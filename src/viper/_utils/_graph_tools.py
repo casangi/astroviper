@@ -106,10 +106,14 @@ def sel_parallel_coords_chunk(parallel_coords, i_chunks, parallel_dims):
     return parallel_coords_chunk
 
 
-def _build_perfectly_parallel_graph(mxds_name, sel_parms, parallel_coords, parallel_dims, func_chunk):
+def _build_perfectly_parallel_graph(mxds_name, sel_parms, parallel_coords, parallel_dims, func_chunk, client):
     """
     Builds a perfectly parallel graph where func_chunk node task is created for each chunk defined in parallel_coords. The data in the mxds is mapped to each parallel_coords chunk.
     """
+    
+    #if local cache is required
+    #wait for workers to join
+    print(client.scheduler_info())
 
     mxds = _load_mxds(mxds_name, sel_parms)
     iter_chunks_indxs = _make_iter_chunks_indxs(parallel_coords, parallel_dims)
@@ -149,6 +153,29 @@ def _build_perfectly_parallel_graph(mxds_name, sel_parms, parallel_coords, paral
         input_parms["parallel_coords"] = parallel_coords_chunk
         input_parms["chunk_id"] = i_chunks
         input_parms["parallel_dims"] = parallel_dims
+        
+        
         graph_list.append(dask.delayed(func_chunk)(dask.delayed(input_parms)))
+        
+        '''
+        a = np.ravel_multi_index([127,0,0,1],[256,256,256,256])
+        #a = np.ravel_multi_index([255,255,255,254],[256,256,256,256])
+        print(a)
+        '''
 
+        '''
+        #a = np.ravel_multi_index([127,0,0,1],[256,256,256,256])
+        if chunk_id == 0:
+            with dask.annotate(resources={'127.0.0.1': 1}):
+                graph_list.append(dask.delayed(func_chunk)(dask.delayed(input_parms)))
+        else:
+            with dask.annotate(resources={'127.0.0.2': 1}):
+                graph_list.append(dask.delayed(func_chunk)(dask.delayed(input_parms)))
+        '''
+    
     return graph_list
+
+'''
+{'type': 'Scheduler', 'id': 'Scheduler-42869e5b-f743-4b1f-9b28-068c7f361c2c', 'address': 'tcp://127.0.0.1:61159', 'services': {'dashboard': 8787}, 'started': 1671722207.311133, 'workers': {'tcp://127.0.0.1:61172': {'type': 'Worker', 'id': 0, 'host': '127.0.0.1', 'resources': {'ravel_ip': 2130706433}, 'local_directory': '/var/folders/l_/788x61bx0dg0fg4hg3zl9zf40000gp/T/dask-worker-space/worker-d7w_r8f1', 'name': 0, 'nthreads': 1, 'memory_limit': 2000000000, 'services': {'dashboard': 61177}, 'status': 'init', 'nanny': 'tcp://127.0.0.1:61165'}, 'tcp://127.0.0.1:61170': {'type': 'Worker', 'id': 2, 'host': '127.0.0.1', 'resources': {'ravel_ip': 2130706433}, 'local_directory': '/var/folders/l_/788x61bx0dg0fg4hg3zl9zf40000gp/T/dask-worker-space/worker-zn3c1mfb', 'name': 2, 'nthreads': 1, 'memory_limit': 2000000000, 'services': {'dashboard': 61175}, 'status': 'init', 'nanny': 'tcp://127.0.0.1:61162'}, 'tcp://127.0.0.1:61173': {'type': 'Worker', 'id': 3, 'host': '127.0.0.1', 'resources': {'ravel_ip': 2130706433}, 'local_directory': '/var/folders/l_/788x61bx0dg0fg4hg3zl9zf40000gp/T/dask-worker-space/worker-398bn6_u', 'name': 3, 'nthreads': 1, 'memory_limit': 2000000000, 'services': {'dashboard': 61174}, 'status': 'init', 'nanny': 'tcp://127.0.0.1:61163'}, 'tcp://127.0.0.1:61171': {'type': 'Worker', 'id': 1, 'host': '127.0.0.1', 'resources': {'ravel_ip': 2130706433}, 'local_directory': '/var/folders/l_/788x61bx0dg0fg4hg3zl9zf40000gp/T/dask-worker-space/worker-5iec4ntz', 'name': 1, 'nthreads': 1, 'memory_limit': 2000000000, 'services': {'dashboard': 61176}, 'status': 'init', 'nanny': 'tcp://127.0.0.1:61164'}}}
+
+'''
