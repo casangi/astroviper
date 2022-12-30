@@ -6,7 +6,7 @@ class viper_worker():
     def __init__(self,local_cache):
         print('init local cache')
         self.local_cache = local_cache
-        log_parms={'log_to_term':True,'log_to_file':False,'log_file':'viper_', 'log_level':'DEBUG'}
+        log_parms={'log_to_term':True,'log_to_file':True,'log_file':'/.lustre/aoc/projects/ngvla/viper/ngvla_sim/viper_', 'log_level':'DEBUG'}
         self.log_to_term=log_parms['log_to_term']
         self.log_to_file=log_parms['log_to_file']
         self.log_file=log_parms['log_file']
