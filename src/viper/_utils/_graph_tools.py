@@ -15,25 +15,28 @@
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 from viper._utils._io import _load_mxds
-import itertools
+import itertools, functools, operator
 import numpy as np
 import dask
-
+import math
+from viper._utils._viper_logger import _get_viper_logger
 
 def _make_iter_chunks_indxs(parallel_coords, parallel_dims):
     chunks_dict = parallel_coords.chunks
 
     parallel_chunks_dict = {}
-    n_chunks = {}
+    n_chunks_dim = {}
+    n_chunks  = 1
     chunk_indxs = []
 
     for dim in parallel_dims:
         parallel_chunks_dict[dim] = chunks_dict[dim]
-        n_chunks[dim] = len(chunks_dict[dim])
-        chunk_indxs.append(np.arange(n_chunks[dim]))
-
+        n_chunks_dim[dim] = len(chunks_dict[dim])
+        n_chunks = n_chunks*len(chunks_dict[dim])
+        chunk_indxs.append(np.arange(n_chunks_dim[dim]))
+        
     iter_chunks_indxs = itertools.product(*chunk_indxs)
-    return iter_chunks_indxs
+    return iter_chunks_indxs,  n_chunks_dim, n_chunks
 
 
 def find_start_stop(chunk_indx):
@@ -95,38 +98,63 @@ def generate_chunk_slices(parallel_coords, mxds, parallel_dims):
     return chunk_slice_dict
 
 
-def sel_parallel_coords_chunk(parallel_coords, i_chunks, parallel_dims):
+def sel_parallel_coords_chunk(parallel_coords, chunk_indx, parallel_dims):
     dim_slices_dict = {}
     for i, dim in enumerate(parallel_dims):
-        end = np.sum(parallel_coords.chunks[dim][: i_chunks[i] + 1])
-        start = end - parallel_coords.chunks[dim][i_chunks[i]]
+        end = np.sum(parallel_coords.chunks[dim][: chunk_indx[i] + 1])
+        start = end - parallel_coords.chunks[dim][chunk_indx[i]]
         dim_slices_dict[dim] = slice(start, end)
 
     parallel_coords_chunk = parallel_coords.isel(dim_slices_dict)
     return parallel_coords_chunk
 
+import ipaddress
+def get_unique_resource_ip(workers_info):
+    nodes = []
+    for worker, wi in workers_info.items():
+        worker_ip = worker[worker.rfind('/')+1:worker.rfind(':')]
+        assert(worker_ip in list(wi['resources'].keys())), "local_cache enabled but workers have not been annotated. Make sure that local_cache has been set to True during client setup."
+        if worker_ip not in nodes: nodes.append(worker_ip)
+    return nodes
+    
 
-def _build_perfectly_parallel_graph(mxds_name, sel_parms, parallel_coords, parallel_dims, func_chunk, client):
+def _build_perfectly_parallel_graph(mxds_name, sel_parms, parallel_coords, parallel_dims, func_chunk, client, local_cache):
     """
     Builds a perfectly parallel graph where func_chunk node task is created for each chunk defined in parallel_coords. The data in the mxds is mapped to each parallel_coords chunk.
     """
     
+    logger = _get_viper_logger()
+    mxds = _load_mxds(mxds_name, sel_parms)
+    iter_chunks_indxs,  n_chunks_dim, n_chunks = _make_iter_chunks_indxs(parallel_coords, parallel_dims)
+    chunk_slice_dict = generate_chunk_slices(parallel_coords, mxds, parallel_dims)
+    
     #if local cache is required
     #wait for workers to join
-    print(client.scheduler_info())
+    print('n_chunks',n_chunks)
+    
+    if local_cache:
+        workers_info = client.scheduler_info()['workers']
+        nodes_ip_list = get_unique_resource_ip(workers_info)
+        n_nodes = len(nodes_ip_list)
+        
+        chunks_per_node = math.floor(n_chunks/n_nodes + 0.5)
+        if chunks_per_node == 0: chunks_per_node = 1
+        chunk_to_node_map = np.repeat(np.arange(n_nodes),chunks_per_node)
 
-    mxds = _load_mxds(mxds_name, sel_parms)
-    iter_chunks_indxs = _make_iter_chunks_indxs(parallel_coords, parallel_dims)
-
-    chunk_slice_dict = generate_chunk_slices(parallel_coords, mxds, parallel_dims)
+        
+        if len(chunk_to_node_map) < n_chunks:
+            n_pad = n_chunks - len(chunk_to_node_map)
+            chunk_to_node_map = np.concatenate([chunk_to_node_map,np.array([chunk_to_node_map[-1]]*n_pad)])
+            
+    print(chunk_to_node_map)
 
     input_parms = {"mxds_name": mxds_name}
     graph_list = []
-    for i_chunks in iter_chunks_indxs:
-        # print('i_chunks',i_chunks)
+    for i_chunk,chunk_indx in enumerate(iter_chunks_indxs):
+        print('chunk_indx',i_chunk,chunk_indx)
 
         parallel_coords_chunk = sel_parallel_coords_chunk(
-            parallel_coords, i_chunks, parallel_dims
+            parallel_coords, chunk_indx, parallel_dims
         )
         parallel_coords_chunk = parallel_coords_chunk.drop_vars(
             list(parallel_coords_chunk.keys())
@@ -136,7 +164,7 @@ def _build_perfectly_parallel_graph(mxds_name, sel_parms, parallel_coords, paral
         for xds_id in mxds.keys():
             single_chunk_slice_dict[xds_id] = {}
             empty_chunk = False
-            for i, chunk_id in enumerate(i_chunks):
+            for i, chunk_id in enumerate(chunk_indx):
                 if chunk_id in chunk_slice_dict[xds_id][parallel_dims[i]]:
                     single_chunk_slice_dict[xds_id][
                         parallel_dims[i]
@@ -151,31 +179,24 @@ def _build_perfectly_parallel_graph(mxds_name, sel_parms, parallel_coords, paral
 
         input_parms["data_sel"] = single_chunk_slice_dict
         input_parms["parallel_coords"] = parallel_coords_chunk
-        input_parms["chunk_id"] = i_chunks
+        input_parms["chunk_indx"] = chunk_indx
+        input_parms["chunk_id"] = chunk_id
         input_parms["parallel_dims"] = parallel_dims
         
-        
-        graph_list.append(dask.delayed(func_chunk)(dask.delayed(input_parms)))
+        if local_cache:
+            node_ip = nodes_ip_list[chunk_to_node_map[i_chunk]]
+            logger.debug("Task with chunk id " + str(chunk_id) + " is assigned to ip " + str(node_ip))
+            input_parms["node_ip"] = node_ip
+            with dask.annotate(resources={node_ip: 1}):
+                graph_list.append(dask.delayed(func_chunk)(dask.delayed(input_parms)))
+        else:
+            graph_list.append(dask.delayed(func_chunk)(dask.delayed(input_parms)))
         
         '''
         a = np.ravel_multi_index([127,0,0,1],[256,256,256,256])
         #a = np.ravel_multi_index([255,255,255,254],[256,256,256,256])
         print(a)
         '''
-
-        '''
-        #a = np.ravel_multi_index([127,0,0,1],[256,256,256,256])
-        if chunk_id == 0:
-            with dask.annotate(resources={'127.0.0.1': 1}):
-                graph_list.append(dask.delayed(func_chunk)(dask.delayed(input_parms)))
-        else:
-            with dask.annotate(resources={'127.0.0.2': 1}):
-                graph_list.append(dask.delayed(func_chunk)(dask.delayed(input_parms)))
-        '''
     
     return graph_list
 
-'''
-{'type': 'Scheduler', 'id': 'Scheduler-42869e5b-f743-4b1f-9b28-068c7f361c2c', 'address': 'tcp://127.0.0.1:61159', 'services': {'dashboard': 8787}, 'started': 1671722207.311133, 'workers': {'tcp://127.0.0.1:61172': {'type': 'Worker', 'id': 0, 'host': '127.0.0.1', 'resources': {'ravel_ip': 2130706433}, 'local_directory': '/var/folders/l_/788x61bx0dg0fg4hg3zl9zf40000gp/T/dask-worker-space/worker-d7w_r8f1', 'name': 0, 'nthreads': 1, 'memory_limit': 2000000000, 'services': {'dashboard': 61177}, 'status': 'init', 'nanny': 'tcp://127.0.0.1:61165'}, 'tcp://127.0.0.1:61170': {'type': 'Worker', 'id': 2, 'host': '127.0.0.1', 'resources': {'ravel_ip': 2130706433}, 'local_directory': '/var/folders/l_/788x61bx0dg0fg4hg3zl9zf40000gp/T/dask-worker-space/worker-zn3c1mfb', 'name': 2, 'nthreads': 1, 'memory_limit': 2000000000, 'services': {'dashboard': 61175}, 'status': 'init', 'nanny': 'tcp://127.0.0.1:61162'}, 'tcp://127.0.0.1:61173': {'type': 'Worker', 'id': 3, 'host': '127.0.0.1', 'resources': {'ravel_ip': 2130706433}, 'local_directory': '/var/folders/l_/788x61bx0dg0fg4hg3zl9zf40000gp/T/dask-worker-space/worker-398bn6_u', 'name': 3, 'nthreads': 1, 'memory_limit': 2000000000, 'services': {'dashboard': 61174}, 'status': 'init', 'nanny': 'tcp://127.0.0.1:61163'}, 'tcp://127.0.0.1:61171': {'type': 'Worker', 'id': 1, 'host': '127.0.0.1', 'resources': {'ravel_ip': 2130706433}, 'local_directory': '/var/folders/l_/788x61bx0dg0fg4hg3zl9zf40000gp/T/dask-worker-space/worker-5iec4ntz', 'name': 1, 'nthreads': 1, 'memory_limit': 2000000000, 'services': {'dashboard': 61176}, 'status': 'init', 'nanny': 'tcp://127.0.0.1:61164'}}}
-
-'''
