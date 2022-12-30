@@ -13,6 +13,10 @@ class viper_worker():
         self.level=log_parms['log_level']
         self.logger = None
         
+        self.logger = _setup_viper_worker_logger(self.log_to_term,self.log_to_file,self.log_file,self.level)
+        self.logger.debug('In init')
+        
+        
     def get_logger(self):
         return self.logger
 
@@ -23,7 +27,7 @@ class viper_worker():
         registered.
         """
         
-        self.logger = _setup_viper_worker_logger(self.log_to_term,self.log_to_file,self.log_file,self.level)
+        
         
         self.logger.debug('Logger created on worker ' + str(worker.id) + ',*,' + str(worker.address))
         
