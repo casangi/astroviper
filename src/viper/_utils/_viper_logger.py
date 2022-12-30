@@ -60,6 +60,7 @@ def _get_viper_worker_logger_name(name=viper_logger_name):
     worker_log_name = name + '_' + str(get_worker().id)
     return worker_log_name
 
+'''
 class _viper_worker_logger_plugin(WorkerPlugin):
     def __init__(self,log_parms):
         self.log_to_term=log_parms['log_to_term']
@@ -75,6 +76,7 @@ class _viper_worker_logger_plugin(WorkerPlugin):
     def setup(self, worker: dask.distributed.Worker):
         "Run when the plugin is attached to a worker. This happens when the plugin is registered and attached to existing workers, or when a worker is created after the plugin has been registered."
         self.logger = _setup_viper_worker_logger(self.log_to_term,self.log_to_file,self.log_file,self.level)
+'''
 
 def _setup_viper_worker_logger(log_to_term,log_to_file,log_file, level):
     parallel_logger_name = _get_viper_worker_logger_name()

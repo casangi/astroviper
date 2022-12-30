@@ -4,7 +4,7 @@ import copy
 import os
 import logging
 from viper._utils._parm_utils._check_logger_parms import _check_logger_parms, _check_worker_logger_parms
-from viper._utils._viper_logger import _viper_worker_logger_plugin, _setup_viper_logger
+from viper._utils._viper_logger import  _setup_viper_logger
 
 def viper_local_client(cores=None, memory_limit=None,autorestrictor=False,local_cache=False,wait_for_workers=True, log_parms={}, worker_log_parms={},local_directory=None):
 
@@ -53,7 +53,7 @@ def viper_local_client(cores=None, memory_limit=None,autorestrictor=False,local_
     
     if local_cache:
         dask.config.set({"distributed.worker.preload": os.path.join(viper_path,'_utils/_viper_worker.py')})
-        dask.config.set({"distributed.worker.preload-argv": ["--local_cache",local_cache]})
+        dask.config.set({"distributed.worker.preload-argv": ["--local_cache",local_cache]}) #,"--log_parms",_worker_log_parms
     
     cluster = dask.distributed.LocalCluster(n_workers=cores, threads_per_worker=1, processes=True, memory_limit=memory_limit) #, silence_logs=logging.ERROR #,resources={'GPU': 2}
     client = dask.distributed.Client(cluster)
@@ -68,8 +68,8 @@ def viper_local_client(cores=None, memory_limit=None,autorestrictor=False,local_
         
         
     _setup_viper_logger(log_to_term=_log_parms['log_to_term'],log_to_file=_log_parms['log_to_file'],log_file=_log_parms['log_file'], level=_log_parms['log_level'])
-    worker_logger = _viper_worker_logger_plugin(_worker_log_parms)
-    client.register_worker_plugin(plugin=worker_logger, name='viper_worker_logger')
+    #worker_logger = _viper_worker_logger_plugin(_worker_log_parms)
+    #client.register_worker_plugin(plugin=worker_logger, name='viper_worker_logger')
     
     return client
 
