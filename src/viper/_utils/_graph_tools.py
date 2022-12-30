@@ -146,7 +146,6 @@ def _build_perfectly_parallel_graph(mxds_name, sel_parms, parallel_coords, paral
             n_pad = n_chunks - len(chunk_to_node_map)
             chunk_to_node_map = np.concatenate([chunk_to_node_map,np.array([chunk_to_node_map[-1]]*n_pad)])
             
-    print(chunk_to_node_map)
 
     input_parms = {"mxds_name": mxds_name}
     graph_list = []
