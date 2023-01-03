@@ -51,9 +51,9 @@ def viper_local_client(cores=None, memory_limit=None,autorestrictor=False,local_
         dask.config.set({"distributed.scheduler.preload": os.path.join(viper_path,'_utils/_viper_scheduler.py')})
         dask.config.set({"distributed.scheduler.preload-argv": ["--local_cache",local_cache,"--autorestrictor",autorestrictor]})
     
-    if local_cache:
+    if local_cache or _worker_log_parms:
         dask.config.set({"distributed.worker.preload": os.path.join(viper_path,'_utils/_viper_worker.py')})
-        dask.config.set({"distributed.worker.preload-argv": ["--local_cache",local_cache]}) #,"--log_parms",_worker_log_parms
+        dask.config.set({"distributed.worker.preload-argv": ["--local_cache",local_cache,"--log_to_term",_worker_log_parms['log_to_term'],"--log_to_file",_worker_log_parms['log_to_file'],"--log_file",_worker_log_parms['log_file'],"--log_level",_worker_log_parms['log_level']]})
     
     cluster = dask.distributed.LocalCluster(n_workers=cores, threads_per_worker=1, processes=True, memory_limit=memory_limit) #, silence_logs=logging.ERROR #,resources={'GPU': 2}
     client = dask.distributed.Client(cluster)
