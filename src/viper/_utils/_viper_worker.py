@@ -49,4 +49,4 @@ class viper_worker():
 async def dask_setup(worker,local_cache,log_to_term,log_to_file,log_file,log_level):
     log_parms = {'log_to_term':log_to_term,'log_to_file':log_to_file,'log_file':log_file, 'log_level':log_level}
     plugin = viper_worker(local_cache,log_parms)
-    await worker.client.register_worker_plugin(plugin)
+    await worker.client.register_worker_plugin(plugin,name='viper_worker')

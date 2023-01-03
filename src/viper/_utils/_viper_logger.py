@@ -33,7 +33,7 @@ def _get_viper_logger(name = viper_logger_name):
         return logging.getLogger(name)
     
     try:
-        logger = worker.plugins['viper_worker_logger'].get_logger()
+        logger = worker.plugins['viper_worker'].get_logger()
         return logger
     except:
         return logging.getLogger()
