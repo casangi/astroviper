@@ -88,6 +88,9 @@ def viper_slurm_cluster_client(workers_per_node, cores_per_node, memory_per_node
     dask_log_dir "/.lustre/aoc/projects/ngvla/viper/ngvla_sim",
     '''
     
+    from dask_jobqueue import SLURMCluster
+    from dask.distributed import Client, config, performance_report
+    
     _log_parms = copy.deepcopy(log_parms)
     _worker_log_parms = copy.deepcopy(worker_log_parms)
     
@@ -133,8 +136,10 @@ def viper_slurm_cluster_client(workers_per_node, cores_per_node, memory_per_node
         job_extra_directives=["--exclude="+exclude_nodes],
         #job_extra_directives=["--exclude=nmpost087,nmpost089,nmpost088"],
         scheduler_options={"dashboard_address": ":"+str(dashboard_port)}
-        #job_extra_directives=["--ntasks-per-node=24"],
     )  # interface='ib0'
+    
+    client = Client(cluster)
+
 
     '''
     When constructing a graph that has local cache enabled all workers need to be up and running.
@@ -149,7 +154,7 @@ def viper_slurm_cluster_client(workers_per_node, cores_per_node, memory_per_node
         
     logger.info('Created client ' + str(client))
     
-    return None
+    return client
     
     
     
