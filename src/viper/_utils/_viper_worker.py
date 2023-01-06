@@ -2,7 +2,7 @@ import click
 
 from viper._utils._viper_logger import _setup_viper_worker_logger
 
-class viper_worker():
+class _viper_worker():
     def __init__(self,local_cache,log_parms):
         print('init local cache')
         self.local_cache = local_cache
@@ -12,7 +12,7 @@ class viper_worker():
         self.log_to_term=log_parms['log_to_term']
         self.log_to_file=log_parms['log_to_file']
         self.log_file=log_parms['log_file']
-        self.level=log_parms['log_level']
+        self.log_level=log_parms['log_level']
 
     def get_logger(self):
         return self.logger
@@ -24,7 +24,7 @@ class viper_worker():
         registered.
         """
         
-        self.logger = _setup_viper_worker_logger(self.log_to_term,self.log_to_file,self.log_file,self.level)
+        self.logger = _setup_viper_worker_logger(self.log_to_term,self.log_to_file,self.log_file,self.log_level)
         self.logger.debug('Logger created on worker ' + str(worker.id) + ',*,' + str(worker.address))
         
         #Documentation https://distributed.dask.org/en/stable/worker.html#distributed.worker.Worker
@@ -48,5 +48,5 @@ class viper_worker():
 @click.option("--log_level", default='INFO')
 async def dask_setup(worker,local_cache,log_to_term,log_to_file,log_file,log_level):
     log_parms = {'log_to_term':log_to_term,'log_to_file':log_to_file,'log_file':log_file, 'log_level':log_level}
-    plugin = viper_worker(local_cache,log_parms)
+    plugin = _viper_worker(local_cache,log_parms)
     await worker.client.register_worker_plugin(plugin,name='viper_worker')
