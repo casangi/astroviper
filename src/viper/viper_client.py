@@ -126,7 +126,7 @@ def viper_slurm_cluster_client(workers_per_node, cores_per_node, memory_per_node
         processes=workers_per_node,
         cores=cores_per_node,
         interface=interface,
-        memory=memory_per_worker,
+        memory=memory_per_node,
         walltime="24:00:00",
         queue=queue,
         name="viper",
