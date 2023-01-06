@@ -8,7 +8,7 @@ from viper._utils._parm_utils._check_logger_parms import _check_logger_parms, _c
 from viper._utils._viper_logger import  _setup_viper_logger, _get_viper_logger
 from viper._utils._viper_worker import _viper_worker #_viper_worker_logger_plugin
 
-def viper_local_client(cores=None, memory_limit=None,viper_autorestrictor=False,viper_local_dir=None,wait_for_workers=True, log_parms={}, worker_log_parms={},local_directory=None):
+def viper_local_client(cores=None, memory_limit=None,viper_autorestrictor=False,dask_local_dir=None,viper_local_dir=None,wait_for_workers=True, log_parms={}, worker_log_parms={}):
     '''
     viper_local_dir setting is only useful for testing since this function creates a local cluster. viper_slurm_cluster_client should be used for a multinode cluster.
 
@@ -36,7 +36,7 @@ def viper_local_client(cores=None, memory_limit=None,viper_autorestrictor=False,
     _setup_viper_logger(**_log_parms)
     logger = _get_viper_logger()
     
-    _set_up_dask(local_directory)
+    _set_up_dask(dask_local_dir)
  
     viper_path = viper.__path__.__dict__["_path"][0]
     if local_cache or viper_autorestrictor:
@@ -72,7 +72,7 @@ def viper_local_client(cores=None, memory_limit=None,viper_autorestrictor=False,
     return client
 
 
-def viper_slurm_cluster_client(workers_per_node, cores_per_node, memory_per_node, number_of_nodes, queue, interface, python_env_dir, dask_local_dir, dask_log_dir, exclude_nodes='nmpost090', dashboard_port=9000, viper_local_dir=None,viper_autorestrictor=False,wait_for_workers=True, log_parms={}, worker_log_parms={},local_directory=None,):
+def viper_slurm_cluster_client(workers_per_node, cores_per_node, memory_per_node, number_of_nodes, queue, interface, python_env_dir, dask_local_dir, dask_log_dir, exclude_nodes='nmpost090', dashboard_port=9000, viper_local_dir=None,viper_autorestrictor=False,wait_for_workers=True, log_parms={}, worker_log_parms={}):
 
     '''
     local_cache setting is only useful for testing since this function creates a local cluster. viper_slurm_cluster_client should be used for a multinode cluster.
@@ -105,7 +105,7 @@ def viper_slurm_cluster_client(workers_per_node, cores_per_node, memory_per_node
     _setup_viper_logger(**_log_parms)
     logger = _get_viper_logger()
 
-    _set_up_dask(local_directory)
+    _set_up_dask(dask_local_dir)
  
     viper_path = viper.__path__.__dict__["_path"][0]
     if local_cache or viper_autorestrictor:
