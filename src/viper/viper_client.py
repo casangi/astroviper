@@ -140,7 +140,8 @@ def viper_slurm_cluster_client(workers_per_node, cores_per_node, memory_per_node
     When constructing a graph that has local cache enabled all workers need to be up and running.
     '''
     if local_cache or wait_for_workers:
-        client.wait_for_workers(n_workers=cores)
+        cluster.scale(workers_per_node*number_of_nodes)
+        client.wait_for_workers(n_workers=workers_per_node*number_of_nodes)
 
     if local_cache or _worker_log_parms:
         plugin = _viper_worker(local_cache,_worker_log_parms)
