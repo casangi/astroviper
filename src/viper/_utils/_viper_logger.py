@@ -38,10 +38,10 @@ def _get_viper_logger(name = viper_logger_name):
     except:
         return logging.getLogger()
 
-def _setup_viper_logger(log_to_term=False,log_to_file=True,log_file='viper_', level='INFO', name=viper_logger_name):
+def _setup_viper_logger(log_to_term=False,log_to_file=True,log_file='viper_', log_level='INFO', name=viper_logger_name):
     """To setup as many loggers as you want"""
     logger = logging.getLogger(name)
-    logger.setLevel(logging.getLevelName(level))
+    logger.setLevel(logging.getLevelName(log_level))
     
     if log_to_term:
         handler = logging.StreamHandler(sys.stdout)
@@ -68,7 +68,7 @@ class _viper_worker_logger_plugin(WorkerPlugin):
         self.log_file=log_parms['log_file']
         self.level=log_parms['log_level']
         self.logger = None
-        print(self.log_to_term,self.log_to_file,self.log_file,self.level)
+        print(self.log_to_term,self.log_to_file,self.log_file,self.log_level)
         
     def get_logger(self):
         return self.logger
@@ -78,11 +78,11 @@ class _viper_worker_logger_plugin(WorkerPlugin):
         self.logger = _setup_viper_worker_logger(self.log_to_term,self.log_to_file,self.log_file,self.level)
 '''
 
-def _setup_viper_worker_logger(log_to_term,log_to_file,log_file, level):
+def _setup_viper_worker_logger(log_to_term,log_to_file,log_file, log_level):
     parallel_logger_name = _get_viper_worker_logger_name()
     
     logger = logging.getLogger(parallel_logger_name)
-    logger.setLevel(logging.getLevelName(level))
+    logger.setLevel(logging.getLevelName(log_level))
     
     if log_to_term:
         handler = logging.StreamHandler(sys.stdout)

@@ -14,11 +14,13 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-from viper._utils._io import _load_mxds
+from viper.dio._utils._io import _load_mxds
 import itertools, functools, operator
 import numpy as np
 import dask
 import math
+import os
+import datetime
 from viper._utils._viper_logger import _get_viper_logger
 
 def _make_iter_chunks_indxs(parallel_coords, parallel_dims):
@@ -118,7 +120,7 @@ def get_unique_resource_ip(workers_info):
     return nodes
     
 
-def _build_perfectly_parallel_graph(mxds_name, sel_parms, parallel_coords, parallel_dims, func_chunk, client, local_cache):
+def _build_perfectly_parallel_graph(mxds_name, sel_parms, parallel_coords, parallel_dims, func_chunk, client):
     """
     Builds a perfectly parallel graph where func_chunk node task is created for each chunk defined in parallel_coords. The data in the mxds is mapped to each parallel_coords chunk.
     """
@@ -128,9 +130,23 @@ def _build_perfectly_parallel_graph(mxds_name, sel_parms, parallel_coords, paral
     iter_chunks_indxs,  n_chunks_dim, n_chunks = _make_iter_chunks_indxs(parallel_coords, parallel_dims)
     chunk_slice_dict = generate_chunk_slices(parallel_coords, mxds, parallel_dims)
     
-    #if local cache is required
-    #wait for workers to join
-    print('n_chunks',n_chunks)
+
+    input_parms = {"mxds_name": mxds_name}
+    
+    if 'VIPER_LOCAL_DIR' in os.environ:
+        local_cache = True
+        input_parms['viper_local_dir'] = os.environ['VIPER_LOCAL_DIR']
+        
+        if 'date_time' in sel_parms:
+            input_parms['date_time'] = sel_parms['date_time']
+        else:
+            input_parms['date_time'] = datetime.datetime.now().strftime("%y%m%d%H%M%S")
+        
+    else:
+        local_cache =  False
+        input_parms['viper_local_dir'] = None
+        input_parms['date_time'] = None
+    
     
     if local_cache:
         workers_info = client.scheduler_info()['workers']
@@ -147,7 +163,7 @@ def _build_perfectly_parallel_graph(mxds_name, sel_parms, parallel_coords, paral
             chunk_to_node_map = np.concatenate([chunk_to_node_map,np.array([chunk_to_node_map[-1]]*n_pad)])
             
 
-    input_parms = {"mxds_name": mxds_name}
+
     graph_list = []
     for i_chunk,chunk_indx in enumerate(iter_chunks_indxs):
         print('chunk_indx',i_chunk,chunk_indx)
@@ -197,5 +213,5 @@ def _build_perfectly_parallel_graph(mxds_name, sel_parms, parallel_coords, paral
         print(a)
         '''
     
-    return graph_list
+    return graph_list, input_parms['date_time']
 
