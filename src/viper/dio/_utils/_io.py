@@ -19,18 +19,21 @@ def _get_attrs(zarr_obj):
 def _load_chunk(zarr_name, slice_dict={},viper_local_dir=None,chunk_id=None,date_time=None):
     logger = _get_viper_logger()
     if viper_local_dir:
+
         viper_local_xds = os.path.join(viper_local_dir,*os.path.split(zarr_name)[-2:]) + '_' + str(chunk_id) + '_' + date_time
+        logger.debug(zarr_name + ',*,' +  viper_local_dir + ',*,' + viper_local_xds + ',*,' + os.path.join(*os.path.split(zarr_name)[-2:]) + ',*,' + str(os.path.split(zarr_name)) )
 
         #Check if already chached:
         try:
+            xds = _load_no_dask_zarr(zarr_name=viper_local_xds, slice_dict={})
             logger.debug(zarr_name + ' chunk ' + str(slice_dict) + ' was found in viper cache: ' + viper_local_xds)
-            return _load_no_dask_zarr(zarr_name=viper_local_xds, slice_dict={})
+            return xds
         except:
-            logger.debug(zarr_name + ' chunk ' + str(slice_dict) + ' was not found in cache or failed to load. Retrieving chunk from ' + zarr_name + ' .')
+            logger.debug(viper_local_xds + ' chunk ' + str(slice_dict) + ' was not found in cache or failed to load. Retrieving chunk from ' + zarr_name + ' .')
             xds = _load_no_dask_zarr(zarr_name=zarr_name, slice_dict=slice_dict)
             xr.Dataset.to_zarr(xds,viper_local_xds,consolidated=True)
             
-            return xds 
+            return xds
     else:
         return  _open_no_dask_zarr(zarr_name, slice_dict=slice_dict)
 
