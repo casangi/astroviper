@@ -19,9 +19,9 @@ def _get_attrs(zarr_obj):
 def _load_chunk(zarr_name, slice_dict={},viper_local_dir=None,chunk_id=None,date_time=None):
     logger = _get_viper_logger()
     if viper_local_dir:
-
-        viper_local_xds = os.path.join(viper_local_dir,*os.path.split(zarr_name)[-2:]) + '_' + str(chunk_id) + '_' + date_time
-        logger.debug(zarr_name + ',*,' +  viper_local_dir + ',*,' + viper_local_xds + ',*,' + os.path.join(*os.path.split(zarr_name)[-2:]) + ',*,' + str(os.path.split(zarr_name)) )
+        xds = os.path.split(zarr_name)[-1]
+        mxds_name = os.path.split(os.path.split(zarr_name)[-2])[-1]
+        viper_local_xds = os.path.join(viper_local_dir,mxds_name,xds) + '_' + str(chunk_id) + '_' + date_time
 
         #Check if already chached:
         try:
