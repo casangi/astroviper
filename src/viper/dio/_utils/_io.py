@@ -36,7 +36,8 @@ def _load_chunk(zarr_name, slice_dict={},viper_local_dir=None,chunk_id=None,date
             found_in_local_cache = False
             return xds, found_in_local_cache
     else:
-        return  _open_no_dask_zarr(zarr_name, slice_dict=slice_dict)
+        found_in_local_cache = None
+        return  _open_no_dask_zarr(zarr_name, slice_dict=slice_dict), found_in_local_cache
 
 
 def _load_no_dask_zarr(zarr_name, slice_dict={}):
