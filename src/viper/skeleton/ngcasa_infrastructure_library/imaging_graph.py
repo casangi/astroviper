@@ -8,7 +8,7 @@ def major_cycle(vis_mds_name, graph_coords, chunk_function_input_parms):
     Run only the major cycle. Needed for interactive CLEAN.
     '''
     
-    from ngcasa.ngcasa_science_library.imaging import  run_major_cycle_chunk, sum_img_ds_chunk, combine_return_dict
+    from ngcasa.ngcasa_science_library.imaging import  run_major_cycle_chunk, sum_img_ds_chunk, combine_return_dict, generate_return_dict
     from ngcasa.ngcasa_infrastructure_library.graph_tools import scatter_graph, gather_graph
 
     if chunk_function_input_parms['cube']:
@@ -17,9 +17,11 @@ def major_cycle(vis_mds_name, graph_coords, chunk_function_input_parms):
         major_cycle_graph = gather_graph(scattered_graph , chunk_function=combine_return_dict,chunk_function_input_parms)
 
     elif chunk_function_input_parms['cont']:
-        chunk_function_input_parms['return_data'] = False
+        chunk_function_input_parms['return_data'] = True
         scattered_graph = scatter_graph(vis_mds_name, graph_coords, chunk_function=run_major_cycle_chunk, chunk_function_input_parms['major'])
-        major_cycle_graph = gather_graph(scattered_graph,chunk_function=sum_img_ds_chunk,chunk_function_input_parms)
+        gathered_graph = gather_graph(scattered_graph,chunk_function=sum_img_ds_chunk,chunk_function_input_parms)
+        chunk_function_input_parms['return_data'] = False
+        major_cycle_graph = append_graph(gathered_graph,chunk_function=generate_return_dict, chunk_function_input_parms) #End up with a single node, no gather required.
 
     result_dict = dask.compute(major_cycle_graph)
     return result_dict
