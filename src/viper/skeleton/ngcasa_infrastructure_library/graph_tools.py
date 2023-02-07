@@ -38,12 +38,16 @@ def append_graph(graph, chunk_function, chunk_function_input_parms):
     '''
 
 
-def wrap_func_with_dio(mds_name, chunk_function,  chunk_function_input_parms, mds_sel_parms_chunk):
+def wrap_func_with_dio(mds, chunk_function,  chunk_function_input_parms, mds_sel_parms_chunk):
     '''
         Wraps chunk function to include loading/saving/caching of data.
     '''
-    #Load the data from cache or common storage. If data loads from common storage it can be cache.
-    mds_chunk = transfer_mds_chunk(mds_name, mds_sel_parms_chunk)
+    
+    if mds is Dataset:
+        mds_chunk = mds
+    else:
+        #Load the data from cache or common storage. If data loads from common storage it can be cache.
+        mds_chunk = transfer_mds_chunk(mds_name, mds_sel_parms_chunk)
     
     #Run the chunk function on the above selected mds_chunk.
     mds_result_chunk = chunk_function(mds_chunk, chunk_function_input_parms)
