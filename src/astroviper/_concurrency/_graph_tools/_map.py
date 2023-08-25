@@ -14,14 +14,14 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-from viper.dio._utils._io import _load_mxds
+from xradio.vis.read_processing_set import read_processing_set
 import itertools, functools, operator
 import numpy as np
 import dask
 import math
 import os
 import datetime
-from viper._utils._viper_logger import _get_viper_logger
+from astroviper._utils._logger import _get_logger
 
 
 def _make_iter_chunks_indxs(parallel_coords, parallel_dims):
@@ -127,15 +127,15 @@ def get_unique_resource_ip(workers_info):
     return nodes
 
 
-def _build_perfectly_parallel_graph(
+def _graph_map(
     mxds_name, sel_parms, parallel_coords, parallel_dims, func_chunk, client
 ):
     """
     Builds a perfectly parallel graph where func_chunk node task is created for each chunk defined in parallel_coords. The data in the mxds is mapped to each parallel_coords chunk.
     """
 
-    logger = _get_viper_logger()
-    mxds = _load_mxds(mxds_name, sel_parms)
+    logger = _get_logger()
+    mxds = read_processing_set(mxds_name, sel_parms["intents"], sel_parms["fields"])
     iter_chunks_indxs, n_chunks_dim, n_chunks = _make_iter_chunks_indxs(
         parallel_coords, parallel_dims
     )
@@ -202,7 +202,7 @@ def _build_perfectly_parallel_graph(
                 single_chunk_slice_dict.pop(xds_id, None)
 
         input_parms["data_sel"] = single_chunk_slice_dict
-        input_parms["parallel_coords"] = parallel_coords_chunk
+        #input_parms["parallel_coords"] = parallel_coords_chunk
         input_parms["chunk_indx"] = chunk_indx
         input_parms["chunk_id"] = chunk_id
         input_parms["parallel_dims"] = parallel_dims
@@ -219,6 +219,7 @@ def _build_perfectly_parallel_graph(
             with dask.annotate(resources={node_ip: 1}):
                 graph_list.append(dask.delayed(func_chunk)(dask.delayed(input_parms)))
         else:
+            print("input_parms",input_parms)
             graph_list.append(dask.delayed(func_chunk)(dask.delayed(input_parms)))
 
         """

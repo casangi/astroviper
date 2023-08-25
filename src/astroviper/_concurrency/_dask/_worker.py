@@ -1,9 +1,9 @@
 import click
 
-from viper._utils._viper_logger import _setup_viper_worker_logger
+from astroviper._utils._logger import _setup_worker_logger
 
 
-class _viper_worker:
+class _worker:
     def __init__(self, local_cache, log_parms):
         print("init local cache")
         self.local_cache = local_cache
@@ -25,7 +25,7 @@ class _viper_worker:
         registered.
         """
 
-        self.logger = _setup_viper_worker_logger(
+        self.logger = _setup_worker_logger(
             self.log_to_term, self.log_to_file, self.log_file, self.log_level
         )
         self.logger.debug(
@@ -64,5 +64,5 @@ async def dask_setup(
         "log_file": log_file,
         "log_level": log_level,
     }
-    plugin = _viper_worker(local_cache, log_parms)
+    plugin = _worker(local_cache, log_parms)
     await worker.client.register_worker_plugin(plugin, name="viper_worker")

@@ -3,33 +3,33 @@ import dask
 import copy
 import os
 import logging
-import viper
-from viper._utils._parm_utils._check_logger_parms import (
+import astroviper
+from astroviper._utils._parm_utils._check_logger_parms import (
     _check_logger_parms,
     _check_worker_logger_parms,
 )
-from viper._utils._viper_logger import (
-    _setup_viper_logger,
-    _get_viper_logger,
-    _setup_viper_logger,
+from astroviper._utils._logger import (
+    _setup_logger,
+    _get_logger,
+    _setup_logger,
 )
-from viper._concurrency._dask_viper._viper_worker import (
-    _viper_worker,
-)  # _viper_worker_logger_plugin
+from astroviper._concurrency._dask._worker import (
+    _worker,
+)  # _worker_logger_plugin
 
 
-def viper_local_client(
+def local_client(
     cores=None,
     memory_limit=None,
-    viper_autorestrictor=False,
+    autorestrictor=False,
     dask_local_dir=None,
-    viper_local_dir=None,
+    local_dir=None,
     wait_for_workers=True,
     log_parms={},
     worker_log_parms={},
 ):
     """
-    viper_local_dir setting is only useful for testing since this function creates a local cluster. viper_slurm_cluster_client should be used for a multinode cluster.
+    local_dir setting is only useful for testing since this function creates a local cluster. slurm_cluster_client should be used for a multinode cluster.
 
     https://github.com/dask/dask/issues/5577
     log_parms['log_to_term'] = True/False
@@ -47,24 +47,24 @@ def viper_local_client(
         _worker_log_parms
     ), "######### ERROR: initialize_processing log_parms checking failed."
 
-    if viper_local_dir:
-        os.environ["VIPER_LOCAL_DIR"] = viper_local_dir
+    if local_dir:
+        os.environ["VIPER_LOCAL_DIR"] = local_dir
         local_cache = True
     else:
         local_cache = False
 
     print(_log_parms)
-    _setup_viper_logger(**_log_parms)
-    logger = _get_viper_logger()
+    _setup_logger(**_log_parms)
+    logger = _get_logger()
 
     _set_up_dask(dask_local_dir)
 
-    viper_path = viper.__path__.__dict__["_path"][0]
-    if local_cache or viper_autorestrictor:
+    viper_path = astroviper.__path__.__dict__["_path"][0]
+    if local_cache or autorestrictor:
         dask.config.set(
             {
                 "distributed.scheduler.preload": os.path.join(
-                    viper_path, "_concurrency/dask_viper/_viper_scheduler.py"
+                    viper_path, "_concurrency/_dask/_scheduler.py"
                 )
             }
         )
@@ -74,14 +74,14 @@ def viper_local_client(
                     "--local_cache",
                     local_cache,
                     "--autorestrictor",
-                    viper_autorestrictor,
+                    autorestrictor,
                 ]
             }
         )
 
-    """ This method of assigning a worker plugin does not seem to work when using dask_jobqueue. Consequently using client.register_worker_plugin so that the method of assigning a worker plugin is the same for viper_local_client and viper_slurm_cluster_client.
+    """ This method of assigning a worker plugin does not seem to work when using dask_jobqueue. Consequently using client.register_worker_plugin so that the method of assigning a worker plugin is the same for local_client and slurm_cluster_client.
     if local_cache or _worker_log_parms:
-        dask.config.set({"distributed.worker.preload": os.path.join(viper_path,'_utils/_viper_worker.py')})
+        dask.config.set({"distributed.worker.preload": os.path.join(viper_path,'_utils/_worker.py')})
         dask.config.set({"distributed.worker.preload-argv": ["--local_cache",local_cache,"--log_to_term",_worker_log_parms['log_to_term'],"--log_to_file",_worker_log_parms['log_to_file'],"--log_file",_worker_log_parms['log_file'],"--log_level",_worker_log_parms['log_level']]})
     """
     # setup dask.distributed based multiprocessing environment
@@ -105,7 +105,7 @@ def viper_local_client(
         client.wait_for_workers(n_workers=cores)
 
     if local_cache or _worker_log_parms:
-        plugin = _viper_worker(local_cache, _worker_log_parms)
+        plugin = _worker(local_cache, _worker_log_parms)
         client.register_worker_plugin(plugin, name="viper_worker")
 
     logger.info("Created client " + str(client))
@@ -113,7 +113,7 @@ def viper_local_client(
     return client
 
 
-def viper_slurm_cluster_client(
+def slurm_cluster_client(
     workers_per_node,
     cores_per_node,
     memory_per_node,
@@ -125,14 +125,14 @@ def viper_slurm_cluster_client(
     dask_log_dir,
     exclude_nodes="nmpost090",
     dashboard_port=9000,
-    viper_local_dir=None,
-    viper_autorestrictor=False,
+    local_dir=None,
+    autorestrictor=False,
     wait_for_workers=True,
     log_parms={},
     worker_log_parms={},
 ):
     """
-    local_cache setting is only useful for testing since this function creates a local cluster. viper_slurm_cluster_client should be used for a multinode cluster.
+    local_cache setting is only useful for testing since this function creates a local cluster. slurm_cluster_client should be used for a multinode cluster.
 
     https://github.com/dask/dask/issues/5577
     log_parms['log_to_term'] = True/False
@@ -158,26 +158,26 @@ def viper_slurm_cluster_client(
         _worker_log_parms
     ), "######### ERROR: initialize_processing log_parms checking failed."
 
-    if viper_local_dir:
-        os.environ["VIPER_LOCAL_DIR"] = viper_local_dir
+    if local_dir:
+        os.environ["VIPER_LOCAL_DIR"] = local_dir
         local_cache = True
     else:
         local_cache = False
 
     # Viper logger for code that is not part of the Dask graph. The worker logger is setup in the _viper_worker plugin.
-    from viper._utils._viper_logger import _setup_viper_logger
+    from viper._utils._logger import _setup_logger
 
-    _setup_viper_logger(**_log_parms)
-    logger = _get_viper_logger()
+    _setup_logger(**_log_parms)
+    logger = _get_logger()
 
     _set_up_dask(dask_local_dir)
 
-    viper_path = viper.__path__.__dict__["_path"][0]
-    if local_cache or viper_autorestrictor:
+    viper_path = astroviper.__path__.__dict__["_path"][0]
+    if local_cache or autorestrictor:
         dask.config.set(
             {
                 "distributed.scheduler.preload": os.path.join(
-                    viper_path, "_concurrency/dask_viper/_viper_scheduler.py"
+                    viper_path, "_concurrency/_dask/_scheduler.py"
                 )
             }
         )
@@ -187,14 +187,14 @@ def viper_slurm_cluster_client(
                     "--local_cache",
                     local_cache,
                     "--autorestrictor",
-                    viper_autorestrictor,
+                    autorestrictor,
                 ]
             }
         )
 
-    """ This method of assigning a worker plugin does not seem to work when using dask_jobqueue. Consequently using client.register_worker_plugin so that the method of assigning a worker plugin is the same for viper_local_client and viper_slurm_cluster_client.
+    """ This method of assigning a worker plugin does not seem to work when using dask_jobqueue. Consequently using client.register_worker_plugin so that the method of assigning a worker plugin is the same for local_client and slurm_cluster_client.
     if local_cache or _worker_log_parms:
-        dask.config.set({"distributed.worker.preload": os.path.join(viper_path,'_utils/_viper_worker.py')})
+        dask.config.set({"distributed.worker.preload": os.path.join(viper_path,'_utils/_worker.py')})
         dask.config.set({"distributed.worker.preload-argv": ["--local_cache",local_cache,"--log_to_term",_worker_log_parms['log_to_term'],"--log_to_file",_worker_log_parms['log_to_file'],"--log_file",_worker_log_parms['log_file'],"--log_level",_worker_log_parms['log_level']]})
     """
 
@@ -225,7 +225,7 @@ def viper_slurm_cluster_client(
         client.wait_for_workers(n_workers=workers_per_node * number_of_nodes)
 
     if local_cache or _worker_log_parms:
-        plugin = _viper_worker(local_cache, _worker_log_parms)
+        plugin = _worker(local_cache, _worker_log_parms)
         client.register_worker_plugin(plugin, name="viper_worker")
 
     logger.info("Created client " + str(client))
