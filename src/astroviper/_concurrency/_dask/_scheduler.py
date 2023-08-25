@@ -35,7 +35,7 @@ def get_node_depths(dependencies, root_nodes, metrics):
     return node_depths
 
 
-class viper_schedular(SchedulerPlugin):
+class schedular(SchedulerPlugin):
     def __init__(self, autorestrictor, local_cache):
         self.autorestrictor = autorestrictor
         self.local_cache = local_cache
@@ -181,5 +181,5 @@ class viper_schedular(SchedulerPlugin):
 @click.option("--autorestrictor", default=False)
 @click.option("--local_cache", default=False)
 def dask_setup(scheduler, autorestrictor, local_cache):
-    plugin = viper_schedular(autorestrictor, local_cache)
+    plugin = schedular(autorestrictor, local_cache)
     scheduler.add_plugin(plugin)
