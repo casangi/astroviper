@@ -65,7 +65,7 @@ def find_start_stop(chunk_indx):
     return chunk_indx_start_stop
 
 
-def generate_chunk_slices(parallel_coords, mxds, parallel_dims):
+def generate_chunk_slices(parallel_coords, ps, parallel_dims):
     """
     Questions: Should we use fill_value='extrapolate' in interp1d?
     """
@@ -84,10 +84,10 @@ def generate_chunk_slices(parallel_coords, mxds, parallel_dims):
                 fill_value="extrapolate",
             )
 
-    for xds_key in mxds:
+    for xds_key in ps:
         for pC_dim in parallel_coords.coords:
             if pC_dim in parallel_dims:
-                interp_indx = interp1d_dict[pC_dim](mxds[xds_key][pC_dim].values)
+                interp_indx = interp1d_dict[pC_dim](ps[xds_key][pC_dim].values)
                 chunk_indx = (interp_indx // parallel_coords.chunks[pC_dim][0]).astype(
                     int
                 )
@@ -128,20 +128,20 @@ def get_unique_resource_ip(workers_info):
 
 
 def _graph_map(
-    mxds_name, sel_parms, parallel_coords, parallel_dims, func_chunk, client
+    ps_name, sel_parms, parallel_coords, parallel_dims, func_chunk, client
 ):
     """
-    Builds a perfectly parallel graph where func_chunk node task is created for each chunk defined in parallel_coords. The data in the mxds is mapped to each parallel_coords chunk.
+    Builds a perfectly parallel graph where func_chunk node task is created for each chunk defined in parallel_coords. The data in the ps is mapped to each parallel_coords chunk.
     """
 
     logger = _get_logger()
-    mxds = read_processing_set(mxds_name, sel_parms["intents"], sel_parms["fields"])
+    ps = read_processing_set(ps_name, sel_parms["intents"], sel_parms["fields"])
     iter_chunks_indxs, n_chunks_dim, n_chunks = _make_iter_chunks_indxs(
         parallel_coords, parallel_dims
     )
-    chunk_slice_dict = generate_chunk_slices(parallel_coords, mxds, parallel_dims)
+    chunk_slice_dict = generate_chunk_slices(parallel_coords, ps, parallel_dims)
 
-    input_parms = {"mxds_name": mxds_name}
+    input_parms = {"ps_name": ps_name}
 
     if "VIPER_LOCAL_DIR" in os.environ:
         local_cache = True
@@ -185,7 +185,7 @@ def _graph_map(
         )
 
         single_chunk_slice_dict = {}
-        for xds_id in mxds.keys():
+        for xds_id in ps.keys():
             single_chunk_slice_dict[xds_id] = {}
             empty_chunk = False
             for i, chunk_id in enumerate(chunk_indx):
@@ -219,7 +219,7 @@ def _graph_map(
             with dask.annotate(resources={node_ip: 1}):
                 graph_list.append(dask.delayed(func_chunk)(dask.delayed(input_parms)))
         else:
-            print("input_parms",input_parms)
+            #print("input_parms",input_parms)
             graph_list.append(dask.delayed(func_chunk)(dask.delayed(input_parms)))
 
         """
