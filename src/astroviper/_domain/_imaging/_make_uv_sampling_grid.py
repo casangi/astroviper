@@ -43,18 +43,14 @@ def  _make_uv_sampling_grid(ms_xds,gcf_xds,img_xds,vis_sel_parms,img_sel_parms,g
 
     _grid_parms['complex_grid'] = True
     if img_data_group_out["uv_sampling_grid"] not in img_xds:
-        if _grid_parms['complex_grid']:
-            img_xds[img_data_group_out["uv_sampling_grid"]] = xr.DataArray(np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128),dims=["frequency","polarization","u","v"])
-            
-        else:
-            img_xds[img_data_group_out["uv_sampling_grid"]] = xr.DataArray(np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.double),dims=["frequency","polarization","u","v"])
+        img_xds[img_data_group_out["uv_sampling_grid"]] = xr.DataArray(np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128),dims=["frequency","polarization","u","v"])
         img_xds[img_data_group_out["uv_sampling_sum_weight"]] = xr.DataArray(np.zeros((n_imag_chan, n_imag_pol), dtype=np.double),dims=["frequency","polarization"])
         
     grid = img_xds[img_data_group_out["uv_sampling_grid"]].values
     sum_weight = img_xds[img_data_group_out["uv_sampling_sum_weight"]].values
     
     
-    vis_data = ms_xds[ms_data_group_in["visibility"]].values
+    vis_data = vis_data = np.zeros((1, 1, 1, 1), dtype=bool)
     uvw = ms_xds[ms_data_group_in["uvw"]].values
     freq_chan = ms_xds.frequency.values
     imaging_weight = ms_xds[ms_data_group_in["weight_imaging"]].values

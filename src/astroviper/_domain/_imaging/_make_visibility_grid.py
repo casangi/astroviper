@@ -9,7 +9,7 @@ from astroviper._domain._imaging._imaging_utils._mosaic_grid import  _mosaic_gri
 from astroviper._utils._parm_utils._check_parms import _check_sel_parms
 import copy
 
-def  _make_uv_sampling_grid(ms_xds,gcf_xds,img_xds,vis_sel_parms,img_sel_parms,grid_parms):
+def  _make_visibility_grid(ms_xds,gcf_xds,img_xds,vis_sel_parms,img_sel_parms,grid_parms):
 
     #Deep copy so that inputs are not modified
     _vis_sel_parms = copy.deepcopy(vis_sel_parms)
@@ -20,7 +20,7 @@ def  _make_uv_sampling_grid(ms_xds,gcf_xds,img_xds,vis_sel_parms,img_sel_parms,g
     assert(_check_grid_parms(_grid_parms)), "######### ERROR: grid_parms checking failed"
     
     ms_data_group_in, ms_data_group_out = _check_sel_parms(ms_xds,_vis_sel_parms,skip_data_group_out=True)
-    img_data_group_in, img_data_group_out = _check_sel_parms(img_xds,_img_sel_parms,default_data_group_out={"mosaic":{"uv_sampling_grid":"UV_SAMPLING_GRID","uv_sampling_sum_weight":"UV_SAMPLING_SUM_WEIGHT"}})
+    img_data_group_in, img_data_group_out = _check_sel_parms(img_xds,_img_sel_parms,default_data_group_out={"mosaic":{"visibility_grid":"VISIBILITY_GRID","visibility_sum_weight":"VISIBILITY_SUM_WEIGHT"}})
     
     #print(ms_data_group_in, ms_data_group_out)
     
@@ -42,16 +42,16 @@ def  _make_uv_sampling_grid(ms_xds,gcf_xds,img_xds,vis_sel_parms,img_sel_parms,g
     oversampling = gcf_xds.attrs["oversampling"]
 
     _grid_parms['complex_grid'] = True
-    if img_data_group_out["uv_sampling_grid"] not in img_xds:
+    if img_data_group_out["visibility_grid"] not in img_xds:
         if _grid_parms['complex_grid']:
-            img_xds[img_data_group_out["uv_sampling_grid"]] = xr.DataArray(np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128),dims=["frequency","polarization","u","v"])
+            img_xds[img_data_group_out["visibility_grid"]] = xr.DataArray(np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128),dims=["frequency","polarization","u","v"])
             
         else:
-            img_xds[img_data_group_out["uv_sampling_grid"]] = xr.DataArray(np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.double),dims=["frequency","polarization","u","v"])
-        img_xds[img_data_group_out["uv_sampling_sum_weight"]] = xr.DataArray(np.zeros((n_imag_chan, n_imag_pol), dtype=np.double),dims=["frequency","polarization"])
+            img_xds[img_data_group_out["visibility_grid"]] = xr.DataArray(np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.double),dims=["frequency","polarization","u","v"])
+        img_xds[img_data_group_out["visibility_sum_weight"]] = xr.DataArray(np.zeros((n_imag_chan, n_imag_pol), dtype=np.double),dims=["frequency","polarization"])
         
-    grid = img_xds[img_data_group_out["uv_sampling_grid"]].values
-    sum_weight = img_xds[img_data_group_out["uv_sampling_sum_weight"]].values
+    grid = img_xds[img_data_group_out["visibility_grid"]].values
+    sum_weight = img_xds[img_data_group_out["visibility_sum_weight"]].values
     
     
     vis_data = ms_xds[ms_data_group_in["visibility"]].values
@@ -59,7 +59,7 @@ def  _make_uv_sampling_grid(ms_xds,gcf_xds,img_xds,vis_sel_parms,img_sel_parms,g
     freq_chan = ms_xds.frequency.values
     imaging_weight = ms_xds[ms_data_group_in["weight_imaging"]].values
     
-    do_psf = True
+    do_psf = False
     
     #print(img_xds)
     cf_baseline_map = gcf_xds['CF_BASELINE_MAP'].values

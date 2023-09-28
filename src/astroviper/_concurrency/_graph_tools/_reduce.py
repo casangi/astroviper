@@ -13,7 +13,7 @@ def _tree_combine(list_to_combine,chunk_function,chunk_function_input_parms):
     return list_to_combine
 
 
-def _graph_reduce(graph, chunk_function, chunk_function_input_parms, mode='tree'):
+def _reduce(graph, chunk_function, chunk_function_input_parms, mode='tree'):
     
     if mode == "tree":
         graph_reduced = _tree_combine(graph[0],chunk_function,chunk_function_input_parms)

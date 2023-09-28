@@ -103,7 +103,8 @@ def _aperture_grid_jit(grid, sum_weight, uvw, freq_chan, chan_map, pol_map, cf_b
                                         
                                         grid[a_chan, a_pol, u_indx, v_indx] = grid[a_chan, a_pol, u_indx, v_indx] +   conv * weighted_data
                                         norm = norm + conv
-                            
+                                
+                                #print("The norm",norm)
                                 sum_weight[a_chan, a_pol] = sum_weight[a_chan, a_pol] + weighted_data * np.real(norm)
 
     return

@@ -44,11 +44,7 @@ def _make_aperture_grid(ms_xds,gcf_xds,img_xds,vis_sel_parms,img_sel_parms,grid_
     
     _grid_parms['complex_grid'] = True
     if img_data_group_out["aperture_grid"] not in img_xds:
-        if _grid_parms['complex_grid']:
-            img_xds[img_data_group_out["aperture_grid"]] = xr.DataArray(np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128),dims=["frequency","polarization","u","v"])
-            
-        else:
-            img_xds[img_data_group_out["aperture_grid"]] = xr.DataArray(np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.double),dims=["frequency","polarization","u","v"])
+        img_xds[img_data_group_out["aperture_grid"]] = xr.DataArray(np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128),dims=["frequency","polarization","u","v"])
         img_xds[img_data_group_out["aperture_grid_sum_weight"]] = xr.DataArray(np.zeros((n_imag_chan, n_imag_pol), dtype=np.double),dims=["frequency","polarization"])
         
     grid = img_xds[img_data_group_out["aperture_grid"]].values

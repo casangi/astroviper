@@ -164,6 +164,8 @@ def find_nearest(array, value):
 
 
 def resize_and_calc_support(conv_kernel,conv_kernel_convolved,gcf_parms,grid_parms):
+
+    #print("$$"*10,conv_kernel.shape,conv_kernel_convolved.shape)
     import itertools
     conv_shape = conv_kernel.shape[0:3]
     conv_support = np.zeros(conv_shape+(2,),dtype=int) #2 is to enable x,y support
