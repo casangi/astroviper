@@ -83,6 +83,8 @@ def generate_chunk_slices(parallel_coords, ps, parallel_dims):
                 kind="nearest",
                 fill_value="extrapolate",
             )
+            
+    #print('interp1d',interp1d_dict,'***')
 
     for xds_key in ps:
         for pC_dim in parallel_coords.coords:
@@ -127,7 +129,7 @@ def get_unique_resource_ip(workers_info):
     return nodes
 
 
-def _graph_map(
+def _map(
     ps_name, sel_parms, parallel_coords, parallel_dims, func_chunk, client
 ):
     """
@@ -136,10 +138,15 @@ def _graph_map(
 
     logger = _get_logger()
     ps = read_processing_set(ps_name, sel_parms["intents"], sel_parms["fields"])
+    #ps = {list(ps.keys())[0]:ps[list(ps.keys())[0]]}
     iter_chunks_indxs, n_chunks_dim, n_chunks = _make_iter_chunks_indxs(
         parallel_coords, parallel_dims
     )
+    
+    #print( iter_chunks_indxs, n_chunks_dim, n_chunks )
+    
     chunk_slice_dict = generate_chunk_slices(parallel_coords, ps, parallel_dims)
+    #print(chunk_slice_dict)
 
     input_parms = {"ps_name": ps_name}
 
