@@ -16,7 +16,7 @@ def _make_gridding_convolution_function(ms_xds,gcf_parms,grid_parms,sel_parms):
     _grid_parms = copy.deepcopy(grid_parms)
     _sel_parms = copy.deepcopy(sel_parms)
     
-    print(sel_parms)
+    #print(sel_parms)
     _check_sel_parms(ms_xds,_sel_parms,skip_data_group_out=True)
     
 
@@ -260,8 +260,8 @@ def make_phase_gradient(field_phase_dir,gcf_parms,grid_parms):
     w.wcs.crval = np.array(phase_center)*rad_to_deg
     w.wcs.ctype = ['RA---SIN','DEC--SIN']
     
-    print('field_phase_dir ',field_phase_dir,'phase_center',phase_center)
-    print(w.all_world2pix(field_phase_dir*rad_to_deg, 1))
+    #print('field_phase_dir ',field_phase_dir,'phase_center',phase_center)
+    #print(w.all_world2pix(field_phase_dir*rad_to_deg, 1))
     pix_dist = np.array(w.all_world2pix(field_phase_dir*rad_to_deg, 1)) - grid_parms['image_size_padded']//2
     pix = -(pix_dist)*2*np.pi/(grid_parms['image_size_padded']*gcf_parms['oversampling'])
     #print('pix_dist',pix_dist, pix, gcf_parms['resize_conv_size'])

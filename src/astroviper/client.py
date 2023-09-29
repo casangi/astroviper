@@ -59,7 +59,8 @@ def local_client(
 
     _set_up_dask(dask_local_dir)
 
-    viper_path = astroviper.__path__.__dict__["_path"][0]
+    #viper_path = astroviper.__path__.__dict__["_path"][0]
+    viper_path = astroviper.__path__[0]
     if local_cache or autorestrictor:
         dask.config.set(
             {

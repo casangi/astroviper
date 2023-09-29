@@ -22,7 +22,7 @@ def _make_imaging_weights(ms_xds,grid_parms,imaging_weights_parms, sel_parms):
     else:
         data_group_in, data_group_out = _check_sel_parms(ms_xds,_sel_parms,default_data_group_out={"imaging":{"weight_imaging":"WEIGHT_IMAGING"}})
 
-    print(data_group_in, data_group_out)
+    #print(data_group_in, data_group_out)
     
     _grid_parms = copy.deepcopy(grid_parms)
     assert(_check_grid_parms(_grid_parms)), "######### ERROR: grid_parms checking failed"

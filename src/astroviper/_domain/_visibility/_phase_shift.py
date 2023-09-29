@@ -55,7 +55,7 @@ def _phase_shift_vis_ds(ms_xds, shift_parms, sel_parms):
     
     uvw_rotmat, phase_rotation = calc_rotation_matrices(ms_xds,_shift_parms)
     
-    print("uvw_rotmat, phase_rotation",uvw_rotmat, phase_rotation)
+    #print("uvw_rotmat, phase_rotation",uvw_rotmat, phase_rotation)
     
     ms_xds[data_group_out["uvw"]] = xr.DataArray(ms_xds[data_group_in["uvw"]].values@uvw_rotmat,dims=ms_xds[data_group_in["uvw"]].dims)
     
@@ -70,7 +70,7 @@ def _phase_shift_vis_ds(ms_xds, shift_parms, sel_parms):
     
     
     if _shift_parms["single_precision"]:
-        print("single precision")
+        #print("single precision")
         ms_xds[data_group_out["visibility"]] = ((phasor*ms_xds[data_group_in["visibility"]]).astype(np.complex64)).astype(np.complex128)
     else:
         ms_xds[data_group_out["visibility"]] = phasor*ms_xds[data_group_in["visibility"]]
