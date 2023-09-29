@@ -27,6 +27,7 @@ dependencies = [
 'bokeh',
 'jupyterlab',
 'pyarrow',
+'xradio==0.0.3',
 'python_casacore>=3.5.2; sys_platform != "darwin" '
 ]
 

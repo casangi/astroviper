@@ -69,7 +69,8 @@ def make_empty_sky_image(xds,phase_center,image_size,cell_size,chan_coords,chan_
     l = np.arange(-image_center[0], image_size[0]-image_center[0])*cell_size[0]
     m = np.arange(-image_center[1], image_size[1]-image_center[1])*cell_size[1]
     
-    coords = {'time':time_coords,'chan': chan_coords, 'pol': pol_coords, 'chan_width' : ('chan',chan_width),'l':l,'m':m,'right_ascension' : (('l','m'),ra/rad_to_deg),'declination' : (('l','m'),dec/rad_to_deg)}
+    coords = {'time':time_coords,'frequency': chan_coords, 'pol': pol_coords,'l':l,'m':m,'right_ascension' : (('l','m'),ra/rad_to_deg),'declination' : (('l','m'),dec/rad_to_deg)}
+    #coords = {'time':time_coords,'chan': chan_coords, 'pol': pol_coords, 'chan_width' : ('chan',chan_width),'l':l,'m':m,'right_ascension' : (('l','m'),ra/rad_to_deg),'declination' : (('l','m'),dec/rad_to_deg)}
     xds.attrs['axis_units'] = ['rad', 'rad', 'time', 'Hz', 'pol']
 
     xds = xds.assign_coords(coords)

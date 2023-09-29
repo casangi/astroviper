@@ -22,98 +22,6 @@ import math
 import os
 import datetime
 from astroviper._utils._logger import _get_logger
-
-
-def _make_iter_chunks_indxs(parallel_coords, parallel_dims):
-    chunks_dict = parallel_coords.chunks
-
-    parallel_chunks_dict = {}
-    n_chunks_dim = {}
-    n_chunks = 1
-    chunk_indxs = []
-
-    for dim in parallel_dims:
-        parallel_chunks_dict[dim] = chunks_dict[dim]
-        n_chunks_dim[dim] = len(chunks_dict[dim])
-        n_chunks = n_chunks * len(chunks_dict[dim])
-        chunk_indxs.append(np.arange(n_chunks_dim[dim]))
-
-    iter_chunks_indxs = itertools.product(*chunk_indxs)
-    return iter_chunks_indxs, n_chunks_dim, n_chunks
-
-
-def find_start_stop(chunk_indx):
-    chunk_indx_start_stop = {}
-    diff = np.diff(chunk_indx)
-    non_zeros_indx = np.nonzero(diff)[0]
-
-    if non_zeros_indx.size:
-        prev_nz_indx = 0
-        for nz_indx in non_zeros_indx:
-            chunk_indx_start_stop[chunk_indx[nz_indx]] = slice(
-                prev_nz_indx, nz_indx + 1
-            )
-            prev_nz_indx = nz_indx + 1
-        chunk_indx_start_stop[chunk_indx[-1]] = slice(
-            prev_nz_indx, len(chunk_indx)
-        )  # Last chunk
-    else:
-        chunk_indx_start_stop = {
-            chunk_indx[0]: slice(None)
-        }  # all data maps to same parallel chunk
-
-    return chunk_indx_start_stop
-
-
-def generate_chunk_slices(parallel_coords, ps, parallel_dims):
-    """
-    Questions: Should we use fill_value='extrapolate' in interp1d?
-    """
-    from scipy.interpolate import interp1d
-
-    chunk_slice_dict = {}
-
-    # Construct an interpolator for each parallel dim:
-    interp1d_dict = {}
-    for pC_dim in parallel_coords.coords:
-        if pC_dim in parallel_dims:
-            interp1d_dict[pC_dim] = interp1d(
-                parallel_coords[pC_dim].values,
-                np.arange(len(parallel_coords[pC_dim])),
-                kind="nearest",
-                fill_value="extrapolate",
-            )
-            
-    #print('interp1d',interp1d_dict,'***')
-
-    for xds_key in ps:
-        for pC_dim in parallel_coords.coords:
-            if pC_dim in parallel_dims:
-                interp_indx = interp1d_dict[pC_dim](ps[xds_key][pC_dim].values)
-                chunk_indx = (interp_indx // parallel_coords.chunks[pC_dim][0]).astype(
-                    int
-                )
-                chunk_indx_start_stop = find_start_stop(chunk_indx)
-
-                if xds_key in chunk_slice_dict:
-                    chunk_slice_dict[xds_key][pC_dim] = chunk_indx_start_stop
-                else:
-                    chunk_slice_dict[xds_key] = {pC_dim: chunk_indx_start_stop}
-
-    return chunk_slice_dict
-
-
-def sel_parallel_coords_chunk(parallel_coords, chunk_indx, parallel_dims):
-    dim_slices_dict = {}
-    for i, dim in enumerate(parallel_dims):
-        end = np.sum(parallel_coords.chunks[dim][: chunk_indx[i] + 1])
-        start = end - parallel_coords.chunks[dim][chunk_indx[i]]
-        dim_slices_dict[dim] = slice(start, end)
-
-    parallel_coords_chunk = parallel_coords.isel(dim_slices_dict)
-    return parallel_coords_chunk
-
-
 import ipaddress
 
 
@@ -129,8 +37,81 @@ def get_unique_resource_ip(workers_info):
     return nodes
 
 
+def _make_iter_chunks_indxs(parallel_coords):
+    parallel_dims = []
+    list_chunk_indxs = []
+    n_chunks = 1
+    for dim, pc in parallel_coords.items():
+        chunk_indxs = list(pc["data_chunks"].keys())
+        n_chunks = n_chunks*len(chunk_indxs)
+        list_chunk_indxs.append(chunk_indxs)
+        parallel_dims.append(dim)
+        
+    iter_chunks_indxs = itertools.product(*list_chunk_indxs)
+    return iter_chunks_indxs, parallel_dims
+    
+
+def _generate_chunk_slices(parallel_coords, ps):
+    """
+    """
+    from scipy.interpolate import interp1d
+
+    #Construct an interpolator for each parallel dim:
+    interp1d_dict = {}
+    for dim, pc in parallel_coords.items():
+        interp1d_dict[dim] = interp1d(
+                pc["data"],
+                np.arange(len(pc["data"])),
+                kind="nearest",
+                bounds_error=False,
+                fill_value=-1
+                #fill_value="extrapolate",
+                #assume_sorted=True
+            ) #Should we use fill_value='extrapolate' in interp1d?
+
+    chunk_slice_dict = {}
+    for xds_key in ps:
+        for dim, pc in parallel_coords.items():
+            interp_indx = interp1d_dict[dim](ps[xds_key][dim].values).astype(int)
+            #print(dim,interp_indx,len(interp_indx))
+            
+            #print(pc['data'][interp_indx])
+            
+            pc_chunk_start = 0
+            pc_chunk_end = 0
+            chunk_indx_start_stop={}
+            for chunk_key in np.arange(len(pc['data_chunks'])): #ensure that keys are ordered.
+                pc_chunk_start = pc_chunk_end
+                pc_chunk_end = len(pc['data_chunks'][chunk_key]) + pc_chunk_end
+
+                start_slice = np.where(interp_indx==pc_chunk_start)[0]
+                if start_slice.size != 0:
+                    start_slice=start_slice[0]
+                else:
+                    start_slice = None
+
+                end_slice = np.where(interp_indx==pc_chunk_end-1)[0]
+            
+                if end_slice.size != 0:
+                    end_slice=end_slice[-1]+1
+                else:
+                    end_slice=len(interp_indx)
+                    
+                if start_slice is None:
+                    chunk_indx_start_stop[chunk_key] = slice(None)
+                else:
+                    chunk_indx_start_stop[chunk_key] = slice(start_slice,end_slice)
+
+            if xds_key in chunk_slice_dict:
+                chunk_slice_dict[xds_key][dim] = chunk_indx_start_stop
+            else:
+                chunk_slice_dict[xds_key] = {dim: chunk_indx_start_stop}
+        
+    return chunk_slice_dict
+  
+
 def _map(
-    ps_name, sel_parms, parallel_coords, parallel_dims, func_chunk, client
+    ps_name, sel_parms, parallel_coords, func_chunk, client
 ):
     """
     Builds a perfectly parallel graph where func_chunk node task is created for each chunk defined in parallel_coords. The data in the ps is mapped to each parallel_coords chunk.
@@ -139,15 +120,13 @@ def _map(
     logger = _get_logger()
     ps = read_processing_set(ps_name, sel_parms["intents"], sel_parms["fields"])
     #ps = {list(ps.keys())[0]:ps[list(ps.keys())[0]]}
-    iter_chunks_indxs, n_chunks_dim, n_chunks = _make_iter_chunks_indxs(
-        parallel_coords, parallel_dims
-    )
     
-    #print( iter_chunks_indxs, n_chunks_dim, n_chunks )
     
-    chunk_slice_dict = generate_chunk_slices(parallel_coords, ps, parallel_dims)
+    iter_chunks_indxs, parallel_dims = _make_iter_chunks_indxs(parallel_coords)
+    
+    chunk_slice_dict = _generate_chunk_slices(parallel_coords, ps)
     #print(chunk_slice_dict)
-
+    
     input_parms = {"ps_name": ps_name}
 
     if "VIPER_LOCAL_DIR" in os.environ:
@@ -158,7 +137,6 @@ def _map(
             input_parms["date_time"] = sel_parms["date_time"]
         else:
             input_parms["date_time"] = datetime.datetime.now().strftime("%y%m%d%H%M%S")
-
     else:
         local_cache = False
         input_parms["viper_local_dir"] = None
@@ -182,14 +160,7 @@ def _map(
 
     graph_list = []
     for i_chunk, chunk_indx in enumerate(iter_chunks_indxs):
-        print("chunk_indx", i_chunk, chunk_indx)
-
-        parallel_coords_chunk = sel_parallel_coords_chunk(
-            parallel_coords, chunk_indx, parallel_dims
-        )
-        parallel_coords_chunk = parallel_coords_chunk.drop_vars(
-            list(parallel_coords_chunk.keys())
-        )
+        #print("chunk_indx", i_chunk, chunk_indx)
 
         single_chunk_slice_dict = {}
         for xds_id in ps.keys():
@@ -200,6 +171,9 @@ def _map(
                     single_chunk_slice_dict[xds_id][
                         parallel_dims[i]
                     ] = chunk_slice_dict[xds_id][parallel_dims[i]][chunk_id]
+                    
+                    if chunk_slice_dict[xds_id][parallel_dims[i]][chunk_id] == slice(None):
+                        empty_chunk = True
                 else:
                     empty_chunk = True
 
@@ -207,27 +181,34 @@ def _map(
                 empty_chunk
             ):  # The xds with xds_id has no data for the parallel chunk (no slice on one of the dims).
                 single_chunk_slice_dict.pop(xds_id, None)
+        #print(single_chunk_slice_dict)
+        if single_chunk_slice_dict:
+            input_parms["data_sel"] = single_chunk_slice_dict
+            input_parms["chunk_coords"] = {}
+            for i_dim,dim in enumerate(parallel_dims):
+                chunk_coords={}
+                chunk_coords["data"] = parallel_coords[dim]["data_chunks"][chunk_indx[i_dim]]
+                chunk_coords["dims"] = parallel_coords[dim]["dims"]
+                chunk_coords["attrs"] = parallel_coords[dim]["attrs"]
+                input_parms["chunk_coords"][dim] = chunk_coords
+            input_parms["chunk_indx"] = chunk_indx
+            input_parms["chunk_id"] = chunk_id
+            input_parms["parallel_dims"] = parallel_dims
 
-        input_parms["data_sel"] = single_chunk_slice_dict
-        #input_parms["parallel_coords"] = parallel_coords_chunk
-        input_parms["chunk_indx"] = chunk_indx
-        input_parms["chunk_id"] = chunk_id
-        input_parms["parallel_dims"] = parallel_dims
-
-        if local_cache:
-            node_ip = nodes_ip_list[chunk_to_node_map[i_chunk]]
-            logger.debug(
-                "Task with chunk id "
-                + str(chunk_id)
-                + " is assigned to ip "
-                + str(node_ip)
-            )
-            input_parms["node_ip"] = node_ip
-            with dask.annotate(resources={node_ip: 1}):
+            if local_cache:
+                node_ip = nodes_ip_list[chunk_to_node_map[i_chunk]]
+                logger.debug(
+                    "Task with chunk id "
+                    + str(chunk_id)
+                    + " is assigned to ip "
+                    + str(node_ip)
+                )
+                input_parms["node_ip"] = node_ip
+                with dask.annotate(resources={node_ip: 1}):
+                    graph_list.append(dask.delayed(func_chunk)(dask.delayed(input_parms)))
+            else:
+                #print("input_parms",input_parms)
                 graph_list.append(dask.delayed(func_chunk)(dask.delayed(input_parms)))
-        else:
-            #print("input_parms",input_parms)
-            graph_list.append(dask.delayed(func_chunk)(dask.delayed(input_parms)))
 
         """
         a = np.ravel_multi_index([127,0,0,1],[256,256,256,256])

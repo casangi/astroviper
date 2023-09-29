@@ -130,15 +130,15 @@ def _check_parms(
                 else:
                     # print('parm_dict',default_element,string_key)
                     parm_dict[string_key][default_element] = default[default_element]
-                    print(
-                        "Setting default",
-                        string_key,
-                        "['",
-                        default_element,
-                        "']",
-                        " to ",
-                        default[default_element],
-                    )
+#                    print(
+#                        "Setting default",
+#                        string_key,
+#                        "['",
+#                        default_element,
+#                        "']",
+#                        " to ",
+#                        default[default_element],
+#                    )
         else:
             type_check = False
             for adt in acceptable_data_types:
@@ -180,7 +180,7 @@ def _check_parms(
         if default is not None:
             # print(parm_dict, string_key,  default)
             parm_dict[string_key] = default
-            print("Setting default", string_key, " to ", parm_dict[string_key])
+            #print("Setting default", string_key, " to ", parm_dict[string_key])
         else:
             print("######### ERROR:Parameter ", string_key, "must be specified")
             return False
