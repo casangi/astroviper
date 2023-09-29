@@ -4,6 +4,7 @@ import copy
 import os
 import logging
 import astroviper
+import distributed
 from astroviper._utils._parm_utils._check_logger_parms import (
     _check_logger_parms,
     _check_worker_logger_parms,
@@ -43,9 +44,11 @@ def local_client(
     assert _check_logger_parms(
         _log_parms
     ), "######### ERROR: initialize_processing log_parms checking failed."
-    assert _check_worker_logger_parms(
-        _worker_log_parms
-    ), "######### ERROR: initialize_processing log_parms checking failed."
+    
+    if _worker_log_parms is not None:
+        assert _check_worker_logger_parms(
+            _worker_log_parms
+        ), "######### ERROR: initialize_processing log_parms checking failed."
 
     if local_dir:
         os.environ["VIPER_LOCAL_DIR"] = local_dir
@@ -85,7 +88,7 @@ def local_client(
         dask.config.set({"distributed.worker.preload": os.path.join(viper_path,'_utils/_worker.py')})
         dask.config.set({"distributed.worker.preload-argv": ["--local_cache",local_cache,"--log_to_term",_worker_log_parms['log_to_term'],"--log_to_file",_worker_log_parms['log_to_file'],"--log_file",_worker_log_parms['log_file'],"--log_level",_worker_log_parms['log_level']]})
     """
-    # setup dask.distributed based multiprocessing environment
+    # setup distributed based multiprocessing environment
     if cores is None:
         cores = multiprocessing.cpu_count()
     if memory_limit is None:
@@ -93,10 +96,10 @@ def local_client(
             str(round(((psutil.virtual_memory().available / (1024**2))) / cores))
             + "MB"
         )
-    cluster = dask.distributed.LocalCluster(
+    cluster = distributed.LocalCluster(
         n_workers=cores, threads_per_worker=1, processes=True, memory_limit=memory_limit
     )  # , silence_logs=logging.ERROR #,resources={'GPU': 2}
-    client = dask.distributed.Client(cluster)
+    client = distributed.Client(cluster)
     client.get_versions(check=True)
 
     """
@@ -147,7 +150,7 @@ def slurm_cluster_client(
     """
 
     from dask_jobqueue import SLURMCluster
-    from dask.distributed import Client, config, performance_report
+    from distributed import Client, config, performance_report
 
     _log_parms = copy.deepcopy(log_parms)
     _worker_log_parms = copy.deepcopy(worker_log_parms)

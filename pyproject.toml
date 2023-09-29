@@ -16,7 +16,7 @@ dependencies = [
 'gdown',
 'matplotlib',
 'numba>=0.57.0',
-'numpy',
+'numpy<=1.25.0',
 'prettytable',
 'pytest',
 'pytest-cov',
@@ -27,6 +27,7 @@ dependencies = [
 'bokeh',
 'jupyterlab',
 'pyarrow',
+'graphviz',
 'xradio==0.0.3',
 'python_casacore>=3.5.2; sys_platform != "darwin" '
 ]
