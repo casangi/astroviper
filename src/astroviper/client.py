@@ -44,7 +44,7 @@ def local_client(
     assert _check_logger_parms(
         _log_parms
     ), "######### ERROR: initialize_processing log_parms checking failed."
-    
+
     if _worker_log_parms is not None:
         assert _check_worker_logger_parms(
             _worker_log_parms
@@ -62,7 +62,7 @@ def local_client(
 
     _set_up_dask(dask_local_dir)
 
-    #viper_path = astroviper.__path__.__dict__["_path"][0]
+    # viper_path = astroviper.__path__.__dict__["_path"][0]
     viper_path = astroviper.__path__[0]
     if local_cache or autorestrictor:
         dask.config.set(
