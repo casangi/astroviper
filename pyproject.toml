@@ -28,7 +28,7 @@ dependencies = [
 'jupyterlab',
 'pyarrow',
 'graphviz',
-'xradio==0.0.3',
+'xradio',
 'python_casacore>=3.5.2; sys_platform != "darwin" '
 ]
 
