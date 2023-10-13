@@ -1,4 +1,3 @@
-
 # ducting - code is complex and might fail after some time if parameters is wrong. Sensable values are also checked. Gives printout of all wrong parameters. Dirty images alone has 14 parameters.
 
 import numpy as np
