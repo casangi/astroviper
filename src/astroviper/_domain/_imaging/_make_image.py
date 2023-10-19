@@ -1,10 +1,8 @@
 def _make_image(input_parms):
-    # print(input_parms['ps_name'])
-    # print(input_parms.keys())
     from xradio.vis.load_processing_set import load_processing_set
 
     ps = load_processing_set(
-        ps_name=input_parms["ps_name"], sel_parms=input_parms["data_sel"]
+        ps_name=input_parms["input_data_name"], sel_parms=input_parms["data_sel"]
     )
 
     # print(ps.keys())
@@ -48,20 +46,11 @@ def _make_image(input_parms):
     # print(ps['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_1'])
     # print(ps['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_1'].frequency)
 
-    freq_coords = ps[
-        "Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_1"
-    ].frequency
-    chan_width = ps[
-        "Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_1"
-    ].frequency.values
-    pol_coords = ps[
-        "Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_1"
-    ].polarization
-    time_coords = np.mean(
-        ps[
-            "Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_1"
-        ].time.values
-    )
+    #NB NB this needs to change
+    freq_coords = ps[list(ps.keys())[0]].frequency
+    chan_width = ps[list(ps.keys())[0]].frequency.values
+    pol_coords = ps[list(ps.keys())[0]].polarization
+    time_coords = np.mean(ps[list(ps.keys())[0]].time.values)
 
     # print(freq_coords.shape,input_parms['data_sel']['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_1'])
 
