@@ -1,4 +1,5 @@
 from xradio.vis.read_processing_set import read_processing_set
+from xradio.image import read_image
 import itertools, functools, operator
 import numpy as np
 import dask
@@ -35,7 +36,7 @@ def _make_iter_chunks_indxs(parallel_coords):
     return iter_chunks_indxs, parallel_dims
 
 
-def _generate_chunk_slices(parallel_coords, ps):
+def _generate_chunk_slices(parallel_coords, input_data_name):
     """ """
     from scipy.interpolate import interp1d
 
@@ -53,9 +54,10 @@ def _generate_chunk_slices(parallel_coords, ps):
         )  # Should we use fill_value='extrapolate' in interp1d?
 
     chunk_slice_dict = {}
-    for xds_key in ps:
+    for xds_key in input_data_name:
         for dim, pc in parallel_coords.items():
-            interp_indx = interp1d_dict[dim](ps[xds_key][dim].values).astype(int)
+            #print(input_data_name[xds_key],dim)
+            interp_indx = interp1d_dict[dim](input_data_name[xds_key][dim].values).astype(int)
             # print(dim,interp_indx,len(interp_indx))
 
             # print(pc['data'][interp_indx])
@@ -85,7 +87,10 @@ def _generate_chunk_slices(parallel_coords, ps):
                 if start_slice is None:
                     chunk_indx_start_stop[chunk_key] = slice(None)
                 else:
-                    chunk_indx_start_stop[chunk_key] = slice(start_slice, end_slice)
+                    if start_slice > end_slice:
+                        chunk_indx_start_stop[chunk_key] = slice(end_slice, start_slice)
+                    else:
+                        chunk_indx_start_stop[chunk_key] = slice(start_slice, end_slice)
 
             if xds_key in chunk_slice_dict:
                 chunk_slice_dict[xds_key][dim] = chunk_indx_start_stop
@@ -95,29 +100,32 @@ def _generate_chunk_slices(parallel_coords, ps):
     return chunk_slice_dict
 
 
-def _map(ps_name, sel_parms, parallel_coords, func_chunk, input_parms, client):
+def _map(input_data_name, input_data_type, parallel_coords, func_chunk, input_parms, ps_sel_parms={}, client=None):
     """
-    Builds a perfectly parallel graph where func_chunk node task is created for each chunk defined in parallel_coords. The data in the ps is mapped to each parallel_coords chunk.
+    Builds a perfectly parallel graph where func_chunk node task is created for each chunk defined in parallel_coords. The data in the input_data_name is mapped to each parallel_coords chunk.
     """
 
     logger = _get_logger()
-    ps = read_processing_set(ps_name, sel_parms["intents"], sel_parms["fields"])
-    # ps = {list(ps.keys())[0]:ps[list(ps.keys())[0]]}
+    
+    if input_data_type=="processing_set":
+        input_data = read_processing_set(input_data_name, ps_sel_parms["intents"], ps_sel_parms["fields"])
+    elif input_data_type=="image":
+        input_data = {'image':read_image(input_data_name)}
 
     iter_chunks_indxs, parallel_dims = _make_iter_chunks_indxs(parallel_coords)
 
-    chunk_slice_dict = _generate_chunk_slices(parallel_coords, ps)
+    chunk_slice_dict = _generate_chunk_slices(parallel_coords, input_data)
     # print(chunk_slice_dict)
 
-    #input_parms = {"ps_name": ps_name}
-    input_parms["ps_name"] = ps_name
+    #input_parms = {"input_data_name": input_data_name}
+    input_parms["input_data_name"] = input_data_name
 
     if "VIPER_LOCAL_DIR" in os.environ:
         local_cache = True
         input_parms["viper_local_dir"] = os.environ["VIPER_LOCAL_DIR"]
 
-        if "date_time" in sel_parms:
-            input_parms["date_time"] = sel_parms["date_time"]
+        if "date_time" in ps_sel_parms:
+            input_parms["date_time"] = ps_sel_parms["date_time"]
         else:
             input_parms["date_time"] = datetime.datetime.now().strftime("%y%m%d%H%M%S")
     else:
@@ -146,7 +154,7 @@ def _map(ps_name, sel_parms, parallel_coords, func_chunk, input_parms, client):
         # print("chunk_indx", i_chunk, chunk_indx)
 
         single_chunk_slice_dict = {}
-        for xds_id in ps.keys():
+        for xds_id in input_data.keys():
             single_chunk_slice_dict[xds_id] = {}
             empty_chunk = False
             for i, chunk_id in enumerate(chunk_indx):
@@ -178,7 +186,7 @@ def _map(ps_name, sel_parms, parallel_coords, func_chunk, input_parms, client):
                 chunk_coords["dims"] = parallel_coords[dim]["dims"]
                 chunk_coords["attrs"] = parallel_coords[dim]["attrs"]
                 input_parms["chunk_coords"][dim] = chunk_coords
-            input_parms["chunk_indx"] = chunk_indx
+            input_parms["chunk_indices"] = chunk_indx
             input_parms["chunk_id"] = chunk_id
             input_parms["parallel_dims"] = parallel_dims
 

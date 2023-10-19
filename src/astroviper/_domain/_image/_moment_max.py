@@ -9,4 +9,4 @@ def _moment_max(img_xds_1, img_xds_2, input_parms):
         ],
         dim="frequency",
     )
-    return img_xds
+    return img_xds.max(dim="frequency", keepdims=True)

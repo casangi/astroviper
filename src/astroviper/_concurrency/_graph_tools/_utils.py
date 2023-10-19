@@ -50,6 +50,22 @@ def _make_frequency_coord(
     }
 
 
+def array_split(data, n_chunks):
+    chunk_size = int(np.ceil(len(data) / n_chunks))
+    
+    from itertools import islice
+    data_iter = iter(data)
+    
+    result = []
+    for _ in range(n_chunks):
+        chunk = list(islice(data_iter, chunk_size))
+        if not chunk:
+            break
+        result.append(np.array(chunk))
+    
+    return result
+ 
+
 def _make_parallel_coord(coord, n_chunks=None):
     if isinstance(coord, xr.core.dataarray.DataArray):
         coord = coord.copy(deep=True).to_dict()
@@ -57,8 +73,11 @@ def _make_parallel_coord(coord, n_chunks=None):
     n_samples = len(coord["data"])
     parallel_coord = {}
     parallel_coord["data"] = coord["data"]
+#    parallel_coord["data_chunks"] = dict(
+#        zip(np.arange(n_chunks), np.array_split(coord["data"], n_chunks))
+#    )
     parallel_coord["data_chunks"] = dict(
-        zip(np.arange(n_chunks), np.array_split(coord["data"], n_chunks))
+        zip(np.arange(n_chunks), array_split(coord["data"], n_chunks))
     )
     parallel_coord["dims"] = coord["dims"]
     parallel_coord["attrs"] = coord["attrs"]
