@@ -27,35 +27,35 @@ def _fft_norm_img_xds(img_xds, gcf_xds, grid_parms, norm_parms, sel_parms):
             "imaging": {
                 "primary_beam": "PRIMARY_BEAM",
                 "point_spread_function": "POINT_SPREAD_FUNCTION",
-                "sky_image": "SKY_IMAGE",
+                "sky": "SKY",
             }
         },
     )
     fft_pair = {
-        "aperture_grid": "primary_beam",
-        "uv_sampling_grid": "point_spread_function",
-        "visibility_grid": "sky_image",
+        "aperture": "primary_beam",
+        "uv_sampling": "point_spread_function",
+        "visibility": "sky",
     }
     sum_of_weight_pair = {
-        "aperture_grid": "aperture_grid_sum_weight",
-        "uv_sampling_grid": "uv_sampling_sum_weight",
-        "visibility_grid": "visibility_sum_weight",
+        "aperture": "aperture_grid_normalization",
+        "uv_sampling": "uv_sampling_normalization",
+        "visibility": "visibility_normalization",
     }
 
     # print(data_group_in, data_group_out)
 
-    for data_variable in ["aperture_grid", "uv_sampling_grid", "visibility_grid"]:
+    for data_variable in ["aperture", "uv_sampling", "visibility"]:
         if data_variable in data_group_in.keys():
             # print(data_variable)
 
-            if data_variable == "aperture_grid":
+            if data_variable == "aperture":
                 # print('1.',data_group_out["aperture_grid_sum_weight"],img_xds[data_group_in[data_variable]].shape,_grid_parms['image_size'])
                 image = _remove_padding(
                     _ifft_uv_to_lm(img_xds[data_group_in[data_variable]].values),
                     _grid_parms["image_size"],
                 ).real
                 sum_weight_copy = copy.deepcopy(
-                    img_xds[data_group_out["aperture_grid_sum_weight"]].values
+                    img_xds[data_group_out["aperture_normalization"]].values
                 )
                 # print("%%%%%%%%%%%%%Sum of weight", sum_weight_copy,data_group_out[sum_of_weight_pair[data_variable]])
                 ##Don't mutate inputs, therefore do deep copy (https://docs.dask.org/en/latest/delayed-best-practices.html).
@@ -77,7 +77,7 @@ def _fft_norm_img_xds(img_xds, gcf_xds, grid_parms, norm_parms, sel_parms):
 
                 if data_variable == "uv_sampling":
                     norm_parms["norm_type"] = "flat_noise"
-                if data_variable == "visibility_grid":
+                if data_variable == "visibility":
                     norm_parms["norm_type"] = "flat_sky"
                 image = _normalize(
                     image,

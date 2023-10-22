@@ -29,8 +29,8 @@ def _make_visibility_grid(
         _img_sel_parms,
         default_data_group_out={
             "mosaic": {
-                "visibility_grid": "VISIBILITY_GRID",
-                "visibility_sum_weight": "VISIBILITY_SUM_WEIGHT",
+                "visibility": "VISIBILITY",
+                "visibility_normalization": "VISIBILITY_NORMALIZATION",
             }
         },
     )
@@ -55,9 +55,9 @@ def _make_visibility_grid(
     oversampling = gcf_xds.attrs["oversampling"]
 
     _grid_parms["complex_grid"] = True
-    if img_data_group_out["visibility_grid"] not in img_xds:
+    if img_data_group_out["visibility"] not in img_xds:
         if _grid_parms["complex_grid"]:
-            img_xds[img_data_group_out["visibility_grid"]] = xr.DataArray(
+            img_xds[img_data_group_out["visibility"]] = xr.DataArray(
                 np.zeros(
                     (n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128
                 ),
@@ -65,17 +65,17 @@ def _make_visibility_grid(
             )
 
         else:
-            img_xds[img_data_group_out["visibility_grid"]] = xr.DataArray(
+            img_xds[img_data_group_out["visibility"]] = xr.DataArray(
                 np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.double),
                 dims=["frequency", "polarization", "u", "v"],
             )
-        img_xds[img_data_group_out["visibility_sum_weight"]] = xr.DataArray(
+        img_xds[img_data_group_out["visibility_normalization"]] = xr.DataArray(
             np.zeros((n_imag_chan, n_imag_pol), dtype=np.double),
             dims=["frequency", "polarization"],
         )
 
-    grid = img_xds[img_data_group_out["visibility_grid"]].values
-    sum_weight = img_xds[img_data_group_out["visibility_sum_weight"]].values
+    grid = img_xds[img_data_group_out["visibility"]].values
+    sum_weight = img_xds[img_data_group_out["visibility_normalization"]].values
 
     vis_data = ms_xds[ms_data_group_in["visibility"]].values
     uvw = ms_xds[ms_data_group_in["uvw"]].values

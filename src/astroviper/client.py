@@ -56,7 +56,7 @@ def local_client(
     else:
         local_cache = False
 
-    print(_log_parms)
+    #print(_log_parms)
     _setup_logger(**_log_parms)
     logger = _get_logger()
 

@@ -186,7 +186,7 @@ def _map(input_data_name, input_data_type, parallel_coords, func_chunk, input_pa
                 chunk_coords["dims"] = parallel_coords[dim]["dims"]
                 chunk_coords["attrs"] = parallel_coords[dim]["attrs"]
                 input_parms["chunk_coords"][dim] = chunk_coords
-            input_parms["chunk_indices"] = chunk_indx
+            input_parms["chunk_indx"] = chunk_indx
             input_parms["chunk_id"] = chunk_id
             input_parms["parallel_dims"] = parallel_dims
 

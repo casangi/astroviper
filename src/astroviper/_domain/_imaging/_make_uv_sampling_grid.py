@@ -29,8 +29,8 @@ def _make_uv_sampling_grid(
         _img_sel_parms,
         default_data_group_out={
             "mosaic": {
-                "uv_sampling_grid": "UV_SAMPLING_GRID",
-                "uv_sampling_sum_weight": "UV_SAMPLING_SUM_WEIGHT",
+                "uv_sampling": "UV_SAMPLING",
+                "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
             }
         },
     )
@@ -55,18 +55,18 @@ def _make_uv_sampling_grid(
     oversampling = gcf_xds.attrs["oversampling"]
 
     _grid_parms["complex_grid"] = True
-    if img_data_group_out["uv_sampling_grid"] not in img_xds:
-        img_xds[img_data_group_out["uv_sampling_grid"]] = xr.DataArray(
+    if img_data_group_out["uv_sampling"] not in img_xds:
+        img_xds[img_data_group_out["uv_sampling"]] = xr.DataArray(
             np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128),
             dims=["frequency", "polarization", "u", "v"],
         )
-        img_xds[img_data_group_out["uv_sampling_sum_weight"]] = xr.DataArray(
+        img_xds[img_data_group_out["uv_sampling_normalization"]] = xr.DataArray(
             np.zeros((n_imag_chan, n_imag_pol), dtype=np.double),
             dims=["frequency", "polarization"],
         )
 
-    grid = img_xds[img_data_group_out["uv_sampling_grid"]].values
-    sum_weight = img_xds[img_data_group_out["uv_sampling_sum_weight"]].values
+    grid = img_xds[img_data_group_out["uv_sampling"]].values
+    sum_weight = img_xds[img_data_group_out["uv_sampling_normalization"]].values
 
     vis_data = vis_data = np.zeros((1, 1, 1, 1), dtype=bool)
     uvw = ms_xds[ms_data_group_in["uvw"]].values

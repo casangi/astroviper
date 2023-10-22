@@ -29,8 +29,8 @@ def _make_aperture_grid(
         _img_sel_parms,
         default_data_group_out={
             "mosaic": {
-                "aperture_grid": "APERTURE_GRID",
-                "aperture_grid_sum_weight": "APERTURE_GRID_SUM_WEIGHT",
+                "aperture": "APERTURE",
+                "aperture_normalization": "APERTURE_NORMALIZATION",
             }
         },
     )
@@ -56,18 +56,18 @@ def _make_aperture_grid(
     # _grid_parms['oversampling']
 
     _grid_parms["complex_grid"] = True
-    if img_data_group_out["aperture_grid"] not in img_xds:
-        img_xds[img_data_group_out["aperture_grid"]] = xr.DataArray(
+    if img_data_group_out["aperture"] not in img_xds:
+        img_xds[img_data_group_out["aperture"]] = xr.DataArray(
             np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128),
             dims=["frequency", "polarization", "u", "v"],
         )
-        img_xds[img_data_group_out["aperture_grid_sum_weight"]] = xr.DataArray(
+        img_xds[img_data_group_out["aperture_normalization"]] = xr.DataArray(
             np.zeros((n_imag_chan, n_imag_pol), dtype=np.double),
             dims=["frequency", "polarization"],
         )
 
-    grid = img_xds[img_data_group_out["aperture_grid"]].values
-    sum_weight = img_xds[img_data_group_out["aperture_grid_sum_weight"]].values
+    grid = img_xds[img_data_group_out["aperture"]].values
+    sum_weight = img_xds[img_data_group_out["aperture_normalization"]].values
 
     uvw = ms_xds[ms_data_group_in["uvw"]].values
     freq_chan = ms_xds.frequency.values
@@ -83,7 +83,7 @@ def _make_aperture_grid(
 
     #    import matplotlib.pyplot as plt
     #    plt.figure()
-    #    plt.plot(img_xds[img_data_group_out["aperture_grid_sum_weight"]].values)
+    #    plt.plot(img_xds[img_data_group_out["aperture_normalization"]].values)
     #    plt.title('1')
 
     _aperture_grid_jit(
@@ -125,7 +125,7 @@ def _make_aperture_grid(
 #    plt.colorbar()
 #
 #
-#    a = np.real(np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(img_xds[img_data_group_out["aperture_grid"]].values, axes=(2, 3)), axes=(2, 3)), axes=(2, 3)))
+#    a = np.real(np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(img_xds[img_data_group_out["aperture"]].values, axes=(2, 3)), axes=(2, 3)), axes=(2, 3)))
 #
 #    plt.figure()
 #    plt.imshow(np.abs(a[80,0,:,:]))

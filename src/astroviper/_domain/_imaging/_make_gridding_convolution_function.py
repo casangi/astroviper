@@ -16,24 +16,28 @@ from astroviper._domain._imaging._imaging_utils._standard_grid import (
 )
 from astroviper._utils._parm_utils._check_parms import _check_sel_parms
 import copy
+import time
 
 
-def _make_gridding_convolution_function(ms_xds, gcf_parms, grid_parms, sel_parms):
+def _make_gridding_convolution_function(gcf_xds, ms_xds, gcf_parms, grid_parms, sel_parms):
+    
+    start_0 = time.time()
     _gcf_parms = copy.deepcopy(gcf_parms)
     _grid_parms = copy.deepcopy(grid_parms)
     _sel_parms = copy.deepcopy(sel_parms)
+    
 
     # print(sel_parms)
     _check_sel_parms(ms_xds, _sel_parms, skip_data_group_out=True)
-
+    _gcf_parms["field_phase_dir"] = ms_xds.attrs["field_info"]["phase_direction"][
+            "data"
+        ]
+        
     _gcf_parms["basline_ant"] = np.array(
-        [ms_xds.baseline_antenna1_id.values, ms_xds.baseline_antenna2_id.values]
-    ).T
+            [ms_xds.baseline_antenna1_id.values, ms_xds.baseline_antenna2_id.values]
+        ).T
     _gcf_parms["freq_chan"] = ms_xds.frequency.values
     _gcf_parms["pol"] = ms_xds.polarization.values
-    _gcf_parms["field_phase_dir"] = ms_xds.attrs["field_info"]["phase_direction"][
-        "data"
-    ]
 
     assert _check_gcf_parms(_gcf_parms), "######### ERROR: gcf_parms checking failed"
     assert _check_grid_parms(_grid_parms), "######### ERROR: grid_parms checking failed"
@@ -42,110 +46,125 @@ def _make_gridding_convolution_function(ms_xds, gcf_parms, grid_parms, sel_parms
         "oversampling"
     ]
 
-    if _gcf_parms["function"] == "airy":
-        from ._imaging_utils._make_pb_symmetric import _airy_disk_rorder
+    if len(gcf_xds.variables) < 1:
 
-        pb_func = _airy_disk_rorder
-    elif _gcf_parms["function"] == "casa_airy":
-        from ._imaging_utils._make_pb_symmetric import _casa_airy_disk_rorder
+        if _gcf_parms["function"] == "airy":
+            from ._imaging_utils._make_pb_symmetric import _airy_disk_rorder
 
-        pb_func = _casa_airy_disk_rorder
-    else:
-        assert (
-            False
-        ), "######### ERROR: Only airy and casa_airy function has been implemented"
+            pb_func = _airy_disk_rorder
+        elif _gcf_parms["function"] == "casa_airy":
+            from ._imaging_utils._make_pb_symmetric import _casa_airy_disk_rorder
 
-    n_unique_ant = len(_gcf_parms["list_dish_diameters"])
-    cf_baseline_map, pb_ant_pairs = create_cf_baseline_map(
-        _gcf_parms["unique_ant_indx"], _gcf_parms["basline_ant"], n_unique_ant
-    )
-    cf_chan_map, pb_freq = create_cf_chan_map(
-        _gcf_parms["freq_chan"], _gcf_parms["chan_tolerance_factor"]
-    )
+            pb_func = _casa_airy_disk_rorder
+        else:
+            assert (
+                False
+            ), "######### ERROR: Only airy and casa_airy function has been implemented"
 
-    cf_pol_map = np.zeros(
-        (len(_gcf_parms["pol"]),), dtype=int
-    )  # create_cf_pol_map(), currently treating all pols the same
-    pb_pol = np.array([0])
-
-    _gcf_parms["ipower"] = 1
-    baseline_pb = make_baseline_patterns(
-        pb_freq, pb_pol, pb_ant_pairs, pb_func, _gcf_parms, _grid_parms
-    )
-
-    _gcf_parms["ipower"] = 2
-    baseline_pb_sqrd = make_baseline_patterns(
-        pb_freq, pb_pol, pb_ant_pairs, pb_func, _gcf_parms, _grid_parms
-    )
-
-    conv_kernel = np.real(
-        np.fft.fftshift(
-            np.fft.fft2(np.fft.ifftshift(baseline_pb, axes=(3, 4)), axes=(3, 4)),
-            axes=(3, 4),
+        n_unique_ant = len(_gcf_parms["list_dish_diameters"])
+        cf_baseline_map, pb_ant_pairs = create_cf_baseline_map(
+            _gcf_parms["unique_ant_indx"], _gcf_parms["basline_ant"], n_unique_ant
         )
-    )
-    conv_kernel_convolved = np.real(
-        np.fft.fftshift(
-            np.fft.fft2(np.fft.ifftshift(baseline_pb_sqrd, axes=(3, 4)), axes=(3, 4)),
-            axes=(3, 4),
+        cf_chan_map, pb_freq = create_cf_chan_map(
+            _gcf_parms["freq_chan"], _gcf_parms["chan_tolerance_factor"]
         )
-    )
 
-    (
-        resized_conv_kernel,
-        resized_conv_kernel_convolved,
-        conv_support,
-    ) = resize_and_calc_support(
-        conv_kernel, conv_kernel_convolved, _gcf_parms, _grid_parms
-    )
+        cf_pol_map = np.zeros(
+            (len(_gcf_parms["pol"]),), dtype=int
+        )  # create_cf_pol_map(), currently treating all pols the same
+        pb_pol = np.array([0])
 
-    gcf_xds = xr.Dataset()
-    gcf_xds["SUPPORT"] = xr.DataArray(
-        conv_support, dims=["conv_baseline", "conv_chan", "conv_pol", "xy"]
-    )
-    gcf_xds["CONV_KERNEL_CONVOLVED"] = xr.DataArray(
-        resized_conv_kernel_convolved,
-        dims=["conv_baseline", "conv_chan", "conv_pol", "u", "v"],
-    )
-    gcf_xds["CONV_KERNEL"] = xr.DataArray(
-        resized_conv_kernel, dims=("conv_baseline", "conv_chan", "conv_pol", "u", "v")
-    )
-    gcf_xds["PS_CORR_IMAGE"] = xr.DataArray(
-        np.ones(_grid_parms["image_size"]), dims=["l", "m"]
-    )
+        _gcf_parms["ipower"] = 1
+        baseline_pb = make_baseline_patterns(
+            pb_freq, pb_pol, pb_ant_pairs, pb_func, _gcf_parms, _grid_parms
+        )
 
+        _gcf_parms["ipower"] = 2
+        baseline_pb_sqrd = make_baseline_patterns(
+            pb_freq, pb_pol, pb_ant_pairs, pb_func, _gcf_parms, _grid_parms
+        )
+        
+        #print("%%% make_baseline_patterns ",time.time()-start_0)
+            
+        start_1 = time.time()
+        conv_kernel = np.real(
+            np.fft.fftshift(
+                np.fft.fft2(np.fft.ifftshift(baseline_pb, axes=(3, 4)), axes=(3, 4)),
+                axes=(3, 4),
+            )
+        )
+        conv_kernel_convolved = np.real(
+            np.fft.fftshift(
+                np.fft.fft2(np.fft.ifftshift(baseline_pb_sqrd, axes=(3, 4)), axes=(3, 4)),
+                axes=(3, 4),
+            )
+        )
+        
+        #print("%%% fft ",time.time()-start_1)
+           
+        start_2 = time.time()
+        (
+            resized_conv_kernel,
+            resized_conv_kernel_convolved,
+            conv_support,
+        ) = resize_and_calc_support(
+            conv_kernel, conv_kernel_convolved, _gcf_parms, _grid_parms
+        )
+        
+        #print("%%% resize ",time.time()-start_2)
+
+        #gcf_xds = xr.Dataset()
+        gcf_xds["SUPPORT"] = xr.DataArray(
+            conv_support, dims=["conv_baseline", "conv_chan", "conv_pol", "xy"]
+        )
+        gcf_xds["CONV_KERNEL_CONVOLVED"] = xr.DataArray(
+            resized_conv_kernel_convolved,
+            dims=["conv_baseline", "conv_chan", "conv_pol", "u", "v"],
+        )
+        gcf_xds["CONV_KERNEL"] = xr.DataArray(
+            resized_conv_kernel, dims=("conv_baseline", "conv_chan", "conv_pol", "u", "v")
+        )
+        gcf_xds["PS_CORR_IMAGE"] = xr.DataArray(
+            np.ones(_grid_parms["image_size"]), dims=["l", "m"]
+        )
+        
+        coords = {"u": np.arange(_gcf_parms["resize_conv_size"][0]),
+            "v": np.arange(_gcf_parms["resize_conv_size"][1]),
+            "xy": np.arange(2),
+            "field_id": [0],
+            "l": np.arange(_grid_parms["image_size"][0]),
+            "m": np.arange(_grid_parms["image_size"][1]),
+            }
+        gcf_xds["CF_BASELINE_MAP"] = xr.DataArray(cf_baseline_map, dims=("baseline"))
+        gcf_xds["CF_CHAN_MAP"] = xr.DataArray(cf_chan_map, dims=("chan"))
+        gcf_xds["CF_POL_MAP"] = xr.DataArray(cf_pol_map, dims=("pol"))
+        gcf_xds.attrs["cell_uv"] = 1 / (
+            _grid_parms["image_size_padded"]
+            * _grid_parms["cell_size"]
+            * _gcf_parms["oversampling"]
+        )
+        gcf_xds.attrs["oversampling"] = _gcf_parms["oversampling"]
+
+        gcf_xds.assign_coords(coords)
+
+        
+
+    start_3 = time.time()
     field_phase_dir = np.array(_gcf_parms["field_phase_dir"])
     phase_gradient = make_phase_gradient(
         field_phase_dir[None, :], _gcf_parms, _grid_parms
     )
-
-    coords = {
-        "u": np.arange(_gcf_parms["resize_conv_size"][0]),
-        "v": np.arange(_gcf_parms["resize_conv_size"][1]),
-        "xy": np.arange(2),
-        "field_id": [0],
-        "l": np.arange(_grid_parms["image_size"][0]),
-        "m": np.arange(_grid_parms["image_size"][1]),
-    }
-    gcf_xds["CF_BASELINE_MAP"] = xr.DataArray(cf_baseline_map, dims=("baseline"))
-    gcf_xds["CF_CHAN_MAP"] = xr.DataArray(cf_chan_map, dims=("chan"))
-    gcf_xds["CF_POL_MAP"] = xr.DataArray(cf_pol_map, dims=("pol"))
+    
     gcf_xds["PHASE_GRADIENT"] = xr.DataArray(
-        phase_gradient, dims=("field_id", "u", "v")
-    )
-    gcf_xds.attrs["cell_uv"] = 1 / (
-        _grid_parms["image_size_padded"]
-        * _grid_parms["cell_size"]
-        * _gcf_parms["oversampling"]
-    )
-    gcf_xds.attrs["oversampling"] = _gcf_parms["oversampling"]
+            phase_gradient, dims=("field_id", "u", "v")
+        )
+    #print("%%% Phase gradient ",time.time()-start_3)
 
-    gcf_xds.assign_coords(coords)
 
     # list_xarray_data_variables = [gcf_dataset['A_TERM'],gcf_dataset['WEIGHT_A_TERM'],gcf_dataset['A_SUPPORT'],gcf_dataset['WEIGHT_A_SUPPORT'],gcf_dataset['PHASE_GRADIENT']]
     # return _store(gcf_dataset,list_xarray_data_variables,_storage_parms)
 
-    return gcf_xds
+    #return gcf_xds
 
 
 def make_baseline_patterns(
@@ -160,8 +179,10 @@ def make_baseline_patterns(
 
     # print("grid_parms",grid_parms)
     # print("pb_grid_parms",pb_grid_parms)
-
+    import time
+    start = time.time()
     patterns = pb_func(pb_freq, pb_pol, gcf_parms, pb_grid_parms)
+    #print('@@@The core',time.time()-start)
     baseline_pattern = np.zeros(
         (
             len(pb_ant_pairs),

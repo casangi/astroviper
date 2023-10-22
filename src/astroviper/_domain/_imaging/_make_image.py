@@ -1,12 +1,15 @@
 def _make_image(input_parms):
+    import time
     from xradio.vis.load_processing_set import load_processing_set
+    start_total = time.time()
+    #print("Processing chunk",input_parms['chunk_id'])
+    
+    from astroviper._utils._logger import _get_logger
+    logger = _get_logger()
+    
+    logger.debug("Processing chunk "+ str(input_parms['chunk_id']) + " " + str(logger.level))
 
-    ps = load_processing_set(
-        ps_name=input_parms["input_data_name"], sel_parms=input_parms["data_sel"]
-    )
-
-    # print(ps.keys())
-
+    start_0 = time.time()
     import numpy as np
     from astroviper._domain._visibility._phase_shift import _phase_shift_vis_ds
     from astroviper._domain._imaging._make_imaging_weights import _make_imaging_weights
@@ -17,89 +20,95 @@ def _make_image(input_parms):
     from astroviper._domain._imaging._make_uv_sampling_grid import (
         _make_uv_sampling_grid,
     )
-    from astroviper.image.make_empty_sky_image import make_empty_sky_image
+    from xradio.image import make_empty_sky_image
     from astroviper._domain._imaging._make_visibility_grid import _make_visibility_grid
     from astroviper._domain._imaging._fft_norm_img_xds import _fft_norm_img_xds
 
     from xradio.vis.load_processing_set import load_processing_set
     import xarray as xr
+    #print("0. Imports",time.time()-start_0)
 
-    # print(shift_parms)
-
+    start_1 = time.time()
     grid_parms = input_parms["grid_parms"]
     
     shift_parms = {}
-#    shift_parms["new_phase_direction"] = ps[
-#        "Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_12"
-#    ].attrs["field_info"]["phase_direction"]
     shift_parms["new_phase_direction"] = grid_parms["phase_direction"]
     shift_parms["common_tangent_reprojection"] = True
-#    grid_parms = {}
-#    grid_parms["chan_mode"] = "cube"
-#    grid_parms["image_size"] = [500, 500]
-#    grid_parms["cell_size"] = np.array([-0.13, 0.13]) * np.pi / (180 * 3600)
-#    grid_parms["fft_padding"] = 1.0
-#    grid_parms["phase_direction"] = shift_parms["new_phase_direction"]
-    # print('grid_parms[phase_direction]',grid_parms['phase_direction'])
-    # print(ps['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_1'].attrs['field_info']['phase_dir'])
 
-    # print(ps['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_1'])
-    # print(ps['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_1'].frequency)
-
-    #NB NB this needs to change
-    freq_coords = ps[list(ps.keys())[0]].frequency
-    chan_width = ps[list(ps.keys())[0]].frequency.values
-    pol_coords = ps[list(ps.keys())[0]].polarization
-    time_coords = np.mean(ps[list(ps.keys())[0]].time.values)
-
-    # print(freq_coords.shape,input_parms['data_sel']['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_1'])
-
-    # print(img_xds)
     img_xds = xr.Dataset()
-    img_xds = make_empty_sky_image(
-        img_xds,
-        grid_parms["phase_direction"]["data"],
-        grid_parms["image_size"],
-        grid_parms["cell_size"],
-        freq_coords.values,
-        chan_width,
-        pol_coords,
-        time_coords,
-        data_group_name="mosaic",
-    )
+    if input_parms['grid_parms']['frequency'] is not None:
+        image_freq_coord = input_parms['grid_parms']['frequency']
+    else:
+        image_freq_coord = input_parms['chunk_coords']['frequency']['data']
+    
+    if input_parms['grid_parms']['polarization'] is not None:
+        image_polarization_coord = input_parms['grid_parms']['polarization']
+    else:
+        image_polarization_coord = input_parms['chunk_coords']['polarization']['data']
+        
+    if input_parms['grid_parms']['time'] is not None:
+        image_time_coord = input_parms['grid_parms']['time']
+    else:
+        image_time_coord = input_parms['chunk_coords']['time']['data']
 
-    # for ms_xds in [list(ps.values())[0]]:
-    for ms_xds in ps.values():
-        # print(ms_xds)
+    img_xds = make_empty_sky_image(xds=img_xds, phase_center=grid_parms['phase_direction']['data'],
+        image_size=grid_parms['image_size'], cell_size=grid_parms['cell_size'],
+        chan_coords=image_freq_coord,
+        pol_coords=image_polarization_coord, time_coords=image_time_coord,
+    )
+    img_xds.attrs['data_groups'] = {'mosaic':{}}
+    
+    #print("1. Empty Image",time.time()-start_1)
+    
+    gcf_xds = xr.Dataset()
+  
+    for ms_v4_name,slice_description in input_parms["data_sel"].items():
+        
+        start_2 = time.time()
+        ps = load_processing_set(
+            ps_name=input_parms["input_data_name"], sel_parms={ms_v4_name:slice_description}
+        )
+        ms_xds = ps.get(0)
+        #print("2. Load",time.time()-start_2)
+        
+        start_3 = time.time()
         data_group_out = _phase_shift_vis_ds(
             ms_xds, shift_parms=shift_parms, sel_parms={}
         )
+        #print("3. phase_shift",time.time()-start_3)
 
         # data_group_out = _make_imaging_weights(ms_xds,grid_parms=grid_parms,imaging_weights_parms={'weighting':'briggs','robust':0.6},sel_parms={"data_group_in":data_group_out})
+        start_4=time.time()
         data_group_out = _make_imaging_weights(
             ms_xds,
             grid_parms=grid_parms,
             imaging_weights_parms={"weighting": "natural", "robust": 0.6},
             sel_parms={"data_group_in": data_group_out},
         )
+        
 
         gcf_parms = {}
         gcf_parms["function"] = "casa_airy"
         gcf_parms["list_dish_diameters"] = np.array([10.7])
         gcf_parms["list_blockage_diameters"] = np.array([0.75])
+        
+        #print("4. Phase_shift ",time.time()-start_4)
 
+        start_4_1=time.time()
         # print(ms_xds.attrs['antenna_xds'])
         unique_ant_indx = ms_xds.attrs["antenna_xds"].DISH_DIAMETER.values
         unique_ant_indx[unique_ant_indx == 12.0] = 0
 
         gcf_parms["unique_ant_indx"] = unique_ant_indx.astype(int)
         gcf_parms["phase_direction"] = grid_parms["phase_direction"]
-        gcf_xds = _make_gridding_convolution_function(
-            ms_xds, gcf_parms, grid_parms, sel_parms={"data_group_in": data_group_out}
+        _make_gridding_convolution_function(
+            gcf_xds,ms_xds, gcf_parms, grid_parms, sel_parms={"data_group_in": data_group_out}
         )
         # print(gcf_xds)
         # print(ms_xds['WEIGHT_IMAGING'])
-
+        #print("4.1 make_gridding_convolution_function ",time.time()-start_4_1)
+        
+        start_4_2 = time.time()
         _make_aperture_grid(
             ms_xds,
             gcf_xds,
@@ -126,7 +135,12 @@ def _make_image(input_parms):
             img_sel_parms={"data_group_in": "mosaic"},
             grid_parms=grid_parms,
         )
+        
+        #print("4.2 rest ",time.time()-start_4_2)
+        
+        #print('&&&'*10)
 
+    start_5 = time.time()
     _fft_norm_img_xds(
         img_xds,
         gcf_xds,
@@ -134,41 +148,46 @@ def _make_image(input_parms):
         norm_parms={},
         sel_parms={"data_group_in": "mosaic", "data_group_out": "mosaic"},
     )
+    #print("5. fft norm",time.time()-start_5)
 
     # Tranform uv-space -> lm-space (sky)
+    
+    
+    #['test_input', 'input_data_name', 'viper_local_dir', 'date_time', 'data_sel', 'chunk_coords', 'chunk_indx', 'chunk_id', 'parallel_dims']
+    
+    start_6 = time.time()
+    parallel_dims_chunk_id = dict(zip(input_parms['parallel_dims'], input_parms['chunk_indx']))
+ 
+    from xradio.image._util._zarr.zarr_low_level import pad_array_with_nans, write_binary_blob_to_disk
+    import os
+    if input_parms['to_disk']:
+        for data_varaible, meta in input_parms['zarr_meta'].items():
+            #print(data_varaible, meta)
+            dims=meta['dims']
+            dtype=meta['dtype']
+            data_varaible_name = meta['name']
+            chunks = meta['chunks']
+            shape = meta['shape']
+            chunk_name = ""
+            if data_varaible_name in img_xds:
+                #print(data_varaible_name,img_xds[data_varaible_name].dims)
+                for d in img_xds[data_varaible_name].dims:
+                    if d in parallel_dims_chunk_id:
+                        chunk_name=chunk_name+str(parallel_dims_chunk_id[d]) + '.'
+                    else:
+                        chunk_name=chunk_name+'0.'
+                chunk_name = chunk_name[:-1]
+                
+                if list(img_xds[data_varaible_name].shape) != list(chunks):
+                    array = pad_array_with_nans(img_xds[data_varaible_name].values,output_shape=chunks,dtype=dtype)
+                else:
+                    array = img_xds[data_varaible_name].values
+                    
+                #print(os.path.join(input_parms['image_file'],data_varaible_name,chunk_name))
+                write_binary_blob_to_disk(array,file_path=os.path.join(input_parms['image_file'],data_varaible_name,chunk_name),compressor=input_parms['compressor'])
+    else:
+        return img_xds
+    #print("6. to disk",time.time()-start_6)
+    #print("Done chunk",input_parms['chunk_id'],time.time()-start_total)
+    #print("***"*20)
 
-    return img_xds
-
-
-"""
-
-    ps_name = '/Users/jsteeb/Dropbox/Data/Antennae_North.cal.lsrk.vis.zarr'
-    sel_parms = {}
-    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_1'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_2'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_3'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_13'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_4'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_5'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_6'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_7'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_8'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_9'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_10'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_11'] = {}
-    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_12'] = {}
-
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_14'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_15'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_16'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_17'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_18'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_19'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_20'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_21'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_22'] = {}
-#    sel_parms['Antennae_North.cal.lsrk_ddi_0_intent_OBSERVE_TARGET#ON_SOURCE_field_id_23'] = {}
-
-    ps = load_processing_set(ps_name,sel_parms)
-
-"""
