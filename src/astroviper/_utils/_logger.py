@@ -78,8 +78,9 @@ class _viper_worker_logger_plugin(WorkerPlugin):
 """
 
 
-def _setup_worker_logger(log_to_term, log_to_file, log_file, log_level):
-    parallel_logger_name = _get_worker_logger_name()
+def _setup_worker_logger(log_to_term, log_to_file, log_file, log_level, worker_id):
+    #parallel_logger_name = _get_worker_logger_name()
+    parallel_logger_name = logger_name + "_" + worker_id
 
     logger = logging.getLogger(parallel_logger_name)
     logger.setLevel(logging.getLevelName(log_level))
@@ -93,7 +94,7 @@ def _setup_worker_logger(log_to_term, log_to_file, log_file, log_level):
         log_file = (
             log_file
             + "_"
-            + str(get_worker().id)
+            + str(worker_id)
             + "_"
             + datetime.today().strftime("%Y%m%d_%H%M%S")
             + ".log"
