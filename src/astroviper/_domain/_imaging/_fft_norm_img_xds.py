@@ -61,6 +61,8 @@ def _fft_norm_img_xds(img_xds, gcf_xds, grid_parms, norm_parms, sel_parms):
                 ##Don't mutate inputs, therefore do deep copy (https://docs.dask.org/en/latest/delayed-best-practices.html).
                 sum_weight_copy[sum_weight_copy == 0] = 1
                 image = np.sqrt(np.abs(image / sum_weight_copy[:, :, None, None]))
+                if _norm_parms["pb_limit"] > 0:
+                    image[image < _norm_parms["pb_limit"]] = np.nan#0.0
             else:
                 image = _remove_padding(
                     _ifft_uv_to_lm(img_xds[data_group_in[data_variable]].values),
@@ -223,22 +225,23 @@ def _normalize(
 
             # print(normalized_image.compute())
         elif norm_type == "none":
+            pass
             # print('in normalize none ')
             # No normalization after gridding and FFT. The minor cycle sees the sky times pb square
-            normalizing_image = ps_correcting_image[None, None, :, :]
-            normalized_image = da.map_blocks(
-                normalize_image,
-                image,
-                sum_weight[:, :, None, None],
-                normalizing_image,
-                oversampling,
-                correct_oversampling,
-            )
+#            normalizing_image = ps_correcting_image[None, None, :, :]
+#            normalized_image = da.map_blocks(
+#                normalize_image,
+#                image,
+#                sum_weight[:, :, None, None],
+#                normalizing_image,
+#                oversampling,
+#                correct_oversampling,
+#            )
             # normalized_image = image
 
         if norm_parms["pb_limit"] > 0:
-            normalized_image[primary_beam < norm_parms["pb_limit"]] = 0.0
-
+            normalized_image[primary_beam < norm_parms["pb_limit"]] = np.nan#0.0
+            
         if norm_parms["single_precision"]:
             normalized_image = (normalized_image.astype(np.float32)).astype(np.float64)
 

@@ -60,7 +60,7 @@ def _generate_chunk_slices(parallel_coords, input_data_name):
             interp_indx = interp1d_dict[dim](input_data_name[xds_key][dim].values).astype(int)
             # print(dim,interp_indx,len(interp_indx))
 
-            # print(pc['data'][interp_indx])
+            #print('interp_indx',interp_indx)
 
             pc_chunk_start = 0
             pc_chunk_end = 0
@@ -68,30 +68,76 @@ def _generate_chunk_slices(parallel_coords, input_data_name):
             for chunk_key in np.arange(
                 len(pc["data_chunks"])
             ):  # ensure that keys are ordered.
-                pc_chunk_start = pc_chunk_end
-                pc_chunk_end = len(pc["data_chunks"][chunk_key]) + pc_chunk_end
+                pc_chunk_start = np.where(np.array(pc["data"])==pc["data_chunks"][chunk_key][0])[0][0] #pc_chunk_end
+                pc_chunk_end = len(pc["data_chunks"][chunk_key]) + pc_chunk_start
 
+                
+                if (pc_chunk_start > interp_indx[-1] and pc_chunk_end > interp_indx[-1]) or (pc_chunk_start < interp_indx[0] and pc_chunk_end < interp_indx[0]):
+                    start_slice = None
+                    end_slice = None
+                else:
+                    #print('***',pc_chunk_start,interp_indx)
+                    if pc_chunk_start < interp_indx[0]:
+                        start_slice = 0
+                    else:
+                        start_slice = []
+                        increase_index = 0
+                        while (len(start_slice)==0) and (pc_chunk_start+increase_index <= interp_indx[-1]):
+                            start_slice = np.where(interp_indx == pc_chunk_start+increase_index)[0]
+                            #print('start_slice',start_slice, pc_chunk_start, increase_index, interp_indx[-1])
+                            increase_index=increase_index+1
+                        if len(start_slice)==0:
+                            start_slice = None
+                        else:
+                            start_slice = start_slice[0]
+                        
+                        
+                    #print('***',pc_chunk_end,interp_indx)
+                    if pc_chunk_end > interp_indx[-1]:
+                        end_slice = len(interp_indx)
+                    else:
+                        end_slice = []
+                        reduce_index = 0
+                        while (len(end_slice)==0) and (reduce_index < pc_chunk_end):
+                            end_slice = np.where(interp_indx == pc_chunk_end - 1 - reduce_index)[0] + 1
+                            reduce_index=reduce_index+1
+                        if len(end_slice)==0:
+                            end_slice = None
+                        else:
+                            end_slice = end_slice[0]
+                        
+              
+                '''
+                #print(pc["data"]-pc["data_chunks"][chunk_key][0])
+                print('pc_chunk_start,pc_chunk_end',pc_chunk_start,pc_chunk_end)
                 start_slice = np.where(interp_indx == pc_chunk_start)[0]
+                print('start_slice',start_slice)
+                
                 if start_slice.size != 0:
                     start_slice = start_slice[0]
                 else:
                     start_slice = None
 
                 end_slice = np.where(interp_indx == pc_chunk_end - 1)[0]
+                
+                print('end_slice',end_slice)
 
                 if end_slice.size != 0:
                     end_slice = end_slice[-1] + 1
                 else:
                     end_slice = len(interp_indx)
+                '''
 
-                if start_slice is None:
-                    chunk_indx_start_stop[chunk_key] = slice(None)
-                else:
-                    if start_slice > end_slice:
-                        chunk_indx_start_stop[chunk_key] = slice(end_slice, start_slice)
-                    else:
-                        chunk_indx_start_stop[chunk_key] = slice(start_slice, end_slice)
-
+#                if start_slice is None:
+#                    chunk_indx_start_stop[chunk_key] = slice(None)
+#                else:
+#                if start_slice > end_slice:
+#                    chunk_indx_start_stop[chunk_key] = slice(end_slice, start_slice)
+#                else:
+                
+                chunk_indx_start_stop[chunk_key] = slice(start_slice, end_slice)
+            
+                #print('start_stop_slice',chunk_indx_start_stop[chunk_key])
             if xds_key in chunk_slice_dict:
                 chunk_slice_dict[xds_key][dim] = chunk_indx_start_stop
             else:
@@ -113,6 +159,7 @@ def _map(input_data_name, input_data_type, parallel_coords, func_chunk, input_pa
         input_data = {'image':read_image(input_data_name)}
 
     iter_chunks_indxs, parallel_dims = _make_iter_chunks_indxs(parallel_coords)
+    #print('*****',iter_chunks_indxs, parallel_dims)
 
     chunk_slice_dict = _generate_chunk_slices(parallel_coords, input_data)
     # print(chunk_slice_dict)
@@ -150,8 +197,10 @@ def _map(input_data_name, input_data_type, parallel_coords, func_chunk, input_pa
             )
 
     graph_list = []
+    
+    #print(chunk_slice_dict)
     for i_chunk, chunk_indx in enumerate(iter_chunks_indxs):
-        # print("chunk_indx", i_chunk, chunk_indx)
+        #print("chunk_indx", i_chunk, chunk_indx)
 
         single_chunk_slice_dict = {}
         for xds_id in input_data.keys():
