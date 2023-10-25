@@ -1,7 +1,6 @@
-
-
 def _dict_to_html(d, indent=0):
     from IPython.display import HTML
+
     html = ""
     for key, value in d.items():
         if isinstance(value, dict):

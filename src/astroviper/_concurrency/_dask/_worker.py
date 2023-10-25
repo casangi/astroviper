@@ -5,7 +5,7 @@ from astroviper._utils._logger import _setup_worker_logger
 
 class _worker:
     def __init__(self, local_cache, log_parms):
-        #print("init local cache")
+        # print("init local cache")
         self.local_cache = local_cache
 
         print("log_parms", log_parms)
@@ -26,7 +26,11 @@ class _worker:
         """
 
         self.logger = _setup_worker_logger(
-            self.log_to_term, self.log_to_file, self.log_file, self.log_level, str(worker.id)
+            self.log_to_term,
+            self.log_to_file,
+            self.log_file,
+            self.log_level,
+            str(worker.id),
         )
         self.logger.debug(
             "Logger created on worker " + str(worker.id) + ",*," + str(worker.address)
