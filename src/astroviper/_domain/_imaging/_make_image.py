@@ -3,12 +3,9 @@ def _make_image(input_parms):
     from xradio.vis.load_processing_set import load_processing_set
 
     start_total = time.time()
-    # print("Processing chunk",input_parms['chunk_id'])
-
     from astroviper._utils._logger import _get_logger
 
     logger = _get_logger()
-
     logger.debug(
         "Processing chunk " + str(input_parms["chunk_id"]) + " " + str(logger.level)
     )
@@ -30,7 +27,6 @@ def _make_image(input_parms):
 
     from xradio.vis.load_processing_set import load_processing_set
     import xarray as xr
-
     # print("0. Imports",time.time()-start_0)
 
     start_1 = time.time()
@@ -86,7 +82,6 @@ def _make_image(input_parms):
         )
         # print("3. phase_shift",time.time()-start_3)
 
-        # data_group_out = _make_imaging_weights(ms_xds,grid_parms=grid_parms,imaging_weights_parms={'weighting':'briggs','robust':0.6},sel_parms={"data_group_in":data_group_out})
         start_4 = time.time()
         data_group_out = _make_imaging_weights(
             ms_xds,
@@ -116,8 +111,6 @@ def _make_image(input_parms):
             grid_parms,
             sel_parms={"data_group_in": data_group_out},
         )
-        # print(gcf_xds)
-        # print(ms_xds['WEIGHT_IMAGING'])
         # print("4.1 make_gridding_convolution_function ",time.time()-start_4_1)
 
         start_4_2 = time.time()
@@ -149,8 +142,7 @@ def _make_image(input_parms):
         )
 
         # print("4.2 rest ",time.time()-start_4_2)
-
-        # print('&&&'*10)
+    
 
     start_5 = time.time()
     _fft_norm_img_xds(
@@ -179,7 +171,6 @@ def _make_image(input_parms):
 
     if input_parms["to_disk"]:
         for data_varaible, meta in input_parms["zarr_meta"].items():
-            # print(data_varaible, meta)
             dims = meta["dims"]
             dtype = meta["dtype"]
             data_varaible_name = meta["name"]
@@ -187,7 +178,6 @@ def _make_image(input_parms):
             shape = meta["shape"]
             chunk_name = ""
             if data_varaible_name in img_xds:
-                # print(data_varaible_name,img_xds[data_varaible_name].dims)
                 for d in img_xds[data_varaible_name].dims:
                     if d in parallel_dims_chunk_id:
                         chunk_name = chunk_name + str(parallel_dims_chunk_id[d]) + "."
@@ -204,7 +194,6 @@ def _make_image(input_parms):
                 else:
                     array = img_xds[data_varaible_name].values
 
-                # print(os.path.join(input_parms['image_file'],data_varaible_name,chunk_name))
                 write_binary_blob_to_disk(
                     array,
                     file_path=os.path.join(
