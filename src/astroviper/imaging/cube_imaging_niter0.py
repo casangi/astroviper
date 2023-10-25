@@ -40,12 +40,14 @@ def cube_imaging_niter0(
             "phase_direction"
         ]
 
+    #Make Parallel Coords
     parallel_coords = {}
     ms_xds = ps.get(0)
     parallel_coords["frequency"] = _make_parallel_coord(
         coord=ms_xds.frequency, n_chunks=n_chunks
     )
 
+    #Create empty image
     img_xds = xr.Dataset()
     img_xds = make_empty_sky_image(
         xds=img_xds,
@@ -89,6 +91,8 @@ def cube_imaging_niter0(
     input_parms["grid_parms"]["time"] = [0]
     input_parms["compressor"] = compressor
     input_parms["image_file"] = image_name
+
+    #Create Map Graph
     graph = _map(
         input_data_name=ps_name,
         input_data_type="processing_set",
@@ -100,9 +104,16 @@ def cube_imaging_niter0(
     )
     input_parms = {}
 
+    #Compute cube
     dask.compute(graph)
 
     zarr.consolidate_metadata(image_name)
+
+
+
+
+
+
 
 
 full_dims_lm = ["frequency", "polarization", "l", "m"]
@@ -136,6 +147,12 @@ data_varaibles_and_dims = {
     },
     "sky": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY"},
 }
+
+
+
+
+
+
 
 
 #'SUM_WEIGHT':['time','polarization','frequency'],
