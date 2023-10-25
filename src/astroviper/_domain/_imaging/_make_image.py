@@ -82,7 +82,7 @@ def _make_image(input_parms):
         data_group_out = _make_imaging_weights(
             ms_xds,
             grid_parms=grid_parms,
-            imaging_weights_parms={"weighting": "natural", "robust": 0.6},
+            imaging_weights_parms={"weighting": "briggs", "robust": 0.6},
             sel_parms={"data_group_in": data_group_out},
         )
         
