@@ -6,7 +6,7 @@ import numba
 import xarray as xr
 from astroviper._domain._imaging._check_imaging_parameters import _check_grid_parms
 from astroviper._domain._imaging._imaging_utils._mosaic_grid import _mosaic_grid_jit
-from astroviper._utils._parm_utils._check_parms import _check_sel_parms
+from graphviper.parameter_checking.check_parms import check_sel_parms
 import copy
 
 
@@ -21,10 +21,10 @@ def _make_uv_sampling_grid(
     _img_sel_parms["overwrite"] = True
     assert _check_grid_parms(_grid_parms), "######### ERROR: grid_parms checking failed"
 
-    ms_data_group_in, ms_data_group_out = _check_sel_parms(
+    ms_data_group_in, ms_data_group_out = check_sel_parms(
         ms_xds, _vis_sel_parms, skip_data_group_out=True
     )
-    img_data_group_in, img_data_group_out = _check_sel_parms(
+    img_data_group_in, img_data_group_out = check_sel_parms(
         img_xds,
         _img_sel_parms,
         default_data_group_out={

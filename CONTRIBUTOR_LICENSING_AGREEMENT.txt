@@ -1,6 +1,6 @@
 Contributor Licensing Agreement
 
-By submitting to the XRADIO (hereafter the Project) you and Associated Universities
+By submitting to the AstroVIPER (hereafter the Project) you and Associated Universities
 Incorporated (hereafter the Guardian) hereby accept and agree to the following terms and conditions:
 
 1. Your "Contribution" shall mean any original work of authorship, including any modifications or
