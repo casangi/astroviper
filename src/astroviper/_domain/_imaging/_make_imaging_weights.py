@@ -14,7 +14,7 @@ from astroviper._domain._imaging._imaging_utils._standard_grid import (
     _standard_imaging_weight_degrid_numpy_wrap,
     _standard_grid_psf_numpy_wrap,
 )
-from astroviper._utils._parm_utils._check_parms import _check_sel_parms
+from graphviper.parameter_checking.check_parms import check_sel_parms
 import copy
 
 
@@ -27,14 +27,14 @@ def _make_imaging_weights(ms_xds, grid_parms, imaging_weights_parms, sel_parms):
 
     if _imaging_weights_parms["weighting"] == "natural":
         _sel_parms["overwrite"] = True  # No actual overwrite is occuring.
-        data_group_in, data_group_out = _check_sel_parms(
+        data_group_in, data_group_out = check_sel_parms(
             ms_xds,
             _sel_parms,
             default_data_group_out={"imaging": {"weight_imaging": "WEIGHT"}},
         )
         return _sel_parms["data_group_out"]
     else:
-        data_group_in, data_group_out = _check_sel_parms(
+        data_group_in, data_group_out = check_sel_parms(
             ms_xds,
             _sel_parms,
             default_data_group_out={"imaging": {"weight_imaging": "WEIGHT_IMAGING"}},

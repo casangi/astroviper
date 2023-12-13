@@ -3,12 +3,11 @@ def _make_image(input_parms):
     from xradio.vis.load_processing_set import load_processing_set
 
     start_total = time.time()
-    from astroviper._utils._logger import _get_logger
-
-    logger = _get_logger()
-    logger.debug(
-        "Processing chunk " + str(input_parms["chunk_id"]) + " " + str(logger.level)
-    )
+    # from astroviper._utils._logger import _get_logger
+    # logger = _get_logger()
+    # logger.debug(
+    #     "Processing chunk " + str(input_parms["chunk_id"]) + " " + str(logger.level)
+    # )
 
     start_0 = time.time()
     import numpy as np
@@ -36,24 +35,22 @@ def _make_image(input_parms):
     shift_parms["new_phase_direction"] = grid_parms["phase_direction"]
     shift_parms["common_tangent_reprojection"] = True
 
-    img_xds = xr.Dataset()
     if input_parms["grid_parms"]["frequency"] is not None:
         image_freq_coord = input_parms["grid_parms"]["frequency"]
     else:
-        image_freq_coord = input_parms["chunk_coords"]["frequency"]["data"]
+        image_freq_coord = input_parms["task_coords"]["frequency"]["data"]
 
     if input_parms["grid_parms"]["polarization"] is not None:
         image_polarization_coord = input_parms["grid_parms"]["polarization"]
     else:
-        image_polarization_coord = input_parms["chunk_coords"]["polarization"]["data"]
+        image_polarization_coord = input_parms["task_coords"]["polarization"]["data"]
 
     if input_parms["grid_parms"]["time"] is not None:
         image_time_coord = input_parms["grid_parms"]["time"]
     else:
-        image_time_coord = input_parms["chunk_coords"]["time"]["data"]
+        image_time_coord = input_parms["task_coords"]["time"]["data"]
 
     img_xds = make_empty_sky_image(
-        xds=img_xds,
         phase_center=grid_parms["phase_direction"]["data"],
         image_size=grid_parms["image_size"],
         cell_size=grid_parms["cell_size"],
@@ -67,13 +64,20 @@ def _make_image(input_parms):
 
     gcf_xds = xr.Dataset()
 
-    for ms_v4_name, slice_description in input_parms["data_sel"].items():
+
+
+    for ms_v4_name, slice_description in input_parms["data_selection"].items():
         start_2 = time.time()
-        ps = load_processing_set(
-            ps_name=input_parms["input_data_name"],
-            sel_parms={ms_v4_name: slice_description},
-        )
-        ms_xds = ps.get(0)
+ 
+        if input_parms["input_data"] is None:
+            ps = load_processing_set(
+                    ps_name=input_parms["input_data_store"],
+                    sel_parms={ms_v4_name: slice_description},
+                )
+            ms_xds = ps.get(0)
+        else:
+            img_xds = input_parms["input_data"][ms_v4_name] #In memory
+
         # print("2. Load",time.time()-start_2)
 
         start_3 = time.time()
@@ -156,11 +160,9 @@ def _make_image(input_parms):
 
     # Tranform uv-space -> lm-space (sky)
 
-    # ['test_input', 'input_data_name', 'viper_local_dir', 'date_time', 'data_sel', 'chunk_coords', 'chunk_indx', 'chunk_id', 'parallel_dims']
-
     start_6 = time.time()
     parallel_dims_chunk_id = dict(
-        zip(input_parms["parallel_dims"], input_parms["chunk_indx"])
+        zip(input_parms["parallel_dims"], input_parms["chunk_indices"])
     )
 
     from xradio.image._util._zarr.zarr_low_level import (

@@ -15,13 +15,8 @@ def cube_imaging_niter0(
     import dask
     import os
     from xradio.vis.read_processing_set import read_processing_set
-    from astroviper._concurrency._graph_tools import (
-        _map,
-        _reduce,
-        _make_time_coord,
-        _make_frequency_coord,
-        _make_parallel_coord,
-    )
+    from graphviper.graph_tools.coordinate_utils import make_parallel_coord
+    from graphviper.graph_tools import map
     from astroviper._domain._imaging import _make_image
     from xradio.image import make_empty_sky_image
     from xradio.image import write_image
@@ -43,14 +38,12 @@ def cube_imaging_niter0(
     #Make Parallel Coords
     parallel_coords = {}
     ms_xds = ps.get(0)
-    parallel_coords["frequency"] = _make_parallel_coord(
+    parallel_coords["frequency"] = make_parallel_coord(
         coord=ms_xds.frequency, n_chunks=n_chunks
     )
 
     #Create empty image
-    img_xds = xr.Dataset()
     img_xds = make_empty_sky_image(
-        xds=img_xds,
         phase_center=grid_parms["phase_direction"]["data"],
         image_size=grid_parms["image_size"],
         cell_size=grid_parms["cell_size"],
@@ -58,6 +51,8 @@ def cube_imaging_niter0(
         pol_coords=ms_xds.polarization.values,
         time_coords=[0],
     )
+
+    #print(img_xds)
 
     write_image(img_xds, imagename=image_name, out_format="zarr")
 
@@ -91,16 +86,18 @@ def cube_imaging_niter0(
     input_parms["grid_parms"]["time"] = [0]
     input_parms["compressor"] = compressor
     input_parms["image_file"] = image_name
+    input_parms["input_data_store"]=ps_name
+
+    from graphviper.graph_tools.coordinate_utils import interpolate_data_coords_onto_parallel_coords
+    node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(parallel_coords, ps)
 
     #Create Map Graph
-    graph = _map(
-        input_data_name=ps_name,
-        input_data_type="processing_set",
-        ps_sel_parms=sel_parms,
-        parallel_coords=parallel_coords,
-        func_chunk=_make_image,
+    graph = map(
+        input_data=ps,
+        node_task_data_mapping=node_task_data_mapping,
+        node_task=_make_image,
         input_parms=input_parms,
-        client=None,
+        in_memory_compute=False
     )
     input_parms = {}
 

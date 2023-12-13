@@ -46,7 +46,7 @@ def _phase_shift_vis_ds(ms_xds, shift_parms, sel_parms):
     psf_dataset : xarray.core.dataset.Dataset
     """
 
-    from astroviper._utils._parm_utils._check_parms import _check_sel_parms
+    from graphviper.parameter_checking.check_parms import check_sel_parms
 
     _sel_parms = copy.deepcopy(sel_parms)
     _shift_parms = copy.deepcopy(shift_parms)
@@ -55,7 +55,7 @@ def _phase_shift_vis_ds(ms_xds, shift_parms, sel_parms):
         _shift_parms
     ), "######### ERROR: shift_parms checking failed"
 
-    data_group_in, data_group_out = _check_sel_parms(
+    data_group_in, data_group_out = check_sel_parms(
         ms_xds,
         _sel_parms,
         default_data_group_out={
@@ -159,7 +159,7 @@ def _directional_cosine(phase_direction_in_radians):
 
 
 def _check_shift_parms(shift_parms):
-    from astroviper._utils._parm_utils._check_parms import _check_parms
+    from graphviper.parameter_checking.check_parms import check_parms
     import numbers
 
     parms_passed = True
@@ -167,11 +167,11 @@ def _check_shift_parms(shift_parms):
     # if not(_check_parms(shift_parms, 'new_phase_direction', [dict])): parms_passed = False
 
     if not (
-        _check_parms(shift_parms, "common_tangent_reprojection", [bool], default=True)
+        check_parms(shift_parms, "common_tangent_reprojection", [bool], default=True)
     ):
         parms_passed = False
 
-    if not (_check_parms(shift_parms, "single_precision", [bool], default=True)):
+    if not (check_parms(shift_parms, "single_precision", [bool], default=True)):
         parms_passed = False
 
     return parms_passed

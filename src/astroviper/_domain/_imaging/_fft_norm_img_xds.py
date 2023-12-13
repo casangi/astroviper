@@ -4,7 +4,7 @@ from scipy import constants
 from numba import jit
 import numba
 import xarray as xr
-from astroviper._utils._parm_utils._check_parms import _check_sel_parms
+from graphviper.parameter_checking.check_parms import check_sel_parms
 from astroviper._domain._imaging._check_imaging_parameters import (
     _check_grid_parms,
     _check_norm_parms,
@@ -20,7 +20,7 @@ def _fft_norm_img_xds(img_xds, gcf_xds, grid_parms, norm_parms, sel_parms):
     _norm_parms = copy.deepcopy(norm_parms)
     assert _check_norm_parms(_norm_parms), "######### ERROR: norm_parms checking failed"
 
-    data_group_in, data_group_out = _check_sel_parms(
+    data_group_in, data_group_out = check_sel_parms(
         img_xds,
         _sel_parms,
         default_data_group_out={
