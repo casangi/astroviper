@@ -9,55 +9,68 @@ import numpy as np
 
 from scipy.stats import median_abs_deviation
 
-@dask.delayed
-def compute_uv_histogram(ms_xds, input_params):
+
+#@dask.delayed
+def compute_uv_histogram(input_params):
     """
     Read in the input XDS and calculate a histogram per pixel in the UV plane.
     """
-
-    # in Hz
-    ref_freq = float(ms_xds.frequency.attrs['reference_frequency']['data'])
+    print('Processing task with id: ', input_params['task_id'])
+    from xradio.vis.load_processing_set import load_processing_set
 
     uvrange = np.asarray(sorted(input_params['uvrange']))
     uvcell = input_params['uvcell']
     nhistbin = input_params['nhistbin']
     npixu, npixv = input_params['npixels']
-    nchunks = input_params['nchunks']
 
     accum_uv_hist_med = np.zeros((npixu, npixv))
     accum_uv_hist_std = np.zeros((npixu, npixv))
-
-    min_baseline = ms_xds.baseline_id.min().data
-    max_baseline = ms_xds.baseline_id.max().data
-
-    # Drop rows that are outside the selected UV range
-    ms_xds = ms_xds.where(((ms_xds.UVW[...,0]**2 + ms_xds.UVW[...,1]**2 > uvrange[0]*uvrange[0]) & (ms_xds.UVW[...,0]**2 + ms_xds.UVW[...,1]**2 < uvrange[1]*uvrange[1])), drop=True)
-
-    uvw = ms_xds.UVW.data
-    vis = ms_xds.VISIBILITY.data
-    flag = ms_xds.FLAG.data.astype(bool)
-    freq = ms_xds.frequency.data
-
-    # Flip flags and replace NaNs with zeros, so they flag the corresponding visibilities
-    #flag = np.nan_to_num(~flag).astype(bool)
-    vis = np.nan_to_num(vis)
-    # Flag visibilities
-    #vis = np.asarray(vis*~flag)
-
-    uvw = np.nan_to_num(uvw)
-    uv_scaled = scale_uv_freq(np.asarray(uvw), np.asarray(freq), ref_freq)
-
-    # Create a histogram per UV pixel - some might be entirely zeros, with no data.
     vis_accum = np.empty((npixu, npixv), dtype=object)
 
-    # Manually verified that the reshape works for a handful of random indices
-    vis_accum = uv_histogram(uv_scaled.reshape([-1,2]), vis.reshape([-1,2]), uvrange, uvcell, npixu, npixv)
+    for ms_v4_name, slice_description in input_params["data_selection"].items():
+        if input_params["input_data"] is None:
+            ps = load_processing_set(
+                    ps_name=input_params["input_data_store"],
+                    sel_parms={ms_v4_name: slice_description},
+                )
+        else:
+            ps = input_params["input_data"][ms_v4_name].isel(slice_description) #In memory
+
+        ms_xds = ps.get(0)
+
+        #ref_freq = float(ms_xds.frequency.attrs['reference_frequency']['data'])
+        ref_freq = np.mean(ms_xds.frequency).values 
+   
+        min_baseline = ms_xds.baseline_id.min().data
+        max_baseline = ms_xds.baseline_id.max().data
+
+        # Drop rows that are outside the selected UV range
+        ms_xds = ms_xds.where(((ms_xds.UVW[...,0]**2 + ms_xds.UVW[...,1]**2 > uvrange[0]*uvrange[0]) & (ms_xds.UVW[...,0]**2 + ms_xds.UVW[...,1]**2 < uvrange[1]*uvrange[1])), drop=True)
+
+        uvw = ms_xds.UVW.data
+        vis = ms_xds.VISIBILITY.data
+        flag = ms_xds.FLAG.data.astype(bool)
+        freq = ms_xds.frequency.data
+
+        # Flip flags and replace NaNs with zeros, so they flag the corresponding visibilities
+        #flag = np.nan_to_num(~flag).astype(bool)
+        vis = np.nan_to_num(vis)
+        # Flag visibilities
+        #vis = np.asarray(vis*~flag)
+
+        uvw = np.nan_to_num(uvw)
+        uv_scaled = scale_uv_freq(np.asarray(uvw), np.asarray(freq), ref_freq)
+
+        # Create a histogram per UV pixel - some might be entirely zeros, with no data.
+        # Manually verified that the reshape works for a handful of random indices
+        uv_histogram(vis_accum, uv_scaled.reshape([-1,2]), vis.reshape([-1,2]), uvrange, uvcell, npixu, npixv)
+
 
     return vis_accum
 
 
 #@nb.jit(nopython=True, nogil=True, cache=True)
-def merge_uv_grids(results, npixu, npixv, nhistbin):
+def merge_uv_grids(results, input_parms):
     """
     Given the list of results from compute_uv_histogram, merge the UV grids together to compute stats
 
@@ -71,6 +84,10 @@ def merge_uv_grids(results, npixu, npixv, nhistbin):
     accum_uv_hist_med   : np.array - Median of the histogram per pixel
     accum_uv_hist_std   : np.array - Standard deviation of the histogram per pixel
     """
+
+    npixu = input_parms['npixu']
+    npixv = input_parms['npixv']
+    nhistbin = input_parms['nhistbin']
 
     nchunk = len(results)
     accum_uv_hist_med = np.zeros((npixu, npixv))
@@ -90,15 +107,15 @@ def merge_uv_grids(results, npixu, npixv, nhistbin):
         for vv in range(npixv):
             concat_list = []
             for nn in range(nchunk):
-                if len(results[0][nn][uu,vv]) > 0:
-                    concat_list.append(results[0][nn][uu,vv])
+                if len(results[nn][uu,vv]) > 0:
+                    concat_list.extend(results[nn][uu,vv])
 
             if len(concat_list) > 0:
                 concat_list = np.nan_to_num(concat_list)
                 accum_uv_hist_med[uu, vv] = np.median(concat_list[concat_list != 0])
                 accum_uv_hist_std[uu, vv] = median_abs_deviation(concat_list[concat_list != 0])
 
-    return accum_uv_hist_med, accum_uv_hist_std
+    return [accum_uv_hist_med, accum_uv_hist_std]
 
 
 
@@ -120,7 +137,7 @@ def hermitian_conjugate(uv, vis):
 
 #@profile
 #@nb.jit(nopython=True, nogil=True, cache=True)
-def uv_histogram(uv, vis, uvrange, uvcell, npixu, npixv):
+def uv_histogram(vis_hist,uv, vis, uvrange, uvcell, npixu, npixv):
     """
     Generate a histogram per UV pixel, given the input UV coordinates & visibilities.
     """
@@ -128,7 +145,7 @@ def uv_histogram(uv, vis, uvrange, uvcell, npixu, npixv):
     uvrange = sorted(uvrange)
     uv, vis = hermitian_conjugate(np.asarray(uv), np.asarray(vis))
 
-    vis_hist = np.zeros((npixu, npixv), dtype=object)
+    #vis_hist = np.zeros((npixu, npixv), dtype=object)
 
     stokesI = np.abs((vis[...,0] + vis[...,-1])/2.)
 
@@ -149,7 +166,7 @@ def uv_histogram(uv, vis, uvrange, uvcell, npixu, npixv):
         if dat != 0:
             vis_hist[ubin,vbin].append(dat)
 
-    return vis_hist
+    #return vis_hist
 
 
 @nb.jit(nopython=True, nogil=True, cache=True)
@@ -216,7 +233,7 @@ def _loop_and_apply_flags(uv_scaled, vis, flag, uvrange, uvcell, min_thresh, max
 
 
 
-@dask.delayed
+#@dask.delayed
 def apply_flags(ms_xds, input_params, min_thresh, max_thresh):
     """
     Apply flags to the input XDS, given the min and max thresholds.
