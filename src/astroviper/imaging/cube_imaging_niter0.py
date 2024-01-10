@@ -86,7 +86,7 @@ def cube_imaging_niter0(
     input_parms["grid_parms"]["time"] = [0]
     input_parms["compressor"] = compressor
     input_parms["image_file"] = image_name
-    input_parms["input_data_store"]=ps_name
+    input_parms["input_data_store"] = ps_name
 
     from graphviper.graph_tools.coordinate_utils import interpolate_data_coords_onto_parallel_coords
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(parallel_coords, ps)

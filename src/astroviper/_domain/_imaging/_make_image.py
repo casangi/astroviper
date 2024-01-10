@@ -74,9 +74,10 @@ def _make_image(input_parms):
                     ps_name=input_parms["input_data_store"],
                     sel_parms={ms_v4_name: slice_description},
                 )
-            ms_xds = ps.get(0)
         else:
-            img_xds = input_parms["input_data"][ms_v4_name] #In memory
+            ps = input_parms["input_data"][ms_v4_name].isel(slice_description) #In memory
+
+        ms_xds = ps.get(0)
 
         # print("2. Load",time.time()-start_2)
 
