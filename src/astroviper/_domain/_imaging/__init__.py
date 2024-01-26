@@ -1,3 +1,5 @@
+from ._fft import _fft_lm_to_uv
+from ._ifft import _ifft_uv_to_lm
 from ._make_imaging_weights import _make_imaging_weights
 from ._make_gridding_convolution_function import _make_gridding_convolution_function
 from ._make_aperture_grid import _make_aperture_grid
