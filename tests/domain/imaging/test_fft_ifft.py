@@ -1,3 +1,6 @@
+# run using eg
+# python -m pytest ../astroviper/tests/domain/imaging/test_fft_ifft.py
+
 from astroviper._domain._imaging._fft import _fft_lm_to_uv
 from astroviper._domain._imaging._ifft import _ifft_uv_to_lm
 import numpy as np

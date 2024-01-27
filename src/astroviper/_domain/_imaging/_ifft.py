@@ -3,7 +3,7 @@ from typing import List
 
 def _ifft_uv_to_lm(ary: np.ndarray, axes: List[int]) -> np.ndarray:
     """
-    Do a 2-D iFFT
+    Do a 2-D iFFT. A real valued array will be returned
     :ary : np.ndarray
         Numpy array to iFT
     :axes : List[int]
@@ -17,4 +17,4 @@ def _ifft_uv_to_lm(ary: np.ndarray, axes: List[int]) -> np.ndarray:
             np.fft.ifftshift(ary, axes=axes),
             axes=axes),
         axes=axes
-    )
+    ).real
