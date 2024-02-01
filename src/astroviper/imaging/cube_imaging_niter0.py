@@ -4,7 +4,7 @@ from numcodecs import Blosc
 def cube_imaging_niter0(
     ps_name,
     image_name,
-    grid_parms,
+    grid_params,
     n_chunks,
     data_variables=["sky", "point_spread_function", "primary_beam"],
     intents=["OBSERVE_TARGET#ON_SOURCE"],
@@ -27,11 +27,11 @@ def cube_imaging_niter0(
     summary_df = ps.summary()
 
     # Get phase center of mosaic if field_id given.
-    if isinstance(grid_parms["phase_direction"], int):
+    if isinstance(grid_params["phase_direction"], int):
         ms_xds_name = summary_df.loc[
-            summary_df["field_id"] == grid_parms["phase_direction"]
+            summary_df["field_id"] == grid_params["phase_direction"]
         ].name.values[0]
-        grid_parms["phase_direction"] = ps[ms_xds_name].attrs["field_info"][
+        grid_params["phase_direction"] = ps[ms_xds_name].attrs["field_info"][
             "phase_direction"
         ]
 
@@ -44,9 +44,9 @@ def cube_imaging_niter0(
 
     #Create empty image
     img_xds = make_empty_sky_image(
-        phase_center=grid_parms["phase_direction"]["data"],
-        image_size=grid_parms["image_size"],
-        cell_size=grid_parms["cell_size"],
+        phase_center=grid_params["phase_direction"]["data"],
+        image_size=grid_params["image_size"],
+        cell_size=grid_params["cell_size"],
         chan_coords=parallel_coords["frequency"]["data"],
         pol_coords=ms_xds.polarization.values,
         time_coords=[0],
@@ -78,12 +78,12 @@ def cube_imaging_niter0(
     sel_parms["fields"] = None
 
     input_parms = {}
-    input_parms["grid_parms"] = grid_parms
+    input_parms["grid_params"] = grid_params
     input_parms["zarr_meta"] = zarr_meta
     input_parms["to_disk"] = True
-    input_parms["grid_parms"]["polarization"] = ms_xds.polarization.values
-    input_parms["grid_parms"]["frequency"] = None
-    input_parms["grid_parms"]["time"] = [0]
+    input_parms["grid_params"]["polarization"] = ms_xds.polarization.values
+    input_parms["grid_params"]["frequency"] = None
+    input_parms["grid_params"]["time"] = [0]
     input_parms["compressor"] = compressor
     input_parms["image_file"] = image_name
     input_parms["input_data_store"]=ps_name
@@ -96,7 +96,7 @@ def cube_imaging_niter0(
         input_data=ps,
         node_task_data_mapping=node_task_data_mapping,
         node_task=_make_image,
-        input_parms=input_parms,
+        input_params=input_parms,
         in_memory_compute=False
     )
     input_parms = {}
