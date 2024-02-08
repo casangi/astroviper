@@ -46,7 +46,8 @@ def _phase_shift_vis_ds(ms_xds, shift_parms, sel_parms):
     psf_dataset : xarray.core.dataset.Dataset
     """
 
-    from graphviper.parameter_checking.check_parms import check_sel_parms
+    #from graphviper.parameter_checking.check_parms import check_sel_parms
+    from astroviper.utils.check_parms import check_parms, check_sel_parms
 
     _sel_parms = copy.deepcopy(sel_parms)
     _shift_parms = copy.deepcopy(shift_parms)
@@ -159,7 +160,8 @@ def _directional_cosine(phase_direction_in_radians):
 
 
 def _check_shift_parms(shift_parms):
-    from graphviper.parameter_checking.check_parms import check_parms
+    #from graphviper.parameter_checking.check_parms import check_parms
+    from astroviper.utils.check_parms import check_parms, check_sel_parms
     import numbers
 
     parms_passed = True
