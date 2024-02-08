@@ -156,6 +156,7 @@ def _feather(input_parms):
     # if input_parms["input_data"] is None: #Load
     dtypes = {"sd": np.int32, "int": np.int32}
     for k in ["sd", "int"]:
+        # the "data_selection" key is set in interpolate_data_coords_onto_parallel_coords()
         xds = load_image(
             input_parms["input_data_store"][k],
             block_des=input_parms["data_selection"]["img"]
@@ -230,7 +231,7 @@ def _feather(input_parms):
     return feather_xds
 
 
-def feather(imagename=None,highres=None,lowres=None, sdfactor=None):
+def feather(imagename=None, highres=None, lowres=None, sdfactor=None):
     _init_dask()
     # Read in input images
     # single dish image
