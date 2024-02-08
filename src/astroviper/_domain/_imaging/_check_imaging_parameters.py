@@ -1,6 +1,6 @@
 import numpy as np
-from graphviper.parameter_checking.check_parms import check_parms
-
+#from graphviper.parameter_checking.check_parms import check_parms
+from astroviper.utils.check_parms import check_parms
 
 def _check_grid_parms(grid_parms):
     import numbers

@@ -14,7 +14,8 @@ from astroviper._domain._imaging._imaging_utils._standard_grid import (
     _standard_imaging_weight_degrid_numpy_wrap,
     _standard_grid_psf_numpy_wrap,
 )
-from graphviper.parameter_checking.check_parms import check_sel_parms
+#from graphviper.parameter_checking.check_parms import check_sel_parms
+from astroviper.utils.check_parms import check_sel_parms
 import copy
 import time
 
