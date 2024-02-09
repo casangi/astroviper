@@ -16,13 +16,13 @@ import numpy as np
 import os
 import xarray as xr
 from xradio.image import load_image
-from xradio.image import make_empty_apeture_image
+from xradio.image import make_empty_aperture_image
 from xradio.image import read_image
 from xradio.image import write_image
 from xradio.image._util.common import _set_multibeam_array
 
 
-def _dask_init():
+def _init_dask():
     # from graphviper.dask.client import local_client
     # viper_client = local_client(cores=4, memory_limit="4GB")
 
@@ -156,10 +156,13 @@ def _feather(input_parms):
     # if input_parms["input_data"] is None: #Load
     dtypes = {"sd": np.int32, "int": np.int32}
     for k in ["sd", "int"]:
-        # the "data_selection" key is set in interpolate_data_coords_onto_parallel_coords()
+        # the "data_selection" key is set in
+        # interpolate_data_coords_onto_parallel_coords()
+        print("data store", input_parms["input_data_store"][k])
+        print("block_des", input_parms["data_selection"][k])
         xds = load_image(
             input_parms["input_data_store"][k],
-            block_des=input_parms["data_selection"]["img"]
+            block_des=input_parms["data_selection"][k]
         )
         fft_plane = (
             xds['sky'].dims.index(input_parms["axes"][0]),
@@ -168,7 +171,7 @@ def _feather(input_parms):
         # else:
         #   img_xds = input_parms["input_data"]['img'] #In memory
         aperture = _fft_lm_to_uv(xds["sky"], fft_plane)
-        dtypes[i] = xds["sky"].dtype
+        dtypes[k] = xds["sky"].dtype
         if k == "int":
             int_ap = aperture
             int_xds = xds
@@ -177,14 +180,14 @@ def _feather(input_parms):
             sd_xds = xds
     mytype = dtypes["sd"] if dtypes["sd"] < dtypes["int"] else dtypes["int"]
     w = (
-        input_parms["w"]
-        if input_parms["w"]
-        else _compute_w_multiple_beams(sd_xds, input_parms["uv"])
+        _compute_w_multiple_beams(sd_xds, input_parms["uv"])
+        if input_parms["w"] is None
+        else input_parms["w"]
     )
     one_minus_w = 1 - w
     s = input_parms["s"]
     beam_ratio = input_parms["beam_ratio"]
-    if not beam_ratio:
+    if beam_ratio is None:
         if "beam" in int_xds.data_vars:
             # compute area for multiple beams
             int_ba = (
@@ -244,7 +247,8 @@ def feather(imagename=None, highres=None, lowres=None, sdfactor=None):
     chans_per_chunk = 2**28/(sd_xds.dims["l"]*sd_xds.dims["m"])
     chans_per_chunk = min(sd_xds.dims["frequency"], chans_per_chunk)
     chunksize = {
-        "polarization": npol, "frequency": chans_per_chunk,
+        "time": sd_xds.dims["time"], "polarization":
+        sd_xds.dims["polarization"], "frequency": chans_per_chunk,
         "l": sd_xds.dims["l"], "m": sd_xds.dims["m"]
     }
     # TODO either deep copy this, or put the chunks back as they were when
@@ -288,7 +292,7 @@ def feather(imagename=None, highres=None, lowres=None, sdfactor=None):
     # beam, if not this computation needs to be done in the node
     # task since it will be per plane
     beam_ratio = None
-    if has_single_beam(sd_xds) and has_single_beam(int_xds):
+    if _has_single_beam(sd_xds) and _has_single_beam(int_xds):
         beam_ratio = (
             _beam_area_single_beam(int_xds)
             /_beam_area_single_beam(sd_xds)
@@ -313,11 +317,11 @@ def feather(imagename=None, highres=None, lowres=None, sdfactor=None):
 
     w = None
     uv = (None, None)
-    if has_single_beam(sd_xds):
+    if _has_single_beam(sd_xds):
         # w is a shape [l, m] np.array. If not computed
         # here, it will be computed on a per chunk basis
         # inside the node task
-        w = compute_w_single_beam(sd_xds)
+        w = _compute_w_single_beam(sd_xds)
     else:
         # w must be computed on a per-plane basis, but
         # u and v can be computed once here and then
@@ -366,7 +370,7 @@ def feather(imagename=None, highres=None, lowres=None, sdfactor=None):
         input_data=input_data,
         node_task_data_mapping=node_task_data_mapping,
         node_task=_feather,
-        input_parms=input_parms,
+        input_params=input_parms,
         in_memory_compute=False
     )
 
@@ -387,5 +391,7 @@ def feather(imagename=None, highres=None, lowres=None, sdfactor=None):
             "time", "polarization", "frequency", "l", "m"
         )
     )
+    final_xds["sky"].attrs = copy.deepcopy(int_xds["sky"].attrs)
     # image.write_image(final_xds, "feather_test_0.im", "casa")
     # print(final_xds["sky"].dtype)
+    return final_xds
