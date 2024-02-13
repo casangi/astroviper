@@ -14,6 +14,9 @@ from graphviper.utils.display import dict_to_html
 from IPython.display import HTML, display
 import numpy as np
 import os
+import shutil
+import time
+from typing import Union
 import xarray as xr
 from xradio.image import load_image
 from xradio.image import make_empty_aperture_image
@@ -26,8 +29,9 @@ def _init_dask():
     # from graphviper.dask.client import local_client
     # viper_client = local_client(cores=4, memory_limit="4GB")
 
-    dask.config.set(scheduler="synchronous")
-    # dask.config.set(scheduler="threads")
+    # dask.config.set(scheduler="synchronous")
+    dask.config.set(scheduler="threads")
+    # dask.config.set(scheduler="processes")
 
 
 def _has_single_beam(xds):
@@ -234,13 +238,58 @@ def _feather(input_parms):
     return feather_xds
 
 
-def feather(imagename=None, highres=None, lowres=None, sdfactor=None):
+def feather(
+    outim: Union[dict, None], highres: Union[str, xr.Dataset],
+    lowres: Union[str, xr.Dataset], sdfactor: float
+):
+    """
+    Create an image from a single dish and interferometer image using the
+    feather algorithm
+    Parameters
+    ----------
+    outim : output image information, dict or None
+        if None, no image is written. if dict must have keys "name" and
+        "format" keys. "name" is the file name to which the image is written,
+        and "format" is the format (casa or zarr) to write the image. An
+        "overwrite" boolean parameter is optional. If it does not exist,
+        it is assumed that the user does not want to overwrite an already
+        extant image of the same name.
+    highres : interferometer image, string or xr.Dataset.
+        If str, an image file by that name will be read from disk.
+        If xr.Dataset, that xds will be used for the interferometer image.
+    lowres : Single dish image, string or xr.Dataset.
+        If str, an image file by that name will be read from disk.
+        If xr.Dataset, that xds will be used for the single dish image.
+    """
+    if outim is not None:
+        if type(outim) != dict:
+            raise ValueError(
+                "If specified, outim must be a dictionary with keys "
+                "'name' and 'format'."
+            )
+        if "name" not in outim or "format" not in outim:
+            raise ValueError(
+                "If specfied, outim dict must have keys 'name' and 'format'"
+            )
+        im_format = outim["format"].lower()
+        if not (im_format == "casa" or im_format == "zarr"):
+            raise ValueError(
+                f"Output image type {outim['format']} is not supported. "
+                "Please choose either casa or zarr"
+            )
+        if "overwrite" not in outim or not outim["overwrite"]:
+            if os.path.exists(outim["name"]):
+                raise RuntimeError(
+                    f"Already existing file {outim['name']} will not be "
+                    "overwritten. To overwrite it, set outim['overwrite'] = True"
+                )
+
     _init_dask()
     # Read in input images
     # single dish image
-    sd_xds = read_image(lowres)
+    sd_xds = read_image(lowres) if isinstance(lowres, str) else lowres
     # interferometer image
-    int_xds = read_image(highres)
+    int_xds = read_image(highres) if isinstance(highres, str) else highres
     if sd_xds["sky"].shape != int_xds["sky"].shape:
         raise RuntimeError("Image shapes differ")
 
@@ -301,7 +350,7 @@ def feather(imagename=None, highres=None, lowres=None, sdfactor=None):
 
     parallel_coords = {}
     # TODO need smarter way to get n_chunks
-    n_chunks = min(16, sd_xds.dims["frequency"])
+    n_chunks = min(4, sd_xds.dims["frequency"])
     parallel_coords["frequency"] = make_parallel_coord(
         coord=sd_xds.frequency, n_chunks=n_chunks
     )
@@ -366,6 +415,7 @@ def feather(imagename=None, highres=None, lowres=None, sdfactor=None):
     input_parms["uv"] = uv
     input_parms["s"] = 1
 
+    t0 = time.time()
     graph = map(
         input_data=input_data,
         node_task_data_mapping=node_task_data_mapping,
@@ -373,14 +423,19 @@ def feather(imagename=None, highres=None, lowres=None, sdfactor=None):
         input_params=input_parms,
         in_memory_compute=False
     )
+    print("time to create graph", time.time() - t0)
 
     dask.visualize(graph, filename="map_graph")
-    res = dask.compute(graph)
+    t0 = time.time()
+    res = dask.compute(graph, num_workers=16)
+    print("time to compute()", time.time() - t0)
     # type(res), type(res[0]),type(res[0][0]), type(res[0][0][0])
     # len(res), len(res[0]), len(res[0][0])
     # res[0][0][0]["sky"].plot()
 
+    t0 = time.time()
     final_xds = xr.concat(res[0][0], "frequency")
+    print("time to concat", time.time() - t0)
     # final_xds
     # final_xds["sky"].values.dtype
 
@@ -392,6 +447,19 @@ def feather(imagename=None, highres=None, lowres=None, sdfactor=None):
         )
     )
     final_xds["sky"].attrs = copy.deepcopy(int_xds["sky"].attrs)
+    if outim is not None:
+        if os.path.exists(outim["name"]):
+            if os.path.isfile(outim["name"]):
+                t0 = time.time()
+                os.remove(outim["name"])
+                print("time to remove existing file", time.time() - t0)
+            if os.path.isdir(outim["name"]):
+                t0 = time.time()
+                shutil.rmtree(outim["name"])
+                print("time to remove existing directory", time.time() - t0)
+        t0 = time.time()
+        write_image(final_xds, outim["name"], outim["format"])
+        print("time to write feather image", time.time() - t0)
     # image.write_image(final_xds, "feather_test_0.im", "casa")
     # print(final_xds["sky"].dtype)
     return final_xds
