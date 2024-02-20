@@ -26,10 +26,11 @@ from xradio.image._util.common import _set_multibeam_array
 
 
 def _init_dask():
-    # from graphviper.dask.client import local_client
-    # viper_client = local_client(cores=4, memory_limit="4GB")
+    #from graphviper.dask.client import local_client
+    #viper_client = local_client(cores=2, memory_limit="4GB")
 
     # dask.config.set(scheduler="synchronous")
+    # dask.config.set(memory_limit="8GB")
     dask.config.set(scheduler="threads")
     # dask.config.set(scheduler="processes")
 
@@ -162,19 +163,23 @@ def _feather(input_parms):
     for k in ["sd", "int"]:
         # the "data_selection" key is set in
         # interpolate_data_coords_onto_parallel_coords()
-        print("data store", input_parms["input_data_store"][k])
-        print("block_des", input_parms["data_selection"][k])
+        # print("data store", input_parms["input_data_store"][k])
+        # print("block_des", input_parms["data_selection"][k])
         xds = load_image(
             input_parms["input_data_store"][k],
             block_des=input_parms["data_selection"][k]
         )
+        # print("load image for", k, "complete")
+        # print("completed load_image()")
         fft_plane = (
             xds['sky'].dims.index(input_parms["axes"][0]),
             xds['sky'].dims.index(input_parms["axes"][1])
         )
+        # print("completed fft_plane")
         # else:
         #   img_xds = input_parms["input_data"]['img'] #In memory
         aperture = _fft_lm_to_uv(xds["sky"], fft_plane)
+        # print("completed _fft_im_to_uv()")
         dtypes[k] = xds["sky"].dtype
         if k == "int":
             int_ap = aperture
@@ -182,6 +187,7 @@ def _feather(input_parms):
         else:
             sd_ap = aperture
             sd_xds = xds
+    print("fft loop complete")
     mytype = dtypes["sd"] if dtypes["sd"] < dtypes["int"] else dtypes["int"]
     w = (
         _compute_w_multiple_beams(sd_xds, input_parms["uv"])
@@ -229,9 +235,17 @@ def _feather(input_parms):
     feather_xds = copy.deepcopy(int_xds)
     # display(feather_xds)
     feather_xrary = xr.DataArray(
-        feather_npary, coords=int_xds["sky"].coords,
+        da.from_array(feather_npary, chunks=int_xds["sky"].shape),
+        coords=int_xds["sky"].coords,
         dims=int_xds["sky"].dims
     )
+    """
+    feather_xrary = xr.DataArray(
+        da.from_array(feather_npary, chunks=int_xds["sky"].shape),
+        coords=int_xds["sky"].coords,
+        dims=int_xds["sky"].dims
+    )
+    """
     feather_xrary.rename("sky")
     feather_xds["sky"] = feather_xrary
     # print("sky shape", feather_xds["sky"].shape)
@@ -240,7 +254,7 @@ def _feather(input_parms):
 
 def feather(
     outim: Union[dict, None], highres: Union[str, xr.Dataset],
-    lowres: Union[str, xr.Dataset], sdfactor: float
+    lowres: Union[str, xr.Dataset], sdfactor: float, selection: dict={}
 ):
     """
     Create an image from a single dish and interferometer image using the
@@ -287,14 +301,15 @@ def feather(
     _init_dask()
     # Read in input images
     # single dish image
-    sd_xds = read_image(lowres) if isinstance(lowres, str) else lowres
+    sd_xds = read_image(lowres, selection=selection) if isinstance(lowres, str) else lowres
     # interferometer image
-    int_xds = read_image(highres) if isinstance(highres, str) else highres
+    int_xds = read_image(highres, selection=selection) if isinstance(highres, str) else highres
     if sd_xds["sky"].shape != int_xds["sky"].shape:
         raise RuntimeError("Image shapes differ")
 
-    chans_per_chunk = 2**28/(sd_xds.dims["l"]*sd_xds.dims["m"])
+    chans_per_chunk = 2**26/(sd_xds.dims["l"]*sd_xds.dims["m"])
     chans_per_chunk = min(sd_xds.dims["frequency"], chans_per_chunk)
+    print("chans_per_chunk", chans_per_chunk)
     chunksize = {
         "time": sd_xds.dims["time"], "polarization":
         sd_xds.dims["polarization"], "frequency": chans_per_chunk,
@@ -350,7 +365,10 @@ def feather(
 
     parallel_coords = {}
     # TODO need smarter way to get n_chunks
-    n_chunks = min(4, sd_xds.dims["frequency"])
+    n_chunks = int(sd_xds.dims["frequency"]//chans_per_chunk)
+    if sd_xds.dims["frequency"] % chans_per_chunk > 0:
+        n_chunks += 1
+    print("n_chunks", n_chunks)
     parallel_coords["frequency"] = make_parallel_coord(
         coord=sd_xds.frequency, n_chunks=n_chunks
     )
@@ -427,7 +445,7 @@ def feather(
 
     dask.visualize(graph, filename="map_graph")
     t0 = time.time()
-    res = dask.compute(graph, num_workers=16)
+    res = dask.compute(graph, num_workers=8)
     print("time to compute()", time.time() - t0)
     # type(res), type(res[0]),type(res[0][0]), type(res[0][0][0])
     # len(res), len(res[0]), len(res[0][0])
