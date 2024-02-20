@@ -17,7 +17,7 @@ def cube_imaging_niter0(
     from xradio.vis.read_processing_set import read_processing_set
     from graphviper.graph_tools.coordinate_utils import make_parallel_coord
     from graphviper.graph_tools import map
-    from astroviper._domain._imaging import _make_image
+    from astroviper.imaging._utils import _make_image
     from xradio.image import make_empty_sky_image
     from xradio.image import write_image
     import zarr
@@ -57,17 +57,12 @@ def cube_imaging_niter0(
     write_image(img_xds, imagename=image_name, out_format="zarr")
 
     from xradio.image._util._zarr.zarr_low_level import (
-        write_binary_blob_to_disk,
-        read_json_file,
-        write_json_file,
-        read_binary_blob_from_disk,
-        pad_array_with_nans,
-        create_data_variable_meta_data_on_disk,
+        create_data_variable_meta_data_on_disk, image_data_varaibles_and_dims
     )
 
     xds_dims = dict(img_xds.dims)
     data_varaibles_and_dims_sel = {
-        key: data_varaibles_and_dims[key] for key in data_variables
+        key: image_data_varaibles_and_dims[key] for key in data_variables
     }
     zarr_meta = create_data_variable_meta_data_on_disk(
         image_name, data_varaibles_and_dims_sel, xds_dims, parallel_coords, compressor
@@ -111,64 +106,3 @@ def cube_imaging_niter0(
 
 
 
-
-
-full_dims_lm = ["frequency", "polarization", "l", "m"]
-full_dims_uv = ["frequency", "polarization", "l", "m"]
-norm_dims = ["frequency", "polarization"]
-
-data_varaibles_and_dims = {
-    "aperture": {"dims": full_dims_uv, "dtype": "<c16", "name": "APERTURE"},
-    "aperture_normalization": {
-        "dims": norm_dims,
-        "dtype": "<c16",
-        "name": "APERTURE_NORMALIZATION",
-    },
-    "primary_beam": {"dims": full_dims_lm, "dtype": "<f8", "name": "PRIMARY_BEAM"},
-    "uv_sampling": {"dims": full_dims_uv, "dtype": "<c16", "name": "UV_SAMPLING"},
-    "uv_sampling_normalization": {
-        "dims": norm_dims,
-        "dtype": "<c16",
-        "name": "UV_SAMPLING_NORMALIZATION",
-    },
-    "point_spread_function": {
-        "dims": full_dims_lm,
-        "dtype": "<f8",
-        "name": "POINT_SPREAD_FUNCTION",
-    },
-    "visibility": {"dims": full_dims_uv, "dtype": "<c16", "name": "VISIBILITY"},
-    "visibility_normalization": {
-        "dims": norm_dims,
-        "dtype": "<c16",
-        "name": "VISIBILITY_NORMALIZATION",
-    },
-    "sky": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY"},
-}
-
-
-
-
-
-
-
-
-#'SUM_WEIGHT':['time','polarization','frequency'],
-# data_varaibles_and_dims= {'aperture':[['time','polarization','frequency','l','m'],"<f8",'APERTURE'],
-#                           'aperture_normalization':[['time','polarization','frequency'],"<f8",'APERTURE_NORMALIZATION'],
-#                           'primary_beam':[['time','polarization','frequency','l','m'],"<f8",'PRIMARY_BEAM'],
-
-#                           'uv_sampling':[['time','polarization','frequency','l','m'],"<f8",'UV_SAMPLING'],
-#                           'uv_sampling_normalization':[['time','polarization','frequency'],"<f8",'UV_SAMPLING_NORMALIZATION'],
-#                           'point_spread_function':[['time','polarization','frequency','l','m'],"<f8",'POINT_SPREAD_FUNCTION'],
-
-#                           'visibility':[['time','polarization','frequency','l','m'],"<f8",'VISIBILITY'],
-#                           'visibility_normalization':[['time','polarization','frequency'],"<f8",'VISIBILITY_NORMALIZATION'],
-#                           'sky':[['time','polarization','frequency','l','m'],"<f8",'SKY']}
-
-# full_dims_lm = ['time','polarization','frequency','l','m']
-# full_dims_uv = ['time','polarization','frequency','l','m']
-# norm_dims = ['time','polarization','frequency']
-
-# full_dims_lm = ['time','frequency','polarization','l','m']
-# full_dims_uv = ['time','frequency','polarization','l','m']
-# norm_dims = ['time','frequency','polarization']
