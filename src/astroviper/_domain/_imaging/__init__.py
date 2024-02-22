@@ -5,4 +5,3 @@ from ._make_gridding_convolution_function import _make_gridding_convolution_func
 from ._make_aperture_grid import _make_aperture_grid
 from ._make_uv_sampling_grid import _make_uv_sampling_grid
 from ._make_visibility_grid import _make_visibility_grid
-from ._make_image import _make_image
