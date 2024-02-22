@@ -9,6 +9,7 @@ def cube_imaging_niter0(
     data_variables=["sky", "point_spread_function", "primary_beam"],
     intents=["OBSERVE_TARGET#ON_SOURCE"],
     compressor=Blosc(cname="lz4", clevel=5),
+    data_group='base'
 ):
     import numpy as np
     import xarray as xr
@@ -23,7 +24,7 @@ def cube_imaging_niter0(
     import zarr
 
     # Get metadata
-    ps = read_processing_set(ps_name, intents=intents)
+    ps = read_processing_set(ps_name, intents=intents, data_group=data_group)
     summary_df = ps.summary()
 
     # Get phase center of mosaic if field_id given.
@@ -31,7 +32,9 @@ def cube_imaging_niter0(
         ms_xds_name = summary_df.loc[
             summary_df["field_id"] == grid_params["phase_direction"]
         ].name.values[0]
-        grid_params["phase_direction"] = ps[ms_xds_name].attrs["field_info"][
+
+        vis_name = ps[ms_xds_name].attrs["data_groups"][data_group]["visibility"]
+        grid_params["phase_direction"] = ps[ms_xds_name][vis_name].attrs["field_info"][
             "phase_direction"
         ]
 
@@ -51,8 +54,6 @@ def cube_imaging_niter0(
         pol_coords=ms_xds.polarization.values,
         time_coords=[0],
     )
-
-    #print(img_xds)
 
     write_image(img_xds, imagename=image_name, out_format="zarr")
 
