@@ -1,13 +1,14 @@
 def _make_image(input_params):
     import time
     from xradio.vis.load_processing_set import load_processing_set
+    import graphviper.utils.logger as logger
+
+    #print(input_params.keys())
 
     start_total = time.time()
-    # from astroviper._utils._logger import _get_logger
-    # logger = _get_logger()
-    # logger.debug(
-    #     "Processing chunk " + str(input_params["chunk_id"]) + " " + str(logger.level)
-    # )
+    logger.debug(
+        "Processing chunk " + str(input_params["task_id"]) 
+    )
 
     start_0 = time.time()
     import numpy as np
@@ -24,9 +25,9 @@ def _make_image(input_params):
     from astroviper._domain._imaging._make_visibility_grid import _make_visibility_grid
     from astroviper._domain._imaging._fft_norm_img_xds import _fft_norm_img_xds
 
-    from xradio.vis.load_processing_set import load_processing_set
+    from xradio.vis.load_processing_set import load_processing_set, processing_set_iterator
     import xarray as xr
-    # print("0. Imports",time.time()-start_0)
+    logger.debug("0. Imports " + str(time.time()-start_0))
 
     start_1 = time.time()
     grid_params = input_params["grid_params"]
@@ -60,31 +61,29 @@ def _make_image(input_params):
     )
     img_xds.attrs["data_groups"] = {"mosaic": {}}
 
-    # print("1. Empty Image",time.time()-start_1)
+    logger.debug("1. Empty Image "+ str(time.time()-start_1))
 
     gcf_xds = xr.Dataset()
+    T_compute =0.0
+    T_load = 0.0
+    T_phase_shift = 0.0
+    T_weights = 0.0
+    T_gcf = 0.0
+    T_aperture_grid = 0.0
+    T_uv_sampling_grid = 0.0
+    T_vis_grid = 0.0
 
+    ps_iter = processing_set_iterator(input_params["data_selection"], input_params["input_data_store"], input_params["input_data"])
 
+    start_2 = time.time()
+    for ms_xds in ps_iter:
 
-    for ms_v4_name, slice_description in input_params["data_selection"].items():
-        start_2 = time.time()
- 
-        if input_params["input_data"] is None:
-            ps = load_processing_set(
-                    ps_name=input_params["input_data_store"],
-                    sel_parms={ms_v4_name: slice_description},
-                )
-            ms_xds = ps.get(0)
-        else:
-            img_xds = input_params["input_data"][ms_v4_name] #In memory
-
-        # print("2. Load",time.time()-start_2)
-
+        start_compute = time.time()
         start_3 = time.time()
         data_group_out = _phase_shift_vis_ds(
             ms_xds, shift_parms=shift_params, sel_parms={}
         )
-        # print("3. phase_shift",time.time()-start_3)
+        T_phase_shift = T_phase_shift + time.time() - start_3
 
         start_4 = time.time()
         data_group_out = _make_imaging_weights(
@@ -93,16 +92,14 @@ def _make_image(input_params):
             imaging_weights_parms={"weighting": "briggs", "robust": 0.6},
             sel_parms={"data_group_in": data_group_out},
         )
+        T_weights = T_weights + time.time() - start_4
 
+        start_5 = time.time()
         gcf_params = {}
         gcf_params["function"] = "casa_airy"
         gcf_params["list_dish_diameters"] = np.array([10.7])
         gcf_params["list_blockage_diameters"] = np.array([0.75])
 
-        # print("4. Phase_shift ",time.time()-start_4)
-
-        start_4_1 = time.time()
-        # print(ms_xds.attrs['antenna_xds'])
         unique_ant_indx = ms_xds.attrs["antenna_xds"].DISH_DIAMETER.values
         unique_ant_indx[unique_ant_indx == 12.0] = 0
 
@@ -115,9 +112,9 @@ def _make_image(input_params):
             grid_params,
             sel_parms={"data_group_in": data_group_out},
         )
-        # print("4.1 make_gridding_convolution_function ",time.time()-start_4_1)
+        T_gcf = T_gcf + time.time() - start_5
 
-        start_4_2 = time.time()
+        start_6 = time.time()
         _make_aperture_grid(
             ms_xds,
             gcf_xds,
@@ -126,7 +123,9 @@ def _make_image(input_params):
             img_sel_parms={"data_group_in": "mosaic"},
             grid_parms=grid_params,
         )
+        T_aperture_grid = T_aperture_grid + time.time()-start_6
 
+        start_7 = time.time()
         _make_uv_sampling_grid(
             ms_xds,
             gcf_xds,
@@ -134,8 +133,10 @@ def _make_image(input_params):
             vis_sel_parms={"data_group_in": data_group_out},
             img_sel_parms={"data_group_in": "mosaic"},
             grid_parms=grid_params,
-        )
+        ) #Will become the PSF.
+        T_uv_sampling_grid = T_uv_sampling_grid + time.time() - start_7
 
+        start_8 = time.time()
         _make_visibility_grid(
             ms_xds,
             gcf_xds,
@@ -144,11 +145,22 @@ def _make_image(input_params):
             img_sel_parms={"data_group_in": "mosaic"},
             grid_parms=grid_params,
         )
+        T_vis_grid = T_vis_grid + time.time() - start_8
+        T_compute = T_compute + time.time() - start_compute
 
-        # print("4.2 rest ",time.time()-start_4_2)
-    
+    T_load = time.time()-start_2-T_compute
 
-    start_5 = time.time()
+    logger.debug("2. Load "+ str(T_load))
+    logger.debug("3. Weights "+ str(T_weights))
+    logger.debug("4. Phase_shift "+ str(T_phase_shift))
+    logger.debug("5. make_gridding_convolution_function "+ str(T_uv_sampling_grid))
+    logger.debug("6. Aperture grid "+ str(T_aperture_grid))
+    logger.debug("7. UV sampling grid "+ str(T_uv_sampling_grid))
+    logger.debug("8. Visibility grid "+ str(T_vis_grid))
+    logger.debug("Compute "+ str(T_compute))
+
+
+    start_9 = time.time()
     _fft_norm_img_xds(
         img_xds,
         gcf_xds,
@@ -156,55 +168,25 @@ def _make_image(input_params):
         norm_parms={},
         sel_parms={"data_group_in": "mosaic", "data_group_out": "mosaic"},
     )
-    # print("5. fft norm",time.time()-start_5)
+    logger.debug("9. fft norm "+ str(time.time()-start_9))
 
     # Tranform uv-space -> lm-space (sky)
 
-    start_6 = time.time()
+    start_10 = time.time()
     parallel_dims_chunk_id = dict(
         zip(input_params["parallel_dims"], input_params["chunk_indices"])
     )
 
     from xradio.image._util._zarr.zarr_low_level import (
-        pad_array_with_nans,
-        write_binary_blob_to_disk,
+        write_chunk
     )
     import os
 
     if input_params["to_disk"]:
         for data_varaible, meta in input_params["zarr_meta"].items():
-            dims = meta["dims"]
-            dtype = meta["dtype"]
-            data_varaible_name = meta["name"]
-            chunks = meta["chunks"]
-            shape = meta["shape"]
-            chunk_name = ""
-            if data_varaible_name in img_xds:
-                for d in img_xds[data_varaible_name].dims:
-                    if d in parallel_dims_chunk_id:
-                        chunk_name = chunk_name + str(parallel_dims_chunk_id[d]) + "."
-                    else:
-                        chunk_name = chunk_name + "0."
-                chunk_name = chunk_name[:-1]
-
-                if list(img_xds[data_varaible_name].shape) != list(chunks):
-                    array = pad_array_with_nans(
-                        img_xds[data_varaible_name].values,
-                        output_shape=chunks,
-                        dtype=dtype,
-                    )
-                else:
-                    array = img_xds[data_varaible_name].values
-
-                write_binary_blob_to_disk(
-                    array,
-                    file_path=os.path.join(
-                        input_params["image_file"], data_varaible_name, chunk_name
-                    ),
-                    compressor=input_params["compressor"],
-                )
+            write_chunk(img_xds,meta,parallel_dims_chunk_id,input_params["compressor"],input_params["image_file"])
     else:
         return img_xds
-    # print("6. to disk",time.time()-start_6)
-    # print("Done chunk",input_params['chunk_id'],time.time()-start_total)
-    # print("***"*20)
+    logger.debug("10. to disk "+ str(time.time()-start_10))
+    logger.debug("Completed task " + str(input_params['task_id']) + " in " + str(time.time()-start_total) + " s.")
+    logger.debug("***"*20)
