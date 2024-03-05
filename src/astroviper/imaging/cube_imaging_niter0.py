@@ -57,9 +57,8 @@ def cube_imaging_niter0(
 
     write_image(img_xds, imagename=image_name, out_format="zarr")
 
-    from xradio.image._util._zarr.zarr_low_level import (
-        create_data_variable_meta_data_on_disk, image_data_varaibles_and_dims
-    )
+    from xradio.image._util._zarr.zarr_low_level import create_data_variable_meta_data_on_disk
+    from xradio.image._util._zarr.zarr_low_level import image_data_variables_and_dims_double_precision as image_data_varaibles_and_dims
 
     xds_dims = dict(img_xds.dims)
     data_varaibles_and_dims_sel = {
