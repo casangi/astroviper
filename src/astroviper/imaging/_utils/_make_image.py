@@ -181,9 +181,10 @@ def _make_image(input_params):
         write_chunk
     )
     import os
-
+  
+    img_xds = img_xds.transpose('polarization','frequency',...).expand_dims(dim='dummy',axis=0)
     if input_params["to_disk"]:
-        for data_varaible, meta in input_params["zarr_meta"].items():
+        for data_variable, meta in input_params["zarr_meta"].items():
             write_chunk(img_xds,meta,parallel_dims_chunk_id,input_params["compressor"],input_params["image_file"])
     else:
         return img_xds
