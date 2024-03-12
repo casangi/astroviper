@@ -360,7 +360,7 @@ def feather_v2(
     if thread_info is None:
         thread_info = get_thread_info()
     logger.debug("Thread info " + str(thread_info))
-    n_chunks_dict = calculate_data_chunking(memory_singleton_chunk,chunking_dims_sizes,thread_info,constant_memory=0,tasks_per_thread=4)
+    n_chunks_dict = calculate_data_chunking(memory_singleton_chunk, chunking_dims_sizes, thread_info, constant_memory=0, tasks_per_thread=4)
 
 
     # chans_per_chunk = 2**26/(sd_xds.dims["l"]*sd_xds.dims["m"])
@@ -520,18 +520,20 @@ def feather_v2(
         input_params["zarr_meta"] = zarr_meta
 
     t0 = time.time()
-    graph = map(
+    viper_graph = map(
         input_data=input_data,
         node_task_data_mapping=node_task_data_mapping,
         node_task=_feather,
         input_params=input_params,
         in_memory_compute=False
     )
+    from graphviper.graph_tools import generate_dask_workflow
+    dask_graph = generate_dask_workflow(viper_graph)
     logger.debug("Time to create graph " + str(time.time() - t0))
 
     #dask.visualize(graph, filename="map_graph")
     t0 = time.time()
-    res = dask.compute(graph)
+    res = dask.compute(dask_graph)
     logger.info("Time to compute() feather " + str(time.time() - t0) + "s")
 
     import zarr
