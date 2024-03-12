@@ -35,19 +35,15 @@ def _make_image(input_params):
     shift_params = {}
     shift_params["new_phase_direction"] = grid_params["phase_direction"]
     shift_params["common_tangent_reprojection"] = True
+    image_freq_coord = input_params["task_coords"]["frequency"]["data"]
 
-    if input_params["grid_params"]["frequency"] is not None:
-        image_freq_coord = input_params["grid_params"]["frequency"]
-    else:
-        image_freq_coord = input_params["task_coords"]["frequency"]["data"]
-
-    if input_params["grid_params"]["polarization"] is not None:
-        image_polarization_coord = input_params["grid_params"]["polarization"]
+    if input_params["polarization"] is not None:
+        image_polarization_coord = input_params["polarization"]
     else:
         image_polarization_coord = input_params["task_coords"]["polarization"]["data"]
 
-    if input_params["grid_params"]["time"] is not None:
-        image_time_coord = input_params["grid_params"]["time"]
+    if input_params["time"] is not None:
+        image_time_coord = input_params["time"]
     else:
         image_time_coord = input_params["task_coords"]["time"]["data"]
 

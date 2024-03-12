@@ -1,6 +1,6 @@
 import graphviper.utils.logger as logger
 
-bytes_in_dtype = {'float32':4,'double':8,'complex':16}
+bytes_in_dtype = {'float32':4,'float64':8,'double':8,'complex64':8,'complex128':16}
 
 def get_thread_info(client=None):
     
@@ -12,7 +12,7 @@ def get_thread_info(client=None):
             import psutil
             cpu_cores = psutil.cpu_count()
             total_memory = psutil.virtual_memory().total/(1024 ** 3)
-            print(cpu_cores,total_memory)
+            #print(cpu_cores,total_memory)
             thread_info = {'n_threads':cpu_cores,'memory_per_thread':total_memory/cpu_cores}
             return thread_info
 
@@ -59,7 +59,7 @@ def calculate_data_chunking(memory_singleton_chunk,chunking_dims_sizes,thread_in
         n_chunks = n_graph_chunks
 
 
-    logger.info('n_chunks: ' + str(n_chunks) + ', n_mem_chunks: ' + str(n_mem_chunks) + ', n_graph_chunks: ' + str(n_graph_chunks))
+    logger.debug('Suggest n_chunks: ' + str(n_chunks) + ', n_mem_chunks: ' + str(n_mem_chunks) + ', n_graph_chunks: ' + str(n_graph_chunks))
 
     dims_sizes = []
     dims_names = []
