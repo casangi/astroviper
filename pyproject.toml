@@ -31,7 +31,7 @@ dependencies = [
 'graphviz',
 'xradio',
 'python_casacore>=3.5.2; sys_platform != "darwin" ',
-ipympl
+'ipympl'
 ]
 
 
