@@ -30,7 +30,7 @@ def cube_imaging_niter0(
     import graphviper.utils.logger as logger
 
     # Get metadata
-    ps = read_processing_set(ps_name, intents=intents, data_group=data_group)
+    ps = read_processing_set(ps_name, intents=intents)
     summary_df = ps.summary()
 
     # Get phase center of mosaic if field_id given.
