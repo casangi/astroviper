@@ -22,7 +22,7 @@ def cube_imaging_niter0(
     from xradio.vis.read_processing_set import read_processing_set
     from graphviper.graph_tools.coordinate_utils import make_parallel_coord
     from graphviper.graph_tools import generate_dask_workflow
-    from graphviper.graph_tools import map
+    from graphviper.graph_tools import map, reduce
     from astroviper.imaging._utils import _make_image
     from xradio.image import make_empty_sky_image
     from xradio.image import write_image
@@ -46,20 +46,7 @@ def cube_imaging_niter0(
 
     # Create Cube frequency axis
     if frequency_coord is None:
-        frequency_values = []
-        spw_ids = []
-        frame = ps.get(0).frequency.frame #Should all be the same frame.
-        for ms_xds in ps.values():
-            if frame != ms_xds.frequency.frame:
-                logger.exception('Frequency reference frame must be the same for all MS v4.')
-            
-            if ms_xds.frequency.spw_id not in spw_ids:
-                frequency_values.append(ms_xds.frequency.values)
-                spw_ids.append(ms_xds.frequency.spw_id)
-        frequency_values = np.sort(np.unique(np.concatenate(frequency_values)))
-        frequency_coord = xr.DataArray(frequency_values,dims='frequency')
-        freq_attrs = {'frame':frame,'units':ps.get(0).frequency.attrs['units'],'type':'spectral_coord'}
-        frequency_coord.attrs = freq_attrs
+        frequency_coord = ps.get_ps_freq_axis()
 
     if polarization_coord is None:
         polarization_coord = ps.get(0).polarization
@@ -96,13 +83,13 @@ def cube_imaging_niter0(
             thread_info = get_thread_info()
             logger.debug("Thread info " + str(thread_info))
         n_chunks = calculate_data_chunking(memory_singleton_chunk, chunking_dims_sizes, thread_info, constant_memory=0, tasks_per_thread=4)['frequency']
+        logger.info('Number of frequency chunks: ' + str(n_chunks) + ' frequency channels: ' + str(chunking_dims_sizes))
 
 
     #Make Parallel Coords
     parallel_coords = {}
-    ms_xds = ps.get(0)
     parallel_coords["frequency"] = make_parallel_coord(
-        coord=ms_xds.frequency, n_chunks=n_chunks
+        coord=frequency_coord, n_chunks=n_chunks
     )
     logger.info('Number of frequency chunks: ' + str(len(parallel_coords['frequency']['data_chunks'])))
 
@@ -134,6 +121,7 @@ def cube_imaging_niter0(
     input_parms["compressor"] = compressor
     input_parms["image_file"] = image_name
     input_parms["input_data_store"]=ps_name
+    input_parms["data_group"] = data_group
 
     from graphviper.graph_tools.coordinate_utils import interpolate_data_coords_onto_parallel_coords
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(parallel_coords, ps)
@@ -146,16 +134,25 @@ def cube_imaging_niter0(
         input_params=input_parms,
         in_memory_compute=False
     )
-    input_parms = {}
-    dask_graph = generate_dask_workflow(viper_graph)
+
+    input_params = {}
+    viper_graph = reduce(viper_graph, _combine_return_data_frames, input_params, mode="tree")
 
     #Compute cube
-    dask.compute(dask_graph)
+    dask_graph = generate_dask_workflow(viper_graph)
+    #dask.visualize(dask_graph,filename='cube_imaging.png')
+    return_dict = dask.compute(dask_graph)[0]
 
     zarr.consolidate_metadata(image_name)
+    return return_dict
+    
+    #return parallel_coords
 
+def _combine_return_data_frames(input_data, input_parms):
+    import pandas as pd
+    combined_df = pd.DataFrame()
 
+    for df in input_data:
+        combined_df = pd.concat([combined_df, df], ignore_index=True)
 
-
-
-
+    return combined_df
