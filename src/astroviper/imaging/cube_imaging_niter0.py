@@ -13,7 +13,9 @@ def cube_imaging_niter0(
     compressor=Blosc(cname="lz4", clevel=5),
     data_group='base',
     double_precission=True,
-    thread_info=None
+    thread_info=None,
+    workflow_ochestrator:{'dask','airflow'}='dask',
+    airflow_dag_folder=None
 ):
     import numpy as np
     import xarray as xr
@@ -21,7 +23,7 @@ def cube_imaging_niter0(
     import os
     from xradio.vis.read_processing_set import read_processing_set
     from graphviper.graph_tools.coordinate_utils import make_parallel_coord
-    from graphviper.graph_tools import generate_dask_workflow
+    from graphviper.graph_tools import generate_dask_workflow, generate_airflow_workflow
     from graphviper.graph_tools import map, reduce
     from astroviper.imaging._utils import _make_image
     from xradio.image import make_empty_sky_image
@@ -136,16 +138,21 @@ def cube_imaging_niter0(
     )
 
     input_params = {}
-    viper_graph = reduce(viper_graph, _combine_return_data_frames, input_params, mode="tree")
 
-    #Compute cube
-    dask_graph = generate_dask_workflow(viper_graph)
-    #dask.visualize(dask_graph,filename='cube_imaging.png')
-    return_dict = dask.compute(dask_graph)[0]
-
-    zarr.consolidate_metadata(image_name)
-    return return_dict
+    if workflow_ochestrator == 'dask':
+        viper_graph = reduce(viper_graph, _combine_return_data_frames, input_params, mode="tree")
+        #Compute cube
+        dask_graph = generate_dask_workflow(viper_graph)
+        #dask.visualize(dask_graph,filename='cube_imaging.png')
+        return_dict = dask.compute(dask_graph)[0]
+        zarr.consolidate_metadata(image_name)
+        return return_dict
+    elif workflow_ochestrator == 'airflow':
+        viper_graph = reduce(viper_graph, _combine_return_data_frames, input_params, mode="single_node")
+        generate_airflow_workflow(viper_graph,dag_id='0',schedule_interval=None,filename=os.path.join(airflow_dag_folder,'cube_imaging_airflow.py'),dag_name='cube_imaging')
     
+    
+
     #return parallel_coords
 
 def _combine_return_data_frames(input_data, input_parms):
