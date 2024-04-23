@@ -181,13 +181,13 @@ def _feather(input_params):
     mytype = dtypes["sd"] if dtypes["sd"] < dtypes["int"] else dtypes["int"]
 
     if _has_single_beam(sd_xds):
-        # w is a shape [l, m] np.array. 
+        # w is a shape [l, m] np.array.
         w = _compute_w_single_beam(sd_xds)
     else:
         # w must be computed on a per-plane basis.
         uv = compute_u_v(sd_xds)
         w = _compute_w_multiple_beams(sd_xds, uv)
-    
+
     one_minus_w = 1 - w
     s = input_params["s"]
     beam_ratio = input_params["beam_ratio"]
@@ -287,7 +287,7 @@ def _feather(input_params):
 
 from numcodecs import Blosc
 
-def feather_v2(
+def feather(
     outim: Union[dict, None], highres: str,
     lowres: str, sdfactor: float, selection: dict={},
     memory_per_thread = None,
@@ -344,17 +344,17 @@ def feather_v2(
     int_xds = read_image(highres, selection=selection) if isinstance(highres, str) else highres
     if sd_xds["sky"].shape != int_xds["sky"].shape:
         raise RuntimeError("Image shapes differ")
-    
+
     # Determine chunking
     from astroviper._utils.data_partitioning import bytes_in_dtype
     ## Determine the amount of memory required by the node task if all dimensions that chunking will occur on are singleton.
     ## For example feather does chunking only only frequency, so memory_singleton_chunk should be the amount of memory requered by _feather when there is a single frequency channel.
-    singleton_chunk_sizes = dict(sd_xds['sky'].sizes) 
-    del singleton_chunk_sizes['frequency'] #Remove dimensions that will be chuncked on. 
+    singleton_chunk_sizes = dict(sd_xds['sky'].sizes)
+    del singleton_chunk_sizes['frequency'] #Remove dimensions that will be chuncked on.
     fudge_factor = 1.1
     n_images_in_memory = 3.0  # Two input and one output image.
     memory_singleton_chunk = n_images_in_memory*np.prod(np.array(list(singleton_chunk_sizes.values())))*fudge_factor*bytes_in_dtype[str(sd_xds['sky'].dtype)]/(1024**3)
-    
+
     chunking_dims_sizes = {'frequency':int_xds["sky"].sizes['frequency']} #Need to know how many frequency channels there are.
     from astroviper._utils.data_partitioning import calculate_data_chunking, get_thread_info
     if thread_info is None:
@@ -419,7 +419,7 @@ def feather_v2(
             /_beam_area_single_beam(sd_xds)
         )
     # print(beam_ratio)
-    
+
     parallel_coords = {}
     # TODO need smarter way to get n_chunks
     # n_chunks = int(sd_xds.dims["frequency"]//chans_per_chunk)
@@ -491,7 +491,7 @@ def feather_v2(
         elif int_xds.sky.dtype == np.float64:
             from xradio.image._util._zarr.zarr_low_level import image_data_variables_and_dims_double_precision as image_data_variables_and_dims
         else:
-            error_message = "Unsupported data type of image " + str(int_xds.sky.dtype) + " expected float32 or float64."  
+            error_message = "Unsupported data type of image " + str(int_xds.sky.dtype) + " expected float32 or float64."
             logger.error(error_message)
             raise Exception(error_message)
 
