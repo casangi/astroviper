@@ -4,7 +4,8 @@ from scipy import constants
 from numba import jit
 import numba
 import xarray as xr
-from graphviper.parameter_checking.check_parms import check_sel_parms
+#from graphviper.parameter_checking.check_parms import check_sel_parms
+from astroviper.utils.check_parms import check_parms, check_sel_parms
 from astroviper._domain._imaging._check_imaging_parameters import (
     _check_grid_parms,
     _check_norm_parms,
@@ -91,7 +92,7 @@ def _fft_norm_img_xds(img_xds, gcf_xds, grid_parms, norm_parms, sel_parms):
                     norm_parms=_norm_parms,
                 )
             img_xds[data_group_out[fft_pair[data_variable]]] = xr.DataArray(
-                image, dims=("frequency", "pol", "l", "m")
+                image, dims=("frequency", "polarization", "l", "m")
             )
 
 
