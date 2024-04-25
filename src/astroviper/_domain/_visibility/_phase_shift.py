@@ -46,7 +46,8 @@ def _phase_shift_vis_ds(ms_xds, shift_parms, sel_parms):
     psf_dataset : xarray.core.dataset.Dataset
     """
 
-    from graphviper.parameter_checking.check_parms import check_sel_parms
+    #from graphviper.parameter_checking.check_parms import check_sel_parms
+    from astroviper.utils.check_parms import check_parms, check_sel_parms
 
     _sel_parms = copy.deepcopy(sel_parms)
     _shift_parms = copy.deepcopy(shift_parms)
@@ -63,7 +64,10 @@ def _phase_shift_vis_ds(ms_xds, shift_parms, sel_parms):
         },
     )
 
-    uvw_rotmat, phase_rotation = calc_rotation_matrices(ms_xds, _shift_parms)
+    field_phase_direction = ms_xds[data_group_in['visibility']].attrs["field_info"][
+            "phase_direction"
+        ]
+    uvw_rotmat, phase_rotation = calc_rotation_matrices(field_phase_direction, _shift_parms)
 
     # print("uvw_rotmat, phase_rotation",uvw_rotmat, phase_rotation)
 
@@ -108,7 +112,7 @@ def _phase_shift_vis_ds(ms_xds, shift_parms, sel_parms):
     return _sel_parms["data_group_out"]
 
 
-def calc_rotation_matrices(vis_dataset, shift_parms):
+def calc_rotation_matrices(field_phase_direction, shift_parms):
     from scipy.spatial.transform import Rotation as R
 
     ra_image = shift_parms["new_phase_direction"]["data"][0]
@@ -122,15 +126,13 @@ def calc_rotation_matrices(vis_dataset, shift_parms):
     uvw_rotmat = np.zeros((3, 3), np.double)
     phase_rotation = np.zeros((3,), np.double)
 
-    field_phase_direction = vis_dataset.attrs["field_info"]["phase_direction"]["data"]
-
     rotmat_field_phase_direction = R.from_euler(
         "ZX",
-        [[-np.pi / 2 + field_phase_direction[0], field_phase_direction[1] - np.pi / 2]],
+        [[-np.pi / 2 + field_phase_direction['data'][0], field_phase_direction['data'][1] - np.pi / 2]],
     ).as_matrix()[0]
     uvw_rotmat = np.matmul(rotmat_new_phase_direction, rotmat_field_phase_direction).T
 
-    field_phase_direction_cosine = _directional_cosine(np.array(field_phase_direction))
+    field_phase_direction_cosine = _directional_cosine(np.array(field_phase_direction['data']))
     phase_rotation = np.matmul(
         rotmat_new_phase_direction,
         (new_phase_direction_cosine - field_phase_direction_cosine),
@@ -159,7 +161,8 @@ def _directional_cosine(phase_direction_in_radians):
 
 
 def _check_shift_parms(shift_parms):
-    from graphviper.parameter_checking.check_parms import check_parms
+    #from graphviper.parameter_checking.check_parms import check_parms
+    from astroviper.utils.check_parms import check_parms, check_sel_parms
     import numbers
 
     parms_passed = True

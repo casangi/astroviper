@@ -14,7 +14,8 @@ from astroviper._domain._imaging._imaging_utils._standard_grid import (
     _standard_imaging_weight_degrid_numpy_wrap,
     _standard_grid_psf_numpy_wrap,
 )
-from graphviper.parameter_checking.check_parms import check_sel_parms
+#from graphviper.parameter_checking.check_parms import check_sel_parms
+from astroviper.utils.check_parms import check_sel_parms
 import copy
 import time
 
@@ -28,10 +29,11 @@ def _make_gridding_convolution_function(
     _sel_parms = copy.deepcopy(sel_parms)
 
     # print(sel_parms)
-    check_sel_parms(ms_xds, _sel_parms, skip_data_group_out=True)
-    _gcf_parms["field_phase_dir"] = ms_xds.attrs["field_info"]["phase_direction"][
-        "data"
-    ]
+    data_group_in, _ = check_sel_parms(ms_xds, _sel_parms, skip_data_group_out=True)
+
+    _gcf_parms["field_phase_dir"] = ms_xds[data_group_in['visibility']].attrs["field_info"][
+            "phase_direction"
+        ]
 
     _gcf_parms["basline_ant"] = np.array(
         [ms_xds.baseline_antenna1_id.values, ms_xds.baseline_antenna2_id.values]
@@ -151,7 +153,7 @@ def _make_gridding_convolution_function(
         gcf_xds.assign_coords(coords)
 
     start_3 = time.time()
-    field_phase_dir = np.array(_gcf_parms["field_phase_dir"])
+    field_phase_dir = np.array(_gcf_parms["field_phase_dir"]["data"])
     phase_gradient = make_phase_gradient(
         field_phase_dir[None, :], _gcf_parms, _grid_parms
     )
