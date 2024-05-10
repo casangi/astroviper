@@ -18,7 +18,14 @@ def get_thread_info(client=None):
 
     memory_per_thread = -1
     n_threads = 0
-    for worker_name, worker in client.cluster.scheduler_info['workers'].items():
+
+    # client.cluster only exists for LocalCluster
+    if client.cluster == None:
+        worker_items = client.scheduler_info()['workers'].items()
+    else:
+        worker_items = client.cluster.scheduler_info['workers'].items()
+    
+    for worker_name, worker in worker_items:
         temp_memory_per_thread = (worker['memory_limit']/worker['nthreads'])/(1024**3)
         n_threads = n_threads  + worker['nthreads']
         if (memory_per_thread == -1) or (memory_per_thread > temp_memory_per_thread):
