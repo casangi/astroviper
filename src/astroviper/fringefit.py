@@ -47,7 +47,10 @@ def _fringefit_reduce(graph_inputs: xr.Dataset, input_params: Dict):
             merged[t] = rhs
     return merged
 
-def fringefit_single(an_xds: xr.Dataset, node_task_data_mapping: Dict, sub_selection: Dict):    
+def fringefit_single(an_xds: xr.Dataset, node_task_data_mapping: Dict, sub_selection: Dict):
+    """
+TODO!
+"""    
     input_params = {}
     input_params['xds'] = an_xds
     input_params['data_sub_selection'] = sub_selection
