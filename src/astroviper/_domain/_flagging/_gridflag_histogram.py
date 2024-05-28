@@ -3,19 +3,37 @@ Module to hold all the histogram related functions.
 """
 
 import dask
+import time
 
 import numba as nb
+from numba.typed import List
 import numpy as np
+import gc
+#from memory_profiler import profile
 
-from scipy.stats import median_abs_deviation
+
+@nb.njit(nogil=True, cache=True, fastmath=True)
+def _merge_vis_lists(ps_vis_accum, vis_accum, npixu, npixv):
+
+    print("start _merge_vis_lists")
+
+    for uu in range(npixu):
+        for vv in range(npixv):
+            if len(vis_accum[uu][vv]) > 0:
+                ps_vis_accum[uu][vv].extend(vis_accum[uu][vv])
+
+    print("end _merge_vis_lists ")
+
+    return ps_vis_accum
 
 
-#@dask.delayed
-def compute_uv_histogram(input_params):
+#@profile
+def accumulate_uv_points(input_params):
     """
     Read in the input XDS and calculate a histogram per pixel in the UV plane.
     """
-    print('Processing task with id: ', input_params['task_id'])
+    gc.collect()
+
     from xradio.vis.load_processing_set import load_processing_set
 
     uvrange = np.asarray(sorted(input_params['uvrange']))
@@ -23,14 +41,13 @@ def compute_uv_histogram(input_params):
     nhistbin = input_params['nhistbin']
     npixu, npixv = input_params['npixels']
 
-    accum_uv_hist_med = np.zeros((npixu, npixv))
-    accum_uv_hist_std = np.zeros((npixu, npixv))
-    vis_accum = np.empty((npixu, npixv), dtype=object)
+    ps_vis_accum = List([List([List.empty_list(nb.f8) for y in range(npixv)]) for z in range(npixu)])
+
+    print(input_params["data_selection"].items())
 
     for ms_v4_name, slice_description in input_params["data_selection"].items():
         if input_params["input_data"] is None:
-            ps = load_processing_set(
-                    ps_name=input_params["input_data_store"],
+            ps = load_processing_set(input_params["input_data_store"],
                     sel_parms={ms_v4_name: slice_description},
                 )
         else:
@@ -39,8 +56,8 @@ def compute_uv_histogram(input_params):
         ms_xds = ps.get(0)
 
         #ref_freq = float(ms_xds.frequency.attrs['reference_frequency']['data'])
-        ref_freq = np.mean(ms_xds.frequency).values 
-   
+        ref_freq = np.mean(ms_xds.frequency).values
+
         min_baseline = ms_xds.baseline_id.min().data
         max_baseline = ms_xds.baseline_id.max().data
 
@@ -52,70 +69,112 @@ def compute_uv_histogram(input_params):
         flag = ms_xds.FLAG.data.astype(bool)
         freq = ms_xds.frequency.data
 
-        # Flip flags and replace NaNs with zeros, so they flag the corresponding visibilities
-        #flag = np.nan_to_num(~flag).astype(bool)
+        print(uvw.shape, vis.shape, flag.shape, freq.shape)
+
+        def getsize(arr):
+            return round(arr.nbytes/1024/1024, 2)
+
+        print("UVW, Vis, flag, freq in MB",  getsize(uvw), getsize(vis), getsize(flag), getsize(freq))
+
+        import sys, psutil
+        process = psutil.Process()
+
+        print("Size of PS, ms_xds in bytes ", sys.getsizeof(ps), sys.getsizeof(ms_xds))
+        print("Total process memory in MB ", process.memory_info().rss/1024/1024)
+
+        del ps, ms_xds
+        gc.collect()
+        print("Total process memory in MB after GC", process.memory_info().rss/1024/1024)
+
         vis = np.nan_to_num(vis)
-        # Flag visibilities
-        #vis = np.asarray(vis*~flag)
+        # Apply previously computed flags
+        vis = np.asarray(vis*~flag)
 
         uvw = np.nan_to_num(uvw)
+        t1 = time.time()
         uv_scaled = scale_uv_freq(np.asarray(uvw), np.asarray(freq), ref_freq)
+        t2 = time.time()
+        print(f"scale_uv_freq time {t2-t1} s")
 
-        # Create a histogram per UV pixel - some might be entirely zeros, with no data.
+        npt = uv_scaled.reshape([-1,2]).shape[0]
+
+        # Create a list of visibilities per UV pixel - some might be entirely zeros, with no data.
         # Manually verified that the reshape works for a handful of random indices
-        uv_histogram(vis_accum, uv_scaled.reshape([-1,2]), vis.reshape([-1,2]), uvrange, uvcell, npixu, npixv)
+        t1 = time.time()
+        vis_accum = vis_per_uv_pixel(uv_scaled.reshape([-1,2]), vis.reshape([-1,2]), uvrange, uvcell, npixu, npixv, npt)
+        t2 = time.time()
+        print(f"vis_per_uv_pixel time {t2-t1} s")
+
+        t1 = time.time()
+        ps_vis_accum = _merge_vis_lists(ps_vis_accum, vis_accum, npixu, npixv)
+        t2 = time.time()
+        print(f"_merge_vis_lists time {t2-t1} s")
+
+    #ps_vis_accum = np.asarray(ps_vis_accum)
+    t1 = time.time()
+    uv_med_grid, uv_std_grid, uv_npt_grid = calc_uv_stats(ps_vis_accum, npixu, npixv)
+    t2 = time.time()
+    print(f"calc_uv_stats time {t2-t1} s")
+
+    return uv_med_grid, uv_std_grid, uv_npt_grid
 
 
-    return vis_accum
 
-
-#@nb.jit(nopython=True, nogil=True, cache=True)
-def merge_uv_grids(results, input_parms):
+@nb.njit(cache=True, nogil=True, fastmath=True)
+def mad_std(data):
     """
-    Given the list of results from compute_uv_histogram, merge the UV grids together to compute stats
+    Calculate the median absolute deviation of the data. Cannot use a "built-in" function like
+    astropy.stats.mad_std because we want to call this function inside numba.jit
 
     Inputs:
-    results      : np.array(list) - All points falling within a UV cell
-    npixu        : Number of pixels in U
-    npixv        : Number of pixels in V
-    nhistbin     : Number of histogram bins
+    data    : np.array - Data
 
     Returns:
-    accum_uv_hist_med   : np.array - Median of the histogram per pixel
-    accum_uv_hist_std   : np.array - Standard deviation of the histogram per pixel
+    mad_std     : float - Median absolute deviation
     """
 
-    npixu = input_parms['npixu']
-    npixv = input_parms['npixv']
-    nhistbin = input_parms['nhistbin']
+    median = np.median(data)
+    mad = np.median(np.abs(data - median))
+    std = 1.4826 * mad
 
-    nchunk = len(results)
-    accum_uv_hist_med = np.zeros((npixu, npixv))
-    accum_uv_hist_std = np.zeros((npixu, npixv))
+    return std
 
-    #for nn in range(nchunk):
-    #    print(results[0][nn].shape)
-    #    for uu in range(npixu):
-    #        for vv in range(npixv):
-    #            if len(results[0][nn][uu,vv]) > 0:
-    #                print(f"nn {nn} uu {uu} vv {vv}")
-    #                print(len(results[0][nn][uu,vv]))
-    #                input()
+    return np.median(np.abs(data - np.median(data)))
 
+
+@nb.njit(cache=True, nogil=True, fastmath=True)
+def calc_uv_stats(ps_vis_accum, npixu, npixv):
+    """
+    Calculate the median and standard deviation of the visibilities per UV pixel.
+
+    Inputs:
+    ps_vis_accum    : np.array - Visibilities
+    npixu           : int - Number of pixels in U
+    npixv           : int - Number of pixels in V
+
+    Returns:
+    uv_med_grid     : np.array - Median of the histogram per pixel
+    uv_std_grid     : np.array - Standard deviation of the histogram per pixel
+    """
+
+    print("start calc_uv_stats")
+
+    uv_med_grid = np.zeros((npixu, npixv))
+    uv_std_grid = np.zeros((npixu, npixv))
+    uv_npt_grid = np.zeros((npixu, npixv), dtype=np.int64)
 
     for uu in range(npixu):
         for vv in range(npixv):
-            concat_list = []
-            for nn in range(nchunk):
-                if len(results[nn][uu,vv]) > 0:
-                    concat_list.extend(results[nn][uu,vv])
+            if len(ps_vis_accum[uu][vv]) > 0:
+                uv_med_grid[uu, vv] = np.median(np.asarray(ps_vis_accum[uu][vv]))
+                uv_std_grid[uu, vv] = mad_std(np.asarray(ps_vis_accum[uu][vv]))
+                uv_npt_grid[uu, vv] = len(ps_vis_accum[uu][vv])
+            else:
+                uv_med_grid[uu, vv] = 0
+                uv_std_grid[uu, vv] = 0
 
-            if len(concat_list) > 0:
-                concat_list = np.nan_to_num(concat_list)
-                accum_uv_hist_med[uu, vv] = np.median(concat_list[concat_list != 0])
-                accum_uv_hist_std[uu, vv] = median_abs_deviation(concat_list[concat_list != 0])
-
-    return [accum_uv_hist_med, accum_uv_hist_std]
+    print("end calc_uv_stats")
+    return uv_med_grid, uv_std_grid, uv_npt_grid
 
 
 
@@ -136,37 +195,146 @@ def hermitian_conjugate(uv, vis):
 
 
 #@profile
-#@nb.jit(nopython=True, nogil=True, cache=True)
-def uv_histogram(vis_hist,uv, vis, uvrange, uvcell, npixu, npixv):
+@nb.jit(nopython=True, nogil=True, cache=True, fastmath=True)
+def vis_per_uv_pixel(uv, vis, uvrange, uvcell, npixu, npixv, npt):
     """
-    Generate a histogram per UV pixel, given the input UV coordinates & visibilities.
+    Accumulate list of visibilities per UV pixel
     """
 
     uvrange = sorted(uvrange)
     uv, vis = hermitian_conjugate(np.asarray(uv), np.asarray(vis))
+    nptuv = np.zeros((npixu, npixv))
 
-    #vis_hist = np.zeros((npixu, npixv), dtype=object)
+    # numba hack : Create an empty typed list
+    vis_accum = List([List([List([float(x) for x in range(0)]) for y in range(npixv)]) for z in range(npixu)])
 
     stokesI = np.abs((vis[...,0] + vis[...,-1])/2.)
 
-    # Initialize empty lists
-    for uu in range(npixu):
-        for vv in range(npixv):
-            vis_hist[uu][vv] = []
+    idx = 0
+    for didx, dat in enumerate(stokesI):
+        if dat == 0:
+            continue
 
-    for idx, dat in enumerate(stokesI):
-        uvdist = np.sqrt(uv[idx, 0]**2 + uv[idx, 1]**2)
+        uvdist = np.sqrt(uv[didx, 0]**2 + uv[didx, 1]**2)
 
         if uvdist > uvrange[1] or uvdist < uvrange[0]:
             continue
 
-        ubin = int((uv[idx, 0] + uvrange[1])//uvcell)
-        vbin = int(uv[idx, 1]//uvcell)
+        ubin = int((uv[didx, 0] + uvrange[1])//uvcell)
+        vbin = int(uv[didx, 1]//uvcell)
 
-        if dat != 0:
-            vis_hist[ubin,vbin].append(dat)
+        vis_accum[ubin][vbin].append(dat)
+        nptuv[ubin, vbin] += 1
 
-    #return vis_hist
+    print("Number of points appended ", np.sum(nptuv))
+    print("Approx size ", np.sum(nptuv)*8/1024/1024)
+    print("end vis_per_uv_pixel")
+    return vis_accum
+
+
+
+@nb.njit(nogil=True, cache=True, fastmath=True)
+def _accum_means(mean1, npt1, mean2, npt2):
+    """
+    Calculate the aggregate mean given two input mean values.
+
+    Inputs:
+    mean1   : float - Mean 1
+    npt1    : int - Number of points for mean 1
+    mean2   : float - Mean 2
+    npt2    : int - Number of points for mean 2
+
+    Returns:
+    mean    : float - Aggregate mean
+    npt     : int - Number of points
+    """
+
+    npt = npt1 + npt2
+    if npt == 0:
+        return 0, 0
+
+    mean = (mean1*npt1 + mean2*npt2)/npt
+
+    return mean, npt
+
+
+@nb.njit(nogil=True, cache=True, fastmath=True)
+def _accum_std(mean1, std1, npt1, mean2, std2, npt2):
+    """
+    Calculate the aggregate standard deviation given two input standard deviation values.
+
+    Inputs:
+    mean1   : float - Mean 1
+    std1    : float - Standard deviation 1
+    npt1    : int - Number of points for mean 1
+    mean2   : float - Mean 2
+    std2    : float - Standard deviation 2
+    npt2    : int - Number of points for mean 2
+
+    Returns:
+    std     : float - Aggregate standard deviation
+    npt     : int - Number of points
+    """
+
+    npt = npt1 + npt2
+    if npt < 2:
+        return 0, 0
+
+    var1 = ((npt1 - 1)*std1**2 + (npt2-1)*std2**2)/(npt1 + npt2 - 1)
+    var2 = ((npt1*npt2) * (mean1 - mean2)**2)/((npt1 + npt2)*(npt1 + npt2 - 1))
+
+    std = np.sqrt(var1 + var2)
+
+    return std, npt
+
+
+#@nb.jit(nopython=True, nogil=True, cache=True)
+def merge_uv_grids(graph, input_params):
+    """
+    Given the list of results from accumulate_uv_points, merge the UV grids together to compute stats
+
+    Inputs:
+    graph        : list(np.array, np.array) - Each element contains the median, std dev and npt UV grid
+    npixu        : Number of pixels in U
+    npixv        : Number of pixels in V
+    nhistbin     : Number of histogram bins
+
+    Returns:
+    accum_uvmed   : np.array - Median of the histogram per pixel
+    accum_uvstd   : np.array - Standard deviation of the histogram per pixel
+    """
+
+    npixu = input_params['npixels'][0]
+    npixv = input_params['npixels'][1]
+    nhistbin = input_params['nhistbin']
+
+    # Graph is a tuple of 2 nested elements : (median, std, npt) from each node
+    # of the input DAG merge_uv_grids should accumulate these grids onto a
+    # single one, and return it.
+
+    nchunk = len(graph)
+
+    accum_uv_med = np.zeros((npixu, npixv))
+    accum_uv_std = np.zeros((npixu, npixv))
+    uvnpt = np.zeros((npixu, npixv), dtype=np.int64)
+
+    med0 = graph[0][0]
+    std0 = graph[0][1]
+    npt0 = graph[0][2]
+
+    med1 = graph[1][0]
+    std1 = graph[1][1]
+    npt1 = graph[1][2]
+
+    for uu in range(npixu):
+        for vv in range(npixv):
+            accum_uv_med[uu,vv], uvnpt[uu,vv] = _accum_means(med0[uu,vv], npt0[uu,vv], med1[uu,vv], npt1[uu,vv])
+            accum_uv_std[uu,vv], __ = _accum_std(med0[uu,vv], std0[uu,vv], npt0[uu,vv], med1[uu,vv], std1[uu,vv], npt1[uu,vv])
+
+
+    np.savez('accum_uv_med.npz', accum_uv_med, accum_uv_std, uvnpt)
+    return accum_uv_med, accum_uv_std, uvnpt
+
 
 
 @nb.jit(nopython=True, nogil=True, cache=True)
@@ -183,8 +351,8 @@ def scale_uv_freq(uvw, frequency, ref_freq):
 
     for ffidx, ff in enumerate(frequency):
         delta_nu = (ff - ref_freq)/ref_freq
-        uv_scaled[:,:,ffidx,0] = uvw[:,:,0] * (1 + delta_nu/ff)
-        uv_scaled[:,:,ffidx,1] = uvw[:,:,1] * (1 + delta_nu/ff)
+        uv_scaled[:,:,ffidx,0] = uvw[:,:,0] * (1 + delta_nu)
+        uv_scaled[:,:,ffidx,1] = uvw[:,:,1] * (1 + delta_nu)
 
     return uv_scaled
 
