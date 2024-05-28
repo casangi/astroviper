@@ -8,7 +8,7 @@ def grid_flag(ps_store, grid_flag_params):
         interpolate_data_coords_onto_parallel_coords)
 
     from astroviper._domain._flagging._gridflag_histogram import (
-        compute_uv_histogram,
+        accumulate_uv_points,
         merge_uv_grids,
         apply_flags)
 
@@ -39,11 +39,16 @@ def grid_flag(ps_store, grid_flag_params):
 
     # Make Parallel Coords.
     # Needs to be reworked for multiple spw.
-    n_chunks = 12
+    n_chunks = 4
     parallel_coords = {}
     ms_xds = ps.get(0)
     parallel_coords["frequency"] = make_parallel_coord(
         coord=ms_xds.frequency, n_chunks=n_chunks
+    )
+
+    n_chunks = 4
+    parallel_coords["baseline_id"] = make_parallel_coord(
+        coord=ms_xds.baseline_id, n_chunks=n_chunks
     )
 
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
@@ -54,7 +59,7 @@ def grid_flag(ps_store, grid_flag_params):
     graph = map(
         input_data=ps,
         node_task_data_mapping=node_task_data_mapping,
-        node_task=compute_uv_histogram,
+        node_task=accumulate_uv_points,
         input_params=input_params,
         in_memory_compute=False,
     )
@@ -66,24 +71,24 @@ def grid_flag(ps_store, grid_flag_params):
     input_params = {}
     input_params["accum_uv_hist"] = dask_graph
 
-    graph = map(
-        input_data=ps,
-        node_task_data_mapping=node_task_data_mapping,
-        node_task=apply_flags,
-        input_params=input_params,
-        in_memory_compute=False,
-    )
+    #graph = map(
+    #    input_data=ps,
+    #    node_task_data_mapping=node_task_data_mapping,
+    #    node_task=apply_flags,
+    #    input_params=input_params,
+    #    in_memory_compute=False,
+    #)
 
-    dask_graph = generate_dask_workflow(graph)
+    #dask_graph = generate_dask_workflow(graph)
     # Inspect graph.
-    dask.visualize(dask_graph, filename="gridflag_graph_raw.png", ranked='LR')
+    #dask.visualize(dask_graph, filename="gridflag_graph_raw.png", ranked='LR')
 
-    result = dask.compute(dask_graph)
-    for msv4 in ps:
-        nflag = np.count_nonzero(ps[msv4].FLAG)
-        frac = nflag/ps[msv4].FLAG.size
-        print(f"{msv4} % flags {frac*100.:.3f}")
+    result = dask.compute(dask_graph, num_workers=3)
+    #for msv4 in ps:
+    #    nflag = np.count_nonzero(ps[msv4].FLAG)
+    #    frac = nflag/ps[msv4].FLAG.size
+    #    print(f"{msv4} % flags {frac*100.:.3f}")
 
     print("DONE")
 
-    return graph
+    return dask_graph
