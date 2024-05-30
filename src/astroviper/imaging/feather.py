@@ -95,7 +95,7 @@ def _compute_w_single_beam(xds):
         * (alpha2*aterm2 + beta2*bterm2)
     )
     # w is an np.array
-    return w.astype(xds["sky"].dtype)
+    return w.astype(xds["SKY"].dtype)
 
 
 def _feather(input_params):
@@ -105,7 +105,7 @@ def _feather(input_params):
         """xds is the single dish xds"""
         beams = xds["beam"]
         logger.debug("Beams shape" + str(beams.shape))
-        w = np.zeros(xds["sky"].shape)
+        w = np.zeros(xds["SKY"].shape)
         bunit = beams.attrs["units"]
         bmaj = beams.sel(beam_param="major")
         # add l and m dims
@@ -162,15 +162,15 @@ def _feather(input_params):
         # print("load image for", k, "complete")
         # print("completed load_image()")
         fft_plane = (
-            xds['sky'].dims.index(input_params["axes"][0]),
-            xds['sky'].dims.index(input_params["axes"][1])
+            xds["SKY"].dims.index(input_params["axes"][0]),
+            xds["SKY"].dims.index(input_params["axes"][1])
         )
         # print("completed fft_plane")
         # else:
         #   img_xds = input_params["input_data"]['img'] #In memory
-        aperture = _fft_lm_to_uv(xds["sky"], fft_plane)
+        aperture = _fft_lm_to_uv(xds["SKY"], fft_plane)
         # print("completed _fft_im_to_uv()")
-        dtypes[k] = xds["sky"].dtype
+        dtypes[k] = xds["SKY"].dtype
         if k == "int":
             int_ap = aperture
             int_xds = xds
@@ -268,28 +268,28 @@ def _feather(input_params):
     # feather_xds = copy.deepcopy(int_xds)
     # # display(feather_xds)
     # feather_xrary = xr.DataArray(
-    #     da.from_array(feather_npary, chunks=int_xds["sky"].shape),
-    #     coords=int_xds["sky"].coords,
-    #     dims=int_xds["sky"].dims
+    #     da.from_array(feather_npary, chunks=int_xds["SKY"].shape),
+    #     coords=int_xds["SKY"].coords,
+    #     dims=int_xds["SKY"].dims
     # )
     # """
     # feather_xrary = xr.DataArray(
-    #     da.from_array(feather_npary, chunks=int_xds["sky"].shape),
-    #     coords=int_xds["sky"].coords,
-    #     dims=int_xds["sky"].dims
+    #     da.from_array(feather_npary, chunks=int_xds["SKY"].shape),
+    #     coords=int_xds["SKY"].coords,
+    #     dims=int_xds["SKY"].dims
     # )
     # """
-    # feather_xrary.rename("sky")
-    # feather_xds["sky"] = feather_xrary
-    # # print("sky shape", feather_xds["sky"].shape)
+    # feather_xrary.rename("SKY")
+    # feather_xds["SKY"] = feather_xrary
+    # # print("SKY shape", feather_xds["SKY"].shape)
     # return feather_xds
 
 
 from numcodecs import Blosc
 
 def feather(
-    outim: Union[dict, None], highres: str,
-    lowres: str, sdfactor: float, selection: dict={},
+    out_im: Union[dict, None], high_res: str,
+    low_res: str, sdfactor: float, selection: dict={},
     memory_per_thread = None,
     thread_info = None,
     compressor=Blosc(cname="lz4", clevel=5),
@@ -299,63 +299,63 @@ def feather(
     feather algorithm
     Parameters
     ----------
-    outim : output image information, dict or None
+    out_im : output image information, dict or None
         if None, no image is written. if dict must have keys "name" and
         "format" keys. "name" is the file name to which the image is written,
         and "format" is the format (casa or zarr) to write the image. An
         "overwrite" boolean parameter is optional. If it does not exist,
         it is assumed that the user does not want to overwrite an already
         extant image of the same name.
-    highres : interferometer image, string or xr.Dataset.
+    high_res : interferometer image, string or xr.Dataset.
         If str, an image file by that name will be read from disk.
         If xr.Dataset, that xds will be used for the interferometer image.
-    lowres : Single dish image, string or xr.Dataset.
+    low_res : Single dish image, string or xr.Dataset.
         If str, an image file by that name will be read from disk.
         If xr.Dataset, that xds will be used for the single dish image.
     """
 
-    if outim is not None:
-        if type(outim) != dict:
+    if out_im is not None:
+        if type(out_im) != dict:
             raise ValueError(
-                "If specified, outim must be a dictionary with keys "
+                "If specified, out_im must be a dictionary with keys "
                 "'name' and 'format'."
             )
-        if "name" not in outim or "format" not in outim:
+        if "name" not in out_im or "format" not in out_im:
             raise ValueError(
-                "If specfied, outim dict must have keys 'name' and 'format'"
+                "If specfied, out_im dict must have keys 'name' and 'format'"
             )
-        im_format = outim["format"].lower()
+        im_format = out_im["format"].lower()
         if not (im_format == "casa" or im_format == "zarr"):
             raise ValueError(
-                f"Output image type {outim['format']} is not supported. "
+                f"Output image type {out_im['format']} is not supported. "
                 "Please choose either casa or zarr"
             )
-        if "overwrite" not in outim or not outim["overwrite"]:
-            if os.path.exists(outim["name"]):
+        if "overwrite" not in out_im or not out_im["overwrite"]:
+            if os.path.exists(out_im["name"]):
                 raise RuntimeError(
-                    f"Already existing file {outim['name']} will not be "
-                    "overwritten. To overwrite it, set outim['overwrite'] = True"
+                    f"Already existing file {out_im['name']} will not be "
+                    "overwritten. To overwrite it, set out_im['overwrite'] = True"
                 )
 
     # Read in input images
     # single dish image
-    sd_xds = read_image(lowres, selection=selection) if isinstance(lowres, str) else lowres
+    sd_xds = read_image(low_res, selection=selection) if isinstance(low_res, str) else low_res
     # interferometer image
-    int_xds = read_image(highres, selection=selection) if isinstance(highres, str) else highres
-    if sd_xds["sky"].shape != int_xds["sky"].shape:
+    int_xds = read_image(high_res, selection=selection) if isinstance(high_res, str) else high_res
+    if sd_xds["SKY"].shape != int_xds["SKY"].shape:
         raise RuntimeError("Image shapes differ")
 
     # Determine chunking
     from astroviper._utils.data_partitioning import bytes_in_dtype
     ## Determine the amount of memory required by the node task if all dimensions that chunking will occur on are singleton.
     ## For example feather does chunking only only frequency, so memory_singleton_chunk should be the amount of memory requered by _feather when there is a single frequency channel.
-    singleton_chunk_sizes = dict(sd_xds['sky'].sizes)
+    singleton_chunk_sizes = dict(sd_xds["SKY"].sizes)
     del singleton_chunk_sizes['frequency'] #Remove dimensions that will be chuncked on.
     fudge_factor = 1.1
     n_images_in_memory = 3.0  # Two input and one output image.
-    memory_singleton_chunk = n_images_in_memory*np.prod(np.array(list(singleton_chunk_sizes.values())))*fudge_factor*bytes_in_dtype[str(sd_xds['sky'].dtype)]/(1024**3)
+    memory_singleton_chunk = n_images_in_memory*np.prod(np.array(list(singleton_chunk_sizes.values())))*fudge_factor*bytes_in_dtype[str(sd_xds["SKY"].dtype)]/(1024**3)
 
-    chunking_dims_sizes = {'frequency':int_xds["sky"].sizes['frequency']} #Need to know how many frequency channels there are.
+    chunking_dims_sizes = {'frequency':int_xds["SKY"].sizes['frequency']} #Need to know how many frequency channels there are.
     from astroviper._utils.data_partitioning import calculate_data_chunking, get_thread_info
     if thread_info is None:
         thread_info = get_thread_info()
@@ -374,14 +374,14 @@ def feather(
     # TODO either deep copy this, or put the chunks back as they were when
     # done
     # Comment: don't need.
-    # sd_xds["sky"].chunk(chunksize)
-    # int_xds["sky"].chunk(chunksize)
+    # sd_xds["SKY"].chunk(chunksize)
+    # int_xds["SKY"].chunk(chunksize)
     # TODO set masked values to zero (might be better to do a deep copy then
     # if it doesn't take too long)
 
     ### DEBUG add multibeam
     #del sd_xds.attrs["beam"]
-    # sky_shape = sd_xds["sky"].shape
+    # sky_shape = sd_xds["SKY"].shape
     # beam_shape = sky_shape[:3] + (3,)
     # beam_ary = da.zeros(beam_shape)
     # beam_ary[:, :, :, 0:2] = 0.0040724349213201025
@@ -394,7 +394,7 @@ def feather(
     #    "frequency": chans_per_chunk, "l": sd_xds.dims["l"],
     #    "m": sd_xds.dims["m"]
     # }
-    # int_xds["sky"].chunk(chunksize)
+    # int_xds["SKY"].chunk(chunksize)
     # int_xds.beam
 
     # add multibeam
@@ -448,8 +448,8 @@ def feather(
     #    plt.colorbar(im)
     #    plt.show()
 
-    # zn = highres
-    # zo = lowres
+    # zn = high_res
+    # zo = low_res
     # DEBUG
     # imgs = [int_xds, sd_xds]
     # if "beam" in int_xds.data_vars:
@@ -482,33 +482,36 @@ def feather(
             pol_coords=int_xds.polarization.values,
             time_coords=[0],
         )
-        write_image(featherd_img_xds, imagename=outim['name'], out_format=outim["format"], overwrite=outim["overwrite"])
+        write_image(
+            featherd_img_xds, imagename=out_im['name'], out_format=out_im["format"],
+            overwrite=out_im["overwrite"]
+        )
 
         #Create the empty data variable SKY.
         from xradio.image._util._zarr.zarr_low_level import create_data_variable_meta_data_on_disk
-        if int_xds.sky.dtype == np.float32:
+        if int_xds.SKY.dtype == np.float32:
             from xradio.image._util._zarr.zarr_low_level import image_data_variables_and_dims_single_precision as image_data_variables_and_dims
-        elif int_xds.sky.dtype == np.float64:
+        elif int_xds.SKY.dtype == np.float64:
             from xradio.image._util._zarr.zarr_low_level import image_data_variables_and_dims_double_precision as image_data_variables_and_dims
         else:
-            error_message = "Unsupported data type of image " + str(int_xds.sky.dtype) + " expected float32 or float64."
+            error_message = "Unsupported data type of image " + str(int_xds.SKY.dtype) + " expected float32 or float64."
             logger.error(error_message)
             raise Exception(error_message)
 
         xds_dims = dict(int_xds.dims)
-        #data_variables=["sky", "point_spread_function", "primary_beam"]
-        data_variables=["sky"]
+        #data_variables=["SKY", "point_spread_function", "primary_beam"]
+        data_variables=["SKY"]
         data_varaibles_and_dims_sel = {
             key: image_data_variables_and_dims[key] for key in data_variables
         }
         zarr_meta = create_data_variable_meta_data_on_disk(
-            outim['name'], data_varaibles_and_dims_sel, xds_dims, parallel_coords, compressor
+            out_im['name'], data_varaibles_and_dims_sel, xds_dims, parallel_coords, compressor
         )
 
     input_params = {}
-    input_params["input_data_store"] = {"sd": lowres, "int": highres}
+    input_params["input_data_store"] = {"sd": low_res, "int": high_res}
     input_params["axes"] = ('l','m')#(3,4)
-    input_params["image_file"] = outim['name']
+    input_params["image_file"] = out_im['name']
     # beam_ratio should be computed inside _feather if
     # at least one image has multiple beams
     input_params["beam_ratio"] = beam_ratio
@@ -537,4 +540,4 @@ def feather(
     logger.info("Time to compute() feather " + str(time.time() - t0) + "s")
 
     import zarr
-    zarr.consolidate_metadata(outim['name'])
+    zarr.consolidate_metadata(out_im['name'])
