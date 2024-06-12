@@ -3,9 +3,11 @@ import dask
 import xarray as xr
 from graphviper.graph_tools.map import map
 from graphviper.graph_tools.reduce import reduce
+from graphviper.graph_tools.generate_dask_workflow import generate_dask_workflow
 from typing import Dict, Union
 
 def _fringe_node_task(input_params: Dict):
+    print("Hello?")
     an_xds = input_params['xds']
     data_sub_selection = input_params['data_sub_selection']
     pol = data_sub_selection['polarization']
@@ -60,8 +62,8 @@ TODO!
         node_task = _fringe_node_task, 
         input_params = input_params,
         in_memory_compute=False)
-    graph_reduce = reduce(graph, _fringefit_reduce, {}, mode="single_node")
-    res = dask.compute(graph_reduce)
+    dask_graph = generate_dask_workflow(graph)
+    res = dask.compute(dask_graph)
     return res
 
 
