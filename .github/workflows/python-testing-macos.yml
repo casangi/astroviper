@@ -24,6 +24,7 @@ jobs:
       - name: Setup Conda
         uses: conda-incubator/setup-miniconda@v3
         with:
+          miniconda-version: "latest"
           auto-activate-base: false
           activate-environment: xradiotest
           auto-update-conda: true
