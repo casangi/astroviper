@@ -325,7 +325,10 @@ def feather(
                 "If specfied, out_im dict must have keys 'name' and 'format'"
             )
         im_format = out_im["format"].lower()
-        if not (im_format == "casa" or im_format == "zarr"):
+        if not (im_format == "casa" or im_format == "zarr" or im_format == "casacore"):
+            if im_format == "casacore":
+                im_format = "casa"
+                out_im["format"] = im_format
             raise ValueError(
                 f"Output image type {out_im['format']} is not supported. "
                 "Please choose either casa or zarr"
@@ -482,8 +485,18 @@ def feather(
             pol_coords=int_xds.polarization.values,
             time_coords=[0],
         )
+        if out_im["format"] == "zarr":
+            zarr_image = out_im["name"]
+            del_zarr = False
+        else:
+            import random, string
+            letters = string.ascii_lowercase
+            rand = ''.join([random.choice(letters) for i in range(10)])
+            zarr_image = out_im["name"] + rand + ".zarr.tmp"
+            # print("tmp image", zarr_image)
+            del_zarr = True
         write_image(
-            featherd_img_xds, imagename=out_im['name'], out_format=out_im["format"],
+            featherd_img_xds, imagename=zarr_image, out_format="zarr",
             overwrite=out_im["overwrite"]
         )
 
@@ -500,18 +513,19 @@ def feather(
 
         xds_dims = dict(int_xds.dims)
         #data_variables=["SKY", "point_spread_function", "primary_beam"]
-        data_variables=["SKY"]
+        data_variables=["sky"]
         data_varaibles_and_dims_sel = {
             key: image_data_variables_and_dims[key] for key in data_variables
         }
         zarr_meta = create_data_variable_meta_data_on_disk(
-            out_im['name'], data_varaibles_and_dims_sel, xds_dims, parallel_coords, compressor
+            zarr_image, data_varaibles_and_dims_sel, xds_dims, parallel_coords, compressor
         )
 
     input_params = {}
     input_params["input_data_store"] = {"sd": low_res, "int": high_res}
     input_params["axes"] = ('l','m')#(3,4)
-    input_params["image_file"] = out_im['name']
+    # input_params["image_file"] = out_im['name']
+    input_params["image_file"] = zarr_image
     # beam_ratio should be computed inside _feather if
     # at least one image has multiple beams
     input_params["beam_ratio"] = beam_ratio
@@ -539,5 +553,11 @@ def feather(
     res = dask.compute(dask_graph)
     logger.info("Time to compute() feather " + str(time.time() - t0) + "s")
 
-    import zarr
-    zarr.consolidate_metadata(out_im['name'])
+    import zarr, shutil
+    zarr.consolidate_metadata(zarr_image)
+
+    if del_zarr:
+        fxds = load_image(zarr_image)
+        # print("out_im", out_im)
+        write_image(fxds, out_im["name"], out_format=out_im["format"])
+        shutil.rmtree(zarr_image)
