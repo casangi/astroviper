@@ -7,13 +7,16 @@ from graphviper.graph_tools.generate_dask_workflow import generate_dask_workflow
 from typing import Dict, Union
 
 def _fringe_node_task(input_params: Dict):
-    print("Hello?")
-    an_xds = input_params['xds']
+    ps = input_params['ps']
+    data_selection = input_params['data_selection']
+    name = list(data_selection.keys())[0]
+    xds = ps[name]
+    # FIXME: for now we do single band
     data_sub_selection = input_params['data_sub_selection']
+    # breakpoint()
     pol = data_sub_selection['polarization']
-    baselines = input_params['task_coords']["baseline_id"]['data']
-    t =  input_params['task_coords']["time"]['data']
-    xds2 = an_xds.sel(time=t, baseline_id=baselines, polarization=pol)
+    xds2 = xds.isel(**input_params['data_selection'][name])
+    xds2 = xds2.sel(polarization=pol)
     vis = xds2.VISIBILITY
     ang = np.angle(vis)
     nvis = np.exp(1J*ang)
@@ -28,14 +31,14 @@ def _fringe_node_task(input_params: Dict):
     )
     ref_ant = 1
     res = {}
+    bl_slice = input_params['data_selection'][name]["baseline_id"]
+    baselines = list(xds.baseline_id[bl_slice].values)
     for i, bl in enumerate(baselines):
-        ant1 = int(an_xds.baseline_antenna1_id[bl].values)
-        ant2 = int(an_xds.baseline_antenna2_id[bl].values)
+        ant1 = int(xds2.baseline_antenna1_id[bl].values)
+        ant2 = int(xds2.baseline_antenna2_id[bl].values)
         a = np.abs(fftvis[:,i,:])
         ind = np.unravel_index(np.argmax(a, axis=None), a.shape)
-        print(f"Time {t[0]} baseline {bl} ({ant1}-{ant2}), peak at {ind} val {a[ind]} out of {np.mean(a)}"
-              f" , array{a.shape}")
-        res.setdefault(t[0], {})[bl] = (ind, a[ind], a.shape)
+        res.setdefault(xds2.time.values[0], {})[bl] = (ind, a[ind], a.shape)
     return res
 
 def _fringefit_reduce(graph_inputs: xr.Dataset, input_params: Dict):
@@ -49,15 +52,16 @@ def _fringefit_reduce(graph_inputs: xr.Dataset, input_params: Dict):
             merged[t] = rhs
     return merged
 
-def fringefit_single(an_xds: xr.Dataset, node_task_data_mapping: Dict, sub_selection: Dict):
+
+def fringefit_single(ps, node_task_data_mapping: Dict, sub_selection: Dict):
     """
 TODO!
 """    
     input_params = {}
-    input_params['xds'] = an_xds
     input_params['data_sub_selection'] = sub_selection
+    input_params['ps'] = ps
     graph = map(
-        input_data = an_xds,
+        input_data = ps,
         node_task_data_mapping = node_task_data_mapping,
         node_task = _fringe_node_task, 
         input_params = input_params,
@@ -65,5 +69,3 @@ TODO!
     dask_graph = generate_dask_workflow(graph)
     res = dask.compute(dask_graph)
     return res
-
-
