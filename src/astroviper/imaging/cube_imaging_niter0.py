@@ -42,8 +42,8 @@ def cube_imaging_niter0(
         ].name.values[0]
 
         vis_name = ps[ms_xds_name].attrs["data_groups"][data_group]["visibility"]
-        grid_params["phase_direction"] = ps[ms_xds_name][vis_name].attrs["field_info"][
-            "phase_direction"
+        grid_params["phase_direction"] = ps[ms_xds_name][vis_name].field_and_source_xds[
+            "FIELD_PHASE_CENTER"
         ]
 
     # Create Cube frequency axis
