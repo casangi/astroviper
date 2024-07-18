@@ -31,8 +31,8 @@ def _make_gridding_convolution_function(
     # print(sel_parms)
     data_group_in, _ = check_sel_parms(ms_xds, _sel_parms, skip_data_group_out=True)
 
-    _gcf_parms["field_phase_dir"] = ms_xds[data_group_in['visibility']].attrs["field_info"][
-            "phase_direction"
+    _gcf_parms["field_phase_dir"] = ms_xds[data_group_in['visibility']].attrs["field_and_source_xds"][
+            "FIELD_PHASE_CENTER"
         ]
 
     _gcf_parms["basline_ant"] = np.array(
@@ -153,7 +153,7 @@ def _make_gridding_convolution_function(
         gcf_xds.assign_coords(coords)
 
     start_3 = time.time()
-    field_phase_dir = np.array(_gcf_parms["field_phase_dir"]["data"])
+    field_phase_dir = np.array(_gcf_parms["field_phase_dir"].data)
     phase_gradient = make_phase_gradient(
         field_phase_dir[None, :], _gcf_parms, _grid_parms
     )
@@ -421,7 +421,7 @@ def make_phase_gradient(field_phase_dir, gcf_parms, grid_parms):
 
     # print(' make_phase_gradient ',field_phase_dir,gcf_parms,grid_parms)
 
-    phase_center = gcf_parms["phase_direction"]["data"]
+    phase_center = gcf_parms["phase_direction"].values
     w = WCS(naxis=2)
     w.wcs.crpix = grid_parms["image_size_padded"] // 2
     w.wcs.cdelt = grid_parms["cell_size"] * rad_to_deg

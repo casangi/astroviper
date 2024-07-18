@@ -52,7 +52,7 @@ def _make_image(input_params):
 
     logger.debug("Creating empty image ")
     img_xds = make_empty_sky_image(
-        phase_center=grid_params["phase_direction"]["data"],
+        phase_center=grid_params["phase_direction"].values,
         image_size=grid_params["image_size"],
         cell_size=grid_params["cell_size"],
         chan_coords=image_freq_coord,

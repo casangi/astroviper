@@ -64,8 +64,8 @@ def _phase_shift_vis_ds(ms_xds, shift_parms, sel_parms):
         },
     )
 
-    field_phase_direction = ms_xds[data_group_in['visibility']].attrs["field_info"][
-            "phase_direction"
+    field_phase_direction = ms_xds[data_group_in['visibility']].attrs["field_and_source_xds"][
+            "FIELD_PHASE_CENTER"
         ]
     uvw_rotmat, phase_rotation = calc_rotation_matrices(field_phase_direction, _shift_parms)
 
@@ -115,8 +115,8 @@ def _phase_shift_vis_ds(ms_xds, shift_parms, sel_parms):
 def calc_rotation_matrices(field_phase_direction, shift_parms):
     from scipy.spatial.transform import Rotation as R
 
-    ra_image = shift_parms["new_phase_direction"]["data"][0]
-    dec_image = shift_parms["new_phase_direction"]["data"][1]
+    ra_image = shift_parms["new_phase_direction"].values[0]
+    dec_image = shift_parms["new_phase_direction"].values[1]
 
     rotmat_new_phase_direction = R.from_euler(
         "XZ", [[np.pi / 2 - dec_image, -ra_image + np.pi / 2]]
@@ -128,11 +128,11 @@ def calc_rotation_matrices(field_phase_direction, shift_parms):
 
     rotmat_field_phase_direction = R.from_euler(
         "ZX",
-        [[-np.pi / 2 + field_phase_direction['data'][0], field_phase_direction['data'][1] - np.pi / 2]],
+        [[-np.pi / 2 + field_phase_direction.values[0], field_phase_direction.values[1] - np.pi / 2]],
     ).as_matrix()[0]
     uvw_rotmat = np.matmul(rotmat_new_phase_direction, rotmat_field_phase_direction).T
 
-    field_phase_direction_cosine = _directional_cosine(np.array(field_phase_direction['data']))
+    field_phase_direction_cosine = _directional_cosine(np.array(field_phase_direction.values))
     phase_rotation = np.matmul(
         rotmat_new_phase_direction,
         (new_phase_direction_cosine - field_phase_direction_cosine),
