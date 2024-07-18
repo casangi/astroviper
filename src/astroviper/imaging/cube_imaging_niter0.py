@@ -55,7 +55,7 @@ def cube_imaging_niter0(
 
     # Create empty image
     img_xds = make_empty_sky_image(
-        phase_center=grid_params["phase_direction"]["data"],
+        phase_center=grid_params["phase_direction"].values,
         image_size=grid_params["image_size"],
         cell_size=grid_params["cell_size"],
         chan_coords=frequency_coord.data,
