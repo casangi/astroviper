@@ -10,7 +10,7 @@ def antennae_from_s3():
     from astroviper.imaging.cube_imaging_niter0 import cube_imaging_niter0
     from xradio.vis.read_processing_set import read_processing_set
 
-    ps_store = "s3://viper-test-data/Antennae_North.cal.lsrk.split.v3.vis.zarr"
+    ps_store = "s3://viper-test-data/Antennae_North.cal.lsrk.split.v5.vis.zarr"
     image_name = "Antennae_North_Cube.img.zarr"
     grid_params = {
         "image_size": [500, 500],
@@ -22,7 +22,7 @@ def antennae_from_s3():
     n_chunks = None
     data_variables = ["sky", "point_spread_function", "primary_beam"]
 
-    ps = read_processing_set(ps_store, intents=["OBSERVE_TARGET#ON_SOURCE"])
+    ps = read_processing_set(ps_store, obs_modes=["OBSERVE_TARGET#ON_SOURCE"])
     polarization_coord = ps[ps_name].polarization
     frequency_coord = ps[ps_name].frequency
 

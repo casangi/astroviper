@@ -9,7 +9,7 @@ def cube_imaging_niter0(
     frequency_coord=None,
     n_chunks=None,
     data_variables=["sky", "point_spread_function", "primary_beam"],
-    intents=["OBSERVE_TARGET#ON_SOURCE"],
+    obs_modes=["OBSERVE_TARGET#ON_SOURCE"],
     compressor=Blosc(cname="lz4", clevel=5),
     data_group="base",
     double_precission=True,
@@ -32,15 +32,14 @@ def cube_imaging_niter0(
     import graphviper.utils.logger as logger
 
     # Get metadata
-    ps = read_processing_set(ps_name, intents=intents)
+    ps = read_processing_set(ps_name, obs_modes=obs_modes)
     summary_df = ps.summary()
 
-    # Get phase center of mosaic if field_id given.
+    # Get phase center of mosaic if field given.
     if isinstance(grid_params["phase_direction"], int):
         ms_xds_name = summary_df.loc[
-            summary_df["field_id"] == grid_params["phase_direction"]
-        ].name.values[0]
-
+            summary_df["field_name"].index.get_loc(grid_params["phase_direction"])
+            ]["name"]
         vis_name = ps[ms_xds_name].attrs["data_groups"][data_group]["visibility"]
         grid_params["phase_direction"] = ps[ms_xds_name][vis_name].field_and_source_xds[
             "FIELD_PHASE_CENTER"
@@ -152,7 +151,7 @@ def cube_imaging_niter0(
     )
 
     sel_parms = {}
-    sel_parms["intents"] = intents
+    sel_parms["obs_modes"] = obs_modes
     sel_parms["fields"] = None
 
     input_parms = {}
