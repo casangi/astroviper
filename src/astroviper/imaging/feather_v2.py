@@ -485,7 +485,7 @@ def feather_v2(
         write_image(featherd_img_xds, imagename=outim['name'], out_format=outim["format"], overwrite=outim["overwrite"])
 
         #Create the empty data variable SKY.
-        from xradio.image._util._zarr.zarr_low_level import create_data_variable_meta_data_on_disk
+        from xradio.image._util._zarr.zarr_low_level import create_data_variable_meta_data
         if int_xds.sky.dtype == np.float32:
             from xradio.image._util._zarr.zarr_low_level import image_data_variables_and_dims_single_precision as image_data_variables_and_dims
         elif int_xds.sky.dtype == np.float64:
@@ -501,7 +501,7 @@ def feather_v2(
         data_varaibles_and_dims_sel = {
             key: image_data_variables_and_dims[key] for key in data_variables
         }
-        zarr_meta = create_data_variable_meta_data_on_disk(
+        zarr_meta = create_data_variable_meta_data(
             outim['name'], data_varaibles_and_dims_sel, xds_dims, parallel_coords, compressor
         )
 

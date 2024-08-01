@@ -39,7 +39,7 @@ def cube_imaging_niter0(
     if isinstance(grid_params["phase_direction"], int):
         ms_xds_name = summary_df.loc[
             summary_df["field_name"].index.get_loc(grid_params["phase_direction"])
-            ]["name"]
+        ]["name"]
         vis_name = ps[ms_xds_name].attrs["data_groups"][data_group]["visibility"]
         grid_params["phase_direction"] = ps[ms_xds_name][vis_name].field_and_source_xds[
             "FIELD_PHASE_CENTER"
@@ -130,7 +130,7 @@ def cube_imaging_niter0(
     )
 
     from xradio.image._util._zarr.zarr_low_level import (
-        create_data_variable_meta_data_on_disk,
+        create_data_variable_meta_data,
     )
 
     if double_precission:
@@ -146,7 +146,7 @@ def cube_imaging_niter0(
     data_varaibles_and_dims_sel = {
         key: image_data_varaibles_and_dims[key] for key in data_variables
     }
-    zarr_meta = create_data_variable_meta_data_on_disk(
+    zarr_meta = create_data_variable_meta_data(
         image_name, data_varaibles_and_dims_sel, xds_dims, parallel_coords, compressor
     )
 
