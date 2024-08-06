@@ -135,19 +135,19 @@ def cube_imaging_niter0(
 
     if double_precission:
         from xradio.image._util._zarr.zarr_low_level import (
-            image_data_variables_and_dims_double_precision as image_data_varaibles_and_dims,
+            image_data_variables_and_dims_double_precision as image_data_variables_and_dims,
         )
     else:
         from xradio.image._util._zarr.zarr_low_level import (
-            image_data_variables_and_dims_single_precision as image_data_varaibles_and_dims,
+            image_data_variables_and_dims_single_precision as image_data_variables_and_dims,
         )
 
     xds_dims = dict(img_xds.dims)
-    data_varaibles_and_dims_sel = {
-        key: image_data_varaibles_and_dims[key] for key in data_variables
+    data_variables_and_dims_sel = {
+        key: image_data_variables_and_dims[key] for key in data_variables
     }
     zarr_meta = create_data_variable_meta_data(
-        image_name, data_varaibles_and_dims_sel, xds_dims, parallel_coords, compressor
+        image_name, data_variables_and_dims_sel, xds_dims, parallel_coords, compressor
     )
 
     sel_parms = {}
