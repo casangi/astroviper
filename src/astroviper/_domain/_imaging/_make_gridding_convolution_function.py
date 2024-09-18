@@ -14,7 +14,8 @@ from astroviper._domain._imaging._imaging_utils._standard_grid import (
     _standard_imaging_weight_degrid_numpy_wrap,
     _standard_grid_psf_numpy_wrap,
 )
-#from graphviper.parameter_checking.check_parms import check_sel_parms
+
+# from graphviper.parameter_checking.check_parms import check_sel_parms
 from astroviper.utils.check_parms import check_sel_parms
 import copy
 import time
@@ -31,13 +32,23 @@ def _make_gridding_convolution_function(
     # print(sel_parms)
     data_group_in, _ = check_sel_parms(ms_xds, _sel_parms, skip_data_group_out=True)
 
-    _gcf_parms["field_phase_dir"] = ms_xds[data_group_in['visibility']].attrs["field_and_source_xds"][
-            "FIELD_PHASE_CENTER"
-        ]
+    _gcf_parms["field_phase_dir"] = ms_xds[data_group_in["correlated_data"]].attrs[
+        "field_and_source_xds"
+    ]["FIELD_PHASE_CENTER"]
 
-    _gcf_parms["basline_ant"] = np.array(
-        [ms_xds.baseline_antenna1_id.values, ms_xds.baseline_antenna2_id.values]
-    ).T
+    # _gcf_parms["basline_ant"] = np.array(
+    #     [ms_xds.baseline_antenna1_id.values, ms_xds.baseline_antenna2_id.values]
+    # ).T
+
+    # MSv4 schema no longer has ids. This is a temporary fix and not very robust.
+    baseline_ant1_id = np.where(
+        ms_xds.antenna_xds.antenna_name == ms_xds.baseline_antenna1_name
+    )[0]
+    baseline_ant2_id = np.where(
+        ms_xds.antenna_xds.antenna_name == ms_xds.baseline_antenna2_name
+    )[0]
+    _gcf_parms["basline_ant"] = np.array([baseline_ant1_id, baseline_ant2_id]).T
+
     _gcf_parms["freq_chan"] = ms_xds.frequency.values
     _gcf_parms["pol"] = ms_xds.polarization.values
 
@@ -48,7 +59,16 @@ def _make_gridding_convolution_function(
         "oversampling"
     ]
 
-    if len(gcf_xds.variables) < 1:
+    # print('^^^^^', len(gcf_xds))
+    # print('&&&&&&&&&&')
+    # print(gcf_xds)
+    # print('&&&&&&&&&&')
+    # if len(gcf_xds) > 1:
+    #     print(gcf_xds.baseline.size, len(_gcf_parms["basline_ant"]))
+    # else:
+    #     print('No data vars')
+    if (len(gcf_xds) < 1) or (gcf_xds.baseline.size != len(_gcf_parms["basline_ant"])):
+        gcf_xds = xr.Dataset()
         if _gcf_parms["function"] == "airy":
             from ._imaging_utils._make_pb_symmetric import _airy_disk_rorder
 
@@ -166,7 +186,7 @@ def _make_gridding_convolution_function(
     # list_xarray_data_variables = [gcf_dataset['A_TERM'],gcf_dataset['WEIGHT_A_TERM'],gcf_dataset['A_SUPPORT'],gcf_dataset['WEIGHT_A_SUPPORT'],gcf_dataset['PHASE_GRADIENT']]
     # return _store(gcf_dataset,list_xarray_data_variables,_storage_parms)
 
-    # return gcf_xds
+    return gcf_xds
 
 
 def make_baseline_patterns(

@@ -6,7 +6,8 @@ import numba
 import xarray as xr
 from astroviper._domain._imaging._check_imaging_parameters import _check_grid_parms
 from astroviper._domain._imaging._imaging_utils._mosaic_grid import _mosaic_grid_jit
-#from graphviper.parameter_checking.check_parms import check_sel_parms
+
+# from graphviper.parameter_checking.check_parms import check_sel_parms
 from astroviper.utils.check_parms import check_parms, check_sel_parms
 import copy
 
@@ -78,7 +79,7 @@ def _make_visibility_grid(
     grid = img_xds[img_data_group_out["visibility"]].values
     sum_weight = img_xds[img_data_group_out["visibility_normalization"]].values
 
-    vis_data = ms_xds[ms_data_group_in["visibility"]].values
+    vis_data = ms_xds[ms_data_group_in["correlated_data"]].values
     uvw = ms_xds[ms_data_group_in["uvw"]].values
     freq_chan = ms_xds.frequency.values
     imaging_weight = ms_xds[ms_data_group_in["weight_imaging"]].values
