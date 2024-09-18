@@ -4,7 +4,8 @@ from scipy import constants
 from numba import jit
 import numba
 import xarray as xr
-#from graphviper.parameter_checking.check_parms import check_sel_parms
+
+# from graphviper.parameter_checking.check_parms import check_sel_parms
 from astroviper.utils.check_parms import check_parms, check_sel_parms
 from astroviper._domain._imaging._check_imaging_parameters import (
     _check_grid_parms,
@@ -47,7 +48,6 @@ def _fft_norm_img_xds(img_xds, gcf_xds, grid_parms, norm_parms, sel_parms):
 
     for data_variable in ["aperture", "uv_sampling", "visibility"]:
         if data_variable in data_group_in.keys():
-            # print(data_variable)
 
             if data_variable == "aperture":
                 # print('1.',data_group_out["aperture_grid_sum_weight"],img_xds[data_group_in[data_variable]].shape,_grid_parms['image_size'])

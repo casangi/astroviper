@@ -53,9 +53,9 @@ def _airy_disk(freq_chan, pol, pb_parms, grid_parms):
         r_grid = (
             np.sqrt(x_grid**2 + y_grid**2)[:, :, None] * k * aperture
         )  # d0 x d1 x chan
-        r_grid[
-            image_center[0], image_center[1], :
-        ] = 1.0  # Avoid the 0/0 for the centre value.
+        r_grid[image_center[0], image_center[1], :] = (
+            1.0  # Avoid the 0/0 for the centre value.
+        )
 
         if blockage_diameter == 0.0:
             airy_disk[:, :, :, 0, i] = (2.0 * jn(1, r_grid) / r_grid) ** ipower
@@ -119,9 +119,9 @@ def _casa_airy_disk(freq_chan, pol, pb_parms, grid_parms):
         r_grid = (
             np.sqrt(x_grid**2 + y_grid**2)[:, :, None] * k * aperture
         )  # d0 x d1 x chan
-        r_grid[
-            image_center[0], image_center[1], :
-        ] = 1.0  # Avoid the 0/0 for the centre value.
+        r_grid[image_center[0], image_center[1], :] = (
+            1.0  # Avoid the 0/0 for the centre value.
+        )
 
         if blockage_diameter == 0.0:
             airy_disk[:, :, :, 0, i] = (2.0 * jn(1, r_grid) / r_grid) ** ipower
@@ -190,9 +190,9 @@ def _airy_disk_rorder(freq_chan, pol, pb_parms, grid_parms):
         r_grid = np.moveaxis(
             (np.sqrt(x_grid**2 + y_grid**2)[:, :, None] * k * aperture), 2, 0
         )  # chan x d0 x d1
-        r_grid[
-            :, image_center[0], image_center[1]
-        ] = 1.0  # Avoid the 0/0 for the centre value.
+        r_grid[:, image_center[0], image_center[1]] = (
+            1.0  # Avoid the 0/0 for the centre value.
+        )
 
         if blockage_diameter == 0.0:
             airy_disk[i, :, 0, :, :] = (2.0 * jn(1, r_grid) / r_grid) ** ipower
@@ -257,9 +257,9 @@ def _casa_airy_disk_rorder(freq_chan, pol, pb_parms, grid_parms):
         r_grid = np.moveaxis(
             (np.sqrt(x_grid**2 + y_grid**2)[:, :, None] * k * aperture), 2, 0
         )  # chan x d0 x d1
-        r_grid[
-            :, image_center[0], image_center[1]
-        ] = 1.0  # Avoid the 0/0 for the centre value.
+        r_grid[:, image_center[0], image_center[1]] = (
+            1.0  # Avoid the 0/0 for the centre value.
+        )
 
         if blockage_diameter == 0.0:
             airy_disk[i, :, 0, :, :] = (2.0 * jn(1, r_grid) / r_grid) ** ipower

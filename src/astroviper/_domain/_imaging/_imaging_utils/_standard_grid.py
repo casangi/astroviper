@@ -455,11 +455,11 @@ def _standard_imaging_weight_degrid_jit(
                                     ]
                                 ) / 2.0
                             else:
-                                imaging_weight[
-                                    i_time, i_baseline, i_chan, i_pol
-                                ] = natural_imaging_weight[
-                                    i_time, i_baseline, i_chan, i_pol
-                                ]
+                                imaging_weight[i_time, i_baseline, i_chan, i_pol] = (
+                                    natural_imaging_weight[
+                                        i_time, i_baseline, i_chan, i_pol
+                                    ]
+                                )
 
                             if ~np.isnan(
                                 natural_imaging_weight[

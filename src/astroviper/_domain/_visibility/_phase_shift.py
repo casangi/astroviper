@@ -46,7 +46,7 @@ def _phase_shift_vis_ds(ms_xds, shift_parms, sel_parms):
     psf_dataset : xarray.core.dataset.Dataset
     """
 
-    #from graphviper.parameter_checking.check_parms import check_sel_parms
+    # from graphviper.parameter_checking.check_parms import check_sel_parms
     from astroviper.utils.check_parms import check_parms, check_sel_parms
 
     _sel_parms = copy.deepcopy(sel_parms)
@@ -60,14 +60,16 @@ def _phase_shift_vis_ds(ms_xds, shift_parms, sel_parms):
         ms_xds,
         _sel_parms,
         default_data_group_out={
-            "phase_shift": {"visibility": "VISIBILITY_SHIFT", "uvw": "UVW_SHIFT"}
+            "phase_shift": {"correlated_data": "VISIBILITY_SHIFT", "uvw": "UVW_SHIFT"}
         },
     )
 
-    field_phase_direction = ms_xds[data_group_in['visibility']].attrs["field_and_source_xds"][
-            "FIELD_PHASE_CENTER"
-        ]
-    uvw_rotmat, phase_rotation = calc_rotation_matrices(field_phase_direction, _shift_parms)
+    field_phase_direction = ms_xds[data_group_in["correlated_data"]].attrs[
+        "field_and_source_xds"
+    ]["FIELD_PHASE_CENTER"]
+    uvw_rotmat, phase_rotation = calc_rotation_matrices(
+        field_phase_direction, _shift_parms
+    )
 
     # print("uvw_rotmat, phase_rotation",uvw_rotmat, phase_rotation)
 
@@ -97,15 +99,15 @@ def _phase_shift_vis_ds(ms_xds, shift_parms, sel_parms):
 
     if _shift_parms["single_precision"]:
         # print("single precision")
-        ms_xds[data_group_out["visibility"]] = (
-            (phasor * ms_xds[data_group_in["visibility"]]).astype(np.complex64)
+        ms_xds[data_group_out["correlated_data"]] = (
+            (phasor * ms_xds[data_group_in["correlated_data"]]).astype(np.complex64)
         ).astype(np.complex128)
     else:
-        ms_xds[data_group_out["visibility"]] = (
-            phasor * ms_xds[data_group_in["visibility"]]
+        ms_xds[data_group_out["correlated_data"]] = (
+            phasor * ms_xds[data_group_in["correlated_data"]]
         )
 
-    ms_xds[data_group_out["visibility"]].attrs["phase_direction"] = shift_parms[
+    ms_xds[data_group_out["correlated_data"]].attrs["phase_direction"] = shift_parms[
         "new_phase_direction"
     ]
 
@@ -128,11 +130,18 @@ def calc_rotation_matrices(field_phase_direction, shift_parms):
 
     rotmat_field_phase_direction = R.from_euler(
         "ZX",
-        [[-np.pi / 2 + field_phase_direction.values[0], field_phase_direction.values[1] - np.pi / 2]],
+        [
+            [
+                -np.pi / 2 + field_phase_direction.values[0],
+                field_phase_direction.values[1] - np.pi / 2,
+            ]
+        ],
     ).as_matrix()[0]
     uvw_rotmat = np.matmul(rotmat_new_phase_direction, rotmat_field_phase_direction).T
 
-    field_phase_direction_cosine = _directional_cosine(np.array(field_phase_direction.values))
+    field_phase_direction_cosine = _directional_cosine(
+        np.array(field_phase_direction.values)
+    )
     phase_rotation = np.matmul(
         rotmat_new_phase_direction,
         (new_phase_direction_cosine - field_phase_direction_cosine),
@@ -161,7 +170,7 @@ def _directional_cosine(phase_direction_in_radians):
 
 
 def _check_shift_parms(shift_parms):
-    #from graphviper.parameter_checking.check_parms import check_parms
+    # from graphviper.parameter_checking.check_parms import check_parms
     from astroviper.utils.check_parms import check_parms, check_sel_parms
     import numbers
 
