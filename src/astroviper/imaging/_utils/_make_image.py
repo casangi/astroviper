@@ -1,6 +1,6 @@
 def _make_image(input_params):
     import time
-    from xradio.correlated_data.load_processing_set import processing_set_iterator
+    from xradio.correlated_data.load_processing_set import ProcessingSetIterator
     import toolviper.utils.logger as logger
     import dask
 
@@ -78,14 +78,14 @@ def _make_image(input_params):
     elif data_group == "corrected":
         data_variables = ["FLAG", "UVW", "VISIBILITY_CORRECTED", "WEIGHT"]
 
-    ps_iter = processing_set_iterator(
+    ps_iter = ProcessingSetIterator(
         input_params["data_selection"],
         input_params["input_data_store"],
         input_params["input_data"],
         data_variables=data_variables,
         load_sub_datasets=True,
     )
-    logger.debug("1.5 Created processing_set_iterator ")
+    logger.debug("1.5 Created ProcessingSetIterator ")
 
     start_2 = time.time()
     for ms_xds in ps_iter:
