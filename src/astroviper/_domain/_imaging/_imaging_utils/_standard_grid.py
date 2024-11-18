@@ -155,7 +155,7 @@ import numpy as np
 
 
 # When jit is used round is repolaced by standard c++ round that is different to python round
-@jit(nopython=True, cache=True, nogil=True) #fastmath=True
+@jit(nopython=True, cache=True, nogil=True)  # fastmath=True
 def _standard_grid_jit(
     grid,
     sum_weight,
@@ -200,8 +200,8 @@ def _standard_grid_jit(
     Returns
     -------
     """
-    
-    #By hardcoding the support and oversampling values, the innermost for loops can be unrolled by the compiler leading to significantly faster code.
+
+    # By hardcoding the support and oversampling values, the innermost for loops can be unrolled by the compiler leading to significantly faster code.
     # support = 7
     # oversampling = 100
 

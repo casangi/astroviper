@@ -1,4 +1,4 @@
-#Enable fastmath (don't check dims).
+# Enable fastmath (don't check dims).
 from numba import jit
 import numpy as np
 import math
@@ -30,13 +30,23 @@ def _create_prolate_spheroidal_kernel(oversampling, support, n_uv):
     support_center = support // 2
     oversampling_center = oversampling // 2
 
-    support_values = (np.arange(support) - support_center)
+    support_values = np.arange(support) - support_center
     if (oversampling % 2) == 0:
-        oversampling_values = ((np.arange(oversampling + 1) - oversampling_center) / oversampling)[:, None]
-        kernel_points_1D = (np.broadcast_to(support_values, (oversampling + 1, support)) + oversampling_values)
+        oversampling_values = (
+            (np.arange(oversampling + 1) - oversampling_center) / oversampling
+        )[:, None]
+        kernel_points_1D = (
+            np.broadcast_to(support_values, (oversampling + 1, support))
+            + oversampling_values
+        )
     else:
-        oversampling_values = ((np.arange(oversampling) - oversampling_center) / oversampling)[:, None]
-        kernel_points_1D = (np.broadcast_to(support_values, (oversampling, support)) + oversampling_values)
+        oversampling_values = (
+            (np.arange(oversampling) - oversampling_center) / oversampling
+        )[:, None]
+        kernel_points_1D = (
+            np.broadcast_to(support_values, (oversampling, support))
+            + oversampling_values
+        )
 
     kernel_points_1D = kernel_points_1D / support_center
 
@@ -44,10 +54,13 @@ def _create_prolate_spheroidal_kernel(oversampling, support, n_uv):
     # kernel_1D /= np.sum(np.real(kernel_1D[oversampling_center,:]))
 
     if (oversampling % 2) == 0:
-        kernel = np.zeros((oversampling + 1, oversampling + 1, support, support),
-                          dtype=np.double)  # dtype=np.complex128
+        kernel = np.zeros(
+            (oversampling + 1, oversampling + 1, support, support), dtype=np.double
+        )  # dtype=np.complex128
     else:
-        kernel = np.zeros((oversampling, oversampling, support, support), dtype=np.double)
+        kernel = np.zeros(
+            (oversampling, oversampling, support, support), dtype=np.double
+        )
 
     for x in range(oversampling):
         for y in range(oversampling):
@@ -75,12 +88,14 @@ def _create_prolate_spheroidal_kernel_1D(oversampling, support):
     support_center = support // 2
     oversampling_center = oversampling // 2
     u = np.arange(oversampling * (support_center)) / (support_center * oversampling)
-    #print(u)
+    # print(u)
 
     long_half_kernel_1D = np.zeros(oversampling * (support_center + 1))
-    _, long_half_kernel_1D[0:oversampling * (support_center)] = _prolate_spheroidal_function(u)
-    
-    #print(_prolate_spheroidal_function(u))
+    _, long_half_kernel_1D[0 : oversampling * (support_center)] = (
+        _prolate_spheroidal_function(u)
+    )
+
+    # print(_prolate_spheroidal_function(u))
     return long_half_kernel_1D
 
 
@@ -98,9 +113,18 @@ def _prolate_spheroidal_function(u):
     to the edge. The grid correction function is just 1/GRDSF(NU) where NU
     is now the distance to the edge of the image.
     """
-    p = np.array([[8.203343e-2, -3.644705e-1, 6.278660e-1, -5.335581e-1, 2.312756e-1],
-                  [4.028559e-3, -3.697768e-2, 1.021332e-1, -1.201436e-1, 6.412774e-2]])
-    q = np.array([[1.0000000e0, 8.212018e-1, 2.078043e-1], [1.0000000e0, 9.599102e-1, 2.918724e-1]])
+    p = np.array(
+        [
+            [8.203343e-2, -3.644705e-1, 6.278660e-1, -5.335581e-1, 2.312756e-1],
+            [4.028559e-3, -3.697768e-2, 1.021332e-1, -1.201436e-1, 6.412774e-2],
+        ]
+    )
+    q = np.array(
+        [
+            [1.0000000e0, 8.212018e-1, 2.078043e-1],
+            [1.0000000e0, 9.599102e-1, 2.918724e-1],
+        ]
+    )
 
     _, n_p = p.shape
     _, n_q = q.shape
@@ -114,7 +138,7 @@ def _prolate_spheroidal_function(u):
     uend[(u >= 0.0) & (u < 0.75)] = 0.75
     uend[(u >= 0.75) & (u <= 1.0)] = 1.0
 
-    delusq = u ** 2 - uend ** 2
+    delusq = u**2 - uend**2
 
     top = p[part, 0]
     for k in range(1, n_p):  # small constant size loop
@@ -125,18 +149,17 @@ def _prolate_spheroidal_function(u):
         bot += q[part, k] * np.power(delusq, k)
 
     grdsf = np.zeros(u.shape, dtype=np.float64)
-    ok = (bot > 0.0)
+    ok = bot > 0.0
     grdsf[ok] = top[ok] / bot[ok]
     ok = np.abs(u > 1.0)
     grdsf[ok] = 0.0
 
     # Return the correcting image and the gridding kernel value
-    return grdsf, (1 - u ** 2) * grdsf
+    return grdsf, (1 - u**2) * grdsf
 
 
 def _coordinates(npixel: int):
-    """ 1D array which spans [-.5,.5[ with 0 at position npixel/2
-    """
+    """1D array which spans [-.5,.5[ with 0 at position npixel/2"""
     return (np.arange(npixel) - npixel // 2) / npixel
 
 
@@ -146,4 +169,3 @@ def _coordinates2(npixel: int):
     2. (0,0) at pixel (floor(n/2),floor(n/2))
     """
     return (np.mgrid[0:npixel, 0:npixel] - npixel // 2) / npixel
-

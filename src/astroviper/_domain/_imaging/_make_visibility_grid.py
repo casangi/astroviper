@@ -117,8 +117,6 @@ def _make_visibility_grid(
     )
 
 
-
-
 def _make_visibility_grid_single_field(
     ms_xds, cgk_1D, img_xds, vis_sel_parms, img_sel_parms, grid_parms
 ):
@@ -193,7 +191,6 @@ def _make_visibility_grid_single_field(
     do_psf = False
     do_imaging_weight = False
 
-    
     _standard_grid_jit(
         grid,
         sum_weight,

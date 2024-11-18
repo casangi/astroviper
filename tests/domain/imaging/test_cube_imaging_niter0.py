@@ -8,11 +8,12 @@ from pandas import Index
 @pytest.fixture
 def antennae_from_s3():
     from toolviper.dask.client import local_client
+
     viper_client = local_client(cores=4, memory_limit="4GB")
-    
+
     from astroviper.imaging.cube_imaging_niter0 import cube_imaging_niter0
     from xradio.correlated_data import open_processing_set
-    
+
     ps_store = "s3://viper-test-data/Antennae_North.cal.lsrk.split.py39.v3.vis.zarr"
     ps = open_processing_set(ps_store, intents=["OBSERVE_TARGET#ON_SOURCE"])
 
@@ -21,7 +22,9 @@ def antennae_from_s3():
         "image_size": [500, 500],
         "cell_size": np.array([-0.13, 0.13]) * np.pi / (180 * 3600),
         "fft_padding": 1.0,
-        "phase_direction": ps['Antennae_North.cal.lsrk.split_04'].VISIBILITY.field_and_source_xds.FIELD_PHASE_CENTER,
+        "phase_direction": ps[
+            "Antennae_North.cal.lsrk.split_04"
+        ].VISIBILITY.field_and_source_xds.FIELD_PHASE_CENTER,
     }
     ms_name = "Antennae_North.cal.lsrk.split_00"
     n_chunks = None
@@ -40,7 +43,7 @@ def antennae_from_s3():
         data_variables=data_variables,
     )
     yield output
-    
+
     assert os.path.exists("Antennae_North_Cube.img.zarr")
 
     # cleanup
@@ -49,4 +52,3 @@ def antennae_from_s3():
 
 def test_file_creation(antennae_from_s3):
     assert os.path.exists("Antennae_North_Cube.img.zarr")
-
