@@ -108,7 +108,6 @@ def _make_uv_sampling_grid(
     )
 
 
-
 def _make_uv_sampling_grid_single_field(
     ms_xds, cgk_1D, img_xds, vis_sel_parms, img_sel_parms, grid_parms
 ):
@@ -173,7 +172,7 @@ def _make_uv_sampling_grid_single_field(
 
     do_psf = True
     do_imaging_weight = False
-    
+
     _standard_grid_jit(
         grid,
         sum_weight,
@@ -191,4 +190,3 @@ def _make_uv_sampling_grid_single_field(
         support=7,
         oversampling=100,
     )
-

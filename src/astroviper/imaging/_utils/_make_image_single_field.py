@@ -1,5 +1,3 @@
-
-
 def _make_image_single_field(input_params):
     import time
     from xradio.correlated_data.load_processing_set import ProcessingSetIterator
@@ -20,7 +18,9 @@ def _make_image_single_field(input_params):
         _make_uv_sampling_grid_single_field,
     )
     from xradio.image import make_empty_sky_image
-    from astroviper._domain._imaging._make_visibility_grid import _make_visibility_grid_single_field
+    from astroviper._domain._imaging._make_visibility_grid import (
+        _make_visibility_grid_single_field,
+    )
     from astroviper._domain._imaging._fft_norm_img_xds import _fft_norm_img_xds
 
     import xarray as xr
@@ -29,7 +29,6 @@ def _make_image_single_field(input_params):
 
     start_1 = time.time()
     grid_params = input_params["grid_params"]
-
 
     image_freq_coord = input_params["task_coords"]["frequency"]["data"]
 
@@ -79,16 +78,19 @@ def _make_image_single_field(input_params):
         load_sub_datasets=True,
     )
     logger.debug("1.5 Created ProcessingSetIterator ")
-    
-    from astroviper._domain._imaging._imaging_utils.gcf_prolate_spheroidal import _create_prolate_spheroidal_kernel_1D 
+
+    from astroviper._domain._imaging._imaging_utils.gcf_prolate_spheroidal import (
+        _create_prolate_spheroidal_kernel_1D,
+    )
+
     cgk_1D = _create_prolate_spheroidal_kernel_1D(100, 7)
 
     start_2 = time.time()
     for ms_xds in ps_iter:
         start_compute = time.time()
-        
+
         # Create a mask where baseline_antenna1_name does not equal baseline_antenna2_name
-        mask = ms_xds['baseline_antenna1_name'] != ms_xds['baseline_antenna2_name']
+        mask = ms_xds["baseline_antenna1_name"] != ms_xds["baseline_antenna2_name"]
         # Apply the mask to the Dataset
         ms_xds = ms_xds.where(mask, drop=True)
 
@@ -100,7 +102,7 @@ def _make_image_single_field(input_params):
             sel_parms={"data_group_in": data_group},
         )
         T_weights = T_weights + time.time() - start_4
-        
+
         start_7 = time.time()
         _make_uv_sampling_grid_single_field(
             ms_xds,
@@ -111,7 +113,6 @@ def _make_image_single_field(input_params):
             grid_parms=grid_params,
         )  # Will become the PSF.
         T_uv_sampling_grid = T_uv_sampling_grid + time.time() - start_7
-        
 
         start_8 = time.time()
         _make_visibility_grid_single_field(
@@ -124,22 +125,25 @@ def _make_image_single_field(input_params):
         )
         T_vis_grid = T_vis_grid + time.time() - start_8
         T_compute = T_compute + time.time() - start_compute
-        
-    
-    #print(img_xds)
-    from astroviper._domain._imaging._imaging_utils._make_pb_symmetric import _airy_disk_rorder 
+
+    # print(img_xds)
+    from astroviper._domain._imaging._imaging_utils._make_pb_symmetric import (
+        _airy_disk_rorder,
+    )
+
     pb_parms = {}
-    pb_parms["list_dish_diameters"] = np.array([10.7]) 
+    pb_parms["list_dish_diameters"] = np.array([10.7])
     pb_parms["list_blockage_diameters"] = np.array([0.75])
     pb_parms["ipower"] = 1
-    
-    grid_params["image_center"] = (np.array(grid_params["image_size"]) // 2).tolist()
-    #(1, 1, len(pol), 1, 1))
-    #print(_airy_disk_rorder(ms_xds.frequency.values, ms_xds.polarization.values, pb_parms, grid_params).shape)
 
-    #img_xds["PRIMARY_BEAM"] =  xr.DataArray(_airy_disk_rorder(ms_xds.frequency.values, ms_xds.polarization.values, pb_parms, grid_params)[0,...], dims=("frequency", "polarization", "l", "m"))
-    img_xds["PRIMARY_BEAM"] =  xr.DataArray(np.ones(img_xds.UV_SAMPLING.shape), dims=("frequency", "polarization", "l", "m"))
-    
+    grid_params["image_center"] = (np.array(grid_params["image_size"]) // 2).tolist()
+    # (1, 1, len(pol), 1, 1))
+    # print(_airy_disk_rorder(ms_xds.frequency.values, ms_xds.polarization.values, pb_parms, grid_params).shape)
+
+    # img_xds["PRIMARY_BEAM"] =  xr.DataArray(_airy_disk_rorder(ms_xds.frequency.values, ms_xds.polarization.values, pb_parms, grid_params)[0,...], dims=("frequency", "polarization", "l", "m"))
+    img_xds["PRIMARY_BEAM"] = xr.DataArray(
+        np.ones(img_xds.UV_SAMPLING.shape), dims=("frequency", "polarization", "l", "m")
+    )
 
     T_load = time.time() - start_2 - T_compute
 
@@ -152,15 +156,20 @@ def _make_image_single_field(input_params):
     logger.debug("Compute " + str(T_compute))
 
     start_9 = time.time()
-    
-    gcf_xds = xr.Dataset()
-    gcf_xds.attrs["oversampling"] = [100,100]
-    gcf_xds.attrs["SUPPORT"] = [7,7]  
-    from astroviper._domain._imaging._imaging_utils.gcf_prolate_spheroidal import  _create_prolate_spheroidal_kernel
-    _, ps_corr_image =  _create_prolate_spheroidal_kernel(100, 7, n_uv=img_xds["UV_SAMPLING"].shape[-2:])
 
-    #print(ps_corr_image.shape)
-    gcf_xds['PS_CORR_IMAGE'] = xr.DataArray(ps_corr_image, dims=("l","m"))
+    gcf_xds = xr.Dataset()
+    gcf_xds.attrs["oversampling"] = [100, 100]
+    gcf_xds.attrs["SUPPORT"] = [7, 7]
+    from astroviper._domain._imaging._imaging_utils.gcf_prolate_spheroidal import (
+        _create_prolate_spheroidal_kernel,
+    )
+
+    _, ps_corr_image = _create_prolate_spheroidal_kernel(
+        100, 7, n_uv=img_xds["UV_SAMPLING"].shape[-2:]
+    )
+
+    # print(ps_corr_image.shape)
+    gcf_xds["PS_CORR_IMAGE"] = xr.DataArray(ps_corr_image, dims=("l", "m"))
 
     _fft_norm_img_xds(
         img_xds,

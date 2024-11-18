@@ -67,7 +67,7 @@ def _make_imaging_weights(ms_xds, grid_parms, imaging_weights_parms, sel_parms):
     )
 
     # Calculate Briggs
-    #print('weight_density_grid',weight_density_grid)
+    # print('weight_density_grid',weight_density_grid)
     briggs_factors = _calculate_briggs_parms(
         weight_density_grid, sum_weight, _imaging_weights_parms
     )  # 2 x chan x pol
@@ -87,8 +87,8 @@ def _calculate_briggs_parms(grid_of_imaging_weights, sum_weight, imaging_weights
     if imaging_weights_parms["weighting"] == "briggs":
         robust = imaging_weights_parms["robust"]
         briggs_factors = np.ones((2,) + sum_weight.shape)
-        
-        squared_sum_weight = np.sum((grid_of_imaging_weights)**2, axis=(2, 3))
+
+        squared_sum_weight = np.sum((grid_of_imaging_weights) ** 2, axis=(2, 3))
         briggs_factors[0, :, :] = (
             np.square(5.0 * 10.0 ** (-robust)) / (squared_sum_weight / sum_weight)
         )[None, None, :, :]

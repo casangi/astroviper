@@ -1,6 +1,6 @@
 def _make_image(input_params):
     import time
-    from xradio.correlated_data.load_processing_set import ProcessingSetIterator
+    from xradio.measurement_set.load_processing_set import ProcessingSetIterator
     import toolviper.utils.logger as logger
     import dask
 

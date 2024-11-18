@@ -21,7 +21,7 @@ def cube_imaging_niter0(
     import xarray as xr
     import dask
     import os
-    from xradio.correlated_data import open_processing_set
+    from xradio.measurement_set import open_processing_set
     from graphviper.graph_tools.coordinate_utils import make_parallel_coord
     from graphviper.graph_tools import generate_dask_workflow, generate_airflow_workflow
     from graphviper.graph_tools import map, reduce
