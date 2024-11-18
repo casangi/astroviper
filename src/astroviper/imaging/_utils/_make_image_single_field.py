@@ -1,6 +1,6 @@
-def _make_image(input_params):
+def _make_image_single_field(input_params):
     import time
-    from xradio.measurement_set.load_processing_set import ProcessingSetIterator
+    from xradio.correlated_data.load_processing_set import ProcessingSetIterator
     import toolviper.utils.logger as logger
     import dask
 
@@ -13,17 +13,14 @@ def _make_image(input_params):
 
     start_0 = time.time()
     import numpy as np
-    from astroviper._domain._visibility._phase_shift import _phase_shift_vis_ds
     from astroviper._domain._imaging._make_imaging_weights import _make_imaging_weights
-    from astroviper._domain._imaging._make_gridding_convolution_function import (
-        _make_gridding_convolution_function,
-    )
-    from astroviper._domain._imaging._make_aperture_grid import _make_aperture_grid
     from astroviper._domain._imaging._make_uv_sampling_grid import (
-        _make_uv_sampling_grid,
+        _make_uv_sampling_grid_single_field,
     )
     from xradio.image import make_empty_sky_image
-    from astroviper._domain._imaging._make_visibility_grid import _make_visibility_grid
+    from astroviper._domain._imaging._make_visibility_grid import (
+        _make_visibility_grid_single_field,
+    )
     from astroviper._domain._imaging._fft_norm_img_xds import _fft_norm_img_xds
 
     import xarray as xr
@@ -33,9 +30,6 @@ def _make_image(input_params):
     start_1 = time.time()
     grid_params = input_params["grid_params"]
 
-    shift_params = {}
-    shift_params["new_phase_direction"] = grid_params["phase_direction"]
-    shift_params["common_tangent_reprojection"] = True
     image_freq_coord = input_params["task_coords"]["frequency"]["data"]
 
     if input_params["polarization"] is not None:
@@ -62,10 +56,8 @@ def _make_image(input_params):
     T_empty_image = time.time() - start_1
     logger.debug("1. Empty Image " + str(time.time() - start_1))
 
-    gcf_xds = xr.Dataset()
     T_compute = 0.0
     T_load = 0.0
-    T_phase_shift = 0.0
     T_weights = 0.0
     T_gcf = 0.0
     T_aperture_grid = 0.0
@@ -87,59 +79,34 @@ def _make_image(input_params):
     )
     logger.debug("1.5 Created ProcessingSetIterator ")
 
+    from astroviper._domain._imaging._imaging_utils.gcf_prolate_spheroidal import (
+        _create_prolate_spheroidal_kernel_1D,
+    )
+
+    cgk_1D = _create_prolate_spheroidal_kernel_1D(100, 7)
+
     start_2 = time.time()
     for ms_xds in ps_iter:
         start_compute = time.time()
-        start_3 = time.time()
-        data_group_out = _phase_shift_vis_ds(
-            ms_xds, shift_parms=shift_params, sel_parms={"data_group_in": data_group}
-        )
-        T_phase_shift = T_phase_shift + time.time() - start_3
+
+        # Create a mask where baseline_antenna1_name does not equal baseline_antenna2_name
+        mask = ms_xds["baseline_antenna1_name"] != ms_xds["baseline_antenna2_name"]
+        # Apply the mask to the Dataset
+        ms_xds = ms_xds.where(mask, drop=True)
 
         start_4 = time.time()
         data_group_out = _make_imaging_weights(
             ms_xds,
             grid_parms=grid_params,
             imaging_weights_parms={"weighting": "briggs", "robust": 0.6},
-            sel_parms={"data_group_in": data_group_out},
+            sel_parms={"data_group_in": data_group},
         )
         T_weights = T_weights + time.time() - start_4
 
-        start_5 = time.time()
-        gcf_params = {}
-        gcf_params["function"] = "casa_airy"
-        gcf_params["list_dish_diameters"] = np.array([10.7])
-        gcf_params["list_blockage_diameters"] = np.array([0.75])
-
-        unique_ant_indx = ms_xds.attrs["antenna_xds"].ANTENNA_DISH_DIAMETER.values
-        unique_ant_indx[unique_ant_indx == 12.0] = 0
-
-        gcf_params["unique_ant_indx"] = unique_ant_indx.astype(int)
-        gcf_params["phase_direction"] = grid_params["phase_direction"]
-        gcf_xds = _make_gridding_convolution_function(
-            gcf_xds,
-            ms_xds,
-            gcf_params,
-            grid_params,
-            sel_parms={"data_group_in": data_group_out},
-        )
-        T_gcf = T_gcf + time.time() - start_5
-
-        start_6 = time.time()
-        _make_aperture_grid(
-            ms_xds,
-            gcf_xds,
-            img_xds,
-            vis_sel_parms={"data_group_in": data_group_out},
-            img_sel_parms={"data_group_in": "mosaic"},
-            grid_parms=grid_params,
-        )
-        T_aperture_grid = T_aperture_grid + time.time() - start_6
-
         start_7 = time.time()
-        _make_uv_sampling_grid(
+        _make_uv_sampling_grid_single_field(
             ms_xds,
-            gcf_xds,
+            cgk_1D,
             img_xds,
             vis_sel_parms={"data_group_in": data_group_out},
             img_sel_parms={"data_group_in": "mosaic"},
@@ -148,9 +115,9 @@ def _make_image(input_params):
         T_uv_sampling_grid = T_uv_sampling_grid + time.time() - start_7
 
         start_8 = time.time()
-        _make_visibility_grid(
+        _make_visibility_grid_single_field(
             ms_xds,
-            gcf_xds,
+            cgk_1D,
             img_xds,
             vis_sel_parms={"data_group_in": data_group_out},
             img_sel_parms={"data_group_in": "mosaic"},
@@ -159,11 +126,29 @@ def _make_image(input_params):
         T_vis_grid = T_vis_grid + time.time() - start_8
         T_compute = T_compute + time.time() - start_compute
 
+    # print(img_xds)
+    from astroviper._domain._imaging._imaging_utils._make_pb_symmetric import (
+        _airy_disk_rorder,
+    )
+
+    pb_parms = {}
+    pb_parms["list_dish_diameters"] = np.array([10.7])
+    pb_parms["list_blockage_diameters"] = np.array([0.75])
+    pb_parms["ipower"] = 1
+
+    grid_params["image_center"] = (np.array(grid_params["image_size"]) // 2).tolist()
+    # (1, 1, len(pol), 1, 1))
+    # print(_airy_disk_rorder(ms_xds.frequency.values, ms_xds.polarization.values, pb_parms, grid_params).shape)
+
+    # img_xds["PRIMARY_BEAM"] =  xr.DataArray(_airy_disk_rorder(ms_xds.frequency.values, ms_xds.polarization.values, pb_parms, grid_params)[0,...], dims=("frequency", "polarization", "l", "m"))
+    img_xds["PRIMARY_BEAM"] = xr.DataArray(
+        np.ones(img_xds.UV_SAMPLING.shape), dims=("frequency", "polarization", "l", "m")
+    )
+
     T_load = time.time() - start_2 - T_compute
 
     logger.debug("2. Load " + str(T_load))
     logger.debug("3. Weights " + str(T_weights))
-    logger.debug("4. Phase_shift " + str(T_phase_shift))
     logger.debug("5. make_gridding_convolution_function " + str(T_gcf))
     logger.debug("6. Aperture grid " + str(T_aperture_grid))
     logger.debug("7. UV sampling grid " + str(T_uv_sampling_grid))
@@ -171,6 +156,20 @@ def _make_image(input_params):
     logger.debug("Compute " + str(T_compute))
 
     start_9 = time.time()
+
+    gcf_xds = xr.Dataset()
+    gcf_xds.attrs["oversampling"] = [100, 100]
+    gcf_xds.attrs["SUPPORT"] = [7, 7]
+    from astroviper._domain._imaging._imaging_utils.gcf_prolate_spheroidal import (
+        _create_prolate_spheroidal_kernel,
+    )
+
+    _, ps_corr_image = _create_prolate_spheroidal_kernel(
+        100, 7, n_uv=img_xds["UV_SAMPLING"].shape[-2:]
+    )
+
+    # print(ps_corr_image.shape)
+    gcf_xds["PS_CORR_IMAGE"] = xr.DataArray(ps_corr_image, dims=("l", "m"))
 
     _fft_norm_img_xds(
         img_xds,
@@ -182,7 +181,7 @@ def _make_image(input_params):
     T_fft = time.time() - start_9
     logger.debug("9. fft norm " + str(time.time() - start_9))
 
-    # Tranform uv-space -> lm-space (sky)
+    # # Tranform uv-space -> lm-space (sky)
 
     start_10 = time.time()
     parallel_dims_chunk_id = dict(
@@ -207,7 +206,6 @@ def _make_image(input_params):
                 input_params["image_file"],
             )
     else:
-
         return img_xds
 
     # mini_cube_name = os.path.join(input_params["image_file"], 'cube_chunk_' + str(input_params["task_id"]))
@@ -226,14 +224,12 @@ def _make_image(input_params):
         + " in "
         + str(time.time() - start_total)
         + ", "
-        + "Empty_image, Load, Weights, Phase_shift, GCF, Aperture, UV, Vis, Total Loop, FFT, To_disk "
+        + "Empty_image, Load, Weights, GCF, Aperture, UV, Vis, Total Loop, FFT, To_disk "
         + str(T_empty_image)
         + ", "
         + str(T_load)
         + ", "
         + str(T_weights)
-        + ", "
-        + str(T_phase_shift)
         + ", "
         + str(T_gcf)
         + ", "
@@ -260,8 +256,6 @@ def _make_image(input_params):
         "T_empty_image": T_empty_image,
         "T_load": T_load,
         "T_weights": T_weights,
-        "T_phase_shift": T_phase_shift,
-        "T_gcf": T_gcf,
         "T_aperture_grid": T_aperture_grid,
         "T_uv_sampling_grid": T_uv_sampling_grid,
         "T_vis_grid": T_vis_grid,
