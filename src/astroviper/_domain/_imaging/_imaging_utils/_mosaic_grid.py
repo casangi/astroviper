@@ -37,6 +37,7 @@ def _aperture_grid_jit(
 
     n_time = uvw.shape[0]
     n_baseline = uvw.shape[1]
+
     n_chan = len(chan_map)
     n_pol = len(pol_map)
 

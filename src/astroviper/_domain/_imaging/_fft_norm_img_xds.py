@@ -4,7 +4,8 @@ from scipy import constants
 from numba import jit
 import numba
 import xarray as xr
-#from graphviper.parameter_checking.check_parms import check_sel_parms
+
+# from graphviper.parameter_checking.check_parms import check_sel_parms
 from astroviper.utils.check_parms import check_parms, check_sel_parms
 from astroviper._domain._imaging._check_imaging_parameters import (
     _check_grid_parms,
@@ -21,17 +22,30 @@ def _fft_norm_img_xds(img_xds, gcf_xds, grid_parms, norm_parms, sel_parms):
     _norm_parms = copy.deepcopy(norm_parms)
     assert _check_norm_parms(_norm_parms), "######### ERROR: norm_parms checking failed"
 
-    data_group_in, data_group_out = check_sel_parms(
-        img_xds,
-        _sel_parms,
-        default_data_group_out={
-            "imaging": {
-                "primary_beam": "PRIMARY_BEAM",
-                "point_spread_function": "POINT_SPREAD_FUNCTION",
-                "sky": "SKY",
-            }
-        },
-    )
+    if "PRIMARY_BEAM" in img_xds:
+        data_group_in, data_group_out = check_sel_parms(
+            img_xds,
+            _sel_parms,
+            default_data_group_out={
+                "imaging": {
+                    "point_spread_function": "POINT_SPREAD_FUNCTION",
+                    "sky": "SKY",
+                }
+            },
+        )
+        data_group_out["primary_beam"] = "PRIMARY_BEAM"
+    else:
+        data_group_in, data_group_out = check_sel_parms(
+            img_xds,
+            _sel_parms,
+            default_data_group_out={
+                "imaging": {
+                    "primary_beam": "PRIMARY_BEAM",
+                    "point_spread_function": "POINT_SPREAD_FUNCTION",
+                    "sky": "SKY",
+                }
+            },
+        )
     fft_pair = {
         "aperture": "primary_beam",
         "uv_sampling": "point_spread_function",
@@ -47,9 +61,8 @@ def _fft_norm_img_xds(img_xds, gcf_xds, grid_parms, norm_parms, sel_parms):
 
     for data_variable in ["aperture", "uv_sampling", "visibility"]:
         if data_variable in data_group_in.keys():
-            # print(data_variable)
 
-            if data_variable == "aperture":
+            if (data_variable == "aperture") and ("APERTURE" in img_xds):
                 # print('1.',data_group_out["aperture_grid_sum_weight"],img_xds[data_group_in[data_variable]].shape,_grid_parms['image_size'])
                 image = _remove_padding(
                     _ifft_uv_to_lm(img_xds[data_group_in[data_variable]].values),
