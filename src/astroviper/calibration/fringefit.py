@@ -1,6 +1,5 @@
-from xradio.measurement_set.open_processing_set import open_processing_set
-from xradio.measurement_set.open_processing_set import open_processing_set
 from xradio.measurement_set.processing_set import ProcessingSet
+from xradio.measurement_set.open_processing_set import open_processing_set
 
 from graphviper.graph_tools.map import map
 from graphviper.graph_tools.reduce import reduce
@@ -19,7 +18,6 @@ import xarray as xa
 import pandas as pd
 import datetime
 
-## I should figure out where this belongs at some point
 def unique(s):
     "Get the unique characters in a string in the order they occur in the original"
     u = []
@@ -57,7 +55,6 @@ def _fringe_node_task(input_params: Dict):
     data_sub_selection = input_params['data_sub_selection']
     allpols = 'RL' # FIXME data_sub_selection['polarization']
     xds2 = xds.isel(**data_selection[name])
-    # xds2 = xds2.sel(polarization=pols)
     ddelay, drate = getFourierSpacings(xds2, npad)
     ref_bls = (xds.baseline_antenna1_name==ref_ant) | (xds.baseline_antenna2_name==ref_ant)
     vis = xds2.VISIBILITY.where(ref_bls)[:, :, :, ::3]
@@ -104,9 +101,9 @@ def _fringe_node_task(input_params: Dict):
             q.SNR.loc[dict(antenna_name=ant, polarization=allpols[p])] = [peak, peak, peak]
     return q
 
-def _fringefit_single(ps, node_task_data_mapping: Dict, sub_selection: Dict, ref_ant: int):
-    """
-TODO!
+def _fringefit_single(ps: ProcessingSet, node_task_data_mapping: Dict, sub_selection: Dict, ref_ant: str):
+    """Fringefits a 
+
 """    
     input_params = {}
     input_params['data_sub_selection'] = sub_selection
@@ -123,7 +120,10 @@ TODO!
     [res] = dask.compute(dask_graph)
     return res
 
-def fringefit_ps(ps, unixtime, interval):
+def fringefit_ps(ps: ProcessingSet, ref_ant: str, unixtime: float, interval: float):
+    """Fringefits a ProcessingSet for a time slice, handling each spw separately.
+
+Currently assumes that each there will be one xds for each spw in the ProcessingSet."""
     ps2 = ps.ms_sel(time=slice(unixtime, unixtime+interval))
     # We manually filter out the empty xdses:
     ps3 = {k : v for k, v in ps2.items() if len(v.time.values) != 0}
@@ -134,6 +134,6 @@ def fringefit_ps(ps, unixtime, interval):
     parallel_coords['baseline_id'] = make_parallel_coord(coord=xds.baseline_id, n_chunks=1)
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(parallel_coords,
                                                                           ps3, ps_partition=['spectral_window_name'])
-    subsel={} # That this has to exist is also a bug, if we're honest.
-    res = _fringefit_single(ps3, node_task_data_mapping, subsel, ref_ant="EF")
+    subsel={} 
+    res = _fringefit_single(ps3, node_task_data_mapping, subsel, ref_ant)
     return res
