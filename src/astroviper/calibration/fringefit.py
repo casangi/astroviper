@@ -1,13 +1,18 @@
-import numpy as np
-import dask
-import xarray as xr
+from xradio.measurement_set.open_processing_set import open_processing_set
+from xradio.measurement_set.open_processing_set import open_processing_set
+from xradio.measurement_set.processing_set import ProcessingSet
+
 from graphviper.graph_tools.map import map
 from graphviper.graph_tools.reduce import reduce
 from graphviper.graph_tools.generate_dask_workflow import generate_dask_workflow
+from graphviper.graph_tools.coordinate_utils import (interpolate_data_coords_onto_parallel_coords,
+                                                     make_parallel_coord, make_time_coord, make_frequency_coord)
+from graphviper.graph_tools.generate_dask_workflow import generate_dask_workflow
+
+from astroviper.calibration.fringe_cal_quantum import make_empty_cal_quantum
+
+
 from typing import Dict, Union
-
-from xradio.vis.read_processing_set import read_processing_set
-
 import dask
 import numpy as np
 import xarray as xa
@@ -23,109 +28,83 @@ def unique(s):
             u.append(c)
     return u
 
-
-
-
-def getFourierSpacings(xds):
+def getFourierSpacings(xds, npad=1):
     f = xds.frequency.values
     df = (f[-1] - f[0])/(len(f)-1)
     dF = len(f)*df
-    ddelay = 1/dF
+    ddelay = 1/dF/npad
     #
     t = xds.time.values
     dt = (t[-1] - t[0])/(len(t)-1)
     dT = len(t) * dt
-    drate = 1/dT
+    drate = 1/dT/npad
     return (ddelay, drate)
 
-def makeCalArray(xds, ref_ant):
-    pols_ant = unique(''.join([c for c in ''.join(xds.polarization.values)]))
-    quantumCoords = xa.Coordinates(coords={'antenna_name' : xds.antenna_xds.antenna_name,
-                                           'polarization' : pols_ant,
-                                           'parameter' : range(3)
-                                           })
-    q = xa.DataArray(coords=quantumCoords)
-    ref_freq = xds.frequency.reference_frequency['data']
-    # Should we choose this reference time?
-    ref_time = xds.time[0]
-    q.attrs['reference_frequency'] = ref_freq
-    q.attrs['reference_time'] = ref_time
-    q.attrs['reference_antenna'] = ref_ant
-    return q
 
 def _fringe_node_task(input_params: Dict):
     ps = input_params['ps'] 
     data_selection = input_params['data_selection']
     ref_ant = input_params['ref_ant']
+    npad = 16 # To see if it's that
     # FIXME: for now we do single band
     if len(data_selection.keys()) > 1:
         print(f'{data_selection.keys()=}')
         raise RuntimeError("We only do single xdses so far")
     name = list(data_selection.keys())[0]
     xds = ps[name]
-    q = makeCalArray(xds, ref_ant)
+    q = make_empty_cal_quantum(xds)
+    q.ref_antenna[0] = ref_ant
     data_sub_selection = input_params['data_sub_selection']
-    pols = data_sub_selection['polarization']
-    # FIXME!
-    pol = pols[0]
+    allpols = 'RL' # FIXME data_sub_selection['polarization']
     xds2 = xds.isel(**data_selection[name])
-    xds2 = xds2.sel(polarization=pols)
-    ddelay, drate = getFourierSpacings(xds2)
-    vis = xds2.VISIBILITY
+    # xds2 = xds2.sel(polarization=pols)
+    ddelay, drate = getFourierSpacings(xds2, npad)
+    ref_bls = (xds.baseline_antenna1_name==ref_ant) | (xds.baseline_antenna2_name==ref_ant)
+    vis = xds2.VISIBILITY.where(ref_bls)[:, :, :, ::3]
     ang = np.angle(vis)
-    nvis = np.exp(1J*ang)
+    normed = np.exp(1J*ang)
+    normed = np.where(np.isnan(normed), 0, normed)
+    s = list(normed.shape)
+    nt = s[0]
+    nf = s[2]
+    s[0] = npad*nt # Pad in time
+    s[2] = npad*nf # Pad in frequency
+    pad = np.zeros(s, complex)
+    pad[:nt, :, :nf, :] = normed
     # Zero the NaNs
-    nvis = np.where(np.isnan(vis), 0, nvis)
     fftvis = np.fft.fftshift(
-         np.fft.fft2(
-             nvis,
-             axes=(0,2)
-         ),
-        axes=(0,2)
-    )
-    bl_slice = data_selection[name]["baseline_id"]
-    baselines = xds2.baseline_id[bl_slice].values
-    ant1s = xds2.baseline_antenna1_name.values
-    ant2s = xds2.baseline_antenna2_name.values
-    try:
-        for i, (bl, ant1, ant2) in enumerate(zip(baselines, ant1s, ant2s)):
-            if ref_ant not in [ant1, ant2]:
-                # print(f"Skipping {ant1}-{ant2}")
-                continue
-            if ref_ant == ant1 and ref_ant==ant2:
-                print("Skipping autos")
-            # print(f"{ant1}-{ant2}")
-            ant = ant1 if (ant2 == ref_ant) else ant2
-            spw = xds.partition_info['spectral_window_name']
-            t = xds.time[0].values
-            print(f"{ant} {spw} {t}")
-            a = np.abs(fftvis[:, i, :]) 
+        np.fft.fft2(pad, axes=(0,2)),
+        axes=(0,2))
+    npols = normed.shape[-1]
+    spw = xds.partition_info['spectral_window_name']
+    t = xds.time[0].values
+    for i, bl in enumerate(ref_bls):
+        if not bl: continue
+        ant1 = xds2.baseline_antenna1_name.values[i]
+        ant2 = xds2.baseline_antenna2_name.values[i]
+        if ref_ant == ant1 and ref_ant==ant2:
+            for p in range(npols):
+                q.CALIBRATION_PARAMETER.loc[dict(antenna_name=ant1, polarization=allpols[p])] = [0, 0, 0]
+                q.SNR.loc[dict(antenna_name=ant1, polarization=allpols[p])] = 3*[1e9]
+        ant = ant1 if (ant2 == ref_ant) else ant2
+        for p in range(npols):
+            ft = fftvis[:, i, :, p]
+            a = np.abs(ft) 
             ind = np.unravel_index(np.argmax(a, axis=None), a.shape)
-            # breakpoint()
             ix, iy = ind
-            phi0 = np.angle(a[ind])
-            delay = ix*ddelay
+            nx, ny = a.shape
+            phi0 = np.angle(ft[ind])
+            # The dimensions are time *then* frequency, so delay is y; rate is x.
+            delay = (iy - ny/2)*ddelay
             ref_freq = xds.frequency.reference_frequency['data']
-            rate = iy*drate/ref_freq
-            q.loc[dict(antenna_name=ant, polarization=pol)] = [phi0, delay, rate]
-    except IndexError as e: 
-        print(f'{xds2.baseline_antenna1_name.values}\n{baselines=}')
-        raise e
+            phi0 -= 2*np.pi*(delay * (xds.frequency.values[0] - ref_freq)) # We'll fix the sign convention empirically
+            rate = (ix - nx/2)*drate/ref_freq
+            peak = np.abs(a[ind])
+            q.CALIBRATION_PARAMETER.loc[dict(antenna_name=ant, polarization=allpols[p])] = [phi0, delay, rate]
+            q.SNR.loc[dict(antenna_name=ant, polarization=allpols[p])] = [peak, peak, peak]
     return q
 
-def _fringefit_reduce(graph_inputs: xr.Dataset, input_params: Dict):
-    merged = {}
-    for e in graph_inputs:
-        [t] = e.keys()
-        rhs = e[t]
-        if t in merged:
-            merged[t].update(rhs)
-        else:
-            merged[t] = rhs
-    return merged
-
-
-def fringefit_single(ps, node_task_data_mapping: Dict, sub_selection: Dict, ref_ant: int):
+def _fringefit_single(ps, node_task_data_mapping: Dict, sub_selection: Dict, ref_ant: int):
     """
 TODO!
 """    
@@ -140,5 +119,21 @@ TODO!
         input_params = input_params,
         in_memory_compute=False)
     dask_graph = generate_dask_workflow(graph)
-    res = dask.compute(dask_graph)
+    # Strip the singleton list wrapper at source
+    [res] = dask.compute(dask_graph)
+    return res
+
+def fringefit_ps(ps, unixtime, interval):
+    ps2 = ps.ms_sel(time=slice(unixtime, unixtime+interval))
+    # We manually filter out the empty xdses:
+    ps3 = {k : v for k, v in ps2.items() if len(v.time.values) != 0}
+    # We need an xds to extract baseline_ids from; just grab the first one from ps3
+    xds = next(iter(ps3.values())) 
+    baselines = xds.baseline_id
+    parallel_coords = {}
+    parallel_coords['baseline_id'] = make_parallel_coord(coord=xds.baseline_id, n_chunks=1)
+    node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(parallel_coords,
+                                                                          ps3, ps_partition=['spectral_window_name'])
+    subsel={} # That this has to exist is also a bug, if we're honest.
+    res = _fringefit_single(ps3, node_task_data_mapping, subsel, ref_ant="EF")
     return res
