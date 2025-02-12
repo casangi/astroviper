@@ -7,10 +7,12 @@ from astroviper._domain._imaging._ifft import _ifft_uv_to_lm
 import copy
 import dask
 import dask.array as da
-from graphviper.graph_tools.coordinate_utils import interpolate_data_coords_onto_parallel_coords
+from graphviper.graph_tools.coordinate_utils import (
+    interpolate_data_coords_onto_parallel_coords,
+)
 from graphviper.graph_tools.coordinate_utils import make_parallel_coord
 from graphviper.graph_tools.map import map
-from graphviper.utils.display import dict_to_html
+from toolviper.utils.display import dict_to_html
 from IPython.display import HTML, display
 import numpy as np
 import os
@@ -26,8 +28,8 @@ from xradio.image._util.common import _set_multibeam_array
 
 
 def _init_dask():
-    #from graphviper.dask.client import local_client
-    #viper_client = local_client(cores=2, memory_limit="4GB")
+    # from graphviper.dask.client import local_client
+    # viper_client = local_client(cores=2, memory_limit="4GB")
 
     # dask.config.set(scheduler="synchronous")
     # dask.config.set(memory_limit="8GB")
@@ -42,22 +44,16 @@ def _has_single_beam(xds):
 def _beam_area_single_beam(xds):
     beam = xds.attrs["beam"]
     bmaj = beam["major"]
-    major = u.Quantity(
-        f"{bmaj['value']}{bmaj['units']}"
-    )
+    major = u.Quantity(f"{bmaj['value']}{bmaj['units']}")
     bmin = beam["minor"]
-    minor = u.Quantity(
-        f"{bmin['value']}{bmin['units']}"
-    )
+    minor = u.Quantity(f"{bmin['value']}{bmin['units']}")
     area = major * minor
-    return area.to(u.rad*u.rad)
+    return area.to(u.rad * u.rad)
 
 
 def _compute_u_v(xds):
     shape = [xds.dims["l"], xds.dims["m"]]
-    sics = np.abs(
-        xds.attrs["direction"]["reference"]["cdelt"]
-    )
+    sics = np.abs(xds.attrs["direction"]["reference"]["cdelt"])
     w_xds = make_empty_aperture_image(
         phase_center=[0, 0],
         image_size=shape,
@@ -69,7 +65,7 @@ def _compute_u_v(xds):
     u = np.zeros(shape)
     v = np.zeros(shape)
     for i, ux in enumerate(w_xds.coords["u"]):
-        u[i,:] = ux
+        u[i, :] = ux
     for i, vx in enumerate(w_xds.coords["v"]):
         v[:, i] = vx
     return (u, v)
@@ -82,34 +78,25 @@ def _compute_w_single_beam(xds):
     shape = [xds.dims["l"], xds.dims["m"]]
     w = np.zeros(shape)
     bmaj = xds.attrs["beam"]["major"]
-    alpha = u.Quantity(
-        f"{bmaj['value']}{bmaj['units']}"
-    )
+    alpha = u.Quantity(f"{bmaj['value']}{bmaj['units']}")
     alpha = alpha.to(u.rad).value
     bmin = xds.attrs["beam"]["minor"]
-    beta = u.Quantity(
-        f"{bmin['value']}{bmin['units']}"
-    )
+    beta = u.Quantity(f"{bmin['value']}{bmin['units']}")
     beta = beta.to(u.rad).value
     bpa = xds.attrs["beam"]["pa"]
-    phi = u.Quantity(
-        f"{bpa['value']}{bpa['units']}"
-    )
+    phi = u.Quantity(f"{bpa['value']}{bpa['units']}")
     phi = phi.to(u.rad).value
-    alpha2 = alpha*alpha
-    beta2 = beta*beta
-    aterm2 = (uu*np.sin(phi) - vv*np.cos(phi))**2
-    bterm2 = (uu*np.cos(phi) + vv*np.sin(phi))**2
-    w = np.exp(
-        -pi2/4.0/np.log(2)
-        * (alpha2*aterm2 + beta2*bterm2)
-    )
+    alpha2 = alpha * alpha
+    beta2 = beta * beta
+    aterm2 = (uu * np.sin(phi) - vv * np.cos(phi)) ** 2
+    bterm2 = (uu * np.cos(phi) + vv * np.sin(phi)) ** 2
+    w = np.exp(-pi2 / 4.0 / np.log(2) * (alpha2 * aterm2 + beta2 * bterm2))
     # w is an np.array
     return w.astype(xds["sky"].dtype)
 
 
 def _feather(input_parms):
-    #display(HTML(dict_to_html(input_parms)))
+    # display(HTML(dict_to_html(input_parms)))
 
     def _compute_w_multiple_beams(xds, uv):
         """xds is the single dish xds"""
@@ -136,27 +123,23 @@ def _feather(input_parms):
         phi = bpa * u.Unit(bunit)
         phi = phi.to(u.rad).value
 
-        alpha2 = alpha*alpha
-        beta2 = beta*beta
+        alpha2 = alpha * alpha
+        beta2 = beta * beta
         # u -> uu, v -> vv because we've already used
         # u for astropy.units
         uu, vv = uv
         uu = uu[np.newaxis, np.newaxis, np.newaxis, :, :]
         vv = vv[np.newaxis, np.newaxis, np.newaxis, :, :]
         # print("u v shape", uu.shape, vv.shape)
-        aterm2 = (uu*np.sin(phi) - vv*np.cos(phi))**2
+        aterm2 = (uu * np.sin(phi) - vv * np.cos(phi)) ** 2
         # print("aterm2, shape",aterm2.shape)
-        bterm2 = (uu*np.cos(phi) + vv*np.sin(phi))**2
+        bterm2 = (uu * np.cos(phi) + vv * np.sin(phi)) ** 2
         # print("bterm2 shape", bterm2.shape)
         w = np.exp(
-            -np.pi*np.pi/4.0/np.log(2)
-            * (
-                alpha2*aterm2 + beta2*bterm2
-            )
+            -np.pi * np.pi / 4.0 / np.log(2) * (alpha2 * aterm2 + beta2 * bterm2)
         )
         # w is an np.array
         return w
-
 
     # if input_parms["input_data"] is None: #Load
     dtypes = {"sd": np.int32, "int": np.int32}
@@ -167,13 +150,13 @@ def _feather(input_parms):
         # print("block_des", input_parms["data_selection"][k])
         xds = load_image(
             input_parms["input_data_store"][k],
-            block_des=input_parms["data_selection"][k]
+            block_des=input_parms["data_selection"][k],
         )
         # print("load image for", k, "complete")
         # print("completed load_image()")
         fft_plane = (
-            xds['sky'].dims.index(input_parms["axes"][0]),
-            xds['sky'].dims.index(input_parms["axes"][1])
+            xds["sky"].dims.index(input_parms["axes"][0]),
+            xds["sky"].dims.index(input_parms["axes"][1]),
         )
         # print("completed fft_plane")
         # else:
@@ -200,22 +183,20 @@ def _feather(input_parms):
     if beam_ratio is None:
         if "beam" in int_xds.data_vars:
             # compute area for multiple beams
-            int_ba = (
-                int_xds["beam"].sel(beam_param="major")
-                * int_xds["beam"].sel(beam_param="minor")
+            int_ba = int_xds["beam"].sel(beam_param="major") * int_xds["beam"].sel(
+                beam_param="minor"
             )
         else:
             int_ba = _beam_area_single_beam(int_xds)
 
         if "beam" in sd_xds.data_vars:
             # compute area for multiple beams
-            sd_ba = (
-                sd_xds["beam"].sel(beam_param="major")
-                * sd_xds["beam"].sel(beam_param="minor")
+            sd_ba = sd_xds["beam"].sel(beam_param="major") * sd_xds["beam"].sel(
+                beam_param="minor"
             )
         else:
             sd_ba = _beam_area_single_beam(sd_xds)
-        beam_ratio = int_ba/sd_ba
+        beam_ratio = int_ba / sd_ba
         beam_ratio = np.expand_dims(beam_ratio, -1)
         beam_ratio = np.expand_dims(beam_ratio, -1)
 
@@ -224,20 +205,14 @@ def _feather(input_parms):
     # print("beam ratio shape", beam_ratio.shape)
     # print("sd_ap shape", sd_ap.shape)
     # print("w shape", w.shape)
-    term = (
-        (
-            one_minus_w * int_ap
-            + s * beam_ratio * sd_ap
-        )
-        / (one_minus_w + s * w)
-    )
+    term = (one_minus_w * int_ap + s * beam_ratio * sd_ap) / (one_minus_w + s * w)
     feather_npary = _ifft_uv_to_lm(term, fft_plane).astype(mytype)
     feather_xds = copy.deepcopy(int_xds)
     # display(feather_xds)
     feather_xrary = xr.DataArray(
         da.from_array(feather_npary, chunks=int_xds["sky"].shape),
         coords=int_xds["sky"].coords,
-        dims=int_xds["sky"].dims
+        dims=int_xds["sky"].dims,
     )
     """
     feather_xrary = xr.DataArray(
@@ -253,8 +228,11 @@ def _feather(input_parms):
 
 
 def feather(
-    outim: Union[dict, None], highres: Union[str, xr.Dataset],
-    lowres: Union[str, xr.Dataset], sdfactor: float, selection: dict={}
+    outim: Union[dict, None],
+    highres: Union[str, xr.Dataset],
+    lowres: Union[str, xr.Dataset],
+    sdfactor: float,
+    selection: dict = {},
 ):
     """
     Create an image from a single dish and interferometer image using the
@@ -301,19 +279,27 @@ def feather(
     _init_dask()
     # Read in input images
     # single dish image
-    sd_xds = read_image(lowres, selection=selection) if isinstance(lowres, str) else lowres
+    sd_xds = (
+        read_image(lowres, selection=selection) if isinstance(lowres, str) else lowres
+    )
     # interferometer image
-    int_xds = read_image(highres, selection=selection) if isinstance(highres, str) else highres
+    int_xds = (
+        read_image(highres, selection=selection)
+        if isinstance(highres, str)
+        else highres
+    )
     if sd_xds["sky"].shape != int_xds["sky"].shape:
         raise RuntimeError("Image shapes differ")
 
-    chans_per_chunk = 2**26/(sd_xds.dims["l"]*sd_xds.dims["m"])
+    chans_per_chunk = 2**26 / (sd_xds.dims["l"] * sd_xds.dims["m"])
     chans_per_chunk = min(sd_xds.dims["frequency"], chans_per_chunk)
     print("chans_per_chunk", chans_per_chunk)
     chunksize = {
-        "time": sd_xds.dims["time"], "polarization":
-        sd_xds.dims["polarization"], "frequency": chans_per_chunk,
-        "l": sd_xds.dims["l"], "m": sd_xds.dims["m"]
+        "time": sd_xds.dims["time"],
+        "polarization": sd_xds.dims["polarization"],
+        "frequency": chans_per_chunk,
+        "l": sd_xds.dims["l"],
+        "m": sd_xds.dims["m"],
     }
     # TODO either deep copy this, or put the chunks back as they were when
     # done
@@ -323,7 +309,7 @@ def feather(
     # if it doesn't take too long)
 
     ### DEBUG add multibeam
-    #del sd_xds.attrs["beam"]
+    # del sd_xds.attrs["beam"]
     # sky_shape = sd_xds["sky"].shape
     # beam_shape = sky_shape[:3] + (3,)
     # beam_ary = da.zeros(beam_shape)
@@ -357,15 +343,12 @@ def feather(
     # task since it will be per plane
     beam_ratio = None
     if _has_single_beam(sd_xds) and _has_single_beam(int_xds):
-        beam_ratio = (
-            _beam_area_single_beam(int_xds)
-            /_beam_area_single_beam(sd_xds)
-        )
+        beam_ratio = _beam_area_single_beam(int_xds) / _beam_area_single_beam(sd_xds)
     # print(beam_ratio)
 
     parallel_coords = {}
     # TODO need smarter way to get n_chunks
-    n_chunks = int(sd_xds.dims["frequency"]//chans_per_chunk)
+    n_chunks = int(sd_xds.dims["frequency"] // chans_per_chunk)
     if sd_xds.dims["frequency"] % chans_per_chunk > 0:
         n_chunks += 1
     print("n_chunks", n_chunks)
@@ -379,7 +362,9 @@ def feather(
     # JW says multiple items in the dict, the key names aren't important so can
     # be anything contextual to the problem at hand
     input_data = {"sd": sd_xds, "int": int_xds}
-    node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(parallel_coords, input_data)
+    node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
+        parallel_coords, input_data
+    )
     # display(HTML(dict_to_html(node_task_data_mapping)))
 
     w = None
@@ -425,7 +410,7 @@ def feather(
 
     input_parms = {}
     input_parms["input_data_store"] = {"sd": lowres, "int": highres}
-    input_parms["axes"] = ('l','m')#(3,4)
+    input_parms["axes"] = ("l", "m")  # (3,4)
     # beam_ratio should be computed inside _feather if
     # at least one image has multiple beams
     input_parms["beam_ratio"] = beam_ratio
@@ -439,7 +424,7 @@ def feather(
         node_task_data_mapping=node_task_data_mapping,
         node_task=_feather,
         input_params=input_parms,
-        in_memory_compute=False
+        in_memory_compute=False,
     )
     print("time to create graph", time.time() - t0)
 
@@ -460,9 +445,7 @@ def feather(
     as_da = da.array(final_xds["sky"].values)
     # print(as_da)
     final_xds["sky"] = xr.DataArray(
-        as_da, dims=(
-            "time", "polarization", "frequency", "l", "m"
-        )
+        as_da, dims=("time", "polarization", "frequency", "l", "m")
     )
     final_xds["sky"].attrs = copy.deepcopy(int_xds["sky"].attrs)
     if outim is not None:

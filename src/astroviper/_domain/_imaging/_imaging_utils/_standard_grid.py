@@ -155,7 +155,7 @@ import numpy as np
 
 
 # When jit is used round is repolaced by standard c++ round that is different to python round
-@jit(nopython=True, cache=True, nogil=True)
+@jit(nopython=True, cache=True, nogil=True)  # fastmath=True
 def _standard_grid_jit(
     grid,
     sum_weight,
@@ -200,6 +200,10 @@ def _standard_grid_jit(
     Returns
     -------
     """
+
+    # By hardcoding the support and oversampling values, the innermost for loops can be unrolled by the compiler leading to significantly faster code.
+    # support = 7
+    # oversampling = 100
 
     c = 299792458.0
     uv_scale = np.zeros((2, len(freq_chan)), dtype=np.double)
@@ -455,11 +459,11 @@ def _standard_imaging_weight_degrid_jit(
                                     ]
                                 ) / 2.0
                             else:
-                                imaging_weight[
-                                    i_time, i_baseline, i_chan, i_pol
-                                ] = natural_imaging_weight[
-                                    i_time, i_baseline, i_chan, i_pol
-                                ]
+                                imaging_weight[i_time, i_baseline, i_chan, i_pol] = (
+                                    natural_imaging_weight[
+                                        i_time, i_baseline, i_chan, i_pol
+                                    ]
+                                )
 
                             if ~np.isnan(
                                 natural_imaging_weight[

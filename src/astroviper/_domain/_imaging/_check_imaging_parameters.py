@@ -1,6 +1,8 @@
 import numpy as np
-#from graphviper.parameter_checking.check_parms import check_parms
+
+# from graphviper.parameter_checking.check_parms import check_parms
 from astroviper.utils.check_parms import check_parms
+
 
 def _check_grid_parms(grid_parms):
     import numbers
@@ -140,9 +142,7 @@ def _check_gcf_parms(gcf_parms):
     ):
         parms_passed = False
     if not (
-        check_parms(
-            gcf_parms, "chan_tolerance_factor", [numbers.Number], default=0.005
-        )
+        check_parms(gcf_parms, "chan_tolerance_factor", [numbers.Number], default=0.005)
     ):
         parms_passed = False
     if not (
@@ -253,9 +253,7 @@ def _check_rotation_parms(rotation_parms):
         parms_passed = False
 
     if not (
-        check_parms(
-            rotation_parms, "common_tangent_reprojection", [bool], default=True
-        )
+        check_parms(rotation_parms, "common_tangent_reprojection", [bool], default=True)
     ):
         parms_passed = False
 
