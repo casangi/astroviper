@@ -128,7 +128,12 @@ class SingleFringeJones(object):
                 'frequency' : xds.frequency,
                 'polarization' : xds.polarization}
         da = xa.DataArray( coords=coords, data=v2)
-        new_xds = xds.assign({'FRINGEFIT' : da})
+        new_xds = xds.assign({'VISIBILIY_CORRECTED' : da})
+        # Now we add the new data group:
+        xds.attrs['data_groups']['calibrated'] = {'correlated_data' : 'VISIBILITY_CORRECTED',
+                                                  'flag' : 'FLAG',
+                                                  'weight' : 'WEIGHT_IMAGING',
+                                                  'uvw' : 'UVW'}
         return new_xds
        
 def apply_cal_ps(ps: ProcessingSet, res: list[xa.DataArray], unixtime: float, interval: float):
