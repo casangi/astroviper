@@ -24,7 +24,7 @@ from xradio.image import load_image
 from xradio.image import make_empty_aperture_image
 from xradio.image import read_image
 from xradio.image import write_image
-from xradio.image._util.common import _set_multibeam_array
+#from xradio.image._util.common import _set_multibeam_array
 
 
 def _init_dask():
