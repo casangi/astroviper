@@ -13,7 +13,8 @@ def _make_image(input_params):
 
     start_0 = time.time()
     import numpy as np
-    from astroviper._domain._visibility._phase_shift import _phase_shift_vis_ds
+    from astroviper._domain._visibility._phase_shift_old import _phase_shift_vis_ds_old
+    from astroviper._domain._visibility._phase_shift import _phase_shift_ms_xds
     from astroviper._domain._imaging._make_imaging_weights import _make_imaging_weights
     from astroviper._domain._imaging._make_gridding_convolution_function import (
         _make_gridding_convolution_function,
@@ -91,17 +92,25 @@ def _make_image(input_params):
     for ms_xds in ps_iter:
         start_compute = time.time()
         start_3 = time.time()
-        data_group_out = _phase_shift_vis_ds(
-            ms_xds, shift_parms=shift_params, sel_parms={"data_group_in": data_group}
+        # data_group_out = _phase_shift_vis_ds_old(
+        #     ms_xds, shift_params=shift_params, sel_params={"data_group_in": data_group}
+        # )
+        ms_xds, data_group_out = _phase_shift_ms_xds(
+            ms_xds, shift_params=shift_params, sel_params={"data_group_in": data_group}
         )
         T_phase_shift = T_phase_shift + time.time() - start_3
+        
+        # print("Data group out", data_group_out)
+        # print("^"*20)
+        # print("ms_xds", ms_xds)
+        # print("^"*20)
 
         start_4 = time.time()
         data_group_out = _make_imaging_weights(
             ms_xds,
-            grid_parms=grid_params,
-            imaging_weights_parms={"weighting": "briggs", "robust": 0.6},
-            sel_parms={"data_group_in": data_group_out},
+            grid_params=grid_params,
+            imaging_weights_params={"weighting": "briggs", "robust": 0.6},
+            sel_params={"data_group_in": data_group_out},
         )
         T_weights = T_weights + time.time() - start_4
 
@@ -121,7 +130,7 @@ def _make_image(input_params):
             ms_xds,
             gcf_params,
             grid_params,
-            sel_parms={"data_group_in": data_group_out},
+            sel_params={"data_group_in": data_group_out},
         )
         T_gcf = T_gcf + time.time() - start_5
 
@@ -130,9 +139,9 @@ def _make_image(input_params):
             ms_xds,
             gcf_xds,
             img_xds,
-            vis_sel_parms={"data_group_in": data_group_out},
-            img_sel_parms={"data_group_in": "mosaic"},
-            grid_parms=grid_params,
+            vis_sel_params={"data_group_in": data_group_out},
+            img_sel_params={"data_group_in": "mosaic"},
+            grid_params=grid_params,
         )
         T_aperture_grid = T_aperture_grid + time.time() - start_6
 
@@ -141,9 +150,9 @@ def _make_image(input_params):
             ms_xds,
             gcf_xds,
             img_xds,
-            vis_sel_parms={"data_group_in": data_group_out},
-            img_sel_parms={"data_group_in": "mosaic"},
-            grid_parms=grid_params,
+            vis_sel_params={"data_group_in": data_group_out},
+            img_sel_params={"data_group_in": "mosaic"},
+            grid_params=grid_params,
         )  # Will become the PSF.
         T_uv_sampling_grid = T_uv_sampling_grid + time.time() - start_7
 
@@ -152,9 +161,9 @@ def _make_image(input_params):
             ms_xds,
             gcf_xds,
             img_xds,
-            vis_sel_parms={"data_group_in": data_group_out},
-            img_sel_parms={"data_group_in": "mosaic"},
-            grid_parms=grid_params,
+            vis_sel_params={"data_group_in": data_group_out},
+            img_sel_params={"data_group_in": "mosaic"},
+            grid_params=grid_params,
         )
         T_vis_grid = T_vis_grid + time.time() - start_8
         T_compute = T_compute + time.time() - start_compute
@@ -176,8 +185,8 @@ def _make_image(input_params):
         img_xds,
         gcf_xds,
         grid_params,
-        norm_parms={},
-        sel_parms={"data_group_in": "mosaic", "data_group_out": "mosaic"},
+        norm_params={},
+        sel_params={"data_group_in": "mosaic", "data_group_out": "mosaic"},
     )
     T_fft = time.time() - start_9
     logger.debug("9. fft norm " + str(time.time() - start_9))

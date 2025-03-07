@@ -7,36 +7,35 @@ from numba import jit
 import numba
 import xarray as xr
 from astroviper._domain._imaging._check_imaging_parameters import (
-    _check_grid_parms,
-    _check_gcf_parms,
+    _check_grid_params,
+    _check_gcf_params,
 )
 from astroviper._domain._imaging._imaging_utils._standard_grid import (
     _standard_imaging_weight_degrid_numpy_wrap,
     _standard_grid_psf_numpy_wrap,
 )
 
-# from graphviper.parameter_checking.check_parms import check_sel_parms
-from astroviper.utils.check_parms import check_sel_parms
+from astroviper.utils.check_params import check_params, check_sel_params
 import copy
 import time
 
 
 def _make_gridding_convolution_function(
-    gcf_xds, ms_xds, gcf_parms, grid_parms, sel_parms
+    gcf_xds, ms_xds, gcf_params, grid_params, sel_params
 ):
     start_0 = time.time()
-    _gcf_parms = copy.deepcopy(gcf_parms)
-    _grid_parms = copy.deepcopy(grid_parms)
-    _sel_parms = copy.deepcopy(sel_parms)
+    _gcf_params = copy.deepcopy(gcf_params)
+    _grid_params = copy.deepcopy(grid_params)
+    _sel_params = copy.deepcopy(sel_params)
 
-    # print(sel_parms)
-    data_group_in, _ = check_sel_parms(ms_xds, _sel_parms, skip_data_group_out=True)
+    # print(sel_params)
+    data_group_in, _ = check_sel_params(ms_xds, _sel_params, skip_data_group_out=True)
 
-    _gcf_parms["field_phase_dir"] = ms_xds[data_group_in["correlated_data"]].attrs[
+    _gcf_params["field_phase_dir"] = ms_xds[data_group_in["correlated_data"]].attrs[
         "field_and_source_xds"
     ]["FIELD_PHASE_CENTER"]
 
-    # _gcf_parms["basline_ant"] = np.array(
+    # _gcf_params["basline_ant"] = np.array(
     #     [ms_xds.baseline_antenna1_id.values, ms_xds.baseline_antenna2_id.values]
     # ).T
 
@@ -47,15 +46,15 @@ def _make_gridding_convolution_function(
     baseline_ant2_id = np.where(
         ms_xds.antenna_xds.antenna_name == ms_xds.baseline_antenna2_name
     )[0]
-    _gcf_parms["basline_ant"] = np.array([baseline_ant1_id, baseline_ant2_id]).T
+    _gcf_params["basline_ant"] = np.array([baseline_ant1_id, baseline_ant2_id]).T
 
-    _gcf_parms["freq_chan"] = ms_xds.frequency.values
-    _gcf_parms["pol"] = ms_xds.polarization.values
+    _gcf_params["freq_chan"] = ms_xds.frequency.values
+    _gcf_params["pol"] = ms_xds.polarization.values
 
-    assert _check_gcf_parms(_gcf_parms), "######### ERROR: gcf_parms checking failed"
-    assert _check_grid_parms(_grid_parms), "######### ERROR: grid_parms checking failed"
+    assert _check_gcf_params(_gcf_params), "######### ERROR: gcf_params checking failed"
+    assert _check_grid_params(_grid_params), "######### ERROR: grid_params checking failed"
 
-    _gcf_parms["resize_conv_size"] = (_gcf_parms["max_support"] + 1) * _gcf_parms[
+    _gcf_params["resize_conv_size"] = (_gcf_params["max_support"] + 1) * _gcf_params[
         "oversampling"
     ]
 
@@ -64,16 +63,16 @@ def _make_gridding_convolution_function(
     # print(gcf_xds)
     # print('&&&&&&&&&&')
     # if len(gcf_xds) > 1:
-    #     print(gcf_xds.baseline.size, len(_gcf_parms["basline_ant"]))
+    #     print(gcf_xds.baseline.size, len(_gcf_params["basline_ant"]))
     # else:
     #     print('No data vars')
-    if (len(gcf_xds) < 1) or (gcf_xds.baseline.size != len(_gcf_parms["basline_ant"])):
+    if (len(gcf_xds) < 1) or (gcf_xds.baseline.size != len(_gcf_params["basline_ant"])):
         gcf_xds = xr.Dataset()
-        if _gcf_parms["function"] == "airy":
+        if _gcf_params["function"] == "airy":
             from ._imaging_utils._make_pb_symmetric import _airy_disk_rorder
 
             pb_func = _airy_disk_rorder
-        elif _gcf_parms["function"] == "casa_airy":
+        elif _gcf_params["function"] == "casa_airy":
             from ._imaging_utils._make_pb_symmetric import _casa_airy_disk_rorder
 
             pb_func = _casa_airy_disk_rorder
@@ -82,27 +81,27 @@ def _make_gridding_convolution_function(
                 False
             ), "######### ERROR: Only airy and casa_airy function has been implemented"
 
-        n_unique_ant = len(_gcf_parms["list_dish_diameters"])
+        n_unique_ant = len(_gcf_params["list_dish_diameters"])
         cf_baseline_map, pb_ant_pairs = create_cf_baseline_map(
-            _gcf_parms["unique_ant_indx"], _gcf_parms["basline_ant"], n_unique_ant
+            _gcf_params["unique_ant_indx"], _gcf_params["basline_ant"], n_unique_ant
         )
         cf_chan_map, pb_freq = create_cf_chan_map(
-            _gcf_parms["freq_chan"], _gcf_parms["chan_tolerance_factor"]
+            _gcf_params["freq_chan"], _gcf_params["chan_tolerance_factor"]
         )
 
         cf_pol_map = np.zeros(
-            (len(_gcf_parms["pol"]),), dtype=int
+            (len(_gcf_params["pol"]),), dtype=int
         )  # create_cf_pol_map(), currently treating all pols the same
         pb_pol = np.array([0])
 
-        _gcf_parms["ipower"] = 1
+        _gcf_params["ipower"] = 1
         baseline_pb = make_baseline_patterns(
-            pb_freq, pb_pol, pb_ant_pairs, pb_func, _gcf_parms, _grid_parms
+            pb_freq, pb_pol, pb_ant_pairs, pb_func, _gcf_params, _grid_params
         )
 
-        _gcf_parms["ipower"] = 2
+        _gcf_params["ipower"] = 2
         baseline_pb_sqrd = make_baseline_patterns(
-            pb_freq, pb_pol, pb_ant_pairs, pb_func, _gcf_parms, _grid_parms
+            pb_freq, pb_pol, pb_ant_pairs, pb_func, _gcf_params, _grid_params
         )
 
         # print("%%% make_baseline_patterns ",time.time()-start_0)
@@ -131,7 +130,7 @@ def _make_gridding_convolution_function(
             resized_conv_kernel_convolved,
             conv_support,
         ) = resize_and_calc_support(
-            conv_kernel, conv_kernel_convolved, _gcf_parms, _grid_parms
+            conv_kernel, conv_kernel_convolved, _gcf_params, _grid_params
         )
 
         # print("%%% resize ",time.time()-start_2)
@@ -149,33 +148,33 @@ def _make_gridding_convolution_function(
             dims=("conv_baseline", "conv_chan", "conv_pol", "u", "v"),
         )
         gcf_xds["PS_CORR_IMAGE"] = xr.DataArray(
-            np.ones(_grid_parms["image_size"]), dims=["l", "m"]
+            np.ones(_grid_params["image_size"]), dims=["l", "m"]
         )
 
         coords = {
-            "u": np.arange(_gcf_parms["resize_conv_size"][0]),
-            "v": np.arange(_gcf_parms["resize_conv_size"][1]),
+            "u": np.arange(_gcf_params["resize_conv_size"][0]),
+            "v": np.arange(_gcf_params["resize_conv_size"][1]),
             "xy": np.arange(2),
             "field_id": [0],
-            "l": np.arange(_grid_parms["image_size"][0]),
-            "m": np.arange(_grid_parms["image_size"][1]),
+            "l": np.arange(_grid_params["image_size"][0]),
+            "m": np.arange(_grid_params["image_size"][1]),
         }
         gcf_xds["CF_BASELINE_MAP"] = xr.DataArray(cf_baseline_map, dims=("baseline"))
         gcf_xds["CF_CHAN_MAP"] = xr.DataArray(cf_chan_map, dims=("chan"))
         gcf_xds["CF_POL_MAP"] = xr.DataArray(cf_pol_map, dims=("pol"))
         gcf_xds.attrs["cell_uv"] = 1 / (
-            _grid_parms["image_size_padded"]
-            * _grid_parms["cell_size"]
-            * _gcf_parms["oversampling"]
+            _grid_params["image_size_padded"]
+            * _grid_params["cell_size"]
+            * _gcf_params["oversampling"]
         )
-        gcf_xds.attrs["oversampling"] = _gcf_parms["oversampling"]
+        gcf_xds.attrs["oversampling"] = _gcf_params["oversampling"]
 
         gcf_xds.assign_coords(coords)
 
     start_3 = time.time()
-    field_phase_dir = np.array(_gcf_parms["field_phase_dir"].data)
+    field_phase_dir = np.array(_gcf_params["field_phase_dir"].data)
     phase_gradient = make_phase_gradient(
-        field_phase_dir[None, :], _gcf_parms, _grid_parms
+        field_phase_dir[None, :], _gcf_params, _grid_params
     )
 
     gcf_xds["PHASE_GRADIENT"] = xr.DataArray(
@@ -184,35 +183,35 @@ def _make_gridding_convolution_function(
     # print("%%% Phase gradient ",time.time()-start_3)
 
     # list_xarray_data_variables = [gcf_dataset['A_TERM'],gcf_dataset['WEIGHT_A_TERM'],gcf_dataset['A_SUPPORT'],gcf_dataset['WEIGHT_A_SUPPORT'],gcf_dataset['PHASE_GRADIENT']]
-    # return _store(gcf_dataset,list_xarray_data_variables,_storage_parms)
+    # return _store(gcf_dataset,list_xarray_data_variables,_storage_params)
 
     return gcf_xds
 
 
 def make_baseline_patterns(
-    pb_freq, pb_pol, pb_ant_pairs, pb_func, gcf_parms, grid_parms
+    pb_freq, pb_pol, pb_ant_pairs, pb_func, gcf_params, grid_params
 ):
     import copy
 
-    pb_grid_parms = copy.deepcopy(grid_parms)
-    pb_grid_parms["cell_size"] = grid_parms["cell_size"] * gcf_parms["oversampling"]
-    pb_grid_parms["image_size"] = pb_grid_parms["image_size_padded"]
-    pb_grid_parms["image_center"] = pb_grid_parms["image_size"] // 2
+    pb_grid_params = copy.deepcopy(grid_params)
+    pb_grid_params["cell_size"] = grid_params["cell_size"] * gcf_params["oversampling"]
+    pb_grid_params["image_size"] = pb_grid_params["image_size_padded"]
+    pb_grid_params["image_center"] = pb_grid_params["image_size"] // 2
 
-    # print("grid_parms",grid_parms)
-    # print("pb_grid_parms",pb_grid_parms)
+    # print("grid_params",grid_params)
+    # print("pb_grid_params",pb_grid_params)
     import time
 
     start = time.time()
-    patterns = pb_func(pb_freq, pb_pol, gcf_parms, pb_grid_parms)
+    patterns = pb_func(pb_freq, pb_pol, gcf_params, pb_grid_params)
     # print('@@@The core',time.time()-start)
     baseline_pattern = np.zeros(
         (
             len(pb_ant_pairs),
             len(pb_freq),
             len(pb_pol),
-            grid_parms["image_size_padded"][0],
-            grid_parms["image_size_padded"][1],
+            grid_params["image_size_padded"][0],
+            grid_params["image_size_padded"][1],
         ),
         dtype=np.double,
     )
@@ -293,18 +292,18 @@ def find_nearest(array, value):
     return idx, array[idx]
 
 
-def resize_and_calc_support(conv_kernel, conv_kernel_convolved, gcf_parms, grid_parms):
+def resize_and_calc_support(conv_kernel, conv_kernel_convolved, gcf_params, grid_params):
     # print("$$"*10,conv_kernel.shape,conv_kernel_convolved.shape)
     import itertools
 
     conv_shape = conv_kernel.shape[0:3]
     conv_support = np.zeros(conv_shape + (2,), dtype=int)  # 2 is to enable x,y support
 
-    resized_conv_size = tuple(gcf_parms["resize_conv_size"])
+    resized_conv_size = tuple(gcf_params["resize_conv_size"])
     start_indx = (
-        grid_parms["image_size_padded"] // 2 - gcf_parms["resize_conv_size"] // 2
+        grid_params["image_size_padded"] // 2 - gcf_params["resize_conv_size"] // 2
     )
-    end_indx = start_indx + gcf_parms["resize_conv_size"]
+    end_indx = start_indx + gcf_params["resize_conv_size"]
 
     resized_conv_kernel = np.zeros(conv_shape + resized_conv_size, dtype=np.double)
     resized_conv_kernel_convolved = np.zeros(
@@ -314,14 +313,14 @@ def resize_and_calc_support(conv_kernel, conv_kernel_convolved, gcf_parms, grid_
     for idx in itertools.product(*[range(s) for s in conv_shape]):
         conv_support[idx] = calc_conv_size(
             conv_kernel_convolved[idx],
-            grid_parms["image_size_padded"],
-            gcf_parms["support_cut_level"],
-            gcf_parms["oversampling"],
-            gcf_parms["max_support"],
+            grid_params["image_size_padded"],
+            gcf_params["support_cut_level"],
+            gcf_params["oversampling"],
+            gcf_params["max_support"],
         )
 
-        embed_conv_size = (conv_support[idx] + 1) * gcf_parms["oversampling"]
-        embed_start_indx = gcf_parms["resize_conv_size"] // 2 - embed_conv_size // 2
+        embed_conv_size = (conv_support[idx] + 1) * gcf_params["oversampling"]
+        embed_start_indx = gcf_params["resize_conv_size"] // 2 - embed_conv_size // 2
         embed_end_indx = embed_start_indx + embed_conv_size
 
         resized_conv_kernel[idx] = conv_kernel[
@@ -341,7 +340,7 @@ def resize_and_calc_support(conv_kernel, conv_kernel_convolved, gcf_parms, grid_
                     embed_start_indx[1] : embed_end_indx[1],
                 ]
             )
-            / (gcf_parms["oversampling"][0] * gcf_parms["oversampling"][1])
+            / (gcf_params["oversampling"][0] * gcf_params["oversampling"][1])
         )
         resized_conv_kernel[idx] = resized_conv_kernel[idx] / normalize_factor
 
@@ -362,7 +361,7 @@ def resize_and_calc_support(conv_kernel, conv_kernel_convolved, gcf_parms, grid_
                     embed_start_indx[1] : embed_end_indx[1],
                 ]
             )
-            / (gcf_parms["oversampling"][0] * gcf_parms["oversampling"][1])
+            / (gcf_params["oversampling"][0] * gcf_params["oversampling"][1])
         )
         resized_conv_kernel_convolved[idx] = (
             resized_conv_kernel_convolved[idx] / normalize_factor
@@ -433,19 +432,19 @@ def calc_conv_size(sub_a_term, imsize, support_cut_level, oversampling, max_supp
     return [support_x, support_y]
 
 
-def make_phase_gradient(field_phase_dir, gcf_parms, grid_parms):
+def make_phase_gradient(field_phase_dir, gcf_params, grid_params):
     from astropy.wcs import WCS
     import math
 
     rad_to_deg = 180 / np.pi
 
-    # print(' make_phase_gradient ',field_phase_dir,gcf_parms,grid_parms)
+    # print(' make_phase_gradient ',field_phase_dir,gcf_params,grid_params)
 
-    phase_center = gcf_parms["phase_direction"].values
+    phase_center = gcf_params["phase_direction"].values
     w = WCS(naxis=2)
-    w.wcs.crpix = grid_parms["image_size_padded"] // 2
-    w.wcs.cdelt = grid_parms["cell_size"] * rad_to_deg
-    # w.wcs.cdelt = [grid_parms['cell_size'][0]*rad_to_deg, grid_parms['cell_size'][1]*rad_to_deg]
+    w.wcs.crpix = grid_params["image_size_padded"] // 2
+    w.wcs.cdelt = grid_params["cell_size"] * rad_to_deg
+    # w.wcs.cdelt = [grid_params['cell_size'][0]*rad_to_deg, grid_params['cell_size'][1]*rad_to_deg]
     w.wcs.crval = np.array(phase_center) * rad_to_deg
     w.wcs.ctype = ["RA---SIN", "DEC--SIN"]
 
@@ -453,18 +452,18 @@ def make_phase_gradient(field_phase_dir, gcf_parms, grid_parms):
     # print(w.all_world2pix(field_phase_dir*rad_to_deg, 1))
     pix_dist = (
         np.array(w.all_world2pix(field_phase_dir * rad_to_deg, 1))
-        - grid_parms["image_size_padded"] // 2
+        - grid_params["image_size_padded"] // 2
     )
     pix = (
         -(pix_dist)
         * 2
         * np.pi
-        / (grid_parms["image_size_padded"] * gcf_parms["oversampling"])
+        / (grid_params["image_size_padded"] * gcf_params["oversampling"])
     )
-    # print('pix_dist',pix_dist, pix, gcf_parms['resize_conv_size'])
+    # print('pix_dist',pix_dist, pix, gcf_params['resize_conv_size'])
     # print('%%%%%%%%%%%%%%%%')
 
-    image_size = gcf_parms["resize_conv_size"]
+    image_size = gcf_params["resize_conv_size"]
     center_indx = image_size // 2
     x = np.arange(-center_indx[0], image_size[0] - center_indx[0])
     y = np.arange(-center_indx[1], image_size[1] - center_indx[1])

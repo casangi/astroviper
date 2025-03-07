@@ -5,27 +5,27 @@ from numba import jit
 import numba
 import xarray as xr
 
-# from graphviper.parameter_checking.check_parms import check_sel_parms
-from astroviper.utils.check_parms import check_parms, check_sel_parms
+# from graphviper.parameter_checking.check_params import check_sel_params
+from astroviper.utils.check_params import check_params, check_sel_params
 from astroviper._domain._imaging._check_imaging_parameters import (
-    _check_grid_parms,
-    _check_norm_parms,
+    _check_grid_params,
+    _check_norm_params,
 )
 import copy
 
 
-def _fft_norm_img_xds(img_xds, gcf_xds, grid_parms, norm_parms, sel_parms):
-    _sel_parms = copy.deepcopy(sel_parms)
-    _grid_parms = copy.deepcopy(grid_parms)
-    assert _check_grid_parms(_grid_parms), "######### ERROR: grid_parms checking failed"
+def _fft_norm_img_xds(img_xds, gcf_xds, grid_params, norm_params, sel_params):
+    _sel_params = copy.deepcopy(sel_params)
+    _grid_params = copy.deepcopy(grid_params)
+    assert _check_grid_params(_grid_params), "######### ERROR: grid_params checking failed"
 
-    _norm_parms = copy.deepcopy(norm_parms)
-    assert _check_norm_parms(_norm_parms), "######### ERROR: norm_parms checking failed"
+    _norm_params = copy.deepcopy(norm_params)
+    assert _check_norm_params(_norm_params), "######### ERROR: norm_params checking failed"
 
     if "PRIMARY_BEAM" in img_xds:
-        data_group_in, data_group_out = check_sel_parms(
+        data_group_in, data_group_out = check_sel_params(
             img_xds,
-            _sel_parms,
+            _sel_params,
             default_data_group_out={
                 "imaging": {
                     "point_spread_function": "POINT_SPREAD_FUNCTION",
@@ -35,9 +35,9 @@ def _fft_norm_img_xds(img_xds, gcf_xds, grid_parms, norm_parms, sel_parms):
         )
         data_group_out["primary_beam"] = "PRIMARY_BEAM"
     else:
-        data_group_in, data_group_out = check_sel_parms(
+        data_group_in, data_group_out = check_sel_params(
             img_xds,
-            _sel_parms,
+            _sel_params,
             default_data_group_out={
                 "imaging": {
                     "primary_beam": "PRIMARY_BEAM",
@@ -63,10 +63,10 @@ def _fft_norm_img_xds(img_xds, gcf_xds, grid_parms, norm_parms, sel_parms):
         if data_variable in data_group_in.keys():
 
             if (data_variable == "aperture") and ("APERTURE" in img_xds):
-                # print('1.',data_group_out["aperture_grid_sum_weight"],img_xds[data_group_in[data_variable]].shape,_grid_parms['image_size'])
+                # print('1.',data_group_out["aperture_grid_sum_weight"],img_xds[data_group_in[data_variable]].shape,_grid_params['image_size'])
                 image = _remove_padding(
                     _ifft_uv_to_lm(img_xds[data_group_in[data_variable]].values),
-                    _grid_parms["image_size"],
+                    _grid_params["image_size"],
                 ).real
                 sum_weight_copy = copy.deepcopy(
                     img_xds[data_group_out["aperture_normalization"]].values
@@ -75,12 +75,12 @@ def _fft_norm_img_xds(img_xds, gcf_xds, grid_parms, norm_parms, sel_parms):
                 ##Don't mutate inputs, therefore do deep copy (https://docs.dask.org/en/latest/delayed-best-practices.html).
                 sum_weight_copy[sum_weight_copy == 0] = 1
                 image = np.sqrt(np.abs(image / sum_weight_copy[:, :, None, None]))
-                if _norm_parms["pb_limit"] > 0:
-                    image[image < _norm_parms["pb_limit"]] = np.nan  # 0.0
+                if _norm_params["pb_limit"] > 0:
+                    image[image < _norm_params["pb_limit"]] = np.nan  # 0.0
             else:
                 image = _remove_padding(
                     _ifft_uv_to_lm(img_xds[data_group_in[data_variable]].values),
-                    _grid_parms["image_size"],
+                    _grid_params["image_size"],
                 )
                 sum_weight = img_xds[
                     data_group_out[sum_of_weight_pair[data_variable]]
@@ -92,9 +92,9 @@ def _fft_norm_img_xds(img_xds, gcf_xds, grid_parms, norm_parms, sel_parms):
                 direction = "forward"
 
                 if data_variable == "uv_sampling":
-                    norm_parms["norm_type"] = "flat_noise"
+                    norm_params["norm_type"] = "flat_noise"
                 if data_variable == "visibility":
-                    norm_parms["norm_type"] = "flat_sky"
+                    norm_params["norm_type"] = "flat_sky"
                 image = _normalize(
                     image,
                     sum_weight,
@@ -102,7 +102,7 @@ def _fft_norm_img_xds(img_xds, gcf_xds, grid_parms, norm_parms, sel_parms):
                     oversampling,
                     ps_correcting_image,
                     direction,
-                    norm_parms=_norm_parms,
+                    norm_params=_norm_params,
                 )
             img_xds[data_group_out[fft_pair[data_variable]]] = xr.DataArray(
                 image, dims=("frequency", "polarization", "l", "m")
@@ -149,7 +149,7 @@ def _normalize(
     oversampling,
     ps_correcting_image,
     direction,
-    norm_parms,
+    norm_params,
 ):
     """
     PB normalization on the cubes
@@ -170,7 +170,7 @@ def _normalize(
     import numpy as np
     import copy
 
-    norm_type = norm_parms["norm_type"]
+    norm_type = norm_params["norm_type"]
 
     def normalize_image(
         image, sum_weights, normalizing_image, oversampling, correct_oversampling
@@ -226,8 +226,8 @@ def _normalize(
                 ps_correcting_image[None, None, :, :] * primary_beam * primary_beam
             )
 
-            # print(sel_parms['data_group_in']['weight_pb'])
-            # print('$%$%',img_dataset[sel_parms['data_group_in']['weight_pb']].data.compute())
+            # print(sel_params['data_group_in']['weight_pb'])
+            # print('$%$%',img_dataset[sel_params['data_group_in']['weight_pb']].data.compute())
 
             normalized_image = normalize_image(
                 image,
@@ -253,10 +253,10 @@ def _normalize(
         #            )
         # normalized_image = image
 
-        if norm_parms["pb_limit"] > 0:
-            normalized_image[primary_beam < norm_parms["pb_limit"]] = np.nan  # 0.0
+        if norm_params["pb_limit"] > 0:
+            normalized_image[primary_beam < norm_params["pb_limit"]] = np.nan  # 0.0
 
-        if norm_parms["single_precision"]:
+        if norm_params["single_precision"]:
             normalized_image = (normalized_image.astype(np.float32)).astype(np.float64)
 
         return normalized_image
