@@ -95,8 +95,8 @@ def _compute_w_single_beam(xds):
     return w.astype(xds["sky"].dtype)
 
 
-def _feather(input_parms):
-    # display(HTML(dict_to_html(input_parms)))
+def _feather(input_params):
+    # display(HTML(dict_to_html(input_params)))
 
     def _compute_w_multiple_beams(xds, uv):
         """xds is the single dish xds"""
@@ -141,26 +141,26 @@ def _feather(input_parms):
         # w is an np.array
         return w
 
-    # if input_parms["input_data"] is None: #Load
+    # if input_params["input_data"] is None: #Load
     dtypes = {"sd": np.int32, "int": np.int32}
     for k in ["sd", "int"]:
         # the "data_selection" key is set in
         # interpolate_data_coords_onto_parallel_coords()
-        # print("data store", input_parms["input_data_store"][k])
-        # print("block_des", input_parms["data_selection"][k])
+        # print("data store", input_params["input_data_store"][k])
+        # print("block_des", input_params["data_selection"][k])
         xds = load_image(
-            input_parms["input_data_store"][k],
-            block_des=input_parms["data_selection"][k],
+            input_params["input_data_store"][k],
+            block_des=input_params["data_selection"][k],
         )
         # print("load image for", k, "complete")
         # print("completed load_image()")
         fft_plane = (
-            xds["sky"].dims.index(input_parms["axes"][0]),
-            xds["sky"].dims.index(input_parms["axes"][1]),
+            xds["sky"].dims.index(input_params["axes"][0]),
+            xds["sky"].dims.index(input_params["axes"][1]),
         )
         # print("completed fft_plane")
         # else:
-        #   img_xds = input_parms["input_data"]['img'] #In memory
+        #   img_xds = input_params["input_data"]['img'] #In memory
         aperture = _fft_lm_to_uv(xds["sky"], fft_plane)
         # print("completed _fft_im_to_uv()")
         dtypes[k] = xds["sky"].dtype
@@ -173,13 +173,13 @@ def _feather(input_parms):
     print("fft loop complete")
     mytype = dtypes["sd"] if dtypes["sd"] < dtypes["int"] else dtypes["int"]
     w = (
-        _compute_w_multiple_beams(sd_xds, input_parms["uv"])
-        if input_parms["w"] is None
-        else input_parms["w"]
+        _compute_w_multiple_beams(sd_xds, input_params["uv"])
+        if input_params["w"] is None
+        else input_params["w"]
     )
     one_minus_w = 1 - w
-    s = input_parms["s"]
-    beam_ratio = input_parms["beam_ratio"]
+    s = input_params["s"]
+    beam_ratio = input_params["beam_ratio"]
     if beam_ratio is None:
         if "beam" in int_xds.data_vars:
             # compute area for multiple beams
@@ -408,22 +408,22 @@ def feather(
     # debug = read_image(zn)
     # print("beam shape", debug.beam.shape)
 
-    input_parms = {}
-    input_parms["input_data_store"] = {"sd": lowres, "int": highres}
-    input_parms["axes"] = ("l", "m")  # (3,4)
+    input_params = {}
+    input_params["input_data_store"] = {"sd": lowres, "int": highres}
+    input_params["axes"] = ("l", "m")  # (3,4)
     # beam_ratio should be computed inside _feather if
     # at least one image has multiple beams
-    input_parms["beam_ratio"] = beam_ratio
-    input_parms["w"] = w
-    input_parms["uv"] = uv
-    input_parms["s"] = 1
+    input_params["beam_ratio"] = beam_ratio
+    input_params["w"] = w
+    input_params["uv"] = uv
+    input_params["s"] = 1
 
     t0 = time.time()
     graph = map(
         input_data=input_data,
         node_task_data_mapping=node_task_data_mapping,
         node_task=_feather,
-        input_params=input_parms,
+        input_params=input_params,
         in_memory_compute=False,
     )
     print("time to create graph", time.time() - t0)
