@@ -29,6 +29,7 @@ import toolviper.utils.logger as logger
 _sky = "SKY"
 _beam = "BEAM"
 
+
 def _compute_u_v(xds):
     shape = [xds.dims["l"], xds.dims["m"]]
     # sics = np.abs(xds.attrs["direction"]["reference"]["cdelt"])
@@ -129,7 +130,6 @@ def _feather(input_params):
     uv = _compute_u_v(sd_xds)
     w = _compute_w_multiple_beams(sd_xds, uv)
 
-
     one_minus_w = 1 - w
     s = input_params["s"]
     if _beam in int_xds.data_vars:
@@ -155,9 +155,7 @@ def _feather(input_params):
     beam_ratio_values = int_ba.values / sd_ba.values
     # use interferometer coords
     beam_ratio = xr.DataArray(
-        beam_ratio_values,
-        dims=int_ba.dims,
-        coords=int_ba.coords.copy()
+        beam_ratio_values, dims=int_ba.dims, coords=int_ba.coords.copy()
     )
 
     beam_ratio = np.expand_dims(beam_ratio, -1)
@@ -370,7 +368,6 @@ def feather_v2(
     if to_disk:
         # create new xarray.Dataset with coordinates same as int_xds
         # but with no data
-
 
         """
         from xradio.image import make_empty_sky_image
