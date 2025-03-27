@@ -149,13 +149,22 @@ def _feather(input_params):
         error_message = "Unable to find BEAM data variable in single dish image."
         logger.error(error_message)
         raise Exception(error_message)
-    beam_ratio = int_ba / sd_ba
+    # need to use values becuase the obs times will in general be different
+    # which would cause a resulting shape with the time dimension having
+    # length 0
+    beam_ratio_values = int_ba.values / sd_ba.values
+    # use interferometer coords
+    beam_ratio = xr.DataArray(
+        beam_ratio_values,
+        dims=int_ba.dims,
+        coords=int_ba.coords.copy()
+    )
+
     beam_ratio = np.expand_dims(beam_ratio, -1)
     beam_ratio = np.expand_dims(beam_ratio, -1)
 
     term = (one_minus_w * int_ap + s * beam_ratio * sd_ap) / (one_minus_w + s * w)
     feather_npary = _ifft_uv_to_lm(term, fft_plane).astype(mytype)
-
     from xradio.image._util._zarr.zarr_low_level import write_chunk
 
     from xradio.image import make_empty_sky_image
@@ -237,7 +246,7 @@ def feather_v2(
         If str, an image file by that name will be read from disk.
         If xr.Dataset, that xds will be used for the single dish image.
     """
-
+    print("hi")
     if outim is not None:
         if type(outim) != dict:
             raise ValueError(
