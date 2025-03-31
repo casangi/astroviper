@@ -57,7 +57,7 @@ def _feather(input_params):
     def _compute_w_multiple_beams(xds, uv):
         """xds is the single dish xds"""
         beams = xds[_beam]
-        #logger.debug("beams " + str(beams))
+        # logger.debug("beams " + str(beams))
         w = np.zeros(xds[_sky].shape)
         bunit = beams.attrs["units"]
         bmaj = beams.sel(beam_param="major")
