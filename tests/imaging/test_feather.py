@@ -1,7 +1,7 @@
 # run using eg
 # python -m pytest ../astroviper/tests/imaging/test_feather.py
 
-from astroviper.imaging import feather_v2
+from astroviper.imaging import feather
 import copy
 import dask.array as da
 import numpy as np
@@ -129,7 +129,7 @@ class FeatherTest(unittest.TestCase):
                 cores=cores, memory_limit="8.0GiB",
                 log_params=log_params, worker_log_params=worker_log_params
             )
-            feather_v2(
+            feather(
                 outim={"name": self.feather_out, "format": "zarr", "overwrite": True},
                 highres=self.int_zarr, lowres=self.sd_zarr, sdfactor=1
             )

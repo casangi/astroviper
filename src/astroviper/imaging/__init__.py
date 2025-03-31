@@ -1,5 +1,5 @@
 # from .feather import feather
-from .feather_v2 import feather_v2
+from .feather import feather
 
 __all__ = [
 #    "feather",
