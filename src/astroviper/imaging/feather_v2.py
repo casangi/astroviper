@@ -57,15 +57,15 @@ def _feather(input_params):
     def _compute_w_multiple_beams(xds, uv):
         """xds is the single dish xds"""
         beams = xds[_beam]
-        logger.debug("beams " + str(beams))
+        #logger.debug("beams " + str(beams))
         w = np.zeros(xds[_sky].shape)
         bunit = beams.attrs["units"]
         bmaj = beams.sel(beam_param="major")
-        logger.debug("bmaj orig shape" + str(bmaj.shape))
+        # logger.debug("bmaj orig shape" + str(bmaj.shape))
         # add l and m dims
         bmaj = np.expand_dims(bmaj, -1)
         bmaj = np.expand_dims(bmaj, -1)
-        logger.debug("bmaj shape " + str(bmaj.shape))
+        # logger.debug("bmaj shape " + str(bmaj.shape))
         alpha = bmaj * u.Unit(bunit)
         alpha = alpha.to(u.rad).value
         bmin = beams.sel(beam_param="minor")
@@ -120,11 +120,11 @@ def _feather(input_params):
         if k == "int":
             int_ap = aperture
             int_xds = xds
-            logger.debug("int_xds beam " + str(int_xds[_beam]))
+            # logger.debug("int_xds beam " + str(int_xds[_beam]))
         else:
             sd_ap = aperture
             sd_xds = xds
-            logger.debug("sd_xds beam " + str(sd_xds[_beam]))
+            # logger.debug("sd_xds beam " + str(sd_xds[_beam]))
     mytype = dtypes["sd"] if dtypes["sd"] < dtypes["int"] else dtypes["int"]
 
     uv = _compute_u_v(sd_xds)
@@ -189,7 +189,6 @@ def _feather(input_params):
     featherd_img_chunk_xds[_sky] = xr.DataArray(
         feather_npary, dims=["time", "frequency", "polarization", "l", "m"]
     )
-
     parallel_dims_chunk_id = dict(
         zip(input_params["parallel_dims"], input_params["chunk_indices"])
     )
@@ -244,7 +243,6 @@ def feather_v2(
         If str, an image file by that name will be read from disk.
         If xr.Dataset, that xds will be used for the single dish image.
     """
-    print("hi")
     if outim is not None:
         if type(outim) != dict:
             raise ValueError(
@@ -336,33 +334,6 @@ def feather_v2(
     )
     # display(HTML(dict_to_html(node_task_data_mapping)))
 
-    # DEBUG
-    # if w:
-    #    from matplotlib import pyplot as plt
-    #    plt.rcParams["figure.figsize"] = [7.00, 3.50]
-    #    plt.rcParams["figure.autolayout"] = True
-    #    im = plt.imshow(w, cmap="copper_r")
-    #    plt.colorbar(im)
-    #    plt.show()
-
-    # zn = highres
-    # zo = lowres
-    # DEBUG
-    # imgs = [int_xds, sd_xds]
-    # if "beam" in int_xds.data_vars:
-    #    zn = "int_mb.zarr"
-    #    if not os.path.exists(zn):
-    #        write_image(int_xds, zn, "zarr")
-    #
-    # if "beam" in sd_xds.data_vars:
-    #    zo = "sd_mb_1.zarr"
-    #    if not os.path.exists(zo):
-    #        write_image(sd_xds, zo, "zarr")
-
-    # zarr_names = [zn, zo]
-    # debug = read_image(zn)
-    # print("beam shape", debug.beam.shape)
-
     # Create empty image on disk
     to_disk = True
     if to_disk:
@@ -391,6 +362,9 @@ def feather_v2(
         featherd_img_xds = xr.Dataset(coords=int_xds.coords)
         featherd_img_xds.attrs = copy.deepcopy(int_xds.attrs)
         featherd_img_xds.attrs["active_mask"] = ""
+        # we cannot build the beam in parallel because its parallel dims are no l, m
+        # so just copy the whole thing here
+        featherd_img_xds[_beam] = int_xds[_beam].copy()
 
         write_image(
             featherd_img_xds,
@@ -423,6 +397,9 @@ def feather_v2(
 
         xds_dims = dict(int_xds.dims)
         # right now the keys are lower case, but the associated values are all caps
+        # the beam cannot be written in chunks because
+        # ValueError: could not broadcast input array from shape (1,4,1,3) into shape (1,4,1,1024,1024)
+
         data_variables = ["sky"]
         data_varaibles_and_dims_sel = {
             key: image_data_variables_and_dims[key] for key in data_variables
