@@ -395,7 +395,7 @@ def feather_v2(
             logger.error(error_message)
             raise Exception(error_message)
 
-        xds_dims = dict(int_xds.dims)
+        xds_dims = dict(int_xds.sizes)
         # right now the keys are lower case, but the associated values are all caps
         # the beam cannot be written in chunks because
         # ValueError: could not broadcast input array from shape (1,4,1,3) into shape (1,4,1,1024,1024)
