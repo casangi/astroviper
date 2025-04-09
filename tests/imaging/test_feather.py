@@ -25,7 +25,7 @@ class FeatherTest(unittest.TestCase):
     def setUp(self):
         import importlib.metadata
         print("xradio version", importlib.metadata.version("xradio"))
-        print("astroviper version", importlib.metadata.version("astroviper"))
+        print("grpahviper version", importlib.metadata.version("graphviper"))
 
     def tearDown(self):
         for f in [
