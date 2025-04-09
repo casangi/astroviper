@@ -23,7 +23,9 @@ class FeatherTest(unittest.TestCase):
     sd_zarr = "sd.zarr"
 
     def setUp(self):
-        pass
+        import importlib.metadata
+        print("xradio version", importlib.metadata.version("xradio"))
+        print("astroviper version", importlib.metadata.version("astroviper"))
 
     def tearDown(self):
         for f in [
