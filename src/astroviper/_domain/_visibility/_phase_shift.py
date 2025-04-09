@@ -71,9 +71,8 @@ def _phase_shift_ms_xds(ms_xds, shift_params, sel_params):
             _shift_params["new_phase_direction"]
         )
 
-    field_phase_xda = ms_xds[data_group_in["correlated_data"]].attrs[
-        "field_and_source_xds"
-    ]["FIELD_PHASE_CENTER"]
+    #!!!!!!!!!!!!!!! Add data group
+    field_phase_xda = ms_xds.ms.get_field_and_source_xds()["FIELD_PHASE_CENTER"]
 
     # Add check to make sure frames and units are the same.
     # Add check for correctly formated measures.
@@ -139,7 +138,6 @@ def _phase_shift_ms_xds(ms_xds, shift_params, sel_params):
             phasor * ms_xds[data_group_in["correlated_data"]]
         )
 
-    from xradio.measurement_set import MeasurementSetXds
     new_field_and_source_xds = xr.Dataset()
     new_field_and_source_xds["FIELD_PHASE_CENTER"] = _shift_params["new_phase_direction"]
     ms_xds[data_group_out["correlated_data"]].attrs["field_and_source_xds"] = new_field_and_source_xds
