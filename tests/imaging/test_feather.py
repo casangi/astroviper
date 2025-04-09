@@ -23,9 +23,7 @@ class FeatherTest(unittest.TestCase):
     sd_zarr = "sd.zarr"
 
     def setUp(self):
-        import importlib.metadata
-        print("xradio version", importlib.metadata.version("xradio"))
-        print("grpahviper version", importlib.metadata.version("graphviper"))
+        pass
 
     def tearDown(self):
         for f in [
@@ -74,8 +72,7 @@ class FeatherTest(unittest.TestCase):
         )
         sky_dims = list(skel_xds.dims)
         # the if shouldn't be necessary, but currently is for CI to pass
-        if "beam_param" in sky_dims:
-            sky_dims.remove("beam_param")
+        sky_dims.remove("beam_param")
         coords = ["time", "frequency", "polarization", "l", "m"]
         sky_coords = {}
         for c in coords:
