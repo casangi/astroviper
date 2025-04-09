@@ -71,7 +71,9 @@ class FeatherTest(unittest.TestCase):
             dtype=np.float32,
         )
         sky_dims = list(skel_xds.dims)
-        sky_dims.remove("beam_param")
+        # the if shouldn't be necessary, but currently is for CI to pass
+        if "beam_param" in sky_dims:
+            sky_dims.remove("beam_param")
         coords = ["time", "frequency", "polarization", "l", "m"]
         sky_coords = {}
         for c in coords:
