@@ -20,40 +20,20 @@ import shutil
 import time
 from typing import Union
 import xarray as xr
-from xradio.image import load_image
-from xradio.image import make_empty_aperture_image
 from xradio.image import read_image
+from xradio.image import make_empty_aperture_image
+from xradio.image import load_image
 from xradio.image import write_image
-from xradio.image._util.common import _set_multibeam_array
+import toolviper.utils.logger as logger
 
-
-def _init_dask():
-    # from graphviper.dask.client import local_client
-    # viper_client = local_client(cores=2, memory_limit="4GB")
-
-    # dask.config.set(scheduler="synchronous")
-    # dask.config.set(memory_limit="8GB")
-    dask.config.set(scheduler="threads")
-    # dask.config.set(scheduler="processes")
-
-
-def _has_single_beam(xds):
-    return "beam" in xds.attrs and xds.attrs["beam"]
-
-
-def _beam_area_single_beam(xds):
-    beam = xds.attrs["beam"]
-    bmaj = beam["major"]
-    major = u.Quantity(f"{bmaj['value']}{bmaj['units']}")
-    bmin = beam["minor"]
-    minor = u.Quantity(f"{bmin['value']}{bmin['units']}")
-    area = major * minor
-    return area.to(u.rad * u.rad)
+_sky = "SKY"
+_beam = "BEAM"
 
 
 def _compute_u_v(xds):
     shape = [xds.dims["l"], xds.dims["m"]]
-    sics = np.abs(xds.attrs["direction"]["reference"]["cdelt"])
+    # sics = np.abs(xds.attrs["direction"]["reference"]["cdelt"])
+    sics = np.abs(2 * [xds.l[1] - xds.l[0]])
     w_xds = make_empty_aperture_image(
         phase_center=[0, 0],
         image_size=shape,
@@ -71,53 +51,29 @@ def _compute_u_v(xds):
     return (u, v)
 
 
-def _compute_w_single_beam(xds):
-    """xds is the single dish (low res) xds"""
-    (uu, vv) = _compute_u_v(xds)
-    pi2 = np.pi * np.pi
-    shape = [xds.dims["l"], xds.dims["m"]]
-    w = np.zeros(shape)
-    bmaj = xds.attrs["beam"]["major"]
-    alpha = u.Quantity(f"{bmaj['value']}{bmaj['units']}")
-    alpha = alpha.to(u.rad).value
-    bmin = xds.attrs["beam"]["minor"]
-    beta = u.Quantity(f"{bmin['value']}{bmin['units']}")
-    beta = beta.to(u.rad).value
-    bpa = xds.attrs["beam"]["pa"]
-    phi = u.Quantity(f"{bpa['value']}{bpa['units']}")
-    phi = phi.to(u.rad).value
-    alpha2 = alpha * alpha
-    beta2 = beta * beta
-    aterm2 = (uu * np.sin(phi) - vv * np.cos(phi)) ** 2
-    bterm2 = (uu * np.cos(phi) + vv * np.sin(phi)) ** 2
-    w = np.exp(-pi2 / 4.0 / np.log(2) * (alpha2 * aterm2 + beta2 * bterm2))
-    # w is an np.array
-    return w.astype(xds["sky"].dtype)
-
-
-def _feather(input_parms):
-    # display(HTML(dict_to_html(input_parms)))
+def _feather(input_params):
+    # display(HTML(dict_to_html(input_params)))
 
     def _compute_w_multiple_beams(xds, uv):
         """xds is the single dish xds"""
-        beams = xds["beam"]
-        # print("beams shape", beams.shape)
-        w = np.zeros(xds["sky"].shape)
+        beams = xds[_beam]
+        # logger.debug("beams " + str(beams))
+        w = np.zeros(xds[_sky].shape)
         bunit = beams.attrs["units"]
         bmaj = beams.sel(beam_param="major")
+        # logger.debug("bmaj orig shape" + str(bmaj.shape))
         # add l and m dims
         bmaj = np.expand_dims(bmaj, -1)
         bmaj = np.expand_dims(bmaj, -1)
-        # print("bmaj shape", bmaj.shape)
+        # logger.debug("bmaj shape " + str(bmaj.shape))
         alpha = bmaj * u.Unit(bunit)
         alpha = alpha.to(u.rad).value
         bmin = beams.sel(beam_param="minor")
         bmin = np.expand_dims(bmin, -1)
-        bmin - np.expand_dims(bmin, -1)
+        bmin = np.expand_dims(bmin, -1)
         beta = bmin * u.Unit(bunit)
         beta = beta.to(u.rad).value
         bpa = beams.sel(beam_param="pa")
-        # print("bpa shape", bpa.shape)
         bpa = np.expand_dims(bpa, -1)
         bpa = np.expand_dims(bpa, -1)
         phi = bpa * u.Unit(bunit)
@@ -130,109 +86,143 @@ def _feather(input_parms):
         uu, vv = uv
         uu = uu[np.newaxis, np.newaxis, np.newaxis, :, :]
         vv = vv[np.newaxis, np.newaxis, np.newaxis, :, :]
-        # print("u v shape", uu.shape, vv.shape)
         aterm2 = (uu * np.sin(phi) - vv * np.cos(phi)) ** 2
-        # print("aterm2, shape",aterm2.shape)
         bterm2 = (uu * np.cos(phi) + vv * np.sin(phi)) ** 2
-        # print("bterm2 shape", bterm2.shape)
         w = np.exp(
             -np.pi * np.pi / 4.0 / np.log(2) * (alpha2 * aterm2 + beta2 * bterm2)
         )
         # w is an np.array
         return w
 
-    # if input_parms["input_data"] is None: #Load
+    # if input_params["input_data"] is None: #Load
     dtypes = {"sd": np.int32, "int": np.int32}
     for k in ["sd", "int"]:
         # the "data_selection" key is set in
         # interpolate_data_coords_onto_parallel_coords()
-        # print("data store", input_parms["input_data_store"][k])
-        # print("block_des", input_parms["data_selection"][k])
+        # print("data store", input_params["input_data_store"][k])
+        # print("block_des", input_params["data_selection"][k])
         xds = load_image(
-            input_parms["input_data_store"][k],
-            block_des=input_parms["data_selection"][k],
+            input_params["input_data_store"][k],
+            block_des=input_params["data_selection"][k],
         )
         # print("load image for", k, "complete")
         # print("completed load_image()")
         fft_plane = (
-            xds["sky"].dims.index(input_parms["axes"][0]),
-            xds["sky"].dims.index(input_parms["axes"][1]),
+            xds[_sky].dims.index(input_params["axes"][0]),
+            xds[_sky].dims.index(input_params["axes"][1]),
         )
         # print("completed fft_plane")
         # else:
-        #   img_xds = input_parms["input_data"]['img'] #In memory
-        aperture = _fft_lm_to_uv(xds["sky"], fft_plane)
+        #   img_xds = input_params["input_data"]['img'] #In memory
+        aperture = _fft_lm_to_uv(xds[_sky], fft_plane)
         # print("completed _fft_im_to_uv()")
-        dtypes[k] = xds["sky"].dtype
+        dtypes[k] = xds[_sky].dtype
         if k == "int":
             int_ap = aperture
             int_xds = xds
+            # logger.debug("int_xds beam " + str(int_xds[_beam]))
         else:
             sd_ap = aperture
             sd_xds = xds
-    print("fft loop complete")
+            # logger.debug("sd_xds beam " + str(sd_xds[_beam]))
     mytype = dtypes["sd"] if dtypes["sd"] < dtypes["int"] else dtypes["int"]
-    w = (
-        _compute_w_multiple_beams(sd_xds, input_parms["uv"])
-        if input_parms["w"] is None
-        else input_parms["w"]
-    )
+
+    uv = _compute_u_v(sd_xds)
+    w = _compute_w_multiple_beams(sd_xds, uv)
+
     one_minus_w = 1 - w
-    s = input_parms["s"]
-    beam_ratio = input_parms["beam_ratio"]
-    if beam_ratio is None:
-        if "beam" in int_xds.data_vars:
-            # compute area for multiple beams
-            int_ba = int_xds["beam"].sel(beam_param="major") * int_xds["beam"].sel(
-                beam_param="minor"
-            )
-        else:
-            int_ba = _beam_area_single_beam(int_xds)
+    s = input_params["s"]
+    if _beam in int_xds.data_vars:
+        int_ba = int_xds[_beam].sel(beam_param="major") * int_xds[_beam].sel(
+            beam_param="minor"
+        )
+    else:
+        error_message = "Unable to find BEAM data variable in interferometer image."
+        logger.error(error_message)
+        raise Exception(error_message)
 
-        if "beam" in sd_xds.data_vars:
-            # compute area for multiple beams
-            sd_ba = sd_xds["beam"].sel(beam_param="major") * sd_xds["beam"].sel(
-                beam_param="minor"
-            )
-        else:
-            sd_ba = _beam_area_single_beam(sd_xds)
-        beam_ratio = int_ba / sd_ba
-        beam_ratio = np.expand_dims(beam_ratio, -1)
-        beam_ratio = np.expand_dims(beam_ratio, -1)
+    if _beam in sd_xds.data_vars:
+        sd_ba = sd_xds[_beam].sel(beam_param="major") * sd_xds[_beam].sel(
+            beam_param="minor"
+        )
+    else:
+        error_message = "Unable to find BEAM data variable in single dish image."
+        logger.error(error_message)
+        raise Exception(error_message)
+    # need to use values becuase the obs times will in general be different
+    # which would cause a resulting shape with the time dimension having
+    # length 0
+    beam_ratio_values = int_ba.values / sd_ba.values
+    # use interferometer coords
+    beam_ratio = xr.DataArray(
+        beam_ratio_values, dims=int_ba.dims, coords=int_ba.coords.copy()
+    )
 
-    # print("one_minus_w shape", one_minus_w.shape)
-    # print("int_ap shape", int_ap.shape)
-    # print("beam ratio shape", beam_ratio.shape)
-    # print("sd_ap shape", sd_ap.shape)
-    # print("w shape", w.shape)
+    beam_ratio = np.expand_dims(beam_ratio, -1)
+    beam_ratio = np.expand_dims(beam_ratio, -1)
+
     term = (one_minus_w * int_ap + s * beam_ratio * sd_ap) / (one_minus_w + s * w)
     feather_npary = _ifft_uv_to_lm(term, fft_plane).astype(mytype)
-    feather_xds = copy.deepcopy(int_xds)
-    # display(feather_xds)
-    feather_xrary = xr.DataArray(
-        da.from_array(feather_npary, chunks=int_xds["sky"].shape),
-        coords=int_xds["sky"].coords,
-        dims=int_xds["sky"].dims,
+    from xradio.image._util._zarr.zarr_low_level import write_chunk
+
+    from xradio.image import make_empty_sky_image
+
+    """
+    # FIXME lon/latpole is not the phase center
+    phase_center = [
+        sd_xds.attrs["direction"]["longpole"]["value"],
+        int_xds.attrs["direction"]["latpole"]["value"],
+    ]
+
+    featherd_img_chunk_xds = make_empty_sky_image(
+        phase_center=phase_center,
+        image_size=[int_xds.sizes["l"], int_xds.sizes["m"]],
+        cell_size=int_xds.attrs["direction"]["reference"]["cdelt"],
+        chan_coords=int_xds.frequency.values,
+        pol_coords=int_xds.polarization.values,
+        time_coords=[0],
     )
     """
-    feather_xrary = xr.DataArray(
-        da.from_array(feather_npary, chunks=int_xds["sky"].shape),
-        coords=int_xds["sky"].coords,
-        dims=int_xds["sky"].dims
+
+    featherd_img_chunk_xds = xr.Dataset(coords=int_xds.coords)
+    # we need an xradio function to return an ordered list of dimensions
+    featherd_img_chunk_xds[_sky] = xr.DataArray(
+        feather_npary, dims=["time", "frequency", "polarization", "l", "m"]
     )
-    """
-    feather_xrary.rename("sky")
-    feather_xds["sky"] = feather_xrary
-    # print("sky shape", feather_xds["sky"].shape)
-    return feather_xds
+    parallel_dims_chunk_id = dict(
+        zip(input_params["parallel_dims"], input_params["chunk_indices"])
+    )
+
+    # print('input_params["zarr_meta"]',input_params["zarr_meta"])
+    if input_params["to_disk"]:
+        for data_variable, meta in input_params["zarr_meta"].items():
+            write_chunk(
+                featherd_img_chunk_xds,
+                meta,
+                parallel_dims_chunk_id,
+                input_params["compressor"],
+                input_params["image_file"],
+            )
+
+        results_dict = {}
+        return results_dict
+    else:
+        results_dict = {"featherd_img_chunk_xds": featherd_img_chunk_xds}
+        return featherd_img_chunk_xds
+
+
+from numcodecs import Blosc
 
 
 def feather(
     outim: Union[dict, None],
-    highres: Union[str, xr.Dataset],
-    lowres: Union[str, xr.Dataset],
+    highres: str,
+    lowres: str,
     sdfactor: float,
     selection: dict = {},
+    memory_per_thread=None,
+    thread_info=None,
+    compressor=Blosc(cname="lz4", clevel=5),
 ):
     """
     Create an image from a single dish and interferometer image using the
@@ -276,7 +266,6 @@ def feather(
                     "overwritten. To overwrite it, set outim['overwrite'] = True"
                 )
 
-    _init_dask()
     # Read in input images
     # single dish image
     sd_xds = (
@@ -288,72 +277,50 @@ def feather(
         if isinstance(highres, str)
         else highres
     )
-    if sd_xds["sky"].shape != int_xds["sky"].shape:
+    if sd_xds[_sky].shape != int_xds[_sky].shape:
         raise RuntimeError("Image shapes differ")
 
-    chans_per_chunk = 2**26 / (sd_xds.dims["l"] * sd_xds.dims["m"])
-    chans_per_chunk = min(sd_xds.dims["frequency"], chans_per_chunk)
-    print("chans_per_chunk", chans_per_chunk)
-    chunksize = {
-        "time": sd_xds.dims["time"],
-        "polarization": sd_xds.dims["polarization"],
-        "frequency": chans_per_chunk,
-        "l": sd_xds.dims["l"],
-        "m": sd_xds.dims["m"],
-    }
-    # TODO either deep copy this, or put the chunks back as they were when
-    # done
-    sd_xds["sky"].chunk(chunksize)
-    int_xds["sky"].chunk(chunksize)
-    # TODO set masked values to zero (might be better to do a deep copy then
-    # if it doesn't take too long)
+    # Determine chunking
+    from astroviper._utils.data_partitioning import bytes_in_dtype
 
-    ### DEBUG add multibeam
-    # del sd_xds.attrs["beam"]
-    # sky_shape = sd_xds["sky"].shape
-    # beam_shape = sky_shape[:3] + (3,)
-    # beam_ary = da.zeros(beam_shape)
-    # beam_ary[:, :, :, 0:2] = 0.0040724349213201025
-    # sd_xds = _set_multibeam_array(sd_xds, beam_ary, "rad")
-    ###
-    # sd_xds
-    # interferometer image
-    # int_xds = read_image("int.zarr")
-    # chunksize = {
-    #    "frequency": chans_per_chunk, "l": sd_xds.dims["l"],
-    #    "m": sd_xds.dims["m"]
-    # }
-    # int_xds["sky"].chunk(chunksize)
-    # int_xds.beam
+    ## Determine the amount of memory required by the node task if all dimensions that chunking will occur on are singleton.
+    ## For example feather does chunking only only frequency, so memory_singleton_chunk should be the amount of memory requered by _feather when there is a single frequency channel.
+    singleton_chunk_sizes = dict(sd_xds[_sky].sizes)
+    del singleton_chunk_sizes[
+        "frequency"
+    ]  # Remove dimensions that will be chuncked on.
+    fudge_factor = 1.1
+    n_images_in_memory = 3.0  # Two input and one output image.
+    memory_singleton_chunk = (
+        n_images_in_memory
+        * np.prod(np.array(list(singleton_chunk_sizes.values())))
+        * fudge_factor
+        * bytes_in_dtype[str(sd_xds[_sky].dtype)]
+        / (1024**3)
+    )
 
-    # add multibeam
-    # from xradio.image._util.common import _set_multibeam_array
-    # import dask.array as da
-    # del int_xds.attrs["beam"]
-    # beam_ary = da.zeros(beam_shape)
-    # beam_ary[:, :, :, 0] = 0.0003175938332518091
-    # beam_ary[:, :, :, 1] = 0.00031237226207452706
-    # beam_ary[:, :, :, 2] = -0.054892581207198074
-    # int_xds = _set_multibeam_array(int_xds, beam_ary, "rad")
-    ###
-    # int_xds
+    chunking_dims_sizes = {
+        "frequency": int_xds[_sky].sizes["frequency"]
+    }  # Need to know how many frequency channels there are.
+    from astroviper._utils.data_partitioning import (
+        calculate_data_chunking,
+        get_thread_info,
+    )
 
-    # beam_ratio will be a scalar if both images have a single
-    # beam, if not this computation needs to be done in the node
-    # task since it will be per plane
-    beam_ratio = None
-    if _has_single_beam(sd_xds) and _has_single_beam(int_xds):
-        beam_ratio = _beam_area_single_beam(int_xds) / _beam_area_single_beam(sd_xds)
-    # print(beam_ratio)
+    if thread_info is None:
+        thread_info = get_thread_info()
+    logger.debug("Thread info " + str(thread_info))
+    n_chunks_dict = calculate_data_chunking(
+        memory_singleton_chunk,
+        chunking_dims_sizes,
+        thread_info,
+        constant_memory=0,
+        tasks_per_thread=4,
+    )
 
     parallel_coords = {}
-    # TODO need smarter way to get n_chunks
-    n_chunks = int(sd_xds.dims["frequency"] // chans_per_chunk)
-    if sd_xds.dims["frequency"] % chans_per_chunk > 0:
-        n_chunks += 1
-    print("n_chunks", n_chunks)
     parallel_coords["frequency"] = make_parallel_coord(
-        coord=sd_xds.frequency, n_chunks=n_chunks
+        coord=sd_xds.frequency, n_chunks=n_chunks_dict["frequency"]
     )
     # display(HTML(dict_to_html(parallel_coords["frequency"])))
 
@@ -367,100 +334,113 @@ def feather(
     )
     # display(HTML(dict_to_html(node_task_data_mapping)))
 
-    w = None
-    uv = (None, None)
-    if _has_single_beam(sd_xds):
-        # w is a shape [l, m] np.array. If not computed
-        # here, it will be computed on a per chunk basis
-        # inside the node task
-        w = _compute_w_single_beam(sd_xds)
-    else:
-        # w must be computed on a per-plane basis, but
-        # u and v can be computed once here and then
-        # input to the node task; they do not need to be
-        # computed per-plane
-        uv = compute_u_v(sd_xds)
+    # Create empty image on disk
+    to_disk = True
+    if to_disk:
+        # create new xarray.Dataset with coordinates same as int_xds
+        # but with no data
 
-    # DEBUG
-    # if w:
-    #    from matplotlib import pyplot as plt
-    #    plt.rcParams["figure.figsize"] = [7.00, 3.50]
-    #    plt.rcParams["figure.autolayout"] = True
-    #    im = plt.imshow(w, cmap="copper_r")
-    #    plt.colorbar(im)
-    #    plt.show()
+        """
+        from xradio.image import make_empty_sky_image
 
-    # zn = highres
-    # zo = lowres
-    # DEBUG
-    # imgs = [int_xds, sd_xds]
-    # if "beam" in int_xds.data_vars:
-    #    zn = "int_mb.zarr"
-    #    if not os.path.exists(zn):
-    #        write_image(int_xds, zn, "zarr")
-    #
-    # if "beam" in sd_xds.data_vars:
-    #    zo = "sd_mb_1.zarr"
-    #    if not os.path.exists(zo):
-    #        write_image(sd_xds, zo, "zarr")
+        # the phase center is not the same as lon/lat pole
+        phase_center = [
+            sd_xds.attrs["direction"]["lonpole"]["data"],
+            int_xds.attrs["direction"]["latpole"]["data"],
+        ]
 
-    # zarr_names = [zn, zo]
-    # debug = read_image(zn)
-    # print("beam shape", debug.beam.shape)
+        featherd_img_xds = make_empty_sky_image(
+            phase_center=phase_center,
+            image_size=[int_xds.sizes["l"], int_xds.sizes["m"]],
+            cell_size=int_xds.attrs["direction"]["reference"]["cdelt"],
+            chan_coords=parallel_coords["frequency"]["data"],
+            pol_coords=int_xds.polarization.values,
+            time_coords=[0],
+        )
+        """
 
-    input_parms = {}
-    input_parms["input_data_store"] = {"sd": lowres, "int": highres}
-    input_parms["axes"] = ("l", "m")  # (3,4)
-    # beam_ratio should be computed inside _feather if
-    # at least one image has multiple beams
-    input_parms["beam_ratio"] = beam_ratio
-    input_parms["w"] = w
-    input_parms["uv"] = uv
-    input_parms["s"] = 1
+        featherd_img_xds = xr.Dataset(coords=int_xds.coords)
+        featherd_img_xds.attrs = copy.deepcopy(int_xds.attrs)
+        featherd_img_xds.attrs["active_mask"] = ""
+        # we cannot build the beam in parallel because its parallel dims are no l, m
+        # so just copy the whole thing here
+        featherd_img_xds[_beam] = int_xds[_beam].copy()
+
+        write_image(
+            featherd_img_xds,
+            imagename=outim["name"],
+            out_format=outim["format"],
+            overwrite=outim["overwrite"],
+        )
+
+        # Create the empty data variable SKY.
+        from xradio.image._util._zarr.zarr_low_level import (
+            create_data_variable_meta_data,
+        )
+
+        if int_xds[_sky].dtype == np.float32:
+            from xradio.image._util._zarr.zarr_low_level import (
+                image_data_variables_and_dims_single_precision as image_data_variables_and_dims,
+            )
+        elif int_xds[_sky].dtype == np.float64:
+            from xradio.image._util._zarr.zarr_low_level import (
+                image_data_variables_and_dims_double_precision as image_data_variables_and_dims,
+            )
+        else:
+            error_message = (
+                "Unsupported data type of image "
+                + str(int_xds[_sky].dtype)
+                + " expected float32 or float64."
+            )
+            logger.error(error_message)
+            raise Exception(error_message)
+
+        xds_dims = dict(int_xds.sizes)
+        # right now the keys are lower case, but the associated values are all caps
+        # the beam cannot be written in chunks because
+        # ValueError: could not broadcast input array from shape (1,4,1,3) into shape (1,4,1,1024,1024)
+
+        data_variables = ["sky"]
+        data_varaibles_and_dims_sel = {
+            key: image_data_variables_and_dims[key] for key in data_variables
+        }
+        zarr_meta = create_data_variable_meta_data(
+            outim["name"],
+            data_varaibles_and_dims_sel,
+            xds_dims,
+            parallel_coords,
+            compressor,
+        )
+
+    input_params = {}
+    input_params["input_data_store"] = {"sd": lowres, "int": highres}
+    input_params["axes"] = ("l", "m")  # (3,4)
+    input_params["image_file"] = outim["name"]
+    input_params["s"] = 1
+
+    if to_disk:
+        input_params["to_disk"] = to_disk
+        input_params["compressor"] = compressor
+        input_params["zarr_meta"] = zarr_meta
 
     t0 = time.time()
-    graph = map(
+    viper_graph = map(
         input_data=input_data,
         node_task_data_mapping=node_task_data_mapping,
         node_task=_feather,
-        input_params=input_parms,
+        input_params=input_params,
         in_memory_compute=False,
     )
-    print("time to create graph", time.time() - t0)
+    from graphviper.graph_tools import generate_dask_workflow
 
-    dask.visualize(graph, filename="map_graph")
+    dask_graph = generate_dask_workflow(viper_graph)
+    logger.debug("Time to create graph " + str(time.time() - t0))
+
+    # dask.visualize(graph, filename="map_graph")
     t0 = time.time()
-    res = dask.compute(graph, num_workers=8)
-    print("time to compute()", time.time() - t0)
-    # type(res), type(res[0]),type(res[0][0]), type(res[0][0][0])
-    # len(res), len(res[0]), len(res[0][0])
-    # res[0][0][0]["sky"].plot()
+    res = dask.compute(dask_graph)
+    logger.info("Time to compute() feather " + str(time.time() - t0) + "s")
 
-    t0 = time.time()
-    final_xds = xr.concat(res[0][0], "frequency")
-    print("time to concat", time.time() - t0)
-    # final_xds
-    # final_xds["sky"].values.dtype
+    import zarr
 
-    as_da = da.array(final_xds["sky"].values)
-    # print(as_da)
-    final_xds["sky"] = xr.DataArray(
-        as_da, dims=("time", "polarization", "frequency", "l", "m")
-    )
-    final_xds["sky"].attrs = copy.deepcopy(int_xds["sky"].attrs)
-    if outim is not None:
-        if os.path.exists(outim["name"]):
-            if os.path.isfile(outim["name"]):
-                t0 = time.time()
-                os.remove(outim["name"])
-                print("time to remove existing file", time.time() - t0)
-            if os.path.isdir(outim["name"]):
-                t0 = time.time()
-                shutil.rmtree(outim["name"])
-                print("time to remove existing directory", time.time() - t0)
-        t0 = time.time()
-        write_image(final_xds, outim["name"], outim["format"])
-        print("time to write feather image", time.time() - t0)
-    # image.write_image(final_xds, "feather_test_0.im", "casa")
-    # print(final_xds["sky"].dtype)
-    return final_xds
+    zarr.consolidate_metadata(outim["name"])
