@@ -14,7 +14,7 @@ dependencies = [
 'dask',
 'distributed',
 'gdown',
-'graphviper',
+'graphviper>=0.0.33',
 'matplotlib',
 'numba>=0.59.0',
 'numpy',
