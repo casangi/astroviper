@@ -220,7 +220,6 @@ def feather(
     lowres: str,
     sdfactor: float,
     selection: dict = {},
-    memory_per_thread=None,
     thread_info=None,
     compressor=Blosc(cname="lz4", clevel=5),
 ):
