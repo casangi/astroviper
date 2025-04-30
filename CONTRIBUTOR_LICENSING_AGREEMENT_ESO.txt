@@ -1,0 +1,9 @@
+Contributions made on behalf of ESO (European Southern Observatory) acknowledge the Contributor
+License Agreement found in the file CONTRIBUTOR_LICENSING_AGREEMENT.txt in the root of this
+code repository, version from commit f4a393f659fad9a3164d69139a221443b89c2629
+(https://github.com/casangi/astroviper/blob/f4a393f659fad9a3164d69139a221443b89c2629/CONTRIBUTOR_LICENSING_AGREEMENT.txt),
+from April 29, 2025.
+
+Contributors have been granted permission to accept the Contributor License Agreement by the Head 
+of the ESO ALMA Support Centre (EASC) in accordance with the AGREEMENT ON THE USE AND LICENSING 
+OF THE ALMA DATA PROCESSING SOFTWARE, signed by AUI, ESO and NAOJ in Feb 2025.
