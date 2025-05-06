@@ -258,7 +258,13 @@ def feather(
                 f"Output image type {outim['format']} is not supported. "
                 "Please choose either casa or zarr"
             )
-        if "overwrite" not in outim or not outim["overwrite"]:
+        if "overwrite" not in outim:
+            outim["overwrite"] = False
+        elif type(outim["overwrite"]) != bool:
+            raise ValueError(
+                "If specified, outim['overwrite'] must be a boolean value"
+            )
+        if not outim["overwrite"]:
             if os.path.exists(outim["name"]):
                 raise RuntimeError(
                     f"Already existing file {outim['name']} will not be "
