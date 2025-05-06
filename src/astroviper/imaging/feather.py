@@ -261,9 +261,7 @@ def feather(
         if "overwrite" not in outim:
             outim["overwrite"] = False
         elif type(outim["overwrite"]) != bool:
-            raise ValueError(
-                "If specified, outim['overwrite'] must be a boolean value"
-            )
+            raise ValueError("If specified, outim['overwrite'] must be a boolean value")
         if not outim["overwrite"]:
             if os.path.exists(outim["name"]):
                 raise RuntimeError(
