@@ -34,7 +34,10 @@ class FeatherTest(unittest.TestCase):
             self.sd_zarr,
         ]:
             if os.path.exists(f):
-                shutil.rmtree(f)
+                if os.path.isdir(f):
+                    shutil.rmtree(f)
+                else:
+                    os.remove(f)
 
     def test_feather(self):
         download(self.sd_image)
@@ -148,3 +151,34 @@ class FeatherTest(unittest.TestCase):
                 ).all(),
                 "Incorrect sky values",
             )
+
+    def test_overwrite(self):
+        """Test overwrite option"""
+        open(self.feather_out, "w").close()
+        self.assertTrue(
+            os.path.exists(self.feather_out), "Feather output file not created"
+        )
+        # test overwrite not present defautls to False by testing for exception
+        try:
+            feather(
+                outim={"name": self.feather_out, "format": "zarr"},
+                highres=self.int_zarr,
+                lowres=self.sd_zarr,
+                sdfactor=1,
+            )
+        except RuntimeError:
+            print("RuntimeError raised as expected")
+        else:
+            self.fail("Feather should have failed to overwrite")
+        # test if overwrite specified but not bool
+        try:
+            feather(
+                outim={"name": self.feather_out, "format": "zarr", "overwrite": 1},
+                highres=self.int_zarr,
+                lowres=self.sd_zarr,
+                sdfactor=1,
+            )
+        except TypeError:
+            print("TypeError raised as expected")
+        else:
+            self.fail("Feather should have failed to run because overwrite is not bool")
