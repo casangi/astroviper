@@ -229,12 +229,17 @@ def feather(
     Parameters
     ----------
     outim : output image information, dict or None
-        if None, no image is written. if dict must have keys "name" and
-        "format" keys. "name" is the file name to which the image is written,
-        and "format" is the format (casa or zarr) to write the image. An
-        "overwrite" boolean parameter is optional. If it does not exist,
-        it is assumed that the user does not want to overwrite an already
-        extant image of the same name.
+        if None, no image is written (probably only useful for debugging). if
+        a dict it must have a "name" key. "name" is the directory to which the
+        zarr format image is written. An "overwrite" boolean parameter is
+        optional. If it does not exist, it is assumed that the user does not
+        want to overwrite an already extant image of the same name. Note that
+        feather only writes zarr format images. If another output format is
+        desired, the user/caller must convert the zarr format image to the
+        desired format after running this function. The zarr file is used to
+        accumulate the results of the computation, chunk by chunk,and so it is
+        needed at the start of the computation and is not written in total at
+        the end but rather is written to as each chunk is computed.
     highres : interferometer image, string or xr.Dataset.
         If str, an image file by that name will be read from disk.
         If xr.Dataset, that xds will be used for the interferometer image.
@@ -245,18 +250,12 @@ def feather(
     if outim is not None:
         if type(outim) != dict:
             raise ValueError(
-                "If specified, outim must be a dictionary with keys "
-                "'name' and 'format'."
+                "If specified, outim must be a dictionary with required key "
+                "'name' and optional key 'overwrite'."
             )
-        if "name" not in outim or "format" not in outim:
+        if "name" not in outim:
             raise ValueError(
-                "If specfied, outim dict must have keys 'name' and 'format'"
-            )
-        im_format = outim["format"].lower()
-        if not (im_format == "casa" or im_format == "zarr"):
-            raise ValueError(
-                f"Output image type {outim['format']} is not supported. "
-                "Please choose either casa or zarr"
+                "If specfied, outim dict must have key 'name'."
             )
         if "overwrite" not in outim:
             outim["overwrite"] = False
@@ -372,7 +371,7 @@ def feather(
         write_image(
             featherd_img_xds,
             imagename=outim["name"],
-            out_format=outim["format"],
+            out_format="zarr",
             overwrite=outim["overwrite"],
         )
 

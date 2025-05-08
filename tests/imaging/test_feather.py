@@ -131,7 +131,7 @@ class FeatherTest(unittest.TestCase):
                 worker_log_params=worker_log_params,
             )
             feather(
-                outim={"name": self.feather_out, "format": "zarr", "overwrite": True},
+                outim={"name": self.feather_out, "overwrite": True},
                 highres=self.int_zarr,
                 lowres=self.sd_zarr,
                 sdfactor=1,
@@ -161,7 +161,7 @@ class FeatherTest(unittest.TestCase):
         # test overwrite not present defautls to False by testing for exception
         try:
             feather(
-                outim={"name": self.feather_out, "format": "zarr"},
+                outim={"name": self.feather_out, },
                 highres=self.int_zarr,
                 lowres=self.sd_zarr,
                 sdfactor=1,
@@ -173,7 +173,7 @@ class FeatherTest(unittest.TestCase):
         # test if overwrite specified but not bool
         try:
             feather(
-                outim={"name": self.feather_out, "format": "zarr", "overwrite": 1},
+                outim={"name": self.feather_out, "overwrite": 1},
                 highres=self.int_zarr,
                 lowres=self.sd_zarr,
                 sdfactor=1,
