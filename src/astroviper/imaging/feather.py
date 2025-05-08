@@ -361,7 +361,6 @@ def feather(
 
         featherd_img_xds = xr.Dataset(coords=int_xds.coords)
         featherd_img_xds.attrs = copy.deepcopy(int_xds.attrs)
-        featherd_img_xds.attrs["active_mask"] = ""
         # we cannot build the beam in parallel because its parallel dims are no l, m
         # so just copy the whole thing here
         featherd_img_xds[_beam] = int_xds[_beam].copy()
