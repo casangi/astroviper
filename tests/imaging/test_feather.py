@@ -161,7 +161,9 @@ class FeatherTest(unittest.TestCase):
         # test overwrite not present defautls to False by testing for exception
         try:
             feather(
-                outim={"name": self.feather_out, },
+                outim={
+                    "name": self.feather_out,
+                },
                 highres=self.int_zarr,
                 lowres=self.sd_zarr,
                 sdfactor=1,

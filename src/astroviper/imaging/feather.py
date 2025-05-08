@@ -254,9 +254,7 @@ def feather(
                 "'name' and optional key 'overwrite'."
             )
         if "name" not in outim:
-            raise ValueError(
-                "If specfied, outim dict must have key 'name'."
-            )
+            raise ValueError("If specfied, outim dict must have key 'name'.")
         if "overwrite" not in outim:
             outim["overwrite"] = False
         elif type(outim["overwrite"]) != bool:
