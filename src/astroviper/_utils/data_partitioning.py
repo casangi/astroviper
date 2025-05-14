@@ -84,7 +84,7 @@ def calculate_data_chunking(
             )
         )
     )
-    assert n_mem_chunks < n_total_dims, (
+    assert n_mem_chunks <= n_total_dims, (
         "Not enough cluster memory per thread. Need at least "
         + str(memory_singleton_chunk)
         + " GiB but only "
