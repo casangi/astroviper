@@ -1,6 +1,6 @@
 [project]
 name = "astroviper"
-version = "0.0.16"
+version = "0.0.17"
 description = "Astro Visibility and Image Parallel Execution Reduction"
 authors = [
     {name = "Jan-Willem Steeb", email="jsteeb@nrao.edu"},
@@ -10,33 +10,45 @@ readme = "README.md"
 requires-python = ">= 3.11, < 3.14"
 
 dependencies = [
-'astropy',
-'dask',
-'distributed',
-'gdown',
-'graphviper>=0.0.33',
-'matplotlib',
-'numba>=0.59.0',
-'numpy',
-'prettytable',
-'pytest',
-'pytest-cov',
-'pytest-html',
-'scipy',
-'xarray',
-'zarr',
-'bokeh',
-'jupyterlab',
-'pyarrow',
-'graphviz',
-'xradio',
-'python_casacore>=3.6.1; sys_platform != "darwin" ',
-'ipympl'
+'graphviper>=0.0.34'
 ]
 
-
 [project.optional-dependencies]
+
+python_casacore = [    
+    'python_casacore>=3.6.1; sys_platform != "darwin"'
+]
+
+interactive = [
+    'matplotlib',
+    'prettytable',
+    'jupyterlab',
+    'ipykernel',
+    'ipympl',
+    'ipython',
+    'jupyter-client',
+]
+
 docs = [
+    'nbsphinx',
+    'recommonmark',
+    'scanpydoc',
+    'sphinx-autoapi',
+    'sphinx-autosummary-accessors',
+    'sphinx_rtd_theme',
+    'twine',
+    'pandoc'
+]
+
+all = [
+    'python_casacore>=3.6.1; sys_platform != "darwin"',
+    'pytest',
+    'pytest-cov',
+    'pytest-html',
+    'python_casacore>=3.6.1; sys_platform != "darwin" ',
+    'matplotlib',
+    'prettytable',
+    'jupyterlab',
     'ipykernel',
     'ipympl',
     'ipython',
