@@ -13,7 +13,6 @@ from graphviper.graph_tools.coordinate_utils import (
 from graphviper.graph_tools.coordinate_utils import make_parallel_coord
 from graphviper.graph_tools.map import map
 from toolviper.utils.display import dict_to_html
-from IPython.display import HTML, display
 import numpy as np
 import os
 import shutil
