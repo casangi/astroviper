@@ -62,7 +62,7 @@ def _ms_spectral_frame_conversion(
     # for k in range(len(newFreqInFrame)):
     #    outMSFreq.values[k] = newFreqInFrame[k]  # wopuld rather assign by coordinate value
     outms.frequency = outMSFreq
-    print(obsfreq.value - outms.frequency.data, newFreqInFrame, obsfreq.value)
+    # print(obsfreq.value - outms.frequency.data, newFreqInFrame, obsfreq.value)
     # for aTLoc in locATt:
     _interpolate_data_weight_from_TOPO(outms, obsfreq)
 
@@ -111,7 +111,7 @@ def _outframe_freq(ms: xarray.core.datatree.DataTree, outframe: str = "lsrk"):
     outfreqs = np.zeros([nchan])
 
     if nchan > 1:
-        width = maxFreq - minFreq
+        width = (maxFreq - minFreq) / nchan
         outfreqs = np.vectorize(lambda k: k * width + minFreq)(
             np.arange(nchan)
         )
@@ -183,7 +183,9 @@ def _get_all_itrs_loc(ms: xarray.core.datatree.DataTree):
 
 
 def _interpolate_data_weight_from_TOPO(
-    ms: xarray.core.datatree.DataTree, origfreq: u.quantity.Quantity
+    ms: xarray.core.datatree.DataTree,
+    origfreq: u.quantity.Quantity,
+    method: str = "linear",
 ):
     """
     interpolate the visibility (and weights)  for every time stamp in the frame of the ms
@@ -191,7 +193,7 @@ def _interpolate_data_weight_from_TOPO(
     ms.frequency attributes
 
     """
-    infreq = origfreq.to(u.Hz).value
+    # infreq = origfreq.to(u.Hz).value
     interpfreq = ms.frequency.data
     locATt = _get_all_itrs_loc(ms)
     fldname = ms.field_name.data[0]
@@ -202,30 +204,87 @@ def _interpolate_data_weight_from_TOPO(
             origfreq, observer=a_loc, target=phcen
         ).with_observer_stationary_relative_to(_frame_from_str(outframe))
         freqATt = frameSpec.quantity.to(u.Hz).value
-        elvis = ms.VISIBILITY[a_loc.obstime.value]
-        elwgt = ms.WEIGHT[a_loc.obstime.value]
-        elflg = ms.FLAG[a_loc.obstime.value]
+        elvis = ms.VISIBILITY.loc[a_loc.obstime.value, :, :, :]
+        elwgt = ms.WEIGHT.loc[a_loc.obstime.value, :, :, :]
+        elflg = ms.FLAG.loc[a_loc.obstime.value, :, :, :]
         elwgt = elwgt * np.logical_not(elflg)
-        _interp_channels(elvis, elwgt, freqATt, interpfreq)
+        newelvis = _interp_channels2(
+            elvis, elwgt, freqATt, interpfreq, method=method
+        )
+        newelvis["frequency"] = ms.VISIBILITY.loc[
+            a_loc.obstime.value, :, :, :
+        ]["frequency"]
+        ms.VISIBILITY.loc[a_loc.obstime.value, :, :, :] = newelvis
 
 
-def _interp_channels(data, weights, datafreq, interpfreq):
-    wgtdata = data.data * weights.data
+def _interp_channels(
+    data: xarray.DataArray,
+    weights: xarray.DataArray,
+    datafreq: np.ndarray,
+    interpfreq: np.ndarray,
+    method: str = "linear",
+):
+    """
+    using numpy array
+    explicitly doing row by row interp
+    """
+    # wgtdata = data.data * weights.data
+    wgtdata = data.data
     for b in range(data.shape[0]):
         for p in range(data.shape[2]):
             fintd = interp1d(
                 datafreq,
                 wgtdata[b, :, p],
-                kind="linear",
+                kind=method,
+                bounds_error=False,
+                # fill_value=0.0,
                 fill_value="extrapolate",
             )
+            # print("before ", wgtdata[b, :, p])
             wgtdata[b, :, p] = fintd(interpfreq)
+            # print("after ", wgtdata[b, :, p])
+            # input("next")
             fintw = interp1d(
                 datafreq,
                 weights[b, :, p],
-                kind="linear",
+                kind=method,
                 fill_value="extrapolate",
             )
             weights[b, :, p] = fintw(interpfreq)
-    data[weights != 0] = wgtdata[weights != 0] / weights[weights != 0]
-    data[weights == 0] = 0.0
+    # wgtdata = wgtdata.where(
+    #    weights != 0, wgtdata[weights != 0] / weights.data[weights != 0]
+    # )
+    # data = data.where(weights == 0, 0.0)
+    return wgtdata
+
+
+def _interp_channels2(data, weights, datafreq, interpfreq, method="linear"):
+    wgtdata = data
+    selfreq = wgtdata.frequency
+    # print("ORIGFREQ ", selfreq, "\n")
+    selfreq.coords["frequency"] = datafreq
+
+    selfreq = xarray.DataArray(
+        data=datafreq,
+        dims=selfreq.dims,
+        coords=selfreq.coords,
+        attrs=selfreq.attrs,
+    )
+    wgtdata["frequency"] = selfreq
+    newwgtdata = wgtdata.interp(
+        frequency=interpfreq,
+        method=method,
+        kwargs={"bounds_error": False, "fill_value": 0.0},
+    )
+    weights["frequency"] = selfreq
+    newweights = weights.interp(
+        frequency=interpfreq,
+        method=method,
+        kwargs={"fill_value": "extrapolate"},
+    )
+    # newfreq = wgtdata.frequency
+    # data["frequency"] = newfreq
+    # print("FREQ ", selfreq, "\n", newwgtdata["frequency"])
+    # newwgtdata = newwgtdata.where(newweights != 0.0, newwgtdata / newweights)
+    # newwgtdata = newwgtdata.where(newweights == 0.0, 0.0)
+    return newwgtdata
