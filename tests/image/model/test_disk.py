@@ -5,7 +5,6 @@ from astroviper.image.model import generate_disk
 
 import numpy as np
 from numpy.testing import assert_allclose
-from scipy.ndimage import binary_dilation
 import unittest
 
 def first_moments(
@@ -102,15 +101,26 @@ class DiskTest(unittest.TestCase):
 
     def test_basic_shape_dtype(self):
         img = generate_disk(self.X, self.Y, 0.0, 0.0, 5.0, 3.0, 0.0, 2.5)
-        self.assertEqual(img.shape, self.X.shape)
-        self.assertEqual(img.dtype, float)
-
+        self.assertEqual(
+            img.shape, self.X.shape,
+            msg=f"Shape mismatch: got {img.shape}, expected {self.X.shape}"
+        )
+        self.assertEqual(
+            img.dtype, float,
+            msg=f"dtype mismatch: got {img.dtype}, expected float"
+        )
     def test_amplitude_inside_outside(self):
         A_d = 3.7
         img = generate_disk(self.X, self.Y, 0.0, 0.0, 5.0, 3.0, 0.0, A_d)
         cy, cx = np.array(self.X.shape) // 2
-        self.assertAlmostEqual(img[cy, cx], A_d)
-        self.assertEqual(img[0, 0], 0.0)
+        self.assertAlmostEqual(
+            img[cy, cx], A_d,
+            msg=f"Center pixel value mismatch: got {img[cy,cx]!r}, expected {A_d!r}"
+        )
+        self.assertEqual(
+            img[0, 0], 0.0,
+            msg=f"Corner pixel should be outside ellipse: got {img[0,0]!r}, expected 0.0"
+        )
 
     def test_flux_matches_area(self):
         x0, y0, a, b, A = 1.0, -2.0, 6.0, 4.0, 5.0
@@ -118,14 +128,28 @@ class DiskTest(unittest.TestCase):
         img = generate_disk(self.X, self.Y, x0, y0, a, b, theta, A)
         flux_discrete = img.sum() * self.dx * self.dy
         flux_continuous = A * np.pi * a * b
-        assert_allclose(flux_discrete, flux_continuous, rtol=5e-3, atol=5e-2)
+        assert_allclose(
+            flux_discrete, flux_continuous, rtol=5e-3, atol=5e-2,
+            err_msg=(
+                "Flux vs. analytic area mismatch: "
+                f"discrete={flux_discrete:.6g}, analytic={flux_continuous:.6g}, "
+                f"rtol=5e-3, atol=5e-2 (x0={x0}, y0={y0}, a={a}, b={b}, A={A}, θ={theta})"
+            )
+        )
 
     def test_centroid_matches_parameters(self):
         x0, y0, a, b, A = 3.2, -4.8, 7.5, 2.5, 2.0
         theta = 45.0
         img = generate_disk(self.X, self.Y, x0, y0, a, b, theta, A)
         xbar, ybar = first_moments(img, self.X, self.Y, self.dx, self.dy)
-        assert_allclose([xbar, ybar], [x0, y0], atol=0.05)
+        assert_allclose(
+            [xbar, ybar], [x0, y0], atol=0.05,
+            err_msg=(
+                "Centroid mismatch: "
+                f"(x̄,ȳ)=({xbar:.6g},{ybar:.6g}) vs expected ({x0:.6g},{y0:.6g}); "
+                "atol=0.05"
+            )
+        )
 
     def test_axis_aligned_symmetry(self):
         img0 = generate_disk(self.X, self.Y, 0.0, 0.0, 8.0, 3.0, 0.0, 1.0)
@@ -135,12 +159,21 @@ class DiskTest(unittest.TestCase):
         assert_allclose(
             img0.sum() * self.dx * self.dy,
             img180.sum() * self.dx * self.dy,
-            rtol=0, atol=1.25 * self.dx * self.dy  # allow a hair over 1 pixel area
+            rtol=0, atol=1.25 * self.dx * self.dy,
+            err_msg=(
+                "Area-weighted flux differs by more than ~1 pixel area between 0° and 180°: "
+                f"flux0={img0.sum()*self.dx*self.dy:.6g}, "
+                f"flux180={img180.sum()*self.dx*self.dy:.6g}, "
+                f"atol={1.25*self.dx*self.dy:.6g}"
+            )
         )
         m0 = img0 > 0
         m1 = img180 > 0
         diff_px = np.count_nonzero(m0 ^ m1)  # symmetric difference
-        self.assertLessEqual(diff_px, 1)     # at most one boundary pixel differs
+        self.assertLessEqual(
+            diff_px, 1,
+            msg=f"Boundary mismatch: {diff_px} differing pixels (expected ≤ 1)"
+        )
 
     def test_rotation_equivalence(self):
         """
@@ -159,12 +192,26 @@ class DiskTest(unittest.TestCase):
         img_unrot = generate_disk(Xr, Yr, x0, y0, a, b, 0.0, A)
 
         # Flux equal within discretization
-        assert_allclose(img_rot.sum(), img_unrot.sum(), rtol=2e-3, atol=1e-2)
+        assert_allclose(
+            img_rot.sum(), img_unrot.sum(), rtol=2e-3, atol=1e-2,
+            err_msg=(
+                "Flux mismatch after rotation: "
+                f"sum(rot)={img_rot.sum():.6g}, sum(unrot)={img_unrot.sum():.6g}, "
+                "rtol=2e-3, atol=1e-2"
+            )
+        )
 
         # Centroids match
         xbar_r, ybar_r = first_moments(img_rot, self.X, self.Y, self.dx, self.dy)
         xbar_u, ybar_u = first_moments(img_unrot, self.X, self.Y, self.dx, self.dy)
-        assert_allclose([xbar_r, ybar_r], [xbar_u, ybar_u], atol=0.05)
+        assert_allclose(
+            [xbar_r, ybar_r], [xbar_u, ybar_u], atol=0.05,
+            err_msg=(
+                "Centroid mismatch after rotation: "
+                f"(x̄,ȳ)_rot=({xbar_r:.6g},{ybar_r:.6g}) vs "
+                f"(x̄,ȳ)_unrot=({xbar_u:.6g},{ybar_u:.6g}); atol=0.05"
+            )
+        )
 
         # Overlap via second moments (rotation-invariant check)
         cov_r = second_moments(img_rot, self.X, self.Y, self.dx, self.dy)
@@ -173,10 +220,23 @@ class DiskTest(unittest.TestCase):
         # 1) Eigenvalues match up to pixelization
         evals_r = np.sort(np.linalg.eigvalsh(cov_r))
         evals_u = np.sort(np.linalg.eigvalsh(cov_u))
-        assert_allclose(evals_r, evals_u, atol=0.05, rtol=0)
+        assert_allclose(
+            evals_r, evals_u, atol=0.05, rtol=0,
+            err_msg=(
+                "Covariance eigenvalues differ after rotation: "
+                f"λ(rot)={evals_r}, λ(unrot)={evals_u}, atol=0.05"
+            )
+        )
 
         # 2) |mu_xy| should match even if the sign flips
-        assert_allclose(abs(cov_r[0, 1]), abs(cov_u[0, 1]), atol=0.05, rtol=0)
+        assert_allclose(
+            abs(cov_r[0, 1]), abs(cov_u[0, 1]), atol=0.05, rtol=0,
+            err_msg=(
+                "Off-diagonal covariance magnitude differs after rotation: "
+                f"|μ_xy|_rot={abs(cov_r[0,1]):.6g}, |μ_xy|_unrot={abs(cov_u[0,1]):.6g}, "
+                "atol=0.05"
+            )
+        )
 
     def test_degenerate_axes_edge_cases(self):
         """When an axis ~ 0, the rasterized area is ~ one-pixel wide strip."""
@@ -187,14 +247,27 @@ class DiskTest(unittest.TestCase):
         img_thin_a = generate_disk(self.X, self.Y, x0, y0, 1e-9, b, 0.0, A)
         area_pix_a = img_thin_a.sum() * self.dx * self.dy
         area_expected_a = A * (2.0 * b) * self.dx
-        assert_allclose(area_pix_a, area_expected_a, rtol=0.1, atol=1e-3)
-
+        assert_allclose(
+            area_pix_a, area_expected_a, rtol=0.1, atol=1e-3,
+            err_msg=(
+                "Degenerate-a area mismatch (strip along x): "
+                f"measured={area_pix_a:.6g}, expected≈{area_expected_a:.6g}, "
+                "rtol=0.1, atol=1e-3"
+            )
+        )
         # b -> 0: expect area ~ A * (2*a) * dy
         a = 3.0
         img_thin_b = generate_disk(self.X, self.Y, x0, y0, a, 1e-9, 0.0, A)
         area_pix_b = img_thin_b.sum() * self.dx * self.dy
         area_expected_b = A * (2.0 * a) * self.dy
-        assert_allclose(area_pix_b, area_expected_b, rtol=0.1, atol=1e-3)
+        assert_allclose(
+            area_pix_b, area_expected_b, rtol=0.1, atol=1e-3,
+            err_msg=(
+                "Degenerate-b area mismatch (strip along y): "
+                f"measured={area_pix_b:.6g}, expected≈{area_expected_b:.6g}, "
+                "rtol=0.1, atol=1e-3"
+            )
+        )
 
 if __name__ == "__main__":
     unittest.main()
