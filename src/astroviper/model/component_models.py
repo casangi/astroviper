@@ -555,7 +555,8 @@ def make_pt_sources(
 
     Duplicate hits are handled correctly and efficiently. If multiple sources map
     to the same grid point, their amplitudes are summed in one pass using
-    ``np.add.at``.
+    ``np.bincount`` (for NumPy) or wrapped into Dask after accumulation. This
+    ensures compatibility with both NumPy and Dask arrays.
 
     Behavior controlled by ``add``:
       - ``add=True`` (default): **Additive** mode. Point-source amplitudes are
@@ -606,8 +607,8 @@ def make_pt_sources(
     Notes
     -----
     For rectilinear yet irregular grids, the nearest 2-D pixel is the Cartesian
-    pair of the nearest 1-D coordinates along x and y. This allows a fast, per-axis
-    nearest search to be combined into a correct 2-D decision.
+    pair of the nearest 1-D coordinates along x and y. This allows a fast,
+    per-axis nearest search to be combined into a correct 2-D decision.
 
     Examples
     --------
@@ -624,7 +625,9 @@ def make_pt_sources(
     if not (amps.size == xs_arr.size == ys_arr.size):
         raise ValueError("amplitudes, xs, and ys must have the same length")
 
-    xda_in = _coerce_to_xda(data, x_coord=x_coord, y_coord=y_coord, coords=coords, dims=dims)
+    xda_in = _coerce_to_xda(
+        data, x_coord=x_coord, y_coord=y_coord, coords=coords, dims=dims
+    )
 
     x_vals = np.asarray(xda_in[x_coord].values)
     y_vals = np.asarray(xda_in[y_coord].values)
@@ -633,10 +636,31 @@ def make_pt_sources(
     yi = _nearest_indices_1d(y_vals, ys_arr)
 
     out_dtype = np.result_type(xda_in.values, amps)
-    base_zeros = xr.zeros_like(xda_in, dtype=out_dtype)
-    source_array = base_zeros.copy()
-    np.add.at(source_array.data, (yi, xi), amps)
+
+    # Dimensions
+    height = xda_in.sizes[y_coord]
+    width = xda_in.sizes[x_coord]
+
+    # Accumulate amplitudes via bincount
+    lin = yi * width + xi
+    acc = np.bincount(
+        lin,
+        weights=amps.astype(out_dtype, copy=False),
+        minlength=height * width,
+    ).reshape(height, width).astype(out_dtype, copy=False)
+
+    # Preserve Dask laziness if input was Dask-backed
+    if _is_dask_array(xda_in.data):
+        src_data = da.from_array(acc, chunks=xda_in.data.chunks)
+    else:
+        src_data = acc
+
+    source_array = xr.DataArray(
+        src_data,
+        coords={y_coord: xda_in[y_coord], x_coord: xda_in[x_coord]},
+        dims=(y_coord, x_coord),
+    )
+
     xda_out = _apply_source_array(xda_in, source_array, add=add)
     xda_out = _copy_meta(xda_in, xda_out)
     return _finalize_output(xda_out, data, output=output)
-
