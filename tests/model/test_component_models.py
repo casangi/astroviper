@@ -24,6 +24,105 @@ def _base_grid(
     return data
 
 
+class TestAngleModes(unittest.TestCase):
+    def test_auto_uses_pa_on_left_handed_grid(self):
+        base = _base_grid(reverse_x=True)  # left-handed: dx * dy < 0
+        out_pa = make_gauss2d(
+            base,
+            a=2.355,
+            b=2.355,
+            theta=45,  # input in degrees
+            degrees=True,
+            angle="auto",  # should choose PA on left-handed grids
+            x0=0.0,
+            y0=0.0,
+            A=10.0,
+            add=False,
+            output="xarray",
+        )
+        out_forced_pa = make_gauss2d(
+            base,
+            a=2.355,
+            b=2.355,
+            theta=45,
+            degrees=True,
+            angle="pa",  # force PA explicitly
+            x0=0.0,
+            y0=0.0,
+            A=10.0,
+            add=False,
+            output="xarray",
+        )
+        self.assertTrue(
+            np.allclose(out_pa.values, out_forced_pa.values),
+            "angle='auto' should act like 'pa' on left-handed grids",
+        )
+
+    def test_auto_uses_math_on_right_handed_grid(self):
+        base = _base_grid(reverse_x=False)  # right-handed: dx * dy > 0
+        out_math = make_disk(
+            base,
+            a=3.0,
+            b=1.5,
+            theta=np.pi / 6,  # radians
+            angle="auto",  # should choose math on right-handed grids
+            x0=0.0,
+            y0=0.0,
+            A=2.0,
+            add=False,
+            output="xarray",
+        )
+        out_forced_math = make_disk(
+            base,
+            a=3.0,
+            b=1.5,
+            theta=np.pi / 6,
+            angle="math",  # force math explicitly
+            x0=0.0,
+            y0=0.0,
+            A=2.0,
+            add=False,
+            output="xarray",
+        )
+        self.assertTrue(
+            np.allclose(out_math.values, out_forced_math.values),
+            "angle='auto' should act like 'math' on right-handed grids",
+        )
+
+    def test_degrees_flag(self):
+        base = _base_grid()
+        out_deg = make_gauss2d(
+            base,
+            a=2.355,
+            b=2.355,
+            theta=30,  # degrees
+            degrees=True,
+            angle="math",
+            x0=0.0,
+            y0=0.0,
+            A=5.0,
+            add=False,
+            output="xarray",
+        )
+        out_rad = make_gauss2d(
+            base,
+            a=2.355,
+            b=2.355,
+            theta=np.deg2rad(30),  # radians
+            degrees=False,
+            angle="math",
+            x0=0.0,
+            y0=0.0,
+            A=5.0,
+            add=False,
+            output="xarray",
+        )
+        self.assertTrue(
+            np.allclose(out_deg.values, out_rad.values),
+            "degrees=True should match radians when converted",
+        )
+
+
 class TestMakeDisk(unittest.TestCase):
     def test_add_true_adds_only_inside(self):
         base = _base_grid()
