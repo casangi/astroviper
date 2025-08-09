@@ -192,6 +192,45 @@ def _nearest_indices_1d(coord_vals: np.ndarray, targets: np.ndarray) -> np.ndarr
     return out.astype(np.int64, copy=False)
 
 
+def _infer_handedness(
+    x_vals: np.ndarray, y_vals: np.ndarray
+) -> Literal["left", "right"]:
+    """Infer grid handedness from 1-D rectilinear coordinates.
+
+    Returns "left" if the grid is left-handed (dx * dy < 0), otherwise "right".
+    Coordinates must be strictly monotonic along each axis.
+    """
+    x_vals = np.asarray(x_vals)
+    y_vals = np.asarray(y_vals)
+
+    dx = np.diff(x_vals)
+    dy = np.diff(y_vals)
+
+    if dx.size == 0 or dy.size == 0:
+        raise ValueError("x and y coordinates must each have length >= 2.")
+
+    if not ((dx > 0).all() or (dx < 0).all()):
+        raise ValueError("x coordinates must be strictly monotonic for angle='auto'.")
+    if not ((dy > 0).all() or (dy < 0).all()):
+        raise ValueError("y coordinates must be strictly monotonic for angle='auto'.")
+
+    return "left" if dx[0] * dy[0] < 0 else "right"
+
+
+def _normalize_theta(
+    angle_value: float, *, angle: Literal["pa", "math"], degrees: bool
+) -> float:
+    """Convert a user-provided angle to the internal math convention in radians.
+
+    "math" is measured from +x toward +y (CCW).
+    "pa"   is astronomical position angle, measured from +y toward +x (North→East).
+
+    Relation: theta_math = (pi/2) - PA.
+    """
+    theta = float(np.deg2rad(angle_value) if degrees else angle_value)
+    return (np.pi / 2.0) - theta if angle == "pa" else theta
+
+
 def _validate_ab_theta_center(
     a: float,
     b: float,
@@ -330,6 +369,8 @@ def make_disk(
     dims: Optional[Tuple[str, str]] = None,
     add: bool = True,
     output: OutputKind = "match",
+    angle: Literal["auto", "pa", "math"] = "auto",
+    degrees: bool = False,
 ) -> ReturnType:
     """
     Fill a rotated ellipse (“disk”) with a constant value on a world-coordinate grid.
@@ -381,6 +422,17 @@ def make_disk(
     output
         Output kind to return. One of ``'match'``, ``'xarray'``, ``'numpy'``,
         or ``'dask'``.
+    angle
+        Controls how ``theta`` is interpreted.
+
+        - ``"auto"`` infers handedness from the 1-D coords. If left-handed
+          (``dx * dy < 0``), interpret ``theta`` as position angle (PA, +y→+x).
+          If right-handed, interpret as math angle (+x→+y, CCW).
+        - ``"pa"`` forces position angle interpretation (North→East).
+        - ``"math"`` forces the standard math convention (+x→+y, CCW).
+    degrees
+        If ``True``, ``theta`` is provided in degrees. If ``False``, radians.
+
 
     Returns
     -------
@@ -412,11 +464,22 @@ def make_disk(
     xda_in = _coerce_to_xda(
         data, x_coord=x_coord, y_coord=y_coord, coords=coords, dims=dims
     )
+    x_vals = np.asarray(xda_in[x_coord].values)
+    y_vals = np.asarray(xda_in[y_coord].values)
+
+    if angle == "auto":
+        handed = _infer_handedness(x_vals, y_vals)
+        angle_mode: Literal["pa", "math"] = "pa" if handed == "left" else "math"
+    else:
+        angle_mode = angle
+
+    theta_eff = _normalize_theta(theta, angle=angle_mode, degrees=degrees)
+
     xp, yp = _rotated_coords(
-        xda_in, x_coord=x_coord, y_coord=y_coord, x0=x0, y0=y0, theta=theta
+        xda_in, x_coord=x_coord, y_coord=y_coord, x0=x0, y0=y0, theta=theta_eff
     )
     mask = (xp / a) ** 2 + (yp / b) ** 2 <= 1.0
-    source_array = xr.where((xp / a) ** 2 + (yp / b) ** 2 <= 1.0, A, 0)
+    source_array = xr.where(mask, A, 0)
     xda_out = _apply_source_array(xda_in, source_array, add=add)
     xda_out = _copy_meta(xda_in, xda_out)
     return _finalize_output(xda_out, data, output=output)
@@ -437,6 +500,8 @@ def make_gauss2d(
     dims: Optional[Tuple[str, str]] = None,
     add: bool = True,
     output: OutputKind = "match",
+    angle: Literal["auto", "pa", "math"] = "auto",
+    degrees: bool = False,
 ) -> ReturnType:
     """
     Generate or add a rotated elliptical 2-D Gaussian using **FWHM** parameters.
@@ -494,6 +559,17 @@ def make_gauss2d(
     output
         Output kind to return. One of ``'match'``, ``'xarray'``, ``'numpy'``,
         or ``'dask'``.
+    angle
+        Controls how ``theta`` is interpreted.
+
+        - ``"auto"`` infers handedness from the 1-D coords. If left-handed
+          (``dx * dy < 0``), interpret ``theta`` as position angle (PA, +y→+x).
+          If right-handed, interpret as math angle (+x→+y, CCW).
+        - ``"pa"`` forces position angle interpretation (North→East).
+        - ``"math"`` forces the standard math convention (+x→+y, CCW).
+    degrees
+        If ``True``, ``theta`` is provided in degrees. If ``False``, radians.
+
 
     Returns
     -------
@@ -525,8 +601,19 @@ def make_gauss2d(
     xda_in = _coerce_to_xda(
         data, x_coord=x_coord, y_coord=y_coord, coords=coords, dims=dims
     )
+    x_vals = np.asarray(xda_in[x_coord].values)
+    y_vals = np.asarray(xda_in[y_coord].values)
+
+    if angle == "auto":
+        handed = _infer_handedness(x_vals, y_vals)
+        angle_mode: Literal["pa", "math"] = "pa" if handed == "left" else "math"
+    else:
+        angle_mode = angle
+
+    theta_eff = _normalize_theta(theta, angle=angle_mode, degrees=degrees)
+
     xp, yp = _rotated_coords(
-        xda_in, x_coord=x_coord, y_coord=y_coord, x0=x0, y0=y0, theta=theta
+        xda_in, x_coord=x_coord, y_coord=y_coord, x0=x0, y0=y0, theta=theta_eff
     )
 
     denom = 2.0 * np.sqrt(2.0 * np.log(2.0))
