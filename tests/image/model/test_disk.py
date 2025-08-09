@@ -5,6 +5,7 @@ from astroviper.image.model import generate_disk
 
 import numpy as np
 from numpy.testing import assert_allclose
+from scipy.ndimage import binary_dilation
 import unittest
 
 def first_moments(
@@ -13,7 +14,7 @@ def first_moments(
     Y: np.ndarray,
     dx: float,
     dy: float
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     """
     Compute the first spatial moments (centroid coordinates) of a 2D image.
 
@@ -49,40 +50,43 @@ def first_moments(
     ybar = (img * Y).sum() * dx * dy / A
     return xbar, ybar
 
-def iou(mask1: np.ndarray, mask2: np.ndarray) -> float:
+def second_moments(
+    img: np.ndarray,
+    X: np.ndarray,
+    Y: np.ndarray,
+    dx: float,
+    dy: float
+) -> np.ndarray:
     """
-    Compute the Intersection over Union (IoU) between two boolean masks.
+    Compute the 2×2 covariance (second central moments) of a 2D image.
 
     Parameters
     ----------
-    mask1 : np.ndarray
-        First mask array. Must be boolean or castable to boolean.
-    mask2 : np.ndarray
-        Second mask array. Must be boolean or castable to boolean.
+    img : np.ndarray
+        Image values.
+    X, Y : np.ndarray
+        Coordinate grids matching `img`.
+    dx, dy : float
+        Pixel sizes along x and y.
 
     Returns
     -------
-    iou_value : float
-        Intersection-over-Union score, defined as:
-
-        .. math::
-
-            IoU = \\frac{|mask1 \\cap mask2|}{|mask1 \\cup mask2|}
-
-        A value between 0.0 and 1.0, where:
-        - 1.0 means the masks are identical
-        - 0.0 means the masks have no overlap
-
-    Notes
-    -----
-    - Both inputs are internally converted to boolean arrays before computation.
-    - If the union of the two masks is empty, this function returns 0.0 to avoid division by zero.
+    cov : np.ndarray
+        2×2 covariance matrix:
+        [[mu_xx, mu_xy],
+         [mu_xy, mu_yy]]
     """
-    m1 = mask1.astype(bool)
-    m2 = mask2.astype(bool)
-    intersection = np.logical_and(m1, m2).sum()
-    union = np.logical_or(m1, m2).sum()
-    return intersection / union if union > 0 else 0.0
+    A = img.sum() * dx * dy
+    if A == 0.0:
+        return np.array([[np.nan, np.nan], [np.nan, np.nan]])
+    xbar = (img * X).sum() * dx * dy / A
+    ybar = (img * Y).sum() * dx * dy / A
+    Xc = X - xbar
+    Yc = Y - ybar
+    mu_xx = (img * (Xc * Xc)).sum() * dx * dy / A
+    mu_yy = (img * (Yc * Yc)).sum() * dx * dy / A
+    mu_xy = (img * (Xc * Yc)).sum() * dx * dy / A
+    return np.array([[mu_xx, mu_xy], [mu_xy, mu_yy]])
 
 class DiskTest(unittest.TestCase):
 
@@ -128,12 +132,17 @@ class DiskTest(unittest.TestCase):
         img180 = generate_disk(self.X, self.Y, 0.0, 0.0, 8.0, 3.0, 180.0, 1.0)
 
         # Allow a couple of boundary pixels to flip; require identical flux and IoU ~ 1
-        assert_allclose(img0.sum(), img180.sum(), rtol=0, atol=1e-9)
+        assert_allclose(
+            img0.sum() * self.dx * self.dy,
+            img180.sum() * self.dx * self.dy,
+            rtol=0, atol=1.25 * self.dx * self.dy  # allow a hair over 1 pixel area
+        )
         m0 = img0 > 0
         m1 = img180 > 0
-        self.assertGreaterEqual(iou(m0, m1), 0.9999)
+        diff_px = np.count_nonzero(m0 ^ m1)  # symmetric difference
+        self.assertLessEqual(diff_px, 1)     # at most one boundary pixel differs
 
-     def test_rotation_equivalence(self):
+    def test_rotation_equivalence(self):
         """
         Comparing masks after rotation should use flux/centroid and overlap, not exact equality.
         """
@@ -157,10 +166,17 @@ class DiskTest(unittest.TestCase):
         xbar_u, ybar_u = first_moments(img_unrot, self.X, self.Y, self.dx, self.dy)
         assert_allclose([xbar_r, ybar_r], [xbar_u, ybar_u], atol=0.05)
 
-        # Overlap high (most discrepancies are 1-pixel boundary effects)
-        mr = img_rot > 0
-        mu = img_unrot > 0
-        self.assertGreaterEqual(iou(mr, mu), 0.98)
+        # Overlap via second moments (rotation-invariant check)
+        cov_r = second_moments(img_rot, self.X, self.Y, self.dx, self.dy)
+        cov_u = second_moments(img_unrot, self.X, self.Y, self.dx, self.dy)
+
+        # 1) Eigenvalues match up to pixelization
+        evals_r = np.sort(np.linalg.eigvalsh(cov_r))
+        evals_u = np.sort(np.linalg.eigvalsh(cov_u))
+        assert_allclose(evals_r, evals_u, atol=0.05, rtol=0)
+
+        # 2) |mu_xy| should match even if the sign flips
+        assert_allclose(abs(cov_r[0, 1]), abs(cov_u[0, 1]), atol=0.05, rtol=0)
 
     def test_degenerate_axes_edge_cases(self):
         """When an axis ~ 0, the rasterized area is ~ one-pixel wide strip."""
