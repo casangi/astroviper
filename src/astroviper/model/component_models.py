@@ -66,7 +66,9 @@ def _coerce_to_xda(
         return data
 
     if not isinstance(data, (np.ndarray, da.Array)):
-        raise TypeError("data must be a DataArray, a 2-D NumPy ndarray, or a Dask array")
+        raise TypeError(
+            "data must be a DataArray, a 2-D NumPy ndarray, or a Dask array"
+        )
 
     if data.ndim != 2:
         raise ValueError("NumPy/Dask array input must be 2-D")
@@ -75,7 +77,9 @@ def _coerce_to_xda(
         raise ValueError("coords must be provided for NumPy/Dask array input")
 
     if x_coord not in coords or y_coord not in coords:
-        raise ValueError(f"coords must include 1-D arrays for {x_coord!r} and {y_coord!r}")
+        raise ValueError(
+            f"coords must include 1-D arrays for {x_coord!r} and {y_coord!r}"
+        )
 
     x_vals = np.asarray(coords[x_coord])
     y_vals = np.asarray(coords[y_coord])
@@ -239,10 +243,7 @@ def _copy_meta(src: xr.DataArray, dest: xr.DataArray) -> xr.DataArray:
 
 
 def _apply_source_array(
-    xda_in: xr.DataArray,
-    source_array: xr.DataArray,
-    *,
-    add: bool
+    xda_in: xr.DataArray, source_array: xr.DataArray, *, add: bool
 ) -> xr.DataArray:
     """
     Apply a generated source array to an input DataArray.
@@ -312,7 +313,6 @@ def _finalize_output(
         return da.from_array(np.asarray(data), chunks="auto")
 
     raise ValueError("output must be one of {'match', 'xarray', 'numpy', 'dask'}")
-
 
 
 def make_disk(
@@ -409,8 +409,12 @@ def make_disk(
     """
     _validate_ab_theta_center(a, b, theta, x0, y0)
 
-    xda_in = _coerce_to_xda(data, x_coord=x_coord, y_coord=y_coord, coords=coords, dims=dims)
-    xp, yp = _rotated_coords(xda_in, x_coord=x_coord, y_coord=y_coord, x0=x0, y0=y0, theta=theta)
+    xda_in = _coerce_to_xda(
+        data, x_coord=x_coord, y_coord=y_coord, coords=coords, dims=dims
+    )
+    xp, yp = _rotated_coords(
+        xda_in, x_coord=x_coord, y_coord=y_coord, x0=x0, y0=y0, theta=theta
+    )
     mask = (xp / a) ** 2 + (yp / b) ** 2 <= 1.0
     source_array = xr.where((xp / a) ** 2 + (yp / b) ** 2 <= 1.0, A, 0)
     xda_out = _apply_source_array(xda_in, source_array, add=add)
@@ -518,8 +522,12 @@ def make_gauss2d(
     """
     _validate_ab_theta_center(a, b, theta, x0, y0, ab_label="FWHM 'a' and 'b'")
 
-    xda_in = _coerce_to_xda(data, x_coord=x_coord, y_coord=y_coord, coords=coords, dims=dims)
-    xp, yp = _rotated_coords(xda_in, x_coord=x_coord, y_coord=y_coord, x0=x0, y0=y0, theta=theta)
+    xda_in = _coerce_to_xda(
+        data, x_coord=x_coord, y_coord=y_coord, coords=coords, dims=dims
+    )
+    xp, yp = _rotated_coords(
+        xda_in, x_coord=x_coord, y_coord=y_coord, x0=x0, y0=y0, theta=theta
+    )
 
     denom = 2.0 * np.sqrt(2.0 * np.log(2.0))
     sigma_x = a / denom
@@ -643,11 +651,15 @@ def make_pt_sources(
 
     # Accumulate amplitudes via bincount
     lin = yi * width + xi
-    acc = np.bincount(
-        lin,
-        weights=amps.astype(out_dtype, copy=False),
-        minlength=height * width,
-    ).reshape(height, width).astype(out_dtype, copy=False)
+    acc = (
+        np.bincount(
+            lin,
+            weights=amps.astype(out_dtype, copy=False),
+            minlength=height * width,
+        )
+        .reshape(height, width)
+        .astype(out_dtype, copy=False)
+    )
 
     # Preserve Dask laziness if input was Dask-backed
     if _is_dask_array(xda_in.data):
