@@ -1,0 +1,642 @@
+from __future__ import annotations
+
+from typing import Any, Literal, Mapping, Optional, Tuple, Union
+
+import numpy as np
+import xarray as xr
+import dask.array as da
+
+ArrayLike2D = Union[np.ndarray, da.Array]
+OutputKind = Literal["match", "xarray", "numpy", "dask"]
+ReturnType = Union[xr.DataArray, np.ndarray, da.Array]
+
+
+def _is_dask_array(obj: Any) -> bool:
+    """
+    Return True if ``obj`` is a Dask array instance at runtime.
+    """
+    return isinstance(obj, da.Array)
+
+
+def _coerce_to_xda(
+    data: Union[xr.DataArray, ArrayLike2D],
+    *,
+    x_coord: str,
+    y_coord: str,
+    coords: Optional[Mapping[str, np.ndarray]] = None,
+    dims: Optional[Tuple[str, str]] = None,
+) -> xr.DataArray:
+    """
+    Coerce input into an ``xarray.DataArray`` with the requested x/y coordinates.
+
+    This helper allows all generators to accept either an ``xarray.DataArray`` or
+    a raw 2-D NumPy/Dask array. In the array case you must provide 1-D coordinate
+    arrays for the horizontal and vertical axes via ``coords``. No data copies
+    are made; the DataArray wraps the original array.
+
+    Parameters
+    ----------
+    data
+        Input grid. Either an ``xarray.DataArray`` or a 2-D NumPy/Dask array.
+    x_coord, y_coord
+        Names of the coordinate variables representing the horizontal and
+        vertical axes in world units.
+    coords
+        Required when ``data`` is a NumPy/Dask array. A mapping that must include
+        1-D arrays for ``x_coord`` and ``y_coord`` whose lengths match the array
+        width and height, respectively.
+    dims
+        Optional dimension names to assign when wrapping a NumPy/Dask array.
+        Defaults to ``(y_coord, x_coord)``.
+
+    Returns
+    -------
+    xarray.DataArray
+        A view on the input data with coordinates attached.
+
+    Raises
+    ------
+    TypeError
+        If ``data`` is not a supported type.
+    ValueError
+        If a NumPy/Dask input is not 2-D, coordinates are missing, or lengths
+        are inconsistent with the array shape.
+    """
+    if isinstance(data, xr.DataArray):
+        return data
+
+    if not isinstance(data, (np.ndarray, da.Array)):
+        raise TypeError("data must be a DataArray, a 2-D NumPy ndarray, or a Dask array")
+
+    if data.ndim != 2:
+        raise ValueError("NumPy/Dask array input must be 2-D")
+
+    if coords is None:
+        raise ValueError("coords must be provided for NumPy/Dask array input")
+
+    if x_coord not in coords or y_coord not in coords:
+        raise ValueError(f"coords must include 1-D arrays for {x_coord!r} and {y_coord!r}")
+
+    x_vals = np.asarray(coords[x_coord])
+    y_vals = np.asarray(coords[y_coord])
+
+    H, W = data.shape
+    if y_vals.shape[0] != H or x_vals.shape[0] != W:
+        raise ValueError(
+            f"Coordinate lengths must match array shape: "
+            f"{y_coord} len={y_vals.shape[0]} vs H={H}, "
+            f"{x_coord} len={x_vals.shape[0]} vs W={W}"
+        )
+
+    if dims is None:
+        dims = (y_coord, x_coord)
+
+    return xr.DataArray(data, coords={y_coord: y_vals, x_coord: x_vals}, dims=dims)
+
+
+def _rotated_coords(
+    xda: xr.DataArray,
+    *,
+    x_coord: str,
+    y_coord: str,
+    x0: float,
+    y0: float,
+    theta: float,
+) -> Tuple[xr.DataArray, xr.DataArray]:
+    """
+    Compute rotated, centered coordinates for an ellipse/Gaussian.
+
+    Let ``X, Y`` be the broadcast 2-D coordinate grids in world units. This
+    returns the rotated coordinates
+
+    ``xp =  (X - x0) * cos(theta) + (Y - y0) * sin(theta)``
+    ``yp = -(X - x0) * sin(theta) + (Y - y0) * cos(theta)``
+
+    which align the x-axis with the ellipse/Gaussian semi-major axis.
+
+    Parameters
+    ----------
+    xda
+        DataArray that holds the coordinate variables.
+    x_coord, y_coord
+        Names of the coordinate variables to use.
+    x0, y0
+        Center in world coordinates.
+    theta
+        Rotation angle in radians measured from +x toward +y.
+
+    Returns
+    -------
+    (xp, yp)
+        Two DataArrays with the same broadcast shape as the input grids.
+    """
+    X, Y = xr.broadcast(xda[x_coord], xda[y_coord])
+    ct = float(np.cos(theta))
+    st = float(np.sin(theta))
+    xp = (X - x0) * ct + (Y - y0) * st
+    yp = -(X - x0) * st + (Y - y0) * ct
+    return xp, yp
+
+
+def _nearest_indices_1d(coord_vals: np.ndarray, targets: np.ndarray) -> np.ndarray:
+    """
+    Map world coordinates to the nearest integer pixel indices along one axis.
+
+    The coordinate array may be monotonically increasing or decreasing. Ties are
+    resolved deterministically by choosing the right-hand neighbor.
+
+    Parameters
+    ----------
+    coord_vals
+        1-D array of grid coordinates along one axis (x or y).
+    targets
+        1-D array of world coordinates to map to pixel indices.
+
+    Returns
+    -------
+    np.ndarray
+        Integer pixel indices for each target, clipped to valid range.
+
+    Notes
+    -----
+    This performs a binary search to find the two nearest coordinates along the
+    axis and compares absolute distances. If a target lies exactly midway, the
+    right coordinate is selected for determinism.
+    """
+    coord_vals = np.asarray(coord_vals)
+    targets = np.asarray(targets).ravel()
+
+    if coord_vals.ndim != 1:
+        raise ValueError("coord_vals must be 1-D")
+
+    ascending = bool(coord_vals[-1] >= coord_vals[0])
+    vals = coord_vals if ascending else coord_vals[::-1]
+
+    idx_right = np.searchsorted(vals, targets, side="left")
+    idx_left = np.clip(idx_right - 1, 0, vals.size - 1)
+    idx_right = np.clip(idx_right, 0, vals.size - 1)
+
+    left = vals[idx_left]
+    right = vals[idx_right]
+
+    choose_right = np.abs(right - targets) <= np.abs(targets - left)
+    out = np.where(choose_right, idx_right, idx_left)
+
+    if not ascending:
+        out = (vals.size - 1) - out
+
+    return out.astype(np.int64, copy=False)
+
+
+def _validate_ab_theta_center(
+    a: float,
+    b: float,
+    theta: float,
+    x0: float,
+    y0: float,
+    *,
+    ab_label: str = "Semi-axes 'a' and 'b'",
+) -> None:
+    """
+    Validate that shape parameters are finite and positive where required.
+
+    Parameters
+    ----------
+    a, b
+        Semi-axis lengths or other width-like parameters; must be positive finite numbers.
+    theta
+        Rotation angle in radians; must be finite.
+    x0, y0
+        Center coordinates in world units; must be finite.
+    ab_label
+        Label for `a` and `b` in error messages (default: "Semi-axes 'a' and 'b'").
+    """
+    if not (np.isfinite(a) and np.isfinite(b) and a > 0.0 and b > 0.0):
+        raise ValueError(f"{ab_label} must be positive finite numbers.")
+    if not np.isfinite(theta) or not np.isfinite(x0) or not np.isfinite(y0):
+        raise ValueError("'theta', 'x0', and 'y0' must be finite numbers.")
+
+
+def _copy_meta(src: xr.DataArray, dest: xr.DataArray) -> xr.DataArray:
+    """
+    Copy name and attributes from one DataArray to another.
+
+    Parameters
+    ----------
+    src :
+        Source DataArray to copy metadata from.
+    dest :
+        Destination DataArray to copy metadata to.
+
+    Returns
+    -------
+    xarray.DataArray
+        The destination DataArray with updated metadata.
+    """
+    dest = dest.assign_attrs(src.attrs)
+    dest.name = getattr(src, "name", None)
+    return dest
+
+
+def _apply_source_array(
+    xda_in: xr.DataArray,
+    source_array: xr.DataArray,
+    *,
+    add: bool
+) -> xr.DataArray:
+    """
+    Apply a generated source array to an input DataArray.
+
+    Parameters
+    ----------
+    xda_in :
+        The existing DataArray to be modified.
+    source_array :
+        The generated values to insert/add. Must be same shape as xda_in.
+    add :
+        If True, add source_array to xda_in where non-zero.
+        If False, replace values in xda_in where source_array is non-zero.
+
+    Returns
+    -------
+    xarray.DataArray
+        Modified DataArray with source array applied.
+    """
+    if add:
+        return xda_in + source_array
+    return xda_in.where(source_array == 0, other=source_array)
+
+
+def _finalize_output(
+    xda_out: xr.DataArray,
+    input_obj: Union[xr.DataArray, ArrayLike2D],
+    *,
+    output: OutputKind,
+) -> ReturnType:
+    """
+    Convert the internal xarray result to the requested output kind.
+
+    If ``output='match'``, the output kind is chosen to match the input object
+    type:
+
+      - DataArray → ``'xarray'``
+      - Dask array → ``'dask'``
+      - NumPy array → ``'numpy'``
+
+    Returns either the DataArray or a plain array view, computing Dask to NumPy
+    if needed, or wrapping NumPy as Dask on request.
+    """
+    if output == "match":
+        if isinstance(input_obj, xr.DataArray):
+            target = "xarray"
+        elif _is_dask_array(input_obj):
+            target = "dask"
+        else:
+            target = "numpy"
+    else:
+        target = output
+
+    if target == "xarray":
+        return xda_out
+
+    data = xda_out.data
+
+    if target == "numpy":
+        if _is_dask_array(data):
+            return np.asarray(data.compute())
+        return np.asarray(data)
+
+    if target == "dask":
+        if _is_dask_array(data):
+            return data
+        return da.from_array(np.asarray(data), chunks="auto")
+
+    raise ValueError("output must be one of {'match', 'xarray', 'numpy', 'dask'}")
+
+
+
+def make_disk(
+    data: Union[xr.DataArray, ArrayLike2D],
+    a: float,
+    b: float,
+    theta: float,
+    x0: float,
+    y0: float,
+    A: Any,
+    *,
+    x_coord: str = "x",
+    y_coord: str = "y",
+    coords: Optional[Mapping[str, np.ndarray]] = None,
+    dims: Optional[Tuple[str, str]] = None,
+    add: bool = True,
+    output: OutputKind = "match",
+) -> ReturnType:
+    """
+    Fill a rotated ellipse (“disk”) with a constant value on a world-coordinate grid.
+
+    ``make_disk`` writes a constant value ``A`` inside an ellipse defined in world
+    coordinates by its semi-axes ``a`` and ``b``, rotation ``theta`` (radians,
+    measured from +x toward +y), and center ``(x0, y0)``. The function accepts
+    either an ``xarray.DataArray`` of any dimensionality that includes named
+    ``x_coord`` and ``y_coord`` dims, or a 2-D NumPy/Dask array plus 1-D
+    coordinate arrays via ``coords``. All coordinates are interpreted as world
+    coordinates.
+
+    Behavior controlled by ``add``:
+      - ``add=True`` (default): **Additive** mode. ``A`` is added to the
+        existing values **only** inside the ellipse; other locations are
+        unchanged.
+      - ``add=False``: **Replacement** mode. Values inside the ellipse are
+        replaced with ``A``; other locations keep their original values.
+
+    The ``output`` parameter controls the return type:
+      - ``'match'`` returns the same kind as the input (DataArray, NumPy, or Dask).
+      - ``'xarray'``, ``'numpy'``, or ``'dask'`` force that kind.
+
+    Parameters
+    ----------
+    data
+        Input field. If a DataArray, it must include dims named ``x_coord`` and
+        ``y_coord``. If a NumPy/Dask array, it must be 2-D and you must pass
+        ``coords``.
+    a, b
+        Semi-major and semi-minor axis lengths. Must be positive finite numbers.
+    theta
+        Rotation angle in radians measured from +x toward +y.
+    x0, y0
+        Ellipse center in world coordinates.
+    A
+        Value to write inside the ellipse, or the increment when ``add=True``.
+    x_coord, y_coord
+        Names of the horizontal and vertical coordinates or dims.
+    coords
+        Required when ``data`` is a NumPy/Dask array. Mapping containing 1-D
+        arrays for ``x_coord`` and ``y_coord`` whose lengths match the array.
+    dims
+        Optional when ``data`` is a NumPy/Dask array. Defaults to
+        ``(y_coord, x_coord)``.
+    add
+        Defaults to ``True``. If ``True``, add to values inside the ellipse;
+        if ``False``, replace values inside the ellipse.
+    output
+        Output kind to return. One of ``'match'``, ``'xarray'``, ``'numpy'``,
+        or ``'dask'``.
+
+    Returns
+    -------
+    xarray.DataArray | numpy.ndarray | dask.array.Array
+        The field with the disk applied, in the requested output kind.
+
+    Raises
+    ------
+    TypeError
+        If ``data`` is not a supported type.
+    ValueError
+        If coordinates are missing or inconsistent, or parameters are invalid.
+
+    Notes
+    -----
+    For DataArray inputs with extra dims (for example, ``("time", "y", "x")``),
+    the 2-D mask broadcasts across the remaining dims. Dask inputs remain lazy.
+
+    Examples
+    --------
+    >>> import numpy as np, xarray as xr
+    >>> y = np.linspace(-5, 5, 101)
+    >>> x = np.linspace(-5, 5, 121)
+    >>> base = xr.DataArray(np.zeros((y.size, x.size)), coords={"y": y, "x": x}, dims=("y", "x"))
+    >>> out = make_disk(base, a=3.0, b=1.5, theta=np.deg2rad(30), x0=0.0, y0=0.0, A=2.0)
+    """
+    _validate_ab_theta_center(a, b, theta, x0, y0)
+
+    xda_in = _coerce_to_xda(data, x_coord=x_coord, y_coord=y_coord, coords=coords, dims=dims)
+    xp, yp = _rotated_coords(xda_in, x_coord=x_coord, y_coord=y_coord, x0=x0, y0=y0, theta=theta)
+    mask = (xp / a) ** 2 + (yp / b) ** 2 <= 1.0
+    source_array = xr.where((xp / a) ** 2 + (yp / b) ** 2 <= 1.0, A, 0)
+    xda_out = _apply_source_array(xda_in, source_array, add=add)
+    xda_out = _copy_meta(xda_in, xda_out)
+    return _finalize_output(xda_out, data, output=output)
+
+
+def make_gauss2d(
+    data: Union[xr.DataArray, ArrayLike2D],
+    a: float,
+    b: float,
+    theta: float,
+    x0: float,
+    y0: float,
+    A: float,
+    *,
+    x_coord: str = "x",
+    y_coord: str = "y",
+    coords: Optional[Mapping[str, np.ndarray]] = None,
+    dims: Optional[Tuple[str, str]] = None,
+    add: bool = True,
+    output: OutputKind = "match",
+) -> ReturnType:
+    """
+    Generate or add a rotated elliptical 2-D Gaussian using **FWHM** parameters.
+
+    ``make_gauss2d`` produces an elliptical Gaussian with peak amplitude ``A`` at
+    center ``(x0, y0)``. Inputs ``a`` and ``b`` are the **full width at half
+    maximum (FWHM)** along the ellipse’s principal axes. The ellipse is rotated
+    by ``theta`` radians measured from +x toward +y.
+
+    Conversion from FWHM to standard deviation:
+
+        ``sigma = FWHM / (2 * sqrt(2 * ln(2)))``
+
+    Field definition:
+
+        ``G(x, y) = A * exp(-0.5 * [ (xp/σx)^2 + (yp/σy)^2 ])``
+
+    where ``xp, yp`` are the rotated coordinates about ``(x0, y0)``.
+
+    Behavior controlled by ``add``:
+      - ``add=True`` (default): **Additive** mode. The Gaussian is added to the
+        existing values.
+      - ``add=False``: **Replacement** mode. The output equals the Gaussian
+        everywhere and replaces any existing values.
+
+    The ``output`` parameter controls the return type:
+      - ``'match'`` returns the same kind as the input (DataArray, NumPy, or Dask).
+      - ``'xarray'``, ``'numpy'``, or ``'dask'`` force that kind.
+
+    Parameters
+    ----------
+    data
+        Input field. If a DataArray, it must include dims named ``x_coord`` and
+        ``y_coord``. If a NumPy/Dask array, it must be 2-D and you must pass
+        ``coords``.
+    a, b
+        FWHM along the semi-major and semi-minor axes. Must be positive finite.
+    theta
+        Rotation angle in radians measured from +x toward +y.
+    x0, y0
+        Gaussian center in world coordinates.
+    A
+        Peak amplitude at the center.
+    x_coord, y_coord
+        Names of the horizontal and vertical coordinates or dims.
+    coords
+        Required when ``data`` is a NumPy/Dask array. Mapping containing 1-D
+        arrays for ``x_coord`` and ``y_coord`` whose lengths match the array.
+    dims
+        Optional when ``data`` is a NumPy/Dask array. Defaults to
+        ``(y_coord, x_coord)``.
+    add
+        Defaults to ``True``. If ``True``, add the Gaussian to existing values;
+        if ``False``, replace by the Gaussian everywhere.
+    output
+        Output kind to return. One of ``'match'``, ``'xarray'``, ``'numpy'``,
+        or ``'dask'``.
+
+    Returns
+    -------
+    xarray.DataArray | numpy.ndarray | dask.array.Array
+        The field with the Gaussian applied, in the requested output kind.
+
+    Raises
+    ------
+    TypeError
+        If ``data`` is not a supported type.
+    ValueError
+        If coordinates are missing or inconsistent, or parameters are invalid.
+
+    Notes
+    -----
+    Works lazily with Dask arrays. For inputs with extra dims, the 2-D Gaussian
+    broadcasts across the remaining dims.
+
+    Examples
+    --------
+    >>> import numpy as np, xarray as xr
+    >>> y = np.linspace(-4, 4, 200)
+    >>> x = np.linspace(-5, 5, 300)
+    >>> base = xr.DataArray(np.zeros((y.size, x.size)), coords={"y": y, "x": x}, dims=("y", "x"))
+    >>> g = make_gauss2d(base, a=2.355, b=4.71, theta=np.deg2rad(30), x0=0.0, y0=0.0, A=10.0)
+    """
+    _validate_ab_theta_center(a, b, theta, x0, y0, ab_label="FWHM 'a' and 'b'")
+
+    xda_in = _coerce_to_xda(data, x_coord=x_coord, y_coord=y_coord, coords=coords, dims=dims)
+    xp, yp = _rotated_coords(xda_in, x_coord=x_coord, y_coord=y_coord, x0=x0, y0=y0, theta=theta)
+
+    denom = 2.0 * np.sqrt(2.0 * np.log(2.0))
+    sigma_x = a / denom
+    sigma_y = b / denom
+
+    source_array = A * np.exp(-0.5 * ((xp / sigma_x) ** 2 + (yp / sigma_y) ** 2))
+    xda_out = _apply_source_array(xda_in, source_array, add=add)
+    xda_out = _copy_meta(xda_in, xda_out)
+    return _finalize_output(xda_out, data, output=output)
+
+
+def make_pt_sources(
+    data: Union[xr.DataArray, ArrayLike2D],
+    amplitudes: Union[np.ndarray, list, tuple],
+    xs: Union[np.ndarray, list, tuple],
+    ys: Union[np.ndarray, list, tuple],
+    *,
+    x_coord: str = "x",
+    y_coord: str = "y",
+    coords: Optional[Mapping[str, np.ndarray]] = None,
+    dims: Optional[Tuple[str, str]] = None,
+    add: bool = True,
+    output: OutputKind = "match",
+) -> ReturnType:
+    """
+    Place a collection of point sources on a world-coordinate grid.
+
+    Each source is defined by an amplitude and a position ``(x, y)`` expressed in
+    the same world units as the grid coordinates. Sources are mapped to the
+    nearest grid point along each axis in physical distance. If a target lies
+    exactly midway between two coordinates along an axis, the right-hand
+    coordinate is chosen deterministically.
+
+    Duplicate hits are handled correctly and efficiently. If multiple sources map
+    to the same grid point, their amplitudes are summed in one pass using
+    ``np.add.at``.
+
+    Behavior controlled by ``add``:
+      - ``add=True`` (default): **Additive** mode. Point-source amplitudes are
+        added to the existing values at those pixels.
+      - ``add=False``: **Replacement** mode. Point-source amplitudes replace the
+        existing values at those pixels; other locations remain unchanged.
+
+    The ``output`` parameter controls the return type:
+      - ``'match'`` returns the same kind as the input (DataArray, NumPy, or Dask).
+      - ``'xarray'``, ``'numpy'``, or ``'dask'`` force that kind.
+
+    Parameters
+    ----------
+    data
+        Input field. If a DataArray, it must include dims named ``x_coord`` and
+        ``y_coord``. If a NumPy/Dask array, it must be 2-D and you must pass
+        ``coords``.
+    amplitudes
+        Sequence of amplitudes, one per source.
+    xs, ys
+        Sequences of x and y world coordinates, one per source. Must be the same
+        length as ``amplitudes``.
+    x_coord, y_coord
+        Names of the horizontal and vertical coordinates or dims.
+    coords
+        Required when ``data`` is a NumPy/Dask array. Mapping containing 1-D
+        arrays for ``x_coord`` and ``y_coord`` whose lengths match the array.
+    dims
+        Optional when ``data`` is a NumPy/Dask array. Defaults to
+        ``(y_coord, x_coord)``.
+    add
+        Defaults to ``True``. If ``True``, add to existing values at those
+        pixels; if ``False``, replace values at those pixels.
+    output
+        Output kind to return. One of ``'match'``, ``'xarray'``, ``'numpy'``,
+        or ``'dask'``.
+
+    Returns
+    -------
+    xarray.DataArray | numpy.ndarray | dask.array.Array
+        The field with point sources applied, in the requested output kind.
+
+    Raises
+    ------
+    ValueError
+        If the lengths of ``amplitudes``, ``xs``, and ``ys`` are not equal.
+
+    Notes
+    -----
+    For rectilinear yet irregular grids, the nearest 2-D pixel is the Cartesian
+    pair of the nearest 1-D coordinates along x and y. This allows a fast, per-axis
+    nearest search to be combined into a correct 2-D decision.
+
+    Examples
+    --------
+    >>> import numpy as np, xarray as xr
+    >>> y = np.linspace(-2, 2, 5)
+    >>> x = np.linspace(-3, 3, 7)
+    >>> base = xr.DataArray(np.zeros((y.size, x.size)), coords={"y": y, "x": x}, dims=("y", "x"))
+    >>> out = make_pt_sources(base, amplitudes=[5, 3], xs=[-0.1, 1.4], ys=[0.2, -0.9])
+    """
+    amps = np.asarray(amplitudes)
+    xs_arr = np.asarray(xs)
+    ys_arr = np.asarray(ys)
+
+    if not (amps.size == xs_arr.size == ys_arr.size):
+        raise ValueError("amplitudes, xs, and ys must have the same length")
+
+    xda_in = _coerce_to_xda(data, x_coord=x_coord, y_coord=y_coord, coords=coords, dims=dims)
+
+    x_vals = np.asarray(xda_in[x_coord].values)
+    y_vals = np.asarray(xda_in[y_coord].values)
+
+    xi = _nearest_indices_1d(x_vals, xs_arr)
+    yi = _nearest_indices_1d(y_vals, ys_arr)
+
+    out_dtype = np.result_type(xda_in.values, amps)
+    base_zeros = xr.zeros_like(xda_in, dtype=out_dtype)
+    source_array = base_zeros.copy()
+    np.add.at(source_array.data, (yi, xi), amps)
+    xda_out = _apply_source_array(xda_in, source_array, add=add)
+    xda_out = _copy_meta(xda_in, xda_out)
+    return _finalize_output(xda_out, data, output=output)
+
