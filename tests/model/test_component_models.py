@@ -36,7 +36,7 @@ class TestAngleModes(unittest.TestCase):
             angle="auto",  # should choose PA on left-handed grids
             x0=0.0,
             y0=0.0,
-            A=10.0,
+            peak=10.0,
             add=False,
             output="xarray",
         )
@@ -49,7 +49,7 @@ class TestAngleModes(unittest.TestCase):
             angle="pa",  # force PA explicitly
             x0=0.0,
             y0=0.0,
-            A=10.0,
+            peak=10.0,
             add=False,
             output="xarray",
         )
@@ -68,7 +68,7 @@ class TestAngleModes(unittest.TestCase):
             angle="auto",  # should choose math on right-handed grids
             x0=0.0,
             y0=0.0,
-            A=2.0,
+            height=2.0,
             add=False,
             output="xarray",
         )
@@ -80,7 +80,7 @@ class TestAngleModes(unittest.TestCase):
             angle="math",  # force math explicitly
             x0=0.0,
             y0=0.0,
-            A=2.0,
+            height=2.0,
             add=False,
             output="xarray",
         )
@@ -100,7 +100,7 @@ class TestAngleModes(unittest.TestCase):
             angle="math",
             x0=0.0,
             y0=0.0,
-            A=5.0,
+            peak=5.0,
             add=False,
             output="xarray",
         )
@@ -113,7 +113,7 @@ class TestAngleModes(unittest.TestCase):
             angle="math",
             x0=0.0,
             y0=0.0,
-            A=5.0,
+            peak=5.0,
             add=False,
             output="xarray",
         )
@@ -133,7 +133,7 @@ class TestMakeDisk(unittest.TestCase):
             theta=0.0,
             x0=0.0,
             y0=0.0,
-            A=3.0,
+            height=3.0,
             add=True,
             output="xarray",
         )
@@ -162,7 +162,7 @@ class TestMakeDisk(unittest.TestCase):
             theta=0.0,
             x0=0.0,
             y0=0.0,
-            A=3.0,
+            height=3.0,
             add=False,
             output="xarray",
         )
@@ -182,7 +182,7 @@ class TestMakeDisk(unittest.TestCase):
             theta=0.0,
             x0=0.0,
             y0=0.0,
-            A=2.0,
+            height=2.0,
             coords={"y": base["y"].values, "x": base["x"].values},
             output="numpy",
         )
@@ -197,7 +197,7 @@ class TestMakeDisk(unittest.TestCase):
             theta=0.0,
             x0=0.0,
             y0=0.0,
-            A=2.0,
+            height=2.0,
             coords={"y": base["y"].values, "x": base["x"].values},
             output="dask",
         )
@@ -208,9 +208,9 @@ class TestMakeDisk(unittest.TestCase):
     def test_param_validation(self):
         base = _base_grid()
         with self.assertRaises(ValueError):
-            make_disk(base, a=-1.0, b=1.0, theta=0.0, x0=0.0, y0=0.0, A=1.0)
+            make_disk(base, a=-1.0, b=1.0, theta=0.0, x0=0.0, y0=0.0, height=1.0)
         with self.assertRaises(ValueError):
-            make_disk(base, a=1.0, b=0.0, theta=np.nan, x0=0.0, y0=0.0, A=1.0)
+            make_disk(base, a=1.0, b=0.0, theta=np.nan, x0=0.0, y0=0.0, height=1.0)
 
 
 class TestMakeGauss2D(unittest.TestCase):
@@ -223,7 +223,7 @@ class TestMakeGauss2D(unittest.TestCase):
             theta=0.0,
             x0=0.0,
             y0=0.0,
-            A=10.0,
+            peak=10.0,
             add=False,
             output="xarray",
         )
@@ -241,7 +241,7 @@ class TestMakeGauss2D(unittest.TestCase):
             theta=0.0,
             x0=0.0,
             y0=0.0,
-            A=3.0,
+            peak=3.0,
             add=True,
             output="xarray",
         )
@@ -256,7 +256,7 @@ class TestMakeGauss2D(unittest.TestCase):
     def test_output_kinds(self):
         base = _base_grid()
         out_xr = make_gauss2d(
-            base, a=2.355, b=2.355, theta=0.0, x0=0.0, y0=0.0, A=1.0, output="xarray"
+            base, a=2.355, b=2.355, theta=0.0, x0=0.0, y0=0.0, peak=1.0, output="xarray"
         )
         self.assertIsInstance(
             out_xr, xr.DataArray, "output='xarray' should return an xarray.DataArray"
@@ -268,7 +268,7 @@ class TestMakeGauss2D(unittest.TestCase):
             theta=0.0,
             x0=0.0,
             y0=0.0,
-            A=1.0,
+            peak=1.0,
             coords={"y": base["y"].values, "x": base["x"].values},
             output="numpy",
         )
@@ -282,7 +282,7 @@ class TestMakeGauss2D(unittest.TestCase):
             theta=0.0,
             x0=0.0,
             y0=0.0,
-            A=1.0,
+            peak=1.0,
             coords={"y": base["y"].values, "x": base["x"].values},
             output="dask",
         )
@@ -299,7 +299,7 @@ class TestMakeGauss2D(unittest.TestCase):
             theta=0.0,
             x0=1.0,
             y0=-2.0,
-            A=5.0,
+            peak=5.0,
             output="xarray",
         )
         self.assertIsInstance(
