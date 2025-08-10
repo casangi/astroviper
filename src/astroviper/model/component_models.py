@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Literal, Mapping, Optional, Tuple, Union
-
+from typing import Any, Literal, Mapping, Optional, Tuple, Union, Sequence
+from numbers import Real
 import numpy as np
 import xarray as xr
 import dask.array as da
@@ -230,15 +230,12 @@ def _normalize_theta(
     theta = float(np.deg2rad(angle_value) if degrees else angle_value)
     return (np.pi / 2.0) - theta if angle == "pa" else theta
 
-
 def _validate_ab_theta_center(
     a: float,
     b: float,
     theta: float,
     x0: float,
     y0: float,
-    *,
-    ab_label: str = "Semi-axes 'a' and 'b'",
 ) -> None:
     """
     Validate that shape parameters are finite and positive where required.
@@ -246,19 +243,35 @@ def _validate_ab_theta_center(
     Parameters
     ----------
     a, b
-        Semi-axis lengths or other width-like parameters; must be positive finite numbers.
+        Semi-axis lengths or width-like parameters; must be positive finite numbers.
     theta
         Rotation angle in radians; must be finite.
     x0, y0
         Center coordinates in world units; must be finite.
-    ab_label
-        Label for `a` and `b` in error messages (default: "Semi-axes 'a' and 'b'").
-    """
-    if not (np.isfinite(a) and np.isfinite(b) and a > 0.0 and b > 0.0):
-        raise ValueError(f"{ab_label} must be positive finite numbers.")
-    if not np.isfinite(theta) or not np.isfinite(x0) or not np.isfinite(y0):
-        raise ValueError("'theta', 'x0', and 'y0' must be finite numbers.")
 
+    Raises
+    ------
+    ValueError
+        If any check fails.
+    """
+    # Check finiteness
+    for value, name in [
+        (a, "'a'"),
+        (b, "'b'"),
+        (theta, "'theta'"),
+        (x0, "'x0'"),
+        (y0, "'y0'"),
+    ]:
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be a finite number.")
+
+    # Check positivity for a and b
+    for value, name in [
+        (a, "'a'"),
+        (b, "'b'"),
+    ]:
+        if value <= 0.0:
+            raise ValueError(f"{name} must be positive.")
 
 def _copy_meta(src: xr.DataArray, dest: xr.DataArray) -> xr.DataArray:
     """
@@ -361,7 +374,7 @@ def make_disk(
     theta: float,
     x0: float,
     y0: float,
-    A: Any,
+    height: Real,
     *,
     x_coord: str = "x",
     y_coord: str = "y",
@@ -375,7 +388,7 @@ def make_disk(
     """
     Fill a rotated ellipse (“disk”) with a constant value on a world-coordinate grid.
 
-    ``make_disk`` writes a constant value ``A`` inside an ellipse defined in world
+    ``make_disk`` writes a constant value ``height`` inside an ellipse defined in world
     coordinates by its semi-axes ``a`` and ``b``, rotation ``theta`` (radians,
     measured from +x toward +y), and center ``(x0, y0)``. The function accepts
     either an ``xarray.DataArray`` of any dimensionality that includes named
@@ -406,7 +419,7 @@ def make_disk(
         Rotation angle in radians measured from +x toward +y.
     x0, y0
         Ellipse center in world coordinates.
-    A
+    height
         Value to write inside the ellipse, or the increment when ``add=True``.
     x_coord, y_coord
         Names of the horizontal and vertical coordinates or dims.
@@ -457,7 +470,7 @@ def make_disk(
     >>> y = np.linspace(-5, 5, 101)
     >>> x = np.linspace(-5, 5, 121)
     >>> base = xr.DataArray(np.zeros((y.size, x.size)), coords={"y": y, "x": x}, dims=("y", "x"))
-    >>> out = make_disk(base, a=3.0, b=1.5, theta=np.deg2rad(30), x0=0.0, y0=0.0, A=2.0)
+    >>> out = make_disk(base, a=3.0, b=1.5, theta=np.deg2rad(30), x0=0.0, y0=0.0, height=2.0)
     """
     _validate_ab_theta_center(a, b, theta, x0, y0)
 
@@ -479,7 +492,7 @@ def make_disk(
         xda_in, x_coord=x_coord, y_coord=y_coord, x0=x0, y0=y0, theta=theta_eff
     )
     mask = (xp / a) ** 2 + (yp / b) ** 2 <= 1.0
-    source_array = xr.where(mask, A, 0)
+    source_array = xr.where(mask, height, 0)
     xda_out = _apply_source_array(xda_in, source_array, add=add)
     xda_out = _copy_meta(xda_in, xda_out)
     return _finalize_output(xda_out, data, output=output)
@@ -492,7 +505,7 @@ def make_gauss2d(
     theta: float,
     x0: float,
     y0: float,
-    A: float,
+    peak: Real,
     *,
     x_coord: str = "x",
     y_coord: str = "y",
@@ -506,7 +519,7 @@ def make_gauss2d(
     """
     Generate or add a rotated elliptical 2-D Gaussian using **FWHM** parameters.
 
-    ``make_gauss2d`` produces an elliptical Gaussian with peak amplitude ``A`` at
+    ``make_gauss2d`` produces an elliptical Gaussian with peak amplitude ``peak`` at
     center ``(x0, y0)``. Inputs ``a`` and ``b`` are the **full width at half
     maximum (FWHM)** along the ellipse’s principal axes. The ellipse is rotated
     by ``theta`` radians measured from +x toward +y.
@@ -517,7 +530,7 @@ def make_gauss2d(
 
     Field definition:
 
-        ``G(x, y) = A * exp(-0.5 * [ (xp/σx)^2 + (yp/σy)^2 ])``
+        ``G(x, y) = peak * exp(-0.5 * [ (xp/σx)^2 + (yp/σy)^2 ])``
 
     where ``xp, yp`` are the rotated coordinates about ``(x0, y0)``.
 
@@ -543,7 +556,7 @@ def make_gauss2d(
         Rotation angle in radians measured from +x toward +y.
     x0, y0
         Gaussian center in world coordinates.
-    A
+    peak
         Peak amplitude at the center.
     x_coord, y_coord
         Names of the horizontal and vertical coordinates or dims.
@@ -594,9 +607,9 @@ def make_gauss2d(
     >>> y = np.linspace(-4, 4, 200)
     >>> x = np.linspace(-5, 5, 300)
     >>> base = xr.DataArray(np.zeros((y.size, x.size)), coords={"y": y, "x": x}, dims=("y", "x"))
-    >>> g = make_gauss2d(base, a=2.355, b=4.71, theta=np.deg2rad(30), x0=0.0, y0=0.0, A=10.0)
+    >>> g = make_gauss2d(base, a=2.355, b=4.71, theta=np.deg2rad(30), x0=0.0, y0=0.0, peak=10.0)
     """
-    _validate_ab_theta_center(a, b, theta, x0, y0, ab_label="FWHM 'a' and 'b'")
+    _validate_ab_theta_center(a, b, theta, x0, y0)
 
     xda_in = _coerce_to_xda(
         data, x_coord=x_coord, y_coord=y_coord, coords=coords, dims=dims
@@ -620,7 +633,7 @@ def make_gauss2d(
     sigma_x = a / denom
     sigma_y = b / denom
 
-    source_array = A * np.exp(-0.5 * ((xp / sigma_x) ** 2 + (yp / sigma_y) ** 2))
+    source_array = peak * np.exp(-0.5 * ((xp / sigma_x) ** 2 + (yp / sigma_y) ** 2))
     xda_out = _apply_source_array(xda_in, source_array, add=add)
     xda_out = _copy_meta(xda_in, xda_out)
     return _finalize_output(xda_out, data, output=output)
@@ -628,7 +641,7 @@ def make_gauss2d(
 
 def make_pt_sources(
     data: Union[xr.DataArray, ArrayLike2D],
-    amplitudes: Union[np.ndarray, list, tuple],
+    amplitudes: Sequence[Real],
     xs: Union[np.ndarray, list, tuple],
     ys: Union[np.ndarray, list, tuple],
     *,
