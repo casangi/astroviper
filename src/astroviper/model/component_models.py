@@ -235,13 +235,17 @@ def _nearest_indices_1d(
         elif out_of_range == "ignore_sloppy" and vals.size >= 2:
             lower_half = 0.5 * abs(vals[1] - vals[0])
             upper_half = 0.5 * abs(vals[-1] - vals[-2])
-            valid = (targets_arr >= val_min - lower_half) & (targets_arr <= val_max + upper_half)
+            valid = (targets_arr >= val_min - lower_half) & (
+                targets_arr <= val_max + upper_half
+            )
         elif out_of_range == "ignore_sloppy" and vals.size == 1:
             valid = np.isclose(targets_arr, val_min)
         else:
             valid = np.ones_like(targets_arr, dtype=bool)
     else:
-        raise ValueError("out_of_range must be one of {'ignore', 'ignore_sloppy', 'clip', 'error'}")
+        raise ValueError(
+            "out_of_range must be one of {'ignore', 'ignore_sloppy', 'clip', 'error'}"
+        )
 
     idx_right = np.searchsorted(vals, targets_arr, side="left")
     idx_left = np.clip(idx_right - 1, 0, vals.size - 1)
@@ -260,13 +264,16 @@ def _nearest_indices_1d(
 
     if out_of_range == "clip":
         if return_valid_mask:
-            return out.reshape(targets.shape), np.ones_like(valid, dtype=bool).reshape(targets.shape)
+            return out.reshape(targets.shape), np.ones_like(valid, dtype=bool).reshape(
+                targets.shape
+            )
         return out.reshape(targets.shape)
 
     if out_of_range in ("ignore", "ignore_sloppy"):
         if return_valid_mask:
             return out.reshape(targets.shape), valid.reshape(targets.shape)
         return out.reshape(targets.shape)
+
 
 def _infer_handedness(
     x_vals: np.ndarray, y_vals: np.ndarray
@@ -305,6 +312,7 @@ def _normalize_theta(
     """
     theta = float(np.deg2rad(angle_value) if degrees else angle_value)
     return (np.pi / 2.0) - theta if angle == "pa" else theta
+
 
 def _validate_ab_theta_center(
     a: float,
@@ -348,6 +356,7 @@ def _validate_ab_theta_center(
     ]:
         if value <= 0.0:
             raise ValueError(f"{name} must be positive.")
+
 
 def _copy_meta(src: xr.DataArray, dest: xr.DataArray) -> xr.DataArray:
     """
@@ -871,7 +880,9 @@ def make_pt_sources(
 
     # Short-circuit if nothing to add.
     if not np.any(valid):
-        out_dtype = np.result_type(xda_in.values, amps.dtype if hasattr(amps, "dtype") else amps)
+        out_dtype = np.result_type(
+            xda_in.values, amps.dtype if hasattr(amps, "dtype") else amps
+        )
         source_array = xr.zeros_like(xda_in, dtype=out_dtype)
         xda_out = _apply_source_array(xda_in, source_array, add=add)
         xda_out = _copy_meta(xda_in, xda_out)
