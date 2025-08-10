@@ -651,28 +651,50 @@ def make_pt_sources(
     dims: Optional[Tuple[str, str]] = None,
     add: bool = True,
     output: OutputKind = "match",
+    out_of_range: Literal["ignore", "ignore_sloppy", "clip", "error"] = "ignore",
 ) -> ReturnType:
     """
     Place a collection of point sources on a world-coordinate grid.
 
     Each source is defined by an amplitude and a position ``(x, y)`` expressed in
-    the same world units as the grid coordinates. Sources are mapped to the
-    nearest grid point along each axis in physical distance. If a target lies
-    exactly midway between two coordinates along an axis, the right-hand
-    coordinate is chosen deterministically.
+    the same world units as the grid coordinates. Sources are mapped to the nearest
+    grid point along each axis in physical distance. If a target lies exactly midway
+    between two coordinates along an axis, the right-hand coordinate is chosen
+    deterministically.
 
     Duplicate hits are handled correctly and efficiently. If multiple sources map
-    to the same grid point, their amplitudes are summed in one pass using
-    ``np.bincount`` (for NumPy) or wrapped into Dask after accumulation. This
-    ensures compatibility with both NumPy and Dask arrays.
+    to the same grid point, their amplitudes are summed in one pass using a
+    linear-index accumulation strategy.
+
+    Out-of-range handling is controlled by ``out_of_range``:
+
+      - ``"ignore"`` (default).
+        Strict ignore. Sources whose x or y fall outside the closed coordinate
+        range are skipped entirely. Use this to drop true out-of-coverage positions.
+
+      - ``"ignore_sloppy"``.
+        Half-pixel–tolerant ignore. Treat a source as in-range if it lands within
+        a half pixel beyond either edge, where the half-pixel is computed from the
+        local spacing at that edge. This is helpful for sources that are only just
+        outside coverage because of rounding.
+
+      - ``"clip"``.
+        Clip to the nearest valid pixel. Sources outside the coordinate range are
+        mapped to the closest edge pixel and included in the accumulation.
+
+      - ``"error"``.
+        Raise ``ValueError`` if any source coordinate is outside the coordinate range.
 
     Behavior controlled by ``add``:
-      - ``add=True`` (default): **Additive** mode. Point-source amplitudes are
-        added to the existing values at those pixels.
-      - ``add=False``: **Replacement** mode. Point-source amplitudes replace the
+
+      - ``add=True`` (default). Additive mode. Point-source amplitudes are added
+        to the existing values at those pixels.
+
+      - ``add=False``. Replacement mode. Point-source amplitudes replace the
         existing values at those pixels; other locations remain unchanged.
 
     The ``output`` parameter controls the return type:
+
       - ``'match'`` returns the same kind as the input (DataArray, NumPy, or Dask).
       - ``'xarray'``, ``'numpy'``, or ``'dask'`` force that kind.
 
@@ -701,6 +723,9 @@ def make_pt_sources(
     output
         Output kind to return. One of ``'match'``, ``'xarray'``, ``'numpy'``,
         or ``'dask'``.
+    out_of_range
+        One of ``{"ignore", "ignore_sloppy", "clip", "error"}`` controlling how
+        sources outside the coordinate range are handled.
 
     Returns
     -------
@@ -710,21 +735,14 @@ def make_pt_sources(
     Raises
     ------
     ValueError
-        If the lengths of ``amplitudes``, ``xs``, and ``ys`` are not equal.
+        If the lengths of ``amplitudes``, ``xs``, and ``ys`` are not equal, or
+        if ``out_of_range='error'`` and any source lies outside the coordinate range.
 
     Notes
     -----
     For rectilinear yet irregular grids, the nearest 2-D pixel is the Cartesian
     pair of the nearest 1-D coordinates along x and y. This allows a fast,
     per-axis nearest search to be combined into a correct 2-D decision.
-
-    Examples
-    --------
-    >>> import numpy as np, xarray as xr
-    >>> y = np.linspace(-2, 2, 5)
-    >>> x = np.linspace(-3, 3, 7)
-    >>> base = xr.DataArray(np.zeros((y.size, x.size)), coords={"y": y, "x": x}, dims=("y", "x"))
-    >>> out = make_pt_sources(base, amplitudes=[5, 3], xs=[-0.1, 1.4], ys=[0.2, -0.9])
     """
     amps = np.asarray(amplitudes)
     xs_arr = np.asarray(xs)
@@ -740,10 +758,32 @@ def make_pt_sources(
     x_vals = np.asarray(xda_in[x_coord].values)
     y_vals = np.asarray(xda_in[y_coord].values)
 
-    xi = _nearest_indices_1d(x_vals, xs_arr)
-    yi = _nearest_indices_1d(y_vals, ys_arr)
+    # Request validity masks so we can truly ignore OOR targets when desired.
+    xi, valid_x = _nearest_indices_1d(
+        x_vals, xs_arr, out_of_range=out_of_range, return_valid_mask=True
+    )
+    yi, valid_y = _nearest_indices_1d(
+        y_vals, ys_arr, out_of_range=out_of_range, return_valid_mask=True
+    )
 
-    out_dtype = np.result_type(xda_in.values, amps)
+    # Combine masks.
+    # For "clip", both valid_x and valid_y will be True everywhere.
+    # For "ignore" and "ignore_sloppy", only sources within policy range are kept.
+    valid = valid_x & valid_y
+
+    # Short-circuit if nothing to add.
+    if not np.any(valid):
+        out_dtype = np.result_type(xda_in.values, amps.dtype if hasattr(amps, "dtype") else amps)
+        source_array = xr.zeros_like(xda_in, dtype=out_dtype)
+        xda_out = _apply_source_array(xda_in, source_array, add=add)
+        xda_out = _copy_meta(xda_in, xda_out)
+        return _finalize_output(xda_out, data, output=output)
+
+    xi = np.asarray(xi)[valid]
+    yi = np.asarray(yi)[valid]
+    amps_kept = amps[valid]
+
+    out_dtype = np.result_type(xda_in.values, amps_kept)
 
     # Dimensions
     height = xda_in.sizes[y_coord]
@@ -754,7 +794,7 @@ def make_pt_sources(
     acc = (
         np.bincount(
             lin,
-            weights=amps.astype(out_dtype, copy=False),
+            weights=amps_kept.astype(out_dtype, copy=False),
             minlength=height * width,
         )
         .reshape(height, width)
