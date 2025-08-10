@@ -1,3 +1,6 @@
+import warnings
+warnings.filterwarnings("ignore", message="The NumPy module was reloaded", category=UserWarning)
+
 import unittest
 
 import numpy as np
@@ -7,6 +10,7 @@ import xarray as xr
 # Adjust import if your package layout differs
 from astroviper.model import make_disk, make_gauss2d, make_pt_sources
 
+import astroviper.model.component_models as cm
 
 def _base_grid(
     nx=101, ny=101, x_start=-5.0, x_stop=5.0, y_start=-5.0, y_stop=5.0, reverse_x=False
@@ -377,3 +381,120 @@ class TestMakePtSources(unittest.TestCase):
         base = _base_grid()
         with self.assertRaises(ValueError):
             make_pt_sources(base, amplitudes=[1.0, 2.0], xs=[0.0], ys=[0.0])
+
+
+class TestCoerceToXda(unittest.TestCase):
+    def test_rejects_unsupported_type(self):
+        with self.assertRaises(TypeError, msg="data must be DataArray/ndarray/Dask"):
+            # Not DA / np.ndarray / dask
+            _ = cm._coerce_to_xda(
+                data="not-an-array", x_coord="x", y_coord="y"
+            )
+
+    def test_rejects_non_2d_numpy(self):
+        arr = np.zeros((3,), dtype=float)
+        with self.assertRaises(ValueError, msg="NumPy/Dask array input must be 2-D"):
+            _ = cm._coerce_to_xda(
+                data=arr, x_coord="x", y_coord="y", coords={"x": np.arange(3), "y": np.arange(1)}
+            )
+
+    def test_requires_coords_for_raw_arrays(self):
+        arr = np.zeros((2, 3), dtype=float)
+        with self.assertRaises(ValueError, msg="coords must be provided"):
+            _ = cm._coerce_to_xda(
+                data=arr, x_coord="x", y_coord="y"
+            )
+
+    def test_missing_coord_keys(self):
+        arr = np.zeros((2, 3), dtype=float)
+        with self.assertRaises(ValueError, msg="coords must include 1-D arrays"):
+            _ = cm._coerce_to_xda(
+                data=arr, x_coord="x", y_coord="y", coords={"x": np.arange(3)}
+            )
+
+    def test_length_mismatch(self):
+        arr = np.zeros((2, 3), dtype=float)
+        with self.assertRaises(ValueError, msg="Coordinate lengths must match array shape"):
+            _ = cm._coerce_to_xda(
+                data=arr, x_coord="x", y_coord="y",
+                coords={"x": np.arange(2), "y": np.arange(2)}  # x length wrong
+            )
+
+class TestInferHandedness(unittest.TestCase):
+    def test_requires_len_ge_2(self):
+        with self.assertRaises(ValueError, msg="length >= 2"):
+            _ = cm._infer_handedness(np.array([0.0]), np.array([0.0, 1.0]))
+
+    def test_non_monotonic_x_raises(self):
+        x = np.array([0.0, 1.0, 1.0])  # not strictly monotonic
+        y = np.array([0.0, 1.0, 2.0])
+        with self.assertRaises(ValueError, msg="x coordinates must be strictly monotonic"):
+            _ = cm._infer_handedness(x, y)
+
+    def test_non_monotonic_y_raises(self):
+        x = np.array([0.0, 1.0, 2.0])
+        y = np.array([0.0, 1.0, 1.0])
+        with self.assertRaises(ValueError, msg="y coordinates must be strictly monotonic"):
+            _ = cm._infer_handedness(x, y)
+
+class TestNearestOutOfRangePolicies(unittest.TestCase):
+    def test_error_policy_raises(self):
+        coords = np.array([0.0, 1.0, 2.0])
+        with self.assertRaises(ValueError, msg="outside the coordinate range"):
+            _ = cm._nearest_indices_1d(
+                coords, np.array([-1.0, 3.0]), out_of_range="error"
+            )
+
+    def test_ignore_returns_mask(self):
+        coords = np.array([0.0, 1.0, 2.0])
+        idx, valid = cm._nearest_indices_1d(
+            coords, np.array([-0.1, 0.1, 1.4, 2.2]),
+            out_of_range="ignore",
+            return_valid_mask=True,
+        )
+        np.testing.assert_array_equal(
+            valid, np.array([False, True, True, False]),
+            err_msg="strict ignore mask wrong",
+        )
+
+    def test_ignore_sloppy_keeps_half_pixel(self):
+        coords = np.array([0.0, 1.0, 2.0])
+        half = 0.5 * (coords[1] - coords[0])
+        idx, valid = cm._nearest_indices_1d(
+            coords, np.array([-half + 1e-6, 2.0 + half - 1e-6]),
+            out_of_range="ignore_sloppy",
+            return_valid_mask=True,
+        )
+        np.testing.assert_array_equal(
+            valid, np.array([True, True]),
+            err_msg="sloppy ignore tolerance failed",
+        )
+
+    def test_clip_clamps(self):
+        coords = np.array([0.0, 1.0, 2.0])
+        idx = cm._nearest_indices_1d(
+            coords, np.array([-10.0, 10.0]), out_of_range="clip"
+        )
+        np.testing.assert_array_equal(
+            idx, np.array([0, 2]),
+            err_msg="clip policy did not clamp to edges",
+        )
+
+class TestFinalizeOutput(unittest.TestCase):
+    def test_invalid_output_kind_raises(self):
+        base = _base_grid()
+        with self.assertRaises(ValueError, msg="output must be one of"):
+            _ = cm._finalize_output(base, base, output="nope")  # type: ignore[arg-type]
+
+class TestParamValidation(unittest.TestCase):
+    def test_make_disk_param_validation(self):
+        base = _base_grid()
+        with self.assertRaises(ValueError, msg="'a' must be positive"):
+            make_disk(base, a=0.0, b=1.0, theta=0.0, x0=0.0, y0=0.0, height=1.0)
+        with self.assertRaises(ValueError, msg="'theta' must be a finite number"):
+            make_disk(base, a=1.0, b=1.0, theta=np.nan, x0=0.0, y0=0.0, height=1.0)
+
+    def test_make_gauss2d_param_validation(self):
+        base = _base_grid()
+        with self.assertRaises(ValueError, msg="'b' must be positive"):
+            make_gauss2d(base, a=1.0, b=-1.0, theta=0.0, x0=0.0, y0=0.0, peak=1.0)
