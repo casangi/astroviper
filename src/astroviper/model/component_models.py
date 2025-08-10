@@ -142,33 +142,70 @@ def _rotated_coords(
     return xp, yp
 
 
-def _nearest_indices_1d(coord_vals: np.ndarray, targets: np.ndarray) -> np.ndarray:
+def _nearest_indices_1d(
+    coord_vals: np.ndarray,
+    targets: np.ndarray,
+    *,
+    out_of_range: Literal["ignore", "ignore_sloppy", "clip", "error"] = "ignore",
+    return_valid_mask: bool = False,
+) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
     """
-    Map world coordinates to the nearest integer pixel indices along one axis.
+    Map world-coordinate ``targets`` to nearest integer indices along one axis.
 
-    The coordinate array may be monotonically increasing or decreasing. Ties are
-    resolved deterministically by choosing the right-hand neighbor.
+    Behavior
+    --------
+    Accepts a strictly monotonic 1-D coordinate array ``coord_vals`` that may be
+    increasing or decreasing. For each target, returns the index of the nearest
+    coordinate in absolute distance. Midpoint ties between two neighbors choose
+    the right-hand neighbor deterministically.
+
+    Out-of-range handling is controlled by ``out_of_range``:
+      - ``"ignore"`` (default). Strict ignore. A target is valid only if it lies
+        within the closed coordinate range [min(coord_vals), max(coord_vals)].
+        If ``return_valid_mask=True``, a boolean mask is returned so callers can
+        skip OOR targets. If the mask is not requested, indices are still
+        returned (clipped) to avoid breaking legacy callers.
+      - ``"ignore_sloppy"``. Half-pixel tolerant ignore. A target is treated as
+        valid if it lies within an expanded range that extends the lower edge by
+        half the first pixel spacing and the upper edge by half the last pixel
+        spacing. This is useful when sources land just outside the nominal
+        coverage by less than half a pixel.
+      - ``"clip"``. Clamp OOR targets to the nearest valid index.
+      - ``"error"``. Raise ``ValueError`` if any target lies outside the
+        coordinate range [min, max].
 
     Parameters
     ----------
     coord_vals
-        1-D array of grid coordinates along one axis (x or y).
+        1-D array of axis coordinates (in world units). Must be strictly
+        monotonic (all increasing or all decreasing).
     targets
-        1-D array of world coordinates to map to pixel indices.
+        1-D array-like of world coordinates to map to indices.
+    out_of_range
+        One of ``{"ignore", "ignore_sloppy", "clip", "error"}``. See Behavior.
+    return_valid_mask
+        If ``True``, also return a boolean array ``valid`` where ``True`` marks
+        targets considered in-range under the chosen policy.
 
     Returns
     -------
     np.ndarray
-        Integer pixel indices for each target, clipped to valid range.
+        Integer indices into ``coord_vals`` for each target (same shape as
+        ``targets``).
+    (np.ndarray, np.ndarray)
+        If ``return_valid_mask=True``, returns ``(indices, valid)`` where
+        ``valid`` is a boolean mask array.
 
     Notes
     -----
-    This performs a binary search to find the two nearest coordinates along the
-    axis and compares absolute distances. If a target lies exactly midway, the
-    right coordinate is selected for determinism.
+    Internally, a monotone-increasing view of ``coord_vals`` is used for the
+    binary search, and indices are mapped back if the original coords were
+    decreasing. Half-pixel tolerance for ``"ignore_sloppy"`` uses the local edge
+    spacings: ``0.5 * |vals[1]-vals[0]|`` at the lower edge and
+    ``0.5 * |vals[-1]-vals[-2]|`` at the upper edge.
     """
     coord_vals = np.asarray(coord_vals)
-    targets = np.asarray(targets).ravel()
+    targets_arr = np.asarray(targets).ravel()
 
     if coord_vals.ndim != 1:
         raise ValueError("coord_vals must be 1-D")
@@ -176,21 +213,60 @@ def _nearest_indices_1d(coord_vals: np.ndarray, targets: np.ndarray) -> np.ndarr
     ascending = bool(coord_vals[-1] >= coord_vals[0])
     vals = coord_vals if ascending else coord_vals[::-1]
 
-    idx_right = np.searchsorted(vals, targets, side="left")
+    if vals.size < 1:
+        raise ValueError("coord_vals must have length >= 1")
+    if vals.size >= 2:
+        diffs = np.diff(vals)
+        if not (diffs > 0).all():
+            raise ValueError("coord_vals must be strictly monotonic")
+
+    val_min = vals[0]
+    val_max = vals[-1]
+
+    if out_of_range == "error":
+        below = targets_arr < val_min
+        above = targets_arr > val_max
+        if np.any(below | above):
+            raise ValueError("One or more targets lie outside the coordinate range.")
+
+    if out_of_range in ("ignore", "clip", "ignore_sloppy"):
+        if out_of_range == "ignore":
+            valid = (targets_arr >= val_min) & (targets_arr <= val_max)
+        elif out_of_range == "ignore_sloppy" and vals.size >= 2:
+            lower_half = 0.5 * abs(vals[1] - vals[0])
+            upper_half = 0.5 * abs(vals[-1] - vals[-2])
+            valid = (targets_arr >= val_min - lower_half) & (targets_arr <= val_max + upper_half)
+        elif out_of_range == "ignore_sloppy" and vals.size == 1:
+            valid = np.isclose(targets_arr, val_min)
+        else:
+            valid = np.ones_like(targets_arr, dtype=bool)
+    else:
+        raise ValueError("out_of_range must be one of {'ignore', 'ignore_sloppy', 'clip', 'error'}")
+
+    idx_right = np.searchsorted(vals, targets_arr, side="left")
     idx_left = np.clip(idx_right - 1, 0, vals.size - 1)
     idx_right = np.clip(idx_right, 0, vals.size - 1)
 
     left = vals[idx_left]
     right = vals[idx_right]
 
-    choose_right = np.abs(right - targets) <= np.abs(targets - left)
+    choose_right = np.abs(right - targets_arr) <= np.abs(targets_arr - left)
     out = np.where(choose_right, idx_right, idx_left)
 
     if not ascending:
         out = (vals.size - 1) - out
 
-    return out.astype(np.int64, copy=False)
+    out = out.astype(np.int64, copy=False)
 
+    if out_of_range == "clip":
+        if return_valid_mask:
+            return out.reshape(targets.shape), np.ones_like(valid, dtype=bool).reshape(targets.shape)
+        return out.reshape(targets.shape)
+
+    if out_of_range in ("ignore", "ignore_sloppy"):
+        if return_valid_mask:
+            return out.reshape(targets.shape), valid.reshape(targets.shape)
+        return out.reshape(targets.shape)
 
 def _infer_handedness(
     x_vals: np.ndarray, y_vals: np.ndarray
