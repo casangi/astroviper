@@ -743,6 +743,28 @@ def make_pt_sources(
     For rectilinear yet irregular grids, the nearest 2-D pixel is the Cartesian
     pair of the nearest 1-D coordinates along x and y. This allows a fast,
     per-axis nearest search to be combined into a correct 2-D decision.
+
+    Examples
+    --------
+    >>> import numpy as np, xarray as xr
+    >>> y = np.linspace(-2, 2, 5)
+    >>> x = np.linspace(-3, 3, 7)
+    >>> base = xr.DataArray(np.zeros((y.size, x.size)),
+    ...                     coords={"y": y, "x": x},
+    ...                     dims=("y", "x"))
+    >>> # Strict ignore (default): OOR sources are dropped
+    >>> out1 = make_pt_sources(base,
+    ...     amplitudes=[5.0, 3.0],
+    ...     xs=[-0.1, 1.4],
+    ...     ys=[0.2, -0.9],
+    ...     out_of_range="ignore")
+    >>> # Half-pixel–tolerant ignore: keep near-edge sources
+    >>> out2 = make_pt_sources(base,
+    ...     amplitudes=[5.0],
+    ...     xs=[-3.0 - (x[1]-x[0])/2 + 1e-6],
+    ...     ys=[0.0],
+    ...     out_of_range="ignore_sloppy")
+
     """
     amps = np.asarray(amplitudes)
     xs_arr = np.asarray(xs)
