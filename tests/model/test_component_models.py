@@ -555,7 +555,7 @@ class TestFinalizeOutputMatchDispatch(unittest.TestCase):
         base = _base_grid()
         out = cm._finalize_output(base, base, output="match")
         self.assertIsInstance(
-            out, xr.DataArray, "match should return DataArray for DataArray input"
+            out, xr.DataArray, "match dispatch: DataArray input should return DataArray"
         )
 
     def test_match_with_dask(self):
@@ -563,14 +563,15 @@ class TestFinalizeOutputMatchDispatch(unittest.TestCase):
         darr = da.from_array(base.values, chunks=base.values.shape)
         out = cm._finalize_output(base, darr, output="match")
         self.assertTrue(
-            cm._is_dask_array(out), "match should return dask for dask input"
+            cm._is_dask_array(out),
+            "match dispatch: dask input should return a dask array",
         )
 
     def test_match_with_numpy(self):
         base = _base_grid()
         out = cm._finalize_output(base, base.values, output="match")
         self.assertIsInstance(
-            out, np.ndarray, "match should return numpy for numpy input"
+            out, np.ndarray, "match dispatch: numpy input should return ndarray"
         )
 
     def test_dask_to_numpy_compute_line(self):
@@ -578,22 +579,25 @@ class TestFinalizeOutputMatchDispatch(unittest.TestCase):
         darr = da.from_array(base.values + 1.0, chunks=base.values.shape)
         xda = xr.DataArray(darr, coords=base.coords, dims=base.dims)
         out = cm._finalize_output(xda, xda, output="numpy")
-        self.assertIsInstance(out, np.ndarray)
+        self.assertIsInstance(
+            out, np.ndarray, "finalize: dask->numpy should return ndarray"
+        )
         self.assertTrue(
-            np.allclose(out, base.values + 1.0), "dask->numpy should compute"
+            np.allclose(out, base.values + 1.0),
+            "finalize: dask->numpy should compute the lazy values",
         )
 
     def test_numpy_to_dask_wrap_line(self):
         base = _base_grid()
         out = cm._finalize_output(base, base, output="dask")
         self.assertTrue(
-            cm._is_dask_array(out), "numpy->dask wrap should produce dask array"
+            cm._is_dask_array(out),
+            "finalize: numpy->dask should wrap as dask.array.Array",
         )
 
 
 class TestNearestIndicesSizeOneCompletion(unittest.TestCase):
     def test_ignore_sloppy_size_one_validity(self):
-        # size-1 coords: isclose path for ignore_sloppy validity
         coords = np.array([1.23])
         idx, valid = cm._nearest_indices_1d(
             coords,
@@ -601,11 +605,18 @@ class TestNearestIndicesSizeOneCompletion(unittest.TestCase):
             out_of_range="ignore_sloppy",
             return_valid_mask=True,
         )
-        np.testing.assert_array_equal(idx, np.array([0, 0]))
-        np.testing.assert_array_equal(valid, np.array([True, False]))
+        np.testing.assert_array_equal(
+            idx,
+            np.array([0, 0]),
+            err_msg="size-1: indices should map to the sole pixel (0) under ignore_sloppy",
+        )
+        np.testing.assert_array_equal(
+            valid,
+            np.array([True, False]),
+            err_msg="size-1: isclose target must be valid; farther target must be invalid",
+        )
 
     def test_clip_with_mask_size_one(self):
-        # size-1 coords: clip + return_valid_mask=True -> returns ones_like(valid)
         coords = np.array([5.0])
         idx, valid = cm._nearest_indices_1d(
             coords,
@@ -613,16 +624,27 @@ class TestNearestIndicesSizeOneCompletion(unittest.TestCase):
             out_of_range="clip",
             return_valid_mask=True,
         )
-        np.testing.assert_array_equal(idx, np.array([0, 0]))
-        np.testing.assert_array_equal(valid, np.array([True, True]))
+        np.testing.assert_array_equal(
+            idx,
+            np.array([0, 0]),
+            err_msg="size-1: clip must clamp both extreme targets to index 0",
+        )
+        np.testing.assert_array_equal(
+            valid,
+            np.array([True, True]),
+            err_msg="size-1: clip+mask must return True for all targets",
+        )
 
     def test_ignore_plain_return_no_mask(self):
-        # hit the no-mask return in the ignore/ignore_sloppy block
         coords = np.array([0.0, 1.0, 2.0])
         idx = cm._nearest_indices_1d(
             coords, np.array([0.2, 2.2]), out_of_range="ignore"
         )
-        np.testing.assert_array_equal(idx, np.array([0, 2]))
+        np.testing.assert_array_equal(
+            idx,
+            np.array([0, 2]),
+            err_msg="ignore (no mask): nearest indices incorrect for [0.2, 2.2]",
+        )
 
 
 class TestMakePtSourcesEarlyExit(unittest.TestCase):
@@ -635,9 +657,14 @@ class TestMakePtSourcesEarlyExit(unittest.TestCase):
             xs=[1e9, -1e9],
             ys=[1e9, -1e9],
             out_of_range="ignore",
-            add=True,  # either mode should take the same early-exit path
+            add=True,
             output="xarray",
         )
         # Should equal the original zeros
-        self.assertIsInstance(out, xr.DataArray)
-        self.assertTrue(np.array_equal(out.values, base.values))
+        self.assertIsInstance(
+            out, xr.DataArray, "early-exit: output should still be an xarray.DataArray"
+        )
+        self.assertTrue(
+            np.array_equal(out.values, base.values),
+            "early-exit: result must equal the unmodified base when all sources are OOR",
+        )
