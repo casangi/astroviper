@@ -518,3 +518,126 @@ class TestParamValidation(unittest.TestCase):
         base = _base_grid()
         with self.assertRaises(ValueError, msg="'b' must be positive"):
             make_gauss2d(base, a=1.0, b=-1.0, theta=0.0, x0=0.0, y0=0.0, peak=1.0)
+
+
+class TestNearestIndicesEdgeCases(unittest.TestCase):
+    def test_coord_vals_must_be_1d(self):
+        coords = np.array([[0.0, 1.0]])  # 2-D
+        with self.assertRaises(ValueError, msg="coord_vals must be 1-D"):
+            cm._nearest_indices_1d(coords, np.array([0.5]))
+
+    def test_coord_vals_length_at_least_one(self):
+        coords = np.array([])  # empty
+        with self.assertRaises(ValueError, msg="length >= 1"):
+            cm._nearest_indices_1d(coords, np.array([0.0]))
+
+    def test_coord_vals_strictly_monotonic(self):
+        coords = np.array([0.0, 1.0, 1.0])  # not strictly increasing
+        with self.assertRaises(ValueError, msg="strictly monotonic"):
+            cm._nearest_indices_1d(coords, np.array([0.5]))
+
+    def test_invalid_out_of_range_value_raises(self):
+        coords = np.array([0.0, 1.0, 2.0])
+        with self.assertRaises(ValueError, msg="out_of_range must be one of"):
+            cm._nearest_indices_1d(coords, np.array([0.5]), out_of_range="nope")  # type: ignore[arg-type]
+
+    def test_descending_branch_maps_back(self):
+        coords = np.array([2.0, 1.0, 0.0])  # strictly decreasing
+        # target near 0.1 → nearest index 2 in decreasing orientation, must map-back correctly
+        idx = cm._nearest_indices_1d(coords, np.array([0.1]), out_of_range="clip")
+        np.testing.assert_array_equal(
+            idx, np.array([2]), err_msg="descending map-back failed"
+        )
+
+
+class TestFinalizeOutputMatchDispatch(unittest.TestCase):
+    def test_match_with_dataarray(self):
+        base = _base_grid()
+        out = cm._finalize_output(base, base, output="match")
+        self.assertIsInstance(
+            out, xr.DataArray, "match should return DataArray for DataArray input"
+        )
+
+    def test_match_with_dask(self):
+        base = _base_grid()
+        darr = da.from_array(base.values, chunks=base.values.shape)
+        out = cm._finalize_output(base, darr, output="match")
+        self.assertTrue(
+            cm._is_dask_array(out), "match should return dask for dask input"
+        )
+
+    def test_match_with_numpy(self):
+        base = _base_grid()
+        out = cm._finalize_output(base, base.values, output="match")
+        self.assertIsInstance(
+            out, np.ndarray, "match should return numpy for numpy input"
+        )
+
+    def test_dask_to_numpy_compute_line(self):
+        base = _base_grid()
+        darr = da.from_array(base.values + 1.0, chunks=base.values.shape)
+        xda = xr.DataArray(darr, coords=base.coords, dims=base.dims)
+        out = cm._finalize_output(xda, xda, output="numpy")
+        self.assertIsInstance(out, np.ndarray)
+        self.assertTrue(
+            np.allclose(out, base.values + 1.0), "dask->numpy should compute"
+        )
+
+    def test_numpy_to_dask_wrap_line(self):
+        base = _base_grid()
+        out = cm._finalize_output(base, base, output="dask")
+        self.assertTrue(
+            cm._is_dask_array(out), "numpy->dask wrap should produce dask array"
+        )
+
+
+class TestNearestIndicesSizeOneCompletion(unittest.TestCase):
+    def test_ignore_sloppy_size_one_validity(self):
+        # size-1 coords: isclose path for ignore_sloppy validity
+        coords = np.array([1.23])
+        idx, valid = cm._nearest_indices_1d(
+            coords,
+            np.array([1.2300000001, 1.24]),
+            out_of_range="ignore_sloppy",
+            return_valid_mask=True,
+        )
+        np.testing.assert_array_equal(idx, np.array([0, 0]))
+        np.testing.assert_array_equal(valid, np.array([True, False]))
+
+    def test_clip_with_mask_size_one(self):
+        # size-1 coords: clip + return_valid_mask=True -> returns ones_like(valid)
+        coords = np.array([5.0])
+        idx, valid = cm._nearest_indices_1d(
+            coords,
+            np.array([100.0, -100.0]),
+            out_of_range="clip",
+            return_valid_mask=True,
+        )
+        np.testing.assert_array_equal(idx, np.array([0, 0]))
+        np.testing.assert_array_equal(valid, np.array([True, True]))
+
+    def test_ignore_plain_return_no_mask(self):
+        # hit the no-mask return in the ignore/ignore_sloppy block
+        coords = np.array([0.0, 1.0, 2.0])
+        idx = cm._nearest_indices_1d(
+            coords, np.array([0.2, 2.2]), out_of_range="ignore"
+        )
+        np.testing.assert_array_equal(idx, np.array([0, 2]))
+
+
+class TestMakePtSourcesEarlyExit(unittest.TestCase):
+    def test_all_out_of_range_early_exit(self):
+        base = _base_grid()
+        # Put both sources far outside; strict ignore drops them all -> early exit path
+        out = make_pt_sources(
+            base,
+            amplitudes=[3.0, 7.0],
+            xs=[1e9, -1e9],
+            ys=[1e9, -1e9],
+            out_of_range="ignore",
+            add=True,  # either mode should take the same early-exit path
+            output="xarray",
+        )
+        # Should equal the original zeros
+        self.assertIsInstance(out, xr.DataArray)
+        self.assertTrue(np.array_equal(out.values, base.values))
