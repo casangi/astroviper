@@ -210,11 +210,13 @@ def _nearest_indices_1d(
     if coord_vals.ndim != 1:
         raise ValueError("coord_vals must be 1-D")
 
+    # Must check for empty before accessing [-1] or [0]
+    if coord_vals.size < 1:
+        raise ValueError("coord_vals must have length >= 1")
+
     ascending = bool(coord_vals[-1] >= coord_vals[0])
     vals = coord_vals if ascending else coord_vals[::-1]
 
-    if vals.size < 1:
-        raise ValueError("coord_vals must have length >= 1")
     if vals.size >= 2:
         diffs = np.diff(vals)
         if not (diffs > 0).all():
@@ -482,7 +484,7 @@ def make_disk(
     coordinates.
 
     Behavior controlled by ``add``:
-      - ``add=True`` (default): **Additive** mode. ``A`` is added to the
+      - ``add=True`` (default): **Additive** mode. ``height`` is added to the
         existing values **only** inside the ellipse; other locations are
         unchanged.
       - ``add=False``: **Replacement** mode. Values inside the ellipse are
