@@ -28,11 +28,37 @@ def _gauss2d_model(
     theta: float,
     offset: float,
 ) -> np.ndarray:
-    """Elliptical 2D Gaussian rotated by theta, plus constant offset."""
+    """
+    Evaluate a rotated elliptical 2D Gaussian plus constant offset.
+
+    Parameters
+    ----------
+    coords
+        Tuple of coordinate arrays ``(X, Y)`` as produced by ``np.mgrid`` or
+        ``np.meshgrid`` in pixel units.
+    amp
+        Peak amplitude of the Gaussian above background.
+    x0, y0
+        Centroid coordinates in pixels (x: fast axis, y: slow axis).
+    sigma_x, sigma_y
+        Standard deviations (pixels) along the Gaussian intrinsic major/minor
+        axes **before** rotation.
+    theta
+        Rotation angle (radians). Positive values rotate the intrinsic
+        (sigma_x axis) toward +Y.
+    offset
+        Constant background level.
+
+    Returns
+    -------
+    np.ndarray
+        Model image with the same shape as the input ``X, Y`` grids.
+    """
     X, Y = coords
     ct, st = np.cos(theta), np.sin(theta)
     x = X - x0
     y = Y - y0
+    # 'why': canonical rotated Gaussian quadratic form
     a = (ct**2) / (2 * sigma_x**2) + (st**2) / (2 * sigma_y**2)
     b = st * ct * (1.0 / (2 * sigma_y**2) - 1.0 / (2 * sigma_x**2))
     c = (st**2) / (2 * sigma_x**2) + (ct**2) / (2 * sigma_y**2)
@@ -40,6 +66,19 @@ def _gauss2d_model(
 
 
 def _fwhm_from_sigma(sigma: float) -> float:
+    """
+    Convert a Gaussian sigma to FWHM.
+
+    Parameters
+    ----------
+    sigma
+        Standard deviation of the Gaussian.
+
+    Returns
+    -------
+    float
+        Full width at half maximum.
+    """
     return 2.0 * np.sqrt(2.0 * np.log(2.0)) * sigma
 
 
@@ -48,7 +87,23 @@ def _moments_initial_guess(
     min_threshold: Optional[Number],
     max_threshold: Optional[Number],
 ) -> Tuple[float, float, float, float, float, float, float]:
-    """Robust moments seed; falls back to center+RMS if degenerate."""
+    """
+    Estimate an initial parameter vector using image moments.
+
+    Parameters
+    ----------
+    z
+        2-D image.
+    min_threshold, max_threshold
+        Pixels outside the inclusive range are masked for the moment
+        calculation. Use ``None`` to disable a bound.
+
+    Returns
+    -------
+    tuple
+        ``(amp, x0, y0, sigma_x, sigma_y, theta, offset)`` suitable as a
+        starting point for nonlinear least-squares.
+    """
     ny, nx = z.shape
     Y, X = np.mgrid[0:ny, 0:nx]
 
@@ -61,11 +116,13 @@ def _moments_initial_guess(
     z_masked = np.where(mask, z, np.nan)
     z_valid = np.where(np.isfinite(z_masked), z_masked, np.nan)
 
+    # Shift to positive weights to stabilize on noisy backgrounds
     min_val = np.nanmin(z_valid)
-    z_pos = z_valid - min_val  # why: positive weights stabilize moments
+    z_pos = z_valid - min_val
 
     total = np.nansum(z_pos)
     if not np.isfinite(total) or total <= 0:
+        # 'why': degenerate case; fall back to robust stats
         med = float(np.nanmedian(z))
         p95 = float(np.nanpercentile(z, 95))
         amp = max(p95 - med, 1e-3)
@@ -88,6 +145,19 @@ def _moments_initial_guess(
 
 
 def _default_bounds(shape: Tuple[int, int]) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
+    """
+    Create conservative parameter bounds for a 2-D plane.
+
+    Parameters
+    ----------
+    shape
+        Image shape as ``(ny, nx)``.
+
+    Returns
+    -------
+    (tuple, tuple)
+        Lower and upper bounds compatible with ``scipy.optimize.curve_fit``.
+    """
     ny, nx = shape
     lb = (0.0, -1.0, -1.0, 0.5, 0.5, -np.pi / 2, -np.inf)
     ub = (np.inf, nx + 1.0, ny + 1.0, max(nx, 2.0), max(ny, 2.0), np.pi / 2, np.inf)
@@ -103,7 +173,30 @@ def _fit_plane_numpy(
     user_init: Optional[Sequence[float]],
     user_bounds: Optional[Tuple[Sequence[float], Sequence[float]]],
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Fit one 2D plane. Returns (best_params[7], perr[7]); NaNs on failure."""
+    """
+    Fit a single 2-D plane with an elliptical Gaussian + constant background.
+
+    Parameters
+    ----------
+    z2d
+        2-D image to fit.
+    min_threshold, max_threshold
+        Pixels outside the inclusive range are ignored during fitting.
+    user_init
+        Optional initial parameter vector
+        ``(amp, x0, y0, sigma_x, sigma_y, theta, offset)``. If ``None``,
+        a moments-based guess is computed.
+    user_bounds
+        Optional pair of lower/upper bound tuples for the parameters. If
+        ``None``, defaults from ``_default_bounds`` are used.
+
+    Returns
+    -------
+    tuple of np.ndarray
+        ``(popt, perr)`` where ``popt`` is the best-fit parameter vector and
+        ``perr`` contains 1σ uncertainties (NaN when covariance is not
+        available).
+    """
     if z2d.ndim != 2:
         raise ValueError("Internal: _fit_plane_numpy expects a 2D array.")
 
@@ -154,6 +247,31 @@ def _fit_plane_wrapper(
     return_model: bool,
     return_residual: bool,
 ) -> tuple:
+    """
+    Vectorized kernel applied by ``xarray.apply_ufunc`` for one 2-D plane.
+
+    Parameters
+    ----------
+    z2d
+        2-D image slice to fit.
+    min_threshold, max_threshold
+        Thresholds for masking pixels during the fit.
+    return_model
+        If True, compute and return the model plane for this slice.
+    return_residual
+        If True, compute and return residual = data - model.
+
+    Returns
+    -------
+    tuple
+        Flattened outputs expected by ``apply_ufunc``:
+
+        - 7 scalars: ``amp, x0, y0, sigma_x, sigma_y, theta, offset``
+        - 7 scalars: corresponding 1σ uncertainties
+        - 3 scalars: ``fwhm_major, fwhm_minor, peak``
+        - residual plane (2-D)
+        - model plane (2-D)
+    """
     popt, perr = _fit_plane_numpy(
         z2d,
         min_threshold=min_threshold,
@@ -183,7 +301,6 @@ def _fit_plane_wrapper(
             if not return_model:
                 model2d = np.full_like(z2d, np.nan, dtype=float)
         else:
-            # Neither requested: skip computing model to save work
             model2d = np.full_like(z2d, np.nan, dtype=float)
             residual2d = np.full_like(z2d, np.nan, dtype=float)
 
@@ -197,6 +314,24 @@ def _fit_plane_wrapper(
 
 
 def _ensure_dataarray(data: ArrayOrDA) -> xr.DataArray:
+    """
+    Normalize supported inputs to an ``xarray.DataArray``.
+
+    Parameters
+    ----------
+    data
+        Input as ``numpy.ndarray``, ``dask.array.Array``, or ``xarray.DataArray``.
+
+    Returns
+    -------
+    xarray.DataArray
+        DataArray view of the input with generated dims/coords when necessary.
+
+    Raises
+    ------
+    TypeError
+        If the input type is unsupported.
+    """
     if isinstance(data, xr.DataArray):
         return data
     if isinstance(data, (np.ndarray, da.Array)):
@@ -207,6 +342,28 @@ def _ensure_dataarray(data: ArrayOrDA) -> xr.DataArray:
 
 
 def _resolve_dims(da: xr.DataArray, dims: Optional[Sequence[Union[str, int]]]) -> Tuple[str, str]:
+    """
+    Resolve the two plane dimensions to their canonical names.
+
+    Parameters
+    ----------
+    da
+        Target DataArray.
+    dims
+        Two dimension names or indices identifying the fit plane. If ``None``
+        and the array is 2-D, the last dim is treated as x and the second-last
+        as y.
+
+    Returns
+    -------
+    (str, str)
+        ``(x_dim, y_dim)`` names.
+
+    Raises
+    ------
+    ValueError
+        If dimensions cannot be resolved.
+    """
     if dims is None:
         if da.ndim == 2:
             return da.dims[-1], da.dims[-2]  # last is x, second-last is y
@@ -235,16 +392,54 @@ def fit_gaussian2d(
     return_residual: bool = True,
 ) -> xr.Dataset:
     """
-    Fit an elliptical 2D Gaussian (per plane).
-    Returns an xarray.Dataset with parameters, uncertainties, FWHMs, peak.
-    Optional: residual (data - model) and/or model planes via flags.
+    Fit an elliptical 2D Gaussian (per plane) to an array.
+
+    This function accepts NumPy, Dask, or Xarray inputs. If the array has more
+    than two dimensions, a fit is performed for every 2-D plane orthogonal to
+    the specified fit dims. Dask-backed inputs execute in parallel across
+    chunks.
 
     Parameters
     ----------
-    return_model : bool
-        Include 2-D fitted model plane(s) as `ds["model"]`.
-    return_residual : bool
-        Include 2-D residual plane(s) as `ds["residual"]`.
+    data
+        Array-like input (NumPy/Dask/Xarray).
+    dims
+        The two plane axes. Use names or integer indices. For 2-D inputs, this
+        can be omitted; the last dim is treated as x and the second-last as y.
+    min_threshold, max_threshold
+        Ignore pixels outside the inclusive range during fitting. Use ``None``
+        to disable either bound.
+    return_model
+        If True, include the per-plane fitted model as ``ds['model']``.
+    return_residual
+        If True, include the per-plane residual (data - model) as
+        ``ds['residual']``.
+
+    Returns
+    -------
+    xarray.Dataset
+        Per-plane results with the following data variables:
+
+        Parameters
+            ``amplitude, x0, y0, sigma_x, sigma_y, theta, offset``
+        Uncertainties (1σ)
+            ``amplitude_err, x0_err, y0_err, sigma_x_err, sigma_y_err, theta_err, offset_err``
+        Derived
+            ``fwhm_major, fwhm_minor, peak``
+        Optional planes
+            ``residual`` (if ``return_residual=True``),
+            ``model`` (if ``return_model=True``)
+
+        Coordinates follow all non-fit dims from ``data``. When 1-D coordinate
+        variables exist for the fit dims, best-effort world coordinates
+        ``x_world, y_world`` are added via linear interpolation.
+
+    Notes
+    -----
+    - FWHM values are derived from the corresponding sigmas:
+      ``FWHM = 2 * sqrt(2 * ln(2)) * sigma``.
+    - Angles are in radians.
+    - If a fit fails for a plane, outputs for that plane are NaN.
     """
     da = _ensure_dataarray(data)
     dim_x, dim_y = _resolve_dims(da, dims)
@@ -321,7 +516,25 @@ def _world_map_bulk(
     dim_x: str,
     dim_y: str,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Vectorized 1-D coord interpolation; silent NaNs on failure."""
+    """
+    Vectorized world-coordinate interpolation from 1-D coords.
+
+    Parameters
+    ----------
+    x0_arr, y0_arr
+        Arrays of pixel centroids shaped like the non-fit dims of the result.
+    block
+        DataArray that provided the 1-D coordinate variables to interpolate
+        from; must contain coordinates for ``dim_x`` and ``dim_y``.
+    dim_x, dim_y
+        Names of the pixel axes (x then y).
+
+    Returns
+    -------
+    (np.ndarray, np.ndarray)
+        World coordinates ``(x_world, y_world)`` aligned with the inputs.
+        NaNs are returned when interpolation cannot be performed.
+    """
     try:
         cx = block.coords[dim_x].values
         cy = block.coords[dim_y].values
@@ -343,8 +556,30 @@ def quicklook_gaussian2d(
     indexer: Optional[dict[str, Any]] = None,
 ) -> None:
     """
-    Quick plot of data / model / residual for a selected plane.
-    Builds missing model/residual on the fly if not returned.
+    Plot data, model, and residual for a selected 2-D plane.
+
+    This helper is for quick QA. If the result dataset does not contain
+    ``model`` or ``residual`` planes (depending on flags used during the fit),
+    they are rebuilt on the fly for the selected plane.
+
+    Parameters
+    ----------
+    data
+        Original input array used for fitting.
+    result
+        Dataset returned by :func:`fit_gaussian2d`.
+    dims
+        The two fit dims (names or integer indices). If omitted for 2-D input,
+        the last dim is x and the second-last is y.
+    indexer
+        Mapping of non-fit dims to select a single plane, e.g. ``{'time': 0}``.
+        When omitted for >2-D inputs, the first plane along each non-fit dim is
+        used.
+
+    Returns
+    -------
+    None
+        Displays a matplotlib figure.
     """
     import matplotlib.pyplot as plt  # local import to keep dependency optional
 
@@ -387,7 +622,26 @@ def _rebuild_model_from_params(
     dim_x: str,
     dim_y: str,
 ) -> xr.DataArray:
-    """Fallback when model wasn't returned (keeps coords)."""
+    """
+    Rebuild a model image for a selected plane from fitted parameters.
+
+    Parameters
+    ----------
+    result
+        Dataset returned by :func:`fit_gaussian2d`.
+    indexer
+        Mapping of non-fit dims to select a single plane from ``result`` (may
+        be ``None`` for 2-D inputs).
+    data2d
+        The corresponding 2-D data plane (provides size/coords).
+    dim_x, dim_y
+        Names of the pixel axes for the plane.
+
+    Returns
+    -------
+    xarray.DataArray
+        2-D model image aligned with ``data2d``.
+    """
     sel = {d: indexer[d] for d in result.dims if indexer and d in indexer}
     amp = float(result["amplitude"].isel(**sel) if sel else result["amplitude"])
     x0 = float(result["x0"].isel(**sel) if sel else result["x0"])
