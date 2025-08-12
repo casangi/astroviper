@@ -48,7 +48,7 @@ def _moments_initial_guess(
     min_threshold: Optional[Number],
     max_threshold: Optional[Number],
 ) -> Tuple[float, float, float, float, float, float, float]:
-    """Robust moments-based seed; falls back to center+RMS if degenerate."""
+    """Robust moments seed; falls back to center+RMS if degenerate."""
     ny, nx = z.shape
     Y, X = np.mgrid[0:ny, 0:nx]
 
@@ -62,7 +62,7 @@ def _moments_initial_guess(
     z_valid = np.where(np.isfinite(z_masked), z_masked, np.nan)
 
     min_val = np.nanmin(z_valid)
-    z_pos = z_valid - min_val
+    z_pos = z_valid - min_val  # why: positive weights stabilize moments
 
     total = np.nansum(z_pos)
     if not np.isfinite(total) or total <= 0:
@@ -152,6 +152,7 @@ def _fit_plane_wrapper(
     min_threshold: Optional[Number],
     max_threshold: Optional[Number],
     return_model: bool,
+    return_residual: bool,
 ) -> tuple:
     popt, perr = _fit_plane_numpy(
         z2d,
@@ -170,19 +171,28 @@ def _fit_plane_wrapper(
 
     ny, nx = z2d.shape
     Y, X = np.mgrid[0:ny, 0:nx]
+
     if np.any(~np.isfinite(popt)):
-        residual2d = np.full_like(z2d, np.nan, dtype=float)
+        # Fit failed: fill with NaNs
         model2d = np.full_like(z2d, np.nan, dtype=float)
+        residual2d = np.full_like(z2d, np.nan, dtype=float)
     else:
-        model2d = _gauss2d_model((X, Y), amp, x0, y0, sx, sy, th, off)
-        residual2d = z2d.astype(float) - model2d  # residual = data - model
+        if return_model or return_residual:
+            model2d = _gauss2d_model((X, Y), amp, x0, y0, sx, sy, th, off)
+            residual2d = (z2d.astype(float) - model2d) if return_residual else np.full_like(z2d, np.nan, dtype=float)
+            if not return_model:
+                model2d = np.full_like(z2d, np.nan, dtype=float)
+        else:
+            # Neither requested: skip computing model to save work
+            model2d = np.full_like(z2d, np.nan, dtype=float)
+            residual2d = np.full_like(z2d, np.nan, dtype=float)
 
     return (
         amp, x0, y0, sx, sy, th, off,
         e_amp, e_x0, e_y0, e_sx, e_sy, e_th, e_off,
         fwhm_major, fwhm_minor, peak,
         residual2d,
-        (model2d if return_model else np.full_like(z2d, np.nan, dtype=float)),
+        model2d,
     )
 
 
@@ -222,11 +232,19 @@ def fit_gaussian2d(
     min_threshold: Optional[Number] = None,
     max_threshold: Optional[Number] = None,
     return_model: bool = False,
+    return_residual: bool = True,
 ) -> xr.Dataset:
     """
     Fit an elliptical 2D Gaussian (per plane).
-    Returns an xarray.Dataset with parameters, uncertainties, FWHMs, peak,
-    residual (data - model), and optionally model.
+    Returns an xarray.Dataset with parameters, uncertainties, FWHMs, peak.
+    Optional: residual (data - model) and/or model planes via flags.
+
+    Parameters
+    ----------
+    return_model : bool
+        Include 2-D fitted model plane(s) as `ds["model"]`.
+    return_residual : bool
+        Include 2-D residual plane(s) as `ds["residual"]`.
     """
     da = _ensure_dataarray(data)
     dim_x, dim_y = _resolve_dims(da, dims)
@@ -235,7 +253,7 @@ def fit_gaussian2d(
     da_tr = da.transpose(*(d for d in da.dims if d not in (dim_y, dim_x)), dim_y, dim_x)
 
     core_dims = [dim_y, dim_x]
-    # params + errs + extras + residual + model
+    # params + errs + extras + residual + model (always part of ufunc outputs; attached conditionally)
     output_dtypes = [np.float64] * (7 + 7 + 3) + [np.float64] + [np.float64]
 
     results = xr.apply_ufunc(
@@ -252,7 +270,12 @@ def fit_gaussian2d(
         vectorize=True,
         dask="parallelized",
         output_dtypes=output_dtypes,
-        kwargs=dict(min_threshold=min_threshold, max_threshold=max_threshold, return_model=return_model),
+        kwargs=dict(
+            min_threshold=min_threshold,
+            max_threshold=max_threshold,
+            return_model=return_model,
+            return_residual=return_residual,
+        ),
     )
 
     (amp, x0, y0, sx, sy, th, off,
@@ -273,9 +296,10 @@ def fit_gaussian2d(
             theta_err=e_th, offset_err=e_off,
             fwhm_major=fwhm_maj, fwhm_minor=fwhm_min,
             peak=peak,
-            residual=residual_da,
         )
     )
+    if return_residual:
+        ds["residual"] = residual_da
     if return_model:
         ds["model"] = model_da
 
@@ -320,7 +344,7 @@ def quicklook_gaussian2d(
 ) -> None:
     """
     Quick plot of data / model / residual for a selected plane.
-    Pass `indexer` to pick non-fit dims (e.g. {'time': 0, 'chan': 5}).
+    Builds missing model/residual on the fly if not returned.
     """
     import matplotlib.pyplot as plt  # local import to keep dependency optional
 
@@ -341,7 +365,10 @@ def quicklook_gaussian2d(
         data2d = da_tr
         model2d = result["model"] if "model" in result else _rebuild_model_from_params(result, None, data2d, dim_x, dim_y)
 
-    residual = data2d - model2d
+    if "residual" in result:
+        residual = result["residual"].transpose(*da_tr.dims).isel(**indexer) if da_tr.ndim > 2 else result["residual"]
+    else:
+        residual = data2d - model2d
 
     fig, axes = plt.subplots(1, 3, figsize=(12, 4), constrained_layout=True)
     axes[0].imshow(np.asarray(data2d), origin="lower"); axes[0].set_title("Data")
@@ -360,7 +387,7 @@ def _rebuild_model_from_params(
     dim_x: str,
     dim_y: str,
 ) -> xr.DataArray:
-    """Fallback when model wasn't requested during fit (keeps coords)."""
+    """Fallback when model wasn't returned (keeps coords)."""
     sel = {d: indexer[d] for d in result.dims if indexer and d in indexer}
     amp = float(result["amplitude"].isel(**sel) if sel else result["amplitude"])
     x0 = float(result["x0"].isel(**sel) if sel else result["x0"])
