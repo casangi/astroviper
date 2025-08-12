@@ -1,0 +1,85 @@
+[build-system]
+requires = [
+    "pybind11>=2.10.0",
+    "setuptools>=64",
+    "wheel",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hogbom-clean"
+version = "0.1.0"
+description = "Hogbom CLEAN algorithm implementation"
+readme = "README.md"
+classifiers = [
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "numpy>=1.20.0",
+]
+requires-python = ">=3.8"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=6.0",
+    "pytest-benchmark",
+    "scipy",
+]
+dev = [
+    "pytest>=6.0",
+    "pytest-benchmark",
+    "scipy",
+    "black",
+    "isort",
+    "mypy",
+    "pre-commit",
+]
+
+[tool.setuptools]
+packages = ["hogbom"]
+
+[tool.setuptools.package-dir]
+hogbom = "python"
+
+[tool.setuptools.package-data]
+hogbom = ["py.typed"]
+
+# Custom build configuration for pybind11
+[tool.pybind11.options]
+strip = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "benchmark: marks tests as benchmarks",
+]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+line_length = 88
+multi_line_output = 3
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "hogbom_clean.*"
+ignore_missing_imports = true
