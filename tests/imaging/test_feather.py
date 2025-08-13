@@ -22,27 +22,29 @@ class FeatherTest(unittest.TestCase):
     int_zarr = "int.zarr"
     sd_zarr = "sd.zarr"
 
-    def setUp(self):
-        pass
+    # --- helpers -------------------------------------------------------------
+    @staticmethod
+    def _rm(path: str) -> None:
+        if os.path.exists(path):
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
 
-    def tearDown(self):
-        for f in [
-            self.int_image,
-            self.sd_image,
-            self.feather_out,
-            self.int_zarr,
-            self.sd_zarr,
-        ]:
-            if os.path.exists(f):
-                if os.path.isdir(f):
-                    shutil.rmtree(f)
-                else:
-                    os.remove(f)
+    @classmethod
+    def _ensure_inputs(cls) -> None:
+        """Create the int/sd zarr inputs once; reuse across tests/classes.
+        Minimal change: this is the original generation logic lifted out of
+        `test_feather`, executed only when needed.
+        """
+        if os.path.exists(cls.int_zarr) and os.path.exists(cls.sd_zarr):
+            return  # already generated
 
-    def test_feather(self):
-        download(self.sd_image)
-        download(self.int_image)
-        download("feather.im")
+        # downloads (idempotent)
+        download(cls.sd_image)
+        download(cls.int_image)
+
+        # build skeleton and select center window if needed
         imsize = [1024, 1024]
         nchan = 16
         rad_per_arcsec = np.pi / 180 / 3600
@@ -55,8 +57,6 @@ class FeatherTest(unittest.TestCase):
             time_coords=[0],
         )
         sel_dict = {}
-        # downloaded CASA images are 4096x4096, if desired image size is smaller
-        # then we need to select the appropriate slice
         if imsize[0] < 4096:
             blc = 2048 - imsize[0] // 2
             l_slice = slice(blc, blc + imsize[0])
@@ -65,22 +65,22 @@ class FeatherTest(unittest.TestCase):
             blc = 2048 - imsize[1] // 2
             m_slice = slice(blc, blc + imsize[1])
             sel_dict["m"] = m_slice
-        print("sel_dict", sel_dict)
-        xds_sd_temp = read_image("feather_sim_sd_c1_pI.im").isel(sel_dict)
-        xds_int_temp = read_image("feather_sim_vla_c1_pI.im").isel(sel_dict)
+
+        xds_sd_temp = read_image(cls.sd_image).isel(sel_dict)
+        xds_int_temp = read_image(cls.int_image).isel(sel_dict)
+
         dm = skel_xds.sizes
         sky_da_zeros = da.zeros(
             [dm["time"], dm["frequency"], dm["polarization"], dm["l"], dm["m"]],
             dtype=np.float32,
         )
         sky_dims = list(skel_xds.dims)
-        # the if shouldn't be necessary, but currently is for CI to pass
-        sky_dims.remove("beam_param")
+        if "beam_param" in sky_dims:
+            sky_dims.remove("beam_param")  # CI compatibility
         coords = ["time", "frequency", "polarization", "l", "m"]
-        sky_coords = {}
-        for c in coords:
-            sky_coords[c] = skel_xds[c]
+        sky_coords = {c: skel_xds[c] for c in coords}
         sky_xa_zeros = xr.DataArray(data=sky_da_zeros, coords=sky_coords, dims=sky_dims)
+
         beam_da_zeros = da.zeros(
             [dm["time"], dm["frequency"], dm["polarization"], dm["beam_param"]],
             dtype=np.float32,
@@ -89,13 +89,10 @@ class FeatherTest(unittest.TestCase):
         beam_xa_zeros = xr.DataArray(
             beam_da_zeros.copy(),
             dims=beam_dims,
-            coords={
-                k: v
-                for k, v in skel_xds.coords.items()
-                if k in beam_dims + ["velocity"]
-            },
+            coords={k: v for k, v in skel_xds.coords.items() if k in beam_dims + ["velocity"]},
         )
-        exp_fds = read_image("feather.im")
+
+        exp_fds = read_image("feather.im")  # downloaded in test_feather if needed
         for i in (0, 1):
             xds = copy.deepcopy(skel_xds)
             xds["SKY"] = sky_xa_zeros.copy()
@@ -106,24 +103,43 @@ class FeatherTest(unittest.TestCase):
                 fx = xds_sd_temp if i == 0 else xds_int_temp
                 xds["SKY"][{"frequency": slice(min_chan, max_chan)}] = fx["SKY"].values
                 xds["SKY"].attrs = {"units": "Jy/beam"}
-                xds["BEAM"][{"frequency": slice(min_chan, max_chan)}] = fx[
-                    "BEAM"
-                ].values
+                xds["BEAM"][{"frequency": slice(min_chan, max_chan)}] = fx["BEAM"].values
                 xds["BEAM"].attrs = {"units": "rad"}
             if i == 0:
                 xds_sd = xds
             else:
                 xds_int = xds
-        for xds, outfile in zip([xds_sd, xds_int], [self.sd_zarr, self.int_zarr]):
-            if os.path.exists(outfile):
-                shutil.rmtree(outfile)
+
+        # write inputs once (idempotent behavior)
+        for xds, outfile in zip([xds_sd, xds_int], [cls.sd_zarr, cls.int_zarr]):
+            cls._rm(outfile)
             write_image(xds, outfile, "zarr")
+
+    # ------------------------------------------------------------------------
+    def setUp(self):
+        pass
+
+    @classmethod
+    def tearDownClass(cls):
+        # remove artifacts at end of module run
+        for f in [cls.int_image, cls.sd_image, cls.feather_out, cls.int_zarr, cls.sd_zarr]:
+            cls._rm(f)
+
+    # ------------------------------------------------------------------------
+    def test_feather(self):
+        # ensure inputs exist once, reused across tests/classes
+        self._ensure_inputs()
+        download("feather.im")  # expected result file used for comparison
+
+        exp_fds = read_image("feather.im")
+        xds_sd = load_image(self.sd_zarr)
+        xds_int = load_image(self.int_zarr)
 
         log_params = {"log_level": "DEBUG"}
         worker_log_params = {"log_level": "DEBUG"}
         for cores in (1, 4):
-            if os.path.exists(self.feather_out):
-                shutil.rmtree(self.feather_out)
+            # clean output safely (file or dir)
+            self._rm(self.feather_out)
             viper_client = local_client(
                 cores=cores,
                 memory_limit="8.0GiB",
@@ -153,12 +169,16 @@ class FeatherTest(unittest.TestCase):
             )
 
     def test_overwrite(self):
-        """Test overwrite option"""
+        """Test overwrite option using prebuilt int/sd zarr inputs"""
+        # ensure inputs exist even if this test runs first
+        self._ensure_inputs()
+        # ensure output path isn't a leftover directory from prior test run
+        self._rm(self.feather_out)
         open(self.feather_out, "w").close()
         self.assertTrue(
             os.path.exists(self.feather_out), "Feather output file not created"
         )
-        # test overwrite not present defautls to False by testing for exception
+        # test overwrite not present defaults to False by testing for exception
         try:
             feather(
                 outim={
@@ -184,3 +204,4 @@ class FeatherTest(unittest.TestCase):
             print("TypeError raised as expected")
         else:
             self.fail("Feather should have failed to run because overwrite is not bool")
+
