@@ -16,9 +16,11 @@ from xradio.image.image import load_image, make_empty_sky_image, read_image, wri
 
 class FeatherShared:
     """Shared artifacts and helpers for feather tests across classes."""
+
     int_image = "feather_sim_vla_c1_pI.im"
     sd_image = "feather_sim_sd_c1_pI.im"
     feather_out = "feather.zarr"
+    feather_expected = "feather.im"  # expected output for comparison
     int_zarr = "int.zarr"
     sd_zarr = "sd.zarr"
 
@@ -83,11 +85,13 @@ class FeatherShared:
         beam_xa_zeros = xr.DataArray(
             beam_da_zeros.copy(),
             dims=beam_dims,
-            coords={k: v for k, v in skel_xds.coords.items() if k in beam_dims + ["velocity"]},
+            coords={
+                k: v
+                for k, v in skel_xds.coords.items()
+                if k in beam_dims + ["velocity"]
+            },
         )
 
-        # download("feather.im")
-        # exp_fds = read_image("feather.im")
         for i in (0, 1):
             xds = copy.deepcopy(skel_xds)
             xds["SKY"] = sky_xa_zeros.copy()
@@ -98,7 +102,9 @@ class FeatherShared:
                 fx = xds_sd_temp if i == 0 else xds_int_temp
                 xds["SKY"][{"frequency": slice(min_chan, max_chan)}] = fx["SKY"].values
                 xds["SKY"].attrs = {"units": "Jy/beam"}
-                xds["BEAM"][{"frequency": slice(min_chan, max_chan)}] = fx["BEAM"].values
+                xds["BEAM"][{"frequency": slice(min_chan, max_chan)}] = fx[
+                    "BEAM"
+                ].values
                 xds["BEAM"].attrs = {"units": "rad"}
             if i == 0:
                 xds_sd = xds
@@ -110,7 +116,7 @@ class FeatherShared:
             write_image(xds, outfile, "zarr")
 
     @classmethod
-    def _feather(cls, cores: int=1, overwrite: bool=True) -> None:
+    def _feather(cls, cores: int = 1, overwrite: bool = True) -> None:
         viper_client = local_client(
             cores=cores,
             memory_limit="8.0GiB",
@@ -126,7 +132,7 @@ class FeatherShared:
         viper_client.close()
 
     def _ensure_feather_output(
-        self, regenerate: bool=False, cores: int=1, overwrite: bool=True
+        self, regenerate: bool = False, cores: int = 1, overwrite: bool = True
     ) -> None:
         self._ensure_inputs()
         # If a leftover regular file exists at the zarr path, remove it
@@ -137,7 +143,10 @@ class FeatherShared:
             self._feather(cores=cores, overwrite=overwrite)
         # Final sanity: must be a directory now
         if not os.path.isdir(self.feather_out):
-            self.fail(f"Expected zarr directory at {self.feather_out}, but it was not created.")
+            self.fail(
+                f"Expected zarr directory at {self.feather_out}, but it was not created."
+            )
+
 
 class FeatherTest(FeatherShared, unittest.TestCase):
 
@@ -149,7 +158,7 @@ class FeatherTest(FeatherShared, unittest.TestCase):
     def test_feather(self):
         # ensure inputs exist once, reused across tests/classes
         self._ensure_inputs()
-        download("feather.im")  # expected result file used for comparison
+        download(self.feather_expected)  # expected result file used for comparison
 
         exp_fds = read_image("feather.im")
         xds_sd = load_image(self.sd_zarr)
@@ -171,6 +180,7 @@ class FeatherTest(FeatherShared, unittest.TestCase):
                 ).all(),
                 "Incorrect sky values",
             )
+        self._rm(self.feather_expected)  # cleanup after test
 
     def test_overwrite(self):
         """Test overwrite option using prebuilt int/sd zarr inputs"""
@@ -190,7 +200,12 @@ class FeatherTest(FeatherShared, unittest.TestCase):
         else:
             self.fail("Feather should have failed to overwrite")
         # test if overwrite specified but not bool
-        self._feather(cores=True, overwrite=True)
+        try:
+            self._feather(cores=1, overwrite=1)
+        except TypeError:
+            print("TypeError raised as expected")
+        else:
+            self.fail("Feather should have failed to run because overwrite is not bool")
 
 
 class FeatherModelComparison(FeatherShared, unittest.TestCase):
@@ -211,7 +226,10 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
         except Exception:
             # fallback: refresh index, then retry
             try:
-                from toolviper.utils.data import update  # local import to avoid global change
+                from toolviper.utils.data import (
+                    update,
+                )  # local import to avoid global change
+
                 update()
                 download(cls.model_key)
             except Exception as e:
@@ -234,15 +252,17 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
         feather_xds = load_image(self.feather_out)
         # expected shape from prior runs
         self.assertEqual(
-            feather_xds.SKY.shape, (1, 16, 1, 1024, 1024),
-            f"Unexpected feathered SKY shape: {feather_xds.SKY.shape}"
+            feather_xds.SKY.shape,
+            (1, 16, 1, 1024, 1024),
+            f"Unexpected feathered SKY shape: {feather_xds.SKY.shape}",
         )
 
         # load model for comparison
         model_xds = read_image(self.model_image)
         self.assertEqual(
-            feather_xds.SKY.shape, model_xds.SKY.shape,
-            f"feather/model shape mismatch: {feather_xds.SKY.shape} vs {model_xds.SKY.shape}"
+            feather_xds.SKY.shape,
+            model_xds.SKY.shape,
+            f"feather/model shape mismatch: {feather_xds.SKY.shape} vs {model_xds.SKY.shape}",
         )
 
         # sums
@@ -251,8 +271,10 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
         fsum = float(feather_plane.sum().compute().values)
         msum = float(model_plane.sum().compute().values)
         rel = fsum / msum - 1.0
-        self.assertAlmostEqual(fsum, 21276.088, delta=1e-3, msg=f"feather sum got {fsum}")
-        self.assertAlmostEqual(msum, 21275.71,  delta=1e-2, msg=f"model sum got {msum}")
+        self.assertAlmostEqual(
+            fsum, 21276.088, delta=1e-3, msg=f"feather sum got {fsum}"
+        )
+        self.assertAlmostEqual(msum, 21275.71, delta=1e-2, msg=f"model sum got {msum}")
 
         # global max positions and values
         f_vals = feather_plane.compute().values
@@ -281,8 +303,12 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
         f_center = feather_plane.isel(l=pslice, m=pslice)
         m_center = model_plane.isel(l=pslice, m=pslice)
 
-        f_pos = list(np.unravel_index(int(np.argmax(f_center.compute().values)), f_center.shape))
-        m_pos = list(np.unravel_index(int(np.argmax(m_center.compute().values)), m_center.shape))
+        f_pos = list(
+            np.unravel_index(int(np.argmax(f_center.compute().values)), f_center.shape)
+        )
+        m_pos = list(
+            np.unravel_index(int(np.argmax(m_center.compute().values)), m_center.shape)
+        )
         self.assertEqual(f_pos, [0, 0, 19, 19], f"feather center max pos {f_pos}")
         self.assertEqual(m_pos, [0, 0, 20, 20], f"model center max pos {m_pos}")
         delta = (np.array(f_pos) - np.array(m_pos)).tolist()
@@ -290,15 +316,22 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
 
         f_peak = float(f_center[tuple(f_pos)].compute().item())
         m_peak = float(m_center[tuple(f_pos)].compute().item())
-        self.assertAlmostEqual(f_peak, 0.5338305830955505, delta=5e-10, msg=f"feather center {f_peak}")
-        self.assertAlmostEqual(m_peak, 0.5857419371604919, delta=5e-10, msg=f"model center {m_peak}")
+        self.assertAlmostEqual(
+            f_peak, 0.5338305830955505, delta=5e-10, msg=f"feather center {f_peak}"
+        )
+        self.assertAlmostEqual(
+            m_peak, 0.5857419371604919, delta=5e-10, msg=f"model center {m_peak}"
+        )
 
         rel = f_peak / m_peak
         width_pct = (np.sqrt(1.0 / rel) - 1.0) * 100.0
-        self.assertAlmostEqual(width_pct, 4.7, delta=0.2, msg=f"width pct {width_pct:.3f}%")
+        self.assertAlmostEqual(
+            width_pct, 4.7, delta=0.2, msg=f"width pct {width_pct:.3f}%"
+        )
 
 
 # Module-level cleanup after all tests in this file finish
+
 
 def tearDownModule(module=None):
     for f in [
@@ -310,4 +343,3 @@ def tearDownModule(module=None):
         FeatherModelComparison.model_image,
     ]:
         FeatherShared._rm(f)
-
