@@ -1,16 +1,14 @@
 [build-system]
 requires = [
+    "scikit-build-core>=0.5.0",
     "pybind11>=2.10.0",
-    "setuptools>=64",
-    "wheel",
 ]
-build-backend = "setuptools.build_meta"
+build-backend = "scikit_build_core.build"
 
 [project]
-name = "hogbom-clean"
+name = "hogbom-deconvolve"
 version = "0.1.0"
 description = "Hogbom CLEAN algorithm implementation"
-readme = "README.md"
 classifiers = [
     "Programming Language :: C++",
     "Programming Language :: Python :: 3",
@@ -41,18 +39,20 @@ dev = [
     "pre-commit",
 ]
 
-[tool.setuptools]
-packages = ["hogbom"]
+# Scikit-build-core configuration
+[tool.scikit-build]
+# Specify the CMake build directory
+build-dir = "build/{wheel_tag}"
+# Map python directory to hogbom package
+wheel.packages = ["hogbom_deconvolve"]
 
-[tool.setuptools.package-dir]
-hogbom = "python"
+[tool.scikit-build.cmake]
+# CMake build type
+build-type = "Release"
 
-[tool.setuptools.package-data]
-hogbom = ["py.typed"]
-
-# Custom build configuration for pybind11
-[tool.pybind11.options]
-strip = true
+[tool.scikit-build.build]
+# Verbose output during build (useful for debugging)
+verbose = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -63,23 +63,3 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "benchmark: marks tests as benchmarks",
 ]
-
-[tool.black]
-line-length = 88
-target-version = ['py38']
-include = '\.pyi?$'
-
-[tool.isort]
-profile = "black"
-line_length = 88
-multi_line_output = 3
-
-[tool.mypy]
-python_version = "3.8"
-warn_return_any = true
-warn_unused_configs = true
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "hogbom_clean.*"
-ignore_missing_imports = true
