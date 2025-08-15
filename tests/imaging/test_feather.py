@@ -139,7 +139,7 @@ class FeatherShared:
         if os.path.isfile(self.feather_out):
             self._rm(self.feather_out)
         # Generate only if the zarr directory doesn't exist
-        if not os.path.isdir(self.feather_out) or regenerate:
+        if regenerate or not os.path.isdir(self.feather_out):
             self._feather(cores=cores, overwrite=overwrite)
         # Final sanity: must be a directory now
         if not os.path.isdir(self.feather_out):
@@ -201,12 +201,12 @@ class FeatherTest(FeatherShared, unittest.TestCase):
             self.fail("Feather should have failed to overwrite")
         # test if overwrite specified but not bool
         try:
-            self._feather(cores=1, overwrite=1)
+            self._feather(cores=4, overwrite="true") # overwrite not bool
+
         except TypeError:
             print("TypeError raised as expected")
         else:
             self.fail("Feather should have failed to run because overwrite is not bool")
-
 
 class FeatherModelComparison(FeatherShared, unittest.TestCase):
     """Comparisons between feathered image and model; uses artifacts built once.
@@ -240,14 +240,14 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
             raise unittest.SkipTest(
                 f"Model image not found after download: {os.path.abspath(cls.model_image)}"
             )
+        # ensure feathered output exists (built by FeatherTest or here once)
+        self._ensure_feather_output(regenerate=False, cores=4, overwrite=True)
 
     @classmethod
     def tearDownClass(cls):
         cls._rm(cls.model_image)
 
     def test_basic_stats_and_positions(self):
-        # ensure feathered output exists (built by FeatherTest or here once)
-        self._ensure_feather_output(regenerate=False, cores=4, overwrite=True)
 
         feather_xds = load_image(self.feather_out)
         # expected shape from prior runs
