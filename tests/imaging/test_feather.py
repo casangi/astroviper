@@ -201,12 +201,13 @@ class FeatherTest(FeatherShared, unittest.TestCase):
             self.fail("Feather should have failed to overwrite")
         # test if overwrite specified but not bool
         try:
-            self._feather(cores=4, overwrite="true") # overwrite not bool
+            self._feather(cores=4, overwrite="true")  # overwrite not bool
 
         except TypeError:
             print("TypeError raised as expected")
         else:
             self.fail("Feather should have failed to run because overwrite is not bool")
+
 
 class FeatherModelComparison(FeatherShared, unittest.TestCase):
     """Comparisons between feathered image and model; uses artifacts built once.
