@@ -82,23 +82,23 @@ def _make_image(input_params):
         input_params["data_selection"],
         input_params["input_data_store"],
         input_params["input_data"],
-        data_variables=data_variables,
+        include_variables=data_variables,
         load_sub_datasets=True,
     )
     logger.debug("1.5 Created ProcessingSetIterator ")
 
     start_2 = time.time()
-    for ms_xds in ps_iter:
+    for ms_xdt in ps_iter:
         start_compute = time.time()
         start_3 = time.time()
         data_group_out = _phase_shift_vis_ds(
-            ms_xds, shift_parms=shift_params, sel_parms={"data_group_in": data_group}
+            ms_xdt, shift_parms=shift_params, sel_parms={"data_group_in": data_group}
         )
         T_phase_shift = T_phase_shift + time.time() - start_3
 
         start_4 = time.time()
         data_group_out = _make_imaging_weights(
-            ms_xds,
+            ms_xdt,
             grid_parms=grid_params,
             imaging_weights_parms={"weighting": "briggs", "robust": 0.6},
             sel_parms={"data_group_in": data_group_out},
@@ -111,14 +111,14 @@ def _make_image(input_params):
         gcf_params["list_dish_diameters"] = np.array([10.7])
         gcf_params["list_blockage_diameters"] = np.array([0.75])
 
-        unique_ant_indx = ms_xds.attrs["antenna_xds"].ANTENNA_DISH_DIAMETER.values
+        unique_ant_indx = ms_xdt.antenna_xds.ANTENNA_DISH_DIAMETER.values
         unique_ant_indx[unique_ant_indx == 12.0] = 0
 
         gcf_params["unique_ant_indx"] = unique_ant_indx.astype(int)
         gcf_params["phase_direction"] = grid_params["phase_direction"]
         gcf_xds = _make_gridding_convolution_function(
             gcf_xds,
-            ms_xds,
+            ms_xdt,
             gcf_params,
             grid_params,
             sel_parms={"data_group_in": data_group_out},
@@ -127,7 +127,7 @@ def _make_image(input_params):
 
         start_6 = time.time()
         _make_aperture_grid(
-            ms_xds,
+            ms_xdt,
             gcf_xds,
             img_xds,
             vis_sel_parms={"data_group_in": data_group_out},
@@ -138,7 +138,7 @@ def _make_image(input_params):
 
         start_7 = time.time()
         _make_uv_sampling_grid(
-            ms_xds,
+            ms_xdt,
             gcf_xds,
             img_xds,
             vis_sel_parms={"data_group_in": data_group_out},
@@ -149,7 +149,7 @@ def _make_image(input_params):
 
         start_8 = time.time()
         _make_visibility_grid(
-            ms_xds,
+            ms_xdt,
             gcf_xds,
             img_xds,
             vis_sel_parms={"data_group_in": data_group_out},
@@ -192,10 +192,18 @@ def _make_image(input_params):
     from xradio.image._util._zarr.zarr_low_level import write_chunk
     import os
 
+    #print(img_xds)
+
     # dask.distributed.print('Writing results to Lustre for task ',input_params['task_id'],' ***** ')
-    img_xds = img_xds.transpose("polarization", "frequency", ...).expand_dims(
+    # img_xds = img_xds.transpose("polarization", "frequency", ...).expand_dims(
+    #     dim="dummy", axis=0
+    # )
+    
+    img_xds = img_xds.expand_dims(
         dim="dummy", axis=0
     )
+    # print("*****************")
+    # print(img_xds)
 
     if input_params["to_disk"]:
         for data_variable, meta in input_params["zarr_meta"].items():

@@ -239,6 +239,7 @@ def check_sel_parms(
             ]
 
         data_group_in = xds.attrs["data_groups"][data_group_in_name]
+        data_group_in["data_group_in_name"] = data_group_in_name
     else:
         data_group_in = None
 
@@ -282,6 +283,7 @@ def check_sel_parms(
         ]
 
         data_group_out = xds.attrs["data_groups"][data_group_out_name]
+        data_group_out["data_group_name"] = data_group_out_name
     else:
         data_group_out = None
 
