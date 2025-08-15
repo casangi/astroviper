@@ -63,10 +63,8 @@ def _phase_shift_vis_ds(ms_xds, shift_parms, sel_parms):
             "phase_shift": {"correlated_data": "VISIBILITY_SHIFT", "uvw": "UVW_SHIFT"}
         },
     )
-
-    field_phase_direction = ms_xds[data_group_in["correlated_data"]].attrs[
-        "field_and_source_xds"
-    ]["FIELD_PHASE_CENTER"]
+    
+    field_phase_direction = ms_xds.xr_ms.get_field_and_source_xds(data_group_in["data_group_in_name"]).FIELD_PHASE_CENTER_DIRECTION.isel(field_name=0)
     uvw_rotmat, phase_rotation = calc_rotation_matrices(
         field_phase_direction, _shift_parms
     )
@@ -127,6 +125,7 @@ def calc_rotation_matrices(field_phase_direction, shift_parms):
 
     uvw_rotmat = np.zeros((3, 3), np.double)
     phase_rotation = np.zeros((3,), np.double)
+    
 
     rotmat_field_phase_direction = R.from_euler(
         "ZX",
