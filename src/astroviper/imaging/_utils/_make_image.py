@@ -192,16 +192,14 @@ def _make_image(input_params):
     from xradio.image._util._zarr.zarr_low_level import write_chunk
     import os
 
-    #print(img_xds)
+    # print(img_xds)
 
     # dask.distributed.print('Writing results to Lustre for task ',input_params['task_id'],' ***** ')
     # img_xds = img_xds.transpose("polarization", "frequency", ...).expand_dims(
     #     dim="dummy", axis=0
     # )
-    
-    img_xds = img_xds.expand_dims(
-        dim="dummy", axis=0
-    )
+
+    img_xds = img_xds.expand_dims(dim="dummy", axis=0)
     # print("*****************")
     # print(img_xds)
 
