@@ -131,19 +131,20 @@ class FeatherShared:
         )
         viper_client.close()
 
+    @classmethod
     def _ensure_feather_output(
-        self, regenerate: bool = False, cores: int = 1, overwrite: bool = True
+        cls, regenerate: bool = False, cores: int = 1, overwrite: bool = True
     ) -> None:
-        self._ensure_inputs()
+        cls._ensure_inputs()
         # If a leftover regular file exists at the zarr path, remove it
-        if os.path.isfile(self.feather_out):
-            self._rm(self.feather_out)
+        if os.path.isfile(cls.feather_out):
+            cls._rm(cls.feather_out)
         # Generate only if the zarr directory doesn't exist
-        if regenerate or not os.path.isdir(self.feather_out):
-            self._feather(cores=cores, overwrite=overwrite)
+        if regenerate or not os.path.isdir(cls.feather_out):
+            cls._feather(cores=cores, overwrite=overwrite)
         # Final sanity: must be a directory now
-        if not os.path.isdir(self.feather_out):
-            self.fail(
+        if not os.path.isdir(cls.feather_out):
+            cls.fail(
                 f"Expected zarr directory at {self.feather_out}, but it was not created."
             )
 
@@ -242,7 +243,7 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
                 f"Model image not found after download: {os.path.abspath(cls.model_image)}"
             )
         # ensure feathered output exists (built by FeatherTest or here once)
-        self._ensure_feather_output(regenerate=False, cores=4, overwrite=True)
+        cls._ensure_feather_output(regenerate=False, cores=4, overwrite=True)
 
     @classmethod
     def tearDownClass(cls):
