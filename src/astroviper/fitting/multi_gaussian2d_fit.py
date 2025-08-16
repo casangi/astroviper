@@ -501,6 +501,87 @@ def _resolve_dims(da: xr.DataArray, dims: Optional[Sequence[Union[str, int]]]) -
             out.append(d)
     return out[0], out[1]
 
+def _axis_sign(coord: Optional[np.ndarray]) -> float:
+    """+1 if strictly ascending, -1 if strictly descending, else +1."""
+    if coord is None or coord.ndim != 1 or coord.size < 2:
+        return 1.0
+    c0, c1 = float(coord[0]), float(coord[1])
+    return 1.0 if np.isfinite(c0) and np.isfinite(c1) and (c1 > c0) else -1.0
+
+def _theta_pa_to_math(pa: np.ndarray, sx: float, sy: float) -> np.ndarray:
+    """
+    Convert PA (from +y toward +x) into math angle (from +x toward +y, CCW)
+    in the index coordinate system whose axis directions are set by (sx, sy).
+    """
+    pa = np.asarray(pa, dtype=float)
+    # Unit vector along major axis in *world* basis: (+x_world, +y_world)
+    vx_w = np.sin(pa)
+    vy_w = np.cos(pa)
+    # Map to index basis by applying axis signs
+    vx_i = vx_w * sx
+    vy_i = vy_w * sy
+    return np.arctan2(vy_i, vx_i)
+
+def _theta_math_to_pa(theta: np.ndarray, sx: float, sy: float) -> np.ndarray:
+    """
+    Convert math angle in index basis back to PA in world-like basis
+    where PA is measured from +y toward +x.
+    """
+    theta = np.asarray(theta, dtype=float)
+    vx_i = np.cos(theta)
+    vy_i = np.sin(theta)
+    # Map back to world basis by undoing the axis signs
+    vx_w = vx_i / sx
+    vy_w = vy_i / sy
+    return np.arctan2(vx_w, vy_w)
+
+def _convert_init_theta(
+    init: Optional[Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]],
+    to_math: bool,
+    sx: float,
+    sy: float,
+    n: int,
+) -> Optional[Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]]:
+    """
+    Return a copy of initial_guesses with theta converted to math-angle if to_math=True.
+    Structure and other fields are preserved.
+    """
+    if init is None or not to_math:
+        return init
+
+    def _conv_arr(arr: np.ndarray) -> np.ndarray:
+        out = np.array(arr, dtype=float, copy=True)
+        if out.shape != (n, 6):
+            return out
+        out[:, 5] = _theta_pa_to_math(out[:, 5], sx, sy)
+        return out
+
+    def _conv_list_of_dicts(lst: Sequence[Dict[str, Number]]) -> List[Dict[str, Number]]:
+        new = []
+        for d in lst:
+            dd = dict(d)
+            if "theta" in dd:
+                dd["theta"] = float(_theta_pa_to_math(np.array([dd["theta"]], float), sx, sy)[0])
+            new.append(dd)
+        return new
+
+    if isinstance(init, np.ndarray):
+        return _conv_arr(init)
+
+    if isinstance(init, (list, tuple)) and (len(init) == n) and isinstance(init[0], dict):
+        return _conv_list_of_dicts(init)  # type: ignore[return-value]
+
+    if isinstance(init, dict) and ("components" in init):
+        comps = init["components"]
+        clone = dict(init)
+        if isinstance(comps, np.ndarray):
+            clone["components"] = _conv_arr(np.asarray(comps))
+        elif isinstance(comps, (list, tuple)) and comps and isinstance(comps[0], dict):
+            clone["components"] = _conv_list_of_dicts(comps)  # type: ignore[arg-type]
+        return clone
+
+    return init
+
 # ----------------------- Public API -----------------------
 
 def fit_multi_gaussian2d(
@@ -515,6 +596,7 @@ def fit_multi_gaussian2d(
     max_nfev: int = 20000,
     return_model: bool = False,
     return_residual: bool = True,
+    angle: str = "math",  # NEW: {"math","pa","auto"}
 ) -> xr.Dataset:
     """
     Fit a sum of N rotated 2-D Gaussians (with a shared constant offset) to each plane.
@@ -523,39 +605,52 @@ def fit_multi_gaussian2d(
         model(x, y) = offset + Σ_{i=1..N} amp_i · G_i(x, y; x0_i, y0_i, sigma_x_i, sigma_y_i, theta_i)
 
     Supports NumPy, Dask, and Xarray inputs, and vectorizes across all non-fit dims.
-    When input is Dask-backed, computation is parallelized via ``xarray.apply_ufunc(dask="parallelized")``.
+    When input is Dask-backed, computation is parallelized via
+    ``xarray.apply_ufunc(dask="parallelized")``.
 
     Parameters
     ----------
-    data : numpy.ndarray | dask.array.Array | xarray.DataArray
-        Input array. If not a DataArray, it is wrapped with generated dims/coords.
-    n_components : int
-        Number of Gaussian components (N >= 1).
-    dims : sequence of two (str | int), optional
-        Names or indices of the two fit axes (x, y). If omitted:
-          • If the DataArray has dims named exactly ``("x","y")``, those are used.
-          • Else if the input is 2-D, last → x, second-last → y.
-          • Else you must specify dims explicitly.
-    min_threshold, max_threshold : float or None, optional
-        Inclusive thresholds to mask pixels during fitting. Use None to disable a side.
-    initial_guesses : array-like | list[dict] | dict, optional
-        Initial parameter guesses to help the optimizer.
-        Forms accepted (offset default = median(data)):
-          • array with shape (N, 6): columns [amp, x0, y0, sigma_x, sigma_y, theta]
-          • list of N dicts with keys {"amp"/"amplitude","x0","y0","sigma_x","sigma_y","theta"}
-          • dict: {"offset": float (optional), "components": (N,6) array OR list[dict] as above}
-        The same guesses are used for all planes (per-plane seeding can be added later).
-    bounds : dict, optional
-        Bounds to constrain parameters. Keys may include:
-          {"offset","amp"/"amplitude","x0","y0","sigma_x","sigma_y","theta"}.
-        Each value is either a single (low, high) tuple applied to all components,
-        or a length-N sequence of (low, high) tuples for per-component bounds.
-    max_nfev : int, default 20000
-        Max function evaluations for the optimizer.
-    return_model : bool, default False
-        If True, include variable ``model`` (the fitted plane).
-    return_residual : bool, default True
-        If True, include variable ``residual`` (= data - model).
+    data: numpy.ndarray | dask.array.Array | xarray.DataArray
+      Input array. If not a DataArray, it is wrapped with dims ('y','x') and generated numeric coords.
+
+    n_components: int
+      Number of Gaussian components (N ≥ 1).
+
+    dims: Sequence[str | int] | None
+      Two dims (names or indices) that define the fit plane (x, y). If omitted: uses ('x','y') if present; else for 2-D uses (last, second-last). Required for ndim ≠ 2 without ('x','y').
+
+    min_threshold: float | None
+      Inclusive lower threshold; pixels with values < min_threshold are ignored during the fit.
+
+    max_threshold: float | None
+      Inclusive upper threshold; pixels with values > max_threshold are ignored during the fit.
+
+    initial_guesses: numpy.ndarray[(N,6)] | list[dict] | dict | None
+      Initial parameter guesses for the optimizer. Forms:
+        • array shape (N,6): columns [amp, x0, y0, sigma_x, sigma_y, theta].
+        • list of N dicts with keys {"amp"/"amplitude","x0","y0","sigma_x"/"sx","sigma_y"/"sy","theta"}.
+        • dict: {"offset": float (optional), "components": (N,6) array OR list[dict] as above}.
+      If omitted, peaks are auto-seeded and offset defaults to the median of threshold-masked data.
+      Note: θ in `initial_guesses` is interpreted per `angle`.
+
+    bounds: dict[str, tuple[float, float] | Sequence[tuple[float, float]]] | None
+      Bounds to constrain parameters. Keys may include {"offset","amp"/"amplitude","x0","y0","sigma_x","sigma_y","theta"}.
+      Each value is either a single (low, high) tuple applied to all components, or a length-N sequence of (low, high) tuples for per-component bounds. To **fix** a parameter, set low == high.
+
+    max_nfev: int
+      Maximum function evaluations for the optimizer. Default: 20000.
+
+    return_model: bool
+      If True, include the fitted model plane(s) as variable ``model``.
+
+    return_residual: bool
+      If True, include residual plane(s) (``data − model``) as variable ``residual``.
+
+    angle: {"math","pa","auto"}
+      Controls how ``theta`` is interpreted (inputs) and reported (outputs).
+        • "math": standard math angle (from +x toward +y, CCW) in data axes.
+        • "pa": position angle (from +y toward +x).
+        • "auto": if axes are left-handed (sign(Δx)·sign(Δy) < 0) treat as PA; otherwise math. Outputs follow the same convention.
 
     Returns
     -------
@@ -595,27 +690,50 @@ def fit_multi_gaussian2d(
     >>> ds = fit_multi_gaussian2d(img_da, n_components=2, initial_guesses=init, return_residual=True)
 
     Vectorized across a stack (auto-detects ('x','y') when present):
-    >>> import xarray as xr
     >>> planes = [img_da + 0.01*np.random.randn(*img_da.shape) for _ in range(3)]
     >>> cube = xr.concat(planes, dim="time")  # dims ('time','y','x')
     >>> ds3 = fit_multi_gaussian2d(cube, n_components=2, initial_guesses=init)
+
+    3-D array with explicit plane dims:
+    >>> vol = xr.DataArray(np.zeros((2, ny, nx)), dims=("z","y","x"))
+    >>> ds_z0 = fit_multi_gaussian2d(vol, n_components=1, dims=("x","y"))
+
+    Using bounds (including fixed parameters via equal bounds):
+    >>> bounds = {"sigma_x": [(1.0, 1.0), (2.0, 4.0)], "offset": (0.05, 0.2)}
+    >>> ds_b = fit_multi_gaussian2d(img_da, n_components=2, initial_guesses=init, bounds=bounds)
+
+    Angle conventions:
+    >>> # Report and interpret theta as position angle:
+    >>> ds_pa = fit_multi_gaussian2d(img_da, n_components=2, initial_guesses=init, angle="pa")
+    >>> # Choose automatically based on axis handedness (descending/ascending coords):
+    >>> ds_auto = fit_multi_gaussian2d(img_da, n_components=2, initial_guesses=init, angle="auto")
     """
     if n_components < 1:
         raise ValueError("n_components must be >= 1.")
 
     da_in = _ensure_dataarray(data)
-    dim_x, dim_y = _resolve_dims(da_in, dims)  # your existing helper (now prefers ('x','y') when available)
+    dim_x, dim_y = _resolve_dims(da_in, dims)
 
     # Move fit dims to the end → [..., y, x]
     da_tr = da_in.transpose(*(d for d in da_in.dims if d not in (dim_y, dim_x)), dim_y, dim_x)
-    core_dims = [dim_y, dim_x]
+    core = [dim_y, dim_x]
 
-    # Output signatures for apply_ufunc (per _multi_fit_plane_wrapper tuple)
+    # 2a) Determine axis signs from coords (or defaults)
+    cx = np.asarray(da_tr.coords[dim_x].values) if dim_x in da_tr.coords else None
+    cy = np.asarray(da_tr.coords[dim_y].values) if dim_y in da_tr.coords else None
+    sx_sign = _axis_sign(cx)
+    sy_sign = _axis_sign(cy)
+    is_left_handed = (sx_sign * sy_sign) < 0.0
+
+    # 2b) Convert initial theta to internal math if needed
+    want_pa = (angle == "pa") or (angle == "auto" and is_left_handed)
+    init_for_fit = _convert_init_theta(initial_guesses, to_math=want_pa, sx=sx_sign, sy=sy_sign, n=int(n_components))
+
     out_dtypes = (
-        [np.float64] * 6   # amp, x0, y0, sx, sy, th
-        + [np.float64] * 6 # amp_e, x0_e, y0_e, sx_e, sy_e, th_e
-        + [np.float64] * 3 # fwhm_major, fwhm_minor, peak
-        + [np.float64, np.float64]  # offset, offset_e
+        [np.float64] * 6      # params per component
+        + [np.float64] * 6    # errors per component
+        + [np.float64] * 3    # derived per component
+        + [np.float64, np.float64]  # offset, offset_err
         + [np.bool_, np.float64]    # success, variance_explained
         + [np.float64, np.float64]  # residual2d, model2d
     )
@@ -628,7 +746,7 @@ def fit_multi_gaussian2d(
     results = xr.apply_ufunc(
         _multi_fit_plane_wrapper,
         da_tr,
-        input_core_dims=[core_dims],
+        input_core_dims=[core],
         output_core_dims=out_core_dims,
         vectorize=True,
         dask="parallelized",
@@ -638,7 +756,7 @@ def fit_multi_gaussian2d(
             n_components=int(n_components),
             min_threshold=min_threshold,
             max_threshold=max_threshold,
-            initial_guesses=initial_guesses,
+            initial_guesses=init_for_fit,  # NOTE: pre-converted for angle
             bounds=bounds,
             max_nfev=int(max_nfev),
             return_model=bool(return_model),
@@ -658,7 +776,7 @@ def fit_multi_gaussian2d(
             amplitude=amp,
             x0=x0, y0=y0,
             sigma_x=sx, sigma_y=sy,
-            theta=th,
+            theta=th,  # will be converted to PA if requested below
             amplitude_err=amp_e,
             x0_err=x0_e, y0_err=y0_e,
             sigma_x_err=sx_e, sigma_y_err=sy_e,
@@ -669,29 +787,38 @@ def fit_multi_gaussian2d(
             success=success, variance_explained=varexp,
         )
     )
-
     if return_residual:
         ds["residual"] = residual
     if return_model:
         ds["model"] = model
 
-    # Optional world coords only when both axes have 1-D numeric coords (supports descending)
+    # 2c) Report theta in requested convention
+    if want_pa:
+        # th is math-angle in index basis → convert to PA
+        th_vals = _theta_math_to_pa(ds["theta"].values, sx_sign, sy_sign)
+        ds["theta"] = xr.DataArray(th_vals, dims=ds["theta"].dims, coords=ds["theta"].coords)
+        # same for theta_err if you want to keep it as angular uncertainty in PA;
+        # small-angle approx is fine: dPA ≈ dθ
+        # (leave as-is to avoid nonlinear propagation)
+
+    # (world coords logic unchanged)
     if (dim_x in da_tr.coords) and (dim_y in da_tr.coords):
         cx = np.asarray(da_tr.coords[dim_x].values)
         cy = np.asarray(da_tr.coords[dim_y].values)
 
-        def _prep(coord: np.ndarray):
+        def _prep(coord: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
             coord = np.asarray(coord)
             if coord.ndim != 1 or coord.size == 0 or not np.all(np.isfinite(coord)):
                 return None, None
-            if coord.size >= 2 and coord[1] < coord[0]:
+            if coord.size >= 2 and coord[1] < coord[0]:  # descending → reverse for interp
                 idx = np.arange(coord.size - 1, -1, -1, dtype=float)
                 return idx, coord[::-1]
+            if not np.all(np.diff(coord) > 0):
+                return None, None
             return np.arange(coord.size, dtype=float), coord
 
         idx_x, val_x = _prep(cx)
         idx_y, val_y = _prep(cy)
-
         if idx_x is not None and idx_y is not None:
             def _interp_x(v: np.ndarray) -> np.ndarray:
                 return np.interp(v, idx_x, val_x)
