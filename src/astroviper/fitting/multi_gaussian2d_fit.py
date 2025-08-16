@@ -260,6 +260,8 @@ def _merge_bounds_multi(
         if name == "offset":
             lb[0] = lo; ub[0] = hi; return
         if idx_in_comp is None:
+            # this should never be reached, so can't be covered
+            # but leaving it in for defensive programming
             return
         if comp_idx is None:
             for i in range(n):
@@ -443,6 +445,7 @@ def _multi_fit_plane_wrapper(
         res = np.nanvar(r_masked)
         varexp = (1.0 - res / tot) if (np.isfinite(tot) and tot > 0) else np.nan
     else:
+        # not coverable from public API call, defensive coding
         varexp = np.nan
 
     # Offset uncertainty is the first element of perr
