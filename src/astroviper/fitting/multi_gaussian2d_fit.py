@@ -323,7 +323,8 @@ def _fit_multi_plane_numpy(
         Mask used during fitting (thresholds).
     """
     if z2d.ndim != 2:
-        raise ValueError("Internal: _fit_multi_plane_numpy expects a 2-D array.")
+        # cannot cover using public API, defensive coding
+        raise ValueError("Internal: _fit_multi_plane_numpy expects a 2-D array.") # pragma: no cover
     ny, nx = z2d.shape
     Y, X = np.mgrid[0:ny, 0:nx]
 
