@@ -296,6 +296,173 @@ class TestPlotHelper:
         mg.plot_components(cube, ds, dims=("x","y"), indexer={"time": 1}, show_residual=True)
         mg.plot_components(cube, ds_no_comp, dims=("x","y"), indexer={"time": 0}, show_residual=False)
 
+    def test_plot_components_defaults_indexer_for_3d_input(self, monkeypatch) -> None:
+        import numpy as np
+        import xarray as xr
+        import matplotlib
+        matplotlib.use("Agg", force=True)  # headless backend
+        import matplotlib.pyplot as plt
+        from astroviper.fitting.multi_gaussian2d_fit import fit_multi_gaussian2d, plot_components
+
+        # Build a 3-D DataArray: ('time','y','x') so da_tr.ndim > 2
+        ny, nx = 32, 32
+        y, x = np.mgrid[0:ny, 0:nx]
+        base = np.exp(-((x - 16) ** 2 + (y - 16) ** 2) / (2 * 3.0 ** 2))
+        frame = xr.DataArray(base, dims=("y", "x"))
+        cube = xr.concat([frame, frame + 0.01], dim="time")
+
+        # Public API fit; no need for residual/model here
+        init = np.array([[1.0, 16.0, 16.0, 3.0, 3.0, 0.0]], float)
+        ds = fit_multi_gaussian2d(cube, n_components=1, initial_guesses=init)
+
+        # Silence plt.show to avoid warnings in CI
+        monkeypatch.setattr(plt, "show", lambda *a, **k: None, raising=False)
+
+        # Call without 'indexer' → triggers default indexer = {leading dims: 0}
+        # This covers:
+        #   if da_tr.ndim > 2:
+        #       if indexer is None:
+        #           indexer = {d: 0 for d in da_tr.dims[:-2]}
+        plot_components(cube, ds, dims=("x", "y"), show_residual=False)
+
+    def test_plot_components_selects_result_plane_with_default_indexer(self, monkeypatch) -> None:
+        import numpy as np
+        import xarray as xr
+        import matplotlib
+        matplotlib.use("Agg", force=True)  # headless
+        import matplotlib.pyplot as plt
+        from astroviper.fitting.multi_gaussian2d_fit import fit_multi_gaussian2d, plot_components
+
+        # Build 3-D data → da_tr.ndim > 2
+        ny, nx = 32, 32
+        y, x = np.mgrid[0:ny, 0:nx]
+        base = np.exp(-((x - 16) ** 2 + (y - 16) ** 2) / (2 * 3.0 ** 2))
+        frame = xr.DataArray(base, dims=("y", "x"))
+        cube = xr.concat([frame, frame + 0.01], dim="time")  # dims: ('time','y','x')
+
+        # Fit via public API; result keeps the leading 'time' dim
+        init = np.array([[1.0, 16.0, 16.0, 3.0, 3.0, 0.0]], float)
+        ds = fit_multi_gaussian2d(cube, n_components=1, initial_guesses=init, return_residual=True)
+        assert "time" in ds.dims  # ensure the nested selection can apply
+
+        # Silence blocking show()
+        monkeypatch.setattr(plt, "show", lambda *a, **k: None, raising=False)
+
+        # Call without indexer → covers:
+        #   if da_tr.ndim > 2:
+        #       if indexer is None:
+        #           indexer = {d: 0 for d in da_tr.dims[:-2]}
+        #       ...
+        #       for d,i in indexer.items():
+        #           if d in res_plane.dims and d not in ("component", dim_y, dim_x):
+        #               res_plane = res_plane.isel({d: i})
+        plot_components(cube, ds, dims=("x", "y"), indexer=None, show_residual=True)
+
+    def test_plot_components_default_indexer_loops_multiple_dims(self, monkeypatch) -> None:
+        import numpy as np
+        import xarray as xr
+        import matplotlib
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+        from astroviper.fitting.multi_gaussian2d_fit import fit_multi_gaussian2d, plot_components
+
+        # 4D data ensures indexer has ≥2 keys → loop body executes (and loops)
+        ny, nx = 24, 24
+        y, x = np.mgrid[0:ny, 0:nx]
+        base = np.exp(-((x - 12) ** 2 + (y - 12) ** 2) / (2 * 3.0 ** 2))
+        frame = xr.DataArray(base, dims=("y", "x"))
+        cube_t = xr.concat([frame, frame + 0.01], dim="t")              # dims: ('t','y','x')
+        cube = xr.concat([cube_t, cube_t + 0.02], dim="band")           # dims: ('band','t','y','x')
+
+        init = np.array([[1.0, 12.0, 12.0, 3.0, 3.0, 0.0]], float)
+        ds = fit_multi_gaussian2d(cube, n_components=1, initial_guesses=init, return_residual=True)
+
+        # avoid blocking GUI
+        monkeypatch.setattr(plt, "show", lambda *a, **k: None, raising=False)
+
+        # indexer=None → default {'band':0, 't':0}; loop iterates over both keys
+        plot_components(cube, ds, dims=("x", "y"), indexer=None, show_residual=True)
+
+    def test_plot_components_loop_multiple_iterations_default_indexer(self, monkeypatch) -> None:
+        import numpy as np
+        import xarray as xr
+        import matplotlib
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+        from astroviper.fitting.multi_gaussian2d_fit import fit_multi_gaussian2d, plot_components
+
+        # Make 5D data so indexer has >=2 keys: ('obs','band','t','y','x')
+        ny, nx = 24, 24
+        y, x = np.mgrid[0:ny, 0:nx]
+        base = np.exp(-((x - 12) ** 2 + (y - 12) ** 2) / (2 * 3.0 ** 2))
+        frame = xr.DataArray(base, dims=("y", "x"))
+        stack_t = xr.concat([frame, frame + 0.01], dim="t")
+        stack_bt = xr.concat([stack_t, stack_t + 0.02], dim="band")
+        cube = xr.concat([stack_bt, stack_bt + 0.03], dim="obs")  # dims: ('obs','band','t','y','x')
+
+        # Fit (public API) and keep residuals so result carries leading dims
+        init = np.array([[1.0, 12.0, 12.0, 3.0, 3.0, 0.0]], float)
+        ds = fit_multi_gaussian2d(cube, n_components=1, initial_guesses=init, return_residual=True)
+
+        # Ensure the result actually has the leading dims so the 'if d in res_plane.dims' passes
+        assert all(d in ds.dims for d in ("obs", "band", "t"))
+
+        # Avoid blocking GUI
+        monkeypatch.setattr(plt, "show", lambda *a, **k: None, raising=False)
+
+        # Call WITHOUT indexer → default indexer includes ('obs','band','t'),
+        # the loop body runs for each -> covers both 763->764 (enter) and 764->763 (iterate)
+        plot_components(cube, ds, dims=("x", "y"), indexer=None, show_residual=True)
+
+    def test_plot_components_else_branch_for_2d_input(self, monkeypatch) -> None:
+        import numpy as np
+        import xarray as xr
+        import matplotlib
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+        from astroviper.fitting.multi_gaussian2d_fit import fit_multi_gaussian2d, plot_components
+
+        # 2D image → triggers the else block (lines 766–768): data2d = da_tr; res_plane = result
+        ny, nx = 40, 40
+        y, x = np.mgrid[0:ny, 0:nx]
+        z = 0.1 + np.exp(-((x - 20) ** 2 + (y - 22) ** 2) / (2 * 3.0 ** 2))
+        img = xr.DataArray(z, dims=("y", "x"))
+
+        init = np.array([[1.0, 20.0, 22.0, 3.0, 3.0, 0.0]], float)
+        ds = fit_multi_gaussian2d(img, n_components=1, initial_guesses=init, return_residual=True)
+
+        # avoid GUI
+        monkeypatch.setattr(plt, "show", lambda *a, **k: None, raising=False)
+
+        # No indexer; 2D input hits the else branch
+        plot_components(img, ds, dims=("x", "y"), indexer=None, show_residual=True)
+
+    def test_plot_components_raises_when_result_missing_required_var(self, monkeypatch) -> None:
+        import numpy as np
+        import xarray as xr
+        import matplotlib
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+        import pytest
+        from astroviper.fitting.multi_gaussian2d_fit import fit_multi_gaussian2d, plot_components
+
+        ny, nx = 32, 32
+        y, x = np.mgrid[0:ny, 0:nx]
+        z = 0.05 + np.exp(-((x - 16) ** 2 + (y - 16) ** 2) / (2 * 3.0 ** 2))
+        img = xr.DataArray(z, dims=("y", "x"))
+
+        init = np.array([[1.0, 16.0, 16.0, 3.0, 3.0, 0.0]], float)
+        ds = fit_multi_gaussian2d(img, n_components=1, initial_guesses=init)
+
+        # Remove a required variable to trigger the _get(...) KeyError path
+        ds_missing = ds.drop_vars("x0")
+
+        # avoid GUI popups
+        monkeypatch.setattr(plt, "show", lambda *a, **k: None, raising=False)
+
+        with pytest.raises(KeyError, match=r"result missing 'x0'"):
+            plot_components(img, ds_missing, dims=("x", "y"), indexer=None, show_residual=False)
+
 class TestNumPyFitting:
     def test_min_threshold_masks_pixels_partial(self) -> None:
         import numpy as np
@@ -429,44 +596,6 @@ class TestAPIHelpers:
         assert np.allclose(sy, [1.5, 3.0])
         assert np.allclose(th, [0.3, 0.0])  # second component theta defaults to 0.0
 
-    def test_init_list_len_mismatch_raises(self) -> None:
-        import numpy as np
-        import pytest
-        import astroviper.fitting.multi_gaussian2d_fit as mg
-
-        z = np.zeros((16, 16), float)
-        n = 2
-        # length=1 but n=2 -> hits the len check and raises
-        init_list = [
-            {"amp": 1.0, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 2.0, "theta": 0.0}
-        ]
-        with pytest.raises(ValueError):
-            mg._normalize_initial_guesses(z, n, init_list, None, None)
-
-    def test_init_list_happy_path_populates_params(self) -> None:
-        import numpy as np
-        import astroviper.fitting.multi_gaussian2d_fit as mg
-
-        z = np.zeros((20, 20), float)
-        n = 2
-        # Mix amp/amplitude and sigma_x/sx; omit theta in second comp (defaults to 0.0)
-        init_list = [
-            {"amp": 1.2, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 1.5, "theta": 0.3},
-            {"amplitude": 0.8, "x0": 10.0, "y0": 4.0, "sx": 2.5, "sy": 3.0},
-        ]
-        p = mg._normalize_initial_guesses(z, n, init_list, None, None)  # exercises lines 224–232
-        off, amp, x0, y0, sx, sy, th = mg._unpack_params(p, n)
-
-        # offset seeded from masked median (0.0 here)
-        assert off == 0.0
-        assert np.allclose(amp, [1.2, 0.8])
-        assert np.allclose(x0, [5.0, 10.0])
-        assert np.allclose(y0, [6.0, 4.0])
-        assert np.allclose(sx, [2.0, 2.5])
-        assert np.allclose(sy, [1.5, 3.0])
-        assert np.allclose(th, [0.3, 0.0])
-
-
     def test_init_components_list_missing_keys_raise(self) -> None:
         import numpy as np
         import pytest
@@ -484,4 +613,164 @@ class TestAPIHelpers:
         bad_sigma = {"components": [{"amp": 1.0, "x0": 4.0, "y0": 5.0}]}
         with pytest.raises((TypeError, ValueError, KeyError)):
             mg._normalize_initial_guesses(z, n, bad_sigma, None, None)
+
+    def test_init_components_list_len_mismatch_raises(self) -> None:
+        import numpy as np
+        import pytest
+        import astroviper.fitting.multi_gaussian2d_fit as mg
+
+        z = np.zeros((16, 16), float)
+        n = 2
+        init_list = [  # len 1 but n=2 → hits lines 221–223
+            {"amp": 1.0, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 2.0, "theta": 0.0}
+        ]
+        init = {"offset": 0.0, "components": init_list}
+        with pytest.raises(ValueError):
+            mg._normalize_initial_guesses(z, n, init, None, None)
+
+    def test_init_components_list_happy_path_covers_224_232(self) -> None:
+        import numpy as np
+        import astroviper.fitting.multi_gaussian2d_fit as mg
+
+        z = np.zeros((20, 20), float)
+        n = 2
+        init = {  # covers lines 224–232: amp vs amplitude; sigma_x/sigma_y vs sx/sy; theta default
+            "offset": 0.1,
+            "components": [
+                {"amp": 1.2, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 1.5, "theta": 0.3},
+                {"amplitude": 0.8, "x0": 10.0, "y0": 4.0, "sx": 2.5, "sy": 3.0},  # theta omitted → 0.0
+            ],
+        }
+        p = mg._normalize_initial_guesses(z, n, init, None, None)
+        off, amp, x0, y0, sx, sy, th = mg._unpack_params(p, n)
+        assert off == 0.1
+        assert np.allclose(amp, [1.2, 0.8])
+        assert np.allclose(x0, [5.0, 10.0])
+        assert np.allclose(y0, [6.0, 4.0])
+        assert np.allclose(sx, [2.0, 2.5])
+        assert np.allclose(sy, [1.5, 3.0])
+        assert np.allclose(th, [0.3, 0.0])
+
+    def test_init_components_tuple_len_mismatch_raises(self) -> None:
+        import numpy as np
+        import pytest
+        import astroviper.fitting.multi_gaussian2d_fit as mg
+
+        z = np.zeros((16, 16), float)
+        n = 2
+        # components is a TUPLE of length 1 → hits 221 (list/tuple), 222–223 (len check → ValueError)
+        comps = (
+            {"amp": 1.0, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 2.0, "theta": 0.0},
+        )
+        init = {"offset": 0.0, "components": comps}
+        with pytest.raises(ValueError):
+            mg._normalize_initial_guesses(z, n, init, None, None)
+
+    def test_init_components_tuple_happy_path_covers_224_to_232(self) -> None:
+        import numpy as np
+        import astroviper.fitting.multi_gaussian2d_fit as mg
+
+        z = np.zeros((20, 20), float)
+        n = 2
+        # components as a TUPLE → exercises 221; then 224 (alloc), 225–231 (loop & synonyms), 232 (pack/return)
+        comps = (
+            {"amp": 1.2, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 1.5, "theta": 0.3},
+            {"amplitude": 0.8, "x0": 10.0, "y0": 4.0, "sx": 2.5, "sy": 3.0},  # theta omitted → defaults to 0.0
+        )
+        init = {"offset": 0.1, "components": comps}
+        p = mg._normalize_initial_guesses(z, n, init, None, None)
+
+        off, amp, x0, y0, sx, sy, th = mg._unpack_params(p, n)
+        assert off == 0.1
+        assert np.allclose(amp, [1.2, 0.8])
+        assert np.allclose(x0, [5.0, 10.0])
+        assert np.allclose(y0, [6.0, 4.0])
+        assert np.allclose(sx, [2.0, 2.5])
+        assert np.allclose(sy, [1.5, 3.0])
+        assert np.allclose(th, [0.3, 0.0])
+
+    def test_init_array_list_form_fallback_covers_234_235(self) -> None:
+        import numpy as np
+        import astroviper.fitting.multi_gaussian2d_fit as mg
+
+        z = np.zeros((18, 19), float)
+        n = 2
+        # PASS a plain LIST (list-of-lists) → falls through to lines 234–239 (array/list form)
+        init_list = [
+            [1.0, 6.0, 7.0, 2.0, 2.0, 0.1],
+            [0.7, 12.0, 5.0, 3.0, 1.5, 0.2],
+        ]
+        p = mg._normalize_initial_guesses(z, n, init_list, None, None)
+        off, amp, *_ = mg._unpack_params(p, n)
+        assert off == 0.0  # offset seeded from masked median
+        assert np.allclose(amp, [1.0, 0.7])
+
+    def test_merge_bounds_calls_set_range_offset_branch(self) -> None:
+        import astroviper.fitting.multi_gaussian2d_fit as mg
+        lb0, ub0 = mg._default_bounds_multi((16, 16), 2)
+        # trigger mapping → canon == "offset" → _set_range(name="offset", ...)
+        lb, ub = mg._merge_bounds_multi(lb0, ub0, {"offset": (-2.5, 3.75)}, n=2)
+
+        assert lb[0] == -2.5 and ub[0] == 3.75
+
+    def test_merge_bounds_per_component_list_hits_specific_component_branch(self) -> None:
+        import astroviper.fitting.multi_gaussian2d_fit as mg
+
+        # base bounds for 2 components
+        lb0, ub0 = mg._default_bounds_multi((32, 48), 2)
+
+        # Per-component bounds → exercises the comp_idx != None branch (lines 270–272)
+        user_bounds = {"sigma_x": [(0.5, 1.5), (2.0, 4.0)]}
+        lb, ub = mg._merge_bounds_multi(lb0, ub0, user_bounds, n=2)
+
+        # sigma_x index inside each component block is 3 → packed indices 1 + 6*i + 3
+        idx_c0 = 1 + 6 * 0 + 3
+        idx_c1 = 1 + 6 * 1 + 3
+
+        assert lb[idx_c0] == 0.5 and ub[idx_c0] == 1.5
+        assert lb[idx_c1] == 2.0 and ub[idx_c1] == 4.0
+
+class TestFailureModes:
+    def test_fit_multi_plane_numpy_raises_on_ndim_not_2(self) -> None:
+        import numpy as np
+        import pytest
+        import astroviper.fitting.multi_gaussian2d_fit as mg
+
+        z3d = np.zeros((2, 4, 5), float)  # ndim=3 → triggers guard
+        with pytest.raises(ValueError):
+            mg._fit_multi_plane_numpy(
+                z3d, n_components=1,
+                min_threshold=None, max_threshold=None,
+                initial_guesses=None, bounds=None,
+                max_nfev=1000,
+            )
+
+    def test_public_api_ensure_dataarray_raises_on_unsupported_type(self) -> None:
+        import pytest
+        from astroviper.fitting.multi_gaussian2d_fit import fit_multi_gaussian2d
+
+        # Passing a plain string (unsupported) forces _ensure_dataarray to hit the final TypeError
+        with pytest.raises(TypeError):
+            fit_multi_gaussian2d("not-an-array", n_components=1)
+
+    def test_resolve_dims_raises_for_3d_without_dims(self) -> None:
+        import numpy as np
+        import xarray as xr
+        import pytest
+        from astroviper.fitting.multi_gaussian2d_fit import fit_multi_gaussian2d
+
+        # 3-D DataArray with no 'x'/'y' dims; calling public API without dims must raise
+        arr = xr.DataArray(np.zeros((2, 8, 9)), dims=("t", "j", "i"))
+        with pytest.raises(ValueError, match=r"ndim != 2.*specify two dims"):
+            fit_multi_gaussian2d(arr, n_components=1)
+
+    def test_public_api_n_components_must_be_positive(self) -> None:
+        import numpy as np
+        import xarray as xr
+        import pytest
+        from astroviper.fitting.multi_gaussian2d_fit import fit_multi_gaussian2d
+
+        da = xr.DataArray(np.zeros((8, 8), float), dims=("y", "x"))
+        with pytest.raises(ValueError, match=r"n_components must be >= 1"):
+            fit_multi_gaussian2d(da, n_components=0)
 
