@@ -296,3 +296,192 @@ class TestPlotHelper:
         mg.plot_components(cube, ds, dims=("x","y"), indexer={"time": 1}, show_residual=True)
         mg.plot_components(cube, ds_no_comp, dims=("x","y"), indexer={"time": 0}, show_residual=False)
 
+class TestNumPyFitting:
+    def test_min_threshold_masks_pixels_partial(self) -> None:
+        import numpy as np
+        import xarray as xr
+        from astroviper.fitting.multi_gaussian2d_fit import fit_multi_gaussian2d
+
+        ny, nx = 64, 64
+        y, x = np.mgrid[0:ny, 0:nx]
+        z = 0.05 + np.exp(-((x - 32) ** 2 + (y - 32) ** 2) / (2 * 3.0 ** 2))
+        da = xr.DataArray(z, dims=("y", "x"))
+
+        init = np.array([[0.8, 32.0, 32.0, 3.0, 3.0, 0.0]], float)
+        ds = fit_multi_gaussian2d(
+            da,
+            n_components=1,
+            initial_guesses=init,
+            min_threshold=0.20,   # exercises: mask &= z2d >= min_threshold
+            return_model=True,
+            return_residual=True,
+        )
+
+        assert bool(ds.success) is True
+        assert "model" in ds and "residual" in ds
+        above = int((z >= 0.20).sum())
+        assert 0 < above < z.size
+
+    def test_min_threshold_masks_pixels_partial(self) -> None:
+        import numpy as np
+        import xarray as xr
+        from astroviper.fitting.multi_gaussian2d_fit import fit_multi_gaussian2d
+
+        ny, nx = 64, 64
+        y, x = np.mgrid[0:ny, 0:nx]
+        z = 0.05 + np.exp(-((x - 32) ** 2 + (y - 32) ** 2) / (2 * 3.0 ** 2))
+        da = xr.DataArray(z, dims=("y", "x"))
+
+        init = np.array([[0.8, 32.0, 32.0, 3.0, 3.0, 0.0]], float)
+        ds = fit_multi_gaussian2d(
+            da,
+            n_components=1,
+            initial_guesses=init,
+            min_threshold=0.20,  # exercises: mask &= z2d >= min_threshold
+            return_model=True,
+            return_residual=True,
+        )
+
+        assert bool(ds.success) is True
+        assert "model" in ds and "residual" in ds
+        above = int((z >= 0.20).sum())
+        assert 0 < above < z.size
+
+    def test_max_threshold_masks_pixels_partial(self) -> None:
+        import numpy as np
+        import xarray as xr
+        from astroviper.fitting.multi_gaussian2d_fit import fit_multi_gaussian2d
+
+        ny, nx = 64, 64
+        y, x = np.mgrid[0:ny, 0:nx]
+        z = 0.05 + np.exp(-((x - 32) ** 2 + (y - 32) ** 2) / (2 * 3.0 ** 2))  # peak ~ 1.05
+        da = xr.DataArray(z, dims=("y", "x"))
+
+        init = np.array([[0.8, 32.0, 32.0, 3.0, 3.0, 0.0]], float)
+        ds = fit_multi_gaussian2d(
+            da,
+            n_components=1,
+            initial_guesses=init,
+            max_threshold=0.60,  # exercises: mask &= z2d <= max_threshold
+            return_model=True,
+            return_residual=True,
+        )
+
+        assert bool(ds.success) is True
+        assert "model" in ds and "residual" in ds
+        below = int((z <= 0.60).sum())
+        assert 0 < below < z.size
+
+class TestAPIHelpers:
+    def test_init_components_array_wrong_shape_raises(self) -> None:
+        import numpy as np
+        import xarray as xr
+        import pytest
+        from astroviper.fitting.multi_gaussian2d_fit import fit_multi_gaussian2d
+
+        da = xr.DataArray(np.zeros((16, 17), float), dims=("y", "x"))
+        bad_init = {"offset": 0.0, "components": np.ones((1, 6), float)}  # shape != (n,6) for n=2
+
+        with pytest.raises(ValueError):
+            fit_multi_gaussian2d(da, n_components=2, initial_guesses=bad_init)
+
+    def test_init_components_list_len_mismatch_raises(self) -> None:
+        import numpy as np
+        import pytest
+        import astroviper.fitting.multi_gaussian2d_fit as mg
+
+        z = np.zeros((16, 17), float)
+        n = 2
+        init = {
+            "offset": 0.0,
+            "components": [  # length 1, but n=2 → should raise
+                {"amp": 1.0, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 2.0, "theta": 0.0}
+            ],
+        }
+        with pytest.raises(ValueError):
+            mg._normalize_initial_guesses(z, n, init, None, None)
+
+    def test_init_components_list_happy_path_synonyms_and_theta_default(self) -> None:
+        import numpy as np
+        import astroviper.fitting.multi_gaussian2d_fit as mg
+
+        z = np.zeros((20, 21), float)  # median = 0.0
+        n = 2
+        init = {
+            "offset": 0.1,
+            "components": [
+                # uses amp + sigma_x/sigma_y + theta
+                {"amp": 1.2, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 1.5, "theta": 0.3},
+                # uses amplitude + sx/sy; theta omitted -> defaults to 0.0
+                {"amplitude": 0.8, "x0": 10.0, "y0": 4.0, "sx": 2.5, "sy": 3.0},
+            ],
+        }
+
+        p = mg._normalize_initial_guesses(z, n, init, None, None)
+        # Unpack and verify values
+        off, amp, x0, y0, sx, sy, th = mg._unpack_params(p, n)
+        assert off == 0.1
+        assert amp.shape == (2,)
+        assert np.allclose(amp, [1.2, 0.8])
+        assert np.allclose(x0, [5.0, 10.0])
+        assert np.allclose(y0, [6.0, 4.0])
+        assert np.allclose(sx, [2.0, 2.5])
+        assert np.allclose(sy, [1.5, 3.0])
+        assert np.allclose(th, [0.3, 0.0])  # second component theta defaults to 0.0
+
+    def test_init_list_len_mismatch_raises(self) -> None:
+        import numpy as np
+        import pytest
+        import astroviper.fitting.multi_gaussian2d_fit as mg
+
+        z = np.zeros((16, 16), float)
+        n = 2
+        # length=1 but n=2 -> hits the len check and raises
+        init_list = [
+            {"amp": 1.0, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 2.0, "theta": 0.0}
+        ]
+        with pytest.raises(ValueError):
+            mg._normalize_initial_guesses(z, n, init_list, None, None)
+
+    def test_init_list_happy_path_populates_params(self) -> None:
+        import numpy as np
+        import astroviper.fitting.multi_gaussian2d_fit as mg
+
+        z = np.zeros((20, 20), float)
+        n = 2
+        # Mix amp/amplitude and sigma_x/sx; omit theta in second comp (defaults to 0.0)
+        init_list = [
+            {"amp": 1.2, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 1.5, "theta": 0.3},
+            {"amplitude": 0.8, "x0": 10.0, "y0": 4.0, "sx": 2.5, "sy": 3.0},
+        ]
+        p = mg._normalize_initial_guesses(z, n, init_list, None, None)  # exercises lines 224–232
+        off, amp, x0, y0, sx, sy, th = mg._unpack_params(p, n)
+
+        # offset seeded from masked median (0.0 here)
+        assert off == 0.0
+        assert np.allclose(amp, [1.2, 0.8])
+        assert np.allclose(x0, [5.0, 10.0])
+        assert np.allclose(y0, [6.0, 4.0])
+        assert np.allclose(sx, [2.0, 2.5])
+        assert np.allclose(sy, [1.5, 3.0])
+        assert np.allclose(th, [0.3, 0.0])
+
+
+    def test_init_components_list_missing_keys_raise(self) -> None:
+        import numpy as np
+        import pytest
+        import astroviper.fitting.multi_gaussian2d_fit as mg
+
+        z = np.zeros((12, 12), float)
+        n = 1
+
+        # Case A: missing 'amp'/'amplitude' -> KeyError (or ValueError in some variants)
+        bad_amp = {"components": [{"x0": 4.0, "y0": 5.0, "sigma_x": 2.0, "sigma_y": 2.0}]}
+        with pytest.raises((KeyError, ValueError)):
+            mg._normalize_initial_guesses(z, n, bad_amp, None, None)
+
+        # Case B: missing both sigma_x/sx and sigma_y/sy -> float(None) TypeError
+        bad_sigma = {"components": [{"amp": 1.0, "x0": 4.0, "y0": 5.0}]}
+        with pytest.raises((TypeError, ValueError, KeyError)):
+            mg._normalize_initial_guesses(z, n, bad_sigma, None, None)
+
