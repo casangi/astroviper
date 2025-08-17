@@ -470,6 +470,247 @@ class TestNumPyFitting:
         below = int((z <= 0.60).sum())
         assert 0 < below < z.size
 
+    def test_angle_pa_init_conversion_and_reporting(self) -> None:
+        # Build a rotated elliptical Gaussian with a known *math* angle
+        ny, nx = 64, 64
+        y, x = np.mgrid[0:ny, 0:nx]
+        amp_true, x0_true, y0_true = 1.0, 28.0, 30.0
+        sx_true, sy_true = 4.0, 2.0
+        theta_math = 0.7  # radians (math: from +x toward +y, CCW)
+
+        ct, st = np.cos(theta_math), np.sin(theta_math)
+        X, Y = x - x0_true, y - y0_true
+        a = (ct**2)/(2*sx_true**2) + (st**2)/(2*sy_true**2)
+        b = st*ct*(1/(2*sy_true**2) - 1/(2*sx_true**2))
+        c = (st**2)/(2*sx_true**2) + (ct**2)/(2*sy_true**2)
+        z = 0.12 + amp_true * np.exp(-(a*X**2 + 2*b*X*Y + c*Y**2))
+        img = xr.DataArray(z, dims=("y", "x"))
+
+        # Expected PA for ascending axes (sx=+1, sy=+1): PA = arctan2(cos(theta), sin(theta))
+        pa_expected = np.arctan2(np.cos(theta_math), np.sin(theta_math))
+
+        # Provide initial guesses *in PA*; public API will convert them via _theta_pa_to_math
+        init = np.array([[0.9, x0_true, y0_true, sx_true*0.9, sy_true*1.1, pa_expected]], float)
+
+        ds = fit_multi_gaussian2d(
+            img,
+            n_components=1,
+            initial_guesses=init,
+            angle="pa",              # triggers PA→math conversion path
+            return_model=False,
+            return_residual=False,
+        )
+
+        assert bool(ds["success"]) is True
+        # theta is reported in the same convention ("pa"), so it should match pa_expected
+        assert np.isfinite(float(ds["theta"]))
+        assert abs(float(ds["theta"]) - pa_expected) < 0.15  # allow some tolerance
+
+    def test_angle_pa_init_conversion_list_of_dicts(self) -> None:
+        # Two rotated Gaussians with known *math* angles
+        ny, nx = 64, 64
+        y, x = np.mgrid[0:ny, 0:nx]
+
+        def gauss(a, x0, y0, sx, sy, th):
+            ct, st = np.cos(th), np.sin(th)
+            X, Y = x - x0, y - y0
+            A = (ct**2)/(2*sx**2) + (st**2)/(2*sy**2)
+            B = st*ct*(1/(2*sy**2) - 1/(2*sx**2))
+            C = (st**2)/(2*sx**2) + (ct**2)/(2*sy**2)
+            return a * np.exp(-(A*X**2 + 2*B*X*Y + C*Y**2))
+
+        th1_math, th2_math = 0.5, 1.1
+        z = (
+            0.10
+            + gauss(1.0, 20.0, 22.0, 3.0, 2.0, th1_math)
+            + gauss(0.8,  44.0, 40.0, 4.0, 2.5, th2_math)
+        )
+        img = xr.DataArray(z, dims=("y", "x"))
+
+        # Convert the true math angles to PA for ascending axes:
+        # PA = arctan2(cos(theta_math), sin(theta_math))
+        pa1 = float(np.arctan2(np.cos(th1_math), np.sin(th1_math)))
+        pa2 = float(np.arctan2(np.cos(th2_math), np.sin(th2_math)))
+
+        # initial_guesses as LIST OF DICTS with 'theta' → triggers _conv_list_of_dicts path
+        init_list = [
+            {"amp": 0.9, "x0": 20.0, "y0": 22.0, "sigma_x": 3.0, "sigma_y": 2.0, "theta": pa1},
+            {"amp": 0.7, "x0": 44.0, "y0": 40.0, "sigma_x": 4.0, "sigma_y": 2.5, "theta": pa2},
+        ]
+
+        ds = fit_multi_gaussian2d(
+            img,
+            n_components=2,
+            initial_guesses=init_list,  # list[dict] path
+            angle="pa",                  # forces PA→math conversion on init
+            return_model=False,
+            return_residual=False,
+        )
+
+        # Sort by x0 to align component identity
+        order = np.argsort(ds["x0"].values)
+        thetas_pa = ds["theta"].values[order]
+
+        # Reported angles are in PA (because angle="pa")
+        assert np.isfinite(thetas_pa).all()
+        assert abs(thetas_pa[0] - pa1) < 0.25
+        assert abs(thetas_pa[1] - pa2) < 0.25
+
+    def test_angle_pa_init_components_array_dict_converted(self) -> None:
+        # Build a single rotated Gaussian (known math angle)
+        ny, nx = 64, 64
+        y, x = np.mgrid[0:ny, 0:nx]
+        amp_true, x0_true, y0_true = 1.0, 30.0, 28.0
+        sx_true, sy_true = 4.0, 2.5
+        theta_math = 0.8
+        ct, st = np.cos(theta_math), np.sin(theta_math)
+        X, Y = x - x0_true, y - y0_true
+        A = (ct**2)/(2*sx_true**2) + (st**2)/(2*sy_true**2)
+        B = st*ct*(1/(2*sy_true**2) - 1/(2*sx_true**2))
+        C = (st**2)/(2*sx_true**2) + (ct**2)/(2*sy_true**2)
+        z = 0.12 + amp_true * np.exp(-(A*X**2 + 2*B*X*Y + C*Y**2))
+        img = xr.DataArray(z, dims=("y", "x"))
+
+        # Convert math→PA for ascending axes: PA = arctan2(cos(th), sin(th))
+        pa = float(np.arctan2(np.cos(theta_math), np.sin(theta_math)))
+
+        # initial_guesses as dict with components **NumPy array** → hits lines 590–595
+        comps = np.array([[0.9, x0_true, y0_true, sx_true, sy_true, pa]], float)
+        init = {"components": comps}
+
+        ds = fit_multi_gaussian2d(
+            img, n_components=1, initial_guesses=init,
+            angle="pa", return_model=False, return_residual=False,
+        )
+
+        assert bool(ds["success"]) is True
+        # theta reported in PA (angle="pa"); should be close to the PA seed
+        assert abs(float(ds["theta"]) - pa) < 0.25
+
+    def test_angle_pa_init_components_list_of_dicts_converted(self) -> None:
+        # Build a single rotated Gaussian (known math angle)
+        ny, nx = 64, 64
+        y, x = np.mgrid[0:ny, 0:nx]
+        amp_true, x0_true, y0_true = 0.9, 22.0, 24.0
+        sx_true, sy_true = 3.5, 2.0
+        theta_math = 0.6
+        ct, st = np.cos(theta_math), np.sin(theta_math)
+        X, Y = x - x0_true, y - y0_true
+        A = (ct**2)/(2*sx_true**2) + (st**2)/(2*sy_true**2)
+        B = st*ct*(1/(2*sy_true**2) - 1/(2*sx_true**2))
+        C = (st**2)/(2*sx_true**2) + (ct**2)/(2*sy_true**2)
+        z = 0.10 + amp_true * np.exp(-(A*X**2 + 2*B*X*Y + C*Y**2))
+        img = xr.DataArray(z, dims=("y", "x"))
+
+        # Compute PA from math angle for ascending axes
+        pa = float(np.arctan2(np.cos(theta_math), np.sin(theta_math)))
+
+        # initial_guesses as dict with components **list of dicts** → hits lines 595–597
+        init = {
+            "components": [
+                {"amp": 0.85, "x0": x0_true, "y0": y0_true, "sigma_x": sx_true, "sigma_y": sy_true, "theta": pa}
+            ]
+        }
+
+        ds = fit_multi_gaussian2d(
+            img, n_components=1, initial_guesses=init,
+            angle="pa", return_model=False, return_residual=False,
+        )
+
+        assert bool(ds["success"]) is True
+        assert abs(float(ds["theta"]) - pa) < 0.25
+
+    def test_angle_pa_list_of_dicts_missing_theta_covers_if_false_branch(self) -> None:
+        # Build a 2-component scene
+        ny, nx = 64, 64
+        y, x = np.mgrid[0:ny, 0:nx]
+
+        def gauss(a, x0, y0, sx, sy, th):
+            ct, st = np.cos(th), np.sin(th)
+            X, Y = x - x0, y - y0
+            A = (ct**2)/(2*sx**2) + (st**2)/(2*sy**2)
+            B = st*ct*(1/(2*sy**2) - 1/(2*sx**2))
+            C = (st**2)/(2*sx**2) + (ct**2)/(2*sy**2)
+            return a * np.exp(-(A*X**2 + 2*B*X*Y + C*Y**2))
+
+        th1_math, th2_math = 0.7, 0.0  # comp1 rotated; comp2 axis-aligned (math)
+        z = (
+            0.10
+            + gauss(1.0, 20.0, 22.0, 3.0, 2.0, th1_math)
+            + gauss(0.8,  44.0, 40.0, 4.0, 2.5, th2_math)
+        )
+        img = xr.DataArray(z, dims=("y", "x"))
+
+        # Expected PA for ascending axes: PA = arctan2(cos(theta_math), sin(theta_math))
+        pa1 = float(np.arctan2(np.cos(th1_math), np.sin(th1_math)))
+        pa2 = float(np.arctan2(np.cos(th2_math), np.sin(th2_math)))  # ~π/2 for theta_math=0
+
+        # list[dict] with one dict MISSING 'theta' → exercises 579→581 (no conversion branch for that dict)
+        init_list = [
+            {"amp": 0.9, "x0": 20.0, "y0": 22.0, "sigma_x": 3.0, "sigma_y": 2.0, "theta": pa1},
+            {"amp": 0.7, "x0": 44.0, "y0": 40.0, "sigma_x": 4.0, "sigma_y": 2.5},  # no 'theta'
+        ]
+
+        ds = fit_multi_gaussian2d(
+            img,
+            n_components=2,
+            initial_guesses=init_list,
+            angle="pa",                  # convert dicts that HAVE 'theta'; report output in PA
+            return_model=False,
+            return_residual=False,
+        )
+
+        assert bool(ds["success"]) is True
+        order = np.argsort(ds["x0"].values)
+        th_pa = ds["theta"].values[order]
+
+        assert np.isfinite(th_pa).all()
+        assert abs(th_pa[0] - pa1) < 0.3     # comp1 near its seeded PA
+        assert abs(th_pa[1] - pa2) < 0.5     # comp2 near PA for math=0 (≈ π/2)
+
+    def test_angle_pa_init_components_list_of_dicts_branch(self) -> None:
+        # 2-component scene
+        ny, nx = 64, 64
+        y, x = np.mgrid[0:ny, 0:nx]
+
+        def g(a, x0, y0, sx, sy, th):
+            ct, st = np.cos(th), np.sin(th)
+            X, Y = x - x0, y - y0
+            A = (ct**2)/(2*sx**2) + (st**2)/(2*sy**2)
+            B = st*ct*(1/(2*sy**2) - 1/(2*sx**2))
+            C = (st**2)/(2*sx**2) + (ct**2)/(2*sy**2)
+            return a * np.exp(-(A*X**2 + 2*B*X*Y + C*Y**2))
+
+        th1_math, th2_math = 0.4, 1.0
+        z = 0.1 + g(1.0, 18.0, 20.0, 3.0, 2.0, th1_math) + g(0.8, 44.0, 38.0, 4.0, 2.6, th2_math)
+        img = xr.DataArray(z, dims=("y", "x"))
+
+        # PA seeds from math angles for ascending axes: PA = arctan2(cos(theta), sin(theta))
+        pa1 = float(np.arctan2(np.cos(th1_math), np.sin(th1_math)))
+        pa2 = float(np.arctan2(np.cos(th2_math), np.sin(th2_math)))
+
+        # Dict with "components" as LIST OF DICTS → hits 595→597 (_conv_list_of_dicts then return clone)
+        init = {
+            "components": [
+                {"amp": 0.9, "x0": 18.0, "y0": 20.0, "sigma_x": 3.0, "sigma_y": 2.0, "theta": pa1},
+                {"amp": 0.7, "x0": 44.0, "y0": 38.0, "sigma_x": 4.0, "sigma_y": 2.6, "theta": pa2},
+            ]
+        }
+
+        ds = fit_multi_gaussian2d(
+            img, n_components=2, initial_guesses=init, angle="pa",
+            return_model=False, return_residual=False,
+        )
+
+        assert bool(ds["success"]) is True
+        # Reported theta is in PA (angle="pa"); check against seeds
+        order = np.argsort(ds["x0"].values)
+        th_pa = ds["theta"].values[order]
+        assert np.isfinite(th_pa).all()
+        assert abs(th_pa[0] - pa1) < 0.3
+        assert abs(th_pa[1] - pa2) < 0.3
+
+
 class TestAPIHelpers:
     def test_init_components_array_wrong_shape_raises(self) -> None:
         da = xr.DataArray(np.zeros((16, 17), float), dims=("y", "x"))
