@@ -175,31 +175,48 @@ def _normalize_initial_guesses(
     Accepts:
       - None: auto-seed using greedy peaks.
       - array-like of shape (n, 6): columns [amp, x0, y0, sx, sy, th]; offset from median.
-      - list of dicts (len n): keys amp, x0, y0, sigma_x, sigma_y, theta; offset from median
+      - list/tuple of dicts (len n): keys amp|amplitude, x0, y0, sigma_x|sx, sigma_y|sy, theta; offset from median.
       - dict with keys:
           'offset': float (optional),
-          'components': array-like (n, 6) or list of dicts as above.
+          'components': array-like (n, 6) or list/tuple of dicts as above.
 
     Returns a packed parameter vector as in _pack_params.
     """
     ny, nx = z2d.shape
-    # threshold mask just for robust stats
+
+    # Threshold mask for robust median
     mask = np.ones_like(z2d, dtype=bool)
     if min_threshold is not None:
-        mask &= z2d >= min_threshold
+        mask &= z2d >= float(min_threshold)
     if max_threshold is not None:
-        mask &= z2d <= max_threshold
+        mask &= z2d <= float(max_threshold)
     z_masked = np.where(mask, z2d, np.nan)
     med = float(np.nanmedian(z_masked))
 
+    # None → auto seeds
     if init is None:
-        seeds = _greedy_peak_seeds(z_masked, n=n, excl_radius=max(3, max(ny, nx)//50))
-        amps = np.array([max(v - med, 1e-3) for (_,_,v) in seeds], dtype=float)
-        x0 = np.array([float(x) for (_,x,_) in seeds], dtype=float)
-        y0 = np.array([float(y) for (y,_,_) in seeds], dtype=float)
+        seeds = _greedy_peak_seeds(z_masked, n=n, excl_radius=max(3, max(ny, nx) // 50))
+        amps = np.array([max(v - med, 1e-3) for (_, _, v) in seeds], dtype=float)
+        x0 = np.array([float(x) for (_, x, _) in seeds], dtype=float)
+        y0 = np.array([float(y) for (y, _, _) in seeds], dtype=float)
         sx = np.full(n, max(nx, ny) / 10.0, dtype=float)
         sy = np.full(n, max(nx, ny) / 10.0, dtype=float)
         th = np.zeros(n, dtype=float)
+        return _pack_params(med, amps, x0, y0, sx, sy, th)
+
+    # NEW: top-level list/tuple of dicts (matches docstring)
+    if isinstance(init, (list, tuple)) and len(init) > 0 and isinstance(init[0], dict):
+        if len(init) != n:
+            raise ValueError(f"initial_guesses list must have length n={n}")
+        amps = np.empty(n); x0 = np.empty(n); y0 = np.empty(n)
+        sx = np.empty(n);  sy = np.empty(n);  th = np.empty(n)
+        for i, comp in enumerate(init):
+            amps[i] = float(comp["amp"] if "amp" in comp else comp["amplitude"])
+            x0[i]  = float(comp["x0"])
+            y0[i]  = float(comp["y0"])
+            sx[i]  = float(comp.get("sigma_x", comp.get("sx")))
+            sy[i]  = float(comp.get("sigma_y", comp.get("sy")))
+            th[i]  = float(comp.get("theta", 0.0))
         return _pack_params(med, amps, x0, y0, sx, sy, th)
 
     # Structured dict form
@@ -208,36 +225,35 @@ def _normalize_initial_guesses(
         comps = init.get("components", None)
         if comps is None:
             raise ValueError("init dict must include 'components' with shape (n,6) or list of dicts.")
-        init = comps
-        # fallthrough to parse comps and finally pack with provided offset
+        init = comps  # fallthrough to parse components and pack with provided offset
 
         if isinstance(init, np.ndarray):
             arr = np.asarray(init, dtype=float)
             if arr.shape != (n, 6):
                 raise ValueError(f"init['components'] must have shape (n,6); got {arr.shape}")
-            amps, x0, y0, sx, sy, th = [arr[:,k].astype(float) for k in range(6)]
+            amps, x0, y0, sx, sy, th = [arr[:, k].astype(float) for k in range(6)]
             return _pack_params(offset, amps, x0, y0, sx, sy, th)
 
-        if isinstance(init, (list, tuple)):
+        if isinstance(init, (list, tuple)) and len(init) > 0 and isinstance(init[0], dict):
             if len(init) != n:
                 raise ValueError(f"init['components'] must have length n={n}")
-            amps = np.empty(n); x0 = np.empty(n); y0 = np.empty(n); sx = np.empty(n); sy = np.empty(n); th = np.empty(n)
+            amps = np.empty(n); x0 = np.empty(n); y0 = np.empty(n)
+            sx = np.empty(n);  sy = np.empty(n);  th = np.empty(n)
             for i, comp in enumerate(init):
                 amps[i] = float(comp["amp"] if "amp" in comp else comp["amplitude"])
-                x0[i] = float(comp["x0"])
-                y0[i] = float(comp["y0"])
-                sx[i] = float(comp.get("sigma_x", comp.get("sx")))
-                sy[i] = float(comp.get("sigma_y", comp.get("sy")))
-                th[i] = float(comp.get("theta", 0.0))
+                x0[i]  = float(comp["x0"])
+                y0[i]  = float(comp["y0"])
+                sx[i]  = float(comp.get("sigma_x", comp.get("sx")))
+                sy[i]  = float(comp.get("sigma_y", comp.get("sy")))
+                th[i]  = float(comp.get("theta", 0.0))
             return _pack_params(offset, amps, x0, y0, sx, sy, th)
 
-    # Array/list form
+    # Array/list form (numpy array or list-of-lists)
     arr = np.asarray(init, dtype=float)
     if arr.shape != (n, 6):
         raise ValueError(f"initial_guesses must have shape (n,6); got {arr.shape}")
-    amps, x0, y0, sx, sy, th = [arr[:,k].astype(float) for k in range(6)]
+    amps, x0, y0, sx, sy, th = [arr[:, k].astype(float) for k in range(6)]
     return _pack_params(med, amps, x0, y0, sx, sy, th)
-
 
 def _merge_bounds_multi(
     base_lb: np.ndarray,
@@ -580,7 +596,8 @@ def _convert_init_theta(
             clone["components"] = _conv_list_of_dicts(comps)  # type: ignore[arg-type]
         return clone
 
-    return init
+    # defensive coding, should not be reached
+    return init # pragma: no cover
 
 # ----------------------- Public API -----------------------
 
