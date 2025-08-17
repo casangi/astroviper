@@ -804,6 +804,17 @@ def fit_multi_gaussian2d(
             success=success, variance_explained=varexp,
         )
     )
+
+    # --- annotate theta convention so downstream tools know how to plot it ---
+    conv = "pa" if want_pa else "math"
+    ds.attrs["theta_convention"] = conv                  # dataset-level flag
+    ds.attrs["axes_handedness"] = "left" if is_left_handed else "right"
+    ds.attrs["angle_input"] = str(angle)                 # what the caller asked for
+    if "theta" in ds:
+        ds["theta"].attrs["convention"] = conv
+    if "theta_err" in ds:
+        ds["theta_err"].attrs["convention"] = conv
+
     if return_residual:
         ds["residual"] = residual
     if return_model:
@@ -863,48 +874,83 @@ def fit_multi_gaussian2d(
     return ds
 
 def plot_components(
-    data: ArrayOrDA,
-    result: xr.Dataset,
-    dims: Optional[Sequence[Union[str, int]]] = None,
-    indexer: Optional[dict] = None,
+    data,
+    result: "xr.Dataset",
+    dims: "Optional[Sequence[Union[str, int]]]" = None,
     *,
-    show_residual: bool = False,
-) -> None:
+    indexer: "Optional[Mapping[str, int]]" = None,
+    show_residual: bool = True,
+    fwhm: bool = False,
+    angle: "Optional[str]" = None,   # ← None means: read from result.attrs
+):
     """
-    Quick visualization: overlays fitted centroids and FWHM ellipses on the data.
+    Quicklook plot: data (and optional residual) with fitted Gaussian components overlaid as ellipses.
 
     Parameters
     ----------
-    data : ndarray | dask.array.Array | xarray.DataArray
-        The same array passed to the fitter.
-    result : xarray.Dataset
-        Output from fit_multi_gaussian2d (or single-Gaussian). Expects variables
-        x0, y0, sigma_x, sigma_y, theta (optionally a 'component' dimension)
-        and optional 'residual'.
-    dims : sequence of two (str|int), optional
-        Fit-plane dims; for 2-D you can omit.
-    indexer : dict, optional
-        For >2-D inputs, selects a single plane (e.g. {'time': 0}).
-    show_residual : bool, default False
-        If True, shows a second panel with residuals.
+    data: numpy.ndarray | dask.array.Array | xarray.DataArray
+      Image or cube. If not a DataArray, it is wrapped with dims ('y','x') and numeric coords.
+
+    result: xarray.Dataset
+      Output from `fit_multi_gaussian2d`. Must contain at least
+      {'x0','y0','sigma_x','sigma_y','theta'}. If present, 'residual' and 'model'
+      will be used for quicklook panels.
+
+    dims: Sequence[str | int] | None
+      Two dims (names or indices) that define the image plane (x, y). If omitted:
+      uses ('x','y') if present; else for 2-D uses (last, second-last).
+
+    indexer: Mapping[str, int] | None
+      For N-D inputs, which indices to select for leading dims (not including x/y/component).
+      If None and data is N-D, defaults to {d: 0 for d in leading dims}.
+
+    show_residual: bool
+      If True and residuals are available in `result` (or model to compute them),
+      show a side-by-side residual panel.
+
+    fwhm: bool
+      If True, draw ellipses at FWHM size (2.3548 * sigma) instead of 1σ.
+
+    angle: {"math","pa","auto"}
+      Convention **of `result["theta"]`**:
+        • "math": theta is math angle (+x → +y, CCW).
+        • "pa": theta is position angle (+y → +x).
+        • "auto": infer from axis handedness (left-handed → PA, else math).
+      Matplotlib expects a **math** angle; if the dataset theta is PA, it is converted.
 
     Returns
     -------
-    None
-    """
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import Ellipse
+    matplotlib.figure.Figure
+      The created figure.
 
+    Notes
+    -----
+    • Ellipses show the fitted components:
+        - center: (x0, y0)
+        - orientation: theta (converted to math if needed)
+        - size: 1σ radii (or FWHM if `fwhm=True`)
+      Width/height passed to Matplotlib’s Ellipse are **diameters**.
+    """
+    # -- imports guarded to avoid hard dependency at import time --
+    try:  # crucial: plotting is optional at runtime/env
+        import matplotlib.pyplot as plt  # type: ignore
+        from matplotlib.patches import Ellipse  # type: ignore
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("Matplotlib is required for plot_components.") from exc
+
+    # -- normalize input and resolve dims --
     da = _ensure_dataarray(data)
     dim_x, dim_y = _resolve_dims(da, dims)
+    # transpose so plane dims are last
     da_tr = da.transpose(*(d for d in da.dims if d not in (dim_y, dim_x)), dim_y, dim_x)
 
+    # -- select a single plane for plotting --
     if da_tr.ndim > 2:
         if indexer is None:
             indexer = {d: 0 for d in da_tr.dims[:-2]}
         data2d = da_tr.isel(**indexer)
         res_plane = result
+        # align result along same leading dims when present
         for d, i in indexer.items():
             if d in res_plane.dims and d not in ("component", dim_y, dim_x):
                 res_plane = res_plane.isel({d: i})
@@ -912,45 +958,95 @@ def plot_components(
         data2d = da_tr
         res_plane = result
 
-    def _get(name):
+    # -- helpers to fetch variables with informative errors --
+    def _get(name: str) -> "xr.DataArray":
         if name not in res_plane:
             raise KeyError(f"result missing '{name}'")
         return res_plane[name]
 
-    x0 = _get("x0"); y0 = _get("y0")
-    sx = _get("sigma_x"); sy = _get("sigma_y")
-    th = _get("theta")
+    x0 = _get("x0").values
+    y0 = _get("y0").values
+    sx = _get("sigma_x").values
+    sy = _get("sigma_y").values
+    th = _get("theta").values  # convention specified by `angle` arg
 
-    if "component" not in x0.dims:
-        x0 = x0.expand_dims({"component": [0]})
-        y0 = y0.expand_dims({"component": [0]})
-        sx = sx.expand_dims({"component": [0]})
-        sy = sy.expand_dims({"component": [0]})
-        th = th.expand_dims({"component": [0]})
+    # -- axis handedness from coords (for PA<->math conversion) --
+    cx = np.asarray(data2d.coords[dim_x].values) if dim_x in data2d.coords else None
+    cy = np.asarray(data2d.coords[dim_y].values) if dim_y in data2d.coords else None
+    sx_sign = _axis_sign(cx)
+    sy_sign = _axis_sign(cy)
+    left_handed = (sx_sign * sy_sign) < 0.0
 
-    if show_residual and "residual" in result:
-        fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
-    else:
-        fig, ax0 = plt.subplots(1, 1, figsize=(6, 5), constrained_layout=True)
-        ax1 = None
+    # -- interpret dataset theta per `angle`, then convert to Matplotlib math angle if needed --
+    # Decide convention of result["theta"]:
+    theta_conv = (str(angle).lower()
+                  if angle is not None
+                  else str(result.attrs.get("theta_convention", "math")).lower())
+    ds_is_pa = (theta_conv == "pa") or (theta_conv == "auto" and left_handed)
 
-    ax0.imshow(np.asarray(data2d), origin="lower")
-    ax0.set_title("Data with fitted components")
-    ax0.set_xlabel(dim_x); ax0.set_ylabel(dim_y)
+    theta_plot = _theta_pa_to_math(th, sx_sign, sy_sign) if ds_is_pa else np.asarray(th, dtype=float)
+    theta_deg = np.degrees(theta_plot)
 
-    k = 2.0 * np.sqrt(2.0 * np.log(2.0))  # FWHM factor
-    for i in range(x0.sizes["component"]):
-        xi = float(x0.isel(component=i)); yi = float(y0.isel(component=i))
-        sxi = float(sx.isel(component=i)); syi = float(sy.isel(component=i))
-        thi = float(th.isel(component=i))
-        ax0.plot([xi], [yi], marker="+", linestyle="None")
-        ax0.add_patch(Ellipse((xi, yi), width=k*sxi, height=k*syi, angle=np.degrees(thi), fill=False, linewidth=1.5))
+    # -- size scale: 1σ or FWHM --
+    scale = 2.3548200450309493 if fwhm else 1.0
+    width = 2.0 * scale * sx
+    height = 2.0 * scale * sy
 
-    if ax1 is not None:
-        res2d = result["residual"]
-        if da_tr.ndim > 2:
-            res2d = res2d.transpose(*da_tr.dims).isel(**indexer)
-        ax1.imshow(np.asarray(res2d), origin="lower")
-        ax1.set_title("Residual")
-        ax1.set_xlabel(dim_x); ax1.set_ylabel(dim_y)
+    # -- choose whether we can show residuals --
+    show_resid_panel = bool(show_residual and ("residual" in res_plane or "model" in res_plane))
+    fig, axes = (plt.subplots(1, 2, figsize=(10, 4.5)) if show_resid_panel
+                 else plt.subplots(1, 1, figsize=(5.5, 5.0)))
+    ax_data = axes[0] if show_resid_panel else axes
+
+    im0 = ax_data.imshow(np.asarray(data2d), origin="lower", aspect="equal")
+    ax_data.set_title("Data with fitted components")
+    ax_data.set_xlabel(dim_x)
+    ax_data.set_ylabel(dim_y)
+
+    # overlay ellipses
+    ncomp = int(np.size(x0))
+    for i in range(ncomp):
+        e = Ellipse(
+            (float(x0[i]), float(y0[i])),
+            float(width[i]),
+            float(height[i]),
+            angle=float(theta_deg[i]),
+            fill=False,
+            linewidth=1.5,
+            edgecolor="k",
+        )
+        ax_data.add_patch(e)
+        # centroid marker
+        ax_data.plot(float(x0[i]), float(y0[i]), marker="+", ms=7, mec="yellow", mfc="none", mew=1.5)
+
+    plt.colorbar(im0, ax=ax_data, fraction=0.046, pad=0.04)
+
+    # residual panel if available/asked
+    if show_resid_panel:
+        ax_res = axes[1]
+        if "residual" in res_plane:
+            res2d = res_plane["residual"]
+            # slice residual like data if it still carries extra dims
+            for d, i in (indexer or {}).items():
+                if d in res2d.dims and d not in (dim_y, dim_x):
+                    res2d = res2d.isel({d: i})
+            resid_img = np.asarray(res2d)
+        elif "model" in res_plane:
+            model2d = res_plane["model"]
+            for d, i in (indexer or {}).items():
+                if d in model2d.dims and d not in (dim_y, dim_x):
+                    model2d = model2d.isel({d: i})
+            resid_img = np.asarray(data2d) - np.asarray(model2d)
+        else:  # pragma: no cover (guarded by show_resid_panel condition)
+            resid_img = np.zeros_like(np.asarray(data2d))
+
+        im1 = ax_res.imshow(resid_img, origin="lower", aspect="equal")
+        ax_res.set_title("Residual (data − model)")
+        ax_res.set_xlabel(dim_x)
+        ax_res.set_ylabel(dim_y)
+        plt.colorbar(im1, ax=ax_res, fraction=0.046, pad=0.04)
+
+    plt.tight_layout()
     plt.show()
+    return fig
+
