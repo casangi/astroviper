@@ -112,9 +112,7 @@ def _outframe_freq(ms: xarray.core.datatree.DataTree, outframe: str = "lsrk"):
 
     if nchan > 1:
         width = (maxFreq - minFreq) / nchan
-        outfreqs = np.vectorize(lambda k: k * width + minFreq)(
-            np.arange(nchan)
-        )
+        outfreqs = np.vectorize(lambda k: k * width + minFreq)(np.arange(nchan))
     else:
         outfreqs = np.array([minFreq])
     # print("minfreq ", minFreq, " maxfreq ", maxFreq)
@@ -122,12 +120,8 @@ def _outframe_freq(ms: xarray.core.datatree.DataTree, outframe: str = "lsrk"):
     return outfreqs
 
 
-def _get_phase_center(
-    ms: xarray.core.datatree.DataTree, fieldname: str
-) -> SkyCoord:
-    pc = ms.ms.get_field_and_source_xds().FIELD_PHASE_CENTER.sel(
-        field_name=fieldname
-    )
+def _get_phase_center(ms: xarray.core.datatree.DataTree, fieldname: str) -> SkyCoord:
+    pc = ms.ms.get_field_and_source_xds().FIELD_PHASE_CENTER.sel(field_name=fieldname)
     pcdir = [d * u.Unit(e) for d, e in zip(pc.data, pc.attrs["units"])]
     phcen = SkyCoord(pcdir[0], pcdir[1], frame=pc.attrs["frame"])
     return phcen
@@ -208,12 +202,10 @@ def _interpolate_data_weight_from_TOPO(
         elwgt = ms.WEIGHT.loc[a_loc.obstime.value, :, :, :]
         elflg = ms.FLAG.loc[a_loc.obstime.value, :, :, :]
         elwgt = elwgt * np.logical_not(elflg)
-        newelvis = _interp_channels2(
-            elvis, elwgt, freqATt, interpfreq, method=method
-        )
-        newelvis["frequency"] = ms.VISIBILITY.loc[
-            a_loc.obstime.value, :, :, :
-        ]["frequency"]
+        newelvis = _interp_channels2(elvis, elwgt, freqATt, interpfreq, method=method)
+        newelvis["frequency"] = ms.VISIBILITY.loc[a_loc.obstime.value, :, :, :][
+            "frequency"
+        ]
         ms.VISIBILITY.loc[a_loc.obstime.value, :, :, :] = newelvis
 
 
