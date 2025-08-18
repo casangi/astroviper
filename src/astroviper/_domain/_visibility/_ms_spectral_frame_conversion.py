@@ -44,11 +44,11 @@ def _ms_spectral_frame_conversion(
     # outms = ms.copy(inherit=False, deep=True)
     outms = copy.deepcopy(ms)
     # need to do selection over frequency here
-    pc = ms.ms.get_field_and_source_xds().FIELD_PHASE_CENTER
-    pcdir = [d * u.Unit(e) for d, e in zip(pc.data[0], pc.units)]
-    phcen = SkyCoord(pcdir[0], pcdir[1], frame=pc.frame)
+    pc = ms.xr_ms.get_field_and_source_xds().FIELD_PHASE_CENTER_DIRECTION
+    phcen = SkyCoord(pc.sel(sky_dir_label="ra").data*u.Unit(pc.units), pc.sel(sky_dir_label="dec").data*u.Unit(pc.units), frame=pc.frame)
+
     locATt = _get_all_itrs_loc(ms)
-    obsfreq = ms.frequency.data * u.Unit(ms.frequency.attrs["units"][0])
+    obsfreq = ms.frequency.data * u.Unit(ms.frequency.attrs["units"])
     newFreqInFrame = _outframe_freq(outms, outframe)
     ##outMSFreq = outms.frequency.assign_coords(frequency=newFreqInFrame) buggy
     outMSFreq = xarray.DataArray(
@@ -90,7 +90,7 @@ def _outframe_freq(ms: xarray.core.datatree.DataTree, outframe: str = "lsrk"):
     obsframe = ms["frequency"].attrs["observer"]
     if "TOPO" not in obsframe:
         raise Exception("This function works with TOPO only for now")
-    obsfreq = ms["frequency"].data * u.Unit(ms.frequency.attrs["units"][0])
+    obsfreq = ms["frequency"].data * u.Unit(ms.frequency.attrs["units"])
     # print("_outframe_freq originfreq", obsfreq)
     nchan = len(obsfreq)
 
@@ -121,9 +121,8 @@ def _outframe_freq(ms: xarray.core.datatree.DataTree, outframe: str = "lsrk"):
 
 
 def _get_phase_center(ms: xarray.core.datatree.DataTree, fieldname: str) -> SkyCoord:
-    pc = ms.ms.get_field_and_source_xds().FIELD_PHASE_CENTER.sel(field_name=fieldname)
-    pcdir = [d * u.Unit(e) for d, e in zip(pc.data, pc.attrs["units"])]
-    phcen = SkyCoord(pcdir[0], pcdir[1], frame=pc.attrs["frame"])
+    pc = ms.xr_ms.get_field_and_source_xds().FIELD_PHASE_CENTER_DIRECTION.sel(field_name=fieldname)
+    phcen = SkyCoord(pc.sel(sky_dir_label="ra").data*u.Unit(pc.units), pc.sel(sky_dir_label="dec").data*u.Unit(pc.units), frame=pc.attrs["frame"])
     return phcen
 
 
@@ -166,7 +165,7 @@ def _get_all_itrs_loc(ms: xarray.core.datatree.DataTree):
         obsstr = "ALMA"
 
     obs = EarthLocation.of_site(obsstr)
-    obs_t = ms["time"].data * u.Unit(ms["time"].attrs["units"][0])
+    obs_t = ms["time"].data * u.Unit(ms["time"].attrs["units"])
     t = Time(
         obs_t,
         format=ms["time"].attrs["format"],
