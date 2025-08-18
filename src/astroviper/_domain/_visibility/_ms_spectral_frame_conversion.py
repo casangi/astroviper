@@ -45,7 +45,11 @@ def _ms_spectral_frame_conversion(
     outms = copy.deepcopy(ms)
     # need to do selection over frequency here
     pc = ms.xr_ms.get_field_and_source_xds().FIELD_PHASE_CENTER_DIRECTION
-    phcen = SkyCoord(pc.sel(sky_dir_label="ra").data*u.Unit(pc.units), pc.sel(sky_dir_label="dec").data*u.Unit(pc.units), frame=pc.frame)
+    phcen = SkyCoord(
+        pc.sel(sky_dir_label="ra").data * u.Unit(pc.units),
+        pc.sel(sky_dir_label="dec").data * u.Unit(pc.units),
+        frame=pc.frame,
+    )
 
     locATt = _get_all_itrs_loc(ms)
     obsfreq = ms.frequency.data * u.Unit(ms.frequency.attrs["units"])
@@ -121,8 +125,14 @@ def _outframe_freq(ms: xarray.core.datatree.DataTree, outframe: str = "lsrk"):
 
 
 def _get_phase_center(ms: xarray.core.datatree.DataTree, fieldname: str) -> SkyCoord:
-    pc = ms.xr_ms.get_field_and_source_xds().FIELD_PHASE_CENTER_DIRECTION.sel(field_name=fieldname)
-    phcen = SkyCoord(pc.sel(sky_dir_label="ra").data*u.Unit(pc.units), pc.sel(sky_dir_label="dec").data*u.Unit(pc.units), frame=pc.attrs["frame"])
+    pc = ms.xr_ms.get_field_and_source_xds().FIELD_PHASE_CENTER_DIRECTION.sel(
+        field_name=fieldname
+    )
+    phcen = SkyCoord(
+        pc.sel(sky_dir_label="ra").data * u.Unit(pc.units),
+        pc.sel(sky_dir_label="dec").data * u.Unit(pc.units),
+        frame=pc.attrs["frame"],
+    )
     return phcen
 
 
