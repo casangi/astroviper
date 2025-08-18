@@ -32,9 +32,9 @@ def _make_gridding_convolution_function(
     # print(sel_parms)
     data_group_in, _ = check_sel_parms(ms_xds, _sel_parms, skip_data_group_out=True)
 
-    _gcf_parms["field_phase_dir"] = ms_xds[data_group_in["correlated_data"]].attrs[
-        "field_and_source_xds"
-    ]["FIELD_PHASE_CENTER"]
+    _gcf_parms["field_phase_dir"] = ms_xds.xr_ms.get_field_and_source_xds(
+        data_group_in["data_group_in_name"]
+    ).FIELD_PHASE_CENTER_DIRECTION.isel(field_name=0)
 
     # _gcf_parms["basline_ant"] = np.array(
     #     [ms_xds.baseline_antenna1_id.values, ms_xds.baseline_antenna2_id.values]

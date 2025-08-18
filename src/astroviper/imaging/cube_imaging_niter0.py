@@ -33,7 +33,7 @@ def cube_imaging_niter0(
 
     # Get metadata
     ps = open_processing_set(ps_name, intents=intents)
-    summary_df = ps.summary()
+    summary_df = ps.xr_ps.summary()
 
     # Get phase center of mosaic if field given.
     if isinstance(grid_params["phase_direction"], int):
