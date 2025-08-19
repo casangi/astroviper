@@ -940,7 +940,12 @@ def fit_multi_gaussian2d(
     y1d, x1d = _extract_1d_coords_for_fit(data, da_tr, coord_type, coords, dim_y, dim_x)
     y1d_da = xr.DataArray(y1d, dims=[dim_y])
     x1d_da = xr.DataArray(x1d, dims=[dim_x])
-
+    # Determine whether evaluation grid is world or pixel.
+    # If x/y coords are exactly 0..N-1 we treat as pixel mode; otherwise world.
+    world_mode = not (
+        np.allclose(x1d, np.arange(x1d.shape[0])) and
+        np.allclose(y1d, np.arange(y1d.shape[0]))
+    )
     out_core_dims = (
         [["component"]]*6 + [["component"]]*6 + [["component"]]*3
         + [[] , []] + [[] , []]
@@ -977,6 +982,105 @@ def fit_multi_gaussian2d(
      success, varexp,
      residual, model) = results
 
+    # -- Angle conventions ----------------------------------------------------
+    # Fitter's internal angle has opposite sign vs the "math" convention.
+    # Convert once to math (index basis), then derive both public conventions.
+    th_math = -th
+    theta_math = th_math
+    theta_pa = xr.DataArray(
+        _theta_math_to_pa(th_math.values, sx_sign, sy_sign),
+        dims=th.dims, coords=th.coords
+    )
+    # Preserve backward-compat "theta" using requested convention
+    th_public = theta_pa if want_pa else theta_math
+
+    # --- Pixel-parameter views (centers + ellipse in pixel coords) ---
+    if world_mode:
+        nx = x1d.shape[0]; ny = y1d.shape[0]
+        x_idx_axis = np.arange(nx, dtype=float)
+        y_idx_axis = np.arange(ny, dtype=float)
+        # centers: world -> pixel via inverse of coord arrays
+        x0_pixel = xr.apply_ufunc(
+            np.interp, x0, xr.DataArray(x1d, dims=[dim_x]), xr.DataArray(x_idx_axis, dims=[dim_x]),
+            input_core_dims=[["component"], [dim_x], [dim_x]],
+            output_core_dims=[["component"]], vectorize=True, dask="parallelized", output_dtypes=[float]
+        )
+        y0_pixel = xr.apply_ufunc(
+            np.interp, y0, xr.DataArray(y1d, dims=[dim_y]), xr.DataArray(y_idx_axis, dims=[dim_y]),
+            input_core_dims=[["component"], [dim_y], [dim_y]],
+            output_core_dims=[["component"]], vectorize=True, dask="parallelized", output_dtypes=[float]
+        )
+        # local pixel scales (world units per pixel) via gradient at nearest pixel
+        gx = np.gradient(x1d.astype(float))
+        gy = np.gradient(y1d.astype(float))
+        x0i = xr.apply_ufunc(
+            np.rint, x0_pixel,
+            input_core_dims=[["component"]], output_core_dims=[["component"]],
+            vectorize=True, dask="parallelized", output_dtypes=[float],
+        ).clip(0, nx-1).astype(int)
+        y0i = xr.apply_ufunc(
+            np.rint, y0_pixel,
+            input_core_dims=[["component"]], output_core_dims=[["component"]],
+            vectorize=True, dask="parallelized", output_dtypes=[float],
+        ).clip(0, ny-1).astype(int)
+        # elementwise pick with clipping (works with vectorize=True)
+        def _pick1d(arr, idx):
+            idx = np.asarray(idx).astype(np.int64)
+            np.clip(idx, 0, arr.shape[0]-1, out=idx)
+            return arr[idx]
+        # pick local scale via np.take with clipping
+        dx_local = xr.apply_ufunc(
+            np.take, xr.DataArray(gx, dims=[dim_x]), x0i,
+            input_core_dims=[[dim_x], ["component"]],
+            output_core_dims=[["component"]],
+            kwargs={"axis": 0, "mode": "clip"},
+            vectorize=True, dask="parallelized", output_dtypes=[float],
+        )
+        dy_local = xr.apply_ufunc(
+            np.take, xr.DataArray(gy, dims=[dim_y]), y0i,
+            input_core_dims=[[dim_y], ["component"]],
+            output_core_dims=[["component"]],
+            kwargs={"axis": 0, "mode": "clip"},
+            vectorize=True, dask="parallelized", output_dtypes=[float],
+        )
+        # covariance transform Σp = S Σw S (S=diag(1/dx,1/dy)) → principal axes in pixel units
+        def _world_to_pixel_cov(sigx, sigy, theta, dx, dy):
+            c = np.cos(theta); s = np.sin(theta)
+            # Σ_world = R diag(sigx^2, sigy^2) R^T
+            a = (c*c)*sigx*sigx + (s*s)*sigy*sigy
+            b = (s*c)*(sigx*sigx - sigy*sigy)
+            d = (s*s)*sigx*sigx + (c*c)*sigy*sigy
+            invdx2 = 1.0/(dx*dx); invdy2 = 1.0/(dy*dy)
+            A = a*invdx2; B = b*(1.0/(dx*dy)); D = d*invdy2
+            tr = A + D
+            det = A*D - B*B
+            tmp = np.sqrt(np.maximum(tr*tr/4.0 - det, 0.0))
+            lam1 = tr/2.0 + tmp
+            lam2 = tr/2.0 - tmp
+            theta_p = 0.5*np.arctan2(2*B, A - D)
+            lam_max = np.maximum(lam1, lam2); lam_min = np.minimum(lam1, lam2)
+            return np.sqrt(np.maximum(lam_max, 0.0)), np.sqrt(np.maximum(lam_min, 0.0)), theta_p
+
+        # Feed math-angle into geometry/covariance computation
+        sigma_major_pixel, sigma_minor_pixel, theta_pixel_math = xr.apply_ufunc(
+            _world_to_pixel_cov, sx, sy, th_math, dx_local, dy_local,
+            input_core_dims=[["component"]]*5,
+            output_core_dims=[["component"], ["component"], ["component"]],
+            vectorize=True, dask="parallelized", output_dtypes=[float, float, float]
+        )
+        # Report pixel-space angle in the SAME convention as 'theta'
+        theta_pixel = (np.pi/2 - theta_pixel_math) if want_pa else theta_pixel_math
+        fwhm_major_pixel = sigma_major_pixel * _SIG2FWHM
+        fwhm_minor_pixel = sigma_minor_pixel * _SIG2FWHM
+    else:
+        # already in pixel space -> alias
+        x0_pixel, y0_pixel = x0, y0
+        sigma_major_pixel = xr.apply_ufunc(np.maximum, sx, sy, dask="parallelized")
+        sigma_minor_pixel = xr.apply_ufunc(np.minimum, sx, sy, dask="parallelized")
+        theta_pixel = th_public
+        fwhm_major_pixel = xr.apply_ufunc(np.maximum, sx*_SIG2FWHM, sy*_SIG2FWHM, dask="parallelized")
+        fwhm_minor_pixel = xr.apply_ufunc(np.minimum, sx*_SIG2FWHM, sy*_SIG2FWHM, dask="parallelized")
+
     # Convert internal σ → public FWHM along principal axes; also provide major/minor & errs.
     # Use DA math to preserve dims/coords.
     _fx = sx * _SIG2FWHM
@@ -990,19 +1094,34 @@ def fit_multi_gaussian2d(
     fwhm_major_err = xr.where(_is_fx_major, _fxe, _fye)
     fwhm_minor_err = xr.where(_is_fx_major, _fye, _fxe)
 
+    # Also expose pixel-space parameters (mirrors of world/fit-space where applicable)
+    sigma_x_pixel = sigma_major_pixel
+    sigma_y_pixel = sigma_minor_pixel
+    # (theta_pixel is the orientation of the major axis in pixel basis)
+    # Provide FWHM in pixel units too:
+
     ds = xr.Dataset(
         data_vars=dict(
             amplitude=amp,
             x0=x0, y0=y0,
             fwhm_major=fwhm_major, fwhm_minor=fwhm_minor,
             sigma_x=sx, sigma_y=sy,
-            theta=th,  # will be converted to PA if requested below
+            theta_math=theta_math,
+            theta_pa=theta_pa,
+            theta=th_public,
             amplitude_err=amp_e,
             x0_err=x0_e, y0_err=y0_e,
             sigma_x_err=sx_e, sigma_y_err=sy_e,
             fwhm_major_err=fwhm_major_err, fwhm_minor_err=fwhm_minor_err,
             theta_err=th_e,
             peak=peak,
+            # pixel-space mirrors
+            x0_pixel=x0_pixel,
+            y0_pixel=y0_pixel,
+            sigma_x_pixel=sigma_x_pixel,
+            sigma_y_pixel=sigma_y_pixel,
+            theta_pixel=theta_pixel,
+            fwhm_major_pixel=fwhm_major_pixel, fwhm_minor_pixel=fwhm_minor_pixel,
             offset=offset, offset_err=offset_e,
             success=success, variance_explained=varexp,
         )
@@ -1012,72 +1131,68 @@ def fit_multi_gaussian2d(
     sigma_major = xr.where(_sx_ge_sy, ds["sigma_x"], ds["sigma_y"])
     sigma_minor = xr.where(_sx_ge_sy, ds["sigma_y"], ds["sigma_x"])
 
-    # --- annotate theta convention so downstream tools know how to plot it ---
+    # --- record only axes handedness; publish both angle conventions explicitly ---
     conv = "pa" if want_pa else "math"
-    ds.attrs["theta_convention"] = conv                  # dataset-level flag
     ds.attrs["axes_handedness"] = "left" if is_left_handed else "right"
-    ds.attrs["angle_input"] = str(angle)                 # what the caller asked for
     if "theta" in ds:
         ds["theta"].attrs["convention"] = conv
     if "theta_err" in ds:
         ds["theta_err"].attrs["convention"] = conv
+    # Add explicit angular units to all theta-related outputs
+    for _name in ("theta", "theta_err", "theta_math", "theta_pa", "theta_pixel"):
+        if _name in ds:
+            ds[_name].attrs["units"] = "rad"
 
     if return_residual:
         ds["residual"] = residual
     if return_model:
         ds["model"] = model
 
-    # 2c) Report theta in requested convention
-    if want_pa:
-        # th is math-angle in index basis → convert to PA
-        th_vals = _theta_math_to_pa(ds["theta"].values, sx_sign, sy_sign)
-        ds["theta"] = xr.DataArray(th_vals, dims=ds["theta"].dims, coords=ds["theta"].coords)
-        # same for theta_err if you want to keep it as angular uncertainty in PA;
-        # small-angle approx is fine: dPA ≈ dθ
-        # (leave as-is to avoid nonlinear propagation)
-
-    # (world coords logic unchanged)
+    # world coord exposure adjusted: alias if already in world, otherwise interp from pixels.
     if (dim_x in da_tr.coords) and (dim_y in da_tr.coords):
         cx = np.asarray(da_tr.coords[dim_x].values)
         cy = np.asarray(da_tr.coords[dim_y].values)
+        if world_mode:
+            # Already fitted in world coords → x0/y0 are world; expose direct aliases.
+            ds["x_world"] = ds["x0"]
+            ds["y_world"] = ds["y0"]
+        else:
+            def _prep(coord: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+                coord = np.asarray(coord)
+                if coord.ndim != 1 or coord.size == 0 or not np.all(np.isfinite(coord)):
+                    return None, None
+                if coord.size >= 2 and coord[1] < coord[0]:  # descending → reverse for interp
+                    idx = np.arange(coord.size - 1, -1, -1, dtype=float)
+                    return idx, coord[::-1]
+                if not np.all(np.diff(coord) > 0):
+                    return None, None
+                return np.arange(coord.size, dtype=float), coord
 
-        def _prep(coord: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-            coord = np.asarray(coord)
-            if coord.ndim != 1 or coord.size == 0 or not np.all(np.isfinite(coord)):
-                return None, None
-            if coord.size >= 2 and coord[1] < coord[0]:  # descending → reverse for interp
-                idx = np.arange(coord.size - 1, -1, -1, dtype=float)
-                return idx, coord[::-1]
-            if not np.all(np.diff(coord) > 0):
-                return None, None
-            return np.arange(coord.size, dtype=float), coord
+            idx_x, val_x = _prep(cx)
+            idx_y, val_y = _prep(cy)
+            if idx_x is not None and idx_y is not None:
+                def _interp_x(v: np.ndarray) -> np.ndarray:
+                    return np.interp(v, idx_x, val_x)
 
-        idx_x, val_x = _prep(cx)
-        idx_y, val_y = _prep(cy)
-        if idx_x is not None and idx_y is not None:
-            def _interp_x(v: np.ndarray) -> np.ndarray:
-                return np.interp(v, idx_x, val_x)
+                def _interp_y(v: np.ndarray) -> np.ndarray:
+                    return np.interp(v, idx_y, val_y)
 
-            def _interp_y(v: np.ndarray) -> np.ndarray:
-                return np.interp(v, idx_y, val_y)
-
-            ds["x_world"] = xr.apply_ufunc(
-                _interp_x, ds["x0"],
-                input_core_dims=[["component"]],
-                output_core_dims=[["component"]],
-                vectorize=True,
-                dask="parallelized",
-                output_dtypes=[float],
-            )
-            ds["y_world"] = xr.apply_ufunc(
-                _interp_y, ds["y0"],
-                input_core_dims=[["component"]],
-                output_core_dims=[["component"]],
-                vectorize=True,
-                dask="parallelized",
-                output_dtypes=[float],
-            )
-
+                ds["x_world"] = xr.apply_ufunc(
+                    _interp_x, ds["x0"],
+                    input_core_dims=[["component"]],
+                    output_core_dims=[["component"]],
+                    vectorize=True,
+                    dask="parallelized",
+                    output_dtypes=[float],
+                )
+                ds["y_world"] = xr.apply_ufunc(
+                    _interp_y, ds["y0"],
+                    input_core_dims=[["component"]],
+                    output_core_dims=[["component"]],
+                    vectorize=True,
+                    dask="parallelized",
+                    output_dtypes=[float],
+                )
     return ds
 
 def plot_components(
