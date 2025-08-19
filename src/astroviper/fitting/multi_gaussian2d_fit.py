@@ -150,18 +150,31 @@ def _greedy_peak_seeds(z: np.ndarray, n: int, excl_radius: int = 5) -> List[Tupl
     return seeds
 
 
-def _default_bounds_multi(shape: Tuple[int, int], n: int) -> Tuple[np.ndarray, np.ndarray]:
+def _default_bounds_multi(
+    shape: Tuple[int, int],
+    n: int,
+    x_rng: Optional[Tuple[float, float]] = None,
+    y_rng: Optional[Tuple[float, float]] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Default bounds vectors for multi-Gaussian parameters (packed order).
+    If x_rng/y_rng are provided (world coords), use them for x0/y0 bounds; otherwise
+    fall back to pixel-index bounds derived from shape.
     """
     ny, nx = shape
     # offset
     lb = [ -np.inf ]
     ub = [  np.inf ]
     # components
+    xlo, xhi = ((-1.0, nx + 1.0) if x_rng is None else (float(x_rng[0]), float(x_rng[1])))
+    ylo, yhi = ((-1.0, ny + 1.0) if y_rng is None else (float(y_rng[0]), float(y_rng[1])))
+    sx_max = max((xhi - xlo), 2.0); sy_max = max((yhi - ylo), 2.0)
+
     for _ in range(n):
-        lb.extend([0.0, -1.0, -1.0, 0.5, 0.5, -np.pi/2])          # amp, x, y, sx, sy, th
-        ub.extend([np.inf, nx + 1.0, ny + 1.0, max(nx, 2.0), max(ny, 2.0),  np.pi/2])
+        # amp,   x0,   y0,     sx,     sy,   theta
+        lb.extend([0.0, xlo,  ylo,   1e-3,   1e-3, -np.pi/2])
+        ub.extend([np.inf, xhi, yhi, sx_max, sy_max,  np.pi/2])
+
     return np.asarray(lb, dtype=float), np.asarray(ub, dtype=float)
 
 def _extract_params_from_comp_dicts(comp_list, n):
@@ -364,6 +377,9 @@ def _fit_multi_plane_numpy(
     initial_guesses: Optional[Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]],
     bounds: Optional[Dict[str, Union[Tuple[float,float], Sequence[Tuple[float,float]]]]],
     max_nfev: int,
+    *,
+    x1d: Optional[np.ndarray] = None,
+    y1d: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Fit N Gaussians + shared offset to a single 2-D plane.
@@ -381,7 +397,19 @@ def _fit_multi_plane_numpy(
         # cannot cover using public API, defensive coding
         raise ValueError("Internal: _fit_multi_plane_numpy expects a 2-D array.") # pragma: no cover
     ny, nx = z2d.shape
-    Y, X = np.mgrid[0:ny, 0:nx]
+    if x1d is None or y1d is None:
+        # pixel-index grid
+        Y, X = np.mgrid[0:ny, 0:nx]
+        x_rng = None
+        y_rng = None
+    else:
+        if y1d.shape[0] != ny or x1d.shape[0] != nx:
+            raise ValueError("Length of y1d/x1d must match z2d shape.")
+        # world grid
+        Y = np.broadcast_to(y1d[:, None], (ny, nx))
+        X = np.broadcast_to(x1d[None, :], (ny, nx))
+        x_rng = (float(np.min(x1d)), float(np.max(x1d)))
+        y_rng = (float(np.min(y1d)), float(np.max(y1d)))
 
     # thresholds
     mask = np.ones_like(z2d, dtype=bool)
@@ -395,7 +423,7 @@ def _fit_multi_plane_numpy(
 
     # seeds & bounds
     p0 = _normalize_initial_guesses(z2d, n_components, initial_guesses, min_threshold, max_threshold)
-    lb0, ub0 = _default_bounds_multi((ny, nx), n_components)
+    lb0, ub0 = _default_bounds_multi((ny, nx), n_components, x_rng=x_rng, y_rng=y_rng)
     lb, ub = _merge_bounds_multi(lb0, ub0, bounds, n_components)
 
     # Ensure seeds within bounds
@@ -426,6 +454,8 @@ def _fit_multi_plane_numpy(
 
 def _multi_fit_plane_wrapper(
     z2d: np.ndarray,
+    y1d: np.ndarray,
+    x1d: np.ndarray,
     n_components: int,
     min_threshold: Optional[Number],
     max_threshold: Optional[Number],
@@ -450,10 +480,15 @@ def _multi_fit_plane_wrapper(
         initial_guesses=initial_guesses,
         bounds=bounds,
         max_nfev=max_nfev,
+        x1d=x1d, y1d=y1d,
     )
 
     ny, nx = z2d.shape
-    Y, X = np.mgrid[0:ny, 0:nx]
+    # Y/X constructed identically in _fit_multi_plane_numpy; keep for model/residual paths
+    if y1d.shape[0] != ny or x1d.shape[0] != nx:
+        raise ValueError("Length of y1d/x1d must match z2d shape for world/pixel grids.")
+    Y = np.broadcast_to(y1d[:, None], (ny, nx))
+    X = np.broadcast_to(x1d[None, :], (ny, nx))
 
     success = bool(np.all(np.isfinite(popt)))
     if not success:
@@ -638,6 +673,58 @@ def _convert_init_theta(
     # defensive coding, should not be reached
     return init # pragma: no cover
 
+def _extract_1d_coords_for_fit(
+    original_input: ArrayOrDA,
+    da_tr: xr.DataArray,
+    coord_type: str,
+    coords: Optional[Sequence[np.ndarray]],
+    dim_y: str,
+    dim_x: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Return (y1d, x1d) arrays for model evaluation.
+
+    Behavior:
+    - If input is an xarray.DataArray:
+        * coord_type controls behavior:
+            - "world": use the DataArray's 1-D coords on (dim_y, dim_x)
+            - "pixel": use index grids 0..N-1
+    - If input is a NumPy/Dask array:
+        * coord_type is ignored
+        * if `coords=(x1d, y1d)` is provided, use those (world); otherwise use pixel indices.
+    """
+    ny, nx = int(da_tr.sizes[dim_y]), int(da_tr.sizes[dim_x])
+
+    if isinstance(original_input, xr.DataArray):
+        ctype = (coord_type or "world").lower()
+        if ctype not in ("world", "pixel"):
+            raise ValueError("coord_type must be 'world' or 'pixel' for DataArray inputs")
+        if ctype == "pixel":
+            return np.arange(ny, dtype=float), np.arange(nx, dtype=float)
+        # world coords from the DataArray
+        if (dim_x not in da_tr.coords) or (dim_y not in da_tr.coords):
+            raise ValueError(f"DataArray is missing coords for dims ({dim_y}, {dim_x}) required for world fitting.")
+        x1d = np.asarray(da_tr.coords[dim_x].values)
+        y1d = np.asarray(da_tr.coords[dim_y].values)
+        if x1d.ndim != 1 or y1d.ndim != 1 or x1d.size != nx or y1d.size != ny:
+            raise ValueError("World coords must be 1-D and match the data shape along (y, x).")
+        return y1d.astype(float), x1d.astype(float)
+
+    # NumPy/Dask input: coord_type is ignored; pick by presence of coords
+    if coords is not None:
+        if len(coords) != 2:
+            raise ValueError("coords must be a tuple/list of (x1d, y1d).")
+        x1d, y1d = coords[0], coords[1]
+        x1d = np.asarray(x1d, dtype=float)
+        y1d = np.asarray(y1d, dtype=float)
+        if x1d.ndim != 1 or y1d.ndim != 1 or x1d.size != nx or y1d.size != ny:
+            raise ValueError("coords must be 1-D arrays with lengths matching (nx, ny).")
+        return y1d, x1d
+
+    # Fallback: pixel indices
+    return np.arange(ny, dtype=float), np.arange(nx, dtype=float)
+
+
 # ----------------------- Public API -----------------------
 
 def fit_multi_gaussian2d(
@@ -654,6 +741,8 @@ def fit_multi_gaussian2d(
     return_model: bool = False,
     return_residual: bool = True,
     angle: str = "math",  # NEW: {"math","pa","auto"}
+    coord_type: str = "world",
+    coords: Optional[Sequence[np.ndarray]] = None,
 ) -> xr.Dataset:
     """
     Fit a sum of N rotated 2-D Gaussians (with a shared constant offset) to each plane.
@@ -712,6 +801,11 @@ def fit_multi_gaussian2d(
         • "math": standard math angle (from +x toward +y, CCW) in data axes.
         • "pa": position angle (from +y toward +x).
         • "auto": if axes are left-handed (sign(Δx)·sign(Δy) < 0) treat as PA; otherwise math. Outputs follow the same convention.
+    coord_type: {"world","pixel"}, default "world"
+      Applies only to xarray.DataArray inputs: "world" uses the DataArray's 1-D coords; "pixel" uses index grids.
+      Ignored for NumPy/Dask inputs.
+    coords: tuple[np.ndarray, np.ndarray] | list[np.ndarray] | None
+      For NumPy/Dask inputs only: provide (x1d, y1d) to fit in world coordinates. Ignored for DataArray inputs.
 
     Returns
     -------
@@ -842,6 +936,11 @@ def fit_multi_gaussian2d(
                 b2[k] = v
         bnds = b2
 
+    # -- Build 1-D coordinate arrays for model evaluation --
+    y1d, x1d = _extract_1d_coords_for_fit(data, da_tr, coord_type, coords, dim_y, dim_x)
+    y1d_da = xr.DataArray(y1d, dims=[dim_y])
+    x1d_da = xr.DataArray(x1d, dims=[dim_x])
+
     out_core_dims = (
         [["component"]]*6 + [["component"]]*6 + [["component"]]*3
         + [[] , []] + [[] , []]
@@ -851,7 +950,9 @@ def fit_multi_gaussian2d(
     results = xr.apply_ufunc(
         _multi_fit_plane_wrapper,
         da_tr,
-        input_core_dims=[core],
+        y1d_da,
+        x1d_da,
+        input_core_dims=[core, [dim_y], [dim_x]],
         output_core_dims=out_core_dims,
         vectorize=True,
         dask="parallelized",
