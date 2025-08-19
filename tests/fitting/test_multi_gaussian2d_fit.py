@@ -160,7 +160,6 @@ class TestInputs:
                                   n_components=1, initial_guesses=np.array([[0.8,15,16,3,2,0.1]]))
         assert "x_world" not in ds or "y_world" not in ds
 
-
 # ------------------------- bounds / dims / API validation -------------------------
 
 class TestBoundsDimsAPI:
@@ -710,6 +709,43 @@ class TestNumPyFitting:
         assert abs(th_pa[0] - pa1) < 0.3
         assert abs(th_pa[1] - pa2) < 0.3
 
+    def test_plot_components_uses_model_branch_and_slices_leading_dims(self) -> None:
+        """Cover the `elif "model"` block in plot_components (with slicing over leading dims)."""
+        # Build a simple 3D cube: dims ('time','y','x')
+        ny, nx = 36, 36
+        y, x = np.mgrid[0:ny, 0:nx]
+        amp, x0, y0, sx, sy, th = 0.9, 18.0, 17.0, 3.0, 2.0, 0.0
+        z = amp * np.exp(-((x - x0) ** 2) / (2 * sx ** 2) - ((y - y0) ** 2) / (2 * sy ** 2))
+        base = xr.DataArray(z, dims=("y", "x")).assign_coords(y=np.arange(ny, dtype=float),
+                                                              x=np.arange(nx, dtype=float))
+        cube = xr.concat([base, base + 0.01], dim="time")
+
+        # Initial guesses in FWHM (default): columns [amp, x0, y0, fwhm_major, fwhm_minor, theta]
+        k = 2.0 * np.sqrt(2.0 * np.log(2.0))
+        init = np.array([[0.8, x0, y0, k * sx, k * sy, th]], float)
+
+        # Fit with model only (no residual) → triggers 'elif "model"' path in plot_components
+        ds = fit_multi_gaussian2d(
+            cube,
+            n_components=1,
+            initial_guesses=init,
+            dims=("x", "y"),
+            return_model=True,
+            return_residual=False,
+        )
+
+        # Now plot with an indexer so the code slices model2d along 'time'
+        fig = mg.plot_components(cube, ds, dims=("x", "y"), indexer={"time": 1}, show_residual=True)
+
+        # Basic sanity check and clean up
+        import matplotlib
+        assert isinstance(fig, matplotlib.figure.Figure)
+        try:
+            import matplotlib.pyplot as plt
+            plt.close(fig)
+        except Exception:
+            pass
+
 
 class TestAPIHelpers:
     def test_init_components_array_wrong_shape_raises(self) -> None:
@@ -941,4 +977,42 @@ class TestAPIHelpers:
         da = xr.DataArray(np.zeros((8, 8), float), dims=("y", "x"))
         with pytest.raises(ValueError, match=r"n_components must be >= 1"):
             fit_multi_gaussian2d(da, n_components=0)
+
+    def test_initial_guesses_list_of_dicts_wrong_length_raises(self) -> None:
+        """List[dict] initial_guesses length != n → ValueError (covers the raise)."""
+        ny, nx = 32, 32
+        img = xr.DataArray(np.zeros((ny, nx), float), dims=("y", "x"))
+        # n_components=2 but provide only one dict → triggers the length check
+        init = [
+            {"amp": 1.0, "x0": 10.0, "y0": 11.0, "fwhm_x": 6.0, "fwhm_y": 4.0, "theta": 0.0}
+        ]
+        with pytest.raises(ValueError, match=r"length n=2"):
+            fit_multi_gaussian2d(
+                img,
+                n_components=2,
+                initial_guesses=init,   # top-level list of dicts path
+                return_model=False,
+                return_residual=False,
+            )
+
+    def test_init_array_wrong_shape_hits_conv_arr_early_return_then_raises(self) -> None:
+        """angle='pa' forces init → _convert_init_theta; (n,5) array triggers early return in _conv_arr."""
+        ny, nx = 16, 16
+        img = xr.DataArray(np.zeros((ny, nx), float), dims=("y", "x"))
+
+        # n_components=1 but provide a (1,5) array → missing theta column
+        init_wrong = np.array([[0.9, 8.0, 7.0, 5.0, 4.0]], dtype=float)
+
+        # Public API call; this goes through _convert_init_theta (because angle='pa'),
+        # where _conv_arr sees shape != (n,6) and returns unchanged; later the
+        # normalization step raises on bad shape. Covers the 'return out' line.
+        with pytest.raises(ValueError, match=r"initial_guesses .* got \(1, 5\)"):
+            fit_multi_gaussian2d(
+                img,
+                n_components=1,
+                initial_guesses=init_wrong,
+                angle="pa",            # ensure the _convert_init_theta path is executed
+                return_model=False,
+                return_residual=False,
+            )
 

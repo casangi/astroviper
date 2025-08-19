@@ -33,11 +33,14 @@ def _gauss2d_component(
     c = (st**2) / (2 * sx**2) + (ct**2) / (2 * sy**2)
     return amp * np.exp(-(a * x**2 + 2 * b * x * y + c * y**2))
 
+_SIG2FWHM = 2.0 * np.sqrt(2.0 * np.log(2.0))
+_FWHM2SIG = 1.0 / _SIG2FWHM
 
-def _fwhm_from_sigma(sigma: float) -> float:
-    """Convert sigma to FWHM."""
-    return 2.0 * np.sqrt(2.0 * np.log(2.0)) * sigma
+def _fwhm_from_sigma(sigma):
+    return _SIG2FWHM * np.asarray(sigma)
 
+def _sigma_from_fwhm(fwhm):
+    return _FWHM2SIG * np.asarray(fwhm)
 
 # ----------------------- Parameter packing helpers -----------------------
 
@@ -161,6 +164,35 @@ def _default_bounds_multi(shape: Tuple[int, int], n: int) -> Tuple[np.ndarray, n
         ub.extend([np.inf, nx + 1.0, ny + 1.0, max(nx, 2.0), max(ny, 2.0),  np.pi/2])
     return np.asarray(lb, dtype=float), np.asarray(ub, dtype=float)
 
+def _extract_params_from_comp_dicts(comp_list, n):
+    """Parse a list of component dicts into arrays (amp, x0, y0, sx, sy, th).
+    Accepts keys: amp|amplitude, x0, y0, sigma_x|sx|fwhm_major, sigma_y|sy|fwhm_minor, theta.
+    Converts FWHM inputs to σ using _FWHM2SIG.
+    Raises KeyError if required keys are missing.
+    """
+    amps = np.empty(n); x0 = np.empty(n); y0 = np.empty(n)
+    sx = np.empty(n);  sy = np.empty(n);  th = np.empty(n)
+    for i, comp in enumerate(comp_list):
+        amps[i] = float(comp["amp"] if "amp" in comp else comp["amplitude"])
+        x0[i]   = float(comp["x0"])
+        y0[i]   = float(comp["y0"])
+        sx_val  = comp.get("sigma_x", comp.get("sx"))
+        sy_val  = comp.get("sigma_y", comp.get("sy"))
+        if sx_val is None:
+            fx = comp.get("fwhm_major")
+            if fx is None:
+                raise KeyError("component missing sigma_x/sx (or fwhm_major)")
+            sx_val = float(fx) * _FWHM2SIG
+        if sy_val is None:
+            fy = comp.get("fwhm_minor")
+            if fy is None:
+                raise KeyError("component missing sigma_y/sy (or fwhm_minor)")
+            sy_val = float(fy) * _FWHM2SIG
+        sx[i]   = float(sx_val)
+        sy[i]   = float(sy_val)
+        th[i]   = float(comp.get("theta", 0.0))
+    return amps, x0, y0, sx, sy, th
+
 
 def _normalize_initial_guesses(
     z2d: np.ndarray,
@@ -204,19 +236,18 @@ def _normalize_initial_guesses(
         th = np.zeros(n, dtype=float)
         return _pack_params(med, amps, x0, y0, sx, sy, th)
 
+    # Allow a single top-level dict when n == 1 (wrap to list-of-dicts)
+    from collections.abc import Mapping
+    if isinstance(init, Mapping) and ("components" not in init and "offset" not in init):
+        if n != 1:
+            raise ValueError("Single-dict initial_guesses is only valid when n_components == 1.")
+        init = [init]
+
     # NEW: top-level list/tuple of dicts (matches docstring)
     if isinstance(init, (list, tuple)) and len(init) > 0 and isinstance(init[0], dict):
         if len(init) != n:
             raise ValueError(f"initial_guesses list must have length n={n}")
-        amps = np.empty(n); x0 = np.empty(n); y0 = np.empty(n)
-        sx = np.empty(n);  sy = np.empty(n);  th = np.empty(n)
-        for i, comp in enumerate(init):
-            amps[i] = float(comp["amp"] if "amp" in comp else comp["amplitude"])
-            x0[i]  = float(comp["x0"])
-            y0[i]  = float(comp["y0"])
-            sx[i]  = float(comp.get("sigma_x", comp.get("sx")))
-            sy[i]  = float(comp.get("sigma_y", comp.get("sy")))
-            th[i]  = float(comp.get("theta", 0.0))
+        amps, x0, y0, sx, sy, th = _extract_params_from_comp_dicts(init, n)
         return _pack_params(med, amps, x0, y0, sx, sy, th)
 
     # Structured dict form
@@ -247,7 +278,6 @@ def _normalize_initial_guesses(
                 sy[i]  = float(comp.get("sigma_y", comp.get("sy")))
                 th[i]  = float(comp.get("theta", 0.0))
             return _pack_params(offset, amps, x0, y0, sx, sy, th)
-
     # Array/list form (numpy array or list-of-lists)
     arr = np.asarray(init, dtype=float)
     if arr.shape != (n, 6):
@@ -278,7 +308,7 @@ def _merge_bounds_multi(
         if idx_in_comp is None:
             # this should never be reached, so can't be covered
             # but leaving it in for defensive programming
-            return
+            return # pragma: no cover
         if comp_idx is None:
             for i in range(n):
                 j0 = 1 + i*6 + idx_in_comp
@@ -296,8 +326,17 @@ def _merge_bounds_multi(
         "y0": (2, "y0"),
         "sigma_x": (3, "sigma_x"),
         "sigma_y": (4, "sigma_y"),
+        "fwhm_major": (3, "fwhm_major"),
+        "fwhm_minor": (4, "fwhm_minor"),
         "theta": (5, "theta"),
     }
+    # helper: convert FWHM ranges to σ if needed (for this merge routine)
+    def _to_sigma_rng(canon_name: str, rng: Tuple[float, float]) -> Tuple[float, float]:
+        lo, hi = float(rng[0]), float(rng[1])
+        if canon_name in ("fwhm_major", "fwhm_minor"):
+            return lo * _FWHM2SIG, hi * _FWHM2SIG
+        return lo, hi
+
     for key, val in user_bounds.items():
         if key not in mapping:
             continue
@@ -306,12 +345,12 @@ def _merge_bounds_multi(
             _set_range("offset", None, tuple(val))  # type: ignore[arg-type]
             continue
         if isinstance(val, (list, tuple)) and len(val) == 2 and not isinstance(val[0], (list, tuple)):
-            _set_range(canon, idx_in_comp, (val[0], val[1]))  # same for all comps
+            _set_range(canon, idx_in_comp, _to_sigma_rng(canon, (val[0], val[1])))  # same for all comps
         else:
             if len(val) != n:
                 raise ValueError(f"bounds[{key!r}] length must be n={n}")
             for i, rng in enumerate(val):  # type: ignore[assignment]
-                _set_range(canon, idx_in_comp, tuple(rng), comp_idx=i)  # type: ignore[arg-type]
+                _set_range(canon, idx_in_comp, _to_sigma_rng(canon, tuple(rng)), comp_idx=i)  # type: ignore[arg-type]
     return lb, ub
 
 
@@ -463,7 +502,7 @@ def _multi_fit_plane_wrapper(
         varexp = (1.0 - res / tot) if (np.isfinite(tot) and tot > 0) else np.nan
     else:
         # not coverable from public API call, defensive coding
-        varexp = np.nan
+        varexp = np.nan # pragma: no cover
 
     # Offset uncertainty is the first element of perr
     offset_e = float(perr[0])
@@ -610,6 +649,7 @@ def fit_multi_gaussian2d(
     max_threshold: Optional[Number] = None,
     initial_guesses: Optional[Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]] = None,
     bounds: Optional[Dict[str, Union[Tuple[float, float], Sequence[Tuple[float, float]]]]] = None,
+    initial_is_fwhm: bool = True,
     max_nfev: int = 20000,
     return_model: bool = False,
     return_residual: bool = True,
@@ -641,19 +681,23 @@ def fit_multi_gaussian2d(
 
     max_threshold: float | None
       Inclusive upper threshold; pixels with values > max_threshold are ignored during the fit.
-
     initial_guesses: numpy.ndarray[(N,6)] | list[dict] | dict | None
-      Initial parameter guesses for the optimizer. Forms:
-        • array shape (N,6): columns [amp, x0, y0, sigma_x, sigma_y, theta].
-        • list of N dicts with keys {"amp"/"amplitude","x0","y0","sigma_x"/"sx","sigma_y"/"sy","theta"}.
+    initial_guesses: numpy.ndarray[(N,6)] | list[dict] | dict | None
+      Initial guesses. **Interpreted in FWHM units** for widths by default:
+        • array shape (N,6): columns **[amp, x0, y0, fwhm_major, fwhm_minor, theta]**.
+        • list of N dicts: keys {"amp"/"amplitude","x0","y0","fwhm_major"|"sigma_x"|"sx","fwhm_minor"|"sigma_y"|"sy","theta"}.
         • dict: {"offset": float (optional), "components": (N,6) array OR list[dict] as above}.
       If omitted, peaks are auto-seeded and offset defaults to the median of threshold-masked data.
       Note: θ in `initial_guesses` is interpreted per `angle`.
-
-    bounds: dict[str, tuple[float, float] | Sequence[tuple[float, float]]] | None
-      Bounds to constrain parameters. Keys may include {"offset","amp"/"amplitude","x0","y0","sigma_x","sigma_y","theta"}.
+      FWHM are converted to σ internally for the optimizer. Set ``initial_is_fwhm=False`` only if
+      your array-form guesses use σ columns instead.
+    bounds: dict[str, (float,float) | Sequence[(float,float)]] | None
+      Bounds to constrain parameters. Keys may include {"offset","amp"/"amplitude","x0","y0","fwhm_major","fwhm_minor","theta"}.
       Each value is either a single (low, high) tuple applied to all components, or a length-N sequence of (low, high) tuples for per-component bounds. To **fix** a parameter, set low == high.
-
+    initial_is_fwhm: bool
+     Default **True**. When ``True`` and ``initial_guesses`` is an array of shape (N,6), columns 3–4
+     are treated as **FWHM** and converted to σ internally. Set to ``False`` only if your array guesses
+     are already in σ. (Dict/list forms can use ``fwhm_major/fwhm_minor`` keys directly.)
     max_nfev: int
       Maximum function evaluations for the optimizer. Default: 20000.
 
@@ -742,9 +786,32 @@ def fit_multi_gaussian2d(
     sy_sign = _axis_sign(cy)
     is_left_handed = (sx_sign * sy_sign) < 0.0
 
-    # 2b) Convert initial theta to internal math if needed
+    # Convert initial guesses: (a) optional FWHM→σ, (b) theta PA→math if requested.
+    ig = initial_guesses
+    if ig is not None and initial_is_fwhm and isinstance(ig, np.ndarray) and ig.shape == (int(n_components), 6):
+        # columns: [amp, x0, y0, fwhm_major, fwhm_minor, theta]  → convert to σ for the fitter
+        ig = ig.copy()
+        ig[:, 3] = _sigma_from_fwhm(ig[:, 3])
+        ig[:, 4] = _sigma_from_fwhm(ig[:, 4])
+    # dict/list forms: allow fwhm_major/fwhm_minor keys by mapping to sigma_x/sigma_y
+    if isinstance(ig, dict) and "components" in ig and isinstance(ig["components"], np.ndarray):
+        arr = np.asarray(ig["components"], dtype=float)
+        if arr.shape == (int(n_components), 6) and initial_is_fwhm:
+            arr = arr.copy()
+            arr[:, 3] = _sigma_from_fwhm(arr[:, 3])
+            arr[:, 4] = _sigma_from_fwhm(arr[:, 4])
+            ig = dict(ig); ig["components"] = arr
+    elif isinstance(ig, (list, tuple)) and ig and isinstance(ig[0], dict):
+        mapped: List[Dict[str, Any]] = []
+        for d in ig:
+            dd = dict(d)
+            if "fwhm_major" in dd: dd["sigma_x"] = float(_sigma_from_fwhm(dd.pop("fwhm_major")))
+            if "fwhm_minor" in dd: dd["sigma_y"] = float(_sigma_from_fwhm(dd.pop("fwhm_minor")))
+            mapped.append(dd)
+        ig = mapped
+
     want_pa = (angle == "pa") or (angle == "auto" and is_left_handed)
-    init_for_fit = _convert_init_theta(initial_guesses, to_math=want_pa, sx=sx_sign, sy=sy_sign, n=int(n_components))
+    init_for_fit = _convert_init_theta(ig, to_math=want_pa, sx=sx_sign, sy=sy_sign, n=int(n_components))
 
     out_dtypes = (
         [np.float64] * 6      # params per component
@@ -754,6 +821,27 @@ def fit_multi_gaussian2d(
         + [np.bool_, np.float64]    # success, variance_explained
         + [np.float64, np.float64]  # residual2d, model2d
     )
+    # Map FWHM bounds to σ if provided (top-level convenience; supports legacy and new names)
+    bnds = bounds
+    if bounds is not None:
+        conv = _FWHM2SIG
+        b2: Dict[str, Any] = {}
+        for k, v in bounds.items():
+            if k in ("fwhm_major", "fwhm_minor"):
+                # map directly to the underlying σ slots (3→sigma_x, 4→sigma_y).
+                # For major/minor we follow the internal slot convention used during fitting.
+                target = (
+                    "sigma_x" if k in ("fwhm_major") else "sigma_y"
+                )
+                if isinstance(v, (list, tuple)) and v and isinstance(v[0], (list, tuple)):
+                    b2[target] = [(float(lo) * conv, float(hi) * conv) for (lo, hi) in v]  # per-component
+                else:
+                    lo, hi = v  # type: ignore[misc]
+                    b2[target] = (float(lo) * conv, float(hi) * conv)
+            else:
+                b2[k] = v
+        bnds = b2
+
     out_core_dims = (
         [["component"]]*6 + [["component"]]*6 + [["component"]]*3
         + [[] , []] + [[] , []]
@@ -773,8 +861,8 @@ def fit_multi_gaussian2d(
             n_components=int(n_components),
             min_threshold=min_threshold,
             max_threshold=max_threshold,
-            initial_guesses=init_for_fit,  # NOTE: pre-converted for angle
-            bounds=bounds,
+            initial_guesses=init_for_fit,  # NOTE: pre-converted for angle, widths are σ
+            bounds=bnds,
             max_nfev=int(max_nfev),
             return_model=bool(return_model),
             return_residual=bool(return_residual),
@@ -788,22 +876,40 @@ def fit_multi_gaussian2d(
      success, varexp,
      residual, model) = results
 
+    # Convert internal σ → public FWHM along principal axes; also provide major/minor & errs.
+    # Use DA math to preserve dims/coords.
+    _fx = sx * _SIG2FWHM
+    _fy = sy * _SIG2FWHM
+    _fxe = sx_e * _SIG2FWHM
+    _fye = sy_e * _SIG2FWHM
+    fwhm_major = xr.apply_ufunc(np.maximum, _fx, _fy, dask="parallelized")
+    fwhm_minor = xr.apply_ufunc(np.minimum, _fx, _fy, dask="parallelized")
+    # match errs to whichever axis is major/minor per-component
+    _is_fx_major = xr.apply_ufunc(np.greater_equal, _fx, _fy, dask="parallelized")
+    fwhm_major_err = xr.where(_is_fx_major, _fxe, _fye)
+    fwhm_minor_err = xr.where(_is_fx_major, _fye, _fxe)
+
     ds = xr.Dataset(
         data_vars=dict(
             amplitude=amp,
             x0=x0, y0=y0,
+            fwhm_major=fwhm_major, fwhm_minor=fwhm_minor,
             sigma_x=sx, sigma_y=sy,
             theta=th,  # will be converted to PA if requested below
             amplitude_err=amp_e,
             x0_err=x0_e, y0_err=y0_e,
             sigma_x_err=sx_e, sigma_y_err=sy_e,
+            fwhm_major_err=fwhm_major_err, fwhm_minor_err=fwhm_minor_err,
             theta_err=th_e,
-            fwhm_major=fwhm_maj, fwhm_minor=fwhm_min,
             peak=peak,
             offset=offset, offset_err=offset_e,
             success=success, variance_explained=varexp,
         )
     )
+    # Principal-axis sigmas (unsorted) → derive explicit major/minor in σ (Dask-safe)
+    _sx_ge_sy = ds["sigma_x"] >= ds["sigma_y"]
+    sigma_major = xr.where(_sx_ge_sy, ds["sigma_x"], ds["sigma_y"])
+    sigma_minor = xr.where(_sx_ge_sy, ds["sigma_y"], ds["sigma_x"])
 
     # --- annotate theta convention so downstream tools know how to plot it ---
     conv = "pa" if want_pa else "math"
@@ -964,11 +1070,12 @@ def plot_components(
             raise KeyError(f"result missing '{name}'")
         return res_plane[name]
 
-    x0 = _get("x0").values
-    y0 = _get("y0").values
-    sx = _get("sigma_x").values
-    sy = _get("sigma_y").values
-    th = _get("theta").values  # convention specified by `angle` arg
+    # Ensure arrays even if a single component (scalar after isel)
+    x0 = np.atleast_1d(_get("x0").values)
+    y0 = np.atleast_1d(_get("y0").values)
+    sx = np.atleast_1d(_get("sigma_x").values)
+    sy = np.atleast_1d(_get("sigma_y").values)
+    th = np.atleast_1d(_get("theta").values)  # convention specified by `angle` arg
 
     # -- axis handedness from coords (for PA<->math conversion) --
     cx = np.asarray(data2d.coords[dim_x].values) if dim_x in data2d.coords else None
@@ -985,12 +1092,13 @@ def plot_components(
     ds_is_pa = (theta_conv == "pa") or (theta_conv == "auto" and left_handed)
 
     theta_plot = _theta_pa_to_math(th, sx_sign, sy_sign) if ds_is_pa else np.asarray(th, dtype=float)
-    theta_deg = np.degrees(theta_plot)
+    theta_deg = np.atleast_1d(np.degrees(theta_plot))
 
     # -- size scale: 1σ or FWHM --
     scale = 2.3548200450309493 if fwhm else 1.0
-    width = 2.0 * scale * sx
-    height = 2.0 * scale * sy
+
+    width = np.atleast_1d(2.0 * scale * sx)
+    height = np.atleast_1d(2.0 * scale * sy)
 
     # -- choose whether we can show residuals --
     show_resid_panel = bool(show_residual and ("residual" in res_plane or "model" in res_plane))
