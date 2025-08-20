@@ -783,7 +783,6 @@ def fit_multi_gaussian2d(
     max_threshold: float | None
       Inclusive upper threshold; pixels with values > max_threshold are ignored during the fit.
     initial_guesses: numpy.ndarray[(N,6)] | list[dict] | dict | None
-    initial_guesses: numpy.ndarray[(N,6)] | list[dict] | dict | None
       Initial guesses. **Interpreted in FWHM units** for widths by default:
         • array shape (N,6): columns **[amp, x0, y0, fwhm_major, fwhm_minor, theta]**.
         • list of N dicts: keys {"amp"/"amplitude","x0","y0","fwhm_major"|"sigma_x"|"sx","fwhm_minor"|"sigma_y"|"sy","theta"}.
@@ -1264,17 +1263,7 @@ def fit_multi_gaussian2d(
     ds = xr.Dataset(
         data_vars=dict(
             amplitude=amp,
-            x0=x0, y0=y0,
-            sigma_major=sigma_major, sigma_minor=sigma_minor,
-            fwhm_major=fwhm_major, fwhm_minor=fwhm_minor,
-            theta_math=theta_math,
-            theta_pa=theta_pa,
-            theta=th_public,
             amplitude_err=amp_e,
-            x0_err=x0_e, y0_err=y0_e,
-            sigma_major_err=sigma_major_err, sigma_minor_err=sigma_minor_err,
-            fwhm_major_err=fwhm_major_err, fwhm_minor_err=fwhm_minor_err,
-            theta_err=th_e,
             peak=peak,
             # pixel-space mirrors
             x0_pixel=x0_pixel,
@@ -1300,12 +1289,8 @@ def fit_multi_gaussian2d(
     # --- record only axes handedness; publish both angle conventions explicitly ---
     conv = "pa" if want_pa else "math"
     ds.attrs["axes_handedness"] = "left" if is_left_handed else "right"
-    if "theta" in ds:
-        ds["theta"].attrs["convention"] = conv
-    if "theta_err" in ds:
-        ds["theta_err"].attrs["convention"] = conv
     # Add explicit angular units to all theta-related outputs
-    for _name in ("theta", "theta_err", "theta_math", "theta_pa", "theta_pixel"):
+    for _name in ("theta_pixel",):
         if _name in ds:
             ds[_name].attrs["units"] = "rad"
 
@@ -1320,11 +1305,11 @@ def fit_multi_gaussian2d(
         cy = np.asarray(da_tr.coords[dim_y].values)
         if world_mode:
             # Already fitted in world coords → x0/y0 are world; expose direct aliases.
-            ds["x0_world"] = ds["x0"]
-            ds["y0_world"] = ds["y0"]
+            ds["x0_world"] = x0
+            ds["y0_world"] = y0
             # Uncertainties are the same coordinate system → direct aliases
-            ds["x0_world_err"] = ds["x0_err"]
-            ds["y0_world_err"] = ds["y0_err"]
+            ds["x0_world_err"] = x0_e
+            ds["y0_world_err"] = y0_e
             # Self-documenting attrs
             ds["x0_world"].attrs["description"] = "Component center x in world coordinates."
             ds["y0_world"].attrs["description"] = "Component center y in world coordinates."
@@ -1499,14 +1484,11 @@ def fit_multi_gaussian2d(
     ds.attrs["param"] = _param
     ds.attrs["package"] = _pkg
     ds.attrs["version"] = _ver
+    ds.attrs["fit_native_frame"] = "world" if world_mode else "pixel"
 
     # --- Self-documenting variable metadata ----------------------------------
     _dv_docs = {
        # centers
-        "x0": "Gaussian center along x in the fit coordinate system (world if world-mode, else pixel). See x0_pixel for explicit pixel index.",
-        "y0": "Gaussian center along y in the fit coordinate system (world if world-mode, else pixel). See y0_pixel for explicit pixel index.",
-        "x0_err": "1σ uncertainty of x0 (same units as x0).",
-        "y0_err": "1σ uncertainty of y0 (same units as y0).",
         "x0_pixel": "Gaussian center x-coordinate in pixel indices (0-based), derived from world coords if necessary.",
         "y0_pixel": "Gaussian center y-coordinate in pixel indices (0-based), derived from world coords if necessary.",
         "x0_pixel_err": "1σ uncertainty of x0_pixel (native if pixel fit; world fit propagated via local pixel scale).",
@@ -1517,10 +1499,6 @@ def fit_multi_gaussian2d(
         "y0_world_err": "1σ uncertainty of y0_world (direct if world fit; else via interpolation/pixel-scale propagation).",
 
         # scales (sigma = standard deviation of the 1-D Gaussian along ellipse axes before FWHM conversion)
-        "sigma_major": "Principal-axis 1σ (major) in the native fit frame (pixel if pixel-fit; world if world-fit).",
-        "sigma_minor": "Principal-axis 1σ (minor) in the native fit frame (pixel if pixel-fit; world if world-fit).",
-        "sigma_major_err": "1σ uncertainty of sigma_major in the native fit frame.",
-        "sigma_minor_err": "1σ uncertainty of sigma_minor in the native fit frame.",
         "sigma_major_pixel": "Gaussian 1σ scale along the major principal axis in pixel units (after world→pixel conversion).",
         "sigma_minor_pixel": "Gaussian 1σ scale along the minor principal axis in pixel units (after world→pixel conversion).",
         "sigma_major_pixel_err": "1σ uncertainty in sigma_major_pixel in pixel units (after world→pixel conversion).",
@@ -1531,10 +1509,6 @@ def fit_multi_gaussian2d(
          "sigma_minor_world_err": "1σ uncertainty of sigma_minor_world (native if world fit; else propagated).",
 
         # FWHM (2*sqrt(2*ln 2) * sigma)
-        "fwhm_major": "Full-width at half-maximum along the major principal axis in fit coordinates (= 2*sqrt(2*ln2) * max(sigma_x, sigma_y)).",
-        "fwhm_minor": "Full-width at half-maximum along the minor principal axis in fit coordinates (= 2*sqrt(2*ln2) * min(sigma_x, sigma_y)).",
-        "fwhm_major_err": "1σ uncertainty of FWHM along the major axis (propagated from sigma).",
-        "fwhm_minor_err": "1σ uncertainty of FWHM along the minor axis (propagated from sigma).",
 
         "fwhm_major_pixel": "Full-width at half-maximum along the major principal axis in pixel coordinates.",
         "fwhm_minor_pixel": "Full-width at half-maximum along the minor principal axis in pixel coordinates.",
@@ -1546,11 +1520,7 @@ def fit_multi_gaussian2d(
         "fwhm_minor_world_err": "1σ uncertainty of world-frame FWHM(minor) (native if world fit; else propagated).",
 
         # angles
-        "theta": "Orientation angle of the ellipse; legacy alias whose convention is indicated by variable attr 'convention'. Prefer theta_math/theta_pa.",
-        "theta_math": "Orientation angle θ (radians) in math convention: measured counterclockwise from +x; axial (wrapped to (-π/2, π/2]).",
-        "theta_pa": "Position angle (radians) in PA convention: measured from +y toward +x (north through east); axial (wrapped to (-π/2, π/2]).",
         "theta_pixel": "Ellipse orientation in pixel coordinates, reported in the same convention as 'theta'.",
-        "theta_err": "1σ uncertainty of the orientation angle (radians); identical for math and PA conventions away from wrapping boundaries.",
 
         # amplitudes / background
         "amplitude": "Component amplitude (peak height above offset) in data units.",
@@ -1571,11 +1541,306 @@ def fit_multi_gaussian2d(
     for _name, _desc in _dv_docs.items():
         if _name in ds:
             ds[_name].attrs.setdefault("description", _desc)
-        if _name.startswith["theta"]:
+        if _name.startswith("theta"):
             # Ensure angular units are tagged consistently
             ds[_name].attrs["units"] = "rad"
-
+    # Add an explanatory note for the per-plane explained-variance metric.
+    # This text is intentionally verbose to make the DV self-documenting.
+    if "variance_explained" in ds:
+        ds["variance_explained"].attrs["note"] = (
+            "R²-style fit quality for each 2-D image plane (y×x). "
+            "Measures how much of the pixel-to-pixel variance is explained by the fitted model.\n\n"
+            "Definitions (per plane): let Z be the data, \\hat{Z} the fitted model, "
+            "R = Z - \\hat{Z} the residuals, and 'offset' the robust baseline (median) used by the fitter.\n\n"
+            "Explained variance fraction:\n"
+            "    EVF = 1 - \\sum (Z - \\hat{Z})^2 \\/ \\sum (Z - \\text{offset})^2\n"
+            "Equivalently:\n"
+            "    EVF = 1 - \\mathrm{Var}(R) \\/ \\mathrm{Var}(Z - \\text{offset})\n\n"
+            "Range: clipped to [0, 1]. 1.0 = perfect fit; 0.0 ≈ no improvement over a flat offset. "
+            "If the denominator is near zero (nearly flat plane), the metric can be unstable.\n\n"
+            "Quick gut-check scale (per plane):"
+            "\n\n"
+            "Quick gut-check scale (per plane):\n"
+            "  ≥0.9 — excellent; model captures most structure\n"
+            "  0.6–0.9 — usable but imperfect\n"
+            "  0.2–0.6 — poor to fair\n"
+            "  ≈0.0 — no better than a flat background\n\n"
+            "For example, a value of 0.2 might indicate:\n"
+            "  • Source shape not well modeled by the chosen number of 2-D Gaussians\n"
+            "  • Centers/widths/angle off (bad seeds or tight bounds)\n"
+            "  • Background (offset) misestimated\n"
+            "  • Coordinates/scales mismatched (pixel vs world, anisotropic scaling)\n"
+            "  • Additional structure present (neighbors, wings, gradients)\n\n"
+            "For low values, some additional ideas:\n"
+            "  • Inspect residuals — should look noise-like if the model is right\n"
+            "  • Loosen/improve seeds or bounds; try adding a component\n"
+            "  • Check background handling\n"
+            "  • Verify frame/scale (pixel vs world, local pixel size)\n"
+            "  • If noise is high, a low value can be expected — consider SNR or weighting in the fit"
+        )
     return ds
+
+# TODO: move to a plotting module
+
+import numpy as np
+from matplotlib.patches import Ellipse
+
+
+# ---- plotting helpers --------------------------------------------------------
+
+def overlay_fit_components(
+    ax,
+    fit,
+    frame: str,
+    metric: str,
+    n_sigma: float,
+    angle: str,
+    edgecolor="k",
+    lw: float = 1.5,
+    alpha: float = 0.9,
+    label: bool = True,
+):
+    """
+    Draw fitted 2D-Gaussian components as ellipses on a Matplotlib Axes.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Target axes to draw on.
+    fit : Mapping-like (e.g., xarray.Dataset or dict)
+        Result object holding per-component parameters. Fields are probed
+        robustly with fallbacks; typical names include:
+          - centers:  x0_{pixel|world}, y0_{pixel|world}, x0, y0
+          - sizes:    sigma_{pixel|world}_{x|y}, sigma_{pixel|world}_{major|minor}
+                      fwhm_{pixel|world}_{x|y},  fwhm_{pixel|world}_{major|minor}
+                      (generic fallbacks without frame prefix are also tried)
+          - angles:   theta_{pixel|world}_{math|pa}, theta_{pixel|world}, theta
+    frame : {"pixel","world"}
+        Which frame to prefer when looking up centers/sizes/angles.
+    metric : {"sigma","fwhm"}
+        Size metric to use for ellipse sizing. If the requested metric is
+        unavailable, a conversion is applied from the available one.
+    n_sigma : float
+        Multiplicative scale applied to σ (or to FWHM after conversion) before
+        converting to ellipse half-width/half-height.
+        Final ellipse *width/height* are 2 * (scaled radii).
+    angle : {"math","pa","auto"}
+        Preferred angle convention. "pa" means position angle (east of north).
+        "math" means the usual mathematical angle (CCW from +x). "auto" tries
+        math then PA. If only PA is available, it is converted to Matplotlib's
+        rotation via: rotation_deg = 90° − PA_deg.
+    edgecolor : any Matplotlib color
+    lw : float
+        Line width.
+    alpha : float
+    label : bool
+        If True, annotate each component with its index at the center.
+
+    Notes
+    -----
+    This implementation is resilient: when requested fields are missing, it
+    falls back to other reasonable options and, as a last resort, draws
+    axis-aligned ellipses (rotation = 0°) instead of raising KeyError.
+    """
+    import warnings
+    from matplotlib.patches import Ellipse as _Ellipse
+
+    res = fit  # local alias
+
+    # ---------- helpers ----------
+    def _present(name: str) -> bool:
+        try:
+            return name in res
+        except Exception:
+            return False
+
+    def _arr(name: str):
+        if not _present(name):
+            return None
+        v = res[name]
+        # xarray.DataArray or numpy/scalar
+        if hasattr(v, "values"):
+            a = np.asarray(v.values, dtype=float)
+        else:
+            a = np.asarray(v, dtype=float)
+        return np.atleast_1d(a)
+
+    def _first(*names):
+        """Return first present array among names, else None."""
+        for n in names:
+            a = _arr(n)
+            if a is not None:
+                return a
+        return None
+
+    def _ncomp_guess() -> int:
+        """Infer number of components from any present per-component field."""
+        candidates = [
+            f"x0_{frame}",
+            f"y0_{frame}",
+            "x0",
+            "y0",
+            f"sigma_{frame}_x",
+            f"sigma_{frame}_y",
+            f"sigma_{frame}_major",
+            f"sigma_{frame}_minor",
+            f"fwhm_{frame}_x",
+            f"fwhm_{frame}_y",
+            f"fwhm_{frame}_major",
+            f"fwhm_{frame}_minor",
+            "amp",
+            "amplitude",
+        ]
+        for k in candidates:
+            a = _arr(k)
+            if a is not None:
+                return int(a.shape[0])
+        return 1
+
+    def _broadcast(a, n):
+        """Broadcast 1-element array to length n."""
+        if a is None:
+            return None
+        if a.size == 1:
+            return np.full((n,), float(a[0]))
+        return a
+
+    # ---- resolve centers (cx, cy) ----
+    cx = _first(f"x0_{frame}", "x0", f"x_{frame}", "x")
+    cy = _first(f"y0_{frame}", "y0", f"y_{frame}", "y")
+
+    n = max(_ncomp_guess(), (1 if cx is None else cx.shape[0]), (1 if cy is None else cy.shape[0]))
+    cx = _broadcast(cx, n) if cx is not None else np.zeros((n,), dtype=float)
+    cy = _broadcast(cy, n) if cy is not None else np.zeros((n,), dtype=float)
+
+    # ---- resolve sizes (semi-axes) with conversions & fallbacks ----
+    # For drawing we want radii (half-sizes in data units). We will compute:
+    #   if metric == "sigma":    rx = n_sigma * sigma_x;    width = 2*rx
+    #   if metric == "fwhm":     rx = 0.5 * n_sigma * fwhm_x; width = 2*rx = n_sigma*fwhm_x
+    FWHM_K = 2.0 * np.sqrt(2.0 * np.log(2.0))  # ≈ 2.35482
+
+    # Try x/y first; if not present, fall back to major/minor (both name orders)
+    sigx = _first(
+        f"sigma_{frame}_x", "sigma_x",
+        f"sigma_{frame}_major", f"sigma_major_{frame}", "sigma_major",
+    )
+    sigy = _first(
+        f"sigma_{frame}_y", "sigma_y",
+        f"sigma_{frame}_minor", f"sigma_minor_{frame}", "sigma_minor",
+    )
+
+    fwx = _first(
+        f"fwhm_{frame}_x", "fwhm_x",
+        f"fwhm_{frame}_major", f"fwhm_major_{frame}", "fwhm_major",
+    )
+    fwy = _first(
+        f"fwhm_{frame}_y", "fwhm_y",
+        f"fwhm_{frame}_minor", f"fwhm_minor_{frame}", "fwhm_minor",
+    )
+
+    # broadcast sizes to n
+    sigx = _broadcast(sigx, n)
+    sigy = _broadcast(sigy, n)
+    fwx = _broadcast(fwx, n)
+    fwy = _broadcast(fwy, n)
+
+    if metric == "sigma":
+        if (sigx is None or sigy is None) and (fwx is not None and fwy is not None):
+            # convert FWHM → sigma
+            sigx = (fwx / FWHM_K) if sigx is None else sigx
+            sigy = (fwy / FWHM_K) if sigy is None else sigy
+        if sigx is None or sigy is None:
+            warnings.warn("Missing size info (sigma/FWHM); drawing components without size.", RuntimeWarning)
+            sigx = np.zeros((n,), dtype=float)
+            sigy = np.zeros((n,), dtype=float)
+        rx = n_sigma * sigx
+        ry = n_sigma * sigy
+    elif metric == "fwhm":
+        if (fwx is None or fwy is None) and (sigx is not None and sigy is not None):
+            # convert sigma → FWHM
+            fwx = (sigx * FWHM_K) if fwx is None else fwx
+            fwy = (sigy * FWHM_K) if fwy is None else fwy
+        if fwx is None or fwy is None:
+            warnings.warn("Missing size info (FWHM/sigma); drawing components without size.", RuntimeWarning)
+            fwx = np.zeros((n,), dtype=float)
+            fwy = np.zeros((n,), dtype=float)
+        # radii are half of (n_sigma * FWHM)
+        rx = 0.5 * n_sigma * fwx
+        ry = 0.5 * n_sigma * fwy
+    else:
+        raise ValueError(f"Unknown metric {metric!r}; expected 'sigma' or 'fwhm'.")
+
+    # ---- resolve angles with graceful fallbacks ----
+    def _choose_theta(frame_name: str, prefer: str):
+        """
+        Return (theta_vals, kind) with kind in {'math','pa'}, values in radians.
+        """
+        cands = []
+        if prefer == "pa":
+            cands += [f"theta_{frame_name}_pa", f"theta_{frame_name}_math"]
+        elif prefer == "math":
+            cands += [f"theta_{frame_name}_math", f"theta_{frame_name}_pa"]
+        else:  # auto
+            cands += [f"theta_{frame_name}_math", f"theta_{frame_name}_pa"]
+        cands += [f"theta_{frame_name}", "theta"]  # generic fallbacks
+
+        for nm in cands:
+            a = _arr(nm)
+            if a is not None:
+                kind = "pa" if nm.endswith("_pa") else "math"
+                return a, kind
+        return None, None
+
+    prefer_kind = angle if angle in ("pa", "math") else "auto"
+    theta_vals, theta_kind = _choose_theta(frame, prefer_kind)
+    if theta_vals is None:
+        other = "pixel" if frame == "world" else "world"
+        theta_vals, theta_kind = _choose_theta(other, prefer_kind)
+
+    if theta_vals is None:
+        # Final fallback: axis-aligned
+        warnings.warn(
+            f"Missing theta for frame '{frame}' (and fallback frame); drawing axis-aligned ellipses.",
+            RuntimeWarning,
+        )
+        theta_deg = np.zeros((n,), dtype=float)
+    else:
+        theta_vals = _broadcast(theta_vals, n)
+        if theta_kind == "pa":
+            # Matplotlib Ellipse angle is CCW from +x; PA is E of N
+            theta_deg = 90.0 - np.degrees(theta_vals)
+        else:
+            theta_deg = np.degrees(theta_vals)
+
+    # ---- draw ----
+    for i in range(n):
+        cx_i = float(cx[i if i < cx.size else 0])
+        cy_i = float(cy[i if i < cy.size else 0])
+        rx_i = float(rx[i if i < rx.size else 0])
+        ry_i = float(ry[i if i < ry.size else 0])
+        th_i = float(theta_deg[i if i < theta_deg.size else 0])
+
+        if not np.isfinite([cx_i, cy_i, rx_i, ry_i, th_i]).all():
+            continue
+        if rx_i <= 0 or ry_i <= 0:
+            # size missing/zero → skip drawing but continue
+            continue
+
+        e = _Ellipse(
+            (cx_i, cy_i),
+            width=2.0 * rx_i,
+            height=2.0 * ry_i,
+            angle=th_i,
+            facecolor="none",
+            edgecolor=edgecolor,
+            lw=lw,
+            alpha=alpha,
+        )
+        ax.add_patch(e)
+
+        if label:
+            # simple center label; offset a touch in x so it doesn’t sit on the edge
+            ax.text(cx_i, cy_i, f"{i+1}", ha="center", va="center", fontsize=9, color=edgecolor, alpha=alpha)
 
 def plot_components(
     data,
@@ -1585,76 +1850,32 @@ def plot_components(
     indexer: "Optional[Mapping[str, int]]" = None,
     show_residual: bool = True,
     fwhm: bool = False,
-    angle: "Optional[str]" = None,   # ← None means: read from result.attrs
+    angle: "Optional[str]" = None,   # "math" | "pa" | None(=auto)
 ):
     """
-    Quicklook plot: data (and optional residual) with fitted Gaussian components overlaid as ellipses.
+    Quicklook: data (and optional residual) with fitted components overlaid as ellipses.
 
-    Parameters
-    ----------
-    data: numpy.ndarray | dask.array.Array | xarray.DataArray
-      Image or cube. If not a DataArray, it is wrapped with dims ('y','x') and numeric coords.
-
-    result: xarray.Dataset
-      Output from `fit_multi_gaussian2d`. Must contain at least
-      {'x0','y0','sigma_x','sigma_y','theta'}. If present, 'residual' and 'model'
-      will be used for quicklook panels.
-
-    dims: Sequence[str | int] | None
-      Two dims (names or indices) that define the image plane (x, y). If omitted:
-      uses ('x','y') if present; else for 2-D uses (last, second-last).
-
-    indexer: Mapping[str, int] | None
-      For N-D inputs, which indices to select for leading dims (not including x/y/component).
-      If None and data is N-D, defaults to {d: 0 for d in leading dims}.
-
-    show_residual: bool
-      If True and residuals are available in `result` (or model to compute them),
-      show a side-by-side residual panel.
-
-    fwhm: bool
-      If True, draw ellipses at FWHM size (2.3548 * sigma) instead of 1σ.
-
-    angle: {"math","pa","auto"}
-      Convention **of `result["theta"]`**:
-        • "math": theta is math angle (+x → +y, CCW).
-        • "pa": theta is position angle (+y → +x).
-        • "auto": infer from axis handedness (left-handed → PA, else math).
-      Matplotlib expects a **math** angle; if the dataset theta is PA, it is converted.
-
-    Returns
-    -------
-    matplotlib.figure.Figure
-      The created figure.
-
-    Notes
-    -----
-    • Ellipses show the fitted components:
-        - center: (x0, y0)
-        - orientation: theta (converted to math if needed)
-        - size: 1σ radii (or FWHM if `fwhm=True`)
-      Width/height passed to Matplotlib’s Ellipse are **diameters**.
+    • Uses world coordinates if the DataArray has numeric, monotonic coords on the plotting dims;
+      otherwise falls back to pixel coordinates.
+    • Draws either 1-σ or FWHM ellipses (`fwhm=True`) and respects math/PA (`angle=`).
     """
-    # -- imports guarded to avoid hard dependency at import time --
-    try:  # crucial: plotting is optional at runtime/env
-        import matplotlib.pyplot as plt  # type: ignore
-        from matplotlib.patches import Ellipse  # type: ignore
+    import numpy as _np
+    try:
+        import matplotlib.pyplot as _plt
     except Exception as exc:  # pragma: no cover
-        raise RuntimeError("Matplotlib is required for plot_components.") from exc
+        raise RuntimeError("Matplotlib is required for plot_components()") from exc
 
-    # -- normalize input and resolve dims --
+    # Normalize input & dims
     da = _ensure_dataarray(data)
     dim_x, dim_y = _resolve_dims(da, dims)
-    # transpose so plane dims are last
     da_tr = da.transpose(*(d for d in da.dims if d not in (dim_y, dim_x)), dim_y, dim_x)
 
-    # -- select a single plane for plotting --
+    # Select a single plane for plotting
     if da_tr.ndim > 2:
         if indexer is None:
             indexer = {d: 0 for d in da_tr.dims[:-2]}
         data2d = da_tr.isel(**indexer)
         res_plane = result
-        # align result along same leading dims when present
         for d, i in indexer.items():
             if d in res_plane.dims and d not in ("component", dim_y, dim_x):
                 res_plane = res_plane.isel({d: i})
@@ -1662,97 +1883,71 @@ def plot_components(
         data2d = da_tr
         res_plane = result
 
-    # -- helpers to fetch variables with informative errors --
-    def _get(name: str) -> "xr.DataArray":
-        if name not in res_plane:
-            raise KeyError(f"result missing '{name}'")
-        return res_plane[name]
-
-    # Ensure arrays even if a single component (scalar after isel)
-    x0 = np.atleast_1d(_get("x0").values)
-    y0 = np.atleast_1d(_get("y0").values)
-    sx = np.atleast_1d(_get("sigma_x").values)
-    sy = np.atleast_1d(_get("sigma_y").values)
-    th = np.atleast_1d(_get("theta").values)  # convention specified by `angle` arg
-
-    # -- axis handedness from coords (for PA<->math conversion) --
-    cx = np.asarray(data2d.coords[dim_x].values) if dim_x in data2d.coords else None
-    cy = np.asarray(data2d.coords[dim_y].values) if dim_y in data2d.coords else None
-    sx_sign = _axis_sign(cx)
-    sy_sign = _axis_sign(cy)
-    left_handed = (sx_sign * sy_sign) < 0.0
-
-    # -- interpret dataset theta per `angle`, then convert to Matplotlib math angle if needed --
-    # Decide convention of result["theta"]:
-    theta_conv = (str(angle).lower()
-                  if angle is not None
-                  else str(result.attrs.get("theta_convention", "math")).lower())
-    ds_is_pa = (theta_conv == "pa") or (theta_conv == "auto" and left_handed)
-
-    theta_plot = _theta_pa_to_math(th, sx_sign, sy_sign) if ds_is_pa else np.asarray(th, dtype=float)
-    theta_deg = np.atleast_1d(np.degrees(theta_plot))
-
-    # -- size scale: 1σ or FWHM --
-    scale = 2.3548200450309493 if fwhm else 1.0
-
-    width = np.atleast_1d(2.0 * scale * sx)
-    height = np.atleast_1d(2.0 * scale * sy)
-
-    # -- choose whether we can show residuals --
-    show_resid_panel = bool(show_residual and ("residual" in res_plane or "model" in res_plane))
-    fig, axes = (plt.subplots(1, 2, figsize=(10, 4.5)) if show_resid_panel
-                 else plt.subplots(1, 1, figsize=(5.5, 5.0)))
-    ax_data = axes[0] if show_resid_panel else axes
-
-    im0 = ax_data.imshow(np.asarray(data2d), origin="lower", aspect="equal")
-    ax_data.set_title("Data with fitted components")
-    ax_data.set_xlabel(dim_x)
-    ax_data.set_ylabel(dim_y)
-
-    # overlay ellipses
-    ncomp = int(np.size(x0))
-    for i in range(ncomp):
-        e = Ellipse(
-            (float(x0[i]), float(y0[i])),
-            float(width[i]),
-            float(height[i]),
-            angle=float(theta_deg[i]),
-            fill=False,
-            linewidth=1.5,
-            edgecolor="k",
+    # Decide plotting coords (world if possible)
+    use_world = (dim_x in data2d.coords) and (dim_y in data2d.coords)
+    if use_world:
+        cx = _np.asarray(data2d.coords[dim_x].values)
+        cy = _np.asarray(data2d.coords[dim_y].values)
+        use_world = (
+            cx.ndim == 1 and cy.ndim == 1 and
+            _np.all(_np.isfinite(cx)) and _np.all(_np.isfinite(cy)) and
+            _np.all(_np.diff(cx) != 0) and _np.all(_np.diff(cy) != 0)
         )
-        ax_data.add_patch(e)
-        # centroid marker
-        ax_data.plot(float(x0[i]), float(y0[i]), marker="+", ms=7, mec="yellow", mfc="none", mew=1.5)
 
-    plt.colorbar(im0, ax=ax_data, fraction=0.046, pad=0.04)
+    # Figure and panels
+    if show_residual and ("residual" in res_plane):
+        fig, (ax0, ax1) = _plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
+    else:
+        fig, (ax0,) = _plt.subplots(1, 1, figsize=(6, 5), constrained_layout=True)
 
-    # residual panel if available/asked
-    if show_resid_panel:
-        ax_res = axes[1]
-        if "residual" in res_plane:
-            res2d = res_plane["residual"]
-            # slice residual like data if it still carries extra dims
-            for d, i in (indexer or {}).items():
-                if d in res2d.dims and d not in (dim_y, dim_x):
-                    res2d = res2d.isel({d: i})
-            resid_img = np.asarray(res2d)
-        elif "model" in res_plane:
-            model2d = res_plane["model"]
-            for d, i in (indexer or {}).items():
-                if d in model2d.dims and d not in (dim_y, dim_x):
-                    model2d = model2d.isel({d: i})
-            resid_img = np.asarray(data2d) - np.asarray(model2d)
-        else:  # pragma: no cover (guarded by show_resid_panel condition)
-            resid_img = np.zeros_like(np.asarray(data2d))
+    Z = _np.asarray(data2d.values, dtype=float)
+    if use_world:
+        x = _np.asarray(data2d.coords[dim_x].values, dtype=float)
+        y = _np.asarray(data2d.coords[dim_y].values, dtype=float)
+        ax0.pcolormesh(x, y, Z, shading="auto")
+        frame_for_overlay = "world"
+    else:
+        ax0.imshow(Z, origin="lower", aspect="equal")
+        frame_for_overlay = "pixel"
 
-        im1 = ax_res.imshow(resid_img, origin="lower", aspect="equal")
-        ax_res.set_title("Residual (data − model)")
-        ax_res.set_xlabel(dim_x)
-        ax_res.set_ylabel(dim_y)
-        plt.colorbar(im1, ax=ax_res, fraction=0.046, pad=0.04)
+    ax0.set_title("Data with fitted components")
+    ax0.set_xlabel(dim_x)
+    ax0.set_ylabel(dim_y)
 
-    plt.tight_layout()
-    plt.show()
+    # Pick overlay frame to match the axes:
+    # pixel-like dims → use pixel frame; otherwise assume world.
+    def _dims_are_pixel(dims):
+        dl = tuple(n.lower() for n in dims)
+        return dl in {("x", "y"), ("i", "j"), ("row", "col"), ("pixel_x", "pixel_y")}
+
+    frame_for_overlay = "pixel" if _dims_are_pixel(dims) else "world"
+
+    # Use the same frame as the axes: world if we're plotting with coord arrays, else pixel
+    frame_for_overlay = "world" if use_world else "pixel"
+
+    overlay_fit_components(
+        ax0,
+        res_plane,
+        frame=frame_for_overlay,
+        metric=("fwhm" if fwhm else "sigma"),
+        n_sigma=1.0,
+        angle=(angle or "auto"),
+        edgecolor="k",
+        lw=1.5,
+        alpha=0.9,
+        label=True,
+    )
+
+    # Residual panel (if present)
+    if show_residual and ("residual" in res_plane):
+        R = _np.asarray(res_plane["residual"].values, dtype=float)
+        if use_world:
+            ax1.pcolormesh(x, y, R, shading="auto")
+        else:
+            ax1.imshow(R, origin="lower", aspect="equal")
+        ax1.set_title("Residual (data − model)")
+        ax1.set_xlabel(dim_x)
+        ax1.set_ylabel(dim_y)
+
     return fig
 
