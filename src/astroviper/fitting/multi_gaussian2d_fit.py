@@ -1193,6 +1193,155 @@ def fit_multi_gaussian2d(
                     dask="parallelized",
                     output_dtypes=[float],
                 )
+    # --- record invocation metadata on the result Dataset ---
+    try:
+        import inspect as _inspect
+    except Exception:
+        _inspect = None
+    try:
+        from importlib import metadata as _ilm
+    except Exception:
+        _ilm = None
+
+    def _short(v, maxlen=120):
+        import numpy as _np
+        import xarray as _xr
+        if v is None:
+            return None
+        if isinstance(v, (float, int, bool, str)):
+            return v
+        if isinstance(v, dict):
+            # shallow sanitize
+            out = {}
+            for k, vv in list(v.items())[:50]:
+                out[k] = _short(vv, maxlen//2)
+            return out
+        if isinstance(v, (list, tuple)):
+            return [ _short(x, maxlen//2) for x in list(v)[:50] ]
+        # arrays / DataArrays / other objects
+        try:
+            shape = tuple(getattr(v, "shape", ()))
+            return f"<{type(v).__name__} shape={shape}>"
+        except Exception:
+            s = repr(v)
+            return s if len(s) <= maxlen else (s[:maxlen-3] + "...")
+
+    # Full parameter set (exclude raw data)
+    _param = dict(
+        n_components=int(n_components),
+        dims=(list(dims) if dims is not None else None),
+        min_threshold=min_threshold,
+        max_threshold=max_threshold,
+        initial_guesses=_short(initial_guesses),
+        bounds=_short(bounds),
+        initial_is_fwhm=bool(initial_is_fwhm),
+        max_nfev=int(max_nfev),
+        return_model=bool(return_model),
+        return_residual=bool(return_residual),
+        angle=str(angle),
+        coord_type=str(coord_type),
+        coords=_short(coords),
+    )
+
+    # Build "call" with only parameters that differ from defaults (best-effort)
+    _call = "fit_multi_gaussian2d("
+    try:
+        if _inspect is not None:
+            _sig = _inspect.signature(fit_multi_gaussian2d)
+            _defs = {k: v.default for k, v in _sig.parameters.items()}
+            _pairs = []
+            for k, v in _param.items():
+                dv = _defs.get(k, object())
+                try:
+                    same = (v == dv)
+                except Exception:
+                    same = False
+                if (v is None and dv is None) or same:
+                    continue
+                _pairs.append(f"{k}={_short(v)}")
+            _call += ", ".join(_pairs)
+        _call += ")"
+    except Exception:
+        _call = "fit_multi_gaussian2d(...)"
+
+    # Package metadata
+    _pkg = (__package__.split(".")[0] if __package__ else "astroviper")
+    try:
+        _ver = _ilm.version(_pkg) if _ilm is not None else "unknown"
+    except Exception:
+        try:
+            import astroviper as _av
+            _ver = getattr(_av, "__version__", "unknown")
+        except Exception:
+            _ver = "unknown"
+
+    ds.attrs["call"] = _call
+    ds.attrs["param"] = _param
+    ds.attrs["package"] = _pkg
+    ds.attrs["version"] = _ver
+
+    # --- Self-documenting variable metadata ----------------------------------
+    _dv_docs = {
+       # centers
+        "x0": "Gaussian center along x in the fit coordinate system (world if world-mode, else pixel). See x0_pixel for explicit pixel index.",
+        "y0": "Gaussian center along y in the fit coordinate system (world if world-mode, else pixel). See y0_pixel for explicit pixel index.",
+        "x0_pixel": "Gaussian center x-coordinate in pixel indices (0-based), derived from world coords if necessary.",
+        "y0_pixel": "Gaussian center y-coordinate in pixel indices (0-based), derived from world coords if necessary.",
+
+        # scales (sigma = standard deviation of the 1-D Gaussian along ellipse axes before FWHM conversion)
+        "sigma_x": "Gaussian 1σ scale along the ellipse x-axis (paired with 'theta') in fit coordinates.",
+        "sigma_y": "Gaussian 1σ scale along the ellipse y-axis (paired with 'theta') in fit coordinates.",
+        "sigma_major_pixel": "Gaussian 1σ scale along the major principal axis in pixel units (after world→pixel conversion).",
+        "sigma_minor_pixel": "Gaussian 1σ scale along the minor principal axis in pixel units (after world→pixel conversion).",
+        "sigma_x_pixel": "Alias for the pixel-space 1σ scale along the first ellipse axis (may equal sigma_major_pixel depending on ordering).",
+        "sigma_y_pixel": "Alias for the pixel-space 1σ scale along the second ellipse axis (may equal sigma_minor_pixel depending on ordering).",
+
+        # FWHM (2*sqrt(2*ln 2) * sigma)
+        "fwhm_major": "Full-width at half-maximum along the major principal axis in fit coordinates (= 2*sqrt(2*ln2) * max(sigma_x, sigma_y)).",
+        "fwhm_minor": "Full-width at half-maximum along the minor principal axis in fit coordinates (= 2*sqrt(2*ln2) * min(sigma_x, sigma_y)).",
+        "fwhm_major_pixel": "Full-width at half-maximum along the major principal axis in pixel units.",
+        "fwhm_minor_pixel": "Full-width at half-maximum along the minor principal axis in pixel units.",
+
+        # angles
+        "theta": "Orientation angle of the ellipse; legacy alias whose convention is indicated by variable attr 'convention'. Prefer theta_math/theta_pa.",
+        "theta_math": "Orientation angle θ (radians) in math convention: measured counterclockwise from +x; axial (wrapped to (-π/2, π/2]).",
+        "theta_pa": "Position angle (radians) in PA convention: measured from +y toward +x (north through east); axial (wrapped to (-π/2, π/2]).",
+        "theta_pixel": "Ellipse orientation in pixel coordinates, reported in the same convention as 'theta'.",
+        "theta_err": "1σ uncertainty of the orientation angle (radians); identical for math and PA conventions away from wrapping boundaries.",
+
+        # amplitudes / background
+        "amplitude": "Component amplitude (peak height above offset) in data units.",
+        "peak": "Model peak value at the component center (offset + amplitude) in data units.",
+        "offset": "Additive constant background in data units for this fit plane.",
+        "offset_err": "1σ uncertainty on the additive background.",
+
+        # uncertainties
+        "amplitude_err": "1σ uncertainty of amplitude parameter in data units.",
+        "x0_err": "1σ uncertainty of x0 (same units as x0).",
+        "y0_err": "1σ uncertainty of y0 (same units as y0).",
+        "sigma_x_err": "1σ uncertainty of sigma_x.",
+        "sigma_y_err": "1σ uncertainty of sigma_y.",
+        "fwhm_major_err": "1σ uncertainty of FWHM along the major axis (propagated from sigma).",
+        "fwhm_minor_err": "1σ uncertainty of FWHM along the minor axis (propagated from sigma).",
+
+        # diagnostics
+        "success": "Optimizer success flag (True/False).",
+        "variance_explained": "Explained variance fraction by the fitted model on this plane (0–1).",
+
+        # images
+        "model": "Best-fit model image on the (y, x) grid of the input.",
+        "residual": "Residual image = data - model on the (y, x) grid of the input.",
+    }
+    for _name, _desc in _dv_docs.items():
+        if _name in ds:
+            ds[_name].attrs.setdefault("description", _desc)
+
+    # Ensure angular units are tagged consistently
+    for _n in ("theta", "theta_err", "theta_math", "theta_pa", "theta_pixel"):
+        if _n in ds:
+            ds[_n].attrs["units"] = "rad"
+
+
     return ds
 
 def plot_components(
