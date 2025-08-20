@@ -1,6 +1,9 @@
 import xarray as xr
 
-def plot_correct_orientation(xda: xr.DataArray, horizontal:str="l", vertical:str="m"):
+def plot_correct_orientation(
+    xda: xr.DataArray, horizontal:str="l", vertical:str="m",
+    vmin=None, vmax=None
+):
     """
     Plot the DataArray with correct orientation. By default, matplotlib will always
     plot the axes with increasing values from left to right and bottom to top, no matter
@@ -15,10 +18,12 @@ def plot_correct_orientation(xda: xr.DataArray, horizontal:str="l", vertical:str
     vertical : str, optional
         The name of the vertical coordinate variable, by default "m".
     """
-    plt = xda.plot.pcolormesh(x=horizontal, y=vertical)
+    m = xda.plot.pcolormesh(
+        x=horizontal, y=vertical, vmin=vmin, vmax=vmax, cmap="viridis"
+    )
     xvals = (xda[horizontal].values)
     if xvals[1] - xvals[0] < 0:
-        plt.axes.invert_xaxis()
+        m.axes.invert_xaxis()
     yvals = (xda[vertical].values)
     if yvals[1] - yvals[0] < 0:
-        plt.axes.invert_yaxis()
+        m.axes.invert_yaxis()
