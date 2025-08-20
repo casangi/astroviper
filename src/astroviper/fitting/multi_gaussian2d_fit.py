@@ -1192,6 +1192,7 @@ def fit_multi_gaussian2d(
             theta_w = 0.5*np.arctan2(2*B, A - D)
             lam_max = np.maximum(lam1, lam2); lam_min = np.minimum(lam1, lam2)
             return np.sqrt(np.maximum(lam_max, 0.0)), np.sqrt(np.maximum(lam_min, 0.0)), theta_w
+
         sigma_major_world, sigma_minor_world, _theta_world_math = xr.apply_ufunc(
             _pixel_to_world_cov, sx, sy, th_math, dx_local, dy_local,
             input_core_dims=[["component"]]*5,
@@ -1264,12 +1265,14 @@ def fit_multi_gaussian2d(
         data_vars=dict(
             amplitude=amp,
             x0=x0, y0=y0,
+            sigma_major=sigma_major, sigma_minor=sigma_minor,
             fwhm_major=fwhm_major, fwhm_minor=fwhm_minor,
             theta_math=theta_math,
             theta_pa=theta_pa,
             theta=th_public,
             amplitude_err=amp_e,
             x0_err=x0_e, y0_err=y0_e,
+            sigma_major_err=sigma_major_err, sigma_minor_err=sigma_minor_err,
             fwhm_major_err=fwhm_major_err, fwhm_minor_err=fwhm_minor_err,
             theta_err=th_e,
             peak=peak,
@@ -1502,6 +1505,8 @@ def fit_multi_gaussian2d(
        # centers
         "x0": "Gaussian center along x in the fit coordinate system (world if world-mode, else pixel). See x0_pixel for explicit pixel index.",
         "y0": "Gaussian center along y in the fit coordinate system (world if world-mode, else pixel). See y0_pixel for explicit pixel index.",
+        "x0_err": "1σ uncertainty of x0 (same units as x0).",
+        "y0_err": "1σ uncertainty of y0 (same units as y0).",
         "x0_pixel": "Gaussian center x-coordinate in pixel indices (0-based), derived from world coords if necessary.",
         "y0_pixel": "Gaussian center y-coordinate in pixel indices (0-based), derived from world coords if necessary.",
         "x0_pixel_err": "1σ uncertainty of x0_pixel (native if pixel fit; world fit propagated via local pixel scale).",
@@ -1512,13 +1517,33 @@ def fit_multi_gaussian2d(
         "y0_world_err": "1σ uncertainty of y0_world (direct if world fit; else via interpolation/pixel-scale propagation).",
 
         # scales (sigma = standard deviation of the 1-D Gaussian along ellipse axes before FWHM conversion)
+        "sigma_major": "Principal-axis 1σ (major) in the native fit frame (pixel if pixel-fit; world if world-fit).",
+        "sigma_minor": "Principal-axis 1σ (minor) in the native fit frame (pixel if pixel-fit; world if world-fit).",
+        "sigma_major_err": "1σ uncertainty of sigma_major in the native fit frame.",
+        "sigma_minor_err": "1σ uncertainty of sigma_minor in the native fit frame.",
         "sigma_major_pixel": "Gaussian 1σ scale along the major principal axis in pixel units (after world→pixel conversion).",
         "sigma_minor_pixel": "Gaussian 1σ scale along the minor principal axis in pixel units (after world→pixel conversion).",
+        "sigma_major_pixel_err": "1σ uncertainty in sigma_major_pixel in pixel units (after world→pixel conversion).",
+        "sigma_minor_pixel_err": "1σ uncertainty in sigma_minor_pixel in pixel units (after world→pixel conversion).",
+         "sigma_major_world": "Principal-axis 1σ (major) expressed in world coordinates.",
+         "sigma_minor_world": "Principal-axis 1σ (minor) expressed in world coordinates.",
+         "sigma_major_world_err": "1σ uncertainty of sigma_major_world (native if world fit; else propagated).",
+         "sigma_minor_world_err": "1σ uncertainty of sigma_minor_world (native if world fit; else propagated).",
+
         # FWHM (2*sqrt(2*ln 2) * sigma)
         "fwhm_major": "Full-width at half-maximum along the major principal axis in fit coordinates (= 2*sqrt(2*ln2) * max(sigma_x, sigma_y)).",
         "fwhm_minor": "Full-width at half-maximum along the minor principal axis in fit coordinates (= 2*sqrt(2*ln2) * min(sigma_x, sigma_y)).",
-        "fwhm_major_pixel": "Full-width at half-maximum along the major principal axis in pixel units.",
-        "fwhm_minor_pixel": "Full-width at half-maximum along the minor principal axis in pixel units.",
+        "fwhm_major_err": "1σ uncertainty of FWHM along the major axis (propagated from sigma).",
+        "fwhm_minor_err": "1σ uncertainty of FWHM along the minor axis (propagated from sigma).",
+
+        "fwhm_major_pixel": "Full-width at half-maximum along the major principal axis in pixel coordinates.",
+        "fwhm_minor_pixel": "Full-width at half-maximum along the minor principal axis in pixel coordinates.",
+        "fwhm_major_pixel_err": "1σ uncertainty of pixel-frame FWHM(major) (native if pixel fit; else propagated).",
+        "fwhm_minor_pixel_err": "1σ uncertainty of pixel-frame FWHM(minor) (native if pixel fit; else propagated).",
+        "fwhm_major_world": "FWHM of the major principal axis in world coordinates.",
+        "fwhm_minor_world": "FWHM of the minor principal axis in world coordinates.",
+        "fwhm_major_world_err": "1σ uncertainty of world-frame FWHM(major) (native if world fit; else propagated).",
+        "fwhm_minor_world_err": "1σ uncertainty of world-frame FWHM(minor) (native if world fit; else propagated).",
 
         # angles
         "theta": "Orientation angle of the ellipse; legacy alias whose convention is indicated by variable attr 'convention'. Prefer theta_math/theta_pa.",
@@ -1535,11 +1560,6 @@ def fit_multi_gaussian2d(
 
         # uncertainties
         "amplitude_err": "1σ uncertainty of amplitude parameter in data units.",
-        "x0_err": "1σ uncertainty of x0 (same units as x0).",
-        "y0_err": "1σ uncertainty of y0 (same units as y0).",
-        "fwhm_major_err": "1σ uncertainty of FWHM along the major axis (propagated from sigma).",
-        "fwhm_minor_err": "1σ uncertainty of FWHM along the minor axis (propagated from sigma).",
-
         # diagnostics
         "success": "Optimizer success flag (True/False).",
         "variance_explained": "Explained variance fraction by the fitted model on this plane (0–1).",
@@ -1551,12 +1571,9 @@ def fit_multi_gaussian2d(
     for _name, _desc in _dv_docs.items():
         if _name in ds:
             ds[_name].attrs.setdefault("description", _desc)
-
-    # Ensure angular units are tagged consistently
-    for _n in ("theta", "theta_err", "theta_math", "theta_pa", "theta_pixel"):
-        if _n in ds:
-            ds[_n].attrs["units"] = "rad"
-
+        if _name.startswith["theta"]:
+            # Ensure angular units are tagged consistently
+            ds[_name].attrs["units"] = "rad"
 
     return ds
 
