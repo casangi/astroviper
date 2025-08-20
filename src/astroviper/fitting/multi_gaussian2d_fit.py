@@ -1596,6 +1596,7 @@ def overlay_fit_components(
     n_sigma: float,
     angle: str,
     edgecolor="k",
+    zorder: float = 10.0,
     lw: float = 1.5,
     alpha: float = 0.9,
     label: bool = True,
@@ -1835,12 +1836,17 @@ def overlay_fit_components(
             edgecolor=edgecolor,
             lw=lw,
             alpha=alpha,
+            zorder=zorder,
         )
         ax.add_patch(e)
 
         if label:
             # simple center label; offset a touch in x so it doesn’t sit on the edge
-            ax.text(cx_i, cy_i, f"{i+1}", ha="center", va="center", fontsize=9, color=edgecolor, alpha=alpha)
+            ax.text(
+                cx_i, cy_i, f"{i+1}",
+                ha="center", va="center", fontsize=9,
+                color=edgecolor, alpha=alpha, zorder=zorder
+            )
 
 def plot_components(
     data,
@@ -1937,7 +1943,6 @@ def plot_components(
         alpha=0.9,
         label=True,
     )
-
     # Residual panel (if present)
     if show_residual and ("residual" in res_plane):
         R = _np.asarray(res_plane["residual"].values, dtype=float)
@@ -1945,6 +1950,20 @@ def plot_components(
             ax1.pcolormesh(x, y, R, shading="auto")
         else:
             ax1.imshow(R, origin="lower", aspect="equal")
+        # Draw the same fitted-component ellipses on top for visual QA
+        overlay_fit_components(
+            ax1,
+            res_plane,
+            frame=frame_for_overlay,
+            metric=("fwhm" if fwhm else "sigma"),
+            n_sigma=1.0,
+            angle=(angle or "auto"),
+            edgecolor="w",     # higher contrast on residuals
+            lw=1.5,
+            alpha=0.95,
+            label=False,
+            zorder=10.0,
+        )
         ax1.set_title("Residual (data − model)")
         ax1.set_xlabel(dim_x)
         ax1.set_ylabel(dim_y)
