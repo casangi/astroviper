@@ -102,7 +102,7 @@ def outframe_freq(ms: xarray.core.datatree.DataTree, outframe: str = "lsrk"):
     # There should be only one field name in each ms
     # should we test for uniqueness ?
     fldname = ms.field_name.data[0]
-    phcen = _get_phase_center(ms, fldname)
+    phcen = get_phase_center(ms, fldname)
     maxFreq = -1
     minFreq = 1e12
     for a_loc in locATt:
