@@ -510,13 +510,14 @@ def _multi_fit_plane_wrapper(
         amp = x0 = y0 = sx = sy = th = zeros
         amp_e = x0_e = y0_e = sx_e = sy_e = th_e = zeros
         fwhm_major = fwhm_minor = peak = zeros
+        peak_err = zeros
         offset = np.nan; offset_e = np.nan
         model2d = np.full_like(z2d, np.nan, dtype=float)
         resid2d = np.full_like(z2d, np.nan, dtype=float)
         varexp = np.nan
         return (amp, x0, y0, sx, sy, th,
                 amp_e, x0_e, y0_e, sx_e, sy_e, th_e,
-                fwhm_major, fwhm_minor, peak,
+                fwhm_major, fwhm_minor, peak, peak_err,
                 offset, offset_e,
                 bool(False), varexp,
                 resid2d, model2d)
@@ -525,12 +526,14 @@ def _multi_fit_plane_wrapper(
     n = int(n_components)
     offset, amp, x0, y0, sx, sy, th = _unpack_params(popt, n)
     _, amp_e, x0_e, y0_e, sx_e, sy_e, th_e = _unpack_params(perr, n)
-
+    # offset uncertainty is scalar (first element of perr); compute it *before* using in peak_err
+    offset_e = float(perr[0])
     # Derived component metrics
     fwhm_major = _fwhm_from_sigma(np.maximum(sx, sy))
     fwhm_minor = _fwhm_from_sigma(np.minimum(sx, sy))
     peak = amp + offset
-
+    # per-component uncertainty on peak = sqrt(amp_err^2 + offset_err^2)
+    peak_err = np.hypot(amp_e, offset_e)
     # Build model & residual
     if return_model or return_residual:
         model2d_full = _multi_gaussian2d_sum(X, Y, popt, n)
@@ -551,12 +554,9 @@ def _multi_fit_plane_wrapper(
         # not coverable from public API call, defensive coding
         varexp = np.nan # pragma: no cover
 
-    # Offset uncertainty is the first element of perr
-    offset_e = float(perr[0])
-
     return (amp, x0, y0, sx, sy, th,
             amp_e, x0_e, y0_e, sx_e, sy_e, th_e,
-            fwhm_major, fwhm_minor, peak,
+            fwhm_major, fwhm_minor, peak, peak_err,
             float(offset), offset_e,
             bool(True), float(varexp),
             resid2d, model2d)
@@ -921,11 +921,12 @@ def fit_multi_gaussian2d(
     out_dtypes = (
         [np.float64] * 6      # params per component
         + [np.float64] * 6    # errors per component
-        + [np.float64] * 3    # derived per component
+        + [np.float64] * 4    # derived per component (add peak_err)
         + [np.float64, np.float64]  # offset, offset_err
         + [np.bool_, np.float64]    # success, variance_explained
         + [np.float64, np.float64]  # residual2d, model2d
     )
+
     # Map FWHM bounds to σ if provided (top-level convenience; supports legacy and new names)
     bnds = bounds
     if bounds is not None:
@@ -958,11 +959,10 @@ def fit_multi_gaussian2d(
         np.allclose(y1d, np.arange(y1d.shape[0]))
     )
     out_core_dims = (
-        [["component"]]*6 + [["component"]]*6 + [["component"]]*3
+        [["component"]]*6 + [["component"]]*6 + [["component"]]*4
         + [[] , []] + [[] , []]
         + [[dim_y, dim_x], [dim_y, dim_x]]
     )
-
     results = xr.apply_ufunc(
         _multi_fit_plane_wrapper,
         da_tr,
@@ -988,7 +988,7 @@ def fit_multi_gaussian2d(
 
     (amp, x0, y0, sx, sy, th,
      amp_e, x0_e, y0_e, sx_e, sy_e, th_e,
-     fwhm_maj, fwhm_min, peak,
+     fwhm_maj, fwhm_min, peak, peak_err,
      offset, offset_e,
      success, varexp,
      residual, model) = results
@@ -1084,6 +1084,10 @@ def fit_multi_gaussian2d(
         fwhm_major_pixel = sigma_major_pixel * _SIG2FWHM
         fwhm_minor_pixel = sigma_minor_pixel * _SIG2FWHM
 
+        # World-basis angle and its error are native in this branch
+        theta_world = th_public
+        theta_world_err = th_e  # same convention as 'theta_world'
+
         # --- σ error propagation (world → pixel) via finite differences (w.r.t σx, σy) ---
         def _fd_sigma_world_to_pixel(sigx, sigy, theta, dx, dy, epsx, epsy):
             # central differences on major/minor wrt (sigx, sigy); returns (dmaj_dsigx, dmin_dsigx, dmaj_dsigy, dmin_dsigy)
@@ -1112,6 +1116,25 @@ def fit_multi_gaussian2d(
             input_core_dims=[["component"], ["component"], ["component"], ["component"]],
             output_core_dims=[["component"]], vectorize=True, dask="parallelized", output_dtypes=[float])
 
+        # --- θ error propagation (world → pixel): d(theta_pixel_math)/d(theta_world_math) ---
+        def _dtheta_pix_dtheta_world(sigx, sigy, theta, dx, dy, eps):
+            _, _, t1 = _world_to_pixel_cov(sigx, sigy, theta + eps, dx, dy)
+            _, _, t2 = _world_to_pixel_cov(sigx, sigy, theta - eps, dx, dy)
+            return (t1 - t2) / (2.0 * eps)
+        _epst = xr.apply_ufunc(lambda v: 1e-6 + 1e-3*np.abs(v), th_math, dask="parallelized")
+        _dtdt = xr.apply_ufunc(
+            _dtheta_pix_dtheta_world, sx, sy, th_math, dx_local, dy_local, _epst,
+            input_core_dims=[["component"]]*6,
+            output_core_dims=[["component"]],
+            vectorize=True, dask="parallelized", output_dtypes=[float],
+        )
+        # convert-to-PA is a shift, so σ is unchanged between math↔PA
+        theta_pixel_err = xr.apply_ufunc(
+            np.multiply, xr.apply_ufunc(np.abs, _dtdt, dask="parallelized"), th_e,
+            input_core_dims=[["component"], ["component"]],
+            output_core_dims=[["component"]],
+            vectorize=True, dask="parallelized", output_dtypes=[float],
+        )
         # --- pixel-center uncertainties from world centers via local scale ---
         x0_pixel_err = xr.apply_ufunc(
             np.divide, x0_e, dx_local,
@@ -1149,6 +1172,10 @@ def fit_multi_gaussian2d(
         theta_pixel = th_public
         fwhm_major_pixel = xr.apply_ufunc(np.maximum, sx*_SIG2FWHM, sy*_SIG2FWHM, dask="parallelized")
         fwhm_minor_pixel = xr.apply_ufunc(np.minimum, sx*_SIG2FWHM, sy*_SIG2FWHM, dask="parallelized")
+        # Angular uncertainty is native in pixel basis
+        theta_pixel_err = th_e
+        # world angle/uncertainty computed below from pixel→world covariance
+
         # and pixel-center uncertainties are the native ones
         x0_pixel_err, y0_pixel_err = x0_e, y0_e
         # Pixel σ errors are native in this branch
@@ -1206,6 +1233,27 @@ def fit_multi_gaussian2d(
             s2M, s2m, _ = _pixel_to_world_cov(sigx, sigy-epsy, theta, dx, dy)
             dM_dsy = (s1M - s2M) / (2.0*epsy); dm_dsy = (s1m - s2m) / (2.0*epsy)
             return dM_dsx, dm_dsx, dM_dsy, dm_dsy
+
+        # World angle in requested convention
+        theta_world = (np.pi/2 - _theta_world_math) if want_pa else _theta_world_math
+        # --- θ error propagation (pixel → world): d(theta_world_math)/d(theta_pixel_math) ---
+        def _dtheta_world_dtheta_pixel(sigx, sigy, theta, dx, dy, eps):
+            _, _, t1 = _pixel_to_world_cov(sigx, sigy, theta + eps, dx, dy)
+            _, _, t2 = _pixel_to_world_cov(sigx, sigy, theta - eps, dx, dy)
+            return (t1 - t2) / (2.0 * eps)
+        _epst_w = xr.apply_ufunc(lambda v: 1e-6 + 1e-3*np.abs(v), th_math, dask="parallelized")
+        _dtdt_w = xr.apply_ufunc(
+            _dtheta_world_dtheta_pixel, sx, sy, th_math, dx_local, dy_local, _epst_w,
+            input_core_dims=[["component"]]*6,
+            output_core_dims=[["component"]],
+            vectorize=True, dask="parallelized", output_dtypes=[float],
+        )
+        theta_world_err = xr.apply_ufunc(
+            np.multiply, xr.apply_ufunc(np.abs, _dtdt_w, dask="parallelized"), th_e,
+            input_core_dims=[["component"], ["component"]],
+            output_core_dims=[["component"]],
+            vectorize=True, dask="parallelized", output_dtypes=[float],
+        )
         _epsx = xr.apply_ufunc(lambda v: 1e-6 + 1e-3*np.abs(v), sx, dask="parallelized")
         _epsy = xr.apply_ufunc(lambda v: 1e-6 + 1e-3*np.abs(v), sy, dask="parallelized")
         dM_dsx, dm_dsx, dM_dsy, dm_dsy = xr.apply_ufunc(
@@ -1264,7 +1312,7 @@ def fit_multi_gaussian2d(
         data_vars=dict(
             amplitude=amp,
             amplitude_err=amp_e,
-            peak=peak,
+            peak=peak, peak_err=peak_err,
             # pixel-space mirrors
             x0_pixel=x0_pixel,
             y0_pixel=y0_pixel,
@@ -1275,6 +1323,9 @@ def fit_multi_gaussian2d(
             sigma_major_pixel_err=sigma_major_pixel_err,
             sigma_minor_pixel_err=sigma_minor_pixel_err,
             theta_pixel=theta_pixel,
+            theta_pixel_err=theta_pixel_err,
+            theta_world=theta_world,
+            theta_world_err=theta_world_err,
             fwhm_major_pixel=fwhm_major_pixel, fwhm_minor_pixel=fwhm_minor_pixel,
             fwhm_major_pixel_err=fwhm_major_pixel_err, fwhm_minor_pixel_err=fwhm_minor_pixel_err,
             # world-space mirrors (explicit)
@@ -1290,7 +1341,8 @@ def fit_multi_gaussian2d(
     conv = "pa" if want_pa else "math"
     ds.attrs["axes_handedness"] = "left" if is_left_handed else "right"
     # Add explicit angular units to all theta-related outputs
-    for _name in ("theta_pixel",):
+    for _name in ("theta_pixel", "theta_pixel_err", "theta_world", "theta_world_err"):
+
         if _name in ds:
             ds[_name].attrs["units"] = "rad"
 
@@ -1503,10 +1555,10 @@ def fit_multi_gaussian2d(
         "sigma_minor_pixel": "Gaussian 1σ scale along the minor principal axis in pixel units (after world→pixel conversion).",
         "sigma_major_pixel_err": "1σ uncertainty in sigma_major_pixel in pixel units (after world→pixel conversion).",
         "sigma_minor_pixel_err": "1σ uncertainty in sigma_minor_pixel in pixel units (after world→pixel conversion).",
-         "sigma_major_world": "Principal-axis 1σ (major) expressed in world coordinates.",
-         "sigma_minor_world": "Principal-axis 1σ (minor) expressed in world coordinates.",
-         "sigma_major_world_err": "1σ uncertainty of sigma_major_world (native if world fit; else propagated).",
-         "sigma_minor_world_err": "1σ uncertainty of sigma_minor_world (native if world fit; else propagated).",
+        "sigma_major_world": "Principal-axis 1σ (major) expressed in world coordinates.",
+        "sigma_minor_world": "Principal-axis 1σ (minor) expressed in world coordinates.",
+        "sigma_major_world_err": "1σ uncertainty of sigma_major_world (native if world fit; else propagated).",
+        "sigma_minor_world_err": "1σ uncertainty of sigma_minor_world (native if world fit; else propagated).",
 
         # FWHM (2*sqrt(2*ln 2) * sigma)
 
@@ -1521,10 +1573,13 @@ def fit_multi_gaussian2d(
 
         # angles
         "theta_pixel": "Ellipse orientation in pixel coordinates, reported in the same convention as 'theta'.",
-
+        "theta_pixel_err": "1σ uncertainty of theta_pixel (radians), propagated through the world↔pixel transform.",
+        "theta_world": "Ellipse orientation in world coordinates, reported in the same convention as 'theta'.",
+        "theta_world_err": "1σ uncertainty of theta_world (radians), propagated through the pixel↔world transform.",
         # amplitudes / background
         "amplitude": "Component amplitude (peak height above offset) in data units.",
         "peak": "Model peak value at the component center (offset + amplitude) in data units.",
+        "peak_err": "1σ uncertainty of the model peak (quadrature of amplitude_err and offset_err).",
         "offset": "Additive constant background in data units for this fit plane.",
         "offset_err": "1σ uncertainty on the additive background.",
 
