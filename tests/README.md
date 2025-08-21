@@ -6,7 +6,7 @@ AstroVIPER Tests use pytest and are located in the `tests` directory. There are 
 - Stakeholder Tests: located in `tests/stakeholder`
 
 Helper functions used in the tests:
-- Helper and utitility functions for tests: located in `tests/utils`
+- Helper and utility functions for tests: located in `tests/utils`
 - Pytest configuration is located in: `tests/utils/conftest.py`
 
 # Test Development
