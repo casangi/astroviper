@@ -4,9 +4,9 @@ from scipy import constants
 from numba import jit
 import numba
 import xarray as xr
-from astroviper._domain._imaging._check_imaging_parameters import _check_grid_parms
-from astroviper._domain._imaging._imaging_utils._mosaic_grid import _mosaic_grid_jit
-from astroviper._domain._imaging._imaging_utils._standard_grid import _standard_grid_jit
+from astroviper.core._imaging._check_imaging_parameters import _check_grid_parms
+from astroviper.core._imaging._imaging_utils._mosaic_grid import _mosaic_grid_jit
+from astroviper.core._imaging._imaging_utils._standard_grid import _standard_grid_jit
 
 # from graphviper.parameter_checking.check_parms import check_sel_parms
 from astroviper.utils.check_parms import check_parms, check_sel_parms

@@ -2,8 +2,8 @@
 # coding: utf-8
 
 from astropy import units as u
-from astroviper._domain._imaging._fft import _fft_lm_to_uv
-from astroviper._domain._imaging._ifft import _ifft_uv_to_lm
+from astroviper.core._imaging._fft import _fft_lm_to_uv
+from astroviper.core._imaging._ifft import _ifft_uv_to_lm
 import copy
 import dask
 import dask.array as da
@@ -280,7 +280,7 @@ def feather(
         raise RuntimeError("Image shapes differ")
 
     # Determine chunking
-    from astroviper._utils.data_partitioning import bytes_in_dtype
+    from astroviper.src.astroviper.utils.data_partitioning import bytes_in_dtype
 
     ## Determine the amount of memory required by the node task if all dimensions that chunking will occur on are singleton.
     ## For example feather does chunking only only frequency, so memory_singleton_chunk should be the amount of memory requered by _feather when there is a single frequency channel.
@@ -301,7 +301,7 @@ def feather(
     chunking_dims_sizes = {
         "frequency": int_xds[_sky].sizes["frequency"]
     }  # Need to know how many frequency channels there are.
-    from astroviper._utils.data_partitioning import (
+    from astroviper.src.astroviper.utils.data_partitioning import (
         calculate_data_chunking,
         get_thread_info,
     )

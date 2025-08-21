@@ -13,18 +13,18 @@ def _make_image(input_params):
 
     start_0 = time.time()
     import numpy as np
-    from astroviper._domain._visibility._phase_shift import _phase_shift_vis_ds
-    from astroviper._domain._imaging._make_imaging_weights import _make_imaging_weights
-    from astroviper._domain._imaging._make_gridding_convolution_function import (
+    from astroviper.core._visibility._phase_shift import _phase_shift_vis_ds
+    from astroviper.core._imaging._make_imaging_weights import _make_imaging_weights
+    from astroviper.core._imaging._make_gridding_convolution_function import (
         _make_gridding_convolution_function,
     )
-    from astroviper._domain._imaging._make_aperture_grid import _make_aperture_grid
-    from astroviper._domain._imaging._make_uv_sampling_grid import (
+    from astroviper.core._imaging._make_aperture_grid import _make_aperture_grid
+    from astroviper.core._imaging._make_uv_sampling_grid import (
         _make_uv_sampling_grid,
     )
     from xradio.image import make_empty_sky_image
-    from astroviper._domain._imaging._make_visibility_grid import _make_visibility_grid
-    from astroviper._domain._imaging._fft_norm_img_xds import _fft_norm_img_xds
+    from astroviper.core._imaging._make_visibility_grid import _make_visibility_grid
+    from astroviper.core._imaging._fft_norm_img_xds import _fft_norm_img_xds
 
     import xarray as xr
 

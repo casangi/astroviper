@@ -13,15 +13,15 @@ def _make_image_single_field(input_params):
 
     start_0 = time.time()
     import numpy as np
-    from astroviper._domain._imaging._make_imaging_weights import _make_imaging_weights
-    from astroviper._domain._imaging._make_uv_sampling_grid import (
+    from astroviper.core._imaging._make_imaging_weights import _make_imaging_weights
+    from astroviper.core._imaging._make_uv_sampling_grid import (
         _make_uv_sampling_grid_single_field,
     )
     from xradio.image import make_empty_sky_image
-    from astroviper._domain._imaging._make_visibility_grid import (
+    from astroviper.core._imaging._make_visibility_grid import (
         _make_visibility_grid_single_field,
     )
-    from astroviper._domain._imaging._fft_norm_img_xds import _fft_norm_img_xds
+    from astroviper.core._imaging._fft_norm_img_xds import _fft_norm_img_xds
 
     import xarray as xr
 
@@ -79,7 +79,7 @@ def _make_image_single_field(input_params):
     )
     logger.debug("1.5 Created ProcessingSetIterator ")
 
-    from astroviper._domain._imaging._imaging_utils.gcf_prolate_spheroidal import (
+    from astroviper.core._imaging._imaging_utils.gcf_prolate_spheroidal import (
         _create_prolate_spheroidal_kernel_1D,
     )
 
@@ -127,7 +127,7 @@ def _make_image_single_field(input_params):
         T_compute = T_compute + time.time() - start_compute
 
     # print(img_xds)
-    from astroviper._domain._imaging._imaging_utils._make_pb_symmetric import (
+    from astroviper.core._imaging._imaging_utils._make_pb_symmetric import (
         _airy_disk_rorder,
     )
 
@@ -160,7 +160,7 @@ def _make_image_single_field(input_params):
     gcf_xds = xr.Dataset()
     gcf_xds.attrs["oversampling"] = [100, 100]
     gcf_xds.attrs["SUPPORT"] = [7, 7]
-    from astroviper._domain._imaging._imaging_utils.gcf_prolate_spheroidal import (
+    from astroviper.core._imaging._imaging_utils.gcf_prolate_spheroidal import (
         _create_prolate_spheroidal_kernel,
     )
 
