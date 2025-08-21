@@ -1340,12 +1340,20 @@ def fit_multi_gaussian2d(
     # --- record only axes handedness; publish both angle conventions explicitly ---
     conv = "pa" if want_pa else "math"
     ds.attrs["axes_handedness"] = "left" if is_left_handed else "right"
+    # Record the chosen theta convention ("math" or "pa") for self-documentation
+    ds.attrs["theta_convention"] = conv
     # Add explicit angular units to all theta-related outputs
-    for _name in ("theta_pixel", "theta_pixel_err", "theta_world", "theta_world_err"):
-
+    # Annotate angle variables with convention + frame (no bare 'theta' var in this DS)
+    for _name, _frame in (
+        ("theta_pixel", "pixel"),
+        ("theta_pixel_err", "pixel"),
+        ("theta_world", "world"),
+        ("theta_world_err", "world"),
+    ):
         if _name in ds:
+            ds[_name].attrs["convention"] = conv
+            ds[_name].attrs["frame"] = _frame
             ds[_name].attrs["units"] = "rad"
-
     if return_residual:
         ds["residual"] = residual
     if return_model:
