@@ -171,7 +171,7 @@ def directional_cosine(phase_direction_in_radians):
 
 def check_shift_parms(shift_parms):
     # from graphviper.parameter_checking.check_parms import check_parms
-    from astroviper.utils.check_params import check_parms, check_sel_parms
+    from astroviper.utils.check_params import check_params, check_sel_params
     import numbers
 
     parms_passed = True
@@ -179,11 +179,11 @@ def check_shift_parms(shift_parms):
     # if not(_check_parms(shift_parms, 'new_phase_direction', [dict])): parms_passed = False
 
     if not (
-        check_parms(shift_parms, "common_tangent_reprojection", [bool], default=True)
+        check_params(shift_parms, "common_tangent_reprojection", [bool], default=True)
     ):
         parms_passed = False
 
-    if not (check_parms(shift_parms, "single_precision", [bool], default=True)):
+    if not (check_params(shift_parms, "single_precision", [bool], default=True)):
         parms_passed = False
 
     return parms_passed
