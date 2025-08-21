@@ -7,7 +7,7 @@ import xarray as xr
 
 # from graphviper.parameter_checking.check_parms import check_sel_parms
 from astroviper.utils.check_parms import check_parms, check_sel_parms
-from astroviper._domain._imaging._check_imaging_parameters import (
+from astroviper.core._imaging._check_imaging_parameters import (
     _check_grid_parms,
     _check_norm_parms,
 )

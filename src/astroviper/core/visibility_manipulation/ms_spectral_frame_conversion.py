@@ -18,7 +18,7 @@ warnings.filterwarnings(
 np.set_printoptions(precision=12)
 
 
-def _ms_spectral_frame_conversion(
+def ms_spectral_frame_conversion(
     ms: xarray.core.datatree.DataTree,
     freqrange: List[float] = [],
     outframe: str = "LSRK",
@@ -51,9 +51,9 @@ def _ms_spectral_frame_conversion(
         frame=pc.frame,
     )
 
-    locATt = _get_all_itrs_loc(ms)
+    locATt = get_all_itrs_loc(ms)
     obsfreq = ms.frequency.data * u.Unit(ms.frequency.attrs["units"])
-    newFreqInFrame = _outframe_freq(outms, outframe)
+    newFreqInFrame = outframe_freq(outms, outframe)
     ##outMSFreq = outms.frequency.assign_coords(frequency=newFreqInFrame) buggy
     outMSFreq = xarray.DataArray(
         data=newFreqInFrame,
@@ -68,12 +68,12 @@ def _ms_spectral_frame_conversion(
     outms.frequency = outMSFreq
     # print(obsfreq.value - outms.frequency.data, newFreqInFrame, obsfreq.value)
     # for aTLoc in locATt:
-    _interpolate_data_weight_from_TOPO(outms, obsfreq)
+    interpolate_data_weight_from_TOPO(outms, obsfreq)
 
     return outms
 
 
-def _outframe_freq(ms: xarray.core.datatree.DataTree, outframe: str = "lsrk"):
+def outframe_freq(ms: xarray.core.datatree.DataTree, outframe: str = "lsrk"):
     """
     Function to get a set of uniformly spaced frequencies that covers the range of frequencies
     in the ms over time in the outframe requested
@@ -95,10 +95,10 @@ def _outframe_freq(ms: xarray.core.datatree.DataTree, outframe: str = "lsrk"):
     if "TOPO" not in obsframe:
         raise Exception("This function works with TOPO only for now")
     obsfreq = ms["frequency"].data * u.Unit(ms.frequency.attrs["units"])
-    # print("_outframe_freq originfreq", obsfreq)
+    # print("outframe_freq originfreq", obsfreq)
     nchan = len(obsfreq)
 
-    locATt = _get_all_itrs_loc(ms)
+    locATt = get_all_itrs_loc(ms)
     # There should be only one field name in each ms
     # should we test for uniqueness ?
     fldname = ms.field_name.data[0]
@@ -108,7 +108,7 @@ def _outframe_freq(ms: xarray.core.datatree.DataTree, outframe: str = "lsrk"):
     for a_loc in locATt:
         frameSpec = SpectralCoord(
             obsfreq, observer=a_loc, target=phcen
-        ).with_observer_stationary_relative_to(_frame_from_str(outframe))
+        ).with_observer_stationary_relative_to(frame_from_str(outframe))
         freqATt = frameSpec.quantity.value
         minFreq = min(minFreq, np.min(freqATt))
         maxFreq = max(maxFreq, np.max(freqATt))
@@ -124,7 +124,7 @@ def _outframe_freq(ms: xarray.core.datatree.DataTree, outframe: str = "lsrk"):
     return outfreqs
 
 
-def _get_phase_center(ms: xarray.core.datatree.DataTree, fieldname: str) -> SkyCoord:
+def get_phase_center(ms: xarray.core.datatree.DataTree, fieldname: str) -> SkyCoord:
     pc = ms.xr_ms.get_field_and_source_xds().FIELD_PHASE_CENTER_DIRECTION.sel(
         field_name=fieldname
     )
@@ -136,7 +136,7 @@ def _get_phase_center(ms: xarray.core.datatree.DataTree, fieldname: str) -> SkyC
     return phcen
 
 
-def _frame_from_str(framestr: str):
+def frame_from_str(framestr: str):
     """
     Tries to interprete string frame a la casa definition and return the
     appropriate astropy frame
@@ -163,7 +163,7 @@ def _frame_from_str(framestr: str):
     return fr
 
 
-def _get_all_itrs_loc(ms: xarray.core.datatree.DataTree):
+def get_all_itrs_loc(ms: xarray.core.datatree.DataTree):
     """This returns an astropy itrs location at all unique times
     in the ms
     """
@@ -185,7 +185,7 @@ def _get_all_itrs_loc(ms: xarray.core.datatree.DataTree):
     return locATt
 
 
-def _interpolate_data_weight_from_TOPO(
+def interpolate_data_weight_from_TOPO(
     ms: xarray.core.datatree.DataTree,
     origfreq: u.quantity.Quantity,
     method: str = "linear",
@@ -198,27 +198,27 @@ def _interpolate_data_weight_from_TOPO(
     """
     # infreq = origfreq.to(u.Hz).value
     interpfreq = ms.frequency.data
-    locATt = _get_all_itrs_loc(ms)
+    locATt = get_all_itrs_loc(ms)
     fldname = ms.field_name.data[0]
-    phcen = _get_phase_center(ms, fldname)
+    phcen = get_phase_center(ms, fldname)
     outframe = ms.frequency.attrs["observer"]
     for a_loc in locATt:
         frameSpec = SpectralCoord(
             origfreq, observer=a_loc, target=phcen
-        ).with_observer_stationary_relative_to(_frame_from_str(outframe))
+        ).with_observer_stationary_relative_to(frame_from_str(outframe))
         freqATt = frameSpec.quantity.to(u.Hz).value
         elvis = ms.VISIBILITY.loc[a_loc.obstime.value, :, :, :]
         elwgt = ms.WEIGHT.loc[a_loc.obstime.value, :, :, :]
         elflg = ms.FLAG.loc[a_loc.obstime.value, :, :, :]
         elwgt = elwgt * np.logical_not(elflg)
-        newelvis = _interp_channels2(elvis, elwgt, freqATt, interpfreq, method=method)
+        newelvis = interp_channels2(elvis, elwgt, freqATt, interpfreq, method=method)
         newelvis["frequency"] = ms.VISIBILITY.loc[a_loc.obstime.value, :, :, :][
             "frequency"
         ]
         ms.VISIBILITY.loc[a_loc.obstime.value, :, :, :] = newelvis
 
 
-def _interp_channels(
+def interp_channels(
     data: xarray.DataArray,
     weights: xarray.DataArray,
     datafreq: np.ndarray,
@@ -259,7 +259,7 @@ def _interp_channels(
     return wgtdata
 
 
-def _interp_channels2(data, weights, datafreq, interpfreq, method="linear"):
+def interp_channels2(data, weights, datafreq, interpfreq, method="linear"):
     wgtdata = data
     selfreq = wgtdata.frequency
     # print("ORIGFREQ ", selfreq, "\n")

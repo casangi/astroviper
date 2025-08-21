@@ -6,11 +6,11 @@ from scipy import constants
 from numba import jit
 import numba
 import xarray as xr
-from astroviper._domain._imaging._check_imaging_parameters import (
+from astroviper.core._imaging._check_imaging_parameters import (
     _check_imaging_weights_parms,
     _check_grid_parms,
 )
-from astroviper._domain._imaging._imaging_utils._standard_grid import (
+from astroviper.core._imaging._imaging_utils._standard_grid import (
     _standard_imaging_weight_degrid_numpy_wrap,
     _standard_grid_psf_numpy_wrap,
 )
