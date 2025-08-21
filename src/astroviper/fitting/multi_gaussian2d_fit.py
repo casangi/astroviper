@@ -1857,6 +1857,7 @@ def plot_components(
     show_residual: bool = True,
     fwhm: bool = False,
     angle: "Optional[str]" = None,   # "math" | "pa" | None(=auto)
+    show: bool = None,
 ):
     """
     Quicklook: data (and optional residual) with fitted components overlaid as ellipses.
@@ -1968,5 +1969,18 @@ def plot_components(
         ax1.set_xlabel(dim_x)
         ax1.set_ylabel(dim_y)
 
-    return fig
+    # Optional showing: avoid duplicate displays in notebooks.
+    # If show is None, auto-detect: show in scripts, NOT in notebooks.
+    if show is None:
+        in_ipy = False
+        try:
+            get_ipython  # type: ignore[name-defined]
+            in_ipy = True
+        except Exception:
+            pass
+        show = not in_ipy
 
+    if show:
+        _plt.show()
+
+    return fig, (ax0, ax1)
