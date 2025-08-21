@@ -119,7 +119,7 @@ class FeatherShared:
     def _feather(cls, cores: int = 1, overwrite: bool = True) -> None:
         viper_client = local_client(
             cores=cores,
-            memory_limit="8.0GiB",
+            memory_limit="2.0GiB",
             log_params={"log_level": "DEBUG"},
             worker_log_params={"log_level": "DEBUG"},
         )
