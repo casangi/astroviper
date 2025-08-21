@@ -171,7 +171,7 @@ def directional_cosine(phase_direction_in_radians):
 
 def check_shift_parms(shift_parms):
     # from graphviper.parameter_checking.check_parms import check_parms
-    from astroviper.utils.check_parms import check_parms, check_sel_parms
+    from astroviper.utils.check_params import check_parms, check_sel_parms
     import numbers
 
     parms_passed = True
