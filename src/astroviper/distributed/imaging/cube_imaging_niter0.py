@@ -25,7 +25,7 @@ def cube_imaging_niter0(
     from graphviper.graph_tools.coordinate_utils import make_parallel_coord
     from graphviper.graph_tools import generate_dask_workflow, generate_airflow_workflow
     from graphviper.graph_tools import map, reduce
-    from astroviper.imaging._utils import _make_image
+    from astroviper.distributed.imaging.utils import make_image_mosaic
     from xradio.image import make_empty_sky_image
     from xradio.image import write_image
     import zarr
@@ -65,7 +65,7 @@ def cube_imaging_niter0(
 
     if n_chunks is None:
         # Calculate n_chunks
-        from astroviper._utils.data_partitioning import bytes_in_dtype
+        from astroviper.utils.data_partitioning import bytes_in_dtype
 
         ## Determine the amount of memory required by the node task if all dimensions that chunking will occur on are singleton.
         ## For example cube_imaging does chunking only only frequency, so memory_singleton_chunk should be the amount of memory requered by _feather when there is a single frequency channel.
@@ -97,7 +97,7 @@ def cube_imaging_niter0(
         chunking_dims_sizes = {
             "frequency": img_xds.sizes["frequency"]
         }  # Need to know how many frequency channels there are.
-        from astroviper._utils.data_partitioning import (
+        from astroviper.utils.data_partitioning import (
             calculate_data_chunking,
             get_thread_info,
         )
@@ -177,7 +177,7 @@ def cube_imaging_niter0(
     viper_graph = map(
         input_data=ps,
         node_task_data_mapping=node_task_data_mapping,
-        node_task=_make_image,
+        node_task=make_image_mosaic,
         input_params=input_parms,
         in_memory_compute=False,
     )
@@ -186,7 +186,7 @@ def cube_imaging_niter0(
 
     if workflow_ochestrator == "dask":
         viper_graph = reduce(
-            viper_graph, _combine_return_data_frames, input_params, mode="tree"
+            viper_graph, combine_return_data_frames, input_params, mode="tree"
         )
         # Compute cube
         dask_graph = generate_dask_workflow(viper_graph)
@@ -196,7 +196,7 @@ def cube_imaging_niter0(
         return return_dict
     elif workflow_ochestrator == "airflow":
         viper_graph = reduce(
-            viper_graph, _combine_return_data_frames, input_params, mode="single_node"
+            viper_graph, combine_return_data_frames, input_params, mode="single_node"
         )
         generate_airflow_workflow(
             viper_graph,
@@ -209,7 +209,7 @@ def cube_imaging_niter0(
     # return parallel_coords
 
 
-def _combine_return_data_frames(input_data, input_parms):
+def combine_return_data_frames(input_data, input_parms):
     import pandas as pd
 
     combined_df = pd.DataFrame()

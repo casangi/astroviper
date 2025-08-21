@@ -14,7 +14,7 @@ import copy
 # Based on CASACORE measures/Measures/UVWMachine.cc and CASA code/synthesis/TransformMachines2/FTMachine.cc::girarUVW
 
 
-def _phase_shift_vis_ds(ms_xds, shift_parms, sel_parms):
+def phase_shift_vis_ds(ms_xds, shift_parms, sel_parms):
     """
     Rotate uvw coordinates and phase rotate visibilities. For a joint mosaics rotation_parms['common_tangent_reprojection'] must be true.
     The specified phasedirection and field phase directions are assumed to be in the same frame.
@@ -52,7 +52,7 @@ def _phase_shift_vis_ds(ms_xds, shift_parms, sel_parms):
     _sel_parms = copy.deepcopy(sel_parms)
     _shift_parms = copy.deepcopy(shift_parms)
 
-    assert _check_shift_parms(
+    assert check_shift_parms(
         _shift_parms
     ), "######### ERROR: shift_parms checking failed"
 
@@ -123,7 +123,7 @@ def calc_rotation_matrices(field_phase_direction, shift_parms):
     rotmat_new_phase_direction = R.from_euler(
         "XZ", [[np.pi / 2 - dec_image, -ra_image + np.pi / 2]]
     ).as_matrix()[0]
-    new_phase_direction_cosine = _directional_cosine(np.array([ra_image, dec_image]))
+    new_phase_direction_cosine = directional_cosine(np.array([ra_image, dec_image]))
 
     uvw_rotmat = np.zeros((3, 3), np.double)
     phase_rotation = np.zeros((3,), np.double)
@@ -139,7 +139,7 @@ def calc_rotation_matrices(field_phase_direction, shift_parms):
     ).as_matrix()[0]
     uvw_rotmat = np.matmul(rotmat_new_phase_direction, rotmat_field_phase_direction).T
 
-    field_phase_direction_cosine = _directional_cosine(
+    field_phase_direction_cosine = directional_cosine(
         np.array(field_phase_direction.values)
     )
     phase_rotation = np.matmul(
@@ -151,7 +151,7 @@ def calc_rotation_matrices(field_phase_direction, shift_parms):
 
 
 @jit(nopython=True, cache=True, nogil=True)
-def _directional_cosine(phase_direction_in_radians):
+def directional_cosine(phase_direction_in_radians):
     """
     # In https://arxiv.org/pdf/astro-ph/0207413.pdf see equation 160
     phase_direction_in_radians (RA,DEC)
@@ -169,7 +169,7 @@ def _directional_cosine(phase_direction_in_radians):
     return phase_direction_cosine
 
 
-def _check_shift_parms(shift_parms):
+def check_shift_parms(shift_parms):
     # from graphviper.parameter_checking.check_parms import check_parms
     from astroviper.utils.check_parms import check_parms, check_sel_parms
     import numbers

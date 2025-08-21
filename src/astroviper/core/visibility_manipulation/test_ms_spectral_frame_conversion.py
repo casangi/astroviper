@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from _ms_spectral_frame_conversion import _ms_spectral_frame_conversion
+from ms_spectral_frame_conversion import ms_spectral_frame_conversion
 import xradio
 from xradio.measurement_set import open_processing_set
 from astropy.time import Time
@@ -25,7 +25,7 @@ def test_ms_spectral_frame_conversion():
     t = origms.time.data
     tas = Time(t, format="unix", scale="utc")
     origfreq = origms.frequency.data
-    lsrkms = _ms_spectral_frame_conversion(origms)
+    lsrkms = ms_spectral_frame_conversion(origms)
     finalfreq = lsrkms.frequency.data
     # 4 times in the data
     t1 = Time(tas[0].datetime)
