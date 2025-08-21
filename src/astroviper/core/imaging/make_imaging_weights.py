@@ -97,7 +97,7 @@ def calculate_briggs_parms(grid_of_imaging_weights, sum_weight, imaging_weights_
         briggs_factors = np.ones((2,) + sum_weight.shape)
         briggs_factors[0, :, :] = briggs_factors[0, :, :] * np.square(robust)
         briggs_factors[1, :, :] = (
-            briggs_factors[1, 0, 0, :, :]
+            briggs_factors[1, :, :]
             * 2.0
             * np.square(imaging_weights_parms["briggs_abs_noise"])
         )
