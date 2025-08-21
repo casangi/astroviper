@@ -55,4 +55,3 @@ if __name__ == "__main__":
 # This is a simple test to ensure that pytest is working correctly.
 # It should be run with pytest to verify that the testing framework is set up properly.
 # To run this test, use the command: pytest -v __test_example__.py
-# This will execute the test and show the results in verbose mode.
