@@ -58,8 +58,9 @@ def _make_imaging_weights(ms_xds, grid_parms, imaging_weights_parms, sel_parms):
     cgk_1D = np.ones((1))
 
     uvw = ms_xds[data_group_out["uvw"]].values
-    data_weight = ms_xds[data_group_out["weight"]].values
+    data_weight = ms_xds[data_group_out["weight"]].values*(1-ms_xds[data_group_out["flag"]].values)
     freq_chan = ms_xds.frequency.values
+    
 
     # Grid Weights
     weight_density_grid, sum_weight = _standard_grid_psf_numpy_wrap(
@@ -72,6 +73,8 @@ def _make_imaging_weights(ms_xds, grid_parms, imaging_weights_parms, sel_parms):
         weight_density_grid, sum_weight, _imaging_weights_parms
     )  # 2 x chan x pol
 
+    print("briggs_factors", briggs_factors.shape, briggs_factors)
+    
     imaging_weights = _standard_imaging_weight_degrid_numpy_wrap(
         weight_density_grid, uvw, data_weight, briggs_factors, freq_chan, _grid_parms
     )
@@ -89,15 +92,18 @@ def _calculate_briggs_parms(grid_of_imaging_weights, sum_weight, imaging_weights
         briggs_factors = np.ones((2,) + sum_weight.shape)
 
         squared_sum_weight = np.sum((grid_of_imaging_weights) ** 2, axis=(2, 3))
+
+        print("squared_sum_weight", squared_sum_weight.shape, squared_sum_weight)
+        print("sum_weight", sum_weight.shape, sum_weight)
         briggs_factors[0, :, :] = (
             np.square(5.0 * 10.0 ** (-robust)) / (squared_sum_weight / sum_weight)
         )[None, None, :, :]
     elif imaging_weights_parms["weighting"] == "briggs_abs":
         robust = imaging_weights_parms["robust"]
         briggs_factors = np.ones((2,) + sum_weight.shape)
-        briggs_factors[0, :, :] = briggs_factor[0, 0, 0, :, :] * np.square(robust)
+        briggs_factors[0, :, :] = briggs_factors[0, 0, 0, :, :] * np.square(robust)
         briggs_factors[1, :, :] = (
-            briggs_factor[1, 0, 0, :, :]
+            briggs_factors[1, 0, 0, :, :]
             * 2.0
             * np.square(imaging_weights_parms["briggs_abs_noise"])
         )
