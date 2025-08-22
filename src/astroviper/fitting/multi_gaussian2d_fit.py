@@ -546,7 +546,8 @@ def _multi_fit_plane_wrapper(
     # Variance explained on masked pixels
     if mask.any():
         z_masked = z2d.astype(float)[mask]
-        r_masked = (z2d.astype(float) - _multi_gaussian2d_sum(X, Y, popt, n))[mask]
+        _model_full = model2d_full if 'model2d_full' in locals() else _multi_gaussian2d_sum(X, Y, popt, n)
+        r_masked = (z2d.astype(float) - _model_full)[mask]
         tot = np.nanvar(z_masked)
         res = np.nanvar(r_masked)
         varexp = (1.0 - res / tot) if (np.isfinite(tot) and tot > 0) else np.nan
@@ -937,7 +938,7 @@ def fit_multi_gaussian2d(
                 # map directly to the underlying σ slots (3→sigma_x, 4→sigma_y).
                 # For major/minor we follow the internal slot convention used during fitting.
                 target = (
-                    "sigma_x" if k in ("fwhm_major") else "sigma_y"
+                    "sigma_x" if k == "fwhm_major" else "sigma_y"
                 )
                 if isinstance(v, (list, tuple)) and v and isinstance(v[0], (list, tuple)):
                     b2[target] = [(float(lo) * conv, float(hi) * conv) for (lo, hi) in v]  # per-component
@@ -1013,8 +1014,6 @@ def fit_multi_gaussian2d(
     th_math = xr.apply_ufunc(_wrap_halfpi, th_math, dask="parallelized", vectorize=True)
 
     # Now publish θ in requested convention
-    theta_math = th_math
-
     theta_math = th_math
     theta_pa = xr.DataArray(
         _theta_math_to_pa(th_math.values, sx_sign, sy_sign),
