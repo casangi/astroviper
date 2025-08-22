@@ -157,9 +157,12 @@ class TestInputs:
         # break monotonicity / finiteness
         x = da2.coords["x"].values.copy(); x[5] = x[4]
         y = da2.coords["y"].values.copy(); y[3] = np.nan
-        ds = fit_multi_gaussian2d(da2.assign_coords(x=("x", x), y=("y", y)),
-                                  n_components=1, initial_guesses=np.array([[0.8,15,16,3,2,0.1]]))
-        assert "x0_world" not in ds or "y0_world" not in ds
+        with pytest.raises(ValueError):
+            fit_multi_gaussian2d(
+                da2.assign_coords(x=("x", x), y=("y", y)),
+                n_components=1,
+                initial_guesses=np.array([[0.8, 15, 16, 3, 2, 0.1]]),
+            )
 
 # ------------------------- bounds / dims / API validation -------------------------
 
