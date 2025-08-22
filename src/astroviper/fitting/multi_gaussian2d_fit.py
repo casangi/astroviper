@@ -686,6 +686,16 @@ def _convert_init_theta(
     # defensive coding, should not be reached
     return init # pragma: no cover
 
+def _axis_is_valid(a: np.ndarray) -> bool:
+    """
+    True if a is 1-D, finite, and strictly monotonic (ascending or descending).
+    """
+    a = np.asarray(a)
+    if a.ndim != 1 or a.size == 0 or not np.all(np.isfinite(a)):
+        return False
+    d = np.diff(a)
+    return np.all(d > 0) or np.all(d < 0)
+
 def _extract_1d_coords_for_fit(
     original_input: ArrayOrDA,
     da_tr: xr.DataArray,
@@ -721,6 +731,8 @@ def _extract_1d_coords_for_fit(
         y1d = np.asarray(da_tr.coords[dim_y].values)
         if x1d.ndim != 1 or y1d.ndim != 1 or x1d.size != nx or y1d.size != ny:
             raise ValueError("World coords must be 1-D and match the data shape along (y, x).")
+        if (not _axis_is_valid(x1d)) or (not _axis_is_valid(y1d)):
+            raise ValueError("World coords must be strictly monotonic and finite along both axes.")
         return y1d.astype(float), x1d.astype(float)
 
     # NumPy/Dask input: coord_type is ignored; pick by presence of coords
@@ -1380,6 +1392,11 @@ def fit_multi_gaussian2d(
     if (dim_x in da_tr.coords) and (dim_y in da_tr.coords):
         cx = np.asarray(da_tr.coords[dim_x].values)
         cy = np.asarray(da_tr.coords[dim_y].values)
+
+        x_valid = _axis_is_valid(cx)
+        y_valid = _axis_is_valid(cy)
+        axes_valid = x_valid and y_valid
+
         if world_mode:
             # Already fitted in world coords → x0/y0 are world; expose direct aliases.
             ds["x0_world"] = x0
@@ -1414,9 +1431,15 @@ def fit_multi_gaussian2d(
                 def _interp_y(v: np.ndarray) -> np.ndarray:
                     return np.interp(v, idx_y, val_y)
 
+                # choose variable names robustly (back-compat with legacy 'x0', prefer '*_pixel' if present)
+                center_x_var = 'x0_pixel' if 'x0_pixel' in ds else 'x0'
+                center_y_var = 'y0_pixel' if 'y0_pixel' in ds else 'y0'
+                err_x_var = 'x0_pixel_err' if 'x0_pixel_err' in ds else 'x0_err'
+                err_y_var = 'y0_pixel_err' if 'y0_pixel_err' in ds else 'y0_err'
+
                 # centers in world coordinates
                 ds["x0_world"] = xr.apply_ufunc(
-                    _interp_x, ds["x0"],
+                    _interp_x, ds[center_x_var],
                     input_core_dims=[["component"]],
                     output_core_dims=[["component"]],
                     vectorize=True,
@@ -1424,7 +1447,7 @@ def fit_multi_gaussian2d(
                     output_dtypes=[float],
                 )
                 ds["y0_world"] = xr.apply_ufunc(
-                    _interp_y, ds["y0"],
+                    _interp_y, ds[center_y_var],
                     input_core_dims=[["component"]],
                     output_core_dims=[["component"]],
                     vectorize=True,
@@ -1440,7 +1463,7 @@ def fit_multi_gaussian2d(
                 def _slope_y(v: np.ndarray) -> np.ndarray:
                     return np.interp(v, idx_y, _gy)
                 _sx_at = xr.apply_ufunc(
-                    _slope_x, ds["x0"],
+                    _slope_x, ds[center_x_var],
                     input_core_dims=[["component"]],
                     output_core_dims=[["component"]],
                     vectorize=True,
@@ -1448,7 +1471,7 @@ def fit_multi_gaussian2d(
                     output_dtypes=[float],
                 )
                 _sy_at = xr.apply_ufunc(
-                    _slope_y, ds["y0"],
+                    _slope_y, ds[center_y_var],
                     input_core_dims=[["component"]],
                     output_core_dims=[["component"]],
                     vectorize=True,
@@ -1456,14 +1479,14 @@ def fit_multi_gaussian2d(
                     output_dtypes=[float],
                 )
                 ds["x0_world_err"] = xr.apply_ufunc(
-                    np.multiply, _sx_at, ds["x0_err"],
+                    np.multiply, _sx_at, ds[err_x_var],
                     input_core_dims=[["component"], ["component"]],
                     output_core_dims=[["component"]],
                     vectorize=True, dask="parallelized",
                     output_dtypes=[float],
                 )
                 ds["y0_world_err"] = xr.apply_ufunc(
-                    np.multiply, _sy_at, ds["y0_err"],
+                    np.multiply, _sy_at, ds[err_y_var],
                     input_core_dims=[["component"], ["component"]],
                     output_core_dims=[["component"]],
                     vectorize=True, dask="parallelized",
