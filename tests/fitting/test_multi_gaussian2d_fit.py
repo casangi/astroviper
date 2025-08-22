@@ -82,10 +82,11 @@ class TestSuccess:
                                   return_model=True, return_residual=True)
         assert bool(ds.success)
         assert 0.0 <= float(ds.variance_explained) <= 1.0
-        assert "x_world" in ds and "y_world" in ds
-        order = np.argsort(ds["x0"].values)
-        assert np.allclose(ds["x0"].values[order], [40.0, 85.0], atol=0.8)
-        assert np.allclose(ds["y0"].values[order], [60.0, 28.0], atol=0.8)
+        assert "x0_world" in ds and "y0_world" in ds
+        order = np.argsort(ds["x0_pixel"].values)
+        assert np.allclose(ds["x0_pixel"].values[order], [40.0, 85.0], atol=0.8)
+        assert np.allclose(ds["y0_pixel"].values[order], [60.0, 28.0], atol=0.8)
+
 
     def test_vectorize_over_time_names_and_indices(self) -> None:
         ny, nx = 64, 80
@@ -94,11 +95,11 @@ class TestSuccess:
         cube = xr.concat(planes, dim="time")  # dims ('time','y','x')
         init = np.array([[0.8, 29.5, 22.5, 4.0, 3.0, 0.2]], float)
         # dims by name
-        ds1 = fit_multi_gaussian2d(cube, n_components=1, initial_guesses=init,
+        ds1 = fit_multi_gaussian2d(cube, n_components=1, initial_guesses=init, coord_type="pixel",
                                    dims=("x", "y"), return_model=False, return_residual=False)
         assert "time" in ds1.dims and ds1.sizes["time"] == 3
         # dims by index
-        ds2 = fit_multi_gaussian2d(cube, n_components=1, initial_guesses=init,
+        ds2 = fit_multi_gaussian2d(cube, n_components=1, initial_guesses=init, coord_type="pixel",
                                    dims=(2, 1), return_model=False, return_residual=False)
         assert np.all(ds2["success"].values)
 
@@ -113,7 +114,7 @@ class TestSuccess:
         ds1 = fit_multi_gaussian2d(da2, n_components=1, initial_guesses=init,
                                    return_model=True, return_residual=False)
         assert "model" in ds1 and "residual" not in ds1
-        assert "x_world" in ds1 and "y_world" in ds1
+        assert "x0_world" in ds1 and "y0_world" in ds1
 
         ds2 = fit_multi_gaussian2d(da2, n_components=1, initial_guesses=init,
                                    return_model=False, return_residual=True)
@@ -126,7 +127,7 @@ class TestSuccess:
             dict(amp=0.6, x0=42.0, y0=30.0, sigma_x=5.0, sigma_y=2.5, theta=0.3),
         ]
         da2 = _scene(ny, nx, comps, offset=0.1, noise=0.03, seed=3)
-        ds = fit_multi_gaussian2d(da2, n_components=2, initial_guesses=None, return_residual=True)
+        ds = fit_multi_gaussian2d(da2, n_components=2, initial_guesses=None, coord_type="pixel", return_residual=True)
         assert bool(ds.success) is True
 
 
@@ -158,7 +159,7 @@ class TestInputs:
         y = da2.coords["y"].values.copy(); y[3] = np.nan
         ds = fit_multi_gaussian2d(da2.assign_coords(x=("x", x), y=("y", y)),
                                   n_components=1, initial_guesses=np.array([[0.8,15,16,3,2,0.1]]))
-        assert "x_world" not in ds or "y_world" not in ds
+        assert "x0_world" not in ds or "y0_world" not in ds
 
 # ------------------------- bounds / dims / API validation -------------------------
 
