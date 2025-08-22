@@ -993,10 +993,28 @@ def fit_multi_gaussian2d(
      success, varexp,
      residual, model) = results
 
-    # -- Angle conventions ----------------------------------------------------
-    # Fitter's internal angle has opposite sign vs the "math" convention.
-    # Convert once to math (index basis), then derive both public conventions.
+    # -- Angle conventions & CANONICALIZATION -------------------------------
+    # Internal angle sign → math: th_math = -th
     th_math = -th
+
+    # Canonicalize ellipse so that:
+    #   • sigma_x ≥ sigma_y (major/minor ordering)
+    #   • theta refers to the MAJOR axis
+    #   • theta wrapped to (-π/2, π/2]
+    _is_major_sx = xr.apply_ufunc(np.greater_equal, sx, sy, dask="parallelized")
+    # swap widths & their errors if needed
+    sx, sy = xr.where(_is_major_sx, sx, sy), xr.where(_is_major_sx, sy, sx)
+    sx_e, sy_e = xr.where(_is_major_sx, sx_e, sy_e), xr.where(_is_major_sx, sy_e, sx_e)
+    # rotate theta by π/2 when we swapped axes
+    th_math = xr.where(_is_major_sx, th_math, th_math + np.pi/2)
+    # wrap to (-π/2, π/2]
+    def _wrap_halfpi(t):
+        return ((t + np.pi/2) % np.pi) - np.pi/2
+    th_math = xr.apply_ufunc(_wrap_halfpi, th_math, dask="parallelized", vectorize=True)
+
+    # Now publish θ in requested convention
+    theta_math = th_math
+
     theta_math = th_math
     theta_pa = xr.DataArray(
         _theta_math_to_pa(th_math.values, sx_sign, sy_sign),
@@ -1579,11 +1597,12 @@ def fit_multi_gaussian2d(
         "fwhm_major_world_err": "1σ uncertainty of world-frame FWHM(major) (native if world fit; else propagated).",
         "fwhm_minor_world_err": "1σ uncertainty of world-frame FWHM(minor) (native if world fit; else propagated).",
 
-        # angles
-        "theta_pixel": "Ellipse orientation in pixel coordinates, reported in the same convention as 'theta'.",
-        "theta_pixel_err": "1σ uncertainty of theta_pixel (radians), propagated through the world↔pixel transform.",
-        "theta_world": "Ellipse orientation in world coordinates, reported in the same convention as 'theta'.",
-        "theta_world_err": "1σ uncertainty of theta_world (radians), propagated through the pixel↔world transform.",
+        # angles (θ always refers to the MAJOR axis; wrapped to (-π/2, π/2])
+        "theta_pixel": "Orientation of the ellipse MAJOR axis in pixel coordinates (same convention as 'theta').",
+        "theta_pixel_err": "1σ uncertainty of theta_pixel (major-axis orientation) in radians; propagated through the world↔pixel transform.",
+        "theta_world": "Orientation of the ellipse MAJOR axis in world coordinates (same convention as 'theta').",
+        "theta_world_err": "1σ uncertainty of theta_world (major-axis orientation) in radians; propagated through the pixel↔world transform.",
+
         # amplitudes / background
         "amplitude": "Component amplitude (peak height above offset) in data units.",
         "peak": "Model peak value at the component center (offset + amplitude) in data units.",
