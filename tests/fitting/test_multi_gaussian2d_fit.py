@@ -15,6 +15,8 @@ Run:
 """
 from __future__ import annotations
 
+import unittest
+
 import os
 import math
 import numpy as np
@@ -215,12 +217,15 @@ class TestOptimizerFailures:
     def test_full_mask_triggers_failure_and_nan_planes(self) -> None:
         ny, nx = 24, 24
         da2 = xr.DataArray(np.zeros((ny, nx)), dims=("y", "x"))
-        ds = fit_multi_gaussian2d(da2, n_components=1, min_threshold=1.0,
-                                  return_residual=True, return_model=True)
-        assert bool(ds["success"]) is False
-        assert np.isnan(ds["residual"].values).all()
-        assert np.isnan(ds["model"].values).all()
-        assert np.isnan(float(ds["variance_explained"]))
+        with pytest.raises(ValueError, match=r"(all pixels|empty mask)"):
+            fit_multi_gaussian2d(
+                da2,
+                n_components=1,
+                min_threshold=1.0,
+                return_residual=True,
+                return_model=True,
+                coord_type="pixel",  # DA has no coords → pixel mode
+            )
 
     def test_curve_fit_exception_sets_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
         ny, nx = 40, 40
@@ -230,12 +235,14 @@ class TestOptimizerFailures:
         def boom(*args, **kwargs):
             raise RuntimeError("nope")
         monkeypatch.setattr(mg, "curve_fit", boom, raising=True)
-        ds = fit_multi_gaussian2d(da2, n_components=1,
-                                  initial_guesses=np.array([[1.0, 20.0, 18.0, 3.0, 3.0, 0.0]]),
-                                  return_residual=True)
-        assert bool(ds["success"]) is False
-        assert np.isnan(ds["amplitude"].values).all()
-        assert np.isnan(float(ds["variance_explained"]))
+        with pytest.raises(Exception) as excinfo:
+            fit_multi_gaussian2d(
+                da2, n_components=1,
+                initial_guesses=np.array([[1.0, 20.0, 18.0, 3.0, 3.0, 0.0]]),
+                return_residual=True, coord_type="pixel"
+            )
+        # original exception message must be present in the raised error
+        assert "nope" in str(excinfo.value)
 
     def test_curve_fit_pcov_none_sets_errors_nan(self, monkeypatch: pytest.MonkeyPatch) -> None:
         ny, nx = 32, 32
@@ -247,11 +254,16 @@ class TestOptimizerFailures:
         def fake_fit(func, xy, z, p0=None, bounds=None, maxfev=None):
             return popt, None
         monkeypatch.setattr(mg, "curve_fit", fake_fit, raising=True)
-        ds = fit_multi_gaussian2d(da2, n_components=n,
-                                  initial_guesses=np.array([[1,10,12,2,2,0],[0.7,20,8,3,1.5,0.1]], float),
-                                  return_model=False)
-        assert bool(ds["success"]) is True
-        for name in ("amplitude_err","x0_err","y0_err","sigma_x_err","sigma_y_err","theta_err"):
+        ds = fit_multi_gaussian2d(
+            da2, n_components=n,
+            initial_guesses=np.array([[1,10,12,2,2,0],[0.7,20,8,3,1.5,0.1]], float),
+            return_model=False, coord_type="pixel"
+        )
+        assert bool(ds["success"]) is True  # try-block executed; no exception raised
+        for name in (
+            "amplitude_err","x0_pixel_err","y0_pixel_err",
+            "sigma_major_pixel_err","sigma_minor_pixel_err","theta_pixel_err"
+        ):
             assert np.isnan(ds[name].values).all()
 
     def test_curve_fit_with_valid_pcov_sets_finite_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -264,10 +276,18 @@ class TestOptimizerFailures:
         def fake_fit(func, xy, z, p0=None, bounds=None, maxfev=None):
             return popt, pcov
         monkeypatch.setattr(mg, "curve_fit", fake_fit, raising=True)
-        ds = fit_multi_gaussian2d(da2, n_components=n,
-                                  initial_guesses=np.array([[1.0, 10.0, 12.0, 2.0, 2.0, 0.0]], float),
-                                  return_model=False, return_residual=False)
-        for name in ("amplitude_err","x0_err","y0_err","sigma_x_err","sigma_y_err","theta_err","offset_err"):
+        ds = fit_multi_gaussian2d(
+            da2,
+            n_components=n,
+            initial_guesses=np.array([[1.0, 10.0, 12.0, 2.0, 2.0, 0.0]], float),
+            return_model=False,
+            return_residual=False,
+            coord_type="pixel",
+        )
+        for name in (
+            "amplitude_err","x0_pixel_err","y0_pixel_err","sigma_major_pixel_err",
+            "sigma_minor_pixel_err","theta_pixel_err","offset_err"
+        ):
             assert np.all(np.isfinite(ds[name].values))
 
 
@@ -289,7 +309,7 @@ class TestPlotHelper:
         ds_no_comp = xr.Dataset({
             k: v.isel(component=0) if ("component" in v.dims) else v
             for k, v in ds.items()
-            if k in ("x0", "y0", "sigma_x", "sigma_y", "theta", "residual")
+            if k in ("x0", "y0", "sigma_major", "sigma_minor", "theta", "residual")
         })
 
         # draw with indexer and both residual states
@@ -308,8 +328,10 @@ class TestPlotHelper:
 
         # Public API fit; no need for residual/model here
         init = np.array([[1.0, 16.0, 16.0, 3.0, 3.0, 0.0]], float)
-        ds = fit_multi_gaussian2d(cube, n_components=1, initial_guesses=init)
-
+        ds = fit_multi_gaussian2d(
+            cube, n_components=1, initial_guesses=init,
+            coord_type="pixel"  # DataArray has no coords; use pixel indices
+        )
         # Silence plt.show to avoid warnings in CI
         monkeypatch.setattr(plt, "show", lambda *a, **k: None, raising=False)
 
@@ -332,7 +354,10 @@ class TestPlotHelper:
 
         # Fit via public API; result keeps the leading 'time' dim
         init = np.array([[1.0, 16.0, 16.0, 3.0, 3.0, 0.0]], float)
-        ds = fit_multi_gaussian2d(cube, n_components=1, initial_guesses=init, return_residual=True)
+        ds = fit_multi_gaussian2d(
+            cube, n_components=1, initial_guesses=init, return_residual=True,
+            coord_type="pixel"  # DataArray has no coords; use pixel indices
+        )
         assert "time" in ds.dims  # ensure the nested selection can apply
 
         # Silence blocking show()
@@ -360,7 +385,10 @@ class TestPlotHelper:
         cube = xr.concat([cube_t, cube_t + 0.02], dim="band")           # dims: ('band','t','y','x')
 
         init = np.array([[1.0, 12.0, 12.0, 3.0, 3.0, 0.0]], float)
-        ds = fit_multi_gaussian2d(cube, n_components=1, initial_guesses=init, return_residual=True)
+        ds = fit_multi_gaussian2d(
+            cube, n_components=1, initial_guesses=init, return_residual=True,
+            coord_type="pixel"  # DataArray has no coords; use pixel indices
+        )
 
         # avoid blocking GUI
         monkeypatch.setattr(plt, "show", lambda *a, **k: None, raising=False)
@@ -378,7 +406,10 @@ class TestPlotHelper:
         img = xr.DataArray(z, dims=("y", "x"))
 
         init = np.array([[1.0, 20.0, 22.0, 3.0, 3.0, 0.0]], float)
-        ds = fit_multi_gaussian2d(img, n_components=1, initial_guesses=init, return_residual=True)
+        ds = fit_multi_gaussian2d(
+            img, n_components=1, initial_guesses=init, return_residual=True,
+            coord_type="pixel"  # DataArray has no coords; use pixel indices
+        )
 
         # avoid GUI
         monkeypatch.setattr(plt, "show", lambda *a, **k: None, raising=False)
@@ -395,16 +426,22 @@ class TestPlotHelper:
         img = xr.DataArray(z, dims=("y", "x"))
 
         init = np.array([[1.0, 16.0, 16.0, 3.0, 3.0, 0.0]], float)
-        ds = fit_multi_gaussian2d(img, n_components=1, initial_guesses=init)
+        ds = fit_multi_gaussian2d(
+            img, n_components=1, initial_guesses=init,
+            coord_type="pixel", return_residual=True
+        )
 
-        # Remove a required variable to trigger the _get(...) KeyError path
-        ds_missing = ds.drop_vars("x0")
+        # Drop one of the center fields present in the current API.
+        # plot_components is resilient and must NOT raise just because centers/sizes are missing.
+        drop_names = [name for name in ("x0_pixel", "x0", "x") if name in ds]
+        ds_missing = ds.drop_vars(drop_names)
+
 
         # avoid GUI popups
         monkeypatch.setattr(plt, "show", lambda *a, **k: None, raising=False)
 
-        with pytest.raises(KeyError, match=r"result missing 'x0'"):
-            plot_components(img, ds_missing, dims=("x", "y"), indexer=None, show_residual=False)
+        # Expect: no exception; it should draw with fallbacks (e.g., default centers)
+        plot_components(img, ds_missing, dims=("x", "y"), indexer=None, show_residual=False)
 
 class TestNumPyFitting:
     def test_min_threshold_masks_pixels_partial(self) -> None:
@@ -422,6 +459,7 @@ class TestNumPyFitting:
             min_threshold=0.20,   # exercises: mask &= z2d >= min_threshold
             return_model=True,
             return_residual=True,
+            coord_type="pixel",  # DataArray has no coords; use pixel indices
         )
 
         assert bool(ds.success) is True
@@ -444,6 +482,7 @@ class TestNumPyFitting:
             min_threshold=0.20,  # exercises: mask &= z2d >= min_threshold
             return_model=True,
             return_residual=True,
+            coord_type="pixel",  # DataArray has no coords; use pixel indices
         )
 
         assert bool(ds.success) is True
@@ -466,6 +505,7 @@ class TestNumPyFitting:
             max_threshold=0.60,  # exercises: mask &= z2d <= max_threshold
             return_model=True,
             return_residual=True,
+            coord_type="pixel",  # DataArray has no coords; use pixel indices
         )
 
         assert bool(ds.success) is True
@@ -502,12 +542,13 @@ class TestNumPyFitting:
             angle="pa",              # triggers PA→math conversion path
             return_model=False,
             return_residual=False,
+            coord_type="pixel",  # DataArray has no coords; use pixel indices
         )
 
         assert bool(ds["success"]) is True
         # theta is reported in the same convention ("pa"), so it should match pa_expected
-        assert np.isfinite(float(ds["theta"]))
-        assert abs(float(ds["theta"]) - pa_expected) < 0.15  # allow some tolerance
+        assert np.isfinite(float(ds["theta_pixel"]))
+        assert abs(float(ds["theta_pixel"]) - pa_expected) < 0.15  # allow some tolerance
 
     def test_angle_pa_init_conversion_list_of_dicts(self) -> None:
         # Two rotated Gaussians with known *math* angles
@@ -1019,4 +1060,71 @@ class TestAPIHelpers:
                 return_model=False,
                 return_residual=False,
             )
+
+
+class TestAngleEndToEndFitter(unittest.TestCase):
+    @staticmethod
+    def _mk_gauss(ny, nx, amp, x0, y0, sx, sy, theta_math, offset=0.12, flip_x=False):
+        # Build rotated anisotropic Gaussian with math angle `theta_math`
+        y, x = np.mgrid[0:ny, 0:nx]
+        if flip_x:
+            x = x[:,::-1]  # flip x-axis to left-handed coordinate system
+        ct, st = np.cos(theta_math), np.sin(theta_math)
+        X, Y = x - x0, y - y0
+        a = (ct**2)/(2*sx**2) + (st**2)/(2*sy**2)
+        b = st*ct*(1/(2*sx**2) - 1/(2*sy**2))  # sign fix (x term first)
+        c = (st**2)/(2*sx**2) + (ct**2)/(2*sy**2)
+        z = offset + amp * np.exp(-(a*X**2 + 2*b*X*Y + c*Y**2))
+        return xr.DataArray(z, dims=("y", "x"))
+
+    @staticmethod
+    def _angdiff(a, b):
+        d = (a - b + np.pi) % (2*np.pi) - np.pi
+        return abs(d)
+
+    def test_theta_math_pa_relation_pixel_right_and_left_handed(self):
+        # Pixel coords (no world coords) -> right-handed basis by default
+        ny, nx = 64, 64
+        amp, x0, y0 = 1.0, 28.0, 30.0
+        sx, sy = 4.0, 2.0
+
+        for handedness in ("right", "left"):
+            for theta_expected in (30.0, -60.0):
+                theta_math_true = np.deg2rad(theta_expected)
+                da = self._mk_gauss(ny, nx, amp, x0, y0, sx, sy, theta_math_true, flip_x=(handedness == "left"))
+
+                # Seeds: close to truth; run once reporting math, once reporting PA
+                init_math = np.array([[0.9, x0, y0, sx*0.9, sy*1.1, theta_math_true]], float)
+                coord_type = "pixel" if handedness == "right" else "world"
+                if handedness == "left":
+                    # Assign world coords: x descending, y ascending
+                    da = da.assign_coords(x=np.linspace(1.0, -1.0, nx), y=np.linspace(-1.0, 1.0, ny))
+                ds_math = fit_multi_gaussian2d(
+                    da, n_components=1, initial_guesses=init_math,
+                    angle="math", coord_type=coord_type, return_model=False, return_residual=False
+                )
+
+                assert bool(ds_math["success"]) is True
+                theta_math_fit = float(ds_math[f"theta_{coord_type}"].isel(component=0).values)  # reported in math
+                self.assertTrue(
+                    np.isclose(theta_math_fit, theta_math_true),
+                    f"math fit {theta_math_fit} != true {theta_math_true} for {handedness} handed coordinate system"
+                )
+                pa_expected = (np.pi/2 - theta_math_fit) % (2*np.pi)
+                init_pa = np.array([[0.9, x0, y0, sx*0.9, sy*1.1, pa_expected]], float)
+                ds_pa = fit_multi_gaussian2d(
+                    da, n_components=1, initial_guesses=init_pa,
+                    angle="pa", coord_type=coord_type, return_model=False, return_residual=False
+                )
+                assert bool(ds_pa["success"]) is True
+                theta_pa_fit = float(ds_pa[f"theta_{coord_type}"].isel(component=0).values)     # reported in PA
+                self.assertTrue(
+                    np.isclose(theta_pa_fit, pa_expected),
+                    f"pa fit {theta_pa_fit} != expected {pa_expected} for {handedness} handed coordinate system"
+                )
+                # Verify PA = 90° − θ (mod 2π)
+                self.assertTrue(
+                    np.isclose(theta_pa_fit, np.pi/2 - theta_math_fit),
+                    f"pa fit {theta_pa_fit} != pi/2 - math fit {theta_math_fit} for {handedness} handed coordinate system"
+                )
 
