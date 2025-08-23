@@ -48,6 +48,17 @@ def _rot(x, y, theta):
     yr_ = -x * st + y * ct
     return xr_, yr_
 
+def _gauss2d_on_grid(x_grid: np.ndarray,
+                     y_grid: np.ndarray,
+                     amp: float, x0: float, y0: float,
+                     sigma_x: float, sigma_y: float,
+                     theta: float,
+                     *, offset: float = 0.0) -> np.ndarray:
+    """Single rotated anisotropic Gaussian evaluated on prebuilt grids.
+    Uses the same rotation as _scene/_rot to avoid cross-term sign bugs.
+    """
+    xr_, yr_ = _rot(x_grid - x0, y_grid - y0, theta)
+    return offset + amp * np.exp(-(xr_**2) / (2 * sigma_x**2) - (yr_**2) / (2 * sigma_y**2))
 
 def _scene(ny: int, nx: int, comps, *, offset=0.0, noise=0.0, seed=0, coords=False) -> xr.DataArray:
     rng = np.random.default_rng(seed)
@@ -443,7 +454,7 @@ class TestPlotHelper:
         # Expect: no exception; it should draw with fallbacks (e.g., default centers)
         plot_components(img, ds_missing, dims=("x", "y"), indexer=None, show_residual=False)
 
-class TestNumPyFitting:
+class TestNumPyFitting(unittest.TestCase):
     def test_min_threshold_masks_pixels_partial(self) -> None:
 
         ny, nx = 64, 64
@@ -524,13 +535,13 @@ class TestNumPyFitting:
         ct, st = np.cos(theta_math), np.sin(theta_math)
         X, Y = x - x0_true, y - y0_true
         a = (ct**2)/(2*sx_true**2) + (st**2)/(2*sy_true**2)
-        b = st*ct*(1/(2*sy_true**2) - 1/(2*sx_true**2))
+        b = st*ct*(1/(2*sx_true**2) - 1/(2*sy_true**2))
         c = (st**2)/(2*sx_true**2) + (ct**2)/(2*sy_true**2)
         z = 0.12 + amp_true * np.exp(-(a*X**2 + 2*b*X*Y + c*Y**2))
         img = xr.DataArray(z, dims=("y", "x"))
 
-        # Expected PA for ascending axes (sx=+1, sy=+1): PA = arctan2(cos(theta), sin(theta))
-        pa_expected = np.arctan2(np.cos(theta_math), np.sin(theta_math))
+        # Expected PA for ascending axes: PA = (π/2 − θ) mod 2π
+        pa_expected = (np.pi/2 - theta_math) % (2*np.pi)
 
         # Provide initial guesses *in PA*; public API will convert them via _theta_pa_to_math
         init = np.array([[0.9, x0_true, y0_true, sx_true*0.9, sy_true*1.1, pa_expected]], float)
@@ -554,27 +565,18 @@ class TestNumPyFitting:
         # Two rotated Gaussians with known *math* angles
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
-
-        def gauss(a, x0, y0, sx, sy, th):
-            ct, st = np.cos(th), np.sin(th)
-            X, Y = x - x0, y - y0
-            A = (ct**2)/(2*sx**2) + (st**2)/(2*sy**2)
-            B = st*ct*(1/(2*sy**2) - 1/(2*sx**2))
-            C = (st**2)/(2*sx**2) + (ct**2)/(2*sy**2)
-            return a * np.exp(-(A*X**2 + 2*B*X*Y + C*Y**2))
-
         th1_math, th2_math = 0.5, 1.1
         z = (
             0.10
-            + gauss(1.0, 20.0, 22.0, 3.0, 2.0, th1_math)
-            + gauss(0.8,  44.0, 40.0, 4.0, 2.5, th2_math)
+            + _gauss2d_on_grid(x, y, 1.0, 20.0, 22.0, 3.0, 2.0, th1_math, offset=0.0)
+            + _gauss2d_on_grid(x, y, 0.8, 44.0, 40.0, 4.0, 2.5, th2_math, offset=0.0)
         )
         img = xr.DataArray(z, dims=("y", "x"))
 
-        # Convert the true math angles to PA for ascending axes:
-        # PA = arctan2(cos(theta_math), sin(theta_math))
-        pa1 = float(np.arctan2(np.cos(th1_math), np.sin(th1_math)))
-        pa2 = float(np.arctan2(np.cos(th2_math), np.sin(th2_math)))
+        # Convert true math angles to PA (local basis): PA = (π/2 − θ) mod 2π
+        pa1 = float(((np.pi/2) - th1_math) % (2*np.pi))
+        pa2 = float(((np.pi/2) - th2_math) % (2*np.pi))
+
 
         # initial_guesses as LIST OF DICTS with 'theta' → triggers _conv_list_of_dicts path
         init_list = [
@@ -589,11 +591,12 @@ class TestNumPyFitting:
             angle="pa",                  # forces PA→math conversion on init
             return_model=False,
             return_residual=False,
+            coord_type="pixel",          # DataArray has no coords; use pixel indices
         )
 
         # Sort by x0 to align component identity
-        order = np.argsort(ds["x0"].values)
-        thetas_pa = ds["theta"].values[order]
+        order = np.argsort(ds["x0_pixel"].values)
+        thetas_pa = ds["theta_pixel"].values[order]
 
         # Reported angles are in PA (because angle="pa")
         assert np.isfinite(thetas_pa).all()
@@ -607,16 +610,12 @@ class TestNumPyFitting:
         amp_true, x0_true, y0_true = 1.0, 30.0, 28.0
         sx_true, sy_true = 4.0, 2.5
         theta_math = 0.8
-        ct, st = np.cos(theta_math), np.sin(theta_math)
-        X, Y = x - x0_true, y - y0_true
-        A = (ct**2)/(2*sx_true**2) + (st**2)/(2*sy_true**2)
-        B = st*ct*(1/(2*sy_true**2) - 1/(2*sx_true**2))
-        C = (st**2)/(2*sx_true**2) + (ct**2)/(2*sy_true**2)
-        z = 0.12 + amp_true * np.exp(-(A*X**2 + 2*B*X*Y + C*Y**2))
+        z = _gauss2d_on_grid(x, y, amp_true, x0_true, y0_true, sx_true, sy_true, theta_math, offset=0.12)
+
         img = xr.DataArray(z, dims=("y", "x"))
 
-        # Convert math→PA for ascending axes: PA = arctan2(cos(th), sin(th))
-        pa = float(np.arctan2(np.cos(theta_math), np.sin(theta_math)))
+        # Local-basis conversion: PA = (π/2 − θ) mod 2π
+        pa = float(((np.pi/2) - theta_math) % (2*np.pi))
 
         # initial_guesses as dict with components **NumPy array** → hits lines 590–595
         comps = np.array([[0.9, x0_true, y0_true, sx_true, sy_true, pa]], float)
@@ -625,11 +624,12 @@ class TestNumPyFitting:
         ds = fit_multi_gaussian2d(
             img, n_components=1, initial_guesses=init,
             angle="pa", return_model=False, return_residual=False,
+            coord_type="pixel",  # DataArray has no coords; use pixel indices
         )
 
         assert bool(ds["success"]) is True
         # theta reported in PA (angle="pa"); should be close to the PA seed
-        assert abs(float(ds["theta"]) - pa) < 0.25
+        assert abs(float(ds["theta_pixel"]) - pa) < 0.25
 
     def test_angle_pa_init_components_list_of_dicts_converted(self) -> None:
         # Build a single rotated Gaussian (known math angle)
@@ -638,16 +638,11 @@ class TestNumPyFitting:
         amp_true, x0_true, y0_true = 0.9, 22.0, 24.0
         sx_true, sy_true = 3.5, 2.0
         theta_math = 0.6
-        ct, st = np.cos(theta_math), np.sin(theta_math)
-        X, Y = x - x0_true, y - y0_true
-        A = (ct**2)/(2*sx_true**2) + (st**2)/(2*sy_true**2)
-        B = st*ct*(1/(2*sy_true**2) - 1/(2*sx_true**2))
-        C = (st**2)/(2*sx_true**2) + (ct**2)/(2*sy_true**2)
-        z = 0.10 + amp_true * np.exp(-(A*X**2 + 2*B*X*Y + C*Y**2))
-        img = xr.DataArray(z, dims=("y", "x"))
+        z = 0.10 + _gauss2d_on_grid(x, y, amp_true, x0_true, y0_true, sx_true, sy_true, theta_math, offset=0.0)
 
-        # Compute PA from math angle for ascending axes
-        pa = float(np.arctan2(np.cos(theta_math), np.sin(theta_math)))
+        img = xr.DataArray(z, dims=("y", "x"))
+        # Local-basis conversion: PA = (π/2 − θ) mod 2π
+        pa = float(((np.pi/2) - theta_math) % (2*np.pi))
 
         # initial_guesses as dict with components **list of dicts** → hits lines 595–597
         init = {
@@ -659,29 +654,22 @@ class TestNumPyFitting:
         ds = fit_multi_gaussian2d(
             img, n_components=1, initial_guesses=init,
             angle="pa", return_model=False, return_residual=False,
+            coord_type="pixel",  # DataArray has no coords; use pixel indices
         )
 
         assert bool(ds["success"]) is True
-        assert abs(float(ds["theta"]) - pa) < 0.25
+        assert abs(float(ds["theta_pixel"]) - pa) < 0.25
 
     def test_angle_pa_list_of_dicts_missing_theta_covers_if_false_branch(self) -> None:
         # Build a 2-component scene
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
 
-        def gauss(a, x0, y0, sx, sy, th):
-            ct, st = np.cos(th), np.sin(th)
-            X, Y = x - x0, y - y0
-            A = (ct**2)/(2*sx**2) + (st**2)/(2*sy**2)
-            B = st*ct*(1/(2*sy**2) - 1/(2*sx**2))
-            C = (st**2)/(2*sx**2) + (ct**2)/(2*sy**2)
-            return a * np.exp(-(A*X**2 + 2*B*X*Y + C*Y**2))
-
         th1_math, th2_math = 0.7, 0.0  # comp1 rotated; comp2 axis-aligned (math)
         z = (
             0.10
-            + gauss(1.0, 20.0, 22.0, 3.0, 2.0, th1_math)
-            + gauss(0.8,  44.0, 40.0, 4.0, 2.5, th2_math)
+            + _gauss2d_on_grid(x, y, 1.0, 20.0, 22.0, 3.0, 2.0, th1_math)
+            + _gauss2d_on_grid(x, y, 0.8, 44.0, 40.0, 4.0, 2.5, th2_math)
         )
         img = xr.DataArray(z, dims=("y", "x"))
 
@@ -702,11 +690,12 @@ class TestNumPyFitting:
             angle="pa",                  # convert dicts that HAVE 'theta'; report output in PA
             return_model=False,
             return_residual=False,
+            coord_type="pixel",          # DataArray has no coords; use pixel indices
         )
 
         assert bool(ds["success"]) is True
-        order = np.argsort(ds["x0"].values)
-        th_pa = ds["theta"].values[order]
+        order = np.argsort(ds["x0_pixel"].values)
+        th_pa = ds["theta_pixel"].values[order]
 
         assert np.isfinite(th_pa).all()
         assert abs(th_pa[0] - pa1) < 0.3     # comp1 near its seeded PA
@@ -716,17 +705,13 @@ class TestNumPyFitting:
         # 2-component scene
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
-
-        def g(a, x0, y0, sx, sy, th):
-            ct, st = np.cos(th), np.sin(th)
-            X, Y = x - x0, y - y0
-            A = (ct**2)/(2*sx**2) + (st**2)/(2*sy**2)
-            B = st*ct*(1/(2*sy**2) - 1/(2*sx**2))
-            C = (st**2)/(2*sx**2) + (ct**2)/(2*sy**2)
-            return a * np.exp(-(A*X**2 + 2*B*X*Y + C*Y**2))
-
         th1_math, th2_math = 0.4, 1.0
-        z = 0.1 + g(1.0, 18.0, 20.0, 3.0, 2.0, th1_math) + g(0.8, 44.0, 38.0, 4.0, 2.6, th2_math)
+        # z = 0.1 + g(1.0, 18.0, 20.0, 3.0, 2.0, th1_math) + g(0.8, 44.0, 38.0, 4.0, 2.6, th2_math)
+        z = (
+                0.1
+                + _gauss2d_on_grid(x, y, 1.0, 18.0, 20.0, 3.0, 2.0, th1_math, offset=0.0)
+                + _gauss2d_on_grid(x, y, 0.8, 44.0, 38.0, 4.0, 2.6, th2_math, offset=0.0)
+            )
         img = xr.DataArray(z, dims=("y", "x"))
 
         # PA seeds from math angles for ascending axes: PA = arctan2(cos(theta), sin(theta))
@@ -744,12 +729,13 @@ class TestNumPyFitting:
         ds = fit_multi_gaussian2d(
             img, n_components=2, initial_guesses=init, angle="pa",
             return_model=False, return_residual=False,
+            coord_type="pixel",
         )
 
         assert bool(ds["success"]) is True
         # Reported theta is in PA (angle="pa"); check against seeds
-        order = np.argsort(ds["x0"].values)
-        th_pa = ds["theta"].values[order]
+        order = np.argsort(ds["x0_pixel"].values)
+        th_pa = ds["theta_pixel"].values[order]
         assert np.isfinite(th_pa).all()
         assert abs(th_pa[0] - pa1) < 0.3
         assert abs(th_pa[1] - pa2) < 0.3
@@ -777,14 +763,23 @@ class TestNumPyFitting:
             dims=("x", "y"),
             return_model=True,
             return_residual=False,
+            coord_type="pixel",  # DataArray has no coords; use pixel indices
         )
 
         # Now plot with an indexer so the code slices model2d along 'time'
-        fig = mg.plot_components(cube, ds, dims=("x", "y"), indexer={"time": 1}, show_residual=True)
+        ret = mg.plot_components(cube, ds, dims=("x", "y"), indexer={"time": 1}, show_residual=True)
 
-        # Basic sanity check and clean up
+        # Accept both return styles: Figure OR (Figure, axes)
         import matplotlib
-        assert isinstance(fig, matplotlib.figure.Figure)
+        if isinstance(ret, matplotlib.figure.Figure):
+            fig = ret
+        else:
+            # expected tuple: (fig, (ax_data, ax_residual|None))
+            assert isinstance(ret, tuple) and len(ret) >= 1
+            fig = ret[0]
+            assert isinstance(fig, matplotlib.figure.Figure)
+
+        # Basic clean up
         try:
             import matplotlib.pyplot as plt
             plt.close(fig)
@@ -947,6 +942,7 @@ class TestAPIHelpers:
             bounds={"offset": (0.05, 0.2)},
             return_model=False,
             return_residual=False,
+            coord_type="pixel",  # DataArray has no coords; use pixel indices
         )
 
         off = float(ds["offset"])
@@ -961,23 +957,12 @@ class TestAPIHelpers:
         # Make a clean 2-component scene with distinct sigma_x per component
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
-
-        def gauss2d(amp, x0, y0, sx, sy, th):
-            ct, st = np.cos(th), np.sin(th)
-            X, Y = x - x0, y - y0
-            a = (ct**2)/(2*sx**2) + (st**2)/(2*sy**2)
-            b = st*ct*(1/(2*sy**2) - 1/(2*sx**2))
-            c = (st**2)/(2*sx**2) + (ct**2)/(2*sy**2)
-            return amp * np.exp(-(a*X**2 + 2*b*X*Y + c*Y**2))
-
-        # Component A: tight sigma_x ~1.0   | Component B: broader sigma_x ~3.0
         z = (
-            0.05
-            + gauss2d(1.0, 20.0, 20.0, 1.0, 1.2, 0.0)
-            + gauss2d(0.8, 44.0, 40.0, 3.0, 2.5, 0.2)
-        )
+                0.05
+                + _gauss2d_on_grid(x, y, 1.0, 20.0, 20.0, 1.0, 1.2, 0.0, offset=0.0)
+                + _gauss2d_on_grid(x, y, 0.8, 44.0, 40.0, 3.0, 2.5, 0.2, offset=0.0)
+            )
         da = xr.DataArray(z, dims=("y", "x"))
-
         # Reasonable initial guesses (order matches components above)
         init = np.array([
             [0.9, 19.5, 20.5, 1.2, 1.0, 0.1],  # near comp A
@@ -994,11 +979,12 @@ class TestAPIHelpers:
             bounds=bounds,
             return_model=False,
             return_residual=False,
+            coord_type="pixel",  # DataArray has no coords; use pixel indices
         )
 
         # Sort by x0 to align components deterministically (A ~20, B ~44)
-        order = np.argsort(ds["x0"].values)
-        sx_sorted = ds["sigma_x"].values[order]
+        order = np.argsort(ds["x0_pixel"].values)
+        sx_sorted = ds["sigma_major_pixel"].values[order]
 
         # Assert each component's sigma_x falls within its per-component bounds
         assert 0.5 <= sx_sorted[0] <= 1.5
@@ -1038,6 +1024,7 @@ class TestAPIHelpers:
                 initial_guesses=init,   # top-level list of dicts path
                 return_model=False,
                 return_residual=False,
+                coord_type="pixel",      # DataArray has no coords; use pixel indices
             )
 
     def test_init_array_wrong_shape_hits_conv_arr_early_return_then_raises(self) -> None:
@@ -1059,6 +1046,7 @@ class TestAPIHelpers:
                 angle="pa",            # ensure the _convert_init_theta path is executed
                 return_model=False,
                 return_residual=False,
+                coord_type="pixel",    # DataArray has no coords; use pixel indices
             )
 
 
