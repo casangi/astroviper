@@ -378,6 +378,26 @@ def _merge_bounds_multi(
                 _set_range(canon, idx_in_comp, _to_sigma_rng(canon, tuple(rng)), comp_idx=i)  # type: ignore[arg-type]
     return lb, ub
 
+def _count_true_at_least(mask: np.ndarray, need: int, *, chunk: int = 262_144) -> int:
+    """Return the number of True values in *mask*, but stop early once *need* is reached.
+
+    Notes
+    -----
+    - Early exit avoids scanning the whole array when enough pixels are available.
+    - Uses vectorized per-chunk reductions in C (``sum`` on ``bool``) for speed.
+    """
+    need = int(need)
+    if need <= 0:
+        return 0
+    flat = np.asarray(mask, dtype=bool).ravel(order="K")
+    total = 0
+    for i in range(0, flat.size, chunk):
+        block = flat[i : i + chunk]
+        total += int(block.sum(dtype=np.intp))  # bool sum is a fast popcount in C
+        if total >= need:
+            return total
+    return total
+
 
 # ----------------------- Single-plane multi fit -----------------------
 
@@ -429,9 +449,14 @@ def _fit_multi_plane_numpy(
         mask &= z2d >= min_threshold
     if max_threshold is not None:
         mask &= z2d <= max_threshold
-    if mask.sum() < (1 + 6*n_components):
+    # Early validation with short-circuit counting
+    need = 1 + 6 * n_components  # offset + 6 per component
+    mask_count = _count_true_at_least(mask, max(1, need))
+    if mask_count == 0:
+        raise ValueError("Thresholding removed all pixels (empty mask); adjust min/max thresholds.")
+    if mask_count < need:
         # Not enough points relative to params
-        return np.full(1 + 6*n_components, np.nan), np.full(1 + 6*n_components, np.nan), mask
+        raise ValueError("Thresholding resulted in not enough pixels being left to fit all parameters")
 
     # seeds & bounds
     p0 = _normalize_initial_guesses(z2d, n_components, initial_guesses, min_threshold, max_threshold, x1d=x1d, y1d=y1d)
@@ -454,11 +479,31 @@ def _fit_multi_plane_numpy(
             bounds=(lb, ub),
             maxfev=int(max_nfev),
         )
-        perr = np.sqrt(np.diag(pcov)) if (pcov is not None and np.all(np.isfinite(pcov))) else np.full_like(popt, np.nan)
-    except Exception:
-        popt = np.full_like(p0, np.nan)
-        perr = np.full_like(p0, np.nan)
-
+        # Robust error extraction: never raise on bad/odd pcov
+        if pcov is None:
+            # fit successful but errs can't be determined
+            perr = np.full(popt.size, np.nan, dtype=float)
+        else:
+            pcov_arr = np.asarray(pcov, dtype=float)
+            ok_shape = (pcov_arr.ndim == 2 and pcov_arr.shape[0] == pcov_arr.shape[1] == popt.size)
+            if (not ok_shape) or (not np.isfinite(pcov_arr).all()):
+                """
+                not ok_shape → pcov isn’t a square matrix of shape (popt.size,
+                  popt.size) (wrong dims or size mismatch).
+                not np.isfinite(pcov_arr).all() → pcov contains NaN or ±inf anywhere.
+                  # In this branch we do not treat the fit as failed; we just can’t
+                  # trust the uncertainties, so we set perr = NaN (float) and keep
+                  # success=True. Typical causes: ill-conditioned Jacobian, parameter
+                  # degeneracy, or a mocked pcov in tests.
+                """
+                perr = np.full(popt.size, np.nan, dtype=float)
+            else:
+                # Some fits yield small negative variances; avoid exceptions if seterr=raise
+                diag = np.diag(pcov_arr).astype(float, copy=False)
+                perr = np.where(diag >= 0, np.sqrt(diag), np.nan)
+    except Exception as e:
+        # propagate optimizer failure with original message
+        raise type(e)(f"curve_fit failed: {e}") from e
     return popt, perr, mask
 
 
@@ -611,32 +656,21 @@ def _axis_sign(coord: Optional[np.ndarray]) -> float:
     c0, c1 = float(coord[0]), float(coord[1])
     return 1.0 if np.isfinite(c0) and np.isfinite(c1) and (c1 > c0) else -1.0
 
-def _theta_pa_to_math(pa: np.ndarray, sx: float, sy: float) -> np.ndarray:
+def _theta_pa_to_math(pa: np.ndarray) -> np.ndarray:
     """
     Convert PA (from +y toward +x) into math angle (from +x toward +y, CCW)
     in the index coordinate system whose axis directions are set by (sx, sy).
     """
-    pa = np.asarray(pa, dtype=float)
-    # Unit vector along major axis in *world* basis: (+x_world, +y_world)
-    vx_w = np.sin(pa)
-    vy_w = np.cos(pa)
-    # Map to index basis by applying axis signs
-    vx_i = vx_w * sx
-    vy_i = vy_w * sy
-    return np.arctan2(vy_i, vx_i)
+    theta_math = np.pi/2 - pa
+    return (theta_math % (2.0 * np.pi))
 
-def _theta_math_to_pa(theta: np.ndarray, sx: float, sy: float) -> np.ndarray:
+def _theta_math_to_pa(theta_math: np.ndarray) -> np.ndarray:
     """
     Convert math angle in index basis back to PA in world-like basis
     where PA is measured from +y toward +x.
     """
-    theta = np.asarray(theta, dtype=float)
-    vx_i = np.cos(theta)
-    vy_i = np.sin(theta)
-    # Map back to world basis by undoing the axis signs
-    vx_w = vx_i / sx
-    vy_w = vy_i / sy
-    return np.arctan2(vx_w, vy_w)
+    pa = np.pi/2 - theta_math
+    return (pa % (2.0 * np.pi))
 
 def _convert_init_theta(
     init: Optional[Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]],
@@ -656,7 +690,7 @@ def _convert_init_theta(
         out = np.array(arr, dtype=float, copy=True)
         if out.shape != (n, 6):
             return out
-        out[:, 5] = _theta_pa_to_math(out[:, 5], sx, sy)
+        out[:, 5] = _theta_pa_to_math(out[:, 5])
         return out
 
     def _conv_list_of_dicts(lst: Sequence[Dict[str, Number]]) -> List[Dict[str, Number]]:
@@ -664,7 +698,7 @@ def _convert_init_theta(
         for d in lst:
             dd = dict(d)
             if "theta" in dd:
-                dd["theta"] = float(_theta_pa_to_math(np.array([dd["theta"]], float), sx, sy)[0])
+                dd["theta"] = float(_theta_pa_to_math(np.array([dd["theta"]], float))[0])
             new.append(dd)
         return new
 
@@ -1028,7 +1062,7 @@ def fit_multi_gaussian2d(
     # Now publish θ in requested convention
     theta_math = th_math
     theta_pa = xr.DataArray(
-        _theta_math_to_pa(th_math.values, sx_sign, sy_sign),
+        _theta_math_to_pa(th_math.values),
         dims=th.dims, coords=th.coords
     )
     # Preserve backward-compat "theta" using requested convention
@@ -2007,9 +2041,11 @@ def plot_components(
 
     # Figure and panels
     if show_residual and ("residual" in res_plane):
-        fig, (ax0, ax1) = _plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
+        fig, axes = _plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
+        ax0, ax1 = axes
     else:
-        fig, (ax0,) = _plt.subplots(1, 1, figsize=(6, 5), constrained_layout=True)
+        fig, ax0 = _plt.subplots(1, 1, figsize=(6, 5), constrained_layout=True)
+        ax1 = None
 
     Z = _np.asarray(data2d.values, dtype=float)
     if use_world:
