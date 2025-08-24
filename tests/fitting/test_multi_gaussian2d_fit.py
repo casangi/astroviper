@@ -402,6 +402,48 @@ class TestInitialGuessesTopLevelListOfDicts:
         assert np.allclose(sy, [1.5, 3.0])
         assert np.allclose(th, [0.3, 0.0])
 
+# ------------------------- initial guesses: single-dict & top-level list-of-dicts (public API) -------------------------
+# Covers:
+# - wrapping a single dict when n_components==1 (becomes [dict])  ⇢ ensures shorthand is accepted
+# - accepting a top-level list[dict] for multiple components       ⇢ ensures list-of-dicts branch is used
+
+class TestInitialGuessesPublicAPIWrapping:
+    def test_single_dict_shorthand_is_wrapped_and_used(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Small scene
+        ny, nx = 10, 11
+        da = xr.DataArray(np.zeros((ny, nx), dtype=float), dims=("y", "x"))
+        # Single dict (no 'components' key) should be accepted for n_components=1
+        init_single = {
+            "amp": 1.1,
+            "x0": 4.0,
+            "y0": 5.0,
+            "sigma_x": 2.0,
+            "sigma_y": 1.5,
+            "theta": 0.25,
+        }
+
+        captured = {}
+
+        def fake_curve_fit(*_, **kw):
+            p0 = np.asarray(kw["p0"], dtype=float)
+            captured["p0"] = p0.copy()
+            n = (p0.size - 1) // 6
+            pcov = np.eye(1 + 6 * n, dtype=float)
+            return p0, pcov
+
+        monkeypatch.setattr(mg, "curve_fit", fake_curve_fit, raising=True)
+
+        ds = fit_multi_gaussian2d(
+            da, n_components=1, initial_guesses=init_single, coord_type="pixel", return_model=False, return_residual=False
+        )
+        assert isinstance(ds, xr.Dataset)
+        # p0: [offset, (amp,x0,y0,sigma_x,sigma_y,theta)]
+        p0 = captured["p0"]
+        assert p0.shape == (1 + 6 * 1,)
+        # offset defaults to median of data (0.0 here)
+        assert np.isclose(p0[0], 0.0)
+        assert np.allclose(p0[1:], [1.1, 4.0, 5.0, 2.0, 1.5, 0.25])
+
 # ------------------------- plotting helper -------------------------
 
 class TestPlotHelper:
@@ -1829,3 +1871,4 @@ class TestInitialGuessesFwhmMinorMappingPublicAPI:
         sy_indices = [1 + 6 * 0 + 4, 1 + 6 * 1 + 4]
         actual_sy = [float(p0[sy_indices[0]]), float(p0[sy_indices[1]])]
         assert np.allclose(actual_sy, expected_sy, rtol=1e-12, atol=0.0)
+
