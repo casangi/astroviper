@@ -7,6 +7,8 @@ import xarray as xr
 import dask.array as da
 from scipy.optimize import curve_fit
 
+import warnings
+
 Number = Union[int, float]
 ArrayOrDA = Union[np.ndarray, da.Array, xr.DataArray]
 
@@ -783,6 +785,156 @@ def _extract_1d_coords_for_fit(
     # Fallback: pixel indices
     return np.arange(ny, dtype=float), np.arange(nx, dtype=float)
 
+# ---------------------------------------------------------------------------
+# Pixel→World interpolation helper (extracted for reliable coverage)
+# ---------------------------------------------------------------------------
+def _interp_centers_world(
+    ds: xr.Dataset,
+    cx: np.ndarray,
+    cy: np.ndarray,
+    dim_x: str,
+    dim_y: str,
+) -> xr.Dataset:
+    """
+    Interpolate fitted pixel centers (and propagate their errors) into world
+    coordinates when the DataArray carried 1-D coords on (x,y).
+    - Handles ascending and descending coords.
+    - Uses local slope from `np.gradient` for uncertainty propagation.
+    """
+    def _prep(coord: np.ndarray) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        coord = np.asarray(coord, dtype=float)
+        if coord.size < 2 or not np.all(np.isfinite(coord)):
+            return None, None
+        if coord[1] < coord[0]:  # descending → reverse for interp
+            idx = np.arange(coord.size - 1, -1, -1, dtype=float)
+            return idx, coord[::-1]
+        if not np.all(np.diff(coord) > 0):
+            return None, None
+        return np.arange(coord.size, dtype=float), coord
+
+    idx_x, val_x = _prep(cx)
+    idx_y, val_y = _prep(cy)
+    if idx_x is None or idx_y is None:
+        return ds
+
+    def _interp_x(v: np.ndarray) -> np.ndarray:
+        return np.interp(v, idx_x, val_x)
+
+    def _interp_y(v: np.ndarray) -> np.ndarray:
+        return np.interp(v, idx_y, val_y)
+
+    # choose variable names robustly (legacy 'x0'/'y0' back-compat)
+    center_x_var = "x0_pixel" if "x0_pixel" in ds else "x0"
+    center_y_var = "y0_pixel" if "y0_pixel" in ds else "y0"
+    err_x_var = "x0_pixel_err" if "x0_pixel_err" in ds else "x0_err"
+    err_y_var = "y0_pixel_err" if "y0_pixel_err" in ds else "y0_err"
+
+    # centers in world coordinates
+    ds["x0_world"] = xr.apply_ufunc(
+        _interp_x, ds[center_x_var],
+        input_core_dims=[["component"]],
+        output_core_dims=[["component"]],
+        vectorize=True,
+        dask="parallelized",
+        output_dtypes=[float],
+    )
+    ds["y0_world"] = xr.apply_ufunc(
+        _interp_y, ds[center_y_var],
+        input_core_dims=[["component"]],
+        output_core_dims=[["component"]],
+        vectorize=True,
+        dask="parallelized",
+        output_dtypes=[float],
+    )
+
+    # propagate uncertainties using local slope of the mapping
+    _gx = np.gradient(val_x)
+    _gy = np.gradient(val_y)
+    def _slope_x(v: np.ndarray) -> np.ndarray:
+        return np.interp(v, idx_x, _gx)
+    def _slope_y(v: np.ndarray) -> np.ndarray:
+        return np.interp(v, idx_y, _gy)
+    _sx_at = xr.apply_ufunc(
+        _slope_x, ds[center_x_var],
+        input_core_dims=[["component"]],
+        output_core_dims=[["component"]],
+        vectorize=True,
+        dask="parallelized",
+        output_dtypes=[float],
+    )
+    _sy_at = xr.apply_ufunc(
+        _slope_y, ds[center_y_var],
+        input_core_dims=[["component"]],
+        output_core_dims=[["component"]],
+        vectorize=True,
+        dask="parallelized",
+        output_dtypes=[float],
+    )
+    ds["x0_world_err"] = xr.apply_ufunc(
+        np.multiply, _sx_at, ds[err_x_var],
+        input_core_dims=[["component"], ["component"]],
+        output_core_dims=[["component"]],
+        vectorize=True,
+        dask="parallelized",
+        output_dtypes=[float],
+    )
+    ds["y0_world_err"] = xr.apply_ufunc(
+        np.multiply, _sy_at, ds[err_y_var],
+        input_core_dims=[["component"], ["component"]],
+        output_core_dims=[["component"]],
+        vectorize=True,
+        dask="parallelized",
+        output_dtypes=[float],
+    )
+
+    # Self-documenting attrs
+    ds["x0_world"].attrs["description"] = (
+        "Component center x in world coordinates (interpolated from pixel index)."
+    )
+    ds["y0_world"].attrs["description"] = (
+        "Component center y in world coordinates (interpolated from pixel index)."
+    )
+    ds["x0_world_err"].attrs["description"] = (
+        "1-sigma uncertainty of x0_world via local axis slope."
+    )
+    ds["y0_world_err"].attrs["description"] = (
+        "1-sigma uncertainty of y0_world via local axis slope."
+    )
+    return ds
+
+def _add_variance_explained(ds: xr.Dataset) -> xr.Dataset:
+    ds["variance_explained"].attrs["note"] = (
+        "R²-style fit quality for each 2-D image plane (y×x). "
+        "Measures how much of the pixel-to-pixel variance is explained by the fitted model.\n\n"
+        "Definitions (per plane): let Z be the data, \\hat{Z} the fitted model, "
+        "R = Z - \\hat{Z} the residuals, and 'offset' the robust baseline (median) used by the fitter.\n\n"
+        "Explained variance fraction:\n"
+        "    EVF = 1 - \\sum (Z - \\hat{Z})^2 \\/ \\sum (Z - \\text{offset})^2\n"
+        "Equivalently:\n"
+        "    EVF = 1 - \\mathrm{Var}(R) \\/ \\mathrm{Var}(Z - \\text{offset})\n\n"
+        "Range: clipped to [0, 1]. 1.0 = perfect fit; 0.0 ≈ no improvement over a flat offset. "
+        "If the denominator is near zero (nearly flat plane), the metric can be unstable.\n\n"
+        "Quick gut-check scale (per plane):"
+        "\n\n"
+        "Quick gut-check scale (per plane):\n"
+        "  ≥0.9 — excellent; model captures most structure\n"
+        "  0.6–0.9 — usable but imperfect\n"
+        "  0.2–0.6 — poor to fair\n"
+        "  ≈0.0 — no better than a flat background\n\n"
+        "For example, a value of 0.2 might indicate:\n"
+        "  • Source shape not well modeled by the chosen number of 2-D Gaussians\n"
+        "  • Centers/widths/angle off (bad seeds or tight bounds)\n"
+        "  • Background (offset) misestimated\n"
+        "  • Coordinates/scales mismatched (pixel vs world, anisotropic scaling)\n"
+        "  • Additional structure present (neighbors, wings, gradients)\n\n"
+        "For low values, some additional ideas:\n"
+        "  • Inspect residuals — should look noise-like if the model is right\n"
+        "  • Loosen/improve seeds or bounds; try adding a component\n"
+        "  • Check background handling\n"
+        "  • Verify frame/scale (pixel vs world, local pixel size)\n"
+        "  • If noise is high, a low value can be expected — consider SNR or weighting in the fit"
+    )
+    return ds
 
 # ----------------------- Public API -----------------------
 
@@ -1454,83 +1606,8 @@ def fit_multi_gaussian2d(
                 if not np.all(np.diff(coord) > 0):
                     return None, None
                 return np.arange(coord.size, dtype=float), coord
-
-            idx_x, val_x = _prep(cx)
-            idx_y, val_y = _prep(cy)
-
-            if idx_x is not None and idx_y is not None:
-                def _interp_x(v: np.ndarray) -> np.ndarray:
-                    return np.interp(v, idx_x, val_x)
-
-                def _interp_y(v: np.ndarray) -> np.ndarray:
-                    return np.interp(v, idx_y, val_y)
-
-                # choose variable names robustly (back-compat with legacy 'x0', prefer '*_pixel' if present)
-                center_x_var = 'x0_pixel' if 'x0_pixel' in ds else 'x0'
-                center_y_var = 'y0_pixel' if 'y0_pixel' in ds else 'y0'
-                err_x_var = 'x0_pixel_err' if 'x0_pixel_err' in ds else 'x0_err'
-                err_y_var = 'y0_pixel_err' if 'y0_pixel_err' in ds else 'y0_err'
-
-                # centers in world coordinates
-                ds["x0_world"] = xr.apply_ufunc(
-                    _interp_x, ds[center_x_var],
-                    input_core_dims=[["component"]],
-                    output_core_dims=[["component"]],
-                    vectorize=True,
-                    dask="parallelized",
-                    output_dtypes=[float],
-                )
-                ds["y0_world"] = xr.apply_ufunc(
-                    _interp_y, ds[center_y_var],
-                    input_core_dims=[["component"]],
-                    output_core_dims=[["component"]],
-                    vectorize=True,
-                    dask="parallelized",
-                    output_dtypes=[float],
-                )
-
-                # propagate uncertainties using local slope of the mapping
-                _gx = np.gradient(val_x)
-                _gy = np.gradient(val_y)
-                def _slope_x(v: np.ndarray) -> np.ndarray:
-                    return np.interp(v, idx_x, _gx)
-                def _slope_y(v: np.ndarray) -> np.ndarray:
-                    return np.interp(v, idx_y, _gy)
-                _sx_at = xr.apply_ufunc(
-                    _slope_x, ds[center_x_var],
-                    input_core_dims=[["component"]],
-                    output_core_dims=[["component"]],
-                    vectorize=True,
-                    dask="parallelized",
-                    output_dtypes=[float],
-                )
-                _sy_at = xr.apply_ufunc(
-                    _slope_y, ds[center_y_var],
-                    input_core_dims=[["component"]],
-                    output_core_dims=[["component"]],
-                    vectorize=True,
-                    dask="parallelized",
-                    output_dtypes=[float],
-                )
-                ds["x0_world_err"] = xr.apply_ufunc(
-                    np.multiply, _sx_at, ds[err_x_var],
-                    input_core_dims=[["component"], ["component"]],
-                    output_core_dims=[["component"]],
-                    vectorize=True, dask="parallelized",
-                    output_dtypes=[float],
-                )
-                ds["y0_world_err"] = xr.apply_ufunc(
-                    np.multiply, _sy_at, ds[err_y_var],
-                    input_core_dims=[["component"], ["component"]],
-                    output_core_dims=[["component"]],
-                    vectorize=True, dask="parallelized",
-                    output_dtypes=[float],
-                )
-                # Self-documenting attrs
-                ds["x0_world"].attrs["description"] = "Component center x in world coordinates (interpolated from pixel index)."
-                ds["y0_world"].attrs["description"] = "Component center y in world coordinates (interpolated from pixel index)."
-                ds["x0_world_err"].attrs["description"] = "1-sigma uncertainty of x0_world via local axis slope."
-                ds["y0_world_err"].attrs["description"] = "1-sigma uncertainty of y0_world via local axis slope."
+            # Extracted for testability & reliable coverage:
+            ds = _interp_centers_world(ds, cx, cy, dim_x, dim_y)
 
     # --- record invocation metadata on the result Dataset ---
     try:
@@ -1685,37 +1762,8 @@ def fit_multi_gaussian2d(
     # Add an explanatory note for the per-plane explained-variance metric.
     # This text is intentionally verbose to make the DV self-documenting.
     if "variance_explained" in ds:
-        ds["variance_explained"].attrs["note"] = (
-            "R²-style fit quality for each 2-D image plane (y×x). "
-            "Measures how much of the pixel-to-pixel variance is explained by the fitted model.\n\n"
-            "Definitions (per plane): let Z be the data, \\hat{Z} the fitted model, "
-            "R = Z - \\hat{Z} the residuals, and 'offset' the robust baseline (median) used by the fitter.\n\n"
-            "Explained variance fraction:\n"
-            "    EVF = 1 - \\sum (Z - \\hat{Z})^2 \\/ \\sum (Z - \\text{offset})^2\n"
-            "Equivalently:\n"
-            "    EVF = 1 - \\mathrm{Var}(R) \\/ \\mathrm{Var}(Z - \\text{offset})\n\n"
-            "Range: clipped to [0, 1]. 1.0 = perfect fit; 0.0 ≈ no improvement over a flat offset. "
-            "If the denominator is near zero (nearly flat plane), the metric can be unstable.\n\n"
-            "Quick gut-check scale (per plane):"
-            "\n\n"
-            "Quick gut-check scale (per plane):\n"
-            "  ≥0.9 — excellent; model captures most structure\n"
-            "  0.6–0.9 — usable but imperfect\n"
-            "  0.2–0.6 — poor to fair\n"
-            "  ≈0.0 — no better than a flat background\n\n"
-            "For example, a value of 0.2 might indicate:\n"
-            "  • Source shape not well modeled by the chosen number of 2-D Gaussians\n"
-            "  • Centers/widths/angle off (bad seeds or tight bounds)\n"
-            "  • Background (offset) misestimated\n"
-            "  • Coordinates/scales mismatched (pixel vs world, anisotropic scaling)\n"
-            "  • Additional structure present (neighbors, wings, gradients)\n\n"
-            "For low values, some additional ideas:\n"
-            "  • Inspect residuals — should look noise-like if the model is right\n"
-            "  • Loosen/improve seeds or bounds; try adding a component\n"
-            "  • Check background handling\n"
-            "  • Verify frame/scale (pixel vs world, local pixel size)\n"
-            "  • If noise is high, a low value can be expected — consider SNR or weighting in the fit"
-        )
+        # put into own function to try to coerce coverage
+        ds = _add_variance_explained(ds)
     return ds
 
 # TODO: move to a plotting module
@@ -1781,7 +1829,6 @@ def overlay_fit_components(
     falls back to other reasonable options and, as a last resort, draws
     axis-aligned ellipses (rotation = 0°) instead of raising KeyError.
     """
-    import warnings
     from matplotlib.patches import Ellipse as _Ellipse
 
     res = fit  # local alias

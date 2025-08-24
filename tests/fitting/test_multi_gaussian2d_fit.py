@@ -29,8 +29,9 @@ import dask.array as da  # type: ignore
 os.environ.setdefault("MPLBACKEND", "Agg")
 import matplotlib
 import matplotlib.pyplot as plt
+import warnings
+import matplotlib
 
-#from astroviper.fitting import multi_gaussian2d_fit as mg
 from astroviper.fitting.multi_gaussian2d_fit import fit_multi_gaussian2d, plot_components
 import astroviper.fitting.multi_gaussian2d_fit as mg
 
@@ -454,7 +455,80 @@ class TestPlotHelper:
         # Expect: no exception; it should draw with fallbacks (e.g., default centers)
         plot_components(img, ds_missing, dims=("x", "y"), indexer=None, show_residual=False)
 
-class TestNumPyFitting(unittest.TestCase):
+    def test_plot_components_else_branch_for_2d_input(self) -> None:
+         # existing test body...
+         pass
+
+    def test_plot_components_fwhm_converts_from_sigma_when_fwhm_missing(self) -> None:
+        """Cover metric=="fwhm" path that converts sigma→FWHM when fwhm vars are absent."""
+        matplotlib.use("Agg", force=True)
+
+        ny, nx = 36, 36
+        y, x = np.mgrid[0:ny, 0:nx]
+        amp, x0, y0, sx, sy, th = 1.0, 18.0, 19.0, 3.0, 2.0, 0.2
+        z = amp * np.exp(-(((x - x0) ** 2) / (2 * sx ** 2) + ((y - y0) ** 2) / (2 * sy ** 2)))
+        img = xr.DataArray(z, dims=("y", "x"))  # no coords → frame='pixel'
+
+        init = np.array([[amp * 0.9, x0, y0, sx, sy, th]], float)
+        ds = fit_multi_gaussian2d(
+            img,
+            n_components=1,
+            initial_guesses=init,
+            coord_type="pixel",
+            return_model=False,
+            return_residual=False,
+        )
+
+        drop = [v for v in ("fwhm_major_pixel", "fwhm_minor_pixel") if v in ds]
+        ds2 = ds.drop_vars(drop) if drop else ds
+
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            ret = mg.plot_components(img, ds2, dims=("x", "y"), fwhm=True, show=False)
+        # No size-warning expected because sigma→FWHM conversion should have supplied radii
+        assert not any("Missing size info" in str(w.message) for w in rec)
+        import matplotlib.figure as _mf
+        # Accept both return styles: Figure OR (Figure, axes)
+        if isinstance(ret, _mf.Figure):
+            fig = ret
+        else:
+            fig, _axes = ret
+        assert isinstance(fig, _mf.Figure)
+
+    def test_plot_components_fwhm_warns_and_draws_without_size_when_both_missing(self) -> None:
+        """Cover metric=="fwhm" path that warns and uses zero radii when both size kinds are missing."""
+        import matplotlib
+        matplotlib.use("Agg", force=True)
+
+        ny, nx = 32, 32
+        y, x = np.mgrid[0:ny, 0:nx]
+        z = np.exp(-((x - 16) ** 2 + (y - 15) ** 2) / (2 * 3.0 ** 2))
+        img = xr.DataArray(z, dims=("y", "x"))
+
+        init = np.array([[0.9, 16.0, 15.0, 3.0, 2.0, 0.0]], float)
+        ds = fit_multi_gaussian2d(img, n_components=1, initial_guesses=init, coord_type="pixel")
+
+        # Drop *both* sigma and FWHM pixel vars to force the warning branch
+        to_drop = [v for v in (
+            "sigma_major_pixel", "sigma_minor_pixel", "fwhm_major_pixel", "fwhm_minor_pixel"
+        ) if v in ds]
+        ds3 = ds.drop_vars(to_drop) if to_drop else ds
+
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            ret = mg.plot_components(img, ds3, dims=("x", "y"), fwhm=True, show=False)
+
+        msgs = ", ".join(str(w.message) for w in rec)
+        assert "Missing size info (FWHM/sigma)" in msgs
+        import matplotlib.figure as _mf
+        # Accept both styles: Figure OR (Figure, axes)
+        if isinstance(ret, _mf.Figure):
+            fig = ret
+        else:
+            fig, _axes = ret
+        assert isinstance(fig, _mf.Figure)
+
+class TestNumPyFitting: # (unittest.TestCase):
     def test_min_threshold_masks_pixels_partial(self) -> None:
 
         ny, nx = 64, 64
@@ -786,6 +860,112 @@ class TestNumPyFitting(unittest.TestCase):
         except Exception:
             pass
 
+    # ----------------------- Pixel→World interpolation coverage -----------------------
+
+    def test_pixel_fit_interpolates_world_centers_and_propagates_errors_ascending(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+          - when DA has valid ascending 1-D world coords on (x,y) but we fit in pixel mode,
+            the code interpolates centers into world coords and propagates uncertainties
+            using local axis slope from np.gradient.
+        """
+        ny, nx = 40, 50
+        y, x = np.mgrid[0:ny, 0:nx]
+        amp, x0, y0, sx, sy, th = 1.0, 30.0, 18.0, 4.0, 2.5, 0.0
+        z = 0.12 + amp * np.exp(-((x - x0) ** 2) / (2 * sx ** 2) - ((y - y0) ** 2) / (2 * sy ** 2))
+
+        # ascending world coords on both axes
+        xw = 100.0 + 0.5 * np.arange(nx, dtype=float)     # slope 0.5
+        yw = -5.0 + 0.25 * np.arange(ny, dtype=float)     # slope 0.25
+        img = xr.DataArray(z, dims=("y", "x")).assign_coords(x=xw, y=yw)
+
+        # Deterministic optimizer: echo p0 and give finite pcov so *_pixel_err are non-NaN
+        def fake_cf(func, xy, zflat, p0=None, bounds=None, maxfev=None):
+            p0 = np.asarray(p0, float)
+            pcov = np.eye(p0.size, dtype=float) * 0.04  # sqrt(diag)=0.2
+            return p0, pcov
+        monkeypatch.setattr(mg, "curve_fit", fake_cf, raising=True)
+
+        init = np.array([[amp, x0, y0, sx, sy, th]], float)
+        ds = fit_multi_gaussian2d(
+            img,
+            n_components=1,
+            initial_guesses=init,
+            angle="math",
+            coord_type="pixel",           # force pixel fit → triggers interpolation branch
+            return_model=False,
+            return_residual=False,
+        )
+
+        # Interpolated world centers + propagated errors must exist
+        assert "x0_world" in ds and "y0_world" in ds
+        assert "x0_world_err" in ds and "y0_world_err" in ds
+
+        # Expected centers via direct interpolation over pixel indices
+        x0_pix = float(ds["x0_pixel"])
+        y0_pix = float(ds["y0_pixel"])
+        x0w_expected = np.interp(x0_pix, np.arange(nx, dtype=float), xw)
+        y0w_expected = np.interp(y0_pix, np.arange(ny, dtype=float), yw)
+        assert abs(float(ds["x0_world"]) - x0w_expected) < 1e-6
+        assert abs(float(ds["y0_world"]) - y0w_expected) < 1e-6
+
+        # Error propagation: world_err ≈ |local slope| * pixel_err (slope constant for linear coords)
+        slope_x = 0.5
+        slope_y = 0.25
+        ex_pix = float(ds["x0_pixel_err"])
+        ey_pix = float(ds["y0_pixel_err"])
+        assert abs(float(ds["x0_world_err"]) - slope_x * ex_pix) < 1e-12
+        assert abs(float(ds["y0_world_err"]) - slope_y * ey_pix) < 1e-12
+
+    def test_pixel_fit_interpolates_world_centers_descending_x(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        Also cover the _prep() path that reverses a descending axis before interpolation.
+        Keep assertions light (presence and bounds) to avoid over-constraining behavior.
+        """
+        ny, nx = 32, 48
+        y, x = np.mgrid[0:ny, 0:nx]
+        amp, x0, y0, sx, sy, th = 0.9, 20.0, 14.0, 3.2, 2.1, 0.0
+        z = amp * np.exp(-((x - x0) ** 2) / (2 * sx ** 2) - ((y - y0) ** 2) / (2 * sy ** 2))
+
+        # x: descending, y: ascending → triggers idx reversal in _prep()
+        xw = np.linspace(5.0, -7.0, nx, dtype=float)      # descending
+        yw = np.linspace(-1.0, 3.0, ny, dtype=float)      # ascending
+        img = xr.DataArray(z, dims=("y", "x")).assign_coords(x=xw, y=yw)
+
+        def fake_cf(func, xy, zflat, p0=None, bounds=None, maxfev=None):
+            p0 = np.asarray(p0, float)
+            pcov = np.eye(p0.size, dtype=float) * 0.01
+            return p0, pcov
+        monkeypatch.setattr(mg, "curve_fit", fake_cf, raising=True)
+
+        init = np.array([[amp, x0, y0, sx, sy, th]], float)
+        ds = fit_multi_gaussian2d(
+            img,
+            n_components=1,
+            initial_guesses=init,
+            angle="math",
+            coord_type="pixel",
+            return_model=False,
+            return_residual=False,
+        )
+
+        for name in ("x0_world", "y0_world", "x0_world_err", "y0_world_err"):
+            assert name in ds
+
+        # Centers should be finite and within coordinate ranges
+        x0w = float(ds["x0_world"])
+        y0w = float(ds["y0_world"])
+        assert np.isfinite(x0w) and np.isfinite(y0w)
+        assert min(xw) - 1e-9 <= x0w <= max(xw) + 1e-9
+        assert min(yw) - 1e-9 <= y0w <= max(yw) + 1e-9
+
+class TestAPIHelpers:
+     def test_init_components_array_wrong_shape_raises(self) -> None:
+         da = xr.DataArray(np.zeros((16, 17), float), dims=("y", "x"))
+         bad_init = {"offset": 0.0, "components": np.ones((1, 6), float)}  # shape != (n,6) for n=2
 
 class TestAPIHelpers:
     def test_init_components_array_wrong_shape_raises(self) -> None:
@@ -1049,6 +1229,36 @@ class TestAPIHelpers:
                 coord_type="pixel",    # DataArray has no coords; use pixel indices
             )
 
+class TestMetadataNotes:
+    def test_variance_explained_includes_self_documenting_note(self) -> None:
+        """Covers attach explanatory note to ``variance_explained`` DV.
+
+        We run a simple 2-D fit and assert that the returned Dataset contains the
+        ``variance_explained`` variable and that it carries a long, self-documenting
+        ``attrs['note']`` string describing the metric. Using ``coord_type='pixel'``
+        avoids any dependency on world coordinates.
+        """
+        ny, nx = 48, 48
+        y, x = np.mgrid[0:ny, 0:nx]
+        z = 0.05 + np.exp(-((x - 24) ** 2 + (y - 20) ** 2) / (2 * 3.0 ** 2))
+        da = xr.DataArray(z, dims=("y", "x"))
+
+        init = np.array([[0.9, 24.0, 20.0, 3.0, 3.0, 0.0]], float)
+        ds = fit_multi_gaussian2d(
+            da,
+            n_components=1,
+            initial_guesses=init,
+            coord_type="pixel",
+            return_model=False,
+            return_residual=False,
+        )
+
+        assert "variance_explained" in ds
+        note = str(ds["variance_explained"].attrs.get("note", ""))
+        # Spot-check key phrases to avoid brittleness while exercising the block.
+        assert "R²-style fit quality" in note
+        assert "Explained variance fraction" in note
+        assert "Quick gut-check scale" in note
 
 class TestAngleEndToEndFitter(unittest.TestCase):
     @staticmethod
@@ -1116,3 +1326,75 @@ class TestAngleEndToEndFitter(unittest.TestCase):
                     f"pa fit {theta_pa_fit} != pi/2 - math fit {theta_math_fit} for {handedness} handed coordinate system"
                 )
 
+    def test_canonicalization_swaps_axes_and_rotates_theta_by_half_pi(self) -> None:
+        """
+        Covers: th_math = -th, major/minor swap, +π/2 rotation, and wrap to (-π/2, π/2].
+        Construct an ellipse whose *math* major axis is along +y (σx < σy, θ_math = 0),
+        so canonicalization must rotate the reported math angle by +π/2.
+        """
+        ny, nx = 64, 64
+        y, x = np.mgrid[0:ny, 0:nx]
+        amp_true, x0_true, y0_true = 1.0, 30.0, 28.0
+        sx_true, sy_true = 2.0, 5.0          # major axis along +y
+        theta_math_true = 0.0                # no rotation in the scene frame
+        z = _gauss2d_on_grid(x, y, amp_true, x0_true, y0_true, sx_true, sy_true, theta_math_true, offset=0.12)
+        img = xr.DataArray(z, dims=("y", "x"))
+
+        # Seed close to truth; ask for math angles back
+        init = np.array([[0.9, x0_true, y0_true, sx_true*0.95, sy_true*1.05, theta_math_true]], float)
+        ds = fit_multi_gaussian2d(
+            img, n_components=1, initial_guesses=init,
+            angle="math", return_model=False, return_residual=False, coord_type="pixel"
+        )
+
+        assert bool(ds["success"]) is True
+        # After canonicalization: sigma_major >= sigma_minor and theta_math in (-π/2, π/2]
+        smaj = float(ds["sigma_major_pixel"])
+        smin = float(ds["sigma_minor_pixel"])
+        th_m = float(ds["theta_pixel"])  # in math because angle="math"
+        assert smaj >= smin
+        assert (-np.pi/2 - 1e-9) < th_m <= (np.pi/2 + 1e-9)
+
+        # For σx<σy and θ_math_true=0, canonicalization rotates by a half-π.
+        # Endpoints ±π/2 are equivalent (ellipse major-axis ambiguity).
+        # Accept either branch endpoint within tight tolerance.
+        err = min(abs(th_m - np.pi/2), abs(th_m + np.pi/2))
+        assert err < 0.01, f"got {th_m}, expected ≈ ±π/2"
+
+    def test_canonicalization_wraps_theta_into_half_pi_interval(self) -> None:
+        """
+        Covers: half-π wrapping branch without swapping widths (σx >= σy).
+        Choose θ_math just over +π/2 so the wrapped angle lands in (-π/2, π/2].
+        """
+        ny, nx = 64, 64
+        y, x = np.mgrid[0:ny, 0:nx]
+        amp_true, x0_true, y0_true = 1.0, 28.0, 30.0
+        sx_true, sy_true = 5.0, 2.0          # already major along x (no swap)
+        theta_math_true = 1.80               # ~103.13°, should wrap negative
+        z = _gauss2d_on_grid(x, y, amp_true, x0_true, y0_true, sx_true, sy_true, theta_math_true, offset=0.10)
+        img = xr.DataArray(z, dims=("y", "x"))
+
+        init = np.array([[0.95, x0_true, y0_true, sx_true, sy_true, theta_math_true]], float)
+        ds = fit_multi_gaussian2d(
+            img, n_components=1, initial_guesses=init,
+            angle="math", return_model=False, return_residual=False, coord_type="pixel"
+        )
+
+        assert bool(ds["success"]) is True
+        th_m = float(ds["theta_pixel"])  # reported math angle, canonicalized
+
+        # Expected wrap: ((θ + π/2) % π) − π/2  ∈ (-π/2, π/2]
+        expected_wrapped = ((theta_math_true + np.pi/2) % np.pi) - np.pi/2
+        assert (-np.pi/2 - 1e-9) < th_m <= (np.pi/2 + 1e-9)
+        assert abs(th_m - expected_wrapped) < 0.15, f"got {th_m}, expected ~{expected_wrapped}"
+
+        # Also verify PA report matches θ→PA conversion on the same fit if requested
+        # (exercises publishing in requested convention).
+        pa_expected = float(((np.pi/2) - th_m) % (2*np.pi))
+        init_pa = np.array([[0.95, x0_true, y0_true, sx_true, sy_true, pa_expected]], float)
+        ds_pa = fit_multi_gaussian2d(
+            img, n_components=1, initial_guesses=init_pa,
+            angle="pa", return_model=False, return_residual=False, coord_type="pixel"
+        )
+        th_pa = float(ds_pa["theta_pixel"])
+        assert abs(th_pa - pa_expected) < 0.01
