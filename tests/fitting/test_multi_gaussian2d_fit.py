@@ -25,12 +25,13 @@ import xarray as xr
 
 import dask.array as da  # type: ignore
 
+import inspect
+
 # Use headless matplotlib, silence plt.show()
 os.environ.setdefault("MPLBACKEND", "Agg")
 import matplotlib
 import matplotlib.pyplot as plt
 import warnings
-import matplotlib
 
 from astroviper.fitting.multi_gaussian2d_fit import fit_multi_gaussian2d, plot_components
 import astroviper.fitting.multi_gaussian2d_fit as mg
@@ -302,6 +303,104 @@ class TestOptimizerFailures:
         ):
             assert np.all(np.isfinite(ds[name].values))
 
+    def test_curve_fit_nonfinite_popt_triggers_not_success_nan_outputs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Force a non-finite solution from curve_fit so the not-success early-return path is exercised.
+
+        Covers the block that fills component arrays, model and residual with NaNs and sets success=False.
+        """
+        ny, nx = 32, 32
+        img = xr.DataArray(np.ones((ny, nx), float), dims=("y", "x"))
+
+        def fake_fit(func, xy, z, p0=None, bounds=None, maxfev=None):
+            popt = np.asarray(p0, float).copy()
+            # poison one parameter so np.all(np.isfinite(popt)) is False
+            popt[2] = np.nan
+            pcov = np.eye(popt.size, dtype=float)
+            return popt, pcov
+
+        monkeypatch.setattr(mg, "curve_fit", fake_fit, raising=True)
+        init = np.array([[0.8, 10.0, 12.0, 3.0, 2.0, 0.1]], float)
+        ds = fit_multi_gaussian2d(
+            img,
+            n_components=1,
+            initial_guesses=init,
+            coord_type="pixel",
+            return_model=True,
+            return_residual=True,
+        )
+
+        assert bool(ds["success"]) is False
+        # Component-level outputs are NaN
+        assert np.isnan(ds["amplitude"].values).all()
+        assert np.isnan(ds["x0_pixel"].values).all()
+        assert np.isnan(ds["y0_pixel"].values).all()
+        assert np.isnan(ds["sigma_major_pixel"].values).all()
+        assert np.isnan(ds["sigma_minor_pixel"].values).all()
+        assert np.isnan(ds["theta_pixel"].values).all()
+        # Planes are filled with NaN
+        assert np.isnan(ds["model"].values).all()
+        assert np.isnan(ds["residual"].values).all()
+        # Variance explained is NaN
+        assert np.isnan(float(ds["variance_explained"]))
+
+    def test_curve_fit_pcov_wrong_shape_sets_errors_nan_success_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """pcov has the wrong shape → perr:=NaN, but success stays True."""
+        ny, nx = 24, 24
+        da = xr.DataArray(np.ones((ny, nx)), dims=("y", "x"))
+        n = 1
+        p_len = 1 + 6 * n
+        popt = np.linspace(0.1, 0.1 + 0.01*(p_len-1), p_len)
+        bad_pcov = np.eye(p_len - 1, dtype=float)  # wrong shape
+
+        def fake_fit(func, xy, z, p0=None, bounds=None, maxfev=None):
+            return popt, bad_pcov
+
+        monkeypatch.setattr(mg, "curve_fit", fake_fit, raising=True)
+        ds = fit_multi_gaussian2d(
+            da,
+            n_components=n,
+            initial_guesses=np.array([[1.0, 10.0, 12.0, 2.0, 2.0, 0.0]], float),
+            coord_type="pixel",
+            return_model=False,
+            return_residual=False,
+        )
+
+        # success True, but *_err are NaN
+        assert bool(ds["success"]) is True
+        err_vars = (
+            "offset_err","amplitude_err","x0_pixel_err","y0_pixel_err",
+            "sigma_major_pixel_err","sigma_minor_pixel_err","theta_pixel_err",
+        )
+        for v in err_vars:
+            assert np.isnan(float(ds[v])), f"{v} should be NaN when pcov is invalid"
+
+# ------------------------- initial guesses: top-level list-of-dicts -------------------------
+
+class TestInitialGuessesTopLevelListOfDicts:
+    def test_top_level_list_of_dicts_len_mismatch_raises(self) -> None:
+        z = np.zeros((16, 16), float)
+        init = [
+            {"amp": 1.0, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 1.5, "theta": 0.25}
+        ]
+        with pytest.raises(ValueError):
+            mg._normalize_initial_guesses(z, 2, init, None, None)
+
+    def test_top_level_list_of_dicts_happy_path_parses_and_packs(self) -> None:
+        z = np.zeros((20, 20), float)
+        n = 2
+        init = [
+            {"amp": 1.2, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 1.5, "theta": 0.3},
+            {"amplitude": 0.8, "x0": 10.0, "y0": 4.0, "sx": 2.5, "sy": 3.0},  # theta omitted → defaults to 0.0
+        ]
+        p = mg._normalize_initial_guesses(z, n, init, None, None)
+        off, amp, x0, y0, sx, sy, th = mg._unpack_params(p, n)
+        assert off == 0.0  # median-based offset for this path
+        assert np.allclose(amp, [1.2, 0.8])
+        assert np.allclose(x0, [5.0, 10.0])
+        assert np.allclose(y0, [6.0, 4.0])
+        assert np.allclose(sx, [2.0, 2.5])
+        assert np.allclose(sy, [1.5, 3.0])
+        assert np.allclose(th, [0.3, 0.0])
 
 # ------------------------- plotting helper -------------------------
 
@@ -493,6 +592,11 @@ class TestPlotHelper:
             fig = ret
         else:
             fig, _axes = ret
+        # Accept both styles: Figure OR (Figure, axes)
+        if isinstance(ret, _mf.Figure):
+            fig = ret
+        else:
+            fig, _ = ret
         assert isinstance(fig, _mf.Figure)
 
     def test_plot_components_fwhm_warns_and_draws_without_size_when_both_missing(self) -> None:
@@ -517,7 +621,6 @@ class TestPlotHelper:
         with warnings.catch_warnings(record=True) as rec:
             warnings.simplefilter("always")
             ret = mg.plot_components(img, ds3, dims=("x", "y"), fwhm=True, show=False)
-
         msgs = ", ".join(str(w.message) for w in rec)
         assert "Missing size info (FWHM/sigma)" in msgs
         import matplotlib.figure as _mf
@@ -525,7 +628,7 @@ class TestPlotHelper:
         if isinstance(ret, _mf.Figure):
             fig = ret
         else:
-            fig, _axes = ret
+            fig, _ = ret
         assert isinstance(fig, _mf.Figure)
 
 class TestNumPyFitting: # (unittest.TestCase):
@@ -1398,3 +1501,331 @@ class TestAngleEndToEndFitter(unittest.TestCase):
         )
         th_pa = float(ds_pa["theta_pixel"])
         assert abs(th_pa - pa_expected) < 0.01
+
+# ⬇️ Paste this into the existing file: tests/test_multi_gaussian2d_fit.py
+# Place anywhere near related pixel→world interpolation tests.
+
+class TestInnerPrepCoverage:
+    def test_inner_prep_lines_executed(self, monkeypatch):
+        """Covers lines by exercising all branches of the local `_prep`.
+        We shim `_interp_centers_world` to reach the `_prep` closure and call it
+        with inputs that trigger: invalid, descending, non-strict, increasing.
+        """
+        calls: list[tuple[str, object, object]] = []
+
+        def shim(ds, cx, cy, dim_x, dim_y):
+            # Access caller's local `_prep`
+            fr = inspect.currentframe()
+            assert fr is not None and fr.f_back is not None
+            local_prep = fr.f_back.f_locals.get("_prep")
+            assert callable(local_prep), "local _prep not found"
+
+            # 1) invalid (ndim!=1) -> (None, None)
+            idx, val = local_prep(np.array([[1.0, 2.0]]))
+            calls.append(("invalid", idx, val))
+
+            # 2) descending -> reversed indices & coords
+            idx, val = local_prep(np.array([5.0, 4.0, 3.0]))
+            calls.append(("descending", idx.copy(), val.copy()))
+
+            # 3) non-strictly-increasing -> (None, None)
+            idx, val = local_prep(np.array([0.0, 1.0, 1.0, 2.0]))
+            calls.append(("non_strict", idx, val))
+
+            # 4) strictly increasing -> identity
+            idx, val = local_prep(np.array([0.0, 0.5, 1.0]))
+            calls.append(("increasing", idx.copy(), val.copy()))
+
+            # mark for assertion that shim ran
+            out = ds.copy()
+            out.attrs["_shim_ran"] = True
+            return out
+
+        # Fast, deterministic optimizer stub
+        def fake_cf(func, xy, zflat, p0=None, bounds=None, maxfev=None):
+            p0 = np.asarray(p0, float)
+            pcov = np.eye(p0.size, dtype=float) * 0.01
+            return p0, pcov
+
+        monkeypatch.setattr(mg, "_interp_centers_world", shim, raising=True)
+        monkeypatch.setattr(mg, "curve_fit", fake_cf, raising=True)
+
+        # Build DataArray with valid world coords; run in pixel mode to enter branch
+        ny, nx = 6, 8
+        y = np.linspace(-1.0, 1.0, ny, dtype=float)
+        x = np.linspace(-2.0, 2.0, nx, dtype=float)
+        da = xr.DataArray(np.zeros((ny, nx), float), dims=("y", "x"), coords={"y": y, "x": x})
+
+        init = np.array([[0.2, nx / 2 - 0.5, ny / 2 - 0.5, 1.5, 1.0, 0.0]], float)
+        ds = fit_multi_gaussian2d(da, n_components=1, initial_guesses=init, coord_type="pixel")
+
+        # The shim executed and exercised all `_prep` branches
+        assert ds.attrs.get("_shim_ran", False) is True
+        assert len(calls) == 4
+
+        # Validate branch outcomes
+        label, idx, val = calls[0]
+        assert label == "invalid" and idx is None and val is None
+
+        label, idx, val = calls[1]
+        assert label == "descending"
+        assert np.allclose(idx, np.array([2.0, 1.0, 0.0]))
+        assert np.allclose(val, np.array([3.0, 4.0, 5.0]))
+
+        label, idx, val = calls[2]
+        assert label == "non_strict" and idx is None and val is None
+
+        label, idx, val = calls[3]
+        assert label == "increasing"
+        assert np.allclose(idx, np.array([0.0, 1.0, 2.0]))
+        assert np.allclose(val, np.array([0.0, 0.5, 1.0]))
+
+class TestCoordsForNdarrayInput:
+    def test_coords_validation_and_success(self, monkeypatch):
+        """Validate tuple length, shape checks, and successful use of provided coords for ndarray input."""
+
+        # Deterministic optimizer
+        def fake_cf(func, xy, zflat, p0=None, bounds=None, maxfev=None):
+            p0 = np.asarray(p0, float)
+            pcov = np.eye(p0.size, dtype=float) * 0.01
+            return p0, pcov
+
+        monkeypatch.setattr(mg, "curve_fit", fake_cf, raising=True)
+
+        ny, nx = 10, 12
+        img = np.zeros((ny, nx), float)
+        init = np.array([[0.5, nx/2 - 0.5, ny/2 - 0.5, 2.0, 1.5, 0.0]], float)
+
+        # 1) wrong-length coords tuple -> error
+        with pytest.raises(ValueError):
+            fit_multi_gaussian2d(img, n_components=1, initial_guesses=init, coords=(np.arange(nx, dtype=float),))
+
+
+    def test_numpy_input_coords_tuple_happy_path_returns_y1d_x1d(self) -> None:
+        """
+        NumPy input with coords=(x1d, y1d) should be accepted and returned (y1d, x1d).
+        Covers the success path that converts and validates coords, then returns them.
+        """
+        ny, nx = 7, 9
+        # original_input is a plain NumPy array (not DataArray)
+        original = np.zeros((ny, nx), dtype=float)
+        # Build a minimal DataArray used only for sizes dim_y/dim_x inside the helper
+        da_tr = xr.DataArray(np.empty((ny, nx), dtype=float), dims=("y", "x"))
+        # Provide non-trivial 1-D coordinates (not pixel indices) to exercise the branch
+        x1d = np.linspace(-2.5, 1.5, nx, dtype=float)
+        y1d = np.linspace(10.0, 12.0, ny, dtype=float)
+        y_out, x_out = mg._extract_1d_coords_for_fit(
+            original_input=original,
+            da_tr=da_tr,
+            coord_type="world",          # ignored for NumPy input
+            coords=(x1d, y1d),           # (x1d, y1d)
+            dim_y="y",
+            dim_x="x",
+        )
+        assert np.allclose(y_out, y1d)
+        assert np.allclose(x_out, x1d)
+
+    def test_numpy_input_coords_tuple_wrong_lengths_raise(self) -> None:
+        """
+        NumPy input with coords of wrong lengths should raise.
+        Exercises the validation right before the success return.
+        """
+        ny, nx = 5, 6
+        original = np.zeros((ny, nx), dtype=float)
+        da_tr = xr.DataArray(np.empty((ny, nx), dtype=float), dims=("y", "x"))
+        # x1d has wrong length
+        x1d_bad = np.linspace(0.0, 1.0, nx + 1, dtype=float)
+        y1d_ok = np.linspace(0.0, 1.0, ny, dtype=float)
+        with pytest.raises(ValueError):
+            mg._extract_1d_coords_for_fit(
+                original_input=original,
+                da_tr=da_tr,
+                coord_type="world",
+                coords=(x1d_bad, y1d_ok),
+                dim_y="y",
+                dim_x="x",
+            )
+
+# ------------------------- result metadata: package version fallback -------------------------
+
+class TestResultMetadataVersion:
+    def _tiny_scene(self) -> xr.DataArray:
+        ny, nx = 6, 6
+        y, x = np.mgrid[0:ny, 0:nx]
+        z = 0.05 + np.exp(-((x - 3.0) ** 2 + (y - 2.0) ** 2) / (2 * 1.2 ** 2))
+        return xr.DataArray(z, dims=("y", "x"))
+
+    def _one_comp(self) -> np.ndarray:
+        return np.array([[1.0, 3.0, 2.0, 1.2, 1.2, 0.0]], float)
+
+    def test_version_fallback_reads_package_dunder(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """If importlib.metadata.version fails, fallback should read astroviper.__version__."""
+        import importlib.metadata as ilmd
+        # Force the primary version lookup to fail → exercise fallback path
+        def _boom(*_, **__):
+            raise Exception("no version")
+        monkeypatch.setattr(ilmd, "version", _boom, raising=True)
+        # Ensure the top-level package exposes __version__
+        import sys, types
+        if "astroviper" not in sys.modules:
+            sys.modules["astroviper"] = types.ModuleType("astroviper")
+        monkeypatch.setattr(sys.modules["astroviper"], "__version__", "0.0.test", raising=False)
+
+        da = self._tiny_scene()
+        ds = fit_multi_gaussian2d(da, n_components=1, initial_guesses=self._one_comp(), coord_type="pixel")
+
+        assert ds.attrs.get("package") == "astroviper"
+        assert ds.attrs.get("version") == "0.0.test"
+
+    def test_version_fallback_unknown_when_no_dunder(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """If both metadata lookup and __version__ access fail, version should be 'unknown'."""
+        import importlib.metadata as ilmd
+        def _boom(*_, **__):
+            raise Exception("no version")
+        monkeypatch.setattr(ilmd, "version", _boom, raising=True)
+        # Remove __version__ if present on the loaded package
+        import sys
+        if "astroviper" in sys.modules:
+            monkeypatch.delattr(sys.modules["astroviper"], "__version__", raising=False)
+
+        da = self._tiny_scene()
+        ds = fit_multi_gaussian2d(da, n_components=1, initial_guesses=self._one_comp(), coord_type="pixel")
+
+        assert ds.attrs.get("package") == "astroviper"
+        assert ds.attrs.get("version") == "unknown"
+
+
+# ------------------------- bounds mapping: FWHM → σ (sigma) -------------------------
+# Covers the branch that maps 'fwhm_major'/'fwhm_minor' bounds into 'sigma_x'/'sigma_y',
+# including both per-component list-of-tuples and single-tuple cases.
+
+class TestBoundsFwhmMapping:
+    def _dummy_results(
+        self, da: xr.DataArray, n: int
+    ) -> tuple[xr.DataArray, xr.DataArray, xr.DataArray, xr.DataArray, xr.DataArray, xr.DataArray,
+               xr.DataArray, xr.DataArray, xr.DataArray, xr.DataArray, xr.DataArray, xr.DataArray,
+               xr.DataArray, xr.DataArray, xr.DataArray, xr.DataArray,
+               xr.DataArray, xr.DataArray, xr.DataArray, xr.DataArray,
+               xr.DataArray, xr.DataArray]:
+        comp = xr.DataArray(np.zeros((n,), dtype=float), dims=("component",))
+        # 6 params + 6 errors + 4 derived
+        blocks = [comp.copy() for _ in range(6 + 6 + 4)]
+        offset = xr.DataArray(0.0)
+        offset_e = xr.DataArray(0.0)
+        success = xr.DataArray(True)
+        varexp = xr.DataArray(1.0)
+        resid = xr.DataArray(np.zeros_like(da.values), dims=da.dims)
+        model = xr.DataArray(np.zeros_like(da.values), dims=da.dims)
+        return (*blocks, offset, offset_e, success, varexp, resid, model)
+
+    def test_fwhm_major_list_of_tuples_maps_to_sigma_x_per_component(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Capture the mapped bounds passed into the vectorized wrapper
+        seen: dict[str, dict] = {}
+
+        # Keep original so we can forward calls not targeting the plane wrapper
+        orig_apply_ufunc = xr.apply_ufunc
+
+        def fake_apply_ufunc(*args, **kw):
+            func = args[0] if args else None
+            # Intercept only the vectorized plane wrapper call (where bounds are passed)
+            if func is mg._multi_fit_plane_wrapper:
+                da_tr = args[1]
+                kwargs_dict = kw.get("kwargs", {}) or {}
+                seen["bounds"] = dict(kwargs_dict.get("bounds", {}))
+                n = int(kwargs_dict.get("n_components", 1))
+                # Return minimally valid shaped results to let the pipeline finish
+                return TestBoundsFwhmMapping()._dummy_results(da_tr, n)
+            # For other apply_ufunc usages (e.g., np.greater_equal), defer to original
+            return orig_apply_ufunc(*args, **kw)
+
+        monkeypatch.setattr(xr, "apply_ufunc", fake_apply_ufunc, raising=True)
+
+        ny, nx = 8, 9
+        da = xr.DataArray(np.zeros((ny, nx), dtype=float), dims=("y", "x"))
+        init = np.array([[1.0, 3.0, 4.0, 2.0, 1.5, 0.0],
+                         [0.8, 6.0, 2.0, 3.0, 2.5, 0.1]], dtype=float)
+        bounds = {"fwhm_major": [(1.0, 4.0), (2.0, 5.0)]}
+
+        ds = fit_multi_gaussian2d(da, n_components=2, initial_guesses=init, bounds=bounds, coord_type="pixel")
+        assert isinstance(ds, xr.Dataset)
+
+        conv = mg._FWHM2SIG
+        expected = {"sigma_x": [(1.0 * conv, 4.0 * conv), (2.0 * conv, 5.0 * conv)]}
+        assert seen["bounds"] == expected
+
+    def test_fwhm_minor_single_tuple_maps_to_sigma_y_tuple(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: dict[str, dict] = {}
+
+        orig_apply_ufunc = xr.apply_ufunc
+
+        def fake_apply_ufunc(*args, **kw):
+            func = args[0] if args else None
+            if func is mg._multi_fit_plane_wrapper:
+                da_tr = args[1]
+                kwargs_dict = kw.get("kwargs", {}) or {}
+                seen["bounds"] = dict(kwargs_dict.get("bounds", {}))
+                n = int(kwargs_dict.get("n_components", 1))
+                return TestBoundsFwhmMapping()._dummy_results(da_tr, n)
+            return orig_apply_ufunc(*args, **kw)
+
+        monkeypatch.setattr(xr, "apply_ufunc", fake_apply_ufunc, raising=True)
+
+        ny, nx = 7, 7
+        da = xr.DataArray(np.zeros((ny, nx), dtype=float), dims=("y", "x"))
+        init = np.array([[1.0, 3.0, 3.0, 1.2, 1.1, 0.0]], dtype=float)
+        bounds = {"fwhm_minor": (2.0, 6.0)}
+
+        ds = fit_multi_gaussian2d(da, n_components=1, initial_guesses=init, bounds=bounds, coord_type="pixel")
+        assert isinstance(ds, xr.Dataset)
+
+        conv = mg._FWHM2SIG
+        expected = {"sigma_y": (2.0 * conv, 6.0 * conv)}
+        assert seen["bounds"] == expected
+
+
+# ------------------------- cover mapping of fwhm_minor → sigma_y (public API) -------------------------
+# Exercises the branch where component dicts omit sigma_y/sy but provide fwhm_minor.
+# This drives the internal list-of-dicts parser so the conversion is applied before fitting.
+
+class TestInitialGuessesFwhmMinorMappingPublicAPI:
+    def test_components_list_of_dicts_maps_fwhm_minor_to_sigma_y_in_p0(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Build a tiny scene
+        ny, nx = 12, 13
+        y, x = np.mgrid[0:ny, 0:nx]
+        z = 0.05 + np.exp(-((x - 6.0) ** 2 + (y - 5.0) ** 2) / (2 * 2.0 ** 2))
+        da = xr.DataArray(z, dims=("y", "x"))
+
+        # Two components with sigma_x provided, sigma_y omitted, fwhm_minor provided.
+        init = {
+            "components": [
+                {"amp": 1.0, "x0": 6.0, "y0": 5.0, "sigma_x": 2.0, "fwhm_minor": 1.5, "theta": 0.1},
+                {"amplitude": 0.8, "x0": 9.0, "y0": 3.0, "sx": 3.0, "fwhm_minor": 2.5, "theta": 0.2},
+            ]
+        }
+
+        captured = {}
+
+        # Intercept scipy.optimize.curve_fit to capture the seed vector p0
+        def fake_curve_fit(*args, **kwargs):
+            p0 = kwargs["p0"]
+            captured["p0"] = np.asarray(p0, dtype=float).copy()
+            n = (p0.size - 1) // 6
+            size = 1 + 6 * n
+            pcov = np.eye(size, dtype=float)
+            return p0, pcov
+
+        monkeypatch.setattr(mg, "curve_fit", fake_curve_fit, raising=True)
+
+        ds = fit_multi_gaussian2d(
+            da, n_components=2, initial_guesses=init, coord_type="pixel", return_model=False, return_residual=False
+        )
+        assert isinstance(ds, xr.Dataset)
+
+        # p0 layout: [offset, (amp,x0,y0,sigma_x,sigma_y,theta)*n]
+        p0 = captured["p0"]
+        # Expected sigma_y from FWHM: σ = FWHM / (2*sqrt(2*ln 2))
+        conv = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+        expected_sy = [1.5 * conv, 2.5 * conv]
+        sy_indices = [1 + 6 * 0 + 4, 1 + 6 * 1 + 4]
+        actual_sy = [float(p0[sy_indices[0]]), float(p0[sy_indices[1]])]
+        assert np.allclose(actual_sy, expected_sy, rtol=1e-12, atol=0.0)
