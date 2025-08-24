@@ -208,6 +208,18 @@ def _extract_params_from_comp_dicts(comp_list, n):
         th[i]   = float(comp.get("theta", 0.0))
     return amps, x0, y0, sx, sy, th
 
+def _process_list_of_dicts(
+    init: Sequence[Dict[str, Number]],
+    n: int,
+    offset: float,
+) -> np.ndarray:
+    """Helper to parse list-of-dicts initial_guesses with provided offset.
+    placing in own fucntion to try to get test coverage to recoognize it.
+    """
+    if len(init) != n:
+        raise ValueError(f"init['components'] must have length n={n}")
+    amps, x0, y0, sx, sy, th = _extract_params_from_comp_dicts(init, n)
+    return _pack_params(offset, amps, x0, y0, sx, sy, th)
 
 def _normalize_initial_guesses(
     z2d: np.ndarray,
@@ -293,18 +305,7 @@ def _normalize_initial_guesses(
             return _pack_params(offset, amps, x0, y0, sx, sy, th)
 
         if isinstance(init, (list, tuple)) and len(init) > 0 and isinstance(init[0], dict):
-            if len(init) != n:
-                raise ValueError(f"init['components'] must have length n={n}")
-            amps = np.empty(n); x0 = np.empty(n); y0 = np.empty(n)
-            sx = np.empty(n);  sy = np.empty(n);  th = np.empty(n)
-            for i, comp in enumerate(init):
-                amps[i] = float(comp["amp"] if "amp" in comp else comp["amplitude"])
-                x0[i]  = float(comp["x0"])
-                y0[i]  = float(comp["y0"])
-                sx[i]  = float(comp.get("sigma_x", comp.get("sx")))
-                sy[i]  = float(comp.get("sigma_y", comp.get("sy")))
-                th[i]  = float(comp.get("theta", 0.0))
-            return _pack_params(offset, amps, x0, y0, sx, sy, th)
+            return (_process_list_of_dicts(init, n, offset))
     # Array/list form (numpy array or list-of-lists)
     arr = np.asarray(init, dtype=float)
     if arr.shape != (n, 6):
@@ -935,6 +936,32 @@ def _add_variance_explained(ds: xr.Dataset) -> xr.Dataset:
         "  • If noise is high, a low value can be expected — consider SNR or weighting in the fit"
     )
     return ds
+
+def _build_call(
+    _inspect, _param,
+):
+    # Build "call" with only parameters that differ from defaults (best-effort)
+    # putting in own fucntion to try to get coverage to recognize it
+    _call = "fit_multi_gaussian2d("
+    try:
+        if _inspect is not None:
+            _sig = _inspect.signature(fit_multi_gaussian2d)
+            _defs = {k: v.default for k, v in _sig.parameters.items()}
+            _pairs = []
+            for k, v in _param.items():
+                dv = _defs.get(k, object())
+                try:
+                    same = (v == dv)
+                except Exception:
+                    same = False
+                if (v is None and dv is None) or same:
+                    continue
+                _pairs.append(f"{k}={_short(v)}")
+            _call += ", ".join(_pairs)
+        _call += ")"
+    except Exception:
+        _call = "fit_multi_gaussian2d(...)"
+    return _call
 
 # ----------------------- Public API -----------------------
 
@@ -1658,27 +1685,7 @@ def fit_multi_gaussian2d(
         coord_type=str(coord_type),
         coords=_short(coords),
     )
-
-    # Build "call" with only parameters that differ from defaults (best-effort)
-    _call = "fit_multi_gaussian2d("
-    try:
-        if _inspect is not None:
-            _sig = _inspect.signature(fit_multi_gaussian2d)
-            _defs = {k: v.default for k, v in _sig.parameters.items()}
-            _pairs = []
-            for k, v in _param.items():
-                dv = _defs.get(k, object())
-                try:
-                    same = (v == dv)
-                except Exception:
-                    same = False
-                if (v is None and dv is None) or same:
-                    continue
-                _pairs.append(f"{k}={_short(v)}")
-            _call += ", ".join(_pairs)
-        _call += ")"
-    except Exception:
-        _call = "fit_multi_gaussian2d(...)"
+    _call = _build_call(_inspect, _param)
 
     # Package metadata
     _pkg = (__package__.split(".")[0] if __package__ else "astroviper")
