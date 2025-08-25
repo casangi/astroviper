@@ -1,4 +1,3 @@
-# tests/test_multi_gaussian2d_all.py
 """
 Unified pytest module for astroviper.fitting.multi_gaussian2d_fit
 
@@ -33,11 +32,11 @@ import matplotlib
 import matplotlib.pyplot as plt
 import warnings
 
-from astroviper.fitting.multi_gaussian2d_fit import (
+from astroviper.distributed.image_analysis.multi_gaussian2d_fit import (
     fit_multi_gaussian2d,
     plot_components,
 )
-import astroviper.fitting.multi_gaussian2d_fit as mg
+import astroviper.distributed.image_analysis.multi_gaussian2d_fit as mg
 
 # ------------------------- fixtures / helpers -------------------------
 
@@ -248,6 +247,7 @@ class TestInputs:
 
 
 class TestBoundsDimsAPI:
+    # TODO these tests need to be rewritten to use public API
     def test_bounds_merge_tuple_all_and_unknown_key_ignored(self) -> None:
         lb0, ub0 = mg._default_bounds_multi((20, 30), 2)
         user = {"foo": (1.0, 2.0), "amplitude": (0.0, 5.0)}  # 'foo' ignored
@@ -1618,10 +1618,6 @@ class TestAPIHelpers:
         assert np.allclose(amp, [1.0, 0.7])
 
     def test_bounds_offset_branch_public_api(self) -> None:
-        import numpy as np
-        import xarray as xr
-        from astroviper.fitting.multi_gaussian2d_fit import fit_multi_gaussian2d
-
         # Build a simple scene with a known offset (~0.12)
         ny, nx = 40, 40
         y, x = np.mgrid[0:ny, 0:nx]
@@ -1647,10 +1643,6 @@ class TestAPIHelpers:
         assert bool(ds["success"]) is True
 
     def test_bounds_per_component_list_public_api_hits_comp_idx_branch(self) -> None:
-        import numpy as np
-        import xarray as xr
-        from astroviper.fitting.multi_gaussian2d_fit import fit_multi_gaussian2d
-
         # Make a clean 2-component scene with distinct sigma_x per component
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
@@ -1691,9 +1683,6 @@ class TestAPIHelpers:
         assert 2.0 <= sx_sorted[1] <= 4.0
 
     def test_public_api_ensure_dataarray_raises_on_unsupported_type(self) -> None:
-        import pytest
-        from astroviper.fitting.multi_gaussian2d_fit import fit_multi_gaussian2d
-
         # object() is neither np.ndarray, dask.array.Array, nor xarray.DataArray
         with pytest.raises(TypeError, match=r"Unsupported input type"):
             fit_multi_gaussian2d(object(), n_components=1)
