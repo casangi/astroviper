@@ -2565,6 +2565,7 @@ class TestResultMetadataShortener:
         assert len(s) == 120 and s.endswith("...")
         assert "shape=" not in s
 
+
 class TestWorldSeeding:
     def test_autoseed_uses_world_axes_and_recovers_params(self) -> None:
         # Synthetic single Gaussian in WORLD coords (not pixel indices)
