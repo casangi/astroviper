@@ -973,6 +973,21 @@ def _build_call(
         _call = "fit_multi_gaussian2d(...)"
     return _call
 
+
+def _add_angle_attrs(ds, conv, frame):
+    # putting in func to try to get coverage to recognize it
+    for _name, _frame in (
+        ("theta_pixel", "pixel"),
+        ("theta_pixel_err", "pixel"),
+        ("theta_world", "world"),
+        ("theta_world_err", "world"),
+    ):
+        if _name in ds:
+            ds[_name].attrs["convention"] = conv
+            ds[_name].attrs["frame"] = _frame
+            ds[_name].attrs["units"] = "rad"
+    return ds
+
 # ----------------------- Public API -----------------------
 
 def fit_multi_gaussian2d(
@@ -1596,16 +1611,9 @@ def fit_multi_gaussian2d(
     ds.attrs["theta_convention"] = conv
     # Add explicit angular units to all theta-related outputs
     # Annotate angle variables with convention + frame (no bare 'theta' var in this DS)
-    for _name, _frame in (
-        ("theta_pixel", "pixel"),
-        ("theta_pixel_err", "pixel"),
-        ("theta_world", "world"),
-        ("theta_world_err", "world"),
-    ):
-        if _name in ds:
-            ds[_name].attrs["convention"] = conv
-            ds[_name].attrs["frame"] = _frame
-            ds[_name].attrs["units"] = "rad"
+
+    ds = _add_angle_attrs(ds, conv, "pixel")
+
     if return_residual:
         ds["residual"] = residual
     if return_model:
