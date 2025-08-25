@@ -1872,3 +1872,103 @@ class TestInitialGuessesFwhmMinorMappingPublicAPI:
         actual_sy = [float(p0[sy_indices[0]]), float(p0[sy_indices[1]])]
         assert np.allclose(actual_sy, expected_sy, rtol=1e-12, atol=0.0)
 
+class TestAutoSeedingPixelPublicAPI:
+    def test_auto_seed_pixel_public_api(self) -> None:
+        """Public API: pixel coords + auto initial guesses."""
+        ny, nx = 7, 9
+        z = np.zeros((ny, nx), dtype=float)
+        # two separated bright pixels
+        for (y, x, v) in [(1, 1, 10.0), (5, 7, 8.0)]:
+            z[y, x] = v
+        da = xr.DataArray(z, dims=("y", "x"))  # no world coords
+
+        ds = fit_multi_gaussian2d(
+            da,
+            n_components=2,
+            initial_guesses=None,        # auto-seed (hits pixel seeding path)
+            coord_type="pixel",          # pixel mode via public API
+            return_model=False,
+            return_residual=False,
+        )
+        assert bool(ds.success)
+
+        # centers should land near the two bright pixels (order-agnostic)
+        pred = np.column_stack([ds["x0_pixel"].values, ds["y0_pixel"].values])
+        expected = [(1.0, 1.0), (7.0, 5.0)]
+        for (xe, ye) in expected:
+            dmin = np.min(np.hypot(pred[:, 0] - xe, pred[:, 1] - ye))
+            assert dmin < 1.0
+
+class TestAutoSeedingPixelElsePublicAPI:
+    def test_auto_seeding_pixel_else_path_public_api(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """
+        Public API call drives the pixel-seeding 'else' path.
+        We force the underlying plane fitter to treat axes as pixel-index grids,
+        then assert seeds: centers at pixel indices and widths == max(nx, ny)/10.
+        """
+        ny, nx = 12, 15
+        yi, xi = 4, 11
+        img = np.zeros((ny, nx), dtype=float)
+        img[yi, xi] = 10.0
+
+        # World-like coords present on the DataArray (public API stays the same)
+        da = xr.DataArray(
+            img,
+            dims=("y", "x"),
+            coords={
+                "y": np.linspace(-5.0, 5.0, ny),
+                "x": np.linspace(100.0, 130.0, nx),
+            },
+        )
+
+        # Capture the optimizer's initial parameter vector (p0)
+        captured: dict[str, np.ndarray] = {}
+
+        def _fake_curve_fit(func, xy, zflat, *, p0=None, bounds=None, maxfev=None):
+            p0 = np.asarray(p0, dtype=float)
+            captured["p0"] = p0.copy()
+            # Echo p0; identity covariance (keeps API stable)
+            return p0, np.eye(p0.size, dtype=float)
+
+        monkeypatch.setattr(mg, "curve_fit", _fake_curve_fit, raising=True)
+
+        # Force pixel seeding by making the internal fitter treat axes as None.
+        # (Still invoked through the public API; we do not call privates ourselves.)
+        _orig_fit = mg._fit_multi_plane_numpy
+
+        def _fit_force_pixel(z2d, n_components, min_threshold, max_threshold,
+                             initial_guesses, bounds, max_nfev, *, x1d=None, y1d=None):
+            return _orig_fit(
+                z2d, n_components, min_threshold, max_threshold,
+                initial_guesses, bounds, max_nfev, x1d=None, y1d=None
+            )
+
+        monkeypatch.setattr(mg, "_fit_multi_plane_numpy", _fit_force_pixel, raising=True)
+
+        # Public API call
+        ds = mg.fit_multi_gaussian2d(
+            da,
+            n_components=1,
+            initial_guesses=None,
+            coord_type="world",
+            return_model=False,
+            return_residual=False,
+        )
+        assert isinstance(ds, xr.Dataset)
+        assert "success" in ds and bool(ds["success"])
+
+        # p0: [offset, amp, x0, y0, sigma_x, sigma_y, theta]
+        p0 = captured["p0"]
+        assert p0.shape == (7,)
+
+        # Centers are pixel indices; widths use max(nx, ny)/10
+        assert np.isclose(p0[2], float(xi))
+        assert np.isclose(p0[3], float(yi))
+        expected_w = max(nx, ny) / 10.0
+        assert np.isclose(p0[4], expected_w)
+        assert np.isclose(p0[5], expected_w)
+
+        # Sanity on the rest
+        assert p0[1] > 0.0          # amp
+        assert np.isclose(p0[0], 0) # offset
+        assert np.isclose(p0[6], 0) # theta

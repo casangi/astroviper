@@ -221,6 +221,17 @@ def _process_list_of_dicts(
     amps, x0, y0, sx, sy, th = _extract_params_from_comp_dicts(init, n)
     return _pack_params(offset, amps, x0, y0, sx, sy, th)
 
+def _is_pixel_index_axes(x1d, y1d):
+    # Treat pure pixel-index axes (0..N-1) as pixel mode even if arrays are present
+    # putting in function to try to get test coverage to recoognize it.
+    _x = np.asarray(x1d, dtype=float)
+    _y = np.asarray(y1d, dtype=float)
+    is_pixel_index_axes = (
+        np.allclose(_x, np.arange(_x.size)) and
+        np.allclose(_y, np.arange(_y.size))
+    )
+    return is_pixel_index_axes
+
 def _normalize_initial_guesses(
     z2d: np.ndarray,
     n: int,
@@ -259,11 +270,10 @@ def _normalize_initial_guesses(
         amps = np.array([max(v - med, 1e-3) for (_, _, v) in seeds], dtype=float)
         xi = np.array([int(x) for (_, x, _) in seeds], dtype=int)
         yi = np.array([int(y) for (y, _, _) in seeds], dtype=int)
-        if x1d is not None and y1d is not None:
+        if x1d is not None and y1d is not None and _is_pixel_index_axes(x1d, y1d):
             # WORLD: map centers and pick widths in world units
             x1d = np.asarray(x1d, dtype=float); y1d = np.asarray(y1d, dtype=float)
-            x0 = x1d[xi].astype(float)
-            y0 = y1d[yi].astype(float)
+            x0 = x1d[xi].astype(float); y0 = y1d[yi].astype(float)
             sx = np.full(n, (np.nanmax(x1d) - np.nanmin(x1d)) / 10.0, dtype=float)
             sy = np.full(n, (np.nanmax(y1d) - np.nanmin(y1d)) / 10.0, dtype=float)
         else:
