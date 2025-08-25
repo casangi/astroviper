@@ -33,10 +33,14 @@ import matplotlib
 import matplotlib.pyplot as plt
 import warnings
 
-from astroviper.fitting.multi_gaussian2d_fit import fit_multi_gaussian2d, plot_components
+from astroviper.fitting.multi_gaussian2d_fit import (
+    fit_multi_gaussian2d,
+    plot_components,
+)
 import astroviper.fitting.multi_gaussian2d_fit as mg
 
 # ------------------------- fixtures / helpers -------------------------
+
 
 @pytest.fixture(autouse=True)
 def _silence_plots(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -50,26 +54,41 @@ def _rot(x, y, theta):
     yr_ = -x * st + y * ct
     return xr_, yr_
 
-def _gauss2d_on_grid(x_grid: np.ndarray,
-                     y_grid: np.ndarray,
-                     amp: float, x0: float, y0: float,
-                     sigma_x: float, sigma_y: float,
-                     theta: float,
-                     *, offset: float = 0.0) -> np.ndarray:
+
+def _gauss2d_on_grid(
+    x_grid: np.ndarray,
+    y_grid: np.ndarray,
+    amp: float,
+    x0: float,
+    y0: float,
+    sigma_x: float,
+    sigma_y: float,
+    theta: float,
+    *,
+    offset: float = 0.0,
+) -> np.ndarray:
     """Single rotated anisotropic Gaussian evaluated on prebuilt grids.
     Uses the same rotation as _scene/_rot to avoid cross-term sign bugs.
     """
     xr_, yr_ = _rot(x_grid - x0, y_grid - y0, theta)
-    return offset + amp * np.exp(-(xr_**2) / (2 * sigma_x**2) - (yr_**2) / (2 * sigma_y**2))
+    return offset + amp * np.exp(
+        -(xr_**2) / (2 * sigma_x**2) - (yr_**2) / (2 * sigma_y**2)
+    )
 
-def _scene(ny: int, nx: int, comps, *, offset=0.0, noise=0.0, seed=0, coords=False) -> xr.DataArray:
+
+def _scene(
+    ny: int, nx: int, comps, *, offset=0.0, noise=0.0, seed=0, coords=False
+) -> xr.DataArray:
     rng = np.random.default_rng(seed)
     yy, xx = np.mgrid[0:ny, 0:nx]
     img = np.zeros((ny, nx), float) + offset
     for c in comps:
         amp = float(c["amp"])
-        x0 = float(c["x0"]); y0 = float(c["y0"])
-        sx = float(c["sigma_x"]); sy = float(c["sigma_y"]); th = float(c["theta"])
+        x0 = float(c["x0"])
+        y0 = float(c["y0"])
+        sx = float(c["sigma_x"])
+        sy = float(c["sigma_y"])
+        th = float(c["theta"])
         xr_, yr_ = _rot(xx - x0, yy - y0, th)
         img += amp * np.exp(-(xr_**2) / (2 * sx**2) - (yr_**2) / (2 * sy**2))
     if noise > 0:
@@ -82,6 +101,7 @@ def _scene(ny: int, nx: int, comps, *, offset=0.0, noise=0.0, seed=0, coords=Fal
 
 # ------------------------- success paths -------------------------
 
+
 class TestSuccess:
     @pytest.mark.parametrize("noise", [0.02, 0.05])
     def test_two_components_with_world_coords(self, noise: float) -> None:
@@ -91,10 +111,16 @@ class TestSuccess:
             dict(amp=0.7, x0=85.0, y0=28.0, sigma_x=5.0, sigma_y=2.5, theta=0.4),
         ]
         da2 = _scene(ny, nx, comps, offset=0.1, noise=noise, seed=123, coords=True)
-        init = np.array([[1.0, 39.5, 60.5, 3.0, 3.0, 0.0],
-                         [0.7, 84.5, 28.5, 5.0, 2.5, 0.4]], float)
-        ds = fit_multi_gaussian2d(da2, n_components=2, initial_guesses=init,
-                                  return_model=True, return_residual=True)
+        init = np.array(
+            [[1.0, 39.5, 60.5, 3.0, 3.0, 0.0], [0.7, 84.5, 28.5, 5.0, 2.5, 0.4]], float
+        )
+        ds = fit_multi_gaussian2d(
+            da2,
+            n_components=2,
+            initial_guesses=init,
+            return_model=True,
+            return_residual=True,
+        )
         assert bool(ds.success)
         assert 0.0 <= float(ds.variance_explained) <= 1.0
         assert "x0_world" in ds and "y0_world" in ds
@@ -102,20 +128,35 @@ class TestSuccess:
         assert np.allclose(ds["x0_pixel"].values[order], [40.0, 85.0], atol=0.8)
         assert np.allclose(ds["y0_pixel"].values[order], [60.0, 28.0], atol=0.8)
 
-
     def test_vectorize_over_time_names_and_indices(self) -> None:
         ny, nx = 64, 80
         base = dict(amp=0.9, x0=30.0, y0=22.0, sigma_x=4.0, sigma_y=3.0, theta=0.2)
-        planes = [_scene(ny, nx, [base], offset=0.1, noise=0.03, seed=s) for s in (1, 2, 3)]
+        planes = [
+            _scene(ny, nx, [base], offset=0.1, noise=0.03, seed=s) for s in (1, 2, 3)
+        ]
         cube = xr.concat(planes, dim="time")  # dims ('time','y','x')
         init = np.array([[0.8, 29.5, 22.5, 4.0, 3.0, 0.2]], float)
         # dims by name
-        ds1 = fit_multi_gaussian2d(cube, n_components=1, initial_guesses=init, coord_type="pixel",
-                                   dims=("x", "y"), return_model=False, return_residual=False)
+        ds1 = fit_multi_gaussian2d(
+            cube,
+            n_components=1,
+            initial_guesses=init,
+            coord_type="pixel",
+            dims=("x", "y"),
+            return_model=False,
+            return_residual=False,
+        )
         assert "time" in ds1.dims and ds1.sizes["time"] == 3
         # dims by index
-        ds2 = fit_multi_gaussian2d(cube, n_components=1, initial_guesses=init, coord_type="pixel",
-                                   dims=(2, 1), return_model=False, return_residual=False)
+        ds2 = fit_multi_gaussian2d(
+            cube,
+            n_components=1,
+            initial_guesses=init,
+            coord_type="pixel",
+            dims=(2, 1),
+            return_model=False,
+            return_residual=False,
+        )
         assert np.all(ds2["success"].values)
 
     def test_flags_and_descending_world_coords(self) -> None:
@@ -126,13 +167,23 @@ class TestSuccess:
         da2 = da2.assign_coords(x=da2.coords["x"][::-1], y=da2.coords["y"][::-1])
         init = np.array([[0.7, 20.0, 18.0, 3.0, 2.0, 0.1]], float)
 
-        ds1 = fit_multi_gaussian2d(da2, n_components=1, initial_guesses=init,
-                                   return_model=True, return_residual=False)
+        ds1 = fit_multi_gaussian2d(
+            da2,
+            n_components=1,
+            initial_guesses=init,
+            return_model=True,
+            return_residual=False,
+        )
         assert "model" in ds1 and "residual" not in ds1
         assert "x0_world" in ds1 and "y0_world" in ds1
 
-        ds2 = fit_multi_gaussian2d(da2, n_components=1, initial_guesses=init,
-                                   return_model=False, return_residual=True)
+        ds2 = fit_multi_gaussian2d(
+            da2,
+            n_components=1,
+            initial_guesses=init,
+            return_model=False,
+            return_residual=True,
+        )
         assert "residual" in ds2 and "model" not in ds2
 
     def test_auto_seeds_when_initial_none(self) -> None:
@@ -142,18 +193,27 @@ class TestSuccess:
             dict(amp=0.6, x0=42.0, y0=30.0, sigma_x=5.0, sigma_y=2.5, theta=0.3),
         ]
         da2 = _scene(ny, nx, comps, offset=0.1, noise=0.03, seed=3)
-        ds = fit_multi_gaussian2d(da2, n_components=2, initial_guesses=None, coord_type="pixel", return_residual=True)
+        ds = fit_multi_gaussian2d(
+            da2,
+            n_components=2,
+            initial_guesses=None,
+            coord_type="pixel",
+            return_residual=True,
+        )
         assert bool(ds.success) is True
 
 
 # ------------------------- input types -------------------------
+
 
 class TestInputs:
     def test_accepts_raw_numpy_array(self) -> None:
         ny, nx = 32, 33
         comps = [dict(amp=1.0, x0=16.0, y0=15.0, sigma_x=3.0, sigma_y=3.0, theta=0.0)]
         arr = _scene(ny, nx, comps).values  # plain ndarray
-        ds = fit_multi_gaussian2d(arr, n_components=1, initial_guesses=np.array([[1,16,15,3,3,0.0]]))
+        ds = fit_multi_gaussian2d(
+            arr, n_components=1, initial_guesses=np.array([[1, 16, 15, 3, 3, 0.0]])
+        )
         assert bool(ds.success) is True
 
     @pytest.mark.skipif(da is None, reason="dask.array not available")
@@ -162,7 +222,9 @@ class TestInputs:
         comps = [dict(amp=1.0, x0=20.0, y0=20.0, sigma_x=3.0, sigma_y=3.0, theta=0.0)]
         np_img = _scene(ny, nx, comps, offset=0.1, noise=0.02, seed=1).data
         darr = da.from_array(np_img, chunks=(ny, nx))
-        ds = fit_multi_gaussian2d(darr, n_components=1, initial_guesses=np.array([[1,20,20,3,3,0.0]]))
+        ds = fit_multi_gaussian2d(
+            darr, n_components=1, initial_guesses=np.array([[1, 20, 20, 3, 3, 0.0]])
+        )
         assert bool(ds.success) is True
 
     def test_world_coords_skipped_for_bad_axis_coords(self) -> None:
@@ -170,8 +232,10 @@ class TestInputs:
         comps = [dict(amp=0.8, x0=15.0, y0=16.0, sigma_x=3.0, sigma_y=2.0, theta=0.1)]
         da2 = _scene(ny, nx, comps, coords=True)
         # break monotonicity / finiteness
-        x = da2.coords["x"].values.copy(); x[5] = x[4]
-        y = da2.coords["y"].values.copy(); y[3] = np.nan
+        x = da2.coords["x"].values.copy()
+        x[5] = x[4]
+        y = da2.coords["y"].values.copy()
+        y[3] = np.nan
         with pytest.raises(ValueError):
             fit_multi_gaussian2d(
                 da2.assign_coords(x=("x", x), y=("y", y)),
@@ -179,7 +243,9 @@ class TestInputs:
                 initial_guesses=np.array([[0.8, 15, 16, 3, 2, 0.1]]),
             )
 
+
 # ------------------------- bounds / dims / API validation -------------------------
+
 
 class TestBoundsDimsAPI:
     def test_bounds_merge_tuple_all_and_unknown_key_ignored(self) -> None:
@@ -209,22 +275,39 @@ class TestBoundsDimsAPI:
         p1 = mg._normalize_initial_guesses(z, 1, arr, None, None)
         assert p1.shape == (7,)
         # dict with ndarray
-        dct = {"offset": 0.2, "components": np.array([[1.0, 5.0, 6.0, 2.0, 2.0, 0.0]], float)}
+        dct = {
+            "offset": 0.2,
+            "components": np.array([[1.0, 5.0, 6.0, 2.0, 2.0, 0.0]], float),
+        }
         p2 = mg._normalize_initial_guesses(z, 1, dct, None, None)
         assert p2[0] == pytest.approx(0.2)
         # dict with list of dicts
-        dct_list = {"components": [{"amp": 0.8, "x0": 3.0, "y0": 4.0, "sigma_x": 2.1, "sigma_y": 1.9, "theta": 0.1}]}
+        dct_list = {
+            "components": [
+                {
+                    "amp": 0.8,
+                    "x0": 3.0,
+                    "y0": 4.0,
+                    "sigma_x": 2.1,
+                    "sigma_y": 1.9,
+                    "theta": 0.1,
+                }
+            ]
+        }
         p3 = mg._normalize_initial_guesses(z, 1, dct_list, None, None)
         assert p3.shape == (7,)
         # wrong shape -> error
         with pytest.raises(ValueError):
-            mg._normalize_initial_guesses(z, 2, np.array([[1, 2, 3, 4, 5, 6]]), None, None)
+            mg._normalize_initial_guesses(
+                z, 2, np.array([[1, 2, 3, 4, 5, 6]]), None, None
+            )
         # dict missing 'components' -> error
         with pytest.raises(ValueError):
             mg._normalize_initial_guesses(z, 1, {"offset": 0.0}, None, None)
 
 
 # ------------------------- optimizer / masking failure paths -------------------------
+
 
 class TestOptimizerFailures:
     def test_full_mask_triggers_failure_and_nan_planes(self) -> None:
@@ -240,54 +323,77 @@ class TestOptimizerFailures:
                 coord_type="pixel",  # DA has no coords → pixel mode
             )
 
-    def test_curve_fit_exception_sets_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_curve_fit_exception_sets_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         ny, nx = 40, 40
         y, x = np.mgrid[0:ny, 0:nx]
         z = np.exp(-((x - 20) ** 2 + (y - 18) ** 2) / (2 * 3.0**2))
         da2 = xr.DataArray(z, dims=("y", "x"))
+
         def boom(*args, **kwargs):
             raise RuntimeError("nope")
+
         monkeypatch.setattr(mg, "curve_fit", boom, raising=True)
         with pytest.raises(Exception) as excinfo:
             fit_multi_gaussian2d(
-                da2, n_components=1,
+                da2,
+                n_components=1,
                 initial_guesses=np.array([[1.0, 20.0, 18.0, 3.0, 3.0, 0.0]]),
-                return_residual=True, coord_type="pixel"
+                return_residual=True,
+                coord_type="pixel",
             )
         # original exception message must be present in the raised error
         assert "nope" in str(excinfo.value)
 
-    def test_curve_fit_pcov_none_sets_errors_nan(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_curve_fit_pcov_none_sets_errors_nan(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         ny, nx = 32, 32
         da2 = xr.DataArray(np.ones((ny, nx)), dims=("y", "x"))
         n = 2
         # popt layout: [offset, (amp,x0,y0,sx,sy,th)*n]
-        popt = np.array([0.1, 1.0, 10.0, 12.0, 2.0, 2.0, 0.0,
-                         0.7, 20.0, 8.0, 3.0, 1.5, 0.1], float)
+        popt = np.array(
+            [0.1, 1.0, 10.0, 12.0, 2.0, 2.0, 0.0, 0.7, 20.0, 8.0, 3.0, 1.5, 0.1], float
+        )
+
         def fake_fit(func, xy, z, p0=None, bounds=None, maxfev=None):
             return popt, None
+
         monkeypatch.setattr(mg, "curve_fit", fake_fit, raising=True)
         ds = fit_multi_gaussian2d(
-            da2, n_components=n,
-            initial_guesses=np.array([[1,10,12,2,2,0],[0.7,20,8,3,1.5,0.1]], float),
-            return_model=False, coord_type="pixel"
+            da2,
+            n_components=n,
+            initial_guesses=np.array(
+                [[1, 10, 12, 2, 2, 0], [0.7, 20, 8, 3, 1.5, 0.1]], float
+            ),
+            return_model=False,
+            coord_type="pixel",
         )
         assert bool(ds["success"]) is True  # try-block executed; no exception raised
         for name in (
-            "amplitude_err","x0_pixel_err","y0_pixel_err",
-            "sigma_major_pixel_err","sigma_minor_pixel_err","theta_pixel_err"
+            "amplitude_err",
+            "x0_pixel_err",
+            "y0_pixel_err",
+            "sigma_major_pixel_err",
+            "sigma_minor_pixel_err",
+            "theta_pixel_err",
         ):
             assert np.isnan(ds[name].values).all()
 
-    def test_curve_fit_with_valid_pcov_sets_finite_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_curve_fit_with_valid_pcov_sets_finite_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         ny, nx = 24, 24
         da2 = xr.DataArray(np.ones((ny, nx)), dims=("y", "x"))
         n = 1
         p_len = 1 + 6 * n
-        popt = np.linspace(0.1, 0.1 + 0.01*(p_len-1), p_len)
+        popt = np.linspace(0.1, 0.1 + 0.01 * (p_len - 1), p_len)
         pcov = np.eye(p_len, dtype=float)
+
         def fake_fit(func, xy, z, p0=None, bounds=None, maxfev=None):
             return popt, pcov
+
         monkeypatch.setattr(mg, "curve_fit", fake_fit, raising=True)
         ds = fit_multi_gaussian2d(
             da2,
@@ -298,12 +404,19 @@ class TestOptimizerFailures:
             coord_type="pixel",
         )
         for name in (
-            "amplitude_err","x0_pixel_err","y0_pixel_err","sigma_major_pixel_err",
-            "sigma_minor_pixel_err","theta_pixel_err","offset_err"
+            "amplitude_err",
+            "x0_pixel_err",
+            "y0_pixel_err",
+            "sigma_major_pixel_err",
+            "sigma_minor_pixel_err",
+            "theta_pixel_err",
+            "offset_err",
         ):
             assert np.all(np.isfinite(ds[name].values))
 
-    def test_curve_fit_nonfinite_popt_triggers_not_success_nan_outputs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_curve_fit_nonfinite_popt_triggers_not_success_nan_outputs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Force a non-finite solution from curve_fit so the not-success early-return path is exercised.
 
         Covers the block that fills component arrays, model and residual with NaNs and sets success=False.
@@ -343,13 +456,15 @@ class TestOptimizerFailures:
         # Variance explained is NaN
         assert np.isnan(float(ds["variance_explained"]))
 
-    def test_curve_fit_pcov_wrong_shape_sets_errors_nan_success_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_curve_fit_pcov_wrong_shape_sets_errors_nan_success_true(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """pcov has the wrong shape → perr:=NaN, but success stays True."""
         ny, nx = 24, 24
         da = xr.DataArray(np.ones((ny, nx)), dims=("y", "x"))
         n = 1
         p_len = 1 + 6 * n
-        popt = np.linspace(0.1, 0.1 + 0.01*(p_len-1), p_len)
+        popt = np.linspace(0.1, 0.1 + 0.01 * (p_len - 1), p_len)
         bad_pcov = np.eye(p_len - 1, dtype=float)  # wrong shape
 
         def fake_fit(func, xy, z, p0=None, bounds=None, maxfev=None):
@@ -368,19 +483,33 @@ class TestOptimizerFailures:
         # success True, but *_err are NaN
         assert bool(ds["success"]) is True
         err_vars = (
-            "offset_err","amplitude_err","x0_pixel_err","y0_pixel_err",
-            "sigma_major_pixel_err","sigma_minor_pixel_err","theta_pixel_err",
+            "offset_err",
+            "amplitude_err",
+            "x0_pixel_err",
+            "y0_pixel_err",
+            "sigma_major_pixel_err",
+            "sigma_minor_pixel_err",
+            "theta_pixel_err",
         )
         for v in err_vars:
             assert np.isnan(float(ds[v])), f"{v} should be NaN when pcov is invalid"
 
+
 # ------------------------- initial guesses: top-level list-of-dicts -------------------------
+
 
 class TestInitialGuessesTopLevelListOfDicts:
     def test_top_level_list_of_dicts_len_mismatch_raises(self) -> None:
         z = np.zeros((16, 16), float)
         init = [
-            {"amp": 1.0, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 1.5, "theta": 0.25}
+            {
+                "amp": 1.0,
+                "x0": 5.0,
+                "y0": 6.0,
+                "sigma_x": 2.0,
+                "sigma_y": 1.5,
+                "theta": 0.25,
+            }
         ]
         with pytest.raises(ValueError):
             mg._normalize_initial_guesses(z, 2, init, None, None)
@@ -389,8 +518,21 @@ class TestInitialGuessesTopLevelListOfDicts:
         z = np.zeros((20, 20), float)
         n = 2
         init = [
-            {"amp": 1.2, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 1.5, "theta": 0.3},
-            {"amplitude": 0.8, "x0": 10.0, "y0": 4.0, "sx": 2.5, "sy": 3.0},  # theta omitted → defaults to 0.0
+            {
+                "amp": 1.2,
+                "x0": 5.0,
+                "y0": 6.0,
+                "sigma_x": 2.0,
+                "sigma_y": 1.5,
+                "theta": 0.3,
+            },
+            {
+                "amplitude": 0.8,
+                "x0": 10.0,
+                "y0": 4.0,
+                "sx": 2.5,
+                "sy": 3.0,
+            },  # theta omitted → defaults to 0.0
         ]
         p = mg._normalize_initial_guesses(z, n, init, None, None)
         off, amp, x0, y0, sx, sy, th = mg._unpack_params(p, n)
@@ -402,13 +544,17 @@ class TestInitialGuessesTopLevelListOfDicts:
         assert np.allclose(sy, [1.5, 3.0])
         assert np.allclose(th, [0.3, 0.0])
 
+
 # ------------------------- initial guesses: single-dict & top-level list-of-dicts (public API) -------------------------
 # Covers:
 # - wrapping a single dict when n_components==1 (becomes [dict])  ⇢ ensures shorthand is accepted
 # - accepting a top-level list[dict] for multiple components       ⇢ ensures list-of-dicts branch is used
 
+
 class TestInitialGuessesPublicAPIWrapping:
-    def test_single_dict_shorthand_is_wrapped_and_used(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_single_dict_shorthand_is_wrapped_and_used(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # Small scene
         ny, nx = 10, 11
         da = xr.DataArray(np.zeros((ny, nx), dtype=float), dims=("y", "x"))
@@ -434,7 +580,12 @@ class TestInitialGuessesPublicAPIWrapping:
         monkeypatch.setattr(mg, "curve_fit", fake_curve_fit, raising=True)
 
         ds = fit_multi_gaussian2d(
-            da, n_components=1, initial_guesses=init_single, coord_type="pixel", return_model=False, return_residual=False
+            da,
+            n_components=1,
+            initial_guesses=init_single,
+            coord_type="pixel",
+            return_model=False,
+            return_residual=False,
         )
         assert isinstance(ds, xr.Dataset)
         # p0: [offset, (amp,x0,y0,sigma_x,sigma_y,theta)]
@@ -444,7 +595,9 @@ class TestInitialGuessesPublicAPIWrapping:
         assert np.isclose(p0[0], 0.0)
         assert np.allclose(p0[1:], [1.1, 4.0, 5.0, 2.0, 1.5, 0.25])
 
+
 # ------------------------- plotting helper -------------------------
+
 
 class TestPlotHelper:
     def test_plot_components_3d_with_indexer_and_no_component_dim(self) -> None:
@@ -456,18 +609,26 @@ class TestPlotHelper:
         cube = xr.concat([base, base + 0.01], dim="time")
 
         init = np.array([[0.8, 18.0, 17.0, 3.0, 2.0, 0.25]], float)
-        ds = fit_multi_gaussian2d(cube, n_components=1, initial_guesses=init, return_residual=True)
+        ds = fit_multi_gaussian2d(
+            cube, n_components=1, initial_guesses=init, return_residual=True
+        )
 
         # Build a DS WITHOUT 'component' dim (fix: use the post-isel dims!)
-        ds_no_comp = xr.Dataset({
-            k: v.isel(component=0) if ("component" in v.dims) else v
-            for k, v in ds.items()
-            if k in ("x0", "y0", "sigma_major", "sigma_minor", "theta", "residual")
-        })
+        ds_no_comp = xr.Dataset(
+            {
+                k: v.isel(component=0) if ("component" in v.dims) else v
+                for k, v in ds.items()
+                if k in ("x0", "y0", "sigma_major", "sigma_minor", "theta", "residual")
+            }
+        )
 
         # draw with indexer and both residual states
-        mg.plot_components(cube, ds, dims=("x","y"), indexer={"time": 1}, show_residual=True)
-        mg.plot_components(cube, ds_no_comp, dims=("x","y"), indexer={"time": 0}, show_residual=False)
+        mg.plot_components(
+            cube, ds, dims=("x", "y"), indexer={"time": 1}, show_residual=True
+        )
+        mg.plot_components(
+            cube, ds_no_comp, dims=("x", "y"), indexer={"time": 0}, show_residual=False
+        )
 
     def test_plot_components_defaults_indexer_for_3d_input(self, monkeypatch) -> None:
         matplotlib.use("Agg", force=True)  # headless backend
@@ -475,15 +636,17 @@ class TestPlotHelper:
         # Build a 3-D DataArray: ('time','y','x') so da_tr.ndim > 2
         ny, nx = 32, 32
         y, x = np.mgrid[0:ny, 0:nx]
-        base = np.exp(-((x - 16) ** 2 + (y - 16) ** 2) / (2 * 3.0 ** 2))
+        base = np.exp(-((x - 16) ** 2 + (y - 16) ** 2) / (2 * 3.0**2))
         frame = xr.DataArray(base, dims=("y", "x"))
         cube = xr.concat([frame, frame + 0.01], dim="time")
 
         # Public API fit; no need for residual/model here
         init = np.array([[1.0, 16.0, 16.0, 3.0, 3.0, 0.0]], float)
         ds = fit_multi_gaussian2d(
-            cube, n_components=1, initial_guesses=init,
-            coord_type="pixel"  # DataArray has no coords; use pixel indices
+            cube,
+            n_components=1,
+            initial_guesses=init,
+            coord_type="pixel",  # DataArray has no coords; use pixel indices
         )
         # Silence plt.show to avoid warnings in CI
         monkeypatch.setattr(plt, "show", lambda *a, **k: None, raising=False)
@@ -495,21 +658,26 @@ class TestPlotHelper:
         #           indexer = {d: 0 for d in da_tr.dims[:-2]}
         plot_components(cube, ds, dims=("x", "y"), show_residual=False)
 
-    def test_plot_components_selects_result_plane_with_default_indexer(self, monkeypatch) -> None:
+    def test_plot_components_selects_result_plane_with_default_indexer(
+        self, monkeypatch
+    ) -> None:
         matplotlib.use("Agg", force=True)  # headless
 
         # Build 3-D data → da_tr.ndim > 2
         ny, nx = 32, 32
         y, x = np.mgrid[0:ny, 0:nx]
-        base = np.exp(-((x - 16) ** 2 + (y - 16) ** 2) / (2 * 3.0 ** 2))
+        base = np.exp(-((x - 16) ** 2 + (y - 16) ** 2) / (2 * 3.0**2))
         frame = xr.DataArray(base, dims=("y", "x"))
         cube = xr.concat([frame, frame + 0.01], dim="time")  # dims: ('time','y','x')
 
         # Fit via public API; result keeps the leading 'time' dim
         init = np.array([[1.0, 16.0, 16.0, 3.0, 3.0, 0.0]], float)
         ds = fit_multi_gaussian2d(
-            cube, n_components=1, initial_guesses=init, return_residual=True,
-            coord_type="pixel"  # DataArray has no coords; use pixel indices
+            cube,
+            n_components=1,
+            initial_guesses=init,
+            return_residual=True,
+            coord_type="pixel",  # DataArray has no coords; use pixel indices
         )
         assert "time" in ds.dims  # ensure the nested selection can apply
 
@@ -526,21 +694,28 @@ class TestPlotHelper:
         #               res_plane = res_plane.isel({d: i})
         plot_components(cube, ds, dims=("x", "y"), indexer=None, show_residual=True)
 
-    def test_plot_components_default_indexer_loops_multiple_dims(self, monkeypatch) -> None:
+    def test_plot_components_default_indexer_loops_multiple_dims(
+        self, monkeypatch
+    ) -> None:
         matplotlib.use("Agg", force=True)
 
         # 4D data ensures indexer has ≥2 keys → loop body executes (and loops)
         ny, nx = 24, 24
         y, x = np.mgrid[0:ny, 0:nx]
-        base = np.exp(-((x - 12) ** 2 + (y - 12) ** 2) / (2 * 3.0 ** 2))
+        base = np.exp(-((x - 12) ** 2 + (y - 12) ** 2) / (2 * 3.0**2))
         frame = xr.DataArray(base, dims=("y", "x"))
-        cube_t = xr.concat([frame, frame + 0.01], dim="t")              # dims: ('t','y','x')
-        cube = xr.concat([cube_t, cube_t + 0.02], dim="band")           # dims: ('band','t','y','x')
+        cube_t = xr.concat([frame, frame + 0.01], dim="t")  # dims: ('t','y','x')
+        cube = xr.concat(
+            [cube_t, cube_t + 0.02], dim="band"
+        )  # dims: ('band','t','y','x')
 
         init = np.array([[1.0, 12.0, 12.0, 3.0, 3.0, 0.0]], float)
         ds = fit_multi_gaussian2d(
-            cube, n_components=1, initial_guesses=init, return_residual=True,
-            coord_type="pixel"  # DataArray has no coords; use pixel indices
+            cube,
+            n_components=1,
+            initial_guesses=init,
+            return_residual=True,
+            coord_type="pixel",  # DataArray has no coords; use pixel indices
         )
 
         # avoid blocking GUI
@@ -555,13 +730,16 @@ class TestPlotHelper:
         # 2D image → triggers the else block (lines 766–768): data2d = da_tr; res_plane = result
         ny, nx = 40, 40
         y, x = np.mgrid[0:ny, 0:nx]
-        z = 0.1 + np.exp(-((x - 20) ** 2 + (y - 22) ** 2) / (2 * 3.0 ** 2))
+        z = 0.1 + np.exp(-((x - 20) ** 2 + (y - 22) ** 2) / (2 * 3.0**2))
         img = xr.DataArray(z, dims=("y", "x"))
 
         init = np.array([[1.0, 20.0, 22.0, 3.0, 3.0, 0.0]], float)
         ds = fit_multi_gaussian2d(
-            img, n_components=1, initial_guesses=init, return_residual=True,
-            coord_type="pixel"  # DataArray has no coords; use pixel indices
+            img,
+            n_components=1,
+            initial_guesses=init,
+            return_residual=True,
+            coord_type="pixel",  # DataArray has no coords; use pixel indices
         )
 
         # avoid GUI
@@ -570,18 +748,23 @@ class TestPlotHelper:
         # No indexer; 2D input hits the else branch
         plot_components(img, ds, dims=("x", "y"), indexer=None, show_residual=True)
 
-    def test_plot_components_raises_when_result_missing_required_var(self, monkeypatch) -> None:
+    def test_plot_components_raises_when_result_missing_required_var(
+        self, monkeypatch
+    ) -> None:
         matplotlib.use("Agg", force=True)
 
         ny, nx = 32, 32
         y, x = np.mgrid[0:ny, 0:nx]
-        z = 0.05 + np.exp(-((x - 16) ** 2 + (y - 16) ** 2) / (2 * 3.0 ** 2))
+        z = 0.05 + np.exp(-((x - 16) ** 2 + (y - 16) ** 2) / (2 * 3.0**2))
         img = xr.DataArray(z, dims=("y", "x"))
 
         init = np.array([[1.0, 16.0, 16.0, 3.0, 3.0, 0.0]], float)
         ds = fit_multi_gaussian2d(
-            img, n_components=1, initial_guesses=init,
-            coord_type="pixel", return_residual=True
+            img,
+            n_components=1,
+            initial_guesses=init,
+            coord_type="pixel",
+            return_residual=True,
         )
 
         # Drop one of the center fields present in the current API.
@@ -589,16 +772,17 @@ class TestPlotHelper:
         drop_names = [name for name in ("x0_pixel", "x0", "x") if name in ds]
         ds_missing = ds.drop_vars(drop_names)
 
-
         # avoid GUI popups
         monkeypatch.setattr(plt, "show", lambda *a, **k: None, raising=False)
 
         # Expect: no exception; it should draw with fallbacks (e.g., default centers)
-        plot_components(img, ds_missing, dims=("x", "y"), indexer=None, show_residual=False)
+        plot_components(
+            img, ds_missing, dims=("x", "y"), indexer=None, show_residual=False
+        )
 
     def test_plot_components_else_branch_for_2d_input(self) -> None:
-         # existing test body...
-         pass
+        # existing test body...
+        pass
 
     def test_plot_components_fwhm_converts_from_sigma_when_fwhm_missing(self) -> None:
         """Cover metric=="fwhm" path that converts sigma→FWHM when fwhm vars are absent."""
@@ -607,7 +791,9 @@ class TestPlotHelper:
         ny, nx = 36, 36
         y, x = np.mgrid[0:ny, 0:nx]
         amp, x0, y0, sx, sy, th = 1.0, 18.0, 19.0, 3.0, 2.0, 0.2
-        z = amp * np.exp(-(((x - x0) ** 2) / (2 * sx ** 2) + ((y - y0) ** 2) / (2 * sy ** 2)))
+        z = amp * np.exp(
+            -(((x - x0) ** 2) / (2 * sx**2) + ((y - y0) ** 2) / (2 * sy**2))
+        )
         img = xr.DataArray(z, dims=("y", "x"))  # no coords → frame='pixel'
 
         init = np.array([[amp * 0.9, x0, y0, sx, sy, th]], float)
@@ -629,6 +815,7 @@ class TestPlotHelper:
         # No size-warning expected because sigma→FWHM conversion should have supplied radii
         assert not any("Missing size info" in str(w.message) for w in rec)
         import matplotlib.figure as _mf
+
         # Accept both return styles: Figure OR (Figure, axes)
         if isinstance(ret, _mf.Figure):
             fig = ret
@@ -641,23 +828,35 @@ class TestPlotHelper:
             fig, _ = ret
         assert isinstance(fig, _mf.Figure)
 
-    def test_plot_components_fwhm_warns_and_draws_without_size_when_both_missing(self) -> None:
+    def test_plot_components_fwhm_warns_and_draws_without_size_when_both_missing(
+        self,
+    ) -> None:
         """Cover metric=="fwhm" path that warns and uses zero radii when both size kinds are missing."""
         import matplotlib
+
         matplotlib.use("Agg", force=True)
 
         ny, nx = 32, 32
         y, x = np.mgrid[0:ny, 0:nx]
-        z = np.exp(-((x - 16) ** 2 + (y - 15) ** 2) / (2 * 3.0 ** 2))
+        z = np.exp(-((x - 16) ** 2 + (y - 15) ** 2) / (2 * 3.0**2))
         img = xr.DataArray(z, dims=("y", "x"))
 
         init = np.array([[0.9, 16.0, 15.0, 3.0, 2.0, 0.0]], float)
-        ds = fit_multi_gaussian2d(img, n_components=1, initial_guesses=init, coord_type="pixel")
+        ds = fit_multi_gaussian2d(
+            img, n_components=1, initial_guesses=init, coord_type="pixel"
+        )
 
         # Drop *both* sigma and FWHM pixel vars to force the warning branch
-        to_drop = [v for v in (
-            "sigma_major_pixel", "sigma_minor_pixel", "fwhm_major_pixel", "fwhm_minor_pixel"
-        ) if v in ds]
+        to_drop = [
+            v
+            for v in (
+                "sigma_major_pixel",
+                "sigma_minor_pixel",
+                "fwhm_major_pixel",
+                "fwhm_minor_pixel",
+            )
+            if v in ds
+        ]
         ds3 = ds.drop_vars(to_drop) if to_drop else ds
 
         with warnings.catch_warnings(record=True) as rec:
@@ -666,6 +865,7 @@ class TestPlotHelper:
         msgs = ", ".join(str(w.message) for w in rec)
         assert "Missing size info (FWHM/sigma)" in msgs
         import matplotlib.figure as _mf
+
         # Accept both styles: Figure OR (Figure, axes)
         if isinstance(ret, _mf.Figure):
             fig = ret
@@ -690,7 +890,15 @@ class TestPlotHelper:
         }
 
         n_sigma = 1.0
-        mg.overlay_fit_components(ax, fit, frame="pixel", metric="sigma", n_sigma=n_sigma, angle="math", label=False)
+        mg.overlay_fit_components(
+            ax,
+            fit,
+            frame="pixel",
+            metric="sigma",
+            n_sigma=n_sigma,
+            angle="math",
+            label=False,
+        )
 
         assert len(ax.patches) == 1
         e = ax.patches[0]
@@ -698,12 +906,13 @@ class TestPlotHelper:
         assert np.isclose(e.get_width(), 2.0 * n_sigma * sigma_x)
         assert np.isclose(e.get_height(), 2.0 * n_sigma * sigma_y)
 
-class TestNumPyFitting: # (unittest.TestCase):
+
+class TestNumPyFitting:  # (unittest.TestCase):
     def test_min_threshold_masks_pixels_partial(self) -> None:
 
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
-        z = 0.05 + np.exp(-((x - 32) ** 2 + (y - 32) ** 2) / (2 * 3.0 ** 2))
+        z = 0.05 + np.exp(-((x - 32) ** 2 + (y - 32) ** 2) / (2 * 3.0**2))
         da = xr.DataArray(z, dims=("y", "x"))
 
         init = np.array([[0.8, 32.0, 32.0, 3.0, 3.0, 0.0]], float)
@@ -711,7 +920,7 @@ class TestNumPyFitting: # (unittest.TestCase):
             da,
             n_components=1,
             initial_guesses=init,
-            min_threshold=0.20,   # exercises: mask &= z2d >= min_threshold
+            min_threshold=0.20,  # exercises: mask &= z2d >= min_threshold
             return_model=True,
             return_residual=True,
             coord_type="pixel",  # DataArray has no coords; use pixel indices
@@ -726,7 +935,7 @@ class TestNumPyFitting: # (unittest.TestCase):
 
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
-        z = 0.05 + np.exp(-((x - 32) ** 2 + (y - 32) ** 2) / (2 * 3.0 ** 2))
+        z = 0.05 + np.exp(-((x - 32) ** 2 + (y - 32) ** 2) / (2 * 3.0**2))
         da = xr.DataArray(z, dims=("y", "x"))
 
         init = np.array([[0.8, 32.0, 32.0, 3.0, 3.0, 0.0]], float)
@@ -749,7 +958,9 @@ class TestNumPyFitting: # (unittest.TestCase):
 
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
-        z = 0.05 + np.exp(-((x - 32) ** 2 + (y - 32) ** 2) / (2 * 3.0 ** 2))  # peak ~ 1.05
+        z = 0.05 + np.exp(
+            -((x - 32) ** 2 + (y - 32) ** 2) / (2 * 3.0**2)
+        )  # peak ~ 1.05
         da = xr.DataArray(z, dims=("y", "x"))
 
         init = np.array([[0.8, 32.0, 32.0, 3.0, 3.0, 0.0]], float)
@@ -778,23 +989,25 @@ class TestNumPyFitting: # (unittest.TestCase):
 
         ct, st = np.cos(theta_math), np.sin(theta_math)
         X, Y = x - x0_true, y - y0_true
-        a = (ct**2)/(2*sx_true**2) + (st**2)/(2*sy_true**2)
-        b = st*ct*(1/(2*sx_true**2) - 1/(2*sy_true**2))
-        c = (st**2)/(2*sx_true**2) + (ct**2)/(2*sy_true**2)
-        z = 0.12 + amp_true * np.exp(-(a*X**2 + 2*b*X*Y + c*Y**2))
+        a = (ct**2) / (2 * sx_true**2) + (st**2) / (2 * sy_true**2)
+        b = st * ct * (1 / (2 * sx_true**2) - 1 / (2 * sy_true**2))
+        c = (st**2) / (2 * sx_true**2) + (ct**2) / (2 * sy_true**2)
+        z = 0.12 + amp_true * np.exp(-(a * X**2 + 2 * b * X * Y + c * Y**2))
         img = xr.DataArray(z, dims=("y", "x"))
 
         # Expected PA for ascending axes: PA = (π/2 − θ) mod 2π
-        pa_expected = (np.pi/2 - theta_math) % (2*np.pi)
+        pa_expected = (np.pi / 2 - theta_math) % (2 * np.pi)
 
         # Provide initial guesses *in PA*; public API will convert them via _theta_pa_to_math
-        init = np.array([[0.9, x0_true, y0_true, sx_true*0.9, sy_true*1.1, pa_expected]], float)
+        init = np.array(
+            [[0.9, x0_true, y0_true, sx_true * 0.9, sy_true * 1.1, pa_expected]], float
+        )
 
         ds = fit_multi_gaussian2d(
             img,
             n_components=1,
             initial_guesses=init,
-            angle="pa",              # triggers PA→math conversion path
+            angle="pa",  # triggers PA→math conversion path
             return_model=False,
             return_residual=False,
             coord_type="pixel",  # DataArray has no coords; use pixel indices
@@ -803,7 +1016,9 @@ class TestNumPyFitting: # (unittest.TestCase):
         assert bool(ds["success"]) is True
         # theta is reported in the same convention ("pa"), so it should match pa_expected
         assert np.isfinite(float(ds["theta_pixel"]))
-        assert abs(float(ds["theta_pixel"]) - pa_expected) < 0.15  # allow some tolerance
+        assert (
+            abs(float(ds["theta_pixel"]) - pa_expected) < 0.15
+        )  # allow some tolerance
 
     def test_angle_pa_init_conversion_list_of_dicts(self) -> None:
         # Two rotated Gaussians with known *math* angles
@@ -818,24 +1033,37 @@ class TestNumPyFitting: # (unittest.TestCase):
         img = xr.DataArray(z, dims=("y", "x"))
 
         # Convert true math angles to PA (local basis): PA = (π/2 − θ) mod 2π
-        pa1 = float(((np.pi/2) - th1_math) % (2*np.pi))
-        pa2 = float(((np.pi/2) - th2_math) % (2*np.pi))
-
+        pa1 = float(((np.pi / 2) - th1_math) % (2 * np.pi))
+        pa2 = float(((np.pi / 2) - th2_math) % (2 * np.pi))
 
         # initial_guesses as LIST OF DICTS with 'theta' → triggers _conv_list_of_dicts path
         init_list = [
-            {"amp": 0.9, "x0": 20.0, "y0": 22.0, "sigma_x": 3.0, "sigma_y": 2.0, "theta": pa1},
-            {"amp": 0.7, "x0": 44.0, "y0": 40.0, "sigma_x": 4.0, "sigma_y": 2.5, "theta": pa2},
+            {
+                "amp": 0.9,
+                "x0": 20.0,
+                "y0": 22.0,
+                "sigma_x": 3.0,
+                "sigma_y": 2.0,
+                "theta": pa1,
+            },
+            {
+                "amp": 0.7,
+                "x0": 44.0,
+                "y0": 40.0,
+                "sigma_x": 4.0,
+                "sigma_y": 2.5,
+                "theta": pa2,
+            },
         ]
 
         ds = fit_multi_gaussian2d(
             img,
             n_components=2,
             initial_guesses=init_list,  # list[dict] path
-            angle="pa",                  # forces PA→math conversion on init
+            angle="pa",  # forces PA→math conversion on init
             return_model=False,
             return_residual=False,
-            coord_type="pixel",          # DataArray has no coords; use pixel indices
+            coord_type="pixel",  # DataArray has no coords; use pixel indices
         )
 
         # Sort by x0 to align component identity
@@ -854,20 +1082,26 @@ class TestNumPyFitting: # (unittest.TestCase):
         amp_true, x0_true, y0_true = 1.0, 30.0, 28.0
         sx_true, sy_true = 4.0, 2.5
         theta_math = 0.8
-        z = _gauss2d_on_grid(x, y, amp_true, x0_true, y0_true, sx_true, sy_true, theta_math, offset=0.12)
+        z = _gauss2d_on_grid(
+            x, y, amp_true, x0_true, y0_true, sx_true, sy_true, theta_math, offset=0.12
+        )
 
         img = xr.DataArray(z, dims=("y", "x"))
 
         # Local-basis conversion: PA = (π/2 − θ) mod 2π
-        pa = float(((np.pi/2) - theta_math) % (2*np.pi))
+        pa = float(((np.pi / 2) - theta_math) % (2 * np.pi))
 
         # initial_guesses as dict with components **NumPy array** → hits lines 590–595
         comps = np.array([[0.9, x0_true, y0_true, sx_true, sy_true, pa]], float)
         init = {"components": comps}
 
         ds = fit_multi_gaussian2d(
-            img, n_components=1, initial_guesses=init,
-            angle="pa", return_model=False, return_residual=False,
+            img,
+            n_components=1,
+            initial_guesses=init,
+            angle="pa",
+            return_model=False,
+            return_residual=False,
             coord_type="pixel",  # DataArray has no coords; use pixel indices
         )
 
@@ -882,22 +1116,35 @@ class TestNumPyFitting: # (unittest.TestCase):
         amp_true, x0_true, y0_true = 0.9, 22.0, 24.0
         sx_true, sy_true = 3.5, 2.0
         theta_math = 0.6
-        z = 0.10 + _gauss2d_on_grid(x, y, amp_true, x0_true, y0_true, sx_true, sy_true, theta_math, offset=0.0)
+        z = 0.10 + _gauss2d_on_grid(
+            x, y, amp_true, x0_true, y0_true, sx_true, sy_true, theta_math, offset=0.0
+        )
 
         img = xr.DataArray(z, dims=("y", "x"))
         # Local-basis conversion: PA = (π/2 − θ) mod 2π
-        pa = float(((np.pi/2) - theta_math) % (2*np.pi))
+        pa = float(((np.pi / 2) - theta_math) % (2 * np.pi))
 
         # initial_guesses as dict with components **list of dicts** → hits lines 595–597
         init = {
             "components": [
-                {"amp": 0.85, "x0": x0_true, "y0": y0_true, "sigma_x": sx_true, "sigma_y": sy_true, "theta": pa}
+                {
+                    "amp": 0.85,
+                    "x0": x0_true,
+                    "y0": y0_true,
+                    "sigma_x": sx_true,
+                    "sigma_y": sy_true,
+                    "theta": pa,
+                }
             ]
         }
 
         ds = fit_multi_gaussian2d(
-            img, n_components=1, initial_guesses=init,
-            angle="pa", return_model=False, return_residual=False,
+            img,
+            n_components=1,
+            initial_guesses=init,
+            angle="pa",
+            return_model=False,
+            return_residual=False,
             coord_type="pixel",  # DataArray has no coords; use pixel indices
         )
 
@@ -919,22 +1166,37 @@ class TestNumPyFitting: # (unittest.TestCase):
 
         # Expected PA for ascending axes: PA = arctan2(cos(theta_math), sin(theta_math))
         pa1 = float(np.arctan2(np.cos(th1_math), np.sin(th1_math)))
-        pa2 = float(np.arctan2(np.cos(th2_math), np.sin(th2_math)))  # ~π/2 for theta_math=0
+        pa2 = float(
+            np.arctan2(np.cos(th2_math), np.sin(th2_math))
+        )  # ~π/2 for theta_math=0
 
         # list[dict] with one dict MISSING 'theta' → exercises 579→581 (no conversion branch for that dict)
         init_list = [
-            {"amp": 0.9, "x0": 20.0, "y0": 22.0, "sigma_x": 3.0, "sigma_y": 2.0, "theta": pa1},
-            {"amp": 0.7, "x0": 44.0, "y0": 40.0, "sigma_x": 4.0, "sigma_y": 2.5},  # no 'theta'
+            {
+                "amp": 0.9,
+                "x0": 20.0,
+                "y0": 22.0,
+                "sigma_x": 3.0,
+                "sigma_y": 2.0,
+                "theta": pa1,
+            },
+            {
+                "amp": 0.7,
+                "x0": 44.0,
+                "y0": 40.0,
+                "sigma_x": 4.0,
+                "sigma_y": 2.5,
+            },  # no 'theta'
         ]
 
         ds = fit_multi_gaussian2d(
             img,
             n_components=2,
             initial_guesses=init_list,
-            angle="pa",                  # convert dicts that HAVE 'theta'; report output in PA
+            angle="pa",  # convert dicts that HAVE 'theta'; report output in PA
             return_model=False,
             return_residual=False,
-            coord_type="pixel",          # DataArray has no coords; use pixel indices
+            coord_type="pixel",  # DataArray has no coords; use pixel indices
         )
 
         assert bool(ds["success"]) is True
@@ -942,8 +1204,8 @@ class TestNumPyFitting: # (unittest.TestCase):
         th_pa = ds["theta_pixel"].values[order]
 
         assert np.isfinite(th_pa).all()
-        assert abs(th_pa[0] - pa1) < 0.3     # comp1 near its seeded PA
-        assert abs(th_pa[1] - pa2) < 0.5     # comp2 near PA for math=0 (≈ π/2)
+        assert abs(th_pa[0] - pa1) < 0.3  # comp1 near its seeded PA
+        assert abs(th_pa[1] - pa2) < 0.5  # comp2 near PA for math=0 (≈ π/2)
 
     def test_angle_pa_init_components_list_of_dicts_branch(self) -> None:
         # 2-component scene
@@ -952,10 +1214,10 @@ class TestNumPyFitting: # (unittest.TestCase):
         th1_math, th2_math = 0.4, 1.0
         # z = 0.1 + g(1.0, 18.0, 20.0, 3.0, 2.0, th1_math) + g(0.8, 44.0, 38.0, 4.0, 2.6, th2_math)
         z = (
-                0.1
-                + _gauss2d_on_grid(x, y, 1.0, 18.0, 20.0, 3.0, 2.0, th1_math, offset=0.0)
-                + _gauss2d_on_grid(x, y, 0.8, 44.0, 38.0, 4.0, 2.6, th2_math, offset=0.0)
-            )
+            0.1
+            + _gauss2d_on_grid(x, y, 1.0, 18.0, 20.0, 3.0, 2.0, th1_math, offset=0.0)
+            + _gauss2d_on_grid(x, y, 0.8, 44.0, 38.0, 4.0, 2.6, th2_math, offset=0.0)
+        )
         img = xr.DataArray(z, dims=("y", "x"))
 
         # PA seeds from math angles for ascending axes: PA = arctan2(cos(theta), sin(theta))
@@ -965,14 +1227,32 @@ class TestNumPyFitting: # (unittest.TestCase):
         # Dict with "components" as LIST OF DICTS → hits 595→597 (_conv_list_of_dicts then return clone)
         init = {
             "components": [
-                {"amp": 0.9, "x0": 18.0, "y0": 20.0, "sigma_x": 3.0, "sigma_y": 2.0, "theta": pa1},
-                {"amp": 0.7, "x0": 44.0, "y0": 38.0, "sigma_x": 4.0, "sigma_y": 2.6, "theta": pa2},
+                {
+                    "amp": 0.9,
+                    "x0": 18.0,
+                    "y0": 20.0,
+                    "sigma_x": 3.0,
+                    "sigma_y": 2.0,
+                    "theta": pa1,
+                },
+                {
+                    "amp": 0.7,
+                    "x0": 44.0,
+                    "y0": 38.0,
+                    "sigma_x": 4.0,
+                    "sigma_y": 2.6,
+                    "theta": pa2,
+                },
             ]
         }
 
         ds = fit_multi_gaussian2d(
-            img, n_components=2, initial_guesses=init, angle="pa",
-            return_model=False, return_residual=False,
+            img,
+            n_components=2,
+            initial_guesses=init,
+            angle="pa",
+            return_model=False,
+            return_residual=False,
             coord_type="pixel",
         )
 
@@ -990,9 +1270,10 @@ class TestNumPyFitting: # (unittest.TestCase):
         ny, nx = 36, 36
         y, x = np.mgrid[0:ny, 0:nx]
         amp, x0, y0, sx, sy, th = 0.9, 18.0, 17.0, 3.0, 2.0, 0.0
-        z = amp * np.exp(-((x - x0) ** 2) / (2 * sx ** 2) - ((y - y0) ** 2) / (2 * sy ** 2))
-        base = xr.DataArray(z, dims=("y", "x")).assign_coords(y=np.arange(ny, dtype=float),
-                                                              x=np.arange(nx, dtype=float))
+        z = amp * np.exp(-((x - x0) ** 2) / (2 * sx**2) - ((y - y0) ** 2) / (2 * sy**2))
+        base = xr.DataArray(z, dims=("y", "x")).assign_coords(
+            y=np.arange(ny, dtype=float), x=np.arange(nx, dtype=float)
+        )
         cube = xr.concat([base, base + 0.01], dim="time")
 
         # Initial guesses in FWHM (default): columns [amp, x0, y0, fwhm_major, fwhm_minor, theta]
@@ -1011,10 +1292,13 @@ class TestNumPyFitting: # (unittest.TestCase):
         )
 
         # Now plot with an indexer so the code slices model2d along 'time'
-        ret = mg.plot_components(cube, ds, dims=("x", "y"), indexer={"time": 1}, show_residual=True)
+        ret = mg.plot_components(
+            cube, ds, dims=("x", "y"), indexer={"time": 1}, show_residual=True
+        )
 
         # Accept both return styles: Figure OR (Figure, axes)
         import matplotlib
+
         if isinstance(ret, matplotlib.figure.Figure):
             fig = ret
         else:
@@ -1026,6 +1310,7 @@ class TestNumPyFitting: # (unittest.TestCase):
         # Basic clean up
         try:
             import matplotlib.pyplot as plt
+
             plt.close(fig)
         except Exception:
             pass
@@ -1036,18 +1321,20 @@ class TestNumPyFitting: # (unittest.TestCase):
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """
-          - when DA has valid ascending 1-D world coords on (x,y) but we fit in pixel mode,
-            the code interpolates centers into world coords and propagates uncertainties
-            using local axis slope from np.gradient.
+        - when DA has valid ascending 1-D world coords on (x,y) but we fit in pixel mode,
+          the code interpolates centers into world coords and propagates uncertainties
+          using local axis slope from np.gradient.
         """
         ny, nx = 40, 50
         y, x = np.mgrid[0:ny, 0:nx]
         amp, x0, y0, sx, sy, th = 1.0, 30.0, 18.0, 4.0, 2.5, 0.0
-        z = 0.12 + amp * np.exp(-((x - x0) ** 2) / (2 * sx ** 2) - ((y - y0) ** 2) / (2 * sy ** 2))
+        z = 0.12 + amp * np.exp(
+            -((x - x0) ** 2) / (2 * sx**2) - ((y - y0) ** 2) / (2 * sy**2)
+        )
 
         # ascending world coords on both axes
-        xw = 100.0 + 0.5 * np.arange(nx, dtype=float)     # slope 0.5
-        yw = -5.0 + 0.25 * np.arange(ny, dtype=float)     # slope 0.25
+        xw = 100.0 + 0.5 * np.arange(nx, dtype=float)  # slope 0.5
+        yw = -5.0 + 0.25 * np.arange(ny, dtype=float)  # slope 0.25
         img = xr.DataArray(z, dims=("y", "x")).assign_coords(x=xw, y=yw)
 
         # Deterministic optimizer: echo p0 and give finite pcov so *_pixel_err are non-NaN
@@ -1055,6 +1342,7 @@ class TestNumPyFitting: # (unittest.TestCase):
             p0 = np.asarray(p0, float)
             pcov = np.eye(p0.size, dtype=float) * 0.04  # sqrt(diag)=0.2
             return p0, pcov
+
         monkeypatch.setattr(mg, "curve_fit", fake_cf, raising=True)
 
         init = np.array([[amp, x0, y0, sx, sy, th]], float)
@@ -1063,7 +1351,7 @@ class TestNumPyFitting: # (unittest.TestCase):
             n_components=1,
             initial_guesses=init,
             angle="math",
-            coord_type="pixel",           # force pixel fit → triggers interpolation branch
+            coord_type="pixel",  # force pixel fit → triggers interpolation branch
             return_model=False,
             return_residual=False,
         )
@@ -1098,17 +1386,18 @@ class TestNumPyFitting: # (unittest.TestCase):
         ny, nx = 32, 48
         y, x = np.mgrid[0:ny, 0:nx]
         amp, x0, y0, sx, sy, th = 0.9, 20.0, 14.0, 3.2, 2.1, 0.0
-        z = amp * np.exp(-((x - x0) ** 2) / (2 * sx ** 2) - ((y - y0) ** 2) / (2 * sy ** 2))
+        z = amp * np.exp(-((x - x0) ** 2) / (2 * sx**2) - ((y - y0) ** 2) / (2 * sy**2))
 
         # x: descending, y: ascending → triggers idx reversal in _prep()
-        xw = np.linspace(5.0, -7.0, nx, dtype=float)      # descending
-        yw = np.linspace(-1.0, 3.0, ny, dtype=float)      # ascending
+        xw = np.linspace(5.0, -7.0, nx, dtype=float)  # descending
+        yw = np.linspace(-1.0, 3.0, ny, dtype=float)  # ascending
         img = xr.DataArray(z, dims=("y", "x")).assign_coords(x=xw, y=yw)
 
         def fake_cf(func, xy, zflat, p0=None, bounds=None, maxfev=None):
             p0 = np.asarray(p0, float)
             pcov = np.eye(p0.size, dtype=float) * 0.01
             return p0, pcov
+
         monkeypatch.setattr(mg, "curve_fit", fake_cf, raising=True)
 
         init = np.array([[amp, x0, y0, sx, sy, th]], float)
@@ -1132,15 +1421,23 @@ class TestNumPyFitting: # (unittest.TestCase):
         assert min(xw) - 1e-9 <= x0w <= max(xw) + 1e-9
         assert min(yw) - 1e-9 <= y0w <= max(yw) + 1e-9
 
-class TestAPIHelpers:
-     def test_init_components_array_wrong_shape_raises(self) -> None:
-         da = xr.DataArray(np.zeros((16, 17), float), dims=("y", "x"))
-         bad_init = {"offset": 0.0, "components": np.ones((1, 6), float)}  # shape != (n,6) for n=2
 
 class TestAPIHelpers:
     def test_init_components_array_wrong_shape_raises(self) -> None:
         da = xr.DataArray(np.zeros((16, 17), float), dims=("y", "x"))
-        bad_init = {"offset": 0.0, "components": np.ones((1, 6), float)}  # shape != (n,6) for n=2
+        bad_init = {
+            "offset": 0.0,
+            "components": np.ones((1, 6), float),
+        }  # shape != (n,6) for n=2
+
+
+class TestAPIHelpers:
+    def test_init_components_array_wrong_shape_raises(self) -> None:
+        da = xr.DataArray(np.zeros((16, 17), float), dims=("y", "x"))
+        bad_init = {
+            "offset": 0.0,
+            "components": np.ones((1, 6), float),
+        }  # shape != (n,6) for n=2
 
         with pytest.raises(ValueError):
             fit_multi_gaussian2d(da, n_components=2, initial_guesses=bad_init)
@@ -1151,7 +1448,14 @@ class TestAPIHelpers:
         init = {
             "offset": 0.0,
             "components": [  # length 1, but n=2 → should raise
-                {"amp": 1.0, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 2.0, "theta": 0.0}
+                {
+                    "amp": 1.0,
+                    "x0": 5.0,
+                    "y0": 6.0,
+                    "sigma_x": 2.0,
+                    "sigma_y": 2.0,
+                    "theta": 0.0,
+                }
             ],
         }
         with pytest.raises(ValueError):
@@ -1164,7 +1468,14 @@ class TestAPIHelpers:
             "offset": 0.1,
             "components": [
                 # uses amp + sigma_x/sigma_y + theta
-                {"amp": 1.2, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 1.5, "theta": 0.3},
+                {
+                    "amp": 1.2,
+                    "x0": 5.0,
+                    "y0": 6.0,
+                    "sigma_x": 2.0,
+                    "sigma_y": 1.5,
+                    "theta": 0.3,
+                },
                 # uses amplitude + sx/sy; theta omitted -> defaults to 0.0
                 {"amplitude": 0.8, "x0": 10.0, "y0": 4.0, "sx": 2.5, "sy": 3.0},
             ],
@@ -1187,7 +1498,9 @@ class TestAPIHelpers:
         n = 1
 
         # Case A: missing 'amp'/'amplitude' -> KeyError (or ValueError in some variants)
-        bad_amp = {"components": [{"x0": 4.0, "y0": 5.0, "sigma_x": 2.0, "sigma_y": 2.0}]}
+        bad_amp = {
+            "components": [{"x0": 4.0, "y0": 5.0, "sigma_x": 2.0, "sigma_y": 2.0}]
+        }
         with pytest.raises((KeyError, ValueError)):
             mg._normalize_initial_guesses(z, n, bad_amp, None, None)
 
@@ -1200,7 +1513,14 @@ class TestAPIHelpers:
         z = np.zeros((16, 16), float)
         n = 2
         init_list = [  # len 1 but n=2 → hits lines 221–223
-            {"amp": 1.0, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 2.0, "theta": 0.0}
+            {
+                "amp": 1.0,
+                "x0": 5.0,
+                "y0": 6.0,
+                "sigma_x": 2.0,
+                "sigma_y": 2.0,
+                "theta": 0.0,
+            }
         ]
         init = {"offset": 0.0, "components": init_list}
         with pytest.raises(ValueError):
@@ -1212,8 +1532,21 @@ class TestAPIHelpers:
         init = {  # covers lines 224–232: amp vs amplitude; sigma_x/sigma_y vs sx/sy; theta default
             "offset": 0.1,
             "components": [
-                {"amp": 1.2, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 1.5, "theta": 0.3},
-                {"amplitude": 0.8, "x0": 10.0, "y0": 4.0, "sx": 2.5, "sy": 3.0},  # theta omitted → 0.0
+                {
+                    "amp": 1.2,
+                    "x0": 5.0,
+                    "y0": 6.0,
+                    "sigma_x": 2.0,
+                    "sigma_y": 1.5,
+                    "theta": 0.3,
+                },
+                {
+                    "amplitude": 0.8,
+                    "x0": 10.0,
+                    "y0": 4.0,
+                    "sx": 2.5,
+                    "sy": 3.0,
+                },  # theta omitted → 0.0
             ],
         }
         p = mg._normalize_initial_guesses(z, n, init, None, None)
@@ -1231,7 +1564,14 @@ class TestAPIHelpers:
         n = 2
         # components is a TUPLE of length 1 → hits 221 (list/tuple), 222–223 (len check → ValueError)
         comps = (
-            {"amp": 1.0, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 2.0, "theta": 0.0},
+            {
+                "amp": 1.0,
+                "x0": 5.0,
+                "y0": 6.0,
+                "sigma_x": 2.0,
+                "sigma_y": 2.0,
+                "theta": 0.0,
+            },
         )
         init = {"offset": 0.0, "components": comps}
         with pytest.raises(ValueError):
@@ -1242,8 +1582,21 @@ class TestAPIHelpers:
         n = 2
         # components as a TUPLE → exercises 221; then 224 (alloc), 225–231 (loop & synonyms), 232 (pack/return)
         comps = (
-            {"amp": 1.2, "x0": 5.0, "y0": 6.0, "sigma_x": 2.0, "sigma_y": 1.5, "theta": 0.3},
-            {"amplitude": 0.8, "x0": 10.0, "y0": 4.0, "sx": 2.5, "sy": 3.0},  # theta omitted → defaults to 0.0
+            {
+                "amp": 1.2,
+                "x0": 5.0,
+                "y0": 6.0,
+                "sigma_x": 2.0,
+                "sigma_y": 1.5,
+                "theta": 0.3,
+            },
+            {
+                "amplitude": 0.8,
+                "x0": 10.0,
+                "y0": 4.0,
+                "sx": 2.5,
+                "sy": 3.0,
+            },  # theta omitted → defaults to 0.0
         )
         init = {"offset": 0.1, "components": comps}
         p = mg._normalize_initial_guesses(z, n, init, None, None)
@@ -1278,7 +1631,7 @@ class TestAPIHelpers:
         # Build a simple scene with a known offset (~0.12)
         ny, nx = 40, 40
         y, x = np.mgrid[0:ny, 0:nx]
-        z = 0.12 + np.exp(-((x - 20) ** 2 + (y - 22) ** 2) / (2 * 3.0 ** 2))
+        z = 0.12 + np.exp(-((x - 20) ** 2 + (y - 22) ** 2) / (2 * 3.0**2))
         da = xr.DataArray(z, dims=("y", "x"))
 
         # Reasonable initial guess
@@ -1308,16 +1661,19 @@ class TestAPIHelpers:
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
         z = (
-                0.05
-                + _gauss2d_on_grid(x, y, 1.0, 20.0, 20.0, 1.0, 1.2, 0.0, offset=0.0)
-                + _gauss2d_on_grid(x, y, 0.8, 44.0, 40.0, 3.0, 2.5, 0.2, offset=0.0)
-            )
+            0.05
+            + _gauss2d_on_grid(x, y, 1.0, 20.0, 20.0, 1.0, 1.2, 0.0, offset=0.0)
+            + _gauss2d_on_grid(x, y, 0.8, 44.0, 40.0, 3.0, 2.5, 0.2, offset=0.0)
+        )
         da = xr.DataArray(z, dims=("y", "x"))
         # Reasonable initial guesses (order matches components above)
-        init = np.array([
-            [0.9, 19.5, 20.5, 1.2, 1.0, 0.1],  # near comp A
-            [0.7, 44.5, 39.5, 2.7, 2.7, 0.2],  # near comp B
-        ], dtype=float)
+        init = np.array(
+            [
+                [0.9, 19.5, 20.5, 1.2, 1.0, 0.1],  # near comp A
+                [0.7, 44.5, 39.5, 2.7, 2.7, 0.2],  # near comp B
+            ],
+            dtype=float,
+        )
 
         # Per-component bounds for sigma_x — this exercises the comp_idx branch inside _merge_bounds_multi
         bounds = {"sigma_x": [(0.5, 1.5), (2.0, 4.0)]}
@@ -1365,19 +1721,28 @@ class TestAPIHelpers:
         img = xr.DataArray(np.zeros((ny, nx), float), dims=("y", "x"))
         # n_components=2 but provide only one dict → triggers the length check
         init = [
-            {"amp": 1.0, "x0": 10.0, "y0": 11.0, "fwhm_x": 6.0, "fwhm_y": 4.0, "theta": 0.0}
+            {
+                "amp": 1.0,
+                "x0": 10.0,
+                "y0": 11.0,
+                "fwhm_x": 6.0,
+                "fwhm_y": 4.0,
+                "theta": 0.0,
+            }
         ]
         with pytest.raises(ValueError, match=r"length n=2"):
             fit_multi_gaussian2d(
                 img,
                 n_components=2,
-                initial_guesses=init,   # top-level list of dicts path
+                initial_guesses=init,  # top-level list of dicts path
                 return_model=False,
                 return_residual=False,
-                coord_type="pixel",      # DataArray has no coords; use pixel indices
+                coord_type="pixel",  # DataArray has no coords; use pixel indices
             )
 
-    def test_init_array_wrong_shape_hits_conv_arr_early_return_then_raises(self) -> None:
+    def test_init_array_wrong_shape_hits_conv_arr_early_return_then_raises(
+        self,
+    ) -> None:
         """angle='pa' forces init → _convert_init_theta; (n,5) array triggers early return in _conv_arr."""
         ny, nx = 16, 16
         img = xr.DataArray(np.zeros((ny, nx), float), dims=("y", "x"))
@@ -1393,11 +1758,12 @@ class TestAPIHelpers:
                 img,
                 n_components=1,
                 initial_guesses=init_wrong,
-                angle="pa",            # ensure the _convert_init_theta path is executed
+                angle="pa",  # ensure the _convert_init_theta path is executed
                 return_model=False,
                 return_residual=False,
-                coord_type="pixel",    # DataArray has no coords; use pixel indices
+                coord_type="pixel",  # DataArray has no coords; use pixel indices
             )
+
 
 class TestMetadataNotes:
     def test_variance_explained_includes_self_documenting_note(self) -> None:
@@ -1410,7 +1776,7 @@ class TestMetadataNotes:
         """
         ny, nx = 48, 48
         y, x = np.mgrid[0:ny, 0:nx]
-        z = 0.05 + np.exp(-((x - 24) ** 2 + (y - 20) ** 2) / (2 * 3.0 ** 2))
+        z = 0.05 + np.exp(-((x - 24) ** 2 + (y - 20) ** 2) / (2 * 3.0**2))
         da = xr.DataArray(z, dims=("y", "x"))
 
         init = np.array([[0.9, 24.0, 20.0, 3.0, 3.0, 0.0]], float)
@@ -1430,24 +1796,25 @@ class TestMetadataNotes:
         assert "Explained variance fraction" in note
         assert "Quick gut-check scale" in note
 
+
 class TestAngleEndToEndFitter(unittest.TestCase):
     @staticmethod
     def _mk_gauss(ny, nx, amp, x0, y0, sx, sy, theta_math, offset=0.12, flip_x=False):
         # Build rotated anisotropic Gaussian with math angle `theta_math`
         y, x = np.mgrid[0:ny, 0:nx]
         if flip_x:
-            x = x[:,::-1]  # flip x-axis to left-handed coordinate system
+            x = x[:, ::-1]  # flip x-axis to left-handed coordinate system
         ct, st = np.cos(theta_math), np.sin(theta_math)
         X, Y = x - x0, y - y0
-        a = (ct**2)/(2*sx**2) + (st**2)/(2*sy**2)
-        b = st*ct*(1/(2*sx**2) - 1/(2*sy**2))  # sign fix (x term first)
-        c = (st**2)/(2*sx**2) + (ct**2)/(2*sy**2)
-        z = offset + amp * np.exp(-(a*X**2 + 2*b*X*Y + c*Y**2))
+        a = (ct**2) / (2 * sx**2) + (st**2) / (2 * sy**2)
+        b = st * ct * (1 / (2 * sx**2) - 1 / (2 * sy**2))  # sign fix (x term first)
+        c = (st**2) / (2 * sx**2) + (ct**2) / (2 * sy**2)
+        z = offset + amp * np.exp(-(a * X**2 + 2 * b * X * Y + c * Y**2))
         return xr.DataArray(z, dims=("y", "x"))
 
     @staticmethod
     def _angdiff(a, b):
-        d = (a - b + np.pi) % (2*np.pi) - np.pi
+        d = (a - b + np.pi) % (2 * np.pi) - np.pi
         return abs(d)
 
     def test_theta_math_pa_relation_pixel_right_and_left_handed(self):
@@ -1459,41 +1826,71 @@ class TestAngleEndToEndFitter(unittest.TestCase):
         for handedness in ("right", "left"):
             for theta_expected in (30.0, -60.0):
                 theta_math_true = np.deg2rad(theta_expected)
-                da = self._mk_gauss(ny, nx, amp, x0, y0, sx, sy, theta_math_true, flip_x=(handedness == "left"))
+                da = self._mk_gauss(
+                    ny,
+                    nx,
+                    amp,
+                    x0,
+                    y0,
+                    sx,
+                    sy,
+                    theta_math_true,
+                    flip_x=(handedness == "left"),
+                )
 
                 # Seeds: close to truth; run once reporting math, once reporting PA
-                init_math = np.array([[0.9, x0, y0, sx*0.9, sy*1.1, theta_math_true]], float)
+                init_math = np.array(
+                    [[0.9, x0, y0, sx * 0.9, sy * 1.1, theta_math_true]], float
+                )
                 coord_type = "pixel" if handedness == "right" else "world"
                 if handedness == "left":
                     # Assign world coords: x descending, y ascending
-                    da = da.assign_coords(x=np.linspace(1.0, -1.0, nx), y=np.linspace(-1.0, 1.0, ny))
+                    da = da.assign_coords(
+                        x=np.linspace(1.0, -1.0, nx), y=np.linspace(-1.0, 1.0, ny)
+                    )
                 ds_math = fit_multi_gaussian2d(
-                    da, n_components=1, initial_guesses=init_math,
-                    angle="math", coord_type=coord_type, return_model=False, return_residual=False
+                    da,
+                    n_components=1,
+                    initial_guesses=init_math,
+                    angle="math",
+                    coord_type=coord_type,
+                    return_model=False,
+                    return_residual=False,
                 )
 
                 assert bool(ds_math["success"]) is True
-                theta_math_fit = float(ds_math[f"theta_{coord_type}"].isel(component=0).values)  # reported in math
+                theta_math_fit = float(
+                    ds_math[f"theta_{coord_type}"].isel(component=0).values
+                )  # reported in math
                 self.assertTrue(
                     np.isclose(theta_math_fit, theta_math_true),
-                    f"math fit {theta_math_fit} != true {theta_math_true} for {handedness} handed coordinate system"
+                    f"math fit {theta_math_fit} != true {theta_math_true} for {handedness} handed coordinate system",
                 )
-                pa_expected = (np.pi/2 - theta_math_fit) % (2*np.pi)
-                init_pa = np.array([[0.9, x0, y0, sx*0.9, sy*1.1, pa_expected]], float)
+                pa_expected = (np.pi / 2 - theta_math_fit) % (2 * np.pi)
+                init_pa = np.array(
+                    [[0.9, x0, y0, sx * 0.9, sy * 1.1, pa_expected]], float
+                )
                 ds_pa = fit_multi_gaussian2d(
-                    da, n_components=1, initial_guesses=init_pa,
-                    angle="pa", coord_type=coord_type, return_model=False, return_residual=False
+                    da,
+                    n_components=1,
+                    initial_guesses=init_pa,
+                    angle="pa",
+                    coord_type=coord_type,
+                    return_model=False,
+                    return_residual=False,
                 )
                 assert bool(ds_pa["success"]) is True
-                theta_pa_fit = float(ds_pa[f"theta_{coord_type}"].isel(component=0).values)     # reported in PA
+                theta_pa_fit = float(
+                    ds_pa[f"theta_{coord_type}"].isel(component=0).values
+                )  # reported in PA
                 self.assertTrue(
                     np.isclose(theta_pa_fit, pa_expected),
-                    f"pa fit {theta_pa_fit} != expected {pa_expected} for {handedness} handed coordinate system"
+                    f"pa fit {theta_pa_fit} != expected {pa_expected} for {handedness} handed coordinate system",
                 )
                 # Verify PA = 90° − θ (mod 2π)
                 self.assertTrue(
-                    np.isclose(theta_pa_fit, np.pi/2 - theta_math_fit),
-                    f"pa fit {theta_pa_fit} != pi/2 - math fit {theta_math_fit} for {handedness} handed coordinate system"
+                    np.isclose(theta_pa_fit, np.pi / 2 - theta_math_fit),
+                    f"pa fit {theta_pa_fit} != pi/2 - math fit {theta_math_fit} for {handedness} handed coordinate system",
                 )
 
     def test_canonicalization_swaps_axes_and_rotates_theta_by_half_pi(self) -> None:
@@ -1505,16 +1902,34 @@ class TestAngleEndToEndFitter(unittest.TestCase):
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
         amp_true, x0_true, y0_true = 1.0, 30.0, 28.0
-        sx_true, sy_true = 2.0, 5.0          # major axis along +y
-        theta_math_true = 0.0                # no rotation in the scene frame
-        z = _gauss2d_on_grid(x, y, amp_true, x0_true, y0_true, sx_true, sy_true, theta_math_true, offset=0.12)
+        sx_true, sy_true = 2.0, 5.0  # major axis along +y
+        theta_math_true = 0.0  # no rotation in the scene frame
+        z = _gauss2d_on_grid(
+            x,
+            y,
+            amp_true,
+            x0_true,
+            y0_true,
+            sx_true,
+            sy_true,
+            theta_math_true,
+            offset=0.12,
+        )
         img = xr.DataArray(z, dims=("y", "x"))
 
         # Seed close to truth; ask for math angles back
-        init = np.array([[0.9, x0_true, y0_true, sx_true*0.95, sy_true*1.05, theta_math_true]], float)
+        init = np.array(
+            [[0.9, x0_true, y0_true, sx_true * 0.95, sy_true * 1.05, theta_math_true]],
+            float,
+        )
         ds = fit_multi_gaussian2d(
-            img, n_components=1, initial_guesses=init,
-            angle="math", return_model=False, return_residual=False, coord_type="pixel"
+            img,
+            n_components=1,
+            initial_guesses=init,
+            angle="math",
+            return_model=False,
+            return_residual=False,
+            coord_type="pixel",
         )
 
         assert bool(ds["success"]) is True
@@ -1523,12 +1938,12 @@ class TestAngleEndToEndFitter(unittest.TestCase):
         smin = float(ds["sigma_minor_pixel"])
         th_m = float(ds["theta_pixel"])  # in math because angle="math"
         assert smaj >= smin
-        assert (-np.pi/2 - 1e-9) < th_m <= (np.pi/2 + 1e-9)
+        assert (-np.pi / 2 - 1e-9) < th_m <= (np.pi / 2 + 1e-9)
 
         # For σx<σy and θ_math_true=0, canonicalization rotates by a half-π.
         # Endpoints ±π/2 are equivalent (ellipse major-axis ambiguity).
         # Accept either branch endpoint within tight tolerance.
-        err = min(abs(th_m - np.pi/2), abs(th_m + np.pi/2))
+        err = min(abs(th_m - np.pi / 2), abs(th_m + np.pi / 2))
         assert err < 0.01, f"got {th_m}, expected ≈ ±π/2"
 
     def test_canonicalization_wraps_theta_into_half_pi_interval(self) -> None:
@@ -1539,38 +1954,66 @@ class TestAngleEndToEndFitter(unittest.TestCase):
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
         amp_true, x0_true, y0_true = 1.0, 28.0, 30.0
-        sx_true, sy_true = 5.0, 2.0          # already major along x (no swap)
-        theta_math_true = 1.80               # ~103.13°, should wrap negative
-        z = _gauss2d_on_grid(x, y, amp_true, x0_true, y0_true, sx_true, sy_true, theta_math_true, offset=0.10)
+        sx_true, sy_true = 5.0, 2.0  # already major along x (no swap)
+        theta_math_true = 1.80  # ~103.13°, should wrap negative
+        z = _gauss2d_on_grid(
+            x,
+            y,
+            amp_true,
+            x0_true,
+            y0_true,
+            sx_true,
+            sy_true,
+            theta_math_true,
+            offset=0.10,
+        )
         img = xr.DataArray(z, dims=("y", "x"))
 
-        init = np.array([[0.95, x0_true, y0_true, sx_true, sy_true, theta_math_true]], float)
+        init = np.array(
+            [[0.95, x0_true, y0_true, sx_true, sy_true, theta_math_true]], float
+        )
         ds = fit_multi_gaussian2d(
-            img, n_components=1, initial_guesses=init,
-            angle="math", return_model=False, return_residual=False, coord_type="pixel"
+            img,
+            n_components=1,
+            initial_guesses=init,
+            angle="math",
+            return_model=False,
+            return_residual=False,
+            coord_type="pixel",
         )
 
         assert bool(ds["success"]) is True
         th_m = float(ds["theta_pixel"])  # reported math angle, canonicalized
 
         # Expected wrap: ((θ + π/2) % π) − π/2  ∈ (-π/2, π/2]
-        expected_wrapped = ((theta_math_true + np.pi/2) % np.pi) - np.pi/2
-        assert (-np.pi/2 - 1e-9) < th_m <= (np.pi/2 + 1e-9)
-        assert abs(th_m - expected_wrapped) < 0.15, f"got {th_m}, expected ~{expected_wrapped}"
+        expected_wrapped = ((theta_math_true + np.pi / 2) % np.pi) - np.pi / 2
+        assert (-np.pi / 2 - 1e-9) < th_m <= (np.pi / 2 + 1e-9)
+        assert (
+            abs(th_m - expected_wrapped) < 0.15
+        ), f"got {th_m}, expected ~{expected_wrapped}"
 
         # Also verify PA report matches θ→PA conversion on the same fit if requested
         # (exercises publishing in requested convention).
-        pa_expected = float(((np.pi/2) - th_m) % (2*np.pi))
-        init_pa = np.array([[0.95, x0_true, y0_true, sx_true, sy_true, pa_expected]], float)
+        pa_expected = float(((np.pi / 2) - th_m) % (2 * np.pi))
+        init_pa = np.array(
+            [[0.95, x0_true, y0_true, sx_true, sy_true, pa_expected]], float
+        )
         ds_pa = fit_multi_gaussian2d(
-            img, n_components=1, initial_guesses=init_pa,
-            angle="pa", return_model=False, return_residual=False, coord_type="pixel"
+            img,
+            n_components=1,
+            initial_guesses=init_pa,
+            angle="pa",
+            return_model=False,
+            return_residual=False,
+            coord_type="pixel",
         )
         th_pa = float(ds_pa["theta_pixel"])
         assert abs(th_pa - pa_expected) < 0.01
 
+
 # ⬇️ Paste this into the existing file: tests/test_multi_gaussian2d_fit.py
 # Place anywhere near related pixel→world interpolation tests.
+
 
 class TestInnerPrepCoverage:
     def test_inner_prep_lines_executed(self, monkeypatch):
@@ -1621,10 +2064,14 @@ class TestInnerPrepCoverage:
         ny, nx = 6, 8
         y = np.linspace(-1.0, 1.0, ny, dtype=float)
         x = np.linspace(-2.0, 2.0, nx, dtype=float)
-        da = xr.DataArray(np.zeros((ny, nx), float), dims=("y", "x"), coords={"y": y, "x": x})
+        da = xr.DataArray(
+            np.zeros((ny, nx), float), dims=("y", "x"), coords={"y": y, "x": x}
+        )
 
         init = np.array([[0.2, nx / 2 - 0.5, ny / 2 - 0.5, 1.5, 1.0, 0.0]], float)
-        ds = fit_multi_gaussian2d(da, n_components=1, initial_guesses=init, coord_type="pixel")
+        ds = fit_multi_gaussian2d(
+            da, n_components=1, initial_guesses=init, coord_type="pixel"
+        )
 
         # The shim executed and exercised all `_prep` branches
         assert ds.attrs.get("_shim_ran", False) is True
@@ -1647,6 +2094,7 @@ class TestInnerPrepCoverage:
         assert np.allclose(idx, np.array([0.0, 1.0, 2.0]))
         assert np.allclose(val, np.array([0.0, 0.5, 1.0]))
 
+
 class TestCoordsForNdarrayInput:
     def test_coords_validation_and_success(self, monkeypatch):
         """Validate tuple length, shape checks, and successful use of provided coords for ndarray input."""
@@ -1661,12 +2109,16 @@ class TestCoordsForNdarrayInput:
 
         ny, nx = 10, 12
         img = np.zeros((ny, nx), float)
-        init = np.array([[0.5, nx/2 - 0.5, ny/2 - 0.5, 2.0, 1.5, 0.0]], float)
+        init = np.array([[0.5, nx / 2 - 0.5, ny / 2 - 0.5, 2.0, 1.5, 0.0]], float)
 
         # 1) wrong-length coords tuple -> error
         with pytest.raises(ValueError):
-            fit_multi_gaussian2d(img, n_components=1, initial_guesses=init, coords=(np.arange(nx, dtype=float),))
-
+            fit_multi_gaussian2d(
+                img,
+                n_components=1,
+                initial_guesses=init,
+                coords=(np.arange(nx, dtype=float),),
+            )
 
     def test_numpy_input_coords_tuple_happy_path_returns_y1d_x1d(self) -> None:
         """
@@ -1684,8 +2136,8 @@ class TestCoordsForNdarrayInput:
         y_out, x_out = mg._extract_1d_coords_for_fit(
             original_input=original,
             da_tr=da_tr,
-            coord_type="world",          # ignored for NumPy input
-            coords=(x1d, y1d),           # (x1d, y1d)
+            coord_type="world",  # ignored for NumPy input
+            coords=(x1d, y1d),  # (x1d, y1d)
             dim_y="y",
             dim_x="x",
         )
@@ -1713,50 +2165,68 @@ class TestCoordsForNdarrayInput:
                 dim_x="x",
             )
 
+
 # ------------------------- result metadata: package version fallback -------------------------
+
 
 class TestResultMetadataVersion:
     def _tiny_scene(self) -> xr.DataArray:
         ny, nx = 6, 6
         y, x = np.mgrid[0:ny, 0:nx]
-        z = 0.05 + np.exp(-((x - 3.0) ** 2 + (y - 2.0) ** 2) / (2 * 1.2 ** 2))
+        z = 0.05 + np.exp(-((x - 3.0) ** 2 + (y - 2.0) ** 2) / (2 * 1.2**2))
         return xr.DataArray(z, dims=("y", "x"))
 
     def _one_comp(self) -> np.ndarray:
         return np.array([[1.0, 3.0, 2.0, 1.2, 1.2, 0.0]], float)
 
-    def test_version_fallback_reads_package_dunder(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_version_fallback_reads_package_dunder(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """If importlib.metadata.version fails, fallback should read astroviper.__version__."""
         import importlib.metadata as ilmd
+
         # Force the primary version lookup to fail → exercise fallback path
         def _boom(*_, **__):
             raise Exception("no version")
+
         monkeypatch.setattr(ilmd, "version", _boom, raising=True)
         # Ensure the top-level package exposes __version__
         import sys, types
+
         if "astroviper" not in sys.modules:
             sys.modules["astroviper"] = types.ModuleType("astroviper")
-        monkeypatch.setattr(sys.modules["astroviper"], "__version__", "0.0.test", raising=False)
+        monkeypatch.setattr(
+            sys.modules["astroviper"], "__version__", "0.0.test", raising=False
+        )
 
         da = self._tiny_scene()
-        ds = fit_multi_gaussian2d(da, n_components=1, initial_guesses=self._one_comp(), coord_type="pixel")
+        ds = fit_multi_gaussian2d(
+            da, n_components=1, initial_guesses=self._one_comp(), coord_type="pixel"
+        )
 
         assert ds.attrs.get("package") == "astroviper"
         assert ds.attrs.get("version") == "0.0.test"
 
-    def test_version_fallback_unknown_when_no_dunder(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_version_fallback_unknown_when_no_dunder(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """If both metadata lookup and __version__ access fail, version should be 'unknown'."""
         import importlib.metadata as ilmd
+
         def _boom(*_, **__):
             raise Exception("no version")
+
         monkeypatch.setattr(ilmd, "version", _boom, raising=True)
         # Remove __version__ if present on the loaded package
         import sys
+
         if "astroviper" in sys.modules:
             monkeypatch.delattr(sys.modules["astroviper"], "__version__", raising=False)
 
         da = self._tiny_scene()
-        ds = fit_multi_gaussian2d(da, n_components=1, initial_guesses=self._one_comp(), coord_type="pixel")
+        ds = fit_multi_gaussian2d(
+            da, n_components=1, initial_guesses=self._one_comp(), coord_type="pixel"
+        )
 
         assert ds.attrs.get("package") == "astroviper"
         assert ds.attrs.get("version") == "unknown"
@@ -1766,14 +2236,32 @@ class TestResultMetadataVersion:
 # Covers the branch that maps 'fwhm_major'/'fwhm_minor' bounds into 'sigma_x'/'sigma_y',
 # including both per-component list-of-tuples and single-tuple cases.
 
+
 class TestBoundsFwhmMapping:
-    def _dummy_results(
-        self, da: xr.DataArray, n: int
-    ) -> tuple[xr.DataArray, xr.DataArray, xr.DataArray, xr.DataArray, xr.DataArray, xr.DataArray,
-               xr.DataArray, xr.DataArray, xr.DataArray, xr.DataArray, xr.DataArray, xr.DataArray,
-               xr.DataArray, xr.DataArray, xr.DataArray, xr.DataArray,
-               xr.DataArray, xr.DataArray, xr.DataArray, xr.DataArray,
-               xr.DataArray, xr.DataArray]:
+    def _dummy_results(self, da: xr.DataArray, n: int) -> tuple[
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+        xr.DataArray,
+    ]:
         comp = xr.DataArray(np.zeros((n,), dtype=float), dims=("component",))
         # 6 params + 6 errors + 4 derived
         blocks = [comp.copy() for _ in range(6 + 6 + 4)]
@@ -1785,7 +2273,9 @@ class TestBoundsFwhmMapping:
         model = xr.DataArray(np.zeros_like(da.values), dims=da.dims)
         return (*blocks, offset, offset_e, success, varexp, resid, model)
 
-    def test_fwhm_major_list_of_tuples_maps_to_sigma_x_per_component(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_fwhm_major_list_of_tuples_maps_to_sigma_x_per_component(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # Capture the mapped bounds passed into the vectorized wrapper
         seen: dict[str, dict] = {}
 
@@ -1809,18 +2299,24 @@ class TestBoundsFwhmMapping:
 
         ny, nx = 8, 9
         da = xr.DataArray(np.zeros((ny, nx), dtype=float), dims=("y", "x"))
-        init = np.array([[1.0, 3.0, 4.0, 2.0, 1.5, 0.0],
-                         [0.8, 6.0, 2.0, 3.0, 2.5, 0.1]], dtype=float)
+        init = np.array(
+            [[1.0, 3.0, 4.0, 2.0, 1.5, 0.0], [0.8, 6.0, 2.0, 3.0, 2.5, 0.1]],
+            dtype=float,
+        )
         bounds = {"fwhm_major": [(1.0, 4.0), (2.0, 5.0)]}
 
-        ds = fit_multi_gaussian2d(da, n_components=2, initial_guesses=init, bounds=bounds, coord_type="pixel")
+        ds = fit_multi_gaussian2d(
+            da, n_components=2, initial_guesses=init, bounds=bounds, coord_type="pixel"
+        )
         assert isinstance(ds, xr.Dataset)
 
         conv = mg._FWHM2SIG
         expected = {"sigma_x": [(1.0 * conv, 4.0 * conv), (2.0 * conv, 5.0 * conv)]}
         assert seen["bounds"] == expected
 
-    def test_fwhm_minor_single_tuple_maps_to_sigma_y_tuple(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_fwhm_minor_single_tuple_maps_to_sigma_y_tuple(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         seen: dict[str, dict] = {}
 
         orig_apply_ufunc = xr.apply_ufunc
@@ -1842,7 +2338,9 @@ class TestBoundsFwhmMapping:
         init = np.array([[1.0, 3.0, 3.0, 1.2, 1.1, 0.0]], dtype=float)
         bounds = {"fwhm_minor": (2.0, 6.0)}
 
-        ds = fit_multi_gaussian2d(da, n_components=1, initial_guesses=init, bounds=bounds, coord_type="pixel")
+        ds = fit_multi_gaussian2d(
+            da, n_components=1, initial_guesses=init, bounds=bounds, coord_type="pixel"
+        )
         assert isinstance(ds, xr.Dataset)
 
         conv = mg._FWHM2SIG
@@ -1854,19 +2352,36 @@ class TestBoundsFwhmMapping:
 # Exercises the branch where component dicts omit sigma_y/sy but provide fwhm_minor.
 # This drives the internal list-of-dicts parser so the conversion is applied before fitting.
 
+
 class TestInitialGuessesFwhmMinorMappingPublicAPI:
-    def test_components_list_of_dicts_maps_fwhm_minor_to_sigma_y_in_p0(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_components_list_of_dicts_maps_fwhm_minor_to_sigma_y_in_p0(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # Build a tiny scene
         ny, nx = 12, 13
         y, x = np.mgrid[0:ny, 0:nx]
-        z = 0.05 + np.exp(-((x - 6.0) ** 2 + (y - 5.0) ** 2) / (2 * 2.0 ** 2))
+        z = 0.05 + np.exp(-((x - 6.0) ** 2 + (y - 5.0) ** 2) / (2 * 2.0**2))
         da = xr.DataArray(z, dims=("y", "x"))
 
         # Two components with sigma_x provided, sigma_y omitted, fwhm_minor provided.
         init = {
             "components": [
-                {"amp": 1.0, "x0": 6.0, "y0": 5.0, "sigma_x": 2.0, "fwhm_minor": 1.5, "theta": 0.1},
-                {"amplitude": 0.8, "x0": 9.0, "y0": 3.0, "sx": 3.0, "fwhm_minor": 2.5, "theta": 0.2},
+                {
+                    "amp": 1.0,
+                    "x0": 6.0,
+                    "y0": 5.0,
+                    "sigma_x": 2.0,
+                    "fwhm_minor": 1.5,
+                    "theta": 0.1,
+                },
+                {
+                    "amplitude": 0.8,
+                    "x0": 9.0,
+                    "y0": 3.0,
+                    "sx": 3.0,
+                    "fwhm_minor": 2.5,
+                    "theta": 0.2,
+                },
             ]
         }
 
@@ -1884,7 +2399,12 @@ class TestInitialGuessesFwhmMinorMappingPublicAPI:
         monkeypatch.setattr(mg, "curve_fit", fake_curve_fit, raising=True)
 
         ds = fit_multi_gaussian2d(
-            da, n_components=2, initial_guesses=init, coord_type="pixel", return_model=False, return_residual=False
+            da,
+            n_components=2,
+            initial_guesses=init,
+            coord_type="pixel",
+            return_model=False,
+            return_residual=False,
         )
         assert isinstance(ds, xr.Dataset)
 
@@ -1897,21 +2417,22 @@ class TestInitialGuessesFwhmMinorMappingPublicAPI:
         actual_sy = [float(p0[sy_indices[0]]), float(p0[sy_indices[1]])]
         assert np.allclose(actual_sy, expected_sy, rtol=1e-12, atol=0.0)
 
+
 class TestAutoSeedingPixelPublicAPI:
     def test_auto_seed_pixel_public_api(self) -> None:
         """Public API: pixel coords + auto initial guesses."""
         ny, nx = 7, 9
         z = np.zeros((ny, nx), dtype=float)
         # two separated bright pixels
-        for (y, x, v) in [(1, 1, 10.0), (5, 7, 8.0)]:
+        for y, x, v in [(1, 1, 10.0), (5, 7, 8.0)]:
             z[y, x] = v
         da = xr.DataArray(z, dims=("y", "x"))  # no world coords
 
         ds = fit_multi_gaussian2d(
             da,
             n_components=2,
-            initial_guesses=None,        # auto-seed (hits pixel seeding path)
-            coord_type="pixel",          # pixel mode via public API
+            initial_guesses=None,  # auto-seed (hits pixel seeding path)
+            coord_type="pixel",  # pixel mode via public API
             return_model=False,
             return_residual=False,
         )
@@ -1920,12 +2441,15 @@ class TestAutoSeedingPixelPublicAPI:
         # centers should land near the two bright pixels (order-agnostic)
         pred = np.column_stack([ds["x0_pixel"].values, ds["y0_pixel"].values])
         expected = [(1.0, 1.0), (7.0, 5.0)]
-        for (xe, ye) in expected:
+        for xe, ye in expected:
             dmin = np.min(np.hypot(pred[:, 0] - xe, pred[:, 1] - ye))
             assert dmin < 1.0
 
+
 class TestAutoSeedingPixelElsePublicAPI:
-    def test_auto_seeding_pixel_else_path_public_api(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_auto_seeding_pixel_else_path_public_api(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """
         Public API call drives the pixel-seeding 'else' path.
         We force the underlying plane fitter to treat axes as pixel-index grids,
@@ -1961,14 +2485,33 @@ class TestAutoSeedingPixelElsePublicAPI:
         # (Still invoked through the public API; we do not call privates ourselves.)
         _orig_fit = mg._fit_multi_plane_numpy
 
-        def _fit_force_pixel(z2d, n_components, min_threshold, max_threshold,
-                             initial_guesses, bounds, max_nfev, *, x1d=None, y1d=None):
+        def _fit_force_pixel(
+            z2d,
+            n_components,
+            min_threshold,
+            max_threshold,
+            initial_guesses,
+            bounds,
+            max_nfev,
+            *,
+            x1d=None,
+            y1d=None,
+        ):
             return _orig_fit(
-                z2d, n_components, min_threshold, max_threshold,
-                initial_guesses, bounds, max_nfev, x1d=None, y1d=None
+                z2d,
+                n_components,
+                min_threshold,
+                max_threshold,
+                initial_guesses,
+                bounds,
+                max_nfev,
+                x1d=None,
+                y1d=None,
             )
 
-        monkeypatch.setattr(mg, "_fit_multi_plane_numpy", _fit_force_pixel, raising=True)
+        monkeypatch.setattr(
+            mg, "_fit_multi_plane_numpy", _fit_force_pixel, raising=True
+        )
 
         # Public API call
         ds = mg.fit_multi_gaussian2d(
@@ -1994,9 +2537,10 @@ class TestAutoSeedingPixelElsePublicAPI:
         assert np.isclose(p0[5], expected_w)
 
         # Sanity on the rest
-        assert p0[1] > 0.0          # amp
-        assert np.isclose(p0[0], 0) # offset
-        assert np.isclose(p0[6], 0) # theta
+        assert p0[1] > 0.0  # amp
+        assert np.isclose(p0[0], 0)  # offset
+        assert np.isclose(p0[6], 0)  # theta
+
 
 class TestResultMetadataShortener:
     def test_coords_repr_truncated_when_shape_property_raises(self) -> None:
@@ -2013,8 +2557,7 @@ class TestResultMetadataShortener:
         ny, nx = 32, 40
         y, x = np.mgrid[0:ny, 0:nx]
         img = 0.1 + np.exp(
-            -((x - nx / 2.0) ** 2) / (2 * 3.0 ** 2)
-            - ((y - ny / 2.0) ** 2) / (2 * 2.0 ** 2)
+            -((x - nx / 2.0) ** 2) / (2 * 3.0**2) - ((y - ny / 2.0) ** 2) / (2 * 2.0**2)
         )
         da = xr.DataArray(img, dims=("y", "x"))
 
@@ -2028,7 +2571,7 @@ class TestResultMetadataShortener:
             n_components=1,
             initial_guesses=init,
             coord_type="pixel",
-            coords=EvilCoords(),      # recorded in metadata; not used for DataArray pixel fits
+            coords=EvilCoords(),  # recorded in metadata; not used for DataArray pixel fits
             return_model=False,
             return_residual=False,
         )
