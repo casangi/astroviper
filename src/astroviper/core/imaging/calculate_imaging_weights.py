@@ -12,10 +12,12 @@ from astroviper.core.imaging.check_imaging_parameters import (
 )
 from astroviper.core.imaging.imaging_weighting.grid_imaging_weights import (
     grid_imaging_weights,
-    degrid_imaging_weights
+    degrid_imaging_weights,
 )
 
-from astroviper.core.imaging.imaging_weighting.briggs_weighting import calculate_briggs_params
+from astroviper.core.imaging.imaging_weighting.briggs_weighting import (
+    calculate_briggs_params,
+)
 
 # from graphviper.parameter_checking.check_parms import check_sel_parms
 from astroviper.utils.check_parms import check_parms, check_sel_parms
@@ -68,7 +70,7 @@ def calculate_imaging_weights(ms_xds, grid_parms, imaging_weights_parms, sel_par
     briggs_factors = calculate_briggs_params(
         weight_density_grid, sum_weight, _imaging_weights_parms
     )  # 2 x chan x pol
-    
+
     print("briggs_factors", briggs_factors.shape, briggs_factors)
 
     imaging_weights = degrid_imaging_weights(
@@ -80,4 +82,3 @@ def calculate_imaging_weights(ms_xds, grid_parms, imaging_weights_parms, sel_par
     )
 
     return _sel_parms["data_group_out"]
-

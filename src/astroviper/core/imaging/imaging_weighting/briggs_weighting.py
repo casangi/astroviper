@@ -1,6 +1,6 @@
-
 def calculate_briggs_params(grid_of_imaging_weights, sum_weight, imaging_weights_parms):
     import numpy as np
+
     if imaging_weights_parms["weighting"] == "briggs":
         robust = imaging_weights_parms["robust"]
         briggs_factors = np.ones((2,) + sum_weight.shape)

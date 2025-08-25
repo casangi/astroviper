@@ -108,7 +108,7 @@ def grid_imaging_weights_jit(
 
     n_u = n_uv[0]
     n_v = n_uv[1]
-    
+
     n_pol = data_weights.shape[3]
 
     for i_time in range(n_time):
