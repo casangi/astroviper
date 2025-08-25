@@ -56,7 +56,7 @@ def standard_grid_numpy_wrap(vis_data, uvw, weight, freq_chan, cgk_1D, grid_parm
 
     do_psf = grid_parms["do_psf"]
     do_imaging_weight = False
-    _standard_grid_jit(
+    standard_grid_jit(
         grid,
         sum_weight,
         do_psf,

@@ -58,9 +58,10 @@ def make_imaging_weights(ms_xds, grid_parms, imaging_weights_parms, sel_parms):
     cgk_1D = np.ones((1))
 
     uvw = ms_xds[data_group_out["uvw"]].values
-    data_weight = ms_xds[data_group_out["weight"]].values*(1-ms_xds[data_group_out["flag"]].values)
+    data_weight = ms_xds[data_group_out["weight"]].values * (
+        1 - ms_xds[data_group_out["flag"]].values
+    )
     freq_chan = ms_xds.frequency.values
-    
 
     # Grid Weights
     weight_density_grid, sum_weight = standard_grid_psf_numpy_wrap(
