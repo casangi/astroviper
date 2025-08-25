@@ -12,6 +12,7 @@ Run:
     # optional coverage:
     # pytest -q --cov=astroviper.fitting.multi_gaussian2d_fit --cov-report=term-missing
 """
+
 from __future__ import annotations
 
 import unittest
