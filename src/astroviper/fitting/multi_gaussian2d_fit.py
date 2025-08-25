@@ -14,6 +14,7 @@ ArrayOrDA = Union[np.ndarray, da.Array, xr.DataArray]
 
 # ----------------------- Core Gaussian pieces -----------------------
 
+
 def _gauss2d_component(
     X: np.ndarray,
     Y: np.ndarray,
@@ -35,16 +36,21 @@ def _gauss2d_component(
     c = (st**2) / (2 * sx**2) + (ct**2) / (2 * sy**2)
     return amp * np.exp(-(a * x**2 + 2 * b * x * y + c * y**2))
 
+
 _SIG2FWHM = 2.0 * np.sqrt(2.0 * np.log(2.0))
 _FWHM2SIG = 1.0 / _SIG2FWHM
+
 
 def _fwhm_from_sigma(sigma):
     return _SIG2FWHM * np.asarray(sigma)
 
+
 def _sigma_from_fwhm(fwhm):
     return _FWHM2SIG * np.asarray(fwhm)
 
+
 # ----------------------- Parameter packing helpers -----------------------
+
 
 def _pack_params(
     offset: float,
@@ -66,7 +72,11 @@ def _pack_params(
     return np.asarray(out, dtype=float)
 
 
-def _unpack_params(params: np.ndarray, n: int) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _unpack_params(
+    params: np.ndarray, n: int
+) -> Tuple[
+    float, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
+]:
     """
     Inverse of _pack_params.
     """
@@ -82,6 +92,7 @@ def _unpack_params(params: np.ndarray, n: int) -> Tuple[float, np.ndarray, np.nd
 
 
 # ----------------------- Multi-Gaussian model -----------------------
+
 
 def _multi_gaussian2d_sum(
     X: np.ndarray,
@@ -130,7 +141,10 @@ def _multi_model_flat(
 
 # ----------------------- Seeding and bounds -----------------------
 
-def _greedy_peak_seeds(z: np.ndarray, n: int, excl_radius: int = 5) -> List[Tuple[int, int, float]]:
+
+def _greedy_peak_seeds(
+    z: np.ndarray, n: int, excl_radius: int = 5
+) -> List[Tuple[int, int, float]]:
     """
     Very simple N-peak detector: greedily pick the top N pixels with local exclusion.
 
@@ -165,19 +179,21 @@ def _default_bounds_multi(
     """
     ny, nx = shape
     # offset
-    lb = [ -np.inf ]
-    ub = [  np.inf ]
+    lb = [-np.inf]
+    ub = [np.inf]
     # components
-    xlo, xhi = ((-1.0, nx + 1.0) if x_rng is None else (float(x_rng[0]), float(x_rng[1])))
-    ylo, yhi = ((-1.0, ny + 1.0) if y_rng is None else (float(y_rng[0]), float(y_rng[1])))
-    sx_max = max((xhi - xlo), 2.0); sy_max = max((yhi - ylo), 2.0)
+    xlo, xhi = (-1.0, nx + 1.0) if x_rng is None else (float(x_rng[0]), float(x_rng[1]))
+    ylo, yhi = (-1.0, ny + 1.0) if y_rng is None else (float(y_rng[0]), float(y_rng[1]))
+    sx_max = max((xhi - xlo), 2.0)
+    sy_max = max((yhi - ylo), 2.0)
 
     for _ in range(n):
         # amp,   x0,   y0,     sx,     sy,   theta
-        lb.extend([0.0, xlo,  ylo,   1e-3,   1e-3, -np.pi/2])
-        ub.extend([np.inf, xhi, yhi, sx_max, sy_max,  np.pi/2])
+        lb.extend([0.0, xlo, ylo, 1e-3, 1e-3, -np.pi / 2])
+        ub.extend([np.inf, xhi, yhi, sx_max, sy_max, np.pi / 2])
 
     return np.asarray(lb, dtype=float), np.asarray(ub, dtype=float)
+
 
 def _extract_params_from_comp_dicts(comp_list, n):
     """Parse a list of component dicts into arrays (amp, x0, y0, sx, sy, th).
@@ -185,14 +201,18 @@ def _extract_params_from_comp_dicts(comp_list, n):
     Converts FWHM inputs to σ using _FWHM2SIG.
     Raises KeyError if required keys are missing.
     """
-    amps = np.empty(n); x0 = np.empty(n); y0 = np.empty(n)
-    sx = np.empty(n);  sy = np.empty(n);  th = np.empty(n)
+    amps = np.empty(n)
+    x0 = np.empty(n)
+    y0 = np.empty(n)
+    sx = np.empty(n)
+    sy = np.empty(n)
+    th = np.empty(n)
     for i, comp in enumerate(comp_list):
         amps[i] = float(comp["amp"] if "amp" in comp else comp["amplitude"])
-        x0[i]   = float(comp["x0"])
-        y0[i]   = float(comp["y0"])
-        sx_val  = comp.get("sigma_x", comp.get("sx"))
-        sy_val  = comp.get("sigma_y", comp.get("sy"))
+        x0[i] = float(comp["x0"])
+        y0[i] = float(comp["y0"])
+        sx_val = comp.get("sigma_x", comp.get("sx"))
+        sy_val = comp.get("sigma_y", comp.get("sy"))
         if sx_val is None:
             fx = comp.get("fwhm_major")
             if fx is None:
@@ -203,10 +223,11 @@ def _extract_params_from_comp_dicts(comp_list, n):
             if fy is None:
                 raise KeyError("component missing sigma_y/sy (or fwhm_minor)")
             sy_val = float(fy) * _FWHM2SIG
-        sx[i]   = float(sx_val)
-        sy[i]   = float(sy_val)
-        th[i]   = float(comp.get("theta", 0.0))
+        sx[i] = float(sx_val)
+        sy[i] = float(sy_val)
+        th[i] = float(comp.get("theta", 0.0))
     return amps, x0, y0, sx, sy, th
+
 
 def _process_list_of_dicts(
     init: Sequence[Dict[str, Number]],
@@ -221,16 +242,17 @@ def _process_list_of_dicts(
     amps, x0, y0, sx, sy, th = _extract_params_from_comp_dicts(init, n)
     return _pack_params(offset, amps, x0, y0, sx, sy, th)
 
+
 def _is_pixel_index_axes(x1d, y1d):
     # Treat pure pixel-index axes (0..N-1) as pixel mode even if arrays are present
     # putting in function to try to get test coverage to recoognize it.
     _x = np.asarray(x1d, dtype=float)
     _y = np.asarray(y1d, dtype=float)
-    is_pixel_index_axes = (
-        np.allclose(_x, np.arange(_x.size)) and
-        np.allclose(_y, np.arange(_y.size))
+    is_pixel_index_axes = np.allclose(_x, np.arange(_x.size)) and np.allclose(
+        _y, np.arange(_y.size)
     )
     return is_pixel_index_axes
+
 
 def _normalize_initial_guesses(
     z2d: np.ndarray,
@@ -238,7 +260,9 @@ def _normalize_initial_guesses(
     init: Optional[Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]],
     min_threshold: Optional[Number],
     max_threshold: Optional[Number],
-    *, x1d: Optional[np.ndarray] = None, y1d: Optional[np.ndarray] = None,
+    *,
+    x1d: Optional[np.ndarray] = None,
+    y1d: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Build an initial parameter vector for N components.
@@ -272,8 +296,10 @@ def _normalize_initial_guesses(
         yi = np.array([int(y) for (y, _, _) in seeds], dtype=int)
         if x1d is not None and y1d is not None and _is_pixel_index_axes(x1d, y1d):
             # WORLD: map centers and pick widths in world units
-            x1d = np.asarray(x1d, dtype=float); y1d = np.asarray(y1d, dtype=float)
-            x0 = x1d[xi].astype(float); y0 = y1d[yi].astype(float)
+            x1d = np.asarray(x1d, dtype=float)
+            y1d = np.asarray(y1d, dtype=float)
+            x0 = x1d[xi].astype(float)
+            y0 = y1d[yi].astype(float)
             sx = np.full(n, (np.nanmax(x1d) - np.nanmin(x1d)) / 10.0, dtype=float)
             sy = np.full(n, (np.nanmax(y1d) - np.nanmin(y1d)) / 10.0, dtype=float)
         else:
@@ -287,9 +313,14 @@ def _normalize_initial_guesses(
 
     # Allow a single top-level dict when n == 1 (wrap to list-of-dicts)
     from collections.abc import Mapping
-    if isinstance(init, Mapping) and ("components" not in init and "offset" not in init):
+
+    if isinstance(init, Mapping) and (
+        "components" not in init and "offset" not in init
+    ):
         if n != 1:
-            raise ValueError("Single-dict initial_guesses is only valid when n_components == 1.")
+            raise ValueError(
+                "Single-dict initial_guesses is only valid when n_components == 1."
+            )
         init = [init]
 
     # NEW: top-level list/tuple of dicts (matches docstring)
@@ -304,18 +335,26 @@ def _normalize_initial_guesses(
         offset = float(init.get("offset", med))
         comps = init.get("components", None)
         if comps is None:
-            raise ValueError("init dict must include 'components' with shape (n,6) or list of dicts.")
+            raise ValueError(
+                "init dict must include 'components' with shape (n,6) or list of dicts."
+            )
         init = comps  # fallthrough to parse components and pack with provided offset
 
         if isinstance(init, np.ndarray):
             arr = np.asarray(init, dtype=float)
             if arr.shape != (n, 6):
-                raise ValueError(f"init['components'] must have shape (n,6); got {arr.shape}")
+                raise ValueError(
+                    f"init['components'] must have shape (n,6); got {arr.shape}"
+                )
             amps, x0, y0, sx, sy, th = [arr[:, k].astype(float) for k in range(6)]
             return _pack_params(offset, amps, x0, y0, sx, sy, th)
 
-        if isinstance(init, (list, tuple)) and len(init) > 0 and isinstance(init[0], dict):
-            return (_process_list_of_dicts(init, n, offset))
+        if (
+            isinstance(init, (list, tuple))
+            and len(init) > 0
+            and isinstance(init[0], dict)
+        ):
+            return _process_list_of_dicts(init, n, offset)
     # Array/list form (numpy array or list-of-lists)
     arr = np.asarray(init, dtype=float)
     if arr.shape != (n, 6):
@@ -323,10 +362,13 @@ def _normalize_initial_guesses(
     amps, x0, y0, sx, sy, th = [arr[:, k].astype(float) for k in range(6)]
     return _pack_params(med, amps, x0, y0, sx, sy, th)
 
+
 def _merge_bounds_multi(
     base_lb: np.ndarray,
     base_ub: np.ndarray,
-    user_bounds: Optional[Dict[str, Union[Tuple[float,float], Sequence[Tuple[float,float]]]]],
+    user_bounds: Optional[
+        Dict[str, Union[Tuple[float, float], Sequence[Tuple[float, float]]]]
+    ],
     n: int,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -337,23 +379,33 @@ def _merge_bounds_multi(
     """
     if user_bounds is None:
         return base_lb, base_ub
-    lb = base_lb.copy(); ub = base_ub.copy()
+    lb = base_lb.copy()
+    ub = base_ub.copy()
 
-    def _set_range(name: str, idx_in_comp: Optional[int], rng: Tuple[float,float], comp_idx: Optional[int] = None):
+    def _set_range(
+        name: str,
+        idx_in_comp: Optional[int],
+        rng: Tuple[float, float],
+        comp_idx: Optional[int] = None,
+    ):
         lo, hi = float(rng[0]), float(rng[1])
         if name == "offset":
-            lb[0] = lo; ub[0] = hi; return
+            lb[0] = lo
+            ub[0] = hi
+            return
         if idx_in_comp is None:
             # this should never be reached, so can't be covered
             # but leaving it in for defensive programming
-            return # pragma: no cover
+            return  # pragma: no cover
         if comp_idx is None:
             for i in range(n):
-                j0 = 1 + i*6 + idx_in_comp
-                lb[j0] = lo; ub[j0] = hi
+                j0 = 1 + i * 6 + idx_in_comp
+                lb[j0] = lo
+                ub[j0] = hi
         else:
-            j0 = 1 + comp_idx*6 + idx_in_comp
-            lb[j0] = lo; ub[j0] = hi
+            j0 = 1 + comp_idx * 6 + idx_in_comp
+            lb[j0] = lo
+            ub[j0] = hi
 
     # Normalize dictionary values
     mapping = {
@@ -368,6 +420,7 @@ def _merge_bounds_multi(
         "fwhm_minor": (4, "fwhm_minor"),
         "theta": (5, "theta"),
     }
+
     # helper: convert FWHM ranges to σ if needed (for this merge routine)
     def _to_sigma_rng(canon_name: str, rng: Tuple[float, float]) -> Tuple[float, float]:
         lo, hi = float(rng[0]), float(rng[1])
@@ -382,14 +435,21 @@ def _merge_bounds_multi(
         if canon == "offset":
             _set_range("offset", None, tuple(val))  # type: ignore[arg-type]
             continue
-        if isinstance(val, (list, tuple)) and len(val) == 2 and not isinstance(val[0], (list, tuple)):
-            _set_range(canon, idx_in_comp, _to_sigma_rng(canon, (val[0], val[1])))  # same for all comps
+        if (
+            isinstance(val, (list, tuple))
+            and len(val) == 2
+            and not isinstance(val[0], (list, tuple))
+        ):
+            _set_range(
+                canon, idx_in_comp, _to_sigma_rng(canon, (val[0], val[1]))
+            )  # same for all comps
         else:
             if len(val) != n:
                 raise ValueError(f"bounds[{key!r}] length must be n={n}")
             for i, rng in enumerate(val):  # type: ignore[assignment]
                 _set_range(canon, idx_in_comp, _to_sigma_rng(canon, tuple(rng)), comp_idx=i)  # type: ignore[arg-type]
     return lb, ub
+
 
 def _count_true_at_least(mask: np.ndarray, need: int, *, chunk: int = 262_144) -> int:
     """Return the number of True values in *mask*, but stop early once *need* is reached.
@@ -414,13 +474,18 @@ def _count_true_at_least(mask: np.ndarray, need: int, *, chunk: int = 262_144) -
 
 # ----------------------- Single-plane multi fit -----------------------
 
+
 def _fit_multi_plane_numpy(
     z2d: np.ndarray,
     n_components: int,
     min_threshold: Optional[Number],
     max_threshold: Optional[Number],
-    initial_guesses: Optional[Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]],
-    bounds: Optional[Dict[str, Union[Tuple[float,float], Sequence[Tuple[float,float]]]]],
+    initial_guesses: Optional[
+        Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]
+    ],
+    bounds: Optional[
+        Dict[str, Union[Tuple[float, float], Sequence[Tuple[float, float]]]]
+    ],
     max_nfev: int,
     *,
     x1d: Optional[np.ndarray] = None,
@@ -440,7 +505,9 @@ def _fit_multi_plane_numpy(
     """
     if z2d.ndim != 2:
         # cannot cover using public API, defensive coding
-        raise ValueError("Internal: _fit_multi_plane_numpy expects a 2-D array.") # pragma: no cover
+        raise ValueError(
+            "Internal: _fit_multi_plane_numpy expects a 2-D array."
+        )  # pragma: no cover
     ny, nx = z2d.shape
     if x1d is None or y1d is None:
         # pixel-index grid
@@ -466,13 +533,25 @@ def _fit_multi_plane_numpy(
     need = 1 + 6 * n_components  # offset + 6 per component
     mask_count = _count_true_at_least(mask, max(1, need))
     if mask_count == 0:
-        raise ValueError("Thresholding removed all pixels (empty mask); adjust min/max thresholds.")
+        raise ValueError(
+            "Thresholding removed all pixels (empty mask); adjust min/max thresholds."
+        )
     if mask_count < need:
         # Not enough points relative to params
-        raise ValueError("Thresholding resulted in not enough pixels being left to fit all parameters")
+        raise ValueError(
+            "Thresholding resulted in not enough pixels being left to fit all parameters"
+        )
 
     # seeds & bounds
-    p0 = _normalize_initial_guesses(z2d, n_components, initial_guesses, min_threshold, max_threshold, x1d=x1d, y1d=y1d)
+    p0 = _normalize_initial_guesses(
+        z2d,
+        n_components,
+        initial_guesses,
+        min_threshold,
+        max_threshold,
+        x1d=x1d,
+        y1d=y1d,
+    )
     lb0, ub0 = _default_bounds_multi((ny, nx), n_components, x_rng=x_rng, y_rng=y_rng)
     lb, ub = _merge_bounds_multi(lb0, ub0, bounds, n_components)
 
@@ -498,7 +577,10 @@ def _fit_multi_plane_numpy(
             perr = np.full(popt.size, np.nan, dtype=float)
         else:
             pcov_arr = np.asarray(pcov, dtype=float)
-            ok_shape = (pcov_arr.ndim == 2 and pcov_arr.shape[0] == pcov_arr.shape[1] == popt.size)
+            ok_shape = (
+                pcov_arr.ndim == 2
+                and pcov_arr.shape[0] == pcov_arr.shape[1] == popt.size
+            )
             if (not ok_shape) or (not np.isfinite(pcov_arr).all()):
                 """
                 not ok_shape → pcov isn’t a square matrix of shape (popt.size,
@@ -522,6 +604,7 @@ def _fit_multi_plane_numpy(
 
 # ----------------------- Vectorized wrapper (for xarray) -----------------------
 
+
 def _multi_fit_plane_wrapper(
     z2d: np.ndarray,
     y1d: np.ndarray,
@@ -529,8 +612,12 @@ def _multi_fit_plane_wrapper(
     n_components: int,
     min_threshold: Optional[Number],
     max_threshold: Optional[Number],
-    initial_guesses: Optional[Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]],
-    bounds: Optional[Dict[str, Union[Tuple[float,float], Sequence[Tuple[float,float]]]]],
+    initial_guesses: Optional[
+        Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]
+    ],
+    bounds: Optional[
+        Dict[str, Union[Tuple[float, float], Sequence[Tuple[float, float]]]]
+    ],
     max_nfev: int,
     return_model: bool,
     return_residual: bool,
@@ -550,13 +637,16 @@ def _multi_fit_plane_wrapper(
         initial_guesses=initial_guesses,
         bounds=bounds,
         max_nfev=max_nfev,
-        x1d=x1d, y1d=y1d,
+        x1d=x1d,
+        y1d=y1d,
     )
 
     ny, nx = z2d.shape
     # Y/X constructed identically in _fit_multi_plane_numpy; keep for model/residual paths
     if y1d.shape[0] != ny or x1d.shape[0] != nx:
-        raise ValueError("Length of y1d/x1d must match z2d shape for world/pixel grids.")
+        raise ValueError(
+            "Length of y1d/x1d must match z2d shape for world/pixel grids."
+        )
     Y = np.broadcast_to(y1d[:, None], (ny, nx))
     X = np.broadcast_to(x1d[None, :], (ny, nx))
 
@@ -569,16 +659,35 @@ def _multi_fit_plane_wrapper(
         amp_e = x0_e = y0_e = sx_e = sy_e = th_e = zeros
         fwhm_major = fwhm_minor = peak = zeros
         peak_err = zeros
-        offset = np.nan; offset_e = np.nan
+        offset = np.nan
+        offset_e = np.nan
         model2d = np.full_like(z2d, np.nan, dtype=float)
         resid2d = np.full_like(z2d, np.nan, dtype=float)
         varexp = np.nan
-        return (amp, x0, y0, sx, sy, th,
-                amp_e, x0_e, y0_e, sx_e, sy_e, th_e,
-                fwhm_major, fwhm_minor, peak, peak_err,
-                offset, offset_e,
-                bool(False), varexp,
-                resid2d, model2d)
+        return (
+            amp,
+            x0,
+            y0,
+            sx,
+            sy,
+            th,
+            amp_e,
+            x0_e,
+            y0_e,
+            sx_e,
+            sy_e,
+            th_e,
+            fwhm_major,
+            fwhm_minor,
+            peak,
+            peak_err,
+            offset,
+            offset_e,
+            bool(False),
+            varexp,
+            resid2d,
+            model2d,
+        )
 
     # Unpack best-fit and uncertainties
     n = int(n_components)
@@ -595,8 +704,14 @@ def _multi_fit_plane_wrapper(
     # Build model & residual
     if return_model or return_residual:
         model2d_full = _multi_gaussian2d_sum(X, Y, popt, n)
-        model2d = model2d_full if return_model else np.full_like(z2d, np.nan, dtype=float)
-        resid2d = (z2d.astype(float) - model2d_full) if return_residual else np.full_like(z2d, np.nan, dtype=float)
+        model2d = (
+            model2d_full if return_model else np.full_like(z2d, np.nan, dtype=float)
+        )
+        resid2d = (
+            (z2d.astype(float) - model2d_full)
+            if return_residual
+            else np.full_like(z2d, np.nan, dtype=float)
+        )
     else:
         model2d = np.full_like(z2d, np.nan, dtype=float)
         resid2d = np.full_like(z2d, np.nan, dtype=float)
@@ -604,21 +719,43 @@ def _multi_fit_plane_wrapper(
     # Variance explained on masked pixels
     if mask.any():
         z_masked = z2d.astype(float)[mask]
-        _model_full = model2d_full if 'model2d_full' in locals() else _multi_gaussian2d_sum(X, Y, popt, n)
+        _model_full = (
+            model2d_full
+            if "model2d_full" in locals()
+            else _multi_gaussian2d_sum(X, Y, popt, n)
+        )
         r_masked = (z2d.astype(float) - _model_full)[mask]
         tot = np.nanvar(z_masked)
         res = np.nanvar(r_masked)
         varexp = (1.0 - res / tot) if (np.isfinite(tot) and tot > 0) else np.nan
     else:
         # not coverable from public API call, defensive coding
-        varexp = np.nan # pragma: no cover
+        varexp = np.nan  # pragma: no cover
 
-    return (amp, x0, y0, sx, sy, th,
-            amp_e, x0_e, y0_e, sx_e, sy_e, th_e,
-            fwhm_major, fwhm_minor, peak, peak_err,
-            float(offset), offset_e,
-            bool(True), float(varexp),
-            resid2d, model2d)
+    return (
+        amp,
+        x0,
+        y0,
+        sx,
+        sy,
+        th,
+        amp_e,
+        x0_e,
+        y0_e,
+        sx_e,
+        sy_e,
+        th_e,
+        fwhm_major,
+        fwhm_minor,
+        peak,
+        peak_err,
+        float(offset),
+        offset_e,
+        bool(True),
+        float(varexp),
+        resid2d,
+        model2d,
+    )
 
 
 def _ensure_dataarray(data: ArrayOrDA) -> xr.DataArray:
@@ -629,9 +766,14 @@ def _ensure_dataarray(data: ArrayOrDA) -> xr.DataArray:
         dims = [f"dim_{i}" for i in range(data.ndim)]
         coords = {d: np.arange(s, dtype=float) for d, s in zip(dims, data.shape)}
         return xr.DataArray(data, dims=dims, coords=coords, name="data")
-    raise TypeError("Unsupported input type; use numpy.ndarray, dask.array.Array, or xarray.DataArray.")
+    raise TypeError(
+        "Unsupported input type; use numpy.ndarray, dask.array.Array, or xarray.DataArray."
+    )
 
-def _resolve_dims(da: xr.DataArray, dims: Optional[Sequence[Union[str, int]]]) -> Tuple[str, str]:
+
+def _resolve_dims(
+    da: xr.DataArray, dims: Optional[Sequence[Union[str, int]]]
+) -> Tuple[str, str]:
     """
     Resolve plane dims to (x_dim, y_dim).
 
@@ -647,7 +789,9 @@ def _resolve_dims(da: xr.DataArray, dims: Optional[Sequence[Union[str, int]]]) -
             return "x", "y"
         if da.ndim == 2:
             return da.dims[-1], da.dims[-2]
-        raise ValueError("For arrays with ndim != 2, specify two dims (names or indices).")
+        raise ValueError(
+            "For arrays with ndim != 2, specify two dims (names or indices)."
+        )
 
     if len(dims) != 2:
         raise ValueError("dims must be length-2.")
@@ -662,6 +806,7 @@ def _resolve_dims(da: xr.DataArray, dims: Optional[Sequence[Union[str, int]]]) -
             out.append(d)
     return out[0], out[1]
 
+
 def _axis_sign(coord: Optional[np.ndarray]) -> float:
     """+1 if strictly ascending, -1 if strictly descending, else +1."""
     if coord is None or coord.ndim != 1 or coord.size < 2:
@@ -669,21 +814,24 @@ def _axis_sign(coord: Optional[np.ndarray]) -> float:
     c0, c1 = float(coord[0]), float(coord[1])
     return 1.0 if np.isfinite(c0) and np.isfinite(c1) and (c1 > c0) else -1.0
 
+
 def _theta_pa_to_math(pa: np.ndarray) -> np.ndarray:
     """
     Convert PA (from +y toward +x) into math angle (from +x toward +y, CCW)
     in the index coordinate system whose axis directions are set by (sx, sy).
     """
-    theta_math = np.pi/2 - pa
-    return (theta_math % (2.0 * np.pi))
+    theta_math = np.pi / 2 - pa
+    return theta_math % (2.0 * np.pi)
+
 
 def _theta_math_to_pa(theta_math: np.ndarray) -> np.ndarray:
     """
     Convert math angle in index basis back to PA in world-like basis
     where PA is measured from +y toward +x.
     """
-    pa = np.pi/2 - theta_math
-    return (pa % (2.0 * np.pi))
+    pa = np.pi / 2 - theta_math
+    return pa % (2.0 * np.pi)
+
 
 def _convert_init_theta(
     init: Optional[Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]],
@@ -706,19 +854,27 @@ def _convert_init_theta(
         out[:, 5] = _theta_pa_to_math(out[:, 5])
         return out
 
-    def _conv_list_of_dicts(lst: Sequence[Dict[str, Number]]) -> List[Dict[str, Number]]:
+    def _conv_list_of_dicts(
+        lst: Sequence[Dict[str, Number]],
+    ) -> List[Dict[str, Number]]:
         new = []
         for d in lst:
             dd = dict(d)
             if "theta" in dd:
-                dd["theta"] = float(_theta_pa_to_math(np.array([dd["theta"]], float))[0])
+                dd["theta"] = float(
+                    _theta_pa_to_math(np.array([dd["theta"]], float))[0]
+                )
             new.append(dd)
         return new
 
     if isinstance(init, np.ndarray):
         return _conv_arr(init)
 
-    if isinstance(init, (list, tuple)) and (len(init) == n) and isinstance(init[0], dict):
+    if (
+        isinstance(init, (list, tuple))
+        and (len(init) == n)
+        and isinstance(init[0], dict)
+    ):
         return _conv_list_of_dicts(init)  # type: ignore[return-value]
 
     if isinstance(init, dict) and ("components" in init):
@@ -731,7 +887,8 @@ def _convert_init_theta(
         return clone
 
     # defensive coding, should not be reached
-    return init # pragma: no cover
+    return init  # pragma: no cover
+
 
 def _axis_is_valid(a: np.ndarray) -> bool:
     """
@@ -742,6 +899,7 @@ def _axis_is_valid(a: np.ndarray) -> bool:
         return False
     d = np.diff(a)
     return np.all(d > 0) or np.all(d < 0)
+
 
 def _extract_1d_coords_for_fit(
     original_input: ArrayOrDA,
@@ -768,18 +926,26 @@ def _extract_1d_coords_for_fit(
     if isinstance(original_input, xr.DataArray):
         ctype = (coord_type or "world").lower()
         if ctype not in ("world", "pixel"):
-            raise ValueError("coord_type must be 'world' or 'pixel' for DataArray inputs")
+            raise ValueError(
+                "coord_type must be 'world' or 'pixel' for DataArray inputs"
+            )
         if ctype == "pixel":
             return np.arange(ny, dtype=float), np.arange(nx, dtype=float)
         # world coords from the DataArray
         if (dim_x not in da_tr.coords) or (dim_y not in da_tr.coords):
-            raise ValueError(f"DataArray is missing coords for dims ({dim_y}, {dim_x}) required for world fitting.")
+            raise ValueError(
+                f"DataArray is missing coords for dims ({dim_y}, {dim_x}) required for world fitting."
+            )
         x1d = np.asarray(da_tr.coords[dim_x].values)
         y1d = np.asarray(da_tr.coords[dim_y].values)
         if x1d.ndim != 1 or y1d.ndim != 1 or x1d.size != nx or y1d.size != ny:
-            raise ValueError("World coords must be 1-D and match the data shape along (y, x).")
+            raise ValueError(
+                "World coords must be 1-D and match the data shape along (y, x)."
+            )
         if (not _axis_is_valid(x1d)) or (not _axis_is_valid(y1d)):
-            raise ValueError("World coords must be strictly monotonic and finite along both axes.")
+            raise ValueError(
+                "World coords must be strictly monotonic and finite along both axes."
+            )
         return y1d.astype(float), x1d.astype(float)
 
     # NumPy/Dask input: coord_type is ignored; pick by presence of coords
@@ -790,11 +956,14 @@ def _extract_1d_coords_for_fit(
         x1d = np.asarray(x1d, dtype=float)
         y1d = np.asarray(y1d, dtype=float)
         if x1d.ndim != 1 or y1d.ndim != 1 or x1d.size != nx or y1d.size != ny:
-            raise ValueError("coords must be 1-D arrays with lengths matching (nx, ny).")
+            raise ValueError(
+                "coords must be 1-D arrays with lengths matching (nx, ny)."
+            )
         return y1d, x1d
 
     # Fallback: pixel indices
     return np.arange(ny, dtype=float), np.arange(nx, dtype=float)
+
 
 # ---------------------------------------------------------------------------
 # Pixel→World interpolation helper (extracted for reliable coverage)
@@ -812,6 +981,7 @@ def _interp_centers_world(
     - Handles ascending and descending coords.
     - Uses local slope from `np.gradient` for uncertainty propagation.
     """
+
     def _prep(coord: np.ndarray) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         coord = np.asarray(coord, dtype=float)
         if coord.size < 2 or not np.all(np.isfinite(coord)):
@@ -842,7 +1012,8 @@ def _interp_centers_world(
 
     # centers in world coordinates
     ds["x0_world"] = xr.apply_ufunc(
-        _interp_x, ds[center_x_var],
+        _interp_x,
+        ds[center_x_var],
         input_core_dims=[["component"]],
         output_core_dims=[["component"]],
         vectorize=True,
@@ -850,7 +1021,8 @@ def _interp_centers_world(
         output_dtypes=[float],
     )
     ds["y0_world"] = xr.apply_ufunc(
-        _interp_y, ds[center_y_var],
+        _interp_y,
+        ds[center_y_var],
         input_core_dims=[["component"]],
         output_core_dims=[["component"]],
         vectorize=True,
@@ -861,12 +1033,16 @@ def _interp_centers_world(
     # propagate uncertainties using local slope of the mapping
     _gx = np.gradient(val_x)
     _gy = np.gradient(val_y)
+
     def _slope_x(v: np.ndarray) -> np.ndarray:
         return np.interp(v, idx_x, _gx)
+
     def _slope_y(v: np.ndarray) -> np.ndarray:
         return np.interp(v, idx_y, _gy)
+
     _sx_at = xr.apply_ufunc(
-        _slope_x, ds[center_x_var],
+        _slope_x,
+        ds[center_x_var],
         input_core_dims=[["component"]],
         output_core_dims=[["component"]],
         vectorize=True,
@@ -874,7 +1050,8 @@ def _interp_centers_world(
         output_dtypes=[float],
     )
     _sy_at = xr.apply_ufunc(
-        _slope_y, ds[center_y_var],
+        _slope_y,
+        ds[center_y_var],
         input_core_dims=[["component"]],
         output_core_dims=[["component"]],
         vectorize=True,
@@ -882,7 +1059,9 @@ def _interp_centers_world(
         output_dtypes=[float],
     )
     ds["x0_world_err"] = xr.apply_ufunc(
-        np.multiply, _sx_at, ds[err_x_var],
+        np.multiply,
+        _sx_at,
+        ds[err_x_var],
         input_core_dims=[["component"], ["component"]],
         output_core_dims=[["component"]],
         vectorize=True,
@@ -890,7 +1069,9 @@ def _interp_centers_world(
         output_dtypes=[float],
     )
     ds["y0_world_err"] = xr.apply_ufunc(
-        np.multiply, _sy_at, ds[err_y_var],
+        np.multiply,
+        _sy_at,
+        ds[err_y_var],
         input_core_dims=[["component"], ["component"]],
         output_core_dims=[["component"]],
         vectorize=True,
@@ -899,19 +1080,20 @@ def _interp_centers_world(
     )
 
     # Self-documenting attrs
-    ds["x0_world"].attrs["description"] = (
-        "Component center x in world coordinates (interpolated from pixel index)."
-    )
-    ds["y0_world"].attrs["description"] = (
-        "Component center y in world coordinates (interpolated from pixel index)."
-    )
-    ds["x0_world_err"].attrs["description"] = (
-        "1-sigma uncertainty of x0_world via local axis slope."
-    )
-    ds["y0_world_err"].attrs["description"] = (
-        "1-sigma uncertainty of y0_world via local axis slope."
-    )
+    ds["x0_world"].attrs[
+        "description"
+    ] = "Component center x in world coordinates (interpolated from pixel index)."
+    ds["y0_world"].attrs[
+        "description"
+    ] = "Component center y in world coordinates (interpolated from pixel index)."
+    ds["x0_world_err"].attrs[
+        "description"
+    ] = "1-sigma uncertainty of x0_world via local axis slope."
+    ds["y0_world_err"].attrs[
+        "description"
+    ] = "1-sigma uncertainty of y0_world via local axis slope."
     return ds
+
 
 def _add_variance_explained(ds: xr.Dataset) -> xr.Dataset:
     ds["variance_explained"].attrs["note"] = (
@@ -947,8 +1129,10 @@ def _add_variance_explained(ds: xr.Dataset) -> xr.Dataset:
     )
     return ds
 
+
 def _build_call(
-    _inspect, _param,
+    _inspect,
+    _param,
 ):
     # Build "call" with only parameters that differ from defaults (best-effort)
     # putting in own fucntion to try to get coverage to recognize it
@@ -961,7 +1145,7 @@ def _build_call(
             for k, v in _param.items():
                 dv = _defs.get(k, object())
                 try:
-                    same = (v == dv)
+                    same = v == dv
                 except Exception:
                     same = False
                 if (v is None and dv is None) or same:
@@ -990,7 +1174,9 @@ def _add_angle_attrs(ds, conv, frame):
         ds[_name].attrs["units"] = "rad"
     return ds
 
+
 # ----------------------- Public API -----------------------
+
 
 def fit_multi_gaussian2d(
     data: ArrayOrDA,
@@ -999,8 +1185,12 @@ def fit_multi_gaussian2d(
     *,
     min_threshold: Optional[Number] = None,
     max_threshold: Optional[Number] = None,
-    initial_guesses: Optional[Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]] = None,
-    bounds: Optional[Dict[str, Union[Tuple[float, float], Sequence[Tuple[float, float]]]]] = None,
+    initial_guesses: Optional[
+        Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]
+    ] = None,
+    bounds: Optional[
+        Dict[str, Union[Tuple[float, float], Sequence[Tuple[float, float]]]]
+    ] = None,
     initial_is_fwhm: bool = True,
     max_nfev: int = 20000,
     return_model: bool = False,
@@ -1134,7 +1324,9 @@ def fit_multi_gaussian2d(
     dim_x, dim_y = _resolve_dims(da_in, dims)
 
     # Move fit dims to the end → [..., y, x]
-    da_tr = da_in.transpose(*(d for d in da_in.dims if d not in (dim_y, dim_x)), dim_y, dim_x)
+    da_tr = da_in.transpose(
+        *(d for d in da_in.dims if d not in (dim_y, dim_x)), dim_y, dim_x
+    )
     core = [dim_y, dim_x]
 
     # 2a) Determine axis signs from coords (or defaults)
@@ -1146,37 +1338,51 @@ def fit_multi_gaussian2d(
 
     # Convert initial guesses: (a) optional FWHM→σ, (b) theta PA→math if requested.
     ig = initial_guesses
-    if ig is not None and initial_is_fwhm and isinstance(ig, np.ndarray) and ig.shape == (int(n_components), 6):
+    if (
+        ig is not None
+        and initial_is_fwhm
+        and isinstance(ig, np.ndarray)
+        and ig.shape == (int(n_components), 6)
+    ):
         # columns: [amp, x0, y0, fwhm_major, fwhm_minor, theta]  → convert to σ for the fitter
         ig = ig.copy()
         ig[:, 3] = _sigma_from_fwhm(ig[:, 3])
         ig[:, 4] = _sigma_from_fwhm(ig[:, 4])
     # dict/list forms: allow fwhm_major/fwhm_minor keys by mapping to sigma_x/sigma_y
-    if isinstance(ig, dict) and "components" in ig and isinstance(ig["components"], np.ndarray):
+    if (
+        isinstance(ig, dict)
+        and "components" in ig
+        and isinstance(ig["components"], np.ndarray)
+    ):
         arr = np.asarray(ig["components"], dtype=float)
         if arr.shape == (int(n_components), 6) and initial_is_fwhm:
             arr = arr.copy()
             arr[:, 3] = _sigma_from_fwhm(arr[:, 3])
             arr[:, 4] = _sigma_from_fwhm(arr[:, 4])
-            ig = dict(ig); ig["components"] = arr
+            ig = dict(ig)
+            ig["components"] = arr
     elif isinstance(ig, (list, tuple)) and ig and isinstance(ig[0], dict):
         mapped: List[Dict[str, Any]] = []
         for d in ig:
             dd = dict(d)
-            if "fwhm_major" in dd: dd["sigma_x"] = float(_sigma_from_fwhm(dd.pop("fwhm_major")))
-            if "fwhm_minor" in dd: dd["sigma_y"] = float(_sigma_from_fwhm(dd.pop("fwhm_minor")))
+            if "fwhm_major" in dd:
+                dd["sigma_x"] = float(_sigma_from_fwhm(dd.pop("fwhm_major")))
+            if "fwhm_minor" in dd:
+                dd["sigma_y"] = float(_sigma_from_fwhm(dd.pop("fwhm_minor")))
             mapped.append(dd)
         ig = mapped
 
     want_pa = (angle == "pa") or (angle == "auto" and is_left_handed)
-    init_for_fit = _convert_init_theta(ig, to_math=want_pa, sx=sx_sign, sy=sy_sign, n=int(n_components))
+    init_for_fit = _convert_init_theta(
+        ig, to_math=want_pa, sx=sx_sign, sy=sy_sign, n=int(n_components)
+    )
 
     out_dtypes = (
-        [np.float64] * 6      # params per component
-        + [np.float64] * 6    # errors per component
-        + [np.float64] * 4    # derived per component (add peak_err)
+        [np.float64] * 6  # params per component
+        + [np.float64] * 6  # errors per component
+        + [np.float64] * 4  # derived per component (add peak_err)
         + [np.float64, np.float64]  # offset, offset_err
-        + [np.bool_, np.float64]    # success, variance_explained
+        + [np.bool_, np.float64]  # success, variance_explained
         + [np.float64, np.float64]  # residual2d, model2d
     )
 
@@ -1189,11 +1395,15 @@ def fit_multi_gaussian2d(
             if k in ("fwhm_major", "fwhm_minor"):
                 # map directly to the underlying σ slots (3→sigma_x, 4→sigma_y).
                 # For major/minor we follow the internal slot convention used during fitting.
-                target = (
-                    "sigma_x" if k == "fwhm_major" else "sigma_y"
-                )
-                if isinstance(v, (list, tuple)) and v and isinstance(v[0], (list, tuple)):
-                    b2[target] = [(float(lo) * conv, float(hi) * conv) for (lo, hi) in v]  # per-component
+                target = "sigma_x" if k == "fwhm_major" else "sigma_y"
+                if (
+                    isinstance(v, (list, tuple))
+                    and v
+                    and isinstance(v[0], (list, tuple))
+                ):
+                    b2[target] = [
+                        (float(lo) * conv, float(hi) * conv) for (lo, hi) in v
+                    ]  # per-component
                 else:
                     lo, hi = v  # type: ignore[misc]
                     b2[target] = (float(lo) * conv, float(hi) * conv)
@@ -1208,12 +1418,15 @@ def fit_multi_gaussian2d(
     # Determine whether evaluation grid is world or pixel.
     # If x/y coords are exactly 0..N-1 we treat as pixel mode; otherwise world.
     world_mode = not (
-        np.allclose(x1d, np.arange(x1d.shape[0])) and
-        np.allclose(y1d, np.arange(y1d.shape[0]))
+        np.allclose(x1d, np.arange(x1d.shape[0]))
+        and np.allclose(y1d, np.arange(y1d.shape[0]))
     )
     out_core_dims = (
-        [["component"]]*6 + [["component"]]*6 + [["component"]]*4
-        + [[] , []] + [[] , []]
+        [["component"]] * 6
+        + [["component"]] * 6
+        + [["component"]] * 4
+        + [[], []]
+        + [[], []]
         + [[dim_y, dim_x], [dim_y, dim_x]]
     )
     results = xr.apply_ufunc(
@@ -1239,12 +1452,30 @@ def fit_multi_gaussian2d(
         ),
     )
 
-    (amp, x0, y0, sx, sy, th,
-     amp_e, x0_e, y0_e, sx_e, sy_e, th_e,
-     fwhm_maj, fwhm_min, peak, peak_err,
-     offset, offset_e,
-     success, varexp,
-     residual, model) = results
+    (
+        amp,
+        x0,
+        y0,
+        sx,
+        sy,
+        th,
+        amp_e,
+        x0_e,
+        y0_e,
+        sx_e,
+        sy_e,
+        th_e,
+        fwhm_maj,
+        fwhm_min,
+        peak,
+        peak_err,
+        offset,
+        offset_e,
+        success,
+        varexp,
+        residual,
+        model,
+    ) = results
 
     # -- Angle conventions & CANONICALIZATION -------------------------------
     # Internal angle sign → math: th_math = -th
@@ -1259,50 +1490,80 @@ def fit_multi_gaussian2d(
     sx, sy = xr.where(_is_major_sx, sx, sy), xr.where(_is_major_sx, sy, sx)
     sx_e, sy_e = xr.where(_is_major_sx, sx_e, sy_e), xr.where(_is_major_sx, sy_e, sx_e)
     # rotate theta by π/2 when we swapped axes
-    th_math = xr.where(_is_major_sx, th_math, th_math + np.pi/2)
+    th_math = xr.where(_is_major_sx, th_math, th_math + np.pi / 2)
+
     # wrap to (-π/2, π/2]
     def _wrap_halfpi(t):
-        return ((t + np.pi/2) % np.pi) - np.pi/2
+        return ((t + np.pi / 2) % np.pi) - np.pi / 2
+
     th_math = xr.apply_ufunc(_wrap_halfpi, th_math, dask="parallelized", vectorize=True)
 
     # Now publish θ in requested convention
     theta_math = th_math
     theta_pa = xr.DataArray(
-        _theta_math_to_pa(th_math.values),
-        dims=th.dims, coords=th.coords
+        _theta_math_to_pa(th_math.values), dims=th.dims, coords=th.coords
     )
     # Preserve backward-compat "theta" using requested convention
     th_public = theta_pa if want_pa else theta_math
 
     # --- Pixel-parameter views (centers + ellipse in pixel coords) ---
     if world_mode:
-        nx = x1d.shape[0]; ny = y1d.shape[0]
+        nx = x1d.shape[0]
+        ny = y1d.shape[0]
         x_idx_axis = np.arange(nx, dtype=float)
         y_idx_axis = np.arange(ny, dtype=float)
         # centers: world -> pixel via inverse of coord arrays
         x0_pixel = xr.apply_ufunc(
-            np.interp, x0, xr.DataArray(x1d, dims=[dim_x]), xr.DataArray(x_idx_axis, dims=[dim_x]),
+            np.interp,
+            x0,
+            xr.DataArray(x1d, dims=[dim_x]),
+            xr.DataArray(x_idx_axis, dims=[dim_x]),
             input_core_dims=[["component"], [dim_x], [dim_x]],
-            output_core_dims=[["component"]], vectorize=True, dask="parallelized", output_dtypes=[float]
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
         )
         y0_pixel = xr.apply_ufunc(
-            np.interp, y0, xr.DataArray(y1d, dims=[dim_y]), xr.DataArray(y_idx_axis, dims=[dim_y]),
+            np.interp,
+            y0,
+            xr.DataArray(y1d, dims=[dim_y]),
+            xr.DataArray(y_idx_axis, dims=[dim_y]),
             input_core_dims=[["component"], [dim_y], [dim_y]],
-            output_core_dims=[["component"]], vectorize=True, dask="parallelized", output_dtypes=[float]
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
         )
         # local pixel scales (world units per pixel) via gradient at nearest pixel
         gx = np.gradient(x1d.astype(float))
         gy = np.gradient(y1d.astype(float))
-        x0i = xr.apply_ufunc(
-            np.rint, x0_pixel,
-            input_core_dims=[["component"]], output_core_dims=[["component"]],
-            vectorize=True, dask="parallelized", output_dtypes=[float],
-        ).clip(0, nx-1).astype(int)
-        y0i = xr.apply_ufunc(
-            np.rint, y0_pixel,
-            input_core_dims=[["component"]], output_core_dims=[["component"]],
-            vectorize=True, dask="parallelized", output_dtypes=[float],
-        ).clip(0, ny-1).astype(int)
+        x0i = (
+            xr.apply_ufunc(
+                np.rint,
+                x0_pixel,
+                input_core_dims=[["component"]],
+                output_core_dims=[["component"]],
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[float],
+            )
+            .clip(0, nx - 1)
+            .astype(int)
+        )
+        y0i = (
+            xr.apply_ufunc(
+                np.rint,
+                y0_pixel,
+                input_core_dims=[["component"]],
+                output_core_dims=[["component"]],
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[float],
+            )
+            .clip(0, ny - 1)
+            .astype(int)
+        )
         """
         # elementwise pick with clipping (works with vectorize=True)
         def _pick1d(arr, idx):
@@ -1312,46 +1573,71 @@ def fit_multi_gaussian2d(
         """
         # pick local scale via np.take with clipping
         dx_local = xr.apply_ufunc(
-            np.take, xr.DataArray(gx, dims=[dim_x]), x0i,
+            np.take,
+            xr.DataArray(gx, dims=[dim_x]),
+            x0i,
             input_core_dims=[[dim_x], ["component"]],
             output_core_dims=[["component"]],
             kwargs={"axis": 0, "mode": "clip"},
-            vectorize=True, dask="parallelized", output_dtypes=[float],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
         )
         dy_local = xr.apply_ufunc(
-            np.take, xr.DataArray(gy, dims=[dim_y]), y0i,
+            np.take,
+            xr.DataArray(gy, dims=[dim_y]),
+            y0i,
             input_core_dims=[[dim_y], ["component"]],
             output_core_dims=[["component"]],
             kwargs={"axis": 0, "mode": "clip"},
-            vectorize=True, dask="parallelized", output_dtypes=[float],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
         )
+
         # covariance transform Σp = S Σw S (S=diag(1/dx,1/dy)) → principal axes in pixel units
         def _world_to_pixel_cov(sigx, sigy, theta, dx, dy):
-            c = np.cos(theta); s = np.sin(theta)
+            c = np.cos(theta)
+            s = np.sin(theta)
             # Σ_world = R diag(sigx^2, sigy^2) R^T
-            a = (c*c)*sigx*sigx + (s*s)*sigy*sigy
-            b = (s*c)*(sigx*sigx - sigy*sigy)
-            d = (s*s)*sigx*sigx + (c*c)*sigy*sigy
-            invdx2 = 1.0/(dx*dx); invdy2 = 1.0/(dy*dy)
-            A = a*invdx2; B = b*(1.0/(dx*dy)); D = d*invdy2
+            a = (c * c) * sigx * sigx + (s * s) * sigy * sigy
+            b = (s * c) * (sigx * sigx - sigy * sigy)
+            d = (s * s) * sigx * sigx + (c * c) * sigy * sigy
+            invdx2 = 1.0 / (dx * dx)
+            invdy2 = 1.0 / (dy * dy)
+            A = a * invdx2
+            B = b * (1.0 / (dx * dy))
+            D = d * invdy2
             tr = A + D
-            det = A*D - B*B
-            tmp = np.sqrt(np.maximum(tr*tr/4.0 - det, 0.0))
-            lam1 = tr/2.0 + tmp
-            lam2 = tr/2.0 - tmp
-            theta_p = 0.5*np.arctan2(2*B, A - D)
-            lam_max = np.maximum(lam1, lam2); lam_min = np.minimum(lam1, lam2)
-            return np.sqrt(np.maximum(lam_max, 0.0)), np.sqrt(np.maximum(lam_min, 0.0)), theta_p
+            det = A * D - B * B
+            tmp = np.sqrt(np.maximum(tr * tr / 4.0 - det, 0.0))
+            lam1 = tr / 2.0 + tmp
+            lam2 = tr / 2.0 - tmp
+            theta_p = 0.5 * np.arctan2(2 * B, A - D)
+            lam_max = np.maximum(lam1, lam2)
+            lam_min = np.minimum(lam1, lam2)
+            return (
+                np.sqrt(np.maximum(lam_max, 0.0)),
+                np.sqrt(np.maximum(lam_min, 0.0)),
+                theta_p,
+            )
 
         # Feed math-angle into geometry/covariance computation
         sigma_major_pixel, sigma_minor_pixel, theta_pixel_math = xr.apply_ufunc(
-            _world_to_pixel_cov, sx, sy, th_math, dx_local, dy_local,
-            input_core_dims=[["component"]]*5,
+            _world_to_pixel_cov,
+            sx,
+            sy,
+            th_math,
+            dx_local,
+            dy_local,
+            input_core_dims=[["component"]] * 5,
             output_core_dims=[["component"], ["component"], ["component"]],
-            vectorize=True, dask="parallelized", output_dtypes=[float, float, float]
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float, float, float],
         )
         # Report pixel-space angle in the SAME convention as 'theta'
-        theta_pixel = (np.pi/2 - theta_pixel_math) if want_pa else theta_pixel_math
+        theta_pixel = (np.pi / 2 - theta_pixel_math) if want_pa else theta_pixel_math
         fwhm_major_pixel = sigma_major_pixel * _SIG2FWHM
         fwhm_minor_pixel = sigma_minor_pixel * _SIG2FWHM
 
@@ -1362,71 +1648,150 @@ def fit_multi_gaussian2d(
         # --- σ error propagation (world → pixel) via finite differences (w.r.t σx, σy) ---
         def _fd_sigma_world_to_pixel(sigx, sigy, theta, dx, dy, epsx, epsy):
             # central differences on major/minor wrt (sigx, sigy); returns (dmaj_dsigx, dmin_dsigx, dmaj_dsigy, dmin_dsigy)
-            s1M, s1m, _ = _world_to_pixel_cov(sigx+epsx, sigy, theta, dx, dy)
-            s2M, s2m, _ = _world_to_pixel_cov(sigx-epsx, sigy, theta, dx, dy)
-            dM_dsx = (s1M - s2M) / (2.0*epsx); dm_dsx = (s1m - s2m) / (2.0*epsx)
-            s1M, s1m, _ = _world_to_pixel_cov(sigx, sigy+epsy, theta, dx, dy)
-            s2M, s2m, _ = _world_to_pixel_cov(sigx, sigy-epsy, theta, dx, dy)
-            dM_dsy = (s1M - s2M) / (2.0*epsy); dm_dsy = (s1m - s2m) / (2.0*epsy)
+            s1M, s1m, _ = _world_to_pixel_cov(sigx + epsx, sigy, theta, dx, dy)
+            s2M, s2m, _ = _world_to_pixel_cov(sigx - epsx, sigy, theta, dx, dy)
+            dM_dsx = (s1M - s2M) / (2.0 * epsx)
+            dm_dsx = (s1m - s2m) / (2.0 * epsx)
+            s1M, s1m, _ = _world_to_pixel_cov(sigx, sigy + epsy, theta, dx, dy)
+            s2M, s2m, _ = _world_to_pixel_cov(sigx, sigy - epsy, theta, dx, dy)
+            dM_dsy = (s1M - s2M) / (2.0 * epsy)
+            dm_dsy = (s1m - s2m) / (2.0 * epsy)
             return dM_dsx, dm_dsx, dM_dsy, dm_dsy
-        _epsx = xr.apply_ufunc(lambda v: 1e-6 + 1e-3*np.abs(v), sx, dask="parallelized")
-        _epsy = xr.apply_ufunc(lambda v: 1e-6 + 1e-3*np.abs(v), sy, dask="parallelized")
+
+        _epsx = xr.apply_ufunc(
+            lambda v: 1e-6 + 1e-3 * np.abs(v), sx, dask="parallelized"
+        )
+        _epsy = xr.apply_ufunc(
+            lambda v: 1e-6 + 1e-3 * np.abs(v), sy, dask="parallelized"
+        )
         dM_dsx, dm_dsx, dM_dsy, dm_dsy = xr.apply_ufunc(
-            _fd_sigma_world_to_pixel, sx, sy, th_math, dx_local, dy_local, _epsx, _epsy,
-            input_core_dims=[["component"]]*7,
-            output_core_dims=[["component"], ["component"], ["component"], ["component"]],
-            vectorize=True, dask="parallelized",
+            _fd_sigma_world_to_pixel,
+            sx,
+            sy,
+            th_math,
+            dx_local,
+            dy_local,
+            _epsx,
+            _epsy,
+            input_core_dims=[["component"]] * 7,
+            output_core_dims=[
+                ["component"],
+                ["component"],
+                ["component"],
+                ["component"],
+            ],
+            vectorize=True,
+            dask="parallelized",
             output_dtypes=[float, float, float, float],
         )
         sigma_major_pixel_err = xr.apply_ufunc(
-            lambda a,b,c,d: np.sqrt((a*b)**2 + (c*d)**2), dM_dsx, sx_e, dM_dsy, sy_e,
-            input_core_dims=[["component"], ["component"], ["component"], ["component"]],
-            output_core_dims=[["component"]], vectorize=True, dask="parallelized", output_dtypes=[float])
+            lambda a, b, c, d: np.sqrt((a * b) ** 2 + (c * d) ** 2),
+            dM_dsx,
+            sx_e,
+            dM_dsy,
+            sy_e,
+            input_core_dims=[
+                ["component"],
+                ["component"],
+                ["component"],
+                ["component"],
+            ],
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
         sigma_minor_pixel_err = xr.apply_ufunc(
-            lambda a,b,c,d: np.sqrt((a*b)**2 + (c*d)**2), dm_dsx, sx_e, dm_dsy, sy_e,
-            input_core_dims=[["component"], ["component"], ["component"], ["component"]],
-            output_core_dims=[["component"]], vectorize=True, dask="parallelized", output_dtypes=[float])
+            lambda a, b, c, d: np.sqrt((a * b) ** 2 + (c * d) ** 2),
+            dm_dsx,
+            sx_e,
+            dm_dsy,
+            sy_e,
+            input_core_dims=[
+                ["component"],
+                ["component"],
+                ["component"],
+                ["component"],
+            ],
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
 
         # --- θ error propagation (world → pixel): d(theta_pixel_math)/d(theta_world_math) ---
         def _dtheta_pix_dtheta_world(sigx, sigy, theta, dx, dy, eps):
             _, _, t1 = _world_to_pixel_cov(sigx, sigy, theta + eps, dx, dy)
             _, _, t2 = _world_to_pixel_cov(sigx, sigy, theta - eps, dx, dy)
             return (t1 - t2) / (2.0 * eps)
-        _epst = xr.apply_ufunc(lambda v: 1e-6 + 1e-3*np.abs(v), th_math, dask="parallelized")
+
+        _epst = xr.apply_ufunc(
+            lambda v: 1e-6 + 1e-3 * np.abs(v), th_math, dask="parallelized"
+        )
         _dtdt = xr.apply_ufunc(
-            _dtheta_pix_dtheta_world, sx, sy, th_math, dx_local, dy_local, _epst,
-            input_core_dims=[["component"]]*6,
+            _dtheta_pix_dtheta_world,
+            sx,
+            sy,
+            th_math,
+            dx_local,
+            dy_local,
+            _epst,
+            input_core_dims=[["component"]] * 6,
             output_core_dims=[["component"]],
-            vectorize=True, dask="parallelized", output_dtypes=[float],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
         )
         # convert-to-PA is a shift, so σ is unchanged between math↔PA
         theta_pixel_err = xr.apply_ufunc(
-            np.multiply, xr.apply_ufunc(np.abs, _dtdt, dask="parallelized"), th_e,
+            np.multiply,
+            xr.apply_ufunc(np.abs, _dtdt, dask="parallelized"),
+            th_e,
             input_core_dims=[["component"], ["component"]],
             output_core_dims=[["component"]],
-            vectorize=True, dask="parallelized", output_dtypes=[float],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
         )
         # --- pixel-center uncertainties from world centers via local scale ---
         x0_pixel_err = xr.apply_ufunc(
-            np.divide, x0_e, dx_local,
+            np.divide,
+            x0_e,
+            dx_local,
             input_core_dims=[["component"], ["component"]],
             output_core_dims=[["component"]],
-            vectorize=True, dask="parallelized", output_dtypes=[float],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
         )
         y0_pixel_err = xr.apply_ufunc(
-            np.divide, y0_e, dy_local,
+            np.divide,
+            y0_e,
+            dy_local,
             input_core_dims=[["component"], ["component"]],
             output_core_dims=[["component"]],
-            vectorize=True, dask="parallelized", output_dtypes=[float],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
         )
         # World-view σ and FWHM are native in this branch
         sigma_x_world, sigma_y_world = sx, sy
         sigma_x_world_err, sigma_y_world_err = sx_e, sy_e
-        sigma_major_world = xr.apply_ufunc(np.maximum, sigma_x_world, sigma_y_world, dask="parallelized")
-        sigma_minor_world = xr.apply_ufunc(np.minimum, sigma_x_world, sigma_y_world, dask="parallelized")
-        _is_sx_major_w = xr.apply_ufunc(np.greater_equal, sigma_x_world, sigma_y_world, dask="parallelized")
-        sigma_major_world_err = xr.where(_is_sx_major_w, sigma_x_world_err, sigma_y_world_err)
-        sigma_minor_world_err = xr.where(_is_sx_major_w, sigma_y_world_err, sigma_x_world_err)
+        sigma_major_world = xr.apply_ufunc(
+            np.maximum, sigma_x_world, sigma_y_world, dask="parallelized"
+        )
+        sigma_minor_world = xr.apply_ufunc(
+            np.minimum, sigma_x_world, sigma_y_world, dask="parallelized"
+        )
+        _is_sx_major_w = xr.apply_ufunc(
+            np.greater_equal, sigma_x_world, sigma_y_world, dask="parallelized"
+        )
+        sigma_major_world_err = xr.where(
+            _is_sx_major_w, sigma_x_world_err, sigma_y_world_err
+        )
+        sigma_minor_world_err = xr.where(
+            _is_sx_major_w, sigma_y_world_err, sigma_x_world_err
+        )
         fwhm_major_world = sigma_major_world * _SIG2FWHM
         fwhm_minor_world = sigma_minor_world * _SIG2FWHM
         fwhm_major_world_err = sigma_major_world_err * _SIG2FWHM
@@ -1441,8 +1806,12 @@ def fit_multi_gaussian2d(
         sigma_major_pixel = xr.apply_ufunc(np.maximum, sx, sy, dask="parallelized")
         sigma_minor_pixel = xr.apply_ufunc(np.minimum, sx, sy, dask="parallelized")
         theta_pixel = th_public
-        fwhm_major_pixel = xr.apply_ufunc(np.maximum, sx*_SIG2FWHM, sy*_SIG2FWHM, dask="parallelized")
-        fwhm_minor_pixel = xr.apply_ufunc(np.minimum, sx*_SIG2FWHM, sy*_SIG2FWHM, dask="parallelized")
+        fwhm_major_pixel = xr.apply_ufunc(
+            np.maximum, sx * _SIG2FWHM, sy * _SIG2FWHM, dask="parallelized"
+        )
+        fwhm_minor_pixel = xr.apply_ufunc(
+            np.minimum, sx * _SIG2FWHM, sy * _SIG2FWHM, dask="parallelized"
+        )
         # Angular uncertainty is native in pixel basis
         theta_pixel_err = th_e
         # world angle/uncertainty computed below from pixel→world covariance
@@ -1459,89 +1828,202 @@ def fit_multi_gaussian2d(
         # Also compute world-view σ/FWHM via pixel→world covariance transform if coords available
         gx = np.gradient(x1d.astype(float))
         gy = np.gradient(y1d.astype(float))
-        x0i = xr.apply_ufunc(np.rint, x0_pixel, input_core_dims=[["component"]], output_core_dims=[["component"]],
-                             vectorize=True, dask="parallelized", output_dtypes=[float]).clip(0, x1d.shape[0]-1).astype(int)
-        y0i = xr.apply_ufunc(np.rint, y0_pixel, input_core_dims=[["component"]], output_core_dims=[["component"]],
-                             vectorize=True, dask="parallelized", output_dtypes=[float]).clip(0, y1d.shape[0]-1).astype(int)
-        dx_local = xr.apply_ufunc(np.take, xr.DataArray(gx, dims=[dim_x]), x0i,
-                                  input_core_dims=[[dim_x], ["component"]],
-                                  output_core_dims=[["component"]],
-                                  kwargs={"axis": 0, "mode": "clip"},
-                                  vectorize=True, dask="parallelized", output_dtypes=[float])
-        dy_local = xr.apply_ufunc(np.take, xr.DataArray(gy, dims=[dim_y]), y0i,
-                                  input_core_dims=[[dim_y], ["component"]],
-                                  output_core_dims=[["component"]],
-                                  kwargs={"axis": 0, "mode": "clip"},
-                                  vectorize=True, dask="parallelized", output_dtypes=[float])
+        x0i = (
+            xr.apply_ufunc(
+                np.rint,
+                x0_pixel,
+                input_core_dims=[["component"]],
+                output_core_dims=[["component"]],
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[float],
+            )
+            .clip(0, x1d.shape[0] - 1)
+            .astype(int)
+        )
+        y0i = (
+            xr.apply_ufunc(
+                np.rint,
+                y0_pixel,
+                input_core_dims=[["component"]],
+                output_core_dims=[["component"]],
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[float],
+            )
+            .clip(0, y1d.shape[0] - 1)
+            .astype(int)
+        )
+        dx_local = xr.apply_ufunc(
+            np.take,
+            xr.DataArray(gx, dims=[dim_x]),
+            x0i,
+            input_core_dims=[[dim_x], ["component"]],
+            output_core_dims=[["component"]],
+            kwargs={"axis": 0, "mode": "clip"},
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
+        dy_local = xr.apply_ufunc(
+            np.take,
+            xr.DataArray(gy, dims=[dim_y]),
+            y0i,
+            input_core_dims=[[dim_y], ["component"]],
+            output_core_dims=[["component"]],
+            kwargs={"axis": 0, "mode": "clip"},
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
+
         def _pixel_to_world_cov(sigx, sigy, theta, dx, dy):
-            c = np.cos(theta); s = np.sin(theta)
+            c = np.cos(theta)
+            s = np.sin(theta)
             # Σ_pixel = R diag(sigx^2, sigy^2) R^T
-            Sxx = (c*c)*sigx*sigx + (s*s)*sigy*sigy
-            Sxy = (s*c)*(sigx*sigx - sigy*sigy)
-            Syy = (s*s)*sigx*sigx + (c*c)*sigy*sigy
+            Sxx = (c * c) * sigx * sigx + (s * s) * sigy * sigy
+            Sxy = (s * c) * (sigx * sigx - sigy * sigy)
+            Syy = (s * s) * sigx * sigx + (c * c) * sigy * sigy
             # world scaling
-            A = (dx*dx)*Sxx; B = (dx*dy)*Sxy; D = (dy*dy)*Syy
+            A = (dx * dx) * Sxx
+            B = (dx * dy) * Sxy
+            D = (dy * dy) * Syy
             tr = A + D
-            det = A*D - B*B
-            tmp = np.sqrt(np.maximum(tr*tr/4.0 - det, 0.0))
-            lam1 = tr/2.0 + tmp
-            lam2 = tr/2.0 - tmp
-            theta_w = 0.5*np.arctan2(2*B, A - D)
-            lam_max = np.maximum(lam1, lam2); lam_min = np.minimum(lam1, lam2)
-            return np.sqrt(np.maximum(lam_max, 0.0)), np.sqrt(np.maximum(lam_min, 0.0)), theta_w
+            det = A * D - B * B
+            tmp = np.sqrt(np.maximum(tr * tr / 4.0 - det, 0.0))
+            lam1 = tr / 2.0 + tmp
+            lam2 = tr / 2.0 - tmp
+            theta_w = 0.5 * np.arctan2(2 * B, A - D)
+            lam_max = np.maximum(lam1, lam2)
+            lam_min = np.minimum(lam1, lam2)
+            return (
+                np.sqrt(np.maximum(lam_max, 0.0)),
+                np.sqrt(np.maximum(lam_min, 0.0)),
+                theta_w,
+            )
 
         sigma_major_world, sigma_minor_world, _theta_world_math = xr.apply_ufunc(
-            _pixel_to_world_cov, sx, sy, th_math, dx_local, dy_local,
-            input_core_dims=[["component"]]*5,
+            _pixel_to_world_cov,
+            sx,
+            sy,
+            th_math,
+            dx_local,
+            dy_local,
+            input_core_dims=[["component"]] * 5,
             output_core_dims=[["component"], ["component"], ["component"]],
-            vectorize=True, dask="parallelized", output_dtypes=[float, float, float])
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float, float, float],
+        )
+
         # Error propagation (pixel → world) via finite differences on (σx, σy)
         def _fd_sigma_pixel_to_world(sigx, sigy, theta, dx, dy, epsx, epsy):
-            s1M, s1m, _ = _pixel_to_world_cov(sigx+epsx, sigy, theta, dx, dy)
-            s2M, s2m, _ = _pixel_to_world_cov(sigx-epsx, sigy, theta, dx, dy)
-            dM_dsx = (s1M - s2M) / (2.0*epsx); dm_dsx = (s1m - s2m) / (2.0*epsx)
-            s1M, s1m, _ = _pixel_to_world_cov(sigx, sigy+epsy, theta, dx, dy)
-            s2M, s2m, _ = _pixel_to_world_cov(sigx, sigy-epsy, theta, dx, dy)
-            dM_dsy = (s1M - s2M) / (2.0*epsy); dm_dsy = (s1m - s2m) / (2.0*epsy)
+            s1M, s1m, _ = _pixel_to_world_cov(sigx + epsx, sigy, theta, dx, dy)
+            s2M, s2m, _ = _pixel_to_world_cov(sigx - epsx, sigy, theta, dx, dy)
+            dM_dsx = (s1M - s2M) / (2.0 * epsx)
+            dm_dsx = (s1m - s2m) / (2.0 * epsx)
+            s1M, s1m, _ = _pixel_to_world_cov(sigx, sigy + epsy, theta, dx, dy)
+            s2M, s2m, _ = _pixel_to_world_cov(sigx, sigy - epsy, theta, dx, dy)
+            dM_dsy = (s1M - s2M) / (2.0 * epsy)
+            dm_dsy = (s1m - s2m) / (2.0 * epsy)
             return dM_dsx, dm_dsx, dM_dsy, dm_dsy
 
         # World angle in requested convention
-        theta_world = (np.pi/2 - _theta_world_math) if want_pa else _theta_world_math
+        theta_world = (np.pi / 2 - _theta_world_math) if want_pa else _theta_world_math
+
         # --- θ error propagation (pixel → world): d(theta_world_math)/d(theta_pixel_math) ---
         def _dtheta_world_dtheta_pixel(sigx, sigy, theta, dx, dy, eps):
             _, _, t1 = _pixel_to_world_cov(sigx, sigy, theta + eps, dx, dy)
             _, _, t2 = _pixel_to_world_cov(sigx, sigy, theta - eps, dx, dy)
             return (t1 - t2) / (2.0 * eps)
-        _epst_w = xr.apply_ufunc(lambda v: 1e-6 + 1e-3*np.abs(v), th_math, dask="parallelized")
+
+        _epst_w = xr.apply_ufunc(
+            lambda v: 1e-6 + 1e-3 * np.abs(v), th_math, dask="parallelized"
+        )
         _dtdt_w = xr.apply_ufunc(
-            _dtheta_world_dtheta_pixel, sx, sy, th_math, dx_local, dy_local, _epst_w,
-            input_core_dims=[["component"]]*6,
+            _dtheta_world_dtheta_pixel,
+            sx,
+            sy,
+            th_math,
+            dx_local,
+            dy_local,
+            _epst_w,
+            input_core_dims=[["component"]] * 6,
             output_core_dims=[["component"]],
-            vectorize=True, dask="parallelized", output_dtypes=[float],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
         )
         theta_world_err = xr.apply_ufunc(
-            np.multiply, xr.apply_ufunc(np.abs, _dtdt_w, dask="parallelized"), th_e,
+            np.multiply,
+            xr.apply_ufunc(np.abs, _dtdt_w, dask="parallelized"),
+            th_e,
             input_core_dims=[["component"], ["component"]],
             output_core_dims=[["component"]],
-            vectorize=True, dask="parallelized", output_dtypes=[float],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
         )
-        _epsx = xr.apply_ufunc(lambda v: 1e-6 + 1e-3*np.abs(v), sx, dask="parallelized")
-        _epsy = xr.apply_ufunc(lambda v: 1e-6 + 1e-3*np.abs(v), sy, dask="parallelized")
+        _epsx = xr.apply_ufunc(
+            lambda v: 1e-6 + 1e-3 * np.abs(v), sx, dask="parallelized"
+        )
+        _epsy = xr.apply_ufunc(
+            lambda v: 1e-6 + 1e-3 * np.abs(v), sy, dask="parallelized"
+        )
         dM_dsx, dm_dsx, dM_dsy, dm_dsy = xr.apply_ufunc(
-            _fd_sigma_pixel_to_world, sx, sy, th_math, dx_local, dy_local, _epsx, _epsy,
-            input_core_dims=[["component"]]*7,
-            output_core_dims=[["component"], ["component"], ["component"], ["component"]],
-            vectorize=True, dask="parallelized",
+            _fd_sigma_pixel_to_world,
+            sx,
+            sy,
+            th_math,
+            dx_local,
+            dy_local,
+            _epsx,
+            _epsy,
+            input_core_dims=[["component"]] * 7,
+            output_core_dims=[
+                ["component"],
+                ["component"],
+                ["component"],
+                ["component"],
+            ],
+            vectorize=True,
+            dask="parallelized",
             output_dtypes=[float, float, float, float],
         )
         sigma_major_world_err = xr.apply_ufunc(
-            lambda a,b,c,d: np.sqrt((a*b)**2 + (c*d)**2), dM_dsx, sx_e, dM_dsy, sy_e,
-            input_core_dims=[["component"], ["component"], ["component"], ["component"]],
-            output_core_dims=[["component"]], vectorize=True, dask="parallelized", output_dtypes=[float])
+            lambda a, b, c, d: np.sqrt((a * b) ** 2 + (c * d) ** 2),
+            dM_dsx,
+            sx_e,
+            dM_dsy,
+            sy_e,
+            input_core_dims=[
+                ["component"],
+                ["component"],
+                ["component"],
+                ["component"],
+            ],
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
         sigma_minor_world_err = xr.apply_ufunc(
-            lambda a,b,c,d: np.sqrt((a*b)**2 + (c*d)**2), dm_dsx, sx_e, dm_dsy, sy_e,
-            input_core_dims=[["component"], ["component"], ["component"], ["component"]],
-            output_core_dims=[["component"]], vectorize=True, dask="parallelized", output_dtypes=[float])
+            lambda a, b, c, d: np.sqrt((a * b) ** 2 + (c * d) ** 2),
+            dm_dsx,
+            sx_e,
+            dm_dsy,
+            sy_e,
+            input_core_dims=[
+                ["component"],
+                ["component"],
+                ["component"],
+                ["component"],
+            ],
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
         fwhm_major_world = sigma_major_world * _SIG2FWHM
         fwhm_minor_world = sigma_minor_world * _SIG2FWHM
         fwhm_major_world_err = sigma_major_world_err * _SIG2FWHM
@@ -1565,8 +2047,8 @@ def fit_multi_gaussian2d(
     fwhm_minor_err = xr.where(_is_fx_major, _fye, _fxe)
     # Also expose pixel/world principal-axis σ explicitly + their errors
     _is_sx_major = xr.apply_ufunc(np.greater_equal, sx, sy, dask="parallelized")
-    sigma_major = xr.where(_is_sx_major, sx,  sy)
-    sigma_minor = xr.where(_is_sx_major, sy,  sx)
+    sigma_major = xr.where(_is_sx_major, sx, sy)
+    sigma_minor = xr.where(_is_sx_major, sy, sx)
     sigma_major_err = xr.where(_is_sx_major, sx_e, sy_e)
     sigma_minor_err = xr.where(_is_sx_major, sy_e, sx_e)
 
@@ -1583,7 +2065,8 @@ def fit_multi_gaussian2d(
         data_vars=dict(
             amplitude=amp,
             amplitude_err=amp_e,
-            peak=peak, peak_err=peak_err,
+            peak=peak,
+            peak_err=peak_err,
             # pixel-space mirrors
             x0_pixel=x0_pixel,
             y0_pixel=y0_pixel,
@@ -1597,15 +2080,23 @@ def fit_multi_gaussian2d(
             theta_pixel_err=theta_pixel_err,
             theta_world=theta_world,
             theta_world_err=theta_world_err,
-            fwhm_major_pixel=fwhm_major_pixel, fwhm_minor_pixel=fwhm_minor_pixel,
-            fwhm_major_pixel_err=fwhm_major_pixel_err, fwhm_minor_pixel_err=fwhm_minor_pixel_err,
+            fwhm_major_pixel=fwhm_major_pixel,
+            fwhm_minor_pixel=fwhm_minor_pixel,
+            fwhm_major_pixel_err=fwhm_major_pixel_err,
+            fwhm_minor_pixel_err=fwhm_minor_pixel_err,
             # world-space mirrors (explicit)
-            sigma_major_world=sigma_major_world, sigma_minor_world=sigma_minor_world,
-            sigma_major_world_err=sigma_major_world_err, sigma_minor_world_err=sigma_minor_world_err,
-            fwhm_major_world=fwhm_major_world, fwhm_minor_world=fwhm_minor_world,
-            fwhm_major_world_err=fwhm_major_world_err, fwhm_minor_world_err=fwhm_minor_world_err,
-            offset=offset, offset_err=offset_e,
-            success=success, variance_explained=varexp,
+            sigma_major_world=sigma_major_world,
+            sigma_minor_world=sigma_minor_world,
+            sigma_major_world_err=sigma_major_world_err,
+            sigma_minor_world_err=sigma_minor_world_err,
+            fwhm_major_world=fwhm_major_world,
+            fwhm_minor_world=fwhm_minor_world,
+            fwhm_major_world_err=fwhm_major_world_err,
+            fwhm_minor_world_err=fwhm_minor_world_err,
+            offset=offset,
+            offset_err=offset_e,
+            success=success,
+            variance_explained=varexp,
         )
     )
     # --- record only axes handedness; publish both angle conventions explicitly ---
@@ -1640,21 +2131,31 @@ def fit_multi_gaussian2d(
             ds["x0_world_err"] = x0_e
             ds["y0_world_err"] = y0_e
             # Self-documenting attrs
-            ds["x0_world"].attrs["description"] = "Component center x in world coordinates."
-            ds["y0_world"].attrs["description"] = "Component center y in world coordinates."
+            ds["x0_world"].attrs[
+                "description"
+            ] = "Component center x in world coordinates."
+            ds["y0_world"].attrs[
+                "description"
+            ] = "Component center y in world coordinates."
             ds["x0_world_err"].attrs["description"] = "1-sigma uncertainty of x0_world."
             ds["y0_world_err"].attrs["description"] = "1-sigma uncertainty of y0_world."
         else:
-            def _prep(coord: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+
+            def _prep(
+                coord: np.ndarray,
+            ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
                 coord = np.asarray(coord)
                 if coord.ndim != 1 or coord.size == 0 or not np.all(np.isfinite(coord)):
                     return None, None
-                if coord.size >= 2 and coord[1] < coord[0]:  # descending → reverse for interp
+                if (
+                    coord.size >= 2 and coord[1] < coord[0]
+                ):  # descending → reverse for interp
                     idx = np.arange(coord.size - 1, -1, -1, dtype=float)
                     return idx, coord[::-1]
                 if not np.all(np.diff(coord) > 0):
                     return None, None
                 return np.arange(coord.size, dtype=float), coord
+
             # Extracted for testability & reliable coverage:
             ds = _interp_centers_world(ds, cx, cy, dim_x, dim_y)
 
@@ -1671,6 +2172,7 @@ def fit_multi_gaussian2d(
     def _short(v, maxlen=120):
         import numpy as _np
         import xarray as _xr
+
         if v is None:
             return None
         if isinstance(v, (float, int, bool, str)):
@@ -1679,17 +2181,17 @@ def fit_multi_gaussian2d(
             # shallow sanitize
             out = {}
             for k, vv in list(v.items())[:50]:
-                out[k] = _short(vv, maxlen//2)
+                out[k] = _short(vv, maxlen // 2)
             return out
         if isinstance(v, (list, tuple)):
-            return [ _short(x, maxlen//2) for x in list(v)[:50] ]
+            return [_short(x, maxlen // 2) for x in list(v)[:50]]
         # arrays / DataArrays / other objects
         try:
             shape = tuple(getattr(v, "shape", ()))
             return f"<{type(v).__name__} shape={shape}>"
         except Exception:
             s = repr(v)
-            return s if len(s) <= maxlen else (s[:maxlen-3] + "...")
+            return s if len(s) <= maxlen else (s[: maxlen - 3] + "...")
 
     # Full parameter set (exclude raw data)
     _param = dict(
@@ -1710,12 +2212,13 @@ def fit_multi_gaussian2d(
     _call = _build_call(_inspect, _param)
 
     # Package metadata
-    _pkg = (__package__.split(".")[0] if __package__ else "astroviper")
+    _pkg = __package__.split(".")[0] if __package__ else "astroviper"
     try:
         _ver = _ilm.version(_pkg) if _ilm is not None else "unknown"
     except Exception:
         try:
             import astroviper as _av
+
             _ver = getattr(_av, "__version__", "unknown")
         except Exception:
             _ver = "unknown"
@@ -1728,7 +2231,7 @@ def fit_multi_gaussian2d(
 
     # --- Self-documenting variable metadata ----------------------------------
     _dv_docs = {
-       # centers
+        # centers
         "x0_pixel": "Gaussian center x-coordinate in pixel indices (0-based), derived from world coords if necessary.",
         "y0_pixel": "Gaussian center y-coordinate in pixel indices (0-based), derived from world coords if necessary.",
         "x0_pixel_err": "1σ uncertainty of x0_pixel (native if pixel fit; world fit propagated via local pixel scale).",
@@ -1737,7 +2240,6 @@ def fit_multi_gaussian2d(
         "y0_world": "Component center y in world coordinates (if available).",
         "x0_world_err": "1σ uncertainty of x0_world (direct if world fit; else via interpolation/pixel-scale propagation).",
         "y0_world_err": "1σ uncertainty of y0_world (direct if world fit; else via interpolation/pixel-scale propagation).",
-
         # scales (sigma = standard deviation of the 1-D Gaussian along ellipse axes before FWHM conversion)
         "sigma_major_pixel": "Gaussian 1σ scale along the major principal axis in pixel units (after world→pixel conversion).",
         "sigma_minor_pixel": "Gaussian 1σ scale along the minor principal axis in pixel units (after world→pixel conversion).",
@@ -1747,9 +2249,7 @@ def fit_multi_gaussian2d(
         "sigma_minor_world": "Principal-axis 1σ (minor) expressed in world coordinates.",
         "sigma_major_world_err": "1σ uncertainty of sigma_major_world (native if world fit; else propagated).",
         "sigma_minor_world_err": "1σ uncertainty of sigma_minor_world (native if world fit; else propagated).",
-
         # FWHM (2*sqrt(2*ln 2) * sigma)
-
         "fwhm_major_pixel": "Full-width at half-maximum along the major principal axis in pixel coordinates.",
         "fwhm_minor_pixel": "Full-width at half-maximum along the minor principal axis in pixel coordinates.",
         "fwhm_major_pixel_err": "1σ uncertainty of pixel-frame FWHM(major) (native if pixel fit; else propagated).",
@@ -1758,26 +2258,22 @@ def fit_multi_gaussian2d(
         "fwhm_minor_world": "FWHM of the minor principal axis in world coordinates.",
         "fwhm_major_world_err": "1σ uncertainty of world-frame FWHM(major) (native if world fit; else propagated).",
         "fwhm_minor_world_err": "1σ uncertainty of world-frame FWHM(minor) (native if world fit; else propagated).",
-
         # angles (θ always refers to the MAJOR axis; wrapped to (-π/2, π/2])
         "theta_pixel": "Orientation of the ellipse MAJOR axis in pixel coordinates (same convention as 'theta').",
         "theta_pixel_err": "1σ uncertainty of theta_pixel (major-axis orientation) in radians; propagated through the world↔pixel transform.",
         "theta_world": "Orientation of the ellipse MAJOR axis in world coordinates (same convention as 'theta').",
         "theta_world_err": "1σ uncertainty of theta_world (major-axis orientation) in radians; propagated through the pixel↔world transform.",
-
         # amplitudes / background
         "amplitude": "Component amplitude (peak height above offset) in data units.",
         "peak": "Model peak value at the component center (offset + amplitude) in data units.",
         "peak_err": "1σ uncertainty of the model peak (quadrature of amplitude_err and offset_err).",
         "offset": "Additive constant background in data units for this fit plane.",
         "offset_err": "1σ uncertainty on the additive background.",
-
         # uncertainties
         "amplitude_err": "1σ uncertainty of amplitude parameter in data units.",
         # diagnostics
         "success": "Optimizer success flag (True/False).",
         "variance_explained": "Explained variance fraction by the fitted model on this plane (0–1).",
-
         # images
         "model": "Best-fit model image on the (y, x) grid of the input.",
         "residual": "Residual image = data - model on the (y, x) grid of the input.",
@@ -1795,6 +2291,7 @@ def fit_multi_gaussian2d(
         ds = _add_variance_explained(ds)
     return ds
 
+
 # TODO: move to a plotting module
 
 import numpy as np
@@ -1802,6 +2299,7 @@ from matplotlib.patches import Ellipse
 
 
 # ---- plotting helpers --------------------------------------------------------
+
 
 def overlay_fit_components(
     ax,
@@ -1924,7 +2422,11 @@ def overlay_fit_components(
     cx = _first(f"x0_{frame}", "x0", f"x_{frame}", "x")
     cy = _first(f"y0_{frame}", "y0", f"y_{frame}", "y")
 
-    n = max(_ncomp_guess(), (1 if cx is None else cx.shape[0]), (1 if cy is None else cy.shape[0]))
+    n = max(
+        _ncomp_guess(),
+        (1 if cx is None else cx.shape[0]),
+        (1 if cy is None else cy.shape[0]),
+    )
     cx = _broadcast(cx, n) if cx is not None else np.zeros((n,), dtype=float)
     cy = _broadcast(cy, n) if cy is not None else np.zeros((n,), dtype=float)
 
@@ -1936,21 +2438,33 @@ def overlay_fit_components(
 
     # Try x/y first; if not present, fall back to major/minor (both name orders)
     sigx = _first(
-        f"sigma_{frame}_x", "sigma_x",
-        f"sigma_{frame}_major", f"sigma_major_{frame}", "sigma_major",
+        f"sigma_{frame}_x",
+        "sigma_x",
+        f"sigma_{frame}_major",
+        f"sigma_major_{frame}",
+        "sigma_major",
     )
     sigy = _first(
-        f"sigma_{frame}_y", "sigma_y",
-        f"sigma_{frame}_minor", f"sigma_minor_{frame}", "sigma_minor",
+        f"sigma_{frame}_y",
+        "sigma_y",
+        f"sigma_{frame}_minor",
+        f"sigma_minor_{frame}",
+        "sigma_minor",
     )
 
     fwx = _first(
-        f"fwhm_{frame}_x", "fwhm_x",
-        f"fwhm_{frame}_major", f"fwhm_major_{frame}", "fwhm_major",
+        f"fwhm_{frame}_x",
+        "fwhm_x",
+        f"fwhm_{frame}_major",
+        f"fwhm_major_{frame}",
+        "fwhm_major",
     )
     fwy = _first(
-        f"fwhm_{frame}_y", "fwhm_y",
-        f"fwhm_{frame}_minor", f"fwhm_minor_{frame}", "fwhm_minor",
+        f"fwhm_{frame}_y",
+        "fwhm_y",
+        f"fwhm_{frame}_minor",
+        f"fwhm_minor_{frame}",
+        "fwhm_minor",
     )
 
     # broadcast sizes to n
@@ -1965,7 +2479,10 @@ def overlay_fit_components(
             sigx = (fwx / FWHM_K) if sigx is None else sigx
             sigy = (fwy / FWHM_K) if sigy is None else sigy
         if sigx is None or sigy is None:
-            warnings.warn("Missing size info (sigma/FWHM); drawing components without size.", RuntimeWarning)
+            warnings.warn(
+                "Missing size info (sigma/FWHM); drawing components without size.",
+                RuntimeWarning,
+            )
             sigx = np.zeros((n,), dtype=float)
             sigy = np.zeros((n,), dtype=float)
         rx = n_sigma * sigx
@@ -1976,7 +2493,10 @@ def overlay_fit_components(
             fwx = (sigx * FWHM_K) if fwx is None else fwx
             fwy = (sigy * FWHM_K) if fwy is None else fwy
         if fwx is None or fwy is None:
-            warnings.warn("Missing size info (FWHM/sigma); drawing components without size.", RuntimeWarning)
+            warnings.warn(
+                "Missing size info (FWHM/sigma); drawing components without size.",
+                RuntimeWarning,
+            )
             fwx = np.zeros((n,), dtype=float)
             fwy = np.zeros((n,), dtype=float)
         # radii are half of (n_sigma * FWHM)
@@ -2057,10 +2577,17 @@ def overlay_fit_components(
         if label:
             # simple center label; offset a touch in x so it doesn’t sit on the edge
             ax.text(
-                cx_i, cy_i, f"{i+1}",
-                ha="center", va="center", fontsize=9,
-                color=edgecolor, alpha=alpha, zorder=zorder
+                cx_i,
+                cy_i,
+                f"{i+1}",
+                ha="center",
+                va="center",
+                fontsize=9,
+                color=edgecolor,
+                alpha=alpha,
+                zorder=zorder,
             )
+
 
 def plot_components(
     data,
@@ -2070,7 +2597,7 @@ def plot_components(
     indexer: "Optional[Mapping[str, int]]" = None,
     show_residual: bool = True,
     fwhm: bool = False,
-    angle: "Optional[str]" = None,   # "math" | "pa" | None(=auto)
+    angle: "Optional[str]" = None,  # "math" | "pa" | None(=auto)
     show: bool = None,
 ):
     """
@@ -2081,6 +2608,7 @@ def plot_components(
     • Draws either 1-σ or FWHM ellipses (`fwhm=True`) and respects math/PA (`angle=`).
     """
     import numpy as _np
+
     try:
         import matplotlib.pyplot as _plt
     except Exception as exc:  # pragma: no cover
@@ -2110,9 +2638,12 @@ def plot_components(
         cx = _np.asarray(data2d.coords[dim_x].values)
         cy = _np.asarray(data2d.coords[dim_y].values)
         use_world = (
-            cx.ndim == 1 and cy.ndim == 1 and
-            _np.all(_np.isfinite(cx)) and _np.all(_np.isfinite(cy)) and
-            _np.all(_np.diff(cx) != 0) and _np.all(_np.diff(cy) != 0)
+            cx.ndim == 1
+            and cy.ndim == 1
+            and _np.all(_np.isfinite(cx))
+            and _np.all(_np.isfinite(cy))
+            and _np.all(_np.diff(cx) != 0)
+            and _np.all(_np.diff(cy) != 0)
         )
 
     # Figure and panels
@@ -2175,7 +2706,7 @@ def plot_components(
             metric=("fwhm" if fwhm else "sigma"),
             n_sigma=1.0,
             angle=(angle or "auto"),
-            edgecolor="w",     # higher contrast on residuals
+            edgecolor="w",  # higher contrast on residuals
             lw=1.5,
             alpha=0.95,
             label=False,
