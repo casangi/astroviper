@@ -2564,3 +2564,45 @@ class TestResultMetadataShortener:
         assert isinstance(s, str)
         assert len(s) == 120 and s.endswith("...")
         assert "shape=" not in s
+
+class TestWorldSeeding:
+    def test_autoseed_uses_world_axes_and_recovers_params(self) -> None:
+        # Synthetic single Gaussian in WORLD coords (not pixel indices)
+        nx = ny = 129
+        x = np.linspace(-nx + 1, nx - 1, nx, dtype=float)
+        y = np.linspace(-ny + 1, ny - 1, ny, dtype=float)
+        X, Y = np.meshgrid(x, y)
+
+        amp_true = 5.0
+        x0_true, y0_true = 40.0, -20.0
+        fwhm_major, fwhm_minor = 20.0, 10.0
+        theta = 0.4  # radians, math convention
+        K = 2.0 * np.sqrt(2.0 * np.log(2.0))  # FWHM = K * sigma
+        sx = fwhm_major / K
+        sy = fwhm_minor / K
+
+        # rotated elliptical Gaussian (math angle)
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+        Xc = X - x0_true
+        Yc = Y - y0_true
+        Xp = Xc * cos_t + Yc * sin_t
+        Yp = -Xc * sin_t + Yc * cos_t
+        Z = amp_true * np.exp(-0.5 * ((Xp / sx) ** 2 + (Yp / sy) ** 2))
+        da = xr.DataArray(Z, dims=("y", "x"), coords={"x": x, "y": y})
+
+        # No initial guesses → exercise auto-seed path.
+        ds = fit_multi_gaussian2d(da, n_components=1)
+
+        # Must fit in WORLD frame when coords are not pure pixel indices.
+        assert ds.attrs.get("fit_native_frame") == "world"
+        assert "x0_world" in ds and "y0_world" in ds
+
+        # Amplitude/peak should be near the truth (no noise, no offset).
+        if "amplitude" in ds:
+            assert np.isclose(float(ds["amplitude"]), amp_true, rtol=0.05, atol=0.05)
+        if "peak" in ds:
+            assert np.isclose(float(ds["peak"]), amp_true, rtol=0.05, atol=0.05)
+
+        # Centers recovered in WORLD coordinates.
+        assert np.isclose(float(ds["x0_world"]), x0_true, atol=1.0)
+        assert np.isclose(float(ds["y0_world"]), y0_true, atol=1.0)
