@@ -673,6 +673,31 @@ class TestPlotHelper:
             fig, _ = ret
         assert isinstance(fig, _mf.Figure)
 
+    def test_overlay_converts_fwhm_to_sigma_when_sigma_missing(self) -> None:
+        matplotlib.use("Agg", force=True)
+        fig, ax = plt.subplots()
+
+        # Known sigma; provide only FWHM so helper must convert → sigma = fwhm / K
+        sigma_x = 3.0
+        sigma_y = 2.0
+        FWHM_K = 2.0 * np.sqrt(2.0 * np.log(2.0))
+        fit = {
+            "x0": np.array([10.0]),
+            "y0": np.array([12.0]),
+            "fwhm_x": np.array([sigma_x * FWHM_K]),
+            "fwhm_y": np.array([sigma_y * FWHM_K]),
+            "theta": np.array([0.0]),
+        }
+
+        n_sigma = 1.0
+        mg.overlay_fit_components(ax, fit, frame="pixel", metric="sigma", n_sigma=n_sigma, angle="math", label=False)
+
+        assert len(ax.patches) == 1
+        e = ax.patches[0]
+        # width = 2 * (n_sigma * sigma_x), height = 2 * (n_sigma * sigma_y)
+        assert np.isclose(e.get_width(), 2.0 * n_sigma * sigma_x)
+        assert np.isclose(e.get_height(), 2.0 * n_sigma * sigma_y)
+
 class TestNumPyFitting: # (unittest.TestCase):
     def test_min_threshold_masks_pixels_partial(self) -> None:
 
@@ -1972,3 +1997,43 @@ class TestAutoSeedingPixelElsePublicAPI:
         assert p0[1] > 0.0          # amp
         assert np.isclose(p0[0], 0) # offset
         assert np.isclose(p0[6], 0) # theta
+
+class TestResultMetadataShortener:
+    def test_coords_repr_truncated_when_shape_property_raises(self) -> None:
+        class EvilCoords:
+            @property
+            def shape(self):
+                # ensure the library's _short() hits the exception path
+                raise RuntimeError("shape access should not be required")
+
+            def __repr__(self) -> str:
+                # long repr triggers truncation branch
+                return "E" * 300
+
+        ny, nx = 32, 40
+        y, x = np.mgrid[0:ny, 0:nx]
+        img = 0.1 + np.exp(
+            -((x - nx / 2.0) ** 2) / (2 * 3.0 ** 2)
+            - ((y - ny / 2.0) ** 2) / (2 * 2.0 ** 2)
+        )
+        da = xr.DataArray(img, dims=("y", "x"))
+
+        init = np.array(
+            [[1.0, nx / 2.0, ny / 2.0, 2.3548 * 3.0, 2.3548 * 2.0, 0.0]],
+            dtype=float,
+        )
+
+        ds = fit_multi_gaussian2d(
+            da,
+            n_components=1,
+            initial_guesses=init,
+            coord_type="pixel",
+            coords=EvilCoords(),      # recorded in metadata; not used for DataArray pixel fits
+            return_model=False,
+            return_residual=False,
+        )
+
+        s = ds.attrs["param"]["coords"]
+        assert isinstance(s, str)
+        assert len(s) == 120 and s.endswith("...")
+        assert "shape=" not in s
