@@ -821,12 +821,6 @@ class TestPlotHelper:
             fig = ret
         else:
             fig, _axes = ret
-        # Accept both styles: Figure OR (Figure, axes)
-        if isinstance(ret, _mf.Figure):
-            fig = ret
-        else:
-            fig, _ = ret
-        assert isinstance(fig, _mf.Figure)
 
     def test_plot_components_fwhm_warns_and_draws_without_size_when_both_missing(
         self,
