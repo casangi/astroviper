@@ -319,15 +319,31 @@ def _split_shape_payload(line: str) -> tuple[str, str]:
     return m.group(1).lower(), m.group(2)
 
 _NUM = r"[-+]?\d+(?:\.\d+)?"
-_UNIT_NUM = rf"{_NUM}(?:\s*(?:pix|deg|rad))?"
-_PAIR = rf"\[\s*({_UNIT_NUM})\s*,\s*({_UNIT_NUM})\s*\]"
+# pixel coordinates/lengths MUST be suffixed with 'pix' to avoid ambiguity
+_PIX_NUM = rf"{_NUM}\s*pix"
+_PAIR_PIX = rf"\[\s*({_PIX_NUM})\s*,\s*({_PIX_NUM})\s*\]"
 
-def _parse_units_val(tok: str) -> tuple[float, str | None]:
+def _parse_units_val(tok: str) -> Tuple[float, str | None]:
     m = re.match(rf"^\s*({_NUM})\s*(pix|deg|rad)?\s*$", tok)
     if not m:
         raise ValueError(f"Invalid numeric token: {tok!r}")
-    val = float(m.group(1)); unit = m.group(2)
+    val = float(m.group(1))
+    unit = m.group(2)
     return val, unit
+
+def _parse_pix_val(tok: str) -> float:
+    m = re.match(rf"^\s*({_NUM})\s*pix\s*$", tok)
+    if not m:
+        raise ValueError(f"Expected '<value>pix' for pixel quantity, got {tok!r}")
+    return float(m.group(1))
+
+def _format_pix_pair_error(src: str) -> str:
+    """Build the exact error message (with suggestion) for missing 'pix' units."""
+    nums = re.findall(r"[-+]?\d+(?:\.\d+)?", src)
+    suggestion = (
+        f" should be '[{nums[0]}pix, {nums[1]}pix]' if these values represent pixel coordinates."
+    )
+    return f"Invalid pixel pair token (require 'pix' units): {src!r}{suggestion}"
 
 def _strip_brackets(s: str) -> str:
     if not (s.startswith("[[") and s.endswith("]")):
@@ -338,36 +354,34 @@ def _rasterize_shape(shape: str, payload: str, X: np.ndarray, Y: np.ndarray) -> 
     inner = _strip_brackets(payload).strip()
     parts = _smart_split_pairs(inner)
     if shape == "box":
-        p1x, p1y = _parse_pair(parts[0]); p2x, p2y = _parse_pair(parts[1])
+        p1x, p1y = _parse_pair_pix(parts[0]); p2x, p2y = _parse_pair_pix(parts[1])
         x1, x2 = sorted([p1x, p2x]); y1, y2 = sorted([p1y, p2y])
         return (X >= x1) & (X <= x2) & (Y >= y1) & (Y <= y2)
     if shape == "centerbox":
-        cx, cy = _parse_pair(parts[0]); w, h = _parse_pair(parts[1])
+        cx, cy = _parse_pair_pix(parts[0]); w, h = _parse_two_pix_vals(parts[1])
         hx, hy = w / 2.0, h / 2.0
         return (np.abs(X - cx) <= hx) & (np.abs(Y - cy) <= hy)
     if shape == "rotbox":
-        cx, cy = _parse_pair(parts[0]); w, h = _parse_pair(parts[1]); ang = _parse_angle(parts[2])
+        cx, cy = _parse_pair_pix(parts[0]); w, h = _parse_two_pix_vals(parts[1]); ang = _parse_angle(parts[2])
         hx, hy = w / 2.0, h / 2.0
         xrp, yrp = _rotate_about(X, Y, cx, cy, -ang)
         return (np.abs(xrp - cx) <= hx) & (np.abs(yrp - cy) <= hy)
     if shape == "circle":
-        cx, cy = _parse_pair(parts[0]); r, _ = _parse_units_val(parts[1])
+        cx, cy = _parse_pair_pix(parts[0]); r = _parse_pix_val(parts[1])
         return ((X - cx) ** 2 + (Y - cy) ** 2) <= (r ** 2 + 1e-9)
     if shape == "annulus":
-        cx, cy = _parse_pair(parts[0])
-        r1, _ = _parse_units_val(parts[1].strip()[1:-1].split(",")[0])
-        r2, _ = _parse_units_val(parts[1].strip()[1:-1].split(",")[1])
+        cx, cy = _parse_pair_pix(parts[0])
+        r1, r2 = _parse_two_pix_vals(parts[1])
         d2 = (X - cx) ** 2 + (Y - cy) ** 2
         return (d2 >= r1 ** 2) & (d2 <= r2 ** 2)
     if shape == "ellipse":
-        cx, cy = _parse_pair(parts[0])
-        a, _ = _parse_units_val(parts[1].strip()[1:-1].split(",")[0])
-        b, _ = _parse_units_val(parts[1].strip()[1:-1].split(",")[1])
+        cx, cy = _parse_pair_pix(parts[0])
+        a, b = _parse_two_pix_vals(parts[1])  # semi-axes in pix
         pa = _parse_angle(parts[2])
         xp, yp = _rotate_about(X, Y, cx, cy, -pa)
         return ((xp - cx) / a) ** 2 + ((yp - cy) / b) ** 2 <= 1.0 + 1e-9
     if shape == "poly":
-        pts = [_parse_pair(p) for p in parts]
+        pts = [_parse_pair_pix(p) for p in parts]
         return _point_in_poly(X, Y, pts)
     raise ValueError(f"Unsupported CRTF shape: {shape}")
 
@@ -390,11 +404,21 @@ def _smart_split_pairs(inner: str) -> List[str]:
         parts.append("".join(buf).strip())
     return parts
 
-def _parse_pair(pair_token: str) -> tuple[float, float]:
-    m = re.match(rf"^\s*\[\s*({_UNIT_NUM})\s*,\s*({_UNIT_NUM})\s*\]\s*$", pair_token)
-    if not m: raise ValueError(f"Invalid pair token: {pair_token!r}")
-    x, _ux = _parse_units_val(m.group(1)); y, _uy = _parse_units_val(m.group(2))
-    return float(x), float(y)
+def _parse_pair_pix(pair_token: str) -> Tuple[float, float]:
+    m = re.match(rf"^\s*{_PAIR_PIX}\s*$", pair_token)
+    if not m:
+        raise ValueError(_format_pix_pair_error(pair_token))
+    x = _parse_pix_val(m.group(1))
+    y = _parse_pix_val(m.group(2))
+    return x, y
+
+def _parse_two_pix_vals(token: str) -> Tuple[float, float]:
+    m = re.match(rf"^\s*\[\s*({_PIX_NUM})\s*,\s*({_PIX_NUM})\s*\]\s*$", token)
+    if not m:
+        raise ValueError(_format_pix_pair_error(token))
+    a = _parse_pix_val(m.group(1))
+    b = _parse_pix_val(m.group(2))
+    return a, b
 
 def _parse_angle(token: str) -> float:
     v, unit = _parse_units_val(token)
