@@ -21,6 +21,8 @@ CRTF (CASA Region Text Format) pixel support (new)
 * Autodetect CRTF when the string starts with ``#CRTF`` **or** begins with a shape
   token followed by ``[[`` (e.g., ``box[[...]]``). Pixel axes follow CASA convention
   (1-based, bottom-left).
+* You can also pass a CRTF file path either as a backticked string (`` `path/file.crtf` ``)
+  or a ``pathlib.Path``; the file contents are read and parsed.
 
 Notes
 -----
@@ -31,6 +33,8 @@ Notes
 from __future__ import annotations
 
 from typing import Mapping, Any, Union
+from pathlib import Path
+
 import math
 import ast
 import re
@@ -78,8 +82,16 @@ def select_mask(data: ArrayLike, select: Any | None = None, mask_source: Any | N
     if isinstance(select, (np.ndarray, xr.DataArray)):
         return _align_bool_mask_to_data(select, data)
 
-    # String: try CASA CRTF (pixel) first, then named-mask expressions
-    if isinstance(select, str):
+    # String/Path: backticked file or Path → load as CRTF; else treat as text.
+    if isinstance(select, (str, Path)):
+        s_file = _maybe_read_crtf_from_path(select)
+        if s_file is not None:
+            # If the user provided a file, it's CRTF by definition; parse directly.
+            m = _crtf_pixel_mask(data, s_file)
+            return _align_bool_mask_to_data(m, data)
+        # Otherwise, handle plain strings (CRTF text or named-mask expression)
+        if isinstance(select, Path):
+            raise FileNotFoundError(f"CRTF file not found: {select}")
         s = select.strip()
         if _looks_like_crtf_pixel(s):
             m = _crtf_pixel_mask(data, s)
@@ -87,11 +99,25 @@ def select_mask(data: ArrayLike, select: Any | None = None, mask_source: Any | N
         env = _build_mask_env(mask_source or (data if isinstance(data, xr.Dataset) else {}))
         expr_mask = _eval_mask_expr(s, env)
         return _align_bool_mask_to_data(expr_mask, data)
-
     raise TypeError(
-        "Unsupported select type. Expected None, boolean array-like, or expression string."
+        "Unsupported select type. Expected None, boolean array-like, expression/CRTF text, "
+        "or a backticked CRTF file string / pathlib.Path."
     )
 
+def _maybe_read_crtf_from_path(sel: Any) -> str | None:
+    """Return file contents if `sel` is a backticked string or a Path; else None."""
+    if isinstance(sel, Path):
+        return sel.read_text(encoding="utf-8") if sel.is_file() else None
+    if isinstance(sel, str):
+        s = sel.strip()
+        m = re.fullmatch(r"`([^`]+)`", s)
+        if not m:
+            return None
+        p = Path(m.group(1))
+        if not p.is_file():
+            raise FileNotFoundError(f"CRTF file not found: {p}")
+        return p.read_text(encoding="utf-8")
+    return None
 
 # ---------------------------- internal helpers -----------------------------
 
@@ -249,7 +275,8 @@ def _to_bool(arr: ArrayLike) -> ArrayLike:
 _SHAPES = {"box", "centerbox", "rotbox", "poly", "circle", "annulus", "ellipse"}
 
 def _looks_like_crtf_pixel(s: str) -> bool:
-    s = s.lstrip()
+    # Strip BOM + whitespace so files with UTF-8 BOM are handled.
+    s = s.lstrip("\ufeff \t\r\n")
     if s.startswith("#CRTF"):
         return True
     m = re.match(r"^([+-])?\s*([A-Za-z]+)\s*\[\[", s, flags=re.IGNORECASE)
