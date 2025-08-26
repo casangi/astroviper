@@ -19,8 +19,10 @@ CRTF (CASA Region Text Format) pixel support (new)
 * ``select`` may be a CRTF pixel string. Supported shapes: ``box``, ``centerbox``,
   ``rotbox``, ``circle``, ``ellipse``, ``poly``, ``annulus``.
 * Autodetect CRTF when the string starts with ``#CRTF`` **or** begins with a shape
-  token followed by ``[[`` (e.g., ``box[[...]]``). Pixel axes follow CASA convention
-  (1-based, bottom-left).
+  token followed by ``[[`` (e.g., ``box[[...]]``).
+* **Pixel coordinates are 0-based (NumPy/xarray index space)** and all pixel
+  quantities must be suffixed with ``pix`` (e.g., ``[0pix, 127pix]``).
+
 * You can also pass a CRTF file path either as a backticked string (`` `path/file.crtf` ``)
   or a ``pathlib.Path``; the file contents are read and parsed.
 
@@ -287,12 +289,11 @@ def _crtf_pixel_mask(data: ArrayLike, text: str) -> ArrayLike:
 
     Combination semantics per line: leading '+' (OR, default) or '-' (NOT/subtract).
     """
-
     ny, nx = (data.shape if not isinstance(data, xr.DataArray) else data.shape)
-    # CRTF 'pix' uses pixel *indices*. Always evaluate in pixel-index space (1..N),
+    # CRTF 'pix' uses pixel *indices*. Evaluate in 0-based index space (0..N-1),
     # independent of any world-coordinate arrays attached to `data`.
-    c = np.arange(nx, dtype=float) + 1.0  # x pixel centers: 1..nx
-    r = np.arange(ny, dtype=float) + 1.0  # y pixel centers: 1..ny
+    c = np.arange(nx, dtype=float)  # x indices: 0..nx-1
+    r = np.arange(ny, dtype=float)  # y indices: 0..ny-1
     X, Y = np.meshgrid(c, r)
 
     acc = np.zeros((ny, nx), dtype=bool)
