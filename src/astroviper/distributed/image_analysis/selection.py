@@ -1,4 +1,4 @@
-"""Generic selection layer for applications.
+"""Generic selection layer for applications + CASA region (pixel) support.
 
 Supported ``select`` forms (basic):
 - ``None`` → keep everything.
@@ -14,6 +14,14 @@ This module exposes two public helpers:
 
 The first returns a boolean mask aligned to ``data``; the second applies it.
 
+CRTF (CASA Region Text Format) pixel support (new)
+--------------------------------------------------
+* ``select`` may be a CRTF pixel string. Supported shapes: ``box``, ``centerbox``,
+  ``rotbox``, ``circle``, ``ellipse``, ``poly``, ``annulus``.
+* Autodetect CRTF when the string starts with ``#CRTF`` **or** begins with a shape
+  token followed by ``[[`` (e.g., ``box[[...]]``). Pixel axes follow CASA convention
+  (1-based, bottom-left).
+
 Notes
 -----
 * Masks treat ``NaN`` as ``False``.
@@ -23,13 +31,15 @@ Notes
 from __future__ import annotations
 
 from typing import Mapping, Any, Union
+import math
 import ast
+import re
 
 import numpy as np
 import xarray as xr
 
 ArrayLike = Union[np.ndarray, xr.DataArray]
-
+__all__ = ["select_mask", "apply_select"]
 
 def apply_select(data: ArrayLike, select: Any | None = None, mask_source: Any | None = None) -> ArrayLike:
     """Return ``data`` with ``select`` applied.
@@ -64,12 +74,18 @@ def select_mask(data: ArrayLike, select: Any | None = None, mask_source: Any | N
     if select is None:
         return _all_true_mask_like(data)
 
+    # Boolean array-like
     if isinstance(select, (np.ndarray, xr.DataArray)):
         return _align_bool_mask_to_data(select, data)
 
+    # String: try CASA CRTF (pixel) first, then named-mask expressions
     if isinstance(select, str):
+        s = select.strip()
+        if _looks_like_crtf_pixel(s):
+            m = _crtf_pixel_mask(data, s)
+            return _align_bool_mask_to_data(m, data)
         env = _build_mask_env(mask_source or (data if isinstance(data, xr.Dataset) else {}))
-        expr_mask = _eval_mask_expr(select, env)
+        expr_mask = _eval_mask_expr(s, env)
         return _align_bool_mask_to_data(expr_mask, data)
 
     raise TypeError(
@@ -156,19 +172,19 @@ def _is_boolish(obj: Any) -> bool:
 
 _ALLOWED_BIN_OPS = (ast.BitAnd, ast.BitOr, ast.BitXor)
 _ALLOWED_UNARY_OPS = (ast.Invert,)
-
 _ALLOWED_NODES = (
     ast.Expression,
     ast.BinOp,
     ast.UnaryOp,
     ast.Name,
     ast.Constant,   # allow literal True/False
-    ast.BoolOp,    # reject at runtime if it's 'and'/'or'
+    ast.BoolOp,     # reject at runtime if it's 'and'/'or'
     # Py3.12 walks operator/context nodes too:
-    ast.operator,  # BitAnd/BitOr/BitXor
-    ast.unaryop,   # Invert
-    ast.Load,      # Name context
+    ast.operator,   # BitAnd/BitOr/BitXor
+    ast.unaryop,    # Invert
+    ast.Load,       # Name context
 )
+
 
 def _eval_mask_expr(expr: str, env: Mapping[str, ArrayLike]) -> ArrayLike:
     """Safely evaluate a boolean mask expression using bitwise operators.
@@ -225,3 +241,154 @@ def _to_bool(arr: ArrayLike) -> ArrayLike:
     if np.issubdtype(arr_np.dtype, np.floating):
         arr_np = np.nan_to_num(arr_np, nan=0.0)
     return arr_np.astype(bool)
+
+# ---------------------------------------------------------------------------
+# CASA Region Text Format (CRTF) — pixel-only parser & rasterizer (new)
+# ---------------------------------------------------------------------------
+
+_SHAPES = {"box", "centerbox", "rotbox", "poly", "circle", "annulus", "ellipse"}
+
+def _looks_like_crtf_pixel(s: str) -> bool:
+    s = s.lstrip()
+    if s.startswith("#CRTF"):
+        return True
+    m = re.match(r"^([+-])?\s*([A-Za-z]+)\s*\[\[", s, flags=re.IGNORECASE)
+    return bool(m and m.group(2).lower() in _SHAPES)
+
+def _crtf_pixel_mask(data: ArrayLike, text: str) -> ArrayLike:
+    """Parse a CRTF pixel string (single or multi-line) into a boolean mask.
+
+    Combination semantics per line: leading '+' (OR, default) or '-' (NOT/subtract).
+    """
+
+    ny, nx = (data.shape if not isinstance(data, xr.DataArray) else data.shape)
+    # CRTF 'pix' uses pixel *indices*. Always evaluate in pixel-index space (1..N),
+    # independent of any world-coordinate arrays attached to `data`.
+    c = np.arange(nx, dtype=float) + 1.0  # x pixel centers: 1..nx
+    r = np.arange(ny, dtype=float) + 1.0  # y pixel centers: 1..ny
+    X, Y = np.meshgrid(c, r)
+
+    acc = np.zeros((ny, nx), dtype=bool)
+    lines = [ln.strip() for ln in re.split(r"[\n;]+", text) if ln.strip() and not ln.strip().startswith("#")]
+    for line in lines:
+        if line.lower().startswith("global"):
+            continue
+        flag = "+"
+        if line[0] in "+-":
+            flag, line = line[0], line[1:].lstrip()
+        shape, payload = _split_shape_payload(line)
+        mask = _rasterize_shape(shape, payload, X, Y)
+        if flag == "+":
+            acc |= mask
+        else:
+            acc &= ~mask
+
+    return xr.DataArray(acc, dims=getattr(data, "dims", ("y", "x"))) if isinstance(data, xr.DataArray) else acc
+
+def _split_shape_payload(line: str) -> tuple[str, str]:
+    m = re.match(r"^([A-Za-z]+)\s*(\[\[.*)$", line)
+    if not m:
+        raise ValueError(f"Invalid CRTF line: {line!r}")
+    return m.group(1).lower(), m.group(2)
+
+_NUM = r"[-+]?\d+(?:\.\d+)?"
+_UNIT_NUM = rf"{_NUM}(?:\s*(?:pix|deg|rad))?"
+_PAIR = rf"\[\s*({_UNIT_NUM})\s*,\s*({_UNIT_NUM})\s*\]"
+
+def _parse_units_val(tok: str) -> tuple[float, str | None]:
+    m = re.match(rf"^\s*({_NUM})\s*(pix|deg|rad)?\s*$", tok)
+    if not m:
+        raise ValueError(f"Invalid numeric token: {tok!r}")
+    val = float(m.group(1)); unit = m.group(2)
+    return val, unit
+
+def _strip_brackets(s: str) -> str:
+    if not (s.startswith("[[") and s.endswith("]")):
+        raise ValueError("CRTF payload must start with '[[ ... ]]'")
+    return s[1:-1]
+
+def _rasterize_shape(shape: str, payload: str, X: np.ndarray, Y: np.ndarray) -> np.ndarray:
+    inner = _strip_brackets(payload).strip()
+    parts = _smart_split_pairs(inner)
+    if shape == "box":
+        p1x, p1y = _parse_pair(parts[0]); p2x, p2y = _parse_pair(parts[1])
+        x1, x2 = sorted([p1x, p2x]); y1, y2 = sorted([p1y, p2y])
+        return (X >= x1) & (X <= x2) & (Y >= y1) & (Y <= y2)
+    if shape == "centerbox":
+        cx, cy = _parse_pair(parts[0]); w, h = _parse_pair(parts[1])
+        hx, hy = w / 2.0, h / 2.0
+        return (np.abs(X - cx) <= hx) & (np.abs(Y - cy) <= hy)
+    if shape == "rotbox":
+        cx, cy = _parse_pair(parts[0]); w, h = _parse_pair(parts[1]); ang = _parse_angle(parts[2])
+        hx, hy = w / 2.0, h / 2.0
+        xrp, yrp = _rotate_about(X, Y, cx, cy, -ang)
+        return (np.abs(xrp - cx) <= hx) & (np.abs(yrp - cy) <= hy)
+    if shape == "circle":
+        cx, cy = _parse_pair(parts[0]); r, _ = _parse_units_val(parts[1])
+        return ((X - cx) ** 2 + (Y - cy) ** 2) <= (r ** 2 + 1e-9)
+    if shape == "annulus":
+        cx, cy = _parse_pair(parts[0])
+        r1, _ = _parse_units_val(parts[1].strip()[1:-1].split(",")[0])
+        r2, _ = _parse_units_val(parts[1].strip()[1:-1].split(",")[1])
+        d2 = (X - cx) ** 2 + (Y - cy) ** 2
+        return (d2 >= r1 ** 2) & (d2 <= r2 ** 2)
+    if shape == "ellipse":
+        cx, cy = _parse_pair(parts[0])
+        a, _ = _parse_units_val(parts[1].strip()[1:-1].split(",")[0])
+        b, _ = _parse_units_val(parts[1].strip()[1:-1].split(",")[1])
+        pa = _parse_angle(parts[2])
+        xp, yp = _rotate_about(X, Y, cx, cy, -pa)
+        return ((xp - cx) / a) ** 2 + ((yp - cy) / b) ** 2 <= 1.0 + 1e-9
+    if shape == "poly":
+        pts = [_parse_pair(p) for p in parts]
+        return _point_in_poly(X, Y, pts)
+    raise ValueError(f"Unsupported CRTF shape: {shape}")
+
+def _smart_split_pairs(inner: str) -> List[str]:
+    parts: List[str] = []
+    buf: List[str] = []
+    depth = 0
+    for ch in inner:
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+        # split only on top-level commas that separate arguments
+        if ch == "," and depth == 0:
+            parts.append("".join(buf).strip())
+            buf = []
+            continue
+        buf.append(ch)
+    if buf:
+        parts.append("".join(buf).strip())
+    return parts
+
+def _parse_pair(pair_token: str) -> tuple[float, float]:
+    m = re.match(rf"^\s*\[\s*({_UNIT_NUM})\s*,\s*({_UNIT_NUM})\s*\]\s*$", pair_token)
+    if not m: raise ValueError(f"Invalid pair token: {pair_token!r}")
+    x, _ux = _parse_units_val(m.group(1)); y, _uy = _parse_units_val(m.group(2))
+    return float(x), float(y)
+
+def _parse_angle(token: str) -> float:
+    v, unit = _parse_units_val(token)
+    return float(v) if unit == "rad" else math.radians(float(v))
+
+def _rotate_about(X: np.ndarray, Y: np.ndarray, cx: float, cy: float, angle_rad: float) -> tuple[np.ndarray, np.ndarray]:
+    ca, sa = math.cos(angle_rad), math.sin(angle_rad)
+    x = X - cx; y = Y - cy
+    xr = x * ca - y * sa; yr = x * sa + y * ca
+    return xr + cx, yr + cy
+
+def _point_in_poly(X: np.ndarray, Y: np.ndarray, pts: list[tuple[float, float]]) -> np.ndarray:
+    # Ray casting algorithm, vectorized
+    x = X.ravel(); y = Y.ravel()
+    inside = np.zeros_like(x, dtype=bool)
+    xs = np.array([p[0] for p in pts]); ys = np.array([p[1] for p in pts])
+    n = len(pts); j = n - 1
+    for i in range(n):
+        xi, yi = xs[i], ys[i]; xj, yj = xs[j], ys[j]
+        cond = ((yi > y) != (yj > y))
+        xints = (xj - xi) * (y - yi) / (yj - yi + 1e-30) + xi
+        inside ^= cond & (x < xints)
+        j = i
+    return inside.reshape(X.shape)
