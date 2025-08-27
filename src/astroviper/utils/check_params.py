@@ -1,7 +1,7 @@
 import numpy as np
 
 
-def check_parms(
+def check_params(
     parm_dict,
     string_key,
     acceptable_data_types,
@@ -90,7 +90,7 @@ def check_parms(
                             )
                             return False
         elif dict in acceptable_data_types:
-            parms_passed = True
+            params_passed = True
 
             if default is None:
                 print(
@@ -103,14 +103,14 @@ def check_parms(
                     # print('1.*******')
                     # print(parm_dict[string_key], default_element, [type(default[default_element])], default[default_element])
                     if not (
-                        check_parms(
+                        check_params(
                             parm_dict[string_key],
                             default_element,
                             [type(default[default_element])],
                             default=default[default_element],
                         )
                     ):
-                        parms_passed = False
+                        params_passed = False
                     # print('2.*******')
                 else:
                     # print('parm_dict',default_element,string_key)
@@ -186,9 +186,9 @@ def _check_dataset(vis_dataset, data_variable_name):
     return True
 
 
-def check_sel_parms(
+def check_sel_params(
     xds,
-    sel_parms,
+    sel_params,
     new_or_modified_data_variables={},
     default_data_group_out=None,
     skip_data_group_in=False,
@@ -200,7 +200,7 @@ def check_sel_parms(
     ----------
     xds : xarray.core.dataset.Dataset
         Input vis.zarr multi dataset.
-    sel_parms : dictionary
+    sel_params : dictionary
     Returns
     -------
     psf_dataset : xarray.core.dataset.Dataset
@@ -208,38 +208,37 @@ def check_sel_parms(
 
     assert "data_groups" in xds.attrs, "No data_groups found in ms_xds."
 
-    if "overwrite" not in sel_parms:
-        sel_parms["overwrite"] = False
+    if "overwrite" not in sel_params:
+        sel_params["overwrite"] = False
         overwrite = False
     else:
-        overwrite = sel_parms["overwrite"]
+        overwrite = sel_params["overwrite"]
 
     if not skip_data_group_in:
-        if not ("data_group_in" in sel_parms):
+        if not ("data_group_in" in sel_params):
             data_group_in_name = "base"
-            sel_parms["data_group_in"] = {
+            sel_params["data_group_in"] = {
                 data_group_in_name: xds.attrs["data_groups"][data_group_in_name]
             }
 
-        if isinstance(sel_parms["data_group_in"], str):
-            data_group_in_name = sel_parms["data_group_in"]
+        if isinstance(sel_params["data_group_in"], str):
+            data_group_in_name = sel_params["data_group_in"]
 
             # print(data_group_in_name,xds.attrs["data_groups"])
-            sel_parms["data_group_in"] = {
-                sel_parms["data_group_in"]: xds.attrs["data_groups"][
-                    sel_parms["data_group_in"]
+            sel_params["data_group_in"] = {
+                sel_params["data_group_in"]: xds.attrs["data_groups"][
+                    sel_params["data_group_in"]
                 ]
             }
         else:
-            data_group_in_name = list(sel_parms["data_group_in"].keys())[0]
+            data_group_in_name = list(sel_params["data_group_in"].keys())[0]
 
         if data_group_in_name not in xds.attrs["data_groups"]:
-            xds.attrs["data_groups"][data_group_in_name] = sel_parms["data_group_in"][
+            xds.attrs["data_groups"][data_group_in_name] = sel_params["data_group_in"][
                 data_group_in_name
             ]
 
         data_group_in = xds.attrs["data_groups"][data_group_in_name]
-        data_group_in["data_group_in_name"] = data_group_in_name
     else:
         data_group_in = None
 
@@ -249,89 +248,108 @@ def check_sel_parms(
             default_data_group_out[default_data_group_out_name].keys()
         )
 
+        # print('************')
+        # print(sel_params["data_group_in"])
+        # print(data_group_in_name)
+        # print('1a',sel_params["data_group_in"][data_group_in_name])
+        # print('************')
+        # print(default_data_group_out_name)
+        # print('2a',default_data_group_out[default_data_group_out_name])
+        # print('************')
+        # print('3c',{
+        #     **sel_params["data_group_in"][data_group_in_name],
+        #     **default_data_group_out[default_data_group_out_name],
+        # })
+        # print('************')
+
         default_data_group_out[default_data_group_out_name] = {
-            **sel_parms["data_group_in"][data_group_in_name],
+            **sel_params["data_group_in"][data_group_in_name],
             **default_data_group_out[default_data_group_out_name],
         }
     else:
         default_data_group_out = None
 
     if not skip_data_group_out:
-        if not ("data_group_out_name" in sel_parms):
-            sel_parms["data_group_out"] = default_data_group_out
+        if not ("data_group_out_name" in sel_params):
+            sel_params["data_group_out"] = default_data_group_out
 
-        if isinstance(sel_parms["data_group_out"], str):
-            sel_parms["data_group_out"] = {
-                sel_parms["data_group_out"]: list(default_data_group_out.values)[0]
+        if isinstance(sel_params["data_group_out"], str):
+            sel_params["data_group_out"] = {
+                sel_params["data_group_out"]: list(default_data_group_out.values)[0]
             }
 
-        data_group_out_name = list(sel_parms["data_group_out"].keys())[0]
+        data_group_out_name = list(sel_params["data_group_out"].keys())[0]
 
         if not overwrite:
             for nm_dv in new_or_modified_data_variables:
                 assert (
-                    sel_parms["data_group_out"][data_group_out_name][nm_dv] not in xds
+                    sel_params["data_group_out"][data_group_out_name][nm_dv] not in xds
                 ), (
-                    sel_parms["data_group_out"][data_group_out_name][nm_dv]
+                    sel_params["data_group_out"][data_group_out_name][nm_dv]
                     + " already present in xds. Set overwrite to True if data variable should be overwritten."
                 )
 
             # assert data_group_out_name not in xds.attrs["data_groups"], "Data group " + data_group_out_name + " already in xds data_groups. Set overwrite to True if data group should be overwritten."
 
-        xds.attrs["data_groups"][data_group_out_name] = sel_parms["data_group_out"][
+        xds.attrs["data_groups"][data_group_out_name] = sel_params["data_group_out"][
             data_group_out_name
         ]
 
         data_group_out = xds.attrs["data_groups"][data_group_out_name]
-        data_group_out["data_group_name"] = data_group_out_name
     else:
         data_group_out = None
 
-    return data_group_in, data_group_out
+    # print('&&&&&&&&&&&&&&&&&&')
+    # print(xds)
+    # print('**%^%^%')
+    # print('1b',data_group_in, data_group_out)
+
+    # print('&&&&&&&&&&&&&&&&&&')
+    return data_group_in_name, data_group_in, data_group_out_name, data_group_out
 
 
-def _check_sub_sel_parms(sel_parms, select_defaults):
-    parms_passed = True
+def _check_sub_sel_params(sel_params, select_defaults):
+    params_passed = True
     for sel in select_defaults:
         if not (
-            check_parms(
-                sel_parms,
+            check_params(
+                sel_params,
                 sel,
                 [type(select_defaults[sel])],
                 default=select_defaults[sel],
             )
         ):
-            parms_passed = False
-    return parms_passed
+            params_passed = False
+    return params_passed
 
 
 """
-def _check_sel_parms(sel_parms,select_defaults):
-    parms_passed = True
+def _check_sel_params(sel_params,select_defaults):
+    params_passed = True
     for sel_def in select_defaults:
         if isinstance(select_defaults[sel_def], dict):
-            if sel_def in sel_parms:
+            if sel_def in sel_params:
                 for sub_sel_def in select_defaults[sel_def]:
                         #print(sub_sel_def,select_defaults[sel_def])
-                        #print(sel_parms[sel_def], sub_sel_def, select_defaults[sel_def][sub_sel_def])
-                        if not(check_parms(sel_parms[sel_def], sub_sel_def, [str], default=select_defaults[sel_def][sub_sel_def])): parms_passed = False
+                        #print(sel_params[sel_def], sub_sel_def, select_defaults[sel_def][sub_sel_def])
+                        if not(check_params(sel_params[sel_def], sub_sel_def, [str], default=select_defaults[sel_def][sub_sel_def])): params_passed = False
             else:
-                sel_parms[sel_def] = select_defaults[sel_def]
+                sel_params[sel_def] = select_defaults[sel_def]
                 print ('Setting default', string_key, ' to ', parm_dict[string_key])
         else:
-            if not(check_parms(sel_parms, sel_def, [str], default=select_defaults[sel_def])): parms_passed = False
-    return parms_passed
+            if not(check_params(sel_params, sel_def, [str], default=select_defaults[sel_def])): params_passed = False
+    return params_passed
 """
 
 
-def _check_existence_sel_parms(dataset, sel_parms):
-    parms_passed = True
-    for sel in sel_parms:
-        if isinstance(sel_parms[sel], dict):
+def _check_existence_sel_params(dataset, sel_params):
+    params_passed = True
+    for sel in sel_params:
+        if isinstance(sel_params[sel], dict):
             if sel != "properties":
-                _check_existence_sel_parms(dataset, sel_parms[sel])
+                _check_existence_sel_params(dataset, sel_params[sel])
         else:
             if (sel != "id") and (sel != "properties"):
-                if not (_check_dataset(dataset, sel_parms[sel])):
-                    parms_passed = False
-    return parms_passed
+                if not (_check_dataset(dataset, sel_params[sel])):
+                    params_passed = False
+    return params_passed
