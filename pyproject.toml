@@ -1,6 +1,6 @@
 [project]
 name = "astroviper"
-version = "0.0.18"
+version = "0.0.20"
 description = "Astro Visibility and Image Parallel Execution Reduction"
 authors = [
     {name = "Jan-Willem Steeb", email="jsteeb@nrao.edu"},
@@ -22,6 +22,7 @@ build-backend = "scikit_build_core.build"
 dependencies = [
     'graphviper>=0.0.34',
     'numpy>=1.20.0',
+    'xradio>=0.0.58'
 ]
 
 [project.optional-dependencies]
@@ -74,7 +75,6 @@ all = [
     'pandoc'
 ]
 
-
 [tool.scikit-build]
 build-dir = "build/{wheel_tag}"
 wheel.packages = ["src/astroviper"]
@@ -87,3 +87,11 @@ verbose = false
 
 [tool.scikit-build.cmake.define]
 PYBIND11_FINDPYTHON = "ON"
+# ---------------------------------------------------------------------------
+# The following section is REQUIRED because this project uses a "src/" layout.
+# By default, setuptools searches for packages in the current directory ("."),
+# but all our Python packages live under "src/" (e.g., src/astroviper).
+# Without this, setuptools will not include astroviper.* in the built wheel/sdist.
+# ---------------------------------------------------------------------------
+[tool.setuptools.packages.find]
+where = ["src"]
