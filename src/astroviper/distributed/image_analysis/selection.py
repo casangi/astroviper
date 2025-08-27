@@ -34,8 +34,9 @@ Notes
 """
 from __future__ import annotations
 
-from typing import Mapping, Any, Union
+from typing import Mapping, Any, Union, Literal, Optional, Tuple
 from pathlib import Path
+import dask.array as da
 
 import math
 import ast
@@ -53,6 +54,18 @@ def apply_select(data: ArrayLike, select: Any | None = None, mask_source: Any | 
     ``data`` must be a ``numpy.ndarray`` or ``xarray.DataArray``.
     For ``xarray.DataArray``, the mask is broadcast/aligned by dimension names.
     For ``numpy.ndarray``, the mask must be broadcastable by shape.
+
+    Parameters
+    ----------
+    return_kind
+        Desired output type:
+        - ``"numpy"`` → ``np.ndarray`` (bool)
+        - ``"dask"`` → ``dask.array.Array`` (bool)
+        - ``"dataarray-numpy"`` → ``xr.DataArray`` backed by NumPy
+        - ``"dataarray-dask"`` (default) → ``xr.DataArray`` backed by Dask
+    dask_chunks
+        Optional chunk spec when constructing dask arrays. If omitted, try to
+        mirror ``data.chunks`` when available, else use sensible defaults.
     """
     mask = select_mask(data, select=select, mask_source=mask_source)
     if isinstance(data, xr.DataArray):
@@ -60,7 +73,16 @@ def apply_select(data: ArrayLike, select: Any | None = None, mask_source: Any | 
     return np.where(np.asarray(mask, dtype=bool), data, np.nan)
 
 
-def select_mask(data: ArrayLike, select: Any | None = None, mask_source: Any | None = None) -> ArrayLike:
+ReturnKind = Literal["numpy", "dask", "dataarray-numpy", "dataarray-dask"]
+
+def select_mask(
+    data: ArrayLike,
+    select: Any | None = None,
+    mask_source: Any | None = None,
+    *,
+    return_kind: ReturnKind = "dataarray-dask",
+    dask_chunks: Optional[Tuple[int, ...]] = None,
+) -> ArrayLike:
     """Build a boolean mask aligned to ``data`` from ``select``.
 
     Parameters
@@ -80,27 +102,32 @@ def select_mask(data: ArrayLike, select: Any | None = None, mask_source: Any | N
     if select is None:
         return _all_true_mask_like(data)
 
-    # Boolean array-like
+    # Boolean/array-like (NumPy or xarray) → align then coerce
     if isinstance(select, (np.ndarray, xr.DataArray)):
-        return _align_bool_mask_to_data(select, data)
+        aligned = _align_bool_mask_to_data(select, data)
+        return _coerce_return_kind(aligned, data, return_kind, dask_chunks)
 
     # String/Path: backticked file or Path → load as CRTF; else treat as text.
     if isinstance(select, (str, Path)):
         s_file = _maybe_read_crtf_from_path(select)
         if s_file is not None:
             # If the user provided a file, it's CRTF by definition; parse directly.
-            m = _crtf_pixel_mask(data, s_file)
-            return _align_bool_mask_to_data(m, data)
+            m = _crtf_pixel_mask(data, s_file, lazy=_want_dask(return_kind))
+            aligned = _align_bool_mask_to_data(m, data)
+            return _coerce_return_kind(aligned, data, return_kind, dask_chunks)
+
         # Otherwise, handle plain strings (CRTF text or named-mask expression)
         if isinstance(select, Path):
             raise FileNotFoundError(f"CRTF file not found: {select}")
         s = select.strip()
         if _looks_like_crtf_pixel(s):
-            m = _crtf_pixel_mask(data, s)
-            return _align_bool_mask_to_data(m, data)
+            m = _crtf_pixel_mask(data, s, lazy=_want_dask(return_kind))
+            aligned = _align_bool_mask_to_data(m, data)
+            return _coerce_return_kind(aligned, data, return_kind, dask_chunks)
         env = _build_mask_env(mask_source or (data if isinstance(data, xr.Dataset) else {}))
         expr_mask = _eval_mask_expr(s, env)
-        return _align_bool_mask_to_data(expr_mask, data)
+        aligned = _align_bool_mask_to_data(expr_mask, data)
+        return _coerce_return_kind(aligned, data, return_kind, dask_chunks)
     raise TypeError(
         "Unsupported select type. Expected None, boolean array-like, expression/CRTF text, "
         "or a backticked CRTF file string / pathlib.Path."
@@ -119,7 +146,7 @@ def _maybe_read_crtf_from_path(sel: Any) -> str | None:
         if not p.is_file():
             raise FileNotFoundError(f"CRTF file not found: {p}")
         return p.read_text(encoding="utf-8")
-    return None
+    return None # pragma: no cover
 
 # ---------------------------- internal helpers -----------------------------
 
@@ -284,19 +311,23 @@ def _looks_like_crtf_pixel(s: str) -> bool:
     m = re.match(r"^([+-])?\s*([A-Za-z]+)\s*\[\[", s, flags=re.IGNORECASE)
     return bool(m and m.group(2).lower() in _SHAPES)
 
-def _crtf_pixel_mask(data: ArrayLike, text: str) -> ArrayLike:
+def _crtf_pixel_mask(data: ArrayLike, text: str, *, lazy: bool = False) -> ArrayLike:
     """Parse a CRTF pixel string (single or multi-line) into a boolean mask.
 
     Combination semantics per line: leading '+' (OR, default) or '-' (NOT/subtract).
     """
     ny, nx = (data.shape if not isinstance(data, xr.DataArray) else data.shape)
-    # CRTF 'pix' uses pixel *indices*. Evaluate in 0-based index space (0..N-1),
-    # independent of any world-coordinate arrays attached to `data`.
-    c = np.arange(nx, dtype=float)  # x indices: 0..nx-1
-    r = np.arange(ny, dtype=float)  # y indices: 0..ny-1
-    X, Y = np.meshgrid(c, r)
+    # Build index grids in either NumPy (eager) or Dask (lazy) for efficient masking
+    if lazy:
+        cx = da.arange(nx, dtype=float)
+        ry = da.arange(ny, dtype=float)
+        X, Y = da.meshgrid(cx, ry, indexing="xy")
+    else:
+        c = np.arange(nx, dtype=float)
+        r = np.arange(ny, dtype=float)
+        X, Y = np.meshgrid(c, r)
 
-    acc = np.zeros((ny, nx), dtype=bool)
+    acc = da.zeros((ny, nx), dtype=bool) if lazy else np.zeros((ny, nx), dtype=bool)
     lines = [ln.strip() for ln in re.split(r"[\n;]+", text) if ln.strip() and not ln.strip().startswith("#")]
     for line in lines:
         if line.lower().startswith("global"):
@@ -307,11 +338,11 @@ def _crtf_pixel_mask(data: ArrayLike, text: str) -> ArrayLike:
         shape, payload = _split_shape_payload(line)
         mask = _rasterize_shape(shape, payload, X, Y)
         if flag == "+":
-            acc |= mask
+            acc = acc | mask
         else:
-            acc &= ~mask
-
+            acc = acc & (~mask)
     return xr.DataArray(acc, dims=getattr(data, "dims", ("y", "x"))) if isinstance(data, xr.DataArray) else acc
+
 
 def _split_shape_payload(line: str) -> tuple[str, str]:
     m = re.match(r"^([A-Za-z]+)\s*(\[\[.*)$", line)
@@ -351,7 +382,12 @@ def _strip_brackets(s: str) -> str:
         raise ValueError("CRTF payload must start with '[[ ... ]]'")
     return s[1:-1]
 
-def _rasterize_shape(shape: str, payload: str, X: np.ndarray, Y: np.ndarray) -> np.ndarray:
+def _rasterize_shape(
+    shape: str,
+    payload: str,
+    X: np.ndarray | da.Array,
+    Y: np.ndarray | da.Array,
+) -> np.ndarray | da.Array:
     inner = _strip_brackets(payload).strip()
     parts = _smart_split_pairs(inner)
     if shape == "box":
@@ -431,16 +467,114 @@ def _rotate_about(X: np.ndarray, Y: np.ndarray, cx: float, cy: float, angle_rad:
     xr = x * ca - y * sa; yr = x * sa + y * ca
     return xr + cx, yr + cy
 
-def _point_in_poly(X: np.ndarray, Y: np.ndarray, pts: list[tuple[float, float]]) -> np.ndarray:
+def _point_in_poly(
+    X: np.ndarray | da.Array,
+    Y: np.ndarray | da.Array,
+    pts: list[tuple[float, float]],
+) -> np.ndarray | da.Array:
     # Ray casting algorithm, vectorized
     x = X.ravel(); y = Y.ravel()
-    inside = np.zeros_like(x, dtype=bool)
+    inside = da.zeros_like(x, dtype=bool) if hasattr(x, "chunks") else np.zeros_like(x, dtype=bool)
     xs = np.array([p[0] for p in pts]); ys = np.array([p[1] for p in pts])
     n = len(pts); j = n - 1
     for i in range(n):
         xi, yi = xs[i], ys[i]; xj, yj = xs[j], ys[j]
         cond = ((yi > y) != (yj > y))
         xints = (xj - xi) * (y - yi) / (yj - yi + 1e-30) + xi
-        inside ^= cond & (x < xints)
+        inside = inside ^ (cond & (x < xints))
         j = i
     return inside.reshape(X.shape)
+
+def _want_dask(return_kind: ReturnKind) -> bool:
+    return return_kind in ("dask", "dataarray-dask")
+
+def _coerce_return_kind(
+    mask: ArrayLike,
+    data: ArrayLike,
+    return_kind: ReturnKind,
+    dask_chunks: Optional[Tuple[int, ...]],
+) -> ArrayLike:
+    """Convert aligned mask to the requested return kind efficiently."""
+    # numpy ndarray of bool
+    if return_kind == "numpy":
+        if isinstance(mask, xr.DataArray):
+            arr = mask.data
+            if getattr(arr, "__module__", "").startswith("dask"):
+                return arr.astype(bool).compute()
+            return np.asarray(mask.values, dtype=bool)
+        if getattr(mask, "__module__", "").startswith("dask"):
+            return mask.astype(bool).compute()  # type: ignore[return-value]
+        return np.asarray(mask, dtype=bool)
+
+    # dask array of bool
+    if return_kind == "dask":
+        if isinstance(mask, xr.DataArray):
+            arr = mask.data
+            if getattr(arr, "__module__", "").startswith("dask"):
+                return arr.astype(bool)
+            chunks = _infer_chunks_like(data, arr.shape, dask_chunks)
+            return da.from_array(np.asarray(arr, dtype=bool), chunks=chunks)
+        chunks = _infer_chunks_like(data, np.shape(mask), dask_chunks)
+        return da.from_array(np.asarray(mask, dtype=bool), chunks=chunks)
+
+    # xr.DataArray backed by NumPy
+    if return_kind == "dataarray-numpy":
+        if isinstance(mask, xr.DataArray):
+            arr = mask.data
+            if getattr(arr, "__module__", "").startswith("dask"):
+                arr = arr.astype(bool).compute()
+            return xr.DataArray(
+                np.asarray(arr, dtype=bool),
+                dims=getattr(mask, "dims", getattr(data, "dims", ("y", "x"))),
+                coords=getattr(mask, "coords", getattr(data, "coords", None)),
+            )
+        if getattr(mask, "__module__", "").startswith("dask"):
+            arr = mask.astype(bool).compute()
+        else:
+            arr = np.asarray(mask, dtype=bool)
+        dims = getattr(data, "dims", ("y", "x")) if isinstance(data, xr.DataArray) else ("y", "x")
+        coords = getattr(data, "coords", None) if isinstance(data, xr.DataArray) else None
+        return xr.DataArray(arr, dims=dims, coords=coords)
+
+    # xr.DataArray backed by Dask (default)
+    if isinstance(mask, xr.DataArray):
+        arr = mask.data
+        if getattr(arr, "__module__", "").startswith("dask"):
+            return mask.astype(bool)
+        chunks = _infer_chunks_like(data, mask.shape, dask_chunks)
+        darr = da.from_array(np.asarray(arr, dtype=bool), chunks=chunks)
+        return xr.DataArray(darr, dims=mask.dims, coords=mask.coords)
+    # ndarray/dask → dask-backed DataArray
+    if getattr(mask, "__module__", "").startswith("dask"):
+        darr = mask.astype(bool)  # type: ignore[assignment]
+    else:
+        chunks = _infer_chunks_like(data, np.shape(mask), dask_chunks)
+        darr = da.from_array(np.asarray(mask, dtype=bool), chunks=chunks)
+    dims = getattr(data, "dims", ("y", "x")) if isinstance(data, xr.DataArray) else ("y", "x")
+    coords = getattr(data, "coords", None) if isinstance(data, xr.DataArray) else None
+    return xr.DataArray(darr, dims=dims, coords=coords)
+
+def _infer_chunks_like(data: Any, shape: Tuple[int, ...], dask_chunks: Optional[Tuple[int, ...]]) -> Tuple[int, ...]:
+    if dask_chunks is not None:
+        return dask_chunks
+    # try to mirror data's chunking
+    if isinstance(data, xr.DataArray) and hasattr(data.data, "chunks"):
+        try:
+            ch = tuple(int(c) for c in (sum(tuple((t if isinstance(t, tuple) else (t,)) for t in data.data.chunks), ())))
+            if len(ch) == len(shape):
+                return ch
+        except Exception:
+            pass
+    if hasattr(data, "chunks"):
+        try:
+            ch = tuple(int(c) for c in (sum(tuple((t if isinstance(t, tuple) else (t,)) for t in data.chunks), ())))
+            if len(ch) == len(shape):
+                return ch
+        except Exception:
+            pass
+    # fallback heuristic: ~256k elements per chunk (2D only); else full shape
+    if len(shape) == 2:
+        ny, nx = shape
+        tgt = max(1, int(256_000 // max(1, nx)))
+        return (min(ny, tgt), nx)
+    return shape
