@@ -309,7 +309,7 @@ py::dict hclean_simple_impl(
     );
 }
 
-PYBIND11_MODULE(hogbom_deconvolve, m) {
+PYBIND11_MODULE(_hogbom_ext, m) {
     m.doc() = "Templated Hogbom CLEAN algorithm - supports both float32 and float64";
     
     // Float32 versions
