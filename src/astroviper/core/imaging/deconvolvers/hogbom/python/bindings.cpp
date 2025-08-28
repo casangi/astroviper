@@ -236,7 +236,7 @@ py::dict hclean_impl(
     
     // Run CLEAN algorithm (always with float backend)
     int final_iter = start_iter;
-    hclean::hclean(
+    hclean::clean(
         static_cast<float*>(model_info.ptr),           // model image output
         static_cast<float*>(dirty_copy_info.ptr),      // dirty/residual (copy)
         static_cast<const float*>(psf_float.request().ptr), // PSF
@@ -317,7 +317,7 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           "Find minimum and maximum values in 3D image (float32)",
           py::arg("image"), py::arg("mask") = py::array_t<float>());
     
-    m.def("hclean", &hclean_impl<float>,
+    m.def("clean", &hclean_impl<float>,
           "Hogbom CLEAN algorithm (float32)",
           py::arg("dirty_image"),
           py::arg("psf"),
@@ -331,7 +331,7 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           py::arg("progress_callback") = py::none(),
           py::arg("stop_callback") = py::none());
     
-    m.def("clean", &hclean_simple_impl<float>,
+    m.def("clean_nc", &hclean_simple_impl<float>,
           "Simple Hogbom CLEAN interface (float32)",
           py::arg("dirty_image"),
           py::arg("psf"),
@@ -345,7 +345,7 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           "Find minimum and maximum values in 3D image (float64)",
           py::arg("image"), py::arg("mask") = py::array_t<double>());
     
-    m.def("hclean", &hclean_impl<double>,
+    m.def("clean", &hclean_impl<double>,
           "Hogbom CLEAN algorithm (float64)",
           py::arg("dirty_image"),
           py::arg("psf"),
@@ -359,7 +359,7 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           py::arg("progress_callback") = py::none(),
           py::arg("stop_callback") = py::none());
     
-    m.def("clean", &hclean_simple_impl<double>,
+    m.def("clean_nc", &hclean_simple_impl<double>,
           "Simple Hogbom CLEAN interface (float64)",
           py::arg("dirty_image"),
           py::arg("psf"),
