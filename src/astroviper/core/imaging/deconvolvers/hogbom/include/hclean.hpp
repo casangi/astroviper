@@ -5,7 +5,7 @@
 namespace hclean {
 
 /**
- * Find minimum and maximum values in a 3D image array
+ * Templated function to find minimum and maximum values in a 3D image array
  * 
  * @param limagestep 3D array [pol][ny][nx] input dirty image
  * @param domask flag indicating if mask is present (0 = no mask)
@@ -16,11 +16,12 @@ namespace hclean {
  * @param fmin output minimum value found
  * @param fmax output maximum value found
  */
-void maximg(const float* limagestep, int domask, const float* lmask, 
-           int nx, int ny, int npol, float& fmin, float& fmax);
+template<typename T>
+void maximg(const T* limagestep, int domask, const T* lmask, 
+           int nx, int ny, int npol, T& fmin, T& fmax);
 
 /**
- * Hogbom CLEAN algorithm implementation
+ * Templated Hogbom CLEAN algorithm implementation
  *
  * @param limage 3D output model image (clean components) [pol][ny][nx]
  * @param limagestep 3D input dirty image / output residual [pol][ny][nx]
@@ -43,12 +44,36 @@ void maximg(const float* limagestep, int domask, const float* lmask,
  * @param msgput callback function for status messages
  * @param stopnow callback function to check if stopping is requested
  */
-void clean(float* limage, float* limagestep, const float* lpsf,
-           int domask, const float* lmask, int nx, int ny, int npol,
+template<typename T>
+void clean(T* limage, T* limagestep, const T* lpsf,
+           int domask, const T* lmask, int nx, int ny, int npol,
            int xbeg, int xend, int ybeg, int yend,
-           int niter, int siter, int& iter, float gain, float thres,
-           float cspeedup,
-           std::function<void(int, int, int, int, int, float)> msgput,
+           int niter, int siter, int& iter, T gain, T thres,
+           T cspeedup,
+           std::function<void(int, int, int, int, int, T)> msgput,
            std::function<void(int&)> stopnow);
+
+// Explicit template instantiation declarations
+extern template void maximg<float>(const float* limagestep, int domask, const float* lmask, 
+                                  int nx, int ny, int npol, float& fmin, float& fmax);
+
+extern template void maximg<double>(const double* limagestep, int domask, const double* lmask, 
+                                   int nx, int ny, int npol, double& fmin, double& fmax);
+
+extern template void clean<float>(float* limage, float* limagestep, const float* lpsf,
+                                 int domask, const float* lmask, int nx, int ny, int npol,
+                                 int xbeg, int xend, int ybeg, int yend,
+                                 int niter, int siter, int& iter, float gain, float thres,
+                                 float cspeedup,
+                                 std::function<void(int, int, int, int, int, float)> msgput,
+                                 std::function<void(int&)> stopnow);
+
+extern template void clean<double>(double* limage, double* limagestep, const double* lpsf,
+                                  int domask, const double* lmask, int nx, int ny, int npol,
+                                  int xbeg, int xend, int ybeg, int yend,
+                                  int niter, int siter, int& iter, double gain, double thres,
+                                  double cspeedup,
+                                  std::function<void(int, int, int, int, int, double)> msgput,
+                                  std::function<void(int&)> stopnow);
 
 } // namespace hclean

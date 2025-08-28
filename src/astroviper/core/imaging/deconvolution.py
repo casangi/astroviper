@@ -94,7 +94,7 @@ def hogbom_clean(dirty_image_xds, psf_xds, deconv_params, output_dir='.'):
             logger.debug(f"PSF shape: {psf_slice.shape}")
 
             # Find initial peak in dirty image
-            fmin, fmax = maximg(dirty_slice)
+            fmin, fmax = hogbom.maximg(dirty_slice)
             initial_peak = max(abs(fmin), abs(fmax))
             logger.debug(f"Initial peak flux: {initial_peak:.6f}")
             
