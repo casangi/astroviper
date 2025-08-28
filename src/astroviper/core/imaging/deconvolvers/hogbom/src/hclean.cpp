@@ -25,6 +25,7 @@
  *                        Charlottesville, VA 22903-2475 USA
  *
  * Converted from Fortran to C++ for modern usage
+ * Templated version to support both float and double precision
  */
 
 #include "../include/hclean.hpp"
@@ -32,34 +33,43 @@
 #include <algorithm>
 #include <limits>
 #include <functional>
+#include <type_traits>
 
 namespace hclean {
 
 /**
- * Find minimum and maximum values in a 3D image array
+ * Templated function to find minimum and maximum values in a 3D image array
  * 
- * @param limagestep 3D array [nx][ny][npol] input dirty image
+ * @param limagestep 3D array [pol][ny][nx] input dirty image
  * @param domask flag indicating if mask is present (0 = no mask)
- * @param lmask 2D mask array [nx][ny] (used if domask != 0)
+ * @param lmask 2D mask array [ny][nx] (used if domask != 0)
  * @param nx width of images
  * @param ny height of images  
  * @param npol number of polarizations
  * @param fmin output minimum value found
  * @param fmax output maximum value found
  */
-void maximg(const float* limagestep, int domask, const float* lmask, 
-           int nx, int ny, int npol, float& fmin, float& fmax) {
+template<typename T>
+void maximg(const T* limagestep, int domask, const T* lmask, 
+           int nx, int ny, int npol, T& fmin, T& fmax) {
     
-    fmin = 1e20f;
-    fmax = -1e20f;
+    // Use appropriate large values for each type
+    if constexpr (std::is_same_v<T, float>) {
+        fmin = 1e20f;
+        fmax = -1e20f;
+    } else {
+        fmin = 1e20;
+        fmax = -1e20;
+    }
     
     for (int pol = 0; pol < npol; ++pol) {
         for (int iy = 0; iy < ny; ++iy) {
             for (int ix = 0; ix < nx; ++ix) {
                 // Check mask condition
-                if ((domask == 0) || (lmask[iy * nx + ix] > 0.5f)) {
+                T mask_threshold = static_cast<T>(0.5);
+                if ((domask == 0) || (lmask[iy * nx + ix] > mask_threshold)) {
                     // Access 3D array: limagestep[pol][iy][ix] in Fortran becomes:
-                    float wpeak = limagestep[pol * ny * nx + iy * nx + ix];
+                    T wpeak = limagestep[pol * ny * nx + iy * nx + ix];
                     
                     if (wpeak > fmax) {
                         fmax = wpeak;
@@ -74,13 +84,13 @@ void maximg(const float* limagestep, int domask, const float* lmask,
 }
 
 /**
- * Hogbom CLEAN algorithm implementation
+ * Templated Hogbom CLEAN algorithm implementation
  *
- * @param limage 3D output model image (clean components) [nx][ny][npol]
- * @param limagestep 3D input dirty image / output residual [nx][ny][npol]
- * @param lpsf 2D point spread function [nx][ny]
+ * @param limage 3D output model image (clean components) [pol][ny][nx]
+ * @param limagestep 3D input dirty image / output residual [pol][ny][nx]
+ * @param lpsf 2D point spread function [ny][nx]
  * @param domask flag indicating if mask is present (0 = no mask)
- * @param lmask 2D input mask image [nx][ny]
+ * @param lmask 2D input mask image [ny][nx]
  * @param nx width of images
  * @param ny height of images
  * @param npol number of polarizations
@@ -97,12 +107,13 @@ void maximg(const float* limagestep, int domask, const float* lmask,
  * @param msgput callback function for status messages
  * @param stopnow callback function to check if stopping is requested
  */
-void clean(float* limage, float* limagestep, const float* lpsf,
-           int domask, const float* lmask, int nx, int ny, int npol,
+template<typename T>
+void clean(T* limage, T* limagestep, const T* lpsf,
+           int domask, const T* lmask, int nx, int ny, int npol,
            int xbeg, int xend, int ybeg, int yend,
-           int niter, int siter, int& iter, float gain, float thres,
-           float cspeedup,
-           std::function<void(int, int, int, int, int, float)> msgput,
+           int niter, int siter, int& iter, T gain, T thres,
+           T cspeedup,
+           std::function<void(int, int, int, int, int, T)> msgput,
            std::function<void(int&)> stopnow) {
     
     int maxiter = siter;
@@ -112,7 +123,7 @@ void clean(float* limage, float* limagestep, const float* lpsf,
     for (int pol = 0; pol < npol; ++pol) {
         
         // Find peak in current polarization within clean box
-        float maxval = 0.0f;
+        T maxval = static_cast<T>(0);
         int px = 0;  // Convert from Fortran 1-based to 0-based
         int py = 0;
 
@@ -121,8 +132,9 @@ void clean(float* limage, float* limagestep, const float* lpsf,
             for (int iy = ybeg; iy < yend; ++iy) {
                 for (int ix = xbeg; ix < xend; ++ix) {
                     // Check mask condition
-                    if ((domask == 0) || (lmask[iy * nx + ix] > 0.5f)) {
-                        float val = std::abs(limagestep[pol * ny * nx + iy * nx + ix]);
+                    T mask_threshold = static_cast<T>(0.5);
+                    if ((domask == 0) || (lmask[iy * nx + ix] > mask_threshold)) {
+                        T val = std::abs(limagestep[pol * ny * nx + iy * nx + ix]);
                         if (val > maxval) {
                             px = ix;
                             py = iy;  
@@ -136,9 +148,11 @@ void clean(float* limage, float* limagestep, const float* lpsf,
             maxval = limagestep[pol * ny * nx + py * nx + px];
             
             // Calculate adaptive threshold if requested
-            float cthres;
-            if (cspeedup > 0.0f) {
-                cthres = thres * std::pow(2.0f, static_cast<float>(iter - siter) / cspeedup);
+            T cthres;
+            T zero_val = static_cast<T>(0);
+            T two_val = static_cast<T>(2);
+            if (cspeedup > zero_val) {
+                cthres = thres * std::pow(two_val, static_cast<T>(iter - siter) / cspeedup);
             } else {
                 cthres = thres;
             }
@@ -167,7 +181,7 @@ void clean(float* limage, float* limagestep, const float* lpsf,
             int y2 = std::min(ny - 1, py + ny / 2 - 1);
             
             // Add component to model and subtract from residual
-            float pv = gain * maxval;
+            T pv = gain * maxval;
             limage[pol * ny * nx + py * nx + px] += pv;
             
             // Subtract scaled PSF from residual
@@ -200,4 +214,27 @@ void clean(float* limage, float* limagestep, const float* lpsf,
     }
 }
 
-} // namespace hclean_fortran
+// Explicit template instantiations for float and double
+template void maximg<float>(const float* limagestep, int domask, const float* lmask, 
+                           int nx, int ny, int npol, float& fmin, float& fmax);
+
+template void maximg<double>(const double* limagestep, int domask, const double* lmask, 
+                            int nx, int ny, int npol, double& fmin, double& fmax);
+
+template void clean<float>(float* limage, float* limagestep, const float* lpsf,
+                          int domask, const float* lmask, int nx, int ny, int npol,
+                          int xbeg, int xend, int ybeg, int yend,
+                          int niter, int siter, int& iter, float gain, float thres,
+                          float cspeedup,
+                          std::function<void(int, int, int, int, int, float)> msgput,
+                          std::function<void(int&)> stopnow);
+
+template void clean<double>(double* limage, double* limagestep, const double* lpsf,
+                           int domask, const double* lmask, int nx, int ny, int npol,
+                           int xbeg, int xend, int ybeg, int yend,
+                           int niter, int siter, int& iter, double gain, double thres,
+                           double cspeedup,
+                           std::function<void(int, int, int, int, int, double)> msgput,
+                           std::function<void(int&)> stopnow);
+
+} // namespace hclean
