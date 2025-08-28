@@ -97,7 +97,7 @@ void maximg(const float* limagestep, int domask, const float* lmask,
  * @param msgput callback function for status messages
  * @param stopnow callback function to check if stopping is requested
  */
-void hclean(float* limage, float* limagestep, const float* lpsf,
+void clean(float* limage, float* limagestep, const float* lpsf,
            int domask, const float* lmask, int nx, int ny, int npol,
            int xbeg, int xend, int ybeg, int yend,
            int niter, int siter, int& iter, float gain, float thres,

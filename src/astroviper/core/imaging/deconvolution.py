@@ -1,7 +1,7 @@
 import numpy as np
 import xarray as xr
 from xradio.image import load_image, write_image, make_empty_sky_image
-from astroviper.imaging.deconvolver.hogbom import hclean
+from astroviper.imaging.deconvolver import hogbom
 
 import toolviper.utils.logger as logger
 
@@ -101,7 +101,7 @@ def hogbom_clean(dirty_image_xds, psf_xds, deconv_params, output_dir='.'):
 
             # Run CLEAN with full interface (including callbacks)
             logger.info("\nRunning Hogbom CLEAN algorithm...")
-            results = hclean(
+            results = hogbom.clean(
                 dirty_image=dirty_slice,
                 psf=psf_slice,
                 gain=deconv_params["gain"],
