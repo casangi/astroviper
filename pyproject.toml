@@ -1,6 +1,6 @@
 [project]
 name = "astroviper"
-version = "0.0.19"
+version = "0.0.20"
 description = "Astro Visibility and Image Parallel Execution Reduction"
 authors = [
     {name = "Jan-Willem Steeb", email="jsteeb@nrao.edu"},
@@ -63,3 +63,12 @@ all = [
     'twine',
     'pandoc'
 ]
+
+# ---------------------------------------------------------------------------
+# The following section is REQUIRED because this project uses a "src/" layout.
+# By default, setuptools searches for packages in the current directory ("."),
+# but all our Python packages live under "src/" (e.g., src/astroviper).
+# Without this, setuptools will not include astroviper.* in the built wheel/sdist.
+# ---------------------------------------------------------------------------
+[tool.setuptools.packages.find]
+where = ["src"]
