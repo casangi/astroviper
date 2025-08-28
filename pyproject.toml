@@ -9,9 +9,20 @@ license = {file = "LICENSE.txt"}
 readme = "README.md"
 requires-python = ">= 3.11, < 3.14"
 
+[build-system]
+requires = [
+    "scikit-build-core>=0.5.0",
+    "pybind11>=2.10.0",
+    "setuptools",
+    "wheel"
+]
+
+build-backend = "scikit_build_core.build"
+
 dependencies = [
-'graphviper>=0.0.34',
-'xradio>=0.0.58'
+    'graphviper>=0.0.34',
+    'numpy>=1.20.0',
+    'xradio>=0.0.58'
 ]
 
 [project.optional-dependencies]
@@ -64,6 +75,18 @@ all = [
     'pandoc'
 ]
 
+[tool.scikit-build]
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["src/astroviper"]
+
+[tool.scikit-build.cmake]
+build-type = "Release"
+
+[tool.scikit-build.build]
+verbose = false
+
+[tool.scikit-build.cmake.define]
+PYBIND11_FINDPYTHON = "ON"
 # ---------------------------------------------------------------------------
 # The following section is REQUIRED because this project uses a "src/" layout.
 # By default, setuptools searches for packages in the current directory ("."),
