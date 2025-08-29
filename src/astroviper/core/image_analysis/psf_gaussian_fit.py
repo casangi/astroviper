@@ -8,7 +8,6 @@ from scipy.interpolate import interpn
 def psf_gaussian_fit(
     xds,
     dv="SKY",
-    beam_set_name="BEAM",
     npix_window=[9, 9],
     sampling=[9, 9],
     cutoff=0.35,
@@ -60,8 +59,11 @@ def psf_gaussian_fit(
     print("ellipse_params dtype:", ellipse_params.dtype)
     print("ellipse_params content:\n", ellipse_params)
 
-    _xds[beam_set_name].data = ellipse_params
-
+    _xds["BEAM"].data = ellipse_params
+    if "unit" in _xds["SKY"].l.attrs:
+        _xds["BEAM"].beam_param.attrs["unit"] = _xds["SKY"].l.attrs["unit"]
+    else:
+        _xds["BEAM"].beam_param.attrs["unit"] = "rad"
     return _xds
 
 
@@ -147,6 +149,7 @@ def psf_gaussian_fit_core(image_to_fit, npix_window, sampling, cutoff, delta):
                     )
                     res_x = res.x
 
+                # is this correct? angle in res resturned by minimize may be in radians??
                 phi = res_x[2] - 90.0
                 if phi < -90.0:
                     phi += 180.0
