@@ -99,6 +99,10 @@ def select_mask(
     -------
     ``xr.DataArray`` if ``data`` is a ``DataArray``; otherwise ``np.ndarray``.
     """
+    # For xr.DataArray results created from strings/paths, we record a
+    # human-readable hint on how to recreate the mask.
+    creation_str: Optional[str] = None
+
     if select is None:
         return _all_true_mask_like(data)
 
@@ -114,20 +118,31 @@ def select_mask(
             # If the user provided a file, it's CRTF by definition; parse directly.
             m = _crtf_pixel_mask(data, s_file, lazy=_want_dask(return_kind))
             aligned = _align_bool_mask_to_data(m, data)
-            return _coerce_return_kind(aligned, data, return_kind, dask_chunks)
+            # Record the *file contents* (not the filename) for reproducible provenance
+            creation_str = s_file
+            return _coerce_return_kind(aligned, data, return_kind, dask_chunks, creation=creation_str)
 
         # Otherwise, handle plain strings (CRTF text or named-mask expression)
         if isinstance(select, Path):
             raise FileNotFoundError(f"CRTF file not found: {select}")
         s = select.strip()
+    if isinstance(select, str):
+        s = select.strip()
         if _looks_like_crtf_pixel(s):
-            m = _crtf_pixel_mask(data, s, lazy=_want_dask(return_kind))
+            m = _crtf_pixel_mask(data, s)
             aligned = _align_bool_mask_to_data(m, data)
-            return _coerce_return_kind(aligned, data, return_kind, dask_chunks)
+            # attach CRTF text as creation on DataArray results
+            if isinstance(aligned, xr.DataArray):
+                return aligned.assign_attrs({**getattr(aligned, "attrs", {}), "creation": select})
+            return aligned
         env = _build_mask_env(mask_source or (data if isinstance(data, xr.Dataset) else {}))
         expr_mask = _eval_mask_expr(s, env)
         aligned = _align_bool_mask_to_data(expr_mask, data)
-        return _coerce_return_kind(aligned, data, return_kind, dask_chunks)
+        if isinstance(aligned, xr.DataArray):
+            # expanded expression with named-mask creations substituted
+            creation = _build_creation_for_expression(select, env)
+            return aligned.assign_attrs({**getattr(aligned, "attrs", {}), "creation": creation})
+        return aligned
     raise TypeError(
         "Unsupported select type. Expected None, boolean array-like, expression/CRTF text, "
         "or a backticked CRTF file string / pathlib.Path."
@@ -493,6 +508,7 @@ def _coerce_return_kind(
     data: ArrayLike,
     return_kind: ReturnKind,
     dask_chunks: Optional[Tuple[int, ...]],
+    creation: Optional[str] = None,
 ) -> ArrayLike:
     """Convert aligned mask to the requested return kind efficiently."""
     # numpy ndarray of bool
@@ -523,27 +539,41 @@ def _coerce_return_kind(
             arr = mask.data
             if getattr(arr, "__module__", "").startswith("dask"):
                 arr = arr.astype(bool).compute()
-            return xr.DataArray(
+            da_out = xr.DataArray(
                 np.asarray(arr, dtype=bool),
                 dims=getattr(mask, "dims", getattr(data, "dims", ("y", "x"))),
                 coords=getattr(mask, "coords", getattr(data, "coords", None)),
             )
+            if creation is not None:
+                da_out = da_out.assign_attrs({**getattr(mask, "attrs", {}), "creation": creation})
+            return da_out
         if getattr(mask, "__module__", "").startswith("dask"):
             arr = mask.astype(bool).compute()
         else:
             arr = np.asarray(mask, dtype=bool)
         dims = getattr(data, "dims", ("y", "x")) if isinstance(data, xr.DataArray) else ("y", "x")
         coords = getattr(data, "coords", None) if isinstance(data, xr.DataArray) else None
-        return xr.DataArray(arr, dims=dims, coords=coords)
+        da_out = xr.DataArray(arr, dims=dims, coords=coords)
+        if creation is not None:
+            da_out = da_out.assign_attrs({"creation": creation})
+        return da_out
 
     # xr.DataArray backed by Dask (default)
     if isinstance(mask, xr.DataArray):
         arr = mask.data
         if getattr(arr, "__module__", "").startswith("dask"):
-            return mask.astype(bool)
+            da_out = mask.astype(bool)
+            if creation is not None:
+                da_out = da_out.assign_attrs({**getattr(mask, "attrs", {}), "creation": creation})
+            return da_out
+        # numpy-backed xarray → wrap into dask with inferred chunks
         chunks = _infer_chunks_like(data, mask.shape, dask_chunks)
         darr = da.from_array(np.asarray(arr, dtype=bool), chunks=chunks)
-        return xr.DataArray(darr, dims=mask.dims, coords=mask.coords)
+        da_out = xr.DataArray(darr, dims=mask.dims, coords=mask.coords)
+        if creation is not None:
+            da_out = da_out.assign_attrs({**getattr(mask, "attrs", {}), "creation": creation})
+        return da_out
+
     # ndarray/dask → dask-backed DataArray
     if getattr(mask, "__module__", "").startswith("dask"):
         darr = mask.astype(bool)  # type: ignore[assignment]
@@ -552,7 +582,10 @@ def _coerce_return_kind(
         darr = da.from_array(np.asarray(mask, dtype=bool), chunks=chunks)
     dims = getattr(data, "dims", ("y", "x")) if isinstance(data, xr.DataArray) else ("y", "x")
     coords = getattr(data, "coords", None) if isinstance(data, xr.DataArray) else None
-    return xr.DataArray(darr, dims=dims, coords=coords)
+    da_out = xr.DataArray(darr, dims=dims, coords=coords)
+    if creation is not None:
+        da_out = da_out.assign_attrs({"creation": creation})
+    return da_out
 
 def _infer_chunks_like(data: Any, shape: Tuple[int, ...], dask_chunks: Optional[Tuple[int, ...]]) -> Tuple[int, ...]:
     if dask_chunks is not None:
@@ -578,3 +611,48 @@ def _infer_chunks_like(data: Any, shape: Tuple[int, ...], dask_chunks: Optional[
         tgt = max(1, int(256_000 // max(1, nx)))
         return (min(ny, tgt), nx)
     return shape
+
+def _build_creation_for_expression(expr: str, env: Mapping[str, ArrayLike]) -> str:
+    """
+    Return an expanded textual expression where each Name is replaced by the
+    underlying mask's 'creation' attribute (if present), parenthesized.
+    Falls back to the original identifier when no creation is available.
+    """
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError:
+        # keep original text if it can't be parsed
+        return expr
+
+    for node in ast.walk(tree):
+        if not isinstance(node, _ALLOWED_NODES):
+            return expr
+        if isinstance(node, ast.BoolOp):
+            # 'and'/'or' are not supported; keep original text
+            return expr
+
+    def _emit(node: ast.AST) -> str:
+        if isinstance(node, ast.Expression):
+            return _emit(node.body)
+        if isinstance(node, ast.Name):
+            value = env.get(node.id, None)
+            # Prefer DataArray with a 'creation' attribute
+            if isinstance(value, xr.DataArray):
+                c = value.attrs.get("creation")
+                if isinstance(c, str) and c:
+                    return f"({c})"
+            # Fallback to the identifier
+            return node.id
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, _ALLOWED_UNARY_OPS):
+            return f"~({_emit(node.operand)})"
+        if isinstance(node, ast.BinOp) and isinstance(node.op, _ALLOWED_BIN_OPS):
+            op = "&" if isinstance(node.op, ast.BitAnd) else "|" if isinstance(node.op, ast.BitOr) else "^"
+            left = _emit(node.left)
+            right = _emit(node.right)
+            return f"({left}) {op} ({right})"
+        if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+            return "True" if node.value else "False"
+        # Unknown node → keep original textual expr
+        return expr
+
+    return _emit(tree)
