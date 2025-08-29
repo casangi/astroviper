@@ -46,7 +46,7 @@ import numpy as np
 import xarray as xr
 
 ArrayLike = Union[np.ndarray, xr.DataArray]
-__all__ = ["select_mask", "apply_select"]
+__all__ = ["select_mask", "apply_select", "combine_with_creation"]
 
 def apply_select(data: ArrayLike, select: Any | None = None, mask_source: Any | None = None) -> ArrayLike:
     """Return ``data`` with ``select`` applied.
@@ -82,6 +82,8 @@ def select_mask(
     *,
     return_kind: ReturnKind = "dataarray-dask",
     dask_chunks: Optional[Tuple[int, ...]] = None,
+    creation_hint: Optional[str] = None,
+    auto_merge_creation: bool = False,
 ) -> ArrayLike:
     """Build a boolean mask aligned to ``data`` from ``select``.
 
@@ -105,12 +107,20 @@ def select_mask(
 
     if select is None:
         return _all_true_mask_like(data)
-
-    # Boolean/array-like (NumPy or xarray) → align then coerce
-    if isinstance(select, (np.ndarray, xr.DataArray)):
+    # Boolean/array-like (NumPy, xarray, or Dask) → align then coerce
+    if isinstance(select, (np.ndarray, xr.DataArray, da.Array)):
+        # Optional provenance auto-merge for DataArray inputs created by composition.
+        creation_str = creation_hint
+        if creation_str is None and auto_merge_creation and isinstance(select, xr.DataArray):
+            c1 = select.attrs.get("creation_a")
+            c2 = select.attrs.get("creation_b")
+            op = select.attrs.get("creation_op")
+            if c1 and c2 and op:
+                creation_str = f"({c1}) {op} ({c2})"
+            elif "creation" in select.attrs:
+                creation_str = select.attrs.get("creation")
         aligned = _align_bool_mask_to_data(select, data)
-        return _coerce_return_kind(aligned, data, return_kind, dask_chunks)
-
+        return _coerce_return_kind(aligned, data, return_kind, dask_chunks, creation=creation_str)
     # String/Path: backticked file or Path → load as CRTF; else treat as text.
     if isinstance(select, (str, Path)):
         s_file = _maybe_read_crtf_from_path(select)
@@ -119,7 +129,7 @@ def select_mask(
             m = _crtf_pixel_mask(data, s_file, lazy=_want_dask(return_kind))
             aligned = _align_bool_mask_to_data(m, data)
             # Record the *file contents* (not the filename) for reproducible provenance
-            creation_str = s_file
+            creation_str = creation_hint if creation_hint is not None else s_file
             return _coerce_return_kind(aligned, data, return_kind, dask_chunks, creation=creation_str)
 
         # Otherwise, handle plain strings (CRTF text or named-mask expression)
@@ -129,20 +139,15 @@ def select_mask(
     if isinstance(select, str):
         s = select.strip()
         if _looks_like_crtf_pixel(s):
-            m = _crtf_pixel_mask(data, s)
+            m = _crtf_pixel_mask(data, s, lazy=_want_dask(return_kind))
             aligned = _align_bool_mask_to_data(m, data)
-            # attach CRTF text as creation on DataArray results
-            if isinstance(aligned, xr.DataArray):
-                return aligned.assign_attrs({**getattr(aligned, "attrs", {}), "creation": select})
-            return aligned
+            creation_str = creation_hint if creation_hint is not None else select
+            return _coerce_return_kind(aligned, data, return_kind, dask_chunks, creation=creation_str)
         env = _build_mask_env(mask_source or (data if isinstance(data, xr.Dataset) else {}))
         expr_mask = _eval_mask_expr(s, env)
         aligned = _align_bool_mask_to_data(expr_mask, data)
-        if isinstance(aligned, xr.DataArray):
-            # expanded expression with named-mask creations substituted
-            creation = _build_creation_for_expression(select, env)
-            return aligned.assign_attrs({**getattr(aligned, "attrs", {}), "creation": creation})
-        return aligned
+        creation_str = creation_hint if creation_hint is not None else _build_creation_for_expression(select, env)
+        return _coerce_return_kind(aligned, data, return_kind, dask_chunks, creation=creation_str)
     raise TypeError(
         "Unsupported select type. Expected None, boolean array-like, expression/CRTF text, "
         "or a backticked CRTF file string / pathlib.Path."
@@ -178,7 +183,14 @@ def _align_bool_mask_to_data(mask: ArrayLike, data: ArrayLike) -> ArrayLike:
     NaNs become False.
     """
     if isinstance(data, xr.DataArray):
-        m = mask if isinstance(mask, xr.DataArray) else xr.DataArray(mask)
+        # Preserve dims to avoid accidental outer-product alignment when wrapping raw arrays
+        if isinstance(mask, xr.DataArray):
+            m = mask
+        else:
+            try:
+                m = xr.DataArray(mask, dims=data.dims[: np.ndim(mask)])
+            except Exception:  # defensive fallback
+                m = xr.DataArray(mask)
         # why: NaNs must become False before bool-cast
         if np.issubdtype(m.dtype, np.floating):
             m = m.fillna(False)
@@ -186,10 +198,15 @@ def _align_bool_mask_to_data(mask: ArrayLike, data: ArrayLike) -> ArrayLike:
         try:
             # align by named dimensions, broadcasting as needed
             m = m.broadcast_like(data)
-        except Exception as exc:  # pragma: no cover - defensive
-            raise ValueError("Mask is not broadcastable to data dimensions") from exc
-        return m
-
+            return m
+        except Exception:
+            # Fallback: NumPy-shape broadcast then wrap back to DataArray.
+            m_np = np.asarray(m.data, dtype=bool)
+            try:
+                b = np.broadcast_to(m_np, data.shape)
+            except ValueError as exc:
+                raise ValueError("Mask is not broadcastable to data shape") from exc
+            return xr.DataArray(b, dims=data.dims, coords=data.coords)
     # numpy path
     m_np = np.asarray(mask)
     # why: NaNs must become False before bool-cast
@@ -656,3 +673,41 @@ def _build_creation_for_expression(expr: str, env: Mapping[str, ArrayLike]) -> s
         return expr
 
     return _emit(tree)
+
+# ---------------------------------------------------------------------------
+# Public helper: combine two masks and preserve provenance
+# ---------------------------------------------------------------------------
+def combine_with_creation(
+    a: xr.DataArray,
+    op: str,
+    b: xr.DataArray,
+    *,
+    template: ArrayLike | None = None,
+    return_kind: ReturnKind = "dataarray-dask",
+    dask_chunks: Optional[Tuple[int, ...]] = None,
+    creation_hint: Optional[str] = None,
+) -> xr.DataArray:
+    """
+    Combine two boolean DataArrays with a bitwise op ('|', '&', '^') and attach a
+    human-readable creation string derived from the inputs' provenance.
+    """
+    if op not in {"|", "&", "^"}:
+        raise ValueError("op must be one of '|', '&', '^'")
+    L = a.astype(bool)
+    R = b.astype(bool)
+    combined = (L | R) if op == "|" else (L & R) if op == "&" else (L ^ R)
+    c1 = a.attrs.get("creation") or (a.name if isinstance(a.name, str) and a.name else "mask_a")
+    c2 = b.attrs.get("creation") or (b.name if isinstance(b.name, str) and b.name else "mask_b")
+    creation = creation_hint if creation_hint is not None else f"({c1}) {op} ({c2})"
+    # carry hints for optional auto-merge paths if users pass `combined` directly later
+    combined = combined.assign_attrs({
+        "creation_a": c1, "creation_b": c2, "creation_op": op,
+    })
+    tmpl = template if template is not None else (a if isinstance(a, xr.DataArray) else b)
+    return select_mask(
+        tmpl,
+        select=combined,
+        return_kind=return_kind,
+        dask_chunks=dask_chunks,
+        creation_hint=creation,
+    )
