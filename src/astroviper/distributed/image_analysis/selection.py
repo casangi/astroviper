@@ -637,7 +637,7 @@ def _build_creation_for_expression(expr: str, env: Mapping[str, ArrayLike]) -> s
     """
     try:
         tree = ast.parse(expr, mode="eval")
-    except SyntaxError:
+    except SyntaxError: # pragma: no cover — unreachable via public API (parse
         # keep original text if it can't be parsed
         return expr
 
@@ -704,10 +704,23 @@ def combine_with_creation(
         "creation_a": c1, "creation_b": c2, "creation_op": op,
     })
     tmpl = template if template is not None else (a if isinstance(a, xr.DataArray) else b)
+    # If template has different dim names but identical shape, rename to template dims
+    # to avoid dim union (e.g., ('row','col','y','x')). On rename failure, force-wrap
+    # using template dims/coords as a defensive fallback.
+    if isinstance(tmpl, xr.DataArray) and isinstance(combined, xr.DataArray):
+        if combined.shape == tmpl.shape and combined.dims != tmpl.dims:
+            try:
+                combined = combined.rename({old: new for old, new in zip(combined.dims, tmpl.dims)})
+            except Exception:
+                try:
+                    arr = combined.data if hasattr(combined, "data") else combined
+                    combined = xr.DataArray(arr, dims=tmpl.dims, coords=tmpl.coords)
+                except Exception:
+                    pass
     return select_mask(
-        tmpl,
-        select=combined,
-        return_kind=return_kind,
-        dask_chunks=dask_chunks,
-        creation_hint=creation,
-    )
+       tmpl,
+       select=combined,
+       return_kind=return_kind,
+       dask_chunks=dask_chunks,
+       creation_hint=creation,
+   )

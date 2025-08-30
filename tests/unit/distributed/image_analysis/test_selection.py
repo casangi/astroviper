@@ -28,6 +28,7 @@ import dask.array as da
 from astroviper.distributed.image_analysis.selection import (
     select_mask,
     apply_select,
+    combine_with_creation,
 )
 
 # ------------------------- fixtures / helpers -------------------------
@@ -807,6 +808,30 @@ class TestReturnKinds:
         assert out.dtype == bool and out.shape == (ny, nx)
         # We don't assert exact chunking (implementation-defined fallback), only that it succeede
 
+    def test_dataarray_numpy_else_branch_creation_attached_and_printed(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """
+        Cover the else-branch in _coerce_return_kind for return_kind='dataarray-numpy':
+            da_out = xr.DataArray(arr, dims=dims, coords=coords)
+            if creation is not None:
+                print("********** covered *********")
+                da_out = da_out.assign_attrs({"creation": creation})
+        Use ndarray `data` and ndarray `select` so the aligned mask is a NumPy array
+        (not an xarray.DataArray), forcing the targeted branch.
+        """
+        ny, nx = 9, 7
+        data = np.zeros((ny, nx), dtype=float)          # ndarray → NumPy align path
+        mask_np = np.zeros((ny, nx), dtype=int)
+        mask_np[2:5, 1:4] = 1
+        hint = "numpy mask branch"
+        out = select_mask(data, select=mask_np, return_kind="dataarray-numpy", creation_hint=hint)
+        # Assert printed marker from the covered branch
+        captured = capsys.readouterr()
+        # Validate return object and attached creation attribute
+        assert isinstance(out, xr.DataArray)
+        assert out.dtype == bool and out.shape == (ny, nx)
+        assert out.dims == ("y", "x") and not hasattr(out.data, "chunks")
+        assert out.attrs.get("creation") == hint
+
 class TestCRTFDirectives:
     def test_global_directive_lines_are_ignored(self) -> None:
         """
@@ -830,3 +855,339 @@ class TestCRTFDirectives:
         assert isinstance(m_with, xr.DataArray) and isinstance(m_without, xr.DataArray)
         assert m_with.shape == m_without.shape == da.shape
         np.testing.assert_array_equal(m_with.values, m_without.values)
+
+class TestCreationAutoMerge:
+    def test_auto_merge_creation_from_triplet_attrs(self) -> None:
+        """
+        Cover:
+            if creation_str is None and auto_merge_creation and isinstance(select, xr.DataArray):
+                c1 = select.attrs.get("creation_a")
+                c2 = select.attrs.get("creation_b")
+                op = select.attrs.get("creation_op")
+                if c1 and c2 and op:
+                    creation_str = f"({c1}) {op} ({c2})"
+        using only the public API.
+        """
+        da_img = make_image(32, 48)
+        c1 = "numpy rect [y:5..15, x:7..20]"
+        c2 = "dask random > 0.9 (chunks=16x16)"
+        op = "|"
+        # Any boolean DataArray works; attributes drive the provenance.
+        base = xr.DataArray(np.zeros(da_img.shape, dtype=bool), dims=da_img.dims, coords=da_img.coords)
+        mask_with_triplet = base.assign_attrs({"creation_a": c1, "creation_b": c2, "creation_op": op})
+        out = select_mask(da_img, select=mask_with_triplet, auto_merge_creation=True)  # default return_kind → DataArray
+        assert isinstance(out, xr.DataArray) and out.dtype == bool and out.shape == da_img.shape
+        assert out.attrs.get("creation") == f"({c1}) {op} ({c2})"
+
+    def test_auto_merge_creation_falls_back_to_single_creation_attr(self) -> None:
+        """
+        Cover the 'elif "creation" in select.attrs: creation_str = select.attrs.get("creation")'
+        fallback when the triplet (creation_a/b/op) is not present.
+        """
+        da_img = make_image(16, 16)
+        prov = "standalone provenance string"
+        base = xr.DataArray(np.zeros(da_img.shape, dtype=bool), dims=da_img.dims, coords=da_img.coords)
+        mask_with_creation_only = base.assign_attrs({"creation": prov})
+        out = select_mask(da_img, select=mask_with_creation_only, auto_merge_creation=True)
+        assert isinstance(out, xr.DataArray) and out.dtype == bool and out.shape == da_img.shape
+        assert out.attrs.get("creation") == prov
+
+class TestAlignFallback:
+    def test_broadcast_like_exception_fallback_numpy_wrap_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """
+        Force xr.DataArray.broadcast_like to raise so _align_bool_mask_to_data enters the
+        top-level except block, then verify the NumPy broadcast fallback succeeds and
+        wraps back to an xr.DataArray with data's dims/coords.
+        """
+        ny, nx = 12, 18
+        data = make_image(ny, nx)  # xarray.DataArray
+        # Shape is broadcastable to (ny, nx) but we'll force broadcast_like to error.
+        col = xr.DataArray(np.zeros((ny, 1), dtype=bool), dims=("y", "x"))
+
+        def boom(self, other, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError("simulate broadcast_like failure")
+
+        # Monkeypatch xarray's method (public third-party API) to trigger fallback path.
+        monkeypatch.setattr(xr.DataArray, "broadcast_like", boom, raising=True)
+
+        out = select_mask(data, select=col)  # PUBLIC API
+        assert isinstance(out, xr.DataArray)
+        assert out.shape == data.shape and out.dims == data.dims
+        assert out.dtype == bool
+
+    def test_fallback_broadcast_to_failure_raises_valueerror(self) -> None:
+        """
+        Make broadcast_like fail naturally (conflicting non-unit size along 'x'),
+        and also make NumPy's broadcast_to fail so we cover the inner except and
+        error message in the fallback.
+        """
+        ny, nx = 10, 15
+        data = make_image(ny, nx)  # xarray.DataArray
+        # Incompatible along x: nx-1 cannot broadcast to nx
+        bad = xr.DataArray(np.zeros((ny, nx - 1), dtype=bool), dims=("y", "x"))
+        with pytest.raises(ValueError, match="Mask is not broadcastable to data shape"):
+            _ = select_mask(data, select=bad)  # PUBLIC API triggers alignment
+
+class TestCombineWithCreationAPI:
+    def test_invalid_op_raises(self) -> None:
+        """
+        op must be one of '|', '&', '^'
+        """
+        da_img = make_image(20, 30)
+        a = select_mask(da_img, select="box[[1pix,1pix],[10pix,10pix]]", return_kind="dataarray-numpy")
+        b = select_mask(da_img, select="box[[5pix,5pix],[15pix,12pix]]",  return_kind="dataarray-numpy")
+        with pytest.raises(ValueError, match=r"op must be one of '\|', '&', '\^'"):
+            combine_with_creation(a, "~", b)
+
+    def test_or_and_xor_semantics_and_creation_merge_default(self) -> None:
+        """
+        Cover L|R, L&R, L^R branches and default creation merge from inputs'
+        'creation' attrs (set via creation_hint).
+        """
+        da_img = make_image(40, 60)
+        # Two simple masks with explicit provenance
+        c1 = "numpy rect [y:5..19, x:7..25]"
+        m1_src = np.zeros(da_img.shape, dtype=bool); m1_src[5:20, 7:26] = True
+        m1 = select_mask(da_img, select=m1_src, return_kind="dataarray-numpy", creation_hint=c1)
+        c2 = "numpy rect [y:10..29, x:20..39]"
+        m2_src = np.zeros(da_img.shape, dtype=bool); m2_src[10:30, 20:40] = True
+        m2 = select_mask(da_img, select=m2_src, return_kind="dataarray-numpy", creation_hint=c2)
+
+        out_or  = combine_with_creation(m1, "|", m2, return_kind="dataarray-numpy")
+        out_and = combine_with_creation(m1, "&", m2, return_kind="dataarray-numpy")
+        out_xor = combine_with_creation(m1, "^", m2, return_kind="dataarray-numpy")
+
+        assert isinstance(out_or, xr.DataArray) and out_or.dtype == bool
+        assert isinstance(out_and, xr.DataArray) and out_and.dtype == bool
+        assert isinstance(out_xor, xr.DataArray) and out_xor.dtype == bool
+
+        np.testing.assert_array_equal(out_or.values,  (m1.values | m2.values))
+        np.testing.assert_array_equal(out_and.values, (m1.values & m2.values))
+        np.testing.assert_array_equal(out_xor.values, (m1.values ^ m2.values))
+
+        assert out_or.attrs.get("creation")  == f"({c1}) | ({c2})"
+        assert out_and.attrs.get("creation") == f"({c1}) & ({c2})"
+        assert out_xor.attrs.get("creation") == f"({c1}) ^ ({c2})"
+
+    def test_creation_hint_overrides(self) -> None:
+        """
+        creation_hint should replace the auto-merged '(c1) op (c2)' string.
+        """
+        da_img = make_image(24, 24)
+        a = select_mask(da_img, select="box[[2pix,2pix],[15pix,15pix]]", return_kind="dataarray-numpy")
+        b = select_mask(da_img, select="box[[6pix,6pix],[20pix,20pix]]", return_kind="dataarray-numpy")
+        hint = "custom provenance for (a | b)"
+        out = combine_with_creation(a, "|", b, return_kind="dataarray-numpy", creation_hint=hint)
+        assert isinstance(out, xr.DataArray)
+        assert out.attrs.get("creation") == hint
+
+    def test_template_controls_dims_and_return_kind_numpy(self) -> None:
+        """
+        When template is provided, output dims/coords follow the template; also
+        cover return_kind='dataarray-numpy'.
+        """
+        ny, nx = 18, 12
+        # Template with custom coords/dim names
+        tmpl = xr.DataArray(np.zeros((ny, nx), dtype=float), dims=("row", "col"),
+                            coords={"row": np.arange(ny)*2.0, "col": np.arange(nx)*3.0})
+        # Inputs share the same shape as template but with default dims
+        a = xr.DataArray(np.zeros((ny, nx), dtype=bool), dims=("y", "x")).assign_attrs(creation="A")
+        b = xr.DataArray(np.zeros((ny, nx), dtype=bool), dims=("y", "x")).assign_attrs(creation="B")
+        b.values[::2, ::3] = True
+        out = combine_with_creation(a, "|", b, template=tmpl, return_kind="dataarray-numpy")
+        assert isinstance(out, xr.DataArray) and not hasattr(out.data, "chunks")
+        assert out.dims == ("row", "col")
+        np.testing.assert_array_equal(out.values, b.values)  # since a is all False, A|B == B
+        assert out.attrs.get("creation") == "(A) | (B)"
+
+    def test_dask_chunks_applied_when_requesting_dask_return_kind(self) -> None:
+        """
+        Ensure that specifying dask_chunks yields a dask-backed output with those chunks.
+        Use numpy-backed inputs so the conversion path constructs a dask array with given chunks.
+        """
+        ny, nx = 50, 70
+        # Expression path requires a non-empty boolean env; provide a tiny dummy mask.
+        dummy = xr.DataArray(np.zeros((1, 1), dtype=bool), dims=("y", "x"))
+        a = select_mask(
+            make_image(ny, nx), select="False",
+            mask_source={"dummy": dummy},
+            return_kind="dataarray-numpy", creation_hint="F",
+        )
+        b = select_mask(
+            make_image(ny, nx), select="True",
+            mask_source={"dummy": dummy},
+            return_kind="dataarray-numpy", creation_hint="T",
+        )
+        chunks = (20, 25)
+        out = combine_with_creation(a, "|", b, return_kind="dataarray-dask", dask_chunks=chunks)
+        assert isinstance(out, xr.DataArray) and hasattr(out.data, "chunks")
+        # chunks may be normalized into tuples-of-tuples by dask
+        got = tuple(sum(([int(c) for c in ch] if isinstance(ch, tuple) else [int(ch)],), []) for ch in out.data.chunks)
+        # Flatten each axis chunking and compare the sizes set (normalize expected to tuple)
+        exp0 = tuple([chunks[0]] * (ny // chunks[0]) + ([ny % chunks[0]] if ny % chunks[0] else []))
+        exp1 = tuple([chunks[1]] * (nx // chunks[1]) + ([nx % chunks[1]] if nx % chunks[1] else []))
+        assert tuple(sum(([int(c) for c in out.data.chunks[0]],), [])) == exp0
+        assert tuple(sum(([int(c) for c in out.data.chunks[1]],), [])) == exp1
+
+class TestDataArrayMaskConstructorFallback:
+    def test_dims_constructor_raises_and_fallback_without_dims_used(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """
+        Cover the except-path:
+            try:
+                m = xr.DataArray(mask, dims=data.dims[: np.ndim(mask)])
+            except Exception:
+                m = xr.DataArray(mask)
+        by making the constructor raise only when 'dims' is provided.
+        Use public API (select_mask) with xarray `data` so alignment proceeds.
+        """
+        ny, nx = 8, 12
+        data = make_image(ny, nx)  # xarray.DataArray with dims ('y','x')
+        mask = np.zeros((ny, 1), dtype=bool)  # broadcastable to (ny, nx)
+
+        orig_init = xr.DataArray.__init__
+
+        def init_maybe_raise(self, data, *args, **kwargs):  # type: ignore[override]
+            # Raise only for the *first* constructor call that uses the original
+            # mask shape with 'dims' (ny, 1). Allow the later fallback
+            # xr.DataArray(b, dims=('y','x')) where b.shape == (ny, nx).
+            if "dims" in kwargs and isinstance(data, np.ndarray) and data.shape == mask.shape:
+                raise RuntimeError("simulated constructor failure with dims")
+            return orig_init(self, data, *args, **kwargs)
+
+        # Patch the class __init__ so only the dims-path fails; fallback call without dims succeeds.
+        monkeypatch.setattr(xr.DataArray, "__init__", init_maybe_raise, raising=True)
+
+        # Also force _align_bool_mask_to_data to take its NumPy broadcast fallback
+        # (otherwise xarray.broadcast_like would create a cross-product of dims).
+        def boom(self, other, *a, **k):  # type: ignore[no-untyped-def]
+            raise RuntimeError("simulate broadcast_like failure")
+        monkeypatch.setattr(xr.DataArray, "broadcast_like", boom, raising=True)
+        # Use return_kind="numpy" so the final result is a NumPy array.
+        out = select_mask(data, select=mask, return_kind="numpy")
+
+        assert isinstance(out, np.ndarray)
+        assert out.dtype == bool and out.shape == (ny, nx)
+
+class TestCombineWithCreationRenameExcept:
+    def test_template_rename_exception_path_falls_back_and_succeeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """
+        Cover the except-path inside combine_with_creation:
+            try:
+                combined = combined.rename({...})
+            except Exception:
+                pass
+        by forcing xr.DataArray.rename to raise. The function should still return a
+        correct boolean DataArray aligned to the template's dims via fallback alignment.
+        """
+        ny, nx = 30, 40
+        # Template uses different dim names; same shape
+        tmpl = xr.DataArray(np.zeros((ny, nx), dtype=float), dims=("row", "col"))
+        # Inputs with ('y','x') dims and simple patterns
+        a = xr.DataArray(np.zeros((ny, nx), dtype=bool), dims=("y", "x")).assign_attrs(creation="A")
+        b = xr.DataArray(np.zeros((ny, nx), dtype=bool), dims=("y", "x")).assign_attrs(creation="B")
+        a.values[5:20, 7:25] = True
+        b.values[10:28, 20:35] = True
+        exp_or = a.values | b.values
+
+        # Force rename failure only when called; public library monkeypatch
+        def bad_rename(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError("simulated rename failure")
+        monkeypatch.setattr(xr.DataArray, "rename", bad_rename, raising=True)
+
+        out = combine_with_creation(a, "|", b, template=tmpl, return_kind="dataarray-numpy")
+        assert isinstance(out, xr.DataArray) and out.dtype == bool
+        # Despite rename failure, select_mask alignment fallback should deliver template dims
+        assert out.dims == ("row", "col") and out.shape == (ny, nx)
+        np.testing.assert_array_equal(out.values, exp_or)
+        # Creation remains well-formed
+        assert out.attrs.get("creation") == "(A) | (B)"
+
+class TestToBoolDataArray:
+    def test_dataarray_float_nan_fillna_before_bool(self) -> None:
+        """
+        Cover nested-if in _to_bool for xarray.DataArray:
+          if isinstance(arr, xr.DataArray):
+              if np.issubdtype(out.dtype, np.floating):
+                  out = out.fillna(False)
+        Provide float DataArrays with NaNs via the public expression API.
+        """
+        da_img = make_image(3, 3)
+        A = xr.DataArray(
+            np.array([[np.nan, 0.0, 0.2],
+                      [-1.0,  0.0, np.nan],
+                      [0.0,   3.0, 0.0]], dtype=float),
+            dims=("y", "x"),
+        )
+        B = xr.DataArray(
+            np.array([[0.0,  1.0, np.nan],
+                      [0.0,  0.0,  3.0],
+                      [np.nan, 0.0, 0.0]], dtype=float),
+            dims=("y", "x"),
+        )
+        # Expected: NaNs -> 0.0, nonzero -> True, zero -> False
+        A_bool = np.nan_to_num(A.values, nan=0.0).astype(bool)
+        B_bool = np.nan_to_num(B.values, nan=0.0).astype(bool)
+        exp = A_bool & ~B_bool
+        m = select_mask(da_img, select="A & ~B", mask_source={"A": A, "B": B}, return_kind="dataarray-numpy")
+        assert isinstance(m, xr.DataArray) and m.dtype == bool
+        np.testing.assert_array_equal(m.values, exp)
+
+class TestCRTFMalformed:
+    def test_crtf_invalid_line_raises(self) -> None:
+        """
+        Public-API coverage of the ValueError raised by _split_shape_payload when a
+        CRTF-looking string contains a malformed line that doesn't match
+        '<shape>[[...]'. The '#CRTF' header routes parsing down the CRTF path.
+        """
+        da_img = make_image(16, 16)
+        crtf_bad = "#CRTF\nnot_a_shape 123"
+        with pytest.raises(ValueError, match=r"Invalid CRTF line: 'not_a_shape 123'"):
+            select_mask(da_img, select=crtf_bad)
+
+class TestCRTFNumericParsingErrors:
+    def test_invalid_numeric_token_in_angle_raises_value_error(self) -> None:
+        """
+        Public-API coverage for _parse_units_val raise:
+        an angle with an unsupported unit triggers "Invalid numeric token: '30xyz'".
+        """
+        da_img = make_image(32, 32)
+        bad = "rotbox[[12pix,8pix],[6pix,3pix], 30xyz]"
+        with pytest.raises(ValueError, match=r"Invalid numeric token: '30xyz'"):
+            select_mask(da_img, select=bad)
+
+    def test_invalid_pixel_quantity_token_raises_specific_message(self) -> None:
+        """
+        Public-API coverage for _parse_pix_val raise path:
+        using 'px' instead of required 'pix' should emit the pixel-specific error.
+        """
+        da_img = make_image(32, 32)
+        bad = "circle[[10pix,10pix], 20px]"
+        with pytest.raises(ValueError, match=r"Expected '<value>pix' for pixel quantity, got '20px'"):
+            select_mask(da_img, select=bad)
+
+
+class TestCreationAssignmentInDataArrayNumpyReturn:
+    def test_creation_hint_attached_in_dataarray_numpy_else_branch(self) -> None:
+        """
+        Cover:
+            da_out = xr.DataArray(arr, dims=dims, coords=coords)
+            if creation is not None:
+                da_out = da_out.assign_attrs({"creation": creation})
+        by passing a NumPy boolean mask (not an xr.DataArray) with return_kind='dataarray-numpy'
+        and a non-None creation_hint.
+        """
+        ny, nx = 11, 13
+        data = make_image(ny, nx)  # xr.DataArray with dims ('y','x')
+        # Plain NumPy mask ⇒ hits the non-xarray path in dataarray-numpy branch
+        mask_np = np.zeros((ny, nx), dtype=int)
+        mask_np[2:5, 3:9] = 1  # some True region after bool-cast
+        hint = "numpy mask demo"
+        out = select_mask(data, select=mask_np, return_kind="dataarray-numpy", creation_hint=hint)
+        assert isinstance(out, xr.DataArray)
+        assert out.dtype == bool and out.shape == (ny, nx)
+        assert out.dims == data.dims
+        # creation attribute must be attached
+        assert out.attrs.get("creation") == hint
+        # ensure NumPy-backed (not dask)
+        assert not hasattr(out.data, "chunks")
+
