@@ -30,7 +30,9 @@ def make_gridding_convolution_function(
     _sel_params = copy.deepcopy(sel_params)
 
     # print(sel_params)
-    data_group_in, _ = check_sel_params(ms_xds, _sel_params, skip_data_group_out=True)
+    data_group_in, _ = check_sel_params(
+        ms_xds, _sel_params, default_data_group_in_name="base"
+    )
 
     _gcf_params["field_phase_dir"] = ms_xds.xr_ms.get_field_and_source_xds(
         data_group_in["data_group_in_name"]

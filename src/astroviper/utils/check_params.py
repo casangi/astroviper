@@ -232,7 +232,9 @@ def check_sel_params(
         default_data_group_out_modified = {}
 
     xds_dv_names = list(xds.data_vars)
-    xds_data_groups = xds.attrs.get("data_groups", {})
+    import copy
+
+    xds_data_groups = copy.deepcopy(xds.attrs.get("data_groups", {}))
 
     # Check the data_group_in
     if "data_group_in_name" in sel_params:
@@ -240,7 +242,7 @@ def check_sel_params(
             "Data group "
             + sel_params["data_group_in_name"]
             + " not found in xds data_groups: "
-            + xds_data_groups.keys()
+            + str(xds_data_groups.keys())
         )
         assert sel_params["data_group_in_name"] in xds_data_groups, (
             "Data group "
@@ -280,7 +282,11 @@ def check_sel_params(
     # Keys in data_group_out will take precedence over default_data_group_out_modified if there are conflicts.
     data_group_out = {**default_data_group_out_modified, **data_group_out}
 
+    if "overwrite" not in sel_params:
+        sel_params["overwrite"] = False
+
     if sel_params["overwrite"]:
+
         for data_group_name, data_group in xds_data_groups.items():
             data_group_values = data_group.values()
             data_group_out_values = data_group_out.values()

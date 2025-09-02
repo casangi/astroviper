@@ -27,16 +27,16 @@ def make_visibility_grid(
     ), "######### ERROR: grid_params checking failed"
 
     ms_data_group_in, ms_data_group_out = check_sel_params(
-        ms_xds, _vis_sel_params, skip_data_group_out=True
+        ms_xds, _vis_sel_params, default_data_group_in_name="base"
     )
     img_data_group_in, img_data_group_out = check_sel_params(
         img_xds,
         _img_sel_params,
-        default_data_group_out={
-            "mosaic": {
-                "visibility": "VISIBILITY",
-                "visibility_normalization": "VISIBILITY_NORMALIZATION",
-            }
+        default_data_group_in_name="mosaic",
+        default_data_group_out_name="mosaic",
+        default_data_group_out_modified={
+            "visibility": "VISIBILITY",
+            "visibility_normalization": "VISIBILITY_NORMALIZATION",
         },
     )
 
@@ -117,6 +117,10 @@ def make_visibility_grid(
         oversampling,
         phase_gradient,
     )
+
+    img_xds.attrs["data_groups"][
+        img_data_group_out["data_group_out_name"]
+    ] = img_data_group_out
 
 
 def make_visibility_grid_single_field(
