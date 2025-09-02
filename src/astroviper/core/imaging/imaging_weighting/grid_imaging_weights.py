@@ -3,7 +3,7 @@ import numpy as np
 import math
 
 
-def grid_imaging_weights(uvw, weight, freq_chan, grid_parms):
+def grid_imaging_weights(grid, sum_weight, uvw, weight, freq_chan, grid_parms):
     """
     Wraps the jit gridder code.
 
@@ -19,8 +19,6 @@ def grid_imaging_weights(uvw, weight, freq_chan, grid_parms):
         (n_chan)
     weight : float array
         (n_time, n_baseline, n_vis_chan)
-    cgk_1D : float array
-        (oversampling*(support//2 + 1))
     grid_parms : dictionary
         keys ('image_size','cell','oversampling','support')
 
@@ -31,12 +29,16 @@ def grid_imaging_weights(uvw, weight, freq_chan, grid_parms):
     """
 
     n_chan = weight.shape[2]
-    if grid_parms["chan_mode"] == "cube":
-        n_imag_chan = n_chan
-        chan_map = (np.arange(0, n_chan)).astype(int)
-    else:  # continuum
-        n_imag_chan = 1  # Making only one continuum image.
-        chan_map = (np.zeros(n_chan)).astype(int)
+    chan_map = (np.arange(0, n_chan)).astype(int)
+    
+    #Always per chan weight so no longer do:
+    # if grid_parms["chan_mode"] == "cube":
+    #     n_imag_chan = n_chan
+    #     chan_map = (np.arange(0, n_chan)).astype(int)
+    # else:  # continuum
+    #     n_imag_chan = 1  # Making only one continuum image.
+    #     chan_map = (np.zeros(n_chan)).astype(int)
+
 
     n_imag_pol = weight.shape[3]
     pol_map = (np.arange(0, n_imag_pol)).astype(int)
@@ -44,10 +46,9 @@ def grid_imaging_weights(uvw, weight, freq_chan, grid_parms):
     n_uv = grid_parms["image_size_padded"]
     delta_lm = grid_parms["cell_size"]
 
-    grid = np.zeros((n_imag_chan, 1, n_uv[0], n_uv[1]), dtype=np.double)
-    sum_weight = np.zeros((n_imag_chan, 1), dtype=np.double)
-
     assert weight.shape[3] < 3, "Polarization should be PP or PP, QQ."
+    
+    print("chan map ", chan_map)
 
     grid_imaging_weights_jit(
         grid,
@@ -59,7 +60,6 @@ def grid_imaging_weights(uvw, weight, freq_chan, grid_parms):
         n_uv,
         delta_lm,
     )
-    return grid, sum_weight
 
 
 import numpy as np
@@ -126,7 +126,7 @@ def grid_imaging_weights_jit(
                     v_pos_conj = -v + uv_center[1]
 
                     # Doing round as int(x+0.5) since u_pos/v_pos should always positive and this matrices fortran and gives consistant rounding.
-                    # Do not use numpy round
+                    # Do ~use numpy round
                     u_indx = int(u_pos + 0.5)
                     v_indx = int(v_pos + 0.5)
 
@@ -139,13 +139,13 @@ def grid_imaging_weights_jit(
                         and (u_indx >= 0)
                         and (v_indx >= 0)
                     ):
-                        if n_pol >= 2:  # NB NB Check polarization order
-                            weight = (
-                                data_weights[i_time, i_baseline, i_chan, 0]
-                                + data_weights[i_time, i_baseline, i_chan, 1]
-                            ) / 2.0
-                        else:
-                            weight = data_weights[i_time, i_baseline, i_chan, 0]
+                        # if n_pol >= 2:  # NB NB Check polarization order
+                        #     weight = (
+                        #         data_weights[i_time, i_baseline, i_chan, 0]
+                        #         + data_weights[i_time, i_baseline, i_chan, 1]
+                        #     ) / 2.0
+                        # else:
+                        weight = data_weights[i_time, i_baseline, i_chan, 0]
 
                         if ~np.isnan(weight):
                             norm = 0.0
@@ -176,8 +176,7 @@ def degrid_imaging_weights(
     freq_chan,
     grid_parms,
 ):
-    n_chan = natural_imaging_weight.shape[2]
-    n_imag_chan = n_chan
+    n_imag_chan = natural_imaging_weight.shape[2]
 
     #    if grid_parms['chan_mode'] == 'cube':
     #        n_imag_chan = n_chan
@@ -186,8 +185,7 @@ def degrid_imaging_weights(
     #        n_imag_chan = 1
     #        chan_map = (np.zeros(n_chan)).astype(int)
     # Should always be cube for image weights
-    n_imag_chan = n_chan
-    chan_map = (np.arange(0, n_chan)).astype(int)
+    chan_map = (np.arange(0, n_imag_chan)).astype(int)
 
     n_imag_pol = natural_imaging_weight.shape[3]
     pol_map = (np.arange(0, n_imag_pol)).astype(int)
@@ -243,7 +241,6 @@ def degrid_imaging_weights_jit(
     n_v = n_uv[1]
 
     # print('Degrid operation')
-
     for i_time in range(n_time):
         for i_baseline in range(n_baseline):
             for i_chan in range(n_chan):
@@ -296,6 +293,7 @@ def degrid_imaging_weights_jit(
                                 ]
                                 != 0.0
                             ):
+                                #print("a_chan, a_pol, u_center_indx, v_center_indx", a_chan, a_pol, u_center_indx, v_center_indx, grid_imaging_weight.shape)
                                 if ~np.isnan(
                                     grid_imaging_weight[
                                         a_chan, a_pol, u_center_indx, v_center_indx

@@ -7,8 +7,8 @@ def calculate_briggs_params(grid_of_imaging_weights, sum_weight, imaging_weights
 
         squared_sum_weight = np.sum((grid_of_imaging_weights) ** 2, axis=(2, 3))
 
-        print("squared_sum_weight", squared_sum_weight.shape, squared_sum_weight)
-        print("sum_weight", sum_weight.shape, sum_weight)
+        # print("squared_sum_weight", squared_sum_weight.shape, squared_sum_weight)
+        # print("sum_weight", sum_weight.shape, sum_weight)
         briggs_factors[0, :, :] = (
             np.square(5.0 * 10.0 ** (-robust)) / (squared_sum_weight / sum_weight)
         )[None, None, :, :]

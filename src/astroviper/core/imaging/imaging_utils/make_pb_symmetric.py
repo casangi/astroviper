@@ -8,7 +8,7 @@
 
 # Formula for obscured airy pattern found in https://en.wikipedia.org/wiki/Airy_disk (see Obscured Airy pattern section)
 # If ipower is 1 the voltage pattern is returned if ipower is 2 the primary beam is returned.
-def airy_disk(freq_chan, pol, pb_parms, grid_parms):
+def airy_disk(freq_chan, pol, pb_params, grid_params):
     """
     Does not yet handle beam squint
     dish_diameters : list of int
@@ -20,13 +20,13 @@ def airy_disk(freq_chan, pol, pb_parms, grid_parms):
     import scipy.constants
     from scipy.special import jn
 
-    cell = grid_parms["cell_size"]
-    image_size = grid_parms["image_size"]
-    image_center = grid_parms["image_center"]
+    cell = grid_params["cell_size"]
+    image_size = grid_params["image_size"]
+    image_center = grid_params["image_center"]
 
-    list_dish_diameters = pb_parms["list_dish_diameters"]
-    list_blockage_diameters = pb_parms["list_blockage_diameters"]
-    ipower = pb_parms["ipower"]
+    list_dish_diameters = pb_params["list_dish_diameters"]
+    list_blockage_diameters = pb_params["list_blockage_diameters"]
+    ipower = pb_params["ipower"]
 
     c = scipy.constants.c  # 299792458
     k = (2 * np.pi * freq_chan) / c
@@ -74,7 +74,7 @@ def airy_disk(freq_chan, pol, pb_parms, grid_parms):
 
 # Formula for obscured airy pattern found in casa6/casa5/code/synthesis/TransformMachines/PBMath1DAiry.cc/h
 # If ipower is 1 the voltage pattern is returned if ipower is 2 the primary beam is returned.
-def casa_airy_disk(freq_chan, pol, pb_parms, grid_parms):
+def casa_airy_disk(freq_chan, pol, pb_params, grid_params):
     """
     Does not yet handle beam squint
     dish_diameters : list of int
@@ -86,13 +86,13 @@ def casa_airy_disk(freq_chan, pol, pb_parms, grid_parms):
     import scipy.constants
     from scipy.special import jn
 
-    cell = grid_parms["cell_size"]
-    image_size = grid_parms["image_size"]
-    image_center = grid_parms["image_center"]
+    cell = grid_params["cell_size"]
+    image_size = grid_params["image_size"]
+    image_center = grid_params["image_center"]
 
-    list_dish_diameters = pb_parms["list_dish_diameters"]
-    list_blockage_diameters = pb_parms["list_blockage_diameters"]
-    ipower = pb_parms["ipower"]
+    list_dish_diameters = pb_params["list_dish_diameters"]
+    list_blockage_diameters = pb_params["list_blockage_diameters"]
+    ipower = pb_params["ipower"]
 
     c = scipy.constants.c  # 299792458
     k = (2 * np.pi * freq_chan) / c
@@ -145,7 +145,7 @@ def casa_airy_disk(freq_chan, pol, pb_parms, grid_parms):
 # Functions used during the creatiuon of the gridding convolution functions.
 # Formula for obscured airy pattern found in https://en.wikipedia.org/wiki/Airy_disk (see Obscured Airy pattern section)
 # If ipower is 1 the voltage pattern is returned if ipower is 2 the primary beam is returned.
-def airy_disk_rorder(freq_chan, pol, pb_parms, grid_parms):
+def airy_disk_rorder(freq_chan, pol, pb_params, grid_params):
     """
     Does not yet handle beam squint
     dish_diameters : list of int
@@ -157,13 +157,13 @@ def airy_disk_rorder(freq_chan, pol, pb_parms, grid_parms):
     import scipy.constants
     from scipy.special import jn
 
-    cell = grid_parms["cell_size"]
-    image_size = grid_parms["image_size"]
-    image_center = grid_parms["image_center"]
+    cell = grid_params["cell_size"]
+    image_size = grid_params["image_size"]
+    image_center = grid_params["image_center"]
 
-    list_dish_diameters = pb_parms["list_dish_diameters"]
-    list_blockage_diameters = pb_parms["list_blockage_diameters"]
-    ipower = pb_parms["ipower"]
+    list_dish_diameters = pb_params["list_dish_diameters"]
+    list_blockage_diameters = pb_params["list_blockage_diameters"]
+    ipower = pb_params["ipower"]
 
     c = scipy.constants.c  # 299792458
     k = (2 * np.pi * freq_chan) / c
@@ -212,7 +212,7 @@ def airy_disk_rorder(freq_chan, pol, pb_parms, grid_parms):
 
 # Formula for obscured airy pattern found in casa6/casa5/code/synthesis/TransformMachines/PBMath1DAiry.cc/h
 # If ipower is 1 the voltage pattern is returned if ipower is 2 the primary beam is returned.
-def casa_airy_disk_rorder(freq_chan, pol, pb_parms, grid_parms):
+def casa_airy_disk_rorder(freq_chan, pol, pb_params, grid_params):
     """
     Does not yet handle beam squint
     dish_diameters : list of int
@@ -224,13 +224,13 @@ def casa_airy_disk_rorder(freq_chan, pol, pb_parms, grid_parms):
     import scipy.constants
     from scipy.special import jn
 
-    cell = grid_parms["cell_size"]
-    image_size = grid_parms["image_size"]
-    image_center = grid_parms["image_center"]
+    cell = grid_params["cell_size"]
+    image_size = grid_params["image_size"]
+    image_center = grid_params["image_center"]
 
-    list_dish_diameters = pb_parms["list_dish_diameters"]
-    list_blockage_diameters = pb_parms["list_blockage_diameters"]
-    ipower = pb_parms["ipower"]
+    list_dish_diameters = pb_params["list_dish_diameters"]
+    list_blockage_diameters = pb_params["list_blockage_diameters"]
+    ipower = pb_params["ipower"]
 
     c = scipy.constants.c  # 299792458
     k = (2 * np.pi * freq_chan) / c

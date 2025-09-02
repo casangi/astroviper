@@ -1,3 +1,3 @@
 from . import hogbom
 
-__all__ = ['hogbom']
+__all__ = ["hogbom"]
