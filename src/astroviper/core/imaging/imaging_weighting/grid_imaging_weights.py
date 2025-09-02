@@ -47,7 +47,7 @@ def grid_imaging_weights(grid, sum_weight, uvw, weight, freq_chan, grid_parms):
 
     assert weight.shape[3] < 3, "Polarization should be PP or PP, QQ."
 
-    print("chan map ", chan_map)
+    # print("chan map ", chan_map)
 
     grid_imaging_weights_jit(
         grid,
