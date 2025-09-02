@@ -35,7 +35,7 @@ Notes
 
 from __future__ import annotations
 
-from typing import Mapping, Any, Union, Literal, Optional, Tuple
+from typing import Mapping, Any, Union, Literal, Optional, Tuple, List
 from pathlib import Path
 import dask.array as da
 
@@ -483,7 +483,13 @@ def _rasterize_shape(
     if shape == "rotbox":
         cx, cy = _parse_pair_pix(parts[0])
         w, h = _parse_two_pix_vals(parts[1])
-        ang = _parse_angle(parts[2])
+        # Require explicit rotation keyword assignment: pa=<angle> or theta_m=<angle>
+        if len(parts) != 3:
+            raise ValueError(
+                "rotbox requires angle specified as 'pa=<angle>' or 'theta_m=<angle>', "
+                "e.g., rotbox[[cx,cy],[w,h], pa=30deg]"
+            )
+        ang = _parse_angle_kv(parts[2])
         hx, hy = w / 2.0, h / 2.0
         xrp, yrp = _rotate_about(X, Y, cx, cy, -ang)
         return (np.abs(xrp - cx) <= hx) & (np.abs(yrp - cy) <= hy)
@@ -499,13 +505,43 @@ def _rasterize_shape(
     if shape == "ellipse":
         cx, cy = _parse_pair_pix(parts[0])
         a, b = _parse_two_pix_vals(parts[1])  # semi-axes in pix
-        pa = _parse_angle(parts[2])
-        xp, yp = _rotate_about(X, Y, cx, cy, -pa)
+        # Require explicit rotation keyword assignment: pa=<angle> or theta_m=<angle>
+        if len(parts) != 3:
+            raise ValueError(
+                "ellipse requires angle specified as 'pa=<angle>' or 'theta_m=<angle>', "
+                "e.g., ellipse[[cx,cy],[a,b], theta_m=30deg]"
+            )
+        ang = _parse_angle_kv(parts[2])
+        xp, yp = _rotate_about(X, Y, cx, cy, -ang)
         return ((xp - cx) / a) ** 2 + ((yp - cy) / b) ** 2 <= 1.0 + 1e-9
     if shape == "poly":
         pts = [_parse_pair_pix(p) for p in parts]
         return _point_in_poly(X, Y, pts)
     raise ValueError(f"Unsupported CRTF shape: {shape}")
+
+
+def _parse_angle_kv(token: str) -> float:
+    """
+    Parse a keyword angle assignment.
+    Accepted forms (case-insensitive):
+      - 'pa=<angle>'       : position angle measured from +y toward +x (handedness-agnostic).
+                             Converted to math angle (from +x toward +y) via (π/2 - α).
+      - 'theta_m=<angle>'  : math angle measured from +x toward +y (handedness-agnostic).
+                             No conversion.
+    <angle> may have units 'deg' or 'rad' (default is interpreted as degrees).
+    """
+    m = re.match(r"^\s*(pa|theta_m)\s*=\s*(.+?)\s*$", token, flags=re.IGNORECASE)
+    if not m:
+        raise ValueError(
+            "Rotation must be provided as 'pa=<angle>' or 'theta_m=<angle>' (e.g., pa=30deg)."
+        )
+    mode = m.group(1).lower()
+    ang_token = m.group(2)
+    ang = _parse_angle(ang_token)  # radians
+    if mode == "pa":
+        # Convert PA (from +y→+x) to math angle (from +x→+y) irrespective of handedness
+        return (math.pi / 2.0) - ang
+    return ang
 
 
 def _smart_split_pairs(inner: str) -> List[str]:

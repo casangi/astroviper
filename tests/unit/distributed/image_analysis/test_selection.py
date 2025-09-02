@@ -90,8 +90,8 @@ class TestCRTFBasics:
     @pytest.mark.parametrize(
         "shape, spec",
         [
-            ("rotbox", "rotbox[[120pix,80pix],[60pix,30pix], 30]"),
-            ("ellipse", "ellipse[[120pix,80pix],[50pix,25pix], 60]"),
+            ("rotbox", "rotbox[[120pix,80pix],[60pix,30pix], theta_m=30]"),
+            ("ellipse", "ellipse[[120pix,80pix],[50pix,25pix], theta_m=60]"),
         ],
     )
     def test_rotbox_ellipse_parse_and_nonempty(self, shape: str, spec: str) -> None:
@@ -108,7 +108,7 @@ class TestCRTFCombine:
     def test_multi_line_plus_minus_matches_boolean_ops(self) -> None:
         da = make_image(160, 160)
         circle = "circle[[100pix,70pix], 45pix]"
-        rot = "rotbox[[100pix,70pix],[40pix,20pix], 20]"
+        rot = "rotbox[[100pix,70pix],[40pix,20pix], theta_m=20]"
         extra = "box[[5pix,130pix],[55pix,150pix]]"
         crtf = f"#CRTF\n+{circle}\n-{rot}\n+{extra}"
         m_file = select_mask(da, select=crtf)
@@ -345,7 +345,7 @@ class TestCRTFFile:
         text = (
             "#CRTF\n"
             "+circle[[70pix,70pix], 40pix]\n"
-            "-rotbox[[70pix,70pix],[30pix,20pix], 30]\n"
+            "-rotbox[[70pix,70pix],[30pix,20pix], theta_m=30]\n"
             "+box[[10pix,110pix],[40pix,130pix]]\n"
         )
         p = tmp_path / "roi.crtf"
@@ -1307,7 +1307,7 @@ class TestCRTFNumericParsingErrors:
         an angle with an unsupported unit triggers "Invalid numeric token: '30xyz'".
         """
         da_img = make_image(32, 32)
-        bad = "rotbox[[12pix,8pix],[6pix,3pix], 30xyz]"
+        bad = "rotbox[[12pix,8pix],[6pix,3pix], theta_m=30xyz]"
         with pytest.raises(ValueError, match=r"Invalid numeric token: '30xyz'"):
             select_mask(da_img, select=bad)
 
@@ -1350,3 +1350,86 @@ class TestCreationAssignmentInDataArrayNumpyReturn:
         assert out.attrs.get("creation") == hint
         # ensure NumPy-backed (not dask)
         assert not hasattr(out.data, "chunks")
+
+
+class TestCombineWithCreationRenameDoubleExcept:
+    def test_rename_and_constructor_fallback_both_raise_then_pass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        Cover the LAST except-pass block inside combine_with_creation:
+            try:    combined = combined.rename({...})
+            except: try:
+                        combined = xr.DataArray(arr, dims=tmpl.dims, coords=tmpl.coords)
+                    except:
+                        pass   # this branch
+        We force both rename and the fallback constructor-with-dims to raise,
+        then ensure the function still returns a valid mask via later alignment.
+        Use public API only.
+        """
+        ny, nx = 15, 18
+        tmpl = xr.DataArray(np.zeros((ny, nx), dtype=float), dims=("row", "col"))
+        a = xr.DataArray(np.zeros((ny, nx), dtype=bool), dims=("y", "x")).assign_attrs(
+            creation="A"
+        )
+        b = xr.DataArray(np.zeros((ny, nx), dtype=bool), dims=("y", "x")).assign_attrs(
+            creation="B"
+        )
+        a.values[::2, :] = True
+        b.values[:, ::3] = True
+        exp_or = a.values | b.values
+
+        # 1) Make rename fail
+        def boom_rename(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError("simulate rename failure")
+
+        monkeypatch.setattr(xr.DataArray, "rename", boom_rename, raising=True)
+
+        # 2) Make the constructor fallback with dims fail, but allow normal constructor calls elsewhere
+        orig_init = xr.DataArray.__init__
+
+        def init_maybe_raise(self, data, *args, **kwargs):  # type: ignore[override]
+            if "dims" in kwargs:
+                raise RuntimeError("simulate constructor failure with dims")
+            return orig_init(self, data, *args, **kwargs)
+
+        monkeypatch.setattr(xr.DataArray, "__init__", init_maybe_raise, raising=True)
+
+        # Choose return_kind='dask' to avoid later xr.DataArray constructions in coercion paths.
+        out = combine_with_creation(a, "|", b, template=tmpl, return_kind="dask")
+        # Should still succeed and return a dask array, but with outer-product broadcasting
+        # because both rename and constructor-with-dims fallbacks were forced to fail.
+        assert hasattr(out, "chunks")  # dask.array.Array
+        got = np.asarray(out.compute(), dtype=bool)
+        # Expect a 4D broadcast result. Axis order may be (y,x,row,col) or (row,col,y,x)
+        # depending on xarray's alignment. Reduce along both possibilities and accept either.
+        assert got.ndim == 4
+        # Option A: last two axes are template dims
+        got2d_last = got.any(axis=-1).any(axis=-1)
+        # Option B: first two axes are template dims
+        got2d_first = got.any(axis=0).any(axis=0)
+        ok = False
+        try:
+            np.testing.assert_array_equal(got2d_last, exp_or)
+            ok = True
+        except AssertionError:
+            pass
+        if not ok:
+            np.testing.assert_array_equal(got2d_first, exp_or)
+
+
+class TestCRTFPA:
+    def test_rotbox_pa_equivalent_to_theta_m(self) -> None:
+        """
+        Cover the `mode == "pa"` branch: pa=30deg should equal theta_m=60deg
+        (since math angle = 90deg - PA).
+        """
+        ny, nx = 160, 200
+        da_img = make_image(ny, nx)
+        cx, cy = 120, 80
+        pa_txt = f"rotbox[[{cx}pix,{cy}pix],[60pix,30pix], pa=30deg]"
+        tm_txt = f"rotbox[[{cx}pix,{cy}pix],[60pix,30pix], theta_m=60deg]"
+        m_pa = select_mask(da_img, select=pa_txt)
+        m_tm = select_mask(da_img, select=tm_txt)
+        assert isinstance(m_pa, xr.DataArray) and isinstance(m_tm, xr.DataArray)
+        np.testing.assert_array_equal(m_pa.values, m_tm.values)
