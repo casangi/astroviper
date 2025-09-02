@@ -65,17 +65,19 @@ def calculate_imaging_weights(ms_xds, grid_params, imaging_weights_params, sel_p
     ]  # do not need to pad since no fft
 
     uvw = ms_xds[data_group_out["uvw"]].values
-    data_weight = ms_xds[data_group_out["weight"]].values 
-    
+    data_weight = ms_xds[data_group_out["weight"]].values
+
     # * (
     #     1 - ms_xds[data_group_out["flag"]].values
     # )
-    data_weight[ms_xds[data_group_out["flag"]] == 1] = np.nan  # Set flagged data to NaN for weighting.
+    data_weight[ms_xds[data_group_out["flag"]] == 1] = (
+        np.nan
+    )  # Set flagged data to NaN for weighting.
     freq_chan = ms_xds.frequency.values
-    
+
     if data_weight.shape[3] == 2:
         data_weight = ((data_weight[..., 0] + data_weight[..., 1]) / 2)[..., np.newaxis]
-        
+
     if data_weight.shape[3] == 4:
         data_weight = ((data_weight[..., 0] + data_weight[..., 3]) / 2)[..., np.newaxis]
 
@@ -84,7 +86,7 @@ def calculate_imaging_weights(ms_xds, grid_params, imaging_weights_params, sel_p
     n_imag_chan = data_weight.shape[2]
     weight_density_grid = np.zeros((n_imag_chan, 1, n_uv[0], n_uv[1]), dtype=np.double)
     sum_weight = np.zeros((n_imag_chan, 1), dtype=np.double)
-    
+
     grid_imaging_weights(
         weight_density_grid, sum_weight, uvw, data_weight, freq_chan, _grid_params
     )
@@ -99,10 +101,10 @@ def calculate_imaging_weights(ms_xds, grid_params, imaging_weights_params, sel_p
     imaging_weights = degrid_imaging_weights(
         weight_density_grid, uvw, data_weight, briggs_factors, freq_chan, _grid_params
     )
-    
-    #Flag data 
-    flags = np.any(ms_xds[data_group_out["flag"]], axis=-1) #
-    data_weight[flags == 1] = np.nan  
+
+    # Flag data
+    flags = np.any(ms_xds[data_group_out["flag"]], axis=-1)  #
+    data_weight[flags == 1] = np.nan
 
     ms_xds[data_group_out["weight_imaging"]] = xr.DataArray(
         imaging_weights[..., 0], dims=ms_xds[data_group_out["weight"]].dims[:-1]
