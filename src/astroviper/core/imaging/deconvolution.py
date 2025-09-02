@@ -1,7 +1,6 @@
 import numpy as np
-import xarray as xr
-from xradio.image import load_image, write_image, make_empty_sky_image
-from astroviper.imaging.deconvolver import hogbom
+#from xradio.image import load_image, write_image, make_empty_sky_image
+from astroviper.core.imaging.deconvolvers import hogbom
 
 import toolviper.utils.logger as logger
 
