@@ -45,37 +45,17 @@ py::tuple maximg_impl(
         mask_ptr = static_cast<T*>(mask_info.ptr);
     }
     
-    // Convert to float for C++ backend if needed
-    float fmin, fmax;
-    if constexpr (std::is_same_v<T, float>) {
-        // Direct path for float - no conversion needed
-        hclean::maximg(
-            static_cast<const float*>(image_info.ptr),
-            domask, static_cast<const float*>(mask_ptr),
-            nx, ny, npol,
-            fmin, fmax
-        );
-    } else {
-        // Convert double to float for backend
-        py::array_t<float> image_float = image_array.template cast<py::array_t<float>>();
-        py::array_t<float> mask_float;
-        float* mask_float_ptr = nullptr;
-        
-        if (domask) {
-            mask_float = mask_array.template cast<py::array_t<float>>();
-            mask_float_ptr = static_cast<float*>(mask_float.request().ptr);
-        }
-        
-        hclean::maximg(
-            static_cast<const float*>(image_float.request().ptr),
-            domask, mask_float_ptr,
-            nx, ny, npol,
-            fmin, fmax
-        );
-    }
+    // Call templated maximg directly with native type
+    T fmin, fmax;
+    hclean::maximg<T>(
+        static_cast<const T*>(image_info.ptr),
+        domask, static_cast<const T*>(mask_ptr),
+        nx, ny, npol,
+        fmin, fmax
+    );
     
     // Return results in original type T
-    return py::make_tuple(static_cast<T>(fmin), static_cast<T>(fmax));
+    return py::make_tuple(fmin, fmax);
 }
 
 /**
@@ -152,65 +132,20 @@ py::dict hclean_impl(
     // Create explicit 3D shape for compile-time safety
     std::vector<py::ssize_t> shape_3d = {npol, ny, nx};
     
-    // Create working arrays and convert to float for backend processing
-    py::array_t<T> dirty_copy_T, model_image_T;
-    py::array_t<float> dirty_copy_float, model_image_float, mask_float;
-    float* mask_float_ptr = nullptr;
+    // Create working arrays in native type T - no conversion needed
+    py::array_t<T> dirty_copy = py::array_t<T>(shape_3d);
+    py::array_t<T> model_image = py::array_t<T>(shape_3d);
     
-    if constexpr (std::is_same_v<T, float>) {
-        // Direct path for float - no conversion needed
-        dirty_copy_T = py::array_t<T>(shape_3d);
-        model_image_T = py::array_t<T>(shape_3d);
-        
-        // Zero-initialize and copy using safe buffer access
-        py::buffer_info model_temp_info = model_image_T.request();
-        py::buffer_info dirty_temp_info = dirty_copy_T.request();
-        std::memset(model_temp_info.ptr, 0, dirty_info.size * sizeof(T));
-        std::memcpy(dirty_temp_info.ptr, dirty_info.ptr, dirty_info.size * sizeof(T));
-        
-        // Use original arrays directly
-        dirty_copy_float = dirty_copy_T;
-        model_image_float = model_image_T;
-        if (domask) {
-            mask_float_ptr = static_cast<float*>(mask_ptr);
-        }
-    } else {
-        // Convert double to float for backend processing
-        // Create float arrays with explicit 3D shape for safety
-        dirty_copy_float = py::array_t<float>(shape_3d);
-        model_image_float = py::array_t<float>(shape_3d);
-        
-        // Copy converted data using safe buffer access
-        auto dirty_cast = dirty_image.template cast<py::array_t<float>>();
-        py::buffer_info cast_info = dirty_cast.request();
-        py::buffer_info dirty_float_info = dirty_copy_float.request();
-        py::buffer_info model_float_info = model_image_float.request();
-        std::memcpy(dirty_float_info.ptr, cast_info.ptr, dirty_info.size * sizeof(float));
-        
-        // Zero-initialize float model using safe buffer access
-        std::memset(model_float_info.ptr, 0, dirty_info.size * sizeof(float));
-        
-        if (domask) {
-            mask_float = mask_array.template cast<py::array_t<float>>();
-            mask_float_ptr = static_cast<float*>(mask_float.request().ptr);
-        }
-    }
+    // Zero-initialize and copy using safe buffer access
+    py::buffer_info model_info = model_image.request();
+    py::buffer_info dirty_copy_info = dirty_copy.request();
+    std::memset(model_info.ptr, 0, dirty_info.size * sizeof(T));
+    std::memcpy(dirty_copy_info.ptr, dirty_info.ptr, dirty_info.size * sizeof(T));
     
-    // Get buffer info for float arrays
-    py::buffer_info dirty_copy_info = dirty_copy_float.request();
-    py::buffer_info model_info = model_image_float.request();
-    
-    // Handle PSF conversion only
-    py::array_t<float> psf_float;
-    if constexpr (std::is_same_v<T, float>) {
-        psf_float = psf_array;
-    } else {
-        psf_float = psf_array.template cast<py::array_t<float>>();
-    }
     
     // Set up progress callback wrapper
-    std::function<void(int, int, int, int, int, float)> msgput_func = 
-        [progress_callback](int npol, int pol, int iter, int px, int py, float peak) {
+    std::function<void(int, int, int, int, int, T)> msgput_func = 
+        [progress_callback](int npol, int pol, int iter, int px, int py, T peak) {
             if (!progress_callback.is_none()) {
                 try {
                     progress_callback(npol, pol, iter, px, py, peak);
@@ -234,53 +169,41 @@ py::dict hclean_impl(
             }
         };
     
-    // Run CLEAN algorithm (always with float backend)
     int final_iter = start_iter;
-    hclean::hclean(
-        static_cast<float*>(model_info.ptr),           // model image output
-        static_cast<float*>(dirty_copy_info.ptr),      // dirty/residual (copy)
-        static_cast<const float*>(psf_float.request().ptr), // PSF
-        domask, mask_float_ptr,                        // mask
-        nx, ny, npol,                                  // dimensions
-        xbeg, xend, ybeg, yend,                       // clean box
-        max_iter, start_iter, final_iter,             // iteration control
-        static_cast<float>(gain), static_cast<float>(threshold), static_cast<float>(speedup), // parameters
-        msgput_func, stopnow_func                     // callbacks
+    hclean::clean<T>(
+        static_cast<T*>(model_info.ptr),           // model image output
+        static_cast<T*>(dirty_copy_info.ptr),      // dirty/residual (copy)
+        static_cast<const T*>(psf_info.ptr),       // PSF
+        domask, static_cast<const T*>(mask_ptr),   // mask
+        nx, ny, npol,                              // dimensions
+        xbeg, xend, ybeg, yend,                   // clean box
+        max_iter, start_iter, final_iter,         // iteration control
+        gain, threshold, speedup,                 // parameters
+        msgput_func, stopnow_func                 // callbacks
     );
     
-    // Convert results back to original type T if needed
-    if constexpr (std::is_same_v<T, float>) {
-        // Results are already in correct type
-        dirty_copy_T = dirty_copy_float;
-        model_image_T = model_image_float;
-    } else {
-        // Convert results from float back to double
-        dirty_copy_T = dirty_copy_float.template cast<py::array_t<T>>();
-        model_image_T = model_image_float.template cast<py::array_t<T>>();
-    }
-    
-    // Calculate total flux cleaned (in original type T)
-    py::array_t<T> model_flat = model_image_T.reshape({npol * ny * nx});
+    // Calculate total flux cleaned
+    py::array_t<T> model_flat = model_image.reshape({npol * ny * nx});
     T total_flux = static_cast<T>(0);
     T* model_data = static_cast<T*>(model_flat.request().ptr);
     for (int i = 0; i < npol * ny * nx; ++i) {
         total_flux += std::abs(model_data[i]);
     }
     
-    // Find final peak in residual (using float backend, convert result)
-    float final_min_f, final_max_f;
-    hclean::maximg(
-        static_cast<const float*>(dirty_copy_info.ptr),
-        domask, mask_float_ptr,
+    // Find final peak in residual
+    T final_min, final_max;
+    hclean::maximg<T>(
+        static_cast<const T*>(dirty_copy_info.ptr),
+        domask, static_cast<const T*>(mask_ptr),
         nx, ny, npol,
-        final_min_f, final_max_f
+        final_min, final_max
     );
-    T final_peak = static_cast<T>(std::max(std::abs(final_min_f), std::abs(final_max_f)));
+    T final_peak = std::max(std::abs(final_min), std::abs(final_max));
     
     // Return comprehensive results in original type T
     py::dict results;
-    results["model_image"] = model_image_T;
-    results["residual_image"] = dirty_copy_T;
+    results["model_image"] = model_image;
+    results["residual_image"] = dirty_copy;
     results["iterations_performed"] = final_iter;
     results["final_peak"] = final_peak;
     results["total_flux_cleaned"] = total_flux;
@@ -317,7 +240,7 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           "Find minimum and maximum values in 3D image (float32)",
           py::arg("image"), py::arg("mask") = py::array_t<float>());
     
-    m.def("hclean", &hclean_impl<float>,
+    m.def("clean", &hclean_impl<float>,
           "Hogbom CLEAN algorithm (float32)",
           py::arg("dirty_image"),
           py::arg("psf"),
@@ -331,7 +254,7 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           py::arg("progress_callback") = py::none(),
           py::arg("stop_callback") = py::none());
     
-    m.def("clean", &hclean_simple_impl<float>,
+    m.def("clean_nc", &hclean_simple_impl<float>,
           "Simple Hogbom CLEAN interface (float32)",
           py::arg("dirty_image"),
           py::arg("psf"),
@@ -345,7 +268,7 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           "Find minimum and maximum values in 3D image (float64)",
           py::arg("image"), py::arg("mask") = py::array_t<double>());
     
-    m.def("hclean", &hclean_impl<double>,
+    m.def("clean", &hclean_impl<double>,
           "Hogbom CLEAN algorithm (float64)",
           py::arg("dirty_image"),
           py::arg("psf"),
@@ -359,7 +282,7 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           py::arg("progress_callback") = py::none(),
           py::arg("stop_callback") = py::none());
     
-    m.def("clean", &hclean_simple_impl<double>,
+    m.def("clean_nc", &hclean_simple_impl<double>,
           "Simple Hogbom CLEAN interface (float64)",
           py::arg("dirty_image"),
           py::arg("psf"),
