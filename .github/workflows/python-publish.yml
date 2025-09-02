@@ -13,7 +13,7 @@ jobs:
   #       run: echo "2 PYPI_TOKEN=${{ secrets.PYPI_TOKEN }}"
 
   call-publish:
-    uses: casangi/toolviper/.github/workflows/python-publish-cpp-template.yml@main
+    uses: casangi/toolviper/.github/workflows/python-publish-cpp-v2-template.yml@main
     with:
       pypi-url: "https://pypi.org/project/astroviper"
     secrets: inherit
