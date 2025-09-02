@@ -30,15 +30,14 @@ def grid_imaging_weights(grid, sum_weight, uvw, weight, freq_chan, grid_parms):
 
     n_chan = weight.shape[2]
     chan_map = (np.arange(0, n_chan)).astype(int)
-    
-    #Always per chan weight so no longer do:
+
+    # Always per chan weight so no longer do:
     # if grid_parms["chan_mode"] == "cube":
     #     n_imag_chan = n_chan
     #     chan_map = (np.arange(0, n_chan)).astype(int)
     # else:  # continuum
     #     n_imag_chan = 1  # Making only one continuum image.
     #     chan_map = (np.zeros(n_chan)).astype(int)
-
 
     n_imag_pol = weight.shape[3]
     pol_map = (np.arange(0, n_imag_pol)).astype(int)
@@ -47,7 +46,7 @@ def grid_imaging_weights(grid, sum_weight, uvw, weight, freq_chan, grid_parms):
     delta_lm = grid_parms["cell_size"]
 
     assert weight.shape[3] < 3, "Polarization should be PP or PP, QQ."
-    
+
     print("chan map ", chan_map)
 
     grid_imaging_weights_jit(
@@ -293,7 +292,7 @@ def degrid_imaging_weights_jit(
                                 ]
                                 != 0.0
                             ):
-                                #print("a_chan, a_pol, u_center_indx, v_center_indx", a_chan, a_pol, u_center_indx, v_center_indx, grid_imaging_weight.shape)
+                                # print("a_chan, a_pol, u_center_indx, v_center_indx", a_chan, a_pol, u_center_indx, v_center_indx, grid_imaging_weight.shape)
                                 if ~np.isnan(
                                     grid_imaging_weight[
                                         a_chan, a_pol, u_center_indx, v_center_indx
