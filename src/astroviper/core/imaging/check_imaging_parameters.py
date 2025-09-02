@@ -1,153 +1,155 @@
 import numpy as np
 
-# from graphviper.parameter_checking.check_parms import check_parms
-from astroviper.utils.check_parms import check_parms
+# from graphviper.parameter_checking.check_params import check_params
+from astroviper.utils.check_params import check_params
 
 
-def check_grid_parms(grid_parms):
+def check_grid_params(grid_params):
     import numbers
 
-    parms_passed = True
+    params_passed = True
     arc_sec_to_rad = np.pi / (3600 * 180)
 
     if not (
-        check_parms(
-            grid_parms,
+        check_params(
+            grid_params,
             "image_size",
             [list],
             list_acceptable_data_types=[int],
             list_len=2,
         )
     ):
-        parms_passed = False
+        params_passed = False
     if not (
-        check_parms(
-            grid_parms,
+        check_params(
+            grid_params,
             "image_center",
             [list],
             list_acceptable_data_types=[int],
             list_len=2,
-            default=np.array(grid_parms["image_size"]) // 2,
+            default=np.array(grid_params["image_size"]) // 2,
         )
     ):
-        parms_passed = False
+        params_passed = False
     if not (
-        check_parms(
-            grid_parms,
+        check_params(
+            grid_params,
             "cell_size",
             [list],
             list_acceptable_data_types=[numbers.Number],
             list_len=2,
         )
     ):
-        parms_passed = False
+        params_passed = False
     if not (
-        check_parms(
-            grid_parms,
+        check_params(
+            grid_params,
             "fft_padding",
             [numbers.Number],
             default=1.2,
             acceptable_range=[1, 10],
         )
     ):
-        parms_passed = False
+        params_passed = False
     if not (
-        check_parms(
-            grid_parms,
+        check_params(
+            grid_params,
             "chan_mode",
             [str],
             acceptable_data=["cube", "continuum"],
             default="cube",
         )
     ):
-        parms_passed = False
+        params_passed = False
 
-    if parms_passed == True:
-        grid_parms["image_size"] = np.array(grid_parms["image_size"]).astype(int)
-        grid_parms["image_size_padded"] = (
-            grid_parms["fft_padding"] * grid_parms["image_size"]
+    if params_passed == True:
+        grid_params["image_size"] = np.array(grid_params["image_size"]).astype(int)
+        grid_params["image_size_padded"] = (
+            grid_params["fft_padding"] * grid_params["image_size"]
         ).astype(int)
-        grid_parms["image_center"] = np.array(grid_parms["image_center"])
-        # grid_parms['cell_size'] = arc_sec_to_rad * np.array(grid_parms['cell_size'])
-        # grid_parms['cell_size'][0] = -grid_parms['cell_size'][0]
+        grid_params["image_center"] = np.array(grid_params["image_center"])
+        # grid_params['cell_size'] = arc_sec_to_rad * np.array(grid_params['cell_size'])
+        # grid_params['cell_size'][0] = -grid_params['cell_size'][0]
 
-    return parms_passed
+    return params_passed
 
 
 ##################### Function Specific Parms #####################
-def check_gcf_parms(gcf_parms):
+def check_gcf_params(gcf_params):
     import numbers
 
-    parms_passed = True
+    params_passed = True
 
     if not (
-        check_parms(
-            gcf_parms,
+        check_params(
+            gcf_params,
             "function",
             [str],
             acceptable_data=["casa_airy", "airy"],
             default="casa_airy",
         )
     ):
-        parms_passed = False
+        params_passed = False
     if not (
-        check_parms(
-            gcf_parms,
+        check_params(
+            gcf_params,
             "freq_chan",
             [list, np.array],
             list_acceptable_data_types=[numbers.Number],
             list_len=-1,
         )
     ):
-        parms_passed = False
+        params_passed = False
     if not (
-        check_parms(
-            gcf_parms,
+        check_params(
+            gcf_params,
             "list_dish_diameters",
             [list, np.array],
             list_acceptable_data_types=[numbers.Number],
             list_len=-1,
         )
     ):
-        parms_passed = False
+        params_passed = False
     if not (
-        check_parms(
-            gcf_parms,
+        check_params(
+            gcf_params,
             "list_blockage_diameters",
             [list, np.array],
             list_acceptable_data_types=[numbers.Number],
             list_len=-1,
         )
     ):
-        parms_passed = False
+        params_passed = False
     if not (
-        check_parms(
-            gcf_parms,
+        check_params(
+            gcf_params,
             "unique_ant_indx",
             [list, np.array],
             list_acceptable_data_types=[numbers.Number],
             list_len=-1,
         )
     ):
-        parms_passed = False
+        params_passed = False
 
     if not (
-        check_parms(
-            gcf_parms,
+        check_params(
+            gcf_params,
             "pol",
             [list, np.array],
             list_acceptable_data_types=[numbers.Number, str],
             list_len=-1,
         )
     ):
-        parms_passed = False
+        params_passed = False
     if not (
-        check_parms(gcf_parms, "chan_tolerance_factor", [numbers.Number], default=0.005)
+        check_params(
+            gcf_params, "chan_tolerance_factor", [numbers.Number], default=0.005
+        )
     ):
-        parms_passed = False
+        params_passed = False
     if not (
-        check_parms(
-            gcf_parms,
+        check_params(
+            gcf_params,
             "oversampling",
             [list, np.array],
             list_acceptable_data_types=[int],
@@ -155,10 +157,10 @@ def check_gcf_parms(gcf_parms):
             default=[10, 10],
         )
     ):
-        parms_passed = False
+        params_passed = False
     if not (
-        check_parms(
-            gcf_parms,
+        check_params(
+            gcf_params,
             "max_support",
             [list, np.array],
             list_acceptable_data_types=[int],
@@ -166,207 +168,214 @@ def check_gcf_parms(gcf_parms):
             default=[15, 15],
         )
     ):
-        parms_passed = False
-    # if not(check_parms(gcf_parms, 'image_phase_center', [list,np.array], list_acceptable_data_types=[numbers.Number], list_len=2)): parms_passed = False
+        params_passed = False
+    # if not(check_params(gcf_params, 'image_phase_center', [list,np.array], list_acceptable_data_types=[numbers.Number], list_len=2)): params_passed = False
     if not (
-        check_parms(
-            gcf_parms, "support_cut_level", [numbers.Number], default=2.5 * 10**-2
+        check_params(
+            gcf_params, "support_cut_level", [numbers.Number], default=2.5 * 10**-2
         )
     ):
-        parms_passed = False
-    if not (check_parms(gcf_parms, "a_chan_num_chunk", [int], default=3)):
-        parms_passed = False
+        params_passed = False
+    if not (check_params(gcf_params, "a_chan_num_chunk", [int], default=3)):
+        params_passed = False
 
-    if gcf_parms["function"] == "airy" or gcf_parms["function"] == "casa_airy":
+    if gcf_params["function"] == "airy" or gcf_params["function"] == "casa_airy":
         if not (
-            check_parms(
-                gcf_parms,
+            check_params(
+                gcf_params,
                 "list_dish_diameters",
                 [list, np.array],
                 list_acceptable_data_types=[numbers.Number],
                 list_len=-1,
             )
         ):
-            parms_passed = False
+            params_passed = False
         if not (
-            check_parms(
-                gcf_parms,
+            check_params(
+                gcf_params,
                 "list_blockage_diameters",
                 [list, np.array],
                 list_acceptable_data_types=[numbers.Number],
                 list_len=-1,
             )
         ):
-            parms_passed = False
+            params_passed = False
 
-        if len(gcf_parms["list_dish_diameters"]) != len(
-            gcf_parms["list_blockage_diameters"]
+        if len(gcf_params["list_dish_diameters"]) != len(
+            gcf_params["list_blockage_diameters"]
         ):
             print(
                 "######### ERROR:Parameter ",
                 "list_dish_diameters and list_blockage_diameters must be the same length.",
             )
-            parms_passed = False
+            params_passed = False
 
-    if parms_passed == True:
-        gcf_parms["oversampling"] = np.array(gcf_parms["oversampling"]).astype(int)
-        gcf_parms["max_support"] = np.array(gcf_parms["max_support"]).astype(int)
-        # gcf_parms['image_phase_center'] =  np.array(gcf_parms['image_phase_center'])
-        gcf_parms["freq_chan"] = np.array(gcf_parms["freq_chan"])
-        gcf_parms["list_dish_diameters"] = np.array(gcf_parms["list_dish_diameters"])
-        gcf_parms["list_blockage_diameters"] = np.array(
-            gcf_parms["list_blockage_diameters"]
+    if params_passed == True:
+        gcf_params["oversampling"] = np.array(gcf_params["oversampling"]).astype(int)
+        gcf_params["max_support"] = np.array(gcf_params["max_support"]).astype(int)
+        # gcf_params['image_phase_center'] =  np.array(gcf_params['image_phase_center'])
+        gcf_params["freq_chan"] = np.array(gcf_params["freq_chan"])
+        gcf_params["list_dish_diameters"] = np.array(gcf_params["list_dish_diameters"])
+        gcf_params["list_blockage_diameters"] = np.array(
+            gcf_params["list_blockage_diameters"]
         )
-        gcf_parms["unique_ant_indx"] = np.array(gcf_parms["unique_ant_indx"])
-        # gcf_parms['basline_ant'] =  np.array(gcf_parms['basline_ant'])
-        gcf_parms["pol"] = np.array(gcf_parms["pol"])
+        gcf_params["unique_ant_indx"] = np.array(gcf_params["unique_ant_indx"])
+        # gcf_params['basline_ant'] =  np.array(gcf_params['basline_ant'])
+        gcf_params["pol"] = np.array(gcf_params["pol"])
 
-    return parms_passed
-
-
-def check_mosaic_pb_parms(pb_mosaic_parms):
-    parms_passed = True
-
-    if not (check_parms(pb_mosaic_parms, "pb_name", [str], default="PB")):
-        parms_passed = False
-
-    if not (check_parms(pb_mosaic_parms, "weight_name", [str], default="WEIGHT_PB")):
-        parms_passed = False
-
-    return parms_passed
+    return params_passed
 
 
-def check_rotation_parms(rotation_parms):
+def check_mosaic_pb_params(pb_mosaic_params):
+    params_passed = True
+
+    if not (check_params(pb_mosaic_params, "pb_name", [str], default="PB")):
+        params_passed = False
+
+    if not (check_params(pb_mosaic_params, "weight_name", [str], default="WEIGHT_PB")):
+        params_passed = False
+
+    return params_passed
+
+
+def check_rotation_params(rotation_params):
     import numbers
 
-    parms_passed = True
+    params_passed = True
 
     if not (
-        check_parms(
-            rotation_parms,
+        check_params(
+            rotation_params,
             "new_phase_center",
             [list],
             list_acceptable_data_types=[numbers.Number],
             list_len=2,
         )
     ):
-        parms_passed = False
+        params_passed = False
 
     if not (
-        check_parms(rotation_parms, "common_tangent_reprojection", [bool], default=True)
+        check_params(
+            rotation_params, "common_tangent_reprojection", [bool], default=True
+        )
     ):
-        parms_passed = False
+        params_passed = False
 
-    if not (check_parms(rotation_parms, "single_precision", [bool], default=True)):
-        parms_passed = False
+    if not (check_params(rotation_params, "single_precision", [bool], default=True)):
+        params_passed = False
 
-    return parms_passed
+    return params_passed
 
 
-def check_norm_parms(norm_parms):
+def check_norm_params(norm_params):
     import numbers
 
-    parms_passed = True
+    params_passed = True
 
     if not (
-        check_parms(
-            norm_parms,
+        check_params(
+            norm_params,
             "norm_type",
             [str],
             default="flat_sky",
             acceptable_data=["flat_noise", "flat_sky", "none"],
         )
     ):
-        parms_passed = False
+        params_passed = False
 
-    if not (check_parms(norm_parms, "single_precision", [bool], default=True)):
-        parms_passed = False
+    if not (check_params(norm_params, "single_precision", [bool], default=True)):
+        params_passed = False
 
-    if not (check_parms(norm_parms, "pb_limit", [numbers.Number], default=0.2)):
-        parms_passed = False
+    if not (check_params(norm_params, "pb_limit", [numbers.Number], default=0.2)):
+        params_passed = False
 
-    return parms_passed
+    return params_passed
 
 
-def check_imaging_weights_parms(imaging_weights_parms):
+def check_imaging_weights_params(imaging_weights_params):
     import numbers
 
-    parms_passed = True
+    params_passed = True
     arc_sec_to_rad = np.pi / (3600 * 180)
 
     if not (
-        check_parms(
-            imaging_weights_parms,
+        check_params(
+            imaging_weights_params,
             "weighting",
             [str],
             acceptable_data=["natural", "uniform", "briggs", "briggs_abs"],
             default="natural",
         )
     ):
-        parms_passed = False
+        params_passed = False
 
-    if imaging_weights_parms["weighting"] == "briggs_abs":
+    if imaging_weights_params["weighting"] == "briggs_abs":
         if not (
-            check_parms(
-                imaging_weights_parms, "briggs_abs_noise", [numbers.Number], default=1.0
+            check_params(
+                imaging_weights_params,
+                "briggs_abs_noise",
+                [numbers.Number],
+                default=1.0,
             )
         ):
-            parms_passed = False
+            params_passed = False
 
-    if (imaging_weights_parms["weighting"] == "briggs") or (
-        imaging_weights_parms["weighting"] == "briggs_abs"
+    if (imaging_weights_params["weighting"] == "briggs") or (
+        imaging_weights_params["weighting"] == "briggs_abs"
     ):
         if not (
-            check_parms(
-                imaging_weights_parms,
+            check_params(
+                imaging_weights_params,
                 "robust",
                 [numbers.Number],
                 default=0.5,
                 acceptable_range=[-2, 2],
             )
         ):
-            parms_passed = False
+            params_passed = False
 
-    return parms_passed
+    return params_passed
 
 
-def check_pb_parms(img_dataset, pb_parms):
+def check_pb_params(img_dataset, pb_params):
     import numbers
 
-    parms_passed = True
+    params_passed = True
     arc_sec_to_rad = np.pi / (3600 * 180)
 
-    # if not(check_parms(pb_parms, 'pb_name', [str], default='PB')): parms_passed = False
+    # if not(check_params(pb_params, 'pb_name', [str], default='PB')): params_passed = False
 
-    if not (check_parms(pb_parms, "function", [str], default="casa_airy")):
-        parms_passed = False
+    if not (check_params(pb_params, "function", [str], default="casa_airy")):
+        params_passed = False
 
     if not (
-        check_parms(
-            pb_parms,
+        check_params(
+            pb_params,
             "list_dish_diameters",
             [list],
             list_acceptable_data_types=[numbers.Number],
             list_len=-1,
         )
     ):
-        parms_passed = False
+        params_passed = False
     if not (
-        check_parms(
-            pb_parms,
+        check_params(
+            pb_params,
             "list_blockage_diameters",
             [list],
             list_acceptable_data_types=[numbers.Number],
             list_len=-1,
         )
     ):
-        parms_passed = False
+        params_passed = False
 
-    if len(pb_parms["list_dish_diameters"]) != len(pb_parms["list_blockage_diameters"]):
+    if len(pb_params["list_dish_diameters"]) != len(
+        pb_params["list_blockage_diameters"]
+    ):
         print(
             "######### ERROR:Parameter ",
             "list_dish_diameters and list_blockage_diameters must be the same length.",
         )
-        parms_passed = False
+        params_passed = False
 
-    return parms_passed
+    return params_passed
