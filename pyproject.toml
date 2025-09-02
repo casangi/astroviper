@@ -1,6 +1,6 @@
 [project]
 name = "astroviper"
-version = "0.0.23"
+version = "0.0.24"
 description = "Astro Visibility and Image Parallel Execution Reduction"
 authors = [{ name = "Jan-Willem Steeb", email = "jsteeb@nrao.edu" }]
 license = { file = "LICENSE.txt" }
