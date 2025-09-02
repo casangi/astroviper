@@ -53,23 +53,40 @@ __all__ = ["select_mask", "apply_select", "combine_with_creation"]
 def apply_select(
     data: ArrayLike, select: Any | None = None, mask_source: Any | None = None
 ) -> ArrayLike:
-    """Return ``data`` with ``select`` applied.
-
-    ``data`` must be a ``numpy.ndarray`` or ``xarray.DataArray``.
-    For ``xarray.DataArray``, the mask is broadcast/aligned by dimension names.
-    For ``numpy.ndarray``, the mask must be broadcastable by shape.
+    """
+    Apply a selection mask to ``data`` and return a masked array/DataArray.
 
     Parameters
     ----------
-    return_kind
-        Desired output type:
-        - ``"numpy"`` → ``np.ndarray`` (bool)
-        - ``"dask"`` → ``dask.array.Array`` (bool)
-        - ``"dataarray-numpy"`` → ``xr.DataArray`` backed by NumPy
-        - ``"dataarray-dask"`` (default) → ``xr.DataArray`` backed by Dask
-    dask_chunks
-        Optional chunk spec when constructing dask arrays. If omitted, try to
-        mirror ``data.chunks`` when available, else use sensible defaults.
+    data : numpy.ndarray or xarray.DataArray
+        Image-like array to mask. May be NumPy-backed or Dask-backed when DataArray.
+    select : None | bool array-like | str | pathlib.Path
+        Selection to apply. Supported forms:
+          - ``None``: keep everything (no-op).
+          - Boolean array-like (NumPy/xarray/Dask): broadcast/aligned to ``data``.
+          - CRTF text (pixel units) such as ``"#CRTF\\nbox[[x1pix,y1pix],[x2pix,y2pix]]"``.
+          - Named-mask expression using bitwise ops ``& | ^ ~`` over names from ``mask_source``.
+          - Backticked path or ``pathlib.Path`` to a CRTF file (e.g., ``"`regions.crtf`"`` or ``Path("regions.crtf")``).
+    mask_source : Mapping[str, array-like] | xarray.Dataset | None
+        Source of named masks referenced by expressions. Only boolean-ish arrays are used.
+
+    Returns
+    -------
+    numpy.ndarray or xarray.DataArray
+        Same container type as ``data``:
+          - If ``data`` is an ``xarray.DataArray``, returns a DataArray with values
+            outside the selection set to NaN via ``data.where(mask)``. Dims/coords
+            are preserved. If the input is Dask-backed, the result remains lazy.
+          - If ``data`` is a NumPy ``ndarray``, returns an array where values outside
+            the selection are NaN (via ``np.where``). If the input dtype cannot
+            represent NaN (e.g., integer), the result is upcast to a floating dtype.
+
+    Notes
+    -----
+    - For xarray inputs, masks are aligned by dimension names; for NumPy inputs,
+      masks must be broadcastable by shape.
+    - In mask construction, NaNs in numeric arrays are treated as False.
+    - Expressions support only ``~``, ``&``, ``|``, ``^`` and parentheses; ``and``/``or`` are rejected.
     """
     mask = select_mask(data, select=select, mask_source=mask_source)
     if isinstance(data, xr.DataArray):

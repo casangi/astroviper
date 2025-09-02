@@ -854,7 +854,7 @@ class TestReturnKinds:
         out = select_mask(data_da, select=mask_np_da, return_kind="dask")
         assert isinstance(out, da.Array)
         assert out.dtype == bool and out.shape == (ny, nx)
-        # We don't assert exact chunking (implementation-defined fallback), only that it succeede
+        # We don't assert exact chunking (implementation-defined fallback), only that it succeeded
 
     def test_dataarray_numpy_else_branch_creation_attached_and_printed(
         self, capsys: pytest.CaptureFixture[str]
