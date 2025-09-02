@@ -59,4 +59,4 @@ target_compile_definitions(_hogbom_ext PRIVATE
 )
 
 # Install the module in the python package directory
-install(TARGETS _hogbom_ext DESTINATION astroviper/core/imaging/deconvolver/hogbom)
+install(TARGETS _hogbom_ext DESTINATION astroviper/core/imaging/deconvolvers/hogbom)
