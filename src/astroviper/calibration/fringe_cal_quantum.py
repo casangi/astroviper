@@ -1,5 +1,5 @@
-from xradio.measurement_set.processing_set import ProcessingSet
-from xradio.measurement_set.measurement_set_xds import MeasurementSetXds
+from xradio.measurement_set.processing_set_xdt import ProcessingSetXdt
+from xradio.measurement_set.measurement_set_xdt import MeasurementSetXdt
 
 import dask
 import numpy as np
@@ -18,8 +18,8 @@ def unique(s):
             u.append(c)
     return u
 
-def make_empty_cal_quantum(xds: MeasurementSetXds):
-    """W
+def make_empty_cal_quantum(xds: MeasurementSetXdt):
+    """
 args: xds, the measurement set used to get the axes we need for our calibration quantum
     """
     pols_ant = unique(''.join([c for c in ''.join(xds.polarization.values)]))
@@ -62,7 +62,7 @@ class SingleFringeJones(object):
         """
 """
         self.q = q
-    def calc_antenna_jones(self, xds: MeasurementSetXds):
+    def calc_antenna_jones(self, xds: MeasurementSetXdt):
         # We scrape all the metadata from an xds. Maybe this is wise, maybe not.
         frequency = xds.frequency
         ref_freq = self.q.frequency.values[0]
@@ -103,14 +103,20 @@ class SingleFringeJones(object):
         jones_diags_right = (np.transpose(jones_diags_right, axes=(0, 1, 2, 4, 3))).conj()
         return jones_diags_right
     def get_ant_to_baseline_maps(self, xds):
+        # Both antenna?_name values are n_baseline long
         baseline_antenna1_name = xds.baseline_antenna1_name.values
         baseline_antenna2_name = xds.baseline_antenna2_name.values
+        # We make a map of antenna name to number:
         antennas = xds.antenna_xds.antenna_name.values
-        ant_num_map = {n: i for i, n in enumerate(antennas)} 
+        ant_num_map = {n: i for i, n in enumerate(antennas)}
+        # Now we make n_baseline long list of left indices 
         left_indices = [ant_num_map[n] for n in baseline_antenna1_name]
+        # And the same for right indices
         right_indices = [ant_num_map[n] for n in baseline_antenna2_name]
         return left_indices, right_indices
     def apply_cal(self, xds):
+        if len(xds.time.values) == 0:
+            return xds
         antenna_jones = self.calc_antenna_jones(xds)
         left_indices, right_indices = self.get_ant_to_baseline_maps(xds)
         # v has shape (n_time, n_baseline, n_freq, 2, 2)
@@ -132,20 +138,17 @@ class SingleFringeJones(object):
         # Now we add the new data group:
         xds.attrs['data_groups']['calibrated'] = {'correlated_data' : 'VISIBILITY_CORRECTED',
                                                   'flag' : 'FLAG',
-                                                  'weight' : 'WEIGHT_IMAGING',
+                                                  'weight' : 'WEIGHT',
                                                   'uvw' : 'UVW'}
         return new_xds
        
-def apply_cal_ps(ps: ProcessingSet, res: list[xa.DataArray], unixtime: float, interval: float):
+def apply_cal_ps(ps: ProcessingSetXdt, res: list[xa.DataArray], unixtime: float, interval: float):
     """I suspect this is the wrong API"""
-    ps2 = ps.ms_sel(time=slice(unixtime, unixtime+interval)) 
-    ps3 = {k : v for k, v in ps2.items() if len(v.time.values) != 0}
-    ps4 = ProcessingSet({})
-    for k, xds in ps3.items():
+    ps2 = ps.sel(time=slice(unixtime, unixtime+interval)) 
+    for k, xds in ps2.items():
         cal = [q for q in res if q.spectral_window_name==xds.frequency.spectral_window_name][0]
         sfj = SingleFringeJones(cal)
         new_xds = sfj.apply_cal(xds)
-        ps4[k] = new_xds
-    return ps4
+    return ps2
 
     
