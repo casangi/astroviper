@@ -1,4 +1,4 @@
-from xradio.measurement_set.processing_set import ProcessingSet
+from xradio.measurement_set.processing_set_xdt import ProcessingSetXdt
 from xradio.measurement_set.open_processing_set import open_processing_set
 
 from graphviper.graph_tools.map import map
@@ -73,7 +73,8 @@ def _fringe_node_task(input_params: Dict):
         np.fft.fft2(pad, axes=(0,2)),
         axes=(0,2))
     npols = normed.shape[-1]
-    spw = xds.partition_info['spectral_window_name']
+    part_info = xds.ms.get_partition_info()
+    spw = part_info['spectral_window_name']
     t = xds.time[0].values
     for i, bl in enumerate(ref_bls):
         if not bl: continue
@@ -101,7 +102,7 @@ def _fringe_node_task(input_params: Dict):
             q.SNR.loc[dict(antenna_name=ant, polarization=allpols[p])] = [peak, peak, peak]
     return q
 
-def _fringefit_single(ps: ProcessingSet, node_task_data_mapping: Dict, sub_selection: Dict, ref_ant: str):
+def _fringefit_single(ps: ProcessingSetXdt, node_task_data_mapping: Dict, sub_selection: Dict, ref_ant: str):
     """Fringefits a 
 
 """    
@@ -120,11 +121,13 @@ def _fringefit_single(ps: ProcessingSet, node_task_data_mapping: Dict, sub_selec
     [res] = dask.compute(dask_graph)
     return res
 
-def fringefit_ps(ps: ProcessingSet, ref_ant: str, unixtime: float, interval: float):
-    """Fringefits a ProcessingSet for a time slice, handling each spw separately.
 
-Currently assumes that each there will be one xds for each spw in the ProcessingSet."""
-    ps2 = ps.ms_sel(time=slice(unixtime, unixtime+interval))
+def fringefit_ps(ps: ProcessingSetXdt, ref_ant: str, unixtime: float, interval: float):
+    """Fringefits a ProcessingSetXdt for a time slice, handling each spw separately.
+
+Currently assumes that each there will be one xds for each spw in the ProcessingSetXdt."""
+    ps2 = ps.sel(time=slice(unixtime, unixtime+interval))
+    # J-W disapproves of filtering and we should instead make sure the task does the appropriate amount of nothing on them
     # We manually filter out the empty xdses:
     ps3 = {k : v for k, v in ps2.items() if len(v.time.values) != 0}
     # We need an xds to extract baseline_ids from; just grab the first one from ps3
