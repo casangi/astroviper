@@ -192,6 +192,11 @@ void clean(T* limage, T* limagestep, const T* lpsf,
                     // C++: lpsf[(ny/2 + iy - py) * nx + (nx/2 + ix - px)]
                     int psf_x = nx / 2 + ix - px;
                     int psf_y = ny / 2 + iy - py;
+
+                    // Check if psf_x and psf_y are within bounds
+                    if (psf_x < 0 || psf_x >= nx || psf_y < 0 || psf_y >= ny) {
+                        continue; // Skip out-of-bounds
+                    }
                     
                     limagestep[pol * ny * nx + iy * nx + ix] -= 
                         pv * lpsf[psf_y * nx + psf_x];

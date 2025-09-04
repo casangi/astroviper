@@ -94,7 +94,7 @@ def hogbom_clean(dirty_image_xds, psf_xds, deconv_params, output_dir="."):
     model_xds = dirty_image_xds.copy(deep=True)
     residual_xds = dirty_image_xds.copy(deep=True)
 
-    # Deconvolution will loop over each time, chan, pol slice
+    # Deconvolution will loop over each time, chan, slice
     for tt in range(ntime):
         for cc in range(nchan):
             dirty_slice = dirty_image_xds["SKY"].isel(time=tt, frequency=cc).values
@@ -122,7 +122,7 @@ def hogbom_clean(dirty_image_xds, psf_xds, deconv_params, output_dir="."):
                 progress_callback=progress_callback,
             )
 
-            model_xds["SKY"][tt, cc, :, :] = results["model_image"]
-            residual_xds["SKY"][tt, cc, :, :] = results["residual_image"]
+            model_xds["SKY"][tt, cc, ...] = results["model_image"]
+            residual_xds["SKY"][tt, cc, ...] = results["residual_image"]
 
     return results
