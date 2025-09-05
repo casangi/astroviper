@@ -2480,6 +2480,8 @@ class TestAutoSeedingPixelElsePublicAPI:
             *,
             x1d=None,
             y1d=None,
+            mask2d=None,
+            **kwargs,
         ):
             return _orig_fit(
                 z2d,
@@ -2491,6 +2493,8 @@ class TestAutoSeedingPixelElsePublicAPI:
                 max_nfev,
                 x1d=None,
                 y1d=None,
+                mask2d=mask2d,
+                **kwargs,
             )
 
         monkeypatch.setattr(
@@ -2607,3 +2611,106 @@ class TestWorldSeeding:
         # Centers recovered in WORLD coordinates.
         assert np.isclose(float(ds["x0_world"]), x0_true, atol=1.0)
         assert np.isclose(float(ds["y0_world"]), y0_true, atol=1.0)
+
+
+
+# ------------------------- masking (public API) -------------------------
+
+
+class TestMaskingPublicAPI:
+    def test_mask_excludes_peak_boolean_public_api(self) -> None:
+        """
+        Two bright pixels; mask excludes the brighter one.
+        Fit should lock onto the unmasked peak.
+        """
+        ny, nx = 12, 14
+        z = np.zeros((ny, nx), dtype=float)
+        yA, xA, vA = 3, 2, 10.0  # brighter, but will be masked out
+        yB, xB, vB = 8, 11, 9.0  # should be selected
+        z[yA, xA] = vA
+        z[yB, xB] = vB
+        da = xr.DataArray(z, dims=("y", "x"))
+
+        mask = np.ones((ny, nx), dtype=bool)
+        mask[yA, xA] = False  # exclude the brighter peak
+
+        ds = fit_multi_gaussian2d(
+            da,
+            n_components=1,
+            initial_guesses=None,
+            mask=mask,
+            coord_type="pixel",
+            return_model=False,
+            return_residual=False,
+        )
+        assert bool(ds["success"])
+
+        # Expect center near the unmasked (xB, yB)
+        x0 = float(np.ravel(ds["x0_pixel"].values)[0])
+        y0 = float(np.ravel(ds["y0_pixel"].values)[0])
+        assert abs(x0 - xB) < 1.0
+        assert abs(y0 - yB) < 1.0
+
+    def test_mask_broadcasts_yx_over_stack_public_api(self) -> None:
+        """
+        (y,x) mask should broadcast across a stacked cube.
+        """
+        ny, nx, nt = 10, 10, 3
+        z = np.zeros((ny, nx), dtype=float)
+        yA, xA, vA = 2, 2, 10.0  # masked out
+        yB, xB, vB = 6, 7, 9.0   # should be selected across all time slices
+        z[yA, xA] = vA
+        z[yB, xB] = vB
+        planes = [xr.DataArray(z.copy(), dims=("y", "x")) for _ in range(nt)]
+        cube = xr.concat(planes, dim="time")
+
+        mask = np.ones((ny, nx), dtype=bool)
+        mask[yA, xA] = False  # exclude A globally; should broadcast to all 'time'
+
+        ds = fit_multi_gaussian2d(
+            cube,
+            n_components=1,
+            initial_guesses=None,
+            mask=mask,
+            coord_type="pixel",
+            return_model=False,
+            return_residual=False,
+        )
+        assert "time" in ds.dims and ds.sizes["time"] == nt
+        assert np.all(ds["success"].values)
+
+        # Flatten in case dims are (time, component)
+        x0 = np.ravel(ds["x0_pixel"].values)
+        y0 = np.ravel(ds["y0_pixel"].values)
+        assert x0.size == nt and y0.size == nt
+        assert np.all(np.abs(x0 - xB) < 1.0)
+        assert np.all(np.abs(y0 - yB) < 1.0)
+
+    def test_mask_and_threshold_empty_after_and_raises_public_api(self) -> None:
+        """
+        Mask ∧ threshold can empty the usable set → ValueError.
+        Without the mask this would pass (bright pixel >= min_threshold),
+        but masking that pixel removes all candidates.
+        """
+        ny, nx = 8, 9
+        z = np.zeros((ny, nx), dtype=float)
+        yP, xP, vP = 3, 5, 10.0
+        z[yP, xP] = vP
+        da = xr.DataArray(z, dims=("y", "x"))
+
+        mask = np.ones((ny, nx), dtype=bool)
+        mask[yP, xP] = False  # remove the only pixel that would pass threshold
+
+        with pytest.raises(ValueError) as excinfo:
+            fit_multi_gaussian2d(
+                da,
+                n_components=1,
+                initial_guesses=None,
+                mask=mask,
+                min_threshold=5.0,  # would keep only (yP,xP) if not masked
+                coord_type="pixel",
+                return_model=False,
+                return_residual=False,
+            )
+        # Implementation message mentions thresholding; we just check the empty mask semantics
+        assert "removed all pixels" in str(excinfo.value)

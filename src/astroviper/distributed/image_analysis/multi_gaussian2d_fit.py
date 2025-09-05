@@ -491,6 +491,7 @@ def _fit_multi_plane_numpy(
     *,
     x1d: Optional[np.ndarray] = None,
     y1d: Optional[np.ndarray] = None,
+    mask2d: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Fit N Gaussians + shared offset to a single 2-D plane.
@@ -502,7 +503,7 @@ def _fit_multi_plane_numpy(
     perr : (1 + 6N,)
         1-sigma uncertainties from the covariance diagonal (NaN on failure).
     mask : (ny,nx) bool
-        Mask used during fitting (thresholds).
+        Mask used during fitting (user mask ∧ thresholds).
     """
     if z2d.ndim != 2:
         # cannot cover using public API, defensive coding
@@ -524,8 +525,13 @@ def _fit_multi_plane_numpy(
         x_rng = (float(np.min(x1d)), float(np.max(x1d)))
         y_rng = (float(np.min(y1d)), float(np.max(y1d)))
 
-    # thresholds
-    mask = np.ones_like(z2d, dtype=bool)
+    # user mask + thresholds
+    if mask2d is None:
+        mask = np.ones_like(z2d, dtype=bool)
+    else:
+        mask = np.asarray(mask2d, dtype=bool).copy()
+        if mask.shape != z2d.shape:
+            raise ValueError("mask shape must match the 2-D plane being fit.")
     if min_threshold is not None:
         mask &= z2d >= min_threshold
     if max_threshold is not None:
@@ -543,9 +549,11 @@ def _fit_multi_plane_numpy(
             "Thresholding resulted in not enough pixels being left to fit all parameters"
         )
 
-    # seeds & bounds
+    # Seed parameters — honor user/threshold mask during seeding
+    # (mask already combines user mask & threshold cuts above)
+    z2d_for_seed = np.where(mask, z2d, np.nan)
     p0 = _normalize_initial_guesses(
-        z2d,
+        z2d_for_seed,
         n_components,
         initial_guesses,
         min_threshold,
@@ -553,6 +561,7 @@ def _fit_multi_plane_numpy(
         x1d=x1d,
         y1d=y1d,
     )
+
     lb0, ub0 = _default_bounds_multi((ny, nx), n_components, x_rng=x_rng, y_rng=y_rng)
     lb, ub = _merge_bounds_multi(lb0, ub0, bounds, n_components)
 
@@ -608,6 +617,7 @@ def _fit_multi_plane_numpy(
 
 def _multi_fit_plane_wrapper(
     z2d: np.ndarray,
+    mask2d: np.ndarray,
     y1d: np.ndarray,
     x1d: np.ndarray,
     n_components: int,
@@ -640,6 +650,7 @@ def _multi_fit_plane_wrapper(
         max_nfev=max_nfev,
         x1d=x1d,
         y1d=y1d,
+        mask2d=mask2d,
     )
 
     ny, nx = z2d.shape
@@ -1184,6 +1195,7 @@ def fit_multi_gaussian2d(
     n_components: int,
     dims: Optional[Sequence[Union[str, int]]] = None,
     *,
+    mask: Optional[ArrayOrDA] = None,
     min_threshold: Optional[Number] = None,
     max_threshold: Optional[Number] = None,
     initial_guesses: Optional[
@@ -1220,6 +1232,11 @@ def fit_multi_gaussian2d(
 
     dims: Sequence[str | int] | None
       Two dims (names or indices) that define the fit plane (x, y). If omitted: uses ('x','y') if present; else for 2-D uses (last, second-last). Required for ndim ≠ 2 without ('x','y').
+
+    mask: numpy.ndarray | dask.array.Array | xarray.DataArray | None
+      Optional boolean mask. **True keeps** a pixel. If 2-D with dims (y, x), it is
+      broadcast across leading dims; if it matches the full array shape, it is used
+      elementwise. Combined with thresholds as: `final_mask = mask ∧ (>= min_threshold) ∧ (<= max_threshold)`.
 
     min_threshold: float | None
       Inclusive lower threshold; pixels with values < min_threshold are ignored during the fit.
@@ -1330,6 +1347,24 @@ def fit_multi_gaussian2d(
     )
     core = [dim_y, dim_x]
 
+    # Resolve mask into a boolean DataArray aligned to da_tr
+    if mask is None:
+        mask_da = xr.ones_like(da_tr, dtype=bool)
+    else:
+        if isinstance(mask, xr.DataArray):
+            mda = mask
+        else:
+            # Support 2-D (y,x) or full-shape masks
+            _m = mask
+            if getattr(_m, "ndim", None) == 2:
+                mda = xr.DataArray(_m, dims=[dim_y, dim_x])
+            else:
+                mda = xr.DataArray(_m, dims=da_tr.dims)
+        mda = mda.astype(bool)
+        # Align & broadcast to data
+        mda, _ = xr.align(mda, da_tr, join="right")
+        mask_da = mda
+
     # 2a) Determine axis signs from coords (or defaults)
     cx = np.asarray(da_tr.coords[dim_x].values) if dim_x in da_tr.coords else None
     cy = np.asarray(da_tr.coords[dim_y].values) if dim_y in da_tr.coords else None
@@ -1433,9 +1468,10 @@ def fit_multi_gaussian2d(
     results = xr.apply_ufunc(
         _multi_fit_plane_wrapper,
         da_tr,
+        mask_da,
         y1d_da,
         x1d_da,
-        input_core_dims=[core, [dim_y], [dim_x]],
+        input_core_dims=[core, core, [dim_y], [dim_x]],
         output_core_dims=out_core_dims,
         vectorize=True,
         dask="parallelized",
