@@ -115,11 +115,13 @@ def hogbom_clean(dirty_image_xds, psf_xds, deconv_params, output_dir="."):
             results = hogbom.clean(
                 dirty_image=dirty_slice,
                 psf=psf_slice,
+                mask = np.array([], dtype=np.float32),
                 gain=deconv_params["gain"],
                 threshold=deconv_params["threshold"],
                 max_iter=deconv_params["niter"],
-                clean_box=deconv_params["clean_box"],
+                clean_box=deconv_params["clean_box"] or (-1,-1,-1,-1),
                 progress_callback=progress_callback,
+                stop_callback=None,
             )
 
             model_xds["SKY"][tt, cc, ...] = results["model_image"]
