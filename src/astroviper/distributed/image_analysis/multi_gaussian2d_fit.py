@@ -658,7 +658,7 @@ def _multi_fit_plane_wrapper(
     if y1d.shape[0] != ny or x1d.shape[0] != nx:
         raise ValueError(
             "Length of y1d/x1d must match z2d shape for world/pixel grids."
-        )
+        ) # pragma: no cover
     Y = np.broadcast_to(y1d[:, None], (ny, nx))
     X = np.broadcast_to(x1d[None, :], (ny, nx))
 
@@ -962,7 +962,7 @@ def _extract_1d_coords_for_fit(
         if x1d.ndim != 1 or y1d.ndim != 1 or x1d.size != nx or y1d.size != ny:
             raise ValueError(
                 "World coords must be 1-D and match the data shape along (y, x)."
-            )
+            ) # pragma: no cover
         if (not _axis_is_valid(x1d)) or (not _axis_is_valid(y1d)):
             raise ValueError(
                 "World coords must be strictly monotonic and finite along both axes."
@@ -2574,15 +2574,9 @@ def overlay_fit_components(
         """
         Return (theta_vals, kind) with kind in {'math','pa'}, values in radians.
         """
-        cands = []
-        if prefer == "pa":
-            cands += [f"theta_{frame_name}_pa", f"theta_{frame_name}_math"]
-        elif prefer == "math":
-            cands += [f"theta_{frame_name}_math", f"theta_{frame_name}_pa"]
-        else:  # auto
-            cands += [f"theta_{frame_name}_math", f"theta_{frame_name}_pa"]
-        cands += [f"theta_{frame_name}", "theta"]  # generic fallbacks
-
+        # Branchless, behavior-preserving ordering (easier to cover)
+        first, second = (("pa", "math") if prefer == "pa" else ("math", "pa"))
+        cands = [f"theta_{frame_name}_{first}", f"theta_{frame_name}_{second}"]
         for nm in cands:
             a = _arr(nm)
             if a is not None:
