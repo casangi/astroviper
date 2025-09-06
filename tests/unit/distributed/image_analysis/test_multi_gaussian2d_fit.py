@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import unittest
 
-import os
+import os, sys
 import math
 import numpy as np
 import pytest
@@ -25,13 +25,16 @@ import xarray as xr
 
 import dask.array as da  # type: ignore
 
+import importlib
 import inspect
+import builtins
 
 # Use headless matplotlib, silence plt.show()
 os.environ.setdefault("MPLBACKEND", "Agg")
 import matplotlib
 import matplotlib.pyplot as plt
 import warnings
+import matplotlib.figure as _mf
 
 from astroviper.distributed.image_analysis.multi_gaussian2d_fit import (
     fit_multi_gaussian2d,
@@ -495,6 +498,24 @@ class TestOptimizerFailures:
         for v in err_vars:
             assert np.isnan(float(ds[v])), f"{v} should be NaN when pcov is invalid"
 
+    def test_threshold_not_enough_pixels_for_params_raises_public_api(self) -> None:
+        """
+        Cover the guard in _fit_multi_plane_numpy:
+            if mask_count < (1 + 6*n_components): raise ValueError(...)
+        Use a small plane with more parameters than masked-in pixels.
+        """
+        # For n_components=2, need = 1 + 6*2 = 13 > 6 (2x3 plane) → triggers branch.
+        da = xr.DataArray(np.zeros((2, 3), float), dims=("y", "x"))
+        mask = np.ones((2, 3), dtype=bool)  # keep all 6 pixels (still < 13 needed)
+        with pytest.raises(ValueError, match=r"not enough pixels.*fit all parameters"):
+            mg.fit_multi_gaussian2d(
+                da,
+                n_components=2,
+                mask=mask,
+                coord_type="pixel",
+                return_model=False,
+                return_residual=False,
+            )
 
 # ------------------------- initial guesses: top-level list-of-dicts -------------------------
 
@@ -815,7 +836,6 @@ class TestPlotHelper:
             ret = mg.plot_components(img, ds2, dims=("x", "y"), fwhm=True, show=False)
         # No size-warning expected because sigma→FWHM conversion should have supplied radii
         assert not any("Missing size info" in str(w.message) for w in rec)
-        import matplotlib.figure as _mf
 
         # Accept both return styles: Figure OR (Figure, axes)
         if isinstance(ret, _mf.Figure):
@@ -827,8 +847,6 @@ class TestPlotHelper:
         self,
     ) -> None:
         """Cover metric=="fwhm" path that warns and uses zero radii when both size kinds are missing."""
-        import matplotlib
-
         matplotlib.use("Agg", force=True)
 
         ny, nx = 32, 32
@@ -859,8 +877,6 @@ class TestPlotHelper:
             ret = mg.plot_components(img, ds3, dims=("x", "y"), fwhm=True, show=False)
         msgs = ", ".join(str(w.message) for w in rec)
         assert "Missing size info (FWHM/sigma)" in msgs
-        import matplotlib.figure as _mf
-
         # Accept both styles: Figure OR (Figure, axes)
         if isinstance(ret, _mf.Figure):
             fig = ret
@@ -1292,8 +1308,6 @@ class TestNumPyFitting:  # (unittest.TestCase):
         )
 
         # Accept both return styles: Figure OR (Figure, axes)
-        import matplotlib
-
         if isinstance(ret, matplotlib.figure.Figure):
             fig = ret
         else:
@@ -1304,8 +1318,6 @@ class TestNumPyFitting:  # (unittest.TestCase):
 
         # Basic clean up
         try:
-            import matplotlib.pyplot as plt
-
             plt.close(fig)
         except Exception:
             pass
@@ -2149,7 +2161,6 @@ class TestCoordsForNdarrayInput:
                 dim_x="x",
             )
 
-
 # ------------------------- result metadata: package version fallback -------------------------
 
 
@@ -2175,7 +2186,6 @@ class TestResultMetadataVersion:
 
         monkeypatch.setattr(ilmd, "version", _boom, raising=True)
         # Ensure the top-level package exposes __version__
-        import sys, types
 
         if "astroviper" not in sys.modules:
             sys.modules["astroviper"] = types.ModuleType("astroviper")
@@ -2714,3 +2724,194 @@ class TestMaskingPublicAPI:
             )
         # Implementation message mentions thresholding; we just check the empty mask semantics
         assert "removed all pixels" in str(excinfo.value)
+
+# ------------------------- OTF string masking (public API) -------------------------
+
+class TestOTFMaskingPublicAPI:
+    def test_otf_mask_excludes_peak_dataarray_public_api(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """
+        select_mask returns a DataArray mask that excludes the brighter peak.
+        The fit should choose the unmasked peak.
+        """
+        ny, nx = 12, 14
+        z = np.zeros((ny, nx), dtype=float)
+        yA, xA, vA = 3, 2, 10.0  # masked out by OTF mask
+        yB, xB, vB = 8, 11, 9.0  # expected fit
+        z[yA, xA] = vA
+        z[yB, xB] = vB
+        da = xr.DataArray(z, dims=("y", "x"))
+
+        def _fake_select_mask(da_tr: xr.DataArray, spec: str) -> xr.DataArray:
+            m = np.ones((ny, nx), dtype=bool)
+            m[yA, xA] = False
+            return xr.DataArray(m, dims=("y", "x"))
+
+        monkeypatch.setattr(mg, "_select_mask", _fake_select_mask, raising=True)
+
+        ds = mg.fit_multi_gaussian2d(
+            da,
+            n_components=1,
+            initial_guesses=None,
+           mask="exclude_bright_A",  # any string → handled by _select_mask
+            coord_type="pixel",
+            return_model=False,
+            return_residual=False,
+        )
+        assert bool(ds["success"])
+        x0 = float(np.ravel(ds["x0_pixel"].values)[0])
+        y0 = float(np.ravel(ds["y0_pixel"].values)[0])
+        assert abs(x0 - xB) < 1.0
+        assert abs(y0 - yB) < 1.0
+
+    def test_otf_mask_broadcasts_ndarray_over_stack_public_api(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """
+        select_mask returns a 2-D ndarray mask (y,x); it should broadcast across stacked 'time'.
+        """
+        ny, nx, nt = 10, 10, 3
+        z = np.zeros((ny, nx), dtype=float)
+        yA, xA, vA = 2, 2, 10.0  # masked out by OTF mask
+        yB, xB, vB = 6, 7, 9.0   # expected across all time slices
+        z[yA, xA] = vA
+        z[yB, xB] = vB
+        planes = [xr.DataArray(z.copy(), dims=("y", "x")) for _ in range(nt)]
+        cube = xr.concat(planes, dim="time")
+
+        def _fake_select_mask(da_tr: xr.DataArray, spec: str) -> np.ndarray:
+            m = np.ones((ny, nx), dtype=bool)
+            m[yA, xA] = False
+            return m  # raw ndarray
+
+        monkeypatch.setattr(mg, "_select_mask", _fake_select_mask, raising=True)
+
+        ds = mg.fit_multi_gaussian2d(
+            cube,
+            n_components=1,
+            initial_guesses=None,
+            mask="exclude_A_ndarray",
+            coord_type="pixel",
+            return_model=False,
+            return_residual=False,
+        )
+        assert "time" in ds.dims and ds.sizes["time"] == nt
+        assert np.all(ds["success"].values)
+        x0 = np.ravel(ds["x0_pixel"].values)
+        y0 = np.ravel(ds["y0_pixel"].values)
+        assert x0.size == nt and y0.size == nt
+        assert np.all(np.abs(x0 - xB) < 1.0)
+        assert np.all(np.abs(y0 - yB) < 1.0)
+
+    def test_otf_mask_dataset_wrapper_supported_public_api(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """
+        select_mask returns a Dataset containing a 'mask' variable; fitter should use it.
+        """
+        ny, nx = 9, 11
+        z = np.zeros((ny, nx), dtype=float)
+        yA, xA, vA = 1, 3, 10.0  # masked out
+        yB, xB, vB = 7, 9, 8.0   # expected
+        z[yA, xA] = vA
+        z[yB, xB] = vB
+        da = xr.DataArray(z, dims=("y", "x"))
+
+        def _fake_select_mask(da_tr: xr.DataArray, spec: str) -> xr.Dataset:
+            m = np.ones((ny, nx), dtype=bool)
+            m[yA, xA] = False
+            return xr.Dataset({"mask": xr.DataArray(m, dims=("y", "x"))})
+
+        monkeypatch.setattr(mg, "_select_mask", _fake_select_mask, raising=True)
+
+        ds = mg.fit_multi_gaussian2d(
+            da,
+            n_components=1,
+            initial_guesses=None,
+            mask="exclude_A_dataset",
+            coord_type="pixel",
+            return_model=False,
+            return_residual=False,
+        )
+        assert bool(ds["success"])
+        x0 = float(np.ravel(ds["x0_pixel"].values)[0])
+        y0 = float(np.ravel(ds["y0_pixel"].values)[0])
+        assert abs(x0 - xB) < 1.0
+        assert abs(y0 - yB) < 1.0
+
+    def test_otf_mask_dataset_without_var_errors_public_api(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """
+        select_mask returns a Dataset without 'mask' variable → should raise TypeError.
+        """
+        ny, nx = 6, 7
+        da = xr.DataArray(np.zeros((ny, nx), dtype=float), dims=("y", "x"))
+
+        def _fake_select_mask(_da: xr.DataArray, spec: str) -> xr.Dataset:
+            return xr.Dataset({"not_mask": xr.DataArray(np.ones((ny, nx), dtype=bool), dims=("y", "x"))})
+
+        monkeypatch.setattr(mg, "_select_mask", _fake_select_mask, raising=True)
+
+        with pytest.raises(TypeError):
+            mg.fit_multi_gaussian2d(
+                da,
+                n_components=1,
+                initial_guesses=None,
+                mask="bad_dataset_without_mask_var",
+                coord_type="pixel",
+                return_model=False,
+                return_residual=False,
+            )
+
+class TestChooseThetaPublicAPI:
+    def _mk_minimal_result(self, *, frame: str, have_pa: bool, have_math: bool) -> xr.Dataset:
+        """
+        Construct a minimal public-API-shaped result Dataset that plot_components accepts.
+        Includes pixel-center, FWHM sizes (so no size warnings), amplitude/offset/success.
+        Optionally includes theta_* variables to exercise candidate preference/fallback.
+        """
+        comp = ("component",)
+        ds = xr.Dataset(
+            data_vars=dict(
+                x0_pixel=xr.DataArray([10.0], dims=comp),
+                y0_pixel=xr.DataArray([12.0], dims=comp),
+                fwhm_major_pixel=xr.DataArray([3.0], dims=comp),
+                fwhm_minor_pixel=xr.DataArray([2.0], dims=comp),
+                amplitude=xr.DataArray([1.0], dims=comp),
+                offset=xr.DataArray(0.0),
+                success=xr.DataArray(True),
+            )
+        )
+        if have_pa:
+            ds[f"theta_{frame}_pa"] = xr.DataArray([0.30], dims=comp)
+        if have_math:
+            ds[f"theta_{frame}_math"] = xr.DataArray([0.60], dims=comp)
+        return ds
+
+    def test_choose_theta_prefers_pa_when_available_public(self) -> None:
+        """
+        angle='pa' and only theta_*_pa exists → first candidate is used.
+        Public API only: plot_components(data, result, angle=...).
+        """
+        ds = self._mk_minimal_result(frame="pixel", have_pa=True, have_math=False)
+        img = xr.DataArray(np.zeros((12, 16), float), dims=("y", "x"))
+        mg.plot_components(img, ds, dims=("y","x"), angle="pa", show=False)
+        plt.close("all")
+
+    def test_choose_theta_falls_back_to_math_when_pa_missing_public(self) -> None:
+        """
+        angle='pa' but only theta_*_math exists → fallback (second candidate) is used.
+        """
+        ds = self._mk_minimal_result(frame="pixel", have_pa=False, have_math=True)
+        img = xr.DataArray(np.zeros((12, 16), float), dims=("y", "x"))
+        mg.plot_components(img, ds, dims=("y","x"), angle="pa", show=False)
+        plt.close("all")
+
+    def test_choose_theta_none_when_both_missing_public(self) -> None:
+        """
+        Neither theta_*_pa nor theta_*_math exist → fall-through to (None, None).
+        plot_components should warn and still draw (axis-aligned ellipse).
+        """
+        ds = self._mk_minimal_result(frame="world", have_pa=False, have_math=False)
+        img = xr.DataArray(np.zeros((12, 16), float), dims=("y", "x"))
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            mg.plot_components(img, ds, dims=("y","x"), angle="pa", show=False)
+            # Implementation emits a RuntimeWarning; accept any warning mentioning "Missing theta".
+            assert any("Missing theta" in str(m.message) for m in w)
+        plt.close("all")
+
