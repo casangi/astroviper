@@ -517,6 +517,7 @@ class TestOptimizerFailures:
                 return_residual=False,
             )
 
+
 # ------------------------- initial guesses: top-level list-of-dicts -------------------------
 
 
@@ -2161,6 +2162,7 @@ class TestCoordsForNdarrayInput:
                 dim_x="x",
             )
 
+
 # ------------------------- result metadata: package version fallback -------------------------
 
 
@@ -2623,7 +2625,6 @@ class TestWorldSeeding:
         assert np.isclose(float(ds["y0_world"]), y0_true, atol=1.0)
 
 
-
 # ------------------------- masking (public API) -------------------------
 
 
@@ -2668,7 +2669,7 @@ class TestMaskingPublicAPI:
         ny, nx, nt = 10, 10, 3
         z = np.zeros((ny, nx), dtype=float)
         yA, xA, vA = 2, 2, 10.0  # masked out
-        yB, xB, vB = 6, 7, 9.0   # should be selected across all time slices
+        yB, xB, vB = 6, 7, 9.0  # should be selected across all time slices
         z[yA, xA] = vA
         z[yB, xB] = vB
         planes = [xr.DataArray(z.copy(), dims=("y", "x")) for _ in range(nt)]
@@ -2725,10 +2726,14 @@ class TestMaskingPublicAPI:
         # Implementation message mentions thresholding; we just check the empty mask semantics
         assert "removed all pixels" in str(excinfo.value)
 
+
 # ------------------------- OTF string masking (public API) -------------------------
 
+
 class TestOTFMaskingPublicAPI:
-    def test_otf_mask_excludes_peak_dataarray_public_api(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_otf_mask_excludes_peak_dataarray_public_api(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """
         select_mask returns a DataArray mask that excludes the brighter peak.
         The fit should choose the unmasked peak.
@@ -2752,7 +2757,7 @@ class TestOTFMaskingPublicAPI:
             da,
             n_components=1,
             initial_guesses=None,
-           mask="exclude_bright_A",  # any string → handled by _select_mask
+            mask="exclude_bright_A",  # any string → handled by _select_mask
             coord_type="pixel",
             return_model=False,
             return_residual=False,
@@ -2763,14 +2768,16 @@ class TestOTFMaskingPublicAPI:
         assert abs(x0 - xB) < 1.0
         assert abs(y0 - yB) < 1.0
 
-    def test_otf_mask_broadcasts_ndarray_over_stack_public_api(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_otf_mask_broadcasts_ndarray_over_stack_public_api(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """
         select_mask returns a 2-D ndarray mask (y,x); it should broadcast across stacked 'time'.
         """
         ny, nx, nt = 10, 10, 3
         z = np.zeros((ny, nx), dtype=float)
         yA, xA, vA = 2, 2, 10.0  # masked out by OTF mask
-        yB, xB, vB = 6, 7, 9.0   # expected across all time slices
+        yB, xB, vB = 6, 7, 9.0  # expected across all time slices
         z[yA, xA] = vA
         z[yB, xB] = vB
         planes = [xr.DataArray(z.copy(), dims=("y", "x")) for _ in range(nt)]
@@ -2800,14 +2807,16 @@ class TestOTFMaskingPublicAPI:
         assert np.all(np.abs(x0 - xB) < 1.0)
         assert np.all(np.abs(y0 - yB) < 1.0)
 
-    def test_otf_mask_dataset_wrapper_supported_public_api(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_otf_mask_dataset_wrapper_supported_public_api(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """
         select_mask returns a Dataset containing a 'mask' variable; fitter should use it.
         """
         ny, nx = 9, 11
         z = np.zeros((ny, nx), dtype=float)
         yA, xA, vA = 1, 3, 10.0  # masked out
-        yB, xB, vB = 7, 9, 8.0   # expected
+        yB, xB, vB = 7, 9, 8.0  # expected
         z[yA, xA] = vA
         z[yB, xB] = vB
         da = xr.DataArray(z, dims=("y", "x"))
@@ -2834,7 +2843,9 @@ class TestOTFMaskingPublicAPI:
         assert abs(x0 - xB) < 1.0
         assert abs(y0 - yB) < 1.0
 
-    def test_otf_mask_dataset_without_var_errors_public_api(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_otf_mask_dataset_without_var_errors_public_api(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """
         select_mask returns a Dataset without 'mask' variable → should raise TypeError.
         """
@@ -2842,7 +2853,13 @@ class TestOTFMaskingPublicAPI:
         da = xr.DataArray(np.zeros((ny, nx), dtype=float), dims=("y", "x"))
 
         def _fake_select_mask(_da: xr.DataArray, spec: str) -> xr.Dataset:
-            return xr.Dataset({"not_mask": xr.DataArray(np.ones((ny, nx), dtype=bool), dims=("y", "x"))})
+            return xr.Dataset(
+                {
+                    "not_mask": xr.DataArray(
+                        np.ones((ny, nx), dtype=bool), dims=("y", "x")
+                    )
+                }
+            )
 
         monkeypatch.setattr(mg, "_select_mask", _fake_select_mask, raising=True)
 
@@ -2857,8 +2874,11 @@ class TestOTFMaskingPublicAPI:
                 return_residual=False,
             )
 
+
 class TestChooseThetaPublicAPI:
-    def _mk_minimal_result(self, *, frame: str, have_pa: bool, have_math: bool) -> xr.Dataset:
+    def _mk_minimal_result(
+        self, *, frame: str, have_pa: bool, have_math: bool
+    ) -> xr.Dataset:
         """
         Construct a minimal public-API-shaped result Dataset that plot_components accepts.
         Includes pixel-center, FWHM sizes (so no size warnings), amplitude/offset/success.
@@ -2889,7 +2909,7 @@ class TestChooseThetaPublicAPI:
         """
         ds = self._mk_minimal_result(frame="pixel", have_pa=True, have_math=False)
         img = xr.DataArray(np.zeros((12, 16), float), dims=("y", "x"))
-        mg.plot_components(img, ds, dims=("y","x"), angle="pa", show=False)
+        mg.plot_components(img, ds, dims=("y", "x"), angle="pa", show=False)
         plt.close("all")
 
     def test_choose_theta_falls_back_to_math_when_pa_missing_public(self) -> None:
@@ -2898,7 +2918,7 @@ class TestChooseThetaPublicAPI:
         """
         ds = self._mk_minimal_result(frame="pixel", have_pa=False, have_math=True)
         img = xr.DataArray(np.zeros((12, 16), float), dims=("y", "x"))
-        mg.plot_components(img, ds, dims=("y","x"), angle="pa", show=False)
+        mg.plot_components(img, ds, dims=("y", "x"), angle="pa", show=False)
         plt.close("all")
 
     def test_choose_theta_none_when_both_missing_public(self) -> None:
@@ -2910,8 +2930,7 @@ class TestChooseThetaPublicAPI:
         img = xr.DataArray(np.zeros((12, 16), float), dims=("y", "x"))
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            mg.plot_components(img, ds, dims=("y","x"), angle="pa", show=False)
+            mg.plot_components(img, ds, dims=("y", "x"), angle="pa", show=False)
             # Implementation emits a RuntimeWarning; accept any warning mentioning "Missing theta".
             assert any("Missing theta" in str(m.message) for m in w)
         plt.close("all")
-

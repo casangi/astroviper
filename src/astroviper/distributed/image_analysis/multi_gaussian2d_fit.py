@@ -658,7 +658,7 @@ def _multi_fit_plane_wrapper(
     if y1d.shape[0] != ny or x1d.shape[0] != nx:
         raise ValueError(
             "Length of y1d/x1d must match z2d shape for world/pixel grids."
-        ) # pragma: no cover
+        )  # pragma: no cover
     Y = np.broadcast_to(y1d[:, None], (ny, nx))
     X = np.broadcast_to(x1d[None, :], (ny, nx))
 
@@ -826,6 +826,7 @@ def _axis_sign(coord: Optional[np.ndarray]) -> float:
     c0, c1 = float(coord[0]), float(coord[1])
     return 1.0 if np.isfinite(c0) and np.isfinite(c1) and (c1 > c0) else -1.0
 
+
 def _select_mask(da_tr: xr.DataArray, spec: str):
     """
     Thin wrapper so tests can monkeypatch this symbol.
@@ -833,7 +834,8 @@ def _select_mask(da_tr: xr.DataArray, spec: str):
     """
     # local import to avoid hard module dependency at import time
     from .selection import select_mask  # type: ignore, pragma: no cover
-    return select_mask(da_tr, spec) # pragma: no cover
+
+    return select_mask(da_tr, spec)  # pragma: no cover
 
 
 def _theta_pa_to_math(pa: np.ndarray) -> np.ndarray:
@@ -962,7 +964,7 @@ def _extract_1d_coords_for_fit(
         if x1d.ndim != 1 or y1d.ndim != 1 or x1d.size != nx or y1d.size != ny:
             raise ValueError(
                 "World coords must be 1-D and match the data shape along (y, x)."
-            ) # pragma: no cover
+            )  # pragma: no cover
         if (not _axis_is_valid(x1d)) or (not _axis_is_valid(y1d)):
             raise ValueError(
                 "World coords must be strictly monotonic and finite along both axes."
@@ -2575,7 +2577,7 @@ def overlay_fit_components(
         Return (theta_vals, kind) with kind in {'math','pa'}, values in radians.
         """
         # Branchless, behavior-preserving ordering (easier to cover)
-        first, second = (("pa", "math") if prefer == "pa" else ("math", "pa"))
+        first, second = ("pa", "math") if prefer == "pa" else ("math", "pa")
         cands = [f"theta_{frame_name}_{first}", f"theta_{frame_name}_{second}"]
         for nm in cands:
             a = _arr(nm)
