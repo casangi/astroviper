@@ -1,9 +1,12 @@
 from numba import jit
 import numpy as np
 import math
+from astropy import Constants
 
 
-def standard_grid_numpy_wrap(vis_data, uvw, weight, freq_chan, cgk_1D, grid_params):
+def standard_grid_numpy_wrap(
+    vis_data, uvw, weight, freq_chan, cgk_1D, grid_params
+):
     """
     Wraps the jit gridder code.
 
@@ -51,7 +54,9 @@ def standard_grid_numpy_wrap(vis_data, uvw, weight, freq_chan, cgk_1D, grid_para
             (n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128
         )
     else:
-        grid = np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.double)
+        grid = np.zeros(
+            (n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.double
+        )
     sum_weight = np.zeros((n_imag_chan, n_imag_pol), dtype=np.double)
 
     do_psf = grid_params["do_psf"]
@@ -120,7 +125,9 @@ def standard_grid_psf_numpy_wrap(uvw, weight, freq_chan, cgk_1D, grid_params):
     oversampling = grid_params["oversampling"]
     support = grid_params["support"]
 
-    grid = np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.double)
+    grid = np.zeros(
+        (n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.double
+    )
     sum_weight = np.zeros((n_imag_chan, n_imag_pol), dtype=np.double)
 
     do_imaging_weight = grid_params["do_imaging_weight"]
@@ -259,9 +266,13 @@ def standard_grid_jit(
                         and (v_center_indx - support_center >= 0)
                     ):
                         u_offset = u_center_indx - u_pos
-                        u_center_offset_indx = math.floor(u_offset * oversampling + 0.5)
+                        u_center_offset_indx = math.floor(
+                            u_offset * oversampling + 0.5
+                        )
                         v_offset = v_center_indx - v_pos
-                        v_center_offset_indx = math.floor(v_offset * oversampling + 0.5)
+                        v_center_offset_indx = math.floor(
+                            v_offset * oversampling + 0.5
+                        )
 
                         for i_pol in range(n_pol):
                             if do_psf:
@@ -279,7 +290,9 @@ def standard_grid_jit(
                                         i_time, i_baseline, i_chan, i_pol
                                     ]
                             else:
-                                sel_weight = weight[i_time, i_baseline, i_chan, i_pol]
+                                sel_weight = weight[
+                                    i_time, i_baseline, i_chan, i_pol
+                                ]
                                 weighted_data = (
                                     vis_data[i_time, i_baseline, i_chan, i_pol]
                                     * weight[i_time, i_baseline, i_chan, i_pol]
@@ -287,24 +300,30 @@ def standard_grid_jit(
 
                             # print('1. u_center_indx, v_center_indx', u_center_indx, v_center_indx, vis_data[i_time, i_baseline, i_chan, i_pol], weight[i_time, i_baseline, i_chan, i_pol])
 
-                            if ~np.isnan(weighted_data) and (weighted_data != 0.0):
+                            if ~np.isnan(weighted_data) and (
+                                weighted_data != 0.0
+                            ):
                                 a_pol = pol_map[i_pol]
                                 norm = 0.0
 
                                 for i_v in range(start_support, end_support):
                                     v_indx = v_center_indx + i_v
                                     v_offset_indx = np.abs(
-                                        oversampling * i_v + v_center_offset_indx
+                                        oversampling * i_v
+                                        + v_center_offset_indx
                                     )
                                     conv_v = cgk_1D[v_offset_indx]
 
                                     if do_imaging_weight:
                                         v_indx_conj = v_center_indx_conj + i_v
 
-                                    for i_u in range(start_support, end_support):
+                                    for i_u in range(
+                                        start_support, end_support
+                                    ):
                                         u_indx = u_center_indx + i_u
                                         u_offset_indx = np.abs(
-                                            oversampling * i_u + u_center_offset_indx
+                                            oversampling * i_u
+                                            + u_center_offset_indx
                                         )
                                         conv_u = cgk_1D[u_offset_indx]
                                         conv = conv_u * conv_v
@@ -316,9 +335,14 @@ def standard_grid_jit(
                                         norm = norm + conv
 
                                         if do_imaging_weight:
-                                            u_indx_conj = u_center_indx_conj + i_u
+                                            u_indx_conj = (
+                                                u_center_indx_conj + i_u
+                                            )
                                             grid[
-                                                a_chan, a_pol, u_indx_conj, v_indx_conj
+                                                a_chan,
+                                                a_pol,
+                                                u_indx_conj,
+                                                v_indx_conj,
                                             ] = (
                                                 grid[
                                                     a_chan,
@@ -330,12 +354,14 @@ def standard_grid_jit(
                                             )
 
                                 sum_weight[a_chan, a_pol] = (
-                                    sum_weight[a_chan, a_pol] + sel_weight * norm
+                                    sum_weight[a_chan, a_pol]
+                                    + sel_weight * norm
                                 )
 
                                 if do_imaging_weight:
                                     sum_weight[a_chan, a_pol] = (
-                                        sum_weight[a_chan, a_pol] + sel_weight * norm
+                                        sum_weight[a_chan, a_pol]
+                                        + sel_weight * norm
                                     )
 
     return
@@ -450,7 +476,9 @@ def standard_imaging_weight_degrid_jit(
                             a_pol = pol_map[i_pol]
 
                             if n_pol == 2:
-                                imaging_weight[i_time, i_baseline, i_chan, i_pol] = (
+                                imaging_weight[
+                                    i_time, i_baseline, i_chan, i_pol
+                                ] = (
                                     natural_imaging_weight[
                                         i_time, i_baseline, i_chan, 0
                                     ]
@@ -459,11 +487,11 @@ def standard_imaging_weight_degrid_jit(
                                     ]
                                 ) / 2.0
                             else:
-                                imaging_weight[i_time, i_baseline, i_chan, i_pol] = (
-                                    natural_imaging_weight[
-                                        i_time, i_baseline, i_chan, i_pol
-                                    ]
-                                )
+                                imaging_weight[
+                                    i_time, i_baseline, i_chan, i_pol
+                                ] = natural_imaging_weight[
+                                    i_time, i_baseline, i_chan, i_pol
+                                ]
 
                             if ~np.isnan(
                                 natural_imaging_weight[
@@ -477,18 +505,27 @@ def standard_imaging_weight_degrid_jit(
                             ):
                                 if ~np.isnan(
                                     grid_imaging_weight[
-                                        a_chan, a_pol, u_center_indx, v_center_indx
+                                        a_chan,
+                                        a_pol,
+                                        u_center_indx,
+                                        v_center_indx,
                                     ]
                                 ) and (
                                     grid_imaging_weight[
-                                        a_chan, a_pol, u_center_indx, v_center_indx
+                                        a_chan,
+                                        a_pol,
+                                        u_center_indx,
+                                        v_center_indx,
                                     ]
                                     != 0.0
                                 ):
                                     briggs_grid_imaging_weight = (
                                         briggs_factors[0, a_chan, a_pol]
                                         * grid_imaging_weight[
-                                            a_chan, a_pol, u_center_indx, v_center_indx
+                                            a_chan,
+                                            a_pol,
+                                            u_center_indx,
+                                            v_center_indx,
                                         ]
                                         + briggs_factors[1, a_chan, a_pol]
                                     )
