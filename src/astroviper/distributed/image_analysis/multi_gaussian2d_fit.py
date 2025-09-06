@@ -826,6 +826,16 @@ def _axis_sign(coord: Optional[np.ndarray]) -> float:
     c0, c1 = float(coord[0]), float(coord[1])
     return 1.0 if np.isfinite(c0) and np.isfinite(c1) and (c1 > c0) else -1.0
 
+def _select_mask(da_tr: xr.DataArray, spec: str):
+    """
+    Thin wrapper so tests can monkeypatch this symbol.
+    Delegates to selection.select_mask in the same package.
+    """
+    # local import to avoid hard module dependency at import time
+    from .selection import select_mask  # type: ignore
+
+    return select_mask(da_tr, spec)
+
 
 def _theta_pa_to_math(pa: np.ndarray) -> np.ndarray:
     """
@@ -1351,7 +1361,25 @@ def fit_multi_gaussian2d(
     if mask is None:
         mask_da = xr.ones_like(da_tr, dtype=bool)
     else:
-        if isinstance(mask, xr.DataArray):
+        if isinstance(mask, str):
+            # Resolve on-the-fly (OTF) string mask via selection helper
+            mda = _select_mask(da_tr, mask)
+            # Allow selector to return a Dataset wrapper containing 'mask'
+            if isinstance(mda, xr.Dataset):
+                if "mask" in mda:
+                    mda = mda["mask"]
+                else:
+                    raise TypeError(
+                        "selection.select_mask returned a Dataset without a 'mask' variable"
+                    )
+            # Normalize plain ndarray → DataArray with appropriate dims
+            if isinstance(mda, np.ndarray):
+                mda = xr.DataArray(
+                    mda, dims=[dim_y, dim_x] if mda.ndim == 2 else da_tr.dims
+                )
+            if not isinstance(mda, xr.DataArray):
+                raise TypeError("selection.select_mask returned unsupported mask type")
+        elif isinstance(mask, xr.DataArray):
             mda = mask
         else:
             # Support 2-D (y,x) or full-shape masks
