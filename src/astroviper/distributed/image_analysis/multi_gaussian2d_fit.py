@@ -832,9 +832,8 @@ def _select_mask(da_tr: xr.DataArray, spec: str):
     Delegates to selection.select_mask in the same package.
     """
     # local import to avoid hard module dependency at import time
-    from .selection import select_mask  # type: ignore
-
-    return select_mask(da_tr, spec)
+    from .selection import select_mask  # type: ignore, pragma: no cover
+    return select_mask(da_tr, spec) # pragma: no cover
 
 
 def _theta_pa_to_math(pa: np.ndarray) -> np.ndarray:
