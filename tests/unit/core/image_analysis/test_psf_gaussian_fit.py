@@ -48,7 +48,7 @@ def test_psf_gaussian_fit_basic():
     params = result["BEAM"]["beam_param"]
     assert params.shape[-1] == 3
     # Check that the fitted widths are positive
-    assert np.all(result["BEAM"].data > 0)
+    assert np.all(result["BEAM"].data[:, :, :-1] > 0)
 
 
 def test_psf_gaussian_fit_custom_window():
@@ -56,4 +56,4 @@ def test_psf_gaussian_fit_custom_window():
     result = psf_gaussian_fit(test_dataset, npix_window=[7, 7], sampling=[7, 7])
     params = result["BEAM"]["beam_param"]
     assert params.shape == (3,)
-    assert np.all(result["BEAM"].data > 0)
+    assert np.all(result["BEAM"].data[:, :, :-1] > 0)

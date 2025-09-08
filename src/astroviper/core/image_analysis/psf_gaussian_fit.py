@@ -154,8 +154,9 @@ def psf_gaussian_fit_core(image_to_fit, npix_window, sampling, cutoff, delta):
 
                 #
                 # phi = res_x[2] - 90.0
-                # if phi < -90.0:
-                #    phi += 180.0
+                phi = res_x[2]
+                if phi < -90.0:
+                    phi += 180.0
 
                 ellipse_params[time, chan, pol, 0] = np.max(
                     np.abs(res_x[0:2])
@@ -165,7 +166,7 @@ def psf_gaussian_fit_core(image_to_fit, npix_window, sampling, cutoff, delta):
                     np.abs(res_x[0:2])
                     # ) * np.abs(delta[1] * 2.355 / sampling[1] / npix_window[1])
                 ) * np.abs(delta[1] * 2.355)
-                # ellipse_params[time, chan, pol, 2] = -phi
-                ellipse_params[time, chan, pol, 2] = -res_x[2]
+                ellipse_params[time, chan, pol, 2] = -phi
+                # ellipse_params[time, chan, pol, 2] = -res_x[2]
                 print("res_x=", res_x)
     return ellipse_params
