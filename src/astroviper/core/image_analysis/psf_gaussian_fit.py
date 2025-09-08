@@ -21,8 +21,6 @@ def psf_gaussian_fit(
         The input data cube.
     dv : str
         The data variable to fit. Default is 'SKY'.
-    beam_set_name : str
-        The name of the beam set.
     npix_window : list
         The size of the fitting window in pixels.
     sampling : list
@@ -34,30 +32,36 @@ def psf_gaussian_fit(
     -------
     xds : xarray.Dataset
         The image with the fitted parameters added.
+        The unit of beam size (major and minor) will be the same unit as
+        that of the input image. If there is no unit attribute for the
+        input image, the unit will be radian. The position angle is given
+        in degrees.
     """
 
     _xds = xds.copy(deep=True)
 
     sampling = np.array(sampling)
     npix_window = np.array(npix_window)
+
+    in_delta = np.array([_xds[dv].l[1] - _xds[dv].l[0], _xds[dv].m[1] - _xds[dv].m[0]])
+    # pixel increments in arcsecond
     delta = (
         np.array([_xds[dv].l[1] - _xds[dv].l[0], _xds[dv].m[1] - _xds[dv].m[0]])
         * 3600
         * 180
         / np.pi
     )
-    # chunks = _xds[dv].data.chunks[2:] + (3,)
 
-    import dask.array as da
-
-    is_dask_array = isinstance(_xds[dv].data, da.Array)
-    print(f"is_dask_array: {is_dask_array}")
+    print(f"in_delta: {in_delta}")
+    print(f"delta: {delta}")
     ellipse_params = psf_gaussian_fit_core(
         _xds[dv].data.compute(), npix_window, sampling, cutoff, delta
     )
-    print("ellipse_params shape:", ellipse_params.shape)
-    print("ellipse_params dtype:", ellipse_params.dtype)
-    print("ellipse_params content:\n", ellipse_params)
+    # psf_gaussian_fit_core returns bmaj and bmin in arcsecond and pa in deg.
+    # Converting to radian for storing to the xradio image
+    print(ellipse_params.shape)
+    ellipse_params[..., :2] = np.deg2rad(ellipse_params[..., :2] / 3600.0)
+    ellipse_params[..., 2] = np.deg2rad(ellipse_params[..., 2])
 
     _xds["BEAM"].data = ellipse_params
     if "unit" in _xds["SKY"].l.attrs:
@@ -130,8 +134,7 @@ def psf_gaussian_fit_core(image_to_fit, npix_window, sampling, cutoff, delta):
         for chan in range(image_to_fit.shape[1]):
             for pol in range(image_to_fit.shape[2]):
 
-                with objmode(res_x="f8[:]"):  # return type anotation
-
+                with objmode(res_x="f8[:]"):  # return type annotation
                     interp_image_to_fit = np.reshape(
                         interpn(
                             (d0, d1),
@@ -149,18 +152,20 @@ def psf_gaussian_fit_core(image_to_fit, npix_window, sampling, cutoff, delta):
                     )
                     res_x = res.x
 
-                # is this correct? angle in res resturned by minimize may be in radians??
-                phi = res_x[2] - 90.0
-                if phi < -90.0:
-                    phi += 180.0
+                #
+                # phi = res_x[2] - 90.0
+                # if phi < -90.0:
+                #    phi += 180.0
 
                 ellipse_params[time, chan, pol, 0] = np.max(
                     np.abs(res_x[0:2])
-                ) * np.abs(delta[0] * 2.355 / sampling[0] / npix_window[0])
+                    # ) * np.abs(delta[0] * 2.355 / sampling[0] / npix_window[0])
+                ) * np.abs(delta[0] * 2.355)
                 ellipse_params[time, chan, pol, 1] = np.min(
                     np.abs(res_x[0:2])
-                ) * np.abs(delta[1] * 2.355 / sampling[1] / npix_window[1])
-                ellipse_params[time, chan, pol, 2] = -phi
-
-    # print(f"type(ellipse_params): {type(ellipse_params)}")
+                    # ) * np.abs(delta[1] * 2.355 / sampling[1] / npix_window[1])
+                ) * np.abs(delta[1] * 2.355)
+                # ellipse_params[time, chan, pol, 2] = -phi
+                ellipse_params[time, chan, pol, 2] = -res_x[2]
+                print("res_x=", res_x)
     return ellipse_params
