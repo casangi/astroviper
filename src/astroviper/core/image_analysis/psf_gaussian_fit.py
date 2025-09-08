@@ -52,8 +52,6 @@ def psf_gaussian_fit(
         / np.pi
     )
 
-    print(f"in_delta: {in_delta}")
-    print(f"delta: {delta}")
     ellipse_params = psf_gaussian_fit_core(
         _xds[dv].data.compute(), npix_window, sampling, cutoff, delta
     )
@@ -63,7 +61,9 @@ def psf_gaussian_fit(
     ellipse_params[..., :2] = np.deg2rad(ellipse_params[..., :2] / 3600.0)
     ellipse_params[..., 2] = np.deg2rad(ellipse_params[..., 2])
 
-    _xds["BEAM"].data = ellipse_params
+    import dask.array as da
+
+    _xds["BEAM"].data = da.from_array(ellipse_params, chunks="auto")
     if "unit" in _xds["SKY"].l.attrs:
         _xds["BEAM"].beam_param.attrs["unit"] = _xds["SKY"].l.attrs["unit"]
     else:
@@ -152,7 +152,6 @@ def psf_gaussian_fit_core(image_to_fit, npix_window, sampling, cutoff, delta):
                     )
                     res_x = res.x
 
-                #
                 # phi = res_x[2] - 90.0
                 phi = res_x[2]
                 if phi < -90.0:
@@ -167,6 +166,4 @@ def psf_gaussian_fit_core(image_to_fit, npix_window, sampling, cutoff, delta):
                     # ) * np.abs(delta[1] * 2.355 / sampling[1] / npix_window[1])
                 ) * np.abs(delta[1] * 2.355)
                 ellipse_params[time, chan, pol, 2] = -phi
-                # ellipse_params[time, chan, pol, 2] = -res_x[2]
-                print("res_x=", res_x)
     return ellipse_params
