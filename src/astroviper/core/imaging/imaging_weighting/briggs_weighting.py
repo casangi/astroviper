@@ -9,9 +9,17 @@ def calculate_briggs_params(grid_of_imaging_weights, sum_weight, imaging_weights
 
         # print("squared_sum_weight", squared_sum_weight.shape, squared_sum_weight)
         # print("sum_weight", sum_weight.shape, sum_weight)
+
+        # print("squared_sum_weight", squared_sum_weight)
+        # print("sum_weight", sum_weight)
+        # print("robust", robust)
+
         briggs_factors[0, :, :] = (
-            np.square(5.0 * 10.0 ** (-robust)) / (squared_sum_weight / sum_weight)
+            np.square(5.0 * 10.0 ** (-robust)) / (squared_sum_weight / (sum_weight))
         )[None, None, :, :]
+        
+        # print("briggs_factors", briggs_factors)
+        # print("$$$$$$$$$$$$$$$$$$$")
     elif imaging_weights_parms["weighting"] == "briggs_abs":
         robust = imaging_weights_parms["robust"]
         briggs_factors = np.ones((2,) + sum_weight.shape)
