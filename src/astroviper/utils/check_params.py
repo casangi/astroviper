@@ -277,6 +277,8 @@ def check_sel_params(
     else:  # No data_group_out is given so use defaults
         data_group_out = default_data_group_out_modified
         data_group_out["data_group_out_name"] = default_data_group_out_name
+        
+
 
     # Add any missing data variables from default. These get created or modified.
     # Keys in data_group_out will take precedence over default_data_group_out_modified if there are conflicts.
@@ -307,5 +309,7 @@ def check_sel_params(
     # Merge data_group_in and data_group_out.
     # Keys in data_group_out will take precedence over data_group_in if there are conflicts.
     data_group_out = {**data_group_in, **data_group_out}
+    
+
 
     return data_group_in, data_group_out

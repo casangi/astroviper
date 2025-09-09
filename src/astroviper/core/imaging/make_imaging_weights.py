@@ -72,9 +72,13 @@ def make_imaging_weights(ms_xds, grid_params, imaging_weights_params, sel_params
     cgk_1D = np.ones((1))
 
     uvw = ms_xds[data_group_out["uvw"]].values
-    data_weight = ms_xds[data_group_out["weight"]].values * (
-        1 - ms_xds[data_group_out["flag"]].values
-    )
+    # data_weight = ms_xds[data_group_out["weight"]].values * (
+    #     1 - ms_xds[data_group_out["flag"]].values
+    # )
+    data_weight = ms_xds[data_group_out["weight"]].values
+    data_weight[ms_xds[data_group_out["flag"]] == 1] = (
+        np.nan
+    )  # Set flagged data to NaN for weighting.
     freq_chan = ms_xds.frequency.values
 
     # Grid Weights
@@ -99,6 +103,12 @@ def make_imaging_weights(ms_xds, grid_params, imaging_weights_params, sel_params
     # print("weight data_group_out", data_group_out)
 
     ms_xds.attrs["data_groups"][data_group_out["data_group_out_name"]] = data_group_out
+
+
+    print("@@@@@@ data_group_in", data_group_in)
+    print("@@@@@@ data_group_out", data_group_out)
+    print("$$$$$$$$$$$$$$$$$$$")
+    
 
     return data_group_out
 

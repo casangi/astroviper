@@ -99,15 +99,21 @@ def make_image_mosaic(input_params):
         T_phase_shift = T_phase_shift + time.time() - start_3
 
         start_4 = time.time()
-        data_group_out = make_imaging_weights(
+        # data_group_out = make_imaging_weights(
+        #     ms_xdt,
+        #     grid_params=grid_params,
+        #     imaging_weights_params={"weighting": "briggs", "robust": 0.6},
+        #     # imaging_weights_params={"weighting": "natural"},
+        #     sel_params={"data_group_in_name": data_group_out["data_group_out_name"]},
+        # )
+        
+        from astroviper.core.imaging.calculate_imaging_weights import calculate_imaging_weights
+        ms_xdt, data_group_out = calculate_imaging_weights(
             ms_xdt,
             grid_params=grid_params,
-            # imaging_weights_params={"weighting": "briggs", "robust": 0.6},
-            imaging_weights_params={"weighting": "natural"},
+            imaging_weights_params={"weighting": "briggs", "robust": 0.6},
             sel_params={"data_group_in_name": data_group_out["data_group_out_name"]},
         )
-
-        # print("@@@@@@ data_group_out", data_group_out)
         T_weights = T_weights + time.time() - start_4
 
         start_5 = time.time()

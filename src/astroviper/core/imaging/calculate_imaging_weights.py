@@ -85,18 +85,45 @@ def calculate_imaging_weights(ms_xds, grid_params, imaging_weights_params, sel_p
     n_uv = _grid_params["image_size_padded"]
     n_imag_chan = data_weight.shape[2]
     weight_density_grid = np.zeros((n_imag_chan, 1, n_uv[0], n_uv[1]), dtype=np.double)
+    #weight_density_grid = np.zeros((n_imag_chan, 1, n_uv[0], n_uv[1]), dtype=np.float32)
     sum_weight = np.zeros((n_imag_chan, 1), dtype=np.double)
+
+
+    # #Try old gridding code
+    # _grid_params["oversampling"] = 0
+    # _grid_params["support"] = 1
+    # _grid_params["do_psf"] = True
+    # _grid_params["complex_grid"] = False
+    # _grid_params["do_imaging_weight"] = True
+
+    # cgk_1D = np.ones((1))
+    
+    # from astroviper.core.imaging.imaging_utils.standard_grid import (
+    # standard_grid_psf_numpy_wrap,
+    # standard_imaging_weight_degrid_numpy_wrap
+    # )
+
+
+    # # Grid Weights
+    # weight_density_grid, sum_weight = standard_grid_psf_numpy_wrap(
+    #     uvw, data_weight, freq_chan, cgk_1D, _grid_params
+    # )
+    # print("&&&&&&&&&&&&$$$$$$$$$$$$$$$")
+    ###############################
+
+
 
     grid_imaging_weights(
         weight_density_grid, sum_weight, uvw, data_weight, freq_chan, _grid_params
     )
+    
 
     # Calculate Briggs
     briggs_factors = calculate_briggs_params(
         weight_density_grid, sum_weight, _imaging_weights_params
     )  # 2 x chan x pol
-    print("sum_weight", sum_weight)
-    print("briggs_factors", briggs_factors)
+    # print("sum_weight", sum_weight)
+    # print("briggs_factors", briggs_factors)
 
     imaging_weights = degrid_imaging_weights(
         weight_density_grid, uvw, data_weight, briggs_factors, freq_chan, _grid_params
@@ -106,11 +133,20 @@ def calculate_imaging_weights(ms_xds, grid_params, imaging_weights_params, sel_p
     flags = np.any(ms_xds[data_group_out["flag"]], axis=-1)  #
     data_weight[flags == 1] = np.nan
 
+    # ms_xds[data_group_out["weight_imaging"]] = xr.DataArray(
+    #     imaging_weights[..., 0], dims=ms_xds[data_group_out["weight"]].dims[:-1]
+    # )
+    # print("imaging_weights.shape", imaging_weights.shape)
+    # print("imaging_weights.shape", np.tile(imaging_weights, (1, 2, 1, 1)).shape)
+    
+    n_pol = ms_xds.sizes["polarization"]
+
     ms_xds[data_group_out["weight_imaging"]] = xr.DataArray(
-        imaging_weights[..., 0], dims=ms_xds[data_group_out["weight"]].dims[:-1]
+        np.tile(imaging_weights, (1, 1, 1, n_pol)), dims=ms_xds[data_group_out["weight"]].dims
     )
 
-    data_group_out_name = _sel_params["data_group_out"]["data_group_out_name"]
+
+    data_group_out_name = data_group_out["data_group_out_name"]
     del data_group_out["data_group_out_name"]
     from datetime import datetime, timezone
 
@@ -119,4 +155,6 @@ def calculate_imaging_weights(ms_xds, grid_params, imaging_weights_params, sel_p
     ms_xds.data_groups[data_group_out_name]["date"] = now.isoformat()
     ms_xds.data_groups[data_group_out_name]["description"] = description
 
-    return ms_xds, data_group_out_name
+    data_group_out["data_group_out_name"] = data_group_out_name
+
+    return ms_xds, data_group_out, weight_density_grid

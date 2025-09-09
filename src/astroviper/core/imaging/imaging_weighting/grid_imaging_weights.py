@@ -3,6 +3,7 @@ import numpy as np
 import math
 
 
+
 def grid_imaging_weights(grid, sum_weight, uvw, weight, freq_chan, grid_parms):
     """
     Wraps the jit gridder code.
@@ -95,6 +96,7 @@ def grid_imaging_weights_jit(
     Returns
     -------
     """
+    
     c = 299792458.0
     uv_scale = np.zeros((2, len(freq_chan)), dtype=np.double)
     uv_scale[0, :] = -(freq_chan * delta_lm[0] * n_uv[0]) / c
@@ -109,7 +111,7 @@ def grid_imaging_weights_jit(
     n_v = n_uv[1]
 
     n_pol = data_weights.shape[3]
-
+    q = 0
     for i_time in range(n_time):
         for i_baseline in range(n_baseline):
             for i_chan in range(n_chan):
@@ -117,7 +119,7 @@ def grid_imaging_weights_jit(
                 u = uvw[i_time, i_baseline, 0] * uv_scale[0, i_chan]
                 v = uvw[i_time, i_baseline, 1] * uv_scale[1, i_chan]
 
-                if ~np.isnan(u) and ~np.isnan(v):
+                if  (not np.isnan(u)) and (not np.isnan(v)):
                     u_pos = u + uv_center[0]
                     v_pos = v + uv_center[1]
 
@@ -125,7 +127,7 @@ def grid_imaging_weights_jit(
                     v_pos_conj = -v + uv_center[1]
 
                     # Doing round as int(x+0.5) since u_pos/v_pos should always positive and this matrices fortran and gives consistant rounding.
-                    # Do ~use numpy round
+                    # Do not use numpy round
                     u_indx = int(u_pos + 0.5)
                     v_indx = int(v_pos + 0.5)
 
@@ -145,18 +147,62 @@ def grid_imaging_weights_jit(
                         #     ) / 2.0
                         # else:
                         weight = data_weights[i_time, i_baseline, i_chan, 0]
+                        
 
-                        if ~np.isnan(weight):
+                        if not np.isnan(weight):
                             norm = 0.0
 
                             grid[a_chan, 0, u_indx, v_indx] = (
                                 grid[a_chan, 0, u_indx, v_indx] + weight
                             )
+                            
+                        
+                            # if a_chan == 2 and i_time==249 and i_baseline==84:
+                            #     print(uvw[i_time, i_baseline, 0], freq_chan[i_chan], u, u_pos, u_indx)
+                            #     print(uvw[i_time, i_baseline, 1], freq_chan[i_chan], v, v_pos, v_indx)
+                                
+                            #     print()
+                                
+                            #     casa_scale_u = 1.2120342027738401E-004 
+                            #     casa_scale_v = -1.2120342027738401E-004
+                            #     casa_u = -29.861312088784778
+                            #     casa_v = 23.059356555574468
+                            #     casa_freq = 372731196838.64001
+                            #     casa_pos_u = 120.50014206523888
+                            #     casa_pos_v = 121.52514168638761
+                            #     Cinv = 3.3356409519815204E-009
+                                
+                            #     c_pos_u = casa_scale_u*casa_u*casa_freq*Cinv + 125
+                            #     c_pos_v = casa_scale_v*casa_v*casa_freq*Cinv + 125
+                            #     print(c_pos_u, c_pos_v)
+                            #     print(casa_u-uvw[i_time, i_baseline, 0], casa_v-uvw[i_time, i_baseline, 1])
+                            #     print(Cinv-(1/c))
+                            #     print("freq_diff",casa_freq - freq_chan[i_chan])
+                            #     print("freq", casa_freq, freq_chan[i_chan])
 
+                            #     #-29.86131208878478 372744878418.1687 -4.500023107852949 120.49997689214705 120
+                            #     #23.059356555574468 372744878418.1687 -3.474985862770519 121.52501413722948 122
+                                
+                                
+                            
+                            #if (a_chan == 2) and (u_indx == 121) and (v_indx == 122):
+
+                                # if np.abs(uvw[i_time, i_baseline, 0] + fuvw[q*2]) > 0.0001:
+                                #     print("something wrong", q, uvw[i_time, i_baseline, 0], fuvw[q*2])
+
+                                # if np.abs(uvw[i_time, i_baseline, 1] + fuvw[q*2+1]) > 0.0001:
+                                #     print("something wrong", q, uvw[i_time, i_baseline, 1], fuvw[q*2+1])
+                                # q = q + 1
+                                
+                                # print(grid[a_chan, 0, u_indx, v_indx], weight)
+                                # print(uvw[i_time, i_baseline, 0], freq_chan[i_chan], u, u_pos, u_indx)
+                                # print(uvw[i_time, i_baseline, 1], freq_chan[i_chan], v, v_pos, v_indx)
+                                
+                                
                             grid[a_chan, 0, u_indx_conj, v_indx_conj] = (
                                 grid[a_chan, 0, u_indx_conj, v_indx_conj] + weight
                             )
-
+                    
                             sum_weight[a_chan, 0] = sum_weight[a_chan, 0] + 2 * weight
     return
 
@@ -246,7 +292,7 @@ def degrid_imaging_weights_jit(
                 a_chan = chan_map[i_chan]
                 u = uvw[i_time, i_baseline, 0] * uv_scale[0, i_chan]
                 v = uvw[i_time, i_baseline, 1] * uv_scale[1, i_chan]
-                if ~np.isnan(u) and ~np.isnan(v):
+                if (not np.isnan(u)) and (not np.isnan(v)):
                     u_pos = u + uv_center[0]
                     v_pos = v + uv_center[1]
 
@@ -282,7 +328,7 @@ def degrid_imaging_weights_jit(
                                     ]
                                 )
 
-                            if ~np.isnan(
+                            if not np.isnan(
                                 natural_imaging_weight[
                                     i_time, i_baseline, i_chan, i_pol
                                 ]
@@ -293,7 +339,7 @@ def degrid_imaging_weights_jit(
                                 != 0.0
                             ):
                                 # print("a_chan, a_pol, u_center_indx, v_center_indx", a_chan, a_pol, u_center_indx, v_center_indx, grid_imaging_weight.shape)
-                                if ~np.isnan(
+                                if not np.isnan(
                                     grid_imaging_weight[
                                         a_chan, a_pol, u_center_indx, v_center_indx
                                     ]
