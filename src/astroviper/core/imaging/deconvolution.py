@@ -1,14 +1,43 @@
 import numpy as np
+import xarray as xr
+from typing import Optional, Tuple
 
-# from xradio.image import load_image, write_image, make_empty_sky_image
 from astroviper.core.imaging.deconvolvers import hogbom
 
 import toolviper.utils.logger as logger
 
 
-# Progress callback function
-def progress_callback(npol, pol, iter_num, px, py, peak):
-    if iter_num % 100 == 0:
+def progress_callback(
+    npol: int,
+    pol: int,
+    iter_num: int,
+    px: int,
+    py: int,
+    peak: float,
+    niter_log: int = 100,
+):
+    """
+    Callback function to log progress during the CLEAN iterations.
+    Logs progress every 100 iterations.
+
+    Parameters:
+    -----------
+    npol: int
+        Total number of polarizations.
+    pol: int
+        Current polarization index.
+    iter_num: int
+        Current iteration number.
+    px: int
+        X-coordinate of the current peak.
+    py: int
+        Y-coordinate of the current peak.
+    peak: float
+        Value of the current peak.
+    niter_log: int
+        Frequency of logging iterations (default is every 100 iterations).
+    """
+    if iter_num % niter_log == 0:
         logger.info(
             f"  Iteration {iter_num}, pol {pol}, peak at ({px}, {py}): {peak:.6f}"
         )
@@ -60,33 +89,60 @@ def _validate_dconv_params(deconv_params):
     return deconv_params
 
 
-def hogbom_clean(dirty_image_xds, psf_xds, deconv_params, output_dir="."):
+def hogbom_clean(
+    dirty_image_xds: xr.Dataset,
+    psf_xds: xr.Dataset,
+    gain: float = 0.1,
+    niter: int = 0,
+    threshold: float = 0,
+    clean_box: Tuple[int] | None = None,
+    output_dir: str = ".",
+):
     """
-    Run Hogbom CLEAN algorithm on the dirty image using the provided PSF.
+    Perform Hogbom CLEAN deconvolution on a dirty image using the provided PSF.
 
-    Inputs:
-    dirty_image_xds: xarray Dataset containing the dirty image.
-    psf_xds: xarray Dataset containing the point spread function (PSF).
-    deconv_params: Dictionary containing deconvolution parameters such as:
-        - 'gain': CLEAN gain (float)
-        - 'niter': Maximum number of iterations (int)
-        - 'threshold': Stopping threshold (float)
-        - 'clean_box': Optional clean box (tuple of slices or None)
-    output_dir: Directory to save the output images (str)
+    Parameters:
+    -----------
+    dirty_image_xds: xarray.Dataset
+        The dirty image dataset with dimensions (time, frequency, polarization, y, x).
+    psf_xds: xarray.Dataset
+        The PSF dataset with dimensions (time, frequency, polarization, y, x).
+    gain: float
+        The CLEAN gain factor (0 < gain <= 1).
+    niter: int
+        The maximum number of CLEAN iterations.
+    threshold: float
+        The stopping threshold for CLEANing.
+    clean_box: Tuple[int] or None
+        A tuple defining the clean box (ymin, ymax, xmin, xmax) or None for no box.
+    output_dir: str
+        Directory to save intermediate outputs (not used in this implementation).
 
     Returns:
-    results: Dictionary containing deconvolution results, including:
-        - 'model_image': The CLEAN model image (numpy array)
-        - 'residual_image': The residual image after CLEAN (numpy array)
-        - 'iterations_performed': Number of iterations performed (int)
-        - 'final_peak': Final peak flux in the residual image (float)
-        - 'total_flux_cleaned': Total flux in the model image (float)
-        - 'converged': Boolean indicating if CLEAN converged (bool)
+    --------
+    results: dict
+        A dictionary containing the model image and residual image after deconvolution.
+    model_xds: xarray.Dataset
+        The model image dataset after deconvolution.
+    residual_xds: xarray.Dataset
+        The residual image dataset after deconvolution.
+
+    Notes:
+    ------
+    - This function assumes that the PSF is the same for all polarizations.
+    - The function loops over time and frequency dimensions to perform deconvolution on each slice.
     """
 
     ntime = dirty_image_xds.dims["time"]
     nchan = dirty_image_xds.dims["frequency"]
     npol = dirty_image_xds.dims["polarization"]
+
+    deconv_params = {
+        "gain": gain,
+        "niter": niter,
+        "threshold": threshold,
+        "clean_box": clean_box,
+    }
 
     # Validate and set default deconvolution parameters
     deconv_params = _validate_dconv_params(deconv_params)
@@ -117,10 +173,10 @@ def hogbom_clean(dirty_image_xds, psf_xds, deconv_params, output_dir="."):
                 dirty_image=dirty_slice,
                 psf=psf_slice,
                 mask=np.array([], dtype=np.float32),
-                gain=deconv_params["gain"],
-                threshold=deconv_params["threshold"],
-                max_iter=deconv_params["niter"],
-                clean_box=deconv_params["clean_box"] or (-1, -1, -1, -1),
+                gain=gain,
+                threshold=threshold,
+                max_iter=niter,
+                clean_box=clean_box or (-1, -1, -1, -1),
                 progress_callback=progress_callback,
                 stop_callback=None,
             )
@@ -128,4 +184,4 @@ def hogbom_clean(dirty_image_xds, psf_xds, deconv_params, output_dir="."):
             model_xds["SKY"][tt, cc, ...] = results["model_image"]
             residual_xds["SKY"][tt, cc, ...] = results["residual_image"]
 
-    return results
+    return results, model_xds, residual_xds
