@@ -7,6 +7,7 @@ from astroviper.core.imaging.deconvolvers import hogbom
 import logging
 import toolviper.utils.logger as logger
 
+
 def progress_callback(
     npol: int,
     pol: int,
@@ -167,7 +168,11 @@ def hogbom_clean(
                 gain=deconv_params["gain"],
                 threshold=deconv_params["threshold"],
                 max_iter=deconv_params["niter"],
-                clean_box=deconv_params["clean_box"] if deconv_params["clean_box"] else (-1, -1, -1, -1),
+                clean_box=(
+                    deconv_params["clean_box"]
+                    if deconv_params["clean_box"]
+                    else (-1, -1, -1, -1)
+                ),
                 progress_callback=progress_callback,
                 stop_callback=None,
             )
@@ -175,7 +180,7 @@ def hogbom_clean(
             model_xds["SKY"][tt, cc, ...] = results["model_image"]
             residual_xds["SKY"][tt, cc, ...] = results["residual_image"]
 
-    # These are only valid for the 
+    # These are only valid for the
     del results["model_image"]
     del results["residual_image"]
 
