@@ -129,7 +129,6 @@ py::dict hclean_impl(
         yend = std::max(ybeg+1, std::min(yend, ny));
     }
     
-    // Create explicit 3D shape for compile-time safety
     std::vector<py::ssize_t> shape_3d = {npol, ny, nx};
     
     // Create working arrays in native type T - no conversion needed
@@ -141,7 +140,6 @@ py::dict hclean_impl(
     py::buffer_info dirty_copy_info = dirty_copy.request();
     std::memset(model_info.ptr, 0, dirty_info.size * sizeof(T));
     std::memcpy(dirty_copy_info.ptr, dirty_info.ptr, dirty_info.size * sizeof(T));
-    
     
     // Set up progress callback wrapper
     std::function<void(int, int, int, int, int, T)> msgput_func = 
