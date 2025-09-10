@@ -206,7 +206,7 @@ void clean(T* limage, T* limagestep, const T* lpsf,
         
         // Output final status for this polarization  
         if (iter > siter) {
-            msgput(npol, pol, -iter, px, py, maxval);
+            msgput(npol, pol, iter, px, py, maxval);
         }
         
         maxiter = std::max(iter, maxiter);
