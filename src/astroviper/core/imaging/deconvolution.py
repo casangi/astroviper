@@ -4,8 +4,8 @@ from typing import Optional, Tuple
 
 from astroviper.core.imaging.deconvolvers import hogbom
 
+import logging
 import toolviper.utils.logger as logger
-
 
 def progress_callback(
     npol: int,
@@ -43,7 +43,7 @@ def progress_callback(
         )
 
 
-def _validate_dconv_params(deconv_params):
+def _validate_deconv_params(deconv_params):
     """
     Validate and set default deconvolution parameters if unspecified.
     deconv_params: Dictionary containing deconvolution parameters such as:
@@ -52,13 +52,14 @@ def _validate_dconv_params(deconv_params):
         - 'threshold': Stopping threshold (float, default=None)
     """
 
-    # NOTE : XXX : This should probably not live here. This validation should happen much earlier
+    # NOTE : XXX : This should probably not live here. This validation function
+    # should live in utils or something
 
     default_params = {
         "gain": 0.1,
         "niter": 1000,
-        "threshold": None,
-        "clean_box": None,  # No clean box by default
+        "threshold": 0.0,
+        "clean_box": (-1, -1, -1, -1),  # No clean box by default
     }
 
     for key, default_value in default_params.items():
@@ -92,10 +93,7 @@ def _validate_dconv_params(deconv_params):
 def hogbom_clean(
     dirty_image_xds: xr.Dataset,
     psf_xds: xr.Dataset,
-    gain: float = 0.1,
-    niter: int = 0,
-    threshold: float = 0,
-    clean_box: Tuple[int] | None = None,
+    deconv_params: Optional[dict] = None,
     output_dir: str = ".",
 ):
     """
@@ -107,14 +105,13 @@ def hogbom_clean(
         The dirty image dataset with dimensions (time, frequency, polarization, y, x).
     psf_xds: xarray.Dataset
         The PSF dataset with dimensions (time, frequency, polarization, y, x).
-    gain: float
-        The CLEAN gain factor (0 < gain <= 1).
-    niter: int
-        The maximum number of CLEAN iterations.
-    threshold: float
-        The stopping threshold for CLEANing.
-    clean_box: Tuple[int] or None
-        A tuple defining the clean box (ymin, ymax, xmin, xmax) or None for no box.
+    deconv_params: dict or None
+        Dictionary containing deconvolution parameters:
+        - gain (float): CLEAN gain factor (0 < gain <= 1).
+        - niter (int): Maximum number of CLEAN iterations.
+        - threshold (float): Stopping threshold for CLEANing.
+        - clean_box (Tuple[int] or None): Clean box defined as (ymin, ymax, xmin, xmax) or None for no box.
+        If None, default parameters will be used.
     output_dir: str
         Directory to save intermediate outputs (not used in this implementation).
 
@@ -137,17 +134,11 @@ def hogbom_clean(
     nchan = dirty_image_xds.dims["frequency"]
     npol = dirty_image_xds.dims["polarization"]
 
-    deconv_params = {
-        "gain": gain,
-        "niter": niter,
-        "threshold": threshold,
-        "clean_box": clean_box,
-    }
-
     # Validate and set default deconvolution parameters
-    deconv_params = _validate_dconv_params(deconv_params)
+    deconv_params = _validate_deconv_params(deconv_params)
 
     # Initialize model and residual xds from dirty image
+    # XXX : Potential hotspot for memory usage here
     model_xds = dirty_image_xds.copy(deep=True)
     residual_xds = dirty_image_xds.copy(deep=True)
 
@@ -173,15 +164,19 @@ def hogbom_clean(
                 dirty_image=dirty_slice,
                 psf=psf_slice,
                 mask=np.array([], dtype=np.float32),
-                gain=gain,
-                threshold=threshold,
-                max_iter=niter,
-                clean_box=clean_box or (-1, -1, -1, -1),
+                gain=deconv_params["gain"],
+                threshold=deconv_params["threshold"],
+                max_iter=deconv_params["niter"],
+                clean_box=deconv_params["clean_box"] if deconv_params["clean_box"] else (-1, -1, -1, -1),
                 progress_callback=progress_callback,
                 stop_callback=None,
             )
 
             model_xds["SKY"][tt, cc, ...] = results["model_image"]
             residual_xds["SKY"][tt, cc, ...] = results["residual_image"]
+
+    # These are only valid for the 
+    del results["model_image"]
+    del results["residual_image"]
 
     return results, model_xds, residual_xds
