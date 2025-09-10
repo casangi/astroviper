@@ -75,7 +75,7 @@ class TestValidateDeconvParams:
         params = {}
         result = _validate_deconv_params(params)
 
-        expected = {"gain": 0.1, "niter": 1000, "threshold": None, "clean_box": None}
+        expected = {"gain": 0.1, "niter": 1000, "threshold": 0.0, "clean_box": (-1,-1,-1,-1)}
         assert result == expected
 
     def test_existing_valid_parameters(self):
@@ -177,8 +177,8 @@ class TestValidateDeconvParams:
         expected = {
             "gain": 0.05,
             "niter": 1000,  # Default
-            "threshold": None,  # Default
-            "clean_box": None,  # Default
+            "threshold": 0.0,  # Default
+            "clean_box": (-1,-1,-1,-1),  # Default
         }
         assert result == expected
 
