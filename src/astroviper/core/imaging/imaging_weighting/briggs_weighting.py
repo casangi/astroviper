@@ -17,7 +17,7 @@ def calculate_briggs_params(grid_of_imaging_weights, sum_weight, imaging_weights
         briggs_factors[0, :, :] = (
             np.square(5.0 * 10.0 ** (-robust)) / (squared_sum_weight / (sum_weight))
         )[None, None, :, :]
-        
+
         # print("briggs_factors", briggs_factors)
         # print("$$$$$$$$$$$$$$$$$$$")
     elif imaging_weights_parms["weighting"] == "briggs_abs":

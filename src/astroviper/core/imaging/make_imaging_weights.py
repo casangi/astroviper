@@ -104,11 +104,9 @@ def make_imaging_weights(ms_xds, grid_params, imaging_weights_params, sel_params
 
     ms_xds.attrs["data_groups"][data_group_out["data_group_out_name"]] = data_group_out
 
-
     print("@@@@@@ data_group_in", data_group_in)
     print("@@@@@@ data_group_out", data_group_out)
     print("$$$$$$$$$$$$$$$$$$$")
-    
 
     return data_group_out
 

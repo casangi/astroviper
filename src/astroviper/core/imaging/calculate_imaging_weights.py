@@ -21,11 +21,21 @@ from astroviper.core.imaging.imaging_weighting.briggs_weighting import (
 )
 
 # from graphviper.parameter_checking.check_params import check_sel_params
-from astroviper.utils.check_params import check_params, check_sel_params
+from astroviper.utils.check_params import (
+    check_params,
+    check_sel_params,
+    check_sel_params_ps_xdt,
+)
 import copy
 
 
-def calculate_imaging_weights(ms_xds, grid_params, imaging_weights_params, sel_params):
+def calculate_imaging_weights(
+    ps_xdt,
+    grid_params,
+    imaging_weights_params,
+    sel_params,
+    return_weight_density_grid=False,
+):
     _sel_params = copy.deepcopy(sel_params)
     _imaging_weights_params = copy.deepcopy(imaging_weights_params)
     assert check_imaging_weights_params(
@@ -34,8 +44,8 @@ def calculate_imaging_weights(ms_xds, grid_params, imaging_weights_params, sel_p
 
     if _imaging_weights_params["weighting"] == "natural":
         _sel_params["overwrite"] = True  # No actual overwrite is occuring.
-        data_group_in, data_group_out = check_sel_params(
-            ms_xds,
+        data_group_in, data_group_out = check_sel_params_ps_xdt(
+            ps_xdt,
             _sel_params,
             default_data_group_in_name="base",
             default_data_group_out_name="imaging",
@@ -44,8 +54,8 @@ def calculate_imaging_weights(ms_xds, grid_params, imaging_weights_params, sel_p
         description = "Data group created for natural imaging weights with ."
         return _sel_params["data_group_out"]
     else:
-        data_group_in, data_group_out = check_sel_params(
-            ms_xds,
+        data_group_in, data_group_out = check_sel_params_ps_xdt(
+            ps_xdt,
             _sel_params,
             default_data_group_in_name="base",
             default_data_group_out_name="imaging",
@@ -64,59 +74,36 @@ def calculate_imaging_weights(ms_xds, grid_params, imaging_weights_params, sel_p
         "image_size"
     ]  # do not need to pad since no fft
 
-    uvw = ms_xds[data_group_out["uvw"]].values
-    data_weight = ms_xds[data_group_out["weight"]].values
-
-    # * (
-    #     1 - ms_xds[data_group_out["flag"]].values
-    # )
-    data_weight[ms_xds[data_group_out["flag"]] == 1] = (
-        np.nan
-    )  # Set flagged data to NaN for weighting.
-    freq_chan = ms_xds.frequency.values
-
-    if data_weight.shape[3] == 2:
-        data_weight = ((data_weight[..., 0] + data_weight[..., 1]) / 2)[..., np.newaxis]
-
-    if data_weight.shape[3] == 4:
-        data_weight = ((data_weight[..., 0] + data_weight[..., 3]) / 2)[..., np.newaxis]
-
     # Grid Weights
     n_uv = _grid_params["image_size_padded"]
-    n_imag_chan = data_weight.shape[2]
+    n_imag_chan = _grid_params["n_imag_chan"]
     weight_density_grid = np.zeros((n_imag_chan, 1, n_uv[0], n_uv[1]), dtype=np.double)
-    #weight_density_grid = np.zeros((n_imag_chan, 1, n_uv[0], n_uv[1]), dtype=np.float32)
+    # weight_density_grid = np.zeros((n_imag_chan, 1, n_uv[0], n_uv[1]), dtype=np.float32)
     sum_weight = np.zeros((n_imag_chan, 1), dtype=np.double)
 
+    # Grid the Weights
+    for ms_xdt in ps_xdt.values():
+        uvw = ms_xdt[data_group_out["uvw"]].values
+        data_weight = ms_xdt[data_group_out["weight"]].values
+        data_weight[ms_xdt[data_group_out["flag"]] == 1] = (
+            np.nan
+        )  # Set flagged data to NaN for weighting.
 
-    # #Try old gridding code
-    # _grid_params["oversampling"] = 0
-    # _grid_params["support"] = 1
-    # _grid_params["do_psf"] = True
-    # _grid_params["complex_grid"] = False
-    # _grid_params["do_imaging_weight"] = True
+        if data_weight.shape[3] == 2:
+            data_weight = ((data_weight[..., 0] + data_weight[..., 1]) / 2)[
+                ..., np.newaxis
+            ]
 
-    # cgk_1D = np.ones((1))
-    
-    # from astroviper.core.imaging.imaging_utils.standard_grid import (
-    # standard_grid_psf_numpy_wrap,
-    # standard_imaging_weight_degrid_numpy_wrap
-    # )
+        if data_weight.shape[3] == 4:
+            data_weight = ((data_weight[..., 0] + data_weight[..., 3]) / 2)[
+                ..., np.newaxis
+            ]
 
+        freq_chan = ms_xdt.frequency.values
 
-    # # Grid Weights
-    # weight_density_grid, sum_weight = standard_grid_psf_numpy_wrap(
-    #     uvw, data_weight, freq_chan, cgk_1D, _grid_params
-    # )
-    # print("&&&&&&&&&&&&$$$$$$$$$$$$$$$")
-    ###############################
-
-
-
-    grid_imaging_weights(
-        weight_density_grid, sum_weight, uvw, data_weight, freq_chan, _grid_params
-    )
-    
+        grid_imaging_weights(
+            weight_density_grid, sum_weight, uvw, data_weight, freq_chan, _grid_params
+        )
 
     # Calculate Briggs
     briggs_factors = calculate_briggs_params(
@@ -124,37 +111,66 @@ def calculate_imaging_weights(ms_xds, grid_params, imaging_weights_params, sel_p
     )  # 2 x chan x pol
     # print("sum_weight", sum_weight)
     # print("briggs_factors", briggs_factors)
+    # print("4 sum of data weights ", np.nansum(data_weight))
 
-    imaging_weights = degrid_imaging_weights(
-        weight_density_grid, uvw, data_weight, briggs_factors, freq_chan, _grid_params
-    )
+    # Degrid the Weights
 
-    # Flag data
-    flags = np.any(ms_xds[data_group_out["flag"]], axis=-1)  #
-    data_weight[flags == 1] = np.nan
+    for ms_xdt in ps_xdt.values():
+        uvw = ms_xdt[data_group_out["uvw"]].values
+        data_weight = ms_xdt[data_group_out["weight"]].values
+        data_weight[ms_xdt[data_group_out["flag"]] == 1] = (
+            np.nan
+        )  # Set flagged data to NaN for weighting.
+        if data_weight.shape[3] == 2:
+            data_weight = ((data_weight[..., 0] + data_weight[..., 1]) / 2)[
+                ..., np.newaxis
+            ]
 
-    # ms_xds[data_group_out["weight_imaging"]] = xr.DataArray(
-    #     imaging_weights[..., 0], dims=ms_xds[data_group_out["weight"]].dims[:-1]
-    # )
-    # print("imaging_weights.shape", imaging_weights.shape)
-    # print("imaging_weights.shape", np.tile(imaging_weights, (1, 2, 1, 1)).shape)
-    
-    n_pol = ms_xds.sizes["polarization"]
+        if data_weight.shape[3] == 4:
+            data_weight = ((data_weight[..., 0] + data_weight[..., 3]) / 2)[
+                ..., np.newaxis
+            ]
 
-    ms_xds[data_group_out["weight_imaging"]] = xr.DataArray(
-        np.tile(imaging_weights, (1, 1, 1, n_pol)), dims=ms_xds[data_group_out["weight"]].dims
-    )
+        freq_chan = ms_xdt.frequency.values
 
+        imaging_weights = degrid_imaging_weights(
+            weight_density_grid,
+            uvw,
+            data_weight,
+            briggs_factors,
+            freq_chan,
+            _grid_params,
+        )
 
-    data_group_out_name = data_group_out["data_group_out_name"]
-    del data_group_out["data_group_out_name"]
-    from datetime import datetime, timezone
+        # # Flag data
+        # flags = np.any(ms_xdt[data_group_out["flag"]], axis=-1)  #
+        # data_weight[flags == 1] = np.nan
 
-    now = datetime.now(timezone.utc)
-    ms_xds.data_groups[data_group_out_name] = data_group_out
-    ms_xds.data_groups[data_group_out_name]["date"] = now.isoformat()
-    ms_xds.data_groups[data_group_out_name]["description"] = description
+        # ms_xdt[data_group_out["weight_imaging"]] = xr.DataArray(
+        #     imaging_weights[..., 0], dims=ms_xdt[data_group_out["weight"]].dims[:-1]
+        # )
+        # print("imaging_weights.shape", imaging_weights.shape)
+        # print("imaging_weights.shape", np.tile(imaging_weights, (1, 2, 1, 1)).shape)
 
-    data_group_out["data_group_out_name"] = data_group_out_name
+        n_pol = ms_xdt.sizes["polarization"]
 
-    return ms_xds, data_group_out, weight_density_grid
+        ms_xdt[data_group_out["weight_imaging"]] = xr.DataArray(
+            np.tile(imaging_weights, (1, 1, 1, n_pol)),
+            dims=ms_xdt[data_group_out["weight"]].dims,
+        )
+
+        data_group_out_name = data_group_out["data_group_out_name"]
+        del data_group_out["data_group_out_name"]
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        ms_xdt.data_groups[data_group_out_name] = data_group_out
+        ms_xdt.data_groups[data_group_out_name]["date"] = now.isoformat()
+        ms_xdt.data_groups[data_group_out_name]["description"] = description
+
+        data_group_out["data_group_out_name"] = data_group_out_name
+
+    if return_weight_density_grid:
+        return ps_xdt, data_group_out, weight_density_grid
+    else:
+        return ps_xdt, data_group_out
