@@ -106,8 +106,11 @@ def make_image_mosaic(input_params):
         #     # imaging_weights_params={"weighting": "natural"},
         #     sel_params={"data_group_in_name": data_group_out["data_group_out_name"]},
         # )
-        
-        from astroviper.core.imaging.calculate_imaging_weights import calculate_imaging_weights
+
+        from astroviper.core.imaging.calculate_imaging_weights import (
+            calculate_imaging_weights,
+        )
+
         ms_xdt, data_group_out = calculate_imaging_weights(
             ms_xdt,
             grid_params=grid_params,
