@@ -138,8 +138,8 @@ py::dict hclean_impl(
     // Zero-initialize and copy using safe buffer access
     py::buffer_info model_info = model_image.request();
     py::buffer_info dirty_copy_info = dirty_copy.request();
-    std::memset(model_info.ptr, 0, dirty_info.size * sizeof(T));
-    std::memcpy(dirty_copy_info.ptr, dirty_info.ptr, dirty_info.size * sizeof(T));
+    std::memset(model_info.ptr, 0, model_info.size * model_info.itemsize);
+    std::memcpy(dirty_copy_info.ptr, dirty_info.ptr, dirty_info.size * dirty_info.itemsize);
     
     // Set up progress callback wrapper
     std::function<void(int, int, int, int, int, T)> msgput_func = 

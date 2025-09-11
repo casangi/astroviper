@@ -1,5 +1,6 @@
 import numpy as np
 import xarray as xr
+import copy
 from typing import Optional, Tuple
 
 from astroviper.core.imaging.deconvolvers import hogbom
@@ -177,11 +178,17 @@ def hogbom_clean(
                 stop_callback=None,
             )
 
-            model_xds["SKY"][tt, cc, ...] = results["model_image"]
-            residual_xds["SKY"][tt, cc, ...] = results["residual_image"]
+            model_xds["SKY"].values[tt, cc, :, :, :] = copy.deepcopy(
+                results["model_image"]
+            )
+            residual_xds["SKY"].values[tt, cc, :, :, :] = copy.deepcopy(
+                results["residual_image"]
+            )
 
-    # These are only valid for the
-    del results["model_image"]
-    del results["residual_image"]
+    final_results = {
+        key: value
+        for key, value in results.items()
+        if key not in ["model_image", "residual_image"]
+    }
 
-    return results, model_xds, residual_xds
+    return final_results, model_xds, residual_xds
