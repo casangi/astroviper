@@ -1,16 +1,17 @@
 import numpy as np
 from numba import jit, objmode
 import numba
+import xarray
 import scipy.optimize as optimize
 from scipy.interpolate import interpn
 
 
 def psf_gaussian_fit(
-    xds,
-    dv="SKY",
-    npix_window=[9, 9],
-    sampling=[9, 9],
-    cutoff=0.35,
+    xds: xarray.Dataset,
+    dv: str = "SKY",
+    npix_window: tuple = [9, 9],
+    sampling: tuple = [9, 9],
+    cutoff: float = 0.35,
 ):
     """
     fit 2D gaussian to psf
@@ -24,7 +25,7 @@ def psf_gaussian_fit(
     npix_window : list
         The size of the fitting window in pixels.
     sampling : list
-        The sampling of the fitting grid.
+        The sampling of the fitting grid in pixels.
     cutoff : float
         The cutoff value for the fitting.
 
@@ -33,40 +34,60 @@ def psf_gaussian_fit(
     xds : xarray.Dataset
         The image with the fitted parameters added.
         The unit of beam size (major and minor) will be the same unit as
-        that of the input image. If there is no unit attribute for the
-        input image, the unit will be radian. The position angle is given
-        in degrees.
+        that of the input image's (l,m) coordintes, which assumed to be
+        radian. The position angle is given in degrees.
     """
+
+    if not isinstance(npix_window, (list, tuple, np.ndarray)):
+        raise TypeError("npix_window must be a list, tuple, or numpy array")
+    if len(npix_window) == 1:
+        npix_window = [npix_window[0], npix_window[0]]
+    if npix_window[0] <= 0 or npix_window[1] <= 0:
+        raise ValueError("npix_window must be positive")
+    if type(npix_window[0]) is not int or type(npix_window[1]) is not int:
+        raise TypeError("npix_window must be integers")
+    if not isinstance(sampling, (list, tuple, np.ndarray)):
+        raise TypeError("sampling must be a list, tuple, or numpy array")
+    if len(sampling) == 1:
+        sampling = [sampling[0], sampling[0]]
+    if sampling[0] <= 0 or sampling[1] <= 0:
+        raise ValueError("sampling must be positive")
+    if type(sampling[0]) is not int or type(sampling[1]) is not int:
+        raise TypeError("sampling must be integers")
+    if cutoff < 0:
+        raise ValueError("cutoff must be non-negative")
+    if dv not in xds:
+        raise KeyError(f"{dv} not found in the dataset")
+    if "l" not in xds[dv].coords:
+        raise KeyError(f"'l' coordinate not found in {dv}")
 
     _xds = xds.copy(deep=True)
 
     sampling = np.array(sampling)
     npix_window = np.array(npix_window)
 
-    in_delta = np.array([_xds[dv].l[1] - _xds[dv].l[0], _xds[dv].m[1] - _xds[dv].m[0]])
-    # pixel increments in arcsecond
-    delta = (
-        np.array([_xds[dv].l[1] - _xds[dv].l[0], _xds[dv].m[1] - _xds[dv].m[0]])
-        * 3600
-        * 180
-        / np.pi
-    )
+    # pixel increments (radians)
+    delta = np.array([_xds[dv].l[1] - _xds[dv].l[0], _xds[dv].m[1] - _xds[dv].m[0]])
+    # To make fitting result expressed in arcsecond uncomment the below
+    #    * 3600
+    #    * 180
+    #    / np.pi
 
     ellipse_params = psf_gaussian_fit_core(
         _xds[dv].data.compute(), npix_window, sampling, cutoff, delta
     )
-    # psf_gaussian_fit_core returns bmaj and bmin in arcsecond and pa in deg.
+
+    # Uncomment line below to change beam_param units to arcsec and deg
+    # psf_gaussian_fit_core returns bmaj and bmin in  and pa in deg.
     # Converting to radian for storing to the xradio image
-    print(ellipse_params.shape)
-    ellipse_params[..., :2] = np.deg2rad(ellipse_params[..., :2] / 3600.0)
-    ellipse_params[..., 2] = np.deg2rad(ellipse_params[..., 2])
+    # ellipse_params[..., :2] = np.deg2rad(ellipse_params[..., :2] / 3600.0)
+    # ellipse_params[..., 2] = np.deg2rad(ellipse_params[..., 2])
 
     import dask.array as da
 
     _xds["BEAM"].data = da.from_array(ellipse_params, chunks="auto")
-    if "unit" in _xds["SKY"].l.attrs:
-        _xds["BEAM"].beam_param.attrs["unit"] = _xds["SKY"].l.attrs["unit"]
-    else:
+    # assume l, m in radians
+    if not "unit" in _xds["SKY"].l.attrs:
         _xds["BEAM"].beam_param.attrs["unit"] = "rad"
     return _xds
 
@@ -80,9 +101,14 @@ def beam_chi2(params, psf, sampling):
     psf_ravel = psf_ravel[psf_mask]
 
     width_x, width_y, rotation = params
-    rotation = 90 - rotation
-    rotation = np.deg2rad(rotation)
 
+    ### comment out assuming everthing done in radians
+    # rotation is assumed to be in degrees
+    # rotation = 90 - rotation
+    # rotation = np.deg2rad(rotation)
+    # for debugging
+    # print("rotation original (rad) =", rotation, " (deg) =", np.rad2deg(rotation))
+    # print("rotation after mod (rad) =", rotation, " (deg) =", np.rad2deg(rotation))
     x_size = sampling[0] * 2 + 1
     y_size = sampling[1] * 2 + 1
 
@@ -107,9 +133,24 @@ def beam_chi2(params, psf, sampling):
 def psf_gaussian_fit_core(image_to_fit, npix_window, sampling, cutoff, delta):
     """
     core function to fit gaussian to psf
+    Parameters
+    ----------
+    image_to_fit : np.ndarray
+        The input data cube.
+    npix_window : np.ndarray
+        The size of the fitting window in pixels.
+    sampling : np.ndarray
+        The sampling of the fitting grid in pixels.
+    cutoff : float
+        The cutoff value for the fitting.
+    delta : np.ndarray
+        The pixel size in radians.
     """
     ellipse_params = np.zeros(image_to_fit.shape[0:3] + (3,), dtype=numba.double)
-
+    if np.all(np.isnan(image_to_fit)):
+        return ellipse_params + np.nan
+    elif np.all(image_to_fit == 0):
+        return ellipse_params
     image_size = np.array(image_to_fit.shape[3:5])
     image_center = image_size // 2
     start_window = image_center - npix_window // 2
@@ -146,17 +187,28 @@ def psf_gaussian_fit_core(image_to_fit, npix_window, sampling, cutoff, delta):
                     ).T
                     interp_image_to_fit[interp_image_to_fit < cutoff] = np.nan
 
-                    p0 = [2.5, 2.5, 0.0]
+                    p0 = [2.5, 2.5, 0]
+                    bound = [(None, None), (None, None), (-np.pi / 4, np.pi / 4)]
                     res = optimize.minimize(
-                        beam_chi2, p0, args=(interp_image_to_fit, sampling // 2)
+                        beam_chi2,
+                        p0,
+                        args=(interp_image_to_fit, sampling // 2),
+                        bounds=bound,
                     )
                     res_x = res.x
-
-                # phi = res_x[2] - 90.0
                 phi = res_x[2]
-                if phi < -90.0:
-                    phi += 180.0
+                # phi = res_x[2] - np.pi / 2
+                # if phi < -np.pi / 2:
+                #    phi += np.pi
+                #    phi = (np.pi / 2 - res_x[2]) % np.pi
 
+                # phi = np.rad2deg(res_x[2])
+                # phi = res_x[2] - 90.0
+                # if phi < -90.0:
+                #    phi += 180.0
+
+                if np.argmax(res_x[0:2]) == 1:
+                    phi = -(np.pi / 2 - phi)
                 ellipse_params[time, chan, pol, 0] = np.max(
                     np.abs(res_x[0:2])
                     # ) * np.abs(delta[0] * 2.355 / sampling[0] / npix_window[0])
@@ -165,5 +217,6 @@ def psf_gaussian_fit_core(image_to_fit, npix_window, sampling, cutoff, delta):
                     np.abs(res_x[0:2])
                     # ) * np.abs(delta[1] * 2.355 / sampling[1] / npix_window[1])
                 ) * np.abs(delta[1] * 2.355)
-                ellipse_params[time, chan, pol, 2] = -phi
+                # ellipse_params[time, chan, pol, 2] = -phi
+                ellipse_params[time, chan, pol, 2] = phi
     return ellipse_params
