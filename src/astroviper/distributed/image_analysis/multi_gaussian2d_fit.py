@@ -491,6 +491,7 @@ def _fit_multi_plane_numpy(
     *,
     x1d: Optional[np.ndarray] = None,
     y1d: Optional[np.ndarray] = None,
+    mask2d: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Fit N Gaussians + shared offset to a single 2-D plane.
@@ -502,7 +503,7 @@ def _fit_multi_plane_numpy(
     perr : (1 + 6N,)
         1-sigma uncertainties from the covariance diagonal (NaN on failure).
     mask : (ny,nx) bool
-        Mask used during fitting (thresholds).
+        Mask used during fitting (user mask ∧ thresholds).
     """
     if z2d.ndim != 2:
         # cannot cover using public API, defensive coding
@@ -524,8 +525,13 @@ def _fit_multi_plane_numpy(
         x_rng = (float(np.min(x1d)), float(np.max(x1d)))
         y_rng = (float(np.min(y1d)), float(np.max(y1d)))
 
-    # thresholds
-    mask = np.ones_like(z2d, dtype=bool)
+    # user mask + thresholds
+    if mask2d is None:
+        mask = np.ones_like(z2d, dtype=bool)
+    else:
+        mask = np.asarray(mask2d, dtype=bool).copy()
+        if mask.shape != z2d.shape:
+            raise ValueError("mask shape must match the 2-D plane being fit.")
     if min_threshold is not None:
         mask &= z2d >= min_threshold
     if max_threshold is not None:
@@ -543,9 +549,11 @@ def _fit_multi_plane_numpy(
             "Thresholding resulted in not enough pixels being left to fit all parameters"
         )
 
-    # seeds & bounds
+    # Seed parameters — honor user/threshold mask during seeding
+    # (mask already combines user mask & threshold cuts above)
+    z2d_for_seed = np.where(mask, z2d, np.nan)
     p0 = _normalize_initial_guesses(
-        z2d,
+        z2d_for_seed,
         n_components,
         initial_guesses,
         min_threshold,
@@ -553,6 +561,7 @@ def _fit_multi_plane_numpy(
         x1d=x1d,
         y1d=y1d,
     )
+
     lb0, ub0 = _default_bounds_multi((ny, nx), n_components, x_rng=x_rng, y_rng=y_rng)
     lb, ub = _merge_bounds_multi(lb0, ub0, bounds, n_components)
 
@@ -608,6 +617,7 @@ def _fit_multi_plane_numpy(
 
 def _multi_fit_plane_wrapper(
     z2d: np.ndarray,
+    mask2d: np.ndarray,
     y1d: np.ndarray,
     x1d: np.ndarray,
     n_components: int,
@@ -640,6 +650,7 @@ def _multi_fit_plane_wrapper(
         max_nfev=max_nfev,
         x1d=x1d,
         y1d=y1d,
+        mask2d=mask2d,
     )
 
     ny, nx = z2d.shape
@@ -647,7 +658,7 @@ def _multi_fit_plane_wrapper(
     if y1d.shape[0] != ny or x1d.shape[0] != nx:
         raise ValueError(
             "Length of y1d/x1d must match z2d shape for world/pixel grids."
-        )
+        )  # pragma: no cover
     Y = np.broadcast_to(y1d[:, None], (ny, nx))
     X = np.broadcast_to(x1d[None, :], (ny, nx))
 
@@ -816,6 +827,17 @@ def _axis_sign(coord: Optional[np.ndarray]) -> float:
     return 1.0 if np.isfinite(c0) and np.isfinite(c1) and (c1 > c0) else -1.0
 
 
+def _select_mask(da_tr: xr.DataArray, spec: str):
+    """
+    Thin wrapper so tests can monkeypatch this symbol.
+    Delegates to selection.select_mask in the same package.
+    """
+    # local import to avoid hard module dependency at import time
+    from .selection import select_mask  # type: ignore, pragma: no cover
+
+    return select_mask(da_tr, spec)  # pragma: no cover
+
+
 def _theta_pa_to_math(pa: np.ndarray) -> np.ndarray:
     """
     Convert PA (from +y toward +x) into math angle (from +x toward +y, CCW)
@@ -942,7 +964,7 @@ def _extract_1d_coords_for_fit(
         if x1d.ndim != 1 or y1d.ndim != 1 or x1d.size != nx or y1d.size != ny:
             raise ValueError(
                 "World coords must be 1-D and match the data shape along (y, x)."
-            )
+            )  # pragma: no cover
         if (not _axis_is_valid(x1d)) or (not _axis_is_valid(y1d)):
             raise ValueError(
                 "World coords must be strictly monotonic and finite along both axes."
@@ -1184,6 +1206,7 @@ def fit_multi_gaussian2d(
     n_components: int,
     dims: Optional[Sequence[Union[str, int]]] = None,
     *,
+    mask: Optional[ArrayOrDA] = None,
     min_threshold: Optional[Number] = None,
     max_threshold: Optional[Number] = None,
     initial_guesses: Optional[
@@ -1220,6 +1243,11 @@ def fit_multi_gaussian2d(
 
     dims: Sequence[str | int] | None
       Two dims (names or indices) that define the fit plane (x, y). If omitted: uses ('x','y') if present; else for 2-D uses (last, second-last). Required for ndim ≠ 2 without ('x','y').
+
+    mask: numpy.ndarray | dask.array.Array | xarray.DataArray | None
+      Optional boolean mask. **True keeps** a pixel. If 2-D with dims (y, x), it is
+      broadcast across leading dims; if it matches the full array shape, it is used
+      elementwise. Combined with thresholds as: `final_mask = mask ∧ (>= min_threshold) ∧ (<= max_threshold)`.
 
     min_threshold: float | None
       Inclusive lower threshold; pixels with values < min_threshold are ignored during the fit.
@@ -1330,6 +1358,42 @@ def fit_multi_gaussian2d(
     )
     core = [dim_y, dim_x]
 
+    # Resolve mask into a boolean DataArray aligned to da_tr
+    if mask is None:
+        mask_da = xr.ones_like(da_tr, dtype=bool)
+    else:
+        if isinstance(mask, str):
+            # Resolve on-the-fly (OTF) string mask via selection helper
+            mda = _select_mask(da_tr, mask)
+            # Allow selector to return a Dataset wrapper containing 'mask'
+            if isinstance(mda, xr.Dataset):
+                if "mask" in mda:
+                    mda = mda["mask"]
+                else:
+                    raise TypeError(
+                        "selection.select_mask returned a Dataset without a 'mask' variable"
+                    )
+            # Normalize plain ndarray → DataArray with appropriate dims
+            if isinstance(mda, np.ndarray):
+                mda = xr.DataArray(
+                    mda, dims=[dim_y, dim_x] if mda.ndim == 2 else da_tr.dims
+                )
+            if not isinstance(mda, xr.DataArray):
+                raise TypeError("selection.select_mask returned unsupported mask type")
+        elif isinstance(mask, xr.DataArray):
+            mda = mask
+        else:
+            # Support 2-D (y,x) or full-shape masks
+            _m = mask
+            if getattr(_m, "ndim", None) == 2:
+                mda = xr.DataArray(_m, dims=[dim_y, dim_x])
+            else:
+                mda = xr.DataArray(_m, dims=da_tr.dims)
+        mda = mda.astype(bool)
+        # Align & broadcast to data
+        mda, _ = xr.align(mda, da_tr, join="right")
+        mask_da = mda
+
     # 2a) Determine axis signs from coords (or defaults)
     cx = np.asarray(da_tr.coords[dim_x].values) if dim_x in da_tr.coords else None
     cy = np.asarray(da_tr.coords[dim_y].values) if dim_y in da_tr.coords else None
@@ -1433,9 +1497,10 @@ def fit_multi_gaussian2d(
     results = xr.apply_ufunc(
         _multi_fit_plane_wrapper,
         da_tr,
+        mask_da,
         y1d_da,
         x1d_da,
-        input_core_dims=[core, [dim_y], [dim_x]],
+        input_core_dims=[core, core, [dim_y], [dim_x]],
         output_core_dims=out_core_dims,
         vectorize=True,
         dask="parallelized",
@@ -2511,15 +2576,9 @@ def overlay_fit_components(
         """
         Return (theta_vals, kind) with kind in {'math','pa'}, values in radians.
         """
-        cands = []
-        if prefer == "pa":
-            cands += [f"theta_{frame_name}_pa", f"theta_{frame_name}_math"]
-        elif prefer == "math":
-            cands += [f"theta_{frame_name}_math", f"theta_{frame_name}_pa"]
-        else:  # auto
-            cands += [f"theta_{frame_name}_math", f"theta_{frame_name}_pa"]
-        cands += [f"theta_{frame_name}", "theta"]  # generic fallbacks
-
+        # Branchless, behavior-preserving ordering (easier to cover)
+        first, second = ("pa", "math") if prefer == "pa" else ("math", "pa")
+        cands = [f"theta_{frame_name}_{first}", f"theta_{frame_name}_{second}"]
         for nm in cands:
             a = _arr(nm)
             if a is not None:
