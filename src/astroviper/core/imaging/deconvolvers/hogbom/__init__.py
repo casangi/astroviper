@@ -12,8 +12,8 @@ except ImportError as e:
 
 __all__ = [
     "maximg",
-    "hclean",
     "clean",
+    "clean_nc",
     "get_dtype_name",
     "is_float32",
     "is_float64",
