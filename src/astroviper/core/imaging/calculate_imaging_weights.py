@@ -1,11 +1,9 @@
 from time import time
 import numpy as np
-import scipy
-
-# import cngi._utils._constants as const
-from scipy import constants
-from numba import jit
-import numba
+from typing import Tuple, Union, Dict
+import numpy as np
+import xarray as xr
+from xarray import DataTree
 import xarray as xr
 from astroviper.core.imaging.check_imaging_parameters import (
     check_imaging_weights_params,
@@ -22,20 +20,105 @@ from astroviper.core.imaging.imaging_weighting.briggs_weighting import (
 
 # from graphviper.parameter_checking.check_params import check_sel_params
 from astroviper.utils.check_params import (
-    check_params,
-    check_sel_params,
     check_sel_params_ps_xdt,
 )
 import copy
 
 
 def calculate_imaging_weights(
-    ps_xdt,
-    grid_params,
-    imaging_weights_params,
-    sel_params,
-    return_weight_density_grid=False,
-):
+    ps_xdt: DataTree,
+    grid_params: Dict,
+    imaging_weights_params: Dict,
+    sel_params: Dict,
+    return_weight_density_grid: bool = False,
+) -> Union[
+    Tuple[DataTree, dict],
+    Tuple[DataTree, dict, np.ndarray],
+]:
+    """
+    Calculate imaging weights for interferometric data using natural or Briggs weighting.
+
+    This function grids per-visibility data weights from a Processing Set (``ps_xdt`` as
+    an xarray ``DataTree``), applies the chosen weighting scheme (natural or Briggs with
+    a specified robust parameter), and degrids the weights back onto the constituent
+    MeasurementSet-like datasets in the tree.
+
+    Parameters
+    ----------
+    ps_xdt : xarray.DataTree
+        Processing Set containing one or more MeasurementSet-like xarray Datasets.
+        Each Dataset must include the fields referenced by ``sel_params`` and
+        ``grid_params`` (e.g., UVW, WEIGHT, FLAG, frequency).
+    grid_params : dict
+        Gridder parameters. Must include:
+            - ``image_size`` : tuple of int
+                UV grid size as ``(n_u, n_v)``.
+            - ``cell_size`` : array-like of float
+                Angular cell size (radians) per UV pixel, typically length 2.
+    imaging_weights_params : dict
+        Weighting scheme configuration. Must include:
+            - ``weighting`` : {"natural", "briggs"}
+                Type of weighting to apply.
+            - ``robust`` : float, optional
+                Briggs robust parameter (ignored if ``"natural"``).
+    sel_params : dict
+        Selection parameters for input/output data groups. Defines which columns
+        (e.g., weight, uvw, flag) are read and where output imaging weights are stored.
+        Common keys include:
+            - ``data_group_in_name`` : str, default ``"base"``
+                Name of the input data group.
+            - ``overwrite`` : bool, default ``False``
+                If True, an existing data variable may be overwritten.
+            - ``data_group_out`` : dict, default ``{"weight_imaging": "WEIGHT"}``
+                Mapping of output variable names; the ``"weight_imaging"`` key sets
+                the name of the output imaging-weight variable.
+            - ``data_group_out_name`` : str, default ``"imaging"``
+                Name of the output data group.
+    return_weight_density_grid : bool, default False
+        If True, also return the 2D weight-density grid used for Briggs weighting
+        (useful for debugging).
+
+    Returns
+    -------
+    ps_xdt : xarray.DataTree
+        The input Processing Set updated with imaging weights written to each leaf Dataset.
+    data_group_out : dict
+        Metadata describing the output data group (e.g., names, descriptions, timestamps).
+    weight_density_grid : numpy.ndarray, optional
+        Only returned if ``return_weight_density_grid=True``. Array of shape
+        ``(n_chan, 1, n_u, n_v)`` containing the weight-density grid.
+
+    Notes
+    -----
+    - **Natural weighting**: Imaging weights are identical to the input data weights;
+      a new data group is created for bookkeeping, but values are not rescaled.
+    - **Briggs weighting**: Imaging weights are scaled by robust-dependent factors
+      computed from the weight-density grid and the channel-wise ``sum_weight``.
+    - Flagged visibilities (``flag == 1``) are set to ``NaN`` during gridding.
+    - Polarization handling:
+        * If there are 2 polarizations (XX, YY): parallel hands are averaged.
+        * If there are 4 polarizations (XX, XY, YX, YY): XX and YY are averaged and
+          the resulting weights are applied to all four polarizations.
+
+    See Also
+    --------
+    grid_imaging_weights : Grid per-visibility weights onto a UV grid.
+    degrid_imaging_weights : Interpolate imaging weights from the UV grid back to visibilities.
+    calculate_briggs_params : Compute robust scaling factors for Briggs weighting.
+
+    Examples
+    --------
+    >>> ps_xdt, data_group_out = calculate_imaging_weights(
+    ...     ps_xdt,
+    ...     grid_params={
+    ...         "image_size": (256, 256),
+    ...         "cell_size": np.array([-0.1, 0.1]) * np.pi / (180 * 3600),
+    ...         "fft_padding": 1.0,
+    ...     },
+    ...     imaging_weights_params={"weighting": "briggs", "robust": 0.5},
+    ...     sel_params={"data_group_in_name": "base"},
+    ... )
+    """
     _sel_params = copy.deepcopy(sel_params)
     _imaging_weights_params = copy.deepcopy(imaging_weights_params)
     assert check_imaging_weights_params(
@@ -86,6 +169,8 @@ def calculate_imaging_weights(
     _grid_params["image_size_padded"] = _grid_params[
         "image_size"
     ]  # do not need to pad since no fft
+    
+    _grid_params["n_imag_chan"] = ps_xdt.xr_ps.get_freq_axis().size
 
     # Grid Weights
     n_uv = _grid_params["image_size_padded"]
