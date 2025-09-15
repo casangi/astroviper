@@ -14,7 +14,6 @@ def create_test_xds(shape=(1, 1, 1, 9, 9)):
     gaussian = np.exp(-(xv**2 + yv**2) / (2 * 0.2**2))
     data = np.zeros(shape)
     data[0, 0, 0, :, :] = gaussian
-    print("data = ", data)
     da_data = da.from_array(data, chunks=(1, 1, 1, 9, 9))
     dims = ["time", "frequency", "polarization", "l", "m"]
     data_coords = {
@@ -68,7 +67,6 @@ def test_psf_gaussian_fit_custom_window():
     params = result["BEAM"]["beam_param"]
     assert params.shape == (3,)
     assert np.all(result["BEAM"].data[:, :, :-1] > 0)
-    print("beam_param_custom_window=", result["BEAM"].data.compute())
     assert np.allclose(result["BEAM"].data[0, 0, 0, :], truth_values, rtol=1e-5, atol=1)
 
 
@@ -86,11 +84,39 @@ def test_negative_npix_window():
         psf_gaussian_fit(ds, npix_window=[-5, 9])
 
 
+def test_single_value_npix_window():
+    """test single value npix_window"""
+    ds = create_test_xds()
+    with pytest.raises((TypeError, AssertionError)):
+        psf_gaussian_fit(ds, npix_window=7)
+
+
+def test_non_integer_npix_window():
+    """test non-integer npix_window"""
+    ds = create_test_xds()
+    with pytest.raises((TypeError, AssertionError)):
+        psf_gaussian_fit(ds, npix_window=[5.5, 9])
+
+
 def test_zero_sampling():
     """test sampling value checking"""
     ds = create_test_xds()
     with pytest.raises((ValueError, AssertionError)):
         psf_gaussian_fit(ds, sampling=[0, 9])
+
+
+def test_single_value_sampling():
+    """test single value sampling"""
+    ds = create_test_xds()
+    with pytest.raises((TypeError, AssertionError)):
+        psf_gaussian_fit(ds, sampling=5)
+
+
+def test_non_integer_sampling():
+    """test non-integer sampling"""
+    ds = create_test_xds()
+    with pytest.raises((TypeError, AssertionError)):
+        psf_gaussian_fit(ds, sampling=[5.5, 9])
 
 
 def test_invalid_cutoff():
@@ -114,7 +140,6 @@ def test_all_nan_input():
     ds = create_test_xds()
     ds["SKY"].data[:] = np.nan
     result = psf_gaussian_fit(ds)
-    print("result=", result["BEAM"].data.compute())
     assert np.all(np.isnan(result["BEAM"].data.compute()))
 
 
@@ -125,6 +150,22 @@ def test_all_zero_input():
     result = psf_gaussian_fit(ds)
     # Depending on implementation, may be all zeros or NaNs
     assert np.all((result["BEAM"].data == 0) | np.isnan(result["BEAM"].data))
+
+
+def test_no_l_coordinate():
+    """test missing 'l' coordinate"""
+    ds = create_test_xds()
+    ds = ds.drop_dims("l")
+    with pytest.raises(KeyError):
+        psf_gaussian_fit(ds)
+
+
+def test_no_m_coordinate():
+    """test missing 'm' coordinate"""
+    ds = create_test_xds()
+    ds = ds.drop_dims("m")
+    with pytest.raises(KeyError):
+        psf_gaussian_fit(ds)
 
 
 def create_rotated_gaussian(shape, angle_deg):
@@ -178,10 +219,6 @@ def test_psf_gaussian_fit_orientation():
         measured_angle = -np.rad2deg(float(result["BEAM"].data[0, 0, 0, 2]))
         measured_bmaj = float(result["BEAM"].data[0, 0, 0, 0])
         measured_bmin = float(result["BEAM"].data[0, 0, 0, 1])
-        print("measured_bmaj =", np.rad2deg(measured_bmaj) * 3600.0)
-        print("measured_bmin =", np.rad2deg(measured_bmin) * 3600.0)
-        print("measured_angle =", measured_angle)
-        print("beam_param = ", result["BEAM"].data.compute())
         # Allow for 180-degree ambiguity and some tolerance
         measured_angle -= 90
         if measured_angle < -90:
@@ -190,9 +227,9 @@ def test_psf_gaussian_fit_orientation():
             measured_angle -= 180
         angle_mod = (measured_angle + 180) % 180
         expected_mod = (angle + 180) % 180
-        print(
-            f"angle={angle}, measured_angle={measured_angle}, angle_mod={angle_mod}, expected_mod={expected_mod}"
-        )
+        # print(
+        #    f"angle={angle}, measured_angle={measured_angle}, angle_mod={angle_mod}, expected_mod={expected_mod}"
+        # )
         assert np.isclose(
             expected_mod,
             angle_mod,

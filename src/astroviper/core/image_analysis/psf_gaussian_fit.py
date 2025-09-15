@@ -40,16 +40,12 @@ def psf_gaussian_fit(
 
     if not isinstance(npix_window, (list, tuple, np.ndarray)):
         raise TypeError("npix_window must be a list, tuple, or numpy array")
-    if len(npix_window) == 1:
-        npix_window = [npix_window[0], npix_window[0]]
     if npix_window[0] <= 0 or npix_window[1] <= 0:
         raise ValueError("npix_window must be positive")
     if type(npix_window[0]) is not int or type(npix_window[1]) is not int:
         raise TypeError("npix_window must be integers")
     if not isinstance(sampling, (list, tuple, np.ndarray)):
         raise TypeError("sampling must be a list, tuple, or numpy array")
-    if len(sampling) == 1:
-        sampling = [sampling[0], sampling[0]]
     if sampling[0] <= 0 or sampling[1] <= 0:
         raise ValueError("sampling must be positive")
     if type(sampling[0]) is not int or type(sampling[1]) is not int:
@@ -58,8 +54,10 @@ def psf_gaussian_fit(
         raise ValueError("cutoff must be non-negative")
     if dv not in xds:
         raise KeyError(f"{dv} not found in the dataset")
-    if "l" not in xds[dv].coords:
-        raise KeyError(f"'l' coordinate not found in {dv}")
+    if "l" not in xds.dims:
+        raise KeyError("'l' coordinate not found in xds")
+    if "m" not in xds.dims:
+        raise KeyError("'m' coordinate not found in xds")
 
     _xds = xds.copy(deep=True)
 
