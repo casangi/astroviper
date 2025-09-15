@@ -52,7 +52,20 @@ def calculate_imaging_weights(
             default_data_group_out_modified={"weight_imaging": "WEIGHT"},
         )
         description = "Data group created for natural imaging weights with ."
-        return _sel_params["data_group_out"]
+        
+        data_group_out_name = data_group_out["data_group_out_name"]
+        del data_group_out["data_group_out_name"]
+        from datetime import datetime, timezone
+
+        for ms_xdt in ps_xdt.values():
+            now = datetime.now(timezone.utc)
+            ms_xdt.data_groups[data_group_out_name] = data_group_out
+            ms_xdt.data_groups[data_group_out_name]["date"] = now.isoformat()
+            ms_xdt.data_groups[data_group_out_name]["description"] = description
+
+            data_group_out["data_group_out_name"] = data_group_out_name
+        
+        return ps_xdt, data_group_out
     else:
         data_group_in, data_group_out = check_sel_params_ps_xdt(
             ps_xdt,
@@ -90,7 +103,10 @@ def calculate_imaging_weights(
         )  # Set flagged data to NaN for weighting.
 
         if data_weight.shape[3] == 2:
-            data_weight = ((data_weight[..., 0] + data_weight[..., 1]) / 2)[
+            # data_weight = ((data_weight[..., 0] + data_weight[..., 1]) / 2)[
+            #     ..., np.newaxis
+            # ]
+            data_weight = ((data_weight[..., 0] + data_weight[..., 0]) / 2)[
                 ..., np.newaxis
             ]
 
@@ -114,6 +130,9 @@ def calculate_imaging_weights(
     # print("4 sum of data weights ", np.nansum(data_weight))
 
     # Degrid the Weights
+    
+    data_group_out_name = data_group_out["data_group_out_name"]
+    del data_group_out["data_group_out_name"]
 
     for ms_xdt in ps_xdt.values():
         uvw = ms_xdt[data_group_out["uvw"]].values
@@ -159,8 +178,6 @@ def calculate_imaging_weights(
             dims=ms_xdt[data_group_out["weight"]].dims,
         )
 
-        data_group_out_name = data_group_out["data_group_out_name"]
-        del data_group_out["data_group_out_name"]
         from datetime import datetime, timezone
 
         now = datetime.now(timezone.utc)

@@ -48,6 +48,7 @@ def make_image_mosaic(input_params):
     else:
         image_time_coord = input_params["task_coords"]["time"]["data"]
 
+    grid_params["n_imag_chan"] = len(image_freq_coord)
     logger.debug("Creating empty image ")
     img_xds = make_empty_sky_image(
         phase_center=grid_params["phase_direction"].values,
@@ -111,12 +112,19 @@ def make_image_mosaic(input_params):
             calculate_imaging_weights,
         )
 
-        ms_xdt, data_group_out = calculate_imaging_weights(
-            ms_xdt,
+        temp_data_tree = xr.DataTree()
+        temp_data_tree["ms"] = ms_xdt
+        temp_data_tree, data_group_out = calculate_imaging_weights(
+            temp_data_tree,
             grid_params=grid_params,
             imaging_weights_params={"weighting": "briggs", "robust": 0.6},
+            #imaging_weights_params={"weighting": "natural"},
             sel_params={"data_group_in_name": data_group_out["data_group_out_name"]},
         )
+        ms_xdt = temp_data_tree["ms"]
+        
+        # print("data_group_out", data_group_out)
+        # print("***********")
         T_weights = T_weights + time.time() - start_4
 
         start_5 = time.time()
@@ -187,6 +195,11 @@ def make_image_mosaic(input_params):
 
     T_load = time.time() - start_2 - T_compute
 
+    print("***********")
+    print(ms_xdt.ds.data_vars.keys())
+    print(ms_xdt.VISIBILITY_NORMALIZATION)
+    print(ms_xdt.POINT_SPREAD_FUNCTION_NORMALIZATION)
+    print("***********")
     logger.debug("2. Load " + str(T_load))
     logger.debug("3. Weights " + str(T_weights))
     logger.debug("4. Phase_shift " + str(T_phase_shift))
