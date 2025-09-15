@@ -14,7 +14,6 @@ def make_image_mosaic(input_params):
     start_0 = time.time()
     import numpy as np
     from astroviper.core.visibility_manipulation.phase_shift import phase_shift_vis_ds
-    from astroviper.core.imaging.make_imaging_weights import make_imaging_weights
     from astroviper.core.imaging.make_gridding_convolution_function import (
         make_gridding_convolution_function,
     )
@@ -48,6 +47,7 @@ def make_image_mosaic(input_params):
     else:
         image_time_coord = input_params["task_coords"]["time"]["data"]
 
+    grid_params["n_imag_chan"] = len(image_freq_coord)
     logger.debug("Creating empty image ")
     img_xds = make_empty_sky_image(
         phase_center=grid_params["phase_direction"].values,
@@ -99,15 +99,24 @@ def make_image_mosaic(input_params):
         T_phase_shift = T_phase_shift + time.time() - start_3
 
         start_4 = time.time()
-        data_group_out = make_imaging_weights(
-            ms_xdt,
+
+        from astroviper.core.imaging.calculate_imaging_weights import (
+            calculate_imaging_weights,
+        )
+
+        temp_data_tree = xr.DataTree()
+        temp_data_tree["ms"] = ms_xdt
+        temp_data_tree, data_group_out = calculate_imaging_weights(
+            temp_data_tree,
             grid_params=grid_params,
             # imaging_weights_params={"weighting": "briggs", "robust": 0.6},
             imaging_weights_params={"weighting": "natural"},
             sel_params={"data_group_in_name": data_group_out["data_group_out_name"]},
         )
+        ms_xdt = temp_data_tree["ms"]
 
-        # print("@@@@@@ data_group_out", data_group_out)
+        # print("data_group_out", data_group_out)
+        # print("***********")
         T_weights = T_weights + time.time() - start_4
 
         start_5 = time.time()
