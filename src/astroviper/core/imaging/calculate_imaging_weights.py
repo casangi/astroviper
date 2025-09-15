@@ -135,7 +135,7 @@ def calculate_imaging_weights(
             default_data_group_out_modified={"weight_imaging": "WEIGHT"},
         )
         description = "Data group created for natural imaging weights with ."
-        
+
         data_group_out_name = data_group_out["data_group_out_name"]
         del data_group_out["data_group_out_name"]
         from datetime import datetime, timezone
@@ -147,7 +147,7 @@ def calculate_imaging_weights(
             ms_xdt.data_groups[data_group_out_name]["description"] = description
 
             data_group_out["data_group_out_name"] = data_group_out_name
-        
+
         return ps_xdt, data_group_out
     else:
         data_group_in, data_group_out = check_sel_params_ps_xdt(
@@ -169,7 +169,7 @@ def calculate_imaging_weights(
     _grid_params["image_size_padded"] = _grid_params[
         "image_size"
     ]  # do not need to pad since no fft
-    
+
     _grid_params["n_imag_chan"] = ps_xdt.xr_ps.get_freq_axis().size
 
     # Grid Weights
@@ -212,7 +212,7 @@ def calculate_imaging_weights(
     # print("4 sum of data weights ", np.nansum(data_weight))
 
     # Degrid the Weights
-    
+
     data_group_out_name = data_group_out["data_group_out_name"]
     del data_group_out["data_group_out_name"]
 
