@@ -56,9 +56,7 @@ def generate_ms4_with_point_sources(
     ] = sources[2]
     # convolve it with a gaussian of 5 pixels
     # mod_im = gaussian_filter(mod_im, sigma=5)
-    mod_im = np.pad(
-        mod_im, pad_width=((1000, 1000), (1000, 1000)), constant_values=0.0
-    )
+    mod_im = np.pad(mod_im, pad_width=((1000, 1000), (1000, 1000)), constant_values=0.0)
     ft_mod = fft_lm_to_uv(mod_im, axes=[0, 1])
 
     uv_components = origms_subset.UVW.sel(uvw_label=["u", "v"])
@@ -67,9 +65,7 @@ def generate_ms4_with_point_sources(
     # Sum the squares along the uvw_label dimension
     sum_square_uv = uv_squared.sum(dim="uvw_label")
     max_uvdist = np.sqrt(sum_square_uv.max()).values
-    cell = ((0.5 / ((invlam).to(u.Unit("/m")).value * max_uvdist)) * u.rad).to(
-        "arcsec"
-    )
+    cell = ((0.5 / ((invlam).to(u.Unit("/m")).value * max_uvdist)) * u.rad).to("arcsec")
     ny, nx = ft_mod.shape
 
     x_axis = np.linspace(-max_uvdist, max_uvdist, nx)
@@ -111,12 +107,8 @@ def generate_ms4_with_point_sources(
     for t in range(num_time):
         for b in range(num_baseline):
             # Get the 'u' and 'v' coordinate for the current time and baseline
-            current_u = (
-                uv_coords.isel(time=t, baseline_id=b).sel(uvw_label="u").values
-            )
-            current_v = (
-                uv_coords.isel(time=t, baseline_id=b).sel(uvw_label="v").values
-            )
+            current_u = uv_coords.isel(time=t, baseline_id=b).sel(uvw_label="u").values
+            current_v = uv_coords.isel(time=t, baseline_id=b).sel(uvw_label="v").values
 
             # Handle potential NaN values in UVW coordinates
             if np.isnan(current_u) or np.isnan(current_v):
@@ -158,9 +150,7 @@ def make_standard_grid_image(dopsf=False):
 
     params = {}
     params["image_size_padded"] = np.array([npix, npix], dtype=int)
-    params["cell_size"] = np.array(
-        [cell.to("rad").value, cell.to("rad").value]
-    )
+    params["cell_size"] = np.array([cell.to("rad").value, cell.to("rad").value])
     params["complex_grid"] = True
     params["oversampling"] = 100
     params["support"] = 7
@@ -178,9 +168,7 @@ def make_standard_grid_image(dopsf=False):
         params["oversampling"], params["support"], params["image_size_padded"]
     )
     dirty_im = (
-        np.real(
-            np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(grid[0, 0, :, :])))
-        )
+        np.real(np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(grid[0, 0, :, :]))))
         / corrTerm
         * npix
         * npix
