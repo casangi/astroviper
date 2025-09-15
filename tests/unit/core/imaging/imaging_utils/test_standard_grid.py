@@ -1,141 +1,102 @@
-import xradio
 import numpy as np
-import xarray as xr
-import matplotlib.pylab as pl
-from toolviper.utils.data import download
-from astropy import units as u
 from astropy import constants as const
 from astroviper.core.imaging.imaging_utils.standard_grid import *
+from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import *
+from astroviper.core.imaging.fft import fft_lm_to_uv
+from astroviper.core.imaging.ifft import ifft_uv_to_lm
+
+import unittest
 
 
-def generate_ms4_with_point_sources(
-    nsources: int = 2, flux: np.ndarray = np.array([1.0, 5.0])
-):
-    """
+class TestStandardGridNumpyWrap(unittest.TestCase):
+    def setup_vis_uvw(self):
+        nant = 200
+        ntime = 1
+        nfreq = 1
+        npol = 1
+        self.freq_chan = np.array([1.4e9])
+        self.grid_size = np.array([nant, nant])
+        maxUV = 2e3
+        cell = 0.5 * const.c.to("m/s").value / self.freq_chan[0] / maxUV
+        self.cell_size = np.array([cell, cell])
+        sources = [
+            np.array([110, 87]),
+            np.array([115, 92]),
+            np.array([1.0, 2.0]),
+        ]
+        mod_im = np.zeros((nant, nant), dtype=np.float64)
+        mod_im[sources[0], sources[1]] = sources[2]
+        ft_mod = np.conj(fft_lm_to_uv(mod_im, axes=[0, 1]))
+        uv_axis = np.linspace(-maxUV, maxUV, nant)
+        self.vis_data = np.zeros(
+            (ntime, nant * nant, nfreq, npol), dtype=np.complex128
+        )
+        self.weight = np.ones(self.vis_data.shape, dtype=np.float64)
+        self.uvw = np.zeros((ntime, nant * nant, 3), dtype=np.float64)
+        for u_idx, u in enumerate(uv_axis):
+            for v_idx, v in enumerate(uv_axis):
+                b_idx = u_idx * nant + v_idx
+                self.uvw[0, b_idx, :] = np.array([u, v, 0.0])
+                self.vis_data[0, b_idx, 0, 0] = ft_mod[u_idx, v_idx]
 
+        # vis_data, uvw, weight, freq_chan, cgk_1D, params
 
-    Parameters
-    ----------
-    nsources : int,
-        DESCRIPTION. The default is 2.
-    flux : np.ndarray, length of nsources
-        DESCRIPTION. The default is np.array([1.0, 5.0]).
+    def test_standard_grid_numpy_wrap_input_checked(self):
+        """Test standard_grid_numpy_wrap_input_checked
+        We test making a complex grid and FFTing that
+        along testing for making a psf
 
-    Returns
-    -------
-    A tuple of (npix, cell), ms4
-
-    """
-    nx = 1000
-    download(file="Antennae_fld1_casa_lsrk.ps.zarr")
-    ps_xdt = xr.open_datatree("Antennae_fld1_casa_lsrk.ps.zarr")
-    origms = ps_xdt["Antennae_fld1_casa_lsrk_0"]
-    # Select the first frequency from the origms dataset
-    origms_subset = origms.isel(frequency=slice(0, 1))
-    f = origms_subset.coords.frequency.values[0] * u.Unit(
-        origms_subset.coords.frequency.units
-    )
-    invlam = f / const.c
-
-    # Let's make a uvgrid from npointsources
-    mod_im = np.zeros((nx, nx), dtype=np.float64)
-    mod_im[
-        (np.random.sample(nsources) * nx).astype(int),
-        (np.random.sample(nsources) * nx).astype(int),
-    ] = flux
-
-    ft_mod = np.fft.fftshift((np.fft.fft2(mod_im)))
-
-    uv_components = origms_subset.UVW.sel(uvw_label=["u", "v"])
-    uv_squared = uv_components**2
-
-    # Sum the squares along the uvw_label dimension
-    sum_square_uv = uv_squared.sum(dim="uvw_label")
-    max_uvdist = np.sqrt(sum_square_uv.max())
-    cell = (0.5 / ((invlam).to(u.Unit("/m")).value * max_uvdist) * u.rad).to(
-        "arcsec"
-    )
-    ny, nx = ft_mod.shape
-
-    x_axis = np.linspace(-max_uvdist, max_uvdist, nx)
-    y_axis = np.linspace(-max_uvdist, max_uvdist, ny)
-
-    # Create the DataArray
-    ft_mod_da = xr.DataArray(
-        ft_mod,
-        coords=[y_axis, x_axis],
-        dims=[
-            "v",
-            "u",
-        ],  # Assign appropriate dimension names (e.g., 'v' for y, 'u' for x)
-    )
-
-    # Create a copy of the VISIBILITY data to modify
-    replaced_visibility = origms_subset.VISIBILITY.copy()
-    uv_coords = origms_subset.UVW.sel(uvw_label=["u", "v"])
-
-    # Iterate through the time and baseline_id dimensions of the visibility data
-    # Note: This iteration can be slow for large datasets.
-    # More efficient approaches might involve xarray's advanced indexing or interpolation methods
-    # if the data structure allows for it. However, given the request, we'll proceed with iteration
-    # to explicitly show the nearest neighbor replacement logic.
-
-    # Get the dimensions
-    num_time = replaced_visibility.sizes["time"]
-    num_baseline = replaced_visibility.sizes["baseline_id"]
-    num_frequency = replaced_visibility.sizes[
-        "frequency"
-    ]  # Should be 1 for origms_subset
-    num_polarization = replaced_visibility.sizes["polarization"]
-
-    # Get the coordinates from ft_mod_da for nearest neighbor lookup
-    u_coords_ft = ft_mod_da.u.values
-    v_coords_ft = ft_mod_da.v.values
-
-    # Iterate through each element of the visibility data
-    for t in range(num_time):
-        for b in range(num_baseline):
-            # Get the 'u' and 'v' coordinate for the current time and baseline
-            current_u = (
-                uv_coords.isel(time=t, baseline_id=b).sel(uvw_label="u").values
-            )
-            current_v = (
-                uv_coords.isel(time=t, baseline_id=b).sel(uvw_label="v").values
-            )
-
-            # Handle potential NaN values in UVW coordinates
-            if np.isnan(current_u) or np.isnan(current_v):
-                # If UV is NaN, we might want to keep the original value or set it to NaN
-                # For this example, we'll just skip replacement for NaN UVW.
-                continue
-
-            # Find the index of the nearest 'u' coordinate in ft_mod_da
-            nearest_u_index = np.argmin(np.abs(u_coords_ft - current_u))
-
-            # Find the index of the nearest 'v' coordinate in ft_mod_da
-            nearest_v_index = np.argmin(np.abs(v_coords_ft - current_v))
-
-            # Get the value from ft_mod_da at the nearest 'u' and 'v' coordinates
-            nearest_ft_value = ft_mod_da.isel(
-                u=nearest_u_index, v=nearest_v_index
-            ).values
-
-            # Replace the VISIBILITY value for all frequencies and polarizations at this time and baseline
-            # Since origms_subset has frequency dimension of size 1, we can iterate or use slicing
-            for f in range(num_frequency):
-                for p in range(num_polarization):
-                    replaced_visibility[t, b, f, p] = nearest_ft_value
-    origms_subset["VISIBILITY"] = replaced_visibility
-    return nx, cell, origms_subset
-
-
-def test_standard_grid():
-    npix, cell, ms4 = generate_ms4_with_point_sources(
-        4, np.array(np.arange(1, 5))
-    )
-    vis = ms4.VISIBILITY
-    params = {}
-    params["image_size"] = npix
-    params["cell"] = cell.to("rad").value
-    params["complex_grid"] = True
-    params
+        """
+        self.setup_vis_uvw()
+        oversampling = 100
+        support = 7
+        cgk_1D = create_prolate_spheroidal_kernel_1D(oversampling, support)
+        grid, sumwt = standard_grid_numpy_wrap_input_checked(
+            vis_data=self.vis_data,
+            uvw=self.uvw,
+            weight=self.weight,
+            freq_chan=self.freq_chan,
+            cgk_1D=cgk_1D,
+            image_size=self.grid_size,
+            cell_size=self.cell_size,
+            oversampling=oversampling,
+            support=support,
+            complex_grid=True,
+            do_psf=False,
+            chan_mode="continuum",
+        )
+        kernel, corrTerm = create_prolate_spheroidal_kernel(
+            oversampling, support, self.grid_size
+        )
+        dirty_im = (
+            ifft_uv_to_lm(grid, axes=[2, 3])
+            / corrTerm
+            * self.grid_size[0]
+            * self.grid_size[1]
+            / sumwt
+        )
+        print(dirty_im.shape, dirty_im[0, 0, 87, 92], dirty_im[0, 0, 110, 115])
+        self.assertGreater(dirty_im[0, 0, 87, 92], 1.8)
+        self.assertGreater(dirty_im[0, 0, 110, 115], 0.9)
+        grid, sumwt = standard_grid_numpy_wrap_input_checked(
+            vis_data=self.vis_data,
+            uvw=self.uvw,
+            weight=self.weight,
+            freq_chan=self.freq_chan,
+            cgk_1D=cgk_1D,
+            image_size=self.grid_size,
+            cell_size=self.cell_size,
+            oversampling=oversampling,
+            support=support,
+            complex_grid=True,
+            do_psf=True,
+            chan_mode="continuum",
+        )
+        dirty_psf = (
+            ifft_uv_to_lm(grid, axes=[2, 3])
+            / corrTerm
+            * self.grid_size[0]
+            * self.grid_size[1]
+            / sumwt
+        )
+        self.assertGreater(0.01, np.abs(dirty_psf[0, 0, 100, 100] - 1.0))
