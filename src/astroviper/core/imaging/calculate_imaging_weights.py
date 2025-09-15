@@ -103,10 +103,7 @@ def calculate_imaging_weights(
         )  # Set flagged data to NaN for weighting.
 
         if data_weight.shape[3] == 2:
-            # data_weight = ((data_weight[..., 0] + data_weight[..., 1]) / 2)[
-            #     ..., np.newaxis
-            # ]
-            data_weight = ((data_weight[..., 0] + data_weight[..., 0]) / 2)[
+            data_weight = ((data_weight[..., 0] + data_weight[..., 1]) / 2)[
                 ..., np.newaxis
             ]
 

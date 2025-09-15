@@ -14,7 +14,6 @@ def make_image_mosaic(input_params):
     start_0 = time.time()
     import numpy as np
     from astroviper.core.visibility_manipulation.phase_shift import phase_shift_vis_ds
-    from astroviper.core.imaging.make_imaging_weights import make_imaging_weights
     from astroviper.core.imaging.make_gridding_convolution_function import (
         make_gridding_convolution_function,
     )
@@ -100,13 +99,6 @@ def make_image_mosaic(input_params):
         T_phase_shift = T_phase_shift + time.time() - start_3
 
         start_4 = time.time()
-        # data_group_out = make_imaging_weights(
-        #     ms_xdt,
-        #     grid_params=grid_params,
-        #     imaging_weights_params={"weighting": "briggs", "robust": 0.6},
-        #     # imaging_weights_params={"weighting": "natural"},
-        #     sel_params={"data_group_in_name": data_group_out["data_group_out_name"]},
-        # )
 
         from astroviper.core.imaging.calculate_imaging_weights import (
             calculate_imaging_weights,
@@ -117,8 +109,8 @@ def make_image_mosaic(input_params):
         temp_data_tree, data_group_out = calculate_imaging_weights(
             temp_data_tree,
             grid_params=grid_params,
-            imaging_weights_params={"weighting": "briggs", "robust": 0.6},
-            #imaging_weights_params={"weighting": "natural"},
+            #imaging_weights_params={"weighting": "briggs", "robust": 0.6},
+            imaging_weights_params={"weighting": "natural"},
             sel_params={"data_group_in_name": data_group_out["data_group_out_name"]},
         )
         ms_xdt = temp_data_tree["ms"]
@@ -195,11 +187,6 @@ def make_image_mosaic(input_params):
 
     T_load = time.time() - start_2 - T_compute
 
-    print("***********")
-    print(ms_xdt.ds.data_vars.keys())
-    print(ms_xdt.VISIBILITY_NORMALIZATION)
-    print(ms_xdt.POINT_SPREAD_FUNCTION_NORMALIZATION)
-    print("***********")
     logger.debug("2. Load " + str(T_load))
     logger.debug("3. Weights " + str(T_weights))
     logger.debug("4. Phase_shift " + str(T_phase_shift))
