@@ -30,16 +30,14 @@ target_include_directories(_hogbom_ext PRIVATE
 # Compiler-specific options
 target_compile_features(_hogbom_ext PRIVATE cxx_std_17)
 
-# Set optimization flags
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(_hogbom_ext PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang>:-O0 -g>
-        $<$<CXX_COMPILER_ID:MSVC>:/Od /Zi>
     )
 else()
+    # Base optimization flags for all platforms
     target_compile_options(_hogbom_ext PRIVATE
-        $<$<CXX_COMPILER_ID:GNU,Clang>:-O2 -march=native>
-        $<$<CXX_COMPILER_ID:MSVC>:/O2>
+        $<$<CXX_COMPILER_ID:GNU,Clang>:-O3 -pipe -fPIC -DNDEBUG>
     )
 endif()
 
@@ -47,10 +45,6 @@ endif()
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(_hogbom_ext PRIVATE -stdlib=libc++)
     target_link_options(_hogbom_ext PRIVATE -stdlib=libc++)
-endif()
-
-if(MSVC)
-    target_compile_options(_hogbom_ext PRIVATE /EHsc)
 endif()
 
 # Version info
