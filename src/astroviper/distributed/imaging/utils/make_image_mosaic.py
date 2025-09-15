@@ -109,12 +109,12 @@ def make_image_mosaic(input_params):
         temp_data_tree, data_group_out = calculate_imaging_weights(
             temp_data_tree,
             grid_params=grid_params,
-            #imaging_weights_params={"weighting": "briggs", "robust": 0.6},
+            # imaging_weights_params={"weighting": "briggs", "robust": 0.6},
             imaging_weights_params={"weighting": "natural"},
             sel_params={"data_group_in_name": data_group_out["data_group_out_name"]},
         )
         ms_xdt = temp_data_tree["ms"]
-        
+
         # print("data_group_out", data_group_out)
         # print("***********")
         T_weights = T_weights + time.time() - start_4
