@@ -28,9 +28,7 @@ class TestStandardGridNumpyWrap(unittest.TestCase):
         mod_im[sources[0], sources[1]] = sources[2]
         ft_mod = np.conj(fft_lm_to_uv(mod_im, axes=[0, 1]))
         uv_axis = np.linspace(-maxUV, maxUV, nant)
-        self.vis_data = np.zeros(
-            (ntime, nant * nant, nfreq, npol), dtype=np.complex128
-        )
+        self.vis_data = np.zeros((ntime, nant * nant, nfreq, npol), dtype=np.complex128)
         self.weight = np.ones(self.vis_data.shape, dtype=np.float64)
         self.uvw = np.zeros((ntime, nant * nant, 3), dtype=np.float64)
         for u_idx, u in enumerate(uv_axis):
