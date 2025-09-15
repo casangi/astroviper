@@ -7,14 +7,14 @@ from astroviper.core.image_analysis.psf_gaussian_fit import psf_gaussian_fit_cor
 
 
 def create_test_xds(shape=(1, 1, 1, 9, 9)):
-    # Create a simple 2D Gaussian as test data
+    # Create a simple 2D circular Gaussian as test data
     x = np.linspace(-1, 1, shape[-2])
     y = np.linspace(-1, 1, shape[-1])
     xv, yv = np.meshgrid(x, y, indexing="ij")
     gaussian = np.exp(-(xv**2 + yv**2) / (2 * 0.2**2))
     data = np.zeros(shape)
-    print("data = ", data)
     data[0, 0, 0, :, :] = gaussian
+    print("data = ", data)
     da_data = da.from_array(data, chunks=(1, 1, 1, 9, 9))
     dims = ["time", "frequency", "polarization", "l", "m"]
     data_coords = {
@@ -42,45 +42,59 @@ def create_test_xds(shape=(1, 1, 1, 9, 9)):
     return test_dataset
 
 
-def test_psf_gaussian_fit_basic():
+def test_psf_gaussian_fit_output_structure():
+    """test fit_psf_gaussian fit gives expected output structure and values"""
     test_dataset = create_test_xds()
     result = psf_gaussian_fit(test_dataset)
+    # sigma = 0.2 -> fwhm = 2* sigma*sqrt(2*ln(2)) = 0.2*2.35482
+    truth_values = [0.47096, 0.47096, 0.0]
     assert "BEAM" in result
     assert "beam_param" in result["BEAM"].dims
     params = result["BEAM"]["beam_param"]
     assert params.shape[-1] == 3
     # Check that the fitted widths are positive
     assert np.all(result["BEAM"].data[:, :, :-1] > 0)
+    assert np.allclose(
+        result["BEAM"].data[0, 0, 0, :], truth_values, rtol=1e-5, atol=1e-4
+    )
 
 
 def test_psf_gaussian_fit_custom_window():
+    """test npix_window and sampling parameters"""
     test_dataset = create_test_xds(shape=(1, 1, 1, 15, 15))
-    print("has sky in dataset:", "SKY" in test_dataset)
-    result = psf_gaussian_fit(test_dataset, npix_window=[7, 7], sampling=[7, 7])
+    truth_values = [0.47096, 0.47096, 0.0]
+    # result = psf_gaussian_fit(test_dataset, npix_window=[7, 7], sampling=[7, 7])
+    result = psf_gaussian_fit(test_dataset, npix_window=[15, 15], sampling=[9, 9])
     params = result["BEAM"]["beam_param"]
     assert params.shape == (3,)
     assert np.all(result["BEAM"].data[:, :, :-1] > 0)
+    print("beam_param_custom_window=", result["BEAM"].data.compute())
+    assert np.allclose(result["BEAM"].data[0, 0, 0, :], truth_values, rtol=1e-5, atol=1)
 
 
 def test_invalid_npix_window_type():
+    """test npix_window type checking"""
     ds = create_test_xds()
     with pytest.raises((TypeError, ValueError)):
         psf_gaussian_fit(ds, npix_window="invalid")
 
 
 def test_negative_npix_window():
+    """test npix_window value checking"""
     ds = create_test_xds()
     with pytest.raises((ValueError, AssertionError)):
         psf_gaussian_fit(ds, npix_window=[-5, 9])
 
 
 def test_zero_sampling():
+    """test sampling value checking"""
     ds = create_test_xds()
     with pytest.raises((ValueError, AssertionError)):
         psf_gaussian_fit(ds, sampling=[0, 9])
 
 
 def test_invalid_cutoff():
+    """test invalid cutoff value"""
     ds = create_test_xds()
     # Negative cutoff may not make sense
     with pytest.raises((ValueError, AssertionError)):
@@ -88,6 +102,7 @@ def test_invalid_cutoff():
 
 
 def test_missing_sky_variable():
+    """test missing SKY variable"""
     ds = create_test_xds()
     del ds["SKY"]
     with pytest.raises(KeyError):
@@ -95,6 +110,7 @@ def test_missing_sky_variable():
 
 
 def test_all_nan_input():
+    """test all NaN input data"""
     ds = create_test_xds()
     ds["SKY"].data[:] = np.nan
     result = psf_gaussian_fit(ds)
@@ -103,6 +119,7 @@ def test_all_nan_input():
 
 
 def test_all_zero_input():
+    """test all zero input data"""
     ds = create_test_xds()
     ds["SKY"].data[:] = 0
     result = psf_gaussian_fit(ds)
@@ -111,6 +128,7 @@ def test_all_zero_input():
 
 
 def create_rotated_gaussian(shape, angle_deg):
+    """Create a dataset with a rotated 2D Gaussian"""
     # Create a 2D Gaussian rotated by angle_deg (counterclockwise from y to x)
     x = np.linspace(-1, 1, shape[-2])
     y = np.linspace(-1, 1, shape[-1])
@@ -136,9 +154,10 @@ def create_rotated_gaussian(shape, angle_deg):
 
 
 def test_psf_gaussian_fit_orientation():
+    """test position angle of fitted results"""
     import matplotlib.pyplot as plt
 
-    for angle in [-45, -33, 33, 45, 91]:
+    for angle in [-135, -90, -45, -33, 33, 45, 90, 135]:
         ds = create_rotated_gaussian((1, 1, 1, 100, 100), angle)
         # Plot the input ellipse (rotated Gaussian)
         input_img = (
