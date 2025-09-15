@@ -190,6 +190,42 @@ def lists_overlap(a, b):
 import xarray as xr
 
 
+def check_sel_params_ps_xdt(
+    ps_xdt: xr.DataTree,
+    sel_params: dict,
+    default_data_group_in_name: str = None,
+    default_data_group_out_name: str = None,
+    default_data_group_out_modified: dict = None,
+):
+    data_group_in_list = []
+    data_group_out_list = []
+    for ms_xdt in ps_xdt.values():
+        data_group_in, data_group_out = check_sel_params(
+            ms_xdt.ds,
+            sel_params,
+            default_data_group_in_name=default_data_group_in_name,
+            default_data_group_out_name=default_data_group_out_name,
+            default_data_group_out_modified=default_data_group_out_modified,
+        )
+        data_group_out_list.append(data_group_out)
+        data_group_in_list.append(data_group_in)
+
+    IGNORE_KEYS = {"date", "description"}
+
+    def normalize(d):
+        return {k: v for k, v in d.items() if k not in IGNORE_KEYS}
+
+    assert all(
+        normalize(d) == normalize(data_group_out_list[0]) for d in data_group_out_list
+    ), "data_group_out must be the same for all measurement sets in the processing set."
+
+    assert all(
+        normalize(d) == normalize(data_group_in_list[0]) for d in data_group_in_list
+    ), "data_group_in must be the same for all measurement sets in the processing set."
+
+    return data_group_in_list[0], data_group_out_list[0]
+
+
 def check_sel_params(
     xds: xr.Dataset,
     sel_params: dict,
