@@ -15,8 +15,8 @@ namespace py = pybind11;
  */
 template<typename T>
 py::tuple maximg_impl(
-    py::array_t<T> image_array,
-    py::array_t<T> mask_array = py::array_t<T>()
+    py::array_t<T, py::array::c_style | py::array::forcecast> image_array,
+    py::array_t<T, py::array::c_style | py::array::forcecast> mask_array = py::array_t<T>()
 ) {
     py::buffer_info image_info = image_array.request();
     
@@ -63,9 +63,9 @@ py::tuple maximg_impl(
  */
 template<typename T>
 py::dict hclean_impl(
-    py::array_t<T> dirty_image,
-    py::array_t<T> psf_array,
-    py::array_t<T> mask_array = py::array_t<T>(),
+    py::array_t<T, py::array::c_style | py::array::forcecast> dirty_image,
+    py::array_t<T, py::array::c_style | py::array::forcecast> psf_array,
+    py::array_t<T, py::array::c_style | py::array::forcecast> mask_array = py::array_t<T>(),
     py::tuple clean_box = py::make_tuple(-1, -1, -1, -1),
     int max_iter = 100,
     int start_iter = 0,
@@ -129,7 +129,6 @@ py::dict hclean_impl(
         yend = std::max(ybeg+1, std::min(yend, ny));
     }
     
-    // Create explicit 3D shape for compile-time safety
     std::vector<py::ssize_t> shape_3d = {npol, ny, nx};
     
     // Create working arrays in native type T - no conversion needed
@@ -139,9 +138,8 @@ py::dict hclean_impl(
     // Zero-initialize and copy using safe buffer access
     py::buffer_info model_info = model_image.request();
     py::buffer_info dirty_copy_info = dirty_copy.request();
-    std::memset(model_info.ptr, 0, dirty_info.size * sizeof(T));
-    std::memcpy(dirty_copy_info.ptr, dirty_info.ptr, dirty_info.size * sizeof(T));
-    
+    std::memset(model_info.ptr, 0, model_info.size * model_info.itemsize);
+    std::memcpy(dirty_copy_info.ptr, dirty_info.ptr, dirty_info.size * dirty_info.itemsize);
     
     // Set up progress callback wrapper
     std::function<void(int, int, int, int, int, T)> msgput_func = 
