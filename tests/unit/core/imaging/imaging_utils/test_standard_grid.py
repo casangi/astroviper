@@ -18,9 +18,7 @@ class TestStandardGridNumpyWrap(unittest.TestCase):
         ntime = 1
         nfreq = self.nvischan
         npol = 1
-        self.freq_chan = np.array(
-            [1.4e9 + 1e7 * i for i in range(self.nvischan)]
-        )
+        self.freq_chan = np.array([1.4e9 + 1e7 * i for i in range(self.nvischan)])
         self.grid_size = np.array([nant, nant])
         maxUV = 2e3
         cell = 0.5 * const.c.to("m/s").value / self.freq_chan[0] / maxUV
@@ -34,9 +32,7 @@ class TestStandardGridNumpyWrap(unittest.TestCase):
         mod_im[sources[0], sources[1]] = sources[2]
         ft_mod = np.conj(fft_lm_to_uv(mod_im, axes=[0, 1]))
         uv_axis = np.linspace(-maxUV, maxUV, nant)
-        self.vis_data = np.zeros(
-            (ntime, nant * nant, nfreq, npol), dtype=np.complex128
-        )
+        self.vis_data = np.zeros((ntime, nant * nant, nfreq, npol), dtype=np.complex128)
         self.weight = np.ones(self.vis_data.shape, dtype=np.float64)
         self.uvw = np.zeros((ntime, nant * nant, 3), dtype=np.float64)
         for u_idx, u in enumerate(uv_axis):
@@ -44,9 +40,9 @@ class TestStandardGridNumpyWrap(unittest.TestCase):
                 b_idx = u_idx * nant + v_idx
                 self.uvw[0, b_idx, :] = np.array([u, v, 0.0])
                 for f_idx in range(self.nvischan):
-                    self.vis_data[0, b_idx, f_idx, 0] = ft_mod[
-                        u_idx, v_idx
-                    ] * (f_idx + 1)
+                    self.vis_data[0, b_idx, f_idx, 0] = ft_mod[u_idx, v_idx] * (
+                        f_idx + 1
+                    )
 
         # vis_data, uvw, weight, freq_chan, cgk_1D, params
 
