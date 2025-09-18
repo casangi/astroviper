@@ -14,7 +14,6 @@ def make_image_mosaic(input_params):
     start_0 = time.time()
     import numpy as np
     from astroviper.core.visibility_manipulation.phase_shift import phase_shift_vis_ds
-    from astroviper.core.imaging.make_imaging_weights import make_imaging_weights
     from astroviper.core.imaging.make_gridding_convolution_function import (
         make_gridding_convolution_function,
     )
@@ -48,6 +47,7 @@ def make_image_mosaic(input_params):
     else:
         image_time_coord = input_params["task_coords"]["time"]["data"]
 
+    grid_params["n_imag_chan"] = len(image_freq_coord)
     logger.debug("Creating empty image ")
     img_xds = make_empty_sky_image(
         phase_center=grid_params["phase_direction"].values,
@@ -72,10 +72,10 @@ def make_image_mosaic(input_params):
     T_uv_sampling_grid = 0.0
     T_vis_grid = 0.0
 
-    data_group = input_params["data_group"]
-    if data_group == "base":
+    data_group_name = input_params["data_group"]
+    if data_group_name == "base":
         data_variables = ["FLAG", "UVW", "VISIBILITY", "WEIGHT"]
-    elif data_group == "corrected":
+    elif data_group_name == "corrected":
         data_variables = ["FLAG", "UVW", "VISIBILITY_CORRECTED", "WEIGHT"]
 
     ps_iter = ProcessingSetIterator(
@@ -92,17 +92,31 @@ def make_image_mosaic(input_params):
         start_compute = time.time()
         start_3 = time.time()
         data_group_out = phase_shift_vis_ds(
-            ms_xdt, shift_parms=shift_params, sel_parms={"data_group_in": data_group}
+            ms_xdt,
+            shift_params=shift_params,
+            sel_params={"data_group_in_name": data_group_name},
         )
         T_phase_shift = T_phase_shift + time.time() - start_3
 
         start_4 = time.time()
-        data_group_out = make_imaging_weights(
-            ms_xdt,
-            grid_parms=grid_params,
-            imaging_weights_parms={"weighting": "briggs", "robust": 0.6},
-            sel_parms={"data_group_in": data_group_out},
+
+        from astroviper.core.imaging.calculate_imaging_weights import (
+            calculate_imaging_weights,
         )
+
+        temp_data_tree = xr.DataTree()
+        temp_data_tree["ms"] = ms_xdt
+        temp_data_tree, data_group_out = calculate_imaging_weights(
+            temp_data_tree,
+            grid_params=grid_params,
+            # imaging_weights_params={"weighting": "briggs", "robust": 0.6},
+            imaging_weights_params={"weighting": "natural"},
+            sel_params={"data_group_in_name": data_group_out["data_group_out_name"]},
+        )
+        ms_xdt = temp_data_tree["ms"]
+
+        # print("data_group_out", data_group_out)
+        # print("***********")
         T_weights = T_weights + time.time() - start_4
 
         start_5 = time.time()
@@ -121,7 +135,7 @@ def make_image_mosaic(input_params):
             ms_xdt,
             gcf_params,
             grid_params,
-            sel_parms={"data_group_in": data_group_out},
+            sel_params={"data_group_in_name": data_group_out["data_group_out_name"]},
         )
         T_gcf = T_gcf + time.time() - start_5
 
@@ -130,20 +144,30 @@ def make_image_mosaic(input_params):
             ms_xdt,
             gcf_xds,
             img_xds,
-            vis_sel_parms={"data_group_in": data_group_out},
-            img_sel_parms={"data_group_in": "mosaic"},
-            grid_parms=grid_params,
+            vis_sel_params={
+                "data_group_in_name": data_group_out["data_group_out_name"]
+            },
+            img_sel_params={"data_group_in_name": "mosaic"},
+            grid_params=grid_params,
         )
         T_aperture_grid = T_aperture_grid + time.time() - start_6
+
+        # print("^^^^^^^^^")
+        # print("ms_xdt.attrs[data_groups]", ms_xdt.attrs["data_groups"])
+        # print( data_group_out["data_group_out_name"])
+        # print("img_xds.attrs[data_groups]", img_xds.attrs["data_groups"])
+        # print("^^^^^^^^^")
 
         start_7 = time.time()
         make_uv_sampling_grid(
             ms_xdt,
             gcf_xds,
             img_xds,
-            vis_sel_parms={"data_group_in": data_group_out},
-            img_sel_parms={"data_group_in": "mosaic"},
-            grid_parms=grid_params,
+            vis_sel_params={
+                "data_group_in_name": data_group_out["data_group_out_name"]
+            },
+            img_sel_params={"data_group_in_name": "mosaic"},
+            grid_params=grid_params,
         )  # Will become the PSF.
         T_uv_sampling_grid = T_uv_sampling_grid + time.time() - start_7
 
@@ -152,9 +176,11 @@ def make_image_mosaic(input_params):
             ms_xdt,
             gcf_xds,
             img_xds,
-            vis_sel_parms={"data_group_in": data_group_out},
-            img_sel_parms={"data_group_in": "mosaic"},
-            grid_parms=grid_params,
+            vis_sel_params={
+                "data_group_in_name": data_group_out["data_group_out_name"]
+            },
+            img_sel_params={"data_group_in_name": "mosaic"},
+            grid_params=grid_params,
         )
         T_vis_grid = T_vis_grid + time.time() - start_8
         T_compute = T_compute + time.time() - start_compute
@@ -176,8 +202,8 @@ def make_image_mosaic(input_params):
         img_xds,
         gcf_xds,
         grid_params,
-        norm_parms={},
-        sel_parms={"data_group_in": "mosaic", "data_group_out": "mosaic"},
+        norm_params={},
+        sel_params={"data_group_in_name": "mosaic", "data_group_out_name": "mosaic"},
     )
     T_fft = time.time() - start_9
     logger.debug("9. fft norm " + str(time.time() - start_9))

@@ -165,13 +165,13 @@ def mosaic_grid_numpy_wrap(
     weight_support,
     phase_gradient,
     freq_chan,
-    grid_parms,
+    grid_params,
 ):
     # print('imaging_weight ', imaging_weight.shape)
     import time
 
     n_chan = imaging_weight.shape[2]
-    if grid_parms["chan_mode"] == "cube":
+    if grid_params["chan_mode"] == "cube":
         n_imag_chan = n_chan
         chan_map = (np.arange(0, n_chan)).astype(np.int)
     else:  # continuum
@@ -181,11 +181,11 @@ def mosaic_grid_numpy_wrap(
     n_imag_pol = imaging_weight.shape[3]
     pol_map = (np.arange(0, n_imag_pol)).astype(np.int)
 
-    n_uv = grid_parms["image_size_padded"]
-    delta_lm = grid_parms["cell_size"]
-    oversampling = grid_parms["oversampling"]
+    n_uv = grid_params["image_size_padded"]
+    delta_lm = grid_params["cell_size"]
+    oversampling = grid_params["oversampling"]
 
-    if grid_parms["complex_grid"]:
+    if grid_params["complex_grid"]:
         grid = np.zeros(
             (n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128
         )
@@ -193,8 +193,8 @@ def mosaic_grid_numpy_wrap(
         grid = np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.double)
     sum_weight = np.zeros((n_imag_chan, n_imag_pol), dtype=np.double)
 
-    do_psf = grid_parms["do_psf"]
-    field_id = grid_parms["field_id"]
+    do_psf = grid_params["do_psf"]
+    field_id = grid_params["field_id"]
 
     # print('vis_data', vis_data.shape , 'grid ', grid.shape, 'sum_weight', sum_weight.shape, 'cf_chan_map ', cf_chan_map.shape, ' cf_baseline_map', cf_baseline_map.shape, 'cf_pol_map', cf_pol_map.shape, ' conv_kernel',  conv_kernel.shape, 'phase_gradient', phase_gradient.shape, 'field', field.shape,  )
 
@@ -238,13 +238,13 @@ def mosaic_psf_grid_numpy_wrap(
     weight_support,
     phase_gradient,
     freq_chan,
-    grid_parms,
+    grid_params,
 ):
     # print('imaging_weight ', imaging_weight.shape)
     import time
 
     n_chan = imaging_weight.shape[2]
-    if grid_parms["chan_mode"] == "cube":
+    if grid_params["chan_mode"] == "cube":
         n_imag_chan = n_chan
         chan_map = (np.arange(0, n_chan)).astype(np.int)
     else:  # continuum
@@ -254,11 +254,11 @@ def mosaic_psf_grid_numpy_wrap(
     n_imag_pol = imaging_weight.shape[3]
     pol_map = (np.arange(0, n_imag_pol)).astype(np.int)
 
-    n_uv = grid_parms["image_size_padded"]
-    delta_lm = grid_parms["cell_size"]
-    oversampling = grid_parms["oversampling"]
+    n_uv = grid_params["image_size_padded"]
+    delta_lm = grid_params["cell_size"]
+    oversampling = grid_params["oversampling"]
 
-    if grid_parms["complex_grid"]:
+    if grid_params["complex_grid"]:
         grid = np.zeros(
             (n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128
         )
@@ -266,8 +266,8 @@ def mosaic_psf_grid_numpy_wrap(
         grid = np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.double)
     sum_weight = np.zeros((n_imag_chan, n_imag_pol), dtype=np.double)
 
-    do_psf = grid_parms["do_psf"]
-    field_id = grid_parms["field_id"]
+    do_psf = grid_params["do_psf"]
+    field_id = grid_params["field_id"]
 
     # print('vis_data', vis_data.shape , 'grid ', grid.shape, 'sum_weight', sum_weight.shape, 'cf_chan_map ', cf_chan_map.shape, ' cf_baseline_map', cf_baseline_map.shape, 'cf_pol_map', cf_pol_map.shape, ' conv_kernel',  conv_kernel.shape, 'phase_gradient', phase_gradient.shape, 'field', field.shape,  )
 
