@@ -6,7 +6,7 @@ from astroviper.core.image_analysis.psf_gaussian_fit import psf_gaussian_fit
 from astroviper.core.image_analysis.psf_gaussian_fit import psf_gaussian_fit_core
 
 
-def create_test_xds(shape=(1, 1, 1, 9, 9)):
+def create_test_xds(shape=(1, 1, 1, 51, 51)):
     # Create a simple 2D circular Gaussian as test data
     x = np.linspace(-1, 1, shape[-2])
     y = np.linspace(-1, 1, shape[-1])
@@ -166,6 +166,14 @@ def test_no_m_coordinate():
         psf_gaussian_fit(ds)
 
 
+def test_oversampling():
+    """test oversampling case"""
+    ds = create_test_xds(shape=(1, 1, 1, 100, 100))
+    result = psf_gaussian_fit(ds, npix_window=[41, 41], sampling=[51, 51])
+    truth_values = [0.47096, 0.47096, 0.0]
+    assert np.allclose(result["BEAM"].data[0, 0, 0, :], truth_values, rtol=1e-3, atol=5)
+
+
 def create_rotated_gaussian(shape, angle_deg):
     """Create a dataset with a rotated 2D Gaussian"""
     # Create a 2D Gaussian rotated by angle_deg (counterclockwise from y to x)
@@ -197,7 +205,7 @@ def test_psf_gaussian_fit_orientation():
     import matplotlib.pyplot as plt
 
     for angle in [-135, -90, -45, -33, 33, 45, 90, 135]:
-        ds = create_rotated_gaussian((1, 1, 1, 100, 100), angle)
+        ds = create_rotated_gaussian((1, 1, 1, 200, 200), angle)
         # Plot the input ellipse (rotated Gaussian)
         input_img = (
             ds["SKY"].data[0, 0, 0].compute()
@@ -225,9 +233,9 @@ def test_psf_gaussian_fit_orientation():
             measured_angle -= 180
         angle_mod = (measured_angle + 180) % 180
         expected_mod = (angle + 180) % 180
-        # print(
-        #    f"angle={angle}, measured_angle={measured_angle}, angle_mod={angle_mod}, expected_mod={expected_mod}"
-        # )
+        print(
+            f"angle={angle}, measured_angle={measured_angle}, angle_mod={angle_mod}, expected_mod={expected_mod}"
+        )
         assert np.isclose(
             expected_mod,
             angle_mod,
