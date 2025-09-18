@@ -9,8 +9,8 @@ from scipy.interpolate import interpn
 def psf_gaussian_fit(
     xds: xarray.Dataset,
     dv: str = "SKY",
-    npix_window: tuple = [9, 9],
-    sampling: tuple = [9, 9],
+    npix_window: list = [51, 51],
+    sampling: list = [51, 51],
     cutoff: float = 0.35,
 ):
     """
@@ -161,6 +161,7 @@ def psf_gaussian_fit_core(image_to_fit, npix_window, sampling, cutoff, delta):
     d1 = np.arange(0, npix_window[1]) * np.abs(delta[1])
     interp_d0 = np.linspace(0, npix_window[0] - 1, sampling[0]) * np.abs(delta[0])
     interp_d1 = np.linspace(0, npix_window[1] - 1, sampling[1]) * np.abs(delta[1])
+
     d0_shape = interp_d0.shape[0]
     d1_shape = interp_d1.shape[0]
 
@@ -186,7 +187,7 @@ def psf_gaussian_fit_core(image_to_fit, npix_window, sampling, cutoff, delta):
                     interp_image_to_fit[interp_image_to_fit < cutoff] = np.nan
 
                     p0 = [2.5, 2.5, 0]
-                    bound = [(None, None), (None, None), (-np.pi / 4, np.pi / 4)]
+                    bound = [(None, None), (None, None), (-np.pi / 2, np.pi / 2)]
                     res = optimize.minimize(
                         beam_chi2,
                         p0,
@@ -210,11 +211,15 @@ def psf_gaussian_fit_core(image_to_fit, npix_window, sampling, cutoff, delta):
                 ellipse_params[time, chan, pol, 0] = np.max(
                     np.abs(res_x[0:2])
                     # ) * np.abs(delta[0] * 2.355 / sampling[0] / npix_window[0])
-                ) * np.abs(delta[0] * 2.355)
+                ) * np.abs(delta[0] * 2.355 / (sampling[0] / npix_window[0]))
+                # ) * np.abs(delta[0] * 2.355)
                 ellipse_params[time, chan, pol, 1] = np.min(
                     np.abs(res_x[0:2])
                     # ) * np.abs(delta[1] * 2.355 / sampling[1] / npix_window[1])
-                ) * np.abs(delta[1] * 2.355)
+                ) * np.abs(delta[1] * 2.355 / (sampling[1] / npix_window[1]))
+                # ) * np.abs(delta[1] * 2.355)
                 # ellipse_params[time, chan, pol, 2] = -phi
+                if phi < 0:
+                    phi = (phi + np.pi) % np.pi
                 ellipse_params[time, chan, pol, 2] = phi
     return ellipse_params
