@@ -1,9 +1,76 @@
 from numba import jit
 import numpy as np
+import numpy.typing as npt
 import math
+from typing import Tuple
+
+# from astropy import constants
 
 
-def standard_grid_numpy_wrap(vis_data, uvw, weight, freq_chan, cgk_1D, grid_parms):
+def standard_grid_numpy_wrap_input_checked(
+    vis_data: npt.NDArray[complex],
+    uvw: npt.NDArray[float],
+    weight: npt.NDArray[float],
+    freq_chan: npt.NDArray[float],
+    cgk_1D: npt.NDArray[float],
+    image_size: npt.NDArray[int],
+    cell_size: npt.NDArray[float],
+    oversampling: int = 100,
+    support: int = 7,
+    complex_grid: bool = True,
+    do_psf: bool = False,
+    chan_mode: str = "continuum",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+
+
+    Parameters
+    ----------
+    vis_data : np.NDArray[complex]
+        Visibilities array has to be of matching shape with uvw
+    uvw : np.NDArray[float]
+        UVW array each element will have 3 valies
+    weight : np.NDArray[float]
+        same as vis_data may be less along pol coordinate
+    freq_chan : np.NDArray[float]
+        shoould match the dimension of the spectral axis of the vis data
+    cgk_1D : np.NDArray[float]
+        an array which is assumed to be 1/2 of a symmetric function
+    image_size : np.NDArray[int]
+        ny, nx  number of pixels along x and y axes
+    cell_size : float
+          cell size in radian
+    oversampling : int, optional
+        ovesample factor for conv func default 100.
+    support : int, optional
+        size of convfunction  The default is 7.
+    complex_grid : bool, optional
+        gridding on a complex grid or float grid The default is True.
+    do_psf : bool, optional
+        grid weights instead of data The default is False.
+    chan_mode : str, optional
+        continuum or cube. The default is 'continuum'.
+
+    Returns
+    -------
+    Tuple of Gridded data and sumweights array
+    grid : complex array
+        (n_chan, n_pol, n_u, n_v)
+    sum_weight : float array (n_chan, n_pol)
+    """
+    # Construct the params dict that standard_grid_numpy_wrap wants
+    params = {}
+    params["image_size_padded"] = image_size
+    params["cell_size"] = cell_size
+    params["complex_grid"] = complex_grid
+    params["oversampling"] = oversampling
+    params["support"] = support
+    params["do_psf"] = do_psf
+    params["chan_mode"] = chan_mode
+    return standard_grid_numpy_wrap(vis_data, uvw, weight, freq_chan, cgk_1D, params)
+
+
+def standard_grid_numpy_wrap(vis_data, uvw, weight, freq_chan, cgk_1D, grid_params):
     """
     Wraps the jit gridder code.
 
@@ -21,9 +88,9 @@ def standard_grid_numpy_wrap(vis_data, uvw, weight, freq_chan, cgk_1D, grid_parm
         (n_time, n_baseline, n_vis_chan)
     cgk_1D : float array
         (oversampling*(support//2 + 1))
-    grid_parms : dictionary
-        keys ('image_size','cell','oversampling','support')
-
+    grid_params : dictionary
+        keys ('image_size','cell_size','oversampling','support',
+              'image_size_padded, complex_grid', 'do_psf', 'chan_mode')
     Returns
     -------
     grid : complex array
@@ -31,7 +98,7 @@ def standard_grid_numpy_wrap(vis_data, uvw, weight, freq_chan, cgk_1D, grid_parm
     """
 
     n_chan = weight.shape[2]
-    if grid_parms["chan_mode"] == "cube":
+    if grid_params["chan_mode"] == "cube":
         n_imag_chan = n_chan
         chan_map = (np.arange(0, n_chan)).astype(int)
     else:  # continuum
@@ -41,12 +108,12 @@ def standard_grid_numpy_wrap(vis_data, uvw, weight, freq_chan, cgk_1D, grid_parm
     n_imag_pol = weight.shape[3]
     pol_map = (np.arange(0, n_imag_pol)).astype(int)
 
-    n_uv = grid_parms["image_size_padded"]
-    delta_lm = grid_parms["cell_size"]
-    oversampling = grid_parms["oversampling"]
-    support = grid_parms["support"]
+    n_uv = grid_params["image_size_padded"]
+    delta_lm = grid_params["cell_size"]
+    oversampling = grid_params["oversampling"]
+    support = grid_params["support"]
 
-    if grid_parms["complex_grid"]:
+    if grid_params["complex_grid"]:
         grid = np.zeros(
             (n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128
         )
@@ -54,9 +121,9 @@ def standard_grid_numpy_wrap(vis_data, uvw, weight, freq_chan, cgk_1D, grid_parm
         grid = np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.double)
     sum_weight = np.zeros((n_imag_chan, n_imag_pol), dtype=np.double)
 
-    do_psf = grid_parms["do_psf"]
+    do_psf = grid_params["do_psf"]
     do_imaging_weight = False
-    _standard_grid_jit(
+    standard_grid_jit(
         grid,
         sum_weight,
         do_psf,
@@ -77,7 +144,7 @@ def standard_grid_numpy_wrap(vis_data, uvw, weight, freq_chan, cgk_1D, grid_parm
     return grid, sum_weight
 
 
-def standard_grid_psf_numpy_wrap(uvw, weight, freq_chan, cgk_1D, grid_parms):
+def standard_grid_psf_numpy_wrap(uvw, weight, freq_chan, cgk_1D, grid_params):
     """
     Wraps the jit gridder code.
 
@@ -95,7 +162,7 @@ def standard_grid_psf_numpy_wrap(uvw, weight, freq_chan, cgk_1D, grid_parms):
         (n_time, n_baseline, n_vis_chan)
     cgk_1D : float array
         (oversampling*(support//2 + 1))
-    grid_parms : dictionary
+    grid_params : dictionary
         keys ('image_size','cell','oversampling','support')
 
     Returns
@@ -105,7 +172,7 @@ def standard_grid_psf_numpy_wrap(uvw, weight, freq_chan, cgk_1D, grid_parms):
     """
 
     n_chan = weight.shape[2]
-    if grid_parms["chan_mode"] == "cube":
+    if grid_params["chan_mode"] == "cube":
         n_imag_chan = n_chan
         chan_map = (np.arange(0, n_chan)).astype(int)
     else:  # continuum
@@ -115,17 +182,17 @@ def standard_grid_psf_numpy_wrap(uvw, weight, freq_chan, cgk_1D, grid_parms):
     n_imag_pol = weight.shape[3]
     pol_map = (np.arange(0, n_imag_pol)).astype(int)
 
-    n_uv = grid_parms["image_size_padded"]
-    delta_lm = grid_parms["cell_size"]
-    oversampling = grid_parms["oversampling"]
-    support = grid_parms["support"]
+    n_uv = grid_params["image_size_padded"]
+    delta_lm = grid_params["cell_size"]
+    oversampling = grid_params["oversampling"]
+    support = grid_params["support"]
 
     grid = np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.double)
     sum_weight = np.zeros((n_imag_chan, n_imag_pol), dtype=np.double)
 
-    do_imaging_weight = grid_parms["do_imaging_weight"]
+    do_imaging_weight = grid_params["do_imaging_weight"]
 
-    do_psf = grid_parms["do_psf"]
+    do_psf = grid_params["do_psf"]
     vis_data = np.zeros(
         (1, 1, 1, 1), dtype=bool
     )  # This 0 bool array is needed to pass to _standard_grid_jit so that the code can be resued and to keep numba happy.
@@ -194,7 +261,7 @@ def standard_grid_jit(
         (n_time, n_baseline, n_vis_chan)
     cgk_1D : float array
         (oversampling*(support//2 + 1))
-    grid_parms : dictionary
+    grid_params : dictionary
         keys ('n_imag_chan','n_imag_pol','n_uv','delta_lm','oversampling','support')
 
     Returns
@@ -318,7 +385,10 @@ def standard_grid_jit(
                                         if do_imaging_weight:
                                             u_indx_conj = u_center_indx_conj + i_u
                                             grid[
-                                                a_chan, a_pol, u_indx_conj, v_indx_conj
+                                                a_chan,
+                                                a_pol,
+                                                u_indx_conj,
+                                                v_indx_conj,
                                             ] = (
                                                 grid[
                                                     a_chan,
@@ -353,12 +423,12 @@ def standard_imaging_weight_degrid_numpy_wrap(
     natural_imaging_weight,
     briggs_factors,
     freq_chan,
-    grid_parms,
+    grid_params,
 ):
     n_chan = natural_imaging_weight.shape[2]
     n_imag_chan = n_chan
 
-    #    if grid_parms['chan_mode'] == 'cube':
+    #    if grid_params['chan_mode'] == 'cube':
     #        n_imag_chan = n_chan
     #        chan_map = (np.arange(0, n_chan)).astype(int)
     #    else:  # continuum
@@ -371,8 +441,8 @@ def standard_imaging_weight_degrid_numpy_wrap(
     n_imag_pol = natural_imaging_weight.shape[3]
     pol_map = (np.arange(0, n_imag_pol)).astype(int)
 
-    n_uv = grid_parms["image_size_padded"]
-    delta_lm = grid_parms["cell_size"]
+    n_uv = grid_params["image_size_padded"]
+    delta_lm = grid_params["cell_size"]
 
     imaging_weight = np.zeros(natural_imaging_weight.shape, dtype=np.double)
 
@@ -477,18 +547,27 @@ def standard_imaging_weight_degrid_jit(
                             ):
                                 if ~np.isnan(
                                     grid_imaging_weight[
-                                        a_chan, a_pol, u_center_indx, v_center_indx
+                                        a_chan,
+                                        a_pol,
+                                        u_center_indx,
+                                        v_center_indx,
                                     ]
                                 ) and (
                                     grid_imaging_weight[
-                                        a_chan, a_pol, u_center_indx, v_center_indx
+                                        a_chan,
+                                        a_pol,
+                                        u_center_indx,
+                                        v_center_indx,
                                     ]
                                     != 0.0
                                 ):
                                     briggs_grid_imaging_weight = (
                                         briggs_factors[0, a_chan, a_pol]
                                         * grid_imaging_weight[
-                                            a_chan, a_pol, u_center_indx, v_center_indx
+                                            a_chan,
+                                            a_pol,
+                                            u_center_indx,
+                                            v_center_indx,
                                         ]
                                         + briggs_factors[1, a_chan, a_pol]
                                     )

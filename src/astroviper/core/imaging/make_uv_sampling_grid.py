@@ -4,37 +4,39 @@ from scipy import constants
 from numba import jit
 import numba
 import xarray as xr
-from astroviper.core.imaging.check_imaging_parameters import check_grid_parms
+from astroviper.core.imaging.check_imaging_parameters import check_grid_params
 from astroviper.core.imaging.imaging_utils.mosaic_grid import mosaic_grid_jit
 from astroviper.core.imaging.imaging_utils.standard_grid import standard_grid_jit
 
-# from graphviper.parameter_checking.check_parms import check_sel_parms
-from astroviper.utils.check_parms import check_parms, check_sel_parms
+# from graphviper.parameter_checking.check_params import check_sel_params
+from astroviper.utils.check_params import check_params, check_sel_params
 import copy
 
 
 def make_uv_sampling_grid(
-    ms_xds, gcf_xds, img_xds, vis_sel_parms, img_sel_parms, grid_parms
+    ms_xds, gcf_xds, img_xds, vis_sel_params, img_sel_params, grid_params
 ):
     # Deep copy so that inputs are not modified
-    _vis_sel_parms = copy.deepcopy(vis_sel_parms)
-    _img_sel_parms = copy.deepcopy(img_sel_parms)
-    _grid_parms = copy.deepcopy(grid_parms)
+    _vis_sel_params = copy.deepcopy(vis_sel_params)
+    _img_sel_params = copy.deepcopy(img_sel_params)
+    _grid_params = copy.deepcopy(grid_params)
 
-    _img_sel_parms["overwrite"] = True
-    assert check_grid_parms(_grid_parms), "######### ERROR: grid_parms checking failed"
+    _img_sel_params["overwrite"] = True
+    assert check_grid_params(
+        _grid_params
+    ), "######### ERROR: grid_params checking failed"
 
-    ms_data_group_in, ms_data_group_out = check_sel_parms(
-        ms_xds, _vis_sel_parms, skip_data_group_out=True
+    ms_data_group_in, ms_data_group_out = check_sel_params(
+        ms_xds, _vis_sel_params, default_data_group_in_name="base"
     )
-    img_data_group_in, img_data_group_out = check_sel_parms(
+    img_data_group_in, img_data_group_out = check_sel_params(
         img_xds,
-        _img_sel_parms,
-        default_data_group_out={
-            "mosaic": {
-                "uv_sampling": "UV_SAMPLING",
-                "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
-            }
+        _img_sel_params,
+        default_data_group_in_name="mosaic",
+        default_data_group_out_name="mosaic",
+        default_data_group_out_modified={
+            "uv_sampling": "UV_SAMPLING",
+            "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
         },
     )
 
@@ -43,7 +45,7 @@ def make_uv_sampling_grid(
     weight_imaging = ms_xds[ms_data_group_in["weight_imaging"]].values
     n_chan = weight_imaging.shape[2]
 
-    if _grid_parms["chan_mode"] == "cube":
+    if _grid_params["chan_mode"] == "cube":
         n_imag_chan = n_chan
         chan_map = (np.arange(0, n_chan)).astype(int)
     else:  # continuum
@@ -53,11 +55,11 @@ def make_uv_sampling_grid(
     n_imag_pol = weight_imaging.shape[3]
     pol_map = (np.arange(0, n_imag_pol)).astype(int)
 
-    n_uv = _grid_parms["image_size_padded"]
-    delta_lm = _grid_parms["cell_size"]
+    n_uv = _grid_params["image_size_padded"]
+    delta_lm = _grid_params["cell_size"]
     oversampling = gcf_xds.attrs["oversampling"]
 
-    _grid_parms["complex_grid"] = True
+    _grid_params["complex_grid"] = True
     if img_data_group_out["uv_sampling"] not in img_xds:
         img_xds[img_data_group_out["uv_sampling"]] = xr.DataArray(
             np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128),
@@ -107,24 +109,30 @@ def make_uv_sampling_grid(
         phase_gradient,
     )
 
+    img_xds.attrs["data_groups"][
+        img_data_group_out["data_group_out_name"]
+    ] = img_data_group_out
+
 
 def make_uv_sampling_grid_single_field(
-    ms_xds, cgk_1D, img_xds, vis_sel_parms, img_sel_parms, grid_parms
+    ms_xds, cgk_1D, img_xds, vis_sel_params, img_sel_params, grid_params
 ):
     # Deep copy so that inputs are not modified
-    _vis_sel_parms = copy.deepcopy(vis_sel_parms)
-    _img_sel_parms = copy.deepcopy(img_sel_parms)
-    _grid_parms = copy.deepcopy(grid_parms)
+    _vis_sel_params = copy.deepcopy(vis_sel_params)
+    _img_sel_params = copy.deepcopy(img_sel_params)
+    _grid_params = copy.deepcopy(grid_params)
 
-    _img_sel_parms["overwrite"] = True
-    assert check_grid_parms(_grid_parms), "######### ERROR: grid_parms checking failed"
+    _img_sel_params["overwrite"] = True
+    assert check_grid_params(
+        _grid_params
+    ), "######### ERROR: grid_params checking failed"
 
-    ms_data_group_in, ms_data_group_out = check_sel_parms(
-        ms_xds, _vis_sel_parms, skip_data_group_out=True
+    ms_data_group_in, ms_data_group_out = check_sel_params(
+        ms_xds, _vis_sel_params, skip_data_group_out=True
     )
-    img_data_group_in, img_data_group_out = check_sel_parms(
+    img_data_group_in, img_data_group_out = check_sel_params(
         img_xds,
-        _img_sel_parms,
+        _img_sel_params,
         default_data_group_out={
             "mosaic": {
                 "uv_sampling": "UV_SAMPLING",
@@ -138,7 +146,7 @@ def make_uv_sampling_grid_single_field(
     weight_imaging = ms_xds[ms_data_group_in["weight_imaging"]].values
     n_chan = weight_imaging.shape[2]
 
-    if _grid_parms["chan_mode"] == "cube":
+    if _grid_params["chan_mode"] == "cube":
         n_imag_chan = n_chan
         chan_map = (np.arange(0, n_chan)).astype(int)
     else:  # continuum
@@ -148,10 +156,10 @@ def make_uv_sampling_grid_single_field(
     n_imag_pol = weight_imaging.shape[3]
     pol_map = (np.arange(0, n_imag_pol)).astype(int)
 
-    n_uv = _grid_parms["image_size_padded"]
-    delta_lm = _grid_parms["cell_size"]
+    n_uv = _grid_params["image_size_padded"]
+    delta_lm = _grid_params["cell_size"]
 
-    _grid_parms["complex_grid"] = True
+    _grid_params["complex_grid"] = True
     if img_data_group_out["uv_sampling"] not in img_xds:
         img_xds[img_data_group_out["uv_sampling"]] = xr.DataArray(
             np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128),
