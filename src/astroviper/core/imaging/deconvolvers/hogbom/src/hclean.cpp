@@ -124,6 +124,7 @@ void clean(T* limage, T* limagestep, const T* lpsf,
         
         // Find peak in current polarization within clean box
         T maxval = static_cast<T>(0);
+        T absval = static_cast<T>(0);
         int px = 0;  // Convert from Fortran 1-based to 0-based
         int py = 0;
 
@@ -135,10 +136,10 @@ void clean(T* limage, T* limagestep, const T* lpsf,
                     T mask_threshold = static_cast<T>(0.5);
                     if ((domask == 0) || (lmask[iy * nx + ix] > mask_threshold)) {
                         T val = std::abs(limagestep[pol * ny * nx + iy * nx + ix]);
-                        if (val > maxval) {
+                        if (val > absval) {
                             px = ix;
                             py = iy;  
-                            maxval = val;
+                            absval = val;
                         }
                     }
                 }
@@ -158,7 +159,7 @@ void clean(T* limage, T* limagestep, const T* lpsf,
             }
             
             // Check convergence criteria
-            if ((yes == 1) || (std::abs(maxval) < cthres)) {
+            if ((yes == 1) || (absval < cthres)) {
                 break;  // goto 200 equivalent
             }
             
@@ -170,7 +171,7 @@ void clean(T* limage, T* limagestep, const T* lpsf,
             }
             
             if (yes == 1) {
-                break;  // goto 200 equivalent
+                break;
             }
             
             // Calculate bounds for PSF subtraction
