@@ -33,9 +33,8 @@ def psf_gaussian_fit(
     -------
     xds : xarray.Dataset
         The image with the fitted parameters added.
-        The unit of beam size (major and minor) will be the same unit as
-        that of the input image's (l,m) coordintes, which assumed to be
-        radian. The position angle is given in degrees.
+        The l and m coordinates of the input data are assumed to be in radians.
+        The units of beam size (major and minor) and position angle are in radians.
     """
 
     if not isinstance(npix_window, (list, tuple, np.ndarray)):
