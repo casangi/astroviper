@@ -130,6 +130,7 @@ void clean(T* limage, T* limagestep, const T* lpsf,
 
         // Main iteration loop
         for (iter = siter; iter < niter; ++iter) {
+            absval = static_cast<T>(0);
             for (int iy = ybeg; iy < yend; ++iy) {
                 for (int ix = xbeg; ix < xend; ++ix) {
                     // Check mask condition
