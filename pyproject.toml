@@ -1,8 +1,8 @@
 [project]
 name = "astroviper"
-version = "0.0.22"
+version = "0.0.30"
 description = "Astro Visibility and Image Parallel Execution Reduction"
-authors = [{ name = "Jan-Willem Steeb", email = "jsteeb@nrao.edu" }]
+authors = [{ name = "Jan-Willem Steeb", email = "jsteeb@nrao.edu"}]
 license = { file = "LICENSE.txt" }
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
