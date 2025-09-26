@@ -227,7 +227,7 @@ def test_psf_gaussian_fit_orientation():
         plt.tight_layout()
         # plt.show(block=True)
         plt.show(block=False)
-        result = psf_gaussian_fit(ds)
+        result = psf_gaussian_fit(ds, npix_window=(21, 21), sampling=(55, 55))
         measured_angle = -np.rad2deg(float(result["BEAM"].data[0, 0, 0, 2]))
         measured_bmaj = float(result["BEAM"].data[0, 0, 0, 0])
         measured_bmin = float(result["BEAM"].data[0, 0, 0, 1])
@@ -251,15 +251,15 @@ def test_psf_gaussian_fit_orientation():
 
 def test_psf_gaussian_fit_core_simple_gaussian():
     # Create a simple 2D Gaussian
-    shape = (1, 1, 1, 9, 9)
+    shape = (1, 1, 1, 100, 100)
     x = np.linspace(-1, 1, shape[-2])
     y = np.linspace(-1, 1, shape[-1])
     xv, yv = np.meshgrid(x, y, indexing="ij")
     gaussian = np.exp(-(xv**2 + yv**2) / (2 * 0.2**2))
     data = np.zeros(shape)
     data[0, 0, 0, :, :] = gaussian
-    npix_window = np.array([9, 9])
-    sampling = np.array([9, 9])
+    npix_window = np.array([41, 41])
+    sampling = np.array([41, 41])
     cutoff = 0.1
     delta = np.array([np.abs(x[1] - x[0]), np.abs(y[1] - y[0])])
     result = psf_gaussian_fit_core(data, npix_window, sampling, cutoff, delta)
