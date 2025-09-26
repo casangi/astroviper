@@ -1,16 +1,19 @@
 import numpy as np
 from numba import jit, objmode
 import numba
-import xarray
+import xarray as xr
 import scipy.optimize as optimize
 from scipy.interpolate import interpn
 
+FWHM_factor = 2.355  # approx 2*sqrt(2*ln(2))
+beam_initial_guess = [2.5, 2.5, 0.0]  # initial guess for [bmaj, bmin, pa]
+
 
 def psf_gaussian_fit(
-    xds: xarray.Dataset,
+    xds: xr.Dataset,
     dv: str = "SKY",
-    npix_window: list = [51, 51],
-    sampling: list = [51, 51],
+    npix_window: tuple = (41, 41),
+    sampling: tuple = (55, 55),
     cutoff: float = 0.35,
 ):
     """
@@ -22,9 +25,9 @@ def psf_gaussian_fit(
         The input data cube.
     dv : str
         The data variable to fit. Default is 'SKY'.
-    npix_window : list
+    npix_window : tuple
         The size of the fitting window in pixels.
-    sampling : list
+    sampling : tuple
         The sampling of the fitting grid in pixels.
     cutoff : float
         The cutoff value for the fitting.
@@ -35,6 +38,11 @@ def psf_gaussian_fit(
         The image with the fitted parameters added.
         The l and m coordinates of the input data are assumed to be in radians.
         The units of beam size (major and minor) and position angle are in radians.
+
+    Notes:
+    -----
+    - Returns NaN values for beam parameters if the fitting fails
+    - L-BFGS-B optimization method is used with bounds on parameters
     """
 
     if not isinstance(npix_window, (list, tuple, np.ndarray)):
@@ -53,9 +61,9 @@ def psf_gaussian_fit(
         raise ValueError("cutoff must be non-negative")
     if dv not in xds:
         raise KeyError(f"{dv} not found in the dataset")
-    if "l" not in xds.dims:
+    if "l" not in xds[dv].coords:
         raise KeyError("'l' coordinate not found in xds")
-    if "m" not in xds.dims:
+    if "m" not in xds[dv].coords:
         raise KeyError("'m' coordinate not found in xds")
 
     _xds = xds.copy(deep=True)
@@ -84,7 +92,7 @@ def psf_gaussian_fit(
 
     _xds["BEAM"].data = da.from_array(ellipse_params, chunks="auto")
     # assume l, m in radians
-    if not "unit" in _xds["SKY"].l.attrs:
+    if "unit" not in _xds["SKY"].l.attrs:
         _xds["BEAM"].beam_param.attrs["unit"] = "rad"
     return _xds
 
@@ -185,7 +193,7 @@ def psf_gaussian_fit_core(image_to_fit, npix_window, sampling, cutoff, delta):
                     ).T
                     interp_image_to_fit[interp_image_to_fit < cutoff] = np.nan
 
-                    p0 = [2.5, 2.5, 0]
+                    p0 = beam_initial_guess
                     bound = [(None, None), (None, None), (-np.pi / 2, np.pi / 2)]
                     res = optimize.minimize(
                         beam_chi2,
@@ -193,7 +201,10 @@ def psf_gaussian_fit_core(image_to_fit, npix_window, sampling, cutoff, delta):
                         args=(interp_image_to_fit, sampling // 2),
                         bounds=bound,
                     )
-                    res_x = res.x
+                    if not res.success:
+                        res_x = np.array([np.nan, np.nan, np.nan])
+                    else:
+                        res_x = res.x
                 phi = res_x[2]
                 # phi = res_x[2] - np.pi / 2
                 # if phi < -np.pi / 2:
@@ -210,12 +221,12 @@ def psf_gaussian_fit_core(image_to_fit, npix_window, sampling, cutoff, delta):
                 ellipse_params[time, chan, pol, 0] = np.max(
                     np.abs(res_x[0:2])
                     # ) * np.abs(delta[0] * 2.355 / sampling[0] / npix_window[0])
-                ) * np.abs(delta[0] * 2.355 / (sampling[0] / npix_window[0]))
+                ) * np.abs(delta[0] * FWHM_factor / (sampling[0] / npix_window[0]))
                 # ) * np.abs(delta[0] * 2.355)
                 ellipse_params[time, chan, pol, 1] = np.min(
                     np.abs(res_x[0:2])
                     # ) * np.abs(delta[1] * 2.355 / sampling[1] / npix_window[1])
-                ) * np.abs(delta[1] * 2.355 / (sampling[1] / npix_window[1]))
+                ) * np.abs(delta[1] * FWHM_factor / (sampling[1] / npix_window[1]))
                 # ) * np.abs(delta[1] * 2.355)
                 # ellipse_params[time, chan, pol, 2] = -phi
                 if phi < 0:
