@@ -6,15 +6,13 @@ from astroviper.core.image_analysis.psf_gaussian_fit import psf_gaussian_fit
 from astroviper.core.image_analysis.psf_gaussian_fit import psf_gaussian_fit_core
 
 
-def create_test_xds(shape=(1, 1, 1, 51, 51)):
+def create_test_xds(shape=(1, 1, 1, 51, 51), rm_coord=None):
     # Create a simple 2D circular Gaussian as test data
     x = np.linspace(-1, 1, shape[-2])
     y = np.linspace(-1, 1, shape[-1])
     xv, yv = np.meshgrid(x, y, indexing="ij")
     gaussian = np.exp(-(xv**2 + yv**2) / (2 * 0.2**2))
     data = np.zeros(shape)
-    data[0, 0, 0, :, :] = gaussian
-    da_data = da.from_array(data, chunks=(1, 1, 1, 9, 9))
     dims = ["time", "frequency", "polarization", "l", "m"]
     data_coords = {
         "time": np.arange(shape[0]),
@@ -23,6 +21,16 @@ def create_test_xds(shape=(1, 1, 1, 51, 51)):
         "l": np.linspace(-1, 1, shape[-2]),
         "m": np.linspace(-1, 1, shape[-1]),
     }
+    if rm_coord is None:
+        data[0, 0, 0, :, :] = gaussian
+        da_data = da.from_array(data, chunks=(1, 1, 1, 9, 9))
+    elif rm_coord == "l" or rm_coord == "m":
+        shape = shape[:-2] + (shape[-2],)  # Adjust shape if a coordinate is removed
+        dims.remove(rm_coord)
+        data_coords.pop(rm_coord)
+        data = np.zeros(shape)
+        da_data = da.from_array(data, chunks=(1, 1, 1, 9))
+
     sky = xr.DataArray(da_data, dims=dims, coords=data_coords)
 
     beam_data = np.zeros((1, shape[1], shape[2], 3))
@@ -152,16 +160,14 @@ def test_all_zero_input():
 
 def test_no_l_coordinate():
     """test missing 'l' coordinate"""
-    ds = create_test_xds()
-    ds = ds.drop_dims("l")
+    ds = create_test_xds(rm_coord="l")
     with pytest.raises(KeyError):
         psf_gaussian_fit(ds)
 
 
 def test_no_m_coordinate():
     """test missing 'm' coordinate"""
-    ds = create_test_xds()
-    ds = ds.drop_dims("m")
+    ds = create_test_xds(rm_coord="m")
     with pytest.raises(KeyError):
         psf_gaussian_fit(ds)
 
