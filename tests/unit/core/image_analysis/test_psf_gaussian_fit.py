@@ -6,15 +6,13 @@ from astroviper.core.image_analysis.psf_gaussian_fit import psf_gaussian_fit
 from astroviper.core.image_analysis.psf_gaussian_fit import psf_gaussian_fit_core
 
 
-def create_test_xds(shape=(1, 1, 1, 9, 9)):
+def create_test_xds(shape=(1, 1, 1, 51, 51), rm_coord=None):
     # Create a simple 2D circular Gaussian as test data
     x = np.linspace(-1, 1, shape[-2])
     y = np.linspace(-1, 1, shape[-1])
     xv, yv = np.meshgrid(x, y, indexing="ij")
     gaussian = np.exp(-(xv**2 + yv**2) / (2 * 0.2**2))
     data = np.zeros(shape)
-    data[0, 0, 0, :, :] = gaussian
-    da_data = da.from_array(data, chunks=(1, 1, 1, 9, 9))
     dims = ["time", "frequency", "polarization", "l", "m"]
     data_coords = {
         "time": np.arange(shape[0]),
@@ -23,6 +21,16 @@ def create_test_xds(shape=(1, 1, 1, 9, 9)):
         "l": np.linspace(-1, 1, shape[-2]),
         "m": np.linspace(-1, 1, shape[-1]),
     }
+    if rm_coord is None:
+        data[0, 0, 0, :, :] = gaussian
+        da_data = da.from_array(data, chunks=(1, 1, 1, 9, 9))
+    elif rm_coord == "l" or rm_coord == "m":
+        shape = shape[:-2] + (shape[-2],)  # Adjust shape if a coordinate is removed
+        dims.remove(rm_coord)
+        data_coords.pop(rm_coord)
+        data = np.zeros(shape)
+        da_data = da.from_array(data, chunks=(1, 1, 1, 9))
+
     sky = xr.DataArray(da_data, dims=dims, coords=data_coords)
 
     beam_data = np.zeros((1, shape[1], shape[2], 3))
@@ -152,18 +160,24 @@ def test_all_zero_input():
 
 def test_no_l_coordinate():
     """test missing 'l' coordinate"""
-    ds = create_test_xds()
-    ds = ds.drop_dims("l")
+    ds = create_test_xds(rm_coord="l")
     with pytest.raises(KeyError):
         psf_gaussian_fit(ds)
 
 
 def test_no_m_coordinate():
     """test missing 'm' coordinate"""
-    ds = create_test_xds()
-    ds = ds.drop_dims("m")
+    ds = create_test_xds(rm_coord="m")
     with pytest.raises(KeyError):
         psf_gaussian_fit(ds)
+
+
+def test_oversampling():
+    """test oversampling case"""
+    ds = create_test_xds(shape=(1, 1, 1, 100, 100))
+    result = psf_gaussian_fit(ds, npix_window=[41, 41], sampling=[51, 51])
+    truth_values = [0.47096, 0.47096, 0.0]
+    assert np.allclose(result["BEAM"].data[0, 0, 0, :], truth_values, rtol=1e-3, atol=5)
 
 
 def create_rotated_gaussian(shape, angle_deg):
@@ -197,7 +211,7 @@ def test_psf_gaussian_fit_orientation():
     import matplotlib.pyplot as plt
 
     for angle in [-135, -90, -45, -33, 33, 45, 90, 135]:
-        ds = create_rotated_gaussian((1, 1, 1, 100, 100), angle)
+        ds = create_rotated_gaussian((1, 1, 1, 200, 200), angle)
         # Plot the input ellipse (rotated Gaussian)
         input_img = (
             ds["SKY"].data[0, 0, 0].compute()
@@ -213,7 +227,7 @@ def test_psf_gaussian_fit_orientation():
         plt.tight_layout()
         # plt.show(block=True)
         plt.show(block=False)
-        result = psf_gaussian_fit(ds)
+        result = psf_gaussian_fit(ds, npix_window=(21, 21), sampling=(55, 55))
         measured_angle = -np.rad2deg(float(result["BEAM"].data[0, 0, 0, 2]))
         measured_bmaj = float(result["BEAM"].data[0, 0, 0, 0])
         measured_bmin = float(result["BEAM"].data[0, 0, 0, 1])
@@ -225,9 +239,9 @@ def test_psf_gaussian_fit_orientation():
             measured_angle -= 180
         angle_mod = (measured_angle + 180) % 180
         expected_mod = (angle + 180) % 180
-        # print(
-        #    f"angle={angle}, measured_angle={measured_angle}, angle_mod={angle_mod}, expected_mod={expected_mod}"
-        # )
+        print(
+            f"angle={angle}, measured_angle={measured_angle}, angle_mod={angle_mod}, expected_mod={expected_mod}"
+        )
         assert np.isclose(
             expected_mod,
             angle_mod,
@@ -237,15 +251,15 @@ def test_psf_gaussian_fit_orientation():
 
 def test_psf_gaussian_fit_core_simple_gaussian():
     # Create a simple 2D Gaussian
-    shape = (1, 1, 1, 9, 9)
+    shape = (1, 1, 1, 100, 100)
     x = np.linspace(-1, 1, shape[-2])
     y = np.linspace(-1, 1, shape[-1])
     xv, yv = np.meshgrid(x, y, indexing="ij")
     gaussian = np.exp(-(xv**2 + yv**2) / (2 * 0.2**2))
     data = np.zeros(shape)
     data[0, 0, 0, :, :] = gaussian
-    npix_window = np.array([9, 9])
-    sampling = np.array([9, 9])
+    npix_window = np.array([41, 41])
+    sampling = np.array([41, 41])
     cutoff = 0.1
     delta = np.array([np.abs(x[1] - x[0]), np.abs(y[1] - y[0])])
     result = psf_gaussian_fit_core(data, npix_window, sampling, cutoff, delta)
