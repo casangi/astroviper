@@ -4,9 +4,12 @@ import copy
 from typing import Optional, Tuple
 
 from astroviper.core.imaging.deconvolvers import hogbom
+from astroviper.core.image_analysis.image_statistics import image_peak_residual
 
 import logging
 import toolviper.utils.logger as logger
+
+# XXX : TODO: As of 2025-10-07 there is no way to supply an initial model image to the deconvolver
 
 
 def progress_callback(
@@ -91,6 +94,83 @@ def _validate_deconv_params(deconv_params):
 
     return deconv_params
 
+
+
+def deconvolve(
+    dirty_image_xds: xr.Dataset,
+    psf_xds: xr.Dataset,
+    model_xds: Optional[xr.Dataset] = None,
+    algorithm: str = "hogbom",
+    deconv_params: Optional[dict] = None,
+    output_dir: str = ".",
+):
+    """
+    Run the chosen deconvolution algorithm on the dirty image using the provided PSF.
+
+    Parameters:
+    -----------
+    dirty_image_xds: xarray.Dataset
+        The dirty image dataset with dimensions (time, frequency, polarization, y, x).
+    psf_xds: xarray.Dataset
+        The PSF dataset with dimensions (time, frequency, polarization, y, x).
+    model_xds: xarray.Dataset or None
+        The initial model image dataset
+    algorithm: str
+        The deconvolution algorithm to use ('hogbom' supported).
+    deconv_params: dict or None
+        Dictionary containing deconvolution parameters specific to the chosen algorithm.
+    output_dir: str
+        Directory to save intermediate outputs (not used in this implementation).
+    Returns:
+    --------
+    results: dict
+        A dictionary containing the model image and residual image after deconvolution.
+    model_xds: xarray.Dataset
+        The model image dataset after deconvolution.
+    residual_xds: xarray.Dataset
+        The residual image dataset after deconvolution.
+
+    Notes:
+    ------
+    - Currently, only the 'hogbom' algorithm is implemented.
+    """
+
+    start_model_flux = 0.0
+    start_peakres = 0.0
+
+    start_peakres = image_peak_residual(dirty_image_xds, per_plane_stats=False, use_mask=True)
+    start_peakres_nomask = image_peak_residual(dirty_image_xds, per_plane_stats=False, use_mask=False)
+
+    if model_xds is not None:
+        start_model_flux = image_peak_residual(model_xds, per_plane_stats=False)
+
+    logger.info(f"Starting peak residual (with mask): {start_peakres:.6f}")
+
+    # TODO : Iterate over planes and send in only a single plne to hogbom_clean
+
+    if algorithm.lower() == "hogbom":
+        results, model_xds, residual_xds = hogbom_clean(
+            dirty_image_xds=dirty_image_xds,
+            psf_xds=psf_xds,
+            deconv_params=deconv_params,
+            output_dir=output_dir,
+        )
+    else:
+        raise ValueError(f"Deconvolution algorithm '{algorithm}' not recognized.")
+
+    peakres = image_peak_residual(residual_xds, per_plane_stats=False, use_mask=True)
+    peakres_nomask = image_peak_residual(residual_xds, per_plane_stats=False, use_mask=False)
+
+    # TODO : Need to add min/max psf sidelobe levels to the return dict
+
+    returndict = {
+        "start_model_flux": start_model_flux,
+        "start_peakres": start_peakres,
+        "start_peakres_nomask": start_peakres_nomask,
+        "peakres": peakres,
+        "peakres_nomask": peakres_nomask,
+        "niter": results.get("niter", None),
+    }
 
 def hogbom_clean(
     dirty_image_xds: xr.Dataset,
