@@ -95,7 +95,6 @@ def _validate_deconv_params(deconv_params):
     return deconv_params
 
 
-
 def deconvolve(
     dirty_image_xds: xr.Dataset,
     psf_xds: xr.Dataset,
@@ -138,8 +137,12 @@ def deconvolve(
     start_model_flux = 0.0
     start_peakres = 0.0
 
-    start_peakres = image_peak_residual(dirty_image_xds, per_plane_stats=False, use_mask=True)
-    start_peakres_nomask = image_peak_residual(dirty_image_xds, per_plane_stats=False, use_mask=False)
+    start_peakres = image_peak_residual(
+        dirty_image_xds, per_plane_stats=False, use_mask=True
+    )
+    start_peakres_nomask = image_peak_residual(
+        dirty_image_xds, per_plane_stats=False, use_mask=False
+    )
 
     if model_xds is not None:
         start_model_flux = image_peak_residual(model_xds, per_plane_stats=False)
@@ -159,7 +162,9 @@ def deconvolve(
         raise ValueError(f"Deconvolution algorithm '{algorithm}' not recognized.")
 
     peakres = image_peak_residual(residual_xds, per_plane_stats=False, use_mask=True)
-    peakres_nomask = image_peak_residual(residual_xds, per_plane_stats=False, use_mask=False)
+    peakres_nomask = image_peak_residual(
+        residual_xds, per_plane_stats=False, use_mask=False
+    )
 
     # TODO : Need to add min/max psf sidelobe levels to the return dict
 
@@ -171,6 +176,7 @@ def deconvolve(
         "peakres_nomask": peakres_nomask,
         "niter": results.get("niter", None),
     }
+
 
 def hogbom_clean(
     dirty_image_xds: xr.Dataset,

@@ -5,6 +5,7 @@ plane images.
 
 import numpy as np
 
+
 def image_peak_residual(image_xds, per_plane_stats=False, use_mask=True, dv="SKY"):
     """
     Compute the peak residual of an image, optionally per plane.
@@ -41,12 +42,16 @@ def image_peak_residual(image_xds, per_plane_stats=False, use_mask=True, dv="SKY
     if per_plane_stats:
         # Compute peak residual for each (time, frequency, polarization) plane
         peak_residual = image_xds[dv].reduce(
-            np.vectorize(lambda arr: arr[np.unravel_index(np.abs(arr).argmax(), arr.shape)]),
+            np.vectorize(
+                lambda arr: arr[np.unravel_index(np.abs(arr).argmax(), arr.shape)]
+            ),
             dim=["y", "x"],
         )
     else:
         # Compute peak residual for the entire image across all planes
-        peak_res_idx = np.unravel_index(np.abs(image_xds[dv].values).argmax(), image_xds[dv].shape)
+        peak_res_idx = np.unravel_index(
+            np.abs(image_xds[dv].values).argmax(), image_xds[dv].shape
+        )
         peak_residual = image_xds[dv].values[peak_res_idx]
-    
+
     return peak_residual
