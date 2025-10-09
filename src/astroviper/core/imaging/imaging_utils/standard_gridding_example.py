@@ -29,7 +29,7 @@ def generate_ms4_with_point_sources(
     npix = 200
     if not os.path.exists("Antennae_fld1_casa_lsrk.ps.zarr"):
         download(file="Antennae_fld1_casa_lsrk.ps.zarr", decompress=True)
-    ps_xdt = xr.open_datatree("Antennae_fld1_casa_lsrk.ps.zarr", engine="zarr")  
+    ps_xdt = xr.open_datatree("Antennae_fld1_casa_lsrk.ps.zarr", engine="zarr")
     origms = ps_xdt["Antennae_fld1_casa_lsrk_0"]
     # Select the first frequency from the origms dataset
     origms_subset = origms.isel(frequency=slice(0, 1))
