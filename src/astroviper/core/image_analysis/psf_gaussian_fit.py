@@ -199,9 +199,8 @@ def psf_gaussian_fit(
     #    npix_window, cutoff, px, py, psf2d, delta
     # )
     # print(" after find_n_points blc, trc=", blc, trc)
-    main_lobe_im, blc, trc = extract_main_lobe(
-        npix_window, cutoff, _xds[dv].data.compute()
-    )
+    # main_lobe_im, blc, trc = extract_main_lobe(
+    main_lobe_im = extract_main_lobe(npix_window, cutoff, _xds[dv].data.compute())
     print("main_lobe_im.shape=", main_lobe_im.shape)
     blc = blc - expand_pixel
     trc = trc + expand_pixel
