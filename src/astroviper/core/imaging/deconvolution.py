@@ -4,7 +4,8 @@ import copy
 from typing import Optional, Tuple
 
 from astroviper.core.imaging.deconvolvers import hogbom
-from astroviper.core.image_analysis.image_statistics import image_peak_residual
+from astroviper.core.image_analysis import image_statistics as imgstats
+from astroviper.core.imaging.imaging_utils.return_dict import ReturnDict
 
 import logging
 import toolviper.utils.logger as logger
@@ -134,32 +135,73 @@ def deconvolve(
     - Currently, only the 'hogbom' algorithm is implemented.
     """
 
+    returndict = ReturnDict()
+
     start_model_flux = 0.0
     start_peakres = 0.0
 
-    start_peakres = image_peak_residual(
-        dirty_image_xds, per_plane_stats=False, use_mask=True
-    )
-    start_peakres_nomask = image_peak_residual(
-        dirty_image_xds, per_plane_stats=False, use_mask=False
-    )
+    ntime = dirty_image_xds.dims["time"]
+    nchan = dirty_image_xds.dims["frequency"]
+    npol = dirty_image_xds.dims["polarization"]
 
+    # XXX : TODO : This should be within the time/pol/chan loop
     if model_xds is not None:
-        start_model_flux = image_peak_residual(model_xds, per_plane_stats=False)
+        start_model_flux = imgstats.image_peak_residual(
+            model_xds, per_plane_stats=False
+        )
+    masksum = imgstats.get_image_masksum(dirty_image_xds)
 
     logger.info(f"Starting peak residual (with mask): {start_peakres:.6f}")
 
-    # TODO : Iterate over planes and send in only a single plne to hogbom_clean
-
     if algorithm.lower() == "hogbom":
-        results, model_xds, residual_xds = hogbom_clean(
-            dirty_image_xds=dirty_image_xds,
-            psf_xds=psf_xds,
-            deconv_params=deconv_params,
-            output_dir=output_dir,
-        )
+        _deconvolver = hogbom_clean
     else:
         raise ValueError(f"Deconvolution algorithm '{algorithm}' not recognized.")
+
+    for tt in range(ntime):
+        for nn in range(nchan):
+            for pp in range(npol):
+                logger.info(
+                    f"Deconvolving time {tt+1}/{ntime}, freq {ff+1}/{nchan}, pol {pp+1}/{npol}"
+                )
+
+                start_peakres = imgstats.image_peak_residual(
+                    dirty_image_xds, per_plane_stats=False, use_mask=True
+                )
+                start_peakres_nomask = imgstats.image_peak_residual(
+                    dirty_image_xds, per_plane_stats=False, use_mask=False
+                )
+
+                dirty_slice = dirty_image_xds.isel(
+                    time=tt, frequency=nn, polarization=pp
+                )
+                psf_slice = psf_xds.isel(time=tt, frequency=nn, polarization=pp)
+
+                results, model_xds, residual_xds = _deconvolver(
+                    dirty_image=dirty_slice,
+                    psf_xds=psf_slice,
+                    deconv_params=deconv_params,
+                    output_dir=output_dir,
+                )
+
+                returnvals = {
+                    "niter": deconv_params.get("niter", None),
+                    "threshold": deconv_params.get("threshold", None),
+                    "iter_done": results.get("iterations_performed", None),
+                    "loop_gain": deconv_params.get("gain", None),
+                    "min_psf_fraction": None,
+                    "max_psf_fraction": None,
+                    "max_psf_sidelobe": None,
+                    "stop_code": None,
+                    "start_model_flux": start_model_flux,
+                    "start_peakres": start_peakres,
+                    "start_peakres_nomask": start_peakres_nomask,
+                    "peakres": peakres,
+                    "peakres_nomask": peakres_nomask,
+                    "masksum": masksum,
+                }
+
+                returndict.add(returnvals, time=tt, pol=pp, chan=nn)
 
     peakres = image_peak_residual(residual_xds, per_plane_stats=False, use_mask=True)
     peakres_nomask = image_peak_residual(
@@ -167,15 +209,6 @@ def deconvolve(
     )
 
     # TODO : Need to add min/max psf sidelobe levels to the return dict
-
-    returndict = {
-        "start_model_flux": start_model_flux,
-        "start_peakres": start_peakres,
-        "start_peakres_nomask": start_peakres_nomask,
-        "peakres": peakres,
-        "peakres_nomask": peakres_nomask,
-        "niter": results.get("niter", None),
-    }
 
 
 def hogbom_clean(
@@ -186,6 +219,9 @@ def hogbom_clean(
 ):
     """
     Perform Hogbom CLEAN deconvolution on a dirty image using the provided PSF.
+    The input dirty image and PSF are expected to be **single plane** images.
+    Any iteration over time, frequency, polarization is done outside this
+    function.
 
     Parameters:
     -----------
@@ -218,10 +254,6 @@ def hogbom_clean(
     - The function loops over time and frequency dimensions to perform deconvolution on each slice.
     """
 
-    ntime = dirty_image_xds.dims["time"]
-    nchan = dirty_image_xds.dims["frequency"]
-    npol = dirty_image_xds.dims["polarization"]
-
     # Validate and set default deconvolution parameters
     deconv_params = _validate_deconv_params(deconv_params)
 
@@ -230,47 +262,41 @@ def hogbom_clean(
     model_xds = dirty_image_xds.copy(deep=True)
     residual_xds = dirty_image_xds.copy(deep=True)
 
-    # Deconvolution will loop over each time, chan, slice
-    for tt in range(ntime):
-        for cc in range(nchan):
-            dirty_slice = dirty_image_xds["SKY"].isel(time=tt, frequency=cc).values
-            psf_slice = (
-                psf_xds["SKY"].isel(time=tt, frequency=cc, polarization=0).values
-            )  # Assuming PSF is same for all polns
+    # Get the underlying values to pass into
+    # pybinded function
+    dirty_slice = dirty_image_xds["SKY"].values
+    psf_slice = psf_xds["SKY"].values
 
-            logger.debug(f"Dirty image shape: {dirty_slice.shape}")
-            logger.debug(f"PSF shape: {psf_slice.shape}")
+    logger.debug(f"Dirty image shape: {dirty_slice.shape}")
+    logger.debug(f"PSF shape: {psf_slice.shape}")
 
-            # Find initial peak in dirty image
-            fmin, fmax = hogbom.maximg(dirty_slice)
-            initial_peak = max(abs(fmin), abs(fmax))
-            logger.debug(f"Initial peak flux: {initial_peak:.6f}")
+    # Find initial peak in dirty image
+    fmin, fmax = hogbom.maximg(dirty_slice)
+    initial_peak = max(abs(fmin), abs(fmax))
+    logger.debug(f"Initial peak flux: {initial_peak:.6f}")
 
-            # Run CLEAN with full interface (including callbacks)
-            logger.info("\nRunning Hogbom CLEAN algorithm...")
-            results = hogbom.clean(
-                dirty_image=dirty_slice,
-                psf=psf_slice,
-                mask=np.array([], dtype=np.float32),
-                gain=deconv_params["gain"],
-                threshold=deconv_params["threshold"],
-                max_iter=deconv_params["niter"],
-                clean_box=(
-                    deconv_params["clean_box"]
-                    if deconv_params["clean_box"]
-                    else (-1, -1, -1, -1)
-                ),
-                progress_callback=progress_callback,
-                stop_callback=None,
-            )
+    # Run CLEAN with full interface (including callbacks)
+    logger.info("\nRunning Hogbom CLEAN algorithm...")
+    results = hogbom.clean(
+        dirty_image=dirty_slice,
+        psf=psf_slice,
+        mask=np.array([], dtype=np.float32),
+        gain=deconv_params["gain"],
+        threshold=deconv_params["threshold"],
+        max_iter=deconv_params["niter"],
+        clean_box=(
+            deconv_params["clean_box"]
+            if deconv_params["clean_box"]
+            else (-1, -1, -1, -1)
+        ),
+        progress_callback=progress_callback,
+        stop_callback=None,
+    )
 
-            model_xds["SKY"].values[tt, cc, :, :, :] = copy.deepcopy(
-                results["model_image"]
-            )
-            residual_xds["SKY"].values[tt, cc, :, :, :] = copy.deepcopy(
-                results["residual_image"]
-            )
+    model_xds["SKY"].values[0, 0, :, :, :] = copy.deepcopy(results["model_image"])
+    residual_xds["SKY"].values[0, 0, :, :, :] = copy.deepcopy(results["residual_image"])
 
+    # XXX : TODO : This will only return the results from the last slice cleaned
     final_results = {
         key: value
         for key, value in results.items()
