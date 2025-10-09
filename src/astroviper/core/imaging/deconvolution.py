@@ -13,6 +13,31 @@ import toolviper.utils.logger as logger
 # XXX : TODO: As of 2025-10-07 there is no way to supply an initial model image to the deconvolver
 
 
+def get_phase_center(dirty_image_xds):
+    """
+    Get the phase center from the dirty image coordinates.
+    Parameters:
+    -----------
+    dirty_image_xds: xarray.Dataset
+        The dirty image dataset with coordinates 'right_ascension' and 'declination'.
+    Returns:
+    --------
+    phase_center: str
+        The phase center in the format "RA,Dec" (e.g., "12.345,-67.890").
+    """
+
+    phase_center = ""
+    ra_shape = dirty_image_xds.coords["right_ascension"].shape
+    dec_shape = dirty_image_xds.coords["declination"].shape
+
+    cx_ra, cy_ra = ra_shape[0] // 2, ra_shape[1] // 2
+    cx_dec, cy_dec = dec_shape[0] // 2, dec_shape[1] // 2
+
+    ra0 = dirty_image_xds.coords["right_ascension"].values[cx_ra, cy_ra]
+    dec0 = dirty_image_xds.coords["declination"].values[cx_dec, cy_dec]
+    phase_center = f"{ra0},{dec0}"
+
+
 def progress_callback(
     npol: int,
     pol: int,
@@ -149,7 +174,9 @@ def deconvolve(
         start_model_flux = imgstats.image_peak_residual(
             model_xds, per_plane_stats=False
         )
+
     masksum = imgstats.get_image_masksum(dirty_image_xds)
+    phase_center = get_phase_center(dirty_image_xds)
 
     logger.info(f"Starting peak residual (with mask): {start_peakres:.6f}")
 
@@ -184,6 +211,17 @@ def deconvolve(
                     output_dir=output_dir,
                 )
 
+                peakres = image_peak_residual(
+                    residual_xds, per_plane_stats=False, use_mask=True
+                )
+                peakres_nomask = image_peak_residual(
+                    residual_xds, per_plane_stats=False, use_mask=False
+                )
+
+                stokes = residual_xds.coords("polarization").values
+                freq = residual_xds.coords("frequency").values
+                time = residual_xds.coords("time").values
+
                 returnvals = {
                     "niter": deconv_params.get("niter", None),
                     "threshold": deconv_params.get("threshold", None),
@@ -193,6 +231,10 @@ def deconvolve(
                     "max_psf_fraction": None,
                     "max_psf_sidelobe": None,
                     "stop_code": None,
+                    "stokes": stokes,
+                    "frequency": freq,
+                    "phase_center": phase_center,
+                    "time": time,
                     "start_model_flux": start_model_flux,
                     "start_peakres": start_peakres,
                     "start_peakres_nomask": start_peakres_nomask,
@@ -203,12 +245,8 @@ def deconvolve(
 
                 returndict.add(returnvals, time=tt, pol=pp, chan=nn)
 
-    peakres = image_peak_residual(residual_xds, per_plane_stats=False, use_mask=True)
-    peakres_nomask = image_peak_residual(
-        residual_xds, per_plane_stats=False, use_mask=False
-    )
-
     # TODO : Need to add min/max psf sidelobe levels to the return dict
+    return returndict, model_xds, residual_xds
 
 
 def hogbom_clean(
