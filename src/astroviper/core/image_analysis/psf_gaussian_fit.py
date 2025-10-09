@@ -61,7 +61,11 @@ def extract_main_lobe(npix_window, threshold, psf_image):
     # Find the peak intensity of the image
     peak_intensity = np.max(psf_image)
     if peak_intensity == 0:
-        return np.zeros_like(psf_image)
+        return (
+            np.zeros_like(psf_image),
+            (0, 0),
+            (psf_image.shape[3] - 1, psf_image.shape[4] - 1),
+        )
     # find peak location in the psf_image
     itm, ifrq, ipol, peak_y, peak_x = np.unravel_index(
         np.argmax(psf_image), psf_image.shape
@@ -199,8 +203,9 @@ def psf_gaussian_fit(
     #    npix_window, cutoff, px, py, psf2d, delta
     # )
     # print(" after find_n_points blc, trc=", blc, trc)
-    # main_lobe_im, blc, trc = extract_main_lobe(
-    main_lobe_im = extract_main_lobe(npix_window, cutoff, _xds[dv].data.compute())
+    main_lobe_im, blc, trc = extract_main_lobe(
+        npix_window, cutoff, _xds[dv].data.compute()
+    )
     print("main_lobe_im.shape=", main_lobe_im.shape)
     blc = blc - expand_pixel
     trc = trc + expand_pixel
