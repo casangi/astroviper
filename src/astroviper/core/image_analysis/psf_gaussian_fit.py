@@ -63,8 +63,8 @@ def extract_main_lobe(npix_window, threshold, psf_image):
     if peak_intensity == 0:
         return (
             np.zeros_like(psf_image),
-            (0, 0),
-            (psf_image.shape[3] - 1, psf_image.shape[4] - 1),
+            np.array([0, 0]),
+            np.array([psf_image.shape[3] - 1, psf_image.shape[4] - 1]),
         )
     # find peak location in the psf_image
     itm, ifrq, ipol, peak_y, peak_x = np.unravel_index(
@@ -118,10 +118,10 @@ def extract_main_lobe(npix_window, threshold, psf_image):
     # return also max sidelobe level?, applying main lobe mask on the original psf_image
     # masked_main = np.where(labels != main_lobe_label, psf_image, 0)
     # max_side_lobe = np.max(masked_main)
-    max_side_lobe = np.max(psf_image * (labels != main_lobe_label))
-    print("max_side_lobe=", max_side_lobe)
+    max_sidelobe = np.max(psf_image * (labels != main_lobe_label))
+    print("maximum sidelobe level: ", max_sidelobe)
     blc, trc = _get_main_lobe_bounding_box(main_lobe_only, max_coords)
-    print("extract_main_lobe: blc, trc=", blc, trc)
+    # print("extract_main_lobe: blc, trc=", blc, trc)
     return main_lobe_only, blc, trc
 
 
@@ -206,10 +206,9 @@ def psf_gaussian_fit(
     main_lobe_im, blc, trc = extract_main_lobe(
         npix_window, cutoff, _xds[dv].data.compute()
     )
-    print("main_lobe_im.shape=", main_lobe_im.shape)
     blc = blc - expand_pixel
     trc = trc + expand_pixel
-    print(" blc, trc after expanding=", blc, trc)
+    # print(" blc, trc after expanding=", blc, trc)
     if blc[0] < 0:
         blc[0] = 0
     if blc[1] < 0:
@@ -219,10 +218,6 @@ def psf_gaussian_fit(
     if trc[1] >= main_lobe_im.shape[4]:
         trc[1] = main_lobe_im.shape[4] - 1
 
-    # image_to_fit = _xds[dv].data.compute()[
-    #    :, :, :, blc[0] : trc[0] + 1, blc[1] : trc[1] + 1
-    # ]
-    print("blc, trc=", blc, trc)
     ellipse_params = psf_gaussian_fit_core(
         _xds[dv].data.compute(), blc, trc, sampling, cutoff, delta
     )
