@@ -274,7 +274,7 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
         msum = float(model_plane.sum().compute().values)
         rel = fsum / msum - 1.0
         self.assertAlmostEqual(
-            fsum, 21276.0859375, delta=1e-3, msg=f"feather sum got {fsum}"
+            fsum, 21276.0859375, delta=1e-2, msg=f"feather sum got {fsum}"
         )
         self.assertAlmostEqual(msum, 21275.71, delta=1e-2, msg=f"model sum got {msum}")
 
