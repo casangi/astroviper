@@ -14,7 +14,7 @@ requires-python = ">=3.11,<3.14"
 
 # ✅ Core runtime dependencies must live here
 dependencies = [
-  "graphviper>=0.0.36",
+  "graphviper>=0.0.35",
   "numpy>=1.20.0",
   "xradio>=1.0.1",
 ]
