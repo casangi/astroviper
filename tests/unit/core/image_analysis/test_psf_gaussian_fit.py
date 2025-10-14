@@ -4,6 +4,7 @@ import numpy as np
 import xarray as xr
 from astroviper.core.image_analysis.psf_gaussian_fit import psf_gaussian_fit
 from astroviper.core.image_analysis.psf_gaussian_fit import psf_gaussian_fit_core
+from astroviper.core.image_analysis.psf_gaussian_fit import extract_main_lobe
 
 
 def create_test_xds(shape=(1, 1, 1, 51, 51), rm_coord=None):
@@ -218,6 +219,7 @@ def test_psf_gaussian_fit_orientation():
             if hasattr(ds["SKY"].data, "compute")
             else ds["SKY"].data[0, 0, 0]
         )
+        # for verfication purpose only
         plt.figure()
         plt.imshow(input_img, origin="lower", cmap="viridis")
         plt.title(f"Input Rotated Gaussian, angle={angle} deg")
@@ -259,10 +261,12 @@ def test_psf_gaussian_fit_core_simple_gaussian():
     data = np.zeros(shape)
     data[0, 0, 0, :, :] = gaussian
     npix_window = np.array([41, 41])
+    blc = np.array([50 - npix_window[0] // 2, 30 - npix_window[1] // 2])
+    trc = np.array([50 + npix_window[0] // 2, 30 + npix_window[1] // 2])
     sampling = np.array([41, 41])
     cutoff = 0.1
     delta = np.array([np.abs(x[1] - x[0]), np.abs(y[1] - y[0])])
-    result = psf_gaussian_fit_core(data, npix_window, sampling, cutoff, delta)
+    result = psf_gaussian_fit_core(data, blc, trc, sampling, cutoff, delta)
     assert result.shape == (1, 1, 1, 3)
     assert np.all(result[0, 0, 0, :2] > 0)
     assert np.isfinite(result[0, 0, 0, 2])
@@ -271,23 +275,105 @@ def test_psf_gaussian_fit_core_simple_gaussian():
 def test_psf_gaussian_fit_core_all_nan():
     # All NaN input
     data = np.full((1, 1, 1, 9, 9), np.nan)
-    npix_window = np.array([9, 9])
+    blc = np.array([0, 0])
+    trc = np.array([9, 9])
     sampling = np.array([9, 9])
     cutoff = 0.1
     delta = np.array([1.0, 1.0])
-    result = psf_gaussian_fit_core(data, npix_window, sampling, cutoff, delta)
+    result = psf_gaussian_fit_core(data, blc, trc, sampling, cutoff, delta)
     assert np.all(np.isnan(result))
 
 
 def test_psf_gaussian_fit_core_all_zero():
     # All zero input
     data = np.zeros((1, 1, 1, 9, 9))
-    npix_window = np.array([9, 9])
+    blc = np.array([0, 0])
+    trc = np.array([9, 9])
     sampling = np.array([9, 9])
     cutoff = 0.1
     delta = np.array([1.0, 1.0])
-    result = psf_gaussian_fit_core(data, npix_window, sampling, cutoff, delta)
+    result = psf_gaussian_fit_core(data, blc, trc, sampling, cutoff, delta)
     assert np.all(result == 0)
+
+
+def test_extract_main_lobe():
+    """
+    Test the extraction of the main lobe from a PSF image.
+    """
+    # Simple test case with a main lobe with sidelobes
+
+    shape = (1, 1, 1, 100, 100)
+    x = np.linspace(-1, 1, shape[-2])
+    y = np.linspace(-1, 1, shape[-1])
+    xv, yv = np.meshgrid(x, y, indexing="ij")
+    gaussian = np.exp(-(xv**2 + yv**2) / (2 * 0.2**2))
+    sidelobe1 = 0.3 * np.exp(-((xv - 0.5) ** 2 + (yv - 0.5) ** 2) / (2 * 0.1**2))
+    sidelobe2 = 0.2 * np.exp(-((xv + 0.5) ** 2 + (yv + 0.5) ** 2) / (2 * 0.1**2))
+    psf_image = gaussian + sidelobe1 + sidelobe2
+
+    # for verification purposes, plot the psf_image
+    import matplotlib.pyplot as plt
+
+    plt.imshow(psf_image, origin="lower", cmap="gray")
+    plt.colorbar()
+    plt.title("PSF Image")
+    plt.show(block=False)  # change to True to pause the test to see the plot
+
+    data = np.zeros(shape)
+    data[0, 0, 0, :, :] = psf_image
+    npix_window = np.array([41, 41])
+    cutoff = 0.1
+    main_lobe_only, blc, trc = extract_main_lobe(npix_window, cutoff, data)
+    print("test_extract_main_lobe: blc, trc=", blc, trc)
+    # Check that the main lobe is extracted correctly by comparing total main lobe pixels
+    # with model main lobe (gaussian) pixels with cutoff applied
+    total_main_lobe = np.sum(main_lobe_only)
+    model_main_lobe = np.sum(gaussian[gaussian >= cutoff * np.max(gaussian)])
+    assert np.isclose(total_main_lobe, model_main_lobe, rtol=0.1)
+    assert blc[0] < trc[0] and blc[1] < trc[1]
+    # Check that sidelobes are zeroed out
+    assert np.all(
+        main_lobe_only[0, 0, 0, :, :][psf_image < cutoff * np.max(psf_image)] == 0
+    )
+
+
+def test_extract_main_lobe_offset_peak():
+    """
+    Test the case where the psf peak is not at the center of the image
+    """
+    shape = (1, 1, 1, 100, 100)
+    x = np.linspace(-1, 1, shape[-2])
+    y = np.linspace(-1, 1, shape[-1])
+    xv, yv = np.meshgrid(x, y, indexing="ij")
+    gaussian = np.exp(-((xv - 0.1) ** 2 + (yv) ** 2) / (2 * 0.2**2))
+    sidelobe1 = 0.3 * np.exp(-((xv - 0.5) ** 2 + (yv - 0.5) ** 2) / (2 * 0.1**2))
+    sidelobe2 = 0.2 * np.exp(-((xv + 0.5) ** 2 + (yv + 0.5) ** 2) / (2 * 0.1**2))
+    psf_image = gaussian + sidelobe1 + sidelobe2
+
+    # for verification purposes, plot the psf_image (set plt.show(block=True) to pause the test)
+    import matplotlib.pyplot as plt
+
+    plt.imshow(psf_image, origin="lower", cmap="gray")
+    plt.colorbar()
+    plt.title("PSF Image with Offset Peak")
+    plt.show(block=False)  # change to True to pause the test to see the plot
+
+    data = np.zeros(shape)
+    data[0, 0, 0, :, :] = psf_image
+    npix_window = np.array([41, 41])
+    cutoff = 0.1
+    main_lobe_only, blc, trc = extract_main_lobe(npix_window, cutoff, data)
+    print("test_extract_main_lobe_offset_peak: blc, trc=", blc, trc)
+    # Check that the main lobe is extracted correctly by comparing total main lobe pixels
+    # with model main lobe (gaussian) pixels with cutoff applied
+    total_main_lobe = np.sum(main_lobe_only)
+    model_main_lobe = np.sum(gaussian[gaussian >= cutoff * np.max(gaussian)])
+    assert np.isclose(total_main_lobe, model_main_lobe, rtol=0.1)
+    assert blc[0] < trc[0] and blc[1] < trc[1]
+    # Check that sidelobes are zeroed out
+    assert np.all(
+        main_lobe_only[0, 0, 0, :, :][psf_image < cutoff * np.max(psf_image)] == 0
+    )
 
 
 # def test_psf_gaussian_fit_core_rotated_gaussian():
