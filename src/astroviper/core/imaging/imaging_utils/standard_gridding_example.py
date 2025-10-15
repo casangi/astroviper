@@ -245,7 +245,7 @@ def make_standard_grid_degrid():
     )
     # testoo
     # print("grid shape", grid.shape, np.max(grid))
-    grid[:, :, :, :] = complex(2.0)
+    # grid[:, :, :, :] = complex(2.0)
     ### end testoo
     degrid_spheroid_ms4(
         vis=ms4,
@@ -258,12 +258,53 @@ def make_standard_grid_degrid():
     return ms4
 
 
-def make_standard_gdegrid_grid():
+def make_standard_degrid_grid():
     nsources = 4
     sources, npix, cell, ms4 = generate_ms4_with_point_sources(
         nsources, np.ones(nsources)
     )
     mod_im = np.zeros((npix, npix), dtype=np.float64)
+    mod_im[
+        sources[0],
+        sources[1],
+    ] = sources[2]
+
+    incr = cell.to("rad").value
+    ft_mod = fft_lm_to_uv(mod_im, axes=[0, 1])
+    elgrid = np.zeros([2, 1, npix, npix], dtype=complex)
+    elgrid[0, 0, :, :] = ft_mod
+    elgrid[1, 0, :, :] = ft_mod
+    degrid_spheroid_ms4(
+        vis=ms4,
+        grid=elgrid,
+        pixelincr=np.array([incr, incr]),
+        support=7,
+        sampling=100,
+        incremental=False,
+    )
+    # Now lets grid and image model vis
+    vis_data = ms4.VISIBILITY_MODEL.data
+    uvw = ms4.UVW.data
+    dims = ms4.dims
+    weight = np.ones([dims["time"], dims["baseline_id"], dims["frequency"], 1])
+    freq_chan = ms4.coords["frequency"].values
+
+    params = {}
+    params["image_size_padded"] = np.array([npix, npix], dtype=int)
+    params["cell_size"] = np.array([incr, incr])
+    params["complex_grid"] = True
+    params["oversampling"] = 100
+    params["support"] = 7
+    params["do_psf"] = False
+    params["chan_mode"] = "continuum"
+
+    cgk_1D = create_prolate_spheroidal_kernel_1D(
+        params["oversampling"], params["support"]
+    )
+    grid, sumwgt = standard_grid_numpy_wrap(
+        vis_data, uvw, weight, freq_chan, cgk_1D, params
+    )
+    return grid, sources
 
 
 def plotvis_uvdist(vis, whichdata="VISIBILITY"):

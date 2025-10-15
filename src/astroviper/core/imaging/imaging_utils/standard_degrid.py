@@ -371,20 +371,20 @@ def dgrid2(
 # jit version of dgrid2
 
 
-# @njit(nopython=True)
+@njit(nopython=True)
 def sgrid_numba(uvw, dphase, freq, c, scale, offset, sampling):
     pos = np.empty(2, dtype=np.float64)
     loc = np.empty(2, dtype=np.int32)
     off = np.empty(2, dtype=np.int32)
 
-    pos[0] = -scale[0] * uvw[0] * freq / c + offset[0]
+    pos[0] = scale[0] * uvw[0] * freq / c + offset[0]
     pos[1] = scale[1] * uvw[1] * freq / c + offset[1]
 
-    loc[0] = np.round(pos[0]).astype(int)
-    loc[1] = np.round(pos[1]).astype(int)
+    loc[0] = int(np.round(pos[0]))
+    loc[1] = int(np.round(pos[1]))
 
-    off[0] = (np.round((loc[0] - pos[0]) * sampling)).astype(int)
-    off[1] = (np.round((loc[1] - pos[1]) * sampling)).astype(int)
+    off[0] = int(np.round((loc[0] - pos[0]) * sampling))
+    off[1] = int(np.round((loc[1] - pos[1]) * sampling))
 
     phase = -2.0 * np.pi * dphase * freq / c
     phasor = np.cos(phase) + 1j * np.sin(phase)
@@ -392,7 +392,7 @@ def sgrid_numba(uvw, dphase, freq, c, scale, offset, sampling):
     return phasor, loc, off
 
 
-# @njit(nopython=True)
+@njit(nopython=True)
 def dgrid_numba(
     uvw,
     dphase,
@@ -428,7 +428,6 @@ def dgrid_numba(
     )
     for t in prange(nt):
         for b in range(nb):
-            print("UVW", uvw[t, b, :], flag[t, b, :, :])
             for ipol in range(nvispol):
                 apol = polmap[ipol]
                 if 0 <= apol < npol:
@@ -446,7 +445,6 @@ def dgrid_numba(
                             )
 
                             x0, y0 = loc
-                            print("LOC", x0, y0)
                             if (
                                 (x0 + supp_beg >= 0)
                                 and (x0 + supp_end < nx)
@@ -470,15 +468,14 @@ def dgrid_numba(
                                                     * grid[
                                                         achan,
                                                         apol,
-                                                        x0 + ix,
-                                                        y0 + iy,
+                                                        x0 + iy,
+                                                        y0 + ix,
                                                     ]
                                                 )
                                 if norm != 0.0:
                                     values[t, b, ichan, ipol] += (
                                         nvalue * np.conj(phasor)
                                     ) / norm
-    print("MAX of values", np.max(values))
 
 
 def degrid_spheroid_ms4(
@@ -507,22 +504,26 @@ def degrid_spheroid_ms4(
     else:
         modvis = vis.VISIBILITY_MODEL.data
     flag = vis.FLAG.data
+    # lets flag NaN UVW
+    ###testoo
+    flag[:, :, :, :] = False
+    ######
+    uvwmask = np.isnan(vis.UVW)
+    print("number of nan UVW", np.sum(uvwmask) / 3)
+    nan_it, nan_ib = np.where(uvwmask.any(dim="uvw_label"))
+    print("sum of flag bef", np.sum(flag))
+    # flag[nan_it, nan_ib, :, :] = True
+    for k in range(len(nan_it)):
+        flag[nan_it[k], nan_ib[k], :, :] = True
+    print("sum of flags aft", np.sum(flag))
     nx, ny = grid.shape[-2:]
     # for sake of completeness making size 3 ofr uvw scales and offset
-    scale = np.array([pixelincr[0] * nx, pixelincr[1] * ny, 0.0]).astype(
+    scale = np.array([-pixelincr[0] * nx, -pixelincr[1] * ny, 0.0]).astype(
         np.float64
     )
     offset = np.array([nx / 2, ny / 2, 0.0]).astype(float)
     freq = vis.frequency.data
     c = constants.c.value
-    print("max UVW", np.nanmax(uvw * freq) / c)
-    print(
-        "max pix",
-        np.nanmax(uvw[:, :, 0] * freq) / c * scale[0] + offset[0],
-        np.nanmin(uvw[:, :, 0] * freq) / c * scale[0] + offset[0],
-        np.nanmax(uvw[:, :, 1] * freq) / c * scale[0] + offset[0],
-        np.nanmin(uvw[:, :, 1] * freq) / c * scale[0] + offset[0],
-    )
     convFunc = create_prolate_spheroidal_kernel_1D(sampling, support)
     nchan = grid.shape[0]
     npol = grid.shape[1]
@@ -535,7 +536,8 @@ def degrid_spheroid_ms4(
     polmap = np.round(np.arange(dims["polarization"]) % npol).astype(
         int
     )  # this is wrong most probably
-    dgrid_numba(
+    #    dgrid_numba(
+    dgrid_optimized(
         uvw,
         dphase,
         modvis,
