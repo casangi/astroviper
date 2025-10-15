@@ -1,52 +1,97 @@
 [project]
 name = "astroviper"
-version = "0.0.16"
+version = "0.0.30"
 description = "Astro Visibility and Image Parallel Execution Reduction"
-authors = [
-    {name = "Jan-Willem Steeb", email="jsteeb@nrao.edu"},
+authors = [{ name = "Jan-Willem Steeb", email = "jsteeb@nrao.edu"},
+    {name = "Dave Mehringer", email="dmehring@nrao.edu"},
+    {name = "Kumar Golap", email="kgolap@nrao.edu"},
+    {name = "Takahiro Tsutsumi", email="ttsutsum@nrao.edu"},
+    {name = "Srikrishna Sekhar", email="ssekhar@nrao.edu"},
 ]
-license = {file = "LICENSE.txt"}
+license = { file = "LICENSE.txt" }
 readme = "README.md"
-requires-python = ">= 3.11, < 3.14"
+requires-python = ">=3.11,<3.14"
 
+# ✅ Core runtime dependencies must live here
 dependencies = [
-'astropy',
-'dask',
-'distributed',
-'gdown',
-'graphviper>=0.0.33',
-'matplotlib',
-'numba>=0.59.0',
-'numpy',
-'prettytable',
-'pytest',
-'pytest-cov',
-'pytest-html',
-'scipy',
-'xarray',
-'zarr',
-'bokeh',
-'jupyterlab',
-'pyarrow',
-'graphviz',
-'xradio',
-'python_casacore>=3.6.1; sys_platform != "darwin" ',
-'ipympl'
+  "graphviper>=0.0.36",
+  "numpy>=1.20.0",
+  "xradio>=1.0.1",
 ]
-
 
 [project.optional-dependencies]
-docs = [
-    'ipykernel',
-    'ipympl',
-    'ipython',
-    'jupyter-client',
-    'nbsphinx',
-    'recommonmark',
-    'scanpydoc',
-    'sphinx-autoapi',
-    'sphinx-autosummary-accessors',
-    'sphinx_rtd_theme',
-    'twine',
-    'pandoc'
+python_casacore = [
+  "python_casacore>=3.6.1; sys_platform != 'darwin'"
 ]
+
+interactive = [
+  "matplotlib",
+  "prettytable",
+  "jupyterlab",
+  "ipykernel",
+  "ipympl",
+  "ipython",
+  "jupyter-client",
+]
+
+docs = [
+  "nbsphinx",
+  "recommonmark",
+  "scanpydoc",
+  "sphinx-autoapi",
+  "sphinx-autosummary-accessors",
+  "sphinx_rtd_theme",
+  "twine",
+  "pandoc",
+]
+
+all = [
+  "python_casacore>=3.6.1; sys_platform != 'darwin'",
+  "pytest",
+  "pytest-cov",
+  "pytest-html",
+  "matplotlib",
+  "prettytable",
+  "jupyterlab",
+  "ipykernel",
+  "ipympl",
+  "ipython",
+  "jupyter-client",
+  "nbsphinx",
+  "recommonmark",
+  "scanpydoc",
+  "sphinx-autoapi",
+  "sphinx-autosummary-accessors",
+  "sphinx_rtd_theme",
+  "twine",
+  "pandoc",
+]
+
+[build-system]
+# Include numpy so headers are present at build time
+requires = [
+  "scikit-build-core>=0.5.0",
+  "pybind11>=2.10.0",
+  "setuptools",
+  "wheel",
+  "numpy>=1.20.0"
+]
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+build-dir = "build/{wheel_tag}"
+# With a src/ layout, list the import package name(s)
+wheel.packages = ["src/astroviper"]
+
+[tool.scikit-build.cmake]
+build-type = "Release"
+
+[tool.scikit-build.build]
+verbose = false
+
+[tool.scikit-build.cmake.define]
+PYBIND11_FINDPYTHON = "ON"
+
+# (Optional) This block is ignored by scikit-build-core; safe to delete.
+[tool.setuptools.packages.find]
+where = ["src"]
