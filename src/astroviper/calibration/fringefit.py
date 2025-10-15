@@ -53,8 +53,8 @@ def _fringe_node_task(input_params: Dict):
     ref_ant = input_params["ref_ant"]
     npad = 8  # To see if it's that
     # FIXME: for now we do single band
-    xdses = [ps[k] for k in data_selection.keys() if ps[k].time.size>0]
-    if len(xdses)>1:
+    xdses = [ps[k] for k in data_selection.keys() if ps[k].time.size > 0]
+    if len(xdses) > 1:
         raise RuntimeError("We only do single xdses so far")
     xds = xdses[0]
     name = xds.relative_to(xds.parent)
@@ -64,21 +64,22 @@ def _fringe_node_task(input_params: Dict):
     allpols = "RL"  # FIXME data_sub_selection['polarization']
     xds2 = xds.isel(**data_selection[name])
     ddelay, drate = getFourierSpacings(xds2, npad)
-    baselines = xds2.baseline_id[(xds2.baseline_id.baseline_antenna1_name==ref_ant) |
-                                 (xds2.baseline_id.baseline_antenna2_name==ref_ant)]
+    baselines = xds2.baseline_id[
+        (xds2.baseline_id.baseline_antenna1_name == ref_ant)
+        | (xds2.baseline_id.baseline_antenna2_name == ref_ant)
+    ]
     vis = xds2.VISIBILITY[:, baselines, :, ::3]
     flags = xds2.FLAG[:, baselines, :, ::3]
     weights = xds2.WEIGHT[:, baselines, :, ::3]
-    
+
     ang = np.angle(vis)
-    normed = np.exp(1j * ang)*weights # May want a new name...
+    normed = np.exp(1j * ang) * weights  # May want a new name...
     normed = np.where(np.isnan(normed), 0, normed)
     normed[flags] = 0
     s = list(normed.shape)
     nt = s[0]
     nf = s[2]
-    s2 = (npad * nt,  # Pad in time
-          npad * nf)  # Pad in frequency
+    s2 = (npad * nt, npad * nf)  # Pad in time  # Pad in frequency
     fftvis = np.fft.fftshift(np.fft.fft2(normed, axes=(0, 2), s=s2), axes=(0, 2))
     npols = normed.shape[-1]
     part_info = xds2.xr_ms.get_partition_info()
@@ -93,12 +94,13 @@ def _fringe_node_task(input_params: Dict):
         ] = [0, 0, 0]
         q.SNR.loc[dict(antenna_name=ref_ant, polarization=allpols[p])] = 3 * [1e9]
     for i, bl in enumerate(baselines):
-        if not bl: continue
+        if not bl:
+            continue
         ant1 = xds2.baseline_antenna1_name.values[bl]
         ant2 = xds2.baseline_antenna2_name.values[bl]
         print(f"Doing {ant1}-{ant2}")
         # FIXME: Surely we need to adjust signs too?
-        if  (ant2 == ref_ant):
+        if ant2 == ref_ant:
             ant = ant1
             sign = -1
         else:
@@ -107,7 +109,7 @@ def _fringe_node_task(input_params: Dict):
         for p in range(npols):
             these_weights = weights[:, i, :, p]
             sumw_ = np.sum(these_weights)
-            sumww_ = np.sum(these_weights*these_weights)
+            sumww_ = np.sum(these_weights * these_weights)
             ft = fftvis[:, i, :, p].squeeze()
             a = np.abs(ft)
             ind = np.unravel_index(np.argmax(a), a.shape)
@@ -115,31 +117,27 @@ def _fringe_node_task(input_params: Dict):
             nx, ny = a.shape
             phi0 = np.angle(ft[ind])
             # The dimensions are time *then* frequency, so delay is y; rate is x.
-            delay = sign*(iy - ny / 2) * ddelay
+            delay = sign * (iy - ny / 2) * ddelay
             ref_freq = xds2.frequency.reference_frequency["data"]
             phi0 -= (
                 2 * np.pi * (delay * (xds2.frequency.values[0] - ref_freq))
             )  # We'll fix the sign convention empirically
             phi0 *= sign
-            rate = sign*(ix - nx / 2) * drate / ref_freq
+            rate = sign * (ix - nx / 2) * drate / ref_freq
             # Calculate SNR
             peak = a[ind]
-            x = np.pi/2*peak/sumw_
-            if x > (0.99*np.pi/2):
+            x = np.pi / 2 * peak / sumw_
+            if x > (0.99 * np.pi / 2):
                 snr = 9999
             else:
                 xcount = np.sum(np.logical_not(flags[:, i, :, p]))
-                print(f"{peak=:6g} {x=:6g} {xcount=:6g}") 
+                print(f"{peak=:6g} {x=:6g} {xcount=:6g}")
                 # Note that the weird weight stuff boils down to sqrt(xcount), if weights are approximately constant
-                snr = np.tan(x)**1.163*np.sqrt(sumw_/np.sqrt(sumww_/xcount))
+                snr = np.tan(x) ** 1.163 * np.sqrt(sumw_ / np.sqrt(sumww_ / xcount))
             q.CALIBRATION_PARAMETER.loc[
                 dict(antenna_name=ant, polarization=allpols[p])
             ] = [phi0, delay, rate]
-            q.SNR.loc[dict(antenna_name=ant, polarization=allpols[p])] = [
-                snr,
-                snr,
-                snr
-            ]
+            q.SNR.loc[dict(antenna_name=ant, polarization=allpols[p])] = [snr, snr, snr]
     return q
 
 
@@ -192,12 +190,14 @@ def fringefit_ps(ps: ProcessingSetXdt, ref_ant: str, unixtime: float, interval: 
     subsel = {}
     res0 = _fringefit_single(ps2, node_task_data_mapping, subsel, ref_ant)
     # Now we collect these into a single DataTree!
-    res_cal_tree = xa.DataTree(children={f'part{i}': xa.DataTree(dataset=q) for i,q in enumerate(res0)})
+    res_cal_tree = xa.DataTree(
+        children={f"part{i}": xa.DataTree(dataset=q) for i, q in enumerate(res0)}
+    )
     return res_cal_tree
 
 
 def apply_cal_ps(
-        ps: ProcessingSetXdt, caltree: xa.DataTree, unixtime: float, interval: float
+    ps: ProcessingSetXdt, caltree: xa.DataTree, unixtime: float, interval: float
 ):
     """Apply a caltree to a processing set"""
     ps2 = ps.sel(time=slice(unixtime, unixtime + interval))
