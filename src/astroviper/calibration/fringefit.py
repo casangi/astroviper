@@ -98,8 +98,6 @@ def _fringe_node_task(input_params: Dict):
             continue
         ant1 = xds2.baseline_antenna1_name.values[bl]
         ant2 = xds2.baseline_antenna2_name.values[bl]
-        print(f"Doing {ant1}-{ant2}")
-        # FIXME: Surely we need to adjust signs too?
         if ant2 == ref_ant:
             ant = ant1
             sign = -1
@@ -131,7 +129,7 @@ def _fringe_node_task(input_params: Dict):
                 snr = 9999
             else:
                 xcount = np.sum(np.logical_not(flags[:, i, :, p]))
-                print(f"{peak=:6g} {x=:6g} {xcount=:6g}")
+                # print(f"{peak=:6g} {x=:6g} {xcount=:6g}")
                 # Note that the weird weight stuff boils down to sqrt(xcount), if weights are approximately constant
                 snr = np.tan(x) ** 1.163 * np.sqrt(sumw_ / np.sqrt(sumww_ / xcount))
             q.CALIBRATION_PARAMETER.loc[
