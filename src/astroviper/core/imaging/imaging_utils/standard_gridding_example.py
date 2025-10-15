@@ -5,7 +5,11 @@ import os
 from toolviper.utils.data import download
 from astropy import units as u
 from astropy import constants as const
+from matplotlib import pyplot as pl
 from astroviper.core.imaging.imaging_utils.standard_grid import *
+from astroviper.core.imaging.imaging_utils.standard_degrid import (
+    degrid_spheroid_ms4,
+)
 from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import *
 from astroviper.core.imaging.fft import fft_lm_to_uv
 
@@ -56,7 +60,9 @@ def generate_ms4_with_point_sources(
     ] = sources[2]
     # convolve it with a gaussian of 5 pixels
     # mod_im = gaussian_filter(mod_im, sigma=5)
-    mod_im = np.pad(mod_im, pad_width=((1000, 1000), (1000, 1000)), constant_values=0.0)
+    mod_im = np.pad(
+        mod_im, pad_width=((1000, 1000), (1000, 1000)), constant_values=0.0
+    )
     ft_mod = fft_lm_to_uv(mod_im, axes=[0, 1])
 
     uv_components = origms_subset.UVW.sel(uvw_label=["u", "v"])
@@ -65,7 +71,9 @@ def generate_ms4_with_point_sources(
     # Sum the squares along the uvw_label dimension
     sum_square_uv = uv_squared.sum(dim="uvw_label")
     max_uvdist = np.sqrt(sum_square_uv.max()).values
-    cell = ((0.5 / ((invlam).to(u.Unit("/m")).value * max_uvdist)) * u.rad).to("arcsec")
+    cell = ((0.5 / ((invlam).to(u.Unit("/m")).value * max_uvdist)) * u.rad).to(
+        "arcsec"
+    )
     ny, nx = ft_mod.shape
 
     x_axis = np.linspace(-max_uvdist, max_uvdist, nx)
@@ -107,8 +115,12 @@ def generate_ms4_with_point_sources(
     for t in range(num_time):
         for b in range(num_baseline):
             # Get the 'u' and 'v' coordinate for the current time and baseline
-            current_u = uv_coords.isel(time=t, baseline_id=b).sel(uvw_label="u").values
-            current_v = uv_coords.isel(time=t, baseline_id=b).sel(uvw_label="v").values
+            current_u = (
+                uv_coords.isel(time=t, baseline_id=b).sel(uvw_label="u").values
+            )
+            current_v = (
+                uv_coords.isel(time=t, baseline_id=b).sel(uvw_label="v").values
+            )
 
             # Handle potential NaN values in UVW coordinates
             if np.isnan(current_u) or np.isnan(current_v):
@@ -150,7 +162,9 @@ def make_standard_grid_image(dopsf=False):
 
     params = {}
     params["image_size_padded"] = np.array([npix, npix], dtype=int)
-    params["cell_size"] = np.array([cell.to("rad").value, cell.to("rad").value])
+    params["cell_size"] = np.array(
+        [cell.to("rad").value, cell.to("rad").value]
+    )
     params["complex_grid"] = True
     params["oversampling"] = 100
     params["support"] = 7
@@ -168,7 +182,9 @@ def make_standard_grid_image(dopsf=False):
         params["oversampling"], params["support"], params["image_size_padded"]
     )
     dirty_im = (
-        np.real(np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(grid[0, 0, :, :]))))
+        np.real(
+            np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(grid[0, 0, :, :])))
+        )
         / corrTerm
         * npix
         * npix
@@ -183,3 +199,111 @@ def make_standard_grid_image(dopsf=False):
         print(
             f"Peak found at [{ppos[0][k], ppos[1][k]}] and value is {dirty_im[ppos[0][k], ppos[1][k]]} "
         )
+
+
+def make_standard_grid_degrid():
+    nsources = 4
+    sources, npix, cell, ms4 = generate_ms4_with_point_sources(
+        nsources, np.ones(nsources)
+    )
+    # lets flag NaN UVW
+    uvwmask = np.isnan(ms4.UVW)
+    print(np.sum(uvwmask))
+    nan_it, nan_ib = np.where(uvwmask.any(dim="uvw_label"))
+    flg = ms4.FLAG
+    print("sum of flag bef", np.sum(flg))
+    flg[:, :, :, :] = False
+    # flg[nan_it, nan_ib, :, :] = True
+    for k in range(len(nan_it)):
+        flg[nan_it[k], nan_ib[k], :, :] = True
+        # print("flagged UVW", ms4.UVW[nan_it[k], nan_ib[k], :].data)
+    ms4["FLAG"] = flg
+    print("sum of flags aft", np.sum(ms4["FLAG"]))
+    vis_data = ms4.VISIBILITY.data
+    uvw = ms4.UVW.data
+    # setting all the weights to 1
+    dims = ms4.dims
+    weight = np.ones([dims["time"], dims["baseline_id"], dims["frequency"], 1])
+    freq_chan = ms4.coords["frequency"].values
+
+    params = {}
+    params["image_size_padded"] = np.array([npix, npix], dtype=int)
+    params["cell_size"] = np.array(
+        [cell.to("rad").value, cell.to("rad").value]
+    )
+    params["complex_grid"] = True
+    params["oversampling"] = 100
+    params["support"] = 7
+    params["do_psf"] = False
+    params["chan_mode"] = "continuum"
+
+    cgk_1D = create_prolate_spheroidal_kernel_1D(
+        params["oversampling"], params["support"]
+    )
+    grid, sumwgt = standard_grid_numpy_wrap(
+        vis_data, uvw, weight, freq_chan, cgk_1D, params
+    )
+    # testoo
+    # print("grid shape", grid.shape, np.max(grid))
+    grid[:, :, :, :] = complex(2.0)
+    ### end testoo
+    degrid_spheroid_ms4(
+        vis=ms4,
+        grid=grid,
+        pixelincr=params["cell_size"],
+        support=params["support"],
+        sampling=params["oversampling"],
+        incremental=False,
+    )
+    return ms4
+
+
+def make_standard_gdegrid_grid():
+    nsources = 4
+    sources, npix, cell, ms4 = generate_ms4_with_point_sources(
+        nsources, np.ones(nsources)
+    )
+    mod_im = np.zeros((npix, npix), dtype=np.float64)
+
+
+def plotvis_uvdist(vis, whichdata="VISIBILITY"):
+    """
+
+
+    Parameters
+    ----------
+    vis : TYPE
+        DESCRIPTION.
+    whichdata : str can be 'VISIBILITY or VISIBILITY_MODEL'
+        DESCRIPTION. The default is 'VISIBILITY'.
+
+    Returns
+    -------
+    None.
+
+    """
+    uv_coords = vis.UVW.sel(uvw_label=["u", "v"])
+    uv_distance = np.sqrt((uv_coords**2).sum(dim="uvw_label"))
+
+    # Get the amplitude of the VISIBILITY data
+    ampl = np.abs(vis[whichdata].isel(polarization=0))
+    ampl2 = np.abs(vis[whichdata].isel(polarization=1))
+    n_tb = np.prod(uv_distance.shape)
+
+    pl.figure(figsize=(10, 6))
+
+    pl.plot(
+        uv_distance.values.flatten(),
+        ampl.values.reshape(n_tb, ampl.shape[-1:][0]),
+        "o",
+    )
+    pl.plot(
+        uv_distance.values.flatten(),
+        ampl.values.reshape(n_tb, ampl2.shape[-1:][0]),
+        "+",
+    )
+    pl.xlabel("UV Distance (m)")
+    pl.ylabel("Visibility Amplitude")
+    pl.title("Visibility Amplitude vs UV Distance")
+    pl.grid(True)
+    pl.show()
