@@ -115,12 +115,8 @@ def dgrid(
                                         # Ensure iloc2 is within bounds for convFunc
                                         if iloc2 < len(convFunc):
                                             wty = convFunc[iloc2]
-                                            for ix in range(
-                                                supp_beg, supp_end
-                                            ):
-                                                iloc1 = abs(
-                                                    sampling * ix + off[0]
-                                                )
+                                            for ix in range(supp_beg, supp_end):
+                                                iloc1 = abs(sampling * ix + off[0])
                                                 # Ensure iloc1 is within bounds for convFunc
                                                 if iloc1 < len(convFunc):
                                                     wtx = convFunc[iloc1]
@@ -145,7 +141,7 @@ def dgrid(
 ###optimizied with help of Gemini
 
 
-@njit(nopython=True)
+@njit
 def dgrid_optimized(
     uvw,
     dphase,
@@ -197,12 +193,11 @@ def dgrid_optimized(
             pos_chan[:, :, ichan, :] = (
                 scale[:2] * uvw[:, :, :2] * (freq[ichan] / c) + offset[:2]
             )
-            loc_chan[:, :, ichan, :] = np.round(
-                pos_chan[:, :, ichan, :]
-            ).astype(np.int64)
+            loc_chan[:, :, ichan, :] = np.round(pos_chan[:, :, ichan, :]).astype(
+                np.int64
+            )
             off_chan[:, :, ichan, :] = np.round(
-                (loc_chan[:, :, ichan, :] - pos_chan[:, :, ichan, :])
-                * sampling
+                (loc_chan[:, :, ichan, :] - pos_chan[:, :, ichan, :]) * sampling
             ).astype(np.int64)
             phase = -2.0 * np.pi * dphase * freq[ichan] / c
             phasor_chan[:, :, ichan] = np.cos(phase) + 1j * np.sin(phase)
@@ -236,33 +231,25 @@ def dgrid_optimized(
                     if ogrid:
                         for ipol in range(nvispol):
                             apol = polmap[ipol]
-                            if (not flag[t, b, ichan, ipol]) and (
-                                0 <= apol < npol
-                            ):
+                            if (not flag[t, b, ichan, ipol]) and (0 <= apol < npol):
                                 # Vectorized convolution
                                 # Extract grid patch
                                 grid_patch = grid[
                                     achan,
                                     apol,
-                                    loc_tbi[0]
-                                    + supp_beg : loc_tbi[0]
-                                    + supp_end,
-                                    loc_tbi[1]
-                                    + supp_beg : loc_tbi[1]
-                                    + supp_end,
+                                    loc_tbi[0] + supp_beg : loc_tbi[0] + supp_end,
+                                    loc_tbi[1] + supp_beg : loc_tbi[1] + supp_end,
                                 ]
 
                                 # Create 2D kernel from pre-calculated 1D kernels based on offset
                                 offset_x = abs(off_tbi[0])
                                 offset_y = abs(off_tbi[1])
                                 kernel_x = conv_kernel_1d[
-                                    sampling
-                                    * np.abs(np.arange(supp_beg, supp_end))
+                                    sampling * np.abs(np.arange(supp_beg, supp_end))
                                     + offset_x
                                 ]
                                 kernel_y = conv_kernel_1d[
-                                    sampling
-                                    * np.abs(np.arange(supp_beg, supp_end))
+                                    sampling * np.abs(np.arange(supp_beg, supp_end))
                                     + offset_y
                                 ]
                                 conv_kernel_2d = kernel_x.reshape(
@@ -371,7 +358,7 @@ def dgrid2(
 # jit version of dgrid2
 
 
-@njit(nopython=True)
+@njit
 def sgrid_numba(uvw, dphase, freq, c, scale, offset, sampling):
     pos = np.empty(2, dtype=np.float64)
     loc = np.empty(2, dtype=np.int32)
@@ -392,7 +379,7 @@ def sgrid_numba(uvw, dphase, freq, c, scale, offset, sampling):
     return phasor, loc, off
 
 
-@njit(nopython=True)
+@njit
 def dgrid_numba(
     uvw,
     dphase,
@@ -485,7 +472,42 @@ def degrid_spheroid_ms4(
     support: int = 7,
     sampling: int = 100,
     incremental: bool = False,
+    whichFunc=0,
 ):
+    """
+
+    Parameters
+    ----------
+    vis : xarray.core.datatree.DataTree
+        ms4 xradio datatree.
+    grid : np.ndarray
+        model gridded visibilities.
+    pixelincr : np.ndarray
+        [dx,dy] 2 values in radians
+    support : int, optional
+        Support of the prolate spheroidal conv func.
+        The default is 7.
+    sampling : int, optional
+        oversampling of prolate spheroidal conv func .
+        The default is 100.
+    incremental : bool, optional
+        if True add model visibilities to existing VISIBILITY_MODEL.
+        The default is False.
+    whichFunc : TYPE, optional
+        0 use degrid vectorized and jit
+        1 use degrid loop and jit
+        The default is 0.
+
+    TODO: The chanmap and polmap may be totally wrong
+
+    Returns
+    -------
+    None.
+
+    """
+    func = dgrid_optimized
+    if whichFunc == 1:
+        func = dgrid_numba
     uvw = vis.UVW.data
     dims = vis.dims
     # as we are not gridding away from phase_center
@@ -518,9 +540,7 @@ def degrid_spheroid_ms4(
     print("sum of flags aft", np.sum(flag))
     nx, ny = grid.shape[-2:]
     # for sake of completeness making size 3 ofr uvw scales and offset
-    scale = np.array([-pixelincr[0] * nx, -pixelincr[1] * ny, 0.0]).astype(
-        np.float64
-    )
+    scale = np.array([-pixelincr[0] * nx, -pixelincr[1] * ny, 0.0]).astype(np.float64)
     offset = np.array([nx / 2, ny / 2, 0.0]).astype(float)
     freq = vis.frequency.data
     c = constants.c.value
@@ -528,16 +548,14 @@ def degrid_spheroid_ms4(
     nchan = grid.shape[0]
     npol = grid.shape[1]
     ## we need to pass chan/pol maps or determine them from info
-    chanmap = np.round(
-        np.arange(dims["frequency"]) / dims["frequency"] * nchan
-    ).astype(
+    chanmap = np.round(np.arange(dims["frequency"]) / dims["frequency"] * nchan).astype(
         int
     )  # Channel mapping
     polmap = np.round(np.arange(dims["polarization"]) % npol).astype(
         int
     )  # this is wrong most probably
     #    dgrid_numba(
-    dgrid_optimized(
+    func(
         uvw,
         dphase,
         modvis,
