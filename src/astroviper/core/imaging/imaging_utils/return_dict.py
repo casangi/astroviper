@@ -5,7 +5,7 @@ and seaerching. By keeping it as a dict underneath, it remains generic
 and lightweight.
 """
 
-from collections import namedtuple
+from collections import namedtuple, OrderedDict
 
 # Define the key structure
 Key = namedtuple("Key", ["time", "pol", "chan"])
@@ -16,7 +16,7 @@ Key = namedtuple("Key", ["time", "pol", "chan"])
 
 class ReturnDict:
     def __init__(self):
-        self.data = {}
+        self.data = OrderedDict()
 
     @property
     def data(self):

@@ -50,8 +50,8 @@ def extract_main_lobe(npix_window, threshold, psf_image):
 
     Args:
         npix_window (tuple): The size of the window in pixels for searching features.
-        psf_image (np.ndarray): The input PSF image with 5 dimensions (time, frequency, polarization, x, y).
         threshold (float): A threshold in fraction of peak value for determining the main lobe.
+        psf_image (np.ndarray): The input PSF image with 5 dimensions (time, frequency, polarization, x, y).
 
     Returns:
         np.ndarray: A new array containing only the main lobe, with other regions zeroed out.
@@ -122,7 +122,7 @@ def extract_main_lobe(npix_window, threshold, psf_image):
     print("maximum sidelobe level: ", max_sidelobe)
     blc, trc = _get_main_lobe_bounding_box(main_lobe_only, max_coords)
     # print("extract_main_lobe: blc, trc=", blc, trc)
-    return main_lobe_only, blc, trc
+    return main_lobe_only, blc, trc, max_sidelobe
 
 
 def psf_gaussian_fit(

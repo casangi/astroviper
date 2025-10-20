@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 
 from astroviper.core.imaging.deconvolvers import hogbom
 from astroviper.core.image_analysis import image_statistics as imgstats
+from astroviper.core.image_analysis.psf_gaussian_fit import extract_main_lobe
 from astroviper.core.imaging.imaging_utils.return_dict import ReturnDict
 
 import logging
@@ -185,6 +186,12 @@ def deconvolve(
     else:
         raise ValueError(f"Deconvolution algorithm '{algorithm}' not recognized.")
 
+    psf_fit_window = (41, 41)
+    psf_fit_cutoff = 0.35
+
+    max_psf_fraction = 0.8
+    min_psf_fraction = 0.1
+
     for tt in range(ntime):
         for nn in range(nchan):
             for pp in range(npol):
@@ -203,6 +210,9 @@ def deconvolve(
                     time=tt, frequency=nn, polarization=pp
                 )
                 psf_slice = psf_xds.isel(time=tt, frequency=nn, polarization=pp)
+                _main_lobe, _blc, _trc, max_psf_sidelobe = extract_main_lobe(
+                    psf_fit_window, psf_fit_cutoff, psf_slice
+                )
 
                 results, model_xds, residual_xds = _deconvolver(
                     dirty_image=dirty_slice,
@@ -227,9 +237,9 @@ def deconvolve(
                     "threshold": deconv_params.get("threshold", None),
                     "iter_done": results.get("iterations_performed", None),
                     "loop_gain": deconv_params.get("gain", None),
-                    "min_psf_fraction": None,
-                    "max_psf_fraction": None,
-                    "max_psf_sidelobe": None,
+                    "min_psf_fraction": min_psf_fraction,
+                    "max_psf_fraction": max_psf_fraction,
+                    "max_psf_sidelobe": max_psf_sidelobe,
                     "stop_code": None,
                     "stokes": stokes,
                     "frequency": freq,
