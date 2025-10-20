@@ -9,7 +9,7 @@ def cube_imaging_niter0(
     frequency_coord=None,
     n_chunks=None,
     data_variables=["sky", "point_spread_function", "primary_beam"],
-    intents=["OBSERVE_TARGET#ON_SOURCE"],
+    scan_intents=["OBSERVE_TARGET#ON_SOURCE"],
     compressor=Blosc(cname="lz4", clevel=5),
     data_group="base",
     double_precission=True,
@@ -32,7 +32,7 @@ def cube_imaging_niter0(
     import toolviper.utils.logger as logger
 
     # Get metadata
-    ps = open_processing_set(ps_name, intents=intents)
+    ps = open_processing_set(ps_name, scan_intents=scan_intents)
     summary_df = ps.xr_ps.summary()
 
     # Get phase center of mosaic if field given.
@@ -151,7 +151,7 @@ def cube_imaging_niter0(
     )
 
     sel_parms = {}
-    sel_parms["intents"] = intents
+    sel_parms["scan_intents"] = scan_intents
     sel_parms["fields"] = None
 
     input_parms = {}
