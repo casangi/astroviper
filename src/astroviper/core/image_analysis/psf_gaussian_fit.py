@@ -65,6 +65,7 @@ def extract_main_lobe(npix_window, threshold, psf_image):
             np.zeros_like(psf_image),
             np.array([0, 0]),
             np.array([psf_image.shape[3] - 1, psf_image.shape[4] - 1]),
+            0.0,  # max_sidelobe is 0.0 if peak_intensity is 0
         )
     # find peak location in the psf_image
     itm, ifrq, ipol, peak_y, peak_x = np.unravel_index(
