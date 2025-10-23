@@ -44,8 +44,6 @@ def get_phase_center(dirty_image_xds):
 
 
 def progress_callback(
-    npol: int,
-    pol: int,
     iter_num: int,
     px: int,
     py: int,
@@ -58,10 +56,6 @@ def progress_callback(
 
     Parameters:
     -----------
-    npol: int
-        Total number of polarizations.
-    pol: int
-        Current polarization index.
     iter_num: int
         Current iteration number.
     px: int
@@ -75,7 +69,7 @@ def progress_callback(
     """
     if iter_num % niter_log == 0:
         logger.info(
-            f"  Iteration {iter_num}, pol {pol}, peak at ({px}, {py}): {peak:.6f}"
+            f"  Iteration {iter_num}, peak at ({px}, {py}): {peak:.6f}"
         )
 
 
@@ -274,22 +268,23 @@ def hogbom_clean(
 ):
     """
     Perform Hogbom CLEAN deconvolution on a dirty image using the provided PSF.
-    The input dirty image and PSF are expected to be **single plane** images.
-    Any iteration over time, frequency, polarization is done outside this
-    function.
+    The input dirty image and PSF are expected to be **single plane** images (2D, spatial dimensions only).
+    Any iteration over time, frequency, polarization is done outside this function.
 
     Parameters:
     -----------
     dirty_image_xds: xarray.Dataset
-        The dirty image dataset with dimensions (time, frequency, polarization, y, x).
+        The dirty image dataset with dimensions (y, x) - a single 2D plane
+        (obtained after selecting specific time, frequency, and polarization indices).
     psf_xds: xarray.Dataset
-        The PSF dataset with dimensions (time, frequency, polarization, y, x).
+        The PSF dataset with dimensions (y, x) - a single 2D plane
+        (obtained after selecting specific time, frequency, and polarization indices).
     deconv_params: dict or None
         Dictionary containing deconvolution parameters:
         - gain (float): CLEAN gain factor (0 < gain <= 1).
         - niter (int): Maximum number of CLEAN iterations.
         - threshold (float): Stopping threshold for CLEANing.
-        - clean_box (Tuple[int] or None): Clean box defined as (ymin, ymax, xmin, xmax) or None for no box.
+        - clean_box (Tuple[int] or None): Clean box defined as (xmin, xmax, ymin, ymax) or None for no box.
         If None, default parameters will be used.
     output_dir: str
         Directory to save intermediate outputs (not used in this implementation).
@@ -305,8 +300,8 @@ def hogbom_clean(
 
     Notes:
     ------
-    - This function assumes that the PSF is the same for all polarizations.
-    - The function loops over time and frequency dimensions to perform deconvolution on each slice.
+    - Input arrays must be 2D (y, x dimensions only).
+    - Iteration over time, frequency, and polarization is handled by the caller (deconvolve function).
     """
 
     # Validate and set default deconvolution parameters

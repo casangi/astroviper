@@ -19,17 +19,16 @@ py::tuple maximg_impl(
     py::array_t<T, py::array::c_style | py::array::forcecast> mask_array = py::array_t<T>()
 ) {
     py::buffer_info image_info = image_array.request();
-    
-    // Validate image dimensions - expect [pol, ny, nx]
-    if (image_info.ndim != 3) {
-        throw std::runtime_error("Image must be 3D array");
+
+    // Validate image dimensions - expect [ny, nx]
+    if (image_info.ndim != 2) {
+        throw std::runtime_error("Image must be 2D array");
     }
-    
+
     // Extract dimensions
-    int npol = image_info.shape[0];
-    int ny = image_info.shape[1]; 
-    int nx = image_info.shape[2];
-    
+    int ny = image_info.shape[0];
+    int nx = image_info.shape[1];
+
     // Handle optional mask
     int domask = 0;
     T* mask_ptr = nullptr;
@@ -44,16 +43,16 @@ py::tuple maximg_impl(
         domask = 1;
         mask_ptr = static_cast<T*>(mask_info.ptr);
     }
-    
+
     // Call templated maximg directly with native type
     T fmin, fmax;
     hclean::maximg<T>(
         static_cast<const T*>(image_info.ptr),
         domask, static_cast<const T*>(mask_ptr),
-        nx, ny, npol,
+        nx, ny,
         fmin, fmax
     );
-    
+
     // Return results in original type T
     return py::make_tuple(fmin, fmax);
 }
@@ -78,24 +77,23 @@ py::dict hclean_impl(
     // Validate input arrays
     py::buffer_info dirty_info = dirty_image.request();
     py::buffer_info psf_info = psf_array.request();
-    
-    if (dirty_info.ndim != 3) {
-        throw std::runtime_error("Dirty image must be 3D [pol, ny, nx]");
+
+    if (dirty_info.ndim != 2) {
+        throw std::runtime_error("Dirty image must be 2D [ny, nx]");
     }
     if (psf_info.ndim != 2) {
         throw std::runtime_error("PSF must be 2D [ny, nx]");
     }
-    
+
     // Extract dimensions
-    int npol = dirty_info.shape[0];
-    int ny = dirty_info.shape[1];
-    int nx = dirty_info.shape[2];
-    
+    int ny = dirty_info.shape[0];
+    int nx = dirty_info.shape[1];
+
     // Validate PSF dimensions match image
     if (psf_info.shape[0] != ny || psf_info.shape[1] != nx) {
         throw std::runtime_error("PSF dimensions must match image spatial dimensions");
     }
-    
+
     // Handle optional mask
     int domask = 0;
     T* mask_ptr = nullptr;
@@ -107,54 +105,54 @@ py::dict hclean_impl(
         domask = 1;
         mask_ptr = static_cast<T*>(mask_info.ptr);
     }
-    
+
     // Parse clean box
     int xbeg = 0, xend = nx, ybeg = 0, yend = ny;
     if (clean_box.size() == 4) {
         xbeg = py::cast<int>(clean_box[0]);
-        xend = py::cast<int>(clean_box[1]);  
+        xend = py::cast<int>(clean_box[1]);
         ybeg = py::cast<int>(clean_box[2]);
         yend = py::cast<int>(clean_box[3]);
-        
+
         // Handle -1 values (use full dimension)
         if (xbeg == -1) xbeg = 0;
         if (xend == -1) xend = nx;
-        if (ybeg == -1) ybeg = 0; 
+        if (ybeg == -1) ybeg = 0;
         if (yend == -1) yend = ny;
-        
+
         // Validate bounds
         xbeg = std::max(0, std::min(xbeg, nx-1));
         xend = std::max(xbeg+1, std::min(xend, nx));
         ybeg = std::max(0, std::min(ybeg, ny-1));
         yend = std::max(ybeg+1, std::min(yend, ny));
     }
-    
-    std::vector<py::ssize_t> shape_3d = {npol, ny, nx};
-    
+
+    std::vector<py::ssize_t> shape_2d = {ny, nx};
+
     // Create working arrays in native type T - no conversion needed
-    py::array_t<T> dirty_copy = py::array_t<T>(shape_3d);
-    py::array_t<T> model_image = py::array_t<T>(shape_3d);
-    
+    py::array_t<T> dirty_copy = py::array_t<T>(shape_2d);
+    py::array_t<T> model_image = py::array_t<T>(shape_2d);
+
     // Zero-initialize and copy using safe buffer access
     py::buffer_info model_info = model_image.request();
     py::buffer_info dirty_copy_info = dirty_copy.request();
     std::memset(model_info.ptr, 0, model_info.size * model_info.itemsize);
     std::memcpy(dirty_copy_info.ptr, dirty_info.ptr, dirty_info.size * dirty_info.itemsize);
-    
+
     // Set up progress callback wrapper
-    std::function<void(int, int, int, int, int, T)> msgput_func = 
-        [progress_callback](int npol, int pol, int iter, int px, int py, T peak) {
+    std::function<void(int, int, int, T)> msgput_func =
+        [progress_callback](int iter, int px, int py, T peak) {
             if (!progress_callback.is_none()) {
                 try {
-                    progress_callback(npol, pol, iter, px, py, peak);
+                    progress_callback(iter, px, py, peak);
                 } catch (const std::runtime_error& e) {
                     py::print("Warning: Progress callback failed:", e.what());
                 }
             }
         };
-    
-    // Set up stop callback wrapper  
-    std::function<void(int&)> stopnow_func = 
+
+    // Set up stop callback wrapper
+    std::function<void(int&)> stopnow_func =
         [stop_callback](int& should_stop) {
             if (!stop_callback.is_none()) {
                 try {
@@ -166,38 +164,37 @@ py::dict hclean_impl(
                 }
             }
         };
-    
+
     int final_iter = start_iter;
     hclean::clean<T>(
         static_cast<T*>(model_info.ptr),           // model image output
         static_cast<T*>(dirty_copy_info.ptr),      // dirty/residual (copy)
         static_cast<const T*>(psf_info.ptr),       // PSF
         domask, static_cast<const T*>(mask_ptr),   // mask
-        nx, ny, npol,                              // dimensions
+        nx, ny,                                    // dimensions
         xbeg, xend, ybeg, yend,                   // clean box
         max_iter, start_iter, final_iter,         // iteration control
         gain, threshold, speedup,                 // parameters
         msgput_func, stopnow_func                 // callbacks
     );
-    
+
     // Calculate total flux cleaned
-    py::array_t<T> model_flat = model_image.reshape({npol * ny * nx});
     T total_flux = static_cast<T>(0);
-    T* model_data = static_cast<T*>(model_flat.request().ptr);
-    for (int i = 0; i < npol * ny * nx; ++i) {
+    T* model_data = static_cast<T*>(model_info.ptr);
+    for (int i = 0; i < ny * nx; ++i) {
         total_flux += std::abs(model_data[i]);
     }
-    
+
     // Find final peak in residual
     T final_min, final_max;
     hclean::maximg<T>(
         static_cast<const T*>(dirty_copy_info.ptr),
         domask, static_cast<const T*>(mask_ptr),
-        nx, ny, npol,
+        nx, ny,
         final_min, final_max
     );
     T final_peak = std::max(std::abs(final_min), std::abs(final_max));
-    
+
     // Return comprehensive results in original type T
     py::dict results;
     results["model_image"] = model_image;
@@ -206,7 +203,7 @@ py::dict hclean_impl(
     results["final_peak"] = final_peak;
     results["total_flux_cleaned"] = total_flux;
     results["converged"] = (final_peak <= threshold);
-    
+
     return results;
 }
 
@@ -235,9 +232,9 @@ PYBIND11_MODULE(_hogbom_ext, m) {
     
     // Float32 versions
     m.def("maximg", &maximg_impl<float>,
-          "Find minimum and maximum values in 3D image (float32)",
+          "Find minimum and maximum values in 2D image (float32)",
           py::arg("image"), py::arg("mask") = py::array_t<float>());
-    
+
     m.def("clean", &hclean_impl<float>,
           "Hogbom CLEAN algorithm (float32)",
           py::arg("dirty_image"),
@@ -251,7 +248,7 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           py::arg("speedup") = 0.0f,
           py::arg("progress_callback") = py::none(),
           py::arg("stop_callback") = py::none());
-    
+
     m.def("clean_nc", &hclean_simple_impl<float>,
           "Simple Hogbom CLEAN interface (float32)",
           py::arg("dirty_image"),
@@ -260,12 +257,12 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           py::arg("threshold") = 0.0f,
           py::arg("max_iter") = 100,
           py::arg("clean_box") = py::make_tuple(-1, -1, -1, -1));
-    
-    // Float64 versions  
+
+    // Float64 versions
     m.def("maximg", &maximg_impl<double>,
-          "Find minimum and maximum values in 3D image (float64)",
+          "Find minimum and maximum values in 2D image (float64)",
           py::arg("image"), py::arg("mask") = py::array_t<double>());
-    
+
     m.def("clean", &hclean_impl<double>,
           "Hogbom CLEAN algorithm (float64)",
           py::arg("dirty_image"),
@@ -279,7 +276,7 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           py::arg("speedup") = 0.0,
           py::arg("progress_callback") = py::none(),
           py::arg("stop_callback") = py::none());
-    
+
     m.def("clean_nc", &hclean_simple_impl<double>,
           "Simple Hogbom CLEAN interface (float64)",
           py::arg("dirty_image"),
