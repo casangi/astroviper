@@ -11,6 +11,9 @@ from astroviper.core.imaging.imaging_utils.return_dict import ReturnDict
 import logging
 import toolviper.utils.logger as logger
 
+#lg = logger.get_logger()
+#lg.setLevel(logging.DEBUG)
+
 # XXX : TODO: As of 2025-10-07 there is no way to supply an initial model image to the deconvolver
 
 
@@ -37,6 +40,7 @@ def get_phase_center(dirty_image_xds):
     ra0 = dirty_image_xds.coords["right_ascension"].values[cx_ra, cy_ra]
     dec0 = dirty_image_xds.coords["declination"].values[cx_dec, cy_dec]
     phase_center = f"{ra0},{dec0}"
+    return phase_center
 
 
 def progress_callback(
@@ -172,9 +176,7 @@ def deconvolve(
 
     # XXX : TODO : This should be within the time/pol/chan loop
     if model_xds is not None:
-        start_model_flux = imgstats.image_peak_residual(
-            model_xds, per_plane_stats=False
-        )
+        start_model_flux = float(model_xds["SKY"].sum().values)
 
     masksum = imgstats.get_image_masksum(dirty_image_xds)
     phase_center = get_phase_center(dirty_image_xds)
@@ -192,11 +194,19 @@ def deconvolve(
     max_psf_fraction = 0.8
     min_psf_fraction = 0.1
 
+
     for tt in range(ntime):
         for nn in range(nchan):
+            # Compute PSF sidelobe, same for all pols
+            _psf_values = psf_xds.isel(time=tt, frequency=nn)["SKY"].values
+            _psf_values = _psf_values[None, None, ...]  # Add dummy axes for freq and time
+            _main_lobe, _blc, _trc, max_psf_sidelobe = extract_main_lobe(
+                psf_fit_window, psf_fit_cutoff, _psf_values
+            )
+
             for pp in range(npol):
                 logger.info(
-                    f"Deconvolving time {tt+1}/{ntime}, freq {ff+1}/{nchan}, pol {pp+1}/{npol}"
+                    f"Deconvolving time {tt+1}/{ntime}, freq {nn+1}/{nchan}, pol {pp+1}/{npol}"
                 )
 
                 start_peakres = imgstats.image_peak_residual(
@@ -210,27 +220,24 @@ def deconvolve(
                     time=tt, frequency=nn, polarization=pp
                 )
                 psf_slice = psf_xds.isel(time=tt, frequency=nn, polarization=pp)
-                _main_lobe, _blc, _trc, max_psf_sidelobe = extract_main_lobe(
-                    psf_fit_window, psf_fit_cutoff, psf_slice
-                )
 
                 results, model_xds, residual_xds = _deconvolver(
-                    dirty_image=dirty_slice,
+                    dirty_image_xds=dirty_slice,
                     psf_xds=psf_slice,
                     deconv_params=deconv_params,
                     output_dir=output_dir,
                 )
 
-                peakres = image_peak_residual(
+                peakres = imgstats.image_peak_residual(
                     residual_xds, per_plane_stats=False, use_mask=True
                 )
-                peakres_nomask = image_peak_residual(
+                peakres_nomask = imgstats.image_peak_residual(
                     residual_xds, per_plane_stats=False, use_mask=False
                 )
 
-                stokes = residual_xds.coords("polarization").values
-                freq = residual_xds.coords("frequency").values
-                time = residual_xds.coords("time").values
+                stokes = residual_xds.coords["polarization"].values
+                freq = residual_xds.coords["frequency"].values
+                time = residual_xds.coords["time"].values
 
                 returnvals = {
                     "niter": deconv_params.get("niter", None),
@@ -341,8 +348,8 @@ def hogbom_clean(
         stop_callback=None,
     )
 
-    model_xds["SKY"].values[0, 0, :, :, :] = copy.deepcopy(results["model_image"])
-    residual_xds["SKY"].values[0, 0, :, :, :] = copy.deepcopy(results["residual_image"])
+    model_xds["SKY"].values[:] = copy.deepcopy(results["model_image"])
+    residual_xds["SKY"].values[:] = copy.deepcopy(results["residual_image"])
 
     # XXX : TODO : This will only return the results from the last slice cleaned
     final_results = {

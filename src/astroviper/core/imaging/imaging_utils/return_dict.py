@@ -16,15 +16,15 @@ Key = namedtuple("Key", ["time", "pol", "chan"])
 
 class ReturnDict:
     def __init__(self):
-        self.data = OrderedDict()
+        self._data = OrderedDict()
 
     @property
     def data(self):
-        return self.data
+        return self._data
 
     @data.setter
     def data(self, value):
-        self.data = value
+        self._data = value
 
     def add(self, value, time, pol, chan):
         key = Key(time, pol, chan)

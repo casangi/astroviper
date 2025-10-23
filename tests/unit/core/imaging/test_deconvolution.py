@@ -18,7 +18,9 @@ from astroviper.core.imaging.deconvolution import (
     _validate_deconv_params,
     progress_callback,
     hogbom_clean,
+    deconvolve,
 )
+from astroviper.core.imaging.imaging_utils.return_dict import ReturnDict
 
 try:
     from astroviper.core.imaging.deconvolvers import hogbom
@@ -374,16 +376,19 @@ class TestHogbomClean:
     )
     def test_hogbom_clean_basic(self, hogbom_images):
         """Test basic hogbom_clean functionality"""
-        # Setup mock returns
 
         resid_image, psf_image = hogbom_images
         dirty_xds = load_image(resid_image)
         psf_xds = load_image(psf_image)
 
+        print(dirty_xds)
+        print(psf_xds)
+
         deconv_params = {"gain": 0.1, "niter": 100}
 
         # Run function
-        result, resid_xds, psf_xds = hogbom_clean(dirty_xds, psf_xds, deconv_params)
+        # Hogbom clean expects a 3D array. The iteration is generally done in the deconvolve() function.
+        result, model_xds, residual_xds = hogbom_clean(dirty_xds.isel(time=0, frequency=0), psf_xds.isel(time=0,frequency=0,polarization=0), deconv_params)
 
         # Verify result structure
         assert isinstance(result, dict)
@@ -503,6 +508,96 @@ class TestHogbomClean:
     #     assert isinstance(result['total_flux_cleaned'], (int, float))
     #     assert isinstance(result['converged'], bool)
     #
+
+
+class TestDeconvolve:
+    """Test the main deconvolve orchestration function"""
+
+    @pytest.mark.skipif(
+        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
+    )
+    def test_deconvolve_basic(self, hogbom_images):
+        """Test basic deconvolve functionality with single plane"""
+
+        resid_image, psf_image = hogbom_images
+        dirty_xds = load_image(resid_image)
+        psf_xds = load_image(psf_image)
+
+        deconv_params = {"gain": 0.1, "niter": 100, "threshold": 0.0}
+
+        # Run deconvolve
+        returndict, model_xds, residual_xds = deconvolve(
+            dirty_xds, psf_xds, deconv_params=deconv_params
+        )
+
+        # Verify ReturnDict structure
+        assert isinstance(returndict, ReturnDict)
+        assert len(returndict.data) > 0
+
+        # Verify model and residual output
+        assert isinstance(model_xds, xr.Dataset)
+        assert isinstance(residual_xds, xr.Dataset)
+        assert "SKY" in model_xds
+        assert "SKY" in residual_xds
+
+    @pytest.mark.skipif(
+        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
+    )
+    def test_deconvolve_returndict_contents(self, hogbom_images):
+        """Test that ReturnDict contains expected fields"""
+
+        resid_image, psf_image = hogbom_images
+        dirty_xds = load_image(resid_image)
+        psf_xds = load_image(psf_image)
+
+        deconv_params = {"gain": 0.1, "niter": 50, "threshold": 0.0}
+
+        returndict, _, _ = deconvolve(dirty_xds, psf_xds, deconv_params=deconv_params)
+
+        # Get first entry from ReturnDict
+        if len(returndict.data) > 0:
+            first_key = list(returndict.data.keys())[0]
+            entry = returndict.data[first_key]
+
+            # Verify expected fields exist
+            expected_fields = [
+                "iter_done",
+                "niter",
+                "threshold",
+                "loop_gain",
+                "peakres",
+                "peakres_nomask",
+                "masksum",
+                "max_psf_sidelobe",
+            ]
+            for field in expected_fields:
+                assert field in entry, f"Missing field: {field}"
+
+    @pytest.mark.skipif(
+        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
+    )
+    def test_deconvolve_with_initial_model(self, hogbom_images):
+        """Test deconvolve with an initial model image"""
+
+        resid_image, psf_image = hogbom_images
+        dirty_xds = load_image(resid_image)
+        psf_xds = load_image(psf_image)
+
+        # Create a simple initial model
+        model_xds = dirty_xds.copy(deep=True)
+        model_xds["SKY"].values[:] = 0.0  # Zero model to start
+
+        deconv_params = {"gain": 0.1, "niter": 50, "threshold": 0.0}
+
+        # Run with initial model
+        returndict, final_model, residual_xds = deconvolve(
+            dirty_xds, psf_xds, model_xds=model_xds, deconv_params=deconv_params
+        )
+
+        # Verify outputs are valid
+        assert isinstance(returndict, ReturnDict)
+        assert isinstance(final_model, xr.Dataset)
+        assert isinstance(residual_xds, xr.Dataset)
 
 
 if __name__ == "__main__":
