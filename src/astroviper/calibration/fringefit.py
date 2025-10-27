@@ -65,8 +65,8 @@ def _fringe_node_task(input_params: Dict):
     xds2 = xds.isel(**data_selection[name])
     ddelay, drate = getFourierSpacings(xds2, npad)
     baselines = xds2.baseline_id[
-        (xds2.baseline_id.baseline_antenna1_name == ref_ant)
-        | (xds2.baseline_id.baseline_antenna2_name == ref_ant)
+        (xds2.baseline_id.baseline_antenna1_name == ref_ant).compute()
+        | (xds2.baseline_id.baseline_antenna2_name == ref_ant).compute()
     ]
     vis = xds2.VISIBILITY[:, baselines, :, ::3]
     flags = xds2.FLAG[:, baselines, :, ::3]

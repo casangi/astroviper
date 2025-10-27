@@ -43,9 +43,9 @@ ps2 = apply_cal_ps(ps, cal_tree, ff_start, ff_interval)
 
 
 def bl_inds(xds, a1, a2):
-    return (xds.baseline_antenna1_name == a1) & (xds.baseline_antenna2_name == a2) | (
-        xds.baseline_antenna1_name == a2
-    ) & (xds.baseline_antenna2_name == a1)
+    return (
+        (xds.baseline_antenna1_name == a1) & (xds.baseline_antenna2_name == a2) |
+        (xds.baseline_antenna1_name == a2) & (xds.baseline_antenna2_name == a1)).compute()
 
 
 # We need an xds to get baselines from; I happen to know this one contains the interval we chose above
