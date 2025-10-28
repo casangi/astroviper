@@ -83,7 +83,10 @@ def make_mask(
         if "active_mask" in target_image[dv].attrs:
             active_mask_dv = target_image[dv].attrs["active_mask"]
             if active_mask_dv in target_image:
-                existing_mask = target_image[active_mask_dv]
+                existing_mask = target_image[active_mask_dv].copy(deep=True)
+                if active_mask_dv == "MASK0":
+                    # CASA mask definition is reverse of xradio mask definition
+                    existing_mask = ~existing_mask
                 # combine existing mask with new mask using logical OR
                 combined_mask = mask_image[dv].where(
                     (mask_image[dv] >= pb_threshold) & existing_mask
@@ -97,9 +100,9 @@ def make_mask(
             if "MASK0" in target_image or "MASK" in target_image:
                 if "MASK0" in target_image:
                     # CASA mask definition is reverse of xradio mask definition
-                    existing_mask = ~target_image["MASK0"]
+                    existing_mask = ~target_image["MASK0"].copy(deep=True)
                 else:
-                    existing_mask = target_image["MASK"]
+                    existing_mask = target_image["MASK"].copy(deep=True)
                 # combine existing mask with new mask using logical OR
                 combined_mask = mask_image[dv].where(
                     (mask_image[dv] >= pb_threshold) & existing_mask
@@ -121,6 +124,7 @@ def make_mask(
     if apply_on_target:
         # apply the mask on target_image
         target_image["MASK"] = mask_only_image
+        target_image[dv].attrs["active_mask"] = "MASK"
         mask_xds = target_image
     else:
         mask_xds = xr.Dataset()
