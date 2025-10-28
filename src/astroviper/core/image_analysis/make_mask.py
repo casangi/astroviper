@@ -42,6 +42,8 @@ def make_mask(
     # for now use SKY data variable
     mask_image = input_image.copy(deep=True)
 
+    if pb_threshold < 0.0 or pb_threshold > 1.0:
+        raise ValueError("pb_threshold must be between 0.0 and 1.0")
     # if target_image is provided check dimensions
     # check for l, m sizes also check for other dimensions (time, frequency, polarization)
     if target_image is None:
