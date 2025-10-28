@@ -78,15 +78,15 @@ def make_mask(
 
     if combine_mask:
         # check if target_image has existing mask and check attribute 'active_mask' that points the data variable contains MASK
-        if "active_mask" in target_image.attrs:
-            active_mask_dv = target_image.attrs["active_mask"]
+        if "active_mask" in target_image[dv].attrs:
+            active_mask_dv = target_image[dv].attrs["active_mask"]
             if active_mask_dv in target_image:
                 existing_mask = target_image[active_mask_dv]
                 # combine existing mask with new mask using logical OR
-                combined_mask = np.where(
-                    (mask_image[dv] >= pb_threshold) | (existing_mask > 0), 1, 0
+                combined_mask = mask_image[dv].where(
+                    (mask_image[dv] >= pb_threshold) & existing_mask
                 )
-                mask_image = combined_mask
+                mask_image[dv] = combined_mask
             else:
                 raise KeyError(
                     f"Active mask data variable '{active_mask_dv}' not found in target image"
