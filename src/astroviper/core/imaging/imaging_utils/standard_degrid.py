@@ -102,9 +102,9 @@ def dgrid(
                             ]:  # Access flag using ipol then ichan
                                 ogrid = (
                                     ((loc[0] + supp_beg) >= 0)
-                                    and ((loc[0] + supp_end) < nx)
+                                    and ((loc[0] + supp_end - 1) < nx)
                                     and ((loc[1] + supp_beg) >= 0)
-                                    and ((loc[1] + supp_end) < ny)
+                                    and ((loc[1] + supp_end - 1) < ny)
                                 )
 
                                 if ogrid:
@@ -225,9 +225,9 @@ def dgrid_optimized(
 
                     ogrid = (
                         ((loc_tbi[0] + supp_beg) >= 0)
-                        and ((loc_tbi[0] + supp_end) < nx)
+                        and ((loc_tbi[0] + supp_end - 1) < nx)
                         and ((loc_tbi[1] + supp_beg) >= 0)
-                        and ((loc_tbi[1] + supp_end) < ny)
+                        and ((loc_tbi[1] + supp_end - 1) < ny)
                     )
 
                     if ogrid:
@@ -430,31 +430,29 @@ def dgrid_numba(
                             x0, y0 = loc
                             if (
                                 (x0 + supp_beg >= 0)
-                                and (x0 + supp_end < nx)
+                                and ((x0 + supp_end - 1) < nx)
                                 and (y0 + supp_beg >= 0)
-                                and (y0 + supp_end < ny)
+                                and ((y0 + supp_end - 1) < ny)
                             ):
                                 nvalue = 0.0
                                 norm = 0.0
-                                for iy in range(supp_beg, supp_end):
-                                    iloc2 = abs(sampling * iy + off[1])
-                                    if iloc2 < len(convFunc):
+                                for ix in range(supp_beg, supp_end):
+                                    iloc1 = abs(sampling * ix + off[0])
+                                    wtx = convFunc[iloc1]
+                                    for iy in range(supp_beg, supp_end):
+                                        iloc2 = abs(sampling * iy + off[1])
                                         wty = convFunc[iloc2]
-                                        for ix in range(supp_beg, supp_end):
-                                            iloc1 = abs(sampling * ix + off[0])
-                                            if iloc1 < len(convFunc):
-                                                wtx = convFunc[iloc1]
-                                                wt = wtx * wty
-                                                norm += wt
-                                                nvalue += (
-                                                    wt
-                                                    * grid[
-                                                        achan,
-                                                        apol,
-                                                        x0 + ix,
-                                                        y0 + iy,
-                                                    ]
-                                                )
+                                        wt = wtx * wty
+                                        norm += wt
+                                        nvalue += (
+                                            wt
+                                            * grid[
+                                                achan,
+                                                apol,
+                                                x0 + ix,
+                                                y0 + iy,
+                                            ]
+                                        )
                                 if norm != 0.0:
                                     values[t, b, ichan, ipol] += (
                                         nvalue * np.conj(phasor)
@@ -509,6 +507,7 @@ def degrid_spheroid_ms4(
     elif whichFunc == 2:
         func = dgrid
     uvw = vis.UVW.data
+    print("Type UVW", type(uvw))
     dims = vis.dims
     # as we are not gridding away from phase_center
     dphase = np.zeros((dims["time"], dims["baseline_id"]), dtype=float)
@@ -546,7 +545,7 @@ def degrid_spheroid_ms4(
     # using same convention of in standard_grid ..negating scale to
     # deal with -u, -v flip from handedness of uvw in MSv2 onwards
     scale = np.array([-pixelincr[0] * nx, -pixelincr[1] * ny, 0.0]).astype(np.float64)
-    offset = np.array([nx / 2, ny / 2, 0.0]).astype(float)
+    offset = np.array([nx / 2, ny / 2, 0.0]).astype(np.float64)
     freq = vis.frequency.data
     c = constants.c.value
     convFunc = create_prolate_spheroidal_kernel_1D(sampling, support)
@@ -558,6 +557,7 @@ def degrid_spheroid_ms4(
     polmap = np.round(np.arange(dims["polarization"]) % npol).astype(
         int
     )  # this is wrong most probably
+
     #    dgrid_numba(
     func(
         uvw,
