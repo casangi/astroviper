@@ -131,6 +131,10 @@ def deconvolve(
     """
     Run the chosen deconvolution algorithm on the dirty image using the provided PSF.
 
+    This function iterates over all (time, frequency, polarization) planes in the input
+    datasets, deconvolving each plane independently, and accumulates results into full
+    multi-dimensional output datasets.
+
     Parameters:
     -----------
     dirty_image_xds: xarray.Dataset
@@ -138,44 +142,48 @@ def deconvolve(
     psf_xds: xarray.Dataset
         The PSF dataset with dimensions (time, frequency, polarization, y, x).
     model_xds: xarray.Dataset or None
-        The initial model image dataset
+        The initial model image dataset with same dimensions as dirty_image_xds.
+        If None, starts with zero model. If provided, deconvolution starts from
+        this initial model (useful for resuming or multi-scale approaches).
     algorithm: str
         The deconvolution algorithm to use ('hogbom' supported).
     deconv_params: dict or None
-        Dictionary containing deconvolution parameters specific to the chosen algorithm.
+        Dictionary containing deconvolution parameters specific to the chosen algorithm:
+        - gain (float): CLEAN gain factor (default: 0.1)
+        - niter (int): Maximum iterations per plane (default: 1000)
+        - threshold (float): Stopping threshold (default: 0.0)
+        - clean_box (tuple): Region to clean (xmin, xmax, ymin, ymax) or (-1,-1,-1,-1) for full image
     output_dir: str
         Directory to save intermediate outputs (not used in this implementation).
+
     Returns:
     --------
-    results: dict
-        A dictionary containing the model image and residual image after deconvolution.
+    returndict: ReturnDict
+        A dictionary containing per-plane deconvolution statistics indexed by (time, pol, chan).
+        Each entry contains: iterations performed, peak residual, model flux, PSF sidelobe levels, etc.
     model_xds: xarray.Dataset
-        The model image dataset after deconvolution.
+        The model image dataset after deconvolution, with dimensions (time, frequency, polarization, y, x).
+        Contains the accumulated CLEAN components from all planes.
     residual_xds: xarray.Dataset
-        The residual image dataset after deconvolution.
+        The residual image dataset after deconvolution, with dimensions (time, frequency, polarization, y, x).
+        Contains the dirty image minus the convolved model for all planes.
 
     Notes:
     ------
     - Currently, only the 'hogbom' algorithm is implemented.
+    - Deconvolution is performed independently on each (time, freq, pol) plane.
+    - PSF sidelobe statistics are computed per (time, freq) and shared across polarizations.
+    - All output datasets preserve the coordinate structure of the input dirty_image_xds.
     """
 
     returndict = ReturnDict()
 
-    start_model_flux = 0.0
-    start_peakres = 0.0
-
-    ntime = dirty_image_xds.dims["time"]
-    nchan = dirty_image_xds.dims["frequency"]
-    npol = dirty_image_xds.dims["polarization"]
-
-    # XXX : TODO : This should be within the time/pol/chan loop
-    if model_xds is not None:
-        start_model_flux = float(model_xds["SKY"].sum().values)
+    ntime = dirty_image_xds.sizes["time"]
+    nchan = dirty_image_xds.sizes["frequency"]
+    npol = dirty_image_xds.sizes["polarization"]
 
     masksum = imgstats.get_image_masksum(dirty_image_xds)
     phase_center = get_phase_center(dirty_image_xds)
-
-    logger.info(f"Starting peak residual (with mask): {start_peakres:.6f}")
 
     if algorithm.lower() == "hogbom":
         _deconvolver = hogbom_clean
@@ -188,6 +196,17 @@ def deconvolve(
     max_psf_fraction = 0.8
     min_psf_fraction = 0.1
 
+    # Pre-allocate full model and residual datasets
+    # Initialize from dirty image structure to preserve coordinates
+    full_model_xds = dirty_image_xds.copy(deep=True)
+    full_residual_xds = dirty_image_xds.copy(deep=True)
+
+    # Zero out the model (residual starts as dirty image copy)
+    full_model_xds["SKY"].values[:] = 0.0
+
+    # If initial model provided, use it as starting point
+    if model_xds is not None:
+        full_model_xds["SKY"].values[:] = model_xds["SKY"].values[:]
 
     for tt in range(ntime):
         for nn in range(nchan):
@@ -203,35 +222,57 @@ def deconvolve(
                     f"Deconvolving time {tt+1}/{ntime}, freq {nn+1}/{nchan}, pol {pp+1}/{npol}"
                 )
 
-                start_peakres = imgstats.image_peak_residual(
-                    dirty_image_xds, per_plane_stats=False, use_mask=True
-                )
-                start_peakres_nomask = imgstats.image_peak_residual(
-                    dirty_image_xds, per_plane_stats=False, use_mask=False
-                )
-
+                # Extract current plane slices
                 dirty_slice = dirty_image_xds.isel(
                     time=tt, frequency=nn, polarization=pp
                 )
                 psf_slice = psf_xds.isel(time=tt, frequency=nn, polarization=pp)
 
-                results, model_xds, residual_xds = _deconvolver(
-                    dirty_image_xds=dirty_slice,
-                    psf_xds=psf_slice,
+                # Compute per-plane starting statistics
+                start_peakres = imgstats.image_peak_residual(
+                    dirty_slice, per_plane_stats=False, use_mask=True
+                )
+                start_peakres_nomask = imgstats.image_peak_residual(
+                    dirty_slice, per_plane_stats=False, use_mask=False
+                )
+
+                # Get starting model flux for this plane
+                if model_xds is not None:
+                    start_model_flux = float(
+                        model_xds["SKY"].isel(time=tt, frequency=nn, polarization=pp).sum().values
+                    )
+                else:
+                    start_model_flux = 0.0
+
+                # Run deconvolution on single plane
+                # Extract numpy arrays from xarray datasets
+                results, model_array, residual_array = _deconvolver(
+                    dirty_image=dirty_slice["SKY"].values,
+                    psf=psf_slice["SKY"].values,
                     deconv_params=deconv_params,
                     output_dir=output_dir,
                 )
 
+                # Insert results back into full datasets at correct plane location
+                full_model_xds["SKY"].values[tt, nn, pp, :, :] = model_array
+                full_residual_xds["SKY"].values[tt, nn, pp, :, :] = residual_array
+
+                # Create temporary xarray for peak residual calculation
+                # (to reuse existing imgstats functions)
+                temp_residual = dirty_slice.copy()
+                temp_residual["SKY"].values[:] = residual_array
+
                 peakres = imgstats.image_peak_residual(
-                    residual_xds, per_plane_stats=False, use_mask=True
+                    temp_residual, per_plane_stats=False, use_mask=True
                 )
                 peakres_nomask = imgstats.image_peak_residual(
-                    residual_xds, per_plane_stats=False, use_mask=False
+                    temp_residual, per_plane_stats=False, use_mask=False
                 )
 
-                stokes = residual_xds.coords["polarization"].values
-                freq = residual_xds.coords["frequency"].values
-                time = residual_xds.coords["time"].values
+                # Extract coordinate values for this plane
+                stokes = dirty_slice.coords["polarization"].values
+                freq = dirty_slice.coords["frequency"].values
+                time = dirty_slice.coords["time"].values
 
                 returnvals = {
                     "niter": deconv_params.get("niter", None),
@@ -256,29 +297,26 @@ def deconvolve(
 
                 returndict.add(returnvals, time=tt, pol=pp, chan=nn)
 
-    # TODO : Need to add min/max psf sidelobe levels to the return dict
-    return returndict, model_xds, residual_xds
+    return returndict, full_model_xds, full_residual_xds
 
 
 def hogbom_clean(
-    dirty_image_xds: xr.Dataset,
-    psf_xds: xr.Dataset,
+    dirty_image: np.ndarray,
+    psf: np.ndarray,
     deconv_params: Optional[dict] = None,
     output_dir: str = ".",
 ):
     """
     Perform Hogbom CLEAN deconvolution on a dirty image using the provided PSF.
-    The input dirty image and PSF are expected to be **single plane** images (2D, spatial dimensions only).
+    The input dirty image and PSF are expected to be **single plane** 2D numpy arrays.
     Any iteration over time, frequency, polarization is done outside this function.
 
     Parameters:
     -----------
-    dirty_image_xds: xarray.Dataset
-        The dirty image dataset with dimensions (y, x) - a single 2D plane
-        (obtained after selecting specific time, frequency, and polarization indices).
-    psf_xds: xarray.Dataset
-        The PSF dataset with dimensions (y, x) - a single 2D plane
-        (obtained after selecting specific time, frequency, and polarization indices).
+    dirty_image: np.ndarray
+        The 2D dirty image array with shape (ny, nx).
+    psf: np.ndarray
+        The 2D PSF array with shape (ny, nx).
     deconv_params: dict or None
         Dictionary containing deconvolution parameters:
         - gain (float): CLEAN gain factor (0 < gain <= 1).
@@ -292,44 +330,44 @@ def hogbom_clean(
     Returns:
     --------
     results: dict
-        A dictionary containing the model image and residual image after deconvolution.
-    model_xds: xarray.Dataset
-        The model image dataset after deconvolution.
-    residual_xds: xarray.Dataset
-        The residual image dataset after deconvolution.
+        A dictionary containing deconvolution statistics (iterations_performed, final_peak, etc.)
+        excluding the image arrays.
+    model_array: np.ndarray
+        The 2D model image array after deconvolution (shape: [ny, nx]).
+    residual_array: np.ndarray
+        The 2D residual image array after deconvolution (shape: [ny, nx]).
 
     Notes:
     ------
-    - Input arrays must be 2D (y, x dimensions only).
+    - Input arrays must be 2D numpy arrays (ny, nx).
+    - Returns numpy arrays for efficient accumulation by caller.
     - Iteration over time, frequency, and polarization is handled by the caller (deconvolve function).
     """
 
     # Validate and set default deconvolution parameters
     deconv_params = _validate_deconv_params(deconv_params)
 
-    # Initialize model and residual xds from dirty image
-    # XXX : Potential hotspot for memory usage here
-    model_xds = dirty_image_xds.copy(deep=True)
-    residual_xds = dirty_image_xds.copy(deep=True)
+    # Validate input arrays
+    if not isinstance(dirty_image, np.ndarray) or dirty_image.ndim != 2:
+        raise ValueError("dirty_image must be a 2D numpy array with shape (ny, nx)")
+    if not isinstance(psf, np.ndarray) or psf.ndim != 2:
+        raise ValueError("psf must be a 2D numpy array with shape (ny, nx)")
+    if dirty_image.shape != psf.shape:
+        raise ValueError(f"dirty_image and psf must have same shape. Got {dirty_image.shape} and {psf.shape}")
 
-    # Get the underlying values to pass into
-    # pybinded function
-    dirty_slice = dirty_image_xds["SKY"].values
-    psf_slice = psf_xds["SKY"].values
-
-    logger.debug(f"Dirty image shape: {dirty_slice.shape}")
-    logger.debug(f"PSF shape: {psf_slice.shape}")
+    logger.debug(f"Dirty image shape: {dirty_image.shape}")
+    logger.debug(f"PSF shape: {psf.shape}")
 
     # Find initial peak in dirty image
-    fmin, fmax = hogbom.maximg(dirty_slice)
+    fmin, fmax = hogbom.maximg(dirty_image)
     initial_peak = max(abs(fmin), abs(fmax))
     logger.debug(f"Initial peak flux: {initial_peak:.6f}")
 
     # Run CLEAN with full interface (including callbacks)
     logger.info("\nRunning Hogbom CLEAN algorithm...")
     results = hogbom.clean(
-        dirty_image=dirty_slice,
-        psf=psf_slice,
+        dirty_image=dirty_image,
+        psf=psf,
         mask=np.array([], dtype=np.float32),
         gain=deconv_params["gain"],
         threshold=deconv_params["threshold"],
@@ -343,14 +381,15 @@ def hogbom_clean(
         stop_callback=None,
     )
 
-    model_xds["SKY"].values[:] = copy.deepcopy(results["model_image"])
-    residual_xds["SKY"].values[:] = copy.deepcopy(results["residual_image"])
+    # Extract arrays from results
+    model_array = results["model_image"]
+    residual_array = results["residual_image"]
 
-    # XXX : TODO : This will only return the results from the last slice cleaned
+    # Return statistics dict (without image arrays) and the arrays separately
     final_results = {
         key: value
         for key, value in results.items()
         if key not in ["model_image", "residual_image"]
     }
 
-    return final_results, model_xds, residual_xds
+    return final_results, model_array, residual_array

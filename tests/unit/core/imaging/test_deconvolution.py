@@ -246,13 +246,13 @@ class TestMaximgFunction:
     def test_maximg_basic_float32(self):
         """Test basic maximg functionality with float32"""
 
-        # Create 3D test image [pol, ny, nx]
-        npol, ny, nx = 2, 32, 32
-        image = np.random.rand(npol, ny, nx).astype(np.float32) * 2 - 1  # Range [-1, 1]
+        # Create 2D test image [ny, nx]
+        ny, nx = 32, 32
+        image = np.random.rand(ny, nx).astype(np.float32) * 2 - 1  # Range [-1, 1]
 
         # Set known min/max values
-        image[0, 10, 15] = -2.5  # Global minimum
-        image[1, 20, 25] = 3.7  # Global maximum
+        image[10, 15] = -2.5  # Global minimum
+        image[20, 25] = 3.7  # Global maximum
 
         fmin, fmax = hogbom.maximg(image)
 
@@ -265,13 +265,13 @@ class TestMaximgFunction:
     def test_maximg_basic_float64(self):
         """Test basic maximg functionality with float64"""
 
-        # Create 3D test image [pol, ny, nx]
-        npol, ny, nx = 1, 16, 16
-        image = np.random.rand(npol, ny, nx).astype(np.float64) * 10
+        # Create 2D test image [ny, nx]
+        ny, nx = 16, 16
+        image = np.random.rand(ny, nx).astype(np.float64) * 10
 
         # Set known min/max values
-        image[0, 5, 8] = -15.75
-        image[0, 12, 3] = 22.33
+        image[5, 8] = -15.75
+        image[12, 3] = 22.33
 
         fmin, fmax = hogbom.maximg(image)
 
@@ -284,12 +284,12 @@ class TestMaximgFunction:
     def test_maximg_with_mask(self):
         """Test maximg with mask"""
 
-        npol, ny, nx = 1, 16, 16
-        image = np.ones((npol, ny, nx), dtype=np.float32) * 5.0
+        ny, nx = 16, 16
+        image = np.ones((ny, nx), dtype=np.float32) * 5.0
 
         # Set extreme values that should be masked out
-        image[0, 3, 4] = -100.0  # Should be ignored due to mask
-        image[0, 10, 12] = 200.0  # Should be ignored due to mask
+        image[3, 4] = -100.0  # Should be ignored due to mask
+        image[10, 12] = 200.0  # Should be ignored due to mask
 
         # Create mask - 1.0 means use pixel, 0.0 means ignore
         mask = np.ones((ny, nx), dtype=np.float32)
@@ -305,12 +305,12 @@ class TestMaximgFunction:
     @pytest.mark.skipif(
         not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
     )
-    def test_maximg_single_polarization(self):
-        """Test maximg with single polarization"""
+    def test_maximg_single_plane(self):
+        """Test maximg with single 2D plane"""
 
-        npol, ny, nx = 1, 8, 8
-        image = np.zeros((npol, ny, nx), dtype=np.float32)
-        image[0, 4, 4] = 1.0  # Single point source
+        ny, nx = 8, 8
+        image = np.zeros((ny, nx), dtype=np.float32)
+        image[4, 4] = 1.0  # Single point source
 
         fmin, fmax = hogbom.maximg(image)
 
@@ -320,17 +320,17 @@ class TestMaximgFunction:
     @pytest.mark.skipif(
         not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
     )
-    def test_maximg_multiple_polarizations(self):
-        """Test maximg with multiple polarizations"""
+    def test_maximg_multiple_sources(self):
+        """Test maximg with multiple sources in 2D plane"""
 
-        npol, ny, nx = 4, 10, 10
-        image = np.zeros((npol, ny, nx), dtype=np.float32)
+        ny, nx = 10, 10
+        image = np.zeros((ny, nx), dtype=np.float32)
 
-        # Set different values in each polarization
-        image[0, 2, 3] = -3.0  # Global minimum
-        image[1, 4, 5] = 1.5
-        image[2, 6, 7] = 2.8  # Global maximum
-        image[3, 8, 1] = -1.2
+        # Set different values at different locations
+        image[2, 3] = -3.0  # Global minimum
+        image[4, 5] = 1.5
+        image[6, 7] = 2.8  # Global maximum
+        image[8, 1] = -1.2
 
         fmin, fmax = hogbom.maximg(image)
 
@@ -343,15 +343,15 @@ class TestMaximgFunction:
     def test_maximg_error_wrong_dimensions(self):
         """Test maximg error handling for wrong dimensions"""
 
-        # Test 2D array (should fail)
-        image_2d = np.random.rand(32, 32).astype(np.float32)
-        with pytest.raises(RuntimeError, match="Image must be 3D array"):
-            hogbom.maximg(image_2d)
+        # Test 1D array (should fail)
+        image_1d = np.random.rand(32).astype(np.float32)
+        with pytest.raises(RuntimeError, match="Image must be 2D array"):
+            hogbom.maximg(image_1d)
 
-        # Test 4D array (should fail)
-        image_4d = np.random.rand(2, 2, 32, 32).astype(np.float32)
-        with pytest.raises(RuntimeError, match="Image must be 3D array"):
-            hogbom.maximg(image_4d)
+        # Test 3D array (should fail - now expects 2D)
+        image_3d = np.random.rand(2, 32, 32).astype(np.float32)
+        with pytest.raises(RuntimeError, match="Image must be 2D array"):
+            hogbom.maximg(image_3d)
 
     @pytest.mark.skipif(
         not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
@@ -359,7 +359,7 @@ class TestMaximgFunction:
     def test_maximg_mask_dimension_mismatch(self):
         """Test maximg error handling for mask dimension mismatch"""
 
-        image = np.random.rand(2, 32, 32).astype(np.float32)
+        image = np.random.rand(32, 32).astype(np.float32)
         wrong_mask = np.ones((16, 16), dtype=np.float32)  # Wrong size
 
         with pytest.raises(
@@ -381,14 +381,20 @@ class TestHogbomClean:
         dirty_xds = load_image(resid_image)
         psf_xds = load_image(psf_image)
 
-        print(dirty_xds)
-        print(psf_xds)
-
         deconv_params = {"gain": 0.1, "niter": 100}
 
+        # Extract 2D numpy arrays from xarray datasets
+        dirty_array = dirty_xds.isel(time=0, frequency=0, polarization=0)["SKY"].values
+        psf_array = psf_xds.isel(time=0, frequency=0, polarization=0)["SKY"].values
+
         # Run function
-        # Hogbom clean expects a 3D array. The iteration is generally done in the deconvolve() function.
-        result, model_xds, residual_xds = hogbom_clean(dirty_xds.isel(time=0, frequency=0), psf_xds.isel(time=0,frequency=0,polarization=0), deconv_params)
+        # Hogbom clean now expects 2D numpy arrays and returns numpy arrays
+        # The iteration over time/freq/pol is done in the deconvolve() function
+        result, model_array, residual_array = hogbom_clean(
+            dirty_array,
+            psf_array,
+            deconv_params
+        )
 
         # Verify result structure
         assert isinstance(result, dict)
@@ -396,6 +402,18 @@ class TestHogbomClean:
         assert "final_peak" in result
         assert "total_flux_cleaned" in result
         assert result["iterations_performed"] == 100
+
+        # Verify arrays are numpy arrays with correct shape
+        assert isinstance(model_array, np.ndarray)
+        assert isinstance(residual_array, np.ndarray)
+        assert model_array.ndim == 2
+        assert residual_array.ndim == 2
+        assert model_array.shape == dirty_array.shape
+        assert residual_array.shape == dirty_array.shape
+
+        # Verify values 
+        assert residual_array[125, 129] == pytest.approx(0.004976, abs=1e-5)
+        assert model_array[128,128] == pytest.approx(0.97746, abs=1e-4)
 
     # @pytest.mark.skipif(
     #     not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
