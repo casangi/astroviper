@@ -391,9 +391,7 @@ class TestHogbomClean:
         # Hogbom clean now expects 2D numpy arrays and returns numpy arrays
         # The iteration over time/freq/pol is done in the deconvolve() function
         result, model_array, residual_array = hogbom_clean(
-            dirty_array,
-            psf_array,
-            deconv_params
+            dirty_array, psf_array, deconv_params
         )
 
         # Verify result structure
@@ -411,9 +409,9 @@ class TestHogbomClean:
         assert model_array.shape == dirty_array.shape
         assert residual_array.shape == dirty_array.shape
 
-        # Verify values 
+        # Verify values
         assert residual_array[125, 129] == pytest.approx(0.004976, abs=1e-5)
-        assert model_array[128,128] == pytest.approx(0.97746, abs=1e-4)
+        assert model_array[128, 128] == pytest.approx(0.97746, abs=1e-4)
 
     # @pytest.mark.skipif(
     #     not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
