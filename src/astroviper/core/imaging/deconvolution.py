@@ -11,8 +11,8 @@ from astroviper.core.imaging.imaging_utils.return_dict import ReturnDict
 import logging
 import toolviper.utils.logger as logger
 
-#lg = logger.get_logger()
-#lg.setLevel(logging.DEBUG)
+# lg = logger.get_logger()
+# lg.setLevel(logging.DEBUG)
 
 # XXX : TODO: As of 2025-10-07 there is no way to supply an initial model image to the deconvolver
 
@@ -68,9 +68,7 @@ def progress_callback(
         Frequency of logging iterations (default is every 100 iterations).
     """
     if iter_num % niter_log == 0:
-        logger.info(
-            f"  Iteration {iter_num}, peak at ({px}, {py}): {peak:.6f}"
-        )
+        logger.info(f"  Iteration {iter_num}, peak at ({px}, {py}): {peak:.6f}")
 
 
 def _validate_deconv_params(deconv_params):
@@ -212,7 +210,9 @@ def deconvolve(
         for nn in range(nchan):
             # Compute PSF sidelobe, same for all pols
             _psf_values = psf_xds.isel(time=tt, frequency=nn)["SKY"].values
-            _psf_values = _psf_values[None, None, ...]  # Add dummy axes for freq and time
+            _psf_values = _psf_values[
+                None, None, ...
+            ]  # Add dummy axes for freq and time
             _main_lobe, _blc, _trc, max_psf_sidelobe = extract_main_lobe(
                 psf_fit_window, psf_fit_cutoff, _psf_values
             )
@@ -239,7 +239,10 @@ def deconvolve(
                 # Get starting model flux for this plane
                 if model_xds is not None:
                     start_model_flux = float(
-                        model_xds["SKY"].isel(time=tt, frequency=nn, polarization=pp).sum().values
+                        model_xds["SKY"]
+                        .isel(time=tt, frequency=nn, polarization=pp)
+                        .sum()
+                        .values
                     )
                 else:
                     start_model_flux = 0.0
@@ -353,7 +356,9 @@ def hogbom_clean(
     if not isinstance(psf, np.ndarray) or psf.ndim != 2:
         raise ValueError("psf must be a 2D numpy array with shape (ny, nx)")
     if dirty_image.shape != psf.shape:
-        raise ValueError(f"dirty_image and psf must have same shape. Got {dirty_image.shape} and {psf.shape}")
+        raise ValueError(
+            f"dirty_image and psf must have same shape. Got {dirty_image.shape} and {psf.shape}"
+        )
 
     logger.debug(f"Dirty image shape: {dirty_image.shape}")
     logger.debug(f"PSF shape: {psf.shape}")
