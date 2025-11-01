@@ -111,9 +111,11 @@ def _validate_deconv_params(deconv_params):
             elif key == "clean_box":
                 if deconv_params[key] is not None and not (
                     isinstance(deconv_params[key], tuple)
-                    and len(deconv_params[key]) == 2
+                    and len(deconv_params[key]) == 4
                 ):
-                    raise ValueError("Clean box must be a tuple of slices or None.")
+                    raise ValueError(
+                        "Clean box must be a 4-tuple (xmin, xmax, ymin, ymax) or None."
+                    )
 
     return deconv_params
 
