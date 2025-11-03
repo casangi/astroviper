@@ -49,7 +49,7 @@ class ReturnDict:
         return self.data
 
     def __repr__(self):
-        lines = ""
+        lines = []
         for key, value in self.data.items():
             lines.append(f"  {key}: {value}")
         return "\n".join(lines)
