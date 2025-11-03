@@ -409,6 +409,10 @@ def dgrid_numba(
     supp_centre = support // 2
     supp_beg = -supp_centre
     supp_end = supp_beg + support
+    pos = np.empty(2, dtype=np.float64)
+    loc = np.empty(2, dtype=np.int32)
+    off = np.empty(2, dtype=np.int32)
+
     for t in prange(nt):
         for b in range(nb):
             for ipol in range(nvispol):
@@ -417,15 +421,37 @@ def dgrid_numba(
                     for ichan in range(nvischan):
                         achan = chanmap[ichan]
                         if 0 <= achan < nchan and not flag[t, b, ichan, ipol]:
-                            phasor, loc, off = sgrid_numba(
-                                uvw[t, b],
-                                dphase[t, b],
-                                freq[ichan],
-                                c,
-                                scale,
-                                offset,
-                                sampling,
+                            # phasor, loc, off = sgrid_numba(
+                            #    uvw[t, b],
+                            #    dphase[t, b],
+                            #    freq[ichan],
+                            #    c,
+                            #    scale,
+                            #    offset,
+                            #    sampling,
+                            # )
+                            # Inlined sgrid
+
+                            pos[0] = (
+                                scale[0] * uvw[t, b, 0] * freq[ichan] / c + offset[0]
                             )
+                            pos[1] = (
+                                scale[1] * uvw[t, b, 1] * freq[ichan] / c + offset[1]
+                            )
+
+                            loc[0] = int(np.round(pos[0]))
+                            loc[1] = int(np.round(pos[1]))
+
+                            off[0] = int(
+                                np.round((float(loc[0]) - pos[0]) * float(sampling))
+                            )
+                            off[1] = int(
+                                np.round((float(loc[1]) - pos[1]) * float(sampling))
+                            )
+
+                            phase = -2.0 * np.pi * dphase[t, b] * freq[ichan] / c
+                            phasor = np.cos(phase) + 1j * np.sin(phase)
+                            # End of inlined sgrid logic
 
                             x0, y0 = loc
                             if (
@@ -507,7 +533,6 @@ def degrid_spheroid_ms4(
     elif whichFunc == 2:
         func = dgrid
     uvw = vis.UVW.data
-    print("Type UVW", type(uvw))
     dims = vis.dims
     # as we are not gridding away from phase_center
     dphase = np.zeros((dims["time"], dims["baseline_id"]), dtype=float)

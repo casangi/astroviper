@@ -8,12 +8,17 @@ from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_kernel_1D,
 )
 import unittest
+from astroviper.core.imaging.imaging_utils.standard_gridding_example import (
+    generate_ms4_with_point_sources,
+)
 from astroviper.core.imaging.imaging_utils.standard_degrid import (
     sgrid,
     sgrid_numba,
     dgrid,
     dgrid_numba,
     dgrid_optimized,
+    dgrid2,
+    degrid_spheroid_ms4,
 )
 
 
@@ -143,23 +148,19 @@ class TestStandardDegrid(unittest.TestCase):
             polmap,
         )
         self.assertEqual(np.max(np.abs(self.vis_data)), 2.0)
-        dgrid_numba(
-            self.uvw,
-            dphase,
-            self.vis_data,
-            flag,
-            self.cell_size,
-            offset,
-            self.grid,
-            self.freq_chan,
-            c,
-            7,
-            100,
-            convFunc,
-            chanmap,
-            polmap,
-        )
-        self.assertEqual(np.max(np.abs(self.vis_data)), 4.0)
+
+    def test_dgrid_optimized(self):
+        self.setup_vis_uvw()
+        offset = self.grid_size // 2
+        flag = np.empty(self.vis_data.shape, dtype=bool)
+        flag.fill(False)
+        nt = self.vis_data.shape[0]
+        nb = self.vis_data.shape[1]
+        dphase = np.zeros([nt, nb], dtype=float)
+        c = const.c.to("m/s").value
+        chanmap = np.zeros(self.freq_chan.shape, dtype=int)
+        polmap = np.zeros([1], dtype=int)
+        convFunc = create_prolate_spheroidal_kernel_1D(100, 7)
         dgrid_optimized(
             self.uvw,
             dphase,
@@ -176,4 +177,81 @@ class TestStandardDegrid(unittest.TestCase):
             chanmap,
             polmap,
         )
-        self.assertEqual(np.max(np.abs(self.vis_data)), 6.0)
+        self.assertEqual(np.max(np.abs(self.vis_data)), 2.0)
+
+    def test_dgrid_numba(self):
+        self.setup_vis_uvw()
+        offset = self.grid_size // 2
+        flag = np.empty(self.vis_data.shape, dtype=bool)
+        flag.fill(False)
+        nt = self.vis_data.shape[0]
+        nb = self.vis_data.shape[1]
+        dphase = np.zeros([nt, nb], dtype=float)
+        c = const.c.to("m/s").value
+        chanmap = np.zeros(self.freq_chan.shape, dtype=int)
+        polmap = np.zeros([1], dtype=int)
+        convFunc = create_prolate_spheroidal_kernel_1D(100, 7)
+        dgrid_numba(
+            self.uvw,
+            dphase,
+            self.vis_data,
+            flag,
+            self.cell_size,
+            offset,
+            self.grid,
+            self.freq_chan,
+            c,
+            7,
+            100,
+            convFunc,
+            chanmap,
+            polmap,
+        )
+        self.assertEqual(np.max(np.abs(self.vis_data)), 2.0)
+
+    def test_dgrid2(self):
+        self.setup_vis_uvw()
+        offset = self.grid_size // 2
+        flag = np.empty(self.vis_data.shape, dtype=bool)
+        flag.fill(False)
+        nt = self.vis_data.shape[0]
+        nb = self.vis_data.shape[1]
+        dphase = np.zeros([nt, nb], dtype=float)
+        c = const.c.to("m/s").value
+        chanmap = np.zeros(self.freq_chan.shape, dtype=int)
+        polmap = np.zeros([1], dtype=int)
+        convFunc = create_prolate_spheroidal_kernel_1D(100, 7)
+        dgrid2(
+            self.uvw,
+            dphase,
+            self.vis_data,
+            flag,
+            self.cell_size,
+            offset,
+            self.grid,
+            self.freq_chan,
+            c,
+            7,
+            100,
+            convFunc,
+            chanmap,
+            polmap,
+        )
+        self.assertEqual(np.max(np.abs(self.vis_data)), 2.0)
+
+    def test_degrid_spheroid_ms4(self):
+        sources, npix, cell, ms = generate_ms4_with_point_sources(
+            nsources=1, flux=np.array([2.0], dtype=float)
+        )
+        cellval = np.array([cell.to("rad").value, cell.to("rad").value], dtype=float)
+        ft_mod = np.zeros([1, 1, npix, npix], dtype=complex)
+        ft_mod[:, :, :, :] = complex(2.0 + 0j)
+        degrid_spheroid_ms4(
+            vis=ms,
+            grid=ft_mod,
+            pixelincr=cellval,
+            support=7,
+            sampling=100,
+            whichFunc=0,
+        )
+        self.assertEqual(np.max(ms.VISIBILITY_MODEL), 2.0)
