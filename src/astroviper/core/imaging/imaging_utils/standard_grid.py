@@ -2,7 +2,12 @@ from numba import jit
 import numpy as np
 import numpy.typing as npt
 import math
+import xarray
 from typing import Tuple
+from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import (
+    create_prolate_spheroidal_kernel_1D,
+    create_prolate_spheroidal_kernel,
+)
 
 # from astropy import constants
 
@@ -581,3 +586,56 @@ def standard_imaging_weight_degrid_jit(
                                     )
 
     return
+
+
+def grid2image_spheroid_ms4(
+    vis: xarray.core.datatree.DataTree,
+    resid_array: np.ndarray,
+    pixelincr: np.ndarray,
+    support: int = 7,
+    sampling: int = 100,
+    dopsf: bool = False,
+    column="VISIBILITY",
+    chan_mode="continuum",
+):
+
+    vis_data = vis[column].data
+    uvw = vis.UVW.data
+    weight = vis.WEIGHT.data
+    freq_chan = vis.coords["frequency"].values
+    nx, ny = resid_array.shape[-2:]
+    cgk_1D = create_prolate_spheroidal_kernel_1D(sampling, support)
+    gridvis, sumwt = standard_grid_numpy_wrap_input_checked(
+        vis_data,
+        uvw,
+        weight,
+        freq_chan,
+        cgk_1D,
+        image_size=np.array([nx, ny], dtype=int),
+        cell_size=pixelincr,
+        oversampling=sampling,
+        support=support,
+        complex_grid=True,
+        do_psf=dopsf,
+        chan_mode=chan_mode,
+    )
+    if gridvis.shape != resid_array.shape:
+        raise RuntimeError(
+            f"Shapes of gridded vis and image do no match {gridvis.shape} and {resid_array.shape}"
+        )
+    kernel, corrTerm = create_prolate_spheroidal_kernel(
+        sampling, support, np.array([nx, ny], dtype=int)
+    )
+    for chan in range(resid_array.shape[0]):
+        for corr in range(resid_array.shape[1]):
+            resid_array[chan, corr, :, :] = (
+                np.real(
+                    np.fft.fftshift(
+                        np.fft.ifft2(np.fft.ifftshift(gridvis[chan, corr, :, :]))
+                    )
+                )
+                / corrTerm
+                * ny
+                * ny
+                / sumwt[chan, corr]
+            )
