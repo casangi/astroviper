@@ -1,4 +1,5 @@
 # .github/workflows/python-testing-linux.yml
+# Test all notebooks.
 name: ipynb Tests
 
 on:
