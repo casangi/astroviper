@@ -50,8 +50,8 @@ def extract_main_lobe(npix_window, threshold, psf_image):
 
     Args:
         npix_window (tuple): The size of the window in pixels for searching features.
-        psf_image (np.ndarray): The input PSF image with 5 dimensions (time, frequency, polarization, x, y).
         threshold (float): A threshold in fraction of peak value for determining the main lobe.
+        psf_image (np.ndarray): The input PSF image with 5 dimensions (time, frequency, polarization, x, y).
 
     Returns:
         np.ndarray: A new array containing only the main lobe, with other regions zeroed out.
@@ -65,6 +65,7 @@ def extract_main_lobe(npix_window, threshold, psf_image):
             np.zeros_like(psf_image),
             np.array([0, 0]),
             np.array([psf_image.shape[3] - 1, psf_image.shape[4] - 1]),
+            0.0,  # max_sidelobe is 0.0 if peak_intensity is 0
         )
     # find peak location in the psf_image
     itm, ifrq, ipol, peak_y, peak_x = np.unravel_index(
@@ -122,7 +123,7 @@ def extract_main_lobe(npix_window, threshold, psf_image):
     print("maximum sidelobe level: ", max_sidelobe)
     blc, trc = _get_main_lobe_bounding_box(main_lobe_only, max_coords)
     # print("extract_main_lobe: blc, trc=", blc, trc)
-    return main_lobe_only, blc, trc
+    return main_lobe_only, blc, trc, max_sidelobe
 
 
 def psf_gaussian_fit(
@@ -203,7 +204,7 @@ def psf_gaussian_fit(
     #    npix_window, cutoff, px, py, psf2d, delta
     # )
     # print(" after find_n_points blc, trc=", blc, trc)
-    main_lobe_im, blc, trc = extract_main_lobe(
+    main_lobe_im, blc, trc, __ = extract_main_lobe(
         npix_window, cutoff, _xds[dv].data.compute()
     )
     blc = blc - expand_pixel
