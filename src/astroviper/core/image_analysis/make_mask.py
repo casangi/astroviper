@@ -1,10 +1,10 @@
-import numpy as np
 import xarray as xr
+import numpy as np
 
 
 def make_mask(
     input_image: xr.DataArray,
-    pb_threshold: float,
+    threshold: float,
     target_image: xr.DataArray = None,
     apply_on_target: bool = False,
     combine_mask: bool = False,
@@ -17,7 +17,7 @@ def make_mask(
     Parameters:
     input_image : xarray.DataArray
         Input image name (assume pb image for now)
-    pb_threshold : float
+    threshold : float
         PB cutoff with respect to the peak value
     target_image : xarray.DataArray
         Target image to the generated mask to be used
@@ -38,12 +38,12 @@ def make_mask(
     # for simplicity for now, assume the relevant data are all in
     # 'SKY' data variable
     dv = "SKY"
-    # aster image schema update use PRIMARY_BEAM data variable but
+    # After image schema update use PRIMARY_BEAM data variable but
     # for now use SKY data variable
     mask_image = input_image.copy(deep=True)
 
-    if pb_threshold < 0.0 or pb_threshold > 1.0:
-        raise ValueError("pb_threshold must be between 0.0 and 1.0")
+    if threshold < 0.0 or threshold > 1.0:
+        raise ValueError("threshold must be between 0.0 and 1.0")
     # if target_image is provided check dimensions
     # check for l, m sizes also check for other dimensions (time, frequency, polarization)
     if target_image is None:
@@ -79,53 +79,69 @@ def make_mask(
                 )
 
     if combine_mask:
+        hasmask = True
         # check if target_image has existing mask and check attribute 'active_mask' that points the data variable contains MASK
         if "active_mask" in target_image[dv].attrs:
+            print("Found 'active_mask' attr.")
             active_mask_dv = target_image[dv].attrs["active_mask"]
             if active_mask_dv in target_image:
                 existing_mask = target_image[active_mask_dv].copy(deep=True)
                 if active_mask_dv == "MASK0":
+                    print("Inverting existing MASK0")
                     # CASA mask definition is reverse of xradio mask definition
                     existing_mask = ~existing_mask
-                # combine existing mask with new mask using logical OR
+                # combine existing mask with new mask using logical AND and ignoring time axis
+                pb_thesh_mask = mask_image[dv] >= threshold
+
                 combined_mask = mask_image[dv].where(
-                    (mask_image[dv] >= pb_threshold) & existing_mask
+                    pb_thesh_mask.drop_vars("time") & existing_mask.drop_vars("time")
                 )
-                mask_image[dv] = combined_mask
             else:
                 raise KeyError(
                     f"Active mask data variable '{active_mask_dv}' not found in target image"
                 )
         else:
             if "MASK0" in target_image or "MASK" in target_image:
+                # if no "active_mask" attr, check MASKO first then MASK
                 if "MASK0" in target_image:
                     # CASA mask definition is reverse of xradio mask definition
                     existing_mask = ~target_image["MASK0"].copy(deep=True)
                 else:
                     existing_mask = target_image["MASK"].copy(deep=True)
-                # combine existing mask with new mask using logical OR
+                # combine existing mask with new mask using logical AND and ignoring time axis
+                pb_thesh_mask = mask_image[dv] >= threshold
                 combined_mask = mask_image[dv].where(
-                    (mask_image[dv] >= pb_threshold) & existing_mask
+                    pb_thesh_mask.drop_vars("time") & existing_mask.drop_vars("time")
                 )
-                mask_image[dv] = combined_mask
+                # pb_thesh_mask = mask_image[dv] >= threshold
+                # combined_mask = pb_thesh_mask & existing_mask
             else:
+                hasmask = False
                 # no existing mask found, print warning and proceed
                 print(
                     "Warning: No existing mask found in target image. Creating new mask."
                 )
-                mask_image[dv] = mask_image[dv].where(mask_image[dv] >= pb_threshold)
+                mask_image[dv] = mask_image[dv].where(mask_image[dv] >= threshold)
     else:
-        mask_image[dv] = mask_image[dv].where(mask_image[dv] >= pb_threshold)
+        mask_image[dv] = mask_image[dv].where(mask_image[dv] >= threshold)
 
-    mask_image["MASK"] = mask_image[dv] > 0
+    if combine_mask and hasmask:
+        # print("coords of combined mask:", combined_mask.coords)x
+        mask_image["MASK"] = mask_image[dv].where(combined_mask > 0, False).astype(bool)
+    else:
+        mask_image["MASK"] = mask_image[dv] > 0
 
     # generate mask only xds
     mask_only_image = mask_image["MASK"]
     if apply_on_target:
-        # apply the mask on target_image
-        target_image["MASK"] = mask_only_image
-        target_image[dv].attrs["active_mask"] = "MASK"
-        mask_xds = target_image
+        # apply the mask on copy of target_image
+        target_image_copy = target_image.copy(deep=True)
+        if "MASK" in target_image_copy:
+            target_image_copy["MASK"].values = mask_only_image
+        else:
+            target_image_copy["MASK"] = mask_only_image
+        target_image_copy[dv].attrs["active_mask"] = "MASK"
+        mask_xds = target_image_copy
     else:
         mask_xds = xr.Dataset()
         mask_xds["MASK"] = mask_only_image
