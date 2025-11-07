@@ -92,7 +92,7 @@ def test_make_mask_no_target():
     ):
         mask = make_mask(
             input_image=pb_image,
-            pb_threshold=pb_threshold,
+            threshold=pb_threshold,
             target_image=None,
             combine_mask=False,
         )
@@ -104,12 +104,10 @@ def test_make_mask_invalid_pb_threshold():
     target = make_image()
     invalid_thresholds = [-0.1, 1.5]
     for pb_threshold in invalid_thresholds:
-        with pytest.raises(
-            ValueError, match="pb_threshold must be between 0.0 and 1.0"
-        ):
+        with pytest.raises(ValueError, match="threshold must be between 0.0 and 1.0"):
             mask = make_mask(
                 input_image=pb_image,
-                pb_threshold=pb_threshold,
+                threshold=pb_threshold,
                 target_image=target,
                 combine_mask=False,
             )
@@ -126,7 +124,7 @@ def test_make_mask_dimension_mismatch():
     ):
         mask = make_mask(
             input_image=pb_image,
-            pb_threshold=pb_threshold,
+            threshold=pb_threshold,
             target_image=target,
             combine_mask=False,
         )
@@ -143,7 +141,7 @@ def test_make_mask_frequency_mismatch():
     ):
         mask = make_mask(
             input_image=pb_image,
-            pb_threshold=pb_threshold,
+            threshold=pb_threshold,
             target_image=target,
             combine_mask=False,
         )
@@ -160,7 +158,7 @@ def test_make_mask_time_mismatch():
     ):
         mask = make_mask(
             input_image=pb_image,
-            pb_threshold=pb_threshold,
+            threshold=pb_threshold,
             target_image=target,
             combine_mask=False,
         )
@@ -177,7 +175,7 @@ def test_make_mask_polarization_mismatch():
     ):
         mask = make_mask(
             input_image=pb_image,
-            pb_threshold=pb_threshold,
+            threshold=pb_threshold,
             target_image=target,
             combine_mask=False,
         )
@@ -202,7 +200,7 @@ def test_make_mask_pb_thresh_only():
     pb_threshold = 0.1
     mask = make_mask(
         input_image=pb_image,
-        pb_threshold=pb_threshold,
+        threshold=pb_threshold,
         target_image=target,
         combine_mask=False,
     )
@@ -255,7 +253,7 @@ def test_make_mask_combine():
     pb_threshold = 0.9
     mask = make_mask(
         input_image=pb_image,
-        pb_threshold=pb_threshold,
+        threshold=pb_threshold,
         target_image=target,
         combine_mask=True,
     )
@@ -289,7 +287,7 @@ def test_make_mask_apply_on_target():
     pb_threshold = 0.2
     mask = make_mask(
         input_image=pb_image,
-        pb_threshold=pb_threshold,
+        threshold=pb_threshold,
         target_image=target,
         apply_on_target=True,
         combine_mask=False,
@@ -304,6 +302,38 @@ def test_make_mask_apply_on_target():
             "m (radians)",
             block=debug,
         )
+
+    np.testing.assert_array_equal(mask["MASK"].values, expected_mask_data)
+
+
+def test_make_mask_apply_on_target_existing_mask():
+    """Test make_mask with apply_on_target = True and existing mask in target image"""
+    # first make target image and add a rectangular mask in 'MASK' data variable
+    target = make_image()
+    target["MASK"] = xr.DataArray(
+        np.zeros_like(target["SKY"].values, dtype=bool),
+        coords=target["SKY"].coords,
+        dims=target["SKY"].dims,
+    )
+    # set a rectangular region to True
+    target["MASK"].isel(l=slice(60, 80), m=slice(40, 80)).values[:] = True
+    # make target data xarray.Dataset
+    target_xds = xr.Dataset()
+    target_xds["SKY"] = target["SKY"]
+    target_xds["MASK"] = target["MASK"]
+
+    pb_image = make_pbimage()
+    pb_threshold = 0.9
+    mask = make_mask(
+        input_image=pb_image,
+        threshold=pb_threshold,
+        target_image=target_xds,
+        apply_on_target=True,
+        combine_mask=True,
+    )
+    expected_mask_data = (pb_image["SKY"].values >= pb_threshold) & (
+        target["MASK"].values
+    )
 
     np.testing.assert_array_equal(mask["MASK"].values, expected_mask_data)
 
@@ -330,7 +360,7 @@ def test_make_mask_active_mask_attribute():
     pb_threshold = 0.9
     mask = make_mask(
         input_image=pb_image,
-        pb_threshold=pb_threshold,
+        threshold=pb_threshold,
         target_image=target_xds,
         combine_mask=True,
     )
@@ -366,7 +396,7 @@ def test_make_mask_active_mask_attribute_casa_mask():
     pb_threshold = 0.9
     mask = make_mask(
         input_image=pb_image,
-        pb_threshold=pb_threshold,
+        threshold=pb_threshold,
         target_image=target_xds,
         combine_mask=True,
     )
@@ -404,7 +434,7 @@ def test_make_mask_active_mask_attribute_missing_dv():
     ):
         mask = make_mask(
             input_image=pb_image,
-            pb_threshold=pb_threshold,
+            threshold=pb_threshold,
             target_image=target_xds,
             combine_mask=True,
         )
@@ -417,7 +447,7 @@ def test_make_mask_target_no_existing_mask():
     pb_threshold = 0.1
     mask = make_mask(
         input_image=pb_image,
-        pb_threshold=pb_threshold,
+        threshold=pb_threshold,
         target_image=target,
         combine_mask=True,
     )
@@ -449,7 +479,7 @@ def test_make_mask_no_active_mask_casa_mask():
     pb_threshold = 0.9
     mask = make_mask(
         input_image=pb_image,
-        pb_threshold=pb_threshold,
+        threshold=pb_threshold,
         target_image=target_xds,
         combine_mask=True,
     )
@@ -471,7 +501,7 @@ def test_make_mask_output_image(tmp_path):
     output_image_name_str = str(tmp_path / "test_mask_output.zarr")
     mask = make_mask(
         input_image=pb_image,
-        pb_threshold=pb_threshold,
+        threshold=pb_threshold,
         target_image=target,
         output_image_name=output_image_name_str,
         output_format="zarr",
