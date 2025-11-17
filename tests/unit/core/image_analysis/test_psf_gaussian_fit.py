@@ -323,7 +323,7 @@ def test_extract_main_lobe():
     data[0, 0, 0, :, :] = psf_image
     npix_window = np.array([41, 41])
     cutoff = 0.1
-    main_lobe_only, blc, trc = extract_main_lobe(npix_window, cutoff, data)
+    main_lobe_only, blc, trc, __ = extract_main_lobe(npix_window, cutoff, data)
     print("test_extract_main_lobe: blc, trc=", blc, trc)
     # Check that the main lobe is extracted correctly by comparing total main lobe pixels
     # with model main lobe (gaussian) pixels with cutoff applied
@@ -362,7 +362,7 @@ def test_extract_main_lobe_offset_peak():
     data[0, 0, 0, :, :] = psf_image
     npix_window = np.array([41, 41])
     cutoff = 0.1
-    main_lobe_only, blc, trc = extract_main_lobe(npix_window, cutoff, data)
+    main_lobe_only, blc, trc, __ = extract_main_lobe(npix_window, cutoff, data)
     print("test_extract_main_lobe_offset_peak: blc, trc=", blc, trc)
     # Check that the main lobe is extracted correctly by comparing total main lobe pixels
     # with model main lobe (gaussian) pixels with cutoff applied
