@@ -170,9 +170,8 @@ class TestGcfProlateSpheroidal(unittest.TestCase):
 
         # For a given oversampling level, the kernel should be symmetric
         # in u and v directions (kernel[x,y] should equal kernel[y,x])
-        center_u = oversampling // 2
-        center_v = oversampling // 2
-        kernel_slice = kernel[center_u, center_v, :, :]
+        center = oversampling // 2
+        kernel_slice = kernel[center, center, :, :]
 
         # Check that the kernel slice is symmetric
         self.assertTrue(np.allclose(kernel_slice, kernel_slice.T))
