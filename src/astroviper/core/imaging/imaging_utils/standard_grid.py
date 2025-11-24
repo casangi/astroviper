@@ -3,7 +3,7 @@ import numpy as np
 import numpy.typing as npt
 import math
 import xarray
-from typing import Tuple
+from typing import Tuple, Union, List
 from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_kernel_1D,
     create_prolate_spheroidal_kernel,
@@ -589,23 +589,20 @@ def standard_imaging_weight_degrid_jit(
     return
 
 
-type listms4 = list[xarray.core.datatree.DataTree]
-
-
 def grid2image_spheroid_ms4(
-    vis: listms4,
+    vis: Union[xarray.core.datatree.DataTree, List[xarray.core.datatree.DataTree]],
     resid_array: np.ndarray,
     pixelincr: np.ndarray,
     support: int = 7,
     sampling: int = 100,
     dopsf: bool = False,
-    column="VISIBILITY",
-    chan_mode="continuum",
+    column: str = "VISIBILITY",
+    chan_mode: str = "continuum",
 ):
     """
     Parameters
     ----------
-    vis : xarray.core.datatree.DataTree
+    vis : single xarray.core.datatree.DataTree or a list of them
         an ms v4 compatible xarray
     resid_array : np.ndarray
         an array that defines the image shape
@@ -633,7 +630,7 @@ def grid2image_spheroid_ms4(
     None.
     *TODO* option to avoid DC (u=0, v=0)
     """
-    if type(vis) == xarray.core.datatree.DataTree:
+    if isinstance(vis, xarray.core.datatree.DataTree):
         listvis = [vis]
     else:
         listvis = vis
@@ -642,8 +639,8 @@ def grid2image_spheroid_ms4(
     gridvis = np.zeros(resid_array.shape, dtype=complex)
     sumwt = np.zeros(resid_array.shape[:2])
     for elvis in listvis:
-        if type(elvis) != xarray.core.datatree.DataTree:
-            raise Exception("One of the elements of vis is not an xarray datatree")
+        if not isinstance(elvis, xarray.core.datatree.DataTree):
+            raise TypeError("One of the elements of vis is not an xarray datatree")
         vis_data = elvis[column].data
         uvw = elvis.UVW.data
         weight = elvis.WEIGHT.data

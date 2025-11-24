@@ -23,7 +23,7 @@ from astroviper.core.imaging.fft import fft_lm_to_uv
 def generate_cube_ms4_with_spectral_point_source():
     """
     This will generate an ms4 with 16 channels
-    Each channel will have a point source with flux of the channel buner
+    Each channel will have a point source with flux of the channel number
 
     Returns tuple
     -------
