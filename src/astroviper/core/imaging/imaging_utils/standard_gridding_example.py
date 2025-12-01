@@ -20,6 +20,38 @@ from astroviper.core.imaging.imaging_utils.standard_degrid import (
 from astroviper.core.imaging.fft import fft_lm_to_uv
 
 
+def generate_cube_ms4_with_spectral_point_source():
+    """
+    This will generate an ms4 with 16 channels
+    Each channel will have a point source with flux of the channel number
+
+    Returns tuple
+    -------
+    cell size to use when imaging
+    an xarray data tree "ms v4"
+
+    """
+    if not os.path.exists("Antennae_fld1_casa_lsrk.ps.zarr"):
+        download(file="Antennae_fld1_casa_lsrk.ps.zarr", decompress=True)
+    ps_xdt = xr.open_datatree("Antennae_fld1_casa_lsrk.ps.zarr", engine="zarr")
+    origms = ps_xdt["Antennae_fld1_casa_lsrk_0"]
+    origms_subset = origms.isel(frequency=slice(0, 16))
+    f = np.max(origms_subset.coords["frequency"]).values * u.Unit(
+        origms_subset.coords["frequency"].units
+    )
+    uv_components = origms_subset.UVW.sel(uvw_label=["u", "v"])
+    uv_squared = uv_components**2
+
+    # Sum the squares along the uvw_label dimension
+    sum_square_uv = uv_squared.sum(dim="uvw_label")
+    max_uvdist = np.sqrt(sum_square_uv.max()).values
+    invlam = f / const.c
+    cell = ((0.5 / ((invlam).to(u.Unit("/m")).value * max_uvdist)) * u.rad).value
+    for k in range(16):
+        origms_subset["VISIBILITY"][:, :, k, :] = k + 1 + 0j
+    return cell, origms_subset
+
+
 def generate_ms4_with_point_sources(
     nsources: int = 2, flux: np.ndarray = np.array([1.0, 5.0])
 ):
