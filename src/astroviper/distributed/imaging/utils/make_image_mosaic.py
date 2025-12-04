@@ -58,7 +58,7 @@ def make_image_mosaic(input_params):
         time_coords=image_time_coord,
     )
     img_xds.attrs["data_groups"] = {"mosaic": {}}
-    
+
     T_empty_image = time.time() - start_1
     logger.debug("1. Empty Image " + str(time.time() - start_1))
 

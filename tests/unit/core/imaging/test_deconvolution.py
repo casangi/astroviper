@@ -591,7 +591,7 @@ class TestReturnDict:
 
         resid_image, psf_image = hogbom_images
         dirty_xds = load_image(resid_image)
-        
+
         psf_xds = load_image(psf_image)
 
         deconv_params = {"gain": 0.1, "niter": 100, "threshold": 0.001}
@@ -733,14 +733,13 @@ class TestReturnDict:
                 ["time", "frequency", "polarization", "l", "m"],
                 mask_data,
             )
-            
+
         if "MASK_SKY" in dirty_xds:
             mask_data = np.repeat(dirty_xds["MASK_SKY"].values, npol, axis=2)
             data_vars_dirty["MASK_SKY"] = (
                 ["time", "frequency", "polarization", "l", "m"],
                 mask_data,
             )
-        
 
         dirty_xds_new = xr.Dataset(
             data_vars_dirty,
@@ -862,7 +861,7 @@ class TestReturnDict:
                 ["time", "frequency", "polarization", "l", "m"],
                 mask_data,
             )
-        
+
         if "MASK_SKY" in dirty_xds:
             mask_data = np.repeat(dirty_xds["MASK_SKY"].values, nchan, axis=1)
             data_vars_dirty["MASK_SKY"] = (

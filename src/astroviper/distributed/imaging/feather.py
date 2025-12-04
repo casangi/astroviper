@@ -87,11 +87,13 @@ def feather(
         )
     else:
         sd_xds = (
-            open_image({"sky":lowres}, selection=selection) if isinstance(lowres, str) else lowres
-        )    
-    
+            open_image({"sky": lowres}, selection=selection)
+            if isinstance(lowres, str)
+            else lowres
+        )
+
     # interferometer image
-    
+
     if "zarr" in highres:
         int_xds = (
             xr.open_zarr(highres).isel(selection)
@@ -100,7 +102,9 @@ def feather(
         )
     else:
         int_xds = (
-            open_image({"sky":highres}, selection=selection) if isinstance(highres, str) else highres
+            open_image({"sky": highres}, selection=selection)
+            if isinstance(highres, str)
+            else highres
         )
     if sd_xds[_sky].shape != int_xds[_sky].shape:
         raise RuntimeError("Image shapes differ")
