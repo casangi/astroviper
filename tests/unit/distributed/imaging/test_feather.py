@@ -11,7 +11,7 @@ from toolviper.dask.client import local_client
 from toolviper.utils.data import download
 import unittest
 import xarray as xr
-from xradio.image.image import load_image, make_empty_sky_image, read_image, write_image
+from xradio.image.image import load_image, make_empty_sky_image, open_image, write_image
 
 
 class FeatherShared:
@@ -48,7 +48,7 @@ class FeatherShared:
             phase_center=[0.6, -0.2],
             image_size=imsize,
             cell_size=[15 * rad_per_arcsec, 15 * rad_per_arcsec],
-            chan_coords=np.linspace(1.4e9, 1.5e9, nchan),
+            frequency_coords=np.linspace(1.4e9, 1.5e9, nchan),
             pol_coords=["I"],
             time_coords=[0],
         )
@@ -62,8 +62,8 @@ class FeatherShared:
             m_slice = slice(blc, blc + imsize[1])
             sel_dict["m"] = m_slice
 
-        xds_sd_temp = read_image(cls.sd_image).isel(sel_dict)
-        xds_int_temp = read_image(cls.int_image).isel(sel_dict)
+        xds_sd_temp = open_image(cls.sd_image).isel(sel_dict)
+        xds_int_temp = open_image(cls.int_image).isel(sel_dict)
 
         dm = skel_xds.sizes
         sky_da_zeros = da.zeros(
@@ -71,17 +71,24 @@ class FeatherShared:
             dtype=np.float32,
         )
         sky_dims = list(skel_xds.dims)
-        if "beam_param" in sky_dims:
-            sky_dims.remove("beam_param")
+        if "beam_params_label" in sky_dims:
+            sky_dims.remove("beam_params_label")
         coords = ["time", "frequency", "polarization", "l", "m"]
         sky_coords = {c: skel_xds[c] for c in coords}
+        
+        print("sky_coords:", sky_coords)  # debug
+        print("&&&&&&&&&")
+        print("sky_dims:", sky_dims)      # debug
+        print("&&&&&&&&&")
+        print("sky_da_zeros shape:", sky_da_zeros.shape)  # debug
+        print("****************")  # debug
         sky_xa_zeros = xr.DataArray(data=sky_da_zeros, coords=sky_coords, dims=sky_dims)
 
         beam_da_zeros = da.zeros(
-            [dm["time"], dm["frequency"], dm["polarization"], dm["beam_param"]],
+            [dm["time"], dm["frequency"], dm["polarization"], dm["beam_params_label"]],
             dtype=np.float32,
         )
-        beam_dims = ["time", "frequency", "polarization", "beam_param"]
+        beam_dims = ["time", "frequency", "polarization", "beam_params_label"]
         beam_xa_zeros = xr.DataArray(
             beam_da_zeros.copy(),
             dims=beam_dims,
@@ -95,17 +102,17 @@ class FeatherShared:
         for i in (0, 1):
             xds = copy.deepcopy(skel_xds)
             xds["SKY"] = sky_xa_zeros.copy()
-            xds["BEAM"] = beam_xa_zeros.copy()
+            xds["BEAM_FIT_PARAMS"] = beam_xa_zeros.copy()
             for j in range(0, nchan, 16):
                 min_chan = j
                 max_chan = min(j + 16, nchan)
                 fx = xds_sd_temp if i == 0 else xds_int_temp
                 xds["SKY"][{"frequency": slice(min_chan, max_chan)}] = fx["SKY"].values
                 xds["SKY"].attrs = {"units": "Jy/beam"}
-                xds["BEAM"][{"frequency": slice(min_chan, max_chan)}] = fx[
-                    "BEAM"
+                xds["BEAM_FIT_PARAMS"][{"frequency": slice(min_chan, max_chan)}] = fx[
+                    "BEAM_FIT_PARAMS"
                 ].values
-                xds["BEAM"].attrs = {"units": "rad"}
+                xds["BEAM_FIT_PARAMS"].attrs = {"units": "rad"}
             if i == 0:
                 xds_sd = xds
             else:
@@ -161,7 +168,7 @@ class FeatherTest(FeatherShared, unittest.TestCase):
         self._ensure_inputs()
         download(self.feather_expected)  # expected result file used for comparison
 
-        exp_fds = read_image("feather.im")
+        exp_fds = open_image("feather.im")
         xds_sd = load_image(self.sd_zarr)
         xds_int = load_image(self.int_zarr)
 
@@ -172,7 +179,7 @@ class FeatherTest(FeatherShared, unittest.TestCase):
                 feather_xds["SKY"].shape, xds_sd["SKY"].shape, "Incorrect sky shape"
             )
             self.assertTrue(
-                (feather_xds["BEAM"].values == xds_int["BEAM"].values).all(),
+                (feather_xds["BEAM_FIT_PARAMS"].values == xds_int["BEAM_FIT_PARAMS"].values).all(),
                 "Incorrect beam values",
             )
             self.assertTrue(
@@ -260,7 +267,7 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
         )
 
         # load model for comparison
-        model_xds = read_image(self.model_image)
+        model_xds = open_image(self.model_image)
         self.assertEqual(
             feather_xds.SKY.shape,
             model_xds.SKY.shape,
@@ -295,7 +302,7 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
     def test_center_region_and_width_inference(self):
         self._ensure_feather_output(regenerate=False, cores=4, overwrite=True)
         feather_xds = load_image(self.feather_out)
-        model_xds = read_image(self.model_image)
+        model_xds = open_image(self.model_image)
 
         feather_plane = feather_xds.SKY.isel(frequency=0)
         model_plane = model_xds.SKY.isel(frequency=0)

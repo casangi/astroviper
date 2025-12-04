@@ -57,7 +57,7 @@ def cube_imaging_niter0(
         phase_center=grid_params["phase_direction"].values,
         image_size=grid_params["image_size"],
         cell_size=grid_params["cell_size"],
-        chan_coords=frequency_coord.data,
+        frequency_coords=frequency_coord.data,
         pol_coords=polarization_coord.data,
         time_coords=[0],
     )
