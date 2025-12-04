@@ -75,10 +75,10 @@ class FeatherShared:
             sky_dims.remove("beam_params_label")
         coords = ["time", "frequency", "polarization", "l", "m"]
         sky_coords = {c: skel_xds[c] for c in coords}
-        
+
         print("sky_coords:", sky_coords)  # debug
         print("&&&&&&&&&")
-        print("sky_dims:", sky_dims)      # debug
+        print("sky_dims:", sky_dims)  # debug
         print("&&&&&&&&&")
         print("sky_da_zeros shape:", sky_da_zeros.shape)  # debug
         print("****************")  # debug
@@ -179,7 +179,10 @@ class FeatherTest(FeatherShared, unittest.TestCase):
                 feather_xds["SKY"].shape, xds_sd["SKY"].shape, "Incorrect sky shape"
             )
             self.assertTrue(
-                (feather_xds["BEAM_FIT_PARAMS"].values == xds_int["BEAM_FIT_PARAMS"].values).all(),
+                (
+                    feather_xds["BEAM_FIT_PARAMS"].values
+                    == xds_int["BEAM_FIT_PARAMS"].values
+                ).all(),
                 "Incorrect beam values",
             )
             self.assertTrue(

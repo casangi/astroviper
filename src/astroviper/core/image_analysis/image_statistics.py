@@ -24,8 +24,8 @@ def get_image_masksum(image_xds, dv="SKY"):
         The sum of the mask values in the image.
     """
 
-    #maskname = image_xds[dv].active_mask
-    mask_name = "MASK_" + dv #need to move to using data_groups
+    # maskname = image_xds[dv].active_mask
+    mask_name = "MASK_" + dv  # need to move to using data_groups
 
     if mask_name is not None:
         mask_xds = image_xds[mask_name]

@@ -62,7 +62,9 @@ def test_psf_gaussian_fit_output_structure():
     assert params.shape[-1] == 3
     # Check that the fitted widths are positive
     assert np.all(result["BEAM_FIT_PARAMS"].data[:, :, :-1] > 0)
-    assert np.allclose(result["BEAM_FIT_PARAMS"].data[0, 0, 0, :], truth_values, rtol=1e-3, atol=5)
+    assert np.allclose(
+        result["BEAM_FIT_PARAMS"].data[0, 0, 0, :], truth_values, rtol=1e-3, atol=5
+    )
 
 
 def test_psf_gaussian_fit_custom_window():
@@ -74,7 +76,9 @@ def test_psf_gaussian_fit_custom_window():
     params = result["BEAM_FIT_PARAMS"]["beam_param"]
     assert params.shape == (3,)
     assert np.all(result["BEAM_FIT_PARAMS"].data[:, :, :-1] > 0)
-    assert np.allclose(result["BEAM_FIT_PARAMS"].data[0, 0, 0, :], truth_values, rtol=1e-3, atol=5)
+    assert np.allclose(
+        result["BEAM_FIT_PARAMS"].data[0, 0, 0, :], truth_values, rtol=1e-3, atol=5
+    )
 
 
 def test_invalid_npix_window_type():
@@ -156,7 +160,9 @@ def test_all_zero_input():
     ds["SKY"].data[:] = 0
     result = psf_gaussian_fit(ds)
     # Depending on implementation, may be all zeros or NaNs
-    assert np.all((result["BEAM_FIT_PARAMS"].data == 0) | np.isnan(result["BEAM_FIT_PARAMS"].data))
+    assert np.all(
+        (result["BEAM_FIT_PARAMS"].data == 0) | np.isnan(result["BEAM_FIT_PARAMS"].data)
+    )
 
 
 def test_no_l_coordinate():
@@ -178,7 +184,9 @@ def test_oversampling():
     ds = create_test_xds(shape=(1, 1, 1, 100, 100))
     result = psf_gaussian_fit(ds, npix_window=[41, 41], sampling=[51, 51])
     truth_values = [0.47096, 0.47096, 0.0]
-    assert np.allclose(result["BEAM_FIT_PARAMS"].data[0, 0, 0, :], truth_values, rtol=1e-3, atol=5)
+    assert np.allclose(
+        result["BEAM_FIT_PARAMS"].data[0, 0, 0, :], truth_values, rtol=1e-3, atol=5
+    )
 
 
 def create_rotated_gaussian(shape, angle_deg):
