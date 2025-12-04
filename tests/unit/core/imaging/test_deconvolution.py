@@ -591,6 +591,7 @@ class TestReturnDict:
 
         resid_image, psf_image = hogbom_images
         dirty_xds = load_image(resid_image)
+
         psf_xds = load_image(psf_image)
 
         deconv_params = {"gain": 0.1, "niter": 100, "threshold": 0.001}
@@ -713,8 +714,8 @@ class TestReturnDict:
             coords_dict["declination"] = dirty_xds.coords["declination"]
         if "velocity" in dirty_xds.coords:
             coords_dict["velocity"] = dirty_xds.coords["velocity"]
-        if "beam_param" in dirty_xds.coords:
-            coords_dict["beam_param"] = dirty_xds.coords["beam_param"]
+        if "beam_params_label" in dirty_xds.coords:
+            coords_dict["beam_params_label"] = dirty_xds.coords["beam_params_label"]
 
         # Create new xarray datasets from scratch
         # Include mask if present in original
@@ -726,9 +727,16 @@ class TestReturnDict:
         }
 
         # Add mask if present
-        if "MASK0" in dirty_xds:
-            mask_data = np.repeat(dirty_xds["MASK0"].values, npol, axis=2)
-            data_vars_dirty["MASK0"] = (
+        if "MASK_0" in dirty_xds:
+            mask_data = np.repeat(dirty_xds["MASK_0"].values, npol, axis=2)
+            data_vars_dirty["MASK_0"] = (
+                ["time", "frequency", "polarization", "l", "m"],
+                mask_data,
+            )
+
+        if "MASK_SKY" in dirty_xds:
+            mask_data = np.repeat(dirty_xds["MASK_SKY"].values, npol, axis=2)
+            data_vars_dirty["MASK_SKY"] = (
                 ["time", "frequency", "polarization", "l", "m"],
                 mask_data,
             )
@@ -847,9 +855,16 @@ class TestReturnDict:
         }
 
         # Add mask if present
-        if "MASK0" in dirty_xds:
-            mask_data = np.repeat(dirty_xds["MASK0"].values, nchan, axis=1)
-            data_vars_dirty["MASK0"] = (
+        if "MASK_0" in dirty_xds:
+            mask_data = np.repeat(dirty_xds["MASK_0"].values, nchan, axis=1)
+            data_vars_dirty["MASK_0"] = (
+                ["time", "frequency", "polarization", "l", "m"],
+                mask_data,
+            )
+
+        if "MASK_SKY" in dirty_xds:
+            mask_data = np.repeat(dirty_xds["MASK_SKY"].values, nchan, axis=1)
+            data_vars_dirty["MASK_SKY"] = (
                 ["time", "frequency", "polarization", "l", "m"],
                 mask_data,
             )
