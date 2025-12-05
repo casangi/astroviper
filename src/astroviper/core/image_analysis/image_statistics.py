@@ -27,7 +27,7 @@ def get_image_masksum(image_xds, dv="SKY"):
     # maskname = image_xds[dv].active_mask
     mask_name = "MASK_" + dv  # need to move to using data_groups
 
-    if mask_name is not None:
+    if mask_name in image_xds:
         mask_xds = image_xds[mask_name]
         mask_sum = int(mask_xds.sum().values)
     else:
