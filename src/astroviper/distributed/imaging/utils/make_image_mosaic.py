@@ -53,7 +53,7 @@ def make_image_mosaic(input_params):
         phase_center=grid_params["phase_direction"].values,
         image_size=grid_params["image_size"],
         cell_size=grid_params["cell_size"],
-        chan_coords=image_freq_coord,
+        frequency_coords=image_freq_coord,
         pol_coords=image_polarization_coord,
         time_coords=image_time_coord,
     )
