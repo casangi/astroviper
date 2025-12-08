@@ -833,6 +833,11 @@ class IterationController:
         self.stopcode = StopCode(major=MAJOR_CONTINUE, minor=MINOR_CONTINUE)
         self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_CONTINUE]
 
+    def reset_stopcode(self) -> None:
+        """Reset the stopcode of the iteration controller"""
+        self.stopcode = StopCode(major=MAJOR_CONTINUE, minor=MINOR_CONTINUE)
+        self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_CONTINUE]
+
     def get_state(self) -> Dict[str, Any]:
         """Get current state of the iteration controller as a dictionary.
 
