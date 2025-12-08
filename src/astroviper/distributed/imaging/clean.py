@@ -26,21 +26,21 @@ from astroviper.core.imaging.fft_norm_img_xds import fft_norm_img_xds
 logger = logging.getLogger(__name__)
 
 
-
-def clean(ms_xds: xr.Dataset,
-          gridder : str = 'standard',
-          deconvolver : str = 'hogbom',
-          image_size : Optional[Tuple[int, int]] = [256, 256],
-          niter : int = 0,
-          nmajor : int = 0,
-          threshold : float = 0.0,
-          gain : float = 0.1,
-          cyclefactor : float = 1.5,
-          cycleniter : int = 10,
-          vis_sel_params: Dict[str, Any],
-          grid_params: Dict[str, Any],
-          iteration_control_params: Dict[str, Any],
-         ) -> Tuple[xr.Dataset, ReturnDict]:
+def clean(
+    ms_xds: xr.Dataset,
+    vis_sel_params: Dict[str, Any],
+    grid_params: Dict[str, Any],
+    iteration_control_params: Dict[str, Any],
+    gridder: str = "standard",
+    deconvolver: str = "hogbom",
+    image_size: Optional[Tuple[int, int]] = [256, 256],
+    niter: int = 0,
+    nmajor: int = 0,
+    threshold: float = 0.0,
+    gain: float = 0.1,
+    cyclefactor: float = 1.5,
+    cycleniter: int = 10,
+) -> Tuple[xr.Dataset, ReturnDict]:
     """
     Perform deconvolution on the image dataset using the specified parameters.
 
@@ -105,12 +105,8 @@ def clean(ms_xds: xr.Dataset,
 
         # Perform Hogbom clean
         img_xds, clean_info = hogbom_clean(
-            img_xds,
-            vis_grid_xds,
-            clean_params,
-            img_sel_params,
-            grid_params
+            img_xds, vis_grid_xds, clean_params, img_sel_params, grid_params
         )
 
         # Update return dictionary with clean info
-        ret_dict[Key.CLEAN_INFO] =
+        # ret_dict[Key.CLEAN_INFO] =
