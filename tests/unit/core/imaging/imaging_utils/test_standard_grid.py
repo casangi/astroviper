@@ -4,6 +4,9 @@ from astroviper.core.imaging.imaging_utils.standard_grid import *
 from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import *
 from astroviper.core.imaging.fft import fft_lm_to_uv
 from astroviper.core.imaging.ifft import ifft_uv_to_lm
+from astroviper.core.imaging.imaging_utils.standard_gridding_example import (
+    generate_cube_ms4_with_spectral_point_source,
+)
 
 import unittest
 
@@ -98,3 +101,24 @@ class TestStandardGridNumpyWrap(unittest.TestCase):
             / sumwt
         )
         self.assertGreater(0.01, np.abs(dirty_psf[0, 0, 100, 100] - 1.0))
+
+    def test_grid2image_spheroid_ms4(self):
+        cell, ms4 = generate_cube_ms4_with_spectral_point_source()
+        dirty_im = np.zeros([16, 2, 200, 200])
+        grid2image_spheroid_ms4(
+            vis=ms4,
+            resid_array=dirty_im,
+            pixelincr=np.array([-cell, cell], dtype=float),
+            support=7,
+            sampling=100,
+            dopsf=False,
+            column="VISIBILITY",
+            chan_mode="cube",
+        )
+        for k in range(16):
+            self.assertAlmostEqual(
+                dirty_im[k, 0, 100, 100],
+                np.round(float(k + 1)),
+                places=4,
+                msg=f"channel {k} missed the peak flux",
+            )
