@@ -380,14 +380,18 @@ class TestHogbomClean:
         """Test basic hogbom_clean functionality"""
 
         resid_image, psf_image = hogbom_images
-        dirty_xds = load_image(resid_image)
-        psf_xds = load_image(psf_image)
+        dirty_xds = load_image({"residual": resid_image})
+        psf_xds = load_image({"point_spread_function": psf_image})
 
         deconv_params = {"gain": 0.1, "niter": 100}
 
         # Extract 2D numpy arrays from xarray datasets
-        dirty_array = dirty_xds.isel(time=0, frequency=0, polarization=0)["SKY"].values
-        psf_array = psf_xds.isel(time=0, frequency=0, polarization=0)["SKY"].values
+        dirty_array = dirty_xds.isel(time=0, frequency=0, polarization=0)[
+            "RESIDUAL"
+        ].values
+        psf_array = psf_xds.isel(time=0, frequency=0, polarization=0)[
+            "POINT_SPREAD_FUNCTION"
+        ].values
 
         # Run function
         # Hogbom clean now expects 2D numpy arrays and returns numpy arrays
@@ -538,8 +542,8 @@ class TestReturnDict:
         """Test ReturnDict structure with single plane (1 time, 1 freq, 1 pol)"""
 
         resid_image, psf_image = hogbom_images
-        dirty_xds = load_image(resid_image)
-        psf_xds = load_image(psf_image)
+        dirty_xds = load_image({"residual": resid_image})
+        psf_xds = load_image({"point_spread_function": psf_image})
 
         deconv_params = {"gain": 0.1, "niter": 100, "threshold": 0.0}
 
@@ -590,8 +594,9 @@ class TestReturnDict:
         """Test that ReturnDict values are internally consistent"""
 
         resid_image, psf_image = hogbom_images
-        dirty_xds = load_image(resid_image)
-        psf_xds = load_image(psf_image)
+        dirty_xds = load_image({"residual": resid_image})
+
+        psf_xds = load_image({"point_spread_function": psf_image})
 
         deconv_params = {"gain": 0.1, "niter": 100, "threshold": 0.001}
 
@@ -643,8 +648,8 @@ class TestReturnDict:
         """Test ReturnDict indexing methods with single plane"""
 
         resid_image, psf_image = hogbom_images
-        dirty_xds = load_image(resid_image)
-        psf_xds = load_image(psf_image)
+        dirty_xds = load_image({"residual": resid_image})
+        psf_xds = load_image({"point_spread_function": psf_image})
 
         deconv_params = {"gain": 0.1, "niter": 50}
 
@@ -680,13 +685,13 @@ class TestReturnDict:
         """Test ReturnDict with synthetic multi-polarization data"""
 
         resid_image, psf_image = hogbom_images
-        dirty_xds = load_image(resid_image)
-        psf_xds = load_image(psf_image)
+        dirty_xds = load_image({"residual": resid_image})
+        psf_xds = load_image({"point_spread_function": psf_image})
 
         # Create synthetic multi-pol data by replicating along polarization axis
         # Original shape: [1, 1, 1, ny, nx]
-        original_dirty = dirty_xds["SKY"].values
-        original_psf = psf_xds["SKY"].values
+        original_dirty = dirty_xds["RESIDUAL"].values
+        original_psf = psf_xds["POINT_SPREAD_FUNCTION"].values
 
         # Replicate to 4 polarizations
         npol = 4
@@ -713,22 +718,32 @@ class TestReturnDict:
             coords_dict["declination"] = dirty_xds.coords["declination"]
         if "velocity" in dirty_xds.coords:
             coords_dict["velocity"] = dirty_xds.coords["velocity"]
-        if "beam_param" in dirty_xds.coords:
-            coords_dict["beam_param"] = dirty_xds.coords["beam_param"]
+        if "beam_params_label" in dirty_xds.coords:
+            coords_dict["beam_params_label"] = dirty_xds.coords["beam_params_label"]
 
         # Create new xarray datasets from scratch
         # Include mask if present in original
         data_vars_dirty = {
-            "SKY": (["time", "frequency", "polarization", "l", "m"], multi_dirty),
+            "RESIDUAL": (["time", "frequency", "polarization", "l", "m"], multi_dirty),
         }
         data_vars_psf = {
-            "SKY": (["time", "frequency", "polarization", "l", "m"], multi_psf),
+            "POINT_SPREAD_FUNCTION": (
+                ["time", "frequency", "polarization", "l", "m"],
+                multi_psf,
+            ),
         }
 
         # Add mask if present
-        if "MASK0" in dirty_xds:
-            mask_data = np.repeat(dirty_xds["MASK0"].values, npol, axis=2)
-            data_vars_dirty["MASK0"] = (
+        if "MASK_0" in dirty_xds:
+            mask_data = np.repeat(dirty_xds["MASK_0"].values, npol, axis=2)
+            data_vars_dirty["MASK_0"] = (
+                ["time", "frequency", "polarization", "l", "m"],
+                mask_data,
+            )
+
+        if "MASK_SKY" in dirty_xds:
+            mask_data = np.repeat(dirty_xds["MASK_SKY"].values, npol, axis=2)
+            data_vars_dirty["MASK_SKY"] = (
                 ["time", "frequency", "polarization", "l", "m"],
                 mask_data,
             )
@@ -740,9 +755,9 @@ class TestReturnDict:
         # Copy dataset attributes
         if hasattr(dirty_xds, "attrs"):
             dirty_xds_new.attrs = dirty_xds.attrs
-        # Copy SKY DataArray attributes (including active_mask)
-        if hasattr(dirty_xds["SKY"], "attrs"):
-            dirty_xds_new["SKY"].attrs = dirty_xds["SKY"].attrs
+        # Copy RESIDUAL DataArray attributes (including active_mask)
+        if hasattr(dirty_xds["RESIDUAL"], "attrs"):
+            dirty_xds_new["RESIDUAL"].attrs = dirty_xds["RESIDUAL"].attrs
 
         # Create PSF coords dict (same as dirty)
         psf_coords_dict = {
@@ -768,9 +783,11 @@ class TestReturnDict:
         # Copy dataset attributes
         if hasattr(psf_xds, "attrs"):
             psf_xds_new.attrs = psf_xds.attrs
-        # Copy SKY DataArray attributes
-        if hasattr(psf_xds["SKY"], "attrs"):
-            psf_xds_new["SKY"].attrs = psf_xds["SKY"].attrs
+        # Copy POINT_SPREAD_FUNCTION DataArray attributes
+        if hasattr(psf_xds["POINT_SPREAD_FUNCTION"], "attrs"):
+            psf_xds_new["POINT_SPREAD_FUNCTION"].attrs = psf_xds[
+                "POINT_SPREAD_FUNCTION"
+            ].attrs
 
         deconv_params = {"gain": 0.1, "niter": 50}
 
@@ -804,12 +821,12 @@ class TestReturnDict:
         """Test ReturnDict with synthetic multi-channel data"""
 
         resid_image, psf_image = hogbom_images
-        dirty_xds = load_image(resid_image)
-        psf_xds = load_image(psf_image)
+        dirty_xds = load_image({"residual": resid_image})
+        psf_xds = load_image({"point_spread_function": psf_image})
 
         # Create synthetic multi-channel data
-        original_dirty = dirty_xds["SKY"].values
-        original_psf = psf_xds["SKY"].values
+        original_dirty = dirty_xds["RESIDUAL"].values
+        original_psf = psf_xds["POINT_SPREAD_FUNCTION"].values
 
         # Replicate to 3 channels
         nchan = 3
@@ -840,16 +857,26 @@ class TestReturnDict:
 
         # Create new xarray datasets from scratch
         data_vars_dirty = {
-            "SKY": (["time", "frequency", "polarization", "l", "m"], multi_dirty),
+            "RESIDUAL": (["time", "frequency", "polarization", "l", "m"], multi_dirty),
         }
         data_vars_psf = {
-            "SKY": (["time", "frequency", "polarization", "l", "m"], multi_psf),
+            "POINT_SPREAD_FUNCTION": (
+                ["time", "frequency", "polarization", "l", "m"],
+                multi_psf,
+            ),
         }
 
         # Add mask if present
-        if "MASK0" in dirty_xds:
-            mask_data = np.repeat(dirty_xds["MASK0"].values, nchan, axis=1)
-            data_vars_dirty["MASK0"] = (
+        if "MASK_0" in dirty_xds:
+            mask_data = np.repeat(dirty_xds["MASK_0"].values, nchan, axis=1)
+            data_vars_dirty["MASK_0"] = (
+                ["time", "frequency", "polarization", "l", "m"],
+                mask_data,
+            )
+
+        if "MASK_SKY" in dirty_xds:
+            mask_data = np.repeat(dirty_xds["MASK_SKY"].values, nchan, axis=1)
+            data_vars_dirty["MASK_SKY"] = (
                 ["time", "frequency", "polarization", "l", "m"],
                 mask_data,
             )
@@ -861,9 +888,9 @@ class TestReturnDict:
         # Copy dataset attributes
         if hasattr(dirty_xds, "attrs"):
             dirty_xds_new.attrs = dirty_xds.attrs
-        # Copy SKY DataArray attributes (including active_mask)
-        if hasattr(dirty_xds["SKY"], "attrs"):
-            dirty_xds_new["SKY"].attrs = dirty_xds["SKY"].attrs
+        # Copy RESIDUAL DataArray attributes (including active_mask)
+        if hasattr(dirty_xds["RESIDUAL"], "attrs"):
+            dirty_xds_new["RESIDUAL"].attrs = dirty_xds["RESIDUAL"].attrs
 
         # Create PSF coords dict (same as dirty)
         psf_coords_dict = {
@@ -887,9 +914,11 @@ class TestReturnDict:
         # Copy dataset attributes
         if hasattr(psf_xds, "attrs"):
             psf_xds_new.attrs = psf_xds.attrs
-        # Copy SKY DataArray attributes
-        if hasattr(psf_xds["SKY"], "attrs"):
-            psf_xds_new["SKY"].attrs = psf_xds["SKY"].attrs
+        # Copy POINT_SPREAD_FUNCTION DataArray attributes
+        if hasattr(psf_xds["POINT_SPREAD_FUNCTION"], "attrs"):
+            psf_xds_new["POINT_SPREAD_FUNCTION"].attrs = psf_xds[
+                "POINT_SPREAD_FUNCTION"
+            ].attrs
 
         deconv_params = {"gain": 0.1, "niter": 50}
 
@@ -927,8 +956,8 @@ class TestDeconvolve:
         """Test basic deconvolve functionality with single plane"""
 
         resid_image, psf_image = hogbom_images
-        dirty_xds = load_image(resid_image)
-        psf_xds = load_image(psf_image)
+        dirty_xds = load_image({"residual": resid_image})
+        psf_xds = load_image({"point_spread_function": psf_image})
 
         deconv_params = {"gain": 0.1, "niter": 100, "threshold": 0.0}
 
@@ -944,8 +973,8 @@ class TestDeconvolve:
         # Verify model and residual output
         assert isinstance(model_xds, xr.Dataset)
         assert isinstance(residual_xds, xr.Dataset)
-        assert "SKY" in model_xds
-        assert "SKY" in residual_xds
+        assert "MODEL" in model_xds
+        assert "RESIDUAL" in residual_xds
 
     @pytest.mark.skipif(
         not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
@@ -954,8 +983,8 @@ class TestDeconvolve:
         """Test that ReturnDict contains expected fields"""
 
         resid_image, psf_image = hogbom_images
-        dirty_xds = load_image(resid_image)
-        psf_xds = load_image(psf_image)
+        dirty_xds = load_image({"residual": resid_image})
+        psf_xds = load_image({"point_spread_function": psf_image})
 
         deconv_params = {"gain": 0.1, "niter": 50, "threshold": 0.0}
 

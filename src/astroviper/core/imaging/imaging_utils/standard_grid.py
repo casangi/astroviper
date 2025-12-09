@@ -3,7 +3,7 @@ import numpy as np
 import numpy.typing as npt
 import math
 import xarray
-from typing import Tuple
+from typing import Tuple, Union, List
 from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_kernel_1D,
     create_prolate_spheroidal_kernel,
@@ -100,6 +100,8 @@ def standard_grid_numpy_wrap(vis_data, uvw, weight, freq_chan, cgk_1D, grid_para
     -------
     grid : complex array
         (1,n_imag_chan,n_imag_pol,n_u,n_v)
+
+    *TODO* option to avoid DC u,v=0
     """
 
     n_chan = weight.shape[2]
@@ -109,7 +111,6 @@ def standard_grid_numpy_wrap(vis_data, uvw, weight, freq_chan, cgk_1D, grid_para
     else:  # continuum
         n_imag_chan = 1  # Making only one continuum image.
         chan_map = (np.zeros(n_chan)).astype(int)
-
     n_imag_pol = weight.shape[3]
     pol_map = (np.arange(0, n_imag_pol)).astype(int)
 
@@ -589,40 +590,87 @@ def standard_imaging_weight_degrid_jit(
 
 
 def grid2image_spheroid_ms4(
-    vis: xarray.core.datatree.DataTree,
+    vis: Union[xarray.core.datatree.DataTree, List[xarray.core.datatree.DataTree]],
     resid_array: np.ndarray,
     pixelincr: np.ndarray,
     support: int = 7,
     sampling: int = 100,
     dopsf: bool = False,
-    column="VISIBILITY",
-    chan_mode="continuum",
+    column: str = "VISIBILITY",
+    chan_mode: str = "continuum",
 ):
+    """
+    Parameters
+    ----------
+    vis : single xarray.core.datatree.DataTree or a list of them
+        an ms v4 compatible xarray
+    resid_array : np.ndarray
+        an array that defines the image shape
+        will contain the image made
+    pixelincr : np.ndarray
+        pixel increment in the direction coordinate axes
+    support : int, optional
+        Size of support of the spheroidal convolution function
+        The default is 7.
+    sampling : int, optional
+        oversampling of convolution function
+        The default is 100.
+    dopsf : bool, optional
+        Grid weights for psf or grid visibility data
+        The default is False.
+    column : TYPE, optional
+        which data array to grid when dopsf=False
+        The default is "VISIBILITY".
+    chan_mode : TYPE, optional
+        can be continuum or cube
+        The default is "continuum".
 
-    vis_data = vis[column].data
-    uvw = vis.UVW.data
-    weight = vis.WEIGHT.data
-    freq_chan = vis.coords["frequency"].values
+    Returns
+    -------
+    None.
+    *TODO* option to avoid DC (u=0, v=0)
+    """
+    if isinstance(vis, xarray.core.datatree.DataTree):
+        listvis = [vis]
+    else:
+        listvis = vis
     nx, ny = resid_array.shape[-2:]
     cgk_1D = create_prolate_spheroidal_kernel_1D(sampling, support)
-    gridvis, sumwt = standard_grid_numpy_wrap_input_checked(
-        vis_data,
-        uvw,
-        weight,
-        freq_chan,
-        cgk_1D,
-        image_size=np.array([nx, ny], dtype=int),
-        cell_size=pixelincr,
-        oversampling=sampling,
-        support=support,
-        complex_grid=True,
-        do_psf=dopsf,
-        chan_mode=chan_mode,
-    )
-    if gridvis.shape != resid_array.shape:
-        raise RuntimeError(
-            f"Shapes of gridded vis and image do no match {gridvis.shape} and {resid_array.shape}"
+    gridvis = np.zeros(resid_array.shape, dtype=complex)
+    sumwt = np.zeros(resid_array.shape[:2])
+    for elvis in listvis:
+        if not isinstance(elvis, xarray.core.datatree.DataTree):
+            raise TypeError("One of the elements of vis is not an xarray datatree")
+        vis_data = elvis[column].data
+        uvw = elvis.UVW.data
+        weight = elvis.WEIGHT.data
+        ###Make sure flag data are not used
+        flag = elvis.FLAG.data
+        weight[flag] = 0.0
+        # weight[np.logical_and(uvw[:, :, 0] == 0, uvw[:, :, 1] == 0)] = 0.0
+        freq_chan = elvis.coords["frequency"].values
+
+        gridvispart, sumwtpart = standard_grid_numpy_wrap_input_checked(
+            vis_data,
+            uvw,
+            weight,
+            freq_chan,
+            cgk_1D,
+            image_size=np.array([nx, ny], dtype=int),
+            cell_size=pixelincr,
+            oversampling=sampling,
+            support=support,
+            complex_grid=True,
+            do_psf=dopsf,
+            chan_mode=chan_mode,
         )
+        if gridvispart.shape != resid_array.shape:
+            raise RuntimeError(
+                f"Shapes of gridded vis and image do no match {gridvispart.shape} and {resid_array.shape}"
+            )
+        gridvis += gridvispart
+        sumwt += sumwtpart
+
     kernel, corrTerm = create_prolate_spheroidal_kernel(
         sampling, support, np.array([nx, ny], dtype=int)
     )

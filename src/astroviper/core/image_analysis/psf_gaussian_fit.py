@@ -128,7 +128,7 @@ def extract_main_lobe(npix_window, threshold, psf_image):
 
 def psf_gaussian_fit(
     xds: xr.Dataset,
-    dv: str = "SKY",
+    dv: str = "POINT_SPREAD_FUNCTION",
     npix_window: tuple = (41, 41),
     sampling: tuple = (55, 55),
     cutoff: float = 0.35,
@@ -141,7 +141,7 @@ def psf_gaussian_fit(
     xds : xarray.Dataset
         The input data cube.
     dv : str
-        The data variable to fit. Default is 'SKY'.
+        The data variable to fit. Default is 'POINT_SPREAD_FUNCTION'.
     npix_window : tuple
         The size of the fitting window in pixels.
     sampling : tuple
@@ -231,10 +231,10 @@ def psf_gaussian_fit(
 
     import dask.array as da
 
-    _xds["BEAM"].data = da.from_array(ellipse_params, chunks="auto")
+    _xds["BEAM_FIT_PARAMS"].data = da.from_array(ellipse_params, chunks="auto")
     # assume l, m in radians
-    if "unit" not in _xds["SKY"].l.attrs:
-        _xds["BEAM"].beam_param.attrs["unit"] = "rad"
+    if "unit" not in _xds["POINT_SPREAD_FUNCTION"].l.attrs:
+        _xds["BEAM_FIT_PARAMS"].beam_params_label.attrs["unit"] = "rad"
     return _xds
 
 
