@@ -4,7 +4,7 @@ from astropy import units as u
 import xarray as xr
 
 _sky = "SKY"
-_beam = "BEAM"
+_beam = "BEAM_FIT_PARAMS"
 import numpy as np
 from xradio.image import make_empty_aperture_image
 from xradio.image import load_image
@@ -19,7 +19,7 @@ def compute_u_v(xds):
         phase_center=[0, 0],
         image_size=shape,
         sky_image_cell_size=sics,
-        chan_coords=[1],
+        frequency_coords=[1],
         pol_coords=["I"],
         time_coords=[0],
     )
@@ -41,7 +41,7 @@ def feather_core(input_params):
         # logger.debug("beams " + str(beams))
         w = np.zeros(xds[_sky].shape)
         bunit = beams.attrs["units"]
-        bmaj = beams.sel(beam_param="major")
+        bmaj = beams.sel(beam_params_label="major")
         # logger.debug("bmaj orig shape" + str(bmaj.shape))
         # add l and m dims
         bmaj = np.expand_dims(bmaj, -1)
@@ -49,12 +49,12 @@ def feather_core(input_params):
         # logger.debug("bmaj shape " + str(bmaj.shape))
         alpha = bmaj * u.Unit(bunit)
         alpha = alpha.to(u.rad).value
-        bmin = beams.sel(beam_param="minor")
+        bmin = beams.sel(beam_params_label="minor")
         bmin = np.expand_dims(bmin, -1)
         bmin = np.expand_dims(bmin, -1)
         beta = bmin * u.Unit(bunit)
         beta = beta.to(u.rad).value
-        bpa = beams.sel(beam_param="pa")
+        bpa = beams.sel(beam_params_label="pa")
         bpa = np.expand_dims(bpa, -1)
         bpa = np.expand_dims(bpa, -1)
         phi = bpa * u.Unit(bunit)
@@ -82,10 +82,17 @@ def feather_core(input_params):
         # interpolate_data_coords_onto_parallel_coords()
         # print("data store", input_params["input_data_store"][k])
         # print("block_des", input_params["data_selection"][k])
+        # print("input_data_store[k]", input_params["input_data_store"][k], k)
         xds = load_image(
             input_params["input_data_store"][k],
             block_des=input_params["data_selection"][k],
         )
+
+        if "BEAM" in xds:
+            xds = xds.rename(
+                {"BEAM": "BEAM_FIT_PARAMS", "beam_param": "beam_params_label"}
+            )
+
         # print("load image for", k, "complete")
         # print("completed load_image()")
         fft_plane = (
@@ -114,8 +121,8 @@ def feather_core(input_params):
     one_minus_w = 1 - w
     s = input_params["s"]
     if _beam in int_xds.data_vars:
-        int_ba = int_xds[_beam].sel(beam_param="major") * int_xds[_beam].sel(
-            beam_param="minor"
+        int_ba = int_xds[_beam].sel(beam_params_label="major") * int_xds[_beam].sel(
+            beam_params_label="minor"
         )
     else:
         error_message = "Unable to find BEAM data variable in interferometer image."
@@ -123,8 +130,8 @@ def feather_core(input_params):
         raise Exception(error_message)
 
     if _beam in sd_xds.data_vars:
-        sd_ba = sd_xds[_beam].sel(beam_param="major") * sd_xds[_beam].sel(
-            beam_param="minor"
+        sd_ba = sd_xds[_beam].sel(beam_params_label="major") * sd_xds[_beam].sel(
+            beam_params_label="minor"
         )
     else:
         error_message = "Unable to find BEAM data variable in single dish image."
@@ -159,7 +166,7 @@ def feather_core(input_params):
         phase_center=phase_center,
         image_size=[int_xds.sizes["l"], int_xds.sizes["m"]],
         cell_size=int_xds.attrs["direction"]["reference"]["cdelt"],
-        chan_coords=int_xds.frequency.values,
+        frequency_coords=int_xds.frequency.values,
         pol_coords=int_xds.polarization.values,
         time_coords=[0],
     )

@@ -32,21 +32,20 @@ def create_test_xds(shape=(1, 1, 1, 51, 51), rm_coord=None):
         data = np.zeros(shape)
         da_data = da.from_array(data, chunks=(1, 1, 1, 9))
 
-    sky = xr.DataArray(da_data, dims=dims, coords=data_coords)
+    psf = xr.DataArray(da_data, dims=dims, coords=data_coords)
 
     beam_data = np.zeros((1, shape[1], shape[2], 3))
     da_beam_data = da.from_array(beam_data, chunks=(1, 1, 1, 1))
-    beam_dims = ["time", "frequency", "polarization", "beam_param"]
+    beam_dims = ["time", "frequency", "polarization", "beam_params_label"]
     beam_coords = {
         "time": np.arange(shape[0]),
         "frequency": np.arange(shape[1]),
         "polarization": np.arange(shape[2]),
-        "beam_param": np.arange(3),
+        "beam_params_label": np.arange(3),
     }
     beam = xr.DataArray(da_beam_data, dims=beam_dims, coords=beam_coords)
 
-    test_dataset = xr.Dataset({"SKY": sky, "BEAM": beam})
-
+    test_dataset = xr.Dataset({"POINT_SPREAD_FUNCTION": psf, "BEAM_FIT_PARAMS": beam})
     return test_dataset
 
 
@@ -56,13 +55,15 @@ def test_psf_gaussian_fit_output_structure():
     result = psf_gaussian_fit(test_dataset)
     # sigma = 0.2 -> fwhm = 2* sigma*sqrt(2*ln(2)) = 0.2*2.35482
     truth_values = [0.47096, 0.47096, 0.0]
-    assert "BEAM" in result
-    assert "beam_param" in result["BEAM"].dims
-    params = result["BEAM"]["beam_param"]
+    assert "BEAM_FIT_PARAMS" in result
+    assert "beam_params_label" in result["BEAM_FIT_PARAMS"].dims
+    params = result["BEAM_FIT_PARAMS"]["beam_params_label"]
     assert params.shape[-1] == 3
     # Check that the fitted widths are positive
-    assert np.all(result["BEAM"].data[:, :, :-1] > 0)
-    assert np.allclose(result["BEAM"].data[0, 0, 0, :], truth_values, rtol=1e-3, atol=5)
+    assert np.all(result["BEAM_FIT_PARAMS"].data[:, :, :-1] > 0)
+    assert np.allclose(
+        result["BEAM_FIT_PARAMS"].data[0, 0, 0, :], truth_values, rtol=1e-3, atol=5
+    )
 
 
 def test_psf_gaussian_fit_custom_window():
@@ -71,10 +72,12 @@ def test_psf_gaussian_fit_custom_window():
     truth_values = [0.47096, 0.47096, 0.0]
     # result = psf_gaussian_fit(test_dataset, npix_window=[7, 7], sampling=[7, 7])
     result = psf_gaussian_fit(test_dataset, npix_window=[15, 15], sampling=[9, 9])
-    params = result["BEAM"]["beam_param"]
+    params = result["BEAM_FIT_PARAMS"]["beam_params_label"]
     assert params.shape == (3,)
-    assert np.all(result["BEAM"].data[:, :, :-1] > 0)
-    assert np.allclose(result["BEAM"].data[0, 0, 0, :], truth_values, rtol=1e-3, atol=5)
+    assert np.all(result["BEAM_FIT_PARAMS"].data[:, :, :-1] > 0)
+    assert np.allclose(
+        result["BEAM_FIT_PARAMS"].data[0, 0, 0, :], truth_values, rtol=1e-3, atol=5
+    )
 
 
 def test_invalid_npix_window_type():
@@ -134,10 +137,10 @@ def test_invalid_cutoff():
         psf_gaussian_fit(ds, cutoff=-0.1)
 
 
-def test_missing_sky_variable():
-    """test missing SKY variable"""
+def test_missing_psf_variable():
+    """test missing POINT_SPREAD_FUNCTION variable"""
     ds = create_test_xds()
-    del ds["SKY"]
+    del ds["POINT_SPREAD_FUNCTION"]
     with pytest.raises(KeyError):
         psf_gaussian_fit(ds)
 
@@ -145,18 +148,20 @@ def test_missing_sky_variable():
 def test_all_nan_input():
     """test all NaN input data"""
     ds = create_test_xds()
-    ds["SKY"].data[:] = np.nan
+    ds["POINT_SPREAD_FUNCTION"].data[:] = np.nan
     result = psf_gaussian_fit(ds)
-    assert np.all(np.isnan(result["BEAM"].data.compute()))
+    assert np.all(np.isnan(result["BEAM_FIT_PARAMS"].data.compute()))
 
 
 def test_all_zero_input():
     """test all zero input data"""
     ds = create_test_xds()
-    ds["SKY"].data[:] = 0
+    ds["POINT_SPREAD_FUNCTION"].data[:] = 0
     result = psf_gaussian_fit(ds)
     # Depending on implementation, may be all zeros or NaNs
-    assert np.all((result["BEAM"].data == 0) | np.isnan(result["BEAM"].data))
+    assert np.all(
+        (result["BEAM_FIT_PARAMS"].data == 0) | np.isnan(result["BEAM_FIT_PARAMS"].data)
+    )
 
 
 def test_no_l_coordinate():
@@ -178,7 +183,9 @@ def test_oversampling():
     ds = create_test_xds(shape=(1, 1, 1, 100, 100))
     result = psf_gaussian_fit(ds, npix_window=[41, 41], sampling=[51, 51])
     truth_values = [0.47096, 0.47096, 0.0]
-    assert np.allclose(result["BEAM"].data[0, 0, 0, :], truth_values, rtol=1e-3, atol=5)
+    assert np.allclose(
+        result["BEAM_FIT_PARAMS"].data[0, 0, 0, :], truth_values, rtol=1e-3, atol=5
+    )
 
 
 def create_rotated_gaussian(shape, angle_deg):
@@ -194,17 +201,17 @@ def create_rotated_gaussian(shape, angle_deg):
     gaussian = np.exp(-(a * xv**2 + 2 * b * xv * yv + c * yv**2))
     data = np.zeros((1, 1, 1, shape[-2], shape[-1]))
     data[0, 0, 0, :, :] = gaussian
-    sky_data = da.from_array(data, chunks="auto")
-    sky = xr.DataArray(
-        sky_data,
+    psf = da.from_array(data, chunks="auto")
+    psf = xr.DataArray(
+        psf,
         dims=["time", "frequency", "polarization", "l", "m"],
         coords={"l": np.arange(shape[-2]), "m": np.arange(shape[-1])},
     )
     beam_data = da.from_array(np.zeros((1, 1, 1, 3)), chunks="auto")
     beam = xr.DataArray(
-        beam_data, dims=["time", "frequency", "polarization", "beam_param"]
+        beam_data, dims=["time", "frequency", "polarization", "beam_params_label"]
     )
-    return xr.Dataset({"SKY": sky, "BEAM": beam})
+    return xr.Dataset({"POINT_SPREAD_FUNCTION": psf, "BEAM_FIT_PARAMS": beam})
 
 
 def test_psf_gaussian_fit_orientation():
@@ -215,9 +222,9 @@ def test_psf_gaussian_fit_orientation():
         ds = create_rotated_gaussian((1, 1, 1, 200, 200), angle)
         # Plot the input ellipse (rotated Gaussian)
         input_img = (
-            ds["SKY"].data[0, 0, 0].compute()
-            if hasattr(ds["SKY"].data, "compute")
-            else ds["SKY"].data[0, 0, 0]
+            ds["POINT_SPREAD_FUNCTION"].data[0, 0, 0].compute()
+            if hasattr(ds["POINT_SPREAD_FUNCTION"].data, "compute")
+            else ds["POINT_SPREAD_FUNCTION"].data[0, 0, 0]
         )
         # for verfication purpose only
         plt.figure()
@@ -230,9 +237,9 @@ def test_psf_gaussian_fit_orientation():
         # plt.show(block=True)
         plt.show(block=False)
         result = psf_gaussian_fit(ds, npix_window=(21, 21), sampling=(55, 55))
-        measured_angle = -np.rad2deg(float(result["BEAM"].data[0, 0, 0, 2]))
-        measured_bmaj = float(result["BEAM"].data[0, 0, 0, 0])
-        measured_bmin = float(result["BEAM"].data[0, 0, 0, 1])
+        measured_angle = -np.rad2deg(float(result["BEAM_FIT_PARAMS"].data[0, 0, 0, 2]))
+        measured_bmaj = float(result["BEAM_FIT_PARAMS"].data[0, 0, 0, 0])
+        measured_bmin = float(result["BEAM_FIT_PARAMS"].data[0, 0, 0, 1])
         # Allow for 180-degree ambiguity and some tolerance
         measured_angle -= 90
         if measured_angle < -90:

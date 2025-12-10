@@ -24,9 +24,11 @@ def get_image_masksum(image_xds, dv="SKY"):
         The sum of the mask values in the image.
     """
 
-    maskname = image_xds[dv].active_mask
-    if maskname is not None:
-        mask_xds = image_xds[maskname]
+    # maskname = image_xds[dv].active_mask
+    mask_name = "MASK_" + dv  # need to move to using data_groups
+
+    if mask_name in image_xds:
+        mask_xds = image_xds[mask_name]
         mask_sum = int(mask_xds.sum().values)
     else:
         mask_sum = 0.0
@@ -34,7 +36,7 @@ def get_image_masksum(image_xds, dv="SKY"):
     return mask_sum
 
 
-def image_peak_residual(image_xds, per_plane_stats=False, use_mask=True, dv="SKY"):
+def image_peak_residual(image_xds, per_plane_stats=False, use_mask=True, dv="RESIDUAL"):
     """
     Compute the peak residual of an image, optionally per plane.
 
@@ -62,9 +64,9 @@ def image_peak_residual(image_xds, per_plane_stats=False, use_mask=True, dv="SKY
 
     # Apply the mask if requested
     if use_mask:
-        maskname = image_xds[dv].active_mask
-        if maskname is not None:
-            mask_xds = image_xds[maskname]
+        mask_name = "MASK_" + dv
+        if mask_name in image_xds:
+            mask_xds = image_xds[mask_name]
             image_xds = image_xds.where(mask_xds)
 
     if per_plane_stats:

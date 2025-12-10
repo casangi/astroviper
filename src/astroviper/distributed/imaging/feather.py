@@ -16,7 +16,7 @@ import os
 import time
 from typing import Union
 import xarray as xr
-from xradio.image import read_image
+from xradio.image import open_image
 from xradio.image import write_image
 import toolviper.utils.logger as logger
 from numcodecs import Blosc
@@ -24,7 +24,7 @@ from numcodecs import Blosc
 from astroviper.core.imaging.feather import feather_core
 
 _sky = "SKY"
-_beam = "BEAM"
+_beam = "BEAM_FIT_PARAMS"
 
 
 def feather(
@@ -81,15 +81,42 @@ def feather(
 
     # Read in input images
     # single dish image
-    sd_xds = (
-        read_image(lowres, selection=selection) if isinstance(lowres, str) else lowres
-    )
+    if "zarr" in lowres:
+        sd_xds = (
+            xr.open_zarr(lowres).isel(selection) if isinstance(lowres, str) else lowres
+        )
+        if "BEAM" in sd_xds:
+            sd_xds = sd_xds.rename(
+                {"BEAM": "BEAM_FIT_PARAMS", "beam_param": "beam_params_label"}
+            )
+
+    else:
+        sd_xds = (
+            open_image({"sky": lowres}, selection=selection)
+            if isinstance(lowres, str)
+            else lowres
+        )
+
     # interferometer image
-    int_xds = (
-        read_image(highres, selection=selection)
-        if isinstance(highres, str)
-        else highres
-    )
+
+    if "zarr" in highres:
+        int_xds = (
+            xr.open_zarr(highres).isel(selection)
+            if isinstance(highres, str)
+            else highres
+        )
+
+        if "BEAM" in int_xds:
+            int_xds = int_xds.rename(
+                {"BEAM": "BEAM_FIT_PARAMS", "beam_param": "beam_params_label"}
+            )
+
+    else:
+        int_xds = (
+            open_image({"sky": highres}, selection=selection)
+            if isinstance(highres, str)
+            else highres
+        )
     if sd_xds[_sky].shape != int_xds[_sky].shape:
         raise RuntimeError("Image shapes differ")
 
@@ -166,7 +193,7 @@ def feather(
             phase_center=phase_center,
             image_size=[int_xds.sizes["l"], int_xds.sizes["m"]],
             cell_size=int_xds.attrs["direction"]["reference"]["cdelt"],
-            chan_coords=parallel_coords["frequency"]["data"],
+            frequency_coords=parallel_coords["frequency"]["data"],
             pol_coords=int_xds.polarization.values,
             time_coords=[0],
         )
