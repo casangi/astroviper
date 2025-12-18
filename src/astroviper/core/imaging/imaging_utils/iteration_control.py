@@ -12,7 +12,12 @@ from typing import Optional, Tuple, Dict, Any, List
 from collections import namedtuple
 
 
-from astroviper.core.imaging.imaging_utils.return_dict import ReturnDict, Key
+from astroviper.core.imaging.imaging_utils.return_dict import (
+    ReturnDict,
+    Key,
+    FIELD_ACCUM,
+    FIELD_SINGLE_VALUE,
+)
 
 HAVE_RETURNDICT = True
 
@@ -66,7 +71,7 @@ MINOR_STOPCODE_DESCRIPTIONS = {
 
 def merge_return_dicts(
     return_dicts: List[ReturnDict],
-    merge_strategy: str = "latest",
+    merge_strategy: str = "update",
 ) -> ReturnDict:
     """
     Merge multiple ReturnDict objects into a single ReturnDict.
@@ -77,15 +82,17 @@ def merge_return_dicts(
 
     Merge Strategies:
     -----------------
+    - "update" (default): Merge dictionaries at the value level if keys conflict. For
+      FIELD_ACCUM fields (peakres, iter_done, etc.), concatenates history lists.
+      For FIELD_SINGLE_VALUE fields, replaces with latest value. Use when
+      different nodes may update different fields for the same plane.
+
     - "latest": If the same (time, pol, chan) key appears in multiple dicts,
       keep the value from the last dict in the list. Use when dicts represent
       sequential updates.
 
     - "error": Raise an error if any (time, pol, chan) key appears in multiple
       dicts. Use when each node should process unique planes.
-
-    - "update": Merge dictionaries at the value level if keys conflict. Use
-      when different nodes may update different fields for the same plane.
 
     Parameters:
     -----------
@@ -94,9 +101,9 @@ def merge_return_dicts(
 
     merge_strategy : str, optional
         Strategy for handling conflicting keys. Options:
-        - "latest" (default): Use value from last dict with this key
+        - "update" (default): Merge value dicts, later entries overwrite earlier
         - "error": Raise error on conflicts
-        - "update": Merge value dicts, later entries overwrite earlier
+        - "latest": Use value from last dict with this key
 
     Returns:
     --------
@@ -142,9 +149,30 @@ def merge_return_dicts(
                         f"Use merge_strategy='latest' or 'update' to handle conflicts."
                     )
                 elif merge_strategy == "update":
-                    # Merge dictionaries - later values overwrite earlier
+                    # Merge dictionaries - handle FIELD_ACCUM specially
                     if isinstance(merged.data[key], dict) and isinstance(value, dict):
-                        merged.data[key].update(value)
+                        # Merge field by field, concatenating lists for FIELD_ACCUM
+                        for field, field_value in value.items():
+                            if field in FIELD_ACCUM:
+                                if field in merged.data[key]:
+                                    existing = merged.data[key][field]
+
+                                    if not isinstance(existing, list):
+                                        existing = [existing]
+                                    if not isinstance(field_value, list):
+                                        field_value = [field_value]
+
+                                    merged.data[key][field] = existing + field_value
+                                else:
+                                    # First occurrence - ensure it's a list
+                                    merged.data[key][field] = (
+                                        field_value
+                                        if isinstance(field_value, list)
+                                        else [field_value]
+                                    )
+                            else:
+                                # Single-value field - replace
+                                merged.data[key][field] = field_value
                     else:
                         merged.data[key] = value
                 else:
@@ -189,7 +217,7 @@ def get_peak_residual_from_returndict(
     Returns:
     --------
     peak_residual : float
-        Maximum peak residual across selected planes
+        Maximum peak residual across selected planes (latest value from history)
         Returns 0.0 if no valid data found
     """
     selected = return_dict.sel(time=time, pol=pol, chan=chan)
@@ -202,10 +230,23 @@ def get_peak_residual_from_returndict(
 
     for entry in selected:
         if entry is not None and key in entry:
+            value = entry[key]
+            if isinstance(value, list):
+                if len(value) == 0:
+                    continue
+                # Use latest value (last in list)
+                value = value[-1]
+
             # Only consider planes with valid mask when using mask
-            if use_mask and "masksum" in entry and entry["masksum"] == 0:
-                continue
-            peak = max(peak, abs(entry[key]))
+            if use_mask and "masksum" in entry:
+                masksum = entry["masksum"]
+                # Handle masksum as list or single value
+                if isinstance(masksum, list):
+                    masksum = masksum[-1] if len(masksum) > 0 else 0
+                if masksum == 0:
+                    continue
+
+            peak = max(peak, abs(value))
 
     return peak
 
@@ -236,7 +277,7 @@ def get_masksum_from_returndict(
     Returns:
     --------
     total_masksum : float
-        Sum of mask values across selected planes
+        Sum of latest mask values across selected planes
         Returns 0.0 if no mask data found
     """
     selected = return_dict.sel(time=time, pol=pol, chan=chan)
@@ -247,7 +288,14 @@ def get_masksum_from_returndict(
     total_masksum = 0.0
     for entry in selected:
         if entry is not None and "masksum" in entry:
-            total_masksum += entry["masksum"]
+            # Extract value (handle both list and single value for backward compatibility)
+            value = entry["masksum"]
+            if isinstance(value, list):
+                if len(value) == 0:
+                    continue
+                # Use latest value (last in list)
+                value = value[-1]
+            total_masksum += value
 
     return total_masksum
 
@@ -278,7 +326,7 @@ def get_iterations_done_from_returndict(
     Returns:
     --------
     total_iterations : int
-        Sum of iterations done across selected planes
+        Sum of all iterations done across entire history and selected planes
     """
     selected = return_dict.sel(time=time, pol=pol, chan=chan)
 
@@ -288,7 +336,14 @@ def get_iterations_done_from_returndict(
     total_iters = 0
     for entry in selected:
         if entry is not None and "iter_done" in entry:
-            total_iters += entry["iter_done"]
+            # Extract value (handle both list and single value for backward compatibility)
+            value = entry["iter_done"]
+            if isinstance(value, list):
+                # Sum entire history
+                total_iters += sum(value)
+            else:
+                # Single value (backward compatibility)
+                total_iters += value
 
     return total_iters
 
@@ -860,3 +915,285 @@ class IterationController:
             "stopcode": {"major": self.stopcode.major, "minor": self.stopcode.minor},
             "stopdescription": self.stopdescription,
         }
+
+
+# ============================================================================
+# Convergence Visualization
+# ============================================================================
+
+
+class ConvergencePlots:
+    """
+    Class for creating convergence visualization plots from ReturnDict.
+
+    This class provides methods to create interactive HoloViews plots showing
+    deconvolution convergence history, including peak residual evolution over
+    iterations.
+
+    Parameters
+    ----------
+    return_dict : ReturnDict
+        ReturnDict object with convergence history (peakres, iter_done fields)
+
+    Attributes
+    ----------
+    return_dict : ReturnDict
+        The ReturnDict containing convergence data
+    stokes_to_pol : dict
+        Mapping from Stokes parameter names to polarization indices
+
+    Examples
+    --------
+    >>> rd = ReturnDict()
+    >>> for cycle in range(5):
+    ...     rd.add({'peakres': 1.0 * 0.7**cycle, 'iter_done': 100},
+    ...            time=0, pol=0, chan=0)
+    >>> plotter = ConvergencePlots(rd)
+    >>> plot = plotter.plot_history(time=0, stokes='I', chan=0)
+    >>> plot  # Display in Jupyter notebook
+    """
+
+    def __init__(self, return_dict):
+        """
+        Initialize ConvergencePlots with a ReturnDict.
+
+        Parameters
+        ----------
+        return_dict : ReturnDict
+            ReturnDict object containing convergence history
+        """
+        self.return_dict = return_dict
+        self.stokes_to_pol = {"I": 0, "Q": 1, "U": 2, "V": 3}
+
+        # Default plotting parameters (set by plot_history)
+        self.width = 700
+        self.height = 400
+        self.responsive = False
+        self.time = 0
+
+    def make_plot(self, stokes_sel, chan_sel):
+        """
+        Generate a convergence plot for given Stokes and channel selection.
+
+        This method is called by HoloViews DynamicMap when widget values change.
+
+        Parameters
+        ----------
+        stokes_sel : str
+            Stokes parameter selection ('I', 'Q', 'U', 'V')
+        chan_sel : int
+            Channel index selection
+
+        Returns
+        -------
+        holoviews.Curve
+            Convergence history curve or empty curve with error message
+        """
+        # Lazy imports
+        try:
+            import holoviews as hv
+            import numpy as np
+
+            hv.extension("bokeh")
+        except ImportError as e:
+            raise ImportError(
+                "ConvergencePlots requires holoviews and bokeh. "
+                "Install with: pip install holoviews bokeh"
+            ) from e
+
+        pol_sel = self.stokes_to_pol.get(stokes_sel, 0)
+
+        # Get data for this (time, pol, chan)
+        key = Key(time=self.time, pol=pol_sel, chan=chan_sel)
+
+        if key not in self.return_dict.data:
+            # Show error message
+            return hv.Curve([]).opts(
+                title=f"No data for Time={self.time}, Stokes={stokes_sel}, Channel={chan_sel}",
+                xlabel="Cumulative Iterations",
+                ylabel="Peak Residual (Jy)",
+                width=self.width,
+                height=self.height,
+                show_grid=True,
+            )
+
+        data = self.return_dict.data[key]
+
+        # Extract history
+        peakres_history = data.get("peakres", [])
+        iter_done_history = data.get("iter_done", [])
+
+        # Handle single values (convert to list)
+        if not isinstance(peakres_history, list):
+            peakres_history = [peakres_history]
+        if not isinstance(iter_done_history, list):
+            iter_done_history = [iter_done_history]
+
+        if not peakres_history or not iter_done_history:
+            return hv.Curve([]).opts(
+                title=f"No convergence history - Time={self.time}, Stokes={stokes_sel}, Channel={chan_sel}",
+                xlabel="Cumulative Iterations",
+                ylabel="Peak Residual (Jy)",
+                width=self.width,
+                height=self.height,
+                show_grid=True,
+            )
+
+        # Calculate cumulative iterations
+        cumulative_iters = np.cumsum(iter_done_history)
+
+        # Create curve data
+        curve_data = list(zip(cumulative_iters, peakres_history))
+
+        # Create plot
+        curve = hv.Curve(
+            curve_data, kdims=["Cumulative Iterations"], vdims=["Peak Residual (Jy)"]
+        )
+
+        return curve.opts(
+            title=f"Convergence History - Time={self.time}, Stokes={stokes_sel}, Channel={chan_sel}",
+            xlabel="Cumulative Iterations",
+            ylabel="Peak Residual (Jy)",
+            color="blue",
+            line_width=2,
+            width=self.width,
+            height=self.height,
+            show_grid=True,
+            show_legend=True,
+            tools=["hover"],
+            responsive=self.responsive,
+        )
+
+    def plot_history(self, time=0, stokes="I", chan=0, **kwargs):
+        """
+        Plot interactive convergence history.
+
+        Creates an interactive HoloViews plot showing peak residual evolution
+        over iterations, with widgets to select Stokes parameter and channel.
+
+        Parameters
+        ----------
+        time : int, optional
+            Time index to plot (default: 0)
+        stokes : str, optional
+            Initial Stokes parameter to display: 'I', 'Q', 'U', or 'V' (default: 'I')
+        chan : int, optional
+            Initial channel index to display (default: 0)
+        **kwargs : dict, optional
+            Additional plotting options:
+            - width : int, plot width in pixels (default: 700)
+            - height : int, plot height in pixels (default: 400)
+            - responsive : bool, make plot responsive (default: False)
+
+        Returns
+        -------
+        holoviews.DynamicMap
+            Interactive plot with Stokes and channel selector widgets
+
+        Notes
+        -----
+        - Requires holoviews with bokeh backend
+        - Uses lazy imports to avoid hard dependency
+        """
+        # Store plotting parameters as instance variables for access in make_plot
+        self.time = time
+        self.width = kwargs.get("width", 700)
+        self.height = kwargs.get("height", 400)
+        self.responsive = kwargs.get("responsive", False)
+
+        # Lazy imports
+        try:
+            import holoviews as hv
+            import numpy as np
+
+            hv.extension("bokeh")
+        except ImportError as e:
+            raise ImportError(
+                "ConvergencePlots requires holoviews and bokeh. "
+                "Install with: pip install holoviews bokeh"
+            ) from e
+
+        # Extract available channels and stokes from ReturnDict
+        available_keys = list(self.return_dict.data.keys())
+        if not available_keys:
+            return hv.Curve([]).opts(
+                title="No data in ReturnDict",
+                xlabel="Cumulative Iterations",
+                ylabel="Peak Residual (Jy)",
+            )
+
+        channels = sorted(set(k.chan for k in available_keys if k.time == time))
+        pols = sorted(set(k.pol for k in available_keys if k.time == time))
+        stokes_available = [s for s, p in self.stokes_to_pol.items() if p in pols]
+
+        if not channels:
+            return hv.Curve([]).opts(
+                title=f"No data for time={time}",
+                xlabel="Cumulative Iterations",
+                ylabel="Peak Residual (Jy)",
+            )
+
+        # Create widgets
+        if stokes_available:
+            stokes_default = (
+                stokes if stokes in stokes_available else stokes_available[0]
+            )
+        else:
+            stokes_default = "I"
+
+        chan_default = chan if chan in channels else (channels[0] if channels else 0)
+
+        # Create DynamicMap with widgets
+        dmap = hv.DynamicMap(self.make_plot, kdims=["Stokes", "Channel"])
+        dmap = dmap.redim.values(
+            Stokes=stokes_available if stokes_available else ["I"],
+            Channel=channels if channels else [0],
+        )
+        dmap = dmap.redim.default(Stokes=stokes_default, Channel=chan_default)
+
+        return dmap
+
+
+def plot_convergence_history(return_dict, time=0, stokes="I", chan=0, **kwargs):
+    """
+    Plot interactive convergence history from ReturnDict.
+
+    Convenience function that wraps ConvergencePlots.plot_history() for
+    backward compatibility and quick plotting.
+
+    Parameters
+    ----------
+    return_dict : ReturnDict
+        ReturnDict object with convergence history (peakres, iter_done fields)
+    time : int, optional
+        Time index to plot (default: 0)
+    stokes : str, optional
+        Initial Stokes parameter to display: 'I', 'Q', 'U', or 'V' (default: 'I')
+    chan : int, optional
+        Initial channel index to display (default: 0)
+    **kwargs : dict, optional
+        Additional plotting options (e.g., width, height, colors)
+
+    Returns
+    -------
+    holoviews.DynamicMap
+        Interactive plot with Stokes and channel selector widgets
+
+    Examples
+    --------
+    >>> rd = ReturnDict()
+    >>> for cycle in range(5):
+    ...     rd.add({'peakres': 1.0 * 0.7**cycle, 'iter_done': 100},
+    ...            time=0, pol=0, chan=0)
+    >>> plot = plot_convergence_history(rd, time=0, stokes='I', chan=0)
+    >>> plot  # Display in Jupyter notebook
+
+    Notes
+    -----
+    - Requires holoviews with bokeh backend
+    - Uses lazy imports to avoid hard dependency
+    - Displays error message if selected (time, pol, chan) not found
+    - For more control, use ConvergencePlots class directly
+    """
+    plotter = ConvergencePlots(return_dict)
+    return plotter.plot_history(time=time, stokes=stokes, chan=chan, **kwargs)
