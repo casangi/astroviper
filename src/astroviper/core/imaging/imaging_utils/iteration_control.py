@@ -400,6 +400,73 @@ def get_max_psf_sidelobe_from_returndict(
     return max_sidelobe
 
 
+def get_model_flux_from_returndict(
+    return_dict: ReturnDict,
+    time: Optional[int] = None,
+    pol: Optional[int] = None,
+    chan: Optional[int] = None,
+) -> float:
+    """
+    Extract cumulative model flux from ReturnDict structure.
+
+    The 'model_flux' field tracks the cumulative flux in the CLEAN model
+    at each major cycle. This function returns the latest (most recent)
+    cumulative flux value from the history.
+
+    **History Tracking**: The model_flux field is history-tracked (stored as
+    a list). This function returns the latest value, which represents the
+    current total flux in the model.
+
+    Parameters:
+    -----------
+    return_dict : ReturnDict
+        ReturnDict instance containing deconvolution statistics
+
+    time : int, optional
+        Filter by specific time index (None = all times)
+
+    pol : int, optional
+        Filter by specific polarization index (None = all pols)
+
+    chan : int, optional
+        Filter by specific channel index (None = all chans)
+
+    Returns:
+    --------
+    model_flux : float
+        Latest cumulative model flux across selected planes (Jy)
+        Returns 0.0 if no valid data found
+
+    Examples:
+    ---------
+    >>> rd = ReturnDict()
+    >>> rd.add({'model_flux': 1.5}, time=0, pol=0, chan=0)
+    >>> rd.add({'model_flux': 2.3}, time=0, pol=0, chan=0)
+    >>> get_model_flux_from_returndict(rd, time=0, pol=0, chan=0)
+    2.3  # Latest cumulative flux
+    """
+    selected = return_dict.sel(time=time, pol=pol, chan=chan)
+
+    if not isinstance(selected, list):
+        selected = [selected] if selected is not None else []
+
+    total_flux = 0.0
+
+    for entry in selected:
+        if entry is not None and "model_flux" in entry:
+            # Extract value (handle both list and single value for backward compatibility)
+            value = entry["model_flux"]
+            if isinstance(value, list):
+                if len(value) == 0:
+                    continue
+                # Use latest value (last in list) - represents cumulative flux
+                value = value[-1]
+
+            total_flux += value
+
+    return total_flux
+
+
 # ============================================================================
 # IterationController Class
 # ============================================================================

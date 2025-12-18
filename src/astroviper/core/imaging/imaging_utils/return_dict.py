@@ -25,6 +25,7 @@ FIELD_ACCUM = {
     "peakres_nomask",  # Peak residual without mask (Jy)
     "iter_done",  # Iterations done in this cycle
     "masksum",  # Sum of mask values (valid pixels)
+    "model_flux",  # Cumulative model flux (Jy)
 }
 
 # Fields that remain single values (constant parameters)
