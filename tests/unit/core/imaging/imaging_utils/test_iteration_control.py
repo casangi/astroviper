@@ -72,9 +72,10 @@ class TestMergeReturnDicts(unittest.TestCase):
         merged = merge_return_dicts([self.rd1, rd_conflict], merge_strategy="latest")
 
         # Should use value from rd_conflict (last in list)
+        # Note: fields are stored as lists even for single values (history tracking)
         entry = merged.sel(time=0, pol=0, chan=0)
-        self.assertEqual(entry["peakres"], 0.9)
-        self.assertEqual(entry["iter_done"], 50)
+        self.assertEqual(entry["peakres"], [0.9])  # Now a list
+        self.assertEqual(entry["iter_done"], [50])  # Now a list
 
     def test_merge_strategy_error_raises_on_conflict(self):
         """Test 'error' merge strategy raises on overlapping keys."""
@@ -95,9 +96,27 @@ class TestMergeReturnDicts(unittest.TestCase):
 
         entry = merged.sel(time=0, pol=0, chan=0)
         # Should have both original and new fields
-        self.assertEqual(entry["peakres"], 0.5)
-        self.assertEqual(entry["iter_done"], 100)
+        # History-tracked fields (FIELD_ACCUM) are stored as lists
+        self.assertEqual(entry["peakres"], [0.5])  # Now a list
+        self.assertEqual(entry["iter_done"], [100])  # Now a list
+        # new_field is not in FIELD_ACCUM, so it's a single value
         self.assertEqual(entry["new_field"], 123)
+
+    def test_merge_strategy_update_concatenates_history(self):
+        """Test 'update' merge strategy concatenates FIELD_ACCUM history lists."""
+        # Create a second dict with same key but new values
+        rd_second_cycle = ReturnDict()
+        rd_second_cycle.add({"peakres": 0.3, "iter_done": 50}, time=0, pol=0, chan=0)
+
+        # Merge with update strategy
+        merged = merge_return_dicts(
+            [self.rd1, rd_second_cycle], merge_strategy="update"
+        )
+
+        entry = merged.sel(time=0, pol=0, chan=0)
+        # FIELD_ACCUM fields should be concatenated
+        self.assertEqual(entry["peakres"], [0.5, 0.3])  # Concatenated history
+        self.assertEqual(entry["iter_done"], [100, 50])  # Concatenated history
 
     def test_merge_empty_list(self):
         """Test merging empty list returns empty ReturnDict."""
