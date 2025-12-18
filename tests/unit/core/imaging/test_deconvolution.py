@@ -611,18 +611,39 @@ class TestReturnDict:
         assert entry["threshold"] == deconv_params["threshold"]
         assert entry["loop_gain"] == deconv_params["gain"]
 
+        # Extract latest values from history-tracked fields (FIELD_ACCUM)
+        # These are now stored as lists to enable convergence tracking
+        iter_done = (
+            entry["iter_done"][-1]
+            if isinstance(entry["iter_done"], list)
+            else entry["iter_done"]
+        )
+        peakres = (
+            entry["peakres"][-1]
+            if isinstance(entry["peakres"], list)
+            else entry["peakres"]
+        )
+        peakres_nomask = (
+            entry["peakres_nomask"][-1]
+            if isinstance(entry["peakres_nomask"], list)
+            else entry["peakres_nomask"]
+        )
+        masksum = (
+            entry["masksum"][-1]
+            if isinstance(entry["masksum"], list)
+            else entry["masksum"]
+        )
+
         # Check that iterations performed is reasonable
-        assert entry["iter_done"] >= 0
-        assert entry["iter_done"] <= entry["niter"]
+        assert iter_done >= 0
+        assert iter_done <= entry["niter"]
 
         # Check that peak residual decreased (using absolute values)
         # Note: May be NaN if mask excludes all pixels
-        if not np.isnan(entry["peakres"]) and not np.isnan(entry["start_peakres"]):
-            assert abs(entry["peakres"]) <= abs(entry["start_peakres"])
-        if not np.isnan(entry["peakres_nomask"]) and not np.isnan(
-            entry["start_peakres_nomask"]
-        ):
-            assert abs(entry["peakres_nomask"]) <= abs(entry["start_peakres_nomask"])
+        if not np.isnan(peakres) and not np.isnan(entry["start_peakres"]):
+            assert abs(peakres) <= abs(entry["start_peakres"])
+        if not np.isnan(peakres_nomask) and not np.isnan(entry["start_peakres_nomask"]):
+            assert abs(peakres_nomask) <= abs(entry["start_peakres_nomask"])
 
         # Check that PSF fractions are in valid range
         assert 0 < entry["min_psf_fraction"] <= 1
@@ -633,7 +654,7 @@ class TestReturnDict:
         assert 0 <= entry["max_psf_sidelobe"] < 1
 
         # Check that masksum is non-negative
-        assert entry["masksum"] >= 0
+        assert masksum >= 0
 
         # Check coordinate values
         assert entry["stokes"] is not None
