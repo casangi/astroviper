@@ -578,6 +578,7 @@ class TestReturnDict:
             "phase_center",
             "time",
             "start_model_flux",
+            "model_flux",
             "start_peakres",
             "start_peakres_nomask",
             "peakres",
@@ -633,6 +634,11 @@ class TestReturnDict:
             if isinstance(entry["masksum"], list)
             else entry["masksum"]
         )
+        model_flux = (
+            entry["model_flux"][-1]
+            if isinstance(entry["model_flux"], list)
+            else entry["model_flux"]
+        )
 
         # Check that iterations performed is reasonable
         assert iter_done >= 0
@@ -655,6 +661,10 @@ class TestReturnDict:
 
         # Check that masksum is non-negative
         assert masksum >= 0
+
+        # Check that model flux is non-negative and >= start_model_flux
+        assert model_flux >= 0
+        assert model_flux >= entry["start_model_flux"]
 
         # Check coordinate values
         assert entry["stokes"] is not None
@@ -1025,6 +1035,7 @@ class TestDeconvolve:
                 "peakres",
                 "peakres_nomask",
                 "masksum",
+                "model_flux",
                 "max_psf_sidelobe",
             ]
             for field in expected_fields:
