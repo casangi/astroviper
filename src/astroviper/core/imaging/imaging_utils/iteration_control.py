@@ -1089,12 +1089,15 @@ class ConvergencePlots:
         # Extract history
         peakres_history = data.get("peakres", [])
         iter_done_history = data.get("iter_done", [])
+        model_flux_history = data.get("model_flux", [])
 
         # Handle single values (convert to list)
         if not isinstance(peakres_history, list):
             peakres_history = [peakres_history]
         if not isinstance(iter_done_history, list):
             iter_done_history = [iter_done_history]
+        if not isinstance(model_flux_history, list):
+            model_flux_history = [model_flux_history]
 
         if not peakres_history or not iter_done_history:
             return hv.Curve([]).opts(
@@ -1109,34 +1112,63 @@ class ConvergencePlots:
         # Calculate cumulative iterations
         cumulative_iters = np.cumsum(iter_done_history)
 
-        # Create curve data
-        curve_data = list(zip(cumulative_iters, peakres_history))
-
-        # Create plot
-        curve = hv.Curve(
-            curve_data, kdims=["Cumulative Iterations"], vdims=["Peak Residual (Jy)"]
-        )
-
-        return curve.opts(
-            title=f"Convergence History - Time={self.time}, Stokes={stokes_sel}, Channel={chan_sel}",
-            xlabel="Cumulative Iterations",
-            ylabel="Peak Residual (Jy)",
+        # Create peak residual curve (left y-axis)
+        peakres_data = list(zip(cumulative_iters, peakres_history))
+        peakres_curve = hv.Curve(
+            peakres_data, kdims=["Cumulative Iterations"], vdims=["Peak Residual (Jy)"]
+        ).opts(
             color="blue",
             line_width=2,
-            width=self.width,
-            height=self.height,
-            show_grid=True,
-            show_legend=True,
             tools=["hover"],
-            responsive=self.responsive,
         )
+
+        # Create model flux curve (right y-axis) if available
+        if model_flux_history and any(f is not None for f in model_flux_history):
+            modelflux_data = list(zip(cumulative_iters, model_flux_history))
+            modelflux_curve = hv.Curve(
+                modelflux_data,
+                kdims=["Cumulative Iterations"],
+                vdims=["Model Flux (Jy)"],
+            ).opts(
+                color="red",
+                line_width=2,
+                tools=["hover"],
+            )
+
+            # Overlay both curves with dual y-axes
+            overlay = (peakres_curve * modelflux_curve).opts(
+                title=f"Convergence History - Time={self.time}, Stokes={stokes_sel}, Channel={chan_sel}",
+                xlabel="Cumulative Iterations",
+                ylabel="Peak Residual (Jy)",
+                width=self.width,
+                height=self.height,
+                show_grid=True,
+                show_legend=True,
+                responsive=self.responsive,
+                multi_y=True,  # Enable dual y-axes
+            )
+            return overlay
+        else:
+            # Fall back to single plot if no model flux data
+            return peakres_curve.opts(
+                title=f"Convergence History - Time={self.time}, Stokes={stokes_sel}, Channel={chan_sel}",
+                xlabel="Cumulative Iterations",
+                ylabel="Peak Residual (Jy)",
+                width=self.width,
+                height=self.height,
+                show_grid=True,
+                show_legend=True,
+                tools=["hover"],
+                responsive=self.responsive,
+            )
 
     def plot_history(self, time=0, stokes="I", chan=0, **kwargs):
         """
         Plot interactive convergence history.
 
-        Creates an interactive HoloViews plot showing peak residual evolution
-        over iterations, with widgets to select Stokes parameter and channel.
+        Creates an interactive HoloViews plot showing peak residual and model flux
+        evolution over iterations, with widgets to select Stokes parameter and channel.
+        Displays dual y-axis plot with Peak Residual (left, blue) and Model Flux (right, red).
 
         Parameters
         ----------
@@ -1148,19 +1180,20 @@ class ConvergencePlots:
             Initial channel index to display (default: 0)
         **kwargs : dict, optional
             Additional plotting options:
-            - width : int, plot width in pixels (default: 700)
+            - width : int, plot width in pixels per subplot (default: 700)
             - height : int, plot height in pixels (default: 400)
             - responsive : bool, make plot responsive (default: False)
 
         Returns
         -------
         holoviews.DynamicMap
-            Interactive plot with Stokes and channel selector widgets
+            Interactive dual y-axis plot with Stokes and channel selector widgets
 
         Notes
         -----
         - Requires holoviews with bokeh backend
         - Uses lazy imports to avoid hard dependency
+        - Falls back to single-axis plot if no model_flux data in ReturnDict
         """
         # Store plotting parameters as instance variables for access in make_plot
         self.time = time
@@ -1226,12 +1259,13 @@ def plot_convergence_history(return_dict, time=0, stokes="I", chan=0, **kwargs):
     Plot interactive convergence history from ReturnDict.
 
     Convenience function that wraps ConvergencePlots.plot_history() for
-    backward compatibility and quick plotting.
+    backward compatibility and quick plotting. Displays dual y-axis plot
+    of peak residual (blue, left) and model flux (red, right) evolution over iterations.
 
     Parameters
     ----------
     return_dict : ReturnDict
-        ReturnDict object with convergence history (peakres, iter_done fields)
+        ReturnDict object with convergence history (peakres, iter_done, model_flux fields)
     time : int, optional
         Time index to plot (default: 0)
     stokes : str, optional
@@ -1239,18 +1273,18 @@ def plot_convergence_history(return_dict, time=0, stokes="I", chan=0, **kwargs):
     chan : int, optional
         Initial channel index to display (default: 0)
     **kwargs : dict, optional
-        Additional plotting options (e.g., width, height, colors)
+        Additional plotting options (e.g., width, height)
 
     Returns
     -------
     holoviews.DynamicMap
-        Interactive plot with Stokes and channel selector widgets
+        Interactive dual y-axis plot with Stokes and channel selector widgets
 
     Examples
     --------
     >>> rd = ReturnDict()
     >>> for cycle in range(5):
-    ...     rd.add({'peakres': 1.0 * 0.7**cycle, 'iter_done': 100},
+    ...     rd.add({'peakres': 1.0 * 0.7**cycle, 'iter_done': 100, 'model_flux': 0.5 * cycle},
     ...            time=0, pol=0, chan=0)
     >>> plot = plot_convergence_history(rd, time=0, stokes='I', chan=0)
     >>> plot  # Display in Jupyter notebook
@@ -1260,6 +1294,7 @@ def plot_convergence_history(return_dict, time=0, stokes="I", chan=0, **kwargs):
     - Requires holoviews with bokeh backend
     - Uses lazy imports to avoid hard dependency
     - Displays error message if selected (time, pol, chan) not found
+    - Falls back to single-axis plot if no model_flux data in ReturnDict
     - For more control, use ConvergencePlots class directly
     """
     plotter = ConvergencePlots(return_dict)
