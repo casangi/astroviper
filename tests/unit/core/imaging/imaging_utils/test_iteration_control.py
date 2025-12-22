@@ -2,6 +2,7 @@
 Unit tests for the iteration control module.
 
 Tests cover:
+- ReturnDict core functionality (initialization, add, sel, to_dict, repr)
 - ReturnDict utility functions (merge, extraction)
 - IterationController initialization and parameter validation
 - Adaptive cyclethreshold calculation
@@ -33,7 +34,492 @@ from astroviper.core.imaging.imaging_utils.iteration_control import (
     # Main class
     IterationController,
 )
-from astroviper.core.imaging.imaging_utils.return_dict import ReturnDict
+from astroviper.core.imaging.imaging_utils.return_dict import (
+    ReturnDict,
+    FIELD_ACCUM,
+    FIELD_SINGLE_VALUE,
+    Key,
+)
+
+
+# =============================================================================
+# ReturnDict Core Functionality Tests
+# =============================================================================
+
+
+class TestReturnDictBasics(unittest.TestCase):
+    """Test ReturnDict initialization, properties, and basic methods."""
+
+    def test_empty_initialization(self):
+        """Test creating an empty ReturnDict."""
+        rd = ReturnDict()
+        self.assertIsNotNone(rd)
+        self.assertEqual(len(rd.data), 0)
+        self.assertIsInstance(rd.data, dict)
+
+    def test_data_property_getter(self):
+        """Test data property getter returns internal dictionary."""
+        rd = ReturnDict()
+        rd.add({"peakres": 1.0}, time=0, pol=0, chan=0)
+
+        data = rd.data
+        self.assertIsInstance(data, dict)
+        self.assertEqual(len(data), 1)
+
+        # Verify the key structure
+        key = Key(0, 0, 0)
+        self.assertIn(key, data)
+
+    def test_data_property_setter(self):
+        """Test data property setter updates internal dictionary."""
+        rd = ReturnDict()
+
+        # Create new data dict
+        new_data = {Key(0, 0, 0): {"peakres": [2.5], "iter_done": [50]}}
+        rd.data = new_data
+
+        self.assertEqual(len(rd.data), 1)
+        entry = rd.sel(time=0, pol=0, chan=0)
+        self.assertEqual(entry["peakres"], [2.5])
+        self.assertEqual(entry["iter_done"], [50])
+
+    def test_to_dict_method(self):
+        """Test to_dict() returns the internal data dictionary."""
+        rd = ReturnDict()
+        rd.add({"peakres": 1.5, "iter_done": 100}, time=0, pol=0, chan=0)
+        rd.add({"peakres": 1.2, "iter_done": 80}, time=0, pol=0, chan=1)
+
+        result = rd.to_dict()
+
+        # Should return the same object as .data
+        self.assertIs(result, rd.data)
+        self.assertEqual(len(result), 2)
+
+    def test_repr_empty(self):
+        """Test __repr__() for empty ReturnDict."""
+        rd = ReturnDict()
+        repr_str = repr(rd)
+
+        # Empty dict should produce empty string (no entries)
+        self.assertEqual(repr_str, "")
+
+    def test_repr_single_entry(self):
+        """Test __repr__() for single entry."""
+        rd = ReturnDict()
+        rd.add({"peakres": 1.0, "iter_done": 50}, time=0, pol=0, chan=0)
+
+        repr_str = repr(rd)
+
+        # Should contain the key and values
+        self.assertIn("Key(time=0, pol=0, chan=0)", repr_str)
+        self.assertIn("peakres", repr_str)
+        self.assertIn("[1.0]", repr_str)  # FIELD_ACCUM stored as list
+        self.assertIn("iter_done", repr_str)
+        self.assertIn("[50]", repr_str)  # FIELD_ACCUM stored as list
+
+    def test_repr_multiple_entries(self):
+        """Test __repr__() for multiple entries."""
+        rd = ReturnDict()
+        rd.add({"peakres": 1.0}, time=0, pol=0, chan=0)
+        rd.add({"peakres": 0.8}, time=0, pol=0, chan=1)
+        rd.add({"peakres": 0.6}, time=0, pol=1, chan=0)
+
+        repr_str = repr(rd)
+
+        # Should contain all keys
+        self.assertIn("Key(time=0, pol=0, chan=0)", repr_str)
+        self.assertIn("Key(time=0, pol=0, chan=1)", repr_str)
+        self.assertIn("Key(time=0, pol=1, chan=0)", repr_str)
+
+        # Should have multiple lines (newline separated)
+        lines = repr_str.split("\n")
+        self.assertEqual(len(lines), 3)
+
+
+class TestReturnDictAdd(unittest.TestCase):
+    """Test ReturnDict.add() method edge cases and history tracking."""
+
+    def test_add_first_entry_field_accum(self):
+        """Test adding first entry with FIELD_ACCUM fields."""
+        rd = ReturnDict()
+        rd.add({"peakres": 1.5, "iter_done": 100}, time=0, pol=0, chan=0)
+
+        entry = rd.sel(time=0, pol=0, chan=0)
+
+        # FIELD_ACCUM fields should be stored as lists
+        self.assertEqual(entry["peakres"], [1.5])
+        self.assertEqual(entry["iter_done"], [100])
+        self.assertIsInstance(entry["peakres"], list)
+        self.assertIsInstance(entry["iter_done"], list)
+
+    def test_add_first_entry_field_single_value(self):
+        """Test adding first entry with FIELD_SINGLE_VALUE fields."""
+        rd = ReturnDict()
+        rd.add({"max_psf_sidelobe": 0.2, "loop_gain": 0.1}, time=0, pol=0, chan=0)
+
+        entry = rd.sel(time=0, pol=0, chan=0)
+
+        # FIELD_SINGLE_VALUE fields should be stored as scalars
+        self.assertEqual(entry["max_psf_sidelobe"], 0.2)
+        self.assertEqual(entry["loop_gain"], 0.1)
+        self.assertNotIsInstance(entry["max_psf_sidelobe"], list)
+        self.assertNotIsInstance(entry["loop_gain"], list)
+
+    def test_add_first_entry_mixed_fields(self):
+        """Test adding first entry with both FIELD_ACCUM and FIELD_SINGLE_VALUE."""
+        rd = ReturnDict()
+        rd.add(
+            {
+                "peakres": 1.0,  # FIELD_ACCUM
+                "iter_done": 50,  # FIELD_ACCUM
+                "max_psf_sidelobe": 0.15,  # FIELD_SINGLE_VALUE
+                "threshold": 0.01,  # FIELD_SINGLE_VALUE
+            },
+            time=0,
+            pol=0,
+            chan=0,
+        )
+
+        entry = rd.sel(time=0, pol=0, chan=0)
+
+        # Check FIELD_ACCUM are lists
+        self.assertEqual(entry["peakres"], [1.0])
+        self.assertEqual(entry["iter_done"], [50])
+
+        # Check FIELD_SINGLE_VALUE are scalars
+        self.assertEqual(entry["max_psf_sidelobe"], 0.15)
+        self.assertEqual(entry["threshold"], 0.01)
+
+    def test_add_unknown_field(self):
+        """Test adding a field not in FIELD_ACCUM or FIELD_SINGLE_VALUE."""
+        rd = ReturnDict()
+        rd.add({"custom_field": 42, "peakres": 1.0}, time=0, pol=0, chan=0)
+
+        entry = rd.sel(time=0, pol=0, chan=0)
+
+        # Unknown fields should be treated as FIELD_SINGLE_VALUE (not accumulated)
+        self.assertEqual(entry["custom_field"], 42)
+        self.assertNotIsInstance(entry["custom_field"], list)
+
+        # Known FIELD_ACCUM should still be a list
+        self.assertEqual(entry["peakres"], [1.0])
+
+    def test_add_empty_dict(self):
+        """Test adding an empty dictionary."""
+        rd = ReturnDict()
+        rd.add({}, time=0, pol=0, chan=0)
+
+        # Key should exist but with empty entry
+        entry = rd.sel(time=0, pol=0, chan=0)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry, {})
+
+    def test_backward_compat_scalar_to_list(self):
+        """Test backward compatibility: scalar converted to list on second add."""
+        rd = ReturnDict()
+
+        # Manually create a scalar entry (simulating old data format)
+        key = Key(0, 0, 0)
+        rd.data[key] = {"peakres": 1.0}  # Scalar instead of list
+
+        # Now add new value - should convert to list and append
+        rd.add({"peakres": 0.8}, time=0, pol=0, chan=0)
+
+        entry = rd.sel(time=0, pol=0, chan=0)
+
+        # Should have converted scalar to list and appended new value
+        self.assertEqual(entry["peakres"], [1.0, 0.8])
+        self.assertIsInstance(entry["peakres"], list)
+
+    def test_multiple_adds_same_key_accumulate(self):
+        """Test multiple adds to same key accumulate FIELD_ACCUM values."""
+        rd = ReturnDict()
+
+        # First add
+        rd.add({"peakres": 1.0, "iter_done": 100}, time=0, pol=0, chan=0)
+
+        # Second add
+        rd.add({"peakres": 0.8, "iter_done": 80}, time=0, pol=0, chan=0)
+
+        # Third add
+        rd.add({"peakres": 0.6, "iter_done": 60}, time=0, pol=0, chan=0)
+
+        entry = rd.sel(time=0, pol=0, chan=0)
+
+        # FIELD_ACCUM should accumulate in lists
+        self.assertEqual(entry["peakres"], [1.0, 0.8, 0.6])
+        self.assertEqual(entry["iter_done"], [100, 80, 60])
+
+    def test_multiple_adds_same_key_replace_single_value(self):
+        """Test multiple adds to same key replace FIELD_SINGLE_VALUE values."""
+        rd = ReturnDict()
+
+        # First add
+        rd.add({"max_psf_sidelobe": 0.2, "threshold": 0.01}, time=0, pol=0, chan=0)
+
+        # Second add with different values
+        rd.add({"max_psf_sidelobe": 0.15, "threshold": 0.005}, time=0, pol=0, chan=0)
+
+        entry = rd.sel(time=0, pol=0, chan=0)
+
+        # FIELD_SINGLE_VALUE should be replaced (last value wins)
+        self.assertEqual(entry["max_psf_sidelobe"], 0.15)
+        self.assertEqual(entry["threshold"], 0.005)
+
+    def test_add_partial_fields_to_existing_key(self):
+        """Test adding partial fields to an existing key."""
+        rd = ReturnDict()
+
+        # First add with some fields
+        rd.add({"peakres": 1.0, "iter_done": 100}, time=0, pol=0, chan=0)
+
+        # Second add with different fields
+        rd.add({"masksum": 500, "max_psf_sidelobe": 0.2}, time=0, pol=0, chan=0)
+
+        entry = rd.sel(time=0, pol=0, chan=0)
+
+        # First fields should still exist
+        self.assertEqual(entry["peakres"], [1.0])
+        self.assertEqual(entry["iter_done"], [100])
+
+        # New fields should be added
+        self.assertEqual(entry["masksum"], [500])  # FIELD_ACCUM
+        self.assertEqual(entry["max_psf_sidelobe"], 0.2)  # FIELD_SINGLE_VALUE
+
+
+class TestReturnDictSel(unittest.TestCase):
+    """Test ReturnDict.sel() method edge cases and filtering."""
+
+    def setUp(self):
+        """Create test ReturnDict with multiple entries."""
+        self.rd = ReturnDict()
+        self.rd.add({"peakres": 1.0}, time=0, pol=0, chan=0)
+        self.rd.add({"peakres": 0.9}, time=0, pol=0, chan=1)
+        self.rd.add({"peakres": 0.8}, time=0, pol=1, chan=0)
+        self.rd.add({"peakres": 0.7}, time=1, pol=0, chan=0)
+
+    def test_sel_no_matches_returns_none(self):
+        """Test sel() returns None when no matches found."""
+        result = self.rd.sel(time=99, pol=0, chan=0)
+        self.assertIsNone(result)
+
+        result = self.rd.sel(time=0, pol=99, chan=0)
+        self.assertIsNone(result)
+
+        result = self.rd.sel(time=0, pol=0, chan=99)
+        self.assertIsNone(result)
+
+    def test_sel_single_match_returns_dict(self):
+        """Test sel() returns single dict (not list) when one match."""
+        result = self.rd.sel(time=0, pol=0, chan=0)
+
+        # Should return a dict, not a list
+        self.assertIsInstance(result, dict)
+        self.assertNotIsInstance(result, list)
+        self.assertEqual(result["peakres"], [1.0])
+
+    def test_sel_multiple_matches_returns_list(self):
+        """Test sel() returns list when multiple matches."""
+        # Filter by time=0 only (should match 3 entries)
+        result = self.rd.sel(time=0)
+
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 3)
+
+        # Verify all are dicts
+        for entry in result:
+            self.assertIsInstance(entry, dict)
+            self.assertIn("peakres", entry)
+
+    def test_sel_all_none_returns_all(self):
+        """Test sel() with all None filters returns all entries (or empty list)."""
+        result = self.rd.sel()
+
+        # With all None, it should return a list of all entries
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 4)
+
+    def test_sel_empty_returndict(self):
+        """Test sel() on empty ReturnDict returns None."""
+        rd_empty = ReturnDict()
+        result = rd_empty.sel(time=0, pol=0, chan=0)
+
+        self.assertIsNone(result)
+
+    def test_sel_filter_by_time_only(self):
+        """Test filtering by time parameter only."""
+        result = self.rd.sel(time=0)
+
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 3)  # 3 entries with time=0
+
+    def test_sel_filter_by_pol_only(self):
+        """Test filtering by pol parameter only."""
+        result = self.rd.sel(pol=0)
+
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 3)  # 3 entries with pol=0
+
+    def test_sel_filter_by_chan_only(self):
+        """Test filtering by chan parameter only."""
+        result = self.rd.sel(chan=0)
+
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 3)  # 3 entries with chan=0
+
+    def test_sel_combined_filters(self):
+        """Test filtering with multiple parameters."""
+        result = self.rd.sel(time=0, pol=0)
+
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 2)  # time=0, pol=0 matches 2 entries
+
+    def test_sel_preserves_order(self):
+        """Test sel() preserves insertion order (OrderedDict behavior)."""
+        rd = ReturnDict()
+
+        # Add in specific order
+        rd.add({"peakres": 1.0}, time=0, pol=0, chan=0)
+        rd.add({"peakres": 0.9}, time=0, pol=0, chan=1)
+        rd.add({"peakres": 0.8}, time=0, pol=0, chan=2)
+
+        result = rd.sel(time=0, pol=0)
+
+        # Should return in insertion order
+        self.assertEqual(result[0]["peakres"], [1.0])
+        self.assertEqual(result[1]["peakres"], [0.9])
+        self.assertEqual(result[2]["peakres"], [0.8])
+
+    def test_sel_nonexistent_values(self):
+        """Test sel() with values that don't exist in any entry."""
+        result = self.rd.sel(time=999, pol=999, chan=999)
+        self.assertIsNone(result)
+
+
+class TestReturnDictFieldClassification(unittest.TestCase):
+    """Test FIELD_ACCUM and FIELD_SINGLE_VALUE classification behavior."""
+
+    def test_field_accum_constants(self):
+        """Test FIELD_ACCUM contains expected fields."""
+        expected_fields = {
+            "peakres",
+            "peakres_nomask",
+            "iter_done",
+            "masksum",
+            "model_flux",
+        }
+        self.assertEqual(FIELD_ACCUM, expected_fields)
+
+    def test_field_single_value_constants(self):
+        """Test FIELD_SINGLE_VALUE contains expected fields."""
+        expected_fields = {"max_psf_sidelobe", "loop_gain", "niter", "threshold"}
+        self.assertEqual(FIELD_SINGLE_VALUE, expected_fields)
+
+    def test_all_field_accum_become_lists(self):
+        """Test all FIELD_ACCUM fields are stored as lists."""
+        rd = ReturnDict()
+
+        # Add all FIELD_ACCUM fields
+        rd.add(
+            {
+                "peakres": 1.0,
+                "peakres_nomask": 1.1,
+                "iter_done": 100,
+                "masksum": 500,
+                "model_flux": 2.5,
+            },
+            time=0,
+            pol=0,
+            chan=0,
+        )
+
+        entry = rd.sel(time=0, pol=0, chan=0)
+
+        # All should be lists
+        for field in FIELD_ACCUM:
+            self.assertIn(field, entry)
+            self.assertIsInstance(entry[field], list)
+            self.assertEqual(len(entry[field]), 1)
+
+    def test_all_field_single_value_remain_scalars(self):
+        """Test all FIELD_SINGLE_VALUE fields remain scalars."""
+        rd = ReturnDict()
+
+        # Add all FIELD_SINGLE_VALUE fields
+        rd.add(
+            {
+                "max_psf_sidelobe": 0.2,
+                "loop_gain": 0.1,
+                "niter": 1000,
+                "threshold": 0.01,
+            },
+            time=0,
+            pol=0,
+            chan=0,
+        )
+
+        entry = rd.sel(time=0, pol=0, chan=0)
+
+        # All should be scalars (not lists)
+        for field in FIELD_SINGLE_VALUE:
+            self.assertIn(field, entry)
+            self.assertNotIsInstance(entry[field], list)
+
+
+class TestReturnDictKeyBehavior(unittest.TestCase):
+    """Test Key namedtuple behavior and OrderedDict properties."""
+
+    def test_key_namedtuple_creation(self):
+        """Test Key namedtuple can be created and accessed."""
+        key = Key(time=0, pol=1, chan=2)
+
+        self.assertEqual(key.time, 0)
+        self.assertEqual(key.pol, 1)
+        self.assertEqual(key.chan, 2)
+
+    def test_key_namedtuple_immutability(self):
+        """Test Key namedtuple is immutable."""
+        key = Key(0, 1, 2)
+
+        with self.assertRaises(AttributeError):
+            key.time = 99
+
+    def test_key_equality(self):
+        """Test Key namedtuples with same values are equal."""
+        key1 = Key(0, 1, 2)
+        key2 = Key(0, 1, 2)
+        key3 = Key(0, 1, 3)
+
+        self.assertEqual(key1, key2)
+        self.assertNotEqual(key1, key3)
+
+    def test_key_hashable(self):
+        """Test Key can be used as dictionary key (hashable)."""
+        test_dict = {}
+        key = Key(0, 1, 2)
+
+        test_dict[key] = "value"
+        self.assertEqual(test_dict[key], "value")
+
+    def test_ordered_dict_preserves_insertion_order(self):
+        """Test ReturnDict preserves insertion order."""
+        rd = ReturnDict()
+
+        # Add keys in specific order
+        rd.add({"peakres": 1.0}, time=2, pol=0, chan=0)
+        rd.add({"peakres": 0.9}, time=0, pol=0, chan=0)
+        rd.add({"peakres": 0.8}, time=1, pol=0, chan=0)
+
+        # Verify order is preserved
+        keys = list(rd.data.keys())
+        self.assertEqual(keys[0].time, 2)
+        self.assertEqual(keys[1].time, 0)
+        self.assertEqual(keys[2].time, 1)
+
+
+# =============================================================================
+# ReturnDict Utility Function Tests (Merge, Extraction)
+# =============================================================================
 
 
 class TestMergeReturnDicts(unittest.TestCase):
