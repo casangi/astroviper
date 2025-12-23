@@ -35,6 +35,7 @@ def make_empty_padded_uv_image(
     image: xr.Dataset,
     image_size: np.ndarray,
     uv_data_array: str = "VISIBILITY_RESIDUAL",
+    insert_res_or_mod=True,
 ) -> xr.Dataset:
     """Create an empty UV image with padding to ``image_size``.
 
@@ -47,7 +48,9 @@ def make_empty_padded_uv_image(
         Target image size in the l,m or u, v dimensions.
     uv_data_array: optional,
     options are : "VISIBILITY", "VISIBILITY_RESIDUAL", "VISIBILITY_MODEL", "UV_SAMPLING"
-
+    insert_res_or_mod: optional, default True
+    copy  model or residual dataArray to the padded output image, depending
+    on if VISIBILITY_MODEL or VISIBILITY_RESIDUAL was requested as padded grid
     Returns
     -------
     xr.Dataset
@@ -65,24 +68,25 @@ def make_empty_padded_uv_image(
             f"current image size {image_size_current} is larger than requested {image_size}"
         )
     # lets get some parameters to make_empty_lmuv_image
-    pc = image.direction["reference"]["data"]
+    # pc = image.direction["reference"]["data"]
+    pc = image.coordinate_system_info["reference_direction"]["data"]
     cellsize_l = np.abs(image.l[1].data - image.l[0].data)
     cellsize_m = np.abs(image.m[1].data - image.m[0].data)
     cellsize = np.array([cellsize_l, cellsize_m])
     freq = image.frequency.values
     pol = image.polarization.values
     tim = image.time.values
-    # dir_frame = image.coordinate_system_info["reference_direction"]["attrs"]["frame"]
-    dir_frame = image.direction["reference"]["attrs"]["frame"]
+    dir_frame = image.coordinate_system_info["reference_direction"]["attrs"]["frame"]
+    # dir_frame = image.direction["reference"]["attrs"]["frame"]
     freq_frame = image.frequency.observer
-    # projection = image.coordinate_system_info["projection"]
-    projection = image.direction["projection"]
+    projection = image.coordinate_system_info["projection"]
+    # projection = image.direction["projection"]
 
     out_im = make_empty_lmuv_image(
         phase_center=pc,
         image_size=image_size,
         sky_image_cell_size=cellsize,
-        chan_coords=freq,
+        frequency_coords=freq,
         pol_coords=pol,
         time_coords=tim,
         direction_reference=dir_frame,
@@ -112,6 +116,29 @@ def make_empty_padded_uv_image(
         coords=weight_coords,
         dims=("time", "frequency", "polarization"),
     )
+    out_im.attrs["data_groups"]["base"][uv_data_array.lower()] = uv_data_array
+    out_im.attrs["data_groups"]["base"][uv_data_array.lower() + "_normalization"] = (
+        uv_data_array + "_NORMALIZATION"
+    )
+    if insert_res_or_mod:
+        dat_name = ""
+        if uv_data_array == "VISIBILITY_MODEL":
+            dat_name = "MODEL"
+        elif uv_data_array == "VISIBILITY_RESIDUAL":
+            dat_name = "RESIDUAL"
+        if dat_name and dat_name in image.data_vars:
+            dat = image[dat_name].values
+            blc = (image_size - dat.shape[-2:]) // 2
+            trc = blc + dat.shape[-2:]
+            out_im[dat_name] = xr.DataArray(
+                np.zeros(sky_data_shape, dtype=np.float32),
+                coords=sky_coords,
+                dims=sky_data_dims,
+            )
+
+            out_im[dat_name].values[:, :, :, blc[0] : trc[0], blc[1] : trc[1]] = dat
+            out_im.attrs["data_groups"]["base"][dat_name.lower()] = dat_name
+
     return out_im
 
 
