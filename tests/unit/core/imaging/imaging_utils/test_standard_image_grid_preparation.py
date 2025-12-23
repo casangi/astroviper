@@ -11,7 +11,24 @@ import unittest
 
 
 class TestStandardImGridPrep(unittest.TestCase):
-    def make_image_xds(self, npol=1, nchan=1):
+    def make_image_xds(self, npol=1, nchan=1, which="SKY"):
+        """
+
+        Parameters
+        ----------
+        npol : TYPE, optional
+            DESCRIPTION. The default is 1.
+        nchan : TYPE, optional
+            DESCRIPTION. The default is 1.
+        which : TYPE, optional
+            which data variable to add. The default is "SKY".
+
+        Returns
+        -------
+        a : TYPE
+            DESCRIPTION.
+
+        """
         pc = [1.0, 0.0]  # phasecenter
         imsize = [200, 200]  # image size
         cellsize = [4.8e-6, 4.8e-6]  # close to 1arcsec
@@ -23,7 +40,7 @@ class TestStandardImGridPrep(unittest.TestCase):
             phase_center=pc,
             image_size=imsize,
             cell_size=cellsize,
-            chan_coords=freq,
+            frequency_coords=freq,
             pol_coords=pol,
             time_coords=epoch,
         )
@@ -37,7 +54,7 @@ class TestStandardImGridPrep(unittest.TestCase):
             imsize[1],
         )
         sky_coords = {dim: a.coords[dim] for dim in sky_data_dims}
-        a["SKY"] = xarray.DataArray(
+        a[which] = xarray.DataArray(
             np.ones(sky_data_shape, dtype=np.float32),
             coords=sky_coords,
             dims=sky_data_dims,
@@ -60,14 +77,17 @@ class TestStandardImGridPrep(unittest.TestCase):
 
     ###################################
     def test_make_empty_padded_uv_image(self):
-        a = self.make_image_xds()
-        b = make_empty_padded_uv_image(a, [250, 250], "RESIDUAL_VISIBILITY")
+        a = self.make_image_xds(which="RESIDUAL")
+        b = make_empty_padded_uv_image(a, [250, 250], "VISIBILITY_RESIDUAL")
         self.assertEqual(b.sizes["u"], 250)
-        print(
-            "SHAPES",
-            b["RESIDUAL_VISIBILITY"].shape,
-            b["RESIDUAL_VISIBILITY_NORMALIZATION"].shape,
-        )
+        # print(
+        #    "SHAPES",
+        #    b["VISIBILITY_RESIDUAL"].shape,
+        #    b["VISIBILITY_RESIDUAL_NORMALIZATION"].shape,
+        # )
+        # print(b.attrs)
+        self.assertTrue("residual" in b.attrs["data_groups"]["base"])
+        self.assertEqual(b["VISIBILITY_RESIDUAL"].shape[3], 250)
 
     ##########################
     def test_mult_div(self):
