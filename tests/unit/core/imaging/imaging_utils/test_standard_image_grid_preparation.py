@@ -6,6 +6,9 @@ from astroviper.core.imaging.imaging_utils.standard_image_grid_preparation impor
     remove_padding,
     apply_pb,
     make_empty_padded_uv_image,
+    fft_to_uv,
+    ifft_to_lm,
+    correct_fft_to_uv,
 )
 import unittest
 
@@ -120,3 +123,20 @@ class TestStandardImGridPrep(unittest.TestCase):
         a["PRIMARY_BEAM"].data[0, 1, 0, :, :] = 0
         apply_pb(a, data_vars="SKY", multiply=True)
         self.assertEqual(np.max(a["SKY"].data[0, 0, 0, :, :]), 1.0)
+
+    def test_fft_to_uv(self):
+
+        a = self.make_image_xds(which="RESIDUAL")
+        b = make_empty_padded_uv_image(a, image_size=[a["l"].size, a["m"].size])
+        fft_to_uv(b)
+        self.assertEqual(b.sel(u=0, v=0)["VISIBILITY_RESIDUAL"].values[0], 200 * 200)
+        correct_fft_to_uv(b)
+        self.assertEqual(b.sel(u=0, v=0)["VISIBILITY_RESIDUAL"].values[0], 1.0)
+        self.assertEqual(b.isel(u=99, v=99)["VISIBILITY_RESIDUAL"].values[0], 0.0)
+
+    def test_ifft_to_lm(self):
+        a = self.make_image_xds(which="RESIDUAL")
+        b = make_empty_padded_uv_image(a, image_size=[a["l"].size, a["m"].size])
+        b.sel(u=0, v=0)["VISIBILITY_RESIDUAL"].values[0] = 10
+        ifft_to_lm(b)
+        self.assertAlmostEqual(b["RESIDUAL"].max().values, 10.0 / 200.0 / 200.0, 10)
