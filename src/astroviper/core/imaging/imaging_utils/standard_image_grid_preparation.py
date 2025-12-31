@@ -443,6 +443,7 @@ def grid2xradio_spheroid_ms4(
     -------
     None.
     *TODO* option to avoid DC (u=0, v=0)
+    For which time coordinate is the gridding supposed to be
     """
     if isinstance(vis, xr.core.datatree.DataTree):
         listvis = [vis]
