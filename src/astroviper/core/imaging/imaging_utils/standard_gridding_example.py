@@ -200,8 +200,10 @@ def make_standard_grid_image(dopsf=False):
     params["chan_mode"] = "continuum"
 
     cgk_1D = sph_1D(params["oversampling"], params["support"])
+    grid = np.array([])
+    sumwt = np.array([])
     grid, sumwgt = standard_grid_numpy_wrap(
-        vis_data, uvw, weight, freq_chan, cgk_1D, params
+        vis_data, grid, sumwt, uvw, weight, freq_chan, cgk_1D, params
     )
 
     kernel, corrTerm = sph_2D(
@@ -260,8 +262,10 @@ def make_standard_grid_degrid():
     params["chan_mode"] = "continuum"
 
     cgk_1D = sph_1D(params["oversampling"], params["support"])
+    grid = np.array([])
+    sumwt = np.array([])
     grid, sumwgt = standard_grid_numpy_wrap(
-        vis_data, uvw, weight, freq_chan, cgk_1D, params
+        vis_data, grid, sumwt, uvw, weight, freq_chan, cgk_1D, params
     )
     # testoo
     # print("grid shape", grid.shape, np.max(grid))
