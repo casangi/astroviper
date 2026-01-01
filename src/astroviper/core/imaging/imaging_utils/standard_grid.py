@@ -14,6 +14,8 @@ from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import (
 
 def standard_grid_numpy_wrap_input_checked(
     vis_data: npt.NDArray[complex],
+    grid: npt.NDArray[complex],
+    sum_weight: npt.NDArray[float],
     uvw: npt.NDArray[float],
     weight: npt.NDArray[float],
     freq_chan: npt.NDArray[float],
@@ -33,6 +35,12 @@ def standard_grid_numpy_wrap_input_checked(
     ----------
     vis_data : np.NDArray[complex]
         Visibilities array has to be of matching shape with uvw
+    grid: numpy array[complex or float]
+        complex grid onto which gridded vis will be added to
+        if it is size 0 it will be created with image_size shape
+    sum_weight: numpy array with sum of weights in the gridding process
+                It will be accumulated to it.
+                if size zero it will be created
     uvw : np.NDArray[float]
         UVW array each element will have 3 valies
     weight : np.NDArray[float]
@@ -72,10 +80,14 @@ def standard_grid_numpy_wrap_input_checked(
     params["support"] = support
     params["do_psf"] = do_psf
     params["chan_mode"] = chan_mode
-    return standard_grid_numpy_wrap(vis_data, uvw, weight, freq_chan, cgk_1D, params)
+    return standard_grid_numpy_wrap(
+        vis_data, grid, sum_weight, uvw, weight, freq_chan, cgk_1D, params
+    )
 
 
-def standard_grid_numpy_wrap(vis_data, uvw, weight, freq_chan, cgk_1D, grid_params):
+def standard_grid_numpy_wrap(
+    vis_data, grid, sum_weight, uvw, weight, freq_chan, cgk_1D, grid_params
+):
     """
     Wraps the jit gridder code.
 
@@ -118,14 +130,17 @@ def standard_grid_numpy_wrap(vis_data, uvw, weight, freq_chan, cgk_1D, grid_para
     delta_lm = grid_params["cell_size"]
     oversampling = grid_params["oversampling"]
     support = grid_params["support"]
-
-    if grid_params["complex_grid"]:
-        grid = np.zeros(
-            (n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128
-        )
-    else:
-        grid = np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.double)
-    sum_weight = np.zeros((n_imag_chan, n_imag_pol), dtype=np.double)
+    if grid.size == 0 and sum_weight.size == 0:
+        if grid_params["complex_grid"]:
+            grid = np.zeros(
+                (n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]),
+                dtype=np.complex128,
+            )
+        else:
+            grid = np.zeros(
+                (n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.double
+            )
+        sum_weight = np.zeros((n_imag_chan, n_imag_pol), dtype=np.double)
 
     do_psf = grid_params["do_psf"]
     do_imaging_weight = False
@@ -636,8 +651,9 @@ def grid2image_spheroid_ms4(
         listvis = vis
     nx, ny = resid_array.shape[-2:]
     cgk_1D = create_prolate_spheroidal_kernel_1D(sampling, support)
-    gridvis = np.zeros(resid_array.shape, dtype=complex)
-    sumwt = np.zeros(resid_array.shape[:2])
+    # start with zero size let it create the grid first time
+    gridvis = np.array([])
+    sumwt = np.array([])
     for elvis in listvis:
         if not isinstance(elvis, xarray.core.datatree.DataTree):
             raise TypeError("One of the elements of vis is not an xarray datatree")
@@ -650,8 +666,10 @@ def grid2image_spheroid_ms4(
         # weight[np.logical_and(uvw[:, :, 0] == 0, uvw[:, :, 1] == 0)] = 0.0
         freq_chan = elvis.coords["frequency"].values
 
-        gridvispart, sumwtpart = standard_grid_numpy_wrap_input_checked(
+        gridvis, sumwt = standard_grid_numpy_wrap_input_checked(
             vis_data,
+            gridvis,
+            sumwt,
             uvw,
             weight,
             freq_chan,
@@ -664,12 +682,10 @@ def grid2image_spheroid_ms4(
             do_psf=dopsf,
             chan_mode=chan_mode,
         )
-        if gridvispart.shape != resid_array.shape:
+        if gridvis.shape != resid_array.shape:
             raise RuntimeError(
-                f"Shapes of gridded vis and image do no match {gridvispart.shape} and {resid_array.shape}"
+                f"Shapes of gridded vis and image do no match {gridvis.shape} and {resid_array.shape}"
             )
-        gridvis += gridvispart
-        sumwt += sumwtpart
 
     kernel, corrTerm = create_prolate_spheroidal_kernel(
         sampling, support, np.array([nx, ny], dtype=int)
@@ -683,7 +699,7 @@ def grid2image_spheroid_ms4(
                     )
                 )
                 / corrTerm
-                * ny
+                * nx
                 * ny
                 / sumwt[chan, corr]
             )
