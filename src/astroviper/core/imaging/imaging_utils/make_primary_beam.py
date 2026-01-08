@@ -14,8 +14,15 @@ def cube_single_field_primary_beam(im_params, telescope, model="casa_airy_disk")
 
     Parameters:
     im_params : dict
-        Imaging parameters including 'cell', 'imsize', and 'freq'.
+        Imaging parameters: must include
+        'cell_size': angular size of a pixel 2d tuple (rad, rad),
+        'image_size': int 2d tuple (nx, ny),
+        'frequency_coords': list of frequencies in Hz,
+        'polarization': list of Stokes parameters,
+        'phase_center': phase reference center (RA, Dec) in radians,
+        'time_coords': list of time coordinates in seconds.
 
+    telescope : str
         The name of the telescope (e.g., 'ALMA', 'ACA').
 
     Returns:
@@ -34,11 +41,11 @@ def cube_single_field_primary_beam(im_params, telescope, model="casa_airy_disk")
             dish_diameter = 6.7
             blockage_diameter = 0.75
         case _:
-            raise ValueError(f"Unsupported telescope: {telescopes}")
+            raise ValueError(f"Unsupported telescope: {telescope}")
 
     pb_params = {
-        "list_dish_diameters": [10.7],  # in meters
-        "list_blockage_diameters": [0.75],  # in meters
+        "list_dish_diameters": [dish_diameter],  # in meters
+        "list_blockage_diameters": [blockage_diameter],  # in meters
         "ipower": 2,
     }
     cell = im_params["cell_size"]
@@ -46,8 +53,6 @@ def cube_single_field_primary_beam(im_params, telescope, model="casa_airy_disk")
     freq_chan = np.array(im_params["frequency_coords"])
     pol = im_params["polarization"]
     phase_center = im_params["phase_center"]
-    print("phase_center:", phase_center)
-    print("imsize=", imsize)
     if model == "casa_airy_disk":
         pb_image_data = casa_airy_disk_rorder(freq_chan, pol, pb_params, im_params)
     else:
@@ -67,7 +72,6 @@ def cube_single_field_primary_beam(im_params, telescope, model="casa_airy_disk")
     print("pb_image.dims=", tuple(pb_image.dims))
     print("pb_image.sizes.values=", pb_image.sizes.values())
     print("pb_image.coords=", pb_image.coords)
-    mypb_dims = ("time", "frequency", "polarization", "l", "m")
     new_dims = tuple(d for d in pb_image.dims if d != "beam_params_label")
     coords = pb_image.drop_vars("beam_params_label").coords
     pb_da = xr.DataArray(
