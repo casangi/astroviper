@@ -57,7 +57,13 @@ def cube_single_field_primary_beam(im_params, telescope, model="casa_airy_disk")
         pb_image_data = casa_airy_disk_rorder(freq_chan, pol, pb_params, im_params)
     else:
         pb_image_data = airy_disk_rorder(freq_chan, pol, pb_params, im_params)
-    print("pb_image_data.shape=", pb_image_data.shape)
+    if len(im_params["time_coords"]) > 1:
+        # Expand pb_image_data to include time axis if multiple time coords
+        # pb_image_data_repeated = np.expand_dims(pb_image_data, axis=0)
+        pb_image_data_tiled = np.tile(
+            pb_image_data, (len(im_params["time_coords"]), 1, 1, 1, 1)
+        )
+
     pb_image = make_empty_sky_image(
         phase_center=phase_center,
         image_size=imsize,
@@ -69,13 +75,10 @@ def cube_single_field_primary_beam(im_params, telescope, model="casa_airy_disk")
         projection="SIN",
         do_sky_coords=True,
     )
-    print("pb_image.dims=", tuple(pb_image.dims))
-    print("pb_image.sizes.values=", pb_image.sizes.values())
-    print("pb_image.coords=", pb_image.coords)
     new_dims = tuple(d for d in pb_image.dims if d != "beam_params_label")
     coords = pb_image.drop_vars("beam_params_label").coords
     pb_da = xr.DataArray(
-        pb_image_data,
+        pb_image_data_tiled if len(im_params["time_coords"]) > 1 else pb_image_data,
         # dims=pb_image.dims[:-1],
         dims=new_dims,
         coords=coords,
