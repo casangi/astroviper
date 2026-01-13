@@ -25,6 +25,10 @@ def cube_single_field_primary_beam(im_params, telescope, model="casa_airy_disk")
     telescope : str
         The name of the telescope (e.g., 'ALMA', 'ACA').
 
+    model : str, optional
+        The primary beam model to use. Currently only one of the two versions of
+        Airy disk model defined in make_pb_symmetric. Default is 'casa_airy_disk'.
+
     Returns:
     pb_image : np.ndarray
         The generated primary beam image.
