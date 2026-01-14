@@ -51,9 +51,13 @@ class TestStandardGridNumpyWrap(unittest.TestCase):
         self.setup_vis_uvw()
         oversampling = 100
         support = 7
+        grid = np.array([])
+        sumwt = np.array([])
         cgk_1D = create_prolate_spheroidal_kernel_1D(oversampling, support)
         grid, sumwt = standard_grid_numpy_wrap_input_checked(
             vis_data=self.vis_data,
+            grid=grid,
+            sum_weight=sumwt,
             uvw=self.uvw,
             weight=self.weight,
             freq_chan=self.freq_chan,
@@ -79,8 +83,12 @@ class TestStandardGridNumpyWrap(unittest.TestCase):
         print(dirty_im.shape, dirty_im[0, 0, 87, 92], dirty_im[0, 0, 110, 115])
         self.assertGreater(dirty_im[0, 0, 87, 92], 1.8)
         self.assertGreater(dirty_im[0, 0, 110, 115], 0.9)
+        grid = np.array([])
+        sumwt = np.array([])
         grid, sumwt = standard_grid_numpy_wrap_input_checked(
             vis_data=self.vis_data,
+            grid=grid,
+            sum_weight=sumwt,
             uvw=self.uvw,
             weight=self.weight,
             freq_chan=self.freq_chan,

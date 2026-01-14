@@ -87,6 +87,12 @@ def feather_core(input_params):
             input_params["input_data_store"][k],
             block_des=input_params["data_selection"][k],
         )
+
+        if "BEAM" in xds:
+            xds = xds.rename(
+                {"BEAM": "BEAM_FIT_PARAMS", "beam_param": "beam_params_label"}
+            )
+
         # print("load image for", k, "complete")
         # print("completed load_image()")
         fft_plane = (

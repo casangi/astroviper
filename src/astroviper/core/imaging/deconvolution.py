@@ -199,19 +199,22 @@ def deconvolve(
     # Pre-allocate full model and residual datasets
     # Initialize from dirty image structure to preserve coordinates
     full_model_xds = dirty_image_xds.copy(deep=True)
+    full_model_xds = full_model_xds.rename_vars({"RESIDUAL": "MODEL"})
+
     full_residual_xds = dirty_image_xds.copy(deep=True)
 
     # Zero out the model (residual starts as dirty image copy)
-    full_model_xds["SKY"].values[:] = 0.0
+    full_model_xds["MODEL"].values[:] = 0.0
 
     # If initial model provided, use it as starting point
     if model_xds is not None:
-        full_model_xds["SKY"].values[:] = model_xds["SKY"].values[:]
-
+        full_model_xds["MODEL"].values[:] = model_xds["MODEL"].values[:]
     for tt in range(ntime):
         for nn in range(nchan):
             # Compute PSF sidelobe, same for all pols
-            _psf_values = psf_xds.isel(time=tt, frequency=nn)["SKY"].values
+            _psf_values = psf_xds.isel(time=tt, frequency=nn)[
+                "POINT_SPREAD_FUNCTION"
+            ].values
             _psf_values = _psf_values[
                 None, None, ...
             ]  # Add dummy axes for freq and time
@@ -241,7 +244,7 @@ def deconvolve(
                 # Get starting model flux for this plane
                 if model_xds is not None:
                     start_model_flux = float(
-                        model_xds["SKY"]
+                        model_xds["MODEL"]
                         .isel(time=tt, frequency=nn, polarization=pp)
                         .sum()
                         .values
@@ -252,20 +255,23 @@ def deconvolve(
                 # Run deconvolution on single plane
                 # Extract numpy arrays from xarray datasets
                 results, model_array, residual_array = _deconvolver(
-                    dirty_image=dirty_slice["SKY"].values,
-                    psf=psf_slice["SKY"].values,
+                    dirty_image=dirty_slice["RESIDUAL"].values,
+                    psf=psf_slice["POINT_SPREAD_FUNCTION"].values,
                     deconv_params=deconv_params,
                     output_dir=output_dir,
                 )
 
                 # Insert results back into full datasets at correct plane location
-                full_model_xds["SKY"].values[tt, nn, pp, :, :] = model_array
-                full_residual_xds["SKY"].values[tt, nn, pp, :, :] = residual_array
+                full_model_xds["MODEL"].values[tt, nn, pp, :, :] = model_array
+                full_residual_xds["RESIDUAL"].values[tt, nn, pp, :, :] = residual_array
+
+                # Calculate final cumulative model flux for this plane
+                model_flux = float(np.sum(model_array))
 
                 # Create temporary xarray for peak residual calculation
                 # (to reuse existing imgstats functions)
                 temp_residual = dirty_slice.copy()
-                temp_residual["SKY"].values[:] = residual_array
+                temp_residual["RESIDUAL"].values[:] = residual_array
 
                 peakres = imgstats.image_peak_residual(
                     temp_residual, per_plane_stats=False, use_mask=True
@@ -293,6 +299,7 @@ def deconvolve(
                     "phase_center": phase_center,
                     "time": time,
                     "start_model_flux": start_model_flux,
+                    "model_flux": model_flux,
                     "start_peakres": start_peakres,
                     "start_peakres_nomask": start_peakres_nomask,
                     "peakres": peakres,
