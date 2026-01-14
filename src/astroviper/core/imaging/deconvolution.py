@@ -265,6 +265,9 @@ def deconvolve(
                 full_model_xds["MODEL"].values[tt, nn, pp, :, :] = model_array
                 full_residual_xds["RESIDUAL"].values[tt, nn, pp, :, :] = residual_array
 
+                # Calculate final cumulative model flux for this plane
+                model_flux = float(np.sum(model_array))
+
                 # Create temporary xarray for peak residual calculation
                 # (to reuse existing imgstats functions)
                 temp_residual = dirty_slice.copy()
@@ -296,6 +299,7 @@ def deconvolve(
                     "phase_center": phase_center,
                     "time": time,
                     "start_model_flux": start_model_flux,
+                    "model_flux": model_flux,
                     "start_peakres": start_peakres,
                     "start_peakres_nomask": start_peakres_nomask,
                     "peakres": peakres,

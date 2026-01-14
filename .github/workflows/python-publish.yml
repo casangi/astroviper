@@ -13,7 +13,8 @@ jobs:
   #       run: echo "2 PYPI_TOKEN=${{ secrets.PYPI_TOKEN }}"
 
   call-publish:
-    uses: casangi/toolviper/.github/workflows/python-publish-cpp-template.yml@main
+    uses: nrao/gh-actions-templates-public/.github/workflows/python-publish-cpp-cngi-template.yml@main
     with:
       pypi-url: "https://pypi.org/project/astroviper"
-    secrets: inherit
+    secrets:
+      PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }} # Explicit pass instead of inherit
