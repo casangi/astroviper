@@ -9,7 +9,7 @@ import xarray as xr
 
 
 def corr_to_stokes(
-    data: Union[np.ndarray, xr.DataArray],
+    data: np.ndarray,
     corr_type: str = "linear",
     transformation_matrix: Optional[np.ndarray] = None,
 ) -> np.ndarray:
@@ -18,8 +18,8 @@ def corr_to_stokes(
 
     Parameters
     ----------
-    data : np.ndarray or xr.DataArray
-        Numpy array or xarray DataArray with correlation products as the final dimension.
+    data : np.ndarray
+        Numpy array with correlation products as the final dimension.
         Typically of shape (..., 4) for 'XX', 'XY', 'YX', 'YY' for e.g.
     corr_type : str, optional
         Type of correlation products, e.g. 'linear', 'circular', or 'custom'.
@@ -40,11 +40,7 @@ def corr_to_stokes(
 
     Example
     -------
-    >>> data = xr.DataArray(
-        np.random.rand(10, 4),
-        dims=['time', 'corr_product'],
-        coords={'corr_product': ['XX', 'YY', 'XY', 'YX']}
-    )
+    >>> data = np.random.rand(10, 4)
     >>> stokes_data = corr_to_stokes(data, corr_type='linear')
     """
 
@@ -69,17 +65,13 @@ def corr_to_stokes(
         ]
 
     # Copy data to avoid modifying original
-    if isinstance(data, xr.DataArray):
-        feed_data = data.values.copy()
-    else:
-        feed_data = data.copy()
-    stokes_data = feed_data @ np.array(transformation_matrix).T
+    stokes_data = data.copy() @ np.array(transformation_matrix).T
 
     return stokes_data
 
 
 def stokes_to_corr(
-    data: Union[np.ndarray, xr.DataArray],
+    data: np.ndarray,
     corr_type: str = "linear",
     transformation_matrix: Optional[np.ndarray] = None,
 ) -> np.ndarray:
@@ -88,8 +80,8 @@ def stokes_to_corr(
 
     Parameters
     ----------
-    data : np.ndarray or xr.DataArray
-        Numpy array or xarray DataArray with Stokes parameters as the final dimension.
+    data : np.ndarray
+        Numpy array with Stokes parameters as the final dimension.
         Typically of shape (..., 4) for 'I', 'Q', 'U', 'V'.
     corr_type : str, optional
         Type of correlation products, e.g. 'linear', 'circular', or 'custom'.
@@ -110,11 +102,7 @@ def stokes_to_corr(
 
     Example
     -------
-    >>> stokes_data = xr.DataArray(
-        np.random.rand(10, 4),
-        dims=['time', 'stokes'],
-        coords={'stokes': ['I', 'Q', 'U', 'V']}
-    )
+    >>> stokes_data = np.random.rand(10, 4)
     >>> corr_data = stokes_to_corr(stokes_data, corr_type='linear')
     """
 
@@ -139,11 +127,7 @@ def stokes_to_corr(
         ]
 
     # Copy data to avoid modifying original
-    if isinstance(data, xr.DataArray):
-        feed_data = data.values.copy()
-    else:
-        feed_data = data.copy()
-    corr_data = feed_data @ np.array(transformation_matrix).T
+    corr_data = data.copy() @ np.array(transformation_matrix).T
 
     return corr_data
 
