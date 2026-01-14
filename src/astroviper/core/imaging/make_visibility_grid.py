@@ -199,20 +199,24 @@ def make_visibility_grid_single_field(
     do_psf = False
     do_imaging_weight = False
 
-    standard_grid_jit(
-        grid,
-        sum_weight,
-        do_psf,
-        do_imaging_weight,
-        vis_data,
-        uvw,
-        freq_chan,
-        chan_map,
-        pol_map,
-        imaging_weight,
-        cgk_1D,
-        n_uv,
-        delta_lm,
-        support=7,
-        oversampling=100,
+    grid, sumwt = standard_grid_numpy_wrap(
+        vis_data, uvw, imaging_weight, freq_chan, cgk_1D, _grid_params
     )
+
+    # standard_grid_jit(
+    #    grid,
+    #    sum_weight,
+    #    do_psf,
+    #    do_imaging_weight,
+    #    vis_data,
+    #    uvw,
+    #    freq_chan,
+    #    chan_map,
+    #    pol_map,
+    #    imaging_weight,
+    #    cgk_1D,
+    #    n_uv,
+    #    delta_lm,
+    #    support=7,
+    #    oversampling=100,
+    # )
