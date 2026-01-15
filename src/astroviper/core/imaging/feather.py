@@ -4,7 +4,7 @@ from astropy import units as u
 import xarray as xr
 
 _sky = "SKY"
-_beam = "BEAM_FIT_PARAMS"
+_beam = "BEAM_FIT_PARAMS_SKY"
 import numpy as np
 from xradio.image import make_empty_aperture_image
 from xradio.image import load_image

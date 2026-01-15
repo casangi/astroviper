@@ -19,7 +19,7 @@ convert_msv2_to_processing_set(
     in_file=msv2_name,
     out_file=convert_out,
     partition_scheme=partition_scheme,
-    overwrite=True,
+    persistence_mode= "w",
     parallel_mode="partition",
 )
 
