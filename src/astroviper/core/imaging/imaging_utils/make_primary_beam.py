@@ -19,6 +19,7 @@ def cube_single_field_primary_beam(im_params, telescope, model="casa_airy_disk")
         'image_size': int 2d tuple (nx, ny),
         'frequency_coords': list of frequencies in Hz,
         'polarization': list of Stokes parameters,
+        'image_center': image center pixel coordinates int 2d tuple (x, y),
         'phase_center': phase reference center (RA, Dec) in radians,
         'time_coords': list of time coordinates in seconds.
 
@@ -30,8 +31,9 @@ def cube_single_field_primary_beam(im_params, telescope, model="casa_airy_disk")
         Airy disk model defined in make_pb_symmetric. Default is 'casa_airy_disk'.
 
     Returns:
-    pb_image : np.ndarray
-        The generated primary beam image.
+    pb_image : xarray.Dataset
+        The generated primary beam image as an XRADIO image with a data variable 'PRIMARY_BEAM'.
+
     """
 
     # ALMA parameters:
@@ -63,7 +65,6 @@ def cube_single_field_primary_beam(im_params, telescope, model="casa_airy_disk")
         pb_image_data = airy_disk_rorder(freq_chan, pol, pb_params, im_params)
     if len(im_params["time_coords"]) > 1:
         # Expand pb_image_data to include time axis if multiple time coords
-        # pb_image_data_repeated = np.expand_dims(pb_image_data, axis=0)
         pb_image_data_tiled = np.tile(
             pb_image_data, (len(im_params["time_coords"]), 1, 1, 1, 1)
         )
@@ -83,7 +84,6 @@ def cube_single_field_primary_beam(im_params, telescope, model="casa_airy_disk")
     coords = pb_image.drop_vars("beam_params_label").coords
     pb_da = xr.DataArray(
         pb_image_data_tiled if len(im_params["time_coords"]) > 1 else pb_image_data,
-        # dims=pb_image.dims[:-1],
         dims=new_dims,
         coords=coords,
         name="PRIMARY_BEAM",

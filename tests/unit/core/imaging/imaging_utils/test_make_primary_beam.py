@@ -1,11 +1,6 @@
 from astroviper.core.imaging.imaging_utils.make_primary_beam import (
     cube_single_field_primary_beam,
 )
-from astroviper.core.imaging.imaging_utils.make_pb_symmetric import (
-    airy_disk_rorder,
-    casa_airy_disk_rorder,
-)
-from xradio.image import make_empty_sky_image
 import xarray as xr
 import numpy as np
 import pytest
@@ -172,8 +167,6 @@ def test_cube_single_field_primary_beam_multiple_channels():
 
     # Verify primary beam changes with frequency (lower frequency = wider beam)
     pb_data = pb_image["PRIMARY_BEAM"].values
-    center_l = 32
-    center_m = 32
     edge_l = 10
     edge_m = 32
 
@@ -194,7 +187,7 @@ def test_cube_single_field_primary_beam_different_image_sizes():
             "image_size": size,
             "image_center": (size[0] // 2, size[1] // 2),
             "frequency_coords": [100e9],
-            "polarization": [0],
+            "polarization": ["I"],
             "phase_center": (0.0, 0.0),
             "time_coords": [0.0],
         }
