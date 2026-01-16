@@ -69,6 +69,66 @@ MINOR_STOPCODE_DESCRIPTIONS = {
 # ============================================================================
 
 
+def _validate_returndict_selection(
+    return_dict: ReturnDict,
+    selected: Any,
+    time: Optional[int] = None,
+    pol: Optional[int] = None,
+    chan: Optional[int] = None,
+) -> None:
+    """
+    Validate that sel() returned data when explicit filters were provided.
+
+    Raises KeyError if explicit time/pol/chan values were specified but
+    no matching entries exist in the ReturnDict.
+
+    Parameters:
+    -----------
+    return_dict : ReturnDict
+        The ReturnDict that was queried
+    selected : Any
+        Result from return_dict.sel()
+    time, pol, chan : Optional[int]
+        The filter values that were used
+
+    Raises:
+    -------
+    KeyError
+        If explicit filters were specified but no matches found
+    """
+    # Only validate when at least one filter is explicitly specified
+    has_explicit_filter = any(x is not None for x in (time, pol, chan))
+
+    if not has_explicit_filter:
+        return  # Wildcard behavior - no validation needed
+
+    # Check if selection returned no results
+    no_results = selected is None or (isinstance(selected, list) and len(selected) == 0)
+
+    if no_results:
+        # Build descriptive error message
+        filter_parts = []
+        if time is not None:
+            filter_parts.append(f"time={time}")
+        if pol is not None:
+            filter_parts.append(f"pol={pol}")
+        if chan is not None:
+            filter_parts.append(f"chan={chan}")
+
+        filter_str = ", ".join(filter_parts)
+
+        # Get available keys for the error message
+        available_keys = list(return_dict.data.keys())
+        if len(available_keys) == 0:
+            available_str = "ReturnDict is empty"
+        elif len(available_keys) <= 10:
+            available_str = f"Available keys: {available_keys}"
+        else:
+            available_str = f"Available keys (first 10 of {len(available_keys)}): {available_keys[:10]}"
+
+        raise KeyError(f"No entries found for {filter_str}. {available_str}")
+
+
 def merge_return_dicts(
     return_dicts: List[ReturnDict],
     merge_strategy: str = "update",
@@ -221,6 +281,7 @@ def get_peak_residual_from_returndict(
         Returns 0.0 if no valid data found
     """
     selected = return_dict.sel(time=time, pol=pol, chan=chan)
+    _validate_returndict_selection(return_dict, selected, time, pol, chan)
 
     if not isinstance(selected, list):
         selected = [selected] if selected is not None else []
@@ -281,6 +342,7 @@ def get_masksum_from_returndict(
         Returns 0.0 if no mask data found
     """
     selected = return_dict.sel(time=time, pol=pol, chan=chan)
+    _validate_returndict_selection(return_dict, selected, time, pol, chan)
 
     if not isinstance(selected, list):
         selected = [selected] if selected is not None else []
@@ -329,6 +391,7 @@ def get_iterations_done_from_returndict(
         Sum of all iterations done across entire history and selected planes
     """
     selected = return_dict.sel(time=time, pol=pol, chan=chan)
+    _validate_returndict_selection(return_dict, selected, time, pol, chan)
 
     if not isinstance(selected, list):
         selected = [selected] if selected is not None else []
@@ -381,6 +444,7 @@ def get_max_psf_sidelobe_from_returndict(
         Returns 0.2 (conservative default) if not found
     """
     selected = return_dict.sel(time=time, pol=pol, chan=chan)
+    _validate_returndict_selection(return_dict, selected, time, pol, chan)
 
     if not isinstance(selected, list):
         selected = [selected] if selected is not None else []
@@ -446,6 +510,7 @@ def get_model_flux_from_returndict(
     2.3  # Latest cumulative flux
     """
     selected = return_dict.sel(time=time, pol=pol, chan=chan)
+    _validate_returndict_selection(return_dict, selected, time, pol, chan)
 
     if not isinstance(selected, list):
         selected = [selected] if selected is not None else []
