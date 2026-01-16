@@ -231,10 +231,14 @@ def psf_gaussian_fit(
 
     import dask.array as da
 
-    _xds["BEAM_FIT_PARAMS"].data = da.from_array(ellipse_params, chunks="auto")
+    _xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data = da.from_array(
+        ellipse_params, chunks="auto"
+    )
     # assume l, m in radians
     if "unit" not in _xds["POINT_SPREAD_FUNCTION"].l.attrs:
-        _xds["BEAM_FIT_PARAMS"].beam_params_label.attrs["unit"] = "rad"
+        _xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].beam_params_label.attrs[
+            "unit"
+        ] = "rad"
     return _xds
 
 

@@ -102,17 +102,17 @@ class FeatherShared:
         for i in (0, 1):
             xds = copy.deepcopy(skel_xds)
             xds["SKY"] = sky_xa_zeros.copy()
-            xds["BEAM_FIT_PARAMS"] = beam_xa_zeros.copy()
+            xds["BEAM_FIT_PARAMS_SKY"] = beam_xa_zeros.copy()
             for j in range(0, nchan, 16):
                 min_chan = j
                 max_chan = min(j + 16, nchan)
                 fx = xds_sd_temp if i == 0 else xds_int_temp
                 xds["SKY"][{"frequency": slice(min_chan, max_chan)}] = fx["SKY"].values
                 xds["SKY"].attrs = {"units": "Jy/beam"}
-                xds["BEAM_FIT_PARAMS"][{"frequency": slice(min_chan, max_chan)}] = fx[
-                    "BEAM_FIT_PARAMS"
-                ].values
-                xds["BEAM_FIT_PARAMS"].attrs = {"units": "rad"}
+                xds["BEAM_FIT_PARAMS_SKY"][{"frequency": slice(min_chan, max_chan)}] = (
+                    fx["BEAM_FIT_PARAMS_SKY"].values
+                )
+                xds["BEAM_FIT_PARAMS_SKY"].attrs = {"units": "rad"}
             if i == 0:
                 xds_sd = xds
             else:
@@ -180,8 +180,8 @@ class FeatherTest(FeatherShared, unittest.TestCase):
             )
             self.assertTrue(
                 (
-                    feather_xds["BEAM_FIT_PARAMS"].values
-                    == xds_int["BEAM_FIT_PARAMS"].values
+                    feather_xds["BEAM_FIT_PARAMS_SKY"].values
+                    == xds_int["BEAM_FIT_PARAMS_SKY"].values
                 ).all(),
                 "Incorrect beam values",
             )
@@ -261,7 +261,7 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
 
     def test_basic_stats_and_positions(self):
 
-        feather_xds = load_image(self.feather_out)
+        feather_xds = load_image({"sky": self.feather_out})
         # expected shape from prior runs
         self.assertEqual(
             feather_xds.SKY.shape,
@@ -270,7 +270,7 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
         )
 
         # load model for comparison
-        model_xds = open_image(self.model_image)
+        model_xds = open_image({"sky": self.model_image})
         self.assertEqual(
             feather_xds.SKY.shape,
             model_xds.SKY.shape,
@@ -304,8 +304,8 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
 
     def test_center_region_and_width_inference(self):
         self._ensure_feather_output(regenerate=False, cores=4, overwrite=True)
-        feather_xds = load_image(self.feather_out)
-        model_xds = open_image(self.model_image)
+        feather_xds = load_image({"sky": self.feather_out})
+        model_xds = open_image({"sky": self.model_image})
 
         feather_plane = feather_xds.SKY.isel(frequency=0)
         model_plane = model_xds.SKY.isel(frequency=0)
