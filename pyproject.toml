@@ -17,6 +17,7 @@ dependencies = [
   "graphviper>=0.0.36",
   "numpy>=1.20.0",
   "xradio[zarr]==1.1.12a0",
+  "numba",
 ]
 
 [project.optional-dependencies]
