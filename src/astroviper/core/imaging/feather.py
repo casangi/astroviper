@@ -92,11 +92,9 @@ def feather_core(input_params):
             xds = xds.rename(
                 {"BEAM": "BEAM_FIT_PARAMS", "beam_param": "beam_params_label"}
             )
-        
+
         if "BEAM_FIT_PARAMS" in xds:
-            xds = xds.rename(
-                {"BEAM_FIT_PARAMS": "BEAM_FIT_PARAMS_SKY"}
-            )
+            xds = xds.rename({"BEAM_FIT_PARAMS": "BEAM_FIT_PARAMS_SKY"})
 
         # print("load image for", k, "complete")
         # print("completed load_image()")
