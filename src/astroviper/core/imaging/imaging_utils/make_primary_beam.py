@@ -8,6 +8,32 @@ import xarray as xr
 import numpy as np
 
 
+def _validate_im_params(im_params):
+    required_keys = [
+        "cell_size",
+        "image_size",
+        "frequency_coords",
+        "polarization",
+        "image_center",
+        "phase_center",
+        "time_coords",
+    ]
+    for key in required_keys:
+        if key not in im_params:
+            raise ValueError(f"im_params must include '{key}' key")
+        if (
+            key == "cell_size"
+            or key == "image_size"
+            or key == "image_center"
+            or key == "phase_center"
+        ):
+            if not (isinstance(im_params[key], tuple) and len(im_params[key]) == 2):
+                raise ValueError(f"'{key}' must be a 2D tuple")
+        if key == "frequency_coords" or key == "time_coords" or key == "polarization":
+            if not isinstance(im_params[key], list):
+                raise ValueError(f"'{key}' must be a list")
+
+
 def cube_single_field_primary_beam(im_params, telescope, model="casa_airy_disk"):
     """
     Generate a primary beam image for a single field in a measurement set.
@@ -35,6 +61,7 @@ def cube_single_field_primary_beam(im_params, telescope, model="casa_airy_disk")
         The generated primary beam image as an XRADIO image with a data variable 'PRIMARY_BEAM'.
 
     """
+    _validate_im_params(im_params)
 
     # ALMA parameters:
     # ALMA 12m: effective diameter 10.7m, blockage 0.75m
