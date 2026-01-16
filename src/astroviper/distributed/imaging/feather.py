@@ -89,6 +89,10 @@ def feather(
             sd_xds = sd_xds.rename(
                 {"BEAM": "BEAM_FIT_PARAMS_SKY", "beam_param": "beam_params_label"}
             )
+        if "BEAM_FIT_PARAMS" in sd_xds:
+            sd_xds = sd_xds.rename(
+                {"BEAM_FIT_PARAMS": "BEAM_FIT_PARAMS_SKY"}
+            )
 
     else:
         sd_xds = (
@@ -109,6 +113,11 @@ def feather(
         if "BEAM" in int_xds:
             int_xds = int_xds.rename(
                 {"BEAM": "BEAM_FIT_PARAMS_SKY", "beam_param": "beam_params_label"}
+            )
+            
+        if "BEAM_FIT_PARAMS" in int_xds:
+            int_xds = int_xds.rename(
+                {"BEAM_FIT_PARAMS": "BEAM_FIT_PARAMS_SKY"}
             )
 
     else:
