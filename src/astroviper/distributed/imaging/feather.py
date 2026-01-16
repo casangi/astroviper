@@ -24,7 +24,7 @@ from numcodecs import Blosc
 from astroviper.core.imaging.feather import feather_core
 
 _sky = "SKY"
-_beam = "BEAM_FIT_PARAMS"
+_beam = "BEAM_FIT_PARAMS_SKY"
 
 
 def feather(
@@ -87,8 +87,10 @@ def feather(
         )
         if "BEAM" in sd_xds:
             sd_xds = sd_xds.rename(
-                {"BEAM": "BEAM_FIT_PARAMS", "beam_param": "beam_params_label"}
+                {"BEAM": "BEAM_FIT_PARAMS_SKY", "beam_param": "beam_params_label"}
             )
+        if "BEAM_FIT_PARAMS" in sd_xds:
+            sd_xds = sd_xds.rename({"BEAM_FIT_PARAMS": "BEAM_FIT_PARAMS_SKY"})
 
     else:
         sd_xds = (
@@ -108,8 +110,11 @@ def feather(
 
         if "BEAM" in int_xds:
             int_xds = int_xds.rename(
-                {"BEAM": "BEAM_FIT_PARAMS", "beam_param": "beam_params_label"}
+                {"BEAM": "BEAM_FIT_PARAMS_SKY", "beam_param": "beam_params_label"}
             )
+
+        if "BEAM_FIT_PARAMS" in int_xds:
+            int_xds = int_xds.rename({"BEAM_FIT_PARAMS": "BEAM_FIT_PARAMS_SKY"})
 
     else:
         int_xds = (
