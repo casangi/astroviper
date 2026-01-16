@@ -63,11 +63,13 @@ def cube_single_field_primary_beam(im_params, telescope, model="casa_airy_disk")
         pb_image_data = casa_airy_disk_rorder(freq_chan, pol, pb_params, im_params)
     else:
         pb_image_data = airy_disk_rorder(freq_chan, pol, pb_params, im_params)
-    if len(im_params["time_coords"]) > 1:
-        # Expand pb_image_data to include time axis if multiple time coords
-        pb_image_data_tiled = np.tile(
-            pb_image_data, (len(im_params["time_coords"]), 1, 1, 1, 1)
-        )
+    # the first dimension for pb_image_data is antenna (for storing multiple dish size models)
+    pb_image_data = pb_image_data[0]
+    # Asuume here no time dependence for PB so for multiple time coords, just repeat the same PB image
+    time_coords_size = len(im_params["time_coords"])
+    pb_image_data_repeated = np.repeat(
+        pb_image_data[np.newaxis, :, :, :, :], time_coords_size, axis=0
+    )
 
     pb_image = make_empty_sky_image(
         phase_center=phase_center,
@@ -83,7 +85,7 @@ def cube_single_field_primary_beam(im_params, telescope, model="casa_airy_disk")
     new_dims = tuple(d for d in pb_image.dims if d != "beam_params_label")
     coords = pb_image.drop_vars("beam_params_label").coords
     pb_da = xr.DataArray(
-        pb_image_data_tiled if len(im_params["time_coords"]) > 1 else pb_image_data,
+        pb_image_data_repeated,
         dims=new_dims,
         coords=coords,
         name="PRIMARY_BEAM",
