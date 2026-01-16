@@ -45,7 +45,9 @@ def create_test_xds(shape=(1, 1, 1, 51, 51), rm_coord=None):
     }
     beam = xr.DataArray(da_beam_data, dims=beam_dims, coords=beam_coords)
 
-    test_dataset = xr.Dataset({"POINT_SPREAD_FUNCTION": psf, "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION": beam})
+    test_dataset = xr.Dataset(
+        {"POINT_SPREAD_FUNCTION": psf, "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION": beam}
+    )
     return test_dataset
 
 
@@ -62,7 +64,10 @@ def test_psf_gaussian_fit_output_structure():
     # Check that the fitted widths are positive
     assert np.all(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[:, :, :-1] > 0)
     assert np.allclose(
-        result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, :], truth_values, rtol=1e-3, atol=5
+        result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, :],
+        truth_values,
+        rtol=1e-3,
+        atol=5,
     )
 
 
@@ -76,7 +81,10 @@ def test_psf_gaussian_fit_custom_window():
     assert params.shape == (3,)
     assert np.all(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[:, :, :-1] > 0)
     assert np.allclose(
-        result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, :], truth_values, rtol=1e-3, atol=5
+        result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, :],
+        truth_values,
+        rtol=1e-3,
+        atol=5,
     )
 
 
@@ -150,7 +158,9 @@ def test_all_nan_input():
     ds = create_test_xds()
     ds["POINT_SPREAD_FUNCTION"].data[:] = np.nan
     result = psf_gaussian_fit(ds)
-    assert np.all(np.isnan(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data.compute()))
+    assert np.all(
+        np.isnan(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data.compute())
+    )
 
 
 def test_all_zero_input():
@@ -160,7 +170,8 @@ def test_all_zero_input():
     result = psf_gaussian_fit(ds)
     # Depending on implementation, may be all zeros or NaNs
     assert np.all(
-        (result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data == 0) | np.isnan(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data)
+        (result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data == 0)
+        | np.isnan(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data)
     )
 
 
@@ -184,7 +195,10 @@ def test_oversampling():
     result = psf_gaussian_fit(ds, npix_window=[41, 41], sampling=[51, 51])
     truth_values = [0.47096, 0.47096, 0.0]
     assert np.allclose(
-        result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, :], truth_values, rtol=1e-3, atol=5
+        result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, :],
+        truth_values,
+        rtol=1e-3,
+        atol=5,
     )
 
 
@@ -211,7 +225,9 @@ def create_rotated_gaussian(shape, angle_deg):
     beam = xr.DataArray(
         beam_data, dims=["time", "frequency", "polarization", "beam_params_label"]
     )
-    return xr.Dataset({"POINT_SPREAD_FUNCTION": psf, "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION": beam})
+    return xr.Dataset(
+        {"POINT_SPREAD_FUNCTION": psf, "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION": beam}
+    )
 
 
 def test_psf_gaussian_fit_orientation():
@@ -237,9 +253,15 @@ def test_psf_gaussian_fit_orientation():
         # plt.show(block=True)
         plt.show(block=False)
         result = psf_gaussian_fit(ds, npix_window=(21, 21), sampling=(55, 55))
-        measured_angle = -np.rad2deg(float(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, 2]))
-        measured_bmaj = float(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, 0])
-        measured_bmin = float(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, 1])
+        measured_angle = -np.rad2deg(
+            float(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, 2])
+        )
+        measured_bmaj = float(
+            result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, 0]
+        )
+        measured_bmin = float(
+            result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, 1]
+        )
         # Allow for 180-degree ambiguity and some tolerance
         measured_angle -= 90
         if measured_angle < -90:
