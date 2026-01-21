@@ -17,6 +17,8 @@ import unittest
 from astroviper.core.imaging.imaging_utils.corr_to_stokes import (
     corr_to_stokes,
     stokes_to_corr,
+    image_stokes_to_corr,
+    image_corr_to_stokes,
 )
 
 
