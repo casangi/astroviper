@@ -2363,7 +2363,6 @@ def fit_multi_gaussian2d(
 import numpy as np
 from matplotlib.patches import Ellipse
 
-
 # ---- plotting helpers --------------------------------------------------------
 
 
