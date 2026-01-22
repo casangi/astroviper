@@ -41,7 +41,6 @@ from astroviper.core.imaging.imaging_utils.return_dict import (
     Key,
 )
 
-
 # =============================================================================
 # ReturnDict Core Functionality Tests
 # =============================================================================
