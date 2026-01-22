@@ -31,6 +31,7 @@ from astroviper.core.imaging.imaging_utils.iteration_control import (
     get_masksum_from_returndict,
     get_iterations_done_from_returndict,
     get_max_psf_sidelobe_from_returndict,
+    get_model_flux_from_returndict,
     # Main class
     IterationController,
 )
@@ -1836,6 +1837,177 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
         # Should converge on threshold
         stopcode, desc = controller.check_convergence(rd)
         self.assertEqual(stopcode.major, MAJOR_THRESHOLD)
+
+
+# =============================================================================
+# Key Validation Tests (Issue #157)
+# =============================================================================
+
+
+class TestReturnDictKeyValidation(unittest.TestCase):
+    """Test key validation in ReturnDict utility functions."""
+
+    def setUp(self):
+        """Create test ReturnDict with known keys."""
+        self.rd = ReturnDict()
+        self.rd.add(
+            {
+                "peakres": 1.0,
+                "masksum": 100,
+                "iter_done": 50,
+                "max_psf_sidelobe": 0.2,
+                "model_flux": 1.5,
+            },
+            time=0,
+            pol=0,
+            chan=0,
+        )
+        self.rd.add(
+            {
+                "peakres": 0.8,
+                "masksum": 80,
+                "iter_done": 40,
+                "max_psf_sidelobe": 0.15,
+                "model_flux": 1.2,
+            },
+            time=0,
+            pol=0,
+            chan=1,
+        )
+
+    # --- get_peak_residual_from_returndict tests ---
+
+    def test_get_peak_residual_invalid_time_raises_keyerror(self):
+        """Test KeyError raised for non-existent time."""
+        with self.assertRaises(KeyError) as context:
+            get_peak_residual_from_returndict(self.rd, time=99, pol=0, chan=0)
+        self.assertIn("time=99", str(context.exception))
+        self.assertIn("Available keys", str(context.exception))
+
+    def test_get_peak_residual_invalid_pol_raises_keyerror(self):
+        """Test KeyError raised for non-existent pol."""
+        with self.assertRaises(KeyError) as context:
+            get_peak_residual_from_returndict(self.rd, time=0, pol=99, chan=0)
+        self.assertIn("pol=99", str(context.exception))
+
+    def test_get_peak_residual_invalid_chan_raises_keyerror(self):
+        """Test KeyError raised for non-existent chan."""
+        with self.assertRaises(KeyError) as context:
+            get_peak_residual_from_returndict(self.rd, time=0, pol=0, chan=99)
+        self.assertIn("chan=99", str(context.exception))
+
+    def test_get_peak_residual_partial_match_failure(self):
+        """Test KeyError when some filters match but not all."""
+        # time=0 exists, pol=0 exists, but chan=2 doesn't
+        with self.assertRaises(KeyError) as context:
+            get_peak_residual_from_returndict(self.rd, time=0, pol=0, chan=2)
+        self.assertIn("chan=2", str(context.exception))
+
+    def test_get_peak_residual_valid_key_succeeds(self):
+        """Test no error for valid key."""
+        result = get_peak_residual_from_returndict(self.rd, time=0, pol=0, chan=0)
+        self.assertEqual(result, 1.0)
+
+    def test_get_peak_residual_wildcard_no_error(self):
+        """Test no error when using wildcards (None values)."""
+        # These should NOT raise errors
+        result = get_peak_residual_from_returndict(self.rd, time=0)
+        self.assertEqual(result, 1.0)  # Max of 1.0 and 0.8
+
+        result = get_peak_residual_from_returndict(self.rd)  # All None
+        self.assertEqual(result, 1.0)
+
+    def test_get_peak_residual_empty_returndict_with_filter(self):
+        """Test KeyError on empty ReturnDict with explicit filter."""
+        rd_empty = ReturnDict()
+        with self.assertRaises(KeyError) as context:
+            get_peak_residual_from_returndict(rd_empty, time=0, pol=0, chan=0)
+        self.assertIn("empty", str(context.exception))
+
+    def test_get_peak_residual_empty_returndict_no_filter(self):
+        """Test no error on empty ReturnDict without filters."""
+        rd_empty = ReturnDict()
+        result = get_peak_residual_from_returndict(rd_empty)  # All None
+        self.assertEqual(result, 0.0)  # Default value
+
+    # --- get_masksum_from_returndict tests ---
+
+    def test_get_masksum_invalid_key_raises_keyerror(self):
+        """Test KeyError raised for non-existent key."""
+        with self.assertRaises(KeyError):
+            get_masksum_from_returndict(self.rd, time=99, pol=0, chan=0)
+
+    def test_get_masksum_valid_key_succeeds(self):
+        """Test no error for valid key."""
+        result = get_masksum_from_returndict(self.rd, time=0, pol=0, chan=0)
+        self.assertEqual(result, 100)
+
+    # --- get_iterations_done_from_returndict tests ---
+
+    def test_get_iterations_done_invalid_key_raises_keyerror(self):
+        """Test KeyError raised for non-existent key."""
+        with self.assertRaises(KeyError):
+            get_iterations_done_from_returndict(self.rd, time=0, pol=0, chan=99)
+
+    def test_get_iterations_done_valid_key_succeeds(self):
+        """Test no error for valid key."""
+        result = get_iterations_done_from_returndict(self.rd, time=0, pol=0, chan=0)
+        self.assertEqual(result, 50)
+
+    # --- get_max_psf_sidelobe_from_returndict tests ---
+
+    def test_get_max_psf_sidelobe_invalid_key_raises_keyerror(self):
+        """Test KeyError raised for non-existent key."""
+        with self.assertRaises(KeyError):
+            get_max_psf_sidelobe_from_returndict(self.rd, time=0, pol=99, chan=0)
+
+    def test_get_max_psf_sidelobe_valid_key_succeeds(self):
+        """Test no error for valid key."""
+        result = get_max_psf_sidelobe_from_returndict(self.rd, time=0, pol=0, chan=0)
+        self.assertEqual(result, 0.2)
+
+    # --- get_model_flux_from_returndict tests ---
+
+    def test_get_model_flux_invalid_key_raises_keyerror(self):
+        """Test KeyError raised for non-existent key."""
+        with self.assertRaises(KeyError):
+            get_model_flux_from_returndict(self.rd, time=99, pol=99, chan=99)
+
+    def test_get_model_flux_valid_key_succeeds(self):
+        """Test no error for valid key."""
+        result = get_model_flux_from_returndict(self.rd, time=0, pol=0, chan=0)
+        self.assertEqual(result, 1.5)
+
+    # --- Error message format tests ---
+
+    def test_error_message_includes_filter_values(self):
+        """Test error message includes the filter values that were specified."""
+        with self.assertRaises(KeyError) as context:
+            get_peak_residual_from_returndict(self.rd, time=5, pol=3, chan=10)
+
+        error_msg = str(context.exception)
+        self.assertIn("time=5", error_msg)
+        self.assertIn("pol=3", error_msg)
+        self.assertIn("chan=10", error_msg)
+
+    def test_error_message_includes_available_keys(self):
+        """Test error message includes available keys for debugging."""
+        with self.assertRaises(KeyError) as context:
+            get_peak_residual_from_returndict(self.rd, time=0, pol=0, chan=99)
+
+        error_msg = str(context.exception)
+        self.assertIn("Available keys", error_msg)
+
+    def test_error_message_partial_filter(self):
+        """Test error message when only some filters specified."""
+        with self.assertRaises(KeyError) as context:
+            get_peak_residual_from_returndict(self.rd, chan=99)
+
+        error_msg = str(context.exception)
+        self.assertIn("chan=99", error_msg)
+        # Should NOT include time or pol since they weren't specified
+        self.assertNotIn("time=None", error_msg)
+        self.assertNotIn("pol=None", error_msg)
 
 
 if __name__ == "__main__":
