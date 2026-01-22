@@ -8,7 +8,6 @@ import astropy.time
 import numpy as np
 import matplotlib.pyplot as plt
 
-
 msv2_name = "global_vlbi_gg084b_reduced.ms"
 toolviper.utils.data.download(file=msv2_name)
 
