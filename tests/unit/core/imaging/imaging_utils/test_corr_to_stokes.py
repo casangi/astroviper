@@ -17,6 +17,8 @@ import unittest
 from astroviper.core.imaging.imaging_utils.corr_to_stokes import (
     corr_to_stokes,
     stokes_to_corr,
+    image_stokes_to_corr,
+    image_corr_to_stokes,
 )
 
 
@@ -259,7 +261,7 @@ class TestXarrayCompatibility(unittest.TestCase):
             coords={"corr": ["XX", "XY", "YX", "YY"]},
         )
 
-        stokes = corr_to_stokes(corr_xr, corr_type="linear")
+        stokes = corr_to_stokes(corr_xr.values, corr_type="linear")
         corr_reconstructed = stokes_to_corr(stokes, corr_type="linear")
 
         # stokes and corr_reconstructed should be numpy arrays
@@ -281,7 +283,7 @@ class TestXarrayCompatibility(unittest.TestCase):
             coords={"corr": ["RR", "RL", "LR", "LL"]},
         )
 
-        stokes = corr_to_stokes(corr_xr, corr_type="circular")
+        stokes = corr_to_stokes(corr_xr.values, corr_type="circular")
         corr_reconstructed = stokes_to_corr(stokes, corr_type="circular")
 
         np.testing.assert_allclose(
@@ -419,6 +421,405 @@ class TestMatrixProperties(unittest.TestCase):
             rtol=1e-10,
             err_msg="Circular matrices are not inverses",
         )
+
+
+class TestImageConversions(unittest.TestCase):
+    """Test high-level image conversion functions."""
+
+    def test_image_corr_to_stokes_numpy_linear(self):
+        """Test image_corr_to_stokes with numpy array (linear polarization)."""
+        # Create synthetic image: (time, freq, pol, l, m) = (1, 64, 4, 128, 128)
+        ntime, nfreq, npol, nl, nm = 1, 64, 4, 128, 128
+
+        # Random correlation image
+        corr_image = np.random.rand(ntime, nfreq, npol, nl, nm) + 1j * np.random.rand(
+            ntime, nfreq, npol, nl, nm
+        )
+
+        # Convert to Stokes
+        stokes_image = image_corr_to_stokes(corr_image, corr_type="linear")
+
+        # Check shape preserved
+        self.assertEqual(stokes_image.shape, corr_image.shape)
+
+        # Round-trip conversion
+        corr_reconstructed = image_stokes_to_corr(stokes_image, corr_type="linear")
+
+        np.testing.assert_allclose(
+            corr_reconstructed,
+            corr_image,
+            rtol=1e-10,
+            err_msg="Image linear round-trip failed",
+        )
+
+    def test_image_corr_to_stokes_numpy_circular(self):
+        """Test image_corr_to_stokes with numpy array (circular polarization)."""
+        # Create synthetic image
+        ntime, nfreq, npol, nl, nm = 1, 32, 4, 64, 64
+
+        corr_image = np.random.rand(ntime, nfreq, npol, nl, nm) + 1j * np.random.rand(
+            ntime, nfreq, npol, nl, nm
+        )
+
+        # Convert to Stokes and back
+        stokes_image = image_corr_to_stokes(corr_image, corr_type="circular")
+        corr_reconstructed = image_stokes_to_corr(stokes_image, corr_type="circular")
+
+        np.testing.assert_allclose(
+            corr_reconstructed,
+            corr_image,
+            rtol=1e-10,
+            err_msg="Image circular round-trip failed",
+        )
+
+    def test_image_different_pol_axis(self):
+        """Test image conversion with polarization at different axis positions."""
+        # Shape: (pol, freq, l, m) = (4, 64, 128, 128)
+        # Polarization at axis 0
+        npol, nfreq, nl, nm = 4, 64, 128, 128
+
+        corr_image = np.random.rand(npol, nfreq, nl, nm) + 1j * np.random.rand(
+            npol, nfreq, nl, nm
+        )
+
+        # Convert with pol_axis=0
+        stokes_image = image_corr_to_stokes(corr_image, corr_type="linear", pol_axis=0)
+        corr_reconstructed = image_stokes_to_corr(
+            stokes_image, corr_type="linear", pol_axis=0
+        )
+
+        self.assertEqual(stokes_image.shape, corr_image.shape)
+        np.testing.assert_allclose(
+            corr_reconstructed,
+            corr_image,
+            rtol=1e-10,
+            err_msg="Image conversion with pol_axis=0 failed",
+        )
+
+    def test_image_negative_pol_axis(self):
+        """Test image conversion with negative pol_axis indexing."""
+        # Shape: (time, freq, l, m, pol) = (1, 32, 64, 64, 4)
+        # Polarization at last axis (index -1)
+        ntime, nfreq, nl, nm, npol = 1, 32, 64, 64, 4
+
+        corr_image = np.random.rand(ntime, nfreq, nl, nm, npol) + 1j * np.random.rand(
+            ntime, nfreq, nl, nm, npol
+        )
+
+        # Convert with pol_axis=-1
+        stokes_image = image_corr_to_stokes(corr_image, corr_type="linear", pol_axis=-1)
+        corr_reconstructed = image_stokes_to_corr(
+            stokes_image, corr_type="linear", pol_axis=-1
+        )
+
+        np.testing.assert_allclose(
+            corr_reconstructed,
+            corr_image,
+            rtol=1e-10,
+            err_msg="Image conversion with pol_axis=-1 failed",
+        )
+
+    def test_image_large_realistic_shape(self):
+        """Test with realistic large image shape."""
+        # Realistic shape: (time, freq, pol, l, m) = (1, 128, 4, 512, 512)
+        # This is ~500 MB for complex128
+        ntime, nfreq, npol, nl, nm = 1, 128, 4, 512, 512
+
+        # Use smaller dtype to save memory in tests
+        corr_image = np.random.rand(ntime, nfreq, npol, nl, nm).astype(
+            np.float32
+        ) + 1j * np.random.rand(ntime, nfreq, npol, nl, nm).astype(np.float32)
+
+        # Convert to Stokes
+        stokes_image = image_corr_to_stokes(corr_image, corr_type="linear")
+
+        # Verify shape
+        self.assertEqual(stokes_image.shape, corr_image.shape)
+
+        # Spot check: verify one pixel's conversion
+        # Extract a single pixel across all dimensions
+        pixel_corr = corr_image[0, 0, :, 0, 0]
+        pixel_stokes_expected = corr_to_stokes(pixel_corr, corr_type="linear")
+        pixel_stokes_actual = stokes_image[0, 0, :, 0, 0]
+
+        np.testing.assert_allclose(
+            pixel_stokes_actual,
+            pixel_stokes_expected,
+            rtol=1e-5,  # Slightly relaxed for float32
+            err_msg="Large image pixel conversion mismatch",
+        )
+
+
+class TestImageConversionsXarray(unittest.TestCase):
+    """Test high-level image conversion functions with xarray DataArrays."""
+
+    def test_image_xarray_linear_preserves_structure(self):
+        """Test that xarray input preserves dims, coords, and attrs."""
+        # Create xarray image DataArray
+        ntime, nfreq, npol, nl, nm = 1, 64, 4, 128, 128
+
+        data = np.random.rand(ntime, nfreq, npol, nl, nm) + 1j * np.random.rand(
+            ntime, nfreq, npol, nl, nm
+        )
+
+        image_da = xr.DataArray(
+            data,
+            dims=["time", "frequency", "polarization", "l", "m"],
+            coords={
+                "time": np.arange(ntime),
+                "frequency": np.linspace(1e9, 2e9, nfreq),
+                "polarization": ["XX", "XY", "YX", "YY"],
+                "l": np.linspace(-0.1, 0.1, nl),
+                "m": np.linspace(-0.1, 0.1, nm),
+            },
+            attrs={"telescope": "VLA", "field": "test_field"},
+        )
+
+        # Convert to Stokes
+        stokes_da = image_corr_to_stokes(image_da, corr_type="linear")
+
+        # Check type
+        self.assertIsInstance(stokes_da, xr.DataArray)
+
+        # Check dims preserved
+        self.assertEqual(stokes_da.dims, image_da.dims)
+
+        # Check shape preserved
+        self.assertEqual(stokes_da.shape, image_da.shape)
+
+        # Check polarization coordinates updated
+        np.testing.assert_array_equal(
+            stokes_da.coords["polarization"].values, ["I", "Q", "U", "V"]
+        )
+
+        # Check other coordinates preserved
+        np.testing.assert_allclose(
+            stokes_da.coords["frequency"].values, image_da.coords["frequency"].values
+        )
+        np.testing.assert_allclose(
+            stokes_da.coords["l"].values, image_da.coords["l"].values
+        )
+        np.testing.assert_allclose(
+            stokes_da.coords["m"].values, image_da.coords["m"].values
+        )
+
+        # Check attributes preserved
+        self.assertEqual(stokes_da.attrs["telescope"], "VLA")
+        self.assertEqual(stokes_da.attrs["field"], "test_field")
+
+    def test_image_xarray_round_trip(self):
+        """Test round-trip conversion with xarray preserves data."""
+        ntime, nfreq, npol, nl, nm = 1, 32, 4, 64, 64
+
+        data = np.random.rand(ntime, nfreq, npol, nl, nm) + 1j * np.random.rand(
+            ntime, nfreq, npol, nl, nm
+        )
+
+        corr_da = xr.DataArray(
+            data,
+            dims=["time", "frequency", "polarization", "l", "m"],
+            coords={
+                "time": [0],
+                "frequency": np.linspace(1e9, 1.5e9, nfreq),
+                "polarization": ["XX", "XY", "YX", "YY"],
+                "l": np.linspace(-0.05, 0.05, nl),
+                "m": np.linspace(-0.05, 0.05, nm),
+            },
+        )
+
+        # Round-trip: corr -> stokes -> corr
+        stokes_da = image_corr_to_stokes(corr_da, corr_type="linear")
+        corr_reconstructed = image_stokes_to_corr(stokes_da, corr_type="linear")
+
+        # Check data matches
+        np.testing.assert_allclose(
+            corr_reconstructed.values,
+            corr_da.values,
+            rtol=1e-10,
+            err_msg="xarray round-trip data mismatch",
+        )
+
+        # Check polarization coords restored
+        np.testing.assert_array_equal(
+            corr_reconstructed.coords["polarization"].values, ["XX", "XY", "YX", "YY"]
+        )
+
+    def test_image_xarray_circular(self):
+        """Test xarray image conversion with circular polarization."""
+        ntime, nfreq, npol, nl, nm = 1, 16, 4, 32, 32
+
+        data = np.random.rand(ntime, nfreq, npol, nl, nm) + 1j * np.random.rand(
+            ntime, nfreq, npol, nl, nm
+        )
+
+        corr_da = xr.DataArray(
+            data,
+            dims=["time", "frequency", "polarization", "l", "m"],
+            coords={
+                "time": [0],
+                "frequency": np.linspace(1e9, 1.2e9, nfreq),
+                "polarization": ["RR", "RL", "LR", "LL"],
+                "l": np.linspace(-0.02, 0.02, nl),
+                "m": np.linspace(-0.02, 0.02, nm),
+            },
+        )
+
+        # Convert circular -> Stokes
+        stokes_da = image_corr_to_stokes(corr_da, corr_type="circular")
+
+        # Check polarization coords
+        np.testing.assert_array_equal(
+            stokes_da.coords["polarization"].values, ["I", "Q", "U", "V"]
+        )
+
+        # Convert back: Stokes -> circular
+        corr_reconstructed = image_stokes_to_corr(stokes_da, corr_type="circular")
+
+        # Check polarization coords
+        np.testing.assert_array_equal(
+            corr_reconstructed.coords["polarization"].values, ["RR", "RL", "LR", "LL"]
+        )
+
+        # Check data
+        np.testing.assert_allclose(
+            corr_reconstructed.values,
+            corr_da.values,
+            rtol=1e-10,
+            err_msg="xarray circular round-trip failed",
+        )
+
+    def test_image_xarray_different_pol_axis(self):
+        """Test xarray conversion with polarization at different axis."""
+        # Shape: (pol, freq, l, m) with pol_axis=0
+        npol, nfreq, nl, nm = 4, 32, 64, 64
+
+        data = np.random.rand(npol, nfreq, nl, nm) + 1j * np.random.rand(
+            npol, nfreq, nl, nm
+        )
+
+        corr_da = xr.DataArray(
+            data,
+            dims=["polarization", "frequency", "l", "m"],
+            coords={
+                "polarization": ["XX", "XY", "YX", "YY"],
+                "frequency": np.linspace(1e9, 1.5e9, nfreq),
+                "l": np.linspace(-0.05, 0.05, nl),
+                "m": np.linspace(-0.05, 0.05, nm),
+            },
+        )
+
+        # Convert with pol_axis=0
+        stokes_da = image_corr_to_stokes(corr_da, corr_type="linear", pol_axis=0)
+        corr_reconstructed = image_stokes_to_corr(
+            stokes_da, corr_type="linear", pol_axis=0
+        )
+
+        # Verify
+        self.assertEqual(stokes_da.dims[0], "polarization")
+        np.testing.assert_array_equal(
+            stokes_da.coords["polarization"].values, ["I", "Q", "U", "V"]
+        )
+        np.testing.assert_allclose(
+            corr_reconstructed.values, corr_da.values, rtol=1e-10
+        )
+
+    def test_image_xarray_custom_matrix(self):
+        """Test image conversion with custom transformation matrix."""
+        ntime, nfreq, npol, nl, nm = 1, 16, 4, 32, 32
+
+        data = np.random.rand(ntime, nfreq, npol, nl, nm) + 1j * np.random.rand(
+            ntime, nfreq, npol, nl, nm
+        )
+
+        corr_da = xr.DataArray(
+            data,
+            dims=["time", "frequency", "polarization", "l", "m"],
+            coords={
+                "polarization": ["XX", "XY", "YX", "YY"],
+            },
+        )
+
+        # Use linear matrix as custom
+        custom_matrix = np.array(
+            [
+                [1, 0, 0, 1],
+                [1, 0, 0, -1],
+                [0, 1, 1, 0],
+                [0, -1j, 1j, 0],
+            ]
+        )
+
+        # Convert with custom matrix
+        stokes_custom = image_corr_to_stokes(
+            corr_da, corr_type="custom", transformation_matrix=custom_matrix
+        )
+
+        # Convert with linear (should match)
+        stokes_linear = image_corr_to_stokes(corr_da, corr_type="linear")
+
+        np.testing.assert_allclose(
+            stokes_custom.values,
+            stokes_linear.values,
+            rtol=1e-10,
+            err_msg="Custom matrix result should match linear",
+        )
+
+
+class TestImageConversionCorrectness(unittest.TestCase):
+    """Test correctness of image conversions against low-level functions."""
+
+    def test_image_matches_lowlevel_per_pixel(self):
+        """Verify image conversion matches low-level function pixel-by-pixel."""
+        # Small image for detailed checking
+        ntime, nfreq, npol, nl, nm = 2, 3, 4, 5, 5
+
+        corr_image = np.random.rand(ntime, nfreq, npol, nl, nm) + 1j * np.random.rand(
+            ntime, nfreq, npol, nl, nm
+        )
+
+        # Convert using image function
+        stokes_image = image_corr_to_stokes(corr_image, corr_type="linear")
+
+        # Verify each pixel independently using low-level function
+        for t in range(ntime):
+            for f in range(nfreq):
+                for l in range(nl):
+                    for m in range(nm):
+                        # Extract polarization vector for this pixel
+                        pixel_corr = corr_image[t, f, :, l, m]
+
+                        # Convert using low-level function
+                        pixel_stokes_expected = corr_to_stokes(
+                            pixel_corr, corr_type="linear"
+                        )
+
+                        # Get from image conversion
+                        pixel_stokes_actual = stokes_image[t, f, :, l, m]
+
+                        np.testing.assert_allclose(
+                            pixel_stokes_actual,
+                            pixel_stokes_expected,
+                            rtol=1e-10,
+                            err_msg=f"Pixel mismatch at ({t}, {f}, {l}, {m})",
+                        )
+
+    def test_image_physical_meaning(self):
+        """Test that image conversion preserves physical meaning of Stokes parameters."""
+        # Create image with known polarization properties
+        ntime, nfreq, npol, nl, nm = 1, 1, 4, 10, 10
+
+        # Unpolarized source: XX = YY = 1, XY = YX = 0
+        corr_unpolarized = np.zeros((ntime, nfreq, npol, nl, nm), dtype=complex)
+        corr_unpolarized[:, :, 0, :, :] = 1.0  # XX
+        corr_unpolarized[:, :, 3, :, :] = 1.0  # YY
+
+        stokes = image_corr_to_stokes(corr_unpolarized, corr_type="linear")
+
+        # Should get I=2, Q=0, U=0, V=0 everywhere
+        np.testing.assert_allclose(stokes[:, :, 0, :, :], 2.0, rtol=1e-10)  # I
+        np.testing.assert_allclose(stokes[:, :, 1, :, :], 0.0, atol=1e-10)  # Q
+        np.testing.assert_allclose(stokes[:, :, 2, :, :], 0.0, atol=1e-10)  # U
+        np.testing.assert_allclose(stokes[:, :, 3, :, :], 0.0, atol=1e-10)  # V
 
 
 if __name__ == "__main__":
