@@ -33,6 +33,8 @@ interactive = [
   "ipympl",
   "ipython",
   "jupyter-client",
+  "bokeh",
+  "holoviews"
 ]
 
 docs = [
