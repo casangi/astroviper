@@ -261,7 +261,7 @@ class TestXarrayCompatibility(unittest.TestCase):
             coords={"corr": ["XX", "XY", "YX", "YY"]},
         )
 
-        stokes = corr_to_stokes(corr_xr, corr_type="linear")
+        stokes = corr_to_stokes(corr_xr.values, corr_type="linear")
         corr_reconstructed = stokes_to_corr(stokes, corr_type="linear")
 
         # stokes and corr_reconstructed should be numpy arrays
@@ -283,7 +283,7 @@ class TestXarrayCompatibility(unittest.TestCase):
             coords={"corr": ["RR", "RL", "LR", "LL"]},
         )
 
-        stokes = corr_to_stokes(corr_xr, corr_type="circular")
+        stokes = corr_to_stokes(corr_xr.values, corr_type="circular")
         corr_reconstructed = stokes_to_corr(stokes, corr_type="circular")
 
         np.testing.assert_allclose(
