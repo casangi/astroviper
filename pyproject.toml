@@ -1,6 +1,6 @@
 [project]
 name = "astroviper"
-version = "0.0.30"
+version = "0.0.31"
 description = "Astro Visibility and Image Parallel Execution Reduction"
 authors = [{ name = "Jan-Willem Steeb", email = "jsteeb@nrao.edu"},
     {name = "Dave Mehringer", email="dmehring@nrao.edu"},
@@ -16,7 +16,7 @@ requires-python = ">=3.11,<3.14"
 dependencies = [
   "graphviper>=0.0.36",
   "numpy>=1.20.0",
-  "xradio[zarr]==1.1.12a0",
+  "xradio[zarr]==1.1.0",
   "numba",
 ]
 
@@ -33,6 +33,8 @@ interactive = [
   "ipympl",
   "ipython",
   "jupyter-client",
+  "bokeh",
+  "holoviews"
 ]
 
 docs = [
