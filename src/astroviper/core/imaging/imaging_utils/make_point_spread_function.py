@@ -10,11 +10,9 @@ def make_psf(vis, im_params, grid_params):
         Imaging parameters: must include
         'cell_size': angular size of a pixel 2d tuple (rad, rad),
         'image_size': int 2d tuple (nx, ny),
-        'frequency_coords': list of frequencies in Hz,
-        'polarization': list of Stokes parameters,
         'image_center': image center pixel coordinates int 2d tuple (x, y),
         'phase_center': phase reference center (RA, Dec) in radians,
-        'time_coords': list of time coordinates in seconds.
+        'chan_mode': channel mode for imaging.
     grid_params : dict
         Gridding parameters: must include
         'sampling': sampling factor for gridding,
@@ -36,7 +34,6 @@ def make_psf(vis, im_params, grid_params):
     vis_data = vis.VISIBILITY.data
     uvw = vis.UVW.data
 
-    # set weight to 1 for now
     dims = vis.dims
     freq_chan = vis.coords["frequency"].values
     nfreq = len(freq_chan)
@@ -45,7 +42,6 @@ def make_psf(vis, im_params, grid_params):
     phase_center = im_params["phase_center"]
     complex_grid = True
     do_psf = True
-    # should be getting from im_params
     chan_mode = im_params["chan_mode"]
     sampling = grid_params["sampling"]
     complex_grid = grid_params["complex_grid"]
@@ -55,7 +51,7 @@ def make_psf(vis, im_params, grid_params):
     npol = len(pol)
     incr = cell_size[0]
 
-    psf_data = np.zeros([nfreq, npol, image_size[0], image_size[0]], dtype=float)
+    psf_data = np.zeros([nfreq, npol, image_size[0], image_size[1]], dtype=float)
     grid2image_spheroid_ms4(
         vis=vis,
         resid_array=psf_data,
@@ -67,7 +63,6 @@ def make_psf(vis, im_params, grid_params):
     )
 
     psf_data_reshaped = np.expand_dims(psf_data, axis=0)
-    print("psf_data_reshaped.shape=", psf_data_reshaped.shape)
 
     psf_xds = make_empty_sky_image(
         phase_center=phase_center,
