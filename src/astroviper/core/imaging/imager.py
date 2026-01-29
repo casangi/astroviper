@@ -27,6 +27,7 @@ from astroviper.core.imaging.imaging_utils.corr_to_stokes import (
     image_corr_to_stokes,
     image_stokes_to_corr,
 )
+from astroviper.core.imaging.imaging_utils.make_point_spread_function import make_psf
 from astroviper.core.imaging.imaging_utils.iteration_control import (
     IterationController,
     ReturnDict,
@@ -68,16 +69,6 @@ def _get_param(params: Dict, key: str):
         return params[key]
     else:
         return default_params.get(key)
-
-
-def make_psf_placeholder():
-    """
-    Placeholder for PSF generation.
-    """
-
-    print("PSF generation not implemented yet")
-
-    return 0
 
 
 def grid_visibilities(
@@ -311,13 +302,23 @@ def run_imaging_loop(
 
     # Make PSF (once, doesn't change during loop)
     print("Making PSF...")
-    psf_corr = make_psf_placeholder()
-    psf_corr = np.zeros((nchan, npol, nx, ny))
+    im_params = {
+        "cell_size": cell_size,
+        "image_size": image_size,
+        "phase_center": phase_center,
+        "chan_mode": chan_mode,
+    }
+    grid_params = {
+        "sampling": oversampling,
+        "complex_grid": True,
+        "support": support,
+    }
+    psf_da = make_psf(ms4, im_params, grid_params)
 
-    # Convert PSF to Stokes
-    psf_stokes = image_corr_to_stokes(psf_corr, corr_type=corr_type, pol_axis=1)
+    # Convert to Stokes (keep 5D: time, freq, pol, l, m)
+    psf_stokes = image_corr_to_stokes(psf_da.values, corr_type=corr_type, pol_axis=2)
 
-    # Create PSF xarray dataset (5D with singleton time for deconvolver compatibility)
+    # Create PSF xarray dataset with Stokes polarization
     psf_xds = make_empty_sky_image(
         phase_center=phase_center,
         image_size=image_size,
@@ -326,9 +327,8 @@ def run_imaging_loop(
         pol_coords=pol_coords,
         time_coords=time_coords,
     )
-    psf_5d = psf_stokes[np.newaxis, ...]  # Add time dimension
     psf_xds["POINT_SPREAD_FUNCTION"] = xr.DataArray(
-        psf_5d,
+        psf_stokes,
         dims=["time", "frequency", "polarization", "l", "m"],
     )
 
