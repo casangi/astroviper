@@ -22,9 +22,6 @@ def make_psf(vis, im_params, grid_params):
         xarray.DataArray
     """
     from xradio.image import make_empty_sky_image
-    from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import (
-        create_prolate_spheroidal_kernel_1D,
-    )
     from astroviper.core.imaging.imaging_utils.standard_grid import (
         grid2image_spheroid_ms4,
     )
@@ -84,4 +81,6 @@ def make_psf(vis, im_params, grid_params):
         name="POINT_SPREAD_FUNCTION",
     )
 
-    return psf_da
+    psf_xds["POINT_SPREAD_FUNCTION"] = psf_da
+
+    return psf_xds
