@@ -60,11 +60,13 @@ def test_make_psf_basic(basic_vis_data):
     }
 
     # Generate PSF
-    psf_da = make_psf(vis, im_params, grid_params)
+    psf_ds = make_psf(vis, im_params, grid_params)
 
     # Verify output is an xarray DataArray
+    assert isinstance(psf_ds, xr.Dataset)
+    assert psf_ds.data_vars["POINT_SPREAD_FUNCTION"] is not None
+    psf_da = psf_ds["POINT_SPREAD_FUNCTION"]
     assert isinstance(psf_da, xr.DataArray)
-
     # Verify the name
     assert psf_da.name == "POINT_SPREAD_FUNCTION"
 
@@ -116,8 +118,11 @@ def test_make_psf_cube(cube_vis_data):
         "support": 7,
     }
 
-    psf_da = make_psf(vis, im_params, grid_params)
+    psf_ds = make_psf(vis, im_params, grid_params)
+    assert isinstance(psf_ds, xr.Dataset)
+    assert psf_ds.data_vars["POINT_SPREAD_FUNCTION"] is not None
 
+    psf_da = psf_ds["POINT_SPREAD_FUNCTION"]
     assert isinstance(psf_da, xr.DataArray)
     assert psf_da.name == "POINT_SPREAD_FUNCTION"
 
@@ -157,7 +162,8 @@ def test_make_psf_coordinates(basic_vis_data):
         "support": 7,
     }
 
-    psf_da = make_psf(vis, im_params, grid_params)
+    psf_ds = make_psf(vis, im_params, grid_params)
+    psf_da = psf_ds["POINT_SPREAD_FUNCTION"]
 
     # Verify coordinates exist
     assert "time" in psf_da.coords
@@ -200,7 +206,8 @@ def test_make_psf_peak_location(basic_vis_data):
         "support": 7,
     }
 
-    psf_da = make_psf(vis, im_params, grid_params)
+    psf_ds = make_psf(vis, im_params, grid_params)
+    psf_da = psf_ds["POINT_SPREAD_FUNCTION"]
     psf_data = psf_da.values[0, 0, 0, :, :]
 
     # Find peak location
@@ -240,7 +247,8 @@ def test_make_psf_normalization(basic_vis_data):
         "support": 7,
     }
 
-    psf_da = make_psf(vis, im_params, grid_params)
+    psf_ds = make_psf(vis, im_params, grid_params)
+    psf_da = psf_ds["POINT_SPREAD_FUNCTION"]
     psf_data = psf_da.values[0, 0, 0, :, :]
 
     # Check that peak is positive
