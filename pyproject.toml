@@ -16,7 +16,7 @@ requires-python = ">=3.11,<3.14"
 dependencies = [
   "graphviper>=0.0.36",
   "numpy>=1.20.0",
-  "xradio[zarr]==1.1.0",
+  "xradio[zarr]>=1.1.1",
   "numba",
 ]
 
