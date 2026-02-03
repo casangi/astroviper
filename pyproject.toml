@@ -1,6 +1,6 @@
 [project]
 name = "astroviper"
-version = "0.0.31"
+version = "0.0.32"
 description = "Astro Visibility and Image Parallel Execution Reduction"
 authors = [{ name = "Jan-Willem Steeb", email = "jsteeb@nrao.edu"},
     {name = "Dave Mehringer", email="dmehring@nrao.edu"},
