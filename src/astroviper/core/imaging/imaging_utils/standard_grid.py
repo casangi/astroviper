@@ -663,6 +663,9 @@ def grid2image_spheroid_ms4(
         ###Make sure flag data are not used
         flag = elvis.FLAG.data
         weight[flag] = 0.0
+        # Zero weights for NaN UVW entries so they never contribute to gridding
+        nan_uvw = np.isnan(uvw[:, :, 0]) | np.isnan(uvw[:, :, 1])
+        weight[nan_uvw] = 0.0
         # weight[np.logical_and(uvw[:, :, 0] == 0, uvw[:, :, 1] == 0)] = 0.0
         freq_chan = elvis.coords["frequency"].values
 
