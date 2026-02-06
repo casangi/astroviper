@@ -31,7 +31,8 @@ def get_image_masksum(image_xds, dv="SKY"):
         mask_xds = image_xds[mask_name]
         mask_sum = int(mask_xds.sum().values)
     else:
-        mask_sum = 0.0
+        # No mask present = all pixels valid
+        mask_sum = int(np.prod(image_xds[dv].shape[-2:]))
 
     return mask_sum
 
