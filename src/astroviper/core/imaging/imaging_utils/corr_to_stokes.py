@@ -280,6 +280,12 @@ def image_corr_to_stokes(
     # Move polarization axis back to original position
     result = np.moveaxis(converted, -1, pol_axis_pos)
 
+    # Real-valued input (e.g. gridded images) produces real Stokes parameters;
+    # corr_to_stokes implicity converts to complex because of the 1j in the
+    # transformation matrix, so catch it here and cast back.
+    if np.isrealobj(data):
+        result = result.real
+
     # If input was xarray, create new DataArray with correct shape
     if is_xarray:
         # Build new coordinates

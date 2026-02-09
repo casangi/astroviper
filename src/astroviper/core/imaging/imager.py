@@ -18,6 +18,7 @@ from astroviper.core.imaging.imaging_utils.make_point_spread_function import mak
 from astroviper.core.imaging.imaging_utils.iteration_control import (
     IterationController,
     ReturnDict,
+    merge_return_dicts,
 )
 from astroviper.core.imaging.deconvolution import deconvolve
 from astroviper.core.imaging.fft import fft_lm_to_uv
@@ -319,8 +320,7 @@ def run_imaging_loop(
         )
 
         controller.update_counts(return_dict)
-        for key, value in return_dict.data.items():
-            combined_return_dict.add(value, time=key[0], pol=key[1], chan=key[2])
+        combined_return_dict = merge_return_dicts([combined_return_dict, return_dict])
 
         stopcode, stopdesc = controller.check_convergence(return_dict)
         if stopcode.major != 0:
