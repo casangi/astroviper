@@ -10,16 +10,15 @@ def make_psf(vis, im_params, grid_params):
         Imaging parameters: must include
         'cell_size': angular size of a pixel 2d tuple (rad, rad),
         'image_size': int 2d tuple (nx, ny),
-        'image_center': image center pixel coordinates int 2d tuple (x, y),
         'phase_center': phase reference center (RA, Dec) in radians,
         'chan_mode': channel mode for imaging.
     grid_params : dict
         Gridding parameters: must include
         'sampling': sampling factor for gridding,
-        'complex_grid': boolean indicating if complex grid is used,
         'support': support size for gridding.
     Returns:
-        xarray.DataArray
+        xarray.Dataset
+            Xradio image xarray Dataset containing the POINT_SPREAD_FUNCTION data variable
     """
     from xradio.image import make_empty_sky_image
     from astroviper.core.imaging.imaging_utils.standard_grid import (
@@ -28,34 +27,27 @@ def make_psf(vis, im_params, grid_params):
     import xarray as xr
     import numpy as np
 
-    vis_data = vis.VISIBILITY.data
-    uvw = vis.UVW.data
-
-    dims = vis.dims
     freq_chan = vis.coords["frequency"].values
     nfreq = len(freq_chan)
     image_size = im_params["image_size"]
     cell_size = im_params["cell_size"]
     phase_center = im_params["phase_center"]
-    complex_grid = True
     do_psf = True
     chan_mode = im_params["chan_mode"]
     sampling = grid_params["sampling"]
-    complex_grid = grid_params["complex_grid"]
     support = grid_params["support"]
     time_coords = vis.coords["time"].values[0]
     pol = vis.coords["polarization"].values
     npol = len(pol)
-    incr = cell_size[0]
 
     psf_data = np.zeros([nfreq, npol, image_size[0], image_size[1]], dtype=float)
     grid2image_spheroid_ms4(
         vis=vis,
         resid_array=psf_data,
-        pixelincr=np.array([-incr, incr]),
+        pixelincr=np.array([-cell_size[0], cell_size[1]]),
         support=support,
         sampling=sampling,
-        dopsf=True,
+        dopsf=do_psf,
         chan_mode=chan_mode,
     )
 
@@ -73,7 +65,7 @@ def make_psf(vis, im_params, grid_params):
         do_sky_coords=True,
     )
     new_dims = tuple(d for d in psf_xds.dims if d != "beam_params_label")
-    coords = psf_xds.drop_vars("beam_params_label").coords
+    coords = psf_xds.drop_vars("beam_params_label", errors="ignore").coords
     psf_da = xr.DataArray(
         psf_data_reshaped,
         dims=new_dims,

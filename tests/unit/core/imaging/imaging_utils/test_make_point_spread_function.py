@@ -46,7 +46,6 @@ def test_make_psf_basic(basic_vis_data):
     im_params = {
         "cell_size": (cell.to("rad").value, cell.to("rad").value),
         "image_size": (npix, npix),
-        "image_center": (npix // 2, npix // 2),
         "phase_center": (3.14973047, -0.3292367),  # RA, Dec in radians
         "time_coords": time_coords,
         "chan_mode": "continuum",
@@ -101,14 +100,11 @@ def test_make_psf_cube(cube_vis_data):
     npix = 200
     freq_chan = vis.coords["frequency"].values
     pol = vis.coords["polarization"].values
-    time_coords = vis.coords["time"].values[0]
 
     im_params = {
         "cell_size": (cell, cell),
         "image_size": (npix, npix),
-        "image_center": (npix // 2, npix // 2),
         "phase_center": (3.14973047, -0.3292367),
-        "time_coords": time_coords,
         "chan_mode": "cube",
     }
 
@@ -146,12 +142,10 @@ def test_make_psf_coordinates(basic_vis_data):
 
     freq_chan = vis.coords["frequency"].values
     pol = vis.coords["polarization"].values
-    time_coords = vis.coords["time"].values[0]
 
     im_params = {
         "cell_size": (cell.to("rad").value, cell.to("rad").value),
         "image_size": (npix, npix),
-        "image_center": (npix // 2, npix // 2),
         "phase_center": (3.14973047, -0.3292367),
         "chan_mode": "continuum",
     }
@@ -175,7 +169,6 @@ def test_make_psf_coordinates(basic_vis_data):
     # Verify coordinate values
     np.testing.assert_array_equal(psf_da.coords["frequency"].values, freq_chan)
     np.testing.assert_array_equal(psf_da.coords["polarization"].values, pol)
-    assert psf_da.coords["time"].values[0] == time_coords
 
     # Verify spatial coordinate dimensions
     assert len(psf_da.coords["l"]) == npix
@@ -190,19 +183,16 @@ def test_make_psf_peak_location(basic_vis_data):
 
     freq_chan = vis.coords["frequency"].values
     pol = vis.coords["polarization"].values
-    time_coords = vis.coords["time"].values[0]
 
     im_params = {
         "cell_size": (cell.to("rad").value, cell.to("rad").value),
         "image_size": (npix, npix),
-        "image_center": (npix // 2, npix // 2),
         "phase_center": (3.14973047, -0.3292367),
         "chan_mode": "continuum",
     }
 
     grid_params = {
         "sampling": 100,
-        "complex_grid": True,
         "support": 7,
     }
 
@@ -231,19 +221,16 @@ def test_make_psf_normalization(basic_vis_data):
 
     freq_chan = vis.coords["frequency"].values
     pol = vis.coords["polarization"].values
-    time_coords = vis.coords["time"].values[0]
 
     im_params = {
         "cell_size": (cell.to("rad").value, cell.to("rad").value),
         "image_size": (npix, npix),
-        "image_center": (npix // 2, npix // 2),
         "phase_center": (3.14973047, -0.3292367),
         "chan_mode": "continuum",
     }
 
     grid_params = {
         "sampling": 100,
-        "complex_grid": True,
         "support": 7,
     }
 
