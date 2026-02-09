@@ -55,7 +55,7 @@ def make_psf(vis, im_params, grid_params):
     npol = len(pol)
     incr = cell_size[0]
 
-    psf_data = np.zeros([nfreq, npol, image_size[0], image_size[0]], dtype=float)
+    psf_data = np.zeros([nfreq, npol, image_size[1], image_size[0]], dtype=float)
     grid2image_spheroid_ms4(
         vis=vis,
         resid_array=psf_data,
