@@ -194,7 +194,7 @@ def deconvolve(
                 f"PSF should have same number of polarizations as the input image, or be Stokes I only. (npol_psf = {npol_psf}, npol_image = {npol})"
             )
 
-    masksum = imgstats.get_image_masksum(dirty_image_xds)
+    masksum = imgstats.get_image_masksum(dirty_image_xds, dv="RESIDUAL")
     phase_center = get_phase_center(dirty_image_xds)
 
     if algorithm.lower() == "hogbom":

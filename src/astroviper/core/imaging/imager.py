@@ -323,7 +323,7 @@ def run_imaging_loop(
             combined_return_dict.add(value, time=key[0], pol=key[1], chan=key[2])
 
         stopcode, stopdesc = controller.check_convergence(return_dict)
-        if stopcode != 0:
+        if stopcode.major != 0:
             print(f"  *** CONVERGED: {stopdesc} ***")
             break
 
