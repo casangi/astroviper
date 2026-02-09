@@ -81,7 +81,7 @@ def grid_visibilities(
 def compute_residual_visibilities(ms4: xr.DataTree) -> None:
     """Compute RESIDUAL = VISIBILITY - VISIBILITY_MODEL in-place."""
 
-    return ms4["RESIDUAL"] = ms4["VISIBILITY"] - ms4['VISIBILITY_MODEL']
+    ms4["RESIDUAL"] = ms4["VISIBILITY"] - ms4["VISIBILITY_MODEL"]
 
 
 def predict_model_visibilities(
