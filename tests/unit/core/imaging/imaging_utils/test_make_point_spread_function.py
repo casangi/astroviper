@@ -85,11 +85,14 @@ def test_make_psf_basic(basic_vis_data):
 
     # PSF should have a peak near the center
     center_idx = npix // 2
-    center_region = psf_data[
-        0, 0, 0, center_idx - 5 : center_idx + 5, center_idx - 5 : center_idx + 5
-    ]
-    max_value = np.max(psf_data[0, 0, 0, :, :])
-    assert np.max(center_region) == max_value
+    half_width = 5
+    psf_slice = psf_data[0, 0, 0, :, :]
+    # Find the location of the global maximum in this slice
+    max_flat_idx = np.argmax(psf_slice)
+    max_i, max_j = np.unravel_index(max_flat_idx, psf_slice.shape)
+    # Assert that the global maximum lies within the central window
+    assert center_idx - half_width <= max_i < center_idx + half_width
+    assert center_idx - half_width <= max_j < center_idx + half_width
 
 
 def test_make_psf_cube(cube_vis_data):
