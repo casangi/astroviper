@@ -15,7 +15,5 @@ on:
 jobs:
   test:
     uses: nrao/gh-actions-templates-public/.github/workflows/python-testing-integration-template.yml@main
-    with:
-      xradio_ref: '470-changes-needed-for-astroviper'
     secrets:
-      DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+      TESTVIPER_DISPATCH_TOKEN: ${{ secrets.TESTVIPER_DISPATCH_TOKEN }}
