@@ -1174,8 +1174,23 @@ class ConvergencePlots:
                 show_grid=True,
             )
 
-        # Calculate cumulative iterations
-        cumulative_iters = np.cumsum(iter_done_history)
+        # Prepend initial state at iteration 0
+        start_peakres_history = data.get("start_peakres", [])
+        start_model_flux_history = data.get("start_model_flux", [])
+        if not isinstance(start_peakres_history, list):
+            start_peakres_history = [start_peakres_history]
+        if not isinstance(start_model_flux_history, list):
+            start_model_flux_history = [start_model_flux_history]
+
+        if start_peakres_history:
+            peakres_history = [start_peakres_history[0]] + list(peakres_history)
+        if start_model_flux_history:
+            model_flux_history = [start_model_flux_history[0]] + list(
+                model_flux_history
+            )
+
+        # Calculate cumulative iterations (with 0 prepended for initial state)
+        cumulative_iters = np.concatenate([[0], np.cumsum(iter_done_history)])
 
         # Create peak residual curve (left y-axis)
         peakres_data = list(zip(cumulative_iters, peakres_history))
