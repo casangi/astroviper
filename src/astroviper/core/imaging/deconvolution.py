@@ -210,10 +210,10 @@ def deconvolve(
 
     # Pre-allocate full model and residual datasets
     # Initialize from dirty image structure to preserve coordinates
-    full_model_xds = dirty_image_xds.copy(deep=True)
+    full_model_xds = dirty_image_xds.copy(deep=True).load()
     full_model_xds = full_model_xds.rename_vars({"RESIDUAL": "MODEL"})
 
-    full_residual_xds = dirty_image_xds.copy(deep=True)
+    full_residual_xds = dirty_image_xds.copy(deep=True).load()
 
     # Zero out the model (residual starts as dirty image copy)
     full_model_xds["MODEL"].values[:] = 0.0
