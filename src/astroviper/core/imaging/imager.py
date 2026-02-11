@@ -23,6 +23,7 @@ from astroviper.core.imaging.imaging_utils.iteration_control import (
 from astroviper.core.imaging.deconvolution import deconvolve
 from astroviper.core.imaging.fft import fft_lm_to_uv
 from xradio.image import make_empty_sky_image
+import toolviper.utils.logger as logger
 
 # Default imaging parameters
 _DEFAULT_PARAMS = {
@@ -166,11 +167,11 @@ def run_imaging_loop(
     freq_coords = ms4.coords["frequency"].values
     time_coords = [float(ms4.coords["time"].values[0])]
 
-    print(
+    logger.info(
         f'Imaging: {ny}x{nx}, {cell_size[0]*206265:.4f}" cells, {n_chan} chan, '
         f"{n_corr}-corr ({corr_type}) → {stokes}"
     )
-    print(f"  niter={niter}, nmajor={nmajor}, threshold={threshold} Jy")
+    logger.info(f"  niter={niter}, nmajor={nmajor}, threshold={threshold} Jy")
 
     controller = IterationController(
         niter=niter,
@@ -184,7 +185,7 @@ def run_imaging_loop(
     )
 
     # Make PSF (Stokes I only, same for all polarizations)
-    print("Making PSF...")
+    logger.info("Making PSF...")
     psf_da = make_psf(
         ms4,
         {
@@ -235,7 +236,7 @@ def run_imaging_loop(
     while controller.stopcode.major == 0:
         major_cycle += 1
         column = "VISIBILITY" if major_cycle == 1 else "RESIDUAL"
-        print(f"=== Major Cycle {major_cycle} === (gridding {column})")
+        logger.info(f"=== Major Cycle {major_cycle} === (gridding {column})")
 
         dirty_corr = grid_visibilities(
             ms4,
@@ -312,7 +313,7 @@ def run_imaging_loop(
 
         peak_res = np.max(np.abs(residual_stokes))
         model_flux = np.sum(model_stokes[:, 0, :, :])
-        print(
+        logger.info(
             f"  peak={peak_res:.6f} Jy, model_flux={model_flux:.6f} Jy, niter={cycle_niter}"
         )
 
@@ -321,7 +322,7 @@ def run_imaging_loop(
 
         stopcode, stopdesc = controller.check_convergence(return_dict)
         if stopcode.major != 0:
-            print(f"  *** CONVERGED: {stopdesc} ***")
+            logger.info(f"  *** CONVERGED: {stopdesc} ***")
             break
 
         # Predict model visibilities for next cycle
@@ -338,7 +339,7 @@ def run_imaging_loop(
         compute_residual_visibilities(ms4)
 
     stokes_i_idx = stokes.index("I") if "I" in stokes else 0
-    print(
+    logger.info(
         f"=== Done: {controller.major_done} major, {controller.total_iter_done} iter, "
         f"peak={np.max(np.abs(residual_stokes)):.6f} Jy, "
         f"flux={np.sum(model_stokes[:, stokes_i_idx, :, :]):.6f} Jy ==="
