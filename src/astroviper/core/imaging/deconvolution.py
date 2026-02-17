@@ -181,8 +181,20 @@ def deconvolve(
     ntime = dirty_image_xds.sizes["time"]
     nchan = dirty_image_xds.sizes["frequency"]
     npol = dirty_image_xds.sizes["polarization"]
+    npol_psf = psf_xds.sizes["polarization"]
 
-    masksum = imgstats.get_image_masksum(dirty_image_xds)
+    # Check if PSF is single-plane (Stokes I only) and needs broadcasting
+    broadcast_psf = npol_psf == 1 and npol > 1
+    if broadcast_psf:
+        logger.info(f"PSF is single-plane, will broadcast to {npol} polarizations")
+    else:
+        # Check if number of polarizations match, error out otherwise.
+        if npol_psf != npol:
+            raise ValueError(
+                f"PSF should have same number of polarizations as the input image, or be Stokes I only. (npol_psf = {npol_psf}, npol_image = {npol})"
+            )
+
+    masksum = imgstats.get_image_masksum(dirty_image_xds, dv="RESIDUAL")
     phase_center = get_phase_center(dirty_image_xds)
 
     if algorithm.lower() == "hogbom":
@@ -198,10 +210,10 @@ def deconvolve(
 
     # Pre-allocate full model and residual datasets
     # Initialize from dirty image structure to preserve coordinates
-    full_model_xds = dirty_image_xds.copy(deep=True)
+    full_model_xds = dirty_image_xds.copy(deep=True).load()
     full_model_xds = full_model_xds.rename_vars({"RESIDUAL": "MODEL"})
 
-    full_residual_xds = dirty_image_xds.copy(deep=True)
+    full_residual_xds = dirty_image_xds.copy(deep=True).load()
 
     # Zero out the model (residual starts as dirty image copy)
     full_model_xds["MODEL"].values[:] = 0.0
@@ -212,12 +224,14 @@ def deconvolve(
     for tt in range(ntime):
         for nn in range(nchan):
             # Compute PSF sidelobe, same for all pols
-            _psf_values = psf_xds.isel(time=tt, frequency=nn)[
+            # For single-plane PSF, always use index 0
+            pidx = 0
+            _psf_values = psf_xds.isel(time=tt, frequency=nn, polarization=pidx)[
                 "POINT_SPREAD_FUNCTION"
             ].values
             _psf_values = _psf_values[
-                None, None, ...
-            ]  # Add dummy axes for freq and time
+                None, None, None, ...
+            ]  # Add dummy axes for freq, time, and pol
             _main_lobe, _blc, _trc, max_psf_sidelobe = extract_main_lobe(
                 psf_fit_window, psf_fit_cutoff, _psf_values
             )
@@ -231,7 +245,10 @@ def deconvolve(
                 dirty_slice = dirty_image_xds.isel(
                     time=tt, frequency=nn, polarization=pp
                 )
-                psf_slice = psf_xds.isel(time=tt, frequency=nn, polarization=pp)
+
+                # For PSF: use matching polarization index, or 0 if single-plane
+                pidx = 0 if broadcast_psf else pp
+                psf_slice = psf_xds.isel(time=tt, frequency=nn, polarization=pidx)
 
                 # Compute per-plane starting statistics
                 start_peakres = imgstats.image_peak_residual(

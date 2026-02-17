@@ -40,7 +40,8 @@ def make_psf(vis, im_params, grid_params):
     pol = vis.coords["polarization"].values
     npol = len(pol)
 
-    psf_data = np.zeros([nfreq, npol, image_size[0], image_size[1]], dtype=float)
+    psf_data = np.zeros([nfreq, npol, image_size[1], image_size[0]], dtype=float)
+
     grid2image_spheroid_ms4(
         vis=vis,
         resid_array=psf_data,
