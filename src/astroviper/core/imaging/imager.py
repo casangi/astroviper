@@ -186,7 +186,7 @@ def run_imaging_loop(
 
     # Make PSF (Stokes I only, same for all polarizations)
     logger.info("Making PSF...")
-    psf_da = make_psf(
+    psf_corr_xds = make_psf(
         ms4,
         {
             "cell_size": cell_size,
@@ -197,7 +197,10 @@ def run_imaging_loop(
         {"sampling": oversampling, "complex_grid": True, "support": support},
     )
     psf_stokes_i = image_corr_to_stokes(
-        psf_da.values, corr_type=corr_type, pol_axis=2, stokes_out=["I"]
+        psf_corr_xds["POINT_SPREAD_FUNCTION"].values,
+        corr_type=corr_type,
+        pol_axis=2,
+        stokes_out=["I"],
     )
     psf_xds = make_empty_sky_image(
         phase_center=phase_center,
