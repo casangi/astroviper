@@ -644,12 +644,29 @@ class TestReturnDict:
         assert iter_done >= 0
         assert iter_done <= entry["niter"]
 
+        # Extract latest values from start_* fields (now FIELD_ACCUM lists)
+        start_peakres = (
+            entry["start_peakres"][-1]
+            if isinstance(entry["start_peakres"], list)
+            else entry["start_peakres"]
+        )
+        start_peakres_nomask = (
+            entry["start_peakres_nomask"][-1]
+            if isinstance(entry["start_peakres_nomask"], list)
+            else entry["start_peakres_nomask"]
+        )
+        start_model_flux = (
+            entry["start_model_flux"][-1]
+            if isinstance(entry["start_model_flux"], list)
+            else entry["start_model_flux"]
+        )
+
         # Check that peak residual decreased (using absolute values)
         # Note: May be NaN if mask excludes all pixels
-        if not np.isnan(peakres) and not np.isnan(entry["start_peakres"]):
-            assert abs(peakres) <= abs(entry["start_peakres"])
-        if not np.isnan(peakres_nomask) and not np.isnan(entry["start_peakres_nomask"]):
-            assert abs(peakres_nomask) <= abs(entry["start_peakres_nomask"])
+        if not np.isnan(peakres) and not np.isnan(start_peakres):
+            assert abs(peakres) <= abs(start_peakres)
+        if not np.isnan(peakres_nomask) and not np.isnan(start_peakres_nomask):
+            assert abs(peakres_nomask) <= abs(start_peakres_nomask)
 
         # Check that PSF fractions are in valid range
         assert 0 < entry["min_psf_fraction"] <= 1
@@ -664,7 +681,7 @@ class TestReturnDict:
 
         # Check that model flux is non-negative and >= start_model_flux
         assert model_flux >= 0
-        assert model_flux >= entry["start_model_flux"]
+        assert model_flux >= start_model_flux
 
         # Check coordinate values
         assert entry["stokes"] is not None
