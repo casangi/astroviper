@@ -407,6 +407,9 @@ class TestReturnDictFieldClassification(unittest.TestCase):
             "iter_done",
             "masksum",
             "model_flux",
+            "start_peakres",
+            "start_peakres_nomask",
+            "start_model_flux",
         }
         self.assertEqual(FIELD_ACCUM, expected_fields)
 
@@ -427,6 +430,9 @@ class TestReturnDictFieldClassification(unittest.TestCase):
                 "iter_done": 100,
                 "masksum": 500,
                 "model_flux": 2.5,
+                "start_peakres": 1.0,
+                "start_peakres_nomask": 1.1,
+                "start_model_flux": 0.0,
             },
             time=0,
             pol=0,
