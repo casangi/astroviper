@@ -3,7 +3,7 @@ name: Publish Python 🐍 distribution 📦 to PyPI and TestPyPI
 
 on:
   release:
-    types: [created]
+    types: [published]
 
 jobs:
   # check-codecov-token:
