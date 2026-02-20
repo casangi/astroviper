@@ -402,9 +402,13 @@ def correct_ifft_to_lm(
                             ).data
                             data_slice *= (nx * ny) / (
                                 corrTerm
-                                * image[sumwt].sel(
-                                    frequency=f_coord, polarization=p_coord
+                                * image[sumwt]
+                                .sel(
+                                    time=t_coord,
+                                    frequency=f_coord,
+                                    polarization=p_coord,
                                 )
+                                .data
                             )
 
 
@@ -458,7 +462,7 @@ def grid2xradio_spheroid_ms4(
     cellsize_m = np.abs(image.m[1].data - image.m[0].data)
     pixelincr = np.array([cellsize_l, cellsize_m])
     if data_var not in image.data_vars:
-        raise Exception("{data_var} is not in {image}")
+        raise Exception(f"{data_var} is not in {image}")
     sumwt_var = data_var + "_NORMALIZATION"
     dat_array = image[data_var]
     sumwt_array = image[sumwt_var]
