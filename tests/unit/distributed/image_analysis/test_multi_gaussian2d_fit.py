@@ -496,7 +496,9 @@ class TestOptimizerFailures:
             "theta_pixel_err",
         )
         for v in err_vars:
-            assert np.isnan(float(ds[v])), f"{v} should be NaN when pcov is invalid"
+            assert np.isnan(
+                float(np.ravel(ds[v].values)[0])
+            ), f"{v} should be NaN when pcov is invalid"
 
     def test_threshold_not_enough_pixels_for_params_raises_public_api(self) -> None:
         """
@@ -1027,9 +1029,9 @@ class TestNumPyFitting:  # (unittest.TestCase):
 
         assert bool(ds["success"]) is True
         # theta is reported in the same convention ("pa"), so it should match pa_expected
-        assert np.isfinite(float(ds["theta_pixel"]))
+        assert np.isfinite(float(np.ravel(ds["theta_pixel"].values)[0]))
         assert (
-            abs(float(ds["theta_pixel"]) - pa_expected) < 0.15
+            abs(float(np.ravel(ds["theta_pixel"].values)[0]) - pa_expected) < 0.15
         )  # allow some tolerance
 
     def test_angle_pa_init_conversion_list_of_dicts(self) -> None:
@@ -1119,7 +1121,7 @@ class TestNumPyFitting:  # (unittest.TestCase):
 
         assert bool(ds["success"]) is True
         # theta reported in PA (angle="pa"); should be close to the PA seed
-        assert abs(float(ds["theta_pixel"]) - pa) < 0.25
+        assert abs(float(np.ravel(ds["theta_pixel"].values)[0]) - pa) < 0.25
 
     def test_angle_pa_init_components_list_of_dicts_converted(self) -> None:
         # Build a single rotated Gaussian (known math angle)
@@ -1161,7 +1163,7 @@ class TestNumPyFitting:  # (unittest.TestCase):
         )
 
         assert bool(ds["success"]) is True
-        assert abs(float(ds["theta_pixel"]) - pa) < 0.25
+        assert abs(float(np.ravel(ds["theta_pixel"].values)[0]) - pa) < 0.25
 
     def test_angle_pa_list_of_dicts_missing_theta_covers_if_false_branch(self) -> None:
         # Build a 2-component scene
@@ -1369,20 +1371,26 @@ class TestNumPyFitting:  # (unittest.TestCase):
         assert "x0_world_err" in ds and "y0_world_err" in ds
 
         # Expected centers via direct interpolation over pixel indices
-        x0_pix = float(ds["x0_pixel"])
-        y0_pix = float(ds["y0_pixel"])
+        x0_pix = float(np.ravel(ds["x0_pixel"].values)[0])
+        y0_pix = float(np.ravel(ds["y0_pixel"].values)[0])
         x0w_expected = np.interp(x0_pix, np.arange(nx, dtype=float), xw)
         y0w_expected = np.interp(y0_pix, np.arange(ny, dtype=float), yw)
-        assert abs(float(ds["x0_world"]) - x0w_expected) < 1e-6
-        assert abs(float(ds["y0_world"]) - y0w_expected) < 1e-6
+        assert abs(float(np.ravel(ds["x0_world"].values)[0]) - x0w_expected) < 1e-6
+        assert abs(float(np.ravel(ds["y0_world"].values)[0]) - y0w_expected) < 1e-6
 
         # Error propagation: world_err ≈ |local slope| * pixel_err (slope constant for linear coords)
         slope_x = 0.5
         slope_y = 0.25
-        ex_pix = float(ds["x0_pixel_err"])
-        ey_pix = float(ds["y0_pixel_err"])
-        assert abs(float(ds["x0_world_err"]) - slope_x * ex_pix) < 1e-12
-        assert abs(float(ds["y0_world_err"]) - slope_y * ey_pix) < 1e-12
+        ex_pix = float(np.ravel(ds["x0_pixel_err"].values)[0])
+        ey_pix = float(np.ravel(ds["y0_pixel_err"].values)[0])
+        assert (
+            abs(float(np.ravel(ds["x0_world_err"].values)[0]) - slope_x * ex_pix)
+            < 1e-12
+        )
+        assert (
+            abs(float(np.ravel(ds["y0_world_err"].values)[0]) - slope_y * ey_pix)
+            < 1e-12
+        )
 
     def test_pixel_fit_interpolates_world_centers_descending_x(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1423,8 +1431,8 @@ class TestNumPyFitting:  # (unittest.TestCase):
             assert name in ds
 
         # Centers should be finite and within coordinate ranges
-        x0w = float(ds["x0_world"])
-        y0w = float(ds["y0_world"])
+        x0w = float(np.ravel(ds["x0_world"].values)[0])
+        y0w = float(np.ravel(ds["y0_world"].values)[0])
         assert np.isfinite(x0w) and np.isfinite(y0w)
         assert min(xw) - 1e-9 <= x0w <= max(xw) + 1e-9
         assert min(yw) - 1e-9 <= y0w <= max(yw) + 1e-9
@@ -1931,9 +1939,11 @@ class TestAngleEndToEndFitter(unittest.TestCase):
 
         assert bool(ds["success"]) is True
         # After canonicalization: sigma_major >= sigma_minor and theta_math in (-π/2, π/2]
-        smaj = float(ds["sigma_major_pixel"])
-        smin = float(ds["sigma_minor_pixel"])
-        th_m = float(ds["theta_pixel"])  # in math because angle="math"
+        smaj = float(np.ravel(ds["sigma_major_pixel"].values)[0])
+        smin = float(np.ravel(ds["sigma_minor_pixel"].values)[0])
+        th_m = float(
+            np.ravel(ds["theta_pixel"].values)[0]
+        )  # in math because angle="math"
         assert smaj >= smin
         assert (-np.pi / 2 - 1e-9) < th_m <= (np.pi / 2 + 1e-9)
 
@@ -1980,7 +1990,9 @@ class TestAngleEndToEndFitter(unittest.TestCase):
         )
 
         assert bool(ds["success"]) is True
-        th_m = float(ds["theta_pixel"])  # reported math angle, canonicalized
+        th_m = float(
+            np.ravel(ds["theta_pixel"].values)[0]
+        )  # reported math angle, canonicalized
 
         # Expected wrap: ((θ + π/2) % π) − π/2  ∈ (-π/2, π/2]
         expected_wrapped = ((theta_math_true + np.pi / 2) % np.pi) - np.pi / 2
@@ -2004,7 +2016,7 @@ class TestAngleEndToEndFitter(unittest.TestCase):
             return_residual=False,
             coord_type="pixel",
         )
-        th_pa = float(ds_pa["theta_pixel"])
+        th_pa = float(np.ravel(ds_pa["theta_pixel"].values)[0])
         assert abs(th_pa - pa_expected) < 0.01
 
 
@@ -2616,13 +2628,20 @@ class TestWorldSeeding:
 
         # Amplitude/peak should be near the truth (no noise, no offset).
         if "amplitude" in ds:
-            assert np.isclose(float(ds["amplitude"]), amp_true, rtol=0.05, atol=0.05)
+            assert np.isclose(
+                float(np.ravel(ds["amplitude"].values)[0]),
+                amp_true,
+                rtol=0.05,
+                atol=0.05,
+            )
         if "peak" in ds:
-            assert np.isclose(float(ds["peak"]), amp_true, rtol=0.05, atol=0.05)
+            assert np.isclose(
+                float(np.ravel(ds["peak"].values)[0]), amp_true, rtol=0.05, atol=0.05
+            )
 
         # Centers recovered in WORLD coordinates.
-        assert np.isclose(float(ds["x0_world"]), x0_true, atol=1.0)
-        assert np.isclose(float(ds["y0_world"]), y0_true, atol=1.0)
+        assert np.isclose(float(np.ravel(ds["x0_world"].values)[0]), x0_true, atol=1.0)
+        assert np.isclose(float(np.ravel(ds["y0_world"].values)[0]), y0_true, atol=1.0)
 
 
 # ------------------------- masking (public API) -------------------------
