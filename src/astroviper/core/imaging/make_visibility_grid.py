@@ -137,16 +137,18 @@ def make_visibility_grid_single_field(
     ), "######### ERROR: grid_params checking failed"
 
     ms_data_group_in, ms_data_group_out = check_sel_params(
-        ms_xds, _vis_sel_params, skip_data_group_out=True
+        ms_xds, _vis_sel_params, default_data_group_in_name="base",
     )
+    
+    print("##### Data groups in image",img_xds.attrs["data_groups"].keys())
     img_data_group_in, img_data_group_out = check_sel_params(
         img_xds,
         _img_sel_params,
-        default_data_group_out={
-            "mosaic": {
+        default_data_group_in_name="single_field",
+        default_data_group_out_name="single_field",
+        default_data_group_out_modified={
                 "visibility": "VISIBILITY",
                 "visibility_normalization": "VISIBILITY_NORMALIZATION",
-            }
         },
     )
 
@@ -202,6 +204,10 @@ def make_visibility_grid_single_field(
     grid, sumwt = standard_grid_numpy_wrap(
         vis_data, uvw, imaging_weight, freq_chan, cgk_1D, _grid_params
     )
+    
+    img_xds.attrs["data_groups"][
+        img_data_group_out["data_group_out_name"]
+    ] = img_data_group_out
 
     # standard_grid_jit(
     #    grid,

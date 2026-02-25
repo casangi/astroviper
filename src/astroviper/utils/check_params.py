@@ -233,20 +233,12 @@ def check_sel_params(
     default_data_group_out_name: str = None,
     default_data_group_out_modified: dict = None,
 ):
-    """Check selection parameters for imaging weights calculation.
+    """Check selection parameters.
 
     Parameters
     ----------
     xds : xr.Dataset
         The input dataset.
-    sel_params : dict
-        The selection parameters.
-    default_data_group_in_name : str, optional
-        The default input data group name, by default None
-    default_data_group_out_name : str, optional
-        The default output data group name, by default None
-    default_data_group_out_modified : dict, optional
-        The default modified output data group, by default {}
     sel_params : dict
         The selection parameters.
     default_data_group_in_name : str, optional
@@ -291,7 +283,7 @@ def check_sel_params(
     else:
         assert default_data_group_in_name in xds_data_groups, (
             "Default data group "
-            + default_data_group_in_name
+            + str(default_data_group_in_name)
             + " not found in xds data_groups: "
             + str(xds_data_groups.keys())
         )
