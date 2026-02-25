@@ -10,6 +10,28 @@ bytes_in_dtype = {
 
 
 def get_thread_info(client=None):
+    """Query available threads and memory from the Dask cluster or local machine.
+
+    If no client is provided, attempts to connect to the current distributed
+    ``Client``. Falls back to ``psutil`` when no distributed scheduler is running.
+
+    Parameters
+    ----------
+    client : distributed.Client, optional
+        An active Dask distributed ``Client``. If ``None``, the current client
+        is retrieved automatically; if no distributed client exists, ``psutil``
+        is used to query the local machine.
+
+    Returns
+    -------
+    dict
+        Dictionary with keys:
+
+        ``n_threads`` : int
+            Total number of worker threads available.
+        ``memory_per_thread`` : float
+            Memory available per thread in GiB (minimum across all workers).
+    """
 
     if client is None:
         try:
@@ -50,6 +72,26 @@ def get_thread_info(client=None):
 
 
 def prime_factors(n):
+    """Return the prime factorization of a positive integer.
+
+    Parameters
+    ----------
+    n : int
+        Positive integer to factorize.
+
+    Returns
+    -------
+    list of int
+        Prime factors of ``n`` in non-decreasing order.
+        Returns an empty list for ``n == 1``.
+
+    Examples
+    --------
+    >>> prime_factors(12)
+    [2, 2, 3]
+    >>> prime_factors(7)
+    [7]
+    """
     i = 2
     factors = []
     while i * i <= n:
@@ -70,6 +112,45 @@ def calculate_data_chunking(
     constant_memory=0,
     tasks_per_thread=4,
 ):
+    """Determine the number of chunks per dimension for parallel processing.
+
+    The chunk count satisfies two constraints:
+
+    * **Memory constraint** – the number of chunks must be large enough that
+      each chunk fits within the memory available per thread.
+    * **Graph constraint** – the number of chunks should be large enough to
+      keep all threads busy (``n_threads * tasks_per_thread``).
+
+    Parameters
+    ----------
+    memory_singleton_chunk : float
+        Memory in GiB required to process a single chunk when all parallelized
+        dimensions have size 1.
+    chunking_dims_sizes : dict
+        Mapping of dimension name to the total number of elements along that
+        dimension (e.g. ``{"frequency": 5}``).
+    thread_info : dict
+        Thread information as returned by :func:`get_thread_info`.
+        Expected keys: ``"n_threads"`` (int), ``"memory_per_thread"`` (float, GiB).
+    constant_memory : float, optional
+        Fixed memory overhead in GiB consumed regardless of chunk size.
+        Default is ``0``.
+    tasks_per_thread : int, optional
+        Target number of tasks queued per thread to keep the scheduler busy.
+        Default is ``4``.
+
+    Returns
+    -------
+    dict
+        Mapping of dimension name to the recommended number of chunks along
+        that dimension (e.g. ``{"frequency": 5}``).
+
+    Raises
+    ------
+    AssertionError
+        If the cluster does not have enough memory per thread to process even
+        a single chunk.
+    """
 
     import numpy as np
 

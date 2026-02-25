@@ -128,16 +128,16 @@ def make_uv_sampling_grid_single_field(
     ), "######### ERROR: grid_params checking failed"
 
     ms_data_group_in, ms_data_group_out = check_sel_params(
-        ms_xds, _vis_sel_params, skip_data_group_out=True
+        ms_xds, _vis_sel_params, default_data_group_in_name="base",
     )
     img_data_group_in, img_data_group_out = check_sel_params(
         img_xds,
         _img_sel_params,
-        default_data_group_out={
-            "mosaic": {
+        default_data_group_in_name="single_field",
+        default_data_group_out_name="single_field",
+        default_data_group_out_modified={
                 "uv_sampling": "UV_SAMPLING",
                 "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
-            }
         },
     )
 
@@ -198,3 +198,7 @@ def make_uv_sampling_grid_single_field(
         support=7,
         oversampling=100,
     )
+    
+    img_xds.attrs["data_groups"][
+        img_data_group_out["data_group_out_name"]
+    ] = img_data_group_out
