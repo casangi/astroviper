@@ -4,7 +4,7 @@ from typing import List, Optional, Union
 
 import numpy as np
 import xarray as xr
-from xradio.image.image import make_empty_lmuv_image
+from xradio.image.image import make_empty_lmuv_image, make_empty_sky_image
 from astroviper.core.imaging.fft import fft_lm_to_uv
 from astroviper.core.imaging.ifft import ifft_uv_to_lm
 from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import (
@@ -14,6 +14,86 @@ from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import (
 from astroviper.core.imaging.imaging_utils.standard_grid import (
     standard_grid_numpy_wrap_input_checked,
 )
+
+
+def make_image_xds(
+    imsize: Union[List[int], np.ndarray],
+    cell: Union[List[float], np.ndarray],
+    freq: Union[float, np.ndarray],
+    freqinc: float,
+    phasecent: Union[List[float], np.ndarray],
+    which: str = "SKY",
+    pol: Optional[Union[List[str], np.ndarray]] = None,
+    time: Optional[Union[List[float], np.ndarray]] = None,
+) -> xr.Dataset:
+    """Create an empty sky image xarray.Dataset with a named data variable.
+
+    Parameters
+    ----------
+    imsize:
+        Number of pixels along the l and m axes.
+    cell:
+        Cell size in radians for the l and m axes.
+    freq:
+        Center frequency (Hz) of each channel.  A scalar is treated as a
+        single-channel image.
+    freqinc:
+        Channel width in Hz (stored as a ``channel_width`` attribute on the
+        frequency coordinate).
+    phasecent:
+        Image phase centre as ``[ra, dec]`` in radians.
+    which:
+        Name of the data variable to create (e.g. ``"SKY"``, ``"RESIDUAL"``,
+        ``"MODEL"``).
+    pol:
+        Polarization labels.  Defaults to ``["I"]``.
+    time:
+        Time coordinates in MJD.  Defaults to ``[0.0]``.
+
+    Returns
+    -------
+    xr.Dataset
+        Sky-image dataset with a single zero-filled data variable named
+        *which*.
+    """
+    if pol is None:
+        pol = np.array(["I"])
+    if time is None:
+        time = np.array([0.0])
+
+    freq_coords = np.atleast_1d(np.asarray(freq, dtype=float))
+
+    image = make_empty_sky_image(
+        phase_center=phasecent,
+        image_size=imsize,
+        cell_size=cell,
+        frequency_coords=freq_coords,
+        pol_coords=pol,
+        time_coords=time,
+    )
+
+    # Store channel width metadata when provided.
+    if freqinc is not None:
+        image["frequency"].attrs["channel_width"] = {
+            "data": freqinc,
+            "units": "Hz",
+        }
+
+    sky_data_dims = ("time", "frequency", "polarization", "l", "m")
+    sky_data_shape = (
+        len(time),
+        len(freq_coords),
+        len(pol),
+        imsize[0],
+        imsize[1],
+    )
+    sky_coords = {dim: image.coords[dim] for dim in sky_data_dims}
+    image[which] = xr.DataArray(
+        np.zeros(sky_data_shape, dtype=np.float32),
+        coords=sky_coords,
+        dims=sky_data_dims,
+    )
+    return image
 
 
 def remove_padding(image: xr.Dataset, image_size: np.ndarray) -> xr.Dataset:
