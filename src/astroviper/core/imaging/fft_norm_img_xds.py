@@ -214,7 +214,7 @@ def normalize(
         correct_oversampling = True
         if norm_type == "flat_noise":
             # Divide the raw image by sqrt(.weight) so that the input to the minor cycle represents the product of the sky and PB. The noise is 'flat' across the region covered by each PB.
-            normalizing_image = primary_beam #* ps_correcting_image
+            normalizing_image = primary_beam  # * ps_correcting_image
             normalized_image = normalize_image(
                 image,
                 sum_weight[:, :, None, None],
@@ -224,9 +224,7 @@ def normalize(
             )
         elif norm_type == "flat_sky":
             #  Divide the raw image by .weight so that the input to the minor cycle represents only the sky. The noise is higher in the outer regions of the primary beam where the sensitivity is low.
-            normalizing_image = (
-                primary_beam * primary_beam #* ps_correcting_image
-            )
+            normalizing_image = primary_beam * primary_beam  # * ps_correcting_image
 
             # print(sel_params['data_group_in']['weight_pb'])
             # print('$%$%',img_dataset[sel_params['data_group_in']['weight_pb']].data.compute())

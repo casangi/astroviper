@@ -202,7 +202,7 @@ def add_visibility_grid_single_field(
 
     do_psf = False
     do_imaging_weight = False
-    
+
     standard_grid_jit(
         grid,
         sum_weight,
