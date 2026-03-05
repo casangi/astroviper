@@ -1,14 +1,16 @@
 """Tests for plotting helpers in ``astroviper.utils.plotting``."""
 
 import matplotlib
+
+# Force a non-interactive backend before pyplot/module imports so headless CI
+# can render figures without GUI dependencies or backend-selection warnings.
+matplotlib.use("Agg", force=True)
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 from astropy.wcs import WCS
 
 from astroviper.utils.plotting import generate_astro_plot
-
-matplotlib.use("Agg", force=True)
-import matplotlib.pyplot as plt
 
 
 def _make_mock_equatorial_sin_wcs() -> WCS:
