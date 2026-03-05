@@ -110,7 +110,7 @@ def calculate_imaging_weights(
     ...         "image_size": (256, 256),
     ...         "cell_size": np.array([-0.1, 0.1]) * np.pi / (180 * 3600),
     ...         "fft_padding": 1.0,
-    
+
     ...     },
     ...     imaging_weights_params={"weighting": "briggs", "robust": 0.5},
     ...     sel_params={"data_group_in_name": "base"},
