@@ -8,6 +8,7 @@ from astropy.wcs import WCS
 from astroviper.utils.plotting import generate_astro_plot
 
 matplotlib.use("Agg", force=True)
+import matplotlib.pyplot as plt
 
 
 def _make_mock_equatorial_sin_wcs() -> WCS:
@@ -44,7 +45,7 @@ def test_generate_astro_plot_places_source_at_requested_xy():
     assert (peak_col, peak_row) == (x_target, y_target)
     assert ax.images[0].origin == "lower"
 
-    matplotlib.pyplot.close(fig)
+    plt.close(fig)
 
 
 def test_generate_astro_plot_world_axes_have_ra_increasing_left():
@@ -63,7 +64,7 @@ def test_generate_astro_plot_world_axes_have_ra_increasing_left():
     # Astronomical convention for sky images: RA increases to the left.
     assert ra_left_deg > ra_right_deg
 
-    matplotlib.pyplot.close(fig)
+    plt.close(fig)
 
 
 def test_generate_astro_plot_requires_wcs_for_world_axes():
@@ -74,3 +75,11 @@ def test_generate_astro_plot_requires_wcs_for_world_axes():
         ValueError, match="wcs must be provided when show_world_axes=True"
     ):
         generate_astro_plot(data=data, wcs=None, show_world_axes=True)
+
+
+def test_generate_astro_plot_requires_2d_data():
+    """Verify plotting helper rejects non-2D inputs with a clear error."""
+    data_1d = np.zeros(20, dtype=float)
+
+    with pytest.raises(ValueError, match="data must be a 2D array-like object"):
+        generate_astro_plot(data=data_1d, show_world_axes=False)

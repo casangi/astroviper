@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 import matplotlib.pyplot as plt
+import numpy as np
 
 
 def generate_astro_plot(
@@ -55,6 +56,12 @@ def generate_astro_plot(
     transposes the input ``data`` before plotting so a source written to
     ``data[x, y]`` is displayed at pixel ``(x, y)`` in the rendered image.
     """
+    data_array = np.asarray(data)
+    if data_array.ndim != 2:
+        raise ValueError(
+            "data must be a 2D array-like object with shape (nx, ny) for plotting."
+        )
+
     if show_world_axes and wcs is None:
         raise ValueError("wcs must be provided when show_world_axes=True.")
 
@@ -64,5 +71,5 @@ def generate_astro_plot(
     else:
         fig, ax = plt.subplots(figsize=figsize)
 
-    ax.imshow(data.T, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax)
+    ax.imshow(data_array.T, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax)
     return fig, ax
