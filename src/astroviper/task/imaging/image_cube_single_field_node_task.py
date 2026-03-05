@@ -24,7 +24,7 @@ def image_cube_single_field_node_task(input_params, ps_iter, img_xds):
     }
     df = pd.DataFrame(return_dict)
     
-    print("**********", img_xds.data_vars.keys(), "**********")
+    #print("**********", img_xds.data_vars.keys(), "**********")
     
     #Write Data chunk to disk
     for dv in input_params["image_data_variables_keep"]:
@@ -37,7 +37,7 @@ def image_cube_single_field_node_task(input_params, ps_iter, img_xds):
             else:
                 idx.append(slice(None))
         idx = tuple(idx)
-        print("dv: ", dv, " idx: ", idx, " size_dict: ", size_dict)
+        #print("dv: ", dv, " idx: ", idx, " size_dict: ", size_dict)
 
         group = zarr.open_group(input_params["image_store"], mode="r+")
         sky = group[dv]
@@ -177,7 +177,7 @@ def residual_cycle_cube_single_field_node_task(
     )
     T_weights = T_weights + time.time() - start_4
 
-    print("$$$$$$$$$$", data_group_out, "***************")
+    #print("$$$$$$$$$$", data_group_out, "***************")
     cgk_1D = create_prolate_spheroidal_kernel_1D(100, 7)
 
     for ms_xdt in ps_iter:
@@ -200,7 +200,7 @@ def residual_cycle_cube_single_field_node_task(
         )  # Will become the PSF.
         T_uv_sampling_grid = T_uv_sampling_grid + time.time() - start_7
 
-        print("3. $$$$$$$ img_xds ", img_xds.attrs["data_groups"].keys())
+        #print("3. $$$$$$$ img_xds ", img_xds.attrs["data_groups"].keys())
         start_8 = time.time()
         add_visibility_grid_single_field(
             ms_xdt,
@@ -214,9 +214,9 @@ def residual_cycle_cube_single_field_node_task(
         T_compute = T_compute + time.time() - start_compute
 
     ps_iter.reset()  # Reset the iterator to the beginning for downstream tasks.
-    print("img_xds after loop ", img_xds.attrs["data_groups"].keys())
-    print("img_xds ", img_xds.data_vars.keys)
-    print("*************")
+    # print("img_xds after loop ", img_xds.attrs["data_groups"].keys())
+    # print("img_xds ", img_xds.data_vars.keys)
+    # print("*************")
     
     start_9 = time.time()
     import xarray as xr
