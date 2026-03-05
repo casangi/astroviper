@@ -21,8 +21,6 @@ from xradio.image import write_image
 import toolviper.utils.logger as logger
 from numcodecs import Blosc
 
-
-
 _sky = "SKY"
 _beam = "BEAM_FIT_PARAMS_SKY"
 
@@ -61,6 +59,7 @@ def feather(
         If xr.Dataset, that xds will be used for the single dish image.
     """
     from astroviper.core.imaging.feather import feather_core
+
     if outim is not None:
         if type(outim) != dict:
             raise ValueError(

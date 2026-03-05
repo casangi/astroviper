@@ -9,7 +9,7 @@ def grid_imaging_weights(
     uvw: np.ndarray,
     data_weight: np.ndarray,
     freq_chan: np.ndarray,
-    #grid_parms: dict,
+    # grid_parms: dict,
     n_uv: list,
     delta_lm: list,
 ):

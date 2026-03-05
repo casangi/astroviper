@@ -1,4 +1,3 @@
-
 def image_cube_single_field_node_task(input_params, ps_iter, img_xds):
     import pandas as pd
     from xradio.image import make_empty_sky_image
@@ -12,7 +11,7 @@ def image_cube_single_field_node_task(input_params, ps_iter, img_xds):
     # ps_xdt = load_processing_set(
     #     input_params["input_data_store"], input_params["data_selection"]
     # )
-    
+
     residual_cycle_cube_single_field_node_task(
         ps_iter, img_xds, input_params, is_n_iter_0=True
     )
@@ -23,10 +22,10 @@ def image_cube_single_field_node_task(input_params, ps_iter, img_xds):
         "T_load": 42.0,
     }
     df = pd.DataFrame(return_dict)
-    
-    #print("**********", img_xds.data_vars.keys(), "**********")
-    
-    #Write Data chunk to disk
+
+    # print("**********", img_xds.data_vars.keys(), "**********")
+
+    # Write Data chunk to disk
     for dv in input_params["image_data_variables_keep"]:
         dv = dv.upper()
         size_dict = img_xds.sizes
@@ -37,12 +36,12 @@ def image_cube_single_field_node_task(input_params, ps_iter, img_xds):
             else:
                 idx.append(slice(None))
         idx = tuple(idx)
-        #print("dv: ", dv, " idx: ", idx, " size_dict: ", size_dict)
+        # print("dv: ", dv, " idx: ", idx, " size_dict: ", size_dict)
 
         group = zarr.open_group(input_params["image_store"], mode="r+")
         sky = group[dv]
         sky[idx] = img_xds[dv].values
-    
+
     return df
 
     # ps_single_pol_xdt = load_processing_set(input_params["input_data_store"], input_params["data_selection"])
@@ -140,9 +139,13 @@ def residual_cycle_cube_single_field_node_task(
     from astroviper.task.imaging.calculate_imaging_weights import (
         calculate_imaging_weights,
     )
-    from astroviper.task.imaging.add_uv_sampling_grid import add_uv_sampling_grid_single_field
+    from astroviper.task.imaging.add_uv_sampling_grid import (
+        add_uv_sampling_grid_single_field,
+    )
     from xradio.image import make_empty_sky_image
-    from astroviper.task.imaging.add_visibility_grid import add_visibility_grid_single_field
+    from astroviper.task.imaging.add_visibility_grid import (
+        add_visibility_grid_single_field,
+    )
 
     from astroviper.core.imaging.fft_norm_img_xds import fft_norm_img_xds
     from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import (
@@ -165,7 +168,7 @@ def residual_cycle_cube_single_field_node_task(
         new_data_group_name=img_data_group_name,
         new_data_group={"description": "test", "date": "2026"},
     )
-    #print("1. $$$$$$$ img_xds ", img_xds.attrs["data_groups"].keys())
+    # print("1. $$$$$$$ img_xds ", img_xds.attrs["data_groups"].keys())
 
     start_4 = time.time()
     data_group_out = calculate_imaging_weights(
@@ -177,7 +180,7 @@ def residual_cycle_cube_single_field_node_task(
     )
     T_weights = T_weights + time.time() - start_4
 
-    #print("$$$$$$$$$$", data_group_out, "***************")
+    # print("$$$$$$$$$$", data_group_out, "***************")
     cgk_1D = create_prolate_spheroidal_kernel_1D(100, 7)
 
     for ms_xdt in ps_iter:
@@ -187,26 +190,30 @@ def residual_cycle_cube_single_field_node_task(
         # Apply the mask to the Dataset
         ms_xdt.ds = ms_xdt.ds.where(mask, drop=True)
 
-        #print("xxxx ms_xdt data_groups ", ms_xdt.data_groups.keys(), " data_vars ", ms_xdt.ds.data_vars.keys())
+        # print("xxxx ms_xdt data_groups ", ms_xdt.data_groups.keys(), " data_vars ", ms_xdt.ds.data_vars.keys())
 
         start_7 = time.time()
         add_uv_sampling_grid_single_field(
             ms_xdt,
             cgk_1D,
             img_xds,
-            vis_sel_params={"data_group_in_name": data_group_out["data_group_out_name"]},
+            vis_sel_params={
+                "data_group_in_name": data_group_out["data_group_out_name"]
+            },
             img_sel_params={"data_group_in_name": img_data_group_name},
             grid_params=input_params["image_params"],
         )  # Will become the PSF.
         T_uv_sampling_grid = T_uv_sampling_grid + time.time() - start_7
 
-        #print("3. $$$$$$$ img_xds ", img_xds.attrs["data_groups"].keys())
+        # print("3. $$$$$$$ img_xds ", img_xds.attrs["data_groups"].keys())
         start_8 = time.time()
         add_visibility_grid_single_field(
             ms_xdt,
             cgk_1D,
             img_xds,
-            vis_sel_params={"data_group_in_name": data_group_out["data_group_out_name"]},
+            vis_sel_params={
+                "data_group_in_name": data_group_out["data_group_out_name"]
+            },
             img_sel_params={"data_group_in_name": img_data_group_name},
             grid_params=input_params["image_params"],
         )
@@ -217,35 +224,46 @@ def residual_cycle_cube_single_field_node_task(
     # print("img_xds after loop ", img_xds.attrs["data_groups"].keys())
     # print("img_xds ", img_xds.data_vars.keys)
     # print("*************")
-    
+
     start_9 = time.time()
     import xarray as xr
+
     gcf_xds = xr.Dataset()
     gcf_xds.attrs["oversampling"] = [100, 100]
     gcf_xds.attrs["SUPPORT"] = [7, 7]
     from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import (
         create_prolate_spheroidal_kernel,
     )
-    
+
     pb_parms = {}
     pb_parms["list_dish_diameters"] = np.array([10.7])
     pb_parms["list_blockage_diameters"] = np.array([0.75])
     pb_parms["ipower"] = 1
 
-    input_params["image_params"]["image_center"] = (np.array(input_params["image_params"]["image_size"]) // 2).tolist()
+    input_params["image_params"]["image_center"] = (
+        np.array(input_params["image_params"]["image_size"]) // 2
+    ).tolist()
     # (1, 1, len(pol), 1, 1))
     # print(_airy_disk_rorder(ms_xdt.frequency.values, ms_xdt.polarization.values, pb_parms, grid_params).shape)
-    
+
     from astroviper.core.imaging.imaging_utils.make_pb_symmetric import (
         airy_disk_rorder,
     )
 
-    img_xds["PRIMARY_BEAM"] =  xr.DataArray(airy_disk_rorder(img_xds.frequency.values, img_xds.polarization.values, pb_parms, input_params["image_params"])[0,...][None,...], dims=("time", "frequency", "polarization", "l", "m"))
+    img_xds["PRIMARY_BEAM"] = xr.DataArray(
+        airy_disk_rorder(
+            img_xds.frequency.values,
+            img_xds.polarization.values,
+            pb_parms,
+            input_params["image_params"],
+        )[0, ...][None, ...],
+        dims=("time", "frequency", "polarization", "l", "m"),
+    )
 
     _, ps_corr_image = create_prolate_spheroidal_kernel(
         100, 7, n_uv=[img_xds.sizes["l"], img_xds.sizes["m"]]
     )
-    
+
     # print(ps_corr_image.shape)
     gcf_xds["PS_CORR_IMAGE"] = xr.DataArray(ps_corr_image, dims=("l", "m"))
 
@@ -254,15 +272,15 @@ def residual_cycle_cube_single_field_node_task(
         gcf_xds,
         grid_params=input_params["image_params"],
         norm_params={},
-        sel_params={"data_group_in_name": img_data_group_name, "data_group_out_name": img_data_group_name},
+        sel_params={
+            "data_group_in_name": img_data_group_name,
+            "data_group_out_name": img_data_group_name,
+        },
     )
-    
 
     T_fft = time.time() - start_9
-    #logger.debug("9. fft norm " + str(time.time() - start_9))
-    
-    
-    
+    # logger.debug("9. fft norm " + str(time.time() - start_9))
+
     # import time
     # from xradio.correlated_data.load_processing_set import ProcessingSetIterator
     # import toolviper.utils.logger as logger
