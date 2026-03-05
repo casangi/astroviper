@@ -2,6 +2,7 @@
 
 import matplotlib
 import numpy as np
+import pytest
 from astropy.wcs import WCS
 
 from astroviper.utils.plotting import generate_astro_plot
@@ -63,3 +64,13 @@ def test_generate_astro_plot_world_axes_have_ra_increasing_left():
     assert ra_left_deg > ra_right_deg
 
     matplotlib.pyplot.close(fig)
+
+
+def test_generate_astro_plot_requires_wcs_for_world_axes():
+    """Verify world-axis mode rejects missing WCS input."""
+    data = np.zeros((20, 20), dtype=float)
+
+    with pytest.raises(
+        ValueError, match="wcs must be provided when show_world_axes=True"
+    ):
+        generate_astro_plot(data=data, wcs=None, show_world_axes=True)
