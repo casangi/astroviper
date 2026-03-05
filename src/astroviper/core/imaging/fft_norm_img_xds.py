@@ -107,7 +107,7 @@ def fft_norm_img_xds(img_xds, gcf_xds, grid_params, norm_params, sel_params):
                     norm_params=_norm_params,
                 )
             img_xds[data_group_out[fft_pair[data_variable]]] = xr.DataArray(
-                image, dims=("frequency", "polarization", "l", "m")
+                image, dims=("time", "frequency", "polarization", "l", "m")
             )
 
 
@@ -214,7 +214,7 @@ def normalize(
         correct_oversampling = True
         if norm_type == "flat_noise":
             # Divide the raw image by sqrt(.weight) so that the input to the minor cycle represents the product of the sky and PB. The noise is 'flat' across the region covered by each PB.
-            normalizing_image = ps_correcting_image[None, None, :, :] * primary_beam
+            normalizing_image = primary_beam #* ps_correcting_image
             normalized_image = normalize_image(
                 image,
                 sum_weight[:, :, None, None],
@@ -225,7 +225,7 @@ def normalize(
         elif norm_type == "flat_sky":
             #  Divide the raw image by .weight so that the input to the minor cycle represents only the sky. The noise is higher in the outer regions of the primary beam where the sensitivity is low.
             normalizing_image = (
-                ps_correcting_image[None, None, :, :] * primary_beam * primary_beam
+                primary_beam * primary_beam #* ps_correcting_image
             )
 
             # print(sel_params['data_group_in']['weight_pb'])
@@ -244,7 +244,7 @@ def normalize(
             pass
             # print('in normalize none ')
             # No normalization after gridding and FFT. The minor cycle sees the sky times pb square
-        #            normalizing_image = ps_correcting_image[None, None, :, :]
+        #            normalizing_image = ps_correcting_image[None, None, None, :, :]
         #            normalized_image = da.map_blocks(
         #                normalize_image,
         #                image,

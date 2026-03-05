@@ -35,6 +35,7 @@ imaging_data_variables_and_dims_double_precision = {
     "sky_dirty": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_DIRTY"},
     "sky_model": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_MODEL"},
     "sky_residual": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_RESIDUAL"},
+    "sky": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY"},
     "mask": {"dims": full_dims_lm, "dtype": "<i8", "name": "MASK"},
 }
 
@@ -71,6 +72,7 @@ imaging_data_variables_and_dims_single_precision = {
     "sky_dirty": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_DIRTY"},
     "sky_model": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_MODEL"},
     "sky_residual": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_RESIDUAL"},
+    "sky": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY"},
     "mask": {"dims": full_dims_lm, "dtype": "<i4", "name": "MASK"},
 }
 
@@ -159,5 +161,3 @@ def create_empty_data_variables_on_disk(
         group[dv].attrs["_ARRAY_DIMENSIONS"] = data_variable_definitions[dv]["dims"]
 
     zarr.consolidate_metadata(zarr_store)
-
-
