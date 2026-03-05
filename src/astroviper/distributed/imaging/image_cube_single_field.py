@@ -212,7 +212,7 @@ def image_cube_single_field(
     )
     # Compute cube
     dask_graph = generate_dask_workflow(viper_graph)
-    dask.visualize(dask_graph, filename="cube_imaging.png")
+    #dask.visualize(dask_graph, filename="cube_imaging.png")
     return_dict = dask.compute(dask_graph)[0]
 
     zarr.consolidate_metadata(image_store)
