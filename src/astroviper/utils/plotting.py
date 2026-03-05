@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 import matplotlib.pyplot as plt
-import xarray as xr
 
 
 def generate_astro_plot(
@@ -67,43 +66,3 @@ def generate_astro_plot(
 
     ax.imshow(data.T, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax)
     return fig, ax
-
-
-def plot_correct_orientation(
-    xda: xr.DataArray, horizontal: str = "l", vertical: str = "m", vmin=None, vmax=None
-):
-    """Plot an ``xarray.DataArray`` and invert axes based on coordinate monotonicity.
-
-    Parameters
-    ----------
-    xda : xr.DataArray
-        Two-dimensional array to plot.
-    horizontal : str, optional
-        Name of the horizontal coordinate in ``xda``. Default is ``"l"``.
-    vertical : str, optional
-        Name of the vertical coordinate in ``xda``. Default is ``"m"``.
-    vmin : float or None, optional
-        Lower bound for image normalization. If ``None``, matplotlib chooses automatically.
-    vmax : float or None, optional
-        Upper bound for image normalization. If ``None``, matplotlib chooses automatically.
-
-    Returns
-    -------
-    matplotlib.collections.QuadMesh
-        The plotted pcolormesh object.
-
-    Notes
-    -----
-    This helper only checks coordinate monotonicity for axis inversion. It does
-    not correct row/column versus x/y indexing conventions in raw 2D arrays.
-    """
-    mesh = xda.plot.pcolormesh(
-        x=horizontal, y=vertical, vmin=vmin, vmax=vmax, cmap="viridis"
-    )
-    xvals = xda[horizontal].values
-    if xvals[1] - xvals[0] < 0:
-        mesh.axes.invert_xaxis()
-    yvals = xda[vertical].values
-    if yvals[1] - yvals[0] < 0:
-        mesh.axes.invert_yaxis()
-    return mesh
