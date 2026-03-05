@@ -1,4 +1,4 @@
-from astroviper.core.imaging.calculate_imaging_weights import calculate_imaging_weights
+from astroviper.task.imaging.calculate_imaging_weights import calculate_imaging_weights
 from astroviper.core.imaging.imaging_weighting.briggs_weighting import (
     calculate_briggs_params,
 )
