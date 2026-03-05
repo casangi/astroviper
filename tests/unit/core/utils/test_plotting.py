@@ -6,7 +6,6 @@ from astropy.wcs import WCS
 
 from astroviper.utils.plotting import generate_astro_plot
 
-
 matplotlib.use("Agg", force=True)
 
 
