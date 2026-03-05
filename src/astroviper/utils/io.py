@@ -157,7 +157,9 @@ def create_empty_data_variables_on_disk(
             )
         else:
             sky = group.require_dataset(dv_name, **_kwargs, compressor=compressor)
-
-        group[dv].attrs["_ARRAY_DIMENSIONS"] = data_variable_definitions[dv]["dims"]
+            
+        group[dv_name].attrs["_ARRAY_DIMENSIONS"] = dv_def["dims"]
 
     zarr.consolidate_metadata(zarr_store)
+
+
