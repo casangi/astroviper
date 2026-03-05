@@ -222,7 +222,7 @@ def image_cube_single_field(
 def wrap_image_cube_single_field_node_task(input_params):
     from xradio.image import make_empty_sky_image
     from xradio.measurement_set.load_processing_set import ProcessingSetIterator
-    
+
     image_params = input_params["image_params"]
     img_xds = make_empty_sky_image(
         phase_center=image_params["phase_direction"],
@@ -245,8 +245,10 @@ def wrap_image_cube_single_field_node_task(input_params):
         in_memory = True
     else:
         in_memory = False
-        
-    assert in_memory, "Currently only in_memory is supported for memory_mode is implemented."
+
+    assert (
+        in_memory
+    ), "Currently only in_memory is supported for memory_mode is implemented."
 
     ps_iter = ProcessingSetIterator(
         input_data_store=input_params["input_data_store"],
@@ -256,8 +258,9 @@ def wrap_image_cube_single_field_node_task(input_params):
         load_sub_datasets=False,
         in_memory=in_memory,
     )
-    
+
     return image_cube_single_field_node_task(input_params, ps_iter, img_xds)
+
 
 def combine_return_data_frames(input_data, input_parms):
     import pandas as pd
