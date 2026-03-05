@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Optional, Tuple
 
-import matplotlib.pyplot as plt
 import numpy as np
 
 
@@ -64,6 +63,10 @@ def generate_astro_plot(
 
     if show_world_axes and wcs is None:
         raise ValueError("wcs must be provided when show_world_axes=True.")
+
+    # Import pyplot lazily so callers can set the Matplotlib backend before
+    # this helper is used (important for headless CI/test environments).
+    import matplotlib.pyplot as plt
 
     if show_world_axes:
         fig = plt.figure(figsize=figsize)
