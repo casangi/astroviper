@@ -307,8 +307,8 @@ def _normalize_theta(
 ) -> float:
     """Convert a user-provided angle to the internal math convention in radians.
 
-    "math" is measured from +x toward +y (CCW).
-    "pa"   is astronomical position angle, measured from +y toward +x (North→East).
+    "math" is measured from +x toward +y.
+    "pa"   is astronomical position angle, measured from +y toward +x.
 
     Relation: theta_math = (pi/2) - PA.
     """
@@ -527,9 +527,9 @@ def make_disk(
 
         - ``"auto"`` infers handedness from the 1-D coords. If left-handed
           (``dx * dy < 0``), interpret ``theta`` as position angle (PA, +y→+x).
-          If right-handed, interpret as math angle (+x→+y, CCW).
-        - ``"pa"`` forces position angle interpretation (North→East).
-        - ``"math"`` forces the standard math convention (+x→+y, CCW).
+          If right-handed, interpret as math angle (+x→+y).
+        - ``"pa"`` forces position angle interpretation (+y→+x).
+        - ``"math"`` forces the standard math convention (+x→+y).
     degrees
         If ``True``, ``theta`` is provided in degrees. If ``False``, radians.
 
@@ -664,9 +664,9 @@ def make_gauss2d(
 
         - ``"auto"`` infers handedness from the 1-D coords. If left-handed
           (``dx * dy < 0``), interpret ``theta`` as position angle (PA, +y→+x).
-          If right-handed, interpret as math angle (+x→+y, CCW).
-        - ``"pa"`` forces position angle interpretation (North→East).
-        - ``"math"`` forces the standard math convention (+x→+y, CCW).
+          If right-handed, interpret as math angle (+x→+y).
+        - ``"pa"`` forces position angle interpretation (+y→+x).
+        - ``"math"`` forces the standard math convention (+x→+y).
     degrees
         If ``True``, ``theta`` is provided in degrees. If ``False``, radians.
 
