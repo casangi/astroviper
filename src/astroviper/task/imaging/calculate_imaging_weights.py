@@ -1,4 +1,5 @@
 from time import time
+from tracemalloc import start
 import numpy as np
 from typing import Tuple, Union, Dict
 import numpy as np
@@ -20,14 +21,17 @@ from astroviper.core.imaging.imaging_weighting.briggs_weighting import (
 
 # from graphviper.parameter_checking.check_params import check_sel_params
 from astroviper.utils.check_params import (
-    check_sel_params_ps_xdt,
+    check_sel_params_ps_iter,
 )
 import copy
 
+from xradio.measurement_set.load_processing_set import ProcessingSetIterator
+
+import toolviper.utils.logger as logger
 
 def calculate_imaging_weights(
-    ps_xdt: DataTree,
-    grid_params: Dict,
+    ps_iter: ProcessingSetIterator,
+    img_xds: xr.Dataset,
     imaging_weights_params: Dict,
     sel_params: Dict,
     return_weight_density_grid: bool = False,
@@ -38,23 +42,19 @@ def calculate_imaging_weights(
     """
     Calculate imaging weights for interferometric data using natural or Briggs weighting.
 
-    This function grids per-visibility data weights from a Processing Set (``ps_xdt`` as
+    This function grids per-visibility data weights from a Processing Set (``ps_iter`` as
     an xarray ``DataTree``), applies the chosen weighting scheme (natural or Briggs with
     a specified robust parameter), and degrids the weights back onto the constituent
     MeasurementSet-like datasets in the tree.
 
     Parameters
     ----------
-    ps_xdt : xarray.DataTree
-        Processing Set containing one or more MeasurementSet-like xarray Datasets.
+    ps_iter : ProcessingSetIterator
+        Processing Set Iterator containing one or more MeasurementSet-like xarray Datasets.
         Each Dataset must include the fields referenced by ``sel_params`` and
         ``grid_params`` (e.g., UVW, WEIGHT, FLAG, frequency).
-    grid_params : dict
-        Gridder parameters. Must include:
-            - ``image_size`` : tuple of int
-                UV grid size as ``(n_u, n_v)``.
-            - ``cell_size`` : array-like of float
-                Angular cell size (radians) per UV pixel, typically length 2.
+    img_xds : xarray.Dataset
+        Image xarray Dataset containing image parameters (e.g., image size, cell size).
     imaging_weights_params : dict
         Weighting scheme configuration. Must include:
             - ``weighting`` : {"natural", "briggs"}
@@ -64,7 +64,7 @@ def calculate_imaging_weights(
     sel_params : dict
         Selection parameters for input/output data groups. Defines which columns
         (e.g., weight, uvw, flag) are read and where output imaging weights are stored.
-        Common keys include:
+        Keys include:
             - ``data_group_in_name`` : str, default ``"base"``
                 Name of the input data group.
             - ``overwrite`` : bool, default ``False``
@@ -80,8 +80,6 @@ def calculate_imaging_weights(
 
     Returns
     -------
-    ps_xdt : xarray.DataTree
-        The input Processing Set updated with imaging weights written to each leaf Dataset.
     data_group_out : dict
         Metadata describing the output data group (e.g., names, descriptions, timestamps).
     weight_density_grid : numpy.ndarray, optional
@@ -108,12 +106,13 @@ def calculate_imaging_weights(
 
     Examples
     --------
-    >>> ps_xdt, data_group_out = calculate_imaging_weights(
-    ...     ps_xdt,
+    >>> ps_iter, data_group_out = calculate_imaging_weights(
+    ...     ps_iter,
     ...     grid_params={
     ...         "image_size": (256, 256),
     ...         "cell_size": np.array([-0.1, 0.1]) * np.pi / (180 * 3600),
     ...         "fft_padding": 1.0,
+
     ...     },
     ...     imaging_weights_params={"weighting": "briggs", "robust": 0.5},
     ...     sel_params={"data_group_in_name": "base"},
@@ -127,31 +126,38 @@ def calculate_imaging_weights(
 
     if _imaging_weights_params["weighting"] == "natural":
         _sel_params["overwrite"] = True  # No actual overwrite is occuring.
-        data_group_in, data_group_out = check_sel_params_ps_xdt(
-            ps_xdt,
+        start = time() 
+        data_group_in, data_group_out = check_sel_params_ps_iter(
+            ps_iter,
             _sel_params,
             default_data_group_in_name="base",
             default_data_group_out_name="imaging",
             default_data_group_out_modified={"weight_imaging": "WEIGHT"},
         )
         description = "Data group created for natural imaging weights with ."
+        logger.debug("Time to check sel_params: " + str(time() - start) + " seconds.")
 
         data_group_out_name = data_group_out["data_group_out_name"]
         del data_group_out["data_group_out_name"]
         from datetime import datetime, timezone
 
-        for ms_xdt in ps_xdt.values():
+        start = time() 
+        for ms_xdt in ps_iter:
             now = datetime.now(timezone.utc)
             ms_xdt.data_groups[data_group_out_name] = data_group_out
             ms_xdt.data_groups[data_group_out_name]["date"] = now.isoformat()
             ms_xdt.data_groups[data_group_out_name]["description"] = description
+            logger.debug("Size of ms_xdt " + str(ms_xdt.nbytes / 1e9) + " GB.")
+        data_group_out["data_group_out_name"] = data_group_out_name
+        logger.debug("Time to set up data groups for natural weighting: " + str(time() - start) + " seconds.")
 
-            data_group_out["data_group_out_name"] = data_group_out_name
-
-        return ps_xdt, data_group_out
+        start = time() 
+        ps_iter.reset()  # Reset the iterator to the beginning for downstream tasks.
+        logger.debug("Time to reset ps_iter: " + str(time() - start) + " seconds.")
+        return data_group_out
     else:
-        data_group_in, data_group_out = check_sel_params_ps_xdt(
-            ps_xdt,
+        data_group_in, data_group_out = check_sel_params_ps_iter(
+            ps_iter,
             _sel_params,
             default_data_group_in_name="base",
             default_data_group_out_name="imaging",
@@ -162,25 +168,16 @@ def calculate_imaging_weights(
             + str(_imaging_weights_params["robust"])
         )
 
-    _grid_params = copy.deepcopy(grid_params)
-    assert check_grid_params(
-        _grid_params
-    ), "######### ERROR: grid_params checking failed"
-    _grid_params["image_size_padded"] = _grid_params[
-        "image_size"
-    ]  # do not need to pad since no fft
-
-    _grid_params["n_imag_chan"] = ps_xdt.xr_ps.get_freq_axis().size
-
     # Grid Weights
-    n_uv = _grid_params["image_size_padded"]
-    n_imag_chan = _grid_params["n_imag_chan"]
+    n_uv = np.array([img_xds.sizes["l"], img_xds.sizes["m"]])
+    delta_lm = img_xds.xr_img.get_lm_cell_size()
+    n_imag_chan = img_xds.sizes["frequency"]
     weight_density_grid = np.zeros((n_imag_chan, 1, n_uv[0], n_uv[1]), dtype=np.double)
     # weight_density_grid = np.zeros((n_imag_chan, 1, n_uv[0], n_uv[1]), dtype=np.float32)
     sum_weight = np.zeros((n_imag_chan, 1), dtype=np.double)
 
     # Grid the Weights
-    for ms_xdt in ps_xdt.values():
+    for ms_xdt in ps_iter:
         uvw = ms_xdt[data_group_out["uvw"]].values
         data_weight = ms_xdt[data_group_out["weight"]].values
         data_weight[ms_xdt[data_group_out["flag"]] == 1] = (
@@ -200,8 +197,9 @@ def calculate_imaging_weights(
         freq_chan = ms_xdt.frequency.values
 
         grid_imaging_weights(
-            weight_density_grid, sum_weight, uvw, data_weight, freq_chan, _grid_params
+            weight_density_grid, sum_weight, uvw, data_weight, freq_chan, n_uv, delta_lm
         )
+    ps_iter.reset()  # Reset the iterator to the beginning for downstream tasks.
 
     # Calculate Briggs
     briggs_factors = calculate_briggs_params(
@@ -216,7 +214,7 @@ def calculate_imaging_weights(
     data_group_out_name = data_group_out["data_group_out_name"]
     del data_group_out["data_group_out_name"]
 
-    for ms_xdt in ps_xdt.values():
+    for ms_xdt in ps_iter:
         uvw = ms_xdt[data_group_out["uvw"]].values
         data_weight = ms_xdt[data_group_out["weight"]].values
         data_weight[ms_xdt[data_group_out["flag"]] == 1] = (
@@ -240,7 +238,8 @@ def calculate_imaging_weights(
             data_weight,
             briggs_factors,
             freq_chan,
-            _grid_params,
+            n_uv,
+            delta_lm,
         )
 
         # # Flag data
@@ -269,7 +268,8 @@ def calculate_imaging_weights(
 
         data_group_out["data_group_out_name"] = data_group_out_name
 
+    ps_iter.reset()  # Reset the iterator to the beginning for downstream tasks.
     if return_weight_density_grid:
-        return ps_xdt, data_group_out, weight_density_grid
+        return data_group_out, weight_density_grid
     else:
-        return ps_xdt, data_group_out
+        return data_group_out

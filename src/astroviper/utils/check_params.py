@@ -1,4 +1,5 @@
 import toolviper.utils.logger as logger
+from xradio.measurement_set.load_processing_set import ProcessingSetIterator
 
 
 def check_params(
@@ -190,8 +191,8 @@ def lists_overlap(a, b):
 import xarray as xr
 
 
-def check_sel_params_ps_xdt(
-    ps_xdt: xr.DataTree,
+def check_sel_params_ps_iter(
+    ps_iter: ProcessingSetIterator,
     sel_params: dict,
     default_data_group_in_name: str = None,
     default_data_group_out_name: str = None,
@@ -199,7 +200,7 @@ def check_sel_params_ps_xdt(
 ):
     data_group_in_list = []
     data_group_out_list = []
-    for ms_xdt in ps_xdt.values():
+    for ms_xdt in ps_iter:
         data_group_in, data_group_out = check_sel_params(
             ms_xdt.ds,
             sel_params,
@@ -209,7 +210,7 @@ def check_sel_params_ps_xdt(
         )
         data_group_out_list.append(data_group_out)
         data_group_in_list.append(data_group_in)
-
+    ps_iter.reset()  # Reset the iterator to the beginning for downstream tasks.
     IGNORE_KEYS = {"date", "description"}
 
     def normalize(d):
@@ -233,20 +234,12 @@ def check_sel_params(
     default_data_group_out_name: str = None,
     default_data_group_out_modified: dict = None,
 ):
-    """Check selection parameters for imaging weights calculation.
+    """Check selection parameters.
 
     Parameters
     ----------
     xds : xr.Dataset
         The input dataset.
-    sel_params : dict
-        The selection parameters.
-    default_data_group_in_name : str, optional
-        The default input data group name, by default None
-    default_data_group_out_name : str, optional
-        The default output data group name, by default None
-    default_data_group_out_modified : dict, optional
-        The default modified output data group, by default {}
     sel_params : dict
         The selection parameters.
     default_data_group_in_name : str, optional
@@ -291,7 +284,7 @@ def check_sel_params(
     else:
         assert default_data_group_in_name in xds_data_groups, (
             "Default data group "
-            + default_data_group_in_name
+            + str(default_data_group_in_name)
             + " not found in xds data_groups: "
             + str(xds_data_groups.keys())
         )

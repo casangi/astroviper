@@ -9,7 +9,9 @@ def grid_imaging_weights(
     uvw: np.ndarray,
     data_weight: np.ndarray,
     freq_chan: np.ndarray,
-    grid_parms: dict,
+    # grid_parms: dict,
+    n_uv: list,
+    delta_lm: list,
 ):
     """
     Grid per-visibility *data weights* onto a UV grid.
@@ -36,12 +38,11 @@ def grid_imaging_weights(
     freq_chan : np.ndarray (float64), shape (n_chan,)
         Sky frequencies (Hz) for each visibility channel used to scale
         meters -> wavelengths and to compute UV pixel coordinates.
-    grid_parms : dict
-        Dictionary of gridding parameters with required keys:
-        - ``"image_size"`` : tuple(int, int)
+
+    n_uv : tuple(int, int)
             Target padded image size in pixels along (u, v). This is also
             the UV grid size.
-        - ``"cell_size"`` : tuple(float, float)
+    cell_size : tuple(float, float)
             Pixel scale (Δl, Δm) in radians along the two image axes.
 
     Returns
@@ -68,9 +69,6 @@ def grid_imaging_weights(
 
     n_imag_pol = data_weight.shape[3]
     pol_map = (np.arange(0, n_imag_pol)).astype(int)  # not used by the kernel yet
-
-    n_uv = grid_parms["image_size"]
-    delta_lm = grid_parms["cell_size"]
 
     # Only PP or (PP, QQ) is supported here; adjust if more pols are added later.
     assert data_weight.shape[3] < 3, "Polarization should be PP or PP, QQ."
@@ -212,7 +210,8 @@ def degrid_imaging_weights(
     data_weight,
     briggs_factors,
     freq_chan,
-    grid_parms,
+    n_uv,
+    delta_lm,
 ):
     """
     Sample a UV *imaging weight grid* at each visibility's (u, v) to form
@@ -258,9 +257,6 @@ def degrid_imaging_weights(
 
     # Single-pol degrid by default (extend to >1 if needed).
     pol_map = (np.arange(0, 1)).astype(int)
-
-    n_uv = grid_parms["image_size"]
-    delta_lm = grid_parms["cell_size"]
 
     # Output array mirrors data_weight shape.
     imaging_weight = np.zeros(data_weight.shape, dtype=np.double)
