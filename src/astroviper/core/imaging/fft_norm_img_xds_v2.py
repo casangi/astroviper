@@ -13,27 +13,8 @@ from astroviper.core.imaging.check_imaging_parameters import (
 )
 import copy
 
-#_OVERSAMPLING_CORR_CACHE = {}
-
-
-# def _get_oversampling_correcting_func(image_shape, oversampling):
-#     key = (image_shape, oversampling[0], oversampling[1])
-#     if key not in _OVERSAMPLING_CORR_CACHE:
-#         image_center = np.array(image_shape) // 2
-#         sincx = np.sinc(
-#             np.arange(-image_center[0], image_shape[0] - image_center[0])
-#             / (image_shape[0] * oversampling[0])
-#         )
-#         sincy = np.sinc(
-#             np.arange(-image_center[1], image_shape[1] - image_center[1])
-#             / (image_shape[1] * oversampling[1])
-#         )
-#         _OVERSAMPLING_CORR_CACHE[key] = np.dot(sincx[:, None], sincy[None, :])
-#     return _OVERSAMPLING_CORR_CACHE[key]
 
 def _get_oversampling_correcting_func(image_shape, oversampling):
-    key = (image_shape, oversampling[0], oversampling[1])
-    
     image_center = np.array(image_shape) // 2
     sincx = np.sinc(
         np.arange(-image_center[0], image_shape[0] - image_center[0])
@@ -43,14 +24,52 @@ def _get_oversampling_correcting_func(image_shape, oversampling):
         np.arange(-image_center[1], image_shape[1] - image_center[1])
         / (image_shape[1] * oversampling[1])
     )
-    _OVERSAMPLING_CORR = np.dot(sincx[:, None], sincy[None, :])
-    return _OVERSAMPLING_CORR
+    return np.dot(sincx[:, None], sincy[None, :])
 
 
-from memory_profiler import profile
+def _ifft_remove_padding(raw_grid, image_size):
+    """Memory-efficient IFFT + crop, processing one 2D (l,m) slice at a time.
 
-@profile()
-def fft_norm_img_xds(img_xds, gcf_xds, grid_params, norm_params, sel_params):
+    Instead of FFT-ing the full 5D padded array (which transiently allocates a
+    second padded-size complex array), we process each (time, freq, pol) plane
+    individually:
+      - only one 2D complex padded plane is ever in memory alongside the output
+      - the output is pre-allocated at the final (unpadded) size
+
+    This trades a small amount of extra compute (Python loop overhead) for a
+    large reduction in peak memory.
+    """
+    import time
+    import toolviper.utils.logger as logger
+
+    start = time.time()
+
+    padded_h, padded_w = raw_grid.shape[-2], raw_grid.shape[-1]
+    scale = padded_h * padded_w
+
+    image_size = np.asarray(image_size)
+    start_l = padded_h // 2 - image_size[0] // 2
+    end_l = start_l + image_size[0]
+    start_m = padded_w // 2 - image_size[1] // 2
+    end_m = start_m + image_size[1]
+
+    T, F, P = raw_grid.shape[0], raw_grid.shape[1], raw_grid.shape[2]
+    output = np.empty((T, F, P, image_size[0], image_size[1]), dtype=np.float64)
+
+    for t in range(T):
+        for f in range(F):
+            for p in range(P):
+                # All temporaries live only for this iteration (one 2D padded plane).
+                tmp = np.fft.fftshift(
+                    np.fft.ifft2(np.fft.ifftshift(raw_grid[t, f, p]))
+                ).real
+                output[t, f, p] = tmp[start_l:end_l, start_m:end_m] * scale
+
+    logger.debug("Time for ifft_uv_to_lm: " + str(time.time() - start))
+    return output
+
+
+def fft_norm_img_xds(img_xds, oversampling, grid_params, norm_params, sel_params):
     import toolviper.utils.logger as logger
     _sel_params = copy.deepcopy(sel_params)
     _grid_params = copy.deepcopy(grid_params)
@@ -108,34 +127,29 @@ def fft_norm_img_xds(img_xds, gcf_xds, grid_params, norm_params, sel_params):
             img_xds[grid_var_name] = xr.DataArray(np.empty(0))
 
             if (data_variable == "aperture") and ("APERTURE" in img_xds):
-                # print('1.',data_group_out["aperture_grid_sum_weight"],img_xds[data_group_in[data_variable]].shape,_grid_params['image_size'])
-                image = remove_padding(
-                    ifft_uv_to_lm(raw_grid),
-                    _grid_params["image_size"],
+                # _ifft_remove_padding processes slice-by-slice to avoid a
+                # second full-size padded array in memory.
+                image = _ifft_remove_padding(
+                    raw_grid, _grid_params["image_size"]
                 ).real
                 del raw_grid
                 sum_weight_copy = copy.deepcopy(
                     img_xds[data_group_out["aperture_normalization"]].values
                 )
-                # print("%%%%%%%%%%%%%Sum of weight", sum_weight_copy,data_group_out[sum_of_weight_pair[data_variable]])
                 ##Don't mutate inputs, therefore do deep copy (https://docs.dask.org/en/latest/delayed-best-practices.html).
                 sum_weight_copy[sum_weight_copy == 0] = 1
                 image = np.sqrt(np.abs(image / sum_weight_copy[:, :, None, None]))
                 if _norm_params["pb_limit"] > 0:
                     image[image < _norm_params["pb_limit"]] = np.nan  # 0.0
             else:
-                image = remove_padding(
-                    ifft_uv_to_lm(raw_grid),
-                    _grid_params["image_size"],
-                )
+                # Slice-by-slice FFT + crop avoids holding the full padded
+                # 5D FFT result in memory alongside raw_grid.
+                image = _ifft_remove_padding(raw_grid, _grid_params["image_size"])
                 del raw_grid
                 sum_weight = img_xds[
                     data_group_out[sum_of_weight_pair[data_variable]]
                 ].values
-                # print("%%%%%%%%%%%%%Sum of weight", sum_weight,data_group_out[sum_of_weight_pair[data_variable]])
                 primary_beam = img_xds[data_group_out["primary_beam"]].values
-                oversampling = gcf_xds.oversampling
-                ps_correcting_image = gcf_xds.PS_CORR_IMAGE.values
                 direction = "forward"
 
                 if data_variable == "uv_sampling":
@@ -147,7 +161,6 @@ def fft_norm_img_xds(img_xds, gcf_xds, grid_params, norm_params, sel_params):
                     sum_weight,
                     primary_beam,
                     oversampling,
-                    ps_correcting_image,
                     direction,
                     norm_params=_norm_params,
                 )
@@ -166,7 +179,6 @@ def ifft_uv_to_lm(image):
     ).real * (image_shape[-1] * image_shape[-2])
     logger.debug("Time for ifft_uv_to_lm: " + str(time.time() - start))
     return image_sky
-    # dafft.fftshift(dafft.ifft2(dafft.ifftshift(grids_and_sum_weights[0], axes=(0, 1)), axes=(0, 1)), axes=(0, 1))
 
 
 def fft_lm_to_uv(image):
@@ -176,16 +188,11 @@ def fft_lm_to_uv(image):
 
 
 def remove_padding(image_dask_array, image_size):
-    # Check that image_size < image_size
-    # Check parameters
-
     import numpy as np
 
     image_size_padded = np.array(image_dask_array.shape[-2:])
     start_xy = image_size_padded // 2 - image_size // 2
     end_xy = start_xy + image_size
-
-    # print("start end",image_size_padded,start_xy,end_xy)
 
     image_dask_array = image_dask_array[
         ..., start_xy[0] : end_xy[0], start_xy[1] : end_xy[1]
@@ -198,57 +205,68 @@ def normalize(
     sum_weight,
     primary_beam,
     oversampling,
-    ps_correcting_image,
     direction,
     norm_params,
 ):
     """
-    PB normalization on the cubes
+    PB normalization on the cubes.
 
-    direction : 'forward''reverse'
-    norm_type : 'flatnoise','flatsky','common','pbsquare'
+    ps_correcting_image and oversampling_correcting_func are both cheap to
+    compute (~0.3 s and ~0.5 s respectively) and are now generated on-the-fly
+    inside this function rather than being passed as pre-allocated arrays.
+    They are combined into a single 2D factor before touching the large image
+    arrays so no extra (T, F, P, l, m) temporaries are created for them.
 
-    Multiply and/or divide by PB models, accounting for masks/regions.
-
-    #See https://casa.nrao.edu/casadocs/casa-5.6.0/imaging/synthesis-imaging/data-weighting Normalizationm Steps
-    #Standard gridder (only ps term) devide by sum of weight and ps correcting image.
-    #https://library.nrao.edu/public/memos/evla/EVLAM_198.pdf
-
-    #
-
+    direction : 'forward' | 'reverse'
+    norm_type : 'flat_noise' | 'flat_sky' | 'none'
     """
-    import dask.array as da
     import numpy as np
     import copy
     import toolviper.utils.logger as logger
     import time
+    from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import (
+        create_prolate_spheroidal_kernel,
+    )
 
     norm_type = norm_params["norm_type"]
 
     def normalize_image(
         image, sum_weights, normalizing_image, oversampling, correct_oversampling
     ):
-        sum_weights_copy = copy.deepcopy(
-            sum_weights
-        )  ##Don't mutate inputs, therefore do deep copy (https://docs.dask.org/en/latest/delayed-best-practices.html).
+        sum_weights_copy = copy.deepcopy(sum_weights)
         sum_weights_copy[sum_weights_copy == 0] = 1
 
         if correct_oversampling:
             image_size = tuple(image.shape[2:])
+
             start = time.time()
             oversampling_correcting_func = _get_oversampling_correcting_func(
                 image_size, oversampling
-            )  # Last section for sinc correcting function https://library.nrao.edu/public/memos/evla/EVLAM_198.pdf
-            logger.debug("Time to get oversampling correcting func: " + str(time.time() - start))
-
-            # print(image.shape,sum_weights_copy.shape,oversampling_correcting_func.shape,oversampling_correcting_func[None,None,:,:].shape,normalizing_image.shape)
-
-            normalized_image = (image / sum_weights_copy) / (
-                oversampling_correcting_func[None, None, :, :] * normalizing_image
+            )
+            logger.debug(
+                "Time to get oversampling correcting func: "
+                + str(time.time() - start)
             )
 
-            # print(sum_weights_copy,oversampling_correcting_func[500,360,None,None])
-            # normalized_image = (image / sum_weights_copy ) / (oversampling_correcting_func[:,:,None,None])
+            start = time.time()
+            _, ps_corr_image = create_prolate_spheroidal_kernel(
+                100, 7, n_uv=list(image_size)
+            )
+            logger.debug(
+                "Calculate ps correcting image: " + str(time.time() - start)
+            )
+
+            # Combine both 2D correction factors into a single 2D array before
+            # broadcasting against the large (T, F, P, l, m) normalizing_image.
+            # This avoids allocating an extra (T, F, P, l, m) temporary.
+            combined_2d_correction = oversampling_correcting_func * ps_corr_image
+
+            # Apply combined correction in-place on normalizing_image.
+            # normalizing_image is already a local copy (primary_beam or pb^2),
+            # so mutation is safe.
+            normalizing_image *= combined_2d_correction
+
+            normalized_image = (image / sum_weights_copy) / normalizing_image
         else:
             normalized_image = (image / sum_weights_copy) / normalizing_image
         return normalized_image
@@ -256,8 +274,11 @@ def normalize(
     if direction == "forward":
         correct_oversampling = True
         if norm_type == "flat_noise":
-            # Divide the raw image by sqrt(.weight) so that the input to the minor cycle represents the product of the sky and PB. The noise is 'flat' across the region covered by each PB.
-            normalizing_image = primary_beam  * ps_correcting_image
+            # Divide the raw image by sqrt(.weight) so that the input to the
+            # minor cycle represents the product of the sky and PB. The noise
+            # is 'flat' across the region covered by each PB.
+            # primary_beam is read-only; make a copy so in-place *= is safe.
+            normalizing_image = primary_beam.copy()
             normalized_image = normalize_image(
                 image,
                 sum_weight[:, :, None, None],
@@ -266,12 +287,10 @@ def normalize(
                 correct_oversampling,
             )
         elif norm_type == "flat_sky":
-            #  Divide the raw image by .weight so that the input to the minor cycle represents only the sky. The noise is higher in the outer regions of the primary beam where the sensitivity is low.
-            normalizing_image = primary_beam * primary_beam  * ps_correcting_image
-
-            # print(sel_params['data_group_in']['weight_pb'])
-            # print('$%$%',img_dataset[sel_params['data_group_in']['weight_pb']].data.compute())
-
+            # Divide the raw image by .weight so that the input to the minor
+            # cycle represents only the sky. Noise is higher in the outer
+            # regions of the primary beam where sensitivity is low.
+            normalizing_image = primary_beam * primary_beam
             normalized_image = normalize_image(
                 image,
                 sum_weight[:, :, None, None],
@@ -279,28 +298,11 @@ def normalize(
                 oversampling,
                 correct_oversampling,
             )
-
-            # print(normalized_image.compute())
         elif norm_type == "none":
             pass
-            # print('in normalize none ')
-            # No normalization after gridding and FFT. The minor cycle sees the sky times pb square
-        #            normalizing_image = ps_correcting_image[None, None, None, :, :]
-        #            normalized_image = da.map_blocks(
-        #                normalize_image,
-        #                image,
-        #                sum_weight[:, :, None, None],
-        #                normalizing_image,
-        #                oversampling,
-        #                correct_oversampling,
-        #            )
-        # normalized_image = image
 
         if norm_params["pb_limit"] > 0:
-            normalized_image[primary_beam < norm_params["pb_limit"]] = np.nan  # 0.0
-
-        # if norm_params["single_precision"]:
-        #     normalized_image = (normalized_image.astype(np.float32)).astype(np.float64)
+            normalized_image[primary_beam < norm_params["pb_limit"]] = np.nan
 
         return normalized_image
     elif direction == "reverse":

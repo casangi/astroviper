@@ -1,4 +1,5 @@
 from time import time
+from tracemalloc import start
 import numpy as np
 from typing import Tuple, Union, Dict
 import numpy as np
@@ -26,6 +27,7 @@ import copy
 
 from xradio.measurement_set.load_processing_set import ProcessingSetIterator
 
+import toolviper.utils.logger as logger
 
 def calculate_imaging_weights(
     ps_iter: ProcessingSetIterator,
@@ -124,6 +126,7 @@ def calculate_imaging_weights(
 
     if _imaging_weights_params["weighting"] == "natural":
         _sel_params["overwrite"] = True  # No actual overwrite is occuring.
+        start = time() 
         data_group_in, data_group_out = check_sel_params_ps_iter(
             ps_iter,
             _sel_params,
@@ -132,19 +135,25 @@ def calculate_imaging_weights(
             default_data_group_out_modified={"weight_imaging": "WEIGHT"},
         )
         description = "Data group created for natural imaging weights with ."
+        logger.debug("Time to check sel_params: " + str(time() - start) + " seconds.")
 
         data_group_out_name = data_group_out["data_group_out_name"]
         del data_group_out["data_group_out_name"]
         from datetime import datetime, timezone
 
+        start = time() 
         for ms_xdt in ps_iter:
             now = datetime.now(timezone.utc)
             ms_xdt.data_groups[data_group_out_name] = data_group_out
             ms_xdt.data_groups[data_group_out_name]["date"] = now.isoformat()
             ms_xdt.data_groups[data_group_out_name]["description"] = description
+            logger.debug("Size of ms_xdt " + str(ms_xdt.nbytes / 1e9) + " GB.")
         data_group_out["data_group_out_name"] = data_group_out_name
+        logger.debug("Time to set up data groups for natural weighting: " + str(time() - start) + " seconds.")
 
+        start = time() 
         ps_iter.reset()  # Reset the iterator to the beginning for downstream tasks.
+        logger.debug("Time to reset ps_iter: " + str(time() - start) + " seconds.")
         return data_group_out
     else:
         data_group_in, data_group_out = check_sel_params_ps_iter(
