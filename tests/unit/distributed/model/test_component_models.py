@@ -35,11 +35,11 @@ def _base_grid(
 class TestAngleModes(unittest.TestCase):
     def test_auto_uses_pa_on_left_handed_grid(self):
         base = _base_grid(reverse_x=True)  # left-handed: dx * dy < 0
-        out_pa = make_gauss2d(
+        out_auto = make_gauss2d(
             base,
             a=2.355,
-            b=2.355,
-            theta=45,  # input in degrees
+            b=4.71,
+            theta=30,  # input in degrees
             degrees=True,
             angle="auto",  # should choose PA on left-handed grids
             x0=0.0,
@@ -51,8 +51,8 @@ class TestAngleModes(unittest.TestCase):
         out_forced_pa = make_gauss2d(
             base,
             a=2.355,
-            b=2.355,
-            theta=45,
+            b=4.71,
+            theta=30,
             degrees=True,
             angle="pa",  # force PA explicitly
             x0=0.0,
@@ -61,9 +61,26 @@ class TestAngleModes(unittest.TestCase):
             add=False,
             output="xarray",
         )
+        out_forced_math = make_gauss2d(
+            base,
+            a=2.355,
+            b=4.71,
+            theta=30,
+            degrees=True,
+            angle="math",  # explicit math should differ for anisotropic Gaussian
+            x0=0.0,
+            y0=0.0,
+            peak=10.0,
+            add=False,
+            output="xarray",
+        )
         self.assertTrue(
-            np.allclose(out_pa.values, out_forced_pa.values),
+            np.allclose(out_auto.values, out_forced_pa.values),
             "angle='auto' should act like 'pa' on left-handed grids",
+        )
+        self.assertFalse(
+            np.allclose(out_auto.values, out_forced_math.values),
+            "angle='auto' should not map to 'math' on left-handed grids",
         )
 
     def test_auto_uses_math_on_right_handed_grid(self):
@@ -95,6 +112,53 @@ class TestAngleModes(unittest.TestCase):
         self.assertTrue(
             np.allclose(out_math.values, out_forced_math.values),
             "angle='auto' should act like 'math' on right-handed grids",
+        )
+
+    def test_disk_auto_uses_pa_on_left_handed_grid(self):
+        base = _base_grid(reverse_x=True)  # left-handed: dx * dy < 0
+        out_auto = make_disk(
+            base,
+            a=3.0,
+            b=1.5,
+            theta=np.deg2rad(30),
+            angle="auto",
+            x0=1.0,
+            y0=-2.0,
+            height=2.0,
+            add=False,
+            output="xarray",
+        )
+        out_pa = make_disk(
+            base,
+            a=3.0,
+            b=1.5,
+            theta=np.deg2rad(30),
+            angle="pa",
+            x0=1.0,
+            y0=-2.0,
+            height=2.0,
+            add=False,
+            output="xarray",
+        )
+        out_math = make_disk(
+            base,
+            a=3.0,
+            b=1.5,
+            theta=np.deg2rad(30),
+            angle="math",
+            x0=1.0,
+            y0=-2.0,
+            height=2.0,
+            add=False,
+            output="xarray",
+        )
+        self.assertTrue(
+            np.allclose(out_auto.values, out_pa.values),
+            "make_disk(angle='auto') should act like 'pa' on left-handed grids",
+        )
+        self.assertFalse(
+            np.allclose(out_auto.values, out_math.values),
+            "make_disk(angle='auto') should not act like 'math' on left-handed grids",
         )
 
     def test_degrees_flag(self):

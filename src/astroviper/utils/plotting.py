@@ -1,29 +1,78 @@
-import xarray as xr
+"""Utilities for plotting image-like arrays with astronomy-friendly orientation."""
+
+from __future__ import annotations
+
+from typing import Optional, Tuple
+
+import numpy as np
 
 
-def plot_correct_orientation(
-    xda: xr.DataArray, horizontal: str = "l", vertical: str = "m", vmin=None, vmax=None
+def generate_astro_plot(
+    data,
+    wcs=None,
+    show_world_axes: bool = False,
+    cmap: str = "magma",
+    figsize: Tuple[float, float] = (8.0, 8.0),
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
 ):
-    """
-    Plot the DataArray with correct orientation. By default, matplotlib will always
-    plot the axes with increasing values from left to right and bottom to top, no matter
-    the orientation of the data. This function checks the values of the horizontal and
-    vertical coordinates and inverts the axes if necessary.
+    """Plot a 2D image array using astronomy-style pixel orientation.
+
     Parameters
     ----------
-    xda : xr.DataArray
-        The DataArray to plot.
-    horizontal : str, optional
-        The name of the horizontal coordinate variable, by default "l".
-    vertical : str, optional
-        The name of the vertical coordinate variable, by default "m".
+    data : numpy.ndarray
+        2D image array with shape ``(nx, ny)`` in the package's internal convention.
+    wcs : astropy.wcs.WCS or None, optional
+        Celestial WCS associated with ``data``.
+        Supported choices are:
+        - ``None``: no WCS context; valid only when ``show_world_axes=False``.
+        - ``astropy.wcs.WCS``: used when ``show_world_axes=True`` to render RA/Dec
+          axes with correct handedness.
+        Default is ``None``.
+    show_world_axes : bool, optional
+        Axis mode for the output plot.
+        Supported choices are:
+        - ``False``: regular matplotlib pixel axes.
+        - ``True``: WCSAxes world-coordinate axes (e.g., RA/Dec).
+        Default is ``False``.
+    cmap : str, optional
+        Matplotlib colormap name. Default is ``"magma"``.
+    figsize : tuple[float, float], optional
+        Figure size in inches as ``(width, height)``. Default is ``(8.0, 8.0)``.
+    vmin : float or None, optional
+        Lower bound for image normalization. If ``None``, matplotlib chooses automatically.
+    vmax : float or None, optional
+        Upper bound for image normalization. If ``None``, matplotlib chooses automatically.
+
+    Returns
+    -------
+    tuple[matplotlib.figure.Figure, matplotlib.axes.Axes]
+        Figure and axes containing the rendered image.
+
+    Notes
+    -----
+    ``imshow`` expects image memory order ``[row, col] == [y, x]``. This function
+    transposes the input ``data`` before plotting so a source written to
+    ``data[x, y]`` is displayed at pixel ``(x, y)`` in the rendered image.
     """
-    m = xda.plot.pcolormesh(
-        x=horizontal, y=vertical, vmin=vmin, vmax=vmax, cmap="viridis"
-    )
-    xvals = xda[horizontal].values
-    if xvals[1] - xvals[0] < 0:
-        m.axes.invert_xaxis()
-    yvals = xda[vertical].values
-    if yvals[1] - yvals[0] < 0:
-        m.axes.invert_yaxis()
+    data_array = np.asarray(data)
+    if data_array.ndim != 2:
+        raise ValueError(
+            "data must be a 2D array-like object with shape (nx, ny) for plotting."
+        )
+
+    if show_world_axes and wcs is None:
+        raise ValueError("wcs must be provided when show_world_axes=True.")
+
+    # Import pyplot lazily so callers can set the Matplotlib backend before
+    # this helper is used (important for headless CI/test environments).
+    import matplotlib.pyplot as plt
+
+    if show_world_axes:
+        fig = plt.figure(figsize=figsize)
+        ax = fig.add_subplot(1, 1, 1, projection=wcs)
+    else:
+        fig, ax = plt.subplots(figsize=figsize)
+
+    ax.imshow(data_array.T, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax)
+    return fig, ax
