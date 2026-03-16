@@ -450,7 +450,11 @@ def _infer_xy_axes(data: ArrayLike) -> Tuple[int, int]:
       are interpreted as having shape ``(nx, ny, ...)`` where axis 0 (length ``nx``)
       is the x-axis and axis 1 (length ``ny``) is the y-axis, so CRTF pixel
       coordinates ``(x, y)`` map directly to indices along these axes.
-    - This helper assumes 2D image-like inputs, consistent with current CRTF support.
+    - This helper is compatible with N-D inputs: it selects which two axes represent
+      x and y, while any additional axes (e.g., channels, polarization, time) are
+      left unchanged. When combined with :func:`_build_pixel_coordinate_grids`, the
+      x/y coordinate grids are broadcast across these extra axes so the resulting
+      CRTF mask is applied identically along non-(x, y) axes.
     """
     if isinstance(data, xr.DataArray) and "x" in data.dims and "y" in data.dims:
         return data.dims.index("x"), data.dims.index("y")
