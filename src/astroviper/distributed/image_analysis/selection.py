@@ -454,6 +454,10 @@ def _infer_xy_axes(data: ArrayLike) -> Tuple[int, int]:
     """
     if isinstance(data, xr.DataArray) and "x" in data.dims and "y" in data.dims:
         return data.dims.index("x"), data.dims.index("y")
+    if isinstance(data, xr.DataArray) and "l" in data.dims and "m" in data.dims:
+        # TODO just a place holder as a reminder. will need to be updated when
+        # full 5-D xradio image cubes are used.
+        return data.dims.index("l"), data.dims.index("m")
     return 0, 1
 
 
