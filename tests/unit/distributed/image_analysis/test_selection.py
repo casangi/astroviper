@@ -752,13 +752,13 @@ class TestReturnKinds:
               arr = np.asarray(mask, dtype=bool)
           dims/coords derived from numpy `data` fallback.
         """
-        ny, nx = 6, 7
-        data = np.zeros((ny, nx), dtype=float)  # numpy data → dims fallback ("x","y")
-        mask_np = np.zeros((ny, nx), dtype=int)
+        nx, ny = 7, 6
+        data = np.zeros((nx, ny), dtype=float)  # numpy data → dims fallback ("x","y")
+        mask_np = np.zeros((nx, ny), dtype=int)
         mask_np[2:4, 3:5] = 1
         out = select_mask(data, select=mask_np, return_kind="dataarray-numpy")
         assert isinstance(out, xr.DataArray)
-        assert out.dtype == bool and out.shape == (ny, nx)
+        assert out.dtype == bool and out.shape == (nx, ny)
         # numpy-backed (no dask chunks)
         assert not hasattr(out.data, "chunks")
         # NumPy fallback uses the public image-axis convention.
