@@ -446,7 +446,10 @@ def _infer_xy_axes(data: ArrayLike) -> Tuple[int, int]:
     - For ``xarray.DataArray`` with named dimensions containing both ``"x"`` and
       ``"y"``, those named dimensions define the axis mapping.
     - For NumPy arrays, or DataArrays without both names, axes default to
-      ``x_axis=0`` and ``y_axis=1``.
+      ``x_axis=0`` and ``y_axis=1``. This implies that unnamed image-like inputs
+      are interpreted as having shape ``(nx, ny, ...)`` where axis 0 (length ``nx``)
+      is the x-axis and axis 1 (length ``ny``) is the y-axis, so CRTF pixel
+      coordinates ``(x, y)`` map directly to indices along these axes.
     - This helper assumes 2D image-like inputs, consistent with current CRTF support.
     """
     if isinstance(data, xr.DataArray) and "x" in data.dims and "y" in data.dims:
