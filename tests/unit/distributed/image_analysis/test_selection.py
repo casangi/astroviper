@@ -120,9 +120,9 @@ class TestCRTFBasics:
         # Pixel count uses inclusive bounds: (20-10+1) * (140-100+1).
         assert int(mask.values.sum()) == (20 - 10 + 1) * (140 - 100 + 1)
         # In-mask coordinate in (x, y) convention should be selected.
-        assert bool(mask.sel(x=15, y=120))
+        assert mask.sel(x=15, y=120).item()
         # Coordinate that would be selected only under swapped interpretation is excluded.
-        assert not bool(mask.sel(x=120, y=15))
+        assert not mask.sel(x=120, y=15).item()
 
 
 # ------------------------- CRTF combination (+ / -) -------------------------
