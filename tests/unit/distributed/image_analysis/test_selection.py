@@ -516,11 +516,11 @@ class TestPolygon:
         # Interior points (well away from edges)
         inside_pts = [(12, 12), (20, 20), (28, 28)]  # (x, y)
         for x, y in inside_pts:
-            assert bool(m.sel(x=x, y=y)) is True
+            assert m.sel(x=x, y=y).item() is True
         # Outside points
         outside_pts = [(9, 9), (31, 31), (40, 10)]  # (x, y)
         for x, y in outside_pts:
-            assert bool(m.sel(x=x, y=y)) is False
+            assert m.sel(x=x, y=y).item() is False
 
     def test_concave_arrow_shape_includes_and_excludes_expected_points(self) -> None:
         da = make_image(80, 100)
@@ -534,12 +534,12 @@ class TestPolygon:
         m = select_mask(da, select=poly)
         # Clearly inside near the arrow head
         for x, y in [(65, 30), (55, 30), (52, 35)]:
-            assert bool(m.sel(x=x, y=y)) is True
+            assert m.sel(x=x, y=y).item() is True
         # Note: points exactly on the polygon edges (e.g., x=50 vertical edge)
         # Clearly outside in the concavity and far away
         # Note: points near the rectangle interior can be inside; avoid ambiguous edge/near-edge picks.
         for x, y in [(45, 17), (5, 5), (90, 10)]:
-            assert bool(m.sel(x=x, y=y)) is False
+            assert m.sel(x=x, y=y).item() is False
 
     def test_polygon_with_float_vertices_behaves_sensibly(self) -> None:
         da = make_image(60, 60)
@@ -550,10 +550,10 @@ class TestPolygon:
         m = select_mask(da, select=poly)
         # Pixels strictly inside should be True
         for x, y in [(12, 12), (20, 20), (29, 29)]:
-            assert bool(m.sel(x=x, y=y)) is True
+            assert m.sel(x=x, y=y).item() is True
         # Pixels well outside should be False
         for x, y in [(9, 9), (31, 31)]:
-            assert bool(m.sel(x=x, y=y)) is False
+            assert m.sel(x=x, y=y).item() is False
 
     def test_polygon_file_roundtrip_matches_inline(self, tmp_path: Path) -> None:
         da = make_image(50, 50)
