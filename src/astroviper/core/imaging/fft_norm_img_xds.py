@@ -13,7 +13,7 @@ from astroviper.core.imaging.check_imaging_parameters import (
 )
 import copy
 
-#_OVERSAMPLING_CORR_CACHE = {}
+# _OVERSAMPLING_CORR_CACHE = {}
 
 
 # def _get_oversampling_correcting_func(image_shape, oversampling):
@@ -31,9 +31,10 @@ import copy
 #         _OVERSAMPLING_CORR_CACHE[key] = np.dot(sincx[:, None], sincy[None, :])
 #     return _OVERSAMPLING_CORR_CACHE[key]
 
+
 def _get_oversampling_correcting_func(image_shape, oversampling):
     key = (image_shape, oversampling[0], oversampling[1])
-    
+
     image_center = np.array(image_shape) // 2
     sincx = np.sinc(
         np.arange(-image_center[0], image_shape[0] - image_center[0])
@@ -49,9 +50,11 @@ def _get_oversampling_correcting_func(image_shape, oversampling):
 
 from memory_profiler import profile
 
+
 @profile()
 def fft_norm_img_xds(img_xds, gcf_xds, grid_params, norm_params, sel_params):
     import toolviper.utils.logger as logger
+
     _sel_params = copy.deepcopy(sel_params)
     _grid_params = copy.deepcopy(grid_params)
     assert check_grid_params(
@@ -159,6 +162,7 @@ def fft_norm_img_xds(img_xds, gcf_xds, grid_params, norm_params, sel_params):
 def ifft_uv_to_lm(image):
     import time
     import toolviper.utils.logger as logger
+
     start = time.time()
     image_shape = image.shape
     image_sky = np.fft.fftshift(
@@ -239,7 +243,9 @@ def normalize(
             oversampling_correcting_func = _get_oversampling_correcting_func(
                 image_size, oversampling
             )  # Last section for sinc correcting function https://library.nrao.edu/public/memos/evla/EVLAM_198.pdf
-            logger.debug("Time to get oversampling correcting func: " + str(time.time() - start))
+            logger.debug(
+                "Time to get oversampling correcting func: " + str(time.time() - start)
+            )
 
             # print(image.shape,sum_weights_copy.shape,oversampling_correcting_func.shape,oversampling_correcting_func[None,None,:,:].shape,normalizing_image.shape)
 
@@ -257,7 +263,7 @@ def normalize(
         correct_oversampling = True
         if norm_type == "flat_noise":
             # Divide the raw image by sqrt(.weight) so that the input to the minor cycle represents the product of the sky and PB. The noise is 'flat' across the region covered by each PB.
-            normalizing_image = primary_beam  * ps_correcting_image
+            normalizing_image = primary_beam * ps_correcting_image
             normalized_image = normalize_image(
                 image,
                 sum_weight[:, :, None, None],
@@ -267,7 +273,7 @@ def normalize(
             )
         elif norm_type == "flat_sky":
             #  Divide the raw image by .weight so that the input to the minor cycle represents only the sky. The noise is higher in the outer regions of the primary beam where the sensitivity is low.
-            normalizing_image = primary_beam * primary_beam  * ps_correcting_image
+            normalizing_image = primary_beam * primary_beam * ps_correcting_image
 
             # print(sel_params['data_group_in']['weight_pb'])
             # print('$%$%',img_dataset[sel_params['data_group_in']['weight_pb']].data.compute())
