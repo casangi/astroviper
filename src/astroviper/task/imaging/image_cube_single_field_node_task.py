@@ -1,8 +1,5 @@
-
-
 # _PS_CORR_IMAGE_CACHE = {}
 import tracemalloc
-
 
 # def _get_ps_corr_image(n_l, n_m):
 #     key = (n_l, n_m)
@@ -66,21 +63,23 @@ def image_cube_single_field_node_task(input_params, ps_iter, img_xds):
     # Explicitly release large arrays so the synchronous dask scheduler doesn't
     # hold them alive until the entire compute() call returns.
     import gc
+
     img_xds = None
     ps_iter = None
     gc.collect()
-    
+
     import ctypes
+
     ctypes.CDLL("libc.so.6").malloc_trim(0)
-    logger.debug('Trimmed all the data')
+    logger.debug("Trimmed all the data")
 
     # Before task 1 returns, take a snapshot
-    if not hasattr(image_cube_single_field_node_task, '_snap1'):
+    if not hasattr(image_cube_single_field_node_task, "_snap1"):
         tracemalloc.start()
         image_cube_single_field_node_task._snap1 = tracemalloc.take_snapshot()
     else:
         snap2 = tracemalloc.take_snapshot()
-        top_stats = snap2.compare_to(image_cube_single_field_node_task._snap1, 'lineno')
+        top_stats = snap2.compare_to(image_cube_single_field_node_task._snap1, "lineno")
         print("=== Memory added between task 1 and task 2 ===")
         for stat in top_stats[:15]:
             print(stat)
@@ -161,7 +160,8 @@ def image_cube_single_field_node_task(input_params, ps_iter, img_xds):
 
 from memory_profiler import profile
 
-#@profile(precision=1)
+
+# @profile(precision=1)
 def residual_cycle_cube_single_field_node_task(
     ps_iter, img_xds, input_params, is_n_iter_0
 ):
@@ -178,7 +178,7 @@ def residual_cycle_cube_single_field_node_task(
     is_n_iter_0 : _type_
         _description_
     """
-    import toolviper.utils.logger as logger   
+    import toolviper.utils.logger as logger
     import time
 
     start_0 = time.time()
@@ -198,6 +198,7 @@ def residual_cycle_cube_single_field_node_task(
     from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import (
         create_prolate_spheroidal_kernel_1D,
     )
+
     logger.debug("Processing chunk " + str(input_params["task_id"]))
 
     T_compute = 0.0
@@ -228,7 +229,7 @@ def residual_cycle_cube_single_field_node_task(
         sel_params={"data_group_in_name": ps_data_group_name},
     )
     T_weights = T_weights + time.time() - start_4
-    
+
     logger.debug("Calculate imaging weights " + str(time.time() - start_4))
 
     # print("$$$$$$$$$$", data_group_out, "***************")
@@ -278,7 +279,6 @@ def residual_cycle_cube_single_field_node_task(
     # print("img_xds ", img_xds.data_vars.keys)
     # print("*************")
 
-    
     import xarray as xr
 
     gcf_xds = xr.Dataset()
@@ -312,7 +312,7 @@ def residual_cycle_cube_single_field_node_task(
     )
     logger.debug("Calculate primary beam " + str(time.time() - start))
 
-    #ps_corr_image = _get_ps_corr_image(img_xds.sizes["l"], img_xds.sizes["m"])
+    # ps_corr_image = _get_ps_corr_image(img_xds.sizes["l"], img_xds.sizes["m"])
     start = time.time()
     # from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import create_prolate_spheroidal_kernel
     # _, ps_corr_image = create_prolate_spheroidal_kernel(100, 7, n_uv=[img_xds.sizes["l"], img_xds.sizes["m"]])
@@ -332,34 +332,20 @@ def residual_cycle_cube_single_field_node_task(
     #         "data_group_out_name": img_data_group_name,
     #     },
     # )
-    fft_norm_img_xds(img_xds, [100, 100], grid_params=input_params["image_params"], norm_params={}, sel_params={
+    fft_norm_img_xds(
+        img_xds,
+        [100, 100],
+        grid_params=input_params["image_params"],
+        norm_params={},
+        sel_params={
             "data_group_in_name": img_data_group_name,
             "data_group_out_name": img_data_group_name,
-        })
+        },
+    )
 
     T_fft = time.time() - start_9
     logger.debug("9.  fft norm " + str(time.time() - start_9))
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
+
     #####################################
 
     # import time

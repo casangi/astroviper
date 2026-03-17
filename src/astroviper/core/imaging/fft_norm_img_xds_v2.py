@@ -71,6 +71,7 @@ def _ifft_remove_padding(raw_grid, image_size):
 
 def fft_norm_img_xds(img_xds, oversampling, grid_params, norm_params, sel_params):
     import toolviper.utils.logger as logger
+
     _sel_params = copy.deepcopy(sel_params)
     _grid_params = copy.deepcopy(grid_params)
     assert check_grid_params(
@@ -129,9 +130,7 @@ def fft_norm_img_xds(img_xds, oversampling, grid_params, norm_params, sel_params
             if (data_variable == "aperture") and ("APERTURE" in img_xds):
                 # _ifft_remove_padding processes slice-by-slice to avoid a
                 # second full-size padded array in memory.
-                image = _ifft_remove_padding(
-                    raw_grid, _grid_params["image_size"]
-                ).real
+                image = _ifft_remove_padding(raw_grid, _grid_params["image_size"]).real
                 del raw_grid
                 sum_weight_copy = copy.deepcopy(
                     img_xds[data_group_out["aperture_normalization"]].values
@@ -172,6 +171,7 @@ def fft_norm_img_xds(img_xds, oversampling, grid_params, norm_params, sel_params
 def ifft_uv_to_lm(image):
     import time
     import toolviper.utils.logger as logger
+
     start = time.time()
     image_shape = image.shape
     image_sky = np.fft.fftshift(
@@ -244,17 +244,14 @@ def normalize(
                 image_size, oversampling
             )
             logger.debug(
-                "Time to get oversampling correcting func: "
-                + str(time.time() - start)
+                "Time to get oversampling correcting func: " + str(time.time() - start)
             )
 
             start = time.time()
             _, ps_corr_image = create_prolate_spheroidal_kernel(
                 100, 7, n_uv=list(image_size)
             )
-            logger.debug(
-                "Calculate ps correcting image: " + str(time.time() - start)
-            )
+            logger.debug("Calculate ps correcting image: " + str(time.time() - start))
 
             # Combine both 2D correction factors into a single 2D array before
             # broadcasting against the large (T, F, P, l, m) normalizing_image.
