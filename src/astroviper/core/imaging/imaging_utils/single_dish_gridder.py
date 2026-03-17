@@ -3,52 +3,6 @@ import numpy as np
 from numba import jit
 
 
-@jit(nopython=True)
-def disk_grid_points(radius, dtype=np.float64):
-    ""
-    disk_x = []
-    disk_y = []
-
-    radius2 = radius * radius
-    coords_range = np.arange(0, math.floor(radius) + 1)
-    for x in coords_range:
-        x2 = x * x
-        y2_max = radius2 - x2
-        for y in coords_range:
-            y2 = y * y
-            if y2 > y2_max:
-                break
-            if x == 0:
-                if y == 0:
-                    disk_x.extend([0])
-                    disk_y.extend([0])
-                else:
-                    disk_x.extend([0,  0])
-                    disk_y.extend([y, -y])
-            else:
-                if y == 0:
-                    disk_x.extend([x,  -x])
-                    disk_y.extend([0,   0])
-                else:
-                    disk_x.extend([x,  x, -x, -x])
-                    disk_y.extend([y, -y,  y, -y])
-
-    n_points = len(disk_x)
-    points_coords = np.empty((n_points, 2), dtype=dtype)
-    points_coords[:, 0] = disk_x
-    points_coords[:, 1] = disk_y
-
-    return points_coords
-
-
-@jit(nopython=True, inline='always')
-def on_image(x, y, n_x, n_y):
-    return (
-        (0 <= x < n_x) and
-        (0 <= y < n_y)
-    )
-
-
 @jit(nopython=True, cache=True)
 def single_dish_gridder_jit(
             # Inputs
