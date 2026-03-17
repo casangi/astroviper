@@ -5,18 +5,18 @@ from numba import jit
 
 @jit(nopython=True, cache=True)
 def single_dish_gridder_jit(
-            # Inputs
-            samples_values=None,
-            samples_weights=None,
-            samples_coords=None,
-            # Outputs
-            grid_values=None,
-            grid_weights=None,
-            # Convolution Parameters
-            cut_radius=None,
-            sampling=None,
-            convolution_array=None
-        ):
+    # Inputs
+    samples_values=None,
+    samples_weights=None,
+    samples_coords=None,
+    # Outputs
+    grid_values=None,
+    grid_weights=None,
+    # Convolution Parameters
+    cut_radius=None,
+    sampling=None,
+    convolution_array=None,
+):
     """
 
     Parameters
@@ -109,9 +109,9 @@ def single_dish_gridder_jit(
                         if sample_weight == 0:
                             continue
                         weighted_value = np.conjugate(sample_value) * sample_weight
-                        grid_values[
-                            neighbor_x, neighbor_y, chan_index, pol_index
-                        ] += convolution_weight * weighted_value
-                        grid_weights[
-                            neighbor_x, neighbor_y, chan_index, pol_index
-                        ] += convolution_weight * sample_weight
+                        grid_values[neighbor_x, neighbor_y, chan_index, pol_index] += (
+                            convolution_weight * weighted_value
+                        )
+                        grid_weights[neighbor_x, neighbor_y, chan_index, pol_index] += (
+                            convolution_weight * sample_weight
+                        )
