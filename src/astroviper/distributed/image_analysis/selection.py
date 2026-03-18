@@ -400,18 +400,10 @@ def _crtf_pixel_mask(data: ArrayLike, text: str, *, lazy: bool = False) -> Array
 
     Combination semantics per line: leading '+' (OR, default) or '-' (NOT/subtract).
     """
-    ny, nx = data.shape if not isinstance(data, xr.DataArray) else data.shape
-    # Build index grids in either NumPy (eager) or Dask (lazy) for efficient masking
-    if lazy:
-        cx = da.arange(nx, dtype=float)
-        ry = da.arange(ny, dtype=float)
-        X, Y = da.meshgrid(cx, ry, indexing="xy")
-    else:
-        c = np.arange(nx, dtype=float)
-        r = np.arange(ny, dtype=float)
-        X, Y = np.meshgrid(c, r)
-
-    acc = da.zeros((ny, nx), dtype=bool) if lazy else np.zeros((ny, nx), dtype=bool)
+    shape = data.shape if isinstance(data, xr.DataArray) else np.shape(data)
+    x_axis, y_axis = _infer_xy_axes(data)
+    X, Y = _build_pixel_coordinate_grids(shape, x_axis, y_axis, lazy=lazy)
+    acc = da.zeros(shape, dtype=bool) if lazy else np.zeros(shape, dtype=bool)
     lines = [
         ln.strip()
         for ln in re.split(r"[\n;]+", text)
@@ -430,10 +422,94 @@ def _crtf_pixel_mask(data: ArrayLike, text: str, *, lazy: bool = False) -> Array
         else:
             acc = acc & (~mask)
     return (
-        xr.DataArray(acc, dims=getattr(data, "dims", ("y", "x")))
+        xr.DataArray(acc, dims=getattr(data, "dims", ("x", "y")))
         if isinstance(data, xr.DataArray)
         else acc
     )
+
+
+def _infer_xy_axes(data: ArrayLike) -> Tuple[int, int]:
+    """Infer the axis indices corresponding to x and y pixel coordinates.
+
+    Parameters
+    ----------
+    data : numpy.ndarray or xarray.DataArray
+        Input image data used as the shape template for CRTF rasterization.
+
+    Returns
+    -------
+    tuple[int, int]
+        Two integers ``(x_axis, y_axis)`` giving the axis index of x then y.
+
+    Notes
+    -----
+    - For ``xarray.DataArray`` with named dimensions containing both ``"x"`` and
+      ``"y"``, those named dimensions define the axis mapping.
+    - For NumPy arrays, or DataArrays without both names, axes default to
+      ``x_axis=0`` and ``y_axis=1``. This implies that unnamed image-like inputs
+      are interpreted as having shape ``(nx, ny, ...)`` where axis 0 (length ``nx``)
+      is the x-axis and axis 1 (length ``ny``) is the y-axis, so CRTF pixel
+      coordinates ``(x, y)`` map directly to indices along these axes.
+    - This helper is compatible with N-D inputs: it selects which two axes represent
+      x and y, while any additional axes (e.g., channels, polarization, time) are
+      left unchanged. When combined with :func:`_build_pixel_coordinate_grids`, the
+      x/y coordinate grids are broadcast across these extra axes so the resulting
+      CRTF mask is applied identically along non-(x, y) axes.
+    """
+    if isinstance(data, xr.DataArray) and "x" in data.dims and "y" in data.dims:
+        return data.dims.index("x"), data.dims.index("y")
+    if isinstance(data, xr.DataArray) and "l" in data.dims and "m" in data.dims:
+        # TODO just a place holder as a reminder. will need to be updated when
+        # full 5-D xradio image cubes are used.
+        return data.dims.index("l"), data.dims.index("m")
+    return 0, 1
+
+
+def _build_pixel_coordinate_grids(
+    shape: Tuple[int, ...], x_axis: int, y_axis: int, *, lazy: bool
+) -> Tuple[np.ndarray | da.Array, np.ndarray | da.Array]:
+    """Build broadcasted x/y pixel-index grids aligned to ``shape``.
+
+    Parameters
+    ----------
+    shape : tuple[int, ...]
+        Output grid shape.
+    x_axis : int
+        Axis index in ``shape`` corresponding to x coordinates.
+    y_axis : int
+        Axis index in ``shape`` corresponding to y coordinates.
+    lazy : bool
+        If ``True``, build Dask arrays; otherwise build NumPy arrays.
+
+    Returns
+    -------
+    tuple[numpy.ndarray | dask.array.Array, numpy.ndarray | dask.array.Array]
+        ``(X, Y)`` coordinate grids, each with full ``shape``.
+
+    Notes
+    -----
+    The function creates 1D index vectors and broadcasts them to full-image grids
+    so CRTF expressions always interpret values as ``(x, y)`` regardless of axis order.
+    """
+    if lazy:
+        x1d = da.arange(shape[x_axis], dtype=float)
+        y1d = da.arange(shape[y_axis], dtype=float)
+        x_view = da.reshape(
+            x1d, tuple(shape[x_axis] if i == x_axis else 1 for i in range(len(shape)))
+        )
+        y_view = da.reshape(
+            y1d, tuple(shape[y_axis] if i == y_axis else 1 for i in range(len(shape)))
+        )
+        return da.broadcast_to(x_view, shape), da.broadcast_to(y_view, shape)
+    x1d = np.arange(shape[x_axis], dtype=float)
+    y1d = np.arange(shape[y_axis], dtype=float)
+    x_view = x1d.reshape(
+        tuple(shape[x_axis] if i == x_axis else 1 for i in range(len(shape)))
+    )
+    y_view = y1d.reshape(
+        tuple(shape[y_axis] if i == y_axis else 1 for i in range(len(shape)))
+    )
+    return np.broadcast_to(x_view, shape), np.broadcast_to(y_view, shape)
 
 
 def _split_shape_payload(line: str) -> tuple[str, str]:
@@ -684,7 +760,7 @@ def _coerce_return_kind(
                 arr = arr.astype(bool).compute()
             da_out = xr.DataArray(
                 np.asarray(arr, dtype=bool),
-                dims=getattr(mask, "dims", getattr(data, "dims", ("y", "x"))),
+                dims=getattr(mask, "dims", getattr(data, "dims", ("x", "y"))),
                 coords=getattr(mask, "coords", getattr(data, "coords", None)),
             )
             if creation is not None:
@@ -697,9 +773,9 @@ def _coerce_return_kind(
         else:
             arr = np.asarray(mask, dtype=bool)
         dims = (
-            getattr(data, "dims", ("y", "x"))
+            getattr(data, "dims", ("x", "y"))
             if isinstance(data, xr.DataArray)
-            else ("y", "x")
+            else ("x", "y")
         )
         coords = (
             getattr(data, "coords", None) if isinstance(data, xr.DataArray) else None
@@ -736,9 +812,9 @@ def _coerce_return_kind(
         chunks = _infer_chunks_like(data, np.shape(mask), dask_chunks)
         darr = da.from_array(np.asarray(mask, dtype=bool), chunks=chunks)
     dims = (
-        getattr(data, "dims", ("y", "x"))
+        getattr(data, "dims", ("x", "y"))
         if isinstance(data, xr.DataArray)
-        else ("y", "x")
+        else ("x", "y")
     )
     coords = getattr(data, "coords", None) if isinstance(data, xr.DataArray) else None
     da_out = xr.DataArray(darr, dims=dims, coords=coords)

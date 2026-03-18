@@ -100,6 +100,30 @@ class TestCRTFBasics:
         assert isinstance(m, xr.DataArray)
         assert m.dtype == bool and int(m.values.sum()) > 0
 
+    def test_box_respects_named_xy_dims_when_dim_order_is_x_then_y(self) -> None:
+        """
+        Ensure CRTF interprets values as (x, y) even when DataArray dims are ('x', 'y').
+
+        This regression covers notebook usage where the underlying array order is
+        shape=(nx, ny) with named dimensions x then y.
+        """
+        nx, ny = 160, 180
+        img = xr.DataArray(
+            np.zeros((nx, ny), dtype=float),
+            dims=("x", "y"),
+            coords={"x": np.arange(nx), "y": np.arange(ny)},
+            name="img_xy",
+        )
+        sel = "box[[10pix,100pix],[20pix,140pix]]"
+        mask = select_mask(img, select=sel)
+
+        # Pixel count uses inclusive bounds: (20-10+1) * (140-100+1).
+        assert int(mask.values.sum()) == (20 - 10 + 1) * (140 - 100 + 1)
+        # In-mask coordinate in (x, y) convention should be selected.
+        assert mask.sel(x=15, y=120).compute().item()
+        # Coordinate that would be selected only under swapped interpretation is excluded.
+        assert not mask.sel(x=120, y=15).compute().item()
+
 
 # ------------------------- CRTF combination (+ / -) -------------------------
 
@@ -492,11 +516,11 @@ class TestPolygon:
         # Interior points (well away from edges)
         inside_pts = [(12, 12), (20, 20), (28, 28)]  # (x, y)
         for x, y in inside_pts:
-            assert bool(m.values[y, x]) is True
+            assert m.sel(x=x, y=y).compute().item() is True
         # Outside points
-        outside_pts = [(9, 9), (31, 31), (40, 10)]
+        outside_pts = [(9, 9), (31, 31), (40, 10)]  # (x, y)
         for x, y in outside_pts:
-            assert bool(m.values[y, x]) is False
+            assert m.sel(x=x, y=y).compute().item() is False
 
     def test_concave_arrow_shape_includes_and_excludes_expected_points(self) -> None:
         da = make_image(80, 100)
@@ -510,12 +534,12 @@ class TestPolygon:
         m = select_mask(da, select=poly)
         # Clearly inside near the arrow head
         for x, y in [(65, 30), (55, 30), (52, 35)]:
-            assert bool(m.values[y, x]) is True
+            assert m.sel(x=x, y=y).compute().item() is True
         # Note: points exactly on the polygon edges (e.g., x=50 vertical edge)
         # Clearly outside in the concavity and far away
         # Note: points near the rectangle interior can be inside; avoid ambiguous edge/near-edge picks.
         for x, y in [(45, 17), (5, 5), (90, 10)]:
-            assert bool(m.values[y, x]) is False
+            assert m.sel(x=x, y=y).compute().item() is False
 
     def test_polygon_with_float_vertices_behaves_sensibly(self) -> None:
         da = make_image(60, 60)
@@ -526,10 +550,10 @@ class TestPolygon:
         m = select_mask(da, select=poly)
         # Pixels strictly inside should be True
         for x, y in [(12, 12), (20, 20), (29, 29)]:
-            assert bool(m.values[y, x]) is True
+            assert m.sel(x=x, y=y).compute().item() is True
         # Pixels well outside should be False
         for x, y in [(9, 9), (31, 31)]:
-            assert bool(m.values[y, x]) is False
+            assert m.sel(x=x, y=y).compute().item() is False
 
     def test_polygon_file_roundtrip_matches_inline(self, tmp_path: Path) -> None:
         da = make_image(50, 50)
@@ -728,17 +752,17 @@ class TestReturnKinds:
               arr = np.asarray(mask, dtype=bool)
           dims/coords derived from numpy `data` fallback.
         """
-        ny, nx = 6, 7
-        data = np.zeros((ny, nx), dtype=float)  # numpy data → dims fallback ("y","x")
-        mask_np = np.zeros((ny, nx), dtype=int)
+        nx, ny = 7, 6
+        data = np.zeros((nx, ny), dtype=float)  # numpy data → dims fallback ("x","y")
+        mask_np = np.zeros((nx, ny), dtype=int)
         mask_np[2:4, 3:5] = 1
         out = select_mask(data, select=mask_np, return_kind="dataarray-numpy")
         assert isinstance(out, xr.DataArray)
-        assert out.dtype == bool and out.shape == (ny, nx)
+        assert out.dtype == bool and out.shape == (nx, ny)
         # numpy-backed (no dask chunks)
         assert not hasattr(out.data, "chunks")
-        # dims fallback
-        assert out.dims == ("y", "x")
+        # NumPy fallback uses the public image-axis convention.
+        assert out.dims == ("x", "y")
         np.testing.assert_array_equal(out.values, mask_np.astype(bool))
 
     def test_dataarray_numpy_from_xarray_dask_mask_xarray_data_computes(self) -> None:
@@ -881,7 +905,7 @@ class TestReturnKinds:
         # Validate return object and attached creation attribute
         assert isinstance(out, xr.DataArray)
         assert out.dtype == bool and out.shape == (ny, nx)
-        assert out.dims == ("y", "x") and not hasattr(out.data, "chunks")
+        assert out.dims == ("x", "y") and not hasattr(out.data, "chunks")
         assert out.attrs.get("creation") == hint
 
 
