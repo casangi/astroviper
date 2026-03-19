@@ -84,7 +84,7 @@ def _coerce_to_xda(
     x_vals = np.asarray(coords[x_coord])
     y_vals = np.asarray(coords[y_coord])
 
-    H, W = data.shape
+    W, H = data.shape
     if y_vals.shape[0] != H or x_vals.shape[0] != W:
         raise ValueError(
             f"Coordinate lengths must match array shape: "
@@ -93,7 +93,7 @@ def _coerce_to_xda(
         )
 
     if dims is None:
-        dims = (y_coord, x_coord)
+        dims = (x_coord, y_coord)
 
     return xr.DataArray(data, coords={y_coord: y_vals, x_coord: x_vals}, dims=dims)
 

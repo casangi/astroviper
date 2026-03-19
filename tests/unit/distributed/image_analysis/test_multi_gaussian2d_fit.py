@@ -247,6 +247,29 @@ class TestInputs:
             )
 
 
+class TestPublishedPlaneDims:
+    def test_model_and_residual_are_published_in_x_y_order(self) -> None:
+        """Published model/residual planes should use the public (x, y) convention."""
+        ny, nx = 20, 24
+        y, x = np.mgrid[0:ny, 0:nx]
+        z = 0.1 + np.exp(-((x - 11.0) ** 2 + (y - 8.0) ** 2) / (2 * 2.0**2))
+        da = xr.DataArray(z, dims=("y", "x"))
+        ds = fit_multi_gaussian2d(
+            da,
+            n_components=1,
+            initial_guesses=np.array([[1.0, 11.0, 8.0, 2.0, 2.0, 0.0]], float),
+            coord_type="pixel",
+            return_model=True,
+            return_residual=True,
+            initial_is_fwhm=False,
+        )
+
+        assert ds["model"].dims == ("x", "y")
+        assert ds["residual"].dims == ("x", "y")
+        assert ds["model"].shape == (nx, ny)
+        assert ds["residual"].shape == (nx, ny)
+
+
 # ------------------------- bounds / dims / API validation -------------------------
 
 
@@ -1323,6 +1346,38 @@ class TestNumPyFitting:  # (unittest.TestCase):
         except Exception:
             pass
 
+    def test_plot_components_aligns_residual_to_spatially_subsetted_data(self) -> None:
+        """Residual plotting should use the same x/y selection window as the displayed data."""
+        ny, nx = 48, 64
+        x = np.linspace(-80.0, 80.0, nx, dtype=float)
+        y = np.linspace(-60.0, 30.0, ny, dtype=float)
+        X, Y = np.meshgrid(x, y)
+        Z = 0.1 + 2.0 * np.exp(-((X - 10.0) ** 2) / (2 * 8.0**2) - ((Y + 15.0) ** 2) / (2 * 5.0**2))
+        img = xr.DataArray(Z, dims=("y", "x"), coords={"x": x, "y": y})
+
+        ds = fit_multi_gaussian2d(
+            img,
+            n_components=1,
+            initial_guesses=np.array([[2.0, 10.0, -15.0, 8.0, 5.0, 0.0]], float),
+            initial_is_fwhm=False,
+            return_model=False,
+            return_residual=True,
+        )
+
+        cropped = img.sel(x=slice(-30.0, 30.0), y=slice(-40.0, 0.0))
+        ret = mg.plot_components(
+            cropped,
+            ds,
+            dims=("x", "y"),
+            show_residual=True,
+            fwhm=True,
+            show=False,
+        )
+
+        fig = ret[0] if isinstance(ret, tuple) else ret
+        assert isinstance(fig, matplotlib.figure.Figure)
+        plt.close(fig)
+
     # ----------------------- Pixel→World interpolation coverage -----------------------
 
     def test_pixel_fit_interpolates_world_centers_and_propagates_errors_ascending(
@@ -2117,9 +2172,9 @@ class TestCoordsForNdarrayInput:
                 coords=(np.arange(nx, dtype=float),),
             )
 
-    def test_numpy_input_coords_tuple_happy_path_returns_y1d_x1d(self) -> None:
+    def test_numpy_input_coords_tuple_happy_path_returns_x1d_y1d(self) -> None:
         """
-        NumPy input with coords=(x1d, y1d) should be accepted and returned (y1d, x1d).
+        NumPy input with coords=(x1d, y1d) should be accepted and returned (x1d, y1d).
         Covers the success path that converts and validates coords, then returns them.
         """
         ny, nx = 7, 9
@@ -2130,7 +2185,7 @@ class TestCoordsForNdarrayInput:
         # Provide non-trivial 1-D coordinates (not pixel indices) to exercise the branch
         x1d = np.linspace(-2.5, 1.5, nx, dtype=float)
         y1d = np.linspace(10.0, 12.0, ny, dtype=float)
-        y_out, x_out = mg._extract_1d_coords_for_fit(
+        x_out, y_out = mg._extract_1d_coords_for_fit(
             original_input=original,
             da_tr=da_tr,
             coord_type="world",  # ignored for NumPy input
@@ -2138,8 +2193,8 @@ class TestCoordsForNdarrayInput:
             dim_y="y",
             dim_x="x",
         )
-        assert np.allclose(y_out, y1d)
         assert np.allclose(x_out, x1d)
+        assert np.allclose(y_out, y1d)
 
     def test_numpy_input_coords_tuple_wrong_lengths_raise(self) -> None:
         """
@@ -2934,3 +2989,117 @@ class TestChooseThetaPublicAPI:
             # Implementation emits a RuntimeWarning; accept any warning mentioning "Missing theta".
             assert any("Missing theta" in str(m.message) for m in w)
         plt.close("all")
+
+    def test_choose_theta_uses_bare_published_theta_without_warning(self) -> None:
+        """
+        Bare theta_{pixel,world} variables published by the fitter should be enough
+        for plotting, even if the explicit *_math/*_pa variants are absent.
+        """
+        comp = ("component",)
+        ds = xr.Dataset(
+            data_vars=dict(
+                x0_pixel=xr.DataArray([10.0], dims=comp),
+                y0_pixel=xr.DataArray([12.0], dims=comp),
+                fwhm_major_pixel=xr.DataArray([3.0], dims=comp),
+                fwhm_minor_pixel=xr.DataArray([2.0], dims=comp),
+                theta_pixel=xr.DataArray([0.30], dims=comp),
+                theta_pixel_err=xr.DataArray([0.01], dims=comp),
+                amplitude=xr.DataArray([1.0], dims=comp),
+                offset=xr.DataArray(0.0),
+                success=xr.DataArray(True),
+            )
+        )
+        img = xr.DataArray(np.zeros((12, 16), float), dims=("y", "x"))
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            mg.plot_components(img, ds, dims=("y", "x"), angle="pa", show=False)
+            assert not any("Missing theta" in str(m.message) for m in w)
+        plt.close("all")
+
+
+class TestThetaOutputsPublished:
+    def test_fit_publishes_theta_aliases_and_explicit_conventions(self) -> None:
+        """
+        Public fit results should expose bare theta aliases plus explicit math/PA
+        variables and matching uncertainty variables in both pixel and world frames.
+        """
+        ny, nx = 64, 80
+        x = np.linspace(-40.0, 40.0, nx, dtype=float)
+        y = np.linspace(-30.0, 30.0, ny, dtype=float)
+        X, Y = np.meshgrid(x, y)
+        theta_math_true = 0.4
+        ct, st = np.cos(theta_math_true), np.sin(theta_math_true)
+        Xc = X - 8.0
+        Yc = Y + 5.0
+        Xr = Xc * ct + Yc * st
+        Yr = -Xc * st + Yc * ct
+        Z = 0.2 + 3.0 * np.exp(-(Xr**2) / (2 * 6.0**2) - (Yr**2) / (2 * 3.0**2))
+        da = xr.DataArray(Z, dims=("y", "x"), coords={"x": x, "y": y})
+
+        ds_pa = fit_multi_gaussian2d(
+            da,
+            n_components=1,
+            initial_guesses=np.array([[3.0, 8.0, -5.0, 6.0, 3.0, 0.4]], float),
+            angle="pa",
+            initial_is_fwhm=False,
+            return_model=False,
+            return_residual=False,
+        )
+
+        for name in (
+            "theta_pixel",
+            "theta_pixel_err",
+            "theta_pixel_math",
+            "theta_pixel_math_err",
+            "theta_pixel_pa",
+            "theta_pixel_pa_err",
+            "theta_world",
+            "theta_world_err",
+            "theta_world_math",
+            "theta_world_math_err",
+            "theta_world_pa",
+            "theta_world_pa_err",
+        ):
+            assert name in ds_pa
+
+        assert np.isclose(
+            ds_pa["theta_pixel"].item(), ds_pa["theta_pixel_pa"].item(), atol=1e-10
+        )
+        assert np.isclose(
+            ds_pa["theta_world"].item(), ds_pa["theta_world_pa"].item(), atol=1e-10
+        )
+        assert np.isclose(
+            ds_pa["theta_pixel_err"].item(),
+            ds_pa["theta_pixel_pa_err"].item(),
+            atol=1e-10,
+        )
+        assert np.isclose(
+            ds_pa["theta_world_err"].item(),
+            ds_pa["theta_world_pa_err"].item(),
+            atol=1e-10,
+        )
+        assert np.isclose(
+            ds_pa["theta_pixel_pa"].item(),
+            np.pi / 2 - ds_pa["theta_pixel_math"].item(),
+            atol=1e-6,
+        )
+
+        ds_math = fit_multi_gaussian2d(
+            da,
+            n_components=1,
+            initial_guesses=np.array([[3.0, 8.0, -5.0, 6.0, 3.0, 0.4]], float),
+            angle="math",
+            initial_is_fwhm=False,
+            return_model=False,
+            return_residual=False,
+        )
+        assert np.isclose(
+            ds_math["theta_pixel"].item(),
+            ds_math["theta_pixel_math"].item(),
+            atol=1e-10,
+        )
+        assert np.isclose(
+            ds_math["theta_world"].item(),
+            ds_math["theta_world_math"].item(),
+            atol=1e-10,
+        )
