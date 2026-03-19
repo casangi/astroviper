@@ -26,7 +26,40 @@ def _gauss2d_component(
     th: float,
 ) -> np.ndarray:
     """
-    Elliptical rotated 2D Gaussian without offset; used as a building block.
+    Evaluate one rotated elliptical Gaussian component on a 2-D grid.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Two-dimensional array of x-coordinate values for the evaluation grid.
+    Y : np.ndarray
+        Two-dimensional array of y-coordinate values for the evaluation grid.
+    amp : float
+        Peak amplitude of the Gaussian component above the shared offset.
+    x0 : float
+        Component center along the x axis, in the same coordinate system as ``X``.
+    y0 : float
+        Component center along the y axis, in the same coordinate system as ``Y``.
+    sx : float
+        Gaussian sigma along the intrinsic x-like principal axis. Must be positive.
+    sy : float
+        Gaussian sigma along the intrinsic y-like principal axis. Must be positive.
+    th : float
+        Rotation angle in radians, interpreted in the internal math convention
+        from +x toward +y.
+
+    Returns
+    -------
+    np.ndarray
+        Array with the same shape as ``X`` and ``Y`` containing the component value
+        at each grid position.
+
+    Notes
+    -----
+    The function does not add a constant background term. ``X`` and ``Y`` are
+    assumed to be shape-compatible 2-D grids representing an astronomy image plane
+    with x treated as the horizontal/image-column axis and y as the vertical/image-row
+    axis.
     """
     ct, st = np.cos(th), np.sin(th)
     x = X - x0
@@ -42,10 +75,46 @@ _FWHM2SIG = 1.0 / _SIG2FWHM
 
 
 def _fwhm_from_sigma(sigma):
+    """
+    Convert Gaussian sigma values to full width at half maximum.
+
+    Parameters
+    ----------
+    sigma : array-like
+        Scalar or array of Gaussian sigma values.
+
+    Returns
+    -------
+    np.ndarray
+        Values converted to FWHM using the standard Gaussian relation.
+
+    Notes
+    -----
+    No positivity check is applied here; callers are expected to pass physically
+    meaningful widths.
+    """
     return _SIG2FWHM * np.asarray(sigma)
 
 
 def _sigma_from_fwhm(fwhm):
+    """
+    Convert full width at half maximum values to Gaussian sigma.
+
+    Parameters
+    ----------
+    fwhm : array-like
+        Scalar or array of FWHM values.
+
+    Returns
+    -------
+    np.ndarray
+        Values converted to sigma using the standard Gaussian relation.
+
+    Notes
+    -----
+    No positivity check is applied here; callers are expected to pass physically
+    meaningful widths.
+    """
     return _FWHM2SIG * np.asarray(fwhm)
 
 
@@ -62,8 +131,35 @@ def _pack_params(
     th: np.ndarray,
 ) -> np.ndarray:
     """
-    Pack shared offset and per-component parameters into a 1-D vector:
-    [offset, amp1,x01,y01,sx1,sy1,th1, ..., ampN,x0N,y0N,sxN,syN,thN]
+    Pack shared and per-component Gaussian parameters into the optimizer layout.
+
+    Parameters
+    ----------
+    offset : float
+        Shared constant background term for the full model.
+    amps : np.ndarray
+        Per-component amplitudes.
+    x0 : np.ndarray
+        Per-component x centers.
+    y0 : np.ndarray
+        Per-component y centers.
+    sx : np.ndarray
+        Per-component sigma values along the intrinsic x-like principal axis.
+    sy : np.ndarray
+        Per-component sigma values along the intrinsic y-like principal axis.
+    th : np.ndarray
+        Per-component rotation angles in radians.
+
+    Returns
+    -------
+    np.ndarray
+        One-dimensional parameter vector with layout
+        ``[offset, amp1, x01, y01, sx1, sy1, th1, ..., ampN, x0N, y0N, sxN, syN, thN]``.
+
+    Notes
+    -----
+    All per-component arrays are assumed to have the same length ``N`` and already
+    use the internal x-before-y parameter convention.
     """
     n = int(amps.size)
     out = [offset]
@@ -78,7 +174,25 @@ def _unpack_params(
     float, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
 ]:
     """
-    Inverse of _pack_params.
+    Unpack a packed optimizer parameter vector into component arrays.
+
+    Parameters
+    ----------
+    params : np.ndarray
+        One-dimensional parameter vector in the layout produced by
+        :func:`_pack_params`.
+    n : int
+        Number of Gaussian components encoded in ``params``.
+
+    Returns
+    -------
+    tuple
+        Tuple ``(offset, amps, x0, y0, sx, sy, th)`` where ``offset`` is a scalar
+        and the remaining entries are length-``n`` arrays.
+
+    Notes
+    -----
+    The function assumes ``params`` contains exactly ``1 + 6 * n`` numeric values.
     """
     offset = float(params[0])
     comps = np.asarray(params[1:], dtype=float).reshape(n, 6)
@@ -101,7 +215,28 @@ def _multi_gaussian2d_sum(
     n: int,
 ) -> np.ndarray:
     """
-    Sum of N elliptical Gaussians plus a shared constant offset.
+    Evaluate the full multi-component Gaussian model on a 2-D grid.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Two-dimensional x-coordinate grid.
+    Y : np.ndarray
+        Two-dimensional y-coordinate grid.
+    params : np.ndarray
+        Packed parameter vector in the format produced by :func:`_pack_params`.
+    n : int
+        Number of Gaussian components encoded in ``params``.
+
+    Returns
+    -------
+    np.ndarray
+        Model image consisting of the shared offset plus the sum of all components.
+
+    Notes
+    -----
+    ``X`` and ``Y`` are assumed to be shape-compatible 2-D arrays describing the
+    same image plane.
     """
     offset, amps, x0, y0, sx, sy, th = _unpack_params(params, n)
     model = np.full_like(X, float(offset), dtype=float)
@@ -116,7 +251,27 @@ def _multi_model_flat(
     n: int,
 ) -> np.ndarray:
     """
-    Flattened wrapper for curve_fit. xy = (x_flat, y_flat); returns z_flat.
+    Evaluate the packed multi-Gaussian model on flattened coordinate vectors.
+
+    Parameters
+    ----------
+    xy : tuple[np.ndarray, np.ndarray]
+        Tuple ``(x_flat, y_flat)`` containing one-dimensional coordinate arrays for
+        the sampled pixels passed to ``scipy.optimize.curve_fit``.
+    *params : float
+        Packed model parameters in the same order as :func:`_pack_params`.
+    n : int
+        Number of Gaussian components represented by ``params``.
+
+    Returns
+    -------
+    np.ndarray
+        One-dimensional model values corresponding to ``xy``.
+
+    Notes
+    -----
+    This helper avoids reconstructing a 2-D image grid during optimization. The
+    coordinate order is explicitly x first, y second.
     """
     x_flat, y_flat = xy
     # Recreate shaped grids for evaluation; they must be same flat length
@@ -146,9 +301,27 @@ def _greedy_peak_seeds(
     z: np.ndarray, n: int, excl_radius: int = 5
 ) -> List[Tuple[int, int, float]]:
     """
-    Very simple N-peak detector: greedily pick the top N pixels with local exclusion.
+    Select approximate seed peaks by greedily taking the brightest remaining pixel.
 
-    Returns list of (y, x, value).
+    Parameters
+    ----------
+    z : np.ndarray
+        Two-dimensional image plane used for seed detection.
+    n : int
+        Number of peaks to return.
+    excl_radius : int, default 5
+        Pixel exclusion radius applied around each selected peak before choosing the
+        next one.
+
+    Returns
+    -------
+    list[tuple[int, int, float]]
+        List of ``(y_index, x_index, value)`` tuples, ordered by greedy selection.
+
+    Notes
+    -----
+    The input plane uses NumPy storage order ``[y, x]``. Returned tuples preserve
+    that index order because they refer to pixel indices, not model parameters.
     """
     z = np.asarray(z, dtype=float)
     z_copy = z.copy()
@@ -173,9 +346,31 @@ def _default_bounds_multi(
     y_rng: Optional[Tuple[float, float]] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Default bounds vectors for multi-Gaussian parameters (packed order).
-    If x_rng/y_rng are provided (world coords), use them for x0/y0 bounds; otherwise
-    fall back to pixel-index bounds derived from shape.
+    Build default lower and upper bounds for the packed multi-Gaussian parameters.
+
+    Parameters
+    ----------
+    shape : tuple[int, int]
+        Image-plane shape ``(ny, nx)``.
+    n : int
+        Number of Gaussian components.
+    x_rng : tuple[float, float] | None, optional
+        Inclusive x-axis coordinate range for center bounds. If ``None``, pixel-index
+        bounds derived from ``shape`` are used.
+    y_rng : tuple[float, float] | None, optional
+        Inclusive y-axis coordinate range for center bounds. If ``None``, pixel-index
+        bounds derived from ``shape`` are used.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        Lower-bound and upper-bound vectors in packed parameter order.
+
+    Notes
+    -----
+    Width bounds are positive-only and use a simple scale based on the coordinate
+    span along each axis. Theta is limited to ``[-pi/2, pi/2]`` because the model is
+    later canonicalized modulo pi.
     """
     ny, nx = shape
     # offset
@@ -196,10 +391,29 @@ def _default_bounds_multi(
 
 
 def _extract_params_from_comp_dicts(comp_list, n):
-    """Parse a list of component dicts into arrays (amp, x0, y0, sx, sy, th).
-    Accepts keys: amp|amplitude, x0, y0, sigma_x|sx|fwhm_major, sigma_y|sy|fwhm_minor, theta.
-    Converts FWHM inputs to σ using _FWHM2SIG.
-    Raises KeyError if required keys are missing.
+    """
+    Parse component dictionaries into numeric parameter arrays.
+
+    Parameters
+    ----------
+    comp_list : Sequence[dict]
+        Sequence of component descriptions. Supported keys are:
+        ``"amp"`` or ``"amplitude"`` for amplitude, ``"x0"``, ``"y0"``,
+        ``"sigma_x"`` or ``"sx"`` or ``"fwhm_major"``, ``"sigma_y"`` or ``"sy"``
+        or ``"fwhm_minor"``, and optional ``"theta"``.
+    n : int
+        Expected number of components.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+        Arrays ``(amps, x0, y0, sx, sy, th)`` each of length ``n``.
+
+    Notes
+    -----
+    ``fwhm_major`` and ``fwhm_minor`` are converted to sigma internally. Missing
+    ``theta`` defaults to ``0.0``. The function raises ``KeyError`` when required
+    center or width keys are absent.
     """
     amps = np.empty(n)
     x0 = np.empty(n)
@@ -234,8 +448,27 @@ def _process_list_of_dicts(
     n: int,
     offset: float,
 ) -> np.ndarray:
-    """Helper to parse list-of-dicts initial_guesses with provided offset.
-    placing in own fucntion to try to get test coverage to recoognize it.
+    """
+    Convert a list of component dictionaries plus an offset into packed parameters.
+
+    Parameters
+    ----------
+    init : Sequence[dict[str, Number]]
+        Sequence of component dictionaries accepted by
+        :func:`_extract_params_from_comp_dicts`.
+    n : int
+        Expected number of components.
+    offset : float
+        Shared constant offset to place at the front of the packed parameter vector.
+
+    Returns
+    -------
+    np.ndarray
+        Packed parameter vector in optimizer order.
+
+    Notes
+    -----
+    This helper centralizes the list-of-dicts path so tests can exercise it directly.
     """
     if len(init) != n:
         raise ValueError(f"init['components'] must have length n={n}")
@@ -244,8 +477,27 @@ def _process_list_of_dicts(
 
 
 def _is_pixel_index_axes(x1d, y1d):
-    # Treat pure pixel-index axes (0..N-1) as pixel mode even if arrays are present
-    # putting in function to try to get test coverage to recoognize it.
+    """
+    Detect whether supplied axis arrays are plain zero-based pixel indices.
+
+    Parameters
+    ----------
+    x1d : array-like
+        Candidate x-axis coordinate array.
+    y1d : array-like
+        Candidate y-axis coordinate array.
+
+    Returns
+    -------
+    bool
+        ``True`` when both axes are numerically equal to ``np.arange(N)`` for their
+        respective lengths.
+
+    Notes
+    -----
+    This check is used to distinguish true world-coordinate fits from pixel-grid
+    fits even when explicit coordinate arrays were supplied.
+    """
     _x = np.asarray(x1d, dtype=float)
     _y = np.asarray(y1d, dtype=float)
     is_pixel_index_axes = np.allclose(_x, np.arange(_x.size)) and np.allclose(
@@ -265,17 +517,41 @@ def _normalize_initial_guesses(
     y1d: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
-    Build an initial parameter vector for N components.
+    Normalize user or auto-generated initial guesses into packed optimizer parameters.
 
-    Accepts:
-      - None: auto-seed using greedy peaks.
-      - array-like of shape (n, 6): columns [amp, x0, y0, sx, sy, th]; offset from median.
-      - list/tuple of dicts (len n): keys amp|amplitude, x0, y0, sigma_x|sx, sigma_y|sy, theta; offset from median.
-      - dict with keys:
-          'offset': float (optional),
-          'components': array-like (n, 6) or list/tuple of dicts as above.
+    Parameters
+    ----------
+    z2d : np.ndarray
+        Two-dimensional image plane used for auto-seeding and background estimation.
+    n : int
+        Number of Gaussian components to seed.
+    init : np.ndarray | Sequence[dict] | dict | None
+        Initial-guess specification. Supported forms are:
+        ``None`` for auto-seeding, an ``(n, 6)`` array with columns
+        ``[amp, x0, y0, sx, sy, th]``, a length-``n`` list of component dictionaries,
+        or a dictionary with optional ``"offset"`` and required ``"components"``.
+    min_threshold : Number | None
+        Inclusive lower threshold applied before estimating the median and selecting
+        automatic seed peaks.
+    max_threshold : Number | None
+        Inclusive upper threshold applied before estimating the median and selecting
+        automatic seed peaks.
+    x1d : np.ndarray | None, optional
+        One-dimensional x-axis coordinates for world-coordinate auto-seeding.
+    y1d : np.ndarray | None, optional
+        One-dimensional y-axis coordinates for world-coordinate auto-seeding.
 
-    Returns a packed parameter vector as in _pack_params.
+    Returns
+    -------
+    np.ndarray
+        Packed parameter vector in the format expected by the optimizer.
+
+    Notes
+    -----
+    Auto-seeding estimates the offset as the threshold-masked median and places seed
+    centers at greedily selected peaks. When ``x1d`` and ``y1d`` describe non-pixel
+    axes, seed centers and widths are expressed in world units; otherwise they remain
+    in pixel units.
     """
     ny, nx = z2d.shape
 
@@ -373,10 +649,32 @@ def _merge_bounds_multi(
     n: int,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Merge user-provided bounds into default [lb, ub].
-    Keys allowed: 'offset','amp','x0','y0','sigma_x','sigma_y','theta'.
-    Values may be a single (low, high) tuple applied to all components, or a
-    sequence of length n with per-component tuples.
+    Merge user-specified parameter bounds into default packed lower/upper bounds.
+
+    Parameters
+    ----------
+    base_lb : np.ndarray
+        Default lower-bound vector in packed parameter order.
+    base_ub : np.ndarray
+        Default upper-bound vector in packed parameter order.
+    user_bounds : dict | None
+        Optional user bounds. Supported keys are ``"offset"``, ``"amp"``,
+        ``"amplitude"``, ``"x0"``, ``"y0"``, ``"sigma_x"``, ``"sigma_y"``,
+        ``"fwhm_major"``, ``"fwhm_minor"``, and ``"theta"``. Each value may be a
+        single ``(low, high)`` tuple for all components or a length-``n`` sequence of
+        tuples for per-component bounds.
+    n : int
+        Number of Gaussian components.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        Updated ``(lb, ub)`` vectors.
+
+    Notes
+    -----
+    FWHM keys are converted into sigma-space bounds because the optimizer works in
+    sigma units internally. Unknown keys are ignored.
     """
     if user_bounds is None:
         return base_lb, base_ub
@@ -453,12 +751,28 @@ def _merge_bounds_multi(
 
 
 def _count_true_at_least(mask: np.ndarray, need: int, *, chunk: int = 262_144) -> int:
-    """Return the number of True values in *mask*, but stop early once *need* is reached.
+    """
+    Count ``True`` entries in a mask, stopping once a target count is reached.
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        Boolean-like array to count.
+    need : int
+        Minimum number of ``True`` values of interest.
+    chunk : int, default 262144
+        Number of flattened elements to process per chunk.
+
+    Returns
+    -------
+    int
+        Count of ``True`` values observed, or an early-return count once ``need`` has
+        been met.
 
     Notes
     -----
-    - Early exit avoids scanning the whole array when enough pixels are available.
-    - Uses vectorized per-chunk reductions in C (``sum`` on ``bool``) for speed.
+    Early exit avoids scanning the entire plane when there are already enough usable
+    pixels to fit the requested number of parameters.
     """
     need = int(need)
     if need <= 0:
@@ -494,16 +808,43 @@ def _fit_multi_plane_numpy(
     mask2d: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Fit N Gaussians + shared offset to a single 2-D plane.
+    Fit a multi-component Gaussian model to one concrete 2-D image plane.
+
+    Parameters
+    ----------
+    z2d : np.ndarray
+        Two-dimensional data plane with NumPy storage order ``[y, x]``.
+    n_components : int
+        Number of Gaussian components to fit.
+    min_threshold : Number | None
+        Inclusive lower data threshold. Pixels below this value are excluded.
+    max_threshold : Number | None
+        Inclusive upper data threshold. Pixels above this value are excluded.
+    initial_guesses : np.ndarray | Sequence[dict] | dict | None
+        Initial-guess specification accepted by :func:`_normalize_initial_guesses`.
+    bounds : dict | None
+        Optional parameter bounds accepted by :func:`_merge_bounds_multi`.
+    max_nfev : int
+        Maximum number of function evaluations passed to ``curve_fit``.
+    x1d : np.ndarray | None, optional
+        One-dimensional x-axis coordinates. ``None`` selects pixel-index fitting.
+    y1d : np.ndarray | None, optional
+        One-dimensional y-axis coordinates. ``None`` selects pixel-index fitting.
+    mask2d : np.ndarray | None, optional
+        Optional boolean keep-mask aligned with ``z2d``.
 
     Returns
     -------
-    popt : (1 + 6N,)
-        Best-fit packed parameter vector.
-    perr : (1 + 6N,)
-        1-sigma uncertainties from the covariance diagonal (NaN on failure).
-    mask : (ny,nx) bool
-        Mask used during fitting (user mask ∧ thresholds).
+    tuple[np.ndarray, np.ndarray, np.ndarray]
+        ``(popt, perr, mask)`` where ``popt`` is the best-fit packed parameter
+        vector, ``perr`` contains one-sigma parameter uncertainties, and ``mask`` is
+        the final fit mask after combining user masking and thresholds.
+
+    Notes
+    -----
+    Coordinates are modeled in x-before-y semantic order even though the input plane
+    is stored in ``[y, x]`` order. The function validates that enough unmasked pixels
+    remain to constrain the requested parameters before calling the optimizer.
     """
     if z2d.ndim != 2:
         # cannot cover using public API, defensive coding
@@ -618,8 +959,8 @@ def _fit_multi_plane_numpy(
 def _multi_fit_plane_wrapper(
     z2d: np.ndarray,
     mask2d: np.ndarray,
-    y1d: np.ndarray,
     x1d: np.ndarray,
+    y1d: np.ndarray,
     n_components: int,
     min_threshold: Optional[Number],
     max_threshold: Optional[Number],
@@ -634,11 +975,46 @@ def _multi_fit_plane_wrapper(
     return_residual: bool,
 ) -> tuple:
     """
-    Vectorized kernel returning component-wise parameters plus diagnostics
-    for one plane. Shapes:
-      - component arrays: (n_components,)
-      - scalars: ()
-      - planes: (ny, nx)
+    Execute one plane fit inside the vectorized ``xarray.apply_ufunc`` wrapper.
+
+    Parameters
+    ----------
+    z2d : np.ndarray
+        Two-dimensional data plane in ``[y, x]`` storage order.
+    mask2d : np.ndarray
+        Boolean keep-mask for ``z2d``.
+    x1d : np.ndarray
+        One-dimensional x-axis coordinates associated with the plane.
+    y1d : np.ndarray
+        One-dimensional y-axis coordinates associated with the plane.
+    n_components : int
+        Number of Gaussian components.
+    min_threshold : Number | None
+        Inclusive lower threshold.
+    max_threshold : Number | None
+        Inclusive upper threshold.
+    initial_guesses : np.ndarray | Sequence[dict] | dict | None
+        Initial-guess specification forwarded to :func:`_fit_multi_plane_numpy`.
+    bounds : dict | None
+        Optional parameter bounds.
+    max_nfev : int
+        Maximum function evaluations for the optimizer.
+    return_model : bool
+        If ``True``, include the full model plane in the returned tuple.
+    return_residual : bool
+        If ``True``, include the residual plane in the returned tuple.
+
+    Returns
+    -------
+    tuple
+        Flat tuple of component arrays, scalar diagnostics, and optional 2-D planes
+        matching the ``output_core_dims`` contract used by ``xarray.apply_ufunc``.
+
+    Notes
+    -----
+    Component-wise arrays are length ``n_components``; scalar diagnostics are shape
+    ``()``; image outputs are shape ``(ny, nx)``. The return order is fixed by the
+    public dataset-construction code below.
     """
     popt, perr, mask = _fit_multi_plane_numpy(
         z2d=z2d,
@@ -771,7 +1147,26 @@ def _multi_fit_plane_wrapper(
 
 
 def _ensure_dataarray(data: ArrayOrDA) -> xr.DataArray:
-    """Normalize input to xarray.DataArray with generated dims/coords if needed."""
+    """
+    Normalize supported input data into an ``xarray.DataArray``.
+
+    Parameters
+    ----------
+    data : ArrayOrDA
+        Supported input object. Choices are ``numpy.ndarray``,
+        ``dask.array.Array``, or ``xarray.DataArray``.
+
+    Returns
+    -------
+    xr.DataArray
+        DataArray view of the input. Raw arrays receive synthetic dimension names and
+        zero-based numeric coordinates.
+
+    Notes
+    -----
+    For non-DataArray inputs, dimensions are named ``dim_0``, ``dim_1``, ... and
+    coordinates are pixel indices as floats.
+    """
     if isinstance(data, xr.DataArray):
         return data
     if isinstance(data, (np.ndarray, da.Array)):
@@ -787,13 +1182,26 @@ def _resolve_dims(
     da: xr.DataArray, dims: Optional[Sequence[Union[str, int]]]
 ) -> Tuple[str, str]:
     """
-    Resolve plane dims to (x_dim, y_dim).
+    Resolve the two dimensions that define the fit plane.
 
-    Rules:
-    - If 'dims' is provided: use those (names or indices).
-    - Else, if DataArray has dims named 'x' and 'y': use ('x', 'y').
-    - Else, if 2-D: assume last is x, second-last is y.
-    - Else: error (ambiguous for ndim != 2 without explicit dims).
+    Parameters
+    ----------
+    da : xr.DataArray
+        Input data array.
+    dims : Sequence[str | int] | None
+        Optional dimension specifier. Supported choices are explicit dimension names
+        or integer dimension indices.
+
+    Returns
+    -------
+    tuple[str, str]
+        ``(x_dim, y_dim)`` names for the fit plane.
+
+    Notes
+    -----
+    If ``dims`` is omitted, the helper prefers explicit ``("x", "y")`` dimensions.
+    Otherwise, for plain 2-D arrays it assumes the last dimension is x and the
+    second-last is y.
     """
     if dims is None:
         # ✅ new: prefer explicitly named axes when present
@@ -820,7 +1228,24 @@ def _resolve_dims(
 
 
 def _axis_sign(coord: Optional[np.ndarray]) -> float:
-    """+1 if strictly ascending, -1 if strictly descending, else +1."""
+    """
+    Determine the orientation sign of a one-dimensional coordinate axis.
+
+    Parameters
+    ----------
+    coord : np.ndarray | None
+        Candidate coordinate axis.
+
+    Returns
+    -------
+    float
+        ``+1.0`` for ascending or indeterminate axes, ``-1.0`` for descending axes.
+
+    Notes
+    -----
+    The helper intentionally falls back to ``+1.0`` for missing, non-1-D, too-short,
+    or non-finite inputs so that handedness logic remains conservative.
+    """
     if coord is None or coord.ndim != 1 or coord.size < 2:
         return 1.0
     c0, c1 = float(coord[0]), float(coord[1])
@@ -829,8 +1254,25 @@ def _axis_sign(coord: Optional[np.ndarray]) -> float:
 
 def _select_mask(da_tr: xr.DataArray, spec: str):
     """
-    Thin wrapper so tests can monkeypatch this symbol.
-    Delegates to selection.select_mask in the same package.
+    Resolve a string mask specification through the local selection helper.
+
+    Parameters
+    ----------
+    da_tr : xr.DataArray
+        Transposed data array used as the mask-selection context.
+    spec : str
+        Selection expression understood by ``selection.select_mask``.
+
+    Returns
+    -------
+    Any
+        Whatever object ``selection.select_mask`` returns. Downstream code normalizes
+        this into a boolean ``DataArray``.
+
+    Notes
+    -----
+    The wrapper exists so tests can monkeypatch a stable symbol in this module
+    without importing the heavier selection machinery at module import time.
     """
     # local import to avoid hard module dependency at import time
     from .selection import select_mask  # type: ignore, pragma: no cover
@@ -840,8 +1282,22 @@ def _select_mask(da_tr: xr.DataArray, spec: str):
 
 def _theta_pa_to_math(pa: np.ndarray) -> np.ndarray:
     """
-    Convert PA (from +y toward +x) into math angle (from +x toward +y, CCW)
-    in the index coordinate system whose axis directions are set by (sx, sy).
+    Convert position-angle values into the internal math-angle convention.
+
+    Parameters
+    ----------
+    pa : np.ndarray
+        Angle array in radians measured from +y toward +x.
+
+    Returns
+    -------
+    np.ndarray
+        Equivalent angles in radians measured from +x toward +y, wrapped into
+        ``[0, 2*pi)``.
+
+    Notes
+    -----
+    This conversion is purely geometric; it does not apply handedness flips itself.
     """
     theta_math = np.pi / 2 - pa
     return theta_math % (2.0 * np.pi)
@@ -849,8 +1305,22 @@ def _theta_pa_to_math(pa: np.ndarray) -> np.ndarray:
 
 def _theta_math_to_pa(theta_math: np.ndarray) -> np.ndarray:
     """
-    Convert math angle in index basis back to PA in world-like basis
-    where PA is measured from +y toward +x.
+    Convert internal math-angle values into position-angle values.
+
+    Parameters
+    ----------
+    theta_math : np.ndarray
+        Angle array in radians measured from +x toward +y.
+
+    Returns
+    -------
+    np.ndarray
+        Equivalent PA angles in radians measured from +y toward +x and wrapped into
+        ``[0, 2*pi)``.
+
+    Notes
+    -----
+    This is the inverse mapping of :func:`_theta_pa_to_math`.
     """
     pa = np.pi / 2 - theta_math
     return pa % (2.0 * np.pi)
@@ -864,8 +1334,33 @@ def _convert_init_theta(
     n: int,
 ) -> Optional[Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]]:
     """
-    Return a copy of initial_guesses with theta converted to math-angle if to_math=True.
-    Structure and other fields are preserved.
+    Convert theta values in initial guesses from PA into math convention when needed.
+
+    Parameters
+    ----------
+    init : np.ndarray | Sequence[dict] | dict | None
+        Initial-guess structure accepted by :func:`fit_multi_gaussian2d`.
+    to_math : bool
+        If ``True``, convert any supplied ``theta`` values from PA to math angle.
+        If ``False``, return ``init`` unchanged.
+    sx : float
+        Axis-orientation sign for x. Currently unused but retained as part of the
+        helper contract for future handedness-aware refinements.
+    sy : float
+        Axis-orientation sign for y. Currently unused but retained as part of the
+        helper contract for future handedness-aware refinements.
+    n : int
+        Expected number of components when array-form guesses are provided.
+
+    Returns
+    -------
+    np.ndarray | Sequence[dict] | dict | None
+        Copy of ``init`` with converted angles when conversion is requested.
+
+    Notes
+    -----
+    The returned object preserves the original structural form as closely as possible.
+    Unknown shapes or unsupported structures are returned unchanged.
     """
     if init is None or not to_math:
         return init
@@ -915,7 +1410,23 @@ def _convert_init_theta(
 
 def _axis_is_valid(a: np.ndarray) -> bool:
     """
-    True if a is 1-D, finite, and strictly monotonic (ascending or descending).
+    Validate that a coordinate axis is usable for one-dimensional interpolation.
+
+    Parameters
+    ----------
+    a : np.ndarray
+        Candidate coordinate axis.
+
+    Returns
+    -------
+    bool
+        ``True`` when the axis is one-dimensional, finite, non-empty, and strictly
+        monotonic.
+
+    Notes
+    -----
+    Both ascending and descending axes are accepted because downstream interpolation
+    code explicitly handles either ordering.
     """
     a = np.asarray(a)
     if a.ndim != 1 or a.size == 0 or not np.all(np.isfinite(a)):
@@ -933,16 +1444,35 @@ def _extract_1d_coords_for_fit(
     dim_x: str,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Return (y1d, x1d) arrays for model evaluation.
+    Resolve the one-dimensional coordinate vectors used for model evaluation.
 
-    Behavior:
-    - If input is an xarray.DataArray:
-        * coord_type controls behavior:
-            - "world": use the DataArray's 1-D coords on (dim_y, dim_x)
-            - "pixel": use index grids 0..N-1
-    - If input is a NumPy/Dask array:
-        * coord_type is ignored
-        * if `coords=(x1d, y1d)` is provided, use those (world); otherwise use pixel indices.
+    Parameters
+    ----------
+    original_input : ArrayOrDA
+        Original object passed to :func:`fit_multi_gaussian2d`.
+    da_tr : xr.DataArray
+        DataArray after transposing the fit plane to the trailing ``(y, x)`` axes.
+    coord_type : str
+        Coordinate-mode selector for DataArray inputs. Supported choices are
+        ``"world"`` and ``"pixel"``.
+    coords : Sequence[np.ndarray] | None
+        For NumPy/Dask inputs only, optional explicit coordinate vectors supplied as
+        ``(x1d, y1d)``.
+    dim_y : str
+        Name of the y dimension in ``da_tr``.
+    dim_x : str
+        Name of the x dimension in ``da_tr``.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        Tuple ``(x1d, y1d)`` of one-dimensional coordinate arrays.
+
+    Notes
+    -----
+    DataArray inputs can use either pixel indices or their attached 1-D coordinate
+    variables. NumPy/Dask inputs ignore ``coord_type`` and use ``coords`` when
+    provided; otherwise they fall back to zero-based pixel indices.
     """
     ny, nx = int(da_tr.sizes[dim_y]), int(da_tr.sizes[dim_x])
 
@@ -953,7 +1483,7 @@ def _extract_1d_coords_for_fit(
                 "coord_type must be 'world' or 'pixel' for DataArray inputs"
             )
         if ctype == "pixel":
-            return np.arange(ny, dtype=float), np.arange(nx, dtype=float)
+            return np.arange(nx, dtype=float), np.arange(ny, dtype=float)
         # world coords from the DataArray
         if (dim_x not in da_tr.coords) or (dim_y not in da_tr.coords):
             raise ValueError(
@@ -969,7 +1499,7 @@ def _extract_1d_coords_for_fit(
             raise ValueError(
                 "World coords must be strictly monotonic and finite along both axes."
             )
-        return y1d.astype(float), x1d.astype(float)
+        return x1d.astype(float), y1d.astype(float)
 
     # NumPy/Dask input: coord_type is ignored; pick by presence of coords
     if coords is not None:
@@ -982,10 +1512,10 @@ def _extract_1d_coords_for_fit(
             raise ValueError(
                 "coords must be 1-D arrays with lengths matching (nx, ny)."
             )
-        return y1d, x1d
+        return x1d, y1d
 
     # Fallback: pixel indices
-    return np.arange(ny, dtype=float), np.arange(nx, dtype=float)
+    return np.arange(nx, dtype=float), np.arange(ny, dtype=float)
 
 
 # ---------------------------------------------------------------------------
@@ -999,10 +1529,33 @@ def _interp_centers_world(
     dim_y: str,
 ) -> xr.Dataset:
     """
-    Interpolate fitted pixel centers (and propagate their errors) into world
-    coordinates when the DataArray carried 1-D coords on (x,y).
-    - Handles ascending and descending coords.
-    - Uses local slope from `np.gradient` for uncertainty propagation.
+    Add world-coordinate center estimates by interpolating fitted pixel centers.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Result dataset containing pixel-center variables such as ``x0_pixel`` and
+        ``y0_pixel``.
+    cx : np.ndarray
+        One-dimensional x-axis world coordinate values associated with pixel columns.
+    cy : np.ndarray
+        One-dimensional y-axis world coordinate values associated with pixel rows.
+    dim_x : str
+        Name of the x dimension for the original data plane.
+    dim_y : str
+        Name of the y dimension for the original data plane.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with interpolated ``x0_world``, ``y0_world`` and corresponding error
+        variables added when the coordinate axes are suitable.
+
+    Notes
+    -----
+    Ascending and descending coordinate axes are both supported. Uncertainty
+    propagation uses the local slope of each 1-D coordinate axis, estimated with
+    ``np.gradient``.
     """
 
     def _prep(coord: np.ndarray) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
@@ -1119,6 +1672,24 @@ def _interp_centers_world(
 
 
 def _add_variance_explained(ds: xr.Dataset) -> xr.Dataset:
+    """
+    Attach a descriptive metadata note to the variance-explained result variable.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Result dataset containing a ``variance_explained`` variable.
+
+    Returns
+    -------
+    xr.Dataset
+        The same dataset with an expanded explanatory note stored in
+        ``ds["variance_explained"].attrs["note"]``.
+
+    Notes
+    -----
+    This helper only annotates metadata; it does not recompute the metric.
+    """
     ds["variance_explained"].attrs["note"] = (
         "R²-style fit quality for each 2-D image plane (y×x). "
         "Measures how much of the pixel-to-pixel variance is explained by the fitted model.\n\n"
@@ -1157,8 +1728,28 @@ def _build_call(
     _inspect,
     _param,
 ):
-    # Build "call" with only parameters that differ from defaults (best-effort)
-    # putting in own fucntion to try to get coverage to recognize it
+    """
+    Build a compact string representation of the user call for result metadata.
+
+    Parameters
+    ----------
+    _inspect : module-like object
+        Object expected to provide ``signature`` for ``fit_multi_gaussian2d``.
+        Typically the standard-library ``inspect`` module.
+    _param : dict
+        Mapping of runtime parameter names to values.
+
+    Returns
+    -------
+    str
+        Best-effort call string that includes only arguments differing from their
+        default values.
+
+    Notes
+    -----
+    If introspection fails for any reason, the helper falls back to the generic
+    string ``"fit_multi_gaussian2d(...)"``.
+    """
     _call = "fit_multi_gaussian2d("
     try:
         if _inspect is not None:
@@ -1182,17 +1773,47 @@ def _build_call(
 
 
 def _add_angle_attrs(ds, conv, frame):
-    # putting in func to try to get coverage to recognize it
-    for _name, _frame in (
-        ("theta_pixel", "pixel"),
-        ("theta_pixel_err", "pixel"),
-        ("theta_world", "world"),
-        ("theta_world_err", "world"),
+    """
+    Add shared angle metadata to the published angle variables in a result dataset.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Result dataset containing the theta variables produced by the fitter.
+    conv : str
+        Angle convention label. Supported public choices are ``"math"`` and ``"pa"``.
+    frame : str
+        Frame label requested by the caller. Current result variables use ``"pixel"``
+        and ``"world"`` frame tags; this argument is retained for call-site symmetry.
+
+    Returns
+    -------
+    xr.Dataset
+        The same dataset with angle metadata populated.
+
+    Notes
+    -----
+    The helper updates the published theta aliases plus the explicit
+    ``*_math``/``*_pa`` variants in place.
+    """
+    for _name, _frame, _conv in (
+        ("theta_pixel", "pixel", conv),
+        ("theta_pixel_err", "pixel", conv),
+        ("theta_pixel_math", "pixel", "math"),
+        ("theta_pixel_math_err", "pixel", "math"),
+        ("theta_pixel_pa", "pixel", "pa"),
+        ("theta_pixel_pa_err", "pixel", "pa"),
+        ("theta_world", "world", conv),
+        ("theta_world_err", "world", conv),
+        ("theta_world_math", "world", "math"),
+        ("theta_world_math_err", "world", "math"),
+        ("theta_world_pa", "world", "pa"),
+        ("theta_world_pa_err", "world", "pa"),
     ):
         # it looks like the if may not be needed, and if its left in
         # code coverage flags uncovered lines
         # if _name in ds:
-        ds[_name].attrs["convention"] = conv
+        ds[_name].attrs["convention"] = _conv
         ds[_name].attrs["frame"] = _frame
         ds[_name].attrs["units"] = "rad"
     return ds
@@ -1310,6 +1931,15 @@ def fit_multi_gaussian2d(
         Optional world coordinates (per component):
             - x_world(component), y_world(component) are added **only** if both fit axes
               have 1-D numeric coordinate variables (ascending or descending).
+
+    Notes
+    -----
+    The fitter models coordinates in x-before-y semantic order while operating on
+    image planes stored in NumPy ``[y, x]`` memory order. Supported angle choices are
+    ``"math"`` for the internal mathematical convention, ``"pa"`` for astronomical
+    position angle measured from +y toward +x, and ``"auto"`` to choose based on axis
+    handedness. Width parameters are optimized internally in sigma units even when
+    array-form initial guesses or bounds are provided in FWHM.
 
     Examples
     --------
@@ -1477,9 +2107,9 @@ def fit_multi_gaussian2d(
         bnds = b2
 
     # -- Build 1-D coordinate arrays for model evaluation --
-    y1d, x1d = _extract_1d_coords_for_fit(data, da_tr, coord_type, coords, dim_y, dim_x)
-    y1d_da = xr.DataArray(y1d, dims=[dim_y])
+    x1d, y1d = _extract_1d_coords_for_fit(data, da_tr, coord_type, coords, dim_y, dim_x)
     x1d_da = xr.DataArray(x1d, dims=[dim_x])
+    y1d_da = xr.DataArray(y1d, dims=[dim_y])
     # Determine whether evaluation grid is world or pixel.
     # If x/y coords are exactly 0..N-1 we treat as pixel mode; otherwise world.
     world_mode = not (
@@ -1498,9 +2128,9 @@ def fit_multi_gaussian2d(
         _multi_fit_plane_wrapper,
         da_tr,
         mask_da,
-        y1d_da,
         x1d_da,
-        input_core_dims=[core, core, [dim_y], [dim_x]],
+        y1d_da,
+        input_core_dims=[core, core, [dim_x], [dim_y]],
         output_core_dims=out_core_dims,
         vectorize=True,
         dask="parallelized",
@@ -1564,13 +2194,18 @@ def fit_multi_gaussian2d(
 
     th_math = xr.apply_ufunc(_wrap_halfpi, th_math, dask="parallelized", vectorize=True)
 
-    # Now publish θ in requested convention
+    # Now publish θ in both explicit conventions, plus backward-compatible aliases
     theta_math = th_math
     theta_pa = xr.DataArray(
         _theta_math_to_pa(th_math.values), dims=th.dims, coords=th.coords
     )
+    # A math↔PA conversion is a constant shift, so the 1-sigma angle uncertainty
+    # is identical in both conventions.
+    theta_math_err = th_e
+    theta_pa_err = th_e
     # Preserve backward-compat "theta" using requested convention
     th_public = theta_pa if want_pa else theta_math
+    th_public_err = theta_pa_err if want_pa else theta_math_err
 
     # --- Pixel-parameter views (centers + ellipse in pixel coords) ---
     if world_mode:
@@ -1703,13 +2338,22 @@ def fit_multi_gaussian2d(
             output_dtypes=[float, float, float],
         )
         # Report pixel-space angle in the SAME convention as 'theta'
-        theta_pixel = (np.pi / 2 - theta_pixel_math) if want_pa else theta_pixel_math
+        theta_pixel_pa = xr.DataArray(
+            _theta_math_to_pa(theta_pixel_math.values),
+            dims=theta_pixel_math.dims,
+            coords=theta_pixel_math.coords,
+        )
+        theta_pixel = theta_pixel_pa if want_pa else theta_pixel_math
         fwhm_major_pixel = sigma_major_pixel * _SIG2FWHM
         fwhm_minor_pixel = sigma_minor_pixel * _SIG2FWHM
 
         # World-basis angle and its error are native in this branch
         theta_world = th_public
-        theta_world_err = th_e  # same convention as 'theta_world'
+        theta_world_err = th_public_err
+        theta_world_math = theta_math
+        theta_world_pa = theta_pa
+        theta_world_math_err = theta_math_err
+        theta_world_pa_err = theta_pa_err
 
         # --- σ error propagation (world → pixel) via finite differences (w.r.t σx, σy) ---
         def _fd_sigma_world_to_pixel(sigx, sigy, theta, dx, dy, epsx, epsy):
@@ -1809,7 +2453,7 @@ def fit_multi_gaussian2d(
             output_dtypes=[float],
         )
         # convert-to-PA is a shift, so σ is unchanged between math↔PA
-        theta_pixel_err = xr.apply_ufunc(
+        theta_pixel_math_err = theta_pixel_err = xr.apply_ufunc(
             np.multiply,
             xr.apply_ufunc(np.abs, _dtdt, dask="parallelized"),
             th_e,
@@ -1819,6 +2463,7 @@ def fit_multi_gaussian2d(
             dask="parallelized",
             output_dtypes=[float],
         )
+        theta_pixel_pa_err = theta_pixel_math_err
         # --- pixel-center uncertainties from world centers via local scale ---
         x0_pixel_err = xr.apply_ufunc(
             np.divide,
@@ -1871,7 +2516,11 @@ def fit_multi_gaussian2d(
         x0_pixel, y0_pixel = x0, y0
         sigma_major_pixel = xr.apply_ufunc(np.maximum, sx, sy, dask="parallelized")
         sigma_minor_pixel = xr.apply_ufunc(np.minimum, sx, sy, dask="parallelized")
-        theta_pixel = th_public
+        theta_pixel_math = th_math
+        theta_pixel_pa = xr.DataArray(
+            _theta_math_to_pa(th_math.values), dims=th_math.dims, coords=th_math.coords
+        )
+        theta_pixel = theta_pixel_pa if want_pa else theta_pixel_math
         fwhm_major_pixel = xr.apply_ufunc(
             np.maximum, sx * _SIG2FWHM, sy * _SIG2FWHM, dask="parallelized"
         )
@@ -1879,7 +2528,9 @@ def fit_multi_gaussian2d(
             np.minimum, sx * _SIG2FWHM, sy * _SIG2FWHM, dask="parallelized"
         )
         # Angular uncertainty is native in pixel basis
-        theta_pixel_err = th_e
+        theta_pixel_math_err = theta_math_err
+        theta_pixel_pa_err = theta_pa_err
+        theta_pixel_err = th_public_err
         # world angle/uncertainty computed below from pixel→world covariance
 
         # and pixel-center uncertainties are the native ones
@@ -1995,7 +2646,13 @@ def fit_multi_gaussian2d(
             return dM_dsx, dm_dsx, dM_dsy, dm_dsy
 
         # World angle in requested convention
-        theta_world = (np.pi / 2 - _theta_world_math) if want_pa else _theta_world_math
+        theta_world_math = _theta_world_math
+        theta_world_pa = xr.DataArray(
+            _theta_math_to_pa(_theta_world_math.values),
+            dims=_theta_world_math.dims,
+            coords=_theta_world_math.coords,
+        )
+        theta_world = theta_world_pa if want_pa else theta_world_math
 
         # --- θ error propagation (pixel → world): d(theta_world_math)/d(theta_pixel_math) ---
         def _dtheta_world_dtheta_pixel(sigx, sigy, theta, dx, dy, eps):
@@ -2020,7 +2677,7 @@ def fit_multi_gaussian2d(
             dask="parallelized",
             output_dtypes=[float],
         )
-        theta_world_err = xr.apply_ufunc(
+        theta_world_math_err = xr.apply_ufunc(
             np.multiply,
             xr.apply_ufunc(np.abs, _dtdt_w, dask="parallelized"),
             th_e,
@@ -2030,6 +2687,8 @@ def fit_multi_gaussian2d(
             dask="parallelized",
             output_dtypes=[float],
         )
+        theta_world_pa_err = theta_world_math_err
+        theta_world_err = theta_world_pa_err if want_pa else theta_world_math_err
         _epsx = xr.apply_ufunc(
             lambda v: 1e-6 + 1e-3 * np.abs(v), sx, dask="parallelized"
         )
@@ -2144,8 +2803,16 @@ def fit_multi_gaussian2d(
             sigma_minor_pixel_err=sigma_minor_pixel_err,
             theta_pixel=theta_pixel,
             theta_pixel_err=theta_pixel_err,
+            theta_pixel_math=theta_pixel_math,
+            theta_pixel_math_err=theta_pixel_math_err,
+            theta_pixel_pa=theta_pixel_pa,
+            theta_pixel_pa_err=theta_pixel_pa_err,
             theta_world=theta_world,
             theta_world_err=theta_world_err,
+            theta_world_math=theta_world_math,
+            theta_world_math_err=theta_world_math_err,
+            theta_world_pa=theta_world_pa,
+            theta_world_pa_err=theta_world_pa_err,
             fwhm_major_pixel=fwhm_major_pixel,
             fwhm_minor_pixel=fwhm_minor_pixel,
             fwhm_major_pixel_err=fwhm_major_pixel_err,
@@ -2176,9 +2843,13 @@ def fit_multi_gaussian2d(
     ds = _add_angle_attrs(ds, conv, "pixel")
 
     if return_residual:
-        ds["residual"] = residual
+        ds["residual"] = residual.transpose(
+            *(d for d in residual.dims if d not in (dim_y, dim_x)), dim_x, dim_y
+        )
     if return_model:
-        ds["model"] = model
+        ds["model"] = model.transpose(
+            *(d for d in model.dims if d not in (dim_y, dim_x)), dim_x, dim_y
+        )
 
     # world coord exposure adjusted: alias if already in world, otherwise interp from pixels.
     if (dim_x in da_tr.coords) and (dim_y in da_tr.coords):
@@ -2327,8 +2998,16 @@ def fit_multi_gaussian2d(
         # angles (θ always refers to the MAJOR axis; wrapped to (-π/2, π/2])
         "theta_pixel": "Orientation of the ellipse MAJOR axis in pixel coordinates (same convention as 'theta').",
         "theta_pixel_err": "1σ uncertainty of theta_pixel (major-axis orientation) in radians; propagated through the world↔pixel transform.",
+        "theta_pixel_math": "Orientation of the ellipse MAJOR axis in pixel coordinates using the math convention (+x toward +y).",
+        "theta_pixel_math_err": "1σ uncertainty of theta_pixel_math in radians.",
+        "theta_pixel_pa": "Orientation of the ellipse MAJOR axis in pixel coordinates using position angle (+y toward +x).",
+        "theta_pixel_pa_err": "1σ uncertainty of theta_pixel_pa in radians.",
         "theta_world": "Orientation of the ellipse MAJOR axis in world coordinates (same convention as 'theta').",
         "theta_world_err": "1σ uncertainty of theta_world (major-axis orientation) in radians; propagated through the pixel↔world transform.",
+        "theta_world_math": "Orientation of the ellipse MAJOR axis in world coordinates using the math convention (+x toward +y).",
+        "theta_world_math_err": "1σ uncertainty of theta_world_math in radians.",
+        "theta_world_pa": "Orientation of the ellipse MAJOR axis in world coordinates using position angle (+y toward +x).",
+        "theta_world_pa_err": "1σ uncertainty of theta_world_pa in radians.",
         # amplitudes / background
         "amplitude": "Component amplitude (peak height above offset) in data units.",
         "peak": "Model peak value at the component center (offset + amplitude) in data units.",
@@ -2420,6 +3099,11 @@ def overlay_fit_components(
     This implementation is resilient: when requested fields are missing, it
     falls back to other reasonable options and, as a last resort, draws
     axis-aligned ellipses (rotation = 0°) instead of raising KeyError.
+
+    Returns
+    -------
+    None
+        The function draws in place on ``ax`` and does not return a value.
     """
     from matplotlib.patches import Ellipse as _Ellipse
 
@@ -2577,11 +3261,21 @@ def overlay_fit_components(
         """
         # Branchless, behavior-preserving ordering (easier to cover)
         first, second = ("pa", "math") if prefer == "pa" else ("math", "pa")
-        cands = [f"theta_{frame_name}_{first}", f"theta_{frame_name}_{second}"]
-        for nm in cands:
+        cands = [
+            (f"theta_{frame_name}_{first}", first),
+            (f"theta_{frame_name}_{second}", second),
+            (f"theta_{frame_name}", prefer if prefer in ("pa", "math") else "math"),
+            ("theta", prefer if prefer in ("pa", "math") else "math"),
+        ]
+        for nm, kind_hint in cands:
             a = _arr(nm)
             if a is not None:
-                kind = "pa" if nm.endswith("_pa") else "math"
+                if nm.endswith("_pa"):
+                    kind = "pa"
+                elif nm.endswith("_math"):
+                    kind = "math"
+                else:
+                    kind = kind_hint
                 return a, kind
         return None, None
 
@@ -2660,11 +3354,45 @@ def plot_components(
     show: bool = None,
 ):
     """
-    Quicklook: data (and optional residual) with fitted components overlaid as ellipses.
+    Plot one fitted image plane and optionally its residual with component overlays.
 
-    • Uses world coordinates if the DataArray has numeric, monotonic coords on the plotting dims;
-      otherwise falls back to pixel coordinates.
-    • Draws either 1-σ or FWHM ellipses (`fwhm=True`) and respects math/PA (`angle=`).
+    Parameters
+    ----------
+    data : ArrayOrDA
+        Original image-like input accepted by :func:`fit_multi_gaussian2d`.
+    result : xr.Dataset
+        Dataset produced by :func:`fit_multi_gaussian2d`.
+    dims : Sequence[str | int] | None, optional
+        Plot-plane dimension specifier. Supported choices are explicit dimension names
+        or integer dimension indices. If omitted, the same rules as
+        :func:`_resolve_dims` are used.
+    indexer : Mapping[str, int] | None, optional
+        For inputs with leading non-plane dimensions, integer index selections used to
+        choose a single plane for plotting.
+    show_residual : bool, default True
+        If ``True`` and the result dataset contains ``residual``, add a second panel
+        showing the residual image.
+    fwhm : bool, default False
+        If ``True``, draw FWHM ellipses. If ``False``, draw one-sigma ellipses.
+    angle : str | None, optional
+        Preferred overlay angle convention. Supported choices are ``"math"``,
+        ``"pa"``, or ``None`` to let the plotting helper auto-select.
+    show : bool | None, optional
+        If ``True``, call ``matplotlib.pyplot.show()``. If ``False``, suppress the
+        display call. If ``None``, defer to the module's existing plotting behavior.
+
+    Returns
+    -------
+    tuple
+        Tuple ``(fig, axes)`` where ``fig`` is the Matplotlib figure and ``axes`` is
+        either a single axes object or an array of axes, matching the created layout.
+
+    Notes
+    -----
+    The helper uses world coordinates when the plotted dimensions carry finite,
+    monotonic 1-D coordinates; otherwise it falls back to pixel plotting. Component
+    overlays are drawn in the matching frame so fitted x/y centers are interpreted in
+    the same convention as the displayed axes.
     """
     import numpy as _np
 
@@ -2690,6 +3418,14 @@ def plot_components(
     else:
         data2d = da_tr
         res_plane = result
+
+    # If the caller passes a spatially subsetted data plane but an unsliced fit result,
+    # align the result to the displayed x/y coordinates before plotting residual/model.
+    if isinstance(res_plane, xr.Dataset) and dim_x in res_plane.dims and dim_y in res_plane.dims:
+        try:
+            res_plane, _ = xr.align(res_plane, data2d, join="right")
+        except Exception:
+            pass
 
     # Decide plotting coords (world if possible)
     use_world = (dim_x in data2d.coords) and (dim_y in data2d.coords)
@@ -2752,7 +3488,12 @@ def plot_components(
     )
     # Residual panel (if present)
     if show_residual and ("residual" in res_plane):
-        R = _np.asarray(res_plane["residual"].values, dtype=float)
+        residual_da = res_plane["residual"]
+        if (dim_x in residual_da.dims) and (dim_y in residual_da.dims):
+            residual_da = residual_da.transpose(
+                *(d for d in residual_da.dims if d not in (dim_y, dim_x)), dim_y, dim_x
+            )
+        R = _np.asarray(residual_da.values, dtype=float)
         if use_world:
             ax1.pcolormesh(x, y, R, shading="auto")
         else:
