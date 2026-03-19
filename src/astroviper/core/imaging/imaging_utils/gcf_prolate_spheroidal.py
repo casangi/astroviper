@@ -77,11 +77,19 @@ def create_prolate_spheroidal_kernel(oversampling, support, n_uv):
     kernel_image_1D_v = prolate_spheroidal_function(kernel_image_points_1D_v)[0]
 
     kernel_image = np.outer(kernel_image_1D_u, kernel_image_1D_v)
-
     # kernel_image[kernel_image > 0.0] = kernel_image.max() / kernel_image[kernel_image > 0.0]
-
     # kernel_image =  kernel_image/kernel_image.max()
-    return kernel, kernel_image
+    
+    return kernel,  kernel_image 
+
+def create_prolate_spheroidal_correcting_image_1D(n_lm_padded):
+    kernel_image_points_1D_u = np.abs(2.0 * coordinates(n_lm_padded[0]))
+    kernel_image_1D_u = prolate_spheroidal_function(kernel_image_points_1D_u)[0]
+
+    kernel_image_points_1D_v = np.abs(2.0 * coordinates(n_lm_padded[1]))
+    kernel_image_1D_v = prolate_spheroidal_function(kernel_image_points_1D_v)[0]
+    
+    return kernel_image_1D_u, kernel_image_1D_v
 
 
 def create_prolate_spheroidal_kernel_1D(oversampling, support):

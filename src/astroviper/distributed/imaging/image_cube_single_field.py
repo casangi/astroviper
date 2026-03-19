@@ -326,9 +326,9 @@ def wrap_image_cube_single_field_node_task(input_params):
     )
 
     logger.debug("Processing set iterator created with partitions.")
-    #result = image_cube_single_field_node_task(input_params, ps_iter, img_xds)
-    import pandas as pd
-    result = pd.DataFrame({"temp":[42]})  # Placeholder to test memory management without running the actual node task.
+    result = image_cube_single_field_node_task(input_params, ps_iter, img_xds)
+    # import pandas as pd
+    # result = pd.DataFrame({"temp":[42]})  # Placeholder to test memory management without running the actual node task.
 
     logger.debug(
         "Memory usage after completing node task, before releasing references: "
