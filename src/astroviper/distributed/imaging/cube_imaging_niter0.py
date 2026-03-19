@@ -25,7 +25,7 @@ def cube_imaging_niter0(
     from graphviper.graph_tools.coordinate_utils import make_parallel_coord
     from graphviper.graph_tools import generate_dask_workflow, generate_airflow_workflow
     from graphviper.graph_tools import map, reduce
-    from astroviper.distributed.imaging.utils import make_image_mosaic
+    from astroviper.task.imaging import make_image_mosaic
     from xradio.image import make_empty_sky_image
     from xradio.image import write_image
     import zarr
