@@ -1,15 +1,7 @@
-# _PS_CORR_IMAGE_CACHE = {}
-import tracemalloc
 
-# def _get_ps_corr_image(n_l, n_m):
-#     key = (n_l, n_m)
-#     if key not in _PS_CORR_IMAGE_CACHE:
-#         from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import (
-#             create_prolate_spheroidal_kernel,
-#         )
-#         _, ps_corr_image = create_prolate_spheroidal_kernel(100, 7, n_uv=[n_l, n_m])
-#         _PS_CORR_IMAGE_CACHE[key] = ps_corr_image
-#     return _PS_CORR_IMAGE_CACHE[key]
+import pandas as pd
+from astroviper.core.imaging import fft_normalize_prolate_spheriodal_gridder
+from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import create_prolate_spheroidal_correcting_image_1D
 
 
 def image_cube_single_field_node_task(input_params, ps_iter, img_xds):
@@ -20,147 +12,47 @@ def image_cube_single_field_node_task(input_params, ps_iter, img_xds):
     import xarray as xr
     import zarr
     from xradio.measurement_set.load_processing_set import ProcessingSetIterator
-    from astroviper.core.imaging.fft_norm_img_xds_v2 import fft_norm_img_xds
     import toolviper.utils.logger as logger
+    
+    logger.debug("Processing chunk " + str(input_params["task_id"]))
 
-    # ps_xdt = load_processing_set(
-    #     input_params["input_data_store"], input_params["data_selection"]
-    # )
-
-    residual_cycle_cube_single_field_node_task(
+    #while loop here
+    img_xds, return_df = residual_cycle_cube_single_field_node_task(
         ps_iter, img_xds, input_params, is_n_iter_0=True
     )
 
-    return_dict = {
-        "task_id": [input_params["task_id"]],
-        "n_channels": [len(input_params["task_coords"]["frequency"]["data"])],
-        "T_load": 42.0,
-    }
-    df = pd.DataFrame(return_dict)
+    
+    return_df["task_id"] = input_params["task_id"]
+    return_df["n_channels"] = len(input_params["task_coords"]["frequency"]["data"])
 
-    # print("**********", img_xds.data_vars.keys(), "**********")
 
     # #Write Data chunk to disk
-    # import time
-    # start_write = time.time()
-    # for dv in input_params["image_data_variables_keep"]:
-    #     dv = dv.upper()
-    #     size_dict = img_xds.sizes
-    #     idx = []
-    #     for dim in img_xds[dv].dims:
-    #         if dim in input_params["task_coords"]:
-    #             idx.append(input_params["task_coords"][dim]["slice"])
-    #         else:
-    #             idx.append(slice(None))
-    #     idx = tuple(idx)
-    #     # print("dv: ", dv, " idx: ", idx, " size_dict: ", size_dict)
+    import time
+    start_write = time.time()
+    for dv in input_params["image_data_variables_keep"]:
+        dv = dv.upper()
+        size_dict = img_xds.sizes
+        idx = []
+        for dim in img_xds[dv].dims:
+            if dim in input_params["task_coords"]:
+                idx.append(input_params["task_coords"][dim]["slice"])
+            else:
+                idx.append(slice(None))
+        idx = tuple(idx)
+        # print("dv: ", dv, " idx: ", idx, " size_dict: ", size_dict)
 
-    #     group = zarr.open_group(input_params["image_store"], mode="r+")
-    #     sky = group[dv]
-    #     sky[idx] = img_xds[dv].values
-    # logger.debug('Time to write to disk ' + str(time.time() - start_write))
-
-    # Explicitly release large arrays so the synchronous dask scheduler doesn't
-    # hold them alive until the entire compute() call returns.
-    import gc
-
-    img_xds = None
-    ps_iter = None
-    gc.collect()
-
-    import ctypes
-
-    ctypes.CDLL("libc.so.6").malloc_trim(0)
-    logger.debug("Trimmed all the data")
-
-    # Before task 1 returns, take a snapshot
-    if not hasattr(image_cube_single_field_node_task, "_snap1"):
-        tracemalloc.start()
-        image_cube_single_field_node_task._snap1 = tracemalloc.take_snapshot()
-    else:
-        snap2 = tracemalloc.take_snapshot()
-        top_stats = snap2.compare_to(image_cube_single_field_node_task._snap1, "lineno")
-        print("=== Memory added between task 1 and task 2 ===")
-        for stat in top_stats[:15]:
-            print(stat)
-
-    return df
-
-    # ps_single_pol_xdt = load_processing_set(input_params["input_data_store"], input_params["data_selection"])
-
-    # print("ps_single_pol_xdt ", ps_single_pol_xdt["twhya_selfcal_5chans_lsrk_0"].frequency.values, "\n *****************")
-
-    # msv4 = ps_single_pol_xdt["twhya_selfcal_5chans_lsrk_0"]
-
-    # params = {
-    #     # Image geometry - use the npix from generated data
-    #     "image_size": input_params["image_params"]["image_size"],
-    #     "cell_size": input_params["image_params"]["cell_size"],
-
-    #     # Gridding
-    #     "support": 7,
-    #     "oversampling": 100,
-
-    #     # Deconvolution
-    #     "algorithm": "hogbom",
-    #     "gain": 0.1,
-    #     "niter": 10000,           # Max total iterations
-    #     "threshold": 0.01,      # Stop at 10 mJy
-
-    #     # Major cycle control - CAPPED AT 3 FOR THIS DEMO
-    #     "nmajor": 3,
-    #     "cyclefactor": 1.5,
-    #     "minpsffraction": 0.05,
-    #     "maxpsffraction": 0.8,
-
-    #     # Spectral/polarization mode
-    #     "chan_mode": "cube",
-    #     "corr_type": "linear",  # XX, YY -> Stokes I, Q
-    # }
-
-    # # Run the imaging loop
-    # model, residual, return_dict, controller = run_imaging_loop(
-    #     ms4=msv4,
-    #     params=params,
-    #     initial_model=None,
-    #     output_dir=".",
-    # )
-
-    # sky = model + residual
-
-    # img_xds["SKY"] = xr.DataArray(sky[None,...], dims=["time", "frequency", "polarization", "l", "m"])
-
-    # parallel_dims_chunk_id = dict(
-    #     zip(input_params["parallel_dims"], input_params["chunk_indices"])
-    # )
-    # #print("parallel_dims_chunk_id ", parallel_dims_chunk_id)
-    # #print("input_params[parallel_dims] ", input_params["parallel_dims"])
-
-    # #task_coords  {'frequency': {'data': array([3.72731197e+11]), 'dims': ('frequency',), 'attrs': {'observer': 'lsrk', 'reference_frequency': {'attrs': {'units': 'Hz', 'observer': 'lsrk', 'type': 'spectral_coord'}, 'data': 372731807168.79895, 'dims': []}, 'rest_frequencies': {'data': 372731807168.79895, 'dims': [], 'attrs': {'units': 'Hz', 'type': 'quantity'}}, 'rest_frequency': {'data': 372731807168.79895, 'dims': [], 'attrs': {'units': 'Hz', 'type': 'quantity'}}, 'type': 'spectral_coord', 'units': 'Hz', 'wave_units': 'mm'}, 'slice': slice(1, 2, None)}}
-
-    # #Write Data chunk to disk
-    # for dv in input_params["image_data_variables_keep"]:
-    #     dv = dv.upper()
-    #     size_dict = img_xds.sizes
-    #     idx = []
-    #     for dim in img_xds[dv].dims:
-    #         if dim in input_params["task_coords"]:
-    #             idx.append(input_params["task_coords"][dim]["slice"])
-    #         else:
-    #             idx.append(slice(None))
-    #     idx = tuple(idx)
-    #     print("dv: ", dv, " idx: ", idx, " size_dict: ", size_dict)
-
-    #     group = zarr.open_group(input_params["image_store"], mode="r+")
-    #     sky = group[dv]
-    #     sky[idx] = img_xds[dv].values
-
-    # return df
+        group = zarr.open_group(input_params["image_store"], mode="r+")
+        sky = group[dv]
+        sky[idx] = img_xds[dv].values
+    logger.debug('Time to write to disk ' + str(time.time() - start_write))
 
 
-from memory_profiler import profile
+
+    return return_df
 
 
+
+#from memory_profiler import profile
 # @profile(precision=1)
 def residual_cycle_cube_single_field_node_task(
     ps_iter, img_xds, input_params, is_n_iter_0
@@ -179,6 +71,7 @@ def residual_cycle_cube_single_field_node_task(
         _description_
     """
     import toolviper.utils.logger as logger
+    import xarray as xr
     import time
 
     start_0 = time.time()
@@ -194,33 +87,29 @@ def residual_cycle_cube_single_field_node_task(
         add_visibility_grid_single_field,
     )
 
-    from astroviper.core.imaging.fft_norm_img_xds_v2 import fft_norm_img_xds
+    from astroviper.core.imaging.fft_normalize_prolate_spheriodal_gridder import ifft_norm_img_xds
     from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import (
         create_prolate_spheroidal_kernel_1D,
     )
 
-    logger.debug("Processing chunk " + str(input_params["task_id"]))
 
-    T_compute = 0.0
-    T_load = 0.0
     T_weights = 0.0
-    T_gcf = 0.0
-    T_aperture_grid = 0.0
+    T_vis_mask = 0.0
     T_uv_sampling_grid = 0.0
     T_vis_grid = 0.0
+    T_add_to_grid = 0.0
 
     img_data_group_name = "single_field"
 
-    ps_data_group_name = input_params["data_group_name"]
+    ps_data_group_name = input_params["processing_set_data_group_name"]
     img_xds.attrs["type"] = "image_dataset"
     img_xds = img_xds.xr_img.add_data_group(
         new_data_group_name=img_data_group_name,
         new_data_group={"description": "test", "date": "2026"},
     )
-    # print("1. $$$$$$$ img_xds ", img_xds.attrs["data_groups"].keys())
     logger.debug("img_xds size " + str(img_xds.nbytes / 1e9) + " GB")
 
-    start_4 = time.time()
+    T_start_weight = time.time()
     data_group_out = calculate_imaging_weights(
         ps_iter,
         img_xds,
@@ -228,23 +117,23 @@ def residual_cycle_cube_single_field_node_task(
         return_weight_density_grid=False,
         sel_params={"data_group_in_name": ps_data_group_name},
     )
-    T_weights = T_weights + time.time() - start_4
+    T_weights = T_weights + time.time() - T_start_weight
+    logger.debug("Calculate imaging weights " + str(time.time() - T_start_weight))
 
-    logger.debug("Calculate imaging weights " + str(time.time() - start_4))
-
-    # print("$$$$$$$$$$", data_group_out, "***************")
+    T_start_gcf = time.time()
     cgk_1D = create_prolate_spheroidal_kernel_1D(100, 7)
-
+    T_gcf = time.time() - T_start_gcf
+    
+    T_start_add_to_grid = time.time()
     for ms_xdt in ps_iter:
-        start_compute = time.time()
+        T_start_vis_mask = time.time()
         # Create a mask where baseline_antenna1_name does not equal baseline_antenna2_name
         mask = ms_xdt["baseline_antenna1_name"] != ms_xdt["baseline_antenna2_name"]
         # Apply the mask to the Dataset
         ms_xdt.ds = ms_xdt.ds.where(mask, drop=True)
+        T_vis_mask = T_vis_mask + time.time() - T_start_vis_mask
 
-        # print("xxxx ms_xdt data_groups ", ms_xdt.data_groups.keys(), " data_vars ", ms_xdt.ds.data_vars.keys())
-
-        start_7 = time.time()
+        T_start_uv = time.time()
         add_uv_sampling_grid_single_field(
             ms_xdt,
             cgk_1D,
@@ -255,11 +144,10 @@ def residual_cycle_cube_single_field_node_task(
             img_sel_params={"data_group_in_name": img_data_group_name},
             grid_params=input_params["image_params"],
         )  # Will become the PSF.
-        T_uv_sampling_grid = T_uv_sampling_grid + time.time() - start_7
-        logger.debug("Add UV sampling grid " + str(time.time() - start_7))
+        T_uv_sampling_grid = T_uv_sampling_grid + time.time() - T_start_uv
 
-        # print("3. $$$$$$$ img_xds ", img_xds.attrs["data_groups"].keys())
-        start_8 = time.time()
+
+        T_start_vis = time.time()
         add_visibility_grid_single_field(
             ms_xdt,
             cgk_1D,
@@ -270,21 +158,15 @@ def residual_cycle_cube_single_field_node_task(
             img_sel_params={"data_group_in_name": img_data_group_name},
             grid_params=input_params["image_params"],
         )
-        T_vis_grid = T_vis_grid + time.time() - start_8
-        logger.debug("Add visibility grid " + str(time.time() - start_8))
-        T_compute = T_compute + time.time() - start_compute
+        T_vis_grid = T_vis_grid + time.time() - T_start_vis
 
-    ps_iter.reset()  # Reset the iterator to the beginning for downstream tasks.
-    # print("img_xds after loop ", img_xds.attrs["data_groups"].keys())
-    # print("img_xds ", img_xds.data_vars.keys)
-    # print("*************")
+    T_add_to_grid = time.time() - T_start_add_to_grid
 
-    import xarray as xr
+    _, T_load = ps_iter.reset()  # Reset the iterator to the beginning for downstream tasks.
+    logger.debug("Load data and add to grid " + str(T_load))
 
-    gcf_xds = xr.Dataset()
-    gcf_xds.attrs["oversampling"] = [100, 100]
-    gcf_xds.attrs["SUPPORT"] = [7, 7]
-
+    #Creation of primary beam
+    start = time.time()
     pb_parms = {}
     pb_parms["list_dish_diameters"] = np.array([10.7])
     pb_parms["list_blockage_diameters"] = np.array([0.75])
@@ -293,58 +175,50 @@ def residual_cycle_cube_single_field_node_task(
     input_params["image_params"]["image_center"] = (
         np.array(input_params["image_params"]["image_size"]) // 2
     ).tolist()
-    # (1, 1, len(pol), 1, 1))
-    # print(_airy_disk_rorder(ms_xdt.frequency.values, ms_xdt.polarization.values, pb_parms, grid_params).shape)
 
     from astroviper.core.imaging.imaging_utils.make_pb_symmetric import (
         airy_disk_rorder,
     )
-
-    start = time.time()
     img_xds["PRIMARY_BEAM"] = xr.DataArray(
         airy_disk_rorder(
             img_xds.frequency.values,
             img_xds.polarization.values,
             pb_parms,
             input_params["image_params"],
-        )[0, ...][None, ...],
-        dims=("time", "frequency", "polarization", "l", "m"),
+        )[0, ...], #Select first since we only have one dish diameter.
+        dims=("frequency", "polarization", "l", "m"),
     )
     logger.debug("Calculate primary beam " + str(time.time() - start))
-
-    # ps_corr_image = _get_ps_corr_image(img_xds.sizes["l"], img_xds.sizes["m"])
-    start = time.time()
-    # from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import create_prolate_spheroidal_kernel
-    # _, ps_corr_image = create_prolate_spheroidal_kernel(100, 7, n_uv=[img_xds.sizes["l"], img_xds.sizes["m"]])
-
-    # # print(ps_corr_image.shape)
-    # gcf_xds["PS_CORR_IMAGE"] = xr.DataArray(ps_corr_image, dims=("l", "m"))
-    # logger.debug("Calculate ps correcting image " + str(time.time() - start))
-
-    start_9 = time.time()
-    # fft_norm_img_xds(
-    #     img_xds,
-    #     gcf_xds,
-    #     grid_params=input_params["image_params"],
-    #     norm_params={},
-    #     sel_params={
-    #         "data_group_in_name": img_data_group_name,
-    #         "data_group_out_name": img_data_group_name,
-    #     },
-    # )
-    fft_norm_img_xds(
+        
+    # Temp: Add singleton time dim to img_xds for FFT normalization. Need to fix gridders to not require this.  
+    del img_xds["time"]
+    img_xds = img_xds.expand_dims(dim="time", axis=0)
+    
+    start_fft_norm = time.time()
+    img_xds = ifft_norm_img_xds(
         img_xds,
-        [100, 100],
-        grid_params=input_params["image_params"],
-        norm_params={},
-        sel_params={
-            "data_group_in_name": img_data_group_name,
-            "data_group_out_name": img_data_group_name,
-        },
+        image_params=input_params["image_params"],
+        data_group_in={"uv_sampling": "UV_SAMPLING", "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION", "visibility": "VISIBILITY", "visibility_normalization": "VISIBILITY_NORMALIZATION"},
+        data_group_out={"sky": "SKY_RESIDUAL", "point_spread_function": "POINT_SPREAD_FUNCTION"},
+        image_data_variables_keep=input_params["image_data_variables_keep"]
     )
+    T_fft_norm = time.time() - start_fft_norm
+    logger.debug("9.  fft norm " + str(time.time() - start_fft_norm))
 
-    T_fft = time.time() - start_9
-    logger.debug("9.  fft norm " + str(time.time() - start_9))
+    return_dict = {
+        "T_weights": [T_weights-T_load],
+        "T_vis_mask": [T_vis_mask],
+        "T_uv_sampling_grid": [T_uv_sampling_grid],
+        "T_vis_grid": [T_vis_grid],
+        "T_add_to_grid": [T_add_to_grid],
+        "T_fft_norm": [T_fft_norm],
+        "T_load": [T_load],
+    }
+    return_df = pd.DataFrame(return_dict)
+  
+    return img_xds, return_df
+
+
 
     #####################################
 
