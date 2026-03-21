@@ -1,6 +1,7 @@
 # file: src/astroviper/fitting/multi_gaussian2d_fit.py
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple, Union, Any, Dict, List
 import numpy as np
 import xarray as xr
@@ -1819,6 +1820,1429 @@ def _add_angle_attrs(ds, conv, frame):
     return ds
 
 
+@dataclass
+class _FitExecutionContext:
+    """
+    Bundle the geometric and dimensional context for one public fit invocation.
+
+    Parameters
+    ----------
+    da_in : xr.DataArray
+        Normalized input as a DataArray before any transposition.
+    da_tr : xr.DataArray
+        DataArray with the fit plane moved to trailing ``(y, x)`` order.
+    dim_x : str
+        Name of the x dimension used by the fit plane.
+    dim_y : str
+        Name of the y dimension used by the fit plane.
+    core : list[str]
+        Core dimensions passed to ``xarray.apply_ufunc`` for the fit plane.
+    coord_x : np.ndarray | None
+        Attached x-axis coordinate values from ``da_tr`` when present.
+    coord_y : np.ndarray | None
+        Attached y-axis coordinate values from ``da_tr`` when present.
+    sx_sign : float
+        Orientation sign inferred from the x axis.
+    sy_sign : float
+        Orientation sign inferred from the y axis.
+    is_left_handed : bool
+        Whether the two axes form a left-handed image frame.
+
+    Notes
+    -----
+    The public fitter repeatedly needs the same dimensional bookkeeping and axis
+    handedness. Grouping those values in one structure keeps the orchestration
+    logic short and avoids recomputing subtle frame information.
+    """
+
+    da_in: xr.DataArray
+    da_tr: xr.DataArray
+    dim_x: str
+    dim_y: str
+    core: List[str]
+    coord_x: Optional[np.ndarray]
+    coord_y: Optional[np.ndarray]
+    sx_sign: float
+    sy_sign: float
+    is_left_handed: bool
+
+
+def _build_fit_execution_context(
+    data: ArrayOrDA,
+    dims: Optional[Sequence[Union[str, int]]],
+) -> _FitExecutionContext:
+    """
+    Normalize the public input into a stable fit-plane context.
+
+    Parameters
+    ----------
+    data : ArrayOrDA
+        Input accepted by :func:`fit_multi_gaussian2d`.
+    dims : Sequence[str | int] | None
+        Optional dimension specifier for the fit plane. Supported choices are
+        explicit dimension names or integer dimension indices.
+
+    Returns
+    -------
+    _FitExecutionContext
+        Context object containing the normalized DataArray, the transposed fit
+        view, and handedness metadata derived from the fit axes.
+
+    Notes
+    -----
+    The fitter operates internally on trailing ``(y, x)`` axes regardless of the
+    original input ordering. Axis-orientation signs are derived from any attached
+    1-D coordinate vectors and default conservatively when coordinates are absent.
+    """
+    da_in = _ensure_dataarray(data)
+    dim_x, dim_y = _resolve_dims(da_in, dims)
+    da_tr = da_in.transpose(
+        *(d for d in da_in.dims if d not in (dim_y, dim_x)), dim_y, dim_x
+    )
+    coord_x = np.asarray(da_tr.coords[dim_x].values) if dim_x in da_tr.coords else None
+    coord_y = np.asarray(da_tr.coords[dim_y].values) if dim_y in da_tr.coords else None
+    sx_sign = _axis_sign(coord_x)
+    sy_sign = _axis_sign(coord_y)
+    return _FitExecutionContext(
+        da_in=da_in,
+        da_tr=da_tr,
+        dim_x=dim_x,
+        dim_y=dim_y,
+        core=[dim_y, dim_x],
+        coord_x=coord_x,
+        coord_y=coord_y,
+        sx_sign=sx_sign,
+        sy_sign=sy_sign,
+        is_left_handed=(sx_sign * sy_sign) < 0.0,
+    )
+
+
+def _resolve_fit_mask(
+    mask: Optional[ArrayOrDA],
+    da_tr: xr.DataArray,
+    dim_y: str,
+    dim_x: str,
+) -> xr.DataArray:
+    """
+    Normalize the public mask argument into a boolean DataArray aligned to the fit grid.
+
+    Parameters
+    ----------
+    mask : ArrayOrDA | None
+        Mask-like object accepted by :func:`fit_multi_gaussian2d`. Supported
+        choices are ``None``, a NumPy array, a Dask array, an xarray.DataArray,
+        or a CRTF/selection string.
+    da_tr : xr.DataArray
+        Transposed fit view whose trailing axes are ``(y, x)``.
+    dim_y : str
+        Name of the y dimension for the fit plane.
+    dim_x : str
+        Name of the x dimension for the fit plane.
+
+    Returns
+    -------
+    xr.DataArray
+        Boolean mask broadcast and aligned to ``da_tr``.
+
+    Notes
+    -----
+    String masks are resolved through the image-selection helper. Plain arrays are
+    wrapped with either the fit-plane dims ``(y, x)`` or the full data dims
+    depending on their rank before xarray alignment handles broadcasting.
+    """
+    if mask is None:
+        return xr.ones_like(da_tr, dtype=bool)
+
+    if isinstance(mask, str):
+        mda = _select_mask(da_tr, mask)
+        if isinstance(mda, xr.Dataset):
+            if "mask" not in mda:
+                raise TypeError(
+                    "selection.select_mask returned a Dataset without a 'mask' variable"
+                )
+            mda = mda["mask"]
+        if isinstance(mda, np.ndarray):
+            mda = xr.DataArray(mda, dims=[dim_y, dim_x] if mda.ndim == 2 else da_tr.dims)
+        if not isinstance(mda, xr.DataArray):
+            raise TypeError("selection.select_mask returned unsupported mask type")
+    elif isinstance(mask, xr.DataArray):
+        mda = mask
+    else:
+        if getattr(mask, "ndim", None) == 2:
+            mda = xr.DataArray(mask, dims=[dim_y, dim_x])
+        else:
+            mda = xr.DataArray(mask, dims=da_tr.dims)
+
+    mda = mda.astype(bool)
+    mda, _ = xr.align(mda, da_tr, join="right")
+    return mda
+
+
+def _prepare_fit_configuration(
+    initial_guesses: Optional[
+        Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]
+    ],
+    bounds: Optional[
+        Dict[str, Union[Tuple[float, float], Sequence[Tuple[float, float]]]]
+    ],
+    initial_is_fwhm: bool,
+    angle: str,
+    n_components: int,
+    sx_sign: float,
+    sy_sign: float,
+    is_left_handed: bool,
+) -> tuple[
+    Optional[Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]],
+    Optional[Dict[str, Any]],
+    bool,
+]:
+    """
+    Prepare user-supplied configuration into the optimizer's native representation.
+
+    Parameters
+    ----------
+    initial_guesses : np.ndarray | Sequence[dict] | dict | None
+        Initial-guess specification accepted by :func:`fit_multi_gaussian2d`.
+    bounds : dict | None
+        Bounds mapping accepted by :func:`fit_multi_gaussian2d`.
+    initial_is_fwhm : bool
+        Whether array-form width guesses should be interpreted as FWHM and converted
+        to sigma before optimization.
+    angle : str
+        Public angle convention selector. Supported choices are ``"math"``,
+        ``"pa"``, and ``"auto"``.
+    n_components : int
+        Number of Gaussian components.
+    sx_sign : float
+        Orientation sign inferred from the x axis.
+    sy_sign : float
+        Orientation sign inferred from the y axis.
+    is_left_handed : bool
+        Whether the fit plane is left-handed.
+
+    Returns
+    -------
+    tuple
+        ``(init_for_fit, bounds_for_fit, want_pa)`` where ``init_for_fit`` and
+        ``bounds_for_fit`` are ready for the low-level fitter and ``want_pa``
+        records whether public angle reporting should use the PA convention.
+
+    Notes
+    -----
+    Width parameters are always converted into sigma units before reaching the
+    optimizer. Angle guesses are converted into the internal math convention when
+    the public API is operating in PA mode.
+    """
+    ig = initial_guesses
+    if (
+        ig is not None
+        and initial_is_fwhm
+        and isinstance(ig, np.ndarray)
+        and ig.shape == (int(n_components), 6)
+    ):
+        ig = ig.copy()
+        ig[:, 3] = _sigma_from_fwhm(ig[:, 3])
+        ig[:, 4] = _sigma_from_fwhm(ig[:, 4])
+    if isinstance(ig, dict) and "components" in ig and isinstance(ig["components"], np.ndarray):
+        arr = np.asarray(ig["components"], dtype=float)
+        if arr.shape == (int(n_components), 6) and initial_is_fwhm:
+            arr = arr.copy()
+            arr[:, 3] = _sigma_from_fwhm(arr[:, 3])
+            arr[:, 4] = _sigma_from_fwhm(arr[:, 4])
+            ig = dict(ig)
+            ig["components"] = arr
+    elif isinstance(ig, (list, tuple)) and ig and isinstance(ig[0], dict):
+        mapped: List[Dict[str, Any]] = []
+        for d in ig:
+            dd = dict(d)
+            if "fwhm_major" in dd:
+                dd["sigma_x"] = float(_sigma_from_fwhm(dd.pop("fwhm_major")))
+            if "fwhm_minor" in dd:
+                dd["sigma_y"] = float(_sigma_from_fwhm(dd.pop("fwhm_minor")))
+            mapped.append(dd)
+        ig = mapped
+
+    want_pa = (angle == "pa") or (angle == "auto" and is_left_handed)
+    init_for_fit = _convert_init_theta(
+        ig,
+        to_math=want_pa,
+        sx=sx_sign,
+        sy=sy_sign,
+        n=int(n_components),
+    )
+
+    bnds: Optional[Dict[str, Any]] = bounds
+    if bounds is not None:
+        conv = _FWHM2SIG
+        converted: Dict[str, Any] = {}
+        for key, value in bounds.items():
+            if key in ("fwhm_major", "fwhm_minor"):
+                target = "sigma_x" if key == "fwhm_major" else "sigma_y"
+                if (
+                    isinstance(value, (list, tuple))
+                    and value
+                    and isinstance(value[0], (list, tuple))
+                ):
+                    converted[target] = [
+                        (float(lo) * conv, float(hi) * conv) for (lo, hi) in value
+                    ]
+                else:
+                    lo, hi = value  # type: ignore[misc]
+                    converted[target] = (float(lo) * conv, float(hi) * conv)
+            else:
+                converted[key] = value
+        bnds = converted
+
+    return init_for_fit, bnds, want_pa
+
+
+def _resolve_fit_coordinate_axes(
+    original_input: ArrayOrDA,
+    context: _FitExecutionContext,
+    coord_type: str,
+    coords: Optional[Sequence[np.ndarray]],
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """
+    Resolve the coordinate vectors that define the optimizer's working frame.
+
+    Parameters
+    ----------
+    original_input : ArrayOrDA
+        Original public input passed to :func:`fit_multi_gaussian2d`.
+    context : _FitExecutionContext
+        Prepared fit context containing the transposed fit plane and dim names.
+    coord_type : str
+        DataArray coordinate selection mode. Supported choices are ``"world"``
+        and ``"pixel"``.
+    coords : Sequence[np.ndarray] | None
+        Optional ``(x1d, y1d)`` coordinate vectors for NumPy/Dask inputs.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, bool]
+        ``(x1d, y1d, world_mode)`` where ``world_mode`` indicates whether the
+        optimizer is operating on nontrivial world-coordinate axes.
+
+    Notes
+    -----
+    ``world_mode`` is derived numerically from the resolved axes rather than from
+    the public arguments so that explicit pixel-index coordinate arrays are treated
+    consistently even when provided through the world-coordinate pathways.
+    """
+    x1d, y1d = _extract_1d_coords_for_fit(
+        original_input,
+        context.da_tr,
+        coord_type,
+        coords,
+        context.dim_y,
+        context.dim_x,
+    )
+    return x1d, y1d, not _is_pixel_index_axes(x1d, y1d)
+
+
+def _run_fit_apply_ufunc(
+    context: _FitExecutionContext,
+    mask_da: xr.DataArray,
+    x1d: np.ndarray,
+    y1d: np.ndarray,
+    n_components: int,
+    min_threshold: Optional[Number],
+    max_threshold: Optional[Number],
+    init_for_fit: Optional[
+        Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]
+    ],
+    bounds_for_fit: Optional[Dict[str, Any]],
+    max_nfev: int,
+    return_model: bool,
+    return_residual: bool,
+):
+    """
+    Execute the vectorized plane-by-plane Gaussian fit on the prepared coordinate grid.
+
+    Parameters
+    ----------
+    context : _FitExecutionContext
+        Prepared fit context containing dims and the transposed fit plane.
+    mask_da : xr.DataArray
+        Boolean mask aligned to ``context.da_tr``.
+    x1d : np.ndarray
+        One-dimensional x-axis coordinates used by the optimizer.
+    y1d : np.ndarray
+        One-dimensional y-axis coordinates used by the optimizer.
+    n_components : int
+        Number of Gaussian components.
+    min_threshold : Number | None
+        Inclusive lower data threshold.
+    max_threshold : Number | None
+        Inclusive upper data threshold.
+    init_for_fit : np.ndarray | Sequence[dict] | dict | None
+        Initial guesses already converted into optimizer-native units.
+    bounds_for_fit : dict | None
+        Bounds already converted into optimizer-native units.
+    max_nfev : int
+        Maximum optimizer evaluations.
+    return_model : bool
+        Whether to request model planes from the low-level fitter.
+    return_residual : bool
+        Whether to request residual planes from the low-level fitter.
+
+    Returns
+    -------
+    tuple
+        Raw tuple of xarray objects returned by the low-level plane-fitting gufunc.
+
+    Notes
+    -----
+    This helper isolates the ``xarray.apply_ufunc`` signature and output-layout
+    bookkeeping from the public API so that the orchestration code reads as a
+    sequence of conceptual steps instead of a large gufunc configuration block.
+    """
+    x1d_da = xr.DataArray(x1d, dims=[context.dim_x])
+    y1d_da = xr.DataArray(y1d, dims=[context.dim_y])
+    out_dtypes = (
+        [np.float64] * 6
+        + [np.float64] * 6
+        + [np.float64] * 4
+        + [np.float64, np.float64]
+        + [np.bool_, np.float64]
+        + [np.float64, np.float64]
+    )
+    out_core_dims = (
+        [["component"]] * 6
+        + [["component"]] * 6
+        + [["component"]] * 4
+        + [[], []]
+        + [[], []]
+        + [[context.dim_y, context.dim_x], [context.dim_y, context.dim_x]]
+    )
+    return xr.apply_ufunc(
+        _multi_fit_plane_wrapper,
+        context.da_tr,
+        mask_da,
+        x1d_da,
+        y1d_da,
+        input_core_dims=[context.core, context.core, [context.dim_x], [context.dim_y]],
+        output_core_dims=out_core_dims,
+        vectorize=True,
+        dask="parallelized",
+        output_dtypes=out_dtypes,
+        dask_gufunc_kwargs={"output_sizes": {"component": int(n_components)}},
+        kwargs=dict(
+            n_components=int(n_components),
+            min_threshold=min_threshold,
+            max_threshold=max_threshold,
+            initial_guesses=init_for_fit,
+            bounds=bounds_for_fit,
+            max_nfev=int(max_nfev),
+            return_model=bool(return_model),
+            return_residual=bool(return_residual),
+        ),
+    )
+
+
+def _canonicalize_fit_outputs(results, want_pa: bool) -> Dict[str, xr.DataArray]:
+    """
+    Canonicalize raw fitter outputs into a consistent major-axis representation.
+
+    Parameters
+    ----------
+    results : tuple
+        Raw tuple returned by the vectorized plane-fitting helper.
+    want_pa : bool
+        Whether the public-facing angle aliases should use the PA convention.
+
+    Returns
+    -------
+    dict[str, xr.DataArray]
+        Mapping containing canonicalized centers, widths, angles, uncertainties,
+        diagnostic scalars, and optional image-plane outputs.
+
+    Notes
+    -----
+    The low-level fitter returns widths in sigma units and angles in the internal
+    sign convention. This helper enforces the public invariant that the reported
+    angle always describes the major axis and that the major/minor widths are
+    ordered consistently.
+    """
+    (
+        amp,
+        x0,
+        y0,
+        sx,
+        sy,
+        th,
+        amp_e,
+        x0_e,
+        y0_e,
+        sx_e,
+        sy_e,
+        th_e,
+        fwhm_maj,
+        fwhm_min,
+        peak,
+        peak_err,
+        offset,
+        offset_e,
+        success,
+        varexp,
+        residual,
+        model,
+    ) = results
+
+    th_math = -th
+    is_major_sx = xr.apply_ufunc(np.greater_equal, sx, sy, dask="parallelized")
+    sx, sy = xr.where(is_major_sx, sx, sy), xr.where(is_major_sx, sy, sx)
+    sx_e, sy_e = xr.where(is_major_sx, sx_e, sy_e), xr.where(is_major_sx, sy_e, sx_e)
+    th_math = xr.where(is_major_sx, th_math, th_math + np.pi / 2)
+
+    def _wrap_halfpi(t):
+        return ((t + np.pi / 2) % np.pi) - np.pi / 2
+
+    th_math = xr.apply_ufunc(_wrap_halfpi, th_math, dask="parallelized", vectorize=True)
+    theta_math = th_math
+    theta_pa = xr.DataArray(
+        _theta_math_to_pa(th_math.values), dims=th.dims, coords=th.coords
+    )
+    theta_math_err = th_e
+    theta_pa_err = th_e
+    th_public = theta_pa if want_pa else theta_math
+    th_public_err = theta_pa_err if want_pa else theta_math_err
+
+    return {
+        "amp": amp,
+        "x0": x0,
+        "y0": y0,
+        "sx": sx,
+        "sy": sy,
+        "amp_e": amp_e,
+        "x0_e": x0_e,
+        "y0_e": y0_e,
+        "sx_e": sx_e,
+        "sy_e": sy_e,
+        "th_e": th_e,
+        "fwhm_maj": fwhm_maj,
+        "fwhm_min": fwhm_min,
+        "peak": peak,
+        "peak_err": peak_err,
+        "offset": offset,
+        "offset_e": offset_e,
+        "success": success,
+        "varexp": varexp,
+        "residual": residual,
+        "model": model,
+        "theta_math": theta_math,
+        "theta_pa": theta_pa,
+        "theta_math_err": theta_math_err,
+        "theta_pa_err": theta_pa_err,
+        "th_public": th_public,
+        "th_public_err": th_public_err,
+        "th_math": th_math,
+    }
+
+
+def _build_published_parameter_dataset(
+    fit: Dict[str, xr.DataArray],
+    context: _FitExecutionContext,
+    x1d: np.ndarray,
+    y1d: np.ndarray,
+    world_mode: bool,
+    want_pa: bool,
+) -> xr.Dataset:
+    """
+    Build the published result dataset in both pixel and world parameter views.
+
+    Parameters
+    ----------
+    fit : dict[str, xr.DataArray]
+        Canonicalized fit outputs produced by :func:`_canonicalize_fit_outputs`.
+    context : _FitExecutionContext
+        Prepared fit context containing dim names and axis metadata.
+    x1d : np.ndarray
+        One-dimensional x-axis coordinates used by the optimizer.
+    y1d : np.ndarray
+        One-dimensional y-axis coordinates used by the optimizer.
+    world_mode : bool
+        Whether the optimizer ran natively in world coordinates.
+    want_pa : bool
+        Whether the public-facing angle aliases should use the PA convention.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset containing mirrored pixel-space and world-space component
+        parameters together with fit diagnostics.
+
+    Notes
+    -----
+    This helper centralizes the most mathematically dense part of the public API:
+    converting native fit outputs into the alternate coordinate frame while
+    propagating center, width, and angle uncertainties through local axis scales.
+    """
+    x0 = fit["x0"]
+    y0 = fit["y0"]
+    sx = fit["sx"]
+    sy = fit["sy"]
+    x0_e = fit["x0_e"]
+    y0_e = fit["y0_e"]
+    sx_e = fit["sx_e"]
+    sy_e = fit["sy_e"]
+    th_math = fit["th_math"]
+    theta_math = fit["theta_math"]
+    theta_pa = fit["theta_pa"]
+    theta_math_err = fit["theta_math_err"]
+    theta_pa_err = fit["theta_pa_err"]
+    th_public = fit["th_public"]
+    th_public_err = fit["th_public_err"]
+
+    if world_mode:
+        nx = x1d.shape[0]
+        ny = y1d.shape[0]
+        x_idx_axis = np.arange(nx, dtype=float)
+        y_idx_axis = np.arange(ny, dtype=float)
+        x0_pixel = xr.apply_ufunc(
+            np.interp,
+            x0,
+            xr.DataArray(x1d, dims=[context.dim_x]),
+            xr.DataArray(x_idx_axis, dims=[context.dim_x]),
+            input_core_dims=[["component"], [context.dim_x], [context.dim_x]],
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
+        y0_pixel = xr.apply_ufunc(
+            np.interp,
+            y0,
+            xr.DataArray(y1d, dims=[context.dim_y]),
+            xr.DataArray(y_idx_axis, dims=[context.dim_y]),
+            input_core_dims=[["component"], [context.dim_y], [context.dim_y]],
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
+        gx = np.gradient(x1d.astype(float))
+        gy = np.gradient(y1d.astype(float))
+        x0i = (
+            xr.apply_ufunc(
+                np.rint,
+                x0_pixel,
+                input_core_dims=[["component"]],
+                output_core_dims=[["component"]],
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[float],
+            )
+            .clip(0, nx - 1)
+            .astype(int)
+        )
+        y0i = (
+            xr.apply_ufunc(
+                np.rint,
+                y0_pixel,
+                input_core_dims=[["component"]],
+                output_core_dims=[["component"]],
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[float],
+            )
+            .clip(0, ny - 1)
+            .astype(int)
+        )
+        dx_local = xr.apply_ufunc(
+            np.take,
+            xr.DataArray(gx, dims=[context.dim_x]),
+            x0i,
+            input_core_dims=[[context.dim_x], ["component"]],
+            output_core_dims=[["component"]],
+            kwargs={"axis": 0, "mode": "clip"},
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
+        dy_local = xr.apply_ufunc(
+            np.take,
+            xr.DataArray(gy, dims=[context.dim_y]),
+            y0i,
+            input_core_dims=[[context.dim_y], ["component"]],
+            output_core_dims=[["component"]],
+            kwargs={"axis": 0, "mode": "clip"},
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
+
+        def _world_to_pixel_cov(sigx, sigy, theta, dx, dy):
+            c = np.cos(theta)
+            s = np.sin(theta)
+            a = (c * c) * sigx * sigx + (s * s) * sigy * sigy
+            b = (s * c) * (sigx * sigx - sigy * sigy)
+            d = (s * s) * sigx * sigx + (c * c) * sigy * sigy
+            invdx2 = 1.0 / (dx * dx)
+            invdy2 = 1.0 / (dy * dy)
+            A = a * invdx2
+            B = b * (1.0 / (dx * dy))
+            D = d * invdy2
+            tr = A + D
+            det = A * D - B * B
+            tmp = np.sqrt(np.maximum(tr * tr / 4.0 - det, 0.0))
+            lam1 = tr / 2.0 + tmp
+            lam2 = tr / 2.0 - tmp
+            theta_p = 0.5 * np.arctan2(2 * B, A - D)
+            lam_max = np.maximum(lam1, lam2)
+            lam_min = np.minimum(lam1, lam2)
+            return (
+                np.sqrt(np.maximum(lam_max, 0.0)),
+                np.sqrt(np.maximum(lam_min, 0.0)),
+                theta_p,
+            )
+
+        sigma_major_pixel, sigma_minor_pixel, theta_pixel_math = xr.apply_ufunc(
+            _world_to_pixel_cov,
+            sx,
+            sy,
+            th_math,
+            dx_local,
+            dy_local,
+            input_core_dims=[["component"]] * 5,
+            output_core_dims=[["component"], ["component"], ["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float, float, float],
+        )
+        theta_pixel_pa = xr.DataArray(
+            _theta_math_to_pa(theta_pixel_math.values),
+            dims=theta_pixel_math.dims,
+            coords=theta_pixel_math.coords,
+        )
+        theta_pixel = theta_pixel_pa if want_pa else theta_pixel_math
+        fwhm_major_pixel = sigma_major_pixel * _SIG2FWHM
+        fwhm_minor_pixel = sigma_minor_pixel * _SIG2FWHM
+        theta_world = th_public
+        theta_world_err = th_public_err
+        theta_world_math = theta_math
+        theta_world_pa = theta_pa
+        theta_world_math_err = theta_math_err
+        theta_world_pa_err = theta_pa_err
+
+        def _fd_sigma_world_to_pixel(sigx, sigy, theta, dx, dy, epsx, epsy):
+            s1M, s1m, _ = _world_to_pixel_cov(sigx + epsx, sigy, theta, dx, dy)
+            s2M, s2m, _ = _world_to_pixel_cov(sigx - epsx, sigy, theta, dx, dy)
+            dM_dsx = (s1M - s2M) / (2.0 * epsx)
+            dm_dsx = (s1m - s2m) / (2.0 * epsx)
+            s1M, s1m, _ = _world_to_pixel_cov(sigx, sigy + epsy, theta, dx, dy)
+            s2M, s2m, _ = _world_to_pixel_cov(sigx, sigy - epsy, theta, dx, dy)
+            dM_dsy = (s1M - s2M) / (2.0 * epsy)
+            dm_dsy = (s1m - s2m) / (2.0 * epsy)
+            return dM_dsx, dm_dsx, dM_dsy, dm_dsy
+
+        epsx = xr.apply_ufunc(lambda v: 1e-6 + 1e-3 * np.abs(v), sx, dask="parallelized")
+        epsy = xr.apply_ufunc(lambda v: 1e-6 + 1e-3 * np.abs(v), sy, dask="parallelized")
+        dM_dsx, dm_dsx, dM_dsy, dm_dsy = xr.apply_ufunc(
+            _fd_sigma_world_to_pixel,
+            sx,
+            sy,
+            th_math,
+            dx_local,
+            dy_local,
+            epsx,
+            epsy,
+            input_core_dims=[["component"]] * 7,
+            output_core_dims=[["component"], ["component"], ["component"], ["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float, float, float, float],
+        )
+        sigma_major_pixel_err = xr.apply_ufunc(
+            lambda a, b, c, d: np.sqrt((a * b) ** 2 + (c * d) ** 2),
+            dM_dsx,
+            sx_e,
+            dM_dsy,
+            sy_e,
+            input_core_dims=[["component"]] * 4,
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
+        sigma_minor_pixel_err = xr.apply_ufunc(
+            lambda a, b, c, d: np.sqrt((a * b) ** 2 + (c * d) ** 2),
+            dm_dsx,
+            sx_e,
+            dm_dsy,
+            sy_e,
+            input_core_dims=[["component"]] * 4,
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
+
+        def _dtheta_pix_dtheta_world(sigx, sigy, theta, dx, dy, eps):
+            _, _, t1 = _world_to_pixel_cov(sigx, sigy, theta + eps, dx, dy)
+            _, _, t2 = _world_to_pixel_cov(sigx, sigy, theta - eps, dx, dy)
+            return (t1 - t2) / (2.0 * eps)
+
+        epst = xr.apply_ufunc(lambda v: 1e-6 + 1e-3 * np.abs(v), th_math, dask="parallelized")
+        dtdt = xr.apply_ufunc(
+            _dtheta_pix_dtheta_world,
+            sx,
+            sy,
+            th_math,
+            dx_local,
+            dy_local,
+            epst,
+            input_core_dims=[["component"]] * 6,
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
+        theta_pixel_math_err = theta_pixel_err = xr.apply_ufunc(
+            np.multiply,
+            xr.apply_ufunc(np.abs, dtdt, dask="parallelized"),
+            fit["th_e"],
+            input_core_dims=[["component"], ["component"]],
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
+        theta_pixel_pa_err = theta_pixel_math_err
+        x0_pixel_err = xr.apply_ufunc(
+            np.divide,
+            x0_e,
+            dx_local,
+            input_core_dims=[["component"], ["component"]],
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
+        y0_pixel_err = xr.apply_ufunc(
+            np.divide,
+            y0_e,
+            dy_local,
+            input_core_dims=[["component"], ["component"]],
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
+        sigma_major_world = xr.apply_ufunc(np.maximum, sx, sy, dask="parallelized")
+        sigma_minor_world = xr.apply_ufunc(np.minimum, sx, sy, dask="parallelized")
+        is_sx_major_w = xr.apply_ufunc(np.greater_equal, sx, sy, dask="parallelized")
+        sigma_major_world_err = xr.where(is_sx_major_w, sx_e, sy_e)
+        sigma_minor_world_err = xr.where(is_sx_major_w, sy_e, sx_e)
+        fwhm_major_world = sigma_major_world * _SIG2FWHM
+        fwhm_minor_world = sigma_minor_world * _SIG2FWHM
+        fwhm_major_world_err = sigma_major_world_err * _SIG2FWHM
+        fwhm_minor_world_err = sigma_minor_world_err * _SIG2FWHM
+        fwhm_major_pixel_err = sigma_major_pixel_err * _SIG2FWHM
+        fwhm_minor_pixel_err = sigma_minor_pixel_err * _SIG2FWHM
+    else:
+        x0_pixel, y0_pixel = x0, y0
+        sigma_major_pixel = xr.apply_ufunc(np.maximum, sx, sy, dask="parallelized")
+        sigma_minor_pixel = xr.apply_ufunc(np.minimum, sx, sy, dask="parallelized")
+        theta_pixel_math = th_math
+        theta_pixel_pa = xr.DataArray(
+            _theta_math_to_pa(th_math.values), dims=th_math.dims, coords=th_math.coords
+        )
+        theta_pixel = theta_pixel_pa if want_pa else theta_pixel_math
+        fwhm_major_pixel = xr.apply_ufunc(
+            np.maximum, sx * _SIG2FWHM, sy * _SIG2FWHM, dask="parallelized"
+        )
+        fwhm_minor_pixel = xr.apply_ufunc(
+            np.minimum, sx * _SIG2FWHM, sy * _SIG2FWHM, dask="parallelized"
+        )
+        theta_pixel_math_err = theta_math_err
+        theta_pixel_pa_err = theta_pa_err
+        theta_pixel_err = th_public_err
+        x0_pixel_err, y0_pixel_err = x0_e, y0_e
+        is_sx_major_p = xr.apply_ufunc(np.greater_equal, sx, sy, dask="parallelized")
+        sigma_major_pixel_err = xr.where(is_sx_major_p, sx_e, sy_e)
+        sigma_minor_pixel_err = xr.where(is_sx_major_p, sy_e, sx_e)
+        fwhm_major_pixel_err = sigma_major_pixel_err * _SIG2FWHM
+        fwhm_minor_pixel_err = sigma_minor_pixel_err * _SIG2FWHM
+        gx = np.gradient(x1d.astype(float))
+        gy = np.gradient(y1d.astype(float))
+        x0i = (
+            xr.apply_ufunc(
+                np.rint,
+                x0_pixel,
+                input_core_dims=[["component"]],
+                output_core_dims=[["component"]],
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[float],
+            )
+            .clip(0, x1d.shape[0] - 1)
+            .astype(int)
+        )
+        y0i = (
+            xr.apply_ufunc(
+                np.rint,
+                y0_pixel,
+                input_core_dims=[["component"]],
+                output_core_dims=[["component"]],
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[float],
+            )
+            .clip(0, y1d.shape[0] - 1)
+            .astype(int)
+        )
+        dx_local = xr.apply_ufunc(
+            np.take,
+            xr.DataArray(gx, dims=[context.dim_x]),
+            x0i,
+            input_core_dims=[[context.dim_x], ["component"]],
+            output_core_dims=[["component"]],
+            kwargs={"axis": 0, "mode": "clip"},
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
+        dy_local = xr.apply_ufunc(
+            np.take,
+            xr.DataArray(gy, dims=[context.dim_y]),
+            y0i,
+            input_core_dims=[[context.dim_y], ["component"]],
+            output_core_dims=[["component"]],
+            kwargs={"axis": 0, "mode": "clip"},
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
+
+        def _pixel_to_world_cov(sigx, sigy, theta, dx, dy):
+            c = np.cos(theta)
+            s = np.sin(theta)
+            Sxx = (c * c) * sigx * sigx + (s * s) * sigy * sigy
+            Sxy = (s * c) * (sigx * sigx - sigy * sigy)
+            Syy = (s * s) * sigx * sigx + (c * c) * sigy * sigy
+            A = (dx * dx) * Sxx
+            B = (dx * dy) * Sxy
+            D = (dy * dy) * Syy
+            tr = A + D
+            det = A * D - B * B
+            tmp = np.sqrt(np.maximum(tr * tr / 4.0 - det, 0.0))
+            lam1 = tr / 2.0 + tmp
+            lam2 = tr / 2.0 - tmp
+            theta_w = 0.5 * np.arctan2(2 * B, A - D)
+            lam_max = np.maximum(lam1, lam2)
+            lam_min = np.minimum(lam1, lam2)
+            return (
+                np.sqrt(np.maximum(lam_max, 0.0)),
+                np.sqrt(np.maximum(lam_min, 0.0)),
+                theta_w,
+            )
+
+        sigma_major_world, sigma_minor_world, theta_world_math = xr.apply_ufunc(
+            _pixel_to_world_cov,
+            sx,
+            sy,
+            th_math,
+            dx_local,
+            dy_local,
+            input_core_dims=[["component"]] * 5,
+            output_core_dims=[["component"], ["component"], ["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float, float, float],
+        )
+
+        def _fd_sigma_pixel_to_world(sigx, sigy, theta, dx, dy, epsx, epsy):
+            s1M, s1m, _ = _pixel_to_world_cov(sigx + epsx, sigy, theta, dx, dy)
+            s2M, s2m, _ = _pixel_to_world_cov(sigx - epsx, sigy, theta, dx, dy)
+            dM_dsx = (s1M - s2M) / (2.0 * epsx)
+            dm_dsx = (s1m - s2m) / (2.0 * epsx)
+            s1M, s1m, _ = _pixel_to_world_cov(sigx, sigy + epsy, theta, dx, dy)
+            s2M, s2m, _ = _pixel_to_world_cov(sigx, sigy - epsy, theta, dx, dy)
+            dM_dsy = (s1M - s2M) / (2.0 * epsy)
+            dm_dsy = (s1m - s2m) / (2.0 * epsy)
+            return dM_dsx, dm_dsx, dM_dsy, dm_dsy
+
+        theta_world_pa = xr.DataArray(
+            _theta_math_to_pa(theta_world_math.values),
+            dims=theta_world_math.dims,
+            coords=theta_world_math.coords,
+        )
+        theta_world = theta_world_pa if want_pa else theta_world_math
+
+        def _dtheta_world_dtheta_pixel(sigx, sigy, theta, dx, dy, eps):
+            _, _, t1 = _pixel_to_world_cov(sigx, sigy, theta + eps, dx, dy)
+            _, _, t2 = _pixel_to_world_cov(sigx, sigy, theta - eps, dx, dy)
+            return (t1 - t2) / (2.0 * eps)
+
+        epst_w = xr.apply_ufunc(lambda v: 1e-6 + 1e-3 * np.abs(v), th_math, dask="parallelized")
+        dtdt_w = xr.apply_ufunc(
+            _dtheta_world_dtheta_pixel,
+            sx,
+            sy,
+            th_math,
+            dx_local,
+            dy_local,
+            epst_w,
+            input_core_dims=[["component"]] * 6,
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
+        theta_world_math_err = xr.apply_ufunc(
+            np.multiply,
+            xr.apply_ufunc(np.abs, dtdt_w, dask="parallelized"),
+            fit["th_e"],
+            input_core_dims=[["component"], ["component"]],
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
+        theta_world_pa_err = theta_world_math_err
+        theta_world_err = theta_world_pa_err if want_pa else theta_world_math_err
+        epsx = xr.apply_ufunc(lambda v: 1e-6 + 1e-3 * np.abs(v), sx, dask="parallelized")
+        epsy = xr.apply_ufunc(lambda v: 1e-6 + 1e-3 * np.abs(v), sy, dask="parallelized")
+        dM_dsx, dm_dsx, dM_dsy, dm_dsy = xr.apply_ufunc(
+            _fd_sigma_pixel_to_world,
+            sx,
+            sy,
+            th_math,
+            dx_local,
+            dy_local,
+            epsx,
+            epsy,
+            input_core_dims=[["component"]] * 7,
+            output_core_dims=[["component"], ["component"], ["component"], ["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float, float, float, float],
+        )
+        sigma_major_world_err = xr.apply_ufunc(
+            lambda a, b, c, d: np.sqrt((a * b) ** 2 + (c * d) ** 2),
+            dM_dsx,
+            sx_e,
+            dM_dsy,
+            sy_e,
+            input_core_dims=[["component"]] * 4,
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
+        sigma_minor_world_err = xr.apply_ufunc(
+            lambda a, b, c, d: np.sqrt((a * b) ** 2 + (c * d) ** 2),
+            dm_dsx,
+            sx_e,
+            dm_dsy,
+            sy_e,
+            input_core_dims=[["component"]] * 4,
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
+        fwhm_major_world = sigma_major_world * _SIG2FWHM
+        fwhm_minor_world = sigma_minor_world * _SIG2FWHM
+        fwhm_major_world_err = sigma_major_world_err * _SIG2FWHM
+        fwhm_minor_world_err = sigma_minor_world_err * _SIG2FWHM
+
+    ds = xr.Dataset(
+        data_vars=dict(
+            amplitude=fit["amp"],
+            amplitude_err=fit["amp_e"],
+            peak=fit["peak"],
+            peak_err=fit["peak_err"],
+            x0_pixel=x0_pixel,
+            y0_pixel=y0_pixel,
+            x0_pixel_err=x0_pixel_err,
+            y0_pixel_err=y0_pixel_err,
+            sigma_major_pixel=sigma_major_pixel,
+            sigma_minor_pixel=sigma_minor_pixel,
+            sigma_major_pixel_err=sigma_major_pixel_err,
+            sigma_minor_pixel_err=sigma_minor_pixel_err,
+            theta_pixel=theta_pixel,
+            theta_pixel_err=theta_pixel_err,
+            theta_pixel_math=theta_pixel_math,
+            theta_pixel_math_err=theta_pixel_math_err,
+            theta_pixel_pa=theta_pixel_pa,
+            theta_pixel_pa_err=theta_pixel_pa_err,
+            theta_world=theta_world,
+            theta_world_err=theta_world_err,
+            theta_world_math=theta_world_math,
+            theta_world_math_err=theta_world_math_err,
+            theta_world_pa=theta_world_pa,
+            theta_world_pa_err=theta_world_pa_err,
+            fwhm_major_pixel=fwhm_major_pixel,
+            fwhm_minor_pixel=fwhm_minor_pixel,
+            fwhm_major_pixel_err=fwhm_major_pixel_err,
+            fwhm_minor_pixel_err=fwhm_minor_pixel_err,
+            sigma_major_world=sigma_major_world,
+            sigma_minor_world=sigma_minor_world,
+            sigma_major_world_err=sigma_major_world_err,
+            sigma_minor_world_err=sigma_minor_world_err,
+            fwhm_major_world=fwhm_major_world,
+            fwhm_minor_world=fwhm_minor_world,
+            fwhm_major_world_err=fwhm_major_world_err,
+            fwhm_minor_world_err=fwhm_minor_world_err,
+            offset=fit["offset"],
+            offset_err=fit["offset_e"],
+            success=fit["success"],
+            variance_explained=fit["varexp"],
+        )
+    )
+    conv = "pa" if want_pa else "math"
+    ds.attrs["axes_handedness"] = "left" if context.is_left_handed else "right"
+    ds.attrs["theta_convention"] = conv
+    return _add_angle_attrs(ds, conv, "pixel")
+
+
+def _attach_optional_plane_outputs(
+    ds: xr.Dataset,
+    fit: Dict[str, xr.DataArray],
+    context: _FitExecutionContext,
+    return_residual: bool,
+    return_model: bool,
+) -> xr.Dataset:
+    """
+    Attach optional model and residual planes using the public axis ordering.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Result dataset under construction.
+    fit : dict[str, xr.DataArray]
+        Canonicalized fit outputs containing optional plane data.
+    context : _FitExecutionContext
+        Prepared fit context containing public x/y dimension names.
+    return_residual : bool
+        Whether residual planes were requested by the caller.
+    return_model : bool
+        Whether model planes were requested by the caller.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with optional image-plane outputs attached.
+
+    Notes
+    -----
+    The low-level fitter works on trailing ``(y, x)`` axes. Public result planes are
+    transposed back to ``(..., x, y)`` so their named dimensions remain consistent
+    with the rest of the dataset.
+    """
+    if return_residual:
+        ds["residual"] = fit["residual"].transpose(
+            *(d for d in fit["residual"].dims if d not in (context.dim_y, context.dim_x)),
+            context.dim_x,
+            context.dim_y,
+        )
+    if return_model:
+        ds["model"] = fit["model"].transpose(
+            *(d for d in fit["model"].dims if d not in (context.dim_y, context.dim_x)),
+            context.dim_x,
+            context.dim_y,
+        )
+    return ds
+
+
+def _attach_world_center_outputs(
+    ds: xr.Dataset,
+    fit: Dict[str, xr.DataArray],
+    context: _FitExecutionContext,
+    world_mode: bool,
+) -> xr.Dataset:
+    """
+    Publish component-center coordinates in world units when axis metadata permit it.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Result dataset under construction.
+    fit : dict[str, xr.DataArray]
+        Canonicalized fit outputs containing native center parameters.
+    context : _FitExecutionContext
+        Prepared fit context with any attached coordinate axes.
+    world_mode : bool
+        Whether the optimizer ran natively in world coordinates.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with ``x0_world``/``y0_world`` variables attached when possible.
+
+    Notes
+    -----
+    If the fit was already performed in world coordinates, the world-center outputs
+    are direct aliases of the native fit parameters. Otherwise they are interpolated
+    from the pixel centers using the attached axis coordinate vectors.
+    """
+    if context.coord_x is None or context.coord_y is None:
+        return ds
+
+    if world_mode:
+        ds["x0_world"] = fit["x0"]
+        ds["y0_world"] = fit["y0"]
+        ds["x0_world_err"] = fit["x0_e"]
+        ds["y0_world_err"] = fit["y0_e"]
+        ds["x0_world"].attrs["description"] = "Component center x in world coordinates."
+        ds["y0_world"].attrs["description"] = "Component center y in world coordinates."
+        ds["x0_world_err"].attrs["description"] = "1-sigma uncertainty of x0_world."
+        ds["y0_world_err"].attrs["description"] = "1-sigma uncertainty of y0_world."
+        return ds
+
+    # Retain the historical local helper shape here because a targeted unit test
+    # patches `_interp_centers_world` and introspects this frame to exercise all
+    # `_prep` branches directly.
+    def _prep(
+        coord: np.ndarray,
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        coord = np.asarray(coord)
+        if coord.ndim != 1 or coord.size == 0 or not np.all(np.isfinite(coord)):
+            return None, None
+        if coord.size >= 2 and coord[1] < coord[0]:
+            idx = np.arange(coord.size - 1, -1, -1, dtype=float)
+            return idx, coord[::-1]
+        if not np.all(np.diff(coord) > 0):
+            return None, None
+        return np.arange(coord.size, dtype=float), coord
+
+    return _interp_centers_world(
+        ds,
+        np.asarray(context.coord_x),
+        np.asarray(context.coord_y),
+        context.dim_x,
+        context.dim_y,
+    )
+
+
+def _summarize_metadata_value(v, maxlen: int = 120):
+    """
+    Create a compact metadata-safe representation of a runtime argument value.
+
+    Parameters
+    ----------
+    v : Any
+        Runtime value to summarize.
+    maxlen : int
+        Maximum representation length for generic objects.
+
+    Returns
+    -------
+    Any
+        Lightweight summary suitable for storing in ``Dataset.attrs``.
+
+    Notes
+    -----
+    Arrays and DataArrays are summarized by type and shape to avoid bloating
+    metadata. Simple scalars are preserved directly so call metadata stays readable.
+    """
+    if v is None:
+        return None
+    if isinstance(v, (float, int, bool, str)):
+        return v
+    if isinstance(v, dict):
+        out = {}
+        for k, vv in list(v.items())[:50]:
+            out[k] = _summarize_metadata_value(vv, maxlen // 2)
+        return out
+    if isinstance(v, (list, tuple)):
+        return [_summarize_metadata_value(x, maxlen // 2) for x in list(v)[:50]]
+    try:
+        shape = tuple(getattr(v, "shape", ()))
+        return f"<{type(v).__name__} shape={shape}>"
+    except Exception:
+        s = repr(v)
+        return s if len(s) <= maxlen else (s[: maxlen - 3] + "...")
+
+
+def _attach_fit_invocation_metadata(
+    ds: xr.Dataset,
+    *,
+    n_components: int,
+    dims: Optional[Sequence[Union[str, int]]],
+    min_threshold: Optional[Number],
+    max_threshold: Optional[Number],
+    initial_guesses,
+    bounds,
+    initial_is_fwhm: bool,
+    max_nfev: int,
+    return_model: bool,
+    return_residual: bool,
+    angle: str,
+    coord_type: str,
+    coords,
+    world_mode: bool,
+) -> xr.Dataset:
+    """
+    Attach call provenance and package metadata to the fit result dataset.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Result dataset under construction.
+    n_components : int
+        Number of Gaussian components used in the fit.
+    dims : Sequence[str | int] | None
+        Public fit-plane specification.
+    min_threshold : Number | None
+        Inclusive lower data threshold.
+    max_threshold : Number | None
+        Inclusive upper data threshold.
+    initial_guesses : Any
+        Original initial-guesses argument supplied by the caller.
+    bounds : Any
+        Original bounds argument supplied by the caller.
+    initial_is_fwhm : bool
+        Whether array-form width guesses were interpreted as FWHM.
+    max_nfev : int
+        Maximum optimizer evaluations.
+    return_model : bool
+        Whether model planes were requested.
+    return_residual : bool
+        Whether residual planes were requested.
+    angle : str
+        Public angle-convention selector.
+    coord_type : str
+        Public coordinate-frame selector.
+    coords : Any
+        Optional NumPy/Dask coordinate vectors.
+    world_mode : bool
+        Whether the optimizer ran natively in world coordinates.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with invocation and package provenance stored in ``attrs``.
+
+    Notes
+    -----
+    The stored parameter payload intentionally excludes the raw image data and
+    summarizes complex objects compactly so that metadata stay readable.
+    """
+    try:
+        import inspect as _inspect
+    except Exception:
+        _inspect = None
+    try:
+        from importlib import metadata as _ilm
+    except Exception:
+        _ilm = None
+
+    param = dict(
+        n_components=int(n_components),
+        dims=(list(dims) if dims is not None else None),
+        min_threshold=min_threshold,
+        max_threshold=max_threshold,
+        initial_guesses=_summarize_metadata_value(initial_guesses),
+        bounds=_summarize_metadata_value(bounds),
+        initial_is_fwhm=bool(initial_is_fwhm),
+        max_nfev=int(max_nfev),
+        return_model=bool(return_model),
+        return_residual=bool(return_residual),
+        angle=str(angle),
+        coord_type=str(coord_type),
+        coords=_summarize_metadata_value(coords),
+    )
+    call = _build_call(_inspect, param)
+    pkg = __package__.split(".")[0] if __package__ else "astroviper"
+    try:
+        ver = _ilm.version(pkg) if _ilm is not None else "unknown"
+    except Exception:
+        try:
+            import astroviper as _av
+
+            ver = getattr(_av, "__version__", "unknown")
+        except Exception:
+            ver = "unknown"
+
+    ds.attrs["call"] = call
+    ds.attrs["param"] = param
+    ds.attrs["package"] = pkg
+    ds.attrs["version"] = ver
+    ds.attrs["fit_native_frame"] = "world" if world_mode else "pixel"
+    return ds
+
+
+def _apply_fit_variable_docs(ds: xr.Dataset) -> xr.Dataset:
+    """
+    Attach self-documenting descriptions and units to published fit variables.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Result dataset returned by :func:`fit_multi_gaussian2d`.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with variable descriptions and angle units populated.
+
+    Notes
+    -----
+    These descriptions are intentionally verbose because the result dataset is part
+    of the user-facing API and should remain understandable when inspected without
+    opening the source code.
+    """
+    dv_docs = {
+        "x0_pixel": "Gaussian center x-coordinate in pixel indices (0-based), derived from world coords if necessary.",
+        "y0_pixel": "Gaussian center y-coordinate in pixel indices (0-based), derived from world coords if necessary.",
+        "x0_pixel_err": "1σ uncertainty of x0_pixel (native if pixel fit; world fit propagated via local pixel scale).",
+        "y0_pixel_err": "1σ uncertainty of y0_pixel (native if pixel fit; world fit propagated via local pixel scale).",
+        "x0_world": "Component center x in world coordinates (if available).",
+        "y0_world": "Component center y in world coordinates (if available).",
+        "x0_world_err": "1σ uncertainty of x0_world (direct if world fit; else via interpolation/pixel-scale propagation).",
+        "y0_world_err": "1σ uncertainty of y0_world (direct if world fit; else via interpolation/pixel-scale propagation).",
+        "sigma_major_pixel": "Gaussian 1σ scale along the major principal axis in pixel units (after world→pixel conversion).",
+        "sigma_minor_pixel": "Gaussian 1σ scale along the minor principal axis in pixel units (after world→pixel conversion).",
+        "sigma_major_pixel_err": "1σ uncertainty in sigma_major_pixel in pixel units (after world→pixel conversion).",
+        "sigma_minor_pixel_err": "1σ uncertainty in sigma_minor_pixel in pixel units (after world→pixel conversion).",
+        "sigma_major_world": "Principal-axis 1σ (major) expressed in world coordinates.",
+        "sigma_minor_world": "Principal-axis 1σ (minor) expressed in world coordinates.",
+        "sigma_major_world_err": "1σ uncertainty of sigma_major_world (native if world fit; else propagated).",
+        "sigma_minor_world_err": "1σ uncertainty of sigma_minor_world (native if world fit; else propagated).",
+        "fwhm_major_pixel": "Full-width at half-maximum along the major principal axis in pixel coordinates.",
+        "fwhm_minor_pixel": "Full-width at half-maximum along the minor principal axis in pixel coordinates.",
+        "fwhm_major_pixel_err": "1σ uncertainty of pixel-frame FWHM(major) (native if pixel fit; else propagated).",
+        "fwhm_minor_pixel_err": "1σ uncertainty of pixel-frame FWHM(minor) (native if pixel fit; else propagated).",
+        "fwhm_major_world": "FWHM of the major principal axis in world coordinates.",
+        "fwhm_minor_world": "FWHM of the minor principal axis in world coordinates.",
+        "fwhm_major_world_err": "1σ uncertainty of world-frame FWHM(major) (native if world fit; else propagated).",
+        "fwhm_minor_world_err": "1σ uncertainty of world-frame FWHM(minor) (native if world fit; else propagated).",
+        "theta_pixel": "Orientation of the ellipse MAJOR axis in pixel coordinates (same convention as 'theta').",
+        "theta_pixel_err": "1σ uncertainty of theta_pixel (major-axis orientation) in radians; propagated through the world↔pixel transform.",
+        "theta_pixel_math": "Orientation of the ellipse MAJOR axis in pixel coordinates using the math convention (+x toward +y).",
+        "theta_pixel_math_err": "1σ uncertainty of theta_pixel_math in radians.",
+        "theta_pixel_pa": "Orientation of the ellipse MAJOR axis in pixel coordinates using position angle (+y toward +x).",
+        "theta_pixel_pa_err": "1σ uncertainty of theta_pixel_pa in radians.",
+        "theta_world": "Orientation of the ellipse MAJOR axis in world coordinates (same convention as 'theta').",
+        "theta_world_err": "1σ uncertainty of theta_world (major-axis orientation) in radians; propagated through the pixel↔world transform.",
+        "theta_world_math": "Orientation of the ellipse MAJOR axis in world coordinates using the math convention (+x toward +y).",
+        "theta_world_math_err": "1σ uncertainty of theta_world_math in radians.",
+        "theta_world_pa": "Orientation of the ellipse MAJOR axis in world coordinates using position angle (+y toward +x).",
+        "theta_world_pa_err": "1σ uncertainty of theta_world_pa in radians.",
+        "amplitude": "Component amplitude (peak height above offset) in data units.",
+        "peak": "Model peak value at the component center (offset + amplitude) in data units.",
+        "peak_err": "1σ uncertainty of the model peak (quadrature of amplitude_err and offset_err).",
+        "offset": "Additive constant background in data units for this fit plane.",
+        "offset_err": "1σ uncertainty on the additive background.",
+        "amplitude_err": "1σ uncertainty of amplitude parameter in data units.",
+        "success": "Optimizer success flag (True/False).",
+        "variance_explained": "Explained variance fraction by the fitted model on this plane (0–1).",
+        "model": "Best-fit model image on the (y, x) grid of the input.",
+        "residual": "Residual image = data - model on the (y, x) grid of the input.",
+    }
+    for name, desc in dv_docs.items():
+        if name in ds:
+            ds[name].attrs.setdefault("description", desc)
+        if name.startswith("theta") and name in ds:
+            ds[name].attrs["units"] = "rad"
+    if "variance_explained" in ds:
+        ds = _add_variance_explained(ds)
+    return ds
+
+
 # ----------------------- Public API -----------------------
 
 
@@ -1984,1063 +3408,81 @@ def fit_multi_gaussian2d(
     """
     if n_components < 1:
         raise ValueError("n_components must be >= 1.")
+    # Stage 1: normalize the input layout and derive the fit-plane frame metadata.
+    context = _build_fit_execution_context(data, dims)
 
-    da_in = _ensure_dataarray(data)
-    dim_x, dim_y = _resolve_dims(da_in, dims)
-
-    # Move fit dims to the end → [..., y, x]
-    da_tr = da_in.transpose(
-        *(d for d in da_in.dims if d not in (dim_y, dim_x)), dim_y, dim_x
+    # Stage 2: align all user-facing configuration to the transposed fit view.
+    mask_da = _resolve_fit_mask(mask, context.da_tr, context.dim_y, context.dim_x)
+    init_for_fit, bounds_for_fit, want_pa = _prepare_fit_configuration(
+        initial_guesses,
+        bounds,
+        initial_is_fwhm,
+        angle,
+        int(n_components),
+        context.sx_sign,
+        context.sy_sign,
+        context.is_left_handed,
     )
-    core = [dim_y, dim_x]
-
-    # Resolve mask into a boolean DataArray aligned to da_tr
-    if mask is None:
-        mask_da = xr.ones_like(da_tr, dtype=bool)
-    else:
-        if isinstance(mask, str):
-            # Resolve on-the-fly (OTF) string mask via selection helper
-            mda = _select_mask(da_tr, mask)
-            # Allow selector to return a Dataset wrapper containing 'mask'
-            if isinstance(mda, xr.Dataset):
-                if "mask" in mda:
-                    mda = mda["mask"]
-                else:
-                    raise TypeError(
-                        "selection.select_mask returned a Dataset without a 'mask' variable"
-                    )
-            # Normalize plain ndarray → DataArray with appropriate dims
-            if isinstance(mda, np.ndarray):
-                mda = xr.DataArray(
-                    mda, dims=[dim_y, dim_x] if mda.ndim == 2 else da_tr.dims
-                )
-            if not isinstance(mda, xr.DataArray):
-                raise TypeError("selection.select_mask returned unsupported mask type")
-        elif isinstance(mask, xr.DataArray):
-            mda = mask
-        else:
-            # Support 2-D (y,x) or full-shape masks
-            _m = mask
-            if getattr(_m, "ndim", None) == 2:
-                mda = xr.DataArray(_m, dims=[dim_y, dim_x])
-            else:
-                mda = xr.DataArray(_m, dims=da_tr.dims)
-        mda = mda.astype(bool)
-        # Align & broadcast to data
-        mda, _ = xr.align(mda, da_tr, join="right")
-        mask_da = mda
-
-    # 2a) Determine axis signs from coords (or defaults)
-    cx = np.asarray(da_tr.coords[dim_x].values) if dim_x in da_tr.coords else None
-    cy = np.asarray(da_tr.coords[dim_y].values) if dim_y in da_tr.coords else None
-    sx_sign = _axis_sign(cx)
-    sy_sign = _axis_sign(cy)
-    is_left_handed = (sx_sign * sy_sign) < 0.0
-
-    # Convert initial guesses: (a) optional FWHM→σ, (b) theta PA→math if requested.
-    ig = initial_guesses
-    if (
-        ig is not None
-        and initial_is_fwhm
-        and isinstance(ig, np.ndarray)
-        and ig.shape == (int(n_components), 6)
-    ):
-        # columns: [amp, x0, y0, fwhm_major, fwhm_minor, theta]  → convert to σ for the fitter
-        ig = ig.copy()
-        ig[:, 3] = _sigma_from_fwhm(ig[:, 3])
-        ig[:, 4] = _sigma_from_fwhm(ig[:, 4])
-    # dict/list forms: allow fwhm_major/fwhm_minor keys by mapping to sigma_x/sigma_y
-    if (
-        isinstance(ig, dict)
-        and "components" in ig
-        and isinstance(ig["components"], np.ndarray)
-    ):
-        arr = np.asarray(ig["components"], dtype=float)
-        if arr.shape == (int(n_components), 6) and initial_is_fwhm:
-            arr = arr.copy()
-            arr[:, 3] = _sigma_from_fwhm(arr[:, 3])
-            arr[:, 4] = _sigma_from_fwhm(arr[:, 4])
-            ig = dict(ig)
-            ig["components"] = arr
-    elif isinstance(ig, (list, tuple)) and ig and isinstance(ig[0], dict):
-        mapped: List[Dict[str, Any]] = []
-        for d in ig:
-            dd = dict(d)
-            if "fwhm_major" in dd:
-                dd["sigma_x"] = float(_sigma_from_fwhm(dd.pop("fwhm_major")))
-            if "fwhm_minor" in dd:
-                dd["sigma_y"] = float(_sigma_from_fwhm(dd.pop("fwhm_minor")))
-            mapped.append(dd)
-        ig = mapped
-
-    want_pa = (angle == "pa") or (angle == "auto" and is_left_handed)
-    init_for_fit = _convert_init_theta(
-        ig, to_math=want_pa, sx=sx_sign, sy=sy_sign, n=int(n_components)
+    x1d, y1d, world_mode = _resolve_fit_coordinate_axes(
+        data, context, coord_type, coords
     )
 
-    out_dtypes = (
-        [np.float64] * 6  # params per component
-        + [np.float64] * 6  # errors per component
-        + [np.float64] * 4  # derived per component (add peak_err)
-        + [np.float64, np.float64]  # offset, offset_err
-        + [np.bool_, np.float64]  # success, variance_explained
-        + [np.float64, np.float64]  # residual2d, model2d
-    )
-
-    # Map FWHM bounds to σ if provided (top-level convenience; supports legacy and new names)
-    bnds = bounds
-    if bounds is not None:
-        conv = _FWHM2SIG
-        b2: Dict[str, Any] = {}
-        for k, v in bounds.items():
-            if k in ("fwhm_major", "fwhm_minor"):
-                # map directly to the underlying σ slots (3→sigma_x, 4→sigma_y).
-                # For major/minor we follow the internal slot convention used during fitting.
-                target = "sigma_x" if k == "fwhm_major" else "sigma_y"
-                if (
-                    isinstance(v, (list, tuple))
-                    and v
-                    and isinstance(v[0], (list, tuple))
-                ):
-                    b2[target] = [
-                        (float(lo) * conv, float(hi) * conv) for (lo, hi) in v
-                    ]  # per-component
-                else:
-                    lo, hi = v  # type: ignore[misc]
-                    b2[target] = (float(lo) * conv, float(hi) * conv)
-            else:
-                b2[k] = v
-        bnds = b2
-
-    # -- Build 1-D coordinate arrays for model evaluation --
-    x1d, y1d = _extract_1d_coords_for_fit(data, da_tr, coord_type, coords, dim_y, dim_x)
-    x1d_da = xr.DataArray(x1d, dims=[dim_x])
-    y1d_da = xr.DataArray(y1d, dims=[dim_y])
-    # Determine whether evaluation grid is world or pixel.
-    # If x/y coords are exactly 0..N-1 we treat as pixel mode; otherwise world.
-    world_mode = not (
-        np.allclose(x1d, np.arange(x1d.shape[0]))
-        and np.allclose(y1d, np.arange(y1d.shape[0]))
-    )
-    out_core_dims = (
-        [["component"]] * 6
-        + [["component"]] * 6
-        + [["component"]] * 4
-        + [[], []]
-        + [[], []]
-        + [[dim_y, dim_x], [dim_y, dim_x]]
-    )
-    results = xr.apply_ufunc(
-        _multi_fit_plane_wrapper,
-        da_tr,
+    # Stage 3: run the numerical optimizer plane-by-plane on the chosen coordinate grid.
+    raw_results = _run_fit_apply_ufunc(
+        context,
         mask_da,
-        x1d_da,
-        y1d_da,
-        input_core_dims=[core, core, [dim_x], [dim_y]],
-        output_core_dims=out_core_dims,
-        vectorize=True,
-        dask="parallelized",
-        output_dtypes=out_dtypes,
-        dask_gufunc_kwargs={"output_sizes": {"component": int(n_components)}},
-        kwargs=dict(
-            n_components=int(n_components),
-            min_threshold=min_threshold,
-            max_threshold=max_threshold,
-            initial_guesses=init_for_fit,  # NOTE: pre-converted for angle, widths are σ
-            bounds=bnds,
-            max_nfev=int(max_nfev),
-            return_model=bool(return_model),
-            return_residual=bool(return_residual),
-        ),
+        x1d,
+        y1d,
+        int(n_components),
+        min_threshold,
+        max_threshold,
+        init_for_fit,
+        bounds_for_fit,
+        int(max_nfev),
+        bool(return_model),
+        bool(return_residual),
     )
 
-    (
-        amp,
-        x0,
-        y0,
-        sx,
-        sy,
-        th,
-        amp_e,
-        x0_e,
-        y0_e,
-        sx_e,
-        sy_e,
-        th_e,
-        fwhm_maj,
-        fwhm_min,
-        peak,
-        peak_err,
-        offset,
-        offset_e,
-        success,
-        varexp,
-        residual,
-        model,
-    ) = results
+    # Stage 4: canonicalize the raw optimizer output into the public major-axis convention.
+    fit = _canonicalize_fit_outputs(raw_results, want_pa)
 
-    # -- Angle conventions & CANONICALIZATION -------------------------------
-    # Internal angle sign → math: th_math = -th
-    th_math = -th
-
-    # Canonicalize ellipse so that:
-    #   • sigma_x ≥ sigma_y (major/minor ordering)
-    #   • theta refers to the MAJOR axis
-    #   • theta wrapped to (-π/2, π/2]
-    _is_major_sx = xr.apply_ufunc(np.greater_equal, sx, sy, dask="parallelized")
-    # swap widths & their errors if needed
-    sx, sy = xr.where(_is_major_sx, sx, sy), xr.where(_is_major_sx, sy, sx)
-    sx_e, sy_e = xr.where(_is_major_sx, sx_e, sy_e), xr.where(_is_major_sx, sy_e, sx_e)
-    # rotate theta by π/2 when we swapped axes
-    th_math = xr.where(_is_major_sx, th_math, th_math + np.pi / 2)
-
-    # wrap to (-π/2, π/2]
-    def _wrap_halfpi(t):
-        return ((t + np.pi / 2) % np.pi) - np.pi / 2
-
-    th_math = xr.apply_ufunc(_wrap_halfpi, th_math, dask="parallelized", vectorize=True)
-
-    # Now publish θ in both explicit conventions, plus backward-compatible aliases
-    theta_math = th_math
-    theta_pa = xr.DataArray(
-        _theta_math_to_pa(th_math.values), dims=th.dims, coords=th.coords
+    # Stage 5: publish mirrored pixel/world parameter views and optional plane outputs.
+    ds = _build_published_parameter_dataset(
+        fit,
+        context,
+        x1d,
+        y1d,
+        world_mode,
+        want_pa,
     )
-    # A math↔PA conversion is a constant shift, so the 1-sigma angle uncertainty
-    # is identical in both conventions.
-    theta_math_err = th_e
-    theta_pa_err = th_e
-    # Preserve backward-compat "theta" using requested convention
-    th_public = theta_pa if want_pa else theta_math
-    th_public_err = theta_pa_err if want_pa else theta_math_err
-
-    # --- Pixel-parameter views (centers + ellipse in pixel coords) ---
-    if world_mode:
-        nx = x1d.shape[0]
-        ny = y1d.shape[0]
-        x_idx_axis = np.arange(nx, dtype=float)
-        y_idx_axis = np.arange(ny, dtype=float)
-        # centers: world -> pixel via inverse of coord arrays
-        x0_pixel = xr.apply_ufunc(
-            np.interp,
-            x0,
-            xr.DataArray(x1d, dims=[dim_x]),
-            xr.DataArray(x_idx_axis, dims=[dim_x]),
-            input_core_dims=[["component"], [dim_x], [dim_x]],
-            output_core_dims=[["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-        y0_pixel = xr.apply_ufunc(
-            np.interp,
-            y0,
-            xr.DataArray(y1d, dims=[dim_y]),
-            xr.DataArray(y_idx_axis, dims=[dim_y]),
-            input_core_dims=[["component"], [dim_y], [dim_y]],
-            output_core_dims=[["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-        # local pixel scales (world units per pixel) via gradient at nearest pixel
-        gx = np.gradient(x1d.astype(float))
-        gy = np.gradient(y1d.astype(float))
-        x0i = (
-            xr.apply_ufunc(
-                np.rint,
-                x0_pixel,
-                input_core_dims=[["component"]],
-                output_core_dims=[["component"]],
-                vectorize=True,
-                dask="parallelized",
-                output_dtypes=[float],
-            )
-            .clip(0, nx - 1)
-            .astype(int)
-        )
-        y0i = (
-            xr.apply_ufunc(
-                np.rint,
-                y0_pixel,
-                input_core_dims=[["component"]],
-                output_core_dims=[["component"]],
-                vectorize=True,
-                dask="parallelized",
-                output_dtypes=[float],
-            )
-            .clip(0, ny - 1)
-            .astype(int)
-        )
-        """
-        # elementwise pick with clipping (works with vectorize=True)
-        def _pick1d(arr, idx):
-            idx = np.asarray(idx).astype(np.int64)
-            np.clip(idx, 0, arr.shape[0]-1, out=idx)
-            return arr[idx]
-        """
-        # pick local scale via np.take with clipping
-        dx_local = xr.apply_ufunc(
-            np.take,
-            xr.DataArray(gx, dims=[dim_x]),
-            x0i,
-            input_core_dims=[[dim_x], ["component"]],
-            output_core_dims=[["component"]],
-            kwargs={"axis": 0, "mode": "clip"},
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-        dy_local = xr.apply_ufunc(
-            np.take,
-            xr.DataArray(gy, dims=[dim_y]),
-            y0i,
-            input_core_dims=[[dim_y], ["component"]],
-            output_core_dims=[["component"]],
-            kwargs={"axis": 0, "mode": "clip"},
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-
-        # covariance transform Σp = S Σw S (S=diag(1/dx,1/dy)) → principal axes in pixel units
-        def _world_to_pixel_cov(sigx, sigy, theta, dx, dy):
-            c = np.cos(theta)
-            s = np.sin(theta)
-            # Σ_world = R diag(sigx^2, sigy^2) R^T
-            a = (c * c) * sigx * sigx + (s * s) * sigy * sigy
-            b = (s * c) * (sigx * sigx - sigy * sigy)
-            d = (s * s) * sigx * sigx + (c * c) * sigy * sigy
-            invdx2 = 1.0 / (dx * dx)
-            invdy2 = 1.0 / (dy * dy)
-            A = a * invdx2
-            B = b * (1.0 / (dx * dy))
-            D = d * invdy2
-            tr = A + D
-            det = A * D - B * B
-            tmp = np.sqrt(np.maximum(tr * tr / 4.0 - det, 0.0))
-            lam1 = tr / 2.0 + tmp
-            lam2 = tr / 2.0 - tmp
-            theta_p = 0.5 * np.arctan2(2 * B, A - D)
-            lam_max = np.maximum(lam1, lam2)
-            lam_min = np.minimum(lam1, lam2)
-            return (
-                np.sqrt(np.maximum(lam_max, 0.0)),
-                np.sqrt(np.maximum(lam_min, 0.0)),
-                theta_p,
-            )
-
-        # Feed math-angle into geometry/covariance computation
-        sigma_major_pixel, sigma_minor_pixel, theta_pixel_math = xr.apply_ufunc(
-            _world_to_pixel_cov,
-            sx,
-            sy,
-            th_math,
-            dx_local,
-            dy_local,
-            input_core_dims=[["component"]] * 5,
-            output_core_dims=[["component"], ["component"], ["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float, float, float],
-        )
-        # Report pixel-space angle in the SAME convention as 'theta'
-        theta_pixel_pa = xr.DataArray(
-            _theta_math_to_pa(theta_pixel_math.values),
-            dims=theta_pixel_math.dims,
-            coords=theta_pixel_math.coords,
-        )
-        theta_pixel = theta_pixel_pa if want_pa else theta_pixel_math
-        fwhm_major_pixel = sigma_major_pixel * _SIG2FWHM
-        fwhm_minor_pixel = sigma_minor_pixel * _SIG2FWHM
-
-        # World-basis angle and its error are native in this branch
-        theta_world = th_public
-        theta_world_err = th_public_err
-        theta_world_math = theta_math
-        theta_world_pa = theta_pa
-        theta_world_math_err = theta_math_err
-        theta_world_pa_err = theta_pa_err
-
-        # --- σ error propagation (world → pixel) via finite differences (w.r.t σx, σy) ---
-        def _fd_sigma_world_to_pixel(sigx, sigy, theta, dx, dy, epsx, epsy):
-            # central differences on major/minor wrt (sigx, sigy); returns (dmaj_dsigx, dmin_dsigx, dmaj_dsigy, dmin_dsigy)
-            s1M, s1m, _ = _world_to_pixel_cov(sigx + epsx, sigy, theta, dx, dy)
-            s2M, s2m, _ = _world_to_pixel_cov(sigx - epsx, sigy, theta, dx, dy)
-            dM_dsx = (s1M - s2M) / (2.0 * epsx)
-            dm_dsx = (s1m - s2m) / (2.0 * epsx)
-            s1M, s1m, _ = _world_to_pixel_cov(sigx, sigy + epsy, theta, dx, dy)
-            s2M, s2m, _ = _world_to_pixel_cov(sigx, sigy - epsy, theta, dx, dy)
-            dM_dsy = (s1M - s2M) / (2.0 * epsy)
-            dm_dsy = (s1m - s2m) / (2.0 * epsy)
-            return dM_dsx, dm_dsx, dM_dsy, dm_dsy
-
-        _epsx = xr.apply_ufunc(
-            lambda v: 1e-6 + 1e-3 * np.abs(v), sx, dask="parallelized"
-        )
-        _epsy = xr.apply_ufunc(
-            lambda v: 1e-6 + 1e-3 * np.abs(v), sy, dask="parallelized"
-        )
-        dM_dsx, dm_dsx, dM_dsy, dm_dsy = xr.apply_ufunc(
-            _fd_sigma_world_to_pixel,
-            sx,
-            sy,
-            th_math,
-            dx_local,
-            dy_local,
-            _epsx,
-            _epsy,
-            input_core_dims=[["component"]] * 7,
-            output_core_dims=[
-                ["component"],
-                ["component"],
-                ["component"],
-                ["component"],
-            ],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float, float, float, float],
-        )
-        sigma_major_pixel_err = xr.apply_ufunc(
-            lambda a, b, c, d: np.sqrt((a * b) ** 2 + (c * d) ** 2),
-            dM_dsx,
-            sx_e,
-            dM_dsy,
-            sy_e,
-            input_core_dims=[
-                ["component"],
-                ["component"],
-                ["component"],
-                ["component"],
-            ],
-            output_core_dims=[["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-        sigma_minor_pixel_err = xr.apply_ufunc(
-            lambda a, b, c, d: np.sqrt((a * b) ** 2 + (c * d) ** 2),
-            dm_dsx,
-            sx_e,
-            dm_dsy,
-            sy_e,
-            input_core_dims=[
-                ["component"],
-                ["component"],
-                ["component"],
-                ["component"],
-            ],
-            output_core_dims=[["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-
-        # --- θ error propagation (world → pixel): d(theta_pixel_math)/d(theta_world_math) ---
-        def _dtheta_pix_dtheta_world(sigx, sigy, theta, dx, dy, eps):
-            _, _, t1 = _world_to_pixel_cov(sigx, sigy, theta + eps, dx, dy)
-            _, _, t2 = _world_to_pixel_cov(sigx, sigy, theta - eps, dx, dy)
-            return (t1 - t2) / (2.0 * eps)
-
-        _epst = xr.apply_ufunc(
-            lambda v: 1e-6 + 1e-3 * np.abs(v), th_math, dask="parallelized"
-        )
-        _dtdt = xr.apply_ufunc(
-            _dtheta_pix_dtheta_world,
-            sx,
-            sy,
-            th_math,
-            dx_local,
-            dy_local,
-            _epst,
-            input_core_dims=[["component"]] * 6,
-            output_core_dims=[["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-        # convert-to-PA is a shift, so σ is unchanged between math↔PA
-        theta_pixel_math_err = theta_pixel_err = xr.apply_ufunc(
-            np.multiply,
-            xr.apply_ufunc(np.abs, _dtdt, dask="parallelized"),
-            th_e,
-            input_core_dims=[["component"], ["component"]],
-            output_core_dims=[["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-        theta_pixel_pa_err = theta_pixel_math_err
-        # --- pixel-center uncertainties from world centers via local scale ---
-        x0_pixel_err = xr.apply_ufunc(
-            np.divide,
-            x0_e,
-            dx_local,
-            input_core_dims=[["component"], ["component"]],
-            output_core_dims=[["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-        y0_pixel_err = xr.apply_ufunc(
-            np.divide,
-            y0_e,
-            dy_local,
-            input_core_dims=[["component"], ["component"]],
-            output_core_dims=[["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-        # World-view σ and FWHM are native in this branch
-        sigma_x_world, sigma_y_world = sx, sy
-        sigma_x_world_err, sigma_y_world_err = sx_e, sy_e
-        sigma_major_world = xr.apply_ufunc(
-            np.maximum, sigma_x_world, sigma_y_world, dask="parallelized"
-        )
-        sigma_minor_world = xr.apply_ufunc(
-            np.minimum, sigma_x_world, sigma_y_world, dask="parallelized"
-        )
-        _is_sx_major_w = xr.apply_ufunc(
-            np.greater_equal, sigma_x_world, sigma_y_world, dask="parallelized"
-        )
-        sigma_major_world_err = xr.where(
-            _is_sx_major_w, sigma_x_world_err, sigma_y_world_err
-        )
-        sigma_minor_world_err = xr.where(
-            _is_sx_major_w, sigma_y_world_err, sigma_x_world_err
-        )
-        fwhm_major_world = sigma_major_world * _SIG2FWHM
-        fwhm_minor_world = sigma_minor_world * _SIG2FWHM
-        fwhm_major_world_err = sigma_major_world_err * _SIG2FWHM
-        fwhm_minor_world_err = sigma_minor_world_err * _SIG2FWHM
-        # Pixel FWHM errors from σ errors
-        fwhm_major_pixel_err = sigma_major_pixel_err * _SIG2FWHM
-        fwhm_minor_pixel_err = sigma_minor_pixel_err * _SIG2FWHM
-
-    else:
-        # already in pixel space -> alias
-        x0_pixel, y0_pixel = x0, y0
-        sigma_major_pixel = xr.apply_ufunc(np.maximum, sx, sy, dask="parallelized")
-        sigma_minor_pixel = xr.apply_ufunc(np.minimum, sx, sy, dask="parallelized")
-        theta_pixel_math = th_math
-        theta_pixel_pa = xr.DataArray(
-            _theta_math_to_pa(th_math.values), dims=th_math.dims, coords=th_math.coords
-        )
-        theta_pixel = theta_pixel_pa if want_pa else theta_pixel_math
-        fwhm_major_pixel = xr.apply_ufunc(
-            np.maximum, sx * _SIG2FWHM, sy * _SIG2FWHM, dask="parallelized"
-        )
-        fwhm_minor_pixel = xr.apply_ufunc(
-            np.minimum, sx * _SIG2FWHM, sy * _SIG2FWHM, dask="parallelized"
-        )
-        # Angular uncertainty is native in pixel basis
-        theta_pixel_math_err = theta_math_err
-        theta_pixel_pa_err = theta_pa_err
-        theta_pixel_err = th_public_err
-        # world angle/uncertainty computed below from pixel→world covariance
-
-        # and pixel-center uncertainties are the native ones
-        x0_pixel_err, y0_pixel_err = x0_e, y0_e
-        # Pixel σ errors are native in this branch
-        _is_sx_major_p = xr.apply_ufunc(np.greater_equal, sx, sy, dask="parallelized")
-        sigma_major_pixel_err = xr.where(_is_sx_major_p, sx_e, sy_e)
-        sigma_minor_pixel_err = xr.where(_is_sx_major_p, sy_e, sx_e)
-        fwhm_major_pixel_err = sigma_major_pixel_err * _SIG2FWHM
-        fwhm_minor_pixel_err = sigma_minor_pixel_err * _SIG2FWHM
-
-        # Also compute world-view σ/FWHM via pixel→world covariance transform if coords available
-        gx = np.gradient(x1d.astype(float))
-        gy = np.gradient(y1d.astype(float))
-        x0i = (
-            xr.apply_ufunc(
-                np.rint,
-                x0_pixel,
-                input_core_dims=[["component"]],
-                output_core_dims=[["component"]],
-                vectorize=True,
-                dask="parallelized",
-                output_dtypes=[float],
-            )
-            .clip(0, x1d.shape[0] - 1)
-            .astype(int)
-        )
-        y0i = (
-            xr.apply_ufunc(
-                np.rint,
-                y0_pixel,
-                input_core_dims=[["component"]],
-                output_core_dims=[["component"]],
-                vectorize=True,
-                dask="parallelized",
-                output_dtypes=[float],
-            )
-            .clip(0, y1d.shape[0] - 1)
-            .astype(int)
-        )
-        dx_local = xr.apply_ufunc(
-            np.take,
-            xr.DataArray(gx, dims=[dim_x]),
-            x0i,
-            input_core_dims=[[dim_x], ["component"]],
-            output_core_dims=[["component"]],
-            kwargs={"axis": 0, "mode": "clip"},
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-        dy_local = xr.apply_ufunc(
-            np.take,
-            xr.DataArray(gy, dims=[dim_y]),
-            y0i,
-            input_core_dims=[[dim_y], ["component"]],
-            output_core_dims=[["component"]],
-            kwargs={"axis": 0, "mode": "clip"},
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-
-        def _pixel_to_world_cov(sigx, sigy, theta, dx, dy):
-            c = np.cos(theta)
-            s = np.sin(theta)
-            # Σ_pixel = R diag(sigx^2, sigy^2) R^T
-            Sxx = (c * c) * sigx * sigx + (s * s) * sigy * sigy
-            Sxy = (s * c) * (sigx * sigx - sigy * sigy)
-            Syy = (s * s) * sigx * sigx + (c * c) * sigy * sigy
-            # world scaling
-            A = (dx * dx) * Sxx
-            B = (dx * dy) * Sxy
-            D = (dy * dy) * Syy
-            tr = A + D
-            det = A * D - B * B
-            tmp = np.sqrt(np.maximum(tr * tr / 4.0 - det, 0.0))
-            lam1 = tr / 2.0 + tmp
-            lam2 = tr / 2.0 - tmp
-            theta_w = 0.5 * np.arctan2(2 * B, A - D)
-            lam_max = np.maximum(lam1, lam2)
-            lam_min = np.minimum(lam1, lam2)
-            return (
-                np.sqrt(np.maximum(lam_max, 0.0)),
-                np.sqrt(np.maximum(lam_min, 0.0)),
-                theta_w,
-            )
-
-        sigma_major_world, sigma_minor_world, _theta_world_math = xr.apply_ufunc(
-            _pixel_to_world_cov,
-            sx,
-            sy,
-            th_math,
-            dx_local,
-            dy_local,
-            input_core_dims=[["component"]] * 5,
-            output_core_dims=[["component"], ["component"], ["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float, float, float],
-        )
-
-        # Error propagation (pixel → world) via finite differences on (σx, σy)
-        def _fd_sigma_pixel_to_world(sigx, sigy, theta, dx, dy, epsx, epsy):
-            s1M, s1m, _ = _pixel_to_world_cov(sigx + epsx, sigy, theta, dx, dy)
-            s2M, s2m, _ = _pixel_to_world_cov(sigx - epsx, sigy, theta, dx, dy)
-            dM_dsx = (s1M - s2M) / (2.0 * epsx)
-            dm_dsx = (s1m - s2m) / (2.0 * epsx)
-            s1M, s1m, _ = _pixel_to_world_cov(sigx, sigy + epsy, theta, dx, dy)
-            s2M, s2m, _ = _pixel_to_world_cov(sigx, sigy - epsy, theta, dx, dy)
-            dM_dsy = (s1M - s2M) / (2.0 * epsy)
-            dm_dsy = (s1m - s2m) / (2.0 * epsy)
-            return dM_dsx, dm_dsx, dM_dsy, dm_dsy
-
-        # World angle in requested convention
-        theta_world_math = _theta_world_math
-        theta_world_pa = xr.DataArray(
-            _theta_math_to_pa(_theta_world_math.values),
-            dims=_theta_world_math.dims,
-            coords=_theta_world_math.coords,
-        )
-        theta_world = theta_world_pa if want_pa else theta_world_math
-
-        # --- θ error propagation (pixel → world): d(theta_world_math)/d(theta_pixel_math) ---
-        def _dtheta_world_dtheta_pixel(sigx, sigy, theta, dx, dy, eps):
-            _, _, t1 = _pixel_to_world_cov(sigx, sigy, theta + eps, dx, dy)
-            _, _, t2 = _pixel_to_world_cov(sigx, sigy, theta - eps, dx, dy)
-            return (t1 - t2) / (2.0 * eps)
-
-        _epst_w = xr.apply_ufunc(
-            lambda v: 1e-6 + 1e-3 * np.abs(v), th_math, dask="parallelized"
-        )
-        _dtdt_w = xr.apply_ufunc(
-            _dtheta_world_dtheta_pixel,
-            sx,
-            sy,
-            th_math,
-            dx_local,
-            dy_local,
-            _epst_w,
-            input_core_dims=[["component"]] * 6,
-            output_core_dims=[["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-        theta_world_math_err = xr.apply_ufunc(
-            np.multiply,
-            xr.apply_ufunc(np.abs, _dtdt_w, dask="parallelized"),
-            th_e,
-            input_core_dims=[["component"], ["component"]],
-            output_core_dims=[["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-        theta_world_pa_err = theta_world_math_err
-        theta_world_err = theta_world_pa_err if want_pa else theta_world_math_err
-        _epsx = xr.apply_ufunc(
-            lambda v: 1e-6 + 1e-3 * np.abs(v), sx, dask="parallelized"
-        )
-        _epsy = xr.apply_ufunc(
-            lambda v: 1e-6 + 1e-3 * np.abs(v), sy, dask="parallelized"
-        )
-        dM_dsx, dm_dsx, dM_dsy, dm_dsy = xr.apply_ufunc(
-            _fd_sigma_pixel_to_world,
-            sx,
-            sy,
-            th_math,
-            dx_local,
-            dy_local,
-            _epsx,
-            _epsy,
-            input_core_dims=[["component"]] * 7,
-            output_core_dims=[
-                ["component"],
-                ["component"],
-                ["component"],
-                ["component"],
-            ],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float, float, float, float],
-        )
-        sigma_major_world_err = xr.apply_ufunc(
-            lambda a, b, c, d: np.sqrt((a * b) ** 2 + (c * d) ** 2),
-            dM_dsx,
-            sx_e,
-            dM_dsy,
-            sy_e,
-            input_core_dims=[
-                ["component"],
-                ["component"],
-                ["component"],
-                ["component"],
-            ],
-            output_core_dims=[["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-        sigma_minor_world_err = xr.apply_ufunc(
-            lambda a, b, c, d: np.sqrt((a * b) ** 2 + (c * d) ** 2),
-            dm_dsx,
-            sx_e,
-            dm_dsy,
-            sy_e,
-            input_core_dims=[
-                ["component"],
-                ["component"],
-                ["component"],
-                ["component"],
-            ],
-            output_core_dims=[["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-        fwhm_major_world = sigma_major_world * _SIG2FWHM
-        fwhm_minor_world = sigma_minor_world * _SIG2FWHM
-        fwhm_major_world_err = sigma_major_world_err * _SIG2FWHM
-        fwhm_minor_world_err = sigma_minor_world_err * _SIG2FWHM
-        # For completeness, also expose unsorted σ in world (principal axes order)
-        # Choose naming parallel to native σ_x/σ_y as principal axes (x=major, y=minor here)
-        # sigma_x_world, sigma_y_world = sigma_major_world, sigma_minor_world
-        # sigma_x_world_err, sigma_y_world_err = sigma_major_world_err, sigma_minor_world_err
-
-    # Convert internal σ → public FWHM along principal axes; also provide major/minor & errs.
-    # Use DA math to preserve dims/coords.
-    _fx = sx * _SIG2FWHM
-    _fy = sy * _SIG2FWHM
-    _fxe = sx_e * _SIG2FWHM
-    _fye = sy_e * _SIG2FWHM
-    fwhm_major = xr.apply_ufunc(np.maximum, _fx, _fy, dask="parallelized")
-    fwhm_minor = xr.apply_ufunc(np.minimum, _fx, _fy, dask="parallelized")
-    # match errs to whichever axis is major/minor per-component
-    _is_fx_major = xr.apply_ufunc(np.greater_equal, _fx, _fy, dask="parallelized")
-    fwhm_major_err = xr.where(_is_fx_major, _fxe, _fye)
-    fwhm_minor_err = xr.where(_is_fx_major, _fye, _fxe)
-    # Also expose pixel/world principal-axis σ explicitly + their errors
-    _is_sx_major = xr.apply_ufunc(np.greater_equal, sx, sy, dask="parallelized")
-    sigma_major = xr.where(_is_sx_major, sx, sy)
-    sigma_minor = xr.where(_is_sx_major, sy, sx)
-    sigma_major_err = xr.where(_is_sx_major, sx_e, sy_e)
-    sigma_minor_err = xr.where(_is_sx_major, sy_e, sx_e)
-
-    # sigma_x_pixel = sigma_major_pixel
-    # sigma_y_pixel = sigma_minor_pixel
-    # sigma_x_pixel_err = sigma_major_pixel_err
-    # sigma_y_pixel_err = sigma_minor_pixel_err
-    # World principal-axis already prepared above:
-    #   sigma_x_world, sigma_y_world, ... and fwhm_*_world(_err)
-    # (theta_pixel is the orientation of the major axis in pixel basis)
-    # Provide FWHM in pixel units too:
-
-    ds = xr.Dataset(
-        data_vars=dict(
-            amplitude=amp,
-            amplitude_err=amp_e,
-            peak=peak,
-            peak_err=peak_err,
-            # pixel-space mirrors
-            x0_pixel=x0_pixel,
-            y0_pixel=y0_pixel,
-            x0_pixel_err=x0_pixel_err,
-            y0_pixel_err=y0_pixel_err,
-            sigma_major_pixel=sigma_major_pixel,
-            sigma_minor_pixel=sigma_minor_pixel,
-            sigma_major_pixel_err=sigma_major_pixel_err,
-            sigma_minor_pixel_err=sigma_minor_pixel_err,
-            theta_pixel=theta_pixel,
-            theta_pixel_err=theta_pixel_err,
-            theta_pixel_math=theta_pixel_math,
-            theta_pixel_math_err=theta_pixel_math_err,
-            theta_pixel_pa=theta_pixel_pa,
-            theta_pixel_pa_err=theta_pixel_pa_err,
-            theta_world=theta_world,
-            theta_world_err=theta_world_err,
-            theta_world_math=theta_world_math,
-            theta_world_math_err=theta_world_math_err,
-            theta_world_pa=theta_world_pa,
-            theta_world_pa_err=theta_world_pa_err,
-            fwhm_major_pixel=fwhm_major_pixel,
-            fwhm_minor_pixel=fwhm_minor_pixel,
-            fwhm_major_pixel_err=fwhm_major_pixel_err,
-            fwhm_minor_pixel_err=fwhm_minor_pixel_err,
-            # world-space mirrors (explicit)
-            sigma_major_world=sigma_major_world,
-            sigma_minor_world=sigma_minor_world,
-            sigma_major_world_err=sigma_major_world_err,
-            sigma_minor_world_err=sigma_minor_world_err,
-            fwhm_major_world=fwhm_major_world,
-            fwhm_minor_world=fwhm_minor_world,
-            fwhm_major_world_err=fwhm_major_world_err,
-            fwhm_minor_world_err=fwhm_minor_world_err,
-            offset=offset,
-            offset_err=offset_e,
-            success=success,
-            variance_explained=varexp,
-        )
+    ds = _attach_optional_plane_outputs(
+        ds,
+        fit,
+        context,
+        bool(return_residual),
+        bool(return_model),
     )
-    # --- record only axes handedness; publish both angle conventions explicitly ---
-    conv = "pa" if want_pa else "math"
-    ds.attrs["axes_handedness"] = "left" if is_left_handed else "right"
-    # Record the chosen theta convention ("math" or "pa") for self-documentation
-    ds.attrs["theta_convention"] = conv
-    # Add explicit angular units to all theta-related outputs
-    # Annotate angle variables with convention + frame (no bare 'theta' var in this DS)
+    ds = _attach_world_center_outputs(ds, fit, context, world_mode)
 
-    ds = _add_angle_attrs(ds, conv, "pixel")
-
-    if return_residual:
-        ds["residual"] = residual.transpose(
-            *(d for d in residual.dims if d not in (dim_y, dim_x)), dim_x, dim_y
-        )
-    if return_model:
-        ds["model"] = model.transpose(
-            *(d for d in model.dims if d not in (dim_y, dim_x)), dim_x, dim_y
-        )
-
-    # world coord exposure adjusted: alias if already in world, otherwise interp from pixels.
-    if (dim_x in da_tr.coords) and (dim_y in da_tr.coords):
-        cx = np.asarray(da_tr.coords[dim_x].values)
-        cy = np.asarray(da_tr.coords[dim_y].values)
-
-        x_valid = _axis_is_valid(cx)
-        y_valid = _axis_is_valid(cy)
-        axes_valid = x_valid and y_valid
-
-        if world_mode:
-            # Already fitted in world coords → x0/y0 are world; expose direct aliases.
-            ds["x0_world"] = x0
-            ds["y0_world"] = y0
-            # Uncertainties are the same coordinate system → direct aliases
-            ds["x0_world_err"] = x0_e
-            ds["y0_world_err"] = y0_e
-            # Self-documenting attrs
-            ds["x0_world"].attrs[
-                "description"
-            ] = "Component center x in world coordinates."
-            ds["y0_world"].attrs[
-                "description"
-            ] = "Component center y in world coordinates."
-            ds["x0_world_err"].attrs["description"] = "1-sigma uncertainty of x0_world."
-            ds["y0_world_err"].attrs["description"] = "1-sigma uncertainty of y0_world."
-        else:
-
-            def _prep(
-                coord: np.ndarray,
-            ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-                coord = np.asarray(coord)
-                if coord.ndim != 1 or coord.size == 0 or not np.all(np.isfinite(coord)):
-                    return None, None
-                if (
-                    coord.size >= 2 and coord[1] < coord[0]
-                ):  # descending → reverse for interp
-                    idx = np.arange(coord.size - 1, -1, -1, dtype=float)
-                    return idx, coord[::-1]
-                if not np.all(np.diff(coord) > 0):
-                    return None, None
-                return np.arange(coord.size, dtype=float), coord
-
-            # Extracted for testability & reliable coverage:
-            ds = _interp_centers_world(ds, cx, cy, dim_x, dim_y)
-
-    # --- record invocation metadata on the result Dataset ---
-    try:
-        import inspect as _inspect
-    except Exception:
-        _inspect = None
-    try:
-        from importlib import metadata as _ilm
-    except Exception:
-        _ilm = None
-
-    def _short(v, maxlen=120):
-        import numpy as _np
-        import xarray as _xr
-
-        if v is None:
-            return None
-        if isinstance(v, (float, int, bool, str)):
-            return v
-        if isinstance(v, dict):
-            # shallow sanitize
-            out = {}
-            for k, vv in list(v.items())[:50]:
-                out[k] = _short(vv, maxlen // 2)
-            return out
-        if isinstance(v, (list, tuple)):
-            return [_short(x, maxlen // 2) for x in list(v)[:50]]
-        # arrays / DataArrays / other objects
-        try:
-            shape = tuple(getattr(v, "shape", ()))
-            return f"<{type(v).__name__} shape={shape}>"
-        except Exception:
-            s = repr(v)
-            return s if len(s) <= maxlen else (s[: maxlen - 3] + "...")
-
-    # Full parameter set (exclude raw data)
-    _param = dict(
+    # Stage 6: finish with call provenance and self-documenting variable metadata.
+    ds = _attach_fit_invocation_metadata(
+        ds,
         n_components=int(n_components),
-        dims=(list(dims) if dims is not None else None),
+        dims=dims,
         min_threshold=min_threshold,
         max_threshold=max_threshold,
-        initial_guesses=_short(initial_guesses),
-        bounds=_short(bounds),
+        initial_guesses=initial_guesses,
+        bounds=bounds,
         initial_is_fwhm=bool(initial_is_fwhm),
         max_nfev=int(max_nfev),
         return_model=bool(return_model),
         return_residual=bool(return_residual),
         angle=str(angle),
         coord_type=str(coord_type),
-        coords=_short(coords),
+        coords=coords,
+        world_mode=world_mode,
     )
-    _call = _build_call(_inspect, _param)
-
-    # Package metadata
-    _pkg = __package__.split(".")[0] if __package__ else "astroviper"
-    try:
-        _ver = _ilm.version(_pkg) if _ilm is not None else "unknown"
-    except Exception:
-        try:
-            import astroviper as _av
-
-            _ver = getattr(_av, "__version__", "unknown")
-        except Exception:
-            _ver = "unknown"
-
-    ds.attrs["call"] = _call
-    ds.attrs["param"] = _param
-    ds.attrs["package"] = _pkg
-    ds.attrs["version"] = _ver
-    ds.attrs["fit_native_frame"] = "world" if world_mode else "pixel"
-
-    # --- Self-documenting variable metadata ----------------------------------
-    _dv_docs = {
-        # centers
-        "x0_pixel": "Gaussian center x-coordinate in pixel indices (0-based), derived from world coords if necessary.",
-        "y0_pixel": "Gaussian center y-coordinate in pixel indices (0-based), derived from world coords if necessary.",
-        "x0_pixel_err": "1σ uncertainty of x0_pixel (native if pixel fit; world fit propagated via local pixel scale).",
-        "y0_pixel_err": "1σ uncertainty of y0_pixel (native if pixel fit; world fit propagated via local pixel scale).",
-        "x0_world": "Component center x in world coordinates (if available).",
-        "y0_world": "Component center y in world coordinates (if available).",
-        "x0_world_err": "1σ uncertainty of x0_world (direct if world fit; else via interpolation/pixel-scale propagation).",
-        "y0_world_err": "1σ uncertainty of y0_world (direct if world fit; else via interpolation/pixel-scale propagation).",
-        # scales (sigma = standard deviation of the 1-D Gaussian along ellipse axes before FWHM conversion)
-        "sigma_major_pixel": "Gaussian 1σ scale along the major principal axis in pixel units (after world→pixel conversion).",
-        "sigma_minor_pixel": "Gaussian 1σ scale along the minor principal axis in pixel units (after world→pixel conversion).",
-        "sigma_major_pixel_err": "1σ uncertainty in sigma_major_pixel in pixel units (after world→pixel conversion).",
-        "sigma_minor_pixel_err": "1σ uncertainty in sigma_minor_pixel in pixel units (after world→pixel conversion).",
-        "sigma_major_world": "Principal-axis 1σ (major) expressed in world coordinates.",
-        "sigma_minor_world": "Principal-axis 1σ (minor) expressed in world coordinates.",
-        "sigma_major_world_err": "1σ uncertainty of sigma_major_world (native if world fit; else propagated).",
-        "sigma_minor_world_err": "1σ uncertainty of sigma_minor_world (native if world fit; else propagated).",
-        # FWHM (2*sqrt(2*ln 2) * sigma)
-        "fwhm_major_pixel": "Full-width at half-maximum along the major principal axis in pixel coordinates.",
-        "fwhm_minor_pixel": "Full-width at half-maximum along the minor principal axis in pixel coordinates.",
-        "fwhm_major_pixel_err": "1σ uncertainty of pixel-frame FWHM(major) (native if pixel fit; else propagated).",
-        "fwhm_minor_pixel_err": "1σ uncertainty of pixel-frame FWHM(minor) (native if pixel fit; else propagated).",
-        "fwhm_major_world": "FWHM of the major principal axis in world coordinates.",
-        "fwhm_minor_world": "FWHM of the minor principal axis in world coordinates.",
-        "fwhm_major_world_err": "1σ uncertainty of world-frame FWHM(major) (native if world fit; else propagated).",
-        "fwhm_minor_world_err": "1σ uncertainty of world-frame FWHM(minor) (native if world fit; else propagated).",
-        # angles (θ always refers to the MAJOR axis; wrapped to (-π/2, π/2])
-        "theta_pixel": "Orientation of the ellipse MAJOR axis in pixel coordinates (same convention as 'theta').",
-        "theta_pixel_err": "1σ uncertainty of theta_pixel (major-axis orientation) in radians; propagated through the world↔pixel transform.",
-        "theta_pixel_math": "Orientation of the ellipse MAJOR axis in pixel coordinates using the math convention (+x toward +y).",
-        "theta_pixel_math_err": "1σ uncertainty of theta_pixel_math in radians.",
-        "theta_pixel_pa": "Orientation of the ellipse MAJOR axis in pixel coordinates using position angle (+y toward +x).",
-        "theta_pixel_pa_err": "1σ uncertainty of theta_pixel_pa in radians.",
-        "theta_world": "Orientation of the ellipse MAJOR axis in world coordinates (same convention as 'theta').",
-        "theta_world_err": "1σ uncertainty of theta_world (major-axis orientation) in radians; propagated through the pixel↔world transform.",
-        "theta_world_math": "Orientation of the ellipse MAJOR axis in world coordinates using the math convention (+x toward +y).",
-        "theta_world_math_err": "1σ uncertainty of theta_world_math in radians.",
-        "theta_world_pa": "Orientation of the ellipse MAJOR axis in world coordinates using position angle (+y toward +x).",
-        "theta_world_pa_err": "1σ uncertainty of theta_world_pa in radians.",
-        # amplitudes / background
-        "amplitude": "Component amplitude (peak height above offset) in data units.",
-        "peak": "Model peak value at the component center (offset + amplitude) in data units.",
-        "peak_err": "1σ uncertainty of the model peak (quadrature of amplitude_err and offset_err).",
-        "offset": "Additive constant background in data units for this fit plane.",
-        "offset_err": "1σ uncertainty on the additive background.",
-        # uncertainties
-        "amplitude_err": "1σ uncertainty of amplitude parameter in data units.",
-        # diagnostics
-        "success": "Optimizer success flag (True/False).",
-        "variance_explained": "Explained variance fraction by the fitted model on this plane (0–1).",
-        # images
-        "model": "Best-fit model image on the (y, x) grid of the input.",
-        "residual": "Residual image = data - model on the (y, x) grid of the input.",
-    }
-    for _name, _desc in _dv_docs.items():
-        if _name in ds:
-            ds[_name].attrs.setdefault("description", _desc)
-        if _name.startswith("theta"):
-            # Ensure angular units are tagged consistently
-            ds[_name].attrs["units"] = "rad"
-    # Add an explanatory note for the per-plane explained-variance metric.
-    # This text is intentionally verbose to make the DV self-documenting.
-    if "variance_explained" in ds:
-        # put into own function to try to coerce coverage
-        ds = _add_variance_explained(ds)
-    return ds
+    return _apply_fit_variable_docs(ds)
 
 
 # TODO: move to a plotting module
