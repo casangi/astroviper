@@ -1865,11 +1865,11 @@ def fit_multi_gaussian2d(
     dims: Sequence[str | int] | None
       Two dims (names or indices) that define the fit plane (x, y). If omitted: uses ('x','y') if present; else for 2-D uses (last, second-last). Required for ndim ≠ 2 without ('x','y').
 
-    mask: numpy.ndarray | dask.array.Array | xarray.DataArray | None
-      Optional boolean mask. **True keeps** a pixel. If 2-D with dims (y, x), it is
+    mask: numpy.ndarray | dask.array.Array | xarray.DataArray | str | None
+      Optional boolean mask. **True means the associated pixel is good.** If 2-D with dims (y, x), it is
       broadcast across leading dims; if it matches the full array shape, it is used
       elementwise. Combined with thresholds as: `final_mask = mask ∧ (>= min_threshold) ∧ (<= max_threshold)`.
-
+      A string value is interpreted as a CRTF specification.
     min_threshold: float | None
       Inclusive lower threshold; pixels with values < min_threshold are ignored during the fit.
 
@@ -1906,7 +1906,10 @@ def fit_multi_gaussian2d(
         • "pa": position angle (from +y toward +x).
         • "auto": if axes are left-handed (sign(Δx)·sign(Δy) < 0) treat as PA; otherwise math. Outputs follow the same convention.
     coord_type: {"world","pixel"}, default "world"
-      Applies only to xarray.DataArray inputs: "world" uses the DataArray's 1-D coords; "pixel" uses index grids.
+      Applies only to xarray.DataArray inputs.
+        • "world": the optimizer evaluates the Gaussian model on the DataArray's attached 1-D coordinate axes.
+        • "pixel": the optimizer evaluates the Gaussian model on zero-based pixel-index axes.
+      When coordinate metadata are available, the returned dataset may still report both pixel-space and world-space component parameters; ``coord_type`` only selects the native frame in which the fit is performed.
       Ignored for NumPy/Dask inputs.
     coords: tuple[np.ndarray, np.ndarray] | list[np.ndarray] | None
       For NumPy/Dask inputs only: provide (x1d, y1d) to fit in world coordinates. Ignored for DataArray inputs.
@@ -1938,8 +1941,11 @@ def fit_multi_gaussian2d(
     image planes stored in NumPy ``[y, x]`` memory order. Supported angle choices are
     ``"math"`` for the internal mathematical convention, ``"pa"`` for astronomical
     position angle measured from +y toward +x, and ``"auto"`` to choose based on axis
-    handedness. Width parameters are optimized internally in sigma units even when
-    array-form initial guesses or bounds are provided in FWHM.
+    handedness. When coordinate metadata are available, the result can include both
+    pixel-space and world-space views of the fitted components, but ``coord_type``
+    determines which frame was used by the optimizer itself. Width parameters are
+    optimized internally in sigma units even when array-form initial guesses or
+    bounds are provided in FWHM.
 
     Examples
     --------
