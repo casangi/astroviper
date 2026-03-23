@@ -2324,10 +2324,9 @@ class TestBoundsFwhmMapping:
         model = xr.DataArray(np.zeros_like(da.values), dims=da.dims)
         return (*blocks, offset, offset_e, success, varexp, resid, model)
 
-    def test_fwhm_major_list_of_tuples_maps_to_sigma_x_per_component(
+    def test_paired_fwhm_bounds_map_to_sigma_bounds_per_component(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Capture the mapped bounds passed into the vectorized wrapper
         seen: dict[str, dict] = {}
 
         # Keep original so we can forward calls not targeting the plane wrapper
@@ -2354,7 +2353,10 @@ class TestBoundsFwhmMapping:
             [[1.0, 3.0, 4.0, 2.0, 1.5, 0.0], [0.8, 6.0, 2.0, 3.0, 2.5, 0.1]],
             dtype=float,
         )
-        bounds = {"fwhm_major": [(1.0, 4.0), (2.0, 5.0)]}
+        bounds = {
+            "fwhm_major": [(1.0, 4.0), (2.0, 5.0)],
+            "fwhm_minor": [(0.5, 2.0), (1.0, 3.0)],
+        }
 
         ds = fit_multi_gaussian2d(
             da, n_components=2, initial_guesses=init, bounds=bounds, coord_type="pixel"
@@ -2362,41 +2364,44 @@ class TestBoundsFwhmMapping:
         assert isinstance(ds, xr.Dataset)
 
         conv = mg._FWHM2SIG
-        expected = {"sigma_x": [(1.0 * conv, 4.0 * conv), (2.0 * conv, 5.0 * conv)]}
+        expected = {
+            "sigma_x": [(1.0 * conv, 4.0 * conv), (2.0 * conv, 5.0 * conv)],
+            "sigma_y": [(0.5 * conv, 2.0 * conv), (1.0 * conv, 3.0 * conv)],
+        }
         assert seen["bounds"] == expected
 
-    def test_fwhm_minor_single_tuple_maps_to_sigma_y_tuple(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        seen: dict[str, dict] = {}
-
-        orig_apply_ufunc = xr.apply_ufunc
-
-        def fake_apply_ufunc(*args, **kw):
-            func = args[0] if args else None
-            if func is mg._multi_fit_plane_wrapper:
-                da_tr = args[1]
-                kwargs_dict = kw.get("kwargs", {}) or {}
-                seen["bounds"] = dict(kwargs_dict.get("bounds", {}))
-                n = int(kwargs_dict.get("n_components", 1))
-                return TestBoundsFwhmMapping()._dummy_results(da_tr, n)
-            return orig_apply_ufunc(*args, **kw)
-
-        monkeypatch.setattr(xr, "apply_ufunc", fake_apply_ufunc, raising=True)
-
-        ny, nx = 7, 7
-        da = xr.DataArray(np.zeros((ny, nx), dtype=float), dims=("y", "x"))
+    @pytest.mark.parametrize("key", ["fwhm_major", "fwhm_minor"])
+    def test_unpaired_public_fwhm_bound_raises(self, key: str) -> None:
+        da = xr.DataArray(np.zeros((7, 7), dtype=float), dims=("y", "x"))
         init = np.array([[1.0, 3.0, 3.0, 1.2, 1.1, 0.0]], dtype=float)
-        bounds = {"fwhm_minor": (2.0, 6.0)}
 
-        ds = fit_multi_gaussian2d(
-            da, n_components=1, initial_guesses=init, bounds=bounds, coord_type="pixel"
-        )
-        assert isinstance(ds, xr.Dataset)
+        with pytest.raises(
+            ValueError,
+            match=r"fwhm_major' and 'fwhm_minor' must be provided together",
+        ):
+            fit_multi_gaussian2d(
+                da,
+                n_components=1,
+                initial_guesses=init,
+                bounds={key: (2.0, 6.0)},
+                coord_type="pixel",
+            )
 
-        conv = mg._FWHM2SIG
-        expected = {"sigma_y": (2.0 * conv, 6.0 * conv)}
-        assert seen["bounds"] == expected
+    def test_public_theta_bound_raises(self) -> None:
+        da = xr.DataArray(np.zeros((7, 7), dtype=float), dims=("y", "x"))
+        init = np.array([[1.0, 3.0, 3.0, 1.2, 1.1, 0.0]], dtype=float)
+
+        with pytest.raises(
+            ValueError,
+            match=r"bounds for 'theta'.*not supported",
+        ):
+            fit_multi_gaussian2d(
+                da,
+                n_components=1,
+                initial_guesses=init,
+                bounds={"theta": (-0.1, 0.1)},
+                coord_type="pixel",
+            )
 
 
 # ------------------------- cover mapping of fwhm_minor → sigma_y (public API) -------------------------
