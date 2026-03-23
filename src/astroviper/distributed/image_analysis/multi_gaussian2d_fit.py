@@ -2031,7 +2031,10 @@ def _prepare_fit_configuration(
     -----
     Width parameters are always converted into sigma units before reaching the
     optimizer. Angle guesses are converted into the internal math convention when
-    the public API is operating in PA mode.
+    the public API is operating in PA mode. Public ``fwhm_major`` and
+    ``fwhm_minor`` bounds must be supplied together, while public ``theta``
+    bounds are rejected because the optimizer does not parameterize the
+    major-axis angle directly.
     """
     ig = initial_guesses
     if (
@@ -2073,6 +2076,16 @@ def _prepare_fit_configuration(
 
     bnds: Optional[Dict[str, Any]] = bounds
     if bounds is not None:
+        has_major = "fwhm_major" in bounds
+        has_minor = "fwhm_minor" in bounds
+        if has_major != has_minor:
+            raise ValueError(
+                "bounds for 'fwhm_major' and 'fwhm_minor' must be provided together."
+            )
+        if "theta" in bounds:
+            raise ValueError(
+                "public bounds for 'theta' are not supported with the current width parameterization."
+            )
         conv = _FWHM2SIG
         converted: Dict[str, Any] = {}
         for key, value in bounds.items():
@@ -3311,6 +3324,8 @@ def fit_multi_gaussian2d(
     bounds: dict[str, (float,float) | Sequence[(float,float)]] | None
       Bounds to constrain parameters. Keys may include {"offset","amp"/"amplitude","x0","y0","fwhm_major","fwhm_minor","theta"}.
       Each value is either a single (low, high) tuple applied to all components, or a length-N sequence of (low, high) tuples for per-component bounds. To **fix** a parameter, set low == high.
+      Public principal-axis width bounds must provide both ``fwhm_major`` and ``fwhm_minor`` together.
+      Public ``theta`` bounds are not supported by the current raw-width parameterization.
     initial_is_fwhm: bool
      Default **True**. When ``True`` and ``initial_guesses`` is an array of shape (N,6), columns 3–4
      are treated as **FWHM** and converted to σ internally. Set to ``False`` only if your array guesses
