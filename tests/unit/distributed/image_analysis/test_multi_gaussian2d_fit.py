@@ -2403,6 +2403,60 @@ class TestBoundsFwhmMapping:
                 coord_type="pixel",
             )
 
+    def test_overlapping_ordered_public_fwhm_bounds_are_allowed(self) -> None:
+        seen: dict[str, dict] = {}
+        orig_apply_ufunc = xr.apply_ufunc
+
+        def fake_apply_ufunc(*args, **kw):
+            func = args[0] if args else None
+            if func is mg._multi_fit_plane_wrapper:
+                da_tr = args[1]
+                kwargs_dict = kw.get("kwargs", {}) or {}
+                seen["bounds"] = dict(kwargs_dict.get("bounds", {}))
+                n = int(kwargs_dict.get("n_components", 1))
+                return TestBoundsFwhmMapping()._dummy_results(da_tr, n)
+            return orig_apply_ufunc(*args, **kw)
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(xr, "apply_ufunc", fake_apply_ufunc, raising=True)
+        try:
+            da = xr.DataArray(np.zeros((7, 7), dtype=float), dims=("y", "x"))
+            init = np.array([[1.0, 3.0, 3.0, 1.2, 1.1, 0.0]], dtype=float)
+            bounds = {"fwhm_major": (5.0, 7.0), "fwhm_minor": (4.0, 6.0)}
+
+            ds = fit_multi_gaussian2d(
+                da,
+                n_components=1,
+                initial_guesses=init,
+                bounds=bounds,
+                coord_type="pixel",
+            )
+            assert isinstance(ds, xr.Dataset)
+
+            conv = mg._FWHM2SIG
+            assert seen["bounds"] == {
+                "sigma_x": (5.0 * conv, 7.0 * conv),
+                "sigma_y": (4.0 * conv, 6.0 * conv),
+            }
+        finally:
+            monkeypatch.undo()
+
+    def test_inconsistent_public_fwhm_bounds_raise(self) -> None:
+        da = xr.DataArray(np.zeros((7, 7), dtype=float), dims=("y", "x"))
+        init = np.array([[1.0, 3.0, 3.0, 1.2, 1.1, 0.0]], dtype=float)
+
+        with pytest.raises(
+            ValueError,
+            match=r"paired principal-axis bounds must satisfy",
+        ):
+            fit_multi_gaussian2d(
+                da,
+                n_components=1,
+                initial_guesses=init,
+                bounds={"fwhm_major": (5.0, 5.5), "fwhm_minor": (4.0, 6.0)},
+                coord_type="pixel",
+            )
+
 
 # ------------------------- cover mapping of fwhm_minor → sigma_y (public API) -------------------------
 # Exercises the branch where component dicts omit sigma_y/sy but provide fwhm_minor.

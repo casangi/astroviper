@@ -2032,9 +2032,10 @@ def _prepare_fit_configuration(
     Width parameters are always converted into sigma units before reaching the
     optimizer. Angle guesses are converted into the internal math convention when
     the public API is operating in PA mode. Public ``fwhm_major`` and
-    ``fwhm_minor`` bounds must be supplied together, while public ``theta``
-    bounds are rejected because the optimizer does not parameterize the
-    major-axis angle directly.
+    ``fwhm_minor`` bounds must be supplied together and must define an ordered
+    principal-axis interval per component, while public ``theta`` bounds are
+    rejected because the optimizer does not parameterize the major-axis angle
+    directly.
     """
     ig = initial_guesses
     if (
@@ -2086,6 +2087,37 @@ def _prepare_fit_configuration(
             raise ValueError(
                 "public bounds for 'theta' are not supported with the current width parameterization."
             )
+        if has_major and has_minor:
+            major_val = bounds["fwhm_major"]
+            minor_val = bounds["fwhm_minor"]
+
+            def _expand_bound_pairs(value: Any) -> List[Tuple[float, float]]:
+                if (
+                    isinstance(value, (list, tuple))
+                    and value
+                    and isinstance(value[0], (list, tuple))
+                ):
+                    if len(value) != int(n_components):
+                        raise ValueError(
+                            "paired 'fwhm_major'/'fwhm_minor' bounds must each have length "
+                            f"n={int(n_components)} when specified per component."
+                        )
+                    return [(float(lo), float(hi)) for (lo, hi) in value]
+                lo, hi = value  # type: ignore[misc]
+                return [(float(lo), float(hi))] * int(n_components)
+
+            major_pairs = _expand_bound_pairs(major_val)
+            minor_pairs = _expand_bound_pairs(minor_val)
+            for i, ((major_lo, major_hi), (minor_lo, minor_hi)) in enumerate(
+                zip(major_pairs, minor_pairs)
+            ):
+                if major_lo < minor_lo or major_hi < minor_hi:
+                    raise ValueError(
+                        "paired principal-axis bounds must satisfy "
+                        f"fwhm_major_lo >= fwhm_minor_lo and fwhm_major_hi >= fwhm_minor_hi "
+                        f"for each component; component {i} received "
+                        f"major=({major_lo}, {major_hi}) and minor=({minor_lo}, {minor_hi})."
+                    )
         conv = _FWHM2SIG
         converted: Dict[str, Any] = {}
         for key, value in bounds.items():
@@ -3325,6 +3357,8 @@ def fit_multi_gaussian2d(
       Bounds to constrain parameters. Keys may include {"offset","amp"/"amplitude","x0","y0","fwhm_major","fwhm_minor","theta"}.
       Each value is either a single (low, high) tuple applied to all components, or a length-N sequence of (low, high) tuples for per-component bounds. To **fix** a parameter, set low == high.
       Public principal-axis width bounds must provide both ``fwhm_major`` and ``fwhm_minor`` together.
+      For each component, the major interval must remain ordered above the minor interval:
+      ``fwhm_major_lo >= fwhm_minor_lo`` and ``fwhm_major_hi >= fwhm_minor_hi``.
       Public ``theta`` bounds are not supported by the current raw-width parameterization.
     initial_is_fwhm: bool
      Default **True**. When ``True`` and ``initial_guesses`` is an array of shape (N,6), columns 3–4
