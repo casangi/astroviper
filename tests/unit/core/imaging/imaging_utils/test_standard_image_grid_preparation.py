@@ -46,6 +46,7 @@ class TestStandardImGridPrep(unittest.TestCase):
             frequency_coords=freq,
             pol_coords=pol,
             time_coords=epoch,
+            do_sky_coords=True,
         )
 
         sky_data_dims = ("time", "frequency", "polarization", "l", "m")
