@@ -233,6 +233,7 @@ def run_imaging_loop(
             frequency_coords=freq_coords,
             pol_coords=pol_coords_arg,
             time_coords=time_coords,
+            do_sky_coords=True,
         )
 
     major_cycle = 0
