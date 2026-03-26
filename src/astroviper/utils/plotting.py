@@ -180,6 +180,7 @@ def generate_plot(
     show_world_axes: bool = False,
     x_coords: Optional[Union[str, np.ndarray]] = None,
     y_coords: Optional[Union[str, np.ndarray]] = None,
+    title: Optional[str] = None,
     cmap: str = "magma",
     figsize: Tuple[float, float] = (8.0, 8.0),
     vmin: Optional[float] = None,
@@ -216,6 +217,8 @@ def generate_plot(
         name or a one-dimensional array. For plain arrays this must be ``None`` or a
         one-dimensional array. If omitted, the 1st axis is treated as y and uses the
         DataArray's matching coordinate or pixel indices.
+    title : str | None, optional
+        Plot title. If provided, it is displayed on the rendered axes.
     cmap : str, optional
         Matplotlib colormap name. Default is ``"magma"``.
     figsize : tuple[float, float], optional
@@ -259,6 +262,8 @@ def generate_plot(
         ax.set_aspect("equal")
         ax.set_xlabel(default_x_label)
         ax.set_ylabel(default_y_label)
+        if title is not None:
+            ax.set_title(title)
         fig.colorbar(image, ax=ax, label=colorbar_label)
         return fig, ax
 
@@ -278,6 +283,8 @@ def generate_plot(
         ax.set_aspect("equal")
         ax.set_xlabel(default_x_label)
         ax.set_ylabel(default_y_label)
+        if title is not None:
+            ax.set_title(title)
         fig.colorbar(mesh, ax=ax, label=colorbar_label)
         return fig, ax
 
@@ -286,5 +293,7 @@ def generate_plot(
     ax.set_aspect("equal")
     ax.set_xlabel(default_x_label)
     ax.set_ylabel(default_y_label)
+    if title is not None:
+        ax.set_title(title)
     fig.colorbar(image, ax=ax, label=colorbar_label)
     return fig, ax
