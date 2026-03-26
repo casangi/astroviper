@@ -1175,6 +1175,9 @@ def _ensure_dataarray(data: ArrayOrDA) -> xr.DataArray:
     if isinstance(data, (np.ndarray, da.Array)):
         dims = [f"dim_{i}" for i in range(data.ndim)]
         coords = {d: np.arange(s, dtype=float) for d, s in zip(dims, data.shape)}
+        # Raw NumPy/Dask arrays arrive without semantic axis names. We wrap them
+        # generically here; downstream dimension resolution will interpret the
+        # last axis as x and the second-last as y unless the caller supplies dims.
         return xr.DataArray(data, dims=dims, coords=coords, name="data")
     raise TypeError(
         "Unsupported input type; use numpy.ndarray, dask.array.Array, or xarray.DataArray."
@@ -1211,6 +1214,9 @@ def _resolve_dims(
         if "x" in da.dims and "y" in da.dims:
             return "x", "y"
         if da.ndim == 2:
+            # For unlabeled/raw 2-D arrays, interpret stored image-plane order as
+            # (y, x): rows first, columns second. Public semantic fit-plane order
+            # remains (x, y), so x maps to the last axis and y to the second-last.
             return da.dims[-1], da.dims[-2]
         raise ValueError(
             "For arrays with ndim != 2, specify two dims (names or indices)."
@@ -1477,7 +1483,10 @@ def _extract_1d_coords_for_fit(
     -----
     DataArray inputs can use either pixel indices or their attached 1-D coordinate
     variables. NumPy/Dask inputs ignore ``coord_type`` and use ``coords`` when
-    provided; otherwise they fall back to zero-based pixel indices.
+    provided; otherwise they fall back to zero-based pixel indices. DataArray
+    inputs requested in ``coord_type="world"`` mode also fall back to pixel-index
+    coordinates when the fit dimensions do not have explicit 1-D coordinate
+    variables attached.
     """
     ny, nx = int(da_tr.sizes[dim_y]), int(da_tr.sizes[dim_x])
 
@@ -1489,11 +1498,10 @@ def _extract_1d_coords_for_fit(
             )
         if ctype == "pixel":
             return np.arange(nx, dtype=float), np.arange(ny, dtype=float)
-        # world coords from the DataArray
+        # world coords from the DataArray; if they are absent, fall back to
+        # pixel indices just like raw NumPy/Dask inputs.
         if (dim_x not in da_tr.coords) or (dim_y not in da_tr.coords):
-            raise ValueError(
-                f"DataArray is missing coords for dims ({dim_y}, {dim_x}) required for world fitting."
-            )
+            return np.arange(nx, dtype=float), np.arange(ny, dtype=float)
         x1d = np.asarray(da_tr.coords[dim_x].values)
         y1d = np.asarray(da_tr.coords[dim_y].values)
         if x1d.ndim != 1 or y1d.ndim != 1 or x1d.size != nx or y1d.size != ny:
@@ -1900,6 +1908,8 @@ def _build_fit_execution_context(
     """
     da_in = _ensure_dataarray(data)
     dim_x, dim_y = _resolve_dims(da_in, dims)
+    # Normalize to trailing (y, x) because image planes are stored in row/column
+    # memory order internally even though the public fit-plane API is (x, y).
     da_tr = da_in.transpose(
         *(d for d in da_in.dims if d not in (dim_y, dim_x)), dim_y, dim_x
     )
@@ -1912,6 +1922,7 @@ def _build_fit_execution_context(
         da_tr=da_tr,
         dim_x=dim_x,
         dim_y=dim_y,
+        # Core gufunc dimensions follow the internal plane storage order (y, x).
         core=[dim_y, dim_x],
         coord_x=coord_x,
         coord_y=coord_y,
@@ -1943,18 +1954,18 @@ def _warn_if_suboptimal_dask_chunking(context: _FitExecutionContext) -> None:
 
     split_fit_dims = [
         dim
-        for dim in (context.dim_y, context.dim_x)
+        for dim in (context.dim_x, context.dim_y)
         if dim in chunksizes and len(chunksizes[dim]) > 1
     ]
     if not split_fit_dims:
         return
 
-    suggested_chunks = {context.dim_y: -1, context.dim_x: -1}
+    suggested_chunks = {context.dim_x: -1, context.dim_y: -1}
     warnings.warn(
         "Dask-backed input is chunked across the fit-plane dimension(s) "
         f"{split_fit_dims!r}. This fitter generally performs best when each full "
-        f"plane is contained in a single chunk along {context.dim_y!r} and "
-        f"{context.dim_x!r}. Consider rechunking before the fit, for example "
+        f"plane is contained in a single chunk along {context.dim_x!r} and "
+        f"{context.dim_y!r}. Consider rechunking before the fit, for example "
         f"`data = data.chunk({suggested_chunks!r})`, while choosing outer-dimension "
         "chunks separately for stack-level parallelism.",
         RuntimeWarning,
@@ -2007,6 +2018,8 @@ def _resolve_fit_mask(
                 )
             mda = mda["mask"]
         if isinstance(mda, np.ndarray):
+            # Plain 2-D masks are interpreted in the same stored plane order as
+            # the image data: rows then columns, i.e. (y, x).
             mda = xr.DataArray(mda, dims=[dim_y, dim_x] if mda.ndim == 2 else da_tr.dims)
         if not isinstance(mda, xr.DataArray):
             raise TypeError("selection.select_mask returned unsupported mask type")
@@ -2014,6 +2027,7 @@ def _resolve_fit_mask(
         mda = mask
     else:
         if getattr(mask, "ndim", None) == 2:
+            # Match the internal 2-D image plane storage order (y, x).
             mda = xr.DataArray(mask, dims=[dim_y, dim_x])
         else:
             mda = xr.DataArray(mask, dims=da_tr.dims)
@@ -2303,6 +2317,8 @@ def _run_fit_apply_ufunc(
         + [["component"]] * 4
         + [[], []]
         + [[], []]
+        # Optional image-plane outputs stay in the internal stored plane order
+        # (y, x) here and are transposed back to public (x, y) later.
         + [[context.dim_y, context.dim_x], [context.dim_y, context.dim_x]]
     )
     return xr.apply_ufunc(
@@ -4003,6 +4019,8 @@ def plot_components(
     # Normalize input & dims
     da = _ensure_dataarray(data)
     dim_x, dim_y = _resolve_dims(da, dims)
+    # Plotting extracts a single stored image plane, so it follows the internal
+    # row/column ordering (y, x) before labeling axes semantically.
     da_tr = da.transpose(*(d for d in da.dims if d not in (dim_y, dim_x)), dim_y, dim_x)
 
     # Select a single plane for plotting
@@ -4089,6 +4107,8 @@ def plot_components(
     if show_residual and ("residual" in res_plane):
         residual_da = res_plane["residual"]
         if (dim_x in residual_da.dims) and (dim_y in residual_da.dims):
+            # Convert the published residual plane back to stored (y, x) order for
+            # plotting routines that consume row/column image arrays.
             residual_da = residual_da.transpose(
                 *(d for d in residual_da.dims if d not in (dim_y, dim_x)), dim_y, dim_x
             )
