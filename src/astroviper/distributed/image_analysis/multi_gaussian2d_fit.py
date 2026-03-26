@@ -635,6 +635,8 @@ def _normalize_initial_guesses(
             return _process_list_of_dicts(init, n, offset)
     # Array/list form (numpy array or list-of-lists)
     arr = np.asarray(init, dtype=float)
+    if arr.shape == (6,) and n == 1:
+        arr = arr.reshape(1, 6)
     if arr.shape != (n, 6):
         raise ValueError(f"initial_guesses must have shape (n,6); got {arr.shape}")
     amps, x0, y0, sx, sy, th = [arr[:, k].astype(float) for k in range(6)]
@@ -1368,6 +1370,8 @@ def _convert_init_theta(
 
     def _conv_arr(arr: np.ndarray) -> np.ndarray:
         out = np.array(arr, dtype=float, copy=True)
+        if out.shape == (6,) and n == 1:
+            out = out.reshape(1, 6)
         if out.shape != (n, 6):
             return out
         out[:, 5] = _theta_pa_to_math(out[:, 5])
@@ -1914,6 +1918,47 @@ def _build_fit_execution_context(
         sx_sign=sx_sign,
         sy_sign=sy_sign,
         is_left_handed=(sx_sign * sy_sign) < 0.0,
+    )
+
+
+def _warn_if_suboptimal_dask_chunking(context: _FitExecutionContext) -> None:
+    """
+    Warn when a Dask-backed input is chunked across the fit-plane dimensions.
+
+    Parameters
+    ----------
+    context : _FitExecutionContext
+        Prepared fit context for the current invocation.
+
+    Notes
+    -----
+    Plane-wise fitting works best when each fit plane is available as a single
+    chunk along the two core fit dimensions. Chunking across those axes can add
+    scheduler overhead and interfere with the intended outer-dimension
+    parallelization strategy.
+    """
+    chunksizes = getattr(context.da_in, "chunksizes", None)
+    if not chunksizes:
+        return
+
+    split_fit_dims = [
+        dim
+        for dim in (context.dim_y, context.dim_x)
+        if dim in chunksizes and len(chunksizes[dim]) > 1
+    ]
+    if not split_fit_dims:
+        return
+
+    suggested_chunks = {context.dim_y: -1, context.dim_x: -1}
+    warnings.warn(
+        "Dask-backed input is chunked across the fit-plane dimension(s) "
+        f"{split_fit_dims!r}. This fitter generally performs best when each full "
+        f"plane is contained in a single chunk along {context.dim_y!r} and "
+        f"{context.dim_x!r}. Consider rechunking before the fit, for example "
+        f"`data = data.chunk({suggested_chunks!r})`, while choosing outer-dimension "
+        "chunks separately for stack-level parallelism.",
+        RuntimeWarning,
+        stacklevel=3,
     )
 
 
@@ -3309,7 +3354,7 @@ def fit_multi_gaussian2d(
     max_nfev: int = 20000,
     return_model: bool = False,
     return_residual: bool = True,
-    angle: str = "math",  # NEW: {"math","pa","auto"}
+    angle: str = "math",
     coord_type: str = "world",
     coords: Optional[Sequence[np.ndarray]] = None,
 ) -> xr.Dataset:
@@ -3344,9 +3389,10 @@ def fit_multi_gaussian2d(
 
     max_threshold: float | None
       Inclusive upper threshold; pixels with values > max_threshold are ignored during the fit.
-    initial_guesses: numpy.ndarray[(N,6)] | list[dict] | dict | None
+    initial_guesses: numpy.ndarray[(N,6)] | list[float] | list[dict] | dict | None
       Initial guesses. **Interpreted in FWHM units** for widths by default:
         • array shape (N,6): columns **[amp, x0, y0, fwhm_major, fwhm_minor, theta]**.
+        • for ``n_components == 1``, a flat length-6 numeric sequence is accepted and treated as one component.
         • list of N dicts: keys {"amp"/"amplitude","x0","y0","fwhm_major"|"sigma_x"|"sx","fwhm_minor"|"sigma_y"|"sy","theta"}.
         • dict: {"offset": float (optional), "components": (N,6) array OR list[dict] as above}.
       If omitted, peaks are auto-seeded and offset defaults to the median of threshold-masked data.
@@ -3354,16 +3400,21 @@ def fit_multi_gaussian2d(
       FWHM are converted to σ internally for the optimizer. Set ``initial_is_fwhm=False`` only if
       your array-form guesses use σ columns instead.
     bounds: dict[str, (float,float) | Sequence[(float,float)]] | None
-      Bounds to constrain parameters. Keys may include {"offset","amp"/"amplitude","x0","y0","fwhm_major","fwhm_minor","theta"}.
-      Each value is either a single (low, high) tuple applied to all components, or a length-N sequence of (low, high) tuples for per-component bounds. To **fix** a parameter, set low == high.
-      Public principal-axis width bounds must provide both ``fwhm_major`` and ``fwhm_minor`` together.
+      Bounds to constrain parameters. Keys may include {"offset","amp"/"amplitude","x0","y0","fwhm_major","fwhm_minor"}.
+      Each parameter is either a single two element (low, high) tuple applied to all components,
+      or a length-N sequence of
+      (low, high) tuples for per-component bounds. To **fix** a parameter, use a very small, meaningless difference
+      between (low, high), e.g. (1.0, 1.000001).
+      FWHM bounds must provide both ``fwhm_major`` and ``fwhm_minor`` simultaneously.
       For each component, the major interval must remain ordered above the minor interval:
       ``fwhm_major_lo >= fwhm_minor_lo`` and ``fwhm_major_hi >= fwhm_minor_hi``.
-      Public ``theta`` bounds are not supported by the current raw-width parameterization.
+      ``theta`` bounds are not supported by the current raw-width parameterization.
+
     initial_is_fwhm: bool
-     Default **True**. When ``True`` and ``initial_guesses`` is an array of shape (N,6), columns 3–4
-     are treated as **FWHM** and converted to σ internally. Set to ``False`` only if your array guesses
-     are already in σ. (Dict/list forms can use ``fwhm_major/fwhm_minor`` keys directly.)
+      Default **True**. When ``True`` and ``initial_guesses`` is an array of shape (N,6), columns 3–4
+      are treated as **FWHM** and converted to σ internally. Set to ``False`` only if your array guesses
+      are for σ widths. (Dict/list forms can use ``fwhm_major/fwhm_minor`` keys directly.)
+
     max_nfev: int
       Maximum function evaluations for the optimizer. Default: 20000.
 
@@ -3374,10 +3425,12 @@ def fit_multi_gaussian2d(
       If True, include residual plane(s) (``data − model``) as variable ``residual``.
 
     angle: {"math","pa","auto"}
-      Controls how ``theta`` is interpreted (inputs) and reported (outputs).
-        • "math": standard math angle (from +x toward +y, CCW) in data axes.
-        • "pa": position angle (from +y toward +x).
-        • "auto": if axes are left-handed (sign(Δx)·sign(Δy) < 0) treat as PA; otherwise math. Outputs follow the same convention.
+      Convention used to interpret any input ``theta`` values supplied in
+      ``initial_guesses``.
+        • "math": ``theta`` is interpreted as the mathematical angle from +x toward +y.
+        • "pa": ``theta`` is interpreted as astronomical position angle from +y toward +x.
+        • "auto": interpret input ``theta`` as PA on left-handed axes and math otherwise.
+
     coord_type: {"world","pixel"}, default "world"
       Applies only to xarray.DataArray inputs.
         • "world": the optimizer evaluates the Gaussian model on the DataArray's attached 1-D coordinate axes.
@@ -3420,6 +3473,59 @@ def fit_multi_gaussian2d(
     optimized internally in sigma units even when array-form initial guesses or
     bounds are provided in FWHM.
 
+    Parallelization
+    ---------------
+    This function is intentionally generic and remains public for callers working
+    with plain NumPy, Dask, or Xarray arrays outside any Astroviper image schema.
+    Its parallel execution behavior therefore depends on the backing array type and
+    on the numerical libraries active in the current Python process.
+
+    For Dask-backed inputs, vectorization across all non-fit dims is dispatched
+    through ``xarray.apply_ufunc(dask="parallelized")``. In that mode, performance
+    is typically controlled by Dask chunking and scheduler configuration rather than
+    by this function directly. For stacks of many independent planes, using Dask to
+    parallelize across the outer plane dims is often the most scalable approach.
+    In general, do not chunk along the two dimensions that define the fit plane.
+    Each fit needs the full ``(y, x)`` plane available as one unit, so chunking the
+    fit axes usually adds overhead or can prevent the gufunc-style execution from
+    matching the intended plane-by-plane pattern. Prefer chunking only along outer
+    stack dims such as ``time``, ``frequency``, ``stokes``, or similar non-fit dims.
+    For example, if the fit plane is ``("x", "y")``, a layout such as
+    ``data.chunk({"time": 4, "y": -1, "x": -1})`` is typically a better starting
+    point than chunking ``x`` or ``y``.
+
+    For NumPy-backed inputs, this function does not create Dask tasks. However, the
+    underlying NumPy/SciPy operations may still use multithreaded native libraries
+    such as OpenBLAS, MKL, BLIS, or OpenMP-backed kernels. As a result, a NumPy
+    input can still consume many CPU cores even though the public API itself has no
+    explicit ``n_workers`` or ``n_threads`` parameter.
+
+    Single-threaded native execution can be faster for workloads dominated by many
+    small independent plane fits, because heavily threaded BLAS/OpenMP execution may
+    add synchronization overhead and oversubscribe CPU resources. This is workload
+    dependent, so benchmark representative data rather than assuming that more
+    threads are always faster.
+
+    A possible in-process, best-effort option is to limit supported native thread
+    pools with ``threadpoolctl``:
+
+    >>> from threadpoolctl import threadpool_limits
+    >>> with threadpool_limits(limits=1):
+    ...     ds = fit_multi_gaussian2d(cube, n_components=2, initial_guesses=init)
+
+    This can be effective even after NumPy/SciPy have already been imported, but it
+    is not guaranteed to force strict single-threaded execution for every backend or
+    every library already loaded into the process. Treat it as a convenience option,
+    not as a hard guarantee.
+
+    The most reliable way to guarantee single-threaded native math is to set the
+    relevant environment variables before starting Python, so that the numerical
+    libraries initialize with the desired thread limits from process start. Typical
+    examples include ``OMP_NUM_THREADS=1``, ``OPENBLAS_NUM_THREADS=1``,
+    ``MKL_NUM_THREADS=1``, ``VECLIB_MAXIMUM_THREADS=1``, and
+    ``NUMEXPR_NUM_THREADS=1``. The exact variables that matter depend on the BLAS
+    and OpenMP backend linked into the user's NumPy/SciPy build.
+
     Examples
     --------
     Basic two-component fit on a 2-D array:
@@ -3449,16 +3555,12 @@ def fit_multi_gaussian2d(
     >>> bounds = {"sigma_x": [(1.0, 1.0), (2.0, 4.0)], "offset": (0.05, 0.2)}
     >>> ds_b = fit_multi_gaussian2d(img_da, n_components=2, initial_guesses=init, bounds=bounds)
 
-    Angle conventions:
-    >>> # Report and interpret theta as position angle:
-    >>> ds_pa = fit_multi_gaussian2d(img_da, n_components=2, initial_guesses=init, angle="pa")
-    >>> # Choose automatically based on axis handedness (descending/ascending coords):
-    >>> ds_auto = fit_multi_gaussian2d(img_da, n_components=2, initial_guesses=init, angle="auto")
     """
     if n_components < 1:
         raise ValueError("n_components must be >= 1.")
     # Stage 1: normalize the input layout and derive the fit-plane frame metadata.
     context = _build_fit_execution_context(data, dims)
+    _warn_if_suboptimal_dask_chunking(context)
 
     # Stage 2: align all user-facing configuration to the transposed fit view.
     mask_da = _resolve_fit_mask(mask, context.da_tr, context.dim_y, context.dim_x)
