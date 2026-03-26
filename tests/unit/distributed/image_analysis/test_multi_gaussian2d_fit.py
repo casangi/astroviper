@@ -301,6 +301,9 @@ class TestBoundsDimsAPI:
         arr = np.array([[1.0, 5.0, 6.0, 2.0, 2.0, 0.0]], float)
         p1 = mg._normalize_initial_guesses(z, 1, arr, None, None)
         assert p1.shape == (7,)
+        flat_arr = [1.0, 5.0, 6.0, 2.0, 2.0, 0.0]
+        p1_flat = mg._normalize_initial_guesses(z, 1, flat_arr, None, None)
+        np.testing.assert_allclose(p1_flat, p1)
         # dict with ndarray
         dct = {
             "offset": 0.2,
@@ -1925,7 +1928,7 @@ class TestAngleEndToEndFitter(unittest.TestCase):
                 ds_pa = fit_multi_gaussian2d(
                     da,
                     n_components=1,
-                    initial_guesses=init_pa,
+                    initial_guesses=init_pa.reshape(-1).tolist(),
                     angle="pa",
                     coord_type=coord_type,
                     return_model=False,
