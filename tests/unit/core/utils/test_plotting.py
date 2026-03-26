@@ -170,3 +170,14 @@ def test_generate_plot_pixel_mode_adds_default_labels_and_colorbar():
     assert fig.axes[1].get_ylabel() == "flux"
 
     plt.close(fig)
+
+
+def test_generate_plot_sets_optional_title():
+    """Plot helper should display an explicitly requested title."""
+    data = np.zeros((4, 4), dtype=float)
+
+    fig, ax = generate_plot(data=data, show_world_axes=False, title="Test Title")
+
+    assert ax.get_title() == "Test Title"
+
+    plt.close(fig)
