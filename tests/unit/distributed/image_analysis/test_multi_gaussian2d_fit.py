@@ -99,6 +99,9 @@ def _scene(
     coords_dict = None
     if coords:
         coords_dict = {"y": np.linspace(-1.0, 1.0, ny), "x": np.linspace(-2.0, 2.0, nx)}
+    # Image planes are stored in NumPy/Xarray memory order (y, x): rows first,
+    # then columns. The public fit API still refers to the semantic plane order
+    # as ("x", "y") when selecting the fit dimensions.
     return xr.DataArray(img, dims=("y", "x"), coords=coords_dict)
 
 
@@ -137,6 +140,7 @@ class TestSuccess:
         planes = [
             _scene(ny, nx, [base], offset=0.1, noise=0.03, seed=s) for s in (1, 2, 3)
         ]
+        # The stacked array keeps image-memory order inside each plane: (y, x).
         cube = xr.concat(planes, dim="time")  # dims ('time','y','x')
         init = np.array([[0.8, 29.5, 22.5, 4.0, 3.0, 0.2]], float)
         # dims by name
@@ -230,6 +234,18 @@ class TestInputs:
         )
         assert bool(ds.success) is True
 
+    def test_dataarray_without_explicit_coords_falls_back_to_pixel_axes(self) -> None:
+        ny, nx = 36, 38
+        comps = [dict(amp=1.0, x0=18.0, y0=17.0, sigma_x=3.0, sigma_y=2.5, theta=0.2)]
+        da2 = xr.DataArray(_scene(ny, nx, comps).values, dims=("y", "x"))
+        ds = fit_multi_gaussian2d(
+            da2,
+            n_components=1,
+            initial_guesses=np.array([[1.0, 18.0, 17.0, 3.0, 2.5, 0.2]], float),
+        )
+        assert bool(ds.success) is True
+        assert ds.attrs["fit_native_frame"] == "pixel"
+
     def test_world_coords_skipped_for_bad_axis_coords(self) -> None:
         ny, nx = 32, 32
         comps = [dict(amp=0.8, x0=15.0, y0=16.0, sigma_x=3.0, sigma_y=2.0, theta=0.1)]
@@ -245,6 +261,32 @@ class TestInputs:
                 n_components=1,
                 initial_guesses=np.array([[0.8, 15, 16, 3, 2, 0.1]]),
             )
+
+    @pytest.mark.skipif(da is None, reason="dask.array not available")
+    def test_warns_when_fit_plane_dims_are_split_across_dask_chunks(self) -> None:
+        ny, nx = 32, 36
+        comps = [dict(amp=1.0, x0=16.0, y0=15.0, sigma_x=3.0, sigma_y=3.0, theta=0.0)]
+        cube_np = np.stack(
+            [
+                _scene(ny, nx, comps, offset=0.1, noise=0.02, seed=s).values
+                for s in (1, 2)
+            ],
+            axis=0,
+        )
+        cube = xr.DataArray(
+            da.from_array(cube_np, chunks=(1, ny, nx // 2)),
+            # Keep the physical array-axis order (time, y, x). The fitter's
+            # public plane selector still uses dims=("x", "y") semantically.
+            dims=("time", "y", "x"),
+        )
+        with pytest.warns(RuntimeWarning, match=r"\['x'\].*chunk\(\{'x': -1, 'y': -1\}\)"):
+            with pytest.raises(ValueError, match=r"dimension x .* multiple chunks"):
+                fit_multi_gaussian2d(
+                    cube,
+                    n_components=1,
+                    initial_guesses=np.array([[1.0, 16.0, 15.0, 3.0, 3.0, 0.0]], float),
+                    dims=("x", "y"),
+                )
 
 
 class TestPublishedPlaneDims:
