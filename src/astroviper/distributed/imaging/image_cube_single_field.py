@@ -1,15 +1,12 @@
 from numcodecs import Blosc
 import xarray as xr
-from astroviper.core.imaging.imaging_utils.return_dict import ReturnDict
 from typing import Optional, Dict, Any, Tuple
 from xradio.image import make_empty_sky_image
 import numpy as np
 import zarr
 
-from toolviper.utils.memory_management import memory_setup, free_memory, get_rss_gb
-
-from astroviper.task.imaging.image_cube_single_field_node_task import (
-    image_cube_single_field_node_task,
+from astroviper.task.imaging.image_cube_single_field import (
+    NT_image_cube_single_field,
 )
 
 
@@ -131,7 +128,7 @@ def image_cube_single_field(
         get_thread_info,
     )
     import time
-    
+
     assert (
         memory_mode == "in_memory"
     ), "Currently only in_memory is supported for memory_mode is implemented."
@@ -159,7 +156,9 @@ def image_cube_single_field(
 
     # Determine number of chunks
     start = time.time()
-    n_chunks = calculate_number_of_chunks_for_cube_imaging(img_xds, double_precision, n_chunks, thread_info)
+    n_chunks = calculate_number_of_chunks_for_cube_imaging(
+        img_xds, double_precision, n_chunks, thread_info
+    )
 
     # Make Parallel Coords
     parallel_coords = {}
@@ -206,7 +205,7 @@ def image_cube_single_field(
     input_parms["compressor"] = compressor
     input_parms["image_store"] = image_store
     input_parms["input_data_store"] = ps_store
-    input_parms["processing_set_data_group_name"] = processing_set_data_group_name   
+    input_parms["processing_set_data_group_name"] = processing_set_data_group_name
     input_parms["image_data_variables_keep"] = image_data_variables_keep
     input_parms["memory_mode"] = memory_mode
     input_parms["cache_directory"] = cache_directory
@@ -215,7 +214,7 @@ def image_cube_single_field(
     input_parms["clear_cache"] = clear_cache
 
     from graphviper.graph_tools.coordinate_utils import (
-        interpolate_data_coords_onto_parallel_coords
+        interpolate_data_coords_onto_parallel_coords,
     )
 
     start = time.time()
@@ -243,27 +242,29 @@ def image_cube_single_field(
     viper_graph = map(
         input_data=ps_xdt,
         node_task_data_mapping=node_task_data_mapping,
-        node_task=wrap_image_cube_single_field_node_task,
+        node_task=NT_image_cube_single_field,
         # node_task=test_task,
         input_params=input_parms,
         in_memory_compute=False,
     )
-    
+
     input_params = {}
 
     viper_graph = reduce(
         viper_graph, combine_return_data_frames, input_params, mode="tree"
     )
-    logger.info("Time to create map reduce graph: " + str(time.time() - start) + " seconds")
-    
+    logger.info(
+        "Time to create map reduce graph: " + str(time.time() - start) + " seconds"
+    )
+
     # Compute cube
     start = time.time()
     dask_graph = generate_dask_workflow(viper_graph)
     logger.info("Time to generate dask graph: " + str(time.time() - start) + " seconds")
-    
+
     if vizualize_graph:
         dask.visualize(dask_graph, filename="cube_imaging.png")
-        
+
     start = time.time()
     return_dict = dask.compute(dask_graph)[0]
     logger.info("Time to compute dask graph: " + str(time.time() - start) + " seconds")
@@ -275,78 +276,6 @@ def image_cube_single_field(
     )
 
     return return_dict
-
-
-# from memory_profiler import profile
-
-# @profile(precision=1)
-def wrap_image_cube_single_field_node_task(input_params):
-    import toolviper.utils.logger as logger
-
-    # Pin the mmap threshold BEFORE any large allocations so they use mmap
-    # and are returned to the OS immediately on free (no heap fragmentation).
-    # Must run at the start of the task, not after, or fragmentation is already done.
-    memory_setup(131072)
-
-    logger.debug(
-        "Memory usage at start of wrap_image_cube_single_field_node_task: "
-        + str(get_rss_gb())
-        + " GB"
-    )
-
-    from xradio.image import make_empty_sky_image
-    from xradio.measurement_set.load_processing_set import ProcessingSetIterator
-
-    image_params = input_params["image_params"]
-    img_xds = make_empty_sky_image(
-        phase_center=image_params["phase_direction"],
-        image_size=image_params["image_size"],
-        cell_size=image_params["cell_size"],
-        frequency_coords=input_params["task_coords"]["frequency"]["data"],
-        pol_coords=image_params["polarization_coords"],
-        time_coords=image_params["time_coords"],
-        do_sky_coords=False,
-    )
-
-    if input_params["memory_mode"] == "in_memory":
-        in_memory = True
-    else:
-        in_memory = False
-
-    assert (
-        in_memory
-    ), "Currently only in_memory is supported for memory_mode is implemented."
-
-    ps_iter = ProcessingSetIterator(
-        input_data_store=input_params["input_data_store"],
-        sel_parms=input_params["data_selection"],
-        data_group_name=input_params["processing_set_data_group_name"],
-        load_sub_datasets=False,
-        in_memory=in_memory,
-    )
-
-    logger.debug("Processing set iterator created with partitions.")
-    result = image_cube_single_field_node_task(input_params, ps_iter, img_xds)
-    # import pandas as pd
-    # result = pd.DataFrame({"temp":[42]})  # Placeholder to test memory management without running the actual node task.
-
-    logger.debug(
-        "Memory usage after completing node task, before releasing references: "
-        + str(get_rss_gb())
-        + " GB"
-    )
-
-    img_xds = None
-    ps_iter = None
-    free_memory()
-    
-    
-    logger.debug(
-        "Memory usage after releasing references: "
-        + str(get_rss_gb())
-        + " GB"
-    )
-    return result
 
 
 def combine_return_data_frames(input_data, input_parms):
@@ -389,6 +318,7 @@ def calculate_number_of_chunks_for_cube_imaging(
         Number of frequency chunks to use for the parallel imaging graph.
     """
     import toolviper.utils.logger as logger
+
     if n_chunks is None:
         # Calculate n_chunks
         from astroviper.utils.data_partitioning import bytes_in_dtype
@@ -445,4 +375,3 @@ def calculate_number_of_chunks_for_cube_imaging(
             + str(chunking_dims_sizes)
         )
     return n_chunks
-

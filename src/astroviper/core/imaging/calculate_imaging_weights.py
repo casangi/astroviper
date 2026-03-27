@@ -1,14 +1,8 @@
-from time import time
-from tracemalloc import start
 import numpy as np
-from typing import Tuple, Union, Dict
-import numpy as np
-import xarray as xr
-from xarray import DataTree
+from typing import Union, Dict
 import xarray as xr
 from astroviper.core.imaging.check_imaging_parameters import (
     check_imaging_weights_params,
-    check_grid_params,
 )
 from astroviper.core.imaging.imaging_weighting.grid_imaging_weights import (
     grid_imaging_weights,
@@ -20,25 +14,26 @@ from astroviper.core.imaging.imaging_weighting.briggs_weighting import (
 )
 
 # from graphviper.parameter_checking.check_params import check_sel_params
-from astroviper.utils.check_params import (
-    check_sel_params_ps_iter,
+from astroviper.utils.data_group_tools import (
+    create_ps_xdt_data_groups_in_and_out,
+    modify_data_groups_ps_xdt,
 )
 import copy
-
-from xradio.measurement_set.load_processing_set import ProcessingSetIterator
-
 import toolviper.utils.logger as logger
 
-
 def calculate_imaging_weights(
-    ps_iter: ProcessingSetIterator,
+    ps_xdt: xr.DataTree,
     img_xds: xr.Dataset,
     imaging_weights_params: Dict,
-    sel_params: Dict,
+    ms_data_group_in_name: str = "base",
+    ms_data_group_out_name: str = "imaging",
+    ms_data_group_out_modified: dict = {"weight_imaging": "WEIGHT_IMAGING"},
+    overwrite: bool = False,
+    single_precision_gridding: bool = False,
     return_weight_density_grid: bool = False,
 ) -> Union[
-    Tuple[DataTree, dict],
-    Tuple[DataTree, dict, np.ndarray],
+    None,
+    np.ndarray,
 ]:
     """
     Calculate imaging weights for interferometric data using natural or Briggs weighting.
@@ -50,9 +45,9 @@ def calculate_imaging_weights(
 
     Parameters
     ----------
-    ps_iter : ProcessingSetIterator
-        Processing Set Iterator containing one or more MeasurementSet-like xarray Datasets.
-        Each Dataset must include the fields referenced by ``sel_params`` and
+    ps_xdt : xarray.DataTree
+        Processing Set DataTree containing one or more MeasurementSet-like xarray Datasets.
+        Each Dataset must include the fields referenced by the data group parameters and
         ``grid_params`` (e.g., UVW, WEIGHT, FLAG, frequency).
     img_xds : xarray.Dataset
         Image xarray Dataset containing image parameters (e.g., image size, cell size).
@@ -62,27 +57,25 @@ def calculate_imaging_weights(
                 Type of weighting to apply.
             - ``robust`` : float, optional
                 Briggs robust parameter (ignored if ``"natural"``).
-    sel_params : dict
-        Selection parameters for input/output data groups. Defines which columns
-        (e.g., weight, uvw, flag) are read and where output imaging weights are stored.
-        Keys include:
-            - ``data_group_in_name`` : str, default ``"base"``
-                Name of the input data group.
-            - ``overwrite`` : bool, default ``False``
-                If True, an existing data variable may be overwritten.
-            - ``data_group_out`` : dict, default ``{"weight_imaging": "WEIGHT"}``
-                Mapping of output variable names; the ``"weight_imaging"`` key sets
-                the name of the output imaging-weight variable.
-            - ``data_group_out_name`` : str, default ``"imaging"``
-                Name of the output data group.
+    ms_data_group_in_name : str, default ``"base"``
+        Name of the input data group.
+    ms_data_group_out_name : str, default ``"imaging"``
+        Name of the output data group.
+    ms_data_group_out_modified : dict, optional
+        Mapping of output variable names; the ``"weight_imaging"`` key sets
+        the name of the output imaging-weight variable. Defaults to
+        ``{"weight_imaging": "WEIGHT_IMAGING"}`` for Briggs weighting.
+        **Natural weighting uses the same variable name as the input data weights, so this parameter is ignored in that case.**
+    overwrite : bool, default ``False``
+        If True, an existing data variable may be overwritten.
     return_weight_density_grid : bool, default False
         If True, also return the 2D weight-density grid used for Briggs weighting
         (useful for debugging).
+    single_precision_gridding : bool, default False
+        If True, use single precision for gridding operations.
 
     Returns
     -------
-    data_group_out : dict
-        Metadata describing the output data group (e.g., names, descriptions, timestamps).
     weight_density_grid : numpy.ndarray, optional
         Only returned if ``return_weight_density_grid=True``. Array of shape
         ``(n_chan, 1, n_u, n_v)`` containing the weight-density grid.
@@ -107,85 +100,54 @@ def calculate_imaging_weights(
 
     Examples
     --------
-    >>> ps_iter, data_group_out = calculate_imaging_weights(
-    ...     ps_iter,
-    ...     grid_params={
-    ...         "image_size": (256, 256),
-    ...         "cell_size": np.array([-0.1, 0.1]) * np.pi / (180 * 3600),
-    ...         "fft_padding": 1.0,
-
-    ...     },
+    >>> calculate_imaging_weights(
+    ...     ps_xdt,
     ...     imaging_weights_params={"weighting": "briggs", "robust": 0.5},
-    ...     sel_params={"data_group_in_name": "base"},
+    ...     ms_data_group_in_name="base",
     ... )
     """
-    _sel_params = copy.deepcopy(sel_params)
     _imaging_weights_params = copy.deepcopy(imaging_weights_params)
+    _ms_data_group_out_modified = copy.deepcopy(ms_data_group_out_modified)
     assert check_imaging_weights_params(
         _imaging_weights_params
     ), "######### ERROR: imaging_weights_params checking failed"
+    
+    ms_data_group_in, ms_data_group_out = create_ps_xdt_data_groups_in_and_out(
+        ps_xdt,
+        data_group_in_name=ms_data_group_in_name,
+        data_group_out_name=ms_data_group_out_name,
+        data_group_out_modified=_ms_data_group_out_modified,
+        overwrite=overwrite,
+    )
 
     if _imaging_weights_params["weighting"] == "natural":
-        _sel_params["overwrite"] = True  # No actual overwrite is occuring.
-        start = time()
-        data_group_in, data_group_out = check_sel_params_ps_iter(
-            ps_iter,
-            _sel_params,
-            default_data_group_in_name="base",
-            default_data_group_out_name="imaging",
-            default_data_group_out_modified={"weight_imaging": "WEIGHT"},
+        ms_data_group_out["weight_imaging"] = ms_data_group_in["weight"]
+        logger.debug("Calculating natural imaging weights (no rescaling of data weights).")
+        modify_data_groups_ps_xdt(
+            ps_xdt,
+            data_group_out_name=ms_data_group_out_name,
+            data_group_out=ms_data_group_out,
+            description="Natural imaging weights; data weights used directly with no rescaling.",
         )
-        description = "Data group created for natural imaging weights with ."
-        logger.debug("Time to check sel_params: " + str(time() - start) + " seconds.")
-
-        data_group_out_name = data_group_out["data_group_out_name"]
-        del data_group_out["data_group_out_name"]
-        from datetime import datetime, timezone
-
-        start = time()
-        for ms_xdt in ps_iter:
-            now = datetime.now(timezone.utc)
-            ms_xdt.data_groups[data_group_out_name] = data_group_out
-            ms_xdt.data_groups[data_group_out_name]["date"] = now.isoformat()
-            ms_xdt.data_groups[data_group_out_name]["description"] = description
-            logger.debug("Size of ms_xdt " + str(ms_xdt.nbytes / 1e9) + " GB.")
-        data_group_out["data_group_out_name"] = data_group_out_name
-        logger.debug(
-            "Time to set up data groups for natural weighting: "
-            + str(time() - start)
-            + " seconds."
-        )
-
-        start = time()
-        ps_iter.reset()  # Reset the iterator to the beginning for downstream tasks.
-        logger.debug("Time to reset ps_iter: " + str(time() - start) + " seconds.")
-        return data_group_out
-    else:
-        data_group_in, data_group_out = check_sel_params_ps_iter(
-            ps_iter,
-            _sel_params,
-            default_data_group_in_name="base",
-            default_data_group_out_name="imaging",
-            default_data_group_out_modified={"weight_imaging": "WEIGHT_IMAGING"},
-        )
-        description = (
-            "Data group created for briggs imaging weights with robust value "
-            + str(_imaging_weights_params["robust"])
-        )
-
+        return 
+    
+    # Briggs weighting requires calculating the weight-density grid and robust factors, so we proceed with gridding and degridding.
     # Grid Weights
     n_uv = np.array([img_xds.sizes["l"], img_xds.sizes["m"]])
     delta_lm = img_xds.xr_img.get_lm_cell_size()
     n_imag_chan = img_xds.sizes["frequency"]
-    weight_density_grid = np.zeros((n_imag_chan, 1, n_uv[0], n_uv[1]), dtype=np.double)
-    # weight_density_grid = np.zeros((n_imag_chan, 1, n_uv[0], n_uv[1]), dtype=np.float32)
+    if single_precision_gridding:
+        dtype = np.float32
+    else:
+        dtype = np.float64
+    weight_density_grid = np.zeros((n_imag_chan, 1, n_uv[0], n_uv[1]), dtype=dtype)
     sum_weight = np.zeros((n_imag_chan, 1), dtype=np.double)
 
     # Grid the Weights
-    for ms_xdt in ps_iter:
-        uvw = ms_xdt[data_group_out["uvw"]].values
-        data_weight = ms_xdt[data_group_out["weight"]].values
-        data_weight[ms_xdt[data_group_out["flag"]] == 1] = (
+    for ms_name, ms_xdt in ps_xdt.items():
+        uvw = ms_xdt[ms_data_group_in["uvw"]].values
+        data_weight = ms_xdt[ms_data_group_in["weight"]].values
+        data_weight[ms_xdt[ms_data_group_in["flag"]] == 1] = (
             np.nan
         )  # Set flagged data to NaN for weighting.
 
@@ -204,7 +166,6 @@ def calculate_imaging_weights(
         grid_imaging_weights(
             weight_density_grid, sum_weight, uvw, data_weight, freq_chan, n_uv, delta_lm
         )
-    ps_iter.reset()  # Reset the iterator to the beginning for downstream tasks.
 
     # Calculate Briggs
     briggs_factors = calculate_briggs_params(
@@ -215,14 +176,10 @@ def calculate_imaging_weights(
     # print("4 sum of data weights ", np.nansum(data_weight))
 
     # Degrid the Weights
-
-    data_group_out_name = data_group_out["data_group_out_name"]
-    del data_group_out["data_group_out_name"]
-
-    for ms_xdt in ps_iter:
-        uvw = ms_xdt[data_group_out["uvw"]].values
-        data_weight = ms_xdt[data_group_out["weight"]].values
-        data_weight[ms_xdt[data_group_out["flag"]] == 1] = (
+    for ms_name, ms_xdt in ps_xdt.items():
+        uvw = ms_xdt[ms_data_group_in["uvw"]].values
+        data_weight = ms_xdt[ms_data_group_in["weight"]].values
+        data_weight[ms_xdt[ms_data_group_in["flag"]] == 1] = (
             np.nan
         )  # Set flagged data to NaN for weighting.
         if data_weight.shape[3] == 2:
@@ -259,22 +216,23 @@ def calculate_imaging_weights(
 
         n_pol = ms_xdt.sizes["polarization"]
 
-        ms_xdt[data_group_out["weight_imaging"]] = xr.DataArray(
+        ms_xdt[ms_data_group_out["weight_imaging"]] = xr.DataArray(
             np.tile(imaging_weights, (1, 1, 1, n_pol)),
-            dims=ms_xdt[data_group_out["weight"]].dims,
+            dims=ms_xdt[ms_data_group_out["weight"]].dims,
         )
 
-        from datetime import datetime, timezone
+    modify_data_groups_ps_xdt(
+        ps_xdt,
+        data_group_out_name=ms_data_group_out_name,
+        data_group_out=ms_data_group_out,
+        description=(
+            f"Briggs imaging weights with robust={imaging_weights_params['robust']}; "
+            "data weights rescaled by robust-dependent factors calculated from the "
+            "weight-density grid and channel-wise sum of data weights."
+        ),
+    )
 
-        now = datetime.now(timezone.utc)
-        ms_xdt.data_groups[data_group_out_name] = data_group_out
-        ms_xdt.data_groups[data_group_out_name]["date"] = now.isoformat()
-        ms_xdt.data_groups[data_group_out_name]["description"] = description
-
-        data_group_out["data_group_out_name"] = data_group_out_name
-
-    ps_iter.reset()  # Reset the iterator to the beginning for downstream tasks.
     if return_weight_density_grid:
-        return data_group_out, weight_density_grid
+        return weight_density_grid
     else:
-        return data_group_out
+        return 

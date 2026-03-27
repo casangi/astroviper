@@ -1,6 +1,7 @@
 full_dims_lm = ["time", "frequency", "polarization", "l", "m"]
 full_dims_uv = ["time", "frequency", "polarization", "u", "v"]
 norm_dims = ["time", "frequency", "polarization"]
+beam_params_dims = ["time", "frequency", "polarization", "beam_params"] 
 
 imaging_data_variables_and_dims_double_precision = {
     "aperture": {"dims": full_dims_uv, "dtype": "<c16", "name": "APERTURE"},
@@ -37,6 +38,26 @@ imaging_data_variables_and_dims_double_precision = {
     "sky_residual": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_RESIDUAL"},
     "sky": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY"},
     "mask": {"dims": full_dims_lm, "dtype": "<i8", "name": "MASK"},
+    "beam_fit_params_point_spread_function": {
+        "dims": beam_params_dims,
+        "dtype": "<f8",
+        "name": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+    },
+    "beam_fit_params_sky_residual": {
+        "dims": beam_params_dims,
+        "dtype": "<f8",
+        "name": "BEAM_FIT_PARAMS_SKY_RESIDUAL",
+    },
+    "beam_fit_params_sky_dirty": {
+        "dims": beam_params_dims,
+        "dtype": "<f8",
+        "name": "BEAM_FIT_PARAMS_SKY_DIRTY",
+    },
+    "beam_fit_params_sky_deconvolved": {
+        "dims": beam_params_dims,
+        "dtype": "<f8",
+        "name": "BEAM_FIT_PARAMS_SKY_DECONVOLVED",
+    },
 }
 
 imaging_data_variables_and_dims_single_precision = {
@@ -74,7 +95,45 @@ imaging_data_variables_and_dims_single_precision = {
     "sky_residual": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_RESIDUAL"},
     "sky": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY"},
     "mask": {"dims": full_dims_lm, "dtype": "<i4", "name": "MASK"},
+    "beam_fit_params_point_spread_function": {
+        "dims": beam_params_dims,
+        "dtype": "<f4",
+        "name": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+    },
+    "beam_fit_params_sky_residual": {
+        "dims": beam_params_dims,
+        "dtype": "<f4",
+        "name": "BEAM_FIT_PARAMS_SKY_RESIDUAL",
+    },
+    "beam_fit_params_sky_dirty": {
+        "dims": beam_params_dims,
+        "dtype": "<f4", "name": "BEAM_FIT_PARAMS_SKY_DIRTY",
+    },
+    "beam_fit_params_sky_deconvolved": { 
+        "dims": beam_params_dims,
+        "dtype": "<f4",
+        "name": "BEAM_FIT_PARAMS_SKY_DECONVOLVED",
+    },     
 }
+
+def  write_result_chunk_to_disk_using_zarr(image_store,image_data_variables_keep,task_coords,img_xds):
+    import zarr
+    import time
+    for dv in image_data_variables_keep:
+        dv = dv.upper()
+        #size_dict = img_xds.sizes
+        idx = []
+        for dim in img_xds[dv].dims:
+            if dim in task_coords:
+                idx.append(task_coords[dim]["slice"])
+            else:
+                idx.append(slice(None))
+        idx = tuple(idx)
+        # print("dv: ", dv, " idx: ", idx, " size_dict: ", size_dict)
+
+        group = zarr.open_group(image_store, mode="r+")
+        sky = group[dv]
+        sky[idx] = img_xds[dv].values
 
 
 def create_empty_data_variables_on_disk(

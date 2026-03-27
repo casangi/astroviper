@@ -11,6 +11,129 @@ beam_initial_guess = [2.5, 2.5, 0.0]  # initial guess for [bmaj, bmin, pa]
 expand_pixel = 5  # expand the fitting window by this many pixels on each side
 
 
+def point_spread_function_gaussian_fit(
+    img_xds: xr.Dataset,
+    dv: str = "POINT_SPREAD_FUNCTION",
+    npix_window: tuple = (41, 41),
+    sampling: tuple = (55, 55),
+    cutoff: float = 0.35,
+    duplicate_params_for_sky: bool = True,
+):
+    """
+    fit 2D gaussian to psf
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        The input data cube.
+    dv : str
+        The data variable to fit. Default is 'POINT_SPREAD_FUNCTION'.
+    npix_window : tuple
+        The size of the fitting window in pixels.
+    sampling : tuple
+        The sampling of the fitting grid in pixels.
+    cutoff : float
+        The cutoff value for the fitting.
+
+    Returns
+    -------
+    xds : xarray.Dataset
+        The image with the fitted parameters added.
+        The l and m coordinates of the input data are assumed to be in radians.
+        The units of beam size (major and minor) and position angle are in radians.
+
+    Notes:
+    -----
+    - Returns NaN values for beam parameters if the fitting fails
+    - L-BFGS-B optimization method is used with bounds on parameters
+    """
+
+    if not isinstance(npix_window, (list, tuple, np.ndarray)):
+        raise TypeError("npix_window must be a list, tuple, or numpy array")
+    if npix_window[0] <= 0 or npix_window[1] <= 0:
+        raise ValueError("npix_window must be positive")
+    if type(npix_window[0]) is not int or type(npix_window[1]) is not int:
+        raise TypeError("npix_window must be integers")
+    if not isinstance(sampling, (list, tuple, np.ndarray)):
+        raise TypeError("sampling must be a list, tuple, or numpy array")
+    if sampling[0] <= 0 or sampling[1] <= 0:
+        raise ValueError("sampling must be positive")
+    if type(sampling[0]) is not int or type(sampling[1]) is not int:
+        raise TypeError("sampling must be integers")
+    if cutoff < 0:
+        raise ValueError("cutoff must be non-negative")
+    if dv not in img_xds:
+        raise KeyError(f"{dv} not found in the dataset")
+    if "l" not in img_xds[dv].coords:
+        raise KeyError("'l' coordinate not found in img_xds")
+    if "m" not in img_xds[dv].coords:
+        raise KeyError("'m' coordinate not found in img_xds")
+
+    sampling = np.array(sampling)
+    npix_window = np.array(npix_window)
+
+    # pixel increments (radians)
+    delta = np.array([img_xds[dv].l[1] - img_xds[dv].l[0], img_xds[dv].m[1] - img_xds[dv].m[0]])
+    # To make fitting result expressed in arcsecond uncomment the below
+    #    * 3600
+    #    * 180
+    #    / np.pi
+
+    # px, py, amp, psf2d = locate_peak_psf(img_xds[dv].values)
+    # print(" locate_peak_psf: px, py, amp=", px, py, amp)
+    # if amp < 1e-7:
+    #    raise ValueError("PSF peak amplitude is zero")
+
+    # npoints, blc, trc, x, y, sigma = find_n_points(
+    #    npix_window, cutoff, px, py, psf2d, delta
+    # )
+    # print(" after find_n_points blc, trc=", blc, trc)
+    main_lobe_im, blc, trc, __ = extract_main_lobe(
+        npix_window, cutoff, img_xds[dv].values
+    )
+    blc = blc - expand_pixel
+    trc = trc + expand_pixel
+    # print(" blc, trc after expanding=", blc, trc)
+    if blc[0] < 0:
+        blc[0] = 0
+    if blc[1] < 0:
+        blc[1] = 0
+    if trc[0] >= main_lobe_im.shape[3]:
+        trc[0] = main_lobe_im.shape[3] - 1
+    if trc[1] >= main_lobe_im.shape[4]:
+        trc[1] = main_lobe_im.shape[4] - 1
+
+    ellipse_params = psf_gaussian_fit_core(
+        img_xds[dv].values, blc, trc, sampling, cutoff, delta
+    )
+
+    # Uncomment line below to change beam_param units to arcsec and deg
+    # psf_gaussian_fit_core returns bmaj and bmin in  and pa in deg.
+    # Converting to radian for storing to the xradio image
+    # ellipse_params[..., :2] = np.deg2rad(ellipse_params[..., :2] / 3600.0)
+    # ellipse_params[..., 2] = np.deg2rad(ellipse_params[..., 2])
+    
+    img_xds = img_xds.assign_coords(
+        beam_params_label=['major', 'minor', 'pa'],
+    )
+
+    img_xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"] = xr.DataArray(
+        ellipse_params, dims=["time", "frequency", "polarization", "beam_params"],
+        attrs={"unit": "rad"}
+    )
+
+    
+    if duplicate_params_for_sky:
+        img_xds["BEAM_FIT_PARAMS_SKY"] = xr.DataArray(
+            ellipse_params, dims=["time", "frequency", "polarization", "beam_params"],
+            attrs=img_xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].attrs,
+        )
+
+
+    return img_xds
+
+
+
 def _get_main_lobe_bounding_box(masked_psf, max_coords):
     """
     Given a psf image of main lobe in full 5D with zero values outside the lobe, find the bounding box
@@ -71,7 +194,7 @@ def extract_main_lobe(npix_window, threshold, psf_image):
     itm, ifrq, ipol, peak_y, peak_x = np.unravel_index(
         np.argmax(psf_image), psf_image.shape
     )
-    print("peak_x, peak_y=", peak_x, peak_y)
+    #print("peak_x, peak_y=", peak_x, peak_y)
 
     # set window outside of psf image to 0
     windowed_psf = np.zeros_like(psf_image)
@@ -124,123 +247,6 @@ def extract_main_lobe(npix_window, threshold, psf_image):
     blc, trc = _get_main_lobe_bounding_box(main_lobe_only, max_coords)
     # print("extract_main_lobe: blc, trc=", blc, trc)
     return main_lobe_only, blc, trc, max_sidelobe
-
-
-def psf_gaussian_fit(
-    xds: xr.Dataset,
-    dv: str = "POINT_SPREAD_FUNCTION",
-    npix_window: tuple = (41, 41),
-    sampling: tuple = (55, 55),
-    cutoff: float = 0.35,
-):
-    """
-    fit 2D gaussian to psf
-
-    Parameters
-    ----------
-    xds : xarray.Dataset
-        The input data cube.
-    dv : str
-        The data variable to fit. Default is 'POINT_SPREAD_FUNCTION'.
-    npix_window : tuple
-        The size of the fitting window in pixels.
-    sampling : tuple
-        The sampling of the fitting grid in pixels.
-    cutoff : float
-        The cutoff value for the fitting.
-
-    Returns
-    -------
-    xds : xarray.Dataset
-        The image with the fitted parameters added.
-        The l and m coordinates of the input data are assumed to be in radians.
-        The units of beam size (major and minor) and position angle are in radians.
-
-    Notes:
-    -----
-    - Returns NaN values for beam parameters if the fitting fails
-    - L-BFGS-B optimization method is used with bounds on parameters
-    """
-
-    if not isinstance(npix_window, (list, tuple, np.ndarray)):
-        raise TypeError("npix_window must be a list, tuple, or numpy array")
-    if npix_window[0] <= 0 or npix_window[1] <= 0:
-        raise ValueError("npix_window must be positive")
-    if type(npix_window[0]) is not int or type(npix_window[1]) is not int:
-        raise TypeError("npix_window must be integers")
-    if not isinstance(sampling, (list, tuple, np.ndarray)):
-        raise TypeError("sampling must be a list, tuple, or numpy array")
-    if sampling[0] <= 0 or sampling[1] <= 0:
-        raise ValueError("sampling must be positive")
-    if type(sampling[0]) is not int or type(sampling[1]) is not int:
-        raise TypeError("sampling must be integers")
-    if cutoff < 0:
-        raise ValueError("cutoff must be non-negative")
-    if dv not in xds:
-        raise KeyError(f"{dv} not found in the dataset")
-    if "l" not in xds[dv].coords:
-        raise KeyError("'l' coordinate not found in xds")
-    if "m" not in xds[dv].coords:
-        raise KeyError("'m' coordinate not found in xds")
-
-    _xds = xds.copy(deep=True)
-
-    sampling = np.array(sampling)
-    npix_window = np.array(npix_window)
-
-    # pixel increments (radians)
-    delta = np.array([_xds[dv].l[1] - _xds[dv].l[0], _xds[dv].m[1] - _xds[dv].m[0]])
-    # To make fitting result expressed in arcsecond uncomment the below
-    #    * 3600
-    #    * 180
-    #    / np.pi
-
-    # px, py, amp, psf2d = locate_peak_psf(_xds[dv].data.compute())
-    # print(" locate_peak_psf: px, py, amp=", px, py, amp)
-    # if amp < 1e-7:
-    #    raise ValueError("PSF peak amplitude is zero")
-
-    # npoints, blc, trc, x, y, sigma = find_n_points(
-    #    npix_window, cutoff, px, py, psf2d, delta
-    # )
-    # print(" after find_n_points blc, trc=", blc, trc)
-    main_lobe_im, blc, trc, __ = extract_main_lobe(
-        npix_window, cutoff, _xds[dv].data.compute()
-    )
-    blc = blc - expand_pixel
-    trc = trc + expand_pixel
-    # print(" blc, trc after expanding=", blc, trc)
-    if blc[0] < 0:
-        blc[0] = 0
-    if blc[1] < 0:
-        blc[1] = 0
-    if trc[0] >= main_lobe_im.shape[3]:
-        trc[0] = main_lobe_im.shape[3] - 1
-    if trc[1] >= main_lobe_im.shape[4]:
-        trc[1] = main_lobe_im.shape[4] - 1
-
-    ellipse_params = psf_gaussian_fit_core(
-        _xds[dv].data.compute(), blc, trc, sampling, cutoff, delta
-    )
-
-    # Uncomment line below to change beam_param units to arcsec and deg
-    # psf_gaussian_fit_core returns bmaj and bmin in  and pa in deg.
-    # Converting to radian for storing to the xradio image
-    # ellipse_params[..., :2] = np.deg2rad(ellipse_params[..., :2] / 3600.0)
-    # ellipse_params[..., 2] = np.deg2rad(ellipse_params[..., 2])
-
-    import dask.array as da
-
-    _xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data = da.from_array(
-        ellipse_params, chunks="auto"
-    )
-    # assume l, m in radians
-    if "unit" not in _xds["POINT_SPREAD_FUNCTION"].l.attrs:
-        _xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].beam_params_label.attrs[
-            "unit"
-        ] = "rad"
-    return _xds
-
 
 def beam_chi2(params, psf, sampling):
     """

@@ -5,13 +5,6 @@ import scipy.fft
 import xarray as xr
 import toolviper.utils.logger as logger
 
-from astroviper.utils.check_params import check_params, check_sel_params
-from astroviper.core.imaging.check_imaging_parameters import (
-    check_grid_params,
-    check_norm_params,
-)
-
-
 def _fft_module(backend):
     """Return the FFT module for the requested backend.
 
@@ -43,6 +36,7 @@ def _fft_module(backend):
         try:
             import pyfftw
             import pyfftw.interfaces.scipy_fft as _pyfftw_fft
+
             pyfftw.interfaces.cache.enable()
             return _pyfftw_fft
         except ImportError:
@@ -55,7 +49,13 @@ def _fft_module(backend):
 
 
 def ifft_norm_img_xds(
-    img_xds, image_params, data_group_in, data_group_out, image_data_variables_keep, threads=1, fft_backend="scipy"
+    img_xds,
+    image_params,
+    data_group_in,
+    data_group_out,
+    image_data_variables_keep,
+    threads=1,
+    fft_backend="scipy",
 ):
     """Normalize and inverse-Fourier-transform gridded UV data to sky images.
 
@@ -154,7 +154,7 @@ def ifft_norm_img_xds(
         "visibility": "visibility_normalization",
     }
 
-    from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import (
+    from astroviper.core.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
         create_prolate_spheroidal_correcting_image_1D,
     )
 
@@ -202,7 +202,7 @@ def ifft_norm_img_xds(
         if data_variable not in image_data_variables_keep:
             # Release the large grid from the dataset so it can be freed as soon
             # as `del raw_grid` is called after the loop.
-            del img_xds[grid_var_name] 
+            del img_xds[grid_var_name]
             del raw_grid  # free ≈ 9 GB as early as possible
 
         img_xds[data_group_out[fft_pair[data_variable]]] = xr.DataArray(
