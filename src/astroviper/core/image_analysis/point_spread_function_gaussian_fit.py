@@ -1,10 +1,14 @@
 import numpy as np
-from numba import jit, objmode
-import numba
 import xarray as xr
 import scipy.optimize as optimize
 from scipy.interpolate import interpn
 from scipy.ndimage import label
+
+from astroviper.utils.data_group_tools import (
+    create_data_groups_in_and_out,
+    modify_data_groups_xds,
+)
+
 
 FWHM_factor = 2.355  # approx 2*sqrt(2*ln(2))
 beam_initial_guess = [2.5, 2.5, 0.0]  # initial guess for [bmaj, bmin, pa]
@@ -13,12 +17,15 @@ expand_pixel = 5  # expand the fitting window by this many pixels on each side
 
 def point_spread_function_gaussian_fit(
     img_xds: xr.Dataset,
-    dv: str = "POINT_SPREAD_FUNCTION",
+    image_data_group_in_name="image",
+    image_data_group_out_name="image",
+    image_data_group_out_modified={"beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"},    
+    overwrite=True,
     npix_window: tuple = (41, 41),
     sampling: tuple = (55, 55),
     cutoff: float = 0.35,
-    duplicate_params_for_sky: bool = True,
-):
+    interpolation_method: str = "splinef2d"
+): 
     """
     fit 2D gaussian to psf
 
@@ -26,14 +33,16 @@ def point_spread_function_gaussian_fit(
     ----------
     img_xds : xarray.Dataset
         The input data cube.
-    dv : str
-        The data variable to fit. Default is 'POINT_SPREAD_FUNCTION'.
+    image_data_group_in_name : str
+        The name of the image data group to fit. Default is 'image'.
     npix_window : tuple
         The size of the fitting window in pixels.
     sampling : tuple
         The sampling of the fitting grid in pixels.
     cutoff : float
         The cutoff value for the fitting.
+    interpolation_method : str
+        The interpolation method to use when resampling the PSF for fitting.
 
     Returns
     -------
@@ -62,24 +71,29 @@ def point_spread_function_gaussian_fit(
         raise TypeError("sampling must be integers")
     if cutoff < 0:
         raise ValueError("cutoff must be non-negative")
-    if dv not in img_xds:
-        raise KeyError(f"{dv} not found in the dataset")
-    if "l" not in img_xds[dv].coords:
-        raise KeyError("'l' coordinate not found in img_xds")
-    if "m" not in img_xds[dv].coords:
-        raise KeyError("'m' coordinate not found in img_xds")
+    
+    image_data_group_in, image_data_group_out = create_data_groups_in_and_out(
+        img_xds,
+        data_group_in_name=image_data_group_in_name,
+        data_group_out_name=image_data_group_out_name,
+        data_group_out_modified=image_data_group_out_modified,
+        overwrite=overwrite,
+    )
+    print(img_xds.attrs["data_groups"])
+    print("image_data_group_in ", image_data_group_in)
+    psf_name = image_data_group_in["point_spread_function"]
 
     sampling = np.array(sampling)
     npix_window = np.array(npix_window)
 
     # pixel increments (radians)
-    delta = np.array([img_xds[dv].l[1] - img_xds[dv].l[0], img_xds[dv].m[1] - img_xds[dv].m[0]])
+    delta = np.array([img_xds[psf_name].l[1] - img_xds[psf_name].l[0], img_xds[psf_name].m[1] - img_xds[psf_name].m[0]])
     # To make fitting result expressed in arcsecond uncomment the below
     #    * 3600
     #    * 180
     #    / np.pi
 
-    # px, py, amp, psf2d = locate_peak_psf(img_xds[dv].values)
+    # px, py, amp, psf2d = locate_peak_psf(img_xds[psf_name].values)
     # print(" locate_peak_psf: px, py, amp=", px, py, amp)
     # if amp < 1e-7:
     #    raise ValueError("PSF peak amplitude is zero")
@@ -89,7 +103,7 @@ def point_spread_function_gaussian_fit(
     # )
     # print(" after find_n_points blc, trc=", blc, trc)
     main_lobe_im, blc, trc, __ = extract_main_lobe(
-        npix_window, cutoff, img_xds[dv].values
+        npix_window, cutoff, img_xds[psf_name].values
     )
     blc = blc - expand_pixel
     trc = trc + expand_pixel
@@ -104,7 +118,7 @@ def point_spread_function_gaussian_fit(
         trc[1] = main_lobe_im.shape[4] - 1
 
     ellipse_params = psf_gaussian_fit_core(
-        img_xds[dv].values, blc, trc, sampling, cutoff, delta
+        img_xds[psf_name].values, blc, trc, sampling, cutoff, delta, interpolation_method
     )
 
     # Uncomment line below to change beam_param units to arcsec and deg
@@ -117,22 +131,19 @@ def point_spread_function_gaussian_fit(
         beam_params_label=['major', 'minor', 'pa'],
     )
 
-    img_xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"] = xr.DataArray(
+    img_xds[image_data_group_out["beam_fit_params_point_spread_function"]] = xr.DataArray(
         ellipse_params, dims=["time", "frequency", "polarization", "beam_params"],
         attrs={"unit": "rad"}
     )
 
-    
-    if duplicate_params_for_sky:
-        img_xds["BEAM_FIT_PARAMS_SKY"] = xr.DataArray(
-            ellipse_params, dims=["time", "frequency", "polarization", "beam_params"],
-            attrs=img_xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].attrs,
-        )
-
+    modify_data_groups_xds(
+        img_xds,
+        image_data_group_out_name,
+        image_data_group_out,
+        description="Added UV sampling grid to img_xds with add_uv_sampling_grid_single_field.",
+    )
 
     return img_xds
-
-
 
 def _get_main_lobe_bounding_box(masked_psf, max_coords):
     """
@@ -248,45 +259,24 @@ def extract_main_lobe(npix_window, threshold, psf_image):
     # print("extract_main_lobe: blc, trc=", blc, trc)
     return main_lobe_only, blc, trc, max_sidelobe
 
-def beam_chi2(params, psf, sampling):
+def beam_chi2(params, psf_ravel_masked, x_grid, y_grid, psf_mask):
     """
     Chi-squared function for beam fitting.
+
+    psf_ravel_masked : pre-ravelled and masked PSF values (non-NaN pixels)
+    x_grid, y_grid   : pre-computed centred coordinate grids (shape: sampling_x, sampling_y)
+    psf_mask         : boolean mask of non-NaN pixels in the ravelled PSF
     """
-    psf_ravel = np.ravel(psf)
-    psf_mask = np.invert(np.isnan(psf_ravel))
-    psf_ravel = psf_ravel[psf_mask]
-
     width_x, width_y, rotation = params
-
-    ### comment out assuming everthing done in radians
-    # rotation is assumed to be in degrees
-    # rotation = 90 - rotation
-    # rotation = np.deg2rad(rotation)
-    # for debugging
-    # print("rotation original (rad) =", rotation, " (deg) =", np.rad2deg(rotation))
-    # print("rotation after mod (rad) =", rotation, " (deg) =", np.rad2deg(rotation))
-    x_size = sampling[0] * 2 + 1
-    y_size = sampling[1] * 2 + 1
-
-    x = np.repeat(np.arange(x_size), y_size).reshape(x_size, y_size)
-    y = np.repeat(np.arange(y_size), x_size).reshape(x_size, y_size).T
-
-    x = x - sampling[0]
-    y = y - sampling[1]
-    xp = x * np.cos(rotation) - y * np.sin(rotation)
-    yp = x * np.sin(rotation) + y * np.cos(rotation)
-
-    gaussian = 1.0 * np.exp(-(((xp) / width_x) ** 2 + ((yp) / width_y) ** 2) / 2.0)
-
-    gaussian_ravel = np.ravel(gaussian)
-    gaussian_ravel = gaussian_ravel[psf_mask]
-
-    chi2 = np.sum((gaussian_ravel - psf_ravel) ** 2)
-    return chi2
+    cos_r = np.cos(rotation)
+    sin_r = np.sin(rotation)
+    xp = x_grid * cos_r - y_grid * sin_r
+    yp = x_grid * sin_r + y_grid * cos_r
+    gaussian = np.exp(-(xp ** 2 / width_x ** 2 + yp ** 2 / width_y ** 2) / 2.0)
+    return np.sum((gaussian.ravel()[psf_mask] - psf_ravel_masked) ** 2)
 
 
-@jit(nopython=True, cache=True, nogil=True)
-def psf_gaussian_fit_core(image_to_fit, blc, trc, sampling, cutoff, delta):
+def psf_gaussian_fit_core(image_to_fit, blc, trc, sampling, cutoff, delta, interpolation_method="linear"):
     """
     core function to fit gaussian to psf
     Parameters
@@ -297,8 +287,6 @@ def psf_gaussian_fit_core(image_to_fit, blc, trc, sampling, cutoff, delta):
         The bottom left corner of the fitting window.
     trc : np.ndarray
         The top right corner of the fitting window.
-    #npix_window : np.ndarray
-    #    The size of the fitting window in pixels.
     sampling : np.ndarray
         The sampling of the fitting grid in pixels.
     cutoff : float
@@ -306,7 +294,7 @@ def psf_gaussian_fit_core(image_to_fit, blc, trc, sampling, cutoff, delta):
     delta : np.ndarray
         The pixel size in radians.
     """
-    ellipse_params = np.zeros(image_to_fit.shape[0:3] + (3,), dtype=numba.double)
+    ellipse_params = np.zeros(image_to_fit.shape[0:3] + (3,), dtype=np.float64)
     if np.all(np.isnan(image_to_fit)):
         return ellipse_params + np.nan
     elif np.all(image_to_fit == 0):
@@ -316,14 +304,7 @@ def psf_gaussian_fit_core(image_to_fit, blc, trc, sampling, cutoff, delta):
     xmax = trc[0] + 1
     ymax = trc[1] + 1
     npix_window = np.array([xmax - xmin, ymax - ymin])
-    image_to_fit = image_to_fit[
-        #    :, :, :, start_window[0] : end_window[0], start_window[1] : end_window[1]
-        :,
-        :,
-        :,
-        xmin:xmax,
-        ymin:ymax,
-    ]
+    image_to_fit = image_to_fit[:, :, :, xmin:xmax, ymin:ymax]
 
     d0 = np.arange(0, npix_window[0]) * np.abs(delta[0])
     d1 = np.arange(0, npix_window[1]) * np.abs(delta[1])
@@ -333,67 +314,61 @@ def psf_gaussian_fit_core(image_to_fit, blc, trc, sampling, cutoff, delta):
     d0_shape = interp_d0.shape[0]
     d1_shape = interp_d1.shape[0]
 
-    xp = np.repeat(interp_d0, d1_shape).reshape(d0_shape, d1_shape)
-    yp = np.repeat(interp_d1, d0_shape).reshape(d1_shape, d0_shape).T
+    xp_grid = np.repeat(interp_d0, d1_shape).reshape(d0_shape, d1_shape)
+    yp_grid = np.repeat(interp_d1, d0_shape).reshape(d1_shape, d0_shape).T
 
-    points = np.vstack((np.ravel(xp), np.ravel(yp))).T
+    points = np.vstack((np.ravel(xp_grid), np.ravel(yp_grid))).T
+
+    # Pre-compute centred coordinate grids for beam_chi2 (constant across iterations)
+    half_s = sampling // 2
+    ix = np.arange(sampling[0]) - half_s[0]
+    iy = np.arange(sampling[1]) - half_s[1]
+    x_grid = np.repeat(ix, sampling[1]).reshape(sampling[0], sampling[1]).astype(np.float64)
+    y_grid = np.repeat(iy, sampling[0]).reshape(sampling[1], sampling[0]).T.astype(np.float64)
+
+    bound = [(None, None), (None, None), (-np.pi / 2, np.pi / 2)]
 
     for time in range(image_to_fit.shape[0]):
         for chan in range(image_to_fit.shape[1]):
             for pol in range(image_to_fit.shape[2]):
+                interp_image_to_fit = np.reshape(
+                    interpn(
+                        (d0, d1),
+                        image_to_fit[time, chan, pol, :, :],
+                        points,
+                        method=interpolation_method,
+                    ),
+                    [sampling[1], sampling[0]],
+                ).T
+                interp_image_to_fit[interp_image_to_fit < cutoff] = np.nan
 
-                with objmode(res_x="f8[:]"):  # return type annotation
+                # Pre-compute mask and masked PSF values once per slice
+                psf_mask = ~np.isnan(interp_image_to_fit.ravel())
+                psf_ravel_masked = interp_image_to_fit.ravel()[psf_mask]
 
-                    interp_image_to_fit = np.reshape(
-                        interpn(
-                            (d0, d1),
-                            image_to_fit[time, chan, pol, :, :],
-                            points,
-                            method="splinef2d",
-                        ),
-                        [sampling[1], sampling[0]],
-                    ).T
-                    interp_image_to_fit[interp_image_to_fit < cutoff] = np.nan
+                res = optimize.minimize(
+                    beam_chi2,
+                    beam_initial_guess,
+                    args=(psf_ravel_masked, x_grid, y_grid, psf_mask),
+                    bounds=bound,
+                )
+                if not res.success:
+                    # could retry with lowering cutoff as done in CASA but
+                    # since the cutoff is used also outside the loop
+                    # implementing retry requires some refactoring...
+                    res_x = np.array([np.nan, np.nan, np.nan])
+                else:
+                    res_x = res.x
 
-                    p0 = beam_initial_guess
-                    bound = [(None, None), (None, None), (-np.pi / 2, np.pi / 2)]
-                    res = optimize.minimize(
-                        beam_chi2,
-                        p0,
-                        args=(interp_image_to_fit, sampling // 2),
-                        bounds=bound,
-                    )
-                    if not res.success:
-                        # could retry with lowerling cutoff as done in CASA but
-                        # since the cutoff is used also outside the loop
-                        # implementing retry requires some refactoring...
-                        res_x = np.array([np.nan, np.nan, np.nan])
-                    else:
-                        res_x = res.x
                 phi = res_x[2]
-                # phi = res_x[2] - np.pi / 2
-                # if phi < -np.pi / 2:
-                #    phi += np.pi
-                #    phi = (np.pi / 2 - res_x[2]) % np.pi
-
-                # phi = np.rad2deg(res_x[2])
-                # phi = res_x[2] - 90.0
-                # if phi < -90.0:
-                #    phi += 180.0
-
                 if np.argmax(res_x[0:2]) == 1:
                     phi = -(np.pi / 2 - phi)
                 ellipse_params[time, chan, pol, 0] = np.max(
                     np.abs(res_x[0:2])
-                    # ) * np.abs(delta[0] * 2.355 / sampling[0] / npix_window[0])
                 ) * np.abs(delta[0] * FWHM_factor / (sampling[0] / npix_window[0]))
-                # ) * np.abs(delta[0] * 2.355)
                 ellipse_params[time, chan, pol, 1] = np.min(
                     np.abs(res_x[0:2])
-                    # ) * np.abs(delta[1] * 2.355 / sampling[1] / npix_window[1])
                 ) * np.abs(delta[1] * FWHM_factor / (sampling[1] / npix_window[1]))
-                # ) * np.abs(delta[1] * 2.355)
-                # ellipse_params[time, chan, pol, 2] = -phi
                 if phi < 0:
                     phi = (phi + np.pi) % np.pi
                 ellipse_params[time, chan, pol, 2] = phi

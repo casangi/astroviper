@@ -1,7 +1,7 @@
 full_dims_lm = ["time", "frequency", "polarization", "l", "m"]
 full_dims_uv = ["time", "frequency", "polarization", "u", "v"]
 norm_dims = ["time", "frequency", "polarization"]
-beam_params_dims = ["time", "frequency", "polarization", "beam_params"] 
+beam_params_dims = ["time", "frequency", "polarization", "beam_params_label"] 
 
 imaging_data_variables_and_dims_double_precision = {
     "aperture": {"dims": full_dims_uv, "dtype": "<c16", "name": "APERTURE"},

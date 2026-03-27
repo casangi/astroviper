@@ -5,6 +5,12 @@ import scipy.fft
 import xarray as xr
 import toolviper.utils.logger as logger
 
+
+from astroviper.utils.data_group_tools import (
+    create_data_groups_in_and_out,
+    modify_data_groups_xds,
+)
+
 def _fft_module(backend):
     """Return the FFT module for the requested backend.
 
@@ -51,9 +57,11 @@ def _fft_module(backend):
 def ifft_norm_img_xds(
     img_xds,
     image_params,
-    data_group_in,
-    data_group_out,
-    image_data_variables_keep,
+    image_data_group_in_name="single_field",
+    image_data_group_out_name="single_field",
+    image_data_group_out_modified={"sky": "SKY_RESIDUAL", "point_spread_function": "POINT_SPREAD_FUNCTION"},
+    overwrite=True,
+    image_data_variables_keep=[],
     threads=1,
     fft_backend="scipy",
 ):
@@ -142,14 +150,20 @@ def ifft_norm_img_xds(
     which for a 12 000 × 12 000 grid is ≈ 1.15 GB.
     """
     _image_params = image_params  # no mutation below; deep copy not needed
+    
+    data_group_in, data_group_out = create_data_groups_in_and_out(
+        img_xds,
+        data_group_in_name=image_data_group_in_name,
+        data_group_out_name=image_data_group_out_name,
+        data_group_out_modified=image_data_group_out_modified,
+        overwrite=overwrite,
+    )
 
     fft_pair = {
-        "aperture": "primary_beam",
         "uv_sampling": "point_spread_function",
         "visibility": "sky",
     }
     normalization_key = {
-        "aperture": "aperture_normalization",
         "uv_sampling": "uv_sampling_normalization",
         "visibility": "visibility_normalization",
     }
@@ -208,6 +222,14 @@ def ifft_norm_img_xds(
         img_xds[data_group_out[fft_pair[data_variable]]] = xr.DataArray(
             result, dims=("time", "frequency", "polarization", "l", "m")
         )
+        
+        modify_data_groups_xds(
+        img_xds,
+        image_data_group_out_name,
+        data_group_out,
+        description="Transformed from aperture uv plane to sky lm plane.",
+    )
+    
     return img_xds
 
 
