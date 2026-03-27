@@ -223,6 +223,21 @@ class TestInputs:
         )
         assert bool(ds.success) is True
 
+    def test_accepts_raw_numpy_array_with_unlabeled_xy_axis_order(self) -> None:
+        ny, nx = 32, 33
+        comps = [dict(amp=1.0, x0=16.0, y0=15.0, sigma_x=3.0, sigma_y=3.0, theta=0.0)]
+        # Transpose into semantic (x, y) axis order before dropping labels.
+        arr_xy = _scene(ny, nx, comps).values.T
+        ds = fit_multi_gaussian2d(
+            arr_xy,
+            n_components=1,
+            initial_guesses=np.array([[1.0, 16.0, 15.0, 3.0, 3.0, 0.0]], float),
+            unlabeled_axis_order="xy",
+        )
+        assert bool(ds.success) is True
+        assert float(ds["x0_pixel"].values[0]) == pytest.approx(16.0, abs=0.8)
+        assert float(ds["y0_pixel"].values[0]) == pytest.approx(15.0, abs=0.8)
+
     @pytest.mark.skipif(da is None, reason="dask.array not available")
     def test_accepts_bare_dask_array(self) -> None:
         ny, nx = 40, 40
@@ -245,6 +260,16 @@ class TestInputs:
         )
         assert bool(ds.success) is True
         assert ds.attrs["fit_native_frame"] == "pixel"
+
+    def test_invalid_unlabeled_axis_order_raises(self) -> None:
+        arr = np.zeros((8, 9), dtype=float)
+        with pytest.raises(ValueError, match="unlabeled_axis_order"):
+            fit_multi_gaussian2d(
+                arr,
+                n_components=1,
+                initial_guesses=np.array([[1.0, 4.0, 4.0, 2.0, 2.0, 0.0]], float),
+                unlabeled_axis_order="bad",
+            )
 
     def test_world_coords_skipped_for_bad_axis_coords(self) -> None:
         ny, nx = 32, 32
