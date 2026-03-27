@@ -110,23 +110,16 @@ def residual_cycle_cube_single_field(
     img_xds = ifft_norm_img_xds(
         img_xds,
         image_params=input_params["image_params"],
-        data_group_in={
-            "uv_sampling": "UV_SAMPLING",
-            "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
-            "visibility": "VISIBILITY",
-            "visibility_normalization": "VISIBILITY_NORMALIZATION",
-        },
-        data_group_out={
-            "sky": "SKY_RESIDUAL",
-            "point_spread_function": "POINT_SPREAD_FUNCTION",
-        },
+        image_data_group_in_name=img_data_group_name,
+        image_data_group_out_name=img_data_group_name,
+        image_data_group_out_modified={"sky": "SKY_RESIDUAL", "point_spread_function": "POINT_SPREAD_FUNCTION"},
         image_data_variables_keep=input_params["image_data_variables_keep"],
     )
     T_fft_norm = time.time() - start_fft_norm
     logger.debug("9.  fft norm " + str(time.time() - start_fft_norm))
     
     start = time.time()
-    img_xds = point_spread_function_gaussian_fit(img_xds, dv="POINT_SPREAD_FUNCTION")
+    img_xds = point_spread_function_gaussian_fit(img_xds, image_data_group_in_name="single_field", image_data_group_out_name="single_field", image_data_group_out_modified={"beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"}, overwrite=True)
     T_psf_fit = time.time() - start
     
     print("2 img_xds ", img_xds)

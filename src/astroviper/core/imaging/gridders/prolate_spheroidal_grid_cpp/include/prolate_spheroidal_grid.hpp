@@ -1,6 +1,7 @@
 #pragma once
 
 #include <complex>
+#include <cstdint>
 
 namespace prolate_spheroidal {
 
@@ -41,9 +42,9 @@ void prolate_spheroidal_grid(
     const std::complex<double>* vis_data,
     const double* uvw,
     const double* frequency_coord,
-    const int* frequency_map,
-    const int* time_map,
-    const int* pol_map,
+    const int64_t* frequency_map,
+    const int64_t* time_map,
+    const int64_t* pol_map,
     const double* weight,
     const double* cgk_1D,
     int m_time_g, int m_chan_g, int m_pol_g, int m_u, int m_v,
@@ -85,9 +86,9 @@ void prolate_spheroidal_grid_uv_sampling(
     double* normalization,
     const double* uvw,
     const double* frequency_coord,
-    const int* frequency_map,
-    const int* time_map,
-    const int* pol_map,
+    const int64_t* frequency_map,
+    const int64_t* time_map,
+    const int64_t* pol_map,
     const double* weight,
     const double* cgk_1D,
     int m_time_g, int m_chan_g, int m_pol_g, int m_u, int m_v,
