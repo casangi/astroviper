@@ -5,9 +5,11 @@ Supports 4-pol (XX,XY,YX,YY or RR,RL,LR,LL → I,Q,U,V) and
 2-pol (XX,YY → I,Q or RR,LL → I,V).
 """
 
+import copy
 from typing import Optional, Union, List
 
 import numpy as np
+import toolviper.utils.logger as logger
 import xarray as xr
 
 # Valid Stokes parameters
@@ -66,6 +68,81 @@ CIRCULAR_STOKES_TO_CORR = np.array(
     ],
     dtype=complex,
 )
+
+new_pol_coords = { "linear_4": ["XX", "XY", "YX", "YY"],
+               "circular_4": ["RR", "RL", "LR", "LL"],
+               "linear_2": ["XX", "YY"],
+               "circular_2": ["RR", "LL"],
+               "stokes_4": ["I", "Q", "U", "V"],
+               "stokes_2_linear": ["I", "Q"],
+               "stokes_2_circular": ["I", "V"]}
+
+def transform_polarization_basis(
+    img_xds: xr.Dataset, 
+    new_polarization_basis : str, 
+    transformation_matrix: Optional[np.ndarray] = None,
+    overwrite=True)-> xr.Dataset:
+    """Transform the polarization basis of the image dataset to the specified basis.
+    This will effect all datagroups in the image dataset, and all data variables within those datagroups.
+    
+    Parameters
+    ----------
+    img_xds : 
+        Array with correlation products as the final dimension, shape (..., 4).
+    new_polarization_basis : str
+        'linear', 'circular', 'stokes', custom
+    transformation_matrix : np.ndarray, optional
+        Custom transformation matrix. Required if corr_type='custom'.
+
+    Returns
+    -------
+    image_dataset : xr.Dataset
+    """
+    
+    if overwrite:
+        img_transformed_xds = img_xds
+    else:
+        img_transformed_xds = xr.Dataset()
+        # Only copy attributes and coordinates, not data variables, since they will be transformed and may have different shapes.
+        img_transformed_xds.attrs = copy.deepcopy(img_xds.attrs)
+        for coord_name in img_xds.coords:
+            img_transformed_xds.coords[coord_name] = copy.deepcopy(img_xds.coords[coord_name])
+            
+    # Update the polarization coordinates
+    len_pol_dim = img_xds.sizes["polarization"]
+    new_polarization_coord_description = new_polarization_basis + f"_{len_pol_dim}"
+    if (len_pol_dim == 2) and (new_polarization_basis == "stokes"):
+        if ("XX" in img_xds.polarization) or ("YY" in img_xds.polarization):
+            new_polarization_coord_description =  new_polarization_coord_description + "_linear"
+        else:
+            new_polarization_coord_description = new_polarization_coord_description + "_circular"
+    
+    new_polarization_coord = new_pol_coords.get(new_polarization_coord_description)
+    
+    #Assign coords needs to overwrite the existing polarization coordinate values, but keep the same coordinate name and attributes. 
+    img_transformed_xds = img_transformed_xds.assign_coords(
+        polarization=new_polarization_coord,
+    )        
+    
+    
+    for var_name in img_xds.data_vars:
+        if new_polarization_basis == "stokes":
+            img_transformed_xds[var_name] = image_corr_to_stokes(
+                img_xds[var_name],
+                corr_type=None,  # Auto-detect based on coordinates
+                transformation_matrix=transformation_matrix,
+                stokes_out=new_polarization_coord
+            )
+        else:
+            img_transformed_xds[var_name] = image_stokes_to_corr(
+                img_xds[var_name],
+                corr_type=None,  # Auto-detect based on coordinates
+                transformation_matrix=transformation_matrix,
+                corr_out=len(new_polarization_coord)
+            )
+    
+    return img_transformed_xds
+    
 
 
 def corr_to_stokes(
@@ -206,6 +283,9 @@ def image_corr_to_stokes(
 
     # Get number of input correlations
     n_corr = data.shape[pol_axis_pos]
+    
+    #logger.debug(f"Transforming polarization basis: corr_type={corr_type}, n_corr={n_corr}, pol_axis={pol_axis_pos}")
+    print(f"Transforming polarization basis: corr_type={corr_type}, n_corr={n_corr}, pol_axis={pol_axis_pos}")
 
     # Validate minimum correlations
     if n_corr < 2:
