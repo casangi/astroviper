@@ -5,4 +5,4 @@ project(astroviper VERSION ${SKBUILD_PROJECT_VERSION} LANGUAGES CXX)
 add_subdirectory(src/astroviper/core/imaging/deconvolvers/hogbom)
 
 # Add the prolate spheroidal gridder extension as a subdirectory
-add_subdirectory(src/astroviper/core/imaging/gridders/prolate_spheroidal_grid)
+add_subdirectory(src/astroviper/core/imaging/gridders/prolate_spheroidal_grid_cpp)

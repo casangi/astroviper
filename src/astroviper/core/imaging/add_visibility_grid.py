@@ -6,7 +6,6 @@ import numba
 import xarray as xr
 
 from astroviper.core.imaging.gridders.mosaic_grid import mosaic_grid_jit
-from astroviper.core.imaging.gridders.prolate_spheroidal_grid import prolate_spheroidal_grid_jit
 from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
@@ -335,22 +334,45 @@ def add_visibility_grid_single_field(
     imaging_weight = ms_xds[ms_data_group_in["weight_imaging"]].values
 
 
-    prolate_spheroidal_grid_jit(
-        grid,
-        normalization,
-        vis_data,
-        uvw,
-        frequency_coord,
-        frequency_map,
-        time_map,
-        pol_map,
-        imaging_weight,
-        cgk_1D,
-        n_uv,
-        delta_lm,
-        support=7,
-        oversampling=100,
-    )
+    from astroviper.core.imaging.gridders.prolate_spheroidal_grid import prolate_spheroidal_grid_jit
+    
+    cpp_gridder = True
+    if cpp_gridder:
+        from astroviper.core.imaging.gridders.prolate_spheroidal_grid_cpp import prolate_spheroidal_grid
+
+        prolate_spheroidal_grid(
+            grid,
+            normalization,
+            vis_data,
+            uvw,
+            frequency_coord,
+            frequency_map,
+            time_map,
+            pol_map,
+            imaging_weight,
+            cgk_1D,
+            n_uv,
+            delta_lm,
+            support=7,
+            oversampling=100,
+        )
+    else:
+        prolate_spheroidal_grid_jit(
+            grid,
+            normalization,
+            vis_data,
+            uvw,
+            frequency_coord,
+            frequency_map,
+            time_map,
+            pol_map,
+            imaging_weight,
+            cgk_1D,
+            n_uv,
+            delta_lm,
+            support=7,
+            oversampling=100,
+        )
     
 
     modify_data_groups_xds(
