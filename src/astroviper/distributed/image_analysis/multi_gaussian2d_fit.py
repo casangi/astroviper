@@ -1185,7 +1185,11 @@ def _ensure_dataarray(data: ArrayOrDA) -> xr.DataArray:
 
 
 def _resolve_dims(
-    da: xr.DataArray, dims: Optional[Sequence[Union[str, int]]]
+    da: xr.DataArray,
+    dims: Optional[Sequence[Union[str, int]]],
+    *,
+    unlabeled_input: bool = False,
+    unlabeled_axis_order: str = "yx",
 ) -> Tuple[str, str]:
     """
     Resolve the two dimensions that define the fit plane.
@@ -1197,6 +1201,13 @@ def _resolve_dims(
     dims : Sequence[str | int] | None
         Optional dimension specifier. Supported choices are explicit dimension names
         or integer dimension indices.
+    unlabeled_input : bool, optional
+        Whether ``da`` originated from a raw NumPy/Dask input without semantic
+        dimension names.
+    unlabeled_axis_order : {"yx", "xy"}, optional
+        Semantic interpretation to apply for unlabeled 2-D arrays when ``dims`` is
+        omitted. ``"yx"`` means stored rows/columns order; ``"xy"`` means the first
+        axis is interpreted semantically as x and the second as y.
 
     Returns
     -------
@@ -1209,11 +1220,19 @@ def _resolve_dims(
     Otherwise, for plain 2-D arrays it assumes the last dimension is x and the
     second-last is y.
     """
+    axis_order = (unlabeled_axis_order or "yx").lower()
+    if axis_order not in ("yx", "xy"):
+        raise ValueError("unlabeled_axis_order must be either 'yx' or 'xy'.")
+
     if dims is None:
         # ✅ new: prefer explicitly named axes when present
         if "x" in da.dims and "y" in da.dims:
             return "x", "y"
         if da.ndim == 2:
+            if unlabeled_input and axis_order == "xy":
+                # Allow callers with unlabeled arrays that already use semantic
+                # (x, y) ordering to declare that contract explicitly.
+                return da.dims[-2], da.dims[-1]
             # For unlabeled/raw 2-D arrays, interpret stored image-plane order as
             # (y, x): rows first, columns second. Public semantic fit-plane order
             # remains (x, y), so x maps to the last axis and y to the second-last.
@@ -1882,6 +1901,7 @@ class _FitExecutionContext:
 def _build_fit_execution_context(
     data: ArrayOrDA,
     dims: Optional[Sequence[Union[str, int]]],
+    unlabeled_axis_order: str = "yx",
 ) -> _FitExecutionContext:
     """
     Normalize the public input into a stable fit-plane context.
@@ -1893,6 +1913,9 @@ def _build_fit_execution_context(
     dims : Sequence[str | int] | None
         Optional dimension specifier for the fit plane. Supported choices are
         explicit dimension names or integer dimension indices.
+    unlabeled_axis_order : {"yx", "xy"}, optional
+        Semantic axis-order contract for unlabeled NumPy/Dask inputs when
+        ``dims`` is omitted.
 
     Returns
     -------
@@ -1906,8 +1929,14 @@ def _build_fit_execution_context(
     original input ordering. Axis-orientation signs are derived from any attached
     1-D coordinate vectors and default conservatively when coordinates are absent.
     """
+    unlabeled_input = not isinstance(data, xr.DataArray)
     da_in = _ensure_dataarray(data)
-    dim_x, dim_y = _resolve_dims(da_in, dims)
+    dim_x, dim_y = _resolve_dims(
+        da_in,
+        dims,
+        unlabeled_input=unlabeled_input,
+        unlabeled_axis_order=unlabeled_axis_order,
+    )
     # Normalize to trailing (y, x) because image planes are stored in row/column
     # memory order internally even though the public fit-plane API is (x, y).
     da_tr = da_in.transpose(
@@ -1971,7 +2000,6 @@ def _warn_if_suboptimal_dask_chunking(context: _FitExecutionContext) -> None:
         RuntimeWarning,
         stacklevel=3,
     )
-
 
 def _resolve_fit_mask(
     mask: Optional[ArrayOrDA],
@@ -2406,8 +2434,14 @@ def _canonicalize_fit_outputs(results, want_pa: bool) -> Dict[str, xr.DataArray]
 
     th_math = xr.apply_ufunc(_wrap_halfpi, th_math, dask="parallelized", vectorize=True)
     theta_math = th_math
-    theta_pa = xr.DataArray(
-        _theta_math_to_pa(th_math.values), dims=th.dims, coords=th.coords
+    theta_pa = xr.apply_ufunc(
+        _theta_math_to_pa,
+        th_math,
+        input_core_dims=[["component"]],
+        output_core_dims=[["component"]],
+        vectorize=True,
+        dask="parallelized",
+        output_dtypes=[float],
     )
     theta_math_err = th_e
     theta_pa_err = th_e
@@ -2616,10 +2650,14 @@ def _build_published_parameter_dataset(
             dask="parallelized",
             output_dtypes=[float, float, float],
         )
-        theta_pixel_pa = xr.DataArray(
-            _theta_math_to_pa(theta_pixel_math.values),
-            dims=theta_pixel_math.dims,
-            coords=theta_pixel_math.coords,
+        theta_pixel_pa = xr.apply_ufunc(
+            _theta_math_to_pa,
+            theta_pixel_math,
+            input_core_dims=[["component"]],
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
         )
         theta_pixel = theta_pixel_pa if want_pa else theta_pixel_math
         fwhm_major_pixel = sigma_major_pixel * _SIG2FWHM
@@ -2751,8 +2789,14 @@ def _build_published_parameter_dataset(
         sigma_major_pixel = xr.apply_ufunc(np.maximum, sx, sy, dask="parallelized")
         sigma_minor_pixel = xr.apply_ufunc(np.minimum, sx, sy, dask="parallelized")
         theta_pixel_math = th_math
-        theta_pixel_pa = xr.DataArray(
-            _theta_math_to_pa(th_math.values), dims=th_math.dims, coords=th_math.coords
+        theta_pixel_pa = xr.apply_ufunc(
+            _theta_math_to_pa,
+            th_math,
+            input_core_dims=[["component"]],
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
         )
         theta_pixel = theta_pixel_pa if want_pa else theta_pixel_math
         fwhm_major_pixel = xr.apply_ufunc(
@@ -2869,10 +2913,14 @@ def _build_published_parameter_dataset(
             dm_dsy = (s1m - s2m) / (2.0 * epsy)
             return dM_dsx, dm_dsx, dM_dsy, dm_dsy
 
-        theta_world_pa = xr.DataArray(
-            _theta_math_to_pa(theta_world_math.values),
-            dims=theta_world_math.dims,
-            coords=theta_world_math.coords,
+        theta_world_pa = xr.apply_ufunc(
+            _theta_math_to_pa,
+            theta_world_math,
+            input_core_dims=[["component"]],
+            output_core_dims=[["component"]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
         )
         theta_world = theta_world_pa if want_pa else theta_world_math
 
@@ -3178,6 +3226,7 @@ def _attach_fit_invocation_metadata(
     return_residual: bool,
     angle: str,
     coord_type: str,
+    unlabeled_axis_order: str,
     coords,
     world_mode: bool,
 ) -> xr.Dataset:
@@ -3212,6 +3261,8 @@ def _attach_fit_invocation_metadata(
         Public angle-convention selector.
     coord_type : str
         Public coordinate-frame selector.
+    unlabeled_axis_order : str
+        Semantic axis-order contract for unlabeled NumPy/Dask inputs.
     coords : Any
         Optional NumPy/Dask coordinate vectors.
     world_mode : bool
@@ -3249,6 +3300,7 @@ def _attach_fit_invocation_metadata(
         return_residual=bool(return_residual),
         angle=str(angle),
         coord_type=str(coord_type),
+        unlabeled_axis_order=str(unlabeled_axis_order),
         coords=_summarize_metadata_value(coords),
     )
     call = _build_call(_inspect, param)
@@ -3372,6 +3424,7 @@ def fit_multi_gaussian2d(
     return_residual: bool = True,
     angle: str = "math",
     coord_type: str = "world",
+    unlabeled_axis_order: str = "yx",
     coords: Optional[Sequence[np.ndarray]] = None,
 ) -> xr.Dataset:
     """
@@ -3387,7 +3440,8 @@ def fit_multi_gaussian2d(
     Parameters
     ----------
     data: numpy.ndarray | dask.array.Array | xarray.DataArray
-      Input array. If not a DataArray, it is wrapped with dims ('y','x') and generated numeric coords.
+      Input array. If not a DataArray, it is wrapped with synthetic dims
+      ``("dim_0", "dim_1", ...)`` and generated numeric coords.
 
     n_components: int
       Number of Gaussian components (N ≥ 1).
@@ -3453,6 +3507,12 @@ def fit_multi_gaussian2d(
         • "pixel": the optimizer evaluates the Gaussian model on zero-based pixel-index axes.
       When coordinate metadata are available, the returned dataset may still report both pixel-space and world-space component parameters; ``coord_type`` only selects the native frame in which the fit is performed.
       Ignored for NumPy/Dask inputs.
+    unlabeled_axis_order: {"yx","xy"}, default "yx"
+      Applies only when ``data`` is a NumPy/Dask array and ``dims`` is omitted.
+        • "yx": interpret the stored 2-D plane as rows then columns, so the last axis is x and the second-last is y.
+        • "xy": interpret the stored 2-D plane semantically as x then y, so the first axis is x and the second is y.
+      Ignored for labeled ``xarray.DataArray`` inputs and for calls that already
+      specify ``dims`` explicitly.
     coords: tuple[np.ndarray, np.ndarray] | list[np.ndarray] | None
       For NumPy/Dask inputs only: provide (x1d, y1d) to fit in world coordinates. Ignored for DataArray inputs.
 
@@ -3487,7 +3547,9 @@ def fit_multi_gaussian2d(
     pixel-space and world-space views of the fitted components, but ``coord_type``
     determines which frame was used by the optimizer itself. Width parameters are
     optimized internally in sigma units even when array-form initial guesses or
-    bounds are provided in FWHM.
+    bounds are provided in FWHM. For unlabeled NumPy/Dask inputs, the default
+    semantic mapping is ``unlabeled_axis_order="yx"``, which interprets the last
+    axis as x and the second-last as y unless the caller opts into ``"xy"``.
 
     Parallelization
     ---------------
@@ -3499,16 +3561,32 @@ def fit_multi_gaussian2d(
     For Dask-backed inputs, vectorization across all non-fit dims is dispatched
     through ``xarray.apply_ufunc(dask="parallelized")``. In that mode, performance
     is typically controlled by Dask chunking and scheduler configuration rather than
-    by this function directly. For stacks of many independent planes, using Dask to
-    parallelize across the outer plane dims is often the most scalable approach.
-    In general, do not chunk along the two dimensions that define the fit plane.
-    Each fit needs the full ``(y, x)`` plane available as one unit, so chunking the
-    fit axes usually adds overhead or can prevent the gufunc-style execution from
-    matching the intended plane-by-plane pattern. Prefer chunking only along outer
-    stack dims such as ``time``, ``frequency``, ``stokes``, or similar non-fit dims.
-    For example, if the fit plane is ``("x", "y")``, a layout such as
+    by this function directly. For stacks of many independent planes, parallelizing
+    across the outer stack dims is usually the right first strategy. In general, do
+    not chunk along the two dimensions that define the fit plane. Each fit needs the
+    full ``(y, x)`` plane available as one unit, so chunking the fit axes usually
+    adds overhead or can prevent the gufunc-style execution from matching the
+    intended plane-by-plane pattern. Prefer chunking only along outer stack dims
+    such as ``time``, ``frequency``, ``stokes``, or similar non-fit dims. For
+    example, if the fit plane is ``("x", "y")``, a layout such as
     ``data.chunk({"time": 4, "y": -1, "x": -1})`` is typically a better starting
     point than chunking ``x`` or ``y``.
+
+    As a first Dask configuration to try for CPU-bound plane fitting on one
+    machine, prefer more single-threaded workers rather than fewer heavily threaded
+    workers. A practical starting point is a local distributed client such as
+    ``Client(n_workers=<physical_cores>, threads_per_worker=1)`` with chunking only
+    along the outer plane dims. If memory is tight, reduce ``n_workers`` first. If
+    there are many more planes than worker slots, choose outer-dimension chunking so
+    the total number of chunks is several times larger than the total number of
+    worker task slots, which usually gives better load balancing than creating only
+    one chunk per worker.
+
+    For small stacks with only a few fit tasks, timing can vary substantially under
+    threaded or distributed schedulers because scheduling overhead and task
+    interleaving become a larger fraction of total runtime. For benchmarking, start
+    with the synchronous scheduler on a fixed input cube, then compare distributed
+    configurations only after the single-process baseline is stable.
 
     For NumPy-backed inputs, this function does not create Dask tasks. However, the
     underlying NumPy/SciPy operations may still use multithreaded native libraries
@@ -3540,7 +3618,10 @@ def fit_multi_gaussian2d(
     examples include ``OMP_NUM_THREADS=1``, ``OPENBLAS_NUM_THREADS=1``,
     ``MKL_NUM_THREADS=1``, ``VECLIB_MAXIMUM_THREADS=1``, and
     ``NUMEXPR_NUM_THREADS=1``. The exact variables that matter depend on the BLAS
-    and OpenMP backend linked into the user's NumPy/SciPy build.
+    and OpenMP backend linked into the user's NumPy/SciPy build. When Dask is used
+    to parallelize across planes, setting those native thread counts to ``1`` is
+    usually a good first choice so that Dask worker concurrency and native linear
+    algebra threading do not compete with each other.
 
     Examples
     --------
@@ -3575,7 +3656,7 @@ def fit_multi_gaussian2d(
     if n_components < 1:
         raise ValueError("n_components must be >= 1.")
     # Stage 1: normalize the input layout and derive the fit-plane frame metadata.
-    context = _build_fit_execution_context(data, dims)
+    context = _build_fit_execution_context(data, dims, unlabeled_axis_order)
     _warn_if_suboptimal_dask_chunking(context)
 
     # Stage 2: align all user-facing configuration to the transposed fit view.
@@ -3646,6 +3727,7 @@ def fit_multi_gaussian2d(
         return_residual=bool(return_residual),
         angle=str(angle),
         coord_type=str(coord_type),
+        unlabeled_axis_order=str(unlabeled_axis_order),
         coords=coords,
         world_mode=world_mode,
     )
