@@ -53,4 +53,4 @@ target_compile_definitions(_prolate_spheroidal_grid_ext PRIVATE
 
 # Install the module in the python package directory
 install(TARGETS _prolate_spheroidal_grid_ext
-    DESTINATION astroviper/core/imaging/gridders/prolate_spheroidal_grid)
+    DESTINATION astroviper/core/imaging/gridders/prolate_spheroidal_grid_cpp)
