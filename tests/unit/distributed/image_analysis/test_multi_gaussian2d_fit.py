@@ -304,7 +304,9 @@ class TestInputs:
             # public plane selector still uses dims=("x", "y") semantically.
             dims=("time", "y", "x"),
         )
-        with pytest.warns(RuntimeWarning, match=r"\['x'\].*chunk\(\{'x': -1, 'y': -1\}\)"):
+        with pytest.warns(
+            RuntimeWarning, match=r"\['x'\].*chunk\(\{'x': -1, 'y': -1\}\)"
+        ):
             with pytest.raises(ValueError, match=r"dimension x .* multiple chunks"):
                 fit_multi_gaussian2d(
                     cube,
@@ -1422,7 +1424,9 @@ class TestNumPyFitting:  # (unittest.TestCase):
         x = np.linspace(-80.0, 80.0, nx, dtype=float)
         y = np.linspace(-60.0, 30.0, ny, dtype=float)
         X, Y = np.meshgrid(x, y)
-        Z = 0.1 + 2.0 * np.exp(-((X - 10.0) ** 2) / (2 * 8.0**2) - ((Y + 15.0) ** 2) / (2 * 5.0**2))
+        Z = 0.1 + 2.0 * np.exp(
+            -((X - 10.0) ** 2) / (2 * 8.0**2) - ((Y + 15.0) ** 2) / (2 * 5.0**2)
+        )
         img = xr.DataArray(Z, dims=("y", "x"), coords={"x": x, "y": y})
 
         ds = fit_multi_gaussian2d(

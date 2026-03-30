@@ -1,4 +1,6 @@
 # file: src/astroviper/fitting/multi_gaussian2d_fit.py
+# 2D gaussian fitter
+# Dave Mehringer
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -2001,6 +2003,7 @@ def _warn_if_suboptimal_dask_chunking(context: _FitExecutionContext) -> None:
         stacklevel=3,
     )
 
+
 def _resolve_fit_mask(
     mask: Optional[ArrayOrDA],
     da_tr: xr.DataArray,
@@ -2048,7 +2051,9 @@ def _resolve_fit_mask(
         if isinstance(mda, np.ndarray):
             # Plain 2-D masks are interpreted in the same stored plane order as
             # the image data: rows then columns, i.e. (y, x).
-            mda = xr.DataArray(mda, dims=[dim_y, dim_x] if mda.ndim == 2 else da_tr.dims)
+            mda = xr.DataArray(
+                mda, dims=[dim_y, dim_x] if mda.ndim == 2 else da_tr.dims
+            )
         if not isinstance(mda, xr.DataArray):
             raise TypeError("selection.select_mask returned unsupported mask type")
     elif isinstance(mask, xr.DataArray):
@@ -2134,7 +2139,11 @@ def _prepare_fit_configuration(
         ig = ig.copy()
         ig[:, 3] = _sigma_from_fwhm(ig[:, 3])
         ig[:, 4] = _sigma_from_fwhm(ig[:, 4])
-    if isinstance(ig, dict) and "components" in ig and isinstance(ig["components"], np.ndarray):
+    if (
+        isinstance(ig, dict)
+        and "components" in ig
+        and isinstance(ig["components"], np.ndarray)
+    ):
         arr = np.asarray(ig["components"], dtype=float)
         if arr.shape == (int(n_components), 6) and initial_is_fwhm:
             arr = arr.copy()
@@ -2680,8 +2689,12 @@ def _build_published_parameter_dataset(
             dm_dsy = (s1m - s2m) / (2.0 * epsy)
             return dM_dsx, dm_dsx, dM_dsy, dm_dsy
 
-        epsx = xr.apply_ufunc(lambda v: 1e-6 + 1e-3 * np.abs(v), sx, dask="parallelized")
-        epsy = xr.apply_ufunc(lambda v: 1e-6 + 1e-3 * np.abs(v), sy, dask="parallelized")
+        epsx = xr.apply_ufunc(
+            lambda v: 1e-6 + 1e-3 * np.abs(v), sx, dask="parallelized"
+        )
+        epsy = xr.apply_ufunc(
+            lambda v: 1e-6 + 1e-3 * np.abs(v), sy, dask="parallelized"
+        )
         dM_dsx, dm_dsx, dM_dsy, dm_dsy = xr.apply_ufunc(
             _fd_sigma_world_to_pixel,
             sx,
@@ -2692,7 +2705,12 @@ def _build_published_parameter_dataset(
             epsx,
             epsy,
             input_core_dims=[["component"]] * 7,
-            output_core_dims=[["component"], ["component"], ["component"], ["component"]],
+            output_core_dims=[
+                ["component"],
+                ["component"],
+                ["component"],
+                ["component"],
+            ],
             vectorize=True,
             dask="parallelized",
             output_dtypes=[float, float, float, float],
@@ -2727,7 +2745,9 @@ def _build_published_parameter_dataset(
             _, _, t2 = _world_to_pixel_cov(sigx, sigy, theta - eps, dx, dy)
             return (t1 - t2) / (2.0 * eps)
 
-        epst = xr.apply_ufunc(lambda v: 1e-6 + 1e-3 * np.abs(v), th_math, dask="parallelized")
+        epst = xr.apply_ufunc(
+            lambda v: 1e-6 + 1e-3 * np.abs(v), th_math, dask="parallelized"
+        )
         dtdt = xr.apply_ufunc(
             _dtheta_pix_dtheta_world,
             sx,
@@ -2929,7 +2949,9 @@ def _build_published_parameter_dataset(
             _, _, t2 = _pixel_to_world_cov(sigx, sigy, theta - eps, dx, dy)
             return (t1 - t2) / (2.0 * eps)
 
-        epst_w = xr.apply_ufunc(lambda v: 1e-6 + 1e-3 * np.abs(v), th_math, dask="parallelized")
+        epst_w = xr.apply_ufunc(
+            lambda v: 1e-6 + 1e-3 * np.abs(v), th_math, dask="parallelized"
+        )
         dtdt_w = xr.apply_ufunc(
             _dtheta_world_dtheta_pixel,
             sx,
@@ -2956,8 +2978,12 @@ def _build_published_parameter_dataset(
         )
         theta_world_pa_err = theta_world_math_err
         theta_world_err = theta_world_pa_err if want_pa else theta_world_math_err
-        epsx = xr.apply_ufunc(lambda v: 1e-6 + 1e-3 * np.abs(v), sx, dask="parallelized")
-        epsy = xr.apply_ufunc(lambda v: 1e-6 + 1e-3 * np.abs(v), sy, dask="parallelized")
+        epsx = xr.apply_ufunc(
+            lambda v: 1e-6 + 1e-3 * np.abs(v), sx, dask="parallelized"
+        )
+        epsy = xr.apply_ufunc(
+            lambda v: 1e-6 + 1e-3 * np.abs(v), sy, dask="parallelized"
+        )
         dM_dsx, dm_dsx, dM_dsy, dm_dsy = xr.apply_ufunc(
             _fd_sigma_pixel_to_world,
             sx,
@@ -2968,7 +2994,12 @@ def _build_published_parameter_dataset(
             epsx,
             epsy,
             input_core_dims=[["component"]] * 7,
-            output_core_dims=[["component"], ["component"], ["component"], ["component"]],
+            output_core_dims=[
+                ["component"],
+                ["component"],
+                ["component"],
+                ["component"],
+            ],
             vectorize=True,
             dask="parallelized",
             output_dtypes=[float, float, float, float],
@@ -3088,7 +3119,11 @@ def _attach_optional_plane_outputs(
     """
     if return_residual:
         ds["residual"] = fit["residual"].transpose(
-            *(d for d in fit["residual"].dims if d not in (context.dim_y, context.dim_x)),
+            *(
+                d
+                for d in fit["residual"].dims
+                if d not in (context.dim_y, context.dim_x)
+            ),
             context.dim_x,
             context.dim_y,
         )
@@ -4120,7 +4155,11 @@ def plot_components(
 
     # If the caller passes a spatially subsetted data plane but an unsliced fit result,
     # align the result to the displayed x/y coordinates before plotting residual/model.
-    if isinstance(res_plane, xr.Dataset) and dim_x in res_plane.dims and dim_y in res_plane.dims:
+    if (
+        isinstance(res_plane, xr.Dataset)
+        and dim_x in res_plane.dims
+        and dim_y in res_plane.dims
+    ):
         try:
             res_plane, _ = xr.align(res_plane, data2d, join="right")
         except Exception:

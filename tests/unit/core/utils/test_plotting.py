@@ -94,7 +94,10 @@ def test_generate_plot_uses_dataarray_axis_coords_for_world_axes():
     data = xr.DataArray(
         np.arange(12, dtype=float).reshape(3, 4),
         dims=("x", "y"),
-        coords={"x": np.array([10.0, 20.0, 30.0]), "y": np.array([-2.0, 0.0, 2.0, 4.0])},
+        coords={
+            "x": np.array([10.0, 20.0, 30.0]),
+            "y": np.array([-2.0, 0.0, 2.0, 4.0]),
+        },
     )
 
     fig, ax = generate_plot(data=data, show_world_axes=True)
