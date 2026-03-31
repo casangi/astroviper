@@ -3587,21 +3587,30 @@ def fit_multi_gaussian2d(
     xarray.Dataset
         Per-plane results with a new core dim ``component`` (length N).
 
-        Per-component parameters:
-            - amplitude(component), x0(component), y0(component),
-              sigma_x(component), sigma_y(component), theta(component)
-        Per-component 1σ uncertainties:
-            - amplitude_err(component), x0_err(component), y0_err(component),
-              sigma_x_err(component), sigma_y_err(component), theta_err(component)
-        Per-component derived:
-            - fwhm_major(component), fwhm_minor(component), peak(component) [= amplitude + offset]
+        Per-component fit values include:
+            - ``amplitude(component)``
+            - pixel-frame centers ``x0_pixel(component)``, ``y0_pixel(component)``
+            - pixel-frame widths ``sigma_major_pixel(component)``,
+              ``sigma_minor_pixel(component)``, ``fwhm_major_pixel(component)``,
+              ``fwhm_minor_pixel(component)``
+            - pixel-frame angles ``theta_pixel(component)``,
+              ``theta_pixel_math(component)``, ``theta_pixel_pa(component)``
+            - ``peak(component)`` [= amplitude + offset]
+        Per-component 1σ uncertainties include matching ``*_err`` variables for
+        all published component quantities above.
         Scalars:
-            - offset, offset_err, success (bool), variance_explained
+            - ``offset``, ``offset_err``, ``success`` (bool), ``variance_explained``
         Optional planes:
-            - residual (if return_residual), model (if return_model)
-        Optional world coordinates (per component):
-            - x_world(component), y_world(component) are added **only** if both fit axes
-              have 1-D numeric coordinate variables (ascending or descending).
+            - ``residual`` (if ``return_residual``), ``model`` (if ``return_model``)
+        Optional world-frame component variables are added when the fit axes have
+        usable 1-D numeric coordinate variables:
+            - centers ``x0_world(component)``, ``y0_world(component)``
+            - world-frame widths ``sigma_major_world(component)``,
+              ``sigma_minor_world(component)``, ``fwhm_major_world(component)``,
+              ``fwhm_minor_world(component)``
+            - world-frame angles ``theta_world(component)``,
+              ``theta_world_math(component)``, ``theta_world_pa(component)``
+            - matching ``*_err`` variables for each published world-frame quantity
 
     Notes
     -----
@@ -3613,9 +3622,9 @@ def fit_multi_gaussian2d(
     pixel-space and world-space views of the fitted components, but ``coord_type``
     determines which frame was used by the optimizer itself. Width parameters are
     optimized internally in sigma units even when array-form initial guesses or
-    bounds are provided in FWHM. For unlabeled NumPy/Dask inputs, the default
-    semantic mapping is ``unlabeled_axis_order="yx"``, which interprets the last
-    axis as x and the second-last as y unless the caller opts into ``"xy"``.
+    bounds are provided in FWHM. For unlabeled NumPy/Dask inputs with omitted
+    ``dims``, callers must now specify ``unlabeled_axis_order`` explicitly so the
+    public x/y plane semantics are not inferred silently.
 
     Parallelization
     ---------------
