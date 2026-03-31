@@ -45,9 +45,10 @@ def _coerce_to_xda(
         Required when ``data`` is a NumPy/Dask array. A mapping that must include
         1-D arrays for ``x_coord`` and ``y_coord`` whose lengths match the array
         width (horizontal) and height (vertical), respectively.
-        This module follows the Astropy convention for 2-D pixel arrays: axis 0
-        is horizontal (x) and axis 1 is vertical (y). See
-        https://docs.astropy.org/en/stable/wcs/index.html.
+        This module's public convention for unlabeled 2-D arrays is that axis 0
+        is horizontal (x) and axis 1 is vertical (y). This is an Astroviper API
+        choice for packed array inputs and should not be confused with the usual
+        NumPy row/column indexing convention ``array[y, x]``.
     dims
         Optional dimension names to assign when wrapping a NumPy/Dask array.
         Defaults to ``(x_coord, y_coord)``.
@@ -87,8 +88,9 @@ def _coerce_to_xda(
     x_vals = np.asarray(coords[x_coord])
     y_vals = np.asarray(coords[y_coord])
     # Public API convention in this module: unlabeled 2-D arrays are interpreted
-    # as (x, y), so x coords map to axis 0 and y coords map to axis 1.
-    # This matches the Astropy convention for pixel coordinates.
+    # as packed (x, y), so x coords map to axis 0 and y coords map to axis 1.
+    # This is an Astroviper convention for raw inputs, not a claim about NumPy
+    # row/column storage order in Astropy.
     W, H = data.shape
     if y_vals.shape[0] != H or x_vals.shape[0] != W:
         raise ValueError(
@@ -488,8 +490,8 @@ def make_disk(
     coordinate arrays via ``coords``. All coordinates are interpreted as world
     coordinates. For unlabeled 2-D NumPy/Dask inputs, this module's public API
     convention is that axis 0 is ``x`` (horizontal) and axis 1 is ``y`` (vertical).
-    This follows the Astropy convention for 2-D pixel coordinates. See
-    https://docs.astropy.org/en/stable/wcs/index.html.
+    That is an Astroviper packed-array convention for raw inputs rather than the
+    usual NumPy row/column indexing order.
 
     Behavior controlled by ``add``:
       - ``add=True`` (default): **Additive** mode. ``height`` is added to the
@@ -558,8 +560,8 @@ def make_disk(
     -----
     For DataArray inputs, labeled dims determine the x/y semantics. For unlabeled
     2-D NumPy/Dask arrays, axis 0 is interpreted as ``x`` (horizontal) and axis 1
-    as ``y`` (vertical). This follows the Astropy convention for 2-D pixel
-    coordinates. See https://docs.astropy.org/en/stable/wcs/index.html.
+    as ``y`` (vertical). That is this module's packed-array API convention rather
+    than the usual NumPy row/column indexing order.
     For DataArray inputs with extra dims (for example, ``("time", "x", "y")``),
     the 2-D mask broadcasts across the remaining dims. Dask inputs remain lazy.
 
@@ -623,8 +625,8 @@ def make_gauss2d(
     maximum (FWHM)** along the ellipse’s principal axes. The ellipse is rotated
     by ``theta`` radians measured from +x toward +y. For unlabeled 2-D NumPy/Dask
     inputs, this module's public API convention is that axis 0 is ``x`` (horizontal)
-    and axis 1 is ``y`` (vertical). This follows the Astropy convention for 2-D
-    pixel coordinates. See https://docs.astropy.org/en/stable/wcs/index.html.
+    and axis 1 is ``y`` (vertical). That is an Astroviper packed-array convention
+    for raw inputs rather than the usual NumPy row/column indexing order.
 
     Conversion from FWHM to standard deviation:
 
@@ -702,8 +704,8 @@ def make_gauss2d(
     -----
     Works lazily with Dask arrays. For DataArray inputs, labeled dims determine
     the x/y semantics. For unlabeled 2-D NumPy/Dask arrays, axis 0 is interpreted
-    as ``x`` and axis 1 as ``y``. This follows the Astropy convention for 2-D
-    pixel coordinates. See https://docs.astropy.org/en/stable/wcs/index.html.
+    as ``x`` and axis 1 as ``y``. That is this module's packed-array API
+    convention rather than the usual NumPy row/column indexing order.
     For inputs with extra dims, the 2-D Gaussian broadcasts across the remaining dims.
 
     Examples
@@ -767,8 +769,8 @@ def make_pt_sources(
     between two coordinates along an axis, the right-hand coordinate is chosen
     deterministically. For unlabeled 2-D NumPy/Dask inputs, this module's public
     API convention is that axis 0 is ``x`` (horizontal) and axis 1 is ``y`` (vertical).
-    This follows the Astropy convention for 2-D pixel coordinates. See
-    https://docs.astropy.org/en/stable/wcs/index.html.
+    That is an Astroviper packed-array convention for raw inputs rather than the
+    usual NumPy row/column indexing order.
 
     Duplicate hits are handled correctly and efficiently. If multiple sources map
     to the same grid point, their amplitudes are summed in one pass using a
@@ -853,8 +855,8 @@ def make_pt_sources(
     per-axis nearest search to be combined into a correct 2-D decision. For
     DataArray inputs, labeled dims determine the x/y semantics. For unlabeled
     2-D NumPy/Dask arrays, axis 0 is interpreted as ``x`` (horizontal) and axis 1
-    as ``y`` (vertical). This follows the Astropy convention for 2-D pixel
-    coordinates. See https://docs.astropy.org/en/stable/wcs/index.html.
+    as ``y`` (vertical). That is this module's packed-array API convention rather
+    than the usual NumPy row/column indexing order.
 
     Examples
     --------
