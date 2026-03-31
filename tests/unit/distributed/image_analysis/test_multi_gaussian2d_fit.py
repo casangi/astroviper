@@ -981,11 +981,6 @@ class TestPlotHelper:
             img, ds_missing, dims=("x", "y"), indexer=None, show_residual=False
         )
 
-    def test_plot_components_else_branch_for_2d_input(self) -> None:
-        # existing test body...
-        """Verify that the 2-D plotting branch works when no extra indexing is required."""
-        pass
-
     def test_plot_components_fwhm_converts_from_sigma_when_fwhm_missing(self) -> None:
         """Cover metric=="fwhm" path that converts sigma→FWHM when fwhm vars are absent."""
         matplotlib.use("Agg", force=True)
@@ -1100,30 +1095,6 @@ class TestPlotHelper:
 
 
 class TestNumPyFitting:  # (unittest.TestCase):
-    def test_min_threshold_masks_pixels_partial(self) -> None:
-
-        """Verify that a lower threshold masks only part of the plane instead of acting as an all-or-nothing cut."""
-        ny, nx = 64, 64
-        y, x = np.mgrid[0:ny, 0:nx]
-        z = 0.05 + np.exp(-((x - 32) ** 2 + (y - 32) ** 2) / (2 * 3.0**2))
-        da = xr.DataArray(z, dims=("y", "x"))
-
-        init = np.array([[0.8, 32.0, 32.0, 3.0, 3.0, 0.0]], float)
-        ds = fit_multi_gaussian2d(
-            da,
-            n_components=1,
-            initial_guesses=init,
-            min_threshold=0.20,  # exercises: mask &= z2d >= min_threshold
-            return_model=True,
-            return_residual=True,
-            coord_type="pixel",  # DataArray has no coords; use pixel indices
-        )
-
-        assert bool(ds.success) is True
-        assert "model" in ds and "residual" in ds
-        above = int((z >= 0.20).sum())
-        assert 0 < above < z.size
-
     def test_min_threshold_masks_pixels_partial(self) -> None:
 
         """Verify that a lower threshold masks only part of the plane instead of acting as an all-or-nothing cut."""
@@ -1651,17 +1622,6 @@ class TestNumPyFitting:  # (unittest.TestCase):
         assert np.isfinite(x0w) and np.isfinite(y0w)
         assert min(xw) - 1e-9 <= x0w <= max(xw) + 1e-9
         assert min(yw) - 1e-9 <= y0w <= max(yw) + 1e-9
-
-
-class TestAPIHelpers:
-    def test_init_components_array_wrong_shape_raises(self) -> None:
-        """Verify that component arrays in initial_guesses must have shape (n_components, 6)."""
-        da = xr.DataArray(np.zeros((16, 17), float), dims=("y", "x"))
-        bad_init = {
-            "offset": 0.0,
-            "components": np.ones((1, 6), float),
-        }  # shape != (n,6) for n=2
-
 
 class TestAPIHelpers:
     def test_init_components_array_wrong_shape_raises(self) -> None:
