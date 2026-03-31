@@ -136,7 +136,7 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0)
         overwrite=True,
     )
     T_psf_fit = time.time() - start
-    
+
     return_dict = {
         "T_weights": [T_weights],
         "T_make_uv_images_single_field": [T_make_uv_images_single_field],
@@ -151,7 +151,7 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0)
 
     # Add the return dict from make_uv_images_single_field
     return_df = pd.concat([return_df, make_uv_images_single_field_return_df], axis=1)
-    
+
     logger.debug("Timing info " + str(return_df))
 
     return img_xds, return_df
