@@ -1,6 +1,8 @@
 # benchmark for fit_multi_gaussian2d implementations on a fixed synthetic cube.
 # Run with --scheduler=distributed to see Dask overheads and scaling behavior,
 # and with --scheduler=synchronous for stable baselines.
+# example usage:
+# OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 NUMEXPR_NUM_THREADS=1 python tests/benchmark/distributed/image_analysis/benchmark_multi_gaussian2d_fit.py --scheduler distributed --repeats 5 --client-threads 1 --n-workers 16 --n-planes 500 --planes-per-chunk 4 --scene-seed 1234 --cube-seed 20260326
 # Dave Mehringer
 
 import os
@@ -28,8 +30,6 @@ from astroviper.distributed.model.component_models import make_gauss2d
 
 from astroviper.distributed.image_analysis.selection import select_mask
 from dask.distributed import Client
-
-from astroviper.utils.plotting import generate_plot
 
 # Reproducibility
 rng = np.random.default_rng(1234)
@@ -71,11 +71,9 @@ def make_scene_via_component_models(
     if nchan == 1:
         components = [components.copy()]
     z = np.zeros((nx, ny, nchan), dtype=float)
-    print("components", components, type(components))
     for i in range(nchan):
         plane_components = components[i]
         for c in plane_components:
-            print("plane component", c, type(c))
             amp = float(c.get("amp", c.get("amplitude")))
             x0c = float(c["x0"])
             y0c = float(c["y0"])
@@ -106,9 +104,7 @@ def make_scene_via_component_models(
         z += rng.normal(scale=noise_std, size=z.shape)
 
     dims = ("x", "y") if nchan == 1 else ("x", "y", "z")
-    print("shape z", z.shape, "dims", dims)
     xda = xr.DataArray(z, dims=dims)
-    print("xda shape", xda.shape)
     if coords:
         vals = (
             dict(x=x, y=y)
@@ -122,12 +118,6 @@ def make_scene_via_component_models(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Benchmark fit_multi_gaussian2d implementations on a fixed synthetic cube."
-    )
-    parser.add_argument(
-        "--impl",
-        choices=("current", "parammap"),
-        default="current",
-        help="Implementation to benchmark. Run the script separately for each implementation.",
     )
     parser.add_argument(
         "--repeats",
@@ -198,25 +188,25 @@ def build_fixed_cube(
     Build one fixed Dask-backed cube so repeated runs and separate processes use
     identical inputs.
     """
-    cube_rng = np.random.default_rng(cube_seed)
     time_chunk = int(chunk_time) if chunk_time is not None else int(planes_per_chunk)
-    arr = base_plane + 0.01 * cube_rng.normal(size=base_plane.shape)
-    print("type arr:", type(arr), flush=True)
-    print("type arr.data", type(arr.data), flush=True)
-    cube_np = np.stack(
-        [
-            (base_plane + 0.01 * cube_rng.normal(size=base_plane.shape)).values
-            for _ in range(n_planes)
-        ],
-        axis=0,
+    base_np = np.asarray(base_plane)
+    base_da = da.from_array(base_np, chunks=base_np.shape)
+    rs = da.random.RandomState(cube_seed)
+    noise = rs.normal(
+        0.0,
+        0.01,
+        size=(n_planes,) + base_np.shape,
+        chunks=(time_chunk,) + base_np.shape,
     )
+    cube = noise + base_da[None, :, :]
     return xr.DataArray(
-        da.from_array(
-            cube_np,
-            chunks=(time_chunk, base_plane.shape[0], base_plane.shape[1]),
-        ),
+        cube,
         dims=("time", "x", "y"),
-        coords={"x": base_plane.coords["x"], "y": base_plane.coords["y"]},
+        coords={
+            "time": np.arange(n_planes),
+            "x": base_plane.coords["x"],
+            "y": base_plane.coords["y"],
+        },
     )
 
 
@@ -228,6 +218,7 @@ def run_benchmark(
     repeats: int,
     scheduler: str,
 ) -> None:
+    n_times = cube_da.sizes["time"]
     parms = dict(
         data=cube_da, n_components=2, initial_guesses=init_arr, dims=("x", "y")
     )
@@ -242,6 +233,8 @@ def run_benchmark(
             metric = float(ds_dask["amplitude"].mean().compute())
         t2 = time.time()
         print("time to compute()", t2 - t1, flush=True)
+        print(f"planes per second: {n_times / (t2 - t1):.2f}", flush=True)
+        print(f"time per plane: {(t2 - t1) / n_times:.6f}s", flush=True)
         print("metric", metric, flush=True)
         total_times.append(t2 - t1)
         print(flush=True)
@@ -249,13 +242,10 @@ def run_benchmark(
     std_compute = float(np.std(total_times))
     print(f"compute mean {mean_compute:.6f}s std {std_compute:.6f}s", flush=True)
 
-
 def main():
     args = parse_args()
     client = None
-    print("args.scheduler", args.scheduler, flush=True)
     if args.scheduler == "distributed":
-        print("spin up distributed client", flush=True)
         client = Client(
             n_workers=args.n_workers, threads_per_worker=args.client_threads
         )
@@ -294,18 +284,9 @@ def main():
         planes_per_chunk=args.planes_per_chunk,
         cube_seed=args.cube_seed,
     )
-    print(args.impl, flush=True)
-    print("shape", data_2g_noise.shape, flush=True)
-    print("cube shape", cube_da.shape, flush=True)
-    print("cube chunks", cube_da.chunks, flush=True)
 
-    code = (
-        fit_multi_gaussian2d
-        if args.impl == "current"
-        else parammap_fit.fit_multi_gaussian2d
-    )
     run_benchmark(
-        code,
+        fit_multi_gaussian2d,
         cube_da,
         init_arr,
         repeats=args.repeats,
