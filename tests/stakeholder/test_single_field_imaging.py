@@ -75,11 +75,7 @@ def test_single_field_imaging():
     phase_direction = combined_field_and_source_xds.FIELD_PHASE_CENTER_DIRECTION.sel(
         field_name=center_field_name
     )
-
-    imaging_metadata_pd = image_cube_single_field(
-        ps_store=ps_store,
-        image_store=image_store,
-        image_params={
+    image_params = {
             "image_size": [250, 250],
             "cell_size": np.array([-0.1, 0.1]) * np.pi / (180 * 3600),
             "phase_direction": phase_direction.values,
@@ -88,7 +84,12 @@ def test_single_field_imaging():
             "time_coords": [0],
             "fft_padding": 1.2,
             "cpp_gridder": True,
-        },
+        }
+
+    imaging_metadata_pd = image_cube_single_field(
+        ps_store=ps_store,
+        image_store=image_store,
+        image_params=image_params,
         imaging_weights_params={
             "weighting": "briggs",
             "robust": 0.5,
@@ -237,6 +238,61 @@ def test_single_field_imaging():
     ), "You broke something! The beam fit parameters for the point spread function are not close enough to the reference values."
 
     # assert np.allclose(img_av_xds.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.sel(polarization="I").values, img_xds.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.sel(polarization="I").values, rtol=1e-2), "You broke something! The beam fit parameters for the point spread function are not close enough to the reference values."
+
+    from astroviper.core.imaging.make_pb_symmetric import (
+        airy_disk_rorder,
+        airy_disk_rorder_v2,
+    )
+    import time
+    pb_parms = {}
+    pb_parms["list_dish_diameters"] = np.array([10.7])
+    pb_parms["list_blockage_diameters"] = np.array([0.75])
+    pb_parms["ipower"] = 1
+    
+    image_params["image_center"] = np.array(image_params["image_size"]) // 2
+
+    start = time.time()
+    PB_v2 = xr.DataArray(
+        airy_disk_rorder_v2(
+            img_xds.frequency.values,
+            img_xds.polarization.values,
+            pb_parms,
+            image_params,
+        )[0, ...][
+            None, ...
+        ],  # Select first since we only have one dish diameter and add time axis.
+        dims=("time", "frequency", "polarization", "l", "m"),
+    )
+    print("PB_v2 time: ", time.time() - start)
+
+    start = time.time()
+    PB_v1 = xr.DataArray(
+        airy_disk_rorder(
+            img_xds.frequency.values,
+            img_xds.polarization.values,
+            pb_parms,
+            image_params,
+        )[0, ...][
+            None, ...
+        ],  # Select first since we only have one dish diameter and add time axis.
+        dims=("time", "frequency", "polarization", "l", "m"),
+    )
+    print("PB_v1 time: ", time.time() - start)
+    
+    plt.figure()
+    plt.imshow(PB_v2.isel(frequency=frequency, time=0, polarization=0))
+    plt.colorbar()
+    plt.figure()
+    plt.imshow(PB_v1.isel(frequency=frequency, time=0, polarization=0))
+    plt.colorbar()
+    plt.figure()
+    plt.imshow(
+        np.abs(PB_v2.isel(frequency=frequency, time=0, polarization=0).values -
+               PB_v1.isel(frequency=frequency, time=0, polarization=0).values)
+    )
+    plt.colorbar()
+    plt.show()
+
 
 
 if __name__ == "__main__":
