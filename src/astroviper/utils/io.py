@@ -1,7 +1,7 @@
 full_dims_lm = ["time", "frequency", "polarization", "l", "m"]
 full_dims_uv = ["time", "frequency", "polarization", "u", "v"]
 norm_dims = ["time", "frequency", "polarization"]
-beam_params_dims = ["time", "frequency", "polarization", "beam_params_label"] 
+beam_params_dims = ["time", "frequency", "polarization", "beam_params_label"]
 
 imaging_data_variables_and_dims_double_precision = {
     "aperture": {"dims": full_dims_uv, "dtype": "<c16", "name": "APERTURE"},
@@ -107,21 +107,26 @@ imaging_data_variables_and_dims_single_precision = {
     },
     "beam_fit_params_sky_dirty": {
         "dims": beam_params_dims,
-        "dtype": "<f4", "name": "BEAM_FIT_PARAMS_SKY_DIRTY",
+        "dtype": "<f4",
+        "name": "BEAM_FIT_PARAMS_SKY_DIRTY",
     },
-    "beam_fit_params_sky_deconvolved": { 
+    "beam_fit_params_sky_deconvolved": {
         "dims": beam_params_dims,
         "dtype": "<f4",
         "name": "BEAM_FIT_PARAMS_SKY_DECONVOLVED",
-    },     
+    },
 }
 
-def  write_result_chunk_to_disk_using_zarr(image_store,image_data_variables_keep,task_coords,img_xds):
+
+def write_result_chunk_to_disk_using_zarr(
+    image_store, image_data_variables_keep, task_coords, img_xds
+):
     import zarr
     import time
+
     for dv in image_data_variables_keep:
         dv = dv.upper()
-        #size_dict = img_xds.sizes
+        # size_dict = img_xds.sizes
         idx = []
         for dim in img_xds[dv].dims:
             if dim in task_coords:

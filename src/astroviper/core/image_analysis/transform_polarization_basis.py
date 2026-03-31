@@ -1,610 +1,370 @@
 """
-Convert correlation products to Stokes parameters.
+Transform image data between polarization bases.
 
-Supports 4-pol (XX,XY,YX,YY or RR,RL,LR,LL → I,Q,U,V) and
-2-pol (XX,YY → I,Q or RR,LL → I,V).
+Supports 4-pol (XX,XY,YX,YY or RR,RL,LR,LL ↔ I,Q,U,V) and
+2-pol (XX,YY ↔ I,Q  or  RR,LL ↔ I,V) conversions.
+
+The workhorse is :func:`_select_transform_matrix`, which is the single
+source of truth for every supported (input basis, output basis) pair.
+:func:`transform_polarization_basis` and
+:func:`transform_polarization_basis_image_data_variable` both delegate to it
+so that the output polarization labels are never computed in two places.
 """
 
 import copy
-from typing import Optional, Union, List
+from typing import Optional
 
 import numpy as np
 import toolviper.utils.logger as logger
 import xarray as xr
 
-# Valid Stokes parameters
-VALID_STOKES = {"I", "Q", "U", "V"}
+# ── 4-pol transformation matrices ────────────────────────────────────────────
 
-# Stokes available from 2-pol data
-STOKES_FROM_2POL_LINEAR = {"I", "Q"}  # XX, YY → I, Q
-STOKES_FROM_2POL_CIRCULAR = {"I", "V"}  # RR, LL → I, V
-
-# Map polarization coordinate values to corr_type
-CORR_TYPE_MAP = {
-    frozenset({"XX", "XY", "YX", "YY"}): "linear",
-    frozenset({"RR", "RL", "LR", "LL"}): "circular",
-    frozenset({"XX", "YY"}): "linear",
-    frozenset({"RR", "LL"}): "circular",
-}
-
-# Transformation matrices: correlation → Stokes
+# correlation → Stokes  (columns: XX, XY, YX, YY)
 LINEAR_CORR_TO_STOKES = np.array(
     [
-        [1, 0, 0, 1],  # I = XX + YY
-        [1, 0, 0, -1],  # Q = XX - YY
-        [0, 1, 1, 0],  # U = XY + YX
-        [0, -1j, 1j, 0],  # V = i(YX - XY)
+        [0.5, 0, 0, 0.5],  # I = (XX + YY) / 2
+        [0.5, 0, 0, -0.5],  # Q = (XX - YY) / 2
+        [0, 0.5, 0.5, 0],  # U = (XY + YX) / 2
+        [0, -0.5j, 0.5j, 0],  # V = i(YX - XY) / 2
     ],
     dtype=complex,
 )
 
+# correlation → Stokes  (columns: RR, RL, LR, LL)
 CIRCULAR_CORR_TO_STOKES = np.array(
     [
-        [1, 0, 0, 1],  # I = RR + LL
-        [0, 1, 1, 0],  # Q = RL + LR
-        [0, -1j, 1j, 0],  # U = i(LR - RL)
-        [1, 0, 0, -1],  # V = RR - LL
+        [0.5, 0, 0, 0.5],  # I = (RR + LL) / 2
+        [0, 0.5, 0.5, 0],  # Q = (RL + LR) / 2
+        [0, -0.5j, 0.5j, 0],  # U = i(LR - RL) / 2
+        [0.5, 0, 0, -0.5],  # V = (RR - LL) / 2
     ],
     dtype=complex,
 )
 
-# Transformation matrices: Stokes → correlation
+# Stokes → correlation  (columns: I, Q, U, V)
 LINEAR_STOKES_TO_CORR = np.array(
     [
-        [0.5, 0.5, 0, 0],  # XX = (I + Q)/2
-        [0, 0, 0.5, 0.5j],  # XY = (U + iV)/2
-        [0, 0, 0.5, -0.5j],  # YX = (U - iV)/2
-        [0.5, -0.5, 0, 0],  # YY = (I - Q)/2
+        [0.5, 0.5, 0, 0],  # XX = (I + Q) / 2
+        [0, 0, 0.5, 0.5j],  # XY = (U + iV) / 2
+        [0, 0, 0.5, -0.5j],  # YX = (U - iV) / 2
+        [0.5, -0.5, 0, 0],  # YY = (I - Q) / 2
     ],
     dtype=complex,
 )
 
+# Stokes → correlation  (columns: I, Q, U, V)
 CIRCULAR_STOKES_TO_CORR = np.array(
     [
-        [0.5, 0, 0, 0.5],  # RR = (I + V)/2
-        [0, 0.5, 0.5j, 0],  # RL = (Q + iU)/2
-        [0, 0.5, -0.5j, 0],  # LR = (Q - iU)/2
-        [0.5, 0, 0, -0.5],  # LL = (I - V)/2
+        [0.5, 0, 0, 0.5],  # RR = (I + V) / 2
+        [0, 0.5, 0.5j, 0],  # RL = (Q + iU) / 2
+        [0, 0.5, -0.5j, 0],  # LR = (Q - iU) / 2
+        [0.5, 0, 0, -0.5],  # LL = (I - V) / 2
     ],
     dtype=complex,
 )
 
-new_pol_coords = { "linear_4": ["XX", "XY", "YX", "YY"],
-               "circular_4": ["RR", "RL", "LR", "LL"],
-               "linear_2": ["XX", "YY"],
-               "circular_2": ["RR", "LL"],
-               "stokes_4": ["I", "Q", "U", "V"],
-               "stokes_2_linear": ["I", "Q"],
-               "stokes_2_circular": ["I", "V"]}
+# ── 2-pol transformation matrices ────────────────────────────────────────────
 
-def transform_polarization_basis(
-    img_xds: xr.Dataset, 
-    new_polarization_basis : str, 
-    transformation_matrix: Optional[np.ndarray] = None,
-    overwrite=True)-> xr.Dataset:
-    """Transform the polarization basis of the image dataset to the specified basis.
-    This will effect all datagroups in the image dataset, and all data variables within those datagroups.
-    
+# correlation → Stokes  (columns: XX, YY)
+LINEAR_2POL_CORR_TO_STOKES = np.array(
+    [
+        [0.5, 0.5],  # I = (XX + YY) / 2
+        [0.5, -0.5],  # Q = (XX - YY) / 2
+    ],
+    dtype=complex,
+)
+
+# correlation → Stokes  (columns: RR, LL)
+CIRCULAR_2POL_CORR_TO_STOKES = np.array(
+    [
+        [0.5, 0.5],  # I = (RR + LL) / 2
+        [0.5, -0.5],  # V = (RR - LL) / 2
+    ],
+    dtype=complex,
+)
+
+# Stokes → correlation  (columns: I, Q)
+LINEAR_2POL_STOKES_TO_CORR = np.array(
+    [
+        [0.5, 0.5],  # XX = (I + Q) / 2
+        [0.5, -0.5],  # YY = (I - Q) / 2
+    ],
+    dtype=complex,
+)
+
+# Stokes → correlation  (columns: I, V)
+CIRCULAR_2POL_STOKES_TO_CORR = np.array(
+    [
+        [0.5, 0.5],  # RR = (I + V) / 2
+        [0.5, -0.5],  # LL = (I - V) / 2
+    ],
+    dtype=complex,
+)
+
+# ── Fallback output labels for custom transformation matrices ─────────────────
+# Used when the caller supplies an explicit matrix and a standard basis name.
+# Keyed by (new_polarization_basis, n_out).  The 2-pol stokes case is
+# ambiguous (IQ vs IV depends on the input) so it is intentionally absent.
+_CUSTOM_MATRIX_OUTPUT_LABELS: dict[tuple[str, int], list[str]] = {
+    ("stokes", 4): ["I", "Q", "U", "V"],
+    ("linear", 4): ["XX", "XY", "YX", "YY"],
+    ("linear", 2): ["XX", "YY"],
+    ("circular", 4): ["RR", "RL", "LR", "LL"],
+    ("circular", 2): ["RR", "LL"],
+}
+
+
+def _select_transform_matrix(
+    pol_set: frozenset,
+    new_polarization_basis: str,
+) -> tuple[np.ndarray, list[str], list[str]]:
+    """Return the transformation matrix and ordered polarization labels.
+
+    This is the single source of truth for every supported conversion.
+    Both :func:`transform_polarization_basis` and
+    :func:`transform_polarization_basis_image_data_variable` call this
+    function so that input/output labels and the matrix are always derived
+    from the same place.
+
     Parameters
     ----------
-    img_xds : 
-        Array with correlation products as the final dimension, shape (..., 4).
+    pol_set : frozenset
+        Frozenset of the current polarization coordinate values.
     new_polarization_basis : str
-        'linear', 'circular', 'stokes', custom
-    transformation_matrix : np.ndarray, optional
-        Custom transformation matrix. Required if corr_type='custom'.
+        Target basis: ``'stokes'``, ``'linear'``, or ``'circular'``.
 
     Returns
     -------
-    image_dataset : xr.Dataset
+    matrix : np.ndarray, shape (n_out, n_in)
+        Transformation matrix where
+        ``result[new_pol] = sum_i matrix[new_pol, i] * data[i]``.
+    in_pol_labels : list[str]
+        Input polarization labels in column order of *matrix*.
+    out_pol_labels : list[str]
+        Output polarization labels in row order of *matrix*.
+
+    Raises
+    ------
+    ValueError
+        If no transformation is defined for the given combination.
     """
-    
+    # ── 4-pol correlations → Stokes ──────────────────────────────────────────
+    if pol_set == frozenset({"XX", "XY", "YX", "YY"}):
+        if new_polarization_basis == "stokes":
+            return LINEAR_CORR_TO_STOKES, ["XX", "XY", "YX", "YY"], ["I", "Q", "U", "V"]
+
+    elif pol_set == frozenset({"RR", "RL", "LR", "LL"}):
+        if new_polarization_basis == "stokes":
+            return (
+                CIRCULAR_CORR_TO_STOKES,
+                ["RR", "RL", "LR", "LL"],
+                ["I", "Q", "U", "V"],
+            )
+
+    # ── 4-pol Stokes → correlations ──────────────────────────────────────────
+    elif pol_set == frozenset({"I", "Q", "U", "V"}):
+        if new_polarization_basis == "linear":
+            return LINEAR_STOKES_TO_CORR, ["I", "Q", "U", "V"], ["XX", "XY", "YX", "YY"]
+        elif new_polarization_basis == "circular":
+            return (
+                CIRCULAR_STOKES_TO_CORR,
+                ["I", "Q", "U", "V"],
+                ["RR", "RL", "LR", "LL"],
+            )
+
+    # ── 2-pol correlations → Stokes ──────────────────────────────────────────
+    elif pol_set == frozenset({"XX", "YY"}):
+        if new_polarization_basis == "stokes":
+            return LINEAR_2POL_CORR_TO_STOKES, ["XX", "YY"], ["I", "Q"]
+
+    elif pol_set == frozenset({"RR", "LL"}):
+        if new_polarization_basis == "stokes":
+            return CIRCULAR_2POL_CORR_TO_STOKES, ["RR", "LL"], ["I", "V"]
+
+    # ── 2-pol Stokes → correlations ──────────────────────────────────────────
+    elif pol_set == frozenset({"I", "Q"}):
+        if new_polarization_basis == "linear":
+            return LINEAR_2POL_STOKES_TO_CORR, ["I", "Q"], ["XX", "YY"]
+
+    elif pol_set == frozenset({"I", "V"}):
+        if new_polarization_basis == "circular":
+            return CIRCULAR_2POL_STOKES_TO_CORR, ["I", "V"], ["RR", "LL"]
+
+    raise ValueError(
+        f"No transformation defined from polarization set {pol_set!r} "
+        f"to basis '{new_polarization_basis}'."
+    )
+
+
+def transform_polarization_basis(
+    img_xds: xr.Dataset,
+    new_polarization_basis: str,
+    transformation_matrix: Optional[np.ndarray] = None,
+    overwrite: bool = True,
+) -> xr.Dataset:
+    """Transform the polarization basis of every data variable in an image dataset.
+
+    Output polarization labels are determined by :func:`_select_transform_matrix`
+    for all standard conversions.  When a custom *transformation_matrix* is
+    supplied the labels are looked up from ``_CUSTOM_MATRIX_OUTPUT_LABELS``
+    using *new_polarization_basis* and the matrix output size; if no match is
+    found, integer indices ``[0, 1, …, n_out-1]`` are used.
+
+    Parameters
+    ----------
+    img_xds : xr.Dataset
+        Image dataset with a ``polarization`` dimension of size 2 or 4.
+        All data variables must share the same polarization axis.
+    new_polarization_basis : str
+        Target basis.  One of ``'stokes'``, ``'linear'``, or ``'circular'``
+        for built-in conversions; any string is accepted when
+        *transformation_matrix* is provided.
+    transformation_matrix : np.ndarray of shape (n_out, n_in), optional
+        Custom transformation matrix.  When provided, *new_polarization_basis*
+        is only used for the output-label fallback lookup and is otherwise
+        ignored.
+    overwrite : bool, default True
+        If ``True`` the input dataset is modified in place.
+        If ``False`` a new dataset is returned with copied coordinates and
+        attributes but transformed data variables.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with transformed data variables and an updated
+        ``polarization`` coordinate.
+    """
     if overwrite:
         img_transformed_xds = img_xds
     else:
         img_transformed_xds = xr.Dataset()
-        # Only copy attributes and coordinates, not data variables, since they will be transformed and may have different shapes.
+        # Copy attributes and all coordinates except the polarization values,
+        # which will be overwritten below.
         img_transformed_xds.attrs = copy.deepcopy(img_xds.attrs)
         for coord_name in img_xds.coords:
-            img_transformed_xds.coords[coord_name] = copy.deepcopy(img_xds.coords[coord_name])
-            
-    # Update the polarization coordinates
-    len_pol_dim = img_xds.sizes["polarization"]
-    new_polarization_coord_description = new_polarization_basis + f"_{len_pol_dim}"
-    if (len_pol_dim == 2) and (new_polarization_basis == "stokes"):
-        if ("XX" in img_xds.polarization) or ("YY" in img_xds.polarization):
-            new_polarization_coord_description =  new_polarization_coord_description + "_linear"
-        else:
-            new_polarization_coord_description = new_polarization_coord_description + "_circular"
-    
-    new_polarization_coord = new_pol_coords.get(new_polarization_coord_description)
-    
-    #Assign coords needs to overwrite the existing polarization coordinate values, but keep the same coordinate name and attributes. 
-    img_transformed_xds = img_transformed_xds.assign_coords(
-        polarization=new_polarization_coord,
-    )        
-    
-    
+            img_transformed_xds.coords[coord_name] = copy.deepcopy(
+                img_xds.coords[coord_name]
+            )
+
+    # Determine the output polarization labels via the single source of truth.
+    if transformation_matrix is not None:
+        n_out = np.asarray(transformation_matrix).shape[0]
+        key = (new_polarization_basis, n_out)
+        new_pol_labels: list = (
+            _CUSTOM_MATRIX_OUTPUT_LABELS[key]
+            if key in _CUSTOM_MATRIX_OUTPUT_LABELS
+            else list(range(n_out))
+        )
+    else:
+        _, _, new_pol_labels = _select_transform_matrix(
+            frozenset(img_xds.polarization.values), new_polarization_basis
+        )
+
+    img_transformed_xds = img_transformed_xds.assign_coords(polarization=new_pol_labels)
+
     for var_name in img_xds.data_vars:
-        if new_polarization_basis == "stokes":
-            img_transformed_xds[var_name] = image_corr_to_stokes(
+        img_transformed_xds[var_name] = (
+            transform_polarization_basis_image_data_variable(
                 img_xds[var_name],
-                corr_type=None,  # Auto-detect based on coordinates
+                new_polarization_basis=new_polarization_basis,
                 transformation_matrix=transformation_matrix,
-                stokes_out=new_polarization_coord
             )
-        else:
-            img_transformed_xds[var_name] = image_stokes_to_corr(
-                img_xds[var_name],
-                corr_type=None,  # Auto-detect based on coordinates
-                transformation_matrix=transformation_matrix,
-                corr_out=len(new_polarization_coord)
-            )
-    
+        )
+
     return img_transformed_xds
-    
 
 
-def corr_to_stokes(
-    data: np.ndarray,
-    corr_type: str = "linear",
+def transform_polarization_basis_image_data_variable(
+    data_var: xr.DataArray,
+    new_polarization_basis: Optional[str] = None,
     transformation_matrix: Optional[np.ndarray] = None,
-) -> np.ndarray:
-    """
-    Convert correlation products to Stokes parameters.
+) -> xr.DataArray:
+    """Apply a polarization basis transformation to a single image data variable.
+
+    The contraction is performed with :func:`xarray.dot` using ``optimize=True``,
+    which delegates to *opt_einsum* when it is installed.  xarray's
+    label-based alignment ensures that the polarization axis is matched by
+    coordinate value, so the input data does not need to be in any particular
+    polarization order.
 
     Parameters
     ----------
-    data : np.ndarray
-        Array with correlation products as the final dimension, shape (..., 4).
-    corr_type : str
-        'linear', 'circular', or 'custom'.
-    transformation_matrix : np.ndarray, optional
-        Custom transformation matrix. Required if corr_type='custom'.
+    data_var : xr.DataArray
+        Image with dimensions ``(time, frequency, polarization, l, m)``.
+        The ``polarization`` coordinate must contain recognized labels
+        (e.g. ``["XX", "XY", "YX", "YY"]`` or ``["I", "Q", "U", "V"]``)
+        unless *transformation_matrix* is supplied, in which case any labels
+        are accepted.
+    new_polarization_basis : str, optional
+        Target basis: ``'stokes'``, ``'linear'``, or ``'circular'``.
+        Drives the automatic matrix selection via :func:`_select_transform_matrix`.
+        Ignored when *transformation_matrix* is provided, except as a hint
+        for the output polarization labels (see *transformation_matrix*).
+    transformation_matrix : np.ndarray of shape (n_out, n_in), optional
+        Explicit transformation matrix.  When provided *new_polarization_basis*
+        is only used to look up standard output labels from
+        ``_CUSTOM_MATRIX_OUTPUT_LABELS``; if no match is found, integer
+        indices ``[0, 1, …, n_out-1]`` are used as the output
+        ``polarization`` coordinate.
 
     Returns
     -------
-    np.ndarray
-        Array with Stokes parameters as the final dimension.
+    xr.DataArray
+        Transformed array with the same dimension order as *data_var* and an
+        updated ``polarization`` coordinate.  All other coordinates and
+        attributes are preserved.
     """
-    if transformation_matrix is None:
-        if corr_type == "linear":
-            transformation_matrix = LINEAR_CORR_TO_STOKES
-        elif corr_type == "circular":
-            transformation_matrix = CIRCULAR_CORR_TO_STOKES
-        else:
+    pol_values = list(data_var.polarization.values)
+    original_dims = list(data_var.dims)
+
+    if transformation_matrix is not None:
+        matrix = np.asarray(transformation_matrix, dtype=complex)
+        n_out = matrix.shape[0]
+        in_pol_labels = pol_values
+        key = (
+            (new_polarization_basis, n_out)
+            if new_polarization_basis is not None
+            else None
+        )
+        out_pol_labels = (
+            _CUSTOM_MATRIX_OUTPUT_LABELS[key]
+            if key in _CUSTOM_MATRIX_OUTPUT_LABELS
+            else list(range(n_out))
+        )
+        logger.debug(
+            f"transform_polarization_basis_image_data_variable: "
+            f"custom matrix {matrix.shape}, output labels {out_pol_labels}"
+        )
+    else:
+        if new_polarization_basis is None:
             raise ValueError(
-                "For 'custom' corr_type, a transformation_matrix must be provided."
+                "new_polarization_basis must be provided when transformation_matrix is None."
             )
-
-    return data @ transformation_matrix.T
-
-
-def stokes_to_corr(
-    data: np.ndarray,
-    corr_type: str = "linear",
-    transformation_matrix: Optional[np.ndarray] = None,
-) -> np.ndarray:
-    """
-    Convert Stokes parameters to correlation products.
-
-    Parameters
-    ----------
-    data : np.ndarray
-        Array with Stokes parameters as the final dimension, shape (..., 4).
-    corr_type : str
-        'linear', 'circular', or 'custom'.
-    transformation_matrix : np.ndarray, optional
-        Custom transformation matrix. Required if corr_type='custom'.
-
-    Returns
-    -------
-    np.ndarray
-        Array with correlation products as the final dimension.
-    """
-    if transformation_matrix is None:
-        if corr_type == "linear":
-            transformation_matrix = LINEAR_STOKES_TO_CORR
-        elif corr_type == "circular":
-            transformation_matrix = CIRCULAR_STOKES_TO_CORR
-        else:
-            raise ValueError(
-                "For 'custom' corr_type, a transformation_matrix must be provided."
-            )
-
-    return data @ transformation_matrix.T
-
-
-def image_corr_to_stokes(
-    image_data: Union[np.ndarray, xr.DataArray],
-    corr_type: Optional[str] = None,
-    pol_axis: int = 2,
-    stokes_out: Optional[List[str]] = None,
-    transformation_matrix: Optional[np.ndarray] = None,
-) -> Union[np.ndarray, xr.DataArray]:
-    """
-    Convert image data from correlation products to Stokes parameters.
-
-    Handles image cubes where polarization is not the last dimension. Moves pol axis
-    to end, applies conversion, then moves it back.
-
-    Parameters
-    ----------
-    image_data : np.ndarray or xr.DataArray
-        Image with polarization dimension. Shape typically (time, freq, pol, l, m).
-        Correlations: [XX, XY, YX, YY] or [RR, RL, LR, LL] for 4-pol,
-        [XX, YY] or [RR, LL] for 2-pol.
-    corr_type : str, optional
-        'linear', 'circular', or 'custom'. Auto-detected for xarray input.
-    pol_axis : int
-        Polarization axis index. Default 2.
-    stokes_out : list of str, optional
-        Output Stokes, e.g., ['I'], ['I', 'Q']. Default: all available.
-    transformation_matrix : np.ndarray, optional
-        Custom matrix. Required if corr_type='custom'.
-
-    Returns
-    -------
-    np.ndarray or xr.DataArray
-        Converted data with Stokes in polarization dimension.
-
-    Examples
-    --------
-    >>> stokes = image_corr_to_stokes(corr_image, corr_type='linear')
-    >>> stokes_i = image_corr_to_stokes(corr_image, stokes_out=['I'])
-    >>> stokes = image_corr_to_stokes(xr_data)  # auto-detects corr_type
-    """
-    # Check if input is xarray
-    is_xarray = isinstance(image_data, xr.DataArray)
-
-    # Extract numpy array if xarray
-    if is_xarray:
-        data = image_data.values
-        pol_dim_name = image_data.dims[pol_axis]
-    else:
-        data = image_data
-
-    # Auto-detect corr_type if input is xarray and corr_type not specified
-    if corr_type is None:
-        if is_xarray:
-            corr_type = _detect_corr_type(image_data, pol_axis)
-        else:
-            raise ValueError(
-                "corr_type is required for numpy input. "
-                "Use xarray DataArray with labeled polarization coordinates for auto-detection."
-            )
-
-    # Normalize pol_axis to positive index
-    ndim = data.ndim
-    if pol_axis < 0:
-        pol_axis_pos = ndim + pol_axis
-    else:
-        pol_axis_pos = pol_axis
-
-    # Get number of input correlations
-    n_corr = data.shape[pol_axis_pos]
-    
-    #logger.debug(f"Transforming polarization basis: corr_type={corr_type}, n_corr={n_corr}, pol_axis={pol_axis_pos}")
-    print(f"Transforming polarization basis: corr_type={corr_type}, n_corr={n_corr}, pol_axis={pol_axis_pos}")
-
-    # Validate minimum correlations
-    if n_corr < 2:
-        raise ValueError(
-            f"Minimum 2 correlations required for Stokes conversion, got {n_corr}"
+        matrix, in_pol_labels, out_pol_labels = _select_transform_matrix(
+            frozenset(pol_values), new_polarization_basis
+        )
+        logger.debug(
+            f"transform_polarization_basis_image_data_variable: "
+            f"{pol_values} -> {out_pol_labels}"
         )
 
-    # Determine default stokes_out based on input
-    if stokes_out is None:
-        if n_corr == 2:
-            if corr_type == "linear":
-                stokes_out = ["I", "Q"]
-            elif corr_type == "circular":
-                stokes_out = ["I", "V"]
-            else:
-                raise ValueError(
-                    f"2-pol conversion requires corr_type 'linear' or 'circular', got '{corr_type}'"
-                )
-        else:
-            stokes_out = ["I", "Q", "U", "V"]
+    # Rename the input polarization dim to avoid a name clash with the output
+    # "polarization" dim that xr.dot will produce from the transform DataArray.
+    data_renamed = data_var.rename({"polarization": "pol_in"})
 
-    # Validate stokes_out
-    stokes_set = set(stokes_out)
-    invalid_stokes = stokes_set - VALID_STOKES
-    if invalid_stokes:
-        raise ValueError(
-            f"Invalid Stokes parameters: {invalid_stokes}. Valid: {VALID_STOKES}"
-        )
+    transform_da = xr.DataArray(
+        matrix,
+        dims=["polarization", "pol_in"],
+        coords={"polarization": out_pol_labels, "pol_in": in_pol_labels},
+    )
 
-    # Validate stokes_out against available correlations for 2-pol
-    if n_corr == 2:
-        if corr_type == "linear":
-            unavailable = stokes_set - STOKES_FROM_2POL_LINEAR
-            if unavailable:
-                raise ValueError(
-                    f"2-pol linear data (XX, YY) cannot produce Stokes {unavailable}. "
-                    f"Only {STOKES_FROM_2POL_LINEAR} available."
-                )
-        elif corr_type == "circular":
-            unavailable = stokes_set - STOKES_FROM_2POL_CIRCULAR
-            if unavailable:
-                raise ValueError(
-                    f"2-pol circular data (RR, LL) cannot produce Stokes {unavailable}. "
-                    f"Only {STOKES_FROM_2POL_CIRCULAR} available."
-                )
+    # xr.dot contracts over "pol_in", aligning on coordinate labels.
+    # optimize=True enables opt_einsum path optimization when available.
+    result = xr.dot(transform_da, data_renamed, dim="pol_in", optimize=True)
 
-    # Move polarization axis to end (creates view, no copy)
-    data_moved = np.moveaxis(data, pol_axis_pos, -1)
+    # Restore the original dimension order: (time, frequency, polarization, l, m)
+    result = result.transpose(*original_dims)
 
-    # Handle 2-pol case: expand to 4-corr, use matrix, then slice
-    if n_corr == 2:
-        data_4corr = _expand_to_4corr(data_moved, corr_type)
-        full_stokes = corr_to_stokes(
-            data_4corr, corr_type=corr_type, transformation_matrix=transformation_matrix
-        )
-    else:
-        # 4-pol case: use existing matrix multiplication directly
-        full_stokes = corr_to_stokes(
-            data_moved, corr_type=corr_type, transformation_matrix=transformation_matrix
-        )
-
-    # If requesting all 4 Stokes, return in standard order regardless of input order
-    if set(stokes_out) == {"I", "Q", "U", "V"}:
-        converted = full_stokes
-        stokes_out = ["I", "Q", "U", "V"]  # Normalize to standard order
-    else:
-        # Slice to requested Stokes
-        stokes_indices = {"I": 0, "Q": 1, "U": 2, "V": 3}
-        indices = [stokes_indices[s] for s in stokes_out]
-        converted = np.take(full_stokes, indices, axis=-1)
-
-    # Move polarization axis back to original position
-    result = np.moveaxis(converted, -1, pol_axis_pos)
-
-    # Real-valued input (e.g. gridded images) produces real Stokes parameters;
-    # corr_to_stokes implicity converts to complex because of the 1j in the
-    # transformation matrix, so catch it here and cast back.
-    if np.isrealobj(data):
-        result = result.real
-
-    # If input was xarray, create new DataArray with correct shape
-    if is_xarray:
-        # Build new coordinates
-        new_coords = dict(image_data.coords)
-        new_coords[pol_dim_name] = stokes_out
-
-        # Create new DataArray with potentially different shape
-        result_da = xr.DataArray(
-            result,
-            dims=image_data.dims,
-            coords=new_coords,
-            attrs=image_data.attrs,
-        )
-        return result_da
-    else:
-        return result
-
-
-def image_stokes_to_corr(
-    image_data: Union[np.ndarray, xr.DataArray],
-    corr_type: str = "linear",
-    pol_axis: int = 2,
-    stokes_in: Optional[List[str]] = None,
-    corr_out: Optional[int] = None,
-    transformation_matrix: Optional[np.ndarray] = None,
-) -> Union[np.ndarray, xr.DataArray]:
-    """
-    Convert image data from Stokes parameters to correlation products.
-
-    Handles image cubes where polarization is not the last dimension. Moves pol axis
-    to end, applies conversion, then moves it back.
-
-    Parameters
-    ----------
-    image_data : np.ndarray or xr.DataArray
-        Image with polarization dimension containing Stokes parameters.
-    corr_type : str
-        'linear', 'circular', or 'custom'. Default 'linear'.
-    pol_axis : int
-        Polarization axis index. Default 2.
-    stokes_in : list of str, optional
-        Input Stokes labels. Inferred from size if None:
-        4 → [I,Q,U,V], 2 → [I,Q] or [I,V], 1 → [I].
-    corr_out : int, optional
-        Output correlations (2 or 4). Default: 4 for 4-Stokes, 2 otherwise.
-    transformation_matrix : np.ndarray, optional
-        Custom matrix. Required if corr_type='custom'.
-
-    Returns
-    -------
-    np.ndarray or xr.DataArray
-        Converted data with correlations in polarization dimension.
-
-    Examples
-    --------
-    >>> corr = image_stokes_to_corr(stokes_image, corr_type='linear')
-    >>> corr = image_stokes_to_corr(stokes_iq, stokes_in=['I', 'Q'])
-    >>> corr = image_stokes_to_corr(stokes_i, stokes_in=['I'])  # XX=YY=I/2
-    """
-    # Check if input is xarray
-    is_xarray = isinstance(image_data, xr.DataArray)
-
-    # Extract numpy array if xarray
-    if is_xarray:
-        data = image_data.values
-        pol_dim_name = image_data.dims[pol_axis]
-    else:
-        data = image_data
-
-    # Normalize pol_axis to positive index
-    ndim = data.ndim
-    if pol_axis < 0:
-        pol_axis_pos = ndim + pol_axis
-    else:
-        pol_axis_pos = pol_axis
-
-    # Get number of input Stokes
-    n_stokes = data.shape[pol_axis_pos]
-
-    # Determine stokes_in if not provided
-    if stokes_in is None:
-        if n_stokes == 4:
-            stokes_in = ["I", "Q", "U", "V"]
-        elif n_stokes == 2:
-            if corr_type == "linear":
-                stokes_in = ["I", "Q"]
-            elif corr_type == "circular":
-                stokes_in = ["I", "V"]
-            else:
-                raise ValueError(
-                    f"2-Stokes conversion requires corr_type 'linear' or 'circular', got '{corr_type}'"
-                )
-        elif n_stokes == 1:
-            stokes_in = ["I"]
-        else:
-            raise ValueError(f"Unexpected number of Stokes parameters: {n_stokes}")
-    else:
-        # Validate provided stokes_in
-        if len(stokes_in) != n_stokes:
-            raise ValueError(
-                f"stokes_in length ({len(stokes_in)}) doesn't match input polarization "
-                f"dimension size ({n_stokes})"
-            )
-
-    # Validate stokes_in values
-    stokes_set = set(stokes_in)
-    invalid_stokes = stokes_set - VALID_STOKES
-    if invalid_stokes:
-        raise ValueError(
-            f"Invalid Stokes parameters: {invalid_stokes}. Valid: {VALID_STOKES}"
-        )
-
-    # Determine corr_out
-    if corr_out is None:
-        if n_stokes == 4:
-            corr_out = 4
-        else:
-            corr_out = 2
-
-    # Validate corr_out
-    if corr_out not in [2, 4]:
-        raise ValueError(f"corr_out must be 2 or 4, got {corr_out}")
-
-    # Validate that we can produce the requested correlations
-    if corr_out == 4 and n_stokes < 4:
-        raise ValueError(
-            f"Cannot produce 4-pol output from {n_stokes}-Stokes input. "
-            "Need U, V for cross-polarizations (XY, YX or RL, LR)."
-        )
-
-    # Move polarization axis to end (creates view, no copy)
-    data_moved = np.moveaxis(data, pol_axis_pos, -1)
-
-    # Handle 2-pol output with direct formulas
-    if corr_out == 2:
-        if corr_type not in ("linear", "circular"):
-            raise ValueError(
-                f"2-pol output requires corr_type 'linear' or 'circular', got '{corr_type}'"
-            )
-
-        stokes_idx = {s: i for i, s in enumerate(stokes_in)}
-        if "I" not in stokes_idx:
-            raise ValueError(
-                f"Cannot convert to {corr_type} correlations without Stokes I"
-            )
-
-        # Linear: XX=(I+Q)/2, YY=(I-Q)/2; Circular: RR=(I+V)/2, LL=(I-V)/2
-        paired_stokes = "Q" if corr_type == "linear" else "V"
-        result_shape = list(data_moved.shape[:-1]) + [2]
-        converted = np.zeros(result_shape, dtype=data_moved.dtype)
-
-        I = data_moved[..., stokes_idx["I"]]
-        if paired_stokes in stokes_idx:
-            P = data_moved[..., stokes_idx[paired_stokes]]
-            converted[..., 0] = (I + P) / 2
-            converted[..., 1] = (I - P) / 2
-        else:
-            # Only Stokes I: unpolarized
-            converted[..., 0] = I / 2
-            converted[..., 1] = I / 2
-
-    else:
-        # Full 4-Stokes to 4-pol: use existing matrix multiplication
-        converted = stokes_to_corr(
-            data_moved, corr_type=corr_type, transformation_matrix=transformation_matrix
-        )
-
-    # Move polarization axis back to original position
-    result = np.moveaxis(converted, -1, pol_axis_pos)
-
-    # Determine output correlation labels
-    if corr_type == "linear":
-        if corr_out == 4:
-            corr_labels = ["XX", "XY", "YX", "YY"]
-        else:
-            corr_labels = ["XX", "YY"]
-    elif corr_type == "circular":
-        if corr_out == 4:
-            corr_labels = ["RR", "RL", "LR", "LL"]
-        else:
-            corr_labels = ["RR", "LL"]
-    else:
-        # Custom: keep generic labels
-        corr_labels = [f"CORR{i}" for i in range(corr_out)]
-
-    # If input was xarray, create new DataArray with correct shape
-    if is_xarray:
-        new_coords = dict(image_data.coords)
-        new_coords[pol_dim_name] = corr_labels
-
-        result_da = xr.DataArray(
-            result,
-            dims=image_data.dims,
-            coords=new_coords,
-            attrs=image_data.attrs,
-        )
-        return result_da
-    else:
-        return result
-
-
-def _expand_to_4stokes(data: np.ndarray, stokes_in: List[str]) -> np.ndarray:
-    """Expand partial Stokes to full [I,Q,U,V] array. Missing values filled with zeros."""
-    result_shape = list(data.shape[:-1]) + [4]
-    result = np.zeros(result_shape, dtype=data.dtype)
-
-    stokes_order = ["I", "Q", "U", "V"]
-    input_idx = {s: i for i, s in enumerate(stokes_in)}
-
-    for out_idx, stokes in enumerate(stokes_order):
-        if stokes in input_idx:
-            result[..., out_idx] = data[..., input_idx[stokes]]
-
+    result.attrs = data_var.attrs.copy()
     return result
-
-
-def _expand_to_4corr(data: np.ndarray, corr_type: str) -> np.ndarray:
-    """Expand 2-pol to 4-pol: [XX,YY]→[XX,0,0,YY] or [RR,LL]→[RR,0,0,LL]."""
-    result_shape = list(data.shape[:-1]) + [4]
-    result = np.zeros(result_shape, dtype=data.dtype)
-
-    # Indices: XX/RR=0, XY/RL=1, YX/LR=2, YY/LL=3
-    result[..., 0] = data[..., 0]  # XX or RR
-    result[..., 3] = data[..., 1]  # YY or LL
-    # Cross-pols (indices 1, 2) remain zero
-
-    return result
-
-
-def _detect_corr_type(image_data: xr.DataArray, pol_axis: int) -> str:
-    """Detect 'linear' or 'circular' from xarray polarization coordinate labels."""
-
-    pol_dim_name = image_data.dims[pol_axis]
-    pol_values = frozenset(str(v) for v in image_data.coords[pol_dim_name].values)
-
-    corr_type = CORR_TYPE_MAP.get(pol_values)
-    if corr_type is None:
-        raise ValueError(
-            f"Cannot detect corr_type from polarization values: {set(pol_values)}. "
-            f"Expected one of: {[set(k) for k in CORR_TYPE_MAP.keys()]}"
-        )
-    return corr_type

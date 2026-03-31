@@ -1,4 +1,3 @@
-
 import xarray as xr
 
 # Keys inside a data group that are metadata rather than data-variable mappings.
@@ -201,6 +200,7 @@ def create_data_groups_in_and_out(
 
     return data_group_in, data_group_out
 
+
 from datetime import datetime, timezone
 
 
@@ -254,8 +254,8 @@ def modify_data_groups_ps_xdt(
             data_group_out=data_group_out,
             description=description,
         )
-            
-            
+
+
 def modify_data_groups_xds(
     xds: xr.Dataset,
     data_group_out_name: str,
@@ -297,28 +297,31 @@ def modify_data_groups_xds(
     None
         Modifies ``xds.attrs["data_groups"]`` in place; no return value.
     """
-    
+
     now = datetime.now(timezone.utc)
 
     # Register the output data group on this dataset.
     if "data_groups" not in xds.attrs:
         xds.attrs["data_groups"] = {}
-        
+
     xds.attrs["data_groups"][data_group_out_name] = data_group_out
 
     # Stamp the date metadata: append to any existing timestamp so the processing history is preserved, or set it fresh if none exists yet.
     if "date" in xds.attrs["data_groups"][data_group_out_name]:
         xds.attrs["data_groups"][data_group_out_name]["date"] = (
-            xds.attrs["data_groups"][data_group_out_name]["date"] + "; " + now.isoformat()
+            xds.attrs["data_groups"][data_group_out_name]["date"]
+            + "; "
+            + now.isoformat()
         )
     else:
-        xds.attrs["data_groups"][data_group_out_name]["date"] = now.isoformat() 
-        
+        xds.attrs["data_groups"][data_group_out_name]["date"] = now.isoformat()
+
     # Stamp the description metadata in the same append-or-set pattern.
     if "description" in xds.attrs["data_groups"][data_group_out_name]:
         xds.attrs["data_groups"][data_group_out_name]["description"] = (
-            xds.attrs["data_groups"][data_group_out_name]["description"] + "; " + description
+            xds.attrs["data_groups"][data_group_out_name]["description"]
+            + "; "
+            + description
         )
     else:
         xds.attrs["data_groups"][data_group_out_name]["description"] = description
-        

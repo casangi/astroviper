@@ -134,9 +134,7 @@ def add_visibility_grid_mosaic(
     # Initialise output arrays on the first call; subsequent calls accumulate.
     if img_data_group_out["visibility"] not in img_xds:
         img_xds[img_data_group_out["visibility"]] = xr.DataArray(
-            np.zeros(
-                (n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128
-            ),
+            np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128),
             dims=["frequency", "polarization", "u", "v"],
         )
         img_xds[img_data_group_out["visibility_normalization"]] = xr.DataArray(
@@ -301,7 +299,7 @@ def add_visibility_grid_single_field(
         n_imag_chan = 1  # Single continuum image collapsed across all channels.
         frequency_map = (np.zeros(n_chan)).astype(int)
 
-    #Time Map #Currently not implemented.
+    # Time Map #Currently not implemented.
     n_imag_time = 1
     n_time = ms_xds.sizes["time"]
     time_map = (np.zeros(n_time)).astype(int)
@@ -309,20 +307,23 @@ def add_visibility_grid_single_field(
     n_imag_pol = weight_imaging.shape[3]
     pol_map = (np.arange(0, n_imag_pol)).astype(int)
 
-    n_uv = (fft_padding * np.array([img_xds.sizes["l"], img_xds.sizes["m"]])).astype(int)
+    n_uv = (fft_padding * np.array([img_xds.sizes["l"], img_xds.sizes["m"]])).astype(
+        int
+    )
     delta_lm = img_xds.xr_img.get_lm_cell_size()
 
     # Initialise output arrays on the first call; subsequent calls accumulate.
     if img_data_group_out["visibility"] not in img_xds:
         img_xds[img_data_group_out["visibility"]] = xr.DataArray(
             np.zeros(
-                (n_imag_time, n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128
+                (n_imag_time, n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]),
+                dtype=np.complex128,
             ),
-            dims=["time","frequency", "polarization", "u", "v"],
+            dims=["time", "frequency", "polarization", "u", "v"],
         )
         img_xds[img_data_group_out["visibility_normalization"]] = xr.DataArray(
             np.zeros((n_imag_time, n_imag_chan, n_imag_pol), dtype=np.double),
-            dims=["time","frequency", "polarization"],
+            dims=["time", "frequency", "polarization"],
         )
 
     grid = img_xds[img_data_group_out["visibility"]].values
@@ -333,12 +334,15 @@ def add_visibility_grid_single_field(
     frequency_coord = ms_xds.frequency.values
     imaging_weight = ms_xds[ms_data_group_in["weight_imaging"]].values
 
+    from astroviper.core.imaging.gridders.prolate_spheroidal_grid import (
+        prolate_spheroidal_grid_jit,
+    )
 
-    from astroviper.core.imaging.gridders.prolate_spheroidal_grid import prolate_spheroidal_grid_jit
-    
     cpp_gridder = False
     if cpp_gridder:
-        from astroviper.core.imaging.gridders.prolate_spheroidal_grid_cpp import prolate_spheroidal_grid
+        from astroviper.core.imaging.gridders.prolate_spheroidal_grid_cpp import (
+            prolate_spheroidal_grid,
+        )
 
         prolate_spheroidal_grid(
             grid,
@@ -373,7 +377,6 @@ def add_visibility_grid_single_field(
             support=7,
             oversampling=100,
         )
-    
 
     modify_data_groups_xds(
         img_xds,

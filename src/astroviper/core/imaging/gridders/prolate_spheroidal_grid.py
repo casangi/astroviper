@@ -30,7 +30,7 @@ def prolate_spheroidal_grid_jit(
     measurement sets) accumulate contributions.
 
     Time and frequency mapping allow the input visibility axes to be collapsed
-    or reordered onto the image axes.  
+    or reordered onto the image axes.
 
     Convention note — axis prefixes:
       * ``m_`` denotes an image-domain axis size.
@@ -188,7 +188,8 @@ def prolate_spheroidal_grid_jit(
                                         norm = norm + conv
 
                                 normalization[a_time, a_chan, a_pol] = (
-                                    normalization[a_time, a_chan, a_pol] + sel_weight * norm
+                                    normalization[a_time, a_chan, a_pol]
+                                    + sel_weight * norm
                                 )
     return
 
@@ -345,10 +346,8 @@ def prolate_spheroidal_grid_uv_sampling_jit(
                         v_center_offset_indx = math.floor(v_offset * oversampling + 0.5)
 
                         for i_pol in range(n_pol):
-                            weight_data = weight[
-                                i_time, i_baseline, i_chan, i_pol
-                            ]
-                        
+                            weight_data = weight[i_time, i_baseline, i_chan, i_pol]
+
                             if ~np.isnan(weight_data) and (weight_data != 0.0):
                                 a_pol = pol_map[i_pol]
                                 norm = 0.0
@@ -375,7 +374,7 @@ def prolate_spheroidal_grid_uv_sampling_jit(
                                         norm = norm + conv
 
                                 normalization[a_time, a_chan, a_pol] = (
-                                    normalization[a_time, a_chan, a_pol] + weight_data * norm
+                                    normalization[a_time, a_chan, a_pol]
+                                    + weight_data * norm
                                 )
     return
-
