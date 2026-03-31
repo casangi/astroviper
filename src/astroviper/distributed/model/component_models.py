@@ -40,14 +40,17 @@ def _coerce_to_xda(
         Input grid. Either an ``xarray.DataArray`` or a 2-D NumPy/Dask array.
     x_coord, y_coord
         Names of the coordinate variables representing the horizontal and
-        vertical axes in world units.
+        vertical axes.
     coords
         Required when ``data`` is a NumPy/Dask array. A mapping that must include
         1-D arrays for ``x_coord`` and ``y_coord`` whose lengths match the array
-        width and height, respectively.
+        width (horizontal) and height (vertical), respectively.
+        This module follows the Astropy convention for 2-D pixel arrays: axis 0
+        is horizontal (x) and axis 1 is vertical (y). See
+        https://docs.astropy.org/en/stable/wcs/index.html.
     dims
         Optional dimension names to assign when wrapping a NumPy/Dask array.
-        Defaults to ``(y_coord, x_coord)``.
+        Defaults to ``(x_coord, y_coord)``.
 
     Returns
     -------
@@ -83,7 +86,9 @@ def _coerce_to_xda(
 
     x_vals = np.asarray(coords[x_coord])
     y_vals = np.asarray(coords[y_coord])
-
+    # Public API convention in this module: unlabeled 2-D arrays are interpreted
+    # as (x, y), so x coords map to axis 0 and y coords map to axis 1.
+    # This matches the Astropy convention for pixel coordinates.
     W, H = data.shape
     if y_vals.shape[0] != H or x_vals.shape[0] != W:
         raise ValueError(
@@ -481,7 +486,10 @@ def make_disk(
     either an ``xarray.DataArray`` of any dimensionality that includes named
     ``x_coord`` and ``y_coord`` dims, or a 2-D NumPy/Dask array plus 1-D
     coordinate arrays via ``coords``. All coordinates are interpreted as world
-    coordinates.
+    coordinates. For unlabeled 2-D NumPy/Dask inputs, this module's public API
+    convention is that axis 0 is ``x`` (horizontal) and axis 1 is ``y`` (vertical).
+    This follows the Astropy convention for 2-D pixel coordinates. See
+    https://docs.astropy.org/en/stable/wcs/index.html.
 
     Behavior controlled by ``add``:
       - ``add=True`` (default): **Additive** mode. ``height`` is added to the
@@ -509,13 +517,13 @@ def make_disk(
     height
         Value to write inside the ellipse, or the increment when ``add=True``.
     x_coord, y_coord
-        Names of the horizontal and vertical coordinates or dims.
+        Names of the horizontal (x_coord) and vertical (y_coord) coordinates or dims.
     coords
         Required when ``data`` is a NumPy/Dask array. Mapping containing 1-D
         arrays for ``x_coord`` and ``y_coord`` whose lengths match the array.
     dims
         Optional when ``data`` is a NumPy/Dask array. Defaults to
-        ``(y_coord, x_coord)``.
+        ``(x_coord, y_coord)``.
     add
         Defaults to ``True``. If ``True``, add to values inside the ellipse;
         if ``False``, replace values inside the ellipse.
@@ -548,15 +556,19 @@ def make_disk(
 
     Notes
     -----
-    For DataArray inputs with extra dims (for example, ``("time", "y", "x")``),
+    For DataArray inputs, labeled dims determine the x/y semantics. For unlabeled
+    2-D NumPy/Dask arrays, axis 0 is interpreted as ``x`` (horizontal) and axis 1
+    as ``y`` (vertical). This follows the Astropy convention for 2-D pixel
+    coordinates. See https://docs.astropy.org/en/stable/wcs/index.html.
+    For DataArray inputs with extra dims (for example, ``("time", "x", "y")``),
     the 2-D mask broadcasts across the remaining dims. Dask inputs remain lazy.
 
     Examples
     --------
     >>> import numpy as np, xarray as xr
-    >>> y = np.linspace(-5, 5, 101)
     >>> x = np.linspace(-5, 5, 121)
-    >>> base = xr.DataArray(np.zeros((y.size, x.size)), coords={"y": y, "x": x}, dims=("y", "x"))
+    >>> y = np.linspace(-5, 5, 101)
+    >>> base = xr.DataArray(np.zeros((x.size, y.size)), coords={"x": x, "y": y}, dims=("x", "y"))
     >>> out = make_disk(base, a=3.0, b=1.5, theta=np.deg2rad(30), x0=0.0, y0=0.0, height=2.0)
     """
     _validate_ab_theta_center(a, b, theta, x0, y0)
@@ -609,7 +621,10 @@ def make_gauss2d(
     ``make_gauss2d`` produces an elliptical Gaussian with peak amplitude ``peak`` at
     center ``(x0, y0)``. Inputs ``a`` and ``b`` are the **full width at half
     maximum (FWHM)** along the ellipse’s principal axes. The ellipse is rotated
-    by ``theta`` radians measured from +x toward +y.
+    by ``theta`` radians measured from +x toward +y. For unlabeled 2-D NumPy/Dask
+    inputs, this module's public API convention is that axis 0 is ``x`` (horizontal)
+    and axis 1 is ``y`` (vertical). This follows the Astropy convention for 2-D
+    pixel coordinates. See https://docs.astropy.org/en/stable/wcs/index.html.
 
     Conversion from FWHM to standard deviation:
 
@@ -652,7 +667,7 @@ def make_gauss2d(
         arrays for ``x_coord`` and ``y_coord`` whose lengths match the array.
     dims
         Optional when ``data`` is a NumPy/Dask array. Defaults to
-        ``(y_coord, x_coord)``.
+        ``(x_coord, y_coord)``.
     add
         Defaults to ``True``. If ``True``, add the Gaussian to existing values;
         if ``False``, replace by the Gaussian everywhere.
@@ -685,15 +700,18 @@ def make_gauss2d(
 
     Notes
     -----
-    Works lazily with Dask arrays. For inputs with extra dims, the 2-D Gaussian
-    broadcasts across the remaining dims.
+    Works lazily with Dask arrays. For DataArray inputs, labeled dims determine
+    the x/y semantics. For unlabeled 2-D NumPy/Dask arrays, axis 0 is interpreted
+    as ``x`` and axis 1 as ``y``. This follows the Astropy convention for 2-D
+    pixel coordinates. See https://docs.astropy.org/en/stable/wcs/index.html.
+    For inputs with extra dims, the 2-D Gaussian broadcasts across the remaining dims.
 
     Examples
     --------
     >>> import numpy as np, xarray as xr
-    >>> y = np.linspace(-4, 4, 200)
     >>> x = np.linspace(-5, 5, 300)
-    >>> base = xr.DataArray(np.zeros((y.size, x.size)), coords={"y": y, "x": x}, dims=("y", "x"))
+    >>> y = np.linspace(-4, 4, 200)
+    >>> base = xr.DataArray(np.zeros((x.size, y.size)), coords={"x": x, "y": y}, dims=("x", "y"))
     >>> g = make_gauss2d(base, a=2.355, b=4.71, theta=np.deg2rad(30), x0=0.0, y0=0.0, peak=10.0)
     """
     _validate_ab_theta_center(a, b, theta, x0, y0)
@@ -747,7 +765,10 @@ def make_pt_sources(
     the same world units as the grid coordinates. Sources are mapped to the nearest
     grid point along each axis in physical distance. If a target lies exactly midway
     between two coordinates along an axis, the right-hand coordinate is chosen
-    deterministically.
+    deterministically. For unlabeled 2-D NumPy/Dask inputs, this module's public
+    API convention is that axis 0 is ``x`` (horizontal) and axis 1 is ``y`` (vertical).
+    This follows the Astropy convention for 2-D pixel coordinates. See
+    https://docs.astropy.org/en/stable/wcs/index.html.
 
     Duplicate hits are handled correctly and efficiently. If multiple sources map
     to the same grid point, their amplitudes are summed in one pass using a
@@ -803,7 +824,7 @@ def make_pt_sources(
         arrays for ``x_coord`` and ``y_coord`` whose lengths match the array.
     dims
         Optional when ``data`` is a NumPy/Dask array. Defaults to
-        ``(y_coord, x_coord)``.
+        ``(x_coord, y_coord)``.
     add
         Defaults to ``True``. If ``True``, add to existing values at those
         pixels; if ``False``, replace values at those pixels.
@@ -829,16 +850,20 @@ def make_pt_sources(
     -----
     For rectilinear yet irregular grids, the nearest 2-D pixel is the Cartesian
     pair of the nearest 1-D coordinates along x and y. This allows a fast,
-    per-axis nearest search to be combined into a correct 2-D decision.
+    per-axis nearest search to be combined into a correct 2-D decision. For
+    DataArray inputs, labeled dims determine the x/y semantics. For unlabeled
+    2-D NumPy/Dask arrays, axis 0 is interpreted as ``x`` (horizontal) and axis 1
+    as ``y`` (vertical). This follows the Astropy convention for 2-D pixel
+    coordinates. See https://docs.astropy.org/en/stable/wcs/index.html.
 
     Examples
     --------
     >>> import numpy as np, xarray as xr
-    >>> y = np.linspace(-2, 2, 5)
     >>> x = np.linspace(-3, 3, 7)
-    >>> base = xr.DataArray(np.zeros((y.size, x.size)),
-    ...                     coords={"y": y, "x": x},
-    ...                     dims=("y", "x"))
+    >>> y = np.linspace(-2, 2, 5)
+    >>> base = xr.DataArray(np.zeros((x.size, y.size)),
+    ...                     coords={"x": x, "y": y},
+    ...                     dims=("x", "y"))
     >>> # Strict ignore (default): OOR sources are dropped
     >>> out1 = make_pt_sources(base,
     ...     amplitudes=[5.0, 3.0],
