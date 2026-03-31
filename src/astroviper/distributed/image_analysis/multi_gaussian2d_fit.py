@@ -2209,6 +2209,7 @@ def _prepare_fit_configuration(
     rejected because the optimizer does not parameterize the major-axis angle
     directly.
     """
+
     def _convert_array_like_widths_to_sigma(
         init_like: Union[np.ndarray, Sequence[Number]],
     ) -> Union[np.ndarray, Sequence[Number]]:
@@ -2254,10 +2255,7 @@ def _prepare_fit_configuration(
             and not isinstance(ig[0], dict)
         ):
             ig = _convert_array_like_widths_to_sigma(ig)
-    if (
-        isinstance(ig, dict)
-        and "components" in ig
-    ):
+    if isinstance(ig, dict) and "components" in ig:
         comps = ig["components"]
         if initial_is_fwhm and (
             isinstance(comps, np.ndarray)
