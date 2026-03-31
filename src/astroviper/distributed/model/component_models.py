@@ -941,7 +941,15 @@ def make_pt_sources(
 
     # Preserve Dask laziness if input was Dask-backed
     if _is_dask_array(xda_in.data):
-        src_data = da.from_array(acc, chunks=xda_in.data.chunks)
+        chunk_map = getattr(xda_in, "chunksizes", {})
+        if x_coord in chunk_map and y_coord in chunk_map:
+            # ``acc`` is constructed explicitly in packed (x, y) order, so its
+            # Dask chunks must be drawn from the named x/y dims rather than from
+            # the raw underlying chunk tuple, which may still be stored as (y, x).
+            chunks = (tuple(chunk_map[x_coord]), tuple(chunk_map[y_coord]))
+        else:
+            chunks = "auto"
+        src_data = da.from_array(acc, chunks=chunks)
     else:
         src_data = acc
 

@@ -478,6 +478,40 @@ class TestMakePtSources(unittest.TestCase):
             "y dimension length should match the supplied y-coordinate axis",
         )
 
+    def test_dask_backed_dataarray_uses_named_xy_chunks_for_source_plane(self):
+        """Verify that Dask-backed DataArray inputs with stored ``(y, x)`` dims still build the temporary source plane with x/y-aligned chunk tuples."""
+        x_vals = np.linspace(10.0, 14.0, 5)
+        y_vals = np.linspace(-2.0, 0.0, 3)
+        base = xr.DataArray(
+            da.zeros((y_vals.size, x_vals.size), chunks=((2, 1), (3, 2))),
+            coords={"y": y_vals, "x": x_vals},
+            dims=("y", "x"),
+        )
+
+        out = make_pt_sources(
+            base,
+            amplitudes=[9.0],
+            xs=[13.0],
+            ys=[-1.0],
+            output="xarray",
+            add=False,
+        )
+
+        self.assertTrue(
+            isinstance(out.data, da.Array),
+            "Dask-backed DataArray input should preserve laziness in xarray output",
+        )
+        self.assertEqual(
+            base.data.chunks,
+            out.data.chunks,
+            "Aligned output should preserve the original named y/x chunk structure",
+        )
+        self.assertEqual(
+            9.0,
+            float(out.sel(x=13.0, y=-1.0, method="nearest").compute().values),
+            "The injected point source should still land on the requested coordinate",
+        )
+
     def test_requires_equal_lengths(self):
         base = _base_grid()
         with self.assertRaises(ValueError):
