@@ -91,10 +91,11 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0)
 
     from astroviper.core.imaging.make_pb_symmetric import (
         airy_disk_rorder,
+        airy_disk_rorder_v2,
     )
 
     img_xds["PRIMARY_BEAM"] = xr.DataArray(
-        airy_disk_rorder(
+        airy_disk_rorder_v2(
             img_xds.frequency.values,
             img_xds.polarization.values,
             pb_parms,

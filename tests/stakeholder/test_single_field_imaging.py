@@ -21,6 +21,7 @@ def test_single_field_imaging():
     update()
 
     download(file="twhya_selfcal_5chans_lsrk_compare_weights.ps.zarr")
+    download(file="twhya_selfcal_5chans_lsrk_robust_0.5_niter_0.img.zarr")
     ps_xdt = open_processing_set("twhya_selfcal_5chans_lsrk_compare_weights.ps.zarr")
     img_xds = xr.open_zarr("twhya_selfcal_5chans_lsrk_robust_0.5_niter_0.img.zarr")
 
@@ -145,6 +146,12 @@ def test_single_field_imaging():
     plt.figure()
     plt.imshow(
         img_xds["SKY_RESIDUAL"].isel(frequency=frequency, time=0, polarization=0)
+    )
+    plt.colorbar()
+
+    plt.figure()
+    plt.imshow(
+        img_av_xds["PRIMARY_BEAM"].isel(frequency=frequency, time=0, polarization=0)
     )
     plt.colorbar()
 
