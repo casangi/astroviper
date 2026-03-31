@@ -792,6 +792,46 @@ class TestInitialGuessesPublicAPIWrapping:
         assert np.isclose(p0[0], 0.0)
         assert np.allclose(p0[1:], [1.1, 4.0, 5.0, 2.0, 1.5, 0.25])
 
+    @pytest.mark.parametrize(
+        "init_input",
+        [
+            np.array([1.1, 4.0, 5.0, 2.355, 4.71, 0.25], dtype=float),
+            [1.1, 4.0, 5.0, 2.355, 4.71, 0.25],
+        ],
+    )
+    def test_single_component_flat_fwhm_guesses_are_converted_before_fit(
+        self, monkeypatch: pytest.MonkeyPatch, init_input
+    ) -> None:
+        """Verify that flat single-component FWHM guesses are converted to sigma before building the optimizer seed vector."""
+        da = xr.DataArray(np.zeros((10, 11), dtype=float), dims=("y", "x"))
+        captured: dict[str, np.ndarray] = {}
+
+        def fake_curve_fit(*_, **kw):
+            p0 = np.asarray(kw["p0"], dtype=float)
+            captured["p0"] = p0.copy()
+            n = (p0.size - 1) // 6
+            pcov = np.eye(1 + 6 * n, dtype=float)
+            return p0, pcov
+
+        monkeypatch.setattr(mg, "curve_fit", fake_curve_fit, raising=True)
+
+        fit_multi_gaussian2d(
+            da,
+            n_components=1,
+            initial_guesses=init_input,
+            initial_is_fwhm=True,
+            coord_type="pixel",
+            return_model=False,
+            return_residual=False,
+        )
+
+        p0 = captured["p0"]
+        assert np.isclose(p0[0], 0.0)
+        assert np.allclose(p0[1:4], [1.1, 4.0, 5.0])
+        assert np.isclose(p0[4], mg._sigma_from_fwhm(2.355))
+        assert np.isclose(p0[5], mg._sigma_from_fwhm(4.71))
+        assert np.isclose(p0[6], 0.25)
+
 
 # ------------------------- plotting helper -------------------------
 
