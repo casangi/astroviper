@@ -72,15 +72,15 @@ def test_single_field_imaging():
         field_name=center_field_name
     )
     image_params = {
-            "image_size": [250, 250],
-            "cell_size": np.array([-0.1, 0.1]) * np.pi / (180 * 3600),
-            "phase_direction": phase_direction.values,
-            "frequency_coords": ps_single_pol_xdt.xr_ps.get_freq_axis().values,
-            "polarization_coords": ["I", "Q"],
-            "time_coords": [0],
-            "fft_padding": 1.2,
-            "cpp_gridder": True,
-        }
+        "image_size": [250, 250],
+        "cell_size": np.array([-0.1, 0.1]) * np.pi / (180 * 3600),
+        "phase_direction": phase_direction.values,
+        "frequency_coords": ps_single_pol_xdt.xr_ps.get_freq_axis().values,
+        "polarization_coords": ["I", "Q"],
+        "time_coords": [0],
+        "fft_padding": 1.2,
+        "cpp_gridder": True,
+    }
 
     imaging_metadata_pd = image_cube_single_field(
         ps_store=ps_store,
@@ -240,11 +240,12 @@ def test_single_field_imaging():
         airy_disk_rorder_v2,
     )
     import time
+
     pb_parms = {}
     pb_parms["list_dish_diameters"] = np.array([10.7])
     pb_parms["list_blockage_diameters"] = np.array([0.75])
     pb_parms["ipower"] = 1
-    
+
     image_params["image_center"] = np.array(image_params["image_size"]) // 2
 
     start = time.time()
@@ -274,7 +275,7 @@ def test_single_field_imaging():
         dims=("time", "frequency", "polarization", "l", "m"),
     )
     print("PB_v1 time: ", time.time() - start)
-    
+
     plt.figure()
     plt.imshow(PB_v2.isel(frequency=frequency, time=0, polarization=0))
     plt.colorbar()
@@ -283,12 +284,13 @@ def test_single_field_imaging():
     plt.colorbar()
     plt.figure()
     plt.imshow(
-        np.abs(PB_v2.isel(frequency=frequency, time=0, polarization=0).values -
-               PB_v1.isel(frequency=frequency, time=0, polarization=0).values)
+        np.abs(
+            PB_v2.isel(frequency=frequency, time=0, polarization=0).values
+            - PB_v1.isel(frequency=frequency, time=0, polarization=0).values
+        )
     )
     plt.colorbar()
     plt.show()
-
 
 
 if __name__ == "__main__":

@@ -80,8 +80,8 @@ def point_spread_function_gaussian_fit(
         data_group_out_modified=image_data_group_out_modified,
         overwrite=overwrite,
     )
-    print(img_xds.attrs["data_groups"])
-    print("image_data_group_in ", image_data_group_in)
+    # print(img_xds.attrs["data_groups"])
+    # print("image_data_group_in ", image_data_group_in)
     psf_name = image_data_group_in["point_spread_function"]
 
     sampling = np.array(sampling)
@@ -270,7 +270,7 @@ def extract_main_lobe(npix_window, threshold, psf_image):
     # masked_main = np.where(labels != main_lobe_label, psf_image, 0)
     # max_side_lobe = np.max(masked_main)
     max_sidelobe = np.max(psf_image * (labels != main_lobe_label))
-    print("maximum sidelobe level: ", max_sidelobe)
+    # print("maximum sidelobe level: ", max_sidelobe)
     blc, trc = _get_main_lobe_bounding_box(main_lobe_only, max_coords)
     # print("extract_main_lobe: blc, trc=", blc, trc)
     return main_lobe_only, blc, trc, max_sidelobe
