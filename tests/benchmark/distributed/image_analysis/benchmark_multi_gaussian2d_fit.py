@@ -242,6 +242,7 @@ def run_benchmark(
     std_compute = float(np.std(total_times))
     print(f"compute mean {mean_compute:.6f}s std {std_compute:.6f}s", flush=True)
 
+
 def main():
     args = parse_args()
     client = None
