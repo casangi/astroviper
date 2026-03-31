@@ -3505,8 +3505,8 @@ def _apply_fit_variable_docs(ds: xr.Dataset) -> xr.Dataset:
         "amplitude_err": "1σ uncertainty of amplitude parameter in data units.",
         "success": "Optimizer success flag (True/False).",
         "variance_explained": "Explained variance fraction by the fitted model on this plane (0–1).",
-        "model": "Best-fit model image on the (y, x) grid of the input.",
-        "residual": "Residual image = data - model on the (y, x) grid of the input.",
+        "model": "Best-fit model image on the published public (x, y) grid of the input.",
+        "residual": "Residual image = data - model on the published public (x, y) grid of the input.",
     }
     for name, desc in dv_docs.items():
         if name in ds:
