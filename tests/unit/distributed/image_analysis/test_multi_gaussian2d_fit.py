@@ -111,6 +111,7 @@ def _scene(
 class TestSuccess:
     @pytest.mark.parametrize("noise", [0.02, 0.05])
     def test_two_components_with_world_coords(self, noise: float) -> None:
+        """Verify that a two-component world-coordinate fit recovers both sources across the parametrized noise levels."""
         ny, nx = 96, 112
         comps = [
             dict(amp=1.0, x0=40.0, y0=60.0, sigma_x=3.0, sigma_y=3.0, theta=0.0),
@@ -135,6 +136,7 @@ class TestSuccess:
         assert np.allclose(ds["y0_pixel"].values[order], [60.0, 28.0], atol=0.8)
 
     def test_vectorize_over_time_names_and_indices(self) -> None:
+        """Verify that the fitter vectorizes over a time axis and accepts both named and index-based fit-dimension selectors."""
         ny, nx = 64, 80
         base = dict(amp=0.9, x0=30.0, y0=22.0, sigma_x=4.0, sigma_y=3.0, theta=0.2)
         planes = [
@@ -167,6 +169,7 @@ class TestSuccess:
         assert np.all(ds2["success"].values)
 
     def test_flags_and_descending_world_coords(self) -> None:
+        """Verify that descending world axes still produce a successful fit and consistent output flags."""
         ny, nx = 40, 50
         comps = [dict(amp=0.8, x0=20.0, y0=18.0, sigma_x=3.0, sigma_y=2.0, theta=0.1)]
         da2 = _scene(ny, nx, comps, coords=True)
@@ -194,6 +197,7 @@ class TestSuccess:
         assert "residual" in ds2 and "model" not in ds2
 
     def test_auto_seeds_when_initial_none(self) -> None:
+        """Verify that the fitter can seed component guesses automatically when callers omit initial_guesses."""
         ny, nx = 48, 60
         comps = [
             dict(amp=1.0, x0=18.0, y0=22.0, sigma_x=3.0, sigma_y=3.0, theta=0.0),
@@ -215,6 +219,7 @@ class TestSuccess:
 
 class TestInputs:
     def test_raw_numpy_array_requires_unlabeled_axis_order_when_dims_omitted(self) -> None:
+        """Verify that ambiguous unlabeled raw 2-D arrays now fail fast unless callers declare the axis-order contract."""
         ny, nx = 32, 33
         comps = [dict(amp=1.0, x0=16.0, y0=15.0, sigma_x=3.0, sigma_y=3.0, theta=0.0)]
         arr = _scene(ny, nx, comps).values  # plain ndarray
@@ -226,6 +231,7 @@ class TestInputs:
             )
 
     def test_accepts_raw_numpy_array_with_unlabeled_yx_axis_order(self) -> None:
+        """Verify that raw NumPy planes in row/column order fit correctly when callers declare the yx contract."""
         ny, nx = 32, 33
         comps = [dict(amp=1.0, x0=16.0, y0=15.0, sigma_x=3.0, sigma_y=3.0, theta=0.0)]
         arr = _scene(ny, nx, comps).values
@@ -238,6 +244,7 @@ class TestInputs:
         assert bool(ds.success) is True
 
     def test_accepts_raw_numpy_array_with_unlabeled_xy_axis_order(self) -> None:
+        """Verify that raw NumPy planes in semantic (x, y) order fit correctly when callers declare the xy contract."""
         ny, nx = 32, 33
         comps = [dict(amp=1.0, x0=16.0, y0=15.0, sigma_x=3.0, sigma_y=3.0, theta=0.0)]
         # Transpose into semantic (x, y) axis order before dropping labels.
@@ -253,6 +260,7 @@ class TestInputs:
         assert float(ds["y0_pixel"].values[0]) == pytest.approx(15.0, abs=0.8)
 
     def test_raw_numpy_array_with_explicit_dims_does_not_need_axis_order(self) -> None:
+        """Verify that explicit fit-plane dims remove the need for an unlabeled-axis-order hint."""
         ny, nx = 32, 33
         comps = [dict(amp=1.0, x0=16.0, y0=15.0, sigma_x=3.0, sigma_y=3.0, theta=0.0)]
         arr = _scene(ny, nx, comps).values
@@ -267,6 +275,7 @@ class TestInputs:
         assert float(ds["y0_pixel"].values[0]) == pytest.approx(15.0, abs=0.8)
 
     def test_raw_xy_mask_tracks_unlabeled_xy_input_order(self) -> None:
+        """Verify that a raw boolean mask supplied in public (x, y) order stays aligned with a raw xy image."""
         ny, nx = 32, 33
         comps = [dict(amp=1.0, x0=16.0, y0=15.0, sigma_x=3.0, sigma_y=3.0, theta=0.0)]
         # The public raw-array contract for this test is semantic (x, y), so both
@@ -287,6 +296,7 @@ class TestInputs:
 
     @pytest.mark.skipif(da is None, reason="dask.array not available")
     def test_accepts_bare_dask_array(self) -> None:
+        """Verify that unlabeled Dask arrays fit successfully once callers provide the raw-axis-order contract."""
         ny, nx = 40, 40
         comps = [dict(amp=1.0, x0=20.0, y0=20.0, sigma_x=3.0, sigma_y=3.0, theta=0.0)]
         np_img = _scene(ny, nx, comps, offset=0.1, noise=0.02, seed=1).data
@@ -300,6 +310,7 @@ class TestInputs:
         assert bool(ds.success) is True
 
     def test_dataarray_without_explicit_coords_falls_back_to_pixel_axes(self) -> None:
+        """Verify that labeled DataArray inputs without usable world coordinates fall back to pixel-frame fitting."""
         ny, nx = 36, 38
         comps = [dict(amp=1.0, x0=18.0, y0=17.0, sigma_x=3.0, sigma_y=2.5, theta=0.2)]
         da2 = xr.DataArray(_scene(ny, nx, comps).values, dims=("y", "x"))
@@ -312,6 +323,7 @@ class TestInputs:
         assert ds.attrs["fit_native_frame"] == "pixel"
 
     def test_invalid_unlabeled_axis_order_raises(self) -> None:
+        """Verify that unsupported unlabeled_axis_order values are rejected immediately."""
         arr = np.zeros((8, 9), dtype=float)
         with pytest.raises(ValueError, match="unlabeled_axis_order"):
             fit_multi_gaussian2d(
@@ -322,6 +334,7 @@ class TestInputs:
             )
 
     def test_world_coords_skipped_for_bad_axis_coords(self) -> None:
+        """Verify that malformed world-coordinate axes do not produce misleading world-frame results."""
         ny, nx = 32, 32
         comps = [dict(amp=0.8, x0=15.0, y0=16.0, sigma_x=3.0, sigma_y=2.0, theta=0.1)]
         da2 = _scene(ny, nx, comps, coords=True)
@@ -339,6 +352,7 @@ class TestInputs:
 
     @pytest.mark.skipif(da is None, reason="dask.array not available")
     def test_warns_when_fit_plane_dims_are_split_across_dask_chunks(self) -> None:
+        """Verify that the fitter warns when Dask chunking splits the fit plane across multiple chunks."""
         ny, nx = 32, 36
         comps = [dict(amp=1.0, x0=16.0, y0=15.0, sigma_x=3.0, sigma_y=3.0, theta=0.0)]
         cube_np = np.stack(
@@ -395,6 +409,7 @@ class TestPublishedPlaneDims:
 class TestBoundsDimsAPI:
     # TODO these tests need to be rewritten to use public API
     def test_bounds_merge_tuple_all_and_unknown_key_ignored(self) -> None:
+        """Verify that shared tuple bounds apply to every component and that unknown bound keys are ignored."""
         lb0, ub0 = mg._default_bounds_multi((20, 30), 2)
         user = {"foo": (1.0, 2.0), "amplitude": (0.0, 5.0)}  # 'foo' ignored
         lb, ub = mg._merge_bounds_multi(lb0, ub0, user, 2)
@@ -402,11 +417,13 @@ class TestBoundsDimsAPI:
         assert lb[7] == 0.0 and ub[7] == 5.0  # comp1 amp
 
     def test_bounds_merge_per_component_length_error(self) -> None:
+        """Verify that per-component bounds must provide one interval per fitted component."""
         lb0, ub0 = mg._default_bounds_multi((20, 30), 2)
         with pytest.raises(ValueError):
             mg._merge_bounds_multi(lb0, ub0, {"amplitude": [(0, 1)]}, 2)
 
     def test_dims_by_index_and_error_paths(self) -> None:
+        """Verify that dimension indices resolve correctly and that invalid dim specifications raise clear errors."""
         da3 = xr.DataArray(np.zeros((3, 4, 5)), dims=("t", "y", "x"))
         assert mg._resolve_dims(da3, (2, 1)) == ("x", "y")
         with pytest.raises(ValueError):
@@ -415,6 +432,7 @@ class TestBoundsDimsAPI:
             mg._resolve_dims(da3, ("q", "y"))
 
     def test_init_formats_and_errors(self) -> None:
+        """Verify that helper normalization accepts supported initial-guess formats and rejects malformed ones."""
         z = np.zeros((16, 17), float)
         # array (n,6)
         arr = np.array([[1.0, 5.0, 6.0, 2.0, 2.0, 0.0]], float)
@@ -460,6 +478,7 @@ class TestBoundsDimsAPI:
 
 class TestOptimizerFailures:
     def test_full_mask_triggers_failure_and_nan_planes(self) -> None:
+        """Verify that masking away all usable pixels raises instead of returning a bogus fit result."""
         ny, nx = 24, 24
         da2 = xr.DataArray(np.zeros((ny, nx)), dims=("y", "x"))
         with pytest.raises(ValueError, match=r"(all pixels|empty mask)"):
@@ -475,6 +494,7 @@ class TestOptimizerFailures:
     def test_curve_fit_exception_sets_failure(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify that low-level optimizer exceptions are surfaced as fit failures."""
         ny, nx = 40, 40
         y, x = np.mgrid[0:ny, 0:nx]
         z = np.exp(-((x - 20) ** 2 + (y - 18) ** 2) / (2 * 3.0**2))
@@ -498,6 +518,7 @@ class TestOptimizerFailures:
     def test_curve_fit_pcov_none_sets_errors_nan(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify that missing covariance output produces NaN parameter uncertainties."""
         ny, nx = 32, 32
         da2 = xr.DataArray(np.ones((ny, nx)), dims=("y", "x"))
         n = 2
@@ -533,6 +554,7 @@ class TestOptimizerFailures:
     def test_curve_fit_with_valid_pcov_sets_finite_errors(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify that finite covariance matrices propagate to finite reported parameter errors."""
         ny, nx = 24, 24
         da2 = xr.DataArray(np.ones((ny, nx)), dims=("y", "x"))
         n = 1
@@ -668,6 +690,7 @@ class TestOptimizerFailures:
 
 class TestInitialGuessesTopLevelListOfDicts:
     def test_top_level_list_of_dicts_len_mismatch_raises(self) -> None:
+        """Verify that top-level list-of-dicts guesses must contain exactly n_components entries."""
         z = np.zeros((16, 16), float)
         init = [
             {
@@ -683,6 +706,7 @@ class TestInitialGuessesTopLevelListOfDicts:
             mg._normalize_initial_guesses(z, 2, init, None, None)
 
     def test_top_level_list_of_dicts_happy_path_parses_and_packs(self) -> None:
+        """Verify that top-level list-of-dicts guesses are parsed and packed into optimizer parameters correctly."""
         z = np.zeros((20, 20), float)
         n = 2
         init = [
@@ -724,6 +748,7 @@ class TestInitialGuessesPublicAPIWrapping:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Small scene
+        """Verify that a single component-dictionary shorthand is wrapped and forwarded through the public API."""
         ny, nx = 10, 11
         da = xr.DataArray(np.zeros((ny, nx), dtype=float), dims=("y", "x"))
         # Single dict (no 'components' key) should be accepted for n_components=1
@@ -769,6 +794,7 @@ class TestInitialGuessesPublicAPIWrapping:
 
 class TestPlotHelper:
     def test_plot_components_3d_with_indexer_and_no_component_dim(self) -> None:
+        """Verify that plot_components handles 3-D inputs with an explicit indexer even when the result lacks a component axis."""
         if not hasattr(mg, "plot_components"):
             pytest.skip("plot_components helper not available")
         ny, nx = 36, 36
@@ -799,6 +825,7 @@ class TestPlotHelper:
         )
 
     def test_plot_components_defaults_indexer_for_3d_input(self, monkeypatch) -> None:
+        """Verify that plot_components chooses a default indexer for 3-D inputs when callers omit one."""
         matplotlib.use("Agg", force=True)  # headless backend
 
         # Build a 3-D DataArray: ('time','y','x') so da_tr.ndim > 2
@@ -829,6 +856,7 @@ class TestPlotHelper:
     def test_plot_components_selects_result_plane_with_default_indexer(
         self, monkeypatch
     ) -> None:
+        """Verify that the helper slices the result dataset consistently with the default data indexer."""
         matplotlib.use("Agg", force=True)  # headless
 
         # Build 3-D data → da_tr.ndim > 2
@@ -865,6 +893,7 @@ class TestPlotHelper:
     def test_plot_components_default_indexer_loops_multiple_dims(
         self, monkeypatch
     ) -> None:
+        """Verify that the default indexer iterates over every extra leading dimension before plotting."""
         matplotlib.use("Agg", force=True)
 
         # 4D data ensures indexer has ≥2 keys → loop body executes (and loops)
@@ -893,6 +922,7 @@ class TestPlotHelper:
         plot_components(cube, ds, dims=("x", "y"), indexer=None, show_residual=True)
 
     def test_plot_components_else_branch_for_2d_input(self, monkeypatch) -> None:
+        """Verify that the 2-D plotting branch works when no extra indexing is required."""
         matplotlib.use("Agg", force=True)
 
         # 2D image → triggers the else block (lines 766–768): data2d = da_tr; res_plane = result
@@ -919,6 +949,7 @@ class TestPlotHelper:
     def test_plot_components_raises_when_result_missing_required_var(
         self, monkeypatch
     ) -> None:
+        """Verify that plot_components rejects result datasets missing the variables it needs to draw components."""
         matplotlib.use("Agg", force=True)
 
         ny, nx = 32, 32
@@ -950,6 +981,7 @@ class TestPlotHelper:
 
     def test_plot_components_else_branch_for_2d_input(self) -> None:
         # existing test body...
+        """Verify that the 2-D plotting branch works when no extra indexing is required."""
         pass
 
     def test_plot_components_fwhm_converts_from_sigma_when_fwhm_missing(self) -> None:
@@ -1031,6 +1063,7 @@ class TestPlotHelper:
         assert isinstance(fig, _mf.Figure)
 
     def test_overlay_converts_fwhm_to_sigma_when_sigma_missing(self) -> None:
+        """Verify that overlay plotting derives sigma widths from FWHM metadata when sigma values are absent."""
         matplotlib.use("Agg", force=True)
         fig, ax = plt.subplots()
 
@@ -1067,6 +1100,7 @@ class TestPlotHelper:
 class TestNumPyFitting:  # (unittest.TestCase):
     def test_min_threshold_masks_pixels_partial(self) -> None:
 
+        """Verify that a lower threshold masks only part of the plane instead of acting as an all-or-nothing cut."""
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
         z = 0.05 + np.exp(-((x - 32) ** 2 + (y - 32) ** 2) / (2 * 3.0**2))
@@ -1090,6 +1124,7 @@ class TestNumPyFitting:  # (unittest.TestCase):
 
     def test_min_threshold_masks_pixels_partial(self) -> None:
 
+        """Verify that a lower threshold masks only part of the plane instead of acting as an all-or-nothing cut."""
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
         z = 0.05 + np.exp(-((x - 32) ** 2 + (y - 32) ** 2) / (2 * 3.0**2))
@@ -1113,6 +1148,7 @@ class TestNumPyFitting:  # (unittest.TestCase):
 
     def test_max_threshold_masks_pixels_partial(self) -> None:
 
+        """Verify that an upper threshold masks only part of the plane instead of removing the full image."""
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
         z = 0.05 + np.exp(
@@ -1138,6 +1174,7 @@ class TestNumPyFitting:  # (unittest.TestCase):
 
     def test_angle_pa_init_conversion_and_reporting(self) -> None:
         # Build a rotated elliptical Gaussian with a known *math* angle
+        """Verify that PA-form initial angles are converted into the internal convention and reported back consistently."""
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
         amp_true, x0_true, y0_true = 1.0, 28.0, 30.0
@@ -1179,6 +1216,7 @@ class TestNumPyFitting:  # (unittest.TestCase):
 
     def test_angle_pa_init_conversion_list_of_dicts(self) -> None:
         # Two rotated Gaussians with known *math* angles
+        """Verify that PA-form initial angles supplied as list-of-dicts inputs round-trip through the public API."""
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
         th1_math, th2_math = 0.5, 1.1
@@ -1234,6 +1272,7 @@ class TestNumPyFitting:  # (unittest.TestCase):
 
     def test_angle_pa_init_components_array_dict_converted(self) -> None:
         # Build a single rotated Gaussian (known math angle)
+        """Verify that PA-form angles inside a {"components": array} initial-guess dict are converted before fitting."""
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
         amp_true, x0_true, y0_true = 1.0, 30.0, 28.0
@@ -1268,6 +1307,7 @@ class TestNumPyFitting:  # (unittest.TestCase):
 
     def test_angle_pa_init_components_list_of_dicts_converted(self) -> None:
         # Build a single rotated Gaussian (known math angle)
+        """Verify that PA-form angles inside a {"components": list-of-dicts} initial-guess dict are converted before fitting."""
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
         amp_true, x0_true, y0_true = 0.9, 22.0, 24.0
@@ -1310,6 +1350,7 @@ class TestNumPyFitting:  # (unittest.TestCase):
 
     def test_angle_pa_list_of_dicts_missing_theta_covers_if_false_branch(self) -> None:
         # Build a 2-component scene
+        """Verify that PA conversion leaves components without explicit theta values on the default-angle path."""
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
 
@@ -1366,6 +1407,7 @@ class TestNumPyFitting:  # (unittest.TestCase):
 
     def test_angle_pa_init_components_list_of_dicts_branch(self) -> None:
         # 2-component scene
+        """Verify that the list-of-dicts PA-conversion branch handles multiple components correctly."""
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
         th1_math, th2_math = 0.4, 1.0
@@ -1611,6 +1653,7 @@ class TestNumPyFitting:  # (unittest.TestCase):
 
 class TestAPIHelpers:
     def test_init_components_array_wrong_shape_raises(self) -> None:
+        """Verify that component arrays in initial_guesses must have shape (n_components, 6)."""
         da = xr.DataArray(np.zeros((16, 17), float), dims=("y", "x"))
         bad_init = {
             "offset": 0.0,
@@ -1620,6 +1663,7 @@ class TestAPIHelpers:
 
 class TestAPIHelpers:
     def test_init_components_array_wrong_shape_raises(self) -> None:
+        """Verify that component arrays in initial_guesses must have shape (n_components, 6)."""
         da = xr.DataArray(np.zeros((16, 17), float), dims=("y", "x"))
         bad_init = {
             "offset": 0.0,
@@ -1630,6 +1674,7 @@ class TestAPIHelpers:
             fit_multi_gaussian2d(da, n_components=2, initial_guesses=bad_init)
 
     def test_init_components_list_len_mismatch_raises(self) -> None:
+        """Verify that component lists inside initial_guesses must contain exactly n_components entries."""
         z = np.zeros((16, 17), float)
         n = 2
         init = {
@@ -1649,6 +1694,7 @@ class TestAPIHelpers:
             mg._normalize_initial_guesses(z, n, init, None, None)
 
     def test_init_components_list_happy_path_synonyms_and_theta_default(self) -> None:
+        """Verify that component-dict synonyms are normalized correctly and that missing theta defaults to zero."""
         z = np.zeros((20, 21), float)  # median = 0.0
         n = 2
         init = {
@@ -1681,6 +1727,7 @@ class TestAPIHelpers:
         assert np.allclose(th, [0.3, 0.0])  # second component theta defaults to 0.0
 
     def test_init_components_list_missing_keys_raise(self) -> None:
+        """Verify that component-dict guesses fail when required amplitude, position, or width fields are missing."""
         z = np.zeros((12, 12), float)
         n = 1
 
@@ -1697,6 +1744,7 @@ class TestAPIHelpers:
             mg._normalize_initial_guesses(z, n, bad_sigma, None, None)
 
     def test_init_components_list_len_mismatch_raises(self) -> None:
+        """Verify that component lists inside initial_guesses must contain exactly n_components entries."""
         z = np.zeros((16, 16), float)
         n = 2
         init_list = [  # len 1 but n=2 → hits lines 221–223
@@ -1714,6 +1762,7 @@ class TestAPIHelpers:
             mg._normalize_initial_guesses(z, n, init, None, None)
 
     def test_init_components_list_happy_path_covers_224_232(self) -> None:
+        """Verify that component-list dictionaries normalize correctly across the supported key synonyms."""
         z = np.zeros((20, 20), float)
         n = 2
         init = {  # covers lines 224–232: amp vs amplitude; sigma_x/sigma_y vs sx/sy; theta default
@@ -1747,6 +1796,7 @@ class TestAPIHelpers:
         assert np.allclose(th, [0.3, 0.0])
 
     def test_init_components_tuple_len_mismatch_raises(self) -> None:
+        """Verify that tuple-based component collections enforce the same length checks as lists."""
         z = np.zeros((16, 16), float)
         n = 2
         # components is a TUPLE of length 1 → hits 221 (list/tuple), 222–223 (len check → ValueError)
@@ -1765,6 +1815,7 @@ class TestAPIHelpers:
             mg._normalize_initial_guesses(z, n, init, None, None)
 
     def test_init_components_tuple_happy_path_covers_224_to_232(self) -> None:
+        """Verify that tuple-based component collections are normalized the same way as list-based ones."""
         z = np.zeros((20, 20), float)
         n = 2
         # components as a TUPLE → exercises 221; then 224 (alloc), 225–231 (loop & synonyms), 232 (pack/return)
@@ -1798,6 +1849,7 @@ class TestAPIHelpers:
         assert np.allclose(th, [0.3, 0.0])
 
     def test_init_array_list_form_fallback_covers_234_235(self) -> None:
+        """Verify that plain nested numeric lists fall back to the array-form initial-guess parser."""
         z = np.zeros((18, 19), float)
         n = 2
         # PASS a plain LIST (list-of-lists) → falls through to lines 234–239 (array/list form)
@@ -1812,6 +1864,7 @@ class TestAPIHelpers:
 
     def test_bounds_offset_branch_public_api(self) -> None:
         # Build a simple scene with a known offset (~0.12)
+        """Verify that a nearly fixed public offset bound is forwarded through the public API and honored by the fit."""
         ny, nx = 40, 40
         y, x = np.mgrid[0:ny, 0:nx]
         z = 0.12 + np.exp(-((x - 20) ** 2 + (y - 22) ** 2) / (2 * 3.0**2))
@@ -1837,6 +1890,7 @@ class TestAPIHelpers:
 
     def test_bounds_per_component_list_public_api_hits_comp_idx_branch(self) -> None:
         # Make a clean 2-component scene with distinct sigma_x per component
+        """Verify that per-component public bounds reach the component-specific branch of the bound merger."""
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
         z = (
@@ -1877,16 +1931,19 @@ class TestAPIHelpers:
 
     def test_public_api_ensure_dataarray_raises_on_unsupported_type(self) -> None:
         # object() is neither np.ndarray, dask.array.Array, nor xarray.DataArray
+        """Verify that unsupported top-level data objects are rejected before any fitting work begins."""
         with pytest.raises(TypeError, match=r"Unsupported input type"):
             fit_multi_gaussian2d(object(), n_components=1)
 
     def test_resolve_dims_raises_for_3d_without_dims(self) -> None:
         # 3-D DataArray with no 'x'/'y' dims; calling public API without dims must raise
+        """Verify that higher-dimensional inputs without explicit fit-plane dims are rejected."""
         arr = xr.DataArray(np.zeros((2, 8, 9)), dims=("t", "j", "i"))
         with pytest.raises(ValueError, match=r"ndim != 2.*specify two dims"):
             fit_multi_gaussian2d(arr, n_components=1)
 
     def test_public_api_n_components_must_be_positive(self) -> None:
+        """Verify that n_components must be strictly positive."""
         da = xr.DataArray(np.zeros((8, 8), float), dims=("y", "x"))
         with pytest.raises(ValueError, match=r"n_components must be >= 1"):
             fit_multi_gaussian2d(da, n_components=0)
@@ -1995,6 +2052,7 @@ class TestAngleEndToEndFitter(unittest.TestCase):
 
     def test_theta_math_pa_relation_pixel_right_and_left_handed(self):
         # Pixel coords (no world coords) -> right-handed basis by default
+        """Verify the end-to-end relation between math and PA theta outputs on both right- and left-handed pixel axes."""
         ny, nx = 64, 64
         amp, x0, y0 = 1.0, 28.0, 30.0
         sx, sy = 4.0, 2.0
@@ -2451,6 +2509,7 @@ class TestBoundsFwhmMapping:
     def test_paired_fwhm_bounds_map_to_sigma_bounds_per_component(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Verify that paired public FWHM bounds are converted into per-component sigma bounds before optimization."""
         seen: dict[str, dict] = {}
 
         # Keep original so we can forward calls not targeting the plane wrapper
@@ -2496,6 +2555,7 @@ class TestBoundsFwhmMapping:
 
     @pytest.mark.parametrize("key", ["fwhm_major", "fwhm_minor"])
     def test_unpaired_public_fwhm_bound_raises(self, key: str) -> None:
+        """Verify that callers cannot specify only one of the paired public FWHM bounds."""
         da = xr.DataArray(np.zeros((7, 7), dtype=float), dims=("y", "x"))
         init = np.array([[1.0, 3.0, 3.0, 1.2, 1.1, 0.0]], dtype=float)
 
@@ -2512,6 +2572,7 @@ class TestBoundsFwhmMapping:
             )
 
     def test_public_theta_bound_raises(self) -> None:
+        """Verify that public theta bounds are rejected by the current width-parameterized API."""
         da = xr.DataArray(np.zeros((7, 7), dtype=float), dims=("y", "x"))
         init = np.array([[1.0, 3.0, 3.0, 1.2, 1.1, 0.0]], dtype=float)
 
@@ -2528,6 +2589,7 @@ class TestBoundsFwhmMapping:
             )
 
     def test_overlapping_ordered_public_fwhm_bounds_are_allowed(self) -> None:
+        """Verify that ordered but overlapping public FWHM intervals are accepted."""
         seen: dict[str, dict] = {}
         orig_apply_ufunc = xr.apply_ufunc
 
@@ -2566,6 +2628,7 @@ class TestBoundsFwhmMapping:
             monkeypatch.undo()
 
     def test_inconsistent_public_fwhm_bounds_raise(self) -> None:
+        """Verify that public FWHM bounds fail when major-axis intervals drop below the paired minor-axis intervals."""
         da = xr.DataArray(np.zeros((7, 7), dtype=float), dims=("y", "x"))
         init = np.array([[1.0, 3.0, 3.0, 1.2, 1.1, 0.0]], dtype=float)
 
@@ -2592,6 +2655,7 @@ class TestInitialGuessesFwhmMinorMappingPublicAPI:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Build a tiny scene
+        """Verify that list-of-dicts initial guesses map public fwhm_minor onto the optimizer's sigma_y parameter."""
         ny, nx = 12, 13
         y, x = np.mgrid[0:ny, 0:nx]
         z = 0.05 + np.exp(-((x - 6.0) ** 2 + (y - 5.0) ** 2) / (2 * 2.0**2))
@@ -2782,6 +2846,7 @@ class TestAutoSeedingPixelElsePublicAPI:
 
 class TestResultMetadataShortener:
     def test_coords_repr_truncated_when_shape_property_raises(self) -> None:
+        """Verify that coordinate-repr shortening survives coordinate objects whose shape property raises."""
         class EvilCoords:
             @property
             def shape(self):
@@ -2823,6 +2888,7 @@ class TestResultMetadataShortener:
 class TestWorldSeeding:
     def test_autoseed_uses_world_axes_and_recovers_params(self) -> None:
         # Synthetic single Gaussian in WORLD coords (not pixel indices)
+        """Verify that automatic seeding uses world-coordinate axes rather than pixel indices when true world axes are present."""
         nx = ny = 129
         x = np.linspace(-nx + 1, nx - 1, nx, dtype=float)
         y = np.linspace(-ny + 1, ny - 1, ny, dtype=float)
