@@ -4353,15 +4353,10 @@ def plot_components(
     ax0.set_xlabel(dim_x)
     ax0.set_ylabel(dim_y)
 
-    # Pick overlay frame to match the axes:
-    # pixel-like dims → use pixel frame; otherwise assume world.
-    def _dims_are_pixel(dims):
-        dl = tuple(n.lower() for n in dims)
-        return dl in {("x", "y"), ("i", "j"), ("row", "col"), ("pixel_x", "pixel_y")}
-
-    frame_for_overlay = "pixel" if _dims_are_pixel(dims) else "world"
-
-    # Use the same frame as the axes: world if we're plotting with coord arrays, else pixel
+    # Use the same frame as the axes: world if we're plotting with coordinate
+    # arrays, otherwise pixel. This avoids reinterpreting the caller's raw
+    # ``dims`` argument and keeps the overlay frame tied to the already-resolved
+    # plotted axes.
     frame_for_overlay = "world" if use_world else "pixel"
 
     overlay_fit_components(

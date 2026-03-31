@@ -990,6 +990,28 @@ class TestPlotHelper:
         # No indexer; 2D input hits the else branch
         plot_components(img, ds, dims=("x", "y"), indexer=None, show_residual=True)
 
+    def test_plot_components_defaults_dims_for_2d_input(self, monkeypatch) -> None:
+        """Verify that plot_components resolves the plot-plane dims itself when callers leave ``dims`` unset."""
+        matplotlib.use("Agg", force=True)
+
+        ny, nx = 40, 40
+        y, x = np.mgrid[0:ny, 0:nx]
+        z = 0.1 + np.exp(-((x - 20) ** 2 + (y - 22) ** 2) / (2 * 3.0**2))
+        img = xr.DataArray(z, dims=("y", "x"))
+
+        init = np.array([[1.0, 20.0, 22.0, 3.0, 3.0, 0.0]], float)
+        ds = fit_multi_gaussian2d(
+            img,
+            n_components=1,
+            initial_guesses=init,
+            return_residual=True,
+            coord_type="pixel",
+        )
+
+        monkeypatch.setattr(plt, "show", lambda *a, **k: None, raising=False)
+
+        plot_components(img, ds, dims=None, indexer=None, show_residual=True)
+
     def test_plot_components_raises_when_result_missing_required_var(
         self, monkeypatch
     ) -> None:
