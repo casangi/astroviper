@@ -220,7 +220,9 @@ class TestSuccess:
 
 
 class TestInputs:
-    def test_raw_numpy_array_requires_unlabeled_axis_order_when_dims_omitted(self) -> None:
+    def test_raw_numpy_array_requires_unlabeled_axis_order_when_dims_omitted(
+        self,
+    ) -> None:
         """Verify that ambiguous unlabeled raw 2-D arrays now fail fast unless callers declare the axis-order contract."""
         ny, nx = 32, 33
         comps = [dict(amp=1.0, x0=16.0, y0=15.0, sigma_x=3.0, sigma_y=3.0, theta=0.0)]
@@ -1096,7 +1098,6 @@ class TestPlotHelper:
 
 class TestNumPyFitting:  # (unittest.TestCase):
     def test_min_threshold_masks_pixels_partial(self) -> None:
-
         """Verify that a lower threshold masks only part of the plane instead of acting as an all-or-nothing cut."""
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
@@ -1120,7 +1121,6 @@ class TestNumPyFitting:  # (unittest.TestCase):
         assert 0 < above < z.size
 
     def test_max_threshold_masks_pixels_partial(self) -> None:
-
         """Verify that an upper threshold masks only part of the plane instead of removing the full image."""
         ny, nx = 64, 64
         y, x = np.mgrid[0:ny, 0:nx]
@@ -1622,6 +1622,7 @@ class TestNumPyFitting:  # (unittest.TestCase):
         assert np.isfinite(x0w) and np.isfinite(y0w)
         assert min(xw) - 1e-9 <= x0w <= max(xw) + 1e-9
         assert min(yw) - 1e-9 <= y0w <= max(yw) + 1e-9
+
 
 class TestAPIHelpers:
     def test_init_components_array_wrong_shape_raises(self) -> None:
@@ -2809,6 +2810,7 @@ class TestAutoSeedingPixelElsePublicAPI:
 class TestResultMetadataShortener:
     def test_coords_repr_truncated_when_shape_property_raises(self) -> None:
         """Verify that coordinate-repr shortening survives coordinate objects whose shape property raises."""
+
         class EvilCoords:
             @property
             def shape(self):
