@@ -21,6 +21,7 @@ from astroviper.utils.data_group_tools import (
 import copy
 import toolviper.utils.logger as logger
 
+
 def calculate_imaging_weights(
     ps_xdt: xr.DataTree,
     img_xds: xr.Dataset,
@@ -111,7 +112,7 @@ def calculate_imaging_weights(
     assert check_imaging_weights_params(
         _imaging_weights_params
     ), "######### ERROR: imaging_weights_params checking failed"
-    
+
     ms_data_group_in, ms_data_group_out = create_ps_xdt_data_groups_in_and_out(
         ps_xdt,
         data_group_in_name=ms_data_group_in_name,
@@ -122,15 +123,17 @@ def calculate_imaging_weights(
 
     if _imaging_weights_params["weighting"] == "natural":
         ms_data_group_out["weight_imaging"] = ms_data_group_in["weight"]
-        logger.debug("Calculating natural imaging weights (no rescaling of data weights).")
+        logger.debug(
+            "Calculating natural imaging weights (no rescaling of data weights)."
+        )
         modify_data_groups_ps_xdt(
             ps_xdt,
             data_group_out_name=ms_data_group_out_name,
             data_group_out=ms_data_group_out,
             description="Natural imaging weights; data weights used directly with no rescaling.",
         )
-        return 
-    
+        return
+
     # Briggs weighting requires calculating the weight-density grid and robust factors, so we proceed with gridding and degridding.
     # Grid Weights
     n_uv = np.array([img_xds.sizes["l"], img_xds.sizes["m"]])
@@ -235,4 +238,4 @@ def calculate_imaging_weights(
     if return_weight_density_grid:
         return weight_density_grid
     else:
-        return 
+        return

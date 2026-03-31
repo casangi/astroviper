@@ -1,5 +1,6 @@
 import toolviper.utils.logger as logger
 
+
 def check_params(
     parm_dict,
     string_key,
@@ -209,4 +210,3 @@ def lists_overlap(a, b):
         ``True`` if the lists have a non-empty intersection.
     """
     return bool(set(a) & set(b))
-

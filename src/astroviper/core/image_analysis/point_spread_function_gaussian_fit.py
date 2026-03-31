@@ -9,7 +9,6 @@ from astroviper.utils.data_group_tools import (
     modify_data_groups_xds,
 )
 
-
 FWHM_factor = 2.355  # approx 2*sqrt(2*ln(2))
 beam_initial_guess = [2.5, 2.5, 0.0]  # initial guess for [bmaj, bmin, pa]
 expand_pixel = 5  # expand the fitting window by this many pixels on each side
@@ -19,13 +18,15 @@ def point_spread_function_gaussian_fit(
     img_xds: xr.Dataset,
     image_data_group_in_name="image",
     image_data_group_out_name="image",
-    image_data_group_out_modified={"beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"},    
+    image_data_group_out_modified={
+        "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
+    },
     overwrite=True,
     npix_window: tuple = (41, 41),
     sampling: tuple = (55, 55),
     cutoff: float = 0.35,
-    interpolation_method: str = "splinef2d"
-): 
+    interpolation_method: str = "splinef2d",
+):
     """
     fit 2D gaussian to psf
 
@@ -71,7 +72,7 @@ def point_spread_function_gaussian_fit(
         raise TypeError("sampling must be integers")
     if cutoff < 0:
         raise ValueError("cutoff must be non-negative")
-    
+
     image_data_group_in, image_data_group_out = create_data_groups_in_and_out(
         img_xds,
         data_group_in_name=image_data_group_in_name,
@@ -87,7 +88,12 @@ def point_spread_function_gaussian_fit(
     npix_window = np.array(npix_window)
 
     # pixel increments (radians)
-    delta = np.array([img_xds[psf_name].l[1] - img_xds[psf_name].l[0], img_xds[psf_name].m[1] - img_xds[psf_name].m[0]])
+    delta = np.array(
+        [
+            img_xds[psf_name].l[1] - img_xds[psf_name].l[0],
+            img_xds[psf_name].m[1] - img_xds[psf_name].m[0],
+        ]
+    )
     # To make fitting result expressed in arcsecond uncomment the below
     #    * 3600
     #    * 180
@@ -118,7 +124,13 @@ def point_spread_function_gaussian_fit(
         trc[1] = main_lobe_im.shape[4] - 1
 
     ellipse_params = psf_gaussian_fit_core(
-        img_xds[psf_name].values, blc, trc, sampling, cutoff, delta, interpolation_method
+        img_xds[psf_name].values,
+        blc,
+        trc,
+        sampling,
+        cutoff,
+        delta,
+        interpolation_method,
     )
 
     # Uncomment line below to change beam_param units to arcsec and deg
@@ -126,14 +138,17 @@ def point_spread_function_gaussian_fit(
     # Converting to radian for storing to the xradio image
     # ellipse_params[..., :2] = np.deg2rad(ellipse_params[..., :2] / 3600.0)
     # ellipse_params[..., 2] = np.deg2rad(ellipse_params[..., 2])
-    
+
     img_xds = img_xds.assign_coords(
-        beam_params_label=['major', 'minor', 'pa'],
+        beam_params_label=["major", "minor", "pa"],
     )
 
-    img_xds[image_data_group_out["beam_fit_params_point_spread_function"]] = xr.DataArray(
-        ellipse_params, dims=["time", "frequency", "polarization", "beam_params"],
-        attrs={"unit": "rad"}
+    img_xds[image_data_group_out["beam_fit_params_point_spread_function"]] = (
+        xr.DataArray(
+            ellipse_params,
+            dims=["time", "frequency", "polarization", "beam_params"],
+            attrs={"unit": "rad"},
+        )
     )
 
     modify_data_groups_xds(
@@ -144,6 +159,7 @@ def point_spread_function_gaussian_fit(
     )
 
     return img_xds
+
 
 def _get_main_lobe_bounding_box(masked_psf, max_coords):
     """
@@ -205,7 +221,7 @@ def extract_main_lobe(npix_window, threshold, psf_image):
     itm, ifrq, ipol, peak_y, peak_x = np.unravel_index(
         np.argmax(psf_image), psf_image.shape
     )
-    #print("peak_x, peak_y=", peak_x, peak_y)
+    # print("peak_x, peak_y=", peak_x, peak_y)
 
     # set window outside of psf image to 0
     windowed_psf = np.zeros_like(psf_image)
@@ -259,6 +275,7 @@ def extract_main_lobe(npix_window, threshold, psf_image):
     # print("extract_main_lobe: blc, trc=", blc, trc)
     return main_lobe_only, blc, trc, max_sidelobe
 
+
 def beam_chi2(params, psf_ravel_masked, x_grid, y_grid, psf_mask):
     """
     Chi-squared function for beam fitting.
@@ -272,11 +289,13 @@ def beam_chi2(params, psf_ravel_masked, x_grid, y_grid, psf_mask):
     sin_r = np.sin(rotation)
     xp = x_grid * cos_r - y_grid * sin_r
     yp = x_grid * sin_r + y_grid * cos_r
-    gaussian = np.exp(-(xp ** 2 / width_x ** 2 + yp ** 2 / width_y ** 2) / 2.0)
+    gaussian = np.exp(-(xp**2 / width_x**2 + yp**2 / width_y**2) / 2.0)
     return np.sum((gaussian.ravel()[psf_mask] - psf_ravel_masked) ** 2)
 
 
-def psf_gaussian_fit_core(image_to_fit, blc, trc, sampling, cutoff, delta, interpolation_method="linear"):
+def psf_gaussian_fit_core(
+    image_to_fit, blc, trc, sampling, cutoff, delta, interpolation_method="linear"
+):
     """
     core function to fit gaussian to psf
     Parameters
@@ -323,8 +342,14 @@ def psf_gaussian_fit_core(image_to_fit, blc, trc, sampling, cutoff, delta, inter
     half_s = sampling // 2
     ix = np.arange(sampling[0]) - half_s[0]
     iy = np.arange(sampling[1]) - half_s[1]
-    x_grid = np.repeat(ix, sampling[1]).reshape(sampling[0], sampling[1]).astype(np.float64)
-    y_grid = np.repeat(iy, sampling[0]).reshape(sampling[1], sampling[0]).T.astype(np.float64)
+    x_grid = (
+        np.repeat(ix, sampling[1]).reshape(sampling[0], sampling[1]).astype(np.float64)
+    )
+    y_grid = (
+        np.repeat(iy, sampling[0])
+        .reshape(sampling[1], sampling[0])
+        .T.astype(np.float64)
+    )
 
     bound = [(None, None), (None, None), (-np.pi / 2, np.pi / 2)]
 

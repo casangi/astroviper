@@ -192,7 +192,10 @@ def add_uv_sampling_grid_single_field(
     ms_data_group_in_name: str = "base",
     img_data_group_in_name: str = "single_field",
     img_data_group_out_name: str = "single_field",
-    img_data_group_out_modified: dict = {"uv_sampling": "UV_SAMPLING", "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION"},
+    img_data_group_out_modified: dict = {
+        "uv_sampling": "UV_SAMPLING",
+        "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
+    },
     overwrite: bool = True,
     chan_mode: str = "cube",
     fft_padding: float = 1.2,
@@ -266,9 +269,9 @@ def add_uv_sampling_grid_single_field(
     """
     # Deep copy so that inputs are not modified
     _img_data_group_out_modified = copy.deepcopy(img_data_group_out_modified)
-    
+
     ms_data_group_in = ms_xdt.attrs["data_groups"][ms_data_group_in_name]
-    
+
     img_data_group_in, img_data_group_out = create_data_groups_in_and_out(
         img_xds,
         data_group_in_name=img_data_group_in_name,
@@ -290,22 +293,27 @@ def add_uv_sampling_grid_single_field(
     n_imag_pol = weight_imaging.shape[3]
     pol_map = (np.arange(0, n_imag_pol)).astype(int)
 
-    #Time Map #Currently not implemented.
+    # Time Map #Currently not implemented.
     n_image_time = 1
     n_time = ms_xdt.sizes["time"]
     time_map = (np.zeros(n_time)).astype(int)
 
-    n_uv = (fft_padding * np.array([img_xds.sizes["l"], img_xds.sizes["m"]])).astype(int)
+    n_uv = (fft_padding * np.array([img_xds.sizes["l"], img_xds.sizes["m"]])).astype(
+        int
+    )
     delta_lm = img_xds.xr_img.get_lm_cell_size()
 
     if img_data_group_out["uv_sampling"] not in img_xds:
         img_xds[img_data_group_out["uv_sampling"]] = xr.DataArray(
-            np.zeros((n_image_time, n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128),
-            dims=["time","frequency", "polarization", "u", "v"],
+            np.zeros(
+                (n_image_time, n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]),
+                dtype=np.complex128,
+            ),
+            dims=["time", "frequency", "polarization", "u", "v"],
         )
         img_xds[img_data_group_out["uv_sampling_normalization"]] = xr.DataArray(
             np.zeros((n_image_time, n_imag_chan, n_imag_pol), dtype=np.double),
-            dims=["time","frequency", "polarization"],
+            dims=["time", "frequency", "polarization"],
         )
 
     grid = img_xds[img_data_group_out["uv_sampling"]].values
@@ -318,16 +326,30 @@ def add_uv_sampling_grid_single_field(
 
     cpp_gridder = True
     if cpp_gridder:
-        from astroviper.core.imaging.gridders.prolate_spheroidal_grid_cpp import prolate_spheroidal_grid_uv_sampling
+        from astroviper.core.imaging.gridders.prolate_spheroidal_grid_cpp import (
+            prolate_spheroidal_grid_uv_sampling,
+        )
 
         prolate_spheroidal_grid_uv_sampling(
-                grid, normalization, uvw,
-                frequency_coord, frequency_map, time_map, pol_map,
-                imaging_weight, cgk_1D, n_uv, delta_lm,
-                support=7, oversampling=100,
-            )
+            grid,
+            normalization,
+            uvw,
+            frequency_coord,
+            frequency_map,
+            time_map,
+            pol_map,
+            imaging_weight,
+            cgk_1D,
+            n_uv,
+            delta_lm,
+            support=7,
+            oversampling=100,
+        )
     else:
-        from astroviper.core.imaging.gridders.prolate_spheroidal_grid import prolate_spheroidal_grid_uv_sampling_jit
+        from astroviper.core.imaging.gridders.prolate_spheroidal_grid import (
+            prolate_spheroidal_grid_uv_sampling_jit,
+        )
+
         prolate_spheroidal_grid_uv_sampling_jit(
             grid,
             normalization,
@@ -343,11 +365,10 @@ def add_uv_sampling_grid_single_field(
             support=7,
             oversampling=100,
         )
-    
+
     modify_data_groups_xds(
         img_xds,
         img_data_group_out_name,
         img_data_group_out,
         description="Added UV sampling grid to img_xds with add_uv_sampling_grid_single_field.",
     )
-    
