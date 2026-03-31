@@ -60,7 +60,6 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0)
             ms_data_group_out_modified={"weight_imaging": "WEIGHT_IMAGING"},
         )
         T_weights = time.time() - T_start_weight
-        logger.debug("Calculate imaging weights " + str(time.time() - T_start_weight))
     # Nb Nb handle data_group_out correctly for not is_n_iter_0.
 
     T_start_gcf = time.time()
@@ -105,14 +104,11 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0)
         ],  # Select first since we only have one dish diameter and add time axis.
         dims=("time", "frequency", "polarization", "l", "m"),
     )
-    logger.debug("Calculate primary beam " + str(time.time() - start))
+    T_primary_beam = time.time() - start
 
     # Temp: Add singleton time dim to img_xds for FFT normalization. Need to fix gridders to not require this.
     # del img_xds["time"]
     # img_xds = img_xds.expand_dims(dim="time", axis=0)
-
-    print("1 img_xds ", img_xds)
-    print("*************" * 10)
 
     start_fft_norm = time.time()
     img_xds = ifft_norm_img_xds(
@@ -127,7 +123,6 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0)
         image_data_variables_keep=input_params["image_data_variables_keep"],
     )
     T_fft_norm = time.time() - start_fft_norm
-    logger.debug("9.  fft norm " + str(time.time() - start_fft_norm))
 
     start = time.time()
     img_xds = point_spread_function_gaussian_fit(
@@ -140,12 +135,12 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0)
         overwrite=True,
     )
     T_psf_fit = time.time() - start
-
-    print("2 img_xds ", img_xds)
-
+    
     return_dict = {
         "T_weights": [T_weights],
         "T_make_uv_images_single_field": [T_make_uv_images_single_field],
+        "T_gcf": [T_gcf],
+        "T_primary_beam": [T_primary_beam],
         "T_fft_norm": [T_fft_norm],
         "T_psf_fit": [T_psf_fit],
     }
@@ -155,6 +150,8 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0)
 
     # Add the return dict from make_uv_images_single_field
     return_df = pd.concat([return_df, make_uv_images_single_field_return_df], axis=1)
+    
+    logger.debug("Timing info " + str(return_df))
 
     return img_xds, return_df
 
