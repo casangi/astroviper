@@ -1475,6 +1475,57 @@ def _axis_is_valid(a: np.ndarray) -> bool:
     return np.all(d > 0) or np.all(d < 0)
 
 
+def _prepare_interp_pair(
+    source_axis: np.ndarray,
+    target_axis: np.ndarray,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    Normalize a monotonic interpolation pair so ``np.interp`` sees ascending ``xp``.
+
+    Parameters
+    ----------
+    source_axis : np.ndarray
+        Coordinate values to use as the ``xp`` argument to ``np.interp``.
+    target_axis : np.ndarray
+        Values paired elementwise with ``source_axis`` to use as the ``fp``
+        argument after any required reversal.
+
+    Returns
+    -------
+    tuple[np.ndarray | None, np.ndarray | None]
+        ``(xp, fp)`` suitable for ``np.interp`` when the input axis is strictly
+        monotonic, or ``(None, None)`` when the axis is invalid.
+
+    Notes
+    -----
+    ``np.interp`` requires ``xp`` to be strictly increasing. This helper accepts
+    either ascending or descending physical axes and, for descending input, reverses
+    both ``source_axis`` and ``target_axis`` together so the coordinate mapping is
+    preserved while satisfying the interpolation precondition.
+    """
+    xp = np.asarray(source_axis, dtype=float)
+    fp = np.asarray(target_axis, dtype=float)
+    if (
+        xp.ndim != 1
+        or fp.ndim != 1
+        or xp.size == 0
+        or xp.size != fp.size
+        or not np.all(np.isfinite(xp))
+        or not np.all(np.isfinite(fp))
+    ):
+        return None, None
+    if xp.size >= 2:
+        d_fp = np.diff(fp)
+        if not (np.all(d_fp > 0) or np.all(d_fp < 0)):
+            return None, None
+    if xp.size >= 2 and xp[1] < xp[0]:
+        xp = xp[::-1]
+        fp = fp[::-1]
+    elif xp.size >= 2 and not np.all(np.diff(xp) > 0):
+        return None, None
+    return xp, fp
+
+
 def _extract_1d_coords_for_fit(
     original_input: ArrayOrDA,
     da_tr: xr.DataArray,
@@ -1601,15 +1652,12 @@ def _interp_centers_world(
     """
 
     def _prep(coord: np.ndarray) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        coord = np.asarray(coord, dtype=float)
-        if coord.size < 2 or not np.all(np.isfinite(coord)):
-            return None, None
-        if coord[1] < coord[0]:  # descending → reverse for interp
-            idx = np.arange(coord.size - 1, -1, -1, dtype=float)
-            return idx, coord[::-1]
-        if not np.all(np.diff(coord) > 0):
-            return None, None
-        return np.arange(coord.size, dtype=float), coord
+        # Pixel centers always live on ascending index axes; only the attached world
+        # coordinates may descend. Prepare the pair through the shared helper so the
+        # output remains mathematically equivalent while satisfying np.interp's
+        # strictly increasing-xp requirement.
+        idx = np.arange(np.asarray(coord).size, dtype=float)
+        return _prepare_interp_pair(idx, coord)
 
     idx_x, val_x = _prep(cx)
     idx_y, val_y = _prep(cy)
@@ -2578,11 +2626,22 @@ def _build_published_parameter_dataset(
         ny = y1d.shape[0]
         x_idx_axis = np.arange(nx, dtype=float)
         y_idx_axis = np.arange(ny, dtype=float)
+        # Convert fitted world-coordinate centers back onto pixel-index axes. The
+        # physical world axes may ascend or descend, but np.interp requires an
+        # increasing source axis, so prepare both axis pairs through the shared
+        # monotonic helper before vectorized interpolation.
+        x_interp_src, x_interp_dst = _prepare_interp_pair(x1d, x_idx_axis)
+        y_interp_src, y_interp_dst = _prepare_interp_pair(y1d, y_idx_axis)
+        if x_interp_src is None or y_interp_src is None:
+            raise ValueError(
+                "world_mode requires strictly monotonic finite coordinate axes "
+                "for world-to-pixel center interpolation."
+            )
         x0_pixel = xr.apply_ufunc(
             np.interp,
             x0,
-            xr.DataArray(x1d, dims=[context.dim_x]),
-            xr.DataArray(x_idx_axis, dims=[context.dim_x]),
+            xr.DataArray(x_interp_src, dims=[context.dim_x]),
+            xr.DataArray(x_interp_dst, dims=[context.dim_x]),
             input_core_dims=[["component"], [context.dim_x], [context.dim_x]],
             output_core_dims=[["component"]],
             vectorize=True,
@@ -2592,8 +2651,8 @@ def _build_published_parameter_dataset(
         y0_pixel = xr.apply_ufunc(
             np.interp,
             y0,
-            xr.DataArray(y1d, dims=[context.dim_y]),
-            xr.DataArray(y_idx_axis, dims=[context.dim_y]),
+            xr.DataArray(y_interp_src, dims=[context.dim_y]),
+            xr.DataArray(y_interp_dst, dims=[context.dim_y]),
             input_core_dims=[["component"], [context.dim_y], [context.dim_y]],
             output_core_dims=[["component"]],
             vectorize=True,
@@ -3217,15 +3276,8 @@ def _attach_world_center_outputs(
     def _prep(
         coord: np.ndarray,
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        coord = np.asarray(coord)
-        if coord.ndim != 1 or coord.size == 0 or not np.all(np.isfinite(coord)):
-            return None, None
-        if coord.size >= 2 and coord[1] < coord[0]:
-            idx = np.arange(coord.size - 1, -1, -1, dtype=float)
-            return idx, coord[::-1]
-        if not np.all(np.diff(coord) > 0):
-            return None, None
-        return np.arange(coord.size, dtype=float), coord
+        idx = np.arange(np.asarray(coord).size, dtype=float)
+        return _prepare_interp_pair(idx, coord)
 
     return _interp_centers_world(
         ds,
