@@ -186,6 +186,8 @@ class TestSuccess:
         )
         assert "model" in ds1 and "residual" not in ds1
         assert "x0_world" in ds1 and "y0_world" in ds1
+        assert float(ds1["x0_pixel"].values[0]) == pytest.approx(20.0, abs=0.8)
+        assert float(ds1["y0_pixel"].values[0]) == pytest.approx(18.0, abs=0.8)
 
         ds2 = fit_multi_gaussian2d(
             da2,
@@ -2317,8 +2319,8 @@ class TestInnerPrepCoverage:
 
         label, idx, val = calls[1]
         assert label == "descending"
-        assert np.allclose(idx, np.array([2.0, 1.0, 0.0]))
-        assert np.allclose(val, np.array([3.0, 4.0, 5.0]))
+        assert np.allclose(idx, np.array([0.0, 1.0, 2.0]))
+        assert np.allclose(val, np.array([5.0, 4.0, 3.0]))
 
         label, idx, val = calls[2]
         assert label == "non_strict" and idx is None and val is None
