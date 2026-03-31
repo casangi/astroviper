@@ -6,8 +6,6 @@ import sys
 import os
 import shutil
 import toolviper
-from xradio.image import load_image
-
 import os
 import numpy as np
 from xradio.measurement_set import open_processing_set
@@ -15,7 +13,6 @@ from xradio.measurement_set import open_processing_set
 
 def test_single_field_imaging():
     from xradio.measurement_set import open_processing_set
-    from xradio.image import load_image, write_image, open_image
     from toolviper.utils.data import download, update
 
     update()
@@ -64,7 +61,6 @@ def test_single_field_imaging():
     ps_store = "twhya_selfcal_5chans_lsrk_compare_weights.ps.zarr"
     image_store = "twhya_selfcal_5chans_lsrk_compare_weights_astroviper.img.zarr"
 
-    os.system("rm -rf ")
     ps_single_pol_xdt = open_processing_set(
         "twhya_selfcal_5chans_lsrk_compare_weights.ps.zarr"
     )
