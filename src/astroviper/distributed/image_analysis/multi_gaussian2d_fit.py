@@ -2177,7 +2177,9 @@ def _prepare_fit_configuration(
         Bounds mapping accepted by :func:`fit_multi_gaussian2d`.
     initial_is_fwhm : bool
         Whether array-form width guesses should be interpreted as FWHM and converted
-        to sigma before optimization.
+        to sigma before optimization. Single-component flat ``(6,)`` array-like
+        guesses are normalized to ``(1, 6)`` before this conversion so they follow
+        the same width-handling path as explicit two-dimensional component arrays.
     angle : str
         Public angle convention selector. Supported choices are ``"math"``,
         ``"pa"``, and ``"auto"``.
@@ -2207,26 +2209,65 @@ def _prepare_fit_configuration(
     rejected because the optimizer does not parameterize the major-axis angle
     directly.
     """
+    def _convert_array_like_widths_to_sigma(
+        init_like: Union[np.ndarray, Sequence[Number]],
+    ) -> Union[np.ndarray, Sequence[Number]]:
+        """
+        Convert array-like FWHM width guesses into sigma units for the optimizer.
+
+        Parameters
+        ----------
+        init_like : np.ndarray | Sequence[Number]
+            Array-like initial-guess payload. Supported forms are an explicit
+            ``(n_components, 6)`` array or, when ``n_components == 1``, a flat
+            length-6 array-like value describing one component.
+
+        Returns
+        -------
+        np.ndarray | Sequence[Number]
+            Converted ``numpy`` array when the payload matches a supported packed
+            component layout, otherwise the original object unchanged.
+
+        Notes
+        -----
+        This helper intentionally mirrors the flat-single-component normalization
+        accepted later by :func:`_normalize_initial_guesses` so public FWHM guesses
+        are converted consistently before the optimizer sees them.
+        """
+        arr = np.asarray(init_like, dtype=float)
+        if arr.shape == (6,) and int(n_components) == 1:
+            arr = arr.reshape(1, 6)
+        if arr.shape != (int(n_components), 6):
+            return init_like
+        arr = arr.copy()
+        arr[:, 3] = _sigma_from_fwhm(arr[:, 3])
+        arr[:, 4] = _sigma_from_fwhm(arr[:, 4])
+        return arr
+
     ig = initial_guesses
-    if (
-        ig is not None
-        and initial_is_fwhm
-        and isinstance(ig, np.ndarray)
-        and ig.shape == (int(n_components), 6)
-    ):
-        ig = ig.copy()
-        ig[:, 3] = _sigma_from_fwhm(ig[:, 3])
-        ig[:, 4] = _sigma_from_fwhm(ig[:, 4])
+    if ig is not None and initial_is_fwhm:
+        if isinstance(ig, np.ndarray):
+            ig = _convert_array_like_widths_to_sigma(ig)
+        elif (
+            isinstance(ig, (list, tuple))
+            and len(ig) > 0
+            and not isinstance(ig[0], dict)
+        ):
+            ig = _convert_array_like_widths_to_sigma(ig)
     if (
         isinstance(ig, dict)
         and "components" in ig
-        and isinstance(ig["components"], np.ndarray)
     ):
-        arr = np.asarray(ig["components"], dtype=float)
-        if arr.shape == (int(n_components), 6) and initial_is_fwhm:
-            arr = arr.copy()
-            arr[:, 3] = _sigma_from_fwhm(arr[:, 3])
-            arr[:, 4] = _sigma_from_fwhm(arr[:, 4])
+        comps = ig["components"]
+        if initial_is_fwhm and (
+            isinstance(comps, np.ndarray)
+            or (
+                isinstance(comps, (list, tuple))
+                and len(comps) > 0
+                and not isinstance(comps[0], dict)
+            )
+        ):
+            arr = _convert_array_like_widths_to_sigma(comps)
             ig = dict(ig)
             ig["components"] = arr
     elif isinstance(ig, (list, tuple)) and ig and isinstance(ig[0], dict):
