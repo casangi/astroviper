@@ -18,6 +18,7 @@ dependencies = [
   "numpy>=1.20.0",
   "xradio[zarr]>=1.1.0",
   "numba",
+  "opt_einsum"
 ]
 
 [project.optional-dependencies]
