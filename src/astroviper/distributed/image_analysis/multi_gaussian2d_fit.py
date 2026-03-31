@@ -1,6 +1,7 @@
 # file: src/astroviper/fitting/multi_gaussian2d_fit.py
 # 2D gaussian fitter
 # Dave Mehringer
+
 from __future__ import annotations
 
 from dataclasses import dataclass
