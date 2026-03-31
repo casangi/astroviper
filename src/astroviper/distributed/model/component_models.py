@@ -100,7 +100,7 @@ def _coerce_to_xda(
     if dims is None:
         dims = (x_coord, y_coord)
 
-    return xr.DataArray(data, coords={y_coord: y_vals, x_coord: x_vals}, dims=dims)
+    return xr.DataArray(data, coords={x_coord: x_vals, y_coord: y_vals}, dims=dims)
 
 
 def _rotated_coords(
@@ -921,19 +921,19 @@ def make_pt_sources(
 
     out_dtype = np.result_type(xda_in.values, amps_kept)
 
-    # Dimensions
-    height = xda_in.sizes[y_coord]
+    # Public convention in this module is (x, y), so axis 0 follows x.
     width = xda_in.sizes[x_coord]
+    height = xda_in.sizes[y_coord]
 
     # Accumulate amplitudes via bincount
-    lin = yi * width + xi
+    lin = xi * height + yi
     acc = (
         np.bincount(
             lin,
             weights=amps_kept.astype(out_dtype, copy=False),
-            minlength=height * width,
+            minlength=width * height,
         )
-        .reshape(height, width)
+        .reshape(width, height)
         .astype(out_dtype, copy=False)
     )
 
@@ -945,8 +945,8 @@ def make_pt_sources(
 
     source_array = xr.DataArray(
         src_data,
-        coords={y_coord: xda_in[y_coord], x_coord: xda_in[x_coord]},
-        dims=(y_coord, x_coord),
+        coords={x_coord: xda_in[x_coord], y_coord: xda_in[y_coord]},
+        dims=(x_coord, y_coord),
     )
 
     xda_out = _apply_source_array(xda_in, source_array, add=add)

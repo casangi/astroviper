@@ -214,12 +214,26 @@ class TestSuccess:
 
 
 class TestInputs:
-    def test_accepts_raw_numpy_array(self) -> None:
+    def test_raw_numpy_array_requires_unlabeled_axis_order_when_dims_omitted(self) -> None:
         ny, nx = 32, 33
         comps = [dict(amp=1.0, x0=16.0, y0=15.0, sigma_x=3.0, sigma_y=3.0, theta=0.0)]
         arr = _scene(ny, nx, comps).values  # plain ndarray
+        with pytest.raises(ValueError, match="unlabeled_axis_order must be specified"):
+            fit_multi_gaussian2d(
+                arr,
+                n_components=1,
+                initial_guesses=np.array([[1, 16, 15, 3, 3, 0.0]]),
+            )
+
+    def test_accepts_raw_numpy_array_with_unlabeled_yx_axis_order(self) -> None:
+        ny, nx = 32, 33
+        comps = [dict(amp=1.0, x0=16.0, y0=15.0, sigma_x=3.0, sigma_y=3.0, theta=0.0)]
+        arr = _scene(ny, nx, comps).values
         ds = fit_multi_gaussian2d(
-            arr, n_components=1, initial_guesses=np.array([[1, 16, 15, 3, 3, 0.0]])
+            arr,
+            n_components=1,
+            initial_guesses=np.array([[1, 16, 15, 3, 3, 0.0]], float),
+            unlabeled_axis_order="yx",
         )
         assert bool(ds.success) is True
 
@@ -238,6 +252,39 @@ class TestInputs:
         assert float(ds["x0_pixel"].values[0]) == pytest.approx(16.0, abs=0.8)
         assert float(ds["y0_pixel"].values[0]) == pytest.approx(15.0, abs=0.8)
 
+    def test_raw_numpy_array_with_explicit_dims_does_not_need_axis_order(self) -> None:
+        ny, nx = 32, 33
+        comps = [dict(amp=1.0, x0=16.0, y0=15.0, sigma_x=3.0, sigma_y=3.0, theta=0.0)]
+        arr = _scene(ny, nx, comps).values
+        ds = fit_multi_gaussian2d(
+            arr,
+            n_components=1,
+            dims=(1, 0),
+            initial_guesses=np.array([[1.0, 16.0, 15.0, 3.0, 3.0, 0.0]], float),
+        )
+        assert bool(ds.success) is True
+        assert float(ds["x0_pixel"].values[0]) == pytest.approx(16.0, abs=0.8)
+        assert float(ds["y0_pixel"].values[0]) == pytest.approx(15.0, abs=0.8)
+
+    def test_raw_xy_mask_tracks_unlabeled_xy_input_order(self) -> None:
+        ny, nx = 32, 33
+        comps = [dict(amp=1.0, x0=16.0, y0=15.0, sigma_x=3.0, sigma_y=3.0, theta=0.0)]
+        # The public raw-array contract for this test is semantic (x, y), so both
+        # the data and the mask are supplied with axis 0 = x and axis 1 = y.
+        arr_xy = _scene(ny, nx, comps).values.T
+        mask_xy = np.zeros_like(arr_xy, dtype=bool)
+        mask_xy[14:19, 13:18] = True
+        ds = fit_multi_gaussian2d(
+            arr_xy,
+            n_components=1,
+            initial_guesses=np.array([[1.0, 16.0, 15.0, 3.0, 3.0, 0.0]], float),
+            mask=mask_xy,
+            unlabeled_axis_order="xy",
+        )
+        assert bool(ds.success) is True
+        assert float(ds["x0_pixel"].values[0]) == pytest.approx(16.0, abs=0.8)
+        assert float(ds["y0_pixel"].values[0]) == pytest.approx(15.0, abs=0.8)
+
     @pytest.mark.skipif(da is None, reason="dask.array not available")
     def test_accepts_bare_dask_array(self) -> None:
         ny, nx = 40, 40
@@ -245,7 +292,10 @@ class TestInputs:
         np_img = _scene(ny, nx, comps, offset=0.1, noise=0.02, seed=1).data
         darr = da.from_array(np_img, chunks=(ny, nx))
         ds = fit_multi_gaussian2d(
-            darr, n_components=1, initial_guesses=np.array([[1, 20, 20, 3, 3, 0.0]])
+            darr,
+            n_components=1,
+            initial_guesses=np.array([[1, 20, 20, 3, 3, 0.0]]),
+            unlabeled_axis_order="yx",
         )
         assert bool(ds.success) is True
 
