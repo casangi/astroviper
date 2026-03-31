@@ -1192,7 +1192,7 @@ def _resolve_dims(
     dims: Optional[Sequence[Union[str, int]]],
     *,
     unlabeled_input: bool = False,
-    unlabeled_axis_order: str = "yx",
+    unlabeled_axis_order: Optional[str] = None,
 ) -> Tuple[str, str]:
     """
     Resolve the two dimensions that define the fit plane.
@@ -1207,10 +1207,12 @@ def _resolve_dims(
     unlabeled_input : bool, optional
         Whether ``da`` originated from a raw NumPy/Dask input without semantic
         dimension names.
-    unlabeled_axis_order : {"yx", "xy"}, optional
+    unlabeled_axis_order : {"yx", "xy"} | None, optional
         Semantic interpretation to apply for unlabeled 2-D arrays when ``dims`` is
         omitted. ``"yx"`` means stored rows/columns order; ``"xy"`` means the first
-        axis is interpreted semantically as x and the second as y.
+        axis is interpreted semantically as x and the second as y. This must be
+        provided explicitly whenever an unlabeled raw 2-D array would otherwise be
+        ambiguous.
 
     Returns
     -------
@@ -1223,8 +1225,8 @@ def _resolve_dims(
     Otherwise, for plain 2-D arrays it assumes the last dimension is x and the
     second-last is y.
     """
-    axis_order = (unlabeled_axis_order or "yx").lower()
-    if axis_order not in ("yx", "xy"):
+    axis_order = None if unlabeled_axis_order is None else unlabeled_axis_order.lower()
+    if axis_order not in (None, "yx", "xy"):
         raise ValueError("unlabeled_axis_order must be either 'yx' or 'xy'.")
 
     if dims is None:
@@ -1232,6 +1234,11 @@ def _resolve_dims(
         if "x" in da.dims and "y" in da.dims:
             return "x", "y"
         if da.ndim == 2:
+            if unlabeled_input and axis_order is None:
+                raise ValueError(
+                    "unlabeled_axis_order must be specified for unlabeled raw 2-D "
+                    "arrays when dims is omitted."
+                )
             if unlabeled_input and axis_order == "xy":
                 # Allow callers with unlabeled arrays that already use semantic
                 # (x, y) ordering to declare that contract explicitly.
@@ -1904,7 +1911,7 @@ class _FitExecutionContext:
 def _build_fit_execution_context(
     data: ArrayOrDA,
     dims: Optional[Sequence[Union[str, int]]],
-    unlabeled_axis_order: str = "yx",
+    unlabeled_axis_order: Optional[str] = None,
 ) -> _FitExecutionContext:
     """
     Normalize the public input into a stable fit-plane context.
@@ -1916,9 +1923,9 @@ def _build_fit_execution_context(
     dims : Sequence[str | int] | None
         Optional dimension specifier for the fit plane. Supported choices are
         explicit dimension names or integer dimension indices.
-    unlabeled_axis_order : {"yx", "xy"}, optional
+    unlabeled_axis_order : {"yx", "xy"} | None, optional
         Semantic axis-order contract for unlabeled NumPy/Dask inputs when
-        ``dims`` is omitted.
+        ``dims`` is omitted. This is ignored for labeled ``xarray`` inputs.
 
     Returns
     -------
@@ -2010,6 +2017,8 @@ def _resolve_fit_mask(
     da_tr: xr.DataArray,
     dim_y: str,
     dim_x: str,
+    *,
+    raw_plane_dims: Optional[Sequence[str]] = None,
 ) -> xr.DataArray:
     """
     Normalize the public mask argument into a boolean DataArray aligned to the fit grid.
@@ -2026,6 +2035,11 @@ def _resolve_fit_mask(
         Name of the y dimension for the fit plane.
     dim_x : str
         Name of the x dimension for the fit plane.
+    raw_plane_dims : Sequence[str] | None, optional
+        Original public plane-dimension order for an accompanying unlabeled raw
+        2-D mask. When provided, a plain 2-D mask is first labeled with this
+        public x/y order so xarray can apply the same alignment/transposition that
+        was already used to normalize the raw data into ``da_tr``.
 
     Returns
     -------
@@ -2035,8 +2049,11 @@ def _resolve_fit_mask(
     Notes
     -----
     String masks are resolved through the image-selection helper. Plain arrays are
-    wrapped with either the fit-plane dims ``(y, x)`` or the full data dims
-    depending on their rank before xarray alignment handles broadcasting.
+    wrapped with either the fit-plane dims or the full data dims depending on
+    their rank before xarray alignment handles broadcasting. The fitter always
+    consumes trailing ``(y, x)`` planes internally, but raw unlabeled masks must
+    first be labeled in the same public plane order as the raw data so they
+    undergo the same semantic x/y-to-row/column conversion during alignment.
     """
     if mask is None:
         return xr.ones_like(da_tr, dtype=bool)
@@ -2050,8 +2067,10 @@ def _resolve_fit_mask(
                 )
             mda = mda["mask"]
         if isinstance(mda, np.ndarray):
-            # Plain 2-D masks are interpreted in the same stored plane order as
-            # the image data: rows then columns, i.e. (y, x).
+            # String masks are resolved against da_tr, which already uses the
+            # fitter's internal trailing (y, x) storage order. If the selection
+            # helper hands us back a bare ndarray, its axes therefore already
+            # match row/column order and can be labeled directly as (y, x).
             mda = xr.DataArray(
                 mda, dims=[dim_y, dim_x] if mda.ndim == 2 else da_tr.dims
             )
@@ -2061,8 +2080,18 @@ def _resolve_fit_mask(
         mda = mask
     else:
         if getattr(mask, "ndim", None) == 2:
-            # Match the internal 2-D image plane storage order (y, x).
-            mda = xr.DataArray(mask, dims=[dim_y, dim_x])
+            if raw_plane_dims is not None:
+                # Plain 2-D masks supplied alongside raw input data are assumed to
+                # use the same public plane order as that raw data. Label them with
+                # the original public x/y dim order here and let xarray alignment
+                # apply the same public -> internal (y, x) transpose that created
+                # da_tr from the raw image.
+                mda = xr.DataArray(mask, dims=list(raw_plane_dims))
+            else:
+                # Without raw-plane context we only know about the internal fit
+                # view, so fall back to treating the bare mask as already stored in
+                # row/column order.
+                mda = xr.DataArray(mask, dims=[dim_y, dim_x])
         else:
             mda = xr.DataArray(mask, dims=da_tr.dims)
 
@@ -3460,7 +3489,7 @@ def fit_multi_gaussian2d(
     return_residual: bool = True,
     angle: str = "math",
     coord_type: str = "world",
-    unlabeled_axis_order: str = "yx",
+    unlabeled_axis_order: Optional[str] = None,
     coords: Optional[Sequence[np.ndarray]] = None,
 ) -> xr.Dataset:
     """
@@ -3543,8 +3572,9 @@ def fit_multi_gaussian2d(
         • "pixel": the optimizer evaluates the Gaussian model on zero-based pixel-index axes.
       When coordinate metadata are available, the returned dataset may still report both pixel-space and world-space component parameters; ``coord_type`` only selects the native frame in which the fit is performed.
       Ignored for NumPy/Dask inputs.
-    unlabeled_axis_order: {"yx","xy"}, default "yx"
+    unlabeled_axis_order: {"yx","xy"} | None, default None
       Applies only when ``data`` is a NumPy/Dask array and ``dims`` is omitted.
+      In that ambiguous raw-array case the caller must specify this explicitly:
         • "yx": interpret the stored 2-D plane as rows then columns, so the last axis is x and the second-last is y.
         • "xy": interpret the stored 2-D plane semantically as x then y, so the first axis is x and the second is y.
       Ignored for labeled ``xarray.DataArray`` inputs and for calls that already
@@ -3691,12 +3721,31 @@ def fit_multi_gaussian2d(
     """
     if n_components < 1:
         raise ValueError("n_components must be >= 1.")
-    # Stage 1: normalize the input layout and derive the fit-plane frame metadata.
+    # Stage 1: normalize the public input layout and derive the fit-plane frame
+    # metadata. For raw unlabeled arrays this is the point where the caller's
+    # explicit public plane contract is resolved and then converted into the
+    # fitter's internal trailing (y, x) row/column plane order.
     context = _build_fit_execution_context(data, dims, unlabeled_axis_order)
     _warn_if_suboptimal_dask_chunking(context)
+    raw_plane_dims = None
+    if not isinstance(data, xr.DataArray):
+        # Preserve the original public plane-dimension order of the raw input so
+        # plain 2-D masks can be labeled the same way before xarray aligns them to
+        # the internal trailing (y, x) fit view.
+        raw_plane_dims = tuple(
+            d for d in context.da_in.dims if d in (context.dim_x, context.dim_y)
+        )
 
-    # Stage 2: align all user-facing configuration to the transposed fit view.
-    mask_da = _resolve_fit_mask(mask, context.da_tr, context.dim_y, context.dim_x)
+    # Stage 2: align all user-facing configuration to that internal (y, x) fit
+    # view. Raw unlabeled masks must honor the same public plane order as the raw
+    # data first so they undergo the same semantic x/y -> row/column conversion.
+    mask_da = _resolve_fit_mask(
+        mask,
+        context.da_tr,
+        context.dim_y,
+        context.dim_x,
+        raw_plane_dims=raw_plane_dims,
+    )
     init_for_fit, bounds_for_fit, want_pa = _prepare_fit_configuration(
         initial_guesses,
         bounds,

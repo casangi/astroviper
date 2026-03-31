@@ -445,6 +445,39 @@ class TestMakePtSources(unittest.TestCase):
             out_dask, da.Array, "output='dask' should return a dask.array.Array"
         )
 
+    def test_raw_array_x_y_order_is_preserved_in_xarray_output(self):
+        x_vals = np.linspace(10.0, 13.0, 4)
+        y_vals = np.linspace(-2.0, 0.0, 3)
+        out = make_pt_sources(
+            np.zeros((x_vals.size, y_vals.size), dtype=float),
+            amplitudes=[9.0],
+            xs=[12.0],
+            ys=[-1.0],
+            coords={"x": x_vals, "y": y_vals},
+            output="xarray",
+            add=False,
+        )
+        self.assertEqual(
+            ("x", "y"),
+            out.dims,
+            "Raw-array point-source output should preserve the public (x, y) convention",
+        )
+        self.assertEqual(
+            9.0,
+            float(out.sel(x=12.0, y=-1.0, method="nearest").values),
+            "The injected point source should land at the requested x/y coordinate",
+        )
+        self.assertEqual(
+            x_vals.size,
+            out.sizes["x"],
+            "x dimension length should match the supplied x-coordinate axis",
+        )
+        self.assertEqual(
+            y_vals.size,
+            out.sizes["y"],
+            "y dimension length should match the supplied y-coordinate axis",
+        )
+
     def test_requires_equal_lengths(self):
         base = _base_grid()
         with self.assertRaises(ValueError):
