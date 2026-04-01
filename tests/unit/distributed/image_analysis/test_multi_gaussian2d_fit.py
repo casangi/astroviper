@@ -26,7 +26,6 @@ import xarray as xr
 import dask.array as da  # type: ignore
 
 import importlib
-import inspect
 import builtins
 
 # Use headless matplotlib, silence plt.show()
@@ -2313,95 +2312,24 @@ class TestAngleEndToEndFitter(unittest.TestCase):
 
 
 class TestInnerPrepCoverage:
-    def test_inner_prep_lines_executed(self, monkeypatch):
-        """Covers lines by exercising all branches of the local `_prep`.
-        We shim `_interp_centers_world` to reach the `_prep` closure and call it
-        with inputs that trigger: invalid, descending, duplicate paired values,
-        increasing, and non-monotonic paired coordinate values.
-        """
-        calls: list[tuple[str, object, object]] = []
+    def test_prepare_pixel_center_interp_lines_executed(self):
+        """Verify that the shared pixel-center interpolation helper handles invalid, descending, and irregular paired coordinate values correctly."""
+        idx, val = mg._prepare_pixel_center_interp(np.array([[1.0, 2.0]]))
+        assert idx is None and val is None
 
-        def shim(ds, cx, cy, dim_x, dim_y):
-            # Access caller's local `_prep`
-            fr = inspect.currentframe()
-            assert fr is not None and fr.f_back is not None
-            local_prep = fr.f_back.f_locals.get("_prep")
-            assert callable(local_prep), "local _prep not found"
-
-            # 1) invalid (ndim!=1) -> (None, None)
-            idx, val = local_prep(np.array([[1.0, 2.0]]))
-            calls.append(("invalid", idx, val))
-
-            # 2) descending -> reversed indices & coords
-            idx, val = local_prep(np.array([5.0, 4.0, 3.0]))
-            calls.append(("descending", idx.copy(), val.copy()))
-
-            # 3) duplicate paired values are acceptable because the synthetic
-            # source axis remains strictly increasing.
-            idx, val = local_prep(np.array([0.0, 1.0, 1.0, 2.0]))
-            calls.append(("duplicate_fp", idx.copy(), val.copy()))
-
-            # 4) strictly increasing -> identity
-            idx, val = local_prep(np.array([0.0, 0.5, 1.0]))
-            calls.append(("increasing", idx.copy(), val.copy()))
-
-            # 5) non-monotonic paired values are still valid because np.interp
-            # only requires the source axis (the synthetic indices) to be monotonic.
-            idx, val = local_prep(np.array([0.0, 1.0, 0.0]))
-            calls.append(("non_monotonic_fp", idx.copy(), val.copy()))
-
-            # mark for assertion that shim ran
-            out = ds.copy()
-            out.attrs["_shim_ran"] = True
-            return out
-
-        # Fast, deterministic optimizer stub
-        def fake_cf(func, xy, zflat, p0=None, bounds=None, maxfev=None):
-            p0 = np.asarray(p0, float)
-            pcov = np.eye(p0.size, dtype=float) * 0.01
-            return p0, pcov
-
-        monkeypatch.setattr(mg, "_interp_centers_world", shim, raising=True)
-        monkeypatch.setattr(mg, "curve_fit", fake_cf, raising=True)
-
-        # Build DataArray with valid world coords; run in pixel mode to enter branch
-        ny, nx = 6, 8
-        y = np.linspace(-1.0, 1.0, ny, dtype=float)
-        x = np.linspace(-2.0, 2.0, nx, dtype=float)
-        da = xr.DataArray(
-            np.zeros((ny, nx), float), dims=("y", "x"), coords={"y": y, "x": x}
-        )
-
-        init = np.array([[0.2, nx / 2 - 0.5, ny / 2 - 0.5, 1.5, 1.0, 0.0]], float)
-        ds = fit_multi_gaussian2d(
-            da, n_components=1, initial_guesses=init, coord_type="pixel"
-        )
-
-        # The shim executed and exercised all `_prep` branches
-        assert ds.attrs.get("_shim_ran", False) is True
-        assert len(calls) == 5
-
-        # Validate branch outcomes
-        label, idx, val = calls[0]
-        assert label == "invalid" and idx is None and val is None
-
-        label, idx, val = calls[1]
-        assert label == "descending"
+        idx, val = mg._prepare_pixel_center_interp(np.array([5.0, 4.0, 3.0]))
         assert np.allclose(idx, np.array([0.0, 1.0, 2.0]))
         assert np.allclose(val, np.array([5.0, 4.0, 3.0]))
 
-        label, idx, val = calls[2]
-        assert label == "duplicate_fp"
+        idx, val = mg._prepare_pixel_center_interp(np.array([0.0, 1.0, 1.0, 2.0]))
         assert np.allclose(idx, np.array([0.0, 1.0, 2.0, 3.0]))
         assert np.allclose(val, np.array([0.0, 1.0, 1.0, 2.0]))
 
-        label, idx, val = calls[3]
-        assert label == "increasing"
+        idx, val = mg._prepare_pixel_center_interp(np.array([0.0, 0.5, 1.0]))
         assert np.allclose(idx, np.array([0.0, 1.0, 2.0]))
         assert np.allclose(val, np.array([0.0, 0.5, 1.0]))
 
-        label, idx, val = calls[4]
-        assert label == "non_monotonic_fp"
+        idx, val = mg._prepare_pixel_center_interp(np.array([0.0, 1.0, 0.0]))
         assert np.allclose(idx, np.array([0.0, 1.0, 2.0]))
         assert np.allclose(val, np.array([0.0, 1.0, 0.0]))
 
