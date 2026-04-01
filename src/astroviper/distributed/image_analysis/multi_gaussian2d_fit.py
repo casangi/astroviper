@@ -1900,12 +1900,10 @@ def _add_angle_attrs(ds, conv, frame):
         ("theta_world_pa", "world", "pa"),
         ("theta_world_pa_err", "world", "pa"),
     ):
-        # it looks like the if may not be needed, and if its left in
-        # code coverage flags uncovered lines
-        # if _name in ds:
-        ds[_name].attrs["convention"] = _conv
-        ds[_name].attrs["frame"] = _frame
-        ds[_name].attrs["units"] = "rad"
+        if _name in ds:
+            ds[_name].attrs["convention"] = _conv
+            ds[_name].attrs["frame"] = _frame
+            ds[_name].attrs["units"] = "rad"
     return ds
 
 
@@ -2643,6 +2641,9 @@ def _build_published_parameter_dataset(
     This helper centralizes the most mathematically dense part of the public API:
     converting native fit outputs into the alternate coordinate frame while
     propagating center, width, and angle uncertainties through local axis scales.
+    World-frame widths and angles are published only when the input supplied
+    usable non-pixel world-coordinate axes, or when the optimizer ran natively
+    in world coordinates from explicit raw-array coordinate vectors.
     """
     x0 = fit["x0"]
     y0 = fit["y0"]
@@ -2659,6 +2660,20 @@ def _build_published_parameter_dataset(
     theta_pa_err = fit["theta_pa_err"]
     th_public = fit["th_public"]
     th_public_err = fit["th_public_err"]
+    coord_x = (
+        None if context.coord_x is None else np.asarray(context.coord_x, dtype=float)
+    )
+    coord_y = (
+        None if context.coord_y is None else np.asarray(context.coord_y, dtype=float)
+    )
+    attached_world_axes = (
+        coord_x is not None
+        and coord_y is not None
+        and _axis_is_valid(coord_x)
+        and _axis_is_valid(coord_y)
+        and not _is_pixel_index_axes(coord_x, coord_y)
+    )
+    publish_world = bool(world_mode or attached_world_axes)
 
     if world_mode:
         nx = x1d.shape[0]
@@ -2799,12 +2814,13 @@ def _build_published_parameter_dataset(
         theta_pixel = theta_pixel_pa if want_pa else theta_pixel_math
         fwhm_major_pixel = sigma_major_pixel * _SIG2FWHM
         fwhm_minor_pixel = sigma_minor_pixel * _SIG2FWHM
-        theta_world = th_public
-        theta_world_err = th_public_err
-        theta_world_math = theta_math
-        theta_world_pa = theta_pa
-        theta_world_math_err = theta_math_err
-        theta_world_pa_err = theta_pa_err
+        if publish_world:
+            theta_world = th_public
+            theta_world_err = th_public_err
+            theta_world_math = theta_math
+            theta_world_pa = theta_pa
+            theta_world_math_err = theta_math_err
+            theta_world_pa_err = theta_pa_err
 
         def _fd_sigma_world_to_pixel(sigx, sigy, theta, dx, dy, epsx, epsy):
             s1M, s1m, _ = _world_to_pixel_cov(sigx + epsx, sigy, theta, dx, dy)
@@ -2921,15 +2937,18 @@ def _build_published_parameter_dataset(
             dask="parallelized",
             output_dtypes=[float],
         )
-        sigma_major_world = xr.apply_ufunc(np.maximum, sx, sy, dask="parallelized")
-        sigma_minor_world = xr.apply_ufunc(np.minimum, sx, sy, dask="parallelized")
-        is_sx_major_w = xr.apply_ufunc(np.greater_equal, sx, sy, dask="parallelized")
-        sigma_major_world_err = xr.where(is_sx_major_w, sx_e, sy_e)
-        sigma_minor_world_err = xr.where(is_sx_major_w, sy_e, sx_e)
-        fwhm_major_world = sigma_major_world * _SIG2FWHM
-        fwhm_minor_world = sigma_minor_world * _SIG2FWHM
-        fwhm_major_world_err = sigma_major_world_err * _SIG2FWHM
-        fwhm_minor_world_err = sigma_minor_world_err * _SIG2FWHM
+        if publish_world:
+            sigma_major_world = xr.apply_ufunc(np.maximum, sx, sy, dask="parallelized")
+            sigma_minor_world = xr.apply_ufunc(np.minimum, sx, sy, dask="parallelized")
+            is_sx_major_w = xr.apply_ufunc(
+                np.greater_equal, sx, sy, dask="parallelized"
+            )
+            sigma_major_world_err = xr.where(is_sx_major_w, sx_e, sy_e)
+            sigma_minor_world_err = xr.where(is_sx_major_w, sy_e, sx_e)
+            fwhm_major_world = sigma_major_world * _SIG2FWHM
+            fwhm_minor_world = sigma_minor_world * _SIG2FWHM
+            fwhm_major_world_err = sigma_major_world_err * _SIG2FWHM
+            fwhm_minor_world_err = sigma_minor_world_err * _SIG2FWHM
         fwhm_major_pixel_err = sigma_major_pixel_err * _SIG2FWHM
         fwhm_minor_pixel_err = sigma_minor_pixel_err * _SIG2FWHM
     else:
@@ -2962,56 +2981,6 @@ def _build_published_parameter_dataset(
         sigma_minor_pixel_err = xr.where(is_sx_major_p, sy_e, sx_e)
         fwhm_major_pixel_err = sigma_major_pixel_err * _SIG2FWHM
         fwhm_minor_pixel_err = sigma_minor_pixel_err * _SIG2FWHM
-        gx = np.gradient(x1d.astype(float))
-        gy = np.gradient(y1d.astype(float))
-        x0i = (
-            xr.apply_ufunc(
-                np.rint,
-                x0_pixel,
-                input_core_dims=[["component"]],
-                output_core_dims=[["component"]],
-                vectorize=True,
-                dask="parallelized",
-                output_dtypes=[float],
-            )
-            .clip(0, x1d.shape[0] - 1)
-            .astype(int)
-        )
-        y0i = (
-            xr.apply_ufunc(
-                np.rint,
-                y0_pixel,
-                input_core_dims=[["component"]],
-                output_core_dims=[["component"]],
-                vectorize=True,
-                dask="parallelized",
-                output_dtypes=[float],
-            )
-            .clip(0, y1d.shape[0] - 1)
-            .astype(int)
-        )
-        dx_local = xr.apply_ufunc(
-            np.take,
-            xr.DataArray(gx, dims=[context.dim_x]),
-            x0i,
-            input_core_dims=[[context.dim_x], ["component"]],
-            output_core_dims=[["component"]],
-            kwargs={"axis": 0, "mode": "clip"},
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-        dy_local = xr.apply_ufunc(
-            np.take,
-            xr.DataArray(gy, dims=[context.dim_y]),
-            y0i,
-            input_core_dims=[[context.dim_y], ["component"]],
-            output_core_dims=[["component"]],
-            kwargs={"axis": 0, "mode": "clip"},
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
 
         def _pixel_to_world_cov(sigx, sigy, theta, dx, dy):
             c = np.cos(theta)
@@ -3036,20 +3005,6 @@ def _build_published_parameter_dataset(
                 theta_w,
             )
 
-        sigma_major_world, sigma_minor_world, theta_world_math = xr.apply_ufunc(
-            _pixel_to_world_cov,
-            sx,
-            sy,
-            th_math,
-            dx_local,
-            dy_local,
-            input_core_dims=[["component"]] * 5,
-            output_core_dims=[["component"], ["component"], ["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float, float, float],
-        )
-
         def _fd_sigma_pixel_to_world(sigx, sigy, theta, dx, dy, epsx, epsy):
             s1M, s1m, _ = _pixel_to_world_cov(sigx + epsx, sigy, theta, dx, dy)
             s2M, s2m, _ = _pixel_to_world_cov(sigx - epsx, sigy, theta, dx, dy)
@@ -3061,150 +3016,217 @@ def _build_published_parameter_dataset(
             dm_dsy = (s1m - s2m) / (2.0 * epsy)
             return dM_dsx, dm_dsx, dM_dsy, dm_dsy
 
-        theta_world_pa = xr.apply_ufunc(
-            _theta_math_to_pa,
-            theta_world_math,
-            input_core_dims=[["component"]],
-            output_core_dims=[["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-        theta_world = theta_world_pa if want_pa else theta_world_math
-
         def _dtheta_world_dtheta_pixel(sigx, sigy, theta, dx, dy, eps):
             _, _, t1 = _pixel_to_world_cov(sigx, sigy, theta + eps, dx, dy)
             _, _, t2 = _pixel_to_world_cov(sigx, sigy, theta - eps, dx, dy)
             return (t1 - t2) / (2.0 * eps)
 
-        epst_w = xr.apply_ufunc(
-            lambda v: 1e-6 + 1e-3 * np.abs(v), th_math, dask="parallelized"
-        )
-        dtdt_w = xr.apply_ufunc(
-            _dtheta_world_dtheta_pixel,
-            sx,
-            sy,
-            th_math,
-            dx_local,
-            dy_local,
-            epst_w,
-            input_core_dims=[["component"]] * 6,
-            output_core_dims=[["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-        theta_world_math_err = xr.apply_ufunc(
-            np.multiply,
-            xr.apply_ufunc(np.abs, dtdt_w, dask="parallelized"),
-            fit["th_e"],
-            input_core_dims=[["component"], ["component"]],
-            output_core_dims=[["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-        theta_world_pa_err = theta_world_math_err
-        theta_world_err = theta_world_pa_err if want_pa else theta_world_math_err
-        epsx = xr.apply_ufunc(
-            lambda v: 1e-6 + 1e-3 * np.abs(v), sx, dask="parallelized"
-        )
-        epsy = xr.apply_ufunc(
-            lambda v: 1e-6 + 1e-3 * np.abs(v), sy, dask="parallelized"
-        )
-        dM_dsx, dm_dsx, dM_dsy, dm_dsy = xr.apply_ufunc(
-            _fd_sigma_pixel_to_world,
-            sx,
-            sy,
-            th_math,
-            dx_local,
-            dy_local,
-            epsx,
-            epsy,
-            input_core_dims=[["component"]] * 7,
-            output_core_dims=[
-                ["component"],
-                ["component"],
-                ["component"],
-                ["component"],
-            ],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float, float, float, float],
-        )
-        sigma_major_world_err = xr.apply_ufunc(
-            lambda a, b, c, d: np.sqrt((a * b) ** 2 + (c * d) ** 2),
-            dM_dsx,
-            sx_e,
-            dM_dsy,
-            sy_e,
-            input_core_dims=[["component"]] * 4,
-            output_core_dims=[["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-        sigma_minor_world_err = xr.apply_ufunc(
-            lambda a, b, c, d: np.sqrt((a * b) ** 2 + (c * d) ** 2),
-            dm_dsx,
-            sx_e,
-            dm_dsy,
-            sy_e,
-            input_core_dims=[["component"]] * 4,
-            output_core_dims=[["component"]],
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        )
-        fwhm_major_world = sigma_major_world * _SIG2FWHM
-        fwhm_minor_world = sigma_minor_world * _SIG2FWHM
-        fwhm_major_world_err = sigma_major_world_err * _SIG2FWHM
-        fwhm_minor_world_err = sigma_minor_world_err * _SIG2FWHM
+        if publish_world:
+            gx = np.gradient(coord_x.astype(float))
+            gy = np.gradient(coord_y.astype(float))
+            x0i = (
+                xr.apply_ufunc(
+                    np.rint,
+                    x0_pixel,
+                    input_core_dims=[["component"]],
+                    output_core_dims=[["component"]],
+                    vectorize=True,
+                    dask="parallelized",
+                    output_dtypes=[float],
+                )
+                .clip(0, coord_x.shape[0] - 1)
+                .astype(int)
+            )
+            y0i = (
+                xr.apply_ufunc(
+                    np.rint,
+                    y0_pixel,
+                    input_core_dims=[["component"]],
+                    output_core_dims=[["component"]],
+                    vectorize=True,
+                    dask="parallelized",
+                    output_dtypes=[float],
+                )
+                .clip(0, coord_y.shape[0] - 1)
+                .astype(int)
+            )
+            dx_local = xr.apply_ufunc(
+                np.take,
+                xr.DataArray(gx, dims=[context.dim_x]),
+                x0i,
+                input_core_dims=[[context.dim_x], ["component"]],
+                output_core_dims=[["component"]],
+                kwargs={"axis": 0, "mode": "clip"},
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[float],
+            )
+            dy_local = xr.apply_ufunc(
+                np.take,
+                xr.DataArray(gy, dims=[context.dim_y]),
+                y0i,
+                input_core_dims=[[context.dim_y], ["component"]],
+                output_core_dims=[["component"]],
+                kwargs={"axis": 0, "mode": "clip"},
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[float],
+            )
+            sigma_major_world, sigma_minor_world, theta_world_math = xr.apply_ufunc(
+                _pixel_to_world_cov,
+                sx,
+                sy,
+                th_math,
+                dx_local,
+                dy_local,
+                input_core_dims=[["component"]] * 5,
+                output_core_dims=[["component"], ["component"], ["component"]],
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[float, float, float],
+            )
+            theta_world_pa = xr.apply_ufunc(
+                _theta_math_to_pa,
+                theta_world_math,
+                input_core_dims=[["component"]],
+                output_core_dims=[["component"]],
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[float],
+            )
+            theta_world = theta_world_pa if want_pa else theta_world_math
+            epst_w = xr.apply_ufunc(
+                lambda v: 1e-6 + 1e-3 * np.abs(v), th_math, dask="parallelized"
+            )
+            dtdt_w = xr.apply_ufunc(
+                _dtheta_world_dtheta_pixel,
+                sx,
+                sy,
+                th_math,
+                dx_local,
+                dy_local,
+                epst_w,
+                input_core_dims=[["component"]] * 6,
+                output_core_dims=[["component"]],
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[float],
+            )
+            theta_world_math_err = xr.apply_ufunc(
+                np.multiply,
+                xr.apply_ufunc(np.abs, dtdt_w, dask="parallelized"),
+                fit["th_e"],
+                input_core_dims=[["component"], ["component"]],
+                output_core_dims=[["component"]],
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[float],
+            )
+            theta_world_pa_err = theta_world_math_err
+            theta_world_err = theta_world_pa_err if want_pa else theta_world_math_err
+            epsx = xr.apply_ufunc(
+                lambda v: 1e-6 + 1e-3 * np.abs(v), sx, dask="parallelized"
+            )
+            epsy = xr.apply_ufunc(
+                lambda v: 1e-6 + 1e-3 * np.abs(v), sy, dask="parallelized"
+            )
+            dM_dsx, dm_dsx, dM_dsy, dm_dsy = xr.apply_ufunc(
+                _fd_sigma_pixel_to_world,
+                sx,
+                sy,
+                th_math,
+                dx_local,
+                dy_local,
+                epsx,
+                epsy,
+                input_core_dims=[["component"]] * 7,
+                output_core_dims=[
+                    ["component"],
+                    ["component"],
+                    ["component"],
+                    ["component"],
+                ],
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[float, float, float, float],
+            )
+            sigma_major_world_err = xr.apply_ufunc(
+                lambda a, b, c, d: np.sqrt((a * b) ** 2 + (c * d) ** 2),
+                dM_dsx,
+                sx_e,
+                dM_dsy,
+                sy_e,
+                input_core_dims=[["component"]] * 4,
+                output_core_dims=[["component"]],
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[float],
+            )
+            sigma_minor_world_err = xr.apply_ufunc(
+                lambda a, b, c, d: np.sqrt((a * b) ** 2 + (c * d) ** 2),
+                dm_dsx,
+                sx_e,
+                dm_dsy,
+                sy_e,
+                input_core_dims=[["component"]] * 4,
+                output_core_dims=[["component"]],
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[float],
+            )
+            fwhm_major_world = sigma_major_world * _SIG2FWHM
+            fwhm_minor_world = sigma_minor_world * _SIG2FWHM
+            fwhm_major_world_err = sigma_major_world_err * _SIG2FWHM
+            fwhm_minor_world_err = sigma_minor_world_err * _SIG2FWHM
 
-    ds = xr.Dataset(
-        data_vars=dict(
-            amplitude=fit["amp"],
-            amplitude_err=fit["amp_e"],
-            peak=fit["peak"],
-            peak_err=fit["peak_err"],
-            x0_pixel=x0_pixel,
-            y0_pixel=y0_pixel,
-            x0_pixel_err=x0_pixel_err,
-            y0_pixel_err=y0_pixel_err,
-            sigma_major_pixel=sigma_major_pixel,
-            sigma_minor_pixel=sigma_minor_pixel,
-            sigma_major_pixel_err=sigma_major_pixel_err,
-            sigma_minor_pixel_err=sigma_minor_pixel_err,
-            theta_pixel=theta_pixel,
-            theta_pixel_err=theta_pixel_err,
-            theta_pixel_math=theta_pixel_math,
-            theta_pixel_math_err=theta_pixel_math_err,
-            theta_pixel_pa=theta_pixel_pa,
-            theta_pixel_pa_err=theta_pixel_pa_err,
-            theta_world=theta_world,
-            theta_world_err=theta_world_err,
-            theta_world_math=theta_world_math,
-            theta_world_math_err=theta_world_math_err,
-            theta_world_pa=theta_world_pa,
-            theta_world_pa_err=theta_world_pa_err,
-            fwhm_major_pixel=fwhm_major_pixel,
-            fwhm_minor_pixel=fwhm_minor_pixel,
-            fwhm_major_pixel_err=fwhm_major_pixel_err,
-            fwhm_minor_pixel_err=fwhm_minor_pixel_err,
-            sigma_major_world=sigma_major_world,
-            sigma_minor_world=sigma_minor_world,
-            sigma_major_world_err=sigma_major_world_err,
-            sigma_minor_world_err=sigma_minor_world_err,
-            fwhm_major_world=fwhm_major_world,
-            fwhm_minor_world=fwhm_minor_world,
-            fwhm_major_world_err=fwhm_major_world_err,
-            fwhm_minor_world_err=fwhm_minor_world_err,
-            offset=fit["offset"],
-            offset_err=fit["offset_e"],
-            success=fit["success"],
-            variance_explained=fit["varexp"],
-        )
+    data_vars = dict(
+        amplitude=fit["amp"],
+        amplitude_err=fit["amp_e"],
+        peak=fit["peak"],
+        peak_err=fit["peak_err"],
+        x0_pixel=x0_pixel,
+        y0_pixel=y0_pixel,
+        x0_pixel_err=x0_pixel_err,
+        y0_pixel_err=y0_pixel_err,
+        sigma_major_pixel=sigma_major_pixel,
+        sigma_minor_pixel=sigma_minor_pixel,
+        sigma_major_pixel_err=sigma_major_pixel_err,
+        sigma_minor_pixel_err=sigma_minor_pixel_err,
+        theta_pixel=theta_pixel,
+        theta_pixel_err=theta_pixel_err,
+        theta_pixel_math=theta_pixel_math,
+        theta_pixel_math_err=theta_pixel_math_err,
+        theta_pixel_pa=theta_pixel_pa,
+        theta_pixel_pa_err=theta_pixel_pa_err,
+        fwhm_major_pixel=fwhm_major_pixel,
+        fwhm_minor_pixel=fwhm_minor_pixel,
+        fwhm_major_pixel_err=fwhm_major_pixel_err,
+        fwhm_minor_pixel_err=fwhm_minor_pixel_err,
+        offset=fit["offset"],
+        offset_err=fit["offset_e"],
+        success=fit["success"],
+        variance_explained=fit["varexp"],
     )
+    if publish_world:
+        data_vars.update(
+            dict(
+                theta_world=theta_world,
+                theta_world_err=theta_world_err,
+                theta_world_math=theta_world_math,
+                theta_world_math_err=theta_world_math_err,
+                theta_world_pa=theta_world_pa,
+                theta_world_pa_err=theta_world_pa_err,
+                sigma_major_world=sigma_major_world,
+                sigma_minor_world=sigma_minor_world,
+                sigma_major_world_err=sigma_major_world_err,
+                sigma_minor_world_err=sigma_minor_world_err,
+                fwhm_major_world=fwhm_major_world,
+                fwhm_minor_world=fwhm_minor_world,
+                fwhm_major_world_err=fwhm_major_world_err,
+                fwhm_minor_world_err=fwhm_minor_world_err,
+            )
+        )
+    ds = xr.Dataset(data_vars=data_vars)
     conv = "pa" if want_pa else "math"
     ds.attrs["axes_handedness"] = "left" if context.is_left_handed else "right"
     ds.attrs["theta_convention"] = conv
@@ -3293,9 +3315,16 @@ def _attach_world_center_outputs(
     -----
     If the fit was already performed in world coordinates, the world-center outputs
     are direct aliases of the native fit parameters. Otherwise they are interpolated
-    from the pixel centers using the attached axis coordinate vectors.
+    from the pixel centers using attached non-pixel world-coordinate axis vectors.
     """
-    if context.coord_x is None or context.coord_y is None:
+    attached_world_axes = (
+        context.coord_x is not None
+        and context.coord_y is not None
+        and _axis_is_valid(np.asarray(context.coord_x, dtype=float))
+        and _axis_is_valid(np.asarray(context.coord_y, dtype=float))
+        and not _is_pixel_index_axes(context.coord_x, context.coord_y)
+    )
+    if not world_mode and not attached_world_axes:
         return ds
 
     if world_mode:
@@ -3693,8 +3722,8 @@ def fit_multi_gaussian2d(
             - ``offset``, ``offset_err``, ``success`` (bool), ``variance_explained``
         Optional planes:
             - ``residual`` (if ``return_residual``), ``model`` (if ``return_model``)
-        Optional world-frame component variables are added when the fit axes have
-        usable 1-D numeric coordinate variables:
+        Optional world-frame component variables are added only when the input
+        provides usable non-pixel 1-D coordinate variables:
             - centers ``x0_world(component)``, ``y0_world(component)``
             - world-frame widths ``sigma_major_world(component)``,
               ``sigma_minor_world(component)``, ``fwhm_major_world(component)``,
