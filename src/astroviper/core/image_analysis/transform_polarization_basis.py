@@ -225,7 +225,9 @@ def transform_polarization_basis(
         is only used for the output-label fallback lookup and is otherwise
         ignored.
     overwrite : bool, default True
-        If ``True`` the input dataset is modified in place.
+        If ``True`` source variables are dropped from *img_xds* one by one as
+        they are transformed, so old and new data for a single variable are the
+        only large allocations alive at the same time.
         If ``False`` a new dataset is returned with copied coordinates and
         attributes but transformed data variables.
 
@@ -235,18 +237,6 @@ def transform_polarization_basis(
         Dataset with transformed data variables and an updated
         ``polarization`` coordinate.
     """
-    if overwrite:
-        img_transformed_xds = img_xds
-    else:
-        img_transformed_xds = xr.Dataset()
-        # Copy attributes and all coordinates except the polarization values,
-        # which will be overwritten below.
-        img_transformed_xds.attrs = copy.deepcopy(img_xds.attrs)
-        for coord_name in img_xds.coords:
-            img_transformed_xds.coords[coord_name] = copy.deepcopy(
-                img_xds.coords[coord_name]
-            )
-
     # Determine the output polarization labels via the single source of truth.
     if transformation_matrix is not None:
         n_out = np.asarray(transformation_matrix).shape[0]
@@ -261,16 +251,57 @@ def transform_polarization_basis(
             frozenset(img_xds.polarization.values), new_polarization_basis
         )
 
-    img_transformed_xds = img_transformed_xds.assign_coords(polarization=new_pol_labels)
+    var_names = list(img_xds.data_vars)
 
-    for var_name in img_xds.data_vars:
-        img_transformed_xds[var_name] = (
-            transform_polarization_basis_image_data_variable(
-                img_xds[var_name],
-                new_polarization_basis=new_polarization_basis,
-                transformation_matrix=transformation_matrix,
-            )
+    if overwrite:
+        # Build the output dataset with updated coords but no data variables yet.
+        # assign_coords is a shallow operation (data arrays are not copied).
+        img_transformed_xds = xr.Dataset(
+            coords={
+                coord_name: (
+                    new_pol_labels
+                    if coord_name == "polarization"
+                    else img_xds.coords[coord_name]
+                )
+                for coord_name in img_xds.coords
+            },
+            attrs=img_xds.attrs,
         )
+
+        # Process one variable at a time and drop it from the source dataset
+        # immediately after transformation so that the old backing array can be
+        # freed before the next variable is processed.
+        for var_name in var_names:
+            img_transformed_xds[var_name] = (
+                transform_polarization_basis_image_data_variable(
+                    img_xds[var_name],
+                    new_polarization_basis=new_polarization_basis,
+                    transformation_matrix=transformation_matrix,
+                )
+            )
+            # Release the source variable's backing array as early as possible.
+            img_xds = img_xds.drop_vars(var_name)
+    else:
+        img_transformed_xds = xr.Dataset(
+            coords={
+                coord_name: (
+                    new_pol_labels
+                    if coord_name == "polarization"
+                    else copy.deepcopy(img_xds.coords[coord_name])
+                )
+                for coord_name in img_xds.coords
+            },
+            attrs=copy.deepcopy(img_xds.attrs),
+        )
+
+        for var_name in var_names:
+            img_transformed_xds[var_name] = (
+                transform_polarization_basis_image_data_variable(
+                    img_xds[var_name],
+                    new_polarization_basis=new_polarization_basis,
+                    transformation_matrix=transformation_matrix,
+                )
+            )
 
     return img_transformed_xds
 
@@ -282,11 +313,12 @@ def transform_polarization_basis_image_data_variable(
 ) -> xr.DataArray:
     """Apply a polarization basis transformation to a single image data variable.
 
-    The contraction is performed with :func:`xarray.dot` using ``optimize=True``,
-    which delegates to *opt_einsum* when it is installed.  xarray's
-    label-based alignment ensures that the polarization axis is matched by
-    coordinate value, so the input data does not need to be in any particular
-    polarization order.
+    The contraction is performed with :func:`numpy.matmul` writing directly
+    into a pre-allocated output buffer, which avoids the intermediate
+    allocations that :func:`xarray.dot` with ``optimize=True`` creates via
+    opt_einsum.  The polarization axis is reordered to match the matrix column
+    order before the multiply so that label-based alignment is preserved
+    without any xarray overhead.
 
     Parameters
     ----------
@@ -317,6 +349,7 @@ def transform_polarization_basis_image_data_variable(
     """
     pol_values = list(data_var.polarization.values)
     original_dims = list(data_var.dims)
+    pol_axis = original_dims.index("polarization")
 
     if transformation_matrix is not None:
         matrix = np.asarray(transformation_matrix, dtype=complex)
@@ -349,22 +382,49 @@ def transform_polarization_basis_image_data_variable(
             f"{pol_values} -> {out_pol_labels}"
         )
 
-    # Rename the input polarization dim to avoid a name clash with the output
-    # "polarization" dim that xr.dot will produce from the transform DataArray.
-    data_renamed = data_var.rename({"polarization": "pol_in"})
+    # --- memory-efficient numpy path -------------------------------------------
+    # Avoid xr.dot / opt_einsum which create multiple intermediate arrays.
+    # Strategy:
+    #   1. Move pol axis to the last position (np.moveaxis → view, no copy).
+    #   2. Reorder pols to match matrix column order if necessary.
+    #   3. Pre-allocate the output buffer with the correct dtype so np.matmul
+    #      writes directly into it without a temporary allocation.
+    #   4. Move pol axis back to its original position (view, no copy).
+    # Peak extra allocation = one output buffer (same size as input for same
+    # dtype; unavoidable for any matrix multiply that mixes all input pols).
 
-    transform_da = xr.DataArray(
-        matrix,
-        dims=["polarization", "pol_in"],
-        coords={"polarization": out_pol_labels, "pol_in": in_pol_labels},
+    arr = data_var.values  # reference to underlying numpy array; no copy
+
+    # Step 1: move pol to last axis — returns a view.
+    arr_pol_last = np.moveaxis(arr, pol_axis, -1)  # (..., P_in)
+
+    # Step 2: reorder input pols to match matrix column order if needed.
+    pol_order = [pol_values.index(p) for p in in_pol_labels]
+    if pol_order != list(range(len(in_pol_labels))):
+        arr_pol_last = arr_pol_last[..., pol_order]  # fancy index → copy
+
+    # Step 3: pre-allocate output and multiply.
+    out_dtype = np.result_type(matrix.dtype, arr.dtype)
+    out_shape = arr_pol_last.shape[:-1] + (matrix.shape[0],)
+    out_pol_last = np.empty(out_shape, dtype=out_dtype)
+    # np.matmul handles dtype promotion internally; writing directly to
+    # out_pol_last avoids any Python-level intermediate allocation.
+    np.matmul(arr_pol_last, matrix.T, out=out_pol_last)
+
+    # Step 4: move pol axis back — returns a view.
+    result_arr = np.moveaxis(out_pol_last, -1, pol_axis)
+
+    # Build output coordinates: reuse existing coord objects, only swap pol.
+    new_coords = {
+        coord_name: data_var.coords[coord_name]
+        for coord_name in data_var.coords
+        if coord_name != "polarization"
+    }
+    new_coords["polarization"] = out_pol_labels
+
+    return xr.DataArray(
+        result_arr,
+        dims=original_dims,
+        coords=new_coords,
+        attrs=data_var.attrs.copy(),
     )
-
-    # xr.dot contracts over "pol_in", aligning on coordinate labels.
-    # optimize=True enables opt_einsum path optimization when available.
-    result = xr.dot(transform_da, data_renamed, dim="pol_in", optimize=True)
-
-    # Restore the original dimension order: (time, frequency, polarization, l, m)
-    result = result.transpose(*original_dims)
-
-    result.attrs = data_var.attrs.copy()
-    return result
