@@ -1100,6 +1100,57 @@ class TestPlotHelper:
         assert seen["unlabeled_input"] is True
         assert seen["unlabeled_axis_order"] == "xy"
 
+    def test_plot_components_reuses_recorded_fit_dims_for_raw_input(
+        self, monkeypatch
+    ) -> None:
+        """Verify that raw-array plotting falls back to the fit-time stored ``dims`` when callers omit plotting dims."""
+        matplotlib.use("Agg", force=True)
+
+        nx, ny = 40, 28
+        x = np.arange(nx, dtype=float)
+        y = np.arange(ny, dtype=float)
+        xx, yy = np.meshgrid(x, y, indexing="ij")
+        img = 0.1 + np.exp(-((xx - 20.0) ** 2 + (yy - 14.0) ** 2) / (2 * 3.0**2))
+
+        init = np.array([[1.0, 20.0, 14.0, 3.0, 3.0, 0.0]], float)
+        ds = fit_multi_gaussian2d(
+            img,
+            n_components=1,
+            initial_guesses=init,
+            return_residual=False,
+            coord_type="pixel",
+            dims=(0, 1),
+        )
+
+        seen: dict[str, object] = {}
+        original_resolve_dims = mg._resolve_dims
+
+        def _recording_resolve_dims(
+            da,
+            dims,
+            *,
+            unlabeled_input=False,
+            unlabeled_axis_order=None,
+        ):
+            seen["dims"] = dims
+            seen["unlabeled_input"] = unlabeled_input
+            seen["unlabeled_axis_order"] = unlabeled_axis_order
+            return original_resolve_dims(
+                da,
+                dims,
+                unlabeled_input=unlabeled_input,
+                unlabeled_axis_order=unlabeled_axis_order,
+            )
+
+        monkeypatch.setattr(mg, "_resolve_dims", _recording_resolve_dims)
+        monkeypatch.setattr(plt, "show", lambda *a, **k: None, raising=False)
+
+        plot_components(img, ds, dims=None, indexer=None, show_residual=False)
+
+        assert seen["dims"] == (0, 1)
+        assert seen["unlabeled_input"] is True
+        assert seen["unlabeled_axis_order"] is None
+
     def test_plot_components_raises_when_result_missing_required_var(
         self, monkeypatch
     ) -> None:
