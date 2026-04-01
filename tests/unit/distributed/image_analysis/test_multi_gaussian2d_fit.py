@@ -2923,6 +2923,7 @@ class TestResultMetadataShortener:
         assert call != "fit_multi_gaussian2d(...)"
         assert "n_components=1" in call
         assert "coord_type=pixel" in call
+        assert "unlabeled_axis_order" not in call
 
 
 class TestWorldSeeding:

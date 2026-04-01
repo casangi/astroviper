@@ -3505,7 +3505,9 @@ def _attach_fit_invocation_metadata(
         return_residual=bool(return_residual),
         angle=str(angle),
         coord_type=str(coord_type),
-        unlabeled_axis_order=str(unlabeled_axis_order),
+        unlabeled_axis_order=(
+            None if unlabeled_axis_order is None else str(unlabeled_axis_order)
+        ),
         coords=_summarize_metadata_value(coords),
     )
     call = _build_call(_inspect, param)
@@ -3961,7 +3963,9 @@ def fit_multi_gaussian2d(
         return_residual=bool(return_residual),
         angle=str(angle),
         coord_type=str(coord_type),
-        unlabeled_axis_order=str(unlabeled_axis_order),
+        unlabeled_axis_order=(
+            None if unlabeled_axis_order is None else str(unlabeled_axis_order)
+        ),
         coords=coords,
         world_mode=world_mode,
     )
