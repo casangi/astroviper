@@ -3474,7 +3474,7 @@ class TestChooseThetaPublicAPI:
         """
         ds = self._mk_minimal_result(frame="pixel", have_pa=True, have_math=False)
         img = xr.DataArray(np.zeros((12, 16), float), dims=("y", "x"))
-        mg.plot_components(img, ds, dims=("y", "x"), angle="pa", show=False)
+        mg.plot_components(img, ds, dims=("x", "y"), angle="pa", show=False)
         plt.close("all")
 
     def test_choose_theta_falls_back_to_math_when_pa_missing_public(self) -> None:
@@ -3483,7 +3483,7 @@ class TestChooseThetaPublicAPI:
         """
         ds = self._mk_minimal_result(frame="pixel", have_pa=False, have_math=True)
         img = xr.DataArray(np.zeros((12, 16), float), dims=("y", "x"))
-        mg.plot_components(img, ds, dims=("y", "x"), angle="pa", show=False)
+        mg.plot_components(img, ds, dims=("x", "y"), angle="pa", show=False)
         plt.close("all")
 
     def test_choose_theta_none_when_both_missing_public(self) -> None:
@@ -3495,7 +3495,7 @@ class TestChooseThetaPublicAPI:
         img = xr.DataArray(np.zeros((12, 16), float), dims=("y", "x"))
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            mg.plot_components(img, ds, dims=("y", "x"), angle="pa", show=False)
+            mg.plot_components(img, ds, dims=("x", "y"), angle="pa", show=False)
             # Implementation emits a RuntimeWarning; accept any warning mentioning "Missing theta".
             assert any("Missing theta" in str(m.message) for m in w)
         plt.close("all")
@@ -3522,7 +3522,7 @@ class TestChooseThetaPublicAPI:
         img = xr.DataArray(np.zeros((12, 16), float), dims=("y", "x"))
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            mg.plot_components(img, ds, dims=("y", "x"), angle="pa", show=False)
+            mg.plot_components(img, ds, dims=("x", "y"), angle="pa", show=False)
             assert not any("Missing theta" in str(m.message) for m in w)
         plt.close("all")
 
