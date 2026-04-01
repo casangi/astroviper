@@ -1612,6 +1612,36 @@ def _extract_1d_coords_for_fit(
 # ---------------------------------------------------------------------------
 # Pixel→World interpolation helper (extracted for reliable coverage)
 # ---------------------------------------------------------------------------
+def _prepare_pixel_center_interp(
+    coord: np.ndarray,
+) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    Prepare pixel-center and world-coordinate arrays for ``np.interp``.
+
+    Parameters
+    ----------
+    coord : np.ndarray
+        One-dimensional world-coordinate axis associated with zero-based pixel
+        centers.
+
+    Returns
+    -------
+    tuple[np.ndarray | None, np.ndarray | None]
+        ``(idx, values)`` suitable for ``np.interp`` where ``idx`` is the
+        ascending pixel-index axis and ``values`` are the paired world
+        coordinates. Returns ``(None, None)`` when the coordinate axis is not a
+        usable one-dimensional interpolation target.
+
+    Notes
+    -----
+    Pixel centers always live on an ascending synthetic index axis. Only the
+    attached world coordinates may descend, so this helper delegates the
+    descending-axis normalization to :func:`_prepare_interp_pair`.
+    """
+    idx = np.arange(np.asarray(coord).size, dtype=float)
+    return _prepare_interp_pair(idx, coord)
+
+
 def _interp_centers_world(
     ds: xr.Dataset,
     cx: np.ndarray,
@@ -1649,16 +1679,8 @@ def _interp_centers_world(
     ``np.gradient``.
     """
 
-    def _prep(coord: np.ndarray) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        # Pixel centers always live on ascending index axes; only the attached world
-        # coordinates may descend. Prepare the pair through the shared helper so the
-        # output remains mathematically equivalent while satisfying np.interp's
-        # strictly increasing-xp requirement.
-        idx = np.arange(np.asarray(coord).size, dtype=float)
-        return _prepare_interp_pair(idx, coord)
-
-    idx_x, val_x = _prep(cx)
-    idx_y, val_y = _prep(cy)
+    idx_x, val_x = _prepare_pixel_center_interp(cx)
+    idx_y, val_y = _prepare_pixel_center_interp(cy)
     if idx_x is None or idx_y is None:
         return ds
 
