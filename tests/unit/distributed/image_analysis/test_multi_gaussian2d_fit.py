@@ -1192,6 +1192,42 @@ class TestPlotHelper:
         assert seen["unlabeled_input"] is True
         assert seen["unlabeled_axis_order"] is None
 
+    def test_plot_components_falls_back_to_pixel_overlay_without_world_vars(
+        self, monkeypatch
+    ) -> None:
+        """Verify that raw-array plotting does not request world overlays when the fit result only publishes pixel-frame variables."""
+        matplotlib.use("Agg", force=True)
+
+        nx, ny = 40, 28
+        x = np.arange(nx, dtype=float)
+        y = np.arange(ny, dtype=float)
+        xx, yy = np.meshgrid(x, y, indexing="ij")
+        img = 0.1 + np.exp(-((xx - 20.0) ** 2 + (yy - 14.0) ** 2) / (2 * 3.0**2))
+
+        init = np.array([[1.0, 20.0, 14.0, 3.0, 3.0, 0.0]], float)
+        ds = fit_multi_gaussian2d(
+            img,
+            n_components=1,
+            initial_guesses=init,
+            return_residual=False,
+            coord_type="pixel",
+            dims=(0, 1),
+        )
+
+        seen: dict[str, object] = {}
+        original_overlay = mg.overlay_fit_components
+
+        def _recording_overlay(*args, **kwargs):
+            seen["frame"] = kwargs.get("frame")
+            return original_overlay(*args, **kwargs)
+
+        monkeypatch.setattr(mg, "overlay_fit_components", _recording_overlay)
+        monkeypatch.setattr(plt, "show", lambda *a, **k: None, raising=False)
+
+        plot_components(img, ds, dims=None, indexer=None, show_residual=False)
+
+        assert seen["frame"] == "pixel"
+
     def test_plot_components_raises_when_result_missing_required_var(
         self, monkeypatch
     ) -> None:
