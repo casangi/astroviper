@@ -2203,7 +2203,7 @@ def _prepare_fit_configuration(
         the same width-handling path as explicit two-dimensional component arrays.
     angle : str
         Public angle convention selector. Supported choices are ``"math"``,
-        ``"pa"``, and ``"auto"``.
+        ``"pa"``, and ``"auto"``. Matching is case-insensitive.
     n_components : int
         Number of Gaussian components.
     sx_sign : float
@@ -2230,6 +2230,12 @@ def _prepare_fit_configuration(
     rejected because the optimizer does not parameterize the major-axis angle
     directly.
     """
+    angle_normalized = str(angle).lower()
+    if angle_normalized not in {"math", "pa", "auto"}:
+        raise ValueError(
+            f"Unsupported angle value {angle!r}. Supported values are "
+            "{'math', 'pa', 'auto'}."
+        )
 
     def _convert_array_like_widths_to_sigma(
         init_like: Union[np.ndarray, Sequence[Number]],
@@ -2300,7 +2306,9 @@ def _prepare_fit_configuration(
             mapped.append(dd)
         ig = mapped
 
-    want_pa = (angle == "pa") or (angle == "auto" and is_left_handed)
+    want_pa = (angle_normalized == "pa") or (
+        angle_normalized == "auto" and is_left_handed
+    )
     init_for_fit = _convert_init_theta(
         ig,
         to_math=want_pa,

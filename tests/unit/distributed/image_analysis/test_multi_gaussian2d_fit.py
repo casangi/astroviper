@@ -1471,6 +1471,47 @@ class TestNumPyFitting:  # (unittest.TestCase):
         assert bool(ds["success"]) is True
         assert abs(ds["theta_pixel"].item() - pa) < 0.25
 
+    def test_angle_selector_accepts_uppercase_public_values(self) -> None:
+        """Verify that public fit angle selectors are matched case-insensitively."""
+        ny, nx = 48, 48
+        y, x = np.mgrid[0:ny, 0:nx]
+        theta_math = 0.5
+        pa = float(((np.pi / 2) - theta_math) % (2 * np.pi))
+        z = 0.05 + _gauss2d_on_grid(
+            x, y, 1.0, 22.0, 24.0, 3.5, 2.0, theta_math, offset=0.0
+        )
+        img = xr.DataArray(z, dims=("y", "x"))
+        init = np.array([[0.9, 22.0, 24.0, 3.5, 2.0, pa]], float)
+
+        ds = fit_multi_gaussian2d(
+            img,
+            n_components=1,
+            initial_guesses=init,
+            angle="PA",
+            return_model=False,
+            return_residual=False,
+            coord_type="pixel",
+        )
+
+        assert bool(ds["success"]) is True
+        assert abs(ds["theta_pixel"].item() - pa) < 0.25
+
+    def test_invalid_public_angle_selector_raises(self) -> None:
+        """Verify that unsupported public fit angle selectors fail fast with a clear error."""
+        img = xr.DataArray(np.zeros((16, 16), float), dims=("y", "x"))
+        init = np.array([[1.0, 8.0, 8.0, 3.0, 2.0, 0.1]], float)
+
+        with pytest.raises(ValueError, match="Unsupported angle value"):
+            fit_multi_gaussian2d(
+                img,
+                n_components=1,
+                initial_guesses=init,
+                angle="weird",
+                return_model=False,
+                return_residual=False,
+                coord_type="pixel",
+            )
+
     def test_angle_pa_list_of_dicts_missing_theta_covers_if_false_branch(self) -> None:
         # Build a 2-component scene
         """Verify that PA conversion leaves components without explicit theta values on the default-angle path."""
