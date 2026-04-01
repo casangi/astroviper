@@ -5,6 +5,7 @@ warnings.filterwarnings(
 )
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import dask.array as da
@@ -510,6 +511,49 @@ class TestMakePtSources(unittest.TestCase):
             9.0,
             float(out.sel(x=13.0, y=-1.0, method="nearest").compute().values),
             "The injected point source should still land on the requested coordinate",
+        )
+
+    def test_dask_backed_dtype_resolution_does_not_touch_values(self):
+        """Verify that Dask-backed point-source generation derives result dtypes without materializing ``DataArray.values``."""
+        x_vals = np.linspace(10.0, 14.0, 5)
+        y_vals = np.linspace(-2.0, 0.0, 3)
+        base = xr.DataArray(
+            da.zeros((y_vals.size, x_vals.size), chunks=((2, 1), (3, 2))),
+            coords={"y": y_vals, "x": x_vals},
+            dims=("y", "x"),
+        )
+
+        values_prop = getattr(type(base), "values", None)
+        self.assertIsNotNone(
+            values_prop, "xarray.DataArray should expose a values property"
+        )
+
+        with patch.object(
+            type(base),
+            "values",
+            new=property(
+                lambda self: (_ for _ in ()).throw(
+                    AssertionError("make_pt_sources should not access DataArray.values")
+                )
+            ),
+        ):
+            out = make_pt_sources(
+                base,
+                amplitudes=[9.0],
+                xs=[13.0],
+                ys=[-1.0],
+                output="xarray",
+                add=False,
+            )
+
+        self.assertTrue(
+            isinstance(out.data, da.Array),
+            "Dask-backed DataArray input should remain lazy after dtype resolution",
+        )
+        self.assertEqual(
+            9.0,
+            float(out.sel(x=13.0, y=-1.0, method="nearest").compute().values),
+            "The injected point source should still be placed correctly after lazy dtype resolution",
         )
 
     def test_requires_equal_lengths(self):
