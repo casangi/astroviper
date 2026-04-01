@@ -29,7 +29,15 @@ from astroviper.distributed.image_analysis.multi_gaussian2d_fit import (
 from astroviper.distributed.model.component_models import make_gauss2d
 
 from astroviper.distributed.image_analysis.selection import select_mask
-from dask.distributed import Client
+try:
+    from dask.distributed import Client
+except ImportError:  # pragma: no cover
+    class Client:  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "dask.distributed is required to use the 'distributed' scheduler. "
+                "Install it via 'pip install dask[distributed]' or use '--scheduler synchronous'."
+            )
 
 # Reproducibility
 rng = np.random.default_rng(1234)
