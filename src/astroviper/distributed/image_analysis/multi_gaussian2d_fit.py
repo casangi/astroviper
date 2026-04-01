@@ -3360,15 +3360,6 @@ def _attach_world_center_outputs(
         ds["y0_world_err"].attrs["description"] = "1-sigma uncertainty of y0_world."
         return ds
 
-    # Retain the historical local helper shape here because a targeted unit test
-    # patches `_interp_centers_world` and introspects this frame to exercise all
-    # `_prep` branches directly.
-    def _prep(
-        coord: np.ndarray,
-    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        idx = np.arange(np.asarray(coord).size, dtype=float)
-        return _prepare_interp_pair(idx, coord)
-
     return _interp_centers_world(
         ds,
         np.asarray(context.coord_x),
