@@ -1951,6 +1951,9 @@ class _FitExecutionContext:
         Attached x-axis coordinate values from ``da_tr`` when present.
     coord_y : np.ndarray | None
         Attached y-axis coordinate values from ``da_tr`` when present.
+    has_explicit_public_coords : bool
+        Whether the original public input carried explicit coordinates on both fit
+        axes, as opposed to synthetic wrapper coordinates added for raw arrays.
     sx_sign : float
         Orientation sign inferred from the x axis.
     sy_sign : float
@@ -1972,6 +1975,7 @@ class _FitExecutionContext:
     core: List[str]
     coord_x: Optional[np.ndarray]
     coord_y: Optional[np.ndarray]
+    has_explicit_public_coords: bool
     sx_sign: float
     sy_sign: float
     is_left_handed: bool
@@ -2007,6 +2011,9 @@ def _build_fit_execution_context(
     The fitter operates internally on trailing ``(y, x)`` axes regardless of the
     original input ordering. Axis-orientation signs are derived from any attached
     1-D coordinate vectors and default conservatively when coordinates are absent.
+    The returned context also records whether those coordinates came explicitly from
+    the public input, which matters when deciding whether duplicate world-frame
+    outputs should still be published.
     """
     unlabeled_input = not isinstance(data, xr.DataArray)
     da_in = _ensure_dataarray(data)
@@ -2023,6 +2030,9 @@ def _build_fit_execution_context(
     )
     coord_x = np.asarray(da_tr.coords[dim_x].values) if dim_x in da_tr.coords else None
     coord_y = np.asarray(da_tr.coords[dim_y].values) if dim_y in da_tr.coords else None
+    has_explicit_public_coords = (
+        isinstance(data, xr.DataArray) and dim_x in data.coords and dim_y in data.coords
+    )
     sx_sign = _axis_sign(coord_x)
     sy_sign = _axis_sign(coord_y)
     return _FitExecutionContext(
@@ -2034,6 +2044,7 @@ def _build_fit_execution_context(
         core=[dim_y, dim_x],
         coord_x=coord_x,
         coord_y=coord_y,
+        has_explicit_public_coords=has_explicit_public_coords,
         sx_sign=sx_sign,
         sy_sign=sy_sign,
         is_left_handed=(sx_sign * sy_sign) < 0.0,
@@ -2408,13 +2419,14 @@ def _resolve_fit_coordinate_axes(
     -------
     tuple[np.ndarray, np.ndarray, bool]
         ``(x1d, y1d, world_mode)`` where ``world_mode`` indicates whether the
-        optimizer is operating on nontrivial world-coordinate axes.
+        optimizer is operating in the explicitly requested or supplied world frame.
 
     Notes
     -----
-    ``world_mode`` is derived numerically from the resolved axes rather than from
-    the public arguments so that explicit pixel-index coordinate arrays are treated
-    consistently even when provided through the world-coordinate pathways.
+    ``world_mode`` is semantic rather than purely numeric. Explicitly attached
+    DataArray coordinates requested via ``coord_type="world"`` and explicit
+    ``coords=(x1d, y1d)`` supplied for raw arrays both count as world-coordinate
+    fits even when those world values numerically equal zero-based pixel indices.
     """
     x1d, y1d = _extract_1d_coords_for_fit(
         original_input,
@@ -2424,7 +2436,16 @@ def _resolve_fit_coordinate_axes(
         context.dim_y,
         context.dim_x,
     )
-    return x1d, y1d, not _is_pixel_index_axes(x1d, y1d)
+    if isinstance(original_input, xr.DataArray):
+        world_mode = (
+            (coord_type or "world").lower() == "world"
+            and context.has_explicit_public_coords
+            and _axis_is_valid(np.asarray(x1d, dtype=float))
+            and _axis_is_valid(np.asarray(y1d, dtype=float))
+        )
+    else:
+        world_mode = coords is not None
+    return x1d, y1d, bool(world_mode)
 
 
 def _run_fit_apply_ufunc(
@@ -2672,9 +2693,9 @@ def _build_published_parameter_dataset(
     This helper centralizes the most mathematically dense part of the public API:
     converting native fit outputs into the alternate coordinate frame while
     propagating center, width, and angle uncertainties through local axis scales.
-    World-frame widths and angles are published only when the input supplied
-    usable non-pixel world-coordinate axes, or when the optimizer ran natively
-    in world coordinates from explicit raw-array coordinate vectors.
+    World-frame widths and angles are published whenever the public input carried
+    usable explicit fit-axis coordinates, or when the optimizer ran natively in
+    world coordinates from explicit raw-array coordinate vectors.
     """
     x0 = fit["x0"]
     y0 = fit["y0"]
@@ -2698,11 +2719,11 @@ def _build_published_parameter_dataset(
         None if context.coord_y is None else np.asarray(context.coord_y, dtype=float)
     )
     attached_world_axes = (
-        coord_x is not None
+        context.has_explicit_public_coords
+        and coord_x is not None
         and coord_y is not None
         and _axis_is_valid(coord_x)
         and _axis_is_valid(coord_y)
-        and not _is_pixel_index_axes(coord_x, coord_y)
     )
     publish_world = bool(world_mode or attached_world_axes)
 
@@ -3346,14 +3367,15 @@ def _attach_world_center_outputs(
     -----
     If the fit was already performed in world coordinates, the world-center outputs
     are direct aliases of the native fit parameters. Otherwise they are interpolated
-    from the pixel centers using attached non-pixel world-coordinate axis vectors.
+    from the pixel centers using any explicit attached 1-D fit-axis coordinates from
+    the public input, even when those coordinates numerically equal pixel indices.
     """
     attached_world_axes = (
-        context.coord_x is not None
+        context.has_explicit_public_coords
+        and context.coord_x is not None
         and context.coord_y is not None
         and _axis_is_valid(np.asarray(context.coord_x, dtype=float))
         and _axis_is_valid(np.asarray(context.coord_y, dtype=float))
-        and not _is_pixel_index_axes(context.coord_x, context.coord_y)
     )
     if not world_mode and not attached_world_axes:
         return ds
@@ -3748,8 +3770,9 @@ def fit_multi_gaussian2d(
             - ``offset``, ``offset_err``, ``success`` (bool), ``variance_explained``
         Optional planes:
             - ``residual`` (if ``return_residual``), ``model`` (if ``return_model``)
-        Optional world-frame component variables are added only when the input
-        provides usable non-pixel 1-D coordinate variables:
+        Optional world-frame component variables are added when the input carries
+        usable explicit 1-D coordinate variables for the fit axes, or when raw
+        arrays provide explicit ``coords=(x1d, y1d)`` for world-coordinate fitting:
             - centers ``x0_world(component)``, ``y0_world(component)``
             - world-frame widths ``sigma_major_world(component)``,
               ``sigma_minor_world(component)``, ``fwhm_major_world(component)``,
