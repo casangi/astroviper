@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple, Union, Any, Dict, List
+from typing import Optional, Sequence, Tuple, Union, Any, Dict, List, Mapping
 import numpy as np
 import xarray as xr
 import dask.array as da
@@ -4331,9 +4331,25 @@ def plot_components(
     except Exception as exc:  # pragma: no cover
         raise RuntimeError("Matplotlib is required for plot_components()") from exc
 
-    # Normalize input & dims
+    # Normalize input & dims. When raw unlabeled arrays are plotted without an
+    # explicit dims= override, reuse the fit-time unlabeled-axis contract stored
+    # in the result metadata so plotting interprets the same semantic x/y plane
+    # that the fitter used before it normalized internally to trailing (y, x).
     da = _ensure_dataarray(data)
-    dim_x, dim_y = _resolve_dims(da, dims)
+    unlabeled_input = not isinstance(data, xr.DataArray)
+    unlabeled_axis_order = None
+    if isinstance(getattr(result, "attrs", None), Mapping):
+        _param = result.attrs.get("param")
+        if isinstance(_param, Mapping):
+            _stored = _param.get("unlabeled_axis_order")
+            if _stored is not None:
+                unlabeled_axis_order = str(_stored)
+    dim_x, dim_y = _resolve_dims(
+        da,
+        dims,
+        unlabeled_input=unlabeled_input,
+        unlabeled_axis_order=unlabeled_axis_order,
+    )
     # Plotting extracts a single stored image plane, so it follows the internal
     # row/column ordering (y, x) before labeling axes semantically.
     da_tr = da.transpose(*(d for d in da.dims if d not in (dim_y, dim_x)), dim_y, dim_x)
