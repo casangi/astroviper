@@ -1807,30 +1807,30 @@ def _add_variance_explained(ds: xr.Dataset) -> xr.Dataset:
         "R²-style fit quality for each 2-D image plane (y×x). "
         "Measures how much of the pixel-to-pixel variance is explained by the fitted model.\n\n"
         "Definitions (per plane): let Z be the data, \\hat{Z} the fitted model, "
-        "R = Z - \\hat{Z} the residuals, and 'offset' the robust baseline (median) used by the fitter.\n\n"
+        "and R = Z - \\hat{Z} the residuals.\n\n"
         "Explained variance fraction:\n"
-        "    EVF = 1 - \\sum (Z - \\hat{Z})^2 \\/ \\sum (Z - \\text{offset})^2\n"
+        "    EVF = 1 - \\mathrm{Var}(R) \\/ \\mathrm{Var}(Z)\n"
         "Equivalently:\n"
-        "    EVF = 1 - \\mathrm{Var}(R) \\/ \\mathrm{Var}(Z - \\text{offset})\n\n"
-        "Range: clipped to [0, 1]. 1.0 = perfect fit; 0.0 ≈ no improvement over a flat offset. "
-        "If the denominator is near zero (nearly flat plane), the metric can be unstable.\n\n"
-        "Quick gut-check scale (per plane):"
-        "\n\n"
+        "    EVF = 1 - \\sum (R - \\bar{R})^2 \\/ \\sum (Z - \\bar{Z})^2\n\n"
+        "Range: values near 1.0 indicate an excellent fit, values near 0.0 indicate "
+        "little improvement over the raw plane variance, and negative values mean "
+        "the residual variance exceeds the data variance. If the denominator is near "
+        "zero (nearly flat plane), the metric is reported as NaN.\n\n"
         "Quick gut-check scale (per plane):\n"
         "  ≥0.9 — excellent; model captures most structure\n"
         "  0.6–0.9 — usable but imperfect\n"
         "  0.2–0.6 — poor to fair\n"
-        "  ≈0.0 — no better than a flat background\n\n"
+        "  ≈0.0 — little reduction in pixel-to-pixel variance\n"
+        "  <0.0 — residuals are more variable than the input plane\n\n"
         "For example, a value of 0.2 might indicate:\n"
         "  • Source shape not well modeled by the chosen number of 2-D Gaussians\n"
         "  • Centers/widths/angle off (bad seeds or tight bounds)\n"
-        "  • Background (offset) misestimated\n"
         "  • Coordinates/scales mismatched (pixel vs world, anisotropic scaling)\n"
         "  • Additional structure present (neighbors, wings, gradients)\n\n"
         "For low values, some additional ideas:\n"
         "  • Inspect residuals — should look noise-like if the model is right\n"
         "  • Loosen/improve seeds or bounds; try adding a component\n"
-        "  • Check background handling\n"
+        "  • Check whether the shared offset/background is appropriate\n"
         "  • Verify frame/scale (pixel vs world, local pixel size)\n"
         "  • If noise is high, a low value can be expected — consider SNR or weighting in the fit"
     )
@@ -3590,7 +3590,7 @@ def _apply_fit_variable_docs(ds: xr.Dataset) -> xr.Dataset:
         "offset_err": "1σ uncertainty on the additive background.",
         "amplitude_err": "1σ uncertainty of amplitude parameter in data units.",
         "success": "Optimizer success flag (True/False).",
-        "variance_explained": "Explained variance fraction by the fitted model on this plane (0–1).",
+        "variance_explained": "Explained variance fraction by the fitted model on this plane; values near 1 are best and negative values are possible.",
         "model": "Best-fit model image on the published public (x, y) grid of the input.",
         "residual": "Residual image = data - model on the published public (x, y) grid of the input.",
     }
