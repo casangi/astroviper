@@ -4347,15 +4347,20 @@ def plot_components(
     da = _ensure_dataarray(data)
     unlabeled_input = not isinstance(data, xr.DataArray)
     unlabeled_axis_order = None
+    dims_for_resolve = dims
     if isinstance(getattr(result, "attrs", None), Mapping):
         _param = result.attrs.get("param")
         if isinstance(_param, Mapping):
+            if dims_for_resolve is None:
+                _stored_dims = _param.get("dims")
+                if isinstance(_stored_dims, (list, tuple)) and len(_stored_dims) == 2:
+                    dims_for_resolve = tuple(_stored_dims)
             _stored = _param.get("unlabeled_axis_order")
             if _stored is not None:
                 unlabeled_axis_order = str(_stored)
     dim_x, dim_y = _resolve_dims(
         da,
-        dims,
+        dims_for_resolve,
         unlabeled_input=unlabeled_input,
         unlabeled_axis_order=unlabeled_axis_order,
     )
