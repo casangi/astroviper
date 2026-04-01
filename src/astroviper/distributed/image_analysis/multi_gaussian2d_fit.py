@@ -1179,8 +1179,9 @@ def _ensure_dataarray(data: ArrayOrDA) -> xr.DataArray:
         dims = [f"dim_{i}" for i in range(data.ndim)]
         coords = {d: np.arange(s, dtype=float) for d, s in zip(dims, data.shape)}
         # Raw NumPy/Dask arrays arrive without semantic axis names. We wrap them
-        # generically here; downstream dimension resolution will interpret the
-        # last axis as x and the second-last as y unless the caller supplies dims.
+        # generically here; downstream dimension resolution applies the caller's
+        # unlabeled_axis_order contract (or explicit dims= override) to decide
+        # how those stored axes map onto semantic x/y fit-plane coordinates.
         return xr.DataArray(data, dims=dims, coords=coords, name="data")
     raise TypeError(
         "Unsupported input type; use numpy.ndarray, dask.array.Array, or xarray.DataArray."
