@@ -275,8 +275,8 @@ def main():
     import astroviper.distributed.image_analysis.multi_gaussian2d_fit_parammap as parammap_fit
 
     init_arr = [
-        [5.5, 41.0, -22.5, 15.0, 8.0, 0.3],
-        [8.5, -56.0, 8.5, 6.0, 4.5, 0.9],
+        [4.5, 41.0, -21.0, 21.0, 9.5, 0.3],
+        [7.5, -52.0, 11.0, 7.5, 5.5, 0.9],
     ]
     cube_da = build_fixed_cube(
         data_2g_noise,
