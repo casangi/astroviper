@@ -4452,11 +4452,23 @@ def plot_components(
     ax0.set_xlabel(dim_x)
     ax0.set_ylabel(dim_y)
 
-    # Use the same frame as the axes: world if we're plotting with coordinate
-    # arrays, otherwise pixel. This avoids reinterpreting the caller's raw
-    # ``dims`` argument and keeps the overlay frame tied to the already-resolved
-    # plotted axes.
-    frame_for_overlay = "world" if use_world else "pixel"
+    # Prefer world overlays only when the plotted axes are world-like *and* the
+    # fit result actually publishes world-frame component variables. Raw inputs
+    # wrapped by _ensure_dataarray() always have synthetic coordinates, but those
+    # coordinates do not imply that x0_world/y0_world-style outputs exist.
+    has_world_overlay_vars = any(
+        name in res_plane
+        for name in (
+            "x0_world",
+            "y0_world",
+            "sigma_major_world",
+            "fwhm_major_world",
+            "theta_world",
+            "theta_world_math",
+            "theta_world_pa",
+        )
+    )
+    frame_for_overlay = "world" if (use_world and has_world_overlay_vars) else "pixel"
 
     overlay_fit_components(
         ax0,
