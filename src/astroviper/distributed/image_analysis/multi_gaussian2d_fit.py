@@ -1854,7 +1854,7 @@ def _build_call(
                     same = False
                 if (v is None and dv is None) or same:
                     continue
-                _pairs.append(f"{k}={_short(v)}")
+                _pairs.append(f"{k}={_summarize_metadata_value(v)}")
             _call += ", ".join(_pairs)
         _call += ")"
     except Exception:

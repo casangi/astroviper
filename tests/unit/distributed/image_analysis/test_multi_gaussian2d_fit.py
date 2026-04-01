@@ -2910,6 +2910,35 @@ class TestResultMetadataShortener:
         assert len(s) == 120 and s.endswith("...")
         assert "shape=" not in s
 
+    def test_call_metadata_uses_summarized_nondefault_arguments(self) -> None:
+        """Verify that result call provenance records non-default arguments instead of falling back to the generic placeholder string."""
+        ny, nx = 24, 28
+        y, x = np.mgrid[0:ny, 0:nx]
+        img = xr.DataArray(
+            0.1
+            + np.exp(
+                -((x - 14.0) ** 2) / (2 * 3.0**2) - ((y - 12.0) ** 2) / (2 * 2.0**2)
+            ),
+            dims=("y", "x"),
+        )
+        init = np.array([[1.0, 14.0, 12.0, 3.0, 2.0, 0.0]], dtype=float)
+
+        ds = fit_multi_gaussian2d(
+            img,
+            n_components=1,
+            initial_guesses=init,
+            coord_type="pixel",
+            return_model=False,
+            return_residual=False,
+        )
+
+        call = ds.attrs["call"]
+        assert isinstance(call, str)
+        assert call.startswith("fit_multi_gaussian2d(")
+        assert call != "fit_multi_gaussian2d(...)"
+        assert "n_components=1" in call
+        assert "coord_type=pixel" in call
+
 
 class TestWorldSeeding:
     def test_autoseed_uses_world_axes_and_recovers_params(self) -> None:
