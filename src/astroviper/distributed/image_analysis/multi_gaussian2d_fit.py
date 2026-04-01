@@ -1,4 +1,4 @@
-# file: src/astroviper/fitting/multi_gaussian2d_fit.py
+# file: src/astroviper/distributed/image_analysis/multi_gaussian2d_fit.py
 # 2D gaussian fitter
 # Dave Mehringer
 
