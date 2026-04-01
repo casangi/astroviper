@@ -578,8 +578,8 @@ def make_disk(
     xda_in = _coerce_to_xda(
         data, x_coord=x_coord, y_coord=y_coord, coords=coords, dims=dims
     )
-    x_vals = np.asarray(xda_in[x_coord].values)
-    y_vals = np.asarray(xda_in[y_coord].values)
+    x_vals = np.asarray(xda_in[x_coord].data)
+    y_vals = np.asarray(xda_in[y_coord].data)
 
     if angle == "auto":
         handed = _infer_handedness(x_vals, y_vals)
@@ -721,8 +721,8 @@ def make_gauss2d(
     xda_in = _coerce_to_xda(
         data, x_coord=x_coord, y_coord=y_coord, coords=coords, dims=dims
     )
-    x_vals = np.asarray(xda_in[x_coord].values)
-    y_vals = np.asarray(xda_in[y_coord].values)
+    x_vals = np.asarray(xda_in[x_coord].data)
+    y_vals = np.asarray(xda_in[y_coord].data)
 
     if angle == "auto":
         handed = _infer_handedness(x_vals, y_vals)
@@ -891,8 +891,8 @@ def make_pt_sources(
         data, x_coord=x_coord, y_coord=y_coord, coords=coords, dims=dims
     )
 
-    x_vals = np.asarray(xda_in[x_coord].values)
-    y_vals = np.asarray(xda_in[y_coord].values)
+    x_vals = np.asarray(xda_in[x_coord].data)
+    y_vals = np.asarray(xda_in[y_coord].data)
 
     # Request validity masks so we can truly ignore OOR targets when desired.
     xi, valid_x = _nearest_indices_1d(
@@ -907,10 +907,12 @@ def make_pt_sources(
     # For "ignore" and "ignore_sloppy", only sources within policy range are kept.
     valid = valid_x & valid_y
 
+    data_dtype = getattr(xda_in.data, "dtype", xda_in.dtype)
+
     # Short-circuit if nothing to add.
     if not np.any(valid):
         out_dtype = np.result_type(
-            xda_in.values, amps.dtype if hasattr(amps, "dtype") else amps
+            data_dtype, amps.dtype if hasattr(amps, "dtype") else amps
         )
         source_array = xr.zeros_like(xda_in, dtype=out_dtype)
         xda_out = _apply_source_array(xda_in, source_array, add=add)
@@ -921,7 +923,7 @@ def make_pt_sources(
     yi = np.asarray(yi)[valid]
     amps_kept = amps[valid]
 
-    out_dtype = np.result_type(xda_in.values, amps_kept)
+    out_dtype = np.result_type(data_dtype, amps_kept)
 
     # Public convention in this module is (x, y), so axis 0 follows x.
     width = xda_in.sizes[x_coord]
