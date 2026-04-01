@@ -172,6 +172,47 @@ class TestSuccess:
         ):
             assert name not in ds
 
+    def test_labeled_pixel_index_coords_still_publish_world_solution_vars(self) -> None:
+        """Verify that explicit DataArray fit-axis coordinates are treated as world coordinates even when they numerically equal pixel indices."""
+        ny, nx = 48, 60
+        comps = [dict(amp=1.0, x0=18.0, y0=22.0, sigma_x=3.0, sigma_y=2.0, theta=0.2)]
+        data = _scene(
+            ny, nx, comps, offset=0.1, noise=0.02, seed=7, coords=False
+        ).values
+        da2 = xr.DataArray(
+            data,
+            dims=("y", "x"),
+            coords={
+                "y": np.arange(ny, dtype=float),
+                "x": np.arange(nx, dtype=float),
+            },
+        )
+        init = np.array([[1.0, 18.0, 22.0, 3.0, 2.0, 0.2]], float)
+
+        ds = fit_multi_gaussian2d(
+            da2,
+            n_components=1,
+            initial_guesses=init,
+            coord_type="pixel",
+            return_model=False,
+            return_residual=False,
+        )
+
+        for name in (
+            "x0_world",
+            "y0_world",
+            "x0_world_err",
+            "y0_world_err",
+            "sigma_major_world",
+            "sigma_minor_world",
+            "fwhm_major_world",
+            "fwhm_minor_world",
+            "theta_world",
+        ):
+            assert name in ds
+        assert np.isclose(ds["x0_world"].item(), ds["x0_pixel"].item())
+        assert np.isclose(ds["y0_world"].item(), ds["y0_pixel"].item())
+
     def test_vectorize_over_time_names_and_indices(self) -> None:
         """Verify that the fitter vectorizes over a time axis and accepts both named and index-based fit-dimension selectors."""
         ny, nx = 64, 80
