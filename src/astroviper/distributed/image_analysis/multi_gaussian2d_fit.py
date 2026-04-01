@@ -1227,7 +1227,7 @@ def _resolve_dims(
     second-last is y.
     """
     axis_order = None if unlabeled_axis_order is None else unlabeled_axis_order.lower()
-    if axis_order not in (None, "yx", "xy"):
+    if unlabeled_input and dims is None and axis_order not in (None, "yx", "xy"):
         raise ValueError("unlabeled_axis_order must be either 'yx' or 'xy'.")
 
     if dims is None:
