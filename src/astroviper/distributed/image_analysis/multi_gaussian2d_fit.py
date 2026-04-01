@@ -3424,7 +3424,7 @@ def _attach_fit_invocation_metadata(
     return_residual: bool,
     angle: str,
     coord_type: str,
-    unlabeled_axis_order: str,
+    unlabeled_axis_order: Optional[str],
     coords,
     world_mode: bool,
 ) -> xr.Dataset:
@@ -3459,8 +3459,10 @@ def _attach_fit_invocation_metadata(
         Public angle-convention selector.
     coord_type : str
         Public coordinate-frame selector.
-    unlabeled_axis_order : str
-        Semantic axis-order contract for unlabeled NumPy/Dask inputs.
+    unlabeled_axis_order : {"yx", "xy"} | None
+        Semantic axis-order contract for unlabeled NumPy/Dask inputs, or
+        ``None`` when the caller supplied labeled data or otherwise did not
+        need to resolve unlabeled raw-array axis order.
     coords : Any
         Optional NumPy/Dask coordinate vectors.
     world_mode : bool
