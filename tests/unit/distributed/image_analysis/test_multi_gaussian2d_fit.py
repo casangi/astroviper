@@ -415,6 +415,41 @@ class TestInputs:
                 unlabeled_axis_order="bad",
             )
 
+    def test_invalid_unlabeled_axis_order_is_ignored_when_dims_are_explicit(
+        self,
+    ) -> None:
+        """Verify that invalid unlabeled-axis hints are ignored once raw-array callers supply explicit fit-plane dims."""
+        ny, nx = 32, 33
+        comps = [dict(amp=1.0, x0=16.0, y0=15.0, sigma_x=3.0, sigma_y=3.0, theta=0.0)]
+        arr = _scene(ny, nx, comps).values
+
+        ds = fit_multi_gaussian2d(
+            arr,
+            n_components=1,
+            dims=(1, 0),
+            initial_guesses=np.array([[1.0, 16.0, 15.0, 3.0, 3.0, 0.0]], float),
+            unlabeled_axis_order="bad",
+        )
+
+        assert bool(ds.success) is True
+
+    def test_invalid_unlabeled_axis_order_is_ignored_for_labeled_dataarray(
+        self,
+    ) -> None:
+        """Verify that invalid unlabeled-axis hints are ignored for labeled DataArray inputs whose dims already disambiguate the fit plane."""
+        ny, nx = 32, 33
+        comps = [dict(amp=1.0, x0=16.0, y0=15.0, sigma_x=3.0, sigma_y=3.0, theta=0.0)]
+        da2 = _scene(ny, nx, comps)
+
+        ds = fit_multi_gaussian2d(
+            da2,
+            n_components=1,
+            initial_guesses=np.array([[1.0, 16.0, 15.0, 3.0, 3.0, 0.0]], float),
+            unlabeled_axis_order="bad",
+        )
+
+        assert bool(ds.success) is True
+
     def test_world_coords_skipped_for_bad_axis_coords(self) -> None:
         """Verify that malformed world-coordinate axes do not produce misleading world-frame results."""
         ny, nx = 32, 32
