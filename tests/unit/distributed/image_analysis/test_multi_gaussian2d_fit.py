@@ -2316,7 +2316,8 @@ class TestInnerPrepCoverage:
     def test_inner_prep_lines_executed(self, monkeypatch):
         """Covers lines by exercising all branches of the local `_prep`.
         We shim `_interp_centers_world` to reach the `_prep` closure and call it
-        with inputs that trigger: invalid, descending, non-strict, increasing.
+        with inputs that trigger: invalid, descending, duplicate paired values,
+        increasing, and non-monotonic paired coordinate values.
         """
         calls: list[tuple[str, object, object]] = []
 
@@ -2335,13 +2336,19 @@ class TestInnerPrepCoverage:
             idx, val = local_prep(np.array([5.0, 4.0, 3.0]))
             calls.append(("descending", idx.copy(), val.copy()))
 
-            # 3) non-strictly-increasing -> (None, None)
+            # 3) duplicate paired values are acceptable because the synthetic
+            # source axis remains strictly increasing.
             idx, val = local_prep(np.array([0.0, 1.0, 1.0, 2.0]))
-            calls.append(("non_strict", idx, val))
+            calls.append(("duplicate_fp", idx.copy(), val.copy()))
 
             # 4) strictly increasing -> identity
             idx, val = local_prep(np.array([0.0, 0.5, 1.0]))
             calls.append(("increasing", idx.copy(), val.copy()))
+
+            # 5) non-monotonic paired values are still valid because np.interp
+            # only requires the source axis (the synthetic indices) to be monotonic.
+            idx, val = local_prep(np.array([0.0, 1.0, 0.0]))
+            calls.append(("non_monotonic_fp", idx.copy(), val.copy()))
 
             # mark for assertion that shim ran
             out = ds.copy()
@@ -2372,7 +2379,7 @@ class TestInnerPrepCoverage:
 
         # The shim executed and exercised all `_prep` branches
         assert ds.attrs.get("_shim_ran", False) is True
-        assert len(calls) == 4
+        assert len(calls) == 5
 
         # Validate branch outcomes
         label, idx, val = calls[0]
@@ -2384,12 +2391,24 @@ class TestInnerPrepCoverage:
         assert np.allclose(val, np.array([5.0, 4.0, 3.0]))
 
         label, idx, val = calls[2]
-        assert label == "non_strict" and idx is None and val is None
+        assert label == "duplicate_fp"
+        assert np.allclose(idx, np.array([0.0, 1.0, 2.0, 3.0]))
+        assert np.allclose(val, np.array([0.0, 1.0, 1.0, 2.0]))
 
         label, idx, val = calls[3]
         assert label == "increasing"
         assert np.allclose(idx, np.array([0.0, 1.0, 2.0]))
         assert np.allclose(val, np.array([0.0, 0.5, 1.0]))
+
+        label, idx, val = calls[4]
+        assert label == "non_monotonic_fp"
+        assert np.allclose(idx, np.array([0.0, 1.0, 2.0]))
+        assert np.allclose(val, np.array([0.0, 1.0, 0.0]))
+
+        idx, val = mg._prepare_interp_pair(
+            np.array([0.0, 1.0, 1.0, 2.0]), np.array([0.0, 1.0, 2.0, 3.0])
+        )
+        assert idx is None and val is None
 
 
 class TestCoordsForNdarrayInput:

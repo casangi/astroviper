@@ -1515,14 +1515,12 @@ def _prepare_interp_pair(
     ):
         return None, None
     if xp.size >= 2:
-        d_fp = np.diff(fp)
-        if not (np.all(d_fp > 0) or np.all(d_fp < 0)):
+        d_xp = np.diff(xp)
+        if not (np.all(d_xp > 0) or np.all(d_xp < 0)):
             return None, None
-    if xp.size >= 2 and xp[1] < xp[0]:
-        xp = xp[::-1]
-        fp = fp[::-1]
-    elif xp.size >= 2 and not np.all(np.diff(xp) > 0):
-        return None, None
+        if np.all(d_xp < 0):
+            xp = xp[::-1]
+            fp = fp[::-1]
     return xp, fp
 
 
