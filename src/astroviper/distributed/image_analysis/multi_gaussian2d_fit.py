@@ -1634,9 +1634,11 @@ def _prepare_pixel_center_interp(
 
     Notes
     -----
-    Pixel centers always live on an ascending synthetic index axis. Only the
-    attached world coordinates may descend, so this helper delegates the
-    descending-axis normalization to :func:`_prepare_interp_pair`.
+    This helper always constructs an ascending synthetic pixel-index axis and
+    pairs it with the provided world-coordinate values. It relies on
+    :func:`_prepare_interp_pair` for the shared finiteness, shape, and source-
+    axis monotonicity checks needed before those arrays are passed to
+    ``np.interp``.
     """
     idx = np.arange(np.asarray(coord).size, dtype=float)
     return _prepare_interp_pair(idx, coord)
