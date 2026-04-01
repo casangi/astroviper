@@ -135,6 +135,44 @@ class TestSuccess:
         assert np.allclose(ds["x0_pixel"].values[order], [40.0, 85.0], atol=0.8)
         assert np.allclose(ds["y0_pixel"].values[order], [60.0, 28.0], atol=0.8)
 
+    def test_pixel_only_input_does_not_publish_world_solution_vars(self) -> None:
+        """Verify that plain pixel-index inputs publish only pixel-frame solution variables and omit world-frame outputs."""
+        ny, nx = 48, 60
+        comps = [dict(amp=1.0, x0=18.0, y0=22.0, sigma_x=3.0, sigma_y=2.0, theta=0.2)]
+        da2 = _scene(ny, nx, comps, offset=0.1, noise=0.02, seed=7, coords=False)
+        init = np.array([[1.0, 18.0, 22.0, 3.0, 2.0, 0.2]], float)
+
+        ds = fit_multi_gaussian2d(
+            da2,
+            n_components=1,
+            initial_guesses=init,
+            coord_type="pixel",
+            return_model=False,
+            return_residual=False,
+        )
+
+        for name in (
+            "x0_world",
+            "y0_world",
+            "x0_world_err",
+            "y0_world_err",
+            "sigma_major_world",
+            "sigma_minor_world",
+            "sigma_major_world_err",
+            "sigma_minor_world_err",
+            "fwhm_major_world",
+            "fwhm_minor_world",
+            "fwhm_major_world_err",
+            "fwhm_minor_world_err",
+            "theta_world",
+            "theta_world_err",
+            "theta_world_math",
+            "theta_world_math_err",
+            "theta_world_pa",
+            "theta_world_pa_err",
+        ):
+            assert name not in ds
+
     def test_vectorize_over_time_names_and_indices(self) -> None:
         """Verify that the fitter vectorizes over a time axis and accepts both named and index-based fit-dimension selectors."""
         ny, nx = 64, 80
