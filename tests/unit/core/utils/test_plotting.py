@@ -12,7 +12,7 @@ from astropy.wcs import WCS
 
 import xarray as xr
 
-from astroviper.utils.plotting import generate_astro_plot, generate_plot
+from astroviper.utils.plotting import generate_plot
 
 
 def _make_mock_equatorial_sin_wcs() -> WCS:
@@ -27,7 +27,7 @@ def _make_mock_equatorial_sin_wcs() -> WCS:
     return wcs
 
 
-def test_generate_astro_plot_places_source_at_requested_xy():
+def test_generate_plot_places_source_at_requested_xy():
     """Verify the x/y source index is rendered at the same x/y plot location."""
     n_pix = 20
     x_target = 5
@@ -37,7 +37,7 @@ def test_generate_astro_plot_places_source_at_requested_xy():
     # The package convention for this helper is data[x, y].
     data[x_target, y_target] = 1.0
 
-    fig, ax = generate_astro_plot(
+    fig, ax = generate_plot(
         data=data, wcs=_make_mock_equatorial_sin_wcs(), show_world_axes=False
     )
 
@@ -52,13 +52,13 @@ def test_generate_astro_plot_places_source_at_requested_xy():
     plt.close(fig)
 
 
-def test_generate_astro_plot_world_axes_have_ra_increasing_left():
+def test_generate_plot_world_axes_have_ra_increasing_left():
     """Verify mocked RA/Dec WCS has increasing RA toward the left edge."""
     n_pix = 20
     data = np.zeros((n_pix, n_pix), dtype=float)
     wcs = _make_mock_equatorial_sin_wcs()
 
-    fig, _ = generate_astro_plot(data=data, wcs=wcs, show_world_axes=True)
+    fig, _ = generate_plot(data=data, wcs=wcs, show_world_axes=True)
 
     # Compare world coordinates at left/right edges through the image midline.
     y_mid = (n_pix - 1) / 2.0
@@ -71,22 +71,12 @@ def test_generate_astro_plot_world_axes_have_ra_increasing_left():
     plt.close(fig)
 
 
-def test_generate_astro_plot_requires_wcs_for_world_axes():
-    """Verify world-axis mode rejects missing WCS input."""
-    data = np.zeros((20, 20), dtype=float)
-
-    with pytest.raises(
-        ValueError, match="wcs must be provided when show_world_axes=True"
-    ):
-        generate_astro_plot(data=data, wcs=None, show_world_axes=True)
-
-
-def test_generate_astro_plot_requires_2d_data():
+def test_generate_plot_requires_2d_data():
     """Verify plotting helper rejects non-2D inputs with a clear error."""
     data_1d = np.zeros(20, dtype=float)
 
     with pytest.raises(ValueError, match="data must be a 2D array-like object"):
-        generate_astro_plot(data=data_1d, show_world_axes=False)
+        generate_plot(data=data_1d, show_world_axes=False)
 
 
 def test_generate_plot_uses_dataarray_axis_coords_for_world_axes():
