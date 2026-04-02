@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, Tuple, Union
+from typing import Any, Optional, Tuple, Union
 
 import numpy as np
 import xarray as xr
@@ -14,7 +14,7 @@ def _resolve_plot_coords(
     y_coords: Optional[Union[str, np.ndarray]] = None,
     *,
     need_coords: bool = True,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[Any, np.ndarray, np.ndarray]:
     """
     Resolve a 2-D plotting payload and its x/y coordinate vectors.
 
