@@ -46,13 +46,13 @@ def _resolve_plot_coords(
     returned coordinate vectors therefore align with ``values.shape == (nx, ny)``.
     """
     if isinstance(data, xr.DataArray):
-        values = np.asarray(data.values)
-        if values.ndim != 2:
+        if data.ndim != 2:
             raise ValueError(
                 "data must be a 2D array-like object with shape (nx, ny) for plotting."
             )
         dim_x = data.dims[0]
         dim_y = data.dims[1]
+        nx, ny = data.shape
 
         def _coord_from_spec(spec, dim_name: str, axis_size: int) -> np.ndarray:
             if spec is None:
@@ -72,9 +72,10 @@ def _resolve_plot_coords(
                 )
             return coord_values
 
-        x_values = _coord_from_spec(x_coords, dim_x, values.shape[0])
-        y_values = _coord_from_spec(y_coords, dim_y, values.shape[1])
-        return values, x_values, y_values
+        x_values = _coord_from_spec(x_coords, dim_x, nx)
+        y_values = _coord_from_spec(y_coords, dim_y, ny)
+        # Materialize here — plotting always requires concrete values.
+        return np.asarray(data.values), x_values, y_values
 
     values = np.asarray(data)
     if values.ndim != 2:
