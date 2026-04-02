@@ -7,11 +7,12 @@
 
 import os
 
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"  # macOS Accelerate
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
+if __name__ == "__main__":
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"  # macOS Accelerate
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 import argparse
 import time
