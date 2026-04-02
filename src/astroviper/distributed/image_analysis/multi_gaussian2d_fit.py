@@ -74,52 +74,12 @@ def _gauss2d_component(
     return amp * np.exp(-(a * x**2 + 2 * b * x * y + c * y**2))
 
 
-_SIG2FWHM = 2.0 * np.sqrt(2.0 * np.log(2.0))
-_FWHM2SIG = 1.0 / _SIG2FWHM
-
-
-def _fwhm_from_sigma(sigma):
-    """
-    Convert Gaussian sigma values to full width at half maximum.
-
-    Parameters
-    ----------
-    sigma : array-like
-        Scalar or array of Gaussian sigma values.
-
-    Returns
-    -------
-    np.ndarray
-        Values converted to FWHM using the standard Gaussian relation.
-
-    Notes
-    -----
-    No positivity check is applied here; callers are expected to pass physically
-    meaningful widths.
-    """
-    return _SIG2FWHM * np.asarray(sigma)
-
-
-def _sigma_from_fwhm(fwhm):
-    """
-    Convert full width at half maximum values to Gaussian sigma.
-
-    Parameters
-    ----------
-    fwhm : array-like
-        Scalar or array of FWHM values.
-
-    Returns
-    -------
-    np.ndarray
-        Values converted to sigma using the standard Gaussian relation.
-
-    Notes
-    -----
-    No positivity check is applied here; callers are expected to pass physically
-    meaningful widths.
-    """
-    return _FWHM2SIG * np.asarray(fwhm)
+from ...utils._gaussian_math import (
+    SIG2FWHM as _SIG2FWHM,
+    FWHM2SIG as _FWHM2SIG,
+    fwhm_from_sigma as _fwhm_from_sigma,
+    sigma_from_fwhm as _sigma_from_fwhm,
+)
 
 
 # ----------------------- Parameter packing helpers -----------------------
@@ -4145,7 +4105,7 @@ def overlay_fit_components(
     # For drawing we want radii (half-sizes in data units). We will compute:
     #   if metric == "sigma":    rx = n_sigma * sigma_x;    width = 2*rx
     #   if metric == "fwhm":     rx = 0.5 * n_sigma * fwhm_x; width = 2*rx = n_sigma*fwhm_x
-    FWHM_K = 2.0 * np.sqrt(2.0 * np.log(2.0))  # ≈ 2.35482
+    FWHM_K = _SIG2FWHM
 
     # Try x/y first; if not present, fall back to major/minor (both name orders)
     sigx = _first(
