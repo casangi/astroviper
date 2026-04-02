@@ -38,10 +38,6 @@ except ImportError:  # pragma: no cover
             )
 
 
-# Reproducibility
-rng = np.random.default_rng(1234)
-
-
 def make_scene_via_component_models(
     nx: int,
     ny: int,
