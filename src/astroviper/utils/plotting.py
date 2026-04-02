@@ -12,6 +12,8 @@ def _resolve_plot_coords(
     data,
     x_coords: Optional[Union[str, np.ndarray]] = None,
     y_coords: Optional[Union[str, np.ndarray]] = None,
+    *,
+    need_coords: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Resolve a 2-D plotting payload and its x/y coordinate vectors.
@@ -32,6 +34,12 @@ def _resolve_plot_coords(
           available, otherwise use pixel indices ``0..ny-1``.
         - ``str``: use the named coordinate from the ``xarray.DataArray``.
         - array-like: explicit y coordinate values with length ``ny``.
+    need_coords : bool, optional
+        When ``False``, skip DataArray coordinate lookup and float casting;
+        return pixel-index arrays instead. Set to ``False`` for rendering
+        modes (e.g. ``imshow``) that do not consume the coordinate vectors,
+        so that non-numeric DataArray coordinates (e.g. ``datetime64``,
+        string labels) do not raise. Default is ``True``.
 
     Returns
     -------
@@ -61,6 +69,16 @@ def _resolve_plot_coords(
         dim_y = data.dims[1]
         nx, ny = data.shape
 
+        if not need_coords:
+            # Coordinate vectors will not be used by the caller; skip the
+            # DataArray coord lookup and float cast to avoid raising on
+            # non-numeric coordinates (e.g. datetime64, string labels).
+            return (
+                np.asarray(data.values),
+                np.arange(nx, dtype=float),
+                np.arange(ny, dtype=float),
+            )
+
         def _coord_from_spec(spec, dim_name: str, axis_size: int) -> np.ndarray:
             if spec is None:
                 if dim_name in data.coords:
@@ -88,6 +106,13 @@ def _resolve_plot_coords(
     if values.ndim != 2:
         raise ValueError(
             "data must be a 2D array-like object with shape (nx, ny) for plotting."
+        )
+
+    if not need_coords:
+        return (
+            values,
+            np.arange(values.shape[0], dtype=float),
+            np.arange(values.shape[1], dtype=float),
         )
 
     def _coord_from_array(
@@ -177,8 +202,12 @@ def generate_plot(
     supplied, the helper renders a coordinate-aware plot using the resolved x/y
     coordinate vectors rather than requiring an ``astropy.wcs.WCS`` object.
     """
+    # Coordinate vectors are only consumed by the pcolormesh (world-axis, no
+    # WCS) branch.  Skip the DataArray coord lookup and float cast in all other
+    # modes so that non-numeric DataArray coordinates don't raise needlessly.
+    need_coords = show_world_axes and wcs is None
     values, x_values, y_values = _resolve_plot_coords(
-        data=data, x_coords=x_coords, y_coords=y_coords
+        data=data, x_coords=x_coords, y_coords=y_coords, need_coords=need_coords
     )
 
     if isinstance(data, xr.DataArray):
