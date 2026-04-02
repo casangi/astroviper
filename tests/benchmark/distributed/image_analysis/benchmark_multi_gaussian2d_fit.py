@@ -87,7 +87,6 @@ def make_scene_via_component_models(
             fwhm_y = float(c["fwhm_minor"])
             thc = float(c.get("theta", 0.0))
 
-            data = z[..., i]
             z[:, :, i] = make_gauss2d(
                 data=z[..., i],
                 a=fwhm_x,
