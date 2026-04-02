@@ -24,6 +24,7 @@ from astroviper.distributed.image_analysis.multi_gaussian2d_fit import (
     fit_multi_gaussian2d,
 )
 from astroviper.distributed.model.component_models import make_gauss2d
+
 try:
     from dask.distributed import Client
 except ImportError:  # pragma: no cover
