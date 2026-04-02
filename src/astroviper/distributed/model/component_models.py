@@ -40,14 +40,18 @@ def _coerce_to_xda(
         Input grid. Either an ``xarray.DataArray`` or a 2-D NumPy/Dask array.
     x_coord, y_coord
         Names of the coordinate variables representing the horizontal and
-        vertical axes in world units.
+        vertical axes.
     coords
         Required when ``data`` is a NumPy/Dask array. A mapping that must include
         1-D arrays for ``x_coord`` and ``y_coord`` whose lengths match the array
-        width and height, respectively.
+        width (horizontal) and height (vertical), respectively.
+        This module's public convention for unlabeled 2-D arrays is that axis 0
+        is horizontal (x) and axis 1 is vertical (y). This is an Astroviper API
+        choice for packed array inputs and should not be confused with the usual
+        NumPy row/column indexing convention ``array[y, x]``.
     dims
         Optional dimension names to assign when wrapping a NumPy/Dask array.
-        Defaults to ``(y_coord, x_coord)``.
+        Defaults to ``(x_coord, y_coord)``.
 
     Returns
     -------
@@ -83,8 +87,11 @@ def _coerce_to_xda(
 
     x_vals = np.asarray(coords[x_coord])
     y_vals = np.asarray(coords[y_coord])
-
-    H, W = data.shape
+    # Public API convention in this module: unlabeled 2-D arrays are interpreted
+    # as packed (x, y), so x coords map to axis 0 and y coords map to axis 1.
+    # This is an Astroviper convention for raw inputs, not a claim about NumPy
+    # row/column storage order in Astropy.
+    W, H = data.shape
     if y_vals.shape[0] != H or x_vals.shape[0] != W:
         raise ValueError(
             f"Coordinate lengths must match array shape: "
@@ -93,9 +100,9 @@ def _coerce_to_xda(
         )
 
     if dims is None:
-        dims = (y_coord, x_coord)
+        dims = (x_coord, y_coord)
 
-    return xr.DataArray(data, coords={y_coord: y_vals, x_coord: x_vals}, dims=dims)
+    return xr.DataArray(data, coords={x_coord: x_vals, y_coord: y_vals}, dims=dims)
 
 
 def _rotated_coords(
@@ -481,7 +488,10 @@ def make_disk(
     either an ``xarray.DataArray`` of any dimensionality that includes named
     ``x_coord`` and ``y_coord`` dims, or a 2-D NumPy/Dask array plus 1-D
     coordinate arrays via ``coords``. All coordinates are interpreted as world
-    coordinates.
+    coordinates. For unlabeled 2-D NumPy/Dask inputs, this module's public API
+    convention is that axis 0 is ``x`` (horizontal) and axis 1 is ``y`` (vertical).
+    That is an Astroviper packed-array convention for raw inputs rather than the
+    usual NumPy row/column indexing order.
 
     Behavior controlled by ``add``:
       - ``add=True`` (default): **Additive** mode. ``height`` is added to the
@@ -509,13 +519,13 @@ def make_disk(
     height
         Value to write inside the ellipse, or the increment when ``add=True``.
     x_coord, y_coord
-        Names of the horizontal and vertical coordinates or dims.
+        Names of the horizontal (x_coord) and vertical (y_coord) coordinates or dims.
     coords
         Required when ``data`` is a NumPy/Dask array. Mapping containing 1-D
         arrays for ``x_coord`` and ``y_coord`` whose lengths match the array.
     dims
         Optional when ``data`` is a NumPy/Dask array. Defaults to
-        ``(y_coord, x_coord)``.
+        ``(x_coord, y_coord)``.
     add
         Defaults to ``True``. If ``True``, add to values inside the ellipse;
         if ``False``, replace values inside the ellipse.
@@ -548,15 +558,19 @@ def make_disk(
 
     Notes
     -----
-    For DataArray inputs with extra dims (for example, ``("time", "y", "x")``),
+    For DataArray inputs, labeled dims determine the x/y semantics. For unlabeled
+    2-D NumPy/Dask arrays, axis 0 is interpreted as ``x`` (horizontal) and axis 1
+    as ``y`` (vertical). That is this module's packed-array API convention rather
+    than the usual NumPy row/column indexing order.
+    For DataArray inputs with extra dims (for example, ``("time", "x", "y")``),
     the 2-D mask broadcasts across the remaining dims. Dask inputs remain lazy.
 
     Examples
     --------
     >>> import numpy as np, xarray as xr
-    >>> y = np.linspace(-5, 5, 101)
     >>> x = np.linspace(-5, 5, 121)
-    >>> base = xr.DataArray(np.zeros((y.size, x.size)), coords={"y": y, "x": x}, dims=("y", "x"))
+    >>> y = np.linspace(-5, 5, 101)
+    >>> base = xr.DataArray(np.zeros((x.size, y.size)), coords={"x": x, "y": y}, dims=("x", "y"))
     >>> out = make_disk(base, a=3.0, b=1.5, theta=np.deg2rad(30), x0=0.0, y0=0.0, height=2.0)
     """
     _validate_ab_theta_center(a, b, theta, x0, y0)
@@ -564,8 +578,8 @@ def make_disk(
     xda_in = _coerce_to_xda(
         data, x_coord=x_coord, y_coord=y_coord, coords=coords, dims=dims
     )
-    x_vals = np.asarray(xda_in[x_coord].values)
-    y_vals = np.asarray(xda_in[y_coord].values)
+    x_vals = np.asarray(xda_in[x_coord].data)
+    y_vals = np.asarray(xda_in[y_coord].data)
 
     if angle == "auto":
         handed = _infer_handedness(x_vals, y_vals)
@@ -609,7 +623,10 @@ def make_gauss2d(
     ``make_gauss2d`` produces an elliptical Gaussian with peak amplitude ``peak`` at
     center ``(x0, y0)``. Inputs ``a`` and ``b`` are the **full width at half
     maximum (FWHM)** along the ellipse’s principal axes. The ellipse is rotated
-    by ``theta`` radians measured from +x toward +y.
+    by ``theta`` radians measured from +x toward +y. For unlabeled 2-D NumPy/Dask
+    inputs, this module's public API convention is that axis 0 is ``x`` (horizontal)
+    and axis 1 is ``y`` (vertical). That is an Astroviper packed-array convention
+    for raw inputs rather than the usual NumPy row/column indexing order.
 
     Conversion from FWHM to standard deviation:
 
@@ -652,7 +669,7 @@ def make_gauss2d(
         arrays for ``x_coord`` and ``y_coord`` whose lengths match the array.
     dims
         Optional when ``data`` is a NumPy/Dask array. Defaults to
-        ``(y_coord, x_coord)``.
+        ``(x_coord, y_coord)``.
     add
         Defaults to ``True``. If ``True``, add the Gaussian to existing values;
         if ``False``, replace by the Gaussian everywhere.
@@ -685,15 +702,18 @@ def make_gauss2d(
 
     Notes
     -----
-    Works lazily with Dask arrays. For inputs with extra dims, the 2-D Gaussian
-    broadcasts across the remaining dims.
+    Works lazily with Dask arrays. For DataArray inputs, labeled dims determine
+    the x/y semantics. For unlabeled 2-D NumPy/Dask arrays, axis 0 is interpreted
+    as ``x`` and axis 1 as ``y``. That is this module's packed-array API
+    convention rather than the usual NumPy row/column indexing order.
+    For inputs with extra dims, the 2-D Gaussian broadcasts across the remaining dims.
 
     Examples
     --------
     >>> import numpy as np, xarray as xr
-    >>> y = np.linspace(-4, 4, 200)
     >>> x = np.linspace(-5, 5, 300)
-    >>> base = xr.DataArray(np.zeros((y.size, x.size)), coords={"y": y, "x": x}, dims=("y", "x"))
+    >>> y = np.linspace(-4, 4, 200)
+    >>> base = xr.DataArray(np.zeros((x.size, y.size)), coords={"x": x, "y": y}, dims=("x", "y"))
     >>> g = make_gauss2d(base, a=2.355, b=4.71, theta=np.deg2rad(30), x0=0.0, y0=0.0, peak=10.0)
     """
     _validate_ab_theta_center(a, b, theta, x0, y0)
@@ -701,8 +721,8 @@ def make_gauss2d(
     xda_in = _coerce_to_xda(
         data, x_coord=x_coord, y_coord=y_coord, coords=coords, dims=dims
     )
-    x_vals = np.asarray(xda_in[x_coord].values)
-    y_vals = np.asarray(xda_in[y_coord].values)
+    x_vals = np.asarray(xda_in[x_coord].data)
+    y_vals = np.asarray(xda_in[y_coord].data)
 
     if angle == "auto":
         handed = _infer_handedness(x_vals, y_vals)
@@ -747,7 +767,10 @@ def make_pt_sources(
     the same world units as the grid coordinates. Sources are mapped to the nearest
     grid point along each axis in physical distance. If a target lies exactly midway
     between two coordinates along an axis, the right-hand coordinate is chosen
-    deterministically.
+    deterministically. For unlabeled 2-D NumPy/Dask inputs, this module's public
+    API convention is that axis 0 is ``x`` (horizontal) and axis 1 is ``y`` (vertical).
+    That is an Astroviper packed-array convention for raw inputs rather than the
+    usual NumPy row/column indexing order.
 
     Duplicate hits are handled correctly and efficiently. If multiple sources map
     to the same grid point, their amplitudes are summed in one pass using a
@@ -803,7 +826,7 @@ def make_pt_sources(
         arrays for ``x_coord`` and ``y_coord`` whose lengths match the array.
     dims
         Optional when ``data`` is a NumPy/Dask array. Defaults to
-        ``(y_coord, x_coord)``.
+        ``(x_coord, y_coord)``.
     add
         Defaults to ``True``. If ``True``, add to existing values at those
         pixels; if ``False``, replace values at those pixels.
@@ -829,16 +852,20 @@ def make_pt_sources(
     -----
     For rectilinear yet irregular grids, the nearest 2-D pixel is the Cartesian
     pair of the nearest 1-D coordinates along x and y. This allows a fast,
-    per-axis nearest search to be combined into a correct 2-D decision.
+    per-axis nearest search to be combined into a correct 2-D decision. For
+    DataArray inputs, labeled dims determine the x/y semantics. For unlabeled
+    2-D NumPy/Dask arrays, axis 0 is interpreted as ``x`` (horizontal) and axis 1
+    as ``y`` (vertical). That is this module's packed-array API convention rather
+    than the usual NumPy row/column indexing order.
 
     Examples
     --------
     >>> import numpy as np, xarray as xr
-    >>> y = np.linspace(-2, 2, 5)
     >>> x = np.linspace(-3, 3, 7)
-    >>> base = xr.DataArray(np.zeros((y.size, x.size)),
-    ...                     coords={"y": y, "x": x},
-    ...                     dims=("y", "x"))
+    >>> y = np.linspace(-2, 2, 5)
+    >>> base = xr.DataArray(np.zeros((x.size, y.size)),
+    ...                     coords={"x": x, "y": y},
+    ...                     dims=("x", "y"))
     >>> # Strict ignore (default): OOR sources are dropped
     >>> out1 = make_pt_sources(base,
     ...     amplitudes=[5.0, 3.0],
@@ -864,8 +891,8 @@ def make_pt_sources(
         data, x_coord=x_coord, y_coord=y_coord, coords=coords, dims=dims
     )
 
-    x_vals = np.asarray(xda_in[x_coord].values)
-    y_vals = np.asarray(xda_in[y_coord].values)
+    x_vals = np.asarray(xda_in[x_coord].data)
+    y_vals = np.asarray(xda_in[y_coord].data)
 
     # Request validity masks so we can truly ignore OOR targets when desired.
     xi, valid_x = _nearest_indices_1d(
@@ -880,10 +907,12 @@ def make_pt_sources(
     # For "ignore" and "ignore_sloppy", only sources within policy range are kept.
     valid = valid_x & valid_y
 
+    data_dtype = getattr(xda_in.data, "dtype", xda_in.dtype)
+
     # Short-circuit if nothing to add.
     if not np.any(valid):
         out_dtype = np.result_type(
-            xda_in.values, amps.dtype if hasattr(amps, "dtype") else amps
+            data_dtype, amps.dtype if hasattr(amps, "dtype") else amps
         )
         source_array = xr.zeros_like(xda_in, dtype=out_dtype)
         xda_out = _apply_source_array(xda_in, source_array, add=add)
@@ -894,34 +923,42 @@ def make_pt_sources(
     yi = np.asarray(yi)[valid]
     amps_kept = amps[valid]
 
-    out_dtype = np.result_type(xda_in.values, amps_kept)
+    out_dtype = np.result_type(data_dtype, amps_kept)
 
-    # Dimensions
-    height = xda_in.sizes[y_coord]
+    # Public convention in this module is (x, y), so axis 0 follows x.
     width = xda_in.sizes[x_coord]
+    height = xda_in.sizes[y_coord]
 
     # Accumulate amplitudes via bincount
-    lin = yi * width + xi
+    lin = xi * height + yi
     acc = (
         np.bincount(
             lin,
             weights=amps_kept.astype(out_dtype, copy=False),
-            minlength=height * width,
+            minlength=width * height,
         )
-        .reshape(height, width)
+        .reshape(width, height)
         .astype(out_dtype, copy=False)
     )
 
     # Preserve Dask laziness if input was Dask-backed
     if _is_dask_array(xda_in.data):
-        src_data = da.from_array(acc, chunks=xda_in.data.chunks)
+        chunk_map = getattr(xda_in, "chunksizes", {})
+        if x_coord in chunk_map and y_coord in chunk_map:
+            # ``acc`` is constructed explicitly in packed (x, y) order, so its
+            # Dask chunks must be drawn from the named x/y dims rather than from
+            # the raw underlying chunk tuple, which may still be stored as (y, x).
+            chunks = (tuple(chunk_map[x_coord]), tuple(chunk_map[y_coord]))
+        else:
+            chunks = "auto"
+        src_data = da.from_array(acc, chunks=chunks)
     else:
         src_data = acc
 
     source_array = xr.DataArray(
         src_data,
-        coords={y_coord: xda_in[y_coord], x_coord: xda_in[x_coord]},
-        dims=(y_coord, x_coord),
+        coords={x_coord: xda_in[x_coord], y_coord: xda_in[y_coord]},
+        dims=(x_coord, y_coord),
     )
 
     xda_out = _apply_source_array(xda_in, source_array, add=add)
