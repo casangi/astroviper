@@ -71,6 +71,52 @@ def test_generate_plot_world_axes_have_ra_increasing_left():
     plt.close(fig)
 
 
+def test_generate_plot_wcs_branch_does_not_override_world_coordinate_labels():
+    """WCSAxes labels should not be overridden with generic dim names."""
+    n_pix = 20
+    data = np.zeros((n_pix, n_pix), dtype=float)
+    wcs = _make_mock_equatorial_sin_wcs()
+
+    fig, ax = generate_plot(data=data, wcs=wcs, show_world_axes=True)
+
+    # WCSAxes derives axis labels from the WCS object (e.g. "Right Ascension
+    # (J2000)").  Our helper must not replace those with generic strings like
+    # "x" or "y".
+    ra_label = ax.coords[0].get_axislabel()
+    dec_label = ax.coords[1].get_axislabel()
+    assert ra_label not in ("x", "y", "")
+    assert dec_label not in ("x", "y", "")
+
+    plt.close(fig)
+
+
+def test_generate_plot_wcs_branch_applies_explicit_string_coord_labels():
+    """Explicitly requested string labels should override WCSAxes defaults."""
+    n_pix = 20
+    data = xr.DataArray(
+        np.zeros((n_pix, n_pix), dtype=float),
+        dims=("ra", "dec"),
+        coords={
+            "ra": np.arange(n_pix, dtype=float),
+            "dec": np.arange(n_pix, dtype=float),
+        },
+    )
+    wcs = _make_mock_equatorial_sin_wcs()
+
+    fig, ax = generate_plot(
+        data=data,
+        wcs=wcs,
+        show_world_axes=True,
+        x_coords="ra",
+        y_coords="dec",
+    )
+
+    assert ax.coords[0].get_axislabel() == "ra"
+    assert ax.coords[1].get_axislabel() == "dec"
+
+    plt.close(fig)
+
+
 def test_generate_plot_requires_2d_data():
     """Verify plotting helper rejects non-2D inputs with a clear error."""
     data_1d = np.zeros(20, dtype=float)
