@@ -83,7 +83,6 @@ from ...utils._gaussian_math import (
     theta_math_to_pa as _theta_math_to_pa,
 )
 
-
 # ----------------------- Parameter packing helpers -----------------------
 
 
