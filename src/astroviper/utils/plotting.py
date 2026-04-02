@@ -43,15 +43,20 @@ def _resolve_plot_coords(
 
     Returns
     -------
-    tuple[np.ndarray, np.ndarray, np.ndarray]
-        Tuple ``(values, x_values, y_values)`` where ``values`` is the 2-D numeric
-        image array and ``x_values`` / ``y_values`` are one-dimensional coordinate
-        vectors for the 0th and 1st axes, respectively.
+    tuple[array-like, np.ndarray, np.ndarray]
+        Tuple ``(values, x_values, y_values)`` where ``values`` is the 2-D
+        image array in the underlying storage format (NumPy or Dask — not yet
+        materialized) and ``x_values`` / ``y_values`` are one-dimensional
+        float coordinate vectors for the 0th and 1st axes, respectively.
+        Callers that require a concrete NumPy array must call
+        ``np.asarray(values)`` themselves.
 
     Notes
     -----
-    This helper preserves the package's x-first, y-second storage convention. The
-    returned coordinate vectors therefore align with ``values.shape == (nx, ny)``.
+    This helper preserves the package's x-first, y-second storage convention.
+    The returned coordinate vectors therefore align with
+    ``values.shape == (nx, ny)``. Materialization of ``values`` is deferred to
+    the caller so that lazy Dask arrays are not computed prematurely.
     """
     if isinstance(data, xr.DataArray):
         if data.ndim != 2:
@@ -76,7 +81,7 @@ def _resolve_plot_coords(
             # String x_coords/y_coords are label-only overrides in this path
             # (e.g. WCS mode) and do not need to name an actual DataArray coord.
             return (
-                np.asarray(data.values),
+                data.data,
                 np.arange(nx, dtype=float),
                 np.arange(ny, dtype=float),
             )
@@ -101,8 +106,7 @@ def _resolve_plot_coords(
 
         x_values = _coord_from_spec(x_coords, dim_x, nx)
         y_values = _coord_from_spec(y_coords, dim_y, ny)
-        # Materialize here — plotting always requires concrete values.
-        return np.asarray(data.values), x_values, y_values
+        return data.data, x_values, y_values
 
     values = np.asarray(data)
     if values.ndim != 2:
@@ -209,6 +213,9 @@ def generate_plot(
     ``data.T`` with ``origin="lower"``. When ``show_world_axes=True`` and no WCS is
     supplied, the helper renders a coordinate-aware plot using the resolved x/y
     coordinate vectors rather than requiring an ``astropy.wcs.WCS`` object.
+
+    Dask-backed arrays are computed (materialized) unconditionally at the
+    rendering boundary, since matplotlib requires concrete in-memory data.
     """
     # Coordinate vectors are only consumed by the pcolormesh (world-axis, no
     # WCS) branch.  Skip the DataArray coord lookup and float cast in all other
@@ -217,6 +224,9 @@ def generate_plot(
     values, x_values, y_values = _resolve_plot_coords(
         data=data, x_coords=x_coords, y_coords=y_coords, need_coords=need_coords
     )
+    # Plotting always requires concrete in-memory data.  Materialize here so
+    # that Dask-backed arrays are computed exactly once at the rendering boundary.
+    values = np.asarray(values)
 
     if isinstance(data, xr.DataArray):
         # Mirror the axis-normalisation applied in _resolve_plot_coords: if the
