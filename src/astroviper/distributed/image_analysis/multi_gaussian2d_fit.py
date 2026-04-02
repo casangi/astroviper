@@ -1545,16 +1545,17 @@ def _prepare_pixel_center_interp(
     tuple[np.ndarray | None, np.ndarray | None]
         ``(idx, values)`` suitable for ``np.interp`` where ``idx`` is the
         ascending pixel-index axis and ``values`` are the paired world
-        coordinates. Returns ``(None, None)`` when the coordinate axis is not a
-        usable one-dimensional interpolation target.
+        coordinates. Returns ``(None, None)`` when ``coord`` is not a finite,
+        one-dimensional array whose size matches the synthetic pixel-index axis.
 
     Notes
     -----
     This helper always constructs an ascending synthetic pixel-index axis and
     pairs it with the provided world-coordinate values. It relies on
-    :func:`_prepare_interp_pair` for the shared finiteness, shape, and source-
-    axis monotonicity checks needed before those arrays are passed to
-    ``np.interp``.
+    :func:`_prepare_interp_pair` for the shared finiteness and shape checks
+    needed before those arrays are passed to ``np.interp``. Non-monotonic
+    coordinate values in ``coord`` are allowed; only the synthetic pixel-index
+    axis is required to be strictly increasing for use with ``np.interp``.
     """
     idx = np.arange(np.asarray(coord).size, dtype=float)
     return _prepare_interp_pair(idx, coord)
