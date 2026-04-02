@@ -87,7 +87,6 @@ def make_scene_via_component_models(
             fwhm_y = float(c["fwhm_minor"])
             thc = float(c.get("theta", 0.0))
 
-            data = z[..., i]
             z[:, :, i] = make_gauss2d(
                 data=z[..., i],
                 a=fwhm_x,
@@ -277,8 +276,6 @@ def main():
         x_world=(-nx + 1, nx - 1),
         y_world=(-ny + 1, ny - 1),
     )
-
-    import astroviper.distributed.image_analysis.multi_gaussian2d_fit_parammap as parammap_fit
 
     init_arr = [
         [4.5, 41.0, -21.0, 21.0, 9.5, 0.3],
