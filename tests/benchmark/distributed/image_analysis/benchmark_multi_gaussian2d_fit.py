@@ -7,11 +7,12 @@
 
 import os
 
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"  # macOS Accelerate
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
+if __name__ == "__main__":
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"  # macOS Accelerate
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 import argparse
 import time
@@ -35,10 +36,6 @@ except ImportError:  # pragma: no cover
                 "dask.distributed is required to use the 'distributed' scheduler. "
                 "Install it via 'pip install dask[distributed]' or use '--scheduler synchronous'."
             )
-
-
-# Reproducibility
-rng = np.random.default_rng(1234)
 
 
 def make_scene_via_component_models(
