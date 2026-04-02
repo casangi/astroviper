@@ -74,53 +74,14 @@ def _gauss2d_component(
     return amp * np.exp(-(a * x**2 + 2 * b * x * y + c * y**2))
 
 
-_SIG2FWHM = 2.0 * np.sqrt(2.0 * np.log(2.0))
-_FWHM2SIG = 1.0 / _SIG2FWHM
-
-
-def _fwhm_from_sigma(sigma):
-    """
-    Convert Gaussian sigma values to full width at half maximum.
-
-    Parameters
-    ----------
-    sigma : array-like
-        Scalar or array of Gaussian sigma values.
-
-    Returns
-    -------
-    np.ndarray
-        Values converted to FWHM using the standard Gaussian relation.
-
-    Notes
-    -----
-    No positivity check is applied here; callers are expected to pass physically
-    meaningful widths.
-    """
-    return _SIG2FWHM * np.asarray(sigma)
-
-
-def _sigma_from_fwhm(fwhm):
-    """
-    Convert full width at half maximum values to Gaussian sigma.
-
-    Parameters
-    ----------
-    fwhm : array-like
-        Scalar or array of FWHM values.
-
-    Returns
-    -------
-    np.ndarray
-        Values converted to sigma using the standard Gaussian relation.
-
-    Notes
-    -----
-    No positivity check is applied here; callers are expected to pass physically
-    meaningful widths.
-    """
-    return _FWHM2SIG * np.asarray(fwhm)
-
+from ...utils._gaussian_math import (
+    SIG2FWHM as _SIG2FWHM,
+    FWHM2SIG as _FWHM2SIG,
+    fwhm_from_sigma as _fwhm_from_sigma,
+    sigma_from_fwhm as _sigma_from_fwhm,
+    theta_pa_to_math as _theta_pa_to_math,
+    theta_math_to_pa as _theta_math_to_pa,
+)
 
 # ----------------------- Parameter packing helpers -----------------------
 
@@ -1319,52 +1280,6 @@ def _select_mask(da_tr: xr.DataArray, spec: str):
     return select_mask(da_tr, spec)  # pragma: no cover
 
 
-def _theta_pa_to_math(pa: np.ndarray) -> np.ndarray:
-    """
-    Convert position-angle values into the internal math-angle convention.
-
-    Parameters
-    ----------
-    pa : np.ndarray
-        Angle array in radians measured from +y toward +x.
-
-    Returns
-    -------
-    np.ndarray
-        Equivalent angles in radians measured from +x toward +y, wrapped into
-        ``[0, 2*pi)``.
-
-    Notes
-    -----
-    This conversion is purely geometric; it does not apply handedness flips itself.
-    """
-    theta_math = np.pi / 2 - pa
-    return theta_math % (2.0 * np.pi)
-
-
-def _theta_math_to_pa(theta_math: np.ndarray) -> np.ndarray:
-    """
-    Convert internal math-angle values into position-angle values.
-
-    Parameters
-    ----------
-    theta_math : np.ndarray
-        Angle array in radians measured from +x toward +y.
-
-    Returns
-    -------
-    np.ndarray
-        Equivalent PA angles in radians measured from +y toward +x and wrapped into
-        ``[0, 2*pi)``.
-
-    Notes
-    -----
-    This is the inverse mapping of :func:`_theta_pa_to_math`.
-    """
-    pa = np.pi / 2 - theta_math
-    return pa % (2.0 * np.pi)
-
-
 def _convert_init_theta(
     init: Optional[Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]],
     to_math: bool,
@@ -1630,16 +1545,17 @@ def _prepare_pixel_center_interp(
     tuple[np.ndarray | None, np.ndarray | None]
         ``(idx, values)`` suitable for ``np.interp`` where ``idx`` is the
         ascending pixel-index axis and ``values`` are the paired world
-        coordinates. Returns ``(None, None)`` when the coordinate axis is not a
-        usable one-dimensional interpolation target.
+        coordinates. Returns ``(None, None)`` when ``coord`` is not a finite,
+        one-dimensional array whose size matches the synthetic pixel-index axis.
 
     Notes
     -----
     This helper always constructs an ascending synthetic pixel-index axis and
     pairs it with the provided world-coordinate values. It relies on
-    :func:`_prepare_interp_pair` for the shared finiteness, shape, and source-
-    axis monotonicity checks needed before those arrays are passed to
-    ``np.interp``.
+    :func:`_prepare_interp_pair` for the shared finiteness and shape checks
+    needed before those arrays are passed to ``np.interp``. Non-monotonic
+    coordinate values in ``coord`` are allowed; only the synthetic pixel-index
+    axis is required to be strictly increasing for use with ``np.interp``.
     """
     idx = np.arange(np.asarray(coord).size, dtype=float)
     return _prepare_interp_pair(idx, coord)
@@ -2345,17 +2261,17 @@ def _prepare_fit_configuration(
             minor_val = bounds["fwhm_minor"]
 
             def _expand_bound_pairs(value: Any) -> List[Tuple[float, float]]:
-                if (
-                    isinstance(value, (list, tuple))
-                    and value
-                    and isinstance(value[0], (list, tuple))
-                ):
-                    if len(value) != int(n_components):
+                # Detect per-component form: any 2-D array-like (list-of-pairs,
+                # tuple-of-pairs, or numpy array with shape (n, 2)).
+                if np.ndim(value) == 2:
+                    arr2d = np.asarray(value)
+                    if arr2d.shape != (int(n_components), 2):
                         raise ValueError(
-                            "paired 'fwhm_major'/'fwhm_minor' bounds must each have length "
-                            f"n={int(n_components)} when specified per component."
+                            "paired 'fwhm_major'/'fwhm_minor' bounds must each have shape "
+                            f"({int(n_components)}, 2) when specified per component; "
+                            f"got shape {arr2d.shape}."
                         )
-                    return [(float(lo), float(hi)) for (lo, hi) in value]
+                    return [(float(row[0]), float(row[1])) for row in arr2d]
                 lo, hi = value  # type: ignore[misc]
                 return [(float(lo), float(hi))] * int(n_components)
 
@@ -2376,13 +2292,10 @@ def _prepare_fit_configuration(
         for key, value in bounds.items():
             if key in ("fwhm_major", "fwhm_minor"):
                 target = "sigma_x" if key == "fwhm_major" else "sigma_y"
-                if (
-                    isinstance(value, (list, tuple))
-                    and value
-                    and isinstance(value[0], (list, tuple))
-                ):
+                if np.ndim(value) == 2:
                     converted[target] = [
-                        (float(lo) * conv, float(hi) * conv) for (lo, hi) in value
+                        (float(lo) * conv, float(hi) * conv)
+                        for (lo, hi) in np.asarray(value)
                     ]
                 else:
                     lo, hi = value  # type: ignore[misc]
@@ -4145,7 +4058,7 @@ def overlay_fit_components(
     # For drawing we want radii (half-sizes in data units). We will compute:
     #   if metric == "sigma":    rx = n_sigma * sigma_x;    width = 2*rx
     #   if metric == "fwhm":     rx = 0.5 * n_sigma * fwhm_x; width = 2*rx = n_sigma*fwhm_x
-    FWHM_K = 2.0 * np.sqrt(2.0 * np.log(2.0))  # ≈ 2.35482
+    FWHM_K = _SIG2FWHM
 
     # Try x/y first; if not present, fall back to major/minor (both name orders)
     sigx = _first(

@@ -7,11 +7,12 @@
 
 import os
 
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"  # macOS Accelerate
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
+if __name__ == "__main__":
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"  # macOS Accelerate
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 import argparse
 import time
@@ -19,16 +20,11 @@ import numpy as np
 import xarray as xr
 import dask
 import dask.array as da
-import matplotlib.pyplot as plt
-from astroviper.utils.plotting import generate_plot
 
 from astroviper.distributed.image_analysis.multi_gaussian2d_fit import (
     fit_multi_gaussian2d,
-    plot_components,
 )
 from astroviper.distributed.model.component_models import make_gauss2d
-
-from astroviper.distributed.image_analysis.selection import select_mask
 
 try:
     from dask.distributed import Client
@@ -42,14 +38,10 @@ except ImportError:  # pragma: no cover
             )
 
 
-# Reproducibility
-rng = np.random.default_rng(1234)
-
-
 def make_scene_via_component_models(
     nx: int,
     ny: int,
-    components: list[dict],
+    components: list[dict] | list[list[dict]],
     *,
     offset: float = 0.1,
     noise_std: float = 0.02,
@@ -60,10 +52,13 @@ def make_scene_via_component_models(
     y_world: tuple[float, float] = (0.0, 1.0),
 ) -> xr.DataArray:
     """
-    Build a synthetic image using astroviper.model.component_models.(make_gaussian|make_gauss2d).
+    Build a synthetic image using astroviper.distributed.model.component_models.make_gauss2d.
 
-    components: list of dicts with keys:
-      {"amp"/"amplitude","x0","y0","sigma_x","sigma_y","theta"}.
+    components:
+      - Single-channel: ``list[dict]`` — one dict per Gaussian component with
+        keys ``{"amp"/"amplitude", "x0", "y0", "fwhm_major", "fwhm_minor", "theta"}``.
+      - Multi-channel: ``list[list[dict]]`` — one inner list per channel, each
+        containing dicts with the same keys as above.
     """
     rng = np.random.default_rng(seed)
 
@@ -92,7 +87,6 @@ def make_scene_via_component_models(
             fwhm_y = float(c["fwhm_minor"])
             thc = float(c.get("theta", 0.0))
 
-            data = z[..., i]
             z[:, :, i] = make_gauss2d(
                 data=z[..., i],
                 a=fwhm_x,
@@ -120,7 +114,7 @@ def make_scene_via_component_models(
         vals = (
             dict(x=x, y=y)
             if nchan == 1
-            else dict(x=x, y=y, z=np.array((2, 4), dtype=float))
+            else dict(x=x, y=y, z=np.arange(nchan, dtype=float))
         )
         xda = xda.assign_coords(vals)
     return xda
@@ -282,8 +276,6 @@ def main():
         x_world=(-nx + 1, nx - 1),
         y_world=(-ny + 1, ny - 1),
     )
-
-    import astroviper.distributed.image_analysis.multi_gaussian2d_fit_parammap as parammap_fit
 
     init_arr = [
         [4.5, 41.0, -21.0, 21.0, 9.5, 0.3],

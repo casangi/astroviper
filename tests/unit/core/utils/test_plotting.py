@@ -12,7 +12,7 @@ from astropy.wcs import WCS
 
 import xarray as xr
 
-from astroviper.utils.plotting import generate_astro_plot, generate_plot
+from astroviper.utils.plotting import generate_plot
 
 
 def _make_mock_equatorial_sin_wcs() -> WCS:
@@ -27,7 +27,7 @@ def _make_mock_equatorial_sin_wcs() -> WCS:
     return wcs
 
 
-def test_generate_astro_plot_places_source_at_requested_xy():
+def test_generate_plot_places_source_at_requested_xy():
     """Verify the x/y source index is rendered at the same x/y plot location."""
     n_pix = 20
     x_target = 5
@@ -37,7 +37,7 @@ def test_generate_astro_plot_places_source_at_requested_xy():
     # The package convention for this helper is data[x, y].
     data[x_target, y_target] = 1.0
 
-    fig, ax = generate_astro_plot(
+    fig, ax = generate_plot(
         data=data, wcs=_make_mock_equatorial_sin_wcs(), show_world_axes=False
     )
 
@@ -52,13 +52,13 @@ def test_generate_astro_plot_places_source_at_requested_xy():
     plt.close(fig)
 
 
-def test_generate_astro_plot_world_axes_have_ra_increasing_left():
+def test_generate_plot_world_axes_have_ra_increasing_left():
     """Verify mocked RA/Dec WCS has increasing RA toward the left edge."""
     n_pix = 20
     data = np.zeros((n_pix, n_pix), dtype=float)
     wcs = _make_mock_equatorial_sin_wcs()
 
-    fig, _ = generate_astro_plot(data=data, wcs=wcs, show_world_axes=True)
+    fig, _ = generate_plot(data=data, wcs=wcs, show_world_axes=True)
 
     # Compare world coordinates at left/right edges through the image midline.
     y_mid = (n_pix - 1) / 2.0
@@ -71,22 +71,85 @@ def test_generate_astro_plot_world_axes_have_ra_increasing_left():
     plt.close(fig)
 
 
-def test_generate_astro_plot_requires_wcs_for_world_axes():
-    """Verify world-axis mode rejects missing WCS input."""
-    data = np.zeros((20, 20), dtype=float)
+def test_generate_plot_wcs_branch_does_not_override_world_coordinate_labels():
+    """WCSAxes labels should not be overridden with generic dim names."""
+    n_pix = 20
+    data = np.zeros((n_pix, n_pix), dtype=float)
+    wcs = _make_mock_equatorial_sin_wcs()
 
-    with pytest.raises(
-        ValueError, match="wcs must be provided when show_world_axes=True"
-    ):
-        generate_astro_plot(data=data, wcs=None, show_world_axes=True)
+    fig, ax = generate_plot(data=data, wcs=wcs, show_world_axes=True)
+
+    # WCSAxes derives axis labels from the WCS object (e.g. "Right Ascension
+    # (J2000)").  Our helper must not replace those with generic strings like
+    # "x" or "y".
+    ra_label = ax.coords[0].get_axislabel()
+    dec_label = ax.coords[1].get_axislabel()
+    assert ra_label not in ("x", "y", "")
+    assert dec_label not in ("x", "y", "")
+
+    plt.close(fig)
 
 
-def test_generate_astro_plot_requires_2d_data():
+def test_generate_plot_wcs_branch_applies_explicit_string_coord_labels():
+    """Explicitly requested string labels should override WCSAxes defaults."""
+    n_pix = 20
+    data = xr.DataArray(
+        np.zeros((n_pix, n_pix), dtype=float),
+        dims=("ra", "dec"),
+        coords={
+            "ra": np.arange(n_pix, dtype=float),
+            "dec": np.arange(n_pix, dtype=float),
+        },
+    )
+    wcs = _make_mock_equatorial_sin_wcs()
+
+    fig, ax = generate_plot(
+        data=data,
+        wcs=wcs,
+        show_world_axes=True,
+        x_coords="ra",
+        y_coords="dec",
+    )
+
+    assert ax.coords[0].get_axislabel() == "ra"
+    assert ax.coords[1].get_axislabel() == "dec"
+
+    plt.close(fig)
+
+
+def test_generate_plot_rejects_string_coords_for_plain_array_in_imshow_mode():
+    """String coord selectors must raise even when show_world_axes=False (imshow)."""
+    data = np.zeros((4, 5), dtype=float)
+
+    with pytest.raises(ValueError, match="xarray.DataArray"):
+        generate_plot(data=data, show_world_axes=False, x_coords="x")
+
+
+def test_generate_plot_string_coord_used_as_label_override_in_imshow_mode():
+    """In imshow mode a string x_coords/y_coords is a label override, not a coord lookup."""
+    data = xr.DataArray(np.zeros((4, 5), dtype=float), dims=("x", "y"))
+
+    # "missing" is not in data.coords, but imshow mode skips coord lookup so
+    # it should be used as a label without raising.
+    fig, ax = generate_plot(data=data, show_world_axes=False, x_coords="missing")
+    assert ax.get_xlabel() == "missing"
+    plt.close(fig)
+
+
+def test_generate_plot_rejects_missing_coord_name_for_dataarray_in_world_axes_mode():
+    """A string coord selector naming a missing coord must raise in pcolormesh mode."""
+    data = xr.DataArray(np.zeros((4, 5), dtype=float), dims=("x", "y"))
+
+    with pytest.raises(ValueError, match="not found in DataArray"):
+        generate_plot(data=data, show_world_axes=True, x_coords="missing")
+
+
+def test_generate_plot_requires_2d_data():
     """Verify plotting helper rejects non-2D inputs with a clear error."""
     data_1d = np.zeros(20, dtype=float)
 
     with pytest.raises(ValueError, match="data must be a 2D array-like object"):
-        generate_astro_plot(data=data_1d, show_world_axes=False)
+        generate_plot(data=data_1d, show_world_axes=False)
 
 
 def test_generate_plot_uses_dataarray_axis_coords_for_world_axes():
@@ -156,6 +219,25 @@ def test_generate_plot_defaults_to_axis_indices_without_coords():
     plt.close(fig)
 
 
+def test_generate_plot_pixel_mode_tolerates_non_numeric_coords():
+    """imshow mode must not raise when DataArray coordinates are non-numeric."""
+    data = xr.DataArray(
+        np.arange(6, dtype=float).reshape(2, 3),
+        dims=("x", "y"),
+        coords={
+            "x": np.array(["2000-01-01", "2000-01-02"], dtype="datetime64"),
+            "y": np.array(["a", "b", "c"]),
+        },
+    )
+
+    # show_world_axes=False uses imshow and must not attempt a float cast on
+    # the non-numeric coords.
+    fig, ax = generate_plot(data=data, show_world_axes=False)
+    assert ax.images[0].origin == "lower"
+
+    plt.close(fig)
+
+
 def test_generate_plot_pixel_mode_adds_default_labels_and_colorbar():
     """Pixel plotting should also label axes and add a colorbar by default."""
     data = xr.DataArray(
@@ -173,6 +255,31 @@ def test_generate_plot_pixel_mode_adds_default_labels_and_colorbar():
     assert fig.axes[1].get_ylabel() == "flux"
 
     plt.close(fig)
+
+
+def test_generate_plot_handles_yx_dataarray_ordering():
+    """DataArrays with (y, x) dim order should produce the same plot as (x, y)."""
+    arr_xy = np.arange(12, dtype=float).reshape(3, 4)
+    data_xy = xr.DataArray(
+        arr_xy,
+        dims=("x", "y"),
+        coords={
+            "x": np.array([1.0, 2.0, 3.0]),
+            "y": np.array([10.0, 20.0, 30.0, 40.0]),
+        },
+    )
+    data_yx = data_xy.transpose("y", "x")
+
+    fig_xy, ax_xy = generate_plot(data=data_xy, show_world_axes=True)
+    fig_yx, ax_yx = generate_plot(data=data_yx, show_world_axes=True)
+
+    assert ax_xy.get_xlim() == ax_yx.get_xlim()
+    assert ax_xy.get_ylim() == ax_yx.get_ylim()
+    assert ax_xy.get_xlabel() == ax_yx.get_xlabel() == "x"
+    assert ax_xy.get_ylabel() == ax_yx.get_ylabel() == "y"
+
+    plt.close(fig_xy)
+    plt.close(fig_yx)
 
 
 def test_generate_plot_sets_optional_title():
