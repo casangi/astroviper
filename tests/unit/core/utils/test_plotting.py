@@ -117,6 +117,22 @@ def test_generate_plot_wcs_branch_applies_explicit_string_coord_labels():
     plt.close(fig)
 
 
+def test_generate_plot_rejects_string_coords_for_plain_array_in_imshow_mode():
+    """String coord selectors must raise even when show_world_axes=False (imshow)."""
+    data = np.zeros((4, 5), dtype=float)
+
+    with pytest.raises(ValueError, match="xarray.DataArray"):
+        generate_plot(data=data, show_world_axes=False, x_coords="x")
+
+
+def test_generate_plot_rejects_missing_coord_name_for_dataarray_in_imshow_mode():
+    """A string coord selector naming a missing coord must raise in imshow mode."""
+    data = xr.DataArray(np.zeros((4, 5), dtype=float), dims=("x", "y"))
+
+    with pytest.raises(ValueError, match="not found in DataArray"):
+        generate_plot(data=data, show_world_axes=False, x_coords="missing")
+
+
 def test_generate_plot_requires_2d_data():
     """Verify plotting helper rejects non-2D inputs with a clear error."""
     data_1d = np.zeros(20, dtype=float)
