@@ -190,8 +190,11 @@ def generate_plot(
         ax = fig.add_subplot(1, 1, 1, projection=wcs)
         image = ax.imshow(values.T, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax)
         ax.set_aspect("equal")
-        ax.set_xlabel(default_x_label)
-        ax.set_ylabel(default_y_label)
+        # WCSAxes manages its own tick labels; use coords API so labels
+        # appear on the correct world-coordinate axes rather than the raw
+        # matplotlib x/y spine labels.
+        ax.coords[0].set_axislabel(default_x_label)
+        ax.coords[1].set_axislabel(default_y_label)
         if title is not None:
             ax.set_title(title)
         fig.colorbar(image, ax=ax, label=colorbar_label)
