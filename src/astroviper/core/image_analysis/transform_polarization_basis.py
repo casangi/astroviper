@@ -254,8 +254,21 @@ def transform_polarization_basis(
     var_names = list(img_xds.data_vars)
 
     if overwrite:
-        # Build the output dataset with updated coords but no data variables yet.
-        # assign_coords is a shallow operation (data arrays are not copied).
+        # ── Memory-minimal in-place path ─────────────────────────────────────
+        # Resolve the transformation matrix once, before the loop.
+        if transformation_matrix is not None:
+            matrix = np.asarray(transformation_matrix, dtype=complex)
+            first_pol_values = list(img_xds.polarization.values)
+            in_pol_labels = first_pol_values
+        else:
+            first_pol_values = list(img_xds.polarization.values)
+            matrix, in_pol_labels, _ = _select_transform_matrix(
+                frozenset(first_pol_values), new_polarization_basis
+            )
+
+        pol_order = [first_pol_values.index(p) for p in in_pol_labels]
+        needs_reorder = pol_order != list(range(len(in_pol_labels)))
+
         img_transformed_xds = xr.Dataset(
             coords={
                 coord_name: (
@@ -268,18 +281,54 @@ def transform_polarization_basis(
             attrs=img_xds.attrs,
         )
 
-        # Process one variable at a time and drop it from the source dataset
-        # immediately after transformation so that the old backing array can be
-        # freed before the next variable is processed.
+        # Pre-allocate a single scratch buffer sized to the first variable and
+        # reuse it for every subsequent variable (all share the same shape).
+        # This means the only extra memory live at any point is this one buffer.
+        scratch: Optional[np.ndarray] = None
+
         for var_name in var_names:
-            img_transformed_xds[var_name] = (
-                transform_polarization_basis_image_data_variable(
-                    img_xds[var_name],
-                    new_polarization_basis=new_polarization_basis,
-                    transformation_matrix=transformation_matrix,
-                )
+            da = img_xds[var_name]
+            pol_axis = list(da.dims).index("polarization")
+            arr = da.values  # reference to underlying array — no copy
+
+            # Move pol to last axis: view, zero bytes allocated.
+            arr_pol_last = np.moveaxis(arr, pol_axis, -1)  # (..., P_in)
+
+            if needs_reorder:
+                arr_pol_last = arr_pol_last[..., pol_order]  # copy only if needed
+
+            out_dtype = np.result_type(matrix.dtype, arr.dtype)
+            out_shape = arr_pol_last.shape[:-1] + (matrix.shape[0],)
+
+            if scratch is None or scratch.shape != out_shape or scratch.dtype != out_dtype:
+                scratch = np.empty(out_shape, dtype=out_dtype)
+
+            # Compute into the scratch buffer — the only large allocation in the loop.
+            np.matmul(arr_pol_last, matrix.T, out=scratch)
+
+            if arr.dtype == out_dtype and not needs_reorder:
+                # Write result back into the original array buffer through the
+                # view. After this, arr contains the transformed data in-place
+                # and scratch can be reused for the next variable.
+                arr_pol_last[...] = scratch
+                result_arr = arr
+            else:
+                # dtype change or reordering: can't write back to source buffer.
+                result_arr = np.moveaxis(scratch, -1, pol_axis).copy()
+
+            new_coords = {
+                coord_name: da.coords[coord_name]
+                for coord_name in da.coords
+                if coord_name != "polarization"
+            }
+            new_coords["polarization"] = new_pol_labels
+
+            img_transformed_xds[var_name] = xr.DataArray(
+                result_arr,
+                dims=list(da.dims),
+                coords=new_coords,
+                attrs=da.attrs.copy(),
             )
-            # Release the source variable's backing array as early as possible.
             img_xds = img_xds.drop_vars(var_name)
     else:
         img_transformed_xds = xr.Dataset(
