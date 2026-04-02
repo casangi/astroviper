@@ -69,6 +69,12 @@ def _resolve_plot_coords(
         dim_y = data.dims[1]
         nx, ny = data.shape
 
+        # Validate string selectors upfront so bad inputs always raise,
+        # regardless of whether coordinate vectors will be consumed.
+        for spec, label in ((x_coords, "x"), (y_coords, "y")):
+            if isinstance(spec, str) and spec not in data.coords:
+                raise ValueError(f"Coordinate {spec!r} not found in DataArray.")
+
         if not need_coords:
             # Coordinate vectors will not be used by the caller; skip the
             # DataArray coord lookup and float cast to avoid raising on
@@ -106,6 +112,12 @@ def _resolve_plot_coords(
     if values.ndim != 2:
         raise ValueError(
             "data must be a 2D array-like object with shape (nx, ny) for plotting."
+        )
+
+    # Validate string selectors upfront — plain arrays never support them.
+    if isinstance(x_coords, str) or isinstance(y_coords, str):
+        raise ValueError(
+            "String coordinate selectors require an xarray.DataArray input."
         )
 
     if not need_coords:
