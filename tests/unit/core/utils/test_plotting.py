@@ -192,6 +192,25 @@ def test_generate_plot_defaults_to_axis_indices_without_coords():
     plt.close(fig)
 
 
+def test_generate_plot_pixel_mode_tolerates_non_numeric_coords():
+    """imshow mode must not raise when DataArray coordinates are non-numeric."""
+    data = xr.DataArray(
+        np.arange(6, dtype=float).reshape(2, 3),
+        dims=("x", "y"),
+        coords={
+            "x": np.array(["2000-01-01", "2000-01-02"], dtype="datetime64"),
+            "y": np.array(["a", "b", "c"]),
+        },
+    )
+
+    # show_world_axes=False uses imshow and must not attempt a float cast on
+    # the non-numeric coords.
+    fig, ax = generate_plot(data=data, show_world_axes=False)
+    assert ax.images[0].origin == "lower"
+
+    plt.close(fig)
+
+
 def test_generate_plot_pixel_mode_adds_default_labels_and_colorbar():
     """Pixel plotting should also label axes and add a colorbar by default."""
     data = xr.DataArray(
