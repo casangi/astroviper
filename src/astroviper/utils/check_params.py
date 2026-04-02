@@ -168,8 +168,19 @@ def check_params(
 
 
 def _check_dataset(vis_dataset, data_variable_name):
-    """
-    Check if a data variable exists in the visualization dataset.
+    """Check if a data variable exists in a dataset.
+
+    Parameters
+    ----------
+    vis_dataset : xr.Dataset
+        The dataset to search.
+    data_variable_name : str
+        Name of the data variable to look up.
+
+    Returns
+    -------
+    bool
+        ``True`` if the variable is present, ``False`` otherwise.
     """
     try:
         temp = vis_dataset[data_variable_name]
@@ -184,164 +195,18 @@ def _check_dataset(vis_dataset, data_variable_name):
 
 
 def lists_overlap(a, b):
-    return bool(set(a) & set(b))
-
-
-import xarray as xr
-
-
-def check_sel_params_ps_xdt(
-    ps_xdt: xr.DataTree,
-    sel_params: dict,
-    default_data_group_in_name: str = None,
-    default_data_group_out_name: str = None,
-    default_data_group_out_modified: dict = None,
-):
-    data_group_in_list = []
-    data_group_out_list = []
-    for ms_xdt in ps_xdt.values():
-        data_group_in, data_group_out = check_sel_params(
-            ms_xdt.ds,
-            sel_params,
-            default_data_group_in_name=default_data_group_in_name,
-            default_data_group_out_name=default_data_group_out_name,
-            default_data_group_out_modified=default_data_group_out_modified,
-        )
-        data_group_out_list.append(data_group_out)
-        data_group_in_list.append(data_group_in)
-
-    IGNORE_KEYS = {"date", "description"}
-
-    def normalize(d):
-        return {k: v for k, v in d.items() if k not in IGNORE_KEYS}
-
-    assert all(
-        normalize(d) == normalize(data_group_out_list[0]) for d in data_group_out_list
-    ), "data_group_out must be the same for all measurement sets in the processing set."
-
-    assert all(
-        normalize(d) == normalize(data_group_in_list[0]) for d in data_group_in_list
-    ), "data_group_in must be the same for all measurement sets in the processing set."
-
-    return data_group_in_list[0], data_group_out_list[0]
-
-
-def check_sel_params(
-    xds: xr.Dataset,
-    sel_params: dict,
-    default_data_group_in_name: str = None,
-    default_data_group_out_name: str = None,
-    default_data_group_out_modified: dict = None,
-):
-    """Check selection parameters for imaging weights calculation.
+    """Check whether two lists share at least one common element.
 
     Parameters
     ----------
-    xds : xr.Dataset
-        The input dataset.
-    sel_params : dict
-        The selection parameters.
-    default_data_group_in_name : str, optional
-        The default input data group name, by default None
-    default_data_group_out_name : str, optional
-        The default output data group name, by default None
-    default_data_group_out_modified : dict, optional
-        The default modified output data group, by default {}
-    sel_params : dict
-        The selection parameters.
-    default_data_group_in_name : str, optional
-        The default input data group name, by default None
-    default_data_group_out_name : str, optional
-        The default output data group name, by default None
-    default_data_group_out_modified : dict, optional
-        The default modified output data group, by default {}
+    a : list
+        First list.
+    b : list
+        Second list.
 
     Returns
     -------
-    data_group_in : dict
-        The input data group.
-    data_group_out : dict
-        The output data group.
+    bool
+        ``True`` if the lists have a non-empty intersection.
     """
-
-    if default_data_group_out_modified is None:
-        default_data_group_out_modified = {}
-
-    xds_dv_names = list(xds.data_vars)
-    import copy
-
-    xds_data_groups = copy.deepcopy(xds.attrs.get("data_groups", {}))
-
-    # Check the data_group_in
-    if "data_group_in_name" in sel_params:
-        assert sel_params["data_group_in_name"] in xds_data_groups, (
-            "Data group "
-            + sel_params["data_group_in_name"]
-            + " not found in xds data_groups: "
-            + str(xds_data_groups.keys())
-        )
-        assert sel_params["data_group_in_name"] in xds_data_groups, (
-            "Data group "
-            + sel_params["data_group_in_name"]
-            + " not found in xds data_groups: "
-            + str(list(xds_data_groups.keys()))
-        )
-        data_group_in = xds_data_groups[sel_params["data_group_in_name"]]
-        data_group_in["data_group_in_name"] = sel_params["data_group_in_name"]
-    else:
-        assert default_data_group_in_name in xds_data_groups, (
-            "Default data group "
-            + default_data_group_in_name
-            + " not found in xds data_groups: "
-            + str(xds_data_groups.keys())
-        )
-        data_group_in = xds_data_groups[default_data_group_in_name]
-        data_group_in["data_group_in_name"] = default_data_group_in_name
-
-    # Check if data_group_out. Three use cases
-    if ("data_group_out_name" in sel_params) and ("data_group_out" in sel_params):
-        data_group_out = sel_params["data_group_out"]
-        data_group_out["data_group_out_name"] = sel_params["data_group_out_name"]
-    elif (
-        "data_group_out_name" in sel_params
-    ):  # Only data_group_out_name is given so use defaults
-        data_group_out = default_data_group_out_modified
-        data_group_out["data_group_out_name"] = sel_params["data_group_out_name"]
-    elif "data_group_out" in sel_params:  # Only data_group_out is given so use defaults
-        data_group_out = sel_params["data_group_out"]
-        data_group_out["data_group_out_name"] = default_data_group_out_name
-    else:  # No data_group_out is given so use defaults
-        data_group_out = default_data_group_out_modified
-        data_group_out["data_group_out_name"] = default_data_group_out_name
-
-    # Add any missing data variables from default. These get created or modified.
-    # Keys in data_group_out will take precedence over default_data_group_out_modified if there are conflicts.
-    data_group_out = {**default_data_group_out_modified, **data_group_out}
-
-    if "overwrite" not in sel_params:
-        sel_params["overwrite"] = False
-
-    if sel_params["overwrite"]:
-
-        for data_group_name, data_group in xds_data_groups.items():
-            data_group_values = data_group.values()
-            data_group_out_values = data_group_out.values()
-
-            # print(data_group_out_values, data_group_values)
-            if lists_overlap(data_group_values, data_group_out_values):
-                logger.debug(
-                    f"Warning: Overwriting data variables in existing data group {data_group_name} since overwrite=True."
-                )
-                # Delete old data group:
-                del xds.attrs["data_groups"][data_group_name]
-    else:
-        for dv_name in data_group_out.values():
-            assert (
-                dv_name not in xds_dv_names
-            ), f"Data variable {dv_name} already exists in xds."
-
-    # Merge data_group_in and data_group_out.
-    # Keys in data_group_out will take precedence over data_group_in if there are conflicts.
-    data_group_out = {**data_group_in, **data_group_out}
-
-    return data_group_in, data_group_out
+    return bool(set(a) & set(b))
