@@ -19,17 +19,11 @@ import numpy as np
 import xarray as xr
 import dask
 import dask.array as da
-import matplotlib.pyplot as plt
-from astroviper.utils.plotting import generate_plot
 
 from astroviper.distributed.image_analysis.multi_gaussian2d_fit import (
     fit_multi_gaussian2d,
-    plot_components,
 )
 from astroviper.distributed.model.component_models import make_gauss2d
-
-from astroviper.distributed.image_analysis.selection import select_mask
-
 try:
     from dask.distributed import Client
 except ImportError:  # pragma: no cover
