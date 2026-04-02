@@ -2260,17 +2260,17 @@ def _prepare_fit_configuration(
             minor_val = bounds["fwhm_minor"]
 
             def _expand_bound_pairs(value: Any) -> List[Tuple[float, float]]:
-                if (
-                    isinstance(value, (list, tuple))
-                    and value
-                    and isinstance(value[0], (list, tuple))
-                ):
-                    if len(value) != int(n_components):
+                # Detect per-component form: any 2-D array-like (list-of-pairs,
+                # tuple-of-pairs, or numpy array with shape (n, 2)).
+                if np.ndim(value) == 2:
+                    arr2d = np.asarray(value)
+                    if arr2d.shape != (int(n_components), 2):
                         raise ValueError(
-                            "paired 'fwhm_major'/'fwhm_minor' bounds must each have length "
-                            f"n={int(n_components)} when specified per component."
+                            "paired 'fwhm_major'/'fwhm_minor' bounds must each have shape "
+                            f"({int(n_components)}, 2) when specified per component; "
+                            f"got shape {arr2d.shape}."
                         )
-                    return [(float(lo), float(hi)) for (lo, hi) in value]
+                    return [(float(row[0]), float(row[1])) for row in arr2d]
                 lo, hi = value  # type: ignore[misc]
                 return [(float(lo), float(hi))] * int(n_components)
 
@@ -2291,13 +2291,10 @@ def _prepare_fit_configuration(
         for key, value in bounds.items():
             if key in ("fwhm_major", "fwhm_minor"):
                 target = "sigma_x" if key == "fwhm_major" else "sigma_y"
-                if (
-                    isinstance(value, (list, tuple))
-                    and value
-                    and isinstance(value[0], (list, tuple))
-                ):
+                if np.ndim(value) == 2:
                     converted[target] = [
-                        (float(lo) * conv, float(hi) * conv) for (lo, hi) in value
+                        (float(lo) * conv, float(hi) * conv)
+                        for (lo, hi) in np.asarray(value)
                     ]
                 else:
                     lo, hi = value  # type: ignore[misc]
