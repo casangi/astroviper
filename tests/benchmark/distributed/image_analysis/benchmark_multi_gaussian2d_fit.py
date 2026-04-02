@@ -41,7 +41,7 @@ except ImportError:  # pragma: no cover
 def make_scene_via_component_models(
     nx: int,
     ny: int,
-    components: list[dict],
+    components: list[dict] | list[list[dict]],
     *,
     offset: float = 0.1,
     noise_std: float = 0.02,
@@ -54,8 +54,11 @@ def make_scene_via_component_models(
     """
     Build a synthetic image using astroviper.distributed.model.component_models.make_gauss2d.
 
-    components: list of dicts with keys:
-      {"amp"/"amplitude", "x0", "y0", "fwhm_major", "fwhm_minor", "theta"}.
+    components:
+      - Single-channel: ``list[dict]`` — one dict per Gaussian component with
+        keys ``{"amp"/"amplitude", "x0", "y0", "fwhm_major", "fwhm_minor", "theta"}``.
+      - Multi-channel: ``list[list[dict]]`` — one inner list per channel, each
+        containing dicts with the same keys as above.
     """
     rng = np.random.default_rng(seed)
 
