@@ -9,6 +9,7 @@ import dask.array as da
 from ...utils._gaussian_math import (
     FWHM2SIG as _FWHM2SIG,
     sigma_from_fwhm as _sigma_from_fwhm,
+    normalize_angle as _normalize_theta,
 )
 
 ArrayLike2D = Union[np.ndarray, da.Array]
@@ -312,20 +313,6 @@ def _infer_handedness(
         raise ValueError("y coordinates must be strictly monotonic for angle='auto'.")
 
     return "left" if dx[0] * dy[0] < 0 else "right"
-
-
-def _normalize_theta(
-    angle_value: float, *, angle: Literal["pa", "math"], degrees: bool
-) -> float:
-    """Convert a user-provided angle to the internal math convention in radians.
-
-    "math" is measured from +x toward +y.
-    "pa"   is astronomical position angle, measured from +y toward +x.
-
-    Relation: theta_math = (pi/2) - PA.
-    """
-    theta = float(np.deg2rad(angle_value) if degrees else angle_value)
-    return (np.pi / 2.0) - theta if angle == "pa" else theta
 
 
 def _validate_ab_theta_center(

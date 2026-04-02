@@ -79,6 +79,8 @@ from ...utils._gaussian_math import (
     FWHM2SIG as _FWHM2SIG,
     fwhm_from_sigma as _fwhm_from_sigma,
     sigma_from_fwhm as _sigma_from_fwhm,
+    theta_pa_to_math as _theta_pa_to_math,
+    theta_math_to_pa as _theta_math_to_pa,
 )
 
 
@@ -1277,52 +1279,6 @@ def _select_mask(da_tr: xr.DataArray, spec: str):
     from .selection import select_mask  # type: ignore, pragma: no cover
 
     return select_mask(da_tr, spec)  # pragma: no cover
-
-
-def _theta_pa_to_math(pa: np.ndarray) -> np.ndarray:
-    """
-    Convert position-angle values into the internal math-angle convention.
-
-    Parameters
-    ----------
-    pa : np.ndarray
-        Angle array in radians measured from +y toward +x.
-
-    Returns
-    -------
-    np.ndarray
-        Equivalent angles in radians measured from +x toward +y, wrapped into
-        ``[0, 2*pi)``.
-
-    Notes
-    -----
-    This conversion is purely geometric; it does not apply handedness flips itself.
-    """
-    theta_math = np.pi / 2 - pa
-    return theta_math % (2.0 * np.pi)
-
-
-def _theta_math_to_pa(theta_math: np.ndarray) -> np.ndarray:
-    """
-    Convert internal math-angle values into position-angle values.
-
-    Parameters
-    ----------
-    theta_math : np.ndarray
-        Angle array in radians measured from +x toward +y.
-
-    Returns
-    -------
-    np.ndarray
-        Equivalent PA angles in radians measured from +y toward +x and wrapped into
-        ``[0, 2*pi)``.
-
-    Notes
-    -----
-    This is the inverse mapping of :func:`_theta_pa_to_math`.
-    """
-    pa = np.pi / 2 - theta_math
-    return pa % (2.0 * np.pi)
 
 
 def _convert_init_theta(
