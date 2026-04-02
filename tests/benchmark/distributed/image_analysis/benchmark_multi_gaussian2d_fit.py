@@ -115,7 +115,7 @@ def make_scene_via_component_models(
         vals = (
             dict(x=x, y=y)
             if nchan == 1
-            else dict(x=x, y=y, z=np.array((2, 4), dtype=float))
+            else dict(x=x, y=y, z=np.arange(nchan, dtype=float))
         )
         xda = xda.assign_coords(vals)
     return xda
