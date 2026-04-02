@@ -10,7 +10,9 @@ import numpy as np
 import pytest
 from astropy.wcs import WCS
 
-from astroviper.utils.plotting import generate_astro_plot
+import xarray as xr
+
+from astroviper.utils.plotting import generate_astro_plot, generate_plot
 
 
 def _make_mock_equatorial_sin_wcs() -> WCS:
@@ -85,3 +87,100 @@ def test_generate_astro_plot_requires_2d_data():
 
     with pytest.raises(ValueError, match="data must be a 2D array-like object"):
         generate_astro_plot(data=data_1d, show_world_axes=False)
+
+
+def test_generate_plot_uses_dataarray_axis_coords_for_world_axes():
+    """World-axis plotting should use the DataArray's axis coordinates by default."""
+    data = xr.DataArray(
+        np.arange(12, dtype=float).reshape(3, 4),
+        dims=("x", "y"),
+        coords={
+            "x": np.array([10.0, 20.0, 30.0]),
+            "y": np.array([-2.0, 0.0, 2.0, 4.0]),
+        },
+    )
+
+    fig, ax = generate_plot(data=data, show_world_axes=True)
+
+    quadmesh = ax.collections[0]
+    x_limits = ax.get_xlim()
+    y_limits = ax.get_ylim()
+
+    assert quadmesh.__class__.__name__ == "QuadMesh"
+    assert x_limits == (10.0, 30.0)
+    assert y_limits == (-2.0, 4.0)
+    assert ax.get_xlabel() == "x"
+    assert ax.get_ylabel() == "y"
+    assert ax.get_aspect() == 1.0
+    assert len(fig.axes) == 2
+    assert fig.axes[1].get_ylabel() == "value"
+
+    plt.close(fig)
+
+
+def test_generate_plot_allows_explicit_xy_coordinate_override():
+    """Explicit x/y coordinate arrays should override DataArray coordinates."""
+    data = xr.DataArray(
+        np.arange(6, dtype=float).reshape(2, 3),
+        dims=("x", "y"),
+        coords={"x": np.array([1.0, 2.0]), "y": np.array([10.0, 20.0, 30.0])},
+    )
+    x_override = np.array([100.0, 200.0])
+    y_override = np.array([-5.0, 5.0, 15.0])
+
+    fig, ax = generate_plot(
+        data=data,
+        show_world_axes=True,
+        x_coords=x_override,
+        y_coords=y_override,
+    )
+
+    assert ax.get_xlim() == (100.0, 200.0)
+    assert ax.get_ylim() == (-5.0, 15.0)
+
+    plt.close(fig)
+
+
+def test_generate_plot_defaults_to_axis_indices_without_coords():
+    """Plain arrays should default to axis-0 as x and axis-1 as y indices."""
+    data = np.zeros((4, 5), dtype=float)
+
+    fig, ax = generate_plot(data=data, show_world_axes=True)
+
+    assert ax.get_xlim() == (0.0, 3.0)
+    assert ax.get_ylim() == (0.0, 4.0)
+    assert ax.get_xlabel() == "x"
+    assert ax.get_ylabel() == "y"
+    assert len(fig.axes) == 2
+
+    plt.close(fig)
+
+
+def test_generate_plot_pixel_mode_adds_default_labels_and_colorbar():
+    """Pixel plotting should also label axes and add a colorbar by default."""
+    data = xr.DataArray(
+        np.arange(9, dtype=float).reshape(3, 3),
+        dims=("ra", "dec"),
+        name="flux",
+    )
+
+    fig, ax = generate_plot(data=data, show_world_axes=False)
+
+    assert ax.get_xlabel() == "ra"
+    assert ax.get_ylabel() == "dec"
+    assert ax.get_aspect() == 1.0
+    assert len(fig.axes) == 2
+    assert fig.axes[1].get_ylabel() == "flux"
+
+    plt.close(fig)
+
+
+def test_generate_plot_sets_optional_title():
+    """Plot helper should display an explicitly requested title."""
+    data = np.zeros((4, 4), dtype=float)
+
+    fig, ax = generate_plot(data=data, show_world_axes=False, title="Test Title")
+
+    assert ax.get_title() == "Test Title"
+
+    plt.close(fig)

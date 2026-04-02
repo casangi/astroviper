@@ -5,6 +5,7 @@ warnings.filterwarnings(
 )
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import dask.array as da
@@ -443,6 +444,116 @@ class TestMakePtSources(unittest.TestCase):
         )
         self.assertIsInstance(
             out_dask, da.Array, "output='dask' should return a dask.array.Array"
+        )
+
+    def test_raw_array_x_y_order_is_preserved_in_xarray_output(self):
+        x_vals = np.linspace(10.0, 13.0, 4)
+        y_vals = np.linspace(-2.0, 0.0, 3)
+        out = make_pt_sources(
+            np.zeros((x_vals.size, y_vals.size), dtype=float),
+            amplitudes=[9.0],
+            xs=[12.0],
+            ys=[-1.0],
+            coords={"x": x_vals, "y": y_vals},
+            output="xarray",
+            add=False,
+        )
+        self.assertEqual(
+            ("x", "y"),
+            out.dims,
+            "Raw-array point-source output should preserve the public (x, y) convention",
+        )
+        self.assertEqual(
+            9.0,
+            float(out.sel(x=12.0, y=-1.0, method="nearest").values),
+            "The injected point source should land at the requested x/y coordinate",
+        )
+        self.assertEqual(
+            x_vals.size,
+            out.sizes["x"],
+            "x dimension length should match the supplied x-coordinate axis",
+        )
+        self.assertEqual(
+            y_vals.size,
+            out.sizes["y"],
+            "y dimension length should match the supplied y-coordinate axis",
+        )
+
+    def test_dask_backed_dataarray_uses_named_xy_chunks_for_source_plane(self):
+        """Verify that Dask-backed DataArray inputs with stored ``(y, x)`` dims still build the temporary source plane with x/y-aligned chunk tuples."""
+        x_vals = np.linspace(10.0, 14.0, 5)
+        y_vals = np.linspace(-2.0, 0.0, 3)
+        base = xr.DataArray(
+            da.zeros((y_vals.size, x_vals.size), chunks=((2, 1), (3, 2))),
+            coords={"y": y_vals, "x": x_vals},
+            dims=("y", "x"),
+        )
+
+        out = make_pt_sources(
+            base,
+            amplitudes=[9.0],
+            xs=[13.0],
+            ys=[-1.0],
+            output="xarray",
+            add=False,
+        )
+
+        self.assertTrue(
+            isinstance(out.data, da.Array),
+            "Dask-backed DataArray input should preserve laziness in xarray output",
+        )
+        self.assertEqual(
+            base.data.chunks,
+            out.data.chunks,
+            "Aligned output should preserve the original named y/x chunk structure",
+        )
+        self.assertEqual(
+            9.0,
+            float(out.sel(x=13.0, y=-1.0, method="nearest").compute().values),
+            "The injected point source should still land on the requested coordinate",
+        )
+
+    def test_dask_backed_dtype_resolution_does_not_touch_values(self):
+        """Verify that Dask-backed point-source generation derives result dtypes without materializing ``DataArray.values``."""
+        x_vals = np.linspace(10.0, 14.0, 5)
+        y_vals = np.linspace(-2.0, 0.0, 3)
+        base = xr.DataArray(
+            da.zeros((y_vals.size, x_vals.size), chunks=((2, 1), (3, 2))),
+            coords={"y": y_vals, "x": x_vals},
+            dims=("y", "x"),
+        )
+
+        values_prop = getattr(type(base), "values", None)
+        self.assertIsNotNone(
+            values_prop, "xarray.DataArray should expose a values property"
+        )
+
+        with patch.object(
+            type(base),
+            "values",
+            new=property(
+                lambda self: (_ for _ in ()).throw(
+                    AssertionError("make_pt_sources should not access DataArray.values")
+                )
+            ),
+        ):
+            out = make_pt_sources(
+                base,
+                amplitudes=[9.0],
+                xs=[13.0],
+                ys=[-1.0],
+                output="xarray",
+                add=False,
+            )
+
+        self.assertTrue(
+            isinstance(out.data, da.Array),
+            "Dask-backed DataArray input should remain lazy after dtype resolution",
+        )
+        self.assertEqual(
+            9.0,
+            float(out.sel(x=13.0, y=-1.0, method="nearest").compute().values),
+            "The injected point source should still be placed correctly after lazy dtype resolution",
         )
 
     def test_requires_equal_lengths(self):
