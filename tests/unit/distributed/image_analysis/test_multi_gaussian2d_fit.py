@@ -2818,6 +2818,48 @@ class TestBoundsFwhmMapping:
         }
         assert seen["bounds"] == expected
 
+    def test_paired_fwhm_bounds_numpy_array_matches_list_of_tuples(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify that numpy array per-component bounds are accepted and produce the same sigma conversion as list-of-tuples."""
+        seen: dict[str, dict] = {}
+        orig_apply_ufunc = xr.apply_ufunc
+
+        def fake_apply_ufunc(*args, **kw):
+            func = args[0] if args else None
+            if func is mg._multi_fit_plane_wrapper:
+                da_tr = args[1]
+                seen["bounds"] = dict((kw.get("kwargs", {}) or {}).get("bounds", {}))
+                n = int((kw.get("kwargs", {}) or {}).get("n_components", 1))
+                return TestBoundsFwhmMapping()._dummy_results(da_tr, n)
+            return orig_apply_ufunc(*args, **kw)
+
+        monkeypatch.setattr(xr, "apply_ufunc", fake_apply_ufunc, raising=True)
+
+        ny, nx = 8, 9
+        da = xr.DataArray(np.zeros((ny, nx), dtype=float), dims=("y", "x"))
+        init = np.array(
+            [[1.0, 3.0, 4.0, 2.0, 1.5, 0.0], [0.8, 6.0, 2.0, 3.0, 2.5, 0.1]],
+            dtype=float,
+        )
+        # Provide bounds as a numpy array instead of list-of-tuples.
+        bounds = {
+            "fwhm_major": np.array([[1.0, 4.0], [2.0, 5.0]]),
+            "fwhm_minor": np.array([[0.5, 2.0], [1.0, 3.0]]),
+        }
+
+        ds = fit_multi_gaussian2d(
+            da, n_components=2, initial_guesses=init, bounds=bounds, coord_type="pixel"
+        )
+        assert isinstance(ds, xr.Dataset)
+
+        conv = mg._FWHM2SIG
+        expected = {
+            "sigma_x": [(1.0 * conv, 4.0 * conv), (2.0 * conv, 5.0 * conv)],
+            "sigma_y": [(0.5 * conv, 2.0 * conv), (1.0 * conv, 3.0 * conv)],
+        }
+        assert seen["bounds"] == expected
+
     @pytest.mark.parametrize("key", ["fwhm_major", "fwhm_minor"])
     def test_unpaired_public_fwhm_bound_raises(self, key: str) -> None:
         """Verify that callers cannot specify only one of the paired public FWHM bounds."""
