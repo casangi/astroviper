@@ -50,6 +50,13 @@ def _resolve_plot_coords(
             raise ValueError(
                 "data must be a 2D array-like object with shape (nx, ny) for plotting."
             )
+        # Normalise to internal (x, y) axis order so dim_x / coord vectors are
+        # always consistent regardless of how the caller stored the DataArray.
+        # A (y, x) array is transposed here; other named layouts fall back to
+        # positional order (dim_0 = x, dim_1 = y).
+        dims = list(data.dims)
+        if "x" in dims and "y" in dims and dims != ["x", "y"]:
+            data = data.transpose("x", "y")
         dim_x = data.dims[0]
         dim_y = data.dims[1]
         nx, ny = data.shape
@@ -175,8 +182,16 @@ def generate_plot(
     )
 
     if isinstance(data, xr.DataArray):
-        default_x_label = x_coords if isinstance(x_coords, str) else data.dims[0]
-        default_y_label = y_coords if isinstance(y_coords, str) else data.dims[1]
+        # Mirror the axis-normalisation applied in _resolve_plot_coords: if the
+        # DataArray has named "x"/"y" dims in (y, x) order, swap to match the
+        # resolved (x, y) layout so labels stay consistent.
+        dims = list(data.dims)
+        if "x" in dims and "y" in dims and dims != ["x", "y"]:
+            x_dim, y_dim = "x", "y"
+        else:
+            x_dim, y_dim = dims[0], dims[1]
+        default_x_label = x_coords if isinstance(x_coords, str) else x_dim
+        default_y_label = y_coords if isinstance(y_coords, str) else y_dim
         colorbar_label = data.name if data.name is not None else "value"
     else:
         default_x_label = "x"

@@ -165,6 +165,31 @@ def test_generate_plot_pixel_mode_adds_default_labels_and_colorbar():
     plt.close(fig)
 
 
+def test_generate_plot_handles_yx_dataarray_ordering():
+    """DataArrays with (y, x) dim order should produce the same plot as (x, y)."""
+    arr_xy = np.arange(12, dtype=float).reshape(3, 4)
+    data_xy = xr.DataArray(
+        arr_xy,
+        dims=("x", "y"),
+        coords={
+            "x": np.array([1.0, 2.0, 3.0]),
+            "y": np.array([10.0, 20.0, 30.0, 40.0]),
+        },
+    )
+    data_yx = data_xy.transpose("y", "x")
+
+    fig_xy, ax_xy = generate_plot(data=data_xy, show_world_axes=True)
+    fig_yx, ax_yx = generate_plot(data=data_yx, show_world_axes=True)
+
+    assert ax_xy.get_xlim() == ax_yx.get_xlim()
+    assert ax_xy.get_ylim() == ax_yx.get_ylim()
+    assert ax_xy.get_xlabel() == ax_yx.get_xlabel() == "x"
+    assert ax_xy.get_ylabel() == ax_yx.get_ylabel() == "y"
+
+    plt.close(fig_xy)
+    plt.close(fig_yx)
+
+
 def test_generate_plot_sets_optional_title():
     """Plot helper should display an explicitly requested title."""
     data = np.zeros((4, 4), dtype=float)
