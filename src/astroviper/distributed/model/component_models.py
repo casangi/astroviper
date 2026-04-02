@@ -7,7 +7,6 @@ import xarray as xr
 import dask.array as da
 
 from ...utils._gaussian_math import (
-    FWHM2SIG as _FWHM2SIG,
     sigma_from_fwhm as _sigma_from_fwhm,
     normalize_angle as _normalize_theta,
 )
