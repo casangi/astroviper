@@ -125,12 +125,23 @@ def test_generate_plot_rejects_string_coords_for_plain_array_in_imshow_mode():
         generate_plot(data=data, show_world_axes=False, x_coords="x")
 
 
-def test_generate_plot_rejects_missing_coord_name_for_dataarray_in_imshow_mode():
-    """A string coord selector naming a missing coord must raise in imshow mode."""
+def test_generate_plot_string_coord_used_as_label_override_in_imshow_mode():
+    """In imshow mode a string x_coords/y_coords is a label override, not a coord lookup."""
+    data = xr.DataArray(np.zeros((4, 5), dtype=float), dims=("x", "y"))
+
+    # "missing" is not in data.coords, but imshow mode skips coord lookup so
+    # it should be used as a label without raising.
+    fig, ax = generate_plot(data=data, show_world_axes=False, x_coords="missing")
+    assert ax.get_xlabel() == "missing"
+    plt.close(fig)
+
+
+def test_generate_plot_rejects_missing_coord_name_for_dataarray_in_world_axes_mode():
+    """A string coord selector naming a missing coord must raise in pcolormesh mode."""
     data = xr.DataArray(np.zeros((4, 5), dtype=float), dims=("x", "y"))
 
     with pytest.raises(ValueError, match="not found in DataArray"):
-        generate_plot(data=data, show_world_axes=False, x_coords="missing")
+        generate_plot(data=data, show_world_axes=True, x_coords="missing")
 
 
 def test_generate_plot_requires_2d_data():
