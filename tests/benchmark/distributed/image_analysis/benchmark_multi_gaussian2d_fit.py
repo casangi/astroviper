@@ -277,8 +277,6 @@ def main():
         y_world=(-ny + 1, ny - 1),
     )
 
-    import astroviper.distributed.image_analysis.multi_gaussian2d_fit_parammap as parammap_fit
-
     init_arr = [
         [4.5, 41.0, -21.0, 21.0, 9.5, 0.3],
         [7.5, -52.0, 11.0, 7.5, 5.5, 0.9],
