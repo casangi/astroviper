@@ -54,10 +54,10 @@ def make_scene_via_component_models(
     y_world: tuple[float, float] = (0.0, 1.0),
 ) -> xr.DataArray:
     """
-    Build a synthetic image using astroviper.model.component_models.(make_gaussian|make_gauss2d).
+    Build a synthetic image using astroviper.distributed.model.component_models.make_gauss2d.
 
     components: list of dicts with keys:
-      {"amp"/"amplitude","x0","y0","sigma_x","sigma_y","theta"}.
+      {"amp"/"amplitude", "x0", "y0", "fwhm_major", "fwhm_minor", "theta"}.
     """
     rng = np.random.default_rng(seed)
 
