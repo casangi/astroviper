@@ -19,17 +19,11 @@ import numpy as np
 import xarray as xr
 import dask
 import dask.array as da
-import matplotlib.pyplot as plt
-from astroviper.utils.plotting import generate_plot
 
 from astroviper.distributed.image_analysis.multi_gaussian2d_fit import (
     fit_multi_gaussian2d,
-    plot_components,
 )
 from astroviper.distributed.model.component_models import make_gauss2d
-
-from astroviper.distributed.image_analysis.selection import select_mask
-
 try:
     from dask.distributed import Client
 except ImportError:  # pragma: no cover
@@ -60,10 +54,10 @@ def make_scene_via_component_models(
     y_world: tuple[float, float] = (0.0, 1.0),
 ) -> xr.DataArray:
     """
-    Build a synthetic image using astroviper.model.component_models.(make_gaussian|make_gauss2d).
+    Build a synthetic image using astroviper.distributed.model.component_models.make_gauss2d.
 
     components: list of dicts with keys:
-      {"amp"/"amplitude","x0","y0","sigma_x","sigma_y","theta"}.
+      {"amp"/"amplitude", "x0", "y0", "fwhm_major", "fwhm_minor", "theta"}.
     """
     rng = np.random.default_rng(seed)
 
