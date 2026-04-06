@@ -72,7 +72,7 @@ LINEAR_2POL_CORR_TO_STOKES = np.array(
         [0.5, 0.5],  # I = (XX + YY) / 2
         [0.5, -0.5],  # Q = (XX - YY) / 2
     ],
-    dtype=complex,
+    dtype=np.float64,
 )
 
 # correlation → Stokes  (columns: RR, LL)
@@ -81,7 +81,7 @@ CIRCULAR_2POL_CORR_TO_STOKES = np.array(
         [0.5, 0.5],  # I = (RR + LL) / 2
         [0.5, -0.5],  # V = (RR - LL) / 2
     ],
-    dtype=complex,
+    dtype=np.float64,
 )
 
 # Stokes → correlation  (columns: I, Q)
@@ -90,7 +90,7 @@ LINEAR_2POL_STOKES_TO_CORR = np.array(
         [0.5, 0.5],  # XX = (I + Q) / 2
         [0.5, -0.5],  # YY = (I - Q) / 2
     ],
-    dtype=complex,
+    dtype=np.float64,
 )
 
 # Stokes → correlation  (columns: I, V)
@@ -99,7 +99,7 @@ CIRCULAR_2POL_STOKES_TO_CORR = np.array(
         [0.5, 0.5],  # RR = (I + V) / 2
         [0.5, -0.5],  # LL = (I - V) / 2
     ],
-    dtype=complex,
+    dtype=np.float64,
 )
 
 # ── Fallback output labels for custom transformation matrices ─────────────────
@@ -268,11 +268,12 @@ def transform_polarization_basis(
             dims=["polarization", "pol_in"],
             coords={"polarization": out_pol_labels, "pol_in": in_pol_labels},
         )    
-
+    
+    
+    from toolviper.utils.memory_management import memory_setup, free_memory, get_rss_gb
     for var_name in img_xds.data_vars:
         original_dims = list(img_transformed_xds[var_name].dims)   
         img_transformed_xds[var_name].values = xr.dot(transform_da, img_transformed_xds[var_name].rename({"polarization": "pol_in"}), dim="pol_in", optimize=True).transpose(*original_dims).values
-
 
     img_transformed_xds = img_transformed_xds.assign_coords(polarization=new_pol_labels)
     return img_transformed_xds

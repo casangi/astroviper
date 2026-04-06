@@ -121,6 +121,8 @@ def test_single_field_imaging():
         thread_info=None,
         n_chunks=None,
         overwrite=True,
+         #disk_chunk_sizes={"frequency": 2},
+        vizualize_graph=True
     )
     img_av_xds = xr.open_zarr(image_store)
 

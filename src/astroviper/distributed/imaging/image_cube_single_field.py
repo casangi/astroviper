@@ -10,6 +10,44 @@ from astroviper.task.imaging.image_cube_single_field import (
 )
 
 
+def _load_processing_set_chunk(load_params):
+    """Load a disk-level chunk of the processing set for the data loading layer.
+
+    Used as the ``data_loading_task`` argument of
+    :func:`graphviper.graph_tools.map.map` when ``disk_chunk_sizes`` is provided.
+    Each call reads one contiguous block of frequency channels (the native on-disk
+    chunk) and returns the loaded datasets as a plain dict.  The framework
+    sub-selects each map task's slice before invoking
+    :func:`NT_image_cube_single_field`, which uses the pre-loaded data directly
+    instead of re-reading from disk.
+
+    Parameters
+    ----------
+    load_params : dict
+        Must contain:
+
+        * ``"input_data_store"`` – path to the processing set Zarr store.
+        * ``"data_selection"`` – ``{xds_name: {dim: slice}}`` at disk-chunk
+          granularity as produced by
+          :func:`graphviper.graph_tools.map._build_load_stage`.
+        * ``"processing_set_data_group_name"`` – data group forwarded to
+          :func:`xradio.measurement_set.load_processing_set`.
+
+    Returns
+    -------
+    dict
+        ``{xds_name: xarray.Dataset}`` with the loaded disk-chunk data.
+    """
+    from xradio.measurement_set.load_processing_set import load_processing_set
+
+    return load_processing_set(
+        load_params["input_data_store"],
+        sel_parms=load_params["data_selection"],
+        data_group_name=load_params.get("processing_set_data_group_name"),
+        load_sub_datasets=False,
+    )
+
+
 def image_cube_single_field(
     ps_store: str,
     image_store: str,
@@ -40,6 +78,7 @@ def image_cube_single_field(
     write_imaging_weights_to_ps: bool = False,
     clear_cache: bool = True,
     vizualize_graph: bool = False,
+    disk_chunk_sizes: Optional[Dict[str, int]] = None,
 ):  # -> Tuple[xr.Dataset, ReturnDict]:
     """
     Create a spectral cube.
@@ -105,6 +144,16 @@ def image_cube_single_field(
         Whether to clear the cache after imaging. Default is True.
     vizualize_graph : bool
         Whether to vizualize the graph. Default is False.
+    disk_chunk_sizes : dict, optional
+        Native on-disk chunk sizes for parallel dimensions, e.g.
+        ``{"frequency": 200}``.  The graph gains a data loading layer: one load
+        node is created per unique disk chunk, each reading the full native
+        chunk once.  The mapping nodes then receive their sub-selected slice
+        from the pre-loaded chunk via ``input_params["input_data"]``, avoiding
+        redundant disk reads when many small mapping tasks fall within the same
+        on-disk chunk.  If ``None`` (default), the chunk sizes are
+        auto-detected from the processing set using
+        :func:`graphviper.graph_tools.coordinate_utils.get_disk_chunk_sizes`.
     Returns
     -------
     deconvolution_stats :
@@ -215,6 +264,7 @@ def image_cube_single_field(
 
     from graphviper.graph_tools.coordinate_utils import (
         interpolate_data_coords_onto_parallel_coords,
+        get_disk_chunk_sizes,
     )
 
     start = time.time()
@@ -231,6 +281,11 @@ def image_cube_single_field(
         + " seconds"
     )
 
+    # Auto-detect native on-disk chunk sizes if not supplied by the caller.
+    if disk_chunk_sizes is None:
+        disk_chunk_sizes = get_disk_chunk_sizes(ps_xdt, parallel_coords)
+        logger.info("Auto-detected disk chunk sizes: " + str(disk_chunk_sizes))
+
     # frequency_coords is not used by node tasks (they use task_coords["frequency"]["data"])
     # so remove it to avoid embedding the full frequency axis in every task in the graph.
     input_parms["image_params"] = {
@@ -243,9 +298,11 @@ def image_cube_single_field(
         input_data=ps_xdt,
         node_task_data_mapping=node_task_data_mapping,
         node_task=NT_image_cube_single_field,
-        # node_task=test_task,
         input_params=input_parms,
         in_memory_compute=False,
+        data_loading_task=_load_processing_set_chunk,
+        disk_chunk_sizes=disk_chunk_sizes,
+        load_node_input_params={"processing_set_data_group_name": processing_set_data_group_name},
     )
 
     input_params = {}

@@ -42,7 +42,12 @@ def NT_image_cube_single_field(input_params, graph_mode=True):
     ), "Currently only in_memory is supported for memory_mode is implemented."
 
     start = time.time()
-    if in_memory:
+    if input_params.get("input_data") is not None:
+        # Data was pre-loaded by the data loading layer (disk-chunk granularity
+        # I/O coalescing).  The framework has already applied the task-level
+        # sub-selection, so use the dict directly.
+        ps_xdt = input_params["input_data"]
+    elif in_memory:
         from xradio.measurement_set.load_processing_set import load_processing_set
 
         ps_xdt = load_processing_set(
