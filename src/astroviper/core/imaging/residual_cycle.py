@@ -152,8 +152,6 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0)
     # Add the return dict from make_uv_images_single_field
     return_df = pd.concat([return_df, make_uv_images_single_field_return_df], axis=1)
 
-    logger.debug("Timing info " + str(return_df))
-
     return img_xds, return_df
 
 
