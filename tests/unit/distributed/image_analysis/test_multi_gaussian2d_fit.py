@@ -3690,3 +3690,62 @@ class TestThetaOutputsPublished:
             ds_math["theta_world_math"].item(),
             atol=1e-10,
         )
+
+
+class TestCoverageGaps:
+    """Tests for previously uncovered code paths."""
+
+    def test_single_dict_init_with_multiple_components_raises(self):
+        """A single-dict (not list) initial_guesses with n_components>1 should raise."""
+        da2 = _scene(48, 60, [dict(amp=1.0, x0=30.0, y0=24.0, sigma_x=4.0, sigma_y=3.0, theta=0.0)])
+        single_dict = {"amp": 1.0, "x0": 30.0, "y0": 24.0, "sigma_x": 4.0, "sigma_y": 3.0, "theta": 0.0}
+        with pytest.raises(ValueError, match="Single-dict initial_guesses is only valid"):
+            fit_multi_gaussian2d(da2, n_components=2, initial_guesses=single_dict)
+
+    def test_invalid_coord_type_raises(self):
+        """coord_type other than 'world'/'pixel' should raise for DataArray inputs."""
+        da2 = _scene(
+            48, 60,
+            [dict(amp=1.0, x0=30.0, y0=24.0, sigma_x=4.0, sigma_y=3.0, theta=0.0)],
+            coords=True,
+        )
+        with pytest.raises(ValueError, match="coord_type must be"):
+            fit_multi_gaussian2d(da2, n_components=1, coord_type="bogus")
+
+    def test_initial_is_fwhm_with_list_of_dicts(self):
+        """initial_is_fwhm=True with list-of-dict guesses using fwhm_major/fwhm_minor keys."""
+        SIG2FWHM = 2.0 * math.sqrt(2.0 * math.log(2.0))
+        fwhm_maj = 4.0 * SIG2FWHM
+        fwhm_min = 3.0 * SIG2FWHM
+        da2 = _scene(
+            48, 60,
+            [dict(amp=1.0, x0=30.0, y0=24.0, sigma_x=4.0, sigma_y=3.0, theta=0.0)],
+            noise=0.01,
+        )
+        init = [{"amp": 1.0, "x0": 30.0, "y0": 24.0, "fwhm_major": fwhm_maj, "fwhm_minor": fwhm_min, "theta": 0.0}]
+        ds = fit_multi_gaussian2d(
+            da2, n_components=1, initial_guesses=init, initial_is_fwhm=True
+        )
+        assert bool(ds.success)
+        np.testing.assert_allclose(ds["sigma_major_pixel"].values, 4.0, atol=0.5)
+        np.testing.assert_allclose(ds["sigma_minor_pixel"].values, 3.0, atol=0.5)
+
+    def test_fwhm_keys_in_comp_dict_guesses(self):
+        """_extract_params_from_comp_dicts converts fwhm_major/fwhm_minor to sigma."""
+        SIG2FWHM = 2.0 * math.sqrt(2.0 * math.log(2.0))
+        fwhm_maj = 4.0 * SIG2FWHM
+        fwhm_min = 3.0 * SIG2FWHM
+        da2 = _scene(
+            48, 60,
+            [dict(amp=1.0, x0=30.0, y0=24.0, sigma_x=4.0, sigma_y=3.0, theta=0.0)],
+            noise=0.01,
+        )
+        # Use fwhm keys with initial_is_fwhm=False — the _extract_params_from_comp_dicts
+        # path handles these internally as sigma = fwhm * FWHM2SIG
+        init = [{"amp": 1.0, "x0": 30.0, "y0": 24.0, "fwhm_major": fwhm_maj, "fwhm_minor": fwhm_min, "theta": 0.0}]
+        ds = fit_multi_gaussian2d(
+            da2, n_components=1, initial_guesses=init, initial_is_fwhm=False
+        )
+        assert bool(ds.success)
+        np.testing.assert_allclose(ds["sigma_major_pixel"].values, 4.0, atol=0.5)
+        np.testing.assert_allclose(ds["sigma_minor_pixel"].values, 3.0, atol=0.5)
