@@ -1,0 +1,758 @@
+"""Tests for astroviper.distributed.image_analysis.imfit."""
+
+from __future__ import annotations
+
+import warnings
+
+import numpy as np
+import pytest
+import xarray as xr
+
+from astroviper.distributed.image_analysis.imfit import imfit
+from astroviper.distributed.model.component_models import make_gauss2d
+from astroviper.utils._gaussian_math import SIG2FWHM, FWHM2SIG
+
+# ---------------------------------------------------------------------------
+# Synthetic xradio-style Dataset builder
+# ---------------------------------------------------------------------------
+
+
+def _make_xradio_image(
+    nl=128,
+    nm=128,
+    cellsize=1e-5,  # radians per pixel (~2 arcsec)
+    components=None,
+    offset=0.05,
+    noise_sigma=0.02,
+    beam_fwhm_maj=None,
+    beam_fwhm_min=None,
+    beam_pa=0.0,
+    phase_center=(1.0, 0.5),  # RA, Dec in radians
+    frame="icrs",
+    projection="SIN",
+    add_sky_coord_grids=False,
+    seed=42,
+):
+    """Build a synthetic xradio Dataset with known Gaussian sources.
+
+    Uses ``make_empty_sky_image`` for the base Dataset structure and
+    ``make_gauss2d`` for source construction.  The l-axis is **decreasing**
+    (positive → negative), so the pixel index for a source at l0 = k*cellsize
+    is ``nl//2 - k``.  The m-axis is increasing, so the pixel index for
+    m0 = k*cellsize is ``nm//2 + k``.
+
+    Parameters
+    ----------
+    components : list of dict
+        Each dict has keys: amp, l0, m0, fwhm_maj, fwhm_min, pa (all in
+        radians for positions/widths, radians for PA).
+    """
+    from xradio.image import make_empty_sky_image
+
+    rng = np.random.default_rng(seed)
+
+    xds = make_empty_sky_image(
+        phase_center=list(phase_center),
+        image_size=[nl, nm],
+        cell_size=[cellsize, cellsize],
+        frequency_coords=np.array([1.0e9]),
+        pol_coords=["I"],
+        time_coords=np.array([0.0]),
+        direction_reference=frame,
+        projection=projection,
+    )
+
+    # Build image on a 2D DataArray; make_gauss2d accumulates components
+    plane = xr.DataArray(
+        np.full((nl, nm), offset, dtype=float),
+        dims=("l", "m"),
+        coords={"l": xds.coords["l"], "m": xds.coords["m"]},
+    )
+
+    for comp in (components or []):
+        plane = make_gauss2d(
+            plane,
+            a=comp["fwhm_maj"],
+            b=comp["fwhm_min"],
+            theta=comp["pa"],
+            x0=comp["l0"],
+            y0=comp["m0"],
+            peak=comp["amp"],
+            x_coord="l",
+            y_coord="m",
+            angle="pa",
+        )
+
+    # Expand to (time, frequency, polarization, l, m) and add noise
+    img = plane.values[np.newaxis, np.newaxis, np.newaxis, :, :]
+    img = img + rng.normal(0, noise_sigma, img.shape)
+
+    xds["SKY"] = xr.DataArray(
+        img,
+        dims=("time", "frequency", "polarization", "l", "m"),
+        coords={
+            "time": xds.coords["time"],
+            "frequency": xds.coords["frequency"],
+            "polarization": xds.coords["polarization"],
+            "l": xds.coords["l"],
+            "m": xds.coords["m"],
+        },
+    )
+
+    if beam_fwhm_maj is not None:
+        beam_data = np.array([[[[beam_fwhm_maj, beam_fwhm_min, beam_pa]]]])
+        xds["BEAM_FIT_PARAMS_SKY"] = xr.DataArray(
+            beam_data,
+            dims=("time", "frequency", "polarization", "beam_params_label"),
+            coords={
+                "time": xds.coords["time"],
+                "frequency": xds.coords["frequency"],
+                "polarization": xds.coords["polarization"],
+                "beam_params_label": xds.coords["beam_params_label"],
+            },
+        )
+
+    if add_sky_coord_grids:
+        # Simple tangent-plane approximation for RA/Dec grids
+        ra0, dec0 = phase_center
+        cos_dec = np.cos(dec0)
+        L, M = np.meshgrid(xds.coords["l"].values, xds.coords["m"].values, indexing="ij")
+        RA = ra0 + L / cos_dec
+        DEC = dec0 + M
+        xds["right_ascension"] = xr.DataArray(
+            RA, dims=("l", "m"), coords={"l": xds.coords["l"], "m": xds.coords["m"]}
+        )
+        xds["declination"] = xr.DataArray(
+            DEC, dims=("l", "m"), coords={"l": xds.coords["l"], "m": xds.coords["m"]}
+        )
+
+    return xds
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+class TestImfitBasic:
+    """Basic functionality tests."""
+
+    def test_single_circular_source(self):
+        """Fit a single circular Gaussian and verify recovery."""
+        cellsize = 1e-5
+        nl = 128
+        fwhm = 10 * cellsize
+        fwhm_pix = 10.0  # in pixels
+        comp = {
+            "amp": 1.0,
+            "l0": 3 * cellsize,
+            "m0": -2 * cellsize,
+            "fwhm_maj": fwhm,
+            "fwhm_min": fwhm,
+            "pa": 0.0,
+        }
+        xds = _make_xradio_image(
+            nl=nl, nm=nl, components=[comp], noise_sigma=0.01, cellsize=cellsize
+        )
+        # Initial guesses in pixel coordinates (imfit uses coord_type="pixel")
+        # l-axis is decreasing: pixel for l0 = k*cellsize is nl//2 - k
+        # m-axis is increasing: pixel for m0 = k*cellsize is nm//2 + k
+        center_l_pix = nl // 2 - 3  # pixel index for l0 = 3*cellsize
+        center_m_pix = nl // 2 - 2  # pixel index for m0 = -2*cellsize
+        init = [
+            {
+                "amp": 0.9,
+                "x0": center_l_pix,
+                "y0": center_m_pix,
+                "fwhm_major": fwhm_pix,
+                "fwhm_minor": fwhm_pix,
+                "theta": 0.0,
+            }
+        ]
+        ds = imfit(xds, n_components=1, beam_var=None, initial_guesses=init)
+
+        assert ds["success"].values
+        np.testing.assert_allclose(ds["amplitude"].values, 1.0, atol=0.05)
+        np.testing.assert_allclose(ds["x0_world"].values, comp["l0"], atol=cellsize)
+        np.testing.assert_allclose(ds["y0_world"].values, comp["m0"], atol=cellsize)
+        np.testing.assert_allclose(ds["fwhm_major_world"].values, fwhm, rtol=0.1)
+        np.testing.assert_allclose(ds["fwhm_minor_world"].values, fwhm, rtol=0.1)
+
+    def test_no_math_angles_in_output(self):
+        """Verify math-convention angles are excluded from imfit output."""
+        xds = _make_xradio_image(
+            components=[
+                {
+                    "amp": 1.0,
+                    "l0": 0,
+                    "m0": 0,
+                    "fwhm_maj": 5e-5,
+                    "fwhm_min": 3e-5,
+                    "pa": 0.3,
+                }
+            ],
+            noise_sigma=0.01,
+        )
+        ds = imfit(xds, n_components=1, beam_var=None)
+
+        math_vars = [v for v in ds.data_vars if "_math" in v]
+        assert math_vars == [], f"Math-angle vars found: {math_vars}"
+
+        pixel_pa_vars = [v for v in ds.data_vars if v.startswith("theta_pixel")]
+        assert pixel_pa_vars == [], f"Pixel PA vars found: {pixel_pa_vars}"
+
+    def test_pa_variable_exists(self):
+        """Verify the output has 'pa' (not 'theta_world_pa')."""
+        xds = _make_xradio_image(
+            components=[
+                {
+                    "amp": 1.0,
+                    "l0": 0,
+                    "m0": 0,
+                    "fwhm_maj": 5e-5,
+                    "fwhm_min": 3e-5,
+                    "pa": 0.3,
+                }
+            ],
+            noise_sigma=0.01,
+        )
+        ds = imfit(xds, n_components=1, beam_var=None)
+        assert "pa" in ds.data_vars
+        assert "pa_err" in ds.data_vars
+        assert "theta_world" not in ds.data_vars
+        assert "theta_world_pa" not in ds.data_vars
+
+
+class TestImfitSkyCoords:
+    """Tests for sky coordinate translation."""
+
+    def test_sky_coords_from_grids(self):
+        """When RA/Dec grids exist, interpolate fitted centers."""
+        cellsize = 1e-5
+        nl = 128
+        fwhm = 10 * cellsize
+        comp = {
+            "amp": 1.0,
+            "l0": 2 * cellsize,
+            "m0": -1 * cellsize,
+            "fwhm_maj": fwhm,
+            "fwhm_min": fwhm,
+            "pa": 0.0,
+        }
+        xds = _make_xradio_image(
+            nl=nl,
+            nm=nl,
+            components=[comp],
+            noise_sigma=0.01,
+            cellsize=cellsize,
+            add_sky_coord_grids=True,
+        )
+        # Pixel-coordinate initial guesses
+        init = [
+            {
+                "amp": 0.9,
+                "x0": nl // 2 - 2,  # l-axis decreasing: pixel for l0=2*cs is nl//2-2
+                "y0": nl // 2 - 1,  # m-axis increasing: pixel for m0=-1*cs is nm//2-1
+                "fwhm_major": 10.0,
+                "fwhm_minor": 10.0,
+                "theta": 0.0,
+            }
+        ]
+        ds = imfit(xds, n_components=1, beam_var=None, initial_guesses=init)
+
+        assert "right_ascension" in ds.data_vars
+        assert "declination" in ds.data_vars
+        # Verify the RA/Dec are close to expected (tangent-plane approx)
+        ra0, dec0 = 1.0, 0.5
+        expected_ra = ra0 + comp["l0"] / np.cos(dec0)
+        expected_dec = dec0 + comp["m0"]
+        np.testing.assert_allclose(
+            ds["right_ascension"].values.flat[0], expected_ra, atol=cellsize
+        )
+        np.testing.assert_allclose(
+            ds["declination"].values.flat[0], expected_dec, atol=cellsize
+        )
+
+    def test_sky_coords_from_wcs(self):
+        """When no grids exist, use WCS projection from coordinate_system_info."""
+        cellsize = 1e-5
+        nl = 128
+        fwhm = 10 * cellsize
+        comp = {
+            "amp": 1.0,
+            "l0": 0.0,
+            "m0": 0.0,
+            "fwhm_maj": fwhm,
+            "fwhm_min": fwhm,
+            "pa": 0.0,
+        }
+        xds = _make_xradio_image(
+            nl=nl,
+            nm=nl,
+            components=[comp],
+            noise_sigma=0.01,
+            cellsize=cellsize,
+            add_sky_coord_grids=False,
+        )
+        # Source at center → pixel center
+        init = [
+            {
+                "amp": 0.9,
+                "x0": nl // 2,
+                "y0": nl // 2,
+                "fwhm_major": 10.0,
+                "fwhm_minor": 10.0,
+                "theta": 0.0,
+            }
+        ]
+        ds = imfit(xds, n_components=1, beam_var=None, initial_guesses=init)
+
+        assert "Right Ascension" in ds.data_vars
+        assert "Declination" in ds.data_vars
+        # Source at phase center → RA, Dec ≈ phase center
+        np.testing.assert_allclose(
+            ds["Right Ascension"].values.flat[0], 1.0, atol=cellsize
+        )
+        np.testing.assert_allclose(ds["Declination"].values.flat[0], 0.5, atol=cellsize)
+        assert ds["Right Ascension"].attrs.get("frame") == "icrs"
+
+
+class TestImfitDeconvolution:
+    """Tests for beam deconvolution."""
+
+    def test_resolved_source_deconvolution(self):
+        """A source larger than the beam should be deconvolved correctly."""
+        cellsize = 1e-5
+        nl = 128
+        src_fwhm_maj = 15 * cellsize
+        src_fwhm_min = 10 * cellsize
+        beam_fwhm = 5 * cellsize
+        # Convolved sizes (circular beam, same PA) add in quadrature
+        conv_fwhm_maj = np.sqrt(src_fwhm_maj**2 + beam_fwhm**2)
+        conv_fwhm_min = np.sqrt(src_fwhm_min**2 + beam_fwhm**2)
+        pa = 0.5
+        comp = {
+            "amp": 1.0,
+            "l0": 0.0,
+            "m0": 0.0,
+            "fwhm_maj": conv_fwhm_maj,
+            "fwhm_min": conv_fwhm_min,
+            "pa": pa,
+        }
+        xds = _make_xradio_image(
+            nl=nl,
+            nm=nl,
+            components=[comp],
+            noise_sigma=0.005,
+            cellsize=cellsize,
+            beam_fwhm_maj=beam_fwhm,
+            beam_fwhm_min=beam_fwhm,
+            beam_pa=0.0,
+        )
+        conv_fwhm_maj_pix = conv_fwhm_maj / cellsize
+        conv_fwhm_min_pix = conv_fwhm_min / cellsize
+        init = [
+            {
+                "amp": 0.9,
+                "x0": nl // 2,
+                "y0": nl // 2,
+                "fwhm_major": conv_fwhm_maj_pix,
+                "fwhm_minor": conv_fwhm_min_pix,
+                "theta": pa,
+            }
+        ]
+        ds = imfit(xds, n_components=1, initial_guesses=init)
+
+        assert "fwhm_major_deconv" in ds.data_vars
+        assert "is_unresolved" in ds.data_vars
+        assert not ds["is_unresolved"].values.flat[0]
+        np.testing.assert_allclose(
+            ds["fwhm_major_deconv"].values.flat[0], src_fwhm_maj, rtol=0.15
+        )
+        np.testing.assert_allclose(
+            ds["fwhm_minor_deconv"].values.flat[0], src_fwhm_min, rtol=0.15
+        )
+
+    def test_unresolved_source(self):
+        """A source smaller than the beam → unresolved with upper limit."""
+        cellsize = 1e-5
+        nl = 128
+        beam_fwhm = 15 * cellsize
+        src_fwhm_maj = beam_fwhm * 0.7
+        src_fwhm_min = beam_fwhm * 0.5
+        comp = {
+            "amp": 1.0,
+            "l0": 0.0,
+            "m0": 0.0,
+            "fwhm_maj": src_fwhm_maj,
+            "fwhm_min": src_fwhm_min,
+            "pa": 0.0,
+        }
+        xds = _make_xradio_image(
+            nl=nl,
+            nm=nl,
+            components=[comp],
+            noise_sigma=0.005,
+            cellsize=cellsize,
+            beam_fwhm_maj=beam_fwhm,
+            beam_fwhm_min=beam_fwhm,
+            beam_pa=0.0,
+        )
+        init = [
+            {
+                "amp": 0.9,
+                "x0": nl // 2,
+                "y0": nl // 2,
+                "fwhm_major": src_fwhm_maj / cellsize,
+                "fwhm_minor": src_fwhm_min / cellsize,
+                "theta": 0.0,
+            }
+        ]
+        ds = imfit(xds, n_components=1, initial_guesses=init)
+
+        assert ds["is_unresolved"].values.flat[0]
+        assert np.isnan(ds["fwhm_major_deconv"].values.flat[0])
+        # Upper limit should equal beam major FWHM
+        np.testing.assert_allclose(
+            ds["fwhm_upper_limit"].values.flat[0], beam_fwhm, rtol=1e-10
+        )
+
+    def test_deconvolved_pixel_sizes_present(self):
+        """Deconvolved pixel-frame sizes should be present when resolved."""
+        cellsize = 1e-5
+        nl = 128
+        beam_fwhm = 5 * cellsize
+        fwhm_maj = 15 * cellsize
+        fwhm_min = 10 * cellsize
+        comp = {
+            "amp": 1.0,
+            "l0": 0.0,
+            "m0": 0.0,
+            "fwhm_maj": fwhm_maj,
+            "fwhm_min": fwhm_min,
+            "pa": 0.0,
+        }
+        xds = _make_xradio_image(
+            nl=nl,
+            nm=nl,
+            components=[comp],
+            noise_sigma=0.005,
+            cellsize=cellsize,
+            beam_fwhm_maj=beam_fwhm,
+            beam_fwhm_min=beam_fwhm,
+            beam_pa=0.0,
+        )
+        init = [
+            {
+                "amp": 0.9,
+                "x0": nl // 2,
+                "y0": nl // 2,
+                "fwhm_major": fwhm_maj / cellsize,
+                "fwhm_minor": fwhm_min / cellsize,
+                "theta": 0.0,
+            }
+        ]
+        ds = imfit(xds, n_components=1, initial_guesses=init)
+
+        assert "fwhm_major_deconv_pixel" in ds.data_vars
+        assert "fwhm_minor_deconv_pixel" in ds.data_vars
+
+
+class TestImfitInputValidation:
+    """Tests for input validation and edge cases."""
+
+    def test_missing_data_var_raises(self):
+        """Missing data variable should raise KeyError."""
+        xds = xr.Dataset()
+        with pytest.raises(KeyError, match="NONEXISTENT"):
+            imfit(xds, n_components=1, data_var="NONEXISTENT", beam_var=None)
+
+    def test_missing_lm_dims_raises(self):
+        """Data variable without l/m dims should raise ValueError."""
+        xds = xr.Dataset({"SKY": xr.DataArray(np.zeros((10, 10)), dims=("x", "y"))})
+        with pytest.raises(ValueError, match="'l' and 'm' dimensions"):
+            imfit(xds, n_components=1, beam_var=None)
+
+    def test_missing_mask_warns(self):
+        """Missing mask variable should warn, not error."""
+        cellsize = 1e-5
+        xds = _make_xradio_image(
+            components=[
+                {
+                    "amp": 1.0,
+                    "l0": 0,
+                    "m0": 0,
+                    "fwhm_maj": 5 * cellsize,
+                    "fwhm_min": 5 * cellsize,
+                    "pa": 0.0,
+                }
+            ],
+            noise_sigma=0.01,
+            cellsize=cellsize,
+        )
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            ds = imfit(xds, n_components=1, mask_var="NONEXISTENT", beam_var=None)
+            mask_warnings = [x for x in w if "NONEXISTENT" in str(x.message)]
+            assert len(mask_warnings) >= 1
+
+    def test_missing_beam_warns(self):
+        """Missing beam variable should warn and skip deconvolution."""
+        cellsize = 1e-5
+        xds = _make_xradio_image(
+            components=[
+                {
+                    "amp": 1.0,
+                    "l0": 0,
+                    "m0": 0,
+                    "fwhm_maj": 5 * cellsize,
+                    "fwhm_min": 5 * cellsize,
+                    "pa": 0.0,
+                }
+            ],
+            noise_sigma=0.01,
+            cellsize=cellsize,
+        )
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            ds = imfit(xds, n_components=1, beam_var="NONEXISTENT")
+            beam_warnings = [x for x in w if "NONEXISTENT" in str(x.message)]
+            assert len(beam_warnings) >= 1
+        assert "fwhm_major_deconv" not in ds.data_vars
+
+    def test_beam_var_none_skips_deconv(self):
+        """Setting beam_var=None should skip deconvolution entirely."""
+        cellsize = 1e-5
+        xds = _make_xradio_image(
+            components=[
+                {
+                    "amp": 1.0,
+                    "l0": 0,
+                    "m0": 0,
+                    "fwhm_maj": 5 * cellsize,
+                    "fwhm_min": 5 * cellsize,
+                    "pa": 0.0,
+                }
+            ],
+            noise_sigma=0.01,
+            cellsize=cellsize,
+            beam_fwhm_maj=3 * cellsize,
+            beam_fwhm_min=3 * cellsize,
+            beam_pa=0.0,
+        )
+        ds = imfit(xds, n_components=1, beam_var=None)
+        assert "fwhm_major_deconv" not in ds.data_vars
+
+    def test_invalid_beam_units_raises(self):
+        """Non-angular beam units should raise ValueError."""
+        cellsize = 1e-5
+        xds = _make_xradio_image(
+            components=[
+                {
+                    "amp": 1.0,
+                    "l0": 0,
+                    "m0": 0,
+                    "fwhm_maj": 5 * cellsize,
+                    "fwhm_min": 5 * cellsize,
+                    "pa": 0.0,
+                }
+            ],
+            noise_sigma=0.01,
+            cellsize=cellsize,
+            beam_fwhm_maj=3 * cellsize,
+            beam_fwhm_min=3 * cellsize,
+            beam_pa=0.0,
+        )
+        xds["BEAM_FIT_PARAMS_SKY"].attrs["units"] = "meters"
+        with pytest.raises(ValueError, match="angular unit"):
+            imfit(xds, n_components=1)
+
+
+class TestImfitCoverageGaps:
+    """Tests for previously uncovered code paths."""
+
+    def test_mask_found_and_used(self):
+        """When a valid mask variable exists, _resolve_mask returns it (line 104)."""
+        cellsize = 1e-5
+        nl = 128
+        fwhm = 10 * cellsize
+        comp = {
+            "amp": 1.0,
+            "l0": 0.0,
+            "m0": 0.0,
+            "fwhm_maj": fwhm,
+            "fwhm_min": fwhm,
+            "pa": 0.0,
+        }
+        xds = _make_xradio_image(
+            nl=nl, nm=nl, components=[comp], noise_sigma=0.01, cellsize=cellsize
+        )
+        # Add a real mask variable: True everywhere (all pixels good)
+        mask = xr.DataArray(
+            np.ones_like(xds["SKY"].values, dtype=bool),
+            dims=xds["SKY"].dims,
+            coords=xds["SKY"].coords,
+        )
+        xds["FLAGS_SKY"] = mask
+
+        # Should not warn about missing mask
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            ds = imfit(xds, n_components=1, beam_var=None)
+            mask_warnings = [x for x in w if "FLAGS_SKY" in str(x.message)]
+            assert mask_warnings == [], f"Unexpected mask warning: {mask_warnings}"
+        assert ds["success"].values
+
+    def test_no_sky_coords_without_reference_direction(self):
+        """When no grids and no reference_direction exist, warn and skip (lines 368-373)."""
+        cellsize = 1e-5
+        nl = 128
+        fwhm = 10 * cellsize
+        comp = {
+            "amp": 1.0,
+            "l0": 0.0,
+            "m0": 0.0,
+            "fwhm_maj": fwhm,
+            "fwhm_min": fwhm,
+            "pa": 0.0,
+        }
+        xds = _make_xradio_image(
+            nl=nl,
+            nm=nl,
+            components=[comp],
+            noise_sigma=0.01,
+            cellsize=cellsize,
+            add_sky_coord_grids=False,
+        )
+        # Remove coordinate_system_info so sky coords can't be computed
+        xds.attrs["coordinate_system_info"] = {}
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            ds = imfit(xds, n_components=1, beam_var=None)
+            sky_warnings = [
+                x for x in w if "sky coordinates cannot be computed" in str(x.message)
+            ]
+            assert len(sky_warnings) >= 1
+        # World l/m should still exist, but RA/Dec should not
+        assert "x0_world" in ds.data_vars
+        assert "Right Ascension" not in ds.data_vars
+        assert "right_ascension" not in ds.data_vars
+
+    def test_deconvolution_without_errors(self):
+        """Exercise the no-error deconvolution path (lines 599-614).
+
+        The generic fitter always produces error variables, so we call
+        ``_deconvolve_and_attach`` directly on a Dataset that lacks them.
+        """
+        from astroviper.distributed.image_analysis.imfit import _deconvolve_and_attach
+
+        # Build a minimal result Dataset that mimics fitter output
+        # but without error variables.
+        src_fwhm_maj = 1.5e-4  # larger than beam
+        src_fwhm_min = 1.0e-4
+        src_pa = 0.3
+        beam_fwhm = 5e-5
+
+        ds = xr.Dataset(
+            {
+                "fwhm_major_world": xr.DataArray(
+                    np.array([[[[src_fwhm_maj]]]]),
+                    dims=("time", "frequency", "polarization", "component"),
+                ),
+                "fwhm_minor_world": xr.DataArray(
+                    np.array([[[[src_fwhm_min]]]]),
+                    dims=("time", "frequency", "polarization", "component"),
+                ),
+                "pa": xr.DataArray(
+                    np.array([[[[src_pa]]]]),
+                    dims=("time", "frequency", "polarization", "component"),
+                ),
+                "sigma_major_world": xr.DataArray(
+                    np.array([[[[src_fwhm_maj * FWHM2SIG]]]]),
+                    dims=("time", "frequency", "polarization", "component"),
+                ),
+                "sigma_minor_world": xr.DataArray(
+                    np.array([[[[src_fwhm_min * FWHM2SIG]]]]),
+                    dims=("time", "frequency", "polarization", "component"),
+                ),
+                "sigma_major_pixel": xr.DataArray(
+                    np.array([[[[src_fwhm_maj * FWHM2SIG / 1e-5]]]]),
+                    dims=("time", "frequency", "polarization", "component"),
+                ),
+                "sigma_minor_pixel": xr.DataArray(
+                    np.array([[[[src_fwhm_min * FWHM2SIG / 1e-5]]]]),
+                    dims=("time", "frequency", "polarization", "component"),
+                ),
+            }
+        )
+        # No *_err variables — this forces the no-error branch
+
+        bmaj = xr.DataArray(np.array([[[beam_fwhm]]]), dims=("time", "frequency", "polarization"))
+        bmin = xr.DataArray(np.array([[[beam_fwhm]]]), dims=("time", "frequency", "polarization"))
+        bpa = xr.DataArray(np.array([[[0.0]]]), dims=("time", "frequency", "polarization"))
+
+        ds = _deconvolve_and_attach(ds, (bmaj, bmin, bpa))
+
+        assert "fwhm_major_deconv" in ds.data_vars
+        assert "is_unresolved" in ds.data_vars
+        assert not ds["is_unresolved"].values.flat[0]
+        # No error variables should be present
+        assert "fwhm_major_deconv_err" not in ds.data_vars
+        assert "is_marginally_resolved" not in ds.data_vars
+        # Deconvolved sizes should be smaller than source sizes
+        assert ds["fwhm_major_deconv"].values.flat[0] < src_fwhm_maj
+        assert ds["fwhm_minor_deconv"].values.flat[0] < src_fwhm_min
+
+
+class TestImfitMetadata:
+    """Tests for metadata propagation."""
+
+    def test_coordinate_system_info_propagated(self):
+        """coordinate_system_info should be copied to result."""
+        cellsize = 1e-5
+        xds = _make_xradio_image(
+            components=[
+                {
+                    "amp": 1.0,
+                    "l0": 0,
+                    "m0": 0,
+                    "fwhm_maj": 5 * cellsize,
+                    "fwhm_min": 5 * cellsize,
+                    "pa": 0.0,
+                }
+            ],
+            noise_sigma=0.01,
+            cellsize=cellsize,
+        )
+        ds = imfit(xds, n_components=1, beam_var=None)
+        assert "coordinate_system_info" in ds.attrs
+        assert ds.attrs["theta_convention"] == "pa"
+        assert "pa_definition" in ds.attrs
+
+    def test_return_model_and_residual(self):
+        """Model and residual planes should be optionally included."""
+        cellsize = 1e-5
+        xds = _make_xradio_image(
+            components=[
+                {
+                    "amp": 1.0,
+                    "l0": 0,
+                    "m0": 0,
+                    "fwhm_maj": 5 * cellsize,
+                    "fwhm_min": 5 * cellsize,
+                    "pa": 0.0,
+                }
+            ],
+            noise_sigma=0.01,
+            cellsize=cellsize,
+        )
+        ds = imfit(
+            xds,
+            n_components=1,
+            beam_var=None,
+            return_model=True,
+            return_residual=True,
+        )
+        assert "model" in ds.data_vars
+        assert "residual" in ds.data_vars
