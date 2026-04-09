@@ -176,3 +176,8 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# user specific AI agent files
+AGENTS.md
+CLAUDE.md
+SUMMARY.md
