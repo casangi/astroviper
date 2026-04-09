@@ -7,6 +7,7 @@ import warnings
 import numpy as np
 import pytest
 import xarray as xr
+from astropy.coordinates import Angle
 
 from astroviper.distributed.image_analysis.imfit import imfit
 from astroviper.distributed.model.component_models import make_gauss2d
@@ -21,6 +22,7 @@ def _make_xradio_image(
     nl=128,
     nm=128,
     cellsize=1e-5,  # radians per pixel (~2 arcsec)
+    cellsize_m=None,
     components=None,
     offset=0.05,
     noise_sigma=0.02,
@@ -50,11 +52,13 @@ def _make_xradio_image(
     from xradio.image import make_empty_sky_image
 
     rng = np.random.default_rng(seed)
+    cellsize_l = float(cellsize)
+    cellsize_m = cellsize_l if cellsize_m is None else float(cellsize_m)
 
     xds = make_empty_sky_image(
         phase_center=list(phase_center),
         image_size=[nl, nm],
-        cell_size=[cellsize, cellsize],
+        cell_size=[cellsize_l, cellsize_m],
         frequency_coords=np.array([1.0e9]),
         pol_coords=["I"],
         time_coords=np.array([0.0]),
@@ -69,7 +73,7 @@ def _make_xradio_image(
         coords={"l": xds.coords["l"], "m": xds.coords["m"]},
     )
 
-    for comp in (components or []):
+    for comp in components or []:
         plane = make_gauss2d(
             plane,
             a=comp["fwhm_maj"],
@@ -116,7 +120,9 @@ def _make_xradio_image(
         # Simple tangent-plane approximation for RA/Dec grids
         ra0, dec0 = phase_center
         cos_dec = np.cos(dec0)
-        L, M = np.meshgrid(xds.coords["l"].values, xds.coords["m"].values, indexing="ij")
+        L, M = np.meshgrid(
+            xds.coords["l"].values, xds.coords["m"].values, indexing="ij"
+        )
         RA = ra0 + L / cos_dec
         DEC = dec0 + M
         xds["right_ascension"] = xr.DataArray(
@@ -178,6 +184,41 @@ class TestImfitBasic:
         np.testing.assert_allclose(ds["fwhm_major_world"].values, fwhm, rtol=0.1)
         np.testing.assert_allclose(ds["fwhm_minor_world"].values, fwhm, rtol=0.1)
 
+    def test_accepts_native_world_initial_guesses(self):
+        """Native ``l``/``m`` initial guesses should be converted to pixel space."""
+        cellsize = 1e-5
+        nl = 128
+        fwhm = 10 * cellsize
+        comp = {
+            "amp": 1.0,
+            "l0": 3 * cellsize,
+            "m0": -2 * cellsize,
+            "fwhm_maj": fwhm,
+            "fwhm_min": fwhm,
+            "pa": 0.0,
+        }
+        xds = _make_xradio_image(
+            nl=nl, nm=nl, components=[comp], noise_sigma=0.01, cellsize=cellsize
+        )
+        init = [
+            {
+                "amp": 0.9,
+                "l0": comp["l0"],
+                "m0": comp["m0"],
+                "fwhm_major": fwhm,
+                "fwhm_minor": fwhm,
+                "theta": 0.0,
+            }
+        ]
+
+        ds = imfit(xds, n_components=1, beam_var=None, initial_guesses=init)
+
+        assert ds["success"].values
+        np.testing.assert_allclose(ds["x0_world"].values, comp["l0"], atol=cellsize)
+        np.testing.assert_allclose(ds["y0_world"].values, comp["m0"], atol=cellsize)
+        np.testing.assert_allclose(ds["x0_pixel"].values, nl // 2 - 3, atol=0.5)
+        np.testing.assert_allclose(ds["y0_pixel"].values, nl // 2 - 2, atol=0.5)
+
     def test_no_math_angles_in_output(self):
         """Verify math-convention angles are excluded from imfit output."""
         xds = _make_xradio_image(
@@ -225,6 +266,44 @@ class TestImfitBasic:
 
 class TestImfitSkyCoords:
     """Tests for sky coordinate translation."""
+
+    def test_accepts_sexagesimal_sky_initial_guesses(self):
+        """Sexagesimal sky positions should seed the pixel-space fit correctly."""
+        cellsize = 1e-5
+        nl = 128
+        fwhm = 10 * cellsize
+        comp = {
+            "amp": 1.0,
+            "l0": 0.0,
+            "m0": 0.0,
+            "fwhm_maj": fwhm,
+            "fwhm_min": fwhm,
+            "pa": 0.0,
+        }
+        xds = _make_xradio_image(
+            nl=nl,
+            nm=nl,
+            components=[comp],
+            noise_sigma=0.01,
+            cellsize=cellsize,
+            add_sky_coord_grids=False,
+        )
+        init = [
+            {
+                "amp": 0.9,
+                "ra": Angle(1.0, unit="rad").to_string(unit="hourangle", sep=":"),
+                "dec": Angle(0.5, unit="rad").to_string(unit="deg", sep=":"),
+                "fwhm_major": fwhm,
+                "fwhm_minor": fwhm,
+                "theta": 0.0,
+            }
+        ]
+
+        ds = imfit(xds, n_components=1, beam_var=None, initial_guesses=init)
+
+        assert ds["success"].values
+        np.testing.assert_allclose(ds["x0_world"].values, 0.0, atol=cellsize)
+        np.testing.assert_allclose(ds["y0_world"].values, 0.0, atol=cellsize)
 
     def test_sky_coords_from_grids(self):
         """When RA/Dec grids exist, interpolate fitted centers."""
@@ -461,6 +540,44 @@ class TestImfitDeconvolution:
 class TestImfitInputValidation:
     """Tests for input validation and edge cases."""
 
+    def test_rejects_world_width_guesses_for_non_square_pixels(self):
+        """World-frame width guesses should fail when the image pixels are not square."""
+        cellsize_l = 1e-5
+        xds = _make_xradio_image(
+            nl=128,
+            nm=128,
+            cellsize=cellsize_l,
+            cellsize_m=2e-5,
+            components=[
+                {
+                    "amp": 1.0,
+                    "l0": 0.0,
+                    "m0": 0.0,
+                    "fwhm_maj": 6 * cellsize_l,
+                    "fwhm_min": 4 * cellsize_l,
+                    "pa": 0.0,
+                }
+            ],
+            noise_sigma=0.01,
+        )
+
+        with pytest.raises(ValueError, match="square pixels"):
+            imfit(
+                xds,
+                n_components=1,
+                beam_var=None,
+                initial_guesses=[
+                    {
+                        "amp": 0.9,
+                        "l0": 0.0,
+                        "m0": 0.0,
+                        "fwhm_major": 6 * cellsize_l,
+                        "fwhm_minor": 4 * cellsize_l,
+                        "theta": 0.0,
+                    }
+                ],
+            )
+
     def test_missing_data_var_raises(self):
         """Missing data variable should raise KeyError."""
         xds = xr.Dataset()
@@ -688,9 +805,15 @@ class TestImfitCoverageGaps:
         )
         # No *_err variables — this forces the no-error branch
 
-        bmaj = xr.DataArray(np.array([[[beam_fwhm]]]), dims=("time", "frequency", "polarization"))
-        bmin = xr.DataArray(np.array([[[beam_fwhm]]]), dims=("time", "frequency", "polarization"))
-        bpa = xr.DataArray(np.array([[[0.0]]]), dims=("time", "frequency", "polarization"))
+        bmaj = xr.DataArray(
+            np.array([[[beam_fwhm]]]), dims=("time", "frequency", "polarization")
+        )
+        bmin = xr.DataArray(
+            np.array([[[beam_fwhm]]]), dims=("time", "frequency", "polarization")
+        )
+        bpa = xr.DataArray(
+            np.array([[[0.0]]]), dims=("time", "frequency", "polarization")
+        )
 
         ds = _deconvolve_and_attach(ds, (bmaj, bmin, bpa))
 

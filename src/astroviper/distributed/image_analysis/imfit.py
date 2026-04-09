@@ -10,10 +10,12 @@ publication of results in standard astronomical conventions.
 from __future__ import annotations
 
 import warnings
-from typing import Dict, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
+import astropy.units as u
 import numpy as np
 import xarray as xr
+from astropy.coordinates import Angle, SkyCoord
 
 from .multi_gaussian2d_fit import fit_multi_gaussian2d
 from ...utils._gaussian_math import (
@@ -42,6 +44,487 @@ _TO_RAD = {
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+
+def _is_scalar_number(value: Any) -> bool:
+    """Return whether *value* is a scalar numeric type but not a string.
+
+    Parameters
+    ----------
+    value : Any
+        Candidate scalar value.
+
+    Returns
+    -------
+    bool
+        ``True`` when *value* is a scalar numeric quantity that should be treated as
+        a raw float-like value in the current frame semantics.
+
+    Notes
+    -----
+    String-like coordinate tokens must stay out of the pixel-coordinate path so
+    sexagesimal sky positions can be routed through explicit world-coordinate
+    parsing instead of raising a plain ``float(...)`` conversion error.
+    """
+    return np.isscalar(value) and not isinstance(value, (str, bytes))
+
+
+def _frame_prefers_hourangle(frame: str) -> bool:
+    """Return whether sexagesimal longitudes in *frame* should default to hours.
+
+    Parameters
+    ----------
+    frame : str
+        Celestial frame name from the image metadata.
+
+    Returns
+    -------
+    bool
+        ``True`` for common equatorial frames whose longitude axis is normally
+        expressed as right ascension, otherwise ``False``.
+    """
+    return str(frame).lower() in {
+        "icrs",
+        "fk5",
+        "fk4",
+        "fk4noeterms",
+        "cirs",
+        "hcrs",
+        "gcrs",
+    }
+
+
+def _coerce_angle_to_radians(value: Any, *, prefer_hourangle: bool = False) -> float:
+    """Convert an angular scalar or string into radians.
+
+    Parameters
+    ----------
+    value : Any
+        Angle value to convert. Supported inputs are numeric radians, Astropy angle
+        or quantity objects, and strings with explicit angular units or sexagesimal
+        notation.
+    prefer_hourangle : bool, optional
+        When ``True``, ambiguous unit-less sexagesimal strings are interpreted as
+        hour angle instead of degrees.
+
+    Returns
+    -------
+    float
+        Angle value in radians.
+
+    Notes
+    -----
+    Plain numeric inputs are treated as radians to preserve the package's existing
+    public angular convention for machine-readable numeric values.
+    """
+    if _is_scalar_number(value):
+        return float(value)
+    try:
+        return Angle(value).to_value(u.rad)
+    except Exception:
+        unit = u.hourangle if prefer_hourangle else u.deg
+        return Angle(value, unit=unit).to_value(u.rad)
+
+
+def _parse_sky_center_to_radians(
+    lon_value: Any,
+    lat_value: Any,
+    frame: str,
+) -> tuple[float, float]:
+    """Parse a sky-position pair into radians in the dataset frame.
+
+    Parameters
+    ----------
+    lon_value : Any
+        Longitude-like value in the dataset sky frame. Numeric inputs are
+        interpreted as radians; sexagesimal strings are accepted.
+    lat_value : Any
+        Latitude-like value in the dataset sky frame. Numeric inputs are
+        interpreted as radians; sexagesimal strings are accepted.
+    frame : str
+        Celestial frame name used by the xradio image metadata.
+
+    Returns
+    -------
+    tuple[float, float]
+        Parsed ``(lon_rad, lat_rad)`` pair in radians.
+
+    Notes
+    -----
+    String parsing is frame-aware: equatorial frames default the longitude field to
+    hour angle, while non-equatorial frames such as Galactic or Supergalactic
+    default both longitude and latitude to degrees.
+    """
+    prefer_hourangle = _frame_prefers_hourangle(frame)
+    if isinstance(lon_value, str) or isinstance(lat_value, str):
+        try:
+            unit = (u.hourangle, u.deg) if prefer_hourangle else (u.deg, u.deg)
+            sc = SkyCoord(lon_value, lat_value, unit=unit, frame=frame)
+            return (
+                sc.spherical.lon.to_value(u.rad),
+                sc.spherical.lat.to_value(u.rad),
+            )
+        except Exception:
+            pass
+    return (
+        _coerce_angle_to_radians(lon_value, prefer_hourangle=prefer_hourangle),
+        _coerce_angle_to_radians(lat_value, prefer_hourangle=False),
+    )
+
+
+def _skycoord_to_lm_from_wcs(
+    lon_rad: float,
+    lat_rad: float,
+    phase_center: Sequence[float],
+    projection: str,
+) -> tuple[float, float]:
+    """Convert sky-frame longitude/latitude into native ``(l, m)`` coordinates.
+
+    Parameters
+    ----------
+    lon_rad : float
+        Sky longitude in radians in the dataset frame.
+    lat_rad : float
+        Sky latitude in radians in the dataset frame.
+    phase_center : sequence[float]
+        Phase-center ``[lon0, lat0]`` in radians.
+    projection : str
+        WCS projection code. Currently only ``"SIN"`` is modeled explicitly;
+        other values warn and reuse the SIN small-field relation.
+
+    Returns
+    -------
+    tuple[float, float]
+        Native ``(l, m)`` coordinates in radians.
+
+    Notes
+    -----
+    This is the forward companion to :func:`_lm_to_radec_from_wcs` and uses the
+    standard radio-interferometric SIN projection relation between sky angles and
+    direction cosines.
+    """
+    if projection != "SIN":
+        warnings.warn(
+            f"Projection {projection!r} not directly supported for sky → "
+            f"l,m conversion; falling back to SIN projection.",
+            stacklevel=3,
+        )
+    lon0, lat0 = float(phase_center[0]), float(phase_center[1])
+    dlon = float(lon_rad) - lon0
+    lat = float(lat_rad)
+    l_val = np.cos(lat) * np.sin(dlon)
+    m_val = np.sin(lat) * np.cos(lat0) - np.cos(lat) * np.sin(lat0) * np.cos(dlon)
+    return float(l_val), float(m_val)
+
+
+def _prepare_world_to_pixel_interp(
+    axis_coord: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Prepare a 1-D world axis for safe interpolation into pixel centers.
+
+    Parameters
+    ----------
+    axis_coord : np.ndarray
+        One-dimensional world-coordinate axis associated with zero-based pixel
+        centers.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        Ascending ``(xp, fp)`` arrays suitable for ``np.interp`` where ``xp`` is the
+        world axis and ``fp`` is the matching pixel-center axis.
+
+    Raises
+    ------
+    ValueError
+        If the axis is not finite, one-dimensional, or strictly monotonic.
+
+    Notes
+    -----
+    ``np.interp`` requires ascending ``xp`` values. Descending image axes are
+    therefore reversed together with their pixel-center partners so the physical
+    world-to-pixel mapping is preserved.
+    """
+    coord = np.asarray(axis_coord, dtype=float)
+    if coord.ndim != 1 or coord.size == 0 or not np.all(np.isfinite(coord)):
+        raise ValueError("Image coordinate axes must be finite 1-D arrays.")
+    diff = np.diff(coord)
+    if not (np.all(diff > 0) or np.all(diff < 0)):
+        raise ValueError("Image coordinate axes must be strictly monotonic.")
+    pixels = np.arange(coord.size, dtype=float)
+    if np.all(diff < 0):
+        coord = coord[::-1]
+        pixels = pixels[::-1]
+    return coord, pixels
+
+
+def _world_value_to_pixel(
+    value: float, axis_coord: np.ndarray, axis_name: str
+) -> float:
+    """Interpolate one world-coordinate value into a zero-based pixel center.
+
+    Parameters
+    ----------
+    value : float
+        World-coordinate value to convert.
+    axis_coord : np.ndarray
+        One-dimensional world-coordinate axis for the corresponding image
+        dimension.
+    axis_name : str
+        Human-readable axis label used in error messages.
+
+    Returns
+    -------
+    float
+        Pixel-center coordinate in the zero-based fitter frame.
+
+    Raises
+    ------
+    ValueError
+        If the requested coordinate lies outside the image axis span.
+    """
+    xp, fp = _prepare_world_to_pixel_interp(axis_coord)
+    if value < xp[0] or value > xp[-1]:
+        raise ValueError(
+            f"Initial guess {axis_name}={value!r} lies outside the image coordinate range."
+        )
+    return float(np.interp(float(value), xp, fp))
+
+
+def _representative_pixel_scale(axis_coord: np.ndarray, axis_name: str) -> float:
+    """Measure a representative world-units-per-pixel scale for one image axis.
+
+    Parameters
+    ----------
+    axis_coord : np.ndarray
+        One-dimensional monotonic world-coordinate axis.
+    axis_name : str
+        Axis label used in validation errors.
+
+    Returns
+    -------
+    float
+        Positive world-units-per-pixel scale derived from the median axis spacing.
+
+    Raises
+    ------
+    ValueError
+        If the axis is invalid or degenerate for scale conversion.
+    """
+    coord = np.asarray(axis_coord, dtype=float)
+    _prepare_world_to_pixel_interp(coord)
+    spacing = np.abs(np.diff(coord))
+    scale = float(np.median(spacing))
+    if not np.isfinite(scale) or scale <= 0.0:
+        raise ValueError(f"Image {axis_name}-axis spacing must be positive and finite.")
+    return scale
+
+
+def _convert_world_widths_to_pixel(
+    comp: Dict[str, Any],
+    l_axis: np.ndarray,
+    m_axis: np.ndarray,
+) -> None:
+    """Convert world-frame width guesses in-place into pixel-frame widths.
+
+    Parameters
+    ----------
+    comp : dict[str, Any]
+        Component guess dictionary to mutate in place.
+    l_axis : np.ndarray
+        Native ``l`` axis in world units.
+    m_axis : np.ndarray
+        Native ``m`` axis in world units.
+
+    Returns
+    -------
+    None
+        The input dictionary is modified in place.
+
+    Raises
+    ------
+    ValueError
+        If world-frame width guesses are supplied on a non-square pixel grid.
+
+    Notes
+    -----
+    World-frame initial widths can be mapped into pixel widths only when the image
+    uses square pixels, because the optimizer parameterization assumes a single
+    pixel metric along the rotated principal axes.
+    """
+    width_keys = {
+        "fwhm_major",
+        "fwhm_minor",
+        "sigma_x",
+        "sigma_y",
+        "sx",
+        "sy",
+    }
+    if not any(key in comp for key in width_keys):
+        return
+    l_scale = _representative_pixel_scale(l_axis, "l")
+    m_scale = _representative_pixel_scale(m_axis, "m")
+    if not np.isclose(l_scale, m_scale, rtol=1e-8, atol=0.0):
+        raise ValueError(
+            "World-frame initial widths are only supported for square pixels; "
+            "non-square pixels cannot safely convert initial FWHM/sigma guesses "
+            "into pixel-space widths."
+        )
+    pixel_scale = 0.5 * (l_scale + m_scale)
+    for key in ("fwhm_major", "fwhm_minor", "sigma_x", "sigma_y", "sx", "sy"):
+        if key in comp:
+            comp[key] = _coerce_angle_to_radians(comp[key]) / pixel_scale
+
+
+def _convert_world_component_guess_to_pixel(
+    xds: xr.Dataset,
+    comp: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Convert one world-frame imfit component guess into pixel-frame form.
+
+    Parameters
+    ----------
+    xds : xr.Dataset
+        Input xradio image Dataset that defines the native ``l``/``m`` axes and sky
+        metadata.
+    comp : Mapping[str, Any]
+        One component guess dictionary.
+
+    Returns
+    -------
+    dict[str, Any]
+        Pixel-frame component guess compatible with :func:`fit_multi_gaussian2d`.
+
+    Notes
+    -----
+    Pixel guesses continue to use ``x0``/``y0`` directly. World guesses may use
+    native ``l0``/``m0`` keys, explicit sky keys ``ra``/``dec``,
+    ``right_ascension``/``declination``, or generic sky keys ``lon``/``lat`` or
+    ``longitude``/``latitude`` in the image frame. String or Astropy angle-valued
+    ``x0``/``y0`` inputs are also interpreted as sky coordinates in the dataset
+    frame. World-frame centers and widths are converted to zero-based pixel
+    coordinates before the fit for numerical stability.
+    """
+    out = dict(comp)
+    l_axis = np.asarray(xds.coords["l"].values, dtype=float)
+    m_axis = np.asarray(xds.coords["m"].values, dtype=float)
+
+    has_lm_keys = ("l0" in out) or ("m0" in out)
+    has_sky_keys = any(
+        key in out
+        for key in (
+            "ra",
+            "dec",
+            "right_ascension",
+            "declination",
+            "lon",
+            "lat",
+            "longitude",
+            "latitude",
+        )
+    )
+    x0_val = out.get("x0")
+    y0_val = out.get("y0")
+    xy_are_plain_numbers = _is_scalar_number(x0_val) and _is_scalar_number(y0_val)
+
+    if not has_lm_keys and not has_sky_keys and xy_are_plain_numbers:
+        return out
+
+    if has_lm_keys:
+        l0 = _coerce_angle_to_radians(out.pop("l0"))
+        m0 = _coerce_angle_to_radians(out.pop("m0"))
+        out.pop("x0", None)
+        out.pop("y0", None)
+    else:
+        if has_sky_keys:
+            lon_value = out.pop(
+                "ra",
+                out.pop(
+                    "right_ascension",
+                    out.pop("lon", out.pop("longitude", None)),
+                ),
+            )
+            lat_value = out.pop(
+                "dec",
+                out.pop(
+                    "declination",
+                    out.pop("lat", out.pop("latitude", None)),
+                ),
+            )
+        else:
+            lon_value = out.get("x0")
+            lat_value = out.get("y0")
+        csinfo = xds.attrs.get("coordinate_system_info", {})
+        ref_dir = csinfo.get("reference_direction", {})
+        phase_center = ref_dir.get("data")
+        if phase_center is None:
+            raise ValueError(
+                "Sky-coordinate initial guesses require coordinate_system_info.reference_direction."
+            )
+        frame = ref_dir.get("attrs", {}).get("frame", "icrs")
+        projection = csinfo.get("projection", "SIN")
+        lon_rad, lat_rad = _parse_sky_center_to_radians(lon_value, lat_value, frame)
+        l0, m0 = _skycoord_to_lm_from_wcs(lon_rad, lat_rad, phase_center, projection)
+        out.pop("x0", None)
+        out.pop("y0", None)
+
+    out["x0"] = _world_value_to_pixel(l0, l_axis, "l")
+    out["y0"] = _world_value_to_pixel(m0, m_axis, "m")
+    _convert_world_widths_to_pixel(out, l_axis, m_axis)
+    return out
+
+
+def _normalize_imfit_initial_guesses(
+    xds: xr.Dataset,
+    initial_guesses: Any,
+) -> Any:
+    """Normalize imfit-specific initial guesses into pixel-frame fitter inputs.
+
+    Parameters
+    ----------
+    xds : xr.Dataset
+        Input xradio image Dataset.
+    initial_guesses : Any
+        Public initial-guess payload accepted by :func:`imfit`.
+
+    Returns
+    -------
+    Any
+        Payload with any world-frame component dictionaries converted into the
+        pixel-frame representation expected by :func:`fit_multi_gaussian2d`.
+
+    Notes
+    -----
+    Array-form guesses remain unchanged because they do not carry semantic field
+    names to disambiguate pixel from world coordinates. Dictionary-form component
+    guesses can opt into world-coordinate handling via explicit keys.
+    """
+    if initial_guesses is None:
+        return None
+    if isinstance(initial_guesses, Mapping):
+        if "components" in initial_guesses or "offset" in initial_guesses:
+            out = dict(initial_guesses)
+            comps = out.get("components")
+            if (
+                isinstance(comps, (list, tuple))
+                and len(comps) > 0
+                and isinstance(comps[0], Mapping)
+            ):
+                out["components"] = [
+                    _convert_world_component_guess_to_pixel(xds, comp) for comp in comps
+                ]
+            return out
+        return _convert_world_component_guess_to_pixel(xds, initial_guesses)
+    if (
+        isinstance(initial_guesses, (list, tuple))
+        and len(initial_guesses) > 0
+        and isinstance(initial_guesses[0], Mapping)
+    ):
+        return [
+            _convert_world_component_guess_to_pixel(xds, comp)
+            for comp in initial_guesses
+        ]
+    return initial_guesses
 
 
 def _validate_data_var(xds: xr.Dataset, data_var: str) -> xr.DataArray:
@@ -767,9 +1250,15 @@ def imfit(
         Inclusive upper threshold; pixels above this are excluded from the fit.
     initial_guesses : array-like or list[dict] or dict or None
         Initial guesses for the fit, passed through to
-        :func:`fit_multi_gaussian2d`. Widths are interpreted as FWHM by
-        default (see *initial_is_fwhm*). Coordinates should be in ``l, m``
-        (radians).
+        :func:`fit_multi_gaussian2d`. Array-form guesses remain pixel-frame.
+        Dictionary-form component guesses may use pixel centers ``x0``/``y0``,
+        native world centers ``l0``/``m0``, equatorial sky keys
+        ``ra``/``dec`` or ``right_ascension``/``declination``, or generic
+        frame-aware sky keys ``lon``/``lat`` or ``longitude``/``latitude``.
+        Sexagesimal sky strings are accepted. World-frame centers and widths are
+        converted into pixel-frame guesses before optimization so the fitter sees
+        numerically well-scaled initial values. World-frame initial widths are
+        only supported for square pixels.
     bounds : dict or None
         Parameter bounds, passed through to :func:`fit_multi_gaussian2d`.
     initial_is_fwhm : bool
@@ -817,8 +1306,9 @@ def imfit(
 
     Notes
     -----
-    The fit is performed on the ``(l, m)`` coordinate axes in world
-    coordinates (radians). Position angles are reported in the standard
+    The fit is performed internally on zero-based pixel axes even though this
+    wrapper accepts world-coordinate initial guesses and publishes world-frame
+    results. Position angles are reported in the standard
     astronomical convention: measured east of north (counter-clockwise from
     "up" in a left-handed coordinate system). Math-convention angles are
     not included in the output.
@@ -830,6 +1320,7 @@ def imfit(
     image_da = _validate_data_var(xds, data_var)
     mask_da = _resolve_mask(xds, mask_var)
     beam = _resolve_beam(xds, beam_var)
+    initial_guesses = _normalize_imfit_initial_guesses(xds, initial_guesses)
 
     # Stage 2: delegate to the generic fitter.
     # Use coord_type="pixel" for numerical stability (l/m values can be very
