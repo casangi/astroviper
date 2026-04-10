@@ -180,4 +180,5 @@ dmypy.json
 # user specific AI agent files
 AGENTS.md
 CLAUDE.md
+HANDOFF.md
 SUMMARY.md
