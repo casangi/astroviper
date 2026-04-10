@@ -10,12 +10,10 @@ publication of results in standard astronomical conventions.
 from __future__ import annotations
 
 import warnings
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 
-import astropy.units as u
 import numpy as np
 import xarray as xr
-from astropy.coordinates import Angle, SkyCoord
 
 from .multi_gaussian2d_fit import fit_multi_gaussian2d
 from ...utils._gaussian_math import (
@@ -25,6 +23,16 @@ from ...utils._gaussian_math import (
     sigma_from_fwhm,
     deconvolve_gaussian,
     deconvolve_gaussian_with_errors,
+)
+from ...utils.coordinate_axes import (
+    representative_pixel_scale,
+    world_value_to_pixel,
+)
+from ...utils.sky_coordinates import (
+    coerce_angle_to_radians,
+    is_scalar_number,
+    parse_sky_center_to_radians,
+    skycoord_to_lm_from_wcs,
 )
 
 Number = Union[int, float]
@@ -44,280 +52,6 @@ _TO_RAD = {
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
-
-
-def _is_scalar_number(value: Any) -> bool:
-    """Return whether *value* is a scalar numeric type but not a string.
-
-    Parameters
-    ----------
-    value : Any
-        Candidate scalar value.
-
-    Returns
-    -------
-    bool
-        ``True`` when *value* is a scalar numeric quantity that should be treated as
-        a raw float-like value in the current frame semantics.
-
-    Notes
-    -----
-    String-like coordinate tokens must stay out of the pixel-coordinate path so
-    sexagesimal sky positions can be routed through explicit world-coordinate
-    parsing instead of raising a plain ``float(...)`` conversion error.
-    """
-    return np.isscalar(value) and not isinstance(value, (str, bytes))
-
-
-def _frame_prefers_hourangle(frame: str) -> bool:
-    """Return whether sexagesimal longitudes in *frame* should default to hours.
-
-    Parameters
-    ----------
-    frame : str
-        Celestial frame name from the image metadata.
-
-    Returns
-    -------
-    bool
-        ``True`` for common equatorial frames whose longitude axis is normally
-        expressed as right ascension, otherwise ``False``.
-    """
-    return str(frame).lower() in {
-        "icrs",
-        "fk5",
-        "fk4",
-        "fk4noeterms",
-        "cirs",
-        "hcrs",
-        "gcrs",
-    }
-
-
-def _coerce_angle_to_radians(value: Any, *, prefer_hourangle: bool = False) -> float:
-    """Convert an angular scalar or string into radians.
-
-    Parameters
-    ----------
-    value : Any
-        Angle value to convert. Supported inputs are numeric radians, Astropy angle
-        or quantity objects, and strings with explicit angular units or sexagesimal
-        notation.
-    prefer_hourangle : bool, optional
-        When ``True``, ambiguous unit-less sexagesimal strings are interpreted as
-        hour angle instead of degrees.
-
-    Returns
-    -------
-    float
-        Angle value in radians.
-
-    Notes
-    -----
-    Plain numeric inputs are treated as radians to preserve the package's existing
-    public angular convention for machine-readable numeric values.
-    """
-    if _is_scalar_number(value):
-        return float(value)
-    try:
-        return Angle(value).to_value(u.rad)
-    except Exception:
-        unit = u.hourangle if prefer_hourangle else u.deg
-        return Angle(value, unit=unit).to_value(u.rad)
-
-
-def _parse_sky_center_to_radians(
-    lon_value: Any,
-    lat_value: Any,
-    frame: str,
-) -> tuple[float, float]:
-    """Parse a sky-position pair into radians in the dataset frame.
-
-    Parameters
-    ----------
-    lon_value : Any
-        Longitude-like value in the dataset sky frame. Numeric inputs are
-        interpreted as radians; sexagesimal strings are accepted.
-    lat_value : Any
-        Latitude-like value in the dataset sky frame. Numeric inputs are
-        interpreted as radians; sexagesimal strings are accepted.
-    frame : str
-        Celestial frame name used by the xradio image metadata.
-
-    Returns
-    -------
-    tuple[float, float]
-        Parsed ``(lon_rad, lat_rad)`` pair in radians.
-
-    Notes
-    -----
-    String parsing is frame-aware: equatorial frames default the longitude field to
-    hour angle, while non-equatorial frames such as Galactic or Supergalactic
-    default both longitude and latitude to degrees.
-    """
-    prefer_hourangle = _frame_prefers_hourangle(frame)
-    if isinstance(lon_value, str) or isinstance(lat_value, str):
-        try:
-            unit = (u.hourangle, u.deg) if prefer_hourangle else (u.deg, u.deg)
-            sc = SkyCoord(lon_value, lat_value, unit=unit, frame=frame)
-            return (
-                sc.spherical.lon.to_value(u.rad),
-                sc.spherical.lat.to_value(u.rad),
-            )
-        except Exception:
-            pass
-    return (
-        _coerce_angle_to_radians(lon_value, prefer_hourangle=prefer_hourangle),
-        _coerce_angle_to_radians(lat_value, prefer_hourangle=False),
-    )
-
-
-def _skycoord_to_lm_from_wcs(
-    lon_rad: float,
-    lat_rad: float,
-    phase_center: Sequence[float],
-    projection: str,
-) -> tuple[float, float]:
-    """Convert sky-frame longitude/latitude into native ``(l, m)`` coordinates.
-
-    Parameters
-    ----------
-    lon_rad : float
-        Sky longitude in radians in the dataset frame.
-    lat_rad : float
-        Sky latitude in radians in the dataset frame.
-    phase_center : sequence[float]
-        Phase-center ``[lon0, lat0]`` in radians.
-    projection : str
-        WCS projection code. Currently only ``"SIN"`` is modeled explicitly;
-        other values warn and reuse the SIN small-field relation.
-
-    Returns
-    -------
-    tuple[float, float]
-        Native ``(l, m)`` coordinates in radians.
-
-    Notes
-    -----
-    This is the forward companion to :func:`_lm_to_radec_from_wcs` and uses the
-    standard radio-interferometric SIN projection relation between sky angles and
-    direction cosines.
-    """
-    if projection != "SIN":
-        warnings.warn(
-            f"Projection {projection!r} not directly supported for sky → "
-            f"l,m conversion; falling back to SIN projection.",
-            stacklevel=3,
-        )
-    lon0, lat0 = float(phase_center[0]), float(phase_center[1])
-    dlon = float(lon_rad) - lon0
-    lat = float(lat_rad)
-    l_val = np.cos(lat) * np.sin(dlon)
-    m_val = np.sin(lat) * np.cos(lat0) - np.cos(lat) * np.sin(lat0) * np.cos(dlon)
-    return float(l_val), float(m_val)
-
-
-def _prepare_world_to_pixel_interp(
-    axis_coord: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Prepare a 1-D world axis for safe interpolation into pixel centers.
-
-    Parameters
-    ----------
-    axis_coord : np.ndarray
-        One-dimensional world-coordinate axis associated with zero-based pixel
-        centers.
-
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray]
-        Ascending ``(xp, fp)`` arrays suitable for ``np.interp`` where ``xp`` is the
-        world axis and ``fp`` is the matching pixel-center axis.
-
-    Raises
-    ------
-    ValueError
-        If the axis is not finite, one-dimensional, or strictly monotonic.
-
-    Notes
-    -----
-    ``np.interp`` requires ascending ``xp`` values. Descending image axes are
-    therefore reversed together with their pixel-center partners so the physical
-    world-to-pixel mapping is preserved.
-    """
-    coord = np.asarray(axis_coord, dtype=float)
-    if coord.ndim != 1 or coord.size == 0 or not np.all(np.isfinite(coord)):
-        raise ValueError("Image coordinate axes must be finite 1-D arrays.")
-    diff = np.diff(coord)
-    if not (np.all(diff > 0) or np.all(diff < 0)):
-        raise ValueError("Image coordinate axes must be strictly monotonic.")
-    pixels = np.arange(coord.size, dtype=float)
-    if np.all(diff < 0):
-        coord = coord[::-1]
-        pixels = pixels[::-1]
-    return coord, pixels
-
-
-def _world_value_to_pixel(
-    value: float, axis_coord: np.ndarray, axis_name: str
-) -> float:
-    """Interpolate one world-coordinate value into a zero-based pixel center.
-
-    Parameters
-    ----------
-    value : float
-        World-coordinate value to convert.
-    axis_coord : np.ndarray
-        One-dimensional world-coordinate axis for the corresponding image
-        dimension.
-    axis_name : str
-        Human-readable axis label used in error messages.
-
-    Returns
-    -------
-    float
-        Pixel-center coordinate in the zero-based fitter frame.
-
-    Raises
-    ------
-    ValueError
-        If the requested coordinate lies outside the image axis span.
-    """
-    xp, fp = _prepare_world_to_pixel_interp(axis_coord)
-    if value < xp[0] or value > xp[-1]:
-        raise ValueError(
-            f"Initial guess {axis_name}={value!r} lies outside the image coordinate range."
-        )
-    return float(np.interp(float(value), xp, fp))
-
-
-def _representative_pixel_scale(axis_coord: np.ndarray, axis_name: str) -> float:
-    """Measure a representative world-units-per-pixel scale for one image axis.
-
-    Parameters
-    ----------
-    axis_coord : np.ndarray
-        One-dimensional monotonic world-coordinate axis.
-    axis_name : str
-        Axis label used in validation errors.
-
-    Returns
-    -------
-    float
-        Positive world-units-per-pixel scale derived from the median axis spacing.
-
-    Raises
-    ------
-    ValueError
-        If the axis is invalid or degenerate for scale conversion.
-    """
-    coord = np.asarray(axis_coord, dtype=float)
-    _prepare_world_to_pixel_interp(coord)
-    spacing = np.abs(np.diff(coord))
-    scale = float(np.median(spacing))
-    if not np.isfinite(scale) or scale <= 0.0:
-        raise ValueError(f"Image {axis_name}-axis spacing must be positive and finite.")
-    return scale
 
 
 def _convert_world_widths_to_pixel(
@@ -362,8 +96,8 @@ def _convert_world_widths_to_pixel(
     }
     if not any(key in comp for key in width_keys):
         return
-    l_scale = _representative_pixel_scale(l_axis, "l")
-    m_scale = _representative_pixel_scale(m_axis, "m")
+    l_scale = representative_pixel_scale(l_axis, "l")
+    m_scale = representative_pixel_scale(m_axis, "m")
     if not np.isclose(l_scale, m_scale, rtol=1e-8, atol=0.0):
         raise ValueError(
             "World-frame initial widths are only supported for square pixels; "
@@ -373,7 +107,7 @@ def _convert_world_widths_to_pixel(
     pixel_scale = 0.5 * (l_scale + m_scale)
     for key in ("fwhm_major", "fwhm_minor", "sigma_x", "sigma_y", "sx", "sy"):
         if key in comp:
-            comp[key] = _coerce_angle_to_radians(comp[key]) / pixel_scale
+            comp[key] = coerce_angle_to_radians(comp[key]) / pixel_scale
 
 
 def _convert_world_component_guess_to_pixel(
@@ -425,14 +159,15 @@ def _convert_world_component_guess_to_pixel(
     )
     x0_val = out.get("x0")
     y0_val = out.get("y0")
-    xy_are_plain_numbers = _is_scalar_number(x0_val) and _is_scalar_number(y0_val)
+    xy_are_plain_numbers = is_scalar_number(x0_val) and is_scalar_number(y0_val)
 
     if not has_lm_keys and not has_sky_keys and xy_are_plain_numbers:
         return out
 
     if has_lm_keys:
-        l0 = _coerce_angle_to_radians(out.pop("l0"))
-        m0 = _coerce_angle_to_radians(out.pop("m0"))
+        # In imfit, explicit l0/m0 keys mean native image-world coordinates.
+        l0 = coerce_angle_to_radians(out.pop("l0"))
+        m0 = coerce_angle_to_radians(out.pop("m0"))
         out.pop("x0", None)
         out.pop("y0", None)
     else:
@@ -452,6 +187,7 @@ def _convert_world_component_guess_to_pixel(
                 ),
             )
         else:
+            # imfit treats non-numeric x0/y0 tokens as sky-frame longitude/latitude.
             lon_value = out.get("x0")
             lat_value = out.get("y0")
         csinfo = xds.attrs.get("coordinate_system_info", {})
@@ -463,13 +199,15 @@ def _convert_world_component_guess_to_pixel(
             )
         frame = ref_dir.get("attrs", {}).get("frame", "icrs")
         projection = csinfo.get("projection", "SIN")
-        lon_rad, lat_rad = _parse_sky_center_to_radians(lon_value, lat_value, frame)
-        l0, m0 = _skycoord_to_lm_from_wcs(lon_rad, lat_rad, phase_center, projection)
+        lon_rad, lat_rad = parse_sky_center_to_radians(lon_value, lat_value, frame)
+        # imfit accepts sky-frame seed positions but fits in native l/m.
+        l0, m0 = skycoord_to_lm_from_wcs(lon_rad, lat_rad, phase_center, projection)
         out.pop("x0", None)
         out.pop("y0", None)
 
-    out["x0"] = _world_value_to_pixel(l0, l_axis, "l")
-    out["y0"] = _world_value_to_pixel(m0, m_axis, "m")
+    out["x0"] = world_value_to_pixel(l0, l_axis, "l")
+    out["y0"] = world_value_to_pixel(m0, m_axis, "m")
+    # imfit converts world-frame widths into pixel widths only at this boundary.
     _convert_world_widths_to_pixel(out, l_axis, m_axis)
     return out
 

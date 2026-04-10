@@ -828,6 +828,165 @@ class TestImfitCoverageGaps:
         assert ds["fwhm_minor_deconv"].values.flat[0] < src_fwhm_min
 
 
+class TestImfitHelperCoverage:
+    """Targeted helper coverage for supported alternate input shapes and edges."""
+
+    def test_normalize_initial_guesses_preserves_array_form(self):
+        """Array-form guesses should bypass imfit-specific dict conversion."""
+        from astroviper.distributed.image_analysis.imfit import (
+            _normalize_imfit_initial_guesses,
+        )
+
+        xds = _make_xradio_image(components=[], noise_sigma=0.0)
+        initial_guesses = np.array([[1.0, 2.0, 3.0]])
+
+        normalized = _normalize_imfit_initial_guesses(xds, initial_guesses)
+
+        assert normalized is initial_guesses
+
+    def test_normalize_initial_guesses_converts_wrapped_component_mapping(self):
+        """Wrapped mapping guesses should convert component dicts and preserve offset."""
+        from astroviper.distributed.image_analysis.imfit import (
+            _normalize_imfit_initial_guesses,
+        )
+
+        cellsize = 1e-5
+        nl = 128
+        xds = _make_xradio_image(
+            nl=nl,
+            nm=nl,
+            cellsize=cellsize,
+            components=[],
+            noise_sigma=0.0,
+        )
+        initial_guesses = {
+            "offset": 0.25,
+            "components": [
+                {
+                    "amp": 0.9,
+                    "l0": 2 * cellsize,
+                    "m0": -1 * cellsize,
+                    "fwhm_major": 6 * cellsize,
+                    "fwhm_minor": 4 * cellsize,
+                    "theta": 0.0,
+                }
+            ],
+        }
+
+        normalized = _normalize_imfit_initial_guesses(xds, initial_guesses)
+
+        assert normalized["offset"] == 0.25
+        comp = normalized["components"][0]
+        np.testing.assert_allclose(comp["x0"], nl // 2 - 2, atol=1e-12)
+        np.testing.assert_allclose(comp["y0"], nl // 2 - 1, atol=1e-12)
+        np.testing.assert_allclose(comp["fwhm_major"], 6.0, atol=1e-12)
+        np.testing.assert_allclose(comp["fwhm_minor"], 4.0, atol=1e-12)
+
+    def test_normalize_initial_guesses_converts_string_xy_sky_centers(self):
+        """String-valued x0/y0 should be treated as sky coordinates, not pixels."""
+        from astroviper.distributed.image_analysis.imfit import (
+            _normalize_imfit_initial_guesses,
+        )
+
+        xds = _make_xradio_image(components=[], noise_sigma=0.0)
+        initial_guesses = {
+            "amp": 0.9,
+            "x0": Angle(1.0, unit="rad").to_string(unit="hourangle", sep=":"),
+            "y0": Angle(0.5, unit="rad").to_string(unit="deg", sep=":"),
+        }
+
+        normalized = _normalize_imfit_initial_guesses(xds, initial_guesses)
+
+        np.testing.assert_allclose(normalized["x0"], 64.0, atol=1e-12)
+        np.testing.assert_allclose(normalized["y0"], 64.0, atol=1e-12)
+
+    def test_normalize_initial_guesses_rejects_sky_guesses_without_reference_direction(
+        self,
+    ):
+        """Sky-coordinate guesses require a phase center in coordinate metadata."""
+        from astroviper.distributed.image_analysis.imfit import (
+            _normalize_imfit_initial_guesses,
+        )
+
+        xds = _make_xradio_image(components=[], noise_sigma=0.0)
+        xds.attrs["coordinate_system_info"] = {}
+
+        with pytest.raises(ValueError, match="reference_direction"):
+            _normalize_imfit_initial_guesses(
+                xds,
+                {
+                    "amp": 0.9,
+                    "x0": Angle(1.0, unit="rad").to_string(unit="hourangle", sep=":"),
+                    "y0": Angle(0.5, unit="rad").to_string(unit="deg", sep=":"),
+                },
+            )
+
+    def test_normalize_initial_guesses_accepts_world_centers_without_widths(self):
+        """Center-only world guesses should still be converted into pixel centers."""
+        from astroviper.distributed.image_analysis.imfit import (
+            _normalize_imfit_initial_guesses,
+        )
+
+        cellsize = 1e-5
+        nl = 128
+        xds = _make_xradio_image(
+            nl=nl,
+            nm=nl,
+            cellsize=cellsize,
+            components=[],
+            noise_sigma=0.0,
+        )
+
+        normalized = _normalize_imfit_initial_guesses(
+            xds,
+            {"amp": 0.9, "l0": 3 * cellsize, "m0": -2 * cellsize},
+        )
+
+        np.testing.assert_allclose(normalized["x0"], nl // 2 - 3, atol=1e-12)
+        np.testing.assert_allclose(normalized["y0"], nl // 2 - 2, atol=1e-12)
+        assert "l0" not in normalized
+        assert "m0" not in normalized
+
+    def test_resolve_mask_none_returns_none(self):
+        """Explicitly disabling masks should short-circuit without warnings."""
+        from astroviper.distributed.image_analysis.imfit import _resolve_mask
+
+        xds = _make_xradio_image(components=[], noise_sigma=0.0)
+
+        assert _resolve_mask(xds, None) is None
+
+    def test_lm_to_radec_from_wcs_warns_for_non_sin_projection(self):
+        """Unsupported projections should warn while falling back to the SIN inverse."""
+        from astroviper.distributed.image_analysis.imfit import _lm_to_radec_from_wcs
+
+        l_vals = xr.DataArray([0.0], dims=("component",))
+        m_vals = xr.DataArray([0.0], dims=("component",))
+
+        with pytest.warns(UserWarning, match="falling back to SIN projection"):
+            ra, dec, attrs = _lm_to_radec_from_wcs(
+                l_vals,
+                m_vals,
+                phase_center=(1.0, 0.5),
+                frame="icrs",
+                projection="TAN",
+            )
+
+        np.testing.assert_allclose(ra.values, [1.0], atol=1e-12)
+        np.testing.assert_allclose(dec.values, [0.5], atol=1e-12)
+        assert attrs["frame"] == "icrs"
+
+    def test_attach_sky_coordinates_returns_input_when_world_centers_absent(self):
+        """Sky-coordinate attachment should no-op when l/m centers are unavailable."""
+        from astroviper.distributed.image_analysis.imfit import _attach_sky_coordinates
+
+        xds = _make_xradio_image(components=[], noise_sigma=0.0)
+        ds = xr.Dataset({"success": xr.DataArray(np.array(True))})
+
+        out = _attach_sky_coordinates(ds, xds)
+
+        assert out is ds
+
+
 class TestImfitMetadata:
     """Tests for metadata propagation."""
 

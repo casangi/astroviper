@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from astroviper.utils.sky_coordinates import (
     coerce_angle_to_radians,
@@ -41,9 +42,44 @@ def test_coerce_angle_to_radians_preserves_numeric_radians():
     np.testing.assert_allclose(coerce_angle_to_radians(0.25), 0.25, atol=0.0)
 
 
+def test_coerce_angle_to_radians_accepts_explicit_unit_strings():
+    """Explicit-unit angle strings should take the direct Astropy parsing path."""
+    np.testing.assert_allclose(
+        coerce_angle_to_radians("180deg"),
+        np.pi,
+        atol=1e-12,
+    )
+
+
+def test_coerce_angle_to_radians_falls_back_for_ambiguous_sexagesimal_strings():
+    """Ambiguous sexagesimal strings should honor the caller's default unit choice."""
+    np.testing.assert_allclose(
+        coerce_angle_to_radians("12:00:00", prefer_hourangle=True),
+        np.pi,
+        atol=1e-12,
+    )
+
+
+def test_parse_sky_center_to_radians_falls_back_after_paired_parse_failure():
+    """The independent-angle fallback should run when SkyCoord rejects the pair."""
+    lon_rad, lat_rad = parse_sky_center_to_radians("12:00:00", "91deg", "icrs")
+
+    np.testing.assert_allclose(lon_rad, np.pi, atol=1e-12)
+    np.testing.assert_allclose(lat_rad, np.deg2rad(91.0), atol=1e-12)
+
+
 def test_skycoord_to_lm_from_wcs_maps_phase_center_to_origin():
     """The phase center should map to native ``(l, m) = (0, 0)``."""
     l_val, m_val = skycoord_to_lm_from_wcs(1.0, 0.5, (1.0, 0.5), "SIN")
+
+    np.testing.assert_allclose(l_val, 0.0, atol=1e-12)
+    np.testing.assert_allclose(m_val, 0.0, atol=1e-12)
+
+
+def test_skycoord_to_lm_from_wcs_warns_for_non_sin_projection():
+    """Unsupported projections should warn while reusing the SIN conversion."""
+    with pytest.warns(UserWarning, match="falling back to SIN projection"):
+        l_val, m_val = skycoord_to_lm_from_wcs(1.0, 0.5, (1.0, 0.5), "TAN")
 
     np.testing.assert_allclose(l_val, 0.0, atol=1e-12)
     np.testing.assert_allclose(m_val, 0.0, atol=1e-12)
