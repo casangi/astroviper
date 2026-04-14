@@ -2,9 +2,15 @@ import pytest
 import dask.array as da
 import numpy as np
 import xarray as xr
-from astroviper.core.image_analysis.psf_gaussian_fit import psf_gaussian_fit
-from astroviper.core.image_analysis.psf_gaussian_fit import psf_gaussian_fit_core
-from astroviper.core.image_analysis.psf_gaussian_fit import extract_main_lobe
+from astroviper.core.image_analysis.point_spread_function_gaussian_fit import (
+    point_spread_function_gaussian_fit as psf_gaussian_fit,
+)
+from astroviper.core.image_analysis.point_spread_function_gaussian_fit import (
+    psf_gaussian_fit_core,
+)
+from astroviper.core.image_analysis.point_spread_function_gaussian_fit import (
+    extract_main_lobe,
+)
 
 
 def create_test_xds(shape=(1, 1, 1, 51, 51), rm_coord=None):
@@ -278,6 +284,66 @@ def test_psf_gaussian_fit_orientation():
             angle_mod,
             atol=5,
         ), f"Expected {angle}, got {measured_angle}"
+
+
+def _make_multi_slice_cube(shape=(2, 3, 2, 81, 81), sigmas=None):
+    """Build a (time, chan, pol, l, m) cube of centred Gaussians with varying widths."""
+    n_t, n_c, n_p, nl, nm = shape
+    x = np.linspace(-1, 1, nl)
+    y = np.linspace(-1, 1, nm)
+    xv, yv = np.meshgrid(x, y, indexing="ij")
+    data = np.zeros(shape)
+    if sigmas is None:
+        rng = np.random.default_rng(0)
+        sigmas = 0.15 + 0.05 * rng.random((n_t, n_c, n_p))
+    for t in range(n_t):
+        for c in range(n_c):
+            for p in range(n_p):
+                s = sigmas[t, c, p]
+                data[t, c, p, :, :] = np.exp(-(xv**2 + yv**2) / (2 * s**2))
+    return data, x, y
+
+
+def test_psf_gaussian_fit_core_threaded_matches_serial():
+    """Threaded execution must yield identical results to the serial path."""
+    data, x, y = _make_multi_slice_cube(shape=(2, 3, 2, 81, 81))
+    blc = np.array([20, 20])
+    trc = np.array([60, 60])
+    sampling = np.array([41, 41])
+    cutoff = 0.1
+    delta = np.array([np.abs(x[1] - x[0]), np.abs(y[1] - y[0])])
+
+    serial = psf_gaussian_fit_core(
+        data.copy(), blc, trc, sampling, cutoff, delta, num_threads=1
+    )
+    threaded = psf_gaussian_fit_core(
+        data.copy(), blc, trc, sampling, cutoff, delta, num_threads=4
+    )
+    auto = psf_gaussian_fit_core(
+        data.copy(), blc, trc, sampling, cutoff, delta, num_threads=0
+    )
+
+    assert serial.shape == (2, 3, 2, 3)
+    np.testing.assert_allclose(threaded, serial, rtol=0, atol=0)
+    np.testing.assert_allclose(auto, serial, rtol=0, atol=0)
+    # Every slice should have produced positive widths.
+    assert np.all(serial[..., :2] > 0)
+
+
+def test_psf_gaussian_fit_core_num_threads_exceeds_tasks():
+    """num_threads larger than the number of slices must still succeed."""
+    data, x, y = _make_multi_slice_cube(shape=(1, 1, 1, 61, 61))
+    blc = np.array([10, 10])
+    trc = np.array([50, 50])
+    sampling = np.array([31, 31])
+    cutoff = 0.1
+    delta = np.array([np.abs(x[1] - x[0]), np.abs(y[1] - y[0])])
+
+    result = psf_gaussian_fit_core(
+        data, blc, trc, sampling, cutoff, delta, num_threads=16
+    )
+    assert result.shape == (1, 1, 1, 3)
+    assert np.all(result[0, 0, 0, :2] > 0)
 
 
 def test_psf_gaussian_fit_core_simple_gaussian():

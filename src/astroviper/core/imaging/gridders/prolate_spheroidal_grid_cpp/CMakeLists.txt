@@ -5,13 +5,15 @@ project(astroviper_prolate_spheroidal_grid
     DESCRIPTION "Prolate spheroidal convolution gridder"
     LANGUAGES CXX)
 
-# Set C++17 standard
-set(CMAKE_CXX_STANDARD 17)
+# Set C++20 standard (required for std::atomic_ref used in the threaded gridder)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Find required packages
 find_package(pybind11 REQUIRED)
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
 
 # Define source files
 set(SOURCES
@@ -28,7 +30,10 @@ target_include_directories(_prolate_spheroidal_grid_ext PRIVATE
 )
 
 # Compiler-specific options
-target_compile_features(_prolate_spheroidal_grid_ext PRIVATE cxx_std_17)
+target_compile_features(_prolate_spheroidal_grid_ext PRIVATE cxx_std_20)
+
+# Link pthread (std::thread backend)
+target_link_libraries(_prolate_spheroidal_grid_ext PRIVATE Threads::Threads)
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(_prolate_spheroidal_grid_ext PRIVATE

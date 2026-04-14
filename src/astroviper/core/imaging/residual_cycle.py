@@ -75,6 +75,7 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0)
         is_n_iter_0,
         ms_data_group_in_name=ps_data_group_name,
         img_data_group_out_name=img_data_group_name,
+        num_threads=input_params["processing_function_threads"],
     )
     T_make_uv_images_single_field = time.time() - T_start_make_uv_images_single_field
 
@@ -122,6 +123,7 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0)
             "point_spread_function": "POINT_SPREAD_FUNCTION",
         },
         image_data_variables_keep=input_params["image_data_variables_keep"],
+        num_threads=input_params["processing_function_threads"],
     )
     T_fft_norm = time.time() - start_fft_norm
 
@@ -134,6 +136,7 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0)
             "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
         },
         overwrite=True,
+        num_threads=input_params["processing_function_threads"],
     )
     T_psf_fit = time.time() - start
 
@@ -163,6 +166,7 @@ def make_uv_images_single_field(
     is_n_iter_0,
     ms_data_group_in_name="corrected",
     img_data_group_out_name="single_field",
+    num_threads=1,
 ):
     from astroviper.core.imaging.add_uv_sampling_grid import (
         add_uv_sampling_grid_single_field,
@@ -199,6 +203,7 @@ def make_uv_images_single_field(
                 overwrite=True,
                 chan_mode="cube",
                 fft_padding=image_params["fft_padding"],
+                num_threads=num_threads,
             )  # Will become the PSF.
             T_uv_sampling_grid = T_uv_sampling_grid + time.time() - T_start_uv
 
@@ -216,6 +221,7 @@ def make_uv_images_single_field(
             overwrite=True,
             chan_mode="cube",
             fft_padding=image_params["fft_padding"],
+            num_threads=num_threads,
         )
         T_vis_grid = T_vis_grid + time.time() - T_start_vis
 

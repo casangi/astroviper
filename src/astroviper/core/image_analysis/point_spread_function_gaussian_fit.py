@@ -1,3 +1,6 @@
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import xarray as xr
 import scipy.optimize as optimize
@@ -26,6 +29,7 @@ def point_spread_function_gaussian_fit(
     sampling: tuple = (55, 55),
     cutoff: float = 0.35,
     interpolation_method: str = "splinef2d",
+    num_threads: int = 1,
 ):
     """
     fit 2D gaussian to psf
@@ -44,6 +48,12 @@ def point_spread_function_gaussian_fit(
         The cutoff value for the fitting.
     interpolation_method : str
         The interpolation method to use when resampling the PSF for fitting.
+    num_threads : int, default 1
+        Number of worker threads used to fit individual (time, frequency,
+        polarization) PSF slices concurrently via a ``ThreadPoolExecutor``.
+        Values ``<= 0`` fall back to ``os.cpu_count()``.  Each slice writes to
+        its own output entry, so the threaded result is identical to the
+        serial one.
 
     Returns
     -------
@@ -131,6 +141,7 @@ def point_spread_function_gaussian_fit(
         cutoff,
         delta,
         interpolation_method,
+        num_threads=num_threads,
     )
 
     # Uncomment line below to change beam_param units to arcsec and deg
@@ -294,7 +305,14 @@ def beam_chi2(params, psf_ravel_masked, x_grid, y_grid, psf_mask):
 
 
 def psf_gaussian_fit_core(
-    image_to_fit, blc, trc, sampling, cutoff, delta, interpolation_method="linear"
+    image_to_fit,
+    blc,
+    trc,
+    sampling,
+    cutoff,
+    delta,
+    interpolation_method="linear",
+    num_threads: int = 1,
 ):
     """
     core function to fit gaussian to psf
@@ -312,6 +330,11 @@ def psf_gaussian_fit_core(
         The cutoff value for the fitting.
     delta : np.ndarray
         The pixel size in radians.
+    num_threads : int, default 1
+        Number of worker threads used to fit (time, chan, pol) slices
+        concurrently via a ``ThreadPoolExecutor``. Values ``<= 0`` fall
+        back to ``os.cpu_count()``. Each slice writes to its own entry in
+        the output, so results are independent of the thread count.
     """
     ellipse_params = np.zeros(image_to_fit.shape[0:3] + (3,), dtype=np.float64)
     if np.all(np.isnan(image_to_fit)):
@@ -353,48 +376,70 @@ def psf_gaussian_fit_core(
 
     bound = [(None, None), (None, None), (-np.pi / 2, np.pi / 2)]
 
-    for time in range(image_to_fit.shape[0]):
-        for chan in range(image_to_fit.shape[1]):
-            for pol in range(image_to_fit.shape[2]):
-                interp_image_to_fit = np.reshape(
-                    interpn(
-                        (d0, d1),
-                        image_to_fit[time, chan, pol, :, :],
-                        points,
-                        method=interpolation_method,
-                    ),
-                    [sampling[1], sampling[0]],
-                ).T
-                interp_image_to_fit[interp_image_to_fit < cutoff] = np.nan
+    bmaj_scale = np.abs(delta[0] * FWHM_factor / (sampling[0] / npix_window[0]))
+    bmin_scale = np.abs(delta[1] * FWHM_factor / (sampling[1] / npix_window[1]))
 
-                # Pre-compute mask and masked PSF values once per slice
-                psf_mask = ~np.isnan(interp_image_to_fit.ravel())
-                psf_ravel_masked = interp_image_to_fit.ravel()[psf_mask]
+    def _fit_slice(time, chan, pol):
+        interp_image_to_fit = np.reshape(
+            interpn(
+                (d0, d1),
+                image_to_fit[time, chan, pol, :, :],
+                points,
+                method=interpolation_method,
+            ),
+            [sampling[1], sampling[0]],
+        ).T
+        interp_image_to_fit[interp_image_to_fit < cutoff] = np.nan
 
-                res = optimize.minimize(
-                    beam_chi2,
-                    beam_initial_guess,
-                    args=(psf_ravel_masked, x_grid, y_grid, psf_mask),
-                    bounds=bound,
-                )
-                if not res.success:
-                    # could retry with lowering cutoff as done in CASA but
-                    # since the cutoff is used also outside the loop
-                    # implementing retry requires some refactoring...
-                    res_x = np.array([np.nan, np.nan, np.nan])
-                else:
-                    res_x = res.x
+        # Pre-compute mask and masked PSF values once per slice
+        psf_mask = ~np.isnan(interp_image_to_fit.ravel())
+        psf_ravel_masked = interp_image_to_fit.ravel()[psf_mask]
 
-                phi = res_x[2]
-                if np.argmax(res_x[0:2]) == 1:
-                    phi = -(np.pi / 2 - phi)
-                ellipse_params[time, chan, pol, 0] = np.max(
-                    np.abs(res_x[0:2])
-                ) * np.abs(delta[0] * FWHM_factor / (sampling[0] / npix_window[0]))
-                ellipse_params[time, chan, pol, 1] = np.min(
-                    np.abs(res_x[0:2])
-                ) * np.abs(delta[1] * FWHM_factor / (sampling[1] / npix_window[1]))
-                if phi < 0:
-                    phi = (phi + np.pi) % np.pi
-                ellipse_params[time, chan, pol, 2] = phi
+        res = optimize.minimize(
+            beam_chi2,
+            beam_initial_guess,
+            args=(psf_ravel_masked, x_grid, y_grid, psf_mask),
+            bounds=bound,
+        )
+        if not res.success:
+            # Could retry with a lowered cutoff as CASA does, but since the
+            # cutoff is also used outside the loop, implementing retry would
+            # require some refactoring.
+            res_x = np.array([np.nan, np.nan, np.nan])
+        else:
+            res_x = res.x
+
+        phi = res_x[2]
+        if np.argmax(res_x[0:2]) == 1:
+            phi = -(np.pi / 2 - phi)
+        if phi < 0:
+            phi = (phi + np.pi) % np.pi
+
+        ellipse_params[time, chan, pol, 0] = np.max(np.abs(res_x[0:2])) * bmaj_scale
+        ellipse_params[time, chan, pol, 1] = np.min(np.abs(res_x[0:2])) * bmin_scale
+        ellipse_params[time, chan, pol, 2] = phi
+
+    n_time, n_chan, n_pol = image_to_fit.shape[0:3]
+    tasks = [
+        (time, chan, pol)
+        for time in range(n_time)
+        for chan in range(n_chan)
+        for pol in range(n_pol)
+    ]
+
+    if num_threads <= 0:
+        resolved_threads = os.cpu_count() or 1
+    else:
+        resolved_threads = num_threads
+    resolved_threads = max(1, min(resolved_threads, len(tasks)))
+
+    if resolved_threads == 1 or len(tasks) <= 1:
+        for t, c, p in tasks:
+            _fit_slice(t, c, p)
+    else:
+        with ThreadPoolExecutor(max_workers=resolved_threads) as pool:
+            # Consume the iterator to surface any exceptions raised by a worker.
+            for _ in pool.map(lambda tcp: _fit_slice(*tcp), tasks):
+                pass
+
     return ellipse_params

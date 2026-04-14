@@ -199,6 +199,7 @@ def add_uv_sampling_grid_single_field(
     overwrite: bool = True,
     chan_mode: str = "cube",
     fft_padding: float = 1.2,
+    num_threads: int = 1,
 ):
     """Accumulate the UV-sampling grid for a single-field observation into an image dataset.
 
@@ -344,6 +345,7 @@ def add_uv_sampling_grid_single_field(
             delta_lm,
             support=7,
             oversampling=100,
+            num_threads=num_threads,
         )
     else:
         from astroviper.core.imaging.gridders.prolate_spheroidal_grid import (

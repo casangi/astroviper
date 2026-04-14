@@ -66,7 +66,7 @@ def ifft_norm_img_xds(
     },
     overwrite=True,
     image_data_variables_keep=[],
-    threads=1,
+    num_threads=1,
     fft_backend="scipy",
 ):
     """Normalize and inverse-Fourier-transform gridded UV data to sky images.
@@ -128,7 +128,7 @@ def ifft_norm_img_xds(
         grids (lowest peak memory); pass all roles to keep all grids
         (useful for diagnostics).
 
-    threads : int, optional
+    num_threads : int, optional
         Number of threads passed to the FFT backend for each 2-D transform.
         Default is ``1``, which is appropriate for a single-threaded dask
         worker.  Set to a higher value only when calling outside of a dask
@@ -208,7 +208,7 @@ def ifft_norm_img_xds(
             for f in range(n_freq):
                 for p in range(n_pol):
                     plane = ifft_uv_to_lm(
-                        raw_grid[t, f, p], threads=threads, fft_backend=fft_backend
+                        raw_grid[t, f, p], num_threads=num_threads, fft_backend=fft_backend
                     )  # (u_pad, v_pad)
                     # Divide in-place to avoid allocating temporaries.
                     plane /= kernel_image_1D_l[:, None]
@@ -237,7 +237,7 @@ def ifft_norm_img_xds(
     return img_xds
 
 
-def ifft_uv_to_lm(grid_2d, fft_plane_dims=(-2, -1), threads=1, fft_backend="scipy"):
+def ifft_uv_to_lm(grid_2d, fft_plane_dims=(-2, -1), num_threads=1, fft_backend="scipy"):
     """Apply a 2-D inverse FFT to transform a UV grid to a sky-plane image.
 
     Applies the standard radio-astronomy convention:
@@ -285,7 +285,7 @@ def ifft_uv_to_lm(grid_2d, fft_plane_dims=(-2, -1), threads=1, fft_backend="scip
         fft.ifft2(
             fft.ifftshift(grid_2d, axes=fft_plane_dims),
             axes=fft_plane_dims,
-            workers=threads,
+            workers=num_threads,
         ),
         axes=fft_plane_dims,
     ).real * (n_u * n_v)
@@ -293,7 +293,7 @@ def ifft_uv_to_lm(grid_2d, fft_plane_dims=(-2, -1), threads=1, fft_backend="scip
     return sky
 
 
-def fft_lm_to_uv(image, fft_plane_dims=(-2, -1), threads=1, fft_backend="scipy"):
+def fft_lm_to_uv(image, fft_plane_dims=(-2, -1), num_threads=1, fft_backend="scipy"):
     """Apply a 2-D FFT to transform a sky-plane image to a UV grid.
 
     Applies the standard radio-astronomy convention:
@@ -334,7 +334,7 @@ def fft_lm_to_uv(image, fft_plane_dims=(-2, -1), threads=1, fft_backend="scipy")
         fft.fft2(
             fft.ifftshift(image, axes=fft_plane_dims),
             axes=fft_plane_dims,
-            workers=threads,
+            workers=num_threads,
         ),
         axes=fft_plane_dims,
     ).real

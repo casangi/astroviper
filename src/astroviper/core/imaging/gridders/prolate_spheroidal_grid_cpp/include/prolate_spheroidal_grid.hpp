@@ -35,6 +35,8 @@ namespace prolate_spheroidal {
  * @param delta_m          Image cell size in m (radians)
  * @param support          Full convolution support width in grid pixels
  * @param oversampling     Oversampling factor of cgk_1D
+ * @param num_threads      Number of worker threads. Values <= 0 fall back to
+ *                         std::thread::hardware_concurrency(); 1 runs serial.
  */
 void prolate_spheroidal_grid(
     std::complex<double>* grid,
@@ -50,7 +52,8 @@ void prolate_spheroidal_grid(
     int m_time_g, int m_chan_g, int m_pol_g, int m_u, int m_v,
     int n_time, int n_baseline, int n_vis_chan, int n_pol,
     double delta_l, double delta_m,
-    int support, int oversampling
+    int support, int oversampling,
+    int num_threads
 );
 
 /**
@@ -80,6 +83,8 @@ void prolate_spheroidal_grid(
  * @param delta_m          Image cell size in m (radians)
  * @param support          Full convolution support width in grid pixels
  * @param oversampling     Oversampling factor of cgk_1D
+ * @param num_threads      Number of worker threads. Values <= 0 fall back to
+ *                         std::thread::hardware_concurrency(); 1 runs serial.
  */
 void prolate_spheroidal_grid_uv_sampling(
     std::complex<double>* grid,
@@ -94,7 +99,8 @@ void prolate_spheroidal_grid_uv_sampling(
     int m_time_g, int m_chan_g, int m_pol_g, int m_u, int m_v,
     int n_time, int n_baseline, int n_vis_chan, int n_pol,
     double delta_l, double delta_m,
-    int support, int oversampling
+    int support, int oversampling,
+    int num_threads
 );
 
 } // namespace prolate_spheroidal

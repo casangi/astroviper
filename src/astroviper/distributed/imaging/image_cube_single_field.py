@@ -1,6 +1,6 @@
 from numcodecs import Blosc
 import xarray as xr
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, Union
 from xradio.image import make_empty_sky_image
 import numpy as np
 import zarr
@@ -56,7 +56,6 @@ def image_cube_single_field(
     iteration_control_params: Dict[str, Any],
     gridder="prolate_spheroidal",
     deconvolver="hogbom",
-    fft_padding="1.0",
     scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],
     field_name: str = None,
     image_data_variables_keep: list[str] = [
@@ -70,6 +69,7 @@ def image_cube_single_field(
     processing_set_data_group_name: str = "corrected",
     double_precision: bool = True,
     thread_info: dict = None,
+    processing_function_threads: int = 1,
     n_chunks: Optional[int] = None,
     overwrite: bool = False,
     memory_mode: str = "in_memory",
@@ -78,7 +78,7 @@ def image_cube_single_field(
     write_imaging_weights_to_ps: bool = False,
     clear_cache: bool = True,
     vizualize_graph: bool = False,
-    disk_chunk_sizes: Optional[Dict[str, int]] = None,
+    disk_chunk_sizes: Optional[Union[Dict[str, int], str]] = None,
 ):  # -> Tuple[xr.Dataset, ReturnDict]:
     """
     Create a spectral cube.
@@ -125,6 +125,9 @@ def image_cube_single_field(
         Use single or double precision math when gridding and deconvolving. Default = true
     thread_info :
     n_chunks : int, optional
+            Number of frequency chunks to use for parallel processing. If None (default), the chunk count is auto-determined based on the image size, memory constraints, and available parallelism.
+    processing_function_threads : int, optional
+            Number of threads to use for processing functions. Defaults to single-thread.
     overwrite : bool
         Whether to overwrite existing image. Default is False.
     memory_mode : str
@@ -144,14 +147,14 @@ def image_cube_single_field(
         Whether to clear the cache after imaging. Default is True.
     vizualize_graph : bool
         Whether to vizualize the graph. Default is False.
-    disk_chunk_sizes : dict, optional
+    disk_chunk_sizes : Union[Dict[str, int], str], optional
         Native on-disk chunk sizes for parallel dimensions, e.g.
         ``{"frequency": 200}``.  The graph gains a data loading layer: one load
         node is created per unique disk chunk, each reading the full native
         chunk once.  The mapping nodes then receive their sub-selected slice
         from the pre-loaded chunk via ``input_params["input_data"]``, avoiding
         redundant disk reads when many small mapping tasks fall within the same
-        on-disk chunk.  If ``None`` (default), the chunk sizes are
+        on-disk chunk.  If ``Auto`` (default), the chunk sizes are
         auto-detected from the processing set using
         :func:`graphviper.graph_tools.coordinate_utils.get_disk_chunk_sizes`.
     Returns
@@ -205,8 +208,10 @@ def image_cube_single_field(
 
     # Determine number of chunks
     start = time.time()
-    n_chunks = calculate_number_of_chunks_for_cube_imaging(
-        img_xds, double_precision, n_chunks, thread_info
+    n_chunks = int(
+        calculate_number_of_chunks_for_cube_imaging(
+            img_xds, double_precision, n_chunks, thread_info
+        )
     )
 
     # Make Parallel Coords
@@ -261,6 +266,7 @@ def image_cube_single_field(
     input_parms["write_visibility_model_to_ps"] = write_visibility_model_to_ps
     input_parms["write_imaging_weights_to_ps"] = write_imaging_weights_to_ps
     input_parms["clear_cache"] = clear_cache
+    input_parms["processing_function_threads"] = processing_function_threads
 
     from graphviper.graph_tools.coordinate_utils import (
         interpolate_data_coords_onto_parallel_coords,
@@ -282,9 +288,12 @@ def image_cube_single_field(
     )
 
     # Auto-detect native on-disk chunk sizes if not supplied by the caller.
-    if disk_chunk_sizes is None:
+    if disk_chunk_sizes == "Auto":
         disk_chunk_sizes = get_disk_chunk_sizes(ps_xdt, parallel_coords)
         logger.info("Auto-detected disk chunk sizes: " + str(disk_chunk_sizes))
+    elif isinstance(disk_chunk_sizes, str):
+        # If disk_chunk_sizes is a string but not "Auto", treat as None
+        disk_chunk_sizes = None
 
     # frequency_coords is not used by node tasks (they use task_coords["frequency"]["data"])
     # so remove it to avoid embedding the full frequency axis in every task in the graph.

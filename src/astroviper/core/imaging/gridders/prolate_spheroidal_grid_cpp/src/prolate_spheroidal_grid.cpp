@@ -1,10 +1,38 @@
 #include "../include/prolate_spheroidal_grid.hpp"
 
+#include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <complex>
+#include <cstdint>
+#include <thread>
 #include <vector>
 
 namespace prolate_spheroidal {
+
+namespace {
+
+// Lock-free atomic add on a non-atomic double via std::atomic_ref (C++20).
+// numpy allocates doubles with 8-byte alignment, which satisfies
+// std::atomic_ref<double>::required_alignment on all supported platforms.
+inline void atomic_add_double(double* target, double value) {
+    std::atomic_ref<double> ref(*target);
+    double current = ref.load(std::memory_order_relaxed);
+    while (!ref.compare_exchange_weak(
+        current, current + value, std::memory_order_relaxed)) {}
+}
+
+// std::complex<double> is guaranteed to be layout-compatible with
+// double[2], so we atomically add the real and imaginary parts
+// independently.
+inline void atomic_add_complex(std::complex<double>* target,
+                               std::complex<double> value) {
+    double* parts = reinterpret_cast<double*>(target);
+    atomic_add_double(parts + 0, value.real());
+    atomic_add_double(parts + 1, value.imag());
+}
+
+} // namespace
 
 void prolate_spheroidal_grid(
     std::complex<double>* grid,
@@ -20,7 +48,8 @@ void prolate_spheroidal_grid(
     int m_time_g, int m_chan_g, int m_pol_g, int m_u, int m_v,
     int n_time, int n_baseline, int n_vis_chan, int n_pol,
     double delta_l, double delta_m,
-    int support, int oversampling
+    int support, int oversampling,
+    int num_threads
 ) {
     constexpr double c = 299792458.0;
 
@@ -63,88 +92,129 @@ void prolate_spheroidal_grid(
     const int uvw_bl_stride   = 3;
     const int uvw_time_stride = n_baseline * uvw_bl_stride;
 
-    for (int i_time = 0; i_time < n_time; ++i_time) {
+    // Per-(time, baseline) kernel. Multiple workers may collide on the same
+    // grid cell (baselines can sample overlapping UV coordinates), so every
+    // write into grid / normalization goes through an atomic add.
+    auto process_time_baseline = [&](int i_time, int i_baseline) {
         const int a_time    = time_map[i_time];
         const int vis_t_off = i_time * vis_time_stride;
         const int uvw_t_off = i_time * uvw_time_stride;
 
-        for (int i_baseline = 0; i_baseline < n_baseline; ++i_baseline) {
-            const int vis_b_off = vis_t_off + i_baseline * vis_bl_stride;
-            const int uvw_b_off = uvw_t_off + i_baseline * uvw_bl_stride;
+        const int vis_b_off = vis_t_off + i_baseline * vis_bl_stride;
+        const int uvw_b_off = uvw_t_off + i_baseline * uvw_bl_stride;
 
-            for (int i_chan = 0; i_chan < n_vis_chan; ++i_chan) {
-                const int a_chan = frequency_map[i_chan];
+        for (int i_chan = 0; i_chan < n_vis_chan; ++i_chan) {
+            const int a_chan = frequency_map[i_chan];
 
-                const double u = uvw[uvw_b_off + 0] * uv_scale_u[i_chan];
-                const double v = uvw[uvw_b_off + 1] * uv_scale_v[i_chan];
+            const double u = uvw[uvw_b_off + 0] * uv_scale_u[i_chan];
+            const double v = uvw[uvw_b_off + 1] * uv_scale_v[i_chan];
 
-                if (std::isnan(u) || std::isnan(v)) continue;
+            if (std::isnan(u) || std::isnan(v)) continue;
 
-                const double u_pos = u + uv_center_u;
-                const double v_pos = v + uv_center_v;
+            const double u_pos = u + uv_center_u;
+            const double v_pos = v + uv_center_v;
 
-                // Round half-away-from-zero: int(x + 0.5) matches Fortran/C++ convention
-                const int u_center_indx = static_cast<int>(u_pos + 0.5);
-                const int v_center_indx = static_cast<int>(v_pos + 0.5);
+            const int u_center_indx = static_cast<int>(u_pos + 0.5);
+            const int v_center_indx = static_cast<int>(v_pos + 0.5);
 
-                if (u_center_indx + support_center >= m_u) continue;
-                if (v_center_indx + support_center >= m_v) continue;
-                if (u_center_indx - support_center <  0)   continue;
-                if (v_center_indx - support_center <  0)   continue;
+            if (u_center_indx + support_center >= m_u) continue;
+            if (v_center_indx + support_center >= m_v) continue;
+            if (u_center_indx - support_center <  0)   continue;
+            if (v_center_indx - support_center <  0)   continue;
 
-                // Sub-pixel offset and its oversampled index
-                const double u_offset = u_center_indx - u_pos;
-                const int    u_center_offset_indx =
-                    static_cast<int>(std::floor(u_offset * oversampling + 0.5));
+            const double u_offset = u_center_indx - u_pos;
+            const int    u_center_offset_indx =
+                static_cast<int>(std::floor(u_offset * oversampling + 0.5));
 
-                const double v_offset = v_center_indx - v_pos;
-                const int    v_center_offset_indx =
-                    static_cast<int>(std::floor(v_offset * oversampling + 0.5));
+            const double v_offset = v_center_indx - v_pos;
+            const int    v_center_offset_indx =
+                static_cast<int>(std::floor(v_offset * oversampling + 0.5));
 
-                const int vis_c_off = vis_b_off + i_chan * vis_chan_stride;
+            const int vis_c_off = vis_b_off + i_chan * vis_chan_stride;
 
-                for (int i_pol = 0; i_pol < n_pol; ++i_pol) {
-                    const int vis_idx = vis_c_off + i_pol;
+            for (int i_pol = 0; i_pol < n_pol; ++i_pol) {
+                const int vis_idx = vis_c_off + i_pol;
 
-                    const double sel_weight = weight[vis_idx];
-                    const std::complex<double> wd = vis_data[vis_idx] * sel_weight;
+                const double sel_weight = weight[vis_idx];
+                const std::complex<double> wd = vis_data[vis_idx] * sel_weight;
 
-                    if (std::isnan(wd.real()) || std::isnan(wd.imag())) continue;
-                    if (wd == std::complex<double>(0.0, 0.0)) continue;
+                if (std::isnan(wd.real()) || std::isnan(wd.imag())) continue;
+                if (wd == std::complex<double>(0.0, 0.0)) continue;
 
-                    const int a_pol = pol_map[i_pol];
+                const int a_pol = pol_map[i_pol];
 
-                    const int grid_base = a_time * grid_time_stride
-                                        + a_chan  * grid_chan_stride
-                                        + a_pol   * grid_pol_stride;
-                    const int norm_idx  = a_time * norm_time_stride
-                                        + a_chan  * norm_chan_stride
-                                        + a_pol;
+                const int grid_base = a_time * grid_time_stride
+                                    + a_chan  * grid_chan_stride
+                                    + a_pol   * grid_pol_stride;
+                const int norm_idx  = a_time * norm_time_stride
+                                    + a_chan  * norm_chan_stride
+                                    + a_pol;
 
-                    double norm = 0.0;
+                double norm = 0.0;
 
-                    for (int i_v = start_support; i_v < end_support; ++i_v) {
-                        const int v_indx = v_center_indx + i_v;
-                        const int v_offset_indx =
-                            std::abs(oversampling * i_v + v_center_offset_indx);
-                        const double conv_v = cgk_1D[v_offset_indx];
+                for (int i_v = start_support; i_v < end_support; ++i_v) {
+                    const int v_indx = v_center_indx + i_v;
+                    const int v_offset_indx =
+                        std::abs(oversampling * i_v + v_center_offset_indx);
+                    const double conv_v = cgk_1D[v_offset_indx];
 
-                        for (int i_u = start_support; i_u < end_support; ++i_u) {
-                            const int u_indx = u_center_indx + i_u;
-                            const int u_offset_indx =
-                                std::abs(oversampling * i_u + u_center_offset_indx);
-                            const double conv = cgk_1D[u_offset_indx] * conv_v;
+                    for (int i_u = start_support; i_u < end_support; ++i_u) {
+                        const int u_indx = u_center_indx + i_u;
+                        const int u_offset_indx =
+                            std::abs(oversampling * i_u + u_center_offset_indx);
+                        const double conv = cgk_1D[u_offset_indx] * conv_v;
 
-                            grid[grid_base + u_indx * m_v + v_indx] += conv * wd;
-                            norm += conv;
-                        }
+                        atomic_add_complex(
+                            grid + grid_base + u_indx * m_v + v_indx,
+                            conv * wd);
+                        norm += conv;
                     }
-
-                    normalization[norm_idx] += sel_weight * norm;
                 }
+
+                atomic_add_double(normalization + norm_idx, sel_weight * norm);
             }
         }
+    };
+
+    const int64_t total_work =
+        static_cast<int64_t>(n_time) * static_cast<int64_t>(n_baseline);
+    if (total_work <= 0) return;
+
+    int resolved_threads = num_threads;
+    if (resolved_threads <= 0) {
+        resolved_threads = static_cast<int>(std::thread::hardware_concurrency());
+        if (resolved_threads <= 0) resolved_threads = 1;
     }
+    if (static_cast<int64_t>(resolved_threads) > total_work) {
+        resolved_threads = static_cast<int>(total_work);
+    }
+
+    auto worker = [&](int64_t begin, int64_t end) {
+        for (int64_t flat = begin; flat < end; ++flat) {
+            const int i_time     = static_cast<int>(flat / n_baseline);
+            const int i_baseline = static_cast<int>(flat % n_baseline);
+            process_time_baseline(i_time, i_baseline);
+        }
+    };
+
+    if (resolved_threads <= 1) {
+        worker(0, total_work);
+        return;
+    }
+
+    const int64_t chunk =
+        (total_work + resolved_threads - 1) / resolved_threads;
+
+    std::vector<std::thread> threads;
+    threads.reserve(resolved_threads - 1);
+    for (int t = 0; t < resolved_threads - 1; ++t) {
+        const int64_t begin = static_cast<int64_t>(t) * chunk;
+        const int64_t end   = std::min(total_work, begin + chunk);
+        threads.emplace_back(worker, begin, end);
+    }
+    // Run the last chunk on the calling thread to save one join.
+    worker(static_cast<int64_t>(resolved_threads - 1) * chunk, total_work);
+    for (auto& th : threads) th.join();
 }
 
 
@@ -161,7 +231,8 @@ void prolate_spheroidal_grid_uv_sampling(
     int m_time_g, int m_chan_g, int m_pol_g, int m_u, int m_v,
     int n_time, int n_baseline, int n_vis_chan, int n_pol,
     double delta_l, double delta_m,
-    int support, int oversampling
+    int support, int oversampling,
+    int num_threads
 ) {
     constexpr double c = 299792458.0;
 
@@ -191,83 +262,126 @@ void prolate_spheroidal_grid_uv_sampling(
     const int uvw_bl_stride   = 3;
     const int uvw_time_stride = n_baseline * uvw_bl_stride;
 
-    for (int i_time = 0; i_time < n_time; ++i_time) {
-        const int a_time   = time_map[i_time];
-        const int wt_t_off = i_time * wt_time_stride;
+    // Per-(time, baseline) kernel; same threading/atomic strategy as
+    // prolate_spheroidal_grid.
+    auto process_time_baseline = [&](int i_time, int i_baseline) {
+        const int a_time    = time_map[i_time];
+        const int wt_t_off  = i_time * wt_time_stride;
         const int uvw_t_off = i_time * uvw_time_stride;
 
-        for (int i_baseline = 0; i_baseline < n_baseline; ++i_baseline) {
-            const int wt_b_off  = wt_t_off  + i_baseline * wt_bl_stride;
-            const int uvw_b_off = uvw_t_off + i_baseline * uvw_bl_stride;
+        const int wt_b_off  = wt_t_off  + i_baseline * wt_bl_stride;
+        const int uvw_b_off = uvw_t_off + i_baseline * uvw_bl_stride;
 
-            for (int i_chan = 0; i_chan < n_vis_chan; ++i_chan) {
-                const int a_chan = frequency_map[i_chan];
+        for (int i_chan = 0; i_chan < n_vis_chan; ++i_chan) {
+            const int a_chan = frequency_map[i_chan];
 
-                const double u = uvw[uvw_b_off + 0] * uv_scale_u[i_chan];
-                const double v = uvw[uvw_b_off + 1] * uv_scale_v[i_chan];
+            const double u = uvw[uvw_b_off + 0] * uv_scale_u[i_chan];
+            const double v = uvw[uvw_b_off + 1] * uv_scale_v[i_chan];
 
-                if (std::isnan(u) || std::isnan(v)) continue;
+            if (std::isnan(u) || std::isnan(v)) continue;
 
-                const double u_pos = u + uv_center_u;
-                const double v_pos = v + uv_center_v;
+            const double u_pos = u + uv_center_u;
+            const double v_pos = v + uv_center_v;
 
-                const int u_center_indx = static_cast<int>(u_pos + 0.5);
-                const int v_center_indx = static_cast<int>(v_pos + 0.5);
+            const int u_center_indx = static_cast<int>(u_pos + 0.5);
+            const int v_center_indx = static_cast<int>(v_pos + 0.5);
 
-                if (u_center_indx + support_center >= m_u) continue;
-                if (v_center_indx + support_center >= m_v) continue;
-                if (u_center_indx - support_center <  0)   continue;
-                if (v_center_indx - support_center <  0)   continue;
+            if (u_center_indx + support_center >= m_u) continue;
+            if (v_center_indx + support_center >= m_v) continue;
+            if (u_center_indx - support_center <  0)   continue;
+            if (v_center_indx - support_center <  0)   continue;
 
-                const double u_offset = u_center_indx - u_pos;
-                const int    u_center_offset_indx =
-                    static_cast<int>(std::floor(u_offset * oversampling + 0.5));
+            const double u_offset = u_center_indx - u_pos;
+            const int    u_center_offset_indx =
+                static_cast<int>(std::floor(u_offset * oversampling + 0.5));
 
-                const double v_offset = v_center_indx - v_pos;
-                const int    v_center_offset_indx =
-                    static_cast<int>(std::floor(v_offset * oversampling + 0.5));
+            const double v_offset = v_center_indx - v_pos;
+            const int    v_center_offset_indx =
+                static_cast<int>(std::floor(v_offset * oversampling + 0.5));
 
-                const int wt_c_off = wt_b_off + i_chan * wt_chan_stride;
+            const int wt_c_off = wt_b_off + i_chan * wt_chan_stride;
 
-                for (int i_pol = 0; i_pol < n_pol; ++i_pol) {
-                    const double weight_data = weight[wt_c_off + i_pol];
+            for (int i_pol = 0; i_pol < n_pol; ++i_pol) {
+                const double weight_data = weight[wt_c_off + i_pol];
 
-                    if (std::isnan(weight_data) || weight_data == 0.0) continue;
+                if (std::isnan(weight_data) || weight_data == 0.0) continue;
 
-                    const int a_pol = pol_map[i_pol];
+                const int a_pol = pol_map[i_pol];
 
-                    const int grid_base = a_time * grid_time_stride
-                                        + a_chan  * grid_chan_stride
-                                        + a_pol   * grid_pol_stride;
-                    const int norm_idx  = a_time * norm_time_stride
-                                        + a_chan  * norm_chan_stride
-                                        + a_pol;
+                const int grid_base = a_time * grid_time_stride
+                                    + a_chan  * grid_chan_stride
+                                    + a_pol   * grid_pol_stride;
+                const int norm_idx  = a_time * norm_time_stride
+                                    + a_chan  * norm_chan_stride
+                                    + a_pol;
 
-                    double norm = 0.0;
+                double norm = 0.0;
 
-                    for (int i_v = start_support; i_v < end_support; ++i_v) {
-                        const int v_indx = v_center_indx + i_v;
-                        const int v_offset_indx =
-                            std::abs(oversampling * i_v + v_center_offset_indx);
-                        const double conv_v = cgk_1D[v_offset_indx];
+                for (int i_v = start_support; i_v < end_support; ++i_v) {
+                    const int v_indx = v_center_indx + i_v;
+                    const int v_offset_indx =
+                        std::abs(oversampling * i_v + v_center_offset_indx);
+                    const double conv_v = cgk_1D[v_offset_indx];
 
-                        for (int i_u = start_support; i_u < end_support; ++i_u) {
-                            const int u_indx = u_center_indx + i_u;
-                            const int u_offset_indx =
-                                std::abs(oversampling * i_u + u_center_offset_indx);
-                            const double conv = cgk_1D[u_offset_indx] * conv_v;
+                    for (int i_u = start_support; i_u < end_support; ++i_u) {
+                        const int u_indx = u_center_indx + i_u;
+                        const int u_offset_indx =
+                            std::abs(oversampling * i_u + u_center_offset_indx);
+                        const double conv = cgk_1D[u_offset_indx] * conv_v;
 
-                            grid[grid_base + u_indx * m_v + v_indx] +=
-                                std::complex<double>(conv * weight_data, 0.0);
-                            norm += conv;
-                        }
+                        // The grid is real-valued here (we add a real weight),
+                        // so only the real part of the complex cell needs an
+                        // atomic add. The imag part is never touched.
+                        double* parts = reinterpret_cast<double*>(
+                            grid + grid_base + u_indx * m_v + v_indx);
+                        atomic_add_double(parts + 0, conv * weight_data);
+                        norm += conv;
                     }
-
-                    normalization[norm_idx] += weight_data * norm;
                 }
+
+                atomic_add_double(normalization + norm_idx, weight_data * norm);
             }
         }
+    };
+
+    const int64_t total_work =
+        static_cast<int64_t>(n_time) * static_cast<int64_t>(n_baseline);
+    if (total_work <= 0) return;
+
+    int resolved_threads = num_threads;
+    if (resolved_threads <= 0) {
+        resolved_threads = static_cast<int>(std::thread::hardware_concurrency());
+        if (resolved_threads <= 0) resolved_threads = 1;
     }
+    if (static_cast<int64_t>(resolved_threads) > total_work) {
+        resolved_threads = static_cast<int>(total_work);
+    }
+
+    auto worker = [&](int64_t begin, int64_t end) {
+        for (int64_t flat = begin; flat < end; ++flat) {
+            const int i_time     = static_cast<int>(flat / n_baseline);
+            const int i_baseline = static_cast<int>(flat % n_baseline);
+            process_time_baseline(i_time, i_baseline);
+        }
+    };
+
+    if (resolved_threads <= 1) {
+        worker(0, total_work);
+        return;
+    }
+
+    const int64_t chunk =
+        (total_work + resolved_threads - 1) / resolved_threads;
+
+    std::vector<std::thread> threads;
+    threads.reserve(resolved_threads - 1);
+    for (int t = 0; t < resolved_threads - 1; ++t) {
+        const int64_t begin = static_cast<int64_t>(t) * chunk;
+        const int64_t end   = std::min(total_work, begin + chunk);
+        threads.emplace_back(worker, begin, end);
+    }
+    worker(static_cast<int64_t>(resolved_threads - 1) * chunk, total_work);
+    for (auto& th : threads) th.join();
 }
 
 } // namespace prolate_spheroidal

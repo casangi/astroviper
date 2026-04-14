@@ -202,6 +202,7 @@ def add_visibility_grid_single_field(
     overwrite: bool = True,
     chan_mode: str = "cube",
     fft_padding: float = 1.2,
+    num_threads: int = 1,
 ):
     """Grid correlated visibilities for a single-field observation into an image dataset.
 
@@ -359,6 +360,7 @@ def add_visibility_grid_single_field(
             delta_lm,
             support=7,
             oversampling=100,
+            num_threads=num_threads,
         )
     else:
         prolate_spheroidal_grid_jit(

@@ -48,7 +48,8 @@ void prolate_spheroidal_grid_bind(
     py::array_t<int64_t, py::array::c_style | py::array::forcecast>  n_uv,          // (2,) — tiny, forcecast OK
     py::array_t<double,  py::array::c_style | py::array::forcecast>  delta_lm,      // (2,) — tiny, forcecast OK
     int support,
-    int oversampling
+    int oversampling,
+    int num_threads
 ) {
     auto grid_info  = grid.request();
     auto norm_info  = normalization.request();
@@ -84,22 +85,42 @@ void prolate_spheroidal_grid_bind(
 
     auto dlm = delta_lm.unchecked<1>();
 
-    prolate_spheroidal::prolate_spheroidal_grid(
-        grid.mutable_data(),                              // Python owns this buffer; C++ writes into it
-        normalization.mutable_data(),
-        static_cast<const cdbl*>(vis_info.ptr),
-        static_cast<const double*>(uvw_info.ptr),
-        frequency_coord.data(),
-        frequency_map.data(),
-        time_map.data(),
-        pol_map.data(),
-        static_cast<const double*>(wt_info.ptr),
-        cgk_1D.data(),
-        m_time_g, m_chan_g, m_pol_g, m_u, m_v,
-        n_time, n_baseline, n_vis_chan, n_pol,
-        dlm(0), dlm(1),
-        support, oversampling
-    );
+    // Capture raw pointers before releasing the GIL; py::array_t accessors
+    // require it, but the underlying numpy buffers remain valid for the
+    // duration of the call because Python owns the arrays.
+    cdbl*         grid_ptr          = grid.mutable_data();
+    double*       norm_ptr          = normalization.mutable_data();
+    const cdbl*   vis_ptr           = static_cast<const cdbl*>(vis_info.ptr);
+    const double* uvw_ptr           = static_cast<const double*>(uvw_info.ptr);
+    const double* freq_ptr          = frequency_coord.data();
+    const int64_t* freq_map_ptr     = frequency_map.data();
+    const int64_t* time_map_ptr     = time_map.data();
+    const int64_t* pol_map_ptr      = pol_map.data();
+    const double* wt_ptr            = static_cast<const double*>(wt_info.ptr);
+    const double* cgk_ptr           = cgk_1D.data();
+    const double  dl                = dlm(0);
+    const double  dm                = dlm(1);
+
+    {
+        py::gil_scoped_release release;
+        prolate_spheroidal::prolate_spheroidal_grid(
+            grid_ptr,
+            norm_ptr,
+            vis_ptr,
+            uvw_ptr,
+            freq_ptr,
+            freq_map_ptr,
+            time_map_ptr,
+            pol_map_ptr,
+            wt_ptr,
+            cgk_ptr,
+            m_time_g, m_chan_g, m_pol_g, m_u, m_v,
+            n_time, n_baseline, n_vis_chan, n_pol,
+            dl, dm,
+            support, oversampling,
+            num_threads
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -118,7 +139,8 @@ void prolate_spheroidal_grid_uv_sampling_bind(
     py::array_t<int64_t, py::array::c_style | py::array::forcecast>  n_uv,
     py::array_t<double,  py::array::c_style | py::array::forcecast>  delta_lm,
     int support,
-    int oversampling
+    int oversampling,
+    int num_threads
 ) {
     auto grid_info = grid.request();
     auto norm_info = normalization.request();
@@ -150,21 +172,37 @@ void prolate_spheroidal_grid_uv_sampling_bind(
 
     auto dlm = delta_lm.unchecked<1>();
 
-    prolate_spheroidal::prolate_spheroidal_grid_uv_sampling(
-        grid.mutable_data(),
-        normalization.mutable_data(),
-        static_cast<const double*>(uvw_info.ptr),
-        frequency_coord.data(),
-        frequency_map.data(),
-        time_map.data(),
-        pol_map.data(),
-        static_cast<const double*>(wt_info.ptr),
-        cgk_1D.data(),
-        m_time_g, m_chan_g, m_pol_g, m_u, m_v,
-        n_time, n_baseline, n_vis_chan, n_pol,
-        dlm(0), dlm(1),
-        support, oversampling
-    );
+    cdbl*         grid_ptr          = grid.mutable_data();
+    double*       norm_ptr          = normalization.mutable_data();
+    const double* uvw_ptr           = static_cast<const double*>(uvw_info.ptr);
+    const double* freq_ptr          = frequency_coord.data();
+    const int64_t* freq_map_ptr     = frequency_map.data();
+    const int64_t* time_map_ptr     = time_map.data();
+    const int64_t* pol_map_ptr      = pol_map.data();
+    const double* wt_ptr            = static_cast<const double*>(wt_info.ptr);
+    const double* cgk_ptr           = cgk_1D.data();
+    const double  dl                = dlm(0);
+    const double  dm                = dlm(1);
+
+    {
+        py::gil_scoped_release release;
+        prolate_spheroidal::prolate_spheroidal_grid_uv_sampling(
+            grid_ptr,
+            norm_ptr,
+            uvw_ptr,
+            freq_ptr,
+            freq_map_ptr,
+            time_map_ptr,
+            pol_map_ptr,
+            wt_ptr,
+            cgk_ptr,
+            m_time_g, m_chan_g, m_pol_g, m_u, m_v,
+            n_time, n_baseline, n_vis_chan, n_pol,
+            dl, dm,
+            support, oversampling,
+            num_threads
+        );
+    }
 }
 
 PYBIND11_MODULE(_prolate_spheroidal_grid_ext, m) {
@@ -172,7 +210,9 @@ PYBIND11_MODULE(_prolate_spheroidal_grid_ext, m) {
 
     m.def("prolate_spheroidal_grid",
           &prolate_spheroidal_grid_bind,
-          "Grid weighted visibilities onto a UV plane using a prolate spheroidal kernel (in-place).",
+          "Grid weighted visibilities onto a UV plane using a prolate spheroidal "
+          "kernel (in-place). num_threads selects the number of std::thread "
+          "workers; <= 0 falls back to std::thread::hardware_concurrency().",
           py::arg("grid"),
           py::arg("normalization"),
           py::arg("vis_data"),
@@ -186,11 +226,14 @@ PYBIND11_MODULE(_prolate_spheroidal_grid_ext, m) {
           py::arg("n_uv"),
           py::arg("delta_lm"),
           py::arg("support"),
-          py::arg("oversampling"));
+          py::arg("oversampling"),
+          py::arg("num_threads") = 1);
 
     m.def("prolate_spheroidal_grid_uv_sampling",
           &prolate_spheroidal_grid_uv_sampling_bind,
-          "Grid imaging weights onto a UV plane (PSF / UV-sampling function, in-place).",
+          "Grid imaging weights onto a UV plane (PSF / UV-sampling function, "
+          "in-place). num_threads selects the number of std::thread workers; "
+          "<= 0 falls back to std::thread::hardware_concurrency().",
           py::arg("grid"),
           py::arg("normalization"),
           py::arg("uvw"),
@@ -203,5 +246,6 @@ PYBIND11_MODULE(_prolate_spheroidal_grid_ext, m) {
           py::arg("n_uv"),
           py::arg("delta_lm"),
           py::arg("support"),
-          py::arg("oversampling"));
+          py::arg("oversampling"),
+          py::arg("num_threads") = 1);
 }
