@@ -560,10 +560,68 @@ def _parse_crtf_line(line: str) -> tuple[str, str, str, dict[str, str]]:
     return flag, shape, payload, kwargs
 
 
+# CRTF keywords that imply frame / velocity-convention conversion.  These are
+# not supported in v1 and raise NotImplementedError when encountered so users
+# know their coordinate intent was not silently dropped.
+_REJECTED_CRTF_KEYWORDS = frozenset({"coord", "frame", "veltype", "restfreq"})
+
+# Visualization-only CRTF keywords that carry no mask semantics.  These are
+# silently ignored so that real-world CRTF files with display annotations can
+# be passed in without error.
+_VIZ_CRTF_KEYWORDS = frozenset(
+    {
+        "color",
+        "linewidth",
+        "linestyle",
+        "symsize",
+        "symthick",
+        "font",
+        "fontsize",
+        "fontstyle",
+        "usetex",
+        "labelpos",
+        "labelcolor",
+        "labeloff",
+        "label",
+    }
+)
+
+
+def _reject_frame_keywords(kwargs: dict[str, str], context: str = "CRTF line") -> None:
+    """Raise ``NotImplementedError`` for any frame-conversion keyword in *kwargs*.
+
+    Parameters
+    ----------
+    kwargs : dict[str, str]
+        Parsed keyword assignments from a CRTF line or global block.
+    context : str
+        Human-readable label used in the error message (e.g. ``"CRTF global"``).
+
+    Raises
+    ------
+    NotImplementedError
+        If any of ``coord=``, ``frame=``, ``veltype=``, ``restfreq=`` appear.
+        Frame and velocity-convention conversions are not supported in v1;
+        world coordinates must be specified in the image's native frame and
+        convention.
+    """
+    for key in _REJECTED_CRTF_KEYWORDS:
+        if key in kwargs:
+            raise NotImplementedError(
+                f"CRTF keyword '{key}=' is not supported (found in {context}). "
+                "Frame and velocity-convention conversions are not implemented in v1. "
+                "Specify coordinates in the image's native frame and convention."
+            )
+
+
 def _crtf_mask(data: ArrayLike, text: str, *, lazy: bool = False) -> ArrayLike:
     """Parse a CRTF string (single or multi-line) into a boolean mask.
 
     Combination semantics per line: leading '+' (OR, default) or '-' (NOT/subtract).
+    ``ann``-prefixed lines (visualization annotations) are silently skipped.
+    Visualization-only keywords are silently ignored.  Frame-conversion keywords
+    (``coord=``, ``frame=``, ``veltype=``, ``restfreq=``) raise
+    ``NotImplementedError``.
     """
     data_shape = data.shape if isinstance(data, xr.DataArray) else np.shape(data)
     x_axis, y_axis = _infer_xy_axes(data)
@@ -576,9 +634,14 @@ def _crtf_mask(data: ArrayLike, text: str, *, lazy: bool = False) -> ArrayLike:
     ]
     for line in lines:
         if line.lower().startswith("global"):
-            _parse_crtf_globals(line)  # parsed; globals not yet applied (step 1)
+            globals_kwargs = _parse_crtf_globals(line)
+            _reject_frame_keywords(globals_kwargs, context="CRTF global")
             continue
-        flag, shape_name, payload, _kwargs = _parse_crtf_line(line)
+        # ann-prefixed lines are visualization annotations; no mask contribution
+        if re.match(r"(?i)^\s*ann\b", line):
+            continue
+        flag, shape_name, payload, kwargs = _parse_crtf_line(line)
+        _reject_frame_keywords(kwargs)
         mask = _rasterize_shape(shape_name, payload, X, Y)
         if flag == "+":
             acc = acc | mask

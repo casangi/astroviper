@@ -921,7 +921,7 @@ class TestCRTFDirectives:
         with_global = "\n".join(
             [
                 "#CRTF",
-                "global coord=pixel",  # should be ignored
+                "global color=green",  # viz keyword; should be silently ignored
                 region,
             ]
         )
@@ -1440,6 +1440,52 @@ class TestCombineWithCreationRenameDoubleExcept:
             pass
         if not ok:
             np.testing.assert_array_equal(got2d_first, exp_or)
+
+
+class TestCrtfRejectedKeywords:
+    """Frame-conversion keywords raise NotImplementedError; viz keywords and ann lines are silent."""
+
+    def _img(self) -> xr.DataArray:
+        return make_image(16, 16)
+
+    @pytest.mark.parametrize(
+        "kw", ["coord=J2000", "frame=TOPO", "veltype=OPTICAL", "restfreq=1.42GHz"]
+    )
+    def test_frame_keyword_on_shape_line_raises(self, kw: str) -> None:
+        img = self._img()
+        crtf = f"box[[0pix,0pix],[4pix,4pix]], {kw}"
+        with pytest.raises(NotImplementedError) as ei:
+            select_mask(img, crtf)
+        assert kw.split("=")[0] in str(ei.value)
+
+    @pytest.mark.parametrize(
+        "kw", ["coord=J2000", "frame=TOPO", "veltype=OPTICAL", "restfreq=1.42GHz"]
+    )
+    def test_frame_keyword_in_global_raises(self, kw: str) -> None:
+        img = self._img()
+        crtf = f"#CRTF\nglobal {kw}\nbox[[0pix,0pix],[4pix,4pix]]"
+        with pytest.raises(NotImplementedError) as ei:
+            select_mask(img, crtf)
+        assert kw.split("=")[0] in str(ei.value)
+
+    def test_viz_keywords_silently_ignored(self) -> None:
+        img = self._img()
+        crtf = "box[[0pix,0pix],[4pix,4pix]], color=green, linewidth=2, label='x'"
+        m = select_mask(img, crtf)
+        assert isinstance(m, xr.DataArray) and m.dtype == bool
+        assert int(m.values.sum()) == 5 * 5
+
+    def test_ann_line_is_silently_skipped(self) -> None:
+        img = self._img()
+        crtf = "#CRTF\nbox[[0pix,0pix],[4pix,4pix]]\nann box[[8pix,8pix],[12pix,12pix]]"
+        m = select_mask(img, crtf)
+        assert int(m.values.sum()) == 5 * 5
+
+    def test_ann_line_alone_produces_empty_mask(self) -> None:
+        img = self._img()
+        crtf = "#CRTF\nann box[[0pix,0pix],[14pix,14pix]]"
+        m = select_mask(img, crtf)
+        assert int(m.values.sum()) == 0
 
 
 class TestCrtfRejectedInputs:
