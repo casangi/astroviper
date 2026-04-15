@@ -614,6 +614,75 @@ def _reject_frame_keywords(kwargs: dict[str, str], context: str = "CRTF line") -
             )
 
 
+def _required_coords_for_line(
+    shape_name: str, kwargs: dict[str, str]
+) -> frozenset[str]:
+    """Return the set of DataArray coord names required by a single CRTF line.
+
+    Parameters
+    ----------
+    shape_name : str
+        Lowercase CRTF shape name (e.g. ``'box'``).
+    kwargs : dict[str, str]
+        Trailing key=value pairs from the CRTF line.
+
+    Returns
+    -------
+    frozenset[str]
+        Coord names that must be present on ``data`` for this line to be
+        processed.  An empty frozenset means any input (including bare
+        ``ndarray``) is accepted for that line.
+
+    Notes
+    -----
+    This function grows as features are added.  Pixel-mode shapes with no
+    extra keywords require no coords.  Non-pixel shape modes and
+    ``range=`` / ``corr=`` / ``time=`` keywords require specific coords;
+    those requirements are wired in during steps 4-7.
+    """
+    required: set[str] = set()
+    # coord requirements filled in by steps 4-7
+    return frozenset(required)
+
+
+def _assert_data_has_coords(
+    data: ArrayLike,
+    required: frozenset[str],
+    context: str = "CRTF line",
+) -> None:
+    """Raise ``ValueError`` if any required coord is absent from *data*.
+
+    Parameters
+    ----------
+    data : numpy.ndarray or xarray.DataArray
+        Data array to check.  NumPy ndarrays carry no named coords; any
+        non-empty *required* set will raise for ndarray inputs.
+    required : frozenset[str]
+        Coord names that must be present.
+    context : str
+        Human-readable label for the error message.
+
+    Raises
+    ------
+    ValueError
+        If *data* is a NumPy ndarray and *required* is non-empty, or if any
+        name in *required* is absent from ``data.coords``.
+    """
+    if not required:
+        return
+    if not isinstance(data, xr.DataArray):
+        missing = required
+    else:
+        missing = frozenset(n for n in required if n not in data.coords)
+    if missing:
+        names = ", ".join(sorted(missing))
+        raise ValueError(
+            f"CRTF feature in {context} requires coord(s) not present on data: "
+            f"{names}. Pass xds.SKY (with the relevant coordinates attached) "
+            "instead of a bare array."
+        )
+
+
 def _crtf_mask(data: ArrayLike, text: str, *, lazy: bool = False) -> ArrayLike:
     """Parse a CRTF string (single or multi-line) into a boolean mask.
 
@@ -642,6 +711,8 @@ def _crtf_mask(data: ArrayLike, text: str, *, lazy: bool = False) -> ArrayLike:
             continue
         flag, shape_name, payload, kwargs = _parse_crtf_line(line)
         _reject_frame_keywords(kwargs)
+        required = _required_coords_for_line(shape_name, kwargs)
+        _assert_data_has_coords(data, required, context=f"'{shape_name}' line")
         mask = _rasterize_shape(shape_name, payload, X, Y)
         if flag == "+":
             acc = acc | mask
