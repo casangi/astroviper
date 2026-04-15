@@ -18,6 +18,7 @@ Run:
 
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 import re
@@ -1492,6 +1493,121 @@ class TestCombineWithCreationRenameDoubleExcept:
             pass
         if not ok:
             np.testing.assert_array_equal(got2d_first, exp_or)
+
+
+# ---------------------------------------------------------------------------
+# Step 5: lm-mode (angular-offset) shape rasterization
+# ---------------------------------------------------------------------------
+
+
+class TestCrtfLmMode:
+    """lm-mode (angular-offset) shape rasterization via select_mask."""
+
+    def _sky(self) -> xr.DataArray:
+        """20×20 sky DataArray with 1-arcsec spacing centred on l=m=0."""
+        n_l, n_m = 20, 20
+        arcsec = math.pi / (180 * 3600)
+        l_rad = np.arange(n_l, dtype=float) * arcsec - 9.5 * arcsec
+        m_rad = np.arange(n_m, dtype=float) * arcsec - 9.5 * arcsec
+        data = np.ones((1, 1, 1, n_l, n_m), dtype=float)
+        return xr.DataArray(
+            data,
+            dims=["time", "frequency", "polarization", "l", "m"],
+            coords={
+                "time": [0.0],
+                "frequency": [1e9],
+                "polarization": ["I"],
+                "l": l_rad,
+                "m": m_rad,
+            },
+        )
+
+    def _arcsec_to_rad(self, a: float) -> float:
+        return a * math.pi / (180 * 3600)
+
+    def test_centerbox_lm_selects_central_square(self) -> None:
+        """centerbox centred at origin with 4×4 arcsec sides selects correct pixels."""
+        sky = self._sky()
+        arcsec = self._arcsec_to_rad(1.0)
+        # pixels 8..11 in each axis (0-based) span l/m in [-1.5, -0.5, 0.5, 1.5] arcsec
+        crtf = "#CRTF\ncenterbox[[0arcsec,0arcsec],[4arcsec,4arcsec]]"
+        mask = select_mask(sky, crtf)
+        got = mask.values.squeeze()  # (l, m)
+        # count selected pixels
+        assert got.sum() > 0
+        l_vals = sky.coords["l"].values
+        m_vals = sky.coords["m"].values
+        half = 2 * arcsec
+        expected = np.zeros((20, 20), dtype=bool)
+        for i, lv in enumerate(l_vals):
+            for j, mv in enumerate(m_vals):
+                if abs(lv) <= half and abs(mv) <= half:
+                    expected[i, j] = True
+        np.testing.assert_array_equal(got, expected)
+
+    def test_circle_lm_matches_distance_formula(self) -> None:
+        """circle in lm mode selects pixels within radius."""
+        sky = self._sky()
+        arcsec = self._arcsec_to_rad(1.0)
+        radius = 3.0 * arcsec
+        crtf = "#CRTF\ncircle[[0arcsec,0arcsec],3arcsec]"
+        mask = select_mask(sky, crtf)
+        got = mask.values.squeeze()
+        l_vals = sky.coords["l"].values
+        m_vals = sky.coords["m"].values
+        expected = np.zeros((20, 20), dtype=bool)
+        for i, lv in enumerate(l_vals):
+            for j, mv in enumerate(m_vals):
+                if math.sqrt(lv**2 + mv**2) <= radius:
+                    expected[i, j] = True
+        np.testing.assert_array_equal(got, expected)
+
+    def test_rotbox_lm_arcmin(self) -> None:
+        """rotbox with arcmin units in lm mode, zero rotation."""
+        sky = self._sky()
+        # 10arcmin box centred at origin, 0 rotation => all 20×20 selected
+        crtf = "#CRTF\nrotbox[[0arcmin,0arcmin],[10arcmin,10arcmin],pa=0deg]"
+        mask = select_mask(sky, crtf)
+        got = mask.values.squeeze()
+        assert got.all(), "Expected all pixels selected by oversized rotbox"
+
+    def test_poly_lm_matches_reference(self) -> None:
+        """poly in lm mode (all-arcsec tokens) selects a triangular region."""
+        sky = self._sky()
+        arcsec = self._arcsec_to_rad(1.0)
+        # triangle with vertices at (0,0), (5arcsec,0), (0,5arcsec) in l/m
+        crtf = "#CRTF\npoly[[0arcsec,0arcsec],[5arcsec,0arcsec],[0arcsec,5arcsec]]"
+        mask = select_mask(sky, crtf)
+        got = mask.values.squeeze()
+        l_vals = sky.coords["l"].values
+        m_vals = sky.coords["m"].values
+        # Point-in-triangle test: l >= 0, m >= 0, l+m < 5arcsec (strict to avoid
+        # ray-casting boundary ambiguity at exact hypotenuse crossings).
+        expected = np.zeros((20, 20), dtype=bool)
+        limit = 5 * arcsec
+        for i, lv in enumerate(l_vals):
+            for j, mv in enumerate(m_vals):
+                if lv >= 0 and mv >= 0 and (lv + mv) < limit:
+                    expected[i, j] = True
+        np.testing.assert_array_equal(got, expected)
+
+    def test_lm_on_ndarray_raises_missing_coord(self) -> None:
+        """lm-mode shapes require l/m coords; raw ndarray raises ValueError."""
+        data = np.ones((20, 20))
+        crtf = "#CRTF\ncircle[[0arcsec,0arcsec],3arcsec]"
+        with pytest.raises(ValueError, match="requires coord"):
+            select_mask(data, crtf)
+
+    def test_lm_on_dataarray_without_lm_coords_raises(self) -> None:
+        """DataArray missing 'l'/'m' coords raises ValueError for lm-mode shape."""
+        da_no_lm = xr.DataArray(
+            np.ones((4, 4)),
+            dims=["x", "y"],
+            coords={"x": np.arange(4), "y": np.arange(4)},
+        )
+        crtf = "#CRTF\ncircle[[0arcsec,0arcsec],3arcsec]"
+        with pytest.raises(ValueError, match="requires coord"):
+            select_mask(da_no_lm, crtf)
 
 
 class TestCrtfRange:

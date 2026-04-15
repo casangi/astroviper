@@ -1035,8 +1035,262 @@ def _compose_line_mask(
     return line_mask
 
 
+# ---------------------------------------------------------------------------
+# lm shape mode: angular-coordinate token parsers, grid builder, rasterizer
+# ---------------------------------------------------------------------------
+
+_ANGULAR_SCALE: dict[str, float] = {
+    "arcsec": math.pi / (180.0 * 3600.0),
+    "arcmin": math.pi / (180.0 * 60.0),
+    "deg": math.pi / 180.0,
+    "rad": 1.0,
+}
+
+
+def _parse_angular_val(tok: str) -> float:
+    """Parse a single angular token and return the value in radians.
+
+    Parameters
+    ----------
+    tok : str
+        Token such as ``'30arcsec'``, ``'1.5arcmin'``, ``'0.5deg'``, ``'0.1rad'``.
+
+    Returns
+    -------
+    float
+        Value in radians.
+
+    Raises
+    ------
+    ValueError
+        If the token cannot be parsed.
+    """
+    m = re.match(rf"^\s*({_NUM_RE})\s*(arcsec|arcmin|deg|rad)\s*$", tok, re.IGNORECASE)
+    if not m:
+        raise ValueError(
+            f"Cannot parse angular token {tok!r}. "
+            "Expected a number followed by arcsec, arcmin, deg, or rad."
+        )
+    return float(m.group(1)) * _ANGULAR_SCALE[m.group(2).lower()]
+
+
+def _parse_pair_angular(pair_token: str) -> tuple[float, float]:
+    """Parse a bracketed angular coordinate pair ``[a, b]`` into radians.
+
+    Parameters
+    ----------
+    pair_token : str
+        Bracketed pair such as ``'[0arcmin, 1arcmin]'``.
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(a_rad, b_rad)`` in radians.
+    """
+    s = pair_token.strip()
+    if not (s.startswith("[") and s.endswith("]")):
+        raise ValueError(f"Expected '[a, b]' angular pair, got {pair_token!r}")
+    inner = s[1:-1]
+    toks = [t.strip() for t in inner.split(",")]
+    if len(toks) != 2:
+        raise ValueError(
+            f"Expected exactly two values in angular pair, got {pair_token!r}"
+        )
+    return _parse_angular_val(toks[0]), _parse_angular_val(toks[1])
+
+
+def _parse_two_angular_vals(token: str) -> tuple[float, float]:
+    """Parse a bracketed pair of angular lengths ``[a, b]`` into radians.
+
+    Parameters
+    ----------
+    token : str
+        Bracketed pair such as ``'[1arcmin, 2arcmin]'``.
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(a_rad, b_rad)`` in radians.
+    """
+    return _parse_pair_angular(token)
+
+
+def _detect_shape_family(payload: str) -> str:
+    """Detect the coordinate family from the first pair in a shape payload.
+
+    Parameters
+    ----------
+    payload : str
+        Full shape payload starting with ``'[['``.
+
+    Returns
+    -------
+    str
+        One of ``'pixel'``, ``'lm'``, ``'world'``, or ``'ambiguous'``.
+
+        - ``'pixel'``: all-``pix`` tokens.
+        - ``'lm'``: ``arcsec`` or ``arcmin`` tokens.
+        - ``'ambiguous'``: ``deg`` or ``rad`` tokens without explicit
+          ``coordsys=`` (could be lm offsets or absolute world coords).
+        - ``'world'``: sexagesimal tokens (e.g. ``18h12m24s``, ``-23d11m00s``).
+
+    Notes
+    -----
+    Only the first token of the first coordinate pair is inspected; shape
+    validity is checked later by the rasterizer.
+    """
+    try:
+        inner = _strip_brackets(payload).strip()
+    except ValueError:
+        return "pixel"
+    parts = _smart_split_pairs(inner)
+    if not parts:
+        return "pixel"
+    # First part is always the center pair (or first vertex for poly)
+    first_pair = parts[0].strip()
+    if first_pair.startswith("[") and first_pair.endswith("]"):
+        first_pair = first_pair[1:-1]
+    toks = [t.strip() for t in first_pair.split(",") if t.strip()]
+    if not toks:
+        return "pixel"
+    first_tok = toks[0]
+    if re.search(r"(?i)pix$", first_tok):
+        return "pixel"
+    if re.search(r"(?i)(arcsec|arcmin)$", first_tok):
+        return "lm"
+    if re.search(r"(?i)(deg|rad)$", first_tok):
+        return "ambiguous"
+    # Sexagesimal: e.g. 18h12m24s or -23d11m00s (digit-letter-digit patterns)
+    if re.search(r"[0-9][hHmMsS]", first_tok) or re.search(r"[hHmMsS][0-9]", first_tok):
+        return "world"
+    return "pixel"  # fallback for bare numbers or unrecognised units
+
+
+def _build_lm_coordinate_grids(
+    data: xr.DataArray,
+    *,
+    lazy: bool,
+) -> tuple[np.ndarray | da.Array, np.ndarray | da.Array]:
+    """Build broadcasted L/M world-coordinate grids from ``l``/``m`` coord values.
+
+    Parameters
+    ----------
+    data : xr.DataArray
+        DataArray that must carry ``l`` and ``m`` coordinates (1-D, radians).
+    lazy : bool
+        If ``True``, build Dask arrays; otherwise build NumPy arrays.
+
+    Returns
+    -------
+    tuple[numpy.ndarray | dask.array.Array, numpy.ndarray | dask.array.Array]
+        ``(L, M)`` grids, each broadcast to ``data.shape``, in radians.
+
+    Notes
+    -----
+    Analogous to :func:`_build_pixel_coordinate_grids` but uses the actual
+    physical coordinate values instead of integer pixel indices.
+    """
+    data_shape = data.shape
+    dims = list(data.dims)
+    l_axis = dims.index("l")
+    m_axis = dims.index("m")
+    l_vals = data.coords["l"].values.astype(float)
+    m_vals = data.coords["m"].values.astype(float)
+    l_view = tuple(len(l_vals) if i == l_axis else 1 for i in range(len(dims)))
+    m_view = tuple(len(m_vals) if i == m_axis else 1 for i in range(len(dims)))
+    if lazy:
+        L = da.broadcast_to(da.reshape(da.from_array(l_vals), l_view), data_shape)
+        M = da.broadcast_to(da.reshape(da.from_array(m_vals), m_view), data_shape)
+    else:
+        L = np.broadcast_to(l_vals.reshape(l_view), data_shape)
+        M = np.broadcast_to(m_vals.reshape(m_view), data_shape)
+    return L, M
+
+
+def _rasterize_shape_lm(
+    shape: str,
+    payload: str,
+    L: np.ndarray | da.Array,
+    M: np.ndarray | da.Array,
+) -> np.ndarray | da.Array:
+    """Rasterize a CRTF shape using angular (lm) coordinates in radians.
+
+    Parameters
+    ----------
+    shape : str
+        Lowercase shape name (``'box'``, ``'centerbox'``, etc.).
+    payload : str
+        Full shape payload starting with ``'[['``.
+    L : numpy.ndarray or dask.array.Array
+        Grid of ``l`` coordinate values (radians), broadcast to data shape.
+    M : numpy.ndarray or dask.array.Array
+        Grid of ``m`` coordinate values (radians), broadcast to data shape.
+
+    Returns
+    -------
+    numpy.ndarray or dask.array.Array
+        Boolean mask with the same shape as ``L`` and ``M``.
+
+    Notes
+    -----
+    Geometry is identical to the pixel rasterizer (:func:`_rasterize_shape`);
+    only the token parser changes (angular units instead of ``pix``).  The
+    rotation angle for ``rotbox`` / ``ellipse`` is still accepted in
+    ``deg`` / ``rad`` via the shared :func:`_parse_angle_kv`.
+    """
+    inner = _strip_brackets(payload).strip()
+    parts = _smart_split_pairs(inner)
+    if shape == "box":
+        p1x, p1y = _parse_pair_angular(parts[0])
+        p2x, p2y = _parse_pair_angular(parts[1])
+        x1, x2 = sorted([p1x, p2x])
+        y1, y2 = sorted([p1y, p2y])
+        return (L >= x1) & (L <= x2) & (M >= y1) & (M <= y2)
+    if shape == "centerbox":
+        cx, cy = _parse_pair_angular(parts[0])
+        w, h = _parse_two_angular_vals(parts[1])
+        hx, hy = w / 2.0, h / 2.0
+        return (np.abs(L - cx) <= hx) & (np.abs(M - cy) <= hy)
+    if shape == "rotbox":
+        cx, cy = _parse_pair_angular(parts[0])
+        w, h = _parse_two_angular_vals(parts[1])
+        if len(parts) != 3:
+            raise ValueError(
+                "rotbox requires angle specified as 'pa=<angle>' or 'theta_m=<angle>', "
+                "e.g., rotbox[[cx,cy],[w,h], pa=30deg]"
+            )
+        ang = _parse_angle_kv(parts[2])
+        hx, hy = w / 2.0, h / 2.0
+        xrp, yrp = _rotate_about(L, M, cx, cy, -ang)
+        return (np.abs(xrp - cx) <= hx) & (np.abs(yrp - cy) <= hy)
+    if shape == "circle":
+        cx, cy = _parse_pair_angular(parts[0])
+        r = _parse_angular_val(parts[1])
+        return ((L - cx) ** 2 + (M - cy) ** 2) <= (r**2 + 1e-30)
+    if shape == "annulus":
+        cx, cy = _parse_pair_angular(parts[0])
+        r1, r2 = _parse_two_angular_vals(parts[1])
+        d2 = (L - cx) ** 2 + (M - cy) ** 2
+        return (d2 >= r1**2) & (d2 <= r2**2)
+    if shape == "ellipse":
+        cx, cy = _parse_pair_angular(parts[0])
+        a, b = _parse_two_angular_vals(parts[1])
+        if len(parts) != 3:
+            raise ValueError(
+                "ellipse requires angle specified as 'pa=<angle>' or 'theta_m=<angle>', "
+                "e.g., ellipse[[cx,cy],[a,b], pa=30deg]"
+            )
+        ang = _parse_angle_kv(parts[2])
+        xp, yp = _rotate_about(L, M, cx, cy, -ang)
+        return ((xp - cx) / a) ** 2 + ((yp - cy) / b) ** 2 <= 1.0 + 1e-30
+    if shape == "poly":
+        pts = [_parse_pair_angular(p) for p in parts]
+        return _point_in_poly(L, M, pts)
+    raise ValueError(f"Unsupported CRTF shape: {shape}")
+
+
 def _required_coords_for_line(
-    shape_name: str, kwargs: dict[str, str]
+    shape_name: str, payload: str, kwargs: dict[str, str]
 ) -> frozenset[str]:
     """Return the set of DataArray coord names required by a single CRTF line.
 
@@ -1044,6 +1298,9 @@ def _required_coords_for_line(
     ----------
     shape_name : str
         Lowercase CRTF shape name (e.g. ``'box'``).
+    payload : str
+        The ``[[...]]`` shape payload string; used to detect the coordinate
+        family (pixel / lm / world) for spatial coord gating.
     kwargs : dict[str, str]
         Trailing key=value pairs from the CRTF line.
 
@@ -1056,10 +1313,10 @@ def _required_coords_for_line(
 
     Notes
     -----
-    This function grows as features are added.  Pixel-mode shapes with no
-    extra keywords require no coords.  Non-pixel shape modes and
-    ``range=`` / ``corr=`` / ``time=`` keywords require specific coords;
-    ``lm``/``world`` shape-mode requirements are added in steps 5-7.
+    Pixel-mode shapes with no extra keywords require no coords.  Non-pixel
+    shape modes and ``range=`` / ``corr=`` / ``time=`` keywords require
+    specific coords.  ``world``-mode requirements (``right_ascension``,
+    ``declination``) are added in step 7.
     """
     required: set[str] = set()
     if "range" in kwargs:
@@ -1079,7 +1336,16 @@ def _required_coords_for_line(
         required.add("polarization")
     if "time" in kwargs:
         required.add("time")
-    # lm / world shape-mode requirements added in steps 5-7
+    # Detect spatial coordinate family and add coord requirements
+    family = _detect_shape_family(payload)
+    if family == "lm":
+        required.add("l")
+        required.add("m")
+    elif family == "world":
+        required.add("right_ascension")
+        required.add("declination")
+    # 'ambiguous' and 'pixel' need no coord gating here; ambiguous raises
+    # later in the rasterizer dispatcher
     return frozenset(required)
 
 
@@ -1158,9 +1424,25 @@ def _crtf_mask(data: ArrayLike, text: str, *, lazy: bool = False) -> ArrayLike:
             continue
         flag, shape_name, payload, kwargs = _parse_crtf_line(line)
         _reject_frame_keywords(kwargs)
-        required = _required_coords_for_line(shape_name, kwargs)
+        required = _required_coords_for_line(shape_name, payload, kwargs)
         _assert_data_has_coords(data, required, context=f"'{shape_name}' line")
-        spatial = _rasterize_shape(shape_name, payload, X, Y)
+        # Dispatch to the appropriate spatial rasterizer by coordinate family
+        family = _detect_shape_family(payload)
+        if family == "lm":
+            L, M = _build_lm_coordinate_grids(data, lazy=lazy)
+            spatial = _rasterize_shape_lm(shape_name, payload, L, M)
+        elif family == "pixel":
+            spatial = _rasterize_shape(shape_name, payload, X, Y)
+        elif family == "ambiguous":
+            raise ValueError(
+                f"Ambiguous deg/rad center coordinates in '{shape_name}' line: "
+                "add coordsys=world or coordsys=lm to the CRTF line or global block."
+            )
+        else:  # world
+            raise NotImplementedError(
+                "world-coordinate shape mode is not yet implemented. "
+                "Use pixel or lm (arcsec/arcmin) coordinates."
+            )
         range_mask = (
             _build_range_mask(data, kwargs) if isinstance(data, xr.DataArray) else None
         )
