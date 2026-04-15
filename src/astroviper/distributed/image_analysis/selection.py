@@ -614,6 +614,427 @@ def _reject_frame_keywords(kwargs: dict[str, str], context: str = "CRTF line") -
             )
 
 
+# ---------------------------------------------------------------------------
+# range= / corr= / time= token parsers and mask builders
+# ---------------------------------------------------------------------------
+
+_FREQ_SCALE: dict[str, float] = {"hz": 1.0, "khz": 1e3, "mhz": 1e6, "ghz": 1e9}
+
+# Canonical Stokes/polarization names accepted by corr=
+_VALID_STOKES: frozenset[str] = frozenset(
+    {
+        "I",
+        "Q",
+        "U",
+        "V",
+        "RR",
+        "RL",
+        "LR",
+        "LL",
+        "XX",
+        "XY",
+        "YX",
+        "YY",
+        "RX",
+        "RY",
+        "LX",
+        "LY",
+        "XR",
+        "XL",
+        "YR",
+        "YL",
+        "PP",
+        "PQ",
+        "QP",
+        "QQ",
+        "RCircular",
+        "LCircular",
+        "Linear",
+        "Ptotal",
+        "Plinear",
+        "PFtotal",
+        "PFlinear",
+        "Pangle",
+    }
+)
+_VALID_STOKES_LOWER: dict[str, str] = {s.lower(): s for s in _VALID_STOKES}
+
+_NUM_RE = r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?"
+
+
+def _detect_range_family(token: str) -> str:
+    """Detect the ``range=`` token family from a single token string.
+
+    Parameters
+    ----------
+    token : str
+        A single value token from ``range=[a, b]``, e.g. ``'1.4GHz'``,
+        ``'100km/s'``, ``'5chan'``.
+
+    Returns
+    -------
+    str
+        One of ``'frequency'``, ``'velocity'``, or ``'channel'``.
+
+    Raises
+    ------
+    ValueError
+        If the token unit cannot be recognised.
+    """
+    t = token.strip()
+    if re.search(r"(?i)(ghz|mhz|khz|hz)$", t):
+        return "frequency"
+    if re.search(r"(?i)km/s|m/s", t):
+        return "velocity"
+    if re.search(r"(?i)chan(nel)?$", t):
+        return "channel"
+    raise ValueError(
+        f"Cannot detect range= family from token {token!r}. "
+        "Expected a frequency (Hz/kHz/MHz/GHz), velocity (m/s or km/s), "
+        "or channel (chan/channel) token."
+    )
+
+
+def _parse_freq_token(token: str) -> float:
+    """Parse a frequency token and return the value in Hz.
+
+    Parameters
+    ----------
+    token : str
+        Token such as ``'1.4GHz'``, ``'1400MHz'``, ``'1.4e9Hz'``.
+
+    Returns
+    -------
+    float
+        Frequency in Hz.
+    """
+    m = re.match(rf"^\s*({_NUM_RE})\s*(Hz|kHz|MHz|GHz)\s*$", token, re.IGNORECASE)
+    if not m:
+        raise ValueError(
+            f"Cannot parse frequency token {token!r}. "
+            "Expected a number followed by Hz, kHz, MHz, or GHz."
+        )
+    return float(m.group(1)) * _FREQ_SCALE[m.group(2).lower()]
+
+
+def _parse_velocity_token(token: str) -> float:
+    """Parse a velocity token and return the value in m/s.
+
+    Parameters
+    ----------
+    token : str
+        Token such as ``'100km/s'``, ``'-50m/s'``.
+
+    Returns
+    -------
+    float
+        Velocity in m/s.
+    """
+    m = re.match(rf"^\s*({_NUM_RE})\s*(km/s|m/s)\s*$", token, re.IGNORECASE)
+    if not m:
+        raise ValueError(
+            f"Cannot parse velocity token {token!r}. "
+            "Expected a number followed by m/s or km/s."
+        )
+    val = float(m.group(1))
+    return val * 1000.0 if m.group(2).lower() == "km/s" else val
+
+
+def _parse_channel_token(token: str) -> int:
+    """Parse a channel token and return the integer channel index.
+
+    Parameters
+    ----------
+    token : str
+        Token such as ``'5chan'``, ``'5channel'``, ``'5'``.
+
+    Returns
+    -------
+    int
+        Zero-based channel index.
+    """
+    m = re.match(r"^\s*(\d+)\s*(?:chan(?:nel)?)?\s*$", token, re.IGNORECASE)
+    if not m:
+        raise ValueError(
+            f"Cannot parse channel token {token!r}. "
+            "Expected an integer optionally followed by 'chan' or 'channel'."
+        )
+    return int(m.group(1))
+
+
+def _detect_time_family(token: str) -> tuple[str, str]:
+    """Detect the ``time=`` token family and return the cleaned value string.
+
+    Parameters
+    ----------
+    token : str
+        Single time bound token from ``time=[a, b]``.
+
+    Returns
+    -------
+    tuple[str, str]
+        ``(family, value_str)`` where *family* is one of ``'mjd'``, ``'jd'``,
+        ``'iso'`` and *value_str* is the numeric or string value stripped of
+        suffix and surrounding quotes.
+
+    Raises
+    ------
+    ValueError
+        If the token cannot be classified.
+    """
+    t = token.strip()
+    # ISO: single- or double-quoted string
+    if (t.startswith("'") and t.endswith("'")) or (
+        t.startswith('"') and t.endswith('"')
+    ):
+        return "iso", t[1:-1]
+    # JD suffix
+    if re.search(r"(?i)jd$", t):
+        return "jd", re.sub(r"(?i)jd$", "", t).strip()
+    # MJD suffix
+    if re.search(r"(?i)mjd$", t):
+        return "mjd", re.sub(r"(?i)mjd$", "", t).strip()
+    # 'd' suffix (e.g. 60000.0d)
+    if re.search(r"(?i)d$", t) and re.match(r"^\s*[-+]?\d", t):
+        return "mjd", re.sub(r"(?i)d$", "", t).strip()
+    # Bare number — interpret as MJD
+    if re.match(rf"^\s*{_NUM_RE}\s*$", t):
+        return "mjd", t.strip()
+    raise ValueError(
+        f"Cannot detect time= family from token {token!r}. "
+        "Expected MJD (bare number or <n>d/<n>mjd), JD (<n>jd), "
+        "or ISO ('YYYY-MM-DDTHH:MM:SS')."
+    )
+
+
+def _build_range_mask(
+    data: xr.DataArray, kwargs: dict[str, str]
+) -> "xr.DataArray | None":
+    """Build a 1-D boolean mask on the ``frequency`` dim from a ``range=`` kwarg.
+
+    Parameters
+    ----------
+    data : xr.DataArray
+        The data array; must carry the required coord (``frequency`` or
+        ``velocity``) — gating ensures this before this function is called.
+    kwargs : dict[str, str]
+        Parsed CRTF keyword assignments for the current line.
+
+    Returns
+    -------
+    xr.DataArray or None
+        Boolean mask with dim ``frequency``, or ``None`` if ``range=`` is
+        absent from *kwargs*.
+
+    Raises
+    ------
+    ValueError
+        If the two range tokens belong to different families, or if the raw
+        value is malformed.
+    """
+    raw = kwargs.get("range")
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not (raw.startswith("[") and raw.endswith("]")):
+        raise ValueError(f"range= value must be bracketed, got {raw!r}")
+    parts = _smart_split_pairs(raw[1:-1])
+    if len(parts) != 2:
+        raise ValueError(f"range= requires exactly two values, got {raw!r}")
+    lo_tok, hi_tok = parts[0].strip(), parts[1].strip()
+    lo_fam = _detect_range_family(lo_tok)
+    hi_fam = _detect_range_family(hi_tok)
+    if lo_fam != hi_fam:
+        raise ValueError(
+            f"range= token family mismatch: {lo_tok!r} is {lo_fam}, "
+            f"{hi_tok!r} is {hi_fam}. Both tokens must use the same units."
+        )
+    freq_dim = data.coords["frequency"].dims[0]
+    if lo_fam == "frequency":
+        lo, hi = _parse_freq_token(lo_tok), _parse_freq_token(hi_tok)
+        freq_vals = data.coords["frequency"].values.astype(float)
+        return xr.DataArray((freq_vals >= lo) & (freq_vals <= hi), dims=[freq_dim])
+    if lo_fam == "velocity":
+        lo, hi = _parse_velocity_token(lo_tok), _parse_velocity_token(hi_tok)
+        vel_vals = data.coords["velocity"].values.astype(float)
+        return xr.DataArray((vel_vals >= lo) & (vel_vals <= hi), dims=[freq_dim])
+    # channel
+    lo_ch = _parse_channel_token(lo_tok)
+    hi_ch = _parse_channel_token(hi_tok)
+    lo_ch, hi_ch = sorted([lo_ch, hi_ch])
+    n = len(data.coords["frequency"])
+    mask_vals = np.zeros(n, dtype=bool)
+    mask_vals[lo_ch : hi_ch + 1] = True
+    return xr.DataArray(mask_vals, dims=[freq_dim])
+
+
+def _build_corr_mask(
+    data: xr.DataArray, kwargs: dict[str, str]
+) -> "xr.DataArray | None":
+    """Build a 1-D boolean mask on the ``polarization`` dim from a ``corr=`` kwarg.
+
+    Parameters
+    ----------
+    data : xr.DataArray
+        The data array; must carry the ``polarization`` coord — gating ensures
+        this before this function is called.
+    kwargs : dict[str, str]
+        Parsed CRTF keyword assignments for the current line.
+
+    Returns
+    -------
+    xr.DataArray or None
+        Boolean mask with dim ``polarization``, or ``None`` if ``corr=`` is
+        absent from *kwargs*.
+
+    Raises
+    ------
+    ValueError
+        If any polarization token is not in the supported Stokes set.
+    """
+    raw = kwargs.get("corr")
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not (raw.startswith("[") and raw.endswith("]")):
+        raise ValueError(f"corr= value must be bracketed, got {raw!r}")
+    tokens = [t.strip() for t in raw[1:-1].split(",") if t.strip()]
+    canonical: list[str] = []
+    for tok in tokens:
+        c = _VALID_STOKES_LOWER.get(tok.lower())
+        if c is None:
+            valid = ", ".join(sorted(_VALID_STOKES))
+            raise ValueError(
+                f"Unknown polarization '{tok}' in corr=. Valid names: {valid}"
+            )
+        canonical.append(c)
+    pol_coord = data.coords["polarization"]
+    pol_dim = pol_coord.dims[0]
+    pol_vals = pol_coord.values
+    mask_vals = np.isin(pol_vals, canonical)
+    return xr.DataArray(mask_vals, dims=[pol_dim])
+
+
+def _build_time_mask(
+    data: xr.DataArray, kwargs: dict[str, str]
+) -> "xr.DataArray | None":
+    """Build a 1-D boolean mask on the ``time`` dim from a ``time=`` kwarg.
+
+    Parameters
+    ----------
+    data : xr.DataArray
+        The data array; must carry the ``time`` coord — gating ensures this
+        before this function is called.
+    kwargs : dict[str, str]
+        Parsed CRTF keyword assignments for the current line.
+
+    Returns
+    -------
+    xr.DataArray or None
+        Boolean mask with dim ``time``, or ``None`` if ``time=`` is absent
+        from *kwargs*.
+
+    Raises
+    ------
+    ValueError
+        If the two time tokens belong to different families, or if parsing
+        fails.
+
+    Notes
+    -----
+    Time values are converted to MJD days and compared against the ``time``
+    coord (which is expected to carry MJD days, as per xradio convention).
+    The time scale is read from ``time.attrs['scale']`` (defaulting to
+    ``'utc'``).
+    """
+    from astropy.time import Time  # import here to avoid top-level astropy dep
+
+    raw = kwargs.get("time")
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not (raw.startswith("[") and raw.endswith("]")):
+        raise ValueError(f"time= value must be bracketed, got {raw!r}")
+    parts = _smart_split_pairs(raw[1:-1])
+    if len(parts) != 2:
+        raise ValueError(f"time= requires exactly two values, got {raw!r}")
+    lo_tok, hi_tok = parts[0].strip(), parts[1].strip()
+    lo_fam, lo_val = _detect_time_family(lo_tok)
+    hi_fam, hi_val = _detect_time_family(hi_tok)
+    if lo_fam != hi_fam:
+        raise ValueError(
+            f"time= token family mismatch: {lo_tok!r} is {lo_fam}, "
+            f"{hi_tok!r} is {hi_fam}. Both tokens must use the same format."
+        )
+    time_coord = data.coords["time"]
+    time_dim = time_coord.dims[0]
+    scale = time_coord.attrs.get("scale", "utc")
+    fam = lo_fam
+    if fam == "iso":
+        try:
+            lo_t = Time(lo_val, format="isot", scale=scale)
+        except Exception:
+            lo_t = Time(lo_val, format="iso", scale=scale)
+        try:
+            hi_t = Time(hi_val, format="isot", scale=scale)
+        except Exception:
+            hi_t = Time(hi_val, format="iso", scale=scale)
+    elif fam == "jd":
+        lo_t = Time(float(lo_val), format="jd", scale=scale)
+        hi_t = Time(float(hi_val), format="jd", scale=scale)
+    else:  # mjd
+        lo_t = Time(float(lo_val), format="mjd", scale=scale)
+        hi_t = Time(float(hi_val), format="mjd", scale=scale)
+    lo_mjd, hi_mjd = lo_t.mjd, hi_t.mjd
+    time_vals = time_coord.values.astype(float)
+    return xr.DataArray((time_vals >= lo_mjd) & (time_vals <= hi_mjd), dims=[time_dim])
+
+
+def _compose_line_mask(
+    spatial: "np.ndarray | da.Array",
+    range_mask: "xr.DataArray | None",
+    corr_mask: "xr.DataArray | None",
+    time_mask: "xr.DataArray | None",
+    data: ArrayLike,
+) -> "np.ndarray | da.Array | xr.DataArray":
+    """Combine per-axis masks into a single full-data-shape boolean mask.
+
+    Parameters
+    ----------
+    spatial : numpy.ndarray or dask.array.Array
+        Full-data-shape spatial mask from the shape rasterizer.
+    range_mask : xr.DataArray or None
+        1-D mask on the ``frequency`` dim, or ``None``.
+    corr_mask : xr.DataArray or None
+        1-D mask on the ``polarization`` dim, or ``None``.
+    time_mask : xr.DataArray or None
+        1-D mask on the ``time`` dim, or ``None``.
+    data : numpy.ndarray or xr.DataArray
+        Original data array used to determine dims and coordinates.
+
+    Returns
+    -------
+    numpy.ndarray, dask.array.Array, or xr.DataArray
+        Combined boolean mask with the same logical shape as ``data``.
+
+    Notes
+    -----
+    For ``xr.DataArray`` inputs, the spatial mask is wrapped with ``data``'s
+    dims and coords so that the 1-D axis masks broadcast correctly by
+    dimension name when combined with ``&``.
+    For ndarray inputs, no axis masks can be present (gating rejects them),
+    so the spatial mask is returned as-is.
+    """
+    if not isinstance(data, xr.DataArray):
+        return spatial
+    # Wrap spatial with data's full dims and coords for aligned broadcasting
+    line_mask: xr.DataArray = xr.DataArray(spatial, dims=data.dims, coords=data.coords)
+    for axis_mask in (range_mask, corr_mask, time_mask):
+        if axis_mask is not None:
+            line_mask = line_mask & axis_mask.astype(bool)
+    return line_mask
+
+
 def _required_coords_for_line(
     shape_name: str, kwargs: dict[str, str]
 ) -> frozenset[str]:
@@ -638,10 +1059,27 @@ def _required_coords_for_line(
     This function grows as features are added.  Pixel-mode shapes with no
     extra keywords require no coords.  Non-pixel shape modes and
     ``range=`` / ``corr=`` / ``time=`` keywords require specific coords;
-    those requirements are wired in during steps 4-7.
+    ``lm``/``world`` shape-mode requirements are added in steps 5-7.
     """
     required: set[str] = set()
-    # coord requirements filled in by steps 4-7
+    if "range" in kwargs:
+        raw = kwargs["range"].strip()
+        # Peek at the first token to determine the family for accurate gating
+        try:
+            inner = raw.lstrip("[").rstrip("]")
+            first_tok = _smart_split_pairs(inner)[0].strip()
+            fam = _detect_range_family(first_tok)
+        except Exception:
+            fam = "frequency"  # conservative fallback
+        if fam == "velocity":
+            required.add("velocity")
+        else:
+            required.add("frequency")
+    if "corr" in kwargs:
+        required.add("polarization")
+    if "time" in kwargs:
+        required.add("time")
+    # lm / world shape-mode requirements added in steps 5-7
     return frozenset(required)
 
 
@@ -695,7 +1133,16 @@ def _crtf_mask(data: ArrayLike, text: str, *, lazy: bool = False) -> ArrayLike:
     data_shape = data.shape if isinstance(data, xr.DataArray) else np.shape(data)
     x_axis, y_axis = _infer_xy_axes(data)
     X, Y = _build_pixel_coordinate_grids(data_shape, x_axis, y_axis, lazy=lazy)
-    acc = da.zeros(data_shape, dtype=bool) if lazy else np.zeros(data_shape, dtype=bool)
+    # Use a DataArray accumulator for DataArray inputs so axis masks
+    # (range/corr/time) broadcast by dimension name rather than by shape.
+    if isinstance(data, xr.DataArray):
+        acc: xr.DataArray | np.ndarray | da.Array = xr.zeros_like(data, dtype=bool)
+    else:
+        acc = (
+            da.zeros(data_shape, dtype=bool)
+            if lazy
+            else np.zeros(data_shape, dtype=bool)
+        )
     lines = [
         ln.strip()
         for ln in re.split(r"[\n;]+", text)
@@ -713,16 +1160,26 @@ def _crtf_mask(data: ArrayLike, text: str, *, lazy: bool = False) -> ArrayLike:
         _reject_frame_keywords(kwargs)
         required = _required_coords_for_line(shape_name, kwargs)
         _assert_data_has_coords(data, required, context=f"'{shape_name}' line")
-        mask = _rasterize_shape(shape_name, payload, X, Y)
+        spatial = _rasterize_shape(shape_name, payload, X, Y)
+        range_mask = (
+            _build_range_mask(data, kwargs) if isinstance(data, xr.DataArray) else None
+        )
+        corr_mask = (
+            _build_corr_mask(data, kwargs) if isinstance(data, xr.DataArray) else None
+        )
+        time_mask = (
+            _build_time_mask(data, kwargs) if isinstance(data, xr.DataArray) else None
+        )
+        line_mask = _compose_line_mask(spatial, range_mask, corr_mask, time_mask, data)
         if flag == "+":
-            acc = acc | mask
+            acc = acc | line_mask
         else:
-            acc = acc & (~mask)
-    return (
-        xr.DataArray(acc, dims=getattr(data, "dims", ("x", "y")))
-        if isinstance(data, xr.DataArray)
-        else acc
-    )
+            acc = acc & (~line_mask)
+    if isinstance(data, xr.DataArray):
+        return (
+            acc if isinstance(acc, xr.DataArray) else xr.DataArray(acc, dims=data.dims)
+        )
+    return acc
 
 
 def _infer_xy_axes(data: ArrayLike) -> Tuple[int, int]:

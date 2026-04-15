@@ -55,6 +55,58 @@ def make_image(ny: int = 200, nx: int = 200) -> xr.DataArray:
     return xr.DataArray(z, dims=("y", "x"), coords={"y": y, "x": x}, name="img")
 
 
+def make_xradio_sky(
+    n_time: int = 3,
+    n_freq: int = 8,
+    n_pol: int = 4,
+    n_l: int = 10,
+    n_m: int = 10,
+    freq_start_ghz: float = 1.0,
+    freq_step_ghz: float = 0.1,
+    vel_start: float = 0.0,
+    vel_step: float = 1e4,
+    pols: tuple[str, ...] = ("I", "Q", "U", "V"),
+    time_start_mjd: float = 60000.0,
+    time_step_mjd: float = 1.0,
+) -> xr.DataArray:
+    """Return a minimal xradio-style SKY DataArray with dims (time, frequency, polarization, l, m)."""
+    freq_hz = (freq_start_ghz + np.arange(n_freq) * freq_step_ghz) * 1e9
+    vel_ms = vel_start + np.arange(n_freq) * vel_step
+    pol_vals = list(pols[:n_pol])
+    time_mjd = time_start_mjd + np.arange(n_time) * time_step_mjd
+    l_rad = np.linspace(-1e-4, 1e-4, n_l)
+    m_rad = np.linspace(-1e-4, 1e-4, n_m)
+    data = np.ones((n_time, n_freq, n_pol, n_l, n_m), dtype=float)
+    freq_coord = xr.DataArray(
+        freq_hz,
+        dims=["frequency"],
+        attrs={"units": "Hz", "observer": "LSRK"},
+    )
+    vel_coord = xr.DataArray(
+        vel_ms,
+        dims=["frequency"],
+        attrs={"units": "m/s", "doppler_type": "radio"},
+    )
+    time_coord = xr.DataArray(
+        time_mjd,
+        dims=["time"],
+        attrs={"units": "d", "scale": "utc", "format": "mjd"},
+    )
+    return xr.DataArray(
+        data,
+        dims=["time", "frequency", "polarization", "l", "m"],
+        coords={
+            "time": time_coord,
+            "frequency": freq_coord,
+            "velocity": vel_coord,
+            "polarization": pol_vals,
+            "l": l_rad,
+            "m": m_rad,
+        },
+        name="SKY",
+    )
+
+
 # ------------------------- CRTF basics -------------------------
 
 
@@ -1440,6 +1492,221 @@ class TestCombineWithCreationRenameDoubleExcept:
             pass
         if not ok:
             np.testing.assert_array_equal(got2d_first, exp_or)
+
+
+class TestCrtfRange:
+    """range= mask builder: frequency, velocity, and channel families."""
+
+    def _sky(self) -> xr.DataArray:
+        return make_xradio_sky(
+            n_time=2,
+            n_freq=10,
+            n_pol=2,
+            n_l=4,
+            n_m=4,
+            freq_start_ghz=1.0,
+            freq_step_ghz=0.1,
+            pols=("I", "Q"),
+        )
+
+    def test_range_frequency_selects_correct_channels(self) -> None:
+        sky = self._sky()
+        # frequencies are 1.0, 1.1, ..., 1.9 GHz; select 1.2–1.5 GHz → channels 2,3,4,5
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], range=[1.2GHz, 1.5GHz]"
+        m = select_mask(sky, crtf)
+        assert isinstance(m, xr.DataArray) and m.dtype == bool
+        freq_any = m.any(dim=["time", "polarization", "l", "m"])
+        selected_freqs = sky.coords["frequency"].values[freq_any.values]
+        assert len(selected_freqs) == 4
+        np.testing.assert_allclose(
+            selected_freqs / 1e9, [1.2, 1.3, 1.4, 1.5], atol=1e-6
+        )
+
+    def test_range_velocity_selects_correct_channels(self) -> None:
+        sky = self._sky()
+        # velocities 0, 1e4, 2e4, ..., 9e4 m/s; select 2e4 to 4e4 → channels 2,3,4
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], range=[20000m/s, 40000m/s]"
+        m = select_mask(sky, crtf)
+        assert isinstance(m, xr.DataArray) and m.dtype == bool
+        freq_any = m.any(dim=["time", "polarization", "l", "m"])
+        assert int(freq_any.values.sum()) == 3
+
+    def test_range_velocity_km_per_s(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], range=[20km/s, 40km/s]"
+        m = select_mask(sky, crtf)
+        freq_any = m.any(dim=["time", "polarization", "l", "m"])
+        assert int(freq_any.values.sum()) == 3
+
+    def test_range_channel_selects_integer_indices(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], range=[2chan, 5chan]"
+        m = select_mask(sky, crtf)
+        freq_any = m.any(dim=["time", "polarization", "l", "m"])
+        assert int(freq_any.values.sum()) == 4  # channels 2,3,4,5
+
+    def test_range_mixed_family_raises(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], range=[1GHz, 5chan]"
+        with pytest.raises(ValueError, match="family mismatch"):
+            select_mask(sky, crtf)
+
+    def test_range_on_ndarray_raises_missing_coord(self) -> None:
+        arr = np.ones((4, 4))
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], range=[1.0GHz, 1.5GHz]"
+        with pytest.raises(ValueError, match="frequency"):
+            select_mask(arr, crtf)
+
+    def test_range_velocity_without_velocity_coord_raises(self) -> None:
+        sky = self._sky()
+        sky_no_vel = sky.drop_vars("velocity")
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], range=[100m/s, 200m/s]"
+        with pytest.raises(ValueError, match="velocity"):
+            select_mask(sky_no_vel, crtf)
+
+
+class TestCrtfCorr:
+    """corr= mask builder: polarization selection."""
+
+    def _sky(self) -> xr.DataArray:
+        return make_xradio_sky(
+            n_time=1, n_freq=4, n_pol=4, n_l=4, n_m=4, pols=("I", "Q", "U", "V")
+        )
+
+    def test_corr_selects_named_polarizations(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], corr=[I, Q]"
+        m = select_mask(sky, crtf)
+        assert isinstance(m, xr.DataArray) and m.dtype == bool
+        pol_any = m.any(dim=["time", "frequency", "l", "m"])
+        selected = sky.coords["polarization"].values[pol_any.values]
+        assert list(selected) == ["I", "Q"]
+
+    def test_corr_case_insensitive(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], corr=[i, q]"
+        m = select_mask(sky, crtf)
+        pol_any = m.any(dim=["time", "frequency", "l", "m"])
+        assert int(pol_any.values.sum()) == 2
+
+    def test_corr_unknown_token_raises(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], corr=[I, FAKE]"
+        with pytest.raises(ValueError, match="FAKE"):
+            select_mask(sky, crtf)
+
+    def test_corr_on_ndarray_raises_missing_coord(self) -> None:
+        arr = np.ones((4, 4))
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], corr=[I, Q]"
+        with pytest.raises(ValueError, match="polarization"):
+            select_mask(arr, crtf)
+
+
+class TestCrtfTime:
+    """time= mask builder: MJD, JD, and ISO time families."""
+
+    def _sky(self) -> xr.DataArray:
+        return make_xradio_sky(
+            n_time=5,
+            n_freq=2,
+            n_pol=2,
+            n_l=4,
+            n_m=4,
+            time_start_mjd=60000.0,
+            time_step_mjd=1.0,
+            pols=("I", "Q"),
+        )
+
+    def test_time_mjd_bare_number(self) -> None:
+        sky = self._sky()
+        # times are 60000, 60001, 60002, 60003, 60004; select 60001–60003
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], time=[60001.0, 60003.0]"
+        m = select_mask(sky, crtf)
+        time_any = m.any(dim=["frequency", "polarization", "l", "m"])
+        assert int(time_any.values.sum()) == 3
+
+    def test_time_mjd_d_suffix(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], time=[60001.0d, 60003.0d]"
+        m = select_mask(sky, crtf)
+        time_any = m.any(dim=["frequency", "polarization", "l", "m"])
+        assert int(time_any.values.sum()) == 3
+
+    def test_time_iso_format(self) -> None:
+        sky = self._sky()
+        # MJD 60000 = 2023-02-25 (approx); use astropy to get exact bounds
+        from astropy.time import Time
+
+        lo = Time(60001.0, format="mjd", scale="utc").isot
+        hi = Time(60003.0, format="mjd", scale="utc").isot
+        crtf = f"#CRTF\n+box[[0pix,0pix],[100pix,100pix]], time=['{lo}', '{hi}']"
+        m = select_mask(sky, crtf)
+        time_any = m.any(dim=["frequency", "polarization", "l", "m"])
+        assert int(time_any.values.sum()) == 3
+
+    def test_time_jd_format(self) -> None:
+        sky = self._sky()
+        from astropy.time import Time
+
+        lo_jd = Time(60001.0, format="mjd", scale="utc").jd
+        hi_jd = Time(60003.0, format="mjd", scale="utc").jd
+        crtf = f"#CRTF\n+box[[0pix,0pix],[100pix,100pix]], time=[{lo_jd}jd, {hi_jd}jd]"
+        m = select_mask(sky, crtf)
+        time_any = m.any(dim=["frequency", "polarization", "l", "m"])
+        assert int(time_any.values.sum()) == 3
+
+    def test_time_mixed_family_raises(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], time=[60001.0, '2023-01-01T00:00:00']"
+        with pytest.raises(ValueError, match="family mismatch"):
+            select_mask(sky, crtf)
+
+    def test_time_on_ndarray_raises_missing_coord(self) -> None:
+        arr = np.ones((4, 4))
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], time=[60000.0, 60001.0]"
+        with pytest.raises(ValueError, match="time"):
+            select_mask(arr, crtf)
+
+
+class TestCrtfPerLineCombining:
+    """Per-line + / - combining with axis masks."""
+
+    def _sky(self) -> xr.DataArray:
+        return make_xradio_sky(
+            n_time=1,
+            n_freq=8,
+            n_pol=4,
+            n_l=8,
+            n_m=8,
+            freq_start_ghz=1.0,
+            freq_step_ghz=0.1,
+            pols=("I", "Q", "U", "V"),
+        )
+
+    def test_two_range_lines_with_plus_produce_union(self) -> None:
+        sky = self._sky()
+        # two frequency windows: 1.0–1.1 GHz (channels 0,1) and 1.5–1.6 GHz (channels 5,6)
+        crtf = (
+            "#CRTF\n"
+            "+box[[0pix,0pix],[100pix,100pix]], range=[1.0GHz, 1.1GHz]\n"
+            "+box[[0pix,0pix],[100pix,100pix]], range=[1.5GHz, 1.6GHz]"
+        )
+        m = select_mask(sky, crtf)
+        freq_any = m.any(dim=["time", "polarization", "l", "m"])
+        assert int(freq_any.values.sum()) == 4  # channels 0,1,5,6
+
+    def test_minus_line_removes_corr(self) -> None:
+        sky = self._sky()
+        # include all, then subtract U and V
+        crtf = (
+            "#CRTF\n"
+            "+box[[0pix,0pix],[100pix,100pix]]\n"
+            "-box[[0pix,0pix],[100pix,100pix]], corr=[U, V]"
+        )
+        m = select_mask(sky, crtf)
+        pol_any = m.any(dim=["time", "frequency", "l", "m"])
+        selected = sky.coords["polarization"].values[pol_any.values]
+        assert list(selected) == ["I", "Q"]
 
 
 class TestCrtfRejectedKeywords:
