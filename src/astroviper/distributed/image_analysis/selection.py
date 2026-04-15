@@ -50,6 +50,27 @@ ArrayLike = Union[np.ndarray, xr.DataArray]
 __all__ = ["select_mask", "apply_select", "combine_with_creation"]
 
 
+def _reject_dataset_input(data: Any) -> None:
+    """Raise ``TypeError`` when *data* is an ``xr.Dataset``.
+
+    Parameters
+    ----------
+    data : any
+        The ``data`` argument passed to ``select_mask`` or ``apply_select``.
+
+    Raises
+    ------
+    TypeError
+        If *data* is an ``xr.Dataset``, with a message pointing users to pass
+        a specific data variable (e.g. ``xds.SKY``) instead.
+    """
+    if isinstance(data, xr.Dataset):
+        raise TypeError(
+            "CRTF selection expects a DataArray (e.g. xds.SKY), not a Dataset. "
+            "Pass the specific data variable you want to mask."
+        )
+
+
 def apply_select(
     data: ArrayLike, select: Any | None = None, mask_source: Any | None = None
 ) -> ArrayLike:
@@ -88,6 +109,7 @@ def apply_select(
     - In mask construction, NaNs in numeric arrays are treated as False.
     - Expressions support only ``~``, ``&``, ``|``, ``^`` and parentheses; ``and``/``or`` are rejected.
     """
+    _reject_dataset_input(data)
     mask = select_mask(data, select=select, mask_source=mask_source)
     if isinstance(data, xr.DataArray):
         return data.where(mask)
@@ -123,6 +145,7 @@ def select_mask(
     -------
     ``xr.DataArray`` if ``data`` is a ``DataArray``; otherwise ``np.ndarray``.
     """
+    _reject_dataset_input(data)
     # For xr.DataArray results created from strings/paths, we record a
     # human-readable hint on how to recreate the mask.
     creation_str: Optional[str] = None
@@ -154,7 +177,7 @@ def select_mask(
         s_file = _maybe_read_crtf_from_path(select)
         if s_file is not None:
             # If the user provided a file, it's CRTF by definition; parse directly.
-            m = _crtf_pixel_mask(data, s_file, lazy=_want_dask(return_kind))
+            m = _crtf_mask(data, s_file, lazy=_want_dask(return_kind))
             aligned = _align_bool_mask_to_data(m, data)
             # Record the *file contents* (not the filename) for reproducible provenance
             creation_str = creation_hint if creation_hint is not None else s_file
@@ -169,7 +192,7 @@ def select_mask(
     if isinstance(select, str):
         s = select.strip()
         if _looks_like_crtf_pixel(s):
-            m = _crtf_pixel_mask(data, s, lazy=_want_dask(return_kind))
+            m = _crtf_mask(data, s, lazy=_want_dask(return_kind))
             aligned = _align_bool_mask_to_data(m, data)
             creation_str = creation_hint if creation_hint is not None else select
             return _coerce_return_kind(
@@ -395,15 +418,157 @@ def _looks_like_crtf_pixel(s: str) -> bool:
     return bool(m and m.group(2).lower() in _SHAPES)
 
 
-def _crtf_pixel_mask(data: ArrayLike, text: str, *, lazy: bool = False) -> ArrayLike:
-    """Parse a CRTF pixel string (single or multi-line) into a boolean mask.
+def _parse_keyword_assignments(text: str) -> dict[str, str]:
+    """Parse a comma-separated list of CRTF key=value assignments.
+
+    Parameters
+    ----------
+    text : str
+        Raw text such as ``"corr=[I,Q], range=[1GHz, 2GHz]"`` or the empty
+        string.
+
+    Returns
+    -------
+    dict[str, str]
+        Mapping of key (stripped) to raw value string (stripped). Empty text
+        returns an empty dict. Values may themselves contain brackets.
+
+    Notes
+    -----
+    Commas that appear inside brackets are not treated as assignment separators,
+    so values like ``"[1GHz, 2GHz]"`` are kept intact.
+    """
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for ch in text:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(buf).strip())
+            buf = []
+            continue
+        buf.append(ch)
+    if buf:
+        parts.append("".join(buf).strip())
+    result: dict[str, str] = {}
+    for part in parts:
+        if not part:
+            continue
+        eq = part.find("=")
+        if eq < 0:
+            raise ValueError(
+                f"Expected 'key=value' in CRTF keyword assignments, got {part!r}"
+            )
+        key = part[:eq].strip()
+        val = part[eq + 1 :].strip()
+        result[key] = val
+    return result
+
+
+def _parse_crtf_globals(line: str) -> dict[str, str]:
+    """Parse a CRTF ``global ...`` line into a dict of keyword assignments.
+
+    Parameters
+    ----------
+    line : str
+        Full global line, e.g. ``"global corr=[I,Q], coordsys=world"``.
+
+    Returns
+    -------
+    dict[str, str]
+        Keyword assignments extracted from the line; empty dict if none are
+        present.
+    """
+    rest = re.sub(r"(?i)^\s*global\s*", "", line).strip()
+    if not rest:
+        return {}
+    return _parse_keyword_assignments(rest)
+
+
+def _extract_bracket_group(s: str) -> tuple[str, str]:
+    """Extract the leading ``[[...]]`` group from a CRTF shape argument string.
+
+    Parameters
+    ----------
+    s : str
+        String starting with ``"[["`` containing shape arguments and optionally
+        followed by trailing key=value pairs.
+
+    Returns
+    -------
+    tuple[str, str]
+        ``(group, remainder)`` where *group* is the matched ``[[...]]`` string
+        (depth returns to zero at the last ``]``) and *remainder* is everything
+        after the closing bracket.
+
+    Raises
+    ------
+    ValueError
+        If *s* does not start with ``"[["`` or contains unmatched brackets.
+    """
+    if not s.startswith("[["):
+        raise ValueError(f"Expected '[[' at start of CRTF shape payload, got {s!r}")
+    depth = 0
+    for i, ch in enumerate(s):
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return s[: i + 1], s[i + 1 :]
+    raise ValueError(f"Unmatched brackets in CRTF shape payload: {s!r}")
+
+
+def _parse_crtf_line(line: str) -> tuple[str, str, str, dict[str, str]]:
+    """Parse a single CRTF region line into its structural components.
+
+    Parameters
+    ----------
+    line : str
+        A single non-comment, non-global CRTF line, optionally prefixed with
+        ``'+'`` or ``'-'`` and optionally followed by trailing key=value pairs
+        after the shape's ``[[...]]`` group.
+        Example: ``"+box[[0pix,0pix],[10pix,10pix]], corr=[I,Q]"``.
+
+    Returns
+    -------
+    tuple[str, str, str, dict[str, str]]
+        ``(flag, shape, payload, kwargs)`` where *flag* is ``'+'`` or ``'-'``,
+        *shape* is the lowercase shape name (e.g. ``'box'``), *payload* is the
+        ``[[...]]`` bracket group string, and *kwargs* is a dict of trailing
+        key=value assignments (empty dict if none are present).
+
+    Raises
+    ------
+    ValueError
+        If the line does not match the expected CRTF region syntax.
+    """
+    flag = "+"
+    rest = line
+    if rest and rest[0] in "+-":
+        flag, rest = rest[0], rest[1:].lstrip()
+    m = re.match(r"^([A-Za-z]+)\s*(\[\[.*)$", rest)
+    if not m:
+        raise ValueError(f"Invalid CRTF line: {line!r}")
+    shape = m.group(1).lower()
+    after_shape = m.group(2)  # starts with '[['
+    payload, remainder = _extract_bracket_group(after_shape)
+    kwargs = _parse_keyword_assignments(remainder)
+    return flag, shape, payload, kwargs
+
+
+def _crtf_mask(data: ArrayLike, text: str, *, lazy: bool = False) -> ArrayLike:
+    """Parse a CRTF string (single or multi-line) into a boolean mask.
 
     Combination semantics per line: leading '+' (OR, default) or '-' (NOT/subtract).
     """
-    shape = data.shape if isinstance(data, xr.DataArray) else np.shape(data)
+    data_shape = data.shape if isinstance(data, xr.DataArray) else np.shape(data)
     x_axis, y_axis = _infer_xy_axes(data)
-    X, Y = _build_pixel_coordinate_grids(shape, x_axis, y_axis, lazy=lazy)
-    acc = da.zeros(shape, dtype=bool) if lazy else np.zeros(shape, dtype=bool)
+    X, Y = _build_pixel_coordinate_grids(data_shape, x_axis, y_axis, lazy=lazy)
+    acc = da.zeros(data_shape, dtype=bool) if lazy else np.zeros(data_shape, dtype=bool)
     lines = [
         ln.strip()
         for ln in re.split(r"[\n;]+", text)
@@ -411,12 +576,10 @@ def _crtf_pixel_mask(data: ArrayLike, text: str, *, lazy: bool = False) -> Array
     ]
     for line in lines:
         if line.lower().startswith("global"):
+            _parse_crtf_globals(line)  # parsed; globals not yet applied (step 1)
             continue
-        flag = "+"
-        if line[0] in "+-":
-            flag, line = line[0], line[1:].lstrip()
-        shape, payload = _split_shape_payload(line)
-        mask = _rasterize_shape(shape, payload, X, Y)
+        flag, shape_name, payload, _kwargs = _parse_crtf_line(line)
+        mask = _rasterize_shape(shape_name, payload, X, Y)
         if flag == "+":
             acc = acc | mask
         else:

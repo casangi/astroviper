@@ -1442,6 +1442,42 @@ class TestCombineWithCreationRenameDoubleExcept:
             np.testing.assert_array_equal(got2d_first, exp_or)
 
 
+class TestCrtfRejectedInputs:
+    """Dataset inputs must be rejected with a clear TypeError before any CRTF parsing."""
+
+    def _make_dataset(self) -> xr.Dataset:
+        img = make_image(16, 16)
+        return xr.Dataset({"SKY": img})
+
+    def test_select_mask_dataset_crtf_raises_typeerror(self) -> None:
+        xds = self._make_dataset()
+        with pytest.raises(TypeError) as ei:
+            select_mask(xds, "box[[0pix,0pix],[4pix,4pix]]")
+        msg = str(ei.value)
+        assert "DataArray" in msg and "xds.SKY" in msg
+
+    def test_apply_select_dataset_crtf_raises_typeerror(self) -> None:
+        xds = self._make_dataset()
+        with pytest.raises(TypeError) as ei:
+            apply_select(xds, "box[[0pix,0pix],[4pix,4pix]]")
+        msg = str(ei.value)
+        assert "DataArray" in msg and "xds.SKY" in msg
+
+    def test_select_mask_dataset_none_raises_typeerror(self) -> None:
+        """TypeError fires before any CRTF parsing, even for select=None."""
+        xds = self._make_dataset()
+        with pytest.raises(TypeError) as ei:
+            select_mask(xds, select=None)
+        msg = str(ei.value)
+        assert "DataArray" in msg and "xds.SKY" in msg
+
+    def test_select_mask_dataarray_succeeds(self) -> None:
+        """Passing xds.SKY (a DataArray) must not raise."""
+        xds = self._make_dataset()
+        m = select_mask(xds["SKY"], "box[[0pix,0pix],[4pix,4pix]]")
+        assert isinstance(m, xr.DataArray) and m.dtype == bool
+
+
 class TestCRTFPA:
     def test_rotbox_pa_equivalent_to_theta_m(self) -> None:
         """
