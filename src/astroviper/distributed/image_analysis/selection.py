@@ -1027,8 +1027,14 @@ def _compose_line_mask(
     """
     if not isinstance(data, xr.DataArray):
         return spatial
-    # Wrap spatial with data's full dims and coords for aligned broadcasting
-    line_mask: xr.DataArray = xr.DataArray(spatial, dims=data.dims, coords=data.coords)
+    # Wrap spatial with data's full dims and coords for aligned broadcasting.
+    # If spatial is already a DataArray (e.g. from world-mode rasterizer, dims=['l','m']),
+    # use it directly; xarray will broadcast missing dims when combined with axis masks
+    # and when folded into the full-shape accumulator.
+    if isinstance(spatial, xr.DataArray):
+        line_mask: xr.DataArray = spatial
+    else:
+        line_mask = xr.DataArray(spatial, dims=data.dims, coords=data.coords)
     for axis_mask in (range_mask, corr_mask, time_mask):
         if axis_mask is not None:
             line_mask = line_mask & axis_mask.astype(bool)
@@ -1244,6 +1250,316 @@ def _resolve_shape_family(payload: str, coordsys: str | None) -> str:
             "coordsys=lm to the CRTF line or global block."
         )
     return detected
+
+
+# ---------------------------------------------------------------------------
+# World-coordinate helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_sexa_ra(token: str) -> float:
+    """Parse a sexagesimal RA token (``HhMmSs``) to radians.
+
+    Parameters
+    ----------
+    token : str
+        e.g. ``'18h12m24.5s'`` or ``'18H12M24S'``.
+
+    Returns
+    -------
+    float
+        Angle in radians.
+
+    Raises
+    ------
+    ValueError
+        If the token does not match the expected sexagesimal RA pattern.
+    """
+    m = re.match(r"^([+-]?)(\d+)[hH](\d+)[mM]([\d.]+)[sS]$", token.strip())
+    if not m:
+        raise ValueError(f"Cannot parse sexagesimal RA token: {token!r}")
+    sign = -1.0 if m.group(1) == "-" else 1.0
+    h, mn, s = int(m.group(2)), int(m.group(3)), float(m.group(4))
+    deg = sign * (h * 15.0 + mn * 15.0 / 60.0 + s * 15.0 / 3600.0)
+    return deg * math.pi / 180.0
+
+
+def _parse_sexa_dec(token: str) -> float:
+    """Parse a sexagesimal Dec token (``DdMmSs``) to radians.
+
+    Parameters
+    ----------
+    token : str
+        e.g. ``'-23d11m00.5s'`` or ``'+12D30M00.5S'``.
+
+    Returns
+    -------
+    float
+        Angle in radians.
+
+    Raises
+    ------
+    ValueError
+        If the token does not match the expected sexagesimal Dec pattern.
+    """
+    m = re.match(r"^([+-]?)(\d+)[dD](\d+)[mM]([\d.]+)[sS]$", token.strip())
+    if not m:
+        raise ValueError(f"Cannot parse sexagesimal Dec token: {token!r}")
+    sign = -1.0 if m.group(1) == "-" else 1.0
+    d, mn, s = int(m.group(2)), int(m.group(3)), float(m.group(4))
+    deg = sign * (d + mn / 60.0 + s / 3600.0)
+    return deg * math.pi / 180.0
+
+
+def _parse_world_coord_token(token: str) -> float:
+    """Parse a single world-coordinate token to radians.
+
+    Parameters
+    ----------
+    token : str
+        Accepted forms: sexagesimal RA (``HhMmSs``), sexagesimal Dec
+        (``DdMmSs``), decimal degrees (``NNdeg``), or radians (``NNrad``).
+        Angular-offset units (``arcsec``, ``arcmin``) are also accepted for
+        length/radius tokens in world-mode shapes.
+
+    Returns
+    -------
+    float
+        Angle in radians.
+
+    Raises
+    ------
+    ValueError
+        If the token cannot be parsed in any accepted form.
+    """
+    token = token.strip()
+    # Decimal degrees
+    m = re.match(r"^([+-]?[\d.]+(?:[eE][+-]?\d+)?)\s*deg$", token, re.IGNORECASE)
+    if m:
+        return float(m.group(1)) * math.pi / 180.0
+    # Radians
+    m = re.match(r"^([+-]?[\d.]+(?:[eE][+-]?\d+)?)\s*rad$", token, re.IGNORECASE)
+    if m:
+        return float(m.group(1))
+    # Angular offsets (arcsec, arcmin) — accepted for radii / edge lengths
+    try:
+        return _parse_angular_val(token)
+    except ValueError:
+        pass
+    # Sexagesimal RA (h/m/s)
+    try:
+        return _parse_sexa_ra(token)
+    except ValueError:
+        pass
+    # Sexagesimal Dec (d/m/s)
+    try:
+        return _parse_sexa_dec(token)
+    except ValueError:
+        pass
+    raise ValueError(f"Cannot parse world coordinate token: {token!r}")
+
+
+def _parse_world_pair(pair_token: str) -> tuple[float, float]:
+    """Parse a world-coordinate pair ``[coord1, coord2]`` to ``(rad, rad)``.
+
+    Parameters
+    ----------
+    pair_token : str
+        Either ``'[coord1, coord2]'`` or bare ``'coord1, coord2'``.
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(coord1_rad, coord2_rad)`` where coord1 is the RA-like (east/lon)
+        axis and coord2 is the Dec-like (north/lat) axis.
+
+    Raises
+    ------
+    ValueError
+        If the pair does not contain exactly two comma-separated tokens.
+    """
+    inner = pair_token.strip()
+    if inner.startswith("[") and inner.endswith("]"):
+        inner = inner[1:-1]
+    toks = [t.strip() for t in inner.split(",") if t.strip()]
+    if len(toks) != 2:
+        raise ValueError(
+            f"Expected exactly 2 coordinates in world pair, got {len(toks)}: "
+            f"{pair_token!r}"
+        )
+    return _parse_world_coord_token(toks[0]), _parse_world_coord_token(toks[1])
+
+
+def _build_skycoord_grid(data: xr.DataArray) -> "SkyCoord":
+    """Build a 2-D ``SkyCoord`` grid from ``right_ascension`` / ``declination`` coords.
+
+    Parameters
+    ----------
+    data : xr.DataArray
+        DataArray that must carry ``right_ascension`` and ``declination`` as 2-D
+        coordinates (radians, on the ``l`` × ``m`` plane).
+
+    Returns
+    -------
+    astropy.coordinates.SkyCoord
+        Sky-coordinate grid with shape ``(n_l, n_m)``, in ICRS.
+
+    Notes
+    -----
+    The RA/Dec arrays are materialised to NumPy here.  World-mode shapes rely
+    on astropy operations that cannot remain lazy; v1 accepts this.
+    """
+    from astropy.coordinates import SkyCoord
+    import astropy.units as u
+
+    ra = np.asarray(data.coords["right_ascension"].values, dtype=float)
+    dec = np.asarray(data.coords["declination"].values, dtype=float)
+    return SkyCoord(ra=ra * u.rad, dec=dec * u.rad, frame="icrs")
+
+
+def _rasterize_shape_world(
+    shape: str,
+    payload: str,
+    skycoord_grid: "SkyCoord",
+) -> xr.DataArray:
+    """Rasterize a world-mode CRTF shape against a per-pixel ``SkyCoord`` grid.
+
+    Parameters
+    ----------
+    shape : str
+        Lowercase CRTF shape name (e.g. ``'circle'``, ``'box'``).
+    payload : str
+        The ``[[...]]`` shape payload with world-coordinate tokens.
+    skycoord_grid : astropy.coordinates.SkyCoord
+        2-D ``(n_l, n_m)`` sky-coordinate grid built from ``right_ascension``
+        and ``declination`` coords.
+
+    Returns
+    -------
+    xr.DataArray
+        2-D boolean mask with dims ``['l', 'm']``.  The ``_compose_line_mask``
+        helper broadcasts it to the full data shape via xarray dimension
+        alignment.
+
+    Notes
+    -----
+    ``circle`` and ``annulus`` use ``SkyCoord.separation``; all other shapes
+    use a ``SkyOffsetFrame`` centred on the shape's centre (or polygon
+    centroid) for tangent-plane geometry.  No frame conversion is performed;
+    RA/Dec values are interpreted as-is in ICRS.
+    """
+    from astropy.coordinates import SkyCoord, SkyOffsetFrame
+    import astropy.units as u
+
+    inner = _strip_brackets(payload).strip()
+    parts = _smart_split_pairs(inner)
+
+    def _center_skycoord(lon_rad: float, lat_rad: float) -> SkyCoord:
+        return SkyCoord(ra=lon_rad * u.rad, dec=lat_rad * u.rad, frame="icrs")
+
+    def _grid_offsets(
+        center: SkyCoord,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return (lon, lat) offsets in radians, lon in ``[-π, π]``."""
+        grid_off = skycoord_grid.transform_to(SkyOffsetFrame(origin=center))
+        lon = grid_off.lon.rad
+        lon = np.where(lon > math.pi, lon - 2 * math.pi, lon)
+        return lon, grid_off.lat.rad
+
+    def _wrap_lon(lon_rad: float) -> float:
+        """Wrap a single longitude value to ``[-π, π]``."""
+        return (lon_rad + math.pi) % (2 * math.pi) - math.pi
+
+    if shape == "circle":
+        cx, cy = _parse_world_pair(parts[0])
+        r_rad = _parse_angular_val(parts[1])
+        center = _center_skycoord(cx, cy)
+        sep = skycoord_grid.separation(center).rad
+        mask_2d = sep <= r_rad + 1e-30
+
+    elif shape == "annulus":
+        cx, cy = _parse_world_pair(parts[0])
+        r1, r2 = _parse_two_angular_vals(parts[1])
+        center = _center_skycoord(cx, cy)
+        sep = skycoord_grid.separation(center).rad
+        mask_2d = (sep >= r1) & (sep <= r2 + 1e-30)
+
+    elif shape == "centerbox":
+        cx, cy = _parse_world_pair(parts[0])
+        w, h = _parse_two_angular_vals(parts[1])
+        center = _center_skycoord(cx, cy)
+        lon, lat = _grid_offsets(center)
+        mask_2d = (np.abs(lon) <= w / 2) & (np.abs(lat) <= h / 2)
+
+    elif shape == "box":
+        # box[[BLC_ra, BLC_dec], [TRC_ra, TRC_dec]]: centre at midpoint
+        ra1, dec1 = _parse_world_pair(parts[0])
+        ra2, dec2 = _parse_world_pair(parts[1])
+        mid_ra = (ra1 + ra2) / 2.0
+        mid_dec = (dec1 + dec2) / 2.0
+        center = _center_skycoord(mid_ra, mid_dec)
+        offset_frame = SkyOffsetFrame(origin=center)
+        lon, lat = _grid_offsets(center)
+        # corners in offset frame
+        blc = _center_skycoord(ra1, dec1).transform_to(offset_frame)
+        trc = _center_skycoord(ra2, dec2).transform_to(offset_frame)
+        blc_lon = _wrap_lon(blc.lon.rad)
+        trc_lon = _wrap_lon(trc.lon.rad)
+        lon_min = min(blc_lon, trc_lon)
+        lon_max = max(blc_lon, trc_lon)
+        lat_min = min(blc.lat.rad, trc.lat.rad)
+        lat_max = max(blc.lat.rad, trc.lat.rad)
+        mask_2d = (
+            (lon >= lon_min) & (lon <= lon_max) & (lat >= lat_min) & (lat <= lat_max)
+        )
+
+    elif shape == "rotbox":
+        cx, cy = _parse_world_pair(parts[0])
+        w, h = _parse_two_angular_vals(parts[1])
+        if len(parts) != 3:
+            raise ValueError("rotbox requires angle, e.g. pa=30deg or theta_m=30deg.")
+        ang = _parse_angle_kv(parts[2])
+        center = _center_skycoord(cx, cy)
+        lon, lat = _grid_offsets(center)
+        lon_r, lat_r = _rotate_about(lon, lat, 0.0, 0.0, -ang)
+        mask_2d = (np.abs(lon_r) <= w / 2) & (np.abs(lat_r) <= h / 2)
+
+    elif shape == "ellipse":
+        cx, cy = _parse_world_pair(parts[0])
+        a, b = _parse_two_angular_vals(parts[1])
+        if len(parts) != 3:
+            raise ValueError("ellipse requires angle, e.g. pa=30deg or theta_m=30deg.")
+        ang = _parse_angle_kv(parts[2])
+        center = _center_skycoord(cx, cy)
+        lon, lat = _grid_offsets(center)
+        xp, yp = _rotate_about(lon, lat, 0.0, 0.0, -ang)
+        mask_2d = (xp / a) ** 2 + (yp / b) ** 2 <= 1.0 + 1e-30
+
+    elif shape == "poly":
+        pts_world = [_parse_world_pair(p) for p in parts]
+        cen_ra = sum(p[0] for p in pts_world) / len(pts_world)
+        cen_dec = sum(p[1] for p in pts_world) / len(pts_world)
+        center = _center_skycoord(cen_ra, cen_dec)
+        offset_frame = SkyOffsetFrame(origin=center)
+        lon, lat = _grid_offsets(center)
+        verts_sky = SkyCoord(
+            ra=np.array([p[0] for p in pts_world]) * u.rad,
+            dec=np.array([p[1] for p in pts_world]) * u.rad,
+            frame="icrs",
+        )
+        verts_off = verts_sky.transform_to(offset_frame)
+        verts_lon = np.where(
+            verts_off.lon.rad > math.pi,
+            verts_off.lon.rad - 2 * math.pi,
+            verts_off.lon.rad,
+        )
+        pts = list(zip(verts_lon.tolist(), verts_off.lat.rad.tolist()))
+        mask_2d = _point_in_poly(lon, lat, pts)
+
+    else:
+        raise ValueError(f"Unsupported CRTF shape for world mode: {shape}")
+
+    return xr.DataArray(mask_2d, dims=["l", "m"])
 
 
 def _build_lm_coordinate_grids(
@@ -1525,11 +1841,11 @@ def _crtf_mask(data: ArrayLike, text: str, *, lazy: bool = False) -> ArrayLike:
             spatial = _rasterize_shape_lm(shape_name, payload, L, M)
         elif family == "pixel":
             spatial = _rasterize_shape(shape_name, payload, X, Y)
-        else:  # world
-            raise NotImplementedError(
-                "world-coordinate shape mode is not yet implemented. "
-                "Use pixel or lm (arcsec/arcmin) coordinates."
-            )
+        else:  # world — requires right_ascension / declination coords
+            # _assert_data_has_coords already verified the coords are present.
+            # Materialise the sky grid (astropy operations are numpy-native).
+            sky_grid = _build_skycoord_grid(data)
+            spatial = _rasterize_shape_world(shape_name, payload, sky_grid)
         range_mask = (
             _build_range_mask(data, effective_kwargs)
             if isinstance(data, xr.DataArray)

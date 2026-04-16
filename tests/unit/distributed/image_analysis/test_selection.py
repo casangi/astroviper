@@ -1894,12 +1894,13 @@ class TestCrtfCoordsysKeyword:
         mask = select_mask(sky, crtf)
         assert mask.values.all()
 
-    def test_coordsys_world_resolves_deg_tokens_raises_not_implemented(self) -> None:
-        """coordsys=world with deg tokens triggers world mode (NotImplementedError in v1)."""
+    def test_coordsys_world_resolves_deg_tokens(self) -> None:
+        """coordsys=world resolves deg tokens as world-mode sky coordinates."""
         sky = self._sky()
+        # All pixels have ra=dec=0 (dummy grid); circle centred there selects all.
         crtf = "#CRTF\ncircle[[0deg,0deg],1deg] coordsys=world"
-        with pytest.raises(NotImplementedError, match="world"):
-            select_mask(sky, crtf)
+        mask = select_mask(sky, crtf)
+        assert mask.values.all()
 
     def test_coordsys_pixel_conflicts_with_arcsec_raises(self) -> None:
         """coordsys=pixel conflicts with arcsec tokens; raises ValueError."""
@@ -1926,10 +1927,11 @@ class TestCrtfCoordsysKeyword:
     def test_per_line_coordsys_overrides_global(self) -> None:
         """Per-line coordsys= takes precedence over the global block."""
         sky = self._sky()
-        # Global says lm but per-line says world => NotImplementedError (world not yet impl)
+        # Global says lm; per-line says world. World mode selects all pixels
+        # (all at ra=dec=0, circle centred there with 1deg radius).
         crtf = "#CRTF\nglobal coordsys=lm\ncircle[[0deg,0deg],1deg] coordsys=world"
-        with pytest.raises(NotImplementedError, match="world"):
-            select_mask(sky, crtf)
+        mask = select_mask(sky, crtf)
+        assert mask.values.all()
 
     def test_unrecognised_coordsys_value_raises(self) -> None:
         """An unrecognised coordsys= value raises ValueError."""
@@ -1937,6 +1939,166 @@ class TestCrtfCoordsysKeyword:
         crtf = "#CRTF\ncircle[[0arcsec,0arcsec],3arcsec] coordsys=galactic"
         with pytest.raises(ValueError, match="[Uu]nrecognized"):
             select_mask(sky, crtf)
+
+
+# ---------------------------------------------------------------------------
+# Step 7: world-mode (SkyCoord / SkyOffsetFrame) shape rasterization
+# ---------------------------------------------------------------------------
+
+
+class TestCrtfWorldMode:
+    """World-coordinate shape rasterization via SkyCoord / SkyOffsetFrame."""
+
+    # Grid: 20×20, 1-arcsec spacing, centered at RA=10deg Dec=20deg.
+    _N = 20
+    _RA0_DEG = 10.0
+    _DEC0_DEG = 20.0
+
+    def _sky(self, with_radec: bool = True) -> xr.DataArray:
+        """20×20 DataArray with real per-pixel RA/Dec grids centered on (_RA0_DEG, _DEC0_DEG)."""
+        n = self._N
+        arcsec = math.pi / (180 * 3600)
+        l_rad = np.arange(n, dtype=float) * arcsec - (n / 2 - 0.5) * arcsec
+        m_rad = np.arange(n, dtype=float) * arcsec - (n / 2 - 0.5) * arcsec
+        ra0 = self._RA0_DEG * math.pi / 180.0
+        dec0 = self._DEC0_DEG * math.pi / 180.0
+        # Tangent-plane approximation: RA offset ≈ l / cos(dec0), Dec offset ≈ m
+        ll, mm = np.meshgrid(l_rad, m_rad, indexing="ij")
+        ra_grid = ra0 + ll / math.cos(dec0)
+        dec_grid = dec0 + mm
+        coords: dict = {
+            "time": [0.0],
+            "frequency": [1e9],
+            "polarization": ["I"],
+            "l": l_rad,
+            "m": m_rad,
+        }
+        if with_radec:
+            coords["right_ascension"] = (["l", "m"], ra_grid)
+            coords["declination"] = (["l", "m"], dec_grid)
+        return xr.DataArray(
+            np.ones((1, 1, 1, n, n), dtype=float),
+            dims=["time", "frequency", "polarization", "l", "m"],
+            coords=coords,
+        )
+
+    def _ra_dec_to_crtf_sexa(self, ra_deg: float, dec_deg: float) -> str:
+        """Format RA/Dec in degrees as CRTF sexagesimal pair string."""
+        ra_h = int(ra_deg / 15)
+        ra_m = int((ra_deg / 15 - ra_h) * 60)
+        ra_s = ((ra_deg / 15 - ra_h) * 60 - ra_m) * 60
+        sign = "+" if dec_deg >= 0 else "-"
+        adec = abs(dec_deg)
+        dec_d = int(adec)
+        dec_m = int((adec - dec_d) * 60)
+        dec_s = ((adec - dec_d) * 60 - dec_m) * 60
+        return f"{ra_h}h{ra_m}m{ra_s:.3f}s,{sign}{dec_d}d{dec_m}m{dec_s:.3f}s"
+
+    def test_circle_sexa_center_separation_match(self) -> None:
+        """circle with sexagesimal center matches per-pixel separation reference."""
+        sky = self._sky()
+        # 3-arcsec radius circle centered at grid center (RA0, Dec0)
+        center = self._ra_dec_to_crtf_sexa(self._RA0_DEG, self._DEC0_DEG)
+        crtf = f"#CRTF\ncircle[[{center}],3arcsec]"
+        mask = select_mask(sky, crtf)
+        got = mask.values.squeeze()
+        # Reference: all pixels whose separation from center ≤ 3arcsec
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+
+        ra = sky.coords["right_ascension"].values
+        dec = sky.coords["declination"].values
+        grid = SkyCoord(ra=ra * u.rad, dec=dec * u.rad, frame="icrs")
+        cen = SkyCoord(
+            ra=self._RA0_DEG * u.deg, dec=self._DEC0_DEG * u.deg, frame="icrs"
+        )
+        expected = grid.separation(cen).arcsec <= 3.0
+        np.testing.assert_array_equal(got, expected)
+
+    def test_box_sexa_selects_rectangular_region(self) -> None:
+        """box with sexagesimal corners selects the correct rectangular sky region."""
+        sky = self._sky()
+        ra0, dec0 = self._RA0_DEG, self._DEC0_DEG
+        # 6×6 arcsec box centered on grid (BLC = center - 3arcsec, TRC = center + 3arcsec)
+        arcsec_deg = 1.0 / 3600.0
+        blc = self._ra_dec_to_crtf_sexa(ra0 - 3 * arcsec_deg, dec0 - 3 * arcsec_deg)
+        trc = self._ra_dec_to_crtf_sexa(ra0 + 3 * arcsec_deg, dec0 + 3 * arcsec_deg)
+        crtf = f"#CRTF\nbox[[{blc}],[{trc}]]"
+        mask = select_mask(sky, crtf)
+        assert mask.values.any()
+        # Inner ±1arcsec box should be fully selected
+        arcsec = math.pi / (180 * 3600)
+        ra = sky.coords["right_ascension"].values
+        dec = sky.coords["declination"].values
+        ra0_r = ra0 * math.pi / 180
+        dec0_r = dec0 * math.pi / 180
+        inner = (np.abs(ra - ra0_r) * math.cos(dec0_r) <= arcsec) & (
+            np.abs(dec - dec0_r) <= arcsec
+        )
+        assert mask.values.squeeze()[inner].all(), "Inner pixels should be selected"
+
+    def test_ellipse_world_pa_matches_circle(self) -> None:
+        """ellipse with a=b and pa=0 produces the same selection as a circle."""
+        sky = self._sky()
+        center = self._ra_dec_to_crtf_sexa(self._RA0_DEG, self._DEC0_DEG)
+        crtf_ell = f"#CRTF\nellipse[[{center}],[3arcsec,3arcsec],pa=0deg]"
+        crtf_cir = f"#CRTF\ncircle[[{center}],3arcsec]"
+        mask_ell = select_mask(sky, crtf_ell).values.squeeze()
+        mask_cir = select_mask(sky, crtf_cir).values.squeeze()
+        # Equal axes => same as circle (allow 1-pixel boundary tolerance)
+        assert mask_ell.sum() == pytest.approx(mask_cir.sum(), abs=2)
+
+    def test_circle_crossing_ra_wrap(self) -> None:
+        """circle centered at RA=0 selects pixels on both sides of the wraparound."""
+        n = 20
+        arcsec = math.pi / (180 * 3600)
+        l_rad = np.arange(n, dtype=float) * arcsec - (n / 2 - 0.5) * arcsec
+        m_rad = np.arange(n, dtype=float) * arcsec - (n / 2 - 0.5) * arcsec
+        dec0 = 0.0
+        ll, mm = np.meshgrid(l_rad, m_rad, indexing="ij")
+        # Grid straddles RA=0; pixels with l<0 have negative RA (wraps to ~2π).
+        ra_grid = ll  # centered at RA=0
+        dec_grid = dec0 + mm
+        sky = xr.DataArray(
+            np.ones((1, 1, 1, n, n), dtype=float),
+            dims=["time", "frequency", "polarization", "l", "m"],
+            coords={
+                "time": [0.0],
+                "frequency": [1e9],
+                "polarization": ["I"],
+                "l": l_rad,
+                "m": m_rad,
+                "right_ascension": (["l", "m"], ra_grid),
+                "declination": (["l", "m"], dec_grid),
+            },
+        )
+        # Center exactly at RA=0h0m0.000s, Dec=+0d0m0.000s; radius 3arcsec.
+        crtf = "#CRTF\ncircle[[0h0m0.000s,+0d0m0.000s],3arcsec]"
+        mask = select_mask(sky, crtf)
+        got = mask.values.squeeze()
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+
+        grid_sc = SkyCoord(ra=ra_grid * u.rad, dec=dec_grid * u.rad, frame="icrs")
+        cen_sc = SkyCoord(ra=0.0 * u.rad, dec=0.0 * u.rad, frame="icrs")
+        expected = grid_sc.separation(cen_sc).arcsec <= 3.0
+        np.testing.assert_array_equal(got, expected)
+
+    def test_world_mode_without_radec_coords_raises(self) -> None:
+        """World-mode shapes on a DataArray without ra/dec coords raise ValueError."""
+        sky = self._sky(with_radec=False)
+        center = self._ra_dec_to_crtf_sexa(self._RA0_DEG, self._DEC0_DEG)
+        crtf = f"#CRTF\ncircle[[{center}],3arcsec]"
+        with pytest.raises(ValueError, match="requires coord"):
+            select_mask(sky, crtf)
+
+    def test_world_mode_on_ndarray_raises(self) -> None:
+        """World-mode shapes on a plain ndarray raise ValueError (no coord gating)."""
+        data = np.ones((20, 20))
+        center = self._ra_dec_to_crtf_sexa(self._RA0_DEG, self._DEC0_DEG)
+        crtf = f"#CRTF\ncircle[[{center}],3arcsec]"
+        with pytest.raises(ValueError, match="requires coord"):
+            select_mask(data, crtf)
 
 
 class TestCrtfRejectedKeywords:
