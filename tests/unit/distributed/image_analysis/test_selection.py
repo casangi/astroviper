@@ -1826,6 +1826,109 @@ class TestCrtfPerLineCombining:
 
 
 # ---------------------------------------------------------------------------
+# Step 8: globals + per-line overrides end-to-end
+# ---------------------------------------------------------------------------
+
+
+class TestCrtfGlobalsAndOverrides:
+    """End-to-end tests for global keyword propagation and per-line override."""
+
+    def _sky(self) -> xr.DataArray:
+        return make_xradio_sky(
+            n_time=1,
+            n_freq=1,
+            pols=["I", "Q", "U", "V"],
+            n_l=20,
+            n_m=20,
+        )
+
+    def test_global_corr_applies_to_every_line(self) -> None:
+        """global corr=[I,Q] restricts every region line to those polarizations."""
+        sky = self._sky()
+        crtf = (
+            "#CRTF\n"
+            "global corr=[I,Q]\n"
+            "box[[0pix,0pix],[9pix,9pix]]\n"
+            "box[[10pix,10pix],[19pix,19pix]]"
+        )
+        mask = select_mask(sky, crtf)
+        # Only I and Q should be selected anywhere
+        pol_any = mask.any(dim=["time", "frequency", "l", "m"])
+        selected = list(sky.coords["polarization"].values[pol_any.values])
+        assert selected == ["I", "Q"]
+
+    def test_per_line_corr_overrides_global(self) -> None:
+        """Per-line corr= overrides global corr= for that line only."""
+        sky = self._sky()
+        # Global: I,Q. Line 2 overrides to U only. Result: line1 selects I,Q;
+        # line2 selects U. Union = I,Q,U.
+        crtf = (
+            "#CRTF\n"
+            "global corr=[I,Q]\n"
+            "box[[0pix,0pix],[9pix,9pix]]\n"
+            "box[[10pix,10pix],[19pix,19pix]] corr=[U]"
+        )
+        mask = select_mask(sky, crtf)
+        pol_any = mask.any(dim=["time", "frequency", "l", "m"])
+        selected = set(sky.coords["polarization"].values[pol_any.values])
+        assert selected == {"I", "Q", "U"}
+        # V must not be selected
+        v_idx = list(sky.coords["polarization"].values).index("V")
+        assert not pol_any.values[v_idx]
+
+    def test_global_coordsys_lm_applies_to_deg_lines(self) -> None:
+        """global coordsys=lm allows deg tokens without per-line coordsys=."""
+        n = 20
+        arcsec = math.pi / (180 * 3600)
+        l_rad = np.arange(n, dtype=float) * arcsec - (n / 2 - 0.5) * arcsec
+        m_rad = np.arange(n, dtype=float) * arcsec - (n / 2 - 0.5) * arcsec
+        sky = xr.DataArray(
+            np.ones((1, 1, 1, n, n), dtype=float),
+            dims=["time", "frequency", "polarization", "l", "m"],
+            coords={
+                "time": [0.0],
+                "frequency": [1e9],
+                "polarization": ["I"],
+                "l": l_rad,
+                "m": m_rad,
+            },
+        )
+        # 10deg >> 20-arcsec grid => all pixels selected in lm mode
+        crtf = "#CRTF\nglobal coordsys=lm\ncircle[[0deg,0deg],10deg]"
+        mask = select_mask(sky, crtf)
+        assert mask.values.all()
+
+    def test_per_line_key_wins_over_global(self) -> None:
+        """When both global and per-line specify the same key, per-line wins."""
+        sky = self._sky()
+        # Global says I,Q,U,V (all); per-line restricts to just I.
+        crtf = (
+            "#CRTF\n"
+            "global corr=[I,Q,U,V]\n"
+            "box[[0pix,0pix],[19pix,19pix]] corr=[I]"
+        )
+        mask = select_mask(sky, crtf)
+        pol_any = mask.any(dim=["time", "frequency", "l", "m"])
+        selected = list(sky.coords["polarization"].values[pol_any.values])
+        assert selected == ["I"]
+
+    def test_multiple_global_lines_accumulate(self) -> None:
+        """Multiple global lines merge; later global keys override earlier ones."""
+        sky = self._sky()
+        # First global sets corr=[I,Q]; second global overrides to corr=[U,V].
+        crtf = (
+            "#CRTF\n"
+            "global corr=[I,Q]\n"
+            "global corr=[U,V]\n"
+            "box[[0pix,0pix],[19pix,19pix]]"
+        )
+        mask = select_mask(sky, crtf)
+        pol_any = mask.any(dim=["time", "frequency", "l", "m"])
+        selected = set(sky.coords["polarization"].values[pol_any.values])
+        assert selected == {"U", "V"}
+
+
+# ---------------------------------------------------------------------------
 # Step 6: coordsys= keyword + family auto-detection
 # ---------------------------------------------------------------------------
 
