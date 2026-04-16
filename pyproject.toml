@@ -68,6 +68,8 @@ all = [
   "sphinx_rtd_theme",
   "twine",
   "pandoc",
+  "pre-commit",
+  "nbstripout",
 ]
 
 [build-system]
