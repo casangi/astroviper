@@ -679,7 +679,7 @@ def _detect_range_family(token: str) -> str:
     Raises
     ------
     ValueError
-        If the token unit cannot be recognised.
+        If the token unit cannot be recognized.
     """
     t = token.strip()
     if re.search(r"(?i)(ghz|mhz|khz|hz)$", t):
@@ -1169,7 +1169,7 @@ def _detect_shape_family(payload: str) -> str:
     # Sexagesimal: e.g. 18h12m24s or -23d11m00s (digit-letter-digit patterns)
     if re.search(r"[0-9][hHmMsS]", first_tok) or re.search(r"[hHmMsS][0-9]", first_tok):
         return "world"
-    return "pixel"  # fallback for bare numbers or unrecognised units
+    return "pixel"  # fallback for bare numbers or unrecognized units
 
 
 def _parse_coordsys_keyword(kwargs: dict[str, str]) -> str | None:
@@ -1444,7 +1444,7 @@ def _rasterize_shape_world(
     Notes
     -----
     ``circle`` and ``annulus`` use ``SkyCoord.separation``; all other shapes
-    use a ``SkyOffsetFrame`` centred on the shape's centre (or polygon
+    use a ``SkyOffsetFrame`` centered on the shape's center (or polygon
     centroid) for tangent-plane geometry.  No frame conversion is performed;
     RA/Dec values are interpreted as-is in ICRS.
     """
@@ -1492,7 +1492,7 @@ def _rasterize_shape_world(
         mask_2d = (np.abs(lon) <= w / 2) & (np.abs(lat) <= h / 2)
 
     elif shape == "box":
-        # box[[BLC_ra, BLC_dec], [TRC_ra, TRC_dec]]: centre at midpoint
+        # box[[BLC_ra, BLC_dec], [TRC_ra, TRC_dec]]: center at midpoint
         ra1, dec1 = _parse_world_pair(parts[0])
         ra2, dec2 = _parse_world_pair(parts[1])
         mid_ra = (ra1 + ra2) / 2.0
@@ -1738,7 +1738,7 @@ def _required_coords_for_line(
         coordsys = _parse_coordsys_keyword(kwargs)
         family = _resolve_shape_family(payload, coordsys)
     except ValueError:
-        # Ambiguous, conflicting, or unrecognised coordsys — dispatch will raise
+        # Ambiguous, conflicting, or unrecognized coordsys — dispatch will raise
         # the proper error; skip coord gating here.
         family = "pixel"
     if family == "lm":
@@ -1833,7 +1833,7 @@ def _crtf_mask(data: ArrayLike, text: str, *, lazy: bool = False) -> ArrayLike:
         effective_kwargs = {**globals_kwargs, **kwargs}
         required = _required_coords_for_line(shape_name, payload, effective_kwargs)
         _assert_data_has_coords(data, required, context=f"'{shape_name}' line")
-        # Resolve coordinate family, honouring any coordsys= keyword.
+        # Resolve coordinate family, honoring any coordsys= keyword.
         coordsys = _parse_coordsys_keyword(effective_kwargs)
         family = _resolve_shape_family(payload, coordsys)
         if family == "lm":

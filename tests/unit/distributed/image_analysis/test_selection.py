@@ -1504,7 +1504,7 @@ class TestCrtfLmMode:
     """lm-mode (angular-offset) shape rasterization via select_mask."""
 
     def _sky(self) -> xr.DataArray:
-        """20×20 sky DataArray with 1-arcsec spacing centred on l=m=0."""
+        """20×20 sky DataArray with 1-arcsec spacing centered on l=m=0."""
         n_l, n_m = 20, 20
         arcsec = math.pi / (180 * 3600)
         l_rad = np.arange(n_l, dtype=float) * arcsec - 9.5 * arcsec
@@ -1526,7 +1526,7 @@ class TestCrtfLmMode:
         return a * math.pi / (180 * 3600)
 
     def test_centerbox_lm_selects_central_square(self) -> None:
-        """centerbox centred at origin with 4×4 arcsec sides selects correct pixels."""
+        """centerbox centered at origin with 4×4 arcsec sides selects correct pixels."""
         sky = self._sky()
         arcsec = self._arcsec_to_rad(1.0)
         # pixels 8..11 in each axis (0-based) span l/m in [-1.5, -0.5, 0.5, 1.5] arcsec
@@ -1565,7 +1565,7 @@ class TestCrtfLmMode:
     def test_rotbox_lm_arcmin(self) -> None:
         """rotbox with arcmin units in lm mode, zero rotation."""
         sky = self._sky()
-        # 10arcmin box centred at origin, 0 rotation => all 20×20 selected
+        # 10arcmin box centered at origin, 0 rotation => all 20×20 selected
         crtf = "#CRTF\nrotbox[[0arcmin,0arcmin],[10arcmin,10arcmin],pa=0deg]"
         mask = select_mask(sky, crtf)
         got = mask.values.squeeze()
@@ -2000,7 +2000,7 @@ class TestCrtfCoordsysKeyword:
     def test_coordsys_world_resolves_deg_tokens(self) -> None:
         """coordsys=world resolves deg tokens as world-mode sky coordinates."""
         sky = self._sky()
-        # All pixels have ra=dec=0 (dummy grid); circle centred there selects all.
+        # All pixels have ra=dec=0 (dummy grid); circle centered there selects all.
         crtf = "#CRTF\ncircle[[0deg,0deg],1deg] coordsys=world"
         mask = select_mask(sky, crtf)
         assert mask.values.all()
@@ -2031,13 +2031,13 @@ class TestCrtfCoordsysKeyword:
         """Per-line coordsys= takes precedence over the global block."""
         sky = self._sky()
         # Global says lm; per-line says world. World mode selects all pixels
-        # (all at ra=dec=0, circle centred there with 1deg radius).
+        # (all at ra=dec=0, circle centered there with 1deg radius).
         crtf = "#CRTF\nglobal coordsys=lm\ncircle[[0deg,0deg],1deg] coordsys=world"
         mask = select_mask(sky, crtf)
         assert mask.values.all()
 
-    def test_unrecognised_coordsys_value_raises(self) -> None:
-        """An unrecognised coordsys= value raises ValueError."""
+    def test_unrecognized_coordsys_value_raises(self) -> None:
+        """An unrecognized coordsys= value raises ValueError."""
         sky = self._sky()
         crtf = "#CRTF\ncircle[[0arcsec,0arcsec],3arcsec] coordsys=galactic"
         with pytest.raises(ValueError, match="[Uu]nrecognized"):
