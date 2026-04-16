@@ -1166,6 +1166,86 @@ def _detect_shape_family(payload: str) -> str:
     return "pixel"  # fallback for bare numbers or unrecognised units
 
 
+def _parse_coordsys_keyword(kwargs: dict[str, str]) -> str | None:
+    """Extract and validate the ``coordsys=`` keyword from a CRTF kwargs dict.
+
+    Parameters
+    ----------
+    kwargs : dict[str, str]
+        Keyword assignments from a CRTF line or merged global+per-line dict.
+
+    Returns
+    -------
+    str or None
+        One of ``'pixel'``, ``'lm'``, ``'world'``, or ``None`` if absent.
+
+    Raises
+    ------
+    ValueError
+        If ``coordsys=`` is present but its value is not one of the accepted
+        choices.
+    """
+    val = kwargs.get("coordsys")
+    if val is None:
+        return None
+    v = val.strip().lower()
+    if v not in ("pixel", "lm", "world"):
+        raise ValueError(
+            f"Unrecognized coordsys= value {val!r}; must be 'pixel', 'lm', or 'world'."
+        )
+    return v
+
+
+def _resolve_shape_family(payload: str, coordsys: str | None) -> str:
+    """Resolve the shape coordinate family, applying an explicit ``coordsys=`` override.
+
+    Parameters
+    ----------
+    payload : str
+        Full shape payload starting with ``'[['``.
+    coordsys : str or None
+        Explicit ``coordsys=`` value (``'pixel'``, ``'lm'``, ``'world'``), or
+        ``None`` if absent.
+
+    Returns
+    -------
+    str
+        One of ``'pixel'``, ``'lm'``, ``'world'``.
+
+    Raises
+    ------
+    ValueError
+        - If tokens are ambiguous (deg/rad) and *coordsys* is ``None``.
+        - If an explicit *coordsys* conflicts with the auto-detected token
+          family (e.g. ``coordsys='pixel'`` with sexagesimal tokens).
+
+    Notes
+    -----
+    When *coordsys* is present and the auto-detected family is ``'ambiguous'``
+    (deg/rad tokens without a clear semantic), *coordsys* resolves the
+    ambiguity.  When the family is already unambiguous, *coordsys* must agree
+    or a ``ValueError`` is raised.
+    """
+    detected = _detect_shape_family(payload)
+    if coordsys is not None:
+        if detected == "ambiguous":
+            # deg/rad tokens resolved by explicit coordsys
+            return coordsys
+        if detected != coordsys:
+            raise ValueError(
+                f"Explicit coordsys={coordsys!r} conflicts with the auto-detected "
+                f"coordinate family '{detected}' implied by the payload tokens: "
+                f"{payload!r}."
+            )
+        return detected
+    if detected == "ambiguous":
+        raise ValueError(
+            "Ambiguous deg/rad center coordinates: add coordsys=world or "
+            "coordsys=lm to the CRTF line or global block."
+        )
+    return detected
+
+
 def _build_lm_coordinate_grids(
     data: xr.DataArray,
     *,
@@ -1336,16 +1416,21 @@ def _required_coords_for_line(
         required.add("polarization")
     if "time" in kwargs:
         required.add("time")
-    # Detect spatial coordinate family and add coord requirements
-    family = _detect_shape_family(payload)
+    # Detect spatial coordinate family and add coord requirements.
+    # Use coordsys= (from merged effective kwargs) to resolve deg/rad ambiguity.
+    try:
+        coordsys = _parse_coordsys_keyword(kwargs)
+        family = _resolve_shape_family(payload, coordsys)
+    except ValueError:
+        # Ambiguous, conflicting, or unrecognised coordsys — dispatch will raise
+        # the proper error; skip coord gating here.
+        family = "pixel"
     if family == "lm":
         required.add("l")
         required.add("m")
     elif family == "world":
         required.add("right_ascension")
         required.add("declination")
-    # 'ambiguous' and 'pixel' need no coord gating here; ambiguous raises
-    # later in the rasterizer dispatcher
     return frozenset(required)
 
 
@@ -1414,43 +1499,51 @@ def _crtf_mask(data: ArrayLike, text: str, *, lazy: bool = False) -> ArrayLike:
         for ln in re.split(r"[\n;]+", text)
         if ln.strip() and not ln.strip().startswith("#")
     ]
+    # Global keyword assignments accumulate across 'global' lines and serve as
+    # defaults for every subsequent region line (per-line overrides win).
+    globals_kwargs: dict[str, str] = {}
     for line in lines:
         if line.lower().startswith("global"):
-            globals_kwargs = _parse_crtf_globals(line)
-            _reject_frame_keywords(globals_kwargs, context="CRTF global")
+            parsed_globals = _parse_crtf_globals(line)
+            _reject_frame_keywords(parsed_globals, context="CRTF global")
+            globals_kwargs.update(parsed_globals)
             continue
         # ann-prefixed lines are visualization annotations; no mask contribution
         if re.match(r"(?i)^\s*ann\b", line):
             continue
         flag, shape_name, payload, kwargs = _parse_crtf_line(line)
         _reject_frame_keywords(kwargs)
-        required = _required_coords_for_line(shape_name, payload, kwargs)
+        # Merge globals with per-line kwargs; per-line takes precedence.
+        effective_kwargs = {**globals_kwargs, **kwargs}
+        required = _required_coords_for_line(shape_name, payload, effective_kwargs)
         _assert_data_has_coords(data, required, context=f"'{shape_name}' line")
-        # Dispatch to the appropriate spatial rasterizer by coordinate family
-        family = _detect_shape_family(payload)
+        # Resolve coordinate family, honouring any coordsys= keyword.
+        coordsys = _parse_coordsys_keyword(effective_kwargs)
+        family = _resolve_shape_family(payload, coordsys)
         if family == "lm":
             L, M = _build_lm_coordinate_grids(data, lazy=lazy)
             spatial = _rasterize_shape_lm(shape_name, payload, L, M)
         elif family == "pixel":
             spatial = _rasterize_shape(shape_name, payload, X, Y)
-        elif family == "ambiguous":
-            raise ValueError(
-                f"Ambiguous deg/rad center coordinates in '{shape_name}' line: "
-                "add coordsys=world or coordsys=lm to the CRTF line or global block."
-            )
         else:  # world
             raise NotImplementedError(
                 "world-coordinate shape mode is not yet implemented. "
                 "Use pixel or lm (arcsec/arcmin) coordinates."
             )
         range_mask = (
-            _build_range_mask(data, kwargs) if isinstance(data, xr.DataArray) else None
+            _build_range_mask(data, effective_kwargs)
+            if isinstance(data, xr.DataArray)
+            else None
         )
         corr_mask = (
-            _build_corr_mask(data, kwargs) if isinstance(data, xr.DataArray) else None
+            _build_corr_mask(data, effective_kwargs)
+            if isinstance(data, xr.DataArray)
+            else None
         )
         time_mask = (
-            _build_time_mask(data, kwargs) if isinstance(data, xr.DataArray) else None
+            _build_time_mask(data, effective_kwargs)
+            if isinstance(data, xr.DataArray)
+            else None
         )
         line_mask = _compose_line_mask(spatial, range_mask, corr_mask, time_mask, data)
         if flag == "+":

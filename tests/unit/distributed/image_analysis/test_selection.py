@@ -1825,6 +1825,120 @@ class TestCrtfPerLineCombining:
         assert list(selected) == ["I", "Q"]
 
 
+# ---------------------------------------------------------------------------
+# Step 6: coordsys= keyword + family auto-detection
+# ---------------------------------------------------------------------------
+
+
+class TestCrtfCoordsysKeyword:
+    """coordsys= keyword resolution and auto-detection of shape coordinate family."""
+
+    def _sky(self) -> xr.DataArray:
+        """Small 10×10 sky DataArray with 1-arcsec l/m spacing and dummy ra/dec."""
+        n = 10
+        arcsec = math.pi / (180 * 3600)
+        l_rad = np.arange(n, dtype=float) * arcsec - 4.5 * arcsec
+        m_rad = np.arange(n, dtype=float) * arcsec - 4.5 * arcsec
+        # Dummy 2-D ra/dec grids so world-mode coord gating passes (dispatch will
+        # still raise NotImplementedError since world-mode is not yet implemented).
+        ra_grid = np.zeros((n, n), dtype=float)
+        dec_grid = np.zeros((n, n), dtype=float)
+        return xr.DataArray(
+            np.ones((1, 1, 1, n, n), dtype=float),
+            dims=["time", "frequency", "polarization", "l", "m"],
+            coords={
+                "time": [0.0],
+                "frequency": [1e9],
+                "polarization": ["I"],
+                "l": l_rad,
+                "m": m_rad,
+                "right_ascension": (["l", "m"], ra_grid),
+                "declination": (["l", "m"], dec_grid),
+            },
+        )
+
+    def test_arcsec_tokens_auto_detected_as_lm(self) -> None:
+        """arcsec tokens are auto-detected as lm mode without coordsys=."""
+        sky = self._sky()
+        crtf = "#CRTF\ncircle[[0arcsec,0arcsec],3arcsec]"
+        mask = select_mask(sky, crtf)
+        assert mask.values.any()
+
+    def test_arcmin_tokens_auto_detected_as_lm(self) -> None:
+        """arcmin tokens are auto-detected as lm mode without coordsys=."""
+        sky = self._sky()
+        # 10arcmin circle covers the entire 10-arcsec grid
+        crtf = "#CRTF\ncircle[[0arcmin,0arcmin],10arcmin]"
+        mask = select_mask(sky, crtf)
+        assert mask.values.all()
+
+    def test_deg_without_coordsys_raises_ambiguous(self) -> None:
+        """deg tokens without coordsys= raise ValueError (ambiguous)."""
+        sky = self._sky()
+        crtf = "#CRTF\ncircle[[0deg,0deg],1deg]"
+        with pytest.raises(ValueError, match="[Aa]mbiguous"):
+            select_mask(sky, crtf)
+
+    def test_rad_without_coordsys_raises_ambiguous(self) -> None:
+        """rad tokens without coordsys= raise ValueError (ambiguous)."""
+        sky = self._sky()
+        crtf = "#CRTF\ncircle[[0rad,0rad],0.1rad]"
+        with pytest.raises(ValueError, match="[Aa]mbiguous"):
+            select_mask(sky, crtf)
+
+    def test_coordsys_lm_resolves_deg_tokens(self) -> None:
+        """coordsys=lm resolves deg tokens as lm-mode angular offsets."""
+        sky = self._sky()
+        # circle of radius 10deg >> grid extent (arcsec scale) => all selected
+        crtf = "#CRTF\ncircle[[0deg,0deg],10deg] coordsys=lm"
+        mask = select_mask(sky, crtf)
+        assert mask.values.all()
+
+    def test_coordsys_world_resolves_deg_tokens_raises_not_implemented(self) -> None:
+        """coordsys=world with deg tokens triggers world mode (NotImplementedError in v1)."""
+        sky = self._sky()
+        crtf = "#CRTF\ncircle[[0deg,0deg],1deg] coordsys=world"
+        with pytest.raises(NotImplementedError, match="world"):
+            select_mask(sky, crtf)
+
+    def test_coordsys_pixel_conflicts_with_arcsec_raises(self) -> None:
+        """coordsys=pixel conflicts with arcsec tokens; raises ValueError."""
+        sky = self._sky()
+        crtf = "#CRTF\ncircle[[0arcsec,0arcsec],3arcsec] coordsys=pixel"
+        with pytest.raises(ValueError, match="[Cc]onflicts"):
+            select_mask(sky, crtf)
+
+    def test_coordsys_world_conflicts_with_pix_raises(self) -> None:
+        """coordsys=world conflicts with pix tokens; raises ValueError."""
+        sky = self._sky()
+        crtf = "#CRTF\nbox[[0pix,0pix],[5pix,5pix]] coordsys=world"
+        with pytest.raises(ValueError, match="[Cc]onflicts"):
+            select_mask(sky, crtf)
+
+    def test_global_coordsys_lm_applies_to_deg_line(self) -> None:
+        """global coordsys=lm lets subsequent lines use deg tokens as lm offsets."""
+        sky = self._sky()
+        # large degree circle => all pixels selected in lm mode
+        crtf = "#CRTF\nglobal coordsys=lm\ncircle[[0deg,0deg],10deg]"
+        mask = select_mask(sky, crtf)
+        assert mask.values.all()
+
+    def test_per_line_coordsys_overrides_global(self) -> None:
+        """Per-line coordsys= takes precedence over the global block."""
+        sky = self._sky()
+        # Global says lm but per-line says world => NotImplementedError (world not yet impl)
+        crtf = "#CRTF\nglobal coordsys=lm\ncircle[[0deg,0deg],1deg] coordsys=world"
+        with pytest.raises(NotImplementedError, match="world"):
+            select_mask(sky, crtf)
+
+    def test_unrecognised_coordsys_value_raises(self) -> None:
+        """An unrecognised coordsys= value raises ValueError."""
+        sky = self._sky()
+        crtf = "#CRTF\ncircle[[0arcsec,0arcsec],3arcsec] coordsys=galactic"
+        with pytest.raises(ValueError, match="[Uu]nrecognized"):
+            select_mask(sky, crtf)
+
+
 class TestCrtfRejectedKeywords:
     """Frame-conversion keywords raise NotImplementedError; viz keywords and ann lines are silent."""
 
