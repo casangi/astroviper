@@ -31,7 +31,7 @@ def prolate_spheroidal_degrid_jit(
     For each non-flagged sample the interpolated value is::
 
         vis_data[i_time, i_baseline, i_chan, i_pol] =
-            sum_over_support(conv * grid[a_time, a_chan, a_pol, v_indx, u_indx]) / norm
+            sum_over_support(conv * grid[a_time, a_chan, a_pol, u_indx, v_indx]) / norm
 
     where ``norm`` is the sum of convolution kernel values over the support
     window.
@@ -45,10 +45,9 @@ def prolate_spheroidal_degrid_jit(
 
     Parameters
     ----------
-    grid : complex ndarray, shape (m_time, m_chan, m_pol, m_v, m_u)
-        Model UV grid to be sampled.  Read only.  Note that the spatial axes
-        are ordered ``(m_v, m_u)`` rather than ``(m_u, m_v)`` as in
-        :func:`prolate_spheroidal_grid_jit`.
+    grid : complex ndarray, shape (m_time, m_chan, m_pol, m_u, m_v)
+        Model UV grid to be sampled.  Read only.  Spatial axes are ordered
+        ``(m_u, m_v)``, matching :func:`prolate_spheroidal_grid_jit`.
     vis_data : complex ndarray, shape (n_time, n_baseline, n_vis_chan, n_pol)
         On input, the sole skip condition is ``NaN``: samples where
         ``vis_data`` is ``NaN`` are not degridded and are left unchanged.
@@ -105,8 +104,6 @@ def prolate_spheroidal_degrid_jit(
     - Hardcoding ``support`` and ``oversampling`` as literals (currently
       commented out) allows Numba to unroll the inner support loops,
       yielding a significant speed-up.
-    - The ``grid`` spatial axes are ordered ``(m_v, m_u)``, which is the
-      reverse of the gridding function's ``(m_u, m_v)`` order.
     """
     # By hardcoding the support and oversampling values, the innermost for loops can be unrolled by the compiler leading to significantly faster code.
     # support = 7
@@ -168,24 +165,27 @@ def prolate_spheroidal_degrid_jit(
                             degrid_value = 0.0
 
                             if ~np.isnan(vis_data[i_time, i_baseline, i_chan, i_pol]):
-                                for i_v in range(start_support, end_support):
-                                    v_indx = v_center_indx + i_v
-                                    v_offset_indx = np.abs(
-                                        oversampling * i_v + v_center_offset_indx
+                                # Iterate with i_v innermost so the contiguous
+                                # last axis of `grid` is accessed with unit
+                                # stride.
+                                for i_u in range(start_support, end_support):
+                                    u_indx = u_center_indx + i_u
+                                    u_offset_indx = np.abs(
+                                        oversampling * i_u + u_center_offset_indx
                                     )
-                                    conv_v = cgk_1D[v_offset_indx]
+                                    conv_u = cgk_1D[u_offset_indx]
 
-                                    for i_u in range(start_support, end_support):
-                                        u_indx = u_center_indx + i_u
-                                        u_offset_indx = np.abs(
-                                            oversampling * i_u + u_center_offset_indx
+                                    for i_v in range(start_support, end_support):
+                                        v_indx = v_center_indx + i_v
+                                        v_offset_indx = np.abs(
+                                            oversampling * i_v + v_center_offset_indx
                                         )
-                                        conv_u = cgk_1D[u_offset_indx]
+                                        conv_v = cgk_1D[v_offset_indx]
                                         conv = conv_u * conv_v
                                         degrid_value += (
                                             conv
                                             * grid[
-                                                a_time, a_chan, a_pol, v_indx, u_indx
+                                                a_time, a_chan, a_pol, u_indx, v_indx
                                             ]
                                         )
                                         norm = norm + conv

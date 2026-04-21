@@ -152,21 +152,24 @@ void prolate_spheroidal_grid(
 
                 double norm = 0.0;
 
-                for (int i_v = start_support; i_v < end_support; ++i_v) {
-                    const int v_indx = v_center_indx + i_v;
-                    const int v_offset_indx =
-                        std::abs(oversampling * i_v + v_center_offset_indx);
-                    const double conv_v = cgk_1D[v_offset_indx];
+                // Iterate with i_v innermost so the contiguous last axis of
+                // `grid` (v, stride 1) is accessed with unit stride.
+                for (int i_u = start_support; i_u < end_support; ++i_u) {
+                    const int u_indx = u_center_indx + i_u;
+                    const int u_offset_indx =
+                        std::abs(oversampling * i_u + u_center_offset_indx);
+                    const double conv_u = cgk_1D[u_offset_indx];
 
-                    for (int i_u = start_support; i_u < end_support; ++i_u) {
-                        const int u_indx = u_center_indx + i_u;
-                        const int u_offset_indx =
-                            std::abs(oversampling * i_u + u_center_offset_indx);
-                        const double conv = cgk_1D[u_offset_indx] * conv_v;
+                    std::complex<double>* grid_row =
+                        grid + grid_base + u_indx * m_v;
 
-                        atomic_add_complex(
-                            grid + grid_base + u_indx * m_v + v_indx,
-                            conv * wd);
+                    for (int i_v = start_support; i_v < end_support; ++i_v) {
+                        const int v_indx = v_center_indx + i_v;
+                        const int v_offset_indx =
+                            std::abs(oversampling * i_v + v_center_offset_indx);
+                        const double conv = conv_u * cgk_1D[v_offset_indx];
+
+                        atomic_add_complex(grid_row + v_indx, conv * wd);
                         norm += conv;
                     }
                 }
@@ -317,23 +320,28 @@ void prolate_spheroidal_grid_uv_sampling(
 
                 double norm = 0.0;
 
-                for (int i_v = start_support; i_v < end_support; ++i_v) {
-                    const int v_indx = v_center_indx + i_v;
-                    const int v_offset_indx =
-                        std::abs(oversampling * i_v + v_center_offset_indx);
-                    const double conv_v = cgk_1D[v_offset_indx];
+                // Iterate with i_v innermost so the contiguous last axis of
+                // `grid` (v, stride 1) is accessed with unit stride.
+                for (int i_u = start_support; i_u < end_support; ++i_u) {
+                    const int u_indx = u_center_indx + i_u;
+                    const int u_offset_indx =
+                        std::abs(oversampling * i_u + u_center_offset_indx);
+                    const double conv_u = cgk_1D[u_offset_indx];
 
-                    for (int i_u = start_support; i_u < end_support; ++i_u) {
-                        const int u_indx = u_center_indx + i_u;
-                        const int u_offset_indx =
-                            std::abs(oversampling * i_u + u_center_offset_indx);
-                        const double conv = cgk_1D[u_offset_indx] * conv_v;
+                    std::complex<double>* grid_row =
+                        grid + grid_base + u_indx * m_v;
+
+                    for (int i_v = start_support; i_v < end_support; ++i_v) {
+                        const int v_indx = v_center_indx + i_v;
+                        const int v_offset_indx =
+                            std::abs(oversampling * i_v + v_center_offset_indx);
+                        const double conv = conv_u * cgk_1D[v_offset_indx];
 
                         // The grid is real-valued here (we add a real weight),
                         // so only the real part of the complex cell needs an
                         // atomic add. The imag part is never touched.
                         double* parts = reinterpret_cast<double*>(
-                            grid + grid_base + u_indx * m_v + v_indx);
+                            grid_row + v_indx);
                         atomic_add_double(parts + 0, conv * weight_data);
                         norm += conv;
                     }

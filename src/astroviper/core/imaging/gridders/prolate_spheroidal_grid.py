@@ -166,19 +166,22 @@ def prolate_spheroidal_grid_jit(
                                 a_pol = pol_map[i_pol]
                                 norm = 0.0
 
-                                for i_v in range(start_support, end_support):
-                                    v_indx = v_center_indx + i_v
-                                    v_offset_indx = np.abs(
-                                        oversampling * i_v + v_center_offset_indx
+                                # Iterate with i_v innermost so the contiguous
+                                # last axis of `grid` is accessed with unit
+                                # stride.
+                                for i_u in range(start_support, end_support):
+                                    u_indx = u_center_indx + i_u
+                                    u_offset_indx = np.abs(
+                                        oversampling * i_u + u_center_offset_indx
                                     )
-                                    conv_v = cgk_1D[v_offset_indx]
+                                    conv_u = cgk_1D[u_offset_indx]
 
-                                    for i_u in range(start_support, end_support):
-                                        u_indx = u_center_indx + i_u
-                                        u_offset_indx = np.abs(
-                                            oversampling * i_u + u_center_offset_indx
+                                    for i_v in range(start_support, end_support):
+                                        v_indx = v_center_indx + i_v
+                                        v_offset_indx = np.abs(
+                                            oversampling * i_v + v_center_offset_indx
                                         )
-                                        conv_u = cgk_1D[u_offset_indx]
+                                        conv_v = cgk_1D[v_offset_indx]
                                         conv = conv_u * conv_v
 
                                         grid[a_time, a_chan, a_pol, u_indx, v_indx] = (
@@ -352,19 +355,22 @@ def prolate_spheroidal_grid_uv_sampling_jit(
                                 a_pol = pol_map[i_pol]
                                 norm = 0.0
 
-                                for i_v in range(start_support, end_support):
-                                    v_indx = v_center_indx + i_v
-                                    v_offset_indx = np.abs(
-                                        oversampling * i_v + v_center_offset_indx
+                                # Iterate with i_v innermost so the contiguous
+                                # last axis of `grid` is accessed with unit
+                                # stride.
+                                for i_u in range(start_support, end_support):
+                                    u_indx = u_center_indx + i_u
+                                    u_offset_indx = np.abs(
+                                        oversampling * i_u + u_center_offset_indx
                                     )
-                                    conv_v = cgk_1D[v_offset_indx]
+                                    conv_u = cgk_1D[u_offset_indx]
 
-                                    for i_u in range(start_support, end_support):
-                                        u_indx = u_center_indx + i_u
-                                        u_offset_indx = np.abs(
-                                            oversampling * i_u + u_center_offset_indx
+                                    for i_v in range(start_support, end_support):
+                                        v_indx = v_center_indx + i_v
+                                        v_offset_indx = np.abs(
+                                            oversampling * i_v + v_center_offset_indx
                                         )
-                                        conv_u = cgk_1D[u_offset_indx]
+                                        conv_v = cgk_1D[v_offset_indx]
                                         conv = conv_u * conv_v
 
                                         grid[a_time, a_chan, a_pol, u_indx, v_indx] = (

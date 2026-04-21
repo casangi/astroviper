@@ -48,7 +48,7 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0,
         #Stokes to corr for residual visibilities.
         # ifft_norm_img_xds will have already transformed to stokes, so transform back to corr for degridding.
         # cgk_1D = create_prolate_spheroidal_kernel_1D(100, 7)
-
+        a=0
  
         
 
