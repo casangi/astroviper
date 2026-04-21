@@ -339,7 +339,7 @@ def add_visibility_grid_single_field(
         prolate_spheroidal_grid_jit,
     )
 
-    cpp_gridder = False
+    cpp_gridder = True
     if cpp_gridder:
         from astroviper.core.imaging.gridders.prolate_spheroidal_grid_cpp import (
             prolate_spheroidal_grid,

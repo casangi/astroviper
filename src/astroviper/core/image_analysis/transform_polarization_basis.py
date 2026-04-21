@@ -269,13 +269,18 @@ def transform_polarization_basis(
             coords={"polarization": out_pol_labels, "pol_in": in_pol_labels},
         )    
     
-    
     from toolviper.utils.memory_management import memory_setup, free_memory, get_rss_gb
     for var_name in img_xds.data_vars:
-        original_dims = list(img_transformed_xds[var_name].dims)   
-        img_transformed_xds[var_name].values = xr.dot(transform_da, img_transformed_xds[var_name].rename({"polarization": "pol_in"}), dim="pol_in", optimize=True).transpose(*original_dims).values
+        original_dims = list(img_transformed_xds[var_name].dims)
+        # Use [:] slice assignment so the transposed result is copied
+        # into the DataArray's existing C-contiguous buffer. Writing
+        # `.values = rhs` instead would *replace* the buffer with the
+        # transposed view, which is strided and thus neither C- nor
+        # F-contiguous.
+        img_transformed_xds[var_name].values[:] = xr.dot(transform_da, img_transformed_xds[var_name].rename({"polarization": "pol_in"}), dim="pol_in", optimize=True).transpose(*original_dims).values
 
     img_transformed_xds = img_transformed_xds.assign_coords(polarization=new_pol_labels)
+
     return img_transformed_xds
 
 

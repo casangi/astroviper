@@ -3,7 +3,7 @@ import time
 
 # from memory_profiler import profile
 # @profile(precision=1)
-def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0):
+def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0, img_data_group_name = "single_field"):
     """_summary_
 
     Parameters
@@ -36,8 +36,10 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0)
     from astroviper.core.image_analysis.point_spread_function_gaussian_fit import (
         point_spread_function_gaussian_fit,
     )
-
-    img_data_group_name = "single_field"
+    
+    from astroviper.core.image_analysis.transform_polarization_basis import (
+        transform_polarization_basis,
+    )
 
     ps_data_group_name = input_params["processing_set_data_group_name"]
     img_xds.attrs["type"] = "image_dataset"
@@ -126,21 +128,37 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0)
         num_threads=input_params["processing_function_threads"],
     )
     T_fft_norm = time.time() - start_fft_norm
-
+    
+    
+    from toolviper.utils.memory_management import get_rss_gb
+    
+    logger.debug("Memory usage after residual cycle " + str(get_rss_gb()) + " GB")
     start = time.time()
-    img_xds = point_spread_function_gaussian_fit(
-        img_xds,
-        image_data_group_in_name="single_field",
-        image_data_group_out_name="single_field",
-        image_data_group_out_modified={
-            "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
-        },
-        overwrite=True,
-        num_threads=input_params["processing_function_threads"],
+    print("img_xds stokes values " + str(img_xds.coords["polarization"].values))
+    img_xds = transform_polarization_basis(
+        img_xds, new_polarization_basis="stokes", overwrite=True
     )
-    T_psf_fit = time.time() - start
+    T_transform_pol = time.time() - start
+    logger.debug("Memory usage after transform polarization " + str(get_rss_gb()) + " GB")
+
+    if is_n_iter_0:
+        start = time.time()
+        img_xds = point_spread_function_gaussian_fit(
+            img_xds,
+            image_data_group_in_name="single_field",
+            image_data_group_out_name="single_field",
+            image_data_group_out_modified={
+                "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
+            },
+            overwrite=True,
+            num_threads=input_params["processing_function_threads"],
+        )
+        T_psf_fit = time.time() - start
+    else:
+        T_psf_fit = 0.0
 
     return_dict = {
+        "T_transform_pol": [T_transform_pol],
         "T_weights": [T_weights],
         "T_make_uv_images_single_field": [T_make_uv_images_single_field],
         "T_gcf": [T_gcf],

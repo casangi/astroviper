@@ -67,7 +67,7 @@ def ifft_norm_img_xds(
     overwrite=True,
     image_data_variables_keep=[],
     num_threads=1,
-    fft_backend="scipy",
+    fft_backend="pyfftw",
 ):
     """Normalize and inverse-Fourier-transform gridded UV data to sky images.
 
@@ -153,6 +153,7 @@ def ifft_norm_img_xds(
     The FFT step adds at most one extra 2-D float64 plane per iteration,
     which for a 12 000 × 12 000 grid is ≈ 1.15 GB.
     """
+
     _image_params = image_params  # no mutation below; deep copy not needed
 
     data_group_in, data_group_out = create_data_groups_in_and_out(
@@ -233,11 +234,11 @@ def ifft_norm_img_xds(
             data_group_out,
             description="Transformed from aperture uv plane to sky lm plane.",
         )
-
+        
     return img_xds
 
 
-def ifft_uv_to_lm(grid_2d, fft_plane_dims=(-2, -1), num_threads=1, fft_backend="scipy"):
+def ifft_uv_to_lm(grid_2d, fft_plane_dims=(-2, -1), num_threads=1, fft_backend="pyfftw"):
     """Apply a 2-D inverse FFT to transform a UV grid to a sky-plane image.
 
     Applies the standard radio-astronomy convention:
@@ -263,7 +264,7 @@ def ifft_uv_to_lm(grid_2d, fft_plane_dims=(-2, -1), num_threads=1, fft_backend="
     threads : int, optional
         Number of threads passed to the FFT backend.  Default is ``1``.
     fft_backend : {"scipy", "pyfftw"}, optional
-        FFT library to use.  Default is ``"scipy"``.
+        FFT library to use.  Default is ``"pyfftw"``.
 
     Returns
     -------
@@ -293,7 +294,7 @@ def ifft_uv_to_lm(grid_2d, fft_plane_dims=(-2, -1), num_threads=1, fft_backend="
     return sky
 
 
-def fft_lm_to_uv(image, fft_plane_dims=(-2, -1), num_threads=1, fft_backend="scipy"):
+def fft_lm_to_uv(image, fft_plane_dims=(-2, -1), num_threads=1, fft_backend="pyfftw"):
     """Apply a 2-D FFT to transform a sky-plane image to a UV grid.
 
     Applies the standard radio-astronomy convention:
@@ -315,7 +316,7 @@ def fft_lm_to_uv(image, fft_plane_dims=(-2, -1), num_threads=1, fft_backend="sci
     threads : int, optional
         Number of threads passed to the FFT backend.  Default is ``1``.
     fft_backend : {"scipy", "pyfftw"}, optional
-        FFT library to use.  Default is ``"scipy"``.
+        FFT library to use.  Default is ``"pyfftw"``.
 
     Returns
     -------
