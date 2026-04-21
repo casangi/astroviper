@@ -25,7 +25,7 @@ def PF_image_cube_single_field(input_params, ps_iter, img_xds):
     
     if input_params["iteration_control_params"]["niter"] > 0:
         start = time.time()
-        model_update_cycle_cube_single_field(img_xds, input_params, is_n_iter_0=True)
+        model_update_cycle_cube_single_field(img_xds, input_params, is_n_iter_0=True, num_threads=input_params["processing_function_threads"])
         T_model_update_cycle = time.time() - start
     else:
         T_model_update_cycle = 0.0

@@ -1,1090 +1,595 @@
 """
-Unit tests for astroviper.core.imaging.deconvolution module
+Unit tests for :mod:`astroviper.core.imaging.deconvolution`.
 
-Tests all functions in the deconvolution module including parameter validation,
-progress callbacks, and the main Hogbom CLEAN algorithm.
+These tests exercise the Python-level orchestration of the CLEAN
+pipeline:
+
+- :func:`_validate_deconvolve_params`: parameter validation and defaults.
+- :func:`_plane_peak_abs_signed`: signed peak-residual helper.
+- :func:`progress_callback`: logging cadence.
+- :func:`get_phase_center`: phase-center extraction from coordinates.
+- :func:`hogbom_clean`: 5-D cube wrapper around ``hogbom.clean_cube``.
+- :func:`deconvolve`: the end-to-end xarray-driven entry point.
+
+All tests construct synthetic inputs so they run without downloading
+test data. The cube-driven tests require the compiled Hogbom extension;
+the pure-Python ones do not.
 """
 
-import pytest
+from __future__ import annotations
+
+import logging
+
 import numpy as np
+import pytest
 import xarray as xr
-import sys
-import os
-import shutil
-import toolviper
-from xradio.image import load_image
 
 from astroviper.core.imaging.deconvolution import (
-    _validate_deconv_params,
-    progress_callback,
-    hogbom_clean,
+    _plane_peak_abs_signed,
+    _validate_deconvolve_params,
     deconvolve,
+    get_phase_center,
+    hogbom_clean,
+    progress_callback,
 )
-from astroviper.core.imaging.imaging_utils.return_dict import ReturnDict
+from astroviper.core.imaging.utils.return_dict import ReturnDict
 
 try:
-    from astroviper.core.imaging.deconvolvers import hogbom
+    from astroviper.core.imaging.deconvolvers import hogbom  # noqa: F401
 
     HOGBOM_AVAILABLE = True
-except ImportError as e:
+except ImportError:  # pragma: no cover
     HOGBOM_AVAILABLE = False
-    print(f"Warning: Hogbom extension not available: {e}")
 
 
-def _wipe_files(file_list):
-    """Helper function to remove files or directories if they exist"""
-    for f in file_list:
-        if os.path.exists(f):
-            if os.path.isdir(f):
-                shutil.rmtree(f)
-            else:
-                os.remove(f)
+requires_hogbom = pytest.mark.skipif(
+    not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
+)
 
 
-@pytest.fixture()
-def hogbom_images():
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _delta_psf_cube(nt, nf, npol, ny, nx, dtype=np.float32):
+    psf = np.zeros((nt, nf, npol, ny, nx), dtype=dtype)
+    psf[..., ny // 2, nx // 2] = 1.0
+    return psf
+
+
+def _make_img_xds(
+    nt=1,
+    nf=1,
+    npol=1,
+    ny=32,
+    nx=32,
+    sources=None,
+    psf_npol=None,
+    with_mask=False,
+    dtype=np.float32,
+):
     """
-    Create a new copy of the test images for hogbom tests.
+    Build a minimal image Dataset matching what :func:`deconvolve`
+    expects.
+
+    The dataset has two data variables — ``RESIDUAL`` and
+    ``POINT_SPREAD_FUNCTION`` — wired up as a ``"residual"`` data
+    group. The residual contains point sources (via ``sources``) and
+    the PSF is a delta at the centre pixel.
+
+    Parameters
+    ----------
+    sources : dict, optional
+        Maps ``(tt, nn, pp)`` -> list of ``(iy, ix, amp)``. Defaults to
+        a single source at the centre of every plane.
+    psf_npol : int, optional
+        PSF polarization count (defaults to ``npol``). Set to ``1`` to
+        exercise the broadcast path.
+    with_mask : bool
+        If True, attach a ``MASK_RESIDUAL`` data variable.
     """
-    resid_image_orig = "refim_point_im.residual"
-    psf_image_orig = "refim_point_im.psf"
+    if psf_npol is None:
+        psf_npol = npol
 
-    if not os.path.exists(resid_image_orig) or not os.path.exists(psf_image_orig):
-        _wipe_files([resid_image_orig, psf_image_orig])
-        toolviper.utils.data.update()
-        files = [resid_image_orig, psf_image_orig]
-        toolviper.utils.data.download(file=files, folder=".")
+    resid = np.zeros((nt, nf, npol, ny, nx), dtype=dtype)
+    if sources is None:
+        sources = {
+            (t, f, p): [(ny // 2, nx // 2, 1.0 + 0.1 * (t * nf * npol + f * npol + p))]
+            for t in range(nt)
+            for f in range(nf)
+            for p in range(npol)
+        }
+    for (tt, nn, pp), src_list in sources.items():
+        for iy, ix, amp in src_list:
+            resid[tt, nn, pp, iy, ix] = amp
 
-    resid_image = "test_hogbom_resid.im"
-    psf_image = "test_hogbom_psf.im"
+    psf = _delta_psf_cube(nt, nf, psf_npol, ny, nx, dtype=dtype)
 
-    if os.path.exists(resid_image):
-        shutil.rmtree(resid_image)
-    if os.path.exists(psf_image):
-        shutil.rmtree(psf_image)
+    coords = {
+        "time": np.arange(nt, dtype=np.float64),
+        "frequency": 1.0e9 + 1.0e6 * np.arange(nf),
+        "polarization": ["I", "Q", "U", "V"][:npol],
+        "l": np.linspace(-0.01, 0.01, nx),
+        "m": np.linspace(-0.01, 0.01, ny),
+    }
 
-    shutil.copytree(resid_image_orig, resid_image)
-    shutil.copytree(psf_image_orig, psf_image)
+    data_vars = {
+        "RESIDUAL": (["time", "frequency", "polarization", "l", "m"], resid),
+        "POINT_SPREAD_FUNCTION": (
+            ["time", "frequency", "polarization", "l", "m"],
+            psf,
+        ),
+    }
 
-    return resid_image, psf_image
+    if with_mask:
+        mask = np.ones((nt, nf, npol, ny, nx), dtype=dtype)
+        data_vars["MASK_RESIDUAL"] = (
+            ["time", "frequency", "polarization", "l", "m"],
+            mask,
+        )
+
+    xds = xr.Dataset(data_vars, coords=coords)
+
+    # The (y, x) dimensions are named ``l``/``m`` in astroviper image
+    # datasets. ``deconvolve`` / ``imgstats`` operate on the trailing
+    # two axes of the values array, so dimension naming is not
+    # inspected; we only need the data_groups attribute.
+    xds.attrs["data_groups"] = {
+        "residual": {
+            "sky": "RESIDUAL",
+            "point_spread_function": "POINT_SPREAD_FUNCTION",
+        }
+    }
+    return xds
 
 
-class TestValidateDeconvParams:
-    """Test the _validate_deconv_params function"""
+# ---------------------------------------------------------------------------
+# _validate_deconvolve_params
+# ---------------------------------------------------------------------------
 
-    def test_default_parameters(self):
-        """Test that default parameters are set correctly"""
-        params = {}
-        result = _validate_deconv_params(params)
 
-        expected = {
+class TestValidateDeconvolveParams:
+    def test_none_returns_defaults(self):
+        result = _validate_deconvolve_params(None)
+        assert result == {
             "gain": 0.1,
             "niter": 1000,
             "threshold": 0.0,
             "clean_box": (-1, -1, -1, -1),
         }
-        assert result == expected
 
-    def test_existing_valid_parameters(self):
-        """Test that valid existing parameters are preserved"""
-        params = {
-            "gain": 0.05,
-            "niter": 500,
-            "threshold": 1e-6,
-            "clean_box": (10, 20, 15, 25),
+    def test_empty_dict_returns_defaults(self):
+        assert _validate_deconvolve_params({}) == {
+            "gain": 0.1,
+            "niter": 1000,
+            "threshold": 0.0,
+            "clean_box": (-1, -1, -1, -1),
         }
-        result = _validate_deconv_params(params)
+
+    def test_partial_params_filled(self):
+        result = _validate_deconvolve_params({"gain": 0.05})
+        assert result["gain"] == 0.05
+        assert result["niter"] == 1000
+        assert result["threshold"] == 0.0
+        assert result["clean_box"] == (-1, -1, -1, -1)
+
+    def test_full_valid_params_preserved(self):
+        params = {
+            "gain": 0.3,
+            "niter": 42,
+            "threshold": 1e-6,
+            "clean_box": (1, 2, 3, 4),
+        }
+        result = _validate_deconvolve_params(params)
         assert result == params
 
-    def test_gain_validation(self):
-        """Test gain parameter validation"""
-        # Valid gain values
-        valid_gains = [0.01, 0.1, 0.5, 1.0]
-        for gain in valid_gains:
-            params = {"gain": gain}
-            result = _validate_deconv_params(params)
-            assert result["gain"] == gain
+    @pytest.mark.parametrize("gain", [0.01, 0.1, 0.5, 1.0])
+    def test_gain_accepts_valid(self, gain):
+        result = _validate_deconvolve_params({"gain": gain})
+        assert result["gain"] == gain
 
-        # Invalid gain values
-        invalid_gains = [0.0, -0.1, 1.1, 2.0]
-        for gain in invalid_gains:
-            params = {"gain": gain}
-            with pytest.raises(ValueError, match="CLEAN gain must be between 0 and 1"):
-                _validate_deconv_params(params)
+    @pytest.mark.parametrize("gain", [0.0, -0.1, 1.1, 2.0])
+    def test_gain_rejects_invalid(self, gain):
+        with pytest.raises(ValueError, match="CLEAN gain"):
+            _validate_deconvolve_params({"gain": gain})
 
-    def test_niter_validation(self):
-        """Test niter parameter validation"""
-        # Valid niter values
-        valid_niters = [1, 100, 1000, 10000]
-        for niter in valid_niters:
-            params = {"niter": niter}
-            result = _validate_deconv_params(params)
-            assert result["niter"] == niter
+    @pytest.mark.parametrize("niter", [1, 100, 1000])
+    def test_niter_accepts_valid(self, niter):
+        result = _validate_deconvolve_params({"niter": niter})
+        assert result["niter"] == niter
 
-        # Invalid niter values
-        invalid_niters = [0, -1, 1.5, "100", None]
-        for niter in invalid_niters:
-            params = {"niter": niter}
-            with pytest.raises(
-                ValueError,
-                match="Maximum number of iterations must be a positive integer",
-            ):
-                _validate_deconv_params(params)
+    @pytest.mark.parametrize("niter", [0, -1, 1.5, "100", None])
+    def test_niter_rejects_invalid(self, niter):
+        with pytest.raises(ValueError, match="positive integer"):
+            _validate_deconvolve_params({"niter": niter})
 
-    def test_threshold_validation(self):
-        """Test threshold parameter validation"""
-        # Valid threshold values
-        valid_thresholds = [None, 0.0, 1e-6, 0.001]
-        for threshold in valid_thresholds:
-            params = {"threshold": threshold}
-            result = _validate_deconv_params(params)
-            assert result["threshold"] == threshold
+    @pytest.mark.parametrize("threshold", [None, 0.0, 1e-6, 1.0])
+    def test_threshold_accepts_valid(self, threshold):
+        result = _validate_deconvolve_params({"threshold": threshold})
+        assert result["threshold"] == threshold
 
-        # Invalid threshold values
-        invalid_thresholds = [-1e-6, -0.001]
-        for threshold in invalid_thresholds:
-            params = {"threshold": threshold}
-            with pytest.raises(
-                ValueError, match="Threshold must be non-negative or None"
-            ):
-                _validate_deconv_params(params)
+    def test_threshold_rejects_negative(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            _validate_deconvolve_params({"threshold": -0.1})
 
-    def test_clean_box_validation(self):
-        """Test clean_box parameter validation"""
-        # Valid clean_box values (4-tuples of integers)
-        valid_clean_boxes = [
-            None,
-            (-1, -1, -1, -1),  # No clean box
-            (0, 10, 0, 10),  # Valid box
-            (5, 15, 10, 20),  # Another valid box
-        ]
-        for clean_box in valid_clean_boxes:
-            params = {"clean_box": clean_box}
-            result = _validate_deconv_params(params)
-            assert result["clean_box"] == clean_box
-
-        # Invalid clean_box values
-        invalid_clean_boxes = [
-            (0, 10),  # Only 2 elements
-            (0, 10, 0),  # Only 3 elements
-            (0, 10, 0, 10, 0),  # 5 elements
-            "invalid",  # String
-            [],  # Empty list
-        ]
-        for clean_box in invalid_clean_boxes:
-            params = {"clean_box": clean_box}
-            with pytest.raises(
-                ValueError, match="Clean box must be a 4-tuple.*or None"
-            ):
-                _validate_deconv_params(params)
-
-    def test_partial_parameters(self):
-        """Test that partial parameter specification works correctly"""
-        params = {"gain": 0.05}
-        result = _validate_deconv_params(params)
-
-        expected = {
-            "gain": 0.05,
-            "niter": 1000,  # Default
-            "threshold": 0.0,  # Default
-            "clean_box": (-1, -1, -1, -1),  # Default
-        }
-        assert result == expected
-
-
-class TestHogbomUtilities:
-    """Test utility functions in the hogbom extension"""
-
-    @pytest.mark.skipif(
-        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
+    @pytest.mark.parametrize(
+        "box",
+        [None, (-1, -1, -1, -1), (0, 10, 0, 10), (5, 15, 10, 20)],
     )
-    def test_get_dtype_name(self):
-        """Test get_dtype_name function"""
+    def test_clean_box_accepts_valid(self, box):
+        result = _validate_deconvolve_params({"clean_box": box})
+        assert result["clean_box"] == box
 
-        # Test different dtypes
-        arr_float32 = np.array([1.0, 2.0], dtype=np.float32)
-        arr_float64 = np.array([1.0, 2.0], dtype=np.float64)
-        arr_int32 = np.array([1, 2], dtype=np.int32)
-
-        assert hogbom.get_dtype_name(arr_float32) == "float32"
-        assert hogbom.get_dtype_name(arr_float64) == "float64"
-        assert hogbom.get_dtype_name(arr_int32) == "int32"
-
-    @pytest.mark.skipif(
-        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
+    @pytest.mark.parametrize(
+        "box",
+        [(0, 10), (0, 10, 0), (0, 10, 0, 10, 0), "invalid", []],
     )
-    def test_is_float32(self):
-        """Test is_float32 function"""
+    def test_clean_box_rejects_invalid(self, box):
+        with pytest.raises(ValueError, match="4-tuple"):
+            _validate_deconvolve_params({"clean_box": box})
 
-        arr_float32 = np.array([1.0, 2.0], dtype=np.float32)
-        arr_float64 = np.array([1.0, 2.0], dtype=np.float64)
-        arr_int32 = np.array([1, 2], dtype=np.int32)
-
-        assert hogbom.is_float32(arr_float32) is True
-        assert hogbom.is_float32(arr_float64) is False
-        assert hogbom.is_float32(arr_int32) is False
-
-    @pytest.mark.skipif(
-        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
-    )
-    def test_is_float64(self):
-        """Test is_float64 function"""
-
-        arr_float32 = np.array([1.0, 2.0], dtype=np.float32)
-        arr_float64 = np.array([1.0, 2.0], dtype=np.float64)
-        arr_int32 = np.array([1, 2], dtype=np.int32)
-
-        assert hogbom.is_float64(arr_float32) is False
-        assert hogbom.is_float64(arr_float64) is True
-        assert hogbom.is_float64(arr_int32) is False
+    def test_does_not_mutate_other_keys(self):
+        params = {"gain": 0.2, "extra": "ignored"}
+        result = _validate_deconvolve_params(params)
+        assert result["extra"] == "ignored"
 
 
-class TestMaximgFunction:
-    """Test the maximg function"""
-
-    @pytest.mark.skipif(
-        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
-    )
-    def test_maximg_basic_float32(self):
-        """Test basic maximg functionality with float32"""
-
-        # Create 2D test image [ny, nx]
-        ny, nx = 32, 32
-        image = np.random.rand(ny, nx).astype(np.float32) * 2 - 1  # Range [-1, 1]
-
-        # Set known min/max values
-        image[10, 15] = -2.5  # Global minimum
-        image[20, 25] = 3.7  # Global maximum
-
-        fmin, fmax = hogbom.maximg(image)
-
-        assert fmin == pytest.approx(-2.5, abs=1e-6)
-        assert fmax == pytest.approx(3.7, abs=1e-6)
-
-    @pytest.mark.skipif(
-        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
-    )
-    def test_maximg_basic_float64(self):
-        """Test basic maximg functionality with float64"""
-
-        # Create 2D test image [ny, nx]
-        ny, nx = 16, 16
-        image = np.random.rand(ny, nx).astype(np.float64) * 10
-
-        # Set known min/max values
-        image[5, 8] = -15.75
-        image[12, 3] = 22.33
-
-        fmin, fmax = hogbom.maximg(image)
-
-        assert fmin == pytest.approx(-15.75, abs=1e-12)
-        assert fmax == pytest.approx(22.33, abs=1e-12)
-
-    @pytest.mark.skipif(
-        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
-    )
-    def test_maximg_with_mask(self):
-        """Test maximg with mask"""
-
-        ny, nx = 16, 16
-        image = np.ones((ny, nx), dtype=np.float32) * 5.0
-
-        # Set extreme values that should be masked out
-        image[3, 4] = -100.0  # Should be ignored due to mask
-        image[10, 12] = 200.0  # Should be ignored due to mask
-
-        # Create mask - 1.0 means use pixel, 0.0 means ignore
-        mask = np.ones((ny, nx), dtype=np.float32)
-        mask[3, 4] = 0.0  # Mask out the minimum
-        mask[10, 12] = 0.0  # Mask out the maximum
-
-        fmin, fmax = hogbom.maximg(image, mask)
-
-        # Should find 5.0 as both min and max (ignoring masked pixels)
-        assert fmin == pytest.approx(5.0, abs=1e-6)
-        assert fmax == pytest.approx(5.0, abs=1e-6)
-
-    @pytest.mark.skipif(
-        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
-    )
-    def test_maximg_single_plane(self):
-        """Test maximg with single 2D plane"""
-
-        ny, nx = 8, 8
-        image = np.zeros((ny, nx), dtype=np.float32)
-        image[4, 4] = 1.0  # Single point source
-
-        fmin, fmax = hogbom.maximg(image)
-
-        assert fmin == pytest.approx(0.0, abs=1e-6)
-        assert fmax == pytest.approx(1.0, abs=1e-6)
-
-    @pytest.mark.skipif(
-        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
-    )
-    def test_maximg_multiple_sources(self):
-        """Test maximg with multiple sources in 2D plane"""
-
-        ny, nx = 10, 10
-        image = np.zeros((ny, nx), dtype=np.float32)
-
-        # Set different values at different locations
-        image[2, 3] = -3.0  # Global minimum
-        image[4, 5] = 1.5
-        image[6, 7] = 2.8  # Global maximum
-        image[8, 1] = -1.2
-
-        fmin, fmax = hogbom.maximg(image)
-
-        assert fmin == pytest.approx(-3.0, abs=1e-6)
-        assert fmax == pytest.approx(2.8, abs=1e-6)
-
-    @pytest.mark.skipif(
-        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
-    )
-    def test_maximg_error_wrong_dimensions(self):
-        """Test maximg error handling for wrong dimensions"""
-
-        # Test 1D array (should fail)
-        image_1d = np.random.rand(32).astype(np.float32)
-        with pytest.raises(RuntimeError, match="Image must be 2D array"):
-            hogbom.maximg(image_1d)
-
-        # Test 3D array (should fail - now expects 2D)
-        image_3d = np.random.rand(2, 32, 32).astype(np.float32)
-        with pytest.raises(RuntimeError, match="Image must be 2D array"):
-            hogbom.maximg(image_3d)
-
-    @pytest.mark.skipif(
-        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
-    )
-    def test_maximg_mask_dimension_mismatch(self):
-        """Test maximg error handling for mask dimension mismatch"""
-
-        image = np.random.rand(32, 32).astype(np.float32)
-        wrong_mask = np.ones((16, 16), dtype=np.float32)  # Wrong size
-
-        with pytest.raises(
-            RuntimeError, match="Mask dimensions must match image spatial dimensions"
-        ):
-            hogbom.maximg(image, wrong_mask)
+# ---------------------------------------------------------------------------
+# _plane_peak_abs_signed
+# ---------------------------------------------------------------------------
 
 
-class TestHogbomClean:
-    """Test the hogbom_clean function"""
+class TestPlanePeakAbsSigned:
+    def test_returns_signed_peak(self):
+        arr = np.zeros((8, 8), dtype=np.float32)
+        arr[3, 3] = 5.0
+        arr[4, 4] = -7.0
+        assert _plane_peak_abs_signed(arr) == pytest.approx(-7.0)
 
-    @pytest.mark.skipif(
-        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
-    )
-    def test_hogbom_clean_basic(self, hogbom_images):
-        """Test basic hogbom_clean functionality"""
+    def test_no_mask_when_all_positive(self):
+        arr = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        assert _plane_peak_abs_signed(arr) == pytest.approx(4.0)
 
-        resid_image, psf_image = hogbom_images
-        dirty_xds = load_image({"residual": resid_image})
-        psf_xds = load_image({"point_spread_function": psf_image})
+    def test_with_mask_excludes_pixels(self):
+        arr = np.array([[1.0, 2.0], [3.0, -10.0]], dtype=np.float32)
+        mask = np.ones_like(arr)
+        mask[1, 1] = 0.0  # exclude the largest magnitude
+        assert _plane_peak_abs_signed(arr, mask=mask) == pytest.approx(3.0)
 
-        deconv_params = {"gain": 0.1, "niter": 100}
+    def test_mask_all_false_returns_nan(self):
+        arr = np.ones((4, 4), dtype=np.float32)
+        mask = np.zeros_like(arr)
+        result = _plane_peak_abs_signed(arr, mask=mask)
+        assert np.isnan(result)
 
-        # Extract 2D numpy arrays from xarray datasets
-        dirty_array = dirty_xds.isel(time=0, frequency=0, polarization=0)[
-            "RESIDUAL"
-        ].values
-        psf_array = psf_xds.isel(time=0, frequency=0, polarization=0)[
-            "POINT_SPREAD_FUNCTION"
-        ].values
+    def test_mask_threshold_is_half(self):
+        """Mask values must exceed 0.5 to count as valid."""
+        arr = np.array([[0.0, 5.0], [0.0, 0.0]], dtype=np.float32)
+        mask = np.array([[0.0, 0.5], [0.0, 0.0]], dtype=np.float32)
+        result = _plane_peak_abs_signed(arr, mask=mask)
+        # 0.5 is NOT > 0.5, so the 5.0 pixel is excluded.
+        assert np.isnan(result)
 
-        # Run function
-        # Hogbom clean now expects 2D numpy arrays and returns numpy arrays
-        # The iteration over time/freq/pol is done in the deconvolve() function
-        result, model_array, residual_array = hogbom_clean(
-            dirty_array, psf_array, deconv_params
+
+# ---------------------------------------------------------------------------
+# progress_callback
+# ---------------------------------------------------------------------------
+
+
+class TestProgressCallback:
+    def test_no_log_off_cadence(self, caplog):
+        with caplog.at_level(logging.INFO):
+            progress_callback(17, 1, 2, 0.5, niter_log=100)
+        # 17 % 100 != 0 so nothing should be emitted.
+        assert not any(
+            "Iteration" in record.getMessage() for record in caplog.records
         )
 
-        # Verify result structure
-        assert isinstance(result, dict)
-        assert "iterations_performed" in result
-        assert "final_peak" in result
-        assert "total_flux_cleaned" in result
-        assert result["iterations_performed"] == 100
-
-        # Verify arrays are numpy arrays with correct shape
-        assert isinstance(model_array, np.ndarray)
-        assert isinstance(residual_array, np.ndarray)
-        assert model_array.ndim == 2
-        assert residual_array.ndim == 2
-        assert model_array.shape == dirty_array.shape
-        assert residual_array.shape == dirty_array.shape
-
-        # Verify values
-        assert residual_array[125, 129] == pytest.approx(0.004976, abs=1e-5)
-        assert model_array[128, 128] == pytest.approx(0.97746, abs=1e-4)
-
-    # @pytest.mark.skipif(
-    #     not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
-    # )
-    # def test_hogbom_clean_multipol(self, hogbom_images):
-    #     """Test hogbom_clean with multiple time and frequency slices"""
-    #
-    #     resid_image, psf_image = hogbom_images
-    #     dirty_xds = load_image(resid_image)
-    #     psf_xds = load_image(psf_image)
-    #
-    #     # Grab data to duplicate across frequency
-    #     original_data = dirty_xds["SKY"].data
-    #     original_psf = psf_xds["SKY"].data
-    #
-    #     pol_coords = ['I', 'Q', 'U', 'V']
-    #
-    #     # Replicate the single plane data to 4 polarizations
-    #     # Original shape should be [time, freq, pol, ny, nx] - expand polarization axis
-    #     cube_data = np.repeat(original_data, 4, axis=2)  # Repeat along pol axis
-    #     cube_psf = np.repeat(original_psf, 4, axis=2)
-    #
-    #     # Create new xarray datasets with frequency dimension
-    #     dirty_xds_multipol = dirty_xds.copy()
-    #     dirty_xds_multipol['SKY'] = xr.DataArray(
-    #         cube_data,
-    #         dims=['time', 'frequency', 'polarization', 'l', 'm'],
-    #         coords={
-    #             'time': dirty_xds['SKY'].coords['time'],
-    #             'frequency': dirty_xds['SKY'].coords['frequency'],
-    #             'polarization': pol_coords,
-    #             'l': dirty_xds['SKY'].coords['l'],
-    #             'm': dirty_xds['SKY'].coords['m']
-    #         }
-    #     )
-    #
-    #     psf_xds_multipol = psf_xds.copy()
-    #     psf_xds_multipol['SKY'] = xr.DataArray(
-    #         cube_psf,
-    #         dims=['time', 'frequency', 'polarization', 'l', 'm'],
-    #         coords={
-    #             'time': psf_xds['SKY'].coords['time'],
-    #             'frequency': psf_xds['SKY'].coords['frequency'],
-    #             'polarization': pol_coords,
-    #             'l': psf_xds['SKY'].coords['l'],
-    #             'm': psf_xds['SKY'].coords['m']
-    #         }
-    #     )
-    #
-    #     deconv_params = {'gain': 0.1, 'niter': 100}
-    #
-    #     result = hogbom_clean(dirty_xds_multipol, psf_xds_multipol, deconv_params)
-    #
-    #
-    # def test_hogbom_clean_logging(self, mock_logger, mock_hogbom):
-    #
-    #     """Test that proper logging occurs during deconvolution"""
-    #     mock_hogbom.maximg.return_value = (-0.5, 1.0)
-    #     mock_hogbom.clean.return_value = {
-    #         'model_image': np.zeros((1, 32, 32), dtype=np.float32),
-    #         'residual_image': np.random.rand(1, 32, 32).astype(np.float32),
-    #         'iterations_performed': 25,
-    #         'final_peak': 0.05,
-    #         'total_flux_cleaned': 1.2,
-    #         'converged': True
-    #     }
-    #
-    #     dirty_xds = self.create_mock_xds(nx=32, ny=32)
-    #     psf_xds = self.create_mock_psf_xds(nx=32, ny=32)
-    #     deconv_params = {'gain': 0.1}
-    #
-    #     hogbom_clean(dirty_xds, psf_xds, deconv_params)
-    #
-    #     # Check that debug and info logging occurred
-    #     assert mock_logger.debug.called
-    #     assert mock_logger.info.called
-    #
-    # def test_hogbom_clean_output_structure(self):
-    #     """Test the structure of hogbom_clean output"""
-    #
-    #     expected_result = {
-    #         'model_image': np.zeros((1, 64, 64), dtype=np.float32),
-    #         'residual_image': np.random.rand(1, 64, 64).astype(np.float32),
-    #         'iterations_performed': 75,
-    #         'final_peak': 0.02,
-    #         'total_flux_cleaned': 3.1,
-    #         'converged': False
-    #     }
-    #
-    #     mock_hogbom.maximg.return_value = (-0.3, 0.8)
-    #     mock_hogbom.clean.return_value = expected_result
-    #
-    #     dirty_xds = self.create_mock_xds()
-    #     psf_xds = self.create_mock_psf_xds()
-    #     deconv_params = {'gain': 0.1}
-    #
-    #     result = hogbom_clean(dirty_xds, psf_xds, deconv_params)
-    #
-    #     # Verify all expected keys are present
-    #     required_keys = [
-    #         'model_image', 'residual_image', 'iterations_performed',
-    #         'final_peak', 'total_flux_cleaned', 'converged'
-    #     ]
-    #     for key in required_keys:
-    #         assert key in result
-    #
-    #     # Verify data types
-    #     assert isinstance(result['iterations_performed'], int)
-    #     assert isinstance(result['final_peak'], (int, float))
-    #     assert isinstance(result['total_flux_cleaned'], (int, float))
-    #     assert isinstance(result['converged'], bool)
-    #
-
-
-class TestReturnDict:
-    """Test the ReturnDict structure, indexing, and values"""
-
-    @pytest.mark.skipif(
-        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
-    )
-    def test_returndict_structure_single_plane(self, hogbom_images):
-        """Test ReturnDict structure with single plane (1 time, 1 freq, 1 pol)"""
-
-        resid_image, psf_image = hogbom_images
-        dirty_xds = load_image({"residual": resid_image})
-        psf_xds = load_image({"point_spread_function": psf_image})
-
-        deconv_params = {"gain": 0.1, "niter": 100, "threshold": 0.0}
-
-        returndict, model_xds, residual_xds = deconvolve(
-            dirty_xds, psf_xds, deconv_params=deconv_params
+    def test_logs_on_cadence(self, caplog):
+        with caplog.at_level(logging.INFO):
+            progress_callback(200, 4, 5, 1.25, niter_log=100)
+        assert any(
+            "Iteration 200" in record.getMessage() for record in caplog.records
         )
 
-        # Verify ReturnDict has exactly one entry (1 time × 1 freq × 1 pol)
-        assert len(returndict.data) == 1
+    def test_default_cadence(self, caplog):
+        with caplog.at_level(logging.INFO):
+            progress_callback(0, 0, 0, 0.0)
+        assert any(
+            "Iteration 0" in record.getMessage() for record in caplog.records
+        )
 
-        # Get the single entry
-        key = list(returndict.data.keys())[0]
-        entry = returndict.data[key]
 
-        # Verify key structure
-        assert key.time == 0
-        assert key.pol == 0
-        assert key.chan == 0
+# ---------------------------------------------------------------------------
+# get_phase_center
+# ---------------------------------------------------------------------------
 
-        # Verify all required fields exist
-        required_fields = [
+
+class TestGetPhaseCenter:
+    def test_reads_centre_pixel(self):
+        ny, nx = 4, 4
+        ra = np.arange(ny * nx, dtype=np.float64).reshape(ny, nx)
+        dec = -ra
+
+        xds = xr.Dataset(
+            coords={
+                "right_ascension": (["l", "m"], ra),
+                "declination": (["l", "m"], dec),
+            }
+        )
+        result = get_phase_center(xds)
+        # Centre pixel is (ny//2, nx//2).
+        expected_ra = ra[ny // 2, nx // 2]
+        expected_dec = dec[ny // 2, nx // 2]
+        assert result == f"{expected_ra},{expected_dec}"
+
+
+# ---------------------------------------------------------------------------
+# hogbom_clean (5D cube wrapper)
+# ---------------------------------------------------------------------------
+
+
+@requires_hogbom
+class TestHogbomCleanCube:
+    def test_basic_cube_cleaned(self):
+        nt, nf, npol, ny, nx = 1, 1, 1, 16, 16
+        resid = np.zeros((nt, nf, npol, ny, nx), dtype=np.float32)
+        resid[0, 0, 0, 8, 8] = 2.5
+        psf = _delta_psf_cube(nt, nf, npol, ny, nx)
+        model = np.zeros_like(resid)
+
+        result = hogbom_clean(
+            residual_cube=resid,
+            psf_cube=psf,
+            model_cube=model,
+            deconvolve_params={"gain": 1.0, "niter": 10, "threshold": 0.1},
+        )
+
+        assert result["iterations_performed"].shape == (nt, nf, npol)
+        assert model[0, 0, 0, 8, 8] == pytest.approx(2.5, abs=1e-6)
+        assert np.allclose(resid, 0.0, atol=1e-6)
+
+    def test_multiplane_threaded_matches_serial(self):
+        nt, nf, npol, ny, nx = 2, 2, 2, 16, 16
+        rng = np.random.default_rng(7)
+        base = rng.standard_normal((nt, nf, npol, ny, nx)).astype(np.float32)
+        psf = _delta_psf_cube(nt, nf, npol, ny, nx)
+
+        resid_a = base.copy()
+        model_a = np.zeros_like(resid_a)
+        hogbom_clean(resid_a, psf, model_a,
+                     {"gain": 0.2, "niter": 20, "threshold": 0.05},
+                     num_threads=1)
+
+        resid_b = base.copy()
+        model_b = np.zeros_like(resid_b)
+        hogbom_clean(resid_b, psf, model_b,
+                     {"gain": 0.2, "niter": 20, "threshold": 0.05},
+                     num_threads=4)
+
+        assert np.array_equal(model_a, model_b)
+        assert np.array_equal(resid_a, resid_b)
+
+    def test_broadcast_psf(self):
+        nt, nf, npol, ny, nx = 1, 1, 3, 16, 16
+        resid = np.zeros((nt, nf, npol, ny, nx), dtype=np.float32)
+        for p in range(npol):
+            resid[0, 0, p, 8, 8] = 1.0 + p
+        psf = _delta_psf_cube(nt, nf, 1, ny, nx)
+        model = np.zeros_like(resid)
+
+        hogbom_clean(resid, psf, model,
+                     {"gain": 1.0, "niter": 5, "threshold": 0.1})
+
+        for p in range(npol):
+            assert model[0, 0, p, 8, 8] == pytest.approx(1.0 + p, abs=1e-6)
+
+    def test_mask_cube_respected(self):
+        nt, nf, npol, ny, nx = 1, 1, 1, 16, 16
+        resid = np.zeros((nt, nf, npol, ny, nx), dtype=np.float32)
+        resid[0, 0, 0, 5, 5] = 10.0
+        resid[0, 0, 0, 10, 10] = 3.0
+        psf = _delta_psf_cube(nt, nf, npol, ny, nx)
+        model = np.zeros_like(resid)
+
+        mask = np.ones_like(resid)
+        mask[0, 0, 0, 5, 5] = 0.0
+
+        hogbom_clean(resid, psf, model,
+                     {"gain": 1.0, "niter": 5, "threshold": 0.1},
+                     mask_cube=mask)
+
+        # Masked source should survive; other source should be cleaned.
+        assert resid[0, 0, 0, 5, 5] == pytest.approx(10.0, abs=1e-6)
+        assert model[0, 0, 0, 10, 10] == pytest.approx(3.0, abs=1e-6)
+
+    def test_rejects_non_5d(self):
+        arr = np.zeros((16, 16), dtype=np.float32)
+        with pytest.raises(ValueError, match="5D"):
+            hogbom_clean(arr, arr, arr)
+
+    def test_rejects_shape_mismatch(self):
+        resid = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
+        psf = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
+        model = np.zeros((1, 1, 1, 8, 8), dtype=np.float32)
+        with pytest.raises(ValueError, match="same shape"):
+            hogbom_clean(resid, psf, model)
+
+    def test_rejects_psf_spatial_mismatch(self):
+        resid = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
+        psf = np.zeros((1, 1, 1, 8, 8), dtype=np.float32)
+        model = np.zeros_like(resid)
+        with pytest.raises(ValueError, match="time, frequency, y, x"):
+            hogbom_clean(resid, psf, model)
+
+    def test_rejects_bad_psf_pol(self):
+        resid = np.zeros((1, 1, 3, 16, 16), dtype=np.float32)
+        psf = np.zeros((1, 1, 2, 16, 16), dtype=np.float32)
+        model = np.zeros_like(resid)
+        with pytest.raises(ValueError, match="polarization"):
+            hogbom_clean(resid, psf, model)
+
+    def test_rejects_bad_mask_shape(self):
+        resid = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
+        psf = _delta_psf_cube(1, 1, 1, 16, 16)
+        model = np.zeros_like(resid)
+        bad_mask = np.ones((1, 1, 1, 8, 8), dtype=np.float32)
+        with pytest.raises(ValueError, match="mask_cube"):
+            hogbom_clean(resid, psf, model, mask_cube=bad_mask)
+
+
+# ---------------------------------------------------------------------------
+# deconvolve (end-to-end)
+# ---------------------------------------------------------------------------
+
+
+@requires_hogbom
+class TestDeconvolve:
+    def test_basic_single_plane(self):
+        xds = _make_img_xds()
+        returndict = deconvolve(
+            img_xds=xds,
+            deconvolve_params={"gain": 1.0, "niter": 5, "threshold": 0.05},
+        )
+
+        assert isinstance(returndict, ReturnDict)
+        assert len(returndict.data) == 1  # 1 time * 1 freq * 1 pol
+        entry = list(returndict.data.values())[0]
+        for field in (
+            "iter_done",
             "niter",
             "threshold",
-            "iter_done",
             "loop_gain",
-            "min_psf_fraction",
-            "max_psf_fraction",
-            "max_psf_sidelobe",
-            "stop_code",
-            "stokes",
-            "frequency",
-            "phase_center",
-            "time",
-            "start_model_flux",
-            "model_flux",
-            "start_peakres",
-            "start_peakres_nomask",
             "peakres",
             "peakres_nomask",
             "masksum",
-        ]
-        for field in required_fields:
-            assert field in entry, f"Missing required field: {field}"
+            "model_flux",
+            "start_model_flux",
+            "start_peakres",
+            "start_peakres_nomask",
+            "stokes",
+            "frequency",
+            "time",
+        ):
+            assert field in entry
 
-    @pytest.mark.skipif(
-        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
-    )
-    def test_returndict_values_consistency(self, hogbom_images):
-        """Test that ReturnDict values are internally consistent"""
+        # Model variable created in place.
+        assert "SKY_MODEL" in xds.data_vars
+        # Source cleaned into model.
+        model = xds["SKY_MODEL"].values
+        assert model[0, 0, 0, 16, 16] == pytest.approx(1.0, abs=1e-5)
 
-        resid_image, psf_image = hogbom_images
-        dirty_xds = load_image({"residual": resid_image})
+    def test_multi_pol_returndict_entries(self):
+        nt, nf, npol = 1, 1, 4
+        xds = _make_img_xds(nt=nt, nf=nf, npol=npol)
+        returndict = deconvolve(
+            img_xds=xds,
+            deconvolve_params={"gain": 1.0, "niter": 5, "threshold": 0.05},
+        )
+        assert len(returndict.data) == nt * nf * npol
+        for p in range(npol):
+            entry = returndict.sel(pol=p)
+            assert isinstance(entry, dict)
+            assert entry["stokes"] == ["I", "Q", "U", "V"][p]
 
-        psf_xds = load_image({"point_spread_function": psf_image})
+    def test_multi_chan_returndict_frequencies(self):
+        nt, nf, npol = 1, 3, 1
+        xds = _make_img_xds(nt=nt, nf=nf, npol=npol)
+        returndict = deconvolve(
+            img_xds=xds,
+            deconvolve_params={"gain": 1.0, "niter": 5, "threshold": 0.05},
+        )
+        assert len(returndict.data) == nt * nf * npol
+        freqs = [float(returndict.sel(chan=c)["frequency"]) for c in range(nf)]
+        assert len(set(freqs)) == nf
 
-        deconv_params = {"gain": 0.1, "niter": 100, "threshold": 0.001}
+    def test_rejects_psf_pol_mismatch(self):
+        """Residual polarization != PSF polarization raises (unless PSF has
+        exactly one polarization, which ``deconvolve`` handles by
+        broadcasting). Here we force npol_psf == 2 with npol == 3 to
+        trigger the error path."""
+        xds = _make_img_xds(npol=3, psf_npol=3)
+        # Swap in a PSF with mismatched polarization dim size by
+        # constructing a new array on a separate pol coord.
+        psf_arr = np.zeros(
+            (xds.sizes["time"], xds.sizes["frequency"], 2,
+             xds.sizes["l"], xds.sizes["m"]),
+            dtype=np.float32,
+        )
+        psf_arr[..., xds.sizes["l"] // 2, xds.sizes["m"] // 2] = 1.0
+        # Build a second dataset carrying only the bad PSF, then merge in
+        # by deleting+re-adding so xarray accepts the new size.
+        del xds["POINT_SPREAD_FUNCTION"]
+        xds = xds.assign_coords({"psf_pol": ["I", "Q"]})
+        xds["POINT_SPREAD_FUNCTION"] = (
+            ["time", "frequency", "psf_pol", "l", "m"], psf_arr
+        )
+        with pytest.raises((ValueError, KeyError)):
+            deconvolve(img_xds=xds)
 
-        returndict, model_xds, residual_xds = deconvolve(
-            dirty_xds, psf_xds, deconv_params=deconv_params
+    def test_rejects_unknown_algorithm(self):
+        xds = _make_img_xds()
+        with pytest.raises(ValueError, match="not recognized"):
+            deconvolve(img_xds=xds, algorithm="clark")
+
+    def test_num_threads_parameter_passes_through(self):
+        """num_threads > 1 must not change the result for a deterministic
+        input (same-input-same-output contract)."""
+        xds_a = _make_img_xds(nt=1, nf=2, npol=2, ny=16, nx=16)
+        xds_b = _make_img_xds(nt=1, nf=2, npol=2, ny=16, nx=16)
+
+        deconvolve(
+            img_xds=xds_a,
+            deconvolve_params={"gain": 0.2, "niter": 10, "threshold": 0.05},
+            num_threads=1,
+        )
+        deconvolve(
+            img_xds=xds_b,
+            deconvolve_params={"gain": 0.2, "niter": 10, "threshold": 0.05},
+            num_threads=4,
         )
 
+        assert np.array_equal(xds_a["RESIDUAL"].values, xds_b["RESIDUAL"].values)
+        assert np.array_equal(
+            xds_a["SKY_MODEL"].values, xds_b["SKY_MODEL"].values
+        )
+
+    def test_returndict_consistency(self):
+        xds = _make_img_xds(nt=1, nf=1, npol=1)
+        returndict = deconvolve(
+            img_xds=xds,
+            deconvolve_params={"gain": 0.5, "niter": 20, "threshold": 0.001},
+        )
         entry = list(returndict.data.values())[0]
 
-        # Check parameter consistency
-        assert entry["niter"] == deconv_params["niter"]
-        assert entry["threshold"] == deconv_params["threshold"]
-        assert entry["loop_gain"] == deconv_params["gain"]
+        # start_peakres must be >= peakres (peak should decrease).
+        start = entry["start_peakres"][-1] if isinstance(entry["start_peakres"], list) else entry["start_peakres"]
+        end = entry["peakres"][-1] if isinstance(entry["peakres"], list) else entry["peakres"]
+        assert abs(end) <= abs(start) + 1e-6
 
-        # Extract latest values from history-tracked fields (FIELD_ACCUM)
-        # These are now stored as lists to enable convergence tracking
-        iter_done = (
-            entry["iter_done"][-1]
-            if isinstance(entry["iter_done"], list)
-            else entry["iter_done"]
+        # iter_done within bounds.
+        iter_done = entry["iter_done"][-1] if isinstance(entry["iter_done"], list) else entry["iter_done"]
+        assert 0 <= iter_done <= entry["niter"]
+
+    def test_deconvolve_with_mask(self):
+        xds = _make_img_xds(nt=1, nf=1, npol=1, with_mask=True)
+        # Zero the mask at the source location; CLEAN should not touch it.
+        xds["MASK_RESIDUAL"].values[0, 0, 0, 16, 16] = 0.0
+
+        returndict = deconvolve(
+            img_xds=xds,
+            deconvolve_params={"gain": 1.0, "niter": 5, "threshold": 0.05},
         )
-        peakres = (
-            entry["peakres"][-1]
-            if isinstance(entry["peakres"], list)
-            else entry["peakres"]
+        # Source should survive since the pixel is masked out.
+        assert xds["RESIDUAL"].values[0, 0, 0, 16, 16] == pytest.approx(
+            1.0, abs=1e-6
         )
-        peakres_nomask = (
-            entry["peakres_nomask"][-1]
-            if isinstance(entry["peakres_nomask"], list)
-            else entry["peakres_nomask"]
+        assert xds["SKY_MODEL"].values[0, 0, 0, 16, 16] == pytest.approx(
+            0.0, abs=1e-6
         )
-        masksum = (
-            entry["masksum"][-1]
-            if isinstance(entry["masksum"], list)
-            else entry["masksum"]
-        )
-        model_flux = (
-            entry["model_flux"][-1]
-            if isinstance(entry["model_flux"], list)
-            else entry["model_flux"]
-        )
-
-        # Check that iterations performed is reasonable
-        assert iter_done >= 0
-        assert iter_done <= entry["niter"]
-
-        # Extract latest values from start_* fields (now FIELD_ACCUM lists)
-        start_peakres = (
-            entry["start_peakres"][-1]
-            if isinstance(entry["start_peakres"], list)
-            else entry["start_peakres"]
-        )
-        start_peakres_nomask = (
-            entry["start_peakres_nomask"][-1]
-            if isinstance(entry["start_peakres_nomask"], list)
-            else entry["start_peakres_nomask"]
-        )
-        start_model_flux = (
-            entry["start_model_flux"][-1]
-            if isinstance(entry["start_model_flux"], list)
-            else entry["start_model_flux"]
-        )
-
-        # Check that peak residual decreased (using absolute values)
-        # Note: May be NaN if mask excludes all pixels
-        if not np.isnan(peakres) and not np.isnan(start_peakres):
-            assert abs(peakres) <= abs(start_peakres)
-        if not np.isnan(peakres_nomask) and not np.isnan(start_peakres_nomask):
-            assert abs(peakres_nomask) <= abs(start_peakres_nomask)
-
-        # Check that PSF fractions are in valid range
-        assert 0 < entry["min_psf_fraction"] <= 1
-        assert 0 < entry["max_psf_fraction"] <= 1
-        assert entry["min_psf_fraction"] <= entry["max_psf_fraction"]
-
-        # Check that PSF sidelobe is in reasonable range [0, 1)
-        assert 0 <= entry["max_psf_sidelobe"] < 1
-
-        # Check that masksum is non-negative
-        assert masksum >= 0
-
-        # Check that model flux is non-negative and >= start_model_flux
-        assert model_flux >= 0
-        assert model_flux >= start_model_flux
-
-        # Check coordinate values
-        assert entry["stokes"] is not None
-        assert entry["frequency"] is not None
-        assert entry["time"] is not None
-        assert entry["phase_center"] is not None
-
-    @pytest.mark.skipif(
-        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
-    )
-    def test_returndict_indexing_single_plane(self, hogbom_images):
-        """Test ReturnDict indexing methods with single plane"""
-
-        resid_image, psf_image = hogbom_images
-        dirty_xds = load_image({"residual": resid_image})
-        psf_xds = load_image({"point_spread_function": psf_image})
-
-        deconv_params = {"gain": 0.1, "niter": 50}
-
-        returndict, _, _ = deconvolve(dirty_xds, psf_xds, deconv_params=deconv_params)
-
-        # Test exact indexing (should return single dict)
-        result = returndict.sel(time=0, pol=0, chan=0)
-        assert isinstance(result, dict)
-        assert "iter_done" in result
-
-        # Test partial indexing - time only
-        result = returndict.sel(time=0)
-        assert isinstance(result, dict)  # Single match returns dict
-
-        # Test partial indexing - pol only
-        result = returndict.sel(pol=0)
-        assert isinstance(result, dict)
-
-        # Test partial indexing - chan only
-        result = returndict.sel(chan=0)
-        assert isinstance(result, dict)
-
-        # Test no indexing (get all)
-        # When only one match, returns dict not list
-        result = returndict.sel()
-        assert isinstance(result, dict)  # Single match
-        assert "iter_done" in result
-
-    @pytest.mark.skipif(
-        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
-    )
-    def test_returndict_with_multipol_synthetic(self, hogbom_images):
-        """Test ReturnDict with synthetic multi-polarization data"""
-
-        resid_image, psf_image = hogbom_images
-        dirty_xds = load_image({"residual": resid_image})
-        psf_xds = load_image({"point_spread_function": psf_image})
-
-        # Create synthetic multi-pol data by replicating along polarization axis
-        # Original shape: [1, 1, 1, ny, nx]
-        original_dirty = dirty_xds["RESIDUAL"].values
-        original_psf = psf_xds["POINT_SPREAD_FUNCTION"].values
-
-        # Replicate to 4 polarizations
-        npol = 4
-        multi_dirty = np.repeat(original_dirty, npol, axis=2)
-        multi_psf = np.repeat(original_psf, npol, axis=2)
-
-        # Create new coordinates
-        pol_coords = ["I", "Q", "U", "V"]
-
-        # Create completely new datasets with proper dimensions
-        # Extract original coordinates - copy all coordinates from original
-        coords_dict = {
-            "time": dirty_xds.coords["time"],
-            "frequency": dirty_xds.coords["frequency"],
-            "polarization": pol_coords,
-            "l": dirty_xds.coords["l"],
-            "m": dirty_xds.coords["m"],
-        }
-
-        # Add 2D spatial coordinates if present
-        if "right_ascension" in dirty_xds.coords:
-            coords_dict["right_ascension"] = dirty_xds.coords["right_ascension"]
-        if "declination" in dirty_xds.coords:
-            coords_dict["declination"] = dirty_xds.coords["declination"]
-        if "velocity" in dirty_xds.coords:
-            coords_dict["velocity"] = dirty_xds.coords["velocity"]
-        if "beam_params_label" in dirty_xds.coords:
-            coords_dict["beam_params_label"] = dirty_xds.coords["beam_params_label"]
-
-        # Create new xarray datasets from scratch
-        # Include mask if present in original
-        data_vars_dirty = {
-            "RESIDUAL": (["time", "frequency", "polarization", "l", "m"], multi_dirty),
-        }
-        data_vars_psf = {
-            "POINT_SPREAD_FUNCTION": (
-                ["time", "frequency", "polarization", "l", "m"],
-                multi_psf,
-            ),
-        }
-
-        # Add mask if present
-        if "MASK_0" in dirty_xds:
-            mask_data = np.repeat(dirty_xds["MASK_0"].values, npol, axis=2)
-            data_vars_dirty["MASK_0"] = (
-                ["time", "frequency", "polarization", "l", "m"],
-                mask_data,
-            )
-
-        if "MASK_SKY" in dirty_xds:
-            mask_data = np.repeat(dirty_xds["MASK_SKY"].values, npol, axis=2)
-            data_vars_dirty["MASK_SKY"] = (
-                ["time", "frequency", "polarization", "l", "m"],
-                mask_data,
-            )
-
-        dirty_xds_new = xr.Dataset(
-            data_vars_dirty,
-            coords=coords_dict,
-        )
-        # Copy dataset attributes
-        if hasattr(dirty_xds, "attrs"):
-            dirty_xds_new.attrs = dirty_xds.attrs
-        # Copy RESIDUAL DataArray attributes (including active_mask)
-        if hasattr(dirty_xds["RESIDUAL"], "attrs"):
-            dirty_xds_new["RESIDUAL"].attrs = dirty_xds["RESIDUAL"].attrs
-
-        # Create PSF coords dict (same as dirty)
-        psf_coords_dict = {
-            "time": psf_xds.coords["time"],
-            "frequency": psf_xds.coords["frequency"],
-            "polarization": pol_coords,
-            "l": psf_xds.coords["l"],
-            "m": psf_xds.coords["m"],
-        }
-        if "right_ascension" in psf_xds.coords:
-            psf_coords_dict["right_ascension"] = psf_xds.coords["right_ascension"]
-        if "declination" in psf_xds.coords:
-            psf_coords_dict["declination"] = psf_xds.coords["declination"]
-        if "velocity" in psf_xds.coords:
-            psf_coords_dict["velocity"] = psf_xds.coords["velocity"]
-        if "beam_param" in psf_xds.coords:
-            psf_coords_dict["beam_param"] = psf_xds.coords["beam_param"]
-
-        psf_xds_new = xr.Dataset(
-            data_vars_psf,
-            coords=psf_coords_dict,
-        )
-        # Copy dataset attributes
-        if hasattr(psf_xds, "attrs"):
-            psf_xds_new.attrs = psf_xds.attrs
-        # Copy POINT_SPREAD_FUNCTION DataArray attributes
-        if hasattr(psf_xds["POINT_SPREAD_FUNCTION"], "attrs"):
-            psf_xds_new["POINT_SPREAD_FUNCTION"].attrs = psf_xds[
-                "POINT_SPREAD_FUNCTION"
-            ].attrs
-
-        deconv_params = {"gain": 0.1, "niter": 50}
-
-        returndict, _, _ = deconvolve(
-            dirty_xds_new, psf_xds_new, deconv_params=deconv_params
-        )
-
-        # Verify we have 4 entries (1 time × 1 freq × 4 pol)
-        assert len(returndict.data) == 4
-
-        # Test indexing by polarization
-        for pp in range(npol):
-            result = returndict.sel(pol=pp)
-            assert isinstance(result, dict)
-            assert result["stokes"] == pol_coords[pp]
-
-        # Test getting all entries for a specific time
-        results = returndict.sel(time=0)
-        assert isinstance(results, list)
-        assert len(results) == 4
-
-        # Test getting all entries for specific channel
-        results = returndict.sel(chan=0)
-        assert isinstance(results, list)
-        assert len(results) == 4
-
-    @pytest.mark.skipif(
-        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
-    )
-    def test_returndict_with_multichan_synthetic(self, hogbom_images):
-        """Test ReturnDict with synthetic multi-channel data"""
-
-        resid_image, psf_image = hogbom_images
-        dirty_xds = load_image({"residual": resid_image})
-        psf_xds = load_image({"point_spread_function": psf_image})
-
-        # Create synthetic multi-channel data
-        original_dirty = dirty_xds["RESIDUAL"].values
-        original_psf = psf_xds["POINT_SPREAD_FUNCTION"].values
-
-        # Replicate to 3 channels
-        nchan = 3
-        multi_dirty = np.repeat(original_dirty, nchan, axis=1)
-        multi_psf = np.repeat(original_psf, nchan, axis=1)
-
-        # Create new frequency coordinates
-        freq_coords = [1.4e9, 1.5e9, 1.6e9]
-
-        # Create completely new datasets with proper dimensions
-        # Extract original coordinates - copy all coordinates from original
-        coords_dict = {
-            "time": dirty_xds.coords["time"],
-            "frequency": freq_coords,
-            "polarization": dirty_xds.coords["polarization"],
-            "l": dirty_xds.coords["l"],
-            "m": dirty_xds.coords["m"],
-        }
-
-        # Add 2D spatial coordinates if present
-        if "right_ascension" in dirty_xds.coords:
-            coords_dict["right_ascension"] = dirty_xds.coords["right_ascension"]
-        if "declination" in dirty_xds.coords:
-            coords_dict["declination"] = dirty_xds.coords["declination"]
-        if "beam_param" in dirty_xds.coords:
-            coords_dict["beam_param"] = dirty_xds.coords["beam_param"]
-        # Note: velocity coord will be recreated per-channel, so skip it
-
-        # Create new xarray datasets from scratch
-        data_vars_dirty = {
-            "RESIDUAL": (["time", "frequency", "polarization", "l", "m"], multi_dirty),
-        }
-        data_vars_psf = {
-            "POINT_SPREAD_FUNCTION": (
-                ["time", "frequency", "polarization", "l", "m"],
-                multi_psf,
-            ),
-        }
-
-        # Add mask if present
-        if "MASK_0" in dirty_xds:
-            mask_data = np.repeat(dirty_xds["MASK_0"].values, nchan, axis=1)
-            data_vars_dirty["MASK_0"] = (
-                ["time", "frequency", "polarization", "l", "m"],
-                mask_data,
-            )
-
-        if "MASK_SKY" in dirty_xds:
-            mask_data = np.repeat(dirty_xds["MASK_SKY"].values, nchan, axis=1)
-            data_vars_dirty["MASK_SKY"] = (
-                ["time", "frequency", "polarization", "l", "m"],
-                mask_data,
-            )
-
-        dirty_xds_new = xr.Dataset(
-            data_vars_dirty,
-            coords=coords_dict,
-        )
-        # Copy dataset attributes
-        if hasattr(dirty_xds, "attrs"):
-            dirty_xds_new.attrs = dirty_xds.attrs
-        # Copy RESIDUAL DataArray attributes (including active_mask)
-        if hasattr(dirty_xds["RESIDUAL"], "attrs"):
-            dirty_xds_new["RESIDUAL"].attrs = dirty_xds["RESIDUAL"].attrs
-
-        # Create PSF coords dict (same as dirty)
-        psf_coords_dict = {
-            "time": psf_xds.coords["time"],
-            "frequency": freq_coords,
-            "polarization": psf_xds.coords["polarization"],
-            "l": psf_xds.coords["l"],
-            "m": psf_xds.coords["m"],
-        }
-        if "right_ascension" in psf_xds.coords:
-            psf_coords_dict["right_ascension"] = psf_xds.coords["right_ascension"]
-        if "declination" in psf_xds.coords:
-            psf_coords_dict["declination"] = psf_xds.coords["declination"]
-        if "beam_param" in psf_xds.coords:
-            psf_coords_dict["beam_param"] = psf_xds.coords["beam_param"]
-
-        psf_xds_new = xr.Dataset(
-            data_vars_psf,
-            coords=psf_coords_dict,
-        )
-        # Copy dataset attributes
-        if hasattr(psf_xds, "attrs"):
-            psf_xds_new.attrs = psf_xds.attrs
-        # Copy POINT_SPREAD_FUNCTION DataArray attributes
-        if hasattr(psf_xds["POINT_SPREAD_FUNCTION"], "attrs"):
-            psf_xds_new["POINT_SPREAD_FUNCTION"].attrs = psf_xds[
-                "POINT_SPREAD_FUNCTION"
-            ].attrs
-
-        deconv_params = {"gain": 0.1, "niter": 50}
-
-        returndict, _, _ = deconvolve(
-            dirty_xds_new, psf_xds_new, deconv_params=deconv_params
-        )
-
-        # Verify we have 3 entries (1 time × 3 freq × 1 pol)
-        assert len(returndict.data) == 3
-
-        # Test indexing by channel
-        for cc in range(nchan):
-            result = returndict.sel(chan=cc)
-            assert isinstance(result, dict)
-            assert result["frequency"] == freq_coords[cc]
-
-        # Test getting all channels for specific polarization
-        results = returndict.sel(pol=0)
-        assert isinstance(results, list)
-        assert len(results) == 3
-
-        # Verify frequencies are different across channels
-        freqs = [float(returndict.sel(chan=cc)["frequency"]) for cc in range(nchan)]
-        assert len(set(freqs)) == nchan  # All unique
-        assert np.allclose(freqs, freq_coords)
-
-
-class TestDeconvolve:
-    """Test the main deconvolve orchestration function"""
-
-    @pytest.mark.skipif(
-        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
-    )
-    def test_deconvolve_basic(self, hogbom_images):
-        """Test basic deconvolve functionality with single plane"""
-
-        resid_image, psf_image = hogbom_images
-        dirty_xds = load_image({"residual": resid_image})
-        psf_xds = load_image({"point_spread_function": psf_image})
-
-        deconv_params = {"gain": 0.1, "niter": 100, "threshold": 0.0}
-
-        # Run deconvolve
-        returndict, model_xds, residual_xds = deconvolve(
-            dirty_xds, psf_xds, deconv_params=deconv_params
-        )
-
-        # Verify ReturnDict structure
         assert isinstance(returndict, ReturnDict)
-        assert len(returndict.data) > 0
-
-        # Verify model and residual output
-        assert isinstance(model_xds, xr.Dataset)
-        assert isinstance(residual_xds, xr.Dataset)
-        assert "MODEL" in model_xds
-        assert "RESIDUAL" in residual_xds
-
-    @pytest.mark.skipif(
-        not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
-    )
-    def test_deconvolve_returndict_contents(self, hogbom_images):
-        """Test that ReturnDict contains expected fields"""
-
-        resid_image, psf_image = hogbom_images
-        dirty_xds = load_image({"residual": resid_image})
-        psf_xds = load_image({"point_spread_function": psf_image})
-
-        deconv_params = {"gain": 0.1, "niter": 50, "threshold": 0.0}
-
-        returndict, _, _ = deconvolve(dirty_xds, psf_xds, deconv_params=deconv_params)
-
-        # Get first entry from ReturnDict
-        if len(returndict.data) > 0:
-            first_key = list(returndict.data.keys())[0]
-            entry = returndict.data[first_key]
-
-            # Verify expected fields exist
-            expected_fields = [
-                "iter_done",
-                "niter",
-                "threshold",
-                "loop_gain",
-                "peakres",
-                "peakres_nomask",
-                "masksum",
-                "model_flux",
-                "max_psf_sidelobe",
-            ]
-            for field in expected_fields:
-                assert field in entry, f"Missing field: {field}"
-
-        # @pytest.mark.skipif(
-        #    not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
-        # )
-        # def test_deconvolve_with_initial_model(self, hogbom_images):
-        #    """Test deconvolve with an initial model image"""
-
-        #    resid_image, psf_image = hogbom_images
-        #    dirty_xds = load_image(resid_image)
-        #    psf_xds = load_image(psf_image)
-
-        #    # Create a simple initial model
-        #    model_xds = dirty_xds.copy(deep=True)
-        #    model_xds["SKY"].values[:] = 0.0  # Zero model to start
-
-        #    deconv_params = {"gain": 0.1, "niter": 50, "threshold": 0.0}
-
-        #    # Run with initial model
-        #    returndict, final_model, residual_xds = deconvolve(
-        #        dirty_xds, psf_xds, model_xds=model_xds, deconv_params=deconv_params
-        #    )
-
-        #    # Verify outputs are valid
-        #    assert isinstance(returndict, ReturnDict)
-        #    assert isinstance(final_model, xr.Dataset)
-        #    assert isinstance(residual_xds, xr.Dataset)
 
 
-if __name__ == "__main__":
-    # Run tests when script is executed directly
+if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

@@ -13,6 +13,7 @@ except ImportError as e:
 __all__ = [
     "maximg",
     "clean",
+    "clean_cube",
     "get_dtype_name",
     "is_float32",
     "is_float64",

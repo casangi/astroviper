@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <vector>
 #include "../include/hclean.hpp"
 
 namespace py = pybind11;
@@ -48,6 +49,50 @@ static py::buffer_info validate_inplace_array(py::array& arr,
     if (info.shape[0] != ny || info.shape[1] != nx) {
         throw std::runtime_error(
             std::string(name) + " has wrong shape; expected (" +
+            std::to_string(ny) + ", " + std::to_string(nx) + ")");
+    }
+    return info;
+}
+
+/**
+ * Validate that a py::array matches dtype T, is 5D with the given
+ * (nt, nf, np_dim, ny, nx) shape, and is C-contiguous. If
+ * require_writable is true, also require the array to be writeable.
+ */
+template<typename T>
+static py::buffer_info validate_inplace_cube(py::array& arr,
+                                             const char* name,
+                                             int nt, int nf, int np_dim,
+                                             int ny, int nx,
+                                             bool require_writable) {
+    if (!arr.dtype().is(py::dtype::of<T>())) {
+        throw std::runtime_error(
+            std::string(name) + " has wrong dtype; expected " +
+            py::cast<std::string>(py::dtype::of<T>().attr("name")) +
+            " but got " + py::cast<std::string>(arr.dtype().attr("name")));
+    }
+    if (!(arr.flags() & py::array::c_style)) {
+        throw std::runtime_error(
+            std::string(name) + " must be C-contiguous (no copy will be made)");
+    }
+    if (require_writable && !arr.writeable()) {
+        throw std::runtime_error(
+            std::string(name) + " must be writeable (array is modified in place)");
+    }
+
+    py::buffer_info info = arr.request(require_writable);
+    if (info.ndim != 5) {
+        throw std::runtime_error(
+            std::string(name) +
+            " must be a 5D array (time, frequency, polarization, y, x)");
+    }
+    if (info.shape[0] != nt || info.shape[1] != nf ||
+        info.shape[2] != np_dim ||
+        info.shape[3] != ny || info.shape[4] != nx) {
+        throw std::runtime_error(
+            std::string(name) + " has wrong shape; expected (" +
+            std::to_string(nt) + ", " + std::to_string(nf) + ", " +
+            std::to_string(np_dim) + ", " +
             std::to_string(ny) + ", " + std::to_string(nx) + ")");
     }
     return info;
@@ -229,6 +274,169 @@ py::dict hclean_impl(
 }
 
 /**
+ * Templated Hogbom CLEAN cube wrapper. The residual_cube and model_cube
+ * arrays are modified in place via pointers into Python-owned buffers;
+ * no copies are made on the C++ side. The outer (t, f, p) loop runs in
+ * num_threads worker threads via std::thread.
+ *
+ * The PSF cube may have np_psf == np_img (one PSF per image pol) or
+ * np_psf == 1 (broadcast across all image pols). Per-plane progress and
+ * stop callbacks are not supported in cube mode; bulk logging should be
+ * done Python-side from the returned per-plane iteration counts.
+ */
+template<typename T>
+py::dict hclean_cube_impl(
+    py::array residual_cube,
+    py::array psf_cube,
+    py::array model_cube,
+    py::array mask_cube,
+    py::tuple clean_box,
+    int max_iter,
+    T gain,
+    T threshold,
+    T speedup,
+    int num_threads
+) {
+    if (!residual_cube.dtype().is(py::dtype::of<T>())) {
+        throw std::runtime_error("residual_cube has wrong dtype");
+    }
+    if (residual_cube.ndim() != 5) {
+        throw std::runtime_error(
+            "residual_cube must be a 5D array [time, frequency, polarization, y, x]");
+    }
+    const int nt = static_cast<int>(residual_cube.shape(0));
+    const int nf = static_cast<int>(residual_cube.shape(1));
+    const int np_img = static_cast<int>(residual_cube.shape(2));
+    const int ny = static_cast<int>(residual_cube.shape(3));
+    const int nx = static_cast<int>(residual_cube.shape(4));
+
+    py::buffer_info residual_info = validate_inplace_cube<T>(
+        residual_cube, "residual_cube", nt, nf, np_img, ny, nx,
+        /*require_writable=*/true);
+    py::buffer_info model_info = validate_inplace_cube<T>(
+        model_cube, "model_cube", nt, nf, np_img, ny, nx,
+        /*require_writable=*/true);
+
+    // PSF may broadcast on polarization axis.
+    if (!psf_cube.dtype().is(py::dtype::of<T>())) {
+        throw std::runtime_error("psf_cube has wrong dtype");
+    }
+    if (psf_cube.ndim() != 5) {
+        throw std::runtime_error(
+            "psf_cube must be a 5D array [time, frequency, polarization, y, x]");
+    }
+    if (psf_cube.shape(0) != nt || psf_cube.shape(1) != nf ||
+        psf_cube.shape(3) != ny || psf_cube.shape(4) != nx) {
+        throw std::runtime_error(
+            "psf_cube must match residual_cube on (time, frequency, y, x)");
+    }
+    const int np_psf = static_cast<int>(psf_cube.shape(2));
+    if (np_psf != np_img && np_psf != 1) {
+        throw std::runtime_error(
+            "psf_cube polarization axis must equal residual_cube polarization "
+            "axis or be 1 (Stokes I broadcast)");
+    }
+    py::buffer_info psf_info = validate_inplace_cube<T>(
+        psf_cube, "psf_cube", nt, nf, np_psf, ny, nx,
+        /*require_writable=*/false);
+
+    int domask = 0;
+    const T* mask_ptr = nullptr;
+    if (mask_cube.size() > 0) {
+        py::buffer_info mask_info = validate_inplace_cube<T>(
+            mask_cube, "mask_cube", nt, nf, np_img, ny, nx,
+            /*require_writable=*/false);
+        domask = 1;
+        mask_ptr = static_cast<const T*>(mask_info.ptr);
+    }
+
+    int xbeg = 0, xend = nx, ybeg = 0, yend = ny;
+    if (clean_box.size() == 4) {
+        xbeg = py::cast<int>(clean_box[0]);
+        xend = py::cast<int>(clean_box[1]);
+        ybeg = py::cast<int>(clean_box[2]);
+        yend = py::cast<int>(clean_box[3]);
+
+        if (xbeg == -1) xbeg = 0;
+        if (xend == -1) xend = nx;
+        if (ybeg == -1) ybeg = 0;
+        if (yend == -1) yend = ny;
+
+        xbeg = std::max(0, std::min(xbeg, nx - 1));
+        xend = std::max(xbeg + 1, std::min(xend, nx));
+        ybeg = std::max(0, std::min(ybeg, ny - 1));
+        yend = std::max(ybeg + 1, std::min(yend, ny));
+    }
+
+    const int nplanes = nt * nf * np_img;
+    std::vector<int> iter_out(nplanes, 0);
+
+    // Drop the GIL: workers do not touch Python objects.
+    {
+        py::gil_scoped_release release;
+        hclean::clean_cube<T>(
+            static_cast<T*>(residual_info.ptr),
+            static_cast<T*>(model_info.ptr),
+            static_cast<const T*>(psf_info.ptr),
+            domask, mask_ptr,
+            nt, nf, np_img, np_psf,
+            ny, nx,
+            xbeg, xend, ybeg, yend,
+            max_iter, gain, threshold, speedup,
+            num_threads, iter_out.data());
+    }
+
+    // Assemble per-plane summary arrays. Plane ordering is C-contiguous
+    // over (time, frequency, polarization).
+    py::array_t<int> iters_arr({nt, nf, np_img});
+    std::memcpy(iters_arr.mutable_data(), iter_out.data(),
+                sizeof(int) * nplanes);
+
+    py::array_t<T> final_peaks_arr({nt, nf, np_img});
+    py::array_t<T> total_flux_arr({nt, nf, np_img});
+    py::array_t<bool> converged_arr({nt, nf, np_img});
+    T* fp = final_peaks_arr.mutable_data();
+    T* tf = total_flux_arr.mutable_data();
+    bool* cv = converged_arr.mutable_data();
+
+    const T* residual_data = static_cast<const T*>(residual_info.ptr);
+    const T* model_data = static_cast<const T*>(model_info.ptr);
+    const std::size_t plane_size =
+        static_cast<std::size_t>(ny) * static_cast<std::size_t>(nx);
+
+    for (int tt = 0; tt < nt; ++tt) {
+        for (int nn = 0; nn < nf; ++nn) {
+            for (int pp = 0; pp < np_img; ++pp) {
+                const std::size_t off =
+                    ((static_cast<std::size_t>(tt) * nf + nn) * np_img + pp) * plane_size;
+
+                T total = static_cast<T>(0);
+                for (std::size_t i = 0; i < plane_size; ++i) {
+                    total += std::abs(model_data[off + i]);
+                }
+                T fmin_p, fmax_p;
+                const T* mptr = (domask && mask_ptr != nullptr) ? mask_ptr + off : nullptr;
+                hclean::maximg<T>(residual_data + off, domask, mptr,
+                                  nx, ny, fmin_p, fmax_p);
+                T fp_val = std::max(std::abs(fmin_p), std::abs(fmax_p));
+
+                const int lin = (tt * nf + nn) * np_img + pp;
+                fp[lin] = fp_val;
+                tf[lin] = total;
+                cv[lin] = (fp_val <= threshold);
+            }
+        }
+    }
+
+    py::dict results;
+    results["iterations_performed"] = iters_arr;
+    results["final_peak"] = final_peaks_arr;
+    results["total_flux_cleaned"] = total_flux_arr;
+    results["converged"] = converged_arr;
+    return results;
+}
+
+/**
  * Runtime dtype dispatcher for hclean_impl. Selects float32 or float64
  * code path based on the dtype of `dirty_image`; all other arrays must
  * share that dtype.
@@ -268,6 +476,42 @@ static py::dict clean_dispatch(
     }
 }
 
+/**
+ * Runtime dtype dispatcher for hclean_cube_impl.
+ */
+static py::dict clean_cube_dispatch(
+    py::array residual_cube,
+    py::array psf_cube,
+    py::array model_cube,
+    py::array mask_cube,
+    py::tuple clean_box,
+    int max_iter,
+    double gain,
+    double threshold,
+    double speedup,
+    int num_threads
+) {
+    auto dt = residual_cube.dtype();
+    if (dt.is(py::dtype::of<float>())) {
+        return hclean_cube_impl<float>(
+            residual_cube, psf_cube, model_cube, mask_cube,
+            clean_box, max_iter,
+            static_cast<float>(gain),
+            static_cast<float>(threshold),
+            static_cast<float>(speedup),
+            num_threads);
+    } else if (dt.is(py::dtype::of<double>())) {
+        return hclean_cube_impl<double>(
+            residual_cube, psf_cube, model_cube, mask_cube,
+            clean_box, max_iter,
+            gain, threshold, speedup,
+            num_threads);
+    } else {
+        throw std::runtime_error(
+            "residual_cube must be float32 or float64");
+    }
+}
+
 PYBIND11_MODULE(_hogbom_ext, m) {
     m.doc() = "Templated Hogbom CLEAN algorithm - in-place, zero-copy arrays";
 
@@ -304,6 +548,28 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           py::arg("speedup") = 0.0,
           py::arg("progress_callback") = py::none(),
           py::arg("stop_callback") = py::none());
+
+    // clean_cube: operate on a full (time, frequency, polarization, y, x)
+    // cube in place. All (t, f, p) planes are dispatched to num_threads
+    // std::thread workers. The PSF cube may have np_psf == np_img or
+    // np_psf == 1 (broadcast across polarization).
+    m.def("clean_cube", &clean_cube_dispatch,
+          "Hogbom CLEAN over a 5D (time, frequency, polarization, y, x) "
+          "cube, parallelized across planes with std::thread. The "
+          "residual and model cubes are modified in place; the PSF cube "
+          "may be single-polarization to broadcast across image pols. "
+          "Returns per-plane arrays of iterations_performed, final_peak, "
+          "total_flux_cleaned, and converged with shape (nt, nf, np).",
+          py::arg("residual_cube"),
+          py::arg("psf_cube"),
+          py::arg("model_cube"),
+          py::arg("mask_cube") = py::array(),
+          py::arg("clean_box") = py::make_tuple(-1, -1, -1, -1),
+          py::arg("max_iter") = 100,
+          py::arg("gain") = 0.1,
+          py::arg("threshold") = 0.0,
+          py::arg("speedup") = 0.0,
+          py::arg("num_threads") = 1);
 
     m.def("get_dtype_name", [](py::array arr) {
         return arr.dtype().str();

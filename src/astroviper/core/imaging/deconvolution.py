@@ -120,7 +120,7 @@ def _validate_deconvolve_params(deconvolve_params):
         "threshold": 0.0,
         "clean_box": (-1, -1, -1, -1),
     }
-    
+
     for key, default_value in default_params.items():
         if key not in deconvolve_params:
             logger.info(
@@ -152,30 +152,65 @@ def _validate_deconvolve_params(deconvolve_params):
     return deconvolve_params
 
 
+def _plane_peak_abs_signed(arr, mask=None):
+    """
+    Return the signed value at the absolute-value peak of a 2-D array,
+    optionally restricted to pixels where ``mask > 0.5``.
+
+    Parameters
+    ----------
+    arr : numpy.ndarray
+        2-D image plane.
+    mask : numpy.ndarray, optional
+        2-D mask of the same shape as ``arr``. If provided, only pixels
+        where ``mask > 0.5`` are considered.
+
+    Returns
+    -------
+    float
+        Signed value of ``arr`` at its absolute-value maximum within the
+        mask. NaN if every pixel is masked.
+    """
+    if mask is None:
+        idx = np.unravel_index(np.abs(arr).argmax(), arr.shape)
+        return float(arr[idx])
+    valid = mask > 0.5
+    if not np.any(valid):
+        return float("nan")
+    absvals = np.where(valid, np.abs(arr), -np.inf)
+    idx = np.unravel_index(absvals.argmax(), arr.shape)
+    return float(arr[idx])
+
+
 def deconvolve(
     img_xds: xr.Dataset = None,
     algorithm: str = "hogbom",
     deconvolve_params: Optional[dict] = None,
+    num_threads: int = 1,
     image_data_group_in_name: str = "residual",
     image_data_group_out_name: str = "model",
     image_data_group_out_modified: Optional[dict] = None,
 ):
     """
-    Deconvolve a residual image cube plane-by-plane, in place.
+    Deconvolve a residual image cube, in place, with planes parallelized
+    in C++.
 
     The residual and model image variables of ``img_xds`` are mutated in
     place: the residual has CLEAN components subtracted from it, and the
-    model has the same components added. No per-plane copies of the
-    ``(ny, nx)`` arrays are retained on the Python side; 2-D views of
-    the underlying numpy arrays are passed directly to the CLEAN routine.
+    model has the same components added. The per-plane ``(time,
+    frequency, polarization)`` loop is delegated to the C++ binding,
+    which dispatches planes across ``num_threads`` ``std::thread``
+    workers. No per-plane copies of the ``(ny, nx)`` arrays are retained
+    on the Python side; the full ``(nt, nf, np, ny, nx)`` numpy buffers
+    are handed directly to the CLEAN routine.
 
     Parameters
     ----------
     img_xds : xarray.Dataset
-        Image dataset containing the residual, PSF, and (optionally) model
-        variables with dimensions
-        ``(time, frequency, polarization, y, x)``. The residual and model
-        variables are updated in place.
+        Image dataset containing the residual, PSF, and (optionally)
+        model variables with dimensions
+        ``(time, frequency, polarization, y, x)``. The residual and
+        model variables are updated in place.
     algorithm : str, optional
         Deconvolution algorithm to use. Only ``"hogbom"`` is currently
         supported.
@@ -183,6 +218,11 @@ def deconvolve(
         Algorithm-specific parameters. See
         :func:`_validate_deconvolve_params` for supported keys and
         defaults.
+    num_threads : int, optional
+        Number of ``std::thread`` workers to use for per-plane CLEAN
+        execution. Values ``<= 1`` disable threading and run in the
+        calling thread. Values larger than the number of planes are
+        clamped to the plane count. Default 1.
     image_data_group_in_name : str, optional
         Name of the input data group in ``img_xds`` that provides the
         residual sky image and PSF. Default is ``"residual"``.
@@ -214,12 +254,16 @@ def deconvolve(
     - The PSF may be single-polarization (Stokes I only), in which case
       it is broadcast across all image polarizations.
     - Deconvolution is performed independently on each
-      ``(time, frequency, polarization)`` plane.
+      ``(time, frequency, polarization)`` plane; parallelization across
+      planes happens inside the C++ binding.
     - The underlying CLEAN C++ binding operates directly on the
       Python-owned numpy buffers: the full ``(nt, nf, np, ny, nx)``
       residual and model cubes are the only per-plane allocations,
       and they are updated in place.
     """
+    if algorithm.lower() != "hogbom":
+        raise ValueError(f"Deconvolution algorithm '{algorithm}' not recognized.")
+
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {"sky": "SKY_MODEL"}
 
@@ -235,10 +279,6 @@ def deconvolve(
     psf_name = data_group_in["point_spread_function"]
     model_name = data_group_out["sky"]
 
-    returndict = ReturnDict()
-
-    # No model provided: allocate once and fill with zeros. We then update
-    # this single allocation in place from every plane's CLEAN call.
     if model_name not in img_xds.data_vars:
         img_xds[model_name] = xr.zeros_like(img_xds[residual_name])
         zero_model = True
@@ -267,27 +307,58 @@ def deconvolve(
         )
 
     masksum = imgstats.get_image_masksum(img_xds, dv=residual_name)
-    # phase_center = get_phase_center(img_xds)
 
-    if algorithm.lower() == "hogbom":
-        _deconvolver = hogbom_clean
-    else:
-        raise ValueError(f"Deconvolution algorithm '{algorithm}' not recognized.")
-
-    # Normalize params once so the per-plane call does not re-fill defaults.
     deconvolve_params = _validate_deconvolve_params(deconvolve_params)
-    
+
     max_psf_fraction = 0.8
     min_psf_fraction = 0.1
     max_psf_sidelobe = None  # TODO: compute per (time, freq) via extract_main_lobe
 
-    # Obtain direct views of the underlying numpy buffers. Integer indexing
-    # into these views yields 2-D views (no copy), which the CLEAN routine
-    # can consume directly and write back to.
     residual_arr = img_xds[residual_name].values
     psf_arr = img_xds[psf_name].values
     model_arr = img_xds[model_name].values
 
+    # Optional mask cube, matching the residual's shape.
+    mask_name = "MASK_" + residual_name
+    mask_arr = None
+    if mask_name in img_xds:
+        mask_da = img_xds[mask_name]
+        # Align mask to the residual's dtype/layout so the C++ binding
+        # accepts it without a copy.
+        mask_arr = np.ascontiguousarray(mask_da.values, dtype=residual_arr.dtype)
+
+    # Collect per-plane starting statistics in-place (no copies, just
+    # reads). The actual CLEAN iteration is driven in C++.
+    start_peakres = np.empty((ntime, nchan, npol), dtype=np.float64)
+    start_peakres_nomask = np.empty((ntime, nchan, npol), dtype=np.float64)
+    start_model_flux = np.empty((ntime, nchan, npol), dtype=np.float64)
+    for tt in range(ntime):
+        for nn in range(nchan):
+            for pp in range(npol):
+                rp = residual_arr[tt, nn, pp]
+                mp = mask_arr[tt, nn, pp] if mask_arr is not None else None
+                start_peakres[tt, nn, pp] = _plane_peak_abs_signed(rp, mask=mp)
+                start_peakres_nomask[tt, nn, pp] = _plane_peak_abs_signed(rp)
+                start_model_flux[tt, nn, pp] = (
+                    0.0 if zero_model else float(model_arr[tt, nn, pp].sum())
+                )
+
+    # Drive the CLEAN loop in C++. The helper owns the full
+    # (time, frequency, polarization) iteration and the parallel worker
+    # pool.
+    results = hogbom_clean(
+        residual_cube=residual_arr,
+        psf_cube=psf_arr,
+        model_cube=model_arr,
+        deconvolve_params=deconvolve_params,
+        num_threads=num_threads,
+        mask_cube=mask_arr,
+    )
+
+    iters = np.asarray(results["iterations_performed"])
+    final_peaks = np.asarray(results["final_peak"])
+
+    returndict = ReturnDict()
     pol_vals = img_xds.coords["polarization"].values
     freq_vals = img_xds.coords["frequency"].values
     time_vals = img_xds.coords["time"].values
@@ -295,53 +366,16 @@ def deconvolve(
     for tt in range(ntime):
         for nn in range(nchan):
             for pp in range(npol):
-                logger.debug(
-                    f"Deconvolving time {tt+1}/{ntime}, "
-                    f"freq {nn+1}/{nchan}, pol {pp+1}/{npol}"
-                )
-
-                pidx = 0 if broadcast_psf else pp
-
-                residual_plane = residual_arr[tt, nn, pp]
-                psf_plane = psf_arr[tt, nn, pidx]
-                model_plane = model_arr[tt, nn, pp]
-
-                # Per-plane starting statistics. Scalar .isel() returns a
-                # 2-D DataArray view, not a copy.
-                residual_slice = img_xds.isel(
-                    time=tt, frequency=nn, polarization=pp
-                )
-                start_peakres = imgstats.image_peak_residual(
-                    residual_slice, per_plane_stats=False, use_mask=True, dv=residual_name
-                )
-                start_peakres_nomask = imgstats.image_peak_residual(
-                    residual_slice, per_plane_stats=False, use_mask=False, dv=residual_name
-                )
-                start_model_flux = (
-                    0.0 if zero_model else float(model_plane.sum())
-                )
-                
-                # Run CLEAN on the plane views; residual_plane and
-                # model_plane are updated in place inside the helper.
-                results = _deconvolver(
-                    residual_image=residual_plane,
-                    psf=psf_plane,
-                    model=model_plane,
-                    deconvolve_params=deconvolve_params,
-                )
-
-                model_flux = float(model_plane.sum())
-                peakres = imgstats.image_peak_residual(
-                    residual_slice, per_plane_stats=False, use_mask=True
-                )
-                peakres_nomask = imgstats.image_peak_residual(
-                    residual_slice, per_plane_stats=False, use_mask=False
-                )
+                rp = residual_arr[tt, nn, pp]
+                mp = mask_arr[tt, nn, pp] if mask_arr is not None else None
+                peakres = _plane_peak_abs_signed(rp, mask=mp)
+                peakres_nomask = _plane_peak_abs_signed(rp)
+                model_flux = float(model_arr[tt, nn, pp].sum())
 
                 returnvals = {
                     "niter": deconvolve_params.get("niter", None),
                     "threshold": deconvolve_params.get("threshold", None),
-                    "iter_done": results.get("iterations_performed", None),
+                    "iter_done": int(iters[tt, nn, pp]),
                     "loop_gain": deconvolve_params.get("gain", None),
                     "min_psf_fraction": min_psf_fraction,
                     "max_psf_fraction": max_psf_fraction,
@@ -349,12 +383,11 @@ def deconvolve(
                     "stop_code": None,
                     "stokes": pol_vals[pp],
                     "frequency": freq_vals[nn],
-                    #"phase_center": phase_center,
                     "time": time_vals[tt],
-                    "start_model_flux": start_model_flux,
+                    "start_model_flux": start_model_flux[tt, nn, pp],
                     "model_flux": model_flux,
-                    "start_peakres": start_peakres,
-                    "start_peakres_nomask": start_peakres_nomask,
+                    "start_peakres": start_peakres[tt, nn, pp],
+                    "start_peakres_nomask": start_peakres_nomask[tt, nn, pp],
                     "peakres": peakres,
                     "peakres_nomask": peakres_nomask,
                     "masksum": masksum,
@@ -366,96 +399,140 @@ def deconvolve(
 
 
 def hogbom_clean(
-    residual_image: np.ndarray,
-    psf: np.ndarray,
-    model: np.ndarray,
+    residual_cube: np.ndarray,
+    psf_cube: np.ndarray,
+    model_cube: np.ndarray,
     deconvolve_params: Optional[dict] = None,
+    num_threads: int = 1,
+    mask_cube: Optional[np.ndarray] = None,
 ):
     """
-    Run Hogbom CLEAN on a single 2-D plane, updating the residual and
-    model arrays in place.
+    Run Hogbom CLEAN over an entire ``(time, frequency, polarization,
+    y, x)`` image cube, parallelized across planes in C++.
 
-    The underlying C++ routine writes the residual and model directly
-    into the caller-supplied arrays with no copies; both arrays must be
-    C-contiguous, writeable, and share a floating-point dtype.
+    The residual and model cubes are updated in place: the residual has
+    CLEAN components subtracted from it, and the model accumulates the
+    same components. The per-plane loop and the ``std::thread`` worker
+    pool live entirely in the C++ binding
+    (:func:`hogbom.clean_cube`); this Python layer only validates inputs
+    and forwards them.
 
     Parameters
     ----------
-    residual_image : numpy.ndarray
-        2-D residual image array with shape ``(ny, nx)``. Updated in
+    residual_cube : numpy.ndarray
+        5-D residual array with shape ``(nt, nf, np, ny, nx)``. Must be
+        C-contiguous, writeable, and float32 or float64. Updated in
         place with the post-CLEAN residual.
-    psf : numpy.ndarray
-        2-D PSF array with shape ``(ny, nx)``. Not modified.
-    model : numpy.ndarray
-        2-D model image array with shape ``(ny, nx)``. CLEAN components
-        found during this call are **added** to this array in place,
-        allowing the caller to accumulate components across calls or to
-        start from a non-zero initial model.
+    psf_cube : numpy.ndarray
+        5-D PSF array with shape ``(nt, nf, np_psf, ny, nx)`` where
+        ``np_psf`` equals ``np`` or is ``1`` (Stokes-I broadcast across
+        all image polarizations). Must be C-contiguous and share the
+        dtype of ``residual_cube``. Not modified.
+    model_cube : numpy.ndarray
+        5-D model array with shape ``(nt, nf, np, ny, nx)``. CLEAN
+        components are **added** into this array in place, allowing
+        callers to start from a non-zero initial model or accumulate
+        across calls. Must be C-contiguous, writeable, and share the
+        dtype of ``residual_cube``.
     deconvolve_params : dict, optional
         Algorithm parameters. See :func:`_validate_deconvolve_params`
-        for supported keys. If ``None``, defaults are used.
+        for supported keys and defaults.
+    num_threads : int, optional
+        Number of ``std::thread`` workers used to run per-plane CLEAN in
+        parallel. ``num_threads <= 1`` disables threading; values larger
+        than the number of planes are clamped to the plane count.
+        Default 1.
+    mask_cube : numpy.ndarray, optional
+        5-D mask array with the same shape and dtype as
+        ``residual_cube``. Pixels with mask value ``> 0.5`` are
+        considered in the peak search; others are ignored. ``None``
+        disables masking.
 
     Returns
     -------
     dict
-        Summary dictionary from the underlying CLEAN binding:
-        ``iterations_performed``, ``final_peak``, ``total_flux_cleaned``,
-        and ``converged``. The final model and residual are already in
-        the caller-supplied arrays.
+        Per-plane summary arrays with shape ``(nt, nf, np)`` and keys
+        ``iterations_performed`` (int), ``final_peak`` (float),
+        ``total_flux_cleaned`` (float), and ``converged`` (bool). The
+        final residual and model cubes are the caller-supplied arrays,
+        updated in place.
 
     Raises
     ------
     ValueError
-        If the inputs are not 2-D numpy arrays of matching shape.
+        If the input arrays are not 5-D, do not share a floating-point
+        dtype, or have incompatible shapes.
 
     Notes
     -----
-    Iteration over ``(time, frequency, polarization)`` is the caller's
-    responsibility (see :func:`deconvolve`).
+    The 5-D layout is the same one used by ``xarray`` image datasets in
+    astroviper, so a plain ``img_xds[name].values`` call produces an
+    array that can be passed to this function without any copy.
     """
     deconvolve_params = _validate_deconvolve_params(deconvolve_params)
 
-    if not isinstance(residual_image, np.ndarray) or residual_image.ndim != 2:
-        raise ValueError("residual_image must be a 2D numpy array with shape (ny, nx)")
-    if not isinstance(psf, np.ndarray) or psf.ndim != 2:
-        raise ValueError("psf must be a 2D numpy array with shape (ny, nx)")
-    if not isinstance(model, np.ndarray) or model.ndim != 2:
-        raise ValueError("model must be a 2D numpy array with shape (ny, nx)")
-    if residual_image.shape != psf.shape:
+    for name, arr in (
+        ("residual_cube", residual_cube),
+        ("psf_cube", psf_cube),
+        ("model_cube", model_cube),
+    ):
+        if not isinstance(arr, np.ndarray) or arr.ndim != 5:
+            raise ValueError(
+                f"{name} must be a 5D numpy array with shape "
+                "(nt, nf, np, ny, nx)"
+            )
+
+    if residual_cube.shape != model_cube.shape:
         raise ValueError(
-            "residual_image and psf must have same shape. "
-            f"Got {residual_image.shape} and {psf.shape}"
+            "residual_cube and model_cube must have same shape. "
+            f"Got {residual_cube.shape} and {model_cube.shape}"
         )
-    if model.shape != residual_image.shape:
+
+    # PSF cube may broadcast on the polarization axis.
+    nt, nf, npol_img, ny, nx = residual_cube.shape
+    nt_p, nf_p, npol_psf, ny_p, nx_p = psf_cube.shape
+    if (nt_p, nf_p, ny_p, nx_p) != (nt, nf, ny, nx):
         raise ValueError(
-            "model and residual_image must have same shape. "
-            f"Got {model.shape} and {residual_image.shape}"
+            "psf_cube must match residual_cube on (time, frequency, y, x). "
+            f"Got psf shape {psf_cube.shape} vs residual shape "
+            f"{residual_cube.shape}"
+        )
+    if npol_psf not in (npol_img, 1):
+        raise ValueError(
+            "psf_cube polarization axis must equal residual_cube "
+            "polarization axis or be 1 (Stokes I broadcast). "
+            f"Got np_psf={npol_psf}, np_img={npol_img}"
         )
 
-    logger.debug(f"Residual image shape: {residual_image.shape}")
-    logger.debug(f"PSF shape: {psf.shape}")
+    if mask_cube is not None:
+        if mask_cube.shape != residual_cube.shape:
+            raise ValueError(
+                "mask_cube must have the same shape as residual_cube. "
+                f"Got {mask_cube.shape} and {residual_cube.shape}"
+            )
 
-    fmin, fmax = hogbom.maximg(residual_image)
-    initial_peak = max(abs(fmin), abs(fmax))
-    logger.debug(f"Initial peak flux: {initial_peak:.6f}")
-
-    logger.info("Running Hogbom CLEAN algorithm...")
+    logger.debug(f"Residual cube shape: {residual_cube.shape}")
+    logger.debug(f"PSF cube shape: {psf_cube.shape}")
+    logger.info("Running Hogbom CLEAN on cube with num_threads=%d" % num_threads)
 
     clean_box = deconvolve_params["clean_box"]
     if clean_box is None:
         clean_box = (-1, -1, -1, -1)
 
-    results = hogbom.clean(
-        dirty_image=residual_image,
-        psf=psf,
-        model=model,
-        mask=np.array([], dtype=residual_image.dtype),
+    mask_arg = (
+        mask_cube
+        if mask_cube is not None
+        else np.array([], dtype=residual_cube.dtype)
+    )
+
+    return hogbom.clean_cube(
+        residual_cube=residual_cube,
+        psf_cube=psf_cube,
+        model_cube=model_cube,
+        mask_cube=mask_arg,
         clean_box=clean_box,
         max_iter=deconvolve_params["niter"],
         gain=deconvolve_params["gain"],
         threshold=deconvolve_params["threshold"],
-        progress_callback=progress_callback,
-        stop_callback=None,
+        num_threads=int(num_threads),
     )
-
-    return results

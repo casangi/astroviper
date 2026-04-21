@@ -31,9 +31,13 @@
 #include "../include/hclean.hpp"
 #include <cmath>
 #include <algorithm>
+#include <atomic>
+#include <cstddef>
 #include <limits>
 #include <functional>
+#include <thread>
 #include <type_traits>
+#include <vector>
 
 namespace hclean {
 
@@ -209,6 +213,84 @@ void clean(T* limage, T* limagestep, const T* lpsf,
     }
 }
 
+/**
+ * Templated cube driver. Runs clean<T> on each (time, frequency,
+ * polarization) plane of a 5D input cube and dispatches planes across
+ * std::thread workers using an atomic index. The per-plane inputs are
+ * non-overlapping slices of the same contiguous cube buffer, so no
+ * synchronization is needed beyond the atomic work counter.
+ */
+template<typename T>
+void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
+                int domask, const T* mask_cube,
+                int nt, int nf, int np_img, int np_psf,
+                int ny, int nx,
+                int xbeg, int xend, int ybeg, int yend,
+                int niter, T gain, T thres, T cspeedup,
+                int num_threads, int* iter_out) {
+
+    const int nplanes = nt * nf * np_img;
+    if (nplanes <= 0) {
+        return;
+    }
+
+    // std::thread callbacks are never invoked from cube mode; supply
+    // no-ops so the inner clean<T> signature is still satisfied.
+    auto noop_msgput = [](int, int, int, T) {};
+    auto noop_stopnow = [](int& x) { x = 0; };
+
+    const std::size_t plane_size = static_cast<std::size_t>(ny) * static_cast<std::size_t>(nx);
+
+    std::atomic<int> next_plane(0);
+
+    auto worker = [&]() {
+        int plane;
+        while ((plane = next_plane.fetch_add(1)) < nplanes) {
+            const int tt = plane / (nf * np_img);
+            const int nn = (plane / np_img) % nf;
+            const int pp = plane % np_img;
+            const int pidx = (np_psf == 1) ? 0 : pp;
+
+            const std::size_t img_offset =
+                ((static_cast<std::size_t>(tt) * nf + nn) * np_img + pp) * plane_size;
+            const std::size_t psf_offset =
+                ((static_cast<std::size_t>(tt) * nf + nn) * np_psf + pidx) * plane_size;
+
+            T* residual = residual_cube + img_offset;
+            T* model = model_cube + img_offset;
+            const T* psf = psf_cube + psf_offset;
+            const T* mask = (domask && mask_cube != nullptr)
+                ? mask_cube + img_offset
+                : nullptr;
+
+            int iter_val = 0;
+            clean<T>(model, residual, psf,
+                     domask, mask,
+                     nx, ny, xbeg, xend, ybeg, yend,
+                     niter, 0, iter_val, gain, thres, cspeedup,
+                     noop_msgput, noop_stopnow);
+            iter_out[plane] = iter_val;
+        }
+    };
+
+    int nthreads = num_threads;
+    if (nthreads < 1) nthreads = 1;
+    if (nthreads > nplanes) nthreads = nplanes;
+
+    if (nthreads == 1) {
+        worker();
+    } else {
+        std::vector<std::thread> threads;
+        threads.reserve(nthreads);
+        for (int i = 0; i < nthreads; ++i) {
+            threads.emplace_back(worker);
+        }
+        for (auto& t : threads) {
+            t.join();
+        }
+    }
+}
+
 // Explicit template instantiations for float and double
 template void maximg<float>(const float* limagestep, int domask, const float* lmask,
                            int nx, int ny, float& fmin, float& fmax);
@@ -231,5 +313,23 @@ template void clean<double>(double* limage, double* limagestep, const double* lp
                            double cspeedup,
                            std::function<void(int, int, int, double)> msgput,
                            std::function<void(int&)> stopnow);
+
+template void clean_cube<float>(float* residual_cube, float* model_cube,
+                                const float* psf_cube, int domask,
+                                const float* mask_cube,
+                                int nt, int nf, int np_img, int np_psf,
+                                int ny, int nx,
+                                int xbeg, int xend, int ybeg, int yend,
+                                int niter, float gain, float thres, float cspeedup,
+                                int num_threads, int* iter_out);
+
+template void clean_cube<double>(double* residual_cube, double* model_cube,
+                                 const double* psf_cube, int domask,
+                                 const double* mask_cube,
+                                 int nt, int nf, int np_img, int np_psf,
+                                 int ny, int nx,
+                                 int xbeg, int xend, int ybeg, int yend,
+                                 int niter, double gain, double thres, double cspeedup,
+                                 int num_threads, int* iter_out);
 
 } // namespace hclean
