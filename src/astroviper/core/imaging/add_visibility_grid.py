@@ -193,8 +193,8 @@ def add_visibility_grid_single_field(
     cgk_1D: np.ndarray,
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
-    img_data_group_in_name: str = "single_field",
-    img_data_group_out_name: str = "single_field",
+    img_data_group_in_name: str = "residual",
+    img_data_group_out_name: str = "residual",
     img_data_group_out_modified: dict = {
         "visibility": "VISIBILITY",
         "visibility_normalization": "VISIBILITY_NORMALIZATION",
@@ -326,6 +326,13 @@ def add_visibility_grid_single_field(
             np.zeros((n_imag_time, n_imag_chan, n_imag_pol), dtype=np.double),
             dims=["time", "frequency", "polarization"],
         )
+        
+        modify_data_groups_xds(
+        img_xds,
+        img_data_group_out_name,
+        img_data_group_out,
+        description="Added gridded visibilities to img_xds with add_visibility_grid_single_field.",
+        )
 
     grid = img_xds[img_data_group_out["visibility"]].values
     normalization = img_xds[img_data_group_out["visibility_normalization"]].values
@@ -380,9 +387,5 @@ def add_visibility_grid_single_field(
             oversampling=100,
         )
 
-    modify_data_groups_xds(
-        img_xds,
-        img_data_group_out_name,
-        img_data_group_out,
-        description="Added gridded visibilities to img_xds with add_visibility_grid_single_field.",
-    )
+
+

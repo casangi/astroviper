@@ -375,7 +375,7 @@ def test_single_field_imaging():
         #     "weighting": "natural",
         # },
         iteration_control_params={
-            "niter": 1,
+            "niter": 1000,
             "nmajor": 0,
             "threshold": 0.0,
             "gain": 0.1,
@@ -407,6 +407,7 @@ def test_single_field_imaging():
         vizualize_graph=True
     )
     img_av_xds = xr.open_zarr(image_store)
+    img_av_compare_xds = xr.open_zarr("compare_twhya_selfcal_5chans_lsrk_compare_weights_astroviper.img.zarr")
 
     from matplotlib import pyplot as plt
     frequency = 4
@@ -464,6 +465,19 @@ def test_single_field_imaging():
         rtol=1e-6,
     ), "You broke something! The beam fit parameters for the point spread function are not close enough to the reference values."
     
+    
+    assert np.allclose(
+        img_av_xds.SKY_MODEL.values,
+        img_av_compare_xds.SKY_MODEL.values,
+        rtol=1e-6,
+    ), "You broke something! The sky model values are not close enough to the reference values."
+    
+    plt.figure()
+    plt.imshow(
+        img_av_xds["SKY_MODEL"].isel(frequency=frequency, time=0, polarization=0)-img_av_compare_xds["SKY_MODEL"].isel(frequency=frequency, time=0, polarization=0)
+    )
+    plt.colorbar()
+    
     plt.figure()
     # plt.imshow((img_av_xds["SKY_RESIDUAL"].isel(frequency=frequency,time=0, polarization=0)+img_av_xds["SKY_RESIDUAL"].isel(frequency=frequency,time=0, polarization=1))/2)
     plt.imshow(
@@ -471,6 +485,10 @@ def test_single_field_imaging():
     )
     plt.colorbar()
     plt.show()
+    
+    print(img_av_xds.attrs["data_groups"].keys())
+    print(img_av_xds.attrs["data_groups"])
+    print(img_av_xds.data_vars)
 
 
 

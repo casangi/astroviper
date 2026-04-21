@@ -190,8 +190,8 @@ def add_uv_sampling_grid_single_field(
     cgk_1D: np.ndarray,
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
-    img_data_group_in_name: str = "single_field",
-    img_data_group_out_name: str = "single_field",
+    img_data_group_in_name: str = "residual",
+    img_data_group_out_name: str = "residual",
     img_data_group_out_modified: dict = {
         "uv_sampling": "UV_SAMPLING",
         "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
@@ -232,7 +232,7 @@ def add_uv_sampling_grid_single_field(
     ms_data_group_in_name : str, default ``"base"``
         Key of the MS input data group in ``ms_xdt.attrs["data_groups"]``.
         Must provide ``"uvw"`` and ``"weight_imaging"`` role keys.
-    img_data_group_in_name : str, default ``"single_field"``
+    img_data_group_in_name : str, default ``"residual"``
         Key of the image input data group in ``ms_xdt.attrs["data_groups"]``.
         Typically the data group written by
         :func:`~astroviper.core.imaging.calculate_imaging_weights.calculate_imaging_weights`.
@@ -316,6 +316,12 @@ def add_uv_sampling_grid_single_field(
             np.zeros((n_image_time, n_imag_chan, n_imag_pol), dtype=np.double),
             dims=["time", "frequency", "polarization"],
         )
+        modify_data_groups_xds(
+            img_xds,
+            img_data_group_out_name,
+            img_data_group_out,
+            description="Added UV sampling grid to img_xds with add_uv_sampling_grid_single_field.",
+        )
 
     grid = img_xds[img_data_group_out["uv_sampling"]].values
     normalization = img_xds[img_data_group_out["uv_sampling_normalization"]].values
@@ -368,9 +374,3 @@ def add_uv_sampling_grid_single_field(
             oversampling=100,
         )
 
-    modify_data_groups_xds(
-        img_xds,
-        img_data_group_out_name,
-        img_data_group_out,
-        description="Added UV sampling grid to img_xds with add_uv_sampling_grid_single_field.",
-    )

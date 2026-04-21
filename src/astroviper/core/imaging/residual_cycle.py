@@ -3,7 +3,7 @@ import time
 
 # from memory_profiler import profile
 # @profile(precision=1)
-def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0, img_data_group_name = "single_field"):
+def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0, img_data_group_name = "residual"):
     """_summary_
 
     Parameters
@@ -42,6 +42,17 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0,
     )
 
     ps_data_group_name = input_params["processing_set_data_group_name"]
+    
+    #Degrid and calculate residual visibilities.
+    if not is_n_iter_0:
+        #Stokes to corr for residual visibilities.
+        # ifft_norm_img_xds will have already transformed to stokes, so transform back to corr for degridding.
+        # cgk_1D = create_prolate_spheroidal_kernel_1D(100, 7)
+
+ 
+        
+
+    
     img_xds.attrs["type"] = "image_dataset"
     img_xds = img_xds.xr_img.add_data_group(
         new_data_group_name=img_data_group_name,
@@ -129,7 +140,6 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0,
     )
     T_fft_norm = time.time() - start_fft_norm
     
-    
     from toolviper.utils.memory_management import get_rss_gb
     
     logger.debug("Memory usage after residual cycle " + str(get_rss_gb()) + " GB")
@@ -145,8 +155,8 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0,
         start = time.time()
         img_xds = point_spread_function_gaussian_fit(
             img_xds,
-            image_data_group_in_name="single_field",
-            image_data_group_out_name="single_field",
+            image_data_group_in_name="residual",
+            image_data_group_out_name="residual",
             image_data_group_out_modified={
                 "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
             },
@@ -183,7 +193,7 @@ def make_uv_images_single_field(
     cgk_1D,
     is_n_iter_0,
     ms_data_group_in_name="corrected",
-    img_data_group_out_name="single_field",
+    img_data_group_out_name="residual",
     num_threads=1,
 ):
     from astroviper.core.imaging.add_uv_sampling_grid import (
@@ -213,6 +223,7 @@ def make_uv_images_single_field(
                 cgk_1D,
                 img_xds,
                 ms_data_group_in_name=ms_data_group_in_name,
+                img_data_group_in_name=img_data_group_out_name,
                 img_data_group_out_name=img_data_group_out_name,
                 img_data_group_out_modified={
                     "uv_sampling": "UV_SAMPLING",
@@ -231,6 +242,7 @@ def make_uv_images_single_field(
             cgk_1D,
             img_xds,
             ms_data_group_in_name=ms_data_group_in_name,
+            img_data_group_in_name=img_data_group_out_name,
             img_data_group_out_name=img_data_group_out_name,
             img_data_group_out_modified={
                 "visibility": "VISIBILITY",
