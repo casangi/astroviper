@@ -6,6 +6,7 @@ try:
     from ._prolate_spheroidal_grid_ext import (
         prolate_spheroidal_grid,
         prolate_spheroidal_grid_uv_sampling,
+        prolate_spheroidal_degrid,
     )
 except ImportError as e:
     raise ImportError(
@@ -16,4 +17,5 @@ except ImportError as e:
 __all__ = [
     "prolate_spheroidal_grid",
     "prolate_spheroidal_grid_uv_sampling",
+    "prolate_spheroidal_degrid",
 ]

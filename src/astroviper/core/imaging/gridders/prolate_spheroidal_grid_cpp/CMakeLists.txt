@@ -18,6 +18,7 @@ find_package(Threads REQUIRED)
 # Define source files
 set(SOURCES
     src/prolate_spheroidal_grid.cpp
+    src/prolate_spheroidal_degrid.cpp
     python/bindings.cpp
 )
 
