@@ -1414,7 +1414,9 @@ class TestToBoolDataArray:
         expected = np.nan_to_num(a, nan=0.0).astype(bool) | np.nan_to_num(
             b, nan=0.0
         ).astype(bool)
-        m = select_mask(data, select="A | B", mask_source={"A": a, "B": b}, return_kind="numpy")
+        m = select_mask(
+            data, select="A | B", mask_source={"A": a, "B": b}, return_kind="numpy"
+        )
         assert isinstance(m, np.ndarray) and m.dtype == bool
         np.testing.assert_array_equal(m, expected)
 
@@ -1470,7 +1472,10 @@ class TestCRTFNumericParsingErrors:
         """Only pa= and theta_m= are accepted for rotated shapes."""
         da_img = make_image(32, 32)
         bad = "rotbox[[12pix,8pix],[6pix,3pix], angle=30deg]"
-        with pytest.raises(ValueError, match=r"Rotation must be provided as 'pa=<angle>' or 'theta_m=<angle>'"):
+        with pytest.raises(
+            ValueError,
+            match=r"Rotation must be provided as 'pa=<angle>' or 'theta_m=<angle>'",
+        ):
             select_mask(da_img, select=bad)
 
     def test_invalid_pixel_quantity_token_raises_specific_message(self) -> None:
@@ -1490,7 +1495,9 @@ class TestCrtfKeywordSyntaxErrors:
     """Malformed keyword-value pairs should fail via the public CRTF API."""
 
     def _sky(self) -> xr.DataArray:
-        return make_xradio_sky(n_time=3, n_freq=6, n_pol=2, n_l=4, n_m=4, pols=("I", "Q"))
+        return make_xradio_sky(
+            n_time=3, n_freq=6, n_pol=2, n_l=4, n_m=4, pols=("I", "Q")
+        )
 
     def test_range_without_brackets_raises(self) -> None:
         sky = self._sky()
@@ -1748,7 +1755,9 @@ class TestCrtfLmMode:
         expected = np.zeros((20, 20), dtype=bool)
         for i, lv in enumerate(l_vals):
             for j, mv in enumerate(m_vals):
-                if (-3 * arcsec) <= lv <= (2 * arcsec) and (-2 * arcsec) <= mv <= (1 * arcsec):
+                if (-3 * arcsec) <= lv <= (2 * arcsec) and (-2 * arcsec) <= mv <= (
+                    1 * arcsec
+                ):
                     expected[i, j] = True
         np.testing.assert_array_equal(mask, expected)
 
