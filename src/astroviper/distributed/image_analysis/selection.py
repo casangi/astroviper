@@ -42,6 +42,7 @@ import dask.array as da
 import math
 import ast
 import re
+import warnings
 
 import numpy as np
 import xarray as xr
@@ -788,12 +789,12 @@ def _detect_time_family(token: str) -> tuple[str, str]:
         t.startswith('"') and t.endswith('"')
     ):
         return "iso", t[1:-1]
-    # JD suffix
-    if re.search(r"(?i)jd$", t):
-        return "jd", re.sub(r"(?i)jd$", "", t).strip()
     # MJD suffix
     if re.search(r"(?i)mjd$", t):
         return "mjd", re.sub(r"(?i)mjd$", "", t).strip()
+    # JD suffix
+    if re.search(r"(?i)jd$", t):
+        return "jd", re.sub(r"(?i)jd$", "", t).strip()
     # 'd' suffix (e.g. 60000.0d)
     if re.search(r"(?i)d$", t) and re.match(r"^\s*[-+]?\d", t):
         return "mjd", re.sub(r"(?i)d$", "", t).strip()
@@ -853,11 +854,15 @@ def _build_range_mask(
     if lo_fam == "frequency":
         lo, hi = _parse_freq_token(lo_tok), _parse_freq_token(hi_tok)
         freq_vals = data.coords["frequency"].values.astype(float)
-        return xr.DataArray((freq_vals >= lo) & (freq_vals <= hi), dims=[freq_dim])
+        mask = xr.DataArray((freq_vals >= lo) & (freq_vals <= hi), dims=[freq_dim])
+        _warn_if_axis_selection_empty("range", raw, "frequency", mask)
+        return mask
     if lo_fam == "velocity":
         lo, hi = _parse_velocity_token(lo_tok), _parse_velocity_token(hi_tok)
         vel_vals = data.coords["velocity"].values.astype(float)
-        return xr.DataArray((vel_vals >= lo) & (vel_vals <= hi), dims=[freq_dim])
+        mask = xr.DataArray((vel_vals >= lo) & (vel_vals <= hi), dims=[freq_dim])
+        _warn_if_axis_selection_empty("range", raw, "velocity", mask)
+        return mask
     # channel
     lo_ch = _parse_channel_token(lo_tok)
     hi_ch = _parse_channel_token(hi_tok)
@@ -865,7 +870,9 @@ def _build_range_mask(
     n = len(data.coords["frequency"])
     mask_vals = np.zeros(n, dtype=bool)
     mask_vals[lo_ch : hi_ch + 1] = True
-    return xr.DataArray(mask_vals, dims=[freq_dim])
+    mask = xr.DataArray(mask_vals, dims=[freq_dim])
+    _warn_if_axis_selection_empty("range", raw, "channel", mask)
+    return mask
 
 
 def _build_corr_mask(
@@ -987,7 +994,49 @@ def _build_time_mask(
         hi_t = Time(float(hi_val), format="mjd", scale=scale)
     lo_mjd, hi_mjd = lo_t.mjd, hi_t.mjd
     time_vals = time_coord.values.astype(float)
-    return xr.DataArray((time_vals >= lo_mjd) & (time_vals <= hi_mjd), dims=[time_dim])
+    mask = xr.DataArray((time_vals >= lo_mjd) & (time_vals <= hi_mjd), dims=[time_dim])
+    _warn_if_axis_selection_empty("time", raw, "time", mask)
+    return mask
+
+
+def _warn_if_axis_selection_empty(
+    keyword: str,
+    raw_value: str,
+    family: str,
+    mask: xr.DataArray,
+) -> None:
+    """Warn when an axis-selection keyword produces an all-False mask.
+
+    Parameters
+    ----------
+    keyword : str
+        CRTF keyword that produced the 1-D mask, such as ``range`` or ``time``.
+    raw_value : str
+        Raw bracketed keyword payload from the CRTF line.
+    family : str
+        Interpreted token family used for the comparison, such as
+        ``frequency``, ``velocity``, ``channel``, or ``time``.
+    mask : xr.DataArray
+        One-dimensional boolean mask built for the target axis.
+
+    Returns
+    -------
+    None
+        Emits a ``UserWarning`` only when *mask* contains no selected entries.
+
+    Assumptions
+    -----------
+    The caller has already validated syntax and built the axis mask.  This
+    helper preserves the existing all-False return semantics and adds only a
+    user-visible warning for non-overlapping selections.
+    """
+    if bool(np.any(np.asarray(mask.values, dtype=bool))):
+        return
+    warnings.warn(
+        f"{keyword}={raw_value} selects no {family} entries; returning an all-False mask.",
+        UserWarning,
+        stacklevel=3,
+    )
 
 
 def _compose_line_mask(
