@@ -42,18 +42,11 @@
 namespace hclean {
 
 /**
- * Templated function to find minimum and maximum values in a 2D image array
- *
- * @param limagestep 2D array [ny][nx] input dirty image
- * @param domask flag indicating if mask is present (0 = no mask)
- * @param lmask 2D mask array [ny][nx] (used if domask != 0)
- * @param nx width of image
- * @param ny height of image
- * @param fmin output minimum value found
- * @param fmax output maximum value found
+ * Templated function to find minimum and maximum values in a 2D image array.
+ * The mask is a bool array; pixels with mask == true are considered.
  */
 template<typename T>
-void maximg(const T* limagestep, int domask, const T* lmask,
+void maximg(const T* limagestep, int domask, const bool* lmask,
            int nx, int ny, T& fmin, T& fmax) {
 
     // Use appropriate large values for each type
@@ -67,10 +60,7 @@ void maximg(const T* limagestep, int domask, const T* lmask,
 
     for (int iy = 0; iy < ny; ++iy) {
         for (int ix = 0; ix < nx; ++ix) {
-            // Check mask condition
-            T mask_threshold = static_cast<T>(0.5);
-            if ((domask == 0) || (lmask[iy * nx + ix] > mask_threshold)) {
-                // Access 2D array: limagestep[iy][ix]
+            if ((domask == 0) || lmask[iy * nx + ix]) {
                 T wpeak = limagestep[iy * nx + ix];
 
                 if (wpeak > fmax) {
@@ -109,7 +99,7 @@ void maximg(const T* limagestep, int domask, const T* lmask,
  */
 template<typename T>
 void clean(T* limage, T* limagestep, const T* lpsf,
-           int domask, const T* lmask, int nx, int ny,
+           int domask, const bool* lmask, int nx, int ny,
            int xbeg, int xend, int ybeg, int yend,
            int niter, int siter, int& iter, T gain, T thres,
            T cspeedup,
@@ -129,9 +119,7 @@ void clean(T* limage, T* limagestep, const T* lpsf,
         absval = static_cast<T>(0);
         for (int iy = ybeg; iy < yend; ++iy) {
             for (int ix = xbeg; ix < xend; ++ix) {
-                // Check mask condition
-                T mask_threshold = static_cast<T>(0.5);
-                if ((domask == 0) || (lmask[iy * nx + ix] > mask_threshold)) {
+                if ((domask == 0) || lmask[iy * nx + ix]) {
                     T val = std::abs(limagestep[iy * nx + ix]);
                     if (val > absval) {
                         px = ix;
@@ -222,7 +210,7 @@ void clean(T* limage, T* limagestep, const T* lpsf,
  */
 template<typename T>
 void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
-                int domask, const T* mask_cube,
+                int domask, const bool* mask_cube,
                 int nt, int nf, int np_img, int np_psf,
                 int ny, int nx,
                 int xbeg, int xend, int ybeg, int yend,
@@ -259,7 +247,7 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
             T* residual = residual_cube + img_offset;
             T* model = model_cube + img_offset;
             const T* psf = psf_cube + psf_offset;
-            const T* mask = (domask && mask_cube != nullptr)
+            const bool* mask = (domask && mask_cube != nullptr)
                 ? mask_cube + img_offset
                 : nullptr;
 
@@ -292,14 +280,14 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
 }
 
 // Explicit template instantiations for float and double
-template void maximg<float>(const float* limagestep, int domask, const float* lmask,
+template void maximg<float>(const float* limagestep, int domask, const bool* lmask,
                            int nx, int ny, float& fmin, float& fmax);
 
-template void maximg<double>(const double* limagestep, int domask, const double* lmask,
+template void maximg<double>(const double* limagestep, int domask, const bool* lmask,
                             int nx, int ny, double& fmin, double& fmax);
 
 template void clean<float>(float* limage, float* limagestep, const float* lpsf,
-                          int domask, const float* lmask, int nx, int ny,
+                          int domask, const bool* lmask, int nx, int ny,
                           int xbeg, int xend, int ybeg, int yend,
                           int niter, int siter, int& iter, float gain, float thres,
                           float cspeedup,
@@ -307,7 +295,7 @@ template void clean<float>(float* limage, float* limagestep, const float* lpsf,
                           std::function<void(int&)> stopnow);
 
 template void clean<double>(double* limage, double* limagestep, const double* lpsf,
-                           int domask, const double* lmask, int nx, int ny,
+                           int domask, const bool* lmask, int nx, int ny,
                            int xbeg, int xend, int ybeg, int yend,
                            int niter, int siter, int& iter, double gain, double thres,
                            double cspeedup,
@@ -316,7 +304,7 @@ template void clean<double>(double* limage, double* limagestep, const double* lp
 
 template void clean_cube<float>(float* residual_cube, float* model_cube,
                                 const float* psf_cube, int domask,
-                                const float* mask_cube,
+                                const bool* mask_cube,
                                 int nt, int nf, int np_img, int np_psf,
                                 int ny, int nx,
                                 int xbeg, int xend, int ybeg, int yend,
@@ -325,7 +313,7 @@ template void clean_cube<float>(float* residual_cube, float* model_cube,
 
 template void clean_cube<double>(double* residual_cube, double* model_cube,
                                  const double* psf_cube, int domask,
-                                 const double* mask_cube,
+                                 const bool* mask_cube,
                                  int nt, int nf, int np_img, int np_psf,
                                  int ny, int nx,
                                  int xbeg, int xend, int ybeg, int yend,

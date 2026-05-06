@@ -200,8 +200,6 @@ def image_cube_single_field(
         "Time to create empty image xds: " + str(time.time() - start) + " seconds"
     )
     
-    print(img_xds)
-
     start = time.time()
     write_image(img_xds, imagename=image_store, out_format="zarr", overwrite=overwrite)
     logger.info(

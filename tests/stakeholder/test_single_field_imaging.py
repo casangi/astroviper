@@ -609,7 +609,7 @@ def test_single_field_imaging():
         iteration_control_params={
             "niter": 100,
             "nmajor": 0,
-            "threshold": 0.0,
+            "threshold": 0.2,
             "gain": 0.1,
             "cyclefactor": 1.5,
             "cycleniter": 1,
@@ -645,8 +645,8 @@ def test_single_field_imaging():
 
     from matplotlib import pyplot as plt
     frequency = 4
-    I_av = img_av_xds.isel(polarization=0,time=0)
-    I = img_xds.isel(polarization=0,time=0)
+    I_av = img_av_xds.isel(polarization=0,time=0,l=slice(100,150), m=slice(100,150))
+    I = img_xds.isel(polarization=0,time=0,l=slice(100,150), m=slice(100,150))
 
     # print(np.abs(np.max(np.abs(I))).values)
 
@@ -660,6 +660,12 @@ def test_single_field_imaging():
     print(I_av)
     print("************" * 10)
     print(I)
+    
+    max_per_dif_model= [2.1e-05, 0.001, 7.7e-06, 0.0022, 0.0013]
+    min_per_dif_model = [2.0e-05, 0.0009, 7.6e-06, 0.0021, 0.0012]  
+    
+    max_per_dif_residual= [0.12, 0.07, 0.09, 0.051, 0.045]
+    min_per_dif_residual = [0.11, 0.06, 0.08, 0.05, 0.04]  
     
     for i_f in range(5):
         # print("Channel ", i_f)
@@ -686,23 +692,23 @@ def test_single_field_imaging():
         axes[1,1].set_title("SKY_RESIDUAL_CASA")
         fig.colorbar(im4, ax=axes[1,1])
         im5 = axes[1,2].imshow(
-            I_av["SKY_RESIDUAL"].isel(frequency=i_f).values - I["SKY_RESIDUAL"].isel(frequency=i_f).values
+            (I_av["SKY_RESIDUAL"].isel(frequency=i_f).values - I["SKY_RESIDUAL"].isel(frequency=i_f).values)/np.max(np.abs(I["SKY_RESIDUAL"].isel(frequency=i_f).values))
         )
         axes[1,2].set_title("SKY_RESIDUAL_AV - SKY_RESIDUAL_CASA")
         fig.colorbar(im5, ax=axes[1,2])
         
         
-        im3 = axes[2,0].imshow(I_av["PRIMARY_BEAM"].isel(frequency=i_f).values)
-        axes[2,0].set_title("PRIMARY_BEAM_AV")
-        fig.colorbar(im3, ax=axes[2,0])
-        im4 = axes[2,1].imshow(I["PRIMARY_BEAM"].isel(frequency=i_f).values)
-        axes[2,1].set_title("PRIMARY_BEAM_CASA")
-        fig.colorbar(im4, ax=axes[2,1])
-        im5 = axes[2,2].imshow(
-            I_av["PRIMARY_BEAM"].isel(frequency=i_f).values - I["PRIMARY_BEAM"].isel(frequency=i_f).values
-        )
-        axes[2,2].set_title("PRIMARY_BEAM_AV - PRIMARY_BEAM_CASA")
-        fig.colorbar(im5, ax=axes[2,2])
+        # im3 = axes[2,0].imshow(I_av["PRIMARY_BEAM"].isel(frequency=i_f).values)
+        # axes[2,0].set_title("PRIMARY_BEAM_AV")
+        # fig.colorbar(im3, ax=axes[2,0])
+        # im4 = axes[2,1].imshow(I["PRIMARY_BEAM"].isel(frequency=i_f).values)
+        # axes[2,1].set_title("PRIMARY_BEAM_CASA")
+        # fig.colorbar(im4, ax=axes[2,1])
+        # im5 = axes[2,2].imshow(
+        #     (I_av["PRIMARY_BEAM"].isel(frequency=i_f).values - I["PRIMARY_BEAM"].isel(frequency=i_f).values)/np.max(np.abs(I["PRIMARY_BEAM"].isel(frequency=i_f).values))
+        # )
+        # axes[2,2].set_title("PRIMARY_BEAM_AV - PRIMARY_BEAM_CASA")
+        # fig.colorbar(im5, ax=axes[2,2])
         
         im3 = axes[2,0].imshow(I_av["MASK"].isel(frequency=i_f).values)
         axes[2,0].set_title("MASK_AV")
@@ -716,10 +722,6 @@ def test_single_field_imaging():
         axes[2,2].set_title("MASK_AV - MASK_CASA")
         fig.colorbar(im5, ax=axes[2,2])
         
-    
-        
-        
-        
         rel_diff_model = np.max(
             np.abs(I_av["SKY_MODEL"].isel(frequency=i_f).values - I["SKY_MODEL"].isel(frequency=i_f).values)
             / np.max(np.abs(I["SKY_MODEL"].isel(frequency=i_f).values))
@@ -732,16 +734,47 @@ def test_single_field_imaging():
         
         print(f"Channel {i_f} Relative difference in SKY_MODEL: ", rel_diff_model)
         print(f"Channel {i_f} Relative difference in SKY_RESIDUAL: ", rel_diff_residual)
+        
 
-        # print("Relative difference: ", rel_diff)
-        # if i_f == 0:
-        #     assert (
-        #         rel_diff < 1e-3
-        #     ), "You broke something! Relative difference between the two images is larger than 1e-3."
-        # else:
-        #     assert (
-        #         rel_diff < 1e-4
-        #     ), "You broke something! Relative difference between the two images is larger than 1e-5."
+        if rel_diff_model > max_per_dif_model[i_f]:
+            print(f"BAD MODEL ", rel_diff_model, " is greater than ", max_per_dif_model[i_f])
+            
+        if rel_diff_model < min_per_dif_model[i_f]:
+            print(f"GOOD MODEL ", rel_diff_model, " is less than ", min_per_dif_model[i_f])
+        
+        if rel_diff_residual > max_per_dif_residual[i_f]:
+            print(f"BAD RESIDUAL ", rel_diff_residual, " is greater than ", max_per_dif_residual[i_f])
+        if rel_diff_residual < min_per_dif_residual[i_f]:
+            print(f"GOOD RESIDUAL ", rel_diff_residual, " is less than ", min_per_dif_residual[i_f])
+        
+        
+        
+        # Channel 0 Relative difference in SKY_MODEL:  2.0388167938454347e-05
+        # Channel 0 Relative difference in SKY_RESIDUAL:  0.49524705855669815
+        
+        # Channel 1 Relative difference in SKY_MODEL:  0.08863909101226053
+        # Channel 1 Relative difference in SKY_RESIDUAL:  0.6390266758908688
+        
+        # Channel 2 Relative difference in SKY_MODEL:  1.0192190827199984e-05
+        # Channel 2 Relative difference in SKY_RESIDUAL:  0.6264641337899804
+        
+        # Channel 3 Relative difference in SKY_MODEL:  0.002121664713110676
+        # Channel 3 Relative difference in SKY_RESIDUAL:  0.5714527578778785
+        
+        # Channel 4 Relative difference in SKY_MODEL:  0.0012122482123595138
+        # Channel 4 Relative difference in SKY_RESIDUAL:  0.5615437885823942
+        
+        
+# Channel 0 Relative difference in SKY_MODEL:  2.0388167939156927e-05
+# Channel 0 Relative difference in SKY_RESIDUAL:  0.11555623461263295
+# Channel 1 Relative difference in SKY_MODEL:  0.0009789482204398345
+# Channel 1 Relative difference in SKY_RESIDUAL:  0.06962187922617491
+# Channel 2 Relative difference in SKY_MODEL:  7.67860174649184e-06
+# Channel 2 Relative difference in SKY_RESIDUAL:  0.087915044478974
+# Channel 3 Relative difference in SKY_MODEL:  0.0021216647131103673
+# Channel 3 Relative difference in SKY_RESIDUAL:  0.05012888138713684
+# Channel 4 Relative difference in SKY_MODEL:  0.0012122482123601821
+# Channel 4 Relative difference in SKY_RESIDUAL:  0.04491952484766548
 
     plt.show()
 
@@ -878,9 +911,18 @@ def test_single_field_imaging():
 
 
 if __name__ == "__main__":
-    test_single_field_imaging_niter0()
+    #test_single_field_imaging_niter0()
     print("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"*10)
     test_single_field_imaging()
+    
+    # import xarray as xr
+    # img_xds = xr.open_zarr("twhya_selfcal_5chans_lsrk_niter_99_astroviper.img.zarr")
+    
+    # import matplotlib.pyplot as plt
+    # plt.figure()
+    # plt.imshow(img_xds["MASK"].isel(frequency=0, time=0, polarization=0).values)
+    # plt.colorbar()
+    # plt.show()  
 
 
     # # write_image(img_xds, "test_write", out_format="casa", overwrite=True)

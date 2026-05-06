@@ -99,12 +99,14 @@ static py::buffer_info validate_inplace_cube(py::array& arr,
 }
 
 /**
- * Templated maximg wrapper. Read-only; accepts forcecast for convenience.
+ * Templated maximg wrapper. The image is templated on T (float/double); the
+ * mask is always bool. The mask is validated as zero-copy: it must be a
+ * C-contiguous bool array matching the image's spatial shape.
  */
 template<typename T>
 py::tuple maximg_impl(
     py::array_t<T, py::array::c_style | py::array::forcecast> image_array,
-    py::array_t<T, py::array::c_style | py::array::forcecast> mask_array = py::array_t<T>()
+    py::array mask_array = py::array()
 ) {
     py::buffer_info image_info = image_array.request();
 
@@ -116,23 +118,18 @@ py::tuple maximg_impl(
     int nx = image_info.shape[1];
 
     int domask = 0;
-    T* mask_ptr = nullptr;
+    const bool* mask_ptr = nullptr;
     if (mask_array.size() > 0) {
-        py::buffer_info mask_info = mask_array.request();
-        if (mask_info.ndim != 2) {
-            throw std::runtime_error("Mask must be 2D array");
-        }
-        if (mask_info.shape[0] != ny || mask_info.shape[1] != nx) {
-            throw std::runtime_error("Mask dimensions must match image spatial dimensions");
-        }
+        py::buffer_info mask_info = validate_inplace_array<bool>(
+            mask_array, "mask", ny, nx, /*require_writable=*/false);
         domask = 1;
-        mask_ptr = static_cast<T*>(mask_info.ptr);
+        mask_ptr = static_cast<const bool*>(mask_info.ptr);
     }
 
     T fmin, fmax;
     hclean::maximg<T>(
         static_cast<const T*>(image_info.ptr),
-        domask, static_cast<const T*>(mask_ptr),
+        domask, mask_ptr,
         nx, ny,
         fmin, fmax
     );
@@ -181,15 +178,15 @@ py::dict hclean_impl(
         model_image, "model", ny, nx, /*require_writable=*/true);
 
     int domask = 0;
-    const T* mask_ptr = nullptr;
+    const bool* mask_ptr = nullptr;
     if (mask_array.size() > 0) {
-        py::buffer_info mask_info = validate_inplace_array<T>(
+        py::buffer_info mask_info = validate_inplace_array<bool>(
             mask_array, "mask", ny, nx, /*require_writable=*/false);
         domask = 1;
         // buffer_info is just a descriptor; the underlying memory is
         // owned by mask_array (a function argument kept alive for the
         // duration of this call), so the raw pointer stays valid.
-        mask_ptr = static_cast<const T*>(mask_info.ptr);
+        mask_ptr = static_cast<const bool*>(mask_info.ptr);
     }
 
     // Parse clean box with -1 meaning "full extent".
@@ -341,13 +338,13 @@ py::dict hclean_cube_impl(
         /*require_writable=*/false);
 
     int domask = 0;
-    const T* mask_ptr = nullptr;
+    const bool* mask_ptr = nullptr;
     if (mask_cube.size() > 0) {
-        py::buffer_info mask_info = validate_inplace_cube<T>(
+        py::buffer_info mask_info = validate_inplace_cube<bool>(
             mask_cube, "mask_cube", nt, nf, np_img, ny, nx,
             /*require_writable=*/false);
         domask = 1;
-        mask_ptr = static_cast<const T*>(mask_info.ptr);
+        mask_ptr = static_cast<const bool*>(mask_info.ptr);
     }
 
     int xbeg = 0, xend = nx, ybeg = 0, yend = ny;
@@ -415,7 +412,7 @@ py::dict hclean_cube_impl(
                     total += std::abs(model_data[off + i]);
                 }
                 T fmin_p, fmax_p;
-                const T* mptr = (domask && mask_ptr != nullptr) ? mask_ptr + off : nullptr;
+                const bool* mptr = (domask && mask_ptr != nullptr) ? mask_ptr + off : nullptr;
                 hclean::maximg<T>(residual_data + off, domask, mptr,
                                   nx, ny, fmin_p, fmax_p);
                 T fp_val = std::max(std::abs(fmin_p), std::abs(fmax_p));
@@ -515,15 +512,15 @@ static py::dict clean_cube_dispatch(
 PYBIND11_MODULE(_hogbom_ext, m) {
     m.doc() = "Templated Hogbom CLEAN algorithm - in-place, zero-copy arrays";
 
-    // maximg: float32 overload
+    // maximg: float32 overload. Mask, if provided, must be a bool array.
     m.def("maximg", &maximg_impl<float>,
           "Find minimum and maximum values in 2D image (float32)",
-          py::arg("image"), py::arg("mask") = py::array_t<float>());
+          py::arg("image"), py::arg("mask") = py::array());
 
-    // maximg: float64 overload
+    // maximg: float64 overload. Mask, if provided, must be a bool array.
     m.def("maximg", &maximg_impl<double>,
           "Find minimum and maximum values in 2D image (float64)",
-          py::arg("image"), py::arg("mask") = py::array_t<double>());
+          py::arg("image"), py::arg("mask") = py::array());
 
     // clean: single entry point; runtime-dispatched on dtype. All input
     // arrays must be C-contiguous, of matching dtype (float32 or float64),

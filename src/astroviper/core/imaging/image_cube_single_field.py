@@ -34,7 +34,6 @@ def PF_image_cube_single_field(input_params, ps_xdt, img_xds):
             T_model_update_cycle = 0.0
             
         is_n_iter_0 = False
-
     
     return_df["task_id"] = input_params["task_id"]
     return_df["n_channels"] = len(input_params["task_coords"]["frequency"]["data"])

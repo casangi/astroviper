@@ -318,25 +318,14 @@ def deconvolve(
     psf_arr = img_xds[psf_name].values
     model_arr = img_xds[model_name].values
 
-    # Optional mask cube, matching the residual's shape.
+    # Optional mask cube, matching the residual's shape. The C++ binding
+    # accepts a bool mask directly; Python keeps ownership of the buffer.
+    
+    print("&&&&&&&&&&",img_xds["MASK"].dtype)
     mask_name = img_xds.attrs["data_groups"][image_data_group_in_name].get("mask", None)
     mask_arr = None
     if mask_name in img_xds:
-        mask_da = img_xds[mask_name]
-        print("mask_da dtype: ", mask_da.dtype)
-        # Align mask to the residual's dtype/layout so the C++ binding
-        # accepts it without a copy.
-        mask_arr = np.ascontiguousarray(mask_da.values, dtype=residual_arr.dtype)
-        #mask_arr = mask_da.data
-        
-        
-        
-        # import matplotlib.pyplot as plt
-        # plt.figure()
-        # plt.imshow(mask_arr[0, 0, 0, ...], origin="lower")
-        # plt.colorbar()
-        # plt.title("Mask plane [0, 0, 0], mask name" + str(mask_name))
-        # plt.show()
+        mask_arr = img_xds[mask_name].values
 
     # Collect per-plane starting statistics in-place (no copies, just
     # reads). The actual CLEAN iteration is driven in C++.
@@ -405,7 +394,7 @@ def deconvolve(
                 }
 
                 returndict.add(returnvals, time=tt, pol=pp, chan=nn)
-
+    print("2 &&&&&&&&&&",img_xds["MASK"].dtype)
     return returndict
 
 
@@ -454,10 +443,11 @@ def hogbom_clean(
         than the number of planes are clamped to the plane count.
         Default 1.
     mask_cube : numpy.ndarray, optional
-        5-D mask array with the same shape and dtype as
-        ``residual_cube``. Pixels with mask value ``> 0.5`` are
-        considered in the peak search; others are ignored. ``None``
-        disables masking.
+        5-D bool mask array with the same shape as ``residual_cube``.
+        Must be C-contiguous and of dtype ``bool`` (the C++ binding
+        accepts the buffer directly without a copy). Pixels with mask
+        value ``True`` are considered in the peak search; others are
+        ignored. ``None`` disables masking.
 
     Returns
     -------

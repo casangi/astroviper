@@ -32,3 +32,6 @@ def model_update_cycle_cube_single_field(img_xds, input_params, is_n_iter_0, num
             image_data_group_out_name =  img_data_group_out_name,
             num_threads=num_threads
         )
+    
+    img_xds.to_zarr("test123.zarr", mode="w")
+    
