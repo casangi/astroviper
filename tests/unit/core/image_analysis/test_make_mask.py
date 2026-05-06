@@ -1,517 +1,180 @@
-"""
-Unit tests for make_mask
+"""Unit tests for astroviper.core.image_analysis.make_mask.make_mask."""
 
-"""
-
-import pytest
 import numpy as np
+import pytest
 import xarray as xr
+
 from astroviper.core.image_analysis.make_mask import make_mask
 
-debug = False
 
-
-# generate primary beam xarray.Dataset image using Gaussian function
-# with data variable 'SKY' for now. In future once xradio image schema
-# is updated it should be changed to use PRIMARY_BEAM data variable
-def make_pbimage(shape=(1, 1, 1, 128, 128)):
+def _build_img_xds(shape=(1, 1, 1, 64, 64), pb_var="PRIMARY_BEAM", mask_var=None):
+    """Build a minimal image Dataset with a Gaussian primary beam, an
+    optional pre-existing boolean mask, and a ``data_groups`` attribute
+    referencing them under the ``"image"`` group."""
     l = np.linspace(-0.05, 0.05, shape[4])
     m = np.linspace(-0.05, 0.05, shape[3])
     L, M = np.meshgrid(l, m, indexing="ij")
     sigma = 0.02
-    gaussian_data = np.exp(-((L**2 + M**2) / (2 * sigma**2)))
+    pb_plane = np.exp(-((L**2 + M**2) / (2 * sigma**2)))
     pb_data = np.zeros(shape)
-    pb_data[0, 0, 0, :, :] = gaussian_data
-    pb_image = xr.DataArray(
-        pb_data,
-        coords={
-            "time": np.arange(shape[0]),
-            "frequency": np.arange(shape[1]),
-            "polarization": np.arange(shape[2]),
-            "l": l,
-            "m": m,
-        },
-        dims=["time", "frequency", "polarization", "l", "m"],
-        name="SKY",
-    )
-    pb_xds = xr.Dataset()
-    pb_xds["SKY"] = pb_image
-    return pb_xds
+    pb_data[0, 0, 0, :, :] = pb_plane
+
+    coords = {
+        "time": np.arange(shape[0]),
+        "frequency": np.arange(shape[1]),
+        "polarization": np.arange(shape[2]),
+        "l": l,
+        "m": m,
+    }
+    dims = ["time", "frequency", "polarization", "l", "m"]
+
+    xds = xr.Dataset()
+    xds[pb_var] = xr.DataArray(pb_data, coords=coords, dims=dims)
+
+    data_group = {"primary_beam": pb_var}
+    if mask_var is not None:
+        # Pre-populate a boolean mask so combine_mask tests have something
+        # to OR with.  A small rectangle is set True; everything else False.
+        mask_data = np.zeros(shape, dtype=bool)
+        mask_data[0, 0, 0, 20:40, 30:50] = True
+        xds[mask_var] = xr.DataArray(mask_data, coords=coords, dims=dims)
+        data_group["mask"] = mask_var
+
+    xds.attrs["data_groups"] = {"image": data_group}
+    return xds
 
 
-# generate image with random sources with data variable 'SKY'.
-def make_image(shape=(1, 1, 1, 128, 128)):
-    l = np.linspace(-0.05, 0.05, shape[4])
-    m = np.linspace(-0.05, 0.05, shape[3])
-    image_data = np.random.rand(*shape)
-    image = xr.DataArray(
-        image_data,
-        coords={
-            "time": np.arange(shape[0]),
-            "frequency": np.arange(shape[1]),
-            "polarization": np.arange(shape[2]),
-            "l": l,
-            "m": m,
-        },
-        dims=["time", "frequency", "polarization", "l", "m"],
-        name="SKY",
-    )
-    image_xds = xr.Dataset()
-    image_xds["SKY"] = image
-    return image_xds
+def test_make_mask_threshold_only():
+    """combine_mask=False produces (primary_beam >= threshold * peak)."""
+    img_xds = _build_img_xds()
+    threshold = 0.1
+    pb = img_xds["PRIMARY_BEAM"].values
+    expected = (pb >= threshold * np.nanmax(pb)).astype(bool)
+
+    result = make_mask(img_xds, threshold=threshold)
+
+    # Function mutates img_xds in place and returns None.
+    assert result is None
+    assert img_xds["MASK"].dtype == bool
+    np.testing.assert_array_equal(img_xds["MASK"].values, expected)
 
 
-# plotting function for debugging
-def plot_image(image: xr.DataArray, title: str, xlabel: str, ylabel: str, block: bool):
-    import matplotlib.pyplot as plt
+def test_make_mask_registers_output_data_group():
+    """The output data group is registered with mask role, date and description."""
+    img_xds = _build_img_xds()
+    threshold = 0.2
 
-    plt.imshow(
-        image.values,
-        origin="lower",
-        extent=[
-            image.coords["l"].min(),
-            image.coords["l"].max(),
-            image.coords["m"].min(),
-            image.coords["m"].max(),
-        ],
-    )
-    plt.colorbar(label="Value")
-    plt.title(title)
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-    plt.show(block=block)
+    make_mask(img_xds, threshold=threshold)
+
+    groups = img_xds.attrs["data_groups"]
+    assert "image" in groups
+    image_group = groups["image"]
+    assert image_group["primary_beam"] == "PRIMARY_BEAM"
+    assert image_group["mask"] == "MASK"
+    assert "date" in image_group
+    assert f"threshold {threshold}" in image_group["description"]
 
 
-# basic improper input tests
-def test_make_mask_no_target():
-    """Test make_mask with no target_image provided"""
-    pb_image = make_pbimage()
-    pb_threshold = 0.1
-    with pytest.raises(
-        ValueError, match="Target image must be provided to check dimensions"
-    ):
-        mask = make_mask(
-            input_image=pb_image,
-            threshold=pb_threshold,
-            target_image=None,
-            combine_mask=False,
-        )
+def test_make_mask_custom_output_mask_name():
+    """The mask data variable picks up the name from data_group_out_modified."""
+    img_xds = _build_img_xds()
 
-
-def test_make_mask_invalid_pb_threshold():
-    """Test make_mask with invalid pb_threshold value"""
-    pb_image = make_pbimage()
-    target = make_image()
-    invalid_thresholds = [-0.1, 1.5]
-    for pb_threshold in invalid_thresholds:
-        with pytest.raises(ValueError, match="threshold must be between 0.0 and 1.0"):
-            mask = make_mask(
-                input_image=pb_image,
-                threshold=pb_threshold,
-                target_image=target,
-                combine_mask=False,
-            )
-
-
-def test_make_mask_dimension_mismatch():
-    """Test make_mask with dimension mismatch between input_image and target_image"""
-    pb_image = make_pbimage()
-    target = make_image(shape=(1, 1, 1, 64, 64))
-    pb_threshold = 0.1
-    with pytest.raises(
-        ValueError,
-        match="Input mask image dimensions do not match target image dimensions",
-    ):
-        mask = make_mask(
-            input_image=pb_image,
-            threshold=pb_threshold,
-            target_image=target,
-            combine_mask=False,
-        )
-
-
-def test_make_mask_frequency_mismatch():
-    """Test make_mask with frequency dimension mismatch between input_image and target_image"""
-    pb_image = make_pbimage(shape=(1, 1, 1, 128, 128))
-    target = make_image(shape=(1, 3, 1, 128, 128))
-    pb_threshold = 0.1
-    with pytest.raises(
-        ValueError,
-        match="Input mask image frequency dimension does not match target image frequency dimension",
-    ):
-        mask = make_mask(
-            input_image=pb_image,
-            threshold=pb_threshold,
-            target_image=target,
-            combine_mask=False,
-        )
-
-
-def test_make_mask_time_mismatch():
-    """Test make_mask with time dimension mismatch between input_image and target_image"""
-    pb_image = make_pbimage(shape=(1, 1, 1, 128, 128))
-    target = make_image(shape=(2, 1, 1, 128, 128))
-    pb_threshold = 0.1
-    with pytest.raises(
-        ValueError,
-        match="Input mask image time dimension does not match target image time dimension",
-    ):
-        mask = make_mask(
-            input_image=pb_image,
-            threshold=pb_threshold,
-            target_image=target,
-            combine_mask=False,
-        )
-
-
-def test_make_mask_polarization_mismatch():
-    """Test make_mask with polarization dimension mismatch between input_image and target_image"""
-    pb_image = make_pbimage(shape=(1, 1, 1, 128, 128))
-    target = make_image(shape=(1, 1, 4, 128, 128))
-    pb_threshold = 0.1
-    with pytest.raises(
-        ValueError,
-        match="Input mask image polarization dimension does not match target image polarization dimension",
-    ):
-        mask = make_mask(
-            input_image=pb_image,
-            threshold=pb_threshold,
-            target_image=target,
-            combine_mask=False,
-        )
-
-
-# test most basic combine_mask = False case
-def test_make_mask_pb_thresh_only():
-    """Test combine_mask = False case"""
-    pb_image = make_pbimage()
-
-    if debug:
-        plot_image(
-            pb_image["SKY"],
-            "Primary Beam Image",
-            "l (radians)",
-            "m (radians)",
-            block=debug,
-        )
-
-    target = make_image()
-
-    pb_threshold = 0.1
-    mask = make_mask(
-        input_image=pb_image,
-        threshold=pb_threshold,
-        target_image=target,
-        combine_mask=False,
-    )
-    expected_mask_data = (pb_image["SKY"].values >= pb_threshold).astype(bool)
-    np.testing.assert_array_equal(mask["MASK"].values, expected_mask_data)
-
-    if debug:
-        plot_image(
-            mask["MASK"],
-            "Generated Mask Image",
-            "l (radians)",
-            "m (radians)",
-            block=debug,
-        )
-
-
-def test_make_mask_combine():
-    """Test combine_mask = True case without active_mask attribute"""
-    # first make target image and add a rectangular mask in 'MASK' data variable
-    target = make_image()
-    target["MASK"] = xr.DataArray(
-        np.zeros_like(target["SKY"].values, dtype=bool),
-        coords=target["SKY"].coords,
-        dims=target["SKY"].dims,
-    )
-    if debug:
-        plot_image(
-            target["MASK"],
-            "Initial Mask in Target Image",
-            "l (radians)",
-            "m (radians)",
-            block=debug,
-        )
-    # set a rectangular region to True
-    target["MASK"].isel(l=slice(60, 80), m=slice(40, 80)).values[:] = True
-    if debug:
-        plot_image(
-            target["MASK"],
-            "Modified Mask in Target Image",
-            "l (radians)",
-            "m (radians)",
-            block=debug,
-        )
-    # make target data xarray.Dataset
-    target_xds = xr.Dataset()
-    target_xds["SKY"] = target["SKY"]
-    target_xds["MASK"] = target["MASK"]
-
-    pb_image = make_pbimage()
-    pb_threshold = 0.9
-    mask = make_mask(
-        input_image=pb_image,
-        threshold=pb_threshold,
-        target_image=target,
-        combine_mask=True,
-    )
-    expected_mask_data = (pb_image["SKY"].values >= pb_threshold) & (
-        target["MASK"].values
+    make_mask(
+        img_xds,
+        threshold=0.5,
+        image_data_group_out_modified={"mask": "MY_MASK"},
     )
 
-    if debug:
-        plot_image(
-            target["MASK"],
-            "Existing Mask in Target Image",
-            "l (radians)",
-            "m (radians)",
-            block=debug,
-        )
-        plot_image(
-            mask["MASK"],
-            "Generated Combined Mask Image",
-            "l (radians)",
-            "m (radians)",
-            block=debug,
-        )
-
-    np.testing.assert_array_equal(mask["MASK"].values, expected_mask_data)
+    assert "MY_MASK" in img_xds.data_vars
+    assert "MASK" not in img_xds.data_vars
+    assert img_xds.attrs["data_groups"]["image"]["mask"] == "MY_MASK"
 
 
-def test_make_mask_apply_on_target():
-    """Test make_mask with apply_on_target = True"""
-    pb_image = make_pbimage()
-    target = make_image()
-    pb_threshold = 0.2
-    mask = make_mask(
-        input_image=pb_image,
-        threshold=pb_threshold,
-        target_image=target,
-        apply_on_target=True,
-        combine_mask=False,
-    )
-    expected_mask_data = (pb_image["SKY"].values >= pb_threshold).astype(bool)
+def test_make_mask_separate_output_data_group():
+    """Output stored under a different group key leaves the input group intact."""
+    img_xds = _build_img_xds()
 
-    if debug:
-        plot_image(
-            mask["MASK"],
-            "Generated Mask Image Applied on Target",
-            "l (radians)",
-            "m (radians)",
-            block=debug,
-        )
-
-    np.testing.assert_array_equal(mask["MASK"].values, expected_mask_data)
-
-
-def test_make_mask_apply_on_target_existing_mask():
-    """Test make_mask with apply_on_target = True and existing mask in target image"""
-    # first make target image and add a rectangular mask in 'MASK' data variable
-    target = make_image()
-    target["MASK"] = xr.DataArray(
-        np.zeros_like(target["SKY"].values, dtype=bool),
-        coords=target["SKY"].coords,
-        dims=target["SKY"].dims,
-    )
-    # set a rectangular region to True
-    target["MASK"].isel(l=slice(60, 80), m=slice(40, 80)).values[:] = True
-    # make target data xarray.Dataset
-    target_xds = xr.Dataset()
-    target_xds["SKY"] = target["SKY"]
-    target_xds["MASK"] = target["MASK"]
-
-    pb_image = make_pbimage()
-    pb_threshold = 0.9
-    mask = make_mask(
-        input_image=pb_image,
-        threshold=pb_threshold,
-        target_image=target_xds,
-        apply_on_target=True,
-        combine_mask=True,
-    )
-    expected_mask_data = (pb_image["SKY"].values >= pb_threshold) & (
-        target["MASK"].values
+    make_mask(
+        img_xds,
+        threshold=0.3,
+        image_data_group_out_name="image_masked",
     )
 
-    np.testing.assert_array_equal(mask["MASK"].values, expected_mask_data)
+    groups = img_xds.attrs["data_groups"]
+    assert "image" in groups and "image_masked" in groups
+    # Input data group untouched (no mask role added).
+    assert "mask" not in groups["image"]
+    # Output data group inherits primary_beam and adds mask.
+    assert groups["image_masked"]["primary_beam"] == "PRIMARY_BEAM"
+    assert groups["image_masked"]["mask"] == "MASK"
 
 
-def test_make_mask_active_mask_attribute():
-    """Test make_mask with combine_mask = True and active_mask attribute"""
-    # first make target image and add a rectangular mask in 'MASK' data variable
-    target = make_image()
-    target["MASK"] = xr.DataArray(
-        np.zeros_like(target["SKY"].values, dtype=bool),
-        coords=target["SKY"].coords,
-        dims=target["SKY"].dims,
-    )
-    # set a rectangular region to True
-    target["MASK"].isel(l=slice(60, 80), m=slice(40, 80)).values[:] = True
-    # make target data xarray.Dataset
-    target_xds = xr.Dataset()
-    target_xds["SKY"] = target["SKY"]
-    target_xds["MASK"] = target["MASK"]
-    # set active_mask attribute
-    target_xds["SKY"].attrs["active_mask"] = "MASK"
+def test_make_mask_combine_with_existing_mask():
+    """combine_mask=True yields logical OR of the input mask and the threshold mask."""
+    # Distinct names for input vs output mask so overwrite=False is fine.
+    img_xds = _build_img_xds(mask_var="MASK_IN")
+    threshold = 0.9
+    pb = img_xds["PRIMARY_BEAM"].values
+    existing = img_xds["MASK_IN"].values
+    expected = np.logical_or(existing, pb >= threshold * np.nanmax(pb))
 
-    pb_image = make_pbimage()
-    pb_threshold = 0.9
-    mask = make_mask(
-        input_image=pb_image,
-        threshold=pb_threshold,
-        target_image=target_xds,
-        combine_mask=True,
-    )
-    expected_mask_data = (pb_image["SKY"].values >= pb_threshold) & (
-        target["MASK"].values
-    )
+    make_mask(img_xds, threshold=threshold, combine_mask=True)
 
-    np.testing.assert_array_equal(mask["MASK"].values, expected_mask_data)
+    np.testing.assert_array_equal(img_xds["MASK"].values, expected)
+    # Input mask is preserved as a separate data variable.
+    np.testing.assert_array_equal(img_xds["MASK_IN"].values, existing)
 
 
-def test_make_mask_active_mask_attribute_casa_mask():
-    """
-    Test make_mask with combine_mask = True and active_mask attribute pointing to
-    CASA mask definition
-    """
-    # first make target image and add a rectangular mask in 'MASK0' data variable
-    target = make_image()
-    target["MASK0"] = xr.DataArray(
-        np.zeros_like(target["SKY"].values, dtype=bool),
-        coords=target["SKY"].coords,
-        dims=target["SKY"].dims,
-    )
-    # set a rectangular region to True
-    target["MASK0"].isel(l=slice(60, 80), m=slice(40, 80)).values[:] = True
-    # make target data xarray.Dataset
-    target_xds = xr.Dataset()
-    target_xds["SKY"] = target["SKY"]
-    target_xds["MASK0"] = target["MASK0"]
-    # set active_mask attribute to 'MASK0' (CASA mask definition)
-    target_xds["SKY"].attrs["active_mask"] = "MASK0"
-    pb_image = make_pbimage()
-
-    pb_threshold = 0.9
-    mask = make_mask(
-        input_image=pb_image,
-        threshold=pb_threshold,
-        target_image=target_xds,
-        combine_mask=True,
-    )
-    # CASA mask definition is reverse of xradio mask definition
-    expected_mask_data = (pb_image["SKY"].values >= pb_threshold) & (
-        ~target["MASK0"].values
-    )
-
-    np.testing.assert_array_equal(mask["MASK"].values, expected_mask_data)
+def test_make_mask_overwrite_false_blocks_existing_mask_var():
+    """When the output mask data variable already exists, overwrite=False raises."""
+    img_xds = _build_img_xds(mask_var="MASK")
+    with pytest.raises(AssertionError):
+        make_mask(img_xds, threshold=0.1)
 
 
-def test_make_mask_active_mask_attribute_missing_dv():
-    """Test make_mask with combine_mask = True and active_mask attribute pointing to missing data variable"""
-    # first make target image and add a rectangular mask in 'MASK' data variable
-    target = make_image()
-    target["MASK0"] = xr.DataArray(
-        np.zeros_like(target["SKY"].values, dtype=bool),
-        coords=target["SKY"].coords,
-        dims=target["SKY"].dims,
-    )
-    # set a rectangular region to True
-    target["MASK0"].isel(l=slice(60, 80), m=slice(40, 80)).values[:] = True
-    # make target data xarray.Dataset
-    target_xds = xr.Dataset()
-    target_xds["SKY"] = target["SKY"]
-    target_xds["MASK0"] = target["MASK0"]
-    # set active_mask attribute to a non-existing data variable
-    target_xds["SKY"].attrs["active_mask"] = "NON_EXISTING_MASK"
+def test_make_mask_overwrite_true_replaces_existing_mask_var():
+    """overwrite=True allows the pre-existing mask data variable to be replaced."""
+    img_xds = _build_img_xds(mask_var="MASK")
+    threshold = 0.1
+    pb = img_xds["PRIMARY_BEAM"].values
+    expected = (pb >= threshold * np.nanmax(pb)).astype(bool)
 
-    pb_image = make_pbimage()
-    pb_threshold = 0.9
-    with pytest.raises(
-        KeyError,
-        match="Active mask data variable 'NON_EXISTING_MASK' not found in target image",
-    ):
-        mask = make_mask(
-            input_image=pb_image,
-            threshold=pb_threshold,
-            target_image=target_xds,
-            combine_mask=True,
-        )
+    make_mask(img_xds, threshold=threshold, overwrite=True)
+
+    np.testing.assert_array_equal(img_xds["MASK"].values, expected)
 
 
-def test_make_mask_target_no_existing_mask():
-    """Test make_mask with combine_mask = True and no existing mask in target image"""
-    pb_image = make_pbimage()
-    target = make_image()
-    pb_threshold = 0.1
-    mask = make_mask(
-        input_image=pb_image,
-        threshold=pb_threshold,
-        target_image=target,
-        combine_mask=True,
-    )
-    expected_mask_data = (pb_image["SKY"].values >= pb_threshold).astype(bool)
-    np.testing.assert_array_equal(mask["MASK"].values, expected_mask_data)
+def test_make_mask_missing_input_data_group_raises():
+    """An unknown input data group name raises an AssertionError."""
+    img_xds = _build_img_xds()
+    with pytest.raises(AssertionError):
+        make_mask(img_xds, threshold=0.1, image_data_group_in_name="does_not_exist")
 
 
-def test_make_mask_no_active_mask_casa_mask():
-    """
-    Test make_mask with combine_mask = True and no active_mask attribute
-    but target image has CASA mask definition in 'MASK0' data variable
-    """
-    # first make target image and add a rectangular mask in 'MASK0' data variable
-    target = make_image()
-    target["MASK0"] = xr.DataArray(
-        np.zeros_like(target["SKY"].values, dtype=bool),
-        coords=target["SKY"].coords,
-        dims=target["SKY"].dims,
-    )
-    # set a rectangular region to True
-    target["MASK0"].isel(l=slice(60, 80), m=slice(40, 80)).values[:] = True
-    # make target data xarray.Dataset
-    target_xds = xr.Dataset()
-    target_xds["SKY"] = target["SKY"]
-    target_xds["MASK0"] = target["MASK0"]
+def test_make_mask_handles_nan_in_primary_beam():
+    """NaNs in the primary beam do not break the threshold (nanmax is used)."""
+    img_xds = _build_img_xds()
+    # Inject a NaN into the primary beam — np.nanmax must ignore it.
+    img_xds["PRIMARY_BEAM"].values[0, 0, 0, 0, 0] = np.nan
+    threshold = 0.1
+    pb = img_xds["PRIMARY_BEAM"].values
+    expected = (pb >= threshold * np.nanmax(pb)).astype(bool)
 
-    pb_image = make_pbimage()
+    make_mask(img_xds, threshold=threshold)
 
-    pb_threshold = 0.9
-    mask = make_mask(
-        input_image=pb_image,
-        threshold=pb_threshold,
-        target_image=target_xds,
-        combine_mask=True,
-    )
-    # CASA mask definition is reverse of xradio mask definition
-    expected_mask_data = (pb_image["SKY"].values >= pb_threshold) & (
-        ~target["MASK0"].values
-    )
-
-    np.testing.assert_array_equal(mask["MASK"].values, expected_mask_data)
+    np.testing.assert_array_equal(img_xds["MASK"].values, expected)
 
 
-def test_make_mask_output_image(tmp_path):
-    """
-    Test make_mask write to disk in zarr format
-    """
-    pb_image = make_pbimage()
-    target = make_image()
-    pb_threshold = 0.3
-    output_image_name_str = str(tmp_path / "test_mask_output.zarr")
-    mask = make_mask(
-        input_image=pb_image,
-        threshold=pb_threshold,
-        target_image=target,
-        output_image_name=output_image_name_str,
-        output_format="zarr",
-        combine_mask=False,
-    )
-    expected_mask_data = (pb_image["SKY"].values >= pb_threshold).astype(bool)
+def test_make_mask_description_appends_on_repeat_call():
+    """A second call with overwrite=True appends to the existing audit-trail description."""
+    img_xds = _build_img_xds()
 
-    import os
+    make_mask(img_xds, threshold=0.1)
+    first_description = img_xds.attrs["data_groups"]["image"]["description"]
 
-    assert os.path.exists(output_image_name_str)
-    # Read back the zarr file to verify contents
-    loaded_mask = xr.open_zarr(output_image_name_str)
-    np.testing.assert_array_equal(loaded_mask["MASK"].values, expected_mask_data)
+    make_mask(img_xds, threshold=0.5, overwrite=True)
+    second_description = img_xds.attrs["data_groups"]["image"]["description"]
+
+    # modify_data_groups_xds appends with "; " when a description already exists.
+    assert second_description.startswith(first_description + "; ")
+    assert "threshold 0.5" in second_description

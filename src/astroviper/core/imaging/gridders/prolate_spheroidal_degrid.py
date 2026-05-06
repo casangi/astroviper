@@ -165,9 +165,6 @@ def prolate_spheroidal_degrid_jit(
                             degrid_value = 0.0
 
                             if ~np.isnan(vis_data[i_time, i_baseline, i_chan, i_pol]):
-                                # Iterate with i_v innermost so the contiguous
-                                # last axis of `grid` is accessed with unit
-                                # stride.
                                 for i_u in range(start_support, end_support):
                                     u_indx = u_center_indx + i_u
                                     u_offset_indx = np.abs(
@@ -190,10 +187,12 @@ def prolate_spheroidal_degrid_jit(
                                         )
                                         norm = norm + conv
 
-                                if norm > 0.0:
+                                if norm != 0.0:
                                     vis_data[i_time, i_baseline, i_chan, i_pol] = (
                                         degrid_value / norm
                                     )
+
+    print(vis_data)
     return
 
 

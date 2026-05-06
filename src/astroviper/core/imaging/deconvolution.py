@@ -319,13 +319,24 @@ def deconvolve(
     model_arr = img_xds[model_name].values
 
     # Optional mask cube, matching the residual's shape.
-    mask_name = "MASK_" + residual_name
+    mask_name = img_xds.attrs["data_groups"][image_data_group_in_name].get("mask", None)
     mask_arr = None
     if mask_name in img_xds:
         mask_da = img_xds[mask_name]
+        print("mask_da dtype: ", mask_da.dtype)
         # Align mask to the residual's dtype/layout so the C++ binding
         # accepts it without a copy.
         mask_arr = np.ascontiguousarray(mask_da.values, dtype=residual_arr.dtype)
+        #mask_arr = mask_da.data
+        
+        
+        
+        # import matplotlib.pyplot as plt
+        # plt.figure()
+        # plt.imshow(mask_arr[0, 0, 0, ...], origin="lower")
+        # plt.colorbar()
+        # plt.title("Mask plane [0, 0, 0], mask name" + str(mask_name))
+        # plt.show()
 
     # Collect per-plane starting statistics in-place (no copies, just
     # reads). The actual CLEAN iteration is driven in C++.

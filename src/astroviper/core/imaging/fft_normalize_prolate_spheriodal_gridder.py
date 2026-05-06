@@ -11,6 +11,18 @@ from astroviper.utils.data_group_tools import (
     modify_data_groups_xds,
 )
 
+ifft_pair = {
+    "uv_sampling": "point_spread_function",
+    "visibility": "sky",
+}
+normalization_key = {
+    "uv_sampling": "uv_sampling_normalization",
+    "visibility": "visibility_normalization",
+}
+fft_pair = {
+    "point_spread_function": "uv_sampling",
+    "sky": "visibility",
+}
 
 def _fft_module(backend):
     """Return the FFT module for the requested backend.
@@ -164,15 +176,6 @@ def ifft_norm_img_xds(
         overwrite=overwrite,
     )
 
-    fft_pair = {
-        "uv_sampling": "point_spread_function",
-        "visibility": "sky",
-    }
-    normalization_key = {
-        "uv_sampling": "uv_sampling_normalization",
-        "visibility": "visibility_normalization",
-    }
-
     from astroviper.core.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
         create_prolate_spheroidal_correcting_image_1D,
     )
@@ -183,7 +186,9 @@ def ifft_norm_img_xds(
         )
     )
 
-    for data_variable in ["aperture", "uv_sampling", "visibility"]:
+    #for data_variable in ["aperture", "uv_sampling", "visibility"]:
+    for data_variable in image_data_group_out_modified:
+        data_variable = fft_pair[data_variable] #Maps the input data variable to the corresponding output data variable (e.g. "uv_sampling" to "point_spread_function", "visibility" to "sky")
         if data_variable not in data_group_in:
             continue
 
@@ -214,14 +219,98 @@ def ifft_norm_img_xds(
                     # Divide in-place to avoid allocating temporaries.
                     plane /= kernel_image_1D_l[:, None]
                     plane /= kernel_image_1D_m[None, :]
+                    plane *= (plane.shape[-1] * plane.shape[-2])  # undo FFT normalisation
                     result[t, f, p] = (
-                        remove_padding(plane, image_size) / normalization[t, f, p]
+                        remove_padding(plane, image_size).real / normalization[t, f, p]
                     )
 
         if data_variable not in image_data_variables_keep:
             # Release the large grid from the dataset so it can be freed as soon
             # as `del raw_grid` is called after the loop.
-            del img_xds[grid_var_name]
+            img_xds.xr_img.delete_data_variables(variables=[grid_var_name])
+            del raw_grid  # free ≈ 9 GB as early as possible
+
+        img_xds[data_group_out[ifft_pair[data_variable]]] = xr.DataArray(
+            result, dims=("time", "frequency", "polarization", "l", "m")
+        )
+
+        modify_data_groups_xds(
+            img_xds,
+            image_data_group_out_name,
+            data_group_out,
+            description="Transformed from aperture uv plane to sky lm plane.",
+        )
+        
+    return img_xds
+
+def fft_norm_img_xds(
+    img_xds,
+    image_params,
+    image_data_group_in_name="model",
+    image_data_group_out_name="model",
+    image_data_group_out_modified={
+        "visibility": "VISIBILITY_MODEL",
+    },
+    overwrite=True,
+    image_data_variables_keep=[],
+    num_threads=1,
+    fft_backend="pyfftw",
+    data_variables_to_process = ["sky"]
+):
+    """
+    
+    Options are data_variables_to_process = ["primary_beam", "point_spread_function", "sky"]
+    """
+
+    _image_params = image_params  # no mutation below; deep copy not needed
+    # print("************" * 10)
+    # print(image_data_group_in_name, image_data_group_out_name, image_data_group_out_modified)
+    # print(img_xds.attrs["data_groups"].keys())
+    # print(img_xds.attrs["data_groups"]["model"])
+    # print("************" * 10)
+
+    data_group_in, data_group_out = create_data_groups_in_and_out(
+        img_xds,
+        data_group_in_name=image_data_group_in_name,
+        data_group_out_name=image_data_group_out_name,
+        data_group_out_modified=image_data_group_out_modified,
+        overwrite=overwrite,
+    )
+    
+    # print("************" * 10)
+    # print("data_group_in " + str(data_group_in))
+    # print("data_group_out " + str(data_group_out))
+    # print("************" * 10)
+    
+    for data_variable in data_variables_to_process:
+        if data_variable not in data_group_in:
+            continue
+
+        grid_var_name = data_group_in[data_variable]
+        print("*$$$$$$$$$$$$$$$", grid_var_name, data_variable)
+        raw_grid = img_xds[grid_var_name].values  # (time, freq, pol, u, v)
+
+        n_time, n_freq, n_pol = raw_grid.shape[:3]
+        image_size = np.asarray(_image_params["image_size"])
+        result = np.empty(
+            (n_time, n_freq, n_pol, image_size[0], image_size[1]),
+            dtype=np.complex128,
+        )
+
+        # Process one 2-D plane at a time to keep FFT temporaries small.
+        # At 12 000 × 12 000 this limits the extra allocation to ≈ 1.15 GB
+        # instead of allocating the full (time, freq, pol, u, v) float64 array.
+        for t in range(n_time):
+            for f in range(n_freq):
+                for p in range(n_pol):
+                    result[t, f, p] = fft_lm_to_uv(
+                        raw_grid[t, f, p], num_threads=num_threads, fft_backend=fft_backend
+                    ) 
+ 
+        if data_variable not in image_data_variables_keep:
+            # Release the large grid from the dataset so it can be freed as soon
+            # as `del raw_grid` is called after the loop.
+            img_xds.xr_img.delete_data_variables(variables=[grid_var_name]) #Deletes the raw grid from the xds.
             del raw_grid  # free ≈ 9 GB as early as possible
 
         img_xds[data_group_out[fft_pair[data_variable]]] = xr.DataArray(
@@ -232,7 +321,7 @@ def ifft_norm_img_xds(
             img_xds,
             image_data_group_out_name,
             data_group_out,
-            description="Transformed from aperture uv plane to sky lm plane.",
+            description="Transformed from lm plane to aperture uv plane.",
         )
         
     return img_xds
@@ -289,7 +378,7 @@ def ifft_uv_to_lm(grid_2d, fft_plane_dims=(-2, -1), num_threads=1, fft_backend="
             workers=num_threads,
         ),
         axes=fft_plane_dims,
-    ).real * (n_u * n_v)
+    )#.real #* (n_u * n_v)
     logger.debug("Time for ifft_uv_to_lm: " + str(time.time() - start))
     return sky
 
@@ -330,15 +419,16 @@ def fft_lm_to_uv(image, fft_plane_dims=(-2, -1), num_threads=1, fft_backend="pyf
     real-valued.  If complex images are passed the imaginary component is
     silently lost.
     """
+    n_v, n_u = image.shape[fft_plane_dims[0]], image.shape[fft_plane_dims[1]]
     fft = _fft_module(fft_backend)
     return fft.fftshift(
         fft.fft2(
-            fft.ifftshift(image, axes=fft_plane_dims),
+            fft.ifftshift(image.astype(np.complex128), axes=fft_plane_dims),
             axes=fft_plane_dims,
             workers=num_threads,
         ),
         axes=fft_plane_dims,
-    ).real
+    )#/ (n_u * n_v)
 
 
 def remove_padding(image, image_size):

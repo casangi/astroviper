@@ -37,7 +37,12 @@ imaging_data_variables_and_dims_double_precision = {
     "sky_model": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_MODEL"},
     "sky_residual": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_RESIDUAL"},
     "sky": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY"},
-    "mask": {"dims": full_dims_lm, "dtype": "<i8", "name": "MASK"},
+    "mask": {
+        "dims": full_dims_lm,
+        "dtype": "|i1",
+        "name": "MASK",
+        "attrs": {"dtype": "bool"},
+    },
     "beam_fit_params_point_spread_function": {
         "dims": beam_params_dims,
         "dtype": "<f8",
@@ -94,7 +99,12 @@ imaging_data_variables_and_dims_single_precision = {
     "sky_model": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_MODEL"},
     "sky_residual": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_RESIDUAL"},
     "sky": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY"},
-    "mask": {"dims": full_dims_lm, "dtype": "<i4", "name": "MASK"},
+    "mask": {
+        "dims": full_dims_lm,
+        "dtype": "|i1",
+        "name": "MASK",
+        "attrs": {"dtype": "bool"},
+    },
     "beam_fit_params_point_spread_function": {
         "dims": beam_params_dims,
         "dtype": "<f4",
@@ -207,11 +217,20 @@ def create_empty_data_variables_on_disk(
             else:
                 chunks.append(shape_dict[d])
 
+        dtype = np.dtype(dv_def["dtype"])
+        extra_attrs = dv_def.get("attrs", {})
+        if extra_attrs.get("dtype") == "bool":
+            fill_value = None
+        elif dtype.kind in ("f", "c"):
+            fill_value = np.nan
+        else:
+            fill_value = 0
+
         _kwargs = dict(
             shape=shape,
             chunks=chunks,
-            dtype=dv_def["dtype"],
-            fill_value=np.nan,
+            dtype=dtype,
+            fill_value=fill_value,
         )
 
         dv_name = dv_def["name"]
@@ -223,5 +242,7 @@ def create_empty_data_variables_on_disk(
             sky = group.require_dataset(dv_name, **_kwargs, compressor=compressor)
 
         group[dv_name].attrs["_ARRAY_DIMENSIONS"] = dv_def["dims"]
+        for k, v in extra_attrs.items():
+            group[dv_name].attrs[k] = v
 
     zarr.consolidate_metadata(zarr_store)

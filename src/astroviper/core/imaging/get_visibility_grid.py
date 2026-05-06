@@ -21,7 +21,7 @@ def get_visibility_grid_single_field(
     ms_data_group_out_modified: dict = {
         "correlated_data": "VISIBILITY_MODEL",
     },
-    img_data_group_in_name: str = "model_visibility_grid",
+    img_data_group_in_name: str = "model",
     overwrite: bool = True,
     chan_mode: str = "cube",
     fft_padding: float = 1.2,
@@ -65,10 +65,6 @@ def get_visibility_grid_single_field(
         :func:`~astroviper.core.imaging.gridders.prolate_spheroidal_grid.prolate_spheroidal_grid_jit`.
         Cell size and image dimensions are read directly from ``img_xds`` via
         ``img_xds.xr_img.get_lm_cell_size()`` and ``img_xds.sizes``.
-    ms_data_group_in_name : str, default ``"base"``
-        Key of the MS input data group in ``ms_xds.attrs["data_groups"]``.
-        Must provide ``"correlated_data"``, ``"uvw"``, and ``"weight_imaging"``
-        role keys.
     ms_data_group_out_name : str, default ``"model"``
         Key under which the output data group is registered in
         ``ms_xds.attrs["data_groups"]``.
@@ -87,10 +83,6 @@ def get_visibility_grid_single_field(
         Channel mapping mode.  ``"cube"`` maps each visibility channel to its
         own image channel; ``"continuum"`` sources every visibility channel
         from image channel 0.
-    fft_padding : float, default ``1.2``
-        Padding factor applied to the image size when computing the UV-grid
-        dimensions: ``n_uv = fft_padding * [img_xds.sizes["l"], img_xds.sizes["m"]]``.
-        Must match the value used to build the model UV grid.
     num_threads : int, default ``1``
         Reserved for a future threaded C++ degridder; currently unused by the
         Numba implementation.
@@ -121,12 +113,9 @@ def get_visibility_grid_single_field(
     """
     _ms_data_group_out_modified = copy.deepcopy(ms_data_group_out_modified)
 
-    # Read the MS input data group directly; the MS is read-only here.
-    ms_data_group_in = ms_xds.attrs["data_groups"][ms_data_group_in_name]
-
     # Resolve the image input and output data groups, guarding against
     # accidental overwrites according to the overwrite flag.
-    _, ms_data_group_out = create_data_groups_in_and_out(
+    ms_data_group_in, ms_data_group_out = create_data_groups_in_and_out(
         ms_xds,
         data_group_in_name=ms_data_group_in_name,
         data_group_out_name=ms_data_group_out_name,
@@ -134,11 +123,9 @@ def get_visibility_grid_single_field(
         overwrite=overwrite,
     )
     
-    model_name = img_xds.attrs["data_groups"][img_data_group_in_name]["SKY"]
+    model_name = img_xds.attrs["data_groups"][img_data_group_in_name]["visibility"]
 
-    weight_imaging = ms_xds[ms_data_group_in["weight_imaging"]].values
-    n_chan = weight_imaging.shape[2]
-
+    n_chan = img_xds.sizes["frequency"]
     if chan_mode == "cube":
         n_imag_chan = n_chan
         frequency_map = (np.arange(0, n_chan)).astype(int)
@@ -151,19 +138,22 @@ def get_visibility_grid_single_field(
     n_time = ms_xds.sizes["time"]
     time_map = (np.zeros(n_time)).astype(int)
 
-    n_imag_pol = weight_imaging.shape[3]
+    n_imag_pol = img_xds.sizes["polarization"]
     pol_map = (np.arange(0, n_imag_pol)).astype(int)
 
-    n_uv = (fft_padding * np.array([img_xds.sizes["l"], img_xds.sizes["m"]])).astype(
+    # NBNB To do: create UV  and allow for padding
+    n_uv = (np.array([img_xds.sizes["l"], img_xds.sizes["m"]])).astype(
         int
     )
+
     delta_lm = img_xds.xr_img.get_lm_cell_size()
 
     # Initialise the output visibility array on the first call; subsequent
     # calls reuse (and overwrite) the existing data variable in place.
     if ms_data_group_out["correlated_data"] not in ms_xds:
         ms_xds[ms_data_group_out["correlated_data"]] = xr.DataArray(
-            xr.zeros_like(ms_xds[ms_data_group_in["correlated_data"]]))
+            np.zeros((ms_xds.sizes["time"], ms_xds.sizes["baseline_id"], ms_xds.sizes["frequency"], ms_xds.sizes["polarization"]), dtype=np.complex64),
+            dims=["time", "baseline_id", "frequency", "polarization"])
         
         modify_data_groups_xds(
             ms_xds,
@@ -173,7 +163,6 @@ def get_visibility_grid_single_field(
         )
 
     grid = img_xds[model_name].values
-  
     vis_data = ms_xds[ms_data_group_out["correlated_data"]].values
     uvw = ms_xds[ms_data_group_in["uvw"]].values
     frequency_coord = ms_xds.frequency.values
@@ -184,9 +173,23 @@ def get_visibility_grid_single_field(
 
     cpp_gridder = False
     if cpp_gridder:
-        pass  # To do: wire up a C++ degridder once one is available.
-        # from astroviper.core.imaging.gridders.prolate_spheroidal_grid_cpp import (
-        #     prolate_spheroidal_degrid,
+        from astroviper.core.imaging.gridders.prolate_spheroidal_grid_cpp import (
+            prolate_spheroidal_degrid,
+        )
+        # prolate_spheroidal_degrid(
+        #     grid,
+        #     vis_data,
+        #     uvw,
+        #     frequency_coord,
+        #     frequency_map,
+        #     time_map,
+        #     pol_map,
+        #     cgk_1D,
+        #     n_uv,
+        #     delta_lm,
+        #     support=7,
+        #     oversampling=100,
+        #     num_threads=num_threads,
         # )
     else:
         prolate_spheroidal_degrid_jit(

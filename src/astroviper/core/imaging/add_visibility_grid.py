@@ -115,7 +115,7 @@ def add_visibility_grid_mosaic(
     )
 
     weight_imaging = ms_xds[ms_data_group_in["weight_imaging"]].values
-    n_chan = weight_imaging.shape[2]
+    n_chan = img_xds.sizes["frequency"]
 
     if chan_mode == "cube":
         n_imag_chan = n_chan
@@ -124,7 +124,7 @@ def add_visibility_grid_mosaic(
         n_imag_chan = 1  # Single continuum image collapsed across all channels.
         chan_map = (np.zeros(n_chan)).astype(int)
 
-    n_imag_pol = weight_imaging.shape[3]
+    n_imag_pol = img_xds.sizes["polarization"]
     pol_map = (np.arange(0, n_imag_pol)).astype(int)
 
     n_uv = fft_padding * np.array([img_xds.sizes["l"], img_xds.sizes["m"]])
