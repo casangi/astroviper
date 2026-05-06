@@ -609,7 +609,7 @@ def test_single_field_imaging():
         iteration_control_params={
             "niter": 100,
             "nmajor": 0,
-            "threshold": 0.2,
+            "threshold": 0.0,
             "gain": 0.1,
             "cyclefactor": 1.5,
             "cycleniter": 1,

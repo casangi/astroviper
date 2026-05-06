@@ -202,27 +202,38 @@ def ifft_norm_img_xds(
 
         n_time, n_freq, n_pol = raw_grid.shape[:3]
         image_size = np.asarray(_image_params["image_size"])
-        result = np.empty(
-            (n_time, n_freq, n_pol, image_size[0], image_size[1]),
-            dtype=np.float64,
-        )
+        # result = np.empty(
+        #     (n_time, n_freq, n_pol, image_size[0], image_size[1]),
+        #     dtype=np.float64,
+        # )
 
         # Process one 2-D plane at a time to keep FFT temporaries small.
         # At 12 000 × 12 000 this limits the extra allocation to ≈ 1.15 GB
         # instead of allocating the full (time, freq, pol, u, v) float64 array.
+        
+        if data_group_out[ifft_pair[data_variable]] not in img_xds:
+            img_xds[data_group_out[ifft_pair[data_variable]]] = xr.DataArray(
+                np.zeros((n_time, n_freq, n_pol, image_size[0], image_size[1]), dtype=np.float64),
+                dims=("time", "frequency", "polarization", "l", "m")
+            )
+
+        padded_image_shape = raw_grid.shape[-2:]
         for t in range(n_time):
             for f in range(n_freq):
                 for p in range(n_pol):
-                    plane = ifft_uv_to_lm(
-                        raw_grid[t, f, p], num_threads=num_threads, fft_backend=fft_backend
-                    )  # (u_pad, v_pad)
+                    # plane = ifft_uv_to_lm(
+                    #     raw_grid[t, f, p], num_threads=num_threads, fft_backend=fft_backend
+                    # )  # (u_pad, v_pad)
                     # Divide in-place to avoid allocating temporaries.
-                    plane /= kernel_image_1D_l[:, None]
-                    plane /= kernel_image_1D_m[None, :]
-                    plane *= (plane.shape[-1] * plane.shape[-2])  # undo FFT normalisation
-                    result[t, f, p] = (
-                        remove_padding(plane, image_size).real / normalization[t, f, p]
-                    )
+                    # plane /= kernel_image_1D_l[:, None]
+                    # plane /= kernel_image_1D_m[None, :]
+                    # plane *= (plane.shape[-1] * plane.shape[-2])  # undo FFT normalisation
+                    # result[t, f, p] = (
+                    #     remove_padding(plane, image_size).real / normalization[t, f, p]
+                    # )
+                    img_xds[data_group_out[ifft_pair[data_variable]]][t, f, p] = remove_padding(ifft_uv_to_lm(
+                        raw_grid[t, f, p], num_threads=num_threads, fft_backend=fft_backend
+                    ) / kernel_image_1D_l[:, None] / kernel_image_1D_m[None, :] * (padded_image_shape[0] * padded_image_shape[1]) / normalization[t, f, p], image_size)
 
         if data_variable not in image_data_variables_keep:
             # Release the large grid from the dataset so it can be freed as soon
@@ -230,9 +241,9 @@ def ifft_norm_img_xds(
             img_xds.xr_img.delete_data_variables(variables=[grid_var_name])
             del raw_grid  # free ≈ 9 GB as early as possible
 
-        img_xds[data_group_out[ifft_pair[data_variable]]] = xr.DataArray(
-            result, dims=("time", "frequency", "polarization", "l", "m")
-        )
+        # img_xds[data_group_out[ifft_pair[data_variable]]] = xr.DataArray(
+        #     result, dims=("time", "frequency", "polarization", "l", "m")
+        # )
 
         modify_data_groups_xds(
             img_xds,
@@ -292,10 +303,16 @@ def fft_norm_img_xds(
 
         n_time, n_freq, n_pol = raw_grid.shape[:3]
         image_size = np.asarray(_image_params["image_size"])
-        result = np.empty(
-            (n_time, n_freq, n_pol, image_size[0], image_size[1]),
-            dtype=np.complex128,
-        )
+        # result = np.empty(
+        #     (n_time, n_freq, n_pol, image_size[0], image_size[1]),
+        #     dtype=np.complex128,
+        # )
+        
+        if data_group_out[fft_pair[data_variable]] not in img_xds:
+            img_xds[data_group_out[fft_pair[data_variable]]] = xr.DataArray(
+                np.zeros((n_time, n_freq, n_pol, image_size[0], image_size[1]), dtype=np.complex128),
+                dims=("time", "frequency", "polarization", "l", "m")
+            )
 
         # Process one 2-D plane at a time to keep FFT temporaries small.
         # At 12 000 × 12 000 this limits the extra allocation to ≈ 1.15 GB
@@ -303,7 +320,10 @@ def fft_norm_img_xds(
         for t in range(n_time):
             for f in range(n_freq):
                 for p in range(n_pol):
-                    result[t, f, p] = fft_lm_to_uv(
+                    # result[t, f, p] = fft_lm_to_uv(
+                    #     raw_grid[t, f, p], num_threads=num_threads, fft_backend=fft_backend
+                    # ) 
+                    img_xds[data_group_out[fft_pair[data_variable]]][t, f, p] = fft_lm_to_uv(
                         raw_grid[t, f, p], num_threads=num_threads, fft_backend=fft_backend
                     ) 
  
@@ -313,9 +333,9 @@ def fft_norm_img_xds(
             img_xds.xr_img.delete_data_variables(variables=[grid_var_name]) #Deletes the raw grid from the xds.
             del raw_grid  # free ≈ 9 GB as early as possible
 
-        img_xds[data_group_out[fft_pair[data_variable]]] = xr.DataArray(
-            result, dims=("time", "frequency", "polarization", "l", "m")
-        )
+        # img_xds[data_group_out[fft_pair[data_variable]]] = xr.DataArray(
+        #     result, dims=("time", "frequency", "polarization", "l", "m")
+        # )
 
         modify_data_groups_xds(
             img_xds,

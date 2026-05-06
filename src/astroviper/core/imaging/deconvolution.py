@@ -320,8 +320,6 @@ def deconvolve(
 
     # Optional mask cube, matching the residual's shape. The C++ binding
     # accepts a bool mask directly; Python keeps ownership of the buffer.
-    
-    print("&&&&&&&&&&",img_xds["MASK"].dtype)
     mask_name = img_xds.attrs["data_groups"][image_data_group_in_name].get("mask", None)
     mask_arr = None
     if mask_name in img_xds:
@@ -394,7 +392,6 @@ def deconvolve(
                 }
 
                 returndict.add(returnvals, time=tt, pol=pp, chan=nn)
-    print("2 &&&&&&&&&&",img_xds["MASK"].dtype)
     return returndict
 
 
