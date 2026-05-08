@@ -176,3 +176,11 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# AI related
+AGENTS.md
+CLAUDE.md
+CRTF_FULL_SUPORT_PROMPT.md
+CRTF_PLAN_V1.md
+HANDOFF.md
+SUMMARY.md

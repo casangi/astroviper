@@ -2,46 +2,204 @@
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple, Union
 
 import numpy as np
+import xarray as xr
 
 
-def generate_astro_plot(
+def _resolve_plot_coords(
+    data,
+    x_coords: Optional[Union[str, np.ndarray]] = None,
+    y_coords: Optional[Union[str, np.ndarray]] = None,
+    *,
+    need_coords: bool = True,
+) -> tuple[Any, np.ndarray, np.ndarray]:
+    """
+    Resolve a 2-D plotting payload and its x/y coordinate vectors.
+
+    Parameters
+    ----------
+    data : numpy.ndarray | xarray.DataArray
+        Two-dimensional image-like input in the package convention ``data[x, y]``.
+    x_coords : str | numpy.ndarray | None, optional
+        X-axis coordinate selector. Supported choices are:
+        - ``None``: use the 0th axis coordinate from an ``xarray.DataArray`` when
+          available, otherwise use pixel indices ``0..nx-1``.
+        - ``str``: use the named coordinate from the ``xarray.DataArray``.
+        - array-like: explicit x coordinate values with length ``nx``.
+    y_coords : str | numpy.ndarray | None, optional
+        Y-axis coordinate selector. Supported choices are:
+        - ``None``: use the 1st axis coordinate from an ``xarray.DataArray`` when
+          available, otherwise use pixel indices ``0..ny-1``.
+        - ``str``: use the named coordinate from the ``xarray.DataArray``.
+        - array-like: explicit y coordinate values with length ``ny``.
+    need_coords : bool, optional
+        When ``False``, skip DataArray coordinate lookup and float casting;
+        return pixel-index arrays instead. Set to ``False`` for rendering
+        modes (e.g. ``imshow``) that do not consume the coordinate vectors,
+        so that non-numeric DataArray coordinates (e.g. ``datetime64``,
+        string labels) do not raise. Default is ``True``.
+
+    Returns
+    -------
+    tuple[array-like, np.ndarray, np.ndarray]
+        Tuple ``(values, x_values, y_values)`` where ``values`` is the 2-D
+        image array in the underlying storage format (NumPy or Dask — not yet
+        materialized) and ``x_values`` / ``y_values`` are one-dimensional
+        float coordinate vectors for the 0th and 1st axes, respectively.
+        Callers that require a concrete NumPy array must call
+        ``np.asarray(values)`` themselves.
+
+    Notes
+    -----
+    This helper preserves the package's x-first, y-second storage convention.
+    The returned coordinate vectors therefore align with
+    ``values.shape == (nx, ny)``. Materialization of ``values`` is deferred to
+    the caller so that lazy Dask arrays are not computed prematurely.
+    """
+    if isinstance(data, xr.DataArray):
+        if data.ndim != 2:
+            raise ValueError(
+                "data must be a 2D array-like object with shape (nx, ny) for plotting."
+            )
+        # Normalise to internal (x, y) axis order so dim_x / coord vectors are
+        # always consistent regardless of how the caller stored the DataArray.
+        # A (y, x) array is transposed here; other named layouts fall back to
+        # positional order (dim_0 = x, dim_1 = y).
+        dims = list(data.dims)
+        if "x" in dims and "y" in dims and dims != ["x", "y"]:
+            data = data.transpose("x", "y")
+        dim_x = data.dims[0]
+        dim_y = data.dims[1]
+        nx, ny = data.shape
+
+        if not need_coords:
+            # Coordinate vectors will not be used by the caller; skip the
+            # DataArray coord lookup and float cast to avoid raising on
+            # non-numeric coordinates (e.g. datetime64, string labels).
+            # String x_coords/y_coords are label-only overrides in this path
+            # (e.g. WCS mode) and do not need to name an actual DataArray coord.
+            return (
+                data.data,
+                np.arange(nx, dtype=float),
+                np.arange(ny, dtype=float),
+            )
+
+        def _coord_from_spec(spec, dim_name: str, axis_size: int) -> np.ndarray:
+            if spec is None:
+                if dim_name in data.coords:
+                    coord_values = np.asarray(data.coords[dim_name].values, dtype=float)
+                else:
+                    coord_values = np.arange(axis_size, dtype=float)
+            elif isinstance(spec, str):
+                if spec not in data.coords:
+                    raise ValueError(f"Coordinate {spec!r} not found in DataArray.")
+                coord_values = np.asarray(data.coords[spec].values, dtype=float)
+            else:
+                coord_values = np.asarray(spec, dtype=float)
+            if coord_values.ndim != 1 or coord_values.size != axis_size:
+                raise ValueError(
+                    f"Coordinate values for {dim_name!r} must be 1-D with length {axis_size}."
+                )
+            return coord_values
+
+        x_values = _coord_from_spec(x_coords, dim_x, nx)
+        y_values = _coord_from_spec(y_coords, dim_y, ny)
+        return data.data, x_values, y_values
+
+    values = np.asarray(data)
+    if values.ndim != 2:
+        raise ValueError(
+            "data must be a 2D array-like object with shape (nx, ny) for plotting."
+        )
+
+    # Validate string selectors upfront — plain arrays never support them.
+    if isinstance(x_coords, str) or isinstance(y_coords, str):
+        raise ValueError(
+            "String coordinate selectors require an xarray.DataArray input."
+        )
+
+    if not need_coords:
+        return (
+            values,
+            np.arange(values.shape[0], dtype=float),
+            np.arange(values.shape[1], dtype=float),
+        )
+
+    def _coord_from_array(
+        spec: Optional[Union[str, np.ndarray]], axis_size: int, axis_name: str
+    ) -> np.ndarray:
+        if spec is None:
+            return np.arange(axis_size, dtype=float)
+        if isinstance(spec, str):
+            raise ValueError(
+                f"String {axis_name} coordinate selectors require an xarray.DataArray input."
+            )
+        coord_values = np.asarray(spec, dtype=float)
+        if coord_values.ndim != 1 or coord_values.size != axis_size:
+            raise ValueError(
+                f"Coordinate values for {axis_name} must be 1-D with length {axis_size}."
+            )
+        return coord_values
+
+    x_values = _coord_from_array(x_coords, values.shape[0], "x")
+    y_values = _coord_from_array(y_coords, values.shape[1], "y")
+    return values, x_values, y_values
+
+
+def generate_plot(
     data,
     wcs=None,
     show_world_axes: bool = False,
+    x_coords: Optional[Union[str, np.ndarray]] = None,
+    y_coords: Optional[Union[str, np.ndarray]] = None,
+    title: Optional[str] = None,
     cmap: str = "magma",
     figsize: Tuple[float, float] = (8.0, 8.0),
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
 ):
-    """Plot a 2D image array using astronomy-style pixel orientation.
+    """
+    Plot a 2-D image using x/y coordinates or celestial WCS when available.
 
     Parameters
     ----------
-    data : numpy.ndarray
-        2D image array with shape ``(nx, ny)`` in the package's internal convention.
-    wcs : astropy.wcs.WCS or None, optional
+    data : numpy.ndarray | xarray.DataArray
+        Two-dimensional image array in the package convention ``data[x, y]``.
+    wcs : astropy.wcs.WCS | None, optional
         Celestial WCS associated with ``data``.
         Supported choices are:
-        - ``None``: no WCS context; valid only when ``show_world_axes=False``.
-        - ``astropy.wcs.WCS``: used when ``show_world_axes=True`` to render RA/Dec
-          axes with correct handedness.
+        - ``None``: no WCS projection; if ``show_world_axes=True`` the helper uses
+          explicit or inferred x/y coordinate vectors instead.
+        - ``astropy.wcs.WCS``: render celestial world axes through WCSAxes.
         Default is ``None``.
     show_world_axes : bool, optional
         Axis mode for the output plot.
         Supported choices are:
         - ``False``: regular matplotlib pixel axes.
-        - ``True``: WCSAxes world-coordinate axes (e.g., RA/Dec).
+        - ``True``: use WCS axes when ``wcs`` is provided, otherwise use x/y
+          coordinate vectors.
         Default is ``False``.
+    x_coords : str | numpy.ndarray | None, optional
+        X coordinate selector. For ``xarray.DataArray`` input this may be a coordinate
+        name or a one-dimensional array. For plain arrays this must be ``None`` or a
+        one-dimensional array. If omitted, the 0th axis is treated as x and uses the
+        DataArray's matching coordinate or pixel indices.
+    y_coords : str | numpy.ndarray | None, optional
+        Y coordinate selector. For ``xarray.DataArray`` input this may be a coordinate
+        name or a one-dimensional array. For plain arrays this must be ``None`` or a
+        one-dimensional array. If omitted, the 1st axis is treated as y and uses the
+        DataArray's matching coordinate or pixel indices.
+    title : str | None, optional
+        Plot title. If provided, it is displayed on the rendered axes.
     cmap : str, optional
         Matplotlib colormap name. Default is ``"magma"``.
     figsize : tuple[float, float], optional
         Figure size in inches as ``(width, height)``. Default is ``(8.0, 8.0)``.
-    vmin : float or None, optional
+    vmin : float | None, optional
         Lower bound for image normalization. If ``None``, matplotlib chooses automatically.
-    vmax : float or None, optional
+    vmax : float | None, optional
         Upper bound for image normalization. If ``None``, matplotlib chooses automatically.
 
     Returns
@@ -51,28 +209,88 @@ def generate_astro_plot(
 
     Notes
     -----
-    ``imshow`` expects image memory order ``[row, col] == [y, x]``. This function
-    transposes the input ``data`` before plotting so a source written to
-    ``data[x, y]`` is displayed at pixel ``(x, y)`` in the rendered image.
+    The helper preserves the package's x-first array convention by plotting
+    ``data.T`` with ``origin="lower"``. When ``show_world_axes=True`` and no WCS is
+    supplied, the helper renders a coordinate-aware plot using the resolved x/y
+    coordinate vectors rather than requiring an ``astropy.wcs.WCS`` object.
+
+    Dask-backed arrays are computed (materialized) unconditionally at the
+    rendering boundary, since matplotlib requires concrete in-memory data.
     """
-    data_array = np.asarray(data)
-    if data_array.ndim != 2:
-        raise ValueError(
-            "data must be a 2D array-like object with shape (nx, ny) for plotting."
-        )
+    # Coordinate vectors are only consumed by the pcolormesh (world-axis, no
+    # WCS) branch.  Skip the DataArray coord lookup and float cast in all other
+    # modes so that non-numeric DataArray coordinates don't raise needlessly.
+    need_coords = show_world_axes and wcs is None
+    values, x_values, y_values = _resolve_plot_coords(
+        data=data, x_coords=x_coords, y_coords=y_coords, need_coords=need_coords
+    )
+    # Plotting always requires concrete in-memory data.  Materialize here so
+    # that Dask-backed arrays are computed exactly once at the rendering boundary.
+    values = np.asarray(values)
 
-    if show_world_axes and wcs is None:
-        raise ValueError("wcs must be provided when show_world_axes=True.")
+    if isinstance(data, xr.DataArray):
+        # Mirror the axis-normalisation applied in _resolve_plot_coords: if the
+        # DataArray has named "x"/"y" dims in (y, x) order, swap to match the
+        # resolved (x, y) layout so labels stay consistent.
+        dims = list(data.dims)
+        if "x" in dims and "y" in dims and dims != ["x", "y"]:
+            x_dim, y_dim = "x", "y"
+        else:
+            x_dim, y_dim = dims[0], dims[1]
+        default_x_label = x_coords if isinstance(x_coords, str) else x_dim
+        default_y_label = y_coords if isinstance(y_coords, str) else y_dim
+        colorbar_label = data.name if data.name is not None else "value"
+    else:
+        default_x_label = "x"
+        default_y_label = "y"
+        colorbar_label = "value"
 
-    # Import pyplot lazily so callers can set the Matplotlib backend before
-    # this helper is used (important for headless CI/test environments).
     import matplotlib.pyplot as plt
 
-    if show_world_axes:
+    if show_world_axes and wcs is not None:
         fig = plt.figure(figsize=figsize)
         ax = fig.add_subplot(1, 1, 1, projection=wcs)
-    else:
-        fig, ax = plt.subplots(figsize=figsize)
+        image = ax.imshow(values.T, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax)
+        ax.set_aspect("equal")
+        # WCSAxes derives world-coordinate labels (e.g. RA/Dec) from the WCS
+        # object itself; only override when the caller explicitly requested a
+        # custom label via a string coordinate selector.
+        if isinstance(x_coords, str):
+            ax.coords[0].set_axislabel(default_x_label)
+        if isinstance(y_coords, str):
+            ax.coords[1].set_axislabel(default_y_label)
+        if title is not None:
+            ax.set_title(title)
+        fig.colorbar(image, ax=ax, label=colorbar_label)
+        return fig, ax
 
-    ax.imshow(data_array.T, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax)
+    if show_world_axes:
+        fig, ax = plt.subplots(figsize=figsize)
+        mesh = ax.pcolormesh(
+            x_values,
+            y_values,
+            values.T,
+            shading="auto",
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+        )
+        ax.set_xlim(float(x_values[0]), float(x_values[-1]))
+        ax.set_ylim(float(y_values[0]), float(y_values[-1]))
+        ax.set_aspect("equal")
+        ax.set_xlabel(default_x_label)
+        ax.set_ylabel(default_y_label)
+        if title is not None:
+            ax.set_title(title)
+        fig.colorbar(mesh, ax=ax, label=colorbar_label)
+        return fig, ax
+
+    fig, ax = plt.subplots(figsize=figsize)
+    image = ax.imshow(values.T, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax)
+    ax.set_aspect("equal")
+    ax.set_xlabel(default_x_label)
+    ax.set_ylabel(default_y_label)
+    if title is not None:
+        ax.set_title(title)
+    fig.colorbar(image, ax=ax, label=colorbar_label)
     return fig, ax
