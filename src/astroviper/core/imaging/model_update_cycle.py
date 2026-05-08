@@ -33,5 +33,13 @@ def model_update_cycle_cube_single_field(img_xds, input_params, is_n_iter_0, num
             num_threads=num_threads
         )
     
-    img_xds.to_zarr("test123.zarr", mode="w")
+    #img_xds.to_zarr("test123.zarr", mode="w")
+    import numpy as np
+    # import matplotlib.pyplot as plt
+    # for i in range(len(img_xds.frequency)):
+    #     plt.figure(figsize=(20,10)) 
+    #     print("%%%%%%%%%%%%%%%%%%%% the max abs value in SKY_MODEL:", np.max(np.abs(img_xds["SKY_MODEL"].isel(polarization=1,time=0, frequency=i)).values))
+    #     plt.imshow(img_xds["SKY_MODEL"].isel(polarization=1,time=0, frequency=i).values)
+    #     plt.colorbar()
+    # plt.show()
     

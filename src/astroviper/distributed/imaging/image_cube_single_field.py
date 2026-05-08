@@ -241,6 +241,23 @@ def image_cube_single_field(
         double_precision=double_precision,
         data_variable_definitions="imaging",
     )
+    
+    # if  write_visibility_model_to_ps: 
+    #     create_empty_data_variables_on_disk(
+    #         ps_store,
+    #         ["visibility_model"],
+    #         shape_dict=ps_xdt.xr_ps.sizes,
+    #         parallel_coords=parallel_coords,
+    #         compressor=compressor,
+    #         double_precision=double_precision,
+    #         data_variable_definitions="visibility_model",
+    #     )
+        
+        
+    # if write_imaging_weights_to_ps: 
+    
+    
+    
     logger.info(
         "Time to create empty data variables on disk: "
         + str(time.time() - start)

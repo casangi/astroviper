@@ -6,7 +6,7 @@ from astroviper.utils.data_group_tools import create_data_groups_in_and_out, mod
 
 # from memory_profiler import profile
 # @profile(precision=1)
-def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0, img_residual_data_group_name = "residual", img_model_data_group_name = "model"):
+def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0, img_residual_data_group_name = "residual", img_model_data_group_name = "model", last_residual_cycle=False):
     """_summary_
 
     Parameters
@@ -52,6 +52,7 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0,
     
     #Degrid and calculate residual visibilities.
     if not is_n_iter_0:
+        #print("1. Data vars", img_xds.data_vars)
         residual_data_group = img_xds.attrs["data_groups"][img_residual_data_group_name]
         img_xds.xr_img.delete_data_variables(variables=[residual_data_group["sky"]]) #Deletes the SKY_RESIDUAL.
         
@@ -64,9 +65,12 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0,
    
         # ifft_norm_img_xds will have already transformed to stokes, so transform back to corr for degridding.
         # cgk_1D = create_prolate_spheroidal_kernel_1D(100, 7)
-        img_casa_xds = xr.open_zarr("twhya_selfcal_5chans_lsrk_niter_99_nmajor_1_briggs.img.zarr")
-        img_xds["SKY_MODEL"].values = img_casa_xds.SKY_MODEL.values
+        # img_casa_xds = xr.open_zarr("twhya_selfcal_5chans_lsrk_niter_99_nmajor_1_briggs.img.zarr")
+        # img_xds["SKY_MODEL"].values = img_casa_xds.SKY_MODEL.values
         
+        
+        # print("2. Data vars", img_xds.data_vars)
+        # print("2.1 Keep", input_params["image_data_variables_keep"])
         start_fft_norm = time.time()
         img_xds = fft_norm_img_xds(
             img_xds,
@@ -76,12 +80,12 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0,
             image_data_group_out_modified={
                 "visibility": "VISIBILITY_MODEL",
             },
-            image_data_variables_keep=input_params["image_data_variables_keep"],
+            image_data_variables_keep=['sky'],
             num_threads=input_params["processing_function_threads"],
         )
         T_fft_norm = time.time() - start_fft_norm
         
-        print(img_xds)
+        #print("3. Data vars", img_xds.data_vars)
         
         make_visibility_model_single_field( ps_xdt,
             img_xds,
@@ -93,29 +97,29 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0,
             img_data_group_in_name = "model",
             num_threads=1,)
         
-        from xradio.measurement_set.load_processing_set import load_processing_set
-        ps_xdt2 = load_processing_set(
-                input_params["input_data_store"],
-                sel_parms=input_params["data_selection"],
-                load_sub_datasets=False,
-            )  
-        model2 = ps_xdt2["twhya_selfcal_lsrk_5chans_0"].ds.VISIBILITY_MODEL.values
-        model_av = ps_xdt["twhya_selfcal_lsrk_5chans_0"].ds.VISIBILITY_MODEL.values
-        print("1^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
-        print(model2[0:5,0,:,0])
-        print("&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
-        print(model_av[0:5,0,:,0])
-        print("&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
-        print(model2[0:5,0,:,0]-model_av[0:5,0,:,0])
-        print("&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
-        print(np.abs(model2[0:5,0,:,0])/np.abs(model_av[0:5,0,:,0]))
-        print(np.abs(model_av[0:5,0,:,0])/np.abs(model2[0:5,0,:,0]))
-        print(model2.shape,model_av.shape)
-        print("Max abs diff in model visibilities: " + str(np.nanmax(np.abs(model2-model_av))))
-        print("Max abs diff in model visibilities: " + str(np.nanmean(np.abs(model2-model_av))))
-        print(img_xds.VISIBILITY_NORMALIZATION.values)
-        print(img_casa_xds.VISIBILITY_NORMALIZATION.values)
-        print("2^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
+        # from xradio.measurement_set.load_processing_set import load_processing_set
+        # ps_xdt2 = load_processing_set(
+        #         input_params["input_data_store"],
+        #         sel_parms=input_params["data_selection"],
+        #         load_sub_datasets=False,
+        #     )  
+        # model2 = ps_xdt2["twhya_selfcal_lsrk_5chans_0"].ds.VISIBILITY_MODEL.values
+        # model_av = ps_xdt["twhya_selfcal_lsrk_5chans_0"].ds.VISIBILITY_MODEL.values
+        # print("1^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
+        # print(model2[0:5,0,:,0])
+        # print("&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
+        # print(model_av[0:5,0,:,0])
+        # print("&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
+        # print(model2[0:5,0,:,0]-model_av[0:5,0,:,0])
+        # print("&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
+        # print(np.abs(model2[0:5,0,:,0])/np.abs(model_av[0:5,0,:,0]))
+        # print(np.abs(model_av[0:5,0,:,0])/np.abs(model2[0:5,0,:,0]))
+        # print(model2.shape,model_av.shape)
+        # print("Max abs diff in model visibilities: " + str(np.nanmax(np.abs(model2-model_av))))
+        # print("Max abs diff in model visibilities: " + str(np.nanmean(np.abs(model2-model_av))))
+        # print(img_xds.VISIBILITY_NORMALIZATION.values)
+        # print(img_casa_xds.VISIBILITY_NORMALIZATION.values)
+        # print("2^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
 
         calculate_residual_visibilities(ps_xdt, ms_data_group_residual_name="residual", ms_data_group_model_name="model", ms_data_group_original_name=ps_data_group_name)
         
@@ -208,6 +212,8 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0,
     # Temp: Add singleton time dim to img_xds for FFT normalization. Need to fix gridders to not require this.
     # del img_xds["time"]
     # img_xds = img_xds.expand_dims(dim="time", axis=0)
+    
+    #print("Before ifff img_xds", img_xds)
     
     if is_n_iter_0:
         ifft_norm_image_data_group_out_modified ={

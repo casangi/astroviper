@@ -1,5 +1,7 @@
 import time
 
+from astroviper.core.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import create_prolate_spheroidal_correcting_image_1D
+from astroviper.core.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import create_prolate_spheroidal_correcting_image_1D
 import numpy as np
 import scipy.fft
 import xarray as xr
@@ -202,38 +204,30 @@ def ifft_norm_img_xds(
 
         n_time, n_freq, n_pol = raw_grid.shape[:3]
         image_size = np.asarray(_image_params["image_size"])
-        # result = np.empty(
-        #     (n_time, n_freq, n_pol, image_size[0], image_size[1]),
-        #     dtype=np.float64,
-        # )
+        padded_image_shape = raw_grid.shape[-2:]
+        flux_scale = padded_image_shape[0] * padded_image_shape[1]
 
         # Process one 2-D plane at a time to keep FFT temporaries small.
         # At 12 000 × 12 000 this limits the extra allocation to ≈ 1.15 GB
         # instead of allocating the full (time, freq, pol, u, v) float64 array.
-        
-        if data_group_out[ifft_pair[data_variable]] not in img_xds:
-            img_xds[data_group_out[ifft_pair[data_variable]]] = xr.DataArray(
-                np.zeros((n_time, n_freq, n_pol, image_size[0], image_size[1]), dtype=np.float64),
-                dims=("time", "frequency", "polarization", "l", "m")
+        out_name = data_group_out[ifft_pair[data_variable]]
+        if out_name not in img_xds:
+            img_xds[out_name] = xr.DataArray(
+                np.empty((n_time, n_freq, n_pol, image_size[0], image_size[1]), dtype=np.float64),
+                dims=("time", "frequency", "polarization", "l", "m"),
             )
+        out_arr = img_xds[out_name].values  # numpy view for in-place writes
 
-        padded_image_shape = raw_grid.shape[-2:]
         for t in range(n_time):
             for f in range(n_freq):
                 for p in range(n_pol):
-                    # plane = ifft_uv_to_lm(
-                    #     raw_grid[t, f, p], num_threads=num_threads, fft_backend=fft_backend
-                    # )  # (u_pad, v_pad)
-                    # Divide in-place to avoid allocating temporaries.
-                    # plane /= kernel_image_1D_l[:, None]
-                    # plane /= kernel_image_1D_m[None, :]
-                    # plane *= (plane.shape[-1] * plane.shape[-2])  # undo FFT normalisation
-                    # result[t, f, p] = (
-                    #     remove_padding(plane, image_size).real / normalization[t, f, p]
-                    # )
-                    img_xds[data_group_out[ifft_pair[data_variable]]][t, f, p] = remove_padding(ifft_uv_to_lm(
+                    plane = ifft_uv_to_lm(
                         raw_grid[t, f, p], num_threads=num_threads, fft_backend=fft_backend
-                    ) / kernel_image_1D_l[:, None] / kernel_image_1D_m[None, :] * (padded_image_shape[0] * padded_image_shape[1]) / normalization[t, f, p], image_size)
+                    )
+                    plane /= kernel_image_1D_l[:, None]
+                    plane /= kernel_image_1D_m[None, :]
+                    plane *= flux_scale / normalization[t, f, p]
+                    out_arr[t, f, p] = remove_padding(plane.real, image_size)
 
         if data_variable not in image_data_variables_keep:
             # Release the large grid from the dataset so it can be freed as soon
@@ -303,16 +297,26 @@ def fft_norm_img_xds(
 
         n_time, n_freq, n_pol = raw_grid.shape[:3]
         image_size = np.asarray(_image_params["image_size"])
-        # result = np.empty(
-        #     (n_time, n_freq, n_pol, image_size[0], image_size[1]),
-        #     dtype=np.complex128,
-        # )
-        
-        if data_group_out[fft_pair[data_variable]] not in img_xds:
-            img_xds[data_group_out[fft_pair[data_variable]]] = xr.DataArray(
-                np.zeros((n_time, n_freq, n_pol, image_size[0], image_size[1]), dtype=np.complex128),
-                dims=("time", "frequency", "polarization", "l", "m")
+
+        out_name = data_group_out[fft_pair[data_variable]]
+        if out_name not in img_xds:
+            img_xds[out_name] = xr.DataArray(
+                np.empty((n_time, n_freq, n_pol, image_size[0], image_size[1]), dtype=np.complex128),
+                dims=("time", "frequency", "polarization", "l", "m"),
             )
+        out_arr = img_xds[out_name].values  # numpy view for in-place writes
+        
+    #     kernel_image_1D_l, kernel_image_1D_m = (
+    #     create_prolate_spheroidal_correcting_image_1D(
+    #         n_lm_padded=[img_xds.sizes["u"], img_xds.sizes["v"]]
+    #     )
+    # )
+        
+        kernel_image_1D_l, kernel_image_1D_m = (
+            create_prolate_spheroidal_correcting_image_1D(
+                n_lm_padded=[250, 250]
+            )
+        )
 
         # Process one 2-D plane at a time to keep FFT temporaries small.
         # At 12 000 × 12 000 this limits the extra allocation to ≈ 1.15 GB
@@ -320,12 +324,14 @@ def fft_norm_img_xds(
         for t in range(n_time):
             for f in range(n_freq):
                 for p in range(n_pol):
-                    # result[t, f, p] = fft_lm_to_uv(
-                    #     raw_grid[t, f, p], num_threads=num_threads, fft_backend=fft_backend
-                    # ) 
-                    img_xds[data_group_out[fft_pair[data_variable]]][t, f, p] = fft_lm_to_uv(
-                        raw_grid[t, f, p], num_threads=num_threads, fft_backend=fft_backend
-                    ) 
+                    # out_arr[t, f, p] = remove_padding(fft_lm_to_uv(
+                    #     raw_grid[t, f, p]/kernel_image_1D_l[:, None]/kernel_image_1D_m[None, :], num_threads=num_threads, fft_backend=fft_backend
+                    # ),(250, 250))
+                    out_arr[t, f, p] = fft_lm_to_uv(
+                        raw_grid[t, f, p]/kernel_image_1D_l[:, None]/kernel_image_1D_m[None, :], num_threads=num_threads, fft_backend=fft_backend
+                    )
+                    
+        print("#5#4#$#$#$#$#$#$#$#"*10, data_variable, image_data_variables_keep)
  
         if data_variable not in image_data_variables_keep:
             # Release the large grid from the dataset so it can be freed as soon
@@ -443,9 +449,10 @@ def fft_lm_to_uv(image, fft_plane_dims=(-2, -1), num_threads=1, fft_backend="pyf
     fft = _fft_module(fft_backend)
     return fft.fftshift(
         fft.fft2(
-            fft.ifftshift(image.astype(np.complex128), axes=fft_plane_dims),
+            fft.ifftshift(image.astype(np.complex128, copy=False), axes=fft_plane_dims),
             axes=fft_plane_dims,
             workers=num_threads,
+            #s=(300,300)
         ),
         axes=fft_plane_dims,
     )#/ (n_u * n_v)

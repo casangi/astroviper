@@ -368,7 +368,7 @@ def test_single_field_imaging_niter0():
             np.abs(I_av.isel(frequency=i_f).values - I.isel(frequency=i_f).values)
             / np.max(np.abs(I.isel(frequency=i_f).values))
         )
-        print("Relative difference: ", rel_diff)
+        # print("Relative difference: ", rel_diff)
         # fig, axes = plt.subplots(2, 3, figsize=(12, 8))
         # fig.suptitle("Channel " + str(i_f) + " Frequency: " + str(I_av.frequency.values[i_f]))
         # im0 = axes[0,0].imshow(I_av.isel(frequency=i_f).values)
@@ -645,8 +645,9 @@ def test_single_field_imaging():
 
     from matplotlib import pyplot as plt
     frequency = 4
-    I_av = img_av_xds.isel(polarization=0,time=0,l=slice(100,150), m=slice(100,150))
-    I = img_xds.isel(polarization=0,time=0,l=slice(100,150), m=slice(100,150))
+    polarization = 0
+    I_av = img_av_xds.isel(polarization=polarization,time=0,l=slice(100,150), m=slice(100,150))
+    I = img_xds.isel(polarization=polarization,time=0,l=slice(100,150), m=slice(100,150))
 
     # print(np.abs(np.max(np.abs(I))).values)
 
@@ -776,7 +777,7 @@ def test_single_field_imaging():
 # Channel 4 Relative difference in SKY_MODEL:  0.0012122482123601821
 # Channel 4 Relative difference in SKY_RESIDUAL:  0.04491952484766548
 
-    plt.show()
+    #plt.show()
 
     # psf_av = img_av_xds.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values
     # psf = img_xds.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values
@@ -911,7 +912,7 @@ def test_single_field_imaging():
 
 
 if __name__ == "__main__":
-    #test_single_field_imaging_niter0()
+    test_single_field_imaging_niter0()
     print("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"*10)
     test_single_field_imaging()
     
