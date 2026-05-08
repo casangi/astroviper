@@ -163,7 +163,7 @@ def test_single_field_imaging_niter0():
     import os
     import numpy as np
     from xradio.measurement_set import open_processing_set
-    from astroviper.distributed.imaging.image_cube_single_field import (
+    from astroviper.distributed_graphs.imaging.image_cube_single_field import (
         image_cube_single_field,
     )
     from xradio.image import make_empty_sky_image
@@ -471,7 +471,7 @@ def test_single_field_imaging_niter0():
         rtol=1e-6,
     ), "You broke something! The beam fit parameters for the point spread function are not close enough to the reference values."
 
-    from astroviper.core.imaging.make_pb_symmetric import (
+    from astroviper.processing_functions.imaging.make_pb_symmetric import (
         airy_disk_rorder,
         airy_disk_rorder_v2,
     )
@@ -571,7 +571,7 @@ def test_single_field_imaging():
     import os
     import numpy as np
     from xradio.measurement_set import open_processing_set
-    from astroviper.distributed.imaging.image_cube_single_field import (
+    from astroviper.distributed_graphs.imaging.image_cube_single_field import (
         image_cube_single_field,
     )
     from xradio.image import make_empty_sky_image
@@ -835,7 +835,7 @@ def test_single_field_imaging():
     # print(ps_xdt.xr_ps.summary())
     
     
-    # from astroviper.core.imaging.fft_normalize_prolate_spheriodal_gridder import (
+    # from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
     #     fft_lm_to_uv, ifft_uv_to_lm
     # )
     
