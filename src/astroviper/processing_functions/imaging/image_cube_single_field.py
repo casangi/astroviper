@@ -1,12 +1,6 @@
 
 
-
-
-
-
-
-
-def PF_image_cube_single_field(input_params, ps_xdt, img_xds):
+def image_cube_single_field(input_params, ps_xdt, img_xds):
     import toolviper.utils.logger as logger
     from astroviper.processing_functions.imaging.residual_cycle import residual_cycle_cube_single_field
     from astroviper.processing_functions.imaging.model_update_cycle import model_update_cycle_cube_single_field

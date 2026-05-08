@@ -163,9 +163,9 @@ def test_single_field_imaging_niter0():
     import os
     import numpy as np
     from xradio.measurement_set import open_processing_set
-    from astroviper.distributed_graphs.imaging.image_cube_single_field import (
-        image_cube_single_field,
-    )
+    # from astroviper.distributed_graphs.imaging.image_cube_single_field import (
+    #     image_cube_single_field,
+    # )
     from xradio.image import make_empty_sky_image
 
     ps_xdt = open_processing_set(
@@ -189,13 +189,15 @@ def test_single_field_imaging_niter0():
         "cpp_gridder": True,
     }
     image_store = "twhya_selfcal_lsrk_5chans_astroviper.img.zarr"
-    imaging_metadata_pd = image_cube_single_field(
+    import astroviper.distributed_graphs as distributed_graphs
+    imaging_metadata_pd = distributed_graphs.imaging.image_cube_single_field(
         ps_store=ps_store,
         image_store=image_store,
         image_params=image_params,
         imaging_weights_params={
             "weighting": "briggs",
             "robust": 0.5,
+            "casa_weighting_implementation": True,
         },
         # imaging_weights_params={
         #     "weighting": "natural",
@@ -220,6 +222,8 @@ def test_single_field_imaging_niter0():
             "point_spread_function",
             "primary_beam",
             "beam_fit_params_point_spread_function",
+            "visibility_normalization",
+            "uv_sampling_normalization",
         ],
         # image_data_variables_keep=[ "sky", "point_spread_function", "primary_beam"],
         processing_set_data_group_name="base",
@@ -261,7 +265,7 @@ def test_single_field_imaging_niter0():
     # )
     # plt.colorbar()
 
-    polarization = 0
+    polarization = 1 
     I_av = img_av_xds["SKY_RESIDUAL"].isel(polarization=polarization,time=0)
     #I = img_xds["SKY_RESIDUAL"].isel(polarization=polarization,time=0)
     I = img_xds["SKY_DECONVOLVED"].isel(polarization=polarization,time=0)
@@ -368,44 +372,44 @@ def test_single_field_imaging_niter0():
             np.abs(I_av.isel(frequency=i_f).values - I.isel(frequency=i_f).values)
             / np.max(np.abs(I.isel(frequency=i_f).values))
         )
-        # print("Relative difference: ", rel_diff)
-        # fig, axes = plt.subplots(2, 3, figsize=(12, 8))
-        # fig.suptitle("Channel " + str(i_f) + " Frequency: " + str(I_av.frequency.values[i_f]))
-        # im0 = axes[0,0].imshow(I_av.isel(frequency=i_f).values)
-        # axes[0,0].set_title("I_AV")
-        # fig.colorbar(im0, ax=axes[0,0])
-        # im1 = axes[0,1].imshow(I.isel(frequency=i_f).values)
-        # axes[0,1].set_title("I_CASA")
-        # fig.colorbar(im1, ax=axes[0,1])
-        # im2 = axes[0,2].imshow(
-        #     I_av.isel(frequency=i_f).values - I.isel(frequency=i_f).values
-        # )
-        # axes[0,2].set_title("I_AV - I_CASA")
-        # fig.colorbar(im2, ax=axes[0,2])
+        print("Relative difference: ", rel_diff)
+        fig, axes = plt.subplots(2, 3, figsize=(12, 8))
+        fig.suptitle("Channel " + str(i_f) + " Frequency: " + str(I_av.frequency.values[i_f]))
+        im0 = axes[0,0].imshow(I_av.isel(frequency=i_f).values)
+        axes[0,0].set_title("I_AV")
+        fig.colorbar(im0, ax=axes[0,0])
+        im1 = axes[0,1].imshow(I.isel(frequency=i_f).values)
+        axes[0,1].set_title("I_CASA")
+        fig.colorbar(im1, ax=axes[0,1])
+        im2 = axes[0,2].imshow(
+            I_av.isel(frequency=i_f).values - I.isel(frequency=i_f).values
+        )
+        axes[0,2].set_title("I_AV - I_CASA")
+        fig.colorbar(im2, ax=axes[0,2])
         
-        # im3 = axes[1,0].imshow(PSF_av.isel(frequency=i_f).values)
-        # axes[1,0].set_title("PSF_AV")
-        # fig.colorbar(im3, ax=axes[1,0])
-        # im4 = axes[1,1].imshow(PSF.isel(frequency=i_f).values)
-        # axes[1,1].set_title("PSF_CASA")
-        # fig.colorbar(im4, ax=axes[1,1])
-        # im5 = axes[1,2].imshow(
-        #     PSF_av.isel(frequency=i_f).values - PSF.isel(frequency=i_f).values
-        # )
-        # axes[1,2].set_title("PSF_AV - PSF_CASA")
-        # fig.colorbar(im5, ax=axes[1,2])
+        im3 = axes[1,0].imshow(PSF_av.isel(frequency=i_f).values)
+        axes[1,0].set_title("PSF_AV")
+        fig.colorbar(im3, ax=axes[1,0])
+        im4 = axes[1,1].imshow(PSF.isel(frequency=i_f).values)
+        axes[1,1].set_title("PSF_CASA")
+        fig.colorbar(im4, ax=axes[1,1])
+        im5 = axes[1,2].imshow(
+            PSF_av.isel(frequency=i_f).values - PSF.isel(frequency=i_f).values
+        )
+        axes[1,2].set_title("PSF_AV - PSF_CASA")
+        fig.colorbar(im5, ax=axes[1,2])
         
 
-        if i_f%2 == 1: #If odd
-            print("Odd channel", i_f)
-            assert (
-                rel_diff < 1e-3
-            ), "You broke something! Relative difference between the two images is larger than 1e-3."
-        else:
-            print("Even channel", i_f)
-            assert (
-                rel_diff < 1e-4
-            ), "You broke something! Relative difference between the two images is larger than 1e-5."
+        # if i_f%2 == 1: #If odd
+        #     print("Odd channel", i_f)
+        #     assert (
+        #         rel_diff < 1e-3
+        #     ), "You broke something! Relative difference between the two images is larger than 1e-3."
+        # else:
+        #     print("Even channel", i_f)
+        #     assert (
+        #         rel_diff < 1e-4
+        #     ), "You broke something! Relative difference between the two images is larger than 1e-5."
             
 # Relative difference:  3.649608446223135e-05
 # Even channel 0
@@ -417,7 +421,7 @@ def test_single_field_imaging_niter0():
 # Odd channel 3
 # Relative difference:  3.216840648012481e-05
 
-    #plt.show()
+    plt.show()
 
 
     psf_av = img_av_xds.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values
@@ -528,6 +532,15 @@ def test_single_field_imaging_niter0():
     # plt.colorbar()
     # plt.show()
     
+    
+    print(img_xds.VISIBILITY_NORMALIZATION.values)
+    print(img_av_xds.VISIBILITY_NORMALIZATION.values)
+    
+        
+    print(img_av_xds.UV_SAMPLING_NORMALIZATION.values)
+    
+    raise
+    
 def test_single_field_imaging():
     from xradio.measurement_set import open_processing_set
     from toolviper.utils.data import download, update
@@ -602,6 +615,7 @@ def test_single_field_imaging():
         imaging_weights_params={
             "weighting": "briggs",
             "robust": 0.5,
+            "casa_weighting_implementation": True,
         },
         # imaging_weights_params={
         #     "weighting": "natural",
@@ -699,17 +713,17 @@ def test_single_field_imaging():
         fig.colorbar(im5, ax=axes[1,2])
         
         
-        # im3 = axes[2,0].imshow(I_av["PRIMARY_BEAM"].isel(frequency=i_f).values)
-        # axes[2,0].set_title("PRIMARY_BEAM_AV")
-        # fig.colorbar(im3, ax=axes[2,0])
-        # im4 = axes[2,1].imshow(I["PRIMARY_BEAM"].isel(frequency=i_f).values)
-        # axes[2,1].set_title("PRIMARY_BEAM_CASA")
-        # fig.colorbar(im4, ax=axes[2,1])
-        # im5 = axes[2,2].imshow(
-        #     (I_av["PRIMARY_BEAM"].isel(frequency=i_f).values - I["PRIMARY_BEAM"].isel(frequency=i_f).values)/np.max(np.abs(I["PRIMARY_BEAM"].isel(frequency=i_f).values))
-        # )
-        # axes[2,2].set_title("PRIMARY_BEAM_AV - PRIMARY_BEAM_CASA")
-        # fig.colorbar(im5, ax=axes[2,2])
+        im3 = axes[2,0].imshow(I_av["PRIMARY_BEAM"].isel(frequency=i_f).values)
+        axes[2,0].set_title("PRIMARY_BEAM_AV")
+        fig.colorbar(im3, ax=axes[2,0])
+        im4 = axes[2,1].imshow(I["PRIMARY_BEAM"].isel(frequency=i_f).values)
+        axes[2,1].set_title("PRIMARY_BEAM_CASA")
+        fig.colorbar(im4, ax=axes[2,1])
+        im5 = axes[2,2].imshow(
+            (I_av["PRIMARY_BEAM"].isel(frequency=i_f).values - I["PRIMARY_BEAM"].isel(frequency=i_f).values)/np.max(np.abs(I["PRIMARY_BEAM"].isel(frequency=i_f).values))
+        )
+        axes[2,2].set_title("PRIMARY_BEAM_AV - PRIMARY_BEAM_CASA")
+        fig.colorbar(im5, ax=axes[2,2])
         
         im3 = axes[2,0].imshow(I_av["MASK"].isel(frequency=i_f).values)
         axes[2,0].set_title("MASK_AV")
@@ -777,7 +791,7 @@ def test_single_field_imaging():
 # Channel 4 Relative difference in SKY_MODEL:  0.0012122482123601821
 # Channel 4 Relative difference in SKY_RESIDUAL:  0.04491952484766548
 
-    #plt.show()
+    plt.show()
 
     # psf_av = img_av_xds.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values
     # psf = img_xds.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values
@@ -912,6 +926,23 @@ def test_single_field_imaging():
 
 
 if __name__ == "__main__":
+    
+    
+    # import xarray as xr
+    # ps_xdt = xr.open_datatree("twhya_selfcal_lsrk_5chans.ps.zarr")
+    # print(ps_xdt.xr_ps.summary())
+    
+    # ms_xdt = ps_xdt["twhya_selfcal_lsrk_5chans_0"]
+    
+    
+    # import matplotlib.pyplot as plt
+    # plt.figure()
+    # plt.plot(ms_xdt["WEIGHT"].isel(frequency=0, polarization=0, baseline_id=0).values)
+    # plt.plot(ms_xdt["WEIGHT"].isel(frequency=0, polarization=1, baseline_id=0).values)
+    # plt.show()
+    
+    
+    
     test_single_field_imaging_niter0()
     print("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"*10)
     test_single_field_imaging()

@@ -5,9 +5,7 @@ from xradio.image import make_empty_sky_image
 import numpy as np
 import zarr
 
-from astroviper.node_tasks.imaging.image_cube_single_field import (
-    NT_image_cube_single_field,
-)
+import astroviper.node_tasks as node_tasks
 
 
 def _load_processing_set_chunk(load_params):
@@ -324,7 +322,7 @@ def image_cube_single_field(
     viper_graph = map(
         input_data=ps_xdt,
         node_task_data_mapping=node_task_data_mapping,
-        node_task=NT_image_cube_single_field,
+        node_task=node_tasks.imaging.image_cube_single_field,
         input_params=input_parms,
         in_memory_compute=False,
         data_loading_task=_load_processing_set_chunk,

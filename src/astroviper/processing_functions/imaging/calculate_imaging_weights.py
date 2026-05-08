@@ -153,16 +153,28 @@ def calculate_imaging_weights(
         data_weight[ms_xdt[ms_data_group_in["flag"]] == 1] = (
             np.nan
         )  # Set flagged data to NaN for weighting.
+        
+        
 
         if data_weight.shape[3] == 2:
-            data_weight = ((data_weight[..., 0] + data_weight[..., 1]) / 2)[
-                ..., np.newaxis
-            ]
+            if imaging_weights_params["casa_weighting_implementation"] == True:
+                data_weight = ((data_weight[..., 0] + data_weight[..., 1]) / 2)[
+                    ..., np.newaxis
+                ]
+            else:
+                data_weight = ((2 * data_weight[..., 0] * data_weight[..., 1]) / (data_weight[..., 0] + data_weight[..., 1]))[
+                    ..., np.newaxis
+                ]
 
         if data_weight.shape[3] == 4:
-            data_weight = ((data_weight[..., 0] + data_weight[..., 3]) / 2)[
-                ..., np.newaxis
-            ]
+            if imaging_weights_params["casa_weighting_implementation"] == True:
+                data_weight = ((data_weight[..., 0] + data_weight[..., 3]) / 2)[
+                    ..., np.newaxis
+                ]
+            else:
+                data_weight = ((2 * data_weight[..., 0] * data_weight[..., 3]) / (data_weight[..., 0] + data_weight[..., 3]))[
+                    ..., np.newaxis
+                ]
 
         freq_chan = ms_xdt.frequency.values
 
@@ -186,14 +198,24 @@ def calculate_imaging_weights(
             np.nan
         )  # Set flagged data to NaN for weighting.
         if data_weight.shape[3] == 2:
-            data_weight = ((data_weight[..., 0] + data_weight[..., 1]) / 2)[
-                ..., np.newaxis
-            ]
+            if imaging_weights_params["casa_weighting_implementation"] == True:
+                data_weight = ((data_weight[..., 0] + data_weight[..., 1]) / 2)[
+                    ..., np.newaxis
+                ]
+            else:
+                data_weight = ((2 * data_weight[..., 0] * data_weight[..., 1]) / (data_weight[..., 0] + data_weight[..., 1]))[
+                    ..., np.newaxis
+                ]
 
         if data_weight.shape[3] == 4:
-            data_weight = ((data_weight[..., 0] + data_weight[..., 3]) / 2)[
-                ..., np.newaxis
-            ]
+            if imaging_weights_params["casa_weighting_implementation"] == True:
+                data_weight = ((data_weight[..., 0] + data_weight[..., 3]) / 2)[
+                    ..., np.newaxis
+                ]
+            else:
+                data_weight = ((2 * data_weight[..., 0] * data_weight[..., 3]) / (data_weight[..., 0] + data_weight[..., 3]))[
+                    ..., np.newaxis
+                ]
 
         freq_chan = ms_xdt.frequency.values
 

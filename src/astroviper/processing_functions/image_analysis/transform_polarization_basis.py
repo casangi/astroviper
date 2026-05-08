@@ -45,10 +45,10 @@ CIRCULAR_CORR_TO_STOKES = np.array(
 # Stokes → correlation  (columns: I, Q, U, V)
 LINEAR_STOKES_TO_CORR = np.array(
     [
-        [0.5, 0.5, 0, 0],  # XX = (I + Q) / 2
-        [0, 0, 0.5, 0.5j],  # XY = (U + iV) / 2
-        [0, 0, 0.5, -0.5j],  # YX = (U - iV) / 2
-        [0.5, -0.5, 0, 0],  # YY = (I - Q) / 2
+        [1.0, 1.0, 0, 0],  # XX = (I + Q) 
+        [0, 0, 1.0, 1.0j],  # XY = (U + iV) 
+        [0, 0, 1.0, -1.0j],  # YX = (U - iV) 
+        [1.0, -1.0, 0, 0],  # YY = (I - Q) 
     ],
     dtype=complex,
 )
@@ -56,10 +56,10 @@ LINEAR_STOKES_TO_CORR = np.array(
 # Stokes → correlation  (columns: I, Q, U, V)
 CIRCULAR_STOKES_TO_CORR = np.array(
     [
-        [0.5, 0, 0, 0.5],  # RR = (I + V) / 2
-        [0, 0.5, 0.5j, 0],  # RL = (Q + iU) / 2
-        [0, 0.5, -0.5j, 0],  # LR = (Q - iU) / 2
-        [0.5, 0, 0, -0.5],  # LL = (I - V) / 2
+        [1.0, 0, 0, 1.0],  # RR = (I + V) 
+        [0, 1.0, 1.0j, 0],  # RL = (Q + iU) 
+        [0, 1.0, -1.0j, 0],  # LR = (Q - iU) 
+        [1.0, 0, 0, -1.0],  # LL = (I - V) 
     ],
     dtype=complex,
 )
@@ -87,8 +87,8 @@ CIRCULAR_2POL_CORR_TO_STOKES = np.array(
 # Stokes → correlation  (columns: I, Q)
 LINEAR_2POL_STOKES_TO_CORR = np.array(
     [
-        [0.5, 0.5],  # XX = (I + Q) / 2
-        [0.5, -0.5],  # YY = (I - Q) / 2
+        [1.0, 1.0],  # XX = (I + Q) 
+        [1.0, -1.0],  # YY = (I - Q) 
     ],
     dtype=np.float64,
 )
@@ -96,8 +96,8 @@ LINEAR_2POL_STOKES_TO_CORR = np.array(
 # Stokes → correlation  (columns: I, V)
 CIRCULAR_2POL_STOKES_TO_CORR = np.array(
     [
-        [0.5, 0.5],  # RR = (I + V) / 2
-        [0.5, -0.5],  # LL = (I - V) / 2
+        [1.0, 1.0],  # RR = (I + V) 
+        [1.0, -1.0],  # LL = (I - V) 
     ],
     dtype=np.float64,
 )

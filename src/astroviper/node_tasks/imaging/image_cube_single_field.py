@@ -1,11 +1,9 @@
-def NT_image_cube_single_field(input_params, graph_mode=True):
+def image_cube_single_field(input_params, graph_mode=True):
     import toolviper.utils.logger as logger
     import time
     from xradio.image import make_empty_sky_image
-    from toolviper.utils.memory_management import memory_setup, free_memory, get_rss_gb
-    from astroviper.processing_functions.imaging.image_cube_single_field import (
-        PF_image_cube_single_field,
-    )
+    from toolviper.utils.memory_management import memory_setup, free_memory, get_rss_gb    
+    import astroviper.processing_functions as pf
 
     # Pin the mmap threshold BEFORE any large allocations so they use mmap
     # and are returned to the OS immediately on free (no heap fragmentation).
@@ -13,7 +11,7 @@ def NT_image_cube_single_field(input_params, graph_mode=True):
     memory_setup(131072)
 
     logger.debug(
-        "Memory usage at start of NT_image_cube_single_field_node_task: "
+        "Memory usage at start of image_cube_single_field_node_task: "
         + str(get_rss_gb())
         + " GB"
     )
@@ -65,7 +63,7 @@ def NT_image_cube_single_field(input_params, graph_mode=True):
     logger.debug("Time to load data " + str(T_load))
 
     logger.debug("Processing set iterator created with partitions.")
-    img_xds, return_df = PF_image_cube_single_field(input_params, ps_xdt, img_xds)
+    img_xds, return_df = pf.imaging.image_cube_single_field(input_params, ps_xdt, img_xds)
 
     start_write = time.time()
     if graph_mode:

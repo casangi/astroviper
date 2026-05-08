@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from importlib import import_module, metadata
 
+from astroviper.node_tasks import imaging
+
 __all__ = [
     "__version__",
     # Namespaced high-level modules (distributed API)
