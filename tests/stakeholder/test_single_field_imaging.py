@@ -265,7 +265,7 @@ def test_single_field_imaging_niter0():
     # )
     # plt.colorbar()
 
-    polarization = 1 
+    polarization = 0
     I_av = img_av_xds["SKY_RESIDUAL"].isel(polarization=polarization,time=0)
     #I = img_xds["SKY_RESIDUAL"].isel(polarization=polarization,time=0)
     I = img_xds["SKY_DECONVOLVED"].isel(polarization=polarization,time=0)
@@ -373,43 +373,43 @@ def test_single_field_imaging_niter0():
             / np.max(np.abs(I.isel(frequency=i_f).values))
         )
         print("Relative difference: ", rel_diff)
-        fig, axes = plt.subplots(2, 3, figsize=(12, 8))
-        fig.suptitle("Channel " + str(i_f) + " Frequency: " + str(I_av.frequency.values[i_f]))
-        im0 = axes[0,0].imshow(I_av.isel(frequency=i_f).values)
-        axes[0,0].set_title("I_AV")
-        fig.colorbar(im0, ax=axes[0,0])
-        im1 = axes[0,1].imshow(I.isel(frequency=i_f).values)
-        axes[0,1].set_title("I_CASA")
-        fig.colorbar(im1, ax=axes[0,1])
-        im2 = axes[0,2].imshow(
-            I_av.isel(frequency=i_f).values - I.isel(frequency=i_f).values
-        )
-        axes[0,2].set_title("I_AV - I_CASA")
-        fig.colorbar(im2, ax=axes[0,2])
+        # fig, axes = plt.subplots(2, 3, figsize=(12, 8))
+        # fig.suptitle("Channel " + str(i_f) + " Frequency: " + str(I_av.frequency.values[i_f]))
+        # im0 = axes[0,0].imshow(I_av.isel(frequency=i_f).values)
+        # axes[0,0].set_title("I_AV")
+        # fig.colorbar(im0, ax=axes[0,0])
+        # im1 = axes[0,1].imshow(I.isel(frequency=i_f).values)
+        # axes[0,1].set_title("I_CASA")
+        # fig.colorbar(im1, ax=axes[0,1])
+        # im2 = axes[0,2].imshow(
+        #     I_av.isel(frequency=i_f).values - I.isel(frequency=i_f).values
+        # )
+        # axes[0,2].set_title("I_AV - I_CASA")
+        # fig.colorbar(im2, ax=axes[0,2])
         
-        im3 = axes[1,0].imshow(PSF_av.isel(frequency=i_f).values)
-        axes[1,0].set_title("PSF_AV")
-        fig.colorbar(im3, ax=axes[1,0])
-        im4 = axes[1,1].imshow(PSF.isel(frequency=i_f).values)
-        axes[1,1].set_title("PSF_CASA")
-        fig.colorbar(im4, ax=axes[1,1])
-        im5 = axes[1,2].imshow(
-            PSF_av.isel(frequency=i_f).values - PSF.isel(frequency=i_f).values
-        )
-        axes[1,2].set_title("PSF_AV - PSF_CASA")
-        fig.colorbar(im5, ax=axes[1,2])
+        # im3 = axes[1,0].imshow(PSF_av.isel(frequency=i_f).values)
+        # axes[1,0].set_title("PSF_AV")
+        # fig.colorbar(im3, ax=axes[1,0])
+        # im4 = axes[1,1].imshow(PSF.isel(frequency=i_f).values)
+        # axes[1,1].set_title("PSF_CASA")
+        # fig.colorbar(im4, ax=axes[1,1])
+        # im5 = axes[1,2].imshow(
+        #     PSF_av.isel(frequency=i_f).values - PSF.isel(frequency=i_f).values
+        # )
+        # axes[1,2].set_title("PSF_AV - PSF_CASA")
+        # fig.colorbar(im5, ax=axes[1,2])
         
 
-        # if i_f%2 == 1: #If odd
-        #     print("Odd channel", i_f)
-        #     assert (
-        #         rel_diff < 1e-3
-        #     ), "You broke something! Relative difference between the two images is larger than 1e-3."
-        # else:
-        #     print("Even channel", i_f)
-        #     assert (
-        #         rel_diff < 1e-4
-        #     ), "You broke something! Relative difference between the two images is larger than 1e-5."
+        if i_f%2 == 1: #If odd
+            print("Odd channel", i_f)
+            assert (
+                rel_diff < 1e-3
+            ), "You broke something! Relative difference between the two images is larger than 1e-3."
+        else:
+            print("Even channel", i_f)
+            assert (
+                rel_diff < 1e-4
+            ), "You broke something! Relative difference between the two images is larger than 1e-5."
             
 # Relative difference:  3.649608446223135e-05
 # Even channel 0
@@ -421,7 +421,7 @@ def test_single_field_imaging_niter0():
 # Odd channel 3
 # Relative difference:  3.216840648012481e-05
 
-    plt.show()
+    # plt.show()
 
 
     psf_av = img_av_xds.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values
@@ -539,7 +539,6 @@ def test_single_field_imaging_niter0():
         
     print(img_av_xds.UV_SAMPLING_NORMALIZATION.values)
     
-    raise
     
 def test_single_field_imaging():
     from xradio.measurement_set import open_processing_set
@@ -660,8 +659,11 @@ def test_single_field_imaging():
     from matplotlib import pyplot as plt
     frequency = 4
     polarization = 0
-    I_av = img_av_xds.isel(polarization=polarization,time=0,l=slice(100,150), m=slice(100,150))
-    I = img_xds.isel(polarization=polarization,time=0,l=slice(100,150), m=slice(100,150))
+    # I_av = img_av_xds.isel(polarization=polarization,time=0,l=slice(100,150), m=slice(100,150))
+    # I = img_xds.isel(polarization=polarization,time=0,l=slice(100,150), m=slice(100,150))
+    
+    I_av = img_av_xds.isel(polarization=polarization,time=0)
+    I = img_xds.isel(polarization=polarization,time=0)
 
     # print(np.abs(np.max(np.abs(I))).values)
 
@@ -679,8 +681,8 @@ def test_single_field_imaging():
     max_per_dif_model= [2.1e-05, 0.001, 7.7e-06, 0.0022, 0.0013]
     min_per_dif_model = [2.0e-05, 0.0009, 7.6e-06, 0.0021, 0.0012]  
     
-    max_per_dif_residual= [0.12, 0.07, 0.09, 0.051, 0.045]
-    min_per_dif_residual = [0.11, 0.06, 0.08, 0.05, 0.04]  
+    max_per_dif_residual= [0.0355, 0.0369, 0.0542, 0.0132, 0.01131]
+    min_per_dif_residual = [0.035, 0.0368, 0.0541, 0.0131, 0.0113]  
     
     for i_f in range(5):
         # print("Channel ", i_f)
@@ -694,7 +696,7 @@ def test_single_field_imaging():
         axes[0,1].set_title("I_CASA SKY MODEL")
         fig.colorbar(im1, ax=axes[0,1])
         im2 = axes[0,2].imshow(
-            I_av["SKY_MODEL"].isel(frequency=i_f).values - I["SKY_MODEL"].isel(frequency=i_f).values
+            100 * (I_av["SKY_MODEL"].isel(frequency=i_f).values - I["SKY_MODEL"].isel(frequency=i_f).values)/np.max(np.abs(I["SKY_MODEL"].isel(frequency=i_f).values))
         )
         axes[0,2].set_title("SKY_MODEL_AV - SKY_MODEL_CASA")
         fig.colorbar(im2, ax=axes[0,2])
@@ -707,7 +709,7 @@ def test_single_field_imaging():
         axes[1,1].set_title("SKY_RESIDUAL_CASA")
         fig.colorbar(im4, ax=axes[1,1])
         im5 = axes[1,2].imshow(
-            (I_av["SKY_RESIDUAL"].isel(frequency=i_f).values - I["SKY_RESIDUAL"].isel(frequency=i_f).values)/np.max(np.abs(I["SKY_RESIDUAL"].isel(frequency=i_f).values))
+            100 * (I_av["SKY_RESIDUAL"].isel(frequency=i_f).values - I["SKY_RESIDUAL"].isel(frequency=i_f).values)/np.max(np.abs(I["SKY_RESIDUAL"].isel(frequency=i_f).values))
         )
         axes[1,2].set_title("SKY_RESIDUAL_AV - SKY_RESIDUAL_CASA")
         fig.colorbar(im5, ax=axes[1,2])
@@ -720,22 +722,22 @@ def test_single_field_imaging():
         axes[2,1].set_title("PRIMARY_BEAM_CASA")
         fig.colorbar(im4, ax=axes[2,1])
         im5 = axes[2,2].imshow(
-            (I_av["PRIMARY_BEAM"].isel(frequency=i_f).values - I["PRIMARY_BEAM"].isel(frequency=i_f).values)/np.max(np.abs(I["PRIMARY_BEAM"].isel(frequency=i_f).values))
+            100 * (I_av["PRIMARY_BEAM"].isel(frequency=i_f).values - I["PRIMARY_BEAM"].isel(frequency=i_f).values)/np.max(np.abs(I["PRIMARY_BEAM"].isel(frequency=i_f).values))
         )
         axes[2,2].set_title("PRIMARY_BEAM_AV - PRIMARY_BEAM_CASA")
         fig.colorbar(im5, ax=axes[2,2])
         
-        im3 = axes[2,0].imshow(I_av["MASK"].isel(frequency=i_f).values)
-        axes[2,0].set_title("MASK_AV")
-        fig.colorbar(im3, ax=axes[2,0])
-        im4 = axes[2,1].imshow(I["MASK"].isel(frequency=i_f).values)
-        axes[2,1].set_title("MASK_CASA")
-        fig.colorbar(im4, ax=axes[2,1])
-        im5 = axes[2,2].imshow(
-            I_av["MASK"].isel(frequency=i_f).values - I["MASK"].isel(frequency=i_f).values
-        )
-        axes[2,2].set_title("MASK_AV - MASK_CASA")
-        fig.colorbar(im5, ax=axes[2,2])
+        # im3 = axes[2,0].imshow(I_av["MASK"].isel(frequency=i_f).values)
+        # axes[2,0].set_title("MASK_AV")
+        # fig.colorbar(im3, ax=axes[2,0])
+        # im4 = axes[2,1].imshow(I["MASK"].isel(frequency=i_f).values)
+        # axes[2,1].set_title("MASK_CASA")
+        # fig.colorbar(im4, ax=axes[2,1])
+        # im5 = axes[2,2].imshow(
+        #     100 * (I_av["MASK"].isel(frequency=i_f).values - I["MASK"].isel(frequency=i_f).values)/np.max(np.abs(I["MASK"].isel(frequency=i_f).values))
+        # )
+        # axes[2,2].set_title("MASK_AV - MASK_CASA")
+        # fig.colorbar(im5, ax=axes[2,2])
         
         rel_diff_model = np.max(
             np.abs(I_av["SKY_MODEL"].isel(frequency=i_f).values - I["SKY_MODEL"].isel(frequency=i_f).values)

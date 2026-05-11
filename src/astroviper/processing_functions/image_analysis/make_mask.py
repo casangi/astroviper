@@ -92,6 +92,18 @@ def make_mask(
         data_group_out_modified=image_data_group_out_modified,
         overwrite=overwrite,
     )
+    
+    # import matplotlib.pyplot as plt
+    # plt.figure(figsize=(20,10))
+    # plt.imshow(img_xds[image_data_group_in["primary_beam"]].isel(polarization=0,time=0, frequency=0).values)
+    # plt.colorbar()
+    # plt.title("Primary Beam ")
+    
+    # plt.figure(figsize=(20,10))
+    # plt.imshow(img_xds[image_data_group_in["primary_beam"]].isel(polarization=1,time=0, frequency=0).values)
+    # plt.colorbar()
+    # plt.title("Primary Beam ")
+    # plt.show()
 
     if combine_mask:
         # Union the threshold mask with the existing mask: a pixel ends up

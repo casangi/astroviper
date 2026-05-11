@@ -271,6 +271,17 @@ def transform_polarization_basis(
     
     from toolviper.utils.memory_management import memory_setup, free_memory, get_rss_gb
     for var_name in img_xds.data_vars:
+        print("@@@@@@@@@@@@@@@@@@ var_name is ", var_name, img_xds[var_name].attrs.keys())
+        if "type" in img_xds[var_name].attrs:
+            print("###### The type of the variable is ", var_name, img_xds[var_name].attrs["type"])
+        if "type" in img_xds[var_name].attrs and img_xds[var_name].attrs["type"] == "point_spread_function":
+            # Skip PSF variables
+            continue
+        
+        if "type" in img_xds[var_name].attrs and img_xds[var_name].attrs["type"] == "primary_beam":
+            if  img_xds["PRIMARY_BEAM"].attrs['method'] == "airy_disk":
+                continue
+
         if ("polarization" in img_xds[var_name].dims) and ("BEAM_FIT" not in var_name):
             # print("###### The type of the variable is ", var_name, img_xds[var_name].attrs.keys())
             # if not img_xds[var_name].attrs["type"] == "point_spread_function":

@@ -190,15 +190,15 @@ def ifft_norm_img_xds(
 
     #for data_variable in ["aperture", "uv_sampling", "visibility"]:
     for data_variable in image_data_group_out_modified:
-        data_variable = fft_pair[data_variable] #Maps the input data variable to the corresponding output data variable (e.g. "uv_sampling" to "point_spread_function", "visibility" to "sky")
-        if data_variable not in data_group_in:
+        data_variable_out = fft_pair[data_variable] #Maps the input data variable to the corresponding output data variable (e.g. "uv_sampling" to "point_spread_function", "visibility" to "sky")
+        if data_variable_out not in data_group_in:
             continue
 
-        grid_var_name = data_group_in[data_variable]
+        grid_var_name = data_group_in[data_variable_out]
         raw_grid = img_xds[grid_var_name].values  # (time, freq, pol, u, v)
 
         normalization = img_xds[
-            data_group_in[normalization_key[data_variable]]
+            data_group_in[normalization_key[data_variable_out]]
         ].values.copy()
         normalization[normalization == 0] = 1  # avoid division by zero
 
@@ -210,13 +210,14 @@ def ifft_norm_img_xds(
         # Process one 2-D plane at a time to keep FFT temporaries small.
         # At 12 000 × 12 000 this limits the extra allocation to ≈ 1.15 GB
         # instead of allocating the full (time, freq, pol, u, v) float64 array.
-        out_name = data_group_out[ifft_pair[data_variable]]
+        out_name = data_group_out[ifft_pair[data_variable_out]]
         if out_name not in img_xds:
             img_xds[out_name] = xr.DataArray(
                 np.empty((n_time, n_freq, n_pol, image_size[0], image_size[1]), dtype=np.float64),
                 dims=("time", "frequency", "polarization", "l", "m"),
             )
         out_arr = img_xds[out_name].values  # numpy view for in-place writes
+        img_xds[out_name].attrs['type'] = data_variable
 
         for t in range(n_time):
             for f in range(n_freq):
@@ -229,13 +230,13 @@ def ifft_norm_img_xds(
                     plane *= flux_scale / normalization[t, f, p]
                     out_arr[t, f, p] = remove_padding(plane.real, image_size)
 
-        if data_variable not in image_data_variables_keep:
+        if data_variable_out not in image_data_variables_keep:
             # Release the large grid from the dataset so it can be freed as soon
             # as `del raw_grid` is called after the loop.
             img_xds.xr_img.delete_data_variables(variables=[grid_var_name])
             del raw_grid  # free ≈ 9 GB as early as possible
 
-        # img_xds[data_group_out[ifft_pair[data_variable]]] = xr.DataArray(
+        # img_xds[data_group_out[ifft_pair[data_variable_out]]] = xr.DataArray(
         #     result, dims=("time", "frequency", "polarization", "l", "m")
         # )
 
@@ -305,18 +306,19 @@ def fft_norm_img_xds(
                 dims=("time", "frequency", "polarization", "l", "m"),
             )
         out_arr = img_xds[out_name].values  # numpy view for in-place writes
-        
-    #     kernel_image_1D_l, kernel_image_1D_m = (
-    #     create_prolate_spheroidal_correcting_image_1D(
-    #         n_lm_padded=[img_xds.sizes["u"], img_xds.sizes["v"]]
-    #     )
-    # )
+        img_xds[out_name].attrs['type'] = data_variable
         
         kernel_image_1D_l, kernel_image_1D_m = (
-            create_prolate_spheroidal_correcting_image_1D(
-                n_lm_padded=[250, 250]
-            )
+        create_prolate_spheroidal_correcting_image_1D(
+            n_lm_padded=[img_xds.sizes["u"], img_xds.sizes["v"]]
         )
+        )
+        
+        # kernel_image_1D_l, kernel_image_1D_m = (
+        #     create_prolate_spheroidal_correcting_image_1D(
+        #         n_lm_padded=[250, 250]
+        #     )
+        # )
 
         # Process one 2-D plane at a time to keep FFT temporaries small.
         # At 12 000 × 12 000 this limits the extra allocation to ≈ 1.15 GB
@@ -490,3 +492,46 @@ def remove_padding(image, image_size):
     start_xy = image_size_padded // 2 - image_size // 2
     end_xy = start_xy + image_size
     return image[..., start_xy[0] : end_xy[0], start_xy[1] : end_xy[1]]
+
+
+def add_padding(image, image_size):
+    """Zero the border around a centred ``image_size`` region of ``image`` in place.
+
+    Inverse of :func:`remove_padding`: where ``remove_padding`` returns a
+    view of the central ``image_size`` pixels of a padded array,
+    ``add_padding`` zeros every pixel *outside* that central region of the
+    same array.  Together they enforce the zero-padded layout — centred
+    data, zero borders — without allocating a new array.
+
+    The function never allocates a new array, never copies the central
+    image data, and operates entirely on the existing buffer.  Only the
+    four border strips around the centre are written (each set to zero).
+    This is intended for tight loops where one padded buffer is reused
+    across iterations.
+
+    Parameters
+    ----------
+    image : numpy.ndarray
+        Padded array to modify in place.  Any number of leading dimensions
+        are supported; the border-zeroing is applied to the last two axes
+        ``(..., n_u_pad, n_v_pad)``.
+    image_size : array-like of int, shape (2,)
+        Pixel dimensions ``[n_l, n_m]`` of the central, unpadded region
+        whose values are preserved.  Must satisfy
+        ``image_size <= image.shape[-2:]`` element-wise.
+
+    Returns
+    -------
+    numpy.ndarray
+        The same ``image`` array (returned for convenience), with its four
+        border strips set to zero in place.
+    """
+    image_size = np.asarray(image_size)
+    image_size_padded = np.array(image.shape[-2:])
+    start_xy = image_size_padded // 2 - image_size // 2
+    end_xy = start_xy + image_size
+    image[..., : start_xy[0], :] = 0
+    image[..., end_xy[0] :, :] = 0
+    image[..., start_xy[0] : end_xy[0], : start_xy[1]] = 0
+    image[..., start_xy[0] : end_xy[0], end_xy[1] :] = 0
+    return image

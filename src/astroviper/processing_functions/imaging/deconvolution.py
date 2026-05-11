@@ -172,14 +172,23 @@ def _plane_peak_abs_signed(arr, mask=None):
         mask. NaN if every pixel is masked.
     """
     if mask is None:
-        idx = np.unravel_index(np.abs(arr).argmax(), arr.shape)
-        return float(arr[idx])
+        print(np.nanmax(np.abs(arr)))
+        return np.nanmax(np.abs(arr))
     valid = mask > 0.5
     if not np.any(valid):
         return float("nan")
-    absvals = np.where(valid, np.abs(arr), -np.inf)
-    idx = np.unravel_index(absvals.argmax(), arr.shape)
-    return float(arr[idx])
+    return np.nanmax(np.where(valid, np.abs(arr), np.nan))
+
+    #Problem if more than one pixel with same max value
+    # if mask is None: 
+    #     idx = np.unravel_index(np.abs(arr).argmax(), arr.shape)
+    #     return float(arr[idx])
+    # valid = mask > 0.5
+    # if not np.any(valid):
+    #     return float("nan")
+    # absvals = np.where(valid, np.abs(arr), -np.inf)
+    # idx = np.unravel_index(absvals.argmax(), arr.shape)
+    # return float(arr[idx])
 
 
 def deconvolve(
@@ -335,15 +344,52 @@ def deconvolve(
             for pp in range(npol):
                 rp = residual_arr[tt, nn, pp]
                 mp = mask_arr[tt, nn, pp] if mask_arr is not None else None
+                print("The pol is ", pp)
                 start_peakres[tt, nn, pp] = _plane_peak_abs_signed(rp, mask=mp)
+                print("The start_peakres is ", start_peakres[tt, nn, pp])
                 start_peakres_nomask[tt, nn, pp] = _plane_peak_abs_signed(rp)
                 start_model_flux[tt, nn, pp] = (
                     0.0 if zero_model else float(model_arr[tt, nn, pp].sum())
                 )
+                print("**************")
 
     # Drive the CLEAN loop in C++. The helper owns the full
     # (time, frequency, polarization) iteration and the parallel worker
     # pool.
+    print("The start_peakres is ", start_peakres)
+    print("The start_peakres_nomask is ", start_peakres_nomask)
+    print("The start_model_flux is ", start_model_flux)
+
+    # import matplotlib.pyplot as plt
+    # plt.figure(figsize=(20,10))
+    # plt.imshow(psf_arr[0,0,1])
+    # plt.colorbar()
+    # plt.title("PSF ")
+    
+    # plt.figure(figsize=(20,10))
+    # plt.imshow(residual_arr[0,0,1])
+    # plt.colorbar()
+    # plt.title("REsidual ")
+    
+    # plt.figure(figsize=(20,10))
+    # plt.imshow(mask_arr[0,0,1])
+    # plt.colorbar()
+    # plt.title("Mask ")
+    
+    # plt.figure(figsize=(20,10))
+    # plt.imshow(mask_arr[0,0,0])
+    # plt.colorbar()
+    # plt.title("Mask ")
+    
+    #     idx = np.unravel_index(np.abs(arr).argmax(), arr.shape)
+    # return float(arr[idx])
+    # print("The max abs value in PSF:", np.max(np.abs(psf_arr[0,0,1])))
+    # print("The max abs value in Residual:", np.max(np.abs(residual_arr[0,0,1])))
+    
+    # print(np.unravel_index(np.abs(residual_arr[0,0,1]).argmax(), residual_arr.shape))
+
+    # plt.show()
+
     results = hogbom_clean(
         residual_cube=residual_arr,
         psf_cube=psf_arr,

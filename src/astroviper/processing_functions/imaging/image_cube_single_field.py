@@ -30,13 +30,13 @@ def image_cube_single_field(input_params, ps_xdt, img_xds):
         
     print("$$$$************" * 10, "1 Final residual cycle after last model update cycle.", img_xds.polarization.values)
         
-    # #Last residual cycle to calcultate final residual image after last model update cycle.
-    # if input_params["iteration_control_params"]["niter"] > 0:       
-    #     start = time.time()
-    #     img_xds, return_df = residual_cycle_cube_single_field(
-    #         ps_xdt, img_xds, input_params, is_n_iter_0=is_n_iter_0
-    #     )
-    #     T_residual_cycle = T_residual_cycle + time.time() - start
+    #Last residual cycle to calcultate final residual image after last model update cycle.
+    if input_params["iteration_control_params"]["niter"] > 0:       
+        start = time.time()
+        img_xds, return_df = residual_cycle_cube_single_field(
+            ps_xdt, img_xds, input_params, is_n_iter_0=is_n_iter_0
+        )
+        T_residual_cycle = T_residual_cycle + time.time() - start
         
     print("$$$$************" * 10, "2 Final residual cycle after last model update cycle.", img_xds.polarization.values)
 

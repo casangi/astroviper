@@ -198,6 +198,10 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0,
             ],  # Select first since we only have one dish diameter and add time axis.
             dims=("time", "frequency", "polarization", "l", "m"),
         )
+        
+        img_xds["PRIMARY_BEAM"].attrs['type'] = "primary_beam"
+        img_xds["PRIMARY_BEAM"].attrs['method'] = "airy_disk"
+        
         modify_data_groups_xds(
             img_xds,
             data_group_out_name=img_residual_data_group_name,

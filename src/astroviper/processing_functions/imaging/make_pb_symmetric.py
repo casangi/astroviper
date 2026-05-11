@@ -284,6 +284,18 @@ def airy_disk_rorder_v2(freq_chan, pol, pb_params, grid_params):
 
     airy_disk[:, :, 0, image_center[0], image_center[1]] = 1.0  # Fix centre value
     airy_disk = np.tile(airy_disk, (1, 1, len(pol), 1, 1))
+    
+    # import matplotlib.pyplot as plt
+    # plt.figure(figsize=(20,10))
+    # plt.imshow(airy_disk[0,0,0])
+    # plt.colorbar()
+    # plt.title("Primary Beam ")
+    
+    # plt.figure(figsize=(20,10))
+    # plt.imshow(airy_disk[0,0,1])
+    # plt.colorbar()
+    # plt.title("Primary Beam ")
+    # plt.show()
 
     return airy_disk
 
