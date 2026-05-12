@@ -654,7 +654,6 @@ def test_single_field_imaging():
         write_visibility_model_to_ps=True
     )
     img_av_xds = xr.open_zarr(image_store)
-    print("av image mask: ", img_av_xds["MASK"])
 
     from matplotlib import pyplot as plt
     frequency = 4
@@ -674,9 +673,9 @@ def test_single_field_imaging():
     # print("************" * 10)
     # print(I_av - I)
     
-    print(I_av)
-    print("************" * 10)
-    print(I)
+    # print(I_av)
+    # print("************" * 10)
+    # print(I)
     
     max_per_dif_model= [2.1e-05, 0.001, 7.7e-06, 0.0022, 0.0013]
     min_per_dif_model = [2.0e-05, 0.0009, 7.6e-06, 0.0021, 0.0012]  

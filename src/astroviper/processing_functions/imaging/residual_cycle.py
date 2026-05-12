@@ -43,8 +43,6 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0,
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
-    
-    print("@@@@@@@@@@@@@", input_params["image_params"]["fft_padding"])
 
     ps_data_group_name = input_params["processing_set_data_group_name"]
     
@@ -111,7 +109,7 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0,
         # print("1^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
         # print(model2[0:5,0,:,0])
         # print("&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
-        print(model_av[0:5,0,:,0])
+        # print(model_av[0:5,0,:,0])
         # print("&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
         # print(model2[0:5,0,:,0]-model_av[0:5,0,:,0])
         # print("&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")

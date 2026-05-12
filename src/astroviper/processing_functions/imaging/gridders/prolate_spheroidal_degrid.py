@@ -192,7 +192,6 @@ def prolate_spheroidal_degrid_jit(
                                         degrid_value / norm
                                     )
 
-    print(vis_data)
     return
 
 

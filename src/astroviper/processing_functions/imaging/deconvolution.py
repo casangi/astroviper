@@ -172,7 +172,7 @@ def _plane_peak_abs_signed(arr, mask=None):
         mask. NaN if every pixel is masked.
     """
     if mask is None:
-        print(np.nanmax(np.abs(arr)))
+        #print(np.nanmax(np.abs(arr)))
         return np.nanmax(np.abs(arr))
     valid = mask > 0.5
     if not np.any(valid):
@@ -344,21 +344,21 @@ def deconvolve(
             for pp in range(npol):
                 rp = residual_arr[tt, nn, pp]
                 mp = mask_arr[tt, nn, pp] if mask_arr is not None else None
-                print("The pol is ", pp)
+                #print("The pol is ", pp)
                 start_peakres[tt, nn, pp] = _plane_peak_abs_signed(rp, mask=mp)
-                print("The start_peakres is ", start_peakres[tt, nn, pp])
+                #print("The start_peakres is ", start_peakres[tt, nn, pp])
                 start_peakres_nomask[tt, nn, pp] = _plane_peak_abs_signed(rp)
                 start_model_flux[tt, nn, pp] = (
                     0.0 if zero_model else float(model_arr[tt, nn, pp].sum())
                 )
-                print("**************")
+                #print("**************")
 
     # Drive the CLEAN loop in C++. The helper owns the full
     # (time, frequency, polarization) iteration and the parallel worker
     # pool.
-    print("The start_peakres is ", start_peakres)
-    print("The start_peakres_nomask is ", start_peakres_nomask)
-    print("The start_model_flux is ", start_model_flux)
+    # print("The start_peakres is ", start_peakres)
+    # print("The start_peakres_nomask is ", start_peakres_nomask)
+    # print("The start_model_flux is ", start_model_flux)
 
     # import matplotlib.pyplot as plt
     # plt.figure(figsize=(20,10))

@@ -296,7 +296,6 @@ def fft_norm_img_xds(
             continue
 
         grid_var_name = data_group_in[data_variable]
-        print("*$$$$$$$$$$$$$$$", grid_var_name, data_variable)
         raw_grid = img_xds[grid_var_name].values  # (time, freq, pol, u, v)
 
         n_time, n_freq, n_pol = raw_grid.shape[:3]
