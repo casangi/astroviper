@@ -280,6 +280,97 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         self.assertAlmostEqual(vis_data[0, 0, 0, 0].imag, 0.0, places=12)
 
     # ------------------------------------------------------------------
+    # In-place / zero-copy behaviour (regression: complex64 vis_data was
+    # silently safe-cast to complex128 by pybind11, so the Python buffer
+    # stayed zero. The binding now takes an untyped py::array and writes
+    # directly into the caller's buffer for both complex64 and complex128.)
+    # ------------------------------------------------------------------
+    def test_inplace_complex128_no_copy(self):
+        """complex128 vis_data is modified in place; numpy buffer is not reallocated."""
+        inputs = _make_random_inputs(seed=20)
+        vis = inputs["vis_data"]  # complex128, owned by Python
+        self.assertEqual(vis.dtype, np.complex128)
+        addr_before = vis.ctypes.data
+        prolate_spheroidal_degrid(
+            inputs["grid"], vis, inputs["uvw"],
+            inputs["frequency_coord"], inputs["frequency_map"],
+            inputs["time_map"], inputs["pol_map"], inputs["cgk_1D"],
+            inputs["n_uv"], inputs["delta_lm"],
+            support=SUPPORT, oversampling=OVERSAMPLING, num_threads=1,
+        )
+        # Same buffer (no reallocation, no silent copy).
+        self.assertEqual(vis.ctypes.data, addr_before)
+        # Something was actually written.
+        self.assertGreater(np.count_nonzero(vis), 0)
+
+    def test_inplace_complex64_no_copy(self):
+        """complex64 vis_data is modified in place; numpy buffer is not reallocated.
+
+        Regression: pybind11's ``py::array_t<complex128>`` previously safe-cast
+        a complex64 input into a temporary complex128 copy, so the C++ kernel
+        wrote into the copy and the Python-owned array stayed zero. The
+        binding now dispatches on dtype and writes through the original
+        buffer.
+        """
+        inputs = _make_random_inputs(seed=21)
+        vis64 = np.zeros_like(inputs["vis_data"], dtype=np.complex64)
+        addr_before = vis64.ctypes.data
+        prolate_spheroidal_degrid(
+            inputs["grid"], vis64, inputs["uvw"],
+            inputs["frequency_coord"], inputs["frequency_map"],
+            inputs["time_map"], inputs["pol_map"], inputs["cgk_1D"],
+            inputs["n_uv"], inputs["delta_lm"],
+            support=SUPPORT, oversampling=OVERSAMPLING, num_threads=1,
+        )
+        self.assertEqual(vis64.ctypes.data, addr_before)
+        self.assertEqual(vis64.dtype, np.complex64)
+        self.assertGreater(np.count_nonzero(vis64), 0)
+
+    def test_complex64_matches_numba_reference(self):
+        """C++ output into a complex64 buffer matches the numba reference within float32 precision."""
+        inputs = _make_random_inputs(seed=22)
+        vis64 = np.zeros_like(inputs["vis_data"], dtype=np.complex64)
+        prolate_spheroidal_degrid(
+            inputs["grid"], vis64, inputs["uvw"],
+            inputs["frequency_coord"], inputs["frequency_map"],
+            inputs["time_map"], inputs["pol_map"], inputs["cgk_1D"],
+            inputs["n_uv"], inputs["delta_lm"],
+            support=SUPPORT, oversampling=OVERSAMPLING, num_threads=1,
+        )
+        ref = _run_jit(inputs)  # complex128 numba reference
+        np.testing.assert_allclose(vis64, ref.astype(np.complex64), rtol=1e-5, atol=1e-6)
+
+    def test_bad_dtype_raises_no_silent_copy(self):
+        """Unsupported vis_data dtype must raise rather than silently allocate a copy."""
+        inputs = _make_random_inputs(seed=23)
+        bad_vis = np.zeros_like(inputs["vis_data"], dtype=np.float64)  # real, not complex
+        with self.assertRaises(RuntimeError):
+            prolate_spheroidal_degrid(
+                inputs["grid"], bad_vis, inputs["uvw"],
+                inputs["frequency_coord"], inputs["frequency_map"],
+                inputs["time_map"], inputs["pol_map"], inputs["cgk_1D"],
+                inputs["n_uv"], inputs["delta_lm"],
+                support=SUPPORT, oversampling=OVERSAMPLING, num_threads=1,
+            )
+
+    def test_jit_and_cpp_produce_same_result(self):
+        """End-to-end equivalence: jit and C++ produce the same vis_data for the
+        same inputs across multiple seeds, baseline counts, channel maps, and
+        thread counts."""
+        configs = [
+            dict(seed=30, n_baseline=32, n_vis_chan=2, n_pol=2, num_threads=1),
+            dict(seed=31, n_baseline=128, n_vis_chan=4, n_pol=2, num_threads=4),
+            dict(seed=32, n_baseline=64, n_vis_chan=3, n_pol=1, num_threads=2),
+        ]
+        for cfg in configs:
+            with self.subTest(**cfg):
+                num_threads = cfg.pop("num_threads")
+                inputs = _make_random_inputs(**cfg)
+                cpp = _run_cpp(inputs, num_threads=num_threads)
+                jit = _run_jit(inputs)
+                np.testing.assert_allclose(cpp, jit, rtol=0, atol=1e-12)
+
+    # ------------------------------------------------------------------
     # Binding input validation
     # ------------------------------------------------------------------
     def test_wrong_ndim_raises(self):

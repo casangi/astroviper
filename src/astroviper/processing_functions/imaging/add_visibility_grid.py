@@ -312,6 +312,8 @@ def add_visibility_grid_single_field(
         int
     )
     delta_lm = img_xds.xr_img.get_lm_cell_size()
+    
+    print("!!!!!!!!add_visibility_grid:", "n_uv:", n_uv, "delta_lm:", delta_lm)
 
     # Initialise output arrays on the first call; subsequent calls accumulate.
     if img_data_group_out["visibility"] not in img_xds:

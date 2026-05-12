@@ -287,6 +287,9 @@ def fft_norm_img_xds(
     # print("data_group_in " + str(data_group_in))
     # print("data_group_out " + str(data_group_out))
     # print("************" * 10)
+    n_uv = (_image_params["fft_padding"] * np.array([img_xds.sizes["l"], img_xds.sizes["m"]])).astype(
+        int
+    )
     
     for data_variable in data_variables_to_process:
         if data_variable not in data_group_in:
@@ -302,15 +305,19 @@ def fft_norm_img_xds(
         out_name = data_group_out[fft_pair[data_variable]]
         if out_name not in img_xds:
             img_xds[out_name] = xr.DataArray(
-                np.empty((n_time, n_freq, n_pol, image_size[0], image_size[1]), dtype=np.complex128),
-                dims=("time", "frequency", "polarization", "l", "m"),
+                np.empty((n_time, n_freq, n_pol, n_uv[0], n_uv[1]), dtype=np.complex128),
+                dims=("time", "frequency", "polarization", "u", "v"),
             )
+            # img_xds[out_name] = xr.DataArray(
+            #     np.empty((n_time, n_freq, n_pol, img_xds.sizes["l"], img_xds.sizes["m"]), dtype=np.complex128),
+            #     dims=("time", "frequency", "polarization", "l", "m"),
+            # )
         out_arr = img_xds[out_name].values  # numpy view for in-place writes
         img_xds[out_name].attrs['type'] = data_variable
         
         kernel_image_1D_l, kernel_image_1D_m = (
         create_prolate_spheroidal_correcting_image_1D(
-            n_lm_padded=[img_xds.sizes["u"], img_xds.sizes["v"]]
+            n_lm_padded=n_uv
         )
         )
         
@@ -323,17 +330,35 @@ def fft_norm_img_xds(
         # Process one 2-D plane at a time to keep FFT temporaries small.
         # At 12 000 × 12 000 this limits the extra allocation to ≈ 1.15 GB
         # instead of allocating the full (time, freq, pol, u, v) float64 array.
+        import matplotlib.pyplot as plt
         for t in range(n_time):
             for f in range(n_freq):
                 for p in range(n_pol):
-                    # out_arr[t, f, p] = remove_padding(fft_lm_to_uv(
-                    #     raw_grid[t, f, p]/kernel_image_1D_l[:, None]/kernel_image_1D_m[None, :], num_threads=num_threads, fft_backend=fft_backend
-                    # ),(250, 250))
+                    add_padding(raw_grid[t, f, p], out_arr[t, f, p])
+                    # plt.figure(figsize=(20,10))
+                    # plt.imshow(np.abs(out_arr[t, f, p]))
+                    # plt.colorbar()
+                    
+                    # print("$$$$************" * 10, "t:", t, "f:", f, "p:", p, out_arr[t, f, p].shape, n_uv[0], n_uv[1])
                     out_arr[t, f, p] = fft_lm_to_uv(
-                        raw_grid[t, f, p]/kernel_image_1D_l[:, None]/kernel_image_1D_m[None, :], num_threads=num_threads, fft_backend=fft_backend
+                        out_arr[t, f, p]/kernel_image_1D_l[:, None]/kernel_image_1D_m[None, :], num_threads=num_threads, fft_backend=fft_backend
                     )
                     
-        print("#5#4#$#$#$#$#$#$#$#"*10, data_variable, image_data_variables_keep)
+                    # out_arr[t, f, p] = fft_lm_to_uv(
+                    #     raw_grid[t, f, p]/kernel_image_1D_l[:, None]/kernel_image_1D_m[None, :], num_threads=num_threads, fft_backend=fft_backend
+                    # )
+                    
+                    
+                    # plt.figure(figsize=(20,10))
+                    # plt.imshow(np.abs(raw_grid[t, f, p]))
+                    # plt.colorbar()
+                    # plt.figure(figsize=(20,10))
+                    # plt.imshow(np.abs(out_arr[t, f, p]))
+                    # plt.colorbar()
+                    # print("$$$$************" * 10, "t:", t, "f:", f, "p:", p, out_arr[t, f, p].shape, n_uv[0], n_uv[1], raw_grid[t, f, p].shape)
+
+        plt.show()
+ 
  
         if data_variable not in image_data_variables_keep:
             # Release the large grid from the dataset so it can be freed as soon
@@ -494,44 +519,44 @@ def remove_padding(image, image_size):
     return image[..., start_xy[0] : end_xy[0], start_xy[1] : end_xy[1]]
 
 
-def add_padding(image, image_size):
-    """Zero the border around a centred ``image_size`` region of ``image`` in place.
+def add_padding(src, dst):
+    """Embed ``src`` into the centre of ``dst`` in place; zero ``dst``'s borders.
 
-    Inverse of :func:`remove_padding`: where ``remove_padding`` returns a
-    view of the central ``image_size`` pixels of a padded array,
-    ``add_padding`` zeros every pixel *outside* that central region of the
-    same array.  Together they enforce the zero-padded layout — centred
-    data, zero borders — without allocating a new array.
+    Inverse of :func:`remove_padding`:
+    ``remove_padding(dst, src.shape[-2:])`` returns a view of the central
+    ``src.shape[-2:]`` pixels of ``dst``; ``add_padding(src, dst)`` writes
+    ``src`` into that same centre and zeros every pixel outside it.
 
-    The function never allocates a new array, never copies the central
-    image data, and operates entirely on the existing buffer.  Only the
-    four border strips around the centre are written (each set to zero).
-    This is intended for tight loops where one padded buffer is reused
-    across iterations.
+    Operates entirely in place on ``dst`` — no new array is allocated.
+    The only data movement is the unavoidable copy of ``src`` into the
+    central region.  Intended for tight loops where the padded buffer is
+    allocated once and reused across iterations.
 
     Parameters
     ----------
-    image : numpy.ndarray
-        Padded array to modify in place.  Any number of leading dimensions
-        are supported; the border-zeroing is applied to the last two axes
-        ``(..., n_u_pad, n_v_pad)``.
-    image_size : array-like of int, shape (2,)
-        Pixel dimensions ``[n_l, n_m]`` of the central, unpadded region
-        whose values are preserved.  Must satisfy
-        ``image_size <= image.shape[-2:]`` element-wise.
+    src : numpy.ndarray
+        Unpadded source array.  Any number of leading dimensions are
+        supported; the centring is applied to the last two axes
+        ``(..., n_l, n_m)``.  Leading dimensions must match ``dst``.
+    dst : numpy.ndarray
+        Pre-allocated padded buffer to modify in place.  Must have shape
+        ``src.shape[:-2] + padded_size`` with
+        ``padded_size >= src.shape[-2:]`` element-wise and a dtype
+        compatible with ``src``.
 
     Returns
     -------
     numpy.ndarray
-        The same ``image`` array (returned for convenience), with its four
-        border strips set to zero in place.
+        The same ``dst`` array, with ``src`` placed at the centre of its
+        last two axes and the surrounding border strips set to zero.
     """
-    image_size = np.asarray(image_size)
-    image_size_padded = np.array(image.shape[-2:])
-    start_xy = image_size_padded // 2 - image_size // 2
-    end_xy = start_xy + image_size
-    image[..., : start_xy[0], :] = 0
-    image[..., end_xy[0] :, :] = 0
-    image[..., start_xy[0] : end_xy[0], : start_xy[1]] = 0
-    image[..., start_xy[0] : end_xy[0], end_xy[1] :] = 0
-    return image
+    src_size = np.array(src.shape[-2:])
+    dst_size = np.array(dst.shape[-2:])
+    start_xy = dst_size // 2 - src_size // 2
+    end_xy = start_xy + src_size
+    dst[..., start_xy[0] : end_xy[0], start_xy[1] : end_xy[1]] = src
+    dst[..., : start_xy[0], :] = 0
+    dst[..., end_xy[0] :, :] = 0
+    dst[..., start_xy[0] : end_xy[0], : start_xy[1]] = 0
+    dst[..., start_xy[0] : end_xy[0], end_xy[1] :] = 0
+    return dst

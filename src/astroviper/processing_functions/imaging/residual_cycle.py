@@ -43,6 +43,8 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0,
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
+    
+    print("@@@@@@@@@@@@@", input_params["image_params"]["fft_padding"])
 
     ps_data_group_name = input_params["processing_set_data_group_name"]
     
@@ -95,7 +97,8 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0,
                                 "correlated_data": "VISIBILITY_MODEL",
                             },
             img_data_group_in_name = "model",
-            num_threads=1,)
+            num_threads=input_params["processing_function_threads"],
+            fft_padding=input_params["image_params"]["fft_padding"],)
         
         # from xradio.measurement_set.load_processing_set import load_processing_set
         # ps_xdt2 = load_processing_set(
@@ -104,11 +107,11 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0,
         #         load_sub_datasets=False,
         #     )  
         # model2 = ps_xdt2["twhya_selfcal_lsrk_5chans_0"].ds.VISIBILITY_MODEL.values
-        # model_av = ps_xdt["twhya_selfcal_lsrk_5chans_0"].ds.VISIBILITY_MODEL.values
+        model_av = ps_xdt["twhya_selfcal_lsrk_5chans_0"].ds.VISIBILITY_MODEL.values
         # print("1^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
         # print(model2[0:5,0,:,0])
         # print("&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
-        # print(model_av[0:5,0,:,0])
+        print(model_av[0:5,0,:,0])
         # print("&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
         # print(model2[0:5,0,:,0]-model_av[0:5,0,:,0])
         # print("&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
@@ -293,7 +296,7 @@ def make_visibility_model_single_field( ps_xdt,
                         "correlated_data": "VISIBILITY_MODEL",
                     },
    img_data_group_in_name = "model",
-    num_threads=1,):
+    num_threads=1,fft_padding=1.2):
     
     for ms_name, ms_xdt in ps_xdt.items():
         get_visibility_grid_single_field(
@@ -305,7 +308,7 @@ def make_visibility_model_single_field( ps_xdt,
                     img_data_group_in_name = img_data_group_in_name,
                     overwrite = True,
                     chan_mode = "cube",
-                    fft_padding = 1.2,
+                    fft_padding = fft_padding,
                     num_threads = num_threads,
                 )
         

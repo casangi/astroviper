@@ -659,11 +659,11 @@ def test_single_field_imaging():
     from matplotlib import pyplot as plt
     frequency = 4
     polarization = 0
-    # I_av = img_av_xds.isel(polarization=polarization,time=0,l=slice(100,150), m=slice(100,150))
-    # I = img_xds.isel(polarization=polarization,time=0,l=slice(100,150), m=slice(100,150))
+    I_av = img_av_xds.isel(polarization=polarization,time=0,l=slice(100,150), m=slice(100,150))
+    I = img_xds.isel(polarization=polarization,time=0,l=slice(100,150), m=slice(100,150))
     
-    I_av = img_av_xds.isel(polarization=polarization,time=0)
-    I = img_xds.isel(polarization=polarization,time=0)
+    # I_av = img_av_xds.isel(polarization=polarization,time=0)
+    # I = img_xds.isel(polarization=polarization,time=0)
 
     # print(np.abs(np.max(np.abs(I))).values)
 
@@ -687,44 +687,44 @@ def test_single_field_imaging():
     for i_f in range(5):
         # print("Channel ", i_f)
         
-        fig, axes = plt.subplots(3, 3, figsize=(14, 14 ))
+        fig, axes = plt.subplots(3, 3, figsize=(16, 14 ))
         fig.suptitle("Channel " + str(i_f) + " Frequency: " + str(I_av.frequency.values[i_f]))
         im0 = axes[0,0].imshow(I_av["SKY_MODEL"].isel(frequency=i_f).values)
-        axes[0,0].set_title("I_AV SKY MODEL")
+        axes[0,0].set_title("MODEL_AV")
         fig.colorbar(im0, ax=axes[0,0])
         im1 = axes[0,1].imshow(I["SKY_MODEL"].isel(frequency=i_f).values)
-        axes[0,1].set_title("I_CASA SKY MODEL")
+        axes[0,1].set_title("MODEL_CASA")
         fig.colorbar(im1, ax=axes[0,1])
         im2 = axes[0,2].imshow(
             100 * (I_av["SKY_MODEL"].isel(frequency=i_f).values - I["SKY_MODEL"].isel(frequency=i_f).values)/np.max(np.abs(I["SKY_MODEL"].isel(frequency=i_f).values))
         )
-        axes[0,2].set_title("SKY_MODEL_AV - SKY_MODEL_CASA")
+        axes[0,2].set_title("Percentage Difference 100% ")
         fig.colorbar(im2, ax=axes[0,2])
         
         
         im3 = axes[1,0].imshow(I_av["SKY_RESIDUAL"].isel(frequency=i_f).values)
-        axes[1,0].set_title("SKY_RESIDUAL_AV")
+        axes[1,0].set_title("RESIDUAL_AV")
         fig.colorbar(im3, ax=axes[1,0])
         im4 = axes[1,1].imshow(I["SKY_RESIDUAL"].isel(frequency=i_f).values)
-        axes[1,1].set_title("SKY_RESIDUAL_CASA")
+        axes[1,1].set_title("RESIDUAL_CASA")
         fig.colorbar(im4, ax=axes[1,1])
         im5 = axes[1,2].imshow(
             100 * (I_av["SKY_RESIDUAL"].isel(frequency=i_f).values - I["SKY_RESIDUAL"].isel(frequency=i_f).values)/np.max(np.abs(I["SKY_RESIDUAL"].isel(frequency=i_f).values))
         )
-        axes[1,2].set_title("SKY_RESIDUAL_AV - SKY_RESIDUAL_CASA")
+        axes[1,2].set_title("Percentage Difference 100% ")
         fig.colorbar(im5, ax=axes[1,2])
         
         
         im3 = axes[2,0].imshow(I_av["PRIMARY_BEAM"].isel(frequency=i_f).values)
-        axes[2,0].set_title("PRIMARY_BEAM_AV")
+        axes[2,0].set_title("PB_AV")
         fig.colorbar(im3, ax=axes[2,0])
         im4 = axes[2,1].imshow(I["PRIMARY_BEAM"].isel(frequency=i_f).values)
-        axes[2,1].set_title("PRIMARY_BEAM_CASA")
+        axes[2,1].set_title("PB_CASA")
         fig.colorbar(im4, ax=axes[2,1])
         im5 = axes[2,2].imshow(
             100 * (I_av["PRIMARY_BEAM"].isel(frequency=i_f).values - I["PRIMARY_BEAM"].isel(frequency=i_f).values)/np.max(np.abs(I["PRIMARY_BEAM"].isel(frequency=i_f).values))
         )
-        axes[2,2].set_title("PRIMARY_BEAM_AV - PRIMARY_BEAM_CASA")
+        axes[2,2].set_title("Percentage Difference 100% ")
         fig.colorbar(im5, ax=axes[2,2])
         
         # im3 = axes[2,0].imshow(I_av["MASK"].isel(frequency=i_f).values)
@@ -748,6 +748,8 @@ def test_single_field_imaging():
             np.abs(I_av["SKY_RESIDUAL"].isel(frequency=i_f).values - I["SKY_RESIDUAL"].isel(frequency=i_f).values)  
             / np.max(np.abs(I["SKY_RESIDUAL"].isel(frequency=i_f).values))
         )
+        
+        #plt.savefig("channel_" + str(i_f) + "_comparison.png")
         
         print(f"Channel {i_f} Relative difference in SKY_MODEL: ", rel_diff_model)
         print(f"Channel {i_f} Relative difference in SKY_RESIDUAL: ", rel_diff_residual)

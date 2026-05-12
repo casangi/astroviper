@@ -142,11 +142,13 @@ def get_visibility_grid_single_field(
     pol_map = (np.arange(0, n_imag_pol)).astype(int)
 
     # NBNB To do: create UV  and allow for padding
-    n_uv = (np.array([img_xds.sizes["l"], img_xds.sizes["m"]])).astype(
+    n_uv = (fft_padding * np.array([img_xds.sizes["l"], img_xds.sizes["m"]])).astype(
         int
     )
+    # n_uv = np.array([300,300])
 
     delta_lm = img_xds.xr_img.get_lm_cell_size()
+    print("!!!!!!!!get_visibility_grid:", "n_uv:", n_uv, "delta_lm:", delta_lm)
 
     # Initialise the output visibility array on the first call; subsequent
     # calls reuse (and overwrite) the existing data variable in place.
@@ -171,26 +173,28 @@ def get_visibility_grid_single_field(
         prolate_spheroidal_degrid_jit,
     )
 
-    cpp_gridder = False
+    cpp_gridder = True
     if cpp_gridder:
         from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
             prolate_spheroidal_degrid,
         )
-        # prolate_spheroidal_degrid(
-        #     grid,
-        #     vis_data,
-        #     uvw,
-        #     frequency_coord,
-        #     frequency_map,
-        #     time_map,
-        #     pol_map,
-        #     cgk_1D,
-        #     n_uv,
-        #     delta_lm,
-        #     support=7,
-        #     oversampling=100,
-        #     num_threads=num_threads,
-        # )
+        prolate_spheroidal_degrid(
+            grid,
+            vis_data,
+            uvw,
+            frequency_coord,
+            frequency_map,
+            time_map,
+            pol_map,
+            cgk_1D,
+            n_uv,
+            delta_lm,
+            support=7,
+            oversampling=100,
+            num_threads=num_threads,
+        )
+        
+        print("222222!@@@@@@@@@@@@@@@@@@@@ vis_data:", np.sum(np.abs(vis_data)))    
     else:
         prolate_spheroidal_degrid_jit(
             grid,
@@ -206,5 +210,4 @@ def get_visibility_grid_single_field(
             support=7,
             oversampling=100,
         )
-
-
+        print("!@@@@@@@@@@@@@@@@@@@@ vis_data:", np.sum(np.abs(vis_data)))    

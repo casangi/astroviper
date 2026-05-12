@@ -9,9 +9,10 @@
 
 namespace prolate_spheroidal {
 
+template <typename VisT>
 void prolate_spheroidal_degrid(
     const std::complex<double>* grid,
-    std::complex<double>* vis_data,
+    VisT* vis_data,
     const double* uvw,
     const double* frequency_coord,
     const int64_t* frequency_map,
@@ -25,6 +26,7 @@ void prolate_spheroidal_degrid(
     int num_threads
 ) {
     constexpr double c = 299792458.0;
+    using VisElem = typename VisT::value_type;
 
     // Precompute per-channel UV scaling factors:
     //   uv_scale[0, i] = -(freq[i] * delta_l * m_u) / c
@@ -98,8 +100,11 @@ void prolate_spheroidal_degrid(
             for (int i_pol = 0; i_pol < n_pol; ++i_pol) {
                 const int vis_idx = vis_c_off + i_pol;
 
-                const std::complex<double> current = vis_data[vis_idx];
-                if (std::isnan(current.real()) || std::isnan(current.imag()))
+                // Read existing sample (cast to double precision) to honour
+                // the NaN-skip contract regardless of vis_data dtype.
+                const VisT current_in = vis_data[vis_idx];
+                if (std::isnan(static_cast<double>(current_in.real())) ||
+                    std::isnan(static_cast<double>(current_in.imag())))
                     continue;
 
                 const int a_pol = pol_map[i_pol];
@@ -134,7 +139,10 @@ void prolate_spheroidal_degrid(
                 }
 
                 if (norm > 0.0) {
-                    vis_data[vis_idx] = degrid_value / norm;
+                    const std::complex<double> result = degrid_value / norm;
+                    vis_data[vis_idx] = VisT(
+                        static_cast<VisElem>(result.real()),
+                        static_cast<VisElem>(result.imag()));
                 }
             }
         }
@@ -180,5 +188,25 @@ void prolate_spheroidal_degrid(
     worker(static_cast<int64_t>(resolved_threads - 1) * chunk, total_work);
     for (auto& th : threads) th.join();
 }
+
+template void prolate_spheroidal_degrid<std::complex<float>>(
+    const std::complex<double>*, std::complex<float>*,
+    const double*, const double*,
+    const int64_t*, const int64_t*, const int64_t*,
+    const double*,
+    int, int, int, int, int,
+    int, int, int, int,
+    double, double,
+    int, int, int);
+
+template void prolate_spheroidal_degrid<std::complex<double>>(
+    const std::complex<double>*, std::complex<double>*,
+    const double*, const double*,
+    const int64_t*, const int64_t*, const int64_t*,
+    const double*,
+    int, int, int, int, int,
+    int, int, int, int,
+    double, double,
+    int, int, int);
 
 } // namespace prolate_spheroidal
