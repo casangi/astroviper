@@ -18,6 +18,7 @@ Run:
 
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 import re
@@ -53,6 +54,58 @@ def make_image(ny: int = 200, nx: int = 200) -> xr.DataArray:
     x = np.arange(nx, dtype=float)
     z = (y[:, None] + x[None, :]) / (ny + nx)  # non-constant for apply_select checks
     return xr.DataArray(z, dims=("y", "x"), coords={"y": y, "x": x}, name="img")
+
+
+def make_xradio_sky(
+    n_time: int = 3,
+    n_freq: int = 8,
+    n_pol: int = 4,
+    n_l: int = 10,
+    n_m: int = 10,
+    freq_start_ghz: float = 1.0,
+    freq_step_ghz: float = 0.1,
+    vel_start: float = 0.0,
+    vel_step: float = 1e4,
+    pols: tuple[str, ...] = ("I", "Q", "U", "V"),
+    time_start_mjd: float = 60000.0,
+    time_step_mjd: float = 1.0,
+) -> xr.DataArray:
+    """Return a minimal xradio-style SKY DataArray with dims (time, frequency, polarization, l, m)."""
+    freq_hz = (freq_start_ghz + np.arange(n_freq) * freq_step_ghz) * 1e9
+    vel_ms = vel_start + np.arange(n_freq) * vel_step
+    pol_vals = list(pols[:n_pol])
+    time_mjd = time_start_mjd + np.arange(n_time) * time_step_mjd
+    l_rad = np.linspace(-1e-4, 1e-4, n_l)
+    m_rad = np.linspace(-1e-4, 1e-4, n_m)
+    data = np.ones((n_time, n_freq, n_pol, n_l, n_m), dtype=float)
+    freq_coord = xr.DataArray(
+        freq_hz,
+        dims=["frequency"],
+        attrs={"units": "Hz", "observer": "LSRK"},
+    )
+    vel_coord = xr.DataArray(
+        vel_ms,
+        dims=["frequency"],
+        attrs={"units": "m/s", "doppler_type": "radio"},
+    )
+    time_coord = xr.DataArray(
+        time_mjd,
+        dims=["time"],
+        attrs={"units": "d", "scale": "utc", "format": "mjd"},
+    )
+    return xr.DataArray(
+        data,
+        dims=["time", "frequency", "polarization", "l", "m"],
+        coords={
+            "time": time_coord,
+            "frequency": freq_coord,
+            "velocity": vel_coord,
+            "polarization": pol_vals,
+            "l": l_rad,
+            "m": m_rad,
+        },
+        name="SKY",
+    )
 
 
 # ------------------------- CRTF basics -------------------------
@@ -732,6 +785,43 @@ class TestReturnKinds:
         assert isinstance(out, xr.DataArray)
         assert hasattr(out.data, "chunks")
 
+    def test_return_kind_numpy_from_plain_dask_mask(self) -> None:
+        """A plain Dask mask with return_kind='numpy' should compute to a NumPy bool array."""
+        ny, nx = 7, 9
+        data = np.zeros((ny, nx), dtype=float)
+        mask_dask = da.from_array(np.eye(ny, nx, dtype=bool), chunks=(3, 4))
+        out = select_mask(data, select=mask_dask, return_kind="numpy")
+        assert isinstance(out, np.ndarray)
+        assert out.dtype == bool and out.shape == (ny, nx)
+        np.testing.assert_array_equal(out, np.eye(ny, nx, dtype=bool))
+
+    def test_return_kind_dataarray_numpy_from_plain_dask_mask(self) -> None:
+        """A plain Dask mask with return_kind='dataarray-numpy' should compute eagerly."""
+        ny, nx = 6, 8
+        data = np.zeros((ny, nx), dtype=float)
+        mask_np = np.zeros((ny, nx), dtype=bool)
+        mask_np[1:4, 2:6] = True
+        mask_dask = da.from_array(mask_np, chunks=(2, 3))
+        out = select_mask(data, select=mask_dask, return_kind="dataarray-numpy")
+        assert isinstance(out, xr.DataArray)
+        assert out.dtype == bool and out.shape == (ny, nx)
+        assert out.dims == ("x", "y")
+        assert not hasattr(out.data, "chunks")
+        np.testing.assert_array_equal(out.values, mask_np)
+
+    def test_return_kind_dataarray_dask_from_plain_dask_mask(self) -> None:
+        """A plain Dask mask with return_kind='dataarray-dask' should stay Dask-backed."""
+        ny, nx = 10, 12
+        data = np.zeros((ny, nx), dtype=float)
+        mask_np = np.zeros((ny, nx), dtype=bool)
+        mask_np[:, ::2] = True
+        mask_dask = da.from_array(mask_np, chunks=(4, 5))
+        out = select_mask(data, select=mask_dask, return_kind="dataarray-dask")
+        assert isinstance(out, xr.DataArray)
+        assert out.dtype == bool and out.shape == (ny, nx)
+        assert hasattr(out.data, "chunks")
+        np.testing.assert_array_equal(out.data.compute(), mask_np)
+
     def test_return_kind_wrap_numpy_mask_to_dask_dataarray(self) -> None:
         data = xr.DataArray(da.zeros((25, 25), chunks=(10, 10)), dims=("y", "x"))
         # Provide a small numpy mask; request dask-backed DataArray mask
@@ -921,7 +1011,7 @@ class TestCRTFDirectives:
         with_global = "\n".join(
             [
                 "#CRTF",
-                "global coord=pixel",  # should be ignored
+                "global color=green",  # viz keyword; should be silently ignored
                 region,
             ]
         )
@@ -1310,6 +1400,26 @@ class TestToBoolDataArray:
         assert isinstance(m, xr.DataArray) and m.dtype == bool
         np.testing.assert_array_equal(m.values, exp)
 
+    def test_ndarray_float_nan_coercion_in_expression_masks(self) -> None:
+        """Float ndarray masks with NaNs should coerce through the public expression API."""
+        data = np.zeros((3, 4), dtype=float)
+        a = np.array(
+            [[np.nan, 0.0, 1.0, 0.0], [2.0, np.nan, 0.0, 0.0], [0.0, 0.0, 3.0, np.nan]],
+            dtype=float,
+        )
+        b = np.array(
+            [[0.0, 1.0, 0.0, np.nan], [0.0, 0.0, 0.0, 0.0], [np.nan, 0.0, 1.0, 0.0]],
+            dtype=float,
+        )
+        expected = np.nan_to_num(a, nan=0.0).astype(bool) | np.nan_to_num(
+            b, nan=0.0
+        ).astype(bool)
+        m = select_mask(
+            data, select="A | B", mask_source={"A": a, "B": b}, return_kind="numpy"
+        )
+        assert isinstance(m, np.ndarray) and m.dtype == bool
+        np.testing.assert_array_equal(m, expected)
+
 
 class TestCRTFMalformed:
     def test_crtf_invalid_line_raises(self) -> None:
@@ -1321,6 +1431,29 @@ class TestCRTFMalformed:
         da_img = make_image(16, 16)
         crtf_bad = "#CRTF\nnot_a_shape 123"
         with pytest.raises(ValueError, match=r"Invalid CRTF line: 'not_a_shape 123'"):
+            select_mask(da_img, select=crtf_bad)
+
+    def test_crtf_unmatched_shape_brackets_raise(self) -> None:
+        """Malformed CRTF shape payloads should raise through the public parser."""
+        da_img = make_image(16, 16)
+        crtf_bad = "#CRTF\ncircle[[8pix,8pix], 3pix"
+        with pytest.raises(ValueError, match=r"Unmatched brackets"):
+            select_mask(da_img, select=crtf_bad)
+
+    def test_global_line_with_no_assignments_is_ignored(self) -> None:
+        """A bare global line should be accepted and contribute no keyword defaults."""
+        da_img = make_image(16, 16)
+        with_global = "#CRTF\nglobal\nbox[[1pix,1pix],[4pix,4pix]]"
+        plain = "#CRTF\nbox[[1pix,1pix],[4pix,4pix]]"
+        m_with = select_mask(da_img, select=with_global)
+        m_plain = select_mask(da_img, select=plain)
+        np.testing.assert_array_equal(m_with.values, m_plain.values)
+
+    def test_keyword_assignment_missing_equals_raises(self) -> None:
+        """Trailing CRTF keyword text must use key=value syntax."""
+        da_img = make_image(16, 16)
+        crtf_bad = "#CRTF\nbox[[1pix,1pix],[4pix,4pix]], corr[I,Q]"
+        with pytest.raises(ValueError, match=r"Expected 'key=value'"):
             select_mask(da_img, select=crtf_bad)
 
 
@@ -1335,6 +1468,16 @@ class TestCRTFNumericParsingErrors:
         with pytest.raises(ValueError, match=r"Invalid numeric token: '30xyz'"):
             select_mask(da_img, select=bad)
 
+    def test_invalid_rotation_keyword_name_raises(self) -> None:
+        """Only pa= and theta_m= are accepted for rotated shapes."""
+        da_img = make_image(32, 32)
+        bad = "rotbox[[12pix,8pix],[6pix,3pix], angle=30deg]"
+        with pytest.raises(
+            ValueError,
+            match=r"Rotation must be provided as 'pa=<angle>' or 'theta_m=<angle>'",
+        ):
+            select_mask(da_img, select=bad)
+
     def test_invalid_pixel_quantity_token_raises_specific_message(self) -> None:
         """
         Public-API coverage for _parse_pix_val raise path:
@@ -1346,6 +1489,89 @@ class TestCRTFNumericParsingErrors:
             ValueError, match=r"Expected '<value>pix' for pixel quantity, got '20px'"
         ):
             select_mask(da_img, select=bad)
+
+
+class TestCrtfKeywordSyntaxErrors:
+    """Malformed keyword-value pairs should fail via the public CRTF API."""
+
+    def _sky(self) -> xr.DataArray:
+        return make_xradio_sky(
+            n_time=3, n_freq=6, n_pol=2, n_l=4, n_m=4, pols=("I", "Q")
+        )
+
+    def test_range_without_brackets_raises(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\nbox[[0pix,0pix],[100pix,100pix]], range=1.2GHz"
+        with pytest.raises(ValueError, match=r"range= value must be bracketed"):
+            select_mask(sky, crtf)
+
+    def test_range_wrong_arity_raises(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\nbox[[0pix,0pix],[100pix,100pix]], range=[1.2GHz]"
+        with pytest.raises(ValueError, match=r"range= requires exactly two values"):
+            select_mask(sky, crtf)
+
+    def test_corr_without_brackets_raises(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\nbox[[0pix,0pix],[100pix,100pix]], corr=I"
+        with pytest.raises(ValueError, match=r"corr= value must be bracketed"):
+            select_mask(sky, crtf)
+
+    def test_time_without_brackets_raises(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\nbox[[0pix,0pix],[100pix,100pix]], time=60001.0"
+        with pytest.raises(ValueError, match=r"time= value must be bracketed"):
+            select_mask(sky, crtf)
+
+    def test_time_wrong_arity_raises(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\nbox[[0pix,0pix],[100pix,100pix]], time=[60001.0]"
+        with pytest.raises(ValueError, match=r"time= requires exactly two values"):
+            select_mask(sky, crtf)
+
+    def test_invalid_range_family_token_raises(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\nbox[[0pix,0pix],[100pix,100pix]], range=[12frobs, 13frobs]"
+        with pytest.raises(ValueError, match=r"Cannot detect range= family"):
+            select_mask(sky, crtf)
+
+    def test_invalid_frequency_token_raises(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\nbox[[0pix,0pix],[100pix,100pix]], range=[1.2eGHz, 1.5GHz]"
+        with pytest.raises(ValueError, match=r"Cannot parse frequency token"):
+            select_mask(sky, crtf)
+
+    def test_invalid_velocity_token_raises(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\nbox[[0pix,0pix],[100pix,100pix]], range=[20kkm/s, 40km/s]"
+        with pytest.raises(ValueError, match=r"Cannot parse velocity token"):
+            select_mask(sky, crtf)
+
+    def test_invalid_channel_token_raises(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\nbox[[0pix,0pix],[100pix,100pix]], range=[twochan, 5chan]"
+        with pytest.raises(ValueError, match=r"Cannot parse channel token"):
+            select_mask(sky, crtf)
+
+    def test_time_mjd_suffix_is_accepted(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\nbox[[0pix,0pix],[100pix,100pix]], time=[60001.0mjd, 60002.0mjd]"
+        m = select_mask(sky, crtf)
+        time_any = m.any(dim=["frequency", "polarization", "l", "m"])
+        assert int(time_any.values.sum()) == 2
+
+    def test_invalid_time_token_raises(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\nbox[[0pix,0pix],[100pix,100pix]], time=[not-a-time, 60002.0]"
+        with pytest.raises(ValueError, match=r"Cannot detect time= family"):
+            select_mask(sky, crtf)
+
+    def test_iso_time_with_space_separator_uses_fallback_parser(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\nbox[[0pix,0pix],[100pix,100pix]], time=['2023-02-26 00:00:00', '2023-02-27 00:00:00']"
+        m = select_mask(sky, crtf)
+        time_any = m.any(dim=["frequency", "polarization", "l", "m"])
+        assert int(time_any.values.sum()) == 2
 
 
 class TestCreationAssignmentInDataArrayNumpyReturn:
@@ -1440,6 +1666,948 @@ class TestCombineWithCreationRenameDoubleExcept:
             pass
         if not ok:
             np.testing.assert_array_equal(got2d_first, exp_or)
+
+
+# ---------------------------------------------------------------------------
+# Step 5: lm-mode (angular-offset) shape rasterization
+# ---------------------------------------------------------------------------
+
+
+class TestCrtfLmMode:
+    """lm-mode (angular-offset) shape rasterization via select_mask."""
+
+    def _sky(self) -> xr.DataArray:
+        """20×20 sky DataArray with 1-arcsec spacing centered on l=m=0."""
+        n_l, n_m = 20, 20
+        arcsec = math.pi / (180 * 3600)
+        l_rad = np.arange(n_l, dtype=float) * arcsec - 9.5 * arcsec
+        m_rad = np.arange(n_m, dtype=float) * arcsec - 9.5 * arcsec
+        data = np.ones((1, 1, 1, n_l, n_m), dtype=float)
+        return xr.DataArray(
+            data,
+            dims=["time", "frequency", "polarization", "l", "m"],
+            coords={
+                "time": [0.0],
+                "frequency": [1e9],
+                "polarization": ["I"],
+                "l": l_rad,
+                "m": m_rad,
+            },
+        )
+
+    def _arcsec_to_rad(self, a: float) -> float:
+        return a * math.pi / (180 * 3600)
+
+    def test_centerbox_lm_selects_central_square(self) -> None:
+        """centerbox centered at origin with 4×4 arcsec sides selects correct pixels."""
+        sky = self._sky()
+        arcsec = self._arcsec_to_rad(1.0)
+        # pixels 8..11 in each axis (0-based) span l/m in [-1.5, -0.5, 0.5, 1.5] arcsec
+        crtf = "#CRTF\ncenterbox[[0arcsec,0arcsec],[4arcsec,4arcsec]]"
+        mask = select_mask(sky, crtf)
+        got = mask.values.squeeze()  # (l, m)
+        # count selected pixels
+        assert got.sum() > 0
+        l_vals = sky.coords["l"].values
+        m_vals = sky.coords["m"].values
+        half = 2 * arcsec
+        expected = np.zeros((20, 20), dtype=bool)
+        for i, lv in enumerate(l_vals):
+            for j, mv in enumerate(m_vals):
+                if abs(lv) <= half and abs(mv) <= half:
+                    expected[i, j] = True
+        np.testing.assert_array_equal(got, expected)
+
+    def test_circle_lm_matches_distance_formula(self) -> None:
+        """circle in lm mode selects pixels within radius."""
+        sky = self._sky()
+        arcsec = self._arcsec_to_rad(1.0)
+        radius = 3.0 * arcsec
+        crtf = "#CRTF\ncircle[[0arcsec,0arcsec],3arcsec]"
+        mask = select_mask(sky, crtf)
+        got = mask.values.squeeze()
+        l_vals = sky.coords["l"].values
+        m_vals = sky.coords["m"].values
+        expected = np.zeros((20, 20), dtype=bool)
+        for i, lv in enumerate(l_vals):
+            for j, mv in enumerate(m_vals):
+                if math.sqrt(lv**2 + mv**2) <= radius:
+                    expected[i, j] = True
+        np.testing.assert_array_equal(got, expected)
+
+    def test_rotbox_lm_arcmin(self) -> None:
+        """rotbox with arcmin units in lm mode, zero rotation."""
+        sky = self._sky()
+        # 10arcmin box centered at origin, 0 rotation => all 20×20 selected
+        crtf = "#CRTF\nrotbox[[0arcmin,0arcmin],[10arcmin,10arcmin],pa=0deg]"
+        mask = select_mask(sky, crtf)
+        got = mask.values.squeeze()
+        assert got.all(), "Expected all pixels selected by oversized rotbox"
+
+    def test_box_lm_selects_expected_rectangle(self) -> None:
+        """box in lm mode should select the same rectangular subset as direct coord checks."""
+        sky = self._sky()
+        crtf = "#CRTF\nbox[[-3arcsec,-2arcsec],[2arcsec,1arcsec]]"
+        mask = select_mask(sky, crtf).values.squeeze()
+        l_vals = sky.coords["l"].values
+        m_vals = sky.coords["m"].values
+        arcsec = self._arcsec_to_rad(1.0)
+        expected = np.zeros((20, 20), dtype=bool)
+        for i, lv in enumerate(l_vals):
+            for j, mv in enumerate(m_vals):
+                if (-3 * arcsec) <= lv <= (2 * arcsec) and (-2 * arcsec) <= mv <= (
+                    1 * arcsec
+                ):
+                    expected[i, j] = True
+        np.testing.assert_array_equal(mask, expected)
+
+    def test_annulus_lm_matches_radial_shell(self) -> None:
+        """annulus in lm mode should match the expected radial shell."""
+        sky = self._sky()
+        crtf = "#CRTF\nannulus[[0arcsec,0arcsec],[2arcsec,4arcsec]]"
+        mask = select_mask(sky, crtf).values.squeeze()
+        l_vals = sky.coords["l"].values
+        m_vals = sky.coords["m"].values
+        arcsec = self._arcsec_to_rad(1.0)
+        expected = np.zeros((20, 20), dtype=bool)
+        for i, lv in enumerate(l_vals):
+            for j, mv in enumerate(m_vals):
+                r = math.sqrt(lv**2 + mv**2)
+                if 2 * arcsec <= r <= 4 * arcsec:
+                    expected[i, j] = True
+        np.testing.assert_array_equal(mask, expected)
+
+    def test_ellipse_lm_selects_nonempty_region(self) -> None:
+        """ellipse in lm mode with an explicit angle should produce a non-empty mask."""
+        sky = self._sky()
+        crtf = "#CRTF\nellipse[[0arcsec,0arcsec],[6arcsec,3arcsec],pa=30deg]"
+        mask = select_mask(sky, crtf)
+        assert mask.values.any()
+
+    def test_rotbox_lm_without_angle_raises(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\nrotbox[[0arcsec,0arcsec],[6arcsec,3arcsec]]"
+        with pytest.raises(ValueError, match=r"rotbox requires angle"):
+            select_mask(sky, crtf)
+
+    def test_ellipse_lm_without_angle_raises(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\nellipse[[0arcsec,0arcsec],[6arcsec,3arcsec]]"
+        with pytest.raises(ValueError, match=r"ellipse requires angle"):
+            select_mask(sky, crtf)
+
+    def test_poly_lm_matches_reference(self) -> None:
+        """poly in lm mode (all-arcsec tokens) selects a triangular region."""
+        sky = self._sky()
+        arcsec = self._arcsec_to_rad(1.0)
+        # triangle with vertices at (0,0), (5arcsec,0), (0,5arcsec) in l/m
+        crtf = "#CRTF\npoly[[0arcsec,0arcsec],[5arcsec,0arcsec],[0arcsec,5arcsec]]"
+        mask = select_mask(sky, crtf)
+        got = mask.values.squeeze()
+        l_vals = sky.coords["l"].values
+        m_vals = sky.coords["m"].values
+        # Point-in-triangle test: l >= 0, m >= 0, l+m < 5arcsec (strict to avoid
+        # ray-casting boundary ambiguity at exact hypotenuse crossings).
+        expected = np.zeros((20, 20), dtype=bool)
+        limit = 5 * arcsec
+        for i, lv in enumerate(l_vals):
+            for j, mv in enumerate(m_vals):
+                if lv >= 0 and mv >= 0 and (lv + mv) < limit:
+                    expected[i, j] = True
+        np.testing.assert_array_equal(got, expected)
+
+    def test_lm_on_ndarray_raises_missing_coord(self) -> None:
+        """lm-mode shapes require l/m coords; raw ndarray raises ValueError."""
+        data = np.ones((20, 20))
+        crtf = "#CRTF\ncircle[[0arcsec,0arcsec],3arcsec]"
+        with pytest.raises(ValueError, match="requires coord"):
+            select_mask(data, crtf)
+
+    def test_lm_on_dataarray_without_lm_coords_raises(self) -> None:
+        """DataArray missing 'l'/'m' coords raises ValueError for lm-mode shape."""
+        da_no_lm = xr.DataArray(
+            np.ones((4, 4)),
+            dims=["x", "y"],
+            coords={"x": np.arange(4), "y": np.arange(4)},
+        )
+        crtf = "#CRTF\ncircle[[0arcsec,0arcsec],3arcsec]"
+        with pytest.raises(ValueError, match="requires coord"):
+            select_mask(da_no_lm, crtf)
+
+
+class TestCrtfRange:
+    """range= mask builder: frequency, velocity, and channel families."""
+
+    def _sky(self) -> xr.DataArray:
+        return make_xradio_sky(
+            n_time=2,
+            n_freq=10,
+            n_pol=2,
+            n_l=4,
+            n_m=4,
+            freq_start_ghz=1.0,
+            freq_step_ghz=0.1,
+            pols=("I", "Q"),
+        )
+
+    def test_range_frequency_selects_correct_channels(self) -> None:
+        sky = self._sky()
+        # frequencies are 1.0, 1.1, ..., 1.9 GHz; select 1.2–1.5 GHz → channels 2,3,4,5
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], range=[1.2GHz, 1.5GHz]"
+        m = select_mask(sky, crtf)
+        assert isinstance(m, xr.DataArray) and m.dtype == bool
+        freq_any = m.any(dim=["time", "polarization", "l", "m"])
+        selected_freqs = sky.coords["frequency"].values[freq_any.values]
+        assert len(selected_freqs) == 4
+        np.testing.assert_allclose(
+            selected_freqs / 1e9, [1.2, 1.3, 1.4, 1.5], atol=1e-6
+        )
+
+    def test_range_velocity_selects_correct_channels(self) -> None:
+        sky = self._sky()
+        # velocities 0, 1e4, 2e4, ..., 9e4 m/s; select 2e4 to 4e4 → channels 2,3,4
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], range=[20000m/s, 40000m/s]"
+        m = select_mask(sky, crtf)
+        assert isinstance(m, xr.DataArray) and m.dtype == bool
+        freq_any = m.any(dim=["time", "polarization", "l", "m"])
+        assert int(freq_any.values.sum()) == 3
+
+    def test_range_velocity_km_per_s(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], range=[20km/s, 40km/s]"
+        m = select_mask(sky, crtf)
+        freq_any = m.any(dim=["time", "polarization", "l", "m"])
+        assert int(freq_any.values.sum()) == 3
+
+    def test_range_channel_selects_integer_indices(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], range=[2chan, 5chan]"
+        m = select_mask(sky, crtf)
+        freq_any = m.any(dim=["time", "polarization", "l", "m"])
+        assert int(freq_any.values.sum()) == 4  # channels 2,3,4,5
+
+    def test_range_mixed_family_raises(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], range=[1GHz, 5chan]"
+        with pytest.raises(ValueError, match="family mismatch"):
+            select_mask(sky, crtf)
+
+    def test_range_on_ndarray_raises_missing_coord(self) -> None:
+        arr = np.ones((4, 4))
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], range=[1.0GHz, 1.5GHz]"
+        with pytest.raises(ValueError, match="frequency"):
+            select_mask(arr, crtf)
+
+    def test_range_velocity_without_velocity_coord_raises(self) -> None:
+        sky = self._sky()
+        sky_no_vel = sky.drop_vars("velocity")
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], range=[100m/s, 200m/s]"
+        with pytest.raises(ValueError, match="velocity"):
+            select_mask(sky_no_vel, crtf)
+
+    def test_range_out_of_overlap_warns_and_returns_all_false(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], range=[5.0GHz, 6.0GHz]"
+        with pytest.warns(
+            UserWarning,
+            match=r"range=\[5\.0GHz, 6\.0GHz\] selects no frequency entries",
+        ):
+            m = select_mask(sky, crtf)
+        freq_any = m.any(dim=["time", "polarization", "l", "m"])
+        assert int(freq_any.values.sum()) == 0
+
+
+class TestCrtfCorr:
+    """corr= mask builder: polarization selection."""
+
+    def _sky(self) -> xr.DataArray:
+        return make_xradio_sky(
+            n_time=1, n_freq=4, n_pol=4, n_l=4, n_m=4, pols=("I", "Q", "U", "V")
+        )
+
+    def test_corr_selects_named_polarizations(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], corr=[I, Q]"
+        m = select_mask(sky, crtf)
+        assert isinstance(m, xr.DataArray) and m.dtype == bool
+        pol_any = m.any(dim=["time", "frequency", "l", "m"])
+        selected = sky.coords["polarization"].values[pol_any.values]
+        assert list(selected) == ["I", "Q"]
+
+    def test_corr_case_insensitive(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], corr=[i, q]"
+        m = select_mask(sky, crtf)
+        pol_any = m.any(dim=["time", "frequency", "l", "m"])
+        assert int(pol_any.values.sum()) == 2
+
+    def test_corr_unknown_token_raises(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], corr=[I, FAKE]"
+        with pytest.raises(ValueError, match="FAKE"):
+            select_mask(sky, crtf)
+
+    def test_corr_on_ndarray_raises_missing_coord(self) -> None:
+        arr = np.ones((4, 4))
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], corr=[I, Q]"
+        with pytest.raises(ValueError, match="polarization"):
+            select_mask(arr, crtf)
+
+
+class TestCrtfTime:
+    """time= mask builder: MJD, JD, and ISO time families."""
+
+    def _sky(self) -> xr.DataArray:
+        return make_xradio_sky(
+            n_time=5,
+            n_freq=2,
+            n_pol=2,
+            n_l=4,
+            n_m=4,
+            time_start_mjd=60000.0,
+            time_step_mjd=1.0,
+            pols=("I", "Q"),
+        )
+
+    def test_time_mjd_bare_number(self) -> None:
+        sky = self._sky()
+        # times are 60000, 60001, 60002, 60003, 60004; select 60001–60003
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], time=[60001.0, 60003.0]"
+        m = select_mask(sky, crtf)
+        time_any = m.any(dim=["frequency", "polarization", "l", "m"])
+        assert int(time_any.values.sum()) == 3
+
+    def test_time_mjd_d_suffix(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], time=[60001.0d, 60003.0d]"
+        m = select_mask(sky, crtf)
+        time_any = m.any(dim=["frequency", "polarization", "l", "m"])
+        assert int(time_any.values.sum()) == 3
+
+    def test_time_iso_format(self) -> None:
+        sky = self._sky()
+        # MJD 60000 = 2023-02-25 (approx); use astropy to get exact bounds
+        from astropy.time import Time
+
+        lo = Time(60001.0, format="mjd", scale="utc").isot
+        hi = Time(60003.0, format="mjd", scale="utc").isot
+        crtf = f"#CRTF\n+box[[0pix,0pix],[100pix,100pix]], time=['{lo}', '{hi}']"
+        m = select_mask(sky, crtf)
+        time_any = m.any(dim=["frequency", "polarization", "l", "m"])
+        assert int(time_any.values.sum()) == 3
+
+    def test_time_jd_format(self) -> None:
+        sky = self._sky()
+        from astropy.time import Time
+
+        lo_jd = Time(60001.0, format="mjd", scale="utc").jd
+        hi_jd = Time(60003.0, format="mjd", scale="utc").jd
+        crtf = f"#CRTF\n+box[[0pix,0pix],[100pix,100pix]], time=[{lo_jd}jd, {hi_jd}jd]"
+        m = select_mask(sky, crtf)
+        time_any = m.any(dim=["frequency", "polarization", "l", "m"])
+        assert int(time_any.values.sum()) == 3
+
+    def test_time_mixed_family_raises(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], time=[60001.0, '2023-01-01T00:00:00']"
+        with pytest.raises(ValueError, match="family mismatch"):
+            select_mask(sky, crtf)
+
+    def test_time_on_ndarray_raises_missing_coord(self) -> None:
+        arr = np.ones((4, 4))
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], time=[60000.0, 60001.0]"
+        with pytest.raises(ValueError, match="time"):
+            select_mask(arr, crtf)
+
+    def test_time_out_of_overlap_warns_and_returns_all_false(self) -> None:
+        sky = self._sky()
+        crtf = "#CRTF\n+box[[0pix,0pix],[100pix,100pix]], time=[59990.0, 59999.0]"
+        with pytest.warns(
+            UserWarning,
+            match=r"time=\[59990\.0, 59999\.0\] selects no time entries",
+        ):
+            m = select_mask(sky, crtf)
+        time_any = m.any(dim=["frequency", "polarization", "l", "m"])
+        assert int(time_any.values.sum()) == 0
+
+
+class TestCrtfPerLineCombining:
+    """Per-line + / - combining with axis masks."""
+
+    def _sky(self) -> xr.DataArray:
+        return make_xradio_sky(
+            n_time=1,
+            n_freq=8,
+            n_pol=4,
+            n_l=8,
+            n_m=8,
+            freq_start_ghz=1.0,
+            freq_step_ghz=0.1,
+            pols=("I", "Q", "U", "V"),
+        )
+
+    def test_two_range_lines_with_plus_produce_union(self) -> None:
+        sky = self._sky()
+        # two frequency windows: 1.0–1.1 GHz (channels 0,1) and 1.5–1.6 GHz (channels 5,6)
+        crtf = (
+            "#CRTF\n"
+            "+box[[0pix,0pix],[100pix,100pix]], range=[1.0GHz, 1.1GHz]\n"
+            "+box[[0pix,0pix],[100pix,100pix]], range=[1.5GHz, 1.6GHz]"
+        )
+        m = select_mask(sky, crtf)
+        freq_any = m.any(dim=["time", "polarization", "l", "m"])
+        assert int(freq_any.values.sum()) == 4  # channels 0,1,5,6
+
+    def test_minus_line_removes_corr(self) -> None:
+        sky = self._sky()
+        # include all, then subtract U and V
+        crtf = (
+            "#CRTF\n"
+            "+box[[0pix,0pix],[100pix,100pix]]\n"
+            "-box[[0pix,0pix],[100pix,100pix]], corr=[U, V]"
+        )
+        m = select_mask(sky, crtf)
+        pol_any = m.any(dim=["time", "frequency", "l", "m"])
+        selected = sky.coords["polarization"].values[pol_any.values]
+        assert list(selected) == ["I", "Q"]
+
+
+# ---------------------------------------------------------------------------
+# Step 8: globals + per-line overrides end-to-end
+# ---------------------------------------------------------------------------
+
+
+class TestCrtfGlobalsAndOverrides:
+    """End-to-end tests for global keyword propagation and per-line override."""
+
+    def _sky(self) -> xr.DataArray:
+        return make_xradio_sky(
+            n_time=1,
+            n_freq=1,
+            pols=["I", "Q", "U", "V"],
+            n_l=20,
+            n_m=20,
+        )
+
+    def test_global_corr_applies_to_every_line(self) -> None:
+        """global corr=[I,Q] restricts every region line to those polarizations."""
+        sky = self._sky()
+        crtf = (
+            "#CRTF\n"
+            "global corr=[I,Q]\n"
+            "box[[0pix,0pix],[9pix,9pix]]\n"
+            "box[[10pix,10pix],[19pix,19pix]]"
+        )
+        mask = select_mask(sky, crtf)
+        # Only I and Q should be selected anywhere
+        pol_any = mask.any(dim=["time", "frequency", "l", "m"])
+        selected = list(sky.coords["polarization"].values[pol_any.values])
+        assert selected == ["I", "Q"]
+
+    def test_per_line_corr_overrides_global(self) -> None:
+        """Per-line corr= overrides global corr= for that line only."""
+        sky = self._sky()
+        # Global: I,Q. Line 2 overrides to U only. Result: line1 selects I,Q;
+        # line2 selects U. Union = I,Q,U.
+        crtf = (
+            "#CRTF\n"
+            "global corr=[I,Q]\n"
+            "box[[0pix,0pix],[9pix,9pix]]\n"
+            "box[[10pix,10pix],[19pix,19pix]] corr=[U]"
+        )
+        mask = select_mask(sky, crtf)
+        pol_any = mask.any(dim=["time", "frequency", "l", "m"])
+        selected = set(sky.coords["polarization"].values[pol_any.values])
+        assert selected == {"I", "Q", "U"}
+        # V must not be selected
+        v_idx = list(sky.coords["polarization"].values).index("V")
+        assert not pol_any.values[v_idx]
+
+    def test_global_coordsys_lm_applies_to_deg_lines(self) -> None:
+        """global coordsys=lm allows deg tokens without per-line coordsys=."""
+        n = 20
+        arcsec = math.pi / (180 * 3600)
+        l_rad = np.arange(n, dtype=float) * arcsec - (n / 2 - 0.5) * arcsec
+        m_rad = np.arange(n, dtype=float) * arcsec - (n / 2 - 0.5) * arcsec
+        sky = xr.DataArray(
+            np.ones((1, 1, 1, n, n), dtype=float),
+            dims=["time", "frequency", "polarization", "l", "m"],
+            coords={
+                "time": [0.0],
+                "frequency": [1e9],
+                "polarization": ["I"],
+                "l": l_rad,
+                "m": m_rad,
+            },
+        )
+        # 10deg >> 20-arcsec grid => all pixels selected in lm mode
+        crtf = "#CRTF\nglobal coordsys=lm\ncircle[[0deg,0deg],10deg]"
+        mask = select_mask(sky, crtf)
+        assert mask.values.all()
+
+    def test_per_line_key_wins_over_global(self) -> None:
+        """When both global and per-line specify the same key, per-line wins."""
+        sky = self._sky()
+        # Global says I,Q,U,V (all); per-line restricts to just I.
+        crtf = (
+            "#CRTF\n"
+            "global corr=[I,Q,U,V]\n"
+            "box[[0pix,0pix],[19pix,19pix]] corr=[I]"
+        )
+        mask = select_mask(sky, crtf)
+        pol_any = mask.any(dim=["time", "frequency", "l", "m"])
+        selected = list(sky.coords["polarization"].values[pol_any.values])
+        assert selected == ["I"]
+
+    def test_multiple_global_lines_accumulate(self) -> None:
+        """Multiple global lines merge; later global keys override earlier ones."""
+        sky = self._sky()
+        # First global sets corr=[I,Q]; second global overrides to corr=[U,V].
+        crtf = (
+            "#CRTF\n"
+            "global corr=[I,Q]\n"
+            "global corr=[U,V]\n"
+            "box[[0pix,0pix],[19pix,19pix]]"
+        )
+        mask = select_mask(sky, crtf)
+        pol_any = mask.any(dim=["time", "frequency", "l", "m"])
+        selected = set(sky.coords["polarization"].values[pol_any.values])
+        assert selected == {"U", "V"}
+
+
+# ---------------------------------------------------------------------------
+# Step 6: coordsys= keyword + family auto-detection
+# ---------------------------------------------------------------------------
+
+
+class TestCrtfCoordsysKeyword:
+    """coordsys= keyword resolution and auto-detection of shape coordinate family."""
+
+    def _sky(self) -> xr.DataArray:
+        """Small 10×10 sky DataArray with 1-arcsec l/m spacing and dummy ra/dec."""
+        n = 10
+        arcsec = math.pi / (180 * 3600)
+        l_rad = np.arange(n, dtype=float) * arcsec - 4.5 * arcsec
+        m_rad = np.arange(n, dtype=float) * arcsec - 4.5 * arcsec
+        # Dummy 2-D ra/dec grids so world-mode coord gating passes (dispatch will
+        # still raise NotImplementedError since world-mode is not yet implemented).
+        ra_grid = np.zeros((n, n), dtype=float)
+        dec_grid = np.zeros((n, n), dtype=float)
+        return xr.DataArray(
+            np.ones((1, 1, 1, n, n), dtype=float),
+            dims=["time", "frequency", "polarization", "l", "m"],
+            coords={
+                "time": [0.0],
+                "frequency": [1e9],
+                "polarization": ["I"],
+                "l": l_rad,
+                "m": m_rad,
+                "right_ascension": (["l", "m"], ra_grid),
+                "declination": (["l", "m"], dec_grid),
+            },
+        )
+
+    def test_arcsec_tokens_auto_detected_as_lm(self) -> None:
+        """arcsec tokens are auto-detected as lm mode without coordsys=."""
+        sky = self._sky()
+        crtf = "#CRTF\ncircle[[0arcsec,0arcsec],3arcsec]"
+        mask = select_mask(sky, crtf)
+        assert mask.values.any()
+
+    def test_arcmin_tokens_auto_detected_as_lm(self) -> None:
+        """arcmin tokens are auto-detected as lm mode without coordsys=."""
+        sky = self._sky()
+        # 10arcmin circle covers the entire 10-arcsec grid
+        crtf = "#CRTF\ncircle[[0arcmin,0arcmin],10arcmin]"
+        mask = select_mask(sky, crtf)
+        assert mask.values.all()
+
+    def test_deg_without_coordsys_raises_ambiguous(self) -> None:
+        """deg tokens without coordsys= raise ValueError (ambiguous)."""
+        sky = self._sky()
+        crtf = "#CRTF\ncircle[[0deg,0deg],1deg]"
+        with pytest.raises(ValueError, match="[Aa]mbiguous"):
+            select_mask(sky, crtf)
+
+    def test_rad_without_coordsys_raises_ambiguous(self) -> None:
+        """rad tokens without coordsys= raise ValueError (ambiguous)."""
+        sky = self._sky()
+        crtf = "#CRTF\ncircle[[0rad,0rad],0.1rad]"
+        with pytest.raises(ValueError, match="[Aa]mbiguous"):
+            select_mask(sky, crtf)
+
+    def test_coordsys_lm_resolves_deg_tokens(self) -> None:
+        """coordsys=lm resolves deg tokens as lm-mode angular offsets."""
+        sky = self._sky()
+        # circle of radius 10deg >> grid extent (arcsec scale) => all selected
+        crtf = "#CRTF\ncircle[[0deg,0deg],10deg] coordsys=lm"
+        mask = select_mask(sky, crtf)
+        assert mask.values.all()
+
+    def test_coordsys_world_resolves_deg_tokens(self) -> None:
+        """coordsys=world resolves deg tokens as world-mode sky coordinates."""
+        sky = self._sky()
+        # All pixels have ra=dec=0 (dummy grid); circle centered there selects all.
+        crtf = "#CRTF\ncircle[[0deg,0deg],1deg] coordsys=world"
+        mask = select_mask(sky, crtf)
+        assert mask.values.all()
+
+    def test_coordsys_pixel_conflicts_with_arcsec_raises(self) -> None:
+        """coordsys=pixel conflicts with arcsec tokens; raises ValueError."""
+        sky = self._sky()
+        crtf = "#CRTF\ncircle[[0arcsec,0arcsec],3arcsec] coordsys=pixel"
+        with pytest.raises(ValueError, match="[Cc]onflicts"):
+            select_mask(sky, crtf)
+
+    def test_coordsys_world_conflicts_with_pix_raises(self) -> None:
+        """coordsys=world conflicts with pix tokens; raises ValueError."""
+        sky = self._sky()
+        crtf = "#CRTF\nbox[[0pix,0pix],[5pix,5pix]] coordsys=world"
+        with pytest.raises(ValueError, match="[Cc]onflicts"):
+            select_mask(sky, crtf)
+
+    def test_global_coordsys_lm_applies_to_deg_line(self) -> None:
+        """global coordsys=lm lets subsequent lines use deg tokens as lm offsets."""
+        sky = self._sky()
+        # large degree circle => all pixels selected in lm mode
+        crtf = "#CRTF\nglobal coordsys=lm\ncircle[[0deg,0deg],10deg]"
+        mask = select_mask(sky, crtf)
+        assert mask.values.all()
+
+    def test_per_line_coordsys_overrides_global(self) -> None:
+        """Per-line coordsys= takes precedence over the global block."""
+        sky = self._sky()
+        # Global says lm; per-line says world. World mode selects all pixels
+        # (all at ra=dec=0, circle centered there with 1deg radius).
+        crtf = "#CRTF\nglobal coordsys=lm\ncircle[[0deg,0deg],1deg] coordsys=world"
+        mask = select_mask(sky, crtf)
+        assert mask.values.all()
+
+    def test_unrecognized_coordsys_value_raises(self) -> None:
+        """An unrecognized coordsys= value raises ValueError."""
+        sky = self._sky()
+        crtf = "#CRTF\ncircle[[0arcsec,0arcsec],3arcsec] coordsys=galactic"
+        with pytest.raises(ValueError, match="[Uu]nrecognized"):
+            select_mask(sky, crtf)
+
+    def test_coordsys_lm_can_match_unambiguous_arcsec_family(self) -> None:
+        """An explicit coordsys that agrees with unambiguous lm tokens should succeed."""
+        sky = self._sky()
+        crtf = "#CRTF\ncircle[[0arcsec,0arcsec],3arcsec] coordsys=lm"
+        mask = select_mask(sky, crtf)
+        assert mask.values.any()
+
+
+# ---------------------------------------------------------------------------
+# Step 7: world-mode (SkyCoord / SkyOffsetFrame) shape rasterization
+# ---------------------------------------------------------------------------
+
+
+class TestCrtfWorldMode:
+    """World-coordinate shape rasterization via SkyCoord / SkyOffsetFrame."""
+
+    # Grid: 20×20, 1-arcsec spacing, centered at RA=10deg Dec=20deg.
+    _N = 20
+    _RA0_DEG = 10.0
+    _DEC0_DEG = 20.0
+
+    def _sky(self, with_radec: bool = True) -> xr.DataArray:
+        """20×20 DataArray with real per-pixel RA/Dec grids centered on (_RA0_DEG, _DEC0_DEG)."""
+        n = self._N
+        arcsec = math.pi / (180 * 3600)
+        l_rad = np.arange(n, dtype=float) * arcsec - (n / 2 - 0.5) * arcsec
+        m_rad = np.arange(n, dtype=float) * arcsec - (n / 2 - 0.5) * arcsec
+        ra0 = self._RA0_DEG * math.pi / 180.0
+        dec0 = self._DEC0_DEG * math.pi / 180.0
+        # Tangent-plane approximation: RA offset ≈ l / cos(dec0), Dec offset ≈ m
+        ll, mm = np.meshgrid(l_rad, m_rad, indexing="ij")
+        ra_grid = ra0 + ll / math.cos(dec0)
+        dec_grid = dec0 + mm
+        coords: dict = {
+            "time": [0.0],
+            "frequency": [1e9],
+            "polarization": ["I"],
+            "l": l_rad,
+            "m": m_rad,
+        }
+        if with_radec:
+            coords["right_ascension"] = (["l", "m"], ra_grid)
+            coords["declination"] = (["l", "m"], dec_grid)
+        return xr.DataArray(
+            np.ones((1, 1, 1, n, n), dtype=float),
+            dims=["time", "frequency", "polarization", "l", "m"],
+            coords=coords,
+        )
+
+    def _ra_dec_to_crtf_sexa(self, ra_deg: float, dec_deg: float) -> str:
+        """Format RA/Dec in degrees as CRTF sexagesimal pair string."""
+        ra_h = int(ra_deg / 15)
+        ra_m = int((ra_deg / 15 - ra_h) * 60)
+        ra_s = ((ra_deg / 15 - ra_h) * 60 - ra_m) * 60
+        sign = "+" if dec_deg >= 0 else "-"
+        adec = abs(dec_deg)
+        dec_d = int(adec)
+        dec_m = int((adec - dec_d) * 60)
+        dec_s = ((adec - dec_d) * 60 - dec_m) * 60
+        return f"{ra_h}h{ra_m}m{ra_s:.3f}s,{sign}{dec_d}d{dec_m}m{dec_s:.3f}s"
+
+    def test_circle_sexa_center_separation_match(self) -> None:
+        """circle with sexagesimal center matches per-pixel separation reference."""
+        sky = self._sky()
+        # 3-arcsec radius circle centered at grid center (RA0, Dec0)
+        center = self._ra_dec_to_crtf_sexa(self._RA0_DEG, self._DEC0_DEG)
+        crtf = f"#CRTF\ncircle[[{center}],3arcsec]"
+        mask = select_mask(sky, crtf)
+        got = mask.values.squeeze()
+        # Reference: all pixels whose separation from center ≤ 3arcsec
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+
+        ra = sky.coords["right_ascension"].values
+        dec = sky.coords["declination"].values
+        grid = SkyCoord(ra=ra * u.rad, dec=dec * u.rad, frame="icrs")
+        cen = SkyCoord(
+            ra=self._RA0_DEG * u.deg, dec=self._DEC0_DEG * u.deg, frame="icrs"
+        )
+        expected = grid.separation(cen).arcsec <= 3.0
+        np.testing.assert_array_equal(got, expected)
+
+    def test_box_sexa_selects_rectangular_region(self) -> None:
+        """box with sexagesimal corners selects the correct rectangular sky region."""
+        sky = self._sky()
+        ra0, dec0 = self._RA0_DEG, self._DEC0_DEG
+        # 6×6 arcsec box centered on grid (BLC = center - 3arcsec, TRC = center + 3arcsec)
+        arcsec_deg = 1.0 / 3600.0
+        blc = self._ra_dec_to_crtf_sexa(ra0 - 3 * arcsec_deg, dec0 - 3 * arcsec_deg)
+        trc = self._ra_dec_to_crtf_sexa(ra0 + 3 * arcsec_deg, dec0 + 3 * arcsec_deg)
+        crtf = f"#CRTF\nbox[[{blc}],[{trc}]]"
+        mask = select_mask(sky, crtf)
+        assert mask.values.any()
+        # Inner ±1arcsec box should be fully selected
+        arcsec = math.pi / (180 * 3600)
+        ra = sky.coords["right_ascension"].values
+        dec = sky.coords["declination"].values
+        ra0_r = ra0 * math.pi / 180
+        dec0_r = dec0 * math.pi / 180
+        inner = (np.abs(ra - ra0_r) * math.cos(dec0_r) <= arcsec) & (
+            np.abs(dec - dec0_r) <= arcsec
+        )
+        assert mask.values.squeeze()[inner].all(), "Inner pixels should be selected"
+
+    def test_annulus_world_selects_nonempty_ring(self) -> None:
+        """world annulus should select a shell around the reference direction."""
+        sky = self._sky()
+        center = self._ra_dec_to_crtf_sexa(self._RA0_DEG, self._DEC0_DEG)
+        crtf = f"#CRTF\nannulus[[{center}],[2arcsec,4arcsec]]"
+        mask = select_mask(sky, crtf)
+        assert mask.values.any()
+        center_circle = select_mask(sky, f"#CRTF\ncircle[[{center}],1arcsec]").values
+        assert not np.any(mask.values & center_circle)
+
+    def test_centerbox_world_selects_nonempty_region(self) -> None:
+        """world centerbox should rasterize a non-empty rectangular sky region."""
+        sky = self._sky()
+        center = self._ra_dec_to_crtf_sexa(self._RA0_DEG, self._DEC0_DEG)
+        crtf = f"#CRTF\ncenterbox[[{center}],[6arcsec,4arcsec]]"
+        mask = select_mask(sky, crtf)
+        assert mask.values.any()
+
+    def test_rotbox_world_selects_nonempty_region(self) -> None:
+        """world rotbox with an explicit PA should rasterize successfully."""
+        sky = self._sky()
+        center = self._ra_dec_to_crtf_sexa(self._RA0_DEG, self._DEC0_DEG)
+        crtf = f"#CRTF\nrotbox[[{center}],[8arcsec,4arcsec],pa=30deg]"
+        mask = select_mask(sky, crtf)
+        assert mask.values.any()
+
+    def test_poly_world_selects_nonempty_region(self) -> None:
+        """world poly should rasterize an arbitrary polygonal sky region."""
+        sky = self._sky()
+        dec = self._DEC0_DEG
+        ra = self._RA0_DEG
+        crtf = (
+            "#CRTF\n"
+            f"poly[[{ra - 2/3600:.6f}deg,{dec - 2/3600:.6f}deg],"
+            f"[{ra + 2/3600:.6f}deg,{dec - 2/3600:.6f}deg],"
+            f"[{ra:.6f}deg,{dec + 3/3600:.6f}deg]] coordsys=world"
+        )
+        mask = select_mask(sky, crtf)
+        assert mask.values.any()
+
+    def test_rotbox_world_without_angle_raises(self) -> None:
+        sky = self._sky()
+        center = self._ra_dec_to_crtf_sexa(self._RA0_DEG, self._DEC0_DEG)
+        crtf = f"#CRTF\nrotbox[[{center}],[8arcsec,4arcsec]]"
+        with pytest.raises(ValueError, match=r"rotbox requires angle"):
+            select_mask(sky, crtf)
+
+    def test_ellipse_world_without_angle_raises(self) -> None:
+        sky = self._sky()
+        center = self._ra_dec_to_crtf_sexa(self._RA0_DEG, self._DEC0_DEG)
+        crtf = f"#CRTF\nellipse[[{center}],[8arcsec,4arcsec]]"
+        with pytest.raises(ValueError, match=r"ellipse requires angle"):
+            select_mask(sky, crtf)
+
+    def test_world_rad_tokens_are_accepted(self) -> None:
+        """coordsys=world should accept rad-valued centers and sizes."""
+        sky = self._sky()
+        ra0 = self._RA0_DEG * math.pi / 180.0
+        dec0 = self._DEC0_DEG * math.pi / 180.0
+        crtf = f"#CRTF\ncircle[[{ra0}rad,{dec0}rad],0.00005rad] coordsys=world"
+        mask = select_mask(sky, crtf)
+        assert mask.values.any()
+
+    def test_world_pair_with_wrong_arity_raises(self) -> None:
+        """A world-coordinate pair must contain exactly two coordinates."""
+        sky = self._sky()
+        crtf = "#CRTF\ncircle[[1h0m0.000s],3arcsec]"
+        with pytest.raises(ValueError, match=r"Expected exactly 2 coordinates"):
+            select_mask(sky, crtf)
+
+    def test_ellipse_world_pa_matches_circle(self) -> None:
+        """ellipse with a=b and pa=0 produces the same selection as a circle."""
+        sky = self._sky()
+        center = self._ra_dec_to_crtf_sexa(self._RA0_DEG, self._DEC0_DEG)
+        crtf_ell = f"#CRTF\nellipse[[{center}],[3arcsec,3arcsec],pa=0deg]"
+        crtf_cir = f"#CRTF\ncircle[[{center}],3arcsec]"
+        mask_ell = select_mask(sky, crtf_ell).values.squeeze()
+        mask_cir = select_mask(sky, crtf_cir).values.squeeze()
+        # Equal axes => same as circle (allow 1-pixel boundary tolerance)
+        assert mask_ell.sum() == pytest.approx(mask_cir.sum(), abs=2)
+
+    def test_circle_crossing_ra_wrap(self) -> None:
+        """circle centered at RA=0 selects pixels on both sides of the wraparound."""
+        n = 20
+        arcsec = math.pi / (180 * 3600)
+        l_rad = np.arange(n, dtype=float) * arcsec - (n / 2 - 0.5) * arcsec
+        m_rad = np.arange(n, dtype=float) * arcsec - (n / 2 - 0.5) * arcsec
+        dec0 = 0.0
+        ll, mm = np.meshgrid(l_rad, m_rad, indexing="ij")
+        # Grid straddles RA=0; pixels with l<0 have negative RA (wraps to ~2π).
+        ra_grid = ll  # centered at RA=0
+        dec_grid = dec0 + mm
+        sky = xr.DataArray(
+            np.ones((1, 1, 1, n, n), dtype=float),
+            dims=["time", "frequency", "polarization", "l", "m"],
+            coords={
+                "time": [0.0],
+                "frequency": [1e9],
+                "polarization": ["I"],
+                "l": l_rad,
+                "m": m_rad,
+                "right_ascension": (["l", "m"], ra_grid),
+                "declination": (["l", "m"], dec_grid),
+            },
+        )
+        # Center exactly at RA=0h0m0.000s, Dec=+0d0m0.000s; radius 3arcsec.
+        crtf = "#CRTF\ncircle[[0h0m0.000s,+0d0m0.000s],3arcsec]"
+        mask = select_mask(sky, crtf)
+        got = mask.values.squeeze()
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+
+        grid_sc = SkyCoord(ra=ra_grid * u.rad, dec=dec_grid * u.rad, frame="icrs")
+        cen_sc = SkyCoord(ra=0.0 * u.rad, dec=0.0 * u.rad, frame="icrs")
+        expected = grid_sc.separation(cen_sc).arcsec <= 3.0
+        np.testing.assert_array_equal(got, expected)
+
+    def test_world_mode_without_radec_coords_raises(self) -> None:
+        """World-mode shapes on a DataArray without ra/dec coords raise ValueError."""
+        sky = self._sky(with_radec=False)
+        center = self._ra_dec_to_crtf_sexa(self._RA0_DEG, self._DEC0_DEG)
+        crtf = f"#CRTF\ncircle[[{center}],3arcsec]"
+        with pytest.raises(ValueError, match="requires coord"):
+            select_mask(sky, crtf)
+
+    def test_world_mode_on_ndarray_raises(self) -> None:
+        """World-mode shapes on a plain ndarray raise ValueError (no coord gating)."""
+        data = np.ones((20, 20))
+        center = self._ra_dec_to_crtf_sexa(self._RA0_DEG, self._DEC0_DEG)
+        crtf = f"#CRTF\ncircle[[{center}],3arcsec]"
+        with pytest.raises(ValueError, match="requires coord"):
+            select_mask(data, crtf)
+
+
+class TestCrtfRejectedKeywords:
+    """Frame-conversion keywords raise NotImplementedError; viz keywords and ann lines are silent."""
+
+    def _img(self) -> xr.DataArray:
+        return make_image(16, 16)
+
+    @pytest.mark.parametrize(
+        "kw", ["coord=J2000", "frame=TOPO", "veltype=OPTICAL", "restfreq=1.42GHz"]
+    )
+    def test_frame_keyword_on_shape_line_raises(self, kw: str) -> None:
+        img = self._img()
+        crtf = f"box[[0pix,0pix],[4pix,4pix]], {kw}"
+        with pytest.raises(NotImplementedError) as ei:
+            select_mask(img, crtf)
+        assert kw.split("=")[0] in str(ei.value)
+
+    @pytest.mark.parametrize(
+        "kw", ["coord=J2000", "frame=TOPO", "veltype=OPTICAL", "restfreq=1.42GHz"]
+    )
+    def test_frame_keyword_in_global_raises(self, kw: str) -> None:
+        img = self._img()
+        crtf = f"#CRTF\nglobal {kw}\nbox[[0pix,0pix],[4pix,4pix]]"
+        with pytest.raises(NotImplementedError) as ei:
+            select_mask(img, crtf)
+        assert kw.split("=")[0] in str(ei.value)
+
+    def test_viz_keywords_silently_ignored(self) -> None:
+        img = self._img()
+        crtf = "box[[0pix,0pix],[4pix,4pix]], color=green, linewidth=2, label='x'"
+        m = select_mask(img, crtf)
+        assert isinstance(m, xr.DataArray) and m.dtype == bool
+        assert int(m.values.sum()) == 5 * 5
+
+    def test_ann_line_is_silently_skipped(self) -> None:
+        img = self._img()
+        crtf = "#CRTF\nbox[[0pix,0pix],[4pix,4pix]]\nann box[[8pix,8pix],[12pix,12pix]]"
+        m = select_mask(img, crtf)
+        assert int(m.values.sum()) == 5 * 5
+
+    def test_ann_line_alone_produces_empty_mask(self) -> None:
+        img = self._img()
+        crtf = "#CRTF\nann box[[0pix,0pix],[14pix,14pix]]"
+        m = select_mask(img, crtf)
+        assert int(m.values.sum()) == 0
+
+
+class TestCrtfRejectedInputs:
+    """Dataset inputs must be rejected with a clear TypeError before any CRTF parsing."""
+
+    def _make_dataset(self) -> xr.Dataset:
+        img = make_image(16, 16)
+        return xr.Dataset({"SKY": img})
+
+    def test_select_mask_dataset_crtf_raises_typeerror(self) -> None:
+        xds = self._make_dataset()
+        with pytest.raises(TypeError) as ei:
+            select_mask(xds, "box[[0pix,0pix],[4pix,4pix]]")
+        msg = str(ei.value)
+        assert "DataArray" in msg and "xds.SKY" in msg
+
+    def test_apply_select_dataset_crtf_raises_typeerror(self) -> None:
+        xds = self._make_dataset()
+        with pytest.raises(TypeError) as ei:
+            apply_select(xds, "box[[0pix,0pix],[4pix,4pix]]")
+        msg = str(ei.value)
+        assert "DataArray" in msg and "xds.SKY" in msg
+
+    def test_select_mask_dataset_none_raises_typeerror(self) -> None:
+        """TypeError fires before any CRTF parsing, even for select=None."""
+        xds = self._make_dataset()
+        with pytest.raises(TypeError) as ei:
+            select_mask(xds, select=None)
+        msg = str(ei.value)
+        assert "DataArray" in msg and "xds.SKY" in msg
+
+    def test_select_mask_dataarray_succeeds(self) -> None:
+        """Passing xds.SKY (a DataArray) must not raise."""
+        xds = self._make_dataset()
+        m = select_mask(xds["SKY"], "box[[0pix,0pix],[4pix,4pix]]")
+        assert isinstance(m, xr.DataArray) and m.dtype == bool
 
 
 class TestCRTFPA:
