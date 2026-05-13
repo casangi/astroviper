@@ -334,6 +334,16 @@ def check_imaging_weights_params(imaging_weights_params):
         ):
             params_passed = False
 
+    if not (
+        check_params(
+            imaging_weights_params,
+            "casa_weighting_implementation",
+            [bool],
+            default=False,
+        )
+    ):
+        params_passed = False
+
     return params_passed
 
 
