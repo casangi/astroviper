@@ -151,6 +151,45 @@ def write_result_chunk_to_disk_using_zarr(
         sky[idx] = img_xds[dv].values
 
 
+def _to_zarr_v3_codec(compressor):
+    """Translate a numcodecs compressor to a Zarr v3 ``BytesBytesCodec``.
+
+    Zarr v3's ``create_array`` rejects numcodecs compressor instances and
+    requires codecs from ``zarr.codecs``. Pass-through if ``compressor`` is
+    already a v3 codec.
+    """
+    from zarr.abc.codec import BytesBytesCodec
+
+    if isinstance(compressor, BytesBytesCodec):
+        return compressor
+
+    cfg = compressor.get_config()
+    codec_id = cfg.get("id")
+
+    if codec_id == "blosc":
+        from zarr.codecs import BloscCodec
+
+        shuffle_map = {0: "noshuffle", 1: "shuffle", 2: "bitshuffle", -1: None}
+        return BloscCodec(
+            cname=cfg["cname"],
+            clevel=cfg["clevel"],
+            shuffle=shuffle_map.get(cfg.get("shuffle", -1)),
+            blocksize=cfg.get("blocksize", 0),
+        )
+    if codec_id == "zstd":
+        from zarr.codecs import ZstdCodec
+
+        return ZstdCodec(level=cfg.get("level", 0), checksum=cfg.get("checksum", False))
+    if codec_id == "gzip":
+        from zarr.codecs import GzipCodec
+
+        return GzipCodec(level=cfg.get("level", 5))
+
+    raise TypeError(
+        f"Cannot translate numcodecs compressor {compressor!r} to a Zarr v3 codec."
+    )
+
+
 def create_empty_data_variables_on_disk(
     zarr_store,
     data_variables,
@@ -197,6 +236,9 @@ def create_empty_data_variables_on_disk(
     _ZARR_V3 = int(zarr.__version__.split(".")[0]) >= 3
     group = zarr.open_group(zarr_store, mode="r+")
 
+    if _ZARR_V3 and compressor is not None:
+        compressor = _to_zarr_v3_codec(compressor)
+
     if isinstance(data_variable_definitions, dict):
         pass
     if data_variable_definitions == "imaging" and double_precision:
@@ -236,13 +278,16 @@ def create_empty_data_variables_on_disk(
         dv_name = dv_def["name"]
         if _ZARR_V3:
             sky = group.require_array(
-                dv_name, **_kwargs, compressors=[compressor] if compressor else []
+                dv_name,
+                **_kwargs,
+                compressors=[compressor] if compressor else [],
+                dimension_names=list(dv_def["dims"]),
             )
         else:
             sky = group.require_dataset(dv_name, **_kwargs, compressor=compressor)
+            sky.attrs["_ARRAY_DIMENSIONS"] = dv_def["dims"]
 
-        group[dv_name].attrs["_ARRAY_DIMENSIONS"] = dv_def["dims"]
         for k, v in extra_attrs.items():
-            group[dv_name].attrs[k] = v
+            sky.attrs[k] = v
 
     zarr.consolidate_metadata(zarr_store)

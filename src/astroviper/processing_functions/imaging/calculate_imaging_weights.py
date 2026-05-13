@@ -122,16 +122,49 @@ def calculate_imaging_weights(
     )
 
     if _imaging_weights_params["weighting"] == "natural":
-        ms_data_group_out["weight_imaging"] = ms_data_group_in["weight"]
+        #ms_data_group_out["weight_imaging"] = ms_data_group_in["weight"], we modify the weights.
         logger.debug(
             "Calculating natural imaging weights (no rescaling of data weights)."
         )
+        
+        for ms_name, ms_xdt in ps_xdt.items():
+            data_weight = ms_xdt[ms_data_group_in["weight"]].values
+            data_weight[ms_xdt[ms_data_group_in["flag"]] == 1] = (
+                np.nan
+            )  # Set flagged data to NaN for weighting.
+            
+            if data_weight.shape[3] == 2:
+                if imaging_weights_params["casa_weighting_implementation"] == True:
+                    data_weight = ((data_weight[..., 0] + data_weight[..., 1]) / 2)[
+                        ..., np.newaxis
+                    ]
+                else:
+                    data_weight = ((2 * data_weight[..., 0] * data_weight[..., 1]) / (data_weight[..., 0] + data_weight[..., 1]))[
+                        ..., np.newaxis
+                    ]
+
+            if data_weight.shape[3] == 4:
+                if imaging_weights_params["casa_weighting_implementation"] == True:
+                    data_weight = ((data_weight[..., 0] + data_weight[..., 3]) / 2)[
+                        ..., np.newaxis
+                    ]
+                else:
+                    data_weight = ((2 * data_weight[..., 0] * data_weight[..., 3]) / (data_weight[..., 0] + data_weight[..., 3]))[
+                        ..., np.newaxis
+                    ]
+            n_pol = ms_xdt.sizes["polarization"] 
+            ms_xdt[ms_data_group_out["weight_imaging"]] = xr.DataArray(
+                np.tile(data_weight, (1, 1, 1, n_pol)),
+                dims=ms_xdt[ms_data_group_out["weight"]].dims,
+            )
+        
         modify_data_groups_ps_xdt(
             ps_xdt,
             data_group_out_name=ms_data_group_out_name,
             data_group_out=ms_data_group_out,
             description="Natural imaging weights; data weights used directly with no rescaling.",
         )
+        
         return
 
     # Briggs weighting requires calculating the weight-density grid and robust factors, so we proceed with gridding and degridding.
@@ -181,6 +214,8 @@ def calculate_imaging_weights(
         grid_imaging_weights(
             weight_density_grid, sum_weight, uvw, data_weight, freq_chan, n_uv, delta_lm
         )
+        
+        
 
     # Calculate Briggs
     briggs_factors = calculate_briggs_params(
