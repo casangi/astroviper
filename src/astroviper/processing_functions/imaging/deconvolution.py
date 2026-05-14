@@ -191,6 +191,181 @@ def _plane_peak_abs_signed(arr, mask=None):
     # return float(arr[idx])
 
 
+def starting_statistics(
+    img_xds: xr.Dataset,
+    image_data_group_in_name: str,
+    image_data_group_out_name: str,
+    zero_model: bool,
+):
+    """
+    Compute per-plane starting peak residuals and model fluxes before
+    CLEAN runs.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Image dataset providing the residual via the input data group
+        and the (possibly zero) starting model via the modified output
+        data group.
+    image_data_group_in_name : str
+        Name of the input data group whose ``"sky"`` key resolves to the
+        residual variable and ``"mask"`` to the optional mask variable.
+    image_data_group_out_name : str
+        Name of the modified output data group whose ``"sky"`` key
+        resolves to the starting model variable.
+    zero_model : bool
+        If ``True``, the starting model is assumed to be all zeros and
+        ``start_model_flux`` is filled with zeros without reading
+        ``model_arr``.
+
+    Returns
+    -------
+    dict
+        Dictionary with keys ``start_peakres``, ``start_peakres_nomask``,
+        and ``start_model_flux`` — each a ``(nt, nf, np)`` float64 array.
+        Suitable for merging into the ``selected_calculations`` argument
+        of :func:`create_deconvolution_return_dict`.
+    """
+    residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
+    model_data_group = img_xds.attrs["data_groups"][image_data_group_out_name]
+
+    residual_arr = img_xds[residual_data_group["sky"]].values
+    model_arr = img_xds[model_data_group["sky"]].values
+
+    mask_name = residual_data_group.get("mask", None)
+    mask_arr = img_xds[mask_name].values if mask_name in img_xds else None
+
+    ntime = img_xds.sizes["time"]
+    nchan = img_xds.sizes["frequency"]
+    npol = img_xds.sizes["polarization"]
+
+    start_peakres = np.empty((ntime, nchan, npol), dtype=np.float64)
+    start_peakres_nomask = np.empty((ntime, nchan, npol), dtype=np.float64)
+    start_model_flux = np.empty((ntime, nchan, npol), dtype=np.float64)
+
+    for tt in range(ntime):
+        for nn in range(nchan):
+            for pp in range(npol):
+                rp = residual_arr[tt, nn, pp]
+                mp = mask_arr[tt, nn, pp] if mask_arr is not None else None
+                start_peakres[tt, nn, pp] = _plane_peak_abs_signed(rp, mask=mp)
+                start_peakres_nomask[tt, nn, pp] = _plane_peak_abs_signed(rp)
+                start_model_flux[tt, nn, pp] = (
+                    0.0 if zero_model else float(model_arr[tt, nn, pp].sum())
+                )
+
+    return {
+        "start_peakres": start_peakres,
+        "start_peakres_nomask": start_peakres_nomask,
+        "start_model_flux": start_model_flux,
+    }
+
+
+def create_deconvolution_return_dict(
+    img_xds: xr.Dataset,
+    image_data_group_in_name: str,
+    image_data_group_out_name: str,
+    deconvolve_params: dict,
+    selected_calculations: dict,
+):
+    """
+    Build the per-plane :class:`ReturnDict` summarizing a CLEAN run.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Image dataset providing the residual via the input data group
+        and the model and (optional) mask via the modified output data
+        group, plus the ``time``, ``frequency``, and ``polarization``
+        coordinates.
+    image_data_group_in_name : str
+        Name of the input data group whose ``"sky"`` key resolves to the
+        post-CLEAN residual variable and ``"mask"`` to the optional mask.
+    image_data_group_out_name : str
+        Name of the modified output data group whose ``"sky"`` key
+        resolves to the post-CLEAN model variable.
+    deconvolve_params : dict
+        Validated deconvolution parameter dict; ``niter``, ``threshold``,
+        and ``gain`` are recorded per plane.
+    selected_calculations : dict
+        Precomputed inputs for the return dict. Required keys:
+
+        - ``iters`` : ``(nt, nf, np)`` int array of iterations performed.
+        - ``start_peakres`` : ``(nt, nf, np)`` masked starting peaks.
+        - ``start_peakres_nomask`` : ``(nt, nf, np)`` unmasked starting peaks.
+        - ``start_model_flux`` : ``(nt, nf, np)`` starting model fluxes.
+        - ``min_psf_fraction``, ``max_psf_fraction``, ``max_psf_sidelobe``
+        - ``masksum``
+
+    Returns
+    -------
+    ReturnDict
+        Per-plane deconvolution statistics indexed by
+        ``(time, chan, pol)``.
+    """
+    residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
+    model_data_group = img_xds.attrs["data_groups"][image_data_group_out_name]
+
+    residual_arr = img_xds[residual_data_group["sky"]].values
+    model_arr = img_xds[model_data_group["sky"]].values
+
+    mask_name = residual_data_group.get("mask", None)
+    mask_arr = img_xds[mask_name].values if mask_name in img_xds else None
+
+    ntime = img_xds.sizes["time"]
+    nchan = img_xds.sizes["frequency"]
+    npol = img_xds.sizes["polarization"]
+
+    pol_vals = img_xds.coords["polarization"].values
+    freq_vals = img_xds.coords["frequency"].values
+    time_vals = img_xds.coords["time"].values
+
+    iters = selected_calculations["iters"]
+    start_peakres = selected_calculations["start_peakres"]
+    start_peakres_nomask = selected_calculations["start_peakres_nomask"]
+    start_model_flux = selected_calculations["start_model_flux"]
+    min_psf_fraction = selected_calculations["min_psf_fraction"]
+    max_psf_fraction = selected_calculations["max_psf_fraction"]
+    max_psf_sidelobe = selected_calculations["max_psf_sidelobe"]
+    masksum = selected_calculations["masksum"]
+
+    returndict = ReturnDict()
+
+    for tt in range(ntime):
+        for nn in range(nchan):
+            for pp in range(npol):
+                rp = residual_arr[tt, nn, pp]
+                mp = mask_arr[tt, nn, pp] if mask_arr is not None else None
+                peakres = _plane_peak_abs_signed(rp, mask=mp)
+                peakres_nomask = _plane_peak_abs_signed(rp)
+                model_flux = float(model_arr[tt, nn, pp].sum())
+
+                returnvals = {
+                    "niter": deconvolve_params.get("niter", None),
+                    "threshold": deconvolve_params.get("threshold", None),
+                    "iter_done": int(iters[tt, nn, pp]),
+                    "loop_gain": deconvolve_params.get("gain", None),
+                    "min_psf_fraction": min_psf_fraction,
+                    "max_psf_fraction": max_psf_fraction,
+                    "max_psf_sidelobe": max_psf_sidelobe,
+                    "stop_code": None,
+                    "stokes": pol_vals[pp],
+                    "frequency": freq_vals[nn],
+                    "time": time_vals[tt],
+                    "start_model_flux": start_model_flux[tt, nn, pp],
+                    "model_flux": model_flux,
+                    "start_peakres": start_peakres[tt, nn, pp],
+                    "start_peakres_nomask": start_peakres_nomask[tt, nn, pp],
+                    "peakres": peakres,
+                    "peakres_nomask": peakres_nomask,
+                    "masksum": masksum,
+                }
+
+                returndict.add(returnvals, time=tt, pol=pp, chan=nn)
+
+    return returndict
+
+
 def deconvolve(
     img_xds: xr.Dataset = None,
     algorithm: str = "hogbom",
@@ -248,9 +423,6 @@ def deconvolve(
         Per-plane deconvolution statistics, indexed by
         ``(time, chan, pol)``. Each entry contains iteration count, peak
         residuals before and after, model fluxes, and PSF bookkeeping.
-    img_xds : xarray.Dataset
-        The same dataset passed in, with residual and model variables
-        updated in place.
 
     Raises
     ------
@@ -336,22 +508,13 @@ def deconvolve(
 
     # Collect per-plane starting statistics in-place (no copies, just
     # reads). The actual CLEAN iteration is driven in C++.
-    start_peakres = np.empty((ntime, nchan, npol), dtype=np.float64)
-    start_peakres_nomask = np.empty((ntime, nchan, npol), dtype=np.float64)
-    start_model_flux = np.empty((ntime, nchan, npol), dtype=np.float64)
-    for tt in range(ntime):
-        for nn in range(nchan):
-            for pp in range(npol):
-                rp = residual_arr[tt, nn, pp]
-                mp = mask_arr[tt, nn, pp] if mask_arr is not None else None
-                #print("The pol is ", pp)
-                start_peakres[tt, nn, pp] = _plane_peak_abs_signed(rp, mask=mp)
-                #print("The start_peakres is ", start_peakres[tt, nn, pp])
-                start_peakres_nomask[tt, nn, pp] = _plane_peak_abs_signed(rp)
-                start_model_flux[tt, nn, pp] = (
-                    0.0 if zero_model else float(model_arr[tt, nn, pp].sum())
-                )
-                #print("**************")
+    start_stats = starting_statistics(
+        img_xds=img_xds,
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_out_name,
+        zero_model=zero_model,
+    )
+
 
     # Drive the CLEAN loop in C++. The helper owns the full
     # (time, frequency, polarization) iteration and the parallel worker
@@ -402,42 +565,20 @@ def deconvolve(
     iters = np.asarray(results["iterations_performed"])
     final_peaks = np.asarray(results["final_peak"])
 
-    returndict = ReturnDict()
-    pol_vals = img_xds.coords["polarization"].values
-    freq_vals = img_xds.coords["frequency"].values
-    time_vals = img_xds.coords["time"].values
-
-    for tt in range(ntime):
-        for nn in range(nchan):
-            for pp in range(npol):
-                rp = residual_arr[tt, nn, pp]
-                mp = mask_arr[tt, nn, pp] if mask_arr is not None else None
-                peakres = _plane_peak_abs_signed(rp, mask=mp)
-                peakres_nomask = _plane_peak_abs_signed(rp)
-                model_flux = float(model_arr[tt, nn, pp].sum())
-
-                returnvals = {
-                    "niter": deconvolve_params.get("niter", None),
-                    "threshold": deconvolve_params.get("threshold", None),
-                    "iter_done": int(iters[tt, nn, pp]),
-                    "loop_gain": deconvolve_params.get("gain", None),
-                    "min_psf_fraction": min_psf_fraction,
-                    "max_psf_fraction": max_psf_fraction,
-                    "max_psf_sidelobe": max_psf_sidelobe,
-                    "stop_code": None,
-                    "stokes": pol_vals[pp],
-                    "frequency": freq_vals[nn],
-                    "time": time_vals[tt],
-                    "start_model_flux": start_model_flux[tt, nn, pp],
-                    "model_flux": model_flux,
-                    "start_peakres": start_peakres[tt, nn, pp],
-                    "start_peakres_nomask": start_peakres_nomask[tt, nn, pp],
-                    "peakres": peakres,
-                    "peakres_nomask": peakres_nomask,
-                    "masksum": masksum,
-                }
-
-                returndict.add(returnvals, time=tt, pol=pp, chan=nn)
+    returndict = create_deconvolution_return_dict(
+        img_xds=img_xds,
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_out_name,
+        deconvolve_params=deconvolve_params,
+        selected_calculations={
+            **start_stats,
+            "iters": iters,
+            "min_psf_fraction": min_psf_fraction,
+            "max_psf_fraction": max_psf_fraction,
+            "max_psf_sidelobe": max_psf_sidelobe,
+            "masksum": masksum,
+        },
+    )
     return returndict
 
 

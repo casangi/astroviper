@@ -33,7 +33,6 @@ def model_update_cycle_cube_single_field(img_xds, input_params, is_n_iter_0, num
             num_threads=num_threads
         )
     
-    #img_xds.to_zarr("test123.zarr", mode="w")
     import numpy as np
     # import matplotlib.pyplot as plt
     # for i in range(len(img_xds.frequency)):
@@ -42,4 +41,6 @@ def model_update_cycle_cube_single_field(img_xds, input_params, is_n_iter_0, num
     #     plt.imshow(img_xds["SKY_MODEL"].isel(polarization=1,time=0, frequency=i).values)
     #     plt.colorbar()
     # plt.show()
+    
+    return deconvolve_dict
     
