@@ -9,9 +9,12 @@ publication of results in standard astronomical conventions.
 
 from __future__ import annotations
 
+import re
 import warnings
+from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 
+import dask.array as da
 import numpy as np
 import xarray as xr
 
@@ -36,9 +39,13 @@ from ...utils.sky_coordinates import (
 )
 
 Number = Union[int, float]
+MaskSpec = Optional[Union[str, Path, np.ndarray, xr.DataArray, da.Array]]
 
 # Angular unit strings recognised when validating beam units.
 _ANGULAR_UNITS = {"rad", "arcsec", "arcmin", "deg"}
+_CRTF_SHAPES = frozenset(
+    {"box", "centerbox", "rotbox", "poly", "circle", "annulus", "ellipse"}
+)
 
 # Conversion factors to radians.
 _TO_RAD = {
@@ -298,31 +305,91 @@ def _validate_data_var(xds: xr.Dataset, data_var: str) -> xr.DataArray:
     return da
 
 
-def _resolve_mask(xds: xr.Dataset, mask_var: Optional[str]) -> Optional[xr.DataArray]:
-    """Extract the mask DataArray if available.
+def _resolve_mask(xds: xr.Dataset, mask_var: MaskSpec) -> Optional[MaskSpec]:
+    """Validate the public mask input before shared selection resolution.
 
     Parameters
     ----------
     xds : xr.Dataset
-        Input xradio image Dataset.
-    mask_var : str or None
-        Name of the mask data variable. ``None`` means no mask.
+        Input xradio image Dataset, used only for the legacy missing-name
+        warning fallback.
+    mask_var : str or pathlib.Path or numpy.ndarray or xarray.DataArray or dask.array.Array or None
+        Mask specification. Supported choices are:
+        - a Dataset variable name
+        - a boolean array/DataArray aligned or broadcastable to the image
+        - a CRTF/selection string understood by ``selection.select_mask``
+        - a CRTF file path whose contents should be read and applied
+        - ``None`` to skip masking
+        String/path resolution order is handled centrally by the shared
+        selection layer. imfit keeps only its historical warning-and-skip
+        fallback for plain unknown variable names.
 
     Returns
     -------
-    xr.DataArray or None
-        The mask DataArray (True = good pixel), or ``None``.
+    same type as ``mask_var`` or None
+        The validated mask specification, or ``None`` when no mask should be
+        applied.
+
+    Raises
+    ------
+    TypeError
+        If *mask_var* is not one of the supported mask input forms.
     """
     if mask_var is None:
         return None
-    if mask_var not in xds:
-        warnings.warn(
-            f"Mask variable {mask_var!r} not found in Dataset; "
-            "proceeding without a mask.",
-            stacklevel=3,
+
+    if isinstance(mask_var, (np.ndarray, xr.DataArray, da.Array)):
+        return mask_var
+
+    if isinstance(mask_var, Path):
+        return mask_var
+
+    if not isinstance(mask_var, str):
+        raise TypeError(
+            "mask_var must be None, a Dataset variable name, a boolean array/DataArray, "
+            "a CRTF/selection string, or a CRTF file path; "
+            f"got {type(mask_var).__name__}."
         )
-        return None
-    return xds[mask_var]
+
+    if mask_var in xds or not _looks_like_plain_missing_mask_name(mask_var):
+        return mask_var
+
+    warnings.warn(
+        f"Mask variable {mask_var!r} not found in Dataset; "
+        "proceeding without a mask.",
+        stacklevel=3,
+    )
+    return None
+
+
+def _looks_like_plain_missing_mask_name(mask_var: str) -> bool:
+    """Return whether a string looks like a missing legacy mask variable name.
+
+    Parameters
+    ----------
+    mask_var : str
+        User-provided mask string supplied to :func:`imfit`.
+
+    Returns
+    -------
+    bool
+        ``True`` when the string is plain enough that imfit should preserve its
+        historical "missing variable name warns and skips" behavior.
+    """
+    spec = mask_var.strip()
+    if not spec:
+        return False
+    if spec.startswith("`") and spec.endswith("`"):
+        return False
+    if any(token in spec for token in "&|^~()[]"):
+        return False
+    if Path(spec).suffix.lower() == ".crtf" or "/" in spec or "\\" in spec:
+        return False
+    spec = spec.lstrip("\ufeff \t\r\n")
+    if spec.startswith("#CRTF"):
+        return False
+    match = re.match(r"^([+-])?\s*([A-Za-z]+)\s*\[\[", spec, flags=re.IGNORECASE)
+    return not bool(match and match.group(2).lower() in _CRTF_SHAPES)
 
 
 def _resolve_beam(
@@ -946,7 +1013,7 @@ def imfit(
     n_components: int,
     *,
     data_var: str = "SKY",
-    mask_var: Optional[str] = "FLAGS_SKY",
+    mask_var: MaskSpec = "FLAGS_SKY",
     beam_var: Optional[str] = "BEAM_FIT_PARAMS_SKY",
     min_threshold: Optional[Number] = None,
     max_threshold: Optional[Number] = None,
@@ -974,9 +1041,14 @@ def imfit(
         Number of Gaussian components to fit (N >= 1).
     data_var : str
         Name of the image data variable. Default ``"SKY"``.
-    mask_var : str or None
-        Name of the mask data variable (True = good pixel). Default
-        ``"FLAGS_SKY"``. Set to ``None`` to skip masking.
+    mask_var : str or pathlib.Path or numpy.ndarray or xarray.DataArray or dask.array.Array or None
+        Mask specification (True = good pixel). A string may name a Dataset
+        variable, provide a CRTF/selection string, or name a CRTF file whose
+        contents should be read. Boolean array/DataArray inputs must be aligned
+        or broadcastable to the image. Default
+        ``"FLAGS_SKY"``. String/path resolution order is shared with the generic
+        selection layer: Dataset variable name, then CRTF file contents, then
+        CRTF/selection text. Set to ``None`` to skip masking.
     beam_var : str or None
         Name of the beam parameter data variable. Default
         ``"BEAM_FIT_PARAMS_SKY"``. Must have a ``beam_params_label``
@@ -1069,6 +1141,7 @@ def imfit(
         n_components,
         dims=("l", "m"),
         mask=mask_da,
+        mask_source=xds,
         min_threshold=min_threshold,
         max_threshold=max_threshold,
         initial_guesses=initial_guesses,

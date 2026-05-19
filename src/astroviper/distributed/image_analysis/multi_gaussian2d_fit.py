@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Sequence, Tuple, Union, Any, Dict, List, Mapping
 import numpy as np
 import xarray as xr
@@ -15,6 +16,7 @@ import warnings
 
 Number = Union[int, float]
 ArrayOrDA = Union[np.ndarray, da.Array, xr.DataArray]
+MaskSpec = Union[np.ndarray, da.Array, xr.DataArray, str, Path]
 
 # ----------------------- Core Gaussian pieces -----------------------
 
@@ -1252,7 +1254,7 @@ def _axis_sign(coord: Optional[np.ndarray]) -> float:
     return 1.0 if np.isfinite(c0) and np.isfinite(c1) and (c1 > c0) else -1.0
 
 
-def _select_mask(da_tr: xr.DataArray, spec: str):
+def _select_mask(da_tr: xr.DataArray, spec: Union[str, Path], mask_source: Any = None):
     """
     Resolve a string mask specification through the local selection helper.
 
@@ -1260,8 +1262,10 @@ def _select_mask(da_tr: xr.DataArray, spec: str):
     ----------
     da_tr : xr.DataArray
         Transposed data array used as the mask-selection context.
-    spec : str
-        Selection expression understood by ``selection.select_mask``.
+    spec : str or pathlib.Path
+        Selection spec understood by ``selection.select_mask``.
+    mask_source : any, optional
+        Mapping or Dataset used to resolve exact mask names and expressions.
 
     Returns
     -------
@@ -1277,7 +1281,7 @@ def _select_mask(da_tr: xr.DataArray, spec: str):
     # local import to avoid hard module dependency at import time
     from .selection import select_mask  # type: ignore, pragma: no cover
 
-    return select_mask(da_tr, spec)  # pragma: no cover
+    return select_mask(da_tr, spec, mask_source=mask_source)  # pragma: no cover
 
 
 def _convert_init_theta(
@@ -2009,22 +2013,23 @@ def _warn_if_suboptimal_dask_chunking(context: _FitExecutionContext) -> None:
 
 
 def _resolve_fit_mask(
-    mask: Optional[ArrayOrDA],
+    mask: Optional[MaskSpec],
     da_tr: xr.DataArray,
     dim_y: str,
     dim_x: str,
     *,
     raw_plane_dims: Optional[Sequence[str]] = None,
+    mask_source: Any | None = None,
 ) -> xr.DataArray:
     """
     Normalize the public mask argument into a boolean DataArray aligned to the fit grid.
 
     Parameters
     ----------
-    mask : ArrayOrDA | None
+    mask : numpy.ndarray | dask.array.Array | xarray.DataArray | str | pathlib.Path | None
         Mask-like object accepted by :func:`fit_multi_gaussian2d`. Supported
         choices are ``None``, a NumPy array, a Dask array, an xarray.DataArray,
-        or a CRTF/selection string.
+        a named-mask / CRTF string, or a CRTF file path.
     da_tr : xr.DataArray
         Transposed fit view whose trailing axes are ``(y, x)``.
     dim_y : str
@@ -2036,6 +2041,9 @@ def _resolve_fit_mask(
         2-D mask. When provided, a plain 2-D mask is first labeled with this
         public x/y order so xarray can apply the same alignment/transposition that
         was already used to normalize the raw data into ``da_tr``.
+    mask_source : any, optional
+        Mapping or Dataset used to resolve exact string mask names and named-mask
+        expressions before CRTF text parsing.
 
     Returns
     -------
@@ -2054,8 +2062,11 @@ def _resolve_fit_mask(
     if mask is None:
         return xr.ones_like(da_tr, dtype=bool)
 
-    if isinstance(mask, str):
-        mda = _select_mask(da_tr, mask)
+    if isinstance(mask, (str, Path)):
+        if mask_source is None:
+            mda = _select_mask(da_tr, mask)
+        else:
+            mda = _select_mask(da_tr, mask, mask_source=mask_source)
         if isinstance(mda, xr.Dataset):
             if "mask" not in mda:
                 raise TypeError(
@@ -3555,7 +3566,8 @@ def fit_multi_gaussian2d(
     n_components: int,
     dims: Optional[Sequence[Union[str, int]]] = None,
     *,
-    mask: Optional[ArrayOrDA] = None,
+    mask: Optional[MaskSpec] = None,
+    mask_source: Any | None = None,
     min_threshold: Optional[Number] = None,
     max_threshold: Optional[Number] = None,
     initial_guesses: Optional[
@@ -3595,11 +3607,15 @@ def fit_multi_gaussian2d(
     dims: Sequence[str | int] | None
       Two dims (names or indices) that define the fit plane (x, y). If omitted: uses ('x','y') if present; else for 2-D uses (last, second-last). Required for ndim ≠ 2 without ('x','y').
 
-    mask: numpy.ndarray | dask.array.Array | xarray.DataArray | str | None
+    mask: numpy.ndarray | dask.array.Array | xarray.DataArray | str | pathlib.Path | None
       Optional boolean mask. **True means the associated pixel is good.** If 2-D with dims (y, x), it is
       broadcast across leading dims; if it matches the full array shape, it is used
       elementwise. Combined with thresholds as: `final_mask = mask ∧ (>= min_threshold) ∧ (<= max_threshold)`.
-      A string value is interpreted as a CRTF specification.
+      String inputs are resolved in this order: exact name from ``mask_source``,
+      CRTF file contents, CRTF text, then named-mask expression text.
+    mask_source: Mapping[str, array-like] | xarray.Dataset | None
+      Optional source of named masks for exact-name resolution and expression
+      masks. Ignored for array-like masks.
     min_threshold: float | None
       Inclusive lower threshold; pixels with values < min_threshold are ignored during the fit.
 
@@ -3836,6 +3852,7 @@ def fit_multi_gaussian2d(
         context.dim_y,
         context.dim_x,
         raw_plane_dims=raw_plane_dims,
+        mask_source=mask_source,
     )
     init_for_fit, bounds_for_fit, want_pa = _prepare_fit_configuration(
         initial_guesses,

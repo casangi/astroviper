@@ -720,6 +720,169 @@ class TestImfitCoverageGaps:
             assert mask_warnings == [], f"Unexpected mask warning: {mask_warnings}"
         assert ds["success"].values
 
+    def test_mask_var_accepts_boolean_array(self):
+        """A boolean array mask should be accepted directly by imfit()."""
+        cellsize = 1e-5
+        target = {
+            "amp": 1.0,
+            "l0": -18 * cellsize,
+            "m0": 14 * cellsize,
+            "fwhm_maj": 7 * cellsize,
+            "fwhm_min": 5 * cellsize,
+            "pa": 0.0,
+        }
+        distractor = {
+            "amp": 1.6,
+            "l0": 20 * cellsize,
+            "m0": -16 * cellsize,
+            "fwhm_maj": 8 * cellsize,
+            "fwhm_min": 6 * cellsize,
+            "pa": 0.3,
+        }
+        xds = _make_xradio_image(
+            nl=128,
+            nm=128,
+            components=[target, distractor],
+            noise_sigma=0.0,
+            cellsize=cellsize,
+        )
+
+        l = xds.coords["l"].values
+        m = xds.coords["m"].values
+        region_2d = (
+            (l[:, None] >= -26 * cellsize) & (l[:, None] <= -10 * cellsize)
+        ) & ((m[None, :] >= 8 * cellsize) & (m[None, :] <= 20 * cellsize))
+        mask = np.broadcast_to(region_2d, xds["SKY"].shape)
+
+        ds = imfit(xds, n_components=1, mask_var=mask, beam_var=None)
+
+        assert ds["success"].values
+        np.testing.assert_allclose(ds["x0_world"].values, target["l0"], atol=cellsize)
+        np.testing.assert_allclose(ds["y0_world"].values, target["m0"], atol=cellsize)
+
+    def test_mask_var_accepts_crtf_string(self):
+        """A CRTF string mask should be forwarded to the selection layer."""
+        cellsize = 1e-5
+        target = {
+            "amp": 1.0,
+            "l0": -18 * cellsize,
+            "m0": 14 * cellsize,
+            "fwhm_maj": 7 * cellsize,
+            "fwhm_min": 5 * cellsize,
+            "pa": 0.0,
+        }
+        distractor = {
+            "amp": 1.6,
+            "l0": 20 * cellsize,
+            "m0": -16 * cellsize,
+            "fwhm_maj": 8 * cellsize,
+            "fwhm_min": 6 * cellsize,
+            "pa": 0.3,
+        }
+        xds = _make_xradio_image(
+            nl=128,
+            nm=128,
+            components=[target, distractor],
+            noise_sigma=0.0,
+            cellsize=cellsize,
+        )
+
+        crtf = (
+            "#CRTF\n"
+            "global coordsys=lm\n"
+            "circle[[-0.00018rad,0.00014rad],0.00008rad]"
+        )
+        ds = imfit(xds, n_components=1, mask_var=crtf, beam_var=None)
+
+        assert ds["success"].values
+        np.testing.assert_allclose(ds["x0_world"].values, target["l0"], atol=cellsize)
+        np.testing.assert_allclose(ds["y0_world"].values, target["m0"], atol=cellsize)
+
+    def test_mask_var_accepts_pixel_crtf_string(self):
+        """A pixel-space CRTF string should honor the public (x, y) convention."""
+        cellsize = 1e-5
+        nl = 128
+        target = {
+            "amp": 1.0,
+            "l0": -18 * cellsize,
+            "m0": 14 * cellsize,
+            "fwhm_maj": 7 * cellsize,
+            "fwhm_min": 5 * cellsize,
+            "pa": 0.0,
+        }
+        distractor = {
+            "amp": 1.6,
+            "l0": 20 * cellsize,
+            "m0": -16 * cellsize,
+            "fwhm_maj": 8 * cellsize,
+            "fwhm_min": 6 * cellsize,
+            "pa": 0.3,
+        }
+        xds = _make_xradio_image(
+            nl=nl,
+            nm=nl,
+            components=[target, distractor],
+            noise_sigma=0.0,
+            cellsize=cellsize,
+        )
+
+        target_x = nl // 2 - int(round(target["l0"] / cellsize))
+        target_y = nl // 2 + int(round(target["m0"] / cellsize))
+        crtf = (
+            "#CRTF\n"
+            f"box[[{target_x - 6}pix,{target_y - 6}pix],"
+            f"[{target_x + 6}pix,{target_y + 6}pix]]"
+        )
+        ds = imfit(xds, n_components=1, mask_var=crtf, beam_var=None)
+
+        assert ds["success"].values
+        np.testing.assert_allclose(ds["x0_world"].values, target["l0"], atol=cellsize)
+        np.testing.assert_allclose(ds["y0_world"].values, target["m0"], atol=cellsize)
+
+    def test_mask_var_accepts_crtf_file_name(self, tmp_path):
+        """A CRTF filename should be read and applied as the mask definition."""
+        cellsize = 1e-5
+        nl = 128
+        target = {
+            "amp": 1.0,
+            "l0": -18 * cellsize,
+            "m0": 14 * cellsize,
+            "fwhm_maj": 7 * cellsize,
+            "fwhm_min": 5 * cellsize,
+            "pa": 0.0,
+        }
+        distractor = {
+            "amp": 1.6,
+            "l0": 20 * cellsize,
+            "m0": -16 * cellsize,
+            "fwhm_maj": 8 * cellsize,
+            "fwhm_min": 6 * cellsize,
+            "pa": 0.3,
+        }
+        xds = _make_xradio_image(
+            nl=nl,
+            nm=nl,
+            components=[target, distractor],
+            noise_sigma=0.0,
+            cellsize=cellsize,
+        )
+
+        target_x = nl // 2 - int(round(target["l0"] / cellsize))
+        target_y = nl // 2 + int(round(target["m0"] / cellsize))
+        crtf_path = tmp_path / "mask.crtf"
+        crtf_path.write_text(
+            "#CRTF\n"
+            f"box[[{target_x - 6}pix,{target_y - 6}pix],"
+            f"[{target_x + 6}pix,{target_y + 6}pix]]\n",
+            encoding="utf-8",
+        )
+
+        ds = imfit(xds, n_components=1, mask_var=str(crtf_path), beam_var=None)
+
+        assert ds["success"].values
+        np.testing.assert_allclose(ds["x0_world"].values, target["l0"], atol=cellsize)
+        np.testing.assert_allclose(ds["y0_world"].values, target["m0"], atol=cellsize)
+
     def test_no_sky_coords_without_reference_direction(self):
         """When no grids and no reference_direction exist, warn and skip (lines 368-373)."""
         cellsize = 1e-5
