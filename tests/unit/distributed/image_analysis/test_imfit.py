@@ -352,6 +352,52 @@ class TestImfitSkyCoords:
             ds["declination"].values.flat[0], expected_dec, atol=cellsize
         )
 
+    def test_sky_coords_from_descending_grids_propagates_errors(self):
+        """Descending l/m sky grids should interpolate centers and errors."""
+        from astroviper.distributed.image_analysis.imfit import _attach_sky_coordinates
+
+        l_coord = np.array([2.0, 1.0, 0.0])
+        m_coord = np.array([5.0, 3.0, 1.0])
+        L, M = np.meshgrid(l_coord, m_coord, indexing="ij")
+        xds = xr.Dataset(
+            data_vars={
+                "right_ascension": xr.DataArray(
+                    10.0 * L + 2.0 * M,
+                    dims=("l", "m"),
+                    coords={"l": l_coord, "m": m_coord},
+                ),
+                "declination": xr.DataArray(
+                    -3.0 * L + 4.0 * M,
+                    dims=("l", "m"),
+                    coords={"l": l_coord, "m": m_coord},
+                ),
+            },
+            coords={"l": l_coord, "m": m_coord},
+        )
+        ds = xr.Dataset(
+            {
+                "x0_world": xr.DataArray([1.25], dims=("component",)),
+                "y0_world": xr.DataArray([2.5], dims=("component",)),
+                "x0_world_err": xr.DataArray([0.2], dims=("component",)),
+                "y0_world_err": xr.DataArray([0.5], dims=("component",)),
+            }
+        )
+
+        out = _attach_sky_coordinates(ds, xds)
+
+        np.testing.assert_allclose(out["right_ascension"].values, [17.5])
+        np.testing.assert_allclose(out["declination"].values, [6.25])
+        np.testing.assert_allclose(
+            out["right_ascension_err"].values,
+            [np.sqrt((10.0 * 0.2) ** 2 + (2.0 * 0.5) ** 2)],
+        )
+        np.testing.assert_allclose(
+            out["declination_err"].values,
+            [np.sqrt((-3.0 * 0.2) ** 2 + (4.0 * 0.5) ** 2)],
+        )
+        assert out["right_ascension"].attrs["description"]
+        assert out["declination_err"].attrs["description"]
+
     def test_sky_coords_from_wcs(self):
         """When no grids exist, use WCS projection from coordinate_system_info."""
         cellsize = 1e-5

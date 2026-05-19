@@ -474,6 +474,60 @@ def _prune_math_angles(ds: xr.Dataset) -> xr.Dataset:
     return ds
 
 
+def _prepare_lm_radec_interpolation_grids(
+    l_coord: np.ndarray,
+    m_coord: np.ndarray,
+    ra_grid: xr.DataArray,
+    dec_grid: xr.DataArray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return l/m axes and RA/Dec grids in ascending interpolation order.
+
+    Parameters
+    ----------
+    l_coord : np.ndarray
+        1-D l coordinate axis values.
+    m_coord : np.ndarray
+        1-D m coordinate axis values.
+    ra_grid : xr.DataArray
+        2-D RA grid with its first axis matching *l_coord* and second axis
+        matching *m_coord*.
+    dec_grid : xr.DataArray
+        2-D Dec grid with the same shape and axis convention as *ra_grid*.
+
+    Returns
+    -------
+    tuple of np.ndarray
+        Ascending l axis, ascending m axis, RA grid, and Dec grid.
+
+    Notes
+    -----
+    xradio l axes are commonly descending. The interpolation arrays are
+    reversed only for strictly descending axes, preserving the physical grid
+    values while presenting scipy with ascending coordinate axes.
+    """
+    l1d = np.asarray(l_coord, dtype=float)
+    m1d = np.asarray(m_coord, dtype=float)
+    ra_np = np.asarray(ra_grid.values)
+    dec_np = np.asarray(dec_grid.values)
+
+    if l1d.ndim != 1 or m1d.ndim != 1:
+        raise ValueError("l_coord and m_coord must be 1-D coordinate axes.")
+    expected_shape = (l1d.size, m1d.size)
+    if ra_np.shape != expected_shape or dec_np.shape != expected_shape:
+        raise ValueError("RA/Dec grids must have shape (len(l_coord), len(m_coord)).")
+
+    if l1d.size > 1 and np.all(np.diff(l1d) < 0):
+        l1d = l1d[::-1]
+        ra_np = ra_np[::-1, :]
+        dec_np = dec_np[::-1, :]
+    if m1d.size > 1 and np.all(np.diff(m1d) < 0):
+        m1d = m1d[::-1]
+        ra_np = ra_np[:, ::-1]
+        dec_np = dec_np[:, ::-1]
+
+    return l1d, m1d, ra_np, dec_np
+
+
 def _lm_to_radec_from_grids(
     l_vals: xr.DataArray,
     m_vals: xr.DataArray,
@@ -506,10 +560,9 @@ def _lm_to_radec_from_grids(
     """
     from scipy.interpolate import RegularGridInterpolator
 
-    ra_np = np.asarray(ra_grid.values)
-    dec_np = np.asarray(dec_grid.values)
-    l1d = np.asarray(l_coord, dtype=float)
-    m1d = np.asarray(m_coord, dtype=float)
+    l1d, m1d, ra_np, dec_np = _prepare_lm_radec_interpolation_grids(
+        l_coord, m_coord, ra_grid, dec_grid
+    )
 
     ra_interp = RegularGridInterpolator(
         (l1d, m1d), ra_np, method="linear", bounds_error=False, fill_value=None
@@ -708,18 +761,19 @@ def _attach_sky_coord_errors_from_grids(
 
     from scipy.interpolate import RegularGridInterpolator
 
-    l1d = np.asarray(l_coord, dtype=float)
-    m1d = np.asarray(m_coord, dtype=float)
+    l1d, m1d, ra_np, dec_np = _prepare_lm_radec_interpolation_grids(
+        l_coord, m_coord, ra_grid, dec_grid
+    )
     ra_interp = RegularGridInterpolator(
         (l1d, m1d),
-        np.asarray(ra_grid.values),
+        ra_np,
         method="linear",
         bounds_error=False,
         fill_value=None,
     )
     dec_interp = RegularGridInterpolator(
         (l1d, m1d),
-        np.asarray(dec_grid.values),
+        dec_np,
         method="linear",
         bounds_error=False,
         fill_value=None,
