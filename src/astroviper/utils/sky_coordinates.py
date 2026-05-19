@@ -160,7 +160,7 @@ def parse_sky_center_to_radians(
     radian-based numerical code.
     """
     prefer_hourangle = frame_prefers_hourangle(frame)
-    if isinstance(lon_value, str) or isinstance(lat_value, str):
+    if isinstance(lon_value, str) and isinstance(lat_value, str):
         try:
             unit = (u.hourangle, u.deg) if prefer_hourangle else (u.deg, u.deg)
             sc = SkyCoord(lon_value, lat_value, unit=unit, frame=frame)

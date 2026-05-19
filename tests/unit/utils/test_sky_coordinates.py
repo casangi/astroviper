@@ -37,6 +37,17 @@ def test_parse_sky_center_to_radians_is_frame_aware():
     np.testing.assert_allclose(gal_lat, np.deg2rad(30.0), atol=1e-12)
 
 
+def test_parse_sky_center_to_radians_preserves_mixed_numeric_radians():
+    """Mixed string/numeric pairs should not reinterpret numeric radians."""
+    lon_rad, lat_rad = parse_sky_center_to_radians("12:00:00", 0.5, "icrs")
+    lon_rad_2, lat_rad_2 = parse_sky_center_to_radians(1.0, "30:00:00", "icrs")
+
+    np.testing.assert_allclose(lon_rad, np.pi, atol=1e-12)
+    np.testing.assert_allclose(lat_rad, 0.5, atol=0.0)
+    np.testing.assert_allclose(lon_rad_2, 1.0, atol=0.0)
+    np.testing.assert_allclose(lat_rad_2, np.deg2rad(30.0), atol=1e-12)
+
+
 def test_coerce_angle_to_radians_preserves_numeric_radians():
     """Plain numeric values should be treated as radians."""
     np.testing.assert_allclose(coerce_angle_to_radians(0.25), 0.25, atol=0.0)
