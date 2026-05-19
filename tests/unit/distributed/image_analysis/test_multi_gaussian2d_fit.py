@@ -3697,15 +3697,29 @@ class TestCoverageGaps:
 
     def test_single_dict_init_with_multiple_components_raises(self):
         """A single-dict (not list) initial_guesses with n_components>1 should raise."""
-        da2 = _scene(48, 60, [dict(amp=1.0, x0=30.0, y0=24.0, sigma_x=4.0, sigma_y=3.0, theta=0.0)])
-        single_dict = {"amp": 1.0, "x0": 30.0, "y0": 24.0, "sigma_x": 4.0, "sigma_y": 3.0, "theta": 0.0}
-        with pytest.raises(ValueError, match="Single-dict initial_guesses is only valid"):
+        da2 = _scene(
+            48,
+            60,
+            [dict(amp=1.0, x0=30.0, y0=24.0, sigma_x=4.0, sigma_y=3.0, theta=0.0)],
+        )
+        single_dict = {
+            "amp": 1.0,
+            "x0": 30.0,
+            "y0": 24.0,
+            "sigma_x": 4.0,
+            "sigma_y": 3.0,
+            "theta": 0.0,
+        }
+        with pytest.raises(
+            ValueError, match="Single-dict initial_guesses is only valid"
+        ):
             fit_multi_gaussian2d(da2, n_components=2, initial_guesses=single_dict)
 
     def test_invalid_coord_type_raises(self):
         """coord_type other than 'world'/'pixel' should raise for DataArray inputs."""
         da2 = _scene(
-            48, 60,
+            48,
+            60,
             [dict(amp=1.0, x0=30.0, y0=24.0, sigma_x=4.0, sigma_y=3.0, theta=0.0)],
             coords=True,
         )
@@ -3718,11 +3732,21 @@ class TestCoverageGaps:
         fwhm_maj = 4.0 * SIG2FWHM
         fwhm_min = 3.0 * SIG2FWHM
         da2 = _scene(
-            48, 60,
+            48,
+            60,
             [dict(amp=1.0, x0=30.0, y0=24.0, sigma_x=4.0, sigma_y=3.0, theta=0.0)],
             noise=0.01,
         )
-        init = [{"amp": 1.0, "x0": 30.0, "y0": 24.0, "fwhm_major": fwhm_maj, "fwhm_minor": fwhm_min, "theta": 0.0}]
+        init = [
+            {
+                "amp": 1.0,
+                "x0": 30.0,
+                "y0": 24.0,
+                "fwhm_major": fwhm_maj,
+                "fwhm_minor": fwhm_min,
+                "theta": 0.0,
+            }
+        ]
         ds = fit_multi_gaussian2d(
             da2, n_components=1, initial_guesses=init, initial_is_fwhm=True
         )
@@ -3736,13 +3760,23 @@ class TestCoverageGaps:
         fwhm_maj = 4.0 * SIG2FWHM
         fwhm_min = 3.0 * SIG2FWHM
         da2 = _scene(
-            48, 60,
+            48,
+            60,
             [dict(amp=1.0, x0=30.0, y0=24.0, sigma_x=4.0, sigma_y=3.0, theta=0.0)],
             noise=0.01,
         )
         # Use fwhm keys with initial_is_fwhm=False — the _extract_params_from_comp_dicts
         # path handles these internally as sigma = fwhm * FWHM2SIG
-        init = [{"amp": 1.0, "x0": 30.0, "y0": 24.0, "fwhm_major": fwhm_maj, "fwhm_minor": fwhm_min, "theta": 0.0}]
+        init = [
+            {
+                "amp": 1.0,
+                "x0": 30.0,
+                "y0": 24.0,
+                "fwhm_major": fwhm_maj,
+                "fwhm_minor": fwhm_min,
+                "theta": 0.0,
+            }
+        ]
         ds = fit_multi_gaussian2d(
             da2, n_components=1, initial_guesses=init, initial_is_fwhm=False
         )
