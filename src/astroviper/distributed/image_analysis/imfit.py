@@ -901,16 +901,16 @@ def _attach_sky_coord_errors_from_wcs(
 
     ra_name = "Right Ascension"
     dec_name = "Declination"
-    ds[f"{ra_name} err"] = xr.DataArray(
+    ds[f"{ra_name}_err"] = xr.DataArray(
         ra_err, dims=ds["x0_world_err"].dims, coords=ds["x0_world_err"].coords
     )
-    ds[f"{dec_name} err"] = xr.DataArray(
+    ds[f"{dec_name}_err"] = xr.DataArray(
         dec_err, dims=ds["y0_world_err"].dims, coords=ds["y0_world_err"].coords
     )
-    ds[f"{ra_name} err"].attrs[
+    ds[f"{ra_name}_err"].attrs[
         "description"
     ] = "1-sigma uncertainty of Right Ascension."
-    ds[f"{dec_name} err"].attrs["description"] = "1-sigma uncertainty of Declination."
+    ds[f"{dec_name}_err"].attrs["description"] = "1-sigma uncertainty of Declination."
 
 
 def _deconvolve_and_attach(

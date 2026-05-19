@@ -466,11 +466,17 @@ class TestImfitSkyCoords:
 
         assert "Right Ascension" in ds.data_vars
         assert "Declination" in ds.data_vars
+        assert "Right Ascension_err" in ds.data_vars
+        assert "Declination_err" in ds.data_vars
+        assert "Right Ascension err" not in ds.data_vars
+        assert "Declination err" not in ds.data_vars
         # Source at phase center → RA, Dec ≈ phase center
         np.testing.assert_allclose(
             ds["Right Ascension"].values.flat[0], 1.0, atol=cellsize
         )
         np.testing.assert_allclose(ds["Declination"].values.flat[0], 0.5, atol=cellsize)
+        assert ds["Right Ascension_err"].attrs["description"]
+        assert ds["Declination_err"].attrs["description"]
         assert ds["Right Ascension"].attrs.get("frame") == "icrs"
 
 
