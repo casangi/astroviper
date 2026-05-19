@@ -530,11 +530,32 @@ def _prepare_lm_radec_interpolation_grids(
     if ra_np.shape != expected_shape or dec_np.shape != expected_shape:
         raise ValueError("RA/Dec grids must have shape (len(l_coord), len(m_coord)).")
 
-    if l1d.size > 1 and np.all(np.diff(l1d) < 0):
+    if l1d.size > 1:
+        l_diff = np.diff(l1d)
+        l_ascending = np.all(l_diff > 0)
+        l_descending = np.all(l_diff < 0)
+        if not (l_ascending or l_descending):
+            raise ValueError(
+                "l_coord must be strictly monotonic, either ascending or descending."
+            )
+    else:
+        l_descending = False
+    if m1d.size > 1:
+        m_diff = np.diff(m1d)
+        m_ascending = np.all(m_diff > 0)
+        m_descending = np.all(m_diff < 0)
+        if not (m_ascending or m_descending):
+            raise ValueError(
+                "m_coord must be strictly monotonic, either ascending or descending."
+            )
+    else:
+        m_descending = False
+
+    if l_descending:
         l1d = l1d[::-1]
         ra_np = ra_np[::-1, :]
         dec_np = dec_np[::-1, :]
-    if m1d.size > 1 and np.all(np.diff(m1d) < 0):
+    if m_descending:
         m1d = m1d[::-1]
         ra_np = ra_np[:, ::-1]
         dec_np = dec_np[:, ::-1]

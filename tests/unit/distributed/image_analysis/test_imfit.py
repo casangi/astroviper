@@ -399,6 +399,37 @@ class TestImfitSkyCoords:
         assert out["right_ascension"].attrs["description"]
         assert out["declination_err"].attrs["description"]
 
+    @pytest.mark.parametrize(
+        "l_coord,m_coord,match",
+        [
+            (np.array([0.0, 1.0, 1.0]), np.array([0.0, 1.0]), "l_coord"),
+            (np.array([0.0, 2.0, 1.0]), np.array([0.0, 1.0]), "l_coord"),
+            (np.array([0.0, 1.0]), np.array([0.0, 1.0, 1.0]), "m_coord"),
+            (np.array([0.0, 1.0]), np.array([0.0, 2.0, 1.0]), "m_coord"),
+        ],
+    )
+    def test_lm_radec_interpolation_rejects_non_monotonic_axes(
+        self, l_coord, m_coord, match
+    ):
+        """RA/Dec grid interpolation should reject repeated or unsorted axes."""
+        from astroviper.distributed.image_analysis.imfit import (
+            _prepare_lm_radec_interpolation_grids,
+        )
+
+        ra_grid = xr.DataArray(
+            np.zeros((l_coord.size, m_coord.size)),
+            dims=("l", "m"),
+            coords={"l": l_coord, "m": m_coord},
+        )
+        dec_grid = xr.DataArray(
+            np.zeros((l_coord.size, m_coord.size)),
+            dims=("l", "m"),
+            coords={"l": l_coord, "m": m_coord},
+        )
+
+        with pytest.raises(ValueError, match=match):
+            _prepare_lm_radec_interpolation_grids(l_coord, m_coord, ra_grid, dec_grid)
+
     def test_sky_coords_from_wcs(self):
         """When no grids exist, use WCS projection from coordinate_system_info."""
         cellsize = 1e-5
