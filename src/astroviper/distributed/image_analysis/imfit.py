@@ -925,7 +925,7 @@ def _deconvolve_and_attach(
             output_core_dims=[["component"]] * 8,
             vectorize=True,
             dask="parallelized",
-            output_dtypes=[float] * 8,
+            output_dtypes=[float, float, float, float, float, float, bool, bool],
         )
         (
             d_fwhm_maj,

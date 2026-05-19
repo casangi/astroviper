@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import warnings
 
+import dask.array as da
 import numpy as np
 import pytest
 import xarray as xr
@@ -1035,6 +1036,47 @@ class TestImfitCoverageGaps:
         # Deconvolved sizes should be smaller than source sizes
         assert ds["fwhm_major_deconv"].values.flat[0] < src_fwhm_maj
         assert ds["fwhm_minor_deconv"].values.flat[0] < src_fwhm_min
+
+    def test_deconvolution_with_errors_dask_flags_are_bool(self):
+        """Dask deconvolution with errors should preserve boolean flag dtypes."""
+        from astroviper.distributed.image_analysis.imfit import _deconvolve_and_attach
+
+        dims = ("time", "frequency", "polarization", "component")
+
+        def _data_array(value):
+            data = da.from_array(
+                np.array([[[[value]]]], dtype=float), chunks=(1, 1, 1, 1)
+            )
+            return xr.DataArray(data, dims=dims)
+
+        ds = xr.Dataset(
+            {
+                "fwhm_major_world": _data_array(1.5e-4),
+                "fwhm_minor_world": _data_array(1.0e-4),
+                "pa": _data_array(0.3),
+                "fwhm_major_world_err": _data_array(1.0e-6),
+                "fwhm_minor_world_err": _data_array(1.0e-6),
+                "pa_err": _data_array(1.0e-3),
+            }
+        )
+        beam_dims = ("time", "frequency", "polarization")
+        bmaj = xr.DataArray(
+            da.from_array(np.array([[[5.0e-5]]], dtype=float), chunks=(1, 1, 1)),
+            dims=beam_dims,
+        )
+        bmin = xr.DataArray(
+            da.from_array(np.array([[[5.0e-5]]], dtype=float), chunks=(1, 1, 1)),
+            dims=beam_dims,
+        )
+        bpa = xr.DataArray(
+            da.from_array(np.array([[[0.0]]], dtype=float), chunks=(1, 1, 1)),
+            dims=beam_dims,
+        )
+
+        out = _deconvolve_and_attach(ds, (bmaj, bmin, bpa))
+
+        assert out["is_unresolved"].dtype == np.dtype(bool)
+        assert out["is_marginally_resolved"].dtype == np.dtype(bool)
 
 
 class TestImfitHelperCoverage:
