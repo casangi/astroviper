@@ -1198,6 +1198,26 @@ class TestImfitHelperCoverage:
         assert "l0" not in normalized
         assert "m0" not in normalized
 
+    @pytest.mark.parametrize(
+        "initial_guess",
+        [
+            {"amp": 0.9, "l0": 0.0},
+            {"amp": 0.9, "m0": 0.0},
+        ],
+    )
+    def test_normalize_initial_guesses_rejects_incomplete_lm_centers(
+        self, initial_guess
+    ):
+        """Native world-center guesses should require paired l0/m0 values."""
+        from astroviper.distributed.image_analysis.imfit import (
+            _normalize_imfit_initial_guesses,
+        )
+
+        xds = _make_xradio_image(components=[], noise_sigma=0.0)
+
+        with pytest.raises(ValueError, match="require both 'l0' and 'm0'"):
+            _normalize_imfit_initial_guesses(xds, initial_guess)
+
     def test_resolve_mask_none_returns_none(self):
         """Explicitly disabling masks should short-circuit without warnings."""
         from astroviper.distributed.image_analysis.imfit import _resolve_mask

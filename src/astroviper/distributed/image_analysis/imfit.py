@@ -150,7 +150,9 @@ def _convert_world_component_guess_to_pixel(
     l_axis = np.asarray(xds.coords["l"].values, dtype=float)
     m_axis = np.asarray(xds.coords["m"].values, dtype=float)
 
-    has_lm_keys = ("l0" in out) or ("m0" in out)
+    has_l0 = "l0" in out
+    has_m0 = "m0" in out
+    has_lm_keys = has_l0 or has_m0
     has_sky_keys = any(
         key in out
         for key in (
@@ -172,6 +174,8 @@ def _convert_world_component_guess_to_pixel(
         return out
 
     if has_lm_keys:
+        if has_l0 != has_m0:
+            raise ValueError("Native world-center guesses require both 'l0' and 'm0'.")
         # In imfit, explicit l0/m0 keys mean native image-world coordinates.
         l0 = coerce_angle_to_radians(out.pop("l0"))
         m0 = coerce_angle_to_radians(out.pop("m0"))
