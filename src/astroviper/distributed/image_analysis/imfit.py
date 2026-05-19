@@ -197,10 +197,20 @@ def _convert_world_component_guess_to_pixel(
                     out.pop("lat", out.pop("latitude", None)),
                 ),
             )
+            if (lon_value is None) != (lat_value is None):
+                raise ValueError(
+                    "Sky-coordinate initial guesses must include both longitude and "
+                    "latitude, for example ra/dec, right_ascension/declination, "
+                    "lon/lat, or longitude/latitude."
+                )
         else:
             # imfit treats non-numeric x0/y0 tokens as sky-frame longitude/latitude.
             lon_value = out.get("x0")
             lat_value = out.get("y0")
+            if (lon_value is None) != (lat_value is None):
+                raise ValueError(
+                    "Sky-coordinate initial guesses must provide both x0 and y0."
+                )
         csinfo = xds.attrs.get("coordinate_system_info", {})
         ref_dir = csinfo.get("reference_direction", {})
         phase_center = ref_dir.get("data")

@@ -1151,6 +1151,56 @@ class TestImfitHelperCoverage:
         np.testing.assert_allclose(normalized["x0"], 64.0, atol=1e-12)
         np.testing.assert_allclose(normalized["y0"], 64.0, atol=1e-12)
 
+    @pytest.mark.parametrize(
+        "initial_guess",
+        [
+            {"amp": 0.9, "ra": 1.0},
+            {"amp": 0.9, "dec": 0.5},
+            {"amp": 0.9, "right_ascension": 1.0},
+            {"amp": 0.9, "latitude": 0.5},
+        ],
+    )
+    def test_normalize_initial_guesses_rejects_incomplete_sky_key_pairs(
+        self, initial_guess
+    ):
+        """Sky-key initial guesses should require paired longitude/latitude values."""
+        from astroviper.distributed.image_analysis.imfit import (
+            _normalize_imfit_initial_guesses,
+        )
+
+        xds = _make_xradio_image(components=[], noise_sigma=0.0)
+
+        with pytest.raises(
+            ValueError, match="must include both longitude and latitude"
+        ):
+            _normalize_imfit_initial_guesses(xds, initial_guess)
+
+    @pytest.mark.parametrize(
+        "initial_guess",
+        [
+            {
+                "amp": 0.9,
+                "x0": Angle(1.0, unit="rad").to_string(unit="hourangle", sep=":"),
+            },
+            {
+                "amp": 0.9,
+                "y0": Angle(0.5, unit="rad").to_string(unit="deg", sep=":"),
+            },
+        ],
+    )
+    def test_normalize_initial_guesses_rejects_incomplete_xy_sky_pairs(
+        self, initial_guess
+    ):
+        """String-valued x0/y0 sky guesses should require paired values."""
+        from astroviper.distributed.image_analysis.imfit import (
+            _normalize_imfit_initial_guesses,
+        )
+
+        xds = _make_xradio_image(components=[], noise_sigma=0.0)
+
+        with pytest.raises(ValueError, match="must provide both x0 and y0"):
+            _normalize_imfit_initial_guesses(xds, initial_guess)
+
     def test_normalize_initial_guesses_rejects_sky_guesses_without_reference_direction(
         self,
     ):
