@@ -233,7 +233,27 @@ def select_mask(
 
 
 def _maybe_read_crtf_from_path(sel: Any) -> str | None:
-    """Return CRTF file contents for supported file-like inputs, else ``None``."""
+    """Return CRTF file contents for supported path inputs.
+
+    Parameters
+    ----------
+    sel : Any
+        Candidate CRTF source. Supported path forms are ``pathlib.Path``
+        instances, backticked path strings, and plain strings that point to an
+        existing file.
+
+    Returns
+    -------
+    str or None
+        File contents for supported existing CRTF paths, otherwise ``None`` for
+        inputs that should continue through inline CRTF/expression parsing.
+
+    Raises
+    ------
+    FileNotFoundError
+        If *sel* is a missing ``Path``, a missing backticked path, or a plain
+        string that looks like a CRTF file path but does not exist.
+    """
     if isinstance(sel, Path):
         if not sel.is_file():
             raise FileNotFoundError(f"CRTF file not found: {sel}")
