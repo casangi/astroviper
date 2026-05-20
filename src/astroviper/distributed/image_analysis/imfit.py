@@ -20,10 +20,7 @@ import xarray as xr
 
 from .multi_gaussian2d_fit import fit_multi_gaussian2d
 from ...utils._gaussian_math import (
-    SIG2FWHM,
     FWHM2SIG,
-    fwhm_from_sigma,
-    sigma_from_fwhm,
     deconvolve_gaussian,
     deconvolve_gaussian_with_errors,
 )
