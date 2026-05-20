@@ -161,7 +161,7 @@ def _gauss_to_cov(sigma_maj, sigma_min, pa):
     sigma_min : array-like
         Minor-axis sigma (not FWHM).
     pa : array-like
-        Position angle in radians, measured from +y toward −x (east of north,
+        Position angle in radians, measured from +y toward +x (east of north,
         standard astronomical convention).
 
     Returns
@@ -206,7 +206,7 @@ def _cov_to_gauss(c00, c01, c11):
     sigma_min : np.ndarray
         Minor-axis sigma.
     pa : np.ndarray
-        Position angle in radians (astronomical convention: from +y toward −x).
+        Position angle in radians (astronomical convention: from +y toward +x).
 
     Notes
     -----
