@@ -4,6 +4,8 @@ Supported ``select`` forms (basic):
 - ``None`` → keep everything.
 - A boolean array-like (``xarray.DataArray`` or ``numpy.ndarray``), already aligned
   or broadcastable to the target ``data``.
+- A plain string name that resolves exactly from ``mask_source`` before any CRTF
+  file or text parsing is attempted.
 - A string expression over named masks using ``&``, ``|``, ``^`` and ``~``.
   Names are resolved from ``mask_source`` (a mapping or an ``xarray.Dataset``).
   If ``mask_source`` is omitted and ``data`` is a Dataset, the dataset is used.
@@ -23,8 +25,9 @@ CRTF (CASA Region Text Format) pixel support (new)
 * **Pixel coordinates are 0-based (NumPy/xarray index space)** and all pixel
   quantities must be suffixed with ``pix`` (e.g., ``[0pix, 127pix]``).
 
-* You can also pass a CRTF file path either as a backticked string (`` `path/file.crtf` ``)
-  or a ``pathlib.Path``; the file contents are read and parsed.
+* You can also pass a CRTF file path either as a backticked string (`` `path/file.crtf` ``),
+  a plain string path such as ``"path/file.crtf"``, or a ``pathlib.Path``; the file
+  contents are read and parsed.
 
 Notes
 -----
@@ -137,7 +140,7 @@ def select_mask(
     data:
         Template array that determines the mask's shape/dims.
     select:
-        ``None`` | boolean array-like | string expression over named masks.
+        ``None`` | boolean array-like | exact mask name | string expression over named masks.
     mask_source:
         Mapping or ``xr.Dataset`` that provides named masks for expressions.
         If ``None`` and ``data`` is an ``xr.Dataset``, that dataset is used.
@@ -173,7 +176,18 @@ def select_mask(
         return _coerce_return_kind(
             aligned, data, return_kind, dask_chunks, creation=creation_str
         )
-    # String/Path: backticked file or Path → load as CRTF; else treat as text.
+    # String exact-name precedence: resolve a matching named mask before any file
+    # or CRTF-text parsing.
+    if isinstance(select, str):
+        exact_name = _maybe_resolve_named_mask_name(select, mask_source)
+        if exact_name is not None:
+            aligned = _align_bool_mask_to_data(exact_name, data)
+            creation_str = creation_hint if creation_hint is not None else select
+            return _coerce_return_kind(
+                aligned, data, return_kind, dask_chunks, creation=creation_str
+            )
+
+    # String/Path: file → load as CRTF; else treat as text.
     if isinstance(select, (str, Path)):
         s_file = _maybe_read_crtf_from_path(select)
         if s_file is not None:
@@ -219,19 +233,86 @@ def select_mask(
 
 
 def _maybe_read_crtf_from_path(sel: Any) -> str | None:
-    """Return file contents if `sel` is a backticked string or a Path; else None."""
+    """Return CRTF file contents for supported path inputs.
+
+    Parameters
+    ----------
+    sel : Any
+        Candidate CRTF source. Supported path forms are ``pathlib.Path``
+        instances, backticked path strings, and plain strings that point to an
+        existing file.
+
+    Returns
+    -------
+    str or None
+        File contents for supported existing CRTF paths, otherwise ``None`` for
+        inputs that should continue through inline CRTF/expression parsing.
+
+    Raises
+    ------
+    FileNotFoundError
+        If *sel* is a missing ``Path``, a missing backticked path, or a plain
+        string that looks like a CRTF file path but does not exist.
+    """
     if isinstance(sel, Path):
-        return sel.read_text(encoding="utf-8") if sel.is_file() else None
+        if not sel.is_file():
+            raise FileNotFoundError(f"CRTF file not found: {sel}")
+        return sel.read_text(encoding="utf-8")
     if isinstance(sel, str):
         s = sel.strip()
         m = re.fullmatch(r"`([^`]+)`", s)
-        if not m:
-            return None
-        p = Path(m.group(1))
-        if not p.is_file():
+        if m:
+            p = Path(m.group(1))
+            if not p.is_file():
+                raise FileNotFoundError(f"CRTF file not found: {p}")
+            return p.read_text(encoding="utf-8")
+
+        p = Path(s)
+        if p.is_file():
+            return p.read_text(encoding="utf-8")
+        if _looks_like_plain_crtf_path(s):
             raise FileNotFoundError(f"CRTF file not found: {p}")
-        return p.read_text(encoding="utf-8")
+        return None
     return None  # pragma: no cover
+
+
+def _looks_like_plain_crtf_path(text: str) -> bool:
+    """Return whether a plain string should be interpreted as a CRTF path."""
+    stripped = text.strip()
+    if (
+        not stripped
+        or "\n" in stripped
+        or "\r" in stripped
+        or stripped.startswith("#CRTF")
+    ):
+        return False
+    if _looks_like_crtf_pixel(stripped):
+        return False
+    return (
+        Path(stripped).suffix.lower() == ".crtf" or "/" in stripped or "\\" in stripped
+    )
+
+
+def _maybe_resolve_named_mask_name(
+    select: str, mask_source: Any | None
+) -> ArrayLike | None:
+    """Return an exact-name mask from ``mask_source`` when available."""
+    if mask_source is None:
+        return None
+
+    if isinstance(mask_source, xr.Dataset):
+        value = mask_source.data_vars.get(select)
+        if value is None or not _is_boolish(value):
+            return None
+        return _to_bool(value)
+
+    if isinstance(mask_source, Mapping):
+        for key, value in mask_source.items():
+            if str(key) == select and _is_boolish(value):
+                return _to_bool(value)
+        return None
+
+    return None
 
 
 # ---------------------------- internal helpers -----------------------------
