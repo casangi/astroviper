@@ -262,6 +262,16 @@ class TestExpressions:
         m_ref = roi & ~bad
         assert (m == m_ref).all()
 
+    def test_plain_name_uses_exact_mask_source_match_before_file_lookup(self) -> None:
+        """Exact mask names in mask_source should resolve before any file parsing."""
+        da = make_image(16, 16)
+        roi = select_mask(da, "box[[2pix,2pix],[5pix,5pix]]")
+        ds = xr.Dataset({"roi.crtf": roi})
+
+        m = select_mask(da, select="roi.crtf", mask_source=ds)
+
+        assert (m == roi).all()
+
     def test_mask_source_typeerror_when_not_mapping_or_dataset(self) -> None:
         """
         Cover: raise TypeError("mask_source must be a Mapping or xarray.Dataset")
@@ -434,6 +444,18 @@ class TestCRTFFile:
         assert (m_bt == m_inline).all()
         assert (m_path == m_inline).all()
 
+    def test_plain_crtf_filename_string_matches_inline(self, tmp_path: Path) -> None:
+        """An existing plain-string `.crtf` filename should be loaded as a file."""
+        da = make_image(30, 30)
+        text = "#CRTF\nbox[[2pix,2pix],[5pix,5pix]]\n"
+        p = tmp_path / "roi.crtf"
+        p.write_text(text, encoding="utf-8")
+
+        m_file = select_mask(da, select=str(p))
+        m_inline = select_mask(da, select=text)
+
+        assert (m_file == m_inline).all()
+
     def test_missing_backticked_file_raises_file_not_found(
         self, tmp_path: Path
     ) -> None:
@@ -449,10 +471,10 @@ class TestCRTFFile:
             select_mask(da, select=missing)
         assert "CRTF file not found" in str(ei.value)
 
-    def test_plain_string_not_backticked_is_parsed_as_text_via_public_api(self) -> None:
+    def test_plain_non_path_string_is_parsed_as_text_via_public_api(self) -> None:
         """
-        Public API only: a non-backticked string must be treated as CRTF/expr text
-        (i.e., not a file), and produce a valid mask.
+        Public API only: a plain non-path string is treated as CRTF/expr text and
+        produces a valid mask.
         """
         da = make_image(20, 20)
         s = "box[[2pix,2pix],[5pix,5pix]]"  # plain string, not backticked
