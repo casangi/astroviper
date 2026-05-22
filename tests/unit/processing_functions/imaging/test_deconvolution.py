@@ -27,6 +27,7 @@ import xarray as xr
 from astroviper.processing_functions.imaging.deconvolution import (
     _plane_peak_abs_signed,
     _validate_deconvolve_params,
+    asp_clean,
     deconvolve,
     get_phase_center,
     hogbom_clean,
@@ -41,9 +42,20 @@ try:
 except ImportError:  # pragma: no cover
     HOGBOM_AVAILABLE = False
 
+try:
+    from astroviper.processing_functions.imaging.deconvolvers import aspclean  # noqa: F401
+
+    ASP_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    ASP_AVAILABLE = False
+
 
 requires_hogbom = pytest.mark.skipif(
     not HOGBOM_AVAILABLE, reason="Hogbom extension not compiled/available"
+)
+
+requires_asp = pytest.mark.skipif(
+    not ASP_AVAILABLE, reason="Asp extension not compiled/available"
 )
 
 
@@ -589,6 +601,209 @@ class TestDeconvolve:
             0.0, abs=1e-6
         )
         assert isinstance(returndict, ReturnDict)
+
+
+# ---------------------------------------------------------------------------
+# asp_clean (5-D cube wrapper around aspclean.clean_cube)
+# ---------------------------------------------------------------------------
+
+
+@requires_asp
+class TestAspClean:
+    @staticmethod
+    def _gauss_psf_cube(nt, nf, npol, ny, nx, sig=2.0):
+        from astroviper.processing_functions.imaging.deconvolvers import aspclean
+
+        yy, xx = np.mgrid[0:ny, 0:nx]
+        g = np.exp(-(((xx - nx // 2) ** 2 + (yy - ny // 2) ** 2) / (2 * sig**2)))
+        psf = np.zeros((nt, nf, npol, ny, nx), dtype=np.float64)
+        psf[...] = g
+        return psf, aspclean
+
+    def test_basic_cube_point_source(self):
+        nt, nf, npol, ny, nx = 1, 1, 1, 32, 32
+        resid = np.zeros((nt, nf, npol, ny, nx), dtype=np.float32)
+        resid[0, 0, 0, 16, 16] = 5.0
+        psf = _delta_psf_cube(nt, nf, npol, ny, nx)
+        model = np.zeros_like(resid)
+
+        result = asp_clean(
+            residual_cube=resid,
+            psf_cube=psf,
+            model_cube=model,
+            deconvolve_params={
+                "gain": 0.5,
+                "niter": 50,
+                "threshold": 0.01,
+                "fusedthreshold": 0.5,
+                "psf_width": 1.0,
+            },
+        )
+        assert result["iterations_performed"].shape == (nt, nf, npol)
+        assert result["peak_residual"].shape == (nt, nf, npol)
+        # point source essentially cleaned into the model at its pixel
+        assert np.max(np.abs(resid)) < 0.05
+        assert model[0, 0, 0, 16, 16] == pytest.approx(5.0, abs=0.1)
+
+    def test_extended_source_flux_recovered_and_invariant(self):
+        nt, nf, npol, ny, nx = 1, 1, 1, 64, 64
+        psf, aspclean = self._gauss_psf_cube(nt, nf, npol, ny, nx, sig=2.0)
+        yy, xx = np.mgrid[0:ny, 0:nx]
+        sky = 3.0 * np.exp(-(((xx - 36) ** 2 + (yy - 30) ** 2) / (2 * 4.0**2)))
+        dirty = aspclean.convolve_centered(sky, psf[0, 0, 0])
+        # Independent C-contiguous copy so the reference `dirty` is not the
+        # same buffer that asp_clean mutates in place.
+        resid = dirty[None, None, None].copy()
+        model = np.zeros_like(resid)
+
+        asp_clean(
+            residual_cube=resid,
+            psf_cube=psf,
+            model_cube=model,
+            deconvolve_params={
+                "gain": 0.1,
+                "niter": 200,
+                "threshold": 0.01,
+                "fusedthreshold": 0.1,
+            },
+        )
+        # residual reduced and most flux recovered
+        assert np.max(np.abs(resid[0, 0, 0])) < 0.2 * np.max(np.abs(dirty))
+        assert 0.6 < model.sum() / sky.sum() < 1.2
+        # Reconstruction invariant: residual == dirty - model (*) psf. This is
+        # exact except for the per-step box clamping near the image edges (a
+        # faithful property of the CASA algorithm), so a tight-but-not-machine
+        # tolerance is used.
+        recon = aspclean.convolve_centered(model[0, 0, 0], psf[0, 0, 0])
+        err = np.max(np.abs(resid[0, 0, 0] + recon - dirty))
+        assert err / np.max(np.abs(dirty)) < 1e-5
+
+    def test_threaded_matches_serial(self):
+        nt, nf, npol, ny, nx = 1, 2, 2, 32, 32
+        rng = np.random.default_rng(11)
+        base = rng.standard_normal((nt, nf, npol, ny, nx)).astype(np.float64)
+        psf, _ = self._gauss_psf_cube(nt, nf, npol, ny, nx, sig=2.0)
+
+        ra, ma = base.copy(), np.zeros_like(base)
+        asp_clean(ra, psf, ma,
+                  {"gain": 0.2, "niter": 40, "threshold": 0.05, "fusedthreshold": 0.1},
+                  num_threads=1)
+        rb, mb = base.copy(), np.zeros_like(base)
+        asp_clean(rb, psf, mb,
+                  {"gain": 0.2, "niter": 40, "threshold": 0.05, "fusedthreshold": 0.1},
+                  num_threads=4)
+
+        assert np.array_equal(ra, rb)
+        assert np.array_equal(ma, mb)
+
+    def test_broadcast_psf(self):
+        nt, nf, npol, ny, nx = 1, 1, 3, 32, 32
+        resid = np.zeros((nt, nf, npol, ny, nx), dtype=np.float32)
+        for p in range(npol):
+            resid[0, 0, p, 16, 16] = 1.0 + p
+        psf = _delta_psf_cube(nt, nf, 1, ny, nx)
+        model = np.zeros_like(resid)
+        out = asp_clean(resid, psf, model,
+                        {"gain": 0.5, "niter": 40, "threshold": 0.01,
+                         "fusedthreshold": 0.5, "psf_width": 1.0})
+        assert out["model_flux"].shape == (nt, nf, npol)
+        assert np.all(np.asarray(out["model_flux"]) > 0)
+
+    def test_bool_mask_converted_and_respected(self):
+        nt, nf, npol, ny, nx = 1, 1, 1, 32, 32
+        resid = np.zeros((nt, nf, npol, ny, nx), dtype=np.float32)
+        resid[0, 0, 0, 6, 6] = 10.0
+        resid[0, 0, 0, 22, 22] = 4.0
+        psf = _delta_psf_cube(nt, nf, npol, ny, nx)
+        model = np.zeros_like(resid)
+
+        # bool mask zeroing a box around the strong source (Asp wants a
+        # numeric mask; asp_clean must convert without mutating the input).
+        mask = np.ones((nt, nf, npol, ny, nx), dtype=bool)
+        mask[0, 0, 0, 0:12, 0:12] = False
+
+        # Restrict to small scales so a large-scale component just outside the
+        # masked box cannot leak flux into it.
+        asp_clean(resid, psf, model,
+                  {"gain": 0.5, "niter": 60, "threshold": 0.01,
+                   "fusedthreshold": 0.5, "psf_width": 1.0, "largestscale": 2},
+                  mask_cube=mask)
+
+        assert mask.dtype == np.bool_  # input mask untouched
+        # No component centres are placed in the masked box, so the masked
+        # strong source is preserved and the model deep inside the box is
+        # negligible (only faint Gaussian tails from edge components bleed in).
+        assert resid[0, 0, 0, 6, 6] == pytest.approx(10.0, abs=0.05)
+        assert np.max(np.abs(model[0, 0, 0, 0:6, 0:6])) < 0.05
+        # the unmasked source is essentially fully cleaned
+        assert abs(resid[0, 0, 0, 22, 22]) < 0.5
+
+    def test_rejects_non_5d(self):
+        arr = np.zeros((16, 16), dtype=np.float32)
+        with pytest.raises(ValueError, match="5D"):
+            asp_clean(arr, arr, arr)
+
+    def test_rejects_shape_mismatch(self):
+        resid = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
+        psf = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
+        model = np.zeros((1, 1, 1, 8, 8), dtype=np.float32)
+        with pytest.raises(ValueError, match="same shape"):
+            asp_clean(resid, psf, model)
+
+    def test_rejects_bad_psf_pol(self):
+        resid = np.zeros((1, 1, 3, 16, 16), dtype=np.float32)
+        psf = np.zeros((1, 1, 2, 16, 16), dtype=np.float32)
+        model = np.zeros_like(resid)
+        with pytest.raises(ValueError, match="polarization"):
+            asp_clean(resid, psf, model)
+
+
+# ---------------------------------------------------------------------------
+# deconvolve end-to-end with algorithm="asp"
+# ---------------------------------------------------------------------------
+
+
+@requires_asp
+class TestDeconvolveAsp:
+    def test_basic_single_plane(self):
+        xds = _make_img_xds()
+        returndict = deconvolve(
+            img_xds=xds,
+            algorithm="asp",
+            deconvolve_params={
+                "gain": 0.5,
+                "niter": 50,
+                "threshold": 0.01,
+                "fusedthreshold": 0.5,
+                "psf_width": 1.0,
+            },
+        )
+        assert isinstance(returndict, ReturnDict)
+        assert "SKY_MODEL" in xds.data_vars
+        # the point source is cleaned into the model
+        assert xds["SKY_MODEL"].values[0, 0, 0, 16, 16] == pytest.approx(1.0, abs=0.1)
+        assert np.max(np.abs(xds["RESIDUAL"].values)) < 0.1
+
+    @pytest.mark.parametrize("alias", ["asp", "aspclean", "asp_clean", "ASP"])
+    def test_algorithm_aliases(self, alias):
+        xds = _make_img_xds(nt=1, nf=1, npol=1)
+        rd = deconvolve(
+            img_xds=xds,
+            algorithm=alias,
+            deconvolve_params={"niter": 10, "psf_width": 1.0, "fusedthreshold": 0.5},
+        )
+        assert isinstance(rd, ReturnDict)
+
+    def test_multi_plane_returndict_entries(self):
+        nt, nf, npol = 1, 2, 2
+        xds = _make_img_xds(nt=nt, nf=nf, npol=npol)
+        rd = deconvolve(
+            img_xds=xds,
+            algorithm="asp",
+            deconvolve_params={"gain": 0.5, "niter": 30, "threshold": 0.01,
+                               "fusedthreshold": 0.5, "psf_width": 1.0},
+        )
+        assert len(rd.data) == nt * nf * npol
 
 
 if __name__ == "__main__":  # pragma: no cover

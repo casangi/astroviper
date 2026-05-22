@@ -4,6 +4,7 @@ import copy
 from typing import Optional, Tuple
 
 from astroviper.processing_functions.imaging.deconvolvers import hogbom
+from astroviper.processing_functions.imaging.deconvolvers import aspclean
 from astroviper.processing_functions.image_analysis import image_statistics as imgstats
 from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import extract_main_lobe
 from astroviper.processing_functions.imaging.utils.return_dict import ReturnDict
@@ -396,12 +397,15 @@ def deconvolve(
         ``(time, frequency, polarization, y, x)``. The residual and
         model variables are updated in place.
     algorithm : str, optional
-        Deconvolution algorithm to use. Only ``"hogbom"`` is currently
-        supported.
+        Deconvolution algorithm to use. ``"hogbom"`` (default) for Hogbom
+        CLEAN or ``"asp"`` (aliases ``"aspclean"``, ``"asp_clean"``) for
+        Adaptive Scale Pixel CLEAN.
     deconvolve_params : dict, optional
         Algorithm-specific parameters. See
-        :func:`_validate_deconvolve_params` for supported keys and
-        defaults.
+        :func:`_validate_deconvolve_params` for the common keys and
+        defaults. The ``"asp"`` algorithm additionally honours
+        ``fusedthreshold``, ``psf_width``, ``largestscale``,
+        ``stoppointmode``, and ``norm_method`` (see :func:`asp_clean`).
     num_threads : int, optional
         Number of ``std::thread`` workers to use for per-plane CLEAN
         execution. Values ``<= 1`` disable threading and run in the
@@ -442,7 +446,8 @@ def deconvolve(
       residual and model cubes are the only per-plane allocations,
       and they are updated in place.
     """
-    if algorithm.lower() != "hogbom":
+    algorithm_l = algorithm.lower()
+    if algorithm_l not in ("hogbom", "asp", "aspclean", "asp_clean"):
         raise ValueError(f"Deconvolution algorithm '{algorithm}' not recognized.")
 
     if image_data_group_out_modified is None:
@@ -553,17 +558,26 @@ def deconvolve(
 
     # plt.show()
 
-    results = hogbom_clean(
-        residual_cube=residual_arr,
-        psf_cube=psf_arr,
-        model_cube=model_arr,
-        deconvolve_params=deconvolve_params,
-        num_threads=num_threads,
-        mask_cube=mask_arr,
-    )
+    if algorithm_l == "hogbom":
+        results = hogbom_clean(
+            residual_cube=residual_arr,
+            psf_cube=psf_arr,
+            model_cube=model_arr,
+            deconvolve_params=deconvolve_params,
+            num_threads=num_threads,
+            mask_cube=mask_arr,
+        )
+    else:  # asp / aspclean / asp_clean
+        results = asp_clean(
+            residual_cube=residual_arr,
+            psf_cube=psf_arr,
+            model_cube=model_arr,
+            deconvolve_params=deconvolve_params,
+            num_threads=num_threads,
+            mask_cube=mask_arr,
+        )
 
     iters = np.asarray(results["iterations_performed"])
-    final_peaks = np.asarray(results["final_peak"])
 
     returndict = create_deconvolution_return_dict(
         img_xds=img_xds,
@@ -719,5 +733,160 @@ def hogbom_clean(
         max_iter=deconvolve_params["niter"],
         gain=deconvolve_params["gain"],
         threshold=deconvolve_params["threshold"],
+        num_threads=int(num_threads),
+    )
+
+
+def asp_clean(
+    residual_cube: np.ndarray,
+    psf_cube: np.ndarray,
+    model_cube: np.ndarray,
+    deconvolve_params: Optional[dict] = None,
+    num_threads: int = 1,
+    mask_cube: Optional[np.ndarray] = None,
+):
+    """
+    Run Adaptive Scale Pixel (Asp / AAspClean) CLEAN over an entire
+    ``(time, frequency, polarization, y, x)`` image cube, parallelized
+    across planes in C++.
+
+    Like :func:`hogbom_clean`, the residual and model cubes are updated
+    in place: the residual has the PSF response of each found component
+    subtracted from it, and the model accumulates the components. The
+    per-plane loop and the ``std::thread`` worker pool live entirely in
+    the C++ binding (:func:`aspclean.clean_cube`); this Python layer only
+    validates inputs and forwards them.
+
+    Parameters
+    ----------
+    residual_cube : numpy.ndarray
+        5-D residual array with shape ``(nt, nf, np, ny, nx)``. Must be
+        C-contiguous, writeable, and float32 or float64. Updated in
+        place with the post-CLEAN residual.
+    psf_cube : numpy.ndarray
+        5-D PSF array with shape ``(nt, nf, np_psf, ny, nx)`` where
+        ``np_psf`` equals ``np`` or is ``1`` (Stokes-I broadcast). Must
+        be C-contiguous and share the dtype of ``residual_cube``. Not
+        modified.
+    model_cube : numpy.ndarray
+        5-D model array with shape ``(nt, nf, np, ny, nx)``. Components
+        are **added** into this array in place. Must be C-contiguous,
+        writeable, and share the dtype of ``residual_cube``.
+    deconvolve_params : dict, optional
+        Algorithm parameters. The common keys (``gain``, ``niter``,
+        ``threshold``) are validated by
+        :func:`_validate_deconvolve_params`. The following Asp-specific
+        keys are read with sensible defaults if present:
+
+        - ``fusedthreshold`` : float, residual/strength level below which
+          the algorithm fuses to Hogbom-style point cleaning for speed.
+          A negative value disables the switch. Default 0.0.
+        - ``psf_width`` : float, PSF Gaussian width in pixels used to
+          seed the initial scales. ``<= 0`` estimates it internally.
+          Default 0.0.
+        - ``largestscale`` : int, largest initial scale in pixels.
+          ``-1`` uses the default (0, w, 2w, 4w, 8w). Default -1.
+        - ``stoppointmode`` : int, stop after this many consecutive
+          smallest-scale (point) components. ``-1`` disables. Default -1.
+        - ``norm_method`` : int, scale-normalization method (1 is the
+          preferred CASA default). Default 1.
+
+        Note: ``clean_box`` is ignored by the Asp algorithm (use a mask
+        instead).
+    num_threads : int, optional
+        Number of ``std::thread`` workers used to run per-plane CLEAN in
+        parallel. ``num_threads <= 1`` disables threading; values larger
+        than the number of planes are clamped to the plane count.
+        Default 1.
+    mask_cube : numpy.ndarray, optional
+        5-D mask array with the same shape as ``residual_cube``. Unlike
+        the Hogbom binding (which takes a ``bool`` mask), the Asp binding
+        takes a numeric mask of the same dtype as the images (it is
+        convolved with each scale internally). A ``bool`` mask is
+        converted to that dtype (the only place a copy may be made).
+        ``None`` cleans the whole image.
+
+    Returns
+    -------
+    dict
+        Per-plane summary arrays with shape ``(nt, nf, np)`` and keys
+        ``iterations_performed`` (int), ``retval`` (int), ``converged``
+        (bool), ``peak_residual`` (float), and ``model_flux`` (float).
+        The final residual and model cubes are the caller-supplied
+        arrays, updated in place.
+
+    Raises
+    ------
+    ValueError
+        If the input arrays are not 5-D, do not share a floating-point
+        dtype, or have incompatible shapes.
+    """
+    deconvolve_params = _validate_deconvolve_params(deconvolve_params)
+
+    for name, arr in (
+        ("residual_cube", residual_cube),
+        ("psf_cube", psf_cube),
+        ("model_cube", model_cube),
+    ):
+        if not isinstance(arr, np.ndarray) or arr.ndim != 5:
+            raise ValueError(
+                f"{name} must be a 5D numpy array with shape "
+                "(nt, nf, np, ny, nx)"
+            )
+
+    if residual_cube.shape != model_cube.shape:
+        raise ValueError(
+            "residual_cube and model_cube must have same shape. "
+            f"Got {residual_cube.shape} and {model_cube.shape}"
+        )
+
+    # PSF cube may broadcast on the polarization axis.
+    nt, nf, npol_img, ny, nx = residual_cube.shape
+    nt_p, nf_p, npol_psf, ny_p, nx_p = psf_cube.shape
+    if (nt_p, nf_p, ny_p, nx_p) != (nt, nf, ny, nx):
+        raise ValueError(
+            "psf_cube must match residual_cube on (time, frequency, y, x). "
+            f"Got psf shape {psf_cube.shape} vs residual shape "
+            f"{residual_cube.shape}"
+        )
+    if npol_psf not in (npol_img, 1):
+        raise ValueError(
+            "psf_cube polarization axis must equal residual_cube "
+            "polarization axis or be 1 (Stokes I broadcast). "
+            f"Got np_psf={npol_psf}, np_img={npol_img}"
+        )
+
+    if mask_cube is not None and mask_cube.shape != residual_cube.shape:
+        raise ValueError(
+            "mask_cube must have the same shape as residual_cube. "
+            f"Got {mask_cube.shape} and {residual_cube.shape}"
+        )
+
+    logger.debug(f"Residual cube shape: {residual_cube.shape}")
+    logger.debug(f"PSF cube shape: {psf_cube.shape}")
+    logger.info("Running Asp CLEAN on cube with num_threads=%d" % num_threads)
+
+    # The Asp binding takes a numeric mask matching the image dtype (it is
+    # convolved with each scale). Convert if needed; an empty array means
+    # "clean everywhere". ``ascontiguousarray`` is a no-op when the mask is
+    # already the right dtype and layout.
+    if mask_cube is not None:
+        mask_arg = np.ascontiguousarray(mask_cube, dtype=residual_cube.dtype)
+    else:
+        mask_arg = np.array([], dtype=residual_cube.dtype)
+
+    return aspclean.clean_cube(
+        residual=residual_cube,
+        psf=psf_cube,
+        model=model_cube,
+        mask=mask_arg,
+        gain=deconvolve_params["gain"],
+        threshold=deconvolve_params["threshold"],
+        niter=deconvolve_params["niter"],
+        fusedthreshold=deconvolve_params.get("fusedthreshold", 0.0),
+        psf_width=deconvolve_params.get("psf_width", 0.0),
+        largestscale=deconvolve_params.get("largestscale", -1),
+        stoppointmode=deconvolve_params.get("stoppointmode", -1),
+        norm_method=deconvolve_params.get("norm_method", 1),
         num_threads=int(num_threads),
     )
