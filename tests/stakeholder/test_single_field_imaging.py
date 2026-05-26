@@ -487,7 +487,7 @@ def test_single_field_imaging_niter0():
                 [3.09916724e-06, 2.32405466e-06, 2.22535443e+00],
                 [3.09916185e-06, 2.32405054e-06, 2.22535528e+00]]]
     
-    print(img_av_xds.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.sel(polarization="I").values)
+    #print(img_av_xds.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.sel(polarization="I").values)
     assert np.allclose(
         img_av_xds.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.sel(polarization="I").values,
         psf_ref,
@@ -625,7 +625,7 @@ def test_single_field_imaging():
         "fft_padding": 1.2,
         "cpp_gridder": True,
     }
-
+    print("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
     imaging_metadata_pd = image_cube_single_field(
         ps_store=ps_store,
         image_store=image_store,
@@ -675,6 +675,9 @@ def test_single_field_imaging():
         write_visibility_model_to_ps=True
     )
     img_av_xds = xr.open_zarr(image_store)
+    print("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
+    
+    print("imaging_metadata_pd", imaging_metadata_pd )
 
     from matplotlib import pyplot as plt
     frequency = 4

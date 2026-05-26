@@ -875,6 +875,7 @@ def asp_clean(
     else:
         mask_arg = np.array([], dtype=residual_cube.dtype)
 
+    #print("@@@@@@@@@@@@@@@@@@@@. ASP clean ")
     return aspclean.clean_cube(
         residual=residual_cube,
         psf=psf_cube,

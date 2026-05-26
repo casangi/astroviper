@@ -61,10 +61,10 @@ def image_cube_single_field(input_params, ps_xdt, img_xds):
             break
         
     
-    print("combined_return_dict:", combined_return_dict)
-    print("******")
-    print("deconvolve_dict:", deconvolve_dict)
-    print("******")
+    # print("combined_return_dict:", combined_return_dict)
+    # print("******")
+    # print("deconvolve_dict:", deconvolve_dict)
+    # print("******")
         
         
         

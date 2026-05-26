@@ -283,6 +283,7 @@ def image_cube_single_field(
     input_parms["clear_cache"] = clear_cache
     input_parms["processing_function_threads"] = processing_function_threads
     input_parms["iteration_control_params"] = iteration_control_params
+    input_parms["deconvolver"] = deconvolver
 
     from graphviper.graph_tools.coordinate_utils import (
         interpolate_data_coords_onto_parallel_coords,

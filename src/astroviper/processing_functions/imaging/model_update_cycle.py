@@ -26,7 +26,7 @@ def model_update_cycle_cube_single_field(img_xds, input_params, is_n_iter_0, num
     
     deconvolve_dict = deconvolve(
             img_xds=img_xds,
-            algorithm='hogbom',
+            algorithm=input_params['deconvolver'],
             deconvolve_params=input_params["iteration_control_params"],
             image_data_group_in_name = img_data_group_in_name,
             image_data_group_out_name =  img_data_group_out_name,
