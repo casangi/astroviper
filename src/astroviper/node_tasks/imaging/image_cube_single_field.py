@@ -60,9 +60,7 @@ def image_cube_single_field(input_params, graph_mode=True):
         # ps_xdt = open_processing_set(...)
         # need to work on data selection.
     T_load = time.time() - start
-    logger.debug("Time to load data " + str(T_load))
 
-    logger.debug("Processing set iterator created with partitions.")
     img_xds, return_df = pf.imaging.image_cube_single_field(input_params, ps_xdt, img_xds)
 
     start_write = time.time()
@@ -78,22 +76,27 @@ def image_cube_single_field(input_params, graph_mode=True):
     else:
         img_xds.to_zarr(input_params["image_store"], consolidated=True)
     T_write = time.time() - start_write
-    logger.debug("Time to write to disk " + str(T_write))
+
 
     return_df["T_load"] = T_load
     return_df["T_write"] = T_write
-
-    logger.debug(
-        "Memory usage after completing node task, before releasing references: "
-        + str(get_rss_gb())
-        + " GB"
-    )
-
     img_xds = None
     ps_xdt = None
     free_memory()
-
+    
     logger.debug(
-        "Memory usage after releasing references: " + str(get_rss_gb()) + " GB"
+        "Memory usage after image_cube_single_field_node_task: "
+        + str(get_rss_gb())
+        + " GB"
     )
+    
+    import pandas as pd
+    with pd.option_context(
+        "display.max_columns", None,
+        "display.max_rows", None,
+        "display.width", None,
+        "display.float_format", "{:.6g}".format,
+    ):
+        print(return_df.to_string())
+
     return return_df

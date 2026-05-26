@@ -40,6 +40,7 @@ def image_cube_single_field(input_params, ps_xdt, img_xds):
         T_residual_cycle = T_residual_cycle + time.time() - start
 
         if input_params["iteration_control_params"]["niter"] > 0:
+            logger.debug("Doing model update")
             cycle_niter, cyclethresh = get_calculate_cycle_controls(controller, combined_return_dict, img_xds, is_n_iter_0, iteration_control_params=input_params["iteration_control_params"])
             
             input_params["iteration_control_params"]["cycleniter"] = cycle_niter
@@ -57,19 +58,9 @@ def image_cube_single_field(input_params, ps_xdt, img_xds):
 
         stopcode, stopdesc = controller.check_convergence(deconvolve_dict)
         if stopcode.major != 0:
-            logger.info(f"  *** CONVERGED: {stopdesc} ***")
+            logger.debug(f"  *** CONVERGED: {stopdesc} ***")
             break
-        
-    
-    # print("combined_return_dict:", combined_return_dict)
-    # print("******")
-    # print("deconvolve_dict:", deconvolve_dict)
-    # print("******")
-        
-        
-        
-   
-        
+                
     #Last residual cycle to calcultate final residual image after last model update cycle.
     if input_params["iteration_control_params"]["niter"] > 0:       
         start = time.time()
@@ -83,7 +74,6 @@ def image_cube_single_field(input_params, ps_xdt, img_xds):
     return_df["n_channels"] = len(input_params["task_coords"]["frequency"]["data"])
     return_df["T_residual_cycle"] = T_residual_cycle
     return_df["T_model_update_cycle"] = T_model_update_cycle
-    logger.debug("Timing info " + str(return_df))
 
     # #Write Data chunk to disk
     return img_xds, return_df

@@ -4,7 +4,7 @@
 # Poly
 # Cos Polyp
 # Inverse Poly coeff
-
+from memory_profiler import profile
 
 # Formula for obscured airy pattern found in https://en.wikipedia.org/wiki/Airy_disk (see Obscured Airy pattern section)
 # If ipower is 1 the voltage pattern is returned if ipower is 2 the primary beam is returned.
@@ -214,12 +214,17 @@ def airy_disk_rorder(freq_chan, pol, pb_params, grid_params):
 # jn is evaluated only on a compact 1D grid (~10k points) instead of the full
 # (chan x N0 x N1) array, then linearly interpolated back onto the 2D image.
 # The interpolation query is fully vectorised across channels via broadcasting.
-def airy_disk_rorder_v2(freq_chan, pol, pb_params, grid_params):
+@profile(precision=1)
+def airy_disk_rorder_v2(freq_chan, pol, pb_params, grid_params, dtype=None):
     """
     Does not yet handle beam squint
     dish_diameters : list of int
     blockage_diameters : list of int
     frequencies : list of number
+    dtype : numpy dtype, optional
+        Floating-point precision for all large arrays.  Defaults to np.float64.
+        Pass np.float32 to halve memory usage at the cost of ~7 decimal digits
+        of precision (sufficient for primary-beam applications).
     """
 
     import numpy as np
@@ -234,11 +239,14 @@ def airy_disk_rorder_v2(freq_chan, pol, pb_params, grid_params):
     list_blockage_diameters = pb_params["list_blockage_diameters"]
     ipower = pb_params["ipower"]
 
-    c = scipy.constants.c  # 299792458
-    k = (2 * np.pi * freq_chan) / c
+    if dtype is None:
+        dtype = np.float64
 
-    x = np.arange(-image_center[0], image_size[0] - image_center[0]) * cell[0]
-    y = np.arange(-image_center[1], image_size[1] - image_center[1]) * cell[1]
+    c = scipy.constants.c  # 299792458
+    k = ((2 * np.pi * freq_chan) / c).astype(dtype)
+
+    x = (np.arange(-image_center[0], image_size[0] - image_center[0]) * cell[0]).astype(dtype)
+    y = (np.arange(-image_center[1], image_size[1] - image_center[1]) * cell[1]).astype(dtype)
 
     airy_disk_size = (
         len(list_blockage_diameters),
@@ -247,11 +255,10 @@ def airy_disk_rorder_v2(freq_chan, pol, pb_params, grid_params):
         image_size[0],
         image_size[1],
     )
-    airy_disk = np.zeros(airy_disk_size)
+    airy_disk = np.zeros(airy_disk_size, dtype=dtype)
 
-    # Compute 2D radius once — shared across all dishes and channels.
-    x_grid, y_grid = np.meshgrid(x, y, indexing="ij")
-    r_2d = np.sqrt(x_grid**2 + y_grid**2)  # (N0, N1)
+    # hypot with broadcasting avoids allocating x_grid and y_grid (saves ~2× N0×N1 arrays).
+    r_2d = np.hypot(x[:, np.newaxis], y[np.newaxis, :])  # (N0, N1)
 
     for i, (dish_diameter, blockage_diameter) in enumerate(
         zip(list_dish_diameters, list_blockage_diameters)
@@ -278,12 +285,15 @@ def airy_disk_rorder_v2(freq_chan, pol, pb_params, grid_params):
         if ipower != 1:
             f_1d **= ipower
 
-        # u_3d[ci, n0, n1] = r_2d[n0, n1] * k[ci] * aperture  — no Python loop.
-        u_3d = r_2d[np.newaxis, :, :] * (k[:, np.newaxis, np.newaxis] * aperture)
-        airy_disk[i, :, 0, :, :] = np.interp(u_3d, u_1d, f_1d)
+        # Loop over channels to avoid a full chan×N0×N1 u_3d array in memory.
+        for ci in range(len(freq_chan)):
+            u_2d = r_2d * (k[ci] * aperture)  # (N0, N1) — freed each iteration
+            airy_disk[i, ci, 0, :, :] = np.interp(u_2d, u_1d, f_1d)
 
     airy_disk[:, :, 0, image_center[0], image_center[1]] = 1.0  # Fix centre value
-    airy_disk = np.tile(airy_disk, (1, 1, len(pol), 1, 1))
+    # broadcast_to instead of tile: zero-copy read-only view over the pol axis.
+    out_shape = (len(list_dish_diameters), len(freq_chan), len(pol), image_size[0], image_size[1])
+    airy_disk = np.broadcast_to(airy_disk, out_shape)
     
     # import matplotlib.pyplot as plt
     # plt.figure(figsize=(20,10))

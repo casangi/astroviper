@@ -6,6 +6,7 @@ import numpy as np
 import scipy.fft
 import xarray as xr
 import toolviper.utils.logger as logger
+from memory_profiler import profile
 
 
 from astroviper.utils.data_group_tools import (
@@ -69,6 +70,7 @@ def _fft_module(backend):
     )
 
 
+@profile(precision=1)
 def ifft_norm_img_xds(
     img_xds,
     image_params,
@@ -82,6 +84,7 @@ def ifft_norm_img_xds(
     image_data_variables_keep=[],
     num_threads=1,
     fft_backend="pyfftw",
+    dtype=np.float64
 ):
     """Normalize and inverse-Fourier-transform gridded UV data to sky images.
 
@@ -228,7 +231,11 @@ def ifft_norm_img_xds(
                     plane /= kernel_image_1D_l[:, None]
                     plane /= kernel_image_1D_m[None, :]
                     plane *= flux_scale / normalization[t, f, p]
-                    out_arr[t, f, p] = remove_padding(plane.real, image_size)
+                    
+                    if dtype == np.float32:
+                        out_arr[t, f, p] = remove_padding(plane.real.astype(dtype), image_size)
+                    else:
+                        out_arr[t, f, p] = remove_padding(plane.real, image_size)
 
         if data_variable_out not in image_data_variables_keep:
             # Release the large grid from the dataset so it can be freed as soon
@@ -249,6 +256,7 @@ def ifft_norm_img_xds(
         
     return img_xds
 
+@profile(precision=1)
 def fft_norm_img_xds(
     img_xds,
     image_params,
