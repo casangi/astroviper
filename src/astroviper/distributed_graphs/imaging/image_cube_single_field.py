@@ -77,6 +77,7 @@ def image_cube_single_field(
     clear_cache: bool = True,
     vizualize_graph: bool = False,
     disk_chunk_sizes: Optional[Union[Dict[str, int], str]] = None,
+    fft_backend="pyfftw"
 ):  # -> Tuple[xr.Dataset, ReturnDict]:
     """
     Create a spectral cube.
@@ -285,6 +286,7 @@ def image_cube_single_field(
     input_parms["iteration_control_params"] = iteration_control_params
     input_parms["deconvolver"] = deconvolver
     input_parms["double_precision"] = double_precision
+    input_parms["fft_backend"] = fft_backend
 
     from graphviper.graph_tools.coordinate_utils import (
         interpolate_data_coords_onto_parallel_coords,

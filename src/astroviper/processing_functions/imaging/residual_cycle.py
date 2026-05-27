@@ -211,7 +211,8 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0,
         image_data_group_out_modified=ifft_norm_image_data_group_out_modified,
         image_data_variables_keep=input_params["image_data_variables_keep"],
         num_threads=input_params["processing_function_threads"],
-        dtype=float_dtype
+        fft_backend=input_params["fft_backend"],
+        complex_dtype=complex_dtype
     )
     T_fft_norm = time.time() - start_fft_norm
     

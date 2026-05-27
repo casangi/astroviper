@@ -7,6 +7,7 @@ import scipy.fft
 import xarray as xr
 import toolviper.utils.logger as logger
 from memory_profiler import profile
+from toolviper.utils.memory_management import get_rss_gb
 
 
 from astroviper.utils.data_group_tools import (
@@ -52,6 +53,7 @@ def _fft_module(backend):
     ValueError
         If ``backend`` is not a recognised string.
     """
+    print("the fft backend is ", backend)
     if backend == "scipy":
         return scipy.fft
     if backend == "pyfftw":
@@ -84,7 +86,7 @@ def ifft_norm_img_xds(
     image_data_variables_keep=[],
     num_threads=1,
     fft_backend="pyfftw",
-    dtype=np.float64
+    complex_dtype=np.complex128
 ):
     """Normalize and inverse-Fourier-transform gridded UV data to sky images.
 
@@ -225,17 +227,24 @@ def ifft_norm_img_xds(
         for t in range(n_time):
             for f in range(n_freq):
                 for p in range(n_pol):
-                    plane = ifft_uv_to_lm(
-                        raw_grid[t, f, p], num_threads=num_threads, fft_backend=fft_backend
-                    )
+                    #print("!!!! Memory before ifft ", get_rss_gb())
+                    if complex_dtype == np.complex128:
+                        plane = ifft_uv_to_lm(
+                            raw_grid[t, f, p], num_threads=num_threads, fft_backend=fft_backend
+                        )
+                    else:
+                        plane = ifft_uv_to_lm(
+                            raw_grid[t, f, p].astype(complex_dtype), num_threads=num_threads, fft_backend=fft_backend
+                        )
+                    #print("!!!! Memory after ifft ", get_rss_gb())
                     plane /= kernel_image_1D_l[:, None]
                     plane /= kernel_image_1D_m[None, :]
                     plane *= flux_scale / normalization[t, f, p]
                     
-                    if dtype == np.float32:
-                        out_arr[t, f, p] = remove_padding(plane.real.astype(dtype), image_size)
-                    else:
-                        out_arr[t, f, p] = remove_padding(plane.real, image_size)
+                    #print("!!!! Memory before remove padding ", get_rss_gb())
+                    out_arr[t, f, p] = remove_padding(plane.real, image_size)
+                        
+                    #print("!!!! Memory after remove padding ", get_rss_gb())
 
         if data_variable_out not in image_data_variables_keep:
             # Release the large grid from the dataset so it can be freed as soon
