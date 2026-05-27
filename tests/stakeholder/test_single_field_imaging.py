@@ -665,7 +665,7 @@ def test_single_field_imaging():
         ],
         # image_data_variables_keep=[ "sky", "point_spread_function", "primary_beam"],
         processing_set_data_group_name="base",
-        double_precision=True,
+        double_precision=False,
         thread_info=None,
         processing_function_threads=12,
         n_chunks=1,

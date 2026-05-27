@@ -214,7 +214,7 @@ def airy_disk_rorder(freq_chan, pol, pb_params, grid_params):
 # jn is evaluated only on a compact 1D grid (~10k points) instead of the full
 # (chan x N0 x N1) array, then linearly interpolated back onto the 2D image.
 # The interpolation query is fully vectorised across channels via broadcasting.
-@profile(precision=1)
+#@profile(precision=1)
 def airy_disk_rorder_v2(freq_chan, pol, pb_params, grid_params, dtype=None):
     """
     Does not yet handle beam squint

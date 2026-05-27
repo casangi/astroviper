@@ -70,7 +70,7 @@ def _fft_module(backend):
     )
 
 
-@profile(precision=1)
+#@profile(precision=1)
 def ifft_norm_img_xds(
     img_xds,
     image_params,
@@ -256,7 +256,7 @@ def ifft_norm_img_xds(
         
     return img_xds
 
-@profile(precision=1)
+#@profile(precision=1)
 def fft_norm_img_xds(
     img_xds,
     image_params,

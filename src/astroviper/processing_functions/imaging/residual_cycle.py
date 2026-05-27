@@ -4,8 +4,8 @@ from astroviper.processing_functions.imaging.get_visibility_grid import get_visi
 from astroviper.utils.data_group_tools import create_data_groups_in_and_out, modify_data_groups_xds
 
 
-from memory_profiler import profile
-@profile(precision=1)
+# from memory_profiler import profile
+# @profile(precision=1)
 def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0, img_residual_data_group_name = "residual", img_model_data_group_name = "model", last_residual_cycle=False):
     """_summary_
 
@@ -322,7 +322,7 @@ def calculate_residual_visibilities(ps_xdt, ms_data_group_residual_name="residua
             description="Calculated residual visibilities by subtracting model visibilities from original visibilities.",
         )
 
-@profile(precision=1)
+#@profile(precision=1)
 def make_uv_images_single_field(
     ps_xdt,
     img_xds,
