@@ -11,6 +11,9 @@ from astroviper.processing_functions.image_analysis.point_spread_function_gaussi
 from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
     extract_main_lobe,
 )
+from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
+    FWHM_factor,
+)
 
 
 def create_test_xds(shape=(1, 1, 1, 51, 51), rm_coord=None):
@@ -54,6 +57,10 @@ def create_test_xds(shape=(1, 1, 1, 51, 51), rm_coord=None):
     test_dataset = xr.Dataset(
         {"POINT_SPREAD_FUNCTION": psf, "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION": beam}
     )
+    # The public fit function resolves data variables through this data group.
+    test_dataset.attrs["data_groups"] = {
+        "image": {"point_spread_function": "POINT_SPREAD_FUNCTION"}
+    }
     return test_dataset
 
 
@@ -120,6 +127,15 @@ def test_non_integer_npix_window():
     ds = create_test_xds()
     with pytest.raises((TypeError, AssertionError)):
         psf_gaussian_fit(ds, npix_window=[5.5, 9])
+
+
+def test_even_npix_window():
+    """npix_window must be odd so the window stays centered on the peak"""
+    ds = create_test_xds()
+    with pytest.raises((ValueError, AssertionError)):
+        psf_gaussian_fit(ds, npix_window=[40, 40])
+    with pytest.raises((ValueError, AssertionError)):
+        psf_gaussian_fit(ds, npix_window=[41, 40])
 
 
 def test_zero_sampling():
@@ -231,9 +247,13 @@ def create_rotated_gaussian(shape, angle_deg):
     beam = xr.DataArray(
         beam_data, dims=["time", "frequency", "polarization", "beam_params_label"]
     )
-    return xr.Dataset(
+    rotated_dataset = xr.Dataset(
         {"POINT_SPREAD_FUNCTION": psf, "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION": beam}
     )
+    rotated_dataset.attrs["data_groups"] = {
+        "image": {"point_spread_function": "POINT_SPREAD_FUNCTION"}
+    }
+    return rotated_dataset
 
 
 def test_psf_gaussian_fit_orientation():
@@ -420,12 +440,15 @@ def test_extract_main_lobe():
     cutoff = 0.1
     main_lobe_only, blc, trc, __ = extract_main_lobe(npix_window, cutoff, data)
     print("test_extract_main_lobe: blc, trc=", blc, trc)
+    # blc/trc are now per-slice arrays of shape (time, frequency, polarization, 2).
+    assert blc.shape == (1, 1, 1, 2)
+    assert trc.shape == (1, 1, 1, 2)
     # Check that the main lobe is extracted correctly by comparing total main lobe pixels
     # with model main lobe (gaussian) pixels with cutoff applied
     total_main_lobe = np.sum(main_lobe_only)
     model_main_lobe = np.sum(gaussian[gaussian >= cutoff * np.max(gaussian)])
     assert np.isclose(total_main_lobe, model_main_lobe, rtol=0.1)
-    assert blc[0] < trc[0] and blc[1] < trc[1]
+    assert blc[0, 0, 0, 0] < trc[0, 0, 0, 0] and blc[0, 0, 0, 1] < trc[0, 0, 0, 1]
     # Check that sidelobes are zeroed out
     assert np.all(
         main_lobe_only[0, 0, 0, :, :][psf_image < cutoff * np.max(psf_image)] == 0
@@ -459,16 +482,86 @@ def test_extract_main_lobe_offset_peak():
     cutoff = 0.1
     main_lobe_only, blc, trc, __ = extract_main_lobe(npix_window, cutoff, data)
     print("test_extract_main_lobe_offset_peak: blc, trc=", blc, trc)
+    # blc/trc are now per-slice arrays of shape (time, frequency, polarization, 2).
+    assert blc.shape == (1, 1, 1, 2)
+    assert trc.shape == (1, 1, 1, 2)
     # Check that the main lobe is extracted correctly by comparing total main lobe pixels
     # with model main lobe (gaussian) pixels with cutoff applied
     total_main_lobe = np.sum(main_lobe_only)
     model_main_lobe = np.sum(gaussian[gaussian >= cutoff * np.max(gaussian)])
     assert np.isclose(total_main_lobe, model_main_lobe, rtol=0.1)
-    assert blc[0] < trc[0] and blc[1] < trc[1]
+    assert blc[0, 0, 0, 0] < trc[0, 0, 0, 0] and blc[0, 0, 0, 1] < trc[0, 0, 0, 1]
     # Check that sidelobes are zeroed out
     assert np.all(
         main_lobe_only[0, 0, 0, :, :][psf_image < cutoff * np.max(psf_image)] == 0
     )
+
+
+def test_extract_main_lobe_per_slice_independent():
+    """extract_main_lobe must return an independent bounding box per slice."""
+    shape = (1, 2, 1, 81, 81)
+    x = np.linspace(-1, 1, shape[-2])
+    y = np.linspace(-1, 1, shape[-1])
+    xv, yv = np.meshgrid(x, y, indexing="ij")
+    data = np.zeros(shape)
+    # Two channels with very different widths -> different main-lobe sizes.
+    data[0, 0, 0] = np.exp(-(xv**2 + yv**2) / (2 * 0.1**2))  # narrow
+    data[0, 1, 0] = np.exp(-(xv**2 + yv**2) / (2 * 0.3**2))  # wide
+    npix_window = np.array([61, 61])
+    cutoff = 0.1
+    main_lobe_only, blc, trc, max_sidelobe = extract_main_lobe(
+        npix_window, cutoff, data
+    )
+    assert blc.shape == (1, 2, 1, 2)
+    assert trc.shape == (1, 2, 1, 2)
+    assert max_sidelobe.shape == (1, 2, 1)
+    # The wider Gaussian must yield a strictly larger main-lobe bounding box.
+    size_narrow = trc[0, 0, 0] - blc[0, 0, 0]
+    size_wide = trc[0, 1, 0] - blc[0, 1, 0]
+    assert np.all(size_wide > size_narrow)
+
+
+def test_psf_gaussian_fit_core_per_slice_boxes():
+    """Per-slice blc/trc arrays must fit each slice with its own window."""
+    shape = (1, 2, 1, 81, 81)
+    x = np.linspace(-1, 1, shape[-2])
+    y = np.linspace(-1, 1, shape[-1])
+    xv, yv = np.meshgrid(x, y, indexing="ij")
+    data = np.zeros(shape)
+    data[0, 0, 0] = np.exp(-(xv**2 + yv**2) / (2 * 0.1**2))  # narrow
+    data[0, 1, 0] = np.exp(-(xv**2 + yv**2) / (2 * 0.3**2))  # wide
+    sampling = np.array([41, 41])
+    cutoff = 0.1
+    delta = np.array([np.abs(x[1] - x[0]), np.abs(y[1] - y[0])])
+
+    _, blc, trc, _ = extract_main_lobe(np.array([61, 61]), cutoff, data)
+    result = psf_gaussian_fit_core(data, blc, trc, sampling, cutoff, delta)
+
+    assert result.shape == (1, 2, 1, 3)
+    # Wider input Gaussian -> larger fitted major axis.
+    assert result[0, 1, 0, 0] > result[0, 0, 0, 0]
+    # Each slice is recovered close to its analytic FWHM (sigma * FWHM_factor).
+    assert np.isclose(result[0, 0, 0, 0], 0.1 * FWHM_factor, rtol=0.15)
+    assert np.isclose(result[0, 1, 0, 0], 0.3 * FWHM_factor, rtol=0.15)
+
+
+def test_psf_gaussian_fit_core_broadcasts_single_box():
+    """A single [l, m] box must match an explicit per-slice array of that box."""
+    data, x, y = _make_multi_slice_cube(shape=(2, 2, 2, 81, 81))
+    sampling = np.array([41, 41])
+    cutoff = 0.1
+    delta = np.array([np.abs(x[1] - x[0]), np.abs(y[1] - y[0])])
+
+    blc = np.array([20, 20])
+    trc = np.array([60, 60])
+    broadcast = psf_gaussian_fit_core(data.copy(), blc, trc, sampling, cutoff, delta)
+
+    blc_full = np.broadcast_to(blc, (2, 2, 2, 2)).copy()
+    trc_full = np.broadcast_to(trc, (2, 2, 2, 2)).copy()
+    per_slice = psf_gaussian_fit_core(
+        data.copy(), blc_full, trc_full, sampling, cutoff, delta
+    )
+    np.testing.assert_allclose(broadcast, per_slice, rtol=0, atol=0)
 
 
 # def test_psf_gaussian_fit_core_rotated_gaussian():

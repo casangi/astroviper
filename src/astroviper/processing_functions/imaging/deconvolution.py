@@ -496,13 +496,16 @@ def deconvolve(
 
     deconvolve_params = _validate_deconvolve_params(deconvolve_params)
 
-    max_psf_fraction = 0.8
-    min_psf_fraction = 0.1
-    max_psf_sidelobe = None  # TODO: compute per (time, freq) via extract_main_lobe
+    max_psf_fraction = deconvolve_params["maxpsffraction"]
+    min_psf_fraction = deconvolve_params["minpsffraction"]    
 
     residual_arr = img_xds[residual_name].values
     psf_arr = img_xds[psf_name].values
     model_arr = img_xds[model_name].values
+    
+    #max_psf_sidelobe = None  # TODO: compute per (time, freq) via extract_main_lobe
+    #max_psf_sidelobe = extract_main_lobe(npix_window, threshold, psf_arr)
+    max_psf_sidelobe = None
 
     # Optional mask cube, matching the residual's shape. The C++ binding
     # accepts a bool mask directly; Python keeps ownership of the buffer.

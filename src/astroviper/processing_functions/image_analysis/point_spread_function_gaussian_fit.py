@@ -41,7 +41,8 @@ def point_spread_function_gaussian_fit(
     image_data_group_in_name : str
         The name of the image data group to fit. Default is 'image'.
     npix_window : tuple
-        The size of the fitting window in pixels.
+        The size of the search window in pixels. Both values must be odd
+        integers so the window is centered on the peak.
     sampling : tuple
         The sampling of the fitting grid in pixels.
     cutoff : float
@@ -74,6 +75,10 @@ def point_spread_function_gaussian_fit(
         raise ValueError("npix_window must be positive")
     if type(npix_window[0]) is not int or type(npix_window[1]) is not int:
         raise TypeError("npix_window must be integers")
+    if npix_window[0] % 2 == 0 or npix_window[1] % 2 == 0:
+        raise ValueError(
+            "npix_window must be odd so the search window is centered on the peak"
+        )
     if not isinstance(sampling, (list, tuple, np.ndarray)):
         raise TypeError("sampling must be a list, tuple, or numpy array")
     if sampling[0] <= 0 or sampling[1] <= 0:
@@ -118,20 +123,17 @@ def point_spread_function_gaussian_fit(
     #    npix_window, cutoff, px, py, psf2d, delta
     # )
     # print(" after find_n_points blc, trc=", blc, trc)
-    main_lobe_im, blc, trc, __ = extract_main_lobe(
+    main_lobe_im, blc, trc, max_sidelobe = extract_main_lobe(
         npix_window, cutoff, img_xds[psf_name].values
     )
+    # blc/trc are per-slice arrays of shape (time, frequency, polarization, 2).
+    # Expand each slice's fitting window and clamp it to the image bounds.
     blc = blc - expand_pixel
     trc = trc + expand_pixel
     # print(" blc, trc after expanding=", blc, trc)
-    if blc[0] < 0:
-        blc[0] = 0
-    if blc[1] < 0:
-        blc[1] = 0
-    if trc[0] >= main_lobe_im.shape[3]:
-        trc[0] = main_lobe_im.shape[3] - 1
-    if trc[1] >= main_lobe_im.shape[4]:
-        trc[1] = main_lobe_im.shape[4] - 1
+    blc = np.maximum(blc, 0)
+    trc[..., 0] = np.minimum(trc[..., 0], main_lobe_im.shape[3] - 1)
+    trc[..., 1] = np.minimum(trc[..., 1], main_lobe_im.shape[4] - 1)
 
     ellipse_params = psf_gaussian_fit_core(
         img_xds[psf_name].values,
@@ -169,121 +171,157 @@ def point_spread_function_gaussian_fit(
         description="Added UV sampling grid to img_xds with add_uv_sampling_grid_single_field.",
     )
 
+    print("max_sidelobe", max_sidelobe)
     return img_xds
 
 
-def _get_main_lobe_bounding_box(masked_psf, max_coords):
+def _get_main_lobe_bounding_box(masked_psf_2d):
     """
-    Given a psf image of main lobe in full 5D with zero values outside the lobe, find the bounding box
-    based on slice of a 2D image at max_coords.
+    Given a 2D image of the main lobe with zero values outside the lobe, find the
+    bounding box that encloses all of its non-zero pixels. The l-extent is
+    widened to cover the m-extent where needed (the original near-square
+    heuristic, preserved here).
 
     Args:
-        masked_psf (np.ndarray): A 2D binary mask where the main lobe is True.
-        max_coords (tuple): Coordinates of the peak intensity within the main lobe.
+        masked_psf_2d (np.ndarray): A 2D (l, m) image where the main lobe is
+            non-zero and all other pixels are zero.
     Returns:
-        tuple: Bounding box coordinates (blc, trc) as ((x_min, y_min), (x_max, y_max))
+        tuple: Bounding box corners (blc, trc) as
+            (np.array([l_min, m_min]), np.array([l_max, m_max])), or (None, None)
+            when there are no non-zero pixels.
     """
-    # make slice of 2d image using the first 3 indices (time, freq, pol) of max_coords
-    psf_2d = masked_psf[max_coords[0], max_coords[1], max_coords[2], :, :]
-    valid_pixels = psf_2d != 0
+    valid_pixels = masked_psf_2d != 0
 
     valid_indices = np.where(valid_pixels)
 
     if len(valid_indices[0]) == 0:
         return None, None  # No valid pixels found
 
-    x_min, x_max = valid_indices[0].min(), valid_indices[0].max()
-    y_min, y_max = valid_indices[1].min(), valid_indices[1].max()
+    l_min, l_max = valid_indices[0].min(), valid_indices[0].max()
+    m_min, m_max = valid_indices[1].min(), valid_indices[1].max()
 
     # Ensure the bounding box is square
-    if x_min > y_min:
-        x_min = y_min
-    if x_max < y_max:
-        x_max = y_max
+    if l_min > m_min:
+        l_min = m_min
+    if l_max < m_max:
+        l_max = m_max
 
-    return np.array([x_min, y_min]), np.array([x_max, y_max])
+    return np.array([l_min, m_min]), np.array([l_max, m_max])
+
+
+def _extract_main_lobe_2d(npix_window, threshold, psf_2d):
+    """
+    Extract the main lobe from a single 2D (l, m) PSF slice.
+
+    Args:
+        npix_window (tuple): The size of the search window in pixels.
+        threshold (float): A threshold as a fraction of the peak value used to
+            isolate the main lobe.
+        psf_2d (np.ndarray): A single 2D PSF slice with dimensions (l, m).
+
+    Returns:
+        main_lobe_only (np.ndarray): The 2D slice with everything outside the
+            main lobe zeroed out.
+        blc (np.ndarray): Bottom-left corner of the main lobe as [l, m].
+        trc (np.ndarray): Top-right corner of the main lobe as [l, m].
+        max_sidelobe (float): Largest value outside the main lobe.
+    """
+    n_l, n_m = psf_2d.shape
+
+    # Find the peak intensity of this slice
+    peak_intensity = np.max(psf_2d)
+    if peak_intensity == 0:
+        return (
+            np.zeros_like(psf_2d),
+            np.array([0, 0]),
+            np.array([n_l - 1, n_m - 1]),
+            0.0,  # max_sidelobe is 0.0 if peak_intensity is 0
+        )
+
+    # Locate the peak within this slice
+    peak_l, peak_m = np.unravel_index(np.argmax(psf_2d), psf_2d.shape)
+
+    # Zero everything outside a window centred on the peak to limit the search.
+    # npix_window is enforced odd upstream, so peak +/- npix_window // 2 (with an
+    # inclusive upper bound) yields exactly npix_window pixels centred on the peak.
+    windowed_psf = np.zeros_like(psf_2d)
+    l0 = max(0, peak_l - npix_window[0] // 2)
+    l1 = min(n_l, peak_l + npix_window[0] // 2 + 1)
+    m0 = max(0, peak_m - npix_window[1] // 2)
+    m1 = min(n_m, peak_m + npix_window[1] // 2 + 1)
+    windowed_psf[l0:l1, m0:m1] = psf_2d[l0:l1, m0:m1]
+
+    # Determine a threshold based on the peak intensity
+    abs_threshold = peak_intensity * threshold
+
+    # Create a binary mask where pixels above the threshold are True and use
+    # SciPy's `label` to find connected components within this slice only.
+    binary_mask = windowed_psf > abs_threshold
+    labels, num_features = label(binary_mask)
+
+    # The main lobe is the connected component containing this slice's peak.
+    main_lobe_label = labels[peak_l, peak_m]
+    main_lobe_only = np.where(labels == main_lobe_label, windowed_psf, 0)
+
+    # Largest value that does not belong to the main lobe.
+    max_sidelobe = np.max(psf_2d * (labels != main_lobe_label))
+
+    blc, trc = _get_main_lobe_bounding_box(main_lobe_only)
+    if blc is None:
+        # No non-zero pixels survived; fall back to the full slice.
+        blc = np.array([0, 0])
+        trc = np.array([n_l - 1, n_m - 1])
+    return main_lobe_only, blc, trc, max_sidelobe
 
 
 def extract_main_lobe(npix_window, threshold, psf_image):
     """
-    Extracts the main lobe from a PSF image, within the window defined by npix_window
+    Extracts the main lobe from a PSF image independently for every
+    (time, frequency, polarization) slice.
+
+    Each 2D (l, m) slice is processed on its own, so the returned bounding box
+    and sidelobe level reflect that slice's main lobe rather than a single box
+    derived from the global peak. The window defined by ``npix_window`` is used
     to handle large images efficiently.
 
     Args:
         npix_window (tuple): The size of the window in pixels for searching features.
         threshold (float): A threshold in fraction of peak value for determining the main lobe.
-        psf_image (np.ndarray): The input PSF image with 5 dimensions (time, frequency, polarization, x, y).
+        psf_image (np.ndarray): The input PSF image with 5 dimensions (time, frequency, polarization, l, m).
 
     Returns:
-        np.ndarray: A new array containing only the main lobe, with other regions zeroed out.
-        blc (np.ndarray): Bottom-left corner of the bounding box of the main lobe.
-        trc (np.ndarray): Top-right corner of the bounding box of the main lobe.
+        main_lobe_only (np.ndarray): A 5D array containing only each slice's main
+            lobe, with other regions zeroed out.
+        blc (np.ndarray): Per-slice bottom-left corners of the bounding box,
+            shape (time, frequency, polarization, 2) as [l, m].
+        trc (np.ndarray): Per-slice top-right corners of the bounding box,
+            shape (time, frequency, polarization, 2) as [l, m].
+        max_sidelobe (np.ndarray): Per-slice maximum sidelobe level,
+            shape (time, frequency, polarization).
     """
-    # Find the peak intensity of the image
-    peak_intensity = np.max(psf_image)
-    if peak_intensity == 0:
-        return (
-            np.zeros_like(psf_image),
-            np.array([0, 0]),
-            np.array([psf_image.shape[3] - 1, psf_image.shape[4] - 1]),
-            0.0,  # max_sidelobe is 0.0 if peak_intensity is 0
-        )
-    # find peak location in the psf_image
-    itm, ifrq, ipol, peak_y, peak_x = np.unravel_index(
-        np.argmax(psf_image), psf_image.shape
-    )
-    # print("peak_x, peak_y=", peak_x, peak_y)
+    n_time, n_freq, n_pol = psf_image.shape[0:3]
 
-    # set window outside of psf image to 0
-    windowed_psf = np.zeros_like(psf_image)
-    windowed_psf[
-        :,
-        :,
-        :,
-        max(0, peak_x - npix_window[0] // 2) : min(
-            psf_image.shape[3], peak_x + npix_window[0] // 2
-        ),
-        max(0, peak_y - npix_window[1] // 2) : min(
-            psf_image.shape[4], peak_y + npix_window[1] // 2
-        ),
-    ] = psf_image[
-        :,
-        :,
-        :,
-        max(0, peak_x - npix_window[0] // 2) : min(
-            psf_image.shape[3], peak_x + npix_window[0] // 2
-        ),
-        max(0, peak_y - npix_window[1] // 2) : min(
-            psf_image.shape[4], peak_y + npix_window[1] // 2
-        ),
-    ]
+    main_lobe_only = np.zeros_like(psf_image)
+    blc = np.zeros((n_time, n_freq, n_pol, 2), dtype=int)
+    trc = np.zeros((n_time, n_freq, n_pol, 2), dtype=int)
+    max_sidelobe = np.zeros((n_time, n_freq, n_pol), dtype=np.float64)
 
-    # print("windowed_psf.shape=", windowed_psf.shape)
-    # create sub
-    # Determine a threshold based on the peak intensity
-    abs_threshold = peak_intensity * threshold
+    for itime in range(n_time):
+        for ifreq in range(n_freq):
+            for ipol in range(n_pol):
+                (
+                    lobe_2d,
+                    slice_blc,
+                    slice_trc,
+                    slice_sidelobe,
+                ) = _extract_main_lobe_2d(
+                    npix_window, threshold, psf_image[itime, ifreq, ipol]
+                )
+                main_lobe_only[itime, ifreq, ipol] = lobe_2d
+                blc[itime, ifreq, ipol] = slice_blc
+                trc[itime, ifreq, ipol] = slice_trc
+                max_sidelobe[itime, ifreq, ipol] = slice_sidelobe
 
-    # Create a binary mask where pixels above the threshold are True
-    binary_mask = windowed_psf > abs_threshold
-    # print("binary_mask=", binary_mask)
-    # Use SciPy's `label` to find connected components in the binary mask
-    # This is efficient for large images and helps find distinct lobes
-    labels, num_features = label(binary_mask)
-
-    # Find the label corresponding to the main lobe
-    # We assume the main lobe is the region containing the global maximum
-    max_coords = np.unravel_index(np.argmax(windowed_psf), windowed_psf.shape)
-    main_lobe_label = labels[max_coords]
-
-    # Create a new image containing only the main lobe
-    main_lobe_only = np.where(labels == main_lobe_label, windowed_psf, 0)
-    # return also max sidelobe level?, applying main lobe mask on the original psf_image
-    # masked_main = np.where(labels != main_lobe_label, psf_image, 0)
-    # max_side_lobe = np.max(masked_main)
-    max_sidelobe = np.max(psf_image * (labels != main_lobe_label))
-    # print("maximum sidelobe level: ", max_sidelobe)
-    blc, trc = _get_main_lobe_bounding_box(main_lobe_only, max_coords)
-    # print("extract_main_lobe: blc, trc=", blc, trc)
     return main_lobe_only, blc, trc, max_sidelobe
 
 
@@ -316,14 +354,21 @@ def psf_gaussian_fit_core(
 ):
     """
     core function to fit gaussian to psf
+
+    Each (time, frequency, polarization) slice is fit independently using its
+    own bounding box, so a different main-lobe window may be used per slice.
+
     Parameters
     ----------
     image_to_fit : np.ndarray
-        The input data cube.
+        The input data cube (time, frequency, polarization, l, m).
     blc : np.ndarray
-        The bottom left corner of the fitting window.
+        Bottom-left corner(s) of the fitting window. Either a single ``[l, m]``
+        pair applied to every slice, or a per-slice array of shape
+        ``(time, frequency, polarization, 2)``.
     trc : np.ndarray
-        The top right corner of the fitting window.
+        Top-right corner(s) of the fitting window, with the same shape
+        conventions as ``blc``.
     sampling : np.ndarray
         The sampling of the fitting grid in pixels.
     cutoff : float
@@ -341,27 +386,19 @@ def psf_gaussian_fit_core(
         return ellipse_params + np.nan
     elif np.all(image_to_fit == 0):
         return ellipse_params
-    xmin = blc[0]
-    ymin = blc[1]
-    xmax = trc[0] + 1
-    ymax = trc[1] + 1
-    npix_window = np.array([xmax - xmin, ymax - ymin])
-    image_to_fit = image_to_fit[:, :, :, xmin:xmax, ymin:ymax]
 
-    d0 = np.arange(0, npix_window[0]) * np.abs(delta[0])
-    d1 = np.arange(0, npix_window[1]) * np.abs(delta[1])
-    interp_d0 = np.linspace(0, npix_window[0] - 1, sampling[0]) * np.abs(delta[0])
-    interp_d1 = np.linspace(0, npix_window[1] - 1, sampling[1]) * np.abs(delta[1])
+    n_time, n_chan, n_pol = image_to_fit.shape[0:3]
 
-    d0_shape = interp_d0.shape[0]
-    d1_shape = interp_d1.shape[0]
+    # Normalise blc/trc to per-slice arrays so a single ``[l, m]`` pair is
+    # broadcast to every (time, frequency, polarization) slice, while per-slice
+    # arrays of shape (time, frequency, polarization, 2) are used as-is.
+    blc = np.asarray(blc, dtype=int)
+    trc = np.asarray(trc, dtype=int)
+    if blc.ndim == 1:
+        blc = np.broadcast_to(blc, (n_time, n_chan, n_pol, 2))
+        trc = np.broadcast_to(trc, (n_time, n_chan, n_pol, 2))
 
-    xp_grid = np.repeat(interp_d0, d1_shape).reshape(d0_shape, d1_shape)
-    yp_grid = np.repeat(interp_d1, d0_shape).reshape(d1_shape, d0_shape).T
-
-    points = np.vstack((np.ravel(xp_grid), np.ravel(yp_grid))).T
-
-    # Pre-compute centred coordinate grids for beam_chi2 (constant across iterations)
+    # Pre-compute centred coordinate grids for beam_chi2 (depend only on sampling)
     half_s = sampling // 2
     ix = np.arange(sampling[0]) - half_s[0]
     iy = np.arange(sampling[1]) - half_s[1]
@@ -376,14 +413,35 @@ def psf_gaussian_fit_core(
 
     bound = [(None, None), (None, None), (-np.pi / 2, np.pi / 2)]
 
-    bmaj_scale = np.abs(delta[0] * FWHM_factor / (sampling[0] / npix_window[0]))
-    bmin_scale = np.abs(delta[1] * FWHM_factor / (sampling[1] / npix_window[1]))
-
     def _fit_slice(time, chan, pol):
+        # Each slice uses its own bounding box, so the fitting window and the
+        # interpolation grid are rebuilt per slice.
+        xmin = blc[time, chan, pol, 0]
+        ymin = blc[time, chan, pol, 1]
+        xmax = trc[time, chan, pol, 0] + 1
+        ymax = trc[time, chan, pol, 1] + 1
+        npix_window = np.array([xmax - xmin, ymax - ymin])
+        slice_to_fit = image_to_fit[time, chan, pol, xmin:xmax, ymin:ymax]
+
+        d0 = np.arange(0, npix_window[0]) * np.abs(delta[0])
+        d1 = np.arange(0, npix_window[1]) * np.abs(delta[1])
+        interp_d0 = np.linspace(0, npix_window[0] - 1, sampling[0]) * np.abs(delta[0])
+        interp_d1 = np.linspace(0, npix_window[1] - 1, sampling[1]) * np.abs(delta[1])
+
+        d0_shape = interp_d0.shape[0]
+        d1_shape = interp_d1.shape[0]
+
+        xp_grid = np.repeat(interp_d0, d1_shape).reshape(d0_shape, d1_shape)
+        yp_grid = np.repeat(interp_d1, d0_shape).reshape(d1_shape, d0_shape).T
+        points = np.vstack((np.ravel(xp_grid), np.ravel(yp_grid))).T
+
+        bmaj_scale = np.abs(delta[0] * FWHM_factor / (sampling[0] / npix_window[0]))
+        bmin_scale = np.abs(delta[1] * FWHM_factor / (sampling[1] / npix_window[1]))
+
         interp_image_to_fit = np.reshape(
             interpn(
                 (d0, d1),
-                image_to_fit[time, chan, pol, :, :],
+                slice_to_fit,
                 points,
                 method=interpolation_method,
             ),
@@ -419,7 +477,6 @@ def psf_gaussian_fit_core(
         ellipse_params[time, chan, pol, 1] = np.min(np.abs(res_x[0:2])) * bmin_scale
         ellipse_params[time, chan, pol, 2] = phi
 
-    n_time, n_chan, n_pol = image_to_fit.shape[0:3]
     tasks = [
         (time, chan, pol)
         for time in range(n_time)

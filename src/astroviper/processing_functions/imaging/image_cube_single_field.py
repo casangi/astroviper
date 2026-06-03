@@ -41,6 +41,9 @@ def image_cube_single_field(input_params, ps_xdt, img_xds):
 
         if input_params["iteration_control_params"]["niter"] > 0:
             logger.debug("Doing model update")
+            print("^^^^^^"*10)
+            print(combined_return_dict)
+            print("^^^^^^"*10)
             cycle_niter, cyclethresh = get_calculate_cycle_controls(controller, combined_return_dict, img_xds, is_n_iter_0, iteration_control_params=input_params["iteration_control_params"])
             
             input_params["iteration_control_params"]["cycleniter"] = cycle_niter

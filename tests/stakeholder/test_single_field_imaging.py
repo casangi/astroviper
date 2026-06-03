@@ -648,6 +648,16 @@ def test_single_field_imaging():
             "minpsffraction": 0.05,
             "maxpsffraction": 0.2,
         },
+        # iteration_control_params={
+        #     "niter": 10000,
+        #     "nmajor": 10,
+        #     "threshold": 0.0,
+        #     "gain": 0.1,
+        #     "cyclefactor": 1.5,
+        #     "cycleniter": 1,
+        #     "minpsffraction": 0.05,
+        #     "maxpsffraction": 0.8,
+        # },
         gridder="prolate_spheroidal",
         deconvolver="hogbom",
         scan_intents="OBSERVE_TARGET#ON_SOURCE",
@@ -672,7 +682,8 @@ def test_single_field_imaging():
         overwrite=True,
         disk_chunk_sizes={"frequency": 5},
         vizualize_graph=True,
-        write_visibility_model_to_ps=True
+        write_visibility_model_to_ps=True,
+        fft_backend="scipy"
     )
     img_av_xds = xr.open_zarr(image_store)
     print("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
@@ -707,8 +718,8 @@ def test_single_field_imaging():
     # max_per_dif_residual= [0.0355, 0.0369, 0.0542, 0.0132, 0.01131]
     # min_per_dif_residual = [0.035, 0.0368, 0.0541, 0.0131, 0.0113] 
     
-    max_per_dif_residual= [8.949e-05, 0.0331, 0.000122, 0.001683, 0.001123]
-    min_per_dif_residual = [8.948e-05, 0.033, 0.000121, 0.001682, 0.001122]   
+    max_per_dif_residual= [8.949e-05, 0.0331, 0.000122, 0.001684, 0.001123]
+    min_per_dif_residual = [8.946e-05, 0.033, 0.000121, 0.001682, 0.001122]   
     
     for i_f in range(5):
         # print("Channel ", i_f)
