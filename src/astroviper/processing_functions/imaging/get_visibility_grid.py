@@ -175,8 +175,6 @@ def get_visibility_grid_single_field(
             prolate_spheroidal_degrid,
         )
         
-        print("vis_data array properties and order", vis_data.shape, vis_data.dtype, vis_data.flags)
-        
         prolate_spheroidal_degrid(
             grid,
             vis_data,

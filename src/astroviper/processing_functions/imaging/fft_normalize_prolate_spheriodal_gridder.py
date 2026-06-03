@@ -53,7 +53,6 @@ def _fft_module(backend):
     ValueError
         If ``backend`` is not a recognised string.
     """
-    print("the fft backend is ", backend)
     if backend == "scipy":
         return scipy.fft
     if backend == "pyfftw":
@@ -286,11 +285,6 @@ def fft_norm_img_xds(
     """
 
     _image_params = image_params  # no mutation below; deep copy not needed
-    # print("************" * 10)
-    # print(image_data_group_in_name, image_data_group_out_name, image_data_group_out_modified)
-    # print(img_xds.attrs["data_groups"].keys())
-    # print(img_xds.attrs["data_groups"]["model"])
-    # print("************" * 10)
 
     data_group_in, data_group_out = create_data_groups_in_and_out(
         img_xds,
@@ -300,10 +294,6 @@ def fft_norm_img_xds(
         overwrite=overwrite,
     )
     
-    # print("************" * 10)
-    # print("data_group_in " + str(data_group_in))
-    # print("data_group_out " + str(data_group_out))
-    # print("************" * 10)
     n_uv = (_image_params["fft_padding"] * np.array([img_xds.sizes["l"], img_xds.sizes["m"]])).astype(
         int
     )

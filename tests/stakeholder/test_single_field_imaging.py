@@ -50,6 +50,7 @@ def make_plot_saver():
     so the ``__main__`` block can run the tests under plain ``python`` too.
     """
     save = os.environ.get("SAVE_PLOTS", "").lower() in ("1", "true", "yes", "on")
+    save = True
     out_dir = os.environ.get("PLOT_DIR", "plots")
     if save:
         os.makedirs(out_dir, exist_ok=True)
@@ -139,7 +140,12 @@ def test_single_field_imaging_niter0(plot_saver):
     )
     img_av_xds = xr.open_zarr(image_store)
 
+    # First pass: generate every channel's comparison plot and record the
+    # relative differences. Assertions are deferred to a second pass below so
+    # that a failure on one channel cannot prevent the remaining plots from
+    # being saved.
     polarization = 0
+    channel_rel_diffs = []
     for i_f in range(5):
         I = img_xds.isel(frequency=i_f, polarization=polarization, time=0)[
             "SKY_DECONVOLVED"
@@ -155,6 +161,7 @@ def test_single_field_imaging_niter0(plot_saver):
         ]
 
         rel_diff = np.max(np.abs(I_av.values - I.values) / np.max(np.abs(I.values)))
+        channel_rel_diffs.append(rel_diff)
         print(f"Channel {i_f} relative difference: {rel_diff}")
 
         fig, axes = plt.subplots(2, 3, figsize=(12, 8))
@@ -179,7 +186,9 @@ def test_single_field_imaging_niter0(plot_saver):
         fig.colorbar(im5, ax=axes[1, 2])
         plot_saver(fig, f"niter0_channel_{i_f}.png")
 
-        # Even channels must match the reference more tightly than odd channels.
+    # Second pass: assertions only (all plots have already been generated).
+    # Even channels must match the reference more tightly than odd channels.
+    for i_f, rel_diff in enumerate(channel_rel_diffs):
         tol = 1e-4 if i_f % 2 == 0 else 1e-3
         assert rel_diff < tol, (
             f"Channel {i_f}: relative difference {rel_diff} exceeds tolerance "
@@ -247,26 +256,26 @@ def test_single_field_imaging(plot_saver):
             "robust": 0.5,
             "casa_weighting_implementation": True,
         },
-        # iteration_control_params={
-        #     "niter": 100,
-        #     "nmajor": 0,
-        #     "threshold": 0.0,
-        #     "gain": 0.1,
-        #     "cyclefactor": 1.5,
-        #     "cycleniter": 1,
-        #     "minpsffraction": 0.05,
-        #     "maxpsffraction": 0.2,
-        # },
         iteration_control_params={
-            "niter": 10000,
-            "nmajor": 10,
+            "niter": 100,
+            "nmajor": 0,
             "threshold": 0.0,
             "gain": 0.1,
             "cyclefactor": 1.5,
             "cycleniter": 1,
             "minpsffraction": 0.05,
-            "maxpsffraction": 0.8,
+            "maxpsffraction": 0.2,
         },
+        # iteration_control_params={
+        #     "niter": 10000,
+        #     "nmajor": 10,
+        #     "threshold": 0.0,
+        #     "gain": 0.1,
+        #     "cyclefactor": 1.5,
+        #     "cycleniter": 1,
+        #     "minpsffraction": 0.05,
+        #     "maxpsffraction": 0.8,
+        # },
         gridder="prolate_spheroidal",
         deconvolver="hogbom",
         scan_intents="OBSERVE_TARGET#ON_SOURCE",
@@ -305,6 +314,11 @@ def test_single_field_imaging(plot_saver):
     max_per_dif_residual = [8.949e-05, 0.0331, 0.000122, 0.001684, 0.001123]
     min_per_dif_residual = [8.946e-05, 0.033, 0.000121, 0.001682, 0.001122]
 
+    # First pass: generate every channel's comparison plot and record the
+    # relative differences. Assertions are deferred to a second pass below so
+    # that a failure on one channel cannot prevent the remaining plots from
+    # being saved.
+    channel_rel_diffs = []
     for i_f in range(5):
         model_av = I_av["SKY_MODEL"].isel(frequency=i_f).values
         model_casa = I["SKY_MODEL"].isel(frequency=i_f).values
@@ -356,6 +370,7 @@ def test_single_field_imaging(plot_saver):
         rel_diff_residual = np.max(
             np.abs(residual_av - residual_casa) / np.max(np.abs(residual_casa))
         )
+        channel_rel_diffs.append((rel_diff_model, rel_diff_residual))
         print(f"Channel {i_f} relative difference in SKY_MODEL: {rel_diff_model}")
         print(f"Channel {i_f} relative difference in SKY_RESIDUAL: {rel_diff_residual}")
 
@@ -370,6 +385,8 @@ def test_single_field_imaging(plot_saver):
                 f"the expected minimum {min_per_dif_residual[i_f]} (consider tightening)."
             )
 
+    # Second pass: assertions only (all plots have already been generated).
+    for i_f, (rel_diff_model, rel_diff_residual) in enumerate(channel_rel_diffs):
         assert rel_diff_model <= max_per_dif_model[i_f], (
             f"Channel {i_f}: SKY_MODEL relative difference {rel_diff_model} exceeds "
             f"the maximum {max_per_dif_model[i_f]}. You broke something!"

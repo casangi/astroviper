@@ -79,6 +79,7 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0,
             },
             image_data_variables_keep=['sky'],
             num_threads=input_params["processing_function_threads"],
+            fft_backend=input_params["fft_backend"],
         )
         T_fft_norm = time.time() - start_fft_norm
         
@@ -335,6 +336,8 @@ def make_uv_images_single_field(
     img_data_group_out_name="residual",
     num_threads=1,
 ):
+    import numpy as np
+
     from astroviper.processing_functions.imaging.add_uv_sampling_grid import (
         add_uv_sampling_grid_single_field,
     )
@@ -352,7 +355,17 @@ def make_uv_images_single_field(
         # Create a mask where baseline_antenna1_name does not equal baseline_antenna2_name
         mask = ms_xdt["baseline_antenna1_name"] != ms_xdt["baseline_antenna2_name"]
         # Apply the mask to the Dataset
-        ms_xdt.ds = ms_xdt.ds.where(mask, drop=True)
+        masked_ds = ms_xdt.ds.where(mask, drop=True)
+        # `where(..., drop=True)` indexes baseline_id with an integer array,
+        # which leaves the (numpy-backed) data variables as transposed,
+        # non-C-contiguous views. Downstream C++ kernels (e.g. the degridder in
+        # get_visibility_grid_single_field, reused across major cycles) require
+        # C-contiguous input, so restore C-order before storing the dataset back.
+        for var_name, var in masked_ds.data_vars.items():
+            data = var.data
+            if isinstance(data, np.ndarray) and not data.flags["C_CONTIGUOUS"]:
+                masked_ds[var_name].data = np.ascontiguousarray(data)
+        ms_xdt.ds = masked_ds
         T_vis_mask = T_vis_mask + time.time() - T_start_vis_mask
 
         if is_n_iter_0:
