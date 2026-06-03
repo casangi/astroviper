@@ -233,7 +233,8 @@ def residual_cycle_cube_single_field(ps_xdt, img_xds, input_params, is_n_iter_0,
             image_data_group_in_name=img_residual_data_group_name,
             image_data_group_out_name=img_residual_data_group_name,
             image_data_group_out_modified={
-                "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
+                "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+                "max_sidelobe_point_spread_function": "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
             },
             overwrite=True,
             num_threads=input_params["processing_function_threads"],

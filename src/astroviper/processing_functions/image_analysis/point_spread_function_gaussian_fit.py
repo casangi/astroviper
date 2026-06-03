@@ -22,7 +22,8 @@ def point_spread_function_gaussian_fit(
     image_data_group_in_name="image",
     image_data_group_out_name="image",
     image_data_group_out_modified={
-        "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
+        "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+        "max_sidelobe_point_spread_function": "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
     },
     overwrite=True,
     npix_window: tuple = (41, 41),
@@ -34,12 +35,29 @@ def point_spread_function_gaussian_fit(
     """
     fit 2D gaussian to psf
 
+    For every (time, frequency, polarization) slice the main lobe of the PSF is
+    isolated, a 2D Gaussian is fit to it, and the largest value found outside
+    the main lobe (the maximum sidelobe level) is recorded. Both results are
+    written back into ``img_xds`` as new data variables.
+
     Parameters
     ----------
     img_xds : xarray.Dataset
         The input data cube.
     image_data_group_in_name : str
         The name of the image data group to fit. Default is 'image'.
+    image_data_group_out_name : str
+        The name of the image data group to write the results to. Default is
+        'image'.
+    image_data_group_out_modified : dict
+        Maps the logical output names to the dataset variable names used to
+        store the results. Defaults to writing the Gaussian fit parameters to
+        ``BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION`` (key
+        ``beam_fit_params_point_spread_function``) and the maximum sidelobe
+        level to ``MAX_SIDELOBE_POINT_SPREAD_FUNCTION`` (key
+        ``max_sidelobe_point_spread_function``).
+    overwrite : bool, default True
+        Whether to overwrite an existing output data group of the same name.
     npix_window : tuple
         The size of the search window in pixels. Both values must be odd
         integers so the window is centered on the peak.
@@ -59,7 +77,16 @@ def point_spread_function_gaussian_fit(
     Returns
     -------
     xds : xarray.Dataset
-        The image with the fitted parameters added.
+        The input image with two data variables added (named according to
+        ``image_data_group_out_modified``):
+
+        - ``BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION`` with dims
+          ``(time, frequency, polarization, beam_params)`` holding the fitted
+          ``[major, minor, pa]`` for each slice.
+        - ``MAX_SIDELOBE_POINT_SPREAD_FUNCTION`` with dims
+          ``(time, frequency, polarization)`` holding the maximum sidelobe
+          level (the largest PSF value outside the main lobe) for each slice.
+
         The l and m coordinates of the input data are assumed to be in radians.
         The units of beam size (major and minor) and position angle are in radians.
 
@@ -67,6 +94,8 @@ def point_spread_function_gaussian_fit(
     -----
     - Returns NaN values for beam parameters if the fitting fails
     - L-BFGS-B optimization method is used with bounds on parameters
+    - The maximum sidelobe level is a fraction of the PSF peak (dimensionless);
+      it is ``0.0`` for an all-zero slice.
     """
 
     if not isinstance(npix_window, (list, tuple, np.ndarray)):
@@ -163,15 +192,22 @@ def point_spread_function_gaussian_fit(
             attrs={"unit": "rad"},
         )
     )
-
+    
+    img_xds[image_data_group_out["max_sidelobe_point_spread_function"]] = (
+        xr.DataArray(
+            max_sidelobe,
+            dims=["time", "frequency", "polarization"],
+            attrs={"unit": ""},
+        )
+    )
+    
     modify_data_groups_xds(
         img_xds,
         image_data_group_out_name,
         image_data_group_out,
         description="Added UV sampling grid to img_xds with add_uv_sampling_grid_single_field.",
     )
-
-    print("max_sidelobe", max_sidelobe)
+    
     return img_xds
 
 

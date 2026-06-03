@@ -348,7 +348,7 @@ def create_deconvolution_return_dict(
                     "loop_gain": deconvolve_params.get("gain", None),
                     "min_psf_fraction": min_psf_fraction,
                     "max_psf_fraction": max_psf_fraction,
-                    "max_psf_sidelobe": max_psf_sidelobe,
+                    "max_psf_sidelobe": max_psf_sidelobe[tt, nn, pp],
                     "stop_code": None,
                     "stokes": pol_vals[pp],
                     "frequency": freq_vals[nn],
@@ -464,6 +464,8 @@ def deconvolve(
     residual_name = data_group_in["sky"]
     psf_name = data_group_in["point_spread_function"]
     model_name = data_group_out["sky"]
+    max_sidelobe_point_spread_function_name = data_group_out.get("max_sidelobe_point_spread_function", None)
+    
 
     if model_name not in img_xds.data_vars:
         img_xds[model_name] = xr.zeros_like(img_xds[residual_name])
@@ -502,10 +504,7 @@ def deconvolve(
     residual_arr = img_xds[residual_name].values
     psf_arr = img_xds[psf_name].values
     model_arr = img_xds[model_name].values
-    
-    #max_psf_sidelobe = None  # TODO: compute per (time, freq) via extract_main_lobe
-    #max_psf_sidelobe = extract_main_lobe(npix_window, threshold, psf_arr)
-    max_psf_sidelobe = None
+    max_psf_sidelobe = img_xds[max_sidelobe_point_spread_function_name].values #time, frequency, polarization
 
     # Optional mask cube, matching the residual's shape. The C++ binding
     # accepts a bool mask directly; Python keeps ownership of the buffer.

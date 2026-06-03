@@ -445,8 +445,6 @@ def get_max_psf_sidelobe_from_returndict(
     """
     selected = return_dict.sel(time=time, pol=pol, chan=chan)
     _validate_returndict_selection(return_dict, selected, time, pol, chan)
-    
-    print("selected", selected)
 
     if not isinstance(selected, list):
         selected = [selected] if selected is not None else []
@@ -456,8 +454,6 @@ def get_max_psf_sidelobe_from_returndict(
 
     for entry in selected:
         if entry is not None and "max_psf_sidelobe" in entry:
-            print("entry", entry)
-            print("#@#@#@"*10,max_sidelobe, entry["max_psf_sidelobe"])
             max_sidelobe = max(max_sidelobe, entry["max_psf_sidelobe"])
             found_any = True
 
