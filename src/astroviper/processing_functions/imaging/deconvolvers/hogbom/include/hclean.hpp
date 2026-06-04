@@ -58,9 +58,12 @@ void clean(T* limage, T* limagestep, const T* lpsf,
  * @param ny image height
  * @param nx image width
  * @param xbeg,xend,ybeg,yend per-plane clean box (0-based, exclusive upper)
- * @param niter maximum iterations per plane
+ * @param niter per-plane maximum iterations; flat array of length
+ *              nt*nf*np_img in (t, f, p) C-order (iteration control is
+ *              independent for every time/frequency/polarization plane)
  * @param gain clean loop gain
- * @param thres flux cleaning threshold
+ * @param thres per-plane flux cleaning threshold; flat array of length
+ *              nt*nf*np_img in (t, f, p) C-order
  * @param cspeedup adaptive threshold speedup (0 disables)
  * @param num_threads number of worker threads; clamped to [1, nplanes]
  * @param iter_out output iterations performed per plane, flat
@@ -72,7 +75,7 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
                 int nt, int nf, int np_img, int np_psf,
                 int ny, int nx,
                 int xbeg, int xend, int ybeg, int yend,
-                int niter, T gain, T thres, T cspeedup,
+                const int* niter, T gain, const T* thres, T cspeedup,
                 int num_threads, int* iter_out);
 
 // Explicit template instantiation declarations
@@ -104,7 +107,7 @@ extern template void clean_cube<float>(float* residual_cube, float* model_cube,
                                        int nt, int nf, int np_img, int np_psf,
                                        int ny, int nx,
                                        int xbeg, int xend, int ybeg, int yend,
-                                       int niter, float gain, float thres, float cspeedup,
+                                       const int* niter, float gain, const float* thres, float cspeedup,
                                        int num_threads, int* iter_out);
 
 extern template void clean_cube<double>(double* residual_cube, double* model_cube,
@@ -113,7 +116,7 @@ extern template void clean_cube<double>(double* residual_cube, double* model_cub
                                         int nt, int nf, int np_img, int np_psf,
                                         int ny, int nx,
                                         int xbeg, int xend, int ybeg, int yend,
-                                        int niter, double gain, double thres, double cspeedup,
+                                        const int* niter, double gain, const double* thres, double cspeedup,
                                         int num_threads, int* iter_out);
 
 } // namespace hclean

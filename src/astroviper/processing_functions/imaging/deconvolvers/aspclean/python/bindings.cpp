@@ -100,8 +100,8 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
 
 template <typename T>
 static py::dict cube_impl(py::array residual, py::array psf, py::array model,
-                          py::array mask, double gain, double threshold,
-                          int niter, double fusedthreshold, double psf_width,
+                          py::array mask, double gain, py::array threshold,
+                          py::array niter, double fusedthreshold, double psf_width,
                           int largestscale, int stoppointmode, int norm_method,
                           int num_threads) {
     const int nt = static_cast<int>(residual.shape(0));
@@ -135,6 +135,17 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
         mask_ptr = static_cast<const T*>(ki.ptr);
     }
 
+    // Per-plane iteration control: threshold (float64) and niter (int32) are
+    // (nt, nf, np_img) arrays so every (time, frequency, polarization) plane
+    // is cleaned with its own threshold and iteration limit.
+    const std::vector<py::ssize_t> cshp = {nt, nf, np_img};
+    py::buffer_info thr_info =
+        check_array<double>(threshold, "threshold", 3, cshp, false);
+    py::buffer_info nit_info =
+        check_array<int>(niter, "niter", 3, cshp, false);
+    const double* thr_ptr = static_cast<const double*>(thr_info.ptr);
+    const int* nit_ptr = static_cast<const int*>(nit_info.ptr);
+
     const int nplanes = nt * nf * np_img;
     std::vector<aspclean::AspResult> results(nplanes);
     {
@@ -142,7 +153,7 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
         aspclean::aspclean_cube<T>(
             static_cast<T*>(ri.ptr), static_cast<T*>(mi.ptr),
             static_cast<const T*>(pi.ptr), mask_ptr, nt, nf, np_img, np_psf, nx,
-            ny, gain, threshold, niter, fusedthreshold, psf_width, largestscale,
+            ny, gain, thr_ptr, nit_ptr, fusedthreshold, psf_width, largestscale,
             stoppointmode, norm_method, num_threads, results.data());
     }
 
@@ -175,7 +186,7 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
 
 static py::dict clean_cube_dispatch(py::array residual, py::array psf,
                                     py::array model, py::array mask, double gain,
-                                    double threshold, int niter,
+                                    py::array threshold, py::array niter,
                                     double fusedthreshold, double psf_width,
                                     int largestscale, int stoppointmode,
                                     int norm_method, int num_threads) {
@@ -244,11 +255,14 @@ PYBIND11_MODULE(_aspclean_ext, m) {
     m.def("clean_cube", &clean_cube_dispatch,
           "Run the Asp minor cycle independently on every (time, frequency, "
           "polarization) plane of a 5D cube in place, across num_threads worker "
-          "threads. The PSF cube may be single-polarization (broadcast). Returns "
-          "per-plane arrays of shape (nt, nf, np).",
+          "threads. The PSF cube may be single-polarization (broadcast). "
+          "Iteration control is independent per plane: threshold (float64) and "
+          "niter (int32) are (nt, nf, np) arrays giving each plane its own "
+          "threshold and iteration limit. Returns per-plane arrays of shape "
+          "(nt, nf, np).",
           py::arg("residual"), py::arg("psf"), py::arg("model"),
           py::arg("mask") = py::array(), py::arg("gain") = 0.1,
-          py::arg("threshold") = 0.0, py::arg("niter") = 100,
+          py::arg("threshold") = py::array(), py::arg("niter") = py::array(),
           py::arg("fusedthreshold") = 0.0, py::arg("psf_width") = 0.0,
           py::arg("largestscale") = -1, py::arg("stoppointmode") = -1,
           py::arg("norm_method") = 1, py::arg("num_threads") = 1);

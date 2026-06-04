@@ -153,6 +153,67 @@ def _validate_deconvolve_params(deconvolve_params):
     return deconvolve_params
 
 
+def _per_plane_iteration_controls(deconvolve_params, nt, nf, npol, threshold_dtype):
+    """Build per-plane ``niter`` and ``threshold`` cubes of shape ``(nt, nf, npol)``.
+
+    Iteration control is performed independently for every
+    ``(time, frequency, polarization)`` plane, so the deconvolvers are driven
+    with a per-plane iteration limit and a per-plane threshold rather than
+    single scalars. The per-plane values are taken from
+    ``deconvolve_params['niter_per_plane']`` and
+    ``deconvolve_params['threshold_per_plane']`` when present (these are
+    supplied by the :class:`IterationController`, indexed
+    ``(time, frequency=chan, polarization)``); otherwise the scalar
+    ``niter`` / ``threshold`` are broadcast across all planes for backward
+    compatibility.
+
+    Parameters
+    ----------
+    deconvolve_params : dict
+        Validated parameter dict. May carry ``niter_per_plane`` /
+        ``threshold_per_plane`` ``(nt, nf, npol)`` arrays.
+    nt, nf, npol : int
+        Cube dimensions (time, frequency, polarization).
+    threshold_dtype : numpy dtype
+        Dtype for the returned threshold cube (image dtype for Hogbom,
+        ``float64`` for Asp).
+
+    Returns
+    -------
+    niter_cube : numpy.ndarray
+        ``(nt, nf, npol)`` int32 per-plane iteration limits.
+    threshold_cube : numpy.ndarray
+        ``(nt, nf, npol)`` per-plane thresholds in ``threshold_dtype``.
+    """
+    shape = (nt, nf, npol)
+
+    niter_pp = deconvolve_params.get("niter_per_plane", None)
+    if niter_pp is None:
+        niter_cube = np.full(shape, int(deconvolve_params["niter"]), dtype=np.int32)
+    else:
+        niter_cube = np.ascontiguousarray(niter_pp, dtype=np.int32)
+        if niter_cube.shape != shape:
+            raise ValueError(
+                f"niter_per_plane shape {niter_cube.shape} does not match the "
+                f"image plane grid {shape}"
+            )
+
+    thr_pp = deconvolve_params.get("threshold_per_plane", None)
+    if thr_pp is None:
+        thr_val = deconvolve_params.get("threshold", 0.0)
+        thr_val = 0.0 if thr_val is None else float(thr_val)
+        threshold_cube = np.full(shape, thr_val, dtype=threshold_dtype)
+    else:
+        threshold_cube = np.ascontiguousarray(thr_pp, dtype=threshold_dtype)
+        if threshold_cube.shape != shape:
+            raise ValueError(
+                f"threshold_per_plane shape {threshold_cube.shape} does not "
+                f"match the image plane grid {shape}"
+            )
+
+    return niter_cube, threshold_cube
+
+
 def _plane_peak_abs_signed(arr, mask=None):
     """
     Return the signed value at the absolute-value peak of a 2-D array,
@@ -726,15 +787,21 @@ def hogbom_clean(
         else np.array([], dtype=residual_cube.dtype)
     )
 
+    # Per-plane iteration control: each (time, frequency, polarization) plane
+    # is cleaned with its own iteration limit and threshold.
+    niter_cube, threshold_cube = _per_plane_iteration_controls(
+        deconvolve_params, nt, nf, npol_img, residual_cube.dtype
+    )
+
     return hogbom.clean_cube(
         residual_cube=residual_cube,
         psf_cube=psf_cube,
         model_cube=model_cube,
         mask_cube=mask_arg,
         clean_box=clean_box,
-        max_iter=deconvolve_params["niter"],
+        max_iter=niter_cube,
         gain=deconvolve_params["gain"],
-        threshold=deconvolve_params["threshold"],
+        threshold=threshold_cube,
         num_threads=int(num_threads),
     )
 
@@ -877,6 +944,13 @@ def asp_clean(
     else:
         mask_arg = np.array([], dtype=residual_cube.dtype)
 
+    # Per-plane iteration control: each (time, frequency, polarization) plane
+    # is cleaned with its own iteration limit and threshold. Asp uses a
+    # float64 threshold regardless of the image dtype.
+    niter_cube, threshold_cube = _per_plane_iteration_controls(
+        deconvolve_params, nt, nf, npol_img, np.float64
+    )
+
     #print("@@@@@@@@@@@@@@@@@@@@. ASP clean ")
     return aspclean.clean_cube(
         residual=residual_cube,
@@ -884,8 +958,8 @@ def asp_clean(
         model=model_cube,
         mask=mask_arg,
         gain=deconvolve_params["gain"],
-        threshold=deconvolve_params["threshold"],
-        niter=deconvolve_params["niter"],
+        threshold=threshold_cube,
+        niter=niter_cube,
         fusedthreshold=deconvolve_params.get("fusedthreshold", 0.0),
         psf_width=deconvolve_params.get("psf_width", 0.0),
         largestscale=deconvolve_params.get("largestscale", -1),

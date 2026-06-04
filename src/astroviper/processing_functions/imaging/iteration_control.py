@@ -5,6 +5,21 @@ This module implements iteration control logic for deconvolution processes,
 adapted from CASA's iteration control implementation in _gclean.py and
 imager_return_dict.py. It has been streamlined to work with AstroViper's
 ReturnDict structure while retaining all original functionality.
+
+Per-plane iteration control
+----------------------------
+All iteration control is performed independently for every
+``(time, chan(frequency), pol)`` plane. Concretely:
+
+- ``niter`` is a per-plane array of remaining iterations
+  (:attr:`IterationController.niter`, shape ``(ntime, nchan, npol)``);
+- every stopping criterion (zero mask, iteration limit, threshold, major-cycle
+  limit) is evaluated per plane, and each plane carries its own stop code;
+- thresholds may differ per plane — :meth:`IterationController.per_plane_cycle_threshold`
+  produces a per-plane cyclethreshold array, and the deconvolvers accept
+  per-plane ``niter`` and ``threshold`` arrays.
+
+The major-cycle loop continues while *any* plane is still active.
 """
 
 import numpy as np
@@ -545,12 +560,28 @@ class IterationController:
     done, etc.) from ReturnDict internally, so callers don't need to manually
     pass individual values.
 
+    Per-plane iteration control
+    ---------------------------
+    All iteration control is performed independently for every
+    ``(time, chan(frequency), pol)`` plane. ``niter`` is a per-plane array,
+    each plane carries its own stop code, and thresholds may differ per plane
+    (:meth:`per_plane_cycle_threshold`). The deconvolvers are driven with
+    per-plane ``niter`` and ``threshold`` arrays. The major-cycle loop
+    continues while *any* plane is still active; the aggregate ``stopcode``
+    reported by :meth:`check_convergence` is CONTINUE until every plane has
+    stopped.
+
     Attributes:
     -----------
-    niter : int
-        Maximum number of minor cycle iterations remaining
+    niter : numpy.ndarray or None
+        Per-plane remaining minor-cycle iterations, shape
+        ``(ntime, nchan, npol)`` indexed ``(time, chan, pol)``. Allocated
+        lazily the first time a ReturnDict is seen (the cube shape is unknown
+        at construction); ``None`` until then. ``_initial_niter`` holds the
+        scalar per-plane budget.
     nmajor : int
-        Maximum number of major cycles remaining (-1 = unlimited)
+        Maximum number of major cycles remaining (-1 = unlimited). Major cycles
+        are global (shared across all planes).
     threshold : float
         Global stopping threshold (in Jy or image units)
     gain : float
@@ -626,9 +657,14 @@ class IterationController:
         nsigma : float, optional
             N-sigma threshold for stopping (default: 0.0, disabled)
         """
-        # Iteration limits
+        # Iteration limits. niter is per-plane and allocated lazily (the cube
+        # shape is not known until the first ReturnDict is seen); until then
+        # _initial_niter holds the scalar per-plane budget. See _ensure_state.
         self._initial_niter = niter
-        self.niter = niter
+        self.niter = None
+        # Per-plane stop codes, same shape as self.niter (allocated lazily).
+        self.stopcode_major = None
+        self.stopcode_minor = None
         self.nmajor = nmajor
 
         # Threshold parameters
@@ -646,9 +682,93 @@ class IterationController:
         self.major_done = 0
         self.total_iter_done = 0
 
-        # Convergence state (namedtuple matching CASA)
+        # Convergence state (namedtuple matching CASA). self.stopcode is the
+        # aggregate over all planes; per-plane codes live in stopcode_major /
+        # stopcode_minor (allocated lazily alongside niter).
         self.stopcode = StopCode(major=MAJOR_CONTINUE, minor=MINOR_CONTINUE)
         self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_CONTINUE]
+
+    # ------------------------------------------------------------------
+    # Per-plane state helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _matches(key, time, pol, chan):
+        """True if a ReturnDict key matches the (time, pol, chan) selection."""
+        return (
+            (time is None or key.time == time)
+            and (pol is None or key.pol == pol)
+            and (chan is None or key.chan == chan)
+        )
+
+    @staticmethod
+    def _key_index(key):
+        """Map a ReturnDict Key(time, pol, chan) to a (time, chan, pol) index.
+
+        The per-plane arrays follow the image-cube axis order
+        ``(time, chan, pol)``, whereas ReturnDict keys are
+        ``(time, pol, chan)``.
+        """
+        return (int(key.time), int(key.chan), int(key.pol))
+
+    @staticmethod
+    def _latest(entry, field, default=0.0):
+        """Return the most recent value of a (possibly history-tracked) field."""
+        if field not in entry:
+            return default
+        value = entry[field]
+        if isinstance(value, list):
+            return value[-1] if value else default
+        return value
+
+    def _ensure_shape(self, needed):
+        """Allocate (or grow) the per-plane arrays to the ``needed`` shape.
+
+        ``needed`` is ``(ntime, nchan, npol)``. Newly allocated planes start at
+        the full per-plane budget (``_initial_niter``) with a CONTINUE stop
+        code. Growing only ever enlarges the arrays (existing values kept).
+        """
+        if self.niter is None:
+            self.niter = np.full(needed, self._initial_niter, dtype=int)
+            self.stopcode_major = np.full(needed, MAJOR_CONTINUE, dtype=int)
+            self.stopcode_minor = np.full(needed, MINOR_CONTINUE, dtype=int)
+        elif any(n > c for n, c in zip(needed, self.niter.shape)):
+            grown = tuple(max(n, c) for n, c in zip(needed, self.niter.shape))
+            sl = tuple(slice(0, d) for d in self.niter.shape)
+            for attr, fill in (
+                ("niter", self._initial_niter),
+                ("stopcode_major", MAJOR_CONTINUE),
+                ("stopcode_minor", MINOR_CONTINUE),
+            ):
+                new = np.full(grown, fill, dtype=int)
+                new[sl] = getattr(self, attr)
+                setattr(self, attr, new)
+
+    def ensure_planes(self, ntime, nchan, npol):
+        """Pre-allocate per-plane state for an ``(ntime, nchan, npol)`` cube.
+
+        Iteration control is performed independently for every
+        ``(time, chan, pol)`` plane. Callers that know the cube shape up front
+        (e.g. before the first deconvolution) call this so that ``niter`` is a
+        fully-sized per-plane array by the time the deconvolver needs it.
+        """
+        self._ensure_shape((int(ntime), int(nchan), int(npol)))
+
+    def _ensure_state(self, return_dict):
+        """Allocate (or grow) the per-plane arrays to cover ``return_dict``.
+
+        The cube shape is inferred from the ReturnDict keys (max index + 1 on
+        each axis). A no-op when the ReturnDict is empty.
+        """
+        keys = list(return_dict.data.keys())
+        if not keys:
+            return
+        needed = (
+            max(k.time for k in keys) + 1,
+            max(k.chan for k in keys) + 1,
+            max(k.pol for k in keys) + 1,
+        )
+        self._ensure_shape(needed)
 
     def calculate_cycle_controls(
         self,
@@ -707,8 +827,14 @@ class IterationController:
             return_dict, use_mask=True, time=time, pol=pol, chan=chan
         )
 
-        # Start with all remaining iterations
-        use_cycleniter = self.niter
+        # Start with all remaining iterations. The deconvolver takes a single
+        # scalar cycleniter, so the per-plane budget is reduced to the largest
+        # remaining budget across planes. Before the per-plane array exists,
+        # fall back to the initial per-plane budget.
+        if self.niter is None:
+            use_cycleniter = self._initial_niter
+        else:
+            use_cycleniter = int(self.niter.max())
 
         # If user forced a specific cycleniter, respect it
         if self.cycleniter >= 0:
@@ -726,6 +852,58 @@ class IterationController:
         cyclethreshold = max(cyclethreshold, self.threshold)
 
         return int(use_cycleniter), cyclethreshold
+
+    def per_plane_cycle_threshold(
+        self,
+        return_dict: ReturnDict,
+        time: Optional[int] = None,
+        pol: Optional[int] = None,
+        chan: Optional[int] = None,
+    ) -> "np.ndarray":
+        """Compute the per-plane minor-cycle threshold array.
+
+        Thresholds are allowed to differ for every ``(time, chan, pol)`` plane.
+        Each plane present in ``return_dict`` gets its own cyclethreshold::
+
+            clamp(max_psf_sidelobe * cyclefactor, minpsffraction, maxpsffraction)
+                * peak_residual,
+
+        floored at the global ``threshold``. Planes not present in
+        ``return_dict`` fall back to the global scalar cyclethreshold from
+        :meth:`calculate_cycle_controls`.
+
+        Parameters
+        ----------
+        return_dict : ReturnDict
+            Per-plane statistics (``peakres`` and ``max_psf_sidelobe``).
+        time, pol, chan : int, optional
+            Restrict the computation to a selection (otherwise all planes).
+
+        Returns
+        -------
+        numpy.ndarray
+            ``(ntime, nchan, npol)`` array of per-plane thresholds, indexed
+            ``(time, chan, pol)`` to match :attr:`niter`.
+        """
+        self._ensure_state(return_dict)
+        # Global cyclethreshold used as the fallback for any plane that has no
+        # entry in return_dict.
+        _, global_threshold = self.calculate_cycle_controls(
+            return_dict, time=time, pol=pol, chan=chan
+        )
+        thresh = np.full(self.niter.shape, global_threshold, dtype=float)
+        for key, fields in return_dict.data.items():
+            if not self._matches(key, time, pol, chan):
+                continue
+            idx = self._key_index(key)
+            peak = abs(self._latest(fields, "peakres", 0.0))
+            sidelobe = self._latest(fields, "max_psf_sidelobe", 0.2)
+            frac = min(
+                max(sidelobe * self.cyclefactor, self.minpsffraction),
+                self.maxpsffraction,
+            )
+            thresh[idx] = max(frac * peak, self.threshold)
+        return thresh
 
     def check_convergence(
         self,
@@ -774,19 +952,23 @@ class IterationController:
         Returns:
         --------
         stopcode : StopCode
-            Named tuple StopCode(major, minor) with integer codes
-            Access via stopcode.major and stopcode.minor
-            major=0, minor=0 means continue
+            Aggregate StopCode(major, minor) across the selected planes.
+            major=0 (CONTINUE) while *any* selected plane is still active;
+            once every plane has stopped it is a representative nonzero code
+            (the shared code if uniform, else the largest). Per-plane codes
+            are available in ``stopcode_major`` / ``stopcode_minor``.
 
         stopdescription : str
-            Human-readable description of stop reason
+            Human-readable description of the aggregate stop reason.
 
         Side Effects:
         -------------
-        Writes the resulting StopCode and its description into the
-        'stop_code' and 'stop_description' fields of every plane in
-        ``return_dict`` matching the time/pol/chan selection, overwriting
-        the placeholder value set by the deconvolver.
+        Evaluates each selected ``(time, pol, chan)`` plane independently and
+        writes that plane's own StopCode and description into the 'stop_code'
+        and 'stop_description' fields of the corresponding ReturnDict entry,
+        overwriting the placeholder set by the deconvolver. Also allocates /
+        updates the per-plane ``niter``, ``stopcode_major`` and
+        ``stopcode_minor`` arrays.
 
         Example:
         --------
@@ -799,57 +981,61 @@ class IterationController:
         >>> if stopcode.major != 0 or stopcode.minor != 0:
         >>>     print(f"Stopped: major={stopcode.major}, minor={stopcode.minor}")
         """
-        # Extract needed values from ReturnDict
-        peak_residual = get_peak_residual_from_returndict(
-            return_dict, use_mask=True, time=time, pol=pol, chan=chan
-        )
-        masksum = get_masksum_from_returndict(
-            return_dict, time=time, pol=pol, chan=chan
-        )
+        self._ensure_state(return_dict)
 
-        # Initialize stop codes
-        stopcode_maj = MAJOR_CONTINUE
-        stopcode_min = MINOR_CONTINUE
-
-        # Check major cycle stopping criteria (in priority order)
-
-        # Priority 1: Check for zero mask
-        if masksum == 0:
-            stopcode_maj = MAJOR_ZERO_MASK
-            self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_ZERO_MASK]
-        # Priority 2: Check iteration limit
-        elif self.niter <= 0:
-            stopcode_maj = MAJOR_ITER_LIMIT
-            self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_ITER_LIMIT]
-        # Priority 3: Check threshold (with tolerance matching CASA)
-        elif self.threshold > 0 and peak_residual <= self.threshold:
-            stopcode_maj = MAJOR_THRESHOLD
-            self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_THRESHOLD]
-        # Priority 4: Check major cycle limit
-        elif self.nmajor != -1 and self.nmajor <= 0:
-            stopcode_maj = MAJOR_CYCLE_LIMIT
-            self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_CYCLE_LIMIT]
-        else:
-            # No stopping criteria met
-            self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_CONTINUE]
-
-        # Update internal state
-        self.stopcode = StopCode(major=stopcode_maj, minor=stopcode_min)
-
-        # Record the resulting stop code and description on every plane
-        # covered by this selection so they are preserved in the ReturnDict
-        # (overwriting the placeholder 'stop_code' set by the deconvolver).
-        # Written directly rather than via add() so they replace the single
-        # value in place instead of being appended as history.
+        # Evaluate every selected plane independently and record its own stop
+        # code. The aggregate returned to the caller is CONTINUE while any
+        # plane is still active.
+        plane_majors = []
         for key, fields in return_dict.data.items():
-            if (
-                (time is None or key.time == time)
-                and (pol is None or key.pol == pol)
-                and (chan is None or key.chan == chan)
-            ):
-                fields["stop_code"] = self.stopcode
-                fields["stop_description"] = self.stopdescription
+            if not self._matches(key, time, pol, chan):
+                continue
+            idx = self._key_index(key)
+            peak_residual = abs(self._latest(fields, "peakres", 0.0))
+            masksum = self._latest(fields, "masksum", 0)
+            remaining = int(self.niter[idx])
 
+            # Major cycle stopping criteria, in priority order (per plane):
+            #   1 zero mask, 2 iteration limit, 3 threshold, 4 major-cycle limit
+            if masksum == 0:
+                maj = MAJOR_ZERO_MASK
+            elif remaining <= 0:
+                maj = MAJOR_ITER_LIMIT
+            elif self.threshold > 0 and peak_residual <= self.threshold:
+                maj = MAJOR_THRESHOLD
+            elif self.nmajor != -1 and self.nmajor <= 0:
+                maj = MAJOR_CYCLE_LIMIT
+            else:
+                maj = MAJOR_CONTINUE
+
+            self.stopcode_major[idx] = maj
+            self.stopcode_minor[idx] = MINOR_CONTINUE
+            plane_majors.append(maj)
+
+            # Stamp this plane's stop code/description into the ReturnDict,
+            # replacing the placeholder set by the deconvolver. Written
+            # directly (not via add()) so it stays a single value.
+            fields["stop_code"] = StopCode(major=maj, minor=MINOR_CONTINUE)
+            fields["stop_description"] = MAJOR_STOPCODE_DESCRIPTIONS[maj]
+
+        # Aggregate across the selected planes.
+        if not plane_majors:
+            # No matching planes (e.g. an empty ReturnDict): nothing left to
+            # clean, so report a stop (matches the historical zero-mask result).
+            agg_major = MAJOR_ZERO_MASK
+            self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_ZERO_MASK]
+        elif any(m == MAJOR_CONTINUE for m in plane_majors):
+            agg_major = MAJOR_CONTINUE
+            self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_CONTINUE]
+        elif len(set(plane_majors)) == 1:
+            agg_major = plane_majors[0]
+            self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[agg_major]
+        else:
+            # All planes stopped, but for different reasons.
+            agg_major = max(plane_majors)
+            self.stopdescription = "All planes stopped (mixed reasons)"
+
+        self.stopcode = StopCode(major=agg_major, minor=MINOR_CONTINUE)
         return self.stopcode, self.stopdescription
 
     def update_counts(
@@ -900,25 +1086,28 @@ class IterationController:
         ):
             return
 
-        # Extract iterations done from ReturnDict
-        iterations_done = get_iterations_done_from_returndict(
-            return_dict, time=time, pol=pol, chan=chan
-        )
+        self._ensure_state(return_dict)
 
-        # Decrement major cycle count (if not unlimited)
+        # Decrement the global major cycle count (major cycles are shared
+        # across planes) once per call.
         if self.nmajor != -1:
-            self.nmajor -= 1
-            if self.nmajor < 0:
-                self.nmajor = 0
+            self.nmajor = max(self.nmajor - 1, 0)
 
-        # Decrement iteration count
-        self.niter -= iterations_done
-        if self.niter < 0:
-            self.niter = 0
+        # Decrement each selected plane's remaining iterations by the work it
+        # did this cycle. Planes that already stopped are left untouched.
+        cycle_iters = 0
+        for key, fields in return_dict.data.items():
+            if not self._matches(key, time, pol, chan):
+                continue
+            idx = self._key_index(key)
+            iters = int(self._latest(fields, "iter_done", 0))
+            if self.stopcode_major[idx] == MAJOR_CONTINUE:
+                self.niter[idx] = max(int(self.niter[idx]) - iters, 0)
+            cycle_iters += iters
 
         # Update tracking counters
         self.major_done += 1
-        self.total_iter_done += iterations_done
+        self.total_iter_done += cycle_iters
 
     def update_parameters(
         self,
@@ -959,13 +1148,16 @@ class IterationController:
         error_message : str
             Empty string if successful, error description if failed
         """
-        # Update and validate niter
+        # Update and validate niter (the per-plane budget). Broadcast to all
+        # existing planes if the per-plane array has already been allocated.
         if niter is not None:
             try:
                 niter_int = int(niter)
                 if niter_int < -1:
                     return -1, "niter must be >= -1"
-                self.niter = niter_int
+                self._initial_niter = niter_int
+                if self.niter is not None:
+                    self.niter[...] = niter_int
             except (ValueError, TypeError):
                 return -1, "niter must be an integer"
 
@@ -1035,16 +1227,22 @@ class IterationController:
 
     def reset(self) -> None:
         """Reset the iteration controller to initial state."""
-        self.niter = self._initial_niter
+        if self.niter is not None:
+            self.niter[...] = self._initial_niter
+            self.stopcode_major[...] = MAJOR_CONTINUE
+            self.stopcode_minor[...] = MINOR_CONTINUE
         self.major_done = 0
         self.total_iter_done = 0
         self.stopcode = StopCode(major=MAJOR_CONTINUE, minor=MINOR_CONTINUE)
         self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_CONTINUE]
 
     def reset_stopcode(self) -> None:
-        """Reset the stopcode of the iteration controller"""
+        """Reset the aggregate and per-plane stop codes of the controller."""
         self.stopcode = StopCode(major=MAJOR_CONTINUE, minor=MINOR_CONTINUE)
         self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_CONTINUE]
+        if self.stopcode_major is not None:
+            self.stopcode_major[...] = MAJOR_CONTINUE
+            self.stopcode_minor[...] = MINOR_CONTINUE
 
     def get_state(self) -> Dict[str, Any]:
         """Get current state of the iteration controller as a dictionary.
@@ -1053,7 +1251,7 @@ class IterationController:
         to preserve the namedtuple structure across serialization.
         """
         return {
-            "niter": self.niter,
+            "niter": self.niter.tolist() if self.niter is not None else None,
             "nmajor": self.nmajor,
             "initial_niter": self._initial_niter,
             "threshold": self.threshold,

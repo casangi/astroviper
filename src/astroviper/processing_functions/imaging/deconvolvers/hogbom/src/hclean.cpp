@@ -214,7 +214,7 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
                 int nt, int nf, int np_img, int np_psf,
                 int ny, int nx,
                 int xbeg, int xend, int ybeg, int yend,
-                int niter, T gain, T thres, T cspeedup,
+                const int* niter, T gain, const T* thres, T cspeedup,
                 int num_threads, int* iter_out) {
 
     const int nplanes = nt * nf * np_img;
@@ -252,10 +252,12 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
                 : nullptr;
 
             int iter_val = 0;
+            // Iteration control is independent per plane: each (t, f, p)
+            // plane uses its own maximum iteration count and threshold.
             clean<T>(model, residual, psf,
                      domask, mask,
                      nx, ny, xbeg, xend, ybeg, yend,
-                     niter, 0, iter_val, gain, thres, cspeedup,
+                     niter[plane], 0, iter_val, gain, thres[plane], cspeedup,
                      noop_msgput, noop_stopnow);
             iter_out[plane] = iter_val;
         }
@@ -308,7 +310,7 @@ template void clean_cube<float>(float* residual_cube, float* model_cube,
                                 int nt, int nf, int np_img, int np_psf,
                                 int ny, int nx,
                                 int xbeg, int xend, int ybeg, int yend,
-                                int niter, float gain, float thres, float cspeedup,
+                                const int* niter, float gain, const float* thres, float cspeedup,
                                 int num_threads, int* iter_out);
 
 template void clean_cube<double>(double* residual_cube, double* model_cube,
@@ -317,7 +319,7 @@ template void clean_cube<double>(double* residual_cube, double* model_cube,
                                  int nt, int nf, int np_img, int np_psf,
                                  int ny, int nx,
                                  int xbeg, int xend, int ybeg, int yend,
-                                 int niter, double gain, double thres, double cspeedup,
+                                 const int* niter, double gain, const double* thres, double cspeedup,
                                  int num_threads, int* iter_out);
 
 } // namespace hclean

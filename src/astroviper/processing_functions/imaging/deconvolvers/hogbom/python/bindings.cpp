@@ -99,6 +99,43 @@ static py::buffer_info validate_inplace_cube(py::array& arr,
 }
 
 /**
+ * Validate a per-plane control array: dtype U, 3D with shape
+ * (nt, nf, np_dim), and C-contiguous. Returns the buffer_info so the caller
+ * can extract the raw pointer (length nt*nf*np_dim in (t, f, p) C-order)
+ * without any copy. Used for the per-plane niter and threshold arrays so
+ * that iteration control is independent for each (time, frequency,
+ * polarization) plane.
+ */
+template<typename U>
+static py::buffer_info validate_per_plane_array(py::array& arr,
+                                                const char* name,
+                                                int nt, int nf, int np_dim) {
+    if (!arr.dtype().is(py::dtype::of<U>())) {
+        throw std::runtime_error(
+            std::string(name) + " has wrong dtype; expected " +
+            py::cast<std::string>(py::dtype::of<U>().attr("name")) +
+            " but got " + py::cast<std::string>(arr.dtype().attr("name")));
+    }
+    if (!(arr.flags() & py::array::c_style)) {
+        throw std::runtime_error(
+            std::string(name) + " must be C-contiguous");
+    }
+    py::buffer_info info = arr.request(false);
+    if (info.ndim != 3) {
+        throw std::runtime_error(
+            std::string(name) +
+            " must be a 3D array (time, frequency, polarization)");
+    }
+    if (info.shape[0] != nt || info.shape[1] != nf || info.shape[2] != np_dim) {
+        throw std::runtime_error(
+            std::string(name) + " has wrong shape; expected (" +
+            std::to_string(nt) + ", " + std::to_string(nf) + ", " +
+            std::to_string(np_dim) + ")");
+    }
+    return info;
+}
+
+/**
  * Templated maximg wrapper. The image is templated on T (float/double); the
  * mask is always bool. The mask is validated as zero-copy: it must be a
  * C-contiguous bool array matching the image's spatial shape.
@@ -288,9 +325,9 @@ py::dict hclean_cube_impl(
     py::array model_cube,
     py::array mask_cube,
     py::tuple clean_box,
-    int max_iter,
+    py::array max_iter,
     T gain,
-    T threshold,
+    py::array threshold,
     T speedup,
     int num_threads
 ) {
@@ -365,6 +402,16 @@ py::dict hclean_cube_impl(
         yend = std::max(ybeg + 1, std::min(yend, ny));
     }
 
+    // Per-plane iteration control: niter (int32) and threshold (T) are
+    // (nt, nf, np_img) arrays so every (time, frequency, polarization) plane
+    // is cleaned with its own iteration limit and threshold.
+    py::buffer_info niter_info = validate_per_plane_array<int>(
+        max_iter, "max_iter", nt, nf, np_img);
+    py::buffer_info thres_info = validate_per_plane_array<T>(
+        threshold, "threshold", nt, nf, np_img);
+    const int* niter_ptr = static_cast<const int*>(niter_info.ptr);
+    const T* thres_ptr = static_cast<const T*>(thres_info.ptr);
+
     const int nplanes = nt * nf * np_img;
     std::vector<int> iter_out(nplanes, 0);
 
@@ -379,7 +426,7 @@ py::dict hclean_cube_impl(
             nt, nf, np_img, np_psf,
             ny, nx,
             xbeg, xend, ybeg, yend,
-            max_iter, gain, threshold, speedup,
+            niter_ptr, gain, thres_ptr, speedup,
             num_threads, iter_out.data());
     }
 
@@ -420,7 +467,7 @@ py::dict hclean_cube_impl(
                 const int lin = (tt * nf + nn) * np_img + pp;
                 fp[lin] = fp_val;
                 tf[lin] = total;
-                cv[lin] = (fp_val <= threshold);
+                cv[lin] = (fp_val <= thres_ptr[lin]);
             }
         }
     }
@@ -482,9 +529,9 @@ static py::dict clean_cube_dispatch(
     py::array model_cube,
     py::array mask_cube,
     py::tuple clean_box,
-    int max_iter,
+    py::array max_iter,
     double gain,
-    double threshold,
+    py::array threshold,
     double speedup,
     int num_threads
 ) {
@@ -494,7 +541,7 @@ static py::dict clean_cube_dispatch(
             residual_cube, psf_cube, model_cube, mask_cube,
             clean_box, max_iter,
             static_cast<float>(gain),
-            static_cast<float>(threshold),
+            threshold,
             static_cast<float>(speedup),
             num_threads);
     } else if (dt.is(py::dtype::of<double>())) {
@@ -555,16 +602,20 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           "cube, parallelized across planes with std::thread. The "
           "residual and model cubes are modified in place; the PSF cube "
           "may be single-polarization to broadcast across image pols. "
-          "Returns per-plane arrays of iterations_performed, final_peak, "
-          "total_flux_cleaned, and converged with shape (nt, nf, np).",
+          "Iteration control is independent per plane: max_iter and "
+          "threshold are (nt, nf, np) arrays (int32 and matching the image "
+          "dtype respectively) giving each (time, frequency, polarization) "
+          "plane its own iteration limit and threshold. Returns per-plane "
+          "arrays of iterations_performed, final_peak, total_flux_cleaned, "
+          "and converged with shape (nt, nf, np).",
           py::arg("residual_cube"),
           py::arg("psf_cube"),
           py::arg("model_cube"),
           py::arg("mask_cube") = py::array(),
           py::arg("clean_box") = py::make_tuple(-1, -1, -1, -1),
-          py::arg("max_iter") = 100,
+          py::arg("max_iter") = py::array(),
           py::arg("gain") = 0.1,
-          py::arg("threshold") = 0.0,
+          py::arg("threshold") = py::array(),
           py::arg("speedup") = 0.0,
           py::arg("num_threads") = 1);
 

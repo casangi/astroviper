@@ -62,10 +62,15 @@ AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
 // plane of a 5-D cube [nt, nf, np, ny, nx], in place, across `num_threads`
 // worker threads. The PSF cube may have np_psf == np_img or np_psf == 1
 // (Stokes-I broadcast). `results` must have length nt*nf*np_img.
+//
+// Iteration control is independent per plane: `threshold` and `niter` are
+// per-plane arrays of length nt*nf*np_img in (t, f, p) C-order, so every
+// (time, frequency, polarization) plane is cleaned with its own threshold
+// and iteration limit.
 template <typename T>
 void aspclean_cube(T* residual, T* model, const T* psf, const T* mask,
                    int nt, int nf, int np_img, int np_psf, int nx, int ny,
-                   double gain, double threshold, int niter,
+                   double gain, const double* threshold, const int* niter,
                    double fusedthreshold, double psf_width, int largestscale,
                    int stoppointmode, int norm_method, int num_threads,
                    AspResult* results);

@@ -41,10 +41,22 @@ def image_cube_single_field(input_params, ps_xdt, img_xds):
 
         if input_params["iteration_control_params"]["niter"] > 0:
             logger.debug("Doing model update")
-            cycle_niter, cyclethresh = get_calculate_cycle_controls(controller, combined_deconvolve_dict, img_xds, is_n_iter_0, iteration_control_params=input_params["iteration_control_params"])
-            
+            # Size the controller's per-plane state to this cube so iteration
+            # control (niter and threshold) is tracked independently for every
+            # (time, frequency, polarization) plane before the deconvolver runs.
+            controller.ensure_planes(
+                img_xds.sizes["time"],
+                img_xds.sizes["frequency"],
+                img_xds.sizes["polarization"],
+            )
+            cycle_niter, cyclethresh, threshold_per_plane = get_calculate_cycle_controls(controller, combined_deconvolve_dict, img_xds, is_n_iter_0, iteration_control_params=input_params["iteration_control_params"])
+
             input_params["iteration_control_params"]["cycleniter"] = cycle_niter
             input_params["iteration_control_params"]["threshold"] = cyclethresh
+            # Per-plane iteration control handed to the deconvolver: remaining
+            # iterations per plane and the per-plane cyclethreshold.
+            input_params["iteration_control_params"]["niter_per_plane"] = controller.niter
+            input_params["iteration_control_params"]["threshold_per_plane"] = threshold_per_plane
             start = time.time()
             deconvolve_dict = model_update_cycle_cube_single_field(img_xds, input_params, is_n_iter_0=is_n_iter_0, num_threads=input_params["processing_function_threads"], img_data_group_in_name = "residual", img_data_group_out_name = "model")
             T_model_update_cycle = T_model_update_cycle + time.time() - start
@@ -109,13 +121,16 @@ def get_calculate_cycle_controls(controller,combined_deconvolve_dict, img_xds, i
             pol=0,
             chan=0,
         )
-        cycle_niter, cyclethresh = controller.calculate_cycle_controls(temp_rd)
+        rd = temp_rd
     else:
-        cycle_niter, cyclethresh = controller.calculate_cycle_controls(
-            combined_deconvolve_dict
-        )
+        rd = combined_deconvolve_dict
 
-    return cycle_niter, cyclethresh
+    cycle_niter, cyclethresh = controller.calculate_cycle_controls(rd)
+    # Per-plane cyclethreshold so each (time, chan, pol) plane can use its own
+    # threshold (falls back to the global value for planes without data).
+    threshold_per_plane = controller.per_plane_cycle_threshold(rd)
+
+    return cycle_niter, cyclethresh, threshold_per_plane
 
 
 def format_deconvolve_dict(combined_deconvolve_dict, float_format="{:.6g}"):

@@ -870,7 +870,7 @@ AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
 template <typename T>
 void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
                    int nf, int np_img, int np_psf, int nx, int ny, double gain,
-                   double threshold, int niter, double fusedthreshold,
+                   const double* threshold, const int* niter, double fusedthreshold,
                    double psf_width, int largestscale, int stoppointmode,
                    int norm_method, int num_threads, AspResult* results) {
     const int nplanes = nt * nf * np_img;
@@ -890,9 +890,11 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
             const std::size_t psf_off =
                 ((static_cast<std::size_t>(tt) * nf + nn) * np_psf + pidx) * plane;
             const T* maskp = mask ? mask + img_off : nullptr;
+            // Iteration control is independent per plane: each (t, f, p)
+            // plane uses its own threshold and iteration limit.
             results[p] = aspclean_plane<T>(residual + img_off, model + img_off,
                                            psf + psf_off, maskp, nx, ny, gain,
-                                           threshold, niter, fusedthreshold,
+                                           threshold[p], niter[p], fusedthreshold,
                                            psf_width, largestscale, stoppointmode,
                                            norm_method, false);
         }
@@ -917,11 +919,12 @@ template AspResult aspclean_plane<double>(double*, double*, const double*, const
                                           int, int, double, double, int, double,
                                           double, int, int, int, bool);
 template void aspclean_cube<float>(float*, float*, const float*, const float*, int,
-                                   int, int, int, int, int, double, double, int,
-                                   double, double, int, int, int, int, AspResult*);
+                                   int, int, int, int, int, double, const double*,
+                                   const int*, double, double, int, int, int, int,
+                                   AspResult*);
 template void aspclean_cube<double>(double*, double*, const double*, const double*,
-                                    int, int, int, int, int, int, double, double,
-                                    int, double, double, int, int, int, int,
-                                    AspResult*);
+                                    int, int, int, int, int, int, double,
+                                    const double*, const int*, double, double, int,
+                                    int, int, int, AspResult*);
 
 }  // namespace aspclean
