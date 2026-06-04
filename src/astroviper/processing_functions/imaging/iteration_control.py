@@ -781,6 +781,13 @@ class IterationController:
         stopdescription : str
             Human-readable description of stop reason
 
+        Side Effects:
+        -------------
+        Writes the resulting StopCode and its description into the
+        'stop_code' and 'stop_description' fields of every plane in
+        ``return_dict`` matching the time/pol/chan selection, overwriting
+        the placeholder value set by the deconvolver.
+
         Example:
         --------
         >>> controller = IterationController(niter=100, threshold=0.01)
@@ -828,6 +835,20 @@ class IterationController:
 
         # Update internal state
         self.stopcode = StopCode(major=stopcode_maj, minor=stopcode_min)
+
+        # Record the resulting stop code and description on every plane
+        # covered by this selection so they are preserved in the ReturnDict
+        # (overwriting the placeholder 'stop_code' set by the deconvolver).
+        # Written directly rather than via add() so they replace the single
+        # value in place instead of being appended as history.
+        for key, fields in return_dict.data.items():
+            if (
+                (time is None or key.time == time)
+                and (pol is None or key.pol == pol)
+                and (chan is None or key.chan == chan)
+            ):
+                fields["stop_code"] = self.stopcode
+                fields["stop_description"] = self.stopdescription
 
         return self.stopcode, self.stopdescription
 

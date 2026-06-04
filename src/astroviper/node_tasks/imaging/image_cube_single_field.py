@@ -1,10 +1,15 @@
+from time import time
+
+
 def image_cube_single_field(input_params, graph_mode=True):
     import toolviper.utils.logger as logger
     import time
     from xradio.image import make_empty_sky_image
     from toolviper.utils.memory_management import memory_setup, free_memory, get_rss_gb    
     import astroviper.processing_functions as pf
-
+    
+    
+    start = time.time()
     # Pin the mmap threshold BEFORE any large allocations so they use mmap
     # and are returned to the OS immediately on free (no heap fragmentation).
     # Must run at the start of the task, not after, or fragmentation is already done.
@@ -90,6 +95,9 @@ def image_cube_single_field(input_params, graph_mode=True):
         + " GB"
     )
     
+    image_cube_task_time = time.time() - start
+    return_df["image_cube_task_time"] = image_cube_task_time
+    
     import pandas as pd
     with pd.option_context(
         "display.max_columns", None,
@@ -98,5 +106,7 @@ def image_cube_single_field(input_params, graph_mode=True):
         "display.float_format", "{:.6g}".format,
     ):
         print(return_df.to_string())
+        
+    
 
     return return_df
