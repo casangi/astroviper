@@ -365,14 +365,32 @@ def image_cube_single_field(
 
 
 def combine_return_data_frames(input_data, input_parms):
+    """Reduce per-chunk results into a single (DataFrame, ReturnDict) pair.
+
+    Each node task returns ``(return_df, combined_deconvolve_dict)`` for its
+    channel chunk, with the deconvolve dict already remapped to global channel
+    numbers. This reducer concatenates the timing DataFrames and merges the
+    per-chunk deconvolve dicts with :func:`merge_return_dicts`. Because every
+    chunk covers a disjoint global channel range, the merge never collides.
+
+    Returns the same ``(combined_df, combined_deconvolve_dict)`` shape so it
+    composes under tree-mode reduction (its own outputs become inputs).
+    """
     import pandas as pd
+    from astroviper.processing_functions.imaging.iteration_control import (
+        merge_return_dicts,
+    )
 
     combined_df = pd.DataFrame()
+    deconvolve_dicts = []
 
-    for df in input_data:
-        combined_df = pd.concat([combined_df, df], ignore_index=True)
+    for return_df, combined_deconvolve_dict in input_data:
+        combined_df = pd.concat([combined_df, return_df], ignore_index=True)
+        deconvolve_dicts.append(combined_deconvolve_dict)
 
-    return combined_df
+    combined_deconvolve_dict = merge_return_dicts(deconvolve_dicts)
+
+    return combined_df, combined_deconvolve_dict
 
 
 def calculate_number_of_chunks_for_cube_imaging(

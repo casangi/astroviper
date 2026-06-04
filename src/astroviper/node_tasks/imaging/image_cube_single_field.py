@@ -1,6 +1,38 @@
 from time import time
 
 
+def _remap_deconvolve_dict_to_global_channels(combined_deconvolve_dict, data_selection):
+    """Shift a chunk-local deconvolve ReturnDict onto global channel numbers.
+
+    The per-chunk ``image_cube_single_field`` labels channels ``0..N-1`` within
+    the chunk. The global channel offset for this chunk is the start of the
+    ``frequency`` slice in ``data_selection`` (frequency and channel are the
+    same axis), e.g. ``{'ms_name': {'frequency': slice(2, 4)}}`` -> offset 2.
+
+    Returns a new ReturnDict whose ``Key.chan`` values are global channel
+    numbers. A no-op returning the input unchanged when the offset is 0 (e.g. a
+    single chunk starting at channel 0) or no frequency slice is present.
+    """
+    from astroviper.processing_functions.imaging.return_dict import ReturnDict, Key
+
+    chan_offset = 0
+    for sel in (data_selection or {}).values():
+        freq_sel = sel.get("frequency") if isinstance(sel, dict) else None
+        if isinstance(freq_sel, slice) and freq_sel.start is not None:
+            chan_offset = int(freq_sel.start)
+            break
+
+    if chan_offset == 0:
+        return combined_deconvolve_dict
+
+    remapped = ReturnDict()
+    for key, value in combined_deconvolve_dict.data.items():
+        remapped.data[
+            Key(time=key.time, pol=key.pol, chan=key.chan + chan_offset)
+        ] = value
+    return remapped
+
+
 def image_cube_single_field(input_params, graph_mode=True):
     import toolviper.utils.logger as logger
     import time
@@ -65,8 +97,18 @@ def image_cube_single_field(input_params, graph_mode=True):
         # ps_xdt = open_processing_set(...)
         # need to work on data selection.
     T_load = time.time() - start
+    
+    print("&&&&"*10,input_params["data_selection"])
 
-    img_xds, return_df = pf.imaging.image_cube_single_field(input_params, ps_xdt, img_xds)
+    img_xds, return_df, combined_deconvolve_dict = pf.imaging.image_cube_single_field(
+        input_params, ps_xdt, img_xds
+    )
+
+    # The deconvolve dict's channels are chunk-local (0-based); remap them to
+    # global channel numbers so the reduce can merge chunks correctly.
+    combined_deconvolve_dict = _remap_deconvolve_dict_to_global_channels(
+        combined_deconvolve_dict, input_params["data_selection"]
+    )
 
     start_write = time.time()
     if graph_mode:
@@ -106,7 +148,7 @@ def image_cube_single_field(input_params, graph_mode=True):
         "display.float_format", "{:.6g}".format,
     ):
         print(return_df.to_string())
-        
-    
 
-    return return_df
+
+
+    return return_df, combined_deconvolve_dict

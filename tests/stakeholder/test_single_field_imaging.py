@@ -34,6 +34,9 @@ from astroviper.processing_functions.imaging.make_pb_symmetric import (
     airy_disk_rorder,
     airy_disk_rorder_v2,
 )
+from astroviper.processing_functions.imaging.iteration_control import (
+    print_deconvolve_dict,
+)
 from xradio.measurement_set import open_processing_set
 
 PS_STORE = "twhya_selfcal_lsrk_5chans.ps.zarr"
@@ -99,7 +102,7 @@ def test_single_field_imaging_niter0(plot_saver):
     image_params = _image_params(ps_xdt)
     image_store = "twhya_selfcal_lsrk_5chans_astroviper.img.zarr"
 
-    imaging_metadata_pd = image_cube_single_field(
+    imaging_metadata_pd, deconvolve_dict = image_cube_single_field(
         ps_store=PS_STORE,
         image_store=image_store,
         image_params=image_params,
@@ -141,6 +144,8 @@ def test_single_field_imaging_niter0(plot_saver):
     img_av_xds = xr.open_zarr(image_store)
     print("&&&&&&&&&"*10)
     print("imaging_metadata_pd", imaging_metadata_pd)
+    print("deconvolve_dict (global channel numbering):")
+    print_deconvolve_dict(deconvolve_dict)
 
 
     # First pass: generate every channel's comparison plot and record the
@@ -250,7 +255,7 @@ def test_single_field_imaging(plot_saver):
     image_params = _image_params(ps_xdt)
     image_store = "twhya_selfcal_5chans_lsrk_niter_99_astroviper.img.zarr"
 
-    imaging_metadata_pd = image_cube_single_field(
+    imaging_metadata_pd, deconvolve_dict = image_cube_single_field(
         ps_store=PS_STORE,
         image_store=image_store,
         image_params=image_params,
@@ -306,6 +311,8 @@ def test_single_field_imaging(plot_saver):
     print("&&&&&&&&&"*10)
     print("imaging_metadata_pd:")
     print(imaging_metadata_pd.to_string())
+    print("deconvolve_dict (global channel numbering):")
+    print_deconvolve_dict(deconvolve_dict)
 
     polarization = 0
     region = dict(polarization=polarization, time=0, l=slice(100, 150), m=slice(100, 150))
@@ -415,7 +422,7 @@ def test_single_field_imaging_multi_cycle(plot_saver):
     image_params = _image_params(ps_xdt)
     image_store = "twhya_selfcal_5chans_lsrk_niter_99_astroviper.img.zarr"
 
-    imaging_metadata_pd = image_cube_single_field(
+    imaging_metadata_pd, deconvolve_dict = image_cube_single_field(
         ps_store=PS_STORE,
         image_store=image_store,
         image_params=image_params,
@@ -461,6 +468,8 @@ def test_single_field_imaging_multi_cycle(plot_saver):
     print("&&&&&&&&&"*10)
     print("imaging_metadata_pd:")
     print(imaging_metadata_pd.to_string())
+    print("deconvolve_dict (global channel numbering):")
+    print_deconvolve_dict(deconvolve_dict)
 
     polarization = 0
     region = dict(polarization=polarization, time=0, l=slice(100, 150), m=slice(100, 150))
