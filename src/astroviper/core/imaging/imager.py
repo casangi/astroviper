@@ -159,9 +159,7 @@ def run_imaging_loop(
         stokes = (
             ["I", "Q"]
             if n_corr == 2 and corr_type == "linear"
-            else ["I", "V"]
-            if n_corr == 2
-            else ["I", "Q", "U", "V"]
+            else ["I", "V"] if n_corr == 2 else ["I", "Q", "U", "V"]
         )
     n_stokes = len(stokes)
 
