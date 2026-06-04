@@ -1,20 +1,41 @@
 
 
-def image_cube_single_field(input_params, ps_xdt, img_xds):
+def single_field_imaging_preperation(input_params, ps_xdt, img_xds):
+    """Set up the iteration controller and run the once-per-chunk imaging setup.
+
+    Everything that is done a single time per chunk happens here, before the
+    major-cycle loop in :func:`image_cube_single_field`:
+
+    * the :class:`IterationController` and the (empty) combined return dict, and
+    * the imaging weights, the point spread function and the primary beam (via
+      :func:`single_field_imaging_setup`).
+
+    The dirty image and the first model update are deliberately NOT done here --
+    they are the first iteration of the loop in :func:`image_cube_single_field`.
+
+    Returns
+    -------
+    controller : IterationController
+        Freshly constructed controller (``stopcode.major == 0``).
+    img_xds
+        Image dataset with the PSF and primary beam, in the Stokes basis.
+    return_df
+        Timing/metadata dataframe from the setup step.
+    combined_deconvolve_dict : ReturnDict
+        Empty accumulator for the per-plane convergence stats.
+    T_residual_cycle, T_model_update_cycle : float
+        Accumulated timers (model-update timer starts at zero).
+    """
     import toolviper.utils.logger as logger
-    from astroviper.processing_functions.imaging.residual_cycle import residual_cycle_cube_single_field
-    from astroviper.processing_functions.imaging.model_update_cycle import model_update_cycle_cube_single_field
+    from astroviper.processing_functions.imaging.residual_cycle import single_field_imaging_setup
     import time
     from astroviper.processing_functions.imaging.iteration_control import (
         IterationController,
         ReturnDict,
-        merge_return_dicts,
-        print_deconvolve_dict,
     )
 
-
     logger.debug("Processing chunk " + str(input_params["task_id"]))
-    
+
     controller = IterationController(
         niter=input_params["iteration_control_params"]["niter"],
         nmajor=input_params["iteration_control_params"]["nmajor"],
@@ -27,9 +48,51 @@ def image_cube_single_field(input_params, ps_xdt, img_xds):
     )
     combined_deconvolve_dict = ReturnDict()
 
-    is_n_iter_0 = True
     T_residual_cycle = 0.0
     T_model_update_cycle = 0.0
+
+    # Once-only imaging setup: imaging weights, PSF and primary beam. The dirty
+    # image and the model update are NOT done here.
+    start = time.time()
+    img_xds, return_df = single_field_imaging_setup(ps_xdt, img_xds, input_params)
+    T_residual_cycle = T_residual_cycle + time.time() - start
+
+    return (
+        controller,
+        img_xds,
+        return_df,
+        combined_deconvolve_dict,
+        T_residual_cycle,
+        T_model_update_cycle,
+    )
+
+
+def image_cube_single_field(input_params, ps_xdt, img_xds):
+    import toolviper.utils.logger as logger
+    from astroviper.processing_functions.imaging.residual_cycle import residual_cycle_cube_single_field
+    from astroviper.processing_functions.imaging.model_update_cycle import model_update_cycle_cube_single_field
+    import time
+    from astroviper.processing_functions.imaging.iteration_control import (
+        IterationController,
+        ReturnDict,
+        merge_return_dicts,
+        print_deconvolve_dict,
+    )
+
+    # All once-only work -- controller setup, imaging weights, PSF and primary
+    # beam creation -- happens in the preparation step before the major-cycle
+    # loop. The dirty image and the first model update are the first iteration
+    # of the loop below.
+    (
+        controller,
+        img_xds,
+        return_df,
+        combined_deconvolve_dict,
+        T_residual_cycle,
+        T_model_update_cycle,
+    ) = single_field_imaging_preperation(input_params, ps_xdt, img_xds)
+
+    is_n_iter_0 = True
     i_cycles = 0
     while controller.stopcode.major == 0:
         i_cycles += 1
@@ -63,9 +126,9 @@ def image_cube_single_field(input_params, ps_xdt, img_xds):
             T_model_update_cycle = T_model_update_cycle + time.time() - start
         else:
             deconvolve_dict = ReturnDict()
-            
+
         is_n_iter_0 = False
-        
+
         controller.update_counts(deconvolve_dict)
 
         # check_convergence stamps the stop code into deconvolve_dict, so run
@@ -76,24 +139,20 @@ def image_cube_single_field(input_params, ps_xdt, img_xds):
         if stopcode.major != 0:
             logger.info(f"  *** CONVERGED: {stopdesc} ***")
             break
-                
+
     #Last residual cycle to calcultate final residual image after last model update cycle.
-    if input_params["iteration_control_params"]["niter"] > 0:       
+    if input_params["iteration_control_params"]["niter"] > 0:
         start = time.time()
         img_xds, return_df = residual_cycle_cube_single_field(
             ps_xdt, img_xds, input_params, is_n_iter_0=is_n_iter_0
         )
         T_residual_cycle = T_residual_cycle + time.time() - start
-        
+
 
     return_df["task_id"] = input_params["task_id"]
     return_df["n_channels"] = len(input_params["task_coords"]["frequency"]["data"])
     return_df["T_residual_cycle"] = T_residual_cycle
     return_df["T_model_update_cycle"] = T_model_update_cycle
-    
-    print("@@@@@@@@@ Combined Deconvolve Dict:")
-    print_deconvolve_dict(combined_deconvolve_dict)
-    print("***************")
 
     # #Write Data chunk to disk
     # combined_deconvolve_dict carries per-plane convergence stats for this
@@ -135,4 +194,3 @@ def get_calculate_cycle_controls(controller,combined_deconvolve_dict, img_xds, i
     threshold_per_plane = controller.per_plane_cycle_threshold(rd)
 
     return cycle_niter, cyclethresh, threshold_per_plane
-

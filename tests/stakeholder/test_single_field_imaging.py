@@ -91,6 +91,51 @@ def _image_params(ps_xdt):
     }
 
 
+def _check_deconvolve_dict(deconvolve_dict, expected, rtol=1e-5, atol=1e-8):
+    """Assert every key and field of a deconvolve ReturnDict matches ``expected``.
+
+    ``expected`` is keyed by ``(time, pol, chan)`` tuples, with ``stop_code``
+    given as a ``(major, minor)`` tuple. Integer fields (niter, iter_done,
+    masksum), string fields (stokes, stop_description) and the stop code are
+    compared exactly; every other (floating-point) field -- scalar or per-cycle
+    history list -- is compared with ``np.allclose``. Regenerate the expected
+    literals if the imaging or iteration-control behaviour intentionally changes.
+    """
+    exact_int_fields = {"niter", "iter_done", "masksum"}
+    string_fields = {"stokes", "stop_description"}
+
+    actual = {tuple(k): v for k, v in deconvolve_dict.data.items()}
+    assert set(actual) == set(expected), (
+        f"deconvolve_dict planes {sorted(actual)} != expected {sorted(expected)}"
+    )
+    for key, exp_fields in expected.items():
+        got = actual[key]
+        assert set(got) == set(exp_fields), (
+            f"plane {key}: fields {sorted(got)} != expected {sorted(exp_fields)}"
+        )
+        for field, exp_val in exp_fields.items():
+            val = got[field]
+            if field == "stop_code":
+                assert (int(val.major), int(val.minor)) == tuple(exp_val), (
+                    f"plane {key} stop_code {val} != {exp_val}"
+                )
+            elif field in string_fields:
+                assert str(val) == exp_val, (
+                    f"plane {key} {field}: {val!r} != {exp_val!r}"
+                )
+            elif field in exact_int_fields:
+                assert np.array_equal(np.asarray(val), np.asarray(exp_val)), (
+                    f"plane {key} {field}: {val} != {exp_val}"
+                )
+            else:
+                assert np.allclose(
+                    np.asarray(val, dtype=float),
+                    np.asarray(exp_val, dtype=float),
+                    rtol=rtol,
+                    atol=atol,
+                ), f"plane {key} {field}: {val} != {exp_val}"
+
+
 def test_single_field_imaging_niter0(plot_saver):
     dask.config.set(scheduler="synchronous")
 
@@ -274,16 +319,6 @@ def test_single_field_imaging(plot_saver):
             "minpsffraction": 0.05,
             "maxpsffraction": 0.2,
         },
-        # iteration_control_params={
-        #     "niter": 10000,
-        #     "nmajor": 10,
-        #     "threshold": 0.0,
-        #     "gain": 0.1,
-        #     "cyclefactor": 1.5,
-        #     "cycleniter": 1,
-        #     "minpsffraction": 0.05,
-        #     "maxpsffraction": 0.8,
-        # },
         gridder="prolate_spheroidal",
         deconvolver="hogbom",
         #deconvolver="asp",
@@ -313,6 +348,82 @@ def test_single_field_imaging(plot_saver):
     print(imaging_metadata_pd.to_string())
     print("deconvolve_dict (global channel numbering):")
     print_deconvolve_dict(deconvolve_dict)
+
+    # Per-plane deconvolution statistics for this niter=100, nmajor=0 run (one
+    # major cycle, stopped on the iteration limit -> stop_code (1, 0)).
+    expected_deconvolve_dict = {
+        (0, 0, 0): {'niter': 100, 'threshold': 0.0715015470981598, 'iter_done': [100], 'loop_gain': 0.1,
+                    'min_psf_fraction': 0.05, 'max_psf_fraction': 0.2, 'max_psf_sidelobe': 0.3445475697517395,
+                    'stop_code': (1, 0), 'stokes': 'I', 'frequency': 372762580492.5155, 'time': 0.0,
+                    'start_model_flux': [0.0], 'model_flux': [0.9266056708712089],
+                    'start_peakres': [0.35750773549079895], 'start_peakres_nomask': [0.35750773549079895],
+                    'peakres': [0.09062794993320043], 'peakres_nomask': [0.09062794993320043],
+                    'masksum': [62500], 'stop_description': 'Reached the iteration limit'},
+        (0, 1, 0): {'niter': 100, 'threshold': 0.0715015470981598, 'iter_done': [100], 'loop_gain': 0.1,
+                    'min_psf_fraction': 0.05, 'max_psf_fraction': 0.2, 'max_psf_sidelobe': 0.3445475697517395,
+                    'stop_code': (1, 0), 'stokes': 'Q', 'frequency': 372762580492.5155, 'time': 0.0,
+                    'start_model_flux': [0.0], 'model_flux': [0.06009334377062642],
+                    'start_peakres': [0.1205507144331932], 'start_peakres_nomask': [0.1205507144331932],
+                    'peakres': [0.07445588224991798], 'peakres_nomask': [0.07445588224991798],
+                    'masksum': [62500], 'stop_description': 'Reached the iteration limit'},
+        (0, 0, 1): {'niter': 100, 'threshold': 0.0715015470981598, 'iter_done': [100], 'loop_gain': 0.1,
+                    'min_psf_fraction': 0.05, 'max_psf_fraction': 0.2, 'max_psf_sidelobe': 0.34453392028808594,
+                    'stop_code': (1, 0), 'stokes': 'I', 'frequency': 372763190875.0631, 'time': 0.0,
+                    'start_model_flux': [0.0], 'model_flux': [0.8096181158874369],
+                    'start_peakres': [0.3351074755191803], 'start_peakres_nomask': [0.3351074755191803],
+                    'peakres': [0.09003297085726052], 'peakres_nomask': [0.09003297085726052],
+                    'masksum': [62500], 'stop_description': 'Reached the iteration limit'},
+        (0, 1, 1): {'niter': 100, 'threshold': 0.0715015470981598, 'iter_done': [100], 'loop_gain': 0.1,
+                    'min_psf_fraction': 0.05, 'max_psf_fraction': 0.2, 'max_psf_sidelobe': 0.34453392028808594,
+                    'stop_code': (1, 0), 'stokes': 'Q', 'frequency': 372763190875.0631, 'time': 0.0,
+                    'start_model_flux': [0.0], 'model_flux': [0.06434190144351142],
+                    'start_peakres': [0.1182534508407116], 'start_peakres_nomask': [0.1182534508407116],
+                    'peakres': [0.07756869577706144], 'peakres_nomask': [0.07756869577706144],
+                    'masksum': [62500], 'stop_description': 'Reached the iteration limit'},
+        (0, 0, 2): {'niter': 100, 'threshold': 0.0715015470981598, 'iter_done': [100], 'loop_gain': 0.1,
+                    'min_psf_fraction': 0.05, 'max_psf_fraction': 0.2, 'max_psf_sidelobe': 0.34448084235191345,
+                    'stop_code': (1, 0), 'stokes': 'I', 'frequency': 372763801257.61084, 'time': 0.0,
+                    'start_model_flux': [0.0], 'model_flux': [0.9100114705555141],
+                    'start_peakres': [0.3380203992128372], 'start_peakres_nomask': [0.3380203992128372],
+                    'peakres': [0.0897947973663456], 'peakres_nomask': [0.0897947973663456],
+                    'masksum': [62500], 'stop_description': 'Reached the iteration limit'},
+        (0, 1, 2): {'niter': 100, 'threshold': 0.0715015470981598, 'iter_done': [100], 'loop_gain': 0.1,
+                    'min_psf_fraction': 0.05, 'max_psf_fraction': 0.2, 'max_psf_sidelobe': 0.34448084235191345,
+                    'stop_code': (1, 0), 'stokes': 'Q', 'frequency': 372763801257.61084, 'time': 0.0,
+                    'start_model_flux': [0.0], 'model_flux': [0.07577367670663074],
+                    'start_peakres': [0.1301141269505024], 'start_peakres_nomask': [0.1301141269505024],
+                    'peakres': [0.07658878708058861], 'peakres_nomask': [0.07658878708058861],
+                    'masksum': [62500], 'stop_description': 'Reached the iteration limit'},
+        (0, 0, 3): {'niter': 100, 'threshold': 0.0715015470981598, 'iter_done': [100], 'loop_gain': 0.1,
+                    'min_psf_fraction': 0.05, 'max_psf_fraction': 0.2, 'max_psf_sidelobe': 0.3444790840148926,
+                    'stop_code': (1, 0), 'stokes': 'I', 'frequency': 372764411640.15845, 'time': 0.0,
+                    'start_model_flux': [0.0], 'model_flux': [0.7685137758888749],
+                    'start_peakres': [0.3250153809785843], 'start_peakres_nomask': [0.3250153809785843],
+                    'peakres': [0.09214768756550326], 'peakres_nomask': [0.09214768756550326],
+                    'masksum': [62500], 'stop_description': 'Reached the iteration limit'},
+        (0, 1, 3): {'niter': 100, 'threshold': 0.0715015470981598, 'iter_done': [100], 'loop_gain': 0.1,
+                    'min_psf_fraction': 0.05, 'max_psf_fraction': 0.2, 'max_psf_sidelobe': 0.3444790840148926,
+                    'stop_code': (1, 0), 'stokes': 'Q', 'frequency': 372764411640.15845, 'time': 0.0,
+                    'start_model_flux': [0.0], 'model_flux': [0.051890125145152254],
+                    'start_peakres': [0.13275842368602753], 'start_peakres_nomask': [0.13275842368602753],
+                    'peakres': [0.07897557256149514], 'peakres_nomask': [0.07897557256149514],
+                    'masksum': [62500], 'stop_description': 'Reached the iteration limit'},
+        (0, 0, 4): {'niter': 100, 'threshold': 0.0715015470981598, 'iter_done': [100], 'loop_gain': 0.1,
+                    'min_psf_fraction': 0.05, 'max_psf_fraction': 0.2, 'max_psf_sidelobe': 0.3444778323173523,
+                    'stop_code': (1, 0), 'stokes': 'I', 'frequency': 372765022022.7062, 'time': 0.0,
+                    'start_model_flux': [0.0], 'model_flux': [0.685908240144164],
+                    'start_peakres': [0.3533458411693573], 'start_peakres_nomask': [0.3533458411693573],
+                    'peakres': [0.08926753026602027], 'peakres_nomask': [0.08926753026602027],
+                    'masksum': [62500], 'stop_description': 'Reached the iteration limit'},
+        (0, 1, 4): {'niter': 100, 'threshold': 0.0715015470981598, 'iter_done': [100], 'loop_gain': 0.1,
+                    'min_psf_fraction': 0.05, 'max_psf_fraction': 0.2, 'max_psf_sidelobe': 0.3444778323173523,
+                    'stop_code': (1, 0), 'stokes': 'Q', 'frequency': 372765022022.7062, 'time': 0.0,
+                    'start_model_flux': [0.0], 'model_flux': [-0.1185715380641539],
+                    'start_peakres': [0.11055046692490578], 'start_peakres_nomask': [0.11055046692490578],
+                    'peakres': [0.07679465310366025], 'peakres_nomask': [0.07679465310366025],
+                    'masksum': [62500], 'stop_description': 'Reached the iteration limit'},
+    }
+    _check_deconvolve_dict(deconvolve_dict, expected_deconvolve_dict)
 
     polarization = 0
     region = dict(polarization=polarization, time=0, l=slice(100, 150), m=slice(100, 150))
@@ -390,12 +501,12 @@ def test_single_field_imaging(plot_saver):
         if rel_diff_model < min_per_dif_model[i_f]:
             print(
                 f"Channel {i_f} SKY_MODEL improved: {rel_diff_model} is below the "
-                f"expected minimum {min_per_dif_model[i_f]} (consider tightening)."
+                f"expected minimum {min_per_dif_model[i_f]}."
             )
         if rel_diff_residual < min_per_dif_residual[i_f]:
             print(
                 f"Channel {i_f} SKY_RESIDUAL improved: {rel_diff_residual} is below "
-                f"the expected minimum {min_per_dif_residual[i_f]} (consider tightening)."
+                f"the expected minimum {min_per_dif_residual[i_f]}."
             )
 
     # Second pass: assertions only (all plots have already been generated).
@@ -416,11 +527,11 @@ def test_single_field_imaging_multi_cycle(plot_saver):
 
     ps_xdt = open_processing_set(PS_STORE)
     img_xds = xr.open_zarr(
-        "twhya_selfcal_5chans_lsrk_niter_99_nmajor_1_briggs.img.zarr"
+        "twhya_selfcal_5chans_lsrk_multi_cycle_truth.img.zarr"
     )
 
     image_params = _image_params(ps_xdt)
-    image_store = "twhya_selfcal_5chans_lsrk_niter_99_astroviper.img.zarr"
+    image_store = "twhya_selfcal_5chans_lsrk_multi_cycle_astroviper.img.zarr"
 
     imaging_metadata_pd, deconvolve_dict = image_cube_single_field(
         ps_store=PS_STORE,
@@ -432,7 +543,7 @@ def test_single_field_imaging_multi_cycle(plot_saver):
             "casa_weighting_implementation": True,
         },
         iteration_control_params={
-            "niter": 100000,
+            "niter": 10000,
             "nmajor": 4,
             "threshold": 0.0,
             "gain": 0.1,
@@ -471,18 +582,132 @@ def test_single_field_imaging_multi_cycle(plot_saver):
     print("deconvolve_dict (global channel numbering):")
     print_deconvolve_dict(deconvolve_dict)
 
+    # Per-plane deconvolution statistics for this niter=10000, nmajor=4 run. Each
+    # history list has one entry per major cycle; the run stops on the major
+    # cycle limit -> stop_code (9, 0).
+    expected_deconvolve_dict = {
+        (0, 0, 0): {'niter': 10000, 'threshold': 0.03742406390770764, 'iter_done': [3, 21, 273, 1517],
+                    'loop_gain': 0.1, 'min_psf_fraction': 0.05, 'max_psf_fraction': 0.8,
+                    'max_psf_sidelobe': 0.3445475697517395, 'stop_code': (9, 0), 'stokes': 'I',
+                    'frequency': 372762580492.5155, 'time': 0.0,
+                    'start_model_flux': [0.0, 0.09718702917164579, 0.4688002345071223, 1.1537604726241149],
+                    'model_flux': [0.09718702917164579, 0.4688002345071223, 1.1537604726241149, 1.847822861355533],
+                    'start_peakres': [0.35750773549079895, 0.26311833411455154, 0.13563209027051926, 0.07156781107187271],
+                    'start_peakres_nomask': [0.35750773549079895, 0.26311833411455154, 0.13563209027051926, 0.10233728587627411],
+                    'peakres': [0.26311837077153755, 0.13563208829064496, 0.06990318710485387, 0.036122493679281074],
+                    'peakres_nomask': [0.26311837077153755, 0.13732841007407787, 0.11575909682422982, 0.08907417228016686],
+                    'masksum': [62500, 62500, 62500, 62500], 'stop_description': 'Reached the major cycle limit (nmajor)'},
+        (0, 1, 0): {'niter': 10000, 'threshold': 0.03742406390770764, 'iter_done': [0, 252, 1728, 2507],
+                    'loop_gain': 0.1, 'min_psf_fraction': 0.05, 'max_psf_fraction': 0.8,
+                    'max_psf_sidelobe': 0.3445475697517395, 'stop_code': (9, 0), 'stokes': 'Q',
+                    'frequency': 372762580492.5155, 'time': 0.0,
+                    'start_model_flux': [0.0, 0.0, -0.005321894089268711, -0.15096239242265286],
+                    'model_flux': [0.0, -0.005321894089268711, -0.15096239242265286, -0.34173595784959543],
+                    'start_peakres': [0.1205507144331932, 0.1205507181584835, 0.06295699812471867, 0.04065505973994732],
+                    'start_peakres_nomask': [0.1205507144331932, 0.1205507181584835, 0.08899888396263123, 0.06060711480677128],
+                    'peakres': [0.1205507144331932, 0.062144659342189774, 0.03209609787320367, 0.016586460598119468],
+                    'peakres_nomask': [0.1205507144331932, 0.09875828369965392, 0.07549973026809857, 0.05831613073743894],
+                    'masksum': [62500, 62500, 62500, 62500], 'stop_description': 'Reached the major cycle limit (nmajor)'},
+        (0, 0, 1): {'niter': 10000, 'threshold': 0.03742406390770764, 'iter_done': [2, 19, 217, 1410],
+                    'loop_gain': 0.1, 'min_psf_fraction': 0.05, 'max_psf_fraction': 0.8,
+                    'max_psf_sidelobe': 0.34453392028808594, 'stop_code': (9, 0), 'stokes': 'I',
+                    'frequency': 372763190875.0631, 'time': 0.0,
+                    'start_model_flux': [0.0, 0.06367041795176881, 0.4067038674282753, 0.9533928860362973],
+                    'model_flux': [0.06367041795176881, 0.4067038674282753, 0.9533928860362973, 1.4102348849152202],
+                    'start_peakres': [0.3351074755191803, 0.2719259709119797, 0.14018256962299347, 0.07534321397542953],
+                    'start_peakres_nomask': [0.3351074755191803, 0.2719259709119797, 0.14018256962299347, 0.09314373135566711],
+                    'peakres': [0.27192600301764985, 0.14018257657320918, 0.07241199221474351, 0.03734806570023123],
+                    'peakres_nomask': [0.27192600301764985, 0.14018257657320918, 0.09828627041416445, 0.07833979352745836],
+                    'masksum': [62500, 62500, 62500, 62500], 'stop_description': 'Reached the major cycle limit (nmajor)'},
+        (0, 1, 1): {'niter': 10000, 'threshold': 0.03742406390770764, 'iter_done': [0, 510, 1836, 2778],
+                    'loop_gain': 0.1, 'min_psf_fraction': 0.05, 'max_psf_fraction': 0.8,
+                    'max_psf_sidelobe': 0.34453392028808594, 'stop_code': (9, 0), 'stokes': 'Q',
+                    'frequency': 372763190875.0631, 'time': 0.0,
+                    'start_model_flux': [0.0, 0.0, 0.2559758192787306, 0.23270246637926756],
+                    'model_flux': [0.0, 0.2559758192787306, 0.23270246637926756, -0.1537634680033626],
+                    'start_peakres': [0.10747269913554192, 0.1074727214872837, 0.05736164189875126, 0.034725749865174294],
+                    'start_peakres_nomask': [0.1182534508407116, 0.11825336143374443, 0.10508286580443382, 0.07211481314152479],
+                    'peakres': [0.10747269913554192, 0.05539023078315345, 0.02861225256105843, 0.014761570474880244],
+                    'peakres_nomask': [0.1182534508407116, 0.1104731137899703, 0.08816010987821392, 0.06365545932103889],
+                    'masksum': [62500, 62500, 62500, 62500], 'stop_description': 'Reached the major cycle limit (nmajor)'},
+        (0, 0, 2): {'niter': 10000, 'threshold': 0.03742406390770764, 'iter_done': [2, 21, 225, 1365],
+                    'loop_gain': 0.1, 'min_psf_fraction': 0.05, 'max_psf_fraction': 0.8,
+                    'max_psf_sidelobe': 0.34448084235191345, 'stop_code': (9, 0), 'stokes': 'I',
+                    'frequency': 372763801257.61084, 'time': 0.0,
+                    'start_model_flux': [0.0, 0.06422387343272877, 0.44228863426298626, 1.0642817398022482],
+                    'model_flux': [0.06422387343272877, 0.44228863426298626, 1.0642817398022482, 1.2768425511333288],
+                    'start_peakres': [0.3380203992128372, 0.2737964391708374, 0.1385836973786354, 0.0724470242857933],
+                    'start_peakres_nomask': [0.3380203992128372, 0.2737964391708374, 0.1385836973786354, 0.10458540543913841],
+                    'peakres': [0.2737964798436145, 0.13858376370159314, 0.07154864122829262, 0.03695601525200815],
+                    'peakres_nomask': [0.2737964798436145, 0.13858376370159314, 0.12015870268768956, 0.0819424536988555],
+                    'masksum': [62500, 62500, 62500, 62500], 'stop_description': 'Reached the major cycle limit (nmajor)'},
+        (0, 1, 2): {'niter': 10000, 'threshold': 0.03742406390770764, 'iter_done': [0, 210, 1595, 2311],
+                    'loop_gain': 0.1, 'min_psf_fraction': 0.05, 'max_psf_fraction': 0.8,
+                    'max_psf_sidelobe': 0.34448084235191345, 'stop_code': (9, 0), 'stokes': 'Q',
+                    'frequency': 372763801257.61084, 'time': 0.0,
+                    'start_model_flux': [0.0, 0.0, 0.29230648444672946, 1.0342716437161545],
+                    'model_flux': [0.0, 0.29230648444672946, 1.0342716437161545, 1.0718694933458495],
+                    'start_peakres': [0.1301141269505024, 0.1301141493022442, 0.07082179840654135, 0.03966241981834173],
+                    'start_peakres_nomask': [0.1301141269505024, 0.1301141493022442, 0.08626517280936241, 0.06678120419383049],
+                    'peakres': [0.1301141269505024, 0.06714578978305617, 0.034671231530496435, 0.017898155966177817],
+                    'peakres_nomask': [0.1301141269505024, 0.08533931549999212, 0.07839905071764713, 0.06462196519349624],
+                    'masksum': [62500, 62500, 62500, 62500], 'stop_description': 'Reached the major cycle limit (nmajor)'},
+        (0, 0, 3): {'niter': 10000, 'threshold': 0.03742406390770764, 'iter_done': [2, 22, 279, 1552],
+                    'loop_gain': 0.1, 'min_psf_fraction': 0.05, 'max_psf_fraction': 0.8,
+                    'max_psf_sidelobe': 0.3444790840148926, 'stop_code': (9, 0), 'stokes': 'I',
+                    'frequency': 372764411640.15845, 'time': 0.0,
+                    'start_model_flux': [0.0, 0.06208955190118765, 0.41661112520218035, 0.7711116959103461],
+                    'model_flux': [0.06208955190118765, 0.41661112520218035, 0.7711116959103461, 1.246058923764651],
+                    'start_peakres': [0.3250153809785843, 0.2669743224978447, 0.13665873184800148, 0.07552315667271614],
+                    'start_peakres_nomask': [0.3250153809785843, 0.2669743224978447, 0.13665873184800148, 0.09676706790924072],
+                    'peakres': [0.2669743294114686, 0.13665873894881198, 0.07054322757269109, 0.03642931892516965],
+                    'peakres_nomask': [0.2669743294114686, 0.13665873894881198, 0.10821098085022521, 0.07827344667891167],
+                    'masksum': [62500, 62500, 62500, 62500], 'stop_description': 'Reached the major cycle limit (nmajor)'},
+        (0, 1, 3): {'niter': 10000, 'threshold': 0.03742406390770764, 'iter_done': [0, 234, 1574, 2161],
+                    'loop_gain': 0.1, 'min_psf_fraction': 0.05, 'max_psf_fraction': 0.8,
+                    'max_psf_sidelobe': 0.3444790840148926, 'stop_code': (9, 0), 'stokes': 'Q',
+                    'frequency': 372764411640.15845, 'time': 0.0,
+                    'start_model_flux': [0.0, 0.0, -0.0019376348073805033, -0.32794513500782063],
+                    'model_flux': [0.0, -0.0019376348073805033, -0.32794513500782063, -0.40983942431381465],
+                    'start_peakres': [0.13275842368602753, 0.13275842741131783, 0.07041618973016739, 0.04057924449443817],
+                    'start_peakres_nomask': [0.13275842368602753, 0.13275842741131783, 0.08207742124795914, 0.06188509427011013],
+                    'peakres': [0.13275842368602753, 0.0685731236197225, 0.035427532969437514, 0.018303977467112688],
+                    'peakres_nomask': [0.13275842368602753, 0.09255358378616745, 0.07877961247840846, 0.05598988311518244],
+                    'masksum': [62500, 62500, 62500, 62500], 'stop_description': 'Reached the major cycle limit (nmajor)'},
+        (0, 0, 4): {'niter': 10000, 'threshold': 0.03742406390770764, 'iter_done': [3, 20, 269, 1455],
+                    'loop_gain': 0.1, 'min_psf_fraction': 0.05, 'max_psf_fraction': 0.8,
+                    'max_psf_sidelobe': 0.3444778323173523, 'stop_code': (9, 0), 'stokes': 'I',
+                    'frequency': 372765022022.7062, 'time': 0.0,
+                    'start_model_flux': [0.0, 0.09632811689227336, 0.44859344134508533, 0.7196022894115142],
+                    'model_flux': [0.09632811689227336, 0.44859344134508533, 0.7196022894115142, 0.8687526581169909],
+                    'start_peakres': [0.3533458411693573, 0.2624829560518265, 0.13386095687747002, 0.07134852558374405],
+                    'start_peakres_nomask': [0.3533458411693573, 0.2624829560518265, 0.13386095687747002, 0.10185753926634789],
+                    'peakres': [0.26248303728047495, 0.1338610040358027, 0.06916595739352831, 0.03571509627867214],
+                    'peakres_nomask': [0.26248303728047495, 0.1338610040358027, 0.1137017434033023, 0.08186949308006658],
+                    'masksum': [62500, 62500, 62500, 62500], 'stop_description': 'Reached the major cycle limit (nmajor)'},
+        (0, 1, 4): {'niter': 10000, 'threshold': 0.03742406390770764, 'iter_done': [0, 461, 1768, 2610],
+                    'loop_gain': 0.1, 'min_psf_fraction': 0.05, 'max_psf_fraction': 0.8,
+                    'max_psf_sidelobe': 0.3444778323173523, 'stop_code': (9, 0), 'stokes': 'Q',
+                    'frequency': 372765022022.7062, 'time': 0.0,
+                    'start_model_flux': [0.0, 0.0, 0.014776201410511294, 0.1883208494848036],
+                    'model_flux': [0.0, 0.014776201410511294, 0.1883208494848036, 0.14211058918192704],
+                    'start_peakres': [0.11055046692490578, 0.11055045202374458, 0.06046096049249172, 0.03794900490902364],
+                    'start_peakres_nomask': [0.11055046692490578, 0.11055045202374458, 0.08840354532003403, 0.0653633363544941],
+                    'peakres': [0.11055046692490578, 0.057018342864911066, 0.02942986543593892, 0.015200409354116482],
+                    'peakres_nomask': [0.11055046692490578, 0.09952463161245279, 0.07619173761696382, 0.06074711394111128],
+                    'masksum': [62500, 62500, 62500, 62500], 'stop_description': 'Reached the major cycle limit (nmajor)'},
+    }
+    _check_deconvolve_dict(deconvolve_dict, expected_deconvolve_dict)
+
     polarization = 0
     region = dict(polarization=polarization, time=0, l=slice(100, 150), m=slice(100, 150))
     I_av = img_av_xds.isel(**region)
     I = img_xds.isel(**region)
 
-    # Expected upper bound on the per-channel relative difference vs CASA.
-    # Exceeding the maximum is a regression; dropping below the minimum is an
-    # (informational) improvement and is reported but not treated as a failure.
-    max_per_dif_model = [2.1e-05, 0.001, 7.7e-06, 0.0022, 0.0013]
-    min_per_dif_model = [2.0e-05, 0.0009, 7.6e-06, 0.0021, 0.0012]
-    max_per_dif_residual = [8.949e-05, 0.0331, 0.000122, 0.001684, 0.001123]
-    min_per_dif_residual = [8.946e-05, 0.033, 0.000121, 0.001682, 0.001122]
+    max_per_dif_model = [1e-06, 1e-06, 1e-06, 1e-06, 1e-06]
+    min_per_dif_model = [1e-07, 1e-07, 1e-07, 1e-07, 1e-07]
+    max_per_dif_residual = [1e-06, 1e-06, 1e-06, 1e-06, 1e-06]
+    min_per_dif_residual = [1e-07, 1e-07, 1e-07, 1e-07, 1e-07]
 
     # First pass: generate every channel's comparison plot and record the
     # relative differences. Assertions are deferred to a second pass below so
@@ -547,24 +772,24 @@ def test_single_field_imaging_multi_cycle(plot_saver):
         if rel_diff_model < min_per_dif_model[i_f]:
             print(
                 f"Channel {i_f} SKY_MODEL improved: {rel_diff_model} is below the "
-                f"expected minimum {min_per_dif_model[i_f]} (consider tightening)."
+                f"expected minimum {min_per_dif_model[i_f]}."
             )
         if rel_diff_residual < min_per_dif_residual[i_f]:
             print(
                 f"Channel {i_f} SKY_RESIDUAL improved: {rel_diff_residual} is below "
-                f"the expected minimum {min_per_dif_residual[i_f]} (consider tightening)."
+                f"the expected minimum {min_per_dif_residual[i_f]}."
             )
 
-    # # Second pass: assertions only (all plots have already been generated).
-    # for i_f, (rel_diff_model, rel_diff_residual) in enumerate(channel_rel_diffs):
-    #     assert rel_diff_model <= max_per_dif_model[i_f], (
-    #         f"Channel {i_f}: SKY_MODEL relative difference {rel_diff_model} exceeds "
-    #         f"the maximum {max_per_dif_model[i_f]}. You broke something!"
-    #     )
-    #     assert rel_diff_residual <= max_per_dif_residual[i_f], (
-    #         f"Channel {i_f}: SKY_RESIDUAL relative difference {rel_diff_residual} "
-    #         f"exceeds the maximum {max_per_dif_residual[i_f]}. You broke something!"
-    #     )
+    # Second pass: assertions only (all plots have already been generated).
+    for i_f, (rel_diff_model, rel_diff_residual) in enumerate(channel_rel_diffs):
+        assert rel_diff_model <= max_per_dif_model[i_f], (
+            f"Channel {i_f}: SKY_MODEL relative difference {rel_diff_model} exceeds "
+            f"the maximum {max_per_dif_model[i_f]}. You broke something!"
+        )
+        assert rel_diff_residual <= max_per_dif_residual[i_f], (
+            f"Channel {i_f}: SKY_RESIDUAL relative difference {rel_diff_residual} "
+            f"exceeds the maximum {max_per_dif_residual[i_f]}. You broke something!"
+        )
 
 
 
