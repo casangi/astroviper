@@ -4,26 +4,27 @@ End-to-end imaging loop similar to CASA tclean.
 Orchestrates gridding, FFT, deconvolution, and degridding in major/minor cycles.
 """
 
-import numpy as np
-import xarray as xr
-from typing import Optional, Tuple, Dict, Any
+from typing import Any, Dict, Optional, Tuple
 
-from astroviper.core.imaging.imaging_utils.standard_grid import grid2image_spheroid_ms4
-from astroviper.core.imaging.imaging_utils.standard_degrid import degrid_spheroid_ms4
+import numpy as np
+import toolviper.utils.logger as logger
+import xarray as xr
+from xradio.image import make_empty_sky_image
+
+from astroviper.core.imaging.deconvolution import deconvolve
+from astroviper.core.imaging.fft import fft_lm_to_uv
 from astroviper.core.imaging.imaging_utils.corr_to_stokes import (
     image_corr_to_stokes,
     image_stokes_to_corr,
 )
-from astroviper.core.imaging.imaging_utils.make_point_spread_function import make_psf
 from astroviper.core.imaging.imaging_utils.iteration_control import (
     IterationController,
     ReturnDict,
     merge_return_dicts,
 )
-from astroviper.core.imaging.deconvolution import deconvolve
-from astroviper.core.imaging.fft import fft_lm_to_uv
-from xradio.image import make_empty_sky_image
-import toolviper.utils.logger as logger
+from astroviper.core.imaging.imaging_utils.make_point_spread_function import make_psf
+from astroviper.core.imaging.imaging_utils.standard_degrid import degrid_spheroid_ms4
+from astroviper.core.imaging.imaging_utils.standard_grid import grid2image_spheroid_ms4
 
 # Default imaging parameters
 _DEFAULT_PARAMS = {
@@ -46,15 +47,15 @@ _DEFAULT_PARAMS = {
 }
 
 
-def _get_param(params: Dict, key: str):
+def _get_param(params: dict, key: str):
     """Get parameter with fallback to default."""
     return params.get(key, _DEFAULT_PARAMS.get(key))
 
 
 def grid_visibilities(
     ms4: xr.DataTree,
-    image_size: Tuple[int, int],
-    cell_size: Tuple[float, float],
+    image_size: tuple[int, int],
+    cell_size: tuple[float, float],
     support: int = 7,
     oversampling: int = 100,
     chan_mode: str = "cube",
@@ -88,7 +89,7 @@ def compute_residual_visibilities(ms4: xr.DataTree) -> None:
 def predict_model_visibilities(
     ms4: xr.DataTree,
     model_image: np.ndarray,
-    cell_size: Tuple[float, float],
+    cell_size: tuple[float, float],
     support: int = 7,
     oversampling: int = 100,
     incremental: bool = False,
@@ -107,10 +108,10 @@ def predict_model_visibilities(
 
 def run_imaging_loop(
     ms4: xr.DataTree,
-    params: Dict[str, Any],
-    initial_model: Optional[np.ndarray] = None,
+    params: dict[str, Any],
+    initial_model: np.ndarray | None = None,
     output_dir: str = ".",
-) -> Tuple[np.ndarray, np.ndarray, ReturnDict, IterationController]:
+) -> tuple[np.ndarray, np.ndarray, ReturnDict, IterationController]:
     """
     Run the full imaging loop with major/minor cycles.
 
@@ -158,7 +159,9 @@ def run_imaging_loop(
         stokes = (
             ["I", "Q"]
             if n_corr == 2 and corr_type == "linear"
-            else ["I", "V"] if n_corr == 2 else ["I", "Q", "U", "V"]
+            else ["I", "V"]
+            if n_corr == 2
+            else ["I", "Q", "U", "V"]
         )
     n_stokes = len(stokes)
 
@@ -209,6 +212,7 @@ def run_imaging_loop(
         frequency_coords=freq_coords,
         pol_coords=["I"],
         time_coords=time_coords,
+        do_sky_coords=True,
     )
     psf_xds["POINT_SPREAD_FUNCTION"] = xr.DataArray(
         psf_stokes_i,
@@ -233,6 +237,7 @@ def run_imaging_loop(
             frequency_coords=freq_coords,
             pol_coords=pol_coords_arg,
             time_coords=time_coords,
+            do_sky_coords=True,
         )
 
     major_cycle = 0

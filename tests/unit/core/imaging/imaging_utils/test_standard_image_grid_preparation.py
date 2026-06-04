@@ -1,16 +1,18 @@
+import unittest
+
 import numpy as np
 import xarray
 from xradio.image.image import make_empty_sky_image
+
 from astroviper.core.imaging.imaging_utils.standard_image_grid_preparation import (
     _mult_div,
-    remove_padding,
     apply_pb,
-    make_empty_padded_uv_image,
+    correct_fft_to_uv,
     fft_to_uv,
     ifft_to_lm,
-    correct_fft_to_uv,
+    make_empty_padded_uv_image,
+    remove_padding,
 )
-import unittest
 
 
 class TestStandardImGridPrep(unittest.TestCase):
@@ -46,6 +48,7 @@ class TestStandardImGridPrep(unittest.TestCase):
             frequency_coords=freq,
             pol_coords=pol,
             time_coords=epoch,
+            do_sky_coords=true,
         )
 
         sky_data_dims = ("time", "frequency", "polarization", "l", "m")

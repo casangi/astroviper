@@ -5,6 +5,7 @@ from typing import List, Optional, Union
 import numpy as np
 import xarray as xr
 from xradio.image.image import make_empty_lmuv_image, make_empty_sky_image
+
 from astroviper.core.imaging.fft import fft_lm_to_uv
 from astroviper.core.imaging.ifft import ifft_uv_to_lm
 from astroviper.core.imaging.imaging_utils.gcf_prolate_spheroidal import (
@@ -17,14 +18,14 @@ from astroviper.core.imaging.imaging_utils.standard_grid import (
 
 
 def make_image_xds(
-    imsize: Union[List[int], np.ndarray],
-    cell: Union[List[float], np.ndarray],
-    freq: Union[float, np.ndarray],
+    imsize: list[int] | np.ndarray,
+    cell: list[float] | np.ndarray,
+    freq: float | np.ndarray,
     freqinc: float,
-    phasecent: Union[List[float], np.ndarray],
+    phasecent: list[float] | np.ndarray,
     which: str = "SKY",
-    pol: Optional[Union[List[str], np.ndarray]] = None,
-    time: Optional[Union[List[float], np.ndarray]] = None,
+    pol: list[str] | np.ndarray | None = None,
+    time: list[float] | np.ndarray | None = None,
 ) -> xr.Dataset:
     """Create an empty sky image xarray.Dataset with a named data variable.
 
@@ -70,6 +71,7 @@ def make_image_xds(
         frequency_coords=freq_coords,
         pol_coords=pol,
         time_coords=time,
+        do_sky_coords=True,
     )
 
     # Store channel width metadata when provided.
@@ -235,9 +237,9 @@ def make_empty_padded_uv_image(
 
 def apply_pb(
     image: xr.Dataset,
-    pb: Optional[xr.Dataset] = None,
+    pb: xr.Dataset | None = None,
     multiply: bool = True,
-    data_vars: Union[str, List[str]] = "",
+    data_vars: str | list[str] = "",
 ) -> None:
     """Apply (multiply or divide) the primary beam to data variables.
 
@@ -309,7 +311,7 @@ def _mult_div(im_da: xr.DataArray, pb_da: xr.DataArray, multiply: bool = True) -
                     ] = np.nan
 
 
-def fft_to_uv(image: xr.Dataset, data_vars: Union[str, List[str]] = "") -> None:
+def fft_to_uv(image: xr.Dataset, data_vars: str | list[str] = "") -> None:
     """
 
 
@@ -341,7 +343,7 @@ def fft_to_uv(image: xr.Dataset, data_vars: Union[str, List[str]] = "") -> None:
             image[dat_name].data = fft_lm_to_uv(image[sky_var].data, axes=[3, 4])
 
 
-def ifft_to_lm(image: xr.Dataset, data_vars: Union[str, List[str]] = "") -> None:
+def ifft_to_lm(image: xr.Dataset, data_vars: str | list[str] = "") -> None:
     """
 
 
@@ -377,7 +379,7 @@ def ifft_to_lm(image: xr.Dataset, data_vars: Union[str, List[str]] = "") -> None
             image[dat_name].data = ifft_uv_to_lm(image[vis_var].data, axes=[3, 4])
 
 
-def correct_fft_to_uv(image: xr.Dataset, data_vars: Union[str, List[str]] = "") -> None:
+def correct_fft_to_uv(image: xr.Dataset, data_vars: str | list[str] = "") -> None:
     """
     Function to correct the N factor when transforming to "frequency"
 
@@ -411,7 +413,7 @@ def correct_fft_to_uv(image: xr.Dataset, data_vars: Union[str, List[str]] = "") 
 
 def correct_ifft_to_lm(
     image: xr.Dataset,
-    data_vars: Union[str, List[str]] = "",
+    data_vars: str | list[str] = "",
     doSpheroidCorr: bool = False,
     convsampling: int = 100,
     convsupport: int = 7,
@@ -493,7 +495,7 @@ def correct_ifft_to_lm(
 
 
 def grid2xradio_spheroid_ms4(
-    vis: Union[xr.core.datatree.DataTree, List[xr.core.datatree.DataTree]],
+    vis: xr.core.datatree.DataTree | list[xr.core.datatree.DataTree],
     image: xr.Dataset,
     support: int = 7,
     sampling: int = 100,
