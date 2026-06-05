@@ -1,5 +1,4 @@
 import pytest
-import dask.array as da
 import numpy as np
 import xarray as xr
 from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
@@ -33,18 +32,17 @@ def create_test_xds(shape=(1, 1, 1, 51, 51), rm_coord=None):
     }
     if rm_coord is None:
         data[0, 0, 0, :, :] = gaussian
-        da_data = da.from_array(data, chunks=(1, 1, 1, 9, 9))
     elif rm_coord == "l" or rm_coord == "m":
         shape = shape[:-2] + (shape[-2],)  # Adjust shape if a coordinate is removed
         dims.remove(rm_coord)
         data_coords.pop(rm_coord)
         data = np.zeros(shape)
-        da_data = da.from_array(data, chunks=(1, 1, 1, 9))
 
-    psf = xr.DataArray(da_data, dims=dims, coords=data_coords)
+    # Processing-function unit tests operate on numpy-backed xarray
+    # structures (no Dask arrays).
+    psf = xr.DataArray(data, dims=dims, coords=data_coords)
 
     beam_data = np.zeros((1, shape[1], shape[2], 3))
-    da_beam_data = da.from_array(beam_data, chunks=(1, 1, 1, 1))
     beam_dims = ["time", "frequency", "polarization", "beam_params_label"]
     beam_coords = {
         "time": np.arange(shape[0]),
@@ -52,7 +50,7 @@ def create_test_xds(shape=(1, 1, 1, 51, 51), rm_coord=None):
         "polarization": np.arange(shape[2]),
         "beam_params_label": np.arange(3),
     }
-    beam = xr.DataArray(da_beam_data, dims=beam_dims, coords=beam_coords)
+    beam = xr.DataArray(beam_data, dims=beam_dims, coords=beam_coords)
 
     test_dataset = xr.Dataset(
         {"POINT_SPREAD_FUNCTION": psf, "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION": beam}
@@ -68,14 +66,18 @@ def test_psf_gaussian_fit_output_structure():
     """test fit_psf_gaussian fit gives expected output structure and values"""
     test_dataset = create_test_xds()
     result = psf_gaussian_fit(test_dataset)
+    print(result)
     # sigma = 0.2 -> fwhm = 2* sigma*sqrt(2*ln(2)) = 0.2*2.35482
     truth_values = [0.47096, 0.47096, 0.0]
     assert "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION" in result
-    assert "beam_params_label" in result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].dims
-    params = result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"]["beam_params_label"]
+    # The fit writes the parameters along a ``beam_params`` dimension and adds a
+    # ``beam_params_label`` coordinate ("major", "minor", "pa") to the dataset.
+    assert "beam_params" in result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].dims
+    assert result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].sizes["beam_params"] == 3
+    params = result["beam_params_label"]
     assert params.shape[-1] == 3
-    # Check that the fitted widths are positive
-    assert np.all(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[:, :, :-1] > 0)
+    # Check that the fitted widths (major, minor) are positive
+    assert np.all(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[..., :-1] > 0)
     assert np.allclose(
         result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, :],
         truth_values,
@@ -90,9 +92,9 @@ def test_psf_gaussian_fit_custom_window():
     truth_values = [0.47096, 0.47096, 0.0]
     # result = psf_gaussian_fit(test_dataset, npix_window=[7, 7], sampling=[7, 7])
     result = psf_gaussian_fit(test_dataset, npix_window=[15, 15], sampling=[9, 9])
-    params = result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"]["beam_params_label"]
+    params = result["beam_params_label"]
     assert params.shape == (3,)
-    assert np.all(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[:, :, :-1] > 0)
+    assert np.all(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[..., :-1] > 0)
     assert np.allclose(
         result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, :],
         truth_values,
@@ -180,9 +182,7 @@ def test_all_nan_input():
     ds = create_test_xds()
     ds["POINT_SPREAD_FUNCTION"].data[:] = np.nan
     result = psf_gaussian_fit(ds)
-    assert np.all(
-        np.isnan(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data.compute())
-    )
+    assert np.all(np.isnan(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].values))
 
 
 def test_all_zero_input():
@@ -237,13 +237,12 @@ def create_rotated_gaussian(shape, angle_deg):
     gaussian = np.exp(-(a * xv**2 + 2 * b * xv * yv + c * yv**2))
     data = np.zeros((1, 1, 1, shape[-2], shape[-1]))
     data[0, 0, 0, :, :] = gaussian
-    psf = da.from_array(data, chunks="auto")
     psf = xr.DataArray(
-        psf,
+        data,
         dims=["time", "frequency", "polarization", "l", "m"],
         coords={"l": np.arange(shape[-2]), "m": np.arange(shape[-1])},
     )
-    beam_data = da.from_array(np.zeros((1, 1, 1, 3)), chunks="auto")
+    beam_data = np.zeros((1, 1, 1, 3))
     beam = xr.DataArray(
         beam_data, dims=["time", "frequency", "polarization", "beam_params_label"]
     )
@@ -263,11 +262,8 @@ def test_psf_gaussian_fit_orientation():
     for angle in [-135, -90, -45, -33, 33, 45, 90, 135]:
         ds = create_rotated_gaussian((1, 1, 1, 200, 200), angle)
         # Plot the input ellipse (rotated Gaussian)
-        input_img = (
-            ds["POINT_SPREAD_FUNCTION"].data[0, 0, 0].compute()
-            if hasattr(ds["POINT_SPREAD_FUNCTION"].data, "compute")
-            else ds["POINT_SPREAD_FUNCTION"].data[0, 0, 0]
-        )
+        input_img = ds["POINT_SPREAD_FUNCTION"][0, 0, 0].values
+
         # for verfication purpose only
         plt.figure()
         plt.imshow(input_img, origin="lower", cmap="viridis")

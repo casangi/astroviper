@@ -134,8 +134,8 @@ def point_spread_function_gaussian_fit(
     # pixel increments (radians)
     delta = np.array(
         [
-            img_xds[psf_name].l[1] - img_xds[psf_name].l[0],
-            img_xds[psf_name].m[1] - img_xds[psf_name].m[0],
+            img_xds[psf_name]["l"][1] - img_xds[psf_name]["l"][0],
+            img_xds[psf_name]["m"][1] - img_xds[psf_name]["m"][0],
         ]
     )
     # To make fitting result expressed in arcsecond uncomment the below
@@ -192,22 +192,20 @@ def point_spread_function_gaussian_fit(
             attrs={"unit": "rad"},
         )
     )
-    
-    img_xds[image_data_group_out["max_sidelobe_point_spread_function"]] = (
-        xr.DataArray(
-            max_sidelobe,
-            dims=["time", "frequency", "polarization"],
-            attrs={"unit": ""},
-        )
+
+    img_xds[image_data_group_out["max_sidelobe_point_spread_function"]] = xr.DataArray(
+        max_sidelobe,
+        dims=["time", "frequency", "polarization"],
+        attrs={"unit": ""},
     )
-    
+
     modify_data_groups_xds(
         img_xds,
         image_data_group_out_name,
         image_data_group_out,
         description="Added UV sampling grid to img_xds with add_uv_sampling_grid_single_field.",
     )
-    
+
     return img_xds
 
 

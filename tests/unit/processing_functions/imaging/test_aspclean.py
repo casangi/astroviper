@@ -185,7 +185,9 @@ class TestClean:
         recon = aspclean.convolve_centered(
             model.astype(np.float64), psf.astype(np.float64)
         )
-        err = np.max(np.abs(resid.astype(np.float64) + recon - dirty.astype(np.float64)))
+        err = np.max(
+            np.abs(resid.astype(np.float64) + recon - dirty.astype(np.float64))
+        )
         tol = 1e-3 if dtype == np.float32 else 1e-9
         assert err / np.max(np.abs(dirty)) < tol
 
@@ -219,7 +221,12 @@ class TestClean:
         peaks = [float(np.max(np.abs(resid)))]
         for _ in range(4):
             aspclean.clean(
-                resid, psf, model, gain=0.1, threshold=0.001, niter=100,
+                resid,
+                psf,
+                model,
+                gain=0.1,
+                threshold=0.001,
+                niter=100,
                 fusedthreshold=0.1,
             )
             peaks.append(float(np.max(np.abs(resid))))
@@ -246,7 +253,13 @@ class TestMask:
         model = np.zeros_like(dirty)
         resid = dirty.copy()
         aspclean.clean(
-            resid, psf, model, mask=mask, gain=0.1, threshold=0.01, niter=150,
+            resid,
+            psf,
+            model,
+            mask=mask,
+            gain=0.1,
+            threshold=0.01,
+            niter=150,
             fusedthreshold=0.1,
         )
         outside = model[mask == 0]
@@ -280,8 +293,9 @@ class TestInPlaceContract:
         resid = dirty.copy()
         resid_id = resid.ctypes.data
         model_id = model.ctypes.data
-        aspclean.clean(resid, psf, model, gain=0.2, threshold=0.01, niter=50,
-                       fusedthreshold=0.1)
+        aspclean.clean(
+            resid, psf, model, gain=0.2, threshold=0.01, niter=50, fusedthreshold=0.1
+        )
         # same buffers (no reallocation), and they changed
         assert resid.ctypes.data == resid_id
         assert model.ctypes.data == model_id
@@ -350,8 +364,18 @@ class TestCube:
 
         rc = resid.copy()
         mc = model.copy()
+        # Iteration control is per (time, frequency, polarization) plane:
+        # threshold is a float64 (nt, nf, np) array and niter an int32 one.
+        threshold = np.full((nt, nf, npol), 0.05, dtype=np.float64)
+        niter = np.full((nt, nf, npol), 80, dtype=np.int32)
         out = aspclean.clean_cube(
-            rc, psf, mc, gain=0.1, threshold=0.05, niter=80, fusedthreshold=0.1,
+            rc,
+            psf,
+            mc,
+            gain=0.1,
+            threshold=threshold,
+            niter=niter,
+            fusedthreshold=0.1,
             num_threads=2,
         )
         assert out["iterations_performed"].shape == (nt, nf, npol)
@@ -364,7 +388,12 @@ class TestCube:
                     r1 = resid[t, f, p].copy()
                     m1 = np.zeros((ny, nx))
                     aspclean.clean(
-                        r1, psf[t, f, p], m1, gain=0.1, threshold=0.05, niter=80,
+                        r1,
+                        psf[t, f, p],
+                        m1,
+                        gain=0.1,
+                        threshold=0.05,
+                        niter=80,
                         fusedthreshold=0.1,
                     )
                     np.testing.assert_allclose(rc[t, f, p], r1, atol=1e-10)
@@ -377,8 +406,16 @@ class TestCube:
         psf1[0, 0, 0] = _centered_psf(nx, ny, 2.0)
         model = np.zeros_like(resid)
         rc = resid.copy()
+        threshold = np.full((nt, nf, npol), 0.05, dtype=np.float64)
+        niter = np.full((nt, nf, npol), 60, dtype=np.int32)
         out = aspclean.clean_cube(
-            rc, psf1, model, gain=0.1, threshold=0.05, niter=60, fusedthreshold=0.1
+            rc,
+            psf1,
+            model,
+            gain=0.1,
+            threshold=threshold,
+            niter=niter,
+            fusedthreshold=0.1,
         )
         assert out["model_flux"].shape == (nt, nf, npol)
         assert np.all(out["model_flux"] > 0)

@@ -151,8 +151,12 @@ class TestInPlaceContract:
         ptr_before = dirty.__array_interface__["data"][0]
 
         hogbom.clean(
-            dirty_image=dirty, psf=psf, model=model,
-            gain=1.0, threshold=0.1, max_iter=5,
+            dirty_image=dirty,
+            psf=psf,
+            model=model,
+            gain=1.0,
+            threshold=0.1,
+            max_iter=5,
         )
 
         assert dirty.__array_interface__["data"][0] == ptr_before
@@ -170,8 +174,12 @@ class TestInPlaceContract:
         ptr_before = model.__array_interface__["data"][0]
 
         hogbom.clean(
-            dirty_image=dirty, psf=psf, model=model,
-            gain=1.0, threshold=0.1, max_iter=5,
+            dirty_image=dirty,
+            psf=psf,
+            model=model,
+            gain=1.0,
+            threshold=0.1,
+            max_iter=5,
         )
 
         assert model.__array_interface__["data"][0] == ptr_before
@@ -188,8 +196,12 @@ class TestInPlaceContract:
         model[3, 3] = 7.0  # prior component, unrelated to current residual
 
         hogbom.clean(
-            dirty_image=dirty, psf=psf, model=model,
-            gain=1.0, threshold=0.1, max_iter=5,
+            dirty_image=dirty,
+            psf=psf,
+            model=model,
+            gain=1.0,
+            threshold=0.1,
+            max_iter=5,
         )
 
         # Prior value is preserved, new component added.
@@ -204,8 +216,12 @@ class TestInPlaceContract:
         model = _zeros(ny, nx)
 
         hogbom.clean(
-            dirty_image=dirty, psf=psf, model=model,
-            gain=1.0, threshold=0.1, max_iter=5,
+            dirty_image=dirty,
+            psf=psf,
+            model=model,
+            gain=1.0,
+            threshold=0.1,
+            max_iter=5,
         )
 
         assert np.array_equal(psf, psf_before)
@@ -224,8 +240,12 @@ class TestDtypeHandling:
         model = _zeros(ny, nx, dtype=np.float64)
 
         hogbom.clean(
-            dirty_image=dirty, psf=psf, model=model,
-            gain=1.0, threshold=0.1, max_iter=5,
+            dirty_image=dirty,
+            psf=psf,
+            model=model,
+            gain=1.0,
+            threshold=0.1,
+            max_iter=5,
         )
 
         assert dirty.dtype == np.float64
@@ -320,8 +340,12 @@ class TestIterationControls:
         model = _zeros(ny, nx)
 
         result = hogbom.clean(
-            dirty_image=dirty, psf=psf, model=model,
-            gain=0.05, threshold=0.0, max_iter=7,
+            dirty_image=dirty,
+            psf=psf,
+            model=model,
+            gain=0.05,
+            threshold=0.0,
+            max_iter=7,
         )
 
         assert result["iterations_performed"] == 7
@@ -335,8 +359,12 @@ class TestIterationControls:
         # With gain=1.0 the source is cleared in one iteration; threshold
         # of 0.01 triggers the break on the next iteration.
         result = hogbom.clean(
-            dirty_image=dirty, psf=psf, model=model,
-            gain=1.0, threshold=0.01, max_iter=100,
+            dirty_image=dirty,
+            psf=psf,
+            model=model,
+            gain=1.0,
+            threshold=0.01,
+            max_iter=100,
         )
 
         assert result["iterations_performed"] <= 5
@@ -354,8 +382,12 @@ class TestIterationControls:
             calls.append((it, px, py, float(peak)))
 
         hogbom.clean(
-            dirty_image=dirty, psf=psf, model=model,
-            gain=0.1, threshold=0.0, max_iter=20,
+            dirty_image=dirty,
+            psf=psf,
+            model=model,
+            gain=0.1,
+            threshold=0.0,
+            max_iter=20,
             progress_callback=cb,
         )
 
@@ -377,8 +409,12 @@ class TestIterationControls:
             return call_count["n"] >= 2  # request stop on second check
 
         result = hogbom.clean(
-            dirty_image=dirty, psf=psf, model=model,
-            gain=0.01, threshold=0.0, max_iter=1000,
+            dirty_image=dirty,
+            psf=psf,
+            model=model,
+            gain=0.01,
+            threshold=0.0,
+            max_iter=1000,
             stop_callback=stop,
         )
 
@@ -394,16 +430,18 @@ class TestMaskAndCleanBox:
     def test_clean_box_restricts_peak_search(self):
         """Sources outside the clean box must be ignored."""
         ny, nx = 32, 32
-        dirty = _point_source_residual(
-            ny, nx, [(5, 5, 10.0), (20, 20, 3.0)]
-        )
+        dirty = _point_source_residual(ny, nx, [(5, 5, 10.0), (20, 20, 3.0)])
         psf = _delta_psf(ny, nx)
         model = _zeros(ny, nx)
 
         # Only the region around (20, 20). Box is (xmin, xmax, ymin, ymax).
         result = hogbom.clean(
-            dirty_image=dirty, psf=psf, model=model,
-            gain=1.0, threshold=0.1, max_iter=10,
+            dirty_image=dirty,
+            psf=psf,
+            model=model,
+            gain=1.0,
+            threshold=0.1,
+            max_iter=10,
             clean_box=(15, 25, 15, 25),
         )
 
@@ -418,18 +456,21 @@ class TestMaskAndCleanBox:
     def test_mask_suppresses_peak(self):
         """Pixels with mask <= 0.5 are ignored when locating the peak."""
         ny, nx = 32, 32
-        dirty = _point_source_residual(
-            ny, nx, [(5, 5, 10.0), (20, 20, 3.0)]
-        )
+        dirty = _point_source_residual(ny, nx, [(5, 5, 10.0), (20, 20, 3.0)])
         psf = _delta_psf(ny, nx)
         model = _zeros(ny, nx)
 
-        mask = np.ones((ny, nx), dtype=np.float32)
-        mask[5, 5] = 0.0  # hide the strong source
+        mask = np.ones((ny, nx), dtype=bool)
+        mask[5, 5] = False  # hide the strong source
 
         hogbom.clean(
-            dirty_image=dirty, psf=psf, model=model, mask=mask,
-            gain=1.0, threshold=0.1, max_iter=10,
+            dirty_image=dirty,
+            psf=psf,
+            model=model,
+            mask=mask,
+            gain=1.0,
+            threshold=0.1,
+            max_iter=10,
         )
 
         # Masked source is untouched; the unmasked one is cleaned.
@@ -447,7 +488,10 @@ class TestMaskAndCleanBox:
 
         with pytest.raises(RuntimeError, match="mask has wrong dtype"):
             hogbom.clean(
-                dirty_image=dirty, psf=psf, model=model, mask=mask,
+                dirty_image=dirty,
+                psf=psf,
+                model=model,
+                mask=mask,
             )
 
 
@@ -464,8 +508,12 @@ class TestReturnDict:
         model = _zeros(ny, nx)
 
         result = hogbom.clean(
-            dirty_image=dirty, psf=psf, model=model,
-            gain=1.0, threshold=0.1, max_iter=5,
+            dirty_image=dirty,
+            psf=psf,
+            model=model,
+            gain=1.0,
+            threshold=0.1,
+            max_iter=5,
         )
 
         for key in (
@@ -481,15 +529,17 @@ class TestReturnDict:
 
     def test_total_flux_matches_model_l1_norm(self):
         ny, nx = 16, 16
-        dirty = _point_source_residual(
-            ny, nx, [(8, 8, 2.0), (3, 12, -1.0)]
-        )
+        dirty = _point_source_residual(ny, nx, [(8, 8, 2.0), (3, 12, -1.0)])
         psf = _delta_psf(ny, nx)
         model = _zeros(ny, nx)
 
         result = hogbom.clean(
-            dirty_image=dirty, psf=psf, model=model,
-            gain=1.0, threshold=0.1, max_iter=20,
+            dirty_image=dirty,
+            psf=psf,
+            model=model,
+            gain=1.0,
+            threshold=0.1,
+            max_iter=20,
         )
 
         assert result["total_flux_cleaned"] == pytest.approx(
@@ -524,21 +574,42 @@ def _point_sources_cube(nt, nf, npol, ny, nx, per_plane_sources, dtype=np.float3
     return resid
 
 
+def _plane_iters(residual_cube, value):
+    """Per-plane ``max_iter`` array for ``clean_cube``.
+
+    Iteration control is independent per (time, frequency, polarization)
+    plane: ``max_iter`` is an int32 array of shape ``(nt, nf, np)``.
+    """
+    return np.full(residual_cube.shape[:3], value, dtype=np.int32)
+
+
+def _plane_threshold(residual_cube, value):
+    """Per-plane ``threshold`` array for ``clean_cube``.
+
+    ``threshold`` is a ``(nt, nf, np)`` array matching the image dtype
+    (float32 or float64).
+    """
+    return np.full(residual_cube.shape[:3], value, dtype=residual_cube.dtype)
+
+
 class TestCubeBasicCorrectness:
     def test_single_plane_cube(self):
         """A 1x1x1 cube with a single point source is cleaned identically
         to the 2-D clean on the same plane."""
         ny, nx = 32, 32
         nt, nf, npol = 1, 1, 1
-        resid = _point_sources_cube(
-            nt, nf, npol, ny, nx, {(0, 0, 0): [(10, 20, 5.0)]}
-        )
+        resid = _point_sources_cube(nt, nf, npol, ny, nx, {(0, 0, 0): [(10, 20, 5.0)]})
         psf = _delta_psf_cube(nt, nf, npol, ny, nx)
         model = np.zeros_like(resid)
 
         result = hogbom.clean_cube(
-            residual_cube=resid, psf_cube=psf, model_cube=model,
-            gain=1.0, threshold=0.1, max_iter=10, num_threads=1,
+            residual_cube=resid,
+            psf_cube=psf,
+            model_cube=model,
+            gain=1.0,
+            threshold=_plane_threshold(resid, 0.1),
+            max_iter=_plane_iters(resid, 10),
+            num_threads=1,
         )
 
         assert result["iterations_performed"].shape == (nt, nf, npol)
@@ -565,8 +636,13 @@ class TestCubeBasicCorrectness:
         model = np.zeros_like(resid)
 
         hogbom.clean_cube(
-            residual_cube=resid, psf_cube=psf, model_cube=model,
-            gain=1.0, threshold=0.1, max_iter=10, num_threads=4,
+            residual_cube=resid,
+            psf_cube=psf,
+            model_cube=model,
+            gain=1.0,
+            threshold=_plane_threshold(resid, 0.1),
+            max_iter=_plane_iters(resid, 10),
+            num_threads=4,
         )
 
         for (t, f, p), amp in expected_amp.items():
@@ -581,15 +657,24 @@ class TestCubeBasicCorrectness:
         ny, nx = 16, 16
         nt, nf, npol = 1, 1, 3
         resid = _point_sources_cube(
-            nt, nf, npol, ny, nx,
+            nt,
+            nf,
+            npol,
+            ny,
+            nx,
             {(0, 0, p): [(8, 8, 1.0 + p)] for p in range(npol)},
         )
         psf = _delta_psf_cube(nt, nf, 1, ny, nx)  # np_psf=1
         model = np.zeros_like(resid)
 
         hogbom.clean_cube(
-            residual_cube=resid, psf_cube=psf, model_cube=model,
-            gain=1.0, threshold=0.1, max_iter=10, num_threads=2,
+            residual_cube=resid,
+            psf_cube=psf,
+            model_cube=model,
+            gain=1.0,
+            threshold=_plane_threshold(resid, 0.1),
+            max_iter=_plane_iters(resid, 10),
+            num_threads=2,
         )
 
         for p in range(npol):
@@ -608,15 +693,25 @@ class TestCubeBasicCorrectness:
         resid_a = resid0.copy()
         model_a = np.zeros_like(resid_a)
         hogbom.clean_cube(
-            residual_cube=resid_a, psf_cube=psf, model_cube=model_a,
-            gain=0.1, threshold=0.05, max_iter=30, num_threads=1,
+            residual_cube=resid_a,
+            psf_cube=psf,
+            model_cube=model_a,
+            gain=0.1,
+            threshold=_plane_threshold(resid_a, 0.05),
+            max_iter=_plane_iters(resid_a, 30),
+            num_threads=1,
         )
 
         resid_b = resid0.copy()
         model_b = np.zeros_like(resid_b)
         hogbom.clean_cube(
-            residual_cube=resid_b, psf_cube=psf, model_cube=model_b,
-            gain=0.1, threshold=0.05, max_iter=30, num_threads=4,
+            residual_cube=resid_b,
+            psf_cube=psf,
+            model_cube=model_b,
+            gain=0.1,
+            threshold=_plane_threshold(resid_b, 0.05),
+            max_iter=_plane_iters(resid_b, 30),
+            num_threads=4,
         )
 
         assert np.array_equal(model_a, model_b)
@@ -626,7 +721,11 @@ class TestCubeBasicCorrectness:
         ny, nx = 16, 16
         nt, nf, npol = 1, 2, 1
         resid = _point_sources_cube(
-            nt, nf, npol, ny, nx,
+            nt,
+            nf,
+            npol,
+            ny,
+            nx,
             {(0, nn, 0): [(8, 8, 3.0 + nn)] for nn in range(nf)},
             dtype=np.float64,
         )
@@ -634,8 +733,13 @@ class TestCubeBasicCorrectness:
         model = np.zeros_like(resid)
 
         hogbom.clean_cube(
-            residual_cube=resid, psf_cube=psf, model_cube=model,
-            gain=1.0, threshold=0.1, max_iter=10, num_threads=2,
+            residual_cube=resid,
+            psf_cube=psf,
+            model_cube=model,
+            gain=1.0,
+            threshold=_plane_threshold(resid, 0.1),
+            max_iter=_plane_iters(resid, 10),
+            num_threads=2,
         )
 
         assert resid.dtype == np.float64
@@ -649,7 +753,11 @@ class TestCubeInPlaceContract:
         ny, nx = 16, 16
         nt, nf, npol = 1, 1, 2
         resid = _point_sources_cube(
-            nt, nf, npol, ny, nx,
+            nt,
+            nf,
+            npol,
+            ny,
+            nx,
             {(0, 0, 0): [(8, 8, 2.0)], (0, 0, 1): [(4, 4, 1.0)]},
         )
         psf = _delta_psf_cube(nt, nf, npol, ny, nx)
@@ -661,8 +769,13 @@ class TestCubeInPlaceContract:
         model_view = model[...]
 
         hogbom.clean_cube(
-            residual_cube=resid, psf_cube=psf, model_cube=model,
-            gain=1.0, threshold=0.1, max_iter=5, num_threads=2,
+            residual_cube=resid,
+            psf_cube=psf,
+            model_cube=model,
+            gain=1.0,
+            threshold=_plane_threshold(resid, 0.1),
+            max_iter=_plane_iters(resid, 5),
+            num_threads=2,
         )
 
         assert resid.__array_interface__["data"][0] == resid_ptr
@@ -680,8 +793,13 @@ class TestCubeInPlaceContract:
         model[0, 0, 0, 3, 3] = 7.0
 
         hogbom.clean_cube(
-            residual_cube=resid, psf_cube=psf, model_cube=model,
-            gain=1.0, threshold=0.1, max_iter=5, num_threads=1,
+            residual_cube=resid,
+            psf_cube=psf,
+            model_cube=model,
+            gain=1.0,
+            threshold=_plane_threshold(resid, 0.1),
+            max_iter=_plane_iters(resid, 5),
+            num_threads=1,
         )
 
         assert model[0, 0, 0, 3, 3] == pytest.approx(7.0, abs=1e-6)
@@ -696,8 +814,13 @@ class TestCubeInPlaceContract:
         model = np.zeros_like(resid)
 
         hogbom.clean_cube(
-            residual_cube=resid, psf_cube=psf, model_cube=model,
-            gain=1.0, threshold=0.1, max_iter=5, num_threads=1,
+            residual_cube=resid,
+            psf_cube=psf,
+            model_cube=model,
+            gain=1.0,
+            threshold=_plane_threshold(resid, 0.1),
+            max_iter=_plane_iters(resid, 5),
+            num_threads=1,
         )
 
         assert np.array_equal(psf, psf_before)
@@ -712,7 +835,9 @@ class TestCubeValidation:
 
         with pytest.raises(RuntimeError, match="5D"):
             hogbom.clean_cube(
-                residual_cube=resid, psf_cube=psf, model_cube=model,
+                residual_cube=resid,
+                psf_cube=psf,
+                model_cube=model,
             )
 
     def test_cube_psf_pol_mismatch(self):
@@ -723,7 +848,9 @@ class TestCubeValidation:
 
         with pytest.raises(RuntimeError, match="polarization"):
             hogbom.clean_cube(
-                residual_cube=resid, psf_cube=psf, model_cube=model,
+                residual_cube=resid,
+                psf_cube=psf,
+                model_cube=model,
             )
 
     def test_cube_noncontiguous_raises(self):
@@ -736,7 +863,9 @@ class TestCubeValidation:
         assert not resid.flags["C_CONTIGUOUS"]
         with pytest.raises(RuntimeError, match="C-contiguous"):
             hogbom.clean_cube(
-                residual_cube=resid, psf_cube=psf, model_cube=model,
+                residual_cube=resid,
+                psf_cube=psf,
+                model_cube=model,
             )
 
     def test_cube_readonly_residual_raises(self):
@@ -750,7 +879,9 @@ class TestCubeValidation:
 
         with pytest.raises(RuntimeError, match="writeable"):
             hogbom.clean_cube(
-                residual_cube=resid, psf_cube=psf, model_cube=model,
+                residual_cube=resid,
+                psf_cube=psf,
+                model_cube=model,
             )
 
     def test_cube_dtype_mismatch_raises(self):
@@ -761,7 +892,9 @@ class TestCubeValidation:
 
         with pytest.raises(RuntimeError, match="dtype"):
             hogbom.clean_cube(
-                residual_cube=resid, psf_cube=psf, model_cube=model,
+                residual_cube=resid,
+                psf_cube=psf,
+                model_cube=model,
             )
 
     def test_cube_unsupported_dtype_raises(self):
@@ -772,7 +905,9 @@ class TestCubeValidation:
 
         with pytest.raises(RuntimeError, match="float32 or float64"):
             hogbom.clean_cube(
-                residual_cube=resid, psf_cube=psf, model_cube=model,
+                residual_cube=resid,
+                psf_cube=psf,
+                model_cube=model,
             )
 
 
@@ -781,16 +916,25 @@ class TestCubeMaskAndBox:
         ny, nx = 32, 32
         nt, nf, npol = 1, 1, 1
         resid = _point_sources_cube(
-            nt, nf, npol, ny, nx,
+            nt,
+            nf,
+            npol,
+            ny,
+            nx,
             {(0, 0, 0): [(5, 5, 10.0), (20, 20, 3.0)]},
         )
         psf = _delta_psf_cube(nt, nf, npol, ny, nx)
         model = np.zeros_like(resid)
 
         hogbom.clean_cube(
-            residual_cube=resid, psf_cube=psf, model_cube=model,
-            gain=1.0, threshold=0.1, max_iter=10,
-            clean_box=(15, 25, 15, 25), num_threads=1,
+            residual_cube=resid,
+            psf_cube=psf,
+            model_cube=model,
+            gain=1.0,
+            threshold=_plane_threshold(resid, 0.1),
+            max_iter=_plane_iters(resid, 10),
+            clean_box=(15, 25, 15, 25),
+            num_threads=1,
         )
 
         assert resid[0, 0, 0, 5, 5] == pytest.approx(10.0, abs=1e-6)
@@ -802,19 +946,28 @@ class TestCubeMaskAndBox:
         ny, nx = 32, 32
         nt, nf, npol = 1, 1, 1
         resid = _point_sources_cube(
-            nt, nf, npol, ny, nx,
+            nt,
+            nf,
+            npol,
+            ny,
+            nx,
             {(0, 0, 0): [(5, 5, 10.0), (20, 20, 3.0)]},
         )
         psf = _delta_psf_cube(nt, nf, npol, ny, nx)
         model = np.zeros_like(resid)
 
-        mask = np.ones_like(resid)
-        mask[0, 0, 0, 5, 5] = 0.0
+        mask = np.ones(resid.shape, dtype=bool)
+        mask[0, 0, 0, 5, 5] = False
 
         hogbom.clean_cube(
-            residual_cube=resid, psf_cube=psf, model_cube=model,
+            residual_cube=resid,
+            psf_cube=psf,
+            model_cube=model,
             mask_cube=mask,
-            gain=1.0, threshold=0.1, max_iter=10, num_threads=1,
+            gain=1.0,
+            threshold=_plane_threshold(resid, 0.1),
+            max_iter=_plane_iters(resid, 10),
+            num_threads=1,
         )
 
         assert resid[0, 0, 0, 5, 5] == pytest.approx(10.0, abs=1e-6)
@@ -827,16 +980,29 @@ class TestCubeReturnShapes:
         ny, nx = 16, 16
         nt, nf, npol = 2, 3, 2
         resid = _point_sources_cube(
-            nt, nf, npol, ny, nx,
-            {(t, f, p): [(8, 8, 1.0)] for t in range(nt)
-             for f in range(nf) for p in range(npol)},
+            nt,
+            nf,
+            npol,
+            ny,
+            nx,
+            {
+                (t, f, p): [(8, 8, 1.0)]
+                for t in range(nt)
+                for f in range(nf)
+                for p in range(npol)
+            },
         )
         psf = _delta_psf_cube(nt, nf, npol, ny, nx)
         model = np.zeros_like(resid)
 
         result = hogbom.clean_cube(
-            residual_cube=resid, psf_cube=psf, model_cube=model,
-            gain=1.0, threshold=0.01, max_iter=5, num_threads=2,
+            residual_cube=resid,
+            psf_cube=psf,
+            model_cube=model,
+            gain=1.0,
+            threshold=_plane_threshold(resid, 0.01),
+            max_iter=_plane_iters(resid, 5),
+            num_threads=2,
         )
 
         expected_shape = (nt, nf, npol)
@@ -857,8 +1023,13 @@ class TestCubeReturnShapes:
 
         # Should not crash even though there is only one plane.
         hogbom.clean_cube(
-            residual_cube=resid, psf_cube=psf, model_cube=model,
-            gain=1.0, threshold=0.1, max_iter=5, num_threads=64,
+            residual_cube=resid,
+            psf_cube=psf,
+            model_cube=model,
+            gain=1.0,
+            threshold=_plane_threshold(resid, 0.1),
+            max_iter=_plane_iters(resid, 5),
+            num_threads=64,
         )
         assert model[0, 0, 0, 4, 4] == pytest.approx(1.0, abs=1e-6)
 

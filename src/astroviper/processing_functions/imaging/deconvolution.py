@@ -239,23 +239,19 @@ def _plane_peak_abs_signed(arr, mask=None):
         mask. NaN if every pixel is masked.
     """
     if mask is None:
-        # print(np.nanmax(np.abs(arr)))
-        return np.nanmax(np.abs(arr))
-    valid = mask > 0.5
-    if not np.any(valid):
+        absvals = np.abs(arr)
+    else:
+        valid = mask > 0.5
+        if not np.any(valid):
+            return float("nan")
+        absvals = np.where(valid, np.abs(arr), np.nan)
+    if np.all(np.isnan(absvals)):
         return float("nan")
-    return np.nanmax(np.where(valid, np.abs(arr), np.nan))
-
-    # Problem if more than one pixel with same max value
-    # if mask is None:
-    #     idx = np.unravel_index(np.abs(arr).argmax(), arr.shape)
-    #     return float(arr[idx])
-    # valid = mask > 0.5
-    # if not np.any(valid):
-    #     return float("nan")
-    # absvals = np.where(valid, np.abs(arr), -np.inf)
-    # idx = np.unravel_index(absvals.argmax(), arr.shape)
-    # return float(arr[idx])
+    # Return the signed value at the absolute-value peak: locate the largest
+    # magnitude with nanargmax, then return arr at that index so a strong
+    # negative residual keeps its sign (as the name/docstring promise).
+    idx = np.unravel_index(np.nanargmax(absvals), absvals.shape)
+    return float(arr[idx])
 
 
 def starting_statistics(
