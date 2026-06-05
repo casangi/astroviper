@@ -1,8 +1,10 @@
 # run using eg
 # python -m pytest ../astroviper/tests/domain/imaging/test_fft_ifft.py
 
-from astroviper.processing_functions.imaging.fft import fft_lm_to_uv
-from astroviper.processing_functions.imaging.ifft import ifft_uv_to_lm
+from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+    fft_lm_to_uv,
+    ifft_uv_to_lm,
+)
 import numpy as np
 import unittest
 

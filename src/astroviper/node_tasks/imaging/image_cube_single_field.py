@@ -1,6 +1,3 @@
-from time import time
-
-
 def _remap_deconvolve_dict_to_global_channels(combined_deconvolve_dict, data_selection):
     """Shift a chunk-local deconvolve ReturnDict onto global channel numbers.
 
@@ -27,24 +24,60 @@ def _remap_deconvolve_dict_to_global_channels(combined_deconvolve_dict, data_sel
 
     remapped = ReturnDict()
     for key, value in combined_deconvolve_dict.data.items():
-        remapped.data[
-            Key(time=key.time, pol=key.pol, chan=key.chan + chan_offset)
-        ] = value
+        remapped.data[Key(time=key.time, pol=key.pol, chan=key.chan + chan_offset)] = (
+            value
+        )
     return remapped
 
 
 def image_cube_single_field(input_params, graph_mode=True):
-    import toolviper.utils.logger as logger
+    """Image one frequency chunk of a single-field cube and write it to disk.
+
+    Thin node task (one ``input_params`` dict in, one ``return_dict`` out):
+    pins the malloc mmap threshold, builds the empty per-chunk image, loads (or
+    receives) this chunk's visibilities, runs the science
+    :func:`~astroviper.processing_functions.imaging.image_cube_single_field.image_cube_single_field`,
+    writes the result slice to the Zarr image store and returns the timing and
+    deconvolution metadata.
+
+    Parameters
+    ----------
+    input_params : dict
+        Parameters injected by the graph framework (``task_coords``,
+        ``data_selection``, ``task_id``, ``input_data``, ...) merged with the
+        imaging parameters set by the driver (``image_params``, ``image_store``,
+        ``image_data_variables_keep``, ``memory_mode``,
+        ``processing_set_data_group_name``, ``deconvolver``, ...).
+    graph_mode : bool, optional
+        If ``True`` (the default) each kept variable's slice is written into the
+        pre-allocated Zarr store with
+        :func:`~astroviper.utils.io.write_result_chunk_to_disk_using_zarr`.
+        If ``False`` the whole chunk image is written with ``to_zarr``.
+
+    Returns
+    -------
+    dict
+        Single dict with two keys:
+
+        * ``"timing"`` : one-row :class:`pandas.DataFrame` with a ``T_*`` column
+          per processing function (load, image build, weights, PSF, primary
+          beam, gridding, FFT normalization, degridding, deconvolution, write,
+          ...) plus ``task_id``, ``n_channels``, ``n_major_cycles`` and the
+          total ``T_image_cube_task``.
+        * ``"deconvolution"`` : the per-plane deconvolution
+          :class:`~astroviper.processing_functions.imaging.return_dict.ReturnDict`,
+          with channels remapped to global channel numbers.
+    """
     import time
+    import toolviper.utils.logger as logger
     from xradio.image import make_empty_sky_image
-    from toolviper.utils.memory_management import memory_setup, free_memory, get_rss_gb    
+    from toolviper.utils.memory_management import memory_setup, free_memory, get_rss_gb
     import astroviper.processing_functions as pf
-    
-    
-    start = time.time()
-    # Pin the mmap threshold BEFORE any large allocations so they use mmap
-    # and are returned to the OS immediately on free (no heap fragmentation).
-    # Must run at the start of the task, not after, or fragmentation is already done.
+
+    task_start = time.time()
+    # Pin the mmap threshold BEFORE any large allocations so they use mmap and
+    # are returned to the OS immediately on free (no heap fragmentation). Must
+    # run at the start of the task, not after, or fragmentation is already done.
     memory_setup(131072)
 
     logger.debug(
@@ -53,36 +86,34 @@ def image_cube_single_field(input_params, graph_mode=True):
         + " GB"
     )
 
-    # Handle initial stokes (transform to corr).
+    assert (
+        input_params["memory_mode"] == "in_memory"
+    ), "Currently only memory_mode='in_memory' is implemented."
 
+    # Build the empty per-chunk image in the correlation basis the gridder works
+    # in. NB: the correlation polarization basis is currently hard-coded to two
+    # linear feeds ("XX", "YY"); the image is transformed to the Stokes output
+    # basis (image_params["polarization_coords"]) inside the science function.
     image_params = input_params["image_params"]
+    start = time.time()
     img_xds = make_empty_sky_image(
         phase_center=image_params["phase_direction"],
         image_size=image_params["image_size"],
         cell_size=image_params["cell_size"],
         frequency_coords=input_params["task_coords"]["frequency"]["data"],
-        # pol_coords=image_params["polarization_coords"],
         pol_coords=["XX", "YY"],
         time_coords=image_params["time_coords"],
         do_sky_coords=False,
     )
-
-    if input_params["memory_mode"] == "in_memory":
-        in_memory = True
-    else:
-        in_memory = False
-
-    assert (
-        in_memory
-    ), "Currently only in_memory is supported for memory_mode is implemented."
+    T_make_empty_image = time.time() - start
 
     start = time.time()
     if input_params.get("input_data") is not None:
         # Data was pre-loaded by the data loading layer (disk-chunk granularity
-        # I/O coalescing).  The framework has already applied the task-level
+        # I/O coalescing). The framework has already applied the task-level
         # sub-selection, so use the dict directly.
         ps_xdt = input_params["input_data"]
-    elif in_memory:
+    else:
         from xradio.measurement_set.load_processing_set import load_processing_set
 
         ps_xdt = load_processing_set(
@@ -91,16 +122,9 @@ def image_cube_single_field(input_params, graph_mode=True):
             data_group_name=input_params["processing_set_data_group_name"],
             load_sub_datasets=False,
         )
-    else:
-        raise ValueError("in_memory=False is not currently supported.")
-        # from xradio.measurement_set.open_processing_set import open_processing_set
-        # ps_xdt = open_processing_set(...)
-        # need to work on data selection.
     T_load = time.time() - start
-    
-    print("&&&&"*10,input_params["data_selection"])
 
-    img_xds, return_df, combined_deconvolve_dict = pf.imaging.image_cube_single_field(
+    img_xds, timing_df, combined_deconvolve_dict = pf.imaging.image_cube_single_field(
         input_params, ps_xdt, img_xds
     )
 
@@ -110,7 +134,7 @@ def image_cube_single_field(input_params, graph_mode=True):
         combined_deconvolve_dict, input_params["data_selection"]
     )
 
-    start_write = time.time()
+    start = time.time()
     if graph_mode:
         from astroviper.utils.io import write_result_chunk_to_disk_using_zarr
 
@@ -122,33 +146,23 @@ def image_cube_single_field(input_params, graph_mode=True):
         )
     else:
         img_xds.to_zarr(input_params["image_store"], consolidated=True)
-    T_write = time.time() - start_write
+    T_write = time.time() - start
 
-
-    return_df["T_load"] = T_load
-    return_df["T_write"] = T_write
     img_xds = None
     ps_xdt = None
     free_memory()
-    
+
     logger.debug(
         "Memory usage after image_cube_single_field_node_task: "
         + str(get_rss_gb())
         + " GB"
     )
-    
-    image_cube_task_time = time.time() - start
-    return_df["image_cube_task_time"] = image_cube_task_time
-    
-    import pandas as pd
-    with pd.option_context(
-        "display.max_columns", None,
-        "display.max_rows", None,
-        "display.width", None,
-        "display.float_format", "{:.6g}".format,
-    ):
-        print(return_df.to_string())
 
+    # Fold the node-task timings (image build, load, write, total) into the
+    # per-chunk timing frame produced by the science function.
+    timing_df["T_make_empty_image"] = T_make_empty_image
+    timing_df["T_load"] = T_load
+    timing_df["T_write"] = T_write
+    timing_df["T_image_cube_task"] = time.time() - task_start
 
-
-    return return_df, combined_deconvolve_dict
+    return {"timing": timing_df, "deconvolution": combined_deconvolve_dict}

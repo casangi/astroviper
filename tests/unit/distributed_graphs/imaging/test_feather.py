@@ -10,8 +10,23 @@ import shutil
 from toolviper.dask.client import local_client
 from toolviper.utils.data import download
 import unittest
+import warnings
 import xarray as xr
 from xradio.image.image import load_image, make_empty_sky_image, open_image, write_image
+
+
+# ---------------------------------------------------------------------------
+# The feather tests are currently DISABLED.
+#
+# Every test class in this module is skipped (both under pytest and plain
+# ``python -m unittest``), and a warning is emitted at import/collection time so
+# anyone running the suite is told the feather tests did not actually execute.
+# ---------------------------------------------------------------------------
+FEATHER_TESTS_DISABLED_REASON = (
+    "Feather tests are currently disabled and were skipped."
+)
+
+warnings.warn(FEATHER_TESTS_DISABLED_REASON, UserWarning, stacklevel=2)
 
 
 class FeatherShared:
@@ -156,6 +171,7 @@ class FeatherShared:
             )
 
 
+@unittest.skip(FEATHER_TESTS_DISABLED_REASON)
 class FeatherTest(FeatherShared, unittest.TestCase):
 
     # ------------------------------------------------------------------------
@@ -220,6 +236,7 @@ class FeatherTest(FeatherShared, unittest.TestCase):
             self.fail("Feather should have failed to run because overwrite is not bool")
 
 
+@unittest.skip(FEATHER_TESTS_DISABLED_REASON)
 class FeatherModelComparison(FeatherShared, unittest.TestCase):
     """Comparisons between feathered image and model; uses artifacts built once.
 

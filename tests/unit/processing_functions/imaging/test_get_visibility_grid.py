@@ -27,7 +27,6 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_
     create_prolate_spheroidal_kernel_1D,
 )
 
-
 SUPPORT = 7
 OVERSAMPLING = 100
 
@@ -69,12 +68,12 @@ def _build_datasets(
     ms_xds = xr.Dataset(
         data_vars={
             "VISIBILITY": (
-                ("time", "baseline", "frequency", "polarization"),
+                ("time", "baseline_id", "frequency", "polarization"),
                 np.zeros((n_time, n_baseline, n_chan, n_pol), dtype=np.complex128),
             ),
-            "UVW": (("time", "baseline", "uvw_label"), uvw),
+            "UVW": (("time", "baseline_id", "uvw_label"), uvw),
             "WEIGHT_IMAGING": (
-                ("time", "baseline", "frequency", "polarization"),
+                ("time", "baseline_id", "frequency", "polarization"),
                 np.ones((n_time, n_baseline, n_chan, n_pol)),
             ),
         },
@@ -104,8 +103,10 @@ def _build_datasets(
         coords={"l": l_coord, "m": m_coord, "frequency": freq},
     )
     img_xds.attrs["type"] = "image_dataset"
+    # get_visibility_grid_single_field degrids the image-side "visibility" uv
+    # grid (default input data group "model") into ms model visibilities.
     img_xds.attrs["data_groups"] = {
-        "model_visibility_grid": {"SKY": "SKY_MODEL"},
+        "model": {"visibility": "SKY_MODEL"},
     }
 
     return ms_xds, img_xds, n_uv
@@ -124,11 +125,10 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
         get_visibility_grid_single_field(ms_xds, cgk, img_xds)
 
         out = ms_xds["VISIBILITY_MODEL"].values
-        self.assertEqual(out.dtype, np.complex128)
+        # The degridder allocates the model visibilities in single precision.
+        self.assertEqual(out.dtype, np.complex64)
         self.assertEqual(out.shape, (1, 16, 2, 2))
-        np.testing.assert_allclose(
-            out, np.full_like(out, sky_value), rtol=0, atol=1e-12
-        )
+        np.testing.assert_allclose(out, np.full_like(out, sky_value), rtol=0, atol=1e-5)
 
     def test_zero_grid_yields_zero_visibilities(self):
         """An all-zero UV model produces all-zero visibilities."""
@@ -160,7 +160,7 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
             ms_xds["VISIBILITY_MODEL"].shape,
             ms_xds["VISIBILITY"].shape,
         )
-        self.assertEqual(ms_xds["VISIBILITY_MODEL"].dtype, np.complex128)
+        self.assertEqual(ms_xds["VISIBILITY_MODEL"].dtype, np.complex64)
 
     def test_registers_output_data_group(self):
         """The `model` data group is added with the correct role mappings."""
@@ -187,9 +187,7 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
 
         get_visibility_grid_single_field(ms_xds, cgk, img_xds)
         with self.assertRaises(AssertionError):
-            get_visibility_grid_single_field(
-                ms_xds, cgk, img_xds, overwrite=False
-            )
+            get_visibility_grid_single_field(ms_xds, cgk, img_xds, overwrite=False)
 
     # ------------------------------------------------------------------
     # Skip behaviour
@@ -206,9 +204,7 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
 
         out = ms_xds["VISIBILITY_MODEL"].values
         # Skipped baseline retains the zero initial value.
-        np.testing.assert_array_equal(
-            out[:, 0], np.zeros_like(out[:, 0])
-        )
+        np.testing.assert_array_equal(out[:, 0], np.zeros_like(out[:, 0]))
         # Other baselines still get the constant-grid value.
         np.testing.assert_allclose(
             out[:, 1:], np.full_like(out[:, 1:], 3.0 + 0.0j), atol=1e-12
@@ -233,30 +229,22 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
     def test_continuum_mode_uses_single_image_channel(self):
         """In continuum mode every visibility channel samples image chan 0."""
         n_chan = 3
-        ms_xds, img_xds, n_uv = _build_datasets(
-            n_chan=n_chan, sky_value=0.0 + 0.0j
-        )
+        ms_xds, img_xds, n_uv = _build_datasets(n_chan=n_chan, sky_value=0.0 + 0.0j)
         # Only image channel 0 has a non-zero model; others are zero.
         sky = img_xds["SKY_MODEL"].values
         sky[:, 0] = 5.0 + 0.0j
         cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
 
-        get_visibility_grid_single_field(
-            ms_xds, cgk, img_xds, chan_mode="continuum"
-        )
+        get_visibility_grid_single_field(ms_xds, cgk, img_xds, chan_mode="continuum")
 
         out = ms_xds["VISIBILITY_MODEL"].values
         # All vis channels read from image chan 0 => all equal 5.0.
-        np.testing.assert_allclose(
-            out, np.full_like(out, 5.0 + 0.0j), atol=1e-12
-        )
+        np.testing.assert_allclose(out, np.full_like(out, 5.0 + 0.0j), atol=1e-12)
 
     def test_cube_mode_maps_chan_to_chan(self):
         """Cube mode maps vis chan i to image chan i."""
         n_chan = 3
-        ms_xds, img_xds, _ = _build_datasets(
-            n_chan=n_chan, sky_value=0.0 + 0.0j
-        )
+        ms_xds, img_xds, _ = _build_datasets(n_chan=n_chan, sky_value=0.0 + 0.0j)
         # Give each image channel a distinct value.
         sky = img_xds["SKY_MODEL"].values
         chan_values = np.array([1.0, 2.0, 3.0], dtype=np.complex128)
@@ -264,15 +252,14 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
             sky[:, c] = chan_values[c]
         cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
 
-        get_visibility_grid_single_field(
-            ms_xds, cgk, img_xds, chan_mode="cube"
-        )
+        get_visibility_grid_single_field(ms_xds, cgk, img_xds, chan_mode="cube")
 
         out = ms_xds["VISIBILITY_MODEL"].values
         # For each vis channel the output must match that image channel.
         for c in range(n_chan):
             np.testing.assert_allclose(
-                out[:, :, c], np.full_like(out[:, :, c], chan_values[c]),
+                out[:, :, c],
+                np.full_like(out[:, :, c], chan_values[c]),
                 atol=1e-12,
             )
 
@@ -305,9 +292,7 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
         pol_map = np.arange(n_pol, dtype=np.int64)
         delta_lm = img_xds.xr_img.get_lm_cell_size()
 
-        direct_vis = np.zeros(
-            ms_xds["VISIBILITY"].shape, dtype=np.complex128
-        )
+        direct_vis = np.zeros(ms_xds["VISIBILITY"].shape, dtype=np.complex128)
         prolate_spheroidal_degrid_jit(
             sky,
             direct_vis,
@@ -323,7 +308,9 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
             oversampling=OVERSAMPLING,
         )
 
-        np.testing.assert_allclose(wrapper_out, direct_vis, rtol=0, atol=1e-12)
+        # The wrapper degrids in single precision; the direct oracle call here
+        # accumulates in complex128, so compare at single-precision tolerance.
+        np.testing.assert_allclose(wrapper_out, direct_vis, rtol=0, atol=1e-5)
 
 
 if __name__ == "__main__":

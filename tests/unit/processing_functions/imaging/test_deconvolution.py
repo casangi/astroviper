@@ -33,17 +33,21 @@ from astroviper.processing_functions.imaging.deconvolution import (
     hogbom_clean,
     progress_callback,
 )
-from astroviper.processing_functions.imaging.utils.return_dict import ReturnDict
+from astroviper.processing_functions.imaging.return_dict import ReturnDict
 
 try:
-    from astroviper.processing_functions.imaging.deconvolvers import hogbom  # noqa: F401
+    from astroviper.processing_functions.imaging.deconvolvers import (
+        hogbom,
+    )  # noqa: F401
 
     HOGBOM_AVAILABLE = True
 except ImportError:  # pragma: no cover
     HOGBOM_AVAILABLE = False
 
 try:
-    from astroviper.processing_functions.imaging.deconvolvers import aspclean  # noqa: F401
+    from astroviper.processing_functions.imaging.deconvolvers import (
+        aspclean,
+    )  # noqa: F401
 
     ASP_AVAILABLE = True
 except ImportError:  # pragma: no cover
@@ -132,10 +136,20 @@ def _make_img_xds(
             ["time", "frequency", "polarization", "l", "m"],
             psf,
         ),
+        # The deconvolve return-dict builder records the per-plane peak PSF
+        # sidelobe, so the data group must carry a
+        # MAX_SIDELOBE_POINT_SPREAD_FUNCTION (time, frequency, polarization)
+        # variable (produced in production by point_spread_function_gaussian_fit).
+        "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
+            ["time", "frequency", "polarization"],
+            np.full((nt, nf, npol), 0.2, dtype=dtype),
+        ),
     }
 
     if with_mask:
-        mask = np.ones((nt, nf, npol, ny, nx), dtype=dtype)
+        # Boolean mask, matching the in-memory MASK produced by make_mask in
+        # production and required by the hogbom binding.
+        mask = np.ones((nt, nf, npol, ny, nx), dtype=bool)
         data_vars["MASK_RESIDUAL"] = (
             ["time", "frequency", "polarization", "l", "m"],
             mask,
@@ -147,12 +161,14 @@ def _make_img_xds(
     # datasets. ``deconvolve`` / ``imgstats`` operate on the trailing
     # two axes of the values array, so dimension naming is not
     # inspected; we only need the data_groups attribute.
-    xds.attrs["data_groups"] = {
-        "residual": {
-            "sky": "RESIDUAL",
-            "point_spread_function": "POINT_SPREAD_FUNCTION",
-        }
+    residual_group = {
+        "sky": "RESIDUAL",
+        "point_spread_function": "POINT_SPREAD_FUNCTION",
+        "max_sidelobe_point_spread_function": "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
     }
+    if with_mask:
+        residual_group["mask"] = "MASK_RESIDUAL"
+    xds.attrs["data_groups"] = {"residual": residual_group}
     return xds
 
 
@@ -169,6 +185,8 @@ class TestValidateDeconvolveParams:
             "niter": 1000,
             "threshold": 0.0,
             "clean_box": (-1, -1, -1, -1),
+            "minpsffraction": 0.05,
+            "maxpsffraction": 0.8,
         }
 
     def test_empty_dict_returns_defaults(self):
@@ -177,6 +195,8 @@ class TestValidateDeconvolveParams:
             "niter": 1000,
             "threshold": 0.0,
             "clean_box": (-1, -1, -1, -1),
+            "minpsffraction": 0.05,
+            "maxpsffraction": 0.8,
         }
 
     def test_partial_params_filled(self):
@@ -185,6 +205,8 @@ class TestValidateDeconvolveParams:
         assert result["niter"] == 1000
         assert result["threshold"] == 0.0
         assert result["clean_box"] == (-1, -1, -1, -1)
+        assert result["minpsffraction"] == 0.05
+        assert result["maxpsffraction"] == 0.8
 
     def test_full_valid_params_preserved(self):
         params = {
@@ -192,6 +214,8 @@ class TestValidateDeconvolveParams:
             "niter": 42,
             "threshold": 1e-6,
             "clean_box": (1, 2, 3, 4),
+            "minpsffraction": 0.1,
+            "maxpsffraction": 0.7,
         }
         result = _validate_deconvolve_params(params)
         assert result == params
@@ -294,23 +318,17 @@ class TestProgressCallback:
         with caplog.at_level(logging.INFO):
             progress_callback(17, 1, 2, 0.5, niter_log=100)
         # 17 % 100 != 0 so nothing should be emitted.
-        assert not any(
-            "Iteration" in record.getMessage() for record in caplog.records
-        )
+        assert not any("Iteration" in record.getMessage() for record in caplog.records)
 
     def test_logs_on_cadence(self, caplog):
         with caplog.at_level(logging.INFO):
             progress_callback(200, 4, 5, 1.25, niter_log=100)
-        assert any(
-            "Iteration 200" in record.getMessage() for record in caplog.records
-        )
+        assert any("Iteration 200" in record.getMessage() for record in caplog.records)
 
     def test_default_cadence(self, caplog):
         with caplog.at_level(logging.INFO):
             progress_callback(0, 0, 0, 0.0)
-        assert any(
-            "Iteration 0" in record.getMessage() for record in caplog.records
-        )
+        assert any("Iteration 0" in record.getMessage() for record in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -370,15 +388,23 @@ class TestHogbomCleanCube:
 
         resid_a = base.copy()
         model_a = np.zeros_like(resid_a)
-        hogbom_clean(resid_a, psf, model_a,
-                     {"gain": 0.2, "niter": 20, "threshold": 0.05},
-                     num_threads=1)
+        hogbom_clean(
+            resid_a,
+            psf,
+            model_a,
+            {"gain": 0.2, "niter": 20, "threshold": 0.05},
+            num_threads=1,
+        )
 
         resid_b = base.copy()
         model_b = np.zeros_like(resid_b)
-        hogbom_clean(resid_b, psf, model_b,
-                     {"gain": 0.2, "niter": 20, "threshold": 0.05},
-                     num_threads=4)
+        hogbom_clean(
+            resid_b,
+            psf,
+            model_b,
+            {"gain": 0.2, "niter": 20, "threshold": 0.05},
+            num_threads=4,
+        )
 
         assert np.array_equal(model_a, model_b)
         assert np.array_equal(resid_a, resid_b)
@@ -391,8 +417,7 @@ class TestHogbomCleanCube:
         psf = _delta_psf_cube(nt, nf, 1, ny, nx)
         model = np.zeros_like(resid)
 
-        hogbom_clean(resid, psf, model,
-                     {"gain": 1.0, "niter": 5, "threshold": 0.1})
+        hogbom_clean(resid, psf, model, {"gain": 1.0, "niter": 5, "threshold": 0.1})
 
         for p in range(npol):
             assert model[0, 0, p, 8, 8] == pytest.approx(1.0 + p, abs=1e-6)
@@ -405,12 +430,18 @@ class TestHogbomCleanCube:
         psf = _delta_psf_cube(nt, nf, npol, ny, nx)
         model = np.zeros_like(resid)
 
-        mask = np.ones_like(resid)
-        mask[0, 0, 0, 5, 5] = 0.0
+        # The hogbom binding requires a boolean mask (matching the in-memory
+        # MASK produced by make_mask in production).
+        mask = np.ones((nt, nf, npol, ny, nx), dtype=bool)
+        mask[0, 0, 0, 5, 5] = False
 
-        hogbom_clean(resid, psf, model,
-                     {"gain": 1.0, "niter": 5, "threshold": 0.1},
-                     mask_cube=mask)
+        hogbom_clean(
+            resid,
+            psf,
+            model,
+            {"gain": 1.0, "niter": 5, "threshold": 0.1},
+            mask_cube=mask,
+        )
 
         # Masked source should survive; other source should be cleaned.
         assert resid[0, 0, 0, 5, 5] == pytest.approx(10.0, abs=1e-6)
@@ -525,8 +556,13 @@ class TestDeconvolve:
         # Swap in a PSF with mismatched polarization dim size by
         # constructing a new array on a separate pol coord.
         psf_arr = np.zeros(
-            (xds.sizes["time"], xds.sizes["frequency"], 2,
-             xds.sizes["l"], xds.sizes["m"]),
+            (
+                xds.sizes["time"],
+                xds.sizes["frequency"],
+                2,
+                xds.sizes["l"],
+                xds.sizes["m"],
+            ),
             dtype=np.float32,
         )
         psf_arr[..., xds.sizes["l"] // 2, xds.sizes["m"] // 2] = 1.0
@@ -535,7 +571,8 @@ class TestDeconvolve:
         del xds["POINT_SPREAD_FUNCTION"]
         xds = xds.assign_coords({"psf_pol": ["I", "Q"]})
         xds["POINT_SPREAD_FUNCTION"] = (
-            ["time", "frequency", "psf_pol", "l", "m"], psf_arr
+            ["time", "frequency", "psf_pol", "l", "m"],
+            psf_arr,
         )
         with pytest.raises((ValueError, KeyError)):
             deconvolve(img_xds=xds)
@@ -563,9 +600,7 @@ class TestDeconvolve:
         )
 
         assert np.array_equal(xds_a["RESIDUAL"].values, xds_b["RESIDUAL"].values)
-        assert np.array_equal(
-            xds_a["SKY_MODEL"].values, xds_b["SKY_MODEL"].values
-        )
+        assert np.array_equal(xds_a["SKY_MODEL"].values, xds_b["SKY_MODEL"].values)
 
     def test_returndict_consistency(self):
         xds = _make_img_xds(nt=1, nf=1, npol=1)
@@ -576,12 +611,24 @@ class TestDeconvolve:
         entry = list(returndict.data.values())[0]
 
         # start_peakres must be >= peakres (peak should decrease).
-        start = entry["start_peakres"][-1] if isinstance(entry["start_peakres"], list) else entry["start_peakres"]
-        end = entry["peakres"][-1] if isinstance(entry["peakres"], list) else entry["peakres"]
+        start = (
+            entry["start_peakres"][-1]
+            if isinstance(entry["start_peakres"], list)
+            else entry["start_peakres"]
+        )
+        end = (
+            entry["peakres"][-1]
+            if isinstance(entry["peakres"], list)
+            else entry["peakres"]
+        )
         assert abs(end) <= abs(start) + 1e-6
 
         # iter_done within bounds.
-        iter_done = entry["iter_done"][-1] if isinstance(entry["iter_done"], list) else entry["iter_done"]
+        iter_done = (
+            entry["iter_done"][-1]
+            if isinstance(entry["iter_done"], list)
+            else entry["iter_done"]
+        )
         assert 0 <= iter_done <= entry["niter"]
 
     def test_deconvolve_with_mask(self):
@@ -594,12 +641,8 @@ class TestDeconvolve:
             deconvolve_params={"gain": 1.0, "niter": 5, "threshold": 0.05},
         )
         # Source should survive since the pixel is masked out.
-        assert xds["RESIDUAL"].values[0, 0, 0, 16, 16] == pytest.approx(
-            1.0, abs=1e-6
-        )
-        assert xds["SKY_MODEL"].values[0, 0, 0, 16, 16] == pytest.approx(
-            0.0, abs=1e-6
-        )
+        assert xds["RESIDUAL"].values[0, 0, 0, 16, 16] == pytest.approx(1.0, abs=1e-6)
+        assert xds["SKY_MODEL"].values[0, 0, 0, 16, 16] == pytest.approx(0.0, abs=1e-6)
         assert isinstance(returndict, ReturnDict)
 
 
@@ -685,13 +728,21 @@ class TestAspClean:
         psf, _ = self._gauss_psf_cube(nt, nf, npol, ny, nx, sig=2.0)
 
         ra, ma = base.copy(), np.zeros_like(base)
-        asp_clean(ra, psf, ma,
-                  {"gain": 0.2, "niter": 40, "threshold": 0.05, "fusedthreshold": 0.1},
-                  num_threads=1)
+        asp_clean(
+            ra,
+            psf,
+            ma,
+            {"gain": 0.2, "niter": 40, "threshold": 0.05, "fusedthreshold": 0.1},
+            num_threads=1,
+        )
         rb, mb = base.copy(), np.zeros_like(base)
-        asp_clean(rb, psf, mb,
-                  {"gain": 0.2, "niter": 40, "threshold": 0.05, "fusedthreshold": 0.1},
-                  num_threads=4)
+        asp_clean(
+            rb,
+            psf,
+            mb,
+            {"gain": 0.2, "niter": 40, "threshold": 0.05, "fusedthreshold": 0.1},
+            num_threads=4,
+        )
 
         assert np.array_equal(ra, rb)
         assert np.array_equal(ma, mb)
@@ -703,9 +754,18 @@ class TestAspClean:
             resid[0, 0, p, 16, 16] = 1.0 + p
         psf = _delta_psf_cube(nt, nf, 1, ny, nx)
         model = np.zeros_like(resid)
-        out = asp_clean(resid, psf, model,
-                        {"gain": 0.5, "niter": 40, "threshold": 0.01,
-                         "fusedthreshold": 0.5, "psf_width": 1.0})
+        out = asp_clean(
+            resid,
+            psf,
+            model,
+            {
+                "gain": 0.5,
+                "niter": 40,
+                "threshold": 0.01,
+                "fusedthreshold": 0.5,
+                "psf_width": 1.0,
+            },
+        )
         assert out["model_flux"].shape == (nt, nf, npol)
         assert np.all(np.asarray(out["model_flux"]) > 0)
 
@@ -724,10 +784,20 @@ class TestAspClean:
 
         # Restrict to small scales so a large-scale component just outside the
         # masked box cannot leak flux into it.
-        asp_clean(resid, psf, model,
-                  {"gain": 0.5, "niter": 60, "threshold": 0.01,
-                   "fusedthreshold": 0.5, "psf_width": 1.0, "largestscale": 2},
-                  mask_cube=mask)
+        asp_clean(
+            resid,
+            psf,
+            model,
+            {
+                "gain": 0.5,
+                "niter": 60,
+                "threshold": 0.01,
+                "fusedthreshold": 0.5,
+                "psf_width": 1.0,
+                "largestscale": 2,
+            },
+            mask_cube=mask,
+        )
 
         assert mask.dtype == np.bool_  # input mask untouched
         # No component centres are placed in the masked box, so the masked
@@ -800,8 +870,13 @@ class TestDeconvolveAsp:
         rd = deconvolve(
             img_xds=xds,
             algorithm="asp",
-            deconvolve_params={"gain": 0.5, "niter": 30, "threshold": 0.01,
-                               "fusedthreshold": 0.5, "psf_width": 1.0},
+            deconvolve_params={
+                "gain": 0.5,
+                "niter": 30,
+                "threshold": 0.01,
+                "fusedthreshold": 0.5,
+                "psf_width": 1.0,
+            },
         )
         assert len(rd.data) == nt * nf * npol
 

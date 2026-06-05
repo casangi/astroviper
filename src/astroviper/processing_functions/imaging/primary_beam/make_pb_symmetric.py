@@ -1,10 +1,18 @@
-# Simple 1D Cases
-# Airy Disk dish, blockage, freq
-# Gaussian halfWidth
-# Poly
-# Cos Polyp
-# Inverse Poly coeff
-from memory_profiler import profile
+"""Azimuthally symmetric (1-D) primary-beam voltage/power patterns.
+
+This module collects the analytic primary-beam models used by the imaging
+pipeline.  The work-horse used by the single-field imager is
+:func:`airy_disk_rorder_v2`; the remaining variants are kept for reference and
+cross-validation (e.g. the stakeholder test asserts that
+:func:`airy_disk_rorder` and :func:`airy_disk_rorder_v2` agree).
+
+Notes
+-----
+The obscured-Airy-pattern formula follows the *Obscured Airy pattern* section
+of https://en.wikipedia.org/wiki/Airy_disk.  When ``ipower == 1`` the voltage
+pattern is returned; when ``ipower == 2`` the (power) primary beam is returned.
+"""
+
 
 # Formula for obscured airy pattern found in https://en.wikipedia.org/wiki/Airy_disk (see Obscured Airy pattern section)
 # If ipower is 1 the voltage pattern is returned if ipower is 2 the primary beam is returned.
@@ -146,11 +154,31 @@ def casa_airy_disk(freq_chan, pol, pb_params, grid_params):
 # Formula for obscured airy pattern found in https://en.wikipedia.org/wiki/Airy_disk (see Obscured Airy pattern section)
 # If ipower is 1 the voltage pattern is returned if ipower is 2 the primary beam is returned.
 def airy_disk_rorder(freq_chan, pol, pb_params, grid_params):
-    """
-    Does not yet handle beam squint
-    dish_diameters : list of int
-    blockage_diameters : list of int
-    frequencies : list of number
+    """Evaluate the obscured Airy primary beam in ``(dish, chan, pol, l, m)`` order.
+
+    Reference implementation that evaluates ``J1(u)/u`` on the full image grid
+    for every channel.  Beam squint is not yet handled.
+
+    Parameters
+    ----------
+    freq_chan : array-like of float
+        Frequencies of each channel, in Hz.
+    pol : array-like
+        Polarization labels; the same azimuthally-symmetric beam is broadcast
+        across every polarization.
+    pb_params : dict
+        Must contain ``"list_dish_diameters"`` (array-like of float, m),
+        ``"list_blockage_diameters"`` (array-like of float, m) and ``"ipower"``
+        (1 for the voltage pattern, 2 for the power beam).
+    grid_params : dict
+        Must contain ``"cell_size"`` (l, m cell size in radians), ``"image_size"``
+        (``(nx, ny)``) and ``"image_center"`` (``(cx, cy)`` pixel index).
+
+    Returns
+    -------
+    numpy.ndarray
+        Array of shape
+        ``(n_dish, n_chan, n_pol, image_size[0], image_size[1])``.
     """
 
     import numpy as np
@@ -214,17 +242,44 @@ def airy_disk_rorder(freq_chan, pol, pb_params, grid_params):
 # jn is evaluated only on a compact 1D grid (~10k points) instead of the full
 # (chan x N0 x N1) array, then linearly interpolated back onto the 2D image.
 # The interpolation query is fully vectorised across channels via broadcasting.
-#@profile(precision=1)
+# @profile(precision=1)
 def airy_disk_rorder_v2(freq_chan, pol, pb_params, grid_params, dtype=None):
-    """
-    Does not yet handle beam squint
-    dish_diameters : list of int
-    blockage_diameters : list of int
-    frequencies : list of number
-    dtype : numpy dtype, optional
-        Floating-point precision for all large arrays.  Defaults to np.float64.
-        Pass np.float32 to halve memory usage at the cost of ~7 decimal digits
-        of precision (sufficient for primary-beam applications).
+    """Fast obscured-Airy primary beam in ``(dish, chan, pol, l, m)`` order.
+
+    Equivalent to :func:`airy_disk_rorder` but evaluates the Bessel term on a
+    compact 1-D lookup table (~10k points) and interpolates back onto the 2-D
+    image with :func:`numpy.interp`, avoiding the full ``(chan, l, m)``
+    evaluation of ``J1``.  Beam squint is not yet handled.
+
+    Parameters
+    ----------
+    freq_chan : array-like of float
+        Frequencies of each channel, in Hz.
+    pol : array-like
+        Polarization labels; the same azimuthally-symmetric beam is broadcast
+        across every polarization (returned as a zero-copy view).
+    pb_params : dict
+        Must contain ``"list_dish_diameters"`` (array-like of float, m),
+        ``"list_blockage_diameters"`` (array-like of float, m) and ``"ipower"``
+        (1 for the voltage pattern, 2 for the power beam).
+    grid_params : dict
+        Must contain ``"cell_size"`` (l, m cell size in radians), ``"image_size"``
+        (``(nx, ny)``) and ``"image_center"`` (``(cx, cy)`` pixel index).
+    dtype : numpy.dtype, optional
+        Floating-point precision for all large arrays.  Defaults to
+        ``numpy.float64``.  Pass ``numpy.float32`` to halve memory usage at the
+        cost of ~7 decimal digits of precision (sufficient for primary-beam
+        applications).
+
+    Returns
+    -------
+    numpy.ndarray
+        Array of shape
+        ``(n_dish, n_chan, n_pol, image_size[0], image_size[1])``.
+
+    See Also
+    --------
+    airy_disk_rorder : Reference implementation evaluated on the full grid.
     """
 
     import numpy as np
@@ -245,8 +300,12 @@ def airy_disk_rorder_v2(freq_chan, pol, pb_params, grid_params, dtype=None):
     c = scipy.constants.c  # 299792458
     k = ((2 * np.pi * freq_chan) / c).astype(dtype)
 
-    x = (np.arange(-image_center[0], image_size[0] - image_center[0]) * cell[0]).astype(dtype)
-    y = (np.arange(-image_center[1], image_size[1] - image_center[1]) * cell[1]).astype(dtype)
+    x = (np.arange(-image_center[0], image_size[0] - image_center[0]) * cell[0]).astype(
+        dtype
+    )
+    y = (np.arange(-image_center[1], image_size[1] - image_center[1]) * cell[1]).astype(
+        dtype
+    )
 
     airy_disk_size = (
         len(list_blockage_diameters),
@@ -292,15 +351,21 @@ def airy_disk_rorder_v2(freq_chan, pol, pb_params, grid_params, dtype=None):
 
     airy_disk[:, :, 0, image_center[0], image_center[1]] = 1.0  # Fix centre value
     # broadcast_to instead of tile: zero-copy read-only view over the pol axis.
-    out_shape = (len(list_dish_diameters), len(freq_chan), len(pol), image_size[0], image_size[1])
+    out_shape = (
+        len(list_dish_diameters),
+        len(freq_chan),
+        len(pol),
+        image_size[0],
+        image_size[1],
+    )
     airy_disk = np.broadcast_to(airy_disk, out_shape)
-    
+
     # import matplotlib.pyplot as plt
     # plt.figure(figsize=(20,10))
     # plt.imshow(airy_disk[0,0,0])
     # plt.colorbar()
     # plt.title("Primary Beam ")
-    
+
     # plt.figure(figsize=(20,10))
     # plt.imshow(airy_disk[0,0,1])
     # plt.colorbar()

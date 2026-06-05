@@ -77,7 +77,7 @@ def image_cube_single_field(
     clear_cache: bool = True,
     vizualize_graph: bool = False,
     disk_chunk_sizes: Optional[Union[Dict[str, int], str]] = None,
-    fft_backend="pyfftw"
+    fft_backend="pyfftw",
 ):  # -> Tuple[xr.Dataset, ReturnDict]:
     """
     Create a spectral cube.
@@ -91,13 +91,19 @@ def image_cube_single_field(
     image_params : dict
         Image parameters used to create the coordinates. Must include:
             - ``image_size`` : array-like of int
-                grid size as ``(x, y)``.
+                Grid size as ``(x, y)``.
             - ``cell_size`` : array-like of float
                 Angular cell size (radians).
-            - ``phase_center`` : array-like of float
-            - ``frequency_coords``  : array-like of float
+            - ``phase_direction`` : array-like of float
+                Image phase centre direction (radians).
+            - ``frequency_coords`` : array-like of float
+                Frequency axis (Hz).
             - ``time_coords`` : array-like of float
-            - ``pol_coords`` : array-like of str
+                Time axis.
+            - ``polarization_coords`` : array-like of str
+                Output (Stokes) polarization labels.
+            - ``fft_padding`` : float
+                Padding factor applied during gridding/FFT.
     imaging_weights_params : dict
         Weighting scheme configuration. Must include:
             - ``weighting`` : {"natural", "briggs"}
@@ -105,24 +111,32 @@ def image_cube_single_field(
             - ``robust`` : float, optional
                 Briggs robust parameter (ignored if ``"natural"``).
     iteration_control_params : dict
-
+        CLEAN iteration controls: ``niter``, ``nmajor``, ``threshold``,
+        ``gain``, ``cyclefactor``, ``cycleniter``, ``minpsffraction`` and
+        ``maxpsffraction``.
     gridder : str
-        The gridder to use. Default prolate_spheroidal.
-        Add Schwab reference
-        prolate_spheroidal: Uses a prolate spheriodal gridding convolution kernel with support 7x7 and oversmapling of 100.
-        nearest: Snaps visibility to nearest element in the grid.
+        The gridder to use. Default ``"prolate_spheroidal"`` (a prolate
+        spheroidal gridding convolution kernel with support 7x7 and oversampling
+        of 100).
     deconvolver : str
-        The image deconvolver to use. Default hogbom.
+        The image deconvolver to use. One of ``"hogbom"`` or ``"asp"``. Default
+        ``"hogbom"``.
     scan_intents : list[str]
-        The scan intent to use
+        The scan intents to image.
     field_name : str
         The field to image. If None, the first field in the processing set will be used
-    compressor :
-    processing_set_data_group_name :
-        Data group in the processing set to use for imaging for example base, corrected ect. Default is base
-    double_precision :
-        Use single or double precision math when gridding and deconvolving. Default = true
-    thread_info :
+    compressor : numcodecs compressor
+        Compressor applied to each chunk of the on-disk image.
+    processing_set_data_group_name : str
+        Data group in the processing set to image (e.g. ``"base"``,
+        ``"corrected"``). Default ``"corrected"``.
+    double_precision : bool
+        Use single- or double-precision math when gridding and deconvolving.
+        Default ``True``.
+    thread_info : dict, optional
+        Thread information as returned by
+        :func:`~astroviper.utils.data_partitioning.get_thread_info`. Queried
+        automatically when ``None``.
     n_chunks : int, optional
             Number of frequency chunks to use for parallel processing. If None (default), the chunk count is auto-determined based on the image size, memory constraints, and available parallelism.
     processing_function_threads : int, optional
@@ -156,9 +170,19 @@ def image_cube_single_field(
         on-disk chunk.  If ``Auto`` (default), the chunk sizes are
         auto-detected from the processing set using
         :func:`graphviper.graph_tools.coordinate_utils.get_disk_chunk_sizes`.
+    fft_backend : str
+        FFT backend used by the gridder normalization (e.g. ``"pyfftw"``,
+        ``"scipy"``). Default ``"pyfftw"``.
+
     Returns
     -------
-    deconvolution_stats :
+    dict
+        ``{"timing", "deconvolution"}``: ``"timing"`` is a
+        :class:`pandas.DataFrame` with one row per frequency chunk and a
+        ``T_*`` column per processing function; ``"deconvolution"`` is the merged
+        per-plane
+        :class:`~astroviper.processing_functions.imaging.return_dict.ReturnDict`
+        of convergence statistics (global channel numbering).
     """
 
     import numpy as np
@@ -198,7 +222,7 @@ def image_cube_single_field(
     logger.info(
         "Time to create empty image xds: " + str(time.time() - start) + " seconds"
     )
-    
+
     start = time.time()
     write_image(img_xds, imagename=image_store, out_format="zarr", overwrite=overwrite)
     logger.info(
@@ -240,23 +264,7 @@ def image_cube_single_field(
         double_precision=double_precision,
         data_variable_definitions="imaging",
     )
-    
-    # if  write_visibility_model_to_ps: 
-    #     create_empty_data_variables_on_disk(
-    #         ps_store,
-    #         ["visibility_model"],
-    #         shape_dict=ps_xdt.xr_ps.sizes,
-    #         parallel_coords=parallel_coords,
-    #         compressor=compressor,
-    #         double_precision=double_precision,
-    #         data_variable_definitions="visibility_model",
-    #     )
-        
-        
-    # if write_imaging_weights_to_ps: 
-    
-    
-    
+
     logger.info(
         "Time to create empty data variables on disk: "
         + str(time.time() - start)
@@ -265,28 +273,29 @@ def image_cube_single_field(
 
     zarr_meta = {}
 
-    input_parms = {}
-    input_parms["image_params"] = image_params
-    input_parms["imaging_weights_params"] = imaging_weights_params
-    input_parms["zarr_meta"] = zarr_meta
-    input_parms["to_disk"] = True
-    input_parms["polarization"] = img_xds.polarization.data
-    input_parms["time"] = [0]
-    input_parms["compressor"] = compressor
-    input_parms["image_store"] = image_store
-    input_parms["input_data_store"] = ps_store
-    input_parms["processing_set_data_group_name"] = processing_set_data_group_name
-    input_parms["image_data_variables_keep"] = image_data_variables_keep
-    input_parms["memory_mode"] = memory_mode
-    input_parms["cache_directory"] = cache_directory
-    input_parms["write_visibility_model_to_ps"] = write_visibility_model_to_ps
-    input_parms["write_imaging_weights_to_ps"] = write_imaging_weights_to_ps
-    input_parms["clear_cache"] = clear_cache
-    input_parms["processing_function_threads"] = processing_function_threads
-    input_parms["iteration_control_params"] = iteration_control_params
-    input_parms["deconvolver"] = deconvolver
-    input_parms["double_precision"] = double_precision
-    input_parms["fft_backend"] = fft_backend
+    input_params = {}
+    input_params["image_params"] = image_params
+    input_params["imaging_weights_params"] = imaging_weights_params
+    input_params["zarr_meta"] = zarr_meta
+    input_params["to_disk"] = True
+    input_params["polarization"] = img_xds.polarization.data
+    input_params["time"] = [0]
+    input_params["compressor"] = compressor
+    input_params["image_store"] = image_store
+    input_params["input_data_store"] = ps_store
+    input_params["processing_set_data_group_name"] = processing_set_data_group_name
+    input_params["image_data_variables_keep"] = image_data_variables_keep
+    input_params["memory_mode"] = memory_mode
+    input_params["cache_directory"] = cache_directory
+    input_params["write_visibility_model_to_ps"] = write_visibility_model_to_ps
+    input_params["write_imaging_weights_to_ps"] = write_imaging_weights_to_ps
+    input_params["clear_cache"] = clear_cache
+    input_params["processing_function_threads"] = processing_function_threads
+    input_params["iteration_control_params"] = iteration_control_params
+    input_params["gridder"] = gridder
+    input_params["deconvolver"] = deconvolver
+    input_params["double_precision"] = double_precision
+    input_params["fft_backend"] = fft_backend
 
     from graphviper.graph_tools.coordinate_utils import (
         interpolate_data_coords_onto_parallel_coords,
@@ -317,7 +326,7 @@ def image_cube_single_field(
 
     # frequency_coords is not used by node tasks (they use task_coords["frequency"]["data"])
     # so remove it to avoid embedding the full frequency axis in every task in the graph.
-    input_parms["image_params"] = {
+    input_params["image_params"] = {
         k: v for k, v in image_params.items() if k != "frequency_coords"
     }
 
@@ -327,17 +336,19 @@ def image_cube_single_field(
         input_data=ps_xdt,
         node_task_data_mapping=node_task_data_mapping,
         node_task=node_tasks.imaging.image_cube_single_field,
-        input_params=input_parms,
+        input_params=input_params,
         in_memory_compute=False,
         data_loading_task=_load_processing_set_chunk,
         disk_chunk_sizes=disk_chunk_sizes,
-        load_node_input_params={"processing_set_data_group_name": processing_set_data_group_name},
+        load_node_input_params={
+            "processing_set_data_group_name": processing_set_data_group_name
+        },
     )
 
-    input_params = {}
+    reduce_input_params = {}
 
     viper_graph = reduce(
-        viper_graph, combine_return_data_frames, input_params, mode="tree"
+        viper_graph, combine_return_data_frames, reduce_input_params, mode="tree"
     )
     logger.info(
         "Time to create map reduce graph: " + str(time.time() - start) + " seconds"
@@ -364,33 +375,51 @@ def image_cube_single_field(
     return return_dict
 
 
-def combine_return_data_frames(input_data, input_parms):
-    """Reduce per-chunk results into a single (DataFrame, ReturnDict) pair.
+def combine_return_data_frames(input_data, input_params):
+    """Reduce per-chunk ``{"timing", "deconvolution"}`` results into one dict.
 
-    Each node task returns ``(return_df, combined_deconvolve_dict)`` for its
-    channel chunk, with the deconvolve dict already remapped to global channel
-    numbers. This reducer concatenates the timing DataFrames and merges the
-    per-chunk deconvolve dicts with :func:`merge_return_dicts`. Because every
+    Each node task returns a single dict with a ``"timing"`` one-row
+    :class:`pandas.DataFrame` and a ``"deconvolution"``
+    :class:`~astroviper.processing_functions.imaging.return_dict.ReturnDict`
+    (already remapped to global channel numbers) for its channel chunk. This
+    reducer concatenates the timing frames (one row per chunk) and merges the
+    per-chunk deconvolution dicts with :func:`merge_return_dicts`. Because every
     chunk covers a disjoint global channel range, the merge never collides.
 
-    Returns the same ``(combined_df, combined_deconvolve_dict)`` shape so it
-    composes under tree-mode reduction (its own outputs become inputs).
+    Returns the same ``{"timing", "deconvolution"}`` shape so it composes under
+    tree-mode reduction (its own output becomes an input at the next level).
+
+    Parameters
+    ----------
+    input_data : list of dict
+        Per-chunk (or partially reduced) results, each with ``"timing"`` and
+        ``"deconvolution"`` keys.
+    input_params : dict
+        Unused; present for the GraphVIPER reduce signature.
+
+    Returns
+    -------
+    dict
+        ``{"timing": pandas.DataFrame, "deconvolution": ReturnDict}``.
     """
     import pandas as pd
     from astroviper.processing_functions.imaging.iteration_control import (
         merge_return_dicts,
     )
 
-    combined_df = pd.DataFrame()
+    combined_timing = pd.DataFrame()
     deconvolve_dicts = []
 
-    for return_df, combined_deconvolve_dict in input_data:
-        combined_df = pd.concat([combined_df, return_df], ignore_index=True)
-        deconvolve_dicts.append(combined_deconvolve_dict)
+    for result in input_data:
+        combined_timing = pd.concat(
+            [combined_timing, result["timing"]], ignore_index=True
+        )
+        deconvolve_dicts.append(result["deconvolution"])
 
-    combined_deconvolve_dict = merge_return_dicts(deconvolve_dicts)
-
-    return combined_df, combined_deconvolve_dict
+    return {
+        "timing": combined_timing,
+        "deconvolution": merge_return_dicts(deconvolve_dicts),
+    }
 
 
 def calculate_number_of_chunks_for_cube_imaging(

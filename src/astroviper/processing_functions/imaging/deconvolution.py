@@ -6,8 +6,10 @@ from typing import Optional, Tuple
 from astroviper.processing_functions.imaging.deconvolvers import hogbom
 from astroviper.processing_functions.imaging.deconvolvers import aspclean
 from astroviper.processing_functions.image_analysis import image_statistics as imgstats
-from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import extract_main_lobe
-from astroviper.processing_functions.imaging.utils.return_dict import ReturnDict
+from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
+    extract_main_lobe,
+)
+from astroviper.processing_functions.imaging.return_dict import ReturnDict
 
 import logging
 import toolviper.utils.logger as logger
@@ -120,6 +122,8 @@ def _validate_deconvolve_params(deconvolve_params):
         "niter": 1000,
         "threshold": 0.0,
         "clean_box": (-1, -1, -1, -1),
+        "minpsffraction": 0.05,
+        "maxpsffraction": 0.8,
     }
 
     for key, default_value in default_params.items():
@@ -143,12 +147,13 @@ def _validate_deconvolve_params(deconvolve_params):
             if value is not None and value < 0:
                 raise ValueError("Threshold must be non-negative or None.")
         elif key == "clean_box":
-            if value is not None and not (
-                isinstance(value, tuple) and len(value) == 4
-            ):
+            if value is not None and not (isinstance(value, tuple) and len(value) == 4):
                 raise ValueError(
                     "Clean box must be a 4-tuple (xmin, xmax, ymin, ymax) or None."
                 )
+        elif key in ("minpsffraction", "maxpsffraction"):
+            if not (0 <= value <= 1):
+                raise ValueError(f"{key} must be between 0 and 1.")
 
     return deconvolve_params
 
@@ -234,15 +239,15 @@ def _plane_peak_abs_signed(arr, mask=None):
         mask. NaN if every pixel is masked.
     """
     if mask is None:
-        #print(np.nanmax(np.abs(arr)))
+        # print(np.nanmax(np.abs(arr)))
         return np.nanmax(np.abs(arr))
     valid = mask > 0.5
     if not np.any(valid):
         return float("nan")
     return np.nanmax(np.where(valid, np.abs(arr), np.nan))
 
-    #Problem if more than one pixel with same max value
-    # if mask is None: 
+    # Problem if more than one pixel with same max value
+    # if mask is None:
     #     idx = np.unravel_index(np.abs(arr).argmax(), arr.shape)
     #     return float(arr[idx])
     # valid = mask > 0.5
@@ -525,8 +530,9 @@ def deconvolve(
     residual_name = data_group_in["sky"]
     psf_name = data_group_in["point_spread_function"]
     model_name = data_group_out["sky"]
-    max_sidelobe_point_spread_function_name = data_group_out.get("max_sidelobe_point_spread_function", None)
-    
+    max_sidelobe_point_spread_function_name = data_group_out.get(
+        "max_sidelobe_point_spread_function", None
+    )
 
     if model_name not in img_xds.data_vars:
         img_xds[model_name] = xr.zeros_like(img_xds[residual_name])
@@ -560,12 +566,14 @@ def deconvolve(
     deconvolve_params = _validate_deconvolve_params(deconvolve_params)
 
     max_psf_fraction = deconvolve_params["maxpsffraction"]
-    min_psf_fraction = deconvolve_params["minpsffraction"]    
+    min_psf_fraction = deconvolve_params["minpsffraction"]
 
     residual_arr = img_xds[residual_name].values
     psf_arr = img_xds[psf_name].values
     model_arr = img_xds[model_name].values
-    max_psf_sidelobe = img_xds[max_sidelobe_point_spread_function_name].values #time, frequency, polarization
+    max_psf_sidelobe = img_xds[
+        max_sidelobe_point_spread_function_name
+    ].values  # time, frequency, polarization
 
     # Optional mask cube, matching the residual's shape. The C++ binding
     # accepts a bool mask directly; Python keeps ownership of the buffer.
@@ -583,7 +591,6 @@ def deconvolve(
         zero_model=zero_model,
     )
 
-
     # Drive the CLEAN loop in C++. The helper owns the full
     # (time, frequency, polarization) iteration and the parallel worker
     # pool.
@@ -596,27 +603,27 @@ def deconvolve(
     # plt.imshow(psf_arr[0,0,1])
     # plt.colorbar()
     # plt.title("PSF ")
-    
+
     # plt.figure(figsize=(20,10))
     # plt.imshow(residual_arr[0,0,1])
     # plt.colorbar()
     # plt.title("REsidual ")
-    
+
     # plt.figure(figsize=(20,10))
     # plt.imshow(mask_arr[0,0,1])
     # plt.colorbar()
     # plt.title("Mask ")
-    
+
     # plt.figure(figsize=(20,10))
     # plt.imshow(mask_arr[0,0,0])
     # plt.colorbar()
     # plt.title("Mask ")
-    
+
     #     idx = np.unravel_index(np.abs(arr).argmax(), arr.shape)
     # return float(arr[idx])
     # print("The max abs value in PSF:", np.max(np.abs(psf_arr[0,0,1])))
     # print("The max abs value in Residual:", np.max(np.abs(residual_arr[0,0,1])))
-    
+
     # print(np.unravel_index(np.abs(residual_arr[0,0,1]).argmax(), residual_arr.shape))
 
     # plt.show()
@@ -740,8 +747,7 @@ def hogbom_clean(
     ):
         if not isinstance(arr, np.ndarray) or arr.ndim != 5:
             raise ValueError(
-                f"{name} must be a 5D numpy array with shape "
-                "(nt, nf, np, ny, nx)"
+                f"{name} must be a 5D numpy array with shape " "(nt, nf, np, ny, nx)"
             )
 
     if residual_cube.shape != model_cube.shape:
@@ -782,9 +788,7 @@ def hogbom_clean(
         clean_box = (-1, -1, -1, -1)
 
     mask_arg = (
-        mask_cube
-        if mask_cube is not None
-        else np.array([], dtype=residual_cube.dtype)
+        mask_cube if mask_cube is not None else np.array([], dtype=residual_cube.dtype)
     )
 
     # Per-plane iteration control: each (time, frequency, polarization) plane
@@ -899,8 +903,7 @@ def asp_clean(
     ):
         if not isinstance(arr, np.ndarray) or arr.ndim != 5:
             raise ValueError(
-                f"{name} must be a 5D numpy array with shape "
-                "(nt, nf, np, ny, nx)"
+                f"{name} must be a 5D numpy array with shape " "(nt, nf, np, ny, nx)"
             )
 
     if residual_cube.shape != model_cube.shape:
@@ -951,7 +954,7 @@ def asp_clean(
         deconvolve_params, nt, nf, npol_img, np.float64
     )
 
-    #print("@@@@@@@@@@@@@@@@@@@@. ASP clean ")
+    # print("@@@@@@@@@@@@@@@@@@@@. ASP clean ")
     return aspclean.clean_cube(
         residual=residual_cube,
         psf=psf_cube,
