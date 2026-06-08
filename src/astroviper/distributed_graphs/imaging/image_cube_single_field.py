@@ -338,7 +338,8 @@ def image_cube_single_field(
         node_task=node_tasks.imaging.image_cube_single_field,
         input_params=input_params,
         in_memory_compute=False,
-        data_loading_task=_load_processing_set_chunk,
+        #data_loading_task=_load_processing_set_chunk,
+        data_loading_task=None,
         disk_chunk_sizes=disk_chunk_sizes,
         load_node_input_params={
             "processing_set_data_group_name": processing_set_data_group_name
@@ -363,6 +364,7 @@ def image_cube_single_field(
         dask.visualize(dask_graph, filename="cube_imaging.png")
 
     start = time.time()
+    print("######### Just before compute ############")
     return_dict = dask.compute(dask_graph)[0]
     logger.info("Time to compute dask graph: " + str(time.time() - start) + " seconds")
 

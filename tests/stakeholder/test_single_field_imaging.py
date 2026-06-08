@@ -27,6 +27,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
+
 from astroviper.distributed_graphs.imaging.image_cube_single_field import (
     image_cube_single_field,
 )
@@ -378,7 +379,15 @@ def test_single_field_imaging_niter0(plot_saver):
 
 
 def test_single_field_imaging(plot_saver):
-    dask.config.set(scheduler="synchronous")
+    #dask.config.set(scheduler="synchronous")
+    
+    # from toolviper.dask.client import local_client
+
+    # viper_client = local_client(cores=4, memory_limit="4GB")
+    
+    from dask.distributed import Client
+    viper_client = Client(n_workers=4, threads_per_worker=1, memory_limit="4GB")
+    
 
     _ensure_ps_store()
     _ensure_truth_images()
@@ -389,7 +398,7 @@ def test_single_field_imaging(plot_saver):
 
     image_params = _image_params(ps_xdt)
     image_store = "twhya_selfcal_5chans_lsrk_niter_99_astroviper.img.zarr"
-
+    print(ps_xdt.xr_ps.summary())
     return_dict = image_cube_single_field(
         ps_store=PS_STORE,
         image_store=image_store,
@@ -1415,3 +1424,16 @@ if __name__ == "__main__":
     test_single_field_imaging(make_plot_saver())
     print("************" * 10)
     test_single_field_imaging_multi_cycle(make_plot_saver())
+    
+    # from dask.distributed import Client
+    # viper_client = Client(n_workers=4, threads_per_worker=1, memory_limit="4GB")
+    
+    # input("Attached dask client. Press Enter to continue with the test...")
+    
+    # def my_func():
+    #     print("Hello from a worker!")
+    # delyaed_list = []
+    # for i in range(10):
+    #     delyaed_list.append(dask.delayed(my_func)())
+    # dask.compute(delyaed_list)
+

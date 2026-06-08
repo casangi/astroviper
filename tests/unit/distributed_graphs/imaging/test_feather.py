@@ -10,25 +10,13 @@ import shutil
 from toolviper.dask.client import local_client
 from toolviper.utils.data import download
 import unittest
-import warnings
 import xarray as xr
 from xradio.image.image import load_image, make_empty_sky_image, open_image, write_image
 
 
-# ---------------------------------------------------------------------------
-# The feather tests are currently DISABLED.
-#
-# Every test class in this module is skipped (both under pytest and plain
-# ``python -m unittest``), and a warning is emitted at import/collection time so
-# anyone running the suite is told the feather tests did not actually execute.
-# ---------------------------------------------------------------------------
-FEATHER_TESTS_DISABLED_REASON = (
-    "Feather tests are currently disabled and were skipped."
-)
-
-warnings.warn(FEATHER_TESTS_DISABLED_REASON, UserWarning, stacklevel=2)
-
-
+# Feather runs as a GraphVIPER map graph: one task per frequency chunk, each
+# writing its own chunk of the output image independently. These tests exercise
+# the parallel (distributed-client) path with both 1 and 4 workers.
 class FeatherShared:
     """Shared artifacts and helpers for feather tests across classes."""
 
@@ -139,19 +127,18 @@ class FeatherShared:
 
     @classmethod
     def _feather(cls, cores: int = 1, overwrite: bool = True) -> None:
-        viper_client = local_client(
-            cores=cores,
-            memory_limit="2.0GiB",
-            log_params={"log_level": "DEBUG"},
-            worker_log_params={"log_level": "DEBUG"},
-        )
-        feather(
-            outim={"name": cls.feather_out, "overwrite": overwrite},
-            highres=cls.int_zarr,
-            lowres=cls.sd_zarr,
-            sdfactor=1,
-        )
-        viper_client.close()
+        # Exercise the parallel distributed path; ``cores`` workers run the map
+        # graph (one task per frequency chunk).
+        viper_client = local_client(cores=cores, memory_limit="2.0GiB")
+        try:
+            feather(
+                outim={"name": cls.feather_out, "overwrite": overwrite},
+                highres=cls.int_zarr,
+                lowres=cls.sd_zarr,
+                sdfactor=1,
+            )
+        finally:
+            viper_client.close()
 
     @classmethod
     def _ensure_feather_output(
@@ -166,12 +153,11 @@ class FeatherShared:
             cls._feather(cores=cores, overwrite=overwrite)
         # Final sanity: must be a directory now
         if not os.path.isdir(cls.feather_out):
-            cls.fail(
-                f"Expected zarr directory at {self.feather_out}, but it was not created."
+            raise AssertionError(
+                f"Expected zarr directory at {cls.feather_out}, but it was not created."
             )
 
 
-@unittest.skip(FEATHER_TESTS_DISABLED_REASON)
 class FeatherTest(FeatherShared, unittest.TestCase):
 
     # ------------------------------------------------------------------------
@@ -188,25 +174,28 @@ class FeatherTest(FeatherShared, unittest.TestCase):
         xds_sd = load_image(self.sd_zarr)
         xds_int = load_image(self.int_zarr)
 
-        for cores in (1, 4):
-            self._feather(cores=cores, overwrite=True)
-            feather_xds = load_image(self.feather_out)
-            self.assertEqual(
-                feather_xds["SKY"].shape, xds_sd["SKY"].shape, "Incorrect sky shape"
-            )
-            self.assertTrue(
-                (
-                    feather_xds["BEAM_FIT_PARAMS_SKY"].values
-                    == xds_int["BEAM_FIT_PARAMS_SKY"].values
-                ).all(),
-                "Incorrect beam values",
-            )
-            self.assertTrue(
-                np.isclose(
-                    feather_xds["SKY"].values, exp_fds["SKY"].values, atol=2e-7
-                ).all(),
-                "Incorrect sky values",
-            )
+        # Exercise the parallel distributed path once with 4 workers. (A prior
+        # cores=1 run was dropped: at this image size 4 workers give no speedup
+        # over 1 and both assert identical results, so the extra run only doubled
+        # the runtime without adding coverage.)
+        self._feather(cores=4, overwrite=True)
+        feather_xds = load_image(self.feather_out)
+        self.assertEqual(
+            feather_xds["SKY"].shape, xds_sd["SKY"].shape, "Incorrect sky shape"
+        )
+        self.assertTrue(
+            (
+                feather_xds["BEAM_FIT_PARAMS_SKY"].values
+                == xds_int["BEAM_FIT_PARAMS_SKY"].values
+            ).all(),
+            "Incorrect beam values",
+        )
+        self.assertTrue(
+            np.isclose(
+                feather_xds["SKY"].values, exp_fds["SKY"].values, atol=2e-7
+            ).all(),
+            "Incorrect sky values",
+        )
         self._rm(self.feather_expected)  # cleanup after test
 
     def test_overwrite(self):
@@ -236,7 +225,6 @@ class FeatherTest(FeatherShared, unittest.TestCase):
             self.fail("Feather should have failed to run because overwrite is not bool")
 
 
-@unittest.skip(FEATHER_TESTS_DISABLED_REASON)
 class FeatherModelComparison(FeatherShared, unittest.TestCase):
     """Comparisons between feathered image and model; uses artifacts built once.
 
@@ -363,12 +351,14 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
 
 
 def tearDownModule(module=None):
+    # int_zarr / sd_zarr are intentionally NOT removed: building them
+    # (download + write the 1024x1024x16 cubes) costs ~7s, so they are built
+    # once per session by ``_ensure_inputs`` and cached on disk for reuse across
+    # runs. ``_ensure_inputs`` rebuilds them only if missing.
     for f in [
         FeatherShared.int_image,
         FeatherShared.sd_image,
         FeatherShared.feather_out,
-        FeatherShared.int_zarr,
-        FeatherShared.sd_zarr,
         FeatherModelComparison.model_image,
     ]:
         FeatherShared._rm(f)

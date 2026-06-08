@@ -87,6 +87,10 @@ pip-log.txt
 pip-delete-this-directory.txt
 
 # Unit test / coverage reports
+# Cached feather test inputs (built once by test_feather's _ensure_inputs and
+# intentionally not deleted in tearDownModule so they are reused across runs).
+/int.zarr/
+/sd.zarr/
 htmlcov/
 .tox/
 .nox/

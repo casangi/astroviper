@@ -68,6 +68,7 @@ def image_cube_single_field(input_params, graph_mode=True):
           :class:`~astroviper.processing_functions.imaging.return_dict.ReturnDict`,
           with channels remapped to global channel numbers.
     """
+    print("######### Starting image_cube_single_field_node_task ############")
     import time
     import toolviper.utils.logger as logger
     from xradio.image import make_empty_sky_image

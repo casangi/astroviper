@@ -1,141 +1,177 @@
 #!/usr/bin/env python
 # coding: utf-8
+"""Feather workflow driver (graph layer).
+
+Builds and runs the GraphVIPER map graph that combines a single-dish and an
+interferometer image with the feather algorithm.  It follows the same approach
+as :func:`astroviper.distributed_graphs.imaging.image_cube_single_field`:
+
+1. create the empty output image on disk (coordinates + the interferometer beam),
+2. pre-allocate the ``SKY`` data variable on disk with
+   :func:`astroviper.utils.io.create_empty_data_variables_on_disk`,
+3. map the per-frequency-chunk node task
+   :func:`astroviper.node_tasks.imaging.feather`, which writes its own ``SKY``
+   slice in parallel via
+   :func:`astroviper.utils.io.write_result_chunk_to_disk_using_zarr`.
+
+The previous implementation used XRADIO's low-level
+``create_data_variable_meta_data`` / ``write_chunk`` helpers, which are not
+Zarr v3 compatible.
+"""
 
 import copy
-import dask
-import dask.array as da
-from graphviper.graph_tools.coordinate_utils import (
-    interpolate_data_coords_onto_parallel_coords,
-)
-from graphviper.graph_tools.coordinate_utils import make_parallel_coord
-from graphviper.graph_tools.map import map
-
-# from toolviper.utils.display import dict_to_html
-import numpy as np
 import os
 import time
 from typing import Union
+
+import numpy as np
 import xarray as xr
-from xradio.image import open_image
-from xradio.image import write_image
-import toolviper.utils.logger as logger
 from numcodecs import Blosc
+import toolviper.utils.logger as logger
+
+import astroviper.node_tasks as node_tasks
 
 _sky = "SKY"
 _beam = "BEAM_FIT_PARAMS_SKY"
+
+
+def _rename_beam_to_convention(xds):
+    """Normalize legacy ``BEAM`` / ``beam_param`` naming to the convention used
+    throughout astroviper (``BEAM_FIT_PARAMS_SKY`` / ``beam_params_label``)."""
+    if "BEAM" in xds:
+        xds = xds.rename(
+            {"BEAM": "BEAM_FIT_PARAMS_SKY", "beam_param": "beam_params_label"}
+        )
+    if "BEAM_FIT_PARAMS" in xds:
+        xds = xds.rename({"BEAM_FIT_PARAMS": "BEAM_FIT_PARAMS_SKY"})
+    return xds
+
+
+def _open_input_image(path, selection):
+    """Open an input image (zarr or XRADIO image) lazily and normalize naming."""
+    from xradio.image import open_image
+
+    if not isinstance(path, str):
+        raise TypeError(
+            "feather highres/lowres must be string paths to the on-disk images "
+            "(the parallel node task reads each frequency chunk from disk)."
+        )
+    if "zarr" in path:
+        xds = xr.open_zarr(path).isel(selection)
+    else:
+        xds = open_image({"sky": path}, selection=selection)
+    return _rename_beam_to_convention(xds)
 
 
 def feather(
     outim: Union[dict, None],
     highres: str,
     lowres: str,
-    sdfactor: float,
+    sdfactor: float = 1.0,
     selection: dict = {},
     thread_info=None,
+    processing_function_threads: int = 1,
+    fft_backend: str = "scipy",
     compressor=Blosc(cname="lz4", clevel=5),
 ):
-    """
-    Create an image from a single dish and interferometer image using the
-    feather algorithm
+    """Create an image from a single dish and interferometer image (feather).
+
     Parameters
     ----------
-    outim : output image information, dict or None
-        if None, no image is written (probably only useful for debugging). if
-        a dict it must have a "name" key. "name" is the directory to which the
-        zarr format image is written. An "overwrite" boolean parameter is
-        optional. If it does not exist, it is assumed that the user does not
-        want to overwrite an already extant image of the same name. Note that
-        feather only writes zarr format images. If another output format is
-        desired, the user/caller must convert the zarr format image to the
-        desired format after running this function. The zarr file is used to
-        accumulate the results of the computation, chunk by chunk,and so it is
-        needed at the start of the computation and is not written in total at
-        the end but rather is written to as each chunk is computed.
-    highres : interferometer image, string or xr.Dataset.
-        If str, an image file by that name will be read from disk.
-        If xr.Dataset, that xds will be used for the interferometer image.
-    lowres : Single dish image, string or xr.Dataset.
-        If str, an image file by that name will be read from disk.
-        If xr.Dataset, that xds will be used for the single dish image.
+    outim : dict
+        Output image information.  Must contain ``"name"`` (the directory the
+        Zarr image is written to).  Optional ``"overwrite"`` (bool, default
+        ``False``).  Only the Zarr format is written; convert afterwards if
+        another format is needed.  The store is created up front and written to
+        chunk-by-chunk in parallel.
+    highres : str
+        Path to the interferometer (high-resolution) image (a ``.zarr`` store or
+        an XRADIO image directory).
+    lowres : str
+        Path to the single-dish (low-resolution) image.
+    sdfactor : float, default 1.0
+        Single-dish scaling factor applied in the feather combination.
+    selection : dict, optional
+        ``xarray`` ``isel`` selection applied to both inputs (e.g. an ``l``/``m``
+        sub-window).  Applied both when sizing the output and when each chunk is
+        loaded.
+    thread_info : dict, optional
+        Thread information as returned by
+        :func:`~astroviper.utils.data_partitioning.get_thread_info`; queried
+        automatically when ``None``.
+    processing_function_threads : int, default 1
+        Number of FFT worker threads used inside each node task.
+    fft_backend : {"scipy", "pyfftw"}, default "scipy"
+        FFT backend used by the feather science function. ``scipy`` is the
+        default (it is always available and measurably faster on the cube sizes
+        typical for feather); pass ``"pyfftw"`` to use the FFTW-backed backend.
+    compressor : numcodecs compressor
+        Compressor applied to each on-disk ``SKY`` chunk.
     """
-    from astroviper.processing_functions.imaging.feather import feather_core
+    import dask
+    from graphviper.graph_tools import generate_dask_workflow
+    from graphviper.graph_tools.coordinate_utils import (
+        interpolate_data_coords_onto_parallel_coords,
+        make_parallel_coord,
+    )
+    from graphviper.graph_tools.map import map
+    from xradio.image import write_image
+    import zarr
 
-    if outim is not None:
-        if type(outim) != dict:
-            raise ValueError(
-                "If specified, outim must be a dictionary with required key "
-                "'name' and optional key 'overwrite'."
-            )
-        if "name" not in outim:
-            raise ValueError("If specfied, outim dict must have key 'name'.")
-        if "overwrite" not in outim:
-            outim["overwrite"] = False
-        elif type(outim["overwrite"]) != bool:
-            raise TypeError("If specified, outim['overwrite'] must be a boolean value")
-        if not outim["overwrite"]:
-            if os.path.exists(outim["name"]):
-                raise RuntimeError(
-                    f"Already existing file {outim['name']} will not be "
-                    "overwritten. To overwrite it, set outim['overwrite'] = True"
-                )
+    from astroviper.utils.data_partitioning import (
+        bytes_in_dtype,
+        calculate_data_chunking,
+        get_thread_info,
+    )
+    from astroviper.utils.io import create_empty_data_variables_on_disk
 
-    # Read in input images
-    # single dish image
-    if "zarr" in lowres:
-        sd_xds = (
-            xr.open_zarr(lowres).isel(selection) if isinstance(lowres, str) else lowres
+    # --- Validate output spec -------------------------------------------------
+    if outim is None or not isinstance(outim, dict):
+        raise ValueError(
+            "outim must be a dictionary with required key 'name' and optional "
+            "key 'overwrite'."
         )
-        if "BEAM" in sd_xds:
-            sd_xds = sd_xds.rename(
-                {"BEAM": "BEAM_FIT_PARAMS_SKY", "beam_param": "beam_params_label"}
-            )
-        if "BEAM_FIT_PARAMS" in sd_xds:
-            sd_xds = sd_xds.rename({"BEAM_FIT_PARAMS": "BEAM_FIT_PARAMS_SKY"})
-
-    else:
-        sd_xds = (
-            open_image({"sky": lowres}, selection=selection)
-            if isinstance(lowres, str)
-            else lowres
+    if "name" not in outim:
+        raise ValueError("outim dict must have key 'name'.")
+    if "overwrite" not in outim:
+        outim["overwrite"] = False
+    elif not isinstance(outim["overwrite"], bool):
+        raise TypeError("If specified, outim['overwrite'] must be a boolean value")
+    if not outim["overwrite"] and os.path.exists(outim["name"]):
+        raise RuntimeError(
+            f"Already existing file {outim['name']} will not be overwritten. To "
+            "overwrite it, set outim['overwrite'] = True"
         )
 
-    # interferometer image
-
-    if "zarr" in highres:
-        int_xds = (
-            xr.open_zarr(highres).isel(selection)
-            if isinstance(highres, str)
-            else highres
-        )
-
-        if "BEAM" in int_xds:
-            int_xds = int_xds.rename(
-                {"BEAM": "BEAM_FIT_PARAMS_SKY", "beam_param": "beam_params_label"}
-            )
-
-        if "BEAM_FIT_PARAMS" in int_xds:
-            int_xds = int_xds.rename({"BEAM_FIT_PARAMS": "BEAM_FIT_PARAMS_SKY"})
-
-    else:
-        int_xds = (
-            open_image({"sky": highres}, selection=selection)
-            if isinstance(highres, str)
-            else highres
-        )
+    # --- Read input image metadata -------------------------------------------
+    sd_xds = _open_input_image(lowres, selection)
+    int_xds = _open_input_image(highres, selection)
     if sd_xds[_sky].shape != int_xds[_sky].shape:
         raise RuntimeError("Image shapes differ")
 
-    # Determine chunking
-    from astroviper.utils.data_partitioning import bytes_in_dtype
+    # Output adopts the interferometer dtype-or-lower precision, matching the
+    # feather science function (feather_core).
+    if sd_xds[_sky].dtype.itemsize <= int_xds[_sky].dtype.itemsize:
+        out_dtype = sd_xds[_sky].dtype
+    else:
+        out_dtype = int_xds[_sky].dtype
+    if out_dtype == np.float64:
+        double_precision = True
+    elif out_dtype == np.float32:
+        double_precision = False
+    else:
+        raise ValueError(
+            "Unsupported image dtype "
+            + str(out_dtype)
+            + "; expected float32 or float64."
+        )
 
-    ## Determine the amount of memory required by the node task if all dimensions that chunking will occur on are singleton.
-    ## For example feather does chunking only only frequency, so memory_singleton_chunk should be the amount of memory requered by _feather when there is a single frequency channel.
+    # --- Determine frequency chunking ----------------------------------------
+    # Memory for a single-frequency chunk: two input images + one output image.
     singleton_chunk_sizes = dict(sd_xds[_sky].sizes)
-    del singleton_chunk_sizes[
-        "frequency"
-    ]  # Remove dimensions that will be chuncked on.
+    del singleton_chunk_sizes["frequency"]
     fudge_factor = 1.1
-    n_images_in_memory = 3.0  # Two input and one output image.
+    n_images_in_memory = 3.0
     memory_singleton_chunk = (
         n_images_in_memory
         * np.prod(np.array(list(singleton_chunk_sizes.values())))
@@ -143,148 +179,90 @@ def feather(
         * bytes_in_dtype[str(sd_xds[_sky].dtype)]
         / (1024**3)
     )
-
-    chunking_dims_sizes = {
-        "frequency": int_xds[_sky].sizes["frequency"]
-    }  # Need to know how many frequency channels there are.
-    from astroviper.utils.data_partitioning import (
-        calculate_data_chunking,
-        get_thread_info,
-    )
-
     if thread_info is None:
         thread_info = get_thread_info()
     logger.debug("Thread info " + str(thread_info))
     n_chunks_dict = calculate_data_chunking(
         memory_singleton_chunk,
-        chunking_dims_sizes,
+        {"frequency": int_xds[_sky].sizes["frequency"]},
         thread_info,
         constant_memory=0,
         tasks_per_thread=4,
     )
 
-    parallel_coords = {}
-    parallel_coords["frequency"] = make_parallel_coord(
-        coord=sd_xds.frequency, n_chunks=n_chunks_dict["frequency"]
+    parallel_coords = {
+        "frequency": make_parallel_coord(
+            coord=int_xds.frequency, n_chunks=n_chunks_dict["frequency"]
+        )
+    }
+    logger.info(
+        "Number of frequency chunks: "
+        + str(len(parallel_coords["frequency"]["data_chunks"]))
     )
-    # display(HTML(dict_to_html(parallel_coords["frequency"])))
 
-    # FIXME need to do this for int_xds as well, can I do in one go
-    # by making "img" a list of xdses?
-    # JW says multiple items in the dict, the key names aren't important so can
-    # be anything contextual to the problem at hand
+    # --- Create the empty image on disk --------------------------------------
+    # Coordinates and attributes are copied from the interferometer image. The
+    # beam is written whole (not chunked): its parallel dim is frequency but the
+    # feathered image simply adopts the interferometer beam unchanged.
+    featherd_img_xds = xr.Dataset(coords=int_xds.coords)
+    featherd_img_xds.attrs = copy.deepcopy(int_xds.attrs)
+    featherd_img_xds[_beam] = int_xds[_beam].copy()
+    # Drop encoding inherited from the source Zarr store: it carries a numcodecs
+    # compressor that Zarr v3's to_zarr rejects. Cleared so xarray picks a
+    # Zarr-v3-compatible default codec.
+    for name in featherd_img_xds.variables:
+        featherd_img_xds[name].encoding = {}
+    write_image(
+        featherd_img_xds,
+        imagename=outim["name"],
+        out_format="zarr",
+        overwrite=outim["overwrite"],
+    )
+
+    # Pre-allocate the SKY data variable (NaN-filled) so each map task can lazily
+    # write its own frequency slice in parallel (Zarr v3 compatible).
+    create_empty_data_variables_on_disk(
+        outim["name"],
+        ["sky"],
+        shape_dict=int_xds.sizes,
+        parallel_coords=parallel_coords,
+        compressor=compressor,
+        double_precision=double_precision,
+        data_variable_definitions="imaging",
+    )
+
+    # --- Build and run the map graph -----------------------------------------
     input_data = {"sd": sd_xds, "int": int_xds}
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
         parallel_coords, input_data
     )
-    # display(HTML(dict_to_html(node_task_data_mapping)))
 
-    # Create empty image on disk
-    to_disk = True
-    if to_disk:
-        # create new xarray.Dataset with coordinates same as int_xds
-        # but with no data
-
-        """
-        from xradio.image import make_empty_sky_image
-
-        # the phase center is not the same as lon/lat pole
-        phase_center = [
-            sd_xds.attrs["direction"]["lonpole"]["data"],
-            int_xds.attrs["direction"]["latpole"]["data"],
-        ]
-
-        featherd_img_xds = make_empty_sky_image(
-            phase_center=phase_center,
-            image_size=[int_xds.sizes["l"], int_xds.sizes["m"]],
-            cell_size=int_xds.attrs["direction"]["reference"]["cdelt"],
-            frequency_coords=parallel_coords["frequency"]["data"],
-            pol_coords=int_xds.polarization.values,
-            time_coords=[0],
-        )
-        """
-
-        featherd_img_xds = xr.Dataset(coords=int_xds.coords)
-        featherd_img_xds.attrs = copy.deepcopy(int_xds.attrs)
-        # we cannot build the beam in parallel because its parallel dims are no l, m
-        # so just copy the whole thing here
-        featherd_img_xds[_beam] = int_xds[_beam].copy()
-
-        write_image(
-            featherd_img_xds,
-            imagename=outim["name"],
-            out_format="zarr",
-            overwrite=outim["overwrite"],
-        )
-
-        # Create the empty data variable SKY.
-        from xradio.image._util._zarr.zarr_low_level import (
-            create_data_variable_meta_data,
-        )
-
-        if int_xds[_sky].dtype == np.float32:
-            from xradio.image._util._zarr.zarr_low_level import (
-                image_data_variables_and_dims_single_precision as image_data_variables_and_dims,
-            )
-        elif int_xds[_sky].dtype == np.float64:
-            from xradio.image._util._zarr.zarr_low_level import (
-                image_data_variables_and_dims_double_precision as image_data_variables_and_dims,
-            )
-        else:
-            error_message = (
-                "Unsupported data type of image "
-                + str(int_xds[_sky].dtype)
-                + " expected float32 or float64."
-            )
-            logger.error(error_message)
-            raise Exception(error_message)
-
-        xds_dims = dict(int_xds.sizes)
-        # right now the keys are lower case, but the associated values are all caps
-        # the beam cannot be written in chunks because
-        # ValueError: could not broadcast input array from shape (1,4,1,3) into shape (1,4,1,1024,1024)
-
-        data_variables = ["sky"]
-        data_varaibles_and_dims_sel = {
-            key: image_data_variables_and_dims[key] for key in data_variables
-        }
-        zarr_meta = create_data_variable_meta_data(
-            outim["name"],
-            data_varaibles_and_dims_sel,
-            xds_dims,
-            parallel_coords,
-            compressor,
-        )
-
-    input_params = {}
-    input_params["input_data_store"] = {"sd": lowres, "int": highres}
-    input_params["axes"] = ("l", "m")  # (3,4)
-    input_params["image_file"] = outim["name"]
-    input_params["s"] = 1
-
-    if to_disk:
-        input_params["to_disk"] = to_disk
-        input_params["compressor"] = compressor
-        input_params["zarr_meta"] = zarr_meta
+    input_params = {
+        "input_data_store": {"sd": lowres, "int": highres},
+        "image_store": outim["name"],
+        "image_data_variables_keep": ["sky"],
+        "axes": ("l", "m"),
+        "sdfactor": sdfactor,
+        "selection": selection,
+        "fft_backend": fft_backend,
+        "processing_function_threads": processing_function_threads,
+        "to_disk": True,
+        "compressor": compressor,
+    }
 
     t0 = time.time()
     viper_graph = map(
         input_data=input_data,
         node_task_data_mapping=node_task_data_mapping,
-        node_task=feather_core,
+        node_task=node_tasks.imaging.feather,
         input_params=input_params,
         in_memory_compute=False,
     )
-    from graphviper.graph_tools import generate_dask_workflow
-
     dask_graph = generate_dask_workflow(viper_graph)
-    logger.debug("Time to create graph " + str(time.time() - t0))
+    logger.debug("Time to create feather graph " + str(time.time() - t0) + "s")
 
-    # dask.visualize(graph, filename="map_graph")
     t0 = time.time()
-    res = dask.compute(dask_graph)
+    dask.compute(dask_graph)
     logger.info("Time to compute() feather " + str(time.time() - t0) + "s")
-
-    import zarr
 
     zarr.consolidate_metadata(outim["name"])

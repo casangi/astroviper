@@ -6,8 +6,14 @@ from astropy.time import Time
 import numpy as np
 import xarray as xr
 import matplotlib.pylab as pl
+import pytest
 
 
+@pytest.mark.skip(
+    reason="Requires local data files (Antennae_fld1_topo.ps.zarr / "
+    "Antennae_fld1_casa_lsrk.ps.zarr) that the test does not download, and "
+    "produces matplotlib figures without assertions. Run manually as a script."
+)
 def test_ms_spectral_frame_conversion():
     """
     unit tests data sets are
