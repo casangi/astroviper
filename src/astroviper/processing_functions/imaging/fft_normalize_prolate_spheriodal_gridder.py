@@ -6,7 +6,7 @@ import numpy as np
 import scipy.fft
 import xarray as xr
 import toolviper.utils.logger as logger
-from memory_profiler import profile
+#from memory_profiler import profile
 from toolviper.utils.memory_management import get_rss_gb
 
 
