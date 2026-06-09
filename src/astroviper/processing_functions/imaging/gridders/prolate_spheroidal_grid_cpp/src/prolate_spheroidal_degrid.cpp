@@ -79,13 +79,26 @@ void prolate_spheroidal_degrid(
             const double u_pos = u + uv_center_u;
             const double v_pos = v + uv_center_v;
 
-            const int u_center_indx = static_cast<int>(u_pos + 0.5);
-            const int v_center_indx = static_cast<int>(v_pos + 0.5);
+            // Round to the nearest grid centre and bounds-check in double
+            // precision *before* narrowing to int. Casting an out-of-range
+            // double to int is undefined behaviour (it yields INT_MIN on
+            // x86/ARM), and the `idx - support_center` guard would then
+            // overflow, letting an extreme UV coordinate slip through and
+            // read out of bounds. Validating in double — where nothing
+            // overflows — guarantees the centre lies in
+            // [support_center, m - support_center) and therefore fits in int.
+            // For an in-bounds (non-negative) coordinate std::floor(x + 0.5)
+            // matches the previous truncating cast exactly.
+            const double u_center = std::floor(u_pos + 0.5);
+            const double v_center = std::floor(v_pos + 0.5);
 
-            if (u_center_indx + support_center >= m_u) continue;
-            if (v_center_indx + support_center >= m_v) continue;
-            if (u_center_indx - support_center <  0)   continue;
-            if (v_center_indx - support_center <  0)   continue;
+            if (u_center + support_center >= m_u) continue;
+            if (v_center + support_center >= m_v) continue;
+            if (u_center - support_center <  0)   continue;
+            if (v_center - support_center <  0)   continue;
+
+            const int u_center_indx = static_cast<int>(u_center);
+            const int v_center_indx = static_cast<int>(v_center);
 
             const double u_offset = u_center_indx - u_pos;
             const int    u_center_offset_indx =
