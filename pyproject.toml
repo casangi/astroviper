@@ -19,7 +19,8 @@ dependencies = [
   "xradio[zarr]>=1.2.1",
   "numba",
   "opt_einsum",
-  "pyfftw"
+  "pyfftw",
+  "graphviz"
 ]
 
 [project.optional-dependencies]
