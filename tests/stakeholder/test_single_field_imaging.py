@@ -272,7 +272,7 @@ def test_single_field_imaging_niter0(plot_saver):
         n_chunks=None,
         overwrite=True,
         disk_chunk_sizes={"frequency": 2},
-        vizualize_graph=True,
+        vizualize_graph=False,
     )
     imaging_metadata_pd = return_dict["timing"]
     deconvolve_dict = return_dict["deconvolution"]
@@ -437,7 +437,7 @@ def test_single_field_imaging(plot_saver):
         n_chunks=1,
         overwrite=True,
         disk_chunk_sizes={"frequency": 5},
-        vizualize_graph=True,
+        vizualize_graph=False,
         write_visibility_model_to_ps=True,
         fft_backend="scipy",
     )
@@ -813,7 +813,7 @@ def test_single_field_imaging_multi_cycle(plot_saver):
         n_chunks=1,
         overwrite=True,
         disk_chunk_sizes={"frequency": 5},
-        vizualize_graph=True,
+        vizualize_graph=False,
         write_visibility_model_to_ps=True,
         fft_backend="scipy",
     )
