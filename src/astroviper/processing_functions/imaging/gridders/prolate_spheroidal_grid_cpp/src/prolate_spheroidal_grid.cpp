@@ -12,14 +12,33 @@ namespace prolate_spheroidal {
 
 namespace {
 
-// Lock-free atomic add on a non-atomic double via std::atomic_ref (C++20).
-// numpy allocates doubles with 8-byte alignment, which satisfies
-// std::atomic_ref<double>::required_alignment on all supported platforms.
+// Lock-free atomic add on a non-atomic double. numpy allocates doubles
+// with 8-byte alignment, which satisfies the lock-free requirement on all
+// supported platforms.
+//
+// Prefer std::atomic_ref (C++20), but fall back to the GCC/Clang __atomic
+// builtins on compilers that don't yet implement it (e.g. GCC < 10, which
+// is still the system compiler on RHEL/Rocky 8). The builtins operate on
+// the same suitably aligned plain double, so the two paths are equivalent.
 inline void atomic_add_double(double* target, double value) {
+#if defined(__cpp_lib_atomic_ref)
     std::atomic_ref<double> ref(*target);
     double current = ref.load(std::memory_order_relaxed);
     while (!ref.compare_exchange_weak(
         current, current + value, std::memory_order_relaxed)) {}
+#else
+    // Generic __atomic_* builtins (pointer args) work on plain double on
+    // both GCC and Clang; the type-specialized __atomic_*_n forms reject
+    // floating-point types under Clang.
+    double current;
+    __atomic_load(target, &current, __ATOMIC_RELAXED);
+    double desired;
+    do {
+        desired = current + value;
+    } while (!__atomic_compare_exchange(
+        target, &current, &desired, /*weak=*/true,
+        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+#endif
 }
 
 // std::complex<double> is guaranteed to be layout-compatible with

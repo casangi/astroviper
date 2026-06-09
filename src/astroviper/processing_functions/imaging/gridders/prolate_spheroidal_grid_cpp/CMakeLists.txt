@@ -5,7 +5,9 @@ project(astroviper_prolate_spheroidal_grid
     DESCRIPTION "Prolate spheroidal convolution gridder"
     LANGUAGES CXX)
 
-# Set C++20 standard (required for std::atomic_ref used in the threaded gridder)
+# Prefer C++20 (enables std::atomic_ref in the threaded gridder); the code
+# falls back to __atomic builtins when atomic_ref is unavailable, so older
+# compilers that only partially implement C++20 (e.g. GCC 8) still build.
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
