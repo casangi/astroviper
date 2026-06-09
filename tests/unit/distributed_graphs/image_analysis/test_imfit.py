@@ -355,7 +355,9 @@ class TestImfitSkyCoords:
 
     def test_sky_coords_from_descending_grids_propagates_errors(self):
         """Descending l/m sky grids should interpolate centers and errors."""
-        from astroviper.distributed_graphs.image_analysis.imfit import _attach_sky_coordinates
+        from astroviper.distributed_graphs.image_analysis.imfit import (
+            _attach_sky_coordinates,
+        )
 
         l_coord = np.array([2.0, 1.0, 0.0])
         m_coord = np.array([5.0, 3.0, 1.0])
@@ -1009,7 +1011,9 @@ class TestImfitCoverageGaps:
         The generic fitter always produces error variables, so we call
         ``_deconvolve_and_attach`` directly on a Dataset that lacks them.
         """
-        from astroviper.distributed_graphs.image_analysis.imfit import _deconvolve_and_attach
+        from astroviper.distributed_graphs.image_analysis.imfit import (
+            _deconvolve_and_attach,
+        )
 
         # Build a minimal result Dataset that mimics fitter output
         # but without error variables.
@@ -1076,7 +1080,9 @@ class TestImfitCoverageGaps:
 
     def test_deconvolution_with_errors_dask_flags_are_bool(self):
         """Dask deconvolution with errors should preserve boolean flag dtypes."""
-        from astroviper.distributed_graphs.image_analysis.imfit import _deconvolve_and_attach
+        from astroviper.distributed_graphs.image_analysis.imfit import (
+            _deconvolve_and_attach,
+        )
 
         dims = ("time", "frequency", "polarization", "component")
 
@@ -1315,7 +1321,9 @@ class TestImfitHelperCoverage:
 
     def test_lm_to_radec_from_wcs_warns_for_non_sin_projection(self):
         """Unsupported projections should warn while falling back to the SIN inverse."""
-        from astroviper.distributed_graphs.image_analysis.imfit import _lm_to_radec_from_wcs
+        from astroviper.distributed_graphs.image_analysis.imfit import (
+            _lm_to_radec_from_wcs,
+        )
 
         l_vals = xr.DataArray([0.0], dims=("component",))
         m_vals = xr.DataArray([0.0], dims=("component",))
@@ -1335,7 +1343,9 @@ class TestImfitHelperCoverage:
 
     def test_attach_sky_coordinates_returns_input_when_world_centers_absent(self):
         """Sky-coordinate attachment should no-op when l/m centers are unavailable."""
-        from astroviper.distributed_graphs.image_analysis.imfit import _attach_sky_coordinates
+        from astroviper.distributed_graphs.image_analysis.imfit import (
+            _attach_sky_coordinates,
+        )
 
         xds = _make_xradio_image(components=[], noise_sigma=0.0)
         ds = xr.Dataset({"success": xr.DataArray(np.array(True))})

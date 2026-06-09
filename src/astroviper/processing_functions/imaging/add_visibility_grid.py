@@ -326,12 +326,12 @@ def add_visibility_grid_single_field(
             np.zeros((n_imag_time, n_imag_chan, n_imag_pol), dtype=np.double),
             dims=["time", "frequency", "polarization"],
         )
-        
+
         modify_data_groups_xds(
-        img_xds,
-        img_data_group_out_name,
-        img_data_group_out,
-        description="Added gridded visibilities to img_xds with add_visibility_grid_single_field.",
+            img_xds,
+            img_data_group_out_name,
+            img_data_group_out,
+            description="Added gridded visibilities to img_xds with add_visibility_grid_single_field.",
         )
 
     grid = img_xds[img_data_group_out["visibility"]].values
@@ -386,6 +386,3 @@ def add_visibility_grid_single_field(
             support=7,
             oversampling=100,
         )
-
-
-

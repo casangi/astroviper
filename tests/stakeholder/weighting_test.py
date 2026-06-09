@@ -1,4 +1,3 @@
-
 def generate_data():
     ps_store = "twhya_selfcal_lsrk_5chans.ps.zarr"
     import dask
@@ -8,16 +7,13 @@ def generate_data():
     import os
     import numpy as np
     from xradio.measurement_set import open_processing_set
+
     # from astroviper.distributed_graphs.imaging.image_cube_single_field import (
     #     image_cube_single_field,
     # )
 
-    ps_xdt = open_processing_set(
-        ps_store
-    )
-    combined_field_and_source_xds = (
-        ps_xdt.xr_ps.get_combined_field_and_source_xds()
-    )
+    ps_xdt = open_processing_set(ps_store)
+    combined_field_and_source_xds = ps_xdt.xr_ps.get_combined_field_and_source_xds()
     center_field_name = combined_field_and_source_xds.attrs["center_field_name"]
     phase_direction = combined_field_and_source_xds.FIELD_PHASE_CENTER_DIRECTION.sel(
         field_name=center_field_name
@@ -32,32 +28,41 @@ def generate_data():
         "fft_padding": 1.2,
         "cpp_gridder": True,
     }
-    
+
     from xradio.image import load_image
     import xarray as xr
+
     weighting = ["briggs", "natural"]
     robust = ["0.5", ""]
-    specmode = ['cube', 'cubedata']
+    specmode = ["cube", "cubedata"]
     perchanweightdensity = [True, False]
-    interpolation = ['nearest', 'linear']
-    
+    interpolation = ["nearest", "linear"]
+
     weighting_setup = [
         {"weighting": "briggs", "robust": 0.5, "casa_weighting_implementation": True},
         {"weighting": "natural", "robust": 0.0, "casa_weighting_implementation": True},
         {"weighting": "briggs", "robust": 0.5, "casa_weighting_implementation": False},
         {"weighting": "natural", "robust": 0.0, "casa_weighting_implementation": False},
     ]
-    
-        
+
     for i, w in enumerate(weighting_setup):
 
-        imaging_weights_params= w
-            
+        imaging_weights_params = w
+
         print("imaging_weights_params: ", imaging_weights_params)
-        
-        image_store = "test_image_" + w["weighting"] + "_robust_" + str(w["robust"]) + "_casa_" + str(w["casa_weighting_implementation"]) + ".zarr"
+
+        image_store = (
+            "test_image_"
+            + w["weighting"]
+            + "_robust_"
+            + str(w["robust"])
+            + "_casa_"
+            + str(w["casa_weighting_implementation"])
+            + ".zarr"
+        )
 
         import astroviper.distributed_graphs as distributed_graphs
+
         imaging_metadata_pd = distributed_graphs.imaging.image_cube_single_field(
             ps_store=ps_store,
             image_store=image_store,
@@ -90,10 +95,11 @@ def generate_data():
             n_chunks=None,
             overwrite=True,
             disk_chunk_sizes={"frequency": 2},
-            vizualize_graph=True
+            vizualize_graph=True,
         )
         img_av_xds = xr.open_zarr(image_store)
-        
+
+
 def plot_data():
     import xarray as xr
     import matplotlib.pyplot as plt
@@ -109,9 +115,13 @@ def plot_data():
     labels = []
     for w in weighting_setup:
         image_store = (
-            "test_image_" + w["weighting"]
-            + "_robust_" + str(w["robust"])
-            + "_casa_" + str(w["casa_weighting_implementation"]) + ".zarr"
+            "test_image_"
+            + w["weighting"]
+            + "_robust_"
+            + str(w["robust"])
+            + "_casa_"
+            + str(w["casa_weighting_implementation"])
+            + ".zarr"
         )
         img_xds = xr.open_zarr(image_store)
         psf = img_xds["POINT_SPREAD_FUNCTION"].isel(frequency=0, polarization=0, time=0)
@@ -144,25 +154,23 @@ def plot_data():
     plt.savefig("psf_weighting_comparison.png", dpi=150)
 
     n = len(psfs)
-    diffs = [
-        [psfs[i].values - psfs[j].values for j in range(n)] for i in range(n)
-    ]
+    diffs = [[psfs[i].values - psfs[j].values for j in range(n)] for i in range(n)]
     vmax = max(
         abs(diffs[i][j][:, center_m]).max() if i != j else 0.0
-        for i in range(n) for j in range(n)
+        for i in range(n)
+        for j in range(n)
     )
     vmax = max(
         vmax,
         max(
             abs(diffs[i][j][center_l, :]).max() if i != j else 0.0
-            for i in range(n) for j in range(n)
+            for i in range(n)
+            for j in range(n)
         ),
     )
     ylim = (-vmax * 1.05, vmax * 1.05)
 
-    fig_diff, axes_diff = plt.subplots(
-        n, n, figsize=(18, 16), sharex=True, sharey=True
-    )
+    fig_diff, axes_diff = plt.subplots(n, n, figsize=(18, 16), sharex=True, sharey=True)
     for i in range(n):
         for j in range(n):
             ax = axes_diff[i, j]
@@ -179,9 +187,7 @@ def plot_data():
             if j == 0:
                 ax.set_ylabel("PSF difference")
 
-    fig_diff.suptitle(
-        "PSF cross-section differences (row - column)", fontsize=12
-    )
+    fig_diff.suptitle("PSF cross-section differences (row - column)", fontsize=12)
     fig_diff.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
     fig_diff.savefig("psf_weighting_difference_grid.png", dpi=150)
 
@@ -200,8 +206,7 @@ def plot_data():
 
     casa_diffs = [psfs[i].values - psfs[j].values for i, j in pairs]
     vmax_casa = max(
-        max(abs(d[:, center_m]).max(), abs(d[center_l, :]).max())
-        for d in casa_diffs
+        max(abs(d[:, center_m]).max(), abs(d[center_l, :]).max()) for d in casa_diffs
     )
     ylim_casa = (-vmax_casa * 1.05, vmax_casa * 1.05)
 
@@ -237,5 +242,5 @@ def plot_data():
 
 
 if __name__ == "__main__":
-    #generate_data()
+    # generate_data()
     plot_data()

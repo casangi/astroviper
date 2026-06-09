@@ -24,7 +24,6 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_
     create_prolate_spheroidal_kernel_1D,
 )
 
-
 SUPPORT = 7
 OVERSAMPLING = 100
 
@@ -261,13 +260,26 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         fmap = np.array([0], dtype=np.int64)
         tmap = np.array([0], dtype=np.int64)
         pmap = np.array([0], dtype=np.int64)
-        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT).astype(np.float64)
+        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT).astype(
+            np.float64
+        )
         n_uv = np.array([m_u, m_v], dtype=np.int64)
         delta_lm = np.array([1.0e-4, 1.0e-4], dtype=np.float64)
 
         prolate_spheroidal_degrid(
-            grid, vis_data, uvw, freq, fmap, tmap, pmap, cgk,
-            n_uv, delta_lm, support=SUPPORT, oversampling=OVERSAMPLING, num_threads=1,
+            grid,
+            vis_data,
+            uvw,
+            freq,
+            fmap,
+            tmap,
+            pmap,
+            cgk,
+            n_uv,
+            delta_lm,
+            support=SUPPORT,
+            oversampling=OVERSAMPLING,
+            num_threads=1,
         )
 
         s = SUPPORT // 2
@@ -292,11 +304,19 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         self.assertEqual(vis.dtype, np.complex128)
         addr_before = vis.ctypes.data
         prolate_spheroidal_degrid(
-            inputs["grid"], vis, inputs["uvw"],
-            inputs["frequency_coord"], inputs["frequency_map"],
-            inputs["time_map"], inputs["pol_map"], inputs["cgk_1D"],
-            inputs["n_uv"], inputs["delta_lm"],
-            support=SUPPORT, oversampling=OVERSAMPLING, num_threads=1,
+            inputs["grid"],
+            vis,
+            inputs["uvw"],
+            inputs["frequency_coord"],
+            inputs["frequency_map"],
+            inputs["time_map"],
+            inputs["pol_map"],
+            inputs["cgk_1D"],
+            inputs["n_uv"],
+            inputs["delta_lm"],
+            support=SUPPORT,
+            oversampling=OVERSAMPLING,
+            num_threads=1,
         )
         # Same buffer (no reallocation, no silent copy).
         self.assertEqual(vis.ctypes.data, addr_before)
@@ -316,11 +336,19 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         vis64 = np.zeros_like(inputs["vis_data"], dtype=np.complex64)
         addr_before = vis64.ctypes.data
         prolate_spheroidal_degrid(
-            inputs["grid"], vis64, inputs["uvw"],
-            inputs["frequency_coord"], inputs["frequency_map"],
-            inputs["time_map"], inputs["pol_map"], inputs["cgk_1D"],
-            inputs["n_uv"], inputs["delta_lm"],
-            support=SUPPORT, oversampling=OVERSAMPLING, num_threads=1,
+            inputs["grid"],
+            vis64,
+            inputs["uvw"],
+            inputs["frequency_coord"],
+            inputs["frequency_map"],
+            inputs["time_map"],
+            inputs["pol_map"],
+            inputs["cgk_1D"],
+            inputs["n_uv"],
+            inputs["delta_lm"],
+            support=SUPPORT,
+            oversampling=OVERSAMPLING,
+            num_threads=1,
         )
         self.assertEqual(vis64.ctypes.data, addr_before)
         self.assertEqual(vis64.dtype, np.complex64)
@@ -331,26 +359,46 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         inputs = _make_random_inputs(seed=22)
         vis64 = np.zeros_like(inputs["vis_data"], dtype=np.complex64)
         prolate_spheroidal_degrid(
-            inputs["grid"], vis64, inputs["uvw"],
-            inputs["frequency_coord"], inputs["frequency_map"],
-            inputs["time_map"], inputs["pol_map"], inputs["cgk_1D"],
-            inputs["n_uv"], inputs["delta_lm"],
-            support=SUPPORT, oversampling=OVERSAMPLING, num_threads=1,
+            inputs["grid"],
+            vis64,
+            inputs["uvw"],
+            inputs["frequency_coord"],
+            inputs["frequency_map"],
+            inputs["time_map"],
+            inputs["pol_map"],
+            inputs["cgk_1D"],
+            inputs["n_uv"],
+            inputs["delta_lm"],
+            support=SUPPORT,
+            oversampling=OVERSAMPLING,
+            num_threads=1,
         )
         ref = _run_jit(inputs)  # complex128 numba reference
-        np.testing.assert_allclose(vis64, ref.astype(np.complex64), rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(
+            vis64, ref.astype(np.complex64), rtol=1e-5, atol=1e-6
+        )
 
     def test_bad_dtype_raises_no_silent_copy(self):
         """Unsupported vis_data dtype must raise rather than silently allocate a copy."""
         inputs = _make_random_inputs(seed=23)
-        bad_vis = np.zeros_like(inputs["vis_data"], dtype=np.float64)  # real, not complex
+        bad_vis = np.zeros_like(
+            inputs["vis_data"], dtype=np.float64
+        )  # real, not complex
         with self.assertRaises(RuntimeError):
             prolate_spheroidal_degrid(
-                inputs["grid"], bad_vis, inputs["uvw"],
-                inputs["frequency_coord"], inputs["frequency_map"],
-                inputs["time_map"], inputs["pol_map"], inputs["cgk_1D"],
-                inputs["n_uv"], inputs["delta_lm"],
-                support=SUPPORT, oversampling=OVERSAMPLING, num_threads=1,
+                inputs["grid"],
+                bad_vis,
+                inputs["uvw"],
+                inputs["frequency_coord"],
+                inputs["frequency_map"],
+                inputs["time_map"],
+                inputs["pol_map"],
+                inputs["cgk_1D"],
+                inputs["n_uv"],
+                inputs["delta_lm"],
+                support=SUPPORT,
+                oversampling=OVERSAMPLING,
+                num_threads=1,
             )
 
     def test_jit_and_cpp_produce_same_result(self):

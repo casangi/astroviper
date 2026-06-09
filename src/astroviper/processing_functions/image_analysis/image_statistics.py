@@ -37,7 +37,9 @@ def get_image_masksum(image_xds, dv="SKY"):
     return mask_sum
 
 
-def image_peak_residual(image_xds, per_plane_stats=False, use_mask=True, dv="SKY_RESIDUAL"):
+def image_peak_residual(
+    image_xds, per_plane_stats=False, use_mask=True, dv="SKY_RESIDUAL"
+):
     """
     Compute the peak residual of an image, optionally per plane.
 

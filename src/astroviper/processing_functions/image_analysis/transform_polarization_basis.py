@@ -45,10 +45,10 @@ CIRCULAR_CORR_TO_STOKES = np.array(
 # Stokes → correlation  (columns: I, Q, U, V)
 LINEAR_STOKES_TO_CORR = np.array(
     [
-        [1.0, 1.0, 0, 0],  # XX = (I + Q) 
-        [0, 0, 1.0, 1.0j],  # XY = (U + iV) 
-        [0, 0, 1.0, -1.0j],  # YX = (U - iV) 
-        [1.0, -1.0, 0, 0],  # YY = (I - Q) 
+        [1.0, 1.0, 0, 0],  # XX = (I + Q)
+        [0, 0, 1.0, 1.0j],  # XY = (U + iV)
+        [0, 0, 1.0, -1.0j],  # YX = (U - iV)
+        [1.0, -1.0, 0, 0],  # YY = (I - Q)
     ],
     dtype=complex,
 )
@@ -56,10 +56,10 @@ LINEAR_STOKES_TO_CORR = np.array(
 # Stokes → correlation  (columns: I, Q, U, V)
 CIRCULAR_STOKES_TO_CORR = np.array(
     [
-        [1.0, 0, 0, 1.0],  # RR = (I + V) 
-        [0, 1.0, 1.0j, 0],  # RL = (Q + iU) 
-        [0, 1.0, -1.0j, 0],  # LR = (Q - iU) 
-        [1.0, 0, 0, -1.0],  # LL = (I - V) 
+        [1.0, 0, 0, 1.0],  # RR = (I + V)
+        [0, 1.0, 1.0j, 0],  # RL = (Q + iU)
+        [0, 1.0, -1.0j, 0],  # LR = (Q - iU)
+        [1.0, 0, 0, -1.0],  # LL = (I - V)
     ],
     dtype=complex,
 )
@@ -87,8 +87,8 @@ CIRCULAR_2POL_CORR_TO_STOKES = np.array(
 # Stokes → correlation  (columns: I, Q)
 LINEAR_2POL_STOKES_TO_CORR = np.array(
     [
-        [1.0, 1.0],  # XX = (I + Q) 
-        [1.0, -1.0],  # YY = (I - Q) 
+        [1.0, 1.0],  # XX = (I + Q)
+        [1.0, -1.0],  # YY = (I - Q)
     ],
     dtype=np.float64,
 )
@@ -96,8 +96,8 @@ LINEAR_2POL_STOKES_TO_CORR = np.array(
 # Stokes → correlation  (columns: I, V)
 CIRCULAR_2POL_STOKES_TO_CORR = np.array(
     [
-        [1.0, 1.0],  # RR = (I + V) 
-        [1.0, -1.0],  # LL = (I - V) 
+        [1.0, 1.0],  # RR = (I + V)
+        [1.0, -1.0],  # LL = (I - V)
     ],
     dtype=np.float64,
 )
@@ -261,44 +261,66 @@ def transform_polarization_basis(
             frozenset(img_xds.polarization.values), new_polarization_basis
         )
 
-    
-    matrix, in_pol_labels, out_pol_labels = get_transformation_matrix(list(img_transformed_xds.polarization.values), new_polarization_basis, transformation_matrix)
+    matrix, in_pol_labels, out_pol_labels = get_transformation_matrix(
+        list(img_transformed_xds.polarization.values),
+        new_polarization_basis,
+        transformation_matrix,
+    )
     transform_da = xr.DataArray(
-            matrix,
-            dims=["polarization", "pol_in"],
-            coords={"polarization": out_pol_labels, "pol_in": in_pol_labels},
-        )    
-    
+        matrix,
+        dims=["polarization", "pol_in"],
+        coords={"polarization": out_pol_labels, "pol_in": in_pol_labels},
+    )
+
     from toolviper.utils.memory_management import memory_setup, free_memory, get_rss_gb
+
     for var_name in img_xds.data_vars:
         # if "type" in img_xds[var_name].attrs:
         #     print("###### The type of the variable is ", var_name, img_xds[var_name].attrs["type"])
-        if "type" in img_xds[var_name].attrs and img_xds[var_name].attrs["type"] == "point_spread_function":
+        if (
+            "type" in img_xds[var_name].attrs
+            and img_xds[var_name].attrs["type"] == "point_spread_function"
+        ):
             # Skip PSF variables
             continue
-        
-        if "type" in img_xds[var_name].attrs and img_xds[var_name].attrs["type"] == "primary_beam":
-            if  img_xds["PRIMARY_BEAM"].attrs['method'] == "airy_disk":
+
+        if (
+            "type" in img_xds[var_name].attrs
+            and img_xds[var_name].attrs["type"] == "primary_beam"
+        ):
+            if img_xds["PRIMARY_BEAM"].attrs["method"] == "airy_disk":
                 continue
 
         if ("polarization" in img_xds[var_name].dims) and ("BEAM_FIT" not in var_name):
             # print("###### The type of the variable is ", var_name, img_xds[var_name].attrs.keys())
             # if not img_xds[var_name].attrs["type"] == "point_spread_function":
             original_dims = list(img_transformed_xds[var_name].dims)
-                # Use [:] slice assignment so the transposed result is copied
-                # into the DataArray's existing C-contiguous buffer. Writing
-                # `.values = rhs` instead would *replace* the buffer with the
-                # transposed view, which is strided and thus neither C- nor
-                # F-contiguous.
-            img_transformed_xds[var_name].values[:] = xr.dot(transform_da, img_transformed_xds[var_name].rename({"polarization": "pol_in"}), dim="pol_in", optimize=True).transpose(*original_dims).values
+            # Use [:] slice assignment so the transposed result is copied
+            # into the DataArray's existing C-contiguous buffer. Writing
+            # `.values = rhs` instead would *replace* the buffer with the
+            # transposed view, which is strided and thus neither C- nor
+            # F-contiguous.
+            img_transformed_xds[var_name].values[:] = (
+                xr.dot(
+                    transform_da,
+                    img_transformed_xds[var_name].rename({"polarization": "pol_in"}),
+                    dim="pol_in",
+                    optimize=True,
+                )
+                .transpose(*original_dims)
+                .values
+            )
 
     img_transformed_xds = img_transformed_xds.assign_coords(polarization=new_pol_labels)
 
     return img_transformed_xds
 
 
-def get_transformation_matrix(in_pol_labels, new_polarization_basis: Optional[str] = None,
-    transformation_matrix: Optional[np.ndarray] = None):
+def get_transformation_matrix(
+    in_pol_labels,
+    new_polarization_basis: Optional[str] = None,
+    transformation_matrix: Optional[np.ndarray] = None,
+):
 
     if transformation_matrix is not None:
         matrix = np.asarray(transformation_matrix, dtype=complex)
@@ -329,7 +351,7 @@ def get_transformation_matrix(in_pol_labels, new_polarization_basis: Optional[st
             f"transform_polarization_basis_image_data_variable: "
             f"{in_pol_labels} -> {out_pol_labels}"
         )
-        
+
     return matrix, in_pol_labels, out_pol_labels
 
 
@@ -373,14 +395,14 @@ def get_transformation_matrix(in_pol_labels, new_polarization_basis: Optional[st
 #         updated ``polarization`` coordinate.  All other coordinates and
 #         attributes are preserved.
 #     """
-    
+
 #     matrix, in_pol_labels, out_pol_labels = get_transformation_matrix(list(data_var.polarization.values), new_polarization_basis, transformation_matrix)
-  
+
 
 #     # Rename the input polarization dim to avoid a name clash with the output
 #     # "polarization" dim that xr.dot will produce from the transform DataArray.
 #     data_renamed = data_var.rename({"polarization": "pol_in"})
-    
+
 #     original_dims = list(data_var.dims)
 
 #     transform_da = xr.DataArray(

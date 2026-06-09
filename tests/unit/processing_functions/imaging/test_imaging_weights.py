@@ -28,11 +28,8 @@ from astroviper.processing_functions.imaging.check_imaging_parameters import (
     check_imaging_weights_params,
 )
 
-
 _MS_DIMS = ("time", "baseline", "frequency", "polarization")
-_MOD_PATH = (
-    "astroviper.processing_functions.imaging.calculate_imaging_weights"
-)
+_MOD_PATH = "astroviper.processing_functions.imaging.calculate_imaging_weights"
 
 
 # ---------------------------------------------------------------------------
@@ -135,9 +132,7 @@ class TestEqualizeParallelHandWeights(unittest.TestCase):
         """For 4 pols, pol indices 0 and 3 are the parallel hands;
         the cross-hands (indices 1, 2) are ignored by the helper."""
         # pol 0 = 2, pol 1 = 999 (cross), pol 2 = 999 (cross), pol 3 = 6.
-        w = np.broadcast_to(
-            np.array([2.0, 999.0, 999.0, 6.0]), (2, 3, 1, 4)
-        ).copy()
+        w = np.broadcast_to(np.array([2.0, 999.0, 999.0, 6.0]), (2, 3, 1, 4)).copy()
         out_casa = _equalize_parallel_hand_weights(
             w, casa_weighting_implementation=True
         )
@@ -242,9 +237,7 @@ class TestCalculateImagingWeightsNatural(unittest.TestCase):
     def test_4_pol_input_tiles_to_4_pol_output(self):
         """For 4 pols the equalized weight is broadcast across all four
         polarizations on output."""
-        ps_xdt = _make_ps_xdt(
-            n_pol=4, weight_per_pol=[2.0, 100.0, 100.0, 6.0]
-        )
+        ps_xdt = _make_ps_xdt(n_pol=4, weight_per_pol=[2.0, 100.0, 100.0, 6.0])
         calculate_imaging_weights(
             ps_xdt,
             None,
@@ -383,9 +376,7 @@ class TestCalculateImagingWeightsDispatch(unittest.TestCase):
 
         # Degrid: return the equalized data_weight unchanged so the caller's
         # tile(..., n_pol) produces an output of the correct shape.
-        self.degrid_mock.side_effect = (
-            lambda grid, uvw, dw, briggs, freq, n_uv, dlm: dw
-        )
+        self.degrid_mock.side_effect = lambda grid, uvw, dw, briggs, freq, n_uv, dlm: dw
         self.briggs_mock.return_value = np.zeros((2, 1, 1))
 
     def test_uniform_dispatches_to_briggs_with_robust_neg_2(self):

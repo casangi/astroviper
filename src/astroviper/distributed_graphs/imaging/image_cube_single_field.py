@@ -338,7 +338,7 @@ def image_cube_single_field(
         node_task=node_tasks.imaging.image_cube_single_field,
         input_params=input_params,
         in_memory_compute=False,
-        #data_loading_task=_load_processing_set_chunk,
+        # data_loading_task=_load_processing_set_chunk,
         data_loading_task=None,
         disk_chunk_sizes=disk_chunk_sizes,
         load_node_input_params={

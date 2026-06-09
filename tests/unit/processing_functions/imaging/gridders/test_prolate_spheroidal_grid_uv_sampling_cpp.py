@@ -28,7 +28,6 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_
     create_prolate_spheroidal_kernel_1D,
 )
 
-
 SUPPORT = 7
 OVERSAMPLING = 100
 
@@ -89,7 +88,11 @@ def _make_random_inputs(
 
 def _run_cpp(inputs, num_threads=1):
     grid, norm = _zero_grid(
-        inputs["m_time"], inputs["m_chan"], inputs["m_pol"], inputs["m_u"], inputs["m_v"]
+        inputs["m_time"],
+        inputs["m_chan"],
+        inputs["m_pol"],
+        inputs["m_u"],
+        inputs["m_v"],
     )
     prolate_spheroidal_grid_uv_sampling(
         grid,
@@ -112,7 +115,11 @@ def _run_cpp(inputs, num_threads=1):
 
 def _run_jit(inputs):
     grid, norm = _zero_grid(
-        inputs["m_time"], inputs["m_chan"], inputs["m_pol"], inputs["m_u"], inputs["m_v"]
+        inputs["m_time"],
+        inputs["m_chan"],
+        inputs["m_pol"],
+        inputs["m_u"],
+        inputs["m_v"],
     )
     prolate_spheroidal_grid_uv_sampling_jit(
         grid,
@@ -223,7 +230,11 @@ class TestProlateSpheroidalGridUVSamplingCpp(unittest.TestCase):
         second["weight"] = inputs["weight"][:, split:]
 
         grid, norm = _zero_grid(
-            inputs["m_time"], inputs["m_chan"], inputs["m_pol"], inputs["m_u"], inputs["m_v"]
+            inputs["m_time"],
+            inputs["m_chan"],
+            inputs["m_pol"],
+            inputs["m_u"],
+            inputs["m_v"],
         )
         for part in (first, second):
             prolate_spheroidal_grid_uv_sampling(
@@ -263,7 +274,12 @@ class TestProlateSpheroidalGridUVSamplingCpp(unittest.TestCase):
             [
                 inputs["weight"],
                 np.ones(
-                    (inputs["weight"].shape[0], 1, inputs["weight"].shape[2], inputs["weight"].shape[3]),
+                    (
+                        inputs["weight"].shape[0],
+                        1,
+                        inputs["weight"].shape[2],
+                        inputs["weight"].shape[3],
+                    ),
                     dtype=np.float64,
                 ),
             ],
@@ -329,20 +345,34 @@ class TestProlateSpheroidalGridUVSamplingCpp(unittest.TestCase):
         tmap = np.array([0], dtype=np.int64)
         pmap = np.array([0], dtype=np.int64)
         weight = np.ones((1, 1, 1, 1), dtype=np.float64)
-        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT).astype(np.float64)
+        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT).astype(
+            np.float64
+        )
         n_uv = np.array([m_u, m_v], dtype=np.int64)
         delta_lm = np.array([1.0e-4, 1.0e-4], dtype=np.float64)
 
         prolate_spheroidal_grid_uv_sampling(
-            grid, norm, uvw, freq, fmap, tmap, pmap, weight, cgk,
-            n_uv, delta_lm, support=SUPPORT, oversampling=OVERSAMPLING, num_threads=1
+            grid,
+            norm,
+            uvw,
+            freq,
+            fmap,
+            tmap,
+            pmap,
+            weight,
+            cgk,
+            n_uv,
+            delta_lm,
+            support=SUPPORT,
+            oversampling=OVERSAMPLING,
+            num_threads=1,
         )
 
         s = SUPPORT // 2
         center_u, center_v = m_u // 2, m_v // 2
-        patch = grid[0, 0, 0,
-                     center_u - s:center_u + s + 1,
-                     center_v - s:center_v + s + 1]
+        patch = grid[
+            0, 0, 0, center_u - s : center_u + s + 1, center_v - s : center_v + s + 1
+        ]
 
         peak_idx = np.unravel_index(np.argmax(np.abs(patch)), patch.shape)
         self.assertEqual(peak_idx, (s, s))
@@ -362,16 +392,29 @@ class TestProlateSpheroidalGridUVSamplingCpp(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_wrong_ndim_raises(self):
         inputs = _make_random_inputs(seed=14)
-        bad_grid = np.zeros((inputs["m_chan"], inputs["m_pol"], inputs["m_u"], inputs["m_v"]),
-                            dtype=np.complex128)  # 4-D, not 5-D
-        norm = np.zeros((inputs["m_time"], inputs["m_chan"], inputs["m_pol"]), dtype=np.float64)
+        bad_grid = np.zeros(
+            (inputs["m_chan"], inputs["m_pol"], inputs["m_u"], inputs["m_v"]),
+            dtype=np.complex128,
+        )  # 4-D, not 5-D
+        norm = np.zeros(
+            (inputs["m_time"], inputs["m_chan"], inputs["m_pol"]), dtype=np.float64
+        )
         with self.assertRaises(RuntimeError):
             prolate_spheroidal_grid_uv_sampling(
-                bad_grid, norm, inputs["uvw"],
-                inputs["frequency_coord"], inputs["frequency_map"],
-                inputs["time_map"], inputs["pol_map"], inputs["weight"],
-                inputs["cgk_1D"], inputs["n_uv"], inputs["delta_lm"],
-                support=SUPPORT, oversampling=OVERSAMPLING, num_threads=1,
+                bad_grid,
+                norm,
+                inputs["uvw"],
+                inputs["frequency_coord"],
+                inputs["frequency_map"],
+                inputs["time_map"],
+                inputs["pol_map"],
+                inputs["weight"],
+                inputs["cgk_1D"],
+                inputs["n_uv"],
+                inputs["delta_lm"],
+                support=SUPPORT,
+                oversampling=OVERSAMPLING,
+                num_threads=1,
             )
 
 

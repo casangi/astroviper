@@ -373,4 +373,3 @@ def add_uv_sampling_grid_single_field(
             support=7,
             oversampling=100,
         )
-

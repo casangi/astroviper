@@ -12,6 +12,7 @@ from astroviper.utils.data_group_tools import (
 )
 import copy
 
+
 def get_visibility_grid_single_field(
     ms_xds: xr.Dataset,
     cgk_1D: np.ndarray,
@@ -122,7 +123,7 @@ def get_visibility_grid_single_field(
         data_group_out_modified=_ms_data_group_out_modified,
         overwrite=overwrite,
     )
-    
+
     model_name = img_xds.attrs["data_groups"][img_data_group_in_name]["visibility"]
 
     n_chan = img_xds.sizes["frequency"]
@@ -150,14 +151,27 @@ def get_visibility_grid_single_field(
     # calls reuse (and overwrite) the existing data variable in place.
     if ms_data_group_out["correlated_data"] not in ms_xds:
         ms_xds[ms_data_group_out["correlated_data"]] = xr.DataArray(
-            np.zeros((ms_xds.sizes["time"], ms_xds.sizes["baseline_id"], ms_xds.sizes["frequency"], ms_xds.sizes["polarization"]), dtype=np.complex64),
-            dims=["time", "baseline_id", "frequency", "polarization"])
-        
+            np.zeros(
+                (
+                    ms_xds.sizes["time"],
+                    ms_xds.sizes["baseline_id"],
+                    ms_xds.sizes["frequency"],
+                    ms_xds.sizes["polarization"],
+                ),
+                dtype=np.complex64,
+            ),
+            dims=["time", "baseline_id", "frequency", "polarization"],
+        )
+
         modify_data_groups_xds(
             ms_xds,
             ms_data_group_out_name,
             ms_data_group_out,
-            description="Degridded visibilities from img_xds " +  img_data_group_in_name + " to ms_xds " + ms_data_group_out_name + " with get_visibility_grid_single_field.",
+            description="Degridded visibilities from img_xds "
+            + img_data_group_in_name
+            + " to ms_xds "
+            + ms_data_group_out_name
+            + " with get_visibility_grid_single_field.",
         )
 
     grid = img_xds[model_name].values
@@ -174,7 +188,7 @@ def get_visibility_grid_single_field(
         from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
             prolate_spheroidal_degrid,
         )
-        
+
         prolate_spheroidal_degrid(
             grid,
             vis_data,
@@ -190,7 +204,7 @@ def get_visibility_grid_single_field(
             oversampling=100,
             num_threads=num_threads,
         )
- 
+
     else:
         prolate_spheroidal_degrid_jit(
             grid,

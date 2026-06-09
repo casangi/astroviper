@@ -92,13 +92,13 @@ def make_mask(
         data_group_out_modified=image_data_group_out_modified,
         overwrite=overwrite,
     )
-    
+
     # import matplotlib.pyplot as plt
     # plt.figure(figsize=(20,10))
     # plt.imshow(img_xds[image_data_group_in["primary_beam"]].isel(polarization=0,time=0, frequency=0).values)
     # plt.colorbar()
     # plt.title("Primary Beam ")
-    
+
     # plt.figure(figsize=(20,10))
     # plt.imshow(img_xds[image_data_group_in["primary_beam"]].isel(polarization=1,time=0, frequency=0).values)
     # plt.colorbar()
@@ -112,24 +112,30 @@ def make_mask(
         # poison the peak value used for the cutoff.
         img_xds[image_data_group_out["mask"]] = np.logical_or(
             img_xds[image_data_group_in["mask"]],
-            img_xds[image_data_group_in["primary_beam"]].where(
+            img_xds[image_data_group_in["primary_beam"]]
+            .where(
                 img_xds[image_data_group_in["primary_beam"]]
-                >= threshold * np.nanmax(img_xds[image_data_group_in["primary_beam"]].values),
+                >= threshold
+                * np.nanmax(img_xds[image_data_group_in["primary_beam"]].values),
                 False,
-            ).astype(bool),
+            )
+            .astype(bool),
         )
         description = f"Mask created with threshold {threshold}."
     else:
         # Build the threshold mask from scratch: keep primary-beam values
         # that meet the cutoff and replace the rest with False, then cast
         # to bool so the kept (non-zero) pixels become True.
-        img_xds[image_data_group_out["mask"]] = img_xds[
-            image_data_group_in["primary_beam"]
-        ].where(
+        img_xds[image_data_group_out["mask"]] = (
             img_xds[image_data_group_in["primary_beam"]]
-            >= threshold * np.nanmax(img_xds[image_data_group_in["primary_beam"]].values),
-            False,
-        ).astype(bool)
+            .where(
+                img_xds[image_data_group_in["primary_beam"]]
+                >= threshold
+                * np.nanmax(img_xds[image_data_group_in["primary_beam"]].values),
+                False,
+            )
+            .astype(bool)
+        )
         description = f"Updated mask with threshold {threshold}."
 
     # Register the output data group on img_xds.attrs["data_groups"] and
@@ -141,9 +147,7 @@ def make_mask(
         image_data_group_out,
         description=description,
     )
-    
-    
-    
+
     # # for simplicity for now, assume the relevant data are all in
     # # 'SKY' data variable
     # dv = "SKY"
