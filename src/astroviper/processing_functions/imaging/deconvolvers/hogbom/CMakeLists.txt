@@ -41,6 +41,21 @@ else()
     )
 endif()
 
+# Disable floating-point expression contraction (FMA fusion) so the float32
+# CLEAN arithmetic rounds identically across compilers/architectures. GCC
+# defaults to -ffp-contract=fast and Apple Clang to =on, which fuse a*b+c with
+# a single rounding; with =off it is a rounded multiply then a rounded subtract
+# -- bit-identical on any IEEE-754 platform. See the note on the multi-cycle
+# stakeholder test: this stabilises iter_done across platforms but puts a few
+# pathologically-sensitive CLEAN planes (e.g. channel 2 of the twhya test) onto
+# a different bifurcation than the contraction-on reference image was blessed
+# with.
+# AppleClang is listed explicitly; the GNU,Clang generator expressions above do
+# NOT match it (CMake reports macOS as "AppleClang").
+target_compile_options(_hogbom_ext PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>
+)
+
 # Platform-specific options
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(_hogbom_ext PRIVATE -stdlib=libc++)

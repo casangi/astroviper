@@ -44,6 +44,16 @@ else()
     )
 endif()
 
+# Disable floating-point expression contraction (FMA fusion) so the deconvolver
+# arithmetic rounds identically across compilers and architectures (GCC defaults
+# to -ffp-contract=fast, Apple Clang to =on). With =off, multiply-adds are a
+# rounded multiply then a rounded add -- bit-identical on any IEEE-754 platform.
+# AppleClang is listed explicitly; the GNU,Clang generator expressions above do
+# NOT match it (CMake reports macOS as "AppleClang").
+target_compile_options(_aspclean_ext PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>
+)
+
 # Platform-specific options
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(_aspclean_ext PRIVATE -stdlib=libc++)
