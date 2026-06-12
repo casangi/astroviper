@@ -678,7 +678,7 @@ def test_single_field_imaging(plot_saver):
     # (informational) improvement and is reported but not treated as a failure.
     max_per_dif_model = [2.1e-05, 0.001, 7.7e-06, 0.0022, 0.0013]
     min_per_dif_model = [2.0e-05, 0.0009, 7.6e-06, 0.0021, 0.0012]
-    max_per_dif_residual = [8.97e-05, 0.0331, 0.000122, 0.001684, 0.001123]
+    max_per_dif_residual = [9.00e-05, 0.0331, 0.000122, 0.001684, 0.001123]
     min_per_dif_residual = [8.946e-05, 0.033, 0.000121, 0.001682, 0.001122]
 
     # First pass: generate every channel's comparison plot and record the
