@@ -1,7 +1,7 @@
 """Unit tests for the single-field primary-beam processing function.
 
 Exercises
-:func:`astroviper.processing_functions.imaging.primary_beam.make_primary_beam.make_single_field_primary_beam`
+:func:`astroviper.processing_functions.imaging.primary_beam.make_primary_beam.make_primary_beam_single_field`
 and the underlying azimuthally-symmetric Airy-disk models. The tests build a
 minimal in-memory image dataset (no visibility data or downloaded files are
 required) and check the contract of the produced ``PRIMARY_BEAM`` variable.
@@ -12,7 +12,7 @@ import pytest
 import xarray as xr
 
 from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (
-    make_single_field_primary_beam,
+    make_primary_beam_single_field,
 )
 from astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric import (
     airy_disk_rorder,
@@ -53,12 +53,15 @@ def _make_empty_residual_image(
     return img_xds, image_params
 
 
-def test_make_single_field_primary_beam_basic():
+def test_make_primary_beam_single_field_basic():
     """PRIMARY_BEAM is created with the right shape, dims, attrs and data group."""
     img_xds, image_params = _make_empty_residual_image()
 
-    img_xds, return_df = make_single_field_primary_beam(
-        img_xds, image_params, image_data_group_name="residual"
+    img_xds, return_df = make_primary_beam_single_field(
+        img_xds,
+        image_params,
+        image_data_group_in_name="residual",
+        image_data_group_out_name="residual",
     )
 
     assert "PRIMARY_BEAM" in img_xds.data_vars
@@ -83,37 +86,50 @@ def test_make_single_field_primary_beam_basic():
     assert float(return_df["T_primary_beam"].iloc[0]) >= 0.0
 
 
-def test_make_single_field_primary_beam_dtype():
+def test_make_primary_beam_single_field_dtype():
     """float_dtype controls the output precision."""
     img_xds, image_params = _make_empty_residual_image()
-    img_xds, _ = make_single_field_primary_beam(
-        img_xds, image_params, image_data_group_name="residual", float_dtype=np.float32
+    img_xds, _ = make_primary_beam_single_field(
+        img_xds,
+        image_params,
+        image_data_group_in_name="residual",
+        image_data_group_out_name="residual",
+        float_dtype=np.float32,
     )
     assert img_xds["PRIMARY_BEAM"].dtype == np.float32
 
 
-def test_make_single_field_primary_beam_noop_when_present():
+def test_make_primary_beam_single_field_noop_when_present():
     """A second call is a no-op when the data group already has a primary beam."""
     img_xds, image_params = _make_empty_residual_image()
-    img_xds, _ = make_single_field_primary_beam(
-        img_xds, image_params, image_data_group_name="residual"
+    img_xds, _ = make_primary_beam_single_field(
+        img_xds,
+        image_params,
+        image_data_group_in_name="residual",
+        image_data_group_out_name="residual",
     )
     first = img_xds["PRIMARY_BEAM"].values.copy()
 
-    img_xds, return_df = make_single_field_primary_beam(
-        img_xds, image_params, image_data_group_name="residual"
+    img_xds, return_df = make_primary_beam_single_field(
+        img_xds,
+        image_params,
+        image_data_group_in_name="residual",
+        image_data_group_out_name="residual",
     )
     assert float(return_df["T_primary_beam"].iloc[0]) == 0.0
     assert np.array_equal(img_xds["PRIMARY_BEAM"].values, first)
 
 
-def test_make_single_field_primary_beam_symmetry():
+def test_make_primary_beam_single_field_symmetry():
     """The beam is symmetric about the image centre."""
     img_xds, image_params = _make_empty_residual_image(
         image_size=(65, 65), frequency_coords=(1.0e11,)
     )
-    img_xds, _ = make_single_field_primary_beam(
-        img_xds, image_params, image_data_group_name="residual"
+    img_xds, _ = make_primary_beam_single_field(
+        img_xds,
+        image_params,
+        image_data_group_in_name="residual",
+        image_data_group_out_name="residual",
     )
     plane = img_xds["PRIMARY_BEAM"].values[0, 0, 0]
     center = 32
@@ -125,13 +141,16 @@ def test_make_single_field_primary_beam_symmetry():
     )
 
 
-def test_make_single_field_primary_beam_frequency_scaling():
+def test_make_primary_beam_single_field_frequency_scaling():
     """Lower frequency gives a wider beam (higher value away from centre)."""
     img_xds, image_params = _make_empty_residual_image(
         frequency_coords=(1.0e11, 1.2e11)
     )
-    img_xds, _ = make_single_field_primary_beam(
-        img_xds, image_params, image_data_group_name="residual"
+    img_xds, _ = make_primary_beam_single_field(
+        img_xds,
+        image_params,
+        image_data_group_in_name="residual",
+        image_data_group_out_name="residual",
     )
     pb = img_xds["PRIMARY_BEAM"].values
     # An off-centre pixel: the lower-frequency (wider) beam is larger there.

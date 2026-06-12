@@ -89,7 +89,7 @@ def generate_data():
             ],
             # image_data_variables_keep=[ "sky", "point_spread_function", "primary_beam"],
             processing_set_data_group_name="base",
-            double_precision=True,
+            single_precision_image=False,
             thread_info=None,
             processing_function_threads=1,
             n_chunks=None,

@@ -1,75 +1,22 @@
 cmake_minimum_required(VERSION 3.15...3.27)
 
-project(astroviper_prolate_spheroidal_grid
-    VERSION ${CMAKE_PROJECT_VERSION}
-    DESCRIPTION "Prolate spheroidal convolution gridder"
-    LANGUAGES CXX)
-
-# Prefer C++20 (enables std::atomic_ref in the threaded gridder); the code
-# falls back to __atomic builtins when atomic_ref is unavailable, so older
-# compilers that only partially implement C++20 (e.g. GCC 8) still build.
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-
-# Find required packages
-find_package(pybind11 REQUIRED)
-set(THREADS_PREFER_PTHREAD_FLAG ON)
-find_package(Threads REQUIRED)
-
-# Define source files
-set(SOURCES
-    src/prolate_spheroidal_grid.cpp
-    src/prolate_spheroidal_degrid.cpp
-    python/bindings.cpp
-)
-
-# Create pybind11 module
-pybind11_add_module(_prolate_spheroidal_grid_ext ${SOURCES})
-
-# Set target properties
-target_include_directories(_prolate_spheroidal_grid_ext PRIVATE
-    include
-)
-
-# Compiler-specific options
-target_compile_features(_prolate_spheroidal_grid_ext PRIVATE cxx_std_20)
-
-# Link pthread (std::thread backend)
-target_link_libraries(_prolate_spheroidal_grid_ext PRIVATE Threads::Threads)
-
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_options(_prolate_spheroidal_grid_ext PRIVATE
-        $<$<CXX_COMPILER_ID:GNU,Clang>:-O0 -g>
-    )
-else()
-    target_compile_options(_prolate_spheroidal_grid_ext PRIVATE
-        $<$<CXX_COMPILER_ID:GNU,Clang>:-O3 -pipe -fPIC -DNDEBUG>
-    )
+# Standalone build support: when this directory is configured directly
+# (cmake -S . -B build, to iterate on just this kernel) rather than via the
+# repo-root add_subdirectory(), bootstrap a project and put the shared cmake/
+# directory on the module path. When built from the repo root these are already
+# set and the include_guard in AstroviperPybind.cmake makes include() a no-op.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    project(astroviper_prolate_spheroidal_grid LANGUAGES CXX)
+    get_filename_component(_av_repo_root
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../.." ABSOLUTE)
+    list(APPEND CMAKE_MODULE_PATH "${_av_repo_root}/cmake")
 endif()
 
-# Disable floating-point expression contraction (FMA fusion) so the
-# gridder/degridder arithmetic rounds identically across compilers and
-# architectures (GCC defaults to -ffp-contract=fast, Apple Clang to =on). With
-# =off, multiply-adds are a rounded multiply then a rounded add -- bit-identical
-# on any IEEE-754 platform -- so the residual that feeds CLEAN is reproducible.
-# AppleClang is listed explicitly; the GNU,Clang generator expressions above do
-# NOT match it (CMake reports macOS as "AppleClang").
-target_compile_options(_prolate_spheroidal_grid_ext PRIVATE
-    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>
+include(AstroviperPybind)
+
+astroviper_add_pybind_module(
+    NAME _prolate_spheroidal_grid_ext
+    SOURCES src/prolate_spheroidal_grid.cpp
+            src/prolate_spheroidal_degrid.cpp
+            python/bindings.cpp
 )
-
-# Platform-specific options
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    target_compile_options(_prolate_spheroidal_grid_ext PRIVATE -stdlib=libc++)
-    target_link_options(_prolate_spheroidal_grid_ext PRIVATE -stdlib=libc++)
-endif()
-
-# Version info
-target_compile_definitions(_prolate_spheroidal_grid_ext PRIVATE
-    VERSION_INFO="${PROJECT_VERSION}"
-)
-
-# Install the module in the python package directory
-install(TARGETS _prolate_spheroidal_grid_ext
-    DESTINATION astroviper/processing_functions/imaging/gridders/prolate_spheroidal_grid_cpp)

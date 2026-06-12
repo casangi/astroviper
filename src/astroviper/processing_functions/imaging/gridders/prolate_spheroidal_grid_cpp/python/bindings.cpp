@@ -9,6 +9,7 @@
 namespace py = pybind11;
 
 using cdbl = std::complex<double>;
+using cflt = std::complex<float>;
 
 // ---------------------------------------------------------------------------
 // Helper: raise a clear error if an array is not C-contiguous.
@@ -29,14 +30,19 @@ static void require_c_contiguous(const py::buffer_info& info, const char* name) 
 // ---------------------------------------------------------------------------
 // prolate_spheroidal_grid
 //
-// No forcecast on large arrays: if dtype/layout is wrong we raise immediately
-// instead of silently allocating a copy.  Memory is owned by Python throughout.
+// The complex UV grid is an image-domain array and may be single (complex64) or
+// double (complex128) precision. It is taken as an untyped py::array and the
+// binding dispatches on its dtype, so pybind11 cannot silently safe-cast a
+// complex64 buffer into a complex128 temporary copy. The visibilities, weights,
+// uvw and kernel stay double precision (the visibilities are never down-cast),
+// and the normalization accumulator stays float64.
 //
-// Arrays that are genuinely tiny (n_uv, delta_lm — 2 elements each) keep
-// forcecast so callers aren't forced to match an exact int width.
+// Memory is owned by Python throughout; no large array is copied. Arrays that
+// are genuinely tiny (n_uv, delta_lm — 2 elements each) keep forcecast so
+// callers aren't forced to match an exact int width.
 // ---------------------------------------------------------------------------
 void prolate_spheroidal_grid_bind(
-    py::array_t<cdbl,    py::array::c_style>                         grid,          // (m_time, m_chan, m_pol, m_u, m_v)  complex128  writable
+    py::array                                                        grid,          // (m_time, m_chan, m_pol, m_u, m_v)  complex64 or complex128, writable
     py::array_t<double,  py::array::c_style>                         normalization, // (m_time, m_chan, m_pol)             float64     writable
     py::array_t<cdbl,    py::array::c_style>                         vis_data,      // (n_time, n_baseline, n_chan, n_pol) complex128
     py::array_t<double,  py::array::c_style>                         uvw,           // (n_time, n_baseline, 3)            float64
@@ -73,6 +79,19 @@ void prolate_spheroidal_grid_bind(
     require_c_contiguous(uvw_info,   "uvw");
     require_c_contiguous(wt_info,    "weight");
 
+    if (grid_info.readonly)
+        throw std::runtime_error("grid must be a writable array (modified in place)");
+
+    const py::dtype dt_c64  = py::dtype::of<cflt>();
+    const py::dtype dt_c128 = py::dtype::of<cdbl>();
+    const py::dtype grid_dtype = grid.dtype();
+    const bool grid_is_c64  = grid_dtype.is(dt_c64);
+    const bool grid_is_c128 = grid_dtype.is(dt_c128);
+    if (!grid_is_c64 && !grid_is_c128)
+        throw std::runtime_error(
+            "grid must be complex64 or complex128 (no implicit conversion is "
+            "performed; the array is modified in place)");
+
     const int m_time_g  = static_cast<int>(grid_info.shape[0]);
     const int m_chan_g  = static_cast<int>(grid_info.shape[1]);
     const int m_pol_g   = static_cast<int>(grid_info.shape[2]);
@@ -89,7 +108,6 @@ void prolate_spheroidal_grid_bind(
     // Capture raw pointers before releasing the GIL; py::array_t accessors
     // require it, but the underlying numpy buffers remain valid for the
     // duration of the call because Python owns the arrays.
-    cdbl*         grid_ptr          = grid.mutable_data();
     double*       norm_ptr          = normalization.mutable_data();
     const cdbl*   vis_ptr           = static_cast<const cdbl*>(vis_info.ptr);
     const double* uvw_ptr           = static_cast<const double*>(uvw_info.ptr);
@@ -102,25 +120,24 @@ void prolate_spheroidal_grid_bind(
     const double  dl                = dlm(0);
     const double  dm                = dlm(1);
 
-    {
+    if (grid_is_c128) {
+        cdbl* grid_ptr = static_cast<cdbl*>(grid_info.ptr);
         py::gil_scoped_release release;
-        prolate_spheroidal::prolate_spheroidal_grid(
-            grid_ptr,
-            norm_ptr,
-            vis_ptr,
-            uvw_ptr,
-            freq_ptr,
-            freq_map_ptr,
-            time_map_ptr,
-            pol_map_ptr,
-            wt_ptr,
-            cgk_ptr,
+        prolate_spheroidal::prolate_spheroidal_grid<double>(
+            grid_ptr, norm_ptr, vis_ptr, uvw_ptr, freq_ptr,
+            freq_map_ptr, time_map_ptr, pol_map_ptr, wt_ptr, cgk_ptr,
             m_time_g, m_chan_g, m_pol_g, m_u, m_v,
             n_time, n_baseline, n_vis_chan, n_pol,
-            dl, dm,
-            support, oversampling,
-            num_threads
-        );
+            dl, dm, support, oversampling, num_threads);
+    } else {
+        cflt* grid_ptr = static_cast<cflt*>(grid_info.ptr);
+        py::gil_scoped_release release;
+        prolate_spheroidal::prolate_spheroidal_grid<float>(
+            grid_ptr, norm_ptr, vis_ptr, uvw_ptr, freq_ptr,
+            freq_map_ptr, time_map_ptr, pol_map_ptr, wt_ptr, cgk_ptr,
+            m_time_g, m_chan_g, m_pol_g, m_u, m_v,
+            n_time, n_baseline, n_vis_chan, n_pol,
+            dl, dm, support, oversampling, num_threads);
     }
 }
 
@@ -128,7 +145,7 @@ void prolate_spheroidal_grid_bind(
 // prolate_spheroidal_grid_uv_sampling
 // ---------------------------------------------------------------------------
 void prolate_spheroidal_grid_uv_sampling_bind(
-    py::array_t<cdbl,    py::array::c_style>                         grid,
+    py::array                                                        grid,
     py::array_t<double,  py::array::c_style>                         normalization,
     py::array_t<double,  py::array::c_style>                         uvw,
     py::array_t<double,  py::array::c_style>                         frequency_coord,
@@ -160,6 +177,19 @@ void prolate_spheroidal_grid_uv_sampling_bind(
     require_c_contiguous(uvw_info,  "uvw");
     require_c_contiguous(wt_info,   "weight");
 
+    if (grid_info.readonly)
+        throw std::runtime_error("grid must be a writable array (modified in place)");
+
+    const py::dtype dt_c64  = py::dtype::of<cflt>();
+    const py::dtype dt_c128 = py::dtype::of<cdbl>();
+    const py::dtype grid_dtype = grid.dtype();
+    const bool grid_is_c64  = grid_dtype.is(dt_c64);
+    const bool grid_is_c128 = grid_dtype.is(dt_c128);
+    if (!grid_is_c64 && !grid_is_c128)
+        throw std::runtime_error(
+            "grid must be complex64 or complex128 (no implicit conversion is "
+            "performed; the array is modified in place)");
+
     const int m_time_g  = static_cast<int>(grid_info.shape[0]);
     const int m_chan_g  = static_cast<int>(grid_info.shape[1]);
     const int m_pol_g   = static_cast<int>(grid_info.shape[2]);
@@ -173,7 +203,6 @@ void prolate_spheroidal_grid_uv_sampling_bind(
 
     auto dlm = delta_lm.unchecked<1>();
 
-    cdbl*         grid_ptr          = grid.mutable_data();
     double*       norm_ptr          = normalization.mutable_data();
     const double* uvw_ptr           = static_cast<const double*>(uvw_info.ptr);
     const double* freq_ptr          = frequency_coord.data();
@@ -185,24 +214,24 @@ void prolate_spheroidal_grid_uv_sampling_bind(
     const double  dl                = dlm(0);
     const double  dm                = dlm(1);
 
-    {
+    if (grid_is_c128) {
+        cdbl* grid_ptr = static_cast<cdbl*>(grid_info.ptr);
         py::gil_scoped_release release;
-        prolate_spheroidal::prolate_spheroidal_grid_uv_sampling(
-            grid_ptr,
-            norm_ptr,
-            uvw_ptr,
-            freq_ptr,
-            freq_map_ptr,
-            time_map_ptr,
-            pol_map_ptr,
-            wt_ptr,
-            cgk_ptr,
+        prolate_spheroidal::prolate_spheroidal_grid_uv_sampling<double>(
+            grid_ptr, norm_ptr, uvw_ptr, freq_ptr,
+            freq_map_ptr, time_map_ptr, pol_map_ptr, wt_ptr, cgk_ptr,
             m_time_g, m_chan_g, m_pol_g, m_u, m_v,
             n_time, n_baseline, n_vis_chan, n_pol,
-            dl, dm,
-            support, oversampling,
-            num_threads
-        );
+            dl, dm, support, oversampling, num_threads);
+    } else {
+        cflt* grid_ptr = static_cast<cflt*>(grid_info.ptr);
+        py::gil_scoped_release release;
+        prolate_spheroidal::prolate_spheroidal_grid_uv_sampling<float>(
+            grid_ptr, norm_ptr, uvw_ptr, freq_ptr,
+            freq_map_ptr, time_map_ptr, pol_map_ptr, wt_ptr, cgk_ptr,
+            m_time_g, m_chan_g, m_pol_g, m_u, m_v,
+            n_time, n_baseline, n_vis_chan, n_pol,
+            dl, dm, support, oversampling, num_threads);
     }
 }
 
@@ -213,13 +242,14 @@ void prolate_spheroidal_grid_uv_sampling_bind(
 // visibility coordinate using the same prolate spheroidal kernel, and writes
 // the convolution-interpolated value into `vis_data` in place.
 //
-// vis_data is taken as an untyped py::array so pybind11 cannot silently
-// safe-cast a complex64 buffer into a complex128 temporary copy (which would
-// leave the caller's array untouched). Layout, dtype, and writeability are
-// checked explicitly; complex64 and complex128 are both written in place.
+// Both `grid` (a single- or double-precision image-domain array) and
+// `vis_data` are taken as untyped py::array so pybind11 cannot silently
+// safe-cast either buffer into a temporary copy. Layout, dtype, and
+// writeability are checked explicitly; the four (grid dtype) x (vis dtype)
+// combinations are dispatched to the templated kernel and written in place.
 // ---------------------------------------------------------------------------
 void prolate_spheroidal_degrid_bind(
-    py::array_t<cdbl,    py::array::c_style>                         grid,          // (m_time, m_chan, m_pol, m_u, m_v)   complex128   read
+    py::array                                                        grid,          // (m_time, m_chan, m_pol, m_u, m_v)   complex64 or complex128, read
     py::array                                                        vis_data,      // (n_time, n_baseline, n_chan, n_pol) complex64 or complex128, writable
     py::array_t<double,  py::array::c_style>                         uvw,           // (n_time, n_baseline, 3)             float64
     py::array_t<double,  py::array::c_style>                         frequency_coord, // (n_vis_chan,)                     float64
@@ -251,8 +281,17 @@ void prolate_spheroidal_degrid_bind(
     if (vis_info.readonly)
         throw std::runtime_error("vis_data must be a writable array");
 
-    const py::dtype dt_c64  = py::dtype::of<std::complex<float>>();
-    const py::dtype dt_c128 = py::dtype::of<std::complex<double>>();
+    const py::dtype dt_c64  = py::dtype::of<cflt>();
+    const py::dtype dt_c128 = py::dtype::of<cdbl>();
+
+    const py::dtype grid_dtype = grid.dtype();
+    const bool grid_is_c64  = grid_dtype.is(dt_c64);
+    const bool grid_is_c128 = grid_dtype.is(dt_c128);
+    if (!grid_is_c64 && !grid_is_c128)
+        throw std::runtime_error(
+            "grid must be complex64 or complex128 (no implicit conversion is "
+            "performed)");
+
     const py::dtype vis_dtype = vis_data.dtype();
     const bool vis_is_c64  = vis_dtype.is(dt_c64);
     const bool vis_is_c128 = vis_dtype.is(dt_c128);
@@ -274,7 +313,8 @@ void prolate_spheroidal_degrid_bind(
 
     auto dlm = delta_lm.unchecked<1>();
 
-    const cdbl*    grid_ptr      = static_cast<const cdbl*>(grid_info.ptr);
+    const void*    grid_ptr_raw  = grid_info.ptr;
+    void*          vis_ptr_raw   = vis_info.ptr;
     const double*  uvw_ptr       = static_cast<const double*>(uvw_info.ptr);
     const double*  freq_ptr      = frequency_coord.data();
     const int64_t* freq_map_ptr  = frequency_map.data();
@@ -284,26 +324,32 @@ void prolate_spheroidal_degrid_bind(
     const double   dl            = dlm(0);
     const double   dm            = dlm(1);
 
-    // vis_info.ptr aliases the Python-owned buffer directly; no copy occurs.
-    if (vis_is_c128) {
-        cdbl* vis_ptr = static_cast<cdbl*>(vis_info.ptr);
+    // Dispatch on (grid dtype) x (vis dtype). The grid/vis_info.ptr alias the
+    // Python-owned buffers directly; no copy occurs.
+    auto run = [&](auto grid_tag, auto vis_tag) {
+        using GridT = decltype(grid_tag);
+        using VisElem = decltype(vis_tag);
+        using VisT = std::complex<VisElem>;
+        const std::complex<GridT>* gp =
+            static_cast<const std::complex<GridT>*>(grid_ptr_raw);
+        VisT* vp = static_cast<VisT*>(vis_ptr_raw);
         py::gil_scoped_release release;
-        prolate_spheroidal::prolate_spheroidal_degrid<cdbl>(
-            grid_ptr, vis_ptr, uvw_ptr, freq_ptr,
+        prolate_spheroidal::prolate_spheroidal_degrid<GridT, VisT>(
+            gp, vp, uvw_ptr, freq_ptr,
             freq_map_ptr, time_map_ptr, pol_map_ptr, cgk_ptr,
             m_time_g, m_chan_g, m_pol_g, m_u, m_v,
             n_time, n_baseline, n_vis_chan, n_pol,
             dl, dm, support, oversampling, num_threads);
+    };
+
+    if (grid_is_c128 && vis_is_c128) {
+        run(double{}, double{});
+    } else if (grid_is_c128 && vis_is_c64) {
+        run(double{}, float{});
+    } else if (grid_is_c64 && vis_is_c128) {
+        run(float{}, double{});
     } else {
-        using cflt = std::complex<float>;
-        cflt* vis_ptr = static_cast<cflt*>(vis_info.ptr);
-        py::gil_scoped_release release;
-        prolate_spheroidal::prolate_spheroidal_degrid<cflt>(
-            grid_ptr, vis_ptr, uvw_ptr, freq_ptr,
-            freq_map_ptr, time_map_ptr, pol_map_ptr, cgk_ptr,
-            m_time_g, m_chan_g, m_pol_g, m_u, m_v,
-            n_time, n_baseline, n_vis_chan, n_pol,
-            dl, dm, support, oversampling, num_threads);
+        run(float{}, float{});
     }
 }
 
@@ -313,8 +359,10 @@ PYBIND11_MODULE(_prolate_spheroidal_grid_ext, m) {
     m.def("prolate_spheroidal_grid",
           &prolate_spheroidal_grid_bind,
           "Grid weighted visibilities onto a UV plane using a prolate spheroidal "
-          "kernel (in-place). num_threads selects the number of std::thread "
-          "workers; <= 0 falls back to std::thread::hardware_concurrency().",
+          "kernel (in-place). The grid may be complex64 or complex128; the "
+          "visibilities stay complex128. num_threads selects the number of "
+          "std::thread workers; <= 0 falls back to "
+          "std::thread::hardware_concurrency().",
           py::arg("grid"),
           py::arg("normalization"),
           py::arg("vis_data"),
@@ -334,8 +382,9 @@ PYBIND11_MODULE(_prolate_spheroidal_grid_ext, m) {
     m.def("prolate_spheroidal_grid_uv_sampling",
           &prolate_spheroidal_grid_uv_sampling_bind,
           "Grid imaging weights onto a UV plane (PSF / UV-sampling function, "
-          "in-place). num_threads selects the number of std::thread workers; "
-          "<= 0 falls back to std::thread::hardware_concurrency().",
+          "in-place). The grid may be complex64 or complex128. num_threads "
+          "selects the number of std::thread workers; <= 0 falls back to "
+          "std::thread::hardware_concurrency().",
           py::arg("grid"),
           py::arg("normalization"),
           py::arg("uvw"),
@@ -354,9 +403,11 @@ PYBIND11_MODULE(_prolate_spheroidal_grid_ext, m) {
     m.def("prolate_spheroidal_degrid",
           &prolate_spheroidal_degrid_bind,
           "Sample (degrid) a model UV grid at visibility coordinates using a "
-          "prolate spheroidal kernel. Writes interpolated values into "
-          "vis_data in place. num_threads selects the number of std::thread "
-          "workers; <= 0 falls back to std::thread::hardware_concurrency().",
+          "prolate spheroidal kernel. The model grid may be complex64 or "
+          "complex128 and the visibilities complex64 or complex128; writes "
+          "interpolated values into vis_data in place. num_threads selects the "
+          "number of std::thread workers; <= 0 falls back to "
+          "std::thread::hardware_concurrency().",
           py::arg("grid"),
           py::arg("vis_data"),
           py::arg("uvw"),

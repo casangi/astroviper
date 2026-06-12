@@ -22,7 +22,7 @@ def get_visibility_grid_single_field(
     ms_data_group_out_modified: dict = {
         "correlated_data": "VISIBILITY_MODEL",
     },
-    img_data_group_in_name: str = "model",
+    image_data_group_in_name: str = "model",
     overwrite: bool = True,
     chan_mode: str = "cube",
     fft_padding: float = 1.2,
@@ -60,7 +60,7 @@ def get_visibility_grid_single_field(
         :func:`prolate_spheroidal_degrid_jit`.
     img_xds : xr.Dataset
         Image dataset holding the model UV grid.  Must expose an image data
-        group under ``img_data_group_in_name`` whose ``"SKY"`` role names a
+        group under ``image_data_group_in_name`` whose ``"SKY"`` role names a
         data variable shaped ``(time, frequency, polarization, u, v)``, the
         same ``(u, v)`` axis order used by
         :func:`~astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid.prolate_spheroidal_grid_jit`.
@@ -73,7 +73,7 @@ def get_visibility_grid_single_field(
         Mapping of role keys to the data-variable names written into
         ``ms_xds``.  ``"correlated_data"`` stores the complex predicted
         visibilities.
-    img_data_group_in_name : str, default ``"model_visibility_grid"``
+    image_data_group_in_name : str, default ``"model_visibility_grid"``
         Key of the image input data group in ``img_xds.attrs["data_groups"]``
         whose ``"SKY"`` role names the model UV grid.
     overwrite : bool, default ``True``
@@ -124,7 +124,7 @@ def get_visibility_grid_single_field(
         overwrite=overwrite,
     )
 
-    model_name = img_xds.attrs["data_groups"][img_data_group_in_name]["visibility"]
+    model_name = img_xds.attrs["data_groups"][image_data_group_in_name]["visibility"]
 
     n_chan = img_xds.sizes["frequency"]
     if chan_mode == "cube":
@@ -149,6 +149,11 @@ def get_visibility_grid_single_field(
 
     # Initialise the output visibility array on the first call; subsequent
     # calls reuse (and overwrite) the existing data variable in place.
+    # The model visibilities are kept double precision (complex128): the
+    # visibilities stay double even when the image-domain model grid is single
+    # precision, and the residual = observed - model is formed in double
+    # precision. The C++ degridder widens each (possibly complex64) model-grid
+    # cell to complex128 for the accumulation, so it can write complex128 here.
     if ms_data_group_out["correlated_data"] not in ms_xds:
         ms_xds[ms_data_group_out["correlated_data"]] = xr.DataArray(
             np.zeros(
@@ -158,7 +163,7 @@ def get_visibility_grid_single_field(
                     ms_xds.sizes["frequency"],
                     ms_xds.sizes["polarization"],
                 ),
-                dtype=np.complex64,
+                dtype=np.complex128,
             ),
             dims=["time", "baseline_id", "frequency", "polarization"],
         )
@@ -168,7 +173,7 @@ def get_visibility_grid_single_field(
             ms_data_group_out_name,
             ms_data_group_out,
             description="Degridded visibilities from img_xds "
-            + img_data_group_in_name
+            + image_data_group_in_name
             + " to ms_xds "
             + ms_data_group_out_name
             + " with get_visibility_grid_single_field.",

@@ -86,6 +86,7 @@ def calculate_imaging_weights(
     overwrite: bool = False,
     single_precision_gridding: bool = False,
     return_weight_density_grid: bool = False,
+    num_threads: int = 1,
 ) -> Union[
     None,
     np.ndarray,
@@ -142,6 +143,12 @@ def calculate_imaging_weights(
         If True *and* the weighting scheme requires gridding (Briggs/uniform),
         also return the 2D weight-density grid (useful for debugging). Ignored
         for natural weighting, which always returns ``None``.
+    num_threads : int, default ``1``
+        Thread count forwarded from ``processing_function_threads`` for the
+        weight grid/degrid step. The weight-density grid/degrid kernels are
+        currently serial Numba kernels (the grid accumulation is kept serial for
+        bit-reproducible weight sums), so this value is propagated for API
+        consistency and future parallelization but does not yet change runtime.
 
     Returns
     -------
@@ -274,7 +281,14 @@ def calculate_imaging_weights(
         freq_chan = ms_xdt.frequency.values
 
         grid_imaging_weights(
-            weight_density_grid, sum_weight, uvw, data_weight, freq_chan, n_uv, delta_lm
+            weight_density_grid,
+            sum_weight,
+            uvw,
+            data_weight,
+            freq_chan,
+            n_uv,
+            delta_lm,
+            num_threads=num_threads,
         )
 
     briggs_factors = calculate_briggs_params(
@@ -300,6 +314,7 @@ def calculate_imaging_weights(
             freq_chan,
             n_uv,
             delta_lm,
+            num_threads=num_threads,
         )
 
         n_pol = ms_xdt.sizes["polarization"]

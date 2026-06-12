@@ -33,7 +33,7 @@ from astroviper.processing_functions.imaging.deconvolution import (
     hogbom_clean,
     progress_callback,
 )
-from astroviper.processing_functions.imaging.return_dict import ReturnDict
+from astroviper.processing_functions.imaging.utils.return_dict import ReturnDict
 
 try:
     from astroviper.processing_functions.imaging.deconvolvers import (

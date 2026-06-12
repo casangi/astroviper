@@ -1,10 +1,11 @@
 """Primary-beam creation for the single-field cube imager."""
 
 
-def make_single_field_primary_beam(
+def make_primary_beam_single_field(
     img_xds,
     image_params,
-    image_data_group_name="residual",
+    image_data_group_in_name="residual",
+    image_data_group_out_name="residual",
     list_dish_diameters=None,
     list_blockage_diameters=None,
     ipower=1,
@@ -15,8 +16,8 @@ def make_single_field_primary_beam(
     Evaluates the obscured-Airy-disk voltage pattern (via
     :func:`~astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric.airy_disk_rorder_v2`)
     for every frequency channel and writes it as the ``PRIMARY_BEAM`` data
-    variable, registering it under ``image_data_group_name``.  The same beam is
-    broadcast across polarization (a single dish diameter is assumed).
+    variable, registering it under ``image_data_group_out_name``.  The same beam
+    is broadcast across polarization (a single dish diameter is assumed).
 
     The beam is created in whatever polarization basis ``img_xds`` currently
     carries; because ``PRIMARY_BEAM`` is stamped with ``method="airy_disk"`` it
@@ -35,7 +36,10 @@ def make_single_field_primary_beam(
         ``"cell_size"`` (l, m cell size in radians).  The image centre is
         derived internally as ``image_size // 2``; the supplied dictionary is
         not mutated.
-    image_data_group_name : str, optional
+    image_data_group_in_name : str, optional
+        Image data group whose existing entries are carried into the output
+        group.  Default ``"residual"``.
+    image_data_group_out_name : str, optional
         Name of the data group that the ``PRIMARY_BEAM`` variable is registered
         under.  Default ``"residual"``.
     list_dish_diameters : array-like of float, optional
@@ -62,7 +66,7 @@ def make_single_field_primary_beam(
     See Also
     --------
     astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric.airy_disk_rorder_v2
-    astroviper.processing_functions.imaging.make_point_spread_function.make_single_field_point_spread_function
+    astroviper.processing_functions.imaging.make_point_spread_function.make_point_spread_function_single_field
     """
     import time
     import numpy as np
@@ -99,14 +103,14 @@ def make_single_field_primary_beam(
         "image_center": (np.array(image_params["image_size"]) // 2).tolist(),
     }
 
-    data_group = img_xds.attrs["data_groups"][image_data_group_name]
+    data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
     if data_group.get("primary_beam", None) is not None:
         return img_xds, pd.DataFrame({"T_primary_beam": [0.0]})
 
     image_data_group_in, image_data_group_out = create_data_groups_in_and_out(
         img_xds,
-        data_group_in_name=image_data_group_name,
-        data_group_out_name=image_data_group_name,
+        data_group_in_name=image_data_group_in_name,
+        data_group_out_name=image_data_group_out_name,
         data_group_out_modified={"primary_beam": "PRIMARY_BEAM"},
         overwrite=False,
     )
@@ -127,7 +131,7 @@ def make_single_field_primary_beam(
 
     modify_data_groups_xds(
         img_xds,
-        data_group_out_name=image_data_group_name,
+        data_group_out_name=image_data_group_out_name,
         data_group_out=image_data_group_out,
         description="Added primary beam to data group.",
     )

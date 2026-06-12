@@ -12,6 +12,7 @@ def grid_imaging_weights(
     # grid_parms: dict,
     n_uv: list,
     delta_lm: list,
+    num_threads: int = 1,
 ):
     """
     Grid per-visibility *data weights* onto a UV grid.
@@ -212,6 +213,7 @@ def degrid_imaging_weights(
     freq_chan,
     n_uv,
     delta_lm,
+    num_threads: int = 1,
 ):
     """
     Sample a UV *imaging weight grid* at each visibility's (u, v) to form

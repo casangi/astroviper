@@ -18,9 +18,9 @@ def add_visibility_grid_mosaic(
     gcf_xds: xr.Dataset,
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
-    img_data_group_in_name: str = "mosaic",
-    img_data_group_out_name: str = "mosaic",
-    img_data_group_out_modified: dict = {
+    image_data_group_in_name: str = "mosaic",
+    image_data_group_out_name: str = "mosaic",
+    image_data_group_out_modified: dict = {
         "visibility": "VISIBILITY",
         "visibility_normalization": "VISIBILITY_NORMALIZATION",
     },
@@ -55,7 +55,7 @@ def add_visibility_grid_mosaic(
         ``oversampling`` attribute.
     img_xds : xr.Dataset
         Image dataset that accumulates the gridded visibilities.  The arrays
-        named by ``img_data_group_out_modified`` are created on the first call
+        named by ``image_data_group_out_modified`` are created on the first call
         (if absent) and accumulated on subsequent calls.  Cell size and image
         dimensions are read directly from ``img_xds`` via
         ``img_xds.xr_img.get_lm_cell_size()`` and ``img_xds.sizes``.
@@ -63,14 +63,14 @@ def add_visibility_grid_mosaic(
         Key of the MS input data group in ``ms_xds.attrs["data_groups"]``.
         Must provide ``"correlated_data"``, ``"uvw"``, and ``"weight_imaging"``
         role keys.
-    img_data_group_in_name : str, default ``"mosaic"``
+    image_data_group_in_name : str, default ``"mosaic"``
         Key of the image input data group in ``img_xds.attrs["data_groups"]``.
         Typically set by a preceding call to
         :func:`~astroviper.processing_functions.imaging.add_uv_sampling_grid.add_uv_sampling_grid_mosaic`.
-    img_data_group_out_name : str, default ``"mosaic"``
+    image_data_group_out_name : str, default ``"mosaic"``
         Key under which the output data group is registered in
         ``img_xds.attrs["data_groups"]``.
-    img_data_group_out_modified : dict, default ``{"visibility": "VISIBILITY", "visibility_normalization": "VISIBILITY_NORMALIZATION"}``
+    image_data_group_out_modified : dict, default ``{"visibility": "VISIBILITY", "visibility_normalization": "VISIBILITY_NORMALIZATION"}``
         Mapping of role keys to the data-variable names written into
         ``img_xds``.  ``"visibility"`` stores the complex gridded visibilities
         and ``"visibility_normalization"`` stores the per-channel,
@@ -99,18 +99,18 @@ def add_visibility_grid_mosaic(
     add_visibility_grid_single_field : Non-mosaic (standard gridder) variant.
     mosaic_grid_jit : Numba-compiled mosaic gridding kernel.
     """
-    _img_data_group_out_modified = copy.deepcopy(img_data_group_out_modified)
+    _image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
 
     # Read the MS input data group directly; the MS is read-only here.
     ms_data_group_in = ms_xds.attrs["data_groups"][ms_data_group_in_name]
 
     # Resolve the image input and output data groups, guarding against
     # accidental overwrites according to the overwrite flag.
-    _, img_data_group_out = create_data_groups_in_and_out(
+    _, image_data_group_out = create_data_groups_in_and_out(
         img_xds,
-        data_group_in_name=img_data_group_in_name,
-        data_group_out_name=img_data_group_out_name,
-        data_group_out_modified=_img_data_group_out_modified,
+        data_group_in_name=image_data_group_in_name,
+        data_group_out_name=image_data_group_out_name,
+        data_group_out_modified=_image_data_group_out_modified,
         overwrite=overwrite,
     )
 
@@ -132,18 +132,18 @@ def add_visibility_grid_mosaic(
     oversampling = gcf_xds.attrs["oversampling"]
 
     # Initialise output arrays on the first call; subsequent calls accumulate.
-    if img_data_group_out["visibility"] not in img_xds:
-        img_xds[img_data_group_out["visibility"]] = xr.DataArray(
+    if image_data_group_out["visibility"] not in img_xds:
+        img_xds[image_data_group_out["visibility"]] = xr.DataArray(
             np.zeros((n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]), dtype=np.complex128),
             dims=["frequency", "polarization", "u", "v"],
         )
-        img_xds[img_data_group_out["visibility_normalization"]] = xr.DataArray(
+        img_xds[image_data_group_out["visibility_normalization"]] = xr.DataArray(
             np.zeros((n_imag_chan, n_imag_pol), dtype=np.double),
             dims=["frequency", "polarization"],
         )
 
-    grid = img_xds[img_data_group_out["visibility"]].values
-    sum_weight = img_xds[img_data_group_out["visibility_normalization"]].values
+    grid = img_xds[image_data_group_out["visibility"]].values
+    sum_weight = img_xds[image_data_group_out["visibility_normalization"]].values
 
     vis_data = ms_xds[ms_data_group_in["correlated_data"]].values
     uvw = ms_xds[ms_data_group_in["uvw"]].values
@@ -182,8 +182,8 @@ def add_visibility_grid_mosaic(
 
     modify_data_groups_xds(
         img_xds,
-        img_data_group_out_name,
-        img_data_group_out,
+        image_data_group_out_name,
+        image_data_group_out,
         description="Added gridded visibilities to img_xds with add_visibility_grid_mosaic.",
     )
 
@@ -193,9 +193,9 @@ def add_visibility_grid_single_field(
     cgk_1D: np.ndarray,
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
-    img_data_group_in_name: str = "residual",
-    img_data_group_out_name: str = "residual",
-    img_data_group_out_modified: dict = {
+    image_data_group_in_name: str = "residual",
+    image_data_group_out_name: str = "residual",
+    image_data_group_out_modified: dict = {
         "visibility": "VISIBILITY",
         "visibility_normalization": "VISIBILITY_NORMALIZATION",
     },
@@ -203,6 +203,7 @@ def add_visibility_grid_single_field(
     chan_mode: str = "cube",
     fft_padding: float = 1.2,
     num_threads: int = 1,
+    complex_dtype=None,
 ):
     """Grid correlated visibilities for a single-field observation into an image dataset.
 
@@ -231,7 +232,7 @@ def add_visibility_grid_single_field(
         :func:`standard_grid_jit`.
     img_xds : xr.Dataset
         Image dataset that accumulates the gridded visibilities.  The arrays
-        named by ``img_data_group_out_modified`` are created on the first call
+        named by ``image_data_group_out_modified`` are created on the first call
         (if absent) and accumulated on subsequent calls.  Cell size and image
         dimensions are read directly from ``img_xds`` via
         ``img_xds.xr_img.get_lm_cell_size()`` and ``img_xds.sizes``.
@@ -239,14 +240,14 @@ def add_visibility_grid_single_field(
         Key of the MS input data group in ``ms_xds.attrs["data_groups"]``.
         Must provide ``"correlated_data"``, ``"uvw"``, and ``"weight_imaging"``
         role keys.
-    img_data_group_in_name : str, default ``"single_field"``
+    image_data_group_in_name : str, default ``"single_field"``
         Key of the image input data group in ``img_xds.attrs["data_groups"]``.
         Typically set by a preceding call to
         :func:`~astroviper.processing_functions.imaging.add_uv_sampling_grid.add_uv_sampling_grid_single_field`.
-    img_data_group_out_name : str, default ``"single_field"``
+    image_data_group_out_name : str, default ``"single_field"``
         Key under which the output data group is registered in
         ``img_xds.attrs["data_groups"]``.
-    img_data_group_out_modified : dict, default ``{"visibility": "VISIBILITY", "visibility_normalization": "VISIBILITY_NORMALIZATION"}``
+    image_data_group_out_modified : dict, default ``{"visibility": "VISIBILITY", "visibility_normalization": "VISIBILITY_NORMALIZATION"}``
         Mapping of role keys to the data-variable names written into
         ``img_xds``.  ``"visibility"`` stores the complex gridded visibilities
         and ``"visibility_normalization"`` stores the per-channel,
@@ -275,18 +276,18 @@ def add_visibility_grid_single_field(
     add_visibility_grid_mosaic : Mosaic (direction-dependent GCF) variant.
     standard_grid_jit : Numba-compiled standard separable gridding kernel.
     """
-    _img_data_group_out_modified = copy.deepcopy(img_data_group_out_modified)
+    _image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
 
     # Read the MS input data group directly; the MS is read-only here.
     ms_data_group_in = ms_xds.attrs["data_groups"][ms_data_group_in_name]
 
     # Resolve the image input and output data groups, guarding against
     # accidental overwrites according to the overwrite flag.
-    _, img_data_group_out = create_data_groups_in_and_out(
+    _, image_data_group_out = create_data_groups_in_and_out(
         img_xds,
-        data_group_in_name=img_data_group_in_name,
-        data_group_out_name=img_data_group_out_name,
-        data_group_out_modified=_img_data_group_out_modified,
+        data_group_in_name=image_data_group_in_name,
+        data_group_out_name=image_data_group_out_name,
+        data_group_out_modified=_image_data_group_out_modified,
         overwrite=overwrite,
     )
 
@@ -313,29 +314,32 @@ def add_visibility_grid_single_field(
     )
     delta_lm = img_xds.xr_img.get_lm_cell_size()
 
+    if complex_dtype is None:
+        complex_dtype = np.complex128
+
     # Initialise output arrays on the first call; subsequent calls accumulate.
-    if img_data_group_out["visibility"] not in img_xds:
-        img_xds[img_data_group_out["visibility"]] = xr.DataArray(
+    if image_data_group_out["visibility"] not in img_xds:
+        img_xds[image_data_group_out["visibility"]] = xr.DataArray(
             np.zeros(
                 (n_imag_time, n_imag_chan, n_imag_pol, n_uv[0], n_uv[1]),
-                dtype=np.complex128,
+                dtype=complex_dtype,
             ),
             dims=["time", "frequency", "polarization", "u", "v"],
         )
-        img_xds[img_data_group_out["visibility_normalization"]] = xr.DataArray(
+        img_xds[image_data_group_out["visibility_normalization"]] = xr.DataArray(
             np.zeros((n_imag_time, n_imag_chan, n_imag_pol), dtype=np.double),
             dims=["time", "frequency", "polarization"],
         )
 
         modify_data_groups_xds(
             img_xds,
-            img_data_group_out_name,
-            img_data_group_out,
+            image_data_group_out_name,
+            image_data_group_out,
             description="Added gridded visibilities to img_xds with add_visibility_grid_single_field.",
         )
 
-    grid = img_xds[img_data_group_out["visibility"]].values
-    normalization = img_xds[img_data_group_out["visibility_normalization"]].values
+    grid = img_xds[image_data_group_out["visibility"]].values
+    normalization = img_xds[image_data_group_out["visibility_normalization"]].values
 
     vis_data = ms_xds[ms_data_group_in["correlated_data"]].values
     uvw = ms_xds[ms_data_group_in["uvw"]].values

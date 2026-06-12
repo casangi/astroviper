@@ -10,7 +10,10 @@ def _remap_deconvolve_dict_to_global_channels(combined_deconvolve_dict, data_sel
     numbers. A no-op returning the input unchanged when the offset is 0 (e.g. a
     single chunk starting at channel 0) or no frequency slice is present.
     """
-    from astroviper.processing_functions.imaging.return_dict import ReturnDict, Key
+    from astroviper.processing_functions.imaging.utils.return_dict import (
+        ReturnDict,
+        Key,
+    )
 
     chan_offset = 0
     for sel in (data_selection or {}).values():
@@ -65,7 +68,7 @@ def image_cube_single_field(input_params, graph_mode=True):
           ...) plus ``task_id``, ``n_channels``, ``n_major_cycles`` and the
           total ``T_image_cube_task``.
         * ``"deconvolution"`` : the per-plane deconvolution
-          :class:`~astroviper.processing_functions.imaging.return_dict.ReturnDict`,
+          :class:`~astroviper.processing_functions.imaging.utils.return_dict.ReturnDict`,
           with channels remapped to global channel numbers.
     """
     print("######### Starting image_cube_single_field_node_task ############")
@@ -91,10 +94,18 @@ def image_cube_single_field(input_params, graph_mode=True):
         input_params["memory_mode"] == "in_memory"
     ), "Currently only memory_mode='in_memory' is implemented."
 
-    # Build the empty per-chunk image in the correlation basis the gridder works
-    # in. NB: the correlation polarization basis is currently hard-coded to two
-    # linear feeds ("XX", "YY"); the image is transformed to the Stokes output
-    # basis (image_params["polarization_coords"]) inside the science function.
+    # Build the empty per-chunk image in the correlation (instrument)
+    # polarization basis the gridder works in. The two-feed correlation labels
+    # follow ``instrument_polarization_basis`` ("linear" -> XX/YY,
+    # "circular" -> RR/LL); the image is transformed to the Stokes output basis
+    # (image_params["polarization_coords"]) inside the science function.
+    instrument_polarization_basis = input_params.get(
+        "instrument_polarization_basis", "linear"
+    )
+    correlation_pol_coords = {
+        "linear": ["XX", "YY"],
+        "circular": ["RR", "LL"],
+    }[instrument_polarization_basis]
     image_params = input_params["image_params"]
     start = time.time()
     img_xds = make_empty_sky_image(
@@ -102,7 +113,7 @@ def image_cube_single_field(input_params, graph_mode=True):
         image_size=image_params["image_size"],
         cell_size=image_params["cell_size"],
         frequency_coords=input_params["task_coords"]["frequency"]["data"],
-        pol_coords=["XX", "YY"],
+        pol_coords=correlation_pol_coords,
         time_coords=image_params["time_coords"],
         do_sky_coords=False,
     )

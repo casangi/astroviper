@@ -221,13 +221,22 @@ def ifft_norm_img_xds(
 
         # Process one 2-D plane at a time to keep FFT temporaries small.
         # At 12 000 × 12 000 this limits the extra allocation to ≈ 1.15 GB
-        # instead of allocating the full (time, freq, pol, u, v) float64 array.
+        # instead of allocating the full (time, freq, pol, u, v) array.
+        #
+        # The sky/PSF image inherits the precision of the gridded UV data: a
+        # complex64 grid yields a float32 image (half the memory), complex128 a
+        # float64 image. The grid is fed to the iFFT at ``complex_dtype`` via
+        # ``np.asarray(..., dtype=complex_dtype)`` — a no-op (no copy) when the
+        # grid is already that dtype, which is the case for the cube imager.
+        float_out_dtype = (
+            np.float32 if np.dtype(complex_dtype) == np.complex64 else np.float64
+        )
         out_name = data_group_out[ifft_pair[data_variable_out]]
         if out_name not in img_xds:
             img_xds[out_name] = xr.DataArray(
                 np.empty(
                     (n_time, n_freq, n_pol, image_size[0], image_size[1]),
-                    dtype=np.float64,
+                    dtype=float_out_dtype,
                 ),
                 dims=("time", "frequency", "polarization", "l", "m"),
             )
@@ -237,20 +246,13 @@ def ifft_norm_img_xds(
         for t in range(n_time):
             for f in range(n_freq):
                 for p in range(n_pol):
-                    # print("!!!! Memory before ifft ", get_rss_gb())
-                    if complex_dtype == np.complex128:
-                        plane = ifft_uv_to_lm(
-                            raw_grid[t, f, p],
-                            num_threads=num_threads,
-                            fft_backend=fft_backend,
-                        )
-                    else:
-                        plane = ifft_uv_to_lm(
-                            raw_grid[t, f, p].astype(complex_dtype),
-                            num_threads=num_threads,
-                            fft_backend=fft_backend,
-                        )
-                    # print("!!!! Memory after ifft ", get_rss_gb())
+                    plane = ifft_uv_to_lm(
+                        np.asarray(raw_grid[t, f, p], dtype=complex_dtype),
+                        num_threads=num_threads,
+                        fft_backend=fft_backend,
+                    )
+                    # In-place ops below preserve `plane`'s precision (the float64
+                    # kernel / normalization are broadcast without upcasting).
                     plane /= kernel_image_1D_l[:, None]
                     plane /= kernel_image_1D_m[None, :]
                     plane *= flux_scale / normalization[t, f, p]
@@ -294,10 +296,17 @@ def fft_norm_img_xds(
     num_threads=1,
     fft_backend="pyfftw",
     data_variables_to_process=["sky"],
+    complex_dtype=np.complex128,
 ):
-    """
+    """Forward-transform a model sky image into a model UV grid.
 
     Options are data_variables_to_process = ["primary_beam", "point_spread_function", "sky"]
+
+    ``complex_dtype`` sets the precision of the output model UV grid
+    (``complex64`` for a single-precision image, ``complex128`` otherwise). The
+    model visibilities degridded from this grid stay double precision regardless
+    (the degridder widens each grid cell to ``complex128`` for the
+    accumulation), so only the image-domain grid is affected here.
     """
 
     _image_params = image_params  # no mutation below; deep copy not needed
@@ -329,7 +338,7 @@ def fft_norm_img_xds(
         if out_name not in img_xds:
             img_xds[out_name] = xr.DataArray(
                 np.empty(
-                    (n_time, n_freq, n_pol, n_uv[0], n_uv[1]), dtype=np.complex128
+                    (n_time, n_freq, n_pol, n_uv[0], n_uv[1]), dtype=complex_dtype
                 ),
                 dims=("time", "frequency", "polarization", "u", "v"),
             )
@@ -370,6 +379,7 @@ def fft_norm_img_xds(
                         / kernel_image_1D_m[None, :],
                         num_threads=num_threads,
                         fft_backend=fft_backend,
+                        complex_dtype=complex_dtype,
                     )
 
                     # out_arr[t, f, p] = fft_lm_to_uv(
@@ -466,7 +476,13 @@ def ifft_uv_to_lm(
     return sky
 
 
-def fft_lm_to_uv(image, fft_plane_dims=(-2, -1), num_threads=1, fft_backend="pyfftw"):
+def fft_lm_to_uv(
+    image,
+    fft_plane_dims=(-2, -1),
+    num_threads=1,
+    fft_backend="pyfftw",
+    complex_dtype=np.complex128,
+):
     """Apply a 2-D FFT to transform a sky-plane image to a UV grid.
 
     Applies the standard radio-astronomy convention:
@@ -506,7 +522,7 @@ def fft_lm_to_uv(image, fft_plane_dims=(-2, -1), num_threads=1, fft_backend="pyf
     fft = _fft_module(fft_backend)
     return fft.fftshift(
         fft.fft2(
-            fft.ifftshift(image.astype(np.complex128, copy=False), axes=fft_plane_dims),
+            fft.ifftshift(np.asarray(image, dtype=complex_dtype), axes=fft_plane_dims),
             axes=fft_plane_dims,
             workers=num_threads,
             # s=(300,300)

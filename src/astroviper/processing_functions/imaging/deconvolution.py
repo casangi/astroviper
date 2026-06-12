@@ -9,7 +9,7 @@ from astroviper.processing_functions.image_analysis import image_statistics as i
 from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
     extract_main_lobe,
 )
-from astroviper.processing_functions.imaging.return_dict import ReturnDict
+from astroviper.processing_functions.imaging.utils.return_dict import ReturnDict
 
 import logging
 import toolviper.utils.logger as logger

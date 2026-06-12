@@ -3,8 +3,8 @@ def model_update_cycle_cube_single_field(
     input_params,
     is_n_iter_0,
     num_threads=1,
-    img_data_group_in_name="residual",
-    img_data_group_out_name="model",
+    image_data_group_in_name="residual",
+    image_data_group_out_name="model",
 ):
     """Run one model-update (minor) cycle: build a mask and deconvolve.
 
@@ -25,10 +25,10 @@ def model_update_cycle_cube_single_field(
         ``True`` on the very first model update.  Currently informational.
     num_threads : int, optional
         Threads handed to the deconvolver kernel.  Default ``1``.
-    img_data_group_in_name : str, optional
+    image_data_group_in_name : str, optional
         Data group holding the residual image and (created) mask.  Default
         ``"residual"``.
-    img_data_group_out_name : str, optional
+    image_data_group_out_name : str, optional
         Data group that the updated sky model is registered under.  Default
         ``"model"``.
 
@@ -48,14 +48,14 @@ def model_update_cycle_cube_single_field(
 
     # Add a primary-beam mask to the input data group if one is not present yet.
     T_make_mask = 0.0
-    mask_name = img_xds.attrs["data_groups"][img_data_group_in_name].get("mask", None)
+    mask_name = img_xds.attrs["data_groups"][image_data_group_in_name].get("mask", None)
     if mask_name is None:
         start = time.time()
         make_mask(
             img_xds,
             threshold=input_params["iteration_control_params"]["threshold"],
-            image_data_group_in_name=img_data_group_in_name,
-            image_data_group_out_name=img_data_group_in_name,
+            image_data_group_in_name=image_data_group_in_name,
+            image_data_group_out_name=image_data_group_in_name,
             combine_mask=False,
             overwrite=False,
         )
@@ -66,8 +66,8 @@ def model_update_cycle_cube_single_field(
         img_xds=img_xds,
         algorithm=input_params["deconvolver"],
         deconvolve_params=input_params["iteration_control_params"],
-        image_data_group_in_name=img_data_group_in_name,
-        image_data_group_out_name=img_data_group_out_name,
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_out_name,
         num_threads=num_threads,
     )
     T_deconvolve = time.time() - start

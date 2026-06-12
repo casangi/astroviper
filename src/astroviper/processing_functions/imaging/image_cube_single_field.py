@@ -1,25 +1,4 @@
-def _accumulate_timing(timing, return_df):
-    """Accumulate the columns of a one-row timing frame into ``timing`` in place.
-
-    Each processing-function timing is summed across every call (setup plus all
-    residual and model-update cycles) so the final per-chunk timing frame reports
-    the total wall time spent in each processing function.
-
-    Parameters
-    ----------
-    timing : dict
-        Accumulator mapping timing-column name to a running total (seconds).
-    return_df : pandas.DataFrame or None
-        One-row timing frame whose columns are added into ``timing``.  ``None``
-        is ignored.
-    """
-    if return_df is None:
-        return
-    for column in return_df.columns:
-        timing[column] = timing.get(column, 0.0) + float(return_df[column].iloc[0])
-
-
-def single_field_imaging_preparation(input_params, ps_xdt, img_xds):
+def imaging_preparation_single_field(input_params, ps_xdt, img_xds):
     """Run the once-per-chunk imaging setup before the major-cycle loop.
 
     Everything that is done a single time per chunk happens here:
@@ -27,7 +6,7 @@ def single_field_imaging_preparation(input_params, ps_xdt, img_xds):
     * construction of the :class:`IterationController` and the (empty) combined
       return dict, and
     * the imaging weights, the point spread function and the primary beam (via
-      :func:`~astroviper.processing_functions.imaging.residual_cycle.single_field_imaging_setup`).
+      :func:`~astroviper.processing_functions.imaging.residual_cycle.imaging_setup_single_field`).
 
     The dirty image and the first model update are deliberately NOT done here --
     they are the first iteration of the loop in :func:`image_cube_single_field`.
@@ -57,9 +36,9 @@ def single_field_imaging_preparation(input_params, ps_xdt, img_xds):
     import time
     import toolviper.utils.logger as logger
     from astroviper.processing_functions.imaging.residual_cycle import (
-        single_field_imaging_setup,
+        imaging_setup_single_field,
     )
-    from astroviper.processing_functions.imaging.iteration_control import (
+    from astroviper.processing_functions.imaging.utils import (
         IterationController,
         ReturnDict,
     )
@@ -81,7 +60,7 @@ def single_field_imaging_preparation(input_params, ps_xdt, img_xds):
     # Once-only imaging setup: imaging weights, PSF and primary beam. The dirty
     # image and the model update are NOT done here.
     start = time.time()
-    img_xds, return_df = single_field_imaging_setup(ps_xdt, img_xds, input_params)
+    img_xds, return_df = imaging_setup_single_field(ps_xdt, img_xds, input_params)
     T_setup = time.time() - start
 
     return controller, img_xds, return_df, combined_deconvolve_dict, T_setup
@@ -128,9 +107,11 @@ def image_cube_single_field(input_params, ps_xdt, img_xds):
     from astroviper.processing_functions.imaging.model_update_cycle import (
         model_update_cycle_cube_single_field,
     )
-    from astroviper.processing_functions.imaging.iteration_control import (
+    from astroviper.processing_functions.imaging.utils import (
         ReturnDict,
         merge_return_dicts,
+        accumulate_timing,
+        get_calculate_cycle_controls,
     )
 
     # All once-only work -- controller setup, imaging weights, PSF and primary
@@ -143,10 +124,10 @@ def image_cube_single_field(input_params, ps_xdt, img_xds):
         setup_return_df,
         combined_deconvolve_dict,
         T_setup,
-    ) = single_field_imaging_preparation(input_params, ps_xdt, img_xds)
+    ) = imaging_preparation_single_field(input_params, ps_xdt, img_xds)
 
     timing = {"T_setup": T_setup}
-    _accumulate_timing(timing, setup_return_df)
+    accumulate_timing(timing, setup_return_df)
 
     T_residual_cycle = 0.0
     T_model_update_cycle = 0.0
@@ -160,7 +141,7 @@ def image_cube_single_field(input_params, ps_xdt, img_xds):
             ps_xdt, img_xds, input_params, is_n_iter_0=is_n_iter_0
         )
         T_residual_cycle += time.time() - start
-        _accumulate_timing(timing, residual_return_df)
+        accumulate_timing(timing, residual_return_df)
 
         if input_params["iteration_control_params"]["niter"] > 0:
             logger.debug("Doing model update")
@@ -200,12 +181,12 @@ def image_cube_single_field(input_params, ps_xdt, img_xds):
                     input_params,
                     is_n_iter_0=is_n_iter_0,
                     num_threads=input_params["processing_function_threads"],
-                    img_data_group_in_name="residual",
-                    img_data_group_out_name="model",
+                    image_data_group_in_name="residual",
+                    image_data_group_out_name="model",
                 )
             )
             T_model_update_cycle += time.time() - start
-            _accumulate_timing(timing, model_update_return_df)
+            accumulate_timing(timing, model_update_return_df)
         else:
             deconvolve_dict = ReturnDict()
 
@@ -232,7 +213,7 @@ def image_cube_single_field(input_params, ps_xdt, img_xds):
             ps_xdt, img_xds, input_params, is_n_iter_0=is_n_iter_0
         )
         T_residual_cycle += time.time() - start
-        _accumulate_timing(timing, residual_return_df)
+        accumulate_timing(timing, residual_return_df)
 
     timing["T_residual_cycle"] = T_residual_cycle
     timing["T_model_update_cycle"] = T_model_update_cycle
@@ -243,76 +224,3 @@ def image_cube_single_field(input_params, ps_xdt, img_xds):
     timing_df = pd.DataFrame({key: [value] for key, value in timing.items()})
 
     return img_xds, timing_df, combined_deconvolve_dict
-
-
-def get_calculate_cycle_controls(
-    controller,
-    combined_deconvolve_dict,
-    img_xds,
-    is_n_iter_0,
-    iteration_control_params,
-    residual_data_group_name="residual",
-):
-    """Compute the cycle iteration limit and threshold for the next model update.
-
-    On the first model update (``is_n_iter_0``) the controls are derived from
-    the freshly made dirty image (its peak residual); afterwards they are derived
-    from the accumulated convergence statistics in ``combined_deconvolve_dict``.
-
-    Parameters
-    ----------
-    controller : IterationController
-        Controller whose ``calculate_cycle_controls`` and
-        ``per_plane_cycle_threshold`` drive the result.
-    combined_deconvolve_dict : ReturnDict
-        Accumulated per-plane convergence statistics (used when not the first
-        model update).
-    img_xds : xarray.Dataset
-        Image dataset providing the residual image for the first model update.
-    is_n_iter_0 : bool
-        ``True`` for the first model update.
-    iteration_control_params : dict
-        Iteration-control parameters (``maxpsffraction``, ``gain`` used to seed
-        the first model update).
-    residual_data_group_name : str, optional
-        Data group holding the residual image.  Default ``"residual"``.
-
-    Returns
-    -------
-    cycle_niter : int
-        Iteration limit for the next minor cycle.
-    cyclethresh : float
-        Global cycle threshold for the next minor cycle.
-    threshold_per_plane : numpy.ndarray
-        Per-plane cycle thresholds.
-    """
-    import numpy as np
-    from astroviper.processing_functions.imaging.iteration_control import ReturnDict
-
-    residual_data_group = img_xds.attrs["data_groups"][residual_data_group_name]
-    if is_n_iter_0:
-        peak_res = np.max(np.abs(img_xds[residual_data_group["sky"]].values))
-        temp_rd = ReturnDict()
-        temp_rd.add(
-            {
-                "peakres": peak_res,
-                "peakres_nomask": peak_res,
-                "masksum": img_xds.sizes["l"] * img_xds.sizes["m"],
-                "iter_done": 0,
-                "max_psf_sidelobe": iteration_control_params["maxpsffraction"],
-                "loop_gain": iteration_control_params["gain"],
-            },
-            time=0,
-            pol=0,
-            chan=0,
-        )
-        rd = temp_rd
-    else:
-        rd = combined_deconvolve_dict
-
-    cycle_niter, cyclethresh = controller.calculate_cycle_controls(rd)
-    # Per-plane cyclethreshold so each (time, chan, pol) plane can use its own
-    # threshold (falls back to the global value for planes without data).
-    threshold_per_plane = controller.per_plane_cycle_threshold(rd)
-
-    return cycle_niter, cyclethresh, threshold_per_plane

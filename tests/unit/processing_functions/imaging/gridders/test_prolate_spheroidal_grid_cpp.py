@@ -450,5 +450,136 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
             )
 
 
+class TestSinglePrecisionGrid(unittest.TestCase):
+    """Single-precision (complex64) grid path.
+
+    The binding dispatches on the grid dtype: a complex64 grid is accumulated
+    directly (the visibilities/weights stay double), giving a complex64 result
+    that matches the complex128 grid to single-precision tolerance.
+    """
+
+    def test_complex64_grid_matches_complex128(self):
+        inputs = _make_random_inputs(seed=7)
+
+        grid128, norm128 = _run_cpp(inputs, num_threads=1)
+
+        grid64 = np.zeros(grid128.shape, dtype=np.complex64)
+        norm64 = np.zeros(norm128.shape, dtype=np.float64)
+        prolate_spheroidal_grid(
+            grid64,
+            norm64,
+            inputs["vis_data"],
+            inputs["uvw"],
+            inputs["frequency_coord"],
+            inputs["frequency_map"],
+            inputs["time_map"],
+            inputs["pol_map"],
+            inputs["weight"],
+            inputs["cgk_1D"],
+            inputs["n_uv"],
+            inputs["delta_lm"],
+            support=SUPPORT,
+            oversampling=OVERSAMPLING,
+            num_threads=1,
+        )
+
+        self.assertEqual(grid64.dtype, np.complex64)
+        # Normalization stays float64 and is identical (double accumulation).
+        np.testing.assert_allclose(norm64, norm128, rtol=0, atol=1e-10)
+        # Grid agrees to single-precision tolerance, scaled by the cell magnitude.
+        scale = max(1.0, float(np.max(np.abs(grid128))))
+        np.testing.assert_allclose(
+            grid64.astype(np.complex128), grid128, rtol=0, atol=1e-5 * scale
+        )
+
+    def test_complex64_grid_threaded_matches_serial(self):
+        inputs = _make_random_inputs(seed=11)
+        common = dict(support=SUPPORT, oversampling=OVERSAMPLING)
+
+        def run(num_threads):
+            grid = np.zeros(
+                (
+                    inputs["m_time"],
+                    inputs["m_chan"],
+                    inputs["m_pol"],
+                    inputs["m_u"],
+                    inputs["m_v"],
+                ),
+                dtype=np.complex64,
+            )
+            norm = np.zeros(
+                (inputs["m_time"], inputs["m_chan"], inputs["m_pol"]),
+                dtype=np.float64,
+            )
+            prolate_spheroidal_grid(
+                grid,
+                norm,
+                inputs["vis_data"],
+                inputs["uvw"],
+                inputs["frequency_coord"],
+                inputs["frequency_map"],
+                inputs["time_map"],
+                inputs["pol_map"],
+                inputs["weight"],
+                inputs["cgk_1D"],
+                inputs["n_uv"],
+                inputs["delta_lm"],
+                num_threads=num_threads,
+                **common,
+            )
+            return grid
+
+        serial = run(1)
+        threaded = run(4)
+        # Atomic accumulation reorders the float32 summation across threads, so
+        # the result is close but not bit-identical at single precision.
+        scale = max(1.0, float(np.max(np.abs(serial))))
+        np.testing.assert_allclose(threaded, serial, rtol=1e-4, atol=1e-4 * scale)
+
+
+class TestSinglePrecisionDegrid(unittest.TestCase):
+    """Single-precision (complex64) model grid degridded to double visibilities."""
+
+    def test_complex64_grid_degrid_to_complex128_vis(self):
+        from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
+            prolate_spheroidal_degrid,
+        )
+
+        inputs = _make_random_inputs(seed=3)
+        grid128, _ = _run_cpp(inputs, num_threads=1)
+        grid64 = grid128.astype(np.complex64)
+
+        n_time, n_baseline, n_vis_chan, n_pol = inputs["vis_data"].shape
+
+        def degrid(grid):
+            vis = np.zeros((n_time, n_baseline, n_vis_chan, n_pol), dtype=np.complex128)
+            prolate_spheroidal_degrid(
+                grid,
+                vis,
+                inputs["uvw"],
+                inputs["frequency_coord"],
+                inputs["frequency_map"],
+                inputs["time_map"],
+                inputs["pol_map"],
+                inputs["cgk_1D"],
+                inputs["n_uv"],
+                inputs["delta_lm"],
+                support=SUPPORT,
+                oversampling=OVERSAMPLING,
+                num_threads=1,
+            )
+            return vis
+
+        vis_from_c128 = degrid(grid128)
+        vis_from_c64 = degrid(grid64)
+
+        # Output visibilities stay double precision regardless of grid dtype.
+        self.assertEqual(vis_from_c64.dtype, np.complex128)
+        scale = max(1.0, float(np.max(np.abs(vis_from_c128))))
+        np.testing.assert_allclose(
+            vis_from_c64, vis_from_c128, rtol=0, atol=1e-5 * scale
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

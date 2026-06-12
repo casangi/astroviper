@@ -1,11 +1,17 @@
+import os
 from numcodecs import Blosc
 import xarray as xr
 from typing import Optional, Dict, Any, Tuple, Union
 from xradio.image import make_empty_sky_image
 import numpy as np
 import zarr
+import toolviper.utils.parameter
 
 import astroviper.node_tasks as node_tasks
+
+# The toolviper parameter-check schema lives next to this module (rather than in
+# a central config/ directory) so it is easy to find; point the validator at it.
+_PARAM_CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _load_processing_set_chunk(load_params):
@@ -46,6 +52,7 @@ def _load_processing_set_chunk(load_params):
     )
 
 
+@toolviper.utils.parameter.validate(config_dir=_PARAM_CONFIG_DIR)
 def image_cube_single_field(
     ps_store: str,
     image_store: str,
@@ -54,6 +61,7 @@ def image_cube_single_field(
     iteration_control_params: Dict[str, Any],
     gridder="prolate_spheroidal",
     deconvolver="hogbom",
+    instrument_polarization_basis: str = "linear",
     scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],
     field_name: str = None,
     image_data_variables_keep: list[str] = [
@@ -65,7 +73,7 @@ def image_cube_single_field(
     ],
     compressor=Blosc(cname="lz4", clevel=5),
     processing_set_data_group_name: str = "corrected",
-    double_precision: bool = True,
+    single_precision_image: bool = True,
     thread_info: dict = None,
     processing_function_threads: int = 1,
     n_chunks: Optional[int] = None,
@@ -121,6 +129,13 @@ def image_cube_single_field(
     deconvolver : str
         The image deconvolver to use. One of ``"hogbom"`` or ``"asp"``. Default
         ``"hogbom"``.
+    instrument_polarization_basis : str
+        Correlation (instrument) polarization basis of the input visibilities.
+        One of ``"linear"`` (feeds ``XX``/``YY``) or ``"circular"`` (feeds
+        ``RR``/``LL``). The per-chunk gridding is performed in this basis and the
+        residual cycle transforms the model image into it before degridding; the
+        output image is always produced in the Stokes basis given by
+        ``image_params["polarization_coords"]``. Default ``"linear"``.
     scan_intents : list[str]
         The scan intents to image.
     field_name : str
@@ -130,9 +145,17 @@ def image_cube_single_field(
     processing_set_data_group_name : str
         Data group in the processing set to image (e.g. ``"base"``,
         ``"corrected"``). Default ``"corrected"``.
-    double_precision : bool
-        Use single- or double-precision math when gridding and deconvolving.
-        Default ``True``.
+    single_precision_image : bool
+        Precision of the image-domain arrays. When ``True`` (the default) the
+        gridded visibility/uv-sampling grids and every sky/PSF/model image are
+        single precision (``complex64`` / ``float32``), and the minor-cycle
+        deconvolution therefore runs in single precision. The visibilities
+        themselves remain double precision (``complex128``) and the residual
+        visibility is computed in double precision; only the image-domain arrays
+        (and the FFTs over them) are cast to single precision after gridding,
+        which roughly halves the image-cube memory footprint and speeds up the
+        FFTs and the minor cycle. When ``False`` the image-domain arrays are
+        double precision (``complex128`` / ``float64``).
     thread_info : dict, optional
         Thread information as returned by
         :func:`~astroviper.utils.data_partitioning.get_thread_info`. Queried
@@ -181,7 +204,7 @@ def image_cube_single_field(
         :class:`pandas.DataFrame` with one row per frequency chunk and a
         ``T_*`` column per processing function; ``"deconvolution"`` is the merged
         per-plane
-        :class:`~astroviper.processing_functions.imaging.return_dict.ReturnDict`
+        :class:`~astroviper.processing_functions.imaging.utils.return_dict.ReturnDict`
         of convergence statistics (global channel numbering).
     """
 
@@ -233,7 +256,7 @@ def image_cube_single_field(
     start = time.time()
     n_chunks = int(
         calculate_number_of_chunks_for_cube_imaging(
-            img_xds, double_precision, n_chunks, thread_info
+            img_xds, single_precision_image, n_chunks, thread_info
         )
     )
 
@@ -261,7 +284,7 @@ def image_cube_single_field(
         shape_dict=img_xds.sizes,
         parallel_coords=parallel_coords,
         compressor=compressor,
-        double_precision=double_precision,
+        double_precision=not single_precision_image,
         data_variable_definitions="imaging",
     )
 
@@ -294,7 +317,8 @@ def image_cube_single_field(
     input_params["iteration_control_params"] = iteration_control_params
     input_params["gridder"] = gridder
     input_params["deconvolver"] = deconvolver
-    input_params["double_precision"] = double_precision
+    input_params["instrument_polarization_basis"] = instrument_polarization_basis
+    input_params["single_precision_image"] = single_precision_image
     input_params["fft_backend"] = fft_backend
 
     from graphviper.graph_tools.coordinate_utils import (
@@ -382,7 +406,7 @@ def combine_return_data_frames(input_data, input_params):
 
     Each node task returns a single dict with a ``"timing"`` one-row
     :class:`pandas.DataFrame` and a ``"deconvolution"``
-    :class:`~astroviper.processing_functions.imaging.return_dict.ReturnDict`
+    :class:`~astroviper.processing_functions.imaging.utils.return_dict.ReturnDict`
     (already remapped to global channel numbers) for its channel chunk. This
     reducer concatenates the timing frames (one row per chunk) and merges the
     per-chunk deconvolution dicts with :func:`merge_return_dicts`. Because every
@@ -405,7 +429,7 @@ def combine_return_data_frames(input_data, input_params):
         ``{"timing": pandas.DataFrame, "deconvolution": ReturnDict}``.
     """
     import pandas as pd
-    from astroviper.processing_functions.imaging.iteration_control import (
+    from astroviper.processing_functions.imaging.utils.iteration_control import (
         merge_return_dicts,
     )
 
@@ -425,7 +449,7 @@ def combine_return_data_frames(input_data, input_params):
 
 
 def calculate_number_of_chunks_for_cube_imaging(
-    img_xds, double_precision, n_chunks, thread_info
+    img_xds, single_precision_image, n_chunks, thread_info
 ):
     """Determine the number of frequency chunks for cube imaging.
 
@@ -438,9 +462,10 @@ def calculate_number_of_chunks_for_cube_imaging(
     ----------
     img_xds : xarray.Dataset
         Empty image dataset whose ``sizes`` attribute provides the grid dimensions.
-    double_precision : bool
-        If ``True``, use double-precision (complex128 / float64) memory estimates;
-        otherwise single-precision (complex64 / float32).
+    single_precision_image : bool
+        If ``True``, use single-precision (complex64 / float32) memory estimates
+        for the image-domain arrays; otherwise double-precision
+        (complex128 / float64).
     n_chunks : int or None
         If not ``None``, this value is returned directly without any computation.
     thread_info : dict or None
@@ -468,7 +493,7 @@ def calculate_number_of_chunks_for_cube_imaging(
             * img_xds.sizes["time"]
         )
         fudge_factor = 1.2
-        if double_precision:
+        if single_precision_image:
             memory_singleton_chunk = fudge_factor * (
                 3 * n_pixels_single_frequency * bytes_in_dtype["complex64"] / (1024**3)
                 + 3 * n_pixels_single_frequency * bytes_in_dtype["float32"] / (1024**3)

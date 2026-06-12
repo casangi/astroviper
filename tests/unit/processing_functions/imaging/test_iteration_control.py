@@ -14,7 +14,7 @@ Tests cover:
 
 import unittest
 import numpy as np
-from astroviper.processing_functions.imaging.iteration_control import (
+from astroviper.processing_functions.imaging.utils.iteration_control import (
     # Stop codes
     StopCode,
     MAJOR_CONTINUE,
@@ -35,7 +35,7 @@ from astroviper.processing_functions.imaging.iteration_control import (
     # Main class
     IterationController,
 )
-from astroviper.processing_functions.imaging.return_dict import (
+from astroviper.processing_functions.imaging.utils.return_dict import (
     ReturnDict,
     FIELD_ACCUM,
     FIELD_SINGLE_VALUE,

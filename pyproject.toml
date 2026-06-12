@@ -93,6 +93,18 @@ build-dir = "build/{wheel_tag}"
 wheel.packages = ["src/astroviper"]
 
 [tool.scikit-build.cmake]
+# CMAKE_BUILD_TYPE for the C++ extensions. This is the lever for optimization /
+# debug flags: the shared cmake/AstroviperPybind.cmake intentionally leaves
+# opt-level to CMake instead of hand-rolling -O3. The reproducibility/standard
+# flags (-std=c++20, -ffp-contract, -stdlib=libc++, threads) apply regardless.
+#   Release        -> -O3 -DNDEBUG          (normal/CI; asserts off)
+#   Debug          -> -g (i.e. -O0)         (gdb/lldb; asserts + pybind checks on)
+#   RelWithDebInfo -> -O2 -g -DNDEBUG       (profiling with symbols)
+#   MinSizeRel     -> -Os -DNDEBUG          (smallest binary)
+# Override for one build without editing this file (Release stays the default):
+#   pip install -e . --no-build-isolation --config-settings=cmake.build-type=Debug
+#   SKBUILD_CMAKE_BUILD_TYPE=Debug pip install -e . --no-build-isolation
+# If a switch behaves oddly (stale cache), delete build/ and reinstall.
 build-type = "Release"
 
 [tool.scikit-build.build]

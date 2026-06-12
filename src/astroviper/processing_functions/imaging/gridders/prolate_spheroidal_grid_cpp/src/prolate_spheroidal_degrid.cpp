@@ -9,9 +9,9 @@
 
 namespace prolate_spheroidal {
 
-template <typename VisT>
+template <typename GridT, typename VisT>
 void prolate_spheroidal_degrid(
-    const std::complex<double>* grid,
+    const std::complex<GridT>* grid,
     VisT* vis_data,
     const double* uvw,
     const double* frequency_coord,
@@ -137,7 +137,7 @@ void prolate_spheroidal_degrid(
                         std::abs(oversampling * i_u + u_center_offset_indx);
                     const double conv_u = cgk_1D[u_offset_indx];
 
-                    const std::complex<double>* grid_row =
+                    const std::complex<GridT>* grid_row =
                         grid + grid_base + u_indx * m_v;
 
                     for (int i_v = start_support; i_v < end_support; ++i_v) {
@@ -146,7 +146,10 @@ void prolate_spheroidal_degrid(
                             std::abs(oversampling * i_v + v_center_offset_indx);
                         const double conv = conv_u * cgk_1D[v_offset_indx];
 
-                        degrid_value += conv * grid_row[v_indx];
+                        // Widen the (possibly single-precision) grid cell to
+                        // complex<double> so the accumulation stays double.
+                        const std::complex<double> grid_value = grid_row[v_indx];
+                        degrid_value += conv * grid_value;
                         norm += conv;
                     }
                 }
@@ -202,24 +205,18 @@ void prolate_spheroidal_degrid(
     for (auto& th : threads) th.join();
 }
 
-template void prolate_spheroidal_degrid<std::complex<float>>(
-    const std::complex<double>*, std::complex<float>*,
-    const double*, const double*,
-    const int64_t*, const int64_t*, const int64_t*,
-    const double*,
-    int, int, int, int, int,
-    int, int, int, int,
-    double, double,
-    int, int, int);
+#define PS_DEGRID_INSTANTIATE(GRIDT, VIST)                                     \
+    template void prolate_spheroidal_degrid<GRIDT, VIST>(                      \
+        const std::complex<GRIDT>*, VIST*, const double*, const double*,       \
+        const int64_t*, const int64_t*, const int64_t*, const double*,         \
+        int, int, int, int, int, int, int, int, int,                           \
+        double, double, int, int, int);
 
-template void prolate_spheroidal_degrid<std::complex<double>>(
-    const std::complex<double>*, std::complex<double>*,
-    const double*, const double*,
-    const int64_t*, const int64_t*, const int64_t*,
-    const double*,
-    int, int, int, int, int,
-    int, int, int, int,
-    double, double,
-    int, int, int);
+PS_DEGRID_INSTANTIATE(double, std::complex<float>)
+PS_DEGRID_INSTANTIATE(double, std::complex<double>)
+PS_DEGRID_INSTANTIATE(float, std::complex<float>)
+PS_DEGRID_INSTANTIATE(float, std::complex<double>)
+
+#undef PS_DEGRID_INSTANTIATE
 
 } // namespace prolate_spheroidal

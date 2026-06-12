@@ -27,7 +27,7 @@ from typing import Optional, Tuple, Dict, Any, List
 from collections import namedtuple
 
 
-from astroviper.processing_functions.imaging.return_dict import (
+from astroviper.processing_functions.imaging.utils.return_dict import (
     ReturnDict,
     Key,
     FIELD_ACCUM,
@@ -1703,3 +1703,73 @@ def format_deconvolve_dict(combined_deconvolve_dict, float_format="{:.6g}"):
 def print_deconvolve_dict(combined_deconvolve_dict, float_format="{:.6g}"):
     """Pretty-print a deconvolution ReturnDict. See :func:`format_deconvolve_dict`."""
     print(format_deconvolve_dict(combined_deconvolve_dict, float_format=float_format))
+
+
+def get_calculate_cycle_controls(
+    controller,
+    combined_deconvolve_dict,
+    img_xds,
+    is_n_iter_0,
+    iteration_control_params,
+    image_data_group_in_name="residual",
+):
+    """Compute the cycle iteration limit and threshold for the next model update.
+
+    On the first model update (``is_n_iter_0``) the controls are derived from
+    the freshly made dirty image (its peak residual); afterwards they are derived
+    from the accumulated convergence statistics in ``combined_deconvolve_dict``.
+
+    Parameters
+    ----------
+    controller : IterationController
+        Controller whose ``calculate_cycle_controls`` and
+        ``per_plane_cycle_threshold`` drive the result.
+    combined_deconvolve_dict : ReturnDict
+        Accumulated per-plane convergence statistics (used when not the first
+        model update).
+    img_xds : xarray.Dataset
+        Image dataset providing the residual image for the first model update.
+    is_n_iter_0 : bool
+        ``True`` for the first model update.
+    iteration_control_params : dict
+        Iteration-control parameters (``maxpsffraction``, ``gain`` used to seed
+        the first model update).
+    image_data_group_in_name : str, optional
+        Image data group holding the residual image.  Default ``"residual"``.
+
+    Returns
+    -------
+    cycle_niter : int
+        Iteration limit for the next minor cycle.
+    cyclethresh : float
+        Global cycle threshold for the next minor cycle.
+    threshold_per_plane : numpy.ndarray
+        Per-plane cycle thresholds.
+    """
+    residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
+    if is_n_iter_0:
+        peak_res = np.max(np.abs(img_xds[residual_data_group["sky"]].values))
+        temp_rd = ReturnDict()
+        temp_rd.add(
+            {
+                "peakres": peak_res,
+                "peakres_nomask": peak_res,
+                "masksum": img_xds.sizes["l"] * img_xds.sizes["m"],
+                "iter_done": 0,
+                "max_psf_sidelobe": iteration_control_params["maxpsffraction"],
+                "loop_gain": iteration_control_params["gain"],
+            },
+            time=0,
+            pol=0,
+            chan=0,
+        )
+        rd = temp_rd
+    else:
+        rd = combined_deconvolve_dict
+
+    cycle_niter, cyclethresh = controller.calculate_cycle_controls(rd)
+    # Per-plane cyclethreshold so each (time, chan, pol) plane can use its own
+    # threshold (falls back to the global value for planes without data).
+    threshold_per_plane = controller.per_plane_cycle_threshold(rd)
+
+    return cycle_niter, cyclethresh, threshold_per_plane

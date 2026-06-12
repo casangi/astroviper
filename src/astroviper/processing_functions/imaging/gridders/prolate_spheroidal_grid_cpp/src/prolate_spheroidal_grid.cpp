@@ -12,27 +12,28 @@ namespace prolate_spheroidal {
 
 namespace {
 
-// Lock-free atomic add on a non-atomic double. numpy allocates doubles
-// with 8-byte alignment, which satisfies the lock-free requirement on all
-// supported platforms.
+// Lock-free atomic add on a non-atomic floating-point value. numpy allocates
+// float/double with natural alignment, which satisfies the lock-free
+// requirement on all supported platforms.
 //
 // Prefer std::atomic_ref (C++20), but fall back to the GCC/Clang __atomic
 // builtins on compilers that don't yet implement it (e.g. GCC < 10, which
 // is still the system compiler on RHEL/Rocky 8). The builtins operate on
-// the same suitably aligned plain double, so the two paths are equivalent.
-inline void atomic_add_double(double* target, double value) {
+// the same suitably aligned plain value, so the two paths are equivalent.
+template <typename T>
+inline void atomic_add_real(T* target, T value) {
 #if defined(__cpp_lib_atomic_ref)
-    std::atomic_ref<double> ref(*target);
-    double current = ref.load(std::memory_order_relaxed);
+    std::atomic_ref<T> ref(*target);
+    T current = ref.load(std::memory_order_relaxed);
     while (!ref.compare_exchange_weak(
         current, current + value, std::memory_order_relaxed)) {}
 #else
-    // Generic __atomic_* builtins (pointer args) work on plain double on
+    // Generic __atomic_* builtins (pointer args) work on plain float/double on
     // both GCC and Clang; the type-specialized __atomic_*_n forms reject
     // floating-point types under Clang.
-    double current;
+    T current;
     __atomic_load(target, &current, __ATOMIC_RELAXED);
-    double desired;
+    T desired;
     do {
         desired = current + value;
     } while (!__atomic_compare_exchange(
@@ -41,20 +42,26 @@ inline void atomic_add_double(double* target, double value) {
 #endif
 }
 
-// std::complex<double> is guaranteed to be layout-compatible with
-// double[2], so we atomically add the real and imaginary parts
-// independently.
-inline void atomic_add_complex(std::complex<double>* target,
+inline void atomic_add_double(double* target, double value) {
+    atomic_add_real<double>(target, value);
+}
+
+// std::complex<GridT> is guaranteed to be layout-compatible with GridT[2], so
+// the real and imaginary parts are added independently. The convolved
+// visibility is computed in double precision and narrowed to GridT here.
+template <typename GridT>
+inline void atomic_add_complex(std::complex<GridT>* target,
                                std::complex<double> value) {
-    double* parts = reinterpret_cast<double*>(target);
-    atomic_add_double(parts + 0, value.real());
-    atomic_add_double(parts + 1, value.imag());
+    GridT* parts = reinterpret_cast<GridT*>(target);
+    atomic_add_real<GridT>(parts + 0, static_cast<GridT>(value.real()));
+    atomic_add_real<GridT>(parts + 1, static_cast<GridT>(value.imag()));
 }
 
 } // namespace
 
+template <typename GridT>
 void prolate_spheroidal_grid(
-    std::complex<double>* grid,
+    std::complex<GridT>* grid,
     double* normalization,
     const std::complex<double>* vis_data,
     const double* uvw,
@@ -192,7 +199,7 @@ void prolate_spheroidal_grid(
                         std::abs(oversampling * i_u + u_center_offset_indx);
                     const double conv_u = cgk_1D[u_offset_indx];
 
-                    std::complex<double>* grid_row =
+                    std::complex<GridT>* grid_row =
                         grid + grid_base + u_indx * m_v;
 
                     for (int i_v = start_support; i_v < end_support; ++i_v) {
@@ -201,7 +208,7 @@ void prolate_spheroidal_grid(
                             std::abs(oversampling * i_v + v_center_offset_indx);
                         const double conv = conv_u * cgk_1D[v_offset_indx];
 
-                        atomic_add_complex(grid_row + v_indx, conv * wd);
+                        atomic_add_complex<GridT>(grid_row + v_indx, conv * wd);
                         norm += conv;
                     }
                 }
@@ -253,8 +260,9 @@ void prolate_spheroidal_grid(
 }
 
 
+template <typename GridT>
 void prolate_spheroidal_grid_uv_sampling(
-    std::complex<double>* grid,
+    std::complex<GridT>* grid,
     double* normalization,
     const double* uvw,
     const double* frequency_coord,
@@ -373,7 +381,7 @@ void prolate_spheroidal_grid_uv_sampling(
                         std::abs(oversampling * i_u + u_center_offset_indx);
                     const double conv_u = cgk_1D[u_offset_indx];
 
-                    std::complex<double>* grid_row =
+                    std::complex<GridT>* grid_row =
                         grid + grid_base + u_indx * m_v;
 
                     for (int i_v = start_support; i_v < end_support; ++i_v) {
@@ -385,9 +393,10 @@ void prolate_spheroidal_grid_uv_sampling(
                         // The grid is real-valued here (we add a real weight),
                         // so only the real part of the complex cell needs an
                         // atomic add. The imag part is never touched.
-                        double* parts = reinterpret_cast<double*>(
+                        GridT* parts = reinterpret_cast<GridT*>(
                             grid_row + v_indx);
-                        atomic_add_double(parts + 0, conv * weight_data);
+                        atomic_add_real<GridT>(
+                            parts + 0, static_cast<GridT>(conv * weight_data));
                         norm += conv;
                     }
                 }
@@ -436,5 +445,32 @@ void prolate_spheroidal_grid_uv_sampling(
     worker(static_cast<int64_t>(resolved_threads - 1) * chunk, total_work);
     for (auto& th : threads) th.join();
 }
+
+// Explicit instantiations for the supported grid precisions.
+template void prolate_spheroidal_grid<double>(
+    std::complex<double>*, double*, const std::complex<double>*, const double*,
+    const double*, const int64_t*, const int64_t*, const int64_t*,
+    const double*, const double*,
+    int, int, int, int, int, int, int, int, int,
+    double, double, int, int, int);
+
+template void prolate_spheroidal_grid<float>(
+    std::complex<float>*, double*, const std::complex<double>*, const double*,
+    const double*, const int64_t*, const int64_t*, const int64_t*,
+    const double*, const double*,
+    int, int, int, int, int, int, int, int, int,
+    double, double, int, int, int);
+
+template void prolate_spheroidal_grid_uv_sampling<double>(
+    std::complex<double>*, double*, const double*, const double*,
+    const int64_t*, const int64_t*, const int64_t*, const double*, const double*,
+    int, int, int, int, int, int, int, int, int,
+    double, double, int, int, int);
+
+template void prolate_spheroidal_grid_uv_sampling<float>(
+    std::complex<float>*, double*, const double*, const double*,
+    const int64_t*, const int64_t*, const int64_t*, const double*, const double*,
+    int, int, int, int, int, int, int, int, int,
+    double, double, int, int, int);
 
 } // namespace prolate_spheroidal

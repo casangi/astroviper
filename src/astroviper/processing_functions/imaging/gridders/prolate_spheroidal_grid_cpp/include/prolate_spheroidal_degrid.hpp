@@ -19,18 +19,22 @@ namespace prolate_spheroidal {
  * in place. Samples whose UV coordinate is NaN, whose support falls outside
  * the grid, or whose visibility value is NaN are left unchanged.
  *
- * The accumulation is always performed in std::complex<double>; the final
- * value is cast to VisT on write so a complex64 vis_data buffer can be
- * written in place without any intermediate copy.
+ * The model grid is an image-domain array and may be single (``GridT=float``)
+ * or double (``GridT=double``) precision; each grid cell is widened to
+ * std::complex<double> before the accumulation, which is always performed in
+ * std::complex<double>. The final value is cast to VisT on write so a complex64
+ * vis_data buffer can be written in place without any intermediate copy. The
+ * visibilities themselves are never down-cast by this routine.
  *
  * Thread safety: work is partitioned by (i_time, i_baseline), so each worker
  * writes to a disjoint slice of vis_data. No atomic operations are required.
  *
+ * @tparam GridT Grid element type: float or double.
  * @tparam VisT  Visibility element type: std::complex<float> or std::complex<double>.
  */
-template <typename VisT>
+template <typename GridT, typename VisT>
 void prolate_spheroidal_degrid(
-    const std::complex<double>* grid,
+    const std::complex<GridT>* grid,
     VisT* vis_data,
     const double* uvw,
     const double* frequency_coord,
@@ -45,24 +49,18 @@ void prolate_spheroidal_degrid(
     int num_threads
 );
 
-extern template void prolate_spheroidal_degrid<std::complex<float>>(
-    const std::complex<double>*, std::complex<float>*,
-    const double*, const double*,
-    const int64_t*, const int64_t*, const int64_t*,
-    const double*,
-    int, int, int, int, int,
-    int, int, int, int,
-    double, double,
-    int, int, int);
+#define PS_DEGRID_EXTERN(GRIDT, VIST)                                          \
+    extern template void prolate_spheroidal_degrid<GRIDT, VIST>(               \
+        const std::complex<GRIDT>*, VIST*, const double*, const double*,       \
+        const int64_t*, const int64_t*, const int64_t*, const double*,         \
+        int, int, int, int, int, int, int, int, int,                           \
+        double, double, int, int, int);
 
-extern template void prolate_spheroidal_degrid<std::complex<double>>(
-    const std::complex<double>*, std::complex<double>*,
-    const double*, const double*,
-    const int64_t*, const int64_t*, const int64_t*,
-    const double*,
-    int, int, int, int, int,
-    int, int, int, int,
-    double, double,
-    int, int, int);
+PS_DEGRID_EXTERN(double, std::complex<float>)
+PS_DEGRID_EXTERN(double, std::complex<double>)
+PS_DEGRID_EXTERN(float, std::complex<float>)
+PS_DEGRID_EXTERN(float, std::complex<double>)
+
+#undef PS_DEGRID_EXTERN
 
 } // namespace prolate_spheroidal

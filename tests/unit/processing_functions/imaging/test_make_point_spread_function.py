@@ -1,7 +1,7 @@
 """Unit tests for the single-field point-spread-function processing function.
 
 Exercises
-:func:`astroviper.processing_functions.imaging.make_point_spread_function.make_single_field_point_spread_function`
+:func:`astroviper.processing_functions.imaging.make_point_spread_function.make_point_spread_function_single_field`
 on the local TW Hya processing set used by the stakeholder imaging test (the
 download fixture for this data is not yet published, so the test is skipped when
 the local copy is absent).  The PSF normalization (peak ``1.0`` at the image
@@ -43,7 +43,7 @@ def psf_result():
         calculate_imaging_weights,
     )
     from astroviper.processing_functions.imaging.make_point_spread_function import (
-        make_single_field_point_spread_function,
+        make_point_spread_function_single_field,
     )
 
     ps_meta = open_processing_set(str(PS_STORE))
@@ -94,12 +94,13 @@ def psf_result():
         "fft_padding": 1.2,
         "cpp_gridder": True,
     }
-    img_xds, return_df = make_single_field_point_spread_function(
+    img_xds, return_df = make_point_spread_function_single_field(
         ps_xdt,
         img_xds,
         image_params,
         ms_data_group_in_name="base",
-        image_data_group_name="residual",
+        image_data_group_in_name="residual",
+        image_data_group_out_name="residual",
         num_threads=1,
         fft_backend="scipy",
         complex_dtype=np.complex128,

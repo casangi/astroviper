@@ -125,8 +125,9 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
         get_visibility_grid_single_field(ms_xds, cgk, img_xds)
 
         out = ms_xds["VISIBILITY_MODEL"].values
-        # The degridder allocates the model visibilities in single precision.
-        self.assertEqual(out.dtype, np.complex64)
+        # The degridder allocates the model visibilities in double precision
+        # (visibilities stay double even when the image-domain grid is single).
+        self.assertEqual(out.dtype, np.complex128)
         self.assertEqual(out.shape, (1, 16, 2, 2))
         np.testing.assert_allclose(out, np.full_like(out, sky_value), rtol=0, atol=1e-5)
 
@@ -160,7 +161,7 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
             ms_xds["VISIBILITY_MODEL"].shape,
             ms_xds["VISIBILITY"].shape,
         )
-        self.assertEqual(ms_xds["VISIBILITY_MODEL"].dtype, np.complex64)
+        self.assertEqual(ms_xds["VISIBILITY_MODEL"].dtype, np.complex128)
 
     def test_registers_output_data_group(self):
         """The `model` data group is added with the correct role mappings."""

@@ -72,12 +72,60 @@ pre-commit install          # installs black + nbstripout git hooks
   `scikit-build-core` caches in `build/{wheel_tag}/`; if a build behaves oddly,
   delete `build/` and reinstall.
 
-### C++ extensions (built from `CMakeLists.txt` at repo root)
-There are three pybind11 modules; all require **C++20** (for `std::atomic_ref`):
+### C++ extensions — one place for all build flags
+There are three pybind11 modules, all built at **C++20** (the gridder needs
+`std::atomic_ref`; the deconvolvers use the same standard for uniformity):
 - `processing_functions/imaging/deconvolvers/hogbom` → `_hogbom_ext`
-- `processing_functions/imaging/deconvolvers/aspclean` → ASP CLEAN
+- `processing_functions/imaging/deconvolvers/aspclean` → `_aspclean_ext`
 - `processing_functions/imaging/gridders/prolate_spheroidal_grid_cpp` →
   `_prolate_spheroidal_grid_ext`
+
+**All shared compiler settings live in one file: [`cmake/AstroviperPybind.cmake`](cmake/AstroviperPybind.cmake).**
+It finds `pybind11`/`Threads` once and defines:
+- an `INTERFACE` target `astroviper_cpp_flags` carrying the C++ standard
+  (`cxx_std_20`, strict — extensions off), the **`-ffp-contract=off`**
+  reproducibility flag (see [the memory contract](#7-the-python--c-memory-contract);
+  bit-identical IEEE-754 across compilers/arches — do not remove), `-stdlib=libc++`
+  for Clang, the `VERSION_INFO` define, and a `Threads::Threads` link; and
+- a helper `astroviper_add_pybind_module(NAME … SOURCES … [INCLUDE_DIRS …]
+  [DESTINATION …])` that creates the module, wires `include/`, applies the shared
+  flags, and installs it (`INCLUDE_DIRS` defaults to `include`; `DESTINATION`
+  defaults to the module's path relative to `src/`).
+
+To **change a flag for every kernel**, edit `cmake/AstroviperPybind.cmake` — and
+only that file. Optimization level / `-fPIC` are left to CMake's build type
+(`build-type=Release` is pinned in `pyproject.toml`); don't hand-roll `-O3`.
+
+Each module's `CMakeLists.txt` is ~3 lines: an `astroviper_add_pybind_module(...)`
+call, preceded by a small standalone-build bootstrap block. The root
+`CMakeLists.txt` only `include()`s the shared module and `add_subdirectory()`s
+each one. A single kernel can also be **built on its own** for fast iteration —
+`cmake -S <module_dir> -B build && cmake --build build` — and it picks up the
+exact same flags (the module finds and includes the shared file itself).
+
+### Build type (Release / Debug)
+`CMAKE_BUILD_TYPE` is set via `build-type` in `[tool.scikit-build.cmake]` of
+`pyproject.toml` (pinned to `Release`). It is the **only** lever for the
+optimization/debug flags — the shared cmake file deliberately leaves opt-level to
+CMake. The reproducibility/standard flags (`-std=c++20`, `-ffp-contract`,
+`-stdlib=libc++`, threads, `VERSION_INFO`) apply for **every** build type.
+
+| `build-type` | Flags | Notes |
+| --- | --- | --- |
+| `Release` | `-O3 -DNDEBUG` | default; asserts **off** |
+| `Debug` | `-g` (i.e. `-O0`) | asserts + pybind11 bounds checks **on** |
+| `RelWithDebInfo` | `-O2 -g -DNDEBUG` | profiling with symbols |
+| `MinSizeRel` | `-Os -DNDEBUG` | smallest binary |
+
+Override for a single build without editing `pyproject.toml` (keeps `Release` as
+the committed default):
+```bash
+pip install -e . --no-build-isolation --config-settings=cmake.build-type=Debug
+# or, equivalently, via the SKBUILD_<dotted-key-uppercased> env var:
+SKBUILD_CMAKE_BUILD_TYPE=Debug pip install -e . --no-build-isolation
+```
+If a switch behaves oddly (stale cache), `rm -rf build` first —
+`CMAKE_BUILD_TYPE` is cached per `build/{wheel_tag}/`.
 
 ### Tests (pytest)
 ```bash
@@ -248,6 +296,28 @@ modify_data_groups_xds(
 - Conventional group names in the imaging loop: `base` → `corrected` →
   (`residual`, `model`).
 
+### Data-group parameter naming (imaging processing functions)
+Every imaging processing function names its data-group parameters from a fixed
+vocabulary so call sites read consistently:
+
+| Parameter | Side | Role |
+| --- | --- | --- |
+| `ms_data_group_in_name` / `ms_data_group_out_name` | measurement set | input / output group name |
+| `image_data_group_in_name` / `image_data_group_out_name` | image dataset | input / output group name |
+| `ms_data_group_out_modified` / `image_data_group_out_modified` | — | dict of role → new data-variable name for the output group |
+
+- Use `image_data_group_*` (not `img_*`); use the explicit `_in_`/`_out_` split
+  (not a single bare `..._data_group_name`).
+- **Not all four are needed** — a function uses only the ones it touches (e.g. a
+  gridder reads an MS and writes an image, so it has `ms_data_group_in_name` +
+  `image_data_group_in_name`/`image_data_group_out_name`).
+- When a function genuinely consumes/produces **more than one group of the same
+  side+direction**, append the role to the canonical name rather than inventing
+  a new prefix. Example —
+  `calculate_residual_visibilities` forms `residual = observed − model` from two
+  MS inputs and one MS output: `ms_data_group_in_observed`,
+  `ms_data_group_in_model`, `ms_data_group_out_residual`.
+
 ---
 
 ## 6. Imaging Deep-Dive
@@ -276,9 +346,36 @@ The user-facing function. Sequence:
 Notable parameters (see the function's NumPy docstring for the full list):
 `image_params`, `imaging_weights_params`, `iteration_control_params`, `gridder`
 (`"prolate_spheroidal"`), `deconvolver` (`"hogbom"` / `"asp"`),
-`processing_set_data_group_name`, `double_precision`,
+`instrument_polarization_basis` (`"linear"` / `"circular"`),
+`processing_set_data_group_name`, `single_precision_image`,
 `processing_function_threads`, `n_chunks`, `disk_chunk_sizes`,
 `fft_backend`, `memory_mode`.
+
+- **`instrument_polarization_basis`** (`"linear"` → feeds `XX`/`YY`,
+  `"circular"` → `RR`/`LL`). The per-chunk gridding is done in this correlation
+  basis: the node task builds the empty image with these correlation pol labels,
+  and the residual cycle transforms the model image into this basis before
+  degridding. The output image is always produced in the Stokes basis given by
+  `image_params["polarization_coords"]`.
+- **`single_precision_image`** (default `True`) sets the precision of the
+  **image-domain** arrays. When `True`, the gridded visibility/uv-sampling grids
+  and every sky/PSF/model image are single precision (`complex64` / `float32`),
+  so the minor-cycle deconvolution runs in single precision and the image-cube
+  memory footprint is roughly halved. The **visibilities stay double precision**
+  (`complex128`) and the residual visibility is computed in double precision —
+  only the image-domain arrays (and the FFTs over them) are cast to single
+  precision after gridding. When `False` the image-domain arrays are double
+  precision. See [the precision model](#65-imaging-io-conventions--utilsio).
+- **Parameter validation happens only here.** The distributed-graph
+  `image_cube_single_field` is decorated with
+  `@toolviper.utils.parameter.validate(config_dir=_PARAM_CONFIG_DIR)`; the full
+  parameter schema lives in `image_cube_single_field.param.json` **next to the
+  module** (`distributed_graphs/imaging/`), and the decorator points the
+  validator at the module's own directory via `config_dir`. The node-task and
+  processing-function layers do **not** re-validate — they trust the
+  already-checked `input_params`. (See the rule in
+  [Coding Conventions](#9-coding-conventions): the `*.param.json` schema always
+  sits beside the function it validates, not in a central `config/` directory.)
 
 - **`disk_chunk_sizes`** (e.g. `{"frequency": 200}` or `"Auto"`) adds a
   *data-loading layer*: one load node per on-disk chunk reads the native chunk
@@ -302,6 +399,17 @@ Signature `image_cube_single_field(input_params, graph_mode=True)`:
 6. `free_memory()` and return a small timing `DataFrame`.
 
 ### 6.3 Science — `processing_functions/imaging/image_cube_single_field.py`
+The **iteration-control and bookkeeping helpers** (not science kernels) live in
+the `processing_functions/imaging/utils/` subpackage: `iteration_control.py`
+(`IterationController`, stop codes, `merge_return_dicts`,
+`get_calculate_cycle_controls`, the `get_*_from_returndict` extractors,
+`format_/print_deconvolve_dict`), `return_dict.py` (`ReturnDict`, `Key`),
+`timing.py` (`accumulate_timing`), and `visibility.py`
+(`drop_auto_correlations` — the shared cross-correlation filter used by the PSF
+and undeconvolved-image gridders; do not re-inline it). Import them from
+`astroviper.processing_functions.imaging.utils` (the package re-exports the
+public symbols).
+
 Runs the **major/minor cycle** CLEAN loop via `IterationController`:
 - `residual_cycle_cube_single_field(...)` — degrid model → compute residual
   visibilities → grid → FFT-normalize → form residual image (+ PSF on the first
@@ -313,10 +421,21 @@ Runs the **major/minor cycle** CLEAN loop via `IterationController`:
 - A final residual cycle produces the last residual image.
 
 ### 6.4 Key processing functions & gridders
+> Naming convention: single-field imaging functions put the `single_field`
+> qualifier **at the end** (`make_point_spread_function_single_field`,
+> `make_primary_beam_single_field`, `make_undeconvolved_image_single_field`,
+> `imaging_setup_single_field`, …).
+
 - Weighting: `calculate_imaging_weights.py` (`"natural"`, `"briggs"`/robust).
 - Gridding (vis → uv grid): `add_visibility_grid.py`
-  (`add_visibility_grid_single_field`), sampling/PSF grid:
-  `add_uv_sampling_grid.py`.
+  (`add_visibility_grid_single_field`).
+- PSF / UV-sampling grid: `make_point_spread_function.py`
+  (`make_point_spread_function_single_field`, plus the
+  `add_uv_sampling_grid_single_field` / `add_uv_sampling_grid_mosaic` gridders
+  that build the PSF numerator — gridding the imaging weights *is* the first
+  step of forming the PSF).
+- Undeconvolved (dirty/residual) image gridding: `make_undeconvolved_image.py`
+  (`make_undeconvolved_image_single_field`).
 - Degridding (model uv grid → vis): `get_visibility_grid.py`.
 - FFT + normalization: `fft_normalize_prolate_spheriodal_gridder.py`.
 - Primary beam: `make_pb_symmetric.py` (airy disk).
@@ -342,6 +461,32 @@ Runs the **major/minor cycle** CLEAN loop via `IterationController`:
   v2 and v3 (`_to_zarr_v3_codec`).
 - `write_result_chunk_to_disk_using_zarr(...)` writes each kept variable's slice
   using the `task_coords` slices.
+
+#### Precision model (`single_precision_image`)
+The driver's `single_precision_image` (default `True`) controls **image-domain**
+precision only; visibilities are **always** `complex128`:
+
+| Stage | `single_precision_image=True` | `=False` |
+| --- | --- | --- |
+| Observed/model/residual **visibilities** | `complex128` | `complex128` |
+| Gridded UV / UV-sampling grid | `complex64` | `complex128` |
+| Grid **normalization** accumulator | `float64` (always) | `float64` |
+| Sky / PSF / model **images** | `float32` | `float64` |
+| Model→vis **uv grid** (`fft_norm_img_xds`) | `complex64` | `complex128` |
+| Minor-cycle **deconvolution** | `float32` | `float64` |
+
+Casting happens **after gridding, before the FFT**: the C++ gridder accumulates
+directly into a `complex64` grid (no extra full-resolution copy), the iFFT/FFT
+run at the grid precision, and the resulting images are `float32`. The
+degridder widens each (possibly `complex64`) model-grid cell to `complex128` and
+writes `complex128` model visibilities, so `residual = observed − model` is
+formed in double precision. Threading the precision: the driver sets
+`input_params["single_precision_image"]`; `residual_cycle` derives
+`complex_dtype`/`float_dtype` from it and forwards `complex_dtype` to the
+gridders (`add_visibility_grid_single_field`, `add_uv_sampling_grid_single_field`),
+to `fft_norm_img_xds`/`ifft_norm_img_xds`, and to the PSF builder. On-disk Zarr
+dtypes follow via `create_empty_data_variables_on_disk(double_precision=not
+single_precision_image)`.
 
 ---
 
@@ -374,10 +519,15 @@ match them in any new kernel:
 5. **Release the GIL during compute**: capture raw pointers, then
    `py::gil_scoped_release release;` around the heavy loop. The NumPy buffers
    stay valid because Python owns them.
-6. **No implicit complex narrowing.** The degridder takes an untyped `py::array`
-   precisely so pybind11 cannot safe-cast a `complex64` buffer into a
-   `complex128` temporary (which would silently drop the caller's writes); it
-   inspects the dtype and writes `complex64` *or* `complex128` in place.
+6. **No implicit complex narrowing.** The gridder's `grid`/`normalization` and
+   the degridder's `grid`/`vis_data` are taken as untyped `py::array` precisely
+   so pybind11 cannot safe-cast a `complex64` buffer into a `complex128`
+   temporary (which would silently drop the caller's writes). The bindings
+   inspect each array's dtype and dispatch to the templated kernel: the gridder
+   accumulates into a `complex64` *or* `complex128` grid (templated on the grid
+   float type; visibilities stay `complex128`), and the degridder reads a
+   `complex64`/`complex128` grid and writes `complex64`/`complex128`
+   visibilities in place — all four combinations are explicitly instantiated.
 7. **Threading inside the kernel** is via a `num_threads` argument →
    `std::thread` workers; `num_threads <= 0` falls back to
    `std::thread::hardware_concurrency()`, `1` runs serial. Concurrent writes to
@@ -472,8 +622,18 @@ per-variable nodes.
   (`@jit(nopython=True, cache=True, nogil=True)`) or C++; verify with timing.
   Large arrays are timed via `T_*` keys collected into per-chunk `DataFrame`s /
   `ReturnDict`s — keep that bookkeeping when adding stages.
-- **Parameter validation**: reuse `astroviper.utils.check_params.check_params`
-  (type/range/allowed-value checks with defaults) rather than ad-hoc validation.
+- **Parameter validation**: the user-facing distributed-graph entry points use
+  **toolviper's schema validation** — decorate the function with
+  `@toolviper.utils.parameter.validate(config_dir=...)`. **Rule: the
+  `<module_name>.param.json` schema file lives right next to the module it
+  validates** (not in a central `config/` directory), and the decorator points
+  the validator at the module's own directory, e.g.
+  `validate(config_dir=os.path.dirname(os.path.abspath(__file__)))`. The schema
+  key is the function name. Validate **once, at the graph layer** — node tasks
+  and processing functions trust the already-checked `input_params`. For
+  internal/leaf-level checks reuse
+  `astroviper.utils.check_params.check_params` (type/range/allowed-value checks
+  with defaults) rather than ad-hoc validation.
 
 ---
 
@@ -511,11 +671,13 @@ per-variable nodes.
 | New/changed imaging **workflow / parallelism** | `distributed_graphs/imaging/` |
 | New **node task** (I/O + orchestration of a chunk) | `node_tasks/imaging/` |
 | New **science kernel** (gridding, weighting, deconvolution, FFT, PB) | `processing_functions/imaging/` |
-| New **C++ kernel** | a sub-package under `processing_functions/.../{gridders,deconvolvers}/` with `include/`, `src/`, `python/bindings.cpp`, `CMakeLists.txt`; register it in the root `CMakeLists.txt` |
+| New **C++ kernel** | a sub-package under `processing_functions/.../{gridders,deconvolvers}/` with `include/`, `src/`, `python/bindings.cpp`, and a ~3-line `CMakeLists.txt` calling `astroviper_add_pybind_module(NAME … SOURCES …)` (copy an existing module's, incl. its standalone bootstrap block); add one `add_subdirectory(...)` line to the root `CMakeLists.txt`. Shared flags come from `cmake/AstroviperPybind.cmake` — don't re-declare them. |
+| Iteration control / `ReturnDict` / timing bookkeeping | `processing_functions/imaging/utils/` |
 | Data-group helpers | `utils/data_group_tools.py` |
 | Zarr variable defs / chunk writers | `utils/io.py` |
 | Chunk-count / thread heuristics | `utils/data_partitioning.py` |
-| Parameter validation helpers | `utils/check_params.py` |
+| Driver-level parameter schema (toolviper `@validate`) | `<module>.param.json` **next to the module** (e.g. `distributed_graphs/imaging/`) |
+| Ad-hoc parameter validation helpers | `utils/check_params.py` |
 | Tests | `tests/unit/<mirror of src path>/`; end-to-end in `tests/stakeholder/` |
 
 ---

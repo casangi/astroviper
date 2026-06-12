@@ -1,5 +1,5 @@
-from .make_primary_beam import make_single_field_primary_beam
+from .make_primary_beam import make_primary_beam_single_field
 
 __all__ = [
-    "make_single_field_primary_beam",
+    "make_primary_beam_single_field",
 ]

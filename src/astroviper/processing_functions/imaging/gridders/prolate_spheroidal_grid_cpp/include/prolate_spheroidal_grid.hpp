@@ -12,6 +12,16 @@ namespace prolate_spheroidal {
  * corresponding sum of convolution weights into normalization. Both arrays
  * are modified in place.
  *
+ * The grid (an image-domain array) is templated on its element precision
+ * @p GridT (``float`` or ``double``), so a single-precision image grid can be
+ * accumulated directly without an extra full-resolution copy. The visibilities,
+ * weights, uvw and kernel stay double precision (the visibilities are never
+ * down-cast); the per-cell convolution is computed in double precision and only
+ * the final atomic accumulation narrows to @p GridT. The normalization
+ * accumulator stays ``double`` for an accurate weight sum.
+ *
+ * @tparam GridT  Grid element type: ``float`` or ``double``.
+ *
  * @param grid             Complex UV grid accumulator, shape (m_time, m_chan, m_pol, m_u, m_v)
  * @param normalization    Per-cell weight accumulator, shape (m_time, m_chan, m_pol)
  * @param vis_data         Visibility data, shape (n_time, n_baseline, n_vis_chan, n_pol)
@@ -38,8 +48,9 @@ namespace prolate_spheroidal {
  * @param num_threads      Number of worker threads. Values <= 0 fall back to
  *                         std::thread::hardware_concurrency(); 1 runs serial.
  */
+template <typename GridT>
 void prolate_spheroidal_grid(
-    std::complex<double>* grid,
+    std::complex<GridT>* grid,
     double* normalization,
     const std::complex<double>* vis_data,
     const double* uvw,
@@ -56,38 +67,32 @@ void prolate_spheroidal_grid(
     int num_threads
 );
 
+extern template void prolate_spheroidal_grid<double>(
+    std::complex<double>*, double*, const std::complex<double>*, const double*,
+    const double*, const int64_t*, const int64_t*, const int64_t*,
+    const double*, const double*,
+    int, int, int, int, int, int, int, int, int,
+    double, double, int, int, int);
+
+extern template void prolate_spheroidal_grid<float>(
+    std::complex<float>*, double*, const std::complex<double>*, const double*,
+    const double*, const int64_t*, const int64_t*, const int64_t*,
+    const double*, const double*,
+    int, int, int, int, int, int, int, int, int,
+    double, double, int, int, int);
+
 /**
  * Grid imaging weights onto a UV plane to form the UV-sampling function (PSF numerator).
  *
- * PSF variant: grids imaging weights instead of weighted visibility data.
+ * PSF variant: grids imaging weights instead of weighted visibility data. The
+ * grid element precision is templated on @p GridT exactly as in
+ * ::prolate_spheroidal_grid.
  *
- * @param grid             Complex UV-sampling grid accumulator, shape (m_time, m_chan, m_pol, m_u, m_v)
- * @param normalization    Per-cell weight accumulator, shape (m_time, m_chan, m_pol)
- * @param uvw              UVW coordinates in metres, shape (n_time, n_baseline, 3)
- * @param frequency_coord  Channel frequencies in Hz, shape (n_vis_chan,)
- * @param frequency_map    Maps vis channel index to image channel index, shape (n_vis_chan,)
- * @param time_map         Maps vis time index to image time index, shape (n_time,)
- * @param pol_map          Maps vis pol index to image pol index, shape (n_pol,)
- * @param weight           Imaging weights, shape (n_time, n_baseline, n_vis_chan, n_pol)
- * @param cgk_1D           Oversampled 1-D prolate spheroidal kernel
- * @param m_time_g         Grid time dimension
- * @param m_chan_g         Grid channel dimension
- * @param m_pol_g          Grid polarization dimension
- * @param m_u              Grid U dimension
- * @param m_v              Grid V dimension
- * @param n_time           Number of visibility time samples
- * @param n_baseline       Number of baselines
- * @param n_vis_chan        Number of visibility channels
- * @param n_pol            Number of polarizations
- * @param delta_l          Image cell size in l (radians)
- * @param delta_m          Image cell size in m (radians)
- * @param support          Full convolution support width in grid pixels
- * @param oversampling     Oversampling factor of cgk_1D
- * @param num_threads      Number of worker threads. Values <= 0 fall back to
- *                         std::thread::hardware_concurrency(); 1 runs serial.
+ * @tparam GridT  Grid element type: ``float`` or ``double``.
  */
+template <typename GridT>
 void prolate_spheroidal_grid_uv_sampling(
-    std::complex<double>* grid,
+    std::complex<GridT>* grid,
     double* normalization,
     const double* uvw,
     const double* frequency_coord,
@@ -102,5 +107,17 @@ void prolate_spheroidal_grid_uv_sampling(
     int support, int oversampling,
     int num_threads
 );
+
+extern template void prolate_spheroidal_grid_uv_sampling<double>(
+    std::complex<double>*, double*, const double*, const double*,
+    const int64_t*, const int64_t*, const int64_t*, const double*, const double*,
+    int, int, int, int, int, int, int, int, int,
+    double, double, int, int, int);
+
+extern template void prolate_spheroidal_grid_uv_sampling<float>(
+    std::complex<float>*, double*, const double*, const double*,
+    const int64_t*, const int64_t*, const int64_t*, const double*, const double*,
+    int, int, int, int, int, int, int, int, int,
+    double, double, int, int, int);
 
 } // namespace prolate_spheroidal

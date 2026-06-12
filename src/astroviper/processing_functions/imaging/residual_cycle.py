@@ -9,8 +9,8 @@ from astroviper.utils.data_group_tools import (
 )
 
 
-def single_field_imaging_setup(
-    ps_xdt, img_xds, input_params, img_residual_data_group_name="residual"
+def imaging_setup_single_field(
+    ps_xdt, img_xds, input_params, image_data_group_out_name="residual"
 ):
     """Perform the once-per-chunk imaging setup before the major-cycle loop.
 
@@ -53,7 +53,7 @@ def single_field_imaging_setup(
         calculate_imaging_weights,
     )
     from astroviper.processing_functions.imaging.make_point_spread_function import (
-        make_single_field_point_spread_function,
+        make_point_spread_function_single_field,
     )
     from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
         point_spread_function_gaussian_fit,
@@ -62,24 +62,24 @@ def single_field_imaging_setup(
         transform_polarization_basis,
     )
     from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (
-        make_single_field_primary_beam,
+        make_primary_beam_single_field,
     )
 
-    if input_params["double_precision"]:
-        float_dtype = np.float64
-        complex_dtype = np.complex128
-    else:
+    if input_params["single_precision_image"]:
         float_dtype = np.float32
         complex_dtype = np.complex64
+    else:
+        float_dtype = np.float64
+        complex_dtype = np.complex128
 
     ps_data_group_name = input_params["processing_set_data_group_name"]
 
     # Create the residual data group up front: the PSF, the primary beam and the
     # residual image all live in it, and gridding writes into it.
-    if img_residual_data_group_name not in img_xds.attrs["data_groups"]:
+    if image_data_group_out_name not in img_xds.attrs["data_groups"]:
         img_xds.attrs["type"] = "image_dataset"
         img_xds = img_xds.xr_img.add_data_group(
-            new_data_group_name=img_residual_data_group_name,
+            new_data_group_name=image_data_group_out_name,
             new_data_group={"description": "test", "date": "2026"},
         )
         logger.debug("img_xds size " + str(img_xds.nbytes / 1e9) + " GB")
@@ -95,18 +95,20 @@ def single_field_imaging_setup(
         ms_data_group_in_name=ps_data_group_name,
         ms_data_group_out_name=ps_data_group_name,
         ms_data_group_out_modified={"weight_imaging": "WEIGHT_IMAGING"},
+        num_threads=input_params["processing_function_threads"],
     )
     T_weights = time.time() - T_start_weight
 
     # Point spread function: grid the UV-sampling function and inverse-transform
     # it.  Auto-correlations are dropped in place inside this call.
     T_start_psf = time.time()
-    img_xds, point_spread_function_return_df = make_single_field_point_spread_function(
+    img_xds, point_spread_function_return_df = make_point_spread_function_single_field(
         ps_xdt,
         img_xds,
         input_params["image_params"],
         ms_data_group_in_name=ps_data_group_name,
-        image_data_group_name=img_residual_data_group_name,
+        image_data_group_in_name=image_data_group_out_name,
+        image_data_group_out_name=image_data_group_out_name,
         image_data_variables_keep=input_params["image_data_variables_keep"],
         num_threads=input_params["processing_function_threads"],
         fft_backend=input_params["fft_backend"],
@@ -116,10 +118,11 @@ def single_field_imaging_setup(
 
     # Primary beam (azimuthally-symmetric obscured Airy disk).  It is independent
     # of the PSF and is created before the transform to the Stokes basis.
-    img_xds, primary_beam_return_df = make_single_field_primary_beam(
+    img_xds, primary_beam_return_df = make_primary_beam_single_field(
         img_xds,
         input_params["image_params"],
-        image_data_group_name=img_residual_data_group_name,
+        image_data_group_in_name=image_data_group_out_name,
+        image_data_group_out_name=image_data_group_out_name,
         float_dtype=float_dtype,
     )
     T_primary_beam = float(primary_beam_return_df["T_primary_beam"].iloc[0])
@@ -133,8 +136,8 @@ def single_field_imaging_setup(
     start = time.time()
     img_xds = point_spread_function_gaussian_fit(
         img_xds,
-        image_data_group_in_name=img_residual_data_group_name,
-        image_data_group_out_name=img_residual_data_group_name,
+        image_data_group_in_name=image_data_group_out_name,
+        image_data_group_out_name=image_data_group_out_name,
         image_data_group_out_modified={
             "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
             "max_sidelobe_point_spread_function": "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
@@ -156,7 +159,7 @@ def single_field_imaging_setup(
         }
     )
     # Merge the fine-grained PSF timings (T_gcf, T_vis_mask, T_uv_sampling_grid,
-    # T_fft_norm) produced by make_single_field_point_spread_function.
+    # T_fft_norm) produced by make_point_spread_function_single_field.
     return_df = pd.concat([return_df, point_spread_function_return_df], axis=1)
 
     return img_xds, return_df
@@ -169,8 +172,8 @@ def residual_cycle_cube_single_field(
     img_xds,
     input_params,
     is_n_iter_0,
-    img_residual_data_group_name="residual",
-    img_model_data_group_name="model",
+    image_data_group_in_name="model",
+    image_data_group_out_name="residual",
     last_residual_cycle=False,
 ):
     """Run one residual (major) cycle.
@@ -178,7 +181,7 @@ def residual_cycle_cube_single_field(
     Degrids the current sky model, forms the residual visibilities, grids them
     and inverse-transforms the grid to a residual image.  The once-per-chunk
     setup (imaging weights, PSF, primary beam and PSF fit) is done beforehand in
-    :func:`single_field_imaging_setup`, so this function only performs the
+    :func:`imaging_setup_single_field`, so this function only performs the
     per-cycle work.
 
     Parameters
@@ -194,10 +197,12 @@ def residual_cycle_cube_single_field(
     is_n_iter_0 : bool
         ``True`` for the very first (dirty image) cycle, where there is no sky
         model to degrid yet.  ``False`` for every later cycle.
-    img_residual_data_group_name : str, optional
-        Data group holding the residual image.  Default ``"residual"``.
-    img_model_data_group_name : str, optional
-        Data group holding the sky model.  Default ``"model"``.
+    image_data_group_in_name : str, optional
+        Image data group holding the sky model that is degridded.  Default
+        ``"model"``.
+    image_data_group_out_name : str, optional
+        Image data group that the residual image is written into.  Default
+        ``"residual"``.
     last_residual_cycle : bool, optional
         Unused placeholder retained for call-site compatibility.
 
@@ -226,12 +231,12 @@ def residual_cycle_cube_single_field(
         transform_polarization_basis,
     )
 
-    if input_params["double_precision"]:
-        float_dtype = np.float64
-        complex_dtype = np.complex128
-    else:
+    if input_params["single_precision_image"]:
         float_dtype = np.float32
         complex_dtype = np.complex64
+    else:
+        float_dtype = np.float64
+        complex_dtype = np.complex128
 
     ps_data_group_name = input_params["processing_set_data_group_name"]
 
@@ -246,16 +251,16 @@ def residual_cycle_cube_single_field(
 
     # Degrid the current model and form the residual visibilities.
     if not is_n_iter_0:
-        residual_data_group = img_xds.attrs["data_groups"][img_residual_data_group_name]
+        residual_data_group = img_xds.attrs["data_groups"][image_data_group_out_name]
         # Delete the SKY_RESIDUAL so the gridded residual image is rebuilt below.
         img_xds.xr_img.delete_data_variables(variables=[residual_data_group["sky"]])
 
-        # Stokes to correlation basis for the model visibilities.
-        # NB To do: derive new_polarization_basis from the input data basis
-        # rather than hard-coding "linear".
+        # Stokes to correlation (instrument) basis for the model visibilities.
         start = time.time()
         img_xds = transform_polarization_basis(
-            img_xds, new_polarization_basis="linear", overwrite=True
+            img_xds,
+            new_polarization_basis=input_params["instrument_polarization_basis"],
+            overwrite=True,
         )
         T_transform_pol += time.time() - start
 
@@ -263,14 +268,15 @@ def residual_cycle_cube_single_field(
         img_xds = fft_norm_img_xds(
             img_xds,
             image_params=input_params["image_params"],
-            image_data_group_in_name=img_model_data_group_name,
-            image_data_group_out_name=img_model_data_group_name,
+            image_data_group_in_name=image_data_group_in_name,
+            image_data_group_out_name=image_data_group_in_name,
             image_data_group_out_modified={
                 "visibility": "VISIBILITY_MODEL",
             },
             image_data_variables_keep=["sky"],
             num_threads=input_params["processing_function_threads"],
             fft_backend=input_params["fft_backend"],
+            complex_dtype=complex_dtype,
         )
         T_fft_norm += time.time() - start
 
@@ -283,7 +289,7 @@ def residual_cycle_cube_single_field(
             ms_data_group_out_modified={
                 "correlated_data": "VISIBILITY_MODEL",
             },
-            img_data_group_in_name="model",
+            image_data_group_in_name=image_data_group_in_name,
             num_threads=input_params["processing_function_threads"],
             fft_padding=input_params["image_params"]["fft_padding"],
         )
@@ -292,9 +298,9 @@ def residual_cycle_cube_single_field(
         start = time.time()
         calculate_residual_visibilities(
             ps_xdt,
-            ms_data_group_residual_name="residual",
-            ms_data_group_model_name="model",
-            ms_data_group_original_name=ps_data_group_name,
+            ms_data_group_out_residual="residual",
+            ms_data_group_in_model="model",
+            ms_data_group_in_observed=ps_data_group_name,
         )
         T_residual_vis += time.time() - start
 
@@ -302,28 +308,36 @@ def residual_cycle_cube_single_field(
         ps_data_group_name = "residual"
     else:
         # First (dirty image) cycle: the image dataset arrives from
-        # single_field_imaging_setup in the Stokes basis. Flip it to the
-        # correlation basis so the gridded residual image is created in the same
-        # basis as the visibility grid, before the transform back to Stokes below.
+        # imaging_setup_single_field in the Stokes basis. Flip it to the
+        # correlation (instrument) basis so the gridded residual image is created
+        # in the same basis as the visibility grid, before the transform back to
+        # Stokes below.
         start = time.time()
         img_xds = transform_polarization_basis(
-            img_xds, new_polarization_basis="linear", overwrite=True
+            img_xds,
+            new_polarization_basis=input_params["instrument_polarization_basis"],
+            overwrite=True,
         )
         T_transform_pol += time.time() - start
 
-    # Grid the (residual) visibilities. The PSF / UV-sampling grid is built once
-    # in single_field_imaging_setup, so only the visibility grid is made here
-    # (is_n_iter_0=False keeps make_uv_images_single_field from regridding it).
+    # Grid the (residual) visibilities into the undeconvolved image grid. The
+    # PSF / UV-sampling grid is built once in imaging_setup_single_field, so only
+    # the visibility grid is made here.
+    from astroviper.processing_functions.imaging.make_undeconvolved_image import (
+        make_undeconvolved_image_single_field,
+    )
+
     T_start_grid = time.time()
-    img_xds, make_uv_images_single_field_return_df = make_uv_images_single_field(
+    img_xds, make_undeconvolved_image_return_df = make_undeconvolved_image_single_field(
         ps_xdt,
         img_xds,
         input_params["image_params"],
         cgk_1D,
         False,
         ms_data_group_in_name=ps_data_group_name,
-        img_data_group_out_name=img_residual_data_group_name,
+        image_data_group_out_name=image_data_group_out_name,
         num_threads=input_params["processing_function_threads"],
+        complex_dtype=complex_dtype,
     )
     T_grid = time.time() - T_start_grid
 
@@ -331,8 +345,8 @@ def residual_cycle_cube_single_field(
     img_xds = ifft_norm_img_xds(
         img_xds,
         image_params=input_params["image_params"],
-        image_data_group_in_name=img_residual_data_group_name,
-        image_data_group_out_name=img_residual_data_group_name,
+        image_data_group_in_name=image_data_group_out_name,
+        image_data_group_out_name=image_data_group_out_name,
         image_data_group_out_modified={
             "sky": "SKY_RESIDUAL",
         },
@@ -358,8 +372,8 @@ def residual_cycle_cube_single_field(
     import pandas as pd
 
     # Per-cycle timing for each processing function.  T_uv_sampling_grid inside
-    # make_uv_images_single_field_return_df is zero here (the UV-sampling grid is
-    # built once in single_field_imaging_setup); T_degrid/T_residual_vis are zero
+    # make_undeconvolved_image_return_df is zero here (the UV-sampling grid is
+    # built once in imaging_setup_single_field); T_degrid/T_residual_vis are zero
     # on the first (dirty image) cycle.
     return_df = pd.DataFrame(
         {
@@ -372,8 +386,8 @@ def residual_cycle_cube_single_field(
         }
     )
     # Add the fine-grained gridding timings (T_vis_mask, T_uv_sampling_grid,
-    # T_vis_grid) from make_uv_images_single_field.
-    return_df = pd.concat([return_df, make_uv_images_single_field_return_df], axis=1)
+    # T_vis_grid) from make_undeconvolved_image_single_field.
+    return_df = pd.concat([return_df, make_undeconvolved_image_return_df], axis=1)
 
     return img_xds, return_df
 
@@ -386,7 +400,7 @@ def make_visibility_model_single_field(
     ms_data_group_out_modified={
         "correlated_data": "VISIBILITY_MODEL",
     },
-    img_data_group_in_name="model",
+    image_data_group_in_name="model",
     num_threads=1,
     fft_padding=1.2,
 ):
@@ -412,7 +426,7 @@ def make_visibility_model_single_field(
     ms_data_group_out_modified : dict, optional
         Data-variable override for the output group.  Default
         ``{"correlated_data": "VISIBILITY_MODEL"}``.
-    img_data_group_in_name : str, optional
+    image_data_group_in_name : str, optional
         Image data group holding the model uv-grid.  Default ``"model"``.
     num_threads : int, optional
         Threads handed to the degridder kernel.  Default ``1``.
@@ -426,7 +440,7 @@ def make_visibility_model_single_field(
             img_xds,
             ms_data_group_out_name=ms_data_group_out_name,
             ms_data_group_out_modified=ms_data_group_out_modified,
-            img_data_group_in_name=img_data_group_in_name,
+            image_data_group_in_name=image_data_group_in_name,
             overwrite=True,
             chan_mode="cube",
             fft_padding=fft_padding,
@@ -436,28 +450,32 @@ def make_visibility_model_single_field(
 
 def calculate_residual_visibilities(
     ps_xdt,
-    ms_data_group_residual_name="residual",
-    ms_data_group_model_name="model",
-    ms_data_group_original_name="base",
+    ms_data_group_out_residual="residual",
+    ms_data_group_in_model="model",
+    ms_data_group_in_observed="base",
 ):
-    """Form residual visibilities (original minus model) for every measurement set.
+    """Form residual visibilities (observed minus model) for every measurement set.
 
-    For each measurement set, subtracts the model visibilities from the original
-    (observed) visibilities and registers the result as ``VISIBILITY_RESIDUAL``
-    under ``ms_data_group_residual_name``.
+    For each measurement set, subtracts the model visibilities from the observed
+    visibilities and registers the result as ``VISIBILITY_RESIDUAL`` under
+    ``ms_data_group_out_residual``.
+
+    This helper consumes two measurement-set input groups (the observed
+    visibilities and the model visibilities) and writes one output group, so it
+    uses the appended-role naming convention rather than a single
+    ``ms_data_group_in_name`` / ``ms_data_group_out_name`` pair.
 
     Parameters
     ----------
     ps_xdt : xarray.DataTree
         Processing set; residual visibilities are written into each measurement
         set in place.
-    ms_data_group_residual_name : str, optional
+    ms_data_group_out_residual : str, optional
         Output data group for the residual visibilities.  Default ``"residual"``.
-    ms_data_group_model_name : str, optional
-        Data group holding the model visibilities.  Default ``"model"``.
-    ms_data_group_original_name : str, optional
-        Data group holding the original (observed) visibilities.  Default
-        ``"base"``.
+    ms_data_group_in_model : str, optional
+        Input data group holding the model visibilities.  Default ``"model"``.
+    ms_data_group_in_observed : str, optional
+        Input data group holding the observed visibilities.  Default ``"base"``.
     """
     from astroviper.utils.data_group_tools import (
         create_data_groups_in_and_out,
@@ -465,15 +483,12 @@ def calculate_residual_visibilities(
     )
 
     for ms_name, ms_xdt in ps_xdt.items():
-        ms_data_group_model = ms_xdt.attrs["data_groups"][ms_data_group_model_name]
-        ms_data_group_original = ms_xdt.attrs["data_groups"][
-            ms_data_group_original_name
-        ]
+        ms_data_group_model = ms_xdt.attrs["data_groups"][ms_data_group_in_model]
 
-        ms_data_group_original, ms_data_group_residual = create_data_groups_in_and_out(
+        ms_data_group_observed, ms_data_group_residual = create_data_groups_in_and_out(
             ms_xdt,
-            data_group_in_name=ms_data_group_original_name,
-            data_group_out_name=ms_data_group_residual_name,
+            data_group_in_name=ms_data_group_in_observed,
+            data_group_out_name=ms_data_group_out_residual,
             data_group_out_modified={
                 "correlated_data": "VISIBILITY_RESIDUAL",
             },
@@ -481,142 +496,13 @@ def calculate_residual_visibilities(
         )
 
         ms_xdt[ms_data_group_residual["correlated_data"]] = (
-            ms_xdt[ms_data_group_original["correlated_data"]]
+            ms_xdt[ms_data_group_observed["correlated_data"]]
             - ms_xdt[ms_data_group_model["correlated_data"]]
         )
 
         modify_data_groups_xds(
             ms_xdt,
-            data_group_out_name=ms_data_group_residual_name,
+            data_group_out_name=ms_data_group_out_residual,
             data_group_out=ms_data_group_residual,
-            description="Calculated residual visibilities by subtracting model visibilities from original visibilities.",
+            description="Calculated residual visibilities by subtracting model visibilities from observed visibilities.",
         )
-
-
-def make_uv_images_single_field(
-    ps_xdt,
-    img_xds,
-    image_params,
-    cgk_1D,
-    is_n_iter_0,
-    ms_data_group_in_name="corrected",
-    img_data_group_out_name="residual",
-    num_threads=1,
-):
-    """Grid the (residual) visibilities of every measurement set onto the uv grid.
-
-    Drops auto-correlations and grids the visibilities (``VISIBILITY`` /
-    ``VISIBILITY_NORMALIZATION``).  On the first (dirty image) cycle
-    (``is_n_iter_0``) it additionally grids the UV-sampling function that becomes
-    the PSF; in the single-field imager the UV-sampling grid is built once in
-    :func:`make_single_field_point_spread_function`, so this is normally called
-    with ``is_n_iter_0=False``.
-
-    Parameters
-    ----------
-    ps_xdt : xarray.DataTree
-        Processing set; auto-correlations are dropped in place before gridding.
-    img_xds : xarray.Dataset
-        Image dataset that the uv grids are written into.
-    image_params : dict
-        Image geometry; must contain ``"fft_padding"``.
-    cgk_1D : numpy.ndarray
-        1-D prolate-spheroidal gridding convolution kernel.
-    is_n_iter_0 : bool
-        If ``True`` also grid the UV-sampling function (PSF) for each ms.
-    ms_data_group_in_name : str, optional
-        Measurement-set data group to grid from.  Default ``"corrected"``.
-    img_data_group_out_name : str, optional
-        Image data group the uv grids are written under.  Default ``"residual"``.
-    num_threads : int, optional
-        Threads handed to the gridding kernel.  Default ``1``.
-
-    Returns
-    -------
-    img_xds : xarray.Dataset
-        The input dataset with the visibility uv grid added.
-    return_df : pandas.DataFrame
-        One-row timing frame with ``T_vis_mask``, ``T_uv_sampling_grid`` and
-        ``T_vis_grid``.
-    """
-    import numpy as np
-
-    from astroviper.processing_functions.imaging.add_uv_sampling_grid import (
-        add_uv_sampling_grid_single_field,
-    )
-    from astroviper.processing_functions.imaging.add_visibility_grid import (
-        add_visibility_grid_single_field,
-    )
-
-    T_vis_mask = 0.0
-    T_uv_sampling_grid = 0.0
-    T_vis_grid = 0.0
-
-    T_start_add_to_grid = time.time()
-    for ms_name, ms_xdt in ps_xdt.items():
-        T_start_vis_mask = time.time()
-        # Create a mask where baseline_antenna1_name does not equal baseline_antenna2_name
-        mask = ms_xdt["baseline_antenna1_name"] != ms_xdt["baseline_antenna2_name"]
-        # Apply the mask to the Dataset
-        masked_ds = ms_xdt.ds.where(mask, drop=True)
-        # `where(..., drop=True)` indexes baseline_id with an integer array,
-        # which leaves the (numpy-backed) data variables as transposed,
-        # non-C-contiguous views. Downstream C++ kernels (e.g. the degridder in
-        # get_visibility_grid_single_field, reused across major cycles) require
-        # C-contiguous input, so restore C-order before storing the dataset back.
-        for var_name, var in masked_ds.data_vars.items():
-            data = var.data
-            if isinstance(data, np.ndarray) and not data.flags["C_CONTIGUOUS"]:
-                masked_ds[var_name].data = np.ascontiguousarray(data)
-        ms_xdt.ds = masked_ds
-        T_vis_mask = T_vis_mask + time.time() - T_start_vis_mask
-
-        if is_n_iter_0:
-            T_start_uv = time.time()
-            add_uv_sampling_grid_single_field(
-                ms_xdt,
-                cgk_1D,
-                img_xds,
-                ms_data_group_in_name=ms_data_group_in_name,
-                img_data_group_in_name=img_data_group_out_name,
-                img_data_group_out_name=img_data_group_out_name,
-                img_data_group_out_modified={
-                    "uv_sampling": "UV_SAMPLING",
-                    "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
-                },
-                overwrite=True,
-                chan_mode="cube",
-                fft_padding=image_params["fft_padding"],
-                num_threads=num_threads,
-            )  # Will become the PSF.
-            T_uv_sampling_grid = T_uv_sampling_grid + time.time() - T_start_uv
-
-        T_start_vis = time.time()
-        add_visibility_grid_single_field(
-            ms_xdt,
-            cgk_1D,
-            img_xds,
-            ms_data_group_in_name=ms_data_group_in_name,
-            img_data_group_in_name=img_data_group_out_name,
-            img_data_group_out_name=img_data_group_out_name,
-            img_data_group_out_modified={
-                "visibility": "VISIBILITY",
-                "visibility_normalization": "VISIBILITY_NORMALIZATION",
-            },
-            overwrite=True,
-            chan_mode="cube",
-            fft_padding=image_params["fft_padding"],
-            num_threads=num_threads,
-        )
-        T_vis_grid = T_vis_grid + time.time() - T_start_vis
-
-    return_dict = {
-        "T_vis_mask": [T_vis_mask],
-        "T_uv_sampling_grid": [T_uv_sampling_grid],
-        "T_vis_grid": [T_vis_grid],
-    }
-    import pandas as pd
-
-    return_df = pd.DataFrame(return_dict)
-
-    return img_xds, return_df
