@@ -78,6 +78,29 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
                 const int* niter, T gain, const T* thres, T cspeedup,
                 int num_threads, int* iter_out);
 
+/**
+ * Many-threads Hogbom CLEAN over a (nt, nf, np_img, ny, nx) image cube whose
+ * parallelism spans BOTH the planes and the rows within each plane.
+ *
+ * Unlike clean_cube (which runs one full per-plane clean per std::thread, so a
+ * single-channel cube uses only n_pol threads), this synchronizes the
+ * per-iteration peak search and PSF subtraction across the whole (plane, row)
+ * work domain and distributes it over num_threads std::thread workers, keeping
+ * every thread busy even with only one or two planes. The per-plane algorithm,
+ * tie-breaking (lowest row then column) and outputs are identical to clean_cube.
+ *
+ * Same parameters and semantics as clean_cube; num_threads is the worker count
+ * (clamped to [1, nplanes*ny]).
+ */
+template<typename T>
+void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
+                int domask, const bool* mask_cube,
+                int nt, int nf, int np_img, int np_psf,
+                int ny, int nx,
+                int xbeg, int xend, int ybeg, int yend,
+                const int* niter, T gain, const T* thres, T cspeedup,
+                int num_threads, int* iter_out);
+
 // Explicit template instantiation declarations
 extern template void maximg<float>(const float* limagestep, int domask, const bool* lmask,
                                   int nx, int ny, float& fmin, float& fmax);
@@ -111,6 +134,24 @@ extern template void clean_cube<float>(float* residual_cube, float* model_cube,
                                        int num_threads, int* iter_out);
 
 extern template void clean_cube<double>(double* residual_cube, double* model_cube,
+                                        const double* psf_cube, int domask,
+                                        const bool* mask_cube,
+                                        int nt, int nf, int np_img, int np_psf,
+                                        int ny, int nx,
+                                        int xbeg, int xend, int ybeg, int yend,
+                                        const int* niter, double gain, const double* thres, double cspeedup,
+                                        int num_threads, int* iter_out);
+
+extern template void clean_cube_many_threads<float>(float* residual_cube, float* model_cube,
+                                       const float* psf_cube, int domask,
+                                       const bool* mask_cube,
+                                       int nt, int nf, int np_img, int np_psf,
+                                       int ny, int nx,
+                                       int xbeg, int xend, int ybeg, int yend,
+                                       const int* niter, float gain, const float* thres, float cspeedup,
+                                       int num_threads, int* iter_out);
+
+extern template void clean_cube_many_threads<double>(double* residual_cube, double* model_cube,
                                         const double* psf_cube, int domask,
                                         const bool* mask_cube,
                                         int nt, int nf, int np_img, int np_psf,

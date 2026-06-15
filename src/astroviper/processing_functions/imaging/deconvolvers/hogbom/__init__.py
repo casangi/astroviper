@@ -14,6 +14,7 @@ __all__ = [
     "maximg",
     "clean",
     "clean_cube",
+    "clean_cube_many_threads",
     "get_dtype_name",
     "is_float32",
     "is_float64",

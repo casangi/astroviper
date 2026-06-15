@@ -255,7 +255,7 @@ def test_single_field_imaging_niter0(plot_saver):
             "maxpsffraction": 0.8,
         },
         gridder="prolate_spheroidal",
-        deconvolver="hogbom",
+        deconvolver="hogbom_many_threads",
         scan_intents="OBSERVE_TARGET#ON_SOURCE",
         image_data_variables_keep=[
             "sky_residual",
@@ -420,7 +420,7 @@ def test_single_field_imaging_nchunks5(plot_saver):
             "maxpsffraction": 0.2,
         },
         gridder="prolate_spheroidal",
-        deconvolver="hogbom",
+        deconvolver="hogbom_many_threads",
         # deconvolver="asp",
         scan_intents="OBSERVE_TARGET#ON_SOURCE",
         image_data_variables_keep=[
@@ -809,7 +809,7 @@ def test_single_field_imaging_nchunks1(plot_saver):
             "maxpsffraction": 0.2,
         },
         gridder="prolate_spheroidal",
-        deconvolver="hogbom",
+        deconvolver="hogbom_many_threads",
         # deconvolver="asp",
         scan_intents="OBSERVE_TARGET#ON_SOURCE",
         image_data_variables_keep=[
@@ -1187,7 +1187,7 @@ def test_single_field_imaging_multi_cycle(plot_saver):
             "maxpsffraction": 0.8,
         },
         gridder="prolate_spheroidal",
-        deconvolver="hogbom",
+        deconvolver="hogbom_many_threads",
         # deconvolver="asp",
         scan_intents="OBSERVE_TARGET#ON_SOURCE",
         image_data_variables_keep=[

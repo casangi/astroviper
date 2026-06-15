@@ -421,6 +421,28 @@ def fft_norm_img_xds(
     return img_xds
 
 
+def _fold_shift_checkerboard(arr, axes):
+    """Multiply ``arr`` in place by the separable checkerboard ``(-1)**(i+j+...)``.
+
+    For even-length axes an ``fftshift`` / ``ifftshift`` (each a roll by ``N/2``)
+    can be replaced by a pointwise multiply by ``(-1)**k`` in the opposite
+    domain, so ``fftshift(fft(ifftshift(x))) == cb * fft(cb * x)`` with
+    ``cb = (-1)**(sum of axis indices)``.  The checkerboard is applied as a 1-D
+    sign broadcast per axis (no full 2-D kernel), which avoids the two
+    full-array roll-copies the shifts would make.  ``arr`` keeps its dtype (the
+    real sign array broadcasts without upcasting a complex array).
+    """
+    sign_dtype = arr.real.dtype
+    for ax in axes:
+        n = arr.shape[ax]
+        sign = np.ones(n, dtype=sign_dtype)
+        sign[1::2] = -1.0
+        shape = [1] * arr.ndim
+        shape[ax] = n
+        arr *= sign.reshape(shape)
+    return arr
+
+
 def ifft_uv_to_lm(
     grid_2d, fft_plane_dims=(-2, -1), num_threads=1, fft_backend="pyfftw"
 ):
@@ -466,15 +488,27 @@ def ifft_uv_to_lm(
     """
     fft = _fft_module(fft_backend)
     start = time.time()
-    n_v, n_u = grid_2d.shape[fft_plane_dims[0]], grid_2d.shape[fft_plane_dims[1]]
-    sky = fft.fftshift(
-        fft.ifft2(
-            fft.ifftshift(grid_2d, axes=fft_plane_dims),
+    even = all(grid_2d.shape[ax] % 2 == 0 for ax in fft_plane_dims)
+    if even:
+        # Fold the ifftshift/fftshift into checkerboard multiplies (lower peak
+        # memory, fewer passes): fftshift(ifft2(ifftshift(x))) == cb*ifft2(cb*x).
+        # The padded grid axes are even (next_fft_friendly_size(even=True)).
+        work = grid_2d.copy()  # own the buffer; do not mutate the caller's grid
+        _fold_shift_checkerboard(work, fft_plane_dims)
+        sky = fft.ifft2(
+            work, axes=fft_plane_dims, workers=num_threads, overwrite_x=True
+        )
+        _fold_shift_checkerboard(sky, fft_plane_dims)
+    else:
+        # Odd axis: the two shifts are not a simple checkerboard; use the rolls.
+        sky = fft.fftshift(
+            fft.ifft2(
+                fft.ifftshift(grid_2d, axes=fft_plane_dims),
+                axes=fft_plane_dims,
+                workers=num_threads,
+            ),
             axes=fft_plane_dims,
-            workers=num_threads,
-        ),
-        axes=fft_plane_dims,
-    )  # .real #* (n_u * n_v)
+        )
     logger.debug("Time for ifft_uv_to_lm: " + str(time.time() - start))
     return sky
 
@@ -521,17 +555,26 @@ def fft_lm_to_uv(
     real-valued.  If complex images are passed the imaginary component is
     silently lost.
     """
-    n_v, n_u = image.shape[fft_plane_dims[0]], image.shape[fft_plane_dims[1]]
     fft = _fft_module(fft_backend)
+    work = np.asarray(image, dtype=complex_dtype)
+    even = all(work.shape[ax] % 2 == 0 for ax in fft_plane_dims)
+    if even:
+        # Fold the shifts into checkerboard multiplies (see ifft_uv_to_lm):
+        # fftshift(fft2(ifftshift(x))) == cb * fft2(cb * x).
+        if work is image:
+            work = work.copy()  # own the buffer if asarray returned a view
+        _fold_shift_checkerboard(work, fft_plane_dims)
+        uv = fft.fft2(work, axes=fft_plane_dims, workers=num_threads, overwrite_x=True)
+        _fold_shift_checkerboard(uv, fft_plane_dims)
+        return uv
     return fft.fftshift(
         fft.fft2(
-            fft.ifftshift(np.asarray(image, dtype=complex_dtype), axes=fft_plane_dims),
+            fft.ifftshift(work, axes=fft_plane_dims),
             axes=fft_plane_dims,
             workers=num_threads,
-            # s=(300,300)
         ),
         axes=fft_plane_dims,
-    )  # / (n_u * n_v)
+    )
 
 
 def remove_padding(image, image_size):

@@ -861,11 +861,10 @@ def hogbom_clean_many_threads(
     algorithm and tie-breaking match :func:`hogbom_clean`, so the result is
     bit-identical on tie-free data; the residual and model cubes are updated in
     place. Parameters and return value match :func:`hogbom_clean`.
-    """
-    from astroviper.processing_functions.imaging.deconvolvers import (
-        hogbom_many_threads,
-    )
 
+    Threads are set from ``num_threads`` (the imaging
+    ``processing_function_threads``).
+    """
     deconvolve_params = _validate_deconvolve_params(deconvolve_params)
 
     for name, arr in (
@@ -909,22 +908,26 @@ def hogbom_clean_many_threads(
     if clean_box is None:
         clean_box = (-1, -1, -1, -1)
 
+    mask_arg = (
+        mask_cube if mask_cube is not None else np.array([], dtype=residual_cube.dtype)
+    )
+
     # Per-plane iteration control: each plane has its own iteration limit and
     # cyclethreshold (shared with the C++ path via _per_plane_iteration_controls).
     niter_cube, cyclethreshold_cube = _per_plane_iteration_controls(
         deconvolve_params, nt, nf, npol_img, residual_cube.dtype
     )
 
-    return hogbom_many_threads.clean_cube(
+    return hogbom.clean_cube_many_threads(
         residual_cube=residual_cube,
         psf_cube=psf_cube,
         model_cube=model_cube,
-        mask_cube=mask_cube,
+        mask_cube=mask_arg,
+        clean_box=clean_box,
         max_iter=niter_cube,
         gain=deconvolve_params["gain"],
         threshold=cyclethreshold_cube,
         num_threads=int(num_threads),
-        clean_box=clean_box,
     )
 
 

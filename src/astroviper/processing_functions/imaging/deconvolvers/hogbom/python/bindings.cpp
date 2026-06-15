@@ -329,7 +329,8 @@ py::dict hclean_cube_impl(
     T gain,
     py::array threshold,
     T speedup,
-    int num_threads
+    int num_threads,
+    bool many_threads
 ) {
     if (!residual_cube.dtype().is(py::dtype::of<T>())) {
         throw std::runtime_error("residual_cube has wrong dtype");
@@ -418,16 +419,29 @@ py::dict hclean_cube_impl(
     // Drop the GIL: workers do not touch Python objects.
     {
         py::gil_scoped_release release;
-        hclean::clean_cube<T>(
-            static_cast<T*>(residual_info.ptr),
-            static_cast<T*>(model_info.ptr),
-            static_cast<const T*>(psf_info.ptr),
-            domask, mask_ptr,
-            nt, nf, np_img, np_psf,
-            ny, nx,
-            xbeg, xend, ybeg, yend,
-            niter_ptr, gain, thres_ptr, speedup,
-            num_threads, iter_out.data());
+        if (many_threads) {
+            hclean::clean_cube_many_threads<T>(
+                static_cast<T*>(residual_info.ptr),
+                static_cast<T*>(model_info.ptr),
+                static_cast<const T*>(psf_info.ptr),
+                domask, mask_ptr,
+                nt, nf, np_img, np_psf,
+                ny, nx,
+                xbeg, xend, ybeg, yend,
+                niter_ptr, gain, thres_ptr, speedup,
+                num_threads, iter_out.data());
+        } else {
+            hclean::clean_cube<T>(
+                static_cast<T*>(residual_info.ptr),
+                static_cast<T*>(model_info.ptr),
+                static_cast<const T*>(psf_info.ptr),
+                domask, mask_ptr,
+                nt, nf, np_img, np_psf,
+                ny, nx,
+                xbeg, xend, ybeg, yend,
+                niter_ptr, gain, thres_ptr, speedup,
+                num_threads, iter_out.data());
+        }
     }
 
     // Assemble per-plane summary arrays. Plane ordering is C-contiguous
@@ -543,13 +557,51 @@ static py::dict clean_cube_dispatch(
             static_cast<float>(gain),
             threshold,
             static_cast<float>(speedup),
-            num_threads);
+            num_threads, /*many_threads=*/false);
     } else if (dt.is(py::dtype::of<double>())) {
         return hclean_cube_impl<double>(
             residual_cube, psf_cube, model_cube, mask_cube,
             clean_box, max_iter,
             gain, threshold, speedup,
-            num_threads);
+            num_threads, /*many_threads=*/false);
+    } else {
+        throw std::runtime_error(
+            "residual_cube must be float32 or float64");
+    }
+}
+
+/**
+ * Runtime dtype dispatcher for the many-threads (across + within plane) cube
+ * cleaner. Same arguments as clean_cube_dispatch; routes to the
+ * clean_cube_many_threads kernel.
+ */
+static py::dict clean_cube_many_threads_dispatch(
+    py::array residual_cube,
+    py::array psf_cube,
+    py::array model_cube,
+    py::array mask_cube,
+    py::tuple clean_box,
+    py::array max_iter,
+    double gain,
+    py::array threshold,
+    double speedup,
+    int num_threads
+) {
+    auto dt = residual_cube.dtype();
+    if (dt.is(py::dtype::of<float>())) {
+        return hclean_cube_impl<float>(
+            residual_cube, psf_cube, model_cube, mask_cube,
+            clean_box, max_iter,
+            static_cast<float>(gain),
+            threshold,
+            static_cast<float>(speedup),
+            num_threads, /*many_threads=*/true);
+    } else if (dt.is(py::dtype::of<double>())) {
+        return hclean_cube_impl<double>(
+            residual_cube, psf_cube, model_cube, mask_cube,
+            clean_box, max_iter,
+            gain, threshold, speedup,
+            num_threads, /*many_threads=*/true);
     } else {
         throw std::runtime_error(
             "residual_cube must be float32 or float64");
@@ -608,6 +660,29 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           "plane its own iteration limit and threshold. Returns per-plane "
           "arrays of iterations_performed, final_peak, total_flux_cleaned, "
           "and converged with shape (nt, nf, np).",
+          py::arg("residual_cube"),
+          py::arg("psf_cube"),
+          py::arg("model_cube"),
+          py::arg("mask_cube") = py::array(),
+          py::arg("clean_box") = py::make_tuple(-1, -1, -1, -1),
+          py::arg("max_iter") = py::array(),
+          py::arg("gain") = 0.1,
+          py::arg("threshold") = py::array(),
+          py::arg("speedup") = 0.0,
+          py::arg("num_threads") = 1);
+
+    // clean_cube_many_threads: same as clean_cube but the parallelism spans
+    // both the (time, frequency, polarization) planes AND the rows within each
+    // plane, so all num_threads workers stay busy even for a single-channel
+    // cube (a few planes). Identical algorithm, tie-breaking and outputs to
+    // clean_cube. num_threads is the worker count (set from
+    // processing_function_threads).
+    m.def("clean_cube_many_threads", &clean_cube_many_threads_dispatch,
+          "Hogbom CLEAN over a 5D (time, frequency, polarization, y, x) cube, "
+          "parallelized across planes AND within each plane (rows) with "
+          "std::thread, so all num_threads workers are used regardless of the "
+          "plane count. Residual and model are modified in place; same "
+          "per-plane max_iter / threshold arrays and outputs as clean_cube.",
           py::arg("residual_cube"),
           py::arg("psf_cube"),
           py::arg("model_cube"),
