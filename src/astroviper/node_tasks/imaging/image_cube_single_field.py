@@ -1,3 +1,6 @@
+from astroviper.utils.param_docs import shares_param_docs
+
+
 def _remap_deconvolve_dict_to_global_channels(combined_deconvolve_dict, data_selection):
     """Shift a chunk-local deconvolve ReturnDict onto global channel numbers.
 
@@ -33,29 +36,107 @@ def _remap_deconvolve_dict_to_global_channels(combined_deconvolve_dict, data_sel
     return remapped
 
 
-def image_cube_single_field(input_params, graph_mode=True):
+@shares_param_docs
+def image_cube_single_field(
+    image_params,
+    imaging_weights_params,
+    iteration_control_params,
+    task_coords,
+    data_selection,
+    image_store,
+    input_data_store,
+    processing_set_data_group_name="corrected",
+    deconvolver="hogbom",
+    instrument_polarization_basis="linear",
+    single_precision_image=True,
+    processing_function_threads=1,
+    fft_backend="pyfftw",
+    image_data_variables_keep=None,
+    restore=False,
+    memory_mode="in_memory",
+    task_id=0,
+    input_data=None,
+    graph_mode=True,
+):
     """Image one frequency chunk of a single-field cube and write it to disk.
 
-    Thin node task (one ``input_params`` dict in, one ``return_dict`` out):
-    pins the malloc mmap threshold, builds the empty per-chunk image, loads (or
-    receives) this chunk's visibilities, runs the science
+    Thin node task: pins the malloc mmap threshold, builds the empty per-chunk
+    image in the correlation (instrument) polarization basis, loads (or receives)
+    this chunk's visibilities, runs the science
     :func:`~astroviper.processing_functions.imaging.image_cube_single_field.image_cube_single_field`,
-    writes the result slice to the Zarr image store and returns the timing and
+    writes the result slice to the Zarr image store, and returns the timing and
     deconvolution metadata.
+
+    This function has a fully spelled-out signature so it can be called directly
+    (standalone) outside of a graph.  When driven by
+    :func:`graphviper.graph_tools.map.map`, graphviper adapts it automatically
+    (via :func:`graphviper.graph_tools.map.make_graph_node_task`), expanding the
+    single ``input_params`` dict it passes into these keyword arguments.
 
     Parameters
     ----------
-    input_params : dict
-        Parameters injected by the graph framework (``task_coords``,
-        ``data_selection``, ``task_id``, ``input_data``, ...) merged with the
-        imaging parameters set by the driver (``image_params``, ``image_store``,
-        ``image_data_variables_keep``, ``memory_mode``,
-        ``processing_set_data_group_name``, ``deconvolver``, ...).
+    image_params : dict
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor.
+    imaging_weights_params : dict
+        Weighting scheme configuration: ``weighting`` (``"natural"`` or
+        ``"briggs"``) and the Briggs ``robust`` parameter.
+    iteration_control_params : dict
+        CLEAN iteration controls: ``niter``, ``nmajor``, ``threshold``, ``gain``,
+        ``cyclefactor``, ``cycleniter``, ``minpsffraction`` and
+        ``maxpsffraction``.
+    task_coords : dict
+        Per-chunk coordinate mapping; ``task_coords["frequency"]["data"]``
+        supplies this chunk's frequency axis.
+    data_selection : dict
+        Per-chunk ``{ms_name: {dim: slice}}`` selection injected by graphviper;
+        used to load this chunk's data and to remap chunk-local channel numbers
+        to global ones.
+    image_store : str
+        Path/URL of the on-disk Zarr image cube.
+    input_data_store : str
+        Path/URL of the processing-set Zarr store to load this chunk's
+        visibilities from (used only when ``input_data`` is ``None``).
+    processing_set_data_group_name : str, optional
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
+    deconvolver : str, optional
+        Deconvolution algorithm for the minor cycle. One of ``"hogbom"`` or
+        ``"asp"``.
+    instrument_polarization_basis : str, optional
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` (``XX``/``YY``) or ``"circular"`` (``RR``/``LL``). The
+        output image is always produced in the Stokes basis.
+    single_precision_image : bool, optional
+        If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
+        images) are single precision (``complex64`` / ``float32``) and the minor
+        cycle runs in single precision; the visibilities always stay double
+        precision. If ``False`` the image-domain arrays are double precision.
+    processing_function_threads : int, optional
+        Number of threads handed to the per-processing-function (C++ / Numba /
+        FFT) kernels.
+    fft_backend : str, optional
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
+    image_data_variables_keep : list of str, optional
+        Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
+        ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+    restore : bool, optional
+        If ``True`` produce a restored image after deconvolution: the model
+        convolved with the clean beam (the Gaussian fit to the PSF) plus the
+        residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
+    memory_mode : str, optional
+        Only ``"in_memory"`` is implemented.  Default ``"in_memory"``.
+    task_id : int, optional
+        Identifier of the frequency chunk being imaged.
+    input_data : dict, optional
+        Pre-loaded data for this chunk (supplied by the data-loading layer); when
+        ``None`` (default) the data is loaded from ``input_data_store``.
     graph_mode : bool, optional
-        If ``True`` (the default) each kept variable's slice is written into the
+        If ``True`` (default) each kept variable's slice is written into the
         pre-allocated Zarr store with
-        :func:`~astroviper.utils.io.write_result_chunk_to_disk_using_zarr`.
-        If ``False`` the whole chunk image is written with ``to_zarr``.
+        :func:`~astroviper.utils.io.write_result_chunk_to_disk_using_zarr`.  If
+        ``False`` the whole chunk image is written with ``to_zarr``.
 
     Returns
     -------
@@ -75,14 +156,10 @@ def image_cube_single_field(input_params, graph_mode=True):
     import time
     import toolviper.utils.logger as logger
     from xradio.image import make_empty_sky_image
-    from toolviper.utils.memory_management import memory_setup, free_memory, get_rss_gb
+    from toolviper.utils.memory_management import get_rss_gb
     import astroviper.processing_functions as pf
 
     task_start = time.time()
-    # Pin the mmap threshold BEFORE any large allocations so they use mmap and
-    # are returned to the OS immediately on free (no heap fragmentation). Must
-    # run at the start of the task, not after, or fragmentation is already done.
-    memory_setup(131072)
 
     logger.debug(
         "Memory usage at start of image_cube_single_field_node_task: "
@@ -91,28 +168,31 @@ def image_cube_single_field(input_params, graph_mode=True):
     )
 
     assert (
-        input_params["memory_mode"] == "in_memory"
+        memory_mode == "in_memory"
     ), "Currently only memory_mode='in_memory' is implemented."
+
+    if image_data_variables_keep is None:
+        image_data_variables_keep = [
+            "sky_residual",
+            "point_spread_function",
+            "primary_beam",
+        ]
 
     # Build the empty per-chunk image in the correlation (instrument)
     # polarization basis the gridder works in. The two-feed correlation labels
     # follow ``instrument_polarization_basis`` ("linear" -> XX/YY,
     # "circular" -> RR/LL); the image is transformed to the Stokes output basis
     # (image_params["polarization_coords"]) inside the science function.
-    instrument_polarization_basis = input_params.get(
-        "instrument_polarization_basis", "linear"
-    )
     correlation_pol_coords = {
         "linear": ["XX", "YY"],
         "circular": ["RR", "LL"],
     }[instrument_polarization_basis]
-    image_params = input_params["image_params"]
     start = time.time()
     img_xds = make_empty_sky_image(
         phase_center=image_params["phase_direction"],
         image_size=image_params["image_size"],
         cell_size=image_params["cell_size"],
-        frequency_coords=input_params["task_coords"]["frequency"]["data"],
+        frequency_coords=task_coords["frequency"]["data"],
         pol_coords=correlation_pol_coords,
         time_coords=image_params["time_coords"],
         do_sky_coords=False,
@@ -120,30 +200,43 @@ def image_cube_single_field(input_params, graph_mode=True):
     T_make_empty_image = time.time() - start
 
     start = time.time()
-    if input_params.get("input_data") is not None:
+    if input_data is not None:
         # Data was pre-loaded by the data loading layer (disk-chunk granularity
         # I/O coalescing). The framework has already applied the task-level
         # sub-selection, so use the dict directly.
-        ps_xdt = input_params["input_data"]
+        ps_xdt = input_data
     else:
         from xradio.measurement_set.load_processing_set import load_processing_set
 
         ps_xdt = load_processing_set(
-            input_params["input_data_store"],
-            sel_parms=input_params["data_selection"],
-            data_group_name=input_params["processing_set_data_group_name"],
+            input_data_store,
+            sel_parms=data_selection,
+            data_group_name=processing_set_data_group_name,
             load_sub_datasets=False,
         )
     T_load = time.time() - start
 
     img_xds, timing_df, combined_deconvolve_dict = pf.imaging.image_cube_single_field(
-        input_params, ps_xdt, img_xds
+        ps_xdt,
+        img_xds,
+        image_params,
+        imaging_weights_params,
+        iteration_control_params,
+        processing_set_data_group_name=processing_set_data_group_name,
+        deconvolver=deconvolver,
+        instrument_polarization_basis=instrument_polarization_basis,
+        single_precision_image=single_precision_image,
+        processing_function_threads=processing_function_threads,
+        fft_backend=fft_backend,
+        image_data_variables_keep=image_data_variables_keep,
+        restore=restore,
+        task_id=task_id,
     )
 
     # The deconvolve dict's channels are chunk-local (0-based); remap them to
     # global channel numbers so the reduce can merge chunks correctly.
     combined_deconvolve_dict = _remap_deconvolve_dict_to_global_channels(
-        combined_deconvolve_dict, input_params["data_selection"]
+        combined_deconvolve_dict, data_selection
     )
 
     start = time.time()
@@ -151,18 +244,17 @@ def image_cube_single_field(input_params, graph_mode=True):
         from astroviper.utils.io import write_result_chunk_to_disk_using_zarr
 
         write_result_chunk_to_disk_using_zarr(
-            input_params["image_store"],
-            input_params["image_data_variables_keep"],
-            input_params["task_coords"],
+            image_store,
+            image_data_variables_keep,
+            task_coords,
             img_xds,
         )
     else:
-        img_xds.to_zarr(input_params["image_store"], consolidated=True)
+        img_xds.to_zarr(image_store, consolidated=True)
     T_write = time.time() - start
 
     img_xds = None
     ps_xdt = None
-    free_memory()
 
     logger.debug(
         "Memory usage after image_cube_single_field_node_task: "

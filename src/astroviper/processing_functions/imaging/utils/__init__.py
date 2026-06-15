@@ -24,7 +24,10 @@ from astroviper.processing_functions.imaging.utils.iteration_control import (
     format_deconvolve_dict,
     print_deconvolve_dict,
 )
-from astroviper.processing_functions.imaging.utils.timing import accumulate_timing
+from astroviper.processing_functions.imaging.utils.timing import (
+    accumulate_timing,
+    format_timing_summary,
+)
 from astroviper.processing_functions.imaging.utils.visibility import (
     drop_auto_correlations,
 )
@@ -46,5 +49,6 @@ __all__ = [
     "format_deconvolve_dict",
     "print_deconvolve_dict",
     "accumulate_timing",
+    "format_timing_summary",
     "drop_auto_correlations",
 ]

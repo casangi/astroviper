@@ -386,14 +386,22 @@ Notable parameters (see the function's NumPy docstring for the full list):
   stubs). Do not assume the others work.
 
 ### 6.2 Node task — `node_tasks/imaging/image_cube_single_field.py`
-Signature `image_cube_single_field(input_params, graph_mode=True)`:
+The node task has a **fully explicit, NumPy-documented, standalone-callable
+signature** (`image_cube_single_field(image_params, imaging_weights_params, ...,
+task_coords, data_selection, image_store, input_data_store, ..., graph_mode=True)`)
+— it does *not* take an opaque `input_params` dict. **`graphviper.graph_tools.map`
+adapts it automatically** to the single-`input_params`-dict calling convention,
+so the driver passes the explicit node task to `map(...)` directly (see
+[6.6](#66-layer-interfaces--parameter-doc-codegen)).
 1. `memory_setup(131072)` **first** (pins the malloc mmap threshold so big
    allocations are released to the OS on free — must run before any large
    allocation).
-2. Build the empty per-chunk `img_xds`.
-3. Get data: use `input_params["input_data"]` if the loading layer pre-loaded it,
-   else `load_processing_set(...)` (eager) for this chunk's `data_selection`.
-4. Call `pf.imaging.image_cube_single_field(input_params, ps_xdt, img_xds)`.
+2. Build the empty per-chunk `img_xds` (correlation pol labels derived from
+   `instrument_polarization_basis`).
+3. Get data: use `input_data` if the loading layer pre-loaded it, else
+   `load_processing_set(...)` (eager) for this chunk's `data_selection`.
+4. Call `pf.imaging.image_cube_single_field(ps_xdt, img_xds, image_params, ...)`
+   with explicit keyword arguments.
 5. Write the result slice to Zarr via
    `astroviper.utils.io.write_result_chunk_to_disk_using_zarr(...)`.
 6. `free_memory()` and return a small timing `DataFrame`.
@@ -419,6 +427,11 @@ Runs the **major/minor cycle** CLEAN loop via `IterationController`:
   `make_mask`.
 - Accumulate per-plane stats into a `ReturnDict`; check convergence; iterate.
 - A final residual cycle produces the last residual image.
+- When `restore=True` (off by default), a final `restore_image(...)` step
+  (`processing_functions/imaging/restore.py`) convolves the model with the clean
+  beam (the per-frequency Gaussian fit to the PSF, in the `residual` data group)
+  and adds the residual, writing `SKY_RESTORED`. The driver auto-adds
+  `"sky_restored"` to `image_data_variables_keep` so it is created/written.
 
 ### 6.4 Key processing functions & gridders
 > Naming convention: single-field imaging functions put the `single_field`
@@ -442,6 +455,9 @@ Runs the **major/minor cycle** CLEAN loop via `IterationController`:
 - Polarization: `image_analysis/transform_polarization_basis.py`
   (stokes ↔ linear).
 - PSF fit: `image_analysis/point_spread_function_gaussian_fit.py`.
+- Restore: `restore.py` (`restore_image`) — clean-beam-convolved model plus
+  residual (FFT convolution, clean beam built from the residual group's
+  `beam_fit_params_point_spread_function`).
 - Deconvolvers: `deconvolution.py` dispatch → `deconvolvers/hogbom` (C++),
   `deconvolvers/aspclean` (C++).
 - The standard gridder kernel exists in **two interchangeable** forms (the
@@ -487,6 +503,50 @@ gridders (`add_visibility_grid_single_field`, `add_uv_sampling_grid_single_field
 to `fft_norm_img_xds`/`ifft_norm_img_xds`, and to the PSF builder. On-disk Zarr
 dtypes follow via `create_empty_data_variables_on_disk(double_precision=not
 single_precision_image)`.
+
+### 6.6 Layer interfaces & parameter-doc codegen
+Every imaging layer (driver, node task, science processing functions) exposes a
+**fully explicit, NumPy-documented, standalone-callable** signature — none of
+them take an opaque `input_params` dict. Two pieces of infrastructure keep that
+clean:
+
+- **Explicit node tasks (auto-adapted by graphviper)** — graphviper's `map`
+  invokes each node task with a single `input_params` dict (into which it injects
+  per-node keys: `task_id`, `task_coords`, `data_selection`, `input_data`, ...).
+  A node task may instead have a **fully explicit signature**: `map` adapts it
+  automatically via `graphviper.graph_tools.map.make_graph_node_task`, which
+  returns a thin `<name>_wrap(input_params)` adapter that expands the dict into
+  the function's declared keyword arguments, **forwarding only the keys it
+  declares** (extra keys the driver/graphviper add are dropped). Legacy node
+  tasks that take a single `input_params` dict are passed through unchanged. So
+  the driver passes the explicit `node_tasks.imaging.image_cube_single_field`
+  straight to `map` — **no astroviper-side wrapper** — and the node task stays a
+  real, documented, directly-callable function. The adapter lives in
+  **graphviper**, not astroviper, so graphviper users never see this detail.
+
+- **Parameter-doc codegen (`astroviper.utils.param_docs`)** — a parameter such as
+  `image_params` is spelled out in all three layers. Its canonical description
+  lives in **one** registry,
+  `processing_functions/imaging/_param_docs.py` (`IMAGING_PARAM_DOCS`,
+  `{param_name: description}`). Functions that share these descriptions are
+  marked with `@shares_param_docs`
+  (`from astroviper.utils.param_docs import shares_param_docs`). The codegen
+  rewrites the matching `Parameters` *descriptions* in the source files —
+  preserving each function's own `name : type` line (so functions can give a
+  parameter different defaults) and every other docstring section.
+
+  **Workflow:** edit a description in `_param_docs.py`, then
+  ```bash
+  python -m astroviper.utils.param_docs sync     # rewrite the source docstrings
+  python -m astroviper.utils.param_docs check    # verify in sync (CI / pre-commit)
+  ```
+  (`python src/astroviper/utils/param_docs.py sync|check` works too — the tool is
+  standalone and needs only `libcst`, no package build.) The
+  [`imaging-param-docs` pre-commit hook](.pre-commit-config.yaml) and the
+  [`param-docs` CI workflow](.github/workflows/param-docs.yml) run `check`. After
+  running `sync`, re-run **black** and commit. To bring a **new** function into
+  the system: decorate it `@shares_param_docs`, add its file to `_target_files()`
+  in `utils/param_docs.py` (if not already listed), and run `sync`.
 
 ---
 
@@ -669,8 +729,10 @@ per-variable nodes.
 | Task | Where |
 | --- | --- |
 | New/changed imaging **workflow / parallelism** | `distributed_graphs/imaging/` |
-| New **node task** (I/O + orchestration of a chunk) | `node_tasks/imaging/` |
+| New **node task** (I/O + orchestration of a chunk) | `node_tasks/imaging/` — give it an explicit signature and pass it straight to `map` (graphviper auto-adapts it; see [6.6](#66-layer-interfaces--parameter-doc-codegen)) |
 | New **science kernel** (gridding, weighting, deconvolution, FFT, PB) | `processing_functions/imaging/` |
+| graphviper single-dict → explicit node-task adapter | **graphviper** `graph_tools/map.py` (`make_graph_node_task`, applied automatically by `map`) |
+| Shared **parameter docstring** (appears in >1 layer) | edit `processing_functions/imaging/_param_docs.py`, mark functions `@shares_param_docs`, run `python -m astroviper.utils.param_docs sync` (tool: `utils/param_docs.py`) |
 | New **C++ kernel** | a sub-package under `processing_functions/.../{gridders,deconvolvers}/` with `include/`, `src/`, `python/bindings.cpp`, and a ~3-line `CMakeLists.txt` calling `astroviper_add_pybind_module(NAME … SOURCES …)` (copy an existing module's, incl. its standalone bootstrap block); add one `add_subdirectory(...)` line to the root `CMakeLists.txt`. Shared flags come from `cmake/AstroviperPybind.cmake` — don't re-declare them. |
 | Iteration control / `ReturnDict` / timing bookkeeping | `processing_functions/imaging/utils/` |
 | Data-group helpers | `utils/data_group_tools.py` |

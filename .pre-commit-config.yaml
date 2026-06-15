@@ -49,3 +49,17 @@ repos:
     rev: 0.8.1
     hooks:
       - id: nbstripout
+
+  # Verify the shared imaging-parameter docstrings are in sync with the central
+  # registry (src/astroviper/processing_functions/imaging/_param_docs.py).
+  # Runs in the active environment (astroviper must be importable); fix drift
+  # with `python -m astroviper.utils.param_docs sync`.
+  - repo: local
+    hooks:
+      - id: imaging-param-docs
+        name: imaging parameter docstring sync check
+        entry: python -m astroviper.utils.param_docs check
+        language: system
+        pass_filenames: false
+        files: >-
+          ^src/astroviper/(distributed_graphs|node_tasks|processing_functions)/imaging/.*\.py$|^src/astroviper/utils/param_docs\.py$

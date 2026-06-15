@@ -1,6 +1,11 @@
+from astroviper.utils.param_docs import shares_param_docs
+
+
+@shares_param_docs
 def model_update_cycle_cube_single_field(
     img_xds,
-    input_params,
+    deconvolver,
+    deconvolve_params,
     is_n_iter_0,
     num_threads=1,
     image_data_group_in_name="residual",
@@ -17,10 +22,16 @@ def model_update_cycle_cube_single_field(
     img_xds : xarray.Dataset
         Image dataset holding the residual image (input data group) and the sky
         model (output data group).  Modified in place.
-    input_params : dict
-        Imaging parameters.  Reads ``"deconvolver"`` (algorithm name) and
-        ``"iteration_control_params"`` (passed through to the deconvolver,
-        including ``"threshold"`` used for the mask).
+    deconvolver : str
+        Deconvolution algorithm for the minor cycle. One of ``"hogbom"`` or
+        ``"asp"``.
+    deconvolve_params : dict
+        Per-cycle deconvolution / iteration-control parameters passed straight to
+        the deconvolver: the absolute ``threshold`` (floor) plus the adaptive
+        ``cyclethreshold``, ``gain``, ``cycleniter``, ``niter_per_plane`` and
+        ``cyclethreshold_per_plane`` ...  The absolute ``threshold`` is also used
+        to build the primary-beam mask (a chunk-independent quantity, so the mask
+        does not depend on how the cube was split across tasks).
     is_n_iter_0 : bool
         ``True`` on the very first model update.  Currently informational.
     num_threads : int, optional
@@ -53,7 +64,7 @@ def model_update_cycle_cube_single_field(
         start = time.time()
         make_mask(
             img_xds,
-            threshold=input_params["iteration_control_params"]["threshold"],
+            threshold=deconvolve_params["threshold"],
             image_data_group_in_name=image_data_group_in_name,
             image_data_group_out_name=image_data_group_in_name,
             combine_mask=False,
@@ -64,8 +75,8 @@ def model_update_cycle_cube_single_field(
     start = time.time()
     deconvolve_dict = deconvolve(
         img_xds=img_xds,
-        algorithm=input_params["deconvolver"],
-        deconvolve_params=input_params["iteration_control_params"],
+        algorithm=deconvolver,
+        deconvolve_params=deconvolve_params,
         image_data_group_in_name=image_data_group_in_name,
         image_data_group_out_name=image_data_group_out_name,
         num_threads=num_threads,

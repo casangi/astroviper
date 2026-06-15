@@ -860,16 +860,19 @@ class IterationController:
         pol: Optional[int] = None,
         chan: Optional[int] = None,
     ) -> "np.ndarray":
-        """Compute the per-plane minor-cycle threshold array.
+        """Compute the per-plane minor-cycle ``cyclethreshold`` array.
 
-        Thresholds are allowed to differ for every ``(time, chan, pol)`` plane.
-        Each plane present in ``return_dict`` gets its own cyclethreshold::
+        The adaptive cyclethreshold is allowed to differ for every
+        ``(time, chan, pol)`` plane. Each plane present in ``return_dict`` gets
+        its own value::
 
             clamp(max_psf_sidelobe * cyclefactor, minpsffraction, maxpsffraction)
                 * peak_residual,
 
-        floored at the global ``threshold``. Planes not present in
-        ``return_dict`` fall back to the global scalar cyclethreshold from
+        floored at the absolute user ``threshold``. Because each plane uses its
+        own ``peak_residual``, the result is independent of how the cube was
+        chunked across tasks. Planes not present in ``return_dict`` fall back to
+        the representative scalar cyclethreshold from
         :meth:`calculate_cycle_controls`.
 
         Parameters
@@ -882,16 +885,16 @@ class IterationController:
         Returns
         -------
         numpy.ndarray
-            ``(ntime, nchan, npol)`` array of per-plane thresholds, indexed
+            ``(ntime, nchan, npol)`` array of per-plane cyclethresholds, indexed
             ``(time, chan, pol)`` to match :attr:`niter`.
         """
         self._ensure_state(return_dict)
-        # Global cyclethreshold used as the fallback for any plane that has no
-        # entry in return_dict.
-        _, global_threshold = self.calculate_cycle_controls(
+        # Representative cyclethreshold, used only as the fallback for any plane
+        # that has no entry in return_dict.
+        _, fallback_cyclethreshold = self.calculate_cycle_controls(
             return_dict, time=time, pol=pol, chan=chan
         )
-        thresh = np.full(self.niter.shape, global_threshold, dtype=float)
+        cyclethreshold = np.full(self.niter.shape, fallback_cyclethreshold, dtype=float)
         for key, fields in return_dict.data.items():
             if not self._matches(key, time, pol, chan):
                 continue
@@ -902,8 +905,8 @@ class IterationController:
                 max(sidelobe * self.cyclefactor, self.minpsffraction),
                 self.maxpsffraction,
             )
-            thresh[idx] = max(frac * peak, self.threshold)
-        return thresh
+            cyclethreshold[idx] = max(frac * peak, self.threshold)
+        return cyclethreshold
 
     def check_convergence(
         self,
@@ -1713,11 +1716,15 @@ def get_calculate_cycle_controls(
     iteration_control_params,
     image_data_group_in_name="residual",
 ):
-    """Compute the cycle iteration limit and threshold for the next model update.
+    """Compute the cycle iteration limit and cyclethreshold for the next model update.
 
     On the first model update (``is_n_iter_0``) the controls are derived from
-    the freshly made dirty image (its peak residual); afterwards they are derived
-    from the accumulated convergence statistics in ``combined_deconvolve_dict``.
+    the freshly made dirty image (each plane's own peak residual); afterwards
+    they are derived from the accumulated convergence statistics in
+    ``combined_deconvolve_dict``.  In both cases the per-plane cyclethreshold is
+    built from each ``(time, frequency, polarization)`` plane's own peak
+    residual, so the result is independent of how the cube was chunked across
+    tasks.
 
     Parameters
     ----------
@@ -1741,35 +1748,49 @@ def get_calculate_cycle_controls(
     -------
     cycle_niter : int
         Iteration limit for the next minor cycle.
-    cyclethresh : float
-        Global cycle threshold for the next minor cycle.
-    threshold_per_plane : numpy.ndarray
-        Per-plane cycle thresholds.
+    cyclethreshold : float
+        Representative scalar cyclethreshold for the next minor cycle.
+    cyclethreshold_per_plane : numpy.ndarray
+        Per-plane cyclethresholds, indexed ``(time, frequency, polarization)``.
     """
     residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
     if is_n_iter_0:
-        peak_res = np.max(np.abs(img_xds[residual_data_group["sky"]].values))
-        temp_rd = ReturnDict()
-        temp_rd.add(
-            {
-                "peakres": peak_res,
-                "peakres_nomask": peak_res,
-                "masksum": img_xds.sizes["l"] * img_xds.sizes["m"],
-                "iter_done": 0,
-                "max_psf_sidelobe": iteration_control_params["maxpsffraction"],
-                "loop_gain": iteration_control_params["gain"],
-            },
-            time=0,
-            pol=0,
-            chan=0,
-        )
-        rd = temp_rd
+        # First model update: there is no accumulated convergence history yet,
+        # so seed a per-plane ReturnDict from the dirty image. Each
+        # (time, frequency, polarization) plane contributes its OWN peak
+        # residual, so the resulting cyclethreshold is genuinely per-plane and
+        # therefore independent of how the cube was chunked across tasks.
+        residual_abs = np.abs(img_xds[residual_data_group["sky"]].values)
+        plane_peak = residual_abs.max(axis=(-2, -1))  # (ntime, nfreq, npol)
+        ntime, nfreq, npol = plane_peak.shape
+        masksum = img_xds.sizes["l"] * img_xds.sizes["m"]
+        rd = ReturnDict()
+        for tt in range(ntime):
+            for nn in range(nfreq):
+                for pp in range(npol):
+                    peak = float(plane_peak[tt, nn, pp])
+                    rd.add(
+                        {
+                            "peakres": peak,
+                            "peakres_nomask": peak,
+                            "masksum": masksum,
+                            "iter_done": 0,
+                            "max_psf_sidelobe": iteration_control_params[
+                                "maxpsffraction"
+                            ],
+                            "loop_gain": iteration_control_params["gain"],
+                        },
+                        time=tt,
+                        pol=pp,
+                        chan=nn,
+                    )
     else:
         rd = combined_deconvolve_dict
 
-    cycle_niter, cyclethresh = controller.calculate_cycle_controls(rd)
-    # Per-plane cyclethreshold so each (time, chan, pol) plane can use its own
-    # threshold (falls back to the global value for planes without data).
-    threshold_per_plane = controller.per_plane_cycle_threshold(rd)
+    cycle_niter, cyclethreshold = controller.calculate_cycle_controls(rd)
+    # Per-plane cyclethreshold so each (time, frequency, polarization) plane is
+    # cleaned to its own threshold; chunk-independent because every plane uses
+    # its own peak residual.
+    cyclethreshold_per_plane = controller.per_plane_cycle_threshold(rd)
 
-    return cycle_niter, cyclethresh, threshold_per_plane
+    return cycle_niter, cyclethreshold, cyclethreshold_per_plane

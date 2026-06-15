@@ -5,6 +5,8 @@ build the PSF numerator: gridding the imaging weights onto the UV plane *is* the
 first step of forming the point spread function.
 """
 
+from astroviper.utils.param_docs import shares_param_docs
+
 import copy
 
 import numpy as np
@@ -385,6 +387,7 @@ def add_uv_sampling_grid_single_field(
         )
 
 
+@shares_param_docs
 def make_point_spread_function_single_field(
     ps_xdt,
     img_xds,
@@ -427,8 +430,9 @@ def make_point_spread_function_single_field(
         Image dataset to populate.  The data group ``image_data_group_out_name``
         must already exist.  Modified in place.
     image_params : dict
-        Image geometry; must contain ``"fft_padding"`` (and the usual
-        ``image_size`` / ``cell_size`` used by the gridders and FFT).
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor.
     ms_data_group_in_name : str, optional
         Measurement-set data group that supplies the weights/uvw used for the
         UV-sampling grid.  Default ``"base"``.
@@ -439,9 +443,8 @@ def make_point_spread_function_single_field(
         Image data group that the ``UV_SAMPLING`` and ``POINT_SPREAD_FUNCTION``
         variables are registered under.  Default ``"residual"``.
     image_data_variables_keep : list of str, optional
-        Logical image-variable keys to retain on disk; forwarded to
-        :func:`~astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder.ifft_norm_img_xds`.
-        Default ``[]``.
+        Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
+        ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
     gcf_oversampling : int, optional
         Oversampling of the prolate-spheroidal gridding convolution kernel.
         Default ``100``.
@@ -450,7 +453,8 @@ def make_point_spread_function_single_field(
     num_threads : int, optional
         Number of threads handed to the gridding and FFT kernels.  Default ``1``.
     fft_backend : str, optional
-        FFT backend forwarded to the inverse transform.  Default ``"pyfftw"``.
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
     complex_dtype : numpy.dtype, optional
         Complex precision of the gridded data.  Defaults to
         ``numpy.complex128``.

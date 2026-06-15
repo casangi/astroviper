@@ -36,6 +36,7 @@ imaging_data_variables_and_dims_double_precision = {
     "sky_dirty": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_DIRTY"},
     "sky_model": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_MODEL"},
     "sky_residual": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_RESIDUAL"},
+    "sky_restored": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_RESTORED"},
     "sky": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY"},
     "mask": {
         "dims": full_dims_lm,
@@ -98,6 +99,7 @@ imaging_data_variables_and_dims_single_precision = {
     "sky_dirty": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_DIRTY"},
     "sky_model": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_MODEL"},
     "sky_residual": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_RESIDUAL"},
+    "sky_restored": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_RESTORED"},
     "sky": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY"},
     "mask": {
         "dims": full_dims_lm,

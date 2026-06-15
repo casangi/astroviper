@@ -266,11 +266,6 @@ def transform_polarization_basis(
         new_polarization_basis,
         transformation_matrix,
     )
-    transform_da = xr.DataArray(
-        matrix,
-        dims=["polarization", "pol_in"],
-        coords={"polarization": out_pol_labels, "pol_in": in_pol_labels},
-    )
 
     from toolviper.utils.memory_management import memory_setup, free_memory, get_rss_gb
 
@@ -295,6 +290,24 @@ def transform_polarization_basis(
             # print("###### The type of the variable is ", var_name, img_xds[var_name].attrs.keys())
             # if not img_xds[var_name].attrs["type"] == "point_spread_function":
             original_dims = list(img_transformed_xds[var_name].dims)
+
+            # Cast the mixing matrix to the image's precision so xr.dot keeps the
+            # result in the image dtype instead of upcasting single-precision
+            # images/grids to float64 / complex128 (the matrices are declared
+            # float64 / complex128). Only the precision is matched; the matrix
+            # stays real or complex as appropriate.
+            img_dtype = img_transformed_xds[var_name].dtype
+            single = (img_dtype == np.float32) or (img_dtype == np.complex64)
+            if np.iscomplexobj(matrix):
+                matrix_dtype = np.complex64 if single else np.complex128
+            else:
+                matrix_dtype = np.float32 if single else np.float64
+            transform_da = xr.DataArray(
+                matrix.astype(matrix_dtype),
+                dims=["polarization", "pol_in"],
+                coords={"polarization": out_pol_labels, "pol_in": in_pol_labels},
+            )
+
             # Use [:] slice assignment so the transposed result is copied
             # into the DataArray's existing C-contiguous buffer. Writing
             # `.values = rhs` instead would *replace* the buffer with the

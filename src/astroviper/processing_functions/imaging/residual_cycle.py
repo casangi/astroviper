@@ -1,3 +1,4 @@
+from astroviper.utils.param_docs import shares_param_docs
 import time
 
 from astroviper.processing_functions.imaging.get_visibility_grid import (
@@ -9,8 +10,18 @@ from astroviper.utils.data_group_tools import (
 )
 
 
+@shares_param_docs
 def imaging_setup_single_field(
-    ps_xdt, img_xds, input_params, image_data_group_out_name="residual"
+    ps_xdt,
+    img_xds,
+    image_params,
+    imaging_weights_params,
+    processing_set_data_group_name="corrected",
+    single_precision_image=True,
+    processing_function_threads=1,
+    fft_backend="pyfftw",
+    image_data_variables_keep=None,
+    image_data_group_out_name="residual",
 ):
     """Perform the once-per-chunk imaging setup before the major-cycle loop.
 
@@ -30,13 +41,37 @@ def imaging_setup_single_field(
 
     Parameters
     ----------
-    ps_xdt : ProcessingSet
+    ps_xdt : xarray.DataTree
         Visibility data.  Auto-correlations are dropped in place while gridding
         the UV-sampling function.
     img_xds : xarray.Dataset
         Image dataset to populate with the PSF and primary beam.
-    input_params : dict
-        Imaging parameters (see :func:`residual_cycle_cube_single_field`).
+    image_params : dict
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor.
+    imaging_weights_params : dict
+        Weighting scheme configuration: ``weighting`` (``"natural"`` or
+        ``"briggs"``) and the Briggs ``robust`` parameter.
+    processing_set_data_group_name : str, optional
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
+    single_precision_image : bool, optional
+        If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
+        images) are single precision (``complex64`` / ``float32``) and the minor
+        cycle runs in single precision; the visibilities always stay double
+        precision. If ``False`` the image-domain arrays are double precision.
+    processing_function_threads : int, optional
+        Number of threads handed to the per-processing-function (C++ / Numba /
+        FFT) kernels.
+    fft_backend : str, optional
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
+    image_data_variables_keep : list of str, optional
+        Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
+        ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+    image_data_group_out_name : str, optional
+        Image data group that the PSF, primary beam and residual image are
+        registered under.  Default ``"residual"``.
 
     Returns
     -------
@@ -65,14 +100,17 @@ def imaging_setup_single_field(
         make_primary_beam_single_field,
     )
 
-    if input_params["single_precision_image"]:
+    if image_data_variables_keep is None:
+        image_data_variables_keep = []
+
+    if single_precision_image:
         float_dtype = np.float32
         complex_dtype = np.complex64
     else:
         float_dtype = np.float64
         complex_dtype = np.complex128
 
-    ps_data_group_name = input_params["processing_set_data_group_name"]
+    ps_data_group_name = processing_set_data_group_name
 
     # Create the residual data group up front: the PSF, the primary beam and the
     # residual image all live in it, and gridding writes into it.
@@ -90,12 +128,12 @@ def imaging_setup_single_field(
     data_group_out = calculate_imaging_weights(
         ps_xdt,
         img_xds,
-        imaging_weights_params=input_params["imaging_weights_params"],
+        imaging_weights_params=imaging_weights_params,
         return_weight_density_grid=False,
         ms_data_group_in_name=ps_data_group_name,
         ms_data_group_out_name=ps_data_group_name,
         ms_data_group_out_modified={"weight_imaging": "WEIGHT_IMAGING"},
-        num_threads=input_params["processing_function_threads"],
+        num_threads=processing_function_threads,
     )
     T_weights = time.time() - T_start_weight
 
@@ -105,13 +143,13 @@ def imaging_setup_single_field(
     img_xds, point_spread_function_return_df = make_point_spread_function_single_field(
         ps_xdt,
         img_xds,
-        input_params["image_params"],
+        image_params,
         ms_data_group_in_name=ps_data_group_name,
         image_data_group_in_name=image_data_group_out_name,
         image_data_group_out_name=image_data_group_out_name,
-        image_data_variables_keep=input_params["image_data_variables_keep"],
-        num_threads=input_params["processing_function_threads"],
-        fft_backend=input_params["fft_backend"],
+        image_data_variables_keep=image_data_variables_keep,
+        num_threads=processing_function_threads,
+        fft_backend=fft_backend,
         complex_dtype=complex_dtype,
     )
     T_make_point_spread_function = time.time() - T_start_psf
@@ -120,7 +158,7 @@ def imaging_setup_single_field(
     # of the PSF and is created before the transform to the Stokes basis.
     img_xds, primary_beam_return_df = make_primary_beam_single_field(
         img_xds,
-        input_params["image_params"],
+        image_params,
         image_data_group_in_name=image_data_group_out_name,
         image_data_group_out_name=image_data_group_out_name,
         float_dtype=float_dtype,
@@ -143,7 +181,7 @@ def imaging_setup_single_field(
             "max_sidelobe_point_spread_function": "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
         },
         overwrite=True,
-        num_threads=input_params["processing_function_threads"],
+        num_threads=processing_function_threads,
     )
     T_psf_fit = time.time() - start
 
@@ -167,11 +205,18 @@ def imaging_setup_single_field(
 
 # from memory_profiler import profile
 # @profile(precision=1)
+@shares_param_docs
 def residual_cycle_cube_single_field(
     ps_xdt,
     img_xds,
-    input_params,
+    image_params,
     is_n_iter_0,
+    processing_set_data_group_name="corrected",
+    instrument_polarization_basis="linear",
+    single_precision_image=True,
+    processing_function_threads=1,
+    fft_backend="pyfftw",
+    image_data_variables_keep=None,
     image_data_group_in_name="model",
     image_data_group_out_name="residual",
     last_residual_cycle=False,
@@ -192,11 +237,33 @@ def residual_cycle_cube_single_field(
     img_xds : xarray.Dataset
         Image dataset holding the sky model (input) and residual image (output).
         Modified in place.
-    input_params : dict
-        Imaging parameters (image params, precision, FFT backend, thread count).
+    image_params : dict
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor.
     is_n_iter_0 : bool
         ``True`` for the very first (dirty image) cycle, where there is no sky
         model to degrid yet.  ``False`` for every later cycle.
+    processing_set_data_group_name : str, optional
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
+    instrument_polarization_basis : str, optional
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` (``XX``/``YY``) or ``"circular"`` (``RR``/``LL``). The
+        output image is always produced in the Stokes basis.
+    single_precision_image : bool, optional
+        If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
+        images) are single precision (``complex64`` / ``float32``) and the minor
+        cycle runs in single precision; the visibilities always stay double
+        precision. If ``False`` the image-domain arrays are double precision.
+    processing_function_threads : int, optional
+        Number of threads handed to the per-processing-function (C++ / Numba /
+        FFT) kernels.
+    fft_backend : str, optional
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
+    image_data_variables_keep : list of str, optional
+        Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
+        ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
     image_data_group_in_name : str, optional
         Image data group holding the sky model that is degridded.  Default
         ``"model"``.
@@ -231,21 +298,25 @@ def residual_cycle_cube_single_field(
         transform_polarization_basis,
     )
 
-    if input_params["single_precision_image"]:
+    if image_data_variables_keep is None:
+        image_data_variables_keep = []
+
+    if single_precision_image:
         float_dtype = np.float32
         complex_dtype = np.complex64
     else:
         float_dtype = np.float64
         complex_dtype = np.complex128
 
-    ps_data_group_name = input_params["processing_set_data_group_name"]
+    ps_data_group_name = processing_set_data_group_name
 
     T_start_gcf = time.time()
     cgk_1D = create_prolate_spheroidal_kernel_1D(100, 7)
     T_gcf = time.time() - T_start_gcf
 
     T_transform_pol = 0.0
-    T_fft_norm = 0.0
+    T_fft_degrid = 0.0
+    T_fft_grid = 0.0
     T_degrid = 0.0
     T_residual_vis = 0.0
 
@@ -259,7 +330,7 @@ def residual_cycle_cube_single_field(
         start = time.time()
         img_xds = transform_polarization_basis(
             img_xds,
-            new_polarization_basis=input_params["instrument_polarization_basis"],
+            new_polarization_basis=instrument_polarization_basis,
             overwrite=True,
         )
         T_transform_pol += time.time() - start
@@ -267,18 +338,18 @@ def residual_cycle_cube_single_field(
         start = time.time()
         img_xds = fft_norm_img_xds(
             img_xds,
-            image_params=input_params["image_params"],
+            image_params=image_params,
             image_data_group_in_name=image_data_group_in_name,
             image_data_group_out_name=image_data_group_in_name,
             image_data_group_out_modified={
                 "visibility": "VISIBILITY_MODEL",
             },
             image_data_variables_keep=["sky"],
-            num_threads=input_params["processing_function_threads"],
-            fft_backend=input_params["fft_backend"],
+            num_threads=processing_function_threads,
+            fft_backend=fft_backend,
             complex_dtype=complex_dtype,
         )
-        T_fft_norm += time.time() - start
+        T_fft_degrid += time.time() - start
 
         start = time.time()
         make_visibility_model_single_field(
@@ -290,8 +361,8 @@ def residual_cycle_cube_single_field(
                 "correlated_data": "VISIBILITY_MODEL",
             },
             image_data_group_in_name=image_data_group_in_name,
-            num_threads=input_params["processing_function_threads"],
-            fft_padding=input_params["image_params"]["fft_padding"],
+            num_threads=processing_function_threads,
+            fft_padding=image_params["fft_padding"],
         )
         T_degrid += time.time() - start
 
@@ -315,7 +386,7 @@ def residual_cycle_cube_single_field(
         start = time.time()
         img_xds = transform_polarization_basis(
             img_xds,
-            new_polarization_basis=input_params["instrument_polarization_basis"],
+            new_polarization_basis=instrument_polarization_basis,
             overwrite=True,
         )
         T_transform_pol += time.time() - start
@@ -331,12 +402,12 @@ def residual_cycle_cube_single_field(
     img_xds, make_undeconvolved_image_return_df = make_undeconvolved_image_single_field(
         ps_xdt,
         img_xds,
-        input_params["image_params"],
+        image_params,
         cgk_1D,
         False,
         ms_data_group_in_name=ps_data_group_name,
         image_data_group_out_name=image_data_group_out_name,
-        num_threads=input_params["processing_function_threads"],
+        num_threads=processing_function_threads,
         complex_dtype=complex_dtype,
     )
     T_grid = time.time() - T_start_grid
@@ -344,18 +415,18 @@ def residual_cycle_cube_single_field(
     start = time.time()
     img_xds = ifft_norm_img_xds(
         img_xds,
-        image_params=input_params["image_params"],
+        image_params=image_params,
         image_data_group_in_name=image_data_group_out_name,
         image_data_group_out_name=image_data_group_out_name,
         image_data_group_out_modified={
             "sky": "SKY_RESIDUAL",
         },
-        image_data_variables_keep=input_params["image_data_variables_keep"],
-        num_threads=input_params["processing_function_threads"],
-        fft_backend=input_params["fft_backend"],
+        image_data_variables_keep=image_data_variables_keep,
+        num_threads=processing_function_threads,
+        fft_backend=fft_backend,
         complex_dtype=complex_dtype,
     )
-    T_fft_norm += time.time() - start
+    T_fft_grid += time.time() - start
 
     from toolviper.utils.memory_management import get_rss_gb
 
@@ -379,9 +450,10 @@ def residual_cycle_cube_single_field(
         {
             "T_gcf": [T_gcf],
             "T_degrid": [T_degrid],
+            "T_fft_degrid": [T_fft_degrid],
             "T_residual_vis": [T_residual_vis],
             "T_grid": [T_grid],
-            "T_fft_norm": [T_fft_norm],
+            "T_fft_grid": [T_fft_grid],
             "T_transform_pol": [T_transform_pol],
         }
     )

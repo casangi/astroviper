@@ -502,7 +502,7 @@ class TestDeconvolve:
         for field in (
             "iter_done",
             "niter",
-            "threshold",
+            "cyclethreshold",
             "loop_gain",
             "peakres",
             "peakres_nomask",

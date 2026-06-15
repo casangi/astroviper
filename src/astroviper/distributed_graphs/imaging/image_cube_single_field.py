@@ -8,6 +8,7 @@ import zarr
 import toolviper.utils.parameter
 
 import astroviper.node_tasks as node_tasks
+from astroviper.utils.param_docs import shares_param_docs
 
 # The toolviper parameter-check schema lives next to this module (rather than in
 # a central config/ directory) so it is easy to find; point the validator at it.
@@ -52,6 +53,7 @@ def _load_processing_set_chunk(load_params):
     )
 
 
+@shares_param_docs
 @toolviper.utils.parameter.validate(config_dir=_PARAM_CONFIG_DIR)
 def image_cube_single_field(
     ps_store: str,
@@ -86,6 +88,7 @@ def image_cube_single_field(
     vizualize_graph: bool = False,
     disk_chunk_sizes: Optional[Union[Dict[str, int], str]] = None,
     fft_backend="pyfftw",
+    restore: bool = False,
 ):  # -> Tuple[xr.Dataset, ReturnDict]:
     """
     Create a spectral cube.
@@ -95,47 +98,29 @@ def image_cube_single_field(
     ps_store : str
         String of the path and name of the processing set.
     image_store : str
-        String of the path and name of the spectral cube image that will be created.
+        Path/URL of the on-disk Zarr image cube.
     image_params : dict
-        Image parameters used to create the coordinates. Must include:
-            - ``image_size`` : array-like of int
-                Grid size as ``(x, y)``.
-            - ``cell_size`` : array-like of float
-                Angular cell size (radians).
-            - ``phase_direction`` : array-like of float
-                Image phase centre direction (radians).
-            - ``frequency_coords`` : array-like of float
-                Frequency axis (Hz).
-            - ``time_coords`` : array-like of float
-                Time axis.
-            - ``polarization_coords`` : array-like of str
-                Output (Stokes) polarization labels.
-            - ``fft_padding`` : float
-                Padding factor applied during gridding/FFT.
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor.
     imaging_weights_params : dict
-        Weighting scheme configuration. Must include:
-            - ``weighting`` : {"natural", "briggs"}
-                Type of weighting to apply.
-            - ``robust`` : float, optional
-                Briggs robust parameter (ignored if ``"natural"``).
+        Weighting scheme configuration: ``weighting`` (``"natural"`` or
+        ``"briggs"``) and the Briggs ``robust`` parameter.
     iteration_control_params : dict
-        CLEAN iteration controls: ``niter``, ``nmajor``, ``threshold``,
-        ``gain``, ``cyclefactor``, ``cycleniter``, ``minpsffraction`` and
+        CLEAN iteration controls: ``niter``, ``nmajor``, ``threshold``, ``gain``,
+        ``cyclefactor``, ``cycleniter``, ``minpsffraction`` and
         ``maxpsffraction``.
     gridder : str
         The gridder to use. Default ``"prolate_spheroidal"`` (a prolate
         spheroidal gridding convolution kernel with support 7x7 and oversampling
         of 100).
     deconvolver : str
-        The image deconvolver to use. One of ``"hogbom"`` or ``"asp"``. Default
-        ``"hogbom"``.
+        Deconvolution algorithm for the minor cycle. One of ``"hogbom"`` or
+        ``"asp"``.
     instrument_polarization_basis : str
-        Correlation (instrument) polarization basis of the input visibilities.
-        One of ``"linear"`` (feeds ``XX``/``YY``) or ``"circular"`` (feeds
-        ``RR``/``LL``). The per-chunk gridding is performed in this basis and the
-        residual cycle transforms the model image into it before degridding; the
-        output image is always produced in the Stokes basis given by
-        ``image_params["polarization_coords"]``. Default ``"linear"``.
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` (``XX``/``YY``) or ``"circular"`` (``RR``/``LL``). The
+        output image is always produced in the Stokes basis.
     scan_intents : list[str]
         The scan intents to image.
     field_name : str
@@ -143,19 +128,12 @@ def image_cube_single_field(
     compressor : numcodecs compressor
         Compressor applied to each chunk of the on-disk image.
     processing_set_data_group_name : str
-        Data group in the processing set to image (e.g. ``"base"``,
-        ``"corrected"``). Default ``"corrected"``.
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     single_precision_image : bool
-        Precision of the image-domain arrays. When ``True`` (the default) the
-        gridded visibility/uv-sampling grids and every sky/PSF/model image are
-        single precision (``complex64`` / ``float32``), and the minor-cycle
-        deconvolution therefore runs in single precision. The visibilities
-        themselves remain double precision (``complex128``) and the residual
-        visibility is computed in double precision; only the image-domain arrays
-        (and the FFTs over them) are cast to single precision after gridding,
-        which roughly halves the image-cube memory footprint and speeds up the
-        FFTs and the minor cycle. When ``False`` the image-domain arrays are
-        double precision (``complex128`` / ``float64``).
+        If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
+        images) are single precision (``complex64`` / ``float32``) and the minor
+        cycle runs in single precision; the visibilities always stay double
+        precision. If ``False`` the image-domain arrays are double precision.
     thread_info : dict, optional
         Thread information as returned by
         :func:`~astroviper.utils.data_partitioning.get_thread_info`. Queried
@@ -163,7 +141,8 @@ def image_cube_single_field(
     n_chunks : int, optional
             Number of frequency chunks to use for parallel processing. If None (default), the chunk count is auto-determined based on the image size, memory constraints, and available parallelism.
     processing_function_threads : int, optional
-            Number of threads to use for processing functions. Defaults to single-thread.
+        Number of threads handed to the per-processing-function (C++ / Numba /
+        FFT) kernels.
     overwrite : bool
         Whether to overwrite existing image. Default is False.
     memory_mode : str
@@ -194,9 +173,12 @@ def image_cube_single_field(
         auto-detected from the processing set using
         :func:`graphviper.graph_tools.coordinate_utils.get_disk_chunk_sizes`.
     fft_backend : str
-        FFT backend used by the gridder normalization (e.g. ``"pyfftw"``,
-        ``"scipy"``). Default ``"pyfftw"``.
-
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
+    restore : bool
+        If ``True`` produce a restored image after deconvolution: the model
+        convolved with the clean beam (the Gaussian fit to the PSF) plus the
+        residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
     Returns
     -------
     dict
@@ -230,6 +212,11 @@ def image_cube_single_field(
     assert (
         memory_mode == "in_memory"
     ), "Currently only in_memory is supported for memory_mode is implemented."
+
+    # When restoring, the restored sky must be created on disk and written, so
+    # ensure it is in the keep list (without mutating the caller's list).
+    if restore and "sky_restored" not in image_data_variables_keep:
+        image_data_variables_keep = list(image_data_variables_keep) + ["sky_restored"]
 
     # Create an empty image on disk with the correct coordinates and dimensions.
     start = time.time()
@@ -320,6 +307,7 @@ def image_cube_single_field(
     input_params["instrument_polarization_basis"] = instrument_polarization_basis
     input_params["single_precision_image"] = single_precision_image
     input_params["fft_backend"] = fft_backend
+    input_params["restore"] = restore
 
     from graphviper.graph_tools.coordinate_utils import (
         interpolate_data_coords_onto_parallel_coords,
@@ -354,7 +342,10 @@ def image_cube_single_field(
         k: v for k, v in image_params.items() if k != "frequency_coords"
     }
 
-    # Create Map Graph
+    # Create Map Graph. The node task has an explicit, NumPy-documented,
+    # standalone signature; graphviper's map() adapts it to the single
+    # ``input_params`` dict calling convention automatically (forwarding only the
+    # keys the node task declares), so it can be passed directly.
     start = time.time()
     viper_graph = map(
         input_data=ps_xdt,

@@ -159,36 +159,37 @@ def _validate_deconvolve_params(deconvolve_params):
 
 
 def _per_plane_iteration_controls(deconvolve_params, nt, nf, npol, threshold_dtype):
-    """Build per-plane ``niter`` and ``threshold`` cubes of shape ``(nt, nf, npol)``.
+    """Build per-plane ``niter`` and ``cyclethreshold`` cubes of shape ``(nt, nf, npol)``.
 
     Iteration control is performed independently for every
     ``(time, frequency, polarization)`` plane, so the deconvolvers are driven
-    with a per-plane iteration limit and a per-plane threshold rather than
+    with a per-plane iteration limit and a per-plane cyclethreshold rather than
     single scalars. The per-plane values are taken from
     ``deconvolve_params['niter_per_plane']`` and
-    ``deconvolve_params['threshold_per_plane']`` when present (these are
+    ``deconvolve_params['cyclethreshold_per_plane']`` when present (these are
     supplied by the :class:`IterationController`, indexed
-    ``(time, frequency=chan, polarization)``); otherwise the scalar
-    ``niter`` / ``threshold`` are broadcast across all planes for backward
-    compatibility.
+    ``(time, frequency=chan, polarization)``). Otherwise the scalar fallbacks
+    are broadcast across all planes for standalone / backward-compatible calls:
+    ``niter`` for the iteration limit, and the representative ``cyclethreshold``
+    (or, failing that, the absolute ``threshold``) for the stopping threshold.
 
     Parameters
     ----------
     deconvolve_params : dict
         Validated parameter dict. May carry ``niter_per_plane`` /
-        ``threshold_per_plane`` ``(nt, nf, npol)`` arrays.
+        ``cyclethreshold_per_plane`` ``(nt, nf, npol)`` arrays.
     nt, nf, npol : int
         Cube dimensions (time, frequency, polarization).
     threshold_dtype : numpy dtype
-        Dtype for the returned threshold cube (image dtype for Hogbom,
+        Dtype for the returned cyclethreshold cube (image dtype for Hogbom,
         ``float64`` for Asp).
 
     Returns
     -------
     niter_cube : numpy.ndarray
         ``(nt, nf, npol)`` int32 per-plane iteration limits.
-    threshold_cube : numpy.ndarray
-        ``(nt, nf, npol)`` per-plane thresholds in ``threshold_dtype``.
+    cyclethreshold_cube : numpy.ndarray
+        ``(nt, nf, npol)`` per-plane cyclethresholds in ``threshold_dtype``.
     """
     shape = (nt, nf, npol)
 
@@ -203,20 +204,24 @@ def _per_plane_iteration_controls(deconvolve_params, nt, nf, npol, threshold_dty
                 f"image plane grid {shape}"
             )
 
-    thr_pp = deconvolve_params.get("threshold_per_plane", None)
-    if thr_pp is None:
-        thr_val = deconvolve_params.get("threshold", 0.0)
-        thr_val = 0.0 if thr_val is None else float(thr_val)
-        threshold_cube = np.full(shape, thr_val, dtype=threshold_dtype)
+    cyclethreshold_pp = deconvolve_params.get("cyclethreshold_per_plane", None)
+    if cyclethreshold_pp is None:
+        scalar = deconvolve_params.get(
+            "cyclethreshold", deconvolve_params.get("threshold", 0.0)
+        )
+        scalar = 0.0 if scalar is None else float(scalar)
+        cyclethreshold_cube = np.full(shape, scalar, dtype=threshold_dtype)
     else:
-        threshold_cube = np.ascontiguousarray(thr_pp, dtype=threshold_dtype)
-        if threshold_cube.shape != shape:
+        cyclethreshold_cube = np.ascontiguousarray(
+            cyclethreshold_pp, dtype=threshold_dtype
+        )
+        if cyclethreshold_cube.shape != shape:
             raise ValueError(
-                f"threshold_per_plane shape {threshold_cube.shape} does not "
-                f"match the image plane grid {shape}"
+                f"cyclethreshold_per_plane shape {cyclethreshold_cube.shape} does "
+                f"not match the image plane grid {shape}"
             )
 
-    return niter_cube, threshold_cube
+    return niter_cube, cyclethreshold_cube
 
 
 def _plane_peak_abs_signed(arr, mask=None):
@@ -348,8 +353,10 @@ def create_deconvolution_return_dict(
         Name of the modified output data group whose ``"sky"`` key
         resolves to the post-CLEAN model variable.
     deconvolve_params : dict
-        Validated deconvolution parameter dict; ``niter``, ``threshold``,
-        and ``gain`` are recorded per plane.
+        Validated deconvolution parameter dict; ``niter`` and ``gain`` are
+        recorded per plane, along with the per-plane ``cyclethreshold`` that
+        each plane was cleaned to (from ``cyclethreshold_per_plane`` when
+        present, else the scalar ``cyclethreshold`` / ``threshold``).
     selected_calculations : dict
         Precomputed inputs for the return dict. Required keys:
 
@@ -392,6 +399,15 @@ def create_deconvolution_return_dict(
     max_psf_sidelobe = selected_calculations["max_psf_sidelobe"]
     masksum = selected_calculations["masksum"]
 
+    # Record the per-plane cyclethreshold actually used to clean each plane.
+    # When driven by the iteration controller this is the
+    # ``cyclethreshold_per_plane`` array; standalone callers fall back to the
+    # representative scalar ``cyclethreshold`` (or the absolute ``threshold``).
+    cyclethreshold_pp = deconvolve_params.get("cyclethreshold_per_plane", None)
+    cyclethreshold_scalar = deconvolve_params.get(
+        "cyclethreshold", deconvolve_params.get("threshold", None)
+    )
+
     returndict = ReturnDict()
 
     for tt in range(ntime):
@@ -402,10 +418,15 @@ def create_deconvolution_return_dict(
                 peakres = _plane_peak_abs_signed(rp, mask=mp)
                 peakres_nomask = _plane_peak_abs_signed(rp)
                 model_flux = float(model_arr[tt, nn, pp].sum())
+                cyclethreshold = (
+                    float(cyclethreshold_pp[tt, nn, pp])
+                    if cyclethreshold_pp is not None
+                    else cyclethreshold_scalar
+                )
 
                 returnvals = {
                     "niter": deconvolve_params.get("niter", None),
-                    "threshold": deconvolve_params.get("threshold", None),
+                    "cyclethreshold": cyclethreshold,
                     "iter_done": int(iters[tt, nn, pp]),
                     "loop_gain": deconvolve_params.get("gain", None),
                     "min_psf_fraction": min_psf_fraction,
@@ -788,8 +809,8 @@ def hogbom_clean(
     )
 
     # Per-plane iteration control: each (time, frequency, polarization) plane
-    # is cleaned with its own iteration limit and threshold.
-    niter_cube, threshold_cube = _per_plane_iteration_controls(
+    # is cleaned with its own iteration limit and cyclethreshold.
+    niter_cube, cyclethreshold_cube = _per_plane_iteration_controls(
         deconvolve_params, nt, nf, npol_img, residual_cube.dtype
     )
 
@@ -801,7 +822,7 @@ def hogbom_clean(
         clean_box=clean_box,
         max_iter=niter_cube,
         gain=deconvolve_params["gain"],
-        threshold=threshold_cube,
+        threshold=cyclethreshold_cube,
         num_threads=int(num_threads),
     )
 
@@ -944,20 +965,19 @@ def asp_clean(
         mask_arg = np.array([], dtype=residual_cube.dtype)
 
     # Per-plane iteration control: each (time, frequency, polarization) plane
-    # is cleaned with its own iteration limit and threshold. Asp uses a
-    # float64 threshold regardless of the image dtype.
-    niter_cube, threshold_cube = _per_plane_iteration_controls(
+    # is cleaned with its own iteration limit and cyclethreshold. Asp uses a
+    # float64 cyclethreshold regardless of the image dtype.
+    niter_cube, cyclethreshold_cube = _per_plane_iteration_controls(
         deconvolve_params, nt, nf, npol_img, np.float64
     )
 
-    # print("@@@@@@@@@@@@@@@@@@@@. ASP clean ")
     return aspclean.clean_cube(
         residual=residual_cube,
         psf=psf_cube,
         model=model_cube,
         mask=mask_arg,
         gain=deconvolve_params["gain"],
-        threshold=threshold_cube,
+        threshold=cyclethreshold_cube,
         niter=niter_cube,
         fusedthreshold=deconvolve_params.get("fusedthreshold", 0.0),
         psf_width=deconvolve_params.get("psf_width", 0.0),

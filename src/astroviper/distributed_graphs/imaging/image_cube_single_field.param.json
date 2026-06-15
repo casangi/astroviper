@@ -17,7 +17,7 @@
         "scan_intents": { "type": ["list", "str"] },
         "field_name": { "type": ["str"], "nullable": true },
         "image_data_variables_keep": { "type": ["list"], "struct type": ["str"] },
-        "compressor": {},
+        "compressor": { "nullable": true },
         "processing_set_data_group_name": { "type": ["str"] },
         "single_precision_image": { "type": "boolean" },
         "thread_info": { "type": ["dict"], "nullable": true },
@@ -34,6 +34,7 @@
         "clear_cache": { "type": "boolean" },
         "vizualize_graph": { "type": "boolean" },
         "disk_chunk_sizes": { "type": ["dict", "str"], "nullable": true },
-        "fft_backend": { "type": ["str"], "allowed": ["pyfftw", "scipy"] }
+        "fft_backend": { "type": ["str"], "allowed": ["pyfftw", "scipy"] },
+        "restore": { "type": "boolean" }
     }
 }

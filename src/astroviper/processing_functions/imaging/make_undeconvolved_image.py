@@ -1,8 +1,11 @@
 """Gridding of the (residual) visibilities into the undeconvolved image grid."""
 
+from astroviper.utils.param_docs import shares_param_docs
+
 import time
 
 
+@shares_param_docs
 def make_undeconvolved_image_single_field(
     ps_xdt,
     img_xds,
@@ -31,7 +34,9 @@ def make_undeconvolved_image_single_field(
     img_xds : xarray.Dataset
         Image dataset that the uv grid is written into.
     image_params : dict
-        Image geometry; must contain ``"fft_padding"``.
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor.
     cgk_1D : numpy.ndarray
         1-D prolate-spheroidal gridding convolution kernel.
     is_n_iter_0 : bool
