@@ -319,10 +319,13 @@ def fft_norm_img_xds(
         overwrite=overwrite,
     )
 
-    n_uv = (
-        _image_params["fft_padding"]
-        * np.array([img_xds.sizes["l"], img_xds.sizes["m"]])
-    ).astype(int)
+    from astroviper.processing_functions.imaging.utils.fft_sizing import (
+        padded_grid_size,
+    )
+
+    n_uv = padded_grid_size(
+        [img_xds.sizes["l"], img_xds.sizes["m"]], _image_params["fft_padding"]
+    )
 
     for data_variable in data_variables_to_process:
         if data_variable not in data_group_in:

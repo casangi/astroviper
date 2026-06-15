@@ -8,7 +8,7 @@
         "gridder": { "type": ["str"], "allowed": ["prolate_spheroidal"] },
         "deconvolver": {
             "type": ["str"],
-            "allowed": ["hogbom", "asp", "aspclean", "asp_clean"]
+            "allowed": ["hogbom", "hogbom_many_threads", "asp", "aspclean", "asp_clean"]
         },
         "instrument_polarization_basis": {
             "type": ["str"],

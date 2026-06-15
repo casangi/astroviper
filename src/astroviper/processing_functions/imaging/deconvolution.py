@@ -530,7 +530,13 @@ def deconvolve(
       and they are updated in place.
     """
     algorithm_l = algorithm.lower()
-    if algorithm_l not in ("hogbom", "asp", "aspclean", "asp_clean"):
+    if algorithm_l not in (
+        "hogbom",
+        "hogbom_many_threads",
+        "asp",
+        "aspclean",
+        "asp_clean",
+    ):
         raise ValueError(f"Deconvolution algorithm '{algorithm}' not recognized.")
 
     if image_data_group_out_modified is None:
@@ -647,6 +653,15 @@ def deconvolve(
 
     if algorithm_l == "hogbom":
         results = hogbom_clean(
+            residual_cube=residual_arr,
+            psf_cube=psf_arr,
+            model_cube=model_arr,
+            deconvolve_params=deconvolve_params,
+            num_threads=num_threads,
+            mask_cube=mask_arr,
+        )
+    elif algorithm_l == "hogbom_many_threads":
+        results = hogbom_clean_many_threads(
             residual_cube=residual_arr,
             psf_cube=psf_arr,
             model_cube=model_arr,
@@ -824,6 +839,92 @@ def hogbom_clean(
         gain=deconvolve_params["gain"],
         threshold=cyclethreshold_cube,
         num_threads=int(num_threads),
+    )
+
+
+def hogbom_clean_many_threads(
+    residual_cube: np.ndarray,
+    psf_cube: np.ndarray,
+    model_cube: np.ndarray,
+    deconvolve_params: Optional[dict] = None,
+    num_threads: int = 1,
+    mask_cube: Optional[np.ndarray] = None,
+):
+    """Hogbom CLEAN over a 5-D cube, threaded across AND within planes (numba).
+
+    A drop-in alternative to :func:`hogbom_clean`. The C++ ``hogbom`` deconvolver
+    parallelizes only *across* the ``(time, frequency, polarization)`` planes, so
+    for single-channel imaging (a few planes) it leaves most threads idle. This
+    version additionally parallelizes each iteration's peak search and PSF
+    subtraction *within* every plane (the parallel domain is ``plane x row``), so
+    all ``num_threads`` stay busy regardless of the plane count. The per-plane
+    algorithm and tie-breaking match :func:`hogbom_clean`, so the result is
+    bit-identical on tie-free data; the residual and model cubes are updated in
+    place. Parameters and return value match :func:`hogbom_clean`.
+    """
+    from astroviper.processing_functions.imaging.deconvolvers import (
+        hogbom_many_threads,
+    )
+
+    deconvolve_params = _validate_deconvolve_params(deconvolve_params)
+
+    for name, arr in (
+        ("residual_cube", residual_cube),
+        ("psf_cube", psf_cube),
+        ("model_cube", model_cube),
+    ):
+        if not isinstance(arr, np.ndarray) or arr.ndim != 5:
+            raise ValueError(
+                f"{name} must be a 5D numpy array with shape (nt, nf, np, ny, nx)"
+            )
+    if residual_cube.shape != model_cube.shape:
+        raise ValueError(
+            "residual_cube and model_cube must have same shape. "
+            f"Got {residual_cube.shape} and {model_cube.shape}"
+        )
+
+    nt, nf, npol_img, ny, nx = residual_cube.shape
+    nt_p, nf_p, npol_psf, ny_p, nx_p = psf_cube.shape
+    if (nt_p, nf_p, ny_p, nx_p) != (nt, nf, ny, nx):
+        raise ValueError(
+            "psf_cube must match residual_cube on (time, frequency, y, x). "
+            f"Got psf shape {psf_cube.shape} vs residual shape {residual_cube.shape}"
+        )
+    if npol_psf not in (npol_img, 1):
+        raise ValueError(
+            "psf_cube polarization axis must equal residual_cube polarization "
+            f"axis or be 1 (Stokes I broadcast). Got np_psf={npol_psf}, np_img={npol_img}"
+        )
+    if mask_cube is not None and mask_cube.shape != residual_cube.shape:
+        raise ValueError(
+            "mask_cube must have the same shape as residual_cube. "
+            f"Got {mask_cube.shape} and {residual_cube.shape}"
+        )
+
+    logger.info(
+        "Running many-threads Hogbom CLEAN on cube with num_threads=%d" % num_threads
+    )
+
+    clean_box = deconvolve_params["clean_box"]
+    if clean_box is None:
+        clean_box = (-1, -1, -1, -1)
+
+    # Per-plane iteration control: each plane has its own iteration limit and
+    # cyclethreshold (shared with the C++ path via _per_plane_iteration_controls).
+    niter_cube, cyclethreshold_cube = _per_plane_iteration_controls(
+        deconvolve_params, nt, nf, npol_img, residual_cube.dtype
+    )
+
+    return hogbom_many_threads.clean_cube(
+        residual_cube=residual_cube,
+        psf_cube=psf_cube,
+        model_cube=model_cube,
+        mask_cube=mask_cube,
+        max_iter=niter_cube,
+        gain=deconvolve_params["gain"],
+        threshold=cyclethreshold_cube,
+        num_threads=int(num_threads),
+        clean_box=clean_box,
     )
 
 

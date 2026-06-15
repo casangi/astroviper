@@ -115,8 +115,9 @@ def image_cube_single_field(
         spheroidal gridding convolution kernel with support 7x7 and oversampling
         of 100).
     deconvolver : str
-        Deconvolution algorithm for the minor cycle. One of ``"hogbom"`` or
-        ``"asp"``.
+        Deconvolution algorithm for the minor cycle. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
+        (numba, threaded across *and* within planes -- faster when there are
+        few planes, e.g. single-channel imaging) or ``"asp"``.
     instrument_polarization_basis : str
         Correlation (instrument) polarization basis the gridding is performed in:
         ``"linear"`` (``XX``/``YY``) or ``"circular"`` (``RR``/``LL``). The

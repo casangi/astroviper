@@ -286,6 +286,16 @@ def transform_polarization_basis(
             if img_xds["PRIMARY_BEAM"].attrs["method"] == "airy_disk":
                 continue
 
+        # Skip uv-domain grids (e.g. VISIBILITY_MODEL). The residual update grids
+        # and degrids in the telescope's NATIVE polarization basis while the model
+        # update works in Stokes, so a model-visibility uv grid is never the thing
+        # being basis-transformed. It also persists across major cycles (it is
+        # rebuilt by fft_norm each cycle), so it must not be deleted -- only
+        # skipped here. Transforming it would be wasteful (large complex grid,
+        # padded 1.2x) and pointless.
+        if "u" in img_xds[var_name].dims or "v" in img_xds[var_name].dims:
+            continue
+
         if ("polarization" in img_xds[var_name].dims) and ("BEAM_FIT" not in var_name):
             # print("###### The type of the variable is ", var_name, img_xds[var_name].attrs.keys())
             # if not img_xds[var_name].attrs["type"] == "point_spread_function":

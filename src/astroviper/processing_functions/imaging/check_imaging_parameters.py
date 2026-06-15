@@ -63,10 +63,14 @@ def check_grid_params(grid_params):
         params_passed = False
 
     if params_passed == True:
+        from astroviper.processing_functions.imaging.utils.fft_sizing import (
+            padded_grid_size,
+        )
+
         grid_params["image_size"] = np.array(grid_params["image_size"]).astype(int)
-        grid_params["image_size_padded"] = (
-            grid_params["fft_padding"] * grid_params["image_size"]
-        ).astype(int)
+        grid_params["image_size_padded"] = padded_grid_size(
+            grid_params["image_size"], grid_params["fft_padding"]
+        )
         grid_params["image_center"] = np.array(grid_params["image_center"])
         # grid_params['cell_size'] = arc_sec_to_rad * np.array(grid_params['cell_size'])
         # grid_params['cell_size'][0] = -grid_params['cell_size'][0]

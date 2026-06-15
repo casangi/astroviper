@@ -142,9 +142,11 @@ def get_visibility_grid_single_field(
     n_imag_pol = img_xds.sizes["polarization"]
     pol_map = (np.arange(0, n_imag_pol)).astype(int)
 
-    n_uv = (fft_padding * np.array([img_xds.sizes["l"], img_xds.sizes["m"]])).astype(
-        int
+    from astroviper.processing_functions.imaging.utils.fft_sizing import (
+        padded_grid_size,
     )
+
+    n_uv = padded_grid_size([img_xds.sizes["l"], img_xds.sizes["m"]], fft_padding)
     delta_lm = img_xds.xr_img.get_lm_cell_size()
 
     # Initialise the output visibility array on the first call; subsequent

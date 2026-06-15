@@ -23,8 +23,9 @@ def model_update_cycle_cube_single_field(
         Image dataset holding the residual image (input data group) and the sky
         model (output data group).  Modified in place.
     deconvolver : str
-        Deconvolution algorithm for the minor cycle. One of ``"hogbom"`` or
-        ``"asp"``.
+        Deconvolution algorithm for the minor cycle. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
+        (numba, threaded across *and* within planes -- faster when there are
+        few planes, e.g. single-channel imaging) or ``"asp"``.
     deconvolve_params : dict
         Per-cycle deconvolution / iteration-control parameters passed straight to
         the deconvolver: the absolute ``threshold`` (floor) plus the adaptive
