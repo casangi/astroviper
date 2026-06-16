@@ -1,11 +1,9 @@
 from astropy.coordinates import SkyCoord, EarthLocation, AltAz
-from astropy.coordinates.erfa_astrom import erfa_astrom, ErfaAstrom, ErfaAstromInterpolator
+from astropy.coordinates.erfa_astrom import erfa_astrom, ErfaAstrom,ErfaAstromInterpolator
 from astropy.time import Time
 import astropy.units as u
 
 import numpy as np
-
-import xarray
 
 _SUPPORTED = ("ICRS", "ALTAZ")
 
