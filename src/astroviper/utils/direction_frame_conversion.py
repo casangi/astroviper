@@ -1,9 +1,9 @@
 from astropy.coordinates import SkyCoord, EarthLocation, AltAz
 from astropy.coordinates.erfa_astrom import (
-                                                erfa_astrom,
-                                                ErfaAstrom,
-                                                ErfaAstromInterpolator
-                                            )
+    erfa_astrom,
+    ErfaAstrom,
+    ErfaAstromInterpolator
+)
 from astropy.time import Time
 import astropy.units as u
 
@@ -39,12 +39,13 @@ def convert_direction_frame(
     times           : astropy Time (N,)  one timestamp per sample
     location        : astropy EarthLocation
     interpolate     : if True, use ErfaAstromInterpolator for a large speedup
-                      by interpolating Earth orientation parameters on a coarser
-                      time grid instead of computing them at every sample.
+                      by interpolating Earth orientation parameters
+                      on a coarser time grid instead of every sample.
                       Precision remains at micro-arcsecond level for typical
                       time_resolution values.
     time_resolution : interpolation grid spacing in seconds (default 300 s).
-                      Smaller = more precise but slower; 300 s gives ~0.05 µas error.
+                      Smaller = more precise but slower;
+                      300 s gives ~0.05 µas error.
 
     Returns
     -------
@@ -57,12 +58,13 @@ def convert_direction_frame(
         raise ValueError("in_frame and out_frame must differ.")
 
     # Build one AltAz frame with the full time array — astropy broadcasts
-    # each (v0[i], v1[i]) against times[i] internally via ERFA, no Python loop needed.
+    # each (v0[i], v1[i]) against times[i] internally via ERFA
     altaz_frame = AltAz(location=location, obstime=times)
 
     # ErfaAstromInterpolator computes Earth orientation parameters (precession,
-    # nutation, polar motion) on a coarser time grid of `time_resolution` seconds
-    # and interpolates between those points, instead of calling ERFA at every sample.
+    # nutation, polar motion) on a coarser time grid of
+    # `time_resolution` seconds and interpolates between those points,
+    # instead of calling ERFA at every sample.
     # This gives up to ~100x speedup with micro-arcsecond precision loss.
     ctx = (
         erfa_astrom.set(ErfaAstromInterpolator(time_resolution * u.s))
@@ -71,14 +73,16 @@ def convert_direction_frame(
     )
     try:
         if fin == "ALTAZ":
-            coord = SkyCoord(az=v0*u.deg, alt=v1*u.deg, frame=altaz_frame)
+            coord = SkyCoord(az=v0 * u.deg, alt=v1 * u.deg, frame=altaz_frame)
             c = coord.icrs
             return c.ra.deg, c.dec.deg, fout
         else:
-            coord = SkyCoord(ra=v0*u.deg, dec=v1*u.deg, frame="icrs")
+            coord = SkyCoord(ra=v0 * u.deg, dec=v1 * u.deg, frame="icrs")
             c = coord.transform_to(altaz_frame)
-            # Astropy returns az in [0°, 360°) but MSv2 convention is (-180°, 180°].
-            # Normalise for consistency; remove once MSv2 compatibility is no longer needed.
+            # Astropy returns az in [0°, 360°) 
+            # but MSv2 convention is (-180°, 180°].
+            # Normalise for consistency; 
+            # remove once MSv2 compatibility is no longer needed.
             az = (c.az.deg + 180) % 360 - 180
             return az, c.alt.deg, fout
     finally:
