@@ -2,7 +2,7 @@ from astropy.coordinates import SkyCoord, EarthLocation, AltAz
 from astropy.coordinates.erfa_astrom import (
     erfa_astrom,
     ErfaAstrom,
-    ErfaAstromInterpolator
+    ErfaAstromInterpolator,
 )
 from astropy.time import Time
 import astropy.units as u
@@ -79,9 +79,9 @@ def convert_direction_frame(
         else:
             coord = SkyCoord(ra=v0 * u.deg, dec=v1 * u.deg, frame="icrs")
             c = coord.transform_to(altaz_frame)
-            # Astropy returns az in [0°, 360°) 
+            # Astropy returns az in [0°, 360°)
             # but MSv2 convention is (-180°, 180°].
-            # Normalise for consistency; 
+            # Normalise for consistency;
             # remove once MSv2 compatibility is no longer needed.
             az = (c.az.deg + 180) % 360 - 180
             return az, c.alt.deg, fout
