@@ -1,5 +1,9 @@
 from astropy.coordinates import SkyCoord, EarthLocation, AltAz
-from astropy.coordinates.erfa_astrom import erfa_astrom, ErfaAstrom,ErfaAstromInterpolator
+from astropy.coordinates.erfa_astrom import (
+                                                erfa_astrom,
+                                                ErfaAstrom,
+                                                ErfaAstromInterpolator
+                                            )
 from astropy.time import Time
 import astropy.units as u
 
@@ -60,13 +64,17 @@ def convert_direction_frame(
     # nutation, polar motion) on a coarser time grid of `time_resolution` seconds
     # and interpolates between those points, instead of calling ERFA at every sample.
     # This gives up to ~100x speedup with micro-arcsecond precision loss.
-    ctx = erfa_astrom.set(ErfaAstromInterpolator(time_resolution * u.s)) if interpolate else None
+    ctx = (
+        erfa_astrom.set(ErfaAstromInterpolator(time_resolution * u.s))
+        if interpolate
+        else None
+    )
     try:
-        if fin == "ALTAZ":                    # ALTAZ → ICRS
+        if fin == "ALTAZ":
             coord = SkyCoord(az=v0*u.deg, alt=v1*u.deg, frame=altaz_frame)
             c = coord.icrs
             return c.ra.deg, c.dec.deg, fout
-        else:                                 # ICRS → ALTAZ
+        else:
             coord = SkyCoord(ra=v0*u.deg, dec=v1*u.deg, frame="icrs")
             c = coord.transform_to(altaz_frame)
             # Astropy returns az in [0°, 360°) but MSv2 convention is (-180°, 180°].
