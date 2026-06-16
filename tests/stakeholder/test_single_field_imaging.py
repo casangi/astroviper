@@ -224,7 +224,8 @@ def _check_deconvolve_dict(deconvolve_dict, expected, rtol=1e-5, atol=1e-8):
                 ), f"plane {key} {field}: {val} != {exp_val}"
 
 
-def test_single_field_imaging_niter0(plot_saver):
+@pytest.mark.parametrize("skunk_works", [False, True])
+def test_single_field_imaging_niter0(plot_saver, skunk_works):
     dask.config.set(scheduler="synchronous")
 
     _ensure_ps_store()
@@ -233,7 +234,8 @@ def test_single_field_imaging_niter0(plot_saver):
     img_xds = xr.open_zarr("twhya_selfcal_5chans_lsrk_niter_0_nmajor_1_briggs.img.zarr")
 
     image_params = _image_params(ps_xdt)
-    image_store = "twhya_selfcal_lsrk_5chans_astroviper.img.zarr"
+    _tag = "_skunk" if skunk_works else ""
+    image_store = f"twhya_selfcal_lsrk_5chans_astroviper{_tag}.img.zarr"
 
     return_dict = image_cube_single_field(
         ps_store=PS_STORE,
@@ -273,6 +275,7 @@ def test_single_field_imaging_niter0(plot_saver):
         overwrite=True,
         disk_chunk_sizes={"frequency": 2},
         vizualize_graph=False,
+        skunk_works=skunk_works,
     )
     imaging_metadata_pd = return_dict["timing"]
     deconvolve_dict = return_dict["deconvolution"]
@@ -326,7 +329,7 @@ def test_single_field_imaging_niter0(plot_saver):
         im5 = axes[1, 2].imshow(PSF_av.values - PSF.values)
         axes[1, 2].set_title("PSF_AV - PSF_CASA")
         fig.colorbar(im5, ax=axes[1, 2])
-        plot_saver(fig, f"niter0_channel_{i_f}.png")
+        plot_saver(fig, f"niter0_channel_{i_f}{_tag}.png")
 
     # Second pass: assertions only (all plots have already been generated).
     # Even channels must match the reference more tightly than odd channels.
@@ -378,7 +381,8 @@ def test_single_field_imaging_niter0(plot_saver):
     ), "airy_disk_rorder and airy_disk_rorder_v2 produced different primary beams."
 
 
-def test_single_field_imaging_nchunks5(plot_saver):
+@pytest.mark.parametrize("skunk_works", [False, True])
+def test_single_field_imaging_nchunks5(plot_saver, skunk_works):
     dask.config.set(scheduler="synchronous")
 
     # from toolviper.dask.client import local_client
@@ -398,7 +402,8 @@ def test_single_field_imaging_nchunks5(plot_saver):
     )
 
     image_params = _image_params(ps_xdt)
-    image_store = "twhya_selfcal_5chans_lsrk_niter_99_astroviper.img.zarr"
+    _tag = "_skunk" if skunk_works else ""
+    image_store = f"twhya_selfcal_5chans_lsrk_niter_99_astroviper{_tag}.img.zarr"
     print(ps_xdt.xr_ps.summary())
     return_dict = image_cube_single_field(
         ps_store=PS_STORE,
@@ -440,6 +445,7 @@ def test_single_field_imaging_nchunks5(plot_saver):
         disk_chunk_sizes={"frequency": 1},
         vizualize_graph=False,
         write_visibility_model_to_ps=True,
+        skunk_works=skunk_works,
         fft_backend="scipy",
     )
     imaging_metadata_pd = return_dict["timing"]
@@ -730,7 +736,7 @@ def test_single_field_imaging_nchunks5(plot_saver):
         im8 = axes[2, 2].imshow(100 * (pb_av - pb_casa) / np.max(np.abs(pb_casa)))
         axes[2, 2].set_title("Percentage Difference 100%")
         fig.colorbar(im8, ax=axes[2, 2])
-        plot_saver(fig, f"niter99_channel_{i_f}.png")
+        plot_saver(fig, f"niter99_channel_{i_f}{_tag}.png")
 
         rel_diff_model = np.max(
             np.abs(model_av - model_casa) / np.max(np.abs(model_casa))
@@ -767,7 +773,8 @@ def test_single_field_imaging_nchunks5(plot_saver):
     # input("Press enter")
 
 
-def test_single_field_imaging_nchunks1(plot_saver):
+@pytest.mark.parametrize("skunk_works", [False, True])
+def test_single_field_imaging_nchunks1(plot_saver, skunk_works):
     dask.config.set(scheduler="synchronous")
 
     # from toolviper.dask.client import local_client
@@ -787,7 +794,8 @@ def test_single_field_imaging_nchunks1(plot_saver):
     )
 
     image_params = _image_params(ps_xdt)
-    image_store = "twhya_selfcal_5chans_lsrk_niter_99_astroviper.img.zarr"
+    _tag = "_skunk" if skunk_works else ""
+    image_store = f"twhya_selfcal_5chans_lsrk_niter_99_astroviper{_tag}.img.zarr"
     print(ps_xdt.xr_ps.summary())
     return_dict = image_cube_single_field(
         ps_store=PS_STORE,
@@ -829,6 +837,7 @@ def test_single_field_imaging_nchunks1(plot_saver):
         disk_chunk_sizes={"frequency": 1},
         vizualize_graph=False,
         write_visibility_model_to_ps=True,
+        skunk_works=skunk_works,
         fft_backend="scipy",
     )
     imaging_metadata_pd = return_dict["timing"]
@@ -1119,7 +1128,7 @@ def test_single_field_imaging_nchunks1(plot_saver):
         im8 = axes[2, 2].imshow(100 * (pb_av - pb_casa) / np.max(np.abs(pb_casa)))
         axes[2, 2].set_title("Percentage Difference 100%")
         fig.colorbar(im8, ax=axes[2, 2])
-        plot_saver(fig, f"niter99_channel_{i_f}.png")
+        plot_saver(fig, f"niter99_channel_{i_f}{_tag}.png")
 
         rel_diff_model = np.max(
             np.abs(model_av - model_casa) / np.max(np.abs(model_casa))
@@ -1156,7 +1165,8 @@ def test_single_field_imaging_nchunks1(plot_saver):
     # input("Press enter")
 
 
-def test_single_field_imaging_multi_cycle(plot_saver):
+@pytest.mark.parametrize("skunk_works", [False, True])
+def test_single_field_imaging_multi_cycle(plot_saver, skunk_works):
     dask.config.set(scheduler="synchronous")
 
     _ensure_ps_store()
@@ -1165,7 +1175,8 @@ def test_single_field_imaging_multi_cycle(plot_saver):
     img_xds = xr.open_zarr("twhya_selfcal_5chans_lsrk_multi_cycle_truth.img.zarr")
 
     image_params = _image_params(ps_xdt)
-    image_store = "twhya_selfcal_5chans_lsrk_multi_cycle_astroviper.img.zarr"
+    _tag = "_skunk" if skunk_works else ""
+    image_store = f"twhya_selfcal_5chans_lsrk_multi_cycle_astroviper{_tag}.img.zarr"
 
     return_dict = image_cube_single_field(
         ps_store=PS_STORE,
@@ -1207,6 +1218,7 @@ def test_single_field_imaging_multi_cycle(plot_saver):
         disk_chunk_sizes={"frequency": 5},
         vizualize_graph=False,
         write_visibility_model_to_ps=True,
+        skunk_works=skunk_works,
         fft_backend="scipy",
     )
     imaging_metadata_pd = return_dict["timing"]
@@ -1809,7 +1821,7 @@ def test_single_field_imaging_multi_cycle(plot_saver):
         im8 = axes[2, 2].imshow(100 * (pb_av - pb_casa) / np.max(np.abs(pb_casa)))
         axes[2, 2].set_title("Percentage Difference 100%")
         fig.colorbar(im8, ax=axes[2, 2])
-        plot_saver(fig, f"multi_cycle_channel_{i_f}.png")
+        plot_saver(fig, f"multi_cycle_channel_{i_f}{_tag}.png")
 
         rel_diff_model = np.max(
             np.abs(model_av - model_casa) / np.max(np.abs(model_casa))

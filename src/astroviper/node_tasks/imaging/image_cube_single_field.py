@@ -54,6 +54,8 @@ def image_cube_single_field(
     image_data_variables_keep=None,
     restore=False,
     memory_mode="in_memory",
+    skunk_works=False,
+    data_group=None,
     task_id=0,
     input_data=None,
     graph_mode=True,
@@ -128,6 +130,18 @@ def image_cube_single_field(
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
     memory_mode : str, optional
         Only ``"in_memory"`` is implemented.  Default ``"in_memory"``.
+    skunk_works : bool, optional
+        If ``True`` use the experimental performance I/O path: load only the
+        data group's data variables straight from the Zarr chunk blobs with
+        :func:`~astroviper.node_tasks.imaging.utils.load_processing_set_skunk_works`
+        (reconstructing coordinates from the inputs) and write each result chunk
+        with
+        :func:`~astroviper.node_tasks.imaging.utils.write_result_chunk_to_disk_using_zarr_skunk_works`.
+        Requires ``data_group``. Default ``False`` (production I/O).
+    data_group : dict, optional
+        Resolved role->variable mapping for ``processing_set_data_group_name``
+        (e.g. ``{"correlated_data": "VISIBILITY", "uvw": "UVW", ...}``), supplied
+        by the distributed graph; only used when ``skunk_works`` is ``True``.
     task_id : int, optional
         Identifier of the frequency chunk being imaged.
     input_data : dict, optional
@@ -206,6 +220,22 @@ def image_cube_single_field(
         # I/O coalescing). The framework has already applied the task-level
         # sub-selection, so use the dict directly.
         ps_xdt = input_data
+    elif skunk_works:
+        # Experimental performance path: read only this chunk's data-group
+        # variables straight from the Zarr chunk blobs and reconstruct the
+        # coordinates from the inputs (no datatree/coords/sub-datasets open).
+        from astroviper.node_tasks.imaging.utils import (
+            load_processing_set_skunk_works,
+        )
+
+        ps_xdt = load_processing_set_skunk_works(
+            input_data_store,
+            sel_parms=data_selection,
+            data_group=data_group,
+            processing_set_data_group_name=processing_set_data_group_name,
+            frequency_coords=task_coords["frequency"]["data"],
+            instrument_polarization_basis=instrument_polarization_basis,
+        )
     else:
         from xradio.measurement_set.load_processing_set import load_processing_set
 
@@ -241,7 +271,20 @@ def image_cube_single_field(
     )
 
     start = time.time()
-    if graph_mode:
+    if graph_mode and skunk_works:
+        # Experimental performance path: encode and write only this chunk's
+        # blob(s) directly to the pre-created Zarr image store (no open_group).
+        from astroviper.node_tasks.imaging.utils import (
+            write_result_chunk_to_disk_using_zarr_skunk_works,
+        )
+
+        write_result_chunk_to_disk_using_zarr_skunk_works(
+            image_store,
+            image_data_variables_keep,
+            task_coords,
+            img_xds,
+        )
+    elif graph_mode:
         from astroviper.utils.io import write_result_chunk_to_disk_using_zarr
 
         write_result_chunk_to_disk_using_zarr(

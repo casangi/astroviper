@@ -35,6 +35,7 @@
         "vizualize_graph": { "type": "boolean" },
         "disk_chunk_sizes": { "type": ["dict", "str"], "nullable": true },
         "fft_backend": { "type": ["str"], "allowed": ["pyfftw", "scipy"] },
-        "restore": { "type": "boolean" }
+        "restore": { "type": "boolean" },
+        "skunk_works": { "type": "boolean" }
     }
 }

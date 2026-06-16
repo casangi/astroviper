@@ -89,6 +89,7 @@ def image_cube_single_field(
     disk_chunk_sizes: Optional[Union[Dict[str, int], str]] = None,
     fft_backend="pyfftw",
     restore: bool = False,
+    skunk_works: bool = False,
 ):  # -> Tuple[xr.Dataset, ReturnDict]:
     """
     Create a spectral cube.
@@ -180,6 +181,14 @@ def image_cube_single_field(
         If ``True`` produce a restored image after deconvolution: the model
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
+    skunk_works : bool
+        If ``True`` use the experimental performance I/O path in each node task:
+        load only the data group's data variables straight from the Zarr chunk
+        blobs (reconstructing coordinates from the inputs, ignoring all
+        sub-datasets) and write each result chunk's blob directly to the
+        pre-created image store, bypassing the asyncio Zarr dataset API. The
+        processing set and image are assumed to share the same frequency
+        coordinate. Default ``False``.
     Returns
     -------
     dict
@@ -309,6 +318,7 @@ def image_cube_single_field(
     input_params["single_precision_image"] = single_precision_image
     input_params["fft_backend"] = fft_backend
     input_params["restore"] = restore
+    input_params["skunk_works"] = skunk_works
 
     from graphviper.graph_tools.coordinate_utils import (
         interpolate_data_coords_onto_parallel_coords,
@@ -318,6 +328,16 @@ def image_cube_single_field(
     start = time.time()
     ps_xdt = open_processing_set(ps_store, scan_intents=scan_intents)
     logger.info("Time to open processing set: " + str(time.time() - start) + " seconds")
+
+    # The skunk-works node-task I/O path reconstructs the processing set from the
+    # data group's variables only, so it needs the resolved role->variable
+    # mapping. Read it once here (from the first MS) and forward it to every
+    # node task rather than re-reading it per task.
+    if skunk_works:
+        first_ms = next(iter(ps_xdt.values()))
+        input_params["data_group"] = first_ms.ds.attrs["data_groups"][
+            processing_set_data_group_name
+        ]
 
     start = time.time()
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
