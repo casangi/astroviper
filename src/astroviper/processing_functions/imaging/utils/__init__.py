@@ -27,6 +27,8 @@ from astroviper.processing_functions.imaging.utils.iteration_control import (
 from astroviper.processing_functions.imaging.utils.timing import (
     accumulate_timing,
     format_timing_summary,
+    IMAGING_TIMING_PHASES,
+    IMAGING_TIMING_TOTAL_KEY,
 )
 from astroviper.processing_functions.imaging.utils.fft_sizing import (
     next_fft_friendly_size,
@@ -54,6 +56,8 @@ __all__ = [
     "print_deconvolve_dict",
     "accumulate_timing",
     "format_timing_summary",
+    "IMAGING_TIMING_PHASES",
+    "IMAGING_TIMING_TOTAL_KEY",
     "next_fft_friendly_size",
     "padded_grid_size",
     "drop_auto_correlations",
