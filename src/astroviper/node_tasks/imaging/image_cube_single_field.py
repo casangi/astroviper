@@ -319,4 +319,19 @@ def image_cube_single_field(
     timing_df["T_write"] = T_write
     timing_df["T_image_cube_task"] = time.time() - task_start
 
+    # Debug: phase-grouped timing breakdown for this chunk. The generic
+    # formatter lives in the top-level utils; the imaging phase layout
+    # parameterizes it.
+    from astroviper.utils.timing import print_timing_summary
+    from astroviper.processing_functions.imaging.utils import (
+        IMAGING_TIMING_PHASES,
+        IMAGING_TIMING_TOTAL_KEY,
+    )
+
+    print_timing_summary(
+        timing_df,
+        IMAGING_TIMING_PHASES,
+        total_key=IMAGING_TIMING_TOTAL_KEY,
+    )
+
     return {"timing": timing_df, "deconvolution": combined_deconvolve_dict}

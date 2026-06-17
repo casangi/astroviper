@@ -37,7 +37,9 @@ def accumulate_timing(timing, return_df, phase=None):
 # *leaf* timings are listed (intermediate subtotals such as
 # ``T_prep_make_point_spread_function`` and ``T_grid`` contain these leaves and
 # are therefore excluded so the leaves can be summed without double counting).
-_TIMING_PHASES = [
+# This is the ``phases`` layout consumed by
+# :func:`astroviper.utils.timing.format_timing_summary`.
+IMAGING_TIMING_PHASES = [
     (
         "PREPARATION (once per chunk)",
         "T_prep",
@@ -89,17 +91,17 @@ _TIMING_PHASES = [
     ),
 ]
 
-_TIMING_TOTAL_KEY = "T_image_cube_task"
+IMAGING_TIMING_TOTAL_KEY = "T_image_cube_task"
 
 
-def format_timing_summary(timing, total_key=_TIMING_TOTAL_KEY):
+def format_timing_summary(timing, total_key=IMAGING_TIMING_TOTAL_KEY):
     """Return a phase-grouped, human-readable summary of an imaging timing dict.
 
-    Groups the per-chunk ``T_*`` timings into the four pipeline phases
-    (preparation, residual update, model update, restore) plus node I/O, showing
-    each phase's total, its leaf sub-timings, and the time within the phase not
-    attributed to any leaf (``unaccounted``).  A trailing line reports the grand
-    total and the share of it covered by the listed phases.
+    Thin imaging-specific wrapper over the generic
+    :func:`astroviper.utils.timing.format_timing_summary`: it supplies the
+    imaging phase layout (:data:`IMAGING_TIMING_PHASES`) so the per-chunk
+    ``T_*`` timings are grouped into the four pipeline phases (preparation,
+    residual update, model update, restore) plus node I/O.
 
     Parameters
     ----------
@@ -114,50 +116,10 @@ def format_timing_summary(timing, total_key=_TIMING_TOTAL_KEY):
     str
         The formatted multi-line summary.
     """
-    # Accept either a dict or a one-row DataFrame.
-    if hasattr(timing, "columns") and hasattr(timing, "iloc"):
-        timing = {c: float(timing[c].iloc[0]) for c in timing.columns}
+    from astroviper.utils.timing import (
+        format_timing_summary as _format_timing_summary,
+    )
 
-    def get(key):
-        v = timing.get(key)
-        return None if v is None else float(v)
-
-    total = get(total_key)
-    lines = []
-    lines.append("=" * 64)
-    lines.append(" AstroVIPER timing breakdown by phase (seconds)")
-    lines.append("=" * 64)
-
-    phase_sum = 0.0
-    for title, total_k, leaves in _TIMING_PHASES:
-        present = [(lbl, k) for lbl, k in leaves if get(k) is not None]
-        phase_total = get(total_k) if total_k else None
-        leaf_total = sum(get(k) for _, k in present)
-        if phase_total is None and not present:
-            continue
-
-        header_total = phase_total if phase_total is not None else leaf_total
-        phase_sum += header_total if header_total is not None else 0.0
-        pct = (
-            f"  ({100.0 * header_total / total:.1f}%)"
-            if total and header_total is not None
-            else ""
-        )
-        lines.append("")
-        lines.append(f"{title}: {header_total:.3f}{pct}")
-        for lbl, k in present:
-            v = get(k)
-            share = f"  ({100.0 * v / header_total:.0f}%)" if header_total else ""
-            lines.append(f"    {lbl:<26}{v:>9.3f}{share}")
-        if phase_total is not None and present:
-            unacc = phase_total - leaf_total
-            lines.append(f"    {'(unaccounted)':<26}{unacc:>9.3f}")
-
-    lines.append("")
-    lines.append("-" * 64)
-    if total is not None:
-        covered = f"  ({100.0 * phase_sum / total:.1f}% of total accounted)"
-        lines.append(f" {'TOTAL (T_image_cube_task)':<26}{total:>9.3f}")
-        lines.append(f" {'sum of phases above':<26}{phase_sum:>9.3f}{covered}")
-    lines.append("=" * 64)
-    return "\n".join(lines)
+    return _format_timing_summary(
+        timing, IMAGING_TIMING_PHASES, total_key=total_key
+    )
