@@ -415,7 +415,10 @@ def load_processing_set_skunk_works(
                 os.path.join(ms_path, data_group["weight"]),
                 {"frequency": freq_sel},
             ),
-            "flag": (os.path.join(ms_path, data_group["flag"]), {"frequency": freq_sel}),
+            "flag": (
+                os.path.join(ms_path, data_group["flag"]),
+                {"frequency": freq_sel},
+            ),
         }
         for coord_name in ("baseline_antenna1_name", "baseline_antenna2_name"):
             if os.path.isdir(os.path.join(ms_path, coord_name)):
