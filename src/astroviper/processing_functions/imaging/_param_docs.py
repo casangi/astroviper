@@ -25,9 +25,11 @@ IMAGING_PARAM_DOCS = {
         '``"briggs"``) and the Briggs ``robust`` parameter.'
     ),
     "iteration_control_params": (
-        "CLEAN iteration controls: ``niter``, ``nmajor``, ``threshold``, ``gain``,\n"
-        "``cyclefactor``, ``cycleniter``, ``minpsffraction`` and\n"
-        "``maxpsffraction``."
+        "CLEAN iteration controls: ``niter``, ``nmajor``, ``threshold`` (the\n"
+        "deconvolver stopping threshold), ``primary_beam_limit`` (primary-beam\n"
+        "mask cutoff as a fraction of the peak primary beam, distinct from\n"
+        "``threshold``), ``gain``, ``cyclefactor``, ``cycleniter``,\n"
+        "``minpsffraction`` and ``maxpsffraction``."
     ),
     "processing_set_data_group_name": (
         'Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).'

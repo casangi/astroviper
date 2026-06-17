@@ -10,18 +10,18 @@ from astroviper.utils.data_group_tools import (
 
 def make_mask(
     img_xds: xr.Dataset,
-    threshold: float,
+    primary_beam_limit: float,
     image_data_group_in_name="image",
     image_data_group_out_name="image",
     image_data_group_out_modified={"mask": "MASK"},
     combine_mask=False,
     overwrite=False,
 ):
-    """Create or update a primary-beam threshold mask on an image dataset.
+    """Create or update a primary-beam limit mask on an image dataset.
 
     The mask is built from the ``primary_beam`` data variable referenced by
     the input data group: pixels whose primary-beam response meets or
-    exceeds ``threshold * peak(primary_beam)`` are marked ``True``.  The
+    exceeds ``primary_beam_limit * peak(primary_beam)`` are marked ``True``.  The
     result is stored on ``img_xds`` under the data variable named by
     ``image_data_group_out_modified["mask"]`` and the output data group is
     registered (with a UTC timestamp and description) in
@@ -38,11 +38,11 @@ def make_mask(
         existing mask data variable likewise referenced by the input data
         group.  Modified in place: the new mask variable is added (or
         overwritten) and ``attrs["data_groups"]`` is updated.
-    threshold : float
+    primary_beam_limit : float
         Primary-beam cutoff expressed as a fraction of the peak primary-beam
         value.  Pixels with
-        ``primary_beam >= threshold * nanmax(primary_beam)`` fall inside the
-        mask.
+        ``primary_beam >= primary_beam_limit * nanmax(primary_beam)`` fall
+        inside the mask.
     image_data_group_in_name : str, optional
         Key in ``img_xds.attrs["data_groups"]`` identifying the data group
         whose ``primary_beam`` (and, if combining, ``mask``) entries drive
@@ -57,7 +57,7 @@ def make_mask(
         ``{"mask": "MASK"}``: the ``mask`` role resolves to the ``"MASK"``
         data variable on the dataset.
     combine_mask : bool, optional
-        If ``True``, combine (logical OR) the new threshold mask with the
+        If ``True``, combine (logical OR) the new primary-beam mask with the
         existing mask referenced by the input data group's ``mask`` role.
         Requires ``overwrite=True`` because the mask data variable is being
         modified in place.  Default ``False``.
@@ -115,13 +115,13 @@ def make_mask(
             img_xds[image_data_group_in["primary_beam"]]
             .where(
                 img_xds[image_data_group_in["primary_beam"]]
-                >= threshold
+                >= primary_beam_limit
                 * np.nanmax(img_xds[image_data_group_in["primary_beam"]].values),
                 False,
             )
             .astype(bool),
         )
-        description = f"Mask created with threshold {threshold}."
+        description = f"Mask created with primary_beam_limit {primary_beam_limit}."
     else:
         # Build the threshold mask from scratch: keep primary-beam values
         # that meet the cutoff and replace the rest with False, then cast
@@ -130,13 +130,13 @@ def make_mask(
             img_xds[image_data_group_in["primary_beam"]]
             .where(
                 img_xds[image_data_group_in["primary_beam"]]
-                >= threshold
+                >= primary_beam_limit
                 * np.nanmax(img_xds[image_data_group_in["primary_beam"]].values),
                 False,
             )
             .astype(bool)
         )
-        description = f"Updated mask with threshold {threshold}."
+        description = f"Updated mask with primary_beam_limit {primary_beam_limit}."
 
     # Register the output data group on img_xds.attrs["data_groups"] and
     # append a UTC timestamp + the description above as an audit-trail

@@ -1,13 +1,30 @@
 """Stakeholder tests for single-field imaging.
 
 These tests run ``image_cube_single_field`` and compare the astroviper output
-against pre-computed CASA reference images that live alongside this file.
-They must therefore be run from this directory so the relative ``*.zarr``
-paths resolve.
+against pre-computed astroviper *truth* images that live alongside this file.
+Each base test exists in several variants that differ only in knobs which must
+*not* change the result (the processing-function thread count and, for the
+multi-cycle test, the number of compute chunks); every variant must therefore
+reproduce its truth image to within ``TRUTH_RTOL``.
+
+The truth images are themselves astroviper output: a single canonical
+reference per base test, regenerated at double precision,
+``processing_function_threads=1``, ``n_chunks=1`` and ``skunk_works=False``
+(see ``_regenerate_truth_images``). The old CASA reference images are no longer
+used.
+
+The tests must be run from this directory so the relative ``*.zarr`` paths
+resolve.
 
 Run with pytest::
 
     conda run -n zinc pytest test_single_field_imaging.py
+
+Regenerate the truth images -- then upload the resulting ``*.img.zarr``
+directories to Google Drive and paste their file ids into
+``_TRUTH_IMAGE_DRIVE_IDS`` -- with::
+
+    conda run -n zinc python test_single_field_imaging.py
 
 Set ``SAVE_PLOTS=1`` to write the per-channel comparison plots to disk
 (directory controlled by ``PLOT_DIR``, default ``plots``)::
@@ -45,12 +62,165 @@ PS_STORE = "twhya_selfcal_lsrk_5chans.ps.zarr"
 # Google Drive file id for the zipped input processing set (``PS_STORE``).
 _PS_STORE_DRIVE_ID = "11rMeV1uWiFNL8hrLU3pozSTBjkCDfl_4"
 
-# Google Drive file IDs for the zipped CASA reference (truth) images. Each is a
-# zipped ``.img.zarr`` directory.
+# Astroviper truth (reference) images. niter0 and niter100 each have a single
+# double-precision truth; multi_cycle has both a double- and a single-precision
+# truth because its deep CLEAN is precision-sensitive. All are regenerated at
+# processing_function_threads=1, n_chunks=1, skunk_works=False (see
+# ``_regenerate_truth_images``); double-precision variants compare against the
+# double truth, single-precision variants against the single truth.
+TRUTH_IMAGE_NITER0 = "twhya_selfcal_5chans_lsrk_niter0_truth.img.zarr"
+TRUTH_IMAGE_NITER100 = "twhya_selfcal_5chans_lsrk_niter100_truth.img.zarr"
+TRUTH_IMAGE_MULTI_CYCLE_DOUBLE = (
+    "twhya_selfcal_5chans_lsrk_multi_cycle_double_truth.img.zarr"
+)
+TRUTH_IMAGE_MULTI_CYCLE_SINGLE = (
+    "twhya_selfcal_5chans_lsrk_multi_cycle_single_truth.img.zarr"
+)
+
+# Google Drive file IDs for the zipped truth images above. Each is a zipped
+# ``.img.zarr`` directory. Regenerate the images locally with
+# ``python test_single_field_imaging.py``, upload them to Google Drive and
+# paste the resulting file ids here. (Until then, a locally regenerated copy is
+# used directly -- the download is a no-op when the directory already exists.)
 _TRUTH_IMAGE_DRIVE_IDS = {
-    "twhya_selfcal_5chans_lsrk_multi_cycle_truth.img.zarr": "1lvMKzqgEcH6kRJjx-2U3MxA_Aj6uWPt_",
-    "twhya_selfcal_5chans_lsrk_niter_0_nmajor_1_briggs.img.zarr": "12QF0hbfVcgY_Mo8jKRQC0FaAG3Q4pf8_",
-    "twhya_selfcal_5chans_lsrk_niter_99_nmajor_1_briggs.img.zarr": "1SqTUd6V3pMRm07LM2dP2seawHb2jUFH_",
+    TRUTH_IMAGE_NITER0: "REPLACE_WITH_DRIVE_ID_AFTER_UPLOAD",
+    TRUTH_IMAGE_NITER100: "REPLACE_WITH_DRIVE_ID_AFTER_UPLOAD",
+    TRUTH_IMAGE_MULTI_CYCLE_DOUBLE: "REPLACE_WITH_DRIVE_ID_AFTER_UPLOAD",
+    TRUTH_IMAGE_MULTI_CYCLE_SINGLE: "REPLACE_WITH_DRIVE_ID_AFTER_UPLOAD",
+}
+
+# Default (tight) per-channel relative-difference ceiling. Double-precision
+# variants reproduce their truth to ~1e-13 (PRIMARY_BEAM ~5e-10 at n_chunks=5),
+# so 1e-6 is a real regression guard with comfortable margin. The multi-threaded
+# single-precision multi_cycle variant carries a much looser per-variant
+# tolerance: at threshold=0.001 the deep CLEAN reaches the peak-selection
+# bifurcation, where a float32 thread-ordering difference flips one channel onto
+# an alternate-but-valid solution (~9%), so that variant is bounded at 0.15.
+TRUTH_RTOL = 1e-6
+
+# Ceiling for the direct double-vs-single multi_cycle comparison
+# (test_single_field_imaging_multi_cycle_double_vs_single). float32 vs float64
+# differ by up to ~10% on the channel where the deep CLEAN tips a peak-selection
+# bifurcation, so this is deliberately loose -- it bounds the precision spread
+# while still catching a gross regression.
+MULTI_CYCLE_DOUBLE_VS_SINGLE_RTOL = 0.15
+
+# Ceiling for the worst-case multi_cycle cross-config comparison
+# (test_single_field_imaging_multi_cycle_worst_case): double / 1 thread /
+# n_chunks=5 vs single / 12 threads / n_chunks=1, so precision, thread count and
+# chunking all differ at once. Still dominated by the float32 peak-selection
+# bifurcation (~10% on one channel), so it shares the same loose ceiling.
+MULTI_CYCLE_WORST_CASE_RTOL = 0.15
+
+# Imaging weighting is identical for every base test.
+IMAGING_WEIGHTS_PARAMS = {
+    "weighting": "briggs",
+    "robust": 0.5,
+    "casa_weighting_implementation": True,
+}
+
+# Per-base-test imaging configuration. Everything fixed for a base test lives
+# here; the per-variant knobs (``processing_function_threads``, ``n_chunks`` and
+# ``single_precision_image``) are supplied by each test. ``skunk_works`` is
+# always False and the truth images are generated from these configs at double
+# precision, threads=1, n_chunks=1.
+_CONFIGS = {
+    "niter0": {
+        "iteration_control_params": {
+            "niter": 0,
+            "nmajor": 0,
+            "threshold": 0.0,
+            "gain": 0.1,
+            "cyclefactor": 1.5,
+            "cycleniter": 1,
+            "minpsffraction": 0.05,
+            "maxpsffraction": 0.8,
+        },
+        "image_data_variables_keep": [
+            "sky_residual",
+            "point_spread_function",
+            "primary_beam",
+            "beam_fit_params_point_spread_function",
+            "visibility_normalization",
+            "uv_sampling_normalization",
+        ],
+        "single_precision_image": False,
+        "disk_chunk_sizes": {"frequency": 2},
+        "extra_kwargs": {},
+        "compare_variables": ["SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"],
+    },
+    "niter100": {
+        "iteration_control_params": {
+            "niter": 100,
+            "nmajor": 0,
+            "threshold": 0.001,
+            "primary_beam_limit": 0.2,
+            "gain": 0.1,
+            "cyclefactor": 1.5,
+            "cycleniter": 1,
+            "minpsffraction": 0.05,
+            "maxpsffraction": 0.2,
+        },
+        "image_data_variables_keep": [
+            "sky_residual",
+            "point_spread_function",
+            "primary_beam",
+            "beam_fit_params_point_spread_function",
+            "sky_model",
+            "mask",
+            "sky_restored",
+        ],
+        "single_precision_image": False,
+        "disk_chunk_sizes": {"frequency": 1},
+        "extra_kwargs": {
+            "write_visibility_model_to_ps": True,
+            "fft_backend": "scipy",
+            "restore": True,
+        },
+        "compare_variables": [
+            "SKY_MODEL",
+            "SKY_RESIDUAL",
+            "PRIMARY_BEAM",
+            "SKY_RESTORED",
+            "MASK",
+        ],
+    },
+    "multi_cycle": {
+        "iteration_control_params": {
+            "niter": 10000,
+            "nmajor": 4,
+            "threshold": 0.001,
+            "primary_beam_limit": 0.2,
+            "gain": 0.1,
+            "cyclefactor": 1.5,
+            "cycleniter": 1,
+            "minpsffraction": 0.05,
+            "maxpsffraction": 0.8,
+        },
+        "image_data_variables_keep": [
+            "sky_residual",
+            "point_spread_function",
+            "primary_beam",
+            "beam_fit_params_point_spread_function",
+            "sky_model",
+            "mask",
+            "sky_restored",
+        ],
+        "single_precision_image": False,
+        "disk_chunk_sizes": {"frequency": 5},
+        "extra_kwargs": {
+            "write_visibility_model_to_ps": True,
+            "fft_backend": "scipy",
+            "restore": True,
+        },
+        "compare_variables": [
+            "SKY_MODEL",
+            "SKY_RESIDUAL",
+            "PRIMARY_BEAM",
+            "SKY_RESTORED",
+            "MASK",
+        ],
+    },
 }
 
 
@@ -71,8 +241,8 @@ def _import_gdown():
 def _download_zarr(zarr_name, file_id):
     """Download and extract one zipped ``.zarr`` directory from Google Drive.
 
-    Used for both the input processing set (``PS_STORE``) and the CASA
-    reference (truth) images. The archives are uploaded as zipped ``.zarr``
+    Used for both the input processing set (``PS_STORE``) and the astroviper
+    truth images. The archives are uploaded as zipped ``.zarr``
     directories, but may arrive *double-zipped* (a ``.zip`` whose only member is
     another ``.zip``). This helper extracts into a scratch directory, recursively
     unpacks any nested ``.zip`` it finds, locates the ``<zarr_name>`` directory
@@ -124,10 +294,9 @@ def _ensure_ps_store():
     _download_zarr(PS_STORE, _PS_STORE_DRIVE_ID)
 
 
-def _ensure_truth_images():
-    """Ensure every reference (truth) image is present, downloading if absent."""
-    for zarr_name, file_id in _TRUTH_IMAGE_DRIVE_IDS.items():
-        _download_zarr(zarr_name, file_id)
+def _ensure_truth_image(zarr_name):
+    """Ensure one astroviper truth image is present, downloading if absent."""
+    _download_zarr(zarr_name, _TRUTH_IMAGE_DRIVE_IDS[zarr_name])
 
 
 def make_plot_saver():
@@ -224,121 +393,212 @@ def _check_deconvolve_dict(deconvolve_dict, expected, rtol=1e-5, atol=1e-8):
                 ), f"plane {key} {field}: {val} != {exp_val}"
 
 
-@pytest.mark.parametrize("skunk_works", [False, True])
-def test_single_field_imaging_niter0(plot_saver, skunk_works):
+def _run_image_cube(
+    kind,
+    image_store,
+    *,
+    processing_function_threads,
+    n_chunks,
+    single_precision_image=None,
+):
+    """Run ``image_cube_single_field`` for one base test ``kind`` and variant.
+
+    Returns ``(return_dict, img_av_xds, image_params)``. ``skunk_works`` is
+    always False; the per-variant knobs are ``processing_function_threads``,
+    ``n_chunks`` and optionally ``single_precision_image`` (which overrides the
+    config value when not None). Everything else comes from ``_CONFIGS[kind]``,
+    so the truth images (generated from the same configs at double precision,
+    threads=1, n_chunks=1) and every variant share an identical imaging setup.
+    """
     dask.config.set(scheduler="synchronous")
-
-    _ensure_ps_store()
-    _ensure_truth_images()
+    config = _CONFIGS[kind]
+    if single_precision_image is None:
+        single_precision_image = config["single_precision_image"]
     ps_xdt = open_processing_set(PS_STORE)
-    img_xds = xr.open_zarr("twhya_selfcal_5chans_lsrk_niter_0_nmajor_1_briggs.img.zarr")
-
     image_params = _image_params(ps_xdt)
-    _tag = "_skunk" if skunk_works else ""
-    image_store = f"twhya_selfcal_lsrk_5chans_astroviper{_tag}.img.zarr"
-
     return_dict = image_cube_single_field(
         ps_store=PS_STORE,
         image_store=image_store,
         image_params=image_params,
-        imaging_weights_params={
-            "weighting": "briggs",
-            "robust": 0.5,
-            "casa_weighting_implementation": True,
-        },
-        iteration_control_params={
-            "niter": 0,
-            "nmajor": 0,
-            "threshold": 0.0,
-            "gain": 0.1,
-            "cyclefactor": 1.5,
-            "cycleniter": 1,
-            "minpsffraction": 0.05,
-            "maxpsffraction": 0.8,
-        },
+        imaging_weights_params=IMAGING_WEIGHTS_PARAMS,
+        iteration_control_params=config["iteration_control_params"],
         gridder="prolate_spheroidal",
         deconvolver="hogbom_many_threads",
         scan_intents="OBSERVE_TARGET#ON_SOURCE",
-        image_data_variables_keep=[
-            "sky_residual",
-            "point_spread_function",
-            "primary_beam",
-            "beam_fit_params_point_spread_function",
-            "visibility_normalization",
-            "uv_sampling_normalization",
-        ],
+        image_data_variables_keep=config["image_data_variables_keep"],
         processing_set_data_group_name="base",
-        single_precision_image=False,
+        single_precision_image=single_precision_image,
         thread_info=None,
-        processing_function_threads=12,
-        n_chunks=None,
+        processing_function_threads=processing_function_threads,
+        n_chunks=n_chunks,
         overwrite=True,
-        disk_chunk_sizes={"frequency": 2},
+        disk_chunk_sizes=config["disk_chunk_sizes"],
         vizualize_graph=False,
-        skunk_works=skunk_works,
+        skunk_works=False,
+        **config["extra_kwargs"],
     )
-    imaging_metadata_pd = return_dict["timing"]
-    deconvolve_dict = return_dict["deconvolution"]
     img_av_xds = xr.open_zarr(image_store)
-    print("&&&&&&&&&" * 10)
-    print("imaging_metadata_pd", imaging_metadata_pd)
-    print("deconvolve_dict (global channel numbering):")
-    print_deconvolve_dict(deconvolve_dict)
+    return return_dict, img_av_xds, image_params
 
-    # First pass: generate every channel's comparison plot and record the
-    # relative differences. Assertions are deferred to a second pass below so
-    # that a failure on one channel cannot prevent the remaining plots from
-    # being saved.
-    polarization = 0
-    channel_rel_diffs = []
-    for i_f in range(5):
-        I = img_xds.isel(frequency=i_f, polarization=polarization, time=0)[
-            "SKY_DECONVOLVED"
-        ]
-        PSF = img_xds.isel(frequency=i_f, polarization=polarization, time=0)[
-            "POINT_SPREAD_FUNCTION"
-        ]
-        I_av = img_av_xds.isel(frequency=i_f, polarization=polarization, time=0)[
-            "SKY_RESIDUAL"
-        ]
-        PSF_av = img_av_xds.isel(frequency=i_f, polarization=polarization, time=0)[
-            "POINT_SPREAD_FUNCTION"
-        ]
 
-        rel_diff = np.max(np.abs(I_av.values - I.values) / np.max(np.abs(I.values)))
-        channel_rel_diffs.append(rel_diff)
-        print(f"Channel {i_f} relative difference: {rel_diff}")
+def _compare_to_truth(
+    img_av_xds,
+    truth_xds,
+    variables,
+    *,
+    plot_saver,
+    plot_prefix,
+    polarization=0,
+    tol=TRUTH_RTOL,
+):
+    """Compare ``variables`` of ``img_av_xds`` against ``truth_xds`` per channel.
 
-        fig, axes = plt.subplots(2, 3, figsize=(12, 8))
-        fig.suptitle(f"Channel {i_f} Frequency: {I_av.frequency.values}")
-        im0 = axes[0, 0].imshow(I_av.values)
-        axes[0, 0].set_title("I_AV")
-        fig.colorbar(im0, ax=axes[0, 0])
-        im1 = axes[0, 1].imshow(I.values)
-        axes[0, 1].set_title("I_CASA")
-        fig.colorbar(im1, ax=axes[0, 1])
-        im2 = axes[0, 2].imshow(I_av.values - I.values)
-        axes[0, 2].set_title("I_AV - I_CASA")
-        fig.colorbar(im2, ax=axes[0, 2])
-        im3 = axes[1, 0].imshow(PSF_av.values)
-        axes[1, 0].set_title("PSF_AV")
-        fig.colorbar(im3, ax=axes[1, 0])
-        im4 = axes[1, 1].imshow(PSF.values)
-        axes[1, 1].set_title("PSF_CASA")
-        fig.colorbar(im4, ax=axes[1, 1])
-        im5 = axes[1, 2].imshow(PSF_av.values - PSF.values)
-        axes[1, 2].set_title("PSF_AV - PSF_CASA")
-        fig.colorbar(im5, ax=axes[1, 2])
-        plot_saver(fig, f"niter0_channel_{i_f}{_tag}.png")
+    For every frequency channel and every variable a 3-panel (AV / TRUTH /
+    normalized difference) comparison plot is generated -- as both a full-image
+    figure and a central-50x50 zoom saved separately -- with the peak relative
+    difference ``max|av - truth| / max|truth|`` annotated under the difference
+    panel. A summary figure plots that peak relative difference against frequency
+    for Stokes I and Q. Assertions (on ``polarization``) are deferred to a final
+    pass so a single failing channel cannot prevent the remaining plots from
+    being saved. Every relative difference must be < ``tol``.
+    """
+    n_freq = img_av_xds.sizes["frequency"]
+    n_pol = img_av_xds.sizes["polarization"]
+    pol_labels = [str(p) for p in np.atleast_1d(img_av_xds.polarization.values)]
+    # Central 50x50 region of the 250x250 image, for the zoomed comparison plot.
+    central = (slice(100, 150), slice(100, 150))
 
-    # Second pass: assertions only (all plots have already been generated).
-    # Even channels must match the reference more tightly than odd channels.
-    for i_f, rel_diff in enumerate(channel_rel_diffs):
-        tol = 1e-4 if i_f % 2 == 0 else 1e-3
-        assert rel_diff < tol, (
-            f"Channel {i_f}: relative difference {rel_diff} exceeds tolerance "
-            f"{tol}. You broke something!"
+    def _plane(xds, var, i_f, pol):
+        # Cast to float so boolean variables (e.g. MASK, stored as bool) can be
+        # differenced and imshow'd like the floating-point images.
+        return np.asarray(
+            xds[var].isel(frequency=i_f, polarization=pol, time=0).values,
+            dtype=float,
         )
+
+    def _rel_diff(av, truth):
+        denom = np.max(np.abs(truth))
+        return np.max(np.abs(av - truth)) / denom if denom else np.max(np.abs(av - truth))
+
+    def _channel_figure(i_f, zoom):
+        # constrained_layout keeps the suptitle snug against the panels and stops
+        # adjacent column titles/colorbars from overlapping.
+        fig, axes = plt.subplots(
+            len(variables),
+            3,
+            figsize=(12, 4 * len(variables)),
+            squeeze=False,
+            constrained_layout=True,
+        )
+        freq = float(img_av_xds.frequency.values[i_f])
+        ztag = "  (central 50x50)" if zoom else ""
+        fig.suptitle(
+            f"{plot_prefix}  channel {i_f}  Stokes {pol_labels[polarization]}  "
+            f"frequency {freq:.6g}{ztag}"
+        )
+        sl = central if zoom else (slice(None), slice(None))
+        diffs = {}
+        for row, var in enumerate(variables):
+            av = _plane(img_av_xds, var, i_f, polarization)
+            truth = _plane(truth_xds, var, i_f, polarization)
+            denom = np.max(np.abs(truth))
+            rel = np.max(np.abs(av - truth)) / denom if denom else np.max(np.abs(av - truth))
+            diffs[var] = rel
+            norm_diff = (av - truth) / denom if denom else (av - truth)
+
+            im0 = axes[row, 0].imshow(av[sl])
+            axes[row, 0].set_title("AV")
+            axes[row, 0].set_ylabel(var)  # variable name on the left, not the title
+            fig.colorbar(im0, ax=axes[row, 0])
+            im1 = axes[row, 1].imshow(truth[sl])
+            axes[row, 1].set_title("TRUTH")
+            fig.colorbar(im1, ax=axes[row, 1])
+            im2 = axes[row, 2].imshow(norm_diff[sl])
+            axes[row, 2].set_title("(AV - TRUTH) / max|TRUTH|")
+            axes[row, 2].set_xlabel(f"peak rel diff: {rel:.3e}")
+            fig.colorbar(im2, ax=axes[row, 2])
+        return fig, diffs
+
+    # Per-channel comparison figures: full image plus a central-50x50 zoom.
+    per_channel_diffs = []
+    for i_f in range(n_freq):
+        fig_full, channel_diffs = _channel_figure(i_f, zoom=False)
+        plot_saver(fig_full, f"{plot_prefix}_channel_{i_f}.png")
+        fig_zoom, _ = _channel_figure(i_f, zoom=True)
+        plot_saver(fig_zoom, f"{plot_prefix}_channel_{i_f}_zoom.png")
+        per_channel_diffs.append(channel_diffs)
+        for var, rel_diff in channel_diffs.items():
+            print(f"{plot_prefix} channel {i_f} {var} relative difference: {rel_diff}")
+
+    # Summary: peak relative difference as a function of frequency, Stokes I & Q.
+    freqs = np.asarray(img_av_xds.frequency.values, dtype=float)
+    fig, axes = plt.subplots(
+        len(variables),
+        1,
+        figsize=(8, 2.6 * len(variables)),
+        squeeze=False,
+        constrained_layout=True,
+    )
+    fig.suptitle(f"{plot_prefix}  peak relative difference vs frequency")
+    for row, var in enumerate(variables):
+        ax = axes[row, 0]
+        for pol in range(n_pol):
+            series = np.array(
+                [
+                    _rel_diff(
+                        _plane(img_av_xds, var, i_f, pol),
+                        _plane(truth_xds, var, i_f, pol),
+                    )
+                    for i_f in range(n_freq)
+                ]
+            )
+            label = pol_labels[pol] if pol < len(pol_labels) else str(pol)
+            # Floor exact zeros so they stay visible on the log axis.
+            ax.plot(freqs, np.maximum(series, 1e-16), marker="o", label=f"Stokes {label}")
+        ax.set_ylabel(var)
+        ax.set_yscale("log")
+        ax.legend(loc="best", fontsize=8)
+    axes[-1, 0].set_xlabel("frequency (Hz)")
+    plot_saver(fig, f"{plot_prefix}_reldiff_vs_freq.png")
+
+    # Final pass: assertions only (all plots have already been generated).
+    for i_f, channel_diffs in enumerate(per_channel_diffs):
+        for var, rel_diff in channel_diffs.items():
+            assert rel_diff < tol, (
+                f"{plot_prefix} channel {i_f}: {var} relative difference "
+                f"{rel_diff} exceeds tolerance {tol}. You broke something!"
+            )
+
+
+@pytest.mark.parametrize("processing_function_threads", [1, 12])
+def test_single_field_imaging_niter0(plot_saver, processing_function_threads):
+    _ensure_ps_store()
+    _ensure_truth_image(TRUTH_IMAGE_NITER0)
+
+    image_store = (
+        "twhya_selfcal_5chans_lsrk_niter0_astroviper_"
+        f"t{processing_function_threads}.img.zarr"
+    )
+    return_dict, img_av_xds, image_params = _run_image_cube(
+        "niter0",
+        image_store,
+        processing_function_threads=processing_function_threads,
+        n_chunks=5,
+    )
+    truth_xds = xr.open_zarr(TRUTH_IMAGE_NITER0)
+
+    print("&&&&&&&&&" * 10)
+    print("imaging_metadata_pd", return_dict["timing"])
+    print("deconvolve_dict (global channel numbering):")
+    print_deconvolve_dict(return_dict["deconvolution"])
+
+    _compare_to_truth(
+        img_av_xds,
+        truth_xds,
+        _CONFIGS["niter0"]["compare_variables"],
+        plot_saver=plot_saver,
+        plot_prefix=f"niter0_t{processing_function_threads}",
+    )
 
     psf_ref = [
         [
@@ -365,14 +625,14 @@ def test_single_field_imaging_niter0(plot_saver, skunk_works):
 
     # Select the first (only) dish diameter and add a leading time axis.
     PB_v2 = airy_disk_rorder_v2(
-        img_xds.frequency.values,
-        img_xds.polarization.values,
+        img_av_xds.frequency.values,
+        img_av_xds.polarization.values,
         pb_parms,
         image_params,
     )[0, ...][None, ...]
     PB_v1 = airy_disk_rorder(
-        img_xds.frequency.values,
-        img_xds.polarization.values,
+        img_av_xds.frequency.values,
+        img_av_xds.polarization.values,
         pb_parms,
         image_params,
     )[0, ...][None, ...]
@@ -381,1502 +641,874 @@ def test_single_field_imaging_niter0(plot_saver, skunk_works):
     ), "airy_disk_rorder and airy_disk_rorder_v2 produced different primary beams."
 
 
-@pytest.mark.parametrize("skunk_works", [False, True])
-def test_single_field_imaging_nchunks5(plot_saver, skunk_works):
-    dask.config.set(scheduler="synchronous")
-
-    # from toolviper.dask.client import local_client
-
-    # viper_client = local_client(cores=4, memory_limit="4GB")
-
-    # from dask.distributed import Client
-
-    # viper_client = Client(n_workers=2, threads_per_worker=2, memory_limit="4GB")
-    # input("Press enter")
-
+@pytest.mark.parametrize("processing_function_threads", [1, 12])
+def test_single_field_imaging_niter100(plot_saver, processing_function_threads):
     _ensure_ps_store()
-    _ensure_truth_images()
-    ps_xdt = open_processing_set(PS_STORE)
-    img_xds = xr.open_zarr(
-        "twhya_selfcal_5chans_lsrk_niter_99_nmajor_1_briggs.img.zarr"
-    )
+    _ensure_truth_image(TRUTH_IMAGE_NITER100)
 
-    image_params = _image_params(ps_xdt)
-    _tag = "_skunk" if skunk_works else ""
-    image_store = f"twhya_selfcal_5chans_lsrk_niter_99_astroviper{_tag}.img.zarr"
-    print(ps_xdt.xr_ps.summary())
-    return_dict = image_cube_single_field(
-        ps_store=PS_STORE,
-        image_store=image_store,
-        image_params=image_params,
-        imaging_weights_params={
-            "weighting": "briggs",
-            "robust": 0.5,
-            "casa_weighting_implementation": True,
-        },
-        iteration_control_params={
-            "niter": 100,
-            "nmajor": 0,
-            "threshold": 0.0,
-            "gain": 0.1,
-            "cyclefactor": 1.5,
-            "cycleniter": 1,
-            "minpsffraction": 0.05,
-            "maxpsffraction": 0.2,
-        },
-        gridder="prolate_spheroidal",
-        deconvolver="hogbom_many_threads",
-        # deconvolver="asp",
-        scan_intents="OBSERVE_TARGET#ON_SOURCE",
-        image_data_variables_keep=[
-            "sky_residual",
-            "point_spread_function",
-            "primary_beam",
-            "beam_fit_params_point_spread_function",
-            "sky_model",
-            "mask",
-        ],
-        processing_set_data_group_name="base",
-        single_precision_image=True,
-        thread_info=None,
-        processing_function_threads=12,
+    image_store = (
+        "twhya_selfcal_5chans_lsrk_niter100_astroviper_"
+        f"t{processing_function_threads}.img.zarr"
+    )
+    return_dict, img_av_xds, _ = _run_image_cube(
+        "niter100",
+        image_store,
+        processing_function_threads=processing_function_threads,
         n_chunks=5,
-        overwrite=True,
-        disk_chunk_sizes={"frequency": 1},
-        vizualize_graph=False,
-        write_visibility_model_to_ps=True,
-        skunk_works=skunk_works,
-        fft_backend="scipy",
     )
-    imaging_metadata_pd = return_dict["timing"]
-    deconvolve_dict = return_dict["deconvolution"]
-    img_av_xds = xr.open_zarr(image_store)
+    truth_xds = xr.open_zarr(TRUTH_IMAGE_NITER100)
+
     print("&&&&&&&&&" * 10)
     print("imaging_metadata_pd:")
-    print(imaging_metadata_pd.to_string())
+    print(return_dict["timing"].to_string())
     print("deconvolve_dict (global channel numbering):")
-    print_deconvolve_dict(deconvolve_dict)
-
-    # Per-plane deconvolution statistics for this niter=100, nmajor=0 run (one
-    # major cycle, stopped on the iteration limit -> stop_code (1, 0)).
-    expected_deconvolve_dict = {
-        (0, 0, 0): {
-            "niter": 100,
-            "cyclethreshold": 0.07150154113769532,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.3445475399494171,
-            "stop_code": (1, 0),
-            "stokes": "I",
-            "frequency": 372762580492.5155,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [0.9266055226325989],
-            "start_peakres": [0.35750770568847656],
-            "start_peakres_nomask": [0.35750770568847656],
-            "peakres": [0.09062789380550385],
-            "peakres_nomask": [0.09062789380550385],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-        (0, 1, 0): {
-            "niter": 100,
-            "cyclethreshold": 0.02411012947559357,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.3445475697517395,
-            "stop_code": (1, 0),
-            "stokes": "Q",
-            "frequency": 372762580492.5155,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [0.060093339532613754],
-            "start_peakres": [0.12055064737796783],
-            "start_peakres_nomask": [0.12055064737796783],
-            "peakres": [-0.07445588707923889],
-            "peakres_nomask": [-0.07445588707923889],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-        (0, 0, 1): {
-            "niter": 100,
-            "cyclethreshold": 0.06702150106430053,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.34453392028808594,
-            "stop_code": (1, 0),
-            "stokes": "I",
-            "frequency": 372763190875.0631,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [0.8096180558204651],
-            "start_peakres": [0.3351075053215027],
-            "start_peakres_nomask": [0.3351075053215027],
-            "peakres": [0.09003297239542007],
-            "peakres_nomask": [0.09003297239542007],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-        (0, 1, 1): {
-            "niter": 100,
-            "cyclethreshold": 0.023650634288787845,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.34453392028808594,
-            "stop_code": (1, 0),
-            "stokes": "Q",
-            "frequency": 372763190875.0631,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [0.06434216350317001],
-            "start_peakres": [-0.11825317144393921],
-            "start_peakres_nomask": [-0.11825317144393921],
-            "peakres": [-0.07756861299276352],
-            "peakres_nomask": [-0.07756861299276352],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-        (0, 0, 2): {
-            "niter": 100,
-            "cyclethreshold": 0.06760407090187073,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.34448081254959106,
-            "stop_code": (1, 0),
-            "stokes": "I",
-            "frequency": 372763801257.61084,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [0.9100114107131958],
-            "start_peakres": [0.33802035450935364],
-            "start_peakres_nomask": [0.33802035450935364],
-            "peakres": [0.08979489654302597],
-            "peakres_nomask": [0.08979489654302597],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-        (0, 1, 2): {
-            "niter": 100,
-            "cyclethreshold": 0.026022839546203616,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.34448081254959106,
-            "stop_code": (1, 0),
-            "stokes": "Q",
-            "frequency": 372763801257.61084,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [0.07577363401651382],
-            "start_peakres": [0.13011419773101807],
-            "start_peakres_nomask": [0.13011419773101807],
-            "peakres": [0.07658877223730087],
-            "peakres_nomask": [0.07658877223730087],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-        (0, 0, 3): {
-            "niter": 100,
-            "cyclethreshold": 0.06500307321548462,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.3444790840148926,
-            "stop_code": (1, 0),
-            "stokes": "I",
-            "frequency": 372764411640.15845,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [0.7685136795043945],
-            "start_peakres": [0.3250153660774231],
-            "start_peakres_nomask": [0.3250153660774231],
-            "peakres": [0.09214764833450317],
-            "peakres_nomask": [0.09214764833450317],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-        (0, 1, 3): {
-            "niter": 100,
-            "cyclethreshold": 0.026551687717437746,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.3444790840148926,
-            "stop_code": (1, 0),
-            "stokes": "Q",
-            "frequency": 372764411640.15845,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [0.05189017206430435],
-            "start_peakres": [0.13275843858718872],
-            "start_peakres_nomask": [0.13275843858718872],
-            "peakres": [-0.07897554337978363],
-            "peakres_nomask": [-0.07897554337978363],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-        (0, 0, 4): {
-            "niter": 100,
-            "cyclethreshold": 0.07066916227340699,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.3444778323173523,
-            "stop_code": (1, 0),
-            "stokes": "I",
-            "frequency": 372765022022.7062,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [0.6859082579612732],
-            "start_peakres": [0.3533458113670349],
-            "start_peakres_nomask": [0.3533458113670349],
-            "peakres": [0.0892675369977951],
-            "peakres_nomask": [0.0892675369977951],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-        (0, 1, 4): {
-            "niter": 100,
-            "cyclethreshold": 0.022110094130039216,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.3444778323173523,
-            "stop_code": (1, 0),
-            "stokes": "Q",
-            "frequency": 372765022022.7062,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [-0.11857172846794128],
-            "start_peakres": [0.11055047065019608],
-            "start_peakres_nomask": [0.11055047065019608],
-            "peakres": [0.07679460197687149],
-            "peakres_nomask": [0.07679460197687149],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-    }
-    _check_deconvolve_dict(deconvolve_dict, expected_deconvolve_dict)
-
-    polarization = 0
-    region = dict(
-        polarization=polarization, time=0, l=slice(100, 150), m=slice(100, 150)
+    print_deconvolve_dict(return_dict["deconvolution"])
+    _check_deconvolve_dict(
+        return_dict["deconvolution"], EXPECTED_DECONVOLVE_DICT_NITER100
     )
-    I_av = img_av_xds.isel(**region)
-    I = img_xds.isel(**region)
 
-    # Expected upper bound on the per-channel relative difference vs CASA.
-    # Exceeding the maximum is a regression; dropping below the minimum is an
-    # (informational) improvement and is reported but not treated as a failure.
-    max_per_dif_model = [2.1e-05, 0.001, 8.0e-06, 0.0022, 0.0013]
-    min_per_dif_model = [2.0e-05, 0.0009, 7.6e-06, 0.0021, 0.0012]
-    max_per_dif_residual = [9.00e-05, 0.0331, 0.000122, 0.001684, 0.001123]
-    min_per_dif_residual = [8.946e-05, 0.033, 0.000121, 0.001682, 0.001122]
-
-    # First pass: generate every channel's comparison plot and record the
-    # relative differences. Assertions are deferred to a second pass below so
-    # that a failure on one channel cannot prevent the remaining plots from
-    # being saved.
-    channel_rel_diffs = []
-    for i_f in range(5):
-        model_av = I_av["SKY_MODEL"].isel(frequency=i_f).values
-        model_casa = I["SKY_MODEL"].isel(frequency=i_f).values
-        residual_av = I_av["SKY_RESIDUAL"].isel(frequency=i_f).values
-        residual_casa = I["SKY_RESIDUAL"].isel(frequency=i_f).values
-        pb_av = I_av["PRIMARY_BEAM"].isel(frequency=i_f).values
-        pb_casa = I["PRIMARY_BEAM"].isel(frequency=i_f).values
-
-        fig, axes = plt.subplots(3, 3, figsize=(16, 14))
-        fig.suptitle(f"Channel {i_f} Frequency: {I_av.frequency.values[i_f]}")
-        im0 = axes[0, 0].imshow(model_av)
-        axes[0, 0].set_title("MODEL_AV")
-        fig.colorbar(im0, ax=axes[0, 0])
-        im1 = axes[0, 1].imshow(model_casa)
-        axes[0, 1].set_title("MODEL_CASA")
-        fig.colorbar(im1, ax=axes[0, 1])
-        im2 = axes[0, 2].imshow(
-            100 * (model_av - model_casa) / np.max(np.abs(model_casa))
-        )
-        axes[0, 2].set_title("Percentage Difference 100%")
-        fig.colorbar(im2, ax=axes[0, 2])
-
-        im3 = axes[1, 0].imshow(residual_av)
-        axes[1, 0].set_title("RESIDUAL_AV")
-        fig.colorbar(im3, ax=axes[1, 0])
-        im4 = axes[1, 1].imshow(residual_casa)
-        axes[1, 1].set_title("RESIDUAL_CASA")
-        fig.colorbar(im4, ax=axes[1, 1])
-        im5 = axes[1, 2].imshow(
-            100 * (residual_av - residual_casa) / np.max(np.abs(residual_casa))
-        )
-        axes[1, 2].set_title("Percentage Difference 100%")
-        fig.colorbar(im5, ax=axes[1, 2])
-
-        im6 = axes[2, 0].imshow(pb_av)
-        axes[2, 0].set_title("PB_AV")
-        fig.colorbar(im6, ax=axes[2, 0])
-        im7 = axes[2, 1].imshow(pb_casa)
-        axes[2, 1].set_title("PB_CASA")
-        fig.colorbar(im7, ax=axes[2, 1])
-        im8 = axes[2, 2].imshow(100 * (pb_av - pb_casa) / np.max(np.abs(pb_casa)))
-        axes[2, 2].set_title("Percentage Difference 100%")
-        fig.colorbar(im8, ax=axes[2, 2])
-        plot_saver(fig, f"niter99_channel_{i_f}{_tag}.png")
-
-        rel_diff_model = np.max(
-            np.abs(model_av - model_casa) / np.max(np.abs(model_casa))
-        )
-        rel_diff_residual = np.max(
-            np.abs(residual_av - residual_casa) / np.max(np.abs(residual_casa))
-        )
-        channel_rel_diffs.append((rel_diff_model, rel_diff_residual))
-        print(f"Channel {i_f} relative difference in SKY_MODEL: {rel_diff_model}")
-        print(f"Channel {i_f} relative difference in SKY_RESIDUAL: {rel_diff_residual}")
-
-        if rel_diff_model < min_per_dif_model[i_f]:
-            print(
-                f"Channel {i_f} SKY_MODEL improved: {rel_diff_model} is below the "
-                f"expected minimum {min_per_dif_model[i_f]}."
-            )
-        if rel_diff_residual < min_per_dif_residual[i_f]:
-            print(
-                f"Channel {i_f} SKY_RESIDUAL improved: {rel_diff_residual} is below "
-                f"the expected minimum {min_per_dif_residual[i_f]}."
-            )
-
-    # Second pass: assertions only (all plots have already been generated).
-    for i_f, (rel_diff_model, rel_diff_residual) in enumerate(channel_rel_diffs):
-        assert rel_diff_model <= max_per_dif_model[i_f], (
-            f"Channel {i_f}: SKY_MODEL relative difference {rel_diff_model} exceeds "
-            f"the maximum {max_per_dif_model[i_f]}. You broke something!"
-        )
-        assert rel_diff_residual <= max_per_dif_residual[i_f], (
-            f"Channel {i_f}: SKY_RESIDUAL relative difference {rel_diff_residual} "
-            f"exceeds the maximum {max_per_dif_residual[i_f]}. You broke something!"
-        )
-
-    # input("Press enter")
+    _compare_to_truth(
+        img_av_xds,
+        truth_xds,
+        _CONFIGS["niter100"]["compare_variables"],
+        plot_saver=plot_saver,
+        plot_prefix=f"niter100_t{processing_function_threads}",
+    )
 
 
-@pytest.mark.parametrize("skunk_works", [False, True])
-def test_single_field_imaging_nchunks1(plot_saver, skunk_works):
-    dask.config.set(scheduler="synchronous")
-
-    # from toolviper.dask.client import local_client
-
-    # viper_client = local_client(cores=4, memory_limit="4GB")
-
-    # from dask.distributed import Client
-
-    # viper_client = Client(n_workers=2, threads_per_worker=2, memory_limit="4GB")
-    # input("Press enter")
-
+@pytest.mark.parametrize(
+    "processing_function_threads, n_chunks, single_precision_image, tol, dict_kind",
+    [
+        (1, 5, False, TRUTH_RTOL, "double"),
+        (12, 5, False, TRUTH_RTOL, "double"),
+        (1, 1, False, TRUTH_RTOL, "double"),
+        (12, 1, False, TRUTH_RTOL, "double"),
+        (1, 1, True, TRUTH_RTOL, "single"),
+        (12, 1, True, 0.15, None),
+    ],
+)
+def test_single_field_imaging_multi_cycle(
+    plot_saver,
+    processing_function_threads,
+    n_chunks,
+    single_precision_image,
+    tol,
+    dict_kind,
+):
     _ensure_ps_store()
-    _ensure_truth_images()
-    ps_xdt = open_processing_set(PS_STORE)
-    img_xds = xr.open_zarr(
-        "twhya_selfcal_5chans_lsrk_niter_99_nmajor_1_briggs.img.zarr"
+    precision_tag = "single" if single_precision_image else "double"
+    truth_image = (
+        TRUTH_IMAGE_MULTI_CYCLE_SINGLE
+        if single_precision_image
+        else TRUTH_IMAGE_MULTI_CYCLE_DOUBLE
+    )
+    _ensure_truth_image(truth_image)
+
+    image_store = (
+        "twhya_selfcal_5chans_lsrk_multi_cycle_astroviper_"
+        f"t{processing_function_threads}_c{n_chunks}_{precision_tag}.img.zarr"
+    )
+    return_dict, img_av_xds, _ = _run_image_cube(
+        "multi_cycle",
+        image_store,
+        processing_function_threads=processing_function_threads,
+        n_chunks=n_chunks,
+        single_precision_image=single_precision_image,
+    )
+    truth_xds = xr.open_zarr(truth_image)
+
+    print("&&&&&&&&&" * 10)
+    print("imaging_metadata_pd:")
+    print(return_dict["timing"].to_string())
+    print("deconvolve_dict (global channel numbering):")
+    print_deconvolve_dict(return_dict["deconvolution"])
+    # The deconvolution ReturnDict is independent of threads and chunks within a
+    # precision. The float fields differ slightly between float32 and float64, so
+    # there is a separate single-precision literal. iter_done is an exact-match
+    # field; with threshold=0.2 the run stops early and single/double iter_done
+    # agree, but the multi-threaded single-precision variant skips the dict check
+    # (dict_kind is None) so a float32 thread-ordering nudge near an iteration
+    # boundary cannot make it flaky -- its image is still validated below.
+    expected_dict = {
+        "double": EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE,
+        "single": EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE_SINGLE,
+        None: None,
+    }[dict_kind]
+    if expected_dict is not None:
+        _check_deconvolve_dict(return_dict["deconvolution"], expected_dict)
+
+    _compare_to_truth(
+        img_av_xds,
+        truth_xds,
+        _CONFIGS["multi_cycle"]["compare_variables"],
+        plot_saver=plot_saver,
+        plot_prefix=(
+            f"multi_cycle_t{processing_function_threads}_c{n_chunks}_{precision_tag}"
+        ),
+        tol=tol,
     )
 
-    image_params = _image_params(ps_xdt)
-    _tag = "_skunk" if skunk_works else ""
-    image_store = f"twhya_selfcal_5chans_lsrk_niter_99_astroviper{_tag}.img.zarr"
-    print(ps_xdt.xr_ps.summary())
-    return_dict = image_cube_single_field(
-        ps_store=PS_STORE,
-        image_store=image_store,
-        image_params=image_params,
-        imaging_weights_params={
-            "weighting": "briggs",
-            "robust": 0.5,
-            "casa_weighting_implementation": True,
-        },
-        iteration_control_params={
-            "niter": 100,
-            "nmajor": 0,
-            "threshold": 0.0,
-            "gain": 0.1,
-            "cyclefactor": 1.5,
-            "cycleniter": 1,
-            "minpsffraction": 0.05,
-            "maxpsffraction": 0.2,
-        },
-        gridder="prolate_spheroidal",
-        deconvolver="hogbom_many_threads",
-        # deconvolver="asp",
-        scan_intents="OBSERVE_TARGET#ON_SOURCE",
-        image_data_variables_keep=[
-            "sky_residual",
-            "point_spread_function",
-            "primary_beam",
-            "beam_fit_params_point_spread_function",
-            "sky_model",
-            "mask",
-        ],
-        processing_set_data_group_name="base",
-        single_precision_image=True,
-        thread_info=None,
+    print(return_dict["timing"].T)
+    print(return_dict["timing"]["T_deconvolve"])
+    print(return_dict["timing"]["T_residual_cycle"])
+    print(return_dict["timing"]["T_image_cube_task"])
+
+
+def test_single_field_imaging_multi_cycle_double_vs_single(plot_saver):
+    """Directly compare the double- and single-precision multi_cycle truths.
+
+    A float32-vs-float64 comparison of the deep multi-cycle CLEAN. Both truths
+    are generated identically except for precision (threads=1, n_chunks=1), so
+    this isolates the precision difference: the single-precision deep CLEAN can
+    tip a peak-selection bifurcation on a channel, hence the deliberately loose
+    ``MULTI_CYCLE_DOUBLE_VS_SINGLE_RTOL``. Generates the per-channel comparison
+    plots (double / single / difference).
+    """
+    _ensure_truth_image(TRUTH_IMAGE_MULTI_CYCLE_DOUBLE)
+    _ensure_truth_image(TRUTH_IMAGE_MULTI_CYCLE_SINGLE)
+
+    double_xds = xr.open_zarr(TRUTH_IMAGE_MULTI_CYCLE_DOUBLE)
+    single_xds = xr.open_zarr(TRUTH_IMAGE_MULTI_CYCLE_SINGLE)
+
+    _compare_to_truth(
+        double_xds,
+        single_xds,
+        _CONFIGS["multi_cycle"]["compare_variables"],
+        plot_saver=plot_saver,
+        plot_prefix="multi_cycle_double_vs_single",
+        tol=MULTI_CYCLE_DOUBLE_VS_SINGLE_RTOL,
+    )
+
+
+def test_single_field_imaging_multi_cycle_worst_case(plot_saver):
+    """Worst-case multi_cycle cross-config comparison.
+
+    Compares the two most-divergent valid multi_cycle runs -- double precision /
+    1 thread / n_chunks=5 against single precision / 12 threads / n_chunks=1 --
+    so every knob that can perturb the result (precision, thread count, chunking)
+    differs at once. The spread is dominated by the float32 deep-CLEAN
+    peak-selection bifurcation, hence the deliberately loose
+    ``MULTI_CYCLE_WORST_CASE_RTOL``. Generates the per-channel comparison plots.
+    Unlike the double-vs-single test, neither configuration is an on-disk truth,
+    so both are imaged here.
+    """
+    _ensure_ps_store()
+    _, double_xds, _ = _run_image_cube(
+        "multi_cycle",
+        "twhya_selfcal_5chans_lsrk_multi_cycle_worstcase_double_t1_c5.img.zarr",
+        processing_function_threads=1,
+        n_chunks=5,
+        single_precision_image=False,
+    )
+    _, single_xds, _ = _run_image_cube(
+        "multi_cycle",
+        "twhya_selfcal_5chans_lsrk_multi_cycle_worstcase_single_t12_c1.img.zarr",
         processing_function_threads=12,
         n_chunks=1,
-        overwrite=True,
-        disk_chunk_sizes={"frequency": 1},
-        vizualize_graph=False,
-        write_visibility_model_to_ps=True,
-        skunk_works=skunk_works,
-        fft_backend="scipy",
+        single_precision_image=True,
     )
-    imaging_metadata_pd = return_dict["timing"]
-    deconvolve_dict = return_dict["deconvolution"]
-    img_av_xds = xr.open_zarr(image_store)
-    print("&&&&&&&&&" * 10)
-    print("imaging_metadata_pd:")
-    print(imaging_metadata_pd.to_string())
-    print("deconvolve_dict (global channel numbering):")
-    print_deconvolve_dict(deconvolve_dict)
-
-    # Per-plane deconvolution statistics for this niter=100, nmajor=0 run (one
-    # major cycle, stopped on the iteration limit -> stop_code (1, 0)).
-    expected_deconvolve_dict = {
-        (0, 0, 0): {
-            "niter": 100,
-            "cyclethreshold": 0.07150154113769532,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.3445475399494171,
-            "stop_code": (1, 0),
-            "stokes": "I",
-            "frequency": 372762580492.5155,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [0.9266055226325989],
-            "start_peakres": [0.35750770568847656],
-            "start_peakres_nomask": [0.35750770568847656],
-            "peakres": [0.09062789380550385],
-            "peakres_nomask": [0.09062789380550385],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-        (0, 1, 0): {
-            "niter": 100,
-            "cyclethreshold": 0.02411012947559357,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.3445475697517395,
-            "stop_code": (1, 0),
-            "stokes": "Q",
-            "frequency": 372762580492.5155,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [0.060093339532613754],
-            "start_peakres": [0.12055064737796783],
-            "start_peakres_nomask": [0.12055064737796783],
-            "peakres": [-0.07445588707923889],
-            "peakres_nomask": [-0.07445588707923889],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-        (0, 0, 1): {
-            "niter": 100,
-            "cyclethreshold": 0.06702150106430053,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.34453392028808594,
-            "stop_code": (1, 0),
-            "stokes": "I",
-            "frequency": 372763190875.0631,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [0.8096180558204651],
-            "start_peakres": [0.3351075053215027],
-            "start_peakres_nomask": [0.3351075053215027],
-            "peakres": [0.09003297239542007],
-            "peakres_nomask": [0.09003297239542007],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-        (0, 1, 1): {
-            "niter": 100,
-            "cyclethreshold": 0.023650634288787845,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.34453392028808594,
-            "stop_code": (1, 0),
-            "stokes": "Q",
-            "frequency": 372763190875.0631,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [0.06434216350317001],
-            "start_peakres": [-0.11825317144393921],
-            "start_peakres_nomask": [-0.11825317144393921],
-            "peakres": [-0.07756861299276352],
-            "peakres_nomask": [-0.07756861299276352],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-        (0, 0, 2): {
-            "niter": 100,
-            "cyclethreshold": 0.06760407090187073,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.34448081254959106,
-            "stop_code": (1, 0),
-            "stokes": "I",
-            "frequency": 372763801257.61084,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [0.9100114107131958],
-            "start_peakres": [0.33802035450935364],
-            "start_peakres_nomask": [0.33802035450935364],
-            "peakres": [0.08979489654302597],
-            "peakres_nomask": [0.08979489654302597],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-        (0, 1, 2): {
-            "niter": 100,
-            "cyclethreshold": 0.026022839546203616,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.34448081254959106,
-            "stop_code": (1, 0),
-            "stokes": "Q",
-            "frequency": 372763801257.61084,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [0.07577363401651382],
-            "start_peakres": [0.13011419773101807],
-            "start_peakres_nomask": [0.13011419773101807],
-            "peakres": [0.07658877223730087],
-            "peakres_nomask": [0.07658877223730087],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-        (0, 0, 3): {
-            "niter": 100,
-            "cyclethreshold": 0.06500307321548462,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.3444790840148926,
-            "stop_code": (1, 0),
-            "stokes": "I",
-            "frequency": 372764411640.15845,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [0.7685136795043945],
-            "start_peakres": [0.3250153660774231],
-            "start_peakres_nomask": [0.3250153660774231],
-            "peakres": [0.09214764833450317],
-            "peakres_nomask": [0.09214764833450317],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-        (0, 1, 3): {
-            "niter": 100,
-            "cyclethreshold": 0.026551687717437746,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.3444790840148926,
-            "stop_code": (1, 0),
-            "stokes": "Q",
-            "frequency": 372764411640.15845,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [0.05189017206430435],
-            "start_peakres": [0.13275843858718872],
-            "start_peakres_nomask": [0.13275843858718872],
-            "peakres": [-0.07897554337978363],
-            "peakres_nomask": [-0.07897554337978363],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-        (0, 0, 4): {
-            "niter": 100,
-            "cyclethreshold": 0.07066916227340699,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.3444778323173523,
-            "stop_code": (1, 0),
-            "stokes": "I",
-            "frequency": 372765022022.7062,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [0.6859082579612732],
-            "start_peakres": [0.3533458113670349],
-            "start_peakres_nomask": [0.3533458113670349],
-            "peakres": [0.0892675369977951],
-            "peakres_nomask": [0.0892675369977951],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-        (0, 1, 4): {
-            "niter": 100,
-            "cyclethreshold": 0.022110094130039216,
-            "iter_done": [100],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.2,
-            "max_psf_sidelobe": 0.3444778323173523,
-            "stop_code": (1, 0),
-            "stokes": "Q",
-            "frequency": 372765022022.7062,
-            "time": 0.0,
-            "start_model_flux": [0.0],
-            "model_flux": [-0.11857172846794128],
-            "start_peakres": [0.11055047065019608],
-            "start_peakres_nomask": [0.11055047065019608],
-            "peakres": [0.07679460197687149],
-            "peakres_nomask": [0.07679460197687149],
-            "masksum": [62500],
-            "stop_description": "Reached the iteration limit",
-        },
-    }
-    _check_deconvolve_dict(deconvolve_dict, expected_deconvolve_dict)
-
-    polarization = 0
-    region = dict(
-        polarization=polarization, time=0, l=slice(100, 150), m=slice(100, 150)
+    _compare_to_truth(
+        double_xds,
+        single_xds,
+        _CONFIGS["multi_cycle"]["compare_variables"],
+        plot_saver=plot_saver,
+        plot_prefix="multi_cycle_worst_case_double_t1_c5_vs_single_t12_c1",
+        tol=MULTI_CYCLE_WORST_CASE_RTOL,
     )
-    I_av = img_av_xds.isel(**region)
-    I = img_xds.isel(**region)
-
-    # Expected upper bound on the per-channel relative difference vs CASA.
-    # Exceeding the maximum is a regression; dropping below the minimum is an
-    # (informational) improvement and is reported but not treated as a failure.
-    max_per_dif_model = [2.1e-05, 0.001, 8.0e-06, 0.0022, 0.0013]
-    min_per_dif_model = [2.0e-05, 0.0009, 7.6e-06, 0.0021, 0.0012]
-    max_per_dif_residual = [9.00e-05, 0.0331, 0.000122, 0.001684, 0.001123]
-    min_per_dif_residual = [8.946e-05, 0.033, 0.000121, 0.001682, 0.001122]
-
-    # First pass: generate every channel's comparison plot and record the
-    # relative differences. Assertions are deferred to a second pass below so
-    # that a failure on one channel cannot prevent the remaining plots from
-    # being saved.
-    channel_rel_diffs = []
-    for i_f in range(5):
-        model_av = I_av["SKY_MODEL"].isel(frequency=i_f).values
-        model_casa = I["SKY_MODEL"].isel(frequency=i_f).values
-        residual_av = I_av["SKY_RESIDUAL"].isel(frequency=i_f).values
-        residual_casa = I["SKY_RESIDUAL"].isel(frequency=i_f).values
-        pb_av = I_av["PRIMARY_BEAM"].isel(frequency=i_f).values
-        pb_casa = I["PRIMARY_BEAM"].isel(frequency=i_f).values
-
-        fig, axes = plt.subplots(3, 3, figsize=(16, 14))
-        fig.suptitle(f"Channel {i_f} Frequency: {I_av.frequency.values[i_f]}")
-        im0 = axes[0, 0].imshow(model_av)
-        axes[0, 0].set_title("MODEL_AV")
-        fig.colorbar(im0, ax=axes[0, 0])
-        im1 = axes[0, 1].imshow(model_casa)
-        axes[0, 1].set_title("MODEL_CASA")
-        fig.colorbar(im1, ax=axes[0, 1])
-        im2 = axes[0, 2].imshow(
-            100 * (model_av - model_casa) / np.max(np.abs(model_casa))
-        )
-        axes[0, 2].set_title("Percentage Difference 100%")
-        fig.colorbar(im2, ax=axes[0, 2])
-
-        im3 = axes[1, 0].imshow(residual_av)
-        axes[1, 0].set_title("RESIDUAL_AV")
-        fig.colorbar(im3, ax=axes[1, 0])
-        im4 = axes[1, 1].imshow(residual_casa)
-        axes[1, 1].set_title("RESIDUAL_CASA")
-        fig.colorbar(im4, ax=axes[1, 1])
-        im5 = axes[1, 2].imshow(
-            100 * (residual_av - residual_casa) / np.max(np.abs(residual_casa))
-        )
-        axes[1, 2].set_title("Percentage Difference 100%")
-        fig.colorbar(im5, ax=axes[1, 2])
-
-        im6 = axes[2, 0].imshow(pb_av)
-        axes[2, 0].set_title("PB_AV")
-        fig.colorbar(im6, ax=axes[2, 0])
-        im7 = axes[2, 1].imshow(pb_casa)
-        axes[2, 1].set_title("PB_CASA")
-        fig.colorbar(im7, ax=axes[2, 1])
-        im8 = axes[2, 2].imshow(100 * (pb_av - pb_casa) / np.max(np.abs(pb_casa)))
-        axes[2, 2].set_title("Percentage Difference 100%")
-        fig.colorbar(im8, ax=axes[2, 2])
-        plot_saver(fig, f"niter99_channel_{i_f}{_tag}.png")
-
-        rel_diff_model = np.max(
-            np.abs(model_av - model_casa) / np.max(np.abs(model_casa))
-        )
-        rel_diff_residual = np.max(
-            np.abs(residual_av - residual_casa) / np.max(np.abs(residual_casa))
-        )
-        channel_rel_diffs.append((rel_diff_model, rel_diff_residual))
-        print(f"Channel {i_f} relative difference in SKY_MODEL: {rel_diff_model}")
-        print(f"Channel {i_f} relative difference in SKY_RESIDUAL: {rel_diff_residual}")
-
-        if rel_diff_model < min_per_dif_model[i_f]:
-            print(
-                f"Channel {i_f} SKY_MODEL improved: {rel_diff_model} is below the "
-                f"expected minimum {min_per_dif_model[i_f]}."
-            )
-        if rel_diff_residual < min_per_dif_residual[i_f]:
-            print(
-                f"Channel {i_f} SKY_RESIDUAL improved: {rel_diff_residual} is below "
-                f"the expected minimum {min_per_dif_residual[i_f]}."
-            )
-
-    # Second pass: assertions only (all plots have already been generated).
-    for i_f, (rel_diff_model, rel_diff_residual) in enumerate(channel_rel_diffs):
-        assert rel_diff_model <= max_per_dif_model[i_f], (
-            f"Channel {i_f}: SKY_MODEL relative difference {rel_diff_model} exceeds "
-            f"the maximum {max_per_dif_model[i_f]}. You broke something!"
-        )
-        assert rel_diff_residual <= max_per_dif_residual[i_f], (
-            f"Channel {i_f}: SKY_RESIDUAL relative difference {rel_diff_residual} "
-            f"exceeds the maximum {max_per_dif_residual[i_f]}. You broke something!"
-        )
-
-    # input("Press enter")
 
 
-@pytest.mark.parametrize("skunk_works", [False, True])
-def test_single_field_imaging_multi_cycle(plot_saver, skunk_works):
-    dask.config.set(scheduler="synchronous")
+def _regenerate_truth_images():
+    """Regenerate every astroviper truth image at threads=1, n_chunks=1.
 
+    niter0 and niter100 get a single double-precision truth each. multi_cycle
+    gets two: a double-precision truth and a single-precision truth (its deep
+    CLEAN is precision-sensitive, so single-precision variants are compared
+    like-for-like against a single-precision reference). Each truth is generated
+    single-threaded and single-chunk -- free of thread/chunk reduction-order
+    effects -- so a variant's divergence is purely the effect of the knob being
+    varied. Run as ``python test_single_field_imaging.py``; each truth
+    ``*.img.zarr`` directory is (over)written in place. Upload them to Google
+    Drive afterwards and paste the file ids into ``_TRUTH_IMAGE_DRIVE_IDS``.
+    """
     _ensure_ps_store()
-    _ensure_truth_images()
-    ps_xdt = open_processing_set(PS_STORE)
-    img_xds = xr.open_zarr("twhya_selfcal_5chans_lsrk_multi_cycle_truth.img.zarr")
-
-    image_params = _image_params(ps_xdt)
-    _tag = "_skunk" if skunk_works else ""
-    image_store = f"twhya_selfcal_5chans_lsrk_multi_cycle_astroviper{_tag}.img.zarr"
-
-    return_dict = image_cube_single_field(
-        ps_store=PS_STORE,
-        image_store=image_store,
-        image_params=image_params,
-        imaging_weights_params={
-            "weighting": "briggs",
-            "robust": 0.5,
-            "casa_weighting_implementation": True,
-        },
-        iteration_control_params={
-            "niter": 10000,
-            "nmajor": 4,
-            "threshold": 0.0,
-            "gain": 0.1,
-            "cyclefactor": 1.5,
-            "cycleniter": 1,
-            "minpsffraction": 0.05,
-            "maxpsffraction": 0.8,
-        },
-        gridder="prolate_spheroidal",
-        deconvolver="hogbom_many_threads",
-        # deconvolver="asp",
-        scan_intents="OBSERVE_TARGET#ON_SOURCE",
-        image_data_variables_keep=[
-            "sky_residual",
-            "point_spread_function",
-            "primary_beam",
-            "beam_fit_params_point_spread_function",
-            "sky_model",
-            "mask",
-        ],
-        processing_set_data_group_name="base",
-        single_precision_image=False,
-        thread_info=None,
-        processing_function_threads=1,
-        n_chunks=1,
-        overwrite=True,
-        disk_chunk_sizes={"frequency": 5},
-        vizualize_graph=False,
-        write_visibility_model_to_ps=True,
-        skunk_works=skunk_works,
-        fft_backend="scipy",
-    )
-    imaging_metadata_pd = return_dict["timing"]
-    deconvolve_dict = return_dict["deconvolution"]
-    img_av_xds = xr.open_zarr(image_store)
-    print("&&&&&&&&&" * 10)
-    print("imaging_metadata_pd:")
-    print(imaging_metadata_pd.to_string())
-    print("deconvolve_dict (global channel numbering):")
-    print_deconvolve_dict(deconvolve_dict)
-
-    # Per-plane deconvolution statistics for this niter=10000, nmajor=4 run. Each
-    # history list has one entry per major cycle; the run stops on the major
-    # cycle limit -> stop_code (9, 0).
-    expected_deconvolve_dict = {
-        (0, 0, 0): {
-            "niter": 10000,
-            "cyclethreshold": 0.035887088729932064,
-            "iter_done": [3, 22, 311, 1627],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.8,
-            "max_psf_sidelobe": 0.3445475295671201,
-            "stop_code": (9, 0),
-            "stokes": "I",
-            "frequency": 372762580492.5155,
-            "time": 0.0,
-            "start_model_flux": [
-                0.0,
-                0.09718702204548665,
-                0.4825330600317771,
-                1.1146658811277848,
-            ],
-            "model_flux": [
-                0.09718702204548665,
-                0.4825330600317771,
-                1.1146658811277848,
-                1.4936288787330485,
-            ],
-            "start_peakres": [
-                0.35750769883669886,
-                0.2631183190329552,
-                0.13405951306715244,
-                0.07311894932118859,
-            ],
-            "start_peakres_nomask": [
-                0.35750769883669886,
-                0.2631183190329552,
-                0.13405951306715244,
-                0.07311894932118859,
-            ],
-            "peakres": [
-                0.26311837258523163,
-                0.13442036393758017,
-                0.06943810002066497,
-                0.035860155400381656,
-            ],
-            "peakres_nomask": [
-                0.26311837258523163,
-                0.13442036393758017,
-                0.06943810002066497,
-                0.035860155400381656,
-            ],
-            "masksum": [62500, 62500, 62500, 62500],
-            "stop_description": "Reached the major cycle limit (nmajor)",
-        },
-        (0, 1, 0): {
-            "niter": 10000,
-            "cyclethreshold": 0.013247323584634525,
-            "iter_done": [8, 739, 2168, 3550],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.8,
-            "max_psf_sidelobe": 0.3445475295671201,
-            "stop_code": (9, 0),
-            "stokes": "Q",
-            "frequency": 372762580492.5155,
-            "time": 0.0,
-            "start_model_flux": [
-                0.0,
-                0.06398640705714075,
-                -0.1452926990861219,
-                -0.17522760771102674,
-            ],
-            "model_flux": [
-                0.06398640705714075,
-                -0.1452926990861219,
-                -0.17522760771102674,
-                -0.43959681844257215,
-            ],
-            "start_peakres": [
-                0.12055068831924319,
-                0.09668704802810893,
-                0.059011654121003544,
-                0.035509332659826295,
-            ],
-            "start_peakres_nomask": [
-                0.12055068831924319,
-                0.09668704802810893,
-                0.059011654121003544,
-                0.035509332659826295,
-            ],
-            "peakres": [
-                0.0959953340255374,
-                -0.04959675650007245,
-                0.025632309909517356,
-                0.013244905094691034,
-            ],
-            "peakres_nomask": [
-                0.0959953340255374,
-                -0.04959675650007245,
-                0.025632309909517356,
-                0.013244905094691034,
-            ],
-            "masksum": [62500, 62500, 62500, 62500],
-            "stop_description": "Reached the major cycle limit (nmajor)",
-        },
-        (0, 0, 1): {
-            "niter": 10000,
-            "cyclethreshold": 0.03353459444139285,
-            "iter_done": [3, 26, 377, 1721],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.8,
-            "max_psf_sidelobe": 0.34453386632693495,
-            "stop_code": (9, 0),
-            "stokes": "I",
-            "frequency": 372763190875.0631,
-            "time": 0.0,
-            "start_model_flux": [
-                0.0,
-                0.09086301993655113,
-                0.48714152453270637,
-                1.0310477002839429,
-            ],
-            "model_flux": [
-                0.09086301993655113,
-                0.48714152453270637,
-                1.0310477002839429,
-                1.344485064348138,
-            ],
-            "start_peakres": [
-                0.3351074869017025,
-                0.24658031275538556,
-                -0.12563841463957237,
-                0.06588943182953905,
-            ],
-            "start_peakres_nomask": [
-                0.3351074869017025,
-                0.24658031275538556,
-                -0.12563841463957237,
-                0.06588943182953905,
-            ],
-            "peakres": [
-                0.24658036446829307,
-                -0.12563929217840017,
-                -0.06488882074961964,
-                -0.03351216571464057,
-            ],
-            "peakres_nomask": [
-                0.24658036446829307,
-                -0.12563929217840017,
-                -0.06488882074961964,
-                -0.03351216571464057,
-            ],
-            "masksum": [62500, 62500, 62500, 62500],
-            "stop_description": "Reached the major cycle limit (nmajor)",
-        },
-        (0, 1, 1): {
-            "niter": 10000,
-            "cyclethreshold": 0.012917005614728168,
-            "iter_done": [15, 899, 2085, 3405],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.8,
-            "max_psf_sidelobe": 0.34453386632693495,
-            "stop_code": (9, 0),
-            "stokes": "Q",
-            "frequency": 372763190875.0631,
-            "time": 0.0,
-            "start_model_flux": [
-                0.0,
-                0.006016719503292783,
-                0.0758875588914891,
-                -0.22256907481112922,
-            ],
-            "model_flux": [
-                0.006016719503292783,
-                0.0758875588914891,
-                -0.22256907481112922,
-                -0.36620845393971224,
-            ],
-            "start_peakres": [
-                -0.11825339664330456,
-                0.09308343885970413,
-                -0.05162875402914403,
-                -0.031164287472864143,
-            ],
-            "start_peakres_nomask": [
-                -0.11825339664330456,
-                0.09308343885970413,
-                -0.05162875402914403,
-                -0.031164287472864143,
-            ],
-            "peakres": [
-                -0.09389724733759419,
-                0.04840577933350613,
-                0.02499416724483618,
-                0.01291204244747398,
-            ],
-            "peakres_nomask": [
-                -0.09389724733759419,
-                0.04840577933350613,
-                0.02499416724483618,
-                0.01291204244747398,
-            ],
-            "masksum": [62500, 62500, 62500, 62500],
-            "stop_description": "Reached the major cycle limit (nmajor)",
-        },
-        (0, 0, 2): {
-            "niter": 10000,
-            "cyclethreshold": 0.03338193870123756,
-            "iter_done": [3, 28, 377, 1671],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.8,
-            "max_psf_sidelobe": 0.34448079976471313,
-            "stop_code": (9, 0),
-            "stokes": "I",
-            "frequency": 372763801257.61084,
-            "time": 0.0,
-            "start_model_flux": [
-                0.0,
-                0.0916035160783401,
-                0.549167181835268,
-                1.1556019812834628,
-            ],
-            "model_flux": [
-                0.0916035160783401,
-                0.549167181835268,
-                1.1556019812834628,
-                1.2716836682032417,
-            ],
-            "start_peakres": [
-                0.33802037776693955,
-                0.24641674736577607,
-                0.1246686131246617,
-                -0.06560293026492342,
-            ],
-            "start_peakres_nomask": [
-                0.33802037776693955,
-                0.24641674736577607,
-                0.1246686131246617,
-                -0.06560293026492342,
-            ],
-            "peakres": [
-                0.246416800747472,
-                0.12511840620530976,
-                -0.0646033851989004,
-                -0.033345614925897445,
-            ],
-            "peakres_nomask": [
-                0.246416800747472,
-                0.12511840620530976,
-                -0.0646033851989004,
-                -0.033345614925897445,
-            ],
-            "masksum": [62500, 62500, 62500, 62500],
-            "stop_description": "Reached the major cycle limit (nmajor)",
-        },
-        (0, 1, 2): {
-            "niter": 10000,
-            "cyclethreshold": 0.014325075683566882,
-            "iter_done": [5, 637, 2041, 3026],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.8,
-            "max_psf_sidelobe": 0.34448079976471313,
-            "stop_code": (9, 0),
-            "stokes": "Q",
-            "frequency": 372763801257.61084,
-            "time": 0.0,
-            "start_model_flux": [
-                0.0,
-                0.03497499853849211,
-                0.5752580905134075,
-                0.9703525326562256,
-            ],
-            "model_flux": [
-                0.03497499853849211,
-                0.5752580905134075,
-                0.9703525326562256,
-                1.1518167912861337,
-            ],
-            "start_peakres": [
-                0.13011414045626285,
-                -0.10400362324374736,
-                0.05671751363877437,
-                -0.034978092733420285,
-            ],
-            "start_peakres_nomask": [
-                0.13011414045626285,
-                -0.10400362324374736,
-                0.05671751363877437,
-                -0.034978092733420285,
-            ],
-            "peakres": [
-                -0.10401673272264614,
-                0.05372676534765114,
-                0.027723026834105463,
-                0.014317272176727186,
-            ],
-            "peakres_nomask": [
-                -0.10401673272264614,
-                0.05372676534765114,
-                0.027723026834105463,
-                0.014317272176727186,
-            ],
-            "masksum": [62500, 62500, 62500, 62500],
-            "stop_description": "Reached the major cycle limit (nmajor)",
-        },
-        (0, 0, 3): {
-            "niter": 10000,
-            "cyclethreshold": 0.03299434374746375,
-            "iter_done": [3, 28, 452, 1826],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.8,
-            "max_psf_sidelobe": 0.3444790825086862,
-            "stop_code": (9, 0),
-            "stokes": "I",
-            "frequency": 372764411640.15845,
-            "time": 0.0,
-            "start_model_flux": [
-                0.0,
-                0.08878698615066784,
-                0.5086397677138595,
-                0.9821409278275168,
-            ],
-            "model_flux": [
-                0.08878698615066784,
-                0.5086397677138595,
-                0.9821409278275168,
-                1.4103561200186392,
-            ],
-            "start_peakres": [
-                0.32501538847028244,
-                0.24324762521379611,
-                -0.123651127264195,
-                -0.06885332750001473,
-            ],
-            "start_peakres_nomask": [
-                0.32501538847028244,
-                0.24324762521379611,
-                -0.123651127264195,
-                -0.06885332750001473,
-            ],
-            "peakres": [
-                0.24324767373115244,
-                -0.12365099019310298,
-                0.06385359890297894,
-                0.032992658767265225,
-            ],
-            "peakres_nomask": [
-                0.24324767373115244,
-                -0.12365099019310298,
-                0.06385359890297894,
-                0.032992658767265225,
-            ],
-            "masksum": [62500, 62500, 62500, 62500],
-            "stop_description": "Reached the major cycle limit (nmajor)",
-        },
-        (0, 1, 3): {
-            "niter": 10000,
-            "cyclethreshold": 0.014327696405280138,
-            "iter_done": [7, 721, 1896, 3206],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.8,
-            "max_psf_sidelobe": 0.3444790825086862,
-            "stop_code": (9, 0),
-            "stokes": "Q",
-            "frequency": 372764411640.15845,
-            "time": 0.0,
-            "start_model_flux": [
-                0.0,
-                0.011751165304778682,
-                -0.006559480846617824,
-                -0.16484162868240546,
-            ],
-            "model_flux": [
-                0.011751165304778682,
-                -0.006559480846617824,
-                -0.16484162868240546,
-                -0.15666565941950023,
-            ],
-            "start_peakres": [
-                0.1327584133004238,
-                -0.10396325269068865,
-                0.05757515774487702,
-                0.03560674358081196,
-            ],
-            "start_peakres_nomask": [
-                0.1327584133004238,
-                -0.10396325269068865,
-                0.05757515774487702,
-                0.03560674358081196,
-            ],
-            "peakres": [
-                -0.10396225525444691,
-                -0.05368349314507971,
-                0.027728236890201426,
-                -0.01430856567084777,
-            ],
-            "peakres_nomask": [
-                -0.10396225525444691,
-                -0.05368349314507971,
-                0.027728236890201426,
-                -0.01430856567084777,
-            ],
-            "masksum": [62500, 62500, 62500, 62500],
-            "stop_description": "Reached the major cycle limit (nmajor)",
-        },
-        (0, 0, 4): {
-            "niter": 10000,
-            "cyclethreshold": 0.035698191359377525,
-            "iter_done": [3, 20, 300, 1555],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.8,
-            "max_psf_sidelobe": 0.3444778231912157,
-            "stop_code": (9, 0),
-            "stokes": "I",
-            "frequency": 372765022022.7062,
-            "time": 0.0,
-            "start_model_flux": [
-                0.0,
-                0.09632811291794373,
-                0.44859343492168907,
-                0.7644585620275723,
-            ],
-            "model_flux": [
-                0.09632811291794373,
-                0.448593434921689,
-                0.7644585620275723,
-                0.9485323094018827,
-            ],
-            "start_peakres": [
-                0.3533458191980322,
-                0.2624829860334643,
-                0.13386095443544133,
-                0.06936598751965845,
-            ],
-            "start_peakres_nomask": [
-                0.3533458191980322,
-                0.2624829860334643,
-                0.13386095443544133,
-                0.06936598751965845,
-            ],
-            "peakres": [
-                0.26248303921608274,
-                0.13386099432385132,
-                0.06908657869210517,
-                0.03568096836877782,
-            ],
-            "peakres_nomask": [
-                0.26248303921608274,
-                0.13386099432385132,
-                0.06908657869210517,
-                0.03568096836877782,
-            ],
-            "masksum": [62500, 62500, 62500, 62500],
-            "stop_description": "Reached the major cycle limit (nmajor)",
-        },
-        (0, 1, 4): {
-            "niter": 10000,
-            "cyclethreshold": 0.012144056419142775,
-            "iter_done": [34, 1056, 1928, 3662],
-            "loop_gain": 0.1,
-            "min_psf_fraction": 0.05,
-            "max_psf_fraction": 0.8,
-            "max_psf_sidelobe": 0.3444778231912157,
-            "stop_code": (9, 0),
-            "stokes": "Q",
-            "frequency": 372765022022.7062,
-            "time": 0.0,
-            "start_model_flux": [
-                0.0,
-                -0.035942656627423034,
-                0.05525502537880295,
-                0.09013507629054078,
-            ],
-            "model_flux": [
-                -0.035942656627423034,
-                0.05525502537880295,
-                0.09013507629054078,
-                -0.1617125421110452,
-            ],
-            "start_peakres": [
-                0.1105504622894227,
-                0.0886835370547483,
-                0.05120629000761651,
-                -0.03239891032590521,
-            ],
-            "start_peakres_nomask": [
-                0.1105504622894227,
-                0.0886835370547483,
-                0.05120629000761651,
-                -0.03239891032590521,
-            ],
-            "peakres": [
-                -0.08827756285000017,
-                -0.04550212157875654,
-                0.02350234780793953,
-                -0.01214399112980437,
-            ],
-            "peakres_nomask": [
-                -0.08827756285000017,
-                -0.04550212157875654,
-                0.02350234780793953,
-                -0.01214399112980437,
-            ],
-            "masksum": [62500, 62500, 62500, 62500],
-            "stop_description": "Reached the major cycle limit (nmajor)",
-        },
-    }
-    _check_deconvolve_dict(deconvolve_dict, expected_deconvolve_dict)
-
-    polarization = 0
-    region = dict(
-        polarization=polarization, time=0, l=slice(100, 150), m=slice(100, 150)
-    )
-    I_av = img_av_xds.isel(**region)
-    I = img_xds.isel(**region)
-
-    # The reference image was re-blessed from the per-plane iteration-control
-    # code (cyclethreshold is now computed per (time, frequency, polarization)
-    # plane from that plane's own peak residual, so deconvolution is independent
-    # of how the cube is chunked across tasks), so this build matches it to ~0.
-    #
-    # Channel 2 (frequency index 2) keeps a relaxed ceiling as a cross-build
-    # guard: the C++ imaging extensions are built with -ffp-contract=off (see
-    # the gridder / hogbom / aspclean CMakeLists) so the float32 CLEAN path is
-    # bit-reproducible, but channel 2's CLEAN sits on a peak-selection
-    # bifurcation where a ~1-ULP difference (e.g. a rebuild with FMA contraction
-    # on) flips the minor cycle onto a different -- but equally valid -- solution
-    # that can diverge by a few percent. Its ceiling admits that bifurcation
-    # while still catching a gross regression; the other four channels stay at
-    # 1e-6. Tighten channel 2 too once the reference build is pinned.
-    max_per_dif_model = [1e-06, 1e-06, 0.05, 1e-06, 1e-06]
-    min_per_dif_model = [1e-07, 1e-07, 1e-07, 1e-07, 1e-07]
-    max_per_dif_residual = [1e-06, 1e-06, 0.12, 1e-06, 1e-06]
-    min_per_dif_residual = [1e-07, 1e-07, 1e-07, 1e-07, 1e-07]
-
-    # First pass: generate every channel's comparison plot and record the
-    # relative differences. Assertions are deferred to a second pass below so
-    # that a failure on one channel cannot prevent the remaining plots from
-    # being saved.
-    channel_rel_diffs = []
-    for i_f in range(5):
-        model_av = I_av["SKY_MODEL"].isel(frequency=i_f).values
-        model_casa = I["SKY_MODEL"].isel(frequency=i_f).values
-        residual_av = I_av["SKY_RESIDUAL"].isel(frequency=i_f).values
-        residual_casa = I["SKY_RESIDUAL"].isel(frequency=i_f).values
-        pb_av = I_av["PRIMARY_BEAM"].isel(frequency=i_f).values
-        pb_casa = I["PRIMARY_BEAM"].isel(frequency=i_f).values
-
-        fig, axes = plt.subplots(3, 3, figsize=(16, 14))
-        fig.suptitle(f"Channel {i_f} Frequency: {I_av.frequency.values[i_f]}")
-        im0 = axes[0, 0].imshow(model_av)
-        axes[0, 0].set_title("MODEL_AV")
-        fig.colorbar(im0, ax=axes[0, 0])
-        im1 = axes[0, 1].imshow(model_casa)
-        axes[0, 1].set_title("MODEL_CASA")
-        fig.colorbar(im1, ax=axes[0, 1])
-        im2 = axes[0, 2].imshow(
-            100 * (model_av - model_casa) / np.max(np.abs(model_casa))
-        )
-        axes[0, 2].set_title("Percentage Difference 100%")
-        fig.colorbar(im2, ax=axes[0, 2])
-
-        im3 = axes[1, 0].imshow(residual_av)
-        axes[1, 0].set_title("RESIDUAL_AV")
-        fig.colorbar(im3, ax=axes[1, 0])
-        im4 = axes[1, 1].imshow(residual_casa)
-        axes[1, 1].set_title("RESIDUAL_CASA")
-        fig.colorbar(im4, ax=axes[1, 1])
-        im5 = axes[1, 2].imshow(
-            100 * (residual_av - residual_casa) / np.max(np.abs(residual_casa))
-        )
-        axes[1, 2].set_title("Percentage Difference 100%")
-        fig.colorbar(im5, ax=axes[1, 2])
-
-        im6 = axes[2, 0].imshow(pb_av)
-        axes[2, 0].set_title("PB_AV")
-        fig.colorbar(im6, ax=axes[2, 0])
-        im7 = axes[2, 1].imshow(pb_casa)
-        axes[2, 1].set_title("PB_CASA")
-        fig.colorbar(im7, ax=axes[2, 1])
-        im8 = axes[2, 2].imshow(100 * (pb_av - pb_casa) / np.max(np.abs(pb_casa)))
-        axes[2, 2].set_title("Percentage Difference 100%")
-        fig.colorbar(im8, ax=axes[2, 2])
-        plot_saver(fig, f"multi_cycle_channel_{i_f}{_tag}.png")
-
-        rel_diff_model = np.max(
-            np.abs(model_av - model_casa) / np.max(np.abs(model_casa))
-        )
-        rel_diff_residual = np.max(
-            np.abs(residual_av - residual_casa) / np.max(np.abs(residual_casa))
-        )
-        channel_rel_diffs.append((rel_diff_model, rel_diff_residual))
-        print(f"Channel {i_f} relative difference in SKY_MODEL: {rel_diff_model}")
-        print(f"Channel {i_f} relative difference in SKY_RESIDUAL: {rel_diff_residual}")
-
-        if rel_diff_model < min_per_dif_model[i_f]:
-            print(
-                f"Channel {i_f} SKY_MODEL improved: {rel_diff_model} is below the "
-                f"expected minimum {min_per_dif_model[i_f]}."
-            )
-        if rel_diff_residual < min_per_dif_residual[i_f]:
-            print(
-                f"Channel {i_f} SKY_RESIDUAL improved: {rel_diff_residual} is below "
-                f"the expected minimum {min_per_dif_residual[i_f]}."
-            )
-
-    # Second pass: assertions only (all plots have already been generated).
-    for i_f, (rel_diff_model, rel_diff_residual) in enumerate(channel_rel_diffs):
-        assert rel_diff_model <= max_per_dif_model[i_f], (
-            f"Channel {i_f}: SKY_MODEL relative difference {rel_diff_model} exceeds "
-            f"the maximum {max_per_dif_model[i_f]}. You broke something!"
-        )
-        assert rel_diff_residual <= max_per_dif_residual[i_f], (
-            f"Channel {i_f}: SKY_RESIDUAL relative difference {rel_diff_residual} "
-            f"exceeds the maximum {max_per_dif_residual[i_f]}. You broke something!"
+    plan = [
+        ("niter0", TRUTH_IMAGE_NITER0, False),
+        ("niter100", TRUTH_IMAGE_NITER100, False),
+        ("multi_cycle", TRUTH_IMAGE_MULTI_CYCLE_DOUBLE, False),
+        ("multi_cycle", TRUTH_IMAGE_MULTI_CYCLE_SINGLE, True),
+    ]
+    for kind, truth_image, single_precision_image in plan:
+        print(f"Regenerating truth image for {kind!r} -> {truth_image}")
+        _run_image_cube(
+            kind,
+            truth_image,
+            processing_function_threads=1,
+            n_chunks=1,
+            single_precision_image=single_precision_image,
         )
 
-    print(imaging_metadata_pd.T)
-    print(imaging_metadata_pd["T_deconvolve"])
-    print(imaging_metadata_pd["T_residual_cycle"])
-    print(imaging_metadata_pd["T_image_cube_task"])
+
+# ---------------------------------------------------------------------------
+# Expected per-plane deconvolution ReturnDicts.
+#
+# Keyed by ``(time, pol, chan)`` with each history list holding one entry per
+# major cycle; checked by ``_check_deconvolve_dict``. Within a precision they
+# are independent of thread count and chunking (iteration control is computed
+# per (time, frequency, polarization) plane), but single precision can take a
+# different iteration count, so multi_cycle carries both a double- and a
+# single-precision literal. Regenerate if the imaging or iteration-control
+# behaviour intentionally changes.
+# ---------------------------------------------------------------------------
+
+# niter=100, nmajor=0, threshold=0.001: deconvolves to the iteration limit
+# (the threshold is not reached) -> stop_code (1, 0).
+EXPECTED_DECONVOLVE_DICT_NITER100 = {
+    (0, 0, 0): {
+        'niter': 100,
+        'cyclethreshold': 0.07150153976733978,
+        'iter_done': [100],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.2,
+        'max_psf_sidelobe': 0.3445475295671201,
+        'stop_code': (1, 0),
+        'stokes': 'I',
+        'frequency': 372762580492.5155,
+        'time': 0.0,
+        'start_model_flux': [0.0],
+        'model_flux': [0.9677845797776481],
+        'start_peakres': [0.35750769883669886],
+        'start_peakres_nomask': [0.35750769883669886],
+        'peakres': [-0.08899075577822424],
+        'peakres_nomask': [-0.11071206252751019],
+        'masksum': [62500],
+        'stop_description': 'Reached the iteration limit',
+    },
+    (0, 1, 0): {
+        'niter': 100,
+        'cyclethreshold': 0.02411013766384864,
+        'iter_done': [100],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.2,
+        'max_psf_sidelobe': 0.3445475295671201,
+        'stop_code': (1, 0),
+        'stokes': 'Q',
+        'frequency': 372762580492.5155,
+        'time': 0.0,
+        'start_model_flux': [0.0],
+        'model_flux': [0.08916942945052633],
+        'start_peakres': [0.12055068831924319],
+        'start_peakres_nomask': [0.12055068831924319],
+        'peakres': [0.07430471569361485],
+        'peakres_nomask': [0.08951620816899497],
+        'masksum': [62500],
+        'stop_description': 'Reached the iteration limit',
+    },
+    (0, 0, 1): {
+        'niter': 100,
+        'cyclethreshold': 0.06702149738034051,
+        'iter_done': [100],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.2,
+        'max_psf_sidelobe': 0.344533866326935,
+        'stop_code': (1, 0),
+        'stokes': 'I',
+        'frequency': 372763190875.0631,
+        'time': 0.0,
+        'start_model_flux': [0.0],
+        'model_flux': [0.8096180886404875],
+        'start_peakres': [0.3351074869017025],
+        'start_peakres_nomask': [0.3351074869017025],
+        'peakres': [0.09003297370692762],
+        'peakres_nomask': [0.09003297370692762],
+        'masksum': [62500],
+        'stop_description': 'Reached the iteration limit',
+    },
+    (0, 1, 1): {
+        'niter': 100,
+        'cyclethreshold': 0.023650679328660947,
+        'iter_done': [100],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.2,
+        'max_psf_sidelobe': 0.344533866326935,
+        'stop_code': (1, 0),
+        'stokes': 'Q',
+        'frequency': 372763190875.0631,
+        'time': 0.0,
+        'start_model_flux': [0.0],
+        'model_flux': [0.0806183920125066],
+        'start_peakres': [-0.11825339664330473],
+        'start_peakres_nomask': [-0.11825339664330473],
+        'peakres': [0.07750591941443867],
+        'peakres_nomask': [-0.08463490573442017],
+        'masksum': [62500],
+        'stop_description': 'Reached the iteration limit',
+    },
+    (0, 0, 2): {
+        'niter': 100,
+        'cyclethreshold': 0.06760407555338792,
+        'iter_done': [100],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.2,
+        'max_psf_sidelobe': 0.34448079976471313,
+        'stop_code': (1, 0),
+        'stokes': 'I',
+        'frequency': 372763801257.61084,
+        'time': 0.0,
+        'start_model_flux': [0.0],
+        'model_flux': [0.9100113948102967],
+        'start_peakres': [0.3380203777669396],
+        'start_peakres_nomask': [0.3380203777669396],
+        'peakres': [0.08979484245919653],
+        'peakres_nomask': [0.08979484245919653],
+        'masksum': [62500],
+        'stop_description': 'Reached the iteration limit',
+    },
+    (0, 1, 2): {
+        'niter': 100,
+        'cyclethreshold': 0.026022828091252573,
+        'iter_done': [100],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.2,
+        'max_psf_sidelobe': 0.34448079976471313,
+        'stop_code': (1, 0),
+        'stokes': 'Q',
+        'frequency': 372763801257.61084,
+        'time': 0.0,
+        'start_model_flux': [0.0],
+        'model_flux': [0.09208456255193924],
+        'start_peakres': [0.13011414045626285],
+        'start_peakres_nomask': [0.13011414045626285],
+        'peakres': [-0.07639895031706921],
+        'peakres_nomask': [-0.08528560955343739],
+        'masksum': [62500],
+        'stop_description': 'Reached the iteration limit',
+    },
+    (0, 0, 3): {
+        'niter': 100,
+        'cyclethreshold': 0.06500307769405649,
+        'iter_done': [100],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.2,
+        'max_psf_sidelobe': 0.34447908250868625,
+        'stop_code': (1, 0),
+        'stokes': 'I',
+        'frequency': 372764411640.15845,
+        'time': 0.0,
+        'start_model_flux': [0.0],
+        'model_flux': [0.7685137907285896],
+        'start_peakres': [0.3250153884702824],
+        'start_peakres_nomask': [0.3250153884702824],
+        'peakres': [0.09214764521763133],
+        'peakres_nomask': [0.09214764521763133],
+        'masksum': [62500],
+        'stop_description': 'Reached the iteration limit',
+    },
+    (0, 1, 3): {
+        'niter': 100,
+        'cyclethreshold': 0.026551682660084775,
+        'iter_done': [100],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.2,
+        'max_psf_sidelobe': 0.34447908250868625,
+        'stop_code': (1, 0),
+        'stokes': 'Q',
+        'frequency': 372764411640.15845,
+        'time': 0.0,
+        'start_model_flux': [0.0],
+        'model_flux': [0.03533077827276314],
+        'start_peakres': [0.13275841330042387],
+        'start_peakres_nomask': [0.13275841330042387],
+        'peakres': [0.07901175475017379],
+        'peakres_nomask': [0.08541584586642978],
+        'masksum': [62500],
+        'stop_description': 'Reached the iteration limit',
+    },
+    (0, 0, 4): {
+        'niter': 100,
+        'cyclethreshold': 0.07066916383960643,
+        'iter_done': [100],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.2,
+        'max_psf_sidelobe': 0.3444778231912157,
+        'stop_code': (1, 0),
+        'stokes': 'I',
+        'frequency': 372765022022.7062,
+        'time': 0.0,
+        'start_model_flux': [0.0],
+        'model_flux': [0.6857668900749301],
+        'start_peakres': [0.35334581919803215],
+        'start_peakres_nomask': [0.35334581919803215],
+        'peakres': [0.08930366061252694],
+        'peakres_nomask': [0.09027342549634497],
+        'masksum': [62500],
+        'stop_description': 'Reached the iteration limit',
+    },
+    (0, 1, 4): {
+        'niter': 100,
+        'cyclethreshold': 0.02211009245788454,
+        'iter_done': [100],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.2,
+        'max_psf_sidelobe': 0.3444778231912157,
+        'stop_code': (1, 0),
+        'stokes': 'Q',
+        'frequency': 372765022022.7062,
+        'time': 0.0,
+        'start_model_flux': [0.0],
+        'model_flux': [-0.09793243292320182],
+        'start_peakres': [0.1105504622894227],
+        'start_peakres_nomask': [0.1105504622894227],
+        'peakres': [0.07635328920165872],
+        'peakres_nomask': [-0.09901618422777503],
+        'masksum': [62500],
+        'stop_description': 'Reached the iteration limit',
+    },
+}
+
+
+# niter=10000, nmajor=4, threshold=0.001: deconvolves to the major-cycle limit
+# (the threshold is not reached) -> stop_code (9, 0).
+EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
+    (0, 0, 0): {
+        'niter': 10000,
+        'cyclethreshold': 0.035900881810030635,
+        'iter_done': [3, 22, 290, 1595],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.3445475295671201,
+        'stop_code': (9, 0),
+        'stokes': 'I',
+        'frequency': 372762580492.5155,
+        'time': 0.0,
+        'start_model_flux': [0.0, 0.09718702204548665, 0.4825330600317771, 1.159797427505857],
+        'model_flux': [0.09718702204548665, 0.4825330600317771, 1.159797427505857, 1.7520032099811906],
+        'start_peakres': [0.35750769883669886, 0.2631183190329552, 0.13405951306715252, 0.07343511202635758],
+        'start_peakres_nomask': [0.35750769883669886, 0.2631183190329552, 0.13405951306715252, 0.09198393537130387],
+        'peakres': [0.26311837258523163, 0.13442036393758017, 0.06946478831746959, 0.03585352130809877],
+        'peakres_nomask': [0.26311837258523163, 0.13442036393758017, -0.10285130475892759, -0.08985693562049257],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+    (0, 1, 0): {
+        'niter': 10000,
+        'cyclethreshold': 0.013208288568023155,
+        'iter_done': [8, 715, 2066, 3653],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.3445475295671201,
+        'stop_code': (9, 0),
+        'stokes': 'Q',
+        'frequency': 372762580492.5155,
+        'time': 0.0,
+        'start_model_flux': [0.0, 0.06398640705714076, -0.13570365233397255, -0.11925250561112496],
+        'model_flux': [0.06398640705714076, -0.13570365233397255, -0.11925250561112496, -0.2702666200375462],
+        'start_peakres': [0.12055068831924319, 0.09668704802810893, 0.05755014392609231, 0.0363014930639613],
+        'start_peakres_nomask': [0.12055068831924319, 0.09668704802810893, -0.06483231242826937, -0.056938615472674585],
+        'peakres': [0.0959953340255374, -0.04950471250278252, -0.02555678086874822, -0.013208065044139546],
+        'peakres_nomask': [0.0959953340255374, 0.07869248490248072, -0.05892657840905252, -0.04888484815084779],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+    (0, 0, 1): {
+        'niter': 10000,
+        'cyclethreshold': 0.03349452616839233,
+        'iter_done': [3, 26, 372, 1637],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.344533866326935,
+        'stop_code': (9, 0),
+        'stokes': 'I',
+        'frequency': 372763190875.0631,
+        'time': 0.0,
+        'start_model_flux': [0.0, 0.09086301993655113, 0.48714152453270637, 1.055466672602224],
+        'model_flux': [0.09086301993655113, 0.48714152453270637, 1.055466672602224, 1.3929070027327735],
+        'start_peakres': [0.3351074869017025, 0.2465803127553856, -0.12563841463957237, 0.06689310012081892],
+        'start_peakres_nomask': [0.3351074869017025, 0.2465803127553856, -0.12563841463957237, -0.07175340967366711],
+        'peakres': [0.24658036446829307, -0.12563929217840017, -0.0648112893815567, -0.03349328036668022],
+        'peakres_nomask': [0.24658036446829307, -0.12563929217840017, -0.07955797944228352, -0.06498572800663095],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+    (0, 1, 1): {
+        'niter': 10000,
+        'cyclethreshold': 0.01294509960945086,
+        'iter_done': [15, 854, 2012, 3310],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.344533866326935,
+        'stop_code': (9, 0),
+        'stokes': 'Q',
+        'frequency': 372763190875.0631,
+        'time': 0.0,
+        'start_model_flux': [0.0, 0.006016719503292748, 0.2056671885703777, 0.08811593952745678],
+        'model_flux': [0.006016719503292748, 0.2056671885703777, 0.08811593952745678, 0.07855219224260607],
+        'start_peakres': [-0.11825339664330473, 0.09308343885970413, -0.052830647582281204, -0.03481885440117216],
+        'start_peakres_nomask': [-0.11825339664330473, 0.09308343885970413, -0.06419945960041408, -0.04972177480089822],
+        'peakres': [-0.09389724733759419, 0.04849935769766049, -0.02504852860563592, -0.01293494736806545],
+        'peakres_nomask': [-0.09389724733759419, -0.07604044511732594, -0.05753203513591941, -0.04780307601839216],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+    (0, 0, 2): {
+        'niter': 10000,
+        'cyclethreshold': 0.033319147131844896,
+        'iter_done': [3, 28, 368, 1614],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.34448079976471313,
+        'stop_code': (9, 0),
+        'stokes': 'I',
+        'frequency': 372763801257.61084,
+        'time': 0.0,
+        'start_model_flux': [0.0, 0.0916035160783401, 0.5491671818352681, 1.1218611311657138],
+        'model_flux': [0.0916035160783401, 0.5491671818352681, 1.1218611311657138, 1.1287944257041806],
+        'start_peakres': [0.3380203777669396, 0.2464167473657761, 0.12466861312466165, -0.06623974818319509],
+        'start_peakres_nomask': [0.3380203777669396, 0.2464167473657761, 0.12466861312466165, 0.06986476369698277],
+        'peakres': [0.246416800747472, 0.12511840620530953, 0.0644818659551853, 0.0332715946474775],
+        'peakres_nomask': [0.246416800747472, 0.12511840620530953, 0.0776866192006112, 0.0643197276130056],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+    (0, 1, 2): {
+        'niter': 10000,
+        'cyclethreshold': 0.014318313868060933,
+        'iter_done': [5, 612, 1963, 3026],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.34448079976471313,
+        'stop_code': (9, 0),
+        'stokes': 'Q',
+        'frequency': 372763801257.61084,
+        'time': 0.0,
+        'start_model_flux': [0.0, 0.03497499853849212, 0.6018001645297726, 0.9931123967009676],
+        'model_flux': [0.03497499853849212, 0.6018001645297726, 0.9931123967009676, 1.007334469762727],
+        'start_peakres': [0.13011414045626285, -0.10400362324374737, -0.05773290986642028, -0.03473492134482885],
+        'start_peakres_nomask': [0.13011414045626285, -0.10400362324374737, -0.0816911358287811, -0.052956508157880555],
+        'peakres': [-0.10401673272264614, -0.053702486822943284, -0.027709940830452882, -0.014317940136346425],
+        'peakres_nomask': [-0.10401673272264614, -0.08080850066390213, -0.0717053634202924, -0.052833260398108546],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+    (0, 0, 3): {
+        'niter': 10000,
+        'cyclethreshold': 0.03293603309341919,
+        'iter_done': [3, 28, 441, 1772],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.34447908250868625,
+        'stop_code': (9, 0),
+        'stokes': 'I',
+        'frequency': 372764411640.15845,
+        'time': 0.0,
+        'start_model_flux': [0.0, 0.08878698615066782, 0.5086397677138595, 0.9458757420905952],
+        'model_flux': [0.08878698615066782, 0.5086397677138595, 0.9458757420905952, 1.5433574528710663],
+        'start_peakres': [0.3250153884702824, 0.24324762521379614, -0.12365112726419497, -0.06921296065803335],
+        'start_peakres_nomask': [0.3250153884702824, 0.24324762521379614, -0.12365112726419497, 0.07271240581112574],
+        'peakres': [0.24324767373115244, -0.12365099019310297, 0.06374075092080266, 0.03293408980973097],
+        'peakres_nomask': [0.24324767373115244, -0.12365099019310297, 0.07802848851809419, 0.061966590096323146],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+    (0, 1, 3): {
+        'niter': 10000,
+        'cyclethreshold': 0.014335478343885431,
+        'iter_done': [7, 694, 1861, 3082],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.34447908250868625,
+        'stop_code': (9, 0),
+        'stokes': 'Q',
+        'frequency': 372764411640.15845,
+        'time': 0.0,
+        'start_model_flux': [0.0, 0.011751165304778703, -0.03164703664044338, -0.2342840038181733],
+        'model_flux': [0.011751165304778703, -0.03164703664044338, -0.2342840038181733, -0.32699774390757613],
+        'start_peakres': [0.13275841330042387, -0.10396325269068865, 0.058687765846087675, -0.035089432781414145],
+        'start_peakres_nomask': [0.13275841330042387, -0.10396325269068865, -0.0631802942904398, -0.04830070435469852],
+        'peakres': [-0.10396225525444691, 0.05371269532409429, -0.02774329719236088, -0.01433033577629681],
+        'peakres_nomask': [-0.10396225525444691, 0.08186354676928359, -0.05910770216233156, -0.0437291158976326],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+    (0, 0, 4): {
+        'niter': 10000,
+        'cyclethreshold': 0.03573911986540156,
+        'iter_done': [3, 20, 290, 1497],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.3444778231912157,
+        'stop_code': (9, 0),
+        'stokes': 'I',
+        'frequency': 372765022022.7062,
+        'time': 0.0,
+        'start_model_flux': [0.0, 0.09632811291794371, 0.44859343492168907, 0.7335580527200094],
+        'model_flux': [0.09632811291794371, 0.44859343492168907, 0.7335580527200094, 0.9831520950925193],
+        'start_peakres': [0.35334581919803215, 0.2624829860334644, 0.13386095443544138, 0.07033269743888945],
+        'start_peakres_nomask': [0.35334581919803215, 0.2624829860334644, 0.13386095443544138, 0.07927601244668904],
+        'peakres': [0.2624830392160828, 0.1338609943238513, -0.06916578747956766, 0.03571772488882554],
+        'peakres_nomask': [0.2624830392160828, 0.1338609943238513, 0.08967755696001663, 0.07547805510487447],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+    (0, 1, 4): {
+        'niter': 10000,
+        'cyclethreshold': 0.012186263452403511,
+        'iter_done': [32, 1003, 1932, 3569],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.3444778231912157,
+        'stop_code': (9, 0),
+        'stokes': 'Q',
+        'frequency': 372765022022.7062,
+        'time': 0.0,
+        'start_model_flux': [0.0, -0.01697025554183381, 0.1709945982838767, 0.2896250041338442],
+        'model_flux': [-0.01697025554183381, 0.1709945982838767, 0.2896250041338442, 0.18891088243462262],
+        'start_peakres': [0.1105504622894227, 0.08913756341350447, 0.05230757236200801, -0.031314655510733445],
+        'start_peakres_nomask': [0.1105504622894227, -0.09824161233271012, -0.07306211302917887, -0.04473555043359731],
+        'peakres': [0.08842375422031411, -0.04568214338258588, 0.02358403092446981, -0.012163852873695542],
+        'peakres_nomask': [-0.10032285401796909, -0.09196188495585823, -0.05946674193127636, -0.04122865035022493],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+}
+
+
+# multi_cycle, single precision (float32), threshold=0.001. The iteration
+# path matches the double-precision run (identical iter_done) but the float
+# fields differ at the float32 level. Asserted only for the single-threaded
+# single-precision variant.
+EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE_SINGLE = {
+    (0, 0, 0): {
+        'niter': 10000,
+        'cyclethreshold': 0.03590087109364959,
+        'iter_done': [3, 22, 290, 1595],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.3445475399494171,
+        'stop_code': (9, 0),
+        'stokes': 'I',
+        'frequency': 372762580492.5155,
+        'time': 0.0,
+        'start_model_flux': [0.0, 0.09718703478574753, 0.4825330972671509, 1.1597975492477417],
+        'model_flux': [0.09718703478574753, 0.4825330972671509, 1.1597975492477417, 1.7520498037338257],
+        'start_peakres': [0.35750773549079895, 0.26311829686164856, 0.13405951857566833, 0.07343511283397675],
+        'start_peakres_nomask': [0.35750773549079895, 0.26311829686164856, 0.13405951857566833, 0.09198445081710815],
+        'peakres': [0.2631183862686157, 0.13442035019397736, 0.06946476548910141, 0.03585322946310043],
+        'peakres_nomask': [0.2631183862686157, 0.13442035019397736, -0.10285143554210663, -0.08985655009746552],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+    (0, 1, 0): {
+        'niter': 10000,
+        'cyclethreshold': 0.013208423494340593,
+        'iter_done': [8, 715, 2066, 3691],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.3445475399494171,
+        'stop_code': (9, 0),
+        'stokes': 'Q',
+        'frequency': 372762580492.5155,
+        'time': 0.0,
+        'start_model_flux': [0.0, 0.06398636102676392, -0.13570334017276764, -0.11925153434276581],
+        'model_flux': [0.06398636102676392, -0.13570334017276764, -0.11925153434276581, -0.2717492878437042],
+        'start_peakres': [0.12055067718029022, 0.09668704122304916, 0.05755025893449783, 0.03630160167813301],
+        'start_peakres_nomask': [0.12055067718029022, 0.09668704122304916, -0.06483209878206253, -0.05693851038813591],
+        'peakres': [0.09599532932043076, -0.04950482025742531, -0.02555704116821289, -0.013187837786972523],
+        'peakres_nomask': [0.09599532932043076, 0.07869172841310501, -0.058926090598106384, -0.04875190183520317],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+    (0, 0, 1): {
+        'niter': 10000,
+        'cyclethreshold': 0.033494540031693165,
+        'iter_done': [3, 26, 372, 1629],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.34453389048576355,
+        'stop_code': (9, 0),
+        'stokes': 'I',
+        'frequency': 372763190875.0631,
+        'time': 0.0,
+        'start_model_flux': [0.0, 0.09086302667856216, 0.48714160919189453, 1.055466651916504],
+        'model_flux': [0.09086302667856216, 0.48714160919189453, 1.055466651916504, 1.433363676071167],
+        'start_peakres': [0.3351075053215027, 0.2465803176164627, -0.1256384253501892, 0.06689311563968658],
+        'start_peakres_nomask': [0.3351075053215027, 0.2465803176164627, -0.1256384253501892, -0.07175352424383163],
+        'peakres': [0.24658039212226868, -0.12563930451869965, -0.06481131166219711, 0.03347983956336975],
+        'peakres_nomask': [0.24658039212226868, -0.12563930451869965, -0.0795576274394989, -0.0650465115904808],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+    (0, 1, 1): {
+        'niter': 10000,
+        'cyclethreshold': 0.012953287189158197,
+        'iter_done': [15, 854, 2012, 3325],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.34453389048576355,
+        'stop_code': (9, 0),
+        'stokes': 'Q',
+        'frequency': 372763190875.0631,
+        'time': 0.0,
+        'start_model_flux': [0.0, 0.006016768515110016, 0.20566707849502563, 0.07336804270744324],
+        'model_flux': [0.006016768515110016, 0.20566707849502563, 0.07336804270744324, 0.07113844156265259],
+        'start_peakres': [-0.11825323104858398, 0.09308347851037979, -0.052830714732408524, -0.03469909355044365],
+        'start_peakres_nomask': [-0.11825323104858398, 0.09308347851037979, -0.06419844180345535, -0.04902895539999008],
+        'peakres': [-0.09389723837375641, 0.04849942401051521, -0.025064369663596153, -0.012949423864483833],
+        'peakres_nomask': [-0.09389723837375641, -0.07604039460420609, -0.057214319705963135, -0.04710587114095688],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+    (0, 0, 2): {
+        'niter': 10000,
+        'cyclethreshold': 0.033319138567790896,
+        'iter_done': [3, 28, 368, 1601],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.34448081254959106,
+        'stop_code': (9, 0),
+        'stokes': 'I',
+        'frequency': 372763801257.61084,
+        'time': 0.0,
+        'start_model_flux': [0.0, 0.09160351008176804, 0.5491672158241272, 1.121861219406128],
+        'model_flux': [0.09160351008176804, 0.5491672158241272, 1.121861219406128, 1.1933925151824951],
+        'start_peakres': [0.33802035450935364, 0.24641676247119904, 0.12466861307621002, -0.06623998284339905],
+        'start_peakres_nomask': [0.33802035450935364, 0.24641676247119904, 0.12466861307621002, 0.06986557692289352],
+        'peakres': [0.24641677737236023, 0.12511801719665527, 0.06448184698820114, 0.03331746906042099],
+        'peakres_nomask': [0.24641677737236023, 0.12511801719665527, 0.07768689095973969, 0.06477666646242142],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+    (0, 1, 2): {
+        'niter': 10000,
+        'cyclethreshold': 0.01433482534525199,
+        'iter_done': [5, 612, 1962, 3012],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.34448081254959106,
+        'stop_code': (9, 0),
+        'stokes': 'Q',
+        'frequency': 372763801257.61084,
+        'time': 0.0,
+        'start_model_flux': [0.0, 0.034974999725818634, 0.601800799369812, 1.0022575855255127],
+        'model_flux': [0.034974999725818634, 0.601800799369812, 1.0022575855255127, 1.0473482608795166],
+        'start_peakres': [0.1301141381263733, -0.10400363802909851, -0.05773300305008888, -0.03526977822184563],
+        'start_peakres_nomask': [0.1301141381263733, -0.10400363802909851, -0.08169113099575043, -0.053010307252407074],
+        'peakres': [-0.1040167510509491, -0.05370248854160309, -0.027741894125938416, -0.014333546161651611],
+        'peakres_nomask': [-0.1040167510509491, -0.08080887049436569, -0.07194143533706665, -0.05283176526427269],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+    (0, 0, 3): {
+        'niter': 10000,
+        'cyclethreshold': 0.03293603412442003,
+        'iter_done': [3, 28, 441, 1761],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.3444790840148926,
+        'stop_code': (9, 0),
+        'stokes': 'I',
+        'frequency': 372764411640.15845,
+        'time': 0.0,
+        'start_model_flux': [0.0, 0.08878699690103531, 0.5086398124694824, 0.9458757042884827],
+        'model_flux': [0.08878699690103531, 0.5086398124694824, 0.9458757042884827, 1.5192127227783203],
+        'start_peakres': [0.32501542568206787, 0.2432476431131363, -0.12365113198757172, -0.06921298056840897],
+        'start_peakres_nomask': [0.32501542568206787, 0.2432476431131363, -0.12365113198757172, 0.07271213084459305],
+        'peakres': [0.24324765801429749, -0.12365101277828217, 0.06374075263738632, 0.03292318433523178],
+        'peakres_nomask': [0.24324765801429749, -0.12365101277828217, 0.07802814990282059, 0.062044233083724976],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+    (0, 1, 3): {
+        'niter': 10000,
+        'cyclethreshold': 0.014314553233285565,
+        'iter_done': [7, 694, 1864, 3095],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.3444790840148926,
+        'stop_code': (9, 0),
+        'stokes': 'Q',
+        'frequency': 372764411640.15845,
+        'time': 0.0,
+        'start_model_flux': [0.0, 0.011751163750886917, -0.03219442069530487, -0.22498169541358948],
+        'model_flux': [0.011751163750886917, -0.03219442069530487, -0.22498169541358948, -0.3274250328540802],
+        'start_peakres': [0.13275839388370514, -0.10396327078342438, 0.05845488980412483, -0.034695617854595184],
+        'start_peakres_nomask': [0.13275839388370514, -0.10396327078342438, -0.06288439780473709, -0.04791884124279022],
+        'peakres': [-0.1039622575044632, -0.05366649851202965, 0.027702800929546356, -0.014308770187199116],
+        'peakres_nomask': [-0.1039622575044632, 0.08219315856695175, -0.05895431712269783, -0.04318733140826225],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+    (0, 0, 4): {
+        'niter': 10000,
+        'cyclethreshold': 0.035739132935993734,
+        'iter_done': [3, 20, 290, 1497],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.3444778323173523,
+        'stop_code': (9, 0),
+        'stokes': 'I',
+        'frequency': 372765022022.7062,
+        'time': 0.0,
+        'start_model_flux': [0.0, 0.09632812440395355, 0.44859346747398376, 0.7335582971572876],
+        'model_flux': [0.09632812440395355, 0.44859346747398376, 0.7335582971572876, 0.9831525087356567],
+        'start_peakres': [0.3533458709716797, 0.26248297095298767, 0.13386096060276031, 0.07033269107341766],
+        'start_peakres_nomask': [0.3533458709716797, 0.26248297095298767, 0.13386096060276031, 0.07927602529525757],
+        'peakres': [0.26248303055763245, 0.1338609755039215, -0.06916581094264984, 0.035717736929655075],
+        'peakres_nomask': [0.26248303055763245, 0.1338609755039215, 0.08967732638120651, 0.07547777891159058],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+    (0, 1, 4): {
+        'niter': 10000,
+        'cyclethreshold': 0.012188658191709445,
+        'iter_done': [32, 1003, 1925, 3573],
+        'loop_gain': 0.1,
+        'min_psf_fraction': 0.05,
+        'max_psf_fraction': 0.8,
+        'max_psf_sidelobe': 0.3444778323173523,
+        'stop_code': (9, 0),
+        'stokes': 'Q',
+        'frequency': 372765022022.7062,
+        'time': 0.0,
+        'start_model_flux': [0.0, -0.0169703159481287, 0.17099492251873016, 0.30038413405418396],
+        'model_flux': [-0.0169703159481287, 0.17099492251873016, 0.30038413405418396, 0.17396986484527588],
+        'start_peakres': [0.11055049300193787, 0.08913756906986237, 0.05230756476521492, -0.030638378113508224],
+        'start_peakres_nomask': [0.11055049300193787, -0.09824150055646896, -0.07306230068206787, -0.04516427963972092],
+        'peakres': [0.08842375129461288, -0.045682262629270554, -0.023588664829730988, -0.012185166589915752],
+        'peakres_nomask': [-0.10032305121421814, -0.09196170419454575, -0.05932775139808655, -0.04091144725680351],
+        'masksum': [62500, 62500, 62500, 62500],
+        'stop_description': 'Reached the major cycle limit (nmajor)',
+    },
+}
 
 
 if __name__ == "__main__":
-    # test_single_field_imaging_niter0(make_plot_saver())
-    # print("************" * 10)
-    test_single_field_imaging_nchunks5(make_plot_saver())
-    test_single_field_imaging_nchunks1(make_plot_saver())
-    # print("************" * 10)
-    # test_single_field_imaging_multi_cycle(make_plot_saver())
-
-    # from dask.distributed import Client
-    # viper_client = Client(n_workers=4, threads_per_worker=1, memory_limit="4GB")
-
-    # input("Attached dask client. Press Enter to continue with the test...")
-
-    # def my_func():
-    #     print("Hello from a worker!")
-    # delyaed_list = []
-    # for i in range(10):
-    #     delyaed_list.append(dask.delayed(my_func)())
-    # dask.compute(delyaed_list)
+    _regenerate_truth_images()

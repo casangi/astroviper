@@ -98,6 +98,10 @@ def _validate_deconvolve_params(deconvolve_params):
         - ``niter`` : int, maximum number of iterations. Default 1000.
         - ``threshold`` : float, stopping threshold, non-negative.
           Default 0.0.
+        - ``primary_beam_limit`` : float in ``[0, 1]``, primary-beam mask
+          cutoff as a fraction of the peak primary beam (used to build the
+          deconvolution mask, *not* the deconvolver stopping threshold).
+          Default 0.0.
         - ``clean_box`` : 4-tuple ``(xmin, xmax, ymin, ymax)``. Default
           ``(-1, -1, -1, -1)`` meaning the full image.
 
@@ -121,6 +125,7 @@ def _validate_deconvolve_params(deconvolve_params):
         "gain": 0.1,
         "niter": 1000,
         "threshold": 0.0,
+        "primary_beam_limit": 0.0,
         "clean_box": (-1, -1, -1, -1),
         "minpsffraction": 0.05,
         "maxpsffraction": 0.8,
@@ -151,7 +156,7 @@ def _validate_deconvolve_params(deconvolve_params):
                 raise ValueError(
                     "Clean box must be a 4-tuple (xmin, xmax, ymin, ymax) or None."
                 )
-        elif key in ("minpsffraction", "maxpsffraction"):
+        elif key in ("minpsffraction", "maxpsffraction", "primary_beam_limit"):
             if not (0 <= value <= 1):
                 raise ValueError(f"{key} must be between 0 and 1.")
 

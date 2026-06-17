@@ -30,9 +30,10 @@ def model_update_cycle_cube_single_field(
         Per-cycle deconvolution / iteration-control parameters passed straight to
         the deconvolver: the absolute ``threshold`` (floor) plus the adaptive
         ``cyclethreshold``, ``gain``, ``cycleniter``, ``niter_per_plane`` and
-        ``cyclethreshold_per_plane`` ...  The absolute ``threshold`` is also used
-        to build the primary-beam mask (a chunk-independent quantity, so the mask
-        does not depend on how the cube was split across tasks).
+        ``cyclethreshold_per_plane`` ...  The separate ``primary_beam_limit``
+        builds the primary-beam mask (a chunk-independent quantity, so the mask
+        does not depend on how the cube was split across tasks); it is distinct
+        from the deconvolver ``threshold``.
     is_n_iter_0 : bool
         ``True`` on the very first model update.  Currently informational.
     num_threads : int, optional
@@ -55,8 +56,15 @@ def model_update_cycle_cube_single_field(
     import time
     import pandas as pd
 
-    from astroviper.processing_functions.imaging.deconvolution import deconvolve
+    from astroviper.processing_functions.imaging.deconvolution import (
+        deconvolve,
+        _validate_deconvolve_params,
+    )
     from astroviper.processing_functions.image_analysis.make_mask import make_mask
+
+    # Apply deconvolve-parameter defaults (e.g. ``primary_beam_limit``) up front
+    # so both the mask step below and the deconvolver see a complete dict.
+    deconvolve_params = _validate_deconvolve_params(deconvolve_params)
 
     # Add a primary-beam mask to the input data group if one is not present yet.
     T_make_mask = 0.0
@@ -65,7 +73,7 @@ def model_update_cycle_cube_single_field(
         start = time.time()
         make_mask(
             img_xds,
-            threshold=deconvolve_params["threshold"],
+            primary_beam_limit=deconvolve_params["primary_beam_limit"],
             image_data_group_in_name=image_data_group_in_name,
             image_data_group_out_name=image_data_group_in_name,
             combine_mask=False,

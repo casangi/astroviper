@@ -7,16 +7,20 @@ generality for speed:
 
 * :func:`load_processing_set_skunk_works` reads **only** the data variables of
   the requested data group, going straight to the on-disk Zarr chunk blobs
-  (parsing the v3 sharding index by hand, or reading the v2 chunk file) instead
-  of opening a dataset/datatree through the asyncio Zarr array API. Every other
-  coordinate is *reconstructed* from the node-task inputs (the processing set
-  and the image are assumed to share the same frequency coordinate); all
-  sub-datasets are ignored.
+  instead of opening a dataset/datatree through the asyncio Zarr array API. For
+  a sharded array it reads the shard index and then ``pread``\\ s only the byte
+  ranges of the inner chunks the task's frequency selection touches -- it does
+  not read the whole shard (a single shard often spans every channel of the
+  array). The data-group arrays are read concurrently across ``num_threads``
+  threads. Every other coordinate is *reconstructed* from the node-task inputs
+  (the processing set and the image are assumed to share the same frequency
+  coordinate); all sub-datasets are ignored.
 * :func:`write_result_chunk_to_disk_using_zarr_skunk_works` writes **only** this
-  task's chunk by encoding the array to the chunk's compressed blob and writing
-  the file directly -- no ``open_group``/``open_zarr`` and no metadata round
-  trip. The empty image (and its Zarr metadata) was already created by the
-  distributed graph.
+  task's chunk by encoding each kept variable's array to its compressed blob and
+  writing the file directly -- no ``open_group``/``open_zarr`` and no metadata
+  round trip. The empty image (and its Zarr metadata) was already created by the
+  distributed graph. The variables are compressed and written concurrently
+  across ``num_threads`` threads (the compression is the dominant write cost).
 
 Nothing here uses dask: the node task is already wrapped in dask, and each task
 owns a disjoint set of chunks, so reads and writes are embarrassingly parallel.
@@ -174,41 +178,40 @@ def _decode_unit(raw, shape, dtype, meta):
     return np.frombuffer(buf, dtype=dtype).reshape(shape, order=meta.get("order", "C"))
 
 
-def _load_shard(array_path, meta, shard_index, inner_per_shard):
-    """Read a shard file and parse its inner-chunk byte index.
+def _read_shard_index(fd, file_size, meta, inner_per_shard):
+    """Read just a shard's inner-chunk byte index (its small header/footer).
 
-    Returns ``(raw_bytes, offsets)`` where ``offsets`` is a flat tuple of
-    ``(offset, nbytes)`` pairs in C-order over the inner-chunk grid, or
-    ``(None, None)`` when the shard file is absent.
+    Returns a flat tuple of ``(offset, nbytes)`` pairs in C-order over the
+    inner-chunk grid.  Only the index bytes are read -- not the chunk data --
+    so a task that wants one channel does not pull the whole shard off disk.
     """
-    path = _chunk_path(array_path, meta, shard_index)
-    if not os.path.exists(path):
-        return None, None
-    with open(path, "rb") as fh:
-        raw = fh.read()
-
     sh = meta["sharding"]
     n_inner = int(np.prod(inner_per_shard))
     has_crc = any(c["name"] == "crc32c" for c in sh.get("index_codecs", []))
     index_nbytes = n_inner * 16 + (4 if has_crc else 0)
     if sh.get("index_location", "end") == "start":
-        index_blob = raw[:index_nbytes]
+        index_blob = os.pread(fd, index_nbytes, 0)
     else:
-        index_blob = raw[-index_nbytes:]
+        index_blob = os.pread(fd, index_nbytes, file_size - index_nbytes)
     if has_crc:
         index_blob = index_blob[:-4]
-    offsets = struct.unpack("<" + "Q" * (2 * n_inner), index_blob)
-    return raw, offsets
+    return struct.unpack("<" + "Q" * (2 * n_inner), index_blob)
 
 
-def _inner_chunk(raw, offsets, flat, inner_shape, sharding_cfg, dtype):
-    """Decode one inner chunk (``flat`` C-order index) from a shard, or None."""
+def _read_inner_chunk(fd, offsets, flat, inner_shape, sharding_cfg, dtype):
+    """``pread`` + decode one inner chunk (``flat`` C-order index) from a shard.
+
+    Reads only that inner chunk's byte range from ``fd``; returns ``None`` for
+    an empty (all-fill) inner chunk so the caller can fill it.  ``os.pread`` is
+    positional -- it does not use or move the shared file offset -- so several
+    threads may read disjoint inner chunks from the same ``fd`` concurrently.
+    """
     off = offsets[2 * flat]
     nbytes = offsets[2 * flat + 1]
     if off == _UINT64_MAX or nbytes == _UINT64_MAX:
         return None  # empty inner chunk -> caller fills
     after = [c for c in sharding_cfg["codecs"] if c["name"] != "bytes"]
-    buf = _decode_bytes_bytes(raw[off : off + nbytes], after)
+    buf = _decode_bytes_bytes(os.pread(fd, nbytes, off), after)
     return np.frombuffer(buf, dtype=dtype).reshape(inner_shape)
 
 
@@ -255,26 +258,39 @@ def read_array_region(array_path, sel):
         per_axis = [
             _axis_overlaps(ranges[ax][0], ranges[ax][1], inner[ax]) for ax in range(nd)
         ]
-        shard_cache = {}
+        # Group the needed inner chunks by their shard so each shard file is
+        # opened and its index read exactly once.  A single shard can span the
+        # whole array (one inner chunk per channel), so reading just the wanted
+        # inner-chunk byte ranges -- rather than the whole shard file -- avoids
+        # over-reading by the channel count.
+        by_shard = {}
         for combo in product(*per_axis):
             gi = tuple(c[0] for c in combo)  # global inner-chunk index
             shard_index = tuple(gi[ax] // inner_per_shard[ax] for ax in range(nd))
             within = tuple(gi[ax] % inner_per_shard[ax] for ax in range(nd))
-            if shard_index not in shard_cache:
-                shard_cache[shard_index] = _load_shard(
-                    array_path, meta, shard_index, inner_per_shard
-                )
-            raw, offsets = shard_cache[shard_index]
             out_sl = tuple(slice(c[3], c[4]) for c in combo)
-            if raw is None:
-                out[out_sl] = fill
+            in_sl = tuple(slice(c[1], c[2]) for c in combo)
+            by_shard.setdefault(shard_index, []).append((within, out_sl, in_sl))
+
+        for shard_index, items in by_shard.items():
+            path = _chunk_path(array_path, meta, shard_index)
+            if not os.path.exists(path):
+                for _within, out_sl, _in_sl in items:
+                    out[out_sl] = fill
                 continue
-            flat = int(np.ravel_multi_index(within, inner_per_shard))
-            arr = _inner_chunk(raw, offsets, flat, inner, meta["sharding"], dtype)
-            if arr is None:
-                out[out_sl] = fill
-            else:
-                out[out_sl] = arr[tuple(slice(c[1], c[2]) for c in combo)]
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                offsets = _read_shard_index(
+                    fd, os.fstat(fd).st_size, meta, inner_per_shard
+                )
+                for within, out_sl, in_sl in items:
+                    flat = int(np.ravel_multi_index(within, inner_per_shard))
+                    arr = _read_inner_chunk(
+                        fd, offsets, flat, inner, meta["sharding"], dtype
+                    )
+                    out[out_sl] = fill if arr is None else arr[in_sl]
+            finally:
+                os.close(fd)
         return out, dims
 
     per_axis = [
@@ -297,6 +313,32 @@ def read_array_region(array_path, sel):
 # ---------------------------------------------------------------------------
 # Public skunk-works load
 # ---------------------------------------------------------------------------
+def _read_arrays_concurrently(reads, num_threads):
+    """Read several Zarr arrays at once via :func:`read_array_region`.
+
+    ``reads`` maps an arbitrary key to ``(array_path, sel)``; the return value
+    maps the same keys to ``(ndarray, dims)``.  With ``num_threads <= 1`` (or a
+    single array) the reads run serially; otherwise each array is read on its
+    own thread.  The reads touch disjoint files and return independent arrays,
+    so there is nothing to synchronise.
+    """
+    items = list(reads.items())
+    if num_threads <= 1 or len(items) <= 1:
+        return {key: read_array_region(path, sel) for key, (path, sel) in items}
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=min(num_threads, len(items))) as executor:
+        futures = {
+            executor.submit(read_array_region, path, sel): key
+            for key, (path, sel) in items
+        }
+        for future in futures:
+            results[futures[future]] = future.result()
+    return results
+
+
 def load_processing_set_skunk_works(
     input_data_store,
     sel_parms,
@@ -304,6 +346,7 @@ def load_processing_set_skunk_works(
     processing_set_data_group_name,
     frequency_coords,
     instrument_polarization_basis="linear",
+    num_threads=1,
 ):
     """Reconstruct a minimal processing set for cube imaging from chunk blobs.
 
@@ -339,6 +382,10 @@ def load_processing_set_skunk_works(
         Frequency values for this task's channels (``task_coords["frequency"]["data"]``).
     instrument_polarization_basis : str
         ``"linear"`` or ``"circular"``; used to label the polarization axis.
+    num_threads : int, optional
+        Maximum number of threads used to read this MS's arrays concurrently.
+        Default ``1`` (serial).  File reads and the numcodecs decode both
+        release the GIL, so threading overlaps the per-array I/O latency.
     """
     import xarray as xr
 
@@ -352,17 +399,34 @@ def load_processing_set_skunk_works(
             else slice(None)
         )
 
-        vis, vis_dims = read_array_region(
-            os.path.join(ms_path, data_group["correlated_data"]),
-            {"frequency": freq_sel},
-        )
-        uvw, uvw_dims = read_array_region(os.path.join(ms_path, data_group["uvw"]), {})
-        weight, w_dims = read_array_region(
-            os.path.join(ms_path, data_group["weight"]), {"frequency": freq_sel}
-        )
-        flag, f_dims = read_array_region(
-            os.path.join(ms_path, data_group["flag"]), {"frequency": freq_sel}
-        )
+        # Collect every array this MS needs -- the four data-group variables and
+        # the two tiny antenna-name coordinates (needed to drop auto-correlations
+        # and not reconstructable from the imaging inputs) -- and read them all
+        # concurrently.  Both the file I/O and the numcodecs decode release the
+        # GIL, so threads overlap the per-array read latency instead of paying
+        # it one array at a time.
+        reads = {
+            "correlated_data": (
+                os.path.join(ms_path, data_group["correlated_data"]),
+                {"frequency": freq_sel},
+            ),
+            "uvw": (os.path.join(ms_path, data_group["uvw"]), {}),
+            "weight": (
+                os.path.join(ms_path, data_group["weight"]),
+                {"frequency": freq_sel},
+            ),
+            "flag": (os.path.join(ms_path, data_group["flag"]), {"frequency": freq_sel}),
+        }
+        for coord_name in ("baseline_antenna1_name", "baseline_antenna2_name"):
+            if os.path.isdir(os.path.join(ms_path, coord_name)):
+                reads[coord_name] = (os.path.join(ms_path, coord_name), {})
+
+        results = _read_arrays_concurrently(reads, num_threads)
+
+        vis, vis_dims = results["correlated_data"]
+        uvw, uvw_dims = results["uvw"]
+        weight, w_dims = results["weight"]
+        flag, f_dims = results["flag"]
 
         npol = vis.shape[vis_dims.index("polarization")]
         pol_labels = _POL_LABELS[instrument_polarization_basis].get(
@@ -379,14 +443,11 @@ def load_processing_set_skunk_works(
             "frequency": ("frequency", freq_values),
             "polarization": ("polarization", pol_labels),
         }
-
         # The per-baseline antenna names cannot be reconstructed from the imaging
-        # inputs and are needed to drop auto-correlations; read these two tiny
-        # 1-D coordinates directly (they live along ``baseline_id``).
+        # inputs and were read above (when present) to drop auto-correlations.
         for coord_name in ("baseline_antenna1_name", "baseline_antenna2_name"):
-            coord_path = os.path.join(ms_path, coord_name)
-            if os.path.isdir(coord_path):
-                values, c_dims = read_array_region(coord_path, {})
+            if coord_name in results:
+                values, c_dims = results[coord_name]
                 coords[coord_name] = (c_dims, values)
 
         ds = xr.Dataset(data_vars=data_vars, coords=coords)
@@ -435,46 +496,89 @@ def _encode_chunk_blob(chunk, meta):
     return numcodecs.get_codec(comp).encode(arr) if comp else arr.tobytes()
 
 
+def _write_one_variable(dv, image_store, task_coords, img_xds):
+    """Encode and write this task's chunk for one image variable.
+
+    The chunk grid index is reconstructed from ``task_coords`` (parallel dims ->
+    ``slice.start // chunk_size``; other dims -> 0), the array is encoded with the
+    variable's on-disk codecs, and the blob is written straight to
+    ``<store>/<VAR>/c/<i0>/.../<iN>``.  Partial (edge) chunks are padded to the
+    full chunk shape with the array's fill value so the blob round-trips through
+    Zarr.  Touches only this variable's own array/files, so it is safe to run for
+    several variables concurrently.
+    """
+    name = dv.upper()
+    array_path = os.path.join(image_store, name)
+    meta = _read_array_meta(array_path)
+    oc = meta["outer_chunks"]
+    dims = list(img_xds[name].dims)
+
+    chunk_index = []
+    for ax, dim in enumerate(dims):
+        if dim in task_coords and isinstance(task_coords[dim].get("slice"), slice):
+            start = task_coords[dim]["slice"].start or 0
+            chunk_index.append(start // oc[ax])
+        else:
+            chunk_index.append(0)
+
+    values = np.asarray(img_xds[name].values)
+    if values.shape != tuple(oc):
+        fill = meta["fill_value"]
+        if fill is None or (isinstance(fill, float) and np.isnan(fill)):
+            fill = np.nan if meta["dtype"].kind in "fc" else 0
+        chunk = np.full(oc, fill, dtype=meta["dtype"])
+        chunk[tuple(slice(0, s) for s in values.shape)] = values
+    else:
+        chunk = values
+
+    blob = _encode_chunk_blob(chunk, meta)
+    path = _chunk_path(array_path, meta, tuple(chunk_index))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(blob)
+
+
 def write_result_chunk_to_disk_using_zarr_skunk_works(
-    image_store, image_data_variables_keep, task_coords, img_xds
+    image_store, image_data_variables_keep, task_coords, img_xds, num_threads=1
 ):
     """Write this task's image chunk(s) directly to their Zarr chunk file(s).
 
-    For each kept variable the chunk grid index is reconstructed from
-    ``task_coords`` (parallel dims -> ``slice.start // chunk_size``; other dims
-    -> 0), the array is encoded with the variable's on-disk codecs, and the blob
-    is written straight to ``<store>/<VAR>/c/<i0>/.../<iN>``. No ``open_group``
-    or ``open_zarr`` is used; the empty image and its metadata were created by
-    the distributed graph. Partial (edge) chunks are padded to the full chunk
-    shape with the array's fill value so the blob round-trips through Zarr.
+    Each kept variable's chunk is encoded (compressed) and written by
+    :func:`_write_one_variable`; no ``open_group`` or ``open_zarr`` is used -- the
+    empty image and its metadata were created by the distributed graph.  The
+    variables are encoded and written concurrently across ``num_threads`` threads:
+    each touches a distinct array/file and the numcodecs compression (blosc/zstd)
+    and the file write both release the GIL, so the per-variable compression --
+    the dominant write cost -- overlaps instead of running one variable at a time.
+
+    Parameters
+    ----------
+    image_store : str
+        Path of the pre-created on-disk Zarr image store.
+    image_data_variables_keep : list of str
+        Logical image-variable keys to write (e.g. ``"sky_residual"``); each is
+        upper-cased to the on-disk array name.
+    task_coords : dict
+        Per-chunk coordinate mapping; the parallel dims' ``slice`` give the chunk
+        grid index this task owns.
+    img_xds : xarray.Dataset
+        The computed image holding this task's chunk for each variable.
+    num_threads : int, optional
+        Maximum number of threads used to encode/write the variables
+        concurrently.  Default ``1`` (serial).
     """
-    for dv in image_data_variables_keep:
-        name = dv.upper()
-        array_path = os.path.join(image_store, name)
-        meta = _read_array_meta(array_path)
-        oc = meta["outer_chunks"]
-        dims = list(img_xds[name].dims)
+    variables = list(image_data_variables_keep)
+    if num_threads <= 1 or len(variables) <= 1:
+        for dv in variables:
+            _write_one_variable(dv, image_store, task_coords, img_xds)
+        return
 
-        chunk_index = []
-        for ax, dim in enumerate(dims):
-            if dim in task_coords and isinstance(task_coords[dim].get("slice"), slice):
-                start = task_coords[dim]["slice"].start or 0
-                chunk_index.append(start // oc[ax])
-            else:
-                chunk_index.append(0)
+    from concurrent.futures import ThreadPoolExecutor
 
-        values = np.asarray(img_xds[name].values)
-        if values.shape != tuple(oc):
-            fill = meta["fill_value"]
-            if fill is None or (isinstance(fill, float) and np.isnan(fill)):
-                fill = np.nan if meta["dtype"].kind in "fc" else 0
-            chunk = np.full(oc, fill, dtype=meta["dtype"])
-            chunk[tuple(slice(0, s) for s in values.shape)] = values
-        else:
-            chunk = values
-
-        blob = _encode_chunk_blob(chunk, meta)
-        path = _chunk_path(array_path, meta, tuple(chunk_index))
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as fh:
-            fh.write(blob)
+    with ThreadPoolExecutor(max_workers=min(num_threads, len(variables))) as executor:
+        futures = [
+            executor.submit(_write_one_variable, dv, image_store, task_coords, img_xds)
+            for dv in variables
+        ]
+        for future in futures:
+            future.result()  # re-raise any per-variable write error

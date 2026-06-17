@@ -85,9 +85,11 @@ def image_cube_single_field(
         Weighting scheme configuration: ``weighting`` (``"natural"`` or
         ``"briggs"``) and the Briggs ``robust`` parameter.
     iteration_control_params : dict
-        CLEAN iteration controls: ``niter``, ``nmajor``, ``threshold``, ``gain``,
-        ``cyclefactor``, ``cycleniter``, ``minpsffraction`` and
-        ``maxpsffraction``.
+        CLEAN iteration controls: ``niter``, ``nmajor``, ``threshold`` (the
+        deconvolver stopping threshold), ``primary_beam_limit`` (primary-beam
+        mask cutoff as a fraction of the peak primary beam, distinct from
+        ``threshold``), ``gain``, ``cyclefactor``, ``cycleniter``,
+        ``minpsffraction`` and ``maxpsffraction``.
     task_coords : dict
         Per-chunk coordinate mapping; ``task_coords["frequency"]["data"]``
         supplies this chunk's frequency axis.
@@ -137,7 +139,9 @@ def image_cube_single_field(
         (reconstructing coordinates from the inputs) and write each result chunk
         with
         :func:`~astroviper.node_tasks.imaging.utils.write_result_chunk_to_disk_using_zarr_skunk_works`.
-        Requires ``data_group``. Default ``False`` (production I/O).
+        Both the skunk-works load and write spread their per-array / per-variable
+        I/O and (de)compression concurrently across ``processing_function_threads``
+        threads.  Requires ``data_group``.  Default ``False`` (production I/O).
     data_group : dict, optional
         Resolved role->variable mapping for ``processing_set_data_group_name``
         (e.g. ``{"correlated_data": "VISIBILITY", "uvw": "UVW", ...}``), supplied
@@ -235,6 +239,7 @@ def image_cube_single_field(
             processing_set_data_group_name=processing_set_data_group_name,
             frequency_coords=task_coords["frequency"]["data"],
             instrument_polarization_basis=instrument_polarization_basis,
+            num_threads=processing_function_threads,
         )
     else:
         from xradio.measurement_set.load_processing_set import load_processing_set
@@ -283,6 +288,7 @@ def image_cube_single_field(
             image_data_variables_keep,
             task_coords,
             img_xds,
+            num_threads=processing_function_threads,
         )
     elif graph_mode:
         from astroviper.utils.io import write_result_chunk_to_disk_using_zarr

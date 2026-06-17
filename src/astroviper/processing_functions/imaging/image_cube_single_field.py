@@ -41,9 +41,11 @@ def imaging_preparation_single_field(
         Weighting scheme configuration: ``weighting`` (``"natural"`` or
         ``"briggs"``) and the Briggs ``robust`` parameter.
     iteration_control_params : dict
-        CLEAN iteration controls: ``niter``, ``nmajor``, ``threshold``, ``gain``,
-        ``cyclefactor``, ``cycleniter``, ``minpsffraction`` and
-        ``maxpsffraction``.
+        CLEAN iteration controls: ``niter``, ``nmajor``, ``threshold`` (the
+        deconvolver stopping threshold), ``primary_beam_limit`` (primary-beam
+        mask cutoff as a fraction of the peak primary beam, distinct from
+        ``threshold``), ``gain``, ``cyclefactor``, ``cycleniter``,
+        ``minpsffraction`` and ``maxpsffraction``.
     processing_set_data_group_name : str, optional
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     single_precision_image : bool, optional
@@ -157,9 +159,11 @@ def image_cube_single_field(
         Weighting scheme configuration: ``weighting`` (``"natural"`` or
         ``"briggs"``) and the Briggs ``robust`` parameter.
     iteration_control_params : dict
-        CLEAN iteration controls: ``niter``, ``nmajor``, ``threshold``, ``gain``,
-        ``cyclefactor``, ``cycleniter``, ``minpsffraction`` and
-        ``maxpsffraction``.
+        CLEAN iteration controls: ``niter``, ``nmajor``, ``threshold`` (the
+        deconvolver stopping threshold), ``primary_beam_limit`` (primary-beam
+        mask cutoff as a fraction of the peak primary beam, distinct from
+        ``threshold``), ``gain``, ``cyclefactor``, ``cycleniter``,
+        ``minpsffraction`` and ``maxpsffraction``.
     processing_set_data_group_name : str, optional
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     deconvolver : str, optional
