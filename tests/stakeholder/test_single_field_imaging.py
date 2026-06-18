@@ -596,7 +596,7 @@ def test_single_field_imaging_niter0(plot_saver, processing_function_threads):
     truth_xds = xr.open_zarr(TRUTH_IMAGE_NITER0)
 
     print("&&&&&&&&&" * 10)
-    print("imaging_metadata_pd", return_dict["timing"])
+    print("imaging_metadata_pd", return_dict["timing_node_tasks"])
     print("deconvolve_dict (global channel numbering):")
     print_deconvolve_dict(return_dict["deconvolution"])
 
@@ -668,7 +668,7 @@ def test_single_field_imaging_niter100(plot_saver, processing_function_threads):
 
     print("&&&&&&&&&" * 10)
     print("imaging_metadata_pd:")
-    print(return_dict["timing"].to_string())
+    print(return_dict["timing_node_tasks"].to_string())
     print("deconvolve_dict (global channel numbering):")
     print_deconvolve_dict(return_dict["deconvolution"])
     _check_deconvolve_dict(
@@ -727,7 +727,7 @@ def test_single_field_imaging_multi_cycle(
 
     print("&&&&&&&&&" * 10)
     print("imaging_metadata_pd:")
-    print(return_dict["timing"].to_string())
+    print(return_dict["timing_node_tasks"].to_string())
     print("deconvolve_dict (global channel numbering):")
     print_deconvolve_dict(return_dict["deconvolution"])
     # The deconvolution ReturnDict is independent of threads and chunks within a
@@ -756,10 +756,10 @@ def test_single_field_imaging_multi_cycle(
         tol=tol,
     )
 
-    print(return_dict["timing"].T)
-    print(return_dict["timing"]["T_deconvolve"])
-    print(return_dict["timing"]["T_residual_cycle"])
-    print(return_dict["timing"]["T_image_cube_task"])
+    print(return_dict["timing_node_tasks"].T)
+    print(return_dict["timing_node_tasks"]["T_deconvolve"])
+    print(return_dict["timing_node_tasks"]["T_residual_cycle"])
+    print(return_dict["timing_node_tasks"]["T_image_cube_task"])
 
 
 def test_single_field_imaging_multi_cycle_double_vs_single(plot_saver):

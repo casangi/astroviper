@@ -15,6 +15,35 @@ from astroviper.utils.param_docs import shares_param_docs
 _PARAM_CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+# Phase layout for the driver-level ("distributed application") timing dict that
+# :func:`image_cube_single_field` accumulates and logs before returning.  It is
+# consumed by :func:`astroviper.utils.timing.format_timing_summary`: a single
+# phase lists every driver step as a leaf and ``T_total`` holds the grand total.
+DISTRIBUTED_APPLICATION_TIMING_PHASES = [
+    (
+        "DISTRIBUTED APPLICATION (driver)",
+        None,
+        [
+            ("create empty image xds", "T_make_empty_image_xds"),
+            ("write empty image to disk", "T_write_empty_image"),
+            (
+                "determine chunks + parallel coords",
+                "T_determine_chunks_and_parallel_coords",
+            ),
+            ("create empty data vars on disk", "T_create_empty_data_variables"),
+            ("open processing set", "T_open_processing_set"),
+            ("interpolate data coords", "T_interpolate_data_coords"),
+            ("create map/reduce graph", "T_create_map_reduce_graph"),
+            ("generate dask graph", "T_generate_dask_graph"),
+            ("compute dask graph", "T_compute_dask_graph"),
+            ("consolidate metadata", "T_consolidate_metadata"),
+        ],
+    ),
+]
+
+DISTRIBUTED_APPLICATION_TIMING_TOTAL_KEY = "T_total"
+
+
 def _load_processing_set_chunk(load_params):
     """Load a disk-level chunk of the processing set for the data loading layer.
 
@@ -194,12 +223,18 @@ def image_cube_single_field(
     Returns
     -------
     dict
-        ``{"timing", "deconvolution"}``: ``"timing"`` is a
-        :class:`pandas.DataFrame` with one row per frequency chunk and a
-        ``T_*`` column per processing function; ``"deconvolution"`` is the merged
-        per-plane
-        :class:`~astroviper.processing_functions.imaging.utils.return_dict.ReturnDict`
-        of convergence statistics (global channel numbering).
+        ``{"timing_node_tasks", "deconvolution", "timing_distributed_application"}``:
+
+        * ``"timing_node_tasks"`` is a :class:`pandas.DataFrame` with one row per
+          frequency chunk and a ``T_*`` column per processing function (the
+          per-node-task timings concatenated across chunks).
+        * ``"deconvolution"`` is the merged per-plane
+          :class:`~astroviper.processing_functions.imaging.utils.return_dict.ReturnDict`
+          of convergence statistics (global channel numbering).
+        * ``"timing_distributed_application"`` is a dict of the driver-level
+          step timings (``T_*`` seconds: building/writing the empty image,
+          building the graph, computing it, consolidating metadata) plus the
+          grand total ``T_total``.
     """
 
     import numpy as np
@@ -230,6 +265,12 @@ def image_cube_single_field(
     if restore and "sky_restored" not in image_data_variables_keep:
         image_data_variables_keep = list(image_data_variables_keep) + ["sky_restored"]
 
+    # Every driver step is timed into ``timing_distributed_application``; the
+    # individual per-step timing log messages are replaced by the formatted
+    # summary logged just before returning.
+    timing_distributed_application = {}
+    application_start = time.time()
+
     # Create an empty image on disk with the correct coordinates and dimensions.
     start = time.time()
     img_xds = make_empty_sky_image(
@@ -241,15 +282,11 @@ def image_cube_single_field(
         time_coords=image_params["time_coords"],
         do_sky_coords=False,
     )
-    logger.info(
-        "Time to create empty image xds: " + str(time.time() - start) + " seconds"
-    )
+    timing_distributed_application["T_make_empty_image_xds"] = time.time() - start
 
     start = time.time()
     write_image(img_xds, imagename=image_store, out_format="zarr", overwrite=overwrite)
-    logger.info(
-        "Time to write empty image to disk: " + str(time.time() - start) + " seconds"
-    )
+    timing_distributed_application["T_write_empty_image"] = time.time() - start
 
     # Determine number of chunks
     start = time.time()
@@ -268,10 +305,8 @@ def image_cube_single_field(
         "Number of frequency chunks ... : "
         + str(len(parallel_coords["frequency"]["data_chunks"]))
     )
-    logger.info(
-        "Time to determine number of chunks and make parallel coords: "
-        + str(time.time() - start)
-        + " seconds"
+    timing_distributed_application["T_determine_chunks_and_parallel_coords"] = (
+        time.time() - start
     )
 
     # Add nan images (these will be overwritten with the actual image data but this ensures the coordinates and dtypes are correct and allows for lazy writing of the data)
@@ -286,11 +321,8 @@ def image_cube_single_field(
         double_precision=not single_precision_image,
         data_variable_definitions="imaging",
     )
-
-    logger.info(
-        "Time to create empty data variables on disk: "
-        + str(time.time() - start)
-        + " seconds"
+    timing_distributed_application["T_create_empty_data_variables"] = (
+        time.time() - start
     )
 
     zarr_meta = {}
@@ -329,7 +361,7 @@ def image_cube_single_field(
 
     start = time.time()
     ps_xdt = open_processing_set(ps_store, scan_intents=scan_intents)
-    logger.info("Time to open processing set: " + str(time.time() - start) + " seconds")
+    timing_distributed_application["T_open_processing_set"] = time.time() - start
 
     # The skunk-works node-task I/O path reconstructs the processing set from the
     # data group's variables only, so it needs the resolved role->variable
@@ -345,11 +377,7 @@ def image_cube_single_field(
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
         parallel_coords, ps_xdt
     )
-    logger.info(
-        "Time to interpolate data coords onto parallel coords: "
-        + str(time.time() - start)
-        + " seconds"
-    )
+    timing_distributed_application["T_interpolate_data_coords"] = time.time() - start
 
     # Auto-detect native on-disk chunk sizes if not supplied by the caller.
     if disk_chunk_sizes == "Auto":
@@ -389,14 +417,12 @@ def image_cube_single_field(
     viper_graph = reduce(
         viper_graph, combine_return_data_frames, reduce_input_params, mode="tree"
     )
-    logger.info(
-        "Time to create map reduce graph: " + str(time.time() - start) + " seconds"
-    )
+    timing_distributed_application["T_create_map_reduce_graph"] = time.time() - start
 
     # Compute cube
     start = time.time()
     dask_graph = generate_dask_workflow(viper_graph)
-    logger.info("Time to generate dask graph: " + str(time.time() - start) + " seconds")
+    timing_distributed_application["T_generate_dask_graph"] = time.time() - start
 
     if vizualize_graph:
         dask.visualize(dask_graph, filename="cube_imaging.png")
@@ -404,21 +430,63 @@ def image_cube_single_field(
     start = time.time()
     print("######### Just before compute ############")
     return_dict = dask.compute(dask_graph)[0]
-    logger.info("Time to compute dask graph: " + str(time.time() - start) + " seconds")
+    timing_distributed_application["T_compute_dask_graph"] = time.time() - start
 
     start = time.time()
     zarr.consolidate_metadata(image_store)
+    timing_distributed_application["T_consolidate_metadata"] = time.time() - start
+
+    timing_distributed_application["T_total"] = time.time() - application_start
+
+    # The reduce already produced ``{"timing_node_tasks", "deconvolution"}``; add
+    # the driver-level timing so the full return dict carries timing for both the
+    # distributed application (this driver) and the per-chunk node tasks.
+    return_dict["timing_distributed_application"] = timing_distributed_application
+
+    from astroviper.utils.timing import format_timing_summary
+    from astroviper.processing_functions.imaging.utils import (
+        IMAGING_TIMING_PHASES,
+        IMAGING_TIMING_TOTAL_KEY,
+    )
+
+    # Driver-level ("distributed application") timing breakdown.
     logger.info(
-        "Time to consolidate metadata: " + str(time.time() - start) + " seconds"
+        format_timing_summary(
+            timing_distributed_application,
+            DISTRIBUTED_APPLICATION_TIMING_PHASES,
+            total_key=DISTRIBUTED_APPLICATION_TIMING_TOTAL_KEY,
+            title="AstroVIPER distributed-application timing (driver, seconds)",
+            total_label="TOTAL (driver wall time)",
+        )
+    )
+
+    # Per-node-task timing summarized across all frequency chunks: the mean of
+    # each timing column over all chunks, then the max (the slowest chunk).
+    timing_node_tasks = return_dict["timing_node_tasks"]
+    logger.info(
+        format_timing_summary(
+            timing_node_tasks.mean(numeric_only=True).to_dict(),
+            IMAGING_TIMING_PHASES,
+            total_key=IMAGING_TIMING_TOTAL_KEY,
+            title="AstroVIPER node-task timing: MEAN over frequency chunks (seconds)",
+        )
+    )
+    logger.info(
+        format_timing_summary(
+            timing_node_tasks.max(numeric_only=True).to_dict(),
+            IMAGING_TIMING_PHASES,
+            total_key=IMAGING_TIMING_TOTAL_KEY,
+            title="AstroVIPER node-task timing: MAX over frequency chunks (seconds)",
+        )
     )
 
     return return_dict
 
 
 def combine_return_data_frames(input_data, input_params):
-    """Reduce per-chunk ``{"timing", "deconvolution"}`` results into one dict.
+    """Reduce per-chunk ``{"timing_node_tasks", "deconvolution"}`` results into one dict.
 
-    Each node task returns a single dict with a ``"timing"`` one-row
+    Each node task returns a single dict with a ``"timing_node_tasks"`` one-row
     :class:`pandas.DataFrame` and a ``"deconvolution"``
     :class:`~astroviper.processing_functions.imaging.utils.return_dict.ReturnDict`
     (already remapped to global channel numbers) for its channel chunk. This
@@ -426,21 +494,22 @@ def combine_return_data_frames(input_data, input_params):
     per-chunk deconvolution dicts with :func:`merge_return_dicts`. Because every
     chunk covers a disjoint global channel range, the merge never collides.
 
-    Returns the same ``{"timing", "deconvolution"}`` shape so it composes under
-    tree-mode reduction (its own output becomes an input at the next level).
+    Returns the same ``{"timing_node_tasks", "deconvolution"}`` shape so it
+    composes under tree-mode reduction (its own output becomes an input at the
+    next level).
 
     Parameters
     ----------
     input_data : list of dict
-        Per-chunk (or partially reduced) results, each with ``"timing"`` and
-        ``"deconvolution"`` keys.
+        Per-chunk (or partially reduced) results, each with
+        ``"timing_node_tasks"`` and ``"deconvolution"`` keys.
     input_params : dict
         Unused; present for the GraphVIPER reduce signature.
 
     Returns
     -------
     dict
-        ``{"timing": pandas.DataFrame, "deconvolution": ReturnDict}``.
+        ``{"timing_node_tasks": pandas.DataFrame, "deconvolution": ReturnDict}``.
     """
     import pandas as pd
     from astroviper.processing_functions.imaging.utils.iteration_control import (
@@ -452,12 +521,12 @@ def combine_return_data_frames(input_data, input_params):
 
     for result in input_data:
         combined_timing = pd.concat(
-            [combined_timing, result["timing"]], ignore_index=True
+            [combined_timing, result["timing_node_tasks"]], ignore_index=True
         )
         deconvolve_dicts.append(result["deconvolution"])
 
     return {
-        "timing": combined_timing,
+        "timing_node_tasks": combined_timing,
         "deconvolution": merge_return_dicts(deconvolve_dicts),
     }
 

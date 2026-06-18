@@ -162,11 +162,11 @@ def image_cube_single_field(
     dict
         Single dict with two keys:
 
-        * ``"timing"`` : one-row :class:`pandas.DataFrame` with a ``T_*`` column
-          per processing function (load, image build, weights, PSF, primary
-          beam, gridding, FFT normalization, degridding, deconvolution, write,
-          ...) plus ``task_id``, ``n_channels``, ``n_major_cycles`` and the
-          total ``T_image_cube_task``.
+        * ``"timing_node_tasks"`` : one-row :class:`pandas.DataFrame` with a
+          ``T_*`` column per processing function (load, image build, weights,
+          PSF, primary beam, gridding, FFT normalization, degridding,
+          deconvolution, write, ...) plus ``task_id``, ``n_channels``,
+          ``n_major_cycles`` and the total ``T_image_cube_task``.
         * ``"deconvolution"`` : the per-plane deconvolution
           :class:`~astroviper.processing_functions.imaging.utils.return_dict.ReturnDict`,
           with channels remapped to global channel numbers.
@@ -332,6 +332,7 @@ def image_cube_single_field(
         timing_df,
         IMAGING_TIMING_PHASES,
         total_key=IMAGING_TIMING_TOTAL_KEY,
+        printer=logger.debug,
     )
 
-    return {"timing": timing_df, "deconvolution": combined_deconvolve_dict}
+    return {"timing_node_tasks": timing_df, "deconvolution": combined_deconvolve_dict}
