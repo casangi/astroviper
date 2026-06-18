@@ -428,7 +428,6 @@ def image_cube_single_field(
         dask.visualize(dask_graph, filename="cube_imaging.png")
 
     start = time.time()
-    print("######### Just before compute ############")
     return_dict = dask.compute(dask_graph)[0]
     timing_distributed_application["T_compute_dask_graph"] = time.time() - start
 

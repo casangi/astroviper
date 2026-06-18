@@ -116,3 +116,17 @@ PYBIND11_FINDPYTHON = "ON"
 # (Optional) This block is ignored by scikit-build-core; safe to delete.
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+# Silence noisy, non-actionable zarr V3 warnings across the whole test suite.
+# pytest's per-test warning capture resets import-time filters, so these must be
+# set here rather than only in src/astroviper/__init__.py (which covers
+# non-pytest runtime use). The first is matched by its specific category; the
+# second is matched by message because its category (zarr.errors.ZarrUserWarning)
+# is a broad base class we do not want to silence wholesale.
+filterwarnings = [
+    # Fixed-length UTF string dtypes (XRADIO Zarr stores) have no stable V3 spec.
+    "ignore::zarr.errors.UnstableSpecificationWarning",
+    # Consolidated metadata is not yet part of the Zarr V3 spec.
+    "ignore:Consolidated metadata is currently not part in the Zarr format 3 specification",
+]

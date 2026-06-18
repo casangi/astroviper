@@ -45,13 +45,13 @@ def _build_img_xds(shape=(1, 1, 1, 64, 64), pb_var="PRIMARY_BEAM", mask_var=None
 
 
 def test_make_mask_threshold_only():
-    """combine_mask=False produces (primary_beam >= threshold * peak)."""
+    """combine_mask=False produces (primary_beam >= primary_beam_limit * peak)."""
     img_xds = _build_img_xds()
-    threshold = 0.1
+    primary_beam_limit = 0.1
     pb = img_xds["PRIMARY_BEAM"].values
-    expected = (pb >= threshold * np.nanmax(pb)).astype(bool)
+    expected = (pb >= primary_beam_limit * np.nanmax(pb)).astype(bool)
 
-    result = make_mask(img_xds, threshold=threshold)
+    result = make_mask(img_xds, primary_beam_limit=primary_beam_limit)
 
     # Function mutates img_xds in place and returns None.
     assert result is None
@@ -62,9 +62,9 @@ def test_make_mask_threshold_only():
 def test_make_mask_registers_output_data_group():
     """The output data group is registered with mask role, date and description."""
     img_xds = _build_img_xds()
-    threshold = 0.2
+    primary_beam_limit = 0.2
 
-    make_mask(img_xds, threshold=threshold)
+    make_mask(img_xds, primary_beam_limit=primary_beam_limit)
 
     groups = img_xds.attrs["data_groups"]
     assert "image" in groups
@@ -72,7 +72,7 @@ def test_make_mask_registers_output_data_group():
     assert image_group["primary_beam"] == "PRIMARY_BEAM"
     assert image_group["mask"] == "MASK"
     assert "date" in image_group
-    assert f"threshold {threshold}" in image_group["description"]
+    assert f"primary_beam_limit {primary_beam_limit}" in image_group["description"]
 
 
 def test_make_mask_custom_output_mask_name():
@@ -81,7 +81,7 @@ def test_make_mask_custom_output_mask_name():
 
     make_mask(
         img_xds,
-        threshold=0.5,
+        primary_beam_limit=0.5,
         image_data_group_out_modified={"mask": "MY_MASK"},
     )
 
@@ -96,7 +96,7 @@ def test_make_mask_separate_output_data_group():
 
     make_mask(
         img_xds,
-        threshold=0.3,
+        primary_beam_limit=0.3,
         image_data_group_out_name="image_masked",
     )
 
@@ -110,15 +110,15 @@ def test_make_mask_separate_output_data_group():
 
 
 def test_make_mask_combine_with_existing_mask():
-    """combine_mask=True yields logical OR of the input mask and the threshold mask."""
+    """combine_mask=True yields logical OR of the input mask and the primary-beam mask."""
     # Distinct names for input vs output mask so overwrite=False is fine.
     img_xds = _build_img_xds(mask_var="MASK_IN")
-    threshold = 0.9
+    primary_beam_limit = 0.9
     pb = img_xds["PRIMARY_BEAM"].values
     existing = img_xds["MASK_IN"].values
-    expected = np.logical_or(existing, pb >= threshold * np.nanmax(pb))
+    expected = np.logical_or(existing, pb >= primary_beam_limit * np.nanmax(pb))
 
-    make_mask(img_xds, threshold=threshold, combine_mask=True)
+    make_mask(img_xds, primary_beam_limit=primary_beam_limit, combine_mask=True)
 
     np.testing.assert_array_equal(img_xds["MASK"].values, expected)
     # Input mask is preserved as a separate data variable.
@@ -129,17 +129,17 @@ def test_make_mask_overwrite_false_blocks_existing_mask_var():
     """When the output mask data variable already exists, overwrite=False raises."""
     img_xds = _build_img_xds(mask_var="MASK")
     with pytest.raises(AssertionError):
-        make_mask(img_xds, threshold=0.1)
+        make_mask(img_xds, primary_beam_limit=0.1)
 
 
 def test_make_mask_overwrite_true_replaces_existing_mask_var():
     """overwrite=True allows the pre-existing mask data variable to be replaced."""
     img_xds = _build_img_xds(mask_var="MASK")
-    threshold = 0.1
+    primary_beam_limit = 0.1
     pb = img_xds["PRIMARY_BEAM"].values
-    expected = (pb >= threshold * np.nanmax(pb)).astype(bool)
+    expected = (pb >= primary_beam_limit * np.nanmax(pb)).astype(bool)
 
-    make_mask(img_xds, threshold=threshold, overwrite=True)
+    make_mask(img_xds, primary_beam_limit=primary_beam_limit, overwrite=True)
 
     np.testing.assert_array_equal(img_xds["MASK"].values, expected)
 
@@ -148,19 +148,21 @@ def test_make_mask_missing_input_data_group_raises():
     """An unknown input data group name raises an AssertionError."""
     img_xds = _build_img_xds()
     with pytest.raises(AssertionError):
-        make_mask(img_xds, threshold=0.1, image_data_group_in_name="does_not_exist")
+        make_mask(
+            img_xds, primary_beam_limit=0.1, image_data_group_in_name="does_not_exist"
+        )
 
 
 def test_make_mask_handles_nan_in_primary_beam():
-    """NaNs in the primary beam do not break the threshold (nanmax is used)."""
+    """NaNs in the primary beam do not break the cutoff (nanmax is used)."""
     img_xds = _build_img_xds()
     # Inject a NaN into the primary beam — np.nanmax must ignore it.
     img_xds["PRIMARY_BEAM"].values[0, 0, 0, 0, 0] = np.nan
-    threshold = 0.1
+    primary_beam_limit = 0.1
     pb = img_xds["PRIMARY_BEAM"].values
-    expected = (pb >= threshold * np.nanmax(pb)).astype(bool)
+    expected = (pb >= primary_beam_limit * np.nanmax(pb)).astype(bool)
 
-    make_mask(img_xds, threshold=threshold)
+    make_mask(img_xds, primary_beam_limit=primary_beam_limit)
 
     np.testing.assert_array_equal(img_xds["MASK"].values, expected)
 
@@ -169,12 +171,12 @@ def test_make_mask_description_appends_on_repeat_call():
     """A second call with overwrite=True appends to the existing audit-trail description."""
     img_xds = _build_img_xds()
 
-    make_mask(img_xds, threshold=0.1)
+    make_mask(img_xds, primary_beam_limit=0.1)
     first_description = img_xds.attrs["data_groups"]["image"]["description"]
 
-    make_mask(img_xds, threshold=0.5, overwrite=True)
+    make_mask(img_xds, primary_beam_limit=0.5, overwrite=True)
     second_description = img_xds.attrs["data_groups"]["image"]["description"]
 
     # modify_data_groups_xds appends with "; " when a description already exists.
     assert second_description.startswith(first_description + "; ")
-    assert "threshold 0.5" in second_description
+    assert "primary_beam_limit 0.5" in second_description
