@@ -128,7 +128,7 @@ def interpolate_pointing_to_spectral_times(
     spec_times = Time(
         t_raw,
         format=main_xds["time"].attrs.get("format", "unix"),
-        scale=main_xds["time"].attrs.get("scale",  "utc"),
+        scale=main_xds["time"].attrs.get("scale", "utc"),
     )
 
     # -- convert both time axes to unix seconds for interpolation -------------
@@ -139,7 +139,7 @@ def interpolate_pointing_to_spectral_times(
     # -- interpolate ----------------------------------------------------------
     # ra wraps at 0/360 — interpolate on the unwrapped values to avoid
     # discontinuities near 0°/360°, then re-wrap to [0°, 360°)
-    ra_unwrapped = np.unwrap(np.deg2rad(ra))   # unwrap in radians
+    ra_unwrapped = np.unwrap(np.deg2rad(ra))  # unwrap in radians
     ra_interp = np.rad2deg(CubicSpline(t_point, ra_unwrapped)(t_spec)) % 360
     dec_interp = CubicSpline(t_point, dec)(t_spec)
 
