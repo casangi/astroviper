@@ -41,11 +41,51 @@ def imaging_preparation_single_field(
         Weighting scheme configuration: ``weighting`` (``"natural"`` or
         ``"briggs"``) and the Briggs ``robust`` parameter.
     iteration_control_params : dict
-        CLEAN iteration controls: ``niter``, ``nmajor``, ``threshold`` (the
-        deconvolver stopping threshold), ``primary_beam_limit`` (primary-beam
-        mask cutoff as a fraction of the peak primary beam, distinct from
-        ``threshold``), ``gain``, ``cyclefactor``, ``cycleniter``,
-        ``minpsffraction`` and ``maxpsffraction``.
+        CLEAN minor/major-cycle iteration controls, matching the meaning of the
+        corresponding CASA ``tclean`` parameters. Iteration control is performed
+        **independently per** ``(time, frequency, polarization)`` **plane**: each
+        plane carries its own iteration budget and stopping thresholds, and the
+        major-cycle loop continues until *every* selected plane has stopped --
+        the one deliberate difference from CASA, whose ``niter`` budget is global
+        across the image. Keys:
+
+        - ``niter`` : Maximum number of minor-cycle CLEAN iterations (flux
+          components) per plane, summed over all major cycles. A plane stops once
+          it has spent this budget; ``niter=0`` makes only the dirty image (no
+          deconvolution).
+        - ``nmajor`` : Maximum number of deconvolving major cycles (each a
+          residual update followed by a minor cycle). ``nmajor=N`` performs ``N``
+          deconvolutions -- the dirty image is computed inside the first such
+          cycle, matching CASA's ``nmajor`` -- and ``nmajor=-1`` removes the
+          major-cycle limit. Shared across planes (not tracked per plane).
+        - ``threshold`` : Absolute stopping threshold, given as a float in Jy. A
+          plane stops when its peak residual inside the clean mask falls to or
+          below ``threshold``; the value is also a hard floor on the
+          per-minor-cycle ``cyclethreshold`` (below). ``threshold=0`` disables
+          the absolute stop.
+        - ``primary_beam_limit`` : Primary-beam mask cutoff as a fraction of the
+          peak primary beam, in ``[0, 1]`` (the analogue of CASA's ``pblimit`` /
+          ``pbmask``). Pixels where the primary beam is below this fraction are
+          excluded from cleaning. A masking cutoff, distinct from ``threshold``.
+        - ``gain`` : CLEAN loop gain -- the fraction of the selected peak flux
+          subtracted from the residual image each minor iteration
+          (``0 < gain <= 1``).
+        - ``cyclefactor`` : Scaling applied to the brightest PSF sidelobe level
+          when setting the minor-cycle stopping depth (see ``cyclethreshold``
+          below). Larger values trigger the next major cycle sooner; smaller
+          values clean deeper before each residual update.
+        - ``cycleniter`` : Maximum number of minor-cycle iterations a plane may
+          run before a major cycle is triggered. ``cycleniter=-1`` lets the
+          adaptive ``cyclethreshold`` govern the depth instead; otherwise the
+          count is clamped to never exceed the plane's remaining ``niter``.
+        - ``minpsffraction`` : Lower clamp on the PSF fraction used to set the
+          minor-cycle threshold ``cyclethreshold = clamp(max_psf_sidelobe *
+          cyclefactor, minpsffraction, maxpsffraction) * peak_residual`` (then
+          floored at ``threshold``). Raising it limits how deep a single minor
+          cycle cleans.
+        - ``maxpsffraction`` : Upper clamp on that same PSF fraction; it
+          guarantees a minimum amount of cleaning per minor cycle even when the
+          PSF sidelobe level is high.
     processing_set_data_group_name : str, optional
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     single_precision_image : bool, optional
@@ -159,11 +199,51 @@ def image_cube_single_field(
         Weighting scheme configuration: ``weighting`` (``"natural"`` or
         ``"briggs"``) and the Briggs ``robust`` parameter.
     iteration_control_params : dict
-        CLEAN iteration controls: ``niter``, ``nmajor``, ``threshold`` (the
-        deconvolver stopping threshold), ``primary_beam_limit`` (primary-beam
-        mask cutoff as a fraction of the peak primary beam, distinct from
-        ``threshold``), ``gain``, ``cyclefactor``, ``cycleniter``,
-        ``minpsffraction`` and ``maxpsffraction``.
+        CLEAN minor/major-cycle iteration controls, matching the meaning of the
+        corresponding CASA ``tclean`` parameters. Iteration control is performed
+        **independently per** ``(time, frequency, polarization)`` **plane**: each
+        plane carries its own iteration budget and stopping thresholds, and the
+        major-cycle loop continues until *every* selected plane has stopped --
+        the one deliberate difference from CASA, whose ``niter`` budget is global
+        across the image. Keys:
+
+        - ``niter`` : Maximum number of minor-cycle CLEAN iterations (flux
+          components) per plane, summed over all major cycles. A plane stops once
+          it has spent this budget; ``niter=0`` makes only the dirty image (no
+          deconvolution).
+        - ``nmajor`` : Maximum number of deconvolving major cycles (each a
+          residual update followed by a minor cycle). ``nmajor=N`` performs ``N``
+          deconvolutions -- the dirty image is computed inside the first such
+          cycle, matching CASA's ``nmajor`` -- and ``nmajor=-1`` removes the
+          major-cycle limit. Shared across planes (not tracked per plane).
+        - ``threshold`` : Absolute stopping threshold, given as a float in Jy. A
+          plane stops when its peak residual inside the clean mask falls to or
+          below ``threshold``; the value is also a hard floor on the
+          per-minor-cycle ``cyclethreshold`` (below). ``threshold=0`` disables
+          the absolute stop.
+        - ``primary_beam_limit`` : Primary-beam mask cutoff as a fraction of the
+          peak primary beam, in ``[0, 1]`` (the analogue of CASA's ``pblimit`` /
+          ``pbmask``). Pixels where the primary beam is below this fraction are
+          excluded from cleaning. A masking cutoff, distinct from ``threshold``.
+        - ``gain`` : CLEAN loop gain -- the fraction of the selected peak flux
+          subtracted from the residual image each minor iteration
+          (``0 < gain <= 1``).
+        - ``cyclefactor`` : Scaling applied to the brightest PSF sidelobe level
+          when setting the minor-cycle stopping depth (see ``cyclethreshold``
+          below). Larger values trigger the next major cycle sooner; smaller
+          values clean deeper before each residual update.
+        - ``cycleniter`` : Maximum number of minor-cycle iterations a plane may
+          run before a major cycle is triggered. ``cycleniter=-1`` lets the
+          adaptive ``cyclethreshold`` govern the depth instead; otherwise the
+          count is clamped to never exceed the plane's remaining ``niter``.
+        - ``minpsffraction`` : Lower clamp on the PSF fraction used to set the
+          minor-cycle threshold ``cyclethreshold = clamp(max_psf_sidelobe *
+          cyclefactor, minpsffraction, maxpsffraction) * peak_residual`` (then
+          floored at ``threshold``). Raising it limits how deep a single minor
+          cycle cleans.
+        - ``maxpsffraction`` : Upper clamp on that same PSF fraction; it
+          guarantees a minimum amount of cleaning per minor cycle even when the
+          PSF sidelobe level is high.
     processing_set_data_group_name : str, optional
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     deconvolver : str, optional
@@ -272,6 +352,7 @@ def image_cube_single_field(
     n_major_cycles = 0
     while controller.stopcode.major == 0:
         n_major_cycles += 1
+        print("*********** This is major cycle ", n_major_cycles)
 
         # ---- Residual-update phase ----
         start = time.time()
@@ -325,7 +406,16 @@ def image_cube_single_field(
                 **iteration_control_params,
                 "cycleniter": cycle_niter,
                 "cyclethreshold": cyclethreshold,
-                "niter_per_plane": controller.niter,
+                # Cap this minor cycle at cycle_niter (= min(cycleniter,
+                # remaining)). The deconvolver uses niter_per_plane as its
+                # per-plane max_iter and never reads "cycleniter"; without this
+                # clamp a single minor cycle is handed the full remaining budget
+                # and (when cyclethreshold is 0) consumes all of niter at once,
+                # collapsing the run to one major cycle. Clamping here makes
+                # cycleniter actually bound each minor cycle so nmajor major
+                # cycles run as intended. .clip returns a copy (the controller's
+                # own remaining-budget array is decremented later by update_counts).
+                "niter_per_plane": controller.niter.clip(max=cycle_niter),
                 "cyclethreshold_per_plane": cyclethreshold_per_plane,
             }
 
@@ -341,6 +431,10 @@ def image_cube_single_field(
                 )
             )
             accumulate_timing(timing, model_update_return_df)
+            print("cycleniter: ", cycle_niter)
+            print("cyclethreshold: ", cyclethreshold)
+            print("niter_per_plane: ", controller.niter)
+            print("cyclethreshold_per_plane", cyclethreshold_per_plane)
         else:
             deconvolve_dict = ReturnDict()
 
