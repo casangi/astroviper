@@ -79,7 +79,7 @@ def progress_callback(
         Default is 100.
     """
     if iter_num % niter_log == 0:
-        logger.info(f"  Iteration {iter_num}, peak at ({px}, {py}): {peak:.6f}")
+        logger.debug(f"  Iteration {iter_num}, peak at ({px}, {py}): {peak:.6f}")
 
 
 def _validate_deconvolve_params(deconvolve_params):
@@ -133,7 +133,7 @@ def _validate_deconvolve_params(deconvolve_params):
 
     for key, default_value in default_params.items():
         if key not in deconvolve_params:
-            logger.info(
+            logger.debug(
                 f"Deconvolution parameter '{key}' not specified. Using default: {default_value}"
             )
             deconvolve_params[key] = default_value
@@ -581,7 +581,7 @@ def deconvolve(
 
     broadcast_psf = npol_psf == 1 and npol > 1
     if broadcast_psf:
-        logger.info(f"PSF is single-plane, will broadcast to {npol} polarizations")
+        logger.debug(f"PSF is single-plane, will broadcast to {npol} polarizations")
     elif npol_psf != npol:
         raise ValueError(
             "PSF should have same number of polarizations as the input image, "
@@ -818,7 +818,7 @@ def hogbom_clean(
 
     logger.debug(f"Residual cube shape: {residual_cube.shape}")
     logger.debug(f"PSF cube shape: {psf_cube.shape}")
-    logger.info("Running Hogbom CLEAN on cube with num_threads=%d" % num_threads)
+    logger.debug("Running Hogbom CLEAN on cube with num_threads=%d" % num_threads)
 
     clean_box = deconvolve_params["clean_box"]
     if clean_box is None:
@@ -905,7 +905,7 @@ def hogbom_clean_many_threads(
             f"Got {mask_cube.shape} and {residual_cube.shape}"
         )
 
-    logger.info(
+    logger.debug(
         "Running many-threads Hogbom CLEAN on cube with num_threads=%d" % num_threads
     )
 
@@ -1062,7 +1062,7 @@ def asp_clean(
 
     logger.debug(f"Residual cube shape: {residual_cube.shape}")
     logger.debug(f"PSF cube shape: {psf_cube.shape}")
-    logger.info("Running Asp CLEAN on cube with num_threads=%d" % num_threads)
+    logger.debug("Running Asp CLEAN on cube with num_threads=%d" % num_threads)
 
     # The Asp binding takes a numeric mask matching the image dtype (it is
     # convolved with each scale). Convert if needed; an empty array means

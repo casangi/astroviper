@@ -418,9 +418,9 @@ def degrid_imaging_weights_jit(
                                     if np.isnan(
                                         briggs_factors[0, a_chan, a_pol]
                                     ) or np.isnan(briggs_factors[1, a_chan, a_pol]):
-                                        print(
-                                            "NaN in briggs_factors", briggs_factors, gij
-                                        )
+                                        # print(
+                                        #     "NaN in briggs_factors", briggs_factors, gij
+                                        # )
                                         raise ValueError("NaN in briggs_factors")
                                     # Briggs denominator: a * G + b
                                     denom = (

@@ -257,10 +257,8 @@ def ifft_norm_img_xds(
                     plane /= kernel_image_1D_m[None, :]
                     plane *= flux_scale / normalization[t, f, p]
 
-                    # print("!!!! Memory before remove padding ", get_rss_gb())
                     out_arr[t, f, p] = remove_padding(plane.real, image_size)
 
-                    # print("!!!! Memory after remove padding ", get_rss_gb())
 
         if data_variable_out not in image_data_variables_keep:
             # Release the large grid from the dataset so it can be freed as soon
@@ -371,11 +369,7 @@ def fft_norm_img_xds(
             for f in range(n_freq):
                 for p in range(n_pol):
                     add_padding(raw_grid[t, f, p], out_arr[t, f, p])
-                    # plt.figure(figsize=(20,10))
-                    # plt.imshow(np.abs(out_arr[t, f, p]))
-                    # plt.colorbar()
 
-                    # print("$$$$************" * 10, "t:", t, "f:", f, "p:", p, out_arr[t, f, p].shape, n_uv[0], n_uv[1])
                     out_arr[t, f, p] = fft_lm_to_uv(
                         out_arr[t, f, p]
                         / kernel_image_1D_l[:, None]
@@ -385,18 +379,7 @@ def fft_norm_img_xds(
                         complex_dtype=complex_dtype,
                     )
 
-                    # out_arr[t, f, p] = fft_lm_to_uv(
-                    #     raw_grid[t, f, p]/kernel_image_1D_l[:, None]/kernel_image_1D_m[None, :], num_threads=num_threads, fft_backend=fft_backend
-                    # )
-
-                    # plt.figure(figsize=(20,10))
-                    # plt.imshow(np.abs(raw_grid[t, f, p]))
-                    # plt.colorbar()
-                    # plt.figure(figsize=(20,10))
-                    # plt.imshow(np.abs(out_arr[t, f, p]))
-                    # plt.colorbar()
-                    # print("$$$$************" * 10, "t:", t, "f:", f, "p:", p, out_arr[t, f, p].shape, n_uv[0], n_uv[1], raw_grid[t, f, p].shape)
-
+             
         plt.show()
 
         if data_variable not in image_data_variables_keep:

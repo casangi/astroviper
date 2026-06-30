@@ -352,7 +352,7 @@ def image_cube_single_field(
     n_major_cycles = 0
     while controller.stopcode.major == 0:
         n_major_cycles += 1
-        print("*********** This is major cycle ", n_major_cycles)
+        #print("*********** This is major cycle ", n_major_cycles)
 
         # ---- Residual-update phase ----
         start = time.time()
@@ -431,10 +431,10 @@ def image_cube_single_field(
                 )
             )
             accumulate_timing(timing, model_update_return_df)
-            print("cycleniter: ", cycle_niter)
-            print("cyclethreshold: ", cyclethreshold)
-            print("niter_per_plane: ", controller.niter)
-            print("cyclethreshold_per_plane", cyclethreshold_per_plane)
+            # print("cycleniter: ", cycle_niter)
+            # print("cyclethreshold: ", cyclethreshold)
+            # print("niter_per_plane: ", controller.niter)
+            # print("cyclethreshold_per_plane", cyclethreshold_per_plane)
         else:
             deconvolve_dict = ReturnDict()
 

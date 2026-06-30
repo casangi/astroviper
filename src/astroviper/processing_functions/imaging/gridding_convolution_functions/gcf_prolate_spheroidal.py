@@ -97,14 +97,12 @@ def create_prolate_spheroidal_kernel_1D(oversampling, support):
     support_center = support // 2
     oversampling_center = oversampling // 2
     u = np.arange(oversampling * (support_center)) / (support_center * oversampling)
-    # print(u)
 
     long_half_kernel_1D = np.zeros(oversampling * (support_center + 1))
     _, long_half_kernel_1D[0 : oversampling * (support_center)] = (
         prolate_spheroidal_function(u)
     )
 
-    # print(_prolate_spheroidal_function(u))
     return long_half_kernel_1D
 
 

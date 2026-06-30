@@ -119,6 +119,10 @@ def image_cube_single_field(
     fft_backend="pyfftw",
     restore: bool = False,
     skunk_works: bool = False,
+    compute_backend: str = "dask",
+    mpi_cluster_setup: Optional[Dict[str, Any]] = None,
+    reduce_mode: str = "tree",
+    reduce_n_batch: int = 2,
 ):  # -> Tuple[xr.Dataset, ReturnDict]:
     """
     Create a spectral cube.
@@ -260,6 +264,28 @@ def image_cube_single_field(
         pre-created image store, bypassing the asyncio Zarr dataset API. The
         processing set and image are assumed to share the same frequency
         coordinate. Default ``False``.
+    compute_backend : str
+        Engine used to execute the map/reduce graph. ``"dask"`` (default) builds
+        a ``dask.delayed`` graph with
+        :func:`graphviper.graph_tools.generate_dask_workflow` and runs
+        ``dask.compute``. ``"mpi"`` instead executes the same graph with
+        :func:`graphviper.graph_tools.processes_with_mpi` on an
+        ``mpi4py.futures`` manager-worker pool; the program must then be launched
+        in the static model (``... python -m mpi4py.futures <script>``), where the
+        rank running this function is the manager and the other ranks are the
+        worker pool. The Dask client is unused in MPI mode.
+    mpi_cluster_setup : dict, optional
+        Options forwarded to :func:`graphviper.graph_tools.processes_with_mpi`
+        when ``compute_backend="mpi"`` (e.g. ``max_workers``, ``chunksize``,
+        ``reduce_in_pool``, ``progress_every``). Ignored for the Dask backend.
+    reduce_mode : str
+        Reduction topology passed to :func:`graphviper.graph_tools.reduce`:
+        ``"tree"`` (binary, default), ``"single_node"`` (all chunks to one reduce
+        node), or ``"tree_n"`` (combine ``reduce_n_batch`` chunks per reduce node
+        per layer). Honoured by both backends.
+    reduce_n_batch : int
+        Fan-in per reduce node when ``reduce_mode="tree_n"`` (must be ``>= 2``).
+        Ignored for the other modes.
     Returns
     -------
     dict
@@ -285,7 +311,7 @@ def image_cube_single_field(
     from xradio.measurement_set import open_processing_set
     from graphviper.graph_tools.coordinate_utils import make_parallel_coord
     from graphviper.graph_tools import generate_dask_workflow, generate_airflow_workflow
-    from graphviper.graph_tools import map, reduce
+    from graphviper.graph_tools import map, reduce, processes_with_mpi
     from xradio.image import make_empty_sky_image
     from xradio.image import write_image
     import zarr
@@ -455,21 +481,45 @@ def image_cube_single_field(
     reduce_input_params = {}
 
     viper_graph = reduce(
-        viper_graph, combine_return_data_frames, reduce_input_params, mode="tree"
+        viper_graph,
+        combine_return_data_frames,
+        reduce_input_params,
+        mode=reduce_mode,
+        n_batch=reduce_n_batch,
     )
     timing_distributed_application["T_create_map_reduce_graph"] = time.time() - start
 
-    # Compute cube
-    start = time.time()
-    dask_graph = generate_dask_workflow(viper_graph)
-    timing_distributed_application["T_generate_dask_graph"] = time.time() - start
+    # Compute cube. Two interchangeable backends execute the same backend-agnostic
+    # viper_graph: the default Dask backend (generate_dask_workflow + dask.compute)
+    # or the MPI backend (processes_with_mpi on an mpi4py.futures manager-worker
+    # pool, selected with compute_backend="mpi" and launched via
+    # `python -m mpi4py.futures`). The MPI backend builds no dask.delayed graph, so
+    # there is no separate "generate" step (T_generate_dask_graph = 0).
+    if compute_backend == "mpi":
+        if vizualize_graph:
+            logger.warning(
+                "vizualize_graph is ignored for compute_backend='mpi' (no "
+                "dask.delayed graph is built)."
+            )
+        timing_distributed_application["T_generate_dask_graph"] = 0.0
+        start = time.time()
+        return_dict = processes_with_mpi(viper_graph, mpi_cluster_setup)
+        timing_distributed_application["T_compute_dask_graph"] = time.time() - start
+    elif compute_backend == "dask":
+        start = time.time()
+        dask_graph = generate_dask_workflow(viper_graph)
+        timing_distributed_application["T_generate_dask_graph"] = time.time() - start
 
-    if vizualize_graph:
-        dask.visualize(dask_graph, filename="cube_imaging.png")
+        if vizualize_graph:
+            dask.visualize(dask_graph, filename="cube_imaging.png")
 
-    start = time.time()
-    return_dict = dask.compute(dask_graph)[0]
-    timing_distributed_application["T_compute_dask_graph"] = time.time() - start
+        start = time.time()
+        return_dict = dask.compute(dask_graph)[0]
+        timing_distributed_application["T_compute_dask_graph"] = time.time() - start
+    else:
+        raise ValueError(
+            f"Unknown compute_backend {compute_backend!r}; expected 'dask' or 'mpi'."
+        )
 
     start = time.time()
     zarr.consolidate_metadata(image_store)

@@ -36,6 +36,13 @@
         "disk_chunk_sizes": { "type": ["dict", "str"], "nullable": true },
         "fft_backend": { "type": ["str"], "allowed": ["pyfftw", "scipy"] },
         "restore": { "type": "boolean" },
-        "skunk_works": { "type": "boolean" }
+        "skunk_works": { "type": "boolean" },
+        "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },
+        "mpi_cluster_setup": { "type": ["dict"], "nullable": true },
+        "reduce_mode": {
+            "type": ["str"],
+            "allowed": ["tree", "single_node", "tree_n"]
+        },
+        "reduce_n_batch": { "type": ["int"], "min": 2 }
     }
 }

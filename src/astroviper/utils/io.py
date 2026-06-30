@@ -146,7 +146,6 @@ def write_result_chunk_to_disk_using_zarr(
             else:
                 idx.append(slice(None))
         idx = tuple(idx)
-        # print("dv: ", dv, " idx: ", idx, " size_dict: ", size_dict)
 
         group = zarr.open_group(image_store, mode="r+")
         sky = group[dv]
