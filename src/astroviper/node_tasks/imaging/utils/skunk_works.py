@@ -499,16 +499,19 @@ def _encode_chunk_blob(chunk, meta):
     return numcodecs.get_codec(comp).encode(arr) if comp else arr.tobytes()
 
 
-def _write_one_variable(dv, image_store, task_coords, img_xds):
-    """Encode and write this task's chunk for one image variable.
+def _encode_one_variable(dv, image_store, task_coords, img_xds):
+    """Encode (compress) this task's chunk for one image variable to its on-disk
+    blob, WITHOUT writing it.
 
     The chunk grid index is reconstructed from ``task_coords`` (parallel dims ->
     ``slice.start // chunk_size``; other dims -> 0), the array is encoded with the
-    variable's on-disk codecs, and the blob is written straight to
-    ``<store>/<VAR>/c/<i0>/.../<iN>``.  Partial (edge) chunks are padded to the
-    full chunk shape with the array's fill value so the blob round-trips through
-    Zarr.  Touches only this variable's own array/files, so it is safe to run for
-    several variables concurrently.
+    variable's on-disk codecs, and the ``(path, blob)`` for
+    ``<store>/<VAR>/c/<i0>/.../<iN>`` is returned.  Partial (edge) chunks are
+    padded to the full chunk shape with the array's fill value so the blob
+    round-trips through Zarr.  Touches only this variable's own metadata, so it is
+    safe to run for several variables concurrently.  Splitting encode from the
+    disk write lets the CPU-bound compression run concurrently while the writes
+    stay serial (see :func:`write_result_chunk_to_disk_using_zarr_skunk_works`).
     """
     name = dv.upper()
     array_path = os.path.join(image_store, name)
@@ -536,6 +539,11 @@ def _write_one_variable(dv, image_store, task_coords, img_xds):
 
     blob = _encode_chunk_blob(chunk, meta)
     path = _chunk_path(array_path, meta, tuple(chunk_index))
+    return path, blob
+
+
+def _write_blob(path, blob):
+    """Write one pre-encoded chunk blob to disk (create its parent dir first)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as fh:
         fh.write(blob)
@@ -546,13 +554,22 @@ def write_result_chunk_to_disk_using_zarr_skunk_works(
 ):
     """Write this task's image chunk(s) directly to their Zarr chunk file(s).
 
-    Each kept variable's chunk is encoded (compressed) and written by
-    :func:`_write_one_variable`; no ``open_group`` or ``open_zarr`` is used -- the
-    empty image and its metadata were created by the distributed graph.  The
-    variables are encoded and written concurrently across ``num_threads`` threads:
-    each touches a distinct array/file and the numcodecs compression (blosc/zstd)
-    and the file write both release the GIL, so the per-variable compression --
-    the dominant write cost -- overlaps instead of running one variable at a time.
+    Two phases, deliberately decoupled:
+
+    1. **Encode (compress)** each kept variable's chunk with its on-disk codecs.
+       This is the dominant, CPU-bound, GIL-releasing cost and runs concurrently
+       across up to ``num_threads`` threads (one per variable).
+    2. **Write** the resulting blobs to disk **serially** -- one open file at a
+       time for this task.
+
+    Keeping the compression threaded but the writes serial is intentional for
+    running at scale on a shared parallel filesystem (Lustre): the per-variable
+    concurrency previously opened one file per variable *per task* simultaneously
+    (e.g. 3 concurrent ~1 GB writes x thousands of tasks), which floods the OSTs /
+    metadata server.  Serial writes cut a task's concurrent open files to one
+    while the (larger) compression cost still overlaps.  No ``open_group`` /
+    ``open_zarr`` is used -- the empty image and its metadata were created by the
+    distributed graph.
 
     Parameters
     ----------
@@ -567,21 +584,30 @@ def write_result_chunk_to_disk_using_zarr_skunk_works(
     img_xds : xarray.Dataset
         The computed image holding this task's chunk for each variable.
     num_threads : int, optional
-        Maximum number of threads used to encode/write the variables
-        concurrently.  Default ``1`` (serial).
+        Maximum number of threads used to *encode/compress* the variables
+        concurrently (the disk writes are always serial).  Default ``1`` (serial
+        encode).
     """
     variables = list(image_data_variables_keep)
+
+    # Phase 1: encode/compress (optionally concurrent across variables).
     if num_threads <= 1 or len(variables) <= 1:
-        for dv in variables:
-            _write_one_variable(dv, image_store, task_coords, img_xds)
-        return
-
-    from concurrent.futures import ThreadPoolExecutor
-
-    with ThreadPoolExecutor(max_workers=min(num_threads, len(variables))) as executor:
-        futures = [
-            executor.submit(_write_one_variable, dv, image_store, task_coords, img_xds)
+        encoded = [
+            _encode_one_variable(dv, image_store, task_coords, img_xds)
             for dv in variables
         ]
-        for future in futures:
-            future.result()  # re-raise any per-variable write error
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(num_threads, len(variables))) as executor:
+            futures = [
+                executor.submit(
+                    _encode_one_variable, dv, image_store, task_coords, img_xds
+                )
+                for dv in variables
+            ]
+            encoded = [f.result() for f in futures]  # order matches variables; re-raises
+
+    # Phase 2: write the blobs serially (one open file at a time for this task).
+    for path, blob in encoded:
+        _write_blob(path, blob)

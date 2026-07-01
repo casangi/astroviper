@@ -357,6 +357,11 @@ def image_cube_single_field(
     timing_df["T_load"] = T_load
     timing_df["T_write"] = T_write
     timing_df["T_image_cube_task"] = time.time() - task_start
+    # Record which node ran this task so the per-chunk timing frame can be grouped
+    # by host (identify stragglers / a slow node in the sweep).
+    import socket
+
+    timing_df["hostname"] = socket.gethostname()
 
     # Debug: phase-grouped timing breakdown for this chunk. The generic
     # formatter lives in the top-level utils; the imaging phase layout

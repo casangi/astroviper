@@ -456,7 +456,7 @@ def image_cube_single_field(
         timing["T_model_update_cycle"] += time.time() - model_phase_start
 
         if stopcode.major != 0:
-            logger.info(f"  *** CONVERGED: {stopdesc} ***")
+            logger.debug(f"  *** CONVERGED: {stopdesc} ***")
             break
 
     # Last residual cycle to compute the final residual image after the last
