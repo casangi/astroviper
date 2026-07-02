@@ -1,6 +1,43 @@
 from astroviper.utils.param_docs import shares_param_docs
 
 
+def _write_task_kill_switch_log(
+    timing_df, task_total_time, threshold, image_store, task_id, hostname
+):
+    """Dump an overrunning node task's full timing breakdown to an error log file.
+
+    Written next to the image store (its parent directory), best-effort. Returns
+    the path written (or a placeholder string if writing failed). Used by the
+    ``task_time_kill_switch_seconds`` watchdog before it raises to abort the run.
+    """
+    import os
+    import time as _time
+
+    try:
+        parent = os.path.dirname(os.path.abspath(image_store)) or "."
+        stamp = _time.strftime("%Y%m%d_%H%M%S")
+        pid = os.getpid()
+        path = os.path.join(
+            parent, f"KILL_SWITCH_task_{task_id}_{hostname}_{pid}_{stamp}.log"
+        )
+        lines = [
+            "TASK TIME KILL SWITCH TRIPPED",
+            f"task_id: {task_id}",
+            f"hostname: {hostname}",
+            f"pid: {pid}",
+            f"task wall time: {task_total_time:.2f} s   (threshold: {threshold} s)",
+            f"image_store: {image_store}",
+            "",
+            "per-task timing breakdown:",
+            timing_df.to_string(index=False),
+        ]
+        with open(path, "w") as fh:
+            fh.write("\n".join(str(ln) for ln in lines) + "\n")
+        return path
+    except Exception as exc:  # never let logging failure mask the kill-switch raise
+        return f"(failed to write kill-switch log: {exc!r})"
+
+
 def _remap_deconvolve_dict_to_global_channels(combined_deconvolve_dict, data_selection):
     """Shift a chunk-local deconvolve ReturnDict onto global channel numbers.
 
@@ -59,6 +96,8 @@ def image_cube_single_field(
     task_id=0,
     input_data=None,
     graph_mode=True,
+    output_shard_channels=None,
+    task_time_kill_switch_seconds=None,
 ):
     """Image one frequency chunk of a single-field cube and write it to disk.
 
@@ -315,7 +354,22 @@ def image_cube_single_field(
     )
 
     start = time.time()
-    if graph_mode and skunk_works:
+    if graph_mode and skunk_works and output_shard_channels:
+        # Sharded performance path: write this chunk's inner-chunk blob(s) into
+        # shared, pre-created Zarr v3 shard files (far fewer files -> metadata-server
+        # relief; the "single parallel file" pattern).
+        from astroviper.node_tasks.imaging.utils import (
+            write_result_chunk_to_disk_sharded_skunk_works,
+        )
+
+        write_result_chunk_to_disk_sharded_skunk_works(
+            image_store,
+            image_data_variables_keep,
+            task_coords,
+            img_xds,
+            num_threads=processing_function_threads,
+        )
+    elif graph_mode and skunk_works:
         # Experimental performance path: encode and write only this chunk's
         # blob(s) directly to the pre-created Zarr image store (no open_group).
         from astroviper.node_tasks.imaging.utils import (
@@ -353,15 +407,37 @@ def image_cube_single_field(
 
     # Fold the node-task timings (image build, load, write, total) into the
     # per-chunk timing frame produced by the science function.
+    task_total_time = time.time() - task_start
     timing_df["T_make_empty_image"] = T_make_empty_image
     timing_df["T_load"] = T_load
     timing_df["T_write"] = T_write
-    timing_df["T_image_cube_task"] = time.time() - task_start
+    timing_df["T_image_cube_task"] = task_total_time
     # Record which node ran this task so the per-chunk timing frame can be grouped
     # by host (identify stragglers / a slow node in the sweep).
     import socket
 
-    timing_df["hostname"] = socket.gethostname()
+    hostname = socket.gethostname()
+    timing_df["hostname"] = hostname
+
+    # Timing kill switch: if this task overran the watchdog threshold, dump its
+    # full timing breakdown to an error log and raise -- aborting the whole
+    # distributed computation (fail fast on a pathological node/I-O stall rather
+    # than hang the run).
+    if (
+        task_time_kill_switch_seconds is not None
+        and task_total_time > task_time_kill_switch_seconds
+    ):
+        log_path = _write_task_kill_switch_log(
+            timing_df, task_total_time, task_time_kill_switch_seconds,
+            image_store, task_id, hostname,
+        )
+        msg = (
+            f"task_time_kill_switch tripped: task {task_id} on {hostname} took "
+            f"{task_total_time:.1f}s > {task_time_kill_switch_seconds}s threshold. "
+            f"Aborting the run. Timing log written to: {log_path}"
+        )
+        logger.error(msg)
+        raise RuntimeError(msg)
 
     # Debug: phase-grouped timing breakdown for this chunk. The generic
     # formatter lives in the top-level utils; the imaging phase layout

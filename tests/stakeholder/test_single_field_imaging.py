@@ -400,15 +400,18 @@ def _run_image_cube(
     processing_function_threads,
     n_chunks,
     single_precision_image=None,
+    skunk_works=False,
+    output_shard_channels=None,
 ):
     """Run ``image_cube_single_field`` for one base test ``kind`` and variant.
 
-    Returns ``(return_dict, img_av_xds, image_params)``. ``skunk_works`` is
-    always False; the per-variant knobs are ``processing_function_threads``,
-    ``n_chunks`` and optionally ``single_precision_image`` (which overrides the
-    config value when not None). Everything else comes from ``_CONFIGS[kind]``,
-    so the truth images (generated from the same configs at double precision,
-    threads=1, n_chunks=1) and every variant share an identical imaging setup.
+    Returns ``(return_dict, img_av_xds, image_params)``. The per-variant knobs are
+    ``processing_function_threads``, ``n_chunks`` and optionally
+    ``single_precision_image`` (which overrides the config value when not None),
+    plus ``skunk_works`` / ``output_shard_channels`` to exercise the direct-write
+    and sharded-write paths. Everything else comes from ``_CONFIGS[kind]``, so the
+    truth images (generated from the same configs at double precision, threads=1,
+    n_chunks=1) and every variant share an identical imaging setup.
     """
     dask.config.set(scheduler="synchronous")
     config = _CONFIGS[kind]
@@ -434,7 +437,8 @@ def _run_image_cube(
         overwrite=True,
         disk_chunk_sizes=config["disk_chunk_sizes"],
         vizualize_graph=False,
-        skunk_works=False,
+        skunk_works=skunk_works,
+        output_shard_channels=output_shard_channels,
         **config["extra_kwargs"],
     )
     img_av_xds = xr.open_zarr(image_store)
@@ -647,6 +651,87 @@ def test_single_field_imaging_niter0(plot_saver, processing_function_threads):
     assert np.allclose(
         PB_v1, PB_v2
     ), "airy_disk_rorder and airy_disk_rorder_v2 produced different primary beams."
+
+
+@pytest.mark.parametrize("processing_function_threads", [1, 12])
+def test_single_field_imaging_niter0_sharded(plot_saver, processing_function_threads):
+    """The sharded direct-write path (skunk_works=True + output_shard_channels)
+    must produce the SAME image as the plain direct-write path while writing far
+    fewer files -- many single-channel tasks writing into shared Zarr v3 shard
+    files (the "single parallel file" pattern for metadata-server relief).
+
+    Verifies three things: (1) the sharded output matches the unsharded
+    direct-write output (numerically identical up to threaded-gridder float
+    reordering), (2) it is a valid Zarr v3 sharded array that
+    reproduces the niter0 truth image, and (3) it really is sharded -- 5 channels
+    packed 2-per-shard give 3 shard files/variable vs 5 one-file-per-channel.
+    """
+    import glob
+
+    _ensure_ps_store()
+    _ensure_truth_image(TRUTH_IMAGE_NITER0)
+
+    # A: plain direct write (one file per channel).
+    store_plain = (
+        "twhya_selfcal_5chans_lsrk_niter0_skunk_astroviper_"
+        f"t{processing_function_threads}.img.zarr"
+    )
+    _, img_plain, _ = _run_image_cube(
+        "niter0", store_plain,
+        processing_function_threads=processing_function_threads, n_chunks=5,
+        skunk_works=True, output_shard_channels=None,
+    )
+    # B: sharded direct write (2 channels per shard).
+    store_sharded = (
+        "twhya_selfcal_5chans_lsrk_niter0_sharded_astroviper_"
+        f"t{processing_function_threads}.img.zarr"
+    )
+    _, img_sharded, _ = _run_image_cube(
+        "niter0", store_sharded,
+        processing_function_threads=processing_function_threads, n_chunks=5,
+        skunk_works=True, output_shard_channels=2,
+    )
+
+    compare_vars = _CONFIGS["niter0"]["compare_variables"]
+
+    # (1) sharded output matches the unsharded direct-write output. The sharded
+    # vs unsharded difference is only the Zarr *file layout*, so the two must
+    # carry the same data; but each store is computed by its own imaging run and
+    # the threaded gridder accumulates visibilities in a nondeterministic order,
+    # so the gridded variables (SKY_RESIDUAL, POINT_SPREAD_FUNCTION) differ run
+    # to run at the ~1e-13 relative level (see: two identical unsharded runs are
+    # not bit-equal above one thread). A real sharding write bug -- data landing
+    # in the wrong shard/offset, truncation, byte corruption -- is orders of
+    # magnitude larger, so allclose well above that float-reordering floor still
+    # catches it while tolerating the benign nondeterminism.
+    for var in compare_vars:
+        assert np.allclose(
+            img_sharded[var].values, img_plain[var].values,
+            rtol=1e-8, atol=1e-10, equal_nan=True,
+        ), f"{var}: sharded write differs from unsharded direct write."
+
+    # (2) it reproduces the niter0 truth image (valid sharded array, read via xarray).
+    truth_xds = xr.open_zarr(TRUTH_IMAGE_NITER0)
+    _compare_to_truth(
+        img_sharded, truth_xds, compare_vars,
+        plot_saver=plot_saver,
+        plot_prefix=f"niter0_sharded_t{processing_function_threads}",
+    )
+
+    # (3) it is actually sharded: ceil(5/2)=3 shard files/variable vs 5 unsharded.
+    for var in compare_vars:
+        n_sharded = len([
+            f for f in glob.glob(os.path.join(store_sharded, var, "c", "**"), recursive=True)
+            if os.path.isfile(f)
+        ])
+        n_plain = len([
+            f for f in glob.glob(os.path.join(store_plain, var, "c", "**"), recursive=True)
+            if os.path.isfile(f)
+        ])
+        assert n_sharded == 3 and n_plain == 5, (
+            f"{var}: expected 3 shard files (sharded) and 5 (unsharded), "
+            f"got {n_sharded} and {n_plain}"
+        )
 
 
 @pytest.mark.parametrize("processing_function_threads", [1, 12])

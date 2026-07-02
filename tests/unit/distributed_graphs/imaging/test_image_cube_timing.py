@@ -29,7 +29,12 @@ from astroviper.utils.timing import format_timing_summary
 
 
 def _make_chunk_result(task_id, t_load, t_deconvolve, t_total, chan):
-    """One node-task-shaped result: a one-row timing frame + a ReturnDict."""
+    """One node-task-shaped result: a one-row timing frame + a ReturnDict.
+
+    The frame carries the string ``hostname`` column the real node task adds for
+    straggler grouping, so the reduce/summary paths are exercised against the
+    same mixed-dtype frame production produces (not a numeric-only stand-in).
+    """
     timing_df = pd.DataFrame(
         [
             {
@@ -39,6 +44,7 @@ def _make_chunk_result(task_id, t_load, t_deconvolve, t_total, chan):
                 "T_load": t_load,
                 "T_deconvolve": t_deconvolve,
                 IMAGING_TIMING_TOTAL_KEY: t_total,
+                "hostname": f"node{task_id}",
             }
         ]
     )
@@ -115,6 +121,46 @@ def test_node_task_timing_mean_and_max_summaries_format():
     assert "10.000" in max_summary
     # The deconvolve leaf is grouped under the model-update phase.
     assert "deconvolve" in mean_summary
+
+
+def test_format_timing_summary_skips_string_metadata_columns():
+    """A per-node-task timing frame carries a string ``hostname`` column, and the
+    node-task print path (``print_timing_summary(timing_df, ...)``) passes that
+    raw one-row frame straight into ``format_timing_summary``. The formatter must
+    therefore skip non-numeric columns rather than ``float("<hostname>")`` them
+    -- the regression that crashed every stakeholder imaging test on any host
+    whose name is not a number (``ValueError: could not convert string to float``).
+
+    This guards the DataFrame-coercion branch directly; the mean/max summary test
+    above only feeds a ``numeric_only=True`` dict and so never exercises it.
+    """
+    timing_df = pd.DataFrame(
+        [
+            {
+                "task_id": 0,
+                "n_channels": 1,
+                "n_major_cycles": 2,
+                "T_load": 1.0,
+                "T_deconvolve": 2.0,
+                IMAGING_TIMING_TOTAL_KEY: 4.0,
+                "hostname": "cordierite",  # a string that is not floatable
+            }
+        ]
+    )
+
+    # Must not raise on the string column.
+    summary = format_timing_summary(
+        timing_df,
+        IMAGING_TIMING_PHASES,
+        total_key=IMAGING_TIMING_TOTAL_KEY,
+        title="node task",
+    )
+
+    # Numeric timings still render; the string metadata column is dropped, not
+    # coerced into a bogus row.
+    assert "4.000" in summary
+    assert "deconvolve" in summary
+    assert "cordierite" not in summary
 
 
 def test_distributed_application_timing_summary_formats():

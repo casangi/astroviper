@@ -123,6 +123,8 @@ def image_cube_single_field(
     mpi_cluster_setup: Optional[Dict[str, Any]] = None,
     reduce_mode: str = "tree",
     reduce_n_batch: int = 2,
+    output_shard_channels: Optional[int] = None,
+    task_time_kill_switch_seconds: Optional[float] = None,
 ):  # -> Tuple[xr.Dataset, ReturnDict]:
     """
     Create a spectral cube.
@@ -286,6 +288,20 @@ def image_cube_single_field(
     reduce_n_batch : int
         Fan-in per reduce node when ``reduce_mode="tree_n"`` (must be ``>= 2``).
         Ignored for the other modes.
+    output_shard_channels : int, optional
+        If set (requires ``skunk_works=True``), write the output image as Zarr v3
+        **sharded** arrays with this many frequency channels packed into each shard
+        file, instead of one file per channel. Many single-channel tasks then write
+        into shared, pre-created shard files at disjoint offsets (the TACC "single
+        parallel file" pattern), cutting the output file count by up to
+        ``output_shard_channels``x and greatly relieving the parallel-filesystem
+        metadata server. ``None`` (default) keeps one file per channel.
+    task_time_kill_switch_seconds : float, optional
+        Watchdog: if a node task's total wall time exceeds this many seconds, it
+        writes an error log with that task's full timing breakdown and then raises,
+        aborting the whole distributed computation. Use to fail fast (and capture
+        the offending task) when a node hits a pathological I/O / compute stall
+        instead of hanging the run. ``None`` (default) disables the watchdog.
     Returns
     -------
     dict
@@ -325,6 +341,16 @@ def image_cube_single_field(
     assert (
         memory_mode == "in_memory"
     ), "Currently only in_memory is supported for memory_mode is implemented."
+
+    # Sharded output is written by the concurrent direct-blob (skunk_works) writer;
+    # the standard write path cannot safely write partial shards concurrently, so
+    # creating sharded arrays without it would corrupt the output. Fail fast rather
+    # than silently create sharded arrays a non-concurrent writer will clobber.
+    if output_shard_channels is not None and not skunk_works:
+        raise ValueError(
+            "output_shard_channels requires skunk_works=True (sharded output is "
+            "written by the concurrent direct-blob writer)."
+        )
 
     # When restoring, the restored sky must be created on disk and written, so
     # ensure it is in the keep list (without mutating the caller's list).
@@ -386,6 +412,7 @@ def image_cube_single_field(
         compressor=compressor,
         double_precision=not single_precision_image,
         data_variable_definitions="imaging",
+        shard_channels=output_shard_channels,
     )
     timing_distributed_application["T_create_empty_data_variables"] = (
         time.time() - start
@@ -419,6 +446,8 @@ def image_cube_single_field(
     input_params["fft_backend"] = fft_backend
     input_params["restore"] = restore
     input_params["skunk_works"] = skunk_works
+    input_params["output_shard_channels"] = output_shard_channels
+    input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
 
     from graphviper.graph_tools.coordinate_utils import (
         interpolate_data_coords_onto_parallel_coords,

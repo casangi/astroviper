@@ -199,6 +199,7 @@ def create_empty_data_variables_on_disk(
     compressor,
     double_precision,
     data_variable_definitions,
+    shard_channels=None,
 ):
     """Create multiple empty data variables on disk.
 
@@ -230,12 +231,31 @@ def create_empty_data_variables_on_disk(
         Dictionary mapping variable names to their definition dicts (with keys
         ``"dims"``, ``"dtype"``, ``"name"``), or the string ``"imaging"`` to
         select the built-in imaging variable definitions.
+    shard_channels : int, optional
+        If set (and Zarr v3), create each array as a Zarr v3 **sharded** array:
+        the per-task chunk (from ``parallel_coords``) becomes the inner chunk, and
+        ``shard_channels`` inner chunks along each parallel dimension are packed
+        into one shard file (index CRC disabled so concurrent single-chunk writers
+        can each set their own index entry). The shard files are pre-created sparse
+        with an empty index. This replaces one-file-per-chunk with far fewer files
+        (metadata-server relief) and is written by
+        :func:`astroviper.node_tasks.imaging.utils.write_result_chunk_to_disk_sharded_skunk_works`.
+        ``None`` (default) keeps the original one-file-per-chunk layout.
     """
+    import os
+
     import zarr
     import numpy as np
 
     _ZARR_V3 = int(zarr.__version__.split(".")[0]) >= 3
     group = zarr.open_group(zarr_store, mode="r+")
+
+    if shard_channels and not _ZARR_V3:
+        raise ValueError(
+            "shard_channels (output sharding) requires Zarr v3; the installed "
+            "zarr is v2."
+        )
+    sharded = bool(shard_channels) and _ZARR_V3
 
     if _ZARR_V3 and compressor is not None:
         compressor = _to_zarr_v3_codec(compressor)
@@ -269,26 +289,65 @@ def create_empty_data_variables_on_disk(
         else:
             fill_value = 0
 
-        _kwargs = dict(
-            shape=shape,
-            chunks=chunks,
-            dtype=dtype,
-            fill_value=fill_value,
-        )
-
         dv_name = dv_def["name"]
-        if _ZARR_V3:
+        if sharded:
+            # Sharded array: `chunks` becomes the INNER chunk; pack `shard_channels`
+            # inner chunks along each parallel dim into one shard. Index CRC is
+            # disabled so independent single-chunk writers can set their own index
+            # entries (see write_result_chunk_to_disk_sharded_skunk_works).
+            from zarr.codecs import ShardingCodec, BytesCodec
+
+            inner = list(chunks)
+            shard = list(chunks)
+            for ax, d in enumerate(dims):
+                if d in parallel_coords:
+                    step = inner[ax]  # inner chunk size on this parallel dim
+                    want = min(int(shard_channels), shape[ax])
+                    shard[ax] = max(step, (want // step) * step)  # multiple of inner
+            inner_codecs = [BytesCodec()] + ([compressor] if compressor else [])
             sky = group.require_array(
                 dv_name,
-                **_kwargs,
+                shape=shape,
+                chunks=tuple(shard),
+                dtype=dtype,
+                fill_value=fill_value,
+                serializer=ShardingCodec(
+                    chunk_shape=tuple(inner),
+                    codecs=inner_codecs,
+                    index_codecs=[BytesCodec()],  # no crc32c -> concurrent-writer safe
+                    index_location="end",
+                ),
+                compressors=[],
+                dimension_names=list(dv_def["dims"]),
+            )
+        elif _ZARR_V3:
+            sky = group.require_array(
+                dv_name,
+                shape=shape,
+                chunks=chunks,
+                dtype=dtype,
+                fill_value=fill_value,
                 compressors=[compressor] if compressor else [],
                 dimension_names=list(dv_def["dims"]),
             )
         else:
-            sky = group.require_dataset(dv_name, **_kwargs, compressor=compressor)
+            sky = group.require_dataset(
+                dv_name, shape=shape, chunks=chunks, dtype=dtype,
+                fill_value=fill_value, compressor=compressor,
+            )
             sky.attrs["_ARRAY_DIMENSIONS"] = dv_def["dims"]
 
         for k, v in extra_attrs.items():
             sky.attrs[k] = v
 
     zarr.consolidate_metadata(zarr_store)
+
+    if sharded:
+        # Pre-create every shard file (sparse, empty index) ONCE here in the driver
+        # so the concurrent write phase creates no files (metadata-server relief).
+        from astroviper.node_tasks.imaging.utils import precreate_sharded_files
+
+        for dv in data_variables:
+            precreate_sharded_files(
+                os.path.join(zarr_store, data_variable_definitions[dv]["name"])
+            )

@@ -52,9 +52,17 @@ def format_timing_summary(
     str
         The formatted multi-line summary.
     """
-    # Accept either a dict or a one-row DataFrame.
+    # Accept either a dict or a one-row DataFrame.  A timing frame may carry
+    # non-numeric metadata columns (e.g. ``hostname``); skip anything that
+    # doesn't coerce to a float rather than blowing up on it.
     if hasattr(timing, "columns") and hasattr(timing, "iloc"):
-        timing = {c: float(timing[c].iloc[0]) for c in timing.columns}
+        numeric = {}
+        for c in timing.columns:
+            try:
+                numeric[c] = float(timing[c].iloc[0])
+            except (TypeError, ValueError):
+                continue
+        timing = numeric
 
     def get(key):
         v = timing.get(key)

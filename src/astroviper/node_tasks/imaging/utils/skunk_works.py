@@ -611,3 +611,243 @@ def write_result_chunk_to_disk_using_zarr_skunk_works(
     # Phase 2: write the blobs serially (one open file at a time for this task).
     for path, blob in encoded:
         _write_blob(path, blob)
+
+
+# ---------------------------------------------------------------------------
+# Sharded write: many single-chunk tasks write into shared, pre-created shard
+# files (the TACC "single parallel file" pattern -> far fewer files, MDS relief)
+# ---------------------------------------------------------------------------
+# Each shard file packs ``n_inner`` inner chunks (one frequency channel each) at
+# FIXED, disjoint "slots" plus a Zarr v3 sharding index.  Because slots are
+# disjoint and pre-sized, independent per-channel tasks ``pwrite`` their inner
+# chunk and its 16-byte index entry with NO locking and NO file creation (the
+# shard files are created once, sparse, by :func:`precreate_sharded_files` in the
+# driver).  A slot's unused tail is a filesystem hole (Lustre is sparse), so
+# fixed slots waste no real space while keeping compression (the index records
+# the true byte length, so reads and stored bytes are the compressed size).
+#
+# The output is a spec-compliant Zarr v3 sharded array (verified readable by both
+# stock zarr and :func:`read_array_region`); the arrays are created WITHOUT an
+# index CRC so independent writers can each set their own index entry.
+_SHARD_INDEX_EMPTY = (1 << 64) - 1
+
+
+def _shard_inner_per_shard(meta):
+    """``(inner_per_shard tuple, n_inner)`` for a sharded array's metadata."""
+    shard = meta["outer_chunks"]
+    inner = meta["sharding"]["chunk_shape"]
+    ips = tuple(shard[i] // inner[i] for i in range(len(shard)))
+    return ips, int(np.prod(ips))
+
+
+def _assert_sharded_no_index_crc(meta, array_path):
+    """The fixed-slot writer/precreator hard-code a CRC-free shard index (bare
+    ``n_inner * 16`` bytes). Fail fast if the array was created with a ``crc32c``
+    index codec (e.g. zarr's default), which would shift the index by 4 bytes and
+    both corrupt our reads and make stock zarr reject the shard. GraphVIPER's
+    creation path (io.create_empty_data_variables_on_disk) sets
+    ``index_codecs=[BytesCodec()]``, so this only guards against a store created
+    another way.
+    """
+    index_codecs = (meta.get("sharding") or {}).get("index_codecs", [])
+    if any(c.get("name") == "crc32c" for c in index_codecs):
+        raise ValueError(
+            f"{array_path}: sharded array has a crc32c index codec, which the "
+            "concurrent fixed-slot writer cannot maintain. Create it with "
+            "index_codecs=[BytesCodec()] (no CRC)."
+        )
+
+
+def _shard_slot_size(meta):
+    """Fixed per-inner-chunk slot size (bytes): the uncompressed inner-chunk size
+    **floored to a whole MiB plus a 2 MiB margin** (so always >= 1 MiB above the
+    raw size). This is a comfortable upper bound on the compressed inner-chunk
+    size (compression essentially never exceeds the raw size + a tiny header); the
+    unused tail of each slot is a sparse hole, so the generous bound costs no real
+    disk space, and :func:`_encode_one_variable_sharded` hard-fails if a blob ever
+    exceeds it (rather than corrupting the shard).
+    """
+    inner = meta["sharding"]["chunk_shape"]
+    nbytes = int(np.prod(inner)) * meta["dtype"].itemsize
+    return ((nbytes >> 20) + 2) << 20
+
+
+def _encode_inner_chunk(chunk, meta):
+    """Encode one inner chunk to its on-disk bytes using the SHARDING inner codecs
+    (``meta["sharding"]["codecs"]`` -- e.g. bytes -> blosc), not the array's
+    top-level codec (which for a sharded array is just the sharding codec)."""
+    b = np.ascontiguousarray(chunk, dtype=meta["dtype"])
+    out = b.tobytes()
+    did_transform = False  # a byte-transform codec has run
+    for codec in meta["sharding"]["codecs"]:
+        name = codec["name"]
+        if name == "bytes":
+            continue
+        cfg = codec.get("configuration", {})
+        if name == "blosc":
+            # blosc encodes the ndarray directly (to infer the shuffle typesize),
+            # so it must be the FIRST transform codec (only 'bytes' may precede it),
+            # else a preceding transform's output would be silently discarded.
+            if did_transform:
+                raise ValueError(
+                    "blosc must be the first transform codec in the sharding inner "
+                    "codec chain (it re-encodes the raw array)."
+                )
+            out = numcodecs.Blosc(
+                cname=cfg.get("cname", "lz4"),
+                clevel=cfg.get("clevel", 5),
+                shuffle=_BLOSC_SHUFFLE.get(cfg.get("shuffle"), 1),
+            ).encode(b)
+            did_transform = True
+        elif name == "zstd":
+            out = numcodecs.Zstd(level=cfg.get("level", 0)).encode(out)
+            did_transform = True
+        elif name in ("gzip", "gz"):
+            out = numcodecs.GZip(level=cfg.get("level", 5)).encode(out)
+            did_transform = True
+        elif name == "crc32c":
+            from numcodecs import checksum32
+
+            out = checksum32.CRC32C().encode(out)
+        else:
+            raise ValueError(f"Unsupported sharding inner codec for encode: {name!r}")
+    return out
+
+
+def precreate_sharded_files(array_path):
+    """Pre-create every shard file of a sharded array as a sparse file with an
+    all-empty index. Run ONCE in the driver (empty-image creation) so the
+    concurrent write phase creates NO files -- eliminating the per-chunk
+    file-create storm on the metadata server.
+
+    Each shard file is ``n_inner * slot_size + index_size`` bytes; only the small
+    index tail (and, later, the written inner chunks) materialise on disk. The
+    index is initialised to the empty marker so unwritten channels read back as
+    the array's fill value.
+    """
+    from itertools import product
+
+    meta = _read_array_meta(array_path)
+    if meta.get("sharding") is None:
+        raise ValueError(f"{array_path} is not a sharded array; cannot pre-create shards.")
+    _assert_sharded_no_index_crc(meta, array_path)
+    ips, n_inner = _shard_inner_per_shard(meta)
+    slot = _shard_slot_size(meta)
+    index_size = n_inner * 16
+    total = n_inner * slot + index_size
+    shard = meta["outer_chunks"]
+    n_shards = tuple(
+        (meta["shape"][i] + shard[i] - 1) // shard[i] for i in range(len(shard))
+    )
+    empty_index = struct.pack(
+        "<" + "Q" * (2 * n_inner), *([_SHARD_INDEX_EMPTY] * (2 * n_inner))
+    )
+    for shard_index in product(*[range(n) for n in n_shards]):
+        path = _chunk_path(array_path, meta, shard_index)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o644)
+        try:
+            os.ftruncate(fd, total)  # sparse
+            os.pwrite(fd, empty_index, n_inner * slot)  # index at end, all-empty
+        finally:
+            os.close(fd)
+
+
+def _encode_one_variable_sharded(dv, image_store, task_coords, img_xds):
+    """Encode this task's inner chunk for one variable and resolve where it goes in
+    its (pre-created) shard file.
+
+    Returns ``(shard_path, slot_offset, index_offset, blob)``. Does not write.
+    """
+    name = dv.upper()
+    array_path = os.path.join(image_store, name)
+    meta = _read_array_meta(array_path)
+    _assert_sharded_no_index_crc(meta, array_path)
+    inner = meta["sharding"]["chunk_shape"]
+    dims = list(img_xds[name].dims)
+
+    # Global inner-chunk index (parallel dims -> slice.start // inner; else 0).
+    chunk_index = []
+    for ax, dim in enumerate(dims):
+        if dim in task_coords and isinstance(task_coords[dim].get("slice"), slice):
+            start = task_coords[dim]["slice"].start or 0
+            chunk_index.append(start // inner[ax])
+        else:
+            chunk_index.append(0)
+
+    values = np.asarray(img_xds[name].values)
+    if values.shape != tuple(inner):
+        fill = meta["fill_value"]
+        if fill is None or (isinstance(fill, float) and np.isnan(fill)):
+            fill = np.nan if meta["dtype"].kind in "fc" else 0
+        chunk = np.full(inner, fill, dtype=meta["dtype"])
+        chunk[tuple(slice(0, s) for s in values.shape)] = values
+    else:
+        chunk = values
+
+    blob = _encode_inner_chunk(chunk, meta)
+    slot = _shard_slot_size(meta)
+    ips, n_inner = _shard_inner_per_shard(meta)
+    if len(blob) > slot:
+        raise ValueError(
+            f"{name}: encoded inner chunk is {len(blob)} B but the shard slot is "
+            f"{slot} B. Increase the slot margin in _shard_slot_size."
+        )
+    shard_index = tuple(chunk_index[i] // ips[i] for i in range(len(chunk_index)))
+    within = tuple(chunk_index[i] % ips[i] for i in range(len(chunk_index)))
+    flat = int(np.ravel_multi_index(within, ips))
+    shard_path = _chunk_path(array_path, meta, shard_index)
+    slot_offset = flat * slot
+    index_offset = n_inner * slot + flat * 16
+    return shard_path, slot_offset, index_offset, blob
+
+
+def write_result_chunk_to_disk_sharded_skunk_works(
+    image_store, image_data_variables_keep, task_coords, img_xds, num_threads=1
+):
+    """Sharded direct-write: write this task's inner chunk for each kept variable
+    into its SHARED, pre-created shard file at a fixed disjoint slot, and set its
+    Zarr v3 index entry.
+
+    Many single-channel tasks write into one shard file concurrently (disjoint
+    byte ranges -> lock-free, no file creation). Compression of the variables runs
+    concurrently (``num_threads``); the ``pwrite``\\ s are serial per task. The
+    shard files must already exist (:func:`precreate_sharded_files`).
+
+    Parameters mirror :func:`write_result_chunk_to_disk_using_zarr_skunk_works`.
+    """
+    variables = list(image_data_variables_keep)
+
+    # Phase 1: encode/compress each variable's inner chunk (optionally concurrent).
+    if num_threads <= 1 or len(variables) <= 1:
+        encoded = [
+            _encode_one_variable_sharded(dv, image_store, task_coords, img_xds)
+            for dv in variables
+        ]
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(num_threads, len(variables))) as executor:
+            futures = [
+                executor.submit(
+                    _encode_one_variable_sharded, dv, image_store, task_coords, img_xds
+                )
+                for dv in variables
+            ]
+            encoded = [f.result() for f in futures]
+
+    # Phase 2: pwrite each inner chunk + its index entry into the shared shard
+    # file (serial per task; disjoint offsets across tasks -> concurrency-safe).
+    for shard_path, slot_offset, index_offset, blob in encoded:
+        try:
+            fd = os.open(shard_path, os.O_WRONLY)  # pre-created; no O_CREAT
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"shard file {shard_path} not found; precreate_sharded_files must "
+                "run in the driver before the sharded writer."
+            ) from exc
+        try:
+            os.pwrite(fd, blob, slot_offset)
+            os.pwrite(fd, struct.pack("<QQ", slot_offset, len(blob)), index_offset)
+        finally:
+            os.close(fd)

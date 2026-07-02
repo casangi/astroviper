@@ -19,6 +19,7 @@ from astroviper.node_tasks.imaging.utils import (
     load_processing_set_skunk_works,
     read_array_region,
     write_result_chunk_to_disk_using_zarr_skunk_works,
+    write_result_chunk_to_disk_sharded_skunk_works,
 )
 from astroviper.utils.io import create_empty_data_variables_on_disk
 
@@ -137,7 +138,9 @@ def test_read_v2_multichannel(tmp_path):
 # --------------------------------------------------------------------------- #
 # Direct chunk writer
 # --------------------------------------------------------------------------- #
-def _make_image_store(tmp_path, compressor, freq_chunks, variables=("sky_residual",)):
+def _make_image_store(
+    tmp_path, compressor, freq_chunks, variables=("sky_residual",), shard_channels=None
+):
     store = str(tmp_path / "img.zarr")
     zarr.open_group(store, mode="w")
     shape_dict = {
@@ -156,6 +159,7 @@ def _make_image_store(tmp_path, compressor, freq_chunks, variables=("sky_residua
         compressor=compressor,
         double_precision=False,
         data_variable_definitions="imaging",
+        shard_channels=shard_channels,
     )
     return store
 
@@ -203,6 +207,83 @@ def test_write_roundtrip_edge_chunk(tmp_path):
     )
     back = zarr.open_array(store + "/SKY_RESIDUAL")[:, 4:5, :, :, :]
     assert _equal(back, vals)
+
+
+@pytest.mark.parametrize("num_threads", [1, 4])
+@pytest.mark.parametrize(
+    "compressor",
+    [None, zarr.codecs.BloscCodec(cname="lz4", clevel=5)],
+    ids=["uncompressed", "blosc"],
+)
+def test_write_roundtrip_sharded(tmp_path, compressor, num_threads):
+    """Sharded writer: many single-channel tasks write concurrently into shared,
+    pre-created shard files; read back correctly by stock zarr AND our reader;
+    the last (partial) shard and an unwritten channel are handled; the file count
+    is reduced (fewer shard files than channels)."""
+    import glob
+    from concurrent.futures import ThreadPoolExecutor
+
+    nfreq, shard = 5, 2  # 5 channels, 2/shard -> ceil(5/2) = 3 shard files/variable
+    freq_chunks = [[c] for c in range(nfreq)]  # 1 channel per imaging chunk (inner=1)
+    variables = ["sky_residual", "point_spread_function"]
+    store = _make_image_store(
+        tmp_path, compressor, freq_chunks, variables, shard_channels=shard
+    )
+    rng = np.random.default_rng(11)
+    vals = {v: rng.standard_normal((1, nfreq, 2, 16, 16)).astype("<f4") for v in variables}
+
+    def _write(k):
+        img = xr.Dataset(
+            {
+                v.upper(): (
+                    ["time", "frequency", "polarization", "l", "m"],
+                    vals[v][:, k : k + 1, :, :, :],
+                )
+                for v in variables
+            }
+        )
+        write_result_chunk_to_disk_sharded_skunk_works(
+            store, variables, {"frequency": {"slice": slice(k, k + 1)}}, img,
+            num_threads=num_threads,
+        )
+
+    # Write channels 0..3 concurrently; leave channel 4 UNWRITTEN.
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(_write, range(nfreq - 1)))
+
+    for v in variables:
+        apath = store + "/" + v.upper()
+        z = zarr.open_array(apath)[:]  # stock zarr reader
+        ours, _ = read_array_region(apath, {})  # our reader
+        for k in range(nfreq - 1):
+            assert _equal(z[:, k], vals[v][:, k]) and _equal(ours[:, k], vals[v][:, k])
+        # Unwritten channel 4 reads back as fill (nan) both ways.
+        assert np.isnan(z[:, 4]).all() and np.isnan(ours[:, 4]).all()
+        # Actually sharded: 3 shard files, not 5 one-file-per-channel.
+        n_files = len([
+            f for f in glob.glob(apath + "/c/**", recursive=True) if __import__("os").path.isfile(f)
+        ])
+        assert n_files == 3, f"{v}: expected 3 shard files, got {n_files}"
+
+
+def test_sharded_slot_overflow_raises(tmp_path):
+    """A compressed inner chunk that would exceed its fixed slot raises clearly
+    rather than corrupting the shard (guarded in _encode_one_variable_sharded)."""
+    from astroviper.node_tasks.imaging.utils import skunk_works as sw
+
+    store = _make_image_store(tmp_path, None, [[0], [1]], ["sky_residual"], shard_channels=2)
+    vals = np.random.default_rng(12).standard_normal((1, 1, 2, 16, 16)).astype("<f4")
+    img = xr.Dataset({"SKY_RESIDUAL": (["time", "frequency", "polarization", "l", "m"], vals)})
+    # Force a tiny slot so the (uncompressed) chunk cannot fit.
+    orig = sw._shard_slot_size
+    sw._shard_slot_size = lambda meta: 16
+    try:
+        with pytest.raises(ValueError, match="shard slot"):
+            write_result_chunk_to_disk_sharded_skunk_works(
+                store, ["sky_residual"], {"frequency": {"slice": slice(0, 1)}}, img
+            )
+    finally:
+        sw._shard_slot_size = orig
 
 
 # --------------------------------------------------------------------------- #
