@@ -332,8 +332,12 @@ def create_empty_data_variables_on_disk(
             )
         else:
             sky = group.require_dataset(
-                dv_name, shape=shape, chunks=chunks, dtype=dtype,
-                fill_value=fill_value, compressor=compressor,
+                dv_name,
+                shape=shape,
+                chunks=chunks,
+                dtype=dtype,
+                fill_value=fill_value,
+                compressor=compressor,
             )
             sky.attrs["_ARRAY_DIMENSIONS"] = dv_def["dims"]
 

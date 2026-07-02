@@ -1,7 +1,7 @@
 """Unit tests for the cube-imaging driver's timing/return-dict contract.
 
 These exercise the data-free parts of
-``astroviper.distributed_graphs.imaging.image_cube_single_field``:
+``astroviper.distributed_applications.imaging.image_cube_single_field``:
 
 * the reduce step ``combine_return_data_frames`` keys its output on
   ``"timing_node_tasks"`` (not the old ``"timing"``), and
@@ -15,7 +15,7 @@ validated in ``tests/stakeholder/test_single_field_imaging.py``.
 
 import pandas as pd
 
-from astroviper.distributed_graphs.imaging.image_cube_single_field import (
+from astroviper.distributed_applications.imaging.image_cube_single_field import (
     combine_return_data_frames,
     DISTRIBUTED_APPLICATION_TIMING_PHASES,
     DISTRIBUTED_APPLICATION_TIMING_TOTAL_KEY,

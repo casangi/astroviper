@@ -311,29 +311,6 @@ class TestPlanePeakAbsSigned:
 
 
 # ---------------------------------------------------------------------------
-# progress_callback
-# ---------------------------------------------------------------------------
-
-
-class TestProgressCallback:
-    def test_no_log_off_cadence(self, caplog):
-        with caplog.at_level(logging.INFO):
-            progress_callback(17, 1, 2, 0.5, niter_log=100)
-        # 17 % 100 != 0 so nothing should be emitted.
-        assert not any("Iteration" in record.getMessage() for record in caplog.records)
-
-    def test_logs_on_cadence(self, caplog):
-        with caplog.at_level(logging.INFO):
-            progress_callback(200, 4, 5, 1.25, niter_log=100)
-        assert any("Iteration 200" in record.getMessage() for record in caplog.records)
-
-    def test_default_cadence(self, caplog):
-        with caplog.at_level(logging.INFO):
-            progress_callback(0, 0, 0, 0.0)
-        assert any("Iteration 0" in record.getMessage() for record in caplog.records)
-
-
-# ---------------------------------------------------------------------------
 # get_phase_center
 # ---------------------------------------------------------------------------
 

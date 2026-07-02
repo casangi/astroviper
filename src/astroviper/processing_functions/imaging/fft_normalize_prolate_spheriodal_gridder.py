@@ -259,7 +259,6 @@ def ifft_norm_img_xds(
 
                     out_arr[t, f, p] = remove_padding(plane.real, image_size)
 
-
         if data_variable_out not in image_data_variables_keep:
             # Release the large grid from the dataset so it can be freed as soon
             # as `del raw_grid` is called after the loop.
@@ -379,7 +378,6 @@ def fft_norm_img_xds(
                         complex_dtype=complex_dtype,
                     )
 
-             
         plt.show()
 
         if data_variable not in image_data_variables_keep:

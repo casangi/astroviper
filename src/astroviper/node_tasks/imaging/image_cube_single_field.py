@@ -428,8 +428,12 @@ def image_cube_single_field(
         and task_total_time > task_time_kill_switch_seconds
     ):
         log_path = _write_task_kill_switch_log(
-            timing_df, task_total_time, task_time_kill_switch_seconds,
-            image_store, task_id, hostname,
+            timing_df,
+            task_total_time,
+            task_time_kill_switch_seconds,
+            image_store,
+            task_id,
+            hostname,
         )
         msg = (
             f"task_time_kill_switch tripped: task {task_id} on {hostname} took "

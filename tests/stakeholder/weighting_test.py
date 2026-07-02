@@ -8,7 +8,7 @@ def generate_data():
     import numpy as np
     from xradio.measurement_set import open_processing_set
 
-    # from astroviper.distributed_graphs.imaging.image_cube_single_field import (
+    # from astroviper.distributed_applications.imaging.image_cube_single_field import (
     #     image_cube_single_field,
     # )
 
@@ -61,9 +61,9 @@ def generate_data():
             + ".zarr"
         )
 
-        import astroviper.distributed_graphs as distributed_graphs
+        import astroviper.distributed_applications as distributed_applications
 
-        imaging_metadata_pd = distributed_graphs.imaging.image_cube_single_field(
+        imaging_metadata_pd = distributed_applications.imaging.image_cube_single_field(
             ps_store=ps_store,
             image_store=image_store,
             image_params=image_params,

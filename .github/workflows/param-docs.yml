@@ -7,13 +7,13 @@ name: Imaging parameter docs
 on:
   push:
     paths:
-      - 'src/astroviper/distributed_graphs/imaging/**.py'
+      - 'src/astroviper/distributed_applications/imaging/**.py'
       - 'src/astroviper/node_tasks/imaging/**.py'
       - 'src/astroviper/processing_functions/imaging/**.py'
       - 'src/astroviper/utils/param_docs.py'
   pull_request:
     paths:
-      - 'src/astroviper/distributed_graphs/imaging/**.py'
+      - 'src/astroviper/distributed_applications/imaging/**.py'
       - 'src/astroviper/node_tasks/imaging/**.py'
       - 'src/astroviper/processing_functions/imaging/**.py'
       - 'src/astroviper/utils/param_docs.py'

@@ -62,4 +62,4 @@ repos:
         language: system
         pass_filenames: false
         files: >-
-          ^src/astroviper/(distributed_graphs|node_tasks|processing_functions)/imaging/.*\.py$|^src/astroviper/utils/param_docs\.py$
+          ^src/astroviper/(distributed_applications|node_tasks|processing_functions)/imaging/.*\.py$|^src/astroviper/utils/param_docs\.py$

@@ -352,7 +352,7 @@ def image_cube_single_field(
     n_major_cycles = 0
     while controller.stopcode.major == 0:
         n_major_cycles += 1
-        #print("*********** This is major cycle ", n_major_cycles)
+        # print("*********** This is major cycle ", n_major_cycles)
 
         # ---- Residual-update phase ----
         start = time.time()

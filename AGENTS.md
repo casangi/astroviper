@@ -39,7 +39,7 @@ builders.
 ### Scope for agents — what to IGNORE
 - **Do not work on calibration.** Treat these as out of scope unless the user
   explicitly asks: `src/astroviper/calibration/`,
-  `src/astroviper/distributed_graphs/calibration/`,
+  `src/astroviper/distributed_applications/calibration/`,
   `src/astroviper/processing_functions/calibration/`,
   `tests/calibration/`.
 - **Pay special attention to imaging** — it is the most developed and most
@@ -157,7 +157,7 @@ AstroVIPER is organized into four layers. **Calls only ever go downward**
 
 ```
 src/astroviper/
-├── distributed_graphs/   (1) Build + compute Dask graphs (GraphVIPER map/reduce).
+├── distributed_applications/   (1) Build + compute Dask graphs (GraphVIPER map/reduce).
 │                             Nodes are node_tasks. NO science here.
 ├── node_tasks/           (2) Thin functions: ONE dict arg in, ONE value out.
 │                             Do I/O (load_processing_set, write Zarr) + call processing_functions.
@@ -171,7 +171,7 @@ layers): `imaging` (focus), `image_analysis`, `flagging`,
 `visibility_manipulation`, `calibration` (ignored — see scope).
 
 ### Layer responsibilities & boundaries
-1. **`distributed_graphs/`** — Constructs `parallel_coords`, maps a `node_task`
+1. **`distributed_applications/`** — Constructs `parallel_coords`, maps a `node_task`
    over data chunks via `graphviper...map`, reduces results
    (`graphviper...reduce`), then `generate_dask_workflow` + `dask.compute`. This
    is the *only* layer that knows about Dask, chunking, and clusters.
@@ -192,8 +192,8 @@ layers): `imaging` (focus), `image_analysis`, `flagging`,
 Each layer/subdomain re-exports its entry points via `__init__.py`. The imaging
 entry point is exposed at all three layers as `image_cube_single_field`:
 ```python
-import astroviper.distributed_graphs as distributed_graphs
-distributed_graphs.imaging.image_cube_single_field(...)   # user-facing driver
+import astroviper.distributed_applications as distributed_applications
+distributed_applications.imaging.image_cube_single_field(...)   # user-facing driver
 ```
 
 ---
@@ -325,7 +325,7 @@ vocabulary so call sites read consistently:
 This is the subsystem to know best. The cube single-field imager is implemented
 across all three layers, each named `image_cube_single_field`:
 
-### 6.1 Driver — `distributed_graphs/imaging/image_cube_single_field.py`
+### 6.1 Driver — `distributed_applications/imaging/image_cube_single_field.py`
 The user-facing function. Sequence:
 1. `make_empty_sky_image(...)` → `write_image(..., out_format="zarr")` (creates
    the image store with correct coords/dims).
@@ -370,7 +370,7 @@ Notable parameters (see the function's NumPy docstring for the full list):
   `image_cube_single_field` is decorated with
   `@toolviper.utils.parameter.validate(config_dir=_PARAM_CONFIG_DIR)`; the full
   parameter schema lives in `image_cube_single_field.param.json` **next to the
-  module** (`distributed_graphs/imaging/`), and the decorator points the
+  module** (`distributed_applications/imaging/`), and the decorator points the
   validator at the module's own directory via `config_dir`. The node-task and
   processing-function layers do **not** re-validate — they trust the
   already-checked `input_params`. (See the rule in
@@ -705,7 +705,7 @@ per-variable nodes.
   group → return stats/timings).
 - Keep the gridder's Numba and C++ implementations consistent.
 - Pass `num_threads` through to kernels and respect `processing_function_threads`.
-- Keep the layering: graph code in `distributed_graphs/`, I/O in `node_tasks/`,
+- Keep the layering: graph code in `distributed_applications/`, I/O in `node_tasks/`,
   science in `processing_functions/`.
 - Run `black`, `pytest`, and rebuild after C++ edits before finishing.
 
@@ -715,7 +715,7 @@ per-variable nodes.
 - ❌ Mutate `xds.attrs["data_groups"]` directly — use `data_group_tools`.
 - ❌ Lowercase a data-variable name or uppercase a coordinate name.
 - ❌ Put Dask/graph logic into `processing_functions/`, or science into
-  `distributed_graphs/`.
+  `distributed_applications/`.
 - ❌ Assume `memory_mode` other than `"in_memory"` works.
 - ❌ Touch calibration code (see [scope](#scope-for-agents--what-to-ignore)).
 - ❌ Commit notebook outputs (pre-commit's `nbstripout` enforces this) or
@@ -728,7 +728,7 @@ per-variable nodes.
 
 | Task | Where |
 | --- | --- |
-| New/changed imaging **workflow / parallelism** | `distributed_graphs/imaging/` |
+| New/changed imaging **workflow / parallelism** | `distributed_applications/imaging/` |
 | New **node task** (I/O + orchestration of a chunk) | `node_tasks/imaging/` — give it an explicit signature and pass it straight to `map` (graphviper auto-adapts it; see [6.6](#66-layer-interfaces--parameter-doc-codegen)) |
 | New **science kernel** (gridding, weighting, deconvolution, FFT, PB) | `processing_functions/imaging/` |
 | graphviper single-dict → explicit node-task adapter | **graphviper** `graph_tools/map.py` (`make_graph_node_task`, applied automatically by `map`) |
@@ -738,7 +738,7 @@ per-variable nodes.
 | Data-group helpers | `utils/data_group_tools.py` |
 | Zarr variable defs / chunk writers | `utils/io.py` |
 | Chunk-count / thread heuristics | `utils/data_partitioning.py` |
-| Driver-level parameter schema (toolviper `@validate`) | `<module>.param.json` **next to the module** (e.g. `distributed_graphs/imaging/`) |
+| Driver-level parameter schema (toolviper `@validate`) | `<module>.param.json` **next to the module** (e.g. `distributed_applications/imaging/`) |
 | Ad-hoc parameter validation helpers | `utils/check_params.py` |
 | Tests | `tests/unit/<mirror of src path>/`; end-to-end in `tests/stakeholder/` |
 

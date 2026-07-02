@@ -35,11 +35,11 @@ import matplotlib.pyplot as plt
 import warnings
 import matplotlib.figure as _mf
 
-from astroviper.distributed_graphs.image_analysis.multi_gaussian2d_fit import (
+from astroviper.distributed_applications.image_analysis.multi_gaussian2d_fit import (
     fit_multi_gaussian2d,
     plot_components,
 )
-import astroviper.distributed_graphs.image_analysis.multi_gaussian2d_fit as mg
+import astroviper.distributed_applications.image_analysis.multi_gaussian2d_fit as mg
 
 # ------------------------- fixtures / helpers -------------------------
 

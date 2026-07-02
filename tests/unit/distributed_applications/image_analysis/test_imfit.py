@@ -1,4 +1,4 @@
-"""Tests for astroviper.distributed_graphs.image_analysis.imfit."""
+"""Tests for astroviper.distributed_applications.image_analysis.imfit."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import pytest
 import xarray as xr
 from astropy.coordinates import Angle
 
-from astroviper.distributed_graphs.image_analysis.imfit import imfit
-from astroviper.distributed_graphs.model.component_models import make_gauss2d
+from astroviper.distributed_applications.image_analysis.imfit import imfit
+from astroviper.distributed_applications.model.component_models import make_gauss2d
 from astroviper.utils._gaussian_math import SIG2FWHM, FWHM2SIG
 
 # ---------------------------------------------------------------------------
@@ -355,7 +355,7 @@ class TestImfitSkyCoords:
 
     def test_sky_coords_from_descending_grids_propagates_errors(self):
         """Descending l/m sky grids should interpolate centers and errors."""
-        from astroviper.distributed_graphs.image_analysis.imfit import (
+        from astroviper.distributed_applications.image_analysis.imfit import (
             _attach_sky_coordinates,
         )
 
@@ -414,7 +414,7 @@ class TestImfitSkyCoords:
         self, l_coord, m_coord, match
     ):
         """RA/Dec grid interpolation should reject repeated or unsorted axes."""
-        from astroviper.distributed_graphs.image_analysis.imfit import (
+        from astroviper.distributed_applications.image_analysis.imfit import (
             _prepare_lm_radec_interpolation_grids,
         )
 
@@ -1011,7 +1011,7 @@ class TestImfitCoverageGaps:
         The generic fitter always produces error variables, so we call
         ``_deconvolve_and_attach`` directly on a Dataset that lacks them.
         """
-        from astroviper.distributed_graphs.image_analysis.imfit import (
+        from astroviper.distributed_applications.image_analysis.imfit import (
             _deconvolve_and_attach,
         )
 
@@ -1080,7 +1080,7 @@ class TestImfitCoverageGaps:
 
     def test_deconvolution_with_errors_dask_flags_are_bool(self):
         """Dask deconvolution with errors should preserve boolean flag dtypes."""
-        from astroviper.distributed_graphs.image_analysis.imfit import (
+        from astroviper.distributed_applications.image_analysis.imfit import (
             _deconvolve_and_attach,
         )
 
@@ -1127,7 +1127,7 @@ class TestImfitHelperCoverage:
 
     def test_normalize_initial_guesses_preserves_array_form(self):
         """Array-form guesses should bypass imfit-specific dict conversion."""
-        from astroviper.distributed_graphs.image_analysis.imfit import (
+        from astroviper.distributed_applications.image_analysis.imfit import (
             _normalize_imfit_initial_guesses,
         )
 
@@ -1140,7 +1140,7 @@ class TestImfitHelperCoverage:
 
     def test_normalize_initial_guesses_converts_wrapped_component_mapping(self):
         """Wrapped mapping guesses should convert component dicts and preserve offset."""
-        from astroviper.distributed_graphs.image_analysis.imfit import (
+        from astroviper.distributed_applications.image_analysis.imfit import (
             _normalize_imfit_initial_guesses,
         )
 
@@ -1178,7 +1178,7 @@ class TestImfitHelperCoverage:
 
     def test_normalize_initial_guesses_converts_string_xy_sky_centers(self):
         """String-valued x0/y0 should be treated as sky coordinates, not pixels."""
-        from astroviper.distributed_graphs.image_analysis.imfit import (
+        from astroviper.distributed_applications.image_analysis.imfit import (
             _normalize_imfit_initial_guesses,
         )
 
@@ -1207,7 +1207,7 @@ class TestImfitHelperCoverage:
         self, initial_guess
     ):
         """Sky-key initial guesses should require paired longitude/latitude values."""
-        from astroviper.distributed_graphs.image_analysis.imfit import (
+        from astroviper.distributed_applications.image_analysis.imfit import (
             _normalize_imfit_initial_guesses,
         )
 
@@ -1235,7 +1235,7 @@ class TestImfitHelperCoverage:
         self, initial_guess
     ):
         """String-valued x0/y0 sky guesses should require paired values."""
-        from astroviper.distributed_graphs.image_analysis.imfit import (
+        from astroviper.distributed_applications.image_analysis.imfit import (
             _normalize_imfit_initial_guesses,
         )
 
@@ -1248,7 +1248,7 @@ class TestImfitHelperCoverage:
         self,
     ):
         """Sky-coordinate guesses require a phase center in coordinate metadata."""
-        from astroviper.distributed_graphs.image_analysis.imfit import (
+        from astroviper.distributed_applications.image_analysis.imfit import (
             _normalize_imfit_initial_guesses,
         )
 
@@ -1267,7 +1267,7 @@ class TestImfitHelperCoverage:
 
     def test_normalize_initial_guesses_accepts_world_centers_without_widths(self):
         """Center-only world guesses should still be converted into pixel centers."""
-        from astroviper.distributed_graphs.image_analysis.imfit import (
+        from astroviper.distributed_applications.image_analysis.imfit import (
             _normalize_imfit_initial_guesses,
         )
 
@@ -1302,7 +1302,7 @@ class TestImfitHelperCoverage:
         self, initial_guess
     ):
         """Native world-center guesses should require paired l0/m0 values."""
-        from astroviper.distributed_graphs.image_analysis.imfit import (
+        from astroviper.distributed_applications.image_analysis.imfit import (
             _normalize_imfit_initial_guesses,
         )
 
@@ -1313,7 +1313,9 @@ class TestImfitHelperCoverage:
 
     def test_resolve_mask_none_returns_none(self):
         """Explicitly disabling masks should short-circuit without warnings."""
-        from astroviper.distributed_graphs.image_analysis.imfit import _resolve_mask
+        from astroviper.distributed_applications.image_analysis.imfit import (
+            _resolve_mask,
+        )
 
         xds = _make_xradio_image(components=[], noise_sigma=0.0)
 
@@ -1321,7 +1323,7 @@ class TestImfitHelperCoverage:
 
     def test_lm_to_radec_from_wcs_warns_for_non_sin_projection(self):
         """Unsupported projections should warn while falling back to the SIN inverse."""
-        from astroviper.distributed_graphs.image_analysis.imfit import (
+        from astroviper.distributed_applications.image_analysis.imfit import (
             _lm_to_radec_from_wcs,
         )
 
@@ -1343,7 +1345,7 @@ class TestImfitHelperCoverage:
 
     def test_attach_sky_coordinates_returns_input_when_world_centers_absent(self):
         """Sky-coordinate attachment should no-op when l/m centers are unavailable."""
-        from astroviper.distributed_graphs.image_analysis.imfit import (
+        from astroviper.distributed_applications.image_analysis.imfit import (
             _attach_sky_coordinates,
         )
 

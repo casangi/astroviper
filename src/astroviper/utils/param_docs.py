@@ -84,7 +84,7 @@ def _target_files():
 
     root = pathlib.Path(__file__).resolve().parents[1]  # src/astroviper
     rel = [
-        "distributed_graphs/imaging/image_cube_single_field.py",
+        "distributed_applications/imaging/image_cube_single_field.py",
         "node_tasks/imaging/image_cube_single_field.py",
         "processing_functions/imaging/image_cube_single_field.py",
         "processing_functions/imaging/residual_cycle.py",

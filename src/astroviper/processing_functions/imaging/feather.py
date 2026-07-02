@@ -5,7 +5,7 @@ operates on in-memory ``xarray`` / NumPy objects and performs **no** I/O and
 **no** Dask/graph work (see ``AGENTS.md``).  Disk reads and the parallel chunk
 writes are handled by the node-task layer
 (:func:`astroviper.node_tasks.imaging.feather`) and the graph driver
-(:func:`astroviper.distributed_graphs.imaging.feather`), mirroring the
+(:func:`astroviper.distributed_applications.imaging.feather`), mirroring the
 ``image_cube_single_field`` layering.
 """
 

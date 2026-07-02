@@ -2,8 +2,8 @@
 Tests for ROI selection (CRTF + expressions) using the public API only.
 
 Public API under test:
-- astroviper.distributed_graphs.image_analysis.selection.select_mask
-- astroviper.distributed_graphs.image_analysis.selection.apply_select
+- astroviper.distributed_applications.image_analysis.selection.select_mask
+- astroviper.distributed_applications.image_analysis.selection.apply_select
 
 Conventions covered:
 - 0-based pixel indices with mandatory "pix" suffix (e.g., [0pix, 127pix])
@@ -27,7 +27,7 @@ import pytest
 import xarray as xr
 import dask.array as da
 
-from astroviper.distributed_graphs.image_analysis.selection import (
+from astroviper.distributed_applications.image_analysis.selection import (
     select_mask,
     apply_select,
     combine_with_creation,

@@ -12,9 +12,13 @@ import dask.array as da
 import xarray as xr
 
 # Adjust import if your package layout differs
-from astroviper.distributed_graphs.model import make_disk, make_gauss2d, make_pt_sources
+from astroviper.distributed_applications.model import (
+    make_disk,
+    make_gauss2d,
+    make_pt_sources,
+)
 
-import astroviper.distributed_graphs.model.component_models as cm
+import astroviper.distributed_applications.model.component_models as cm
 
 
 def _base_grid(

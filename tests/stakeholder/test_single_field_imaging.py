@@ -45,7 +45,7 @@ import pytest
 import xarray as xr
 
 
-from astroviper.distributed_graphs.imaging.image_cube_single_field import (
+from astroviper.distributed_applications.imaging.image_cube_single_field import (
     image_cube_single_field,
 )
 from astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric import (
@@ -677,9 +677,12 @@ def test_single_field_imaging_niter0_sharded(plot_saver, processing_function_thr
         f"t{processing_function_threads}.img.zarr"
     )
     _, img_plain, _ = _run_image_cube(
-        "niter0", store_plain,
-        processing_function_threads=processing_function_threads, n_chunks=5,
-        skunk_works=True, output_shard_channels=None,
+        "niter0",
+        store_plain,
+        processing_function_threads=processing_function_threads,
+        n_chunks=5,
+        skunk_works=True,
+        output_shard_channels=None,
     )
     # B: sharded direct write (2 channels per shard).
     store_sharded = (
@@ -687,9 +690,12 @@ def test_single_field_imaging_niter0_sharded(plot_saver, processing_function_thr
         f"t{processing_function_threads}.img.zarr"
     )
     _, img_sharded, _ = _run_image_cube(
-        "niter0", store_sharded,
-        processing_function_threads=processing_function_threads, n_chunks=5,
-        skunk_works=True, output_shard_channels=2,
+        "niter0",
+        store_sharded,
+        processing_function_threads=processing_function_threads,
+        n_chunks=5,
+        skunk_works=True,
+        output_shard_channels=2,
     )
 
     compare_vars = _CONFIGS["niter0"]["compare_variables"]
@@ -706,28 +712,43 @@ def test_single_field_imaging_niter0_sharded(plot_saver, processing_function_thr
     # catches it while tolerating the benign nondeterminism.
     for var in compare_vars:
         assert np.allclose(
-            img_sharded[var].values, img_plain[var].values,
-            rtol=1e-8, atol=1e-10, equal_nan=True,
+            img_sharded[var].values,
+            img_plain[var].values,
+            rtol=1e-8,
+            atol=1e-10,
+            equal_nan=True,
         ), f"{var}: sharded write differs from unsharded direct write."
 
     # (2) it reproduces the niter0 truth image (valid sharded array, read via xarray).
     truth_xds = xr.open_zarr(TRUTH_IMAGE_NITER0)
     _compare_to_truth(
-        img_sharded, truth_xds, compare_vars,
+        img_sharded,
+        truth_xds,
+        compare_vars,
         plot_saver=plot_saver,
         plot_prefix=f"niter0_sharded_t{processing_function_threads}",
     )
 
     # (3) it is actually sharded: ceil(5/2)=3 shard files/variable vs 5 unsharded.
     for var in compare_vars:
-        n_sharded = len([
-            f for f in glob.glob(os.path.join(store_sharded, var, "c", "**"), recursive=True)
-            if os.path.isfile(f)
-        ])
-        n_plain = len([
-            f for f in glob.glob(os.path.join(store_plain, var, "c", "**"), recursive=True)
-            if os.path.isfile(f)
-        ])
+        n_sharded = len(
+            [
+                f
+                for f in glob.glob(
+                    os.path.join(store_sharded, var, "c", "**"), recursive=True
+                )
+                if os.path.isfile(f)
+            ]
+        )
+        n_plain = len(
+            [
+                f
+                for f in glob.glob(
+                    os.path.join(store_plain, var, "c", "**"), recursive=True
+                )
+                if os.path.isfile(f)
+            ]
+        )
         assert n_sharded == 3 and n_plain == 5, (
             f"{var}: expected 3 shard files (sharded) and 5 (unsharded), "
             f"got {n_sharded} and {n_plain}"

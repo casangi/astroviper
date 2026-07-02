@@ -599,14 +599,18 @@ def write_result_chunk_to_disk_using_zarr_skunk_works(
     else:
         from concurrent.futures import ThreadPoolExecutor
 
-        with ThreadPoolExecutor(max_workers=min(num_threads, len(variables))) as executor:
+        with ThreadPoolExecutor(
+            max_workers=min(num_threads, len(variables))
+        ) as executor:
             futures = [
                 executor.submit(
                     _encode_one_variable, dv, image_store, task_coords, img_xds
                 )
                 for dv in variables
             ]
-            encoded = [f.result() for f in futures]  # order matches variables; re-raises
+            encoded = [
+                f.result() for f in futures
+            ]  # order matches variables; re-raises
 
     # Phase 2: write the blobs serially (one open file at a time for this task).
     for path, blob in encoded:
@@ -729,7 +733,9 @@ def precreate_sharded_files(array_path):
 
     meta = _read_array_meta(array_path)
     if meta.get("sharding") is None:
-        raise ValueError(f"{array_path} is not a sharded array; cannot pre-create shards.")
+        raise ValueError(
+            f"{array_path} is not a sharded array; cannot pre-create shards."
+        )
     _assert_sharded_no_index_crc(meta, array_path)
     ips, n_inner = _shard_inner_per_shard(meta)
     slot = _shard_slot_size(meta)
@@ -827,7 +833,9 @@ def write_result_chunk_to_disk_sharded_skunk_works(
     else:
         from concurrent.futures import ThreadPoolExecutor
 
-        with ThreadPoolExecutor(max_workers=min(num_threads, len(variables))) as executor:
+        with ThreadPoolExecutor(
+            max_workers=min(num_threads, len(variables))
+        ) as executor:
             futures = [
                 executor.submit(
                     _encode_one_variable_sharded, dv, image_store, task_coords, img_xds

@@ -4,7 +4,7 @@
 These are fast, self-contained tests on small hand-built images.  Per the
 processing-function convention the inputs are NumPy-backed ``xarray`` datasets
 (no Dask arrays); the end-to-end graph/I/O behaviour is covered separately by
-``tests/unit/distributed_graphs/imaging/test_feather.py``.
+``tests/unit/distributed_applications/imaging/test_feather.py``.
 """
 
 import numpy as np

@@ -1,7 +1,7 @@
 # run using eg
 # python -m pytest ../astroviper/tests/imaging/test_feather.py
 
-from astroviper.distributed_graphs.imaging import feather
+from astroviper.distributed_applications.imaging import feather
 import copy
 import dask.array as da
 import numpy as np

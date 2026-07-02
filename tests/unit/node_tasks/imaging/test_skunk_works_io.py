@@ -230,7 +230,9 @@ def test_write_roundtrip_sharded(tmp_path, compressor, num_threads):
         tmp_path, compressor, freq_chunks, variables, shard_channels=shard
     )
     rng = np.random.default_rng(11)
-    vals = {v: rng.standard_normal((1, nfreq, 2, 16, 16)).astype("<f4") for v in variables}
+    vals = {
+        v: rng.standard_normal((1, nfreq, 2, 16, 16)).astype("<f4") for v in variables
+    }
 
     def _write(k):
         img = xr.Dataset(
@@ -243,7 +245,10 @@ def test_write_roundtrip_sharded(tmp_path, compressor, num_threads):
             }
         )
         write_result_chunk_to_disk_sharded_skunk_works(
-            store, variables, {"frequency": {"slice": slice(k, k + 1)}}, img,
+            store,
+            variables,
+            {"frequency": {"slice": slice(k, k + 1)}},
+            img,
             num_threads=num_threads,
         )
 
@@ -260,9 +265,13 @@ def test_write_roundtrip_sharded(tmp_path, compressor, num_threads):
         # Unwritten channel 4 reads back as fill (nan) both ways.
         assert np.isnan(z[:, 4]).all() and np.isnan(ours[:, 4]).all()
         # Actually sharded: 3 shard files, not 5 one-file-per-channel.
-        n_files = len([
-            f for f in glob.glob(apath + "/c/**", recursive=True) if __import__("os").path.isfile(f)
-        ])
+        n_files = len(
+            [
+                f
+                for f in glob.glob(apath + "/c/**", recursive=True)
+                if __import__("os").path.isfile(f)
+            ]
+        )
         assert n_files == 3, f"{v}: expected 3 shard files, got {n_files}"
 
 
@@ -271,9 +280,13 @@ def test_sharded_slot_overflow_raises(tmp_path):
     rather than corrupting the shard (guarded in _encode_one_variable_sharded)."""
     from astroviper.node_tasks.imaging.utils import skunk_works as sw
 
-    store = _make_image_store(tmp_path, None, [[0], [1]], ["sky_residual"], shard_channels=2)
+    store = _make_image_store(
+        tmp_path, None, [[0], [1]], ["sky_residual"], shard_channels=2
+    )
     vals = np.random.default_rng(12).standard_normal((1, 1, 2, 16, 16)).astype("<f4")
-    img = xr.Dataset({"SKY_RESIDUAL": (["time", "frequency", "polarization", "l", "m"], vals)})
+    img = xr.Dataset(
+        {"SKY_RESIDUAL": (["time", "frequency", "polarization", "l", "m"], vals)}
+    )
     # Force a tiny slot so the (uncompressed) chunk cannot fit.
     orig = sw._shard_slot_size
     sw._shard_slot_size = lambda meta: 16

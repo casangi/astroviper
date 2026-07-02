@@ -4,7 +4,7 @@
 
 Builds and runs the GraphVIPER map graph that combines a single-dish and an
 interferometer image with the feather algorithm.  It follows the same approach
-as :func:`astroviper.distributed_graphs.imaging.image_cube_single_field`:
+as :func:`astroviper.distributed_applications.imaging.image_cube_single_field`:
 
 1. create the empty output image on disk (coordinates + the interferometer beam),
 2. pre-allocate the ``SKY`` data variable on disk with
