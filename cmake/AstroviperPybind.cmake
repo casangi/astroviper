@@ -18,6 +18,57 @@
 # ---------------------------------------------------------------------------
 include_guard(GLOBAL)
 
+# ---------------------------------------------------------------------------
+# Toolchain floor. AstroVIPER is built as C++23 (see the standard set below),
+# so require a compiler with a complete C++23 implementation and fail
+# configuration EARLY -- with a clear message, before Python/pybind11 discovery
+# -- rather than emitting inscrutable errors deep in a template. The enclosing
+# CMakeLists has already called project(... LANGUAGES CXX), so the compiler id
+# and version are known here.
+#
+# The code targets C++23 as a dialect but uses no library/language feature that
+# needs GCC's newest libstdc++ (only std::atomic_ref, which is C++20), so the
+# floor is GCC 14 -- which fully accepts -std=c++23 -- rather than GCC 15. That
+# keeps the same compiler available in Ubuntu's default repos AND in the
+# manylinux_2_28 wheel image (gcc-toolset-14; there is no gcc-toolset-15 for
+# el8), so no PPA or custom image is needed. The Clang / Apple Clang floors are
+# the equivalents that spell the flag -std=c++23. Raise these only if you start
+# using a feature that requires a newer toolchain.
+# ---------------------------------------------------------------------------
+set(AV_MIN_GNU_VERSION        14)   # GCC
+set(AV_MIN_CLANG_VERSION      17)   # LLVM Clang (first release spelled -std=c++23)
+set(AV_MIN_APPLECLANG_VERSION 16)   # Apple Clang (Xcode 16; ~ LLVM 18)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS AV_MIN_GNU_VERSION)
+        message(FATAL_ERROR
+            "AstroVIPER requires GCC >= ${AV_MIN_GNU_VERSION} for C++23, but "
+            "found GCC ${CMAKE_CXX_COMPILER_VERSION} (${CMAKE_CXX_COMPILER}). "
+            "Point CMake at a newer compiler, e.g. -DCMAKE_CXX_COMPILER=g++-14 "
+            "or set the CXX environment variable.")
+    endif()
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS AV_MIN_CLANG_VERSION)
+        message(FATAL_ERROR
+            "AstroVIPER requires Clang >= ${AV_MIN_CLANG_VERSION} for C++23, "
+            "but found Clang ${CMAKE_CXX_COMPILER_VERSION} "
+            "(${CMAKE_CXX_COMPILER}).")
+    endif()
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS AV_MIN_APPLECLANG_VERSION)
+        message(FATAL_ERROR
+            "AstroVIPER requires Apple Clang >= ${AV_MIN_APPLECLANG_VERSION} "
+            "for C++23, but found Apple Clang ${CMAKE_CXX_COMPILER_VERSION} "
+            "(${CMAKE_CXX_COMPILER}).")
+    endif()
+else()
+    message(WARNING
+        "AstroVIPER is built as C++23 and is tested only with GCC >= "
+        "${AV_MIN_GNU_VERSION} or an equivalent Clang. The detected compiler "
+        "'${CMAKE_CXX_COMPILER_ID}' ${CMAKE_CXX_COMPILER_VERSION} is untested; "
+        "the build will continue but a complete C++23 implementation is "
+        "required.")
+endif()
+
 # Let pybind11 locate Python via CMake's FindPython. Works for both the
 # scikit-build-core build and a standalone configure.
 set(PYBIND11_FINDPYTHON ON)
@@ -55,12 +106,14 @@ find_package(Threads REQUIRED)
 # ---------------------------------------------------------------------------
 add_library(astroviper_cpp_flags INTERFACE)
 
-# C++20 everywhere. The gridder needs it (std::atomic_ref); it is harmless for
-# the deconvolvers and keeps one standard across the codebase. CXX_EXTENSIONS OFF
-# pins strict -std=c++20 (not -std=gnu++20) for portable, standard-conformant
-# builds. Set globally so every target created after this include inherits it.
+# C++23 everywhere, for every kernel. CXX_EXTENSIONS OFF pins strict -std=c++23
+# (not -std=gnu++23) for portable, standard-conformant builds. Set globally so
+# every target created after this include inherits it; the flags target below
+# also carries cxx_std_23 as a usage requirement for anything that links it.
 set(CMAKE_CXX_EXTENSIONS OFF)
-target_compile_features(astroviper_cpp_flags INTERFACE cxx_std_20)
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+target_compile_features(astroviper_cpp_flags INTERFACE cxx_std_23)
 
 # Scientific reproducibility: disable floating-point expression contraction
 # (FMA fusion) so a*b+c is a rounded multiply then a rounded add -- bit-identical
@@ -70,7 +123,7 @@ target_compile_features(astroviper_cpp_flags INTERFACE cxx_std_20)
 #   NOTE: CMake reports macOS's compiler as "AppleClang", which the GNU,Clang
 #   generator expression does NOT match -- it must be listed explicitly.
 target_compile_options(astroviper_cpp_flags INTERFACE
-    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=on>
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>
     $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-pipe>
 )
 

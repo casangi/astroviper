@@ -14,32 +14,15 @@ namespace {
 
 // Lock-free atomic add on a non-atomic floating-point value. numpy allocates
 // float/double with natural alignment, which satisfies the lock-free
-// requirement on all supported platforms.
-//
-// Prefer std::atomic_ref (C++20), but fall back to the GCC/Clang __atomic
-// builtins on compilers that don't yet implement it (e.g. GCC < 10, which
-// is still the system compiler on RHEL/Rocky 8). The builtins operate on
-// the same suitably aligned plain value, so the two paths are equivalent.
+// requirement on all supported platforms. std::atomic_ref is always available:
+// AstroVIPER requires C++23 (see cmake/AstroviperPybind.cmake), so no
+// feature-test fallback is needed.
 template <typename T>
 inline void atomic_add_real(T* target, T value) {
-#if defined(__cpp_lib_atomic_ref)
     std::atomic_ref<T> ref(*target);
     T current = ref.load(std::memory_order_relaxed);
     while (!ref.compare_exchange_weak(
         current, current + value, std::memory_order_relaxed)) {}
-#else
-    // Generic __atomic_* builtins (pointer args) work on plain float/double on
-    // both GCC and Clang; the type-specialized __atomic_*_n forms reject
-    // floating-point types under Clang.
-    T current;
-    __atomic_load(target, &current, __ATOMIC_RELAXED);
-    T desired;
-    do {
-        desired = current + value;
-    } while (!__atomic_compare_exchange(
-        target, &current, &desired, /*weak=*/true,
-        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
-#endif
 }
 
 inline void atomic_add_double(double* target, double value) {
