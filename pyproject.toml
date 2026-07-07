@@ -20,7 +20,8 @@ dependencies = [
   "numba",
   "opt_einsum",
   "pyfftw",
-  "graphviz"
+  "graphviz",
+  "gdown"
 ]
 
 [project.optional-dependencies]
