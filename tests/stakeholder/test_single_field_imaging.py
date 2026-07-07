@@ -89,10 +89,31 @@ _TRUTH_IMAGE_DRIVE_IDS = {
     TRUTH_IMAGE_MULTI_CYCLE_SINGLE: "1CiiOg-pfwS7gbrzhUPM37feM1jWIjq1e",
 }
 
+<<<<<<< HEAD
 # Default (tight) per-channel relative-difference ceiling for the reproducible
 # variants. Double-precision multi_cycle and the niter0/niter100 tests reproduce
 # their truth to ~1e-13 (PRIMARY_BEAM ~5e-10 at n_chunks=5), so 1e-6 is a real
 # regression guard with comfortable margin.
+=======
+# Default (tight) per-channel relative-difference ceiling. Double-precision
+# variants reproduce their truth to ~1e-13 (PRIMARY_BEAM ~5e-10 at n_chunks=5),
+# so 1e-6 is a real regression guard with comfortable margin. BOTH single-
+# precision multi_cycle variants (1- and 12-thread) instead use the looser 0.15
+# ceiling below: at threshold=0.001 the deep CLEAN reaches a peak-selection
+# bifurcation where a sub-ULP float32 perturbation flips one channel onto an
+# alternate-but-valid solution (~9%). The perturbation is NOT the CLEAN, which
+# is bit-identical given identical input at any thread count once -ffp-contract
+# is off (cmake/AstroviperPybind.cmake); it is a difference in the gridded
+# float32 SEED (dirty image / PSF) that the deep CLEAN then amplifies, from two
+# independent sources:
+#   * PLATFORM (x86 vs ARM): the complex64 pocketfft iFFT that builds the dirty
+#     image/PSF picks architecture-specific SIMD kernels, so the seed is not
+#     bit-identical across platforms -- this hits even the 1-thread run (which
+#     is why its dict trajectory is compared loosely, not tightly).
+#   * THREAD COUNT (>1): the C++ gridder accumulates visibilities into shared
+#     grid cells via a lock-free atomic add, so the seed is not bit-reproducible
+#     above one thread on a fixed platform.
+>>>>>>> 0f471fff6b59106c47b5a29366d5aa40f9a92955
 TRUTH_RTOL = 1e-6
 
 # Loose ceiling for the single-precision multi_cycle image comparison -- used by
@@ -121,6 +142,34 @@ MULTI_CYCLE_DOUBLE_VS_SINGLE_RTOL = 0.15
 # chunking all differ at once. Still dominated by the float32 peak-selection
 # bifurcation (~10% on one channel), so it shares the same loose ceiling.
 MULTI_CYCLE_WORST_CASE_RTOL = 0.15
+
+# Deconvolve-dict floats computed FROM the float32 gridded seed: the per-major-
+# cycle CLEAN trajectory (model_flux, peakres, ...) plus the thresholds derived
+# from it and from the PSF (cyclethreshold, max_psf_sidelobe). In single
+# precision these differ cross-platform once the deep CLEAN tips a peak-selection
+# tie (~few %) or simply inherits the platform's float32 seed noise (~1e-4) --
+# see the TRUTH_RTOL comment above. For a single-precision dict they are compared
+# by MAGNITUDE at MULTI_CYCLE_SINGLE_DICT_RTOL with a peak-scaled atol (the peak-
+# residual sign flips at the bifurcation while its magnitude is stable). iter_done
+# is included because the minor-cycle count to reach the cycle threshold also
+# bifurcates (~few %) once a channel tips. Everything else stays tight: the
+# remaining exact-int fields (niter, masksum), stop_code, the strings, and the
+# config/coordinate floats (loop_gain, min/max_psf_fraction, frequency, time) are
+# all bit-reproducible. Double-precision dicts compare every field tightly.
+_BIFURCATION_SENSITIVE_FIELDS = frozenset(
+    {
+        "model_flux",
+        "start_model_flux",
+        "peakres",
+        "peakres_nomask",
+        "start_peakres",
+        "start_peakres_nomask",
+        "cyclethreshold",
+        "max_psf_sidelobe",
+        "iter_done",
+    }
+)
+MULTI_CYCLE_SINGLE_DICT_RTOL = 0.15
 
 # Imaging weighting is identical for every base test.
 IMAGING_WEIGHTS_PARAMS = {
@@ -358,15 +407,31 @@ def _image_params(ps_xdt):
     }
 
 
-def _check_deconvolve_dict(deconvolve_dict, expected, rtol=1e-5, atol=1e-8):
+def _check_deconvolve_dict(
+    deconvolve_dict,
+    expected,
+    rtol=1e-5,
+    atol=1e-8,
+    loose_fields=frozenset(),
+    loose_rtol=0.15,
+):
     """Assert every key and field of a deconvolve ReturnDict matches ``expected``.
 
     ``expected`` is keyed by ``(time, pol, chan)`` tuples, with ``stop_code``
     given as a ``(major, minor)`` tuple. Integer fields (niter, iter_done,
     masksum), string fields (stokes, stop_description) and the stop code are
     compared exactly; every other (floating-point) field -- scalar or per-cycle
-    history list -- is compared with ``np.allclose``. Regenerate the expected
-    literals if the imaging or iteration-control behaviour intentionally changes.
+    history list -- is compared with ``np.allclose`` at ``rtol``/``atol``.
+
+    Fields named in ``loose_fields`` are instead compared by MAGNITUDE at
+    ``loose_rtol`` with a peak-scaled ``atol`` (``loose_rtol * max|expected|``).
+    This is for the single-precision multi_cycle dict, whose per-cycle
+    flux/residual trajectory bifurcates cross-platform and above one thread (see
+    the TRUTH_RTOL comment): the peak-residual sign flips while its magnitude is
+    stable, and the minor-cycle count itself drifts, so those fields cannot be
+    pinned tightly, while niter/stop_code/masksum still can. Regenerate the
+    expected literals if the imaging or iteration-control behaviour intentionally
+    changes.
     """
     exact_int_fields = {"niter", "iter_done", "masksum"}
     string_fields = {"stokes", "stop_description"}
@@ -390,6 +455,29 @@ def _check_deconvolve_dict(deconvolve_dict, expected, rtol=1e-5, atol=1e-8):
                 assert (
                     str(val) == exp_val
                 ), f"plane {key} {field}: {val!r} != {exp_val!r}"
+            elif field in loose_fields:
+                # Checked BEFORE exact_int_fields so a field marked loose (e.g.
+                # iter_done for a single-precision dict) is compared loosely; for
+                # a double-precision dict loose_fields is empty, so iter_done
+                # falls through to the exact-int check below.
+                # Single-precision deep-CLEAN trajectory: bifurcates cross-
+                # platform / above one thread. Compare MAGNITUDES at a loose,
+                # peak-scaled tolerance. The accumulated flux is positive so abs
+                # is a no-op there, but the peak-residual SIGN flips at the
+                # bifurcation (same |value|, opposite sign -- a positive vs
+                # negative sidelobe wins); only its magnitude, which convergence
+                # tests against the threshold, is stable. The peak-scaled atol
+                # also keeps small values from false-failing on a per-element
+                # relative test.
+                exp_arr = np.abs(np.asarray(exp_val, dtype=float))
+                act_arr = np.abs(np.asarray(val, dtype=float))
+                scale = float(np.max(exp_arr)) if exp_arr.size else 0.0
+                assert np.allclose(
+                    act_arr,
+                    exp_arr,
+                    rtol=loose_rtol,
+                    atol=max(atol, loose_rtol * scale),
+                ), f"plane {key} {field} (loose |{loose_rtol}|): {val} != {exp_val}"
             elif field in exact_int_fields:
                 assert np.array_equal(
                     np.asarray(val), np.asarray(exp_val)
@@ -807,8 +895,16 @@ def test_single_field_imaging_niter100(plot_saver, processing_function_threads):
         (12, 5, False, TRUTH_RTOL, "double"),
         (1, 1, False, TRUTH_RTOL, "double"),
         (12, 1, False, TRUTH_RTOL, "double"),
+<<<<<<< HEAD
         (1, 1, True, MULTI_CYCLE_SINGLE_RTOL, None),
         (12, 1, True, MULTI_CYCLE_SINGLE_RTOL, None),
+=======
+        # Single precision bifurcates cross-platform even at 1 thread (see
+        # TRUTH_RTOL): use the 0.15 image ceiling like its 12-thread sibling,
+        # and validate the dict with loose bifurcation-sensitive fields.
+        (1, 1, True, 0.15, "single"),
+        (12, 1, True, 0.15, None),
+>>>>>>> 0f471fff6b59106c47b5a29366d5aa40f9a92955
     ],
 )
 def test_single_field_imaging_multi_cycle(
@@ -841,18 +937,50 @@ def test_single_field_imaging_multi_cycle(
     )
     truth_xds = xr.open_zarr(truth_image)
 
+<<<<<<< HEAD
     # Only the double-precision multi_cycle checks the deconvolution ReturnDict:
     # it is stable across thread count and chunking. The single-precision deep
     # CLEAN sits on a float32 peak-selection bifurcation (see
     # MULTI_CYCLE_SINGLE_RTOL), so its per-plane history is not reproducible
     # tightly enough to pin -- both single-precision variants pass dict_kind=None
     # and are validated only by the (loosely bounded) image comparison below.
+=======
+    print("&&&&&&&&&" * 10)
+    print("imaging_metadata_pd:")
+    print(return_dict["timing_node_tasks"].to_string())
+    print("deconvolve_dict (global channel numbering):")
+    print_deconvolve_dict(return_dict["deconvolution"])
+    # The ReturnDict's structurally-exact fields (niter, masksum, stop_code,
+    # config/coords) reproduce cross-platform and across thread counts; its per-
+    # cycle float trajectory (model_flux, peakres, ...) and iter_done do NOT in
+    # single precision, where the deep CLEAN bifurcates. That trajectory follows
+    # the deep CLEAN exactly, and the CLEAN amplifies the sub-ULP float32 SEED
+    # differences -- between platforms (complex64 pocketfft
+    # iFFT) and, above one thread, between thread counts (atomic-add gridder) --
+    # into a ~few-percent peak-selection bifurcation. This is a seed/amplification
+    # effect, not a CLEAN thread-ordering bug: clean_cube_many_threads is bit-
+    # identical given identical input at any thread count (-ffp-contract=off).
+    # So: double precision compares the whole dict tightly; single precision
+    # compares the bifurcation-sensitive float fields (and iter_done) loosely by
+    # magnitude while keeping niter/stop_code/masksum exact; and the 12-thread single
+    # row skips the dict (dict_kind None) since the atomic-add seed adds a second
+    # nondeterminism axis. The image is validated (at the 0.15 single-precision
+    # ceiling) below regardless.
+>>>>>>> 0f471fff6b59106c47b5a29366d5aa40f9a92955
     expected_dict = {
         "double": EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE,
         None: None,
     }[dict_kind]
     if expected_dict is not None:
-        _check_deconvolve_dict(return_dict["deconvolution"], expected_dict)
+        loose_fields = (
+            _BIFURCATION_SENSITIVE_FIELDS if dict_kind == "single" else frozenset()
+        )
+        _check_deconvolve_dict(
+            return_dict["deconvolution"],
+            expected_dict,
+            loose_fields=loose_fields,
+            loose_rtol=MULTI_CYCLE_SINGLE_DICT_RTOL,
+        )
 
     _compare_to_truth(
         img_av_xds,
