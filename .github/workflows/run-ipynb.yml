@@ -16,4 +16,7 @@ jobs:
  
   call-testing-linux:
     uses: nrao/gh-actions-templates-public/.github/workflows/run-ipynb-template.yml@main
+    with:
+      # astroviper's C++ extensions require C++23 (GCC >= 14).
+      gcc-version: "14"
     secrets: inherit
