@@ -1,6 +1,7 @@
-from numba import jit
-import numpy as np
 import math
+
+import numpy as np
+from numba import jit
 
 # from numba import gdb
 
@@ -484,18 +485,3 @@ def mosaic_grid_jit(
                                     )  # *np.real(norm**2)#* np.real(norm) #np.abs(norm**2) #**2 term is needed since the pb is in the image twice (one naturally and another from the gcf)
 
     return
-
-
-def tree_sum_list(list_to_sum):
-    import dask.array as da
-
-    while len(list_to_sum) > 1:
-        new_list_to_sum = []
-        for i in range(0, len(list_to_sum), 2):
-            if i < len(list_to_sum) - 1:
-                lazy = da.add(list_to_sum[i], list_to_sum[i + 1])
-            else:
-                lazy = list_to_sum[i]
-            new_list_to_sum.append(lazy)
-        list_to_sum = new_list_to_sum
-    return list_to_sum

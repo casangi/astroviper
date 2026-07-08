@@ -137,22 +137,21 @@ static py::buffer_info validate_per_plane_array(py::array& arr,
 
 /**
  * Templated maximg wrapper. The image is templated on T (float/double); the
- * mask is always bool. The mask is validated as zero-copy: it must be a
- * C-contiguous bool array matching the image's spatial shape.
+ * mask is always bool. Both are validated as zero-copy: they must be
+ * C-contiguous arrays of the exact dtype with matching spatial shapes — no
+ * implicit conversion or copy is ever made (see maximg_dispatch).
  */
 template<typename T>
-py::tuple maximg_impl(
-    py::array_t<T, py::array::c_style | py::array::forcecast> image_array,
-    py::array mask_array = py::array()
-) {
-    py::buffer_info image_info = image_array.request();
-
-    if (image_info.ndim != 2) {
+py::tuple maximg_impl(py::array image_array, py::array mask_array) {
+    if (image_array.ndim() != 2) {
         throw std::runtime_error("Image must be 2D array");
     }
 
-    int ny = image_info.shape[0];
-    int nx = image_info.shape[1];
+    const int ny = static_cast<int>(image_array.shape(0));
+    const int nx = static_cast<int>(image_array.shape(1));
+
+    py::buffer_info image_info = validate_inplace_array<T>(
+        image_array, "image", ny, nx, /*require_writable=*/false);
 
     int domask = 0;
     const bool* mask_ptr = nullptr;
@@ -172,6 +171,22 @@ py::tuple maximg_impl(
     );
 
     return py::make_tuple(fmin, fmax);
+}
+
+/**
+ * Runtime dtype dispatcher for maximg_impl. Selects the float32 or float64
+ * code path from the image dtype; anything else raises (no forcecast, so a
+ * wrong dtype is never silently copy-converted).
+ */
+static py::tuple maximg_dispatch(py::array image, py::array mask) {
+    auto dt = image.dtype();
+    if (dt.is(py::dtype::of<float>())) {
+        return maximg_impl<float>(image, mask);
+    } else if (dt.is(py::dtype::of<double>())) {
+        return maximg_impl<double>(image, mask);
+    } else {
+        throw std::runtime_error("image must be float32 or float64");
+    }
 }
 
 /**
@@ -611,14 +626,13 @@ static py::dict clean_cube_many_threads_dispatch(
 PYBIND11_MODULE(_hogbom_ext, m) {
     m.doc() = "Templated Hogbom CLEAN algorithm - in-place, zero-copy arrays";
 
-    // maximg: float32 overload. Mask, if provided, must be a bool array.
-    m.def("maximg", &maximg_impl<float>,
-          "Find minimum and maximum values in 2D image (float32)",
-          py::arg("image"), py::arg("mask") = py::array());
-
-    // maximg: float64 overload. Mask, if provided, must be a bool array.
-    m.def("maximg", &maximg_impl<double>,
-          "Find minimum and maximum values in 2D image (float64)",
+    // maximg: single entry point; runtime-dispatched on dtype (float32 or
+    // float64, C-contiguous, no copies). Mask, if provided, must be a bool
+    // array of the same shape.
+    m.def("maximg", &maximg_dispatch,
+          "Find minimum and maximum values in a 2D image (float32 or "
+          "float64; C-contiguous, zero-copy). Mask, if provided, must be a "
+          "C-contiguous bool array of the same shape.",
           py::arg("image"), py::arg("mask") = py::array());
 
     // clean: single entry point; runtime-dispatched on dtype. All input

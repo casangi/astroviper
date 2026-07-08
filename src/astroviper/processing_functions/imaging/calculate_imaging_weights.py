@@ -1,24 +1,25 @@
+import copy
+from typing import Dict, Union
+
 import numpy as np
-from typing import Union, Dict
+import toolviper.utils.logger as logger
 import xarray as xr
+
 from astroviper.processing_functions.imaging.check_imaging_parameters import (
     check_imaging_weights_params,
 )
-from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights import (
-    grid_imaging_weights,
-    degrid_imaging_weights,
-)
-
 from astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting import (
     calculate_briggs_params,
 )
-
+from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights import (
+    degrid_imaging_weights,
+    grid_imaging_weights,
+)
 from astroviper.utils.data_group_tools import (
     create_ps_xdt_data_groups_in_and_out,
     modify_data_groups_ps_xdt,
 )
-import copy
-import toolviper.utils.logger as logger
+from astroviper.utils.param_docs import shares_param_docs
 
 
 def _equalize_parallel_hand_weights(
@@ -76,10 +77,11 @@ def _equalize_parallel_hand_weights(
     return equalized[..., np.newaxis]
 
 
+@shares_param_docs
 def calculate_imaging_weights(
     ps_xdt: xr.DataTree,
     img_xds: xr.Dataset,
-    imaging_weights_params: Dict,
+    imaging_weights_params: dict,
     ms_data_group_in_name: str = "base",
     ms_data_group_out_name: str = "imaging",
     ms_data_group_out_modified: dict = {"weight_imaging": "WEIGHT_IMAGING"},
@@ -87,10 +89,7 @@ def calculate_imaging_weights(
     single_precision_gridding: bool = False,
     return_weight_density_grid: bool = False,
     num_threads: int = 1,
-) -> Union[
-    None,
-    np.ndarray,
-]:
+) -> None | np.ndarray:
     """
     Calculate imaging weights for interferometric data.
 
@@ -111,21 +110,8 @@ def calculate_imaging_weights(
         Image xarray Dataset containing image parameters (e.g., image size, cell
         size).
     imaging_weights_params : dict
-        Weighting scheme configuration. Keys:
-            - ``weighting`` : {"natural", "uniform", "briggs", "briggs_abs"}
-                Type of weighting to apply. ``"uniform"`` is implemented as Briggs
-                with ``robust = -2.0``.
-            - ``robust`` : float, optional
-                Briggs robust parameter (ignored for ``"natural"``; forced to
-                ``-2.0`` for ``"uniform"``).
-            - ``casa_weighting_implementation`` : bool, optional (default ``False``)
-                Selects the parallel-hand weight-equalization formula. If ``False``
-                (default), use the formally correct error-propagation expression
-                ``2 * w_xx * w_yy / (w_xx + w_yy)`` derived from the Stokes
-                formation identities (Moellenbrock 2025). If ``True``, use the
-                legacy CASA arithmetic mean ``(w_xx + w_yy) / 2``, which is
-                strictly correct only when the two correlation weights are equal
-                and is retained for compatibility with CASA reference results.
+        Weighting scheme configuration: ``weighting`` (``"natural"`` or
+        ``"briggs"``) and the Briggs ``robust`` parameter.
     ms_data_group_in_name : str, default ``"base"``
         Name of the input data group.
     ms_data_group_out_name : str, default ``"imaging"``

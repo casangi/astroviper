@@ -205,25 +205,29 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
     throw std::runtime_error("residual must be float32 or float64");
 }
 
-// Test helper: PSF Gaussian width estimate (mean FWHM in pixels).
-static double psf_width_helper(
-    py::array_t<double, py::array::c_style | py::array::forcecast> psf) {
-    py::buffer_info info = psf.request();
-    if (info.ndim != 2) throw std::runtime_error("psf must be a 2D array");
+// Test helper: PSF Gaussian width estimate (mean FWHM in pixels). The PSF is
+// a full 2D image, so it is validated zero-copy (float64, C-contiguous) —
+// never forcecast.
+static double psf_width_helper(py::array psf) {
+    if (psf.ndim() != 2) throw std::runtime_error("psf must be a 2D array");
+    const std::vector<py::ssize_t> shp = {psf.shape(0), psf.shape(1)};
+    py::buffer_info info = check_array<double>(psf, "psf", 2, shp, false);
     return aspclean::psf_gaussian_width(static_cast<const double*>(info.ptr),
                                         static_cast<int>(info.shape[1]),
                                         static_cast<int>(info.shape[0]));
 }
 
-// Test helper: centred FFT-based circular convolution of two 2D images.
-static py::array_t<double> convolve_helper(
-    py::array_t<double, py::array::c_style | py::array::forcecast> a,
-    py::array_t<double, py::array::c_style | py::array::forcecast> b) {
-    py::buffer_info ai = a.request(), bi = b.request();
-    if (ai.ndim != 2 || bi.ndim != 2)
+// Test helper: centred FFT-based circular convolution of two 2D images. Both
+// inputs are full 2D images, validated zero-copy (float64, C-contiguous) —
+// never forcecast.
+static py::array_t<double> convolve_helper(py::array a, py::array b) {
+    if (a.ndim() != 2 || b.ndim() != 2)
         throw std::runtime_error("inputs must be 2D arrays");
-    if (ai.shape[0] != bi.shape[0] || ai.shape[1] != bi.shape[1])
+    if (a.shape(0) != b.shape(0) || a.shape(1) != b.shape(1))
         throw std::runtime_error("inputs must have the same shape");
+    const std::vector<py::ssize_t> shp = {a.shape(0), a.shape(1)};
+    py::buffer_info ai = check_array<double>(a, "a", 2, shp, false);
+    py::buffer_info bi = check_array<double>(b, "b", 2, shp, false);
     const int ny = static_cast<int>(ai.shape[0]);
     const int nx = static_cast<int>(ai.shape[1]);
     py::array_t<double> out({ny, nx});

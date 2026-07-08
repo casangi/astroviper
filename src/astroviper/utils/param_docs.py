@@ -87,6 +87,7 @@ def _target_files():
         "distributed_applications/imaging/image_cube_single_field.py",
         "node_tasks/imaging/image_cube_single_field.py",
         "processing_functions/imaging/image_cube_single_field.py",
+        "processing_functions/imaging/calculate_imaging_weights.py",
         "processing_functions/imaging/residual_cycle.py",
         "processing_functions/imaging/model_update_cycle.py",
         "processing_functions/imaging/make_point_spread_function.py",

@@ -14,9 +14,9 @@ requires-python = ">=3.11,<3.14"
 
 # ✅ Core runtime dependencies must live here
 dependencies = [
-  "graphviper>=0.0.44",
+  "graphviper>=0.0.45",
   "numpy>=1.20.0",
-  "xradio[zarr]>=1.2.1",
+  "xradio[zarr]>=1.2.2",
   "numba",
   "opt_einsum",
   "pyfftw",
@@ -117,6 +117,11 @@ PYBIND11_FINDPYTHON = "ON"
 # (Optional) This block is ignored by scikit-build-core; safe to delete.
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.isort]
+# Use black-compatible import formatting; without this, isort and black keep
+# rewriting each other's output and the pre-commit run never stabilizes.
+profile = "black"
 
 [tool.pytest.ini_options]
 # Silence noisy, non-actionable zarr V3 warnings across the whole test suite.

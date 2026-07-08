@@ -1,4 +1,5 @@
 import numpy as np
+import toolviper.utils.logger as logger
 
 # from graphviper.parameter_checking.check_params import check_params
 from astroviper.utils.check_params import check_params
@@ -208,9 +209,9 @@ def check_gcf_params(gcf_params):
         if len(gcf_params["list_dish_diameters"]) != len(
             gcf_params["list_blockage_diameters"]
         ):
-            print(
-                "######### ERROR:Parameter ",
-                "list_dish_diameters and list_blockage_diameters must be the same length.",
+            logger.error(
+                "Parameter list_dish_diameters and list_blockage_diameters "
+                "must be the same length."
             )
             params_passed = False
 
@@ -386,9 +387,9 @@ def check_pb_params(img_dataset, pb_params):
     if len(pb_params["list_dish_diameters"]) != len(
         pb_params["list_blockage_diameters"]
     ):
-        print(
-            "######### ERROR:Parameter ",
-            "list_dish_diameters and list_blockage_diameters must be the same length.",
+        logger.error(
+            "Parameter list_dish_diameters and list_blockage_diameters "
+            "must be the same length."
         )
         params_passed = False
 

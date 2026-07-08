@@ -1,18 +1,19 @@
 import os
-from numcodecs import Blosc
-import xarray as xr
-from typing import Optional, Dict, Any, Tuple, Union
-from xradio.image import make_empty_sky_image
+from typing import Any, Dict, Optional, Tuple, Union
+
 import numpy as np
-import zarr
 import toolviper.utils.parameter
+import xarray as xr
+import zarr
+from numcodecs import Blosc
+from xradio.image import make_empty_sky_image
 
 import astroviper.node_tasks as node_tasks
 from astroviper.utils.param_docs import shares_param_docs
 
 # The toolviper parameter-check schema lives next to this module (rather than in
 # a central config/ directory) so it is easy to find; point the validator at it.
-_PARAM_CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
+_PARAM_CONFIG_DIR = os.path.dirname(__file__)
 
 
 # Phase layout for the driver-level ("distributed application") timing dict that
@@ -87,9 +88,9 @@ def _load_processing_set_chunk(load_params):
 def image_cube_single_field(
     ps_store: str,
     image_store: str,
-    image_params: Dict[str, Any],
-    imaging_weights_params: Dict[str, Any],
-    iteration_control_params: Dict[str, Any],
+    image_params: dict[str, Any],
+    imaging_weights_params: dict[str, Any],
+    iteration_control_params: dict[str, Any],
     gridder="prolate_spheroidal",
     deconvolver="hogbom",
     instrument_polarization_basis: str = "linear",
@@ -107,7 +108,7 @@ def image_cube_single_field(
     single_precision_image: bool = True,
     thread_info: dict = None,
     processing_function_threads: int = 1,
-    n_chunks: Optional[int] = None,
+    n_chunks: int | None = None,
     overwrite: bool = False,
     memory_mode: str = "in_memory",
     cache_directory: str = None,
@@ -115,16 +116,16 @@ def image_cube_single_field(
     write_imaging_weights_to_ps: bool = False,
     clear_cache: bool = True,
     vizualize_graph: bool = False,
-    disk_chunk_sizes: Optional[Union[Dict[str, int], str]] = None,
+    disk_chunk_sizes: dict[str, int] | str | None = None,
     fft_backend="pyfftw",
     restore: bool = False,
     skunk_works: bool = False,
     compute_backend: str = "dask",
-    mpi_cluster_setup: Optional[Dict[str, Any]] = None,
+    mpi_cluster_setup: dict[str, Any] | None = None,
     reduce_mode: str = "tree",
     reduce_n_batch: int = 2,
-    output_shard_channels: Optional[int] = None,
-    task_time_kill_switch_seconds: Optional[float] = None,
+    output_shard_channels: int | None = None,
+    task_time_kill_switch_seconds: float | None = None,
 ):  # -> Tuple[xr.Dataset, ReturnDict]:
     """
     Create a spectral cube.
@@ -319,24 +320,34 @@ def image_cube_single_field(
           grand total ``T_total``.
     """
 
-    import numpy as np
-    import xarray as xr
-    import dask
     import os
+    import time
+
+    import dask
+    import numpy as np
     import toolviper.utils.logger as logger
-    from xradio.measurement_set import open_processing_set
-    from graphviper.graph_tools.coordinate_utils import make_parallel_coord
-    from graphviper.graph_tools import generate_dask_workflow, generate_airflow_workflow
-    from graphviper.graph_tools import map, reduce, processes_with_mpi
-    from xradio.image import make_empty_sky_image
-    from xradio.image import write_image
+    import xarray as xr
     import zarr
-    from astroviper.utils.io import create_empty_data_variables_on_disk
+    from graphviper.graph_tools import (
+        generate_airflow_workflow,
+        generate_dask_workflow,
+        map,
+        processes_with_mpi,
+        reduce,
+    )
+    from graphviper.graph_tools.coordinate_utils import make_parallel_coord
+    from xradio.image import make_empty_sky_image, write_image
+    from xradio.measurement_set import open_processing_set
+
+    from astroviper.utils.data_group_tools import modify_data_groups_xds
     from astroviper.utils.data_partitioning import (
         calculate_data_chunking,
         get_thread_info,
     )
-    import time
+    from astroviper.utils.io import (
+        create_empty_data_variables_on_disk,
+        image_data_groups_for_kept_variables,
+    )
 
     assert (
         memory_mode == "in_memory"
@@ -375,6 +386,22 @@ def image_cube_single_field(
         do_sky_coords=False,
     )
     timing_distributed_application["T_make_empty_image_xds"] = time.time() - start
+
+    # Register the image data groups for the kept variables so the on-disk
+    # store carries the same group layout the node tasks build in memory
+    # (make_empty_sky_image only stamps an empty "base" placeholder, which is
+    # dropped here in favor of the real groups).
+    img_xds.attrs.get("data_groups", {}).pop("base", None)
+    for data_group_name, data_group in image_data_groups_for_kept_variables(
+        image_data_variables_keep
+    ).items():
+        modify_data_groups_xds(
+            img_xds,
+            data_group_out_name=data_group_name,
+            data_group_out=data_group,
+            description="Created by the image_cube_single_field driver; "
+            "populated by its node tasks.",
+        )
 
     start = time.time()
     write_image(img_xds, imagename=image_store, out_format="zarr", overwrite=overwrite)
@@ -450,8 +477,8 @@ def image_cube_single_field(
     input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
 
     from graphviper.graph_tools.coordinate_utils import (
-        interpolate_data_coords_onto_parallel_coords,
         get_disk_chunk_sizes,
+        interpolate_data_coords_onto_parallel_coords,
     )
 
     start = time.time()
@@ -561,11 +588,11 @@ def image_cube_single_field(
     # distributed application (this driver) and the per-chunk node tasks.
     return_dict["timing_distributed_application"] = timing_distributed_application
 
-    from astroviper.utils.timing import format_timing_summary
     from astroviper.processing_functions.imaging.utils import (
         IMAGING_TIMING_PHASES,
         IMAGING_TIMING_TOTAL_KEY,
     )
+    from astroviper.utils.timing import format_timing_summary
 
     # Driver-level ("distributed application") timing breakdown.
     logger.info(
@@ -630,6 +657,7 @@ def combine_return_data_frames(input_data, input_params):
         ``{"timing_node_tasks": pandas.DataFrame, "deconvolution": ReturnDict}``.
     """
     import pandas as pd
+
     from astroviper.processing_functions.imaging.utils.iteration_control import (
         merge_return_dicts,
     )
@@ -696,13 +724,25 @@ def calculate_number_of_chunks_for_cube_imaging(
         fudge_factor = 1.2
         if single_precision_image:
             memory_singleton_chunk = fudge_factor * (
-                3 * n_pixels_single_frequency * bytes_in_dtype["complex64"] / (1024**3)
-                + 3 * n_pixels_single_frequency * bytes_in_dtype["float32"] / (1024**3)
+                3
+                * n_pixels_single_frequency
+                * bytes_in_dtype["complex64"]
+                / (1024**3)
+                + 3
+                * n_pixels_single_frequency
+                * bytes_in_dtype["float32"]
+                / (1024**3)
             )
         else:
             memory_singleton_chunk = fudge_factor * (
-                3 * n_pixels_single_frequency * bytes_in_dtype["complex128"] / (1024**3)
-                + 3 * n_pixels_single_frequency * bytes_in_dtype["float64"] / (1024**3)
+                3
+                * n_pixels_single_frequency
+                * bytes_in_dtype["complex128"]
+                / (1024**3)
+                + 3
+                * n_pixels_single_frequency
+                * bytes_in_dtype["float64"]
+                / (1024**3)
             )
 
         logger.info(

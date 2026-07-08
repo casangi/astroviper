@@ -130,11 +130,65 @@ imaging_data_variables_and_dims_single_precision = {
 }
 
 
+# Data-group membership of the image variables: variable key (as used in
+# ``image_data_variables_keep``) -> (data group name, role). Mirrors the
+# groups the processing functions register on the in-memory per-chunk image
+# dataset (``residual`` / ``model`` / ``restored``) so the driver can stamp
+# the same layout onto the on-disk store. Variables not listed here do not
+# belong to a data group.
+imaging_data_variable_data_group_roles = {
+    "sky_residual": ("residual", "sky"),
+    "point_spread_function": ("residual", "point_spread_function"),
+    "primary_beam": ("residual", "primary_beam"),
+    "mask": ("residual", "mask"),
+    "uv_sampling": ("residual", "uv_sampling"),
+    "uv_sampling_normalization": ("residual", "uv_sampling_normalization"),
+    "visibility": ("residual", "visibility"),
+    "visibility_normalization": ("residual", "visibility_normalization"),
+    "beam_fit_params_point_spread_function": (
+        "residual",
+        "beam_fit_params_point_spread_function",
+    ),
+    "sky_model": ("model", "sky"),
+    "sky_restored": ("restored", "sky"),
+}
+
+
+def image_data_groups_for_kept_variables(image_data_variables_keep):
+    """Build the image data groups for the variables kept on disk.
+
+    Parameters
+    ----------
+    image_data_variables_keep : list of str
+        Keys into ``imaging_data_variables_and_dims_*`` selecting which image
+        variables are written to the output Zarr store.
+
+    Returns
+    -------
+    dict
+        ``{data_group_name: {role: DATA_VARIABLE_NAME}}`` restricted to the
+        kept variables. The group layout mirrors what the processing
+        functions register on the in-memory per-chunk image dataset
+        (``residual`` / ``model`` / ``restored``); kept variables with no
+        data-group membership are skipped.
+    """
+    registry = imaging_data_variables_and_dims_double_precision
+    data_groups = {}
+    for key in image_data_variables_keep:
+        membership = imaging_data_variable_data_group_roles.get(key)
+        if membership is None:
+            continue
+        group_name, role = membership
+        data_groups.setdefault(group_name, {})[role] = registry[key]["name"]
+    return data_groups
+
+
 def write_result_chunk_to_disk_using_zarr(
     image_store, image_data_variables_keep, task_coords, img_xds
 ):
-    import zarr
     import time
+
+    import zarr
 
     for dv in image_data_variables_keep:
         dv = dv.upper()
@@ -244,8 +298,8 @@ def create_empty_data_variables_on_disk(
     """
     import os
 
-    import zarr
     import numpy as np
+    import zarr
 
     _ZARR_V3 = int(zarr.__version__.split(".")[0]) >= 3
     group = zarr.open_group(zarr_store, mode="r+")
@@ -295,7 +349,7 @@ def create_empty_data_variables_on_disk(
             # inner chunks along each parallel dim into one shard. Index CRC is
             # disabled so independent single-chunk writers can set their own index
             # entries (see write_result_chunk_to_disk_sharded_skunk_works).
-            from zarr.codecs import ShardingCodec, BytesCodec
+            from zarr.codecs import BytesCodec, ShardingCodec
 
             inner = list(chunks)
             shard = list(chunks)
