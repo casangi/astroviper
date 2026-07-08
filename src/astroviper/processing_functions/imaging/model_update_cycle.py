@@ -54,13 +54,14 @@ def model_update_cycle_cube_single_field(
         columns.
     """
     import time
+
     import pandas as pd
 
-    from astroviper.processing_functions.imaging.deconvolution import (
-        deconvolve,
-        _validate_deconvolve_params,
-    )
     from astroviper.processing_functions.image_analysis.make_mask import make_mask
+    from astroviper.processing_functions.imaging.deconvolution import (
+        _validate_deconvolve_params,
+        deconvolve,
+    )
 
     # Apply deconvolve-parameter defaults (e.g. ``primary_beam_limit``) up front
     # so both the mask step below and the deconvolver see a complete dict.

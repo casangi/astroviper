@@ -20,17 +20,18 @@ from __future__ import annotations
 
 import math
 import os
-from pathlib import Path
 import re
+from pathlib import Path
+
+import dask.array as da
 import numpy as np
 import pytest
 import xarray as xr
-import dask.array as da
 
 from astroviper.distributed_applications.image_analysis.selection import (
-    select_mask,
     apply_select,
     combine_with_creation,
+    select_mask,
 )
 
 # ------------------------- fixtures / helpers -------------------------
@@ -2382,8 +2383,8 @@ class TestCrtfWorldMode:
         mask = select_mask(sky, crtf)
         got = mask.values.squeeze()
         # Reference: all pixels whose separation from center ≤ 3arcsec
-        from astropy.coordinates import SkyCoord
         import astropy.units as u
+        from astropy.coordinates import SkyCoord
 
         ra = sky.coords["right_ascension"].values
         dec = sky.coords["declination"].values
@@ -2525,8 +2526,8 @@ class TestCrtfWorldMode:
         crtf = "#CRTF\ncircle[[0h0m0.000s,+0d0m0.000s],3arcsec]"
         mask = select_mask(sky, crtf)
         got = mask.values.squeeze()
-        from astropy.coordinates import SkyCoord
         import astropy.units as u
+        from astropy.coordinates import SkyCoord
 
         grid_sc = SkyCoord(ra=ra_grid * u.rad, dec=dec_grid * u.rad, frame="icrs")
         cen_sc = SkyCoord(ra=0.0 * u.rad, dec=0.0 * u.rad, frame="icrs")

@@ -116,8 +116,6 @@ def format_timing_summary(timing, total_key=IMAGING_TIMING_TOTAL_KEY):
     str
         The formatted multi-line summary.
     """
-    from astroviper.utils.timing import (
-        format_timing_summary as _format_timing_summary,
-    )
+    from astroviper.utils.timing import format_timing_summary as _format_timing_summary
 
     return _format_timing_summary(timing, IMAGING_TIMING_PHASES, total_key=total_key)

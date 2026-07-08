@@ -1,12 +1,11 @@
-# -*- coding: utf-8 -*-
-from ms_spectral_frame_conversion import ms_spectral_frame_conversion
-import xradio
-from xradio.measurement_set import open_processing_set
-from astropy.time import Time
-import numpy as np
-import xarray as xr
 import matplotlib.pylab as pl
+import numpy as np
 import pytest
+import xarray as xr
+import xradio
+from astropy.time import Time
+from ms_spectral_frame_conversion import ms_spectral_frame_conversion
+from xradio.measurement_set import open_processing_set
 
 
 @pytest.mark.skip(

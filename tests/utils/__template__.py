@@ -1,13 +1,11 @@
 import pytest
 import xarray as xr
-
 from xradio.measurement_set import load_processing_set
-from xradio.schema.check import check_datatree
-
 from xradio.measurement_set.measurement_set_xdt import (
-    MeasurementSetXdt,
     InvalidAccessorLocation,
+    MeasurementSetXdt,
 )
+from xradio.schema.check import check_datatree
 
 
 def test_simple():

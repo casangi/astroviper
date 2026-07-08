@@ -8,7 +8,7 @@ the ``residual`` and ``model`` arrays are written into directly.
 """
 
 try:
-    from ._aspclean_ext import *  # noqa: F401,F403
+    from astroviper.processing_functions.imaging.deconvolvers.aspclean._aspclean_ext import *  # noqa: F401,F403
 except ImportError as e:
     raise ImportError(
         "Failed to import Asp CLEAN extension module. "

@@ -4,15 +4,16 @@
 
 from __future__ import annotations
 
+import warnings
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence, Tuple, Union, Any, Dict, List, Mapping
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import dask.array as da
 import numpy as np
 import xarray as xr
-import dask.array as da
 from scipy.optimize import curve_fit
-
-import warnings
 
 Number = Union[int, float]
 ArrayOrDA = Union[np.ndarray, da.Array, xr.DataArray]
@@ -76,14 +77,12 @@ def _gauss2d_component(
     return amp * np.exp(-(a * x**2 + 2 * b * x * y + c * y**2))
 
 
-from ...utils._gaussian_math import (
-    SIG2FWHM as _SIG2FWHM,
-    FWHM2SIG as _FWHM2SIG,
-    fwhm_from_sigma as _fwhm_from_sigma,
-    sigma_from_fwhm as _sigma_from_fwhm,
-    theta_pa_to_math as _theta_pa_to_math,
-    theta_math_to_pa as _theta_math_to_pa,
-)
+from astroviper.utils._gaussian_math import FWHM2SIG as _FWHM2SIG
+from astroviper.utils._gaussian_math import SIG2FWHM as _SIG2FWHM
+from astroviper.utils._gaussian_math import fwhm_from_sigma as _fwhm_from_sigma
+from astroviper.utils._gaussian_math import sigma_from_fwhm as _sigma_from_fwhm
+from astroviper.utils._gaussian_math import theta_math_to_pa as _theta_math_to_pa
+from astroviper.utils._gaussian_math import theta_pa_to_math as _theta_pa_to_math
 
 # ----------------------- Parameter packing helpers -----------------------
 
@@ -137,7 +136,7 @@ def _pack_params(
 
 def _unpack_params(
     params: np.ndarray, n: int
-) -> Tuple[
+) -> tuple[
     float, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
 ]:
     """
@@ -213,7 +212,7 @@ def _multi_gaussian2d_sum(
 
 
 def _multi_model_flat(
-    xy: Tuple[np.ndarray, np.ndarray],
+    xy: tuple[np.ndarray, np.ndarray],
     *params: float,
     n: int,
 ) -> np.ndarray:
@@ -266,7 +265,7 @@ def _multi_model_flat(
 
 def _greedy_peak_seeds(
     z: np.ndarray, n: int, excl_radius: int = 5
-) -> List[Tuple[int, int, float]]:
+) -> list[tuple[int, int, float]]:
     """
     Select approximate seed peaks by greedily taking the brightest remaining pixel.
 
@@ -292,7 +291,7 @@ def _greedy_peak_seeds(
     """
     z = np.asarray(z, dtype=float)
     z_copy = z.copy()
-    seeds: List[Tuple[int, int, float]] = []
+    seeds: list[tuple[int, int, float]] = []
     ny, nx = z.shape
     for _ in range(n):
         j, i = np.unravel_index(np.nanargmax(z_copy), z_copy.shape)
@@ -307,11 +306,11 @@ def _greedy_peak_seeds(
 
 
 def _default_bounds_multi(
-    shape: Tuple[int, int],
+    shape: tuple[int, int],
     n: int,
-    x_rng: Optional[Tuple[float, float]] = None,
-    y_rng: Optional[Tuple[float, float]] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
+    x_rng: tuple[float, float] | None = None,
+    y_rng: tuple[float, float] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Build default lower and upper bounds for the packed multi-Gaussian parameters.
 
@@ -411,7 +410,7 @@ def _extract_params_from_comp_dicts(comp_list, n):
 
 
 def _process_list_of_dicts(
-    init: Sequence[Dict[str, Number]],
+    init: Sequence[dict[str, Number]],
     n: int,
     offset: float,
 ) -> np.ndarray:
@@ -476,12 +475,12 @@ def _is_pixel_index_axes(x1d, y1d):
 def _normalize_initial_guesses(
     z2d: np.ndarray,
     n: int,
-    init: Optional[Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]],
-    min_threshold: Optional[Number],
-    max_threshold: Optional[Number],
+    init: np.ndarray | Sequence[dict[str, Number]] | dict[str, Any] | None,
+    min_threshold: Number | None,
+    max_threshold: Number | None,
     *,
-    x1d: Optional[np.ndarray] = None,
-    y1d: Optional[np.ndarray] = None,
+    x1d: np.ndarray | None = None,
+    y1d: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Normalize user or auto-generated initial guesses into packed optimizer parameters.
@@ -590,7 +589,7 @@ def _normalize_initial_guesses(
                 raise ValueError(
                     f"init['components'] must have shape (n,6); got {arr.shape}"
                 )
-            amps, x0, y0, sx, sy, th = [arr[:, k].astype(float) for k in range(6)]
+            amps, x0, y0, sx, sy, th = (arr[:, k].astype(float) for k in range(6))
             return _pack_params(offset, amps, x0, y0, sx, sy, th)
 
         if (
@@ -605,18 +604,17 @@ def _normalize_initial_guesses(
         arr = arr.reshape(1, 6)
     if arr.shape != (n, 6):
         raise ValueError(f"initial_guesses must have shape (n,6); got {arr.shape}")
-    amps, x0, y0, sx, sy, th = [arr[:, k].astype(float) for k in range(6)]
+    amps, x0, y0, sx, sy, th = (arr[:, k].astype(float) for k in range(6))
     return _pack_params(med, amps, x0, y0, sx, sy, th)
 
 
 def _merge_bounds_multi(
     base_lb: np.ndarray,
     base_ub: np.ndarray,
-    user_bounds: Optional[
-        Dict[str, Union[Tuple[float, float], Sequence[Tuple[float, float]]]]
-    ],
+    user_bounds: None
+    | (dict[str, tuple[float, float] | Sequence[tuple[float, float]]]),
     n: int,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Merge user-specified parameter bounds into default packed lower/upper bounds.
 
@@ -652,9 +650,9 @@ def _merge_bounds_multi(
 
     def _set_range(
         name: str,
-        idx_in_comp: Optional[int],
-        rng: Tuple[float, float],
-        comp_idx: Optional[int] = None,
+        idx_in_comp: int | None,
+        rng: tuple[float, float],
+        comp_idx: int | None = None,
     ):
         lo, hi = float(rng[0]), float(rng[1])
         if name == "offset":
@@ -690,7 +688,7 @@ def _merge_bounds_multi(
     }
 
     # helper: convert FWHM ranges to σ if needed (for this merge routine)
-    def _to_sigma_rng(canon_name: str, rng: Tuple[float, float]) -> Tuple[float, float]:
+    def _to_sigma_rng(canon_name: str, rng: tuple[float, float]) -> tuple[float, float]:
         lo, hi = float(rng[0]), float(rng[1])
         if canon_name in ("fwhm_major", "fwhm_minor"):
             return lo * _FWHM2SIG, hi * _FWHM2SIG
@@ -762,20 +760,16 @@ def _count_true_at_least(mask: np.ndarray, need: int, *, chunk: int = 262_144) -
 def _fit_multi_plane_numpy(
     z2d: np.ndarray,
     n_components: int,
-    min_threshold: Optional[Number],
-    max_threshold: Optional[Number],
-    initial_guesses: Optional[
-        Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]
-    ],
-    bounds: Optional[
-        Dict[str, Union[Tuple[float, float], Sequence[Tuple[float, float]]]]
-    ],
+    min_threshold: Number | None,
+    max_threshold: Number | None,
+    initial_guesses: None | (np.ndarray | Sequence[dict[str, Number]] | dict[str, Any]),
+    bounds: None | (dict[str, tuple[float, float] | Sequence[tuple[float, float]]]),
     max_nfev: int,
     *,
-    x1d: Optional[np.ndarray] = None,
-    y1d: Optional[np.ndarray] = None,
-    mask2d: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    x1d: np.ndarray | None = None,
+    y1d: np.ndarray | None = None,
+    mask2d: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Fit a multi-component Gaussian model to one concrete 2-D image plane.
 
@@ -931,14 +925,10 @@ def _multi_fit_plane_wrapper(
     x1d: np.ndarray,
     y1d: np.ndarray,
     n_components: int,
-    min_threshold: Optional[Number],
-    max_threshold: Optional[Number],
-    initial_guesses: Optional[
-        Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]
-    ],
-    bounds: Optional[
-        Dict[str, Union[Tuple[float, float], Sequence[Tuple[float, float]]]]
-    ],
+    min_threshold: Number | None,
+    max_threshold: Number | None,
+    initial_guesses: None | (np.ndarray | Sequence[dict[str, Number]] | dict[str, Any]),
+    bounds: None | (dict[str, tuple[float, float] | Sequence[tuple[float, float]]]),
     max_nfev: int,
     return_model: bool,
     return_residual: bool,
@@ -1153,11 +1143,11 @@ def _ensure_dataarray(data: ArrayOrDA) -> xr.DataArray:
 
 def _resolve_dims(
     da: xr.DataArray,
-    dims: Optional[Sequence[Union[str, int]]],
+    dims: Sequence[str | int] | None,
     *,
     unlabeled_input: bool = False,
-    unlabeled_axis_order: Optional[str] = None,
-) -> Tuple[str, str]:
+    unlabeled_axis_order: str | None = None,
+) -> tuple[str, str]:
     """
     Resolve the two dimensions that define the fit plane.
 
@@ -1218,7 +1208,7 @@ def _resolve_dims(
     if len(dims) != 2:
         raise ValueError("dims must be length-2.")
 
-    out: List[str] = []
+    out: list[str] = []
     for d in dims:
         if isinstance(d, int):
             out.append(da.dims[d])
@@ -1229,7 +1219,7 @@ def _resolve_dims(
     return out[0], out[1]
 
 
-def _axis_sign(coord: Optional[np.ndarray]) -> float:
+def _axis_sign(coord: np.ndarray | None) -> float:
     """
     Determine the orientation sign of a one-dimensional coordinate axis.
 
@@ -1254,7 +1244,7 @@ def _axis_sign(coord: Optional[np.ndarray]) -> float:
     return 1.0 if np.isfinite(c0) and np.isfinite(c1) and (c1 > c0) else -1.0
 
 
-def _select_mask(da_tr: xr.DataArray, spec: Union[str, Path], mask_source: Any = None):
+def _select_mask(da_tr: xr.DataArray, spec: str | Path, mask_source: Any = None):
     """
     Resolve a string mask specification through the local selection helper.
 
@@ -1279,18 +1269,20 @@ def _select_mask(da_tr: xr.DataArray, spec: Union[str, Path], mask_source: Any =
     without importing the heavier selection machinery at module import time.
     """
     # local import to avoid hard module dependency at import time
-    from .selection import select_mask  # type: ignore, pragma: no cover
+    from astroviper.distributed_applications.image_analysis.selection import (
+        select_mask,  # type: ignore, pragma: no cover
+    )
 
     return select_mask(da_tr, spec, mask_source=mask_source)  # pragma: no cover
 
 
 def _convert_init_theta(
-    init: Optional[Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]],
+    init: np.ndarray | Sequence[dict[str, Number]] | dict[str, Any] | None,
     to_math: bool,
     sx: float,
     sy: float,
     n: int,
-) -> Optional[Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]]:
+) -> np.ndarray | Sequence[dict[str, Number]] | dict[str, Any] | None:
     """
     Convert theta values in initial guesses from PA into math convention when needed.
 
@@ -1333,8 +1325,8 @@ def _convert_init_theta(
         return out
 
     def _conv_list_of_dicts(
-        lst: Sequence[Dict[str, Number]],
-    ) -> List[Dict[str, Number]]:
+        lst: Sequence[dict[str, Number]],
+    ) -> list[dict[str, Number]]:
         new = []
         for d in lst:
             dd = dict(d)
@@ -1398,7 +1390,7 @@ def _axis_is_valid(a: np.ndarray) -> bool:
 def _prepare_interp_pair(
     source_axis: np.ndarray,
     target_axis: np.ndarray,
-) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+) -> tuple[np.ndarray | None, np.ndarray | None]:
     """
     Normalize a monotonic interpolation pair so ``np.interp`` sees ascending ``xp``.
 
@@ -1448,7 +1440,7 @@ def _extract_1d_coords_for_fit(
     original_input: ArrayOrDA,
     da_tr: xr.DataArray,
     coord_type: str,
-    coords: Optional[Sequence[np.ndarray]],
+    coords: Sequence[np.ndarray] | None,
     dim_y: str,
     dim_x: str,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -1534,7 +1526,7 @@ def _extract_1d_coords_for_fit(
 # ---------------------------------------------------------------------------
 def _prepare_pixel_center_interp(
     coord: np.ndarray,
-) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+) -> tuple[np.ndarray | None, np.ndarray | None]:
     """
     Prepare pixel-center and world-coordinate arrays for ``np.interp``.
 
@@ -1892,9 +1884,9 @@ class _FitExecutionContext:
     da_tr: xr.DataArray
     dim_x: str
     dim_y: str
-    core: List[str]
-    coord_x: Optional[np.ndarray]
-    coord_y: Optional[np.ndarray]
+    core: list[str]
+    coord_x: np.ndarray | None
+    coord_y: np.ndarray | None
     has_explicit_public_coords: bool
     sx_sign: float
     sy_sign: float
@@ -1903,8 +1895,8 @@ class _FitExecutionContext:
 
 def _build_fit_execution_context(
     data: ArrayOrDA,
-    dims: Optional[Sequence[Union[str, int]]],
-    unlabeled_axis_order: Optional[str] = None,
+    dims: Sequence[str | int] | None,
+    unlabeled_axis_order: str | None = None,
 ) -> _FitExecutionContext:
     """
     Normalize the public input into a stable fit-plane context.
@@ -2013,12 +2005,12 @@ def _warn_if_suboptimal_dask_chunking(context: _FitExecutionContext) -> None:
 
 
 def _resolve_fit_mask(
-    mask: Optional[MaskSpec],
+    mask: MaskSpec | None,
     da_tr: xr.DataArray,
     dim_y: str,
     dim_x: str,
     *,
-    raw_plane_dims: Optional[Sequence[str]] = None,
+    raw_plane_dims: Sequence[str] | None = None,
     mask_source: Any | None = None,
 ) -> xr.DataArray:
     """
@@ -2108,12 +2100,8 @@ def _resolve_fit_mask(
 
 
 def _prepare_fit_configuration(
-    initial_guesses: Optional[
-        Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]
-    ],
-    bounds: Optional[
-        Dict[str, Union[Tuple[float, float], Sequence[Tuple[float, float]]]]
-    ],
+    initial_guesses: None | (np.ndarray | Sequence[dict[str, Number]] | dict[str, Any]),
+    bounds: None | (dict[str, tuple[float, float] | Sequence[tuple[float, float]]]),
     initial_is_fwhm: bool,
     angle: str,
     n_components: int,
@@ -2121,8 +2109,8 @@ def _prepare_fit_configuration(
     sy_sign: float,
     is_left_handed: bool,
 ) -> tuple[
-    Optional[Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]],
-    Optional[Dict[str, Any]],
+    np.ndarray | Sequence[dict[str, Number]] | dict[str, Any] | None,
+    dict[str, Any] | None,
     bool,
 ]:
     """
@@ -2176,8 +2164,8 @@ def _prepare_fit_configuration(
         )
 
     def _convert_array_like_widths_to_sigma(
-        init_like: Union[np.ndarray, Sequence[Number]],
-    ) -> Union[np.ndarray, Sequence[Number]]:
+        init_like: np.ndarray | Sequence[Number],
+    ) -> np.ndarray | Sequence[Number]:
         """
         Convert array-like FWHM width guesses into sigma units for the optimizer.
 
@@ -2234,7 +2222,7 @@ def _prepare_fit_configuration(
             ig = dict(ig)
             ig["components"] = arr
     elif isinstance(ig, (list, tuple)) and ig and isinstance(ig[0], dict):
-        mapped: List[Dict[str, Any]] = []
+        mapped: list[dict[str, Any]] = []
         for d in ig:
             dd = dict(d)
             if "fwhm_major" in dd:
@@ -2255,7 +2243,7 @@ def _prepare_fit_configuration(
         n=int(n_components),
     )
 
-    bnds: Optional[Dict[str, Any]] = bounds
+    bnds: dict[str, Any] | None = bounds
     if bounds is not None:
         has_major = "fwhm_major" in bounds
         has_minor = "fwhm_minor" in bounds
@@ -2271,7 +2259,7 @@ def _prepare_fit_configuration(
             major_val = bounds["fwhm_major"]
             minor_val = bounds["fwhm_minor"]
 
-            def _expand_bound_pairs(value: Any) -> List[Tuple[float, float]]:
+            def _expand_bound_pairs(value: Any) -> list[tuple[float, float]]:
                 # Detect per-component form: any 2-D array-like (list-of-pairs,
                 # tuple-of-pairs, or numpy array with shape (n, 2)).
                 if np.ndim(value) == 2:
@@ -2299,7 +2287,7 @@ def _prepare_fit_configuration(
                         f"major=({major_lo}, {major_hi}) and minor=({minor_lo}, {minor_hi})."
                     )
         conv = _FWHM2SIG
-        converted: Dict[str, Any] = {}
+        converted: dict[str, Any] = {}
         for key, value in bounds.items():
             if key in ("fwhm_major", "fwhm_minor"):
                 target = "sigma_x" if key == "fwhm_major" else "sigma_y"
@@ -2322,7 +2310,7 @@ def _resolve_fit_coordinate_axes(
     original_input: ArrayOrDA,
     context: _FitExecutionContext,
     coord_type: str,
-    coords: Optional[Sequence[np.ndarray]],
+    coords: Sequence[np.ndarray] | None,
 ) -> tuple[np.ndarray, np.ndarray, bool]:
     """
     Resolve the coordinate vectors that define the optimizer's working frame.
@@ -2378,12 +2366,10 @@ def _run_fit_apply_ufunc(
     x1d: np.ndarray,
     y1d: np.ndarray,
     n_components: int,
-    min_threshold: Optional[Number],
-    max_threshold: Optional[Number],
-    init_for_fit: Optional[
-        Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]
-    ],
-    bounds_for_fit: Optional[Dict[str, Any]],
+    min_threshold: Number | None,
+    max_threshold: Number | None,
+    init_for_fit: None | (np.ndarray | Sequence[dict[str, Number]] | dict[str, Any]),
+    bounds_for_fit: dict[str, Any] | None,
     max_nfev: int,
     return_model: bool,
     return_residual: bool,
@@ -2474,7 +2460,7 @@ def _run_fit_apply_ufunc(
     )
 
 
-def _canonicalize_fit_outputs(results, want_pa: bool) -> Dict[str, xr.DataArray]:
+def _canonicalize_fit_outputs(results, want_pa: bool) -> dict[str, xr.DataArray]:
     """
     Canonicalize raw fitter outputs into a consistent major-axis representation.
 
@@ -2581,7 +2567,7 @@ def _canonicalize_fit_outputs(results, want_pa: bool) -> Dict[str, xr.DataArray]
 
 
 def _build_published_parameter_dataset(
-    fit: Dict[str, xr.DataArray],
+    fit: dict[str, xr.DataArray],
     context: _FitExecutionContext,
     x1d: np.ndarray,
     y1d: np.ndarray,
@@ -3211,7 +3197,7 @@ def _build_published_parameter_dataset(
 
 def _attach_optional_plane_outputs(
     ds: xr.Dataset,
-    fit: Dict[str, xr.DataArray],
+    fit: dict[str, xr.DataArray],
     context: _FitExecutionContext,
     return_residual: bool,
     return_model: bool,
@@ -3264,7 +3250,7 @@ def _attach_optional_plane_outputs(
 
 def _attach_world_center_outputs(
     ds: xr.Dataset,
-    fit: Dict[str, xr.DataArray],
+    fit: dict[str, xr.DataArray],
     context: _FitExecutionContext,
     world_mode: bool,
 ) -> xr.Dataset:
@@ -3368,9 +3354,9 @@ def _attach_fit_invocation_metadata(
     ds: xr.Dataset,
     *,
     n_components: int,
-    dims: Optional[Sequence[Union[str, int]]],
-    min_threshold: Optional[Number],
-    max_threshold: Optional[Number],
+    dims: Sequence[str | int] | None,
+    min_threshold: Number | None,
+    max_threshold: Number | None,
     initial_guesses,
     bounds,
     initial_is_fwhm: bool,
@@ -3379,7 +3365,7 @@ def _attach_fit_invocation_metadata(
     return_residual: bool,
     angle: str,
     coord_type: str,
-    unlabeled_axis_order: Optional[str],
+    unlabeled_axis_order: str | None,
     coords,
     world_mode: bool,
 ) -> xr.Dataset:
@@ -3564,26 +3550,24 @@ def _apply_fit_variable_docs(ds: xr.Dataset) -> xr.Dataset:
 def fit_multi_gaussian2d(
     data: ArrayOrDA,
     n_components: int,
-    dims: Optional[Sequence[Union[str, int]]] = None,
+    dims: Sequence[str | int] | None = None,
     *,
-    mask: Optional[MaskSpec] = None,
+    mask: MaskSpec | None = None,
     mask_source: Any | None = None,
-    min_threshold: Optional[Number] = None,
-    max_threshold: Optional[Number] = None,
-    initial_guesses: Optional[
-        Union[np.ndarray, Sequence[Dict[str, Number]], Dict[str, Any]]
-    ] = None,
-    bounds: Optional[
-        Dict[str, Union[Tuple[float, float], Sequence[Tuple[float, float]]]]
-    ] = None,
+    min_threshold: Number | None = None,
+    max_threshold: Number | None = None,
+    initial_guesses: None
+    | (np.ndarray | Sequence[dict[str, Number]] | dict[str, Any]) = None,
+    bounds: None
+    | (dict[str, tuple[float, float] | Sequence[tuple[float, float]]]) = None,
     initial_is_fwhm: bool = True,
     max_nfev: int = 20000,
     return_model: bool = False,
     return_residual: bool = True,
     angle: str = "math",
     coord_type: str = "world",
-    unlabeled_axis_order: Optional[str] = None,
-    coords: Optional[Sequence[np.ndarray]] = None,
+    unlabeled_axis_order: str | None = None,
+    coords: Sequence[np.ndarray] | None = None,
 ) -> xr.Dataset:
     """
     Fit a sum of N rotated 2-D Gaussians (with a shared constant offset) to each plane.
@@ -4236,13 +4220,13 @@ def overlay_fit_components(
 
 def plot_components(
     data,
-    result: "xr.Dataset",
-    dims: "Optional[Sequence[Union[str, int]]]" = None,
+    result: xr.Dataset,
+    dims: Sequence[str | int] | None = None,
     *,
-    indexer: "Optional[Mapping[str, int]]" = None,
+    indexer: Mapping[str, int] | None = None,
     show_residual: bool = True,
     fwhm: bool = False,
-    angle: "Optional[str]" = None,  # "math" | "pa" | None(=auto)
+    angle: str | None = None,  # "math" | "pa" | None(=auto)
     show: bool = None,
 ):
     """

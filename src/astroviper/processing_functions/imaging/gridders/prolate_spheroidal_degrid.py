@@ -1,9 +1,9 @@
 import math
 
 import numpy as np
-from numba import jit, njit, prange
 import xarray
 from astropy import constants
+from numba import jit, njit, prange
 
 
 @jit(nopython=True, cache=True, nogil=True)  # fastmath=True

@@ -51,10 +51,12 @@ def feather(input_params, graph_mode=True):
         total ``T_feather_task`` (plus ``task_id``).
     """
     import time
+
     import pandas as pd
     import toolviper.utils.logger as logger
+    from toolviper.utils.memory_management import free_memory, get_rss_gb, memory_setup
     from xradio.image import load_image
-    from toolviper.utils.memory_management import memory_setup, free_memory, get_rss_gb
+
     import astroviper.processing_functions as pf
 
     task_start = time.time()

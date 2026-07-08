@@ -37,8 +37,8 @@ import os
 import struct
 from itertools import product
 
-import numpy as np
 import numcodecs
+import numpy as np
 
 # Zarr v3 ``data_type`` -> little-endian NumPy dtype string.
 _V3_DTYPE = {

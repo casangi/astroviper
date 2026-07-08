@@ -15,31 +15,31 @@ Run:
 
 from __future__ import annotations
 
+import builtins
+import importlib
+import math
+import os
+import sys
 import unittest
 
-import os, sys
-import math
+import dask.array as da  # type: ignore
 import numpy as np
 import pytest
 import xarray as xr
 
-import dask.array as da  # type: ignore
-
-import importlib
-import builtins
-
 # Use headless matplotlib, silence plt.show()
 os.environ.setdefault("MPLBACKEND", "Agg")
-import matplotlib
-import matplotlib.pyplot as plt
 import warnings
-import matplotlib.figure as _mf
 
+import matplotlib
+import matplotlib.figure as _mf
+import matplotlib.pyplot as plt
+
+import astroviper.distributed_applications.image_analysis.multi_gaussian2d_fit as mg
 from astroviper.distributed_applications.image_analysis.multi_gaussian2d_fit import (
     fit_multi_gaussian2d,
     plot_components,
 )
-import astroviper.distributed_applications.image_analysis.multi_gaussian2d_fit as mg
 
 # ------------------------- fixtures / helpers -------------------------
 
@@ -1796,7 +1796,9 @@ class TestNumPyFitting:  # (unittest.TestCase):
         ny, nx = 36, 36
         y, x = np.mgrid[0:ny, 0:nx]
         amp, x0, y0, sx, sy, th = 0.9, 18.0, 17.0, 3.0, 2.0, 0.0
-        z = amp * np.exp(-((x - x0) ** 2) / (2 * sx**2) - ((y - y0) ** 2) / (2 * sy**2))
+        z = amp * np.exp(
+            -((x - x0) ** 2) / (2 * sx**2) - ((y - y0) ** 2) / (2 * sy**2)
+        )
         base = xr.DataArray(z, dims=("y", "x")).assign_coords(
             y=np.arange(ny, dtype=float), x=np.arange(nx, dtype=float)
         )
@@ -1942,7 +1944,9 @@ class TestNumPyFitting:  # (unittest.TestCase):
         ny, nx = 32, 48
         y, x = np.mgrid[0:ny, 0:nx]
         amp, x0, y0, sx, sy, th = 0.9, 20.0, 14.0, 3.2, 2.1, 0.0
-        z = amp * np.exp(-((x - x0) ** 2) / (2 * sx**2) - ((y - y0) ** 2) / (2 * sy**2))
+        z = amp * np.exp(
+            -((x - x0) ** 2) / (2 * sx**2) - ((y - y0) ** 2) / (2 * sy**2)
+        )
 
         # x: descending, y: ascending → triggers idx reversal in _prep()
         xw = np.linspace(5.0, -7.0, nx, dtype=float)  # descending
@@ -2736,7 +2740,9 @@ class TestResultMetadataVersion:
 
 
 class TestBoundsFwhmMapping:
-    def _dummy_results(self, da: xr.DataArray, n: int) -> tuple[
+    def _dummy_results(
+        self, da: xr.DataArray, n: int
+    ) -> tuple[
         xr.DataArray,
         xr.DataArray,
         xr.DataArray,
@@ -3168,7 +3174,8 @@ class TestResultMetadataShortener:
         ny, nx = 32, 40
         y, x = np.mgrid[0:ny, 0:nx]
         img = 0.1 + np.exp(
-            -((x - nx / 2.0) ** 2) / (2 * 3.0**2) - ((y - ny / 2.0) ** 2) / (2 * 2.0**2)
+            -((x - nx / 2.0) ** 2) / (2 * 3.0**2)
+            - ((y - ny / 2.0) ** 2) / (2 * 2.0**2)
         )
         da = xr.DataArray(img, dims=("y", "x"))
 

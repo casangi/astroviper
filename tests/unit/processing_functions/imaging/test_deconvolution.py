@@ -36,18 +36,18 @@ from astroviper.processing_functions.imaging.deconvolution import (
 from astroviper.processing_functions.imaging.utils.return_dict import ReturnDict
 
 try:
-    from astroviper.processing_functions.imaging.deconvolvers import (
+    from astroviper.processing_functions.imaging.deconvolvers import (  # noqa: F401
         hogbom,
-    )  # noqa: F401
+    )
 
     HOGBOM_AVAILABLE = True
 except ImportError:  # pragma: no cover
     HOGBOM_AVAILABLE = False
 
 try:
-    from astroviper.processing_functions.imaging.deconvolvers import (
+    from astroviper.processing_functions.imaging.deconvolvers import (  # noqa: F401
         aspclean,
-    )  # noqa: F401
+    )
 
     ASP_AVAILABLE = True
 except ImportError:  # pragma: no cover

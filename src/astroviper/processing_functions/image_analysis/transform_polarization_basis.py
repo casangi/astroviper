@@ -199,7 +199,7 @@ def _select_transform_matrix(
 def transform_polarization_basis(
     img_xds: xr.Dataset,
     new_polarization_basis: str,
-    transformation_matrix: Optional[np.ndarray] = None,
+    transformation_matrix: np.ndarray | None = None,
     overwrite: bool = True,
 ) -> xr.Dataset:
     """Transform the polarization basis of every data variable in an image dataset.
@@ -264,7 +264,7 @@ def transform_polarization_basis(
         transformation_matrix,
     )
 
-    from toolviper.utils.memory_management import memory_setup, free_memory, get_rss_gb
+    from toolviper.utils.memory_management import free_memory, get_rss_gb, memory_setup
 
     for var_name in img_xds.data_vars:
         # if "type" in img_xds[var_name].attrs:
@@ -343,8 +343,8 @@ def transform_polarization_basis(
 
 def get_transformation_matrix(
     in_pol_labels,
-    new_polarization_basis: Optional[str] = None,
-    transformation_matrix: Optional[np.ndarray] = None,
+    new_polarization_basis: str | None = None,
+    transformation_matrix: np.ndarray | None = None,
 ):
 
     if transformation_matrix is not None:

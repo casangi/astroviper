@@ -1,16 +1,17 @@
 # run using eg
 # python -m pytest ../astroviper/tests/domain/imaging/test_fft_ifft.py
 
+import unittest
+
+import numpy as np
+
 from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
     fft_lm_to_uv,
     ifft_uv_to_lm,
 )
-import numpy as np
-import unittest
 
 
 class FFTTest(unittest.TestCase):
-
     def test_fft_ifft_round_trip(self):
         sky_lm = np.zeros((128, 128))
         sky_lm[64, 64] = 1

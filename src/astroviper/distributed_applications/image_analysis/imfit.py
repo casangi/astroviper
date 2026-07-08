@@ -11,24 +11,27 @@ from __future__ import annotations
 
 import re
 import warnings
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import dask.array as da
 import numpy as np
 import xarray as xr
 
-from .multi_gaussian2d_fit import fit_multi_gaussian2d
-from ...utils._gaussian_math import (
+from astroviper.distributed_applications.image_analysis.multi_gaussian2d_fit import (
+    fit_multi_gaussian2d,
+)
+from astroviper.utils._gaussian_math import (
     FWHM2SIG,
     deconvolve_gaussian,
     deconvolve_gaussian_with_errors,
 )
-from ...utils.coordinate_axes import (
+from astroviper.utils.coordinate_axes import (
     representative_pixel_scale,
     world_value_to_pixel,
 )
-from ...utils.sky_coordinates import (
+from astroviper.utils.sky_coordinates import (
     coerce_angle_to_radians,
     is_scalar_number,
     parse_sky_center_to_radians,
@@ -59,7 +62,7 @@ _TO_RAD = {
 
 
 def _convert_world_widths_to_pixel(
-    comp: Dict[str, Any],
+    comp: dict[str, Any],
     l_axis: np.ndarray,
     m_axis: np.ndarray,
 ) -> None:
@@ -117,7 +120,7 @@ def _convert_world_widths_to_pixel(
 def _convert_world_component_guess_to_pixel(
     xds: xr.Dataset,
     comp: Mapping[str, Any],
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Convert one world-frame imfit component guess into pixel-frame form.
 
     Parameters
@@ -316,7 +319,7 @@ def _validate_data_var(xds: xr.Dataset, data_var: str) -> xr.DataArray:
     return da
 
 
-def _resolve_mask(xds: xr.Dataset, mask_var: MaskSpec) -> Optional[MaskSpec]:
+def _resolve_mask(xds: xr.Dataset, mask_var: MaskSpec) -> MaskSpec | None:
     """Validate the public mask input before shared selection resolution.
 
     Parameters
@@ -404,8 +407,8 @@ def _looks_like_plain_missing_mask_name(mask_var: str) -> bool:
 
 
 def _resolve_beam(
-    xds: xr.Dataset, beam_var: Optional[str]
-) -> Optional[Tuple[xr.DataArray, xr.DataArray, xr.DataArray]]:
+    xds: xr.Dataset, beam_var: str | None
+) -> tuple[xr.DataArray, xr.DataArray, xr.DataArray] | None:
     """Extract per-plane beam parameters (bmaj, bmin, bpa) in radians.
 
     Parameters
@@ -490,7 +493,7 @@ def _prepare_lm_radec_interpolation_grids(
     m_coord: np.ndarray,
     ra_grid: xr.DataArray,
     dec_grid: xr.DataArray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Return l/m axes and RA/Dec grids in ascending interpolation order.
 
     Parameters
@@ -567,7 +570,7 @@ def _lm_to_radec_from_grids(
     dec_grid: xr.DataArray,
     l_coord: np.ndarray,
     m_coord: np.ndarray,
-) -> Tuple[xr.DataArray, xr.DataArray]:
+) -> tuple[xr.DataArray, xr.DataArray]:
     """Interpolate (l, m) center positions into RA/Dec grids.
 
     Parameters
@@ -620,7 +623,7 @@ def _lm_to_radec_from_wcs(
     phase_center: Sequence[float],
     frame: str,
     projection: str,
-) -> Tuple[xr.DataArray, xr.DataArray, Dict[str, str]]:
+) -> tuple[xr.DataArray, xr.DataArray, dict[str, str]]:
     """Convert (l, m) direction cosines to RA/Dec via projection inverse.
 
     Parameters
@@ -912,7 +915,7 @@ def _attach_sky_coord_errors_from_wcs(
 
 def _deconvolve_and_attach(
     ds: xr.Dataset,
-    beam: Tuple[xr.DataArray, xr.DataArray, xr.DataArray],
+    beam: tuple[xr.DataArray, xr.DataArray, xr.DataArray],
 ) -> xr.Dataset:
     """Deconvolve fitted components from the beam and attach results.
 
@@ -1100,9 +1103,9 @@ def imfit(
     *,
     data_var: str = "SKY",
     mask_var: MaskSpec = "FLAGS_SKY",
-    beam_var: Optional[str] = "BEAM_FIT_PARAMS_SKY",
-    min_threshold: Optional[Number] = None,
-    max_threshold: Optional[Number] = None,
+    beam_var: str | None = "BEAM_FIT_PARAMS_SKY",
+    min_threshold: Number | None = None,
+    max_threshold: Number | None = None,
     initial_guesses=None,
     bounds=None,
     initial_is_fwhm: bool = True,

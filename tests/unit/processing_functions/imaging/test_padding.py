@@ -1,8 +1,9 @@
 # run using eg
 # python -m pytest astroviper/tests/unit/processing_functions/imaging/test_padding.py
 
-import numpy as np
 import unittest
+
+import numpy as np
 
 from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
     add_padding,
@@ -11,7 +12,6 @@ from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gr
 
 
 class PaddingTest(unittest.TestCase):
-
     def test_add_padding_basic(self):
         rng = np.random.default_rng(0)
         src = rng.standard_normal((4, 4))

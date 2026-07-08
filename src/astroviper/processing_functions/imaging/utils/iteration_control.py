@@ -22,16 +22,16 @@ All iteration control is performed independently for every
 The major-cycle loop continues while *any* plane is still active.
 """
 
-import numpy as np
-from typing import Optional, Tuple, Dict, Any, List
 from collections import namedtuple
+from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 
 from astroviper.processing_functions.imaging.utils.return_dict import (
-    ReturnDict,
-    Key,
     FIELD_ACCUM,
     FIELD_SINGLE_VALUE,
+    Key,
+    ReturnDict,
 )
 
 HAVE_RETURNDICT = True
@@ -87,9 +87,9 @@ MINOR_STOPCODE_DESCRIPTIONS = {
 def _validate_returndict_selection(
     return_dict: ReturnDict,
     selected: Any,
-    time: Optional[int] = None,
-    pol: Optional[int] = None,
-    chan: Optional[int] = None,
+    time: int | None = None,
+    pol: int | None = None,
+    chan: int | None = None,
 ) -> None:
     """
     Validate that sel() returned data when explicit filters were provided.
@@ -145,7 +145,7 @@ def _validate_returndict_selection(
 
 
 def merge_return_dicts(
-    return_dicts: List[ReturnDict],
+    return_dicts: list[ReturnDict],
     merge_strategy: str = "update",
 ) -> ReturnDict:
     """
@@ -262,9 +262,9 @@ def merge_return_dicts(
 def get_peak_residual_from_returndict(
     return_dict: ReturnDict,
     use_mask: bool = True,
-    time: Optional[int] = None,
-    pol: Optional[int] = None,
-    chan: Optional[int] = None,
+    time: int | None = None,
+    pol: int | None = None,
+    chan: int | None = None,
 ) -> float:
     """
     Extract peak residual from ReturnDict structure.
@@ -329,9 +329,9 @@ def get_peak_residual_from_returndict(
 
 def get_masksum_from_returndict(
     return_dict: ReturnDict,
-    time: Optional[int] = None,
-    pol: Optional[int] = None,
-    chan: Optional[int] = None,
+    time: int | None = None,
+    pol: int | None = None,
+    chan: int | None = None,
 ) -> float:
     """
     Calculate total mask sum from ReturnDict structure.
@@ -379,9 +379,9 @@ def get_masksum_from_returndict(
 
 def get_iterations_done_from_returndict(
     return_dict: ReturnDict,
-    time: Optional[int] = None,
-    pol: Optional[int] = None,
-    chan: Optional[int] = None,
+    time: int | None = None,
+    pol: int | None = None,
+    chan: int | None = None,
 ) -> int:
     """
     Calculate total iterations done from ReturnDict structure.
@@ -428,9 +428,9 @@ def get_iterations_done_from_returndict(
 
 def get_max_psf_sidelobe_from_returndict(
     return_dict: ReturnDict,
-    time: Optional[int] = None,
-    pol: Optional[int] = None,
-    chan: Optional[int] = None,
+    time: int | None = None,
+    pol: int | None = None,
+    chan: int | None = None,
 ) -> float:
     """
     Extract maximum PSF sidelobe level from ReturnDict.
@@ -481,9 +481,9 @@ def get_max_psf_sidelobe_from_returndict(
 
 def get_model_flux_from_returndict(
     return_dict: ReturnDict,
-    time: Optional[int] = None,
-    pol: Optional[int] = None,
-    chan: Optional[int] = None,
+    time: int | None = None,
+    pol: int | None = None,
+    chan: int | None = None,
 ) -> float:
     """
     Extract cumulative model flux from ReturnDict structure.
@@ -773,10 +773,10 @@ class IterationController:
     def calculate_cycle_controls(
         self,
         return_dict: ReturnDict,
-        time: Optional[int] = None,
-        pol: Optional[int] = None,
-        chan: Optional[int] = None,
-    ) -> Tuple[int, float]:
+        time: int | None = None,
+        pol: int | None = None,
+        chan: int | None = None,
+    ) -> tuple[int, float]:
         """
         Calculate cycleniter and cyclethreshold for the next minor cycle.
 
@@ -856,9 +856,9 @@ class IterationController:
     def per_plane_cycle_threshold(
         self,
         return_dict: ReturnDict,
-        time: Optional[int] = None,
-        pol: Optional[int] = None,
-        chan: Optional[int] = None,
+        time: int | None = None,
+        pol: int | None = None,
+        chan: int | None = None,
     ) -> "np.ndarray":
         """Compute the per-plane minor-cycle ``cyclethreshold`` array.
 
@@ -911,10 +911,10 @@ class IterationController:
     def check_convergence(
         self,
         return_dict: ReturnDict,
-        time: Optional[int] = None,
-        pol: Optional[int] = None,
-        chan: Optional[int] = None,
-    ) -> Tuple[StopCode, str]:
+        time: int | None = None,
+        pol: int | None = None,
+        chan: int | None = None,
+    ) -> tuple[StopCode, str]:
         """
         Check if deconvolution has converged based on multiple criteria.
 
@@ -1044,9 +1044,9 @@ class IterationController:
     def update_counts(
         self,
         return_dict: ReturnDict,
-        time: Optional[int] = None,
-        pol: Optional[int] = None,
-        chan: Optional[int] = None,
+        time: int | None = None,
+        pol: int | None = None,
+        chan: int | None = None,
     ) -> None:
         """
         Update iteration counts after a major cycle completes.
@@ -1114,12 +1114,12 @@ class IterationController:
 
     def update_parameters(
         self,
-        niter: Optional[int] = None,
-        cycleniter: Optional[int] = None,
-        nmajor: Optional[int] = None,
-        threshold: Optional[float] = None,
-        cyclefactor: Optional[float] = None,
-    ) -> Tuple[int, str]:
+        niter: int | None = None,
+        cycleniter: int | None = None,
+        nmajor: int | None = None,
+        threshold: float | None = None,
+        cyclefactor: float | None = None,
+    ) -> tuple[int, str]:
         """
         Update iteration control parameters with validation.
 
@@ -1247,7 +1247,7 @@ class IterationController:
             self.stopcode_major[...] = MAJOR_CONTINUE
             self.stopcode_minor[...] = MINOR_CONTINUE
 
-    def get_state(self) -> Dict[str, Any]:
+    def get_state(self) -> dict[str, Any]:
         """Get current state of the iteration controller as a dictionary.
 
         Note: The stopcode is serialized as a dict with 'major' and 'minor' keys
@@ -1524,8 +1524,8 @@ class ConvergencePlots:
                 ylabel="Peak Residual (Jy)",
             )
 
-        channels = sorted(set(k.chan for k in available_keys if k.time == time))
-        pols = sorted(set(k.pol for k in available_keys if k.time == time))
+        channels = sorted({k.chan for k in available_keys if k.time == time})
+        pols = sorted({k.pol for k in available_keys if k.time == time})
         stokes_available = [s for s, p in self.stokes_to_pol.items() if p in pols]
 
         if not channels:

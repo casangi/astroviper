@@ -1,27 +1,26 @@
-from xradio.measurement_set.processing_set_xdt import ProcessingSetXdt
-from xradio.measurement_set.open_processing_set import open_processing_set
-
-from graphviper.graph_tools.map import map
-from graphviper.graph_tools.reduce import reduce
-from graphviper.graph_tools.generate_dask_workflow import generate_dask_workflow
-from graphviper.graph_tools.coordinate_utils import (
-    interpolate_data_coords_onto_parallel_coords,
-    make_parallel_coord,
-    make_time_coord,
-    make_frequency_coord,
-)
-from graphviper.graph_tools.generate_dask_workflow import generate_dask_workflow
-
-from astroviper.calibration.fringe_cal_quantum import make_empty_cal_quantum
-
-from .fringe_cal_quantum import SingleFringeJones
-
+import datetime
 from typing import Dict, Union
+
 import dask
 import numpy as np
-import xarray as xa
 import pandas as pd
-import datetime
+import xarray as xa
+from graphviper.graph_tools.coordinate_utils import (
+    interpolate_data_coords_onto_parallel_coords,
+    make_frequency_coord,
+    make_parallel_coord,
+    make_time_coord,
+)
+from graphviper.graph_tools.generate_dask_workflow import generate_dask_workflow
+from graphviper.graph_tools.map import map
+from graphviper.graph_tools.reduce import reduce
+from xradio.measurement_set.open_processing_set import open_processing_set
+from xradio.measurement_set.processing_set_xdt import ProcessingSetXdt
+
+from astroviper.calibration.fringe_cal_quantum import (
+    SingleFringeJones,
+    make_empty_cal_quantum,
+)
 
 
 def unique(s):
@@ -46,7 +45,7 @@ def getFourierSpacings(xds, npad=1):
     return (ddelay, drate)
 
 
-def _fringe_node_task(input_params: Dict):
+def _fringe_node_task(input_params: dict):
     ps = input_params["ps"]
     data_selection = input_params["data_selection"]
     print(f"{data_selection=}")
@@ -141,8 +140,8 @@ def _fringe_node_task(input_params: Dict):
 
 def _fringefit_single(
     ps: ProcessingSetXdt,
-    node_task_data_mapping: Dict,
-    sub_selection: Dict,
+    node_task_data_mapping: dict,
+    sub_selection: dict,
     ref_ant: str,
 ):
     """Fringefits a single something. I should probably know what for something."""

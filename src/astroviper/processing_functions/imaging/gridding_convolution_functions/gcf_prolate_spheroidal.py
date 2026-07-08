@@ -1,8 +1,9 @@
 # Enable fastmath (don't check dims).
-from numba import jit
-import numpy as np
 import math
 import time
+
+import numpy as np
+from numba import jit
 
 
 def create_prolate_spheroidal_kernel(oversampling, support, n_uv):
@@ -99,9 +100,10 @@ def create_prolate_spheroidal_kernel_1D(oversampling, support):
     u = np.arange(oversampling * (support_center)) / (support_center * oversampling)
 
     long_half_kernel_1D = np.zeros(oversampling * (support_center + 1))
-    _, long_half_kernel_1D[0 : oversampling * (support_center)] = (
-        prolate_spheroidal_function(u)
-    )
+    (
+        _,
+        long_half_kernel_1D[0 : oversampling * (support_center)],
+    ) = prolate_spheroidal_function(u)
 
     return long_half_kernel_1D
 

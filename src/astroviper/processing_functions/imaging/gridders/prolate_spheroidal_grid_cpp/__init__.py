@@ -3,10 +3,10 @@ Prolate spheroidal convolution gridder (C++ extension).
 """
 
 try:
-    from ._prolate_spheroidal_grid_ext import (
+    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp._prolate_spheroidal_grid_ext import (
+        prolate_spheroidal_degrid,
         prolate_spheroidal_grid,
         prolate_spheroidal_grid_uv_sampling,
-        prolate_spheroidal_degrid,
     )
 except ImportError as e:
     raise ImportError(

@@ -13,33 +13,32 @@ Tests cover:
 """
 
 import unittest
+
 import numpy as np
-from astroviper.processing_functions.imaging.utils.iteration_control import (
-    # Stop codes
-    StopCode,
+
+from astroviper.processing_functions.imaging.utils.iteration_control import (  # Stop codes; Utility functions; Main class
     MAJOR_CONTINUE,
+    MAJOR_CYCLE_LIMIT,
     MAJOR_ITER_LIMIT,
     MAJOR_THRESHOLD,
     MAJOR_ZERO_MASK,
-    MAJOR_CYCLE_LIMIT,
     MINOR_CONTINUE,
     MINOR_ITER_LIMIT,
     MINOR_THRESHOLD,
-    # Utility functions
-    merge_return_dicts,
-    get_peak_residual_from_returndict,
-    get_masksum_from_returndict,
+    IterationController,
+    StopCode,
     get_iterations_done_from_returndict,
+    get_masksum_from_returndict,
     get_max_psf_sidelobe_from_returndict,
     get_model_flux_from_returndict,
-    # Main class
-    IterationController,
+    get_peak_residual_from_returndict,
+    merge_return_dicts,
 )
 from astroviper.processing_functions.imaging.utils.return_dict import (
-    ReturnDict,
     FIELD_ACCUM,
     FIELD_SINGLE_VALUE,
     Key,
+    ReturnDict,
 )
 
 # =============================================================================

@@ -118,7 +118,9 @@ def imaging_preparation_single_field(
         Wall-clock time of the setup step (seconds).
     """
     import time
+
     import toolviper.utils.logger as logger
+
     from astroviper.processing_functions.imaging.residual_cycle import (
         imaging_setup_single_field,
     )
@@ -289,19 +291,21 @@ def image_cube_single_field(
         numbers before the reduce.
     """
     import time
-    import toolviper.utils.logger as logger
+
     import pandas as pd
-    from astroviper.processing_functions.imaging.residual_cycle import (
-        residual_cycle_cube_single_field,
-    )
+    import toolviper.utils.logger as logger
+
     from astroviper.processing_functions.imaging.model_update_cycle import (
         model_update_cycle_cube_single_field,
     )
+    from astroviper.processing_functions.imaging.residual_cycle import (
+        residual_cycle_cube_single_field,
+    )
     from astroviper.processing_functions.imaging.utils import (
         ReturnDict,
-        merge_return_dicts,
         accumulate_timing,
         get_calculate_cycle_controls,
+        merge_return_dicts,
     )
 
     if image_data_variables_keep is None:
@@ -384,14 +388,16 @@ def image_cube_single_field(
                 img_xds.sizes["frequency"],
                 img_xds.sizes["polarization"],
             )
-            cycle_niter, cyclethreshold, cyclethreshold_per_plane = (
-                get_calculate_cycle_controls(
-                    controller,
-                    combined_deconvolve_dict,
-                    img_xds,
-                    is_n_iter_0,
-                    iteration_control_params=iteration_control_params,
-                )
+            (
+                cycle_niter,
+                cyclethreshold,
+                cyclethreshold_per_plane,
+            ) = get_calculate_cycle_controls(
+                controller,
+                combined_deconvolve_dict,
+                img_xds,
+                is_n_iter_0,
+                iteration_control_params=iteration_control_params,
             )
             timing["T_iteration_control"] += time.time() - start
 
@@ -419,16 +425,17 @@ def image_cube_single_field(
                 "cyclethreshold_per_plane": cyclethreshold_per_plane,
             }
 
-            deconvolve_dict, model_update_return_df = (
-                model_update_cycle_cube_single_field(
-                    img_xds,
-                    deconvolver,
-                    deconvolve_params,
-                    is_n_iter_0=is_n_iter_0,
-                    num_threads=processing_function_threads,
-                    image_data_group_in_name="residual",
-                    image_data_group_out_name="model",
-                )
+            (
+                deconvolve_dict,
+                model_update_return_df,
+            ) = model_update_cycle_cube_single_field(
+                img_xds,
+                deconvolver,
+                deconvolve_params,
+                is_n_iter_0=is_n_iter_0,
+                num_threads=processing_function_threads,
+                image_data_group_in_name="residual",
+                image_data_group_out_name="model",
             )
             accumulate_timing(timing, model_update_return_df)
             # print("cycleniter: ", cycle_niter)

@@ -1,12 +1,12 @@
-from xradio.measurement_set.open_processing_set import open_processing_set
-from astroviper.calibration.fringefit import fringefit_ps, apply_cal_ps
-from xradio.measurement_set import convert_msv2_to_processing_set
-import toolviper
-
-import xarray as xa
 import astropy.time
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+import toolviper
+import xarray as xa
+from xradio.measurement_set import convert_msv2_to_processing_set
+from xradio.measurement_set.open_processing_set import open_processing_set
+
+from astroviper.calibration.fringefit import apply_cal_ps, fringefit_ps
 
 msv2_name = "global_vlbi_gg084b_reduced.ms"
 toolviper.utils.data.download(file=msv2_name)

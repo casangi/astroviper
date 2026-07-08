@@ -4,10 +4,10 @@ import numpy as np
 import pytest
 
 from astroviper.utils._gaussian_math import (
-    SIG2FWHM,
     FWHM2SIG,
-    _gauss_to_cov,
+    SIG2FWHM,
     _cov_to_gauss,
+    _gauss_to_cov,
     deconvolve_gaussian,
     deconvolve_gaussian_with_errors,
 )

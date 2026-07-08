@@ -12,7 +12,7 @@ from astropy.coordinates import Angle
 
 from astroviper.distributed_applications.image_analysis.imfit import imfit
 from astroviper.distributed_applications.model.component_models import make_gauss2d
-from astroviper.utils._gaussian_math import SIG2FWHM, FWHM2SIG
+from astroviper.utils._gaussian_math import FWHM2SIG, SIG2FWHM
 
 # ---------------------------------------------------------------------------
 # Synthetic xradio-style Dataset builder

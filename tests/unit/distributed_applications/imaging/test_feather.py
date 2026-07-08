@@ -1,17 +1,19 @@
 # run using eg
 # python -m pytest ../astroviper/tests/imaging/test_feather.py
 
-from astroviper.distributed_applications.imaging import feather
 import copy
-import dask.array as da
-import numpy as np
 import os
 import shutil
+import unittest
+
+import dask.array as da
+import numpy as np
+import xarray as xr
 from toolviper.dask.client import local_client
 from toolviper.utils.data import download
-import unittest
-import xarray as xr
 from xradio.image.image import load_image, make_empty_sky_image, open_image, write_image
+
+from astroviper.distributed_applications.imaging import feather
 
 
 # Feather runs as a GraphVIPER map graph: one task per frequency chunk, each
@@ -112,9 +114,9 @@ class FeatherShared:
                 fx = xds_sd_temp if i == 0 else xds_int_temp
                 xds["SKY"][{"frequency": slice(min_chan, max_chan)}] = fx["SKY"].values
                 xds["SKY"].attrs = {"units": "Jy/beam"}
-                xds["BEAM_FIT_PARAMS_SKY"][{"frequency": slice(min_chan, max_chan)}] = (
-                    fx["BEAM_FIT_PARAMS_SKY"].values
-                )
+                xds["BEAM_FIT_PARAMS_SKY"][
+                    {"frequency": slice(min_chan, max_chan)}
+                ] = fx["BEAM_FIT_PARAMS_SKY"].values
                 xds["BEAM_FIT_PARAMS_SKY"].attrs = {"units": "rad"}
             if i == 0:
                 xds_sd = xds
@@ -243,9 +245,9 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
         except Exception:
             # fallback: refresh index, then retry
             try:
-                from toolviper.utils.data import (
+                from toolviper.utils.data import (  # local import to avoid global change
                     update,
-                )  # local import to avoid global change
+                )
 
                 update()
                 download(cls.model_key)

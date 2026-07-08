@@ -1,6 +1,5 @@
-import xarray as xr
 import numpy as np
-
+import xarray as xr
 
 from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,

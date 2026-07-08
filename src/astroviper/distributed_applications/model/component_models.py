@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from typing import Any, Literal, Mapping, Optional, Tuple, Union, Sequence
+from collections.abc import Mapping, Sequence
 from numbers import Real
+from typing import Any, Literal, Optional, Tuple, Union
+
+import dask.array as da
 import numpy as np
 import xarray as xr
-import dask.array as da
 
-from ...utils._gaussian_math import (
-    sigma_from_fwhm as _sigma_from_fwhm,
-    normalize_angle as _normalize_theta,
-)
+from astroviper.utils._gaussian_math import normalize_angle as _normalize_theta
+from astroviper.utils._gaussian_math import sigma_from_fwhm as _sigma_from_fwhm
 
 ArrayLike2D = Union[np.ndarray, da.Array]
 OutputKind = Literal["match", "xarray", "numpy", "dask"]
@@ -24,12 +24,12 @@ def _is_dask_array(obj: Any) -> bool:
 
 
 def _coerce_to_xda(
-    data: Union[xr.DataArray, ArrayLike2D],
+    data: xr.DataArray | ArrayLike2D,
     *,
     x_coord: str,
     y_coord: str,
-    coords: Optional[Mapping[str, np.ndarray]] = None,
-    dims: Optional[Tuple[str, str]] = None,
+    coords: Mapping[str, np.ndarray] | None = None,
+    dims: tuple[str, str] | None = None,
 ) -> xr.DataArray:
     """
     Coerce input into an ``xarray.DataArray`` with the requested x/y coordinates.
@@ -118,7 +118,7 @@ def _rotated_coords(
     x0: float,
     y0: float,
     theta: float,
-) -> Tuple[xr.DataArray, xr.DataArray]:
+) -> tuple[xr.DataArray, xr.DataArray]:
     """
     Compute rotated, centered coordinates for an ellipse/Gaussian.
 
@@ -160,7 +160,7 @@ def _nearest_indices_1d(
     *,
     out_of_range: Literal["ignore", "ignore_sloppy", "clip", "error"] = "ignore",
     return_valid_mask: bool = False,
-) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """
     Map world-coordinate ``targets`` to nearest integer indices along one axis.
 
@@ -407,7 +407,7 @@ def _apply_source_array(
 
 def _finalize_output(
     xda_out: xr.DataArray,
-    input_obj: Union[xr.DataArray, ArrayLike2D],
+    input_obj: xr.DataArray | ArrayLike2D,
     *,
     output: OutputKind,
 ) -> ReturnType:
@@ -453,7 +453,7 @@ def _finalize_output(
 
 
 def make_disk(
-    data: Union[xr.DataArray, ArrayLike2D],
+    data: xr.DataArray | ArrayLike2D,
     a: float,
     b: float,
     theta: float,
@@ -463,8 +463,8 @@ def make_disk(
     *,
     x_coord: str = "x",
     y_coord: str = "y",
-    coords: Optional[Mapping[str, np.ndarray]] = None,
-    dims: Optional[Tuple[str, str]] = None,
+    coords: Mapping[str, np.ndarray] | None = None,
+    dims: tuple[str, str] | None = None,
     add: bool = True,
     output: OutputKind = "match",
     angle: Literal["auto", "pa", "math"] = "auto",
@@ -591,7 +591,7 @@ def make_disk(
 
 
 def make_gauss2d(
-    data: Union[xr.DataArray, ArrayLike2D],
+    data: xr.DataArray | ArrayLike2D,
     a: float,
     b: float,
     theta: float,
@@ -601,8 +601,8 @@ def make_gauss2d(
     *,
     x_coord: str = "x",
     y_coord: str = "y",
-    coords: Optional[Mapping[str, np.ndarray]] = None,
-    dims: Optional[Tuple[str, str]] = None,
+    coords: Mapping[str, np.ndarray] | None = None,
+    dims: tuple[str, str] | None = None,
     add: bool = True,
     output: OutputKind = "match",
     angle: Literal["auto", "pa", "math"] = "auto",
@@ -737,15 +737,15 @@ def make_gauss2d(
 
 
 def make_pt_sources(
-    data: Union[xr.DataArray, ArrayLike2D],
+    data: xr.DataArray | ArrayLike2D,
     amplitudes: Sequence[Real],
-    xs: Union[np.ndarray, list, tuple],
-    ys: Union[np.ndarray, list, tuple],
+    xs: np.ndarray | list | tuple,
+    ys: np.ndarray | list | tuple,
     *,
     x_coord: str = "x",
     y_coord: str = "y",
-    coords: Optional[Mapping[str, np.ndarray]] = None,
-    dims: Optional[Tuple[str, str]] = None,
+    coords: Mapping[str, np.ndarray] | None = None,
+    dims: tuple[str, str] | None = None,
     add: bool = True,
     output: OutputKind = "match",
     out_of_range: Literal["ignore", "ignore_sloppy", "clip", "error"] = "ignore",

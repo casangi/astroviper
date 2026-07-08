@@ -1,4 +1,3 @@
-from astroviper.utils.param_docs import shares_param_docs
 import time
 
 from astroviper.processing_functions.imaging.get_visibility_grid import (
@@ -8,6 +7,7 @@ from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
 )
+from astroviper.utils.param_docs import shares_param_docs
 
 
 @shares_param_docs
@@ -80,21 +80,23 @@ def imaging_setup_single_field(
     return_df : pandas.DataFrame
         One-row timing frame for the setup step.
     """
+    import time
+
+    import numpy as np
     import toolviper.utils.logger as logger
     import xarray as xr
-    import time
-    import numpy as np
-    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
-        calculate_imaging_weights,
-    )
-    from astroviper.processing_functions.imaging.make_point_spread_function import (
-        make_point_spread_function_single_field,
-    )
+
     from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
         point_spread_function_gaussian_fit,
     )
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
+    )
+    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+        calculate_imaging_weights,
+    )
+    from astroviper.processing_functions.imaging.make_point_spread_function import (
+        make_point_spread_function_single_field,
     )
     from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (
         make_primary_beam_single_field,
@@ -282,20 +284,21 @@ def residual_cycle_cube_single_field(
         ``T_residual_vis``, ``T_grid``, ``T_fft_norm``, ``T_transform_pol`` and
         the fine-grained gridding timings).
     """
+    import time
+
+    import numpy as np
     import toolviper.utils.logger as logger
     import xarray as xr
-    import time
-    import numpy as np
-    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
-        ifft_norm_img_xds,
-        fft_norm_img_xds,
-    )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
-        create_prolate_spheroidal_kernel_1D,
-    )
 
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
+    )
+    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+        fft_norm_img_xds,
+        ifft_norm_img_xds,
+    )
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
+        create_prolate_spheroidal_kernel_1D,
     )
 
     if image_data_variables_keep is None:

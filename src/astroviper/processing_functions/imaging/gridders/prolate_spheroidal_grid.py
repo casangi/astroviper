@@ -1,7 +1,8 @@
-from numba import jit
+import math
+
 import numpy as np
 import numpy.typing as npt
-import math
+from numba import jit
 
 
 # When jit is used round is repolaced by standard c++ round that is different to python round

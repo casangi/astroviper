@@ -1,29 +1,26 @@
-import numpy as np
-import xarray as xr
 import copy
+import logging
 from typing import Optional, Tuple
 
-from astroviper.processing_functions.imaging.deconvolvers import hogbom
-from astroviper.processing_functions.imaging.deconvolvers import aspclean
+import numpy as np
+import toolviper.utils.logger as logger
+import xarray as xr
+
 from astroviper.processing_functions.image_analysis import image_statistics as imgstats
 from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
     extract_main_lobe,
 )
+from astroviper.processing_functions.imaging.deconvolvers import aspclean, hogbom
 from astroviper.processing_functions.imaging.utils.return_dict import ReturnDict
-
-import logging
-import toolviper.utils.logger as logger
+from astroviper.utils.data_group_tools import (
+    create_data_groups_in_and_out,
+    modify_data_groups_xds,
+)
 
 # lg = logger.get_logger()
 # lg.setLevel(logging.DEBUG)
 
 # XXX : TODO: As of 2025-10-07 there is no way to supply an initial model image to the deconvolver
-
-
-from astroviper.utils.data_group_tools import (
-    create_data_groups_in_and_out,
-    modify_data_groups_xds,
-)
 
 
 def get_phase_center(residual_image_xds):
@@ -458,11 +455,11 @@ def create_deconvolution_return_dict(
 def deconvolve(
     img_xds: xr.Dataset = None,
     algorithm: str = "hogbom",
-    deconvolve_params: Optional[dict] = None,
+    deconvolve_params: dict | None = None,
     num_threads: int = 1,
     image_data_group_in_name: str = "residual",
     image_data_group_out_name: str = "model",
-    image_data_group_out_modified: Optional[dict] = None,
+    image_data_group_out_modified: dict | None = None,
 ):
     """
     Deconvolve a residual image cube, in place, with planes parallelized
@@ -730,9 +727,9 @@ def hogbom_clean(
     residual_cube: np.ndarray,
     psf_cube: np.ndarray,
     model_cube: np.ndarray,
-    deconvolve_params: Optional[dict] = None,
+    deconvolve_params: dict | None = None,
     num_threads: int = 1,
-    mask_cube: Optional[np.ndarray] = None,
+    mask_cube: np.ndarray | None = None,
 ):
     """
     Run Hogbom CLEAN over an entire ``(time, frequency, polarization,
@@ -874,9 +871,9 @@ def hogbom_clean_many_threads(
     residual_cube: np.ndarray,
     psf_cube: np.ndarray,
     model_cube: np.ndarray,
-    deconvolve_params: Optional[dict] = None,
+    deconvolve_params: dict | None = None,
     num_threads: int = 1,
-    mask_cube: Optional[np.ndarray] = None,
+    mask_cube: np.ndarray | None = None,
 ):
     """Hogbom CLEAN over a 5-D cube, threaded across AND within planes (numba).
 
@@ -963,9 +960,9 @@ def asp_clean(
     residual_cube: np.ndarray,
     psf_cube: np.ndarray,
     model_cube: np.ndarray,
-    deconvolve_params: Optional[dict] = None,
+    deconvolve_params: dict | None = None,
     num_threads: int = 1,
-    mask_cube: Optional[np.ndarray] = None,
+    mask_cube: np.ndarray | None = None,
 ):
     """
     Run Adaptive Scale Pixel (Asp / AAspClean) CLEAN over an entire

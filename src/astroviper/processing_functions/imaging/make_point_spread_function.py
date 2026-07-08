@@ -5,8 +5,6 @@ build the PSF numerator: gridding the imaging weights onto the UV plane *is* the
 first step of forming the point spread function.
 """
 
-from astroviper.utils.param_docs import shares_param_docs
-
 import copy
 
 import numpy as np
@@ -16,6 +14,7 @@ from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
 )
+from astroviper.utils.param_docs import shares_param_docs
 
 
 def add_uv_sampling_grid_mosaic(
@@ -479,13 +478,14 @@ def make_point_spread_function_single_field(
     astroviper.processing_functions.imaging.primary_beam.make_primary_beam.make_primary_beam_single_field
     """
     import time
+
     import pandas as pd
 
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
-        create_prolate_spheroidal_kernel_1D,
-    )
     from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
         ifft_norm_img_xds,
+    )
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
+        create_prolate_spheroidal_kernel_1D,
     )
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations
 

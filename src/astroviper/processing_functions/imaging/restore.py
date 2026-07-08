@@ -1,6 +1,6 @@
 import numpy as np
-import xarray as xr
 import scipy.fft
+import xarray as xr
 
 from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
@@ -158,6 +158,7 @@ def restore_image(
     the residual (the model cannot be restored without a beam).
     """
     import time
+
     import pandas as pd
 
     start = time.time()

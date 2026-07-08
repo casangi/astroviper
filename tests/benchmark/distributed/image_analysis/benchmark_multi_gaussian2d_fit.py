@@ -16,10 +16,11 @@ if __name__ == "__main__":
 
 import argparse
 import time
-import numpy as np
-import xarray as xr
+
 import dask
 import dask.array as da
+import numpy as np
+import xarray as xr
 
 from astroviper.distributed_applications.image_analysis.multi_gaussian2d_fit import (
     fit_multi_gaussian2d,

@@ -8,9 +8,8 @@ matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
-from astropy.wcs import WCS
-
 import xarray as xr
+from astropy.wcs import WCS
 
 from astroviper.utils.plotting import generate_plot
 

@@ -1,8 +1,8 @@
 """Gridding of the (residual) visibilities into the undeconvolved image grid."""
 
-from astroviper.utils.param_docs import shares_param_docs
-
 import time
+
+from astroviper.utils.param_docs import shares_param_docs
 
 
 @shares_param_docs

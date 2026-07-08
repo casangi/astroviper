@@ -1,14 +1,14 @@
-# -*- coding: utf-8 -*-
-import xradio
-import xarray
 import copy
+import warnings
 from typing import List
-from astropy.coordinates import SpectralCoord, EarthLocation, SkyCoord
-from astropy.time import Time
+
 import astropy.units as u
 import numpy as np
+import xarray
+import xradio
+from astropy.coordinates import EarthLocation, SkyCoord, SpectralCoord
+from astropy.time import Time
 from scipy.interpolate import interp1d
-import warnings
 
 warnings.filterwarnings(
     "ignore",
@@ -20,7 +20,7 @@ np.set_printoptions(precision=12)
 
 def ms_spectral_frame_conversion(
     ms: xarray.core.datatree.DataTree,
-    freqrange: List[float] = [],
+    freqrange: list[float] = [],
     outframe: str = "LSRK",
 ) -> xarray.core.datatree.DataTree:
     """

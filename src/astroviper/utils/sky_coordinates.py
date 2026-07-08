@@ -14,7 +14,8 @@ schema or fitter API.
 from __future__ import annotations
 
 import warnings
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import astropy.units as u
 import numpy as np

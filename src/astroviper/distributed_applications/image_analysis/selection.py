@@ -38,15 +38,15 @@ Notes
 
 from __future__ import annotations
 
-from typing import Mapping, Any, Union, Literal, Optional, Tuple, List
-from pathlib import Path
-import dask.array as da
-
-import math
 import ast
+import math
 import re
 import warnings
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any, List, Literal, Optional, Tuple, Union
 
+import dask.array as da
 import numpy as np
 import xarray as xr
 
@@ -129,8 +129,8 @@ def select_mask(
     mask_source: Any | None = None,
     *,
     return_kind: ReturnKind = "dataarray-dask",
-    dask_chunks: Optional[Tuple[int, ...]] = None,
-    creation_hint: Optional[str] = None,
+    dask_chunks: tuple[int, ...] | None = None,
+    creation_hint: str | None = None,
     auto_merge_creation: bool = False,
 ) -> ArrayLike:
     """Build a boolean mask aligned to ``data`` from ``select``.
@@ -152,7 +152,7 @@ def select_mask(
     _reject_dataset_input(data)
     # For xr.DataArray results created from strings/paths, we record a
     # human-readable hint on how to recreate the mask.
-    creation_str: Optional[str] = None
+    creation_str: str | None = None
 
     if select is None:
         return _all_true_mask_like(data)
@@ -891,7 +891,7 @@ def _detect_time_family(token: str) -> tuple[str, str]:
 
 def _build_range_mask(
     data: xr.DataArray, kwargs: dict[str, str]
-) -> "xr.DataArray | None":
+) -> xr.DataArray | None:
     """Build a 1-D boolean mask on the ``frequency`` dim from a ``range=`` kwarg.
 
     Parameters
@@ -956,9 +956,7 @@ def _build_range_mask(
     return mask
 
 
-def _build_corr_mask(
-    data: xr.DataArray, kwargs: dict[str, str]
-) -> "xr.DataArray | None":
+def _build_corr_mask(data: xr.DataArray, kwargs: dict[str, str]) -> xr.DataArray | None:
     """Build a 1-D boolean mask on the ``polarization`` dim from a ``corr=`` kwarg.
 
     Parameters
@@ -1003,9 +1001,7 @@ def _build_corr_mask(
     return xr.DataArray(mask_vals, dims=[pol_dim])
 
 
-def _build_time_mask(
-    data: xr.DataArray, kwargs: dict[str, str]
-) -> "xr.DataArray | None":
+def _build_time_mask(data: xr.DataArray, kwargs: dict[str, str]) -> xr.DataArray | None:
     """Build a 1-D boolean mask on the ``time`` dim from a ``time=`` kwarg.
 
     Parameters
@@ -1121,12 +1117,12 @@ def _warn_if_axis_selection_empty(
 
 
 def _compose_line_mask(
-    spatial: "np.ndarray | da.Array",
-    range_mask: "xr.DataArray | None",
-    corr_mask: "xr.DataArray | None",
-    time_mask: "xr.DataArray | None",
+    spatial: np.ndarray | da.Array,
+    range_mask: xr.DataArray | None,
+    corr_mask: xr.DataArray | None,
+    time_mask: xr.DataArray | None,
     data: ArrayLike,
-) -> "np.ndarray | da.Array | xr.DataArray":
+) -> np.ndarray | da.Array | xr.DataArray:
     """Combine per-axis masks into a single full-data-shape boolean mask.
 
     Parameters
@@ -1520,7 +1516,7 @@ def _parse_world_pair(pair_token: str) -> tuple[float, float]:
     return _parse_world_coord_token(toks[0]), _parse_world_coord_token(toks[1])
 
 
-def _build_skycoord_grid(data: xr.DataArray) -> "SkyCoord":
+def _build_skycoord_grid(data: xr.DataArray) -> SkyCoord:
     """Build a 2-D ``SkyCoord`` grid from ``right_ascension`` / ``declination`` coords.
 
     Parameters
@@ -1539,8 +1535,8 @@ def _build_skycoord_grid(data: xr.DataArray) -> "SkyCoord":
     The RA/Dec arrays are materialised to NumPy here.  World-mode shapes rely
     on astropy operations that cannot remain lazy; v1 accepts this.
     """
-    from astropy.coordinates import SkyCoord
     import astropy.units as u
+    from astropy.coordinates import SkyCoord
 
     ra = np.asarray(data.coords["right_ascension"].values, dtype=float)
     dec = np.asarray(data.coords["declination"].values, dtype=float)
@@ -1550,7 +1546,7 @@ def _build_skycoord_grid(data: xr.DataArray) -> "SkyCoord":
 def _rasterize_shape_world(
     shape: str,
     payload: str,
-    skycoord_grid: "SkyCoord",
+    skycoord_grid: SkyCoord,
 ) -> xr.DataArray:
     """Rasterize a world-mode CRTF shape against a per-pixel ``SkyCoord`` grid.
 
@@ -1578,8 +1574,8 @@ def _rasterize_shape_world(
     centroid) for tangent-plane geometry.  No frame conversion is performed;
     RA/Dec values are interpreted as-is in ICRS.
     """
-    from astropy.coordinates import SkyCoord, SkyOffsetFrame
     import astropy.units as u
+    from astropy.coordinates import SkyCoord, SkyOffsetFrame
 
     inner = _strip_brackets(payload).strip()
     parts = _smart_split_pairs(inner)
@@ -2003,7 +1999,7 @@ def _crtf_mask(data: ArrayLike, text: str, *, lazy: bool = False) -> ArrayLike:
     return acc
 
 
-def _infer_xy_axes(data: ArrayLike) -> Tuple[int, int]:
+def _infer_xy_axes(data: ArrayLike) -> tuple[int, int]:
     """Infer the axis indices corresponding to x and y pixel coordinates.
 
     Parameters
@@ -2041,8 +2037,8 @@ def _infer_xy_axes(data: ArrayLike) -> Tuple[int, int]:
 
 
 def _build_pixel_coordinate_grids(
-    shape: Tuple[int, ...], x_axis: int, y_axis: int, *, lazy: bool
-) -> Tuple[np.ndarray | da.Array, np.ndarray | da.Array]:
+    shape: tuple[int, ...], x_axis: int, y_axis: int, *, lazy: bool
+) -> tuple[np.ndarray | da.Array, np.ndarray | da.Array]:
     """Build broadcasted x/y pixel-index grids aligned to ``shape``.
 
     Parameters
@@ -2100,7 +2096,7 @@ _PIX_NUM = rf"{_NUM}\s*pix"
 _PAIR_PIX = rf"\[\s*({_PIX_NUM})\s*,\s*({_PIX_NUM})\s*\]"
 
 
-def _parse_units_val(tok: str) -> Tuple[float, str | None]:
+def _parse_units_val(tok: str) -> tuple[float, str | None]:
     m = re.match(rf"^\s*({_NUM})\s*(pix|deg|rad)?\s*$", tok)
     if not m:
         raise ValueError(f"Invalid numeric token: {tok!r}")
@@ -2212,9 +2208,9 @@ def _parse_angle_kv(token: str) -> float:
     return ang
 
 
-def _smart_split_pairs(inner: str) -> List[str]:
-    parts: List[str] = []
-    buf: List[str] = []
+def _smart_split_pairs(inner: str) -> list[str]:
+    parts: list[str] = []
+    buf: list[str] = []
     depth = 0
     for ch in inner:
         if ch == "[":
@@ -2232,7 +2228,7 @@ def _smart_split_pairs(inner: str) -> List[str]:
     return parts
 
 
-def _parse_pair_pix(pair_token: str) -> Tuple[float, float]:
+def _parse_pair_pix(pair_token: str) -> tuple[float, float]:
     m = re.match(rf"^\s*{_PAIR_PIX}\s*$", pair_token)
     if not m:
         raise ValueError(_format_pix_pair_error(pair_token))
@@ -2241,7 +2237,7 @@ def _parse_pair_pix(pair_token: str) -> Tuple[float, float]:
     return x, y
 
 
-def _parse_two_pix_vals(token: str) -> Tuple[float, float]:
+def _parse_two_pix_vals(token: str) -> tuple[float, float]:
     m = re.match(rf"^\s*\[\s*({_PIX_NUM})\s*,\s*({_PIX_NUM})\s*\]\s*$", token)
     if not m:
         raise ValueError(_format_pix_pair_error(token))
@@ -2301,8 +2297,8 @@ def _coerce_return_kind(
     mask: ArrayLike,
     data: ArrayLike,
     return_kind: ReturnKind,
-    dask_chunks: Optional[Tuple[int, ...]],
-    creation: Optional[str] = None,
+    dask_chunks: tuple[int, ...] | None,
+    creation: str | None = None,
 ) -> ArrayLike:
     """Convert aligned mask to the requested return kind efficiently."""
     # numpy ndarray of bool
@@ -2399,8 +2395,8 @@ def _coerce_return_kind(
 
 
 def _infer_chunks_like(
-    data: Any, shape: Tuple[int, ...], dask_chunks: Optional[Tuple[int, ...]]
-) -> Tuple[int, ...]:
+    data: Any, shape: tuple[int, ...], dask_chunks: tuple[int, ...] | None
+) -> tuple[int, ...]:
     if dask_chunks is not None:
         return dask_chunks
     # try to mirror data's chunking
@@ -2484,7 +2480,9 @@ def _build_creation_for_expression(expr: str, env: Mapping[str, ArrayLike]) -> s
             op = (
                 "&"
                 if isinstance(node.op, ast.BitAnd)
-                else "|" if isinstance(node.op, ast.BitOr) else "^"
+                else "|"
+                if isinstance(node.op, ast.BitOr)
+                else "^"
             )
             left = _emit(node.left)
             right = _emit(node.right)
@@ -2507,8 +2505,8 @@ def combine_with_creation(
     *,
     template: ArrayLike | None = None,
     return_kind: ReturnKind = "dataarray-dask",
-    dask_chunks: Optional[Tuple[int, ...]] = None,
-    creation_hint: Optional[str] = None,
+    dask_chunks: tuple[int, ...] | None = None,
+    creation_hint: str | None = None,
 ) -> xr.DataArray:
     """
     Combine two boolean DataArrays with a bitwise op ('|', '&', '^') and attach a

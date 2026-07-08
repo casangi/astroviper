@@ -12,7 +12,7 @@ values (replacing). This enables convergence visualization and monitoring
 deconvolution progress across major/minor cycles.
 """
 
-from collections import namedtuple, OrderedDict
+from collections import OrderedDict, namedtuple
 
 # Define the key structure
 # A namedtuple is used for the keys to ensure immutability and easy comparison

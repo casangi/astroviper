@@ -13,9 +13,9 @@ import numpy as np
 import pytest
 
 try:
-    from astroviper.processing_functions.imaging.deconvolvers import (
+    from astroviper.processing_functions.imaging.deconvolvers import (  # noqa: F401
         hogbom,
-    )  # noqa: F401
+    )
 
     HOGBOM_AVAILABLE = hasattr(hogbom, "clean_cube_many_threads")
 except ImportError:  # pragma: no cover

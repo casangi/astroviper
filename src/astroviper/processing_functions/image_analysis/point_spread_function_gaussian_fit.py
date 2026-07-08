@@ -2,8 +2,8 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
-import xarray as xr
 import scipy.optimize as optimize
+import xarray as xr
 from scipy.interpolate import interpn
 from scipy.ndimage import label
 
@@ -185,12 +185,12 @@ def point_spread_function_gaussian_fit(
         beam_params_label=["major", "minor", "pa"],
     )
 
-    img_xds[image_data_group_out["beam_fit_params_point_spread_function"]] = (
-        xr.DataArray(
-            ellipse_params,
-            dims=["time", "frequency", "polarization", "beam_params"],
-            attrs={"unit": "rad"},
-        )
+    img_xds[
+        image_data_group_out["beam_fit_params_point_spread_function"]
+    ] = xr.DataArray(
+        ellipse_params,
+        dims=["time", "frequency", "polarization", "beam_params"],
+        attrs={"unit": "rad"},
     )
 
     img_xds[image_data_group_out["max_sidelobe_point_spread_function"]] = xr.DataArray(

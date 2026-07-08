@@ -69,16 +69,17 @@ def make_primary_beam_single_field(
     astroviper.processing_functions.imaging.make_point_spread_function.make_point_spread_function_single_field
     """
     import time
-    import numpy as np
-    import xarray as xr
-    import pandas as pd
 
+    import numpy as np
+    import pandas as pd
+    import xarray as xr
+
+    from astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric import (
+        airy_disk_rorder_v2,
+    )
     from astroviper.utils.data_group_tools import (
         create_data_groups_in_and_out,
         modify_data_groups_xds,
-    )
-    from astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric import (
-        airy_disk_rorder_v2,
     )
 
     if float_dtype is None:

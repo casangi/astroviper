@@ -36,9 +36,10 @@ def psf_result():
     Mirrors the once-per-chunk setup: compute the imaging weights, then make the
     point spread function.
     """
+    from xradio.image import make_empty_sky_image
     from xradio.measurement_set import open_processing_set
     from xradio.measurement_set.load_processing_set import load_processing_set
-    from xradio.image import make_empty_sky_image
+
     from astroviper.processing_functions.imaging.calculate_imaging_weights import (
         calculate_imaging_weights,
     )

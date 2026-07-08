@@ -3,7 +3,7 @@ Hogbom CLEAN implementation
 """
 
 try:
-    from ._hogbom_ext import *
+    from astroviper.processing_functions.imaging.deconvolvers.hogbom._hogbom_ext import *
 except ImportError as e:
     raise ImportError(
         "Failed to import Hogbom CLEAN extension module. "

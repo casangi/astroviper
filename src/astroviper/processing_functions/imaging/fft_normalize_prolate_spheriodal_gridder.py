@@ -1,20 +1,16 @@
 import time
 
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
-    create_prolate_spheroidal_correcting_image_1D,
-)
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
-    create_prolate_spheroidal_correcting_image_1D,
-)
 import numpy as np
 import scipy.fft
-import xarray as xr
 import toolviper.utils.logger as logger
+import xarray as xr
 
 # from memory_profiler import profile
 from toolviper.utils.memory_management import get_rss_gb
 
-
+from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
+    create_prolate_spheroidal_correcting_image_1D,
+)
 from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
@@ -192,10 +188,11 @@ def ifft_norm_img_xds(
         create_prolate_spheroidal_correcting_image_1D,
     )
 
-    kernel_image_1D_l, kernel_image_1D_m = (
-        create_prolate_spheroidal_correcting_image_1D(
-            n_lm_padded=[img_xds.sizes["u"], img_xds.sizes["v"]]
-        )
+    (
+        kernel_image_1D_l,
+        kernel_image_1D_m,
+    ) = create_prolate_spheroidal_correcting_image_1D(
+        n_lm_padded=[img_xds.sizes["u"], img_xds.sizes["v"]]
     )
 
     # for data_variable in ["aperture", "uv_sampling", "visibility"]:
@@ -349,9 +346,10 @@ def fft_norm_img_xds(
         out_arr = img_xds[out_name].values  # numpy view for in-place writes
         img_xds[out_name].attrs["type"] = data_variable
 
-        kernel_image_1D_l, kernel_image_1D_m = (
-            create_prolate_spheroidal_correcting_image_1D(n_lm_padded=n_uv)
-        )
+        (
+            kernel_image_1D_l,
+            kernel_image_1D_m,
+        ) = create_prolate_spheroidal_correcting_image_1D(n_lm_padded=n_uv)
 
         # kernel_image_1D_l, kernel_image_1D_m = (
         #     create_prolate_spheroidal_correcting_image_1D(

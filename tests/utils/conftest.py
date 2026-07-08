@@ -1,6 +1,7 @@
-from pathlib import Path
-import shutil
 import os
+import shutil
+from pathlib import Path
+
 import pytest
 from toolviper.utils.data import download
 from xradio.measurement_set import convert_msv2_to_processing_set

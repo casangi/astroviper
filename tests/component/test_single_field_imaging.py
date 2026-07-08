@@ -43,7 +43,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 import xarray as xr
-
+from xradio.measurement_set import open_processing_set
 
 from astroviper.distributed_applications.imaging.image_cube_single_field import (
     image_cube_single_field,
@@ -55,7 +55,6 @@ from astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric impo
 from astroviper.processing_functions.imaging.utils.iteration_control import (
     print_deconvolve_dict,
 )
-from xradio.measurement_set import open_processing_set
 
 PS_STORE = "twhya_selfcal_lsrk_5chans.ps.zarr"
 

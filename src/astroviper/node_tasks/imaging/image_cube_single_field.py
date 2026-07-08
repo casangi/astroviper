@@ -51,8 +51,8 @@ def _remap_deconvolve_dict_to_global_channels(combined_deconvolve_dict, data_sel
     single chunk starting at channel 0) or no frequency slice is present.
     """
     from astroviper.processing_functions.imaging.utils.return_dict import (
-        ReturnDict,
         Key,
+        ReturnDict,
     )
 
     chan_offset = 0
@@ -67,9 +67,9 @@ def _remap_deconvolve_dict_to_global_channels(combined_deconvolve_dict, data_sel
 
     remapped = ReturnDict()
     for key, value in combined_deconvolve_dict.data.items():
-        remapped.data[Key(time=key.time, pol=key.pol, chan=key.chan + chan_offset)] = (
-            value
-        )
+        remapped.data[
+            Key(time=key.time, pol=key.pol, chan=key.chan + chan_offset)
+        ] = value
     return remapped
 
 
@@ -251,9 +251,11 @@ def image_cube_single_field(
           with channels remapped to global channel numbers.
     """
     import time
+
     import toolviper.utils.logger as logger
-    from xradio.image import make_empty_sky_image
     from toolviper.utils.memory_management import get_rss_gb
+    from xradio.image import make_empty_sky_image
+
     import astroviper.processing_functions as pf
 
     task_start = time.time()
@@ -306,9 +308,7 @@ def image_cube_single_field(
         # Experimental performance path: read only this chunk's data-group
         # variables straight from the Zarr chunk blobs and reconstruct the
         # coordinates from the inputs (no datatree/coords/sub-datasets open).
-        from astroviper.node_tasks.imaging.utils import (
-            load_processing_set_skunk_works,
-        )
+        from astroviper.node_tasks.imaging.utils import load_processing_set_skunk_works
 
         ps_xdt = load_processing_set_skunk_works(
             input_data_store,
@@ -446,11 +446,11 @@ def image_cube_single_field(
     # Debug: phase-grouped timing breakdown for this chunk. The generic
     # formatter lives in the top-level utils; the imaging phase layout
     # parameterizes it.
-    from astroviper.utils.timing import print_timing_summary
     from astroviper.processing_functions.imaging.utils import (
         IMAGING_TIMING_PHASES,
         IMAGING_TIMING_TOTAL_KEY,
     )
+    from astroviper.utils.timing import print_timing_summary
 
     print_timing_summary(
         timing_df,

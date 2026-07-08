@@ -1,10 +1,11 @@
+import copy
+
+import numba
 import numpy as np
 import scipy
-from scipy import constants
-from numba import jit
-import numba
 import xarray as xr
-import copy
+from numba import jit
+from scipy import constants
 
 # silence NumbaPerformanceWarning
 # import warnings
@@ -176,8 +177,9 @@ def directional_cosine(phase_direction_in_radians):
 
 def check_shift_params(shift_params):
     # from graphviper.parameter_checking.check_params import check_params
-    from astroviper.utils.check_params import check_params, check_sel_params
     import numbers
+
+    from astroviper.utils.check_params import check_params, check_sel_params
 
     params_passed = True
 

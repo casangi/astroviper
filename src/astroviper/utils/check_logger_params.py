@@ -1,7 +1,8 @@
 # ducting - code is complex and might fail after some time if parameters is wrong. Sensable values are also checked. Gives printout of all wrong parameters. Dirty images alone has 14 parameters.
 
 import numpy as np
-from .check_params import check_params, _check_dataset
+
+from astroviper.utils.check_params import _check_dataset, check_params
 
 
 def check_logger_params(logger_params):

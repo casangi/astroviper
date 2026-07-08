@@ -1,6 +1,7 @@
-from numba import jit
-import numpy as np
 import math
+
+import numpy as np
+from numba import jit
 
 
 def grid_imaging_weights(
@@ -398,9 +399,9 @@ def degrid_imaging_weights_jit(
                             #         ]
                             #     )
 
-                            imaging_weight[i_time, i_baseline, i_chan, i_pol] = (
-                                data_weight[i_time, i_baseline, i_chan, i_pol]
-                            )
+                            imaging_weight[
+                                i_time, i_baseline, i_chan, i_pol
+                            ] = data_weight[i_time, i_baseline, i_chan, i_pol]
 
                             # Only proceed if the natural weight is finite and non-zero.
                             if not np.isnan(

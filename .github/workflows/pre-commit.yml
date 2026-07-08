@@ -1,0 +1,32 @@
+# Run every hook in .pre-commit-config.yaml over the full repository, so CI
+# enforces exactly what `pre-commit install` enforces locally: repo hygiene
+# checks, pyupgrade (py311+), absolufy-imports, isort (black profile), black,
+# nbstripout, and the imaging-param-docs sync check.
+#
+# The imaging-param-docs local hook runs param_docs.py as a standalone script,
+# so libcst is its only dependency — no package build / C++ compile is needed.
+name: pre-commit
+
+on: [push, pull_request]
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pre-commit and local-hook dependencies
+        run: python -m pip install --upgrade pip pre-commit libcst
+
+      - name: Cache pre-commit hook environments
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-py3.11-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - name: Run all pre-commit hooks on all files
+        run: pre-commit run --all-files --show-diff-on-failure --color=always

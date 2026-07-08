@@ -10,8 +10,8 @@ import xarray as xr
 
 def _resolve_plot_coords(
     data,
-    x_coords: Optional[Union[str, np.ndarray]] = None,
-    y_coords: Optional[Union[str, np.ndarray]] = None,
+    x_coords: str | np.ndarray | None = None,
+    y_coords: str | np.ndarray | None = None,
     *,
     need_coords: bool = True,
 ) -> tuple[Any, np.ndarray, np.ndarray]:
@@ -128,7 +128,7 @@ def _resolve_plot_coords(
         )
 
     def _coord_from_array(
-        spec: Optional[Union[str, np.ndarray]], axis_size: int, axis_name: str
+        spec: str | np.ndarray | None, axis_size: int, axis_name: str
     ) -> np.ndarray:
         if spec is None:
             return np.arange(axis_size, dtype=float)
@@ -152,13 +152,13 @@ def generate_plot(
     data,
     wcs=None,
     show_world_axes: bool = False,
-    x_coords: Optional[Union[str, np.ndarray]] = None,
-    y_coords: Optional[Union[str, np.ndarray]] = None,
-    title: Optional[str] = None,
+    x_coords: str | np.ndarray | None = None,
+    y_coords: str | np.ndarray | None = None,
+    title: str | None = None,
     cmap: str = "magma",
-    figsize: Tuple[float, float] = (8.0, 8.0),
-    vmin: Optional[float] = None,
-    vmax: Optional[float] = None,
+    figsize: tuple[float, float] = (8.0, 8.0),
+    vmin: float | None = None,
+    vmax: float | None = None,
 ):
     """
     Plot a 2-D image using x/y coordinates or celestial WCS when available.

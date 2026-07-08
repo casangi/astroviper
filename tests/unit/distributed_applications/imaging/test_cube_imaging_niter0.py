@@ -1,7 +1,8 @@
-import pytest
-import numpy as np
-import shutil
 import os
+import shutil
+
+import numpy as np
+import pytest
 from pandas import Index
 
 # @pytest.fixture

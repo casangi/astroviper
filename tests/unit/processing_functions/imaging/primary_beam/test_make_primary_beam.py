@@ -11,12 +11,12 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (
-    make_primary_beam_single_field,
-)
 from astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric import (
     airy_disk_rorder,
     airy_disk_rorder_v2,
+)
+from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (
+    make_primary_beam_single_field,
 )
 
 ARCSEC = np.pi / (180 * 3600)

@@ -16,14 +16,14 @@ validated in ``tests/stakeholder/test_single_field_imaging.py``.
 import pandas as pd
 
 from astroviper.distributed_applications.imaging.image_cube_single_field import (
-    combine_return_data_frames,
     DISTRIBUTED_APPLICATION_TIMING_PHASES,
     DISTRIBUTED_APPLICATION_TIMING_TOTAL_KEY,
+    combine_return_data_frames,
 )
 from astroviper.processing_functions.imaging.utils import (
-    ReturnDict,
     IMAGING_TIMING_PHASES,
     IMAGING_TIMING_TOTAL_KEY,
+    ReturnDict,
 )
 from astroviper.utils.timing import format_timing_summary
 

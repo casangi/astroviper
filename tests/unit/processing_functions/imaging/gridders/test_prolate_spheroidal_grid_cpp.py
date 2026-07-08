@@ -16,11 +16,11 @@ import unittest
 
 import numpy as np
 
-from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-    prolate_spheroidal_grid,
-)
 from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid import (
     prolate_spheroidal_grid_jit,
+)
+from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
+    prolate_spheroidal_grid,
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_kernel_1D,

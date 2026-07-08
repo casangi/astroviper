@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from astroviper.processing_functions import (
-    imaging,
-    flagging,
     calibration,
+    flagging,
     image_analysis,
+    imaging,
     visibility_manipulation,
 )
 

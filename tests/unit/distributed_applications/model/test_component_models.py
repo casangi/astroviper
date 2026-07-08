@@ -7,9 +7,11 @@ warnings.filterwarnings(
 import unittest
 from unittest.mock import patch
 
-import numpy as np
 import dask.array as da
+import numpy as np
 import xarray as xr
+
+import astroviper.distributed_applications.model.component_models as cm
 
 # Adjust import if your package layout differs
 from astroviper.distributed_applications.model import (
@@ -17,8 +19,6 @@ from astroviper.distributed_applications.model import (
     make_gauss2d,
     make_pt_sources,
 )
-
-import astroviper.distributed_applications.model.component_models as cm
 
 
 def _base_grid(

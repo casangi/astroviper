@@ -1,16 +1,17 @@
+import copy
+
+import numba
 import numpy as np
 import scipy
-from scipy import constants
-from numba import jit
-import numba
 import xarray as xr
+from numba import jit
+from scipy import constants
 
 from astroviper.processing_functions.imaging.gridders.mosaic_grid import mosaic_grid_jit
 from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
 )
-import copy
 
 
 def add_visibility_grid_mosaic(

@@ -19,9 +19,9 @@ import pytest
 import xarray as xr
 
 from astroviper.processing_functions.imaging.restore import (
-    restore_image,
-    _elliptical_gaussian_kernel,
     FWHM_factor,
+    _elliptical_gaussian_kernel,
+    restore_image,
 )
 
 

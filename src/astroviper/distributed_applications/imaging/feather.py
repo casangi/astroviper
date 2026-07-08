@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# coding: utf-8
 """Feather workflow driver (graph layer).
 
 Builds and runs the GraphVIPER map graph that combines a single-dish and an
@@ -25,9 +24,9 @@ import time
 from typing import Union
 
 import numpy as np
+import toolviper.utils.logger as logger
 import xarray as xr
 from numcodecs import Blosc
-import toolviper.utils.logger as logger
 
 import astroviper.node_tasks as node_tasks
 
@@ -64,7 +63,7 @@ def _open_input_image(path, selection):
 
 
 def feather(
-    outim: Union[dict, None],
+    outim: dict | None,
     highres: str,
     lowres: str,
     sdfactor: float = 1.0,
@@ -109,6 +108,7 @@ def feather(
         Compressor applied to each on-disk ``SKY`` chunk.
     """
     import dask
+    import zarr
     from graphviper.graph_tools import generate_dask_workflow
     from graphviper.graph_tools.coordinate_utils import (
         interpolate_data_coords_onto_parallel_coords,
@@ -116,7 +116,6 @@ def feather(
     )
     from graphviper.graph_tools.map import map
     from xradio.image import write_image
-    import zarr
 
     from astroviper.utils.data_partitioning import (
         bytes_in_dtype,
