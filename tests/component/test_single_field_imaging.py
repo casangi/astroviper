@@ -348,7 +348,7 @@ def make_plot_saver():
     so the ``__main__`` block can run the tests under plain ``python`` too.
     """
     save = os.environ.get("SAVE_PLOTS", "").lower() in ("1", "true", "yes", "on")
-    # save = True
+    save = True
     out_dir = os.environ.get("PLOT_DIR", "plots")
     if save:
         os.makedirs(out_dir, exist_ok=True)
