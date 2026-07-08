@@ -533,6 +533,14 @@ def deconvolve(
       Python-owned numpy buffers: the full ``(nt, nf, np, ny, nx)``
       residual and model cubes are the only per-plane allocations,
       and they are updated in place.
+    - Because the update is in place, the residual and model data
+      variables must be **materialised** (real numpy arrays), not lazy
+      (dask-backed). Images opened lazily -- e.g. via
+      ``xradio.image.open_image`` / ``load_image`` -- must be realised
+      first with ``img_xds = img_xds.load()`` (or ``.compute()``);
+      otherwise ``.values`` returns throwaway copies, the in-place CLEAN
+      writes are lost, and the model stays zero. ``deconvolve`` raises a
+      ``ValueError`` if handed lazy residual/model variables.
     """
     algorithm_l = algorithm.lower()
     if algorithm_l not in (
@@ -595,6 +603,21 @@ def deconvolve(
 
     max_psf_fraction = deconvolve_params["maxpsffraction"]
     min_psf_fraction = deconvolve_params["minpsffraction"]
+
+    # CLEAN mutates the residual/model numpy buffers in place. A lazy
+    # (dask-backed) DataArray returns a *fresh* array from ``.values`` on every
+    # access, so the C++ writes would land in a throwaway copy and the model
+    # would silently stay unchanged. Fail loudly instead: materialise first.
+    lazy_vars = [
+        name for name in (residual_name, model_name) if img_xds[name].chunks is not None
+    ]
+    if lazy_vars:
+        raise ValueError(
+            f"deconvolve() modifies the residual/model in place, but these image "
+            f"data variables are lazy (dask-backed): {lazy_vars}. Materialise the "
+            f"image before calling, e.g. `img_xds = img_xds.load()` (or "
+            f"`.compute()`); otherwise the in-place CLEAN updates are lost."
+        )
 
     residual_arr = img_xds[residual_name].values
     psf_arr = img_xds[psf_name].values

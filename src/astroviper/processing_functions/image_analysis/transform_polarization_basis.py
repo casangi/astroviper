@@ -11,7 +11,6 @@ source of truth for every supported (input basis, output basis) pair.
 so that the output polarization labels are never computed in two places.
 """
 
-import copy
 from typing import Optional
 
 import numpy as np
@@ -226,8 +225,8 @@ def transform_polarization_basis(
         ignored.
     overwrite : bool, default True
         If ``True`` the input dataset is modified in place.
-        If ``False`` a new dataset is returned with copied coordinates and
-        attributes but transformed data variables.
+        If ``False`` a deep copy is returned with its data variables
+        transformed and the input left untouched.
 
     Returns
     -------
@@ -238,14 +237,12 @@ def transform_polarization_basis(
     if overwrite:
         img_transformed_xds = img_xds
     else:
-        img_transformed_xds = xr.Dataset()
-        # Copy attributes and all coordinates except the polarization values,
-        # which will be overwritten below.
-        img_transformed_xds.attrs = copy.deepcopy(img_xds.attrs)
-        for coord_name in img_xds.coords:
-            img_transformed_xds.coords[coord_name] = copy.deepcopy(
-                img_xds.coords[coord_name]
-            )
+        # Independent deep copy so the loop below can transform its data
+        # variables in place without mutating the caller's dataset. A deep copy
+        # (rather than an empty Dataset) guarantees every data variable is
+        # present in the output -- including the pass-through variables (PSF,
+        # airy-disk primary beam, uv-domain grids) that the loop skips.
+        img_transformed_xds = img_xds.copy(deep=True)
 
     # Determine the output polarization labels via the single source of truth.
     if transformation_matrix is not None:
@@ -334,7 +331,12 @@ def transform_polarization_basis(
                 .values
             )
 
-    img_transformed_xds = img_transformed_xds.assign_coords(polarization=new_pol_labels)
+    # Update the polarization labels in place on the (possibly copied) dataset
+    # and return it. ``assign_coords`` would return a *new* object and leave the
+    # caller's coordinate stale; doing it in place keeps overwrite=True a true
+    # in-place operation -- the returned dataset is the input, now fully
+    # consistent (transformed data *and* the new labels).
+    img_transformed_xds.coords["polarization"] = new_pol_labels
 
     return img_transformed_xds
 

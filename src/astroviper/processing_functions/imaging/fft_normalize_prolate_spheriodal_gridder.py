@@ -435,10 +435,14 @@ def ifft_uv_to_lm(
       before the transform.
     * Compute the 2-D inverse FFT.
     * ``fftshift`` the result to place the image centre at the array centre.
-    * Multiply by the number of UV cells to obtain the correct flux scale
-      (undoing NumPy's implicit 1/N normalisation).
-    * Discard the imaginary part; for conjugate-symmetric UV data (real sky
-      emission) it should be negligible.
+
+    The result is returned **complex and unscaled**: this routine applies
+    neither the flux normalisation (undoing NumPy's implicit 1/N) nor a
+    real-part projection.  Callers are responsible for both --
+    :func:`ifft_norm_img_xds` divides by the prolate-spheroidal correction
+    and the summed weights and takes ``.real``.  For conjugate-symmetric UV
+    data (real sky emission) the imaginary part is negligible, but it is
+    still present in the return value.
 
     Parameters
     ----------
@@ -457,9 +461,9 @@ def ifft_uv_to_lm(
     Returns
     -------
     numpy.ndarray
-        Real-valued sky image of the same spatial shape as ``grid_2d``.
-        Pixel values are in units of Jy/beam (flux scale) consistent with
-        the gridded weights.
+        Complex sky-plane image, same spatial shape and dtype as ``grid_2d``.
+        Unscaled -- apply the flux normalisation and take ``.real`` in the
+        caller (see :func:`ifft_norm_img_xds`).
 
     Notes
     -----
@@ -509,32 +513,34 @@ def fft_lm_to_uv(
       before the transform.
     * Compute the 2-D FFT.
     * ``fftshift`` the result to place the DC component at the array centre.
-    * Return only the real part (valid when the input image is real-valued,
-      which holds for Stokes I, Q, U, V images).
+
+    The full **complex** UV grid is returned (no real-part projection and no
+    flux normalisation are applied here).  The input is cast to
+    ``complex_dtype`` before transforming, so a real sky image is handled
+    correctly.
 
     Parameters
     ----------
     image : numpy.ndarray
-        Real-valued sky image.  Can be any number of dimensions; the FFT is
-        applied along ``fft_plane_dims``.
+        Sky image (typically real-valued -- Stokes I, Q, U, V).  Can be any
+        number of dimensions; the FFT is applied along ``fft_plane_dims``.
+        Cast to ``complex_dtype`` internally.
     fft_plane_dims : tuple of int, optional
         Axes over which to apply the 2-D FFT.  Default is ``(-2, -1)``.
     threads : int, optional
         Number of threads passed to the FFT backend.  Default is ``1``.
     fft_backend : {"scipy", "pyfftw"}, optional
         FFT library to use.  Default is ``"pyfftw"``.
+    complex_dtype : numpy dtype, optional
+        Complex dtype the image is cast to and the grid is returned in.
+        Default ``numpy.complex128``.
 
     Returns
     -------
     numpy.ndarray
-        Real part of the 2-D FFT of the input image, with the DC component
-        shifted to the array centre.  Same shape as ``image``.
-
-    Notes
-    -----
-    Discarding the imaginary part is only valid when ``image`` is strictly
-    real-valued.  If complex images are passed the imaginary component is
-    silently lost.
+        Complex UV grid (dtype ``complex_dtype``), the 2-D FFT of the input
+        image with the DC component shifted to the array centre.  Same shape
+        as ``image``.
     """
     fft = _fft_module(fft_backend)
     work = np.asarray(image, dtype=complex_dtype)

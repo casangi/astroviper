@@ -148,6 +148,36 @@ pytest --cov=astroviper tests # with coverage
 - `nbstripout` strips notebook outputs (keeps diffs small, repo light).
 - If pre-commit rewrites files, **re-stage** them and commit again.
 
+### Documentation notebooks (`docs/`)
+Tutorials live under `docs/`, organised to **mirror the source module tree** —
+put a new notebook in the folder matching the layer + subdomain of the function
+it demonstrates:
+- `distributed_applications_tutorials/{imaging,image_analysis,model}/`
+- `processing_functions_tutorials/{imaging,image_analysis,visibility_manipulation}/`
+- `calibration_tutorials/`, plus `theory/` and `utils/`.
+
+Notebooks must stay **output-stripped** (`nbstripout`) and
+**headless-executable** — they are run non-interactively (`nbconvert` /
+`nbclient`, and the CI "run ipynb" job). To keep them from hanging a headless run:
+- **Never activate an interactive Matplotlib backend** — no `%matplotlib widget`,
+  `%matplotlib notebook`, or `ipympl`. Those open a Jupyter *comm* to a browser
+  frontend that never answers under `nbclient`, so the cell blocks until the
+  execution timeout — a hard hang in CI. Use **`%matplotlib inline`**. (A
+  *commented* `# %matplotlib widget` hint for interactive users is fine.)
+- **ipywidgets is OK headless.** `interact(...)`, `interactive(...)` and
+  `display(widget)` all execute fine under `nbclient` (the widget just renders no
+  live output) — keep them for human readers. Don't design a cell so its result
+  *depends on* live widget interaction; compute the result eagerly and let the
+  widget only re-render it. When a cell is purely an interactive explorer, a
+  static fallback (e.g. a small multi-panel montage) is the most robust choice for
+  the executed copy — see
+  `processing_functions_tutorials/imaging/demo_standard_grid.ipynb`.
+- Always execute notebooks with a **per-cell timeout** so a genuinely stuck cell
+  fails loudly instead of hanging the whole run.
+- **Heavy notebooks are slow, not hung.** Run the notebook suite **sequentially**
+  (or with a small concurrency cap): launching many gridding/imaging notebooks at
+  once oversubscribes CPU/RAM and can make an ordinary cell look like a deadlock.
+
 ---
 
 ## 3. Architecture: the Four Layers
