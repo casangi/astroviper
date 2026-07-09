@@ -9,14 +9,15 @@
 **AstroVIPER** (Astro **V**isibility and **I**mage **P**arallel **E**xecution
 **R**eduction) is part of the VIPER ecosystem that does radio astronomy data processing.
 
-| Package | Role | Docs |
+| Package | Role | Repo |
 | --- | --- | --- |
 | **ToolVIPER** | Logging, parameter checking, and Dask cluster tools | https://github.com/casangi/toolviper |
-| **XRADIO** | I/O + data model: Processing Sets, MS v4, image datasets, schema, accessors | https://github.com/casangi/xradio |
+| **XRADIO** | I/O + data model: Processing Sets(MS v4), image datasets, calibration datasets, schema, accessors | https://github.com/casangi/xradio |
 | **GraphVIPER** | Concurrency: builds & runs Dask MapReduce graphs | https://github.com/casangi/graphviper |
-| **AstroVIPER** (this repo) | Science: gridding, weighting, FFT, deconvolution (CLEAN), imaging workflows | https://github.com/casangi/astroviper |
+| **AstroVIPER** (this repo) | Science: flagging, calibration, imaging, image analysis, visibility manipulation, simulation | https://github.com/casangi/astroviper |
 | **FlowVIPER** | Data-processing workflows built from AstroVIPER's distributed applications | https://github.com/casangi/flowviper |
 
+Note that all the packages are still under development and functionality is not complete.
 
 - **Language**: Python `>=3.11,<3.14`, with performance-critical kernels in **C++23** (via pybind11).
 - **Data model**: everything is `xarray` (`DataArray` / `Dataset` /`DataTree`), persisted as **Zarr**.
@@ -45,7 +46,7 @@ pre-commit install          # installs black + nbstripout git hooks
   pip install -e '.[all]'   # or: pip install .
   ```
   `scikit-build-core` caches in `build/{wheel_tag}/`; if a build behaves oddly,
-  delete `build/` and reinstall.
+  delete `build/` and reinstall. The -e creates an editable Python installation.
 
 **All shared compiler settings live in one file: [`cmake/AstroviperPybind.cmake`](cmake/AstroviperPybind.cmake).**
 It finds `pybind11`/`Threads` once and defines:
@@ -106,14 +107,13 @@ pytest --cov=astroviper tests # with coverage
   `tests/unit/processing_functions/imaging/`.
 - Shared fixtures live in `tests/utils/conftest.py` (auto-discovered, no import
   needed). A canonical example/template is `tests/utils/__template__.py`.
-- Data is fetched with `toolviper.utils.data.download(...)`; MS v2 → MS v4
-  conversion uses `xradio...convert_msv2_to_processing_set`.
+- Data is fetched with `toolviper.utils.data.download(...)`.
 - **Add or update tests for any code you change**, even if not asked.
 
 ### Formatting / pre-commit (required before committing)
 - **Black** is the formatter. CI fails on unformatted code.
 - **isort** orders imports, configured with `profile = "black"` in
-  `pyproject.toml` (required — without it isort and black rewrite each other's
+  `pyproject.toml` (required: without it isort and black rewrite each other's
   output forever). `pyupgrade` (py311+) and `absolufy-imports` also run.
 - `nbstripout` strips notebook outputs (keeps diffs small, repo light).
 - If pre-commit rewrites files, **re-stage** them and commit again.
@@ -124,7 +124,6 @@ put a new notebook in the folder matching the layer + subdomain of the function
 it demonstrates:
 - `distributed_applications_tutorials/{imaging,image_analysis,model}/`
 - `processing_functions_tutorials/{imaging,image_analysis,visibility_manipulation}/`
-- `calibration_tutorials/`, plus `theory/` and `utils/`.
 
 Notebooks must stay **output-stripped** (`nbstripout`) and
 **headless-executable** — they are run non-interactively (`nbconvert` /
@@ -152,24 +151,25 @@ Notebooks must stay **output-stripped** (`nbstripout`) and
 
 ## 3. Architecture: the Four Layers
 
-AstroVIPER is organized into four layers. **Calls only ever go downward**
-(graphs → node_tasks → processing_functions → utils); never call upward.
+AstroVIPER is organized into four layers. **Calls only ever go downward or horizontally**
+(distributed_applications → node_tasks → processing_functions → utils); never call upward. Note that
+a layer can call any layer lower than itself for example distributed_applications can call processing_functions
+and a layer can call horizontally for example a processing_function can call another processing_functions.
 
 ```
 src/astroviper/
 ├── distributed_applications/
 │                         (1) Build + compute Dask graphs (GraphVIPER map/reduce).
-│                             Nodes are node_tasks. NO science here. A driver may
-│                             build several graphs and call compute more than once.
+│                             Nodes are node_tasks. NO science here. Several graphs and compute calls can be done.
 ├── node_tasks/           (2) The functions that run as graph nodes.
 │                             Do I/O (load_processing_set, write Zarr) + call processing_functions.
-├── processing_functions/ (3) The science. Pure Python / Numba / C++(pybind11).
-│                             Python owns all large-array memory. NO graph/Dask code.
+├── processing_functions/ (3) The science. Pure Python / C++(pybind11).
+│                             Python owns all large-array memory. NO graph/Dask code. Xarray can still be used without Dask arrays and native lazy Xarray's arrays are also allowed
 └── utils/                (4) Helpers: data_group_tools, io, data_partitioning, check_params, …
 ```
 
 Each of layers 1–3 is further split by **subdomain** (mirrored across the
-layers): `imaging`, `image_analysis`, `flagging`, `visibility_manipulation`, `calibration`.
+layers): `imaging`, `image_analysis`, `flagging`, `visibility_manipulation`, `calibration` , `simulation`.
 
 ### Layer responsibilities & boundaries
 1. **`distributed_applications/`** — Constructs `parallel_coords`, maps a `node_task`
@@ -213,7 +213,7 @@ You must understand these data structures; they appear in nearly every function.
   for a single observation/SPW/pol-setup. The main dataset holds `VISIBILITY`
   (interferometer) or `SPECTRUM` (single dish), plus `UVW`, `WEIGHT`, `FLAG`,
   with sub-datasets (`antenna_xds`, `field_and_source_*`, `weather_xds`, …) in
-  attributes. Dimensions: `time × baseline_id × frequency × polarization`.
+  attributes. Dimensions: `time × baseline_id × frequency × polarization` for Visibility correlated datasets (intefreometers) and `time × antenna_name × frequency × polarization` for Spectrum correlated datasets (single dish).
 - **Image dataset** (`img_xds`): Two coordinate spaces:
   - **image domain** dims `(time, frequency, polarization, l, m)`
   - **uv / grid domain** dims `(time, frequency, polarization, u, v)`
@@ -221,9 +221,9 @@ You must understand these data structures; they appear in nearly every function.
 
 ### Lazy vs. eager (naming tells you which)
 - `open_*` → **lazy**: loads only metadata; data variables are Dask arrays.
-  (`open_processing_set`)
+  (`open_processing_set`). Used in distrabuted_applications layer.
 - `load_*` → **eager**: loads everything into memory now.
-  (`load_processing_set`)
+  (`load_processing_set`). Used in node_tasks layer.
 
 ### XRADIO accessors (used heavily — prefer these over hand-rolled logic)
 - Processing set: `ps_xdt.xr_ps.summary()`, `.get_freq_axis()`,
@@ -390,7 +390,7 @@ Numba kernels follow the same memory philosophy: decorate with
 (`grid`, `normalization`, …). `nogil=True` lets them run under Dask threads.
 
 ### Two levels of parallelism (don't conflate them)
-- **Across chunks**: the Dask graph (GraphVIPER) — one task per frequency chunk.
+- **Across chunks**: the Dask graph (GraphVIPER) — one task per  chunk.
 - **Within a task**: `processing_function_threads` → passed as `num_threads` to
   the C++/Numba kernels.
 
@@ -416,13 +416,7 @@ GraphVIPER is a Dask MapReduce layer. The flow used by AstroVIPER:
    `reduce_fn(input_data, input_params)`.
 5. `generate_dask_workflow(viper_graph)` → `dask.compute(...)`.
 
-**The framework injects these keys into every `node_task`'s `input_params`**
-(do not set them yourself; do read them): `chunk_indices`, `parallel_dims`,
-`data_selection`, `task_coords`, `task_id`, `input_data` (pre-loaded data if a
-`data_loading_task`/`disk_chunk_sizes` was used, else `None`), `date_time`
-(+ `viper_local_dir` when local caching is enabled). AstroVIPER adds the rest
-(`image_params`, `iteration_control_params`, `image_store`, `double_precision`,
-`deconvolver`, `fft_backend`, etc.).
+When applicable multiple instances of map-reduce can be done in a single distributed_application.
 
 ### Why this design (do not regress it)
 GraphVIPER deliberately **loads data inside compute nodes** rather than as
@@ -456,8 +450,7 @@ per-variable nodes.
     cycle** (not CASA's "major cycle" / "minor cycle") in code, docstrings, and
     docs — matching `residual_cycle_cube_single_field` /
     `model_update_cycle_cube_single_field`. A one-time "(CASA's major/minor
-    cycle)" parenthetical for orientation is fine; `tclean`-compatible parameter
-    names like `nmajor` keep their CASA spelling.
+    cycle)" parenthetical for orientation is fine.
 - **Formatting**: **Black** (enforced by CI + pre-commit). Don't hand-format.
 - **Imports**: prefer **absolute** imports (`from
   astroviper.processing_functions.imaging.residual_cycle import ...`). Relative
@@ -466,7 +459,7 @@ per-variable nodes.
   paths) are frequently imported **inside functions** to keep worker import time
   and graph-serialization cost low — follow the local pattern in the file you're
   editing.
-- **Docstrings**: **NumPy-style** for all public functions/classes (see
+- **Docstrings**: **NumPy-style** for all functions/classes (see
   `data_group_tools.py` and `add_visibility_grid.py` for exemplars — Parameters,
   Returns, Raises, See Also).
 - **Logging**: use the **toolviper** logger, not `print`:
@@ -474,9 +467,8 @@ per-variable nodes.
   import toolviper.utils.logger as logger
   logger.info(...); logger.debug(...)
   ```
-  (Some legacy `print(...)` calls exist in hot loops — don't add new ones.)
-- **Performance**: vectorize with NumPy; if not feasible, use **Numba**
-  (`@jit(nopython=True, cache=True, nogil=True)`) or C++; verify with timing.
+  The log level in node_tasks and processing_functions should always be debug or higher because there will be many instances of these functions.
+- **Performance**: vectorize with NumPy; if not feasible, use C++; verify with timing.
   Large arrays are timed via `T_*` keys collected into per-chunk `DataFrame`s /
   `ReturnDict`s — keep that bookkeeping when adding stages.
 - **Parameter validation**: the user-facing distributed-graph entry points use
@@ -500,7 +492,7 @@ per-variable nodes.
 - Mirror existing patterns in `processing_functions/imaging/` for any new
   science function (data-group in/out resolution → compute in place → register
   group → return stats/timings).
-- Keep the gridder's Numba and C++ implementations consistent.
+- Keep the C++ implementations consistent.
 - Pass `num_threads` through to kernels and respect `processing_function_threads`.
 - Keep the layering: graph code in `distributed_applications/`, I/O in `node_tasks/`,
   science in `processing_functions/`.
@@ -513,8 +505,6 @@ per-variable nodes.
 - ❌ Lowercase a data-variable name or uppercase a coordinate name.
 - ❌ Put Dask/graph logic into `processing_functions/`, or science into
   `distributed_applications/`.
-- ❌ Assume `memory_mode` other than `"in_memory"` works.
-- ❌ Touch calibration code — it is outside the scope of this guide.
 - ❌ Commit notebook outputs (pre-commit's `nbstripout` enforces this) or
   unformatted code.
 - ❌ Introduce relative imports outside `__init__.py` re-exports.
@@ -523,7 +513,7 @@ per-variable nodes.
 - Tests written with at least 80% coverage.
 - Example notebook created (start from `docs/notebook_template.ipynb`).
 - NumPy-style docstrings on all public functions.
-- Initial performance testing done using larger datasets.
+- Initial performance testing done using larger datasets and relevant timing comparison with CASA/
 
 ---
 
@@ -595,11 +585,7 @@ The user-facing function. Sequence:
 ### 12.2 Node task — `node_tasks/imaging/image_cube_single_field.py`
 The node task has a **fully explicit, NumPy-documented, standalone-callable
 signature** (`image_cube_single_field(image_params, imaging_weights_params, ...,
-task_coords, data_selection, image_store, input_data_store, ..., graph_mode=True)`)
-— it does *not* take an opaque `input_params` dict. **`graphviper.graph_tools.map`
-adapts it automatically** to the single-`input_params`-dict calling convention,
-so the driver passes the explicit node task to `map(...)` directly (see
-[12.6](#126-layer-interfaces--parameter-doc-codegen)).
+task_coords, data_selection, image_store, input_data_store, ..., graph_mode=True)`).
 1. Build the empty per-chunk `img_xds` (correlation pol labels derived from
    `instrument_polarization_basis`).
 2. Get data: use `input_data` if the loading layer pre-loaded it, else
