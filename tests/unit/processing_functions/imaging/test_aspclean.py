@@ -379,7 +379,7 @@ class TestCube:
             threshold=threshold,
             niter=niter,
             fusedthreshold=0.1,
-            num_threads=2,
+            processing_function_threads=2,
         )
         assert out["iterations_performed"].shape == (nt, nf, npol)
         assert out["peak_residual"].shape == (nt, nf, npol)

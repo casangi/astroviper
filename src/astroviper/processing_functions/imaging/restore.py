@@ -74,7 +74,7 @@ def restore_image(
     image_data_group_out_modified: dict = {"sky": "SKY_RESTORED"},
     beam_fit_params_key: str = "beam_fit_params_point_spread_function",
     beam_polarization_index: int = 0,
-    num_threads: int = 1,
+    processing_function_threads: int = 1,
     overwrite: bool = True,
 ):
     """Restore an image: model convolved with the clean beam plus the residual.
@@ -133,7 +133,7 @@ def restore_image(
         Polarization index of the beam-fit parameters used to build the clean
         beam (the same beam is applied to every polarization).  Default ``0``
         (Stokes I).
-    num_threads : int, optional
+    processing_function_threads : int, optional
         Number of worker threads handed to ``scipy.fft`` for the per-plane
         FFTs.  Values ``<= 0`` use all available cores.  Default ``1``.
     overwrite : bool, optional
@@ -211,7 +211,11 @@ def restore_image(
     delta = abs(float(l[1] - l[0]))
 
     # scipy.fft uses one worker by default; <= 0 means "all cores".
-    workers = num_threads if (num_threads and num_threads > 0) else -1
+    workers = (
+        processing_function_threads
+        if (processing_function_threads and processing_function_threads > 0)
+        else -1
+    )
 
     # Single output cube allocation; filled plane by plane below.
     restored = np.empty_like(residual)

@@ -872,7 +872,7 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
                    int nf, int np_img, int np_psf, int nx, int ny, double gain,
                    const double* threshold, const int* niter, double fusedthreshold,
                    double psf_width, int largestscale, int stoppointmode,
-                   int norm_method, int num_threads, AspResult* results) {
+                   int norm_method, int processing_function_threads, AspResult* results) {
     const int nplanes = nt * nf * np_img;
     if (nplanes <= 0) return;
     const std::size_t plane = static_cast<std::size_t>(ny) * nx;
@@ -900,7 +900,7 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
         }
     };
 
-    int nthreads = std::max(1, std::min(num_threads, nplanes));
+    int nthreads = std::max(1, std::min(processing_function_threads, nplanes));
     if (nthreads == 1) {
         worker();
     } else {

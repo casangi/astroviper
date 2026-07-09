@@ -433,7 +433,7 @@ def image_cube_single_field(
                 deconvolver,
                 deconvolve_params,
                 is_n_iter_0=is_n_iter_0,
-                num_threads=processing_function_threads,
+                processing_function_threads=processing_function_threads,
                 image_data_group_in_name="residual",
                 image_data_group_out_name="model",
             )
@@ -498,7 +498,7 @@ def image_cube_single_field(
             image_data_group_in_residual_name="residual",
             image_data_group_in_model_name="model",
             image_data_group_out_restore_name="restored",
-            num_threads=processing_function_threads,
+            processing_function_threads=processing_function_threads,
         )
         accumulate_timing(timing, restore_return_df)
 

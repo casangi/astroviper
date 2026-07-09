@@ -103,7 +103,7 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
                           py::array mask, double gain, py::array threshold,
                           py::array niter, double fusedthreshold, double psf_width,
                           int largestscale, int stoppointmode, int norm_method,
-                          int num_threads) {
+                          int processing_function_threads) {
     const int nt = static_cast<int>(residual.shape(0));
     const int nf = static_cast<int>(residual.shape(1));
     const int np_img = static_cast<int>(residual.shape(2));
@@ -154,7 +154,7 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
             static_cast<T*>(ri.ptr), static_cast<T*>(mi.ptr),
             static_cast<const T*>(pi.ptr), mask_ptr, nt, nf, np_img, np_psf, nx,
             ny, gain, thr_ptr, nit_ptr, fusedthreshold, psf_width, largestscale,
-            stoppointmode, norm_method, num_threads, results.data());
+            stoppointmode, norm_method, processing_function_threads, results.data());
     }
 
     py::array_t<int> iters({nt, nf, np_img});
@@ -189,7 +189,7 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
                                     py::array threshold, py::array niter,
                                     double fusedthreshold, double psf_width,
                                     int largestscale, int stoppointmode,
-                                    int norm_method, int num_threads) {
+                                    int norm_method, int processing_function_threads) {
     if (residual.ndim() != 5)
         throw std::runtime_error(
             "residual must be a 5D array [time, frequency, polarization, y, x]");
@@ -197,11 +197,11 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
     if (dt.is(py::dtype::of<float>()))
         return cube_impl<float>(residual, psf, model, mask, gain, threshold,
                                 niter, fusedthreshold, psf_width, largestscale,
-                                stoppointmode, norm_method, num_threads);
+                                stoppointmode, norm_method, processing_function_threads);
     if (dt.is(py::dtype::of<double>()))
         return cube_impl<double>(residual, psf, model, mask, gain, threshold,
                                  niter, fusedthreshold, psf_width, largestscale,
-                                 stoppointmode, norm_method, num_threads);
+                                 stoppointmode, norm_method, processing_function_threads);
     throw std::runtime_error("residual must be float32 or float64");
 }
 
@@ -258,7 +258,7 @@ PYBIND11_MODULE(_aspclean_ext, m) {
 
     m.def("clean_cube", &clean_cube_dispatch,
           "Run the Asp minor cycle independently on every (time, frequency, "
-          "polarization) plane of a 5D cube in place, across num_threads worker "
+          "polarization) plane of a 5D cube in place, across processing_function_threads worker "
           "threads. The PSF cube may be single-polarization (broadcast). "
           "Iteration control is independent per plane: threshold (float64) and "
           "niter (int32) are (nt, nf, np) arrays giving each plane its own "
@@ -269,7 +269,7 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           py::arg("threshold") = py::array(), py::arg("niter") = py::array(),
           py::arg("fusedthreshold") = 0.0, py::arg("psf_width") = 0.0,
           py::arg("largestscale") = -1, py::arg("stoppointmode") = -1,
-          py::arg("norm_method") = 1, py::arg("num_threads") = 1);
+          py::arg("norm_method") = 1, py::arg("processing_function_threads") = 1);
 
     m.def("psf_gaussian_width", &psf_width_helper,
           "Estimate the PSF Gaussian width (mean FWHM in pixels) used to seed "

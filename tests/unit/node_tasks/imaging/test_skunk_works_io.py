@@ -164,13 +164,13 @@ def _make_image_store(
     return store
 
 
-@pytest.mark.parametrize("num_threads", [1, 4])
+@pytest.mark.parametrize("processing_function_threads", [1, 4])
 @pytest.mark.parametrize(
     "compressor",
     [None, zarr.codecs.BloscCodec(cname="lz4", clevel=5)],
     ids=["uncompressed", "blosc"],
 )
-def test_write_roundtrip(tmp_path, compressor, num_threads):
+def test_write_roundtrip(tmp_path, compressor, processing_function_threads):
     # 3 equal chunks of 2 channels; write three variables so the threaded
     # (per-variable) path is exercised.
     freq_chunks = [list(range(2)), list(range(2)), list(range(2))]
@@ -186,7 +186,11 @@ def test_write_roundtrip(tmp_path, compressor, num_threads):
     )
     task_coords = {"frequency": {"slice": slice(2, 4), "data": [0, 1]}}
     write_result_chunk_to_disk_using_zarr_skunk_works(
-        store, variables, task_coords, img, num_threads=num_threads
+        store,
+        variables,
+        task_coords,
+        img,
+        processing_function_threads=processing_function_threads,
     )
     for v in variables:
         back = zarr.open_array(store + "/" + v.upper())[:, 2:4, :, :, :]
@@ -209,13 +213,13 @@ def test_write_roundtrip_edge_chunk(tmp_path):
     assert _equal(back, vals)
 
 
-@pytest.mark.parametrize("num_threads", [1, 4])
+@pytest.mark.parametrize("processing_function_threads", [1, 4])
 @pytest.mark.parametrize(
     "compressor",
     [None, zarr.codecs.BloscCodec(cname="lz4", clevel=5)],
     ids=["uncompressed", "blosc"],
 )
-def test_write_roundtrip_sharded(tmp_path, compressor, num_threads):
+def test_write_roundtrip_sharded(tmp_path, compressor, processing_function_threads):
     """Sharded writer: many single-channel tasks write concurrently into shared,
     pre-created shard files; read back correctly by stock zarr AND our reader;
     the last (partial) shard and an unwritten channel are handled; the file count
@@ -249,7 +253,7 @@ def test_write_roundtrip_sharded(tmp_path, compressor, num_threads):
             variables,
             {"frequency": {"slice": slice(k, k + 1)}},
             img,
-            num_threads=num_threads,
+            processing_function_threads=processing_function_threads,
         )
 
     # Write channels 0..3 concurrently; leave channel 4 UNWRITTEN.
@@ -302,8 +306,8 @@ def test_sharded_slot_overflow_raises(tmp_path):
 # --------------------------------------------------------------------------- #
 # Full processing-set reconstruction
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("num_threads", [1, 4])
-def test_load_processing_set_reconstruction(tmp_path, num_threads):
+@pytest.mark.parametrize("processing_function_threads", [1, 4])
+def test_load_processing_set_reconstruction(tmp_path, processing_function_threads):
     ntime, nbl, nfreq, npol = 2, 6, 4, 2
     rng = np.random.default_rng(6)
     store = str(tmp_path / "ps.zarr")
@@ -344,7 +348,13 @@ def test_load_processing_set_reconstruction(tmp_path, num_threads):
     sel = {ms_name: {"frequency": slice(1, 3)}}
 
     ps = load_processing_set_skunk_works(
-        store, sel, data_group, "base", freq_values, "linear", num_threads=num_threads
+        store,
+        sel,
+        data_group,
+        "base",
+        freq_values,
+        "linear",
+        processing_function_threads=processing_function_threads,
     )
     ms = ps[ms_name]
     assert _equal(ms["VISIBILITY"].values, vis[:, :, 1:3, :])

@@ -14,7 +14,7 @@ def make_undeconvolved_image_single_field(
     is_n_iter_0,
     ms_data_group_in_name="corrected",
     image_data_group_out_name="residual",
-    num_threads=1,
+    processing_function_threads=1,
     complex_dtype=None,
 ):
     """Grid the (residual) visibilities of every measurement set onto the uv grid.
@@ -47,8 +47,9 @@ def make_undeconvolved_image_single_field(
         Measurement-set data group to grid from.  Default ``"corrected"``.
     image_data_group_out_name : str, optional
         Image data group the uv grid is written under.  Default ``"residual"``.
-    num_threads : int, optional
-        Threads handed to the gridding kernel.  Default ``1``.
+    processing_function_threads : int, optional
+        Number of threads handed to the per-processing-function (C++ / Numba /
+        FFT) kernels.
     complex_dtype : numpy.dtype, optional
         Complex precision of the gridded visibility grid (``complex64`` for a
         single-precision image, ``complex128`` otherwise).  Defaults to
@@ -97,7 +98,7 @@ def make_undeconvolved_image_single_field(
             overwrite=True,
             chan_mode="cube",
             fft_padding=image_params["fft_padding"],
-            num_threads=num_threads,
+            processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
         )
         T_vis_grid = T_vis_grid + time.time() - T_start_vis

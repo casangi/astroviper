@@ -86,7 +86,7 @@ def feather(input_params, graph_mode=True):
         sdfactor=input_params["sdfactor"],
         axes=input_params["axes"],
         fft_backend=input_params.get("fft_backend", "scipy"),
-        num_threads=input_params.get("processing_function_threads", 1),
+        processing_function_threads=input_params.get("processing_function_threads", 1),
     )
     T_feather = time.time() - start
 

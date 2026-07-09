@@ -219,7 +219,7 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
                 int ny, int nx,
                 int xbeg, int xend, int ybeg, int yend,
                 const int* niter, T gain, const T* thres, T cspeedup,
-                int num_threads, int* iter_out) {
+                int processing_function_threads, int* iter_out) {
 
     const int nplanes = nt * nf * np_img;
     if (nplanes <= 0) {
@@ -267,7 +267,7 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
         }
     };
 
-    int nthreads = num_threads;
+    int nthreads = processing_function_threads;
     if (nthreads < 1) nthreads = 1;
     if (nthreads > nplanes) nthreads = nplanes;
 
@@ -382,7 +382,7 @@ private:
 /**
  * Many-threads cube driver. Same algorithm as clean<T> applied per plane, but
  * the parallelism spans the whole (plane, row) work domain: each iteration's
- * peak search and PSF subtraction are split into num_threads contiguous row
+ * peak search and PSF subtraction are split into processing_function_threads contiguous row
  * ranges and run on a persistent thread pool, with a cheap serial per-plane
  * reduction in between. This keeps every thread busy even with one or two
  * planes (single-channel imaging), unlike clean_cube which is one thread per
@@ -396,7 +396,7 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
                 int ny, int nx,
                 int xbeg, int xend, int ybeg, int yend,
                 const int* niter, T gain, const T* thres, T cspeedup,
-                int num_threads, int* iter_out) {
+                int processing_function_threads, int* iter_out) {
 
     const int nplanes = nt * nf * np_img;
     if (nplanes <= 0) {
@@ -417,7 +417,7 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
         if (niter[pl] > max_niter) max_niter = niter[pl];
     }
 
-    int nthreads = num_threads;
+    int nthreads = processing_function_threads;
     if (nthreads < 1) nthreads = 1;
 
     const long n_rows = static_cast<long>(nplanes) * ny;
@@ -567,7 +567,7 @@ template void clean_cube<float>(float* residual_cube, float* model_cube,
                                 int ny, int nx,
                                 int xbeg, int xend, int ybeg, int yend,
                                 const int* niter, float gain, const float* thres, float cspeedup,
-                                int num_threads, int* iter_out);
+                                int processing_function_threads, int* iter_out);
 
 template void clean_cube<double>(double* residual_cube, double* model_cube,
                                  const double* psf_cube, int domask,
@@ -576,7 +576,7 @@ template void clean_cube<double>(double* residual_cube, double* model_cube,
                                  int ny, int nx,
                                  int xbeg, int xend, int ybeg, int yend,
                                  const int* niter, double gain, const double* thres, double cspeedup,
-                                 int num_threads, int* iter_out);
+                                 int processing_function_threads, int* iter_out);
 
 template void clean_cube_many_threads<float>(float* residual_cube, float* model_cube,
                                 const float* psf_cube, int domask,
@@ -585,7 +585,7 @@ template void clean_cube_many_threads<float>(float* residual_cube, float* model_
                                 int ny, int nx,
                                 int xbeg, int xend, int ybeg, int yend,
                                 const int* niter, float gain, const float* thres, float cspeedup,
-                                int num_threads, int* iter_out);
+                                int processing_function_threads, int* iter_out);
 
 template void clean_cube_many_threads<double>(double* residual_cube, double* model_cube,
                                  const double* psf_cube, int domask,
@@ -594,6 +594,6 @@ template void clean_cube_many_threads<double>(double* residual_cube, double* mod
                                  int ny, int nx,
                                  int xbeg, int xend, int ybeg, int yend,
                                  const int* niter, double gain, const double* thres, double cspeedup,
-                                 int num_threads, int* iter_out);
+                                 int processing_function_threads, int* iter_out);
 
 } // namespace hclean

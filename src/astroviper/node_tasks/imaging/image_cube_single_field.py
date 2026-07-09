@@ -317,7 +317,7 @@ def image_cube_single_field(
             processing_set_data_group_name=processing_set_data_group_name,
             frequency_coords=task_coords["frequency"]["data"],
             instrument_polarization_basis=instrument_polarization_basis,
-            num_threads=processing_function_threads,
+            processing_function_threads=processing_function_threads,
         )
     else:
         from xradio.measurement_set.load_processing_set import load_processing_set
@@ -367,7 +367,7 @@ def image_cube_single_field(
             image_data_variables_keep,
             task_coords,
             img_xds,
-            num_threads=processing_function_threads,
+            processing_function_threads=processing_function_threads,
         )
     elif graph_mode and skunk_works:
         # Experimental performance path: encode and write only this chunk's
@@ -381,7 +381,7 @@ def image_cube_single_field(
             image_data_variables_keep,
             task_coords,
             img_xds,
-            num_threads=processing_function_threads,
+            processing_function_threads=processing_function_threads,
         )
     elif graph_mode:
         from astroviper.utils.io import write_result_chunk_to_disk_using_zarr

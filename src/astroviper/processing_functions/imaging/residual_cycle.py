@@ -135,7 +135,7 @@ def imaging_setup_single_field(
         ms_data_group_in_name=ps_data_group_name,
         ms_data_group_out_name=ps_data_group_name,
         ms_data_group_out_modified={"weight_imaging": "WEIGHT_IMAGING"},
-        num_threads=processing_function_threads,
+        processing_function_threads=processing_function_threads,
     )
     T_weights = time.time() - T_start_weight
 
@@ -150,7 +150,7 @@ def imaging_setup_single_field(
         image_data_group_in_name=image_data_group_out_name,
         image_data_group_out_name=image_data_group_out_name,
         image_data_variables_keep=image_data_variables_keep,
-        num_threads=processing_function_threads,
+        processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,
     )
@@ -183,7 +183,7 @@ def imaging_setup_single_field(
             "max_sidelobe_point_spread_function": "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
         },
         overwrite=True,
-        num_threads=processing_function_threads,
+        processing_function_threads=processing_function_threads,
     )
     T_psf_fit = time.time() - start
 
@@ -348,7 +348,7 @@ def residual_cycle_cube_single_field(
                 "visibility": "VISIBILITY_MODEL",
             },
             image_data_variables_keep=["sky"],
-            num_threads=processing_function_threads,
+            processing_function_threads=processing_function_threads,
             fft_backend=fft_backend,
             complex_dtype=complex_dtype,
         )
@@ -364,7 +364,7 @@ def residual_cycle_cube_single_field(
                 "correlated_data": "VISIBILITY_MODEL",
             },
             image_data_group_in_name=image_data_group_in_name,
-            num_threads=processing_function_threads,
+            processing_function_threads=processing_function_threads,
             fft_padding=image_params["fft_padding"],
         )
         T_degrid += time.time() - start
@@ -410,7 +410,7 @@ def residual_cycle_cube_single_field(
         False,
         ms_data_group_in_name=ps_data_group_name,
         image_data_group_out_name=image_data_group_out_name,
-        num_threads=processing_function_threads,
+        processing_function_threads=processing_function_threads,
         complex_dtype=complex_dtype,
     )
     T_grid = time.time() - T_start_grid
@@ -425,7 +425,7 @@ def residual_cycle_cube_single_field(
             "sky": "SKY_RESIDUAL",
         },
         image_data_variables_keep=image_data_variables_keep,
-        num_threads=processing_function_threads,
+        processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,
     )
@@ -476,7 +476,7 @@ def make_visibility_model_single_field(
         "correlated_data": "VISIBILITY_MODEL",
     },
     image_data_group_in_name="model",
-    num_threads=1,
+    processing_function_threads=1,
     fft_padding=1.2,
 ):
     """Degrid the model image into model visibilities for every measurement set.
@@ -503,7 +503,7 @@ def make_visibility_model_single_field(
         ``{"correlated_data": "VISIBILITY_MODEL"}``.
     image_data_group_in_name : str, optional
         Image data group holding the model uv-grid.  Default ``"model"``.
-    num_threads : int, optional
+    processing_function_threads : int, optional
         Threads handed to the degridder kernel.  Default ``1``.
     fft_padding : float, optional
         Padding factor used during degridding.  Default ``1.2``.
@@ -519,7 +519,7 @@ def make_visibility_model_single_field(
             overwrite=True,
             chan_mode="cube",
             fft_padding=fft_padding,
-            num_threads=num_threads,
+            processing_function_threads=processing_function_threads,
         )
 
 

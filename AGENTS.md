@@ -213,7 +213,7 @@ You must understand these data structures; they appear in nearly every function.
   for a single observation/SPW/pol-setup. The main dataset holds `VISIBILITY`
   (interferometer) or `SPECTRUM` (single dish), plus `UVW`, `WEIGHT`, `FLAG`,
   with sub-datasets (`antenna_xds`, `field_and_source_*`, `weather_xds`, …) in
-  attributes. Dimensions: `time × baseline_id × frequency × polarization` for Visibility correlated datasets (intefreometers) and `time × antenna_name × frequency × polarization` for Spectrum correlated datasets (single dish).
+  attributes. Dimensions: `time × baseline_id × frequency × polarization` for Visibility correlated datasets (interferometers) and `time × antenna_name × frequency × polarization` for Spectrum correlated datasets (single dish).
 - **Image dataset** (`img_xds`): Two coordinate spaces:
   - **image domain** dims `(time, frequency, polarization, l, m)`
   - **uv / grid domain** dims `(time, frequency, polarization, u, v)`
@@ -221,7 +221,7 @@ You must understand these data structures; they appear in nearly every function.
 
 ### Lazy vs. eager (naming tells you which)
 - `open_*` → **lazy**: loads only metadata; data variables are Dask arrays.
-  (`open_processing_set`). Used in distrabuted_applications layer.
+  (`open_processing_set`). Used in the distributed_applications layer.
 - `load_*` → **eager**: loads everything into memory now.
   (`load_processing_set`). Used in node_tasks layer.
 
@@ -378,8 +378,8 @@ match them in any new kernel:
    float type; visibilities stay `complex128`), and the degridder reads a
    `complex64`/`complex128` grid and writes `complex64`/`complex128`
    visibilities in place — all four combinations are explicitly instantiated.
-7. **Threading inside the kernel** is via a `num_threads` argument →
-   `std::thread` workers; `num_threads <= 0` falls back to
+7. **Threading inside the kernel** is via a `processing_function_threads` argument →
+   `std::thread` workers; `processing_function_threads <= 0` falls back to
    `std::thread::hardware_concurrency()`, `1` runs serial. Concurrent writes to
    shared grid cells use lock-free `std::atomic_ref<double>` adds (C++20) —
    `complex<double>` is added as two `double` lanes.
@@ -390,9 +390,10 @@ Numba kernels follow the same memory philosophy: decorate with
 (`grid`, `normalization`, …). `nogil=True` lets them run under Dask threads.
 
 ### Two levels of parallelism (don't conflate them)
-- **Across chunks**: the Dask graph (GraphVIPER) — one task per  chunk.
-- **Within a task**: `processing_function_threads` → passed as `num_threads` to
-  the C++/Numba kernels.
+- **Across chunks**: the Dask graph (GraphVIPER) — one task per chunk.
+- **Within a task**: `processing_function_threads`, passed down unchanged from
+  the driver to the C++/Numba kernels (the same parameter name at every layer
+  of the stack).
 
 ---
 
@@ -462,6 +463,26 @@ per-variable nodes.
 - **Docstrings**: **NumPy-style** for all functions/classes (see
   `data_group_tools.py` and `add_visibility_grid.py` for exemplars — Parameters,
   Returns, Raises, See Also).
+- **Shared parameter docs (`astroviper.utils.param_docs`) — the rule for
+  repeated APIs**: when the same parameter is spelled out in more than one
+  public function (the common case: the driver, node task, and processing
+  function of one feature all declaring `image_params`,
+  `processing_function_threads`, …), its description must **not** be
+  hand-copied between docstrings. Instead:
+  1. Put the canonical description in the subdomain's registry — for imaging,
+     `processing_functions/imaging/_param_docs.py` (`IMAGING_PARAM_DOCS`,
+     `{param_name: description}`).
+  2. Decorate every function that shares it with `@shares_param_docs`
+     (`from astroviper.utils.param_docs import shares_param_docs`) and make
+     sure the file is listed in `_target_files()` in `utils/param_docs.py`.
+  3. Run `python -m astroviper.utils.param_docs sync` to rewrite the source
+     docstrings, then re-run black. `... param_docs check` runs in pre-commit
+     and CI and fails on drift.
+  Only the *description* is shared — each function keeps its own
+  `name : type, default ...` line, so defaults may differ per layer. This
+  applies to **all future work with a repeated API**, not just imaging: a new
+  subdomain gets its own `_param_docs.py` registry following the same pattern.
+  See §12.6 for the worked imaging example.
 - **Logging**: use the **toolviper** logger, not `print`:
   ```python
   import toolviper.utils.logger as logger
@@ -493,7 +514,8 @@ per-variable nodes.
   science function (data-group in/out resolution → compute in place → register
   group → return stats/timings).
 - Keep the C++ implementations consistent.
-- Pass `num_threads` through to kernels and respect `processing_function_threads`.
+- Pass `processing_function_threads` through unchanged from driver to kernels —
+  the same parameter name is used at every layer.
 - Keep the layering: graph code in `distributed_applications/`, I/O in `node_tasks/`,
   science in `processing_functions/`.
 - Run `black`, `pytest`, and rebuild after C++ edits before finishing.
@@ -513,7 +535,7 @@ per-variable nodes.
 - Tests written with at least 80% coverage.
 - Example notebook created (start from `docs/notebook_template.ipynb`).
 - NumPy-style docstrings on all public functions.
-- Initial performance testing done using larger datasets and relevant timing comparison with CASA/
+- Initial performance testing done using larger datasets and relevant timing comparison with CASA.
 
 ---
 

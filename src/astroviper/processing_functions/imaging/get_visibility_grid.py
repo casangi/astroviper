@@ -27,7 +27,7 @@ def get_visibility_grid_single_field(
     overwrite: bool = True,
     chan_mode: str = "cube",
     fft_padding: float = 1.2,
-    num_threads: int = 1,
+    processing_function_threads: int = 1,
 ):
     """Degrid a UV-domain model onto measurement-set visibility coordinates.
 
@@ -85,7 +85,7 @@ def get_visibility_grid_single_field(
         Channel mapping mode.  ``"cube"`` maps each visibility channel to its
         own image channel; ``"continuum"`` sources every visibility channel
         from image channel 0.
-    num_threads : int, default ``1``
+    processing_function_threads : int, default ``1``
         Reserved for a future threaded C++ degridder; currently unused by the
         Numba implementation.
 
@@ -210,7 +210,7 @@ def get_visibility_grid_single_field(
             delta_lm,
             support=7,
             oversampling=100,
-            num_threads=num_threads,
+            processing_function_threads=processing_function_threads,
         )
 
     else:

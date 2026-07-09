@@ -108,7 +108,7 @@ def feather_core(
     sdfactor: float = 1.0,
     axes: tuple = ("l", "m"),
     fft_backend: str = "scipy",
-    num_threads: int = 1,
+    processing_function_threads: int = 1,
 ) -> xr.Dataset:
     """Combine a single-dish and an interferometer image with the feather algorithm.
 
@@ -136,7 +136,7 @@ def feather_core(
         FFT backend forwarded to :func:`fft_lm_to_uv` / :func:`ifft_uv_to_lm`.
         ``scipy`` is always available and faster on typical feather cube sizes;
         ``"pyfftw"`` selects the FFTW-backed backend.
-    num_threads : int, default 1
+    processing_function_threads : int, default 1
         Number of FFT worker threads.
 
     Returns
@@ -167,11 +167,14 @@ def feather_core(
     int_ap = fft_lm_to_uv(
         int_xds[_sky].values,
         fft_plane,
-        num_threads=num_threads,
+        processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
     )
     sd_ap = fft_lm_to_uv(
-        sd_xds[_sky].values, fft_plane, num_threads=num_threads, fft_backend=fft_backend
+        sd_xds[_sky].values,
+        fft_plane,
+        processing_function_threads=processing_function_threads,
+        fft_backend=fft_backend,
     )
 
     # Preserve the lower-precision dtype of the two inputs for the output image.
@@ -199,7 +202,12 @@ def feather_core(
     # The inverse transform is complex; the sky image is its real part (the
     # imaginary part is negligible for real emission).
     feather_npary = np.real(
-        ifft_uv_to_lm(term, fft_plane, num_threads=num_threads, fft_backend=fft_backend)
+        ifft_uv_to_lm(
+            term,
+            fft_plane,
+            processing_function_threads=processing_function_threads,
+            fft_backend=fft_backend,
+        )
     ).astype(out_dtype)
 
     featherd_img_xds = xr.Dataset(coords=int_xds.coords)

@@ -23,7 +23,7 @@ void prolate_spheroidal_degrid(
     int n_time, int n_baseline, int n_vis_chan, int n_pol,
     double delta_l, double delta_m,
     int support, int oversampling,
-    int num_threads
+    int processing_function_threads
 ) {
     constexpr double c = 299792458.0;
     using VisElem = typename VisT::value_type;
@@ -168,7 +168,7 @@ void prolate_spheroidal_degrid(
         static_cast<int64_t>(n_time) * static_cast<int64_t>(n_baseline);
     if (total_work <= 0) return;
 
-    int resolved_threads = num_threads;
+    int resolved_threads = processing_function_threads;
     if (resolved_threads <= 0) {
         resolved_threads = static_cast<int>(std::thread::hardware_concurrency());
         if (resolved_threads <= 0) resolved_threads = 1;

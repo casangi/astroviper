@@ -456,7 +456,7 @@ def deconvolve(
     img_xds: xr.Dataset = None,
     algorithm: str = "hogbom",
     deconvolve_params: dict | None = None,
-    num_threads: int = 1,
+    processing_function_threads: int = 1,
     image_data_group_in_name: str = "residual",
     image_data_group_out_name: str = "model",
     image_data_group_out_modified: dict | None = None,
@@ -469,7 +469,7 @@ def deconvolve(
     place: the residual has CLEAN components subtracted from it, and the
     model has the same components added. The per-plane ``(time,
     frequency, polarization)`` loop is delegated to the C++ binding,
-    which dispatches planes across ``num_threads`` ``std::thread``
+    which dispatches planes across ``processing_function_threads`` ``std::thread``
     workers. No per-plane copies of the ``(ny, nx)`` arrays are retained
     on the Python side; the full ``(nt, nf, np, ny, nx)`` numpy buffers
     are handed directly to the CLEAN routine.
@@ -491,7 +491,7 @@ def deconvolve(
         defaults. The ``"asp"`` algorithm additionally honours
         ``fusedthreshold``, ``psf_width``, ``largestscale``,
         ``stoppointmode``, and ``norm_method`` (see :func:`asp_clean`).
-    num_threads : int, optional
+    processing_function_threads : int, optional
         Number of ``std::thread`` workers to use for per-plane CLEAN
         execution. Values ``<= 1`` disable threading and run in the
         calling thread. Values larger than the number of planes are
@@ -682,7 +682,7 @@ def deconvolve(
             psf_cube=psf_arr,
             model_cube=model_arr,
             deconvolve_params=deconvolve_params,
-            num_threads=num_threads,
+            processing_function_threads=processing_function_threads,
             mask_cube=mask_arr,
         )
     elif algorithm_l == "hogbom_many_threads":
@@ -691,7 +691,7 @@ def deconvolve(
             psf_cube=psf_arr,
             model_cube=model_arr,
             deconvolve_params=deconvolve_params,
-            num_threads=num_threads,
+            processing_function_threads=processing_function_threads,
             mask_cube=mask_arr,
         )
     else:  # asp / aspclean / asp_clean
@@ -700,7 +700,7 @@ def deconvolve(
             psf_cube=psf_arr,
             model_cube=model_arr,
             deconvolve_params=deconvolve_params,
-            num_threads=num_threads,
+            processing_function_threads=processing_function_threads,
             mask_cube=mask_arr,
         )
 
@@ -728,7 +728,7 @@ def hogbom_clean(
     psf_cube: np.ndarray,
     model_cube: np.ndarray,
     deconvolve_params: dict | None = None,
-    num_threads: int = 1,
+    processing_function_threads: int = 1,
     mask_cube: np.ndarray | None = None,
 ):
     """
@@ -762,9 +762,9 @@ def hogbom_clean(
     deconvolve_params : dict, optional
         Algorithm parameters. See :func:`_validate_deconvolve_params`
         for supported keys and defaults.
-    num_threads : int, optional
+    processing_function_threads : int, optional
         Number of ``std::thread`` workers used to run per-plane CLEAN in
-        parallel. ``num_threads <= 1`` disables threading; values larger
+        parallel. ``processing_function_threads <= 1`` disables threading; values larger
         than the number of planes are clamped to the plane count.
         Default 1.
     mask_cube : numpy.ndarray, optional
@@ -838,7 +838,10 @@ def hogbom_clean(
 
     logger.debug(f"Residual cube shape: {residual_cube.shape}")
     logger.debug(f"PSF cube shape: {psf_cube.shape}")
-    logger.debug("Running Hogbom CLEAN on cube with num_threads=%d" % num_threads)
+    logger.debug(
+        "Running Hogbom CLEAN on cube with processing_function_threads=%d"
+        % processing_function_threads
+    )
 
     clean_box = deconvolve_params["clean_box"]
     if clean_box is None:
@@ -863,7 +866,7 @@ def hogbom_clean(
         max_iter=niter_cube,
         gain=deconvolve_params["gain"],
         threshold=cyclethreshold_cube,
-        num_threads=int(num_threads),
+        processing_function_threads=int(processing_function_threads),
     )
 
 
@@ -872,7 +875,7 @@ def hogbom_clean_many_threads(
     psf_cube: np.ndarray,
     model_cube: np.ndarray,
     deconvolve_params: dict | None = None,
-    num_threads: int = 1,
+    processing_function_threads: int = 1,
     mask_cube: np.ndarray | None = None,
 ):
     """Hogbom CLEAN over a 5-D cube, threaded across AND within planes (numba).
@@ -882,12 +885,12 @@ def hogbom_clean_many_threads(
     for single-channel imaging (a few planes) it leaves most threads idle. This
     version additionally parallelizes each iteration's peak search and PSF
     subtraction *within* every plane (the parallel domain is ``plane x row``), so
-    all ``num_threads`` stay busy regardless of the plane count. The per-plane
+    all ``processing_function_threads`` stay busy regardless of the plane count. The per-plane
     algorithm and tie-breaking match :func:`hogbom_clean`, so the result is
     bit-identical on tie-free data; the residual and model cubes are updated in
     place. Parameters and return value match :func:`hogbom_clean`.
 
-    Threads are set from ``num_threads`` (the imaging
+    Threads are set from ``processing_function_threads`` (the imaging
     ``processing_function_threads``).
     """
     deconvolve_params = _validate_deconvolve_params(deconvolve_params)
@@ -926,7 +929,8 @@ def hogbom_clean_many_threads(
         )
 
     logger.debug(
-        "Running many-threads Hogbom CLEAN on cube with num_threads=%d" % num_threads
+        "Running many-threads Hogbom CLEAN on cube with processing_function_threads=%d"
+        % processing_function_threads
     )
 
     clean_box = deconvolve_params["clean_box"]
@@ -952,7 +956,7 @@ def hogbom_clean_many_threads(
         max_iter=niter_cube,
         gain=deconvolve_params["gain"],
         threshold=cyclethreshold_cube,
-        num_threads=int(num_threads),
+        processing_function_threads=int(processing_function_threads),
     )
 
 
@@ -961,7 +965,7 @@ def asp_clean(
     psf_cube: np.ndarray,
     model_cube: np.ndarray,
     deconvolve_params: dict | None = None,
-    num_threads: int = 1,
+    processing_function_threads: int = 1,
     mask_cube: np.ndarray | None = None,
 ):
     """
@@ -1012,9 +1016,9 @@ def asp_clean(
 
         Note: ``clean_box`` is ignored by the Asp algorithm (use a mask
         instead).
-    num_threads : int, optional
+    processing_function_threads : int, optional
         Number of ``std::thread`` workers used to run per-plane CLEAN in
-        parallel. ``num_threads <= 1`` disables threading; values larger
+        parallel. ``processing_function_threads <= 1`` disables threading; values larger
         than the number of planes are clamped to the plane count.
         Default 1.
     mask_cube : numpy.ndarray, optional
@@ -1082,7 +1086,10 @@ def asp_clean(
 
     logger.debug(f"Residual cube shape: {residual_cube.shape}")
     logger.debug(f"PSF cube shape: {psf_cube.shape}")
-    logger.debug("Running Asp CLEAN on cube with num_threads=%d" % num_threads)
+    logger.debug(
+        "Running Asp CLEAN on cube with processing_function_threads=%d"
+        % processing_function_threads
+    )
 
     # The Asp binding takes a numeric mask matching the image dtype (it is
     # convolved with each scale). Convert if needed; an empty array means
@@ -1113,5 +1120,5 @@ def asp_clean(
         largestscale=deconvolve_params.get("largestscale", -1),
         stoppointmode=deconvolve_params.get("stoppointmode", -1),
         norm_method=deconvolve_params.get("norm_method", 1),
-        num_threads=int(num_threads),
+        processing_function_threads=int(processing_function_threads),
     )

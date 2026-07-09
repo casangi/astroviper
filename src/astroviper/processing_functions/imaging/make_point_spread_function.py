@@ -209,7 +209,7 @@ def add_uv_sampling_grid_single_field(
     overwrite: bool = True,
     chan_mode: str = "cube",
     fft_padding: float = 1.2,
-    num_threads: int = 1,
+    processing_function_threads: int = 1,
     complex_dtype=None,
 ):
     """Accumulate the UV-sampling grid for a single-field observation into an image dataset.
@@ -264,7 +264,7 @@ def add_uv_sampling_grid_single_field(
         Padding factor applied to the image size when computing the UV-grid
         dimensions: ``n_uv = fft_padding * [img_xds.sizes["l"], img_xds.sizes["m"]]``.
         Values greater than ``1.0`` reduce aliasing from the FFT.
-    num_threads : int, default ``1``
+    processing_function_threads : int, default ``1``
         Threads handed to the C++ gridding kernel.
     complex_dtype : numpy.dtype, optional
         Complex precision of the gridded UV-sampling data (``complex64`` for a
@@ -368,7 +368,7 @@ def add_uv_sampling_grid_single_field(
             delta_lm,
             support=7,
             oversampling=100,
-            num_threads=num_threads,
+            processing_function_threads=processing_function_threads,
         )
     else:
         from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid import (
@@ -403,7 +403,7 @@ def make_point_spread_function_single_field(
     image_data_variables_keep=None,
     gcf_oversampling=100,
     gcf_support=7,
-    num_threads=1,
+    processing_function_threads=1,
     fft_backend="pyfftw",
     complex_dtype=None,
 ):
@@ -455,8 +455,9 @@ def make_point_spread_function_single_field(
         Default ``100``.
     gcf_support : int, optional
         Support (in pixels) of the gridding convolution kernel.  Default ``7``.
-    num_threads : int, optional
-        Number of threads handed to the gridding and FFT kernels.  Default ``1``.
+    processing_function_threads : int, optional
+        Number of threads handed to the per-processing-function (C++ / Numba /
+        FFT) kernels.
     fft_backend : str, optional
         FFT backend used by the gridder normalization (``"pyfftw"`` or
         ``"scipy"``).
@@ -520,7 +521,7 @@ def make_point_spread_function_single_field(
             overwrite=True,
             chan_mode="cube",
             fft_padding=image_params["fft_padding"],
-            num_threads=num_threads,
+            processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
         )  # Will become the PSF.
         T_uv_sampling_grid += time.time() - T_start_uv
@@ -535,7 +536,7 @@ def make_point_spread_function_single_field(
             "point_spread_function": "POINT_SPREAD_FUNCTION",
         },
         image_data_variables_keep=image_data_variables_keep,
-        num_threads=num_threads,
+        processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,
     )

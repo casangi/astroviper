@@ -85,7 +85,7 @@ def ifft_norm_img_xds(
     },
     overwrite=True,
     image_data_variables_keep=[],
-    num_threads=1,
+    processing_function_threads=1,
     fft_backend="pyfftw",
     complex_dtype=np.complex128,
 ):
@@ -148,7 +148,7 @@ def ifft_norm_img_xds(
         grids (lowest peak memory); pass all roles to keep all grids
         (useful for diagnostics).
 
-    num_threads : int, optional
+    processing_function_threads : int, optional
         Number of threads passed to the FFT backend for each 2-D transform.
         Default is ``1``, which is appropriate for a single-threaded dask
         worker.  Set to a higher value only when calling outside of a dask
@@ -245,7 +245,7 @@ def ifft_norm_img_xds(
                 for p in range(n_pol):
                     plane = ifft_uv_to_lm(
                         np.asarray(raw_grid[t, f, p], dtype=complex_dtype),
-                        num_threads=num_threads,
+                        processing_function_threads=processing_function_threads,
                         fft_backend=fft_backend,
                     )
                     # In-place ops below preserve `plane`'s precision (the float64
@@ -287,7 +287,7 @@ def fft_norm_img_xds(
     },
     overwrite=True,
     image_data_variables_keep=[],
-    num_threads=1,
+    processing_function_threads=1,
     fft_backend="pyfftw",
     data_variables_to_process=["sky"],
     complex_dtype=np.complex128,
@@ -371,7 +371,7 @@ def fft_norm_img_xds(
                         out_arr[t, f, p]
                         / kernel_image_1D_l[:, None]
                         / kernel_image_1D_m[None, :],
-                        num_threads=num_threads,
+                        processing_function_threads=processing_function_threads,
                         fft_backend=fft_backend,
                         complex_dtype=complex_dtype,
                     )
@@ -423,7 +423,10 @@ def _fold_shift_checkerboard(arr, axes):
 
 
 def ifft_uv_to_lm(
-    grid_2d, fft_plane_dims=(-2, -1), num_threads=1, fft_backend="pyfftw"
+    grid_2d,
+    fft_plane_dims=(-2, -1),
+    processing_function_threads=1,
+    fft_backend="pyfftw",
 ):
     """Apply a 2-D inverse FFT to transform a UV grid to a sky-plane image.
 
@@ -479,7 +482,10 @@ def ifft_uv_to_lm(
         work = grid_2d.copy()  # own the buffer; do not mutate the caller's grid
         _fold_shift_checkerboard(work, fft_plane_dims)
         sky = fft.ifft2(
-            work, axes=fft_plane_dims, workers=num_threads, overwrite_x=True
+            work,
+            axes=fft_plane_dims,
+            workers=processing_function_threads,
+            overwrite_x=True,
         )
         _fold_shift_checkerboard(sky, fft_plane_dims)
     else:
@@ -488,7 +494,7 @@ def ifft_uv_to_lm(
             fft.ifft2(
                 fft.ifftshift(grid_2d, axes=fft_plane_dims),
                 axes=fft_plane_dims,
-                workers=num_threads,
+                workers=processing_function_threads,
             ),
             axes=fft_plane_dims,
         )
@@ -499,7 +505,7 @@ def ifft_uv_to_lm(
 def fft_lm_to_uv(
     image,
     fft_plane_dims=(-2, -1),
-    num_threads=1,
+    processing_function_threads=1,
     fft_backend="pyfftw",
     complex_dtype=np.complex128,
 ):
@@ -549,14 +555,19 @@ def fft_lm_to_uv(
         if work is image:
             work = work.copy()  # own the buffer if asarray returned a view
         _fold_shift_checkerboard(work, fft_plane_dims)
-        uv = fft.fft2(work, axes=fft_plane_dims, workers=num_threads, overwrite_x=True)
+        uv = fft.fft2(
+            work,
+            axes=fft_plane_dims,
+            workers=processing_function_threads,
+            overwrite_x=True,
+        )
         _fold_shift_checkerboard(uv, fft_plane_dims)
         return uv
     return fft.fftshift(
         fft.fft2(
             fft.ifftshift(work, axes=fft_plane_dims),
             axes=fft_plane_dims,
-            workers=num_threads,
+            workers=processing_function_threads,
         ),
         axes=fft_plane_dims,
     )

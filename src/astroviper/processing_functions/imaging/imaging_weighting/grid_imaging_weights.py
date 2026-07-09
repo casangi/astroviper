@@ -13,7 +13,9 @@ def grid_imaging_weights(
     # grid_parms: dict,
     n_uv: list,
     delta_lm: list,
-    num_threads: int = 1,
+    # Currently unused: the weight gridding kernel stays serial so weight sums
+    # are bit-reproducible; accepted for API consistency across the stack.
+    processing_function_threads: int = 1,
 ):
     """
     Grid per-visibility *data weights* onto a UV grid.
@@ -214,7 +216,9 @@ def degrid_imaging_weights(
     freq_chan,
     n_uv,
     delta_lm,
-    num_threads: int = 1,
+    # Currently unused: the weight degridding kernel stays serial so weight
+    # sums are bit-reproducible; accepted for API consistency across the stack.
+    processing_function_threads: int = 1,
 ):
     """
     Sample a UV *imaging weight grid* at each visibility's (u, v) to form

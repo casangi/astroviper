@@ -7,7 +7,7 @@ def model_update_cycle_cube_single_field(
     deconvolver,
     deconvolve_params,
     is_n_iter_0,
-    num_threads=1,
+    processing_function_threads=1,
     image_data_group_in_name="residual",
     image_data_group_out_name="model",
 ):
@@ -36,8 +36,9 @@ def model_update_cycle_cube_single_field(
         from the deconvolver ``threshold``.
     is_n_iter_0 : bool
         ``True`` on the very first model update.  Currently informational.
-    num_threads : int, optional
-        Threads handed to the deconvolver kernel.  Default ``1``.
+    processing_function_threads : int, optional
+        Number of threads handed to the per-processing-function (C++ / Numba /
+        FFT) kernels.
     image_data_group_in_name : str, optional
         Data group holding the residual image and (created) mask.  Default
         ``"residual"``.
@@ -89,7 +90,7 @@ def model_update_cycle_cube_single_field(
         deconvolve_params=deconvolve_params,
         image_data_group_in_name=image_data_group_in_name,
         image_data_group_out_name=image_data_group_out_name,
-        num_threads=num_threads,
+        processing_function_threads=processing_function_threads,
     )
     T_deconvolve = time.time() - start
 

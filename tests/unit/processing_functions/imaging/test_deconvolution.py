@@ -372,7 +372,7 @@ class TestHogbomCleanCube:
             psf,
             model_a,
             {"gain": 0.2, "niter": 20, "threshold": 0.05},
-            num_threads=1,
+            processing_function_threads=1,
         )
 
         resid_b = base.copy()
@@ -382,7 +382,7 @@ class TestHogbomCleanCube:
             psf,
             model_b,
             {"gain": 0.2, "niter": 20, "threshold": 0.05},
-            num_threads=4,
+            processing_function_threads=4,
         )
 
         assert np.array_equal(model_a, model_b)
@@ -561,8 +561,8 @@ class TestDeconvolve:
         with pytest.raises(ValueError, match="not recognized"):
             deconvolve(img_xds=xds, algorithm="clark")
 
-    def test_num_threads_parameter_passes_through(self):
-        """num_threads > 1 must not change the result for a deterministic
+    def test_processing_function_threads_parameter_passes_through(self):
+        """processing_function_threads > 1 must not change the result for a deterministic
         input (same-input-same-output contract)."""
         xds_a = _make_img_xds(nt=1, nf=2, npol=2, ny=16, nx=16)
         xds_b = _make_img_xds(nt=1, nf=2, npol=2, ny=16, nx=16)
@@ -570,12 +570,12 @@ class TestDeconvolve:
         deconvolve(
             img_xds=xds_a,
             deconvolve_params={"gain": 0.2, "niter": 10, "threshold": 0.05},
-            num_threads=1,
+            processing_function_threads=1,
         )
         deconvolve(
             img_xds=xds_b,
             deconvolve_params={"gain": 0.2, "niter": 10, "threshold": 0.05},
-            num_threads=4,
+            processing_function_threads=4,
         )
 
         assert np.array_equal(xds_a["RESIDUAL"].values, xds_b["RESIDUAL"].values)
@@ -712,7 +712,7 @@ class TestAspClean:
             psf,
             ma,
             {"gain": 0.2, "niter": 40, "threshold": 0.05, "fusedthreshold": 0.1},
-            num_threads=1,
+            processing_function_threads=1,
         )
         rb, mb = base.copy(), np.zeros_like(base)
         asp_clean(
@@ -720,7 +720,7 @@ class TestAspClean:
             psf,
             mb,
             {"gain": 0.2, "niter": 40, "threshold": 0.05, "fusedthreshold": 0.1},
-            num_threads=4,
+            processing_function_threads=4,
         )
 
         assert np.array_equal(ra, rb)

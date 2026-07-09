@@ -59,7 +59,7 @@ AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
                          bool verbose);
 
 // Run aspclean_plane independently on every (time, frequency, polarization)
-// plane of a 5-D cube [nt, nf, np, ny, nx], in place, across `num_threads`
+// plane of a 5-D cube [nt, nf, np, ny, nx], in place, across `processing_function_threads`
 // worker threads. The PSF cube may have np_psf == np_img or np_psf == 1
 // (Stokes-I broadcast). `results` must have length nt*nf*np_img.
 //
@@ -72,7 +72,7 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask,
                    int nt, int nf, int np_img, int np_psf, int nx, int ny,
                    double gain, const double* threshold, const int* niter,
                    double fusedthreshold, double psf_width, int largestscale,
-                   int stoppointmode, int norm_method, int num_threads,
+                   int stoppointmode, int norm_method, int processing_function_threads,
                    AspResult* results);
 
 }  // namespace aspclean

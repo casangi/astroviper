@@ -329,13 +329,13 @@ def test_psf_gaussian_fit_core_threaded_matches_serial():
     delta = np.array([np.abs(x[1] - x[0]), np.abs(y[1] - y[0])])
 
     serial = psf_gaussian_fit_core(
-        data.copy(), blc, trc, sampling, cutoff, delta, num_threads=1
+        data.copy(), blc, trc, sampling, cutoff, delta, processing_function_threads=1
     )
     threaded = psf_gaussian_fit_core(
-        data.copy(), blc, trc, sampling, cutoff, delta, num_threads=4
+        data.copy(), blc, trc, sampling, cutoff, delta, processing_function_threads=4
     )
     auto = psf_gaussian_fit_core(
-        data.copy(), blc, trc, sampling, cutoff, delta, num_threads=0
+        data.copy(), blc, trc, sampling, cutoff, delta, processing_function_threads=0
     )
 
     assert serial.shape == (2, 3, 2, 3)
@@ -345,8 +345,8 @@ def test_psf_gaussian_fit_core_threaded_matches_serial():
     assert np.all(serial[..., :2] > 0)
 
 
-def test_psf_gaussian_fit_core_num_threads_exceeds_tasks():
-    """num_threads larger than the number of slices must still succeed."""
+def test_psf_gaussian_fit_core_processing_function_threads_exceeds_tasks():
+    """processing_function_threads larger than the number of slices must still succeed."""
     data, x, y = _make_multi_slice_cube(shape=(1, 1, 1, 61, 61))
     blc = np.array([10, 10])
     trc = np.array([50, 50])
@@ -355,7 +355,7 @@ def test_psf_gaussian_fit_core_num_threads_exceeds_tasks():
     delta = np.array([np.abs(x[1] - x[0]), np.abs(y[1] - y[0])])
 
     result = psf_gaussian_fit_core(
-        data, blc, trc, sampling, cutoff, delta, num_threads=16
+        data, blc, trc, sampling, cutoff, delta, processing_function_threads=16
     )
     assert result.shape == (1, 1, 1, 3)
     assert np.all(result[0, 0, 0, :2] > 0)

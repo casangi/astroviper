@@ -326,7 +326,7 @@ py::dict hclean_impl(
  * Templated Hogbom CLEAN cube wrapper. The residual_cube and model_cube
  * arrays are modified in place via pointers into Python-owned buffers;
  * no copies are made on the C++ side. The outer (t, f, p) loop runs in
- * num_threads worker threads via std::thread.
+ * processing_function_threads worker threads via std::thread.
  *
  * The PSF cube may have np_psf == np_img (one PSF per image pol) or
  * np_psf == 1 (broadcast across all image pols). Per-plane progress and
@@ -344,7 +344,7 @@ py::dict hclean_cube_impl(
     T gain,
     py::array threshold,
     T speedup,
-    int num_threads,
+    int processing_function_threads,
     bool many_threads
 ) {
     if (!residual_cube.dtype().is(py::dtype::of<T>())) {
@@ -444,7 +444,7 @@ py::dict hclean_cube_impl(
                 ny, nx,
                 xbeg, xend, ybeg, yend,
                 niter_ptr, gain, thres_ptr, speedup,
-                num_threads, iter_out.data());
+                processing_function_threads, iter_out.data());
         } else {
             hclean::clean_cube<T>(
                 static_cast<T*>(residual_info.ptr),
@@ -455,7 +455,7 @@ py::dict hclean_cube_impl(
                 ny, nx,
                 xbeg, xend, ybeg, yend,
                 niter_ptr, gain, thres_ptr, speedup,
-                num_threads, iter_out.data());
+                processing_function_threads, iter_out.data());
         }
     }
 
@@ -562,7 +562,7 @@ static py::dict clean_cube_dispatch(
     double gain,
     py::array threshold,
     double speedup,
-    int num_threads
+    int processing_function_threads
 ) {
     auto dt = residual_cube.dtype();
     if (dt.is(py::dtype::of<float>())) {
@@ -572,13 +572,13 @@ static py::dict clean_cube_dispatch(
             static_cast<float>(gain),
             threshold,
             static_cast<float>(speedup),
-            num_threads, /*many_threads=*/false);
+            processing_function_threads, /*many_threads=*/false);
     } else if (dt.is(py::dtype::of<double>())) {
         return hclean_cube_impl<double>(
             residual_cube, psf_cube, model_cube, mask_cube,
             clean_box, max_iter,
             gain, threshold, speedup,
-            num_threads, /*many_threads=*/false);
+            processing_function_threads, /*many_threads=*/false);
     } else {
         throw std::runtime_error(
             "residual_cube must be float32 or float64");
@@ -600,7 +600,7 @@ static py::dict clean_cube_many_threads_dispatch(
     double gain,
     py::array threshold,
     double speedup,
-    int num_threads
+    int processing_function_threads
 ) {
     auto dt = residual_cube.dtype();
     if (dt.is(py::dtype::of<float>())) {
@@ -610,13 +610,13 @@ static py::dict clean_cube_many_threads_dispatch(
             static_cast<float>(gain),
             threshold,
             static_cast<float>(speedup),
-            num_threads, /*many_threads=*/true);
+            processing_function_threads, /*many_threads=*/true);
     } else if (dt.is(py::dtype::of<double>())) {
         return hclean_cube_impl<double>(
             residual_cube, psf_cube, model_cube, mask_cube,
             clean_box, max_iter,
             gain, threshold, speedup,
-            num_threads, /*many_threads=*/true);
+            processing_function_threads, /*many_threads=*/true);
     } else {
         throw std::runtime_error(
             "residual_cube must be float32 or float64");
@@ -660,7 +660,7 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           py::arg("stop_callback") = py::none());
 
     // clean_cube: operate on a full (time, frequency, polarization, y, x)
-    // cube in place. All (t, f, p) planes are dispatched to num_threads
+    // cube in place. All (t, f, p) planes are dispatched to processing_function_threads
     // std::thread workers. The PSF cube may have np_psf == np_img or
     // np_psf == 1 (broadcast across polarization).
     m.def("clean_cube", &clean_cube_dispatch,
@@ -683,18 +683,18 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           py::arg("gain") = 0.1,
           py::arg("threshold") = py::array(),
           py::arg("speedup") = 0.0,
-          py::arg("num_threads") = 1);
+          py::arg("processing_function_threads") = 1);
 
     // clean_cube_many_threads: same as clean_cube but the parallelism spans
     // both the (time, frequency, polarization) planes AND the rows within each
-    // plane, so all num_threads workers stay busy even for a single-channel
+    // plane, so all processing_function_threads workers stay busy even for a single-channel
     // cube (a few planes). Identical algorithm, tie-breaking and outputs to
-    // clean_cube. num_threads is the worker count (set from
+    // clean_cube. processing_function_threads is the worker count (set from
     // processing_function_threads).
     m.def("clean_cube_many_threads", &clean_cube_many_threads_dispatch,
           "Hogbom CLEAN over a 5D (time, frequency, polarization, y, x) cube, "
           "parallelized across planes AND within each plane (rows) with "
-          "std::thread, so all num_threads workers are used regardless of the "
+          "std::thread, so all processing_function_threads workers are used regardless of the "
           "plane count. Residual and model are modified in place; same "
           "per-plane max_iter / threshold arrays and outputs as clean_cube.",
           py::arg("residual_cube"),
@@ -706,7 +706,7 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           py::arg("gain") = 0.1,
           py::arg("threshold") = py::array(),
           py::arg("speedup") = 0.0,
-          py::arg("num_threads") = 1);
+          py::arg("processing_function_threads") = 1);
 
     m.def("get_dtype_name", [](py::array arr) {
         return arr.dtype().str();

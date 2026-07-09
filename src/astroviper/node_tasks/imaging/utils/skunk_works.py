@@ -11,7 +11,7 @@ generality for speed:
   a sharded array it reads the shard index and then ``pread``\\ s only the byte
   ranges of the inner chunks the task's frequency selection touches -- it does
   not read the whole shard (a single shard often spans every channel of the
-  array). The data-group arrays are read concurrently across ``num_threads``
+  array). The data-group arrays are read concurrently across ``processing_function_threads``
   threads. Every other coordinate is *reconstructed* from the node-task inputs
   (the processing set and the image are assumed to share the same frequency
   coordinate); all sub-datasets are ignored.
@@ -20,7 +20,7 @@ generality for speed:
   writing the file directly -- no ``open_group``/``open_zarr`` and no metadata
   round trip. The empty image (and its Zarr metadata) was already created by the
   distributed graph. The variables are compressed and written concurrently
-  across ``num_threads`` threads (the compression is the dominant write cost).
+  across ``processing_function_threads`` threads (the compression is the dominant write cost).
 
 Nothing here uses dask: the node task is already wrapped in dask, and each task
 owns a disjoint set of chunks, so reads and writes are embarrassingly parallel.
@@ -313,23 +313,25 @@ def read_array_region(array_path, sel):
 # ---------------------------------------------------------------------------
 # Public skunk-works load
 # ---------------------------------------------------------------------------
-def _read_arrays_concurrently(reads, num_threads):
+def _read_arrays_concurrently(reads, processing_function_threads):
     """Read several Zarr arrays at once via :func:`read_array_region`.
 
     ``reads`` maps an arbitrary key to ``(array_path, sel)``; the return value
-    maps the same keys to ``(ndarray, dims)``.  With ``num_threads <= 1`` (or a
+    maps the same keys to ``(ndarray, dims)``.  With ``processing_function_threads <= 1`` (or a
     single array) the reads run serially; otherwise each array is read on its
     own thread.  The reads touch disjoint files and return independent arrays,
     so there is nothing to synchronise.
     """
     items = list(reads.items())
-    if num_threads <= 1 or len(items) <= 1:
+    if processing_function_threads <= 1 or len(items) <= 1:
         return {key: read_array_region(path, sel) for key, (path, sel) in items}
 
     from concurrent.futures import ThreadPoolExecutor
 
     results = {}
-    with ThreadPoolExecutor(max_workers=min(num_threads, len(items))) as executor:
+    with ThreadPoolExecutor(
+        max_workers=min(processing_function_threads, len(items))
+    ) as executor:
         futures = {
             executor.submit(read_array_region, path, sel): key
             for key, (path, sel) in items
@@ -346,7 +348,7 @@ def load_processing_set_skunk_works(
     processing_set_data_group_name,
     frequency_coords,
     instrument_polarization_basis="linear",
-    num_threads=1,
+    processing_function_threads=1,
 ):
     """Reconstruct a minimal processing set for cube imaging from chunk blobs.
 
@@ -382,7 +384,7 @@ def load_processing_set_skunk_works(
         Frequency values for this task's channels (``task_coords["frequency"]["data"]``).
     instrument_polarization_basis : str
         ``"linear"`` or ``"circular"``; used to label the polarization axis.
-    num_threads : int, optional
+    processing_function_threads : int, optional
         Maximum number of threads used to read this MS's arrays concurrently.
         Default ``1`` (serial).  File reads and the numcodecs decode both
         release the GIL, so threading overlaps the per-array I/O latency.
@@ -424,7 +426,7 @@ def load_processing_set_skunk_works(
             if os.path.isdir(os.path.join(ms_path, coord_name)):
                 reads[coord_name] = (os.path.join(ms_path, coord_name), {})
 
-        results = _read_arrays_concurrently(reads, num_threads)
+        results = _read_arrays_concurrently(reads, processing_function_threads)
 
         vis, vis_dims = results["correlated_data"]
         uvw, uvw_dims = results["uvw"]
@@ -550,7 +552,11 @@ def _write_blob(path, blob):
 
 
 def write_result_chunk_to_disk_using_zarr_skunk_works(
-    image_store, image_data_variables_keep, task_coords, img_xds, num_threads=1
+    image_store,
+    image_data_variables_keep,
+    task_coords,
+    img_xds,
+    processing_function_threads=1,
 ):
     """Write this task's image chunk(s) directly to their Zarr chunk file(s).
 
@@ -558,7 +564,7 @@ def write_result_chunk_to_disk_using_zarr_skunk_works(
 
     1. **Encode (compress)** each kept variable's chunk with its on-disk codecs.
        This is the dominant, CPU-bound, GIL-releasing cost and runs concurrently
-       across up to ``num_threads`` threads (one per variable).
+       across up to ``processing_function_threads`` threads (one per variable).
     2. **Write** the resulting blobs to disk **serially** -- one open file at a
        time for this task.
 
@@ -583,7 +589,7 @@ def write_result_chunk_to_disk_using_zarr_skunk_works(
         grid index this task owns.
     img_xds : xarray.Dataset
         The computed image holding this task's chunk for each variable.
-    num_threads : int, optional
+    processing_function_threads : int, optional
         Maximum number of threads used to *encode/compress* the variables
         concurrently (the disk writes are always serial).  Default ``1`` (serial
         encode).
@@ -591,7 +597,7 @@ def write_result_chunk_to_disk_using_zarr_skunk_works(
     variables = list(image_data_variables_keep)
 
     # Phase 1: encode/compress (optionally concurrent across variables).
-    if num_threads <= 1 or len(variables) <= 1:
+    if processing_function_threads <= 1 or len(variables) <= 1:
         encoded = [
             _encode_one_variable(dv, image_store, task_coords, img_xds)
             for dv in variables
@@ -600,7 +606,7 @@ def write_result_chunk_to_disk_using_zarr_skunk_works(
         from concurrent.futures import ThreadPoolExecutor
 
         with ThreadPoolExecutor(
-            max_workers=min(num_threads, len(variables))
+            max_workers=min(processing_function_threads, len(variables))
         ) as executor:
             futures = [
                 executor.submit(
@@ -809,7 +815,11 @@ def _encode_one_variable_sharded(dv, image_store, task_coords, img_xds):
 
 
 def write_result_chunk_to_disk_sharded_skunk_works(
-    image_store, image_data_variables_keep, task_coords, img_xds, num_threads=1
+    image_store,
+    image_data_variables_keep,
+    task_coords,
+    img_xds,
+    processing_function_threads=1,
 ):
     """Sharded direct-write: write this task's inner chunk for each kept variable
     into its SHARED, pre-created shard file at a fixed disjoint slot, and set its
@@ -817,7 +827,7 @@ def write_result_chunk_to_disk_sharded_skunk_works(
 
     Many single-channel tasks write into one shard file concurrently (disjoint
     byte ranges -> lock-free, no file creation). Compression of the variables runs
-    concurrently (``num_threads``); the ``pwrite``\\ s are serial per task. The
+    concurrently (``processing_function_threads``); the ``pwrite``\\ s are serial per task. The
     shard files must already exist (:func:`precreate_sharded_files`).
 
     Parameters mirror :func:`write_result_chunk_to_disk_using_zarr_skunk_works`.
@@ -825,7 +835,7 @@ def write_result_chunk_to_disk_sharded_skunk_works(
     variables = list(image_data_variables_keep)
 
     # Phase 1: encode/compress each variable's inner chunk (optionally concurrent).
-    if num_threads <= 1 or len(variables) <= 1:
+    if processing_function_threads <= 1 or len(variables) <= 1:
         encoded = [
             _encode_one_variable_sharded(dv, image_store, task_coords, img_xds)
             for dv in variables
@@ -834,7 +844,7 @@ def write_result_chunk_to_disk_sharded_skunk_works(
         from concurrent.futures import ThreadPoolExecutor
 
         with ThreadPoolExecutor(
-            max_workers=min(num_threads, len(variables))
+            max_workers=min(processing_function_threads, len(variables))
         ) as executor:
             futures = [
                 executor.submit(

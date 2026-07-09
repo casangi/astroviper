@@ -56,7 +56,7 @@ void prolate_spheroidal_grid_bind(
     py::array_t<double,  py::array::c_style | py::array::forcecast>  delta_lm,      // (2,) — tiny, forcecast OK
     int support,
     int oversampling,
-    int num_threads
+    int processing_function_threads
 ) {
     auto grid_info  = grid.request();
     auto norm_info  = normalization.request();
@@ -128,7 +128,7 @@ void prolate_spheroidal_grid_bind(
             freq_map_ptr, time_map_ptr, pol_map_ptr, wt_ptr, cgk_ptr,
             m_time_g, m_chan_g, m_pol_g, m_u, m_v,
             n_time, n_baseline, n_vis_chan, n_pol,
-            dl, dm, support, oversampling, num_threads);
+            dl, dm, support, oversampling, processing_function_threads);
     } else {
         cflt* grid_ptr = static_cast<cflt*>(grid_info.ptr);
         py::gil_scoped_release release;
@@ -137,7 +137,7 @@ void prolate_spheroidal_grid_bind(
             freq_map_ptr, time_map_ptr, pol_map_ptr, wt_ptr, cgk_ptr,
             m_time_g, m_chan_g, m_pol_g, m_u, m_v,
             n_time, n_baseline, n_vis_chan, n_pol,
-            dl, dm, support, oversampling, num_threads);
+            dl, dm, support, oversampling, processing_function_threads);
     }
 }
 
@@ -158,7 +158,7 @@ void prolate_spheroidal_grid_uv_sampling_bind(
     py::array_t<double,  py::array::c_style | py::array::forcecast>  delta_lm,
     int support,
     int oversampling,
-    int num_threads
+    int processing_function_threads
 ) {
     auto grid_info = grid.request();
     auto norm_info = normalization.request();
@@ -222,7 +222,7 @@ void prolate_spheroidal_grid_uv_sampling_bind(
             freq_map_ptr, time_map_ptr, pol_map_ptr, wt_ptr, cgk_ptr,
             m_time_g, m_chan_g, m_pol_g, m_u, m_v,
             n_time, n_baseline, n_vis_chan, n_pol,
-            dl, dm, support, oversampling, num_threads);
+            dl, dm, support, oversampling, processing_function_threads);
     } else {
         cflt* grid_ptr = static_cast<cflt*>(grid_info.ptr);
         py::gil_scoped_release release;
@@ -231,7 +231,7 @@ void prolate_spheroidal_grid_uv_sampling_bind(
             freq_map_ptr, time_map_ptr, pol_map_ptr, wt_ptr, cgk_ptr,
             m_time_g, m_chan_g, m_pol_g, m_u, m_v,
             n_time, n_baseline, n_vis_chan, n_pol,
-            dl, dm, support, oversampling, num_threads);
+            dl, dm, support, oversampling, processing_function_threads);
     }
 }
 
@@ -261,7 +261,7 @@ void prolate_spheroidal_degrid_bind(
     py::array_t<double,  py::array::c_style | py::array::forcecast>  delta_lm,      // (2,) — tiny, forcecast OK
     int support,
     int oversampling,
-    int num_threads
+    int processing_function_threads
 ) {
     auto grid_info = grid.request();
     auto vis_info  = vis_data.request();
@@ -339,7 +339,7 @@ void prolate_spheroidal_degrid_bind(
             freq_map_ptr, time_map_ptr, pol_map_ptr, cgk_ptr,
             m_time_g, m_chan_g, m_pol_g, m_u, m_v,
             n_time, n_baseline, n_vis_chan, n_pol,
-            dl, dm, support, oversampling, num_threads);
+            dl, dm, support, oversampling, processing_function_threads);
     };
 
     if (grid_is_c128 && vis_is_c128) {
@@ -360,7 +360,7 @@ PYBIND11_MODULE(_prolate_spheroidal_grid_ext, m) {
           &prolate_spheroidal_grid_bind,
           "Grid weighted visibilities onto a UV plane using a prolate spheroidal "
           "kernel (in-place). The grid may be complex64 or complex128; the "
-          "visibilities stay complex128. num_threads selects the number of "
+          "visibilities stay complex128. processing_function_threads selects the number of "
           "std::thread workers; <= 0 falls back to "
           "std::thread::hardware_concurrency().",
           py::arg("grid"),
@@ -377,12 +377,12 @@ PYBIND11_MODULE(_prolate_spheroidal_grid_ext, m) {
           py::arg("delta_lm"),
           py::arg("support"),
           py::arg("oversampling"),
-          py::arg("num_threads") = 1);
+          py::arg("processing_function_threads") = 1);
 
     m.def("prolate_spheroidal_grid_uv_sampling",
           &prolate_spheroidal_grid_uv_sampling_bind,
           "Grid imaging weights onto a UV plane (PSF / UV-sampling function, "
-          "in-place). The grid may be complex64 or complex128. num_threads "
+          "in-place). The grid may be complex64 or complex128. processing_function_threads "
           "selects the number of std::thread workers; <= 0 falls back to "
           "std::thread::hardware_concurrency().",
           py::arg("grid"),
@@ -398,14 +398,14 @@ PYBIND11_MODULE(_prolate_spheroidal_grid_ext, m) {
           py::arg("delta_lm"),
           py::arg("support"),
           py::arg("oversampling"),
-          py::arg("num_threads") = 1);
+          py::arg("processing_function_threads") = 1);
 
     m.def("prolate_spheroidal_degrid",
           &prolate_spheroidal_degrid_bind,
           "Sample (degrid) a model UV grid at visibility coordinates using a "
           "prolate spheroidal kernel. The model grid may be complex64 or "
           "complex128 and the visibilities complex64 or complex128; writes "
-          "interpolated values into vis_data in place. num_threads selects the "
+          "interpolated values into vis_data in place. processing_function_threads selects the "
           "number of std::thread workers; <= 0 falls back to "
           "std::thread::hardware_concurrency().",
           py::arg("grid"),
@@ -420,5 +420,5 @@ PYBIND11_MODULE(_prolate_spheroidal_grid_ext, m) {
           py::arg("delta_lm"),
           py::arg("support"),
           py::arg("oversampling"),
-          py::arg("num_threads") = 1);
+          py::arg("processing_function_threads") = 1);
 }

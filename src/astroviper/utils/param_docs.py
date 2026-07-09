@@ -158,6 +158,11 @@ def _rewrite_docstring(docstring, registry):
                 desc = registry[pname].rstrip("\n")
                 for dl in desc.split("\n"):
                     out.append((" " * body_indent + dl).rstrip() if dl else "")
+                # Preserve a trailing blank line from the consumed block (e.g.
+                # the separator before the next section when this parameter is
+                # the last one in the Parameters section).
+                if j > i + 1 and not lines[j - 1].strip():
+                    out.append("")
                 changed = True
             else:
                 out.extend(lines[i + 1 : j])

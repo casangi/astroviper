@@ -30,7 +30,7 @@ def point_spread_function_gaussian_fit(
     sampling: tuple = (55, 55),
     cutoff: float = 0.35,
     interpolation_method: str = "splinef2d",
-    num_threads: int = 1,
+    processing_function_threads: int = 1,
 ):
     """
     fit 2D gaussian to psf
@@ -67,7 +67,7 @@ def point_spread_function_gaussian_fit(
         The cutoff value for the fitting.
     interpolation_method : str
         The interpolation method to use when resampling the PSF for fitting.
-    num_threads : int, default 1
+    processing_function_threads : int, default 1
         Number of worker threads used to fit individual (time, frequency,
         polarization) PSF slices concurrently via a ``ThreadPoolExecutor``.
         Values ``<= 0`` fall back to ``os.cpu_count()``.  Each slice writes to
@@ -172,7 +172,7 @@ def point_spread_function_gaussian_fit(
         cutoff,
         delta,
         interpolation_method,
-        num_threads=num_threads,
+        processing_function_threads=processing_function_threads,
     )
 
     # Uncomment line below to change beam_param units to arcsec and deg
@@ -384,7 +384,7 @@ def psf_gaussian_fit_core(
     cutoff,
     delta,
     interpolation_method="linear",
-    num_threads: int = 1,
+    processing_function_threads: int = 1,
 ):
     """
     core function to fit gaussian to psf
@@ -409,7 +409,7 @@ def psf_gaussian_fit_core(
         The cutoff value for the fitting.
     delta : np.ndarray
         The pixel size in radians.
-    num_threads : int, default 1
+    processing_function_threads : int, default 1
         Number of worker threads used to fit (time, chan, pol) slices
         concurrently via a ``ThreadPoolExecutor``. Values ``<= 0`` fall
         back to ``os.cpu_count()``. Each slice writes to its own entry in
@@ -518,10 +518,10 @@ def psf_gaussian_fit_core(
         for pol in range(n_pol)
     ]
 
-    if num_threads <= 0:
+    if processing_function_threads <= 0:
         resolved_threads = os.cpu_count() or 1
     else:
-        resolved_threads = num_threads
+        resolved_threads = processing_function_threads
     resolved_threads = max(1, min(resolved_threads, len(tasks)))
 
     if resolved_threads == 1 or len(tasks) <= 1:

@@ -3,7 +3,7 @@
 Coverage:
   * Numerical agreement with the Numba reference (`prolate_spheroidal_degrid_jit`)
   * Serial vs multi-threaded equivalence (exact: no atomic collisions)
-  * `num_threads <= 0` auto-detects hardware concurrency
+  * `processing_function_threads <= 0` auto-detects hardware concurrency
   * NaN UV / NaN vis / out-of-bounds samples are left unchanged
   * Channel / time / pol index maps (cube and continuum collapse)
   * Dirac-delta grid returns the expected separable-kernel peak
@@ -85,7 +85,7 @@ def _make_random_inputs(
     )
 
 
-def _run_cpp(inputs, num_threads=1):
+def _run_cpp(inputs, processing_function_threads=1):
     vis_data = inputs["vis_data"].copy()
     prolate_spheroidal_degrid(
         inputs["grid"],
@@ -100,7 +100,7 @@ def _run_cpp(inputs, num_threads=1):
         inputs["delta_lm"],
         support=SUPPORT,
         oversampling=OVERSAMPLING,
-        num_threads=num_threads,
+        processing_function_threads=processing_function_threads,
     )
     return vis_data
 
@@ -131,7 +131,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
     def test_matches_numba_reference(self):
         """Serial C++ degridder matches the numba reference bit-for-bit."""
         inputs = _make_random_inputs(seed=1)
-        cpp = _run_cpp(inputs, num_threads=1)
+        cpp = _run_cpp(inputs, processing_function_threads=1)
         ref = _run_jit(inputs)
         np.testing.assert_allclose(cpp, ref, rtol=0, atol=1e-12)
         # Ensure the test exercises the interpolation path — a non-trivial
@@ -142,7 +142,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         """frequency_map collapsing all channels onto image chan 0."""
         inputs = _make_random_inputs(n_vis_chan=4, m_chan=1, seed=2)
         inputs["frequency_map"] = np.zeros(4, dtype=np.int64)
-        cpp = _run_cpp(inputs, num_threads=1)
+        cpp = _run_cpp(inputs, processing_function_threads=1)
         ref = _run_jit(inputs)
         np.testing.assert_allclose(cpp, ref, rtol=0, atol=1e-12)
 
@@ -150,7 +150,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         """time_map collapsing multiple time steps onto image time 0."""
         inputs = _make_random_inputs(n_time=3, m_time=1, seed=3)
         inputs["time_map"] = np.zeros(3, dtype=np.int64)
-        cpp = _run_cpp(inputs, num_threads=1)
+        cpp = _run_cpp(inputs, processing_function_threads=1)
         ref = _run_jit(inputs)
         np.testing.assert_allclose(cpp, ref, rtol=0, atol=1e-12)
 
@@ -158,7 +158,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         """pol_map reordering swaps which grid pol feeds each vis pol."""
         inputs = _make_random_inputs(n_pol=2, seed=4)
         inputs["pol_map"] = np.array([1, 0], dtype=np.int64)
-        cpp = _run_cpp(inputs, num_threads=1)
+        cpp = _run_cpp(inputs, processing_function_threads=1)
         ref = _run_jit(inputs)
         np.testing.assert_allclose(cpp, ref, rtol=0, atol=1e-12)
 
@@ -173,23 +173,23 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         of floating-point sums: the result is bit-identical.
         """
         inputs = _make_random_inputs(n_baseline=256, seed=5)
-        serial = _run_cpp(inputs, num_threads=1)
+        serial = _run_cpp(inputs, processing_function_threads=1)
         for nt in (2, 4, 8):
-            with self.subTest(num_threads=nt):
-                threaded = _run_cpp(inputs, num_threads=nt)
+            with self.subTest(processing_function_threads=nt):
+                threaded = _run_cpp(inputs, processing_function_threads=nt)
                 np.testing.assert_array_equal(threaded, serial)
 
-    def test_num_threads_auto_detect(self):
-        """num_threads <= 0 falls back to hardware_concurrency()."""
+    def test_processing_function_threads_auto_detect(self):
+        """processing_function_threads <= 0 falls back to hardware_concurrency()."""
         inputs = _make_random_inputs(seed=6)
-        serial = _run_cpp(inputs, num_threads=1)
-        auto = _run_cpp(inputs, num_threads=0)
+        serial = _run_cpp(inputs, processing_function_threads=1)
+        auto = _run_cpp(inputs, processing_function_threads=0)
         np.testing.assert_array_equal(auto, serial)
 
     def test_threaded_matches_reference(self):
         """Threaded C++ output matches the numba reference within tolerance."""
         inputs = _make_random_inputs(n_baseline=200, seed=7)
-        cpp = _run_cpp(inputs, num_threads=4)
+        cpp = _run_cpp(inputs, processing_function_threads=4)
         ref = _run_jit(inputs)
         np.testing.assert_allclose(cpp, ref, rtol=0, atol=1e-12)
 
@@ -204,7 +204,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         inputs["vis_data"] = np.full_like(inputs["vis_data"], sentinel)
         inputs["uvw"][:, 0, :] = np.nan  # baseline 0 is fully NaN
 
-        cpp = _run_cpp(inputs, num_threads=1)
+        cpp = _run_cpp(inputs, processing_function_threads=1)
         ref = _run_jit(inputs)
         np.testing.assert_allclose(cpp, ref, rtol=0, atol=1e-12)
         # Baseline 0 stays untouched across every time/chan/pol.
@@ -217,7 +217,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         inputs = _make_random_inputs(n_baseline=8, seed=10)
         inputs["vis_data"][0, 0, 0, 0] = complex(np.nan, np.nan)
 
-        cpp = _run_cpp(inputs, num_threads=1)
+        cpp = _run_cpp(inputs, processing_function_threads=1)
         ref = _run_jit(inputs)
 
         self.assertTrue(np.isnan(cpp[0, 0, 0, 0].real))
@@ -234,7 +234,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         inputs["vis_data"][:] = sentinel
         inputs["uvw"][:] = 1.0e15  # far outside the grid
 
-        cpp = _run_cpp(inputs, num_threads=1)
+        cpp = _run_cpp(inputs, processing_function_threads=1)
         self.assertTrue(np.all(cpp == sentinel))
 
     # ------------------------------------------------------------------
@@ -279,7 +279,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
             delta_lm,
             support=SUPPORT,
             oversampling=OVERSAMPLING,
-            num_threads=1,
+            processing_function_threads=1,
         )
 
         s = SUPPORT // 2
@@ -316,7 +316,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
             inputs["delta_lm"],
             support=SUPPORT,
             oversampling=OVERSAMPLING,
-            num_threads=1,
+            processing_function_threads=1,
         )
         # Same buffer (no reallocation, no silent copy).
         self.assertEqual(vis.ctypes.data, addr_before)
@@ -348,7 +348,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
             inputs["delta_lm"],
             support=SUPPORT,
             oversampling=OVERSAMPLING,
-            num_threads=1,
+            processing_function_threads=1,
         )
         self.assertEqual(vis64.ctypes.data, addr_before)
         self.assertEqual(vis64.dtype, np.complex64)
@@ -371,7 +371,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
             inputs["delta_lm"],
             support=SUPPORT,
             oversampling=OVERSAMPLING,
-            num_threads=1,
+            processing_function_threads=1,
         )
         ref = _run_jit(inputs)  # complex128 numba reference
         np.testing.assert_allclose(
@@ -398,7 +398,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
                 inputs["delta_lm"],
                 support=SUPPORT,
                 oversampling=OVERSAMPLING,
-                num_threads=1,
+                processing_function_threads=1,
             )
 
     def test_jit_and_cpp_produce_same_result(self):
@@ -406,15 +406,35 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         same inputs across multiple seeds, baseline counts, channel maps, and
         thread counts."""
         configs = [
-            dict(seed=30, n_baseline=32, n_vis_chan=2, n_pol=2, num_threads=1),
-            dict(seed=31, n_baseline=128, n_vis_chan=4, n_pol=2, num_threads=4),
-            dict(seed=32, n_baseline=64, n_vis_chan=3, n_pol=1, num_threads=2),
+            dict(
+                seed=30,
+                n_baseline=32,
+                n_vis_chan=2,
+                n_pol=2,
+                processing_function_threads=1,
+            ),
+            dict(
+                seed=31,
+                n_baseline=128,
+                n_vis_chan=4,
+                n_pol=2,
+                processing_function_threads=4,
+            ),
+            dict(
+                seed=32,
+                n_baseline=64,
+                n_vis_chan=3,
+                n_pol=1,
+                processing_function_threads=2,
+            ),
         ]
         for cfg in configs:
             with self.subTest(**cfg):
-                num_threads = cfg.pop("num_threads")
+                processing_function_threads = cfg.pop("processing_function_threads")
                 inputs = _make_random_inputs(**cfg)
-                cpp = _run_cpp(inputs, num_threads=num_threads)
+                cpp = _run_cpp(
+                    inputs, processing_function_threads=processing_function_threads
+                )
                 jit = _run_jit(inputs)
                 np.testing.assert_allclose(cpp, jit, rtol=0, atol=1e-12)
 
@@ -441,7 +461,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
                 inputs["delta_lm"],
                 support=SUPPORT,
                 oversampling=OVERSAMPLING,
-                num_threads=1,
+                processing_function_threads=1,
             )
 
 

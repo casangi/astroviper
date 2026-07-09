@@ -3,7 +3,7 @@
 Coverage:
   * Numerical agreement with the Numba reference (`prolate_spheroidal_grid_jit`)
   * Serial vs multi-threaded equivalence
-  * `num_threads <= 0` auto-detects hardware concurrency
+  * `processing_function_threads <= 0` auto-detects hardware concurrency
   * Accumulation semantics (two calls == one combined call)
   * NaN UV / NaN weight / zero weight are skipped
   * Samples whose support falls outside the grid are skipped
@@ -90,7 +90,7 @@ def _make_random_inputs(
     )
 
 
-def _run_cpp(inputs, num_threads=1):
+def _run_cpp(inputs, processing_function_threads=1):
     grid, norm = _zero_grid(
         inputs["m_time"],
         inputs["m_chan"],
@@ -113,7 +113,7 @@ def _run_cpp(inputs, num_threads=1):
         inputs["delta_lm"],
         support=SUPPORT,
         oversampling=OVERSAMPLING,
-        num_threads=num_threads,
+        processing_function_threads=processing_function_threads,
     )
     return grid, norm
 
@@ -152,7 +152,7 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
     def test_matches_numba_reference(self):
         """C++ gridder matches the numba reference bit-for-bit-ish."""
         inputs = _make_random_inputs(seed=1)
-        cpp_grid, cpp_norm = _run_cpp(inputs, num_threads=1)
+        cpp_grid, cpp_norm = _run_cpp(inputs, processing_function_threads=1)
         ref_grid, ref_norm = _run_jit(inputs)
         np.testing.assert_allclose(cpp_grid, ref_grid, rtol=0, atol=1e-12)
         np.testing.assert_allclose(cpp_norm, ref_norm, rtol=0, atol=1e-12)
@@ -162,7 +162,7 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
         """frequency_map collapsing all channels onto image chan 0."""
         inputs = _make_random_inputs(n_vis_chan=4, m_chan=1, seed=2)
         inputs["frequency_map"] = np.zeros(4, dtype=np.int64)
-        cpp_grid, cpp_norm = _run_cpp(inputs, num_threads=1)
+        cpp_grid, cpp_norm = _run_cpp(inputs, processing_function_threads=1)
         ref_grid, ref_norm = _run_jit(inputs)
         np.testing.assert_allclose(cpp_grid, ref_grid, rtol=0, atol=1e-12)
         np.testing.assert_allclose(cpp_norm, ref_norm, rtol=0, atol=1e-12)
@@ -174,7 +174,7 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
         """time_map collapsing multiple time steps onto image time 0."""
         inputs = _make_random_inputs(n_time=3, m_time=1, seed=3)
         inputs["time_map"] = np.zeros(3, dtype=np.int64)
-        cpp_grid, _ = _run_cpp(inputs, num_threads=1)
+        cpp_grid, _ = _run_cpp(inputs, processing_function_threads=1)
         ref_grid, _ = _run_jit(inputs)
         np.testing.assert_allclose(cpp_grid, ref_grid, rtol=0, atol=1e-12)
         self.assertEqual(cpp_grid.shape[0], 1)
@@ -183,7 +183,7 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
         """pol_map reorders the visibility polarizations into the image pol axis."""
         inputs = _make_random_inputs(n_pol=2, seed=4)
         inputs["pol_map"] = np.array([1, 0], dtype=np.int64)  # swap the two pols
-        cpp_grid, _ = _run_cpp(inputs, num_threads=1)
+        cpp_grid, _ = _run_cpp(inputs, processing_function_threads=1)
         ref_grid, _ = _run_jit(inputs)
         np.testing.assert_allclose(cpp_grid, ref_grid, rtol=0, atol=1e-12)
 
@@ -197,25 +197,25 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
         bit-identical — but it must be numerically close.
         """
         inputs = _make_random_inputs(n_baseline=256, seed=5)
-        grid_serial, norm_serial = _run_cpp(inputs, num_threads=1)
+        grid_serial, norm_serial = _run_cpp(inputs, processing_function_threads=1)
         for nt in (2, 4, 8):
-            with self.subTest(num_threads=nt):
-                grid_t, norm_t = _run_cpp(inputs, num_threads=nt)
+            with self.subTest(processing_function_threads=nt):
+                grid_t, norm_t = _run_cpp(inputs, processing_function_threads=nt)
                 np.testing.assert_allclose(grid_t, grid_serial, rtol=1e-10, atol=1e-10)
                 np.testing.assert_allclose(norm_t, norm_serial, rtol=1e-10, atol=1e-10)
 
-    def test_num_threads_auto_detect(self):
-        """num_threads <= 0 falls back to hardware_concurrency()."""
+    def test_processing_function_threads_auto_detect(self):
+        """processing_function_threads <= 0 falls back to hardware_concurrency()."""
         inputs = _make_random_inputs(seed=6)
-        grid_serial, norm_serial = _run_cpp(inputs, num_threads=1)
-        grid_auto, norm_auto = _run_cpp(inputs, num_threads=0)
+        grid_serial, norm_serial = _run_cpp(inputs, processing_function_threads=1)
+        grid_auto, norm_auto = _run_cpp(inputs, processing_function_threads=0)
         np.testing.assert_allclose(grid_auto, grid_serial, rtol=1e-10, atol=1e-10)
         np.testing.assert_allclose(norm_auto, norm_serial, rtol=1e-10, atol=1e-10)
 
     def test_threaded_matches_reference(self):
         """Threaded C++ output matches the numba reference within tolerance."""
         inputs = _make_random_inputs(n_baseline=200, seed=7)
-        cpp_grid, cpp_norm = _run_cpp(inputs, num_threads=4)
+        cpp_grid, cpp_norm = _run_cpp(inputs, processing_function_threads=4)
         ref_grid, ref_norm = _run_jit(inputs)
         np.testing.assert_allclose(cpp_grid, ref_grid, rtol=1e-10, atol=1e-10)
         np.testing.assert_allclose(cpp_norm, ref_norm, rtol=1e-10, atol=1e-10)
@@ -227,7 +227,7 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
         """Two calls on disjoint halves equal one call on the full set."""
         inputs = _make_random_inputs(n_baseline=64, seed=8)
 
-        full_grid, full_norm = _run_cpp(inputs, num_threads=1)
+        full_grid, full_norm = _run_cpp(inputs, processing_function_threads=1)
 
         split = inputs["uvw"].shape[1] // 2
         first = dict(inputs)
@@ -262,7 +262,7 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
                 part["delta_lm"],
                 support=SUPPORT,
                 oversampling=OVERSAMPLING,
-                num_threads=1,
+                processing_function_threads=1,
             )
 
         np.testing.assert_allclose(grid, full_grid, rtol=0, atol=1e-12)
@@ -275,7 +275,7 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
         """A NaN UVW sample must not alter grid / normalization."""
         inputs = _make_random_inputs(n_baseline=16, seed=9)
 
-        baseline_grid, baseline_norm = _run_cpp(inputs, num_threads=1)
+        baseline_grid, baseline_norm = _run_cpp(inputs, processing_function_threads=1)
 
         inputs2 = dict(inputs)
         uvw_nan = inputs["uvw"].copy()
@@ -313,7 +313,7 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
             axis=1,
         )
 
-        grid_with_nan, norm_with_nan = _run_cpp(inputs2, num_threads=1)
+        grid_with_nan, norm_with_nan = _run_cpp(inputs2, processing_function_threads=1)
         np.testing.assert_allclose(grid_with_nan, baseline_grid, rtol=0, atol=0)
         np.testing.assert_allclose(norm_with_nan, baseline_norm, rtol=0, atol=0)
 
@@ -330,7 +330,7 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
         drop["uvw"] = inputs["uvw"][:, 1:]
         drop["weight"] = inputs["weight"][:, 1:]
 
-        full_grid, full_norm = _run_cpp(inputs, num_threads=1)
+        full_grid, full_norm = _run_cpp(inputs, processing_function_threads=1)
         drop_grid, drop_norm = _run_cpp(
             {
                 **drop,
@@ -338,7 +338,7 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
                 "uvw": np.ascontiguousarray(drop["uvw"]),
                 "weight": np.ascontiguousarray(drop["weight"]),
             },
-            num_threads=1,
+            processing_function_threads=1,
         )
         np.testing.assert_allclose(full_grid, drop_grid, rtol=0, atol=0)
         np.testing.assert_allclose(full_norm, drop_norm, rtol=0, atol=0)
@@ -350,7 +350,7 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
         # small (~1.0e-4 * 64 / 3e8 ~ 2e-11) so uvw of 1e15 gives u ~ 2e4
         # pixels, comfortably out of bounds on either axis.
         inputs["uvw"][:] = 1.0e15
-        grid, norm = _run_cpp(inputs, num_threads=1)
+        grid, norm = _run_cpp(inputs, processing_function_threads=1)
         self.assertEqual(np.count_nonzero(grid), 0)
         self.assertEqual(np.count_nonzero(norm), 0)
 
@@ -396,7 +396,7 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
             delta_lm,
             support=SUPPORT,
             oversampling=OVERSAMPLING,
-            num_threads=1,
+            processing_function_threads=1,
         )
 
         s = SUPPORT // 2
@@ -446,7 +446,7 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
                 inputs["delta_lm"],
                 support=SUPPORT,
                 oversampling=OVERSAMPLING,
-                num_threads=1,
+                processing_function_threads=1,
             )
 
 
@@ -461,7 +461,7 @@ class TestSinglePrecisionGrid(unittest.TestCase):
     def test_complex64_grid_matches_complex128(self):
         inputs = _make_random_inputs(seed=7)
 
-        grid128, norm128 = _run_cpp(inputs, num_threads=1)
+        grid128, norm128 = _run_cpp(inputs, processing_function_threads=1)
 
         grid64 = np.zeros(grid128.shape, dtype=np.complex64)
         norm64 = np.zeros(norm128.shape, dtype=np.float64)
@@ -480,7 +480,7 @@ class TestSinglePrecisionGrid(unittest.TestCase):
             inputs["delta_lm"],
             support=SUPPORT,
             oversampling=OVERSAMPLING,
-            num_threads=1,
+            processing_function_threads=1,
         )
 
         self.assertEqual(grid64.dtype, np.complex64)
@@ -496,7 +496,7 @@ class TestSinglePrecisionGrid(unittest.TestCase):
         inputs = _make_random_inputs(seed=11)
         common = dict(support=SUPPORT, oversampling=OVERSAMPLING)
 
-        def run(num_threads):
+        def run(processing_function_threads):
             grid = np.zeros(
                 (
                     inputs["m_time"],
@@ -524,7 +524,7 @@ class TestSinglePrecisionGrid(unittest.TestCase):
                 inputs["cgk_1D"],
                 inputs["n_uv"],
                 inputs["delta_lm"],
-                num_threads=num_threads,
+                processing_function_threads=processing_function_threads,
                 **common,
             )
             return grid
@@ -546,7 +546,7 @@ class TestSinglePrecisionDegrid(unittest.TestCase):
         )
 
         inputs = _make_random_inputs(seed=3)
-        grid128, _ = _run_cpp(inputs, num_threads=1)
+        grid128, _ = _run_cpp(inputs, processing_function_threads=1)
         grid64 = grid128.astype(np.complex64)
 
         n_time, n_baseline, n_vis_chan, n_pol = inputs["vis_data"].shape
@@ -566,7 +566,7 @@ class TestSinglePrecisionDegrid(unittest.TestCase):
                 inputs["delta_lm"],
                 support=SUPPORT,
                 oversampling=OVERSAMPLING,
-                num_threads=1,
+                processing_function_threads=1,
             )
             return vis
 

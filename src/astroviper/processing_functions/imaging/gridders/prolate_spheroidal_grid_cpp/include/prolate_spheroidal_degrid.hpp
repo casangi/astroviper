@@ -46,7 +46,7 @@ void prolate_spheroidal_degrid(
     int n_time, int n_baseline, int n_vis_chan, int n_pol,
     double delta_l, double delta_m,
     int support, int oversampling,
-    int num_threads
+    int processing_function_threads
 );
 
 #define PS_DEGRID_EXTERN(GRIDT, VIST)                                          \

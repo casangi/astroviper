@@ -609,7 +609,7 @@ class TestCubeBasicCorrectness:
             gain=1.0,
             threshold=_plane_threshold(resid, 0.1),
             max_iter=_plane_iters(resid, 10),
-            num_threads=1,
+            processing_function_threads=1,
         )
 
         assert result["iterations_performed"].shape == (nt, nf, npol)
@@ -642,7 +642,7 @@ class TestCubeBasicCorrectness:
             gain=1.0,
             threshold=_plane_threshold(resid, 0.1),
             max_iter=_plane_iters(resid, 10),
-            num_threads=4,
+            processing_function_threads=4,
         )
 
         for (t, f, p), amp in expected_amp.items():
@@ -674,14 +674,14 @@ class TestCubeBasicCorrectness:
             gain=1.0,
             threshold=_plane_threshold(resid, 0.1),
             max_iter=_plane_iters(resid, 10),
-            num_threads=2,
+            processing_function_threads=2,
         )
 
         for p in range(npol):
             assert model[0, 0, p, 8, 8] == pytest.approx(1.0 + p, abs=1e-5)
 
     def test_cube_threading_matches_serial(self):
-        """Serial (num_threads=1) and parallel (num_threads=N) runs must
+        """Serial (processing_function_threads=1) and parallel (processing_function_threads=N) runs must
         produce identical results for deterministic inputs."""
         ny, nx = 24, 24
         nt, nf, npol = 2, 3, 2
@@ -699,7 +699,7 @@ class TestCubeBasicCorrectness:
             gain=0.1,
             threshold=_plane_threshold(resid_a, 0.05),
             max_iter=_plane_iters(resid_a, 30),
-            num_threads=1,
+            processing_function_threads=1,
         )
 
         resid_b = resid0.copy()
@@ -711,7 +711,7 @@ class TestCubeBasicCorrectness:
             gain=0.1,
             threshold=_plane_threshold(resid_b, 0.05),
             max_iter=_plane_iters(resid_b, 30),
-            num_threads=4,
+            processing_function_threads=4,
         )
 
         assert np.array_equal(model_a, model_b)
@@ -739,7 +739,7 @@ class TestCubeBasicCorrectness:
             gain=1.0,
             threshold=_plane_threshold(resid, 0.1),
             max_iter=_plane_iters(resid, 10),
-            num_threads=2,
+            processing_function_threads=2,
         )
 
         assert resid.dtype == np.float64
@@ -775,7 +775,7 @@ class TestCubeInPlaceContract:
             gain=1.0,
             threshold=_plane_threshold(resid, 0.1),
             max_iter=_plane_iters(resid, 5),
-            num_threads=2,
+            processing_function_threads=2,
         )
 
         assert resid.__array_interface__["data"][0] == resid_ptr
@@ -799,7 +799,7 @@ class TestCubeInPlaceContract:
             gain=1.0,
             threshold=_plane_threshold(resid, 0.1),
             max_iter=_plane_iters(resid, 5),
-            num_threads=1,
+            processing_function_threads=1,
         )
 
         assert model[0, 0, 0, 3, 3] == pytest.approx(7.0, abs=1e-6)
@@ -820,7 +820,7 @@ class TestCubeInPlaceContract:
             gain=1.0,
             threshold=_plane_threshold(resid, 0.1),
             max_iter=_plane_iters(resid, 5),
-            num_threads=1,
+            processing_function_threads=1,
         )
 
         assert np.array_equal(psf, psf_before)
@@ -934,7 +934,7 @@ class TestCubeMaskAndBox:
             threshold=_plane_threshold(resid, 0.1),
             max_iter=_plane_iters(resid, 10),
             clean_box=(15, 25, 15, 25),
-            num_threads=1,
+            processing_function_threads=1,
         )
 
         assert resid[0, 0, 0, 5, 5] == pytest.approx(10.0, abs=1e-6)
@@ -967,7 +967,7 @@ class TestCubeMaskAndBox:
             gain=1.0,
             threshold=_plane_threshold(resid, 0.1),
             max_iter=_plane_iters(resid, 10),
-            num_threads=1,
+            processing_function_threads=1,
         )
 
         assert resid[0, 0, 0, 5, 5] == pytest.approx(10.0, abs=1e-6)
@@ -1002,7 +1002,7 @@ class TestCubeReturnShapes:
             gain=1.0,
             threshold=_plane_threshold(resid, 0.01),
             max_iter=_plane_iters(resid, 5),
-            num_threads=2,
+            processing_function_threads=2,
         )
 
         expected_shape = (nt, nf, npol)
@@ -1013,8 +1013,8 @@ class TestCubeReturnShapes:
         assert result["iterations_performed"].dtype.kind == "i"
         assert result["final_peak"].dtype == np.float32
 
-    def test_num_threads_clamped(self):
-        """num_threads larger than the number of planes must be handled."""
+    def test_processing_function_threads_clamped(self):
+        """processing_function_threads larger than the number of planes must be handled."""
         ny, nx = 8, 8
         nt, nf, npol = 1, 1, 1
         resid = _point_sources_cube(nt, nf, npol, ny, nx, {(0, 0, 0): [(4, 4, 1.0)]})
@@ -1029,7 +1029,7 @@ class TestCubeReturnShapes:
             gain=1.0,
             threshold=_plane_threshold(resid, 0.1),
             max_iter=_plane_iters(resid, 5),
-            num_threads=64,
+            processing_function_threads=64,
         )
         assert model[0, 0, 0, 4, 4] == pytest.approx(1.0, abs=1e-6)
 

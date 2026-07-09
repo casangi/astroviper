@@ -102,7 +102,7 @@ def psf_result():
         ms_data_group_in_name="base",
         image_data_group_in_name="residual",
         image_data_group_out_name="residual",
-        num_threads=1,
+        processing_function_threads=1,
         fft_backend="scipy",
         complex_dtype=np.complex128,
     )

@@ -45,7 +45,7 @@ namespace prolate_spheroidal {
  * @param delta_m          Image cell size in m (radians)
  * @param support          Full convolution support width in grid pixels
  * @param oversampling     Oversampling factor of cgk_1D
- * @param num_threads      Number of worker threads. Values <= 0 fall back to
+ * @param processing_function_threads      Number of worker threads. Values <= 0 fall back to
  *                         std::thread::hardware_concurrency(); 1 runs serial.
  */
 template <typename GridT>
@@ -64,7 +64,7 @@ void prolate_spheroidal_grid(
     int n_time, int n_baseline, int n_vis_chan, int n_pol,
     double delta_l, double delta_m,
     int support, int oversampling,
-    int num_threads
+    int processing_function_threads
 );
 
 extern template void prolate_spheroidal_grid<double>(
@@ -105,7 +105,7 @@ void prolate_spheroidal_grid_uv_sampling(
     int n_time, int n_baseline, int n_vis_chan, int n_pol,
     double delta_l, double delta_m,
     int support, int oversampling,
-    int num_threads
+    int processing_function_threads
 );
 
 extern template void prolate_spheroidal_grid_uv_sampling<double>(
