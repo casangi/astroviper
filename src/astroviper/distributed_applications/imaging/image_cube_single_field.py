@@ -126,6 +126,7 @@ def image_cube_single_field(
     reduce_n_batch: int = 2,
     output_shard_channels: int | None = None,
     task_time_kill_switch_seconds: float | None = None,
+    monitor_resources_seconds: float | None = None,
 ):  # -> Tuple[xr.Dataset, ReturnDict]:
     """
     Create a spectral cube.
@@ -303,6 +304,16 @@ def image_cube_single_field(
         aborting the whole distributed computation. Use to fail fast (and capture
         the offending task) when a node hits a pathological I/O / compute stall
         instead of hanging the run. ``None`` (default) disables the watchdog.
+    monitor_resources_seconds : float, optional
+        If set, sample each node task's worker-process CPU / memory / I/O usage
+        every this many seconds (graphviper's
+        :func:`~graphviper.graph_tools.map.monitor_node_task`) and carry the
+        series into ``"timing_node_tasks"`` as list-valued columns
+        (``time_seconds``, ``cpu_percent``, ``memory_rss_bytes`` and, on Linux,
+        ``read_bytes``/``write_bytes``/``read_chars``/``write_chars``) plus the
+        scalar ``sample_interval_seconds``. Per-task attribution is exact only
+        with one concurrent task per worker process. Requires ``psutil``.
+        ``None`` (default) disables monitoring.
     Returns
     -------
     dict
@@ -532,6 +543,7 @@ def image_cube_single_field(
         load_node_input_params={
             "processing_set_data_group_name": processing_set_data_group_name
         },
+        monitor_resources_seconds=monitor_resources_seconds,
     )
 
     reduce_input_params = {}
@@ -666,9 +678,20 @@ def combine_return_data_frames(input_data, input_params):
     deconvolve_dicts = []
 
     for result in input_data:
-        combined_timing = pd.concat(
-            [combined_timing, result["timing_node_tasks"]], ignore_index=True
-        )
+        timing = result["timing_node_tasks"]
+        # graphviper's optional resource monitor (map(monitor_resources_seconds=...))
+        # attaches a top-level "resource_usage" dict-of-series to each LEAF result;
+        # fold it into that leaf's one-row timing frame as list-valued columns so
+        # it survives tree reduction (partially reduced inputs have no such key --
+        # their series are already columns of a multi-row frame).
+        usage = result.get("resource_usage")
+        if usage is not None:
+            timing = timing.copy()
+            for key, value in usage.items():
+                # a list series becomes ONE cell of the single row; scalars
+                # (sample_interval_seconds) broadcast.
+                timing[key] = [value] if isinstance(value, list) else value
+        combined_timing = pd.concat([combined_timing, timing], ignore_index=True)
         deconvolve_dicts.append(result["deconvolution"])
 
     return {
