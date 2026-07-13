@@ -373,3 +373,96 @@ def test_load_processing_set_reconstruction(tmp_path, processing_function_thread
     # drop_auto_correlations: antenna1 != antenna2 keeps the 3 cross-corrs.
     mask = ms["baseline_antenna1_name"] != ms["baseline_antenna2_name"]
     assert int(mask.sum()) == 3
+
+
+# --------------------------------------------------------------------------- #
+# Transient-EIO retry in the sharded pwrite path
+# --------------------------------------------------------------------------- #
+def _make_flaky_pwrite(monkeypatch, fail_first_n, errno_value):
+    """Patch os.pwrite to raise OSError(errno_value) for the first N calls."""
+    import errno as _errno  # noqa: F401
+    import os
+
+    real_pwrite = os.pwrite
+    calls = {"n": 0}
+
+    def flaky(fd, data, offset):
+        calls["n"] += 1
+        if calls["n"] <= fail_first_n:
+            raise OSError(errno_value, "Input/output error")
+        return real_pwrite(fd, data, offset)
+
+    monkeypatch.setattr(os, "pwrite", flaky)
+    return calls
+
+
+def test_pwrite_eio_retry_recovers(tmp_path, monkeypatch):
+    """A transient EIO burst (first two pwrite calls) heals on retry with a
+    fresh fd, and both the blob and its index entry land correctly."""
+    import errno
+    import struct
+
+    from astroviper.node_tasks.imaging.utils.skunk_works import (
+        _pwrite_shard_slot_with_eio_retry,
+    )
+
+    monkeypatch.setattr("time.sleep", lambda s: None)  # no real backoff in tests
+    shard = tmp_path / "c0"
+    shard.write_bytes(b"\0" * 64)
+    calls = _make_flaky_pwrite(monkeypatch, 2, errno.EIO)
+
+    _pwrite_shard_slot_with_eio_retry(str(shard), 0, 32, b"payload!")
+
+    raw = shard.read_bytes()
+    assert raw[:8] == b"payload!"
+    assert struct.unpack("<QQ", raw[32:48]) == (0, 8)
+    assert calls["n"] > 2  # retried past the failures
+
+
+def test_pwrite_eio_retry_exhausts_and_raises(tmp_path, monkeypatch):
+    """Persistent EIO raises after the retry schedule is exhausted."""
+    import errno
+
+    from astroviper.node_tasks.imaging.utils.skunk_works import (
+        _EIO_RETRY_BACKOFF_SECONDS,
+        _pwrite_shard_slot_with_eio_retry,
+    )
+
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    shard = tmp_path / "c0"
+    shard.write_bytes(b"\0" * 64)
+    calls = _make_flaky_pwrite(monkeypatch, 10_000, errno.EIO)
+
+    with pytest.raises(OSError) as excinfo:
+        _pwrite_shard_slot_with_eio_retry(str(shard), 0, 32, b"payload!")
+    assert excinfo.value.errno == errno.EIO
+    # one pwrite attempt per open (the first of the pair fails each time)
+    assert calls["n"] == 1 + len(_EIO_RETRY_BACKOFF_SECONDS)
+
+
+def test_pwrite_non_eio_oserror_propagates_immediately(tmp_path, monkeypatch):
+    """Only EIO is retried; e.g. ENOSPC must fail fast."""
+    import errno
+
+    from astroviper.node_tasks.imaging.utils.skunk_works import (
+        _pwrite_shard_slot_with_eio_retry,
+    )
+
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    shard = tmp_path / "c0"
+    shard.write_bytes(b"\0" * 64)
+    calls = _make_flaky_pwrite(monkeypatch, 10_000, errno.ENOSPC)
+
+    with pytest.raises(OSError) as excinfo:
+        _pwrite_shard_slot_with_eio_retry(str(shard), 0, 32, b"payload!")
+    assert excinfo.value.errno == errno.ENOSPC
+    assert calls["n"] == 1  # no retry
+
+
+def test_pwrite_missing_shard_keeps_actionable_error(tmp_path):
+    from astroviper.node_tasks.imaging.utils.skunk_works import (
+        _pwrite_shard_slot_with_eio_retry,
+    )
+
+    with pytest.raises(FileNotFoundError, match="precreate_sharded_files"):
+        _pwrite_shard_slot_with_eio_retry(str(tmp_path / "missing"), 0, 32, b"x")

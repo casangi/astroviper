@@ -857,6 +857,38 @@ def write_result_chunk_to_disk_sharded_skunk_works(
     # Phase 2: pwrite each inner chunk + its index entry into the shared shard
     # file (serial per task; disjoint offsets across tasks -> concurrency-safe).
     for shard_path, slot_offset, index_offset, blob in encoded:
+        _pwrite_shard_slot_with_eio_retry(shard_path, slot_offset, index_offset, blob)
+
+
+# Transient-EIO retry schedule for the sharded pwrites: seconds to wait before
+# each retry. A Lustre client eviction / OST hiccup fails ALL in-flight I/O of a
+# client with EIO at once (observed 2026-07-12/13: sweep combo 23 and job
+# 7855526, six tasks within 35 ms); the client usually reconnects within
+# seconds, after which a fresh file descriptor works again. Worst case adds
+# ~21 s to the task -- well under the 400 s task watchdog.
+_EIO_RETRY_BACKOFF_SECONDS = (1.0, 5.0, 15.0)
+
+
+def _pwrite_shard_slot_with_eio_retry(shard_path, slot_offset, index_offset, blob):
+    """Write one encoded inner chunk + its Zarr v3 index entry into the shared
+    shard file, retrying transient ``EIO`` with a FRESH file descriptor.
+
+    The reopen is essential: after a Lustre client eviction the old descriptor
+    stays poisoned, so retrying on the same fd cannot succeed. Redoing both
+    pwrites after a partial failure is safe -- same bytes at the same disjoint
+    offsets (idempotent), and the index entry is written last, so a reader
+    never sees an index pointing at an unwritten blob. Only ``EIO`` is
+    retried; every other error propagates immediately.
+    """
+    import errno
+    import time
+
+    import toolviper.utils.logger as logger
+
+    last_exc = None
+    for attempt, delay in enumerate((0.0,) + _EIO_RETRY_BACKOFF_SECONDS):
+        if delay:
+            time.sleep(delay)
         try:
             fd = os.open(shard_path, os.O_WRONLY)  # pre-created; no O_CREAT
         except FileNotFoundError as exc:
@@ -864,8 +896,34 @@ def write_result_chunk_to_disk_sharded_skunk_works(
                 f"shard file {shard_path} not found; precreate_sharded_files must "
                 "run in the driver before the sharded writer."
             ) from exc
+        except OSError as exc:
+            if exc.errno != errno.EIO:
+                raise
+            last_exc = exc
+            logger.warning(
+                f"sharded writer: EIO opening {shard_path} (attempt "
+                f"{attempt + 1}/{1 + len(_EIO_RETRY_BACKOFF_SECONDS)}); retrying."
+            )
+            continue
         try:
             os.pwrite(fd, blob, slot_offset)
             os.pwrite(fd, struct.pack("<QQ", slot_offset, len(blob)), index_offset)
+            if attempt:
+                logger.warning(
+                    f"sharded writer: pwrite to {shard_path} succeeded on "
+                    f"attempt {attempt + 1} after transient EIO."
+                )
+            return
+        except OSError as exc:
+            if exc.errno != errno.EIO:
+                raise
+            last_exc = exc
+            logger.warning(
+                f"sharded writer: EIO writing slot at offset {slot_offset} of "
+                f"{shard_path} (attempt "
+                f"{attempt + 1}/{1 + len(_EIO_RETRY_BACKOFF_SECONDS)}); "
+                "reopening and retrying."
+            )
         finally:
             os.close(fd)
+    raise last_exc
