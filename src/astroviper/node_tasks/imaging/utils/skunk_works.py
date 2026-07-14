@@ -32,6 +32,7 @@ The functions deliberately do not remove or replace the production
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import struct
@@ -238,8 +239,16 @@ def read_array_region(array_path, sel):
     Handles Zarr v3 (sharded and plain) and v2; supports selections spanning
     several chunks / inner chunks (e.g. multiple frequency channels). Returns
     ``(ndarray, dims)``.
+
+    Every filesystem unit (metadata, one shard's index + inner chunks, one
+    plain chunk file) runs under :func:`_retry_transient_io`, so a Lustre
+    client eviction mid-read is retried with a fresh descriptor instead of
+    failing the task (the read-side counterpart of the sharded writer's EIO
+    retry; job 7856457 died on exactly this).
     """
-    meta = _read_array_meta(array_path)
+    meta = _retry_transient_io(
+        f"metadata of {array_path}", lambda: _read_array_meta(array_path)
+    )
     shape, dims, dtype = meta["shape"], meta["dims"], meta["dtype"]
     oc = meta["outer_chunks"]
     nd = len(shape)
@@ -274,23 +283,34 @@ def read_array_region(array_path, sel):
 
         for shard_index, items in by_shard.items():
             path = _chunk_path(array_path, meta, shard_index)
-            if not os.path.exists(path):
-                for _within, out_sl, _in_sl in items:
-                    out[out_sl] = fill
-                continue
-            fd = os.open(path, os.O_RDONLY)
-            try:
-                offsets = _read_shard_index(
-                    fd, os.fstat(fd).st_size, meta, inner_per_shard
-                )
-                for within, out_sl, in_sl in items:
-                    flat = int(np.ravel_multi_index(within, inner_per_shard))
-                    arr = _read_inner_chunk(
-                        fd, offsets, flat, inner, meta["sharding"], dtype
+
+            # The whole open -> index -> pread unit is one retryable action so
+            # every attempt gets a fresh descriptor. A truly absent shard
+            # (never written -> all fill) is detected via the open's ENOENT,
+            # NOT an os.path.exists pre-check: exists() reports False on ANY
+            # error, so during an eviction window it would silently turn real
+            # data into fill values.
+            def _read_shard(path=path, items=items):
+                try:
+                    fd = os.open(path, os.O_RDONLY)
+                except FileNotFoundError:
+                    for _within, out_sl, _in_sl in items:
+                        out[out_sl] = fill
+                    return
+                try:
+                    offsets = _read_shard_index(
+                        fd, os.fstat(fd).st_size, meta, inner_per_shard
                     )
-                    out[out_sl] = fill if arr is None else arr[in_sl]
-            finally:
-                os.close(fd)
+                    for within, out_sl, in_sl in items:
+                        flat = int(np.ravel_multi_index(within, inner_per_shard))
+                        arr = _read_inner_chunk(
+                            fd, offsets, flat, inner, meta["sharding"], dtype
+                        )
+                        out[out_sl] = fill if arr is None else arr[in_sl]
+                finally:
+                    os.close(fd)
+
+            _retry_transient_io(f"shard {path}", _read_shard)
         return out, dims
 
     per_axis = [
@@ -300,11 +320,20 @@ def read_array_region(array_path, sel):
         ci = tuple(c[0] for c in combo)
         out_sl = tuple(slice(c[3], c[4]) for c in combo)
         path = _chunk_path(array_path, meta, ci)
-        if not os.path.exists(path):
+
+        # Absent chunk (never written) detected via ENOENT, not an exists()
+        # pre-check -- see the sharded branch for why.
+        def _read_chunk(path=path):
+            try:
+                with open(path, "rb") as fh:
+                    return fh.read()
+            except FileNotFoundError:
+                return None
+
+        raw = _retry_transient_io(f"chunk {path}", _read_chunk)
+        if raw is None:
             out[out_sl] = fill
             continue
-        with open(path, "rb") as fh:
-            raw = fh.read()
         arr = _decode_unit(raw, oc, dtype, meta)
         out[out_sl] = arr[tuple(slice(c[1], c[2]) for c in combo)]
     return out, dims
@@ -860,13 +889,61 @@ def write_result_chunk_to_disk_sharded_skunk_works(
         _pwrite_shard_slot_with_eio_retry(shard_path, slot_offset, index_offset, blob)
 
 
-# Transient-EIO retry schedule for the sharded pwrites: seconds to wait before
-# each retry. A Lustre client eviction / OST hiccup fails ALL in-flight I/O of a
-# client with EIO at once (observed 2026-07-12/13: sweep combo 23 and job
-# 7855526, six tasks within 35 ms); the client usually reconnects within
-# seconds, after which a fresh file descriptor works again. Worst case adds
-# ~21 s to the task -- well under the 400 s task watchdog.
+# Transient-I/O retry schedule for the direct chunk reads and sharded pwrites:
+# seconds to wait before each retry. A Lustre client eviction / OST hiccup
+# fails ALL in-flight I/O of a client at once (observed 2026-07-12/13: sweep
+# combo 23 and job 7855526, six tasks within 35 ms); the client usually
+# reconnects within seconds, after which a fresh file descriptor works again.
+# Worst case adds ~21 s to the task -- well under the 400 s task watchdog.
 _EIO_RETRY_BACKOFF_SECONDS = (1.0, 5.0, 15.0)
+
+# Errnos an eviction surfaces as: EIO is the classic one (the writes of job
+# 7855526); ESHUTDOWN (108, "Cannot send after transport endpoint shutdown")
+# is what in-flight preads got when the client was evicted mid-read (job
+# 7856457); ENOTCONN is its close sibling. Everything else (ENOENT, EACCES,
+# ...) is a real error and propagates immediately.
+_TRANSIENT_IO_ERRNOS = frozenset({errno.EIO, errno.ESHUTDOWN, errno.ENOTCONN})
+
+
+def _retry_transient_io(description, func):
+    """Run ``func()`` -- one self-contained open->read->close unit -- retrying
+    the transient Lustre errnos above with the shared backoff schedule.
+
+    ``func`` MUST open its own fresh file descriptor on every call: after a
+    client eviction the old descriptor stays poisoned, so the reopen is what
+    makes the retry effective (same reason the sharded writer reopens).
+    ``func`` must also be idempotent -- redoing the whole unit is safe for
+    reads. Returns ``func()``'s value; raises the last transient error when
+    the schedule is exhausted.
+    """
+    import time
+
+    import toolviper.utils.logger as logger
+
+    n_attempts = 1 + len(_EIO_RETRY_BACKOFF_SECONDS)
+    last_exc = None
+    for attempt, delay in enumerate((0.0,) + _EIO_RETRY_BACKOFF_SECONDS):
+        if delay:
+            time.sleep(delay)
+        try:
+            result = func()
+        except OSError as exc:
+            if exc.errno not in _TRANSIENT_IO_ERRNOS:
+                raise
+            last_exc = exc
+            logger.warning(
+                f"skunk-works reader: transient "
+                f"{errno.errorcode.get(exc.errno, exc.errno)} on {description} "
+                f"(attempt {attempt + 1}/{n_attempts}); reopening and retrying."
+            )
+            continue
+        if attempt:
+            logger.warning(
+                f"skunk-works reader: {description} succeeded on attempt "
+                f"{attempt + 1} after transient I/O error."
+            )
+        return result
+    raise last_exc
 
 
 def _pwrite_shard_slot_with_eio_retry(shard_path, slot_offset, index_offset, blob):
@@ -877,10 +954,10 @@ def _pwrite_shard_slot_with_eio_retry(shard_path, slot_offset, index_offset, blo
     stays poisoned, so retrying on the same fd cannot succeed. Redoing both
     pwrites after a partial failure is safe -- same bytes at the same disjoint
     offsets (idempotent), and the index entry is written last, so a reader
-    never sees an index pointing at an unwritten blob. Only ``EIO`` is
-    retried; every other error propagates immediately.
+    never sees an index pointing at an unwritten blob. Only the transient
+    eviction errnos (``_TRANSIENT_IO_ERRNOS``) are retried; every other error
+    propagates immediately.
     """
-    import errno
     import time
 
     import toolviper.utils.logger as logger
@@ -897,11 +974,12 @@ def _pwrite_shard_slot_with_eio_retry(shard_path, slot_offset, index_offset, blo
                 "run in the driver before the sharded writer."
             ) from exc
         except OSError as exc:
-            if exc.errno != errno.EIO:
+            if exc.errno not in _TRANSIENT_IO_ERRNOS:
                 raise
             last_exc = exc
             logger.warning(
-                f"sharded writer: EIO opening {shard_path} (attempt "
+                f"sharded writer: {errno.errorcode.get(exc.errno, exc.errno)} "
+                f"opening {shard_path} (attempt "
                 f"{attempt + 1}/{1 + len(_EIO_RETRY_BACKOFF_SECONDS)}); retrying."
             )
             continue
@@ -911,16 +989,16 @@ def _pwrite_shard_slot_with_eio_retry(shard_path, slot_offset, index_offset, blo
             if attempt:
                 logger.warning(
                     f"sharded writer: pwrite to {shard_path} succeeded on "
-                    f"attempt {attempt + 1} after transient EIO."
+                    f"attempt {attempt + 1} after transient I/O error."
                 )
             return
         except OSError as exc:
-            if exc.errno != errno.EIO:
+            if exc.errno not in _TRANSIENT_IO_ERRNOS:
                 raise
             last_exc = exc
             logger.warning(
-                f"sharded writer: EIO writing slot at offset {slot_offset} of "
-                f"{shard_path} (attempt "
+                f"sharded writer: {errno.errorcode.get(exc.errno, exc.errno)} "
+                f"writing slot at offset {slot_offset} of {shard_path} (attempt "
                 f"{attempt + 1}/{1 + len(_EIO_RETRY_BACKOFF_SECONDS)}); "
                 "reopening and retrying."
             )

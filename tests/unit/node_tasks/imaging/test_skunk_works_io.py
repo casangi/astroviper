@@ -10,6 +10,10 @@ set from the chunk blobs alone.
 
 from __future__ import annotations
 
+import errno
+import os
+import time
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -133,6 +137,94 @@ def test_read_v2_multichannel(tmp_path):
     got, dims = read_array_region(path, {"frequency": slice(1, 3)})
     assert dims == list(DIMS)
     assert _equal(got, data[:, :, 1:3, :])
+
+
+# --------------------------------------------------------------------------- #
+# Transient-I/O (Lustre client eviction) retry in the reader
+# --------------------------------------------------------------------------- #
+def _sharded_store(tmp_path):
+    shape = (3, 5, 4, 2)
+    data = np.random.default_rng(7).standard_normal(shape).astype("<f4")
+    path = str(tmp_path / "EV")
+    arr = zarr.create_array(
+        path,
+        shape=shape,
+        chunks=(3, 5, 1, 2),
+        shards=(3, 5, 4, 2),
+        dtype="float32",
+        dimension_names=DIMS,
+        compressors=zarr.codecs.ZstdCodec(),
+    )
+    arr[:] = data
+    return path, data
+
+
+def test_read_retries_transient_eviction(tmp_path, monkeypatch):
+    """First preads fail like an in-flight read on an evicted Lustre client
+    (ESHUTDOWN -- the job 7856457 failure mode); the reader must reopen,
+    retry, and still return the correct data."""
+    path, data = _sharded_store(tmp_path)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    real_pread = os.pread
+    fails = {"n": 2}
+
+    def flaky_pread(fd, n, off):
+        if fails["n"] > 0:
+            fails["n"] -= 1
+            raise OSError(
+                errno.ESHUTDOWN, "Cannot send after transport endpoint shutdown"
+            )
+        return real_pread(fd, n, off)
+
+    monkeypatch.setattr(os, "pread", flaky_pread)
+    got, _ = read_array_region(path, {"frequency": slice(0, 4)})
+    assert fails["n"] == 0
+    assert _equal(got, data)
+
+
+def test_read_retry_exhaustion_raises(tmp_path, monkeypatch):
+    """A persistent EIO (client never reconnects) exhausts the schedule and
+    surfaces the original error."""
+    path, _ = _sharded_store(tmp_path)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    monkeypatch.setattr(
+        os,
+        "pread",
+        lambda fd, n, off: (_ for _ in ()).throw(OSError(errno.EIO, "I/O error")),
+    )
+    with pytest.raises(OSError) as excinfo:
+        read_array_region(path, {"frequency": slice(0, 4)})
+    assert excinfo.value.errno == errno.EIO
+
+
+def test_read_non_transient_errno_propagates_immediately(tmp_path, monkeypatch):
+    """Non-eviction errnos (here EBADF) must not be retried or slept on."""
+    path, _ = _sharded_store(tmp_path)
+    calls = {"n": 0}
+
+    def bad_pread(fd, n, off):
+        calls["n"] += 1
+        raise OSError(errno.EBADF, "Bad file descriptor")
+
+    monkeypatch.setattr(os, "pread", bad_pread)
+    slept = []
+    monkeypatch.setattr(time, "sleep", lambda s: slept.append(s))
+    with pytest.raises(OSError):
+        read_array_region(path, {"frequency": slice(0, 4)})
+    assert calls["n"] == 1 and not slept
+
+
+def test_read_missing_shard_still_fills(tmp_path):
+    """Absent chunk blobs are now detected via the open's ENOENT (not an
+    os.path.exists pre-check); a never-written shard must still read as the
+    fill value."""
+    path, _ = _sharded_store(tmp_path)
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            if f != "zarr.json":
+                os.remove(os.path.join(root, f))
+    got, _ = read_array_region(path, {"frequency": slice(0, 4)})
+    assert _equal(got, np.zeros_like(got))
 
 
 # --------------------------------------------------------------------------- #
