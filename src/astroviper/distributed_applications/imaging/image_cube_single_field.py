@@ -526,6 +526,19 @@ def image_cube_single_field(
         k: v for k, v in image_params.items() if k != "frequency_coords"
     }
 
+    # Sharded output: dispatch the tasks in shard-interleaved "waves" (each wave
+    # touches every shard file once) so the concurrently running tasks write to
+    # all shard files -- and hence all Lustre OSTs -- instead of piling onto the
+    # few shards that consecutive task_ids share. Derived from the on-disk shard
+    # layout of the first kept variable, for any combination of sharded dims.
+    task_priorities = None
+    if skunk_works and output_shard_channels:
+        from astroviper.node_tasks.imaging.utils import compute_shard_task_priorities
+
+        task_priorities = compute_shard_task_priorities(
+            image_store, image_data_variables_keep[0], node_task_data_mapping
+        )
+
     # Create Map Graph. The node task has an explicit, NumPy-documented,
     # standalone signature; graphviper's map() adapts it to the single
     # ``input_params`` dict calling convention automatically (forwarding only the
@@ -544,6 +557,7 @@ def image_cube_single_field(
             "processing_set_data_group_name": processing_set_data_group_name
         },
         monitor_resources_seconds=monitor_resources_seconds,
+        task_priorities=task_priorities,
     )
 
     reduce_input_params = {}

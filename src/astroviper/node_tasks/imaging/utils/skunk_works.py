@@ -1005,3 +1005,252 @@ def _pwrite_shard_slot_with_eio_retry(shard_path, slot_offset, index_offset, blo
         finally:
             os.close(fd)
     raise last_exc
+
+
+# ---------------------------------------------------------------------------
+# Shard-aware task scheduling priorities (spread concurrent writers over
+# shards, and hence over OSTs) + shard -> OST placement diagnostic
+# ---------------------------------------------------------------------------
+
+
+def compute_shard_task_priorities(image_store, data_variable, node_task_data_mapping):
+    """Per-task scheduling priorities that spread concurrently running tasks
+    across shard files (higher priority = dispatched earlier).
+
+    With the sharded writer, every task whose chunk falls in the same shard
+    file writes to the same Lustre OST (shard files are created stripe-1).
+    Dispatching tasks in plain task_id order concentrates all in-flight tasks
+    on a handful of consecutive shards -- a few hot OSTs while the rest sit
+    idle. These priorities order the tasks in "waves" instead: consecutive
+    priorities step through EVERY shard once before revisiting one, so at any
+    instant the in-flight tasks are spread over all shard files/OSTs:
+
+        rank(task)     = flat(within-shard index) * n_shards + flat(shard index)
+        priority(task) = -rank
+
+    (Negated so the first wave keeps Dask's default priority 0 and task_id
+    order breaks ties.) The shard layout is read from the variable's own
+    on-disk Zarr v3 metadata, and the task -> inner-chunk mapping uses the same
+    arithmetic as the sharded writer (``task_coords[dim]["slice"].start //
+    inner_chunk`` on every array axis), so the priorities agree with where the
+    writer will actually write for ANY combination of sharded dimensions --
+    nothing here is specific to frequency.
+
+    Parameters
+    ----------
+    image_store : str
+        Path of the (already created) on-disk Zarr image store.
+    data_variable : str
+        Logical image-variable key (e.g. ``"sky_residual"``); upper-cased to
+        the on-disk array name exactly like the writers. Its shard layout
+        stands in for all kept variables (they share the same layout on the
+        parallel dims).
+    node_task_data_mapping : dict
+        ``{task_id: {"task_coords": {dim: {"slice": slice, ...}}, ...}}`` as
+        produced by graphviper's
+        ``interpolate_data_coords_onto_parallel_coords``.
+
+    Returns
+    -------
+    dict or None
+        ``{task_id: int}`` suitable for graphviper's
+        ``map(task_priorities=...)``, or None when the variable is not sharded
+        (no reordering to do).
+    """
+    array_path = os.path.join(image_store, data_variable.upper())
+    meta = _read_array_meta(array_path)
+    if meta.get("sharding") is None:
+        return None
+
+    inner = meta["sharding"]["chunk_shape"]
+    ips, _ = _shard_inner_per_shard(meta)  # inner chunks per shard, per axis
+    dims = meta["dims"]
+    n_shards_per_axis = tuple(
+        -(-meta["shape"][ax] // meta["outer_chunks"][ax]) for ax in range(len(dims))
+    )
+    n_shards = int(np.prod(n_shards_per_axis))
+
+    priorities = {}
+    for task_id, task_params in node_task_data_mapping.items():
+        task_coords = task_params["task_coords"]
+        shard_index, within = [], []
+        for ax, dim in enumerate(dims):
+            if dim in task_coords and isinstance(task_coords[dim].get("slice"), slice):
+                start = task_coords[dim]["slice"].start or 0
+                g = start // inner[ax]
+            else:
+                g = 0
+            shard_index.append(g // ips[ax])
+            within.append(g % ips[ax])
+        flat_within = int(np.ravel_multi_index(within, ips))
+        flat_shard = int(np.ravel_multi_index(shard_index, n_shards_per_axis))
+        priorities[task_id] = -(flat_within * n_shards + flat_shard)
+    return priorities
+
+
+def _parse_lfs_getstripe(text, paths):
+    """Parse ``lfs getstripe <file> ...`` output into
+    ``{path: {"stripe_count": int or None, "ost_indices": [int, ...]}}``.
+
+    Handles the classic per-file layout report: the file's path on its own
+    line, ``lmm_stripe_count:  N``, then an ``obdidx objid objid group`` table
+    with one indented row per stripe whose first token is the OST index. Only
+    lines matching a requested path start a new file block; unrecognized lines
+    are ignored, so layout/version variations degrade to partial info rather
+    than a parse error.
+    """
+    wanted = set(paths)
+    result = {}
+    current = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line in wanted:
+            current = {"stripe_count": None, "ost_indices": []}
+            result[line] = current
+            continue
+        if current is None or not line:
+            continue
+        if line.startswith("lmm_stripe_count:"):
+            # PFL/composite layouts print one lmm_stripe_count PER component;
+            # keep the first (the instantiated head component), not the last.
+            if current["stripe_count"] is None:
+                try:
+                    current["stripe_count"] = int(line.split(":", 1)[1])
+                except ValueError:
+                    pass
+        elif raw[:1].isspace():
+            tokens = line.split()
+            # obdidx table row: indented, first token is the (integer) OST index.
+            if len(tokens) >= 2 and tokens[0].isdigit():
+                current["ost_indices"].append(int(tokens[0]))
+            elif "l_ost_idx:" in tokens:
+                # PFL/composite object row: '- 0: { l_ost_idx: 5, l_fid: ... }'.
+                nxt = tokens.index("l_ost_idx:") + 1
+                if nxt < len(tokens):
+                    try:
+                        current["ost_indices"].append(int(tokens[nxt].rstrip(",}")))
+                    except ValueError:
+                        pass
+    return result
+
+
+def record_shard_ost_map(zarr_store, array_names, out_path=None):
+    """Record which Lustre OST holds each shard file of the given sharded
+    arrays and save the table as its own feather DataFrame.
+
+    Run in the driver right after :func:`precreate_sharded_files`: with
+    stripe-count 1 every shard file lives on exactly ONE OST, chosen by
+    Lustre's weighted round-robin allocator with NO distinctness guarantee --
+    two shards on one OST halve that OST's share of the write bandwidth. This
+    table is the instrument for checking the actual placement and for joining
+    per-task write times to OSTs in the benchmark analysis (task chunk ->
+    shard -> OST).
+
+    Best-effort by design: on hosts without Lustre (no ``lfs`` on PATH) or
+    when ``lfs getstripe`` yields nothing usable, it logs and returns None
+    without writing anything.
+
+    Parameters
+    ----------
+    zarr_store : str
+        Path of the image store holding the arrays.
+    array_names : list of str
+        On-disk array names (e.g. ``["SKY_RESIDUAL", "PRIMARY_BEAM"]``) whose
+        shard files to record; non-sharded arrays are skipped.
+    out_path : str, optional
+        Feather file to write; default ``<zarr_store>_shard_osts.ft`` (a
+        SIBLING of the store, so readers of the store never encounter a
+        foreign file inside it, and the benchmark harness can find it from
+        the store path alone).
+
+    Returns
+    -------
+    pandas.DataFrame or None
+        Columns ``variable``, ``shard_file`` (path relative to the store),
+        ``shard_index`` (per-axis shard indices), ``ost_index`` (first/only
+        OST, nullable), ``ost_indices`` (all OSTs of the file), and
+        ``stripe_count``; or None when nothing could be recorded.
+    """
+    import shutil
+    import subprocess
+
+    import pandas as pd
+    import toolviper.utils.logger as logger
+
+    if shutil.which("lfs") is None:
+        logger.info(
+            "record_shard_ost_map: 'lfs' not found (not a Lustre filesystem?); "
+            "skipping shard->OST recording."
+        )
+        return None
+
+    rows, abs_paths = [], []
+    for name in array_names:
+        array_path = os.path.join(zarr_store, name)
+        meta = _read_array_meta(array_path)
+        if meta.get("sharding") is None:
+            continue
+        n_shards = tuple(
+            -(-meta["shape"][ax] // meta["outer_chunks"][ax])
+            for ax in range(len(meta["shape"]))
+        )
+        for shard_index in product(*[range(n) for n in n_shards]):
+            path = _chunk_path(array_path, meta, shard_index)
+            abs_paths.append(path)
+            rows.append(
+                {
+                    "variable": name,
+                    "shard_file": os.path.relpath(path, zarr_store),
+                    "shard_index": list(shard_index),
+                }
+            )
+    if not rows:
+        logger.info("record_shard_ost_map: no sharded arrays found; nothing to record.")
+        return None
+
+    try:
+        proc = subprocess.run(
+            ["lfs", "getstripe"] + abs_paths,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except Exception as exc:
+        logger.warning(f"record_shard_ost_map: lfs getstripe failed ({exc}); skipping.")
+        return None
+    # getstripe exits nonzero if ANY path failed; still parse what it printed.
+    stripe_info = _parse_lfs_getstripe(proc.stdout, abs_paths)
+    if not stripe_info:
+        logger.warning(
+            "record_shard_ost_map: could not parse any layout from lfs getstripe "
+            f"(rc={proc.returncode}); skipping."
+        )
+        return None
+
+    for row, path in zip(rows, abs_paths):
+        info = stripe_info.get(path, {})
+        osts = info.get("ost_indices", [])
+        row["ost_index"] = osts[0] if osts else None
+        row["ost_indices"] = osts
+        row["stripe_count"] = info.get("stripe_count")
+
+    df = pd.DataFrame(rows)
+    df["ost_index"] = df["ost_index"].astype("Int64")
+    df["stripe_count"] = df["stripe_count"].astype("Int64")
+
+    ost_counts = df["ost_index"].value_counts()
+    if len(ost_counts):
+        logger.info(
+            f"record_shard_ost_map: {len(df)} shard files on "
+            f"{len(ost_counts)} distinct OSTs (most-loaded OST holds "
+            f"{int(ost_counts.iloc[0])} shard files)."
+        )
+
+    if out_path is None:
+        out_path = zarr_store.rstrip("/") + "_shard_osts.ft"
+    try:
+        df.to_feather(out_path)
+        logger.info(f"record_shard_ost_map: wrote shard->OST table to {out_path}")
+    except Exception as exc:
+        logger.warning(f"record_shard_ost_map: could not write {out_path} ({exc}).")
+    return df

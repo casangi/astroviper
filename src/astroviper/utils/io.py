@@ -403,9 +403,25 @@ def create_empty_data_variables_on_disk(
     if sharded:
         # Pre-create every shard file (sparse, empty index) ONCE here in the driver
         # so the concurrent write phase creates no files (metadata-server relief).
-        from astroviper.node_tasks.imaging.utils import precreate_sharded_files
+        from astroviper.node_tasks.imaging.utils import (
+            precreate_sharded_files,
+            record_shard_ost_map,
+        )
 
         for dv in data_variables:
             precreate_sharded_files(
                 os.path.join(zarr_store, data_variable_definitions[dv]["name"])
             )
+
+        # Record which OST each freshly created shard file landed on (Lustre's
+        # allocator gives no distinctness guarantee); saved as a sibling
+        # feather of the store. Best-effort: must never fail the imaging run.
+        try:
+            record_shard_ost_map(
+                zarr_store,
+                [data_variable_definitions[dv]["name"] for dv in data_variables],
+            )
+        except Exception as exc:
+            import toolviper.utils.logger as logger
+
+            logger.warning(f"record_shard_ost_map failed ({exc}); continuing.")

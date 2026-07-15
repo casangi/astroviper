@@ -558,3 +558,172 @@ def test_pwrite_missing_shard_keeps_actionable_error(tmp_path):
 
     with pytest.raises(FileNotFoundError, match="precreate_sharded_files"):
         _pwrite_shard_slot_with_eio_retry(str(tmp_path / "missing"), 0, 32, b"x")
+
+
+# --------------------------------------------------------------------------- #
+# Shard-aware task priorities
+# --------------------------------------------------------------------------- #
+def test_compute_shard_task_priorities_wave_order(tmp_path):
+    """6 single-channel chunks, 2 channels/shard -> 3 shards (ips=2). Ranks must
+    interleave shards: rank = within * n_shards + shard, priority = -rank, so
+    the dispatch order (descending priority) steps through every shard once
+    before revisiting one -- exactly the writer's shard arithmetic."""
+    from astroviper.node_tasks.imaging.utils import compute_shard_task_priorities
+
+    freq_chunks = [[c] for c in range(6)]
+    store = _make_image_store(tmp_path, None, freq_chunks, shard_channels=2)
+
+    node_task_data_mapping = {
+        i: {"task_coords": {"frequency": {"slice": slice(i, i + 1), "data": [i]}}}
+        for i in range(6)
+    }
+    priorities = compute_shard_task_priorities(
+        store, "sky_residual", node_task_data_mapping
+    )
+    # task i: shard = i // 2, within = i % 2, rank = (i % 2) * 3 + i // 2.
+    assert priorities == {0: 0, 1: -3, 2: -1, 3: -4, 4: -2, 5: -5}
+    # Dispatch order (higher priority first): each wave of 3 hits all 3 shards.
+    order = sorted(priorities, key=lambda t: -priorities[t])
+    assert order == [0, 2, 4, 1, 3, 5]
+    shards_first_wave = {t // 2 for t in order[:3]}
+    assert shards_first_wave == {0, 1, 2}
+
+
+def test_compute_shard_task_priorities_unsharded_returns_none(tmp_path):
+    """A plain (non-sharded) array has no shard layout -> None (no reordering)."""
+    from astroviper.node_tasks.imaging.utils import compute_shard_task_priorities
+
+    freq_chunks = [[c] for c in range(4)]
+    store = _make_image_store(tmp_path, None, freq_chunks, shard_channels=None)
+    mapping = {
+        i: {"task_coords": {"frequency": {"slice": slice(i, i + 1)}}} for i in range(4)
+    }
+    assert compute_shard_task_priorities(store, "sky_residual", mapping) is None
+
+
+# --------------------------------------------------------------------------- #
+# Shard -> OST recording (lfs getstripe)
+# --------------------------------------------------------------------------- #
+def _fake_getstripe_output(paths, ost_of):
+    """Canonical ``lfs getstripe`` layout report for each path."""
+    blocks = []
+    for p in paths:
+        ost = ost_of(p)
+        blocks.append(
+            f"{p}\n"
+            "lmm_stripe_count:  1\n"
+            "lmm_stripe_size:   1048576\n"
+            "lmm_pattern:       raid0\n"
+            "lmm_layout_gen:    0\n"
+            f"lmm_stripe_offset: {ost}\n"
+            "\tobdidx\t\t objid\t\t objid\t\t group\n"
+            f"\t    {ost}\t      1234567\t    0x12d687\t             0\n"
+        )
+    return "\n".join(blocks)
+
+
+def test_parse_lfs_getstripe():
+    from astroviper.node_tasks.imaging.utils.skunk_works import _parse_lfs_getstripe
+
+    paths = ["/scratch/store/VAR/c/0/0", "/scratch/store/VAR/c/0/1"]
+    text = _fake_getstripe_output(paths, ost_of=lambda p: 40 + int(p[-1]))
+    parsed = _parse_lfs_getstripe(text, paths)
+    assert parsed == {
+        paths[0]: {"stripe_count": 1, "ost_indices": [40]},
+        paths[1]: {"stripe_count": 1, "ost_indices": [41]},
+    }
+
+
+def test_record_shard_ost_map(tmp_path, monkeypatch):
+    """With a fake ``lfs``: one row per pre-created shard file per sharded
+    variable, OSTs parsed from getstripe, saved as the sibling feather."""
+    import subprocess
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from astroviper.node_tasks.imaging.utils import record_shard_ost_map
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[:2] == ["lfs", "getstripe"]
+        # Deterministic OST per file: its index in the argument list, mod 4.
+        ost_of = {p: i % 4 for i, p in enumerate(cmd[2:])}
+        return SimpleNamespace(
+            returncode=0,
+            stdout=_fake_getstripe_output(cmd[2:], ost_of=ost_of.get),
+            stderr="",
+        )
+
+    # Patch BEFORE creating the store: create_empty_data_variables_on_disk
+    # itself calls record_shard_ost_map after pre-creating the shard files, and
+    # on a real Lustre host that call would otherwise use the real lfs.
+    monkeypatch.setattr("shutil.which", lambda name: "/fake/lfs")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    nfreq, shard = 5, 2  # ceil(5/2) = 3 shard files per variable
+    freq_chunks = [[c] for c in range(nfreq)]
+    variables = ["sky_residual", "point_spread_function"]
+    store = _make_image_store(
+        tmp_path, None, freq_chunks, variables, shard_channels=shard
+    )
+
+    df = record_shard_ost_map(store, ["SKY_RESIDUAL", "POINT_SPREAD_FUNCTION"])
+    assert df is not None
+    assert sorted(df["variable"].unique()) == ["POINT_SPREAD_FUNCTION", "SKY_RESIDUAL"]
+    assert len(df) == 6  # 3 shard files x 2 variables
+    assert df["ost_index"].tolist() == [0, 1, 2, 3, 0, 1]
+    assert (df["stripe_count"] == 1).all()
+    # Shard indices enumerate the frequency-axis shard grid (axis 1 of 5 axes).
+    freq_shard_indices = [
+        si[1] for si in df[df["variable"] == "SKY_RESIDUAL"]["shard_index"]
+    ]
+    assert freq_shard_indices == [0, 1, 2]
+    # Saved as a sibling feather of the store, round-trippable.
+    sibling = store.rstrip("/") + "_shard_osts.ft"
+    assert os.path.exists(sibling)
+    back = pd.read_feather(sibling)
+    assert back["ost_index"].tolist() == [0, 1, 2, 3, 0, 1]
+
+
+def test_record_shard_ost_map_without_lfs(tmp_path, monkeypatch):
+    """No ``lfs`` on PATH (any non-Lustre host) -> returns None, writes nothing."""
+    from astroviper.node_tasks.imaging.utils import record_shard_ost_map
+
+    # Patch BEFORE creating the store (store creation triggers the io-level
+    # record_shard_ost_map call, which on a Lustre host would write the sibling).
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    freq_chunks = [[c] for c in range(4)]
+    store = _make_image_store(tmp_path, None, freq_chunks, shard_channels=2)
+    assert record_shard_ost_map(store, ["SKY_RESIDUAL"]) is None
+    assert not os.path.exists(store.rstrip("/") + "_shard_osts.ft")
+
+
+def test_parse_lfs_getstripe_composite_pfl_layout():
+    """PFL/composite output: OSTs live in ``l_ost_idx:`` object rows and
+    ``lmm_stripe_count`` appears once per component (first one must win)."""
+    from astroviper.node_tasks.imaging.utils.skunk_works import _parse_lfs_getstripe
+
+    path = "/scratch/store/VAR/c/0/0"
+    text = (
+        f"{path}\n"
+        "  lcm_layout_gen:    3\n"
+        "  lcm_mirror_count:  1\n"
+        "  lcm_entry_count:   2\n"
+        "    lcme_id:             1\n"
+        "    lcme_extent.e_start: 0\n"
+        "      lmm_stripe_count:  1\n"
+        "      lmm_stripe_size:   1048576\n"
+        "      lmm_pattern:       raid0\n"
+        "      lmm_stripe_offset: 5\n"
+        "      lmm_objects:\n"
+        "      - 0: { l_ost_idx: 5, l_fid: [0x100050000:0x20f0:0x0] }\n"
+        "    lcme_id:             2\n"
+        "    lcme_extent.e_start: 1073741824\n"
+        "      lmm_stripe_count:  4\n"
+        "      lmm_stripe_size:   1048576\n"
+        "      lmm_pattern:       raid0\n"
+        "      lmm_stripe_offset: -1\n"
+    )
+    parsed = _parse_lfs_getstripe(text, [path])
+    assert parsed[path]["ost_indices"] == [5]
+    assert parsed[path]["stripe_count"] == 1

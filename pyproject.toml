@@ -74,7 +74,8 @@ all = [
   "pandoc",
   "pre-commit",
   "nbstripout",
-  "memory_profiler"
+  "memory_profiler",
+  "bokeh"
 ]
 
 [build-system]
