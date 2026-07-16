@@ -954,9 +954,12 @@ def _pwrite_shard_slot_with_eio_retry(shard_path, slot_offset, index_offset, blo
     stays poisoned, so retrying on the same fd cannot succeed. Redoing both
     pwrites after a partial failure is safe -- same bytes at the same disjoint
     offsets (idempotent), and the index entry is written last, so a reader
-    never sees an index pointing at an unwritten blob. Only the transient
-    eviction errnos (``_TRANSIENT_IO_ERRNOS``) are retried; every other error
-    propagates immediately.
+    never sees an index pointing at an unwritten blob. The ``os.close`` is part
+    of the retried unit too: an eviction can surface a failed writeback as EIO
+    at close() after apparently-successful pwrites (observed: Frontera job
+    7860369), and then the data may not be durable. Only the transient eviction
+    errnos (``_TRANSIENT_IO_ERRNOS``) are retried; every other error propagates
+    immediately.
     """
     import time
 
@@ -986,24 +989,38 @@ def _pwrite_shard_slot_with_eio_retry(shard_path, slot_offset, index_offset, blo
         try:
             os.pwrite(fd, blob, slot_offset)
             os.pwrite(fd, struct.pack("<QQ", slot_offset, len(blob)), index_offset)
-            if attempt:
-                logger.warning(
-                    f"sharded writer: pwrite to {shard_path} succeeded on "
-                    f"attempt {attempt + 1} after transient I/O error."
-                )
-            return
         except OSError as exc:
-            if exc.errno not in _TRANSIENT_IO_ERRNOS:
-                raise
-            last_exc = exc
-            logger.warning(
-                f"sharded writer: {errno.errorcode.get(exc.errno, exc.errno)} "
-                f"writing slot at offset {slot_offset} of {shard_path} (attempt "
-                f"{attempt + 1}/{1 + len(_EIO_RETRY_BACKOFF_SECONDS)}); "
-                "reopening and retrying."
-            )
-        finally:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                pass  # the write already failed; a close error adds nothing
+            failure = exc
+        else:
+            try:
+                # close() is part of the retried unit: during an eviction
+                # window it can surface a failed writeback as EIO even though
+                # the pwrites above "succeeded", in which case the data may not
+                # be durable and the whole slot write must be redone. Linux
+                # releases the fd even when close() errors, so no second close.
+                os.close(fd)
+            except OSError as exc:
+                failure = exc
+            else:
+                if attempt:
+                    logger.warning(
+                        f"sharded writer: pwrite to {shard_path} succeeded on "
+                        f"attempt {attempt + 1} after transient I/O error."
+                    )
+                return
+        if failure.errno not in _TRANSIENT_IO_ERRNOS:
+            raise failure
+        last_exc = failure
+        logger.warning(
+            f"sharded writer: {errno.errorcode.get(failure.errno, failure.errno)} "
+            f"writing slot at offset {slot_offset} of {shard_path} (attempt "
+            f"{attempt + 1}/{1 + len(_EIO_RETRY_BACKOFF_SECONDS)}); "
+            "reopening and retrying."
+        )
     raise last_exc
 
 

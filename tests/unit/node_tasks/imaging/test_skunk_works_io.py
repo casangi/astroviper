@@ -560,6 +560,69 @@ def test_pwrite_missing_shard_keeps_actionable_error(tmp_path):
         _pwrite_shard_slot_with_eio_retry(str(tmp_path / "missing"), 0, 32, b"x")
 
 
+def _make_flaky_close(monkeypatch, fail_first_n, errno_value):
+    """Patch os.close to ACTUALLY close the fd, then raise OSError for the
+    first N calls — mirroring Linux semantics where a failing close() (e.g. a
+    Lustre writeback EIO after an eviction) still releases the descriptor."""
+    import os
+
+    real_close = os.close
+    calls = {"n": 0}
+
+    def flaky(fd):
+        calls["n"] += 1
+        real_close(fd)
+        if calls["n"] <= fail_first_n:
+            raise OSError(errno_value, "Input/output error")
+
+    monkeypatch.setattr(os, "close", flaky)
+    return calls
+
+
+def test_close_eio_after_successful_pwrites_retries(tmp_path, monkeypatch):
+    """An eviction can surface failed writeback as EIO at close() even though
+    both pwrites succeeded (Frontera job 7860369). The data may not be durable,
+    so the slot write must be redone on a fresh descriptor — not swallowed, and
+    not allowed to escape the retry loop."""
+    import errno
+    import struct
+
+    from astroviper.node_tasks.imaging.utils.skunk_works import (
+        _pwrite_shard_slot_with_eio_retry,
+    )
+
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    shard = tmp_path / "c0"
+    shard.write_bytes(b"\0" * 64)
+    calls = _make_flaky_close(monkeypatch, 1, errno.EIO)
+
+    _pwrite_shard_slot_with_eio_retry(str(shard), 0, 32, b"payload!")
+
+    raw = shard.read_bytes()
+    assert raw[:8] == b"payload!"
+    assert struct.unpack("<QQ", raw[32:48]) == (0, 8)
+    assert calls["n"] == 2  # first close failed transiently; retry's close won
+
+
+def test_close_non_transient_error_propagates_immediately(tmp_path, monkeypatch):
+    """A non-eviction close error (e.g. EDQUOT) must fail fast, not retry."""
+    import errno
+
+    from astroviper.node_tasks.imaging.utils.skunk_works import (
+        _pwrite_shard_slot_with_eio_retry,
+    )
+
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    shard = tmp_path / "c0"
+    shard.write_bytes(b"\0" * 64)
+    calls = _make_flaky_close(monkeypatch, 10_000, errno.EDQUOT)
+
+    with pytest.raises(OSError) as excinfo:
+        _pwrite_shard_slot_with_eio_retry(str(shard), 0, 32, b"payload!")
+    assert excinfo.value.errno == errno.EDQUOT
+    assert calls["n"] == 1  # no retry
+
+
 # --------------------------------------------------------------------------- #
 # Shard-aware task priorities
 # --------------------------------------------------------------------------- #
