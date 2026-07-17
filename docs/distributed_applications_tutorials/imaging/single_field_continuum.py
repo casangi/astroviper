@@ -89,7 +89,7 @@ imaging_weights_params = {
 DIRTY_IMAGE_STORE = "twhya_dirty.img.zarr"
 
 dirty_iteration_control = {
-    "niter": 0,
+    "niter": 100,
     "nmajor": 0,
     "threshold": 0.0,
     "gain": 0.1,
@@ -105,7 +105,7 @@ image_params = image_params
 imaging_weights_params = imaging_weights_params
 iteration_control_params = dirty_iteration_control
 gridder = "prolate_spheroidal"
-deconvolver = "hogbom_many_threads"
+deconvolver = "hogbom"
 scan_intents = "OBSERVE_TARGET#ON_SOURCE"
 image_data_variables_keep = [
     "sky_residual",
@@ -130,7 +130,7 @@ cache_directory = None
 write_visibility_model_to_ps = False
 write_imaging_weights_to_ps = False
 clear_cache = True
-vizualize_graph = False
+vizualize_graph = True
 disk_chunk_sizes = None
 fft_backend = "pyfftw"
 restore = False
@@ -754,6 +754,7 @@ import toolviper.utils.logger as logger
 import xarray as xr
 import zarr
 from graphviper.graph_tools import (
+    append,
     generate_airflow_workflow,
     generate_dask_workflow,
     map,
@@ -979,6 +980,21 @@ viper_graph = reduce(
     n_batch=reduce_n_batch,
 )
 timing_distributed_application["T_create_map_reduce_graph"] = time.time() - start
+
+append_input_params = {
+    "iteration_control_params": iteration_control_params,
+    "deconvolver": deconvolver,
+    "processing_function_threads": processing_function_threads,
+    "is_n_iter_0": True,
+    "image_data_group_in_name": "residual",
+    "image_data_group_out_name": "model",
+}
+
+viper_graph = append(
+    viper_graph,
+    node_tasks.imaging.model_update_continuum_single_field,
+    append_input_params,
+)
 
 # Compute cube. Two interchangeable backends execute the same backend-agnostic
 # viper_graph: the default Dask backend (generate_dask_workflow + dask.compute)

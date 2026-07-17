@@ -1,6 +1,7 @@
 from astroviper.processing_functions.imaging.feather import feather_core
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
     image_continuum_single_field,
+    model_update_cycle_mtmfs_single_field,
 )
 from astroviper.processing_functions.imaging.image_cube_single_field import (
     image_cube_single_field,

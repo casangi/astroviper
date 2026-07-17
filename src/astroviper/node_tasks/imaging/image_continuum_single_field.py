@@ -400,3 +400,282 @@ def image_continuum_single_field(
         "timing_node_tasks": timing_df,
         "deconvolution": combined_deconvolve_dict,
     }
+
+
+@shares_param_docs
+def model_update_continuum_single_field(
+    input_data,
+    input_params,
+):
+    """Run one continuum model-update node entirely in memory.
+
+        This node is intended for the GraphViper append stage. It receives the
+        globally reduced continuum Taylor products from the preceding reduce stage,
+        calculates the minor-cycle controls, runs the continuum model-update
+        processing function, updates convergence information, and returns the
+        modified image dataset in memory.
+
+        No image or processing-set data are read from or written to disk.
+
+        reduce output dictionary
+        │
+        ├── input_data["image"]
+        ├── input_data["deconvolution"]
+        └── input_data["timing_node_tasks"]
+                │
+                ▼
+    model_update_continuum_single_field
+                │
+                ├── calculates cycle controls
+                ├── calls model_update_cycle_mtmfs_single_field
+                ├── updates convergence
+                └── changes SKY_MODEL[taylor_term=0]
+                │
+                ▼
+    updated result dictionary remains in memory
+
+        Parameters
+        ----------
+        input_data : dict
+            Output of the preceding GraphViper reduce stage. It must contain
+
+            ``input_data["image"]``
+                Globally reduced continuum image dataset.
+
+            It may additionally contain
+
+            ``input_data["deconvolution"]``
+                Previously accumulated deconvolution statistics.
+
+            ``input_data["timing_node_tasks"]``
+                Timing information from the map/reduce stages.
+
+        input_params : dict
+            Append-node configuration. Expected entries are
+
+            ``iteration_control_params``
+                Global CLEAN iteration-control parameters.
+
+            Optional entries are
+
+            ``deconvolver``
+                Deconvolver name. Default is ``"hogbom"``.
+
+            ``processing_function_threads``
+                Number of threads passed to the model-update processing function.
+
+            ``is_n_iter_0``
+                Whether this is the first model update. Default is ``True``.
+
+            ``controller``
+                Existing :class:`IterationController`. If omitted, a new controller
+                is constructed from ``iteration_control_params``.
+
+            ``image_data_group_in_name``
+                Residual data-group name. Default is ``"residual"``.
+
+            ``image_data_group_out_name``
+                Model data-group name. Default is ``"model"``.
+
+        Returns
+        -------
+        dict
+            Dictionary containing the updated in-memory image, model-update timing,
+            deconvolution statistics, controller, and convergence state.
+    """
+    import time
+
+    import pandas as pd
+    import toolviper.utils.logger as logger
+
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        model_update_cycle_mtmfs_single_field,
+    )
+    from astroviper.processing_functions.imaging.utils import (
+        IterationController,
+        ReturnDict,
+        get_calculate_cycle_controls,
+        merge_return_dicts,
+    )
+
+    node_start = time.time()
+
+    # GraphViper append normally supplies the preceding graph result directly.
+    # Accept a singleton list as well, in case the append execution wrapper
+    # retains the reduce-style list convention.
+    if isinstance(input_data, (list, tuple)):
+        if len(input_data) != 1:
+            raise ValueError(
+                "The continuum model-update append node expects exactly one "
+                f"reduced input, but received {len(input_data)}."
+            )
+        input_data = input_data[0]
+
+    if not isinstance(input_data, dict):
+        raise TypeError(
+            "input_data must be the dictionary returned by the continuum "
+            f"reduce stage, not {type(input_data).__name__}."
+        )
+
+    if "image" not in input_data:
+        raise KeyError(
+            "The continuum reduce result does not contain the required "
+            "'image' entry."
+        )
+
+    if "iteration_control_params" not in input_params:
+        raise KeyError("input_params must contain 'iteration_control_params'.")
+
+    img_xds = input_data["image"]
+    iteration_control_params = input_params["iteration_control_params"]
+
+    deconvolver = input_params.get("deconvolver", "hogbom")
+    processing_function_threads = input_params.get(
+        "processing_function_threads",
+        1,
+    )
+    is_n_iter_0 = input_params.get("is_n_iter_0", True)
+
+    image_data_group_in_name = input_params.get(
+        "image_data_group_in_name",
+        "residual",
+    )
+    image_data_group_out_name = input_params.get(
+        "image_data_group_out_name",
+        "model",
+    )
+
+    # -------------------------------------------------------------
+    # Obtain or temporarily construct the iteration controller.
+    #
+    # Once controller ownership is moved to the application level, the
+    # existing controller should be supplied in input_params.
+    # -------------------------------------------------------------
+    controller = input_params.get("controller")
+
+    if controller is None:
+        controller = IterationController(
+            niter=iteration_control_params["niter"],
+            nmajor=iteration_control_params["nmajor"],
+            threshold=iteration_control_params["threshold"],
+            gain=iteration_control_params["gain"],
+            cyclefactor=iteration_control_params["cyclefactor"],
+            minpsffraction=iteration_control_params["minpsffraction"],
+            maxpsffraction=iteration_control_params["maxpsffraction"],
+            cycleniter=iteration_control_params["cycleniter"],
+        )
+
+    combined_deconvolve_dict = input_data.get("deconvolution")
+
+    if combined_deconvolve_dict is None:
+        combined_deconvolve_dict = ReturnDict()
+
+    timing = {
+        "T_iteration_control": 0.0,
+        "T_model_update_cycle": 0.0,
+        "T_convergence": 0.0,
+    }
+
+    # -------------------------------------------------------------
+    # Calculate the controls for this minor cycle.
+    #
+    # The temporary Taylor-0 Högbom implementation has one effective
+    # frequency plane. Independently controlled planes are therefore
+    # time x 1 x polarization.
+    # -------------------------------------------------------------
+    start = time.time()
+
+    controller.ensure_planes(
+        img_xds.sizes["time"],
+        1,
+        img_xds.sizes["polarization"],
+    )
+
+    (
+        cycle_niter,
+        cyclethreshold,
+        cyclethreshold_per_plane,
+    ) = get_calculate_cycle_controls(
+        controller,
+        combined_deconvolve_dict,
+        img_xds,
+        is_n_iter_0,
+        iteration_control_params=iteration_control_params,
+    )
+
+    timing["T_iteration_control"] = time.time() - start
+
+    deconvolve_params = {
+        **iteration_control_params,
+        "cycleniter": cycle_niter,
+        "cyclethreshold": cyclethreshold,
+        "niter_per_plane": controller.niter.clip(max=cycle_niter),
+        "cyclethreshold_per_plane": cyclethreshold_per_plane,
+    }
+
+    # -------------------------------------------------------------
+    # Run the model-update processing function.
+    #
+    # img_xds is already in memory and is modified in place.
+    # -------------------------------------------------------------
+    start = time.time()
+
+    (deconvolve_dict, model_update_return_df,) = model_update_cycle_mtmfs_single_field(
+        img_xds,
+        deconvolver,
+        deconvolve_params,
+        is_n_iter_0=is_n_iter_0,
+        processing_function_threads=processing_function_threads,
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_out_name,
+    )
+
+    timing["T_model_update_cycle"] = time.time() - start
+
+    # -------------------------------------------------------------
+    # Update convergence bookkeeping.
+    # -------------------------------------------------------------
+    start = time.time()
+
+    controller.update_counts(deconvolve_dict)
+
+    stopcode, stopdesc = controller.check_convergence(deconvolve_dict)
+
+    combined_deconvolve_dict = merge_return_dicts(
+        [
+            combined_deconvolve_dict,
+            deconvolve_dict,
+        ]
+    )
+
+    timing["T_convergence"] = time.time() - start
+    timing["T_model_update_node_task"] = time.time() - node_start
+
+    logger.debug(
+        "Continuum model update finished with "
+        f"major stop code {stopcode.major}: {stopdesc}"
+    )
+
+    node_timing_df = pd.DataFrame({key: [value] for key, value in timing.items()})
+
+    if model_update_return_df is not None:
+        node_timing_df = pd.concat(
+            [
+                node_timing_df.reset_index(drop=True),
+                model_update_return_df.reset_index(drop=True),
+            ],
+            axis=1,
+        )
+
+    # Preserve the map/reduce timing separately rather than mixing rows from
+    # different types of node task.
+    return {
+        "image": img_xds,
+        "timing_node_tasks": input_data.get("timing_node_tasks"),
+        "timing_model_update": node_timing_df,
+        "deconvolution": combined_deconvolve_dict,
+        "controller": controller,
+        "stopcode": stopcode,
+        "stopdesc": stopdesc,
+        "is_n_iter_0": False,
+    }

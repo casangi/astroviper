@@ -627,8 +627,13 @@ def deconvolve(
     # accepts a bool mask directly; Python keeps ownership of the buffer.
     mask_name = img_xds.attrs["data_groups"][image_data_group_in_name].get("mask", None)
     mask_arr = None
+    # if mask_name in img_xds:
+    #    mask_arr = img_xds[mask_name].values
     if mask_name in img_xds:
-        mask_arr = img_xds[mask_name].values
+        mask_arr = np.ascontiguousarray(
+            img_xds[mask_name].values,
+            dtype=np.bool_,
+        )
 
     # Collect per-plane starting statistics in-place (no copies, just
     # reads). The actual CLEAN iteration is driven in C++.
