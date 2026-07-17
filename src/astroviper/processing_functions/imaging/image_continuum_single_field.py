@@ -223,7 +223,7 @@ def image_continuum_single_field(
     #    from astroviper.processing_functions.imaging.model_update_cycle import (
     #           model_update_cycle_mtmfs_single_field,
     #           )
-    from astroviper.processing_functions.imaging.residual_cycle_continuum_single_field_zero import (
+    from astroviper.processing_functions.imaging.residual_cycle_continuum_single_field import (
         residual_cycle_continuum_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (

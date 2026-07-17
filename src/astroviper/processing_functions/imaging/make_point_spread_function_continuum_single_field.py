@@ -340,6 +340,8 @@ def make_point_spread_function_continuum_single_field(
     ps_xdt,
     img_xds,
     image_params,
+    nterms=None,
+    reference_frequency=None,
     ms_data_group_in_name="base",
     image_data_group_in_name="residual",
     image_data_group_out_name="residual",
@@ -383,6 +385,17 @@ def make_point_spread_function_continuum_single_field(
         complex_dtype = np.complex128
     if image_data_variables_keep is None:
         image_data_variables_keep = []
+
+    # Work on a local copy so that this function does not modify the caller's
+    # image-parameter dictionary.
+    image_params = copy.deepcopy(image_params)
+
+    # Support both explicit keyword arguments and values stored in image_params.
+    if nterms is not None:
+        image_params["nterms"] = int(nterms)
+
+    if reference_frequency is not None:
+        image_params["reference_frequency"] = float(reference_frequency)
 
     _, n_psf_taylor_terms, reference_frequency = _validate_mtmfs_parameters(
         image_params

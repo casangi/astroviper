@@ -204,14 +204,36 @@ def ifft_norm_img_xds(
             continue
 
         grid_var_name = data_group_in[data_variable_out]
-        raw_grid = img_xds[grid_var_name].values  # (time, freq, pol, u, v)
+        grid_da = img_xds[grid_var_name]
 
-        normalization = img_xds[
-            data_group_in[normalization_key[data_variable_out]]
-        ].values.copy()
-        normalization[normalization == 0] = 1  # avoid division by zero
+        if grid_da.dims[-2:] != ("u", "v"):
+            raise ValueError(
+                f"{grid_var_name} must end in dimensions ('u', 'v'); "
+                f"received {grid_da.dims}."
+            )
 
-        n_time, n_freq, n_pol = raw_grid.shape[:3]
+        plane_dims = [
+            dim for dim in grid_da.dims[:-2] if dim not in {"time", "polarization"}
+        ]
+        if len(plane_dims) != 1:
+            raise ValueError(
+                f"Could not identify one plane dimension in {grid_var_name}; "
+                f"received {grid_da.dims}."
+            )
+
+        plane_dim = plane_dims[0]
+        grid_da = grid_da.transpose("time", plane_dim, "polarization", "u", "v")
+        raw_grid = grid_da.values
+
+        normalization_name = data_group_in[normalization_key[data_variable_out]]
+        normalization = (
+            img_xds[normalization_name]
+            .transpose("time", plane_dim, "polarization")
+            .values.copy()
+        )
+        normalization[normalization == 0] = 1
+
+        n_time, n_planes, n_pol = raw_grid.shape[:3]
         image_size = np.asarray(_image_params["image_size"])
         padded_image_shape = raw_grid.shape[-2:]
         flux_scale = padded_image_shape[0] * padded_image_shape[1]
@@ -229,32 +251,64 @@ def ifft_norm_img_xds(
             np.float32 if np.dtype(complex_dtype) == np.complex64 else np.float64
         )
         out_name = data_group_out[ifft_pair[data_variable_out]]
+        output_dims = (
+            "time",
+            plane_dim,
+            "polarization",
+            "l",
+            "m",
+        )
+        output_shape = (
+            n_time,
+            n_planes,
+            n_pol,
+            image_size[0],
+            image_size[1],
+        )
+
+        if out_name in img_xds:
+            existing = img_xds[out_name]
+            if existing.dims != output_dims or existing.shape != output_shape:
+                if not overwrite:
+                    raise ValueError(
+                        f"Existing {out_name} has dimensions {existing.dims} "
+                        f"and shape {existing.shape}; expected {output_dims} "
+                        f"and {output_shape}."
+                    )
+                img_xds = img_xds.drop_vars(out_name)
+
         if out_name not in img_xds:
+            output_coords = {
+                dim: img_xds.coords[dim] for dim in output_dims if dim in img_xds.coords
+            }
             img_xds[out_name] = xr.DataArray(
-                np.empty(
-                    (n_time, n_freq, n_pol, image_size[0], image_size[1]),
-                    dtype=float_out_dtype,
-                ),
-                dims=("time", "frequency", "polarization", "l", "m"),
+                np.empty(output_shape, dtype=float_out_dtype),
+                dims=output_dims,
+                coords=output_coords,
             )
-        out_arr = img_xds[out_name].values  # numpy view for in-place writes
+
+        out_arr = img_xds[out_name].values
         img_xds[out_name].attrs["type"] = data_variable
 
         for t in range(n_time):
-            for f in range(n_freq):
+            for plane_index in range(n_planes):
                 for p in range(n_pol):
                     plane = ifft_uv_to_lm(
-                        np.asarray(raw_grid[t, f, p], dtype=complex_dtype),
+                        np.asarray(
+                            raw_grid[t, plane_index, p],
+                            dtype=complex_dtype,
+                        ),
                         processing_function_threads=processing_function_threads,
                         fft_backend=fft_backend,
                     )
-                    # In-place ops below preserve `plane`'s precision (the float64
-                    # kernel / normalization are broadcast without upcasting).
                     plane /= kernel_image_1D_l[:, None]
                     plane /= kernel_image_1D_m[None, :]
-                    plane *= flux_scale / normalization[t, f, p]
+                    plane *= flux_scale / normalization[t, plane_index, p]
 
-                    out_arr[t, f, p] = remove_padding(plane.real, image_size)
+                    out_arr[t, plane_index, p] = remove_padding(
+                        plane.real,
+                        image_size,
+                    )
 
         if data_variable_out not in image_data_variables_keep:
             # Release the large grid from the dataset so it can be freed as soon

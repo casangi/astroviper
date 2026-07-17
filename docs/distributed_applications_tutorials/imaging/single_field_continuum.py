@@ -1066,7 +1066,6 @@ import matplotlib.pyplot as plt
 import xarray as xr
 
 return_dict = dask.compute(dask_graph)[0]
-
 dirty_xds = return_dict["image"]
 
 print(dirty_xds)
@@ -1074,46 +1073,74 @@ print("\nVariable dimensions:")
 for var in dirty_xds.data_vars:
     print(f"{var}: {dirty_xds[var].dims}")
 
-
 fig, axes = plt.subplots(
-    1,
-    3,
-    figsize=(15, 4.2),
+    2,
+    2,
+    figsize=(10, 9),
     constrained_layout=True,
 )
 
-# Residual Taylor term R0
+# ------------------------------------------------------------
+# R0
+# ------------------------------------------------------------
+
 plane = dirty_xds["SKY_RESIDUAL"].isel(
     time=0,
     taylor_term=0,
     polarization=0,
 )
 
-im = axes[0].imshow(
+im = axes[0, 0].imshow(
     plane.values,
     origin="lower",
     cmap="viridis",
 )
-axes[0].set_title("SKY_RESIDUAL\nTaylor term R0")
-fig.colorbar(im, ax=axes[0])
 
-# PSF/Hessian Taylor term H0
+axes[0, 0].set_title("Residual R0")
+fig.colorbar(im, ax=axes[0, 0])
+
+# ------------------------------------------------------------
+# R1
+# ------------------------------------------------------------
+
+plane = dirty_xds["SKY_RESIDUAL"].isel(
+    time=0,
+    taylor_term=1,
+    polarization=0,
+)
+
+im = axes[0, 1].imshow(
+    plane.values,
+    origin="lower",
+    cmap="viridis",
+)
+
+axes[0, 1].set_title("Residual R1")
+fig.colorbar(im, ax=axes[0, 1])
+
+# ------------------------------------------------------------
+# H0
+# ------------------------------------------------------------
+
 plane = dirty_xds["POINT_SPREAD_FUNCTION"].isel(
     time=0,
     psf_taylor_order=0,
     polarization=0,
 )
 
-im = axes[1].imshow(
+im = axes[1, 0].imshow(
     plane.values,
     origin="lower",
     cmap="viridis",
 )
-axes[1].set_title("POINT_SPREAD_FUNCTION\nTaylor order H0")
-fig.colorbar(im, ax=axes[1])
 
-# Primary beam may still have a frequency dimension because its continuum
-# treatment has not yet been implemented.
+axes[1, 0].set_title("PSF H0")
+fig.colorbar(im, ax=axes[1, 0])
+
+# ------------------------------------------------------------
+# Primary beam
+# ------------------------------------------------------------
+
 primary_beam = dirty_xds["PRIMARY_BEAM"]
 
 selection = {
@@ -1126,12 +1153,13 @@ if "frequency" in primary_beam.dims:
 
 plane = primary_beam.isel(**selection)
 
-im = axes[2].imshow(
+im = axes[1, 1].imshow(
     plane.values,
     origin="lower",
     cmap="viridis",
 )
-axes[2].set_title("PRIMARY_BEAM")
-fig.colorbar(im, ax=axes[2])
+
+axes[1, 1].set_title("Primary Beam")
+fig.colorbar(im, ax=axes[1, 1])
 
 plt.show()

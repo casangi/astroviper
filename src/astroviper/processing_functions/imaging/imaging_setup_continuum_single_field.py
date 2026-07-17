@@ -210,7 +210,7 @@ def imaging_setup_continuum_single_field(
     from astroviper.processing_functions.imaging.calculate_imaging_weights import (
         calculate_imaging_weights,
     )
-    from astroviper.processing_functions.imaging.make_point_spread_function_continuum_single_field_zero import (
+    from astroviper.processing_functions.imaging.make_point_spread_function_continuum_single_field import (
         make_point_spread_function_continuum_single_field,
     )
     from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (
