@@ -114,6 +114,7 @@ def residual_update_continuum_single_field(
     skunk_works=False,
     data_group=None,
     is_n_iter_0=True,
+    model_xds=None,
     task_id=0,
     input_data=None,
     graph_mode=True,
@@ -321,6 +322,7 @@ def residual_update_continuum_single_field(
         image_data_variables_keep=image_data_variables_keep,
         restore=restore,
         is_n_iter_0=is_n_iter_0,
+        model_xds=model_xds,
         task_id=task_id,
     )
 

@@ -894,48 +894,48 @@ def image_continuum_single_field(
     # standalone signature; graphviper's map() adapts it to the single
     # ``input_params`` dict calling convention automatically (forwarding only the
     # keys the node task declares), so it can be passed directly.
-    start = time.time()
-    viper_graph = map(
-        input_data=ps_xdt,
-        node_task_data_mapping=node_task_data_mapping,
-        node_task=node_tasks.imaging.residual_update_continuum_single_field,
-        input_params=input_params,
-        in_memory_compute=False,
-        # data_loading_task=_load_processing_set_chunk,
-        data_loading_task=None,
-        disk_chunk_sizes=disk_chunk_sizes,
-        load_node_input_params={
-            "processing_set_data_group_name": processing_set_data_group_name
-        },
-        monitor_resources_seconds=monitor_resources_seconds,
-        task_priorities=task_priorities,
-    )
+    # start = time.time()
+    # viper_graph = map(
+    #    input_data=ps_xdt,
+    #    node_task_data_mapping=node_task_data_mapping,
+    #    node_task=node_tasks.imaging.residual_update_continuum_single_field,
+    #    input_params=input_params,
+    #    in_memory_compute=False,
+    #    # data_loading_task=_load_processing_set_chunk,
+    #    data_loading_task=None,
+    #    disk_chunk_sizes=disk_chunk_sizes,
+    #    load_node_input_params={
+    #        "processing_set_data_group_name": processing_set_data_group_name
+    #    },
+    #    monitor_resources_seconds=monitor_resources_seconds,
+    #    task_priorities=task_priorities,
+    # )
 
-    reduce_input_params = {}
+    # reduce_input_params = {}
 
-    viper_graph = reduce(
-        viper_graph,
-        combine_continuum_chunks,
-        reduce_input_params,
-        mode=reduce_mode,
-        n_batch=reduce_n_batch,
-    )
-    timing_distributed_application["T_create_map_reduce_graph"] = time.time() - start
+    # viper_graph = reduce(
+    #    viper_graph,
+    #    combine_continuum_chunks,
+    #    reduce_input_params,
+    #    mode=reduce_mode,
+    #    n_batch=reduce_n_batch,
+    # )
+    # timing_distributed_application["T_create_map_reduce_graph"] = time.time() - start
 
-    append_input_params = {
-        "iteration_control_params": iteration_control_params,
-        "deconvolver": deconvolver,
-        "processing_function_threads": processing_function_threads,
-        "is_n_iter_0": True,
-        "image_data_group_in_name": "residual",
-        "image_data_group_out_name": "model",
-    }
+    # append_input_params = {
+    #    "iteration_control_params": iteration_control_params,
+    #    "deconvolver": deconvolver,
+    #    "processing_function_threads": processing_function_threads,
+    #    "is_n_iter_0": True,
+    #    "image_data_group_in_name": "residual",
+    #    "image_data_group_out_name": "model",
+    # }
 
-    viper_graph = append(
-        viper_graph,
-        node_tasks.imaging.model_update_continuum_single_field,
-        append_input_params,
-    )
+    # viper_graph = append(
+    #    viper_graph,
+    #    node_tasks.imaging.model_update_continuum_single_field,
+    #    append_input_params,
+    # )
 
     # Compute the continuum graph. Two interchangeable backends execute the same backend-agnostic
     # viper_graph: the default Dask backend (generate_dask_workflow + dask.compute)
@@ -943,31 +943,166 @@ def image_continuum_single_field(
     # pool, selected with compute_backend="mpi" and launched via
     # `python -m mpi4py.futures`). The MPI backend builds no dask.delayed graph, so
     # there is no separate "generate" step (T_generate_dask_graph = 0).
-    if compute_backend == "mpi":
-        if vizualize_graph:
-            logger.warning(
-                "vizualize_graph is ignored for compute_backend='mpi' (no "
-                "dask.delayed graph is built)."
-            )
-        timing_distributed_application["T_generate_dask_graph"] = 0.0
-        start = time.time()
-        return_dict = processes_with_mpi(viper_graph, mpi_cluster_setup)
-        timing_distributed_application["T_compute_dask_graph"] = time.time() - start
-    elif compute_backend == "dask":
-        start = time.time()
-        dask_graph = generate_dask_workflow(viper_graph)
-        timing_distributed_application["T_generate_dask_graph"] = time.time() - start
 
-        if vizualize_graph:
-            dask.visualize(dask_graph, filename="continuum_imaging.png")
+    # if compute_backend == "mpi":
+    #    if vizualize_graph:
+    #        logger.warning(
+    #            "vizualize_graph is ignored for compute_backend='mpi' (no "
+    #            "dask.delayed graph is built)."
+    #        )
+    #    timing_distributed_application["T_generate_dask_graph"] = 0.0
+    #    start = time.time()
+    #    return_dict = processes_with_mpi(viper_graph, mpi_cluster_setup)
+    #    timing_distributed_application["T_compute_dask_graph"] = time.time() - start
+    # elif compute_backend == "dask":
+    #    start = time.time()
+    #    dask_graph = generate_dask_workflow(viper_graph)
+    #    timing_distributed_application["T_generate_dask_graph"] = time.time() - start
 
-        start = time.time()
-        return_dict = dask.compute(dask_graph)[0]
-        timing_distributed_application["T_compute_dask_graph"] = time.time() - start
-    else:
-        raise ValueError(
-            f"Unknown compute_backend {compute_backend!r}; expected 'dask' or 'mpi'."
-        )
+    #    if vizualize_graph:
+    #        dask.visualize(dask_graph, filename="continuum_imaging.png")
+
+    #    start = time.time()
+    #    return_dict = dask.compute(dask_graph)[0]
+    #    timing_distributed_application["T_compute_dask_graph"] = time.time() - start
+    # else:
+    #    raise ValueError(
+    #        f"Unknown compute_backend {compute_backend!r}; expected 'dask' or 'mpi'."
+    #    )
+
+    ###
+
+    # =============================================================
+    # Major cycle 1 + minor cycle 1
+    # =============================================================
+
+    start = time.time()
+
+    first_viper_graph = map(
+        input_data=ps_xdt,
+        node_task_data_mapping=node_task_data_mapping,
+        node_task=node_tasks.imaging.residual_update_continuum_single_field,
+        input_params=input_params,
+        in_memory_compute=False,
+        data_loading_task=None,
+        disk_chunk_sizes=disk_chunk_sizes,
+        load_node_input_params={
+            "processing_set_data_group_name": processing_set_data_group_name,
+        },
+        monitor_resources_seconds=monitor_resources_seconds,
+        task_priorities=task_priorities,
+    )
+
+    first_viper_graph = reduce(
+        first_viper_graph,
+        combine_continuum_chunks,
+        {},
+        mode=reduce_mode,
+        n_batch=reduce_n_batch,
+    )
+
+    first_append_input_params = {
+        "iteration_control_params": iteration_control_params,
+        "deconvolver": deconvolver,
+        "processing_function_threads": processing_function_threads,
+        "is_n_iter_0": True,
+        "controller": controller,
+        "image_data_group_in_name": "residual",
+        "image_data_group_out_name": "model",
+    }
+
+    first_viper_graph = append(
+        first_viper_graph,
+        node_tasks.imaging.model_update_continuum_single_field,
+        first_append_input_params,
+    )
+
+    timing_distributed_application["T_create_map_reduce_append_graph"] = (
+        time.time() - start
+    )
+
+    start = time.time()
+    first_dask_graph = generate_dask_workflow(first_viper_graph)
+    timing_distributed_application["T_generate_dask_graph"] = time.time() - start
+
+    start = time.time()
+    first_return_dict = dask.compute(first_dask_graph)[0]
+    timing_distributed_application["T_compute_dask_graph"] = time.time() - start
+
+    controller = first_return_dict["controller"]
+
+    # =============================================================
+    # Major cycle 2
+    # =============================================================
+
+    start = time.time()
+
+    second_input_params = dict(input_params)
+    second_input_params["is_n_iter_0"] = False
+
+    second_input_params["model_xds"] = first_return_dict["image"]
+
+    # first_image = first_return_dict["image"]
+
+    # model_xds = first_image[["SKY_MODEL"]].copy(deep=False)
+    # model_xds.attrs = {
+    #    "data_groups": {
+    #        "model": {
+    #            "sky": "SKY_MODEL",
+    #        }
+    #    }
+    # }
+
+    # second_input_params["model_xds"] = model_xds
+
+    second_viper_graph = map(
+        input_data=ps_xdt,
+        node_task_data_mapping=node_task_data_mapping,
+        node_task=node_tasks.imaging.residual_update_continuum_single_field,
+        input_params=second_input_params,
+        in_memory_compute=False,
+        data_loading_task=None,
+        disk_chunk_sizes=disk_chunk_sizes,
+        load_node_input_params={
+            "processing_set_data_group_name": processing_set_data_group_name,
+        },
+        monitor_resources_seconds=monitor_resources_seconds,
+        task_priorities=task_priorities,
+    )
+
+    second_viper_graph = reduce(
+        second_viper_graph,
+        combine_continuum_chunks,
+        {},
+        mode=reduce_mode,
+        n_batch=reduce_n_batch,
+    )
+
+    timing_distributed_application["T_create_map_reduce_append_graph"] = (
+        time.time() - start
+    )
+
+    start = time.time()
+    second_dask_graph = generate_dask_workflow(second_viper_graph)
+    timing_distributed_application["T_generate_dask_graph"] = time.time() - start
+
+    start = time.time()
+    second_return_dict = dask.compute(second_dask_graph)[0]
+    timing_distributed_application["T_compute_dask_graph"] = time.time() - start
+
+    return_dict = second_return_dict
+
+    # Preserve the model and controller state from the first minor cycle.
+    return_dict["image"]["SKY_MODEL"] = first_return_dict["image"]["SKY_MODEL"].copy(
+        deep=True
+    )
+    return_dict["controller"] = first_return_dict["controller"]
+    return_dict["deconvolution"] = first_return_dict["deconvolution"]
+    return_dict["stopcode"] = first_return_dict["stopcode"]
+    return_dict["stopdesc"] = first_return_dict["stopdesc"]
+    return_dict["is_n_iter_0"] = False
+
+    ###
 
     start = time.time()
     zarr.consolidate_metadata(image_store)

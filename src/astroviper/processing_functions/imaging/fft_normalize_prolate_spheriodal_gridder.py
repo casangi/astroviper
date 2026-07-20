@@ -702,3 +702,234 @@ def add_padding(src, dst):
     dst[..., start_xy[0] : end_xy[0], : start_xy[1]] = 0
     dst[..., start_xy[0] : end_xy[0], end_xy[1] :] = 0
     return dst
+
+
+def fft_norm_continuum_img_xds(
+    img_xds,
+    image_params,
+    image_data_group_in_name="model",
+    image_data_group_out_name="model",
+    image_data_group_out_modified=None,
+    overwrite=True,
+    image_data_variables_keep=None,
+    processing_function_threads=1,
+    fft_backend="pyfftw",
+    data_variables_to_process=None,
+    complex_dtype=np.complex128,
+):
+    """Forward-transform continuum Taylor-model images into Taylor UV grids.
+
+    This is the MT-MFS equivalent of :func:`fft_norm_img_xds`. The input sky
+    model must have dimensions
+
+        (time, taylor_term, polarization, l, m)
+
+    and the output visibility grid is created with dimensions
+
+        (time, taylor_term, polarization, u, v).
+
+    One FFT is performed for each Taylor term, rather than for every frequency
+    channel.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Continuum image dataset containing the Taylor-term sky model.
+    image_params : dict
+        Imaging parameters. Must contain ``image_size`` and ``fft_padding``.
+    image_data_group_in_name : str, optional
+        Input image data group containing the sky model.
+    image_data_group_out_name : str, optional
+        Output image data group receiving the Taylor UV grid.
+    image_data_group_out_modified : dict, optional
+        Output data-group variable mapping. Defaults to
+        ``{"visibility": "VISIBILITY_MODEL"}``.
+    overwrite : bool, optional
+        Replace an existing output variable when its dimensions or shape do not
+        match the expected Taylor UV grid.
+    image_data_variables_keep : list of str, optional
+        Logical input variables to retain after the FFT.
+    processing_function_threads : int, optional
+        Number of FFT threads.
+    fft_backend : {"scipy", "pyfftw"}, optional
+        FFT backend.
+    data_variables_to_process : list of str, optional
+        Logical variables to transform. Defaults to ``["sky"]``.
+    complex_dtype : numpy dtype, optional
+        Complex precision of the UV grid.
+
+    Returns
+    -------
+    xarray.Dataset
+        Dataset containing the Taylor-term visibility grid.
+    """
+    if image_data_group_out_modified is None:
+        image_data_group_out_modified = {
+            "visibility": "VISIBILITY_MODEL",
+        }
+
+    if image_data_variables_keep is None:
+        image_data_variables_keep = []
+
+    if data_variables_to_process is None:
+        data_variables_to_process = ["sky"]
+
+    data_group_in, data_group_out = create_data_groups_in_and_out(
+        img_xds,
+        data_group_in_name=image_data_group_in_name,
+        data_group_out_name=image_data_group_out_name,
+        data_group_out_modified=image_data_group_out_modified,
+        overwrite=overwrite,
+    )
+
+    from astroviper.processing_functions.imaging.utils.fft_sizing import (
+        padded_grid_size,
+    )
+
+    n_uv = padded_grid_size(
+        [img_xds.sizes["l"], img_xds.sizes["m"]],
+        image_params["fft_padding"],
+    )
+
+    for data_variable in data_variables_to_process:
+        if data_variable not in data_group_in:
+            continue
+
+        image_var_name = data_group_in[data_variable]
+
+        if image_var_name not in img_xds:
+            raise KeyError(
+                f"Input image variable {image_var_name!r} is not present " "in img_xds."
+            )
+
+        image_da = img_xds[image_var_name]
+
+        required_dims = {
+            "time",
+            "taylor_term",
+            "polarization",
+            "l",
+            "m",
+        }
+
+        missing_dims = required_dims.difference(image_da.dims)
+
+        if missing_dims:
+            raise ValueError(
+                f"{image_var_name!r} is missing dimensions "
+                f"{sorted(missing_dims)}. Received {image_da.dims}."
+            )
+
+        image_da = image_da.transpose(
+            "time",
+            "taylor_term",
+            "polarization",
+            "l",
+            "m",
+        )
+
+        raw_image = image_da.values
+
+        n_time = image_da.sizes["time"]
+        n_terms = image_da.sizes["taylor_term"]
+        n_pol = image_da.sizes["polarization"]
+
+        output_dims = (
+            "time",
+            "taylor_term",
+            "polarization",
+            "u",
+            "v",
+        )
+
+        output_shape = (
+            n_time,
+            n_terms,
+            n_pol,
+            n_uv[0],
+            n_uv[1],
+        )
+
+        out_name = data_group_out[fft_pair[data_variable]]
+
+        if out_name in img_xds:
+            existing = img_xds[out_name]
+
+            if existing.dims != output_dims or existing.shape != output_shape:
+                if not overwrite:
+                    raise ValueError(
+                        f"Existing {out_name!r} has dimensions "
+                        f"{existing.dims} and shape {existing.shape}; "
+                        f"expected {output_dims} and {output_shape}."
+                    )
+
+                img_xds = img_xds.drop_vars(out_name)
+
+        if out_name not in img_xds:
+            output_coords = {}
+
+            for dim in ("time", "taylor_term", "polarization"):
+                if dim in image_da.coords:
+                    output_coords[dim] = image_da.coords[dim]
+                elif dim in img_xds.coords:
+                    output_coords[dim] = img_xds.coords[dim]
+
+            # Do not reuse any existing frequency coordinate. The output has
+            # a Taylor axis, not a frequency axis.
+            img_xds[out_name] = xr.DataArray(
+                np.empty(
+                    output_shape,
+                    dtype=complex_dtype,
+                ),
+                dims=output_dims,
+                coords=output_coords,
+            )
+
+        out_arr = img_xds[out_name].values
+        img_xds[out_name].attrs["type"] = data_variable
+
+        (
+            kernel_image_1D_l,
+            kernel_image_1D_m,
+        ) = create_prolate_spheroidal_correcting_image_1D(n_lm_padded=n_uv)
+
+        padded_plane = np.empty(
+            (n_uv[0], n_uv[1]),
+            dtype=complex_dtype,
+        )
+
+        for t in range(n_time):
+            for term in range(n_terms):
+                for p in range(n_pol):
+                    add_padding(
+                        raw_image[t, term, p],
+                        padded_plane,
+                    )
+
+                    # Apply the same prolate-spheroidal correction as the cube
+                    # FFT routine before transforming to the UV plane.
+                    padded_plane /= kernel_image_1D_l[:, None]
+                    padded_plane /= kernel_image_1D_m[None, :]
+
+                    out_arr[t, term, p] = fft_lm_to_uv(
+                        padded_plane,
+                        processing_function_threads=(processing_function_threads),
+                        fft_backend=fft_backend,
+                        complex_dtype=complex_dtype,
+                    )
+
+        if data_variable not in image_data_variables_keep:
+            img_xds.xr_img.delete_data_variables(variables=[image_var_name])
+            del raw_image
+
+        modify_data_groups_xds(
+            img_xds,
+            image_data_group_out_name,
+            data_group_out,
+            description=(
+                "Transformed continuum Taylor model from lm plane "
+                "to aperture uv plane."
+            ),
+        )
+
+    return img_xds

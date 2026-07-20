@@ -130,6 +130,7 @@ def residual_update_continuum_single_field(
     image_data_variables_keep=None,
     restore=False,
     is_n_iter_0=True,
+    model_xds=None,
     task_id=0,
 ):
     """Perform setup and exactly one continuum residual update."""
@@ -176,6 +177,35 @@ def residual_update_continuum_single_field(
     )
 
     # -------------------------------------------------------------
+    # Install the current global model for later major cycles
+    # -------------------------------------------------------------
+    if not is_n_iter_0:
+        if model_xds is None:
+            raise ValueError(
+                "A continuum model must be supplied when is_n_iter_0=False."
+            )
+
+        if "SKY_MODEL" not in model_xds:
+            raise KeyError(
+                "model_xds does not contain the required SKY_MODEL variable."
+            )
+
+        model = model_xds["SKY_MODEL"]
+
+        if "taylor_term" not in model.dims:
+            raise ValueError(
+                "The continuum model must contain a taylor_term dimension."
+            )
+
+        # Avoid mutating or aliasing the global model dataset.
+        img_xds["SKY_MODEL"] = model.copy(deep=True)
+
+        img_xds.attrs.setdefault("data_groups", {})
+        img_xds.attrs["data_groups"]["model"] = {
+            "sky": "SKY_MODEL",
+        }
+
+    # -------------------------------------------------------------
     # Exactly one residual update
     # -------------------------------------------------------------
     start = time.time()
@@ -183,6 +213,7 @@ def residual_update_continuum_single_field(
     img_xds, residual_return_df = residual_cycle_continuum_single_field(
         ps_xdt,
         img_xds,
+        model_xds,
         image_params,
         is_n_iter_0,
         processing_set_data_group_name=processing_set_data_group_name,
