@@ -227,6 +227,97 @@ def test_read_missing_shard_still_fills(tmp_path):
     assert _equal(got, np.zeros_like(got))
 
 
+def _chunk_files(store):
+    """Every data (chunk/shard) file under a store, i.e. everything but metadata."""
+    return sorted(
+        os.path.join(root, f)
+        for root, _dirs, files in os.walk(store)
+        for f in files
+        if f != "zarr.json"
+    )
+
+
+def test_read_short_pread_is_retried(tmp_path, monkeypatch):
+    """A short ``pread`` (Lustre eviction window: fewer bytes than requested,
+    NO error raised) must be detected, retried with a fresh descriptor, and
+    still return correct data -- previously the truncated buffer went straight
+    to the decoder and killed the task with 'invalid input data'."""
+    path, data = _sharded_store(tmp_path)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    real_pread = os.pread
+    state = {"calls": 0, "truncated": 0}
+
+    def flaky_pread(fd, n, off):
+        state["calls"] += 1
+        raw = real_pread(fd, n, off)
+        # Truncate the 2nd pread overall (the first inner-chunk read; call 1
+        # is the shard index) once; every retry pread after that is honest.
+        if state["calls"] == 2 and not state["truncated"]:
+            state["truncated"] = 1
+            return raw[:-1]
+        return raw
+
+    monkeypatch.setattr(os, "pread", flaky_pread)
+    got, _ = read_array_region(path, {"frequency": slice(0, 4)})
+    assert state["truncated"] == 1
+    assert _equal(got, data)
+
+
+def test_read_corrupt_inner_chunk_raises_labeled_eio(tmp_path, monkeypatch):
+    """Genuine on-disk corruption must exhaust the retry schedule and surface
+    as OSError(EIO) NAMING the shard file and inner chunk (not as a bare
+    numcodecs 'Zstd decompression error')."""
+    path, _ = _sharded_store(tmp_path)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    (shard_file,) = _chunk_files(path)
+    with open(shard_file, "r+b") as fh:  # first blob starts at offset 0
+        fh.write(b"\xde\xad\xbe\xef")
+    with pytest.raises(OSError) as excinfo:
+        read_array_region(path, {"frequency": slice(0, 4)})
+    assert excinfo.value.errno == errno.EIO
+    msg = str(excinfo.value)
+    assert "decode of inner chunk" in msg and shard_file in msg
+
+
+def test_read_truncated_shard_raises_labeled_eio(tmp_path, monkeypatch):
+    """A shard file smaller than its own index (truncated write) must surface
+    as OSError(EIO) naming the file, not as an unlabeled struct/pread error."""
+    path, _ = _sharded_store(tmp_path)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    (shard_file,) = _chunk_files(path)
+    os.truncate(shard_file, 10)
+    with pytest.raises(OSError) as excinfo:
+        read_array_region(path, {"frequency": slice(0, 4)})
+    assert excinfo.value.errno == errno.EIO
+    msg = str(excinfo.value)
+    assert "smaller than its index" in msg and shard_file in msg
+
+
+def test_read_corrupt_plain_chunk_raises_labeled_eio(tmp_path, monkeypatch):
+    """The plain (non-sharded) branch gets the same treatment: a corrupt chunk
+    blob surfaces as OSError(EIO) naming the chunk file, after retries."""
+    shape = (3, 5, 3)
+    data = np.random.default_rng(11).standard_normal(shape).astype("<f8")
+    path = str(tmp_path / "UVW")
+    arr = zarr.create_array(
+        path,
+        shape=shape,
+        chunks=shape,
+        dtype="float64",
+        dimension_names=("time", "baseline_id", "uvw_label"),
+        compressors=zarr.codecs.ZstdCodec(),
+    )
+    arr[:] = data
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    (chunk_file,) = _chunk_files(path)
+    with open(chunk_file, "r+b") as fh:
+        fh.write(b"\xde\xad\xbe\xef")
+    with pytest.raises(OSError) as excinfo:
+        read_array_region(path, {})
+    assert excinfo.value.errno == errno.EIO
+    assert "decode of chunk" in str(excinfo.value)
+
+
 # --------------------------------------------------------------------------- #
 # Direct chunk writer
 # --------------------------------------------------------------------------- #
