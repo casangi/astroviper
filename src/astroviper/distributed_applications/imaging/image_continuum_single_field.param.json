@@ -1,0 +1,51 @@
+{
+    "image_continuum_single_field": {
+        "ps_store": { "required": true, "type": ["str"] },
+        "image_store": { "required": true, "type": ["str"] },
+        "image_params": { "required": true, "type": ["dict"] },
+        "imaging_weights_params": { "required": true, "type": ["dict"] },
+        "iteration_control_params": { "required": true, "type": ["dict"] },
+        "gridder": { "type": ["str"], "allowed": ["prolate_spheroidal"] },
+        "deconvolver": {
+            "type": ["str"],
+            "allowed": ["hogbom", "hogbom_many_threads", "asp", "aspclean", "asp_clean"]
+        },
+        "instrument_polarization_basis": {
+            "type": ["str"],
+            "allowed": ["linear", "circular"]
+        },
+        "scan_intents": { "type": ["list", "str"] },
+        "field_name": { "type": ["str"], "nullable": true },
+        "image_data_variables_keep": { "type": ["list"], "struct type": ["str"] },
+        "compressor": { "nullable": true },
+        "processing_set_data_group_name": { "type": ["str"] },
+        "single_precision_image": { "type": "boolean" },
+        "thread_info": { "type": ["dict"], "nullable": true },
+        "processing_function_threads": { "type": ["int"], "min": 1 },
+        "n_chunks": { "type": ["int"], "nullable": true, "min": 1 },
+        "overwrite": { "type": "boolean" },
+        "memory_mode": {
+            "type": ["str"],
+            "allowed": ["in_memory", "in_place", "cache"]
+        },
+        "cache_directory": { "type": ["str"], "nullable": true },
+        "write_visibility_model_to_ps": { "type": "boolean" },
+        "write_imaging_weights_to_ps": { "type": "boolean" },
+        "clear_cache": { "type": "boolean" },
+        "vizualize_graph": { "type": "boolean" },
+        "disk_chunk_sizes": { "type": ["dict", "str"], "nullable": true },
+        "fft_backend": { "type": ["str"], "allowed": ["pyfftw", "scipy"] },
+        "restore": { "type": "boolean" },
+        "skunk_works": { "type": "boolean" },
+        "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },
+        "mpi_cluster_setup": { "type": ["dict"], "nullable": true },
+        "reduce_mode": {
+            "type": ["str"],
+            "allowed": ["tree", "single_node", "tree_n"]
+        },
+        "reduce_n_batch": { "type": ["int"], "min": 2 },
+        "output_shard_channels": { "type": ["int"], "nullable": true, "min": 1 },
+        "task_time_kill_switch_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 },
+        "monitor_resources_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 }
+    }
+}
