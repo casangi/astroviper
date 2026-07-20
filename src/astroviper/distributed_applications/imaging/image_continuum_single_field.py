@@ -880,7 +880,7 @@ def image_continuum_single_field(
     viper_graph = map(
         input_data=ps_xdt,
         node_task_data_mapping=node_task_data_mapping,
-        node_task=node_tasks.imaging.image_continuum_single_field,
+        node_task=node_tasks.imaging.residual_update_continuum_single_field,
         input_params=input_params,
         in_memory_compute=False,
         # data_loading_task=_load_processing_set_chunk,

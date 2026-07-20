@@ -136,7 +136,7 @@ def imaging_preparation_continuum_single_field(
 
 
 @shares_param_docs
-def image_continuum_single_field(
+def residual_update_continuum_single_field(
     ps_xdt,
     img_xds,
     image_params,
@@ -443,7 +443,7 @@ def image_continuum_single_field(
 
 
 @shares_param_docs
-def model_update_cycle_mtmfs_single_field(
+def model_update_mtmfs_single_field(
     img_xds,
     deconvolver,
     deconvolve_params,

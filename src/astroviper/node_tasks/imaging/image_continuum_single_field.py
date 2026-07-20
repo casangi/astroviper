@@ -95,7 +95,7 @@ def _remap_deconvolve_dict_to_global_channels(
 
 
 @shares_param_docs
-def image_continuum_single_field(
+def residual_update_continuum_single_field(
     image_params,
     imaging_weights_params,
     iteration_control_params,
@@ -308,7 +308,7 @@ def image_continuum_single_field(
         img_xds,
         timing_df,
         combined_deconvolve_dict,
-    ) = pf.imaging.image_continuum_single_field(
+    ) = pf.imaging.residual_update_continuum_single_field(
         ps_xdt,
         img_xds,
         image_params,
@@ -427,7 +427,7 @@ def model_update_continuum_single_field(
     model_update_continuum_single_field
                 │
                 ├── calculates cycle controls
-                ├── calls model_update_cycle_mtmfs_single_field
+                ├── calls model_update_mtmfs_single_field
                 ├── updates convergence
                 └── changes SKY_MODEL[taylor_term=0]
                 │
@@ -489,7 +489,7 @@ def model_update_continuum_single_field(
     import toolviper.utils.logger as logger
 
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
-        model_update_cycle_mtmfs_single_field,
+        model_update_mtmfs_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (
         IterationController,
@@ -572,7 +572,7 @@ def model_update_continuum_single_field(
 
     timing = {
         "T_iteration_control": 0.0,
-        "T_model_update_cycle": 0.0,
+        "T_model_update": 0.0,
         "T_convergence": 0.0,
     }
 
@@ -620,7 +620,7 @@ def model_update_continuum_single_field(
     # -------------------------------------------------------------
     start = time.time()
 
-    (deconvolve_dict, model_update_return_df,) = model_update_cycle_mtmfs_single_field(
+    (deconvolve_dict, model_update_return_df,) = model_update_mtmfs_single_field(
         img_xds,
         deconvolver,
         deconvolve_params,
@@ -630,7 +630,7 @@ def model_update_continuum_single_field(
         image_data_group_out_name=image_data_group_out_name,
     )
 
-    timing["T_model_update_cycle"] = time.time() - start
+    timing["T_model_update"] = time.time() - start
 
     # -------------------------------------------------------------
     # Update convergence bookkeeping.
