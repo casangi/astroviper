@@ -98,7 +98,6 @@ def _remap_deconvolve_dict_to_global_channels(
 def residual_update_continuum_single_field(
     image_params,
     imaging_weights_params,
-    iteration_control_params,
     task_coords,
     data_selection,
     image_store,
@@ -114,6 +113,7 @@ def residual_update_continuum_single_field(
     memory_mode="in_memory",
     skunk_works=False,
     data_group=None,
+    is_n_iter_0=True,
     task_id=0,
     input_data=None,
     graph_mode=True,
@@ -307,30 +307,29 @@ def residual_update_continuum_single_field(
     (
         img_xds,
         timing_df,
-        combined_deconvolve_dict,
+        # combined_deconvolve_dict,
     ) = pf.imaging.residual_update_continuum_single_field(
         ps_xdt,
         img_xds,
         image_params,
         imaging_weights_params,
-        iteration_control_params,
         processing_set_data_group_name=processing_set_data_group_name,
-        deconvolver=deconvolver,
         instrument_polarization_basis=instrument_polarization_basis,
         single_precision_image=single_precision_image,
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         image_data_variables_keep=image_data_variables_keep,
         restore=restore,
+        is_n_iter_0=is_n_iter_0,
         task_id=task_id,
     )
 
     # Preserve the cube implementation's global channel remapping for the
     # deconvolution metadata. This is harmless for an empty ReturnDict.
-    combined_deconvolve_dict = _remap_deconvolve_dict_to_global_channels(
-        combined_deconvolve_dict,
-        data_selection,
-    )
+    # combined_deconvolve_dict = _remap_deconvolve_dict_to_global_channels(
+    #    combined_deconvolve_dict,
+    #    data_selection,
+    # )
 
     # No output image writing is performed here. The Taylor products stay in
     # memory and flow directly into the GraphViper reduction stage.
@@ -398,7 +397,7 @@ def residual_update_continuum_single_field(
     return {
         "image": img_xds,
         "timing_node_tasks": timing_df,
-        "deconvolution": combined_deconvolve_dict,
+        # "deconvolution": combined_deconvolve_dict,
     }
 
 

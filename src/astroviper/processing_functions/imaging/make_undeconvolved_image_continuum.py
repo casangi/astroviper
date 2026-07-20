@@ -11,7 +11,6 @@ def make_undeconvolved_image_continuum_single_field(
     img_xds,
     image_params,
     cgk_1D,
-    is_n_iter_0,
     nterms=None,
     reference_frequency=None,
     ms_data_group_in_name="corrected",

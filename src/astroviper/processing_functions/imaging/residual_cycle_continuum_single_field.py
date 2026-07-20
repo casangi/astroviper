@@ -73,12 +73,6 @@ def residual_cycle_continuum_single_field(
     T_degrid = 0.0
     T_residual_vis = 0.0
 
-    if not is_n_iter_0:
-        raise NotImplementedError(
-            "Continuum model degridding and residual-visibility formation are "
-            "not implemented yet. Run the current continuum path with niter=0."
-        )
-
     start = time.time()
     img_xds = transform_polarization_basis(
         img_xds,
@@ -96,7 +90,6 @@ def residual_cycle_continuum_single_field(
         img_xds,
         image_params,
         cgk_1D,
-        is_n_iter_0,
         nterms=nterms,
         reference_frequency=reference_frequency,
         ms_data_group_in_name=ps_data_group_name,

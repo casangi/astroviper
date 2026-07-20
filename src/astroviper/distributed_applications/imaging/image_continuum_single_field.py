@@ -683,6 +683,10 @@ def image_continuum_single_field(
     from xradio.image import make_empty_sky_image, write_image
     from xradio.measurement_set import open_processing_set
 
+    from astroviper.processing_functions.imaging.utils import (
+        IterationController,
+        ReturnDict,
+    )
     from astroviper.utils.data_group_tools import modify_data_groups_xds
     from astroviper.utils.data_partitioning import (
         calculate_data_chunking,
@@ -811,6 +815,7 @@ def image_continuum_single_field(
     input_params["processing_function_threads"] = processing_function_threads
     input_params["iteration_control_params"] = iteration_control_params
     input_params["gridder"] = gridder
+    input_params["is_n_iter_0"] = True
     input_params["deconvolver"] = deconvolver
     input_params["instrument_polarization_basis"] = instrument_polarization_basis
     input_params["single_precision_image"] = single_precision_image
@@ -819,6 +824,19 @@ def image_continuum_single_field(
     input_params["skunk_works"] = skunk_works
     input_params["output_shard_channels"] = output_shard_channels
     input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
+
+    controller = IterationController(
+        niter=iteration_control_params["niter"],
+        nmajor=iteration_control_params["nmajor"],
+        threshold=iteration_control_params["threshold"],
+        gain=iteration_control_params["gain"],
+        cyclefactor=iteration_control_params["cyclefactor"],
+        minpsffraction=iteration_control_params["minpsffraction"],
+        maxpsffraction=iteration_control_params["maxpsffraction"],
+        cycleniter=iteration_control_params["cycleniter"],
+    )
+
+    combined_deconvolve_dict = ReturnDict()
 
     from graphviper.graph_tools.coordinate_utils import (
         get_disk_chunk_sizes,
