@@ -235,17 +235,50 @@ def residual_update_continuum_single_field(
 
     timing["T_restore"] = 0.0
 
-    if restore and iteration_control_params["niter"] > 0:
-        from astroviper.processing_functions.imaging.image_continuum_single_field import restore_image_continuum_single_field
+    if restore:
+        from copy import deepcopy
 
-        img_xds, restore_return_df = (
-            restore_image_continuum_single_field(
-                img_xds,
-                image_data_group_in_residual_name="residual",
-                image_data_group_in_model_name="model",
-                image_data_group_out_restore_name="restored",
-                processing_function_threads=processing_function_threads,
+        from astroviper.processing_functions.imaging.image_continuum_single_field import (
+            restore_image_continuum_single_field,
+        )
+
+        beam_fit_params_key = "beam_fit_params_point_spread_function"
+
+        model_residual_group = model_xds.attrs["data_groups"]["residual"]
+        residual_group = img_xds.attrs["data_groups"]["residual"]
+
+        if beam_fit_params_key not in model_residual_group:
+            raise KeyError(
+                f"{beam_fit_params_key!r} was not found in the residual "
+                "data group of model_xds."
             )
+
+        beam_name = model_residual_group[beam_fit_params_key]
+
+        if beam_name not in model_xds:
+            raise KeyError(
+                f"The beam-fit variable {beam_name!r} is registered in "
+                "model_xds, but the variable itself is missing."
+            )
+
+        # Copy the data-group registration.
+        residual_group[beam_fit_params_key] = beam_name
+
+        # Copy the actual fitted-beam DataArray.
+        img_xds[beam_name] = model_xds[beam_name].copy(deep=False)
+
+        # Copy the beam-parameter coordinate used by the DataArray.
+        if "beam_params_label" in model_xds.coords:
+            img_xds = img_xds.assign_coords(
+                beam_params_label=model_xds.coords["beam_params_label"]
+            )
+
+        img_xds, restore_return_df = restore_image_continuum_single_field(
+            img_xds,
+            image_data_group_in_residual_name="residual",
+            image_data_group_in_model_name="model",
+            image_data_group_out_restore_name="restored",
+            processing_function_threads=processing_function_threads,
         )
 
         accumulate_timing(timing, restore_return_df)
@@ -695,6 +728,7 @@ def add_max_sidelobe_point_spread_function_continuum_single_field(
 
     return img_xds
 
+
 def restore_image_continuum_single_field(
     img_xds,
     image_data_group_in_residual_name="residual",
@@ -752,14 +786,12 @@ def restore_image_continuum_single_field(
 
     if image_data_group_in_residual_name not in data_groups:
         raise KeyError(
-            f"Residual data group "
-            f"{image_data_group_in_residual_name!r} is missing."
+            f"Residual data group " f"{image_data_group_in_residual_name!r} is missing."
         )
 
     if image_data_group_in_model_name not in data_groups:
         raise KeyError(
-            f"Model data group "
-            f"{image_data_group_in_model_name!r} is missing."
+            f"Model data group " f"{image_data_group_in_model_name!r} is missing."
         )
 
     residual_group = data_groups[image_data_group_in_residual_name]
@@ -781,14 +813,10 @@ def restore_image_continuum_single_field(
         )
 
     if residual_name not in img_xds:
-        raise KeyError(
-            f"Residual variable {residual_name!r} is missing."
-        )
+        raise KeyError(f"Residual variable {residual_name!r} is missing.")
 
     if model_name not in img_xds:
-        raise KeyError(
-            f"Model variable {model_name!r} is missing."
-        )
+        raise KeyError(f"Model variable {model_name!r} is missing.")
 
     residual_da = img_xds[residual_name]
     model_da = img_xds[model_name]
@@ -821,9 +849,7 @@ def restore_image_continuum_single_field(
         if "POINT_SPREAD_FUNCTION" in img_xds:
             psf_name = "POINT_SPREAD_FUNCTION"
         else:
-            raise KeyError(
-                "No point-spread-function variable was found."
-            )
+            raise KeyError("No point-spread-function variable was found.")
 
     psf_da = img_xds[psf_name]
 
@@ -842,15 +868,10 @@ def restore_image_continuum_single_field(
         }:
             continue
 
-        if (
-            "taylor_term" in coord.dims
-            or "psf_taylor_order" in coord.dims
-        ):
+        if "taylor_term" in coord.dims or "psf_taylor_order" in coord.dims:
             continue
 
-        cube_xds = cube_xds.assign_coords(
-            {coord_name: coord.copy(deep=False)}
-        )
+        cube_xds = cube_xds.assign_coords({coord_name: coord.copy(deep=False)})
 
     cube_xds = cube_xds.assign_coords(
         frequency=("frequency", np.asarray([0], dtype=np.int64))
@@ -881,9 +902,8 @@ def restore_image_continuum_single_field(
             .assign_coords(frequency=cube_xds.frequency)
         )
     elif "frequency" in psf_da.dims:
-        cube_xds[psf_name] = (
-            psf_da.isel(frequency=slice(0, 1))
-            .assign_coords(frequency=cube_xds.frequency)
+        cube_xds[psf_name] = psf_da.isel(frequency=slice(0, 1)).assign_coords(
+            frequency=cube_xds.frequency
         )
     else:
         # A PSF without a spectral dimension is expanded to one channel.
@@ -892,21 +912,34 @@ def restore_image_continuum_single_field(
             axis=1,
         )
 
+    residual_group = cube_xds.attrs["data_groups"][image_data_group_in_residual_name]
+    beam_fit_params_key = "beam_fit_params_point_spread_function"
+    beam_name = residual_group[beam_fit_params_key]
+
+    beam_da = img_xds[beam_name]
+
+    if "frequency" not in beam_da.dims:
+        beam_da = beam_da.expand_dims(
+            frequency=cube_xds.frequency.values,
+            axis=1,
+        )
+
+    cube_xds[beam_name] = beam_da.transpose(
+        "time",
+        "frequency",
+        "polarization",
+        "beam_params",
+    )
+
     cube_xds, timing_df = restore_image(
         cube_xds,
-        image_data_group_in_residual_name=(
-            image_data_group_in_residual_name
-        ),
+        image_data_group_in_residual_name=(image_data_group_in_residual_name),
         image_data_group_in_model_name=image_data_group_in_model_name,
-        image_data_group_out_restore_name=(
-            image_data_group_out_restore_name
-        ),
+        image_data_group_out_restore_name=(image_data_group_out_restore_name),
         processing_function_threads=processing_function_threads,
     )
 
-    restored_group = cube_xds.attrs["data_groups"][
-        image_data_group_out_restore_name
-    ]
+    restored_group = cube_xds.attrs["data_groups"][image_data_group_out_restore_name]
 
     restored_name = restored_group["sky"]
 
@@ -914,9 +947,7 @@ def restore_image_continuum_single_field(
         cube_xds[restored_name]
         .rename({"frequency": "taylor_term"})
         .assign_coords(
-            taylor_term=img_xds.coords["taylor_term"].isel(
-                taylor_term=slice(0, 1)
-            )
+            taylor_term=img_xds.coords["taylor_term"].isel(taylor_term=slice(0, 1))
         )
     )
 
@@ -929,50 +960,245 @@ def restore_image_continuum_single_field(
     return img_xds, timing_df
 
 
+def point_spread_function_gaussian_fit_continuum(
+    img_xds,
+    image_data_group_in_name="residual",
+    image_data_group_out_name="residual",
+    processing_function_threads=1,
+):
+    """Fit the restoring beam to the zeroth-order continuum PSF.
 
+    The existing cube ``point_spread_function_gaussian_fit`` routine expects
+    a PSF with dimensions
 
+        (time, frequency, polarization, l, m).
 
+    A continuum MT-MFS PSF instead has dimensions
 
+        (time, psf_taylor_order, polarization, l, m).
 
+    This wrapper selects the globally reduced zeroth-order Taylor PSF,
+    presents it to the cube fitter as a single-frequency PSF, and copies the
+    fitted beam parameters and maximum sidelobe back into the continuum
+    image dataset.
 
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Globally reduced continuum image dataset.
+    image_data_group_in_name : str, optional
+        Data group containing the continuum point-spread function.
+    image_data_group_out_name : str, optional
+        Data group in which the beam-fit products are registered.
+    processing_function_threads : int, optional
+        Number of threads supplied to the Gaussian-fit routine.
 
+    Returns
+    -------
+    img_xds : xarray.Dataset
+        Continuum dataset containing the fitted restoring beam and maximum
+        PSF sidelobe.
+    return_df : pandas.DataFrame
+        One-row timing dataframe.
+    """
+    import time
+    from copy import deepcopy
 
+    import numpy as np
+    import pandas as pd
+    import xarray as xr
 
+    from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
+        point_spread_function_gaussian_fit,
+    )
 
+    beam_fit_key = "beam_fit_params_point_spread_function"
+    max_sidelobe_key = "max_sidelobe_point_spread_function"
 
+    # ------------------------------------------------------------------
+    # Validate the requested data groups and obtain the PSF variable.
+    # ------------------------------------------------------------------
+    data_groups = img_xds.attrs.get("data_groups", {})
 
+    if image_data_group_in_name not in data_groups:
+        raise KeyError(
+            f"Input data group {image_data_group_in_name!r} was not found. "
+            f"Available groups are {list(data_groups)}."
+        )
 
+    input_group = data_groups[image_data_group_in_name]
 
+    if "point_spread_function" not in input_group:
+        raise KeyError(
+            "'point_spread_function' was not found in data group "
+            f"{image_data_group_in_name!r}."
+        )
 
+    psf_name = input_group["point_spread_function"]
 
+    if psf_name not in img_xds:
+        raise KeyError(
+            f"PSF variable {psf_name!r}, registered in data group "
+            f"{image_data_group_in_name!r}, was not found in img_xds."
+        )
 
+    psf_da = img_xds[psf_name]
 
+    if "psf_taylor_order" not in psf_da.dims:
+        raise ValueError(
+            f"Continuum PSF {psf_name!r} must contain the dimension "
+            f"'psf_taylor_order'. Found dimensions {psf_da.dims}."
+        )
 
+    if psf_da.sizes["psf_taylor_order"] < 1:
+        raise ValueError(f"Continuum PSF {psf_name!r} has no Taylor-order entries.")
 
+    required_psf_dims = {"time", "polarization", "l", "m"}
+    missing_psf_dims = required_psf_dims.difference(psf_da.dims)
 
+    if missing_psf_dims:
+        raise ValueError(
+            f"Continuum PSF {psf_name!r} is missing required dimensions "
+            f"{sorted(missing_psf_dims)}. Found dimensions {psf_da.dims}."
+        )
 
+    # ------------------------------------------------------------------
+    # Select the globally reduced zeroth-order PSF.
+    # ------------------------------------------------------------------
+    psf0_da = psf_da.isel(psf_taylor_order=0, drop=True)
 
+    # The numerical frequency value is not used by the fit itself, but the
+    # cube routine requires a one-element frequency coordinate.
+    continuum_metadata = img_xds.attrs.get("continuum_imaging", {})
 
+    if "reference_frequency_hz" in continuum_metadata:
+        reference_frequency_hz = float(continuum_metadata["reference_frequency_hz"])
+    elif "frequency" in img_xds.coords and img_xds.frequency.size > 0:
+        reference_frequency_hz = float(
+            np.asarray(img_xds.frequency.values).reshape(-1)[0]
+        )
+    else:
+        # This is only a coordinate label for the temporary cube.
+        reference_frequency_hz = 0.0
 
+    frequency_coord = np.asarray(
+        [reference_frequency_hz],
+        dtype=np.float64,
+    )
 
+    cube_psf_da = psf0_da.expand_dims(frequency=frequency_coord,).transpose(
+        "time",
+        "frequency",
+        "polarization",
+        "l",
+        "m",
+    )
 
+    # ------------------------------------------------------------------
+    # Build a minimal, one-frequency cube dataset.
+    # ------------------------------------------------------------------
+    cube_xds = xr.Dataset(
+        {
+            psf_name: cube_psf_da,
+        }
+    )
 
+    cube_xds.attrs = deepcopy(img_xds.attrs)
+    cube_xds.attrs["type"] = "image_dataset"
 
+    # The Gaussian fitter only needs the PSF registration. Using the same
+    # input and output group lets it add its beam-fit entries to this group.
+    cube_xds.attrs["data_groups"] = {
+        image_data_group_out_name: {
+            "point_spread_function": psf_name,
+        }
+    }
 
+    # ------------------------------------------------------------------
+    # Run the existing cube Gaussian-fit routine.
+    #
+    # The routine modifies and returns only the xarray.Dataset; it does not
+    # return a timing dataframe.
+    # ------------------------------------------------------------------
+    start = time.time()
 
+    cube_xds = point_spread_function_gaussian_fit(
+        cube_xds,
+        image_data_group_in_name=image_data_group_out_name,
+        image_data_group_out_name=image_data_group_out_name,
+        processing_function_threads=processing_function_threads,
+    )
 
+    return_df = pd.DataFrame(
+        {
+            "T_psf_fit": [time.time() - start],
+        }
+    )
 
+    cube_group = cube_xds.attrs["data_groups"][image_data_group_out_name]
 
+    if beam_fit_key not in cube_group:
+        raise KeyError(
+            f"The Gaussian fitter did not register {beam_fit_key!r} "
+            f"in data group {image_data_group_out_name!r}."
+        )
 
+    if max_sidelobe_key not in cube_group:
+        raise KeyError(
+            f"The Gaussian fitter did not register {max_sidelobe_key!r} "
+            f"in data group {image_data_group_out_name!r}."
+        )
 
+    beam_fit_name = cube_group[beam_fit_key]
+    max_sidelobe_name = cube_group[max_sidelobe_key]
 
+    if beam_fit_name not in cube_xds:
+        raise KeyError(
+            f"The fitted-beam variable {beam_fit_name!r} is not present "
+            "in the temporary cube dataset."
+        )
 
+    if max_sidelobe_name not in cube_xds:
+        raise KeyError(
+            f"The maximum-sidelobe variable {max_sidelobe_name!r} is not "
+            "present in the temporary cube dataset."
+        )
 
+    # ------------------------------------------------------------------
+    # Copy the one-channel fit back without retaining a frequency dimension.
+    #
+    # This avoids conflicting with any existing continuum frequency
+    # coordinate. The continuum restore wrapper should expand these arrays
+    # back to one frequency channel when constructing its temporary cube.
+    # ------------------------------------------------------------------
+    beam_fit_da = cube_xds[beam_fit_name]
 
+    if "frequency" in beam_fit_da.dims:
+        beam_fit_da = beam_fit_da.isel(frequency=0, drop=True)
 
+    max_sidelobe_da = cube_xds[max_sidelobe_name]
 
+    if "frequency" in max_sidelobe_da.dims:
+        max_sidelobe_da = max_sidelobe_da.isel(
+            frequency=0,
+            drop=True,
+        )
 
+    if "beam_params_label" in cube_xds.coords:
+        img_xds = img_xds.assign_coords(
+            beam_params_label=cube_xds.coords["beam_params_label"],
+        )
 
+    img_xds[beam_fit_name] = beam_fit_da
+    img_xds[max_sidelobe_name] = max_sidelobe_da
 
+    # Create the output group if input and output names differ.
+    if image_data_group_out_name not in img_xds.attrs["data_groups"]:
+        img_xds.attrs["data_groups"][image_data_group_out_name] = deepcopy(input_group)
 
+    output_group = img_xds.attrs["data_groups"][image_data_group_out_name]
 
+    output_group[beam_fit_key] = beam_fit_name
+    output_group[max_sidelobe_key] = max_sidelobe_name
+
+    return img_xds, return_df

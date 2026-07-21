@@ -1040,6 +1040,23 @@ def image_continuum_single_field(
     second_input_params = dict(input_params)
     second_input_params["is_n_iter_0"] = False
 
+    second_input_params["restore"] = True
+
+    # When we restore, we need to perform a gaussian fit to the point spread function first
+    if second_input_params["restore"]:
+        from astroviper.processing_functions.imaging.image_continuum_single_field import (
+            point_spread_function_gaussian_fit_continuum,
+        )
+
+        (
+            first_return_dict["image"],
+            psf_fit_return_df,
+        ) = point_spread_function_gaussian_fit_continuum(
+            first_return_dict["image"],
+            image_data_group_in_name="residual",
+            image_data_group_out_name="residual",
+        )
+
     second_input_params["model_xds"] = first_return_dict["image"]
 
     # first_image = first_return_dict["image"]
@@ -1054,6 +1071,8 @@ def image_continuum_single_field(
     # }
 
     # second_input_params["model_xds"] = model_xds
+
+    # second_return_dict is the output after the final continuum reduce
 
     second_viper_graph = map(
         input_data=ps_xdt,
