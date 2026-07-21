@@ -233,6 +233,23 @@ def residual_update_continuum_single_field(
     )
     timing["nterms"] = image_params.get("nterms", 2)
 
+    timing["T_restore"] = 0.0
+
+    if restore and iteration_control_params["niter"] > 0:
+        from astroviper.processing_functions.imaging.image_continuum_single_field import restore_image_continuum_single_field
+
+        img_xds, restore_return_df = (
+            restore_image_continuum_single_field(
+                img_xds,
+                image_data_group_in_residual_name="residual",
+                image_data_group_in_model_name="model",
+                image_data_group_out_restore_name="restored",
+                processing_function_threads=processing_function_threads,
+            )
+        )
+
+        accumulate_timing(timing, restore_return_df)
+
     timing_df = pd.DataFrame({key: [value] for key, value in timing.items()})
 
     return img_xds, timing_df
@@ -677,3 +694,285 @@ def add_max_sidelobe_point_spread_function_continuum_single_field(
     data_group["max_sidelobe_point_spread_function"] = output_name
 
     return img_xds
+
+def restore_image_continuum_single_field(
+    img_xds,
+    image_data_group_in_residual_name="residual",
+    image_data_group_in_model_name="model",
+    image_data_group_out_restore_name="restored",
+    processing_function_threads=1,
+):
+    """Restore the Taylor-zero continuum model.
+
+    The continuum model and residual use ``taylor_term`` while the existing
+    cube restoration routine expects ``frequency``. This function constructs
+    a one-channel cube view containing:
+
+    - model Taylor term 0,
+    - residual Taylor term 0,
+    - PSF Taylor order 0,
+
+    runs the existing cube restoration routine, and copies the restored image
+    back into the continuum dataset with a ``taylor_term`` dimension.
+
+    The output restored image therefore has dimensions
+
+        (time, taylor_term=1, polarization, l, m)
+
+    and represents the restored reference-frequency image.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Continuum image dataset containing model, residual, and PSF products.
+    image_data_group_in_residual_name : str, optional
+        Data group containing the residual image.
+    image_data_group_in_model_name : str, optional
+        Data group containing the sky model.
+    image_data_group_out_restore_name : str, optional
+        Data group receiving the restored image.
+    processing_function_threads : int, optional
+        Number of threads passed to the restoration routine.
+
+    Returns
+    -------
+    img_xds : xarray.Dataset
+        Original continuum image dataset with the restored Taylor-zero image.
+    timing_df : pandas.DataFrame
+        Timing information returned by the restoration routine.
+    """
+    import copy
+
+    import numpy as np
+    import xarray as xr
+
+    from astroviper.processing_functions.imaging.restore import restore_image
+
+    data_groups = img_xds.attrs.get("data_groups", {})
+
+    if image_data_group_in_residual_name not in data_groups:
+        raise KeyError(
+            f"Residual data group "
+            f"{image_data_group_in_residual_name!r} is missing."
+        )
+
+    if image_data_group_in_model_name not in data_groups:
+        raise KeyError(
+            f"Model data group "
+            f"{image_data_group_in_model_name!r} is missing."
+        )
+
+    residual_group = data_groups[image_data_group_in_residual_name]
+    model_group = data_groups[image_data_group_in_model_name]
+
+    residual_name = residual_group.get("sky")
+    model_name = model_group.get("sky")
+
+    if residual_name is None:
+        raise KeyError(
+            f"Residual data group "
+            f"{image_data_group_in_residual_name!r} does not define 'sky'."
+        )
+
+    if model_name is None:
+        raise KeyError(
+            f"Model data group "
+            f"{image_data_group_in_model_name!r} does not define 'sky'."
+        )
+
+    if residual_name not in img_xds:
+        raise KeyError(
+            f"Residual variable {residual_name!r} is missing."
+        )
+
+    if model_name not in img_xds:
+        raise KeyError(
+            f"Model variable {model_name!r} is missing."
+        )
+
+    residual_da = img_xds[residual_name]
+    model_da = img_xds[model_name]
+
+    if "taylor_term" not in residual_da.dims:
+        raise ValueError(
+            f"Residual variable {residual_name!r} does not contain "
+            "a 'taylor_term' dimension."
+        )
+
+    if "taylor_term" not in model_da.dims:
+        raise ValueError(
+            f"Model variable {model_name!r} does not contain "
+            "a 'taylor_term' dimension."
+        )
+
+    # Locate the PSF from the available image data groups.
+    psf_name = None
+
+    for group in data_groups.values():
+        candidate = group.get("point_spread_function")
+
+        if candidate is not None and candidate in img_xds:
+            psf_name = candidate
+            break
+
+    if psf_name is None:
+        # Fallback for datasets in which the variable exists but the logical
+        # mapping has not been registered in the expected group.
+        if "POINT_SPREAD_FUNCTION" in img_xds:
+            psf_name = "POINT_SPREAD_FUNCTION"
+        else:
+            raise KeyError(
+                "No point-spread-function variable was found."
+            )
+
+    psf_da = img_xds[psf_name]
+
+    # The existing restore routine expects cube dimensions. Construct a
+    # one-channel view corresponding to the MT-MFS reference-frequency image.
+    cube_xds = xr.Dataset(
+        attrs=copy.deepcopy(img_xds.attrs),
+    )
+
+    # Preserve scalar and non-spectral coordinates used by restore_image.
+    for coord_name, coord in img_xds.coords.items():
+        if coord_name in {
+            "frequency",
+            "taylor_term",
+            "psf_taylor_order",
+        }:
+            continue
+
+        if (
+            "taylor_term" in coord.dims
+            or "psf_taylor_order" in coord.dims
+        ):
+            continue
+
+        cube_xds = cube_xds.assign_coords(
+            {coord_name: coord.copy(deep=False)}
+        )
+
+    cube_xds = cube_xds.assign_coords(
+        frequency=("frequency", np.asarray([0], dtype=np.int64))
+    )
+
+    cube_xds[residual_name] = (
+        residual_da.isel(taylor_term=slice(0, 1))
+        .rename({"taylor_term": "frequency"})
+        .assign_coords(frequency=cube_xds.frequency)
+    )
+
+    cube_xds[model_name] = (
+        model_da.isel(taylor_term=slice(0, 1))
+        .rename({"taylor_term": "frequency"})
+        .assign_coords(frequency=cube_xds.frequency)
+    )
+
+    if "psf_taylor_order" in psf_da.dims:
+        cube_xds[psf_name] = (
+            psf_da.isel(psf_taylor_order=slice(0, 1))
+            .rename({"psf_taylor_order": "frequency"})
+            .assign_coords(frequency=cube_xds.frequency)
+        )
+    elif "taylor_term" in psf_da.dims:
+        cube_xds[psf_name] = (
+            psf_da.isel(taylor_term=slice(0, 1))
+            .rename({"taylor_term": "frequency"})
+            .assign_coords(frequency=cube_xds.frequency)
+        )
+    elif "frequency" in psf_da.dims:
+        cube_xds[psf_name] = (
+            psf_da.isel(frequency=slice(0, 1))
+            .assign_coords(frequency=cube_xds.frequency)
+        )
+    else:
+        # A PSF without a spectral dimension is expanded to one channel.
+        cube_xds[psf_name] = psf_da.expand_dims(
+            frequency=cube_xds.frequency.values,
+            axis=1,
+        )
+
+    cube_xds, timing_df = restore_image(
+        cube_xds,
+        image_data_group_in_residual_name=(
+            image_data_group_in_residual_name
+        ),
+        image_data_group_in_model_name=image_data_group_in_model_name,
+        image_data_group_out_restore_name=(
+            image_data_group_out_restore_name
+        ),
+        processing_function_threads=processing_function_threads,
+    )
+
+    restored_group = cube_xds.attrs["data_groups"][
+        image_data_group_out_restore_name
+    ]
+
+    restored_name = restored_group["sky"]
+
+    restored_da = (
+        cube_xds[restored_name]
+        .rename({"frequency": "taylor_term"})
+        .assign_coords(
+            taylor_term=img_xds.coords["taylor_term"].isel(
+                taylor_term=slice(0, 1)
+            )
+        )
+    )
+
+    img_xds[restored_name] = restored_da
+
+    img_xds.attrs.setdefault("data_groups", {})[
+        image_data_group_out_restore_name
+    ] = copy.deepcopy(restored_group)
+
+    return img_xds, timing_df
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
