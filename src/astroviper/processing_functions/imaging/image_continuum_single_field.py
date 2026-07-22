@@ -1,3 +1,5 @@
+import xarray as xr
+
 from astroviper.utils.param_docs import shares_param_docs
 
 
@@ -303,8 +305,6 @@ def residual_update_continuum_single_field(
     timing["T_restore"] = 0.0
 
     if restore:
-        from copy import deepcopy
-
         from astroviper.processing_functions.imaging.image_continuum_single_field import (
             restore_image_continuum_single_field,
         )
@@ -312,12 +312,16 @@ def residual_update_continuum_single_field(
         # There shouldn't be a point spread function in img_xds if is_n_iter_0 = False
         # since img_xds was initialized empty in this case
         # As a consequence, you cannot restore on the first major loop
-        assert (restore and is_n_iter_0) == False
-        img_xds["POINT_SPREAD_FUNCTION"] = model_xds["POINT_SPREAD_FUNCTION"]
-
-        # Insert primary beam into return variable again
-        if "PRIMARY_BEAM" not in img_xds and "PRIMARY_BEAM" in model_xds:
-            img_xds["PRIMARY_BEAM"] = model_xds["PRIMARY_BEAM"]
+        # We also need the primary beam for the final output
+        for name in ["POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"]:
+            if name in model_xds:
+                # note that due to a dimension mismatch the more natural img_xds['POINT_SPREAD_FUNCTION'] = model_xds['POINT_SPREAD_FUNCTION'] fails
+                # for now, we rely on this dirty workaround instead
+                img_xds = copy_variable_without_alignment(
+                    img_xds,
+                    model_xds,
+                    name,
+                )
 
         beam_fit_params_key = "beam_fit_params_point_spread_function"
 
@@ -1279,3 +1283,25 @@ def point_spread_function_gaussian_fit_continuum(
     output_group[max_sidelobe_key] = max_sidelobe_name
 
     return img_xds, return_df
+
+
+def copy_variable_without_alignment(
+    destination: xr.Dataset,
+    source: xr.Dataset,
+    name: str,
+) -> xr.Dataset:
+    source_da = source[name]
+
+    for dim, size in source_da.sizes.items():
+        if dim in destination.sizes and destination.sizes[dim] != size:
+            raise ValueError(
+                f"{name}: incompatible size for dimension {dim!r}: "
+                f"source={size}, destination={destination.sizes[dim]}"
+            )
+
+    destination[name] = xr.Variable(
+        dims=source_da.dims,
+        data=source_da.data,
+        attrs=source_da.attrs.copy(),
+    )
+    return destination
