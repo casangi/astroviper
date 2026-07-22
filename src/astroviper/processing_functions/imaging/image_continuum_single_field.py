@@ -133,6 +133,7 @@ def residual_update_continuum_single_field(
     restore=False,
     is_n_iter_0=True,
     model_xds=None,
+    static_xds=None,
     task_id=0,
 ):
     """Perform setup and exactly one continuum residual update."""
@@ -314,18 +315,18 @@ def residual_update_continuum_single_field(
         # As a consequence, you cannot restore on the first major loop
         # We also need the primary beam for the final output
         for name in ["POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"]:
-            if name in model_xds:
+            if name in static_xds:
                 # note that due to a dimension mismatch the more natural img_xds['POINT_SPREAD_FUNCTION'] = model_xds['POINT_SPREAD_FUNCTION'] fails
                 # for now, we rely on this dirty workaround instead
                 img_xds = copy_variable_without_alignment(
                     img_xds,
-                    model_xds,
+                    static_xds,
                     name,
                 )
 
         beam_fit_params_key = "beam_fit_params_point_spread_function"
 
-        model_residual_group = model_xds.attrs["data_groups"]["residual"]
+        model_residual_group = static_xds.attrs["data_groups"]["residual"]
         residual_group = img_xds.attrs["data_groups"]["residual"]
 
         if beam_fit_params_key not in model_residual_group:
@@ -336,7 +337,7 @@ def residual_update_continuum_single_field(
 
         beam_name = model_residual_group[beam_fit_params_key]
 
-        if beam_name not in model_xds:
+        if beam_name not in static_xds:
             raise KeyError(
                 f"The beam-fit variable {beam_name!r} is registered in "
                 "model_xds, but the variable itself is missing."
@@ -346,12 +347,12 @@ def residual_update_continuum_single_field(
         residual_group[beam_fit_params_key] = beam_name
 
         # Copy the actual fitted-beam DataArray.
-        img_xds[beam_name] = model_xds[beam_name].copy(deep=False)
+        img_xds[beam_name] = static_xds[beam_name].copy(deep=False)
 
         # Copy the beam-parameter coordinate used by the DataArray.
-        if "beam_params_label" in model_xds.coords:
+        if "beam_params_label" in static_xds.coords:
             img_xds = img_xds.assign_coords(
-                beam_params_label=model_xds.coords["beam_params_label"]
+                beam_params_label=static_xds.coords["beam_params_label"]
             )
 
         img_xds, restore_return_df = restore_image_continuum_single_field(

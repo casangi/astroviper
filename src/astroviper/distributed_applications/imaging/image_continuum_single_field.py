@@ -1031,6 +1031,33 @@ def image_continuum_single_field(
 
     controller = first_return_dict["controller"]
 
+    # We need to do this once after the first major loop
+    # Fit beam, in principle only needed when we restore later on
+    # This check is currently not applied, i.e. whether we will restore at a later point
+    # and the beam gets fitted by default
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        point_spread_function_gaussian_fit_continuum,
+    )
+
+    (
+        first_return_dict["image"],
+        psf_fit_return_df,
+    ) = point_spread_function_gaussian_fit_continuum(
+        first_return_dict["image"],
+        image_data_group_in_name="residual",
+        image_data_group_out_name="residual",
+    )
+
+    # static_xds will hold the quantities that do not change from iteration to iteration
+    # model_xds will hold the actual model that gets updated
+    static_xds = first_return_dict["image"][
+        [
+            "POINT_SPREAD_FUNCTION",
+            "PRIMARY_BEAM",
+            "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+        ]
+    ]
+
     # =============================================================
     # Major cycle 2
     # =============================================================
@@ -1042,35 +1069,14 @@ def image_continuum_single_field(
 
     second_input_params["restore"] = True
 
-    # When we restore, we need to perform a gaussian fit to the point spread function first
-    if second_input_params["restore"]:
-        from astroviper.processing_functions.imaging.image_continuum_single_field import (
-            point_spread_function_gaussian_fit_continuum,
-        )
-
-        (
-            first_return_dict["image"],
-            psf_fit_return_df,
-        ) = point_spread_function_gaussian_fit_continuum(
-            first_return_dict["image"],
-            image_data_group_in_name="residual",
-            image_data_group_out_name="residual",
-        )
-
-    second_input_params["model_xds"] = first_return_dict["image"]
-
-    # first_image = first_return_dict["image"]
-
-    # model_xds = first_image[["SKY_MODEL"]].copy(deep=False)
-    # model_xds.attrs = {
-    #    "data_groups": {
-    #        "model": {
-    #            "sky": "SKY_MODEL",
-    #        }
-    #    }
-    # }
-
-    # second_input_params["model_xds"] = model_xds
+    # second_input_params["model_xds"] = first_return_dict["image"]
+    model_xds = first_return_dict["image"][
+        [
+            "SKY_MODEL",
+        ]
+    ]
+    second_input_params["model_xds"] = model_xds
+    second_input_params["static_xds"] = static_xds
 
     # second_return_dict is the output after the final continuum reduce
 
