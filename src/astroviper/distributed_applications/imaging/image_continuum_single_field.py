@@ -1058,6 +1058,11 @@ def image_continuum_single_field(
         ]
     ]
 
+    # Preserve the complete model dataset, including coordinates such as
+    # polarization=["I", "Q"] or the corresponding valid labels.
+    model_1_xds = first_return_dict["image"][["SKY_MODEL"]].copy(deep=True)
+    model_1 = model_1_xds["SKY_MODEL"]
+
     # =============================================================
     # Major cycle 2 + minor cycle 2
     # =============================================================
@@ -1140,11 +1145,20 @@ def image_continuum_single_field(
 
     controller = second_return_dict["controller"]
 
-    model_xds = second_return_dict["image"][
-        [
-            "SKY_MODEL",
-        ]
-    ]
+    model_increment_2 = second_return_dict["image"]["SKY_MODEL"]
+
+    # Start from the first accumulated model dataset so that all coordinates,
+    # dataset attributes, and variable attributes are preserved.
+    model_2_xds = model_1_xds.copy(deep=True)
+
+    # Add the second minor-cycle increment positionally. We intentionally update
+    # only the array data rather than constructing a new xr.Dataset/xr.Variable,
+    # because constructing a new dataset without coordinates changes the
+    # polarization coordinate to integer indices [0, 1].
+    model_2_xds["SKY_MODEL"].data = model_1.data + model_increment_2.data
+
+    # Preserve the original SKY_MODEL attributes explicitly.
+    model_2_xds["SKY_MODEL"].attrs = model_1.attrs.copy()
 
     # =============================================================
     # Major cycle 3
@@ -1159,7 +1173,7 @@ def image_continuum_single_field(
     third_input_params["restore"] = True
 
     # Use the model produced by minor cycle 2.
-    third_input_params["model_xds"] = model_xds
+    third_input_params["model_xds"] = model_2_xds
 
     # Continue to use the static products created during major cycle 1.
     third_input_params["static_xds"] = static_xds
@@ -1203,13 +1217,7 @@ def image_continuum_single_field(
 
     return_dict = third_return_dict
 
-    source_model = second_return_dict["image"]["SKY_MODEL"]
-
-    return_dict["image"]["SKY_MODEL"] = xr.Variable(
-        source_model.dims,
-        source_model.data,
-        attrs=source_model.attrs.copy(),
-    )
+    return_dict["image"]["SKY_MODEL"] = model_2_xds["SKY_MODEL"].copy(deep=True)
 
     return_dict["controller"] = second_return_dict["controller"]
     return_dict["deconvolution"] = second_return_dict["deconvolution"]

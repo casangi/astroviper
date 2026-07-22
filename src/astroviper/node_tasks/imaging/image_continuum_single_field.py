@@ -476,7 +476,6 @@ def model_update_continuum_single_field(
 
             ``image_data_group_in_name``
                 Residual data-group name. Default is ``"residual"``.
-
             ``image_data_group_out_name``
                 Model data-group name. Default is ``"model"``.
 
@@ -624,6 +623,7 @@ def model_update_continuum_single_field(
     # -------------------------------------------------------------
     start = time.time()
 
+    # If nit the first call, we need to copy PSF and PB from the static_xds
     if is_n_iter_0 == False:
         static_xds = input_params["static_xds"]
 
