@@ -85,14 +85,16 @@ def residual_cycle_continuum_single_field(
     # ------------------------------------------------------------
     if not is_n_iter_0:
 
-        residual_data_group = img_xds.attrs["data_groups"].get(
-            image_data_group_out_name
+        # delete an old residual if present
+        residual_data_group = img_xds.attrs.get("data_groups", {}).get(
+            image_data_group_out_name,
+            {},
         )
 
-        if residual_data_group is None:
-            raise KeyError(
-                f"Image data group {image_data_group_out_name!r} is missing."
-            )
+        residual_sky_name = residual_data_group.get("sky")
+
+        if residual_sky_name is not None and residual_sky_name in img_xds:
+            img_xds.xr_img.delete_data_variables(variables=[residual_sky_name])
 
         residual_sky_name = residual_data_group.get("sky")
 

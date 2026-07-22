@@ -156,25 +156,92 @@ def residual_update_continuum_single_field(
     # -------------------------------------------------------------
     # Setup phase
     # -------------------------------------------------------------
-    (img_xds, setup_return_df, T_setup,) = imaging_preparation_continuum_single_field(
-        ps_xdt,
-        img_xds,
-        image_params,
-        imaging_weights_params,
-        processing_set_data_group_name=processing_set_data_group_name,
-        single_precision_image=single_precision_image,
-        processing_function_threads=processing_function_threads,
-        fft_backend=fft_backend,
-        image_data_variables_keep=image_data_variables_keep,
-        task_id=task_id,
-    )
 
-    timing["T_prep"] = T_setup
-    accumulate_timing(
-        timing,
-        setup_return_df,
-        phase="prep",
-    )
+    if is_n_iter_0:
+
+        (
+            img_xds,
+            setup_return_df,
+            T_setup,
+        ) = imaging_preparation_continuum_single_field(
+            ps_xdt,
+            img_xds,
+            image_params,
+            imaging_weights_params,
+            processing_set_data_group_name=processing_set_data_group_name,
+            single_precision_image=single_precision_image,
+            processing_function_threads=processing_function_threads,
+            fft_backend=fft_backend,
+            image_data_variables_keep=image_data_variables_keep,
+            task_id=task_id,
+        )
+
+        timing["T_prep"] = T_setup
+        accumulate_timing(
+            timing,
+            setup_return_df,
+            phase="prep",
+        )
+
+    else:
+        # Do the empty registrations ... that are needed down the line
+        from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
+            transform_polarization_basis,
+        )
+        from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+            calculate_imaging_weights,
+        )
+
+        # make_empty_sky_image() supplies the geometry and coordinates, but the
+        # xradio image accessor requires this dataset-type marker.
+        img_xds.attrs["type"] = "image_dataset"
+
+        # Residual needs to be registered
+        image_data_group_out_name = "residual"
+        data_groups = img_xds.attrs.setdefault("data_groups", {})
+
+        if image_data_group_out_name not in data_groups:
+            img_xds = img_xds.xr_img.add_data_group(
+                new_data_group_name=image_data_group_out_name,
+                new_data_group={
+                    "description": "Continuum residual products.",
+                    "date": "2026",
+                },
+            )
+
+        # Need to transform basis to Stokes
+        img_xds = transform_polarization_basis(
+            img_xds,
+            new_polarization_basis="stokes",
+            overwrite=True,
+        )
+
+        # Needs to be refactored at a later point when decided what to do with weights
+        start = time.time()
+
+        calculate_imaging_weights(
+            ps_xdt,
+            img_xds,
+            imaging_weights_params=imaging_weights_params,
+            return_weight_density_grid=False,
+            ms_data_group_in_name=processing_set_data_group_name,
+            ms_data_group_out_name=processing_set_data_group_name,
+            ms_data_group_out_modified={
+                "weight_imaging": "WEIGHT_IMAGING",
+            },
+            processing_function_threads=processing_function_threads,
+        )
+
+        T_weights = time.time() - start
+
+        setup_return_df = pd.DataFrame({})
+
+        timing["T_prep"] = T_weights
+        accumulate_timing(
+            timing,
+            setup_return_df,
+            phase="prep",
+        )
 
     # -------------------------------------------------------------
     # Install the current global model for later major cycles
@@ -241,6 +308,16 @@ def residual_update_continuum_single_field(
         from astroviper.processing_functions.imaging.image_continuum_single_field import (
             restore_image_continuum_single_field,
         )
+
+        # There shouldn't be a point spread function in img_xds if is_n_iter_0 = False
+        # since img_xds was initialized empty in this case
+        # As a consequence, you cannot restore on the first major loop
+        assert (restore and is_n_iter_0) == False
+        img_xds["POINT_SPREAD_FUNCTION"] = model_xds["POINT_SPREAD_FUNCTION"]
+
+        # Insert primary beam into return variable again
+        if "PRIMARY_BEAM" not in img_xds and "PRIMARY_BEAM" in model_xds:
+            img_xds["PRIMARY_BEAM"] = model_xds["PRIMARY_BEAM"]
 
         beam_fit_params_key = "beam_fit_params_point_spread_function"
 
