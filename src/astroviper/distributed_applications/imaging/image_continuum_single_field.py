@@ -1059,7 +1059,7 @@ def image_continuum_single_field(
     ]
 
     # =============================================================
-    # Major cycle 2
+    # Major cycle 2 + minor cycle 2
     # =============================================================
 
     start = time.time()
@@ -1067,7 +1067,7 @@ def image_continuum_single_field(
     second_input_params = dict(input_params)
     second_input_params["is_n_iter_0"] = False
 
-    second_input_params["restore"] = True
+    second_input_params["restore"] = False  # True
 
     # second_input_params["model_xds"] = first_return_dict["image"]
     model_xds = first_return_dict["image"][
@@ -1095,12 +1095,33 @@ def image_continuum_single_field(
         task_priorities=task_priorities,
     )
 
+    reduce_input_params = {
+        "additive_variables": ("SKY_RESIDUAL",),
+    }
+
     second_viper_graph = reduce(
         second_viper_graph,
         combine_continuum_chunks,
-        {},
+        reduce_input_params,
         mode=reduce_mode,
         n_batch=reduce_n_batch,
+    )
+
+    second_append_input_params = {
+        "iteration_control_params": iteration_control_params,
+        "deconvolver": deconvolver,
+        "processing_function_threads": processing_function_threads,
+        "is_n_iter_0": False,
+        "controller": controller,
+        "static_xds": static_xds,
+        "image_data_group_in_name": "residual",
+        "image_data_group_out_name": "model",
+    }
+
+    second_viper_graph = append(
+        second_viper_graph,
+        node_tasks.imaging.model_update_continuum_single_field,
+        second_append_input_params,
     )
 
     timing_distributed_application["T_create_map_reduce_append_graph"] = (
@@ -1117,15 +1138,94 @@ def image_continuum_single_field(
 
     return_dict = second_return_dict
 
-    # Preserve the model and controller state from the first minor cycle.
-    return_dict["image"]["SKY_MODEL"] = first_return_dict["image"]["SKY_MODEL"].copy(
-        deep=True
+    controller = second_return_dict["controller"]
+
+    model_xds = second_return_dict["image"][
+        [
+            "SKY_MODEL",
+        ]
+    ]
+
+    # =============================================================
+    # Major cycle 3
+    # =============================================================
+
+    start = time.time()
+
+    third_input_params = dict(input_params)
+    third_input_params["is_n_iter_0"] = False
+
+    # This is the final major cycle, so restore the final image here.
+    third_input_params["restore"] = True
+
+    # Use the model produced by minor cycle 2.
+    third_input_params["model_xds"] = model_xds
+
+    # Continue to use the static products created during major cycle 1.
+    third_input_params["static_xds"] = static_xds
+
+    third_viper_graph = map(
+        input_data=ps_xdt,
+        node_task_data_mapping=node_task_data_mapping,
+        node_task=node_tasks.imaging.residual_update_continuum_single_field,
+        input_params=third_input_params,
+        in_memory_compute=False,
+        data_loading_task=None,
+        disk_chunk_sizes=disk_chunk_sizes,
+        load_node_input_params={
+            "processing_set_data_group_name": processing_set_data_group_name,
+        },
+        monitor_resources_seconds=monitor_resources_seconds,
+        task_priorities=task_priorities,
     )
-    return_dict["controller"] = first_return_dict["controller"]
-    return_dict["deconvolution"] = first_return_dict["deconvolution"]
-    return_dict["stopcode"] = first_return_dict["stopcode"]
-    return_dict["stopdesc"] = first_return_dict["stopdesc"]
+
+    third_viper_graph = reduce(
+        third_viper_graph,
+        combine_continuum_chunks,
+        {},
+        mode=reduce_mode,
+        n_batch=reduce_n_batch,
+    )
+
+    timing_distributed_application["T_create_third_map_reduce_graph"] = (
+        time.time() - start
+    )
+
+    start = time.time()
+    third_dask_graph = generate_dask_workflow(third_viper_graph)
+    timing_distributed_application["T_generate_third_dask_graph"] = time.time() - start
+
+    start = time.time()
+    third_return_dict = dask.compute(third_dask_graph)[0]
+    timing_distributed_application["T_compute_third_dask_graph"] = time.time() - start
+
+    ###########################################################################
+
+    return_dict = third_return_dict
+
+    source_model = second_return_dict["image"]["SKY_MODEL"]
+
+    return_dict["image"]["SKY_MODEL"] = xr.Variable(
+        source_model.dims,
+        source_model.data,
+        attrs=source_model.attrs.copy(),
+    )
+
+    return_dict["controller"] = second_return_dict["controller"]
+    return_dict["deconvolution"] = second_return_dict["deconvolution"]
+    return_dict["stopcode"] = second_return_dict["stopcode"]
+    return_dict["stopdesc"] = second_return_dict["stopdesc"]
     return_dict["is_n_iter_0"] = False
+
+    # Preserve the model and controller state from the second minor cycle.
+    # return_dict["image"]["SKY_MODEL"] = first_return_dict["image"]["SKY_MODEL"].copy(
+    #    deep=True
+    # )
+    # return_dict["controller"] = first_return_dict["controller"]
+    # return_dict["deconvolution"] = first_return_dict["deconvolution"]
+    # return_dict["stopcode"] = first_return_dict["stopcode"]
+    # return_dict["stopdesc"] = first_return_dict["stopdesc"]
+    # return_dict["is_n_iter_0"] = False
 
     ###
 

@@ -490,6 +490,7 @@ def model_update_continuum_single_field(
 
     import pandas as pd
     import toolviper.utils.logger as logger
+    import xarray as xr
 
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
         model_update_mtmfs_single_field,
@@ -622,6 +623,39 @@ def model_update_continuum_single_field(
     # img_xds is already in memory and is modified in place.
     # -------------------------------------------------------------
     start = time.time()
+
+    if is_n_iter_0 == False:
+        static_xds = input_params["static_xds"]
+
+        for name in (
+            "POINT_SPREAD_FUNCTION",
+            "PRIMARY_BEAM",
+            "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+        ):
+            if name in static_xds and name not in img_xds:
+                source = static_xds[name]
+                img_xds[name] = xr.Variable(
+                    source.dims,
+                    source.data,
+                    attrs=source.attrs.copy(),
+                )
+
+            # Re-register the static variables in the current residual data group.
+            data_groups = img_xds.attrs.setdefault("data_groups", {})
+            residual_data_group = data_groups.setdefault(
+                image_data_group_in_name,
+                {},
+            )
+
+            residual_data_group["point_spread_function"] = "POINT_SPREAD_FUNCTION"
+
+            if "PRIMARY_BEAM" in img_xds:
+                residual_data_group["primary_beam"] = "PRIMARY_BEAM"
+
+            if "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION" in img_xds:
+                residual_data_group[
+                    "beam_fit_params"
+                ] = "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
 
     (deconvolve_dict, model_update_return_df,) = model_update_mtmfs_single_field(
         img_xds,
