@@ -246,8 +246,10 @@ def combine_continuum_chunks(input_data, input_params):
         input_params.get(
             "additive_variables",
             (
-                "SKY_RESIDUAL",
-                "POINT_SPREAD_FUNCTION",
+                "VISIBILITY",
+                "VISIBILITY_NORMALIZATION",
+                "UV_SAMPLING",
+                "UV_SAMPLING_NORMALIZATION",
             ),
         )
     )
@@ -980,6 +982,9 @@ def image_continuum_single_field(
     # major stop code means that the CLEAN loop has converged or reached one
     # of its configured limits.
     while controller.stopcode.major == 0:
+
+        print(n_major_cycles)
+
         n_major_cycles += 1
 
         logger.debug(f"Starting continuum major cycle {n_major_cycles}.")
@@ -1015,7 +1020,10 @@ def image_continuum_single_field(
             reduce_input_params = {}
         else:
             reduce_input_params = {
-                "additive_variables": ("SKY_RESIDUAL",),
+                "additive_variables": (
+                    "VISIBILITY",
+                    "VISIBILITY_NORMALIZATION",
+                ),
             }
 
         # ---------------------------------------------------------
@@ -1029,6 +1037,10 @@ def image_continuum_single_field(
             "controller": controller,
             "image_data_group_in_name": "residual",
             "image_data_group_out_name": "model",
+            "image_params": image_params,
+            "image_data_variables_keep": image_data_variables_keep,
+            "fft_backend": fft_backend,
+            "single_precision_image": single_precision_image,
         }
 
         if not is_n_iter_0:
@@ -1113,7 +1125,7 @@ def image_continuum_single_field(
     final_input_params = dict(input_params)
 
     final_input_params["is_n_iter_0"] = False
-    final_input_params["restore"] = True
+    final_input_params["restore"] = False  # True
     final_input_params["model_xds"] = model_xds
     final_input_params["static_xds"] = static_xds
 
@@ -1122,7 +1134,12 @@ def image_continuum_single_field(
     # occur after the convergence decision.
     final_return_dict = _compute_continuum_graph(
         cycle_input_params=final_input_params,
-        reduce_input_params={},
+        reduce_input_params={
+            "additive_variables": (
+                "VISIBILITY",
+                "VISIBILITY_NORMALIZATION",
+            ),
+        },
         append_input_params=None,
     )
 

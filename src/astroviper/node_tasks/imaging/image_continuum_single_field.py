@@ -419,10 +419,20 @@ def continuum_append_node(
     The prepared dataset is then passed to
     model_update_continuum_single_field().
     """
+    import numpy as np
     import xarray as xr
 
+    from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
+        transform_polarization_basis,
+    )
+    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (  # fft_norm_continuum_img_xds,; fft_norm_img_xds,
+        ifft_norm_img_xds,
+    )
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
         point_spread_function_gaussian_fit_continuum,
+    )
+    from astroviper.processing_functions.imaging.make_point_spread_function_continuum_single_field import (
+        _rename_psf_frequency_axis_to_taylor_order,
     )
 
     # GraphViper may supply the preceding result directly or as a
@@ -458,6 +468,105 @@ def continuum_append_node(
     )
 
     psf_fit_return_df = None
+
+    complex_dtype = np.complex64  # if single_precision_image else np.complex128
+    n_psf_taylor_terms = 3
+    nterms = 2
+    reference_frequency = 372763801257.61084
+
+    img_xds = ifft_norm_img_xds(
+        img_xds,
+        image_params=input_params["image_params"],
+        image_data_group_in_name="residual",
+        image_data_group_out_name="residual",
+        image_data_group_out_modified={
+            "sky": "SKY_RESIDUAL",
+        },
+        image_data_variables_keep=input_params["image_data_variables_keep"],
+        processing_function_threads=processing_function_threads,
+        fft_backend=input_params["fft_backend"],
+        complex_dtype=complex_dtype,
+    )
+
+    if "SKY_RESIDUAL" not in img_xds:
+        raise RuntimeError("ifft_norm_img_xds did not create SKY_RESIDUAL.")
+
+    if "taylor_term" not in img_xds["SKY_RESIDUAL"].dims:
+        raise RuntimeError(
+            "Continuum inverse FFT did not preserve the taylor_term dimension."
+        )
+
+    img_xds["SKY_RESIDUAL"].attrs.update(
+        {
+            "description": "Continuum residual Taylor products.",
+            "nterms": nterms,
+            "reference_frequency": reference_frequency,
+            "placeholder": False,
+        }
+    )
+
+    # start = time.time()
+    # img_xds = transform_polarization_basis(
+    #    img_xds,
+    #    new_polarization_basis="stokes",
+    #    overwrite=True,
+    # )
+    # T_transform_pol += time.time() - start
+
+    if is_n_iter_0:
+
+        # Gather PSF
+        img_xds = ifft_norm_img_xds(
+            img_xds,
+            image_params=input_params["image_params"],
+            image_data_group_in_name="residual",
+            image_data_group_out_name="residual",
+            image_data_group_out_modified={
+                "point_spread_function": "POINT_SPREAD_FUNCTION",
+            },
+            image_data_variables_keep=input_params["image_data_variables_keep"],
+            processing_function_threads=processing_function_threads,
+            fft_backend=input_params["fft_backend"],
+            complex_dtype=complex_dtype,
+        )
+
+        # This is harmless when the FFT helper already preserves arbitrary leading
+        # dimensions, and provides compatibility if it still labels the plane axis
+        # as "frequency".
+        img_xds = _rename_psf_frequency_axis_to_taylor_order(
+            img_xds,
+            image_data_group_out_name="residual",
+            n_psf_taylor_terms=n_psf_taylor_terms,
+        )
+
+        psf_name = img_xds.attrs["data_groups"]["residual"]["point_spread_function"]
+        if psf_name not in img_xds:
+            raise RuntimeError(
+                f"ifft_norm_img_xds did not create the expected variable {psf_name!r}."
+            )
+        if "psf_taylor_order" not in img_xds[psf_name].dims:
+            raise RuntimeError(
+                f"{psf_name} has dimensions {img_xds[psf_name].dims}; expected a "
+                "'psf_taylor_order' dimension.  The FFT normalization helper must "
+                "preserve arbitrary leading dimensions or be extended for MT-MFS."
+            )
+
+        img_xds[psf_name].attrs.update(
+            {
+                "type": "point_spread_function",
+                "nterms": nterms,  # int(image_params["nterms"]),
+                "n_psf_taylor_terms": n_psf_taylor_terms,
+                "reference_frequency": reference_frequency,
+            }
+        )
+
+    # start = time.time()
+    img_xds = transform_polarization_basis(
+        img_xds,
+        new_polarization_basis="stokes",
+        overwrite=True,
+    )
+    # T_transform_pol += time.time() - start
 
     if is_n_iter_0:
         # ----------------------------------------------------------

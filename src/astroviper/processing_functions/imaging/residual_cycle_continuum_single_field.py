@@ -163,30 +163,30 @@ def residual_cycle_continuum_single_field(
         #
         # The residual image is produced in correlation basis.
         #
-        start = time.time()
+        # start = time.time()
 
-        img_xds = transform_polarization_basis(
-            img_xds,
-            new_polarization_basis=instrument_polarization_basis,
-            overwrite=True,
-        )
+        # img_xds = transform_polarization_basis(
+        #    img_xds,
+        #    new_polarization_basis=instrument_polarization_basis,
+        #    overwrite=True,
+        # )
 
-        T_transform_pol += time.time() - start
+        # T_transform_pol += time.time() - start
 
     # ------------------------------------------------------------
     # First dirty-image cycle.
     # ------------------------------------------------------------
-    else:
+    # else:
 
-        start = time.time()
+    # start = time.time()
 
-        img_xds = transform_polarization_basis(
-            img_xds,
-            new_polarization_basis=instrument_polarization_basis,
-            overwrite=True,
-        )
+    # img_xds = transform_polarization_basis(
+    #    img_xds,
+    #    new_polarization_basis=instrument_polarization_basis,
+    #    overwrite=True,
+    # )
 
-        T_transform_pol += time.time() - start
+    # T_transform_pol += time.time() - start
 
     start = time.time()
     (
@@ -206,52 +206,52 @@ def residual_cycle_continuum_single_field(
     )
     T_grid = time.time() - start
 
-    start = time.time()
-    img_xds = ifft_norm_img_xds(
-        img_xds,
-        image_params=image_params,
-        image_data_group_in_name=image_data_group_out_name,
-        image_data_group_out_name=image_data_group_out_name,
-        image_data_group_out_modified={
-            "sky": "SKY_RESIDUAL",
-        },
-        image_data_variables_keep=image_data_variables_keep,
-        processing_function_threads=processing_function_threads,
-        fft_backend=fft_backend,
-        complex_dtype=complex_dtype,
-    )
-    T_fft_grid = time.time() - start
+    # start = time.time()
+    # img_xds = ifft_norm_img_xds(
+    #    img_xds,
+    #    image_params=image_params,
+    #    image_data_group_in_name=image_data_group_out_name,
+    #    image_data_group_out_name=image_data_group_out_name,
+    #    image_data_group_out_modified={
+    #        "sky": "SKY_RESIDUAL",
+    #    },
+    #    image_data_variables_keep=image_data_variables_keep,
+    #    processing_function_threads=processing_function_threads,
+    #    fft_backend=fft_backend,
+    #    complex_dtype=complex_dtype,
+    # )
+    # T_fft_grid = time.time() - start
 
-    if "SKY_RESIDUAL" not in img_xds:
-        raise RuntimeError("ifft_norm_img_xds did not create SKY_RESIDUAL.")
+    # if "SKY_RESIDUAL" not in img_xds:
+    #    raise RuntimeError("ifft_norm_img_xds did not create SKY_RESIDUAL.")
 
-    if "taylor_term" not in img_xds["SKY_RESIDUAL"].dims:
-        raise RuntimeError(
-            "Continuum inverse FFT did not preserve the taylor_term dimension."
-        )
+    # if "taylor_term" not in img_xds["SKY_RESIDUAL"].dims:
+    #    raise RuntimeError(
+    #        "Continuum inverse FFT did not preserve the taylor_term dimension."
+    #    )
 
-    img_xds["SKY_RESIDUAL"].attrs.update(
-        {
-            "description": "Continuum residual Taylor products.",
-            "nterms": nterms,
-            "reference_frequency": reference_frequency,
-            "placeholder": False,
-        }
-    )
+    # img_xds["SKY_RESIDUAL"].attrs.update(
+    #    {
+    #        "description": "Continuum residual Taylor products.",
+    #        "nterms": nterms,
+    #        "reference_frequency": reference_frequency,
+    #        "placeholder": False,
+    #    }
+    # )
 
-    start = time.time()
-    img_xds = transform_polarization_basis(
-        img_xds,
-        new_polarization_basis="stokes",
-        overwrite=True,
-    )
-    T_transform_pol += time.time() - start
+    # start = time.time()
+    # img_xds = transform_polarization_basis(
+    #    img_xds,
+    #    new_polarization_basis="stokes",
+    #    overwrite=True,
+    # )
+    # T_transform_pol += time.time() - start
 
-    logger.debug(
-        "Created continuum residual Taylor products with dimensions "
-        f"{img_xds['SKY_RESIDUAL'].dims} and shape "
-        f"{img_xds['SKY_RESIDUAL'].shape}."
-    )
+    # logger.debug(
+    #    "Created continuum residual Taylor products with dimensions "
+    #    f"{img_xds['SKY_RESIDUAL'].dims} and shape "
+    #    f"{img_xds['SKY_RESIDUAL'].shape}."
+    # )
 
     return_df = pd.DataFrame(
         {
@@ -260,7 +260,7 @@ def residual_cycle_continuum_single_field(
             "T_fft_degrid": [T_fft_degrid],
             "T_residual_vis": [T_residual_vis],
             "T_grid": [T_grid],
-            "T_fft_grid": [T_fft_grid],
+            # "T_fft_grid": [T_fft_grid],
             "T_transform_pol": [T_transform_pol],
             "nterms": [nterms],
             "is_n_iter_0": [bool(is_n_iter_0)],

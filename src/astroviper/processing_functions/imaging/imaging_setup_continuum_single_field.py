@@ -324,15 +324,15 @@ def imaging_setup_continuum_single_field(
     # -------------------------------------------------------------
     # Correlation -> Stokes
     # -------------------------------------------------------------
-    start = time.time()
+    # start = time.time()
 
-    img_xds = transform_polarization_basis(
-        img_xds,
-        new_polarization_basis="stokes",
-        overwrite=True,
-    )
+    # img_xds = transform_polarization_basis(
+    #    img_xds,
+    #    new_polarization_basis="stokes",
+    #    overwrite=True,
+    # )
 
-    T_transform_pol = time.time() - start
+    # T_transform_pol = time.time() - start
 
     # Deliberately no point_spread_function_gaussian_fit here. The correct beam
     # is fitted from the globally reduced zeroth-order Taylor PSF.
@@ -342,7 +342,7 @@ def imaging_setup_continuum_single_field(
             "T_weights": [T_weights],
             "T_make_point_spread_function": [T_make_point_spread_function],
             "T_primary_beam": [T_primary_beam],
-            "T_transform_pol": [T_transform_pol],
+            # "T_transform_pol": [T_transform_pol],
             # Preserve the cube timing schema while showing that the fit was
             # intentionally deferred.
             "T_psf_fit": [0.0],

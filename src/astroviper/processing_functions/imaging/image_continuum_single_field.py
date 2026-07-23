@@ -188,9 +188,9 @@ def residual_update_continuum_single_field(
 
     else:
         # Do the empty registrations ... that are needed down the line
-        from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
-            transform_polarization_basis,
-        )
+        # from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
+        #    transform_polarization_basis,
+        # )
         from astroviper.processing_functions.imaging.calculate_imaging_weights import (
             calculate_imaging_weights,
         )
@@ -213,11 +213,11 @@ def residual_update_continuum_single_field(
             )
 
         # Need to transform basis to Stokes
-        img_xds = transform_polarization_basis(
-            img_xds,
-            new_polarization_basis="stokes",
-            overwrite=True,
-        )
+        # img_xds = transform_polarization_basis(
+        #    img_xds,
+        #    new_polarization_basis="stokes",
+        #    overwrite=True,
+        # )
 
         # Needs to be refactored at a later point when decided what to do with weights
         start = time.time()

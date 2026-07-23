@@ -439,60 +439,60 @@ def make_point_spread_function_continuum_single_field(
         )
         T_uv_sampling_grid += time.time() - start
 
-    start = time.time()
-    img_xds = ifft_norm_img_xds(
-        img_xds,
-        image_params=image_params,
-        image_data_group_in_name=image_data_group_in_name,
-        image_data_group_out_name=image_data_group_out_name,
-        image_data_group_out_modified={
-            "point_spread_function": "POINT_SPREAD_FUNCTION",
-        },
-        image_data_variables_keep=image_data_variables_keep,
-        processing_function_threads=processing_function_threads,
-        fft_backend=fft_backend,
-        complex_dtype=complex_dtype,
-    )
-    T_fft_norm = time.time() - start
+    # start = time.time()
+    # img_xds = ifft_norm_img_xds(
+    #    img_xds,
+    #    image_params=image_params,
+    #    image_data_group_in_name=image_data_group_in_name,
+    #    image_data_group_out_name=image_data_group_out_name,
+    #    image_data_group_out_modified={
+    #        "point_spread_function": "POINT_SPREAD_FUNCTION",
+    #    },
+    #    image_data_variables_keep=image_data_variables_keep,
+    #    processing_function_threads=processing_function_threads,
+    #    fft_backend=fft_backend,
+    #    complex_dtype=complex_dtype,
+    # )
+    # T_fft_norm = time.time() - start
 
     # This is harmless when the FFT helper already preserves arbitrary leading
     # dimensions, and provides compatibility if it still labels the plane axis
     # as "frequency".
-    img_xds = _rename_psf_frequency_axis_to_taylor_order(
-        img_xds,
-        image_data_group_out_name=image_data_group_out_name,
-        n_psf_taylor_terms=n_psf_taylor_terms,
-    )
+    # img_xds = _rename_psf_frequency_axis_to_taylor_order(
+    #    img_xds,
+    #    image_data_group_out_name=image_data_group_out_name,
+    #    n_psf_taylor_terms=n_psf_taylor_terms,
+    # )
 
-    psf_name = img_xds.attrs["data_groups"][image_data_group_out_name][
-        "point_spread_function"
-    ]
-    if psf_name not in img_xds:
-        raise RuntimeError(
-            f"ifft_norm_img_xds did not create the expected variable {psf_name!r}."
-        )
-    if "psf_taylor_order" not in img_xds[psf_name].dims:
-        raise RuntimeError(
-            f"{psf_name} has dimensions {img_xds[psf_name].dims}; expected a "
-            "'psf_taylor_order' dimension.  The FFT normalization helper must "
-            "preserve arbitrary leading dimensions or be extended for MT-MFS."
-        )
+    # psf_name = img_xds.attrs["data_groups"][image_data_group_out_name][
+    #    "point_spread_function"
+    # ]
+    # if psf_name not in img_xds:
+    #    raise RuntimeError(
+    #        f"ifft_norm_img_xds did not create the expected variable {psf_name!r}."
+    #    )
+    # if "psf_taylor_order" not in img_xds[psf_name].dims:
+    #    raise RuntimeError(
+    #        f"{psf_name} has dimensions {img_xds[psf_name].dims}; expected a "
+    #        "'psf_taylor_order' dimension.  The FFT normalization helper must "
+    #        "preserve arbitrary leading dimensions or be extended for MT-MFS."
+    #    )
 
-    img_xds[psf_name].attrs.update(
-        {
-            "type": "point_spread_function",
-            "nterms": int(image_params["nterms"]),
-            "n_psf_taylor_terms": n_psf_taylor_terms,
-            "reference_frequency": reference_frequency,
-        }
-    )
+    # img_xds[psf_name].attrs.update(
+    #    {
+    #        "type": "point_spread_function",
+    #        "nterms": int(image_params["nterms"]),
+    #        "n_psf_taylor_terms": n_psf_taylor_terms,
+    #        "reference_frequency": reference_frequency,
+    #    }
+    # )
 
     return_df = pd.DataFrame(
         {
             "T_gcf": [T_gcf],
             "T_vis_mask": [T_vis_mask],
             "T_uv_sampling_grid": [T_uv_sampling_grid],
-            "T_fft_norm": [T_fft_norm],
+            # "T_fft_norm": [T_fft_norm],
         }
     )
 
