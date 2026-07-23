@@ -469,10 +469,45 @@ def continuum_append_node(
 
     psf_fit_return_df = None
 
-    complex_dtype = np.complex64  # if single_precision_image else np.complex128
-    n_psf_taylor_terms = 3
-    nterms = 2
-    reference_frequency = 372763801257.61084
+    # ----------------------------------------------------------
+    # Resolve and validate continuum configuration.
+    # ----------------------------------------------------------
+    if "image_params" not in input_params:
+        raise KeyError("continuum_append_node requires input_params['image_params'].")
+
+    image_params = input_params["image_params"]
+
+    if "nterms" not in image_params:
+        raise KeyError("image_params must contain 'nterms' for continuum imaging.")
+
+    nterms = int(image_params["nterms"])
+
+    if nterms < 1:
+        raise ValueError(
+            f"image_params['nterms'] must be at least 1; received {nterms}."
+        )
+
+    if "reference_frequency" in image_params:
+        reference_frequency = float(image_params["reference_frequency"])
+    elif "reference_frequency_hz" in image_params:
+        reference_frequency = float(image_params["reference_frequency_hz"])
+    else:
+        raise KeyError(
+            "image_params must contain either 'reference_frequency' or "
+            "'reference_frequency_hz'."
+        )
+
+    if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
+        raise ValueError(
+            "The continuum reference frequency must be finite and positive; "
+            f"received {reference_frequency}."
+        )
+
+    n_psf_taylor_terms = 2 * nterms - 1
+
+    single_precision_image = bool(input_params.get("single_precision_image", True))
+
+    complex_dtype = np.complex64 if single_precision_image else np.complex128
 
     img_xds = ifft_norm_img_xds(
         img_xds,
@@ -504,6 +539,14 @@ def continuum_append_node(
             "placeholder": False,
         }
     )
+
+    if img_xds["SKY_RESIDUAL"].sizes["taylor_term"] != nterms:
+        raise ValueError(
+            "The reduced residual Taylor stack is inconsistent with nterms: "
+            f"SKY_RESIDUAL contains "
+            f"{img_xds['SKY_RESIDUAL'].sizes['taylor_term']} terms, "
+            f"but image_params requests {nterms}."
+        )
 
     # start = time.time()
     # img_xds = transform_polarization_basis(
@@ -559,6 +602,14 @@ def continuum_append_node(
                 "reference_frequency": reference_frequency,
             }
         )
+
+        if img_xds[psf_name].sizes["psf_taylor_order"] != n_psf_taylor_terms:
+            raise ValueError(
+                "The reduced PSF Taylor stack is inconsistent with nterms: "
+                f"{psf_name} contains "
+                f"{img_xds[psf_name].sizes['psf_taylor_order']} orders, "
+                f"but {n_psf_taylor_terms} are required for nterms={nterms}."
+            )
 
     # start = time.time()
     img_xds = transform_polarization_basis(
