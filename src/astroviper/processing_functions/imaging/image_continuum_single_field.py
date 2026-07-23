@@ -538,18 +538,28 @@ def model_update_mtmfs_single_field(
 
     start = time.time()
 
-    # add sidelobe point spread function
-    if is_n_iter_0:
-        img_xds = add_max_sidelobe_point_spread_function_continuum_single_field(img_xds)
-    else:
-        max_sidelobe_name = "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
+    max_sidelobe_name = "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
 
-        if max_sidelobe_name not in img_xds:
-            raise KeyError(f"{max_sidelobe_name} is required for later minor cycles.")
+    if max_sidelobe_name not in img_xds:
+        raise KeyError(
+            f"{max_sidelobe_name} is required before running the "
+            "continuum minor cycle. It must be created by "
+            "point_spread_function_gaussian_fit_continuum() during "
+            "the first append node and restored from static_xds during "
+            "later append nodes."
+        )
 
-        residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
+    data_groups = img_xds.attrs.setdefault(
+        "data_groups",
+        {},
+    )
 
-        residual_data_group["max_sidelobe_point_spread_function"] = max_sidelobe_name
+    residual_data_group = data_groups.setdefault(
+        image_data_group_in_name,
+        {},
+    )
+
+    residual_data_group["max_sidelobe_point_spread_function"] = max_sidelobe_name
 
     # ------------------------------------------------------------------
     # Build a temporary cube-like image dataset.
@@ -757,104 +767,6 @@ def model_update_mtmfs_single_field(
         )
 
     return deconvolve_dict, return_df
-
-
-def add_max_sidelobe_point_spread_function_continuum_single_field(
-    img_xds,
-    *,
-    image_data_group_name="residual",
-    output_name="MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
-):
-    """Measure the maximum sidelobe of each Taylor PSF plane."""
-
-    import numpy as np
-    import xarray as xr
-
-    data_group = img_xds.attrs["data_groups"][image_data_group_name]
-    psf_name = data_group["point_spread_function"]
-
-    psf = img_xds[psf_name]
-
-    if "psf_taylor_order" not in psf.dims:
-        raise ValueError(
-            f"{psf_name!r} must contain 'psf_taylor_order'; "
-            f"received dimensions {psf.dims}."
-        )
-
-    # Replace this block with the existing cube-PSF sidelobe-analysis
-    # implementation if one is available.
-    psf_values = np.abs(
-        psf.transpose(
-            "time",
-            "psf_taylor_order",
-            "polarization",
-            "l",
-            "m",
-        ).values
-    )
-
-    n_time, n_order, n_pol, n_l, n_m = psf_values.shape
-    max_sidelobe = np.empty(
-        (n_time, n_order, n_pol),
-        dtype=np.float64,
-    )
-
-    for time_index in range(n_time):
-        for order_index in range(n_order):
-            for pol_index in range(n_pol):
-                plane = psf_values[
-                    time_index,
-                    order_index,
-                    pol_index,
-                ]
-
-                peak_l, peak_m = np.unravel_index(
-                    np.argmax(plane),
-                    plane.shape,
-                )
-
-                sidelobe_plane = plane.copy()
-
-                # Temporary main-lobe exclusion. Ideally derive this region from
-                # the fitted restoring beam or reuse the cube implementation.
-                half_width = 3
-
-                l_start = max(0, peak_l - half_width)
-                l_stop = min(n_l, peak_l + half_width + 1)
-                m_start = max(0, peak_m - half_width)
-                m_stop = min(n_m, peak_m + half_width + 1)
-
-                sidelobe_plane[
-                    l_start:l_stop,
-                    m_start:m_stop,
-                ] = 0.0
-
-                max_sidelobe[
-                    time_index,
-                    order_index,
-                    pol_index,
-                ] = np.max(sidelobe_plane)
-
-    img_xds[output_name] = xr.DataArray(
-        max_sidelobe,
-        dims=(
-            "time",
-            "psf_taylor_order",
-            "polarization",
-        ),
-        coords={
-            "time": psf.coords["time"],
-            "psf_taylor_order": psf.coords["psf_taylor_order"],
-            "polarization": psf.coords["polarization"],
-        },
-        attrs={
-            "type": "max_sidelobe_point_spread_function",
-        },
-    )
-
-    data_group["max_sidelobe_point_spread_function"] = output_name
-
-    return img_xds
 
 
 def restore_image_continuum_single_field(

@@ -410,7 +410,163 @@ def continuum_append_node(
     input_data,
     input_params,
 ):
-    return_dict = model_update_continuum_single_field(input_data, input_params)
+    """Prepare static continuum products and run one minor cycle.
+
+    On the first iteration, the globally reduced PSF is fitted and the
+    static imaging products are collected. On later iterations, those
+    static products are restored into the newly reduced residual dataset.
+
+    The prepared dataset is then passed to
+    model_update_continuum_single_field().
+    """
+    import xarray as xr
+
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        point_spread_function_gaussian_fit_continuum,
+    )
+
+    # GraphViper may supply the preceding result directly or as a
+    # singleton sequence.
+    if isinstance(input_data, (list, tuple)):
+        if len(input_data) != 1:
+            raise ValueError(
+                "continuum_append_node expects exactly one reduced input, "
+                f"but received {len(input_data)}."
+            )
+        input_data = input_data[0]
+
+    if not isinstance(input_data, dict):
+        raise TypeError(
+            "continuum_append_node expects the dictionary returned by "
+            f"the reduce stage, not {type(input_data).__name__}."
+        )
+
+    if "image" not in input_data:
+        raise KeyError("The continuum reduce result does not contain 'image'.")
+
+    img_xds = input_data["image"]
+    is_n_iter_0 = bool(input_params.get("is_n_iter_0", True))
+
+    image_data_group_in_name = input_params.get(
+        "image_data_group_in_name",
+        "residual",
+    )
+
+    processing_function_threads = input_params.get(
+        "processing_function_threads",
+        1,
+    )
+
+    psf_fit_return_df = None
+
+    if is_n_iter_0:
+        # ----------------------------------------------------------
+        # Operations performed exactly once, after major cycle 1.
+        # ----------------------------------------------------------
+        (img_xds, psf_fit_return_df,) = point_spread_function_gaussian_fit_continuum(
+            img_xds,
+            image_data_group_in_name=image_data_group_in_name,
+            image_data_group_out_name=image_data_group_in_name,
+            processing_function_threads=processing_function_threads,
+        )
+
+        static_variable_names = [
+            "POINT_SPREAD_FUNCTION",
+            "PRIMARY_BEAM",
+            "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
+        ]
+
+        missing = [name for name in static_variable_names if name not in img_xds]
+
+        if missing:
+            raise KeyError(
+                "The first continuum append node could not construct "
+                f"all static products. Missing: {missing}."
+            )
+
+        static_xds = img_xds[static_variable_names].copy(deep=False)
+
+        # Keep the data-group metadata required when static_xds is
+        # installed during later cycles.
+        static_xds.attrs = dict(img_xds.attrs)
+
+    else:
+        # ----------------------------------------------------------
+        # Operations performed after all later major cycles.
+        # ----------------------------------------------------------
+        if "static_xds" not in input_params:
+            raise KeyError("static_xds must be supplied when " "is_n_iter_0=False.")
+
+        static_xds = input_params["static_xds"]
+
+        static_variable_names = [
+            "POINT_SPREAD_FUNCTION",
+            "PRIMARY_BEAM",
+            "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
+        ]
+
+        for name in static_variable_names:
+            if name not in static_xds:
+                raise KeyError(f"static_xds does not contain {name!r}.")
+
+            if name not in img_xds:
+                source = static_xds[name]
+
+                img_xds[name] = xr.Variable(
+                    source.dims,
+                    source.data,
+                    attrs=source.attrs.copy(),
+                )
+
+        # Reconstruct the residual data-group registrations.
+        data_groups = img_xds.attrs.setdefault(
+            "data_groups",
+            {},
+        )
+
+        residual_data_group = data_groups.setdefault(
+            image_data_group_in_name,
+            {},
+        )
+
+        residual_data_group["point_spread_function"] = "POINT_SPREAD_FUNCTION"
+
+        residual_data_group["primary_beam"] = "PRIMARY_BEAM"
+
+        residual_data_group[
+            "beam_fit_params_point_spread_function"
+        ] = "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
+
+        residual_data_group[
+            "max_sidelobe_point_spread_function"
+        ] = "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
+
+    input_data["image"] = img_xds
+
+    # The lower-level model-update node now only handles iteration
+    # control, deconvolution, and convergence.
+    model_update_input_params = dict(input_params)
+
+    # static_xds has already been installed above. Do not make the
+    # model-update node responsible for it as well.
+    model_update_input_params.pop("static_xds", None)
+
+    return_dict = model_update_continuum_single_field(
+        input_data,
+        model_update_input_params,
+    )
+
+    # Expose static state to the distributed driver for the next
+    # major-cycle graph.
+    return_dict["static_xds"] = static_xds
+
+    if psf_fit_return_df is not None:
+        return_dict["timing_psf_fit"] = psf_fit_return_df.reset_index(drop=True)
+    else:
+        return_dict["timing_psf_fit"] = None
+
     return return_dict
 
 
@@ -631,46 +787,6 @@ def model_update_continuum_single_field(
     # img_xds is already in memory and is modified in place.
     # -------------------------------------------------------------
     start = time.time()
-
-    # If not the first call, we need to copy PSF and PB from the static_xds
-    if is_n_iter_0 == False:
-        static_xds = input_params["static_xds"]
-
-        for name in (
-            "POINT_SPREAD_FUNCTION",
-            "PRIMARY_BEAM",
-            "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
-            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
-        ):
-            if name in static_xds and name not in img_xds:
-                source = static_xds[name]
-                img_xds[name] = xr.Variable(
-                    source.dims,
-                    source.data,
-                    attrs=source.attrs.copy(),
-                )
-
-            # Re-register the static variables in the current residual data group.
-            data_groups = img_xds.attrs.setdefault("data_groups", {})
-            residual_data_group = data_groups.setdefault(
-                image_data_group_in_name,
-                {},
-            )
-
-            residual_data_group["point_spread_function"] = "POINT_SPREAD_FUNCTION"
-
-            if "PRIMARY_BEAM" in img_xds:
-                residual_data_group["primary_beam"] = "PRIMARY_BEAM"
-
-            if "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION" in img_xds:
-                residual_data_group[
-                    "beam_fit_params"
-                ] = "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
-
-            if "MAX_SIDELOBE_POINT_SPREAD_FUNCTION" in img_xds:
-                residual_data_group[
-                    "max_sidelobe_point_spread_function"
-                ] = "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
 
     (deconvolve_dict, model_update_return_df,) = model_update_mtmfs_single_field(
         img_xds,

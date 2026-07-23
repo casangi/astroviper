@@ -1030,34 +1030,11 @@ def image_continuum_single_field(
     timing_distributed_application["T_compute_dask_graph"] = time.time() - start
 
     controller = first_return_dict["controller"]
+    static_xds = first_return_dict["static_xds"]
 
-    # We need to do this once after the first major loop
-    # Fit beam, in principle only needed when we restore later on
-    # This check is currently not applied, i.e. whether we will restore at a later point
-    # and the beam gets fitted by default
-    from astroviper.processing_functions.imaging.image_continuum_single_field import (
-        point_spread_function_gaussian_fit_continuum,
-    )
+    model_1_xds = first_return_dict["image"][["SKY_MODEL"]].copy(deep=True)
 
-    (
-        first_return_dict["image"],
-        psf_fit_return_df,
-    ) = point_spread_function_gaussian_fit_continuum(
-        first_return_dict["image"],
-        image_data_group_in_name="residual",
-        image_data_group_out_name="residual",
-    )
-
-    # static_xds will hold the quantities that do not change from iteration to iteration
-    # model_xds will hold the actual model that gets updated
-    static_xds = first_return_dict["image"][
-        [
-            "POINT_SPREAD_FUNCTION",
-            "PRIMARY_BEAM",
-            "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
-            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
-        ]
-    ]
+    model_1 = model_1_xds["SKY_MODEL"]
 
     # Preserve the complete model dataset, including coordinates such as
     # polarization=["I", "Q"] or the corresponding valid labels.
@@ -1126,7 +1103,7 @@ def image_continuum_single_field(
 
     second_viper_graph = append(
         second_viper_graph,
-        node_tasks.imaging.model_update_continuum_single_field,
+        node_tasks.imaging.continuum_append_node,
         second_append_input_params,
     )
 
