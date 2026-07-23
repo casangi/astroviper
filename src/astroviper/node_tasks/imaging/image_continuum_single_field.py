@@ -405,87 +405,47 @@ def residual_update_continuum_single_field(
     }
 
 
-@shares_param_docs
-def continuum_append_node(
-    input_data,
-    input_params,
-):
-    """Prepare static continuum products and run one minor cycle.
-
-    On the first iteration, the globally reduced PSF is fitted and the
-    static imaging products are collected. On later iterations, those
-    static products are restored into the newly reduced residual dataset.
-
-    The prepared dataset is then passed to
-    model_update_continuum_single_field().
-    """
-    import numpy as np
-    import xarray as xr
-
-    from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
-        transform_polarization_basis,
-    )
-    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (  # fft_norm_continuum_img_xds,; fft_norm_img_xds,
-        ifft_norm_img_xds,
-    )
-    from astroviper.processing_functions.imaging.image_continuum_single_field import (
-        point_spread_function_gaussian_fit_continuum,
-    )
-    from astroviper.processing_functions.imaging.make_point_spread_function_continuum_single_field import (
-        _rename_psf_frequency_axis_to_taylor_order,
-    )
-
-    # GraphViper may supply the preceding result directly or as a
-    # singleton sequence.
+def _unwrap_continuum_reduce_result(input_data, node_name):
+    """Return the dictionary produced by the continuum reduce stage."""
     if isinstance(input_data, (list, tuple)):
         if len(input_data) != 1:
             raise ValueError(
-                "continuum_append_node expects exactly one reduced input, "
+                f"{node_name} expects exactly one reduced input, "
                 f"but received {len(input_data)}."
             )
         input_data = input_data[0]
 
     if not isinstance(input_data, dict):
         raise TypeError(
-            "continuum_append_node expects the dictionary returned by "
-            f"the reduce stage, not {type(input_data).__name__}."
+            f"{node_name} expects the dictionary returned by the reduce "
+            f"stage, not {type(input_data).__name__}."
         )
 
     if "image" not in input_data:
-        raise KeyError("The continuum reduce result does not contain 'image'.")
+        raise KeyError(
+            f"The continuum reduce result supplied to {node_name} "
+            "does not contain 'image'."
+        )
 
-    img_xds = input_data["image"]
-    is_n_iter_0 = bool(input_params.get("is_n_iter_0", True))
+    return input_data
 
-    image_data_group_in_name = input_params.get(
-        "image_data_group_in_name",
-        "residual",
-    )
 
-    processing_function_threads = input_params.get(
-        "processing_function_threads",
-        1,
-    )
+def _resolve_continuum_append_configuration(input_params):
+    """Resolve validated continuum parameters used by global append nodes."""
+    import numpy as np
 
-    psf_fit_return_df = None
-
-    # ----------------------------------------------------------
-    # Resolve and validate continuum configuration.
-    # ----------------------------------------------------------
     if "image_params" not in input_params:
-        raise KeyError("continuum_append_node requires input_params['image_params'].")
+        raise KeyError("A continuum append node requires input_params['image_params'].")
 
     image_params = input_params["image_params"]
 
     if "nterms" not in image_params:
-        raise KeyError("image_params must contain 'nterms' for continuum imaging.")
+        raise KeyError("image_params must contain 'nterms'.")
 
     nterms = int(image_params["nterms"])
 
     if nterms < 1:
-        raise ValueError(
-            f"image_params['nterms'] must be at least 1; received {nterms}."
-        )
+        raise ValueError(f"image_params['nterms'] must be positive; received {nterms}.")
 
     if "reference_frequency" in image_params:
         reference_frequency = float(image_params["reference_frequency"])
@@ -493,7 +453,7 @@ def continuum_append_node(
         reference_frequency = float(image_params["reference_frequency_hz"])
     else:
         raise KeyError(
-            "image_params must contain either 'reference_frequency' or "
+            "image_params must contain 'reference_frequency' or "
             "'reference_frequency_hz'."
         )
 
@@ -503,32 +463,149 @@ def continuum_append_node(
             f"received {reference_frequency}."
         )
 
-    n_psf_taylor_terms = 2 * nterms - 1
-
     single_precision_image = bool(input_params.get("single_precision_image", True))
 
-    complex_dtype = np.complex64 if single_precision_image else np.complex128
+    return {
+        "image_params": image_params,
+        "nterms": nterms,
+        "n_psf_taylor_terms": 2 * nterms - 1,
+        "reference_frequency": reference_frequency,
+        "complex_dtype": (np.complex64 if single_precision_image else np.complex128),
+        "processing_function_threads": int(
+            input_params.get("processing_function_threads", 1)
+        ),
+        "fft_backend": input_params.get("fft_backend", "pyfftw"),
+        "image_data_variables_keep": input_params.get(
+            "image_data_variables_keep",
+            [],
+        ),
+        "image_data_group_in_name": input_params.get(
+            "image_data_group_in_name",
+            "residual",
+        ),
+    }
 
+
+def _install_static_continuum_products(
+    img_xds,
+    static_xds,
+    image_data_group_name="residual",
+):
+    """Install cached PSF, PB, and beam-fit products into a residual image."""
+    import xarray as xr
+
+    static_variable_names = (
+        "POINT_SPREAD_FUNCTION",
+        "PRIMARY_BEAM",
+        "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+        "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
+    )
+
+    for name in static_variable_names:
+        if name not in static_xds:
+            raise KeyError(f"static_xds does not contain {name!r}.")
+
+        if name not in img_xds:
+            source = static_xds[name]
+
+            img_xds[name] = xr.Variable(
+                source.dims,
+                source.data,
+                attrs=source.attrs.copy(),
+            )
+
+    data_groups = img_xds.attrs.setdefault("data_groups", {})
+    residual_group = data_groups.setdefault(image_data_group_name, {})
+
+    residual_group.update(
+        {
+            "point_spread_function": "POINT_SPREAD_FUNCTION",
+            "primary_beam": "PRIMARY_BEAM",
+            "beam_fit_params_point_spread_function": (
+                "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
+            ),
+            "max_sidelobe_point_spread_function": (
+                "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
+            ),
+        }
+    )
+
+    return img_xds
+
+
+def _prepare_continuum_image(
+    img_xds,
+    input_params,
+    *,
+    initialize_static_products,
+):
+    """Convert globally reduced UV products into image-domain products.
+
+    This helper performs the operations shared by the minor-cycle and
+    finalization nodes:
+
+    1. inverse FFT and normalize the reduced residual UV grids;
+    2. create and fit the globally reduced PSF on the first major cycle;
+    3. otherwise install cached static products;
+    4. convert the image dataset from correlation basis to Stokes.
+
+    Returns
+    -------
+    tuple
+        ``(img_xds, static_xds, psf_fit_return_df)``.
+    """
+    from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
+        transform_polarization_basis,
+    )
+    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+        ifft_norm_img_xds,
+    )
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        point_spread_function_gaussian_fit_continuum,
+    )
+    from astroviper.processing_functions.imaging.make_point_spread_function_continuum_single_field import (
+        _rename_psf_frequency_axis_to_taylor_order,
+    )
+
+    config = _resolve_continuum_append_configuration(input_params)
+
+    image_params = config["image_params"]
+    nterms = config["nterms"]
+    n_psf_taylor_terms = config["n_psf_taylor_terms"]
+    reference_frequency = config["reference_frequency"]
+    image_data_group_name = config["image_data_group_in_name"]
+
+    # ----------------------------------------------------------
+    # Global residual inverse FFT.
+    # ----------------------------------------------------------
     img_xds = ifft_norm_img_xds(
         img_xds,
-        image_params=input_params["image_params"],
-        image_data_group_in_name="residual",
-        image_data_group_out_name="residual",
+        image_params=image_params,
+        image_data_group_in_name=image_data_group_name,
+        image_data_group_out_name=image_data_group_name,
         image_data_group_out_modified={
             "sky": "SKY_RESIDUAL",
         },
-        image_data_variables_keep=input_params["image_data_variables_keep"],
-        processing_function_threads=processing_function_threads,
-        fft_backend=input_params["fft_backend"],
-        complex_dtype=complex_dtype,
+        image_data_variables_keep=config["image_data_variables_keep"],
+        processing_function_threads=config["processing_function_threads"],
+        fft_backend=config["fft_backend"],
+        complex_dtype=config["complex_dtype"],
     )
 
     if "SKY_RESIDUAL" not in img_xds:
-        raise RuntimeError("ifft_norm_img_xds did not create SKY_RESIDUAL.")
+        raise RuntimeError(
+            "The global residual inverse FFT did not create SKY_RESIDUAL."
+        )
 
     if "taylor_term" not in img_xds["SKY_RESIDUAL"].dims:
-        raise RuntimeError(
-            "Continuum inverse FFT did not preserve the taylor_term dimension."
+        raise RuntimeError("SKY_RESIDUAL does not contain the 'taylor_term' dimension.")
+
+    actual_nterms = img_xds["SKY_RESIDUAL"].sizes["taylor_term"]
+
+    if actual_nterms != nterms:
+        raise ValueError(
+            "The residual Taylor stack is inconsistent with nterms: "
+            f"received {actual_nterms}, expected {nterms}."
         )
 
     img_xds["SKY_RESIDUAL"].attrs.update(
@@ -540,177 +617,137 @@ def continuum_append_node(
         }
     )
 
-    if img_xds["SKY_RESIDUAL"].sizes["taylor_term"] != nterms:
-        raise ValueError(
-            "The reduced residual Taylor stack is inconsistent with nterms: "
-            f"SKY_RESIDUAL contains "
-            f"{img_xds['SKY_RESIDUAL'].sizes['taylor_term']} terms, "
-            f"but image_params requests {nterms}."
-        )
+    psf_fit_return_df = None
 
-    # start = time.time()
-    # img_xds = transform_polarization_basis(
-    #    img_xds,
-    #    new_polarization_basis="stokes",
-    #    overwrite=True,
-    # )
-    # T_transform_pol += time.time() - start
-
-    if is_n_iter_0:
-
-        # Gather PSF
+    if initialize_static_products:
+        # ------------------------------------------------------
+        # Global PSF inverse FFT and beam fit.
+        # ------------------------------------------------------
         img_xds = ifft_norm_img_xds(
             img_xds,
-            image_params=input_params["image_params"],
-            image_data_group_in_name="residual",
-            image_data_group_out_name="residual",
+            image_params=image_params,
+            image_data_group_in_name=image_data_group_name,
+            image_data_group_out_name=image_data_group_name,
             image_data_group_out_modified={
                 "point_spread_function": "POINT_SPREAD_FUNCTION",
             },
-            image_data_variables_keep=input_params["image_data_variables_keep"],
-            processing_function_threads=processing_function_threads,
-            fft_backend=input_params["fft_backend"],
-            complex_dtype=complex_dtype,
+            image_data_variables_keep=config["image_data_variables_keep"],
+            processing_function_threads=config["processing_function_threads"],
+            fft_backend=config["fft_backend"],
+            complex_dtype=config["complex_dtype"],
         )
 
-        # This is harmless when the FFT helper already preserves arbitrary leading
-        # dimensions, and provides compatibility if it still labels the plane axis
-        # as "frequency".
         img_xds = _rename_psf_frequency_axis_to_taylor_order(
             img_xds,
-            image_data_group_out_name="residual",
+            image_data_group_out_name=image_data_group_name,
             n_psf_taylor_terms=n_psf_taylor_terms,
         )
 
-        psf_name = img_xds.attrs["data_groups"]["residual"]["point_spread_function"]
+        psf_name = img_xds.attrs["data_groups"][image_data_group_name][
+            "point_spread_function"
+        ]
+
         if psf_name not in img_xds:
             raise RuntimeError(
-                f"ifft_norm_img_xds did not create the expected variable {psf_name!r}."
+                "The global PSF inverse FFT did not create " f"{psf_name!r}."
             )
+
         if "psf_taylor_order" not in img_xds[psf_name].dims:
             raise RuntimeError(
-                f"{psf_name} has dimensions {img_xds[psf_name].dims}; expected a "
-                "'psf_taylor_order' dimension.  The FFT normalization helper must "
-                "preserve arbitrary leading dimensions or be extended for MT-MFS."
+                f"{psf_name!r} does not contain the " "'psf_taylor_order' dimension."
+            )
+
+        actual_psf_terms = img_xds[psf_name].sizes["psf_taylor_order"]
+
+        if actual_psf_terms != n_psf_taylor_terms:
+            raise ValueError(
+                "The PSF Taylor stack is inconsistent with nterms: "
+                f"received {actual_psf_terms}, "
+                f"expected {n_psf_taylor_terms}."
             )
 
         img_xds[psf_name].attrs.update(
             {
                 "type": "point_spread_function",
-                "nterms": nterms,  # int(image_params["nterms"]),
+                "nterms": nterms,
                 "n_psf_taylor_terms": n_psf_taylor_terms,
                 "reference_frequency": reference_frequency,
             }
         )
 
-        if img_xds[psf_name].sizes["psf_taylor_order"] != n_psf_taylor_terms:
-            raise ValueError(
-                "The reduced PSF Taylor stack is inconsistent with nterms: "
-                f"{psf_name} contains "
-                f"{img_xds[psf_name].sizes['psf_taylor_order']} orders, "
-                f"but {n_psf_taylor_terms} are required for nterms={nterms}."
-            )
-
-    # start = time.time()
-    img_xds = transform_polarization_basis(
-        img_xds,
-        new_polarization_basis="stokes",
-        overwrite=True,
-    )
-    # T_transform_pol += time.time() - start
-
-    if is_n_iter_0:
-        # ----------------------------------------------------------
-        # Operations performed exactly once, after major cycle 1.
-        # ----------------------------------------------------------
         (img_xds, psf_fit_return_df,) = point_spread_function_gaussian_fit_continuum(
             img_xds,
-            image_data_group_in_name=image_data_group_in_name,
-            image_data_group_out_name=image_data_group_in_name,
-            processing_function_threads=processing_function_threads,
+            image_data_group_in_name=image_data_group_name,
+            image_data_group_out_name=image_data_group_name,
+            processing_function_threads=config["processing_function_threads"],
         )
 
-        static_variable_names = [
+        static_variable_names = (
             "POINT_SPREAD_FUNCTION",
             "PRIMARY_BEAM",
             "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
             "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
-        ]
+        )
 
         missing = [name for name in static_variable_names if name not in img_xds]
 
         if missing:
             raise KeyError(
-                "The first continuum append node could not construct "
+                "The first continuum global node could not construct "
                 f"all static products. Missing: {missing}."
             )
 
-        static_xds = img_xds[static_variable_names].copy(deep=False)
-
-        # Keep the data-group metadata required when static_xds is
-        # installed during later cycles.
+        static_xds = img_xds[list(static_variable_names)].copy(deep=False)
         static_xds.attrs = dict(img_xds.attrs)
 
     else:
-        # ----------------------------------------------------------
-        # Operations performed after all later major cycles.
-        # ----------------------------------------------------------
         if "static_xds" not in input_params:
-            raise KeyError("static_xds must be supplied when " "is_n_iter_0=False.")
+            raise KeyError(
+                "static_xds must be supplied when static products are "
+                "not initialized in this node."
+            )
 
         static_xds = input_params["static_xds"]
 
-        static_variable_names = [
-            "POINT_SPREAD_FUNCTION",
-            "PRIMARY_BEAM",
-            "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
-            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
-        ]
-
-        for name in static_variable_names:
-            if name not in static_xds:
-                raise KeyError(f"static_xds does not contain {name!r}.")
-
-            if name not in img_xds:
-                source = static_xds[name]
-
-                img_xds[name] = xr.Variable(
-                    source.dims,
-                    source.data,
-                    attrs=source.attrs.copy(),
-                )
-
-        # Reconstruct the residual data-group registrations.
-        data_groups = img_xds.attrs.setdefault(
-            "data_groups",
-            {},
+        img_xds = _install_static_continuum_products(
+            img_xds,
+            static_xds,
+            image_data_group_name=image_data_group_name,
         )
 
-        residual_data_group = data_groups.setdefault(
-            image_data_group_in_name,
-            {},
-        )
+    # This transformation is performed exactly once, after the global
+    # inverse FFT. The map/reduce products must remain in correlation basis.
+    img_xds = transform_polarization_basis(
+        img_xds,
+        new_polarization_basis="stokes",
+        overwrite=True,
+    )
 
-        residual_data_group["point_spread_function"] = "POINT_SPREAD_FUNCTION"
+    return img_xds, static_xds, psf_fit_return_df
 
-        residual_data_group["primary_beam"] = "PRIMARY_BEAM"
 
-        residual_data_group[
-            "beam_fit_params_point_spread_function"
-        ] = "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
+@shares_param_docs
+def continuum_minor_cycle_node(
+    input_data,
+    input_params,
+):
+    """Prepare the globally reduced image and run one continuum minor cycle."""
+    input_data = _unwrap_continuum_reduce_result(
+        input_data,
+        "continuum_minor_cycle_node",
+    )
 
-        residual_data_group[
-            "max_sidelobe_point_spread_function"
-        ] = "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
+    is_n_iter_0 = bool(input_params.get("is_n_iter_0", True))
+
+    (img_xds, static_xds, psf_fit_return_df,) = _prepare_continuum_image(
+        input_data["image"],
+        input_params,
+        initialize_static_products=is_n_iter_0,
+    )
 
     input_data["image"] = img_xds
 
-    # The lower-level model-update node now only handles iteration
-    # control, deconvolution, and convergence.
     model_update_input_params = dict(input_params)
-
-    # static_xds has already been installed above. Do not make the
-    # model-update node responsible for it as well.
     model_update_input_params.pop("static_xds", None)
 
     return_dict = model_update_continuum_single_field(
@@ -718,16 +755,64 @@ def continuum_append_node(
         model_update_input_params,
     )
 
-    # Expose static state to the distributed driver for the next
-    # major-cycle graph.
     return_dict["static_xds"] = static_xds
-
-    if psf_fit_return_df is not None:
-        return_dict["timing_psf_fit"] = psf_fit_return_df.reset_index(drop=True)
-    else:
-        return_dict["timing_psf_fit"] = None
+    return_dict["timing_psf_fit"] = (
+        None if psf_fit_return_df is None else psf_fit_return_df.reset_index(drop=True)
+    )
 
     return return_dict
+
+
+@shares_param_docs
+def continuum_finalize_node(
+    input_data,
+    input_params,
+):
+    """Finalize the residual image after the last major cycle.
+
+    This node performs the global residual inverse FFT, converts the result
+    to Stokes, installs the cached static imaging products, and attaches
+    the accumulated model.
+
+    Restoration and final output pruning will be added in the subsequent
+    refactoring steps. No deconvolution or iteration-controller update is
+    performed here.
+    """
+    input_data = _unwrap_continuum_reduce_result(
+        input_data,
+        "continuum_finalize_node",
+    )
+
+    if "static_xds" not in input_params:
+        raise KeyError("continuum_finalize_node requires input_params['static_xds'].")
+
+    if "model_xds" not in input_params:
+        raise KeyError("continuum_finalize_node requires input_params['model_xds'].")
+
+    img_xds, static_xds, _ = _prepare_continuum_image(
+        input_data["image"],
+        input_params,
+        initialize_static_products=False,
+    )
+
+    model_xds = input_params["model_xds"]
+
+    if "SKY_MODEL" not in model_xds:
+        raise KeyError("model_xds does not contain 'SKY_MODEL'.")
+
+    if "SKY_MODEL" in img_xds:
+        img_xds = img_xds.drop_vars("SKY_MODEL")
+
+    img_xds["SKY_MODEL"] = model_xds["SKY_MODEL"].copy(deep=True)
+
+    input_data["image"] = img_xds
+    input_data["static_xds"] = static_xds
+
+    # Preserve the final accumulated model as a separate driver-visible
+    # state object as well as installing it in the output image.
+    input_data["model_xds"] = model_xds
+
+    return input_data
 
 
 @shares_param_docs

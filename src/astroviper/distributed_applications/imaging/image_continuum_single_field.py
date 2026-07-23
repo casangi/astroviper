@@ -899,6 +899,7 @@ def image_continuum_single_field(
     def _compute_continuum_graph(
         cycle_input_params,
         reduce_input_params,
+        append_node=None,
         append_input_params=None,
     ):
         """Construct and compute one distributed continuum graph.
@@ -938,10 +939,16 @@ def image_continuum_single_field(
             n_batch=reduce_n_batch,
         )
 
-        if append_input_params is not None:
+        if append_node is None and append_input_params is not None:
+            raise ValueError("append_input_params was supplied without an append_node.")
+
+        if append_node is not None and append_input_params is None:
+            raise ValueError("append_node was supplied without append_input_params.")
+
+        if append_node is not None:
             viper_graph = append(
                 viper_graph,
-                node_tasks.imaging.continuum_append_node,
+                append_node,
                 append_input_params,
             )
 
@@ -1049,9 +1056,16 @@ def image_continuum_single_field(
         # ---------------------------------------------------------
         # Execute one major cycle followed by one minor cycle.
         # ---------------------------------------------------------
+        # cycle_return_dict = _compute_continuum_graph(
+        #    cycle_input_params=cycle_input_params,
+        #    reduce_input_params=reduce_input_params,
+        #    append_input_params=append_input_params,
+        # )
+
         cycle_return_dict = _compute_continuum_graph(
             cycle_input_params=cycle_input_params,
             reduce_input_params=reduce_input_params,
+            append_node=node_tasks.imaging.continuum_minor_cycle_node,
             append_input_params=append_input_params,
         )
 
@@ -1129,9 +1143,6 @@ def image_continuum_single_field(
     final_input_params["model_xds"] = model_xds
     final_input_params["static_xds"] = static_xds
 
-    # Preserve the behavior of the existing final major cycle. This graph
-    # deliberately has no append node because no further model update should
-    # occur after the convergence decision.
     final_return_dict = _compute_continuum_graph(
         cycle_input_params=final_input_params,
         reduce_input_params={
@@ -1140,7 +1151,8 @@ def image_continuum_single_field(
                 "VISIBILITY_NORMALIZATION",
             ),
         },
-        append_input_params=None,
+        append_node=node_tasks.imaging.continuum_finalize_node,
+        append_input_params=final_input_params,
     )
 
     # =============================================================
