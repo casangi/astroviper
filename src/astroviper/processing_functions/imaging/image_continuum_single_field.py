@@ -132,7 +132,7 @@ def residual_update_continuum_single_field(
     image_data_variables_keep=None,
     restore=False,
     is_n_iter_0=True,
-    model_xds=None,
+    model_uv_xds=None,
     static_xds=None,
     task_id=0,
 ):
@@ -247,35 +247,6 @@ def residual_update_continuum_single_field(
         )
 
     # -------------------------------------------------------------
-    # Install the current global model for later major cycles
-    # -------------------------------------------------------------
-    if not is_n_iter_0:
-        if model_xds is None:
-            raise ValueError(
-                "A continuum model must be supplied when is_n_iter_0=False."
-            )
-
-        if "SKY_MODEL" not in model_xds:
-            raise KeyError(
-                "model_xds does not contain the required SKY_MODEL variable."
-            )
-
-        model = model_xds["SKY_MODEL"]
-
-        if "taylor_term" not in model.dims:
-            raise ValueError(
-                "The continuum model must contain a taylor_term dimension."
-            )
-
-        # Avoid mutating or aliasing the global model dataset.
-        img_xds["SKY_MODEL"] = model.copy(deep=True)
-
-        img_xds.attrs.setdefault("data_groups", {})
-        img_xds.attrs["data_groups"]["model"] = {
-            "sky": "SKY_MODEL",
-        }
-
-    # -------------------------------------------------------------
     # Exactly one residual update
     # -------------------------------------------------------------
     start = time.time()
@@ -283,7 +254,7 @@ def residual_update_continuum_single_field(
     img_xds, residual_return_df = residual_cycle_continuum_single_field(
         ps_xdt,
         img_xds,
-        model_xds,
+        model_uv_xds,
         image_params,
         is_n_iter_0,
         processing_set_data_group_name=processing_set_data_group_name,
@@ -1311,3 +1282,197 @@ def copy_variable_without_alignment(
         attrs=source_da.attrs.copy(),
     )
     return destination
+
+
+@shares_param_docs
+def prepare_model_uv_continuum_single_field(
+    model_xds,
+    image_params,
+    instrument_polarization_basis="linear",
+    single_precision_image=True,
+    processing_function_threads=1,
+    fft_backend="pyfftw",
+    image_data_group_name="model",
+):
+    """Prepare global Fourier-domain Taylor model grids for degridding.
+
+    This function should be called once after each global continuum model
+    update. It converts the image-domain Taylor model from Stokes parameters
+    to the instrumental correlation basis and Fourier-transforms every Taylor
+    term.
+
+    The returned dataset can be shared by all frequency-chunk map workers.
+    Each worker then only reconstructs the model at its local frequencies and
+    degrids it, avoiding repeated polarization transformations and FFTs.
+
+    Parameters
+    ----------
+    model_xds : xarray.Dataset
+        Image-domain continuum model dataset. The data group selected by
+        ``image_data_group_name`` must register a ``sky`` variable with a
+        ``taylor_term`` dimension.
+    image_params : dict
+        Image geometry and FFT parameters. It must contain ``nterms``.
+    instrument_polarization_basis : {"linear", "circular"}, optional
+        Instrumental correlation basis into which the Stokes model is
+        transformed.
+    single_precision_image : bool, optional
+        If true, create complex64 Fourier grids. Otherwise, create complex128
+        Fourier grids.
+    processing_function_threads : int, optional
+        Number of threads used by the polarization and FFT processing
+        functions.
+    fft_backend : str, optional
+        FFT backend passed to ``fft_norm_continuum_img_xds``.
+    image_data_group_name : str, optional
+        Data group containing the model sky variable and receiving the model
+        visibility grid.
+
+    Returns
+    -------
+    model_uv_xds : xarray.Dataset
+        Model dataset in the instrumental polarization basis containing
+        ``VISIBILITY_MODEL`` with a ``taylor_term`` dimension.
+    """
+    import copy
+
+    import numpy as np
+    import xarray as xr
+
+    from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
+        transform_polarization_basis,
+    )
+    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+        fft_norm_continuum_img_xds,
+    )
+
+    if not isinstance(model_xds, xr.Dataset):
+        raise TypeError(
+            "model_xds must be an xarray.Dataset; received "
+            f"{type(model_xds).__name__}."
+        )
+
+    if instrument_polarization_basis not in ("linear", "circular"):
+        raise ValueError(
+            "instrument_polarization_basis must be either 'linear' or "
+            f"'circular'; received {instrument_polarization_basis!r}."
+        )
+
+    nterms = int(image_params.get("nterms", 0))
+
+    if nterms < 1:
+        raise ValueError("image_params['nterms'] must be at least 1.")
+
+    data_groups = model_xds.attrs.get("data_groups", {})
+
+    if image_data_group_name not in data_groups:
+        raise KeyError(
+            f"Model data group {image_data_group_name!r} is not present in "
+            "model_xds.attrs['data_groups']."
+        )
+
+    model_data_group = data_groups[image_data_group_name]
+    model_sky_name = model_data_group.get("sky")
+
+    if model_sky_name is None:
+        raise KeyError(
+            f"Model data group {image_data_group_name!r} does not define "
+            "a 'sky' variable."
+        )
+
+    if model_sky_name not in model_xds:
+        raise KeyError(
+            f"Model sky variable {model_sky_name!r} is not present in " "model_xds."
+        )
+
+    model_sky = model_xds[model_sky_name]
+
+    if "taylor_term" not in model_sky.dims:
+        raise ValueError(
+            f"Model sky variable {model_sky_name!r} must contain a "
+            "'taylor_term' dimension."
+        )
+
+    if model_sky.sizes["taylor_term"] != nterms:
+        raise ValueError(
+            "The number of model Taylor terms does not match "
+            "image_params['nterms']: "
+            f"{model_sky.sizes['taylor_term']} != {nterms}."
+        )
+
+    complex_dtype = np.complex64 if single_precision_image else np.complex128
+
+    # The accumulated model must remain in Stokes basis for the next model
+    # update and for final restoration. Work on an independent copy.
+    model_uv_xds = model_xds.copy(deep=True)
+    model_uv_xds.attrs = copy.deepcopy(model_xds.attrs)
+
+    model_uv_xds = transform_polarization_basis(
+        model_uv_xds,
+        new_polarization_basis=instrument_polarization_basis,
+        overwrite=True,
+    )
+
+    model_uv_xds = fft_norm_continuum_img_xds(
+        model_uv_xds,
+        image_params=image_params,
+        image_data_group_in_name=image_data_group_name,
+        image_data_group_out_name=image_data_group_name,
+        image_data_group_out_modified={
+            "visibility": "VISIBILITY_MODEL",
+        },
+        image_data_variables_keep=["sky"],
+        processing_function_threads=processing_function_threads,
+        fft_backend=fft_backend,
+        complex_dtype=complex_dtype,
+    )
+
+    output_data_groups = model_uv_xds.attrs.get("data_groups", {})
+
+    if image_data_group_name not in output_data_groups:
+        raise RuntimeError(
+            "The model FFT removed or failed to create data group "
+            f"{image_data_group_name!r}."
+        )
+
+    output_model_group = output_data_groups[image_data_group_name]
+    model_visibility_name = output_model_group.get("visibility")
+
+    if model_visibility_name is None:
+        raise RuntimeError(
+            "fft_norm_continuum_img_xds did not register a model "
+            "visibility variable."
+        )
+
+    if model_visibility_name not in model_uv_xds:
+        raise RuntimeError(
+            "fft_norm_continuum_img_xds registered model visibility "
+            f"{model_visibility_name!r}, but that variable is absent."
+        )
+
+    model_visibility = model_uv_xds[model_visibility_name]
+
+    if "taylor_term" not in model_visibility.dims:
+        raise RuntimeError(
+            f"Model visibility variable {model_visibility_name!r} must "
+            "contain a 'taylor_term' dimension."
+        )
+
+    if model_visibility.sizes["taylor_term"] != nterms:
+        raise RuntimeError(
+            "The Fourier-domain model has the wrong number of Taylor terms: "
+            f"{model_visibility.sizes['taylor_term']} != {nterms}."
+        )
+
+    model_visibility.attrs.update(
+        {
+            "description": (
+                "Global Fourier-domain continuum Taylor model used for "
+                "distributed degridding."
+            ),
+            "nterms": nterms,
+            "instrument_polarization_basis": (instrument_polarization_basis),
+        }
+    )
+
+    return model_uv_xds

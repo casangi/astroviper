@@ -114,7 +114,7 @@ def residual_update_continuum_single_field(
     skunk_works=False,
     data_group=None,
     is_n_iter_0=True,
-    model_xds=None,
+    model_uv_xds=None,
     static_xds=None,
     task_id=0,
     input_data=None,
@@ -323,7 +323,7 @@ def residual_update_continuum_single_field(
         image_data_variables_keep=image_data_variables_keep,
         restore=restore,
         is_n_iter_0=is_n_iter_0,
-        model_xds=model_xds,
+        model_uv_xds=model_uv_xds,
         static_xds=static_xds,
         task_id=task_id,
     )
@@ -778,6 +778,9 @@ def continuum_finalize_node(
     refactoring steps. No deconvolution or iteration-controller update is
     performed here.
     """
+
+    from astroviper.utils.data_group_tools import modify_data_groups_xds
+
     input_data = _unwrap_continuum_reduce_result(
         input_data,
         "continuum_finalize_node",
@@ -804,6 +807,15 @@ def continuum_finalize_node(
         img_xds = img_xds.drop_vars("SKY_MODEL")
 
     img_xds["SKY_MODEL"] = model_xds["SKY_MODEL"].copy(deep=True)
+
+    modify_data_groups_xds(
+        img_xds,
+        data_group_out_name="model",
+        data_group_out={
+            "sky": "SKY_MODEL",
+        },
+        description="Accumulated continuum model installed for final restoration.",
+    )
 
     if input_params.get("restore", False):
         from astroviper.processing_functions.imaging.image_continuum_single_field import (

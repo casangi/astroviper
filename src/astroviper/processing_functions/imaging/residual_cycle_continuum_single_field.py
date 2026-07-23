@@ -5,7 +5,7 @@ from astroviper.utils.param_docs import shares_param_docs
 def residual_cycle_continuum_single_field(
     ps_xdt,
     img_xds,
-    model_xds,
+    model_uv_xds,
     image_params,
     is_n_iter_0,
     processing_set_data_group_name="corrected",
@@ -96,43 +96,38 @@ def residual_cycle_continuum_single_field(
         if residual_sky_name is not None and residual_sky_name in img_xds:
             img_xds.xr_img.delete_data_variables(variables=[residual_sky_name])
 
-        residual_sky_name = residual_data_group.get("sky")
-
-        if residual_sky_name is not None and residual_sky_name in img_xds:
-            img_xds.xr_img.delete_data_variables(variables=[residual_sky_name])
-
         #
         # Work on the updated model produced by the previous minor cycle.
         #
-        model_xds = transform_polarization_basis(
-            model_xds,
-            new_polarization_basis=instrument_polarization_basis,
-            overwrite=True,
-        )
+        # model_xds = transform_polarization_basis(
+        #    model_xds,
+        #    new_polarization_basis=instrument_polarization_basis,
+        #    overwrite=True,
+        # )
 
-        start = time.time()
+        # start = time.time()
 
-        model_xds = fft_norm_continuum_img_xds(
-            model_xds,
-            image_params=image_params,
-            image_data_group_in_name=image_data_group_in_name,
-            image_data_group_out_name=image_data_group_in_name,
-            image_data_group_out_modified={
-                "visibility": "VISIBILITY_MODEL",
-            },
-            image_data_variables_keep=["sky"],
-            processing_function_threads=processing_function_threads,
-            fft_backend=fft_backend,
-            complex_dtype=complex_dtype,
-        )
+        # model_xds = fft_norm_continuum_img_xds(
+        #    model_xds,
+        #    image_params=image_params,
+        #    image_data_group_in_name=image_data_group_in_name,
+        #    image_data_group_out_name=image_data_group_in_name,
+        #    image_data_group_out_modified={
+        #        "visibility": "VISIBILITY_MODEL",
+        #    },
+        #    image_data_variables_keep=["sky"],
+        #    processing_function_threads=processing_function_threads,
+        #    fft_backend=fft_backend,
+        #    complex_dtype=complex_dtype,
+        # )
 
-        T_fft_degrid += time.time() - start
+        # T_fft_degrid += time.time() - start
 
         start = time.time()
 
         make_visibility_model_continuum_single_field(
             ps_xdt,
-            model_xds,
+            model_uv_xds,
             cgk_1D,
             nterms=nterms,
             reference_frequency=reference_frequency,

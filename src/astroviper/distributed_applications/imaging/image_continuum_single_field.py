@@ -685,6 +685,9 @@ def image_continuum_single_field(
     from xradio.image import make_empty_sky_image, write_image
     from xradio.measurement_set import open_processing_set
 
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        prepare_model_uv_continuum_single_field,
+    )
     from astroviper.processing_functions.imaging.utils import (
         IterationController,
         ReturnDict,
@@ -982,6 +985,7 @@ def image_continuum_single_field(
     is_n_iter_0 = True
     static_xds = None
     model_xds = None
+    model_uv_xds = None
     last_minor_return_dict = None
     n_major_cycles = 0
 
@@ -1009,13 +1013,16 @@ def image_continuum_single_field(
                     f"major cycle {n_major_cycles}."
                 )
 
+            if model_uv_xds is None:
+                raise RuntimeError("No Fourier-domain model is available.")
+
             if static_xds is None:
                 raise RuntimeError(
                     "No static continuum products are available for "
                     f"major cycle {n_major_cycles}."
                 )
 
-            cycle_input_params["model_xds"] = model_xds
+            cycle_input_params["model_uv_xds"] = model_uv_xds
             cycle_input_params["static_xds"] = static_xds
 
         # During the first major cycle the PSF and residual Taylor products
@@ -1112,6 +1119,15 @@ def image_continuum_single_field(
 
             model_xds["SKY_MODEL"].attrs = accumulated_model.attrs.copy()
 
+        model_uv_xds = prepare_model_uv_continuum_single_field(
+            model_xds,
+            image_params=image_params,
+            instrument_polarization_basis=instrument_polarization_basis,
+            single_precision_image=single_precision_image,
+            processing_function_threads=processing_function_threads,
+            fft_backend=fft_backend,
+        )
+
         is_n_iter_0 = False
 
         stopcode = cycle_return_dict["stopcode"]
@@ -1134,10 +1150,14 @@ def image_continuum_single_field(
     # Final major cycle: recompute residual and restore
     # =============================================================
 
+    assert model_uv_xds is not None
+    assert model_xds is not None
+
     final_input_params = dict(input_params)
 
     final_input_params["is_n_iter_0"] = False
     final_input_params["restore"] = True
+    final_input_params["model_uv_xds"] = model_uv_xds
     final_input_params["model_xds"] = model_xds
     final_input_params["static_xds"] = static_xds
 
