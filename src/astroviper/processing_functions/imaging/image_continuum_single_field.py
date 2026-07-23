@@ -303,68 +303,6 @@ def residual_update_continuum_single_field(
     )
     timing["nterms"] = image_params.get("nterms", 2)
 
-    timing["T_restore"] = 0.0
-
-    if restore:
-        from astroviper.processing_functions.imaging.image_continuum_single_field import (
-            restore_image_continuum_single_field,
-        )
-
-        # There shouldn't be a point spread function in img_xds if is_n_iter_0 = False
-        # since img_xds was initialized empty in this case
-        # As a consequence, you cannot restore on the first major loop
-        # We also need the primary beam for the final output
-        for name in ["POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"]:
-            if name in static_xds:
-                # note that due to a dimension mismatch the more natural img_xds['POINT_SPREAD_FUNCTION'] = model_xds['POINT_SPREAD_FUNCTION'] fails
-                # for now, we rely on this dirty workaround instead
-                img_xds = copy_variable_without_alignment(
-                    img_xds,
-                    static_xds,
-                    name,
-                )
-
-        beam_fit_params_key = "beam_fit_params_point_spread_function"
-
-        model_residual_group = static_xds.attrs["data_groups"]["residual"]
-        residual_group = img_xds.attrs["data_groups"]["residual"]
-
-        if beam_fit_params_key not in model_residual_group:
-            raise KeyError(
-                f"{beam_fit_params_key!r} was not found in the residual "
-                "data group of model_xds."
-            )
-
-        beam_name = model_residual_group[beam_fit_params_key]
-
-        if beam_name not in static_xds:
-            raise KeyError(
-                f"The beam-fit variable {beam_name!r} is registered in "
-                "model_xds, but the variable itself is missing."
-            )
-
-        # Copy the data-group registration.
-        residual_group[beam_fit_params_key] = beam_name
-
-        # Copy the actual fitted-beam DataArray.
-        img_xds[beam_name] = static_xds[beam_name].copy(deep=False)
-
-        # Copy the beam-parameter coordinate used by the DataArray.
-        if "beam_params_label" in static_xds.coords:
-            img_xds = img_xds.assign_coords(
-                beam_params_label=static_xds.coords["beam_params_label"]
-            )
-
-        img_xds, restore_return_df = restore_image_continuum_single_field(
-            img_xds,
-            image_data_group_in_residual_name="residual",
-            image_data_group_in_model_name="model",
-            image_data_group_out_restore_name="restored",
-            processing_function_threads=processing_function_threads,
-        )
-
-        accumulate_timing(timing, restore_return_df)
-
     timing_df = pd.DataFrame({key: [value] for key, value in timing.items()})
 
     return img_xds, timing_df
@@ -769,7 +707,7 @@ def model_update_mtmfs_single_field(
     return deconvolve_dict, return_df
 
 
-def restore_image_continuum_single_field(
+def restore_image(
     img_xds,
     image_data_group_in_residual_name="residual",
     image_data_group_in_model_name="model",
@@ -778,60 +716,66 @@ def restore_image_continuum_single_field(
 ):
     """Restore the Taylor-zero continuum model.
 
-    The continuum model and residual use ``taylor_term`` while the existing
-    cube restoration routine expects ``frequency``. This function constructs
-    a one-channel cube view containing:
+    The continuum model and residual use a ``taylor_term`` dimension, while
+    the existing cube restoration routine expects a ``frequency`` dimension.
+    This wrapper constructs a temporary one-channel cube containing:
 
-    - model Taylor term 0,
-    - residual Taylor term 0,
-    - PSF Taylor order 0,
+    * residual Taylor term zero;
+    * model Taylor term zero;
+    * PSF Taylor order zero;
+    * the fitted restoring-beam parameters.
 
-    runs the existing cube restoration routine, and copies the restored image
-    back into the continuum dataset with a ``taylor_term`` dimension.
-
-    The output restored image therefore has dimensions
-
-        (time, taylor_term=1, polarization, l, m)
-
-    and represents the restored reference-frequency image.
+    It then calls the existing cube restoration routine and copies the restored
+    reference-frequency image back into the continuum dataset.
 
     Parameters
     ----------
     img_xds : xarray.Dataset
-        Continuum image dataset containing model, residual, and PSF products.
+        Continuum image dataset containing the residual, model, PSF, and fitted
+        restoring-beam parameters.
     image_data_group_in_residual_name : str, optional
         Data group containing the residual image.
     image_data_group_in_model_name : str, optional
         Data group containing the sky model.
     image_data_group_out_restore_name : str, optional
-        Data group receiving the restored image.
+        Data group under which the restored image is registered.
     processing_function_threads : int, optional
-        Number of threads passed to the restoration routine.
+        Number of threads passed to the cube restoration routine.
 
     Returns
     -------
     img_xds : xarray.Dataset
-        Original continuum image dataset with the restored Taylor-zero image.
+        Input continuum dataset with the restored reference-frequency image.
     timing_df : pandas.DataFrame
-        Timing information returned by the restoration routine.
+        Timing information returned by the cube restoration routine.
     """
     import copy
 
     import numpy as np
     import xarray as xr
 
-    from astroviper.processing_functions.imaging.restore import restore_image
+    # Alias the existing cube routine to avoid colliding with this wrapper.
+    from astroviper.processing_functions.imaging.restore import (
+        restore_image as restore_cube_image,
+    )
 
     data_groups = img_xds.attrs.get("data_groups", {})
 
+    # ------------------------------------------------------------------
+    # Resolve the residual and model variables.
+    # ------------------------------------------------------------------
     if image_data_group_in_residual_name not in data_groups:
         raise KeyError(
-            f"Residual data group " f"{image_data_group_in_residual_name!r} is missing."
+            "Residual data group "
+            f"{image_data_group_in_residual_name!r} is missing. "
+            f"Available groups are {list(data_groups)}."
         )
 
     if image_data_group_in_model_name not in data_groups:
         raise KeyError(
-            f"Model data group " f"{image_data_group_in_model_name!r} is missing."
+            "Model data group "
+            f"{image_data_group_in_model_name!r} is missing. "
+            f"Available groups are {list(data_groups)}."
         )
 
     residual_group = data_groups[image_data_group_in_residual_name]
@@ -853,53 +797,73 @@ def restore_image_continuum_single_field(
         )
 
     if residual_name not in img_xds:
-        raise KeyError(f"Residual variable {residual_name!r} is missing.")
+        raise KeyError(f"Residual variable {residual_name!r} is missing from img_xds.")
 
     if model_name not in img_xds:
-        raise KeyError(f"Model variable {model_name!r} is missing.")
+        raise KeyError(f"Model variable {model_name!r} is missing from img_xds.")
 
     residual_da = img_xds[residual_name]
     model_da = img_xds[model_name]
 
-    if "taylor_term" not in residual_da.dims:
-        raise ValueError(
-            f"Residual variable {residual_name!r} does not contain "
-            "a 'taylor_term' dimension."
-        )
+    for variable_name, data_array in (
+        (residual_name, residual_da),
+        (model_name, model_da),
+    ):
+        if "taylor_term" not in data_array.dims:
+            raise ValueError(
+                f"{variable_name!r} must contain a 'taylor_term' "
+                f"dimension. Found {data_array.dims}."
+            )
 
-    if "taylor_term" not in model_da.dims:
-        raise ValueError(
-            f"Model variable {model_name!r} does not contain "
-            "a 'taylor_term' dimension."
-        )
+        if data_array.sizes["taylor_term"] < 1:
+            raise ValueError(f"{variable_name!r} contains no Taylor terms.")
 
-    # Locate the PSF from the available image data groups.
-    psf_name = None
-
-    for group in data_groups.values():
-        candidate = group.get("point_spread_function")
-
-        if candidate is not None and candidate in img_xds:
-            psf_name = candidate
-            break
+    # ------------------------------------------------------------------
+    # Resolve the PSF.
+    # ------------------------------------------------------------------
+    psf_name = residual_group.get("point_spread_function")
 
     if psf_name is None:
-        # Fallback for datasets in which the variable exists but the logical
-        # mapping has not been registered in the expected group.
+        # Permit older datasets where the logical registration is missing.
         if "POINT_SPREAD_FUNCTION" in img_xds:
             psf_name = "POINT_SPREAD_FUNCTION"
         else:
-            raise KeyError("No point-spread-function variable was found.")
+            raise KeyError(
+                "The residual data group does not define "
+                "'point_spread_function', and POINT_SPREAD_FUNCTION is absent."
+            )
+
+    if psf_name not in img_xds:
+        raise KeyError(f"Point-spread-function variable {psf_name!r} is missing.")
 
     psf_da = img_xds[psf_name]
 
-    # The existing restore routine expects cube dimensions. Construct a
-    # one-channel view corresponding to the MT-MFS reference-frequency image.
-    cube_xds = xr.Dataset(
-        attrs=copy.deepcopy(img_xds.attrs),
-    )
+    # ------------------------------------------------------------------
+    # Resolve the fitted restoring beam.
+    # ------------------------------------------------------------------
+    beam_fit_key = "beam_fit_params_point_spread_function"
+    beam_name = residual_group.get(beam_fit_key)
 
-    # Preserve scalar and non-spectral coordinates used by restore_image.
+    if beam_name is None:
+        if "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION" in img_xds:
+            beam_name = "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
+        else:
+            raise KeyError(
+                f"The residual data group does not define {beam_fit_key!r}, "
+                "and BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION is absent."
+            )
+
+    if beam_name not in img_xds:
+        raise KeyError(f"Restoring-beam variable {beam_name!r} is missing.")
+
+    beam_da = img_xds[beam_name]
+
+    # ------------------------------------------------------------------
+    # Construct a one-channel cube view.
+    # ------------------------------------------------------------------
+    cube_xds = xr.Dataset(attrs=copy.deepcopy(img_xds.attrs))
+
+    # Preserve all coordinates that do not depend on a spectral/Taylor axis.
     for coord_name, coord in img_xds.coords.items():
         if coord_name in {
             "frequency",
@@ -908,70 +872,145 @@ def restore_image_continuum_single_field(
         }:
             continue
 
-        if "taylor_term" in coord.dims or "psf_taylor_order" in coord.dims:
+        if (
+            "frequency" in coord.dims
+            or "taylor_term" in coord.dims
+            or "psf_taylor_order" in coord.dims
+        ):
             continue
 
         cube_xds = cube_xds.assign_coords({coord_name: coord.copy(deep=False)})
 
-    cube_xds = cube_xds.assign_coords(
-        frequency=("frequency", np.asarray([0], dtype=np.int64))
+    # The numerical frequency value is not used by restoration, but use the
+    # reference frequency when it is available to preserve meaningful metadata.
+    reference_frequency = img_xds.attrs.get("reference_frequency") or img_xds.attrs.get(
+        "reference_frequency_hz"
     )
 
-    cube_xds[residual_name] = (
-        residual_da.isel(taylor_term=slice(0, 1))
-        .rename({"taylor_term": "frequency"})
-        .assign_coords(frequency=cube_xds.frequency)
-    )
+    if reference_frequency is None:
+        frequency_value = np.asarray([0.0], dtype=np.float64)
+    else:
+        frequency_value = np.asarray(
+            [float(reference_frequency)],
+            dtype=np.float64,
+        )
 
-    cube_xds[model_name] = (
-        model_da.isel(taylor_term=slice(0, 1))
-        .rename({"taylor_term": "frequency"})
-        .assign_coords(frequency=cube_xds.frequency)
-    )
+    cube_xds = cube_xds.assign_coords(frequency=("frequency", frequency_value))
+
+    def _taylor_zero_to_frequency(data_array):
+        """Convert Taylor term zero into a singleton frequency plane."""
+        return (
+            data_array.isel(taylor_term=slice(0, 1))
+            .rename({"taylor_term": "frequency"})
+            .assign_coords(frequency=cube_xds.coords["frequency"])
+        )
+
+    cube_xds[residual_name] = _taylor_zero_to_frequency(residual_da)
+    cube_xds[model_name] = _taylor_zero_to_frequency(model_da)
 
     if "psf_taylor_order" in psf_da.dims:
+        if psf_da.sizes["psf_taylor_order"] < 1:
+            raise ValueError(f"PSF variable {psf_name!r} contains no Taylor orders.")
+
         cube_xds[psf_name] = (
             psf_da.isel(psf_taylor_order=slice(0, 1))
             .rename({"psf_taylor_order": "frequency"})
-            .assign_coords(frequency=cube_xds.frequency)
+            .assign_coords(frequency=cube_xds.coords["frequency"])
         )
+
     elif "taylor_term" in psf_da.dims:
         cube_xds[psf_name] = (
             psf_da.isel(taylor_term=slice(0, 1))
             .rename({"taylor_term": "frequency"})
-            .assign_coords(frequency=cube_xds.frequency)
+            .assign_coords(frequency=cube_xds.coords["frequency"])
         )
+
     elif "frequency" in psf_da.dims:
         cube_xds[psf_name] = psf_da.isel(frequency=slice(0, 1)).assign_coords(
-            frequency=cube_xds.frequency
+            frequency=cube_xds.coords["frequency"]
         )
+
     else:
-        # A PSF without a spectral dimension is expanded to one channel.
+        frequency_axis = psf_da.dims.index("time") + 1 if "time" in psf_da.dims else 0
+
         cube_xds[psf_name] = psf_da.expand_dims(
-            frequency=cube_xds.frequency.values,
-            axis=1,
+            frequency=cube_xds.coords["frequency"].values,
+            axis=frequency_axis,
         )
 
-    residual_group = cube_xds.attrs["data_groups"][image_data_group_in_residual_name]
-    beam_fit_params_key = "beam_fit_params_point_spread_function"
-    beam_name = residual_group[beam_fit_params_key]
-
-    beam_da = img_xds[beam_name]
-
-    if "frequency" not in beam_da.dims:
-        beam_da = beam_da.expand_dims(
-            frequency=cube_xds.frequency.values,
-            axis=1,
+    # ------------------------------------------------------------------
+    # Convert the beam parameters into cube layout.
+    # ------------------------------------------------------------------
+    if "frequency" in beam_da.dims:
+        cube_beam_da = beam_da.isel(frequency=slice(0, 1)).assign_coords(
+            frequency=cube_xds.coords["frequency"]
         )
 
-    cube_xds[beam_name] = beam_da.transpose(
+    elif "taylor_term" in beam_da.dims:
+        cube_beam_da = (
+            beam_da.isel(taylor_term=slice(0, 1))
+            .rename({"taylor_term": "frequency"})
+            .assign_coords(frequency=cube_xds.coords["frequency"])
+        )
+
+    elif "psf_taylor_order" in beam_da.dims:
+        cube_beam_da = (
+            beam_da.isel(psf_taylor_order=slice(0, 1))
+            .rename({"psf_taylor_order": "frequency"})
+            .assign_coords(frequency=cube_xds.coords["frequency"])
+        )
+
+    else:
+        frequency_axis = beam_da.dims.index("time") + 1 if "time" in beam_da.dims else 0
+
+        cube_beam_da = beam_da.expand_dims(
+            frequency=cube_xds.coords["frequency"].values,
+            axis=frequency_axis,
+        )
+
+    expected_beam_dims = (
         "time",
         "frequency",
         "polarization",
         "beam_params",
     )
 
-    cube_xds, timing_df = restore_image(
+    missing_beam_dims = [
+        dim for dim in expected_beam_dims if dim not in cube_beam_da.dims
+    ]
+
+    if missing_beam_dims:
+        raise ValueError(
+            f"Beam variable {beam_name!r} cannot be converted to the "
+            f"expected cube dimensions {expected_beam_dims}. "
+            f"Missing dimensions: {missing_beam_dims}; "
+            f"found {cube_beam_da.dims}."
+        )
+
+    cube_xds[beam_name] = cube_beam_da.transpose(*expected_beam_dims)
+
+    # Ensure the temporary cube data-group registrations refer to variables
+    # actually installed above.
+    cube_data_groups = cube_xds.attrs.setdefault("data_groups", {})
+
+    cube_residual_group = cube_data_groups.setdefault(
+        image_data_group_in_residual_name,
+        {},
+    )
+    cube_residual_group["sky"] = residual_name
+    cube_residual_group["point_spread_function"] = psf_name
+    cube_residual_group[beam_fit_key] = beam_name
+
+    cube_model_group = cube_data_groups.setdefault(
+        image_data_group_in_model_name,
+        {},
+    )
+    cube_model_group["sky"] = model_name
+
+    # ------------------------------------------------------------------
+    # Run the existing cube restoration implementation.
+    # ------------------------------------------------------------------
+    cube_xds, timing_df = restore_cube_image(
         cube_xds,
         image_data_group_in_residual_name=(image_data_group_in_residual_name),
         image_data_group_in_model_name=image_data_group_in_model_name,
@@ -980,9 +1019,17 @@ def restore_image_continuum_single_field(
     )
 
     restored_group = cube_xds.attrs["data_groups"][image_data_group_out_restore_name]
-
     restored_name = restored_group["sky"]
 
+    if restored_name not in cube_xds:
+        raise RuntimeError(
+            "The cube restoration routine registered restored variable "
+            f"{restored_name!r}, but did not create it."
+        )
+
+    # ------------------------------------------------------------------
+    # Copy the restored reference-frequency plane back to Taylor layout.
+    # ------------------------------------------------------------------
     restored_da = (
         cube_xds[restored_name]
         .rename({"frequency": "taylor_term"})

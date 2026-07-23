@@ -805,6 +805,31 @@ def continuum_finalize_node(
 
     img_xds["SKY_MODEL"] = model_xds["SKY_MODEL"].copy(deep=True)
 
+    if input_params.get("restore", False):
+        from astroviper.processing_functions.imaging.image_continuum_single_field import (
+            restore_image,
+        )
+
+        img_xds, restore_timing_df = restore_image(
+            img_xds,
+            image_data_group_in_residual_name=(
+                input_params.get(
+                    "image_data_group_in_name",
+                    "residual",
+                )
+            ),
+            image_data_group_in_model_name="model",
+            image_data_group_out_restore_name="restored",
+            processing_function_threads=input_params.get(
+                "processing_function_threads",
+                1,
+            ),
+        )
+
+        input_data["timing_restore"] = restore_timing_df.reset_index(drop=True)
+    else:
+        input_data["timing_restore"] = None
+
     input_data["image"] = img_xds
     input_data["static_xds"] = static_xds
 

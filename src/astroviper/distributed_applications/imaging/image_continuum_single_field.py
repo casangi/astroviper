@@ -990,8 +990,6 @@ def image_continuum_single_field(
     # of its configured limits.
     while controller.stopcode.major == 0:
 
-        print(n_major_cycles)
-
         n_major_cycles += 1
 
         logger.debug(f"Starting continuum major cycle {n_major_cycles}.")
@@ -1139,7 +1137,7 @@ def image_continuum_single_field(
     final_input_params = dict(input_params)
 
     final_input_params["is_n_iter_0"] = False
-    final_input_params["restore"] = False  # True
+    final_input_params["restore"] = True
     final_input_params["model_xds"] = model_xds
     final_input_params["static_xds"] = static_xds
 
