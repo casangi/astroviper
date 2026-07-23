@@ -890,328 +890,265 @@ def image_continuum_single_field(
             image_store, image_data_variables_keep[0], node_task_data_mapping
         )
 
-    # Create Map Graph. The node task has an explicit, NumPy-documented,
-    # standalone signature; graphviper's map() adapts it to the single
-    # ``input_params`` dict calling convention automatically (forwarding only the
-    # keys the node task declares), so it can be passed directly.
-    # start = time.time()
-    # viper_graph = map(
-    #    input_data=ps_xdt,
-    #    node_task_data_mapping=node_task_data_mapping,
-    #    node_task=node_tasks.imaging.residual_update_continuum_single_field,
-    #    input_params=input_params,
-    #    in_memory_compute=False,
-    #    # data_loading_task=_load_processing_set_chunk,
-    #    data_loading_task=None,
-    #    disk_chunk_sizes=disk_chunk_sizes,
-    #    load_node_input_params={
-    #        "processing_set_data_group_name": processing_set_data_group_name
-    #    },
-    #    monitor_resources_seconds=monitor_resources_seconds,
-    #    task_priorities=task_priorities,
-    # )
-
-    # reduce_input_params = {}
-
-    # viper_graph = reduce(
-    #    viper_graph,
-    #    combine_continuum_chunks,
-    #    reduce_input_params,
-    #    mode=reduce_mode,
-    #    n_batch=reduce_n_batch,
-    # )
-    # timing_distributed_application["T_create_map_reduce_graph"] = time.time() - start
-
-    # append_input_params = {
-    #    "iteration_control_params": iteration_control_params,
-    #    "deconvolver": deconvolver,
-    #    "processing_function_threads": processing_function_threads,
-    #    "is_n_iter_0": True,
-    #    "image_data_group_in_name": "residual",
-    #    "image_data_group_out_name": "model",
-    # }
-
-    # viper_graph = append(
-    #    viper_graph,
-    #    node_tasks.imaging.model_update_continuum_single_field,
-    #    append_input_params,
-    # )
-
-    # Compute the continuum graph. Two interchangeable backends execute the same backend-agnostic
-    # viper_graph: the default Dask backend (generate_dask_workflow + dask.compute)
-    # or the MPI backend (processes_with_mpi on an mpi4py.futures manager-worker
-    # pool, selected with compute_backend="mpi" and launched via
-    # `python -m mpi4py.futures`). The MPI backend builds no dask.delayed graph, so
-    # there is no separate "generate" step (T_generate_dask_graph = 0).
-
-    # if compute_backend == "mpi":
-    #    if vizualize_graph:
-    #        logger.warning(
-    #            "vizualize_graph is ignored for compute_backend='mpi' (no "
-    #            "dask.delayed graph is built)."
-    #        )
-    #    timing_distributed_application["T_generate_dask_graph"] = 0.0
-    #    start = time.time()
-    #    return_dict = processes_with_mpi(viper_graph, mpi_cluster_setup)
-    #    timing_distributed_application["T_compute_dask_graph"] = time.time() - start
-    # elif compute_backend == "dask":
-    #    start = time.time()
-    #    dask_graph = generate_dask_workflow(viper_graph)
-    #    timing_distributed_application["T_generate_dask_graph"] = time.time() - start
-
-    #    if vizualize_graph:
-    #        dask.visualize(dask_graph, filename="continuum_imaging.png")
-
-    #    start = time.time()
-    #    return_dict = dask.compute(dask_graph)[0]
-    #    timing_distributed_application["T_compute_dask_graph"] = time.time() - start
-    # else:
-    #    raise ValueError(
-    #        f"Unknown compute_backend {compute_backend!r}; expected 'dask' or 'mpi'."
-    #    )
-
-    ###
-
     # =============================================================
-    # Major cycle 1 + minor cycle 1
+    # Distributed major/minor-cycle loop
     # =============================================================
 
-    start = time.time()
-
-    first_viper_graph = map(
-        input_data=ps_xdt,
-        node_task_data_mapping=node_task_data_mapping,
-        node_task=node_tasks.imaging.residual_update_continuum_single_field,
-        input_params=input_params,
-        in_memory_compute=False,
-        data_loading_task=None,
-        disk_chunk_sizes=disk_chunk_sizes,
-        load_node_input_params={
-            "processing_set_data_group_name": processing_set_data_group_name,
-        },
-        monitor_resources_seconds=monitor_resources_seconds,
-        task_priorities=task_priorities,
-    )
-
-    first_viper_graph = reduce(
-        first_viper_graph,
-        combine_continuum_chunks,
-        {},
-        mode=reduce_mode,
-        n_batch=reduce_n_batch,
-    )
-
-    first_append_input_params = {
-        "iteration_control_params": iteration_control_params,
-        "deconvolver": deconvolver,
-        "processing_function_threads": processing_function_threads,
-        "is_n_iter_0": True,
-        "controller": controller,
-        "image_data_group_in_name": "residual",
-        "image_data_group_out_name": "model",
-    }
-
-    first_viper_graph = append(
-        first_viper_graph,
-        node_tasks.imaging.continuum_append_node,  # model_update_continuum_single_field,
-        first_append_input_params,
-    )
-
-    timing_distributed_application["T_create_map_reduce_append_graph"] = (
-        time.time() - start
-    )
-
-    start = time.time()
-    first_dask_graph = generate_dask_workflow(first_viper_graph)
-    timing_distributed_application["T_generate_dask_graph"] = time.time() - start
-
-    start = time.time()
-    first_return_dict = dask.compute(first_dask_graph)[0]
-    timing_distributed_application["T_compute_dask_graph"] = time.time() - start
-
-    controller = first_return_dict["controller"]
-    static_xds = first_return_dict["static_xds"]
-
-    model_1_xds = first_return_dict["image"][["SKY_MODEL"]].copy(deep=True)
-
-    model_1 = model_1_xds["SKY_MODEL"]
-
-    # Preserve the complete model dataset, including coordinates such as
-    # polarization=["I", "Q"] or the corresponding valid labels.
-    model_1_xds = first_return_dict["image"][["SKY_MODEL"]].copy(deep=True)
-    model_1 = model_1_xds["SKY_MODEL"]
-
-    # =============================================================
-    # Major cycle 2 + minor cycle 2
-    # =============================================================
-
-    start = time.time()
-
-    second_input_params = dict(input_params)
-    second_input_params["is_n_iter_0"] = False
-
-    second_input_params["restore"] = False  # True
-
-    # second_input_params["model_xds"] = first_return_dict["image"]
-    model_xds = first_return_dict["image"][
-        [
-            "SKY_MODEL",
-        ]
-    ]
-    second_input_params["model_xds"] = model_xds
-    second_input_params["static_xds"] = static_xds
-
-    # second_return_dict is the output after the final continuum reduce
-
-    second_viper_graph = map(
-        input_data=ps_xdt,
-        node_task_data_mapping=node_task_data_mapping,
-        node_task=node_tasks.imaging.residual_update_continuum_single_field,
-        input_params=second_input_params,
-        in_memory_compute=False,
-        data_loading_task=None,
-        disk_chunk_sizes=disk_chunk_sizes,
-        load_node_input_params={
-            "processing_set_data_group_name": processing_set_data_group_name,
-        },
-        monitor_resources_seconds=monitor_resources_seconds,
-        task_priorities=task_priorities,
-    )
-
-    reduce_input_params = {
-        "additive_variables": ("SKY_RESIDUAL",),
-    }
-
-    second_viper_graph = reduce(
-        second_viper_graph,
-        combine_continuum_chunks,
+    def _compute_continuum_graph(
+        cycle_input_params,
         reduce_input_params,
-        mode=reduce_mode,
-        n_batch=reduce_n_batch,
-    )
+        append_input_params=None,
+    ):
+        """Construct and compute one distributed continuum graph.
 
-    second_append_input_params = {
-        "iteration_control_params": iteration_control_params,
-        "deconvolver": deconvolver,
-        "processing_function_threads": processing_function_threads,
-        "is_n_iter_0": False,
-        "controller": controller,
-        "static_xds": static_xds,
-        "image_data_group_in_name": "residual",
-        "image_data_group_out_name": "model",
-    }
+        When append_input_params is supplied, the graph performs
 
-    second_viper_graph = append(
-        second_viper_graph,
-        node_tasks.imaging.continuum_append_node,
-        second_append_input_params,
-    )
+            map -> reduce -> continuum append/minor cycle
 
-    timing_distributed_application["T_create_map_reduce_append_graph"] = (
-        time.time() - start
-    )
+        Otherwise it performs only
 
-    start = time.time()
-    second_dask_graph = generate_dask_workflow(second_viper_graph)
-    timing_distributed_application["T_generate_dask_graph"] = time.time() - start
+            map -> reduce
 
-    start = time.time()
-    second_return_dict = dask.compute(second_dask_graph)[0]
-    timing_distributed_application["T_compute_dask_graph"] = time.time() - start
+        which is used for the final residual/restoration cycle.
+        """
+        start = time.time()
 
-    return_dict = second_return_dict
+        viper_graph = map(
+            input_data=ps_xdt,
+            node_task_data_mapping=node_task_data_mapping,
+            node_task=node_tasks.imaging.residual_update_continuum_single_field,
+            input_params=cycle_input_params,
+            in_memory_compute=False,
+            data_loading_task=None,
+            disk_chunk_sizes=disk_chunk_sizes,
+            load_node_input_params={
+                "processing_set_data_group_name": (processing_set_data_group_name),
+            },
+            monitor_resources_seconds=monitor_resources_seconds,
+            task_priorities=task_priorities,
+        )
 
-    controller = second_return_dict["controller"]
+        viper_graph = reduce(
+            viper_graph,
+            combine_continuum_chunks,
+            reduce_input_params,
+            mode=reduce_mode,
+            n_batch=reduce_n_batch,
+        )
 
-    model_increment_2 = second_return_dict["image"]["SKY_MODEL"]
+        if append_input_params is not None:
+            viper_graph = append(
+                viper_graph,
+                node_tasks.imaging.continuum_append_node,
+                append_input_params,
+            )
 
-    # Start from the first accumulated model dataset so that all coordinates,
-    # dataset attributes, and variable attributes are preserved.
-    model_2_xds = model_1_xds.copy(deep=True)
+        timing_distributed_application["T_create_map_reduce_append_graph"] += (
+            time.time() - start
+        )
 
-    # Add the second minor-cycle increment positionally. We intentionally update
-    # only the array data rather than constructing a new xr.Dataset/xr.Variable,
-    # because constructing a new dataset without coordinates changes the
-    # polarization coordinate to integer indices [0, 1].
-    model_2_xds["SKY_MODEL"].data = model_1.data + model_increment_2.data
+        start = time.time()
 
-    # Preserve the original SKY_MODEL attributes explicitly.
-    model_2_xds["SKY_MODEL"].attrs = model_1.attrs.copy()
+        dask_graph = generate_dask_workflow(viper_graph)
+
+        timing_distributed_application["T_generate_dask_graph"] += time.time() - start
+
+        start = time.time()
+
+        graph_result = dask.compute(dask_graph)[0]
+
+        timing_distributed_application["T_compute_dask_graph"] += time.time() - start
+
+        return graph_result
+
+    # These timing entries now accumulate over all major cycles instead of
+    # being overwritten by each hard-coded graph.
+    timing_distributed_application["T_create_map_reduce_append_graph"] = 0.0
+
+    timing_distributed_application["T_generate_dask_graph"] = 0.0
+
+    timing_distributed_application["T_compute_dask_graph"] = 0.0
+
+    # State carried between independently computed distributed graphs.
+    is_n_iter_0 = True
+    static_xds = None
+    model_xds = None
+    last_minor_return_dict = None
+    n_major_cycles = 0
+
+    # The IterationController is updated inside the append node. A nonzero
+    # major stop code means that the CLEAN loop has converged or reached one
+    # of its configured limits.
+    while controller.stopcode.major == 0:
+        n_major_cycles += 1
+
+        logger.debug(f"Starting continuum major cycle {n_major_cycles}.")
+
+        # ---------------------------------------------------------
+        # Configure the distributed residual/major-cycle map tasks.
+        # ---------------------------------------------------------
+        cycle_input_params = dict(input_params)
+
+        cycle_input_params["is_n_iter_0"] = is_n_iter_0
+        cycle_input_params["restore"] = False
+
+        if not is_n_iter_0:
+            if model_xds is None:
+                raise RuntimeError(
+                    "No accumulated continuum model is available for "
+                    f"major cycle {n_major_cycles}."
+                )
+
+            if static_xds is None:
+                raise RuntimeError(
+                    "No static continuum products are available for "
+                    f"major cycle {n_major_cycles}."
+                )
+
+            cycle_input_params["model_xds"] = model_xds
+            cycle_input_params["static_xds"] = static_xds
+
+        # During the first major cycle the PSF and residual Taylor products
+        # are reduced. Later cycles only produce new residual products; the
+        # static PSF/PB products are supplied by continuum_append_node.
+        if is_n_iter_0:
+            reduce_input_params = {}
+        else:
+            reduce_input_params = {
+                "additive_variables": ("SKY_RESIDUAL",),
+            }
+
+        # ---------------------------------------------------------
+        # Configure the global continuum minor-cycle append node.
+        # ---------------------------------------------------------
+        append_input_params = {
+            "iteration_control_params": iteration_control_params,
+            "deconvolver": deconvolver,
+            "processing_function_threads": processing_function_threads,
+            "is_n_iter_0": is_n_iter_0,
+            "controller": controller,
+            "image_data_group_in_name": "residual",
+            "image_data_group_out_name": "model",
+        }
+
+        if not is_n_iter_0:
+            append_input_params["static_xds"] = static_xds
+
+        # ---------------------------------------------------------
+        # Execute one major cycle followed by one minor cycle.
+        # ---------------------------------------------------------
+        cycle_return_dict = _compute_continuum_graph(
+            cycle_input_params=cycle_input_params,
+            reduce_input_params=reduce_input_params,
+            append_input_params=append_input_params,
+        )
+
+        last_minor_return_dict = cycle_return_dict
+        controller = cycle_return_dict["controller"]
+
+        # ---------------------------------------------------------
+        # Initialize or update the state carried to the next cycle.
+        # ---------------------------------------------------------
+        if is_n_iter_0:
+            if "static_xds" not in cycle_return_dict:
+                raise KeyError(
+                    "The first continuum append node did not return " "'static_xds'."
+                )
+
+            static_xds = cycle_return_dict["static_xds"]
+
+            # The first minor-cycle result is the initial accumulated model.
+            model_xds = cycle_return_dict["image"][["SKY_MODEL"]].copy(deep=True)
+
+        else:
+            # Later temporary Högbom minor cycles return a model increment.
+            model_increment = cycle_return_dict["image"]["SKY_MODEL"]
+
+            if model_increment.dims != model_xds["SKY_MODEL"].dims:
+                raise ValueError(
+                    "The continuum model increment dimensions do not match "
+                    "the accumulated model: "
+                    f"{model_increment.dims} != "
+                    f"{model_xds['SKY_MODEL'].dims}."
+                )
+
+            if model_increment.shape != model_xds["SKY_MODEL"].shape:
+                raise ValueError(
+                    "The continuum model increment shape does not match "
+                    "the accumulated model: "
+                    f"{model_increment.shape} != "
+                    f"{model_xds['SKY_MODEL'].shape}."
+                )
+
+            # Update only the data so that coordinates such as the Stokes
+            # polarization labels remain unchanged.
+            accumulated_model = model_xds["SKY_MODEL"]
+
+            model_xds["SKY_MODEL"].data = accumulated_model.data + model_increment.data
+
+            model_xds["SKY_MODEL"].attrs = accumulated_model.attrs.copy()
+
+        is_n_iter_0 = False
+
+        stopcode = cycle_return_dict["stopcode"]
+        stopdesc = cycle_return_dict["stopdesc"]
+
+        if stopcode.major != 0:
+            logger.debug(
+                "Continuum major/minor-cycle loop stopped after "
+                f"{n_major_cycles} major cycles: {stopdesc}"
+            )
+            break
+
+    if last_minor_return_dict is None:
+        raise RuntimeError(
+            "The continuum major/minor-cycle loop completed without "
+            "executing a minor cycle."
+        )
 
     # =============================================================
-    # Major cycle 3
+    # Final major cycle: recompute residual and restore
     # =============================================================
 
-    start = time.time()
+    final_input_params = dict(input_params)
 
-    third_input_params = dict(input_params)
-    third_input_params["is_n_iter_0"] = False
+    final_input_params["is_n_iter_0"] = False
+    final_input_params["restore"] = True
+    final_input_params["model_xds"] = model_xds
+    final_input_params["static_xds"] = static_xds
 
-    # This is the final major cycle, so restore the final image here.
-    third_input_params["restore"] = True
-
-    # Use the model produced by minor cycle 2.
-    third_input_params["model_xds"] = model_2_xds
-
-    # Continue to use the static products created during major cycle 1.
-    third_input_params["static_xds"] = static_xds
-
-    third_viper_graph = map(
-        input_data=ps_xdt,
-        node_task_data_mapping=node_task_data_mapping,
-        node_task=node_tasks.imaging.residual_update_continuum_single_field,
-        input_params=third_input_params,
-        in_memory_compute=False,
-        data_loading_task=None,
-        disk_chunk_sizes=disk_chunk_sizes,
-        load_node_input_params={
-            "processing_set_data_group_name": processing_set_data_group_name,
-        },
-        monitor_resources_seconds=monitor_resources_seconds,
-        task_priorities=task_priorities,
+    # Preserve the behavior of the existing final major cycle. This graph
+    # deliberately has no append node because no further model update should
+    # occur after the convergence decision.
+    final_return_dict = _compute_continuum_graph(
+        cycle_input_params=final_input_params,
+        reduce_input_params={},
+        append_input_params=None,
     )
 
-    third_viper_graph = reduce(
-        third_viper_graph,
-        combine_continuum_chunks,
-        {},
-        mode=reduce_mode,
-        n_batch=reduce_n_batch,
-    )
+    # =============================================================
+    # Assemble the final application result
+    # =============================================================
 
-    timing_distributed_application["T_create_third_map_reduce_graph"] = (
-        time.time() - start
-    )
+    return_dict = final_return_dict
 
-    start = time.time()
-    third_dask_graph = generate_dask_workflow(third_viper_graph)
-    timing_distributed_application["T_generate_third_dask_graph"] = time.time() - start
+    # The final major-cycle graph computes the final residual/restored image,
+    # while the accumulated model comes from all preceding minor cycles.
+    return_dict["image"]["SKY_MODEL"] = model_xds["SKY_MODEL"].copy(deep=True)
 
-    start = time.time()
-    third_return_dict = dask.compute(third_dask_graph)[0]
-    timing_distributed_application["T_compute_third_dask_graph"] = time.time() - start
+    # Convergence and deconvolution state come from the last minor cycle,
+    # because the final graph contains no model-update append node.
+    for key in (
+        "controller",
+        "deconvolution",
+        "stopcode",
+        "stopdesc",
+        "is_n_iter_0",
+    ):
+        return_dict[key] = last_minor_return_dict[key]
 
-    ###########################################################################
-
-    return_dict = third_return_dict
-
-    return_dict["image"]["SKY_MODEL"] = model_2_xds["SKY_MODEL"].copy(deep=True)
-
-    return_dict["controller"] = second_return_dict["controller"]
-    return_dict["deconvolution"] = second_return_dict["deconvolution"]
-    return_dict["stopcode"] = second_return_dict["stopcode"]
-    return_dict["stopdesc"] = second_return_dict["stopdesc"]
-    return_dict["is_n_iter_0"] = False
-
-    # Preserve the model and controller state from the second minor cycle.
-    # return_dict["image"]["SKY_MODEL"] = first_return_dict["image"]["SKY_MODEL"].copy(
-    #    deep=True
-    # )
-    # return_dict["controller"] = first_return_dict["controller"]
-    # return_dict["deconvolution"] = first_return_dict["deconvolution"]
-    # return_dict["stopcode"] = first_return_dict["stopcode"]
-    # return_dict["stopdesc"] = first_return_dict["stopdesc"]
-    # return_dict["is_n_iter_0"] = False
+    return_dict["static_xds"] = static_xds
+    return_dict["n_major_cycles"] = n_major_cycles
 
     ###
 
