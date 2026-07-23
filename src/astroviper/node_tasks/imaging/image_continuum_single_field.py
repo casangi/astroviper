@@ -406,6 +406,15 @@ def residual_update_continuum_single_field(
 
 
 @shares_param_docs
+def continuum_append_node(
+    input_data,
+    input_params,
+):
+    return_dict = model_update_continuum_single_field(input_data, input_params)
+    return return_dict
+
+
+@shares_param_docs
 def model_update_continuum_single_field(
     input_data,
     input_params,
@@ -623,7 +632,7 @@ def model_update_continuum_single_field(
     # -------------------------------------------------------------
     start = time.time()
 
-    # If nit the first call, we need to copy PSF and PB from the static_xds
+    # If not the first call, we need to copy PSF and PB from the static_xds
     if is_n_iter_0 == False:
         static_xds = input_params["static_xds"]
 
@@ -631,6 +640,7 @@ def model_update_continuum_single_field(
             "POINT_SPREAD_FUNCTION",
             "PRIMARY_BEAM",
             "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
         ):
             if name in static_xds and name not in img_xds:
                 source = static_xds[name]
@@ -656,6 +666,11 @@ def model_update_continuum_single_field(
                 residual_data_group[
                     "beam_fit_params"
                 ] = "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"
+
+            if "MAX_SIDELOBE_POINT_SPREAD_FUNCTION" in img_xds:
+                residual_data_group[
+                    "max_sidelobe_point_spread_function"
+                ] = "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
 
     (deconvolve_dict, model_update_return_df,) = model_update_mtmfs_single_field(
         img_xds,

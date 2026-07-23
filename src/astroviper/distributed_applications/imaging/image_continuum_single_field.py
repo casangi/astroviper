@@ -1013,7 +1013,7 @@ def image_continuum_single_field(
 
     first_viper_graph = append(
         first_viper_graph,
-        node_tasks.imaging.model_update_continuum_single_field,
+        node_tasks.imaging.continuum_append_node,  # model_update_continuum_single_field,
         first_append_input_params,
     )
 
@@ -1055,6 +1055,7 @@ def image_continuum_single_field(
             "POINT_SPREAD_FUNCTION",
             "PRIMARY_BEAM",
             "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
         ]
     ]
 

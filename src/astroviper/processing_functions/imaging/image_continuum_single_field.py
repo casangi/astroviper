@@ -539,7 +539,17 @@ def model_update_mtmfs_single_field(
     start = time.time()
 
     # add sidelobe point spread function
-    img_xds = add_max_sidelobe_point_spread_function_continuum_single_field(img_xds)
+    if is_n_iter_0:
+        img_xds = add_max_sidelobe_point_spread_function_continuum_single_field(img_xds)
+    else:
+        max_sidelobe_name = "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
+
+        if max_sidelobe_name not in img_xds:
+            raise KeyError(f"{max_sidelobe_name} is required for later minor cycles.")
+
+        residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
+
+        residual_data_group["max_sidelobe_point_spread_function"] = max_sidelobe_name
 
     # ------------------------------------------------------------------
     # Build a temporary cube-like image dataset.
@@ -596,8 +606,44 @@ def model_update_mtmfs_single_field(
         )
 
     # Copy Taylor-dependent variables into the temporary cube layout.
+    max_sidelobe_name = "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
+
     for variable_name, data_array in img_xds.data_vars.items():
-        if "taylor_term" in data_array.dims:
+
+        if variable_name == max_sidelobe_name:
+            if data_array.dims == ("time", "polarization"):
+                hogbom_xds[variable_name] = xr.DataArray(
+                    data_array.values[:, np.newaxis, :],
+                    dims=(
+                        "time",
+                        "frequency",
+                        "polarization",
+                    ),
+                    coords={
+                        "time": data_array.coords["time"],
+                        "frequency": frequency_coord,
+                        "polarization": data_array.coords["polarization"],
+                    },
+                    attrs=data_array.attrs.copy(),
+                )
+
+            elif "psf_taylor_order" in data_array.dims:
+                hogbom_xds[variable_name] = _to_single_frequency(
+                    data_array,
+                    "psf_taylor_order",
+                )
+
+            elif "frequency" in data_array.dims:
+                hogbom_xds[variable_name] = data_array.isel(
+                    frequency=slice(0, 1)
+                ).assign_coords(frequency=frequency_coord)
+
+            else:
+                raise ValueError(
+                    f"{variable_name} has unsupported dimensions " f"{data_array.dims}."
+                )
+
+        elif "taylor_term" in data_array.dims:
             hogbom_xds[variable_name] = _to_single_frequency(
                 data_array,
                 "taylor_term",
