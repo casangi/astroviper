@@ -130,10 +130,8 @@ def residual_update_continuum_single_field(
     processing_function_threads=1,
     fft_backend="pyfftw",
     image_data_variables_keep=None,
-    restore=False,
     is_n_iter_0=True,
     model_uv_xds=None,
-    static_xds=None,
     task_id=0,
 ):
     """Perform setup and exactly one continuum residual update."""
