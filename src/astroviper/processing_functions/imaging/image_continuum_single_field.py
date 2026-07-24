@@ -2,6 +2,70 @@ import xarray as xr
 
 from astroviper.utils.param_docs import shares_param_docs
 
+###############################################################################
+# Generic helper functions
+###############################################################################
+
+def copy_variable_without_alignment(
+    destination: xr.Dataset,
+    source: xr.Dataset,
+    name: str,
+) -> xr.Dataset:
+    
+    """Copy a data variable without coordinate alignment.
+    
+    This helper copies the numerical values and metadata of a data variable from
+    one :class:`xarray.Dataset` to another while preserving the destination
+    dataset's coordinates and indexing.
+    
+    Unlike a normal xarray assignment, which aligns arrays by coordinate labels,
+    this function performs a positional copy of the underlying array data. This is
+    useful when the source and destination datasets are known to have identical
+    array layouts but differ in coordinates or auxiliary metadata.
+    
+    Parameters
+    ----------
+    destination_xds : xarray.Dataset
+        Dataset receiving the copied variable.
+    
+    source_xds : xarray.Dataset
+        Dataset providing the variable to copy.
+    
+    variable_name : str
+        Name of the data variable to copy.
+    
+    Returns
+    -------
+    xarray.Dataset
+        The destination dataset with the copied variable. Variable attributes are
+        preserved, while the destination dataset's coordinates and data-group
+        definitions remain unchanged.
+    
+    Notes
+    -----
+    This helper should only be used when the source and destination variables are
+    known to have identical dimensions and shapes. No coordinate alignment or
+    broadcasting is performed."""    
+    
+    source_da = source[name]
+
+    for dim, size in source_da.sizes.items():
+        if dim in destination.sizes and destination.sizes[dim] != size:
+            raise ValueError(
+                f"{name}: incompatible size for dimension {dim!r}: "
+                f"source={size}, destination={destination.sizes[dim]}"
+            )
+
+    destination[name] = xr.Variable(
+        dims=source_da.dims,
+        data=source_da.data,
+        attrs=source_da.attrs.copy(),
+    )
+    return destination
+
+###############################################################################
+# Processing Function level functionality related to the residual update
+###############################################################################
 
 @shares_param_docs
 def imaging_preparation_continuum_single_field(
@@ -16,74 +80,75 @@ def imaging_preparation_continuum_single_field(
     image_data_variables_keep=None,
     task_id=0,
 ):
-    """Run the once-per-chunk continuum-imaging setup.
-
-    Everything performed only once for one frequency-chunk map task belongs
-    here:
-
-    * construction of the :class:`IterationController`;
-    * construction of the initially empty combined deconvolution return dict;
-    * imaging-weight calculation;
-    * creation of the local Taylor PSF/Hessian products;
-    * creation of the primary-beam products, when requested;
-    * creation of any continuum/Taylor coordinates and data groups required by
-      the returned :class:`xarray.Dataset`.
-
-    The dirty/residual Taylor images are deliberately not calculated here.
-    They are produced by the first call to
-    :func:`residual_cycle_continuum_single_field`.
-
-    Notes
-    -----
-    For ``nterms=2`` the setup implementation is expected to create local
-    Taylor PSF/Hessian products of orders 0, 1, and 2. The preferred xarray
-    representation is one point-spread-function variable with a Taylor-order
-    dimension rather than separate unrelated variables.
-
+    """Run the once-per-chunk continuum imaging preparation.
+    
+    This helper performs the setup work required only during the first major
+    cycle for one frequency-chunk map task. It delegates to
+    :func:`imaging_setup_continuum_single_field`, which prepares the chunk-local
+    visibility and UV-sampling products needed by the subsequent continuum
+    residual update.
+    
+    The setup stage may include
+    
+    * calculating and registering imaging weights;
+    * constructing the chunk-local visibility and UV-sampling grids;
+    * creating the corresponding normalization products;
+    * creating the primary beam when requested;
+    * establishing the continuum coordinates, metadata, and image data groups
+      required by later processing stages.
+    
+    No model visibility prediction, residual visibility calculation, global
+    reduction, inverse FFT, minor cycle, or restoration is performed here. Those
+    operations are handled by later stages of the continuum imaging workflow.
+    
     Parameters
     ----------
     ps_xdt : xarray.DataTree
         Visibility data for this frequency chunk.
+    
     img_xds : xarray.Dataset
-        Empty image dataset for this chunk.
+        Empty image dataset carrying the geometry and coordinates for this chunk.
+    
     image_params : dict
-        Image geometry and continuum configuration. In addition to the normal
-        image geometry, this should contain or resolve:
-
-        * ``nterms``;
-        * ``reference_frequency``;
-        * the output polarization and time coordinates;
-        * gridding/FFT parameters such as ``fft_padding``.
+        Image geometry and continuum configuration. This includes the image size,
+        cell size, reference frequency, number of Taylor terms, and gridding or FFT
+        configuration required by the setup processing functions.
+    
     imaging_weights_params : dict
-        Weighting configuration.
-    iteration_control_params : dict
-        Major/minor-cycle control configuration.
+        Imaging-weight configuration.
+    
     processing_set_data_group_name : str, optional
-        Processing-set data group to image.
+        Processing-set data group used as the input for imaging.
+    
     single_precision_image : bool, optional
-        Whether image-domain products use single precision.
+        Whether continuum image and grid products use single precision.
+    
     processing_function_threads : int, optional
-        Number of threads supplied to lower-level processing kernels.
+        Number of threads supplied to lower-level processing functions.
+    
     fft_backend : str, optional
-        FFT backend used during image normalization.
+        FFT backend supplied to setup functions that require Fourier transforms.
+    
     image_data_variables_keep : list of str, optional
-        Logical output variables retained in ``img_xds``.
+        Logical image products to retain in the returned dataset.
+    
     task_id : int, optional
-        Frequency-chunk identifier.
-
+        Identifier of the frequency-chunk task, used for logging.
+    
     Returns
     -------
-    controller : IterationController
-        Freshly initialized iteration controller.
     img_xds : xarray.Dataset
-        Dataset carrying the local Taylor PSF/Hessian and setup products.
+        Chunk-local continuum dataset containing the setup products required by
+        the residual-update and reduce stages.
+    
     return_df : pandas.DataFrame
-        One-row timing frame returned by the setup function.
-    combined_deconvolve_dict : ReturnDict
-        Initially empty deconvolution-statistics accumulator.
+        Timing information returned by
+        :func:`imaging_setup_continuum_single_field`.
+    
     T_setup : float
-        Wall-clock duration of this setup phase.
+        Total wall-clock duration of the setup call, in seconds.
     """
+    
     import time
 
     import toolviper.utils.logger as logger
@@ -96,6 +161,7 @@ def imaging_preparation_continuum_single_field(
 
     start = time.time()
 
+    #wrap around imaging setup
     img_xds, return_df = imaging_setup_continuum_single_field(
         ps_xdt,
         img_xds,
@@ -116,6 +182,215 @@ def imaging_preparation_continuum_single_field(
         T_setup,
     )
 
+@shares_param_docs
+def prepare_model_uv_continuum_single_field(
+    model_xds,
+    image_params,
+    instrument_polarization_basis="linear",
+    single_precision_image=True,
+    processing_function_threads=1,
+    fft_backend="pyfftw",
+    image_data_group_name="model",
+):
+    """Prepare the Fourier-domain continuum model for the next major cycle.
+    
+    This function is called once after each continuum minor cycle. It converts the
+    updated image-domain continuum model from the Stokes basis into the
+    instrumental correlation basis and Fourier-transforms every Taylor term to
+    produce the corresponding model visibility grids.
+    
+    The resulting Fourier-domain model is shared by all frequency-chunk map
+    workers during the subsequent major cycle. Each worker reconstructs the model
+    visibilities at its local frequencies and degrids them directly, avoiding
+    repeated polarization transformations and FFTs on every worker.
+    
+    Parameters
+    ----------
+    model_xds : xarray.Dataset
+        Image-domain continuum model dataset. The data group selected by
+        ``image_data_group_name`` must contain a ``sky`` variable with a
+        ``taylor_term`` dimension.
+    
+    image_params : dict
+        Continuum imaging configuration, including the image geometry, FFT
+        parameters, and the number of Taylor terms.
+    
+    instrument_polarization_basis : {"linear", "circular"}, optional
+        Instrumental correlation basis into which the Stokes model is
+        transformed before the Fourier transform.
+    
+    single_precision_image : bool, optional
+        If ``True``, create ``complex64`` Fourier grids; otherwise create
+        ``complex128`` grids.
+    
+    processing_function_threads : int, optional
+        Number of threads supplied to the polarization transformation and FFT
+        routines.
+    
+    fft_backend : str, optional
+        FFT backend passed to ``fft_norm_continuum_img_xds``.
+    
+    image_data_group_name : str, optional
+        Data group containing the continuum sky model and receiving the Fourier-
+        domain model visibility grids.
+    
+    Returns
+    -------
+    model_uv_xds : xarray.Dataset
+        Continuum model dataset in the instrumental correlation basis containing
+        the Fourier-domain Taylor coefficients (``VISIBILITY_MODEL``), indexed by
+        ``taylor_term``.
+    
+    Notes
+    -----
+    This function performs the expensive polarization transformation and Fourier
+    transform only once per major cycle. The resulting Fourier-domain model is
+    reused by every distributed map task, substantially reducing the computational
+    cost of continuum degridding.
+    """
+    import copy
+
+    import numpy as np
+    import xarray as xr
+
+    from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
+        transform_polarization_basis,
+    )
+    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+        fft_norm_continuum_img_xds,
+    )
+
+    if not isinstance(model_xds, xr.Dataset):
+        raise TypeError(
+            "model_xds must be an xarray.Dataset; received "
+            f"{type(model_xds).__name__}."
+        )
+
+    if instrument_polarization_basis not in ("linear", "circular"):
+        raise ValueError(
+            "instrument_polarization_basis must be either 'linear' or "
+            f"'circular'; received {instrument_polarization_basis!r}."
+        )
+
+    nterms = int(image_params.get("nterms", 0))
+
+    if nterms < 1:
+        raise ValueError("image_params['nterms'] must be at least 1.")
+
+    data_groups = model_xds.attrs.get("data_groups", {})
+
+    if image_data_group_name not in data_groups:
+        raise KeyError(
+            f"Model data group {image_data_group_name!r} is not present in "
+            "model_xds.attrs['data_groups']."
+        )
+
+    model_data_group = data_groups[image_data_group_name]
+    model_sky_name = model_data_group.get("sky")
+
+    if model_sky_name is None:
+        raise KeyError(
+            f"Model data group {image_data_group_name!r} does not define "
+            "a 'sky' variable."
+        )
+
+    if model_sky_name not in model_xds:
+        raise KeyError(
+            f"Model sky variable {model_sky_name!r} is not present in " "model_xds."
+        )
+
+    model_sky = model_xds[model_sky_name]
+
+    if "taylor_term" not in model_sky.dims:
+        raise ValueError(
+            f"Model sky variable {model_sky_name!r} must contain a "
+            "'taylor_term' dimension."
+        )
+
+    if model_sky.sizes["taylor_term"] != nterms:
+        raise ValueError(
+            "The number of model Taylor terms does not match "
+            "image_params['nterms']: "
+            f"{model_sky.sizes['taylor_term']} != {nterms}."
+        )
+
+    complex_dtype = np.complex64 if single_precision_image else np.complex128
+
+    # The accumulated model must remain in Stokes basis for the next model
+    # update and for final restoration. Work on an independent copy.
+    model_uv_xds = model_xds.copy(deep=True)
+    model_uv_xds.attrs = copy.deepcopy(model_xds.attrs)
+
+    model_uv_xds = transform_polarization_basis(
+        model_uv_xds,
+        new_polarization_basis=instrument_polarization_basis,
+        overwrite=True,
+    )
+
+    model_uv_xds = fft_norm_continuum_img_xds(
+        model_uv_xds,
+        image_params=image_params,
+        image_data_group_in_name=image_data_group_name,
+        image_data_group_out_name=image_data_group_name,
+        image_data_group_out_modified={
+            "visibility": "VISIBILITY_MODEL",
+        },
+        image_data_variables_keep=["sky"],
+        processing_function_threads=processing_function_threads,
+        fft_backend=fft_backend,
+        complex_dtype=complex_dtype,
+    )
+
+    output_data_groups = model_uv_xds.attrs.get("data_groups", {})
+
+    if image_data_group_name not in output_data_groups:
+        raise RuntimeError(
+            "The model FFT removed or failed to create data group "
+            f"{image_data_group_name!r}."
+        )
+
+    output_model_group = output_data_groups[image_data_group_name]
+    model_visibility_name = output_model_group.get("visibility")
+
+    if model_visibility_name is None:
+        raise RuntimeError(
+            "fft_norm_continuum_img_xds did not register a model "
+            "visibility variable."
+        )
+
+    if model_visibility_name not in model_uv_xds:
+        raise RuntimeError(
+            "fft_norm_continuum_img_xds registered model visibility "
+            f"{model_visibility_name!r}, but that variable is absent."
+        )
+
+    model_visibility = model_uv_xds[model_visibility_name]
+
+    if "taylor_term" not in model_visibility.dims:
+        raise RuntimeError(
+            f"Model visibility variable {model_visibility_name!r} must "
+            "contain a 'taylor_term' dimension."
+        )
+
+    if model_visibility.sizes["taylor_term"] != nterms:
+        raise RuntimeError(
+            "The Fourier-domain model has the wrong number of Taylor terms: "
+            f"{model_visibility.sizes['taylor_term']} != {nterms}."
+        )
+
+    model_visibility.attrs.update(
+        {
+            "description": (
+                "Global Fourier-domain continuum Taylor model used for "
+                "distributed degridding."
+            ),
+            "nterms": nterms,
+            "instrument_polarization_basis": (instrument_polarization_basis),
+        }
+    )
+
+    return model_uv_xds
+
 
 @shares_param_docs
 def residual_update_continuum_single_field(
@@ -134,7 +409,79 @@ def residual_update_continuum_single_field(
     model_uv_xds=None,
     task_id=0,
 ):
-    """Perform setup and exactly one continuum residual update."""
+    """Perform one continuum major-cycle update for a single frequency chunk.
+
+    This function is the primary processing entry point executed by the continuum
+    map node task. It performs the operations required to compute the chunk-local
+    continuum products that are later accumulated by the GraphViper reduce stage.
+    
+    During the first major cycle, the function first executes the one-time imaging
+    preparation for the frequency chunk before computing the initial residual
+    products. During subsequent major cycles, it reuses the existing imaging
+    geometry, updates the imaging weights when required, and computes a new
+    residual using the globally prepared Fourier-domain continuum model.
+    
+    The residual-update stage predicts the model visibilities (except during the
+    first major cycle), subtracts them from the observed visibilities, grids the
+    resulting residual visibilities into Taylor-weighted UV-domain products, and
+    returns those products for global reduction. No inverse FFT, minor cycle, or
+    restoration is performed here.
+    
+    Parameters
+    ----------
+    ps_xdt : xarray.DataTree
+        Visibility data for this frequency chunk.
+    
+    img_xds : xarray.Dataset
+        Chunk-local continuum image dataset used to accumulate the UV-domain
+        products.
+    
+    image_params : dict
+        Image geometry and continuum imaging configuration.
+    
+    imaging_weights_params : dict
+        Imaging-weight configuration.
+    
+    processing_set_data_group_name : str, optional
+        Processing-set data group to image.
+    
+    deconvolver : str, optional
+        Reserved for future continuum deconvolution implementations.
+    
+    instrument_polarization_basis : {"linear", "circular"}, optional
+        Instrument correlation basis used during gridding and degridding.
+    
+    single_precision_image : bool, optional
+        Whether continuum products use single precision.
+    
+    processing_function_threads : int, optional
+        Number of threads supplied to the lower-level processing functions.
+    
+    fft_backend : str, optional
+        FFT backend used by the underlying processing functions.
+    
+    image_data_variables_keep : list of str, optional
+        Logical image products retained in the returned dataset.
+    
+    is_n_iter_0 : bool, optional
+        Indicates whether this is the first major cycle.
+    
+    model_uv_xds : xarray.Dataset, optional
+        Globally prepared Fourier-domain Taylor model used for degridding during
+        all major cycles after the first.
+    
+    task_id : int, optional
+        Identifier of the current frequency chunk.
+    
+    Returns
+    -------
+    img_xds : xarray.Dataset
+        Chunk-local continuum dataset containing the UV-domain products required
+        by the GraphViper reduce stage.
+    
+    timing_df : pandas.DataFrame
+        Timing summary for the setup (when applicable) and residual-update
+        processing performed by this function."""
 
     import time
 
@@ -186,9 +533,6 @@ def residual_update_continuum_single_field(
 
     else:
         # Do the empty registrations ... that are needed down the line
-        # from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
-        #    transform_polarization_basis,
-        # )
         from astroviper.processing_functions.imaging.calculate_imaging_weights import (
             calculate_imaging_weights,
         )
@@ -209,13 +553,6 @@ def residual_update_continuum_single_field(
                     "date": "2026",
                 },
             )
-
-        # Need to transform basis to Stokes
-        # img_xds = transform_polarization_basis(
-        #    img_xds,
-        #    new_polarization_basis="stokes",
-        #    overwrite=True,
-        # )
 
         # Needs to be refactored at a later point when decided what to do with weights
         start = time.time()
@@ -277,6 +614,10 @@ def residual_update_continuum_single_field(
     return img_xds, timing_df
 
 
+###############################################################################
+# Processing Function level functionality related to the model update
+###############################################################################
+
 @shares_param_docs
 def model_update_mtmfs_single_field(
     img_xds,
@@ -287,78 +628,85 @@ def model_update_mtmfs_single_field(
     image_data_group_in_name="residual",
     image_data_group_out_name="model",
 ):
-    """Run a temporary continuum minor cycle using Taylor order zero.
-
-        This is an interim implementation until a true MT-MFS deconvolution backend
-        is available. It performs an ordinary Högbom CLEAN using only
-
-            SKY_RESIDUAL[taylor_term=0]
-
-        and
-
-            POINT_SPREAD_FUNCTION[psf_taylor_order=0].
-
-        The resulting model is copied into
-
-            SKY_MODEL[taylor_term=0].
-
-        Higher-order Taylor residuals, PSFs, and model terms are left unchanged.
-
-        For now, we follow this strategy as a placeholder
-        continuum Taylor dataset
-            │
-            ├── take residual Taylor term 0
-            ├── take PSF Taylor order 0
-            ├── take model Taylor term 0
-            │
-            ▼
-    build temporary one-channel cube dataset
+    """Perform one continuum minor-cycle model update.
+    
+    This function implements the current continuum deconvolution backend used by
+    the distributed MT-MFS imaging workflow. Until a native MT-MFS deconvolver is
+    available, the minor cycle is performed by temporarily projecting the
+    continuum dataset onto a single-frequency cube representation and reusing the
+    existing cube Högbom implementation.
+    
+    The procedure is
+    
+    continuum image dataset
+        │
+        ├── select residual Taylor term 0
+        ├── select PSF Taylor order 0
+        ├── select model Taylor term 0
+        │
+        ▼
+    construct temporary one-channel cube dataset
     (time, frequency=1, polarization, l, m)
-            │
-            ▼
-    call existing cube model-update function
-            │
-            ├── create primary-beam mask if needed
-            ├── run Högbom CLEAN
-            └── update the temporary cube model
-            │
-            ▼
-    copy cleaned model plane back into SKY_MODEL[taylor_term=0]
-
-        Parameters
-        ----------
-        img_xds : xarray.Dataset
-            Globally reduced continuum image dataset. Residual/model images are
-            expected to use ``taylor_term`` while the PSF uses
-            ``psf_taylor_order``.
-        deconvolver : str
-            Deconvolver name. Currently only ``"hogbom"`` is supported.
-        deconvolve_params : dict
-            Minor-cycle parameters, including ``cycleniter``,
-            ``cyclethreshold``, ``niter_per_plane``, and
-            ``cyclethreshold_per_plane``.
-        is_n_iter_0 : bool, optional
-            Whether this is the first model-update cycle.
-        processing_function_threads : int, optional
-            Number of threads used by the deconvolution backend.
-        image_data_group_in_name : str, optional
-            Input image data-group name.
-        image_data_group_out_name : str, optional
-            Output model data-group name.
-
-        Returns
-        -------
-        deconvolve_dict : ReturnDict
-            Per-plane deconvolution statistics returned by the Högbom backend.
-        return_df : pandas.DataFrame
-            Timing information for this model-update cycle.
-
-        Notes
-        -----
-        Despite the function name, this is not yet a true MT-MFS minor cycle.
-        It is a compatibility layer around the existing single-frequency Högbom
-        backend.
-    """
+        │
+        ▼
+    call existing cube model-update implementation
+        │
+        ├── construct the deconvolution mask (if required)
+        ├── determine CLEAN components
+        ├── update the temporary cube model
+        └── return deconvolution statistics
+        │
+        ▼
+    copy the updated model back into
+    SKY_MODEL[taylor_term=0]
+    
+    Only the zeroth Taylor coefficient is modified during the minor cycle.
+    Higher-order Taylor model terms are intentionally left unchanged and are
+    updated indirectly through the subsequent major cycle.
+    
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Globally reduced continuum image dataset. The residual and model images
+        are expected to use the ``taylor_term`` dimension, while the point-spread
+        function uses ``psf_taylor_order``.
+    
+    deconvolver : str
+        Name of the continuum deconvolver. Currently only ``"hogbom"`` is
+        supported.
+    
+    deconvolve_params : dict
+        Minor-cycle control parameters. These typically include entries such as
+        ``cycleniter``, ``cyclethreshold``, ``niter_per_plane``, and
+        ``cyclethreshold_per_plane``.
+    
+    is_n_iter_0 : bool, optional
+        Indicates whether this is the first minor cycle.
+    
+    processing_function_threads : int, optional
+        Number of threads supplied to the deconvolution backend.
+    
+    image_data_group_in_name : str, optional
+        Name of the residual image data group.
+    
+    image_data_group_out_name : str, optional
+        Name of the output model data group.
+    
+    Returns
+    -------
+    deconvolve_dict : ReturnDict
+        Deconvolution statistics returned by the Högbom implementation.
+    
+    return_df : pandas.DataFrame
+        Timing information for the continuum minor cycle.
+    
+    Notes
+    -----
+    This function is a compatibility layer that allows the continuum imaging
+    pipeline to reuse the existing cube deconvolution backend. Although the
+    surrounding imaging algorithm is MT-MFS, the current minor cycle operates
+    only on the zeroth Taylor coefficient. A future native MT-MFS deconvolver
+    will replace this implementation."""
     import copy
     import time
 
@@ -676,6 +1024,10 @@ def model_update_mtmfs_single_field(
     return deconvolve_dict, return_df
 
 
+###############################################################################
+# Processing function level functionality to initialize and finish imaging
+###############################################################################
+
 def restore_image(
     img_xds,
     image_data_group_in_residual_name="residual",
@@ -683,41 +1035,72 @@ def restore_image(
     image_data_group_out_restore_name="restored",
     processing_function_threads=1,
 ):
-    """Restore the Taylor-zero continuum model.
-
-    The continuum model and residual use a ``taylor_term`` dimension, while
-    the existing cube restoration routine expects a ``frequency`` dimension.
-    This wrapper constructs a temporary one-channel cube containing:
-
-    * residual Taylor term zero;
-    * model Taylor term zero;
-    * PSF Taylor order zero;
-    * the fitted restoring-beam parameters.
-
-    It then calls the existing cube restoration routine and copies the restored
-    reference-frequency image back into the continuum dataset.
-
+    """Restore the continuum image.
+    
+    This function restores the final continuum image by temporarily projecting the
+    continuum dataset onto a one-channel cube representation and reusing the
+    existing cube restoration implementation.
+    
+    The procedure is
+    
+    continuum image dataset
+        │
+        ├── select residual Taylor term 0
+        ├── select model Taylor term 0
+        ├── select PSF Taylor order 0
+        └── copy the fitted restoring-beam parameters
+        │
+        ▼
+    construct temporary one-channel cube dataset
+    (time, frequency=1, polarization, l, m)
+        │
+        ▼
+    call existing cube restoration implementation
+        │
+        ├── convolve the model with the restoring beam
+        ├── add the residual image
+        └── produce the restored image
+        │
+        ▼
+    copy the restored image back into the
+    continuum dataset
+    
+    The restored image corresponds to the reference-frequency (Taylor-zero)
+    continuum image.
+    
     Parameters
     ----------
     img_xds : xarray.Dataset
-        Continuum image dataset containing the residual, model, PSF, and fitted
-        restoring-beam parameters.
+        Continuum image dataset containing the residual image, sky model,
+        point-spread function, and fitted restoring-beam parameters.
+    
     image_data_group_in_residual_name : str, optional
-        Data group containing the residual image.
+        Name of the residual image data group.
+    
     image_data_group_in_model_name : str, optional
-        Data group containing the sky model.
+        Name of the sky-model data group.
+    
     image_data_group_out_restore_name : str, optional
-        Data group under which the restored image is registered.
+        Name under which the restored image is registered.
+    
     processing_function_threads : int, optional
-        Number of threads passed to the cube restoration routine.
-
+        Number of threads supplied to the cube restoration backend.
+    
     Returns
     -------
     img_xds : xarray.Dataset
-        Input continuum dataset with the restored reference-frequency image.
+        Continuum dataset with the restored Taylor-zero image added.
+    
     timing_df : pandas.DataFrame
-        Timing information returned by the cube restoration routine.
-    """
+        Timing information returned by the restoration backend.
+    
+    Notes
+    -----
+    This function is a compatibility layer around the existing cube restoration
+    routine. Although the surrounding imaging algorithm is MT-MFS, the current
+    restoration operates only on the zeroth Taylor coefficient and therefore
+    produces the restored reference-frequency continuum image."""
+    
     import copy
 
     import numpy as np
@@ -1022,41 +1405,67 @@ def point_spread_function_gaussian_fit_continuum(
     image_data_group_out_name="residual",
     processing_function_threads=1,
 ):
-    """Fit the restoring beam to the zeroth-order continuum PSF.
-
-    The existing cube ``point_spread_function_gaussian_fit`` routine expects
-    a PSF with dimensions
-
-        (time, frequency, polarization, l, m).
-
-    A continuum MT-MFS PSF instead has dimensions
-
-        (time, psf_taylor_order, polarization, l, m).
-
-    This wrapper selects the globally reduced zeroth-order Taylor PSF,
-    presents it to the cube fitter as a single-frequency PSF, and copies the
-    fitted beam parameters and maximum sidelobe back into the continuum
-    image dataset.
-
+    """Fit the restoring beam from the continuum point-spread function.
+    
+    This function determines the restoring beam by temporarily projecting the
+    continuum point-spread function onto a one-channel cube representation and
+    reusing the existing cube Gaussian-fitting implementation.
+    
+    The procedure is
+    
+    continuum image dataset
+        │
+        ├── select PSF Taylor order 0
+        │
+        ▼
+    construct temporary one-channel cube dataset
+    (time, frequency=1, polarization, l, m)
+        │
+        ▼
+    call existing cube Gaussian-fit implementation
+        │
+        ├── fit the restoring beam
+        ├── determine the maximum PSF sidelobe
+        └── return beam-fit statistics
+        │
+        ▼
+    copy the fitted restoring-beam parameters and
+    maximum PSF sidelobe back into the
+    continuum dataset
+    
+    Only the zeroth Taylor-order point-spread function is used for the beam fit.
+    
     Parameters
     ----------
     img_xds : xarray.Dataset
-        Globally reduced continuum image dataset.
+        Continuum image dataset containing the point-spread function.
+    
     image_data_group_in_name : str, optional
-        Data group containing the continuum point-spread function.
+        Name of the data group containing the continuum point-spread function.
+    
     image_data_group_out_name : str, optional
-        Data group in which the beam-fit products are registered.
+        Name of the data group in which the fitted restoring-beam parameters are
+        registered.
+    
     processing_function_threads : int, optional
-        Number of threads supplied to the Gaussian-fit routine.
-
+        Number of threads supplied to the Gaussian-fitting backend.
+    
     Returns
     -------
     img_xds : xarray.Dataset
-        Continuum dataset containing the fitted restoring beam and maximum
-        PSF sidelobe.
+        Continuum dataset with the fitted restoring-beam parameters and maximum
+        PSF sidelobe added.
+    
     return_df : pandas.DataFrame
-        One-row timing dataframe.
-    """
+        Timing information returned by the Gaussian-fitting backend.
+    
+    Notes
+    -----
+    This function is a compatibility layer around the existing cube
+    ``point_spread_function_gaussian_fit`` implementation. The restoring beam is
+    determined exclusively from the zeroth Taylor-order point-spread function,
+    which is the standard convention for MT-MFS imaging."""
+    
     import time
     from copy import deepcopy
 
@@ -1258,219 +1667,3 @@ def point_spread_function_gaussian_fit_continuum(
     output_group[max_sidelobe_key] = max_sidelobe_name
 
     return img_xds, return_df
-
-
-def copy_variable_without_alignment(
-    destination: xr.Dataset,
-    source: xr.Dataset,
-    name: str,
-) -> xr.Dataset:
-    source_da = source[name]
-
-    for dim, size in source_da.sizes.items():
-        if dim in destination.sizes and destination.sizes[dim] != size:
-            raise ValueError(
-                f"{name}: incompatible size for dimension {dim!r}: "
-                f"source={size}, destination={destination.sizes[dim]}"
-            )
-
-    destination[name] = xr.Variable(
-        dims=source_da.dims,
-        data=source_da.data,
-        attrs=source_da.attrs.copy(),
-    )
-    return destination
-
-
-@shares_param_docs
-def prepare_model_uv_continuum_single_field(
-    model_xds,
-    image_params,
-    instrument_polarization_basis="linear",
-    single_precision_image=True,
-    processing_function_threads=1,
-    fft_backend="pyfftw",
-    image_data_group_name="model",
-):
-    """Prepare global Fourier-domain Taylor model grids for degridding.
-
-    This function should be called once after each global continuum model
-    update. It converts the image-domain Taylor model from Stokes parameters
-    to the instrumental correlation basis and Fourier-transforms every Taylor
-    term.
-
-    The returned dataset can be shared by all frequency-chunk map workers.
-    Each worker then only reconstructs the model at its local frequencies and
-    degrids it, avoiding repeated polarization transformations and FFTs.
-
-    Parameters
-    ----------
-    model_xds : xarray.Dataset
-        Image-domain continuum model dataset. The data group selected by
-        ``image_data_group_name`` must register a ``sky`` variable with a
-        ``taylor_term`` dimension.
-    image_params : dict
-        Image geometry and FFT parameters. It must contain ``nterms``.
-    instrument_polarization_basis : {"linear", "circular"}, optional
-        Instrumental correlation basis into which the Stokes model is
-        transformed.
-    single_precision_image : bool, optional
-        If true, create complex64 Fourier grids. Otherwise, create complex128
-        Fourier grids.
-    processing_function_threads : int, optional
-        Number of threads used by the polarization and FFT processing
-        functions.
-    fft_backend : str, optional
-        FFT backend passed to ``fft_norm_continuum_img_xds``.
-    image_data_group_name : str, optional
-        Data group containing the model sky variable and receiving the model
-        visibility grid.
-
-    Returns
-    -------
-    model_uv_xds : xarray.Dataset
-        Model dataset in the instrumental polarization basis containing
-        ``VISIBILITY_MODEL`` with a ``taylor_term`` dimension.
-    """
-    import copy
-
-    import numpy as np
-    import xarray as xr
-
-    from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
-        transform_polarization_basis,
-    )
-    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
-        fft_norm_continuum_img_xds,
-    )
-
-    if not isinstance(model_xds, xr.Dataset):
-        raise TypeError(
-            "model_xds must be an xarray.Dataset; received "
-            f"{type(model_xds).__name__}."
-        )
-
-    if instrument_polarization_basis not in ("linear", "circular"):
-        raise ValueError(
-            "instrument_polarization_basis must be either 'linear' or "
-            f"'circular'; received {instrument_polarization_basis!r}."
-        )
-
-    nterms = int(image_params.get("nterms", 0))
-
-    if nterms < 1:
-        raise ValueError("image_params['nterms'] must be at least 1.")
-
-    data_groups = model_xds.attrs.get("data_groups", {})
-
-    if image_data_group_name not in data_groups:
-        raise KeyError(
-            f"Model data group {image_data_group_name!r} is not present in "
-            "model_xds.attrs['data_groups']."
-        )
-
-    model_data_group = data_groups[image_data_group_name]
-    model_sky_name = model_data_group.get("sky")
-
-    if model_sky_name is None:
-        raise KeyError(
-            f"Model data group {image_data_group_name!r} does not define "
-            "a 'sky' variable."
-        )
-
-    if model_sky_name not in model_xds:
-        raise KeyError(
-            f"Model sky variable {model_sky_name!r} is not present in " "model_xds."
-        )
-
-    model_sky = model_xds[model_sky_name]
-
-    if "taylor_term" not in model_sky.dims:
-        raise ValueError(
-            f"Model sky variable {model_sky_name!r} must contain a "
-            "'taylor_term' dimension."
-        )
-
-    if model_sky.sizes["taylor_term"] != nterms:
-        raise ValueError(
-            "The number of model Taylor terms does not match "
-            "image_params['nterms']: "
-            f"{model_sky.sizes['taylor_term']} != {nterms}."
-        )
-
-    complex_dtype = np.complex64 if single_precision_image else np.complex128
-
-    # The accumulated model must remain in Stokes basis for the next model
-    # update and for final restoration. Work on an independent copy.
-    model_uv_xds = model_xds.copy(deep=True)
-    model_uv_xds.attrs = copy.deepcopy(model_xds.attrs)
-
-    model_uv_xds = transform_polarization_basis(
-        model_uv_xds,
-        new_polarization_basis=instrument_polarization_basis,
-        overwrite=True,
-    )
-
-    model_uv_xds = fft_norm_continuum_img_xds(
-        model_uv_xds,
-        image_params=image_params,
-        image_data_group_in_name=image_data_group_name,
-        image_data_group_out_name=image_data_group_name,
-        image_data_group_out_modified={
-            "visibility": "VISIBILITY_MODEL",
-        },
-        image_data_variables_keep=["sky"],
-        processing_function_threads=processing_function_threads,
-        fft_backend=fft_backend,
-        complex_dtype=complex_dtype,
-    )
-
-    output_data_groups = model_uv_xds.attrs.get("data_groups", {})
-
-    if image_data_group_name not in output_data_groups:
-        raise RuntimeError(
-            "The model FFT removed or failed to create data group "
-            f"{image_data_group_name!r}."
-        )
-
-    output_model_group = output_data_groups[image_data_group_name]
-    model_visibility_name = output_model_group.get("visibility")
-
-    if model_visibility_name is None:
-        raise RuntimeError(
-            "fft_norm_continuum_img_xds did not register a model "
-            "visibility variable."
-        )
-
-    if model_visibility_name not in model_uv_xds:
-        raise RuntimeError(
-            "fft_norm_continuum_img_xds registered model visibility "
-            f"{model_visibility_name!r}, but that variable is absent."
-        )
-
-    model_visibility = model_uv_xds[model_visibility_name]
-
-    if "taylor_term" not in model_visibility.dims:
-        raise RuntimeError(
-            f"Model visibility variable {model_visibility_name!r} must "
-            "contain a 'taylor_term' dimension."
-        )
-
-    if model_visibility.sizes["taylor_term"] != nterms:
-        raise RuntimeError(
-            "The Fourier-domain model has the wrong number of Taylor terms: "
-            f"{model_visibility.sizes['taylor_term']} != {nterms}."
-        )
-
-    model_visibility.attrs.update(
-        {
-            "description": (
-                "Global Fourier-domain continuum Taylor model used for "
-                "distributed degridding."
-            ),
-            "nterms": nterms,
-            "instrument_polarization_basis": (instrument_polarization_basis),
-        }
-    )
-
-    return model_uv_xds
