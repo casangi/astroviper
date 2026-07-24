@@ -1,25 +1,13 @@
 """Distributed single-field continuum imaging application.
 
-This module is the production-style inverse of the temporary flattened example:
-the notebook-facing setup remains outside, while graph construction and execution
+The notebook-facing setup remains outside, while graph construction and execution
 live in :func:`image_continuum_single_field`.
-
-The current continuum graph is
-
-    map(image_continuum_single_field node task)
-        -> reduce(combine_continuum_chunks)
-        -> append(model_update_continuum_single_field)
-
-Thus the frequency-parallel residual/PSF products are reduced before one global
-continuum model-update node is run.
 """
 
 import os
 from typing import Any
 
-import numpy as np
 import toolviper.utils.parameter
-import xarray as xr
 import zarr
 from numcodecs import Blosc
 
@@ -52,114 +40,138 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
 
 DISTRIBUTED_APPLICATION_TIMING_TOTAL_KEY = "T_total"
 
+###############################################################################
+# The main functions to build and reduce graphviper graphs
+###############################################################################
 
-def _load_processing_set_chunk(load_params):
-    """Load a disk-level chunk of the processing set for the data loading layer.
 
-    Used as the ``data_loading_task`` argument of
-    :func:`graphviper.graph_tools.map.map` when ``disk_chunk_sizes`` is provided.
-    Each call reads one contiguous block of frequency channels (the native on-disk
-    chunk) and returns the loaded datasets as a plain dict.  The framework
-    sub-selects each map task's slice before invoking
-    :func:`image_continuum_single_field`, which uses the pre-loaded data directly
-    instead of re-reading from disk.
+def compute_continuum_graph(
+    *,
+    ps_xdt,
+    node_task_data_mapping,
+    cycle_input_params,
+    reduce_input_params,
+    disk_chunk_sizes,
+    processing_set_data_group_name,
+    monitor_resources_seconds,
+    task_priorities,
+    reduce_mode,
+    reduce_n_batch,
+    append_node=None,
+    append_input_params=None,
+):
+    """The graph performs
 
-    Parameters
-    ----------
-    load_params : dict
-        Must contain:
+    map -> reduce -> append_node
 
-        * ``"input_data_store"`` – path to the processing set Zarr store.
-        * ``"data_selection"`` – ``{xds_name: {dim: slice}}`` at disk-chunk
-          granularity as produced by
-          :func:`graphviper.graph_tools.map._build_load_stage`.
-        * ``"processing_set_data_group_name"`` – data group forwarded to
-          :func:`xradio.measurement_set.load_processing_set`.
+     Parameters
+     ----------
+     ps_xdt
+         Processing set used as the map input.
+     node_task_data_mapping
+         Mapping between processing-set coordinates and map-task coordinates.
+     cycle_input_params : dict
+         Parameters forwarded to each residual major-cycle map task.
+     reduce_input_params : dict
+         Parameters forwarded to :func:`combine_continuum_chunks`.
+     disk_chunk_sizes : dict or None
+         Native disk-level chunk sizes used by the GraphVIPER map stage.
+     processing_set_data_group_name : str
+         Processing-set data group loaded by each map task.
+     monitor_resources_seconds : float or None
+         Resource-monitor sampling interval for map tasks.
+     task_priorities
+         Optional GraphVIPER task priorities.
+     reduce_mode : str
+         GraphVIPER reduction mode.
+     reduce_n_batch : int
+         Number of inputs combined per reduction batch.
+     append_node : callable, optional
+         Global node executed after reduction.
+     append_input_params : dict, optional
+         Parameters forwarded to ``append_node``.
 
-    Returns
-    -------
-    dict
-        ``{xds_name: xarray.Dataset}`` with the loaded disk-chunk data.
+     Returns
+     -------
+     dict
+         Computed result of the map/reduce or map/reduce/append graph.
+
+     Raises
+     ------
+     ValueError
+         If only one of ``append_node`` and ``append_input_params`` is supplied.
     """
-    from xradio.measurement_set.load_processing_set import load_processing_set
+    import time
 
-    return load_processing_set(
-        load_params["input_data_store"],
-        sel_parms=load_params["data_selection"],
-        data_group_name=load_params.get("processing_set_data_group_name"),
-        load_sub_datasets=False,
+    import dask
+    from graphviper.graph_tools import append, generate_dask_workflow, map, reduce
+
+    # Some sanity checks
+    if append_node is None and append_input_params is not None:
+        raise ValueError("append_input_params was supplied without an append_node.")
+
+    if append_node is not None and append_input_params is None:
+        raise ValueError("append_node was supplied without append_input_params.")
+
+    timings = {}
+
+    start = time.time()
+
+    # Mapping stage: Residual update (calculation of taylor order uv grids)
+    viper_graph = map(
+        input_data=ps_xdt,
+        node_task_data_mapping=node_task_data_mapping,
+        node_task=node_tasks.imaging.residual_update_continuum_single_field,
+        input_params=cycle_input_params,
+        in_memory_compute=False,
+        data_loading_task=None,
+        disk_chunk_sizes=disk_chunk_sizes,
+        load_node_input_params={
+            "processing_set_data_group_name": processing_set_data_group_name,
+        },
+        monitor_resources_seconds=monitor_resources_seconds,
+        task_priorities=task_priorities,
     )
 
-
-def combine_return_data_frames(input_data, input_params):
-    """Reduce per-chunk ``{"timing_node_tasks", "deconvolution"}`` results into one dict.
-
-    Each node task returns a single dict with a ``"timing_node_tasks"`` one-row
-    :class:`pandas.DataFrame` and a ``"deconvolution"``
-    :class:`~astroviper.processing_functions.imaging.utils.return_dict.ReturnDict`
-    (already remapped to global channel numbers) for its channel chunk. This
-    reducer concatenates the timing frames (one row per chunk) and merges the
-    per-chunk deconvolution dicts with :func:`merge_return_dicts`. Because every
-    chunk covers a disjoint global channel range, the merge never collides.
-
-    Returns the same ``{"timing_node_tasks", "deconvolution"}`` shape so it
-    composes under tree-mode reduction (its own output becomes an input at the
-    next level).
-
-    Parameters
-    ----------
-    input_data : list of dict
-        Per-chunk (or partially reduced) results, each with
-        ``"timing_node_tasks"`` and ``"deconvolution"`` keys.
-    input_params : dict
-        Unused; present for the GraphVIPER reduce signature.
-
-    Returns
-    -------
-    dict
-        ``{"timing_node_tasks": pandas.DataFrame, "deconvolution": ReturnDict}``.
-    """
-    import pandas as pd
-
-    from astroviper.processing_functions.imaging.utils.iteration_control import (
-        merge_return_dicts,
+    # Reduce stage: Combine uv grids
+    viper_graph = reduce(
+        viper_graph,
+        combine_continuum_chunks,
+        reduce_input_params,
+        mode=reduce_mode,
+        n_batch=reduce_n_batch,
     )
 
-    combined_timing = pd.DataFrame()
-    deconvolve_dicts = []
+    # Append node: Either minor cycle or finalization
+    if append_node is not None:
+        viper_graph = append(
+            viper_graph,
+            append_node,
+            append_input_params,
+        )
 
-    for result in input_data:
-        timing = result["timing_node_tasks"]
-        # graphviper's optional resource monitor (map(monitor_resources_seconds=...))
-        # attaches a top-level "resource_usage" dict-of-series to each LEAF result;
-        # fold it into that leaf's one-row timing frame as list-valued columns so
-        # it survives tree reduction (partially reduced inputs have no such key --
-        # their series are already columns of a multi-row frame).
-        usage = result.get("resource_usage")
-        if usage is not None:
-            timing = timing.copy()
-            for key, value in usage.items():
-                # a list series becomes ONE cell of the single row; scalars
-                # (sample_interval_seconds) broadcast.
-                timing[key] = [value] if isinstance(value, list) else value
-        combined_timing = pd.concat([combined_timing, timing], ignore_index=True)
-        deconvolve_dicts.append(result["deconvolution"])
+    timings["T_create_map_reduce_append_graph"] = time.time() - start
 
-    return {
-        "timing_node_tasks": combined_timing,
-        "deconvolution": merge_return_dicts(deconvolve_dicts),
-    }
+    start = time.time()
+    dask_graph = generate_dask_workflow(viper_graph)
+    timings["T_generate_dask_graph"] = time.time() - start
+
+    start = time.time()
+    graph_result = dask.compute(dask_graph)[0]
+    timings["T_compute_dask_graph"] = time.time() - start
+
+    return graph_result, timings
 
 
 def combine_continuum_chunks(input_data, input_params):
     """Combine frequency-chunk continuum map results.
 
-    This function is designed for use as the ``combine`` function passed to
-    :func:`graphviper.graph_tools.reduce`. It is associative: its output has
-    the same structure as each map-task input, so it can be used with
+    This function is intended for use as the ``combine`` function passed to
+    :func:`graphviper.graph_tools.reduce`. It is associative: the returned object
+    has the same structure as each input element, allowing reductions using
     ``mode="tree"``, ``mode="tree_n"``, or ``mode="single_node"``.
 
-    Each input item is expected to have the structure
+    Each input element is expected to have the form
 
     .. code-block:: python
 
@@ -169,67 +181,85 @@ def combine_continuum_chunks(input_data, input_params):
             "deconvolution": deconvolution_return_dict,
         }
 
-    where ``img_xds`` contains chunk-local Taylor products. By default, the
-    reducer sums:
+    where ``img_xds`` contains the continuum imaging products produced by one
+    frequency chunk.
 
-    * ``SKY_RESIDUAL``;
-    * ``POINT_SPREAD_FUNCTION``.
+    By default, the reducer performs an element-wise sum of the additive image
+    products
 
-    With the current test scaffolding, these variables have dimensions
+    * ``VISIBILITY``;
+    * ``VISIBILITY_NORMALIZATION``;
+    * ``UV_SAMPLING``;
+    * ``UV_SAMPLING_NORMALIZATION``.
 
-    ``SKY_RESIDUAL``
-        ``(time, taylor_term, polarization, l, m)``
+    With the current continuum implementation these variables have dimensions
 
-    ``POINT_SPREAD_FUNCTION``
-        ``(time, psf_taylor_order, polarization, l, m)``.
+    ``VISIBILITY``
+        ``(time, taylor_term, polarization, u, v)``
 
-    The function does not sum the input frequency coordinate or other
-    frequency-dependent variables such as the temporary cube-style primary
-    beam. Non-additive variables are copied from the first input dataset.
+    ``VISIBILITY_NORMALIZATION``
+        ``(time, taylor_term, polarization)``
+
+    ``UV_SAMPLING``
+        ``(time, psf_taylor_order, polarization, u, v)``
+
+    ``UV_SAMPLING_NORMALIZATION``
+        ``(time, psf_taylor_order, polarization)``.
+
+    All remaining dataset variables (for example metadata, coordinates, primary
+    beam products, and other non-additive quantities) are copied from the first
+    input dataset after verifying consistency across all inputs.
 
     Parameters
     ----------
     input_data : list of dict
         Leaf map-task results or partially reduced results.
-    input_params : dict
-        Optional reducer configuration. Supported entries are:
+
+    input_params : dict, optional
+        Optional reducer configuration. Supported entries are
 
         ``additive_variables`` : sequence of str, optional
-            Dataset variables to sum. Defaults to
-            ``("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION")``.
+            Dataset variables that are accumulated by element-wise addition.
+            Defaults to
+
+            ``("VISIBILITY", "VISIBILITY_NORMALIZATION",
+            "UV_SAMPLING", "UV_SAMPLING_NORMALIZATION")``.
 
         ``strict`` : bool, optional
-            If true, every additive variable must be present in every input and
-            all dimensions and coordinates must match exactly. Defaults to
-            true.
+            If ``True``, every additive variable must exist in every input and
+            dimensions, coordinates, and selected metadata must agree exactly.
+            Defaults to ``True``.
 
         ``copy_image_deep`` : bool, optional
-            Whether to deep-copy the first image dataset before accumulating.
-            Defaults to true. A deep copy avoids mutating an input result but
-            temporarily increases memory usage.
+            If ``True``, the first image dataset is deep-copied before
+            accumulation. This avoids modifying an input object at the cost of
+            additional temporary memory. Defaults to ``True``.
 
     Returns
     -------
     dict
-        Same structure as a map-task result:
+        Dictionary with the same structure as a map-task result.
 
         ``"image"``
-            Dataset containing the summed Taylor products.
+            Dataset containing the accumulated continuum products.
 
         ``"timing_node_tasks"``
-            Concatenated timing dataframe, one row per original map task.
+            Concatenated timing dataframe containing one row per original map
+            task.
 
         ``"deconvolution"``
-            Merged deconvolution metadata.
+            Combined deconvolution metadata.
 
     Notes
     -----
-    This reducer performs *unnormalized summation*. Any MT-MFS normalization by
-    sum-of-weights or Hessian terms should be applied only after all chunks have
-    been reduced.
+    This reducer performs an unnormalized accumulation of continuum products.
+    Any normalization by imaging weights, sum-of-weights, or Hessian terms is
+    performed later, after all frequency chunks have been reduced.
 
-    The reference frequency and number of Taylor terms must be identical for
-    every frequency chunk. The reducer validates those metadata when available.
+    The reducer assumes that all inputs were produced using identical continuum
+    imaging parameters (for example, reference frequency, Taylor expansion, and
+    image geometry). These metadata are validated when available before
+    accumulation.
     """
     import numpy as np
     import pandas as pd
@@ -263,6 +293,8 @@ def combine_continuum_chunks(input_data, input_params):
     # Helper functions
     # ------------------------------------------------------------------
 
+    # Kept inline due ti their shortness
+    # returns dictionary of metadata
     def _continuum_metadata(dataset):
         metadata = dataset.attrs.get("continuum_imaging", {})
 
@@ -281,6 +313,7 @@ def combine_continuum_chunks(input_data, input_params):
             ),
         }
 
+    # validate metadata
     def _validate_metadata(reference_dataset, candidate_dataset, input_index):
         reference = _continuum_metadata(reference_dataset)
         candidate = _continuum_metadata(candidate_dataset)
@@ -322,6 +355,7 @@ def combine_continuum_chunks(input_data, input_params):
                 f"input[{input_index}]={candidate_frequency}."
             )
 
+    # validate that additive variables match in dimensions
     def _validate_additive_variable(
         reference_array,
         candidate_array,
@@ -361,6 +395,7 @@ def combine_continuum_chunks(input_data, input_params):
     # Timing and deconvolution metadata
     # ------------------------------------------------------------------
 
+    # Concatenate timing and deconvolution return dictionaries
     combined_timing = pd.DataFrame()
     deconvolution_dicts = []
 
@@ -410,6 +445,8 @@ def combine_continuum_chunks(input_data, input_params):
             f"{type(first_image).__name__}."
         )
 
+    # Make a copy for the combined image
+    # In this way, dimensions, shapes, metadata and coordinates are going to be correct
     combined_image = first_image.copy(deep=copy_image_deep)
 
     for variable_name in additive_variables:
@@ -426,12 +463,14 @@ def combine_continuum_chunks(input_data, input_params):
         # read-only array.
         combined_image[variable_name] = combined_image[variable_name].copy(deep=True)
 
+    # Main loop: Loop over input data to combine
     for input_index, result in enumerate(input_data[1:], start=1):
         if "image" not in result:
             raise KeyError(f"input[{input_index}] does not contain an 'image' dataset.")
 
         candidate_image = result["image"]
 
+        # Sanity checks
         if not isinstance(candidate_image, xr.Dataset):
             raise TypeError(
                 f"input[{input_index}]['image'] must be an xarray.Dataset; "
@@ -444,6 +483,7 @@ def combine_continuum_chunks(input_data, input_params):
             input_index,
         )
 
+        # combine for every additive variable
         for variable_name in additive_variables:
             accumulator_has_variable = variable_name in combined_image
             candidate_has_variable = variable_name in candidate_image
@@ -493,6 +533,11 @@ def combine_continuum_chunks(input_data, input_params):
         "timing_node_tasks": combined_timing,
         "deconvolution": combined_deconvolution,
     }
+
+
+###############################################################################
+# Generic Helper Functions
+###############################################################################
 
 
 def calculate_number_of_chunks_for_continuum_imaging(
@@ -597,7 +642,7 @@ def calculate_number_of_chunks_for_continuum_imaging(
 
 
 ###############################################################################
-###############################################################################
+# Main distributed layer level function call
 ###############################################################################
 
 
@@ -645,43 +690,40 @@ def image_continuum_single_field(
     task_time_kill_switch_seconds: float | None = None,
     monitor_resources_seconds: float | None = None,
 ) -> dict:
-    """Create one single-field continuum map/reduce/model-update graph.
-
-    Frequency chunks are processed independently by
-    ``node_tasks.imaging.image_continuum_single_field``. Their Taylor residual
-    and PSF products are summed by :func:`combine_continuum_chunks`, after which
-    one ``model_update_continuum_single_field`` node performs the current global
-    minor-cycle update.
-
-    This function reproduces the supplied flattened prototype. It executes one
-    graph containing one map stage, one reduction, and one appended model-update
-    call. A future multi-major-cycle controller should rebuild or extend this
-    graph around persistent model state rather than being hidden inside this
-    first refactoring.
-
-    Returns
-    -------
-    dict
-        Contains ``image``, ``timing_node_tasks``, ``deconvolution``, and
-        ``timing_distributed_application``.
     """
-    import os
+    Distributed MT-MFS continuum imaging.
+
+    Pipeline
+    --------
+
+    Initialization
+        - prepare static imaging quantities
+        - build Dask graph
+
+    Major cycle
+        - predict model visibilities
+        - compute residual visibilities
+        - grid Taylor residuals
+        - reduce across frequency partitions
+        - inverse FFT
+        - minor cycle
+
+    Finalization
+        - final residual image
+        - restoration
+        - write products
+
+    Unlike cube imaging, FFTs are performed only once after each
+    minor cycle. Workers operate directly on UV-domain Taylor grids.
+    """
     import time
 
-    import dask
-    import numpy as np
     import toolviper.utils.logger as logger
-    import xarray as xr
-    import zarr
-    from graphviper.graph_tools import (
-        append,
-        generate_airflow_workflow,
-        generate_dask_workflow,
-        map,
-        processes_with_mpi,
-        reduce,
+    from graphviper.graph_tools.coordinate_utils import (
+        get_disk_chunk_sizes,
+        interpolate_data_coords_onto_parallel_coords,
+        make_parallel_coord,
     )
-    from graphviper.graph_tools.coordinate_utils import make_parallel_coord
     from xradio.image import make_empty_sky_image, write_image
     from xradio.measurement_set import open_processing_set
 
@@ -689,18 +731,16 @@ def image_continuum_single_field(
         prepare_model_uv_continuum_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (
+        IMAGING_TIMING_PHASES,
+        IMAGING_TIMING_TOTAL_KEY,
         IterationController,
-        ReturnDict,
     )
     from astroviper.utils.data_group_tools import modify_data_groups_xds
-    from astroviper.utils.data_partitioning import (
-        calculate_data_chunking,
-        get_thread_info,
-    )
     from astroviper.utils.io import (
         create_empty_data_variables_on_disk,
         image_data_groups_for_kept_variables,
     )
+    from astroviper.utils.timing import format_timing_summary
 
     assert (
         memory_mode == "in_memory"
@@ -841,13 +881,6 @@ def image_continuum_single_field(
         cycleniter=iteration_control_params["cycleniter"],
     )
 
-    combined_deconvolve_dict = ReturnDict()
-
-    from graphviper.graph_tools.coordinate_utils import (
-        get_disk_chunk_sizes,
-        interpolate_data_coords_onto_parallel_coords,
-    )
-
     start = time.time()
     ps_xdt = open_processing_set(ps_store, scan_intents=scan_intents)
     timing_distributed_application["T_open_processing_set"] = time.time() - start
@@ -899,82 +932,7 @@ def image_continuum_single_field(
     # Distributed major/minor-cycle loop
     # =============================================================
 
-    def _compute_continuum_graph(
-        cycle_input_params,
-        reduce_input_params,
-        append_node=None,
-        append_input_params=None,
-    ):
-        """Construct and compute one distributed continuum graph.
-
-        When append_input_params is supplied, the graph performs
-
-            map -> reduce -> continuum append/minor cycle
-
-        Otherwise it performs only
-
-            map -> reduce
-
-        which is used for the final residual/restoration cycle.
-        """
-        start = time.time()
-
-        viper_graph = map(
-            input_data=ps_xdt,
-            node_task_data_mapping=node_task_data_mapping,
-            node_task=node_tasks.imaging.residual_update_continuum_single_field,
-            input_params=cycle_input_params,
-            in_memory_compute=False,
-            data_loading_task=None,
-            disk_chunk_sizes=disk_chunk_sizes,
-            load_node_input_params={
-                "processing_set_data_group_name": (processing_set_data_group_name),
-            },
-            monitor_resources_seconds=monitor_resources_seconds,
-            task_priorities=task_priorities,
-        )
-
-        viper_graph = reduce(
-            viper_graph,
-            combine_continuum_chunks,
-            reduce_input_params,
-            mode=reduce_mode,
-            n_batch=reduce_n_batch,
-        )
-
-        if append_node is None and append_input_params is not None:
-            raise ValueError("append_input_params was supplied without an append_node.")
-
-        if append_node is not None and append_input_params is None:
-            raise ValueError("append_node was supplied without append_input_params.")
-
-        if append_node is not None:
-            viper_graph = append(
-                viper_graph,
-                append_node,
-                append_input_params,
-            )
-
-        timing_distributed_application["T_create_map_reduce_append_graph"] += (
-            time.time() - start
-        )
-
-        start = time.time()
-
-        dask_graph = generate_dask_workflow(viper_graph)
-
-        timing_distributed_application["T_generate_dask_graph"] += time.time() - start
-
-        start = time.time()
-
-        graph_result = dask.compute(dask_graph)[0]
-
-        timing_distributed_application["T_compute_dask_graph"] += time.time() - start
-
-        return graph_result
-
-    # These timing entries now accumulate over all major cycles instead of
-    # being overwritten by each hard-coded graph.
+    # These timing entries accumulate over all major cycles
     timing_distributed_application["T_create_map_reduce_append_graph"] = 0.0
 
     timing_distributed_application["T_generate_dask_graph"] = 0.0
@@ -1055,25 +1013,36 @@ def image_continuum_single_field(
             "single_precision_image": single_precision_image,
         }
 
+        # In later major loops, a static_xds should be present
+        # This holds static quantities such as PSF and PB
         if not is_n_iter_0:
             append_input_params["static_xds"] = static_xds
 
         # ---------------------------------------------------------
         # Execute one major cycle followed by one minor cycle.
         # ---------------------------------------------------------
-        # cycle_return_dict = _compute_continuum_graph(
-        #    cycle_input_params=cycle_input_params,
-        #    reduce_input_params=reduce_input_params,
-        #    append_input_params=append_input_params,
-        # )
 
-        cycle_return_dict = _compute_continuum_graph(
+        # Call the graph with continuum_minor_cycle_node
+        cycle_return_dict, graph_timings = compute_continuum_graph(
+            ps_xdt=ps_xdt,
+            node_task_data_mapping=node_task_data_mapping,
             cycle_input_params=cycle_input_params,
             reduce_input_params=reduce_input_params,
+            disk_chunk_sizes=disk_chunk_sizes,
+            processing_set_data_group_name=processing_set_data_group_name,
+            monitor_resources_seconds=monitor_resources_seconds,
+            task_priorities=task_priorities,
+            reduce_mode=reduce_mode,
+            reduce_n_batch=reduce_n_batch,
             append_node=node_tasks.imaging.continuum_minor_cycle_node,
             append_input_params=append_input_params,
         )
 
+        # Gather timing information
+        for key, value in graph_timings.items():
+            timing_distributed_application[key] += value
+
+        # Get current status for bookkeeping
         last_minor_return_dict = cycle_return_dict
         controller = cycle_return_dict["controller"]
 
@@ -1086,13 +1055,15 @@ def image_continuum_single_field(
                     "The first continuum append node did not return " "'static_xds'."
                 )
 
+            # Static holding quantities that are only computed in the first major loop
+            # PSF, PB, PSF sidelobe level ...
             static_xds = cycle_return_dict["static_xds"]
 
             # The first minor-cycle result is the initial accumulated model.
             model_xds = cycle_return_dict["image"][["SKY_MODEL"]].copy(deep=True)
 
         else:
-            # Later temporary Högbom minor cycles return a model increment.
+            # Later minor cycles return a model increment.
             model_increment = cycle_return_dict["image"]["SKY_MODEL"]
 
             if model_increment.dims != model_xds["SKY_MODEL"].dims:
@@ -1115,10 +1086,12 @@ def image_continuum_single_field(
             # polarization labels remain unchanged.
             accumulated_model = model_xds["SKY_MODEL"]
 
+            # Sum old model and model increment
             model_xds["SKY_MODEL"].data = accumulated_model.data + model_increment.data
 
             model_xds["SKY_MODEL"].attrs = accumulated_model.attrs.copy()
 
+        # Prepare global Fourier-domain Taylor model grids for degridding
         model_uv_xds = prepare_model_uv_continuum_single_field(
             model_xds,
             image_params=image_params,
@@ -1128,6 +1101,7 @@ def image_continuum_single_field(
             fft_backend=fft_backend,
         )
 
+        # Update global iteration control information and break loop if converged
         is_n_iter_0 = False
 
         stopcode = cycle_return_dict["stopcode"]
@@ -1161,7 +1135,10 @@ def image_continuum_single_field(
     final_input_params["model_xds"] = model_xds
     final_input_params["static_xds"] = static_xds
 
-    final_return_dict = _compute_continuum_graph(
+    # Call the graph with continuum_finalize_node
+    final_return_dict, graph_timings = compute_continuum_graph(
+        ps_xdt=ps_xdt,
+        node_task_data_mapping=node_task_data_mapping,
         cycle_input_params=final_input_params,
         reduce_input_params={
             "additive_variables": (
@@ -1169,9 +1146,19 @@ def image_continuum_single_field(
                 "VISIBILITY_NORMALIZATION",
             ),
         },
+        disk_chunk_sizes=disk_chunk_sizes,
+        processing_set_data_group_name=processing_set_data_group_name,
+        monitor_resources_seconds=monitor_resources_seconds,
+        task_priorities=task_priorities,
+        reduce_mode=reduce_mode,
+        reduce_n_batch=reduce_n_batch,
         append_node=node_tasks.imaging.continuum_finalize_node,
         append_input_params=final_input_params,
     )
+
+    # Gather timing information
+    for key, value in graph_timings.items():
+        timing_distributed_application[key] += value
 
     # =============================================================
     # Assemble the final application result
@@ -1197,8 +1184,7 @@ def image_continuum_single_field(
     return_dict["static_xds"] = static_xds
     return_dict["n_major_cycles"] = n_major_cycles
 
-    ###
-
+    # Consolidate metadata
     start = time.time()
     zarr.consolidate_metadata(image_store)
     timing_distributed_application["T_consolidate_metadata"] = time.time() - start
@@ -1209,12 +1195,6 @@ def image_continuum_single_field(
     # the driver-level timing so the full return dict carries timing for both the
     # distributed application (this driver) and the per-chunk node tasks.
     return_dict["timing_distributed_application"] = timing_distributed_application
-
-    from astroviper.processing_functions.imaging.utils import (
-        IMAGING_TIMING_PHASES,
-        IMAGING_TIMING_TOTAL_KEY,
-    )
-    from astroviper.utils.timing import format_timing_summary
 
     # Driver-level ("distributed application") timing breakdown.
     logger.info(
