@@ -246,16 +246,52 @@ def add_visibility_grid_continuum_single_field(
     # for each Taylor order, while all physical frequency channels map to that
     # single plane. The Taylor factor is applied through a temporary imaging-
     # weight array, leaving the MS weights unchanged.
+    # for taylor_term in range(nterms):
+    #    taylor_factor = x**taylor_term
+    #    taylor_imaging_weight = weight_imaging * taylor_factor[None, None, :, None]
+    #    grid_view = grid[:, taylor_term : taylor_term + 1, :, :, :]
+    #    normalization_view = normalization[:, taylor_term : taylor_term + 1, :]
+    #    prolate_spheroidal_grid(
+    #        grid_view,
+    #        normalization_view,
+    #        vis_data,
+    #        uvw,
+    #        frequency_coord,
+    #        frequency_map,
+    #        time_map,
+    #        pol_map,
+    #        taylor_imaging_weight,
+    #        cgk_1D,
+    #        n_uv,
+    #        delta_lm,
+    #        support=7,
+    #        oversampling=100,
+    #        processing_function_threads=processing_function_threads,
+    #    )
+    # Common zeroth-order normalization.
+    zeroth_normalization = np.zeros(
+        (n_imag_time, 1, n_imag_pol),
+        dtype=np.double,
+    )
+
     for taylor_term in range(nterms):
+
         taylor_factor = x**taylor_term
-        taylor_imaging_weight = weight_imaging * taylor_factor[None, None, :, None]
+
+        taylor_imaging_weight = np.ascontiguousarray(
+            weight_imaging * taylor_factor[None, None, :, None]
+        )
 
         grid_view = grid[:, taylor_term : taylor_term + 1, :, :, :]
-        normalization_view = normalization[:, taylor_term : taylor_term + 1, :]
+
+        temporary_normalization = np.zeros(
+            (n_imag_time, 1, n_imag_pol),
+            dtype=np.double,
+        )
 
         prolate_spheroidal_grid(
             grid_view,
-            normalization_view,
+            temporary_normalization,
             vis_data,
             uvw,
             frequency_coord,
@@ -270,6 +306,18 @@ def add_visibility_grid_continuum_single_field(
             oversampling=100,
             processing_function_threads=processing_function_threads,
         )
+
+        #
+        # Keep only the ordinary sum of imaging weights.
+        #
+        if taylor_term == 0:
+            zeroth_normalization += temporary_normalization
+
+    #
+    # Every residual Taylor image is normalized by the same
+    # zeroth-order sum of imaging weights.
+    #
+    normalization[...] = zeroth_normalization
 
     img_xds[visibility_name].attrs.update(
         {
