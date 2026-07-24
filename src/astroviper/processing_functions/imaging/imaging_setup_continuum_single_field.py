@@ -261,22 +261,59 @@ def imaging_setup_continuum_single_field(
     # -------------------------------------------------------------
     # Imaging weights
     # -------------------------------------------------------------
-    start = time.time()
+    # start = time.time()
 
-    calculate_imaging_weights(
-        ps_xdt,
-        img_xds,
-        imaging_weights_params=imaging_weights_params,
-        return_weight_density_grid=False,
-        ms_data_group_in_name=ps_data_group_name,
-        ms_data_group_out_name=ps_data_group_name,
-        ms_data_group_out_modified={
-            "weight_imaging": "WEIGHT_IMAGING",
-        },
-        processing_function_threads=processing_function_threads,
-    )
+    # calculate_imaging_weights(
+    #    ps_xdt,
+    #    img_xds,
+    #    imaging_weights_params=imaging_weights_params,
+    #    return_weight_density_grid=False,
+    #    ms_data_group_in_name=ps_data_group_name,
+    #    ms_data_group_out_name=ps_data_group_name,
+    #    ms_data_group_out_modified={
+    #        "weight_imaging": "WEIGHT_IMAGING",
+    #    },
+    #    processing_function_threads=processing_function_threads,
+    # )
 
-    T_weights = time.time() - start
+    # T_weights = time.time() - start
+
+    for ms_name, ms_xdt in ps_xdt.items():
+        data_groups = ms_xdt.attrs.get("data_groups", {})
+
+        if processing_set_data_group_name not in data_groups:
+            raise KeyError(
+                f"Data group {processing_set_data_group_name!r} is missing "
+                f"from processing-set child {ms_name!r}."
+            )
+
+        weight_name = data_groups[processing_set_data_group_name].get("weight_imaging")
+
+        if weight_name is None:
+            raise KeyError(
+                f"Imaging weights have not been registered for "
+                f"processing-set child {ms_name!r}."
+            )
+
+        if weight_name not in ms_xdt:
+            raise KeyError(
+                f"Registered imaging-weight variable {weight_name!r} is absent "
+                f"from processing-set child {ms_name!r}."
+            )
+
+    # start = time.time()
+    # from astroviper.processing_functions.imaging.prepare_imaging_weights_continuum import (
+    #    prepare_imaging_weights_continuum,
+    # )
+
+    # ps_xdt, imaging_weights_return_df = prepare_imaging_weights_continuum(
+    #    ps_xdt,
+    #    img_xds,
+    #    imaging_weights_params,
+    #    processing_set_data_group_name=processing_set_data_group_name,
+    #    processing_function_threads=processing_function_threads,
+    # )
+    # T_weights = time.time() - start
 
     # -------------------------------------------------------------
     # Chunk-local Taylor PSF/Hessian products
@@ -339,7 +376,7 @@ def imaging_setup_continuum_single_field(
 
     return_df = pd.DataFrame(
         {
-            "T_weights": [T_weights],
+            # "T_weights": [T_weights],
             "T_make_point_spread_function": [T_make_point_spread_function],
             "T_primary_beam": [T_primary_beam],
             # "T_transform_pol": [T_transform_pol],

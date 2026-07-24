@@ -535,9 +535,164 @@ def combine_continuum_chunks(input_data, input_params):
     }
 
 
+def combine_continuum_imaging_weight_chunks(
+    input_data,
+    input_params,
+):
+    """Collect per-task imaging-weight preparation results.
+
+    The function is associative and can therefore be used by GraphViper's
+    tree, tree_n, and single-node reduction modes.
+    """
+    import pandas as pd
+
+    del input_params
+
+    if not input_data:
+        raise ValueError("combine_continuum_imaging_weight_chunks received no inputs.")
+
+    weight_cache_mapping = {}
+    combined_timing = pd.DataFrame()
+
+    for input_index, result in enumerate(input_data):
+        if not isinstance(result, dict):
+            raise TypeError(
+                f"Weight-preparation input[{input_index}] must be a "
+                f"dictionary; received {type(result).__name__}."
+            )
+
+        # Leaf result from the preparation map.
+        if "task_id" in result:
+            task_id = int(result["task_id"])
+
+            if task_id in weight_cache_mapping:
+                raise ValueError(f"Duplicate imaging-weight result for task {task_id}.")
+
+            if "weight_datasets" not in result:
+                raise KeyError(
+                    f"Weight-preparation result for task {task_id} does not "
+                    "contain 'weight_datasets'."
+                )
+
+            weight_cache_mapping[task_id] = result["weight_datasets"]
+
+        # Partially reduced result.
+        elif "weight_cache_mapping" in result:
+            for task_id, weight_datasets in result["weight_cache_mapping"].items():
+                task_id = int(task_id)
+
+                if task_id in weight_cache_mapping:
+                    raise ValueError(
+                        f"Duplicate imaging-weight result for task {task_id}."
+                    )
+
+                weight_cache_mapping[task_id] = weight_datasets
+
+        else:
+            raise KeyError(
+                f"Weight-preparation input[{input_index}] contains neither "
+                "'task_id' nor 'weight_cache_mapping'."
+            )
+
+        timing_df = result.get("timing_node_tasks")
+
+        if timing_df is not None:
+            combined_timing = pd.concat(
+                [combined_timing, timing_df],
+                ignore_index=True,
+            )
+
+        resource_usage = result.get("resource_usage")
+
+        if resource_usage is not None and timing_df is not None:
+            # The map result's resource information can be added if desired.
+            # It is not needed for the numerical cache.
+            pass
+
+    return {
+        "weight_cache_mapping": weight_cache_mapping,
+        "timing_node_tasks": combined_timing,
+    }
+
+
 ###############################################################################
 # Generic Helper Functions
 ###############################################################################
+
+
+def prepare_continuum_imaging_weights(
+    *,
+    ps_xdt,
+    node_task_data_mapping,
+    input_params,
+    disk_chunk_sizes,
+    processing_set_data_group_name,
+    monitor_resources_seconds,
+    task_priorities,
+    reduce_mode="tree",
+    reduce_n_batch=2,
+):
+    """Calculate imaging weights once for every continuum frequency chunk."""
+    import time
+
+    import dask
+    from graphviper.graph_tools import generate_dask_workflow, map, reduce
+
+    timings = {}
+
+    start = time.time()
+
+    weight_graph = map(
+        input_data=ps_xdt,
+        node_task_data_mapping=node_task_data_mapping,
+        node_task=(node_tasks.imaging.prepare_imaging_weights_continuum_node),
+        input_params=input_params,
+        in_memory_compute=False,
+        data_loading_task=None,
+        disk_chunk_sizes=disk_chunk_sizes,
+        load_node_input_params={
+            "processing_set_data_group_name": (processing_set_data_group_name),
+        },
+        monitor_resources_seconds=monitor_resources_seconds,
+        task_priorities=task_priorities,
+    )
+
+    weight_graph = reduce(
+        weight_graph,
+        combine_continuum_imaging_weight_chunks,
+        {},
+        mode=reduce_mode,
+        n_batch=reduce_n_batch,
+    )
+
+    timings["T_create_imaging_weight_graph"] = time.time() - start
+
+    start = time.time()
+    dask_graph = generate_dask_workflow(weight_graph)
+    timings["T_generate_imaging_weight_dask_graph"] = time.time() - start
+
+    start = time.time()
+    result = dask.compute(dask_graph)[0]
+    timings["T_compute_imaging_weight_graph"] = time.time() - start
+
+    if "weight_cache_mapping" not in result:
+        raise RuntimeError(
+            "The imaging-weight preparation graph did not return "
+            "'weight_cache_mapping'."
+        )
+
+    expected_task_ids = set(range(len(node_task_data_mapping)))
+    actual_task_ids = set(result["weight_cache_mapping"])
+
+    if actual_task_ids != expected_task_ids:
+        raise RuntimeError(
+            "The imaging-weight preparation graph returned an unexpected "
+            "set of task identifiers: "
+            f"expected={sorted(expected_task_ids)}, "
+            f"received={sorted(actual_task_ids)}."
+        )
+
+    return result, timings
 
 
 def calculate_number_of_chunks_for_continuum_imaging(
@@ -947,6 +1102,53 @@ def image_continuum_single_field(
     last_minor_return_dict = None
     n_major_cycles = 0
 
+    # =============================================================
+    # Prepare imaging weights once before entering the major loop
+    # =============================================================
+
+    weight_preparation_input_params = {
+        "image_params": input_params["image_params"],
+        "imaging_weights_params": imaging_weights_params,
+        "input_data_store": ps_store,
+        "processing_set_data_group_name": (processing_set_data_group_name),
+        "instrument_polarization_basis": (instrument_polarization_basis),
+        "processing_function_threads": (processing_function_threads),
+    }
+
+    if skunk_works:
+        # The preparation node shown above currently uses the standard loader.
+        # Either leave skunk_works unsupported for this stage or extend the node
+        # with the same direct-Zarr loading branch as the residual node.
+        logger.warning(
+            "Imaging-weight preparation currently uses the standard "
+            "processing-set loader even though skunk_works=True."
+        )
+
+    weight_return_dict, weight_graph_timings = prepare_continuum_imaging_weights(
+        ps_xdt=ps_xdt,
+        node_task_data_mapping=node_task_data_mapping,
+        input_params=weight_preparation_input_params,
+        disk_chunk_sizes=disk_chunk_sizes,
+        processing_set_data_group_name=(processing_set_data_group_name),
+        monitor_resources_seconds=monitor_resources_seconds,
+        task_priorities=task_priorities,
+        reduce_mode=reduce_mode,
+        reduce_n_batch=reduce_n_batch,
+    )
+
+    for key, value in weight_graph_timings.items():
+        timing_distributed_application[key] = (
+            timing_distributed_application.get(key, 0.0) + value
+        )
+
+    weight_cache_mapping = weight_return_dict["weight_cache_mapping"]
+
+    weight_timing_df = weight_return_dict.get("timing_node_tasks")
+
+    # ---------------------------------------------------------
+    # Main loop
+    # ---------------------------------------------------------
+
     # The IterationController is updated inside the append node. A nonzero
     # major stop code means that the CLEAN loop has converged or reached one
     # of its configured limits.
@@ -963,6 +1165,9 @@ def image_continuum_single_field(
 
         cycle_input_params["is_n_iter_0"] = is_n_iter_0
         cycle_input_params["restore"] = False
+
+        # Prepared once before the major-cycle loop.
+        cycle_input_params["weight_cache_mapping"] = weight_cache_mapping
 
         if not is_n_iter_0:
             if model_xds is None:
@@ -1134,6 +1339,8 @@ def image_continuum_single_field(
     final_input_params["model_uv_xds"] = model_uv_xds
     final_input_params["model_xds"] = model_xds
     final_input_params["static_xds"] = static_xds
+
+    final_input_params["weight_cache_mapping"] = weight_cache_mapping
 
     # Call the graph with continuum_finalize_node
     final_return_dict, graph_timings = compute_continuum_graph(

@@ -6,47 +6,48 @@ from astroviper.utils.param_docs import shares_param_docs
 # Generic helper functions
 ###############################################################################
 
+
 def copy_variable_without_alignment(
     destination: xr.Dataset,
     source: xr.Dataset,
     name: str,
 ) -> xr.Dataset:
-    
+
     """Copy a data variable without coordinate alignment.
-    
+
     This helper copies the numerical values and metadata of a data variable from
     one :class:`xarray.Dataset` to another while preserving the destination
     dataset's coordinates and indexing.
-    
+
     Unlike a normal xarray assignment, which aligns arrays by coordinate labels,
     this function performs a positional copy of the underlying array data. This is
     useful when the source and destination datasets are known to have identical
     array layouts but differ in coordinates or auxiliary metadata.
-    
+
     Parameters
     ----------
     destination_xds : xarray.Dataset
         Dataset receiving the copied variable.
-    
+
     source_xds : xarray.Dataset
         Dataset providing the variable to copy.
-    
+
     variable_name : str
         Name of the data variable to copy.
-    
+
     Returns
     -------
     xarray.Dataset
         The destination dataset with the copied variable. Variable attributes are
         preserved, while the destination dataset's coordinates and data-group
         definitions remain unchanged.
-    
+
     Notes
     -----
     This helper should only be used when the source and destination variables are
     known to have identical dimensions and shapes. No coordinate alignment or
-    broadcasting is performed."""    
-    
+    broadcasting is performed."""
+
     source_da = source[name]
 
     for dim, size in source_da.sizes.items():
@@ -63,9 +64,11 @@ def copy_variable_without_alignment(
     )
     return destination
 
+
 ###############################################################################
 # Processing Function level functionality related to the residual update
 ###############################################################################
+
 
 @shares_param_docs
 def imaging_preparation_continuum_single_field(
@@ -81,74 +84,74 @@ def imaging_preparation_continuum_single_field(
     task_id=0,
 ):
     """Run the once-per-chunk continuum imaging preparation.
-    
+
     This helper performs the setup work required only during the first major
     cycle for one frequency-chunk map task. It delegates to
     :func:`imaging_setup_continuum_single_field`, which prepares the chunk-local
     visibility and UV-sampling products needed by the subsequent continuum
     residual update.
-    
+
     The setup stage may include
-    
+
     * calculating and registering imaging weights;
     * constructing the chunk-local visibility and UV-sampling grids;
     * creating the corresponding normalization products;
     * creating the primary beam when requested;
     * establishing the continuum coordinates, metadata, and image data groups
       required by later processing stages.
-    
+
     No model visibility prediction, residual visibility calculation, global
     reduction, inverse FFT, minor cycle, or restoration is performed here. Those
     operations are handled by later stages of the continuum imaging workflow.
-    
+
     Parameters
     ----------
     ps_xdt : xarray.DataTree
         Visibility data for this frequency chunk.
-    
+
     img_xds : xarray.Dataset
         Empty image dataset carrying the geometry and coordinates for this chunk.
-    
+
     image_params : dict
         Image geometry and continuum configuration. This includes the image size,
         cell size, reference frequency, number of Taylor terms, and gridding or FFT
         configuration required by the setup processing functions.
-    
+
     imaging_weights_params : dict
         Imaging-weight configuration.
-    
+
     processing_set_data_group_name : str, optional
         Processing-set data group used as the input for imaging.
-    
+
     single_precision_image : bool, optional
         Whether continuum image and grid products use single precision.
-    
+
     processing_function_threads : int, optional
         Number of threads supplied to lower-level processing functions.
-    
+
     fft_backend : str, optional
         FFT backend supplied to setup functions that require Fourier transforms.
-    
+
     image_data_variables_keep : list of str, optional
         Logical image products to retain in the returned dataset.
-    
+
     task_id : int, optional
         Identifier of the frequency-chunk task, used for logging.
-    
+
     Returns
     -------
     img_xds : xarray.Dataset
         Chunk-local continuum dataset containing the setup products required by
         the residual-update and reduce stages.
-    
+
     return_df : pandas.DataFrame
         Timing information returned by
         :func:`imaging_setup_continuum_single_field`.
-    
+
     T_setup : float
         Total wall-clock duration of the setup call, in seconds.
     """
-    
+
     import time
 
     import toolviper.utils.logger as logger
@@ -161,7 +164,7 @@ def imaging_preparation_continuum_single_field(
 
     start = time.time()
 
-    #wrap around imaging setup
+    # wrap around imaging setup
     img_xds, return_df = imaging_setup_continuum_single_field(
         ps_xdt,
         img_xds,
@@ -182,6 +185,7 @@ def imaging_preparation_continuum_single_field(
         T_setup,
     )
 
+
 @shares_param_docs
 def prepare_model_uv_continuum_single_field(
     model_xds,
@@ -193,54 +197,54 @@ def prepare_model_uv_continuum_single_field(
     image_data_group_name="model",
 ):
     """Prepare the Fourier-domain continuum model for the next major cycle.
-    
+
     This function is called once after each continuum minor cycle. It converts the
     updated image-domain continuum model from the Stokes basis into the
     instrumental correlation basis and Fourier-transforms every Taylor term to
     produce the corresponding model visibility grids.
-    
+
     The resulting Fourier-domain model is shared by all frequency-chunk map
     workers during the subsequent major cycle. Each worker reconstructs the model
     visibilities at its local frequencies and degrids them directly, avoiding
     repeated polarization transformations and FFTs on every worker.
-    
+
     Parameters
     ----------
     model_xds : xarray.Dataset
         Image-domain continuum model dataset. The data group selected by
         ``image_data_group_name`` must contain a ``sky`` variable with a
         ``taylor_term`` dimension.
-    
+
     image_params : dict
         Continuum imaging configuration, including the image geometry, FFT
         parameters, and the number of Taylor terms.
-    
+
     instrument_polarization_basis : {"linear", "circular"}, optional
         Instrumental correlation basis into which the Stokes model is
         transformed before the Fourier transform.
-    
+
     single_precision_image : bool, optional
         If ``True``, create ``complex64`` Fourier grids; otherwise create
         ``complex128`` grids.
-    
+
     processing_function_threads : int, optional
         Number of threads supplied to the polarization transformation and FFT
         routines.
-    
+
     fft_backend : str, optional
         FFT backend passed to ``fft_norm_continuum_img_xds``.
-    
+
     image_data_group_name : str, optional
         Data group containing the continuum sky model and receiving the Fourier-
         domain model visibility grids.
-    
+
     Returns
     -------
     model_uv_xds : xarray.Dataset
         Continuum model dataset in the instrumental correlation basis containing
         the Fourier-domain Taylor coefficients (``VISIBILITY_MODEL``), indexed by
         ``taylor_term``.
-    
+
     Notes
     -----
     This function performs the expensive polarization transformation and Fourier
@@ -414,71 +418,71 @@ def residual_update_continuum_single_field(
     This function is the primary processing entry point executed by the continuum
     map node task. It performs the operations required to compute the chunk-local
     continuum products that are later accumulated by the GraphViper reduce stage.
-    
+
     During the first major cycle, the function first executes the one-time imaging
     preparation for the frequency chunk before computing the initial residual
     products. During subsequent major cycles, it reuses the existing imaging
     geometry, updates the imaging weights when required, and computes a new
     residual using the globally prepared Fourier-domain continuum model.
-    
+
     The residual-update stage predicts the model visibilities (except during the
     first major cycle), subtracts them from the observed visibilities, grids the
     resulting residual visibilities into Taylor-weighted UV-domain products, and
     returns those products for global reduction. No inverse FFT, minor cycle, or
     restoration is performed here.
-    
+
     Parameters
     ----------
     ps_xdt : xarray.DataTree
         Visibility data for this frequency chunk.
-    
+
     img_xds : xarray.Dataset
         Chunk-local continuum image dataset used to accumulate the UV-domain
         products.
-    
+
     image_params : dict
         Image geometry and continuum imaging configuration.
-    
+
     imaging_weights_params : dict
         Imaging-weight configuration.
-    
+
     processing_set_data_group_name : str, optional
         Processing-set data group to image.
-    
+
     deconvolver : str, optional
         Reserved for future continuum deconvolution implementations.
-    
+
     instrument_polarization_basis : {"linear", "circular"}, optional
         Instrument correlation basis used during gridding and degridding.
-    
+
     single_precision_image : bool, optional
         Whether continuum products use single precision.
-    
+
     processing_function_threads : int, optional
         Number of threads supplied to the lower-level processing functions.
-    
+
     fft_backend : str, optional
         FFT backend used by the underlying processing functions.
-    
+
     image_data_variables_keep : list of str, optional
         Logical image products retained in the returned dataset.
-    
+
     is_n_iter_0 : bool, optional
         Indicates whether this is the first major cycle.
-    
+
     model_uv_xds : xarray.Dataset, optional
         Globally prepared Fourier-domain Taylor model used for degridding during
         all major cycles after the first.
-    
+
     task_id : int, optional
         Identifier of the current frequency chunk.
-    
+
     Returns
     -------
     img_xds : xarray.Dataset
         Chunk-local continuum dataset containing the UV-domain products required
         by the GraphViper reduce stage.
-    
+
     timing_df : pandas.DataFrame
         Timing summary for the setup (when applicable) and residual-update
         processing performed by this function."""
@@ -555,26 +559,26 @@ def residual_update_continuum_single_field(
             )
 
         # Needs to be refactored at a later point when decided what to do with weights
-        start = time.time()
+        # start = time.time()
 
-        calculate_imaging_weights(
-            ps_xdt,
-            img_xds,
-            imaging_weights_params=imaging_weights_params,
-            return_weight_density_grid=False,
-            ms_data_group_in_name=processing_set_data_group_name,
-            ms_data_group_out_name=processing_set_data_group_name,
-            ms_data_group_out_modified={
-                "weight_imaging": "WEIGHT_IMAGING",
-            },
-            processing_function_threads=processing_function_threads,
-        )
+        # calculate_imaging_weights(
+        #    ps_xdt,
+        #    img_xds,
+        #    imaging_weights_params=imaging_weights_params,
+        #    return_weight_density_grid=False,
+        #    ms_data_group_in_name=processing_set_data_group_name,
+        #    ms_data_group_out_name=processing_set_data_group_name,
+        #    ms_data_group_out_modified={
+        #        "weight_imaging": "WEIGHT_IMAGING",
+        #    },
+        #    processing_function_threads=processing_function_threads,
+        # )
 
-        T_weights = time.time() - start
+        # T_weights = time.time() - start
 
         setup_return_df = pd.DataFrame({})
 
-        timing["T_prep"] = T_weights
+        # timing["T_prep"] = T_weights
         accumulate_timing(
             timing,
             setup_return_df,
@@ -618,6 +622,7 @@ def residual_update_continuum_single_field(
 # Processing Function level functionality related to the model update
 ###############################################################################
 
+
 @shares_param_docs
 def model_update_mtmfs_single_field(
     img_xds,
@@ -629,15 +634,15 @@ def model_update_mtmfs_single_field(
     image_data_group_out_name="model",
 ):
     """Perform one continuum minor-cycle model update.
-    
+
     This function implements the current continuum deconvolution backend used by
     the distributed MT-MFS imaging workflow. Until a native MT-MFS deconvolver is
     available, the minor cycle is performed by temporarily projecting the
     continuum dataset onto a single-frequency cube representation and reusing the
     existing cube Högbom implementation.
-    
+
     The procedure is
-    
+
     continuum image dataset
         │
         ├── select residual Taylor term 0
@@ -659,47 +664,47 @@ def model_update_mtmfs_single_field(
         ▼
     copy the updated model back into
     SKY_MODEL[taylor_term=0]
-    
+
     Only the zeroth Taylor coefficient is modified during the minor cycle.
     Higher-order Taylor model terms are intentionally left unchanged and are
     updated indirectly through the subsequent major cycle.
-    
+
     Parameters
     ----------
     img_xds : xarray.Dataset
         Globally reduced continuum image dataset. The residual and model images
         are expected to use the ``taylor_term`` dimension, while the point-spread
         function uses ``psf_taylor_order``.
-    
+
     deconvolver : str
         Name of the continuum deconvolver. Currently only ``"hogbom"`` is
         supported.
-    
+
     deconvolve_params : dict
         Minor-cycle control parameters. These typically include entries such as
         ``cycleniter``, ``cyclethreshold``, ``niter_per_plane``, and
         ``cyclethreshold_per_plane``.
-    
+
     is_n_iter_0 : bool, optional
         Indicates whether this is the first minor cycle.
-    
+
     processing_function_threads : int, optional
         Number of threads supplied to the deconvolution backend.
-    
+
     image_data_group_in_name : str, optional
         Name of the residual image data group.
-    
+
     image_data_group_out_name : str, optional
         Name of the output model data group.
-    
+
     Returns
     -------
     deconvolve_dict : ReturnDict
         Deconvolution statistics returned by the Högbom implementation.
-    
+
     return_df : pandas.DataFrame
         Timing information for the continuum minor cycle.
-    
+
     Notes
     -----
     This function is a compatibility layer that allows the continuum imaging
@@ -1028,6 +1033,7 @@ def model_update_mtmfs_single_field(
 # Processing function level functionality to initialize and finish imaging
 ###############################################################################
 
+
 def restore_image(
     img_xds,
     image_data_group_in_residual_name="residual",
@@ -1036,13 +1042,13 @@ def restore_image(
     processing_function_threads=1,
 ):
     """Restore the continuum image.
-    
+
     This function restores the final continuum image by temporarily projecting the
     continuum dataset onto a one-channel cube representation and reusing the
     existing cube restoration implementation.
-    
+
     The procedure is
-    
+
     continuum image dataset
         │
         ├── select residual Taylor term 0
@@ -1064,43 +1070,43 @@ def restore_image(
         ▼
     copy the restored image back into the
     continuum dataset
-    
+
     The restored image corresponds to the reference-frequency (Taylor-zero)
     continuum image.
-    
+
     Parameters
     ----------
     img_xds : xarray.Dataset
         Continuum image dataset containing the residual image, sky model,
         point-spread function, and fitted restoring-beam parameters.
-    
+
     image_data_group_in_residual_name : str, optional
         Name of the residual image data group.
-    
+
     image_data_group_in_model_name : str, optional
         Name of the sky-model data group.
-    
+
     image_data_group_out_restore_name : str, optional
         Name under which the restored image is registered.
-    
+
     processing_function_threads : int, optional
         Number of threads supplied to the cube restoration backend.
-    
+
     Returns
     -------
     img_xds : xarray.Dataset
         Continuum dataset with the restored Taylor-zero image added.
-    
+
     timing_df : pandas.DataFrame
         Timing information returned by the restoration backend.
-    
+
     Notes
     -----
     This function is a compatibility layer around the existing cube restoration
     routine. Although the surrounding imaging algorithm is MT-MFS, the current
     restoration operates only on the zeroth Taylor coefficient and therefore
     produces the restored reference-frequency continuum image."""
-    
+
     import copy
 
     import numpy as np
@@ -1406,13 +1412,13 @@ def point_spread_function_gaussian_fit_continuum(
     processing_function_threads=1,
 ):
     """Fit the restoring beam from the continuum point-spread function.
-    
+
     This function determines the restoring beam by temporarily projecting the
     continuum point-spread function onto a one-channel cube representation and
     reusing the existing cube Gaussian-fitting implementation.
-    
+
     The procedure is
-    
+
     continuum image dataset
         │
         ├── select PSF Taylor order 0
@@ -1432,40 +1438,40 @@ def point_spread_function_gaussian_fit_continuum(
     copy the fitted restoring-beam parameters and
     maximum PSF sidelobe back into the
     continuum dataset
-    
+
     Only the zeroth Taylor-order point-spread function is used for the beam fit.
-    
+
     Parameters
     ----------
     img_xds : xarray.Dataset
         Continuum image dataset containing the point-spread function.
-    
+
     image_data_group_in_name : str, optional
         Name of the data group containing the continuum point-spread function.
-    
+
     image_data_group_out_name : str, optional
         Name of the data group in which the fitted restoring-beam parameters are
         registered.
-    
+
     processing_function_threads : int, optional
         Number of threads supplied to the Gaussian-fitting backend.
-    
+
     Returns
     -------
     img_xds : xarray.Dataset
         Continuum dataset with the fitted restoring-beam parameters and maximum
         PSF sidelobe added.
-    
+
     return_df : pandas.DataFrame
         Timing information returned by the Gaussian-fitting backend.
-    
+
     Notes
     -----
     This function is a compatibility layer around the existing cube
     ``point_spread_function_gaussian_fit`` implementation. The restoring beam is
     determined exclusively from the zeroth Taylor-order point-spread function,
     which is the standard convention for MT-MFS imaging."""
-    
+
     import time
     from copy import deepcopy
 

@@ -175,6 +175,106 @@ def _install_static_continuum_products(
     return img_xds
 
 
+def _attach_imaging_weights_continuum(
+    ps_xdt,
+    weight_datasets,
+    processing_set_data_group_name="corrected",
+    weight_imaging_name="WEIGHT_IMAGING",
+):
+    """Attach cached imaging weights to a loaded processing-set chunk.
+
+    Parameters
+    ----------
+    ps_xdt : xarray.DataTree
+        Freshly loaded processing-set chunk.
+
+    weight_datasets : dict
+        Mapping from processing-set child name to an xarray Dataset containing
+        ``weight_imaging_name``.
+
+    processing_set_data_group_name : str, optional
+        Processing-set data group receiving the logical
+        ``"weight_imaging"`` registration.
+
+    weight_imaging_name : str, optional
+        Name of the cached imaging-weight variable.
+
+    Returns
+    -------
+    xarray.DataTree
+        Processing-set chunk with cached imaging weights attached.
+    """
+    attached = 0
+
+    for ms_name, ms_xdt in ps_xdt.items():
+        if ms_name not in weight_datasets:
+            raise KeyError(
+                f"No cached imaging weights were found for processing-set "
+                f"child {ms_name!r}. Available children are "
+                f"{list(weight_datasets)}."
+            )
+
+        weight_xds = weight_datasets[ms_name]
+
+        if weight_imaging_name not in weight_xds:
+            raise KeyError(
+                f"Cached dataset for {ms_name!r} does not contain "
+                f"{weight_imaging_name!r}."
+            )
+
+        weight_da = weight_xds[weight_imaging_name]
+
+        if (
+            weight_da.dims
+            != ms_xdt[
+                ms_xdt.attrs["data_groups"][processing_set_data_group_name]["weight"]
+            ].dims
+        ):
+            raise ValueError(
+                f"Cached imaging weights for {ms_name!r} have dimensions "
+                f"{weight_da.dims}, which do not match the visibility-weight "
+                "dimensions."
+            )
+
+        for dim, size in weight_da.sizes.items():
+            if dim not in ms_xdt.sizes:
+                raise ValueError(
+                    f"Cached imaging weights for {ms_name!r} contain unknown "
+                    f"dimension {dim!r}."
+                )
+
+            if ms_xdt.sizes[dim] != size:
+                raise ValueError(
+                    f"Cached imaging weights for {ms_name!r} have size "
+                    f"{size} along {dim!r}; the loaded processing-set chunk "
+                    f"has size {ms_xdt.sizes[dim]}."
+                )
+
+        # Use a direct Variable assignment to avoid coordinate alignment.
+        ms_xdt[weight_imaging_name] = weight_da.variable.copy(deep=False)
+
+        data_groups = ms_xdt.attrs.setdefault("data_groups", {})
+
+        if processing_set_data_group_name not in data_groups:
+            raise KeyError(
+                f"Processing-set child {ms_name!r} does not contain data group "
+                f"{processing_set_data_group_name!r}."
+            )
+
+        data_groups[processing_set_data_group_name][
+            "weight_imaging"
+        ] = weight_imaging_name
+
+        attached += 1
+
+    if attached == 0:
+        raise RuntimeError(
+            "No imaging-weight datasets were attached to the processing-set " "chunk."
+        )
+
+    return ps_xdt
+
+
 ###############################################################################
 # Node task level functionality related to the residual update
 ###############################################################################
@@ -202,6 +302,7 @@ def residual_update_continuum_single_field(
     task_id=0,
     input_data=None,
     task_time_kill_switch_seconds=None,
+    weight_cache_mapping=None,
 ):
     """Compute one frequency chunk's continuum UV-grid products in memory.
 
@@ -393,6 +494,31 @@ def residual_update_continuum_single_field(
     T_load = time.time() - start
 
     # =============================================================
+    # Load Imaging Cache
+    # =============================================================
+
+    if weight_cache_mapping is None:
+        raise ValueError(
+            "residual_update_continuum_single_field requires the "
+            "once-per-run imaging-weight cache."
+        )
+
+    task_id = int(task_id)
+
+    if task_id not in weight_cache_mapping:
+        raise KeyError(
+            f"No cached imaging weights were found for task {task_id}. "
+            f"Available task IDs are {sorted(weight_cache_mapping)}."
+        )
+
+    ps_xdt = _attach_imaging_weights_continuum(
+        ps_xdt,
+        weight_cache_mapping[task_id],
+        processing_set_data_group_name=(processing_set_data_group_name),
+        weight_imaging_name="WEIGHT_IMAGING",
+    )
+
+    # =============================================================
     # Run processing function
     # =============================================================
 
@@ -471,7 +597,122 @@ def residual_update_continuum_single_field(
     return {
         "image": img_xds,
         "timing_node_tasks": timing_df,
-        # "deconvolution": combined_deconvolve_dict,
+    }
+
+
+@shares_param_docs
+def prepare_imaging_weights_continuum_node(
+    image_params,
+    imaging_weights_params,
+    task_coords,
+    data_selection,
+    input_data_store,
+    processing_set_data_group_name="corrected",
+    instrument_polarization_basis="linear",
+    processing_function_threads=1,
+    input_data=None,
+    task_id=0,
+):
+    """Prepare imaging weights for one frequency-chunk map task.
+
+    The node loads one processing-set chunk, calculates ``WEIGHT_IMAGING``,
+    and returns only the weight arrays required by later major cycles. The
+    original visibilities are not retained in the preparation result.
+    """
+    import time
+
+    import xarray as xr
+    from xradio.image import make_empty_sky_image
+
+    from astroviper.processing_functions.imaging.prepare_imaging_weights_continuum import (
+        prepare_imaging_weights_continuum,
+    )
+
+    if input_data is None:
+        from xradio.measurement_set.load_processing_set import load_processing_set
+
+        ps_xdt = load_processing_set(
+            input_data_store,
+            sel_parms=data_selection,
+            data_group_name=processing_set_data_group_name,
+            load_sub_datasets=False,
+        )
+    else:
+        ps_xdt = input_data
+
+    correlation_pol_coords = {
+        "linear": ["XX", "YY"],
+        "circular": ["RR", "LL"],
+    }[instrument_polarization_basis]
+
+    img_xds = make_empty_sky_image(
+        phase_center=image_params["phase_direction"],
+        image_size=image_params["image_size"],
+        cell_size=image_params["cell_size"],
+        frequency_coords=task_coords["frequency"]["data"],
+        pol_coords=correlation_pol_coords,
+        time_coords=image_params["time_coords"],
+        do_sky_coords=False,
+    )
+    img_xds.attrs["type"] = "image_dataset"
+
+    start = time.time()
+
+    ps_xdt, timing_df = prepare_imaging_weights_continuum(
+        ps_xdt,
+        img_xds,
+        imaging_weights_params,
+        processing_set_data_group_name=processing_set_data_group_name,
+        processing_function_threads=processing_function_threads,
+    )
+
+    # Retain only WEIGHT_IMAGING. Returning the complete processing set would
+    # keep visibilities, UVW, flags, and other large arrays alive unnecessarily.
+    weight_datasets = {}
+
+    for ms_name, ms_xdt in ps_xdt.items():
+        data_groups = ms_xdt.attrs.get("data_groups", {})
+
+        if processing_set_data_group_name not in data_groups:
+            raise KeyError(
+                f"Data group {processing_set_data_group_name!r} is missing "
+                f"from processing-set child {ms_name!r}."
+            )
+
+        weight_name = data_groups[processing_set_data_group_name].get("weight_imaging")
+
+        if weight_name is None:
+            raise KeyError(
+                f"The imaging-weight calculation did not register "
+                f"'weight_imaging' for processing-set child {ms_name!r}."
+            )
+
+        if weight_name not in ms_xdt:
+            raise KeyError(
+                f"The registered imaging-weight variable {weight_name!r} "
+                f"is absent from processing-set child {ms_name!r}."
+            )
+
+        weight_da = ms_xdt[weight_name]
+
+        weight_datasets[ms_name] = xr.Dataset(
+            {
+                weight_name: xr.Variable(
+                    dims=weight_da.dims,
+                    data=weight_da.data,
+                    attrs=weight_da.attrs.copy(),
+                )
+            }
+        )
+
+    timing_df = timing_df.copy()
+    timing_df["task_id"] = task_id
+    timing_df["T_prepare_imaging_weights_node"] = time.time() - start
+
+    return {
+        "task_id": int(task_id),
+        "weight_datasets": weight_datasets,
+        "timing_node_tasks": timing_df,
     }
 
 
