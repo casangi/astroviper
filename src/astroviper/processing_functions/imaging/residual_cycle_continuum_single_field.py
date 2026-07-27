@@ -18,29 +18,87 @@ def residual_cycle_continuum_single_field(
     image_data_group_out_name="residual",
     last_residual_cycle=False,
 ):
-    """Create continuum residual Taylor products for the initial dirty-image cycle.
+    """Calculate the partition-local continuum residual Taylor products.
 
-    This implementation supports the current ``niter=0`` path. It grids the
-    observed visibilities into MT-MFS residual Taylor uv grids, inverse-transforms
-    them into ``SKY_RESIDUAL``, and transforms the result back to Stokes.
+    This function performs one continuum major-cycle residual update for a single
+    visibility partition. During the first major cycle it directly grids the
+    observed visibilities into Taylor-weighted residual UV grids. During later
+    major cycles it first predicts the current sky model from the globally prepared
+    Fourier-domain Taylor model, forms residual visibilities, and then grids those
+    residuals.
 
-    Model degridding and residual-visibility formation for later major cycles are
-    intentionally not implemented yet.
-    """
+    The processing-set partition is expected to already contain prepared imaging
+    weights. These are calculated before entering the continuum major-cycle loop
+    and are reused throughout all subsequent major cycles.
+
+    The function performs the following operations:
+
+    * create the gridding convolution kernel;
+    * (later major cycles only)
+        * reconstruct channel-dependent model visibility grids from the Fourier
+          Taylor model;
+        * degrid the model into predicted visibilities;
+        * form residual visibilities;
+    * grid the residual visibilities into partition-local Taylor residual UV grids;
+    * inverse Fourier-transform and normalize the local Taylor products.
+
+    The resulting Taylor residual images remain partition-local and are later
+    combined by the distributed reduction stage. No global reduction, minor cycle,
+    restoration, or Gaussian PSF fitting is performed here.
+
+    Parameters
+    ----------
+    ps_xdt : xarray.DataTree or mapping
+        Processing-set partition containing the observed (or residual)
+        visibilities together with previously prepared imaging weights.
+    img_xds : xarray.Dataset
+        Continuum image dataset containing the partition-local static products.
+    model_uv_xds : xarray.Dataset
+        Globally prepared Fourier-domain Taylor model. This is only used after the
+        first major cycle.
+    image_params : dict
+        Image geometry and continuum imaging parameters.
+    is_n_iter_0 : bool
+        True for the first major cycle, in which no model prediction is required.
+    processing_set_data_group_name : str, optional
+        Processing-set data group containing the observed visibilities.
+    instrument_polarization_basis : str, optional
+        Instrument correlation basis.
+    single_precision_image : bool, optional
+        Whether complex image-domain arrays use single precision.
+    processing_function_threads : int, optional
+        Number of threads supplied to the gridding kernels.
+    fft_backend : str, optional
+        FFT backend used by the lower-level imaging functions.
+    image_data_variables_keep : list of str, optional
+        Image products retained in the returned dataset.
+    image_data_group_in_name : str, optional
+        Image data group containing the current Taylor model.
+    image_data_group_out_name : str, optional
+        Image data group receiving the residual Taylor products.
+    last_residual_cycle : bool, optional
+        Indicates whether this is the final residual calculation after the last
+        minor cycle.
+
+    Returns
+    -------
+    img_xds : xarray.Dataset
+        Partition-local continuum image dataset containing the residual Taylor
+        products.
+    return_df : pandas.DataFrame
+        Timing summary for the residual-update stage.
+
+    Notes
+    -----
+    This function operates entirely on one visibility partition. The globally
+    reduced Taylor residuals are produced later by the distributed reduction
+    stage, after which the inverse FFT, Stokes conversion, normalization, and
+    minor-cycle processing are performed."""
     import time
 
     import numpy as np
     import pandas as pd
-    import toolviper.utils.logger as logger
 
-    from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
-        transform_polarization_basis,
-    )
-    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
-        fft_norm_continuum_img_xds,
-        fft_norm_img_xds,
-        ifft_norm_img_xds,
-    )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
         create_prolate_spheroidal_kernel_1D,
     )
@@ -74,8 +132,6 @@ def residual_cycle_continuum_single_field(
     cgk_1D = create_prolate_spheroidal_kernel_1D(100, 7)
     T_gcf = time.time() - start
 
-    T_transform_pol = 0.0
-    T_fft_degrid = 0.0
     T_degrid = 0.0
     T_residual_vis = 0.0
 
@@ -95,33 +151,6 @@ def residual_cycle_continuum_single_field(
 
         if residual_sky_name is not None and residual_sky_name in img_xds:
             img_xds.xr_img.delete_data_variables(variables=[residual_sky_name])
-
-        #
-        # Work on the updated model produced by the previous minor cycle.
-        #
-        # model_xds = transform_polarization_basis(
-        #    model_xds,
-        #    new_polarization_basis=instrument_polarization_basis,
-        #    overwrite=True,
-        # )
-
-        # start = time.time()
-
-        # model_xds = fft_norm_continuum_img_xds(
-        #    model_xds,
-        #    image_params=image_params,
-        #    image_data_group_in_name=image_data_group_in_name,
-        #    image_data_group_out_name=image_data_group_in_name,
-        #    image_data_group_out_modified={
-        #        "visibility": "VISIBILITY_MODEL",
-        #    },
-        #    image_data_variables_keep=["sky"],
-        #    processing_function_threads=processing_function_threads,
-        #    fft_backend=fft_backend,
-        #    complex_dtype=complex_dtype,
-        # )
-
-        # T_fft_degrid += time.time() - start
 
         start = time.time()
 
@@ -155,33 +184,9 @@ def residual_cycle_continuum_single_field(
 
         ps_data_group_name = "residual"
 
-        #
-        # The residual image is produced in correlation basis.
-        #
-        # start = time.time()
-
-        # img_xds = transform_polarization_basis(
-        #    img_xds,
-        #    new_polarization_basis=instrument_polarization_basis,
-        #    overwrite=True,
-        # )
-
-        # T_transform_pol += time.time() - start
-
     # ------------------------------------------------------------
-    # First dirty-image cycle.
+    # Grid residual
     # ------------------------------------------------------------
-    # else:
-
-    # start = time.time()
-
-    # img_xds = transform_polarization_basis(
-    #    img_xds,
-    #    new_polarization_basis=instrument_polarization_basis,
-    #    overwrite=True,
-    # )
-
-    # T_transform_pol += time.time() - start
 
     start = time.time()
     (
@@ -201,62 +206,12 @@ def residual_cycle_continuum_single_field(
     )
     T_grid = time.time() - start
 
-    # start = time.time()
-    # img_xds = ifft_norm_img_xds(
-    #    img_xds,
-    #    image_params=image_params,
-    #    image_data_group_in_name=image_data_group_out_name,
-    #    image_data_group_out_name=image_data_group_out_name,
-    #    image_data_group_out_modified={
-    #        "sky": "SKY_RESIDUAL",
-    #    },
-    #    image_data_variables_keep=image_data_variables_keep,
-    #    processing_function_threads=processing_function_threads,
-    #    fft_backend=fft_backend,
-    #    complex_dtype=complex_dtype,
-    # )
-    # T_fft_grid = time.time() - start
-
-    # if "SKY_RESIDUAL" not in img_xds:
-    #    raise RuntimeError("ifft_norm_img_xds did not create SKY_RESIDUAL.")
-
-    # if "taylor_term" not in img_xds["SKY_RESIDUAL"].dims:
-    #    raise RuntimeError(
-    #        "Continuum inverse FFT did not preserve the taylor_term dimension."
-    #    )
-
-    # img_xds["SKY_RESIDUAL"].attrs.update(
-    #    {
-    #        "description": "Continuum residual Taylor products.",
-    #        "nterms": nterms,
-    #        "reference_frequency": reference_frequency,
-    #        "placeholder": False,
-    #    }
-    # )
-
-    # start = time.time()
-    # img_xds = transform_polarization_basis(
-    #    img_xds,
-    #    new_polarization_basis="stokes",
-    #    overwrite=True,
-    # )
-    # T_transform_pol += time.time() - start
-
-    # logger.debug(
-    #    "Created continuum residual Taylor products with dimensions "
-    #    f"{img_xds['SKY_RESIDUAL'].dims} and shape "
-    #    f"{img_xds['SKY_RESIDUAL'].shape}."
-    # )
-
     return_df = pd.DataFrame(
         {
             "T_gcf": [T_gcf],
             "T_degrid": [T_degrid],
-            "T_fft_degrid": [T_fft_degrid],
             "T_residual_vis": [T_residual_vis],
             "T_grid": [T_grid],
-            # "T_fft_grid": [T_fft_grid],
-            "T_transform_pol": [T_transform_pol],
             "nterms": [nterms],
             "is_n_iter_0": [bool(is_n_iter_0)],
             "last_residual_cycle": [bool(last_residual_cycle)],
@@ -283,60 +238,69 @@ def make_visibility_model_continuum_single_field(
     processing_function_threads=1,
     fft_padding=1.2,
 ):
-    """Degrid an MT-MFS Taylor model into channel-dependent model visibilities.
+    """Predict channel-dependent model visibilities from a Fourier Taylor model.
 
-    The input ``model_xds`` is expected to contain Fourier-transformed model
-    Taylor terms,
+    The continuum major cycle maintains the sky model as Fourier-transformed Taylor
+    coefficients rather than frequency images. This function reconstructs the model
+    visibility grid at the actual observing frequencies of one processing-set
+    partition and degrids that model into predicted visibilities.
 
-        M_t(u, v),  t = 0, ..., nterms - 1,
+    For each frequency channel ν, the model visibility grid is reconstructed as
 
-    registered as the ``visibility`` variable of
-    ``image_data_group_in_name``. For every measurement-set frequency channel,
-    this function reconstructs the model uv grid as
+        M(u,v,ν) =
+            Σ_t M_t(u,v)
+                ((ν-ν_ref)/ν_ref)^t,
 
-        M(u, v, nu) =
-            sum_t M_t(u, v)
-                  ((nu - reference_frequency) / reference_frequency)**t
+    where ``M_t`` denotes the Fourier-domain Taylor coefficient and ``ν_ref`` is
+    the common continuum reference frequency.
 
-    and passes the resulting frequency cube to the existing cube degridder.
+    The reconstructed frequency cube is presented to the existing cube degridder,
+    which produces predicted model visibilities in the measurement set.
 
-    Model visibilities are written into each measurement-set dataset under
-    ``ms_data_group_out_name``.
+    This reconstruction is repeated independently for every visibility partition,
+    whereas the Fourier Taylor model itself is prepared only once after each global
+    minor-cycle update.
 
     Parameters
     ----------
     ps_xdt : xarray.DataTree
-        Processing set containing one or more measurement-set datasets.
+        Processing-set partition receiving the predicted model visibilities.
     model_xds : xarray.Dataset
-        Image dataset containing the Fourier-transformed Taylor model. The
-        input model data group must define a ``visibility`` variable with a
-        ``taylor_term`` dimension.
+        Globally prepared Fourier-domain Taylor model. The selected image data
+        group must register a visibility variable containing the Taylor
+        coefficients.
     cgk_1D : numpy.ndarray
         One-dimensional prolate-spheroidal convolution kernel.
     nterms : int
-        Number of Taylor model terms to use.
+        Number of Taylor terms to reconstruct.
     reference_frequency : float
-        MT-MFS reference frequency in Hz.
+        Common MT-MFS reference frequency in Hz.
     ms_data_group_out_name : str, optional
-        Measurement-set data group receiving the predicted model
-        visibilities.
+        Processing-set data group receiving the predicted model visibilities.
     ms_data_group_out_modified : dict, optional
-        Output data-variable mapping. Defaults to
+        Mapping describing the output visibility variable. Defaults to
         ``{"correlated_data": "VISIBILITY_MODEL"}``.
     image_data_group_in_name : str, optional
-        Image data group containing the Fourier-transformed model.
+        Image data group containing the Fourier Taylor model.
     processing_function_threads : int, optional
-        Number of threads supplied to the degridder.
+        Number of threads supplied to the cube degridder.
     fft_padding : float, optional
-        FFT padding factor used by the degridder.
+        FFT padding factor forwarded to the cube implementation.
 
-    Raises
-    ------
-    ValueError
-        If the Taylor configuration or reference frequency is invalid.
-    KeyError
-        If the model data group, model uv grid, or frequency coordinate is
-        missing.
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    This function is currently implemented as a compatibility wrapper around the
+    existing cube degridder. For each processing-set partition it reconstructs a
+    temporary frequency cube from the stored Taylor coefficients and calls the
+    cube degridding implementation.
+
+    The Fourier-domain Taylor model is prepared only once after each global
+    continuum minor cycle. Consequently, this function performs only the spectral
+    reconstruction and degridding required for the current visibility partition.
     """
     import copy
 
@@ -346,6 +310,10 @@ def make_visibility_model_continuum_single_field(
     from astroviper.processing_functions.imaging.get_visibility_grid import (
         get_visibility_grid_single_field,
     )
+
+    # ------------------------------------------------------------
+    # Load grids from memory and perform sanity checks
+    # ------------------------------------------------------------
 
     if ms_data_group_out_modified is None:
         ms_data_group_out_modified = {
@@ -404,6 +372,10 @@ def make_visibility_model_continuum_single_field(
 
     # Ignore any extra Taylor terms that may be present.
     model_taylor_grid = model_taylor_grid.isel(taylor_term=slice(0, nterms))
+
+    # ------------------------------------------------------------
+    # Wrapper around cube implementation, may need refactoring into a native continuum implementation later
+    # ------------------------------------------------------------
 
     for _, ms_xdt in ps_xdt.items():
         if "frequency" in ms_xdt.coords:
@@ -515,6 +487,7 @@ def make_visibility_model_continuum_single_field(
 
         cube_model_xds[model_visibility_name] = frequency_model_grid
 
+        # Run cube-specific degrid
         get_visibility_grid_single_field(
             ms_xdt,
             cgk_1D,

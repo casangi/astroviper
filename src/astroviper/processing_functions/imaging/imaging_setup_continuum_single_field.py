@@ -112,104 +112,91 @@ def imaging_setup_continuum_single_field(
     image_data_variables_keep=None,
     image_data_group_out_name="residual",
 ):
-    """Perform the once-per-chunk setup for continuum MT-MFS imaging.
+    """Prepare the partition-local static products for continuum MT-MFS imaging.
 
-    This is the continuum counterpart of
-    :func:`imaging_setup_single_field`. It performs the work that is
-    independent of the current sky model and therefore needs to run only once
-    for one frequency-chunk map task:
+    This function performs the setup required once for each visibility partition
+    before the first continuum major cycle. It prepares all products that are
+    independent of the current sky model and can therefore be reused throughout the
+    major-cycle iterations.
 
-    * validate the continuum Taylor expansion parameters;
-    * create the output image data group;
-    * calculate imaging weights;
-    * construct this chunk's local Taylor PSF/Hessian products;
-    * construct the primary beam;
-    * transform the image products from the instrument correlation basis to
-      Stokes.
+    Specifically, this function
 
-    The dirty/residual Taylor images are not calculated here. They are created
-    later by :func:`residual_cycle_continuum_single_field`.
+    * validates the continuum Taylor-expansion parameters;
+    * attaches continuum metadata to the image dataset;
+    * creates the continuum residual image data group;
+    * verifies that imaging weights have already been prepared and attached to the
+      processing-set partition;
+    * constructs the partition-local Taylor PSF/Hessian products;
+    * constructs the primary beam.
 
-    For ``nterms = N``, the local PSF/Hessian contribution contains
-    ``2*N - 1`` Taylor orders. In particular, ``nterms=2`` produces local
-    orders 0, 1, and 2.
+    The dirty/residual Taylor images are intentionally **not** calculated here.
+    They are generated during
+    :func:`residual_cycle_continuum_single_field`.
 
-    The PSF Gaussian fit and maximum-sidelobe calculation are intentionally
-    deferred until after the map-task products have been globally reduced.
-    Fitting every chunk-local zeroth-order PSF is not equivalent to fitting the
-    globally summed zeroth-order PSF.
+    Likewise, the restoring-beam fit is intentionally deferred until after the
+    global reduction of the Taylor PSFs. Fitting the beam from a partition-local
+    zeroth-order PSF is not equivalent to fitting the globally accumulated PSF.
+
+    For ``nterms = N``, this function generates ``2N-1`` local PSF/Hessian Taylor
+    orders. For example, ``nterms=2`` produces the local Taylor orders
+    ``H_0``, ``H_1``, and ``H_2``.
 
     Parameters
     ----------
     ps_xdt : xarray.DataTree or mapping
-        Visibility data for this frequency chunk.
+        Processing-set partition containing the visibility data and previously
+        prepared imaging weights.
     img_xds : xarray.Dataset
-        Empty image dataset for this frequency chunk, initially in the
-        instrument correlation basis.
+        Empty continuum image dataset. On return, the dataset contains the
+        partition-local static imaging products.
     image_params : dict
-        Image geometry and continuum settings. The following continuum entries
-        are used:
+        Image geometry and continuum parameters. The following continuum-specific
+        entries are used:
 
         ``nterms``
-            Number of MT-MFS sky Taylor terms. Defaults to 2.
+            Number of MT-MFS sky Taylor terms.
 
         ``reference_frequency`` or ``reference_frequency_hz``
-            Scalar Taylor expansion reference frequency, common to all map
-            tasks. Supplying this explicitly is strongly recommended.
+            Common Taylor-expansion reference frequency shared by all visibility
+            partitions.
 
-        The usual geometry entries such as ``image_size``, ``cell_size``,
-        ``phase_direction`` and ``fft_padding`` are forwarded to lower-level
-        functions.
+        Standard imaging parameters such as image size, cell size, phase center,
+        and FFT padding are forwarded to the lower-level processing functions.
     imaging_weights_params : dict
-        Imaging-weight configuration.
+        Imaging-weight configuration. This function does not calculate imaging
+        weights but retains this argument for API compatibility.
     processing_set_data_group_name : str, optional
-        Processing-set data group to image.
+        Processing-set data group containing the prepared imaging weights.
     single_precision_image : bool, optional
-        If true, image-domain arrays use ``float32`` / ``complex64``.
+        If true, image-domain arrays are allocated using single precision.
     processing_function_threads : int, optional
-        Threads supplied to processing kernels.
+        Number of threads passed to the lower-level processing functions.
     fft_backend : str, optional
-        FFT backend used during PSF normalization.
+        FFT backend used by the PSF-generation routine.
     image_data_variables_keep : list of str, optional
-        Logical image variables retained in the returned dataset.
+        Image products that should be retained in the returned dataset.
     image_data_group_out_name : str, optional
-        Output image data group. Defaults to ``"residual"``.
+        Name of the continuum image data group. Defaults to ``"residual"``.
 
     Returns
     -------
     img_xds : xarray.Dataset
-        Image dataset in the Stokes basis containing the chunk-local Taylor
-        PSF/Hessian products and primary beam.
+        Continuum image dataset containing the partition-local Taylor PSF/Hessian
+        products, primary beam, and continuum metadata.
     return_df : pandas.DataFrame
-        One-row setup timing dataframe.
+        One-row timing dataframe summarizing the setup stage.
 
     Notes
     -----
-    This function depends on the new lower-level processing function
-
-    ``make_point_spread_function_continuum_single_field(...)``.
-
-    That function is responsible for creating the xarray Taylor-order
-    representation. A recommended layout is:
-
-    ``POINT_SPREAD_FUNCTION``
-        dimensions ``(time, psf_taylor_order, polarization, l, m)``
-
-    with ``psf_taylor_order = range(2*nterms - 1)``.
-
-    The input frequency channels remain available as coordinates or metadata,
-    but the PSF output itself should be collapsed over frequency into Taylor
-    orders.
+    This function prepares only partition-local quantities. The globally reduced
+    Taylor PSFs, Gaussian restoring-beam fit, inverse FFT, normalization,
+    polarization conversion, minor cycle, and restoration are performed in later
+    stages of the continuum imaging workflow after the map-task outputs have been
+    combined.
     """
     import pandas as pd
     import toolviper.utils.logger as logger
 
-    from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
-        transform_polarization_basis,
-    )
-    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
-        calculate_imaging_weights,
-    )
     from astroviper.processing_functions.imaging.make_point_spread_function_continuum_single_field import (
         make_point_spread_function_continuum_single_field,
     )
@@ -259,24 +246,9 @@ def imaging_setup_continuum_single_field(
         logger.debug("continuum img_xds size " + str(img_xds.nbytes / 1.0e9) + " GB")
 
     # -------------------------------------------------------------
-    # Imaging weights
+    # Load imaging weights from memory
     # -------------------------------------------------------------
-    # start = time.time()
-
-    # calculate_imaging_weights(
-    #    ps_xdt,
-    #    img_xds,
-    #    imaging_weights_params=imaging_weights_params,
-    #    return_weight_density_grid=False,
-    #    ms_data_group_in_name=ps_data_group_name,
-    #    ms_data_group_out_name=ps_data_group_name,
-    #    ms_data_group_out_modified={
-    #        "weight_imaging": "WEIGHT_IMAGING",
-    #    },
-    #    processing_function_threads=processing_function_threads,
-    # )
-
-    # T_weights = time.time() - start
+    start = time.time()
 
     for ms_name, ms_xdt in ps_xdt.items():
         data_groups = ms_xdt.attrs.get("data_groups", {})
@@ -301,19 +273,7 @@ def imaging_setup_continuum_single_field(
                 f"from processing-set child {ms_name!r}."
             )
 
-    # start = time.time()
-    # from astroviper.processing_functions.imaging.prepare_imaging_weights_continuum import (
-    #    prepare_imaging_weights_continuum,
-    # )
-
-    # ps_xdt, imaging_weights_return_df = prepare_imaging_weights_continuum(
-    #    ps_xdt,
-    #    img_xds,
-    #    imaging_weights_params,
-    #    processing_set_data_group_name=processing_set_data_group_name,
-    #    processing_function_threads=processing_function_threads,
-    # )
-    # T_weights = time.time() - start
+    T_weights = time.time() - start
 
     # -------------------------------------------------------------
     # Chunk-local Taylor PSF/Hessian products
@@ -361,27 +321,15 @@ def imaging_setup_continuum_single_field(
     # -------------------------------------------------------------
     # Correlation -> Stokes
     # -------------------------------------------------------------
-    # start = time.time()
-
-    # img_xds = transform_polarization_basis(
-    #    img_xds,
-    #    new_polarization_basis="stokes",
-    #    overwrite=True,
-    # )
-
-    # T_transform_pol = time.time() - start
 
     # Deliberately no point_spread_function_gaussian_fit here. The correct beam
     # is fitted from the globally reduced zeroth-order Taylor PSF.
 
     return_df = pd.DataFrame(
         {
-            # "T_weights": [T_weights],
+            "T_weights": [T_weights],
             "T_make_point_spread_function": [T_make_point_spread_function],
             "T_primary_beam": [T_primary_beam],
-            # "T_transform_pol": [T_transform_pol],
-            # Preserve the cube timing schema while showing that the fit was
-            # intentionally deferred.
             "T_psf_fit": [0.0],
             "nterms": [nterms],
             "n_psf_taylor_terms": [2 * nterms - 1],

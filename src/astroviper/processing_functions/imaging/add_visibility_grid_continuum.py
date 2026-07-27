@@ -5,11 +5,6 @@ import copy
 import numpy as np
 import xarray as xr
 
-from astroviper.utils.data_group_tools import (
-    create_data_groups_in_and_out,
-    modify_data_groups_xds,
-)
-
 
 def add_visibility_grid_continuum_single_field(
     ms_xds: xr.Dataset,
@@ -86,6 +81,19 @@ def add_visibility_grid_continuum_single_field(
     None
         ``img_xds`` is modified in place.
     """
+
+    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
+        prolate_spheroidal_grid,
+    )
+    from astroviper.processing_functions.imaging.utils.fft_sizing import (
+        padded_grid_size,
+    )
+    from astroviper.utils.data_group_tools import (
+        create_data_groups_in_and_out,
+        modify_data_groups_xds,
+    )
+
+    # Read input
     nterms = int(nterms)
     reference_frequency = float(reference_frequency)
 
@@ -100,6 +108,7 @@ def add_visibility_grid_continuum_single_field(
     if complex_dtype is None:
         complex_dtype = np.complex128
 
+    # Prepare image data group
     image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
 
     ms_data_group_in = ms_xds.attrs["data_groups"][ms_data_group_in_name]
@@ -112,6 +121,7 @@ def add_visibility_grid_continuum_single_field(
         overwrite=overwrite,
     )
 
+    # Find dimensions
     weight_imaging = ms_xds[ms_data_group_in["weight_imaging"]].values
 
     if weight_imaging.ndim != 4:
@@ -132,16 +142,13 @@ def add_visibility_grid_continuum_single_field(
     # Each gridder invocation writes all input channels into one output plane.
     frequency_map = np.zeros(n_chan, dtype=int)
 
-    from astroviper.processing_functions.imaging.utils.fft_sizing import (
-        padded_grid_size,
-    )
-
     n_uv = padded_grid_size(
         [img_xds.sizes["l"], img_xds.sizes["m"]],
         fft_padding,
     )
     delta_lm = img_xds.xr_img.get_lm_cell_size()
 
+    # sanity check on naming of axes
     if "taylor_term" not in img_xds.coords:
         img_xds.coords["taylor_term"] = np.arange(
             nterms,
@@ -169,6 +176,7 @@ def add_visibility_grid_continuum_single_field(
         n_imag_pol,
     )
 
+    # Prepare empty grids with the correct layout
     if visibility_name not in img_xds:
         coords = {
             dim: img_xds.coords[dim]
@@ -221,6 +229,7 @@ def add_visibility_grid_continuum_single_field(
                 f"{expected_normalization_shape}."
             )
 
+    # extract grid, correlated data, uvw and frequencies
     grid = img_xds[visibility_name].values
     normalization = img_xds[normalization_name].values
 
@@ -234,48 +243,21 @@ def add_visibility_grid_continuum_single_field(
             f"channel axis: {frequency_coord.shape[0]} != {n_chan}."
         )
 
+    # Taylor weighting related to reference frequency
     x = (
         frequency_coord.astype(np.float64, copy=False) - reference_frequency
     ) / reference_frequency
 
-    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-        prolate_spheroidal_grid,
-    )
-
-    # Reuse the established cube/continuum gridder. A one-plane view is passed
-    # for each Taylor order, while all physical frequency channels map to that
-    # single plane. The Taylor factor is applied through a temporary imaging-
-    # weight array, leaving the MS weights unchanged.
-    # for taylor_term in range(nterms):
-    #    taylor_factor = x**taylor_term
-    #    taylor_imaging_weight = weight_imaging * taylor_factor[None, None, :, None]
-    #    grid_view = grid[:, taylor_term : taylor_term + 1, :, :, :]
-    #    normalization_view = normalization[:, taylor_term : taylor_term + 1, :]
-    #    prolate_spheroidal_grid(
-    #        grid_view,
-    #        normalization_view,
-    #        vis_data,
-    #        uvw,
-    #        frequency_coord,
-    #        frequency_map,
-    #        time_map,
-    #        pol_map,
-    #        taylor_imaging_weight,
-    #        cgk_1D,
-    #        n_uv,
-    #        delta_lm,
-    #        support=7,
-    #        oversampling=100,
-    #        processing_function_threads=processing_function_threads,
-    #    )
     # Common zeroth-order normalization.
     zeroth_normalization = np.zeros(
         (n_imag_time, 1, n_imag_pol),
         dtype=np.double,
     )
 
+    # Gridding per Taylor term
     for taylor_term in range(nterms):
 
+        # taylor weight
         taylor_factor = x**taylor_term
 
         taylor_imaging_weight = np.ascontiguousarray(
@@ -284,11 +266,13 @@ def add_visibility_grid_continuum_single_field(
 
         grid_view = grid[:, taylor_term : taylor_term + 1, :, :, :]
 
+        # to be overwritten by zero-order normalization
         temporary_normalization = np.zeros(
             (n_imag_time, 1, n_imag_pol),
             dtype=np.double,
         )
 
+        # gridding functionality
         prolate_spheroidal_grid(
             grid_view,
             temporary_normalization,
@@ -319,6 +303,7 @@ def add_visibility_grid_continuum_single_field(
     #
     normalization[...] = zeroth_normalization
 
+    # Format output
     img_xds[visibility_name].attrs.update(
         {
             "description": "MT-MFS Taylor-weighted visibility uv grids.",

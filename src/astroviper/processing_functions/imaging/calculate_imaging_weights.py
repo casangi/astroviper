@@ -1,24 +1,9 @@
 import copy
-from typing import Dict, Union
 
 import numpy as np
 import toolviper.utils.logger as logger
 import xarray as xr
 
-from astroviper.processing_functions.imaging.check_imaging_parameters import (
-    check_imaging_weights_params,
-)
-from astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting import (
-    calculate_briggs_params,
-)
-from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights import (
-    degrid_imaging_weights,
-    grid_imaging_weights,
-)
-from astroviper.utils.data_group_tools import (
-    create_ps_xdt_data_groups_in_and_out,
-    modify_data_groups_ps_xdt,
-)
 from astroviper.utils.param_docs import shares_param_docs
 
 
@@ -186,6 +171,22 @@ def calculate_imaging_weights(
     ...     ms_data_group_in_name="base",
     ... )
     """
+
+    from astroviper.processing_functions.imaging.check_imaging_parameters import (
+        check_imaging_weights_params,
+    )
+    from astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting import (
+        calculate_briggs_params,
+    )
+    from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights import (
+        degrid_imaging_weights,
+        grid_imaging_weights,
+    )
+    from astroviper.utils.data_group_tools import (
+        create_ps_xdt_data_groups_in_and_out,
+        modify_data_groups_ps_xdt,
+    )
+
     _imaging_weights_params = copy.deepcopy(imaging_weights_params)
     _ms_data_group_out_modified = copy.deepcopy(ms_data_group_out_modified)
     assert check_imaging_weights_params(
@@ -209,12 +210,14 @@ def calculate_imaging_weights(
         overwrite=overwrite,
     )
 
+    # for natural weighting, we can skip the gridding and degridding operations
     if _imaging_weights_params["weighting"] == "natural":
         logger.debug(
             "Calculating natural imaging weights (parallel-hand equalization only; "
             "no rescaling of data weights)."
         )
 
+        # fill visibility column
         for ms_name, ms_xdt in ps_xdt.items():
             data_weight = ms_xdt[ms_data_group_in["weight"]].values
             data_weight[ms_xdt[ms_data_group_in["flag"]] == 1] = np.nan
