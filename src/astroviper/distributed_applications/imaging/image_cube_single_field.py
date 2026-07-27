@@ -682,14 +682,24 @@ def combine_return_data_frames(input_data, input_params):
     dict
         ``{"timing_node_tasks": pandas.DataFrame, "deconvolution": ReturnDict}``.
     """
+    import socket
+    import time
+
     import pandas as pd
 
     from astroviper.processing_functions.imaging.utils.iteration_control import (
         merge_return_dicts,
     )
 
+    t_start = time.time()
     timing_frames = []
     deconvolve_dicts = []
+    # Per-reduce-node timing provenance: child reduce calls carry their records
+    # in "timing_reduce_nodes" (leaf node-task results have none); pool them and
+    # append this call's own record, so the final result holds one record per
+    # reduce node of the whole tree -- on any backend (dask workers, the MPI
+    # manager, or the streaming cascade). The task-stream analysis draws these.
+    reduce_records = []
 
     for result in input_data:
         timing = result["timing_node_tasks"]
@@ -707,13 +717,28 @@ def combine_return_data_frames(input_data, input_params):
                 timing[key] = [value] if isinstance(value, list) else value
         timing_frames.append(timing)
         deconvolve_dicts.append(result["deconvolution"])
+        reduce_records.extend(result.get("timing_reduce_nodes", []))
 
     # ONE concat per reduce call: concatenating inside the loop re-copied the
     # accumulated rows for every input (O(k^2) row copies per call -- a real
     # cost on rank 0, which reduces 15360 one-row frames single-threaded).
+    combined_timing = pd.concat(timing_frames, ignore_index=True)
+    merged_deconvolve = merge_return_dicts(deconvolve_dicts)
+    t_end = time.time()
+    reduce_records.append(
+        {
+            "start_unixtime": t_start,
+            "end_unixtime": t_end,
+            "T_reduce_node": t_end - t_start,
+            "hostname": socket.gethostname(),
+            "n_inputs": len(input_data),
+            "n_rows_out": int(len(combined_timing)),
+        }
+    )
     return {
-        "timing_node_tasks": pd.concat(timing_frames, ignore_index=True),
-        "deconvolution": merge_return_dicts(deconvolve_dicts),
+        "timing_node_tasks": combined_timing,
+        "deconvolution": merged_deconvolve,
+        "timing_reduce_nodes": reduce_records,
     }
 
 
