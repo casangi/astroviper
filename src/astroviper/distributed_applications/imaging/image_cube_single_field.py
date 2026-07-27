@@ -586,7 +586,15 @@ def image_cube_single_field(
         timing_distributed_application["T_generate_dask_graph"] = 0.0
         start = time.time()
         return_dict = processes_with_mpi(viper_graph, mpi_cluster_setup)
-        timing_distributed_application["T_compute_dask_graph"] = time.time() - start
+        end = time.time()
+        timing_distributed_application["T_compute_dask_graph"] = end - start
+        # ABSOLUTE anchors of the compute call, saved with the overall row so
+        # the task-stream analysis can place the compute window on the same
+        # wall clock as the per-task start_unixtime values (exposing the
+        # pre-first-task cold-start gap directly instead of reconstructing it
+        # from creation_date).
+        timing_distributed_application["compute_start_unixtime"] = start
+        timing_distributed_application["compute_end_unixtime"] = end
     elif compute_backend == "dask":
         start = time.time()
         dask_graph = generate_dask_workflow(viper_graph)
@@ -597,7 +605,11 @@ def image_cube_single_field(
 
         start = time.time()
         return_dict = dask.compute(dask_graph)[0]
-        timing_distributed_application["T_compute_dask_graph"] = time.time() - start
+        end = time.time()
+        timing_distributed_application["T_compute_dask_graph"] = end - start
+        # Same absolute compute-call anchors as the MPI branch (see above).
+        timing_distributed_application["compute_start_unixtime"] = start
+        timing_distributed_application["compute_end_unixtime"] = end
     else:
         raise ValueError(
             f"Unknown compute_backend {compute_backend!r}; expected 'dask' or 'mpi'."
