@@ -688,7 +688,7 @@ def combine_return_data_frames(input_data, input_params):
         merge_return_dicts,
     )
 
-    combined_timing = pd.DataFrame()
+    timing_frames = []
     deconvolve_dicts = []
 
     for result in input_data:
@@ -705,11 +705,14 @@ def combine_return_data_frames(input_data, input_params):
                 # a list series becomes ONE cell of the single row; scalars
                 # (sample_interval_seconds) broadcast.
                 timing[key] = [value] if isinstance(value, list) else value
-        combined_timing = pd.concat([combined_timing, timing], ignore_index=True)
+        timing_frames.append(timing)
         deconvolve_dicts.append(result["deconvolution"])
 
+    # ONE concat per reduce call: concatenating inside the loop re-copied the
+    # accumulated rows for every input (O(k^2) row copies per call -- a real
+    # cost on rank 0, which reduces 15360 one-row frames single-threaded).
     return {
-        "timing_node_tasks": combined_timing,
+        "timing_node_tasks": pd.concat(timing_frames, ignore_index=True),
         "deconvolution": merge_return_dicts(deconvolve_dicts),
     }
 
