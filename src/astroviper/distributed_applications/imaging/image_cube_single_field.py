@@ -694,7 +694,9 @@ def combine_return_data_frames(input_data, input_params):
     dict
         ``{"timing_node_tasks": pandas.DataFrame, "deconvolution": ReturnDict}``.
     """
+    import os
     import socket
+    import threading
     import time
 
     import pandas as pd
@@ -737,12 +739,26 @@ def combine_return_data_frames(input_data, input_params):
     combined_timing = pd.concat(timing_frames, ignore_index=True)
     merged_deconvolve = merge_return_dicts(deconvolve_dicts)
     t_end = time.time()
+    # Identity of the execution slot this reduce ran on, so the task-stream
+    # analysis can place reduce nodes on their TRUE worker lane (matching the
+    # same columns recorded per map task) instead of interval-packing them
+    # into borrowed lanes. worker_name is the Dask worker (None on the MPI
+    # manager, which runs reduces outside any Dask worker).
+    try:
+        from distributed import get_worker
+
+        worker_name = str(get_worker().name)
+    except Exception:
+        worker_name = None
     reduce_records.append(
         {
             "start_unixtime": t_start,
             "end_unixtime": t_end,
             "T_reduce_node": t_end - t_start,
             "hostname": socket.gethostname(),
+            "process_pid": os.getpid(),
+            "thread_native_id": threading.get_native_id(),
+            "worker_name": worker_name,
             "n_inputs": len(input_data),
             "n_rows_out": int(len(combined_timing)),
         }

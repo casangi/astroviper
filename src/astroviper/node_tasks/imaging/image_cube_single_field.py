@@ -483,11 +483,26 @@ def image_cube_single_field(
     timing_df["T_write"] = T_write
     timing_df["T_image_cube_task"] = task_total_time
     # Record which node ran this task so the per-chunk timing frame can be grouped
-    # by host (identify stragglers / a slow node in the sweep).
+    # by host (identify stragglers / a slow node in the sweep), plus the exact
+    # execution slot (process + thread + Dask worker name) so the task-stream
+    # analysis can reconstruct TRUE per-worker lanes -- and place reduce nodes
+    # (which record the same identity) on the lane they actually ran on --
+    # instead of inferring lanes by interval packing. worker_name is None
+    # outside a Dask worker (the MPI ranks).
+    import os
     import socket
+    import threading
 
     hostname = socket.gethostname()
     timing_df["hostname"] = hostname
+    timing_df["process_pid"] = os.getpid()
+    timing_df["thread_native_id"] = threading.get_native_id()
+    try:
+        from distributed import get_worker
+
+        timing_df["worker_name"] = str(get_worker().name)
+    except Exception:
+        timing_df["worker_name"] = None
 
     if write_exc is not None:
         for key, value in _log_task_io_failure(
