@@ -163,7 +163,287 @@ def compute_continuum_graph(
     return graph_result, timings
 
 
-def prepare_continuum_imaging_weights(
+def prepare_continuum_imaging_weights_global(
+    *,
+    ps_xdt,
+    node_task_data_mapping,
+    input_params,
+    disk_chunk_sizes,
+    processing_set_data_group_name,
+    monitor_resources_seconds,
+    task_priorities,
+    reduce_mode="tree",
+    reduce_n_batch=2,
+):
+    import time
+
+    import dask
+    import numpy as np
+    import xarray as xr
+    from graphviper.graph_tools import generate_dask_workflow, map, reduce
+
+    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+        normalize_imaging_weight_params,
+    )
+    from astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting import (
+        calculate_briggs_params,
+    )
+
+    timings = {}
+
+    start = time.time()
+
+    weight_density_graph = map(
+        input_data=ps_xdt,
+        node_task_data_mapping=node_task_data_mapping,
+        node_task=(node_tasks.imaging.grid_imaging_weight_density_continuum_node),
+        input_params=input_params,
+        in_memory_compute=False,
+        data_loading_task=None,
+        disk_chunk_sizes=disk_chunk_sizes,
+        load_node_input_params={
+            "processing_set_data_group_name": (processing_set_data_group_name),
+        },
+        monitor_resources_seconds=monitor_resources_seconds,
+        task_priorities=task_priorities,
+    )
+
+    weight_density_graph = reduce(
+        weight_density_graph,
+        combine_continuum_weight_density_chunks,
+        {},
+        mode=reduce_mode,
+        n_batch=reduce_n_batch,
+    )
+
+    timings["T_create_imaging_weight_graph"] = time.time() - start
+
+    start = time.time()
+    dask_graph = generate_dask_workflow(weight_density_graph)
+    timings["T_generate_imaging_weight_dask_graph"] = time.time() - start
+
+    start = time.time()
+    weight_density_result = dask.compute(dask_graph)[0]
+    timings["T_compute_imaging_weight_graph"] = time.time() - start
+
+    # =============================================================
+    # Compute global Briggs factors
+    # =============================================================
+
+    start = time.time()
+
+    if "weight_density" not in weight_density_result:
+        raise KeyError(
+            "The weight-density graph result does not contain " "'weight_density'."
+        )
+
+    global_weight_density_xds = weight_density_result["weight_density"]
+
+    if not isinstance(global_weight_density_xds, xr.Dataset):
+        raise TypeError(
+            "weight_density_result['weight_density'] must be an "
+            f"xarray.Dataset; received "
+            f"{type(global_weight_density_xds).__name__}."
+        )
+
+    required_variables = (
+        "WEIGHT_DENSITY_GRID",
+        "SUM_WEIGHT",
+    )
+
+    missing_variables = [
+        variable_name
+        for variable_name in required_variables
+        if variable_name not in global_weight_density_xds
+    ]
+
+    if missing_variables:
+        raise KeyError(
+            "The globally reduced weight-density dataset is missing "
+            f"variables {missing_variables}."
+        )
+
+    global_weight_density_da = global_weight_density_xds["WEIGHT_DENSITY_GRID"]
+    global_sum_weight_da = global_weight_density_xds["SUM_WEIGHT"]
+
+    expected_density_dims = (
+        "frequency",
+        "weight_polarization",
+        "u",
+        "v",
+    )
+    expected_sum_weight_dims = (
+        "frequency",
+        "weight_polarization",
+    )
+
+    if global_weight_density_da.dims != expected_density_dims:
+        raise ValueError(
+            "WEIGHT_DENSITY_GRID has dimensions "
+            f"{global_weight_density_da.dims}; expected "
+            f"{expected_density_dims}."
+        )
+
+    if global_sum_weight_da.dims != expected_sum_weight_dims:
+        raise ValueError(
+            "SUM_WEIGHT has dimensions "
+            f"{global_sum_weight_da.dims}; expected "
+            f"{expected_sum_weight_dims}."
+        )
+
+    if (
+        global_weight_density_da.sizes["frequency"]
+        != global_sum_weight_da.sizes["frequency"]
+    ):
+        raise ValueError(
+            "WEIGHT_DENSITY_GRID and SUM_WEIGHT have different "
+            "frequency-axis lengths."
+        )
+
+    if (
+        global_weight_density_da.sizes["weight_polarization"]
+        != global_sum_weight_da.sizes["weight_polarization"]
+    ):
+        raise ValueError(
+            "WEIGHT_DENSITY_GRID and SUM_WEIGHT have different "
+            "weight-polarization-axis lengths."
+        )
+
+    global_weight_density_grid = np.asarray(
+        global_weight_density_da.values,
+    )
+
+    global_sum_weight = np.asarray(
+        global_sum_weight_da.values,
+        dtype=np.float64,
+    )
+
+    normalized_weight_params = normalize_imaging_weight_params(
+        input_params["imaging_weights_params"]
+    )
+
+    if normalized_weight_params["weighting"] != "briggs":
+        raise ValueError(
+            "Global Briggs-factor calculation requires Briggs or uniform "
+            "weighting. After normalization, received weighting="
+            f"{normalized_weight_params['weighting']!r}."
+        )
+
+    global_briggs_factors = calculate_briggs_params(
+        global_weight_density_grid,
+        global_sum_weight,
+        normalized_weight_params,
+    )
+
+    global_briggs_factors = np.asarray(global_briggs_factors)
+
+    expected_factor_shape = (
+        2,
+        global_weight_density_da.sizes["frequency"],
+        global_weight_density_da.sizes["weight_polarization"],
+    )
+
+    if global_briggs_factors.shape != expected_factor_shape:
+        raise ValueError(
+            "calculate_briggs_params returned an unexpected shape: "
+            f"{global_briggs_factors.shape}; expected "
+            f"{expected_factor_shape}."
+        )
+
+    if not np.all(np.isfinite(global_briggs_factors)):
+        raise ValueError("The global Briggs factors contain non-finite values.")
+
+    T_calculate_global_briggs_factors = time.time() - start
+
+    timings["T_calculate_global_briggs_factors"] = T_calculate_global_briggs_factors
+
+    # =============================================================
+    # Package factors into an xr.DataArray
+    # =============================================================
+
+    global_briggs_factors_da = xr.DataArray(
+        global_briggs_factors,
+        dims=(
+            "briggs_parameter",
+            "frequency",
+            "weight_polarization",
+        ),
+        coords={
+            "briggs_parameter": np.arange(
+                global_briggs_factors.shape[0],
+                dtype=np.int64,
+            ),
+            "frequency": global_weight_density_xds.coords["frequency"],
+            "weight_polarization": (
+                global_weight_density_xds.coords["weight_polarization"]
+            ),
+        },
+        name="BRIGGS_FACTORS",
+        attrs={
+            "description": (
+                "Global Briggs factors calculated from the reduced "
+                "continuum weight-density grid."
+            ),
+            "weighting": normalized_weight_params["weighting"],
+            "robust": normalized_weight_params["robust"],
+        },
+    )
+
+    # =============================================================
+    # Add factors to the global dataset
+    # =============================================================
+
+    global_weight_density_xds["BRIGGS_FACTORS"] = global_briggs_factors_da
+
+    # =============================================================
+    # Degridding
+    # =============================================================
+
+    weight_degrid_input_params = dict(input_params)
+
+    weight_degrid_input_params["global_weighting_xds"] = global_weight_density_xds
+
+    (
+        weight_result,
+        weight_degrid_timings,
+    ) = compute_continuum_imaging_weight_degrid_graph(
+        ps_xdt=ps_xdt,
+        node_task_data_mapping=node_task_data_mapping,
+        input_params=weight_degrid_input_params,
+        disk_chunk_sizes=disk_chunk_sizes,
+        processing_set_data_group_name=(processing_set_data_group_name),
+        monitor_resources_seconds=monitor_resources_seconds,
+        task_priorities=task_priorities,
+        reduce_mode=reduce_mode,
+        reduce_n_batch=reduce_n_batch,
+    )
+
+    weight_cache_mapping = weight_result["weight_cache_mapping"]
+
+    for key, value in weight_degrid_timings.items():
+        timings[key] = timings.get(key, 0.0) + value
+
+    if "weight_cache_mapping" not in weight_result:
+        raise RuntimeError(
+            "The imaging-weight preparation graph did not return "
+            "'weight_cache_mapping'."
+        )
+
+    expected_task_ids = set(range(len(node_task_data_mapping)))
+    actual_task_ids = set(weight_result["weight_cache_mapping"])
+
+    if actual_task_ids != expected_task_ids:
+        raise RuntimeError(
+            "The imaging-weight preparation graph returned an unexpected "
+            "set of task identifiers: "
+            f"expected={sorted(expected_task_ids)}, "
+            f"received={sorted(actual_task_ids)}."
+        )
+
+    return weight_result, timings
+
+
+def prepare_continuum_imaging_weights_local(
     *,
     ps_xdt,
     node_task_data_mapping,
@@ -296,6 +576,85 @@ def prepare_continuum_imaging_weights(
     if actual_task_ids != expected_task_ids:
         raise RuntimeError(
             "The imaging-weight preparation graph returned an unexpected "
+            "set of task identifiers: "
+            f"expected={sorted(expected_task_ids)}, "
+            f"received={sorted(actual_task_ids)}."
+        )
+
+    return result, timings
+
+
+def compute_continuum_imaging_weight_degrid_graph(
+    *,
+    ps_xdt,
+    node_task_data_mapping,
+    input_params,
+    disk_chunk_sizes,
+    processing_set_data_group_name,
+    monitor_resources_seconds,
+    task_priorities,
+    reduce_mode="tree",
+    reduce_n_batch=2,
+):
+    """Compute final per-visibility weights from global weighting products."""
+    import time
+
+    import dask
+    from graphviper.graph_tools import generate_dask_workflow, map, reduce
+
+    if "global_weighting_xds" not in input_params:
+        raise KeyError(
+            "Graph 2 input parameters must contain " "'global_weighting_xds'."
+        )
+
+    timings = {}
+
+    start = time.time()
+
+    weight_graph = map(
+        input_data=ps_xdt,
+        node_task_data_mapping=node_task_data_mapping,
+        node_task=(node_tasks.imaging.degrid_imaging_weights_continuum_node),
+        input_params=input_params,
+        in_memory_compute=False,
+        data_loading_task=None,
+        disk_chunk_sizes=disk_chunk_sizes,
+        load_node_input_params={
+            "processing_set_data_group_name": (processing_set_data_group_name),
+        },
+        monitor_resources_seconds=monitor_resources_seconds,
+        task_priorities=task_priorities,
+    )
+
+    weight_graph = reduce(
+        weight_graph,
+        combine_continuum_imaging_weight_chunks,
+        {},
+        mode=reduce_mode,
+        n_batch=reduce_n_batch,
+    )
+
+    timings["T_create_imaging_weight_degrid_graph"] = time.time() - start
+
+    start = time.time()
+    dask_graph = generate_dask_workflow(weight_graph)
+    timings["T_generate_imaging_weight_degrid_dask_graph"] = time.time() - start
+
+    start = time.time()
+    result = dask.compute(dask_graph)[0]
+    timings["T_compute_imaging_weight_degrid_graph"] = time.time() - start
+
+    if "weight_cache_mapping" not in result:
+        raise RuntimeError(
+            "The imaging-weight degrid graph did not return " "'weight_cache_mapping'."
+        )
+
+    expected_task_ids = set(range(len(node_task_data_mapping)))
+    actual_task_ids = {int(task_id) for task_id in result["weight_cache_mapping"]}
+
+    if actual_task_ids != expected_task_ids:
+        raise RuntimeError(
+            "The imaging-weight degrid graph returned an unexpected "
             "set of task identifiers: "
             f"expected={sorted(expected_task_ids)}, "
             f"received={sorted(actual_task_ids)}."
@@ -673,6 +1032,386 @@ def combine_continuum_chunks(input_data, input_params):
         "image": combined_image,
         "timing_node_tasks": combined_timing,
         "deconvolution": combined_deconvolution,
+    }
+
+
+def combine_continuum_weight_density_chunks(
+    input_data,
+    input_params,
+):
+    """Combine partition-local continuum weight-density contributions.
+
+    This function is intended for use as the ``combine`` function passed to
+    :func:`graphviper.graph_tools.reduce` for the first distributed weighting
+    graph.
+
+    Each leaf input is expected to contain
+
+    .. code-block:: python
+
+        {
+            "task_id": task_id,
+            "weight_density": weight_density_xds,
+            "timing_node_tasks": timing_df,
+        }
+
+    where ``weight_density_xds`` contains
+
+    ``WEIGHT_DENSITY_GRID``
+        Dimensions ``(frequency, weight_polarization, u, v)``.
+
+    ``SUM_WEIGHT``
+        Dimensions ``(frequency, weight_polarization)``.
+
+    Partially reduced inputs have the same structure, except that ``task_id``
+    is omitted.
+
+    Inputs are aligned on their physical frequency coordinates using an outer
+    join. Contributions at matching frequencies are added, while disjoint
+    frequency planes are retained. Consequently, the reducer supports both
+
+    * frequency partitioning, where tasks usually own disjoint channels; and
+    * time or baseline partitioning, where multiple tasks contribute to the
+      same frequency planes.
+
+    Parameters
+    ----------
+    input_data : list of dict
+        Leaf map-task results or partially reduced results.
+
+    input_params : dict, optional
+        Optional reducer configuration. Supported entries are
+
+        ``copy_density_deep`` : bool, optional
+            Whether to deep-copy the first density dataset before
+            accumulation. Defaults to ``True``.
+
+        ``frequency_rtol`` : float, optional
+            Relative tolerance used when validating frequency coordinates.
+            Defaults to ``1e-12``.
+
+        ``frequency_atol`` : float, optional
+            Absolute tolerance used when validating frequency coordinates.
+            Defaults to ``0.0``.
+
+    Returns
+    -------
+    dict
+        Associative partial or complete reduction result containing
+
+        ``"weight_density"``
+            Dataset containing the globally accumulated
+            ``WEIGHT_DENSITY_GRID`` and ``SUM_WEIGHT``.
+
+        ``"timing_node_tasks"``
+            Concatenated timing dataframe containing one row per original map
+            task.
+
+    Notes
+    -----
+    This reducer only sums raw weight-density and sum-of-weight contributions.
+    Briggs factors must be calculated from the fully reduced result after this
+    graph has completed.
+    """
+    import numpy as np
+    import pandas as pd
+    import xarray as xr
+
+    if input_params is None:
+        input_params = {}
+
+    copy_density_deep = bool(input_params.get("copy_density_deep", True))
+    frequency_rtol = float(input_params.get("frequency_rtol", 1.0e-12))
+    frequency_atol = float(input_params.get("frequency_atol", 0.0))
+
+    if not input_data:
+        raise ValueError("combine_continuum_weight_density_chunks received no inputs.")
+
+    required_variables = (
+        "WEIGHT_DENSITY_GRID",
+        "SUM_WEIGHT",
+    )
+
+    # -------------------------------------------------------------
+    # Validate one reducer input and return its density dataset.
+    # -------------------------------------------------------------
+    def _get_density_dataset(result, input_index):
+        if not isinstance(result, dict):
+            raise TypeError(
+                f"input[{input_index}] must be a dictionary; received "
+                f"{type(result).__name__}."
+            )
+
+        if "weight_density" not in result:
+            raise KeyError(
+                f"input[{input_index}] does not contain " "'weight_density'."
+            )
+
+        density_xds = result["weight_density"]
+
+        if not isinstance(density_xds, xr.Dataset):
+            raise TypeError(
+                f"input[{input_index}]['weight_density'] must be an "
+                f"xarray.Dataset; received "
+                f"{type(density_xds).__name__}."
+            )
+
+        missing_variables = [
+            name for name in required_variables if name not in density_xds
+        ]
+
+        if missing_variables:
+            raise KeyError(
+                f"input[{input_index}]['weight_density'] is missing "
+                f"variables {missing_variables}."
+            )
+
+        if "frequency" not in density_xds.coords:
+            raise KeyError(
+                f"input[{input_index}]['weight_density'] does not "
+                "contain a frequency coordinate."
+            )
+
+        frequency = np.asarray(
+            density_xds.coords["frequency"].values,
+            dtype=np.float64,
+        )
+
+        if frequency.ndim != 1:
+            raise ValueError(
+                f"input[{input_index}] frequency coordinate must be "
+                f"one-dimensional; received shape {frequency.shape}."
+            )
+
+        if frequency.size == 0:
+            raise ValueError(f"input[{input_index}] contains no frequency channels.")
+
+        if not np.all(np.isfinite(frequency)):
+            raise ValueError(
+                f"input[{input_index}] frequency coordinate contains "
+                "non-finite values."
+            )
+
+        if np.unique(frequency).size != frequency.size:
+            raise ValueError(
+                f"input[{input_index}] frequency coordinate contains "
+                "duplicate values."
+            )
+
+        density = density_xds["WEIGHT_DENSITY_GRID"]
+        sum_weight = density_xds["SUM_WEIGHT"]
+
+        expected_density_dims = (
+            "frequency",
+            "weight_polarization",
+            "u",
+            "v",
+        )
+        expected_sum_weight_dims = (
+            "frequency",
+            "weight_polarization",
+        )
+
+        if density.dims != expected_density_dims:
+            raise ValueError(
+                f"input[{input_index}] WEIGHT_DENSITY_GRID has "
+                f"dimensions {density.dims}; expected "
+                f"{expected_density_dims}."
+            )
+
+        if sum_weight.dims != expected_sum_weight_dims:
+            raise ValueError(
+                f"input[{input_index}] SUM_WEIGHT has dimensions "
+                f"{sum_weight.dims}; expected "
+                f"{expected_sum_weight_dims}."
+            )
+
+        return density_xds
+
+    # -------------------------------------------------------------
+    # Validate non-frequency geometry and weighting metadata.
+    # -------------------------------------------------------------
+    def _validate_compatible_layout(
+        reference_xds,
+        candidate_xds,
+        input_index,
+    ):
+        for dimension in (
+            "weight_polarization",
+            "u",
+            "v",
+        ):
+            reference_size = reference_xds.sizes.get(dimension)
+            candidate_size = candidate_xds.sizes.get(dimension)
+
+            if reference_size != candidate_size:
+                raise ValueError(
+                    f"Dimension {dimension!r} differs for "
+                    f"input[{input_index}]: reference={reference_size}, "
+                    f"candidate={candidate_size}."
+                )
+
+            if dimension in reference_xds.coords and dimension in candidate_xds.coords:
+                try:
+                    xr.align(
+                        reference_xds.coords[dimension],
+                        candidate_xds.coords[dimension],
+                        join="exact",
+                        copy=False,
+                    )
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Coordinate {dimension!r} differs for "
+                        f"input[{input_index}]."
+                    ) from exc
+
+        metadata_keys = (
+            "weighting",
+            "robust",
+            "casa_weighting_implementation",
+            "cell_size_l",
+            "cell_size_m",
+        )
+
+        for key in metadata_keys:
+            reference_value = reference_xds.attrs.get(key)
+            candidate_value = candidate_xds.attrs.get(key)
+
+            if reference_value is None or candidate_value is None:
+                continue
+
+            if isinstance(reference_value, (float, np.floating),) or isinstance(
+                candidate_value,
+                (float, np.floating),
+            ):
+                if not np.isclose(
+                    float(reference_value),
+                    float(candidate_value),
+                    rtol=frequency_rtol,
+                    atol=frequency_atol,
+                ):
+                    raise ValueError(
+                        f"Weight-density metadata {key!r} differs for "
+                        f"input[{input_index}]: "
+                        f"reference={reference_value}, "
+                        f"candidate={candidate_value}."
+                    )
+            elif reference_value != candidate_value:
+                raise ValueError(
+                    f"Weight-density metadata {key!r} differs for "
+                    f"input[{input_index}]: "
+                    f"reference={reference_value!r}, "
+                    f"candidate={candidate_value!r}."
+                )
+
+    # -------------------------------------------------------------
+    # Initialize accumulation.
+    # -------------------------------------------------------------
+    first_xds = _get_density_dataset(
+        input_data[0],
+        0,
+    )
+
+    combined_xds = first_xds.copy(
+        deep=copy_density_deep,
+    )
+
+    # Ensure the two numerical accumulators own writable arrays.
+    for variable_name in required_variables:
+        combined_xds[variable_name] = combined_xds[variable_name].copy(deep=True)
+
+    combined_timing = pd.DataFrame()
+
+    # -------------------------------------------------------------
+    # Collect timing from every input, including the first.
+    # -------------------------------------------------------------
+    for input_index, result in enumerate(input_data):
+        if "timing_node_tasks" not in result:
+            raise KeyError(
+                f"input[{input_index}] does not contain " "'timing_node_tasks'."
+            )
+
+        timing_df = result["timing_node_tasks"]
+
+        if not isinstance(timing_df, pd.DataFrame):
+            raise TypeError(
+                f"input[{input_index}]['timing_node_tasks'] must be a "
+                f"pandas.DataFrame; received "
+                f"{type(timing_df).__name__}."
+            )
+
+        resource_usage = result.get("resource_usage")
+
+        if resource_usage is not None:
+            timing_df = timing_df.copy()
+
+            for key, value in resource_usage.items():
+                timing_df[key] = [value] if isinstance(value, list) else value
+
+        combined_timing = pd.concat(
+            [combined_timing, timing_df],
+            ignore_index=True,
+        )
+
+    # -------------------------------------------------------------
+    # Accumulate remaining density datasets.
+    # -------------------------------------------------------------
+    for input_index, result in enumerate(
+        input_data[1:],
+        start=1,
+    ):
+        candidate_xds = _get_density_dataset(
+            result,
+            input_index,
+        )
+
+        _validate_compatible_layout(
+            combined_xds,
+            candidate_xds,
+            input_index,
+        )
+
+        # Outer alignment has the desired behavior:
+        #
+        # - overlapping frequencies are placed on the same planes and added;
+        # - disjoint frequencies are retained;
+        # - missing planes are filled with zero.
+        combined_xds, candidate_xds = xr.align(
+            combined_xds,
+            candidate_xds,
+            join="outer",
+            copy=False,
+            fill_value=0.0,
+        )
+
+        for variable_name in required_variables:
+            combined_xds[variable_name] = (
+                combined_xds[variable_name] + candidate_xds[variable_name]
+            )
+
+    # Sort the final frequency axis because tree reduction and outer
+    # alignment do not guarantee that channels remain globally ordered.
+    combined_xds = combined_xds.sortby("frequency")
+
+    combined_xds.attrs["n_weight_density_chunks_combined"] = int(len(combined_timing))
+
+    # This count is additive across tree-reduction levels because the input
+    # datasets carry the number of original MS datasets represented.
+    combined_xds.attrs["n_processing_set_datasets_gridded"] = int(
+        sum(
+            int(
+                _get_density_dataset(result, input_index,).attrs.get(
+                    "n_processing_set_datasets_gridded",
+                    0,
+                )
+            )
+            for input_index, result in enumerate(input_data)
+        )
+    )
+
+    return {
+        "weight_density": combined_xds,
+        "timing_node_tasks": combined_timing,
     }
 
 
@@ -1190,17 +1929,57 @@ def image_continuum_single_field(
             "processing-set loader even though skunk_works=True."
         )
 
-    weight_return_dict, weight_graph_timings = prepare_continuum_imaging_weights(
-        ps_xdt=ps_xdt,
-        node_task_data_mapping=node_task_data_mapping,
-        input_params=weight_preparation_input_params,
-        disk_chunk_sizes=disk_chunk_sizes,
-        processing_set_data_group_name=(processing_set_data_group_name),
-        monitor_resources_seconds=monitor_resources_seconds,
-        task_priorities=task_priorities,
-        reduce_mode=reduce_mode,
-        reduce_n_batch=reduce_n_batch,
-    )
+    weighting = imaging_weights_params["weighting"].lower()
+
+    if weighting == "natural":
+        (
+            weight_return_dict,
+            weight_graph_timings,
+        ) = prepare_continuum_imaging_weights_local(
+            ps_xdt=ps_xdt,
+            node_task_data_mapping=node_task_data_mapping,
+            input_params=weight_preparation_input_params,
+            disk_chunk_sizes=disk_chunk_sizes,
+            processing_set_data_group_name=(processing_set_data_group_name),
+            monitor_resources_seconds=monitor_resources_seconds,
+            task_priorities=task_priorities,
+            reduce_mode=reduce_mode,
+            reduce_n_batch=reduce_n_batch,
+        )
+
+    elif weighting in ("briggs", "uniform"):
+        (
+            weight_return_dict,
+            weight_graph_timings,
+        ) = prepare_continuum_imaging_weights_global(
+            ps_xdt=ps_xdt,
+            node_task_data_mapping=node_task_data_mapping,
+            input_params=weight_preparation_input_params,
+            disk_chunk_sizes=disk_chunk_sizes,
+            processing_set_data_group_name=(processing_set_data_group_name),
+            monitor_resources_seconds=monitor_resources_seconds,
+            task_priorities=task_priorities,
+            reduce_mode=reduce_mode,
+            reduce_n_batch=reduce_n_batch,
+        )
+
+    else:
+        raise ValueError(
+            "Unsupported imaging weighting scheme "
+            f"{imaging_weights_params['weighting']!r}."
+        )
+
+    # weight_return_dict, weight_graph_timings = prepare_continuum_imaging_weights(
+    #    ps_xdt=ps_xdt,
+    #    node_task_data_mapping=node_task_data_mapping,
+    #    input_params=weight_preparation_input_params,
+    #    disk_chunk_sizes=disk_chunk_sizes,
+    #    processing_set_data_group_name=(processing_set_data_group_name),
+    #    monitor_resources_seconds=monitor_resources_seconds,
+    #    task_priorities=task_priorities,
+    #    reduce_mode=reduce_mode,
+    #    reduce_n_batch=reduce_n_batch,
+    # )
 
     for key, value in weight_graph_timings.items():
         timing_distributed_application[key] = (

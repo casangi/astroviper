@@ -601,6 +601,443 @@ def residual_update_continuum_single_field(
 
 
 @shares_param_docs
+def grid_imaging_weight_density_continuum_node(
+    image_params,
+    imaging_weights_params,
+    task_coords,
+    data_selection,
+    input_data_store,
+    processing_set_data_group_name="corrected",
+    instrument_polarization_basis="linear",
+    single_precision_gridding=False,
+    processing_function_threads=1,
+    skunk_works=False,
+    data_group=None,
+    input_data=None,
+    task_id=0,
+):
+    """Grid one visibility partition's contribution to the global weight density.
+
+    This node task implements the map stage of the distributed continuum
+    imaging-weight calculation. It loads one processing-set partition, creates
+    the corresponding local image geometry, and calls
+    ``grid_imaging_weight_density_continuum`` to produce the partition-local
+    weight-density grid and sum-of-weight contribution.
+
+    The node does not calculate Briggs factors, degrid imaging weights, or
+    create ``WEIGHT_IMAGING``. Those operations occur only after all local
+    density contributions have been combined by the GraphViper reduce stage.
+
+    Returns
+    -------
+    dict
+        Dictionary containing
+
+        ``"weight_density"``
+            An :class:`xarray.Dataset` containing
+            ``WEIGHT_DENSITY_GRID`` and ``SUM_WEIGHT``.
+
+        ``"timing_node_tasks"``
+            One-row timing dataframe for this map task.
+
+        ``"task_id"``
+            Integer task identifier.
+    """
+    import time
+
+    import pandas as pd
+    import toolviper.utils.logger as logger
+    from xradio.image import make_empty_sky_image
+
+    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+        grid_imaging_weight_density_continuum,
+    )
+
+    task_id = int(task_id)
+    task_start = time.time()
+
+    # ------------------------------------------------------------------
+    # Load this task's visibility partition.
+    # ------------------------------------------------------------------
+    start = time.time()
+
+    if input_data is not None:
+        # GraphViper or another caller already loaded and selected the
+        # processing-set partition.
+        ps_xdt = input_data
+
+    elif skunk_works:
+        from astroviper.node_tasks.imaging.utils import load_processing_set_skunk_works
+
+        ps_xdt = load_processing_set_skunk_works(
+            input_data_store,
+            sel_parms=data_selection,
+            data_group=data_group,
+            processing_set_data_group_name=(processing_set_data_group_name),
+            frequency_coords=task_coords["frequency"]["data"],
+            instrument_polarization_basis=(instrument_polarization_basis),
+            processing_function_threads=(processing_function_threads),
+        )
+
+    else:
+        from xradio.measurement_set.load_processing_set import load_processing_set
+
+        ps_xdt = load_processing_set(
+            input_data_store,
+            sel_parms=data_selection,
+            data_group_name=processing_set_data_group_name,
+            load_sub_datasets=False,
+        )
+
+    T_load = time.time() - start
+
+    # ------------------------------------------------------------------
+    # Construct the local image geometry used by the density gridder.
+    # ------------------------------------------------------------------
+    if "frequency" not in task_coords:
+        raise KeyError(
+            "grid_imaging_weight_density_continuum_node requires "
+            "task_coords['frequency']."
+        )
+
+    if "data" not in task_coords["frequency"]:
+        raise KeyError(
+            "task_coords['frequency'] must contain the local frequency "
+            "coordinate under the key 'data'."
+        )
+
+    correlation_pol_coords = {
+        "linear": ["XX", "YY"],
+        "circular": ["RR", "LL"],
+    }
+
+    if instrument_polarization_basis not in correlation_pol_coords:
+        raise ValueError(
+            "instrument_polarization_basis must be 'linear' or "
+            f"'circular'; received "
+            f"{instrument_polarization_basis!r}."
+        )
+
+    start = time.time()
+
+    img_xds = make_empty_sky_image(
+        phase_center=image_params["phase_direction"],
+        image_size=image_params["image_size"],
+        cell_size=image_params["cell_size"],
+        frequency_coords=task_coords["frequency"]["data"],
+        pol_coords=correlation_pol_coords[instrument_polarization_basis],
+        time_coords=image_params["time_coords"],
+        do_sky_coords=False,
+    )
+
+    # Required by the xradio image accessor used to retrieve the image
+    # cell size.
+    img_xds.attrs["type"] = "image_dataset"
+
+    T_make_empty_image = time.time() - start
+
+    # ------------------------------------------------------------------
+    # Grid the partition-local density contribution.
+    # ------------------------------------------------------------------
+    start = time.time()
+
+    weight_density_xds = grid_imaging_weight_density_continuum(
+        ps_xdt,
+        img_xds,
+        imaging_weights_params,
+        ms_data_group_in_name=processing_set_data_group_name,
+        single_precision_gridding=single_precision_gridding,
+        processing_function_threads=processing_function_threads,
+    )
+
+    T_grid_weight_density = time.time() - start
+
+    # ------------------------------------------------------------------
+    # Validate the map-task output before returning it to the reducer.
+    # ------------------------------------------------------------------
+    required_variables = (
+        "WEIGHT_DENSITY_GRID",
+        "SUM_WEIGHT",
+    )
+
+    missing_variables = [
+        name for name in required_variables if name not in weight_density_xds
+    ]
+
+    if missing_variables:
+        raise RuntimeError(
+            "The weight-density processing function did not create all "
+            f"required products. Missing: {missing_variables}."
+        )
+
+    if "frequency" not in weight_density_xds.coords:
+        raise RuntimeError(
+            "The partition-local weight-density result does not contain "
+            "a frequency coordinate."
+        )
+
+    task_total_time = time.time() - task_start
+
+    timing_df = pd.DataFrame(
+        {
+            "task_id": [task_id],
+            "T_load": [T_load],
+            "T_make_empty_image": [T_make_empty_image],
+            "T_grid_weight_density": [T_grid_weight_density],
+            "T_weight_density_node": [task_total_time],
+            "n_frequency_channels": [weight_density_xds.sizes.get("frequency", 0)],
+        }
+    )
+
+    logger.debug(
+        "Finished continuum weight-density task "
+        f"{task_id}: "
+        f"{weight_density_xds.sizes.get('frequency', 0)} channels, "
+        f"{task_total_time:.3f} s."
+    )
+
+    # The visibility partition is not needed after its density
+    # contribution has been constructed.
+    ps_xdt = None
+    img_xds = None
+
+    return {
+        "task_id": task_id,
+        "weight_density": weight_density_xds,
+        "timing_node_tasks": timing_df,
+    }
+
+
+@shares_param_docs
+def degrid_imaging_weights_continuum_node(
+    image_params,
+    imaging_weights_params,
+    global_weighting_xds,
+    task_coords,
+    data_selection,
+    input_data_store,
+    processing_set_data_group_name="corrected",
+    instrument_polarization_basis="linear",
+    processing_function_threads=1,
+    skunk_works=False,
+    data_group=None,
+    input_data=None,
+    task_id=0,
+):
+    """Create final imaging weights for one visibility partition.
+
+    This node implements the map stage of the second distributed continuum
+    weighting graph. It loads one processing-set partition, selects the
+    corresponding planes from the globally reduced weight-density products,
+    degrids the global Briggs weighting solution onto the local visibility
+    samples, and returns only the resulting imaging-weight arrays.
+
+    No density gridding or Briggs-factor calculation is performed here.
+    """
+    import time
+
+    import pandas as pd
+    import toolviper.utils.logger as logger
+    import xarray as xr
+    from xradio.image import make_empty_sky_image
+
+    from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+        degrid_imaging_weights_continuum,
+    )
+
+    task_id = int(task_id)
+    task_start = time.time()
+
+    if not isinstance(global_weighting_xds, xr.Dataset):
+        raise TypeError(
+            "global_weighting_xds must be an xarray.Dataset; received "
+            f"{type(global_weighting_xds).__name__}."
+        )
+
+    # -------------------------------------------------------------
+    # Load this task's visibility partition.
+    # -------------------------------------------------------------
+    start = time.time()
+
+    if input_data is not None:
+        ps_xdt = input_data
+
+    elif skunk_works:
+        from astroviper.node_tasks.imaging.utils import load_processing_set_skunk_works
+
+        ps_xdt = load_processing_set_skunk_works(
+            input_data_store,
+            sel_parms=data_selection,
+            data_group=data_group,
+            processing_set_data_group_name=(processing_set_data_group_name),
+            frequency_coords=task_coords["frequency"]["data"],
+            instrument_polarization_basis=(instrument_polarization_basis),
+            processing_function_threads=(processing_function_threads),
+        )
+
+    else:
+        from xradio.measurement_set.load_processing_set import load_processing_set
+
+        ps_xdt = load_processing_set(
+            input_data_store,
+            sel_parms=data_selection,
+            data_group_name=processing_set_data_group_name,
+            load_sub_datasets=False,
+        )
+
+    T_load = time.time() - start
+
+    # -------------------------------------------------------------
+    # Construct the local image geometry needed by the degridder.
+    # -------------------------------------------------------------
+    if "frequency" not in task_coords:
+        raise KeyError(
+            "degrid_imaging_weights_continuum_node requires "
+            "task_coords['frequency']."
+        )
+
+    if "data" not in task_coords["frequency"]:
+        raise KeyError(
+            "task_coords['frequency'] must contain the local channel "
+            "coordinate under 'data'."
+        )
+
+    correlation_pol_coords = {
+        "linear": ["XX", "YY"],
+        "circular": ["RR", "LL"],
+    }
+
+    if instrument_polarization_basis not in correlation_pol_coords:
+        raise ValueError(
+            "instrument_polarization_basis must be 'linear' or "
+            f"'circular'; received {instrument_polarization_basis!r}."
+        )
+
+    start = time.time()
+
+    img_xds = make_empty_sky_image(
+        phase_center=image_params["phase_direction"],
+        image_size=image_params["image_size"],
+        cell_size=image_params["cell_size"],
+        frequency_coords=task_coords["frequency"]["data"],
+        pol_coords=correlation_pol_coords[instrument_polarization_basis],
+        time_coords=image_params["time_coords"],
+        do_sky_coords=False,
+    )
+    img_xds.attrs["type"] = "image_dataset"
+
+    T_make_empty_image = time.time() - start
+
+    # -------------------------------------------------------------
+    # Degrid the global weighting products.
+    # -------------------------------------------------------------
+    start = time.time()
+
+    ps_xdt = degrid_imaging_weights_continuum(
+        ps_xdt,
+        img_xds,
+        global_weighting_xds,
+        imaging_weights_params,
+        ms_data_group_in_name=processing_set_data_group_name,
+        ms_data_group_out_name=processing_set_data_group_name,
+        ms_data_group_out_modified={
+            "weight_imaging": "WEIGHT_IMAGING",
+        },
+        overwrite=True,
+        processing_function_threads=processing_function_threads,
+    )
+
+    T_degrid_imaging_weights = time.time() - start
+
+    # -------------------------------------------------------------
+    # Extract only the task-local imaging-weight arrays.
+    # -------------------------------------------------------------
+    start = time.time()
+
+    weight_datasets = {}
+
+    for ms_name, ms_xds in ps_xdt.items():
+        data_groups = ms_xds.attrs.get("data_groups", {})
+
+        if processing_set_data_group_name not in data_groups:
+            raise KeyError(
+                f"Processing-set child {ms_name!r} does not contain "
+                f"data group {processing_set_data_group_name!r}."
+            )
+
+        data_group = data_groups[processing_set_data_group_name]
+        weight_name = data_group.get("weight_imaging")
+
+        if weight_name is None:
+            raise KeyError(
+                f"The degridding stage did not register "
+                f"'weight_imaging' for child {ms_name!r}."
+            )
+
+        if weight_name not in ms_xds:
+            raise KeyError(
+                f"The registered imaging-weight variable "
+                f"{weight_name!r} is absent from child {ms_name!r}."
+            )
+
+        weight_da = ms_xds[weight_name]
+
+        # Create an independent lightweight dataset containing only the
+        # per-visibility imaging weights. The visibility partition itself
+        # must not remain reachable from the map result.
+        weight_datasets[ms_name] = xr.Dataset(
+            {
+                weight_name: xr.Variable(
+                    dims=weight_da.dims,
+                    data=weight_da.data,
+                    attrs=weight_da.attrs.copy(),
+                )
+            },
+            attrs={
+                "weight_imaging_name": weight_name,
+                "processing_set_data_group_name": (processing_set_data_group_name),
+                "task_id": task_id,
+            },
+        )
+
+    if not weight_datasets:
+        raise RuntimeError(
+            f"No imaging-weight datasets were produced for task {task_id}."
+        )
+
+    T_extract_imaging_weights = time.time() - start
+    task_total_time = time.time() - task_start
+
+    timing_df = pd.DataFrame(
+        {
+            "task_id": [task_id],
+            "T_load": [T_load],
+            "T_make_empty_image": [T_make_empty_image],
+            "T_degrid_imaging_weights": [T_degrid_imaging_weights],
+            "T_extract_imaging_weights": [T_extract_imaging_weights],
+            "T_imaging_weight_degrid_node": [task_total_time],
+            "n_frequency_channels": [img_xds.sizes.get("frequency", 0)],
+            "n_processing_set_children": [len(weight_datasets)],
+        }
+    )
+
+    logger.debug(
+        "Finished continuum imaging-weight degrid task "
+        f"{task_id}: {len(weight_datasets)} processing-set children, "
+        f"{task_total_time:.3f} s."
+    )
+
+    ps_xdt = None
+    img_xds = None
+
+    return {
+        "task_id": task_id,
+        "weight_datasets": weight_datasets,
+        "timing_node_tasks": timing_df,
+    }
+
+
+@shares_param_docs
 def prepare_imaging_weights_continuum_node(
     image_params,
     imaging_weights_params,

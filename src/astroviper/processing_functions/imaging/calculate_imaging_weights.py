@@ -62,6 +62,943 @@ def _equalize_parallel_hand_weights(
     return equalized[..., np.newaxis]
 
 
+def normalize_imaging_weight_params(imaging_weights_params):
+    """Validate and normalize the imaging-weight configuration."""
+    import copy
+
+    from astroviper.processing_functions.imaging.check_imaging_parameters import (
+        check_imaging_weights_params,
+    )
+
+    params = copy.deepcopy(imaging_weights_params)
+
+    if params["weighting"] == "uniform":
+        params["weighting"] = "briggs"
+        params["robust"] = -2.0
+
+    if not check_imaging_weights_params(params):
+        raise ValueError("Invalid imaging-weight parameters.")
+
+    return params
+
+
+def prepare_local_data_weights(
+    ms_xds,
+    ms_data_group,
+    *,
+    casa_weighting_implementation,
+):
+    """Return flagged and parallel-hand-equalized data weights."""
+    import numpy as np
+
+    data_weight = np.array(
+        ms_xds[ms_data_group["weight"]].values,
+        copy=True,
+    )
+
+    flag = ms_xds[ms_data_group["flag"]].values
+    data_weight[flag == 1] = np.nan
+
+    return _equalize_parallel_hand_weights(
+        data_weight,
+        casa_weighting_implementation,
+    )
+
+
+# @shares_param_docs
+def grid_imaging_weight_density_continuum(
+    ps_xdt: xr.DataTree,
+    img_xds: xr.Dataset,
+    imaging_weights_params: dict,
+    ms_data_group_in_name: str = "base",
+    single_precision_gridding: bool = False,
+    processing_function_threads: int = 1,
+) -> xr.Dataset:
+    """Grid one visibility partition's contribution to the weight density.
+
+    This function implements the first, partition-local stage of distributed
+    Briggs or uniform weighting. It masks flagged data weights, equalizes the
+    parallel-hand correlation weights, and grids the resulting weights onto a
+    channel-dependent UV-density grid.
+
+    No Briggs factors are calculated and no weights are degridded back to the
+    visibility samples. The returned density and sum-of-weight products are
+    intended to be accumulated across visibility partitions by a distributed
+    reduction stage.
+
+    Parameters
+    ----------
+    ps_xdt : xarray.DataTree
+        Processing-set partition containing one or more MeasurementSet-like
+        datasets.
+
+    img_xds : xarray.Dataset
+        Image dataset supplying the local frequency coordinate, image size, and
+        angular cell size.
+
+    imaging_weights_params : dict
+        Imaging-weight configuration. Only Briggs and uniform weighting require
+        this function. Uniform weighting is treated as Briggs weighting with
+        ``robust=-2``.
+
+        The entry ``casa_weighting_implementation`` selects the parallel-hand
+        equalization convention.
+
+    ms_data_group_in_name : str, optional
+        Processing-set data group containing the raw weights, flags, and UVW
+        coordinates.
+
+    single_precision_gridding : bool, optional
+        If true, use ``float32`` for the weight-density grid. Otherwise use
+        ``float64``. ``SUM_WEIGHT`` is always accumulated in ``float64``.
+
+    processing_function_threads : int, optional
+        Number of threads supplied to the weight-density gridder.
+
+    Returns
+    -------
+    xarray.Dataset
+        Dataset containing
+
+        ``WEIGHT_DENSITY_GRID``
+            Partition-local UV-density contribution with dimensions
+            ``(frequency, weight_polarization, u, v)``.
+
+        ``SUM_WEIGHT``
+            Partition-local sum of equalized data weights with dimensions
+            ``(frequency, weight_polarization)``.
+
+        The physical frequency coordinate is retained so that a later reducer
+        can align and sum contributions from arbitrary time, baseline, or
+        frequency partitions.
+
+    Notes
+    -----
+    This function does not modify ``ps_xdt``. In particular, flags are applied
+    to a copy of the raw data-weight array rather than replacing flagged
+    elements in the processing-set weight variable.
+
+    Natural weighting does not require a UV-density grid and is therefore
+    rejected by this function.
+    """
+    import copy
+
+    import numpy as np
+    import xarray as xr
+
+    from astroviper.processing_functions.imaging.check_imaging_parameters import (
+        check_imaging_weights_params,
+    )
+    from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights import (
+        grid_imaging_weights,
+    )
+
+    # ------------------------------------------------------------------
+    # Validate and normalize the weighting configuration.
+    # ------------------------------------------------------------------
+    if not isinstance(imaging_weights_params, dict):
+        raise TypeError(
+            "imaging_weights_params must be a dictionary; received "
+            f"{type(imaging_weights_params).__name__}."
+        )
+
+    weight_params = copy.deepcopy(imaging_weights_params)
+
+    if not check_imaging_weights_params(weight_params):
+        raise ValueError("imaging_weights_params validation failed.")
+
+    weighting = str(weight_params["weighting"]).lower()
+
+    if weighting == "natural":
+        raise ValueError("Natural weighting does not require a weight-density grid.")
+
+    if weighting == "uniform":
+        # The robust value is not used during density gridding, but normalize
+        # the configuration here so that all stages use the same convention.
+        weight_params["weighting"] = "briggs"
+        weight_params["robust"] = -2.0
+
+    elif weighting != "briggs":
+        raise ValueError(
+            "grid_imaging_weight_density_continuum supports only "
+            f"'briggs' and 'uniform'; received {weighting!r}."
+        )
+
+    casa_weighting_implementation = bool(weight_params["casa_weighting_implementation"])
+
+    # ------------------------------------------------------------------
+    # Resolve the common local output layout.
+    # ------------------------------------------------------------------
+    required_image_dimensions = ("frequency", "l", "m")
+
+    missing_image_dimensions = [
+        dim for dim in required_image_dimensions if dim not in img_xds.sizes
+    ]
+
+    if missing_image_dimensions:
+        raise ValueError(
+            "img_xds is missing dimensions required for weight-density "
+            f"gridding: {missing_image_dimensions}."
+        )
+
+    frequency = np.asarray(
+        img_xds.coords["frequency"].values,
+        dtype=np.float64,
+    )
+
+    if frequency.ndim != 1:
+        raise ValueError(
+            "The image frequency coordinate must be one-dimensional; "
+            f"received shape {frequency.shape}."
+        )
+
+    if frequency.size == 0:
+        raise ValueError(
+            "The image frequency coordinate must contain at least one channel."
+        )
+
+    if not np.all(np.isfinite(frequency)):
+        raise ValueError("The image frequency coordinate contains non-finite values.")
+
+    n_uv = np.asarray(
+        [
+            img_xds.sizes["l"],
+            img_xds.sizes["m"],
+        ],
+        dtype=np.int64,
+    )
+
+    delta_lm = np.asarray(
+        img_xds.xr_img.get_lm_cell_size(),
+        dtype=np.float64,
+    )
+
+    if delta_lm.shape != (2,):
+        raise ValueError(
+            "The image cell-size accessor must return two angular cell sizes; "
+            f"received shape {delta_lm.shape}."
+        )
+
+    density_dtype = np.float32 if single_precision_gridding else np.float64
+
+    # The current weighting kernels operate on one equalized polarization
+    # plane. The final imaging weights are tiled over the requested image
+    # correlations during the later degrid stage.
+    n_weight_polarization = 1
+
+    weight_density_grid = np.zeros(
+        (
+            frequency.size,
+            n_weight_polarization,
+            n_uv[0],
+            n_uv[1],
+        ),
+        dtype=density_dtype,
+    )
+
+    sum_weight = np.zeros(
+        (
+            frequency.size,
+            n_weight_polarization,
+        ),
+        dtype=np.float64,
+    )
+
+    # ------------------------------------------------------------------
+    # Accumulate every MS child belonging to this visibility partition.
+    # ------------------------------------------------------------------
+    datasets_gridded = 0
+
+    for ms_name, ms_xds in ps_xdt.items():
+        data_groups = ms_xds.attrs.get("data_groups", {})
+
+        if ms_data_group_in_name not in data_groups:
+            raise KeyError(
+                f"Processing-set child {ms_name!r} does not contain data "
+                f"group {ms_data_group_in_name!r}."
+            )
+
+        data_group = data_groups[ms_data_group_in_name]
+
+        required_roles = (
+            "uvw",
+            "weight",
+            "flag",
+        )
+
+        missing_roles = [role for role in required_roles if role not in data_group]
+
+        if missing_roles:
+            raise KeyError(
+                f"Processing-set data group {ms_data_group_in_name!r} in "
+                f"child {ms_name!r} is missing roles {missing_roles}."
+            )
+
+        required_variables = {role: data_group[role] for role in required_roles}
+
+        missing_variables = [
+            variable_name
+            for variable_name in required_variables.values()
+            if variable_name not in ms_xds
+        ]
+
+        if missing_variables:
+            raise KeyError(
+                f"Processing-set child {ms_name!r} is missing variables "
+                f"{missing_variables}."
+            )
+
+        if "frequency" not in ms_xds.coords:
+            raise KeyError(
+                f"Processing-set child {ms_name!r} does not contain a "
+                "'frequency' coordinate."
+            )
+
+        ms_frequency = np.asarray(
+            ms_xds.coords["frequency"].values,
+            dtype=np.float64,
+        )
+
+        if ms_frequency.ndim != 1:
+            raise ValueError(
+                f"The frequency coordinate for child {ms_name!r} must be "
+                f"one-dimensional; received shape {ms_frequency.shape}."
+            )
+
+        # grid_imaging_weights currently assumes that its output channel axis
+        # corresponds directly to the supplied frequency channels.
+        if ms_frequency.shape != frequency.shape or not np.allclose(
+            ms_frequency,
+            frequency,
+            rtol=1.0e-12,
+            atol=0.0,
+        ):
+            raise ValueError(
+                f"The frequencies in processing-set child {ms_name!r} do not "
+                "match the local image frequency axis. "
+                f"MS frequencies={ms_frequency}; "
+                f"image frequencies={frequency}."
+            )
+
+        uvw = np.asarray(ms_xds[data_group["uvw"]].values)
+
+        # Make a copy because applying the flags must not mutate the raw
+        # processing-set WEIGHT variable.
+        data_weight = np.array(
+            ms_xds[data_group["weight"]].values,
+            copy=True,
+        )
+
+        flag = np.asarray(ms_xds[data_group["flag"]].values)
+
+        if flag.shape != data_weight.shape:
+            raise ValueError(
+                f"FLAG and WEIGHT have different shapes for child "
+                f"{ms_name!r}: {flag.shape} != {data_weight.shape}."
+            )
+
+        data_weight[flag == 1] = np.nan
+
+        data_weight = _equalize_parallel_hand_weights(
+            data_weight,
+            casa_weighting_implementation,
+        )
+
+        if data_weight.shape[-1] != n_weight_polarization:
+            raise ValueError(
+                "Parallel-hand equalization must produce one weight "
+                f"polarization; received shape {data_weight.shape} for "
+                f"child {ms_name!r}."
+            )
+
+        grid_imaging_weights(
+            weight_density_grid,
+            sum_weight,
+            uvw,
+            data_weight,
+            ms_frequency,
+            n_uv,
+            delta_lm,
+            processing_function_threads=processing_function_threads,
+        )
+
+        datasets_gridded += 1
+
+    if datasets_gridded == 0:
+        raise RuntimeError(
+            "No processing-set datasets were gridded into the local "
+            "weight-density contribution."
+        )
+
+    # ------------------------------------------------------------------
+    # Package the numerical output with coordinates and metadata.
+    # ------------------------------------------------------------------
+    result_xds = xr.Dataset(
+        data_vars={
+            "WEIGHT_DENSITY_GRID": xr.DataArray(
+                weight_density_grid,
+                dims=(
+                    "frequency",
+                    "weight_polarization",
+                    "u",
+                    "v",
+                ),
+                coords={
+                    "frequency": frequency,
+                    "weight_polarization": np.arange(
+                        n_weight_polarization,
+                        dtype=np.int64,
+                    ),
+                    "u": np.arange(n_uv[0], dtype=np.int64),
+                    "v": np.arange(n_uv[1], dtype=np.int64),
+                },
+                attrs={
+                    "description": (
+                        "Partition-local contribution to the global "
+                        "imaging-weight density grid."
+                    ),
+                },
+            ),
+            "SUM_WEIGHT": xr.DataArray(
+                sum_weight,
+                dims=(
+                    "frequency",
+                    "weight_polarization",
+                ),
+                coords={
+                    "frequency": frequency,
+                    "weight_polarization": np.arange(
+                        n_weight_polarization,
+                        dtype=np.int64,
+                    ),
+                },
+                attrs={
+                    "description": (
+                        "Partition-local sum of flagged and equalized "
+                        "visibility data weights."
+                    ),
+                },
+            ),
+        },
+        attrs={
+            "weighting": weight_params["weighting"],
+            "robust": weight_params.get("robust"),
+            "casa_weighting_implementation": (casa_weighting_implementation),
+            "n_processing_set_datasets_gridded": datasets_gridded,
+            "cell_size_l": float(delta_lm[0]),
+            "cell_size_m": float(delta_lm[1]),
+        },
+    )
+
+    return result_xds
+
+
+# @shares_param_docs
+def degrid_imaging_weights_continuum(
+    ps_xdt: xr.DataTree,
+    img_xds: xr.Dataset,
+    global_weighting_xds: xr.Dataset,
+    imaging_weights_params: dict,
+    ms_data_group_in_name: str = "base",
+    ms_data_group_out_name: str = "imaging",
+    ms_data_group_out_modified: dict | None = None,
+    overwrite: bool = False,
+    processing_function_threads: int = 1,
+) -> xr.DataTree:
+    """Create per-visibility imaging weights from the global density grid.
+
+    This function implements the partition-local numerical stage of the second
+    distributed continuum weighting graph. It receives the globally accumulated
+    weight-density grid and globally calculated Briggs factors, selects the
+    frequency planes required by each local processing-set dataset, and degrids
+    the final imaging weights onto the corresponding visibility samples.
+
+    Parallel-hand data weights are flagged and equalized locally before
+    degridding. The resulting single-polarization imaging weights are tiled over
+    the original correlation axis and registered under the logical
+    ``"weight_imaging"`` role in the requested output data group.
+
+    Parameters
+    ----------
+    ps_xdt : xarray.DataTree
+        Local processing-set partition for which imaging weights are created.
+
+    img_xds : xarray.Dataset
+        Image dataset providing image size and angular cell size. Its frequency
+        coordinate is not required to equal the full global frequency axis.
+
+    global_weighting_xds : xarray.Dataset
+        Globally reduced weighting dataset containing
+
+        ``WEIGHT_DENSITY_GRID``
+            Dimensions ``(frequency, weight_polarization, u, v)``.
+
+        ``SUM_WEIGHT``
+            Dimensions ``(frequency, weight_polarization)``.
+
+        ``BRIGGS_FACTORS``
+            Dimensions
+            ``(briggs_parameter, frequency, weight_polarization)``.
+
+    imaging_weights_params : dict
+        Imaging-weight configuration. Uniform weighting is normalized to Briggs
+        weighting with ``robust=-2``.
+
+    ms_data_group_in_name : str, optional
+        Name of the processing-set input data group containing UVW, raw weights,
+        and flags.
+
+    ms_data_group_out_name : str, optional
+        Name of the processing-set data group receiving the final imaging
+        weights.
+
+    ms_data_group_out_modified : dict, optional
+        Mapping describing the output imaging-weight variable. Defaults to
+
+        ``{"weight_imaging": "WEIGHT_IMAGING"}``.
+
+    overwrite : bool, optional
+        Whether an existing output variable may be replaced.
+
+    processing_function_threads : int, optional
+        Number of threads supplied to the degridding kernel.
+
+    Returns
+    -------
+    xarray.DataTree
+        The input processing-set partition with ``WEIGHT_IMAGING`` created and
+        registered for every contained MeasurementSet-like dataset.
+
+    Notes
+    -----
+    This function does not calculate a density grid or Briggs factors. Those
+    products must be calculated globally before this function is called.
+
+    Frequency planes are matched by physical frequency coordinate rather than
+    by local positional index. This allows the global weighting dataset to
+    contain channels contributed by multiple distributed partitions.
+    """
+    import copy
+
+    import numpy as np
+    import xarray as xr
+
+    from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights import (
+        degrid_imaging_weights,
+    )
+    from astroviper.utils.data_group_tools import (
+        create_ps_xdt_data_groups_in_and_out,
+        modify_data_groups_ps_xdt,
+    )
+
+    # ------------------------------------------------------------------
+    # Validate and normalize configuration.
+    # ------------------------------------------------------------------
+    if ms_data_group_out_modified is None:
+        ms_data_group_out_modified = {
+            "weight_imaging": "WEIGHT_IMAGING",
+        }
+
+    if not isinstance(global_weighting_xds, xr.Dataset):
+        raise TypeError(
+            "global_weighting_xds must be an xarray.Dataset; received "
+            f"{type(global_weighting_xds).__name__}."
+        )
+
+    weight_params = normalize_imaging_weight_params(imaging_weights_params)
+
+    weighting = str(weight_params["weighting"]).lower()
+
+    if weighting != "briggs":
+        raise ValueError(
+            "degrid_imaging_weights_continuum requires Briggs or uniform "
+            f"weighting; normalized weighting is {weighting!r}."
+        )
+
+    required_global_variables = (
+        "WEIGHT_DENSITY_GRID",
+        "SUM_WEIGHT",
+        "BRIGGS_FACTORS",
+    )
+
+    missing_global_variables = [
+        variable_name
+        for variable_name in required_global_variables
+        if variable_name not in global_weighting_xds
+    ]
+
+    if missing_global_variables:
+        raise KeyError(
+            "global_weighting_xds is missing required variables "
+            f"{missing_global_variables}."
+        )
+
+    if "frequency" not in global_weighting_xds.coords:
+        raise KeyError("global_weighting_xds does not contain a frequency coordinate.")
+
+    global_density_da = global_weighting_xds["WEIGHT_DENSITY_GRID"]
+    global_sum_weight_da = global_weighting_xds["SUM_WEIGHT"]
+    global_briggs_da = global_weighting_xds["BRIGGS_FACTORS"]
+
+    expected_density_dims = (
+        "frequency",
+        "weight_polarization",
+        "u",
+        "v",
+    )
+    expected_sum_weight_dims = (
+        "frequency",
+        "weight_polarization",
+    )
+    expected_briggs_dims = (
+        "briggs_parameter",
+        "frequency",
+        "weight_polarization",
+    )
+
+    if global_density_da.dims != expected_density_dims:
+        raise ValueError(
+            "WEIGHT_DENSITY_GRID has dimensions "
+            f"{global_density_da.dims}; expected "
+            f"{expected_density_dims}."
+        )
+
+    if global_sum_weight_da.dims != expected_sum_weight_dims:
+        raise ValueError(
+            "SUM_WEIGHT has dimensions "
+            f"{global_sum_weight_da.dims}; expected "
+            f"{expected_sum_weight_dims}."
+        )
+
+    if global_briggs_da.dims != expected_briggs_dims:
+        raise ValueError(
+            "BRIGGS_FACTORS has dimensions "
+            f"{global_briggs_da.dims}; expected "
+            f"{expected_briggs_dims}."
+        )
+
+    if global_briggs_da.sizes["briggs_parameter"] != 2:
+        raise ValueError(
+            "BRIGGS_FACTORS must contain exactly two Briggs parameters; "
+            f"received "
+            f"{global_briggs_da.sizes['briggs_parameter']}."
+        )
+
+    global_frequency = np.asarray(
+        global_weighting_xds.coords["frequency"].values,
+        dtype=np.float64,
+    )
+
+    if global_frequency.ndim != 1:
+        raise ValueError(
+            "The global frequency coordinate must be one-dimensional; "
+            f"received shape {global_frequency.shape}."
+        )
+
+    if global_frequency.size == 0:
+        raise ValueError("The global frequency coordinate contains no channels.")
+
+    if not np.all(np.isfinite(global_frequency)):
+        raise ValueError("The global frequency coordinate contains non-finite values.")
+
+    if np.unique(global_frequency).size != global_frequency.size:
+        raise ValueError("The global frequency coordinate contains duplicate values.")
+
+    # ------------------------------------------------------------------
+    # Resolve the common image geometry used by the degridder.
+    # ------------------------------------------------------------------
+    for dimension_name in ("l", "m"):
+        if dimension_name not in img_xds.sizes:
+            raise ValueError(
+                f"img_xds does not contain dimension " f"{dimension_name!r}."
+            )
+
+    n_uv = np.asarray(
+        [
+            img_xds.sizes["l"],
+            img_xds.sizes["m"],
+        ],
+        dtype=np.int64,
+    )
+
+    if (
+        global_density_da.sizes["u"] != n_uv[0]
+        or global_density_da.sizes["v"] != n_uv[1]
+    ):
+        raise ValueError(
+            "The global density-grid geometry does not match img_xds: "
+            f"density={(global_density_da.sizes['u'], global_density_da.sizes['v'])}, "
+            f"image={(n_uv[0], n_uv[1])}."
+        )
+
+    delta_lm = np.asarray(
+        img_xds.xr_img.get_lm_cell_size(),
+        dtype=np.float64,
+    )
+
+    if delta_lm.shape != (2,):
+        raise ValueError(
+            "The image cell-size accessor must return two values; "
+            f"received shape {delta_lm.shape}."
+        )
+
+    # Validate stored grid geometry when available.
+    for attr_name, cell_size in (
+        ("cell_size_l", delta_lm[0]),
+        ("cell_size_m", delta_lm[1]),
+    ):
+        stored_value = global_weighting_xds.attrs.get(attr_name)
+
+        if stored_value is not None and not np.isclose(
+            float(stored_value),
+            float(cell_size),
+            rtol=1.0e-12,
+            atol=0.0,
+        ):
+            raise ValueError(
+                f"Global weighting metadata {attr_name!r}="
+                f"{stored_value} does not match img_xds value "
+                f"{cell_size}."
+            )
+
+    # ------------------------------------------------------------------
+    # Create the input/output processing-set data groups.
+    # ------------------------------------------------------------------
+    ms_data_group_in, ms_data_group_out = create_ps_xdt_data_groups_in_and_out(
+        ps_xdt,
+        data_group_in_name=ms_data_group_in_name,
+        data_group_out_name=ms_data_group_out_name,
+        data_group_out_modified=copy.deepcopy(ms_data_group_out_modified),
+        overwrite=overwrite,
+    )
+
+    casa_weighting_implementation = bool(weight_params["casa_weighting_implementation"])
+
+    datasets_processed = 0
+
+    # ------------------------------------------------------------------
+    # Degrid the global density onto every local visibility partition.
+    # ------------------------------------------------------------------
+    for ms_name, ms_xds in ps_xdt.items():
+        if "frequency" not in ms_xds.coords:
+            raise KeyError(
+                f"Processing-set child {ms_name!r} does not contain a "
+                "'frequency' coordinate."
+            )
+
+        local_frequency = np.asarray(
+            ms_xds.coords["frequency"].values,
+            dtype=np.float64,
+        )
+
+        if local_frequency.ndim != 1:
+            raise ValueError(
+                f"The frequency coordinate for child {ms_name!r} must "
+                f"be one-dimensional; received "
+                f"shape {local_frequency.shape}."
+            )
+
+        if not np.all(np.isfinite(local_frequency)):
+            raise ValueError(
+                f"The frequency coordinate for child {ms_name!r} "
+                "contains non-finite values."
+            )
+
+        # Match local frequencies to global planes. Using nearest matching with
+        # a tight tolerance avoids depending on exact floating-point identity.
+        global_indices = []
+
+        for local_value in local_frequency:
+            close_indices = np.flatnonzero(
+                np.isclose(
+                    global_frequency,
+                    local_value,
+                    rtol=1.0e-12,
+                    atol=0.0,
+                )
+            )
+
+            if close_indices.size == 0:
+                raise KeyError(
+                    f"Frequency {local_value} Hz from child "
+                    f"{ms_name!r} is absent from the global "
+                    "weight-density grid."
+                )
+
+            if close_indices.size > 1:
+                raise ValueError(
+                    f"Frequency {local_value} Hz from child "
+                    f"{ms_name!r} matches multiple global planes."
+                )
+
+            global_indices.append(int(close_indices[0]))
+
+        global_indices = np.asarray(
+            global_indices,
+            dtype=np.int64,
+        )
+
+        # Preserve the local channel order expected by the degridding kernel.
+        local_density_grid = np.asarray(
+            global_density_da.isel(frequency=global_indices).values
+        )
+
+        local_briggs_factors = np.asarray(
+            global_briggs_da.isel(frequency=global_indices).values
+        )
+
+        expected_local_density_shape = (
+            local_frequency.size,
+            global_density_da.sizes["weight_polarization"],
+            n_uv[0],
+            n_uv[1],
+        )
+
+        if local_density_grid.shape != expected_local_density_shape:
+            raise ValueError(
+                f"Selected density grid for child {ms_name!r} has shape "
+                f"{local_density_grid.shape}; expected "
+                f"{expected_local_density_shape}."
+            )
+
+        expected_local_briggs_shape = (
+            2,
+            local_frequency.size,
+            global_density_da.sizes["weight_polarization"],
+        )
+
+        if local_briggs_factors.shape != expected_local_briggs_shape:
+            raise ValueError(
+                f"Selected Briggs factors for child {ms_name!r} have "
+                f"shape {local_briggs_factors.shape}; expected "
+                f"{expected_local_briggs_shape}."
+            )
+
+        required_input_variables = (
+            ms_data_group_in["uvw"],
+            ms_data_group_in["weight"],
+            ms_data_group_in["flag"],
+        )
+
+        missing_input_variables = [
+            variable_name
+            for variable_name in required_input_variables
+            if variable_name not in ms_xds
+        ]
+
+        if missing_input_variables:
+            raise KeyError(
+                f"Processing-set child {ms_name!r} is missing input "
+                f"variables {missing_input_variables}."
+            )
+
+        uvw = np.asarray(ms_xds[ms_data_group_in["uvw"]].values)
+
+        data_weight = prepare_local_data_weights(
+            ms_xds,
+            ms_data_group_in,
+            casa_weighting_implementation=(casa_weighting_implementation),
+        )
+
+        if data_weight.shape[-1] != (global_density_da.sizes["weight_polarization"]):
+            raise ValueError(
+                f"Equalized raw weights for child {ms_name!r} contain "
+                f"{data_weight.shape[-1]} polarization planes, but the "
+                "global density grid contains "
+                f"{global_density_da.sizes['weight_polarization']}."
+            )
+
+        imaging_weights = degrid_imaging_weights(
+            local_density_grid,
+            uvw,
+            data_weight,
+            local_briggs_factors,
+            local_frequency,
+            n_uv,
+            delta_lm,
+            processing_function_threads=(processing_function_threads),
+        )
+
+        imaging_weights = np.asarray(imaging_weights)
+
+        expected_equalized_shape = data_weight.shape
+
+        if imaging_weights.shape != expected_equalized_shape:
+            raise ValueError(
+                f"Degridded imaging weights for child {ms_name!r} have "
+                f"shape {imaging_weights.shape}; expected "
+                f"{expected_equalized_shape}."
+            )
+
+        if "polarization" not in ms_xds.sizes:
+            raise ValueError(
+                f"Processing-set child {ms_name!r} does not contain "
+                "a polarization dimension."
+            )
+
+        n_polarization = int(ms_xds.sizes["polarization"])
+
+        if imaging_weights.shape[-1] != 1:
+            raise ValueError(
+                "The current continuum weighting implementation expects "
+                "one equalized weight-polarization plane before tiling; "
+                f"received shape {imaging_weights.shape} for child "
+                f"{ms_name!r}."
+            )
+
+        output_weights = np.repeat(
+            imaging_weights,
+            n_polarization,
+            axis=-1,
+        )
+
+        output_weight_name = ms_data_group_out["weight_imaging"]
+
+        reference_weight = ms_xds[ms_data_group_in["weight"]]
+
+        if output_weights.shape != reference_weight.shape:
+            raise ValueError(
+                f"Final imaging weights for child {ms_name!r} have "
+                f"shape {output_weights.shape}; expected the raw weight "
+                f"shape {reference_weight.shape}."
+            )
+
+        ms_xds[output_weight_name] = xr.DataArray(
+            output_weights,
+            dims=reference_weight.dims,
+            coords={
+                dimension_name: reference_weight.coords[dimension_name]
+                for dimension_name in reference_weight.dims
+                if dimension_name in reference_weight.coords
+            },
+            attrs={
+                "description": (
+                    "Per-visibility continuum imaging weights derived "
+                    "from the globally reduced UV-density grid."
+                ),
+                "weighting": weight_params["weighting"],
+                "robust": weight_params.get("robust"),
+            },
+        )
+
+        datasets_processed += 1
+
+    if datasets_processed == 0:
+        raise RuntimeError("No processing-set datasets were assigned imaging weights.")
+
+    modify_data_groups_ps_xdt(
+        ps_xdt,
+        data_group_out_name=ms_data_group_out_name,
+        data_group_out=ms_data_group_out,
+        description=(
+            "Continuum imaging weights derived from the globally reduced "
+            "weight-density grid and global Briggs factors."
+        ),
+    )
+
+    return ps_xdt
+
+
 @shares_param_docs
 def calculate_imaging_weights(
     ps_xdt: xr.DataTree,
