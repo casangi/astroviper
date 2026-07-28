@@ -130,8 +130,8 @@ def calculate_imaging_weights(
         also return the 2D weight-density grid (useful for debugging). Ignored
         for natural weighting, which always returns ``None``.
     processing_function_threads : int, default ``1``
-        Number of threads handed to the per-processing-function (C++ / Numba /
-        FFT) kernels.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
 
     Returns
     -------
@@ -188,9 +188,9 @@ def calculate_imaging_weights(
     """
     _imaging_weights_params = copy.deepcopy(imaging_weights_params)
     _ms_data_group_out_modified = copy.deepcopy(ms_data_group_out_modified)
-    assert check_imaging_weights_params(
-        _imaging_weights_params
-    ), "######### ERROR: imaging_weights_params checking failed"
+    assert check_imaging_weights_params(_imaging_weights_params), (
+        "######### ERROR: imaging_weights_params checking failed"
+    )
 
     # Uniform weighting is implemented as Briggs with robust = -2.0.
     if _imaging_weights_params["weighting"] == "uniform":

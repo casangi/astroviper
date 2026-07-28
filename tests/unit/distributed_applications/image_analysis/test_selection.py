@@ -555,7 +555,7 @@ class TestApplySelect:
     def test_full_image_box_selects_all_pixels(self) -> None:
         ny, nx = 32, 48
         da = make_image(ny, nx)
-        s = f"box[[0pix,0pix],[{nx-1}pix,{ny-1}pix]]"
+        s = f"box[[0pix,0pix],[{nx - 1}pix,{ny - 1}pix]]"
         m = select_mask(da, select=s)
         assert int(m.values.sum()) == ny * nx
 
@@ -726,7 +726,7 @@ class TestSmartSplitPairs:
         # 1) Annulus is a subset of the outer circle
         assert bool((m_ann & ~m_outer).values.any()) is False
         # 2) A strict ring (outer minus a slightly smaller inner) is contained in annulus
-        m_inner_grow = select_mask(da, select=f"circle[[{cx}pix,{cy}pix], {r1+1}pix]")
+        m_inner_grow = select_mask(da, select=f"circle[[{cx}pix,{cy}pix], {r1 + 1}pix]")
         m_ring_subset = m_outer & ~m_inner_grow
         assert bool((m_ring_subset & ~m_ann).values.any()) is False
 
@@ -2172,11 +2172,7 @@ class TestCrtfGlobalsAndOverrides:
         """When both global and per-line specify the same key, per-line wins."""
         sky = self._sky()
         # Global says I,Q,U,V (all); per-line restricts to just I.
-        crtf = (
-            "#CRTF\n"
-            "global corr=[I,Q,U,V]\n"
-            "box[[0pix,0pix],[19pix,19pix]] corr=[I]"
-        )
+        crtf = "#CRTF\nglobal corr=[I,Q,U,V]\nbox[[0pix,0pix],[19pix,19pix]] corr=[I]"
         mask = select_mask(sky, crtf)
         pol_any = mask.any(dim=["time", "frequency", "l", "m"])
         selected = list(sky.coords["polarization"].values[pol_any.values])
@@ -2450,9 +2446,9 @@ class TestCrtfWorldMode:
         ra = self._RA0_DEG
         crtf = (
             "#CRTF\n"
-            f"poly[[{ra - 2/3600:.6f}deg,{dec - 2/3600:.6f}deg],"
-            f"[{ra + 2/3600:.6f}deg,{dec - 2/3600:.6f}deg],"
-            f"[{ra:.6f}deg,{dec + 3/3600:.6f}deg]] coordsys=world"
+            f"poly[[{ra - 2 / 3600:.6f}deg,{dec - 2 / 3600:.6f}deg],"
+            f"[{ra + 2 / 3600:.6f}deg,{dec - 2 / 3600:.6f}deg],"
+            f"[{ra:.6f}deg,{dec + 3 / 3600:.6f}deg]] coordsys=world"
         )
         mask = select_mask(sky, crtf)
         assert mask.values.any()

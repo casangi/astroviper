@@ -15,9 +15,8 @@ requires-python = ">=3.11,<3.14"
 # ✅ Core runtime dependencies must live here
 dependencies = [
   "graphviper>=0.0.45",
-  "numpy>=1.20.0",
+  "numpy",
   "xradio[zarr]>=1.2.2",
-  "numba",
   "opt_einsum",
   "pyfftw",
   "graphviz",
@@ -85,7 +84,7 @@ requires = [
   "pybind11>=2.10.0",
   "setuptools",
   "wheel",
-  "numpy>=1.20.0"
+  "numpy"
 ]
 build-backend = "scikit_build_core.build"
 
@@ -119,10 +118,13 @@ PYBIND11_FINDPYTHON = "ON"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.isort]
-# Use black-compatible import formatting; without this, isort and black keep
-# rewriting each other's output and the pre-commit run never stabilizes.
-profile = "black"
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+# Ruff replaces isort + black: the formatter handles layout and the "I" rules
+# enforce import sorting. General lint rules are not (yet) enabled.
+select = ["I"]
 
 [tool.pytest.ini_options]
 # Silence noisy, non-actionable zarr V3 warnings across the whole test suite.

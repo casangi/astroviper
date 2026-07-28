@@ -1,7 +1,8 @@
 import math
 
 import numpy as np
-from numba import jit
+
+# from numba import jit  # numba disabled (dependency removed)
 
 # from numba import gdb
 
@@ -10,7 +11,8 @@ def ndim_list(shape):
     return [ndim_list(shape[1:]) if len(shape) > 1 else None for _ in range(shape[0])]
 
 
-@jit(nopython=True, cache=True, nogil=True)
+# numba disabled (dependency removed); kernel now runs as plain Python.
+# @jit(nopython=True, cache=True, nogil=True)
 def aperture_grid_jit(
     grid,
     sum_weight,
@@ -304,7 +306,8 @@ def mosaic_psf_grid_numpy_wrap(
 
 # Important changes to be made https://github.com/numba/numba/issues/4261
 # debug=True and gdb()
-@jit(nopython=True, cache=True, nogil=True)
+# numba disabled (dependency removed); kernel now runs as plain Python.
+# @jit(nopython=True, cache=True, nogil=True)
 def mosaic_grid_jit(
     grid,
     sum_weight,
@@ -472,16 +475,14 @@ def mosaic_grid_jit(
                                         a_chan, a_pol
                                     ] + imaging_weight[
                                         i_time, i_baseline, i_chan, i_pol
-                                    ] * np.real(
-                                        norm
-                                    )
+                                    ] * np.real(norm)
                                 else:
-                                    sum_weight[a_chan, a_pol] = sum_weight[
-                                        a_chan, a_pol
-                                    ] + imaging_weight[
-                                        i_time, i_baseline, i_chan, i_pol
-                                    ] * np.real(
-                                        norm**2
+                                    sum_weight[a_chan, a_pol] = (
+                                        sum_weight[a_chan, a_pol]
+                                        + imaging_weight[
+                                            i_time, i_baseline, i_chan, i_pol
+                                        ]
+                                        * np.real(norm**2)
                                     )  # *np.real(norm**2)#* np.real(norm) #np.abs(norm**2) #**2 term is needed since the pb is in the image twice (one naturally and another from the gcf)
 
     return

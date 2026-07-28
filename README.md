@@ -47,8 +47,8 @@ pre-commit install
 On macOS, install python-casacore via conda-forge (as above) before running `pip install`.
 
 The `pre-commit install` step sets up git hooks that automatically run code
-formatting (black) and strip Jupyter notebook outputs (nbstripout) on every
-commit. This keeps diffs clean and prevents large binary outputs from bloating
+formatting and import sorting (ruff) and strip Jupyter notebook outputs
+(nbstripout) on every commit. This keeps diffs clean and prevents large binary outputs from bloating
 the repository.
 
 If `pre-commit` detects and makes any changes, those files will need to be

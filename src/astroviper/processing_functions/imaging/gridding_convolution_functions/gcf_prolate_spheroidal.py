@@ -3,7 +3,6 @@ import math
 import time
 
 import numpy as np
-from numba import jit
 
 
 def create_prolate_spheroidal_kernel(oversampling, support, n_uv):

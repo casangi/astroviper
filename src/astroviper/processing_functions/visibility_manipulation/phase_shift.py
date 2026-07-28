@@ -1,10 +1,11 @@
 import copy
 
-import numba
+# import numba  # numba disabled (dependency removed)
 import numpy as np
 import scipy
 import xarray as xr
-from numba import jit
+
+# from numba import jit  # numba disabled (dependency removed)
 from scipy import constants
 
 # silence NumbaPerformanceWarning
@@ -53,9 +54,9 @@ def phase_shift_vis_ds(ms_xds, shift_params, sel_params):
     _sel_params = copy.deepcopy(sel_params)
     _shift_params = copy.deepcopy(shift_params)
 
-    assert check_shift_params(
-        _shift_params
-    ), "######### ERROR: shift_params checking failed"
+    assert check_shift_params(_shift_params), (
+        "######### ERROR: shift_params checking failed"
+    )
 
     data_group_in, data_group_out = check_sel_params(
         ms_xds,
@@ -156,14 +157,15 @@ def calc_rotation_matrices(field_phase_direction, shift_params):
     return uvw_rotmat, phase_rotation
 
 
-@jit(nopython=True, cache=True, nogil=True)
+# numba disabled (dependency removed); kernel now runs as plain Python.
+# @jit(nopython=True, cache=True, nogil=True)
 def directional_cosine(phase_direction_in_radians):
     """
     # In https://arxiv.org/pdf/astro-ph/0207413.pdf see equation 160
     phase_direction_in_radians (RA,DEC)
     """
 
-    phase_direction_cosine = np.zeros((3,), dtype=numba.f8)
+    phase_direction_cosine = np.zeros((3,), dtype=np.float64)  # was numba.f8
     # phase_direction_cosine = np.zeros((3,))
     phase_direction_cosine[0] = np.cos(phase_direction_in_radians[0]) * np.cos(
         phase_direction_in_radians[1]

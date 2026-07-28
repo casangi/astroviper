@@ -5,12 +5,10 @@ import xarray as xr
 from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
     FWHM_factor,
     extract_main_lobe,
+    psf_gaussian_fit_core,
 )
 from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
     point_spread_function_gaussian_fit as psf_gaussian_fit,
-)
-from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
-    psf_gaussian_fit_core,
 )
 
 

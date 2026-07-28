@@ -348,48 +348,26 @@ def add_uv_sampling_grid_single_field(
     frequency_coord = ms_xdt.frequency.values
     imaging_weight = ms_xdt[ms_data_group_in["weight_imaging"]].values
 
-    cpp_gridder = True
-    if cpp_gridder:
-        from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-            prolate_spheroidal_grid_uv_sampling,
-        )
+    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
+        prolate_spheroidal_grid_uv_sampling,
+    )
 
-        prolate_spheroidal_grid_uv_sampling(
-            grid,
-            normalization,
-            uvw,
-            frequency_coord,
-            frequency_map,
-            time_map,
-            pol_map,
-            imaging_weight,
-            cgk_1D,
-            n_uv,
-            delta_lm,
-            support=7,
-            oversampling=100,
-            processing_function_threads=processing_function_threads,
-        )
-    else:
-        from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid import (
-            prolate_spheroidal_grid_uv_sampling_jit,
-        )
-
-        prolate_spheroidal_grid_uv_sampling_jit(
-            grid,
-            normalization,
-            uvw,
-            frequency_coord,
-            frequency_map,
-            time_map,
-            pol_map,
-            imaging_weight,
-            cgk_1D,
-            n_uv,
-            delta_lm,
-            support=7,
-            oversampling=100,
-        )
+    prolate_spheroidal_grid_uv_sampling(
+        grid,
+        normalization,
+        uvw,
+        frequency_coord,
+        frequency_map,
+        time_map,
+        pol_map,
+        imaging_weight,
+        cgk_1D,
+        n_uv,
+        delta_lm,
+        support=7,
+        oversampling=100,
+        processing_function_threads=processing_function_threads,
+    )
 
 
 @shares_param_docs
@@ -456,8 +434,8 @@ def make_point_spread_function_single_field(
     gcf_support : int, optional
         Support (in pixels) of the gridding convolution kernel.  Default ``7``.
     processing_function_threads : int, optional
-        Number of threads handed to the per-processing-function (C++ / Numba /
-        FFT) kernels.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     fft_backend : str, optional
         FFT backend used by the gridder normalization (``"pyfftw"`` or
         ``"scipy"``).

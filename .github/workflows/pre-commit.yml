@@ -1,7 +1,7 @@
 # Run every hook in .pre-commit-config.yaml over the full repository, so CI
 # enforces exactly what `pre-commit install` enforces locally: repo hygiene
-# checks, pyupgrade (py311+), absolufy-imports, isort (black profile), black,
-# nbstripout, and the imaging-param-docs sync check.
+# checks, pyupgrade (py311+), absolufy-imports, ruff (import sorting +
+# formatting), nbstripout, and the imaging-param-docs sync check.
 #
 # The imaging-param-docs local hook runs param_docs.py as a standalone script,
 # so libcst is its only dependency — no package build / C++ compile is needed.

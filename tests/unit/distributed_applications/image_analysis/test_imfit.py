@@ -873,11 +873,7 @@ class TestImfitCoverageGaps:
             cellsize=cellsize,
         )
 
-        crtf = (
-            "#CRTF\n"
-            "global coordsys=lm\n"
-            "circle[[-0.00018rad,0.00014rad],0.00008rad]"
-        )
+        crtf = "#CRTF\nglobal coordsys=lm\ncircle[[-0.00018rad,0.00014rad],0.00008rad]"
         ds = imfit(xds, n_components=1, mask_var=crtf, beam_var=None)
 
         assert ds["success"].values

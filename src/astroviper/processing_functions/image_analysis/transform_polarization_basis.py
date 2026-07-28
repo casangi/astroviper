@@ -346,7 +346,6 @@ def get_transformation_matrix(
     new_polarization_basis: str | None = None,
     transformation_matrix: np.ndarray | None = None,
 ):
-
     if transformation_matrix is not None:
         matrix = np.asarray(transformation_matrix, dtype=complex)
         n_out = matrix.shape[0]

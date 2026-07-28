@@ -87,8 +87,11 @@ def test_combine_return_data_frames_composes_under_tree_reduction():
     partial = combine_return_data_frames(leaves[:1], input_params={})
     # A partially-reduced result is itself a valid reducer input.
     final = combine_return_data_frames([partial, leaves[1]], input_params={})
-    assert set(final) == {"timing_node_tasks", "deconvolution"}
+    assert set(final) == {"timing_node_tasks", "deconvolution", "timing_reduce_nodes"}
     assert len(final["timing_node_tasks"]) == 2
+    # One provenance record per reduce node of the tree: the partial reduce's
+    # record is pooled forward and the final call appends its own.
+    assert len(final["timing_reduce_nodes"]) == 2
 
 
 def test_node_task_timing_mean_and_max_summaries_format():

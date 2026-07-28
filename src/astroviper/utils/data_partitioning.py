@@ -210,9 +210,7 @@ def calculate_data_chunking(
         found_factors = False
 
         while not found_factors:
-
             if len(factors) > len(chunking_dims_sizes):
-
                 n_reduce = len(factors) - len(chunking_dims_sizes)
 
                 for i in range(n_reduce):

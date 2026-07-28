@@ -77,7 +77,7 @@ IMAGING_PARAM_DOCS = {
     "deconvolver": (
         "Deconvolution algorithm for the minor cycle. One of ``"
         '"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``\n'
-        "(numba, threaded across *and* within planes -- faster when there are\n"
+        "(C++, threaded across *and* within planes -- faster when there are\n"
         'few planes, e.g. single-channel imaging) or ``"asp"``.'
     ),
     "instrument_polarization_basis": (
@@ -92,12 +92,10 @@ IMAGING_PARAM_DOCS = {
         "precision. If ``False`` the image-domain arrays are double precision."
     ),
     "processing_function_threads": (
-        "Number of threads handed to the per-processing-function (C++ / Numba /\n"
-        "FFT) kernels."
+        "Number of threads handed to the per-processing-function (C++ / FFT)\nkernels."
     ),
     "fft_backend": (
-        'FFT backend used by the gridder normalization (``"pyfftw"`` or\n'
-        '``"scipy"``).'
+        'FFT backend used by the gridder normalization (``"pyfftw"`` or\n``"scipy"``).'
     ),
     "image_data_variables_keep": (
         'Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,\n'

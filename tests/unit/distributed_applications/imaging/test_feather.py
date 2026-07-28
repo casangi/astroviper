@@ -114,9 +114,9 @@ class FeatherShared:
                 fx = xds_sd_temp if i == 0 else xds_int_temp
                 xds["SKY"][{"frequency": slice(min_chan, max_chan)}] = fx["SKY"].values
                 xds["SKY"].attrs = {"units": "Jy/beam"}
-                xds["BEAM_FIT_PARAMS_SKY"][
-                    {"frequency": slice(min_chan, max_chan)}
-                ] = fx["BEAM_FIT_PARAMS_SKY"].values
+                xds["BEAM_FIT_PARAMS_SKY"][{"frequency": slice(min_chan, max_chan)}] = (
+                    fx["BEAM_FIT_PARAMS_SKY"].values
+                )
                 xds["BEAM_FIT_PARAMS_SKY"].attrs = {"units": "rad"}
             if i == 0:
                 xds_sd = xds
@@ -161,7 +161,6 @@ class FeatherShared:
 
 
 class FeatherTest(FeatherShared, unittest.TestCase):
-
     # ------------------------------------------------------------------------
     def setUp(self):
         pass
@@ -267,7 +266,6 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
         cls._rm(cls.model_image)
 
     def test_basic_stats_and_positions(self):
-
         feather_xds = load_image({"sky": self.feather_out})
         # expected shape from prior runs
         self.assertEqual(

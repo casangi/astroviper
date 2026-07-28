@@ -105,9 +105,9 @@ def _remap_deconvolve_dict_to_global_channels(combined_deconvolve_dict, data_sel
 
     remapped = ReturnDict()
     for key, value in combined_deconvolve_dict.data.items():
-        remapped.data[
-            Key(time=key.time, pol=key.pol, chan=key.chan + chan_offset)
-        ] = value
+        remapped.data[Key(time=key.time, pol=key.pol, chan=key.chan + chan_offset)] = (
+            value
+        )
     return remapped
 
 
@@ -223,7 +223,7 @@ def image_cube_single_field(
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     deconvolver : str, optional
         Deconvolution algorithm for the minor cycle. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
-        (numba, threaded across *and* within planes -- faster when there are
+        (C++, threaded across *and* within planes -- faster when there are
         few planes, e.g. single-channel imaging) or ``"asp"``.
     instrument_polarization_basis : str, optional
         Correlation (instrument) polarization basis the gridding is performed in:
@@ -235,8 +235,8 @@ def image_cube_single_field(
         cycle runs in single precision; the visibilities always stay double
         precision. If ``False`` the image-domain arrays are double precision.
     processing_function_threads : int, optional
-        Number of threads handed to the per-processing-function (C++ / Numba /
-        FFT) kernels.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     fft_backend : str, optional
         FFT backend used by the gridder normalization (``"pyfftw"`` or
         ``"scipy"``).
@@ -304,9 +304,9 @@ def image_cube_single_field(
         + " GB"
     )
 
-    assert (
-        memory_mode == "in_memory"
-    ), "Currently only memory_mode='in_memory' is implemented."
+    assert memory_mode == "in_memory", (
+        "Currently only memory_mode='in_memory' is implemented."
+    )
 
     if image_data_variables_keep is None:
         image_data_variables_keep = [
@@ -385,6 +385,7 @@ def image_cube_single_field(
                 "T_make_empty_image": T_make_empty_image,
                 "T_load": time.time() - start,
                 "T_image_cube_task": time.time() - task_start,
+                "start_unixtime": task_start,
             }
         )
         return {
@@ -482,6 +483,11 @@ def image_cube_single_field(
     timing_df["T_load"] = T_load
     timing_df["T_write"] = T_write
     timing_df["T_image_cube_task"] = task_total_time
+    # Wall-clock anchor so the task-stream analysis can place this task on the
+    # run's common timeline without needing the resource monitor (whose own
+    # anchor, recorded a hair earlier around the whole task, overwrites this
+    # column when monitor_resources_seconds is set).
+    timing_df["start_unixtime"] = task_start
     # Record which node ran this task so the per-chunk timing frame can be grouped
     # by host (identify stragglers / a slow node in the sweep), plus the exact
     # execution slot (process + thread + Dask worker name) so the task-stream

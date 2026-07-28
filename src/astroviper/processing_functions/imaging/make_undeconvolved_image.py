@@ -48,8 +48,8 @@ def make_undeconvolved_image_single_field(
     image_data_group_out_name : str, optional
         Image data group the uv grid is written under.  Default ``"residual"``.
     processing_function_threads : int, optional
-        Number of threads handed to the per-processing-function (C++ / Numba /
-        FFT) kernels.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     complex_dtype : numpy.dtype, optional
         Complex precision of the gridded visibility grid (``complex64`` for a
         single-precision image, ``complex128`` otherwise).  Defaults to

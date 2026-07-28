@@ -6,9 +6,11 @@ Coverage:
   * Channel-mode `cube` vs `continuum`.
   * NaN UVW samples and out-of-bounds samples are skipped.
   * `overwrite=False` guards against accidental overwrites on a second call.
-  * Agreement with a direct call to `prolate_spheroidal_degrid_jit`.
+  * Agreement with a direct call to the pure-Python reference degridder.
 """
 
+import os
+import sys
 import unittest
 
 import numpy as np
@@ -20,9 +22,13 @@ import xradio.image.image_xds  # noqa: F401
 from astroviper.processing_functions.imaging.get_visibility_grid import (
     get_visibility_grid_single_field,
 )
-from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_degrid import (
-    prolate_spheroidal_degrid_jit,
-)
+
+# The pure-Python reference degridder (de-jitted copy of the retired numba
+# kernel) lives next to the C++ gridder tests; that directory is not a package,
+# so put it on sys.path explicitly.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "gridders"))
+from reference_gridders import prolate_spheroidal_degrid_reference
+
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_kernel_1D,
 )
@@ -265,10 +271,10 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
             )
 
     # ------------------------------------------------------------------
-    # Oracle: direct call to prolate_spheroidal_degrid_jit
+    # Oracle: direct call to the pure-Python reference degridder
     # ------------------------------------------------------------------
-    def test_matches_direct_degrid_jit_call(self):
-        """Degridding via the wrapper must match a direct jit call."""
+    def test_matches_direct_degrid_reference_call(self):
+        """Degridding via the wrapper must match a direct reference call."""
         ms_xds, img_xds, n_uv = _build_datasets(sky_value=0.0 + 0.0j, seed=42)
         # Populate the UV grid with deterministic-but-nontrivial data.
         rng = np.random.default_rng(7)
@@ -284,7 +290,7 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
         get_visibility_grid_single_field(ms_xds, cgk, img_xds)
         wrapper_out = ms_xds["VISIBILITY_MODEL"].values.copy()
 
-        # --- Direct jit call with the same inputs ---
+        # --- Direct reference call with the same inputs ---
         n_time = ms_xds.sizes["time"]
         n_chan = ms_xds.sizes["frequency"]
         n_pol = ms_xds.sizes["polarization"]
@@ -294,7 +300,7 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
         delta_lm = img_xds.xr_img.get_lm_cell_size()
 
         direct_vis = np.zeros(ms_xds["VISIBILITY"].shape, dtype=np.complex128)
-        prolate_spheroidal_degrid_jit(
+        prolate_spheroidal_degrid_reference(
             sky,
             direct_vis,
             ms_xds["UVW"].values,

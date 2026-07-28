@@ -322,8 +322,7 @@ def plot_cluster_resource_usage(
     )
     if have_io:
         axes["io"] = _figure(
-            "Cluster I/O rate over the run (syscall-level, counts network "
-            "filesystems)",
+            "Cluster I/O rate over the run (syscall-level, counts network filesystems)",
             "Aggregate I/O rate (GB/s)",
             [
                 ("read", acc["read_rate"], "tab:blue"),

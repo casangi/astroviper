@@ -61,8 +61,8 @@ def imaging_setup_single_field(
         cycle runs in single precision; the visibilities always stay double
         precision. If ``False`` the image-domain arrays are double precision.
     processing_function_threads : int, optional
-        Number of threads handed to the per-processing-function (C++ / Numba /
-        FFT) kernels.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     fft_backend : str, optional
         FFT backend used by the gridder normalization (``"pyfftw"`` or
         ``"scipy"``).
@@ -258,8 +258,8 @@ def residual_cycle_cube_single_field(
         cycle runs in single precision; the visibilities always stay double
         precision. If ``False`` the image-domain arrays are double precision.
     processing_function_threads : int, optional
-        Number of threads handed to the per-processing-function (C++ / Numba /
-        FFT) kernels.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     fft_backend : str, optional
         FFT backend used by the gridder normalization (``"pyfftw"`` or
         ``"scipy"``).

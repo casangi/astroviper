@@ -30,20 +30,12 @@ repos:
       - id: absolufy-imports
         name: absolufy-imports
 
-  -   repo: https://github.com/pycqa/isort
-      rev: 5.13.2
-      hooks:
-      - id: isort
-        args: ["--filter-files"]
-        language_version: python3
-
-  -   repo: https://github.com/psf/black
-      rev: 22.8.0
-      hooks:
-      - id: black
-        language_version: python3
-        args:
-          - --target-version=py311
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.12.5
+    hooks:
+      - id: ruff-check        # import sorting (isort replacement; see [tool.ruff.lint])
+        args: [--fix]
+      - id: ruff-format       # formatter (black replacement)
 
   - repo: https://github.com/kynan/nbstripout
     rev: 0.8.1

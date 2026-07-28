@@ -43,9 +43,9 @@ class TestLoadProcessingSet:
         ps_xdt = load_processing_set(str(convert_measurement_set_to_processing_set))
         issues = check_datatree(ps_xdt)
         # The check_datatree function returns a SchemaIssues object, not a string
-        assert (
-            str(issues) == "No schema issues found"
-        ), f"Schema validation failed: {issues}"
+        assert str(issues) == "No schema issues found", (
+            f"Schema validation failed: {issues}"
+        )
 
 
 if __name__ == "__main__":

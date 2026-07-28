@@ -564,9 +564,7 @@ def _encode_chunk_blob(chunk, meta):
                     cname=cfg.get("cname", "lz4"),
                     clevel=cfg.get("clevel", 5),
                     shuffle=_BLOSC_SHUFFLE.get(cfg.get("shuffle"), 1),
-                ).encode(
-                    b
-                )  # ndarray -> correct typesize for shuffle
+                ).encode(b)  # ndarray -> correct typesize for shuffle
             elif name in ("gzip", "gz"):
                 out = numcodecs.GZip(level=cfg.get("level", 5)).encode(out)
             elif name == "crc32c":

@@ -117,10 +117,7 @@ class TestPsfWidth:
         yy, xx = np.mgrid[0:ny, 0:nx]
         sx, sy = 2.0, 4.0
         psf = np.exp(
-            -(
-                ((xx - nx // 2) ** 2) / (2 * sx**2)
-                + ((yy - ny // 2) ** 2) / (2 * sy**2)
-            )
+            -(((xx - nx // 2) ** 2) / (2 * sx**2) + ((yy - ny // 2) ** 2) / (2 * sy**2))
         )
         w = aspclean.psf_gaussian_width(np.ascontiguousarray(psf))
         kx = np.ceil(2.0 * np.sqrt(2.0 * np.log(2.0)) * sx)

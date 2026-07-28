@@ -804,7 +804,7 @@ def hogbom_clean(
     ):
         if not isinstance(arr, np.ndarray) or arr.ndim != 5:
             raise ValueError(
-                f"{name} must be a 5D numpy array with shape " "(nt, nf, np, ny, nx)"
+                f"{name} must be a 5D numpy array with shape (nt, nf, np, ny, nx)"
             )
 
     if residual_cube.shape != model_cube.shape:
@@ -878,7 +878,7 @@ def hogbom_clean_many_threads(
     processing_function_threads: int = 1,
     mask_cube: np.ndarray | None = None,
 ):
-    """Hogbom CLEAN over a 5-D cube, threaded across AND within planes (numba).
+    """Hogbom CLEAN over a 5-D cube, threaded across AND within planes (C++).
 
     A drop-in alternative to :func:`hogbom_clean`. The C++ ``hogbom`` deconvolver
     parallelizes only *across* the ``(time, frequency, polarization)`` planes, so
@@ -1053,7 +1053,7 @@ def asp_clean(
     ):
         if not isinstance(arr, np.ndarray) or arr.ndim != 5:
             raise ValueError(
-                f"{name} must be a 5D numpy array with shape " "(nt, nf, np, ny, nx)"
+                f"{name} must be a 5D numpy array with shape (nt, nf, np, ny, nx)"
             )
 
     if residual_cube.shape != model_cube.shape:

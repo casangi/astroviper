@@ -196,7 +196,7 @@ def image_cube_single_field(
         of 100).
     deconvolver : str
         Deconvolution algorithm for the minor cycle. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
-        (numba, threaded across *and* within planes -- faster when there are
+        (C++, threaded across *and* within planes -- faster when there are
         few planes, e.g. single-channel imaging) or ``"asp"``.
     instrument_polarization_basis : str
         Correlation (instrument) polarization basis the gridding is performed in:
@@ -222,8 +222,8 @@ def image_cube_single_field(
     n_chunks : int, optional
             Number of frequency chunks to use for parallel processing. If None (default), the chunk count is auto-determined based on the image size, memory constraints, and available parallelism.
     processing_function_threads : int, optional
-        Number of threads handed to the per-processing-function (C++ / Numba /
-        FFT) kernels.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     overwrite : bool
         Whether to overwrite existing image. Default is False.
     memory_mode : str
@@ -360,9 +360,9 @@ def image_cube_single_field(
         image_data_groups_for_kept_variables,
     )
 
-    assert (
-        memory_mode == "in_memory"
-    ), "Currently only in_memory is supported for memory_mode is implemented."
+    assert memory_mode == "in_memory", (
+        "Currently only in_memory is supported for memory_mode is implemented."
+    )
 
     # Sharded output is written by the concurrent direct-blob (skunk_works) writer;
     # the standard write path cannot safely write partial shards concurrently, so
@@ -817,25 +817,13 @@ def calculate_number_of_chunks_for_cube_imaging(
         fudge_factor = 1.2
         if single_precision_image:
             memory_singleton_chunk = fudge_factor * (
-                3
-                * n_pixels_single_frequency
-                * bytes_in_dtype["complex64"]
-                / (1024**3)
-                + 3
-                * n_pixels_single_frequency
-                * bytes_in_dtype["float32"]
-                / (1024**3)
+                3 * n_pixels_single_frequency * bytes_in_dtype["complex64"] / (1024**3)
+                + 3 * n_pixels_single_frequency * bytes_in_dtype["float32"] / (1024**3)
             )
         else:
             memory_singleton_chunk = fudge_factor * (
-                3
-                * n_pixels_single_frequency
-                * bytes_in_dtype["complex128"]
-                / (1024**3)
-                + 3
-                * n_pixels_single_frequency
-                * bytes_in_dtype["float64"]
-                / (1024**3)
+                3 * n_pixels_single_frequency * bytes_in_dtype["complex128"] / (1024**3)
+                + 3 * n_pixels_single_frequency * bytes_in_dtype["float64"] / (1024**3)
             )
 
         logger.info(

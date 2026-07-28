@@ -1,11 +1,7 @@
 import copy
 
-import numba
 import numpy as np
-import scipy
 import xarray as xr
-from numba import jit
-from scipy import constants
 
 from astroviper.processing_functions.imaging.gridders.mosaic_grid import mosaic_grid_jit
 from astroviper.utils.data_group_tools import (
@@ -44,8 +40,8 @@ def get_visibility_grid_single_field(
     :func:`~astroviper.processing_functions.imaging.add_visibility_grid.add_visibility_grid_single_field`:
     it predicts visibilities *from* a UV-plane model rather than gridding
     observed visibilities onto a UV plane.  It uses the standard separable
-    prolate-spheroidal degridder (:func:`prolate_spheroidal_degrid_jit`) and
-    therefore does not require a GCF dataset.
+    prolate-spheroidal degridder (the C++ ``prolate_spheroidal_degrid``
+    kernel) and therefore does not require a GCF dataset.
 
     Parameters
     ----------
@@ -58,13 +54,13 @@ def get_visibility_grid_single_field(
     cgk_1D : np.ndarray
         Oversampled 1-D prolate spheroidal wave function (PSWF) kernel.
         Shape ``(oversampling * (support // 2 + 1),)``; passed directly to
-        :func:`prolate_spheroidal_degrid_jit`.
+        the C++ ``prolate_spheroidal_degrid`` kernel.
     img_xds : xr.Dataset
         Image dataset holding the model UV grid.  Must expose an image data
         group under ``image_data_group_in_name`` whose ``"SKY"`` role names a
         data variable shaped ``(time, frequency, polarization, u, v)``, the
-        same ``(u, v)`` axis order used by
-        :func:`~astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid.prolate_spheroidal_grid_jit`.
+        same ``(u, v)`` axis order used by the C++
+        ``prolate_spheroidal_grid`` kernel.
         Cell size and image dimensions are read directly from ``img_xds`` via
         ``img_xds.xr_img.get_lm_cell_size()`` and ``img_xds.sizes``.
     ms_data_group_out_name : str, default ``"model"``
@@ -86,8 +82,8 @@ def get_visibility_grid_single_field(
         own image channel; ``"continuum"`` sources every visibility channel
         from image channel 0.
     processing_function_threads : int, default ``1``
-        Reserved for a future threaded C++ degridder; currently unused by the
-        Numba implementation.
+        Number of threads used by the C++ degridder; ``<= 0`` falls back to
+        the hardware concurrency.
 
     Returns
     -------
@@ -98,7 +94,7 @@ def get_visibility_grid_single_field(
     Notes
     -----
     - Flags must be applied by the caller before invoking this function.  The
-      underlying :func:`prolate_spheroidal_degrid_jit` has no flag argument
+      underlying C++ ``prolate_spheroidal_degrid`` kernel has no flag argument
       and only skips samples whose ``vis_data`` value is ``NaN``.  Newly
       allocated output arrays are zero-initialised (not ``NaN``), so every
       visibility whose ``uvw`` is finite and whose support falls inside the
@@ -110,8 +106,8 @@ def get_visibility_grid_single_field(
     --------
     astroviper.processing_functions.imaging.add_visibility_grid.add_visibility_grid_single_field :
         Forward (gridding) counterpart.
-    prolate_spheroidal_degrid_jit :
-        Numba-compiled standard separable degridding kernel.
+    astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp.prolate_spheroidal_degrid :
+        C++ standard separable degridding kernel.
     """
     _ms_data_group_out_modified = copy.deepcopy(ms_data_group_out_modified)
 
@@ -187,44 +183,22 @@ def get_visibility_grid_single_field(
     uvw = ms_xds[ms_data_group_in["uvw"]].values
     frequency_coord = ms_xds.frequency.values
 
-    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_degrid import (
-        prolate_spheroidal_degrid_jit,
+    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
+        prolate_spheroidal_degrid,
     )
 
-    cpp_gridder = True
-    if cpp_gridder:
-        from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-            prolate_spheroidal_degrid,
-        )
-
-        prolate_spheroidal_degrid(
-            grid,
-            vis_data,
-            uvw,
-            frequency_coord,
-            frequency_map,
-            time_map,
-            pol_map,
-            cgk_1D,
-            n_uv,
-            delta_lm,
-            support=7,
-            oversampling=100,
-            processing_function_threads=processing_function_threads,
-        )
-
-    else:
-        prolate_spheroidal_degrid_jit(
-            grid,
-            vis_data,
-            uvw,
-            frequency_coord,
-            frequency_map,
-            time_map,
-            pol_map,
-            cgk_1D,
-            n_uv,
-            delta_lm,
-            support=7,
-            oversampling=100,
-        )
+    prolate_spheroidal_degrid(
+        grid,
+        vis_data,
+        uvw,
+        frequency_coord,
+        frequency_map,
+        time_map,
+        pol_map,
+        cgk_1D,
+        n_uv,
+        delta_lm,
+        support=7,
+        oversampling=100,
+        processing_function_threads=processing_function_threads,
+    )

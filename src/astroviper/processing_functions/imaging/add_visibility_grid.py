@@ -1,11 +1,7 @@
 import copy
 
-import numba
 import numpy as np
-import scipy
 import xarray as xr
-from numba import jit
-from scipy import constants
 
 from astroviper.processing_functions.imaging.gridders.mosaic_grid import mosaic_grid_jit
 from astroviper.utils.data_group_tools import (
@@ -98,7 +94,7 @@ def add_visibility_grid_mosaic(
     See Also
     --------
     add_visibility_grid_single_field : Non-mosaic (standard gridder) variant.
-    mosaic_grid_jit : Numba-compiled mosaic gridding kernel.
+    mosaic_grid_jit : Mosaic gridding kernel (pure Python; currently unmaintained).
     """
     _image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
 
@@ -222,8 +218,8 @@ def add_visibility_grid_single_field(
 
     This function is the non-mosaic counterpart of
     :func:`add_visibility_grid_mosaic`.  It uses the standard separable
-    gridder (:func:`standard_grid_jit`) rather than the direction-dependent
-    mosaic gridder, so no GCF dataset is required.
+    gridder (the C++ ``prolate_spheroidal_grid`` kernel) rather than the
+    direction-dependent mosaic gridder, so no GCF dataset is required.
 
     Parameters
     ----------
@@ -233,8 +229,8 @@ def add_visibility_grid_single_field(
         ``weight_imaging``) and a ``frequency`` coordinate.
     cgk_1D : np.ndarray
         1-D convolutional gridding kernel used by the standard gridder.
-        Shape ``(oversampling * support,)``; passed directly to
-        :func:`standard_grid_jit`.
+        Shape ``(oversampling * support,)``; passed directly to the C++
+        ``prolate_spheroidal_grid`` kernel.
     img_xds : xr.Dataset
         Image dataset that accumulates the gridded visibilities.  The arrays
         named by ``image_data_group_out_modified`` are created on the first call
@@ -279,7 +275,8 @@ def add_visibility_grid_single_field(
     See Also
     --------
     add_visibility_grid_mosaic : Mosaic (direction-dependent GCF) variant.
-    standard_grid_jit : Numba-compiled standard separable gridding kernel.
+    astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp.prolate_spheroidal_grid :
+        C++ standard separable gridding kernel.
     """
     _image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
 
@@ -353,47 +350,24 @@ def add_visibility_grid_single_field(
     frequency_coord = ms_xds.frequency.values
     imaging_weight = ms_xds[ms_data_group_in["weight_imaging"]].values
 
-    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid import (
-        prolate_spheroidal_grid_jit,
+    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
+        prolate_spheroidal_grid,
     )
 
-    cpp_gridder = True
-    if cpp_gridder:
-        from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-            prolate_spheroidal_grid,
-        )
-
-        prolate_spheroidal_grid(
-            grid,
-            normalization,
-            vis_data,
-            uvw,
-            frequency_coord,
-            frequency_map,
-            time_map,
-            pol_map,
-            imaging_weight,
-            cgk_1D,
-            n_uv,
-            delta_lm,
-            support=7,
-            oversampling=100,
-            processing_function_threads=processing_function_threads,
-        )
-    else:
-        prolate_spheroidal_grid_jit(
-            grid,
-            normalization,
-            vis_data,
-            uvw,
-            frequency_coord,
-            frequency_map,
-            time_map,
-            pol_map,
-            imaging_weight,
-            cgk_1D,
-            n_uv,
-            delta_lm,
-            support=7,
-            oversampling=100,
-        )
+    prolate_spheroidal_grid(
+        grid,
+        normalization,
+        vis_data,
+        uvw,
+        frequency_coord,
+        frequency_map,
+        time_map,
+        pol_map,
+        imaging_weight,
+        cgk_1D,
+        n_uv,
+        delta_lm,
+        support=7,
+        oversampling=100,
+        processing_function_threads=processing_function_threads,
+    )

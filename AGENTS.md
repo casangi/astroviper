@@ -32,7 +32,7 @@ the build system is `scikit-build-core` + `pybind11` + CMake.
 git clone git@github.com:casangi/astroviper.git
 cd astroviper
 pip install -e '.[all]'     # builds the C++ extensions; '[all]' adds test/docs/interactive deps
-pre-commit install          # installs black + nbstripout git hooks
+pre-commit install          # installs ruff + nbstripout git hooks
 ```
 - **macOS**: install casacore via conda *first*, because `pip install
   python-casacore` does not work on macOS:
@@ -111,10 +111,10 @@ pytest --cov=astroviper tests # with coverage
 - **Add or update tests for any code you change**, even if not asked.
 
 ### Formatting / pre-commit (required before committing)
-- **Black** is the formatter. CI fails on unformatted code.
-- **isort** orders imports, configured with `profile = "black"` in
-  `pyproject.toml` (required: without it isort and black rewrite each other's
-  output forever). `pyupgrade` (py311+) and `absolufy-imports` also run.
+- **Ruff** is the formatter (`ruff format`, black-compatible) and also orders
+  imports (`ruff check --select I --fix`, configured in `[tool.ruff.lint]` of
+  `pyproject.toml`). CI fails on unformatted code. `pyupgrade` (py311+) and
+  `absolufy-imports` also run.
 - `nbstripout` strips notebook outputs (keeps diffs small, repo light).
 - If pre-commit rewrites files, **re-stage** them and commit again.
 
@@ -343,7 +343,8 @@ vocabulary so call sites read consistently:
 ## 6. The Python ↔ C++ Memory Contract
 
 > **This is the most important performance/correctness rule in the repo.** It
-> applies to all pybind11 kernels (gridder, degridder, Hogbom, ASP).
+> applies to all pybind11 kernels (gridder, degridder, imaging weights, Hogbom,
+> ASP).
 
 **Python always owns and controls large-array memory. C++ is given pointers to
 read/write Python-owned NumPy buffers in place. No unnecessary copies are ever
@@ -384,16 +385,11 @@ match them in any new kernel:
    shared grid cells use lock-free `std::atomic_ref<double>` adds (C++20) —
    `complex<double>` is added as two `double` lanes.
 
-### Numba equivalent
-Numba kernels follow the same memory philosophy: decorate with
-`@jit(nopython=True, cache=True, nogil=True)` and **modify arrays in place**
-(`grid`, `normalization`, …). `nogil=True` lets them run under Dask threads.
-
 ### Two levels of parallelism (don't conflate them)
 - **Across chunks**: the Dask graph (GraphVIPER) — one task per chunk.
 - **Within a task**: `processing_function_threads`, passed down unchanged from
-  the driver to the C++/Numba kernels (the same parameter name at every layer
-  of the stack).
+  the driver to the C++ kernels (the same parameter name at every layer of the
+  stack).
 
 ---
 
@@ -452,7 +448,7 @@ per-variable nodes.
     docs — matching `residual_cycle_cube_single_field` /
     `model_update_cycle_cube_single_field`. A one-time "(CASA's major/minor
     cycle)" parenthetical for orientation is fine.
-- **Formatting**: **Black** (enforced by CI + pre-commit). Don't hand-format.
+- **Formatting**: **Ruff** (enforced by CI + pre-commit). Don't hand-format.
 - **Imports**: prefer **absolute** imports (`from
   astroviper.processing_functions.imaging.residual_cycle import ...`). Relative
   imports appear only as short re-exports in `__init__.py` files. Heavy/optional
@@ -476,8 +472,8 @@ per-variable nodes.
      (`from astroviper.utils.param_docs import shares_param_docs`) and make
      sure the file is listed in `_target_files()` in `utils/param_docs.py`.
   3. Run `python -m astroviper.utils.param_docs sync` to rewrite the source
-     docstrings, then re-run black. `... param_docs check` runs in pre-commit
-     and CI and fails on drift.
+     docstrings, then re-run `ruff format`. `... param_docs check` runs in
+     pre-commit and CI and fails on drift.
   Only the *description* is shared — each function keeps its own
   `name : type, default ...` line, so defaults may differ per layer. This
   applies to **all future work with a repeated API**, not just imaging: a new
@@ -518,7 +514,7 @@ per-variable nodes.
   the same parameter name is used at every layer.
 - Keep the layering: graph code in `distributed_applications/`, I/O in `node_tasks/`,
   science in `processing_functions/`.
-- Run `black`, `pytest`, and rebuild after C++ edits before finishing.
+- Run `ruff format`, `pytest`, and rebuild after C++ edits before finishing.
 
 **Don't**
 - ❌ Add `forcecast` to (or otherwise allow silent copies / dtype conversions of)
@@ -547,7 +543,7 @@ per-variable nodes.
   - Lazy vs eager (`open_`/`load_`): <https://xradio.readthedocs.io/en/latest/development.html#lazy-and-eager-functions>
 - GraphVIPER docs: <https://graphviper.readthedocs.io/en/latest/>
   - Graph building tutorial (map/reduce, `parallel_coords`): <https://graphviper.readthedocs.io/en/latest/graph_building_tutorial.html>
-- pybind11: <https://pybind11.readthedocs.io/> · scikit-build-core: <https://scikit-build-core.readthedocs.io/> · Numba: <https://numba.readthedocs.io/>
+- pybind11: <https://pybind11.readthedocs.io/> · scikit-build-core: <https://scikit-build-core.readthedocs.io/>
 
 ---
 
@@ -674,11 +670,11 @@ via `IterationController`:
   `beam_fit_params_point_spread_function`).
 - Deconvolvers: `deconvolution.py` dispatch → `deconvolvers/hogbom` (C++),
   `deconvolvers/aspclean` (C++).
-- The standard gridder kernel exists in **two interchangeable** forms (the
-  Python wrapper picks via a `cpp_gridder` flag): Numba
-  (`gridders/prolate_spheroidal_grid.py::prolate_spheroidal_grid_jit`) and C++
-  (`gridders/prolate_spheroidal_grid_cpp`). **Keep both in sync** if you change
-  the gridding math.
+- The standard gridder kernel is implemented in C++
+  (`gridders/prolate_spheroidal_grid_cpp`); pure-Python reference copies used
+  as test oracles live in
+  `tests/unit/processing_functions/imaging/gridders/reference_gridders.py`.
+  **Keep the references in sync** if you change the gridding math.
 
 ### 12.5 Imaging I/O conventions — `utils/io.py`
 - `imaging_data_variables_and_dims_double_precision` /
@@ -758,6 +754,6 @@ clean:
   standalone and needs only `libcst`, no package build.) The
   [`imaging-param-docs` pre-commit hook](.pre-commit-config.yaml) and the
   [`param-docs` CI workflow](.github/workflows/param-docs.yml) run `check`. After
-  running `sync`, re-run **black** and commit. To bring a **new** function into
+  running `sync`, re-run **ruff format** and commit. To bring a **new** function into
   the system: decorate it `@shares_param_docs`, add its file to `_target_files()`
   in `utils/param_docs.py` (if not already listed), and run `sync`.
