@@ -77,6 +77,36 @@ def _validate_continuum_parameters(image_params, img_xds):
     return nterms, reference_frequency_hz
 
 
+def _imaging_weights_are_available(
+    ps_xdt,
+    processing_set_data_group_name,
+):
+    """Return True when every selected dataset has accessible imaging weights."""
+    datasets_checked = 0
+
+    for ms_name, ms_xdt in ps_xdt.items():
+        data_groups = ms_xdt.attrs.get("data_groups", {})
+
+        if processing_set_data_group_name not in data_groups:
+            raise KeyError(
+                f"Data group {processing_set_data_group_name!r} is missing "
+                f"from processing-set child {ms_name!r}."
+            )
+
+        datasets_checked += 1
+
+        data_group = data_groups[processing_set_data_group_name]
+        weight_name = data_group.get("weight_imaging")
+
+        if weight_name is None or weight_name not in ms_xdt:
+            return False
+
+    if datasets_checked == 0:
+        raise RuntimeError("No processing-set datasets were available for imaging.")
+
+    return True
+
+
 def _attach_continuum_metadata(
     img_xds,
     *,
@@ -246,32 +276,68 @@ def imaging_setup_continuum_single_field(
         logger.debug("continuum img_xds size " + str(img_xds.nbytes / 1.0e9) + " GB")
 
     # -------------------------------------------------------------
-    # Load imaging weights from memory
+    # Load imaging weights from memory or calculate them
     # -------------------------------------------------------------
+
     start = time.time()
 
-    for ms_name, ms_xdt in ps_xdt.items():
-        data_groups = ms_xdt.attrs.get("data_groups", {})
+    # Determine whether the weights are already available
+    weights_available = _imaging_weights_are_available(
+        ps_xdt,
+        processing_set_data_group_name,
+    )
 
-        if processing_set_data_group_name not in data_groups:
-            raise KeyError(
-                f"Data group {processing_set_data_group_name!r} is missing "
-                f"from processing-set child {ms_name!r}."
+    weights_were_calculated = False
+
+    # if weights are not available, we compute them locally
+    if not weights_available:
+        from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+            calculate_imaging_weights,
+        )
+
+        # calculate weights per channel
+        calculate_imaging_weights(
+            ps_xdt,
+            img_xds,
+            imaging_weights_params=imaging_weights_params,
+            return_weight_density_grid=False,
+            ms_data_group_in_name=processing_set_data_group_name,
+            ms_data_group_out_name=processing_set_data_group_name,
+            ms_data_group_out_modified={
+                "weight_imaging": "WEIGHT_IMAGING",
+            },
+            overwrite=True,
+            processing_function_threads=processing_function_threads,
+        )
+
+        weights_were_calculated = True
+
+    # if they are available, we just load the weights
+    else:
+        for ms_name, ms_xdt in ps_xdt.items():
+            data_groups = ms_xdt.attrs.get("data_groups", {})
+
+            if processing_set_data_group_name not in data_groups:
+                raise KeyError(
+                    f"Data group {processing_set_data_group_name!r} is missing "
+                    f"from processing-set child {ms_name!r}."
+                )
+
+            weight_name = data_groups[processing_set_data_group_name].get(
+                "weight_imaging"
             )
 
-        weight_name = data_groups[processing_set_data_group_name].get("weight_imaging")
+            if weight_name is None:
+                raise KeyError(
+                    f"Imaging weights have not been registered for "
+                    f"processing-set child {ms_name!r}."
+                )
 
-        if weight_name is None:
-            raise KeyError(
-                f"Imaging weights have not been registered for "
-                f"processing-set child {ms_name!r}."
-            )
-
-        if weight_name not in ms_xdt:
-            raise KeyError(
-                f"Registered imaging-weight variable {weight_name!r} is absent "
-                f"from processing-set child {ms_name!r}."
-            )
+            if weight_name not in ms_xdt:
+                raise KeyError(
+                    f"Registered imaging-weight variable {weight_name!r} is absent "
+                    f"from processing-set child {ms_name!r}."
+                )
 
     T_weights = time.time() - start
 
@@ -334,6 +400,7 @@ def imaging_setup_continuum_single_field(
             "nterms": [nterms],
             "n_psf_taylor_terms": [2 * nterms - 1],
             "reference_frequency_hz": [reference_frequency_hz],
+            "imaging_weights_calculated": [weights_were_calculated],
         }
     )
 

@@ -537,9 +537,6 @@ def residual_update_continuum_single_field(
 
     else:
         # Do the empty registrations ... that are needed down the line
-        from astroviper.processing_functions.imaging.calculate_imaging_weights import (
-            calculate_imaging_weights,
-        )
 
         # make_empty_sky_image() supplies the geometry and coordinates, but the
         # xradio image accessor requires this dataset-type marker.

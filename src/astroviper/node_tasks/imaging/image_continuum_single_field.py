@@ -497,26 +497,18 @@ def residual_update_continuum_single_field(
     # Load Imaging Cache
     # =============================================================
 
-    if weight_cache_mapping is None:
-        raise ValueError(
-            "residual_update_continuum_single_field requires the "
-            "once-per-run imaging-weight cache."
+    if weight_cache_mapping is not None:
+        task_id = int(task_id)
+
+        if task_id not in weight_cache_mapping:
+            raise KeyError(f"No cached imaging weights were found for task {task_id}.")
+
+        ps_xdt = _attach_imaging_weights_continuum(
+            ps_xdt,
+            weight_cache_mapping[task_id],
+            processing_set_data_group_name=(processing_set_data_group_name),
+            weight_imaging_name="WEIGHT_IMAGING",
         )
-
-    task_id = int(task_id)
-
-    if task_id not in weight_cache_mapping:
-        raise KeyError(
-            f"No cached imaging weights were found for task {task_id}. "
-            f"Available task IDs are {sorted(weight_cache_mapping)}."
-        )
-
-    ps_xdt = _attach_imaging_weights_continuum(
-        ps_xdt,
-        weight_cache_mapping[task_id],
-        processing_set_data_group_name=(processing_set_data_group_name),
-        weight_imaging_name="WEIGHT_IMAGING",
-    )
 
     # =============================================================
     # Run processing function
@@ -538,6 +530,41 @@ def residual_update_continuum_single_field(
         model_uv_xds=model_uv_xds,
         task_id=task_id,
     )
+
+    # Preserve the first-cycle imaging weights for reuse by later major cycles.
+    # They may have been loaded from the processing set or calculated in setup.
+    weight_datasets = {}
+
+    if is_n_iter_0 and weight_cache_mapping is None:
+        import xarray as xr
+
+        for ms_name, ms_xds in ps_xdt.items():
+            data_group = ms_xds.attrs["data_groups"][processing_set_data_group_name]
+
+            weight_name = data_group.get("weight_imaging")
+
+            if weight_name is None or weight_name not in ms_xds:
+                raise RuntimeError(
+                    f"No imaging weights were available for {ms_name!r} "
+                    "after first-cycle setup."
+                )
+
+            weight_da = ms_xds[weight_name]
+
+            weight_datasets[ms_name] = xr.Dataset(
+                {
+                    weight_name: xr.Variable(
+                        dims=weight_da.dims,
+                        data=weight_da.data,
+                        attrs=weight_da.attrs.copy(),
+                    )
+                },
+                attrs={
+                    "weight_imaging_name": weight_name,
+                    "processing_set_data_group_name": (processing_set_data_group_name),
+                    "task_id": int(task_id),
+                },
+            )
 
     # No output image writing is performed here. The Taylor products stay in
     # memory and flow directly into the GraphViper reduction stage.
@@ -594,10 +621,17 @@ def residual_update_continuum_single_field(
         printer=logger.debug,
     )
 
-    return {
+    return_dict = {
         "image": img_xds,
         "timing_node_tasks": timing_df,
     }
+
+    # If we have computed weights in the first major loop locally, we need to communicate that back to the driver
+    if weight_datasets:
+        return_dict["task_id"] = int(task_id)
+        return_dict["weight_datasets"] = weight_datasets
+
+    return return_dict
 
 
 @shares_param_docs
@@ -1414,11 +1448,20 @@ def continuum_minor_cycle_node(
     model_update_input_params = dict(input_params)
     model_update_input_params.pop("static_xds", None)
 
-    # run the model update
+    # Preserve imaging weights collected during the first major-cycle reduce.
+    weight_cache_mapping = input_data.get("weight_cache_mapping")
+
+    # Run the model update.
     return_dict = model_update_continuum_single_field(
         input_data,
         model_update_input_params,
     )
+
+    # model_update_continuum_single_field constructs its own return dictionary,
+    # so explicitly carry the first-cycle imaging-weight cache through the
+    # append node to the distributed driver.
+    if weight_cache_mapping is not None:
+        return_dict["weight_cache_mapping"] = weight_cache_mapping
 
     return_dict["static_xds"] = static_xds
     return_dict["timing_psf_fit"] = (
@@ -1632,7 +1675,6 @@ def model_update_continuum_single_field(
         model_update_mtmfs_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (
-        IterationController,
         ReturnDict,
         get_calculate_cycle_controls,
         merge_return_dicts,

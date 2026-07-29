@@ -891,6 +891,43 @@ def combine_continuum_chunks(input_data, input_params):
                 f"input[{input_index}]."
             ) from exc
 
+    def _merge_weight_mapping(
+        destination,
+        incoming,
+        *,
+        input_index,
+    ):
+        if not isinstance(incoming, dict):
+            raise TypeError(
+                "Imaging-weight mapping from "
+                f"input[{input_index}] must be a "
+                f"dictionary; received "
+                f"{type(incoming).__name__}."
+            )
+
+        for task_id, weight_datasets in incoming.items():
+            task_id = int(task_id)
+
+            if task_id in destination:
+                raise ValueError(
+                    "Duplicate imaging-weight result for " f"task {task_id}."
+                )
+
+            if not isinstance(weight_datasets, dict):
+                raise TypeError(
+                    "Imaging weights for task "
+                    f"{task_id} must be a dictionary; "
+                    f"received "
+                    f"{type(weight_datasets).__name__}."
+                )
+
+            if not weight_datasets:
+                raise ValueError(
+                    "Imaging-weight mapping for task " f"{task_id} is empty."
+                )
+
+            destination[task_id] = weight_datasets
+
     # ------------------------------------------------------------------
     # Timing and deconvolution metadata
     # ------------------------------------------------------------------
@@ -898,8 +935,17 @@ def combine_continuum_chunks(input_data, input_params):
     # Concatenate timing and deconvolution return dictionaries
     combined_timing = pd.DataFrame()
     deconvolution_dicts = []
+    # Optional: gather imaging weights
+    weight_cache_mapping = {}
 
-    for result in input_data:
+    for input_index, result in enumerate(input_data):
+        if not isinstance(result, dict):
+            raise TypeError(
+                f"input[{input_index}] must be a "
+                f"dictionary; received "
+                f"{type(result).__name__}."
+            )
+
         if "timing_node_tasks" not in result:
             raise KeyError(
                 "Every continuum map/reduce result must contain " "'timing_node_tasks'."
@@ -925,6 +971,32 @@ def combine_continuum_chunks(input_data, input_params):
 
         if "deconvolution" in result:
             deconvolution_dicts.append(result["deconvolution"])
+
+        # Leaf result from a first-major-cycle map task.
+        #
+        # Check for weight_datasets rather than task_id because
+        # ordinary map tasks may also carry a task_id.
+        if "weight_datasets" in result:
+            if "task_id" not in result:
+                raise KeyError(
+                    f"input[{input_index}] contains "
+                    "'weight_datasets' but does not contain "
+                    "'task_id'."
+                )
+
+            _merge_weight_mapping(
+                weight_cache_mapping,
+                {int(result["task_id"]): (result["weight_datasets"])},
+                input_index=input_index,
+            )
+
+        # Partially reduced result from an earlier tree level.
+        if "weight_cache_mapping" in result:
+            _merge_weight_mapping(
+                weight_cache_mapping,
+                result["weight_cache_mapping"],
+                input_index=input_index,
+            )
 
     # ------------------------------------------------------------------
     # Taylor-image reduction
@@ -1028,11 +1100,16 @@ def combine_continuum_chunks(input_data, input_params):
 
         combined_deconvolution = ReturnDict()
 
-    return {
+    return_dict = {
         "image": combined_image,
         "timing_node_tasks": combined_timing,
         "deconvolution": combined_deconvolution,
     }
+
+    if weight_cache_mapping:
+        return_dict["weight_cache_mapping"] = weight_cache_mapping
+
+    return return_dict
 
 
 def combine_continuum_weight_density_chunks(
@@ -1948,20 +2025,25 @@ def image_continuum_single_field(
         )
 
     elif weighting in ("briggs", "uniform"):
-        (
-            weight_return_dict,
-            weight_graph_timings,
-        ) = prepare_continuum_imaging_weights_global(
-            ps_xdt=ps_xdt,
-            node_task_data_mapping=node_task_data_mapping,
-            input_params=weight_preparation_input_params,
-            disk_chunk_sizes=disk_chunk_sizes,
-            processing_set_data_group_name=(processing_set_data_group_name),
-            monitor_resources_seconds=monitor_resources_seconds,
-            task_priorities=task_priorities,
-            reduce_mode=reduce_mode,
-            reduce_n_batch=reduce_n_batch,
-        )
+        if False:
+            (
+                weight_return_dict,
+                weight_graph_timings,
+            ) = prepare_continuum_imaging_weights_global(
+                ps_xdt=ps_xdt,
+                node_task_data_mapping=node_task_data_mapping,
+                input_params=weight_preparation_input_params,
+                disk_chunk_sizes=disk_chunk_sizes,
+                processing_set_data_group_name=(processing_set_data_group_name),
+                monitor_resources_seconds=monitor_resources_seconds,
+                task_priorities=task_priorities,
+                reduce_mode=reduce_mode,
+                reduce_n_batch=reduce_n_batch,
+            )
+        else:
+            weight_return_dict = {}
+            weight_return_dict["weight_cache_mapping"] = None
+            weight_graph_timings = {}
 
     else:
         raise ValueError(
@@ -1969,26 +2051,12 @@ def image_continuum_single_field(
             f"{imaging_weights_params['weighting']!r}."
         )
 
-    # weight_return_dict, weight_graph_timings = prepare_continuum_imaging_weights(
-    #    ps_xdt=ps_xdt,
-    #    node_task_data_mapping=node_task_data_mapping,
-    #    input_params=weight_preparation_input_params,
-    #    disk_chunk_sizes=disk_chunk_sizes,
-    #    processing_set_data_group_name=(processing_set_data_group_name),
-    #    monitor_resources_seconds=monitor_resources_seconds,
-    #    task_priorities=task_priorities,
-    #    reduce_mode=reduce_mode,
-    #    reduce_n_batch=reduce_n_batch,
-    # )
-
     for key, value in weight_graph_timings.items():
         timing_distributed_application[key] = (
             timing_distributed_application.get(key, 0.0) + value
         )
 
     weight_cache_mapping = weight_return_dict["weight_cache_mapping"]
-
-    weight_timing_df = weight_return_dict.get("timing_node_tasks")
 
     # ---------------------------------------------------------
     # Main loop
@@ -2150,6 +2218,28 @@ def image_continuum_single_field(
             processing_function_threads=processing_function_threads,
             fft_backend=fft_backend,
         )
+
+        # if imaging weights are calculated locally at the imaging setup in the first major loop
+        # we need to carry that state over
+        if is_n_iter_0 and weight_cache_mapping is None:
+            weight_cache_mapping = cycle_return_dict.get("weight_cache_mapping")
+
+            if weight_cache_mapping is None:
+                raise RuntimeError(
+                    "The first major cycle did not return the locally calculated "
+                    "imaging-weight cache."
+                )
+
+            expected_task_ids = {int(task_id) for task_id in node_task_data_mapping}
+            actual_task_ids = {int(task_id) for task_id in weight_cache_mapping}
+
+            if actual_task_ids != expected_task_ids:
+                raise RuntimeError(
+                    "The first major cycle returned an incomplete imaging-weight "
+                    "cache: "
+                    f"expected={sorted(expected_task_ids)}, "
+                    f"received={sorted(actual_task_ids)}."
+                )
 
         # Update global iteration control information and break loop if converged
         is_n_iter_0 = False
