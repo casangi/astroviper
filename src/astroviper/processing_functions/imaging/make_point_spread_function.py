@@ -24,10 +24,7 @@ def add_uv_sampling_grid_mosaic(
     ms_data_group_in_name: str = "base",
     image_data_group_in_name: str = "mosaic",
     image_data_group_out_name: str = "mosaic",
-    image_data_group_out_modified: dict = {
-        "uv_sampling": "UV_SAMPLING",
-        "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
-    },
+    image_data_group_out_modified: dict | None = None,
     overwrite: bool = True,
     chan_mode: str = "cube",
     fft_padding: float = 1.2,
@@ -100,6 +97,11 @@ def add_uv_sampling_grid_mosaic(
         mosaic_grid_jit,
     )
 
+    if image_data_group_out_modified is None:
+        image_data_group_out_modified = {
+            "uv_sampling": "UV_SAMPLING",
+            "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
+        }
     _image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
 
     # Read the MS input data group directly; the MS is read-only here.
@@ -202,10 +204,7 @@ def add_uv_sampling_grid_single_field(
     ms_data_group_in_name: str = "base",
     image_data_group_in_name: str = "residual",
     image_data_group_out_name: str = "residual",
-    image_data_group_out_modified: dict = {
-        "uv_sampling": "UV_SAMPLING",
-        "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
-    },
+    image_data_group_out_modified: dict | None = None,
     overwrite: bool = True,
     chan_mode: str = "cube",
     fft_padding: float = 1.2,
@@ -281,6 +280,11 @@ def add_uv_sampling_grid_single_field(
     --------
     add_uv_sampling_grid_mosaic : Mosaic (direction-dependent GCF) variant.
     """
+    if image_data_group_out_modified is None:
+        image_data_group_out_modified = {
+            "uv_sampling": "UV_SAMPLING",
+            "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
+        }
     # Deep copy so that inputs are not modified
     _image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
 
@@ -479,7 +483,7 @@ def make_point_spread_function_single_field(
 
     T_vis_mask = 0.0
     T_uv_sampling_grid = 0.0
-    for ms_name, ms_xdt in ps_xdt.items():
+    for ms_xdt in ps_xdt.values():
         T_start_vis_mask = time.time()
         drop_auto_correlations(ms_xdt)
         T_vis_mask += time.time() - T_start_vis_mask

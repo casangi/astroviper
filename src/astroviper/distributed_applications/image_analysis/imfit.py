@@ -13,7 +13,7 @@ import re
 import warnings
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any
 
 import dask.array as da
 import numpy as np
@@ -38,8 +38,8 @@ from astroviper.utils.sky_coordinates import (
     skycoord_to_lm_from_wcs,
 )
 
-Number = Union[int, float]
-MaskSpec = Optional[Union[str, Path, np.ndarray, xr.DataArray, da.Array]]
+Number = int | float
+MaskSpec = str | Path | np.ndarray | xr.DataArray | da.Array | None
 
 # Angular unit strings recognised when validating beam units.
 _ANGULAR_UNITS = {"rad", "arcsec", "arcmin", "deg"}
@@ -265,7 +265,7 @@ def _normalize_imfit_initial_guesses(
             out = dict(initial_guesses)
             comps = out.get("components")
             if (
-                isinstance(comps, (list, tuple))
+                isinstance(comps, list | tuple)
                 and len(comps) > 0
                 and isinstance(comps[0], Mapping)
             ):
@@ -275,7 +275,7 @@ def _normalize_imfit_initial_guesses(
             return out
         return _convert_world_component_guess_to_pixel(xds, initial_guesses)
     if (
-        isinstance(initial_guesses, (list, tuple))
+        isinstance(initial_guesses, list | tuple)
         and len(initial_guesses) > 0
         and isinstance(initial_guesses[0], Mapping)
     ):
@@ -352,7 +352,7 @@ def _resolve_mask(xds: xr.Dataset, mask_var: MaskSpec) -> MaskSpec | None:
     if mask_var is None:
         return None
 
-    if isinstance(mask_var, (np.ndarray, xr.DataArray, da.Array)):
+    if isinstance(mask_var, np.ndarray | xr.DataArray | da.Array):
         return mask_var
 
     if isinstance(mask_var, Path):

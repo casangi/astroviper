@@ -10,7 +10,6 @@ writes are handled by the node-task layer
 """
 
 import numpy as np
-import toolviper.utils.logger as logger
 import xarray as xr
 from astropy import units as u
 from xradio.image import make_empty_aperture_image

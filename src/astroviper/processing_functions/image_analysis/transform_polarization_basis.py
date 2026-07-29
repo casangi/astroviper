@@ -11,8 +11,6 @@ source of truth for every supported (input basis, output basis) pair.
 so that the output polarization labels are never computed in two places.
 """
 
-from typing import Optional
-
 import numpy as np
 import toolviper.utils.logger as logger
 import xarray as xr
@@ -263,8 +261,6 @@ def transform_polarization_basis(
         new_polarization_basis,
         transformation_matrix,
     )
-
-    from toolviper.utils.memory_management import free_memory, get_rss_gb, memory_setup
 
     for var_name in img_xds.data_vars:
         # if "type" in img_xds[var_name].attrs:

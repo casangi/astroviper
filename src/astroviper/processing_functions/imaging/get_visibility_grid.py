@@ -3,7 +3,6 @@ import copy
 import numpy as np
 import xarray as xr
 
-from astroviper.processing_functions.imaging.gridders.mosaic_grid import mosaic_grid_jit
 from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
@@ -16,9 +15,7 @@ def get_visibility_grid_single_field(
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
     ms_data_group_out_name: str = "model",
-    ms_data_group_out_modified: dict = {
-        "correlated_data": "VISIBILITY_MODEL",
-    },
+    ms_data_group_out_modified: dict | None = None,
     image_data_group_in_name: str = "model",
     overwrite: bool = True,
     chan_mode: str = "cube",
@@ -109,6 +106,10 @@ def get_visibility_grid_single_field(
     astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp.prolate_spheroidal_degrid :
         C++ standard separable degridding kernel.
     """
+    if ms_data_group_out_modified is None:
+        ms_data_group_out_modified = {
+            "correlated_data": "VISIBILITY_MODEL",
+        }
     _ms_data_group_out_modified = copy.deepcopy(ms_data_group_out_modified)
 
     # Resolve the image input and output data groups, guarding against
@@ -125,14 +126,12 @@ def get_visibility_grid_single_field(
 
     n_chan = img_xds.sizes["frequency"]
     if chan_mode == "cube":
-        n_imag_chan = n_chan
         frequency_map = (np.arange(0, n_chan)).astype(int)
     else:  # continuum
-        n_imag_chan = 1  # Single continuum image collapsed across all channels.
+        # Single continuum image collapsed across all channels.
         frequency_map = (np.zeros(n_chan)).astype(int)
 
     # Time Map #Currently not implemented.
-    n_imag_time = 1
     n_time = ms_xds.sizes["time"]
     time_map = (np.zeros(n_time)).astype(int)
 

@@ -17,10 +17,7 @@ def add_visibility_grid_mosaic(
     ms_data_group_in_name: str = "base",
     image_data_group_in_name: str = "mosaic",
     image_data_group_out_name: str = "mosaic",
-    image_data_group_out_modified: dict = {
-        "visibility": "VISIBILITY",
-        "visibility_normalization": "VISIBILITY_NORMALIZATION",
-    },
+    image_data_group_out_modified: dict | None = None,
     overwrite: bool = True,
     chan_mode: str = "cube",
     fft_padding: float = 1.2,
@@ -96,6 +93,11 @@ def add_visibility_grid_mosaic(
     add_visibility_grid_single_field : Non-mosaic (standard gridder) variant.
     mosaic_grid_jit : Mosaic gridding kernel (pure Python; currently unmaintained).
     """
+    if image_data_group_out_modified is None:
+        image_data_group_out_modified = {
+            "visibility": "VISIBILITY",
+            "visibility_normalization": "VISIBILITY_NORMALIZATION",
+        }
     _image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
 
     # Read the MS input data group directly; the MS is read-only here.
@@ -111,7 +113,6 @@ def add_visibility_grid_mosaic(
         overwrite=overwrite,
     )
 
-    weight_imaging = ms_xds[ms_data_group_in["weight_imaging"]].values
     n_chan = img_xds.sizes["frequency"]
 
     if chan_mode == "cube":
@@ -196,10 +197,7 @@ def add_visibility_grid_single_field(
     ms_data_group_in_name: str = "base",
     image_data_group_in_name: str = "residual",
     image_data_group_out_name: str = "residual",
-    image_data_group_out_modified: dict = {
-        "visibility": "VISIBILITY",
-        "visibility_normalization": "VISIBILITY_NORMALIZATION",
-    },
+    image_data_group_out_modified: dict | None = None,
     overwrite: bool = True,
     chan_mode: str = "cube",
     fft_padding: float = 1.2,
@@ -278,6 +276,11 @@ def add_visibility_grid_single_field(
     astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp.prolate_spheroidal_grid :
         C++ standard separable gridding kernel.
     """
+    if image_data_group_out_modified is None:
+        image_data_group_out_modified = {
+            "visibility": "VISIBILITY",
+            "visibility_normalization": "VISIBILITY_NORMALIZATION",
+        }
     _image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
 
     # Read the MS input data group directly; the MS is read-only here.

@@ -18,8 +18,6 @@ the pure-Python ones do not.
 
 from __future__ import annotations
 
-import logging
-
 import numpy as np
 import pytest
 import xarray as xr
@@ -31,7 +29,6 @@ from astroviper.processing_functions.imaging.deconvolution import (
     deconvolve,
     get_phase_center,
     hogbom_clean,
-    progress_callback,
 )
 from astroviper.processing_functions.imaging.utils.return_dict import ReturnDict
 

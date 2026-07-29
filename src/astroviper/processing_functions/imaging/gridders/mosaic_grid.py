@@ -171,7 +171,6 @@ def mosaic_grid_numpy_wrap(
     grid_params,
 ):
     # print('imaging_weight ', imaging_weight.shape)
-    import time
 
     n_chan = imaging_weight.shape[2]
     if grid_params["chan_mode"] == "cube":
@@ -244,7 +243,6 @@ def mosaic_psf_grid_numpy_wrap(
     grid_params,
 ):
     # print('imaging_weight ', imaging_weight.shape)
-    import time
 
     n_chan = imaging_weight.shape[2]
     if grid_params["chan_mode"] == "cube":
@@ -343,17 +341,10 @@ def mosaic_grid_jit(
     n_u = n_uv[0]
     n_v = n_uv[1]
 
-    u_center = uv_center[0]
-    v_center = uv_center[1]
-
     max_support_center = np.max(weight_support)
 
     conv_v_center = conv_kernel.shape[-1] // 2
     conv_u_center = conv_kernel.shape[-2] // 2
-
-    conv_size = np.array(conv_kernel.shape[-2:])
-
-    # print('conv_size',conv_size)
 
     # print('sizes ',conv_kernel.shape, conv_u_center, conv_v_center)
 

@@ -19,7 +19,6 @@ import pytest
 import xarray as xr
 
 from astroviper.processing_functions.imaging.restore import (
-    FWHM_factor,
     _elliptical_gaussian_kernel,
     restore_image,
 )
@@ -242,7 +241,6 @@ class TestRestoreImage:
         np.testing.assert_array_equal(xds["SKY_MODEL"].values, model0)
 
     def test_nan_beam_falls_back_to_residual(self):
-        delta = 1.0e-3
         rng = np.random.default_rng(1)
         residual = rng.standard_normal((1, 1, 2, 32, 32)).astype(np.float32)
         model = np.zeros((1, 1, 2, 32, 32), dtype=np.float32)

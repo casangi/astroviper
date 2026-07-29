@@ -1,11 +1,9 @@
 import copy
 import warnings
-from typing import List
 
 import astropy.units as u
 import numpy as np
 import xarray
-import xradio
 from astropy.coordinates import EarthLocation, SkyCoord, SpectralCoord
 from astropy.time import Time
 from scipy.interpolate import interp1d
@@ -20,7 +18,7 @@ np.set_printoptions(precision=12)
 
 def ms_spectral_frame_conversion(
     ms: xarray.core.datatree.DataTree,
-    freqrange: list[float] = [],
+    freqrange: list[float] | None = None,
     outframe: str = "LSRK",
 ) -> xarray.core.datatree.DataTree:
     """
@@ -40,18 +38,12 @@ def ms_spectral_frame_conversion(
     ms v4 xds
 
     """
+    if freqrange is None:
+        freqrange = []
 
     # outms = ms.copy(inherit=False, deep=True)
     outms = copy.deepcopy(ms)
     # need to do selection over frequency here
-    pc = ms.xr_ms.get_field_and_source_xds().FIELD_PHASE_CENTER_DIRECTION
-    phcen = SkyCoord(
-        pc.sel(sky_dir_label="ra").data * u.Unit(pc.units),
-        pc.sel(sky_dir_label="dec").data * u.Unit(pc.units),
-        frame=pc.frame,
-    )
-
-    locATt = get_all_itrs_loc(ms)
     obsfreq = ms.frequency.data * u.Unit(ms.frequency.attrs["units"])
     newFreqInFrame = outframe_freq(outms, outframe)
     ##outMSFreq = outms.frequency.assign_coords(frequency=newFreqInFrame) buggy
@@ -278,11 +270,6 @@ def interp_channels2(data, weights, datafreq, interpfreq, method="linear"):
         kwargs={"bounds_error": False, "fill_value": 0.0},
     )
     weights["frequency"] = selfreq
-    newweights = weights.interp(
-        frequency=interpfreq,
-        method=method,
-        kwargs={"fill_value": "extrapolate"},
-    )
     # newfreq = wgtdata.frequency
     # data["frequency"] = newfreq
     # print("FREQ ", selfreq, "\n", newwgtdata["frequency"])

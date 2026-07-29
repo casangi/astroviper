@@ -6,8 +6,6 @@ import toolviper.utils.logger as logger
 import xarray as xr
 
 # from memory_profiler import profile
-from toolviper.utils.memory_management import get_rss_gb
-
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_correcting_image_1D,
 )
@@ -64,10 +62,10 @@ def _fft_module(backend):
 
             pyfftw.interfaces.cache.enable()
             return _pyfftw_fft
-        except ImportError:
+        except ImportError as err:
             raise ImportError(
                 "pyfftw is not installed. Install it with: pip install pyfftw"
-            )
+            ) from err
     raise ValueError(
         f"Unknown FFT backend '{backend}'. Supported values: 'scipy', 'pyfftw'."
     )
@@ -79,12 +77,9 @@ def ifft_norm_img_xds(
     image_params,
     image_data_group_in_name="single_field",
     image_data_group_out_name="single_field",
-    image_data_group_out_modified={
-        "sky": "SKY_RESIDUAL",
-        "point_spread_function": "POINT_SPREAD_FUNCTION",
-    },
+    image_data_group_out_modified=None,
     overwrite=True,
-    image_data_variables_keep=[],
+    image_data_variables_keep=None,
     processing_function_threads=1,
     fft_backend="pyfftw",
     complex_dtype=np.complex128,
@@ -173,6 +168,13 @@ def ifft_norm_img_xds(
     The FFT step adds at most one extra 2-D float64 plane per iteration,
     which for a 12 000 × 12 000 grid is ≈ 1.15 GB.
     """
+    if image_data_group_out_modified is None:
+        image_data_group_out_modified = {
+            "sky": "SKY_RESIDUAL",
+            "point_spread_function": "POINT_SPREAD_FUNCTION",
+        }
+    if image_data_variables_keep is None:
+        image_data_variables_keep = []
 
     _image_params = image_params  # no mutation below; deep copy not needed
 
@@ -282,14 +284,12 @@ def fft_norm_img_xds(
     image_params,
     image_data_group_in_name="model",
     image_data_group_out_name="model",
-    image_data_group_out_modified={
-        "visibility": "VISIBILITY_MODEL",
-    },
+    image_data_group_out_modified=None,
     overwrite=True,
-    image_data_variables_keep=[],
+    image_data_variables_keep=None,
     processing_function_threads=1,
     fft_backend="pyfftw",
-    data_variables_to_process=["sky"],
+    data_variables_to_process=None,
     complex_dtype=np.complex128,
 ):
     """Forward-transform a model sky image into a model UV grid.
@@ -302,6 +302,14 @@ def fft_norm_img_xds(
     (the degridder widens each grid cell to ``complex128`` for the
     accumulation), so only the image-domain grid is affected here.
     """
+    if image_data_group_out_modified is None:
+        image_data_group_out_modified = {
+            "visibility": "VISIBILITY_MODEL",
+        }
+    if image_data_variables_keep is None:
+        image_data_variables_keep = []
+    if data_variables_to_process is None:
+        data_variables_to_process = ["sky"]
 
     _image_params = image_params  # no mutation below; deep copy not needed
 
@@ -329,7 +337,6 @@ def fft_norm_img_xds(
         raw_grid = img_xds[grid_var_name].values  # (time, freq, pol, u, v)
 
         n_time, n_freq, n_pol = raw_grid.shape[:3]
-        image_size = np.asarray(_image_params["image_size"])
 
         out_name = data_group_out[fft_pair[data_variable]]
         if out_name not in img_xds:

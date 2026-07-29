@@ -164,7 +164,6 @@ def plot_task_resource_usage(source, max_task_lines=200, save_prefix=None):
         ``{"cpu": ax, "memory": ax, "io": ax}`` (values are None for series
         that were not recorded).
     """
-    import matplotlib.pyplot as plt
 
     df = _as_timing_frame(source)
     axes = {}
@@ -403,7 +402,9 @@ def assign_task_stream_lanes(tasks):
             lane_of = {key: ln for ln, key in enumerate(first.index)}
             t.loc[idx, "lane"] = [
                 lane_of[(p, th)]
-                for p, th in zip(sub["process_pid"], sub["thread_native_id"])
+                for p, th in zip(
+                    sub["process_pid"], sub["thread_native_id"], strict=False
+                )
             ]
             n_lanes_h = len(lane_of)
         else:
@@ -422,7 +423,9 @@ def assign_task_stream_lanes(tasks):
             n_lanes_h = len(busy_until)
         lane_offset[h] = offsets
         offsets += n_lanes_h
-    t["row"] = [lane_offset[h] + ln for h, ln in zip(t["hostname"], t["lane"])]
+    t["row"] = [
+        lane_offset[h] + ln for h, ln in zip(t["hostname"], t["lane"], strict=False)
+    ]
     return t, hosts, offsets
 
 
@@ -515,7 +518,10 @@ rect[data-i]:hover { stroke: #000; stroke-width: 0.8px; }
 
     # ---- utilization panel ----
     r_max = max(float(np.max(running)), float(n_workers))
-    uy = lambda v: top + util_h - v / (1.08 * r_max) * util_h
+
+    def uy(v):
+        return top + util_h - v / (1.08 * r_max) * util_h
+
     pts = [f"{X(ev_t[0]):.1f},{uy(0):.1f}"]
     for i in range(len(ev_t)):  # step-after curve
         y = f"{uy(running[i]):.1f}"

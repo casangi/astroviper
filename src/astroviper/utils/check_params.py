@@ -1,6 +1,3 @@
-import toolviper.utils.logger as logger
-
-
 def check_params(
     parm_dict,
     string_key,
@@ -74,7 +71,7 @@ def check_params(
                         return False
 
                     if acceptable_data is not None:
-                        if not (parm_dict[string_key][i] in acceptable_data):
+                        if parm_dict[string_key][i] not in acceptable_data:
                             print(
                                 "######### ERROR: Invalid",
                                 string_key,
@@ -97,8 +94,6 @@ def check_params(
                             )
                             return False
         elif dict in acceptable_data_types:
-            params_passed = True
-
             if default is None:
                 print(
                     "######### ERROR:Dictionary parameters must have a default. Please report bug."
@@ -107,15 +102,12 @@ def check_params(
             # print('is a dict',default)
             for default_element in default:
                 if default_element in parm_dict[string_key]:
-                    if not (
-                        check_params(
-                            parm_dict[string_key],
-                            default_element,
-                            [type(default[default_element])],
-                            default=default[default_element],
-                        )
-                    ):
-                        params_passed = False
+                    check_params(
+                        parm_dict[string_key],
+                        default_element,
+                        [type(default[default_element])],
+                        default=default[default_element],
+                    )
                 else:
                     parm_dict[string_key][default_element] = default[default_element]
         else:
@@ -133,7 +125,7 @@ def check_params(
                 return False
 
             if acceptable_data is not None:
-                if not (parm_dict[string_key] in acceptable_data):
+                if parm_dict[string_key] not in acceptable_data:
                     print(
                         "######### ERROR: Invalid",
                         string_key,
@@ -183,7 +175,7 @@ def _check_dataset(vis_dataset, data_variable_name):
         ``True`` if the variable is present, ``False`` otherwise.
     """
     try:
-        temp = vis_dataset[data_variable_name]
+        _ = vis_dataset[data_variable_name]
     except KeyError:
         print(
             "######### ERROR Data array ",

@@ -52,7 +52,7 @@ def airy_disk(freq_chan, pol, pb_params, grid_params):
     airy_disk = np.zeros(airy_disk_size)
 
     for i, (dish_diameter, blockage_diameter) in enumerate(
-        zip(list_dish_diameters, list_blockage_diameters)
+        zip(list_dish_diameters, list_blockage_diameters, strict=False)
     ):
         aperture = dish_diameter / 2
         x_grid, y_grid = np.meshgrid(x, y, indexing="ij")
@@ -118,7 +118,7 @@ def casa_airy_disk(freq_chan, pol, pb_params, grid_params):
     airy_disk = np.zeros(airy_disk_size)
 
     for i, (dish_diameter, blockage_diameter) in enumerate(
-        zip(list_dish_diameters, list_blockage_diameters)
+        zip(list_dish_diameters, list_blockage_diameters, strict=False)
     ):
         aperture = dish_diameter / 2
         x_grid, y_grid = np.meshgrid(x, y, indexing="ij")
@@ -209,7 +209,7 @@ def airy_disk_rorder(freq_chan, pol, pb_params, grid_params):
     airy_disk = np.zeros(airy_disk_size)
 
     for i, (dish_diameter, blockage_diameter) in enumerate(
-        zip(list_dish_diameters, list_blockage_diameters)
+        zip(list_dish_diameters, list_blockage_diameters, strict=False)
     ):
         aperture = dish_diameter / 2
         x_grid, y_grid = np.meshgrid(x, y, indexing="ij")
@@ -320,7 +320,7 @@ def airy_disk_rorder_v2(freq_chan, pol, pb_params, grid_params, dtype=None):
     r_2d = np.hypot(x[:, np.newaxis], y[np.newaxis, :])  # (N0, N1)
 
     for i, (dish_diameter, blockage_diameter) in enumerate(
-        zip(list_dish_diameters, list_blockage_diameters)
+        zip(list_dish_diameters, list_blockage_diameters, strict=False)
     ):
         aperture = dish_diameter / 2
 
@@ -413,7 +413,7 @@ def casa_airy_disk_rorder(freq_chan, pol, pb_params, grid_params):
     airy_disk = np.zeros(airy_disk_size)
 
     for i, (dish_diameter, blockage_diameter) in enumerate(
-        zip(list_dish_diameters, list_blockage_diameters)
+        zip(list_dish_diameters, list_blockage_diameters, strict=False)
     ):
         aperture = dish_diameter / 2
         x_grid, y_grid = np.meshgrid(x, y, indexing="ij")

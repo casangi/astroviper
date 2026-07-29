@@ -199,7 +199,7 @@ class TestClean:
         dirty[40, 50] = 7.0
         model = np.zeros((ny, nx))
         resid = dirty.copy()
-        res = aspclean.clean(
+        aspclean.clean(
             resid,
             psf,
             model,
@@ -345,7 +345,6 @@ class TestCube:
     def _make_cube(self, nt, nf, npol, ny, nx, dtype=np.float64):
         psf = np.zeros((nt, nf, npol, ny, nx), dtype)
         resid = np.zeros((nt, nf, npol, ny, nx), dtype)
-        rng = np.random.default_rng(3)
         single_psf = _centered_psf(nx, ny, 2.0, dtype)
         for t in range(nt):
             for f in range(nf):

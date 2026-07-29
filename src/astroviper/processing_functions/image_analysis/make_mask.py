@@ -12,7 +12,7 @@ def make_mask(
     primary_beam_limit: float,
     image_data_group_in_name="image",
     image_data_group_out_name="image",
-    image_data_group_out_modified={"mask": "MASK"},
+    image_data_group_out_modified=None,
     combine_mask=False,
     overwrite=False,
 ):
@@ -78,6 +78,8 @@ def make_mask(
     To use ``combine_mask=True``, ``overwrite`` must also be ``True`` so
     that the existing mask variable can be replaced.
     """
+    if image_data_group_out_modified is None:
+        image_data_group_out_modified = {"mask": "MASK"}
 
     # Resolve and validate the input/output data groups.  The helper checks
     # that image_data_group_in_name exists in img_xds.attrs["data_groups"],

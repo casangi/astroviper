@@ -9,7 +9,6 @@ required) and check the contract of the produced ``PRIMARY_BEAM`` variable.
 
 import numpy as np
 import pytest
-import xarray as xr
 
 from astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric import (
     airy_disk_rorder,

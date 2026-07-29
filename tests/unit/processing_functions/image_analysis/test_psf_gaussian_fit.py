@@ -275,12 +275,6 @@ def test_psf_gaussian_fit_orientation():
         measured_angle = -np.rad2deg(
             float(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, 2])
         )
-        measured_bmaj = float(
-            result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, 0]
-        )
-        measured_bmin = float(
-            result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, 1]
-        )
         # Allow for 180-degree ambiguity and some tolerance
         measured_angle -= 90
         if measured_angle < -90:

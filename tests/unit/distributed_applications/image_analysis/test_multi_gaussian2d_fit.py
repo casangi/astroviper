@@ -15,11 +15,10 @@ Run:
 
 from __future__ import annotations
 
-import builtins
-import importlib
 import math
 import os
 import sys
+import types
 import unittest
 
 import dask.array as da  # type: ignore
@@ -2060,7 +2059,7 @@ class TestAPIHelpers:
         with pytest.raises((TypeError, ValueError, KeyError)):
             mg._normalize_initial_guesses(z, n, bad_sigma, None, None)
 
-    def test_init_components_list_len_mismatch_raises(self) -> None:
+    def test_init_components_list_len_mismatch_raises_covers_221_223(self) -> None:
         """Verify that component lists inside initial_guesses must contain exactly n_components entries."""
         z = np.zeros((16, 16), float)
         n = 2

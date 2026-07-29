@@ -43,7 +43,7 @@ def is_scalar_number(value: Any) -> bool:
     ``"10deg"``. This helper exists so callers can keep numeric inputs on the
     direct float path while routing string-like values through unit-aware parsers.
     """
-    return np.isscalar(value) and not isinstance(value, (str, bytes))
+    return np.isscalar(value) and not isinstance(value, str | bytes)
 
 
 def frame_prefers_hourangle(frame: str) -> bool:

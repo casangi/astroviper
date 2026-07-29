@@ -14,12 +14,10 @@ requires-python = ">=3.11,<3.14"
 
 # ✅ Core runtime dependencies must live here
 dependencies = [
-  "graphviper>=0.0.45",
+  "graphviper>=0.0.51",
   "numpy",
-  "xradio[zarr]>=1.2.2",
   "opt_einsum",
   "pyfftw",
-  "graphviz",
   "gdown"
 ]
 
@@ -37,7 +35,8 @@ interactive = [
   "ipython",
   "jupyter-client",
   "bokeh",
-  "holoviews"
+  "holoviews",
+  "graphviz",
 ]
 
 docs = [
@@ -73,8 +72,8 @@ all = [
   "pandoc",
   "pre-commit",
   "nbstripout",
-  "memory_profiler",
-  "bokeh"
+  "bokeh",
+  "graphviz",
 ]
 
 [build-system]
@@ -120,11 +119,21 @@ where = ["src"]
 
 [tool.ruff]
 target-version = "py311"
+# Stale manual backup (candidate for deletion) -- not worth linting.
+extend-exclude = ["tests/component/untitled folder 2"]
 
 [tool.ruff.lint]
-# Ruff replaces isort + black: the formatter handles layout and the "I" rules
-# enforce import sorting. General lint rules are not (yet) enabled.
-select = ["I"]
+# Ruff replaces isort + black (layout via `ruff format`, import sorting via the
+# "I" rules) and also lints for real defects and best practices:
+#   E4/E7/E9 -- pycodestyle errors (import placement, statement syntax, runtime)
+#   F        -- pyflakes: undefined names, unused imports, unused variables
+#   B        -- flake8-bugbear: likely bugs (mutable defaults, loop captures, ...)
+#   UP       -- pyupgrade: outdated syntax/typing (mirrors the pyupgrade hook)
+select = ["E4", "E7", "E9", "F", "B", "UP", "I"]
+# E741 (ambiguous variable name l/I/O): l and m are the standard radio-astronomy
+# direction-cosine coordinate names (see AGENTS.md section 8) and must keep
+# those names.
+ignore = ["E741"]
 
 [tool.pytest.ini_options]
 # Silence noisy, non-actionable zarr V3 warnings across the whole test suite.

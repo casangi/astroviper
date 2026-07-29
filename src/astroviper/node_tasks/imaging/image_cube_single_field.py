@@ -135,6 +135,7 @@ def image_cube_single_field(
     input_data=None,
     graph_mode=True,
     output_shard_channels=None,
+    output_image_format="zarr",
     task_time_kill_switch_seconds=None,
 ):
     """Image one frequency chunk of a single-field cube and write it to disk.
@@ -273,6 +274,13 @@ def image_cube_single_field(
         pre-allocated Zarr store with
         :func:`~astroviper.utils.io.write_result_chunk_to_disk_using_zarr`.  If
         ``False`` the whole chunk image is written with ``to_zarr``.
+    output_image_format : str, optional
+        On-disk format of the image store this task writes into: ``"zarr"``
+        (default) or ``"fits"``.  With ``"fits"`` the chunk is ``pwrite``-en
+        directly into the pre-created XRADIO-conformant FITS files
+        (:func:`~astroviper.node_tasks.imaging.utils.write_result_chunk_to_fits_skunk_works`;
+        the driver created them with
+        :func:`~astroviper.node_tasks.imaging.utils.create_empty_fits_images`).
 
     Returns
     -------
@@ -420,7 +428,23 @@ def image_cube_single_field(
     start = time.time()
     write_exc = None
     try:
-        if graph_mode and skunk_works and output_shard_channels:
+        if graph_mode and output_image_format == "fits":
+            # FITS performance path: pwrite this chunk's contiguous channel
+            # block (and its BEAMS-table rows) directly into the pre-created
+            # XRADIO-conformant FITS files -- disjoint byte ranges across
+            # tasks, no locking, no file creation.
+            from astroviper.node_tasks.imaging.utils import (
+                write_result_chunk_to_fits_skunk_works,
+            )
+
+            write_result_chunk_to_fits_skunk_works(
+                image_store,
+                image_data_variables_keep,
+                task_coords,
+                img_xds,
+                processing_function_threads=processing_function_threads,
+            )
+        elif graph_mode and skunk_works and output_shard_channels:
             # Sharded performance path: write this chunk's inner-chunk blob(s) into
             # shared, pre-created Zarr v3 shard files (far fewer files -> metadata-server
             # relief; the "single parallel file" pattern).

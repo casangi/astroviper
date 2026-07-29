@@ -1,5 +1,4 @@
 import copy
-from typing import Dict, Union
 
 import numpy as np
 import toolviper.utils.logger as logger
@@ -84,7 +83,7 @@ def calculate_imaging_weights(
     imaging_weights_params: dict,
     ms_data_group_in_name: str = "base",
     ms_data_group_out_name: str = "imaging",
-    ms_data_group_out_modified: dict = {"weight_imaging": "WEIGHT_IMAGING"},
+    ms_data_group_out_modified: dict | None = None,
     overwrite: bool = False,
     single_precision_gridding: bool = False,
     return_weight_density_grid: bool = False,
@@ -186,6 +185,8 @@ def calculate_imaging_weights(
     ...     ms_data_group_in_name="base",
     ... )
     """
+    if ms_data_group_out_modified is None:
+        ms_data_group_out_modified = {"weight_imaging": "WEIGHT_IMAGING"}
     _imaging_weights_params = copy.deepcopy(imaging_weights_params)
     _ms_data_group_out_modified = copy.deepcopy(ms_data_group_out_modified)
     assert check_imaging_weights_params(_imaging_weights_params), (
@@ -215,7 +216,7 @@ def calculate_imaging_weights(
             "no rescaling of data weights)."
         )
 
-        for ms_name, ms_xdt in ps_xdt.items():
+        for ms_xdt in ps_xdt.values():
             data_weight = ms_xdt[ms_data_group_in["weight"]].values
             data_weight[ms_xdt[ms_data_group_in["flag"]] == 1] = np.nan
             data_weight = _equalize_parallel_hand_weights(
@@ -253,7 +254,7 @@ def calculate_imaging_weights(
     sum_weight = np.zeros((n_imag_chan, 1), dtype=np.double)
 
     # Grid the weights.
-    for ms_name, ms_xdt in ps_xdt.items():
+    for ms_xdt in ps_xdt.values():
         uvw = ms_xdt[ms_data_group_in["uvw"]].values
         data_weight = ms_xdt[ms_data_group_in["weight"]].values
         data_weight[ms_xdt[ms_data_group_in["flag"]] == 1] = np.nan
@@ -279,7 +280,7 @@ def calculate_imaging_weights(
     )  # 2 x chan x pol
 
     # Degrid the weights.
-    for ms_name, ms_xdt in ps_xdt.items():
+    for ms_xdt in ps_xdt.values():
         uvw = ms_xdt[ms_data_group_in["uvw"]].values
         data_weight = ms_xdt[ms_data_group_in["weight"]].values
         data_weight[ms_xdt[ms_data_group_in["flag"]] == 1] = np.nan

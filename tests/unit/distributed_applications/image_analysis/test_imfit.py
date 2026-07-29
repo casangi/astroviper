@@ -12,7 +12,7 @@ from astropy.coordinates import Angle
 
 from astroviper.distributed_applications.image_analysis.imfit import imfit
 from astroviper.distributed_applications.model.component_models import make_gauss2d
-from astroviper.utils._gaussian_math import FWHM2SIG, SIG2FWHM
+from astroviper.utils._gaussian_math import FWHM2SIG
 
 # ---------------------------------------------------------------------------
 # Synthetic xradio-style Dataset builder
@@ -695,7 +695,7 @@ class TestImfitInputValidation:
         )
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            ds = imfit(xds, n_components=1, mask_var="NONEXISTENT", beam_var=None)
+            imfit(xds, n_components=1, mask_var="NONEXISTENT", beam_var=None)
             mask_warnings = [x for x in w if "NONEXISTENT" in str(x.message)]
             assert len(mask_warnings) >= 1
 

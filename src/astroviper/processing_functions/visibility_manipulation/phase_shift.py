@@ -2,7 +2,6 @@ import copy
 
 # import numba  # numba disabled (dependency removed)
 import numpy as np
-import scipy
 import xarray as xr
 
 # from numba import jit  # numba disabled (dependency removed)
@@ -49,7 +48,7 @@ def phase_shift_vis_ds(ms_xds, shift_params, sel_params):
     """
 
     # from graphviper.parameter_checking.check_params import check_sel_params
-    from astroviper.utils.check_params import check_params, check_sel_params
+    from astroviper.utils.check_params import check_sel_params
 
     _sel_params = copy.deepcopy(sel_params)
     _shift_params = copy.deepcopy(shift_params)
@@ -179,9 +178,8 @@ def directional_cosine(phase_direction_in_radians):
 
 def check_shift_params(shift_params):
     # from graphviper.parameter_checking.check_params import check_params
-    import numbers
 
-    from astroviper.utils.check_params import check_params, check_sel_params
+    from astroviper.utils.check_params import check_params
 
     params_passed = True
 

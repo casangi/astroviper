@@ -71,7 +71,7 @@ def restore_image(
     image_data_group_in_residual_name: str = "residual",
     image_data_group_in_model_name: str = "model",
     image_data_group_out_restore_name: str = "restored",
-    image_data_group_out_modified: dict = {"sky": "SKY_RESTORED"},
+    image_data_group_out_modified: dict | None = None,
     beam_fit_params_key: str = "beam_fit_params_point_spread_function",
     beam_polarization_index: int = 0,
     processing_function_threads: int = 1,
@@ -160,6 +160,9 @@ def restore_image(
     import time
 
     import pandas as pd
+
+    if image_data_group_out_modified is None:
+        image_data_group_out_modified = {"sky": "SKY_RESTORED"}
 
     start = time.time()
 

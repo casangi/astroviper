@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import math
 import os
-import re
 from pathlib import Path
 
 import dask.array as da
@@ -219,7 +218,7 @@ class TestExpressions:
         roi = select_mask(da, "circle[[32pix,32pix], 10pix]")
         bad = select_mask(da, "box[[0pix,0pix],[10pix,63pix]]")
         expr = "roi & -bad"  # using '-' instead of '~'
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             select_mask(da, select=expr, mask_source={"roi": roi, "bad": bad})
 
     def test_expression_unknown_name_keyerror_lists_available(self) -> None:
@@ -720,7 +719,6 @@ class TestSmartSplitPairs:
         ann = f"annulus[[{cx}pix,{cy}pix], [ {r1}pix, {r2}pix]]   "
         m_ann = select_mask(da, select=ann)
         m_outer = select_mask(da, select=f"circle[[{cx}pix,{cy}pix], {r2}pix]")
-        m_inner = select_mask(da, select=f"circle[[{cx}pix,{cy}pix], {r1}pix]")
         # Annulus includes the inner boundary (>= r1), while (outer & ~inner)
         # excludes it. Instead of equality, assert subset relations:
         # 1) Annulus is a subset of the outer circle
@@ -993,14 +991,11 @@ class TestReturnKinds:
         assert out.dtype == bool and out.shape == (ny, nx)
         # We don't assert exact chunking (implementation-defined fallback), only that it succeeded
 
-    def test_dataarray_numpy_else_branch_creation_attached_and_printed(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_dataarray_numpy_else_branch_creation_attached_and_printed(self) -> None:
         """
         Cover the else-branch in _coerce_return_kind for return_kind='dataarray-numpy':
             da_out = xr.DataArray(arr, dims=dims, coords=coords)
             if creation is not None:
-                print("********** covered *********")
                 da_out = da_out.assign_attrs({"creation": creation})
         Use ndarray `data` and ndarray `select` so the aligned mask is a NumPy array
         (not an xarray.DataArray), forcing the targeted branch.
@@ -1013,8 +1008,6 @@ class TestReturnKinds:
         out = select_mask(
             data, select=mask_np, return_kind="dataarray-numpy", creation_hint=hint
         )
-        # Assert printed marker from the covered branch
-        captured = capsys.readouterr()
         # Validate return object and attached creation attribute
         assert isinstance(out, xr.DataArray)
         assert out.dtype == bool and out.shape == (ny, nx)
@@ -1279,11 +1272,6 @@ class TestCombineWithCreationAPI:
             a, "|", b, return_kind="dataarray-dask", dask_chunks=chunks
         )
         assert isinstance(out, xr.DataArray) and hasattr(out.data, "chunks")
-        # chunks may be normalized into tuples-of-tuples by dask
-        got = tuple(
-            sum(([int(c) for c in ch] if isinstance(ch, tuple) else [int(ch)],), [])
-            for ch in out.data.chunks
-        )
         # Flatten each axis chunking and compare the sizes set (normalize expected to tuple)
         exp0 = tuple(
             [chunks[0]] * (ny // chunks[0])

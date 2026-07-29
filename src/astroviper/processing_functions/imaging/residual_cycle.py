@@ -80,11 +80,9 @@ def imaging_setup_single_field(
     return_df : pandas.DataFrame
         One-row timing frame for the setup step.
     """
-    import time
 
     import numpy as np
     import toolviper.utils.logger as logger
-    import xarray as xr
 
     from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
         point_spread_function_gaussian_fit,
@@ -127,7 +125,7 @@ def imaging_setup_single_field(
     # Imaging weights are computed once, on the unmasked data (the auto-
     # correlations are only dropped while gridding the UV-sampling grid below).
     T_start_weight = time.time()
-    data_group_out = calculate_imaging_weights(
+    calculate_imaging_weights(
         ps_xdt,
         img_xds,
         imaging_weights_params=imaging_weights_params,
@@ -284,11 +282,9 @@ def residual_cycle_cube_single_field(
         ``T_residual_vis``, ``T_grid``, ``T_fft_norm``, ``T_transform_pol`` and
         the fine-grained gridding timings).
     """
-    import time
 
     import numpy as np
     import toolviper.utils.logger as logger
-    import xarray as xr
 
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
@@ -305,10 +301,8 @@ def residual_cycle_cube_single_field(
         image_data_variables_keep = []
 
     if single_precision_image:
-        float_dtype = np.float32
         complex_dtype = np.complex64
     else:
-        float_dtype = np.float64
         complex_dtype = np.complex128
 
     ps_data_group_name = processing_set_data_group_name
@@ -472,9 +466,7 @@ def make_visibility_model_single_field(
     img_xds,
     cgk_1D,
     ms_data_group_out_name="model",
-    ms_data_group_out_modified={
-        "correlated_data": "VISIBILITY_MODEL",
-    },
+    ms_data_group_out_modified=None,
     image_data_group_in_name="model",
     processing_function_threads=1,
     fft_padding=1.2,
@@ -508,7 +500,11 @@ def make_visibility_model_single_field(
     fft_padding : float, optional
         Padding factor used during degridding.  Default ``1.2``.
     """
-    for ms_name, ms_xdt in ps_xdt.items():
+    if ms_data_group_out_modified is None:
+        ms_data_group_out_modified = {
+            "correlated_data": "VISIBILITY_MODEL",
+        }
+    for ms_xdt in ps_xdt.values():
         get_visibility_grid_single_field(
             ms_xdt,
             cgk_1D,
@@ -552,12 +548,8 @@ def calculate_residual_visibilities(
     ms_data_group_in_observed : str, optional
         Input data group holding the observed visibilities.  Default ``"base"``.
     """
-    from astroviper.utils.data_group_tools import (
-        create_data_groups_in_and_out,
-        modify_data_groups_xds,
-    )
 
-    for ms_name, ms_xdt in ps_xdt.items():
+    for ms_xdt in ps_xdt.values():
         ms_data_group_model = ms_xdt.attrs["data_groups"][ms_data_group_in_model]
 
         ms_data_group_observed, ms_data_group_residual = create_data_groups_in_and_out(

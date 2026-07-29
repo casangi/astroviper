@@ -4,17 +4,19 @@ warnings.filterwarnings(
     "ignore", message="The NumPy module was reloaded", category=UserWarning
 )
 
-import unittest
-from unittest.mock import patch
+# noqa reason (E402): the filterwarnings call above must run before these imports
+# so the numpy-reload UserWarning emitted at import time is suppressed.
+import unittest  # noqa: E402
+from unittest.mock import patch  # noqa: E402
 
-import dask.array as da
-import numpy as np
-import xarray as xr
+import dask.array as da  # noqa: E402
+import numpy as np  # noqa: E402
+import xarray as xr  # noqa: E402
 
-import astroviper.distributed_applications.model.component_models as cm
+import astroviper.distributed_applications.model.component_models as cm  # noqa: E402
 
 # Adjust import if your package layout differs
-from astroviper.distributed_applications.model import (
+from astroviper.distributed_applications.model import (  # noqa: E402
     make_disk,
     make_gauss2d,
     make_pt_sources,

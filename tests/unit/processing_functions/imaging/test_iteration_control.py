@@ -14,8 +14,6 @@ Tests cover:
 
 import unittest
 
-import numpy as np
-
 from astroviper.processing_functions.imaging.utils.iteration_control import (  # Stop codes; Utility functions; Main class
     MAJOR_CONTINUE,
     MAJOR_CYCLE_LIMIT,
@@ -23,8 +21,6 @@ from astroviper.processing_functions.imaging.utils.iteration_control import (  #
     MAJOR_THRESHOLD,
     MAJOR_ZERO_MASK,
     MINOR_CONTINUE,
-    MINOR_ITER_LIMIT,
-    MINOR_THRESHOLD,
     IterationController,
     StopCode,
     get_iterations_done_from_returndict,
@@ -1553,7 +1549,9 @@ class TestFullMajorCycleWorkflow(unittest.TestCase):
         residuals = [1.0, 0.5, 0.08]  # Last one below threshold
         iterations_per_cycle = [100, 100, 50]
 
-        for cycle, (residual, iters) in enumerate(zip(residuals, iterations_per_cycle)):
+        for cycle, (residual, iters) in enumerate(
+            zip(residuals, iterations_per_cycle, strict=False)
+        ):
             # Create ReturnDict for this cycle
             rd = ReturnDict()
             rd.add(

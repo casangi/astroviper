@@ -44,13 +44,16 @@ import re
 import warnings
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, List, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Literal
 
 import dask.array as da
 import numpy as np
 import xarray as xr
 
-ArrayLike = Union[np.ndarray, xr.DataArray]
+if TYPE_CHECKING:
+    from astropy.coordinates import SkyCoord
+
+ArrayLike = np.ndarray | xr.DataArray
 __all__ = ["select_mask", "apply_select", "combine_with_creation"]
 
 
@@ -157,7 +160,7 @@ def select_mask(
     if select is None:
         return _all_true_mask_like(data)
     # Boolean/array-like (NumPy, xarray, or Dask) → align then coerce
-    if isinstance(select, (np.ndarray, xr.DataArray, da.Array)):
+    if isinstance(select, np.ndarray | xr.DataArray | da.Array):
         # Optional provenance auto-merge for DataArray inputs created by composition.
         creation_str = creation_hint
         if (
@@ -188,7 +191,7 @@ def select_mask(
             )
 
     # String/Path: file → load as CRTF; else treat as text.
-    if isinstance(select, (str, Path)):
+    if isinstance(select, str | Path):
         s_file = _maybe_read_crtf_from_path(select)
         if s_file is not None:
             # If the user provided a file, it's CRTF by definition; parse directly.
@@ -1679,7 +1682,7 @@ def _rasterize_shape_world(
             verts_off.lon.rad - 2 * math.pi,
             verts_off.lon.rad,
         )
-        pts = list(zip(verts_lon.tolist(), verts_off.lat.rad.tolist()))
+        pts = list(zip(verts_lon.tolist(), verts_off.lat.rad.tolist(), strict=False))
         mask_2d = _point_in_poly(lon, lat, pts)
 
     else:
@@ -2542,7 +2545,10 @@ def combine_with_creation(
         if combined.shape == tmpl.shape and combined.dims != tmpl.dims:
             try:
                 combined = combined.rename(
-                    {old: new for old, new in zip(combined.dims, tmpl.dims)}
+                    {
+                        old: new
+                        for old, new in zip(combined.dims, tmpl.dims, strict=False)
+                    }
                 )
             except Exception:
                 try:

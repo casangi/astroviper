@@ -123,7 +123,9 @@ class FeatherShared:
             else:
                 xds_int = xds
 
-        for xds, outfile in zip([xds_sd, xds_int], [cls.sd_zarr, cls.int_zarr]):
+        for xds, outfile in zip(
+            [xds_sd, xds_int], [cls.sd_zarr, cls.int_zarr], strict=False
+        ):
             cls._rm(outfile)
             write_image(xds, outfile, "zarr")
 
@@ -251,7 +253,9 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
                 update()
                 download(cls.model_key)
             except Exception as e:
-                raise unittest.SkipTest(f"Could not download '{cls.model_key}': {e}")
+                raise unittest.SkipTest(
+                    f"Could not download '{cls.model_key}': {e}"
+                ) from e
 
         # Make the failure obvious if the download location differs
         if not os.path.exists(cls.model_image):
@@ -287,7 +291,6 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
         model_plane = model_xds.SKY.isel(frequency=0)
         fsum = float(feather_plane.sum().compute().values)
         msum = float(model_plane.sum().compute().values)
-        rel = fsum / msum - 1.0
         self.assertAlmostEqual(
             fsum, 21276.0859375, delta=1e-2, msg=f"feather sum got {fsum}"
         )

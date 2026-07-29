@@ -1,7 +1,7 @@
 # src/astroviper/__init__.py
 from __future__ import annotations
 
-from importlib import import_module, metadata
+from importlib import metadata
 
 from astroviper.node_tasks import imaging
 

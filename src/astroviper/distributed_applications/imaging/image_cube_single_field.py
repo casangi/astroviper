@@ -1,9 +1,7 @@
 import os
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any
 
-import numpy as np
 import toolviper.utils.parameter
-import xarray as xr
 import zarr
 from numcodecs import Blosc
 from xradio.image import make_empty_sky_image
@@ -94,16 +92,16 @@ def image_cube_single_field(
     gridder="prolate_spheroidal",
     deconvolver="hogbom",
     instrument_polarization_basis: str = "linear",
-    scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],
+    scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],  # noqa: B006 - param.json schema requires list/str (not nullable); never mutated
     field_name: str = None,
-    image_data_variables_keep: list[str] = [
+    image_data_variables_keep: list[str] = [  # noqa: B006 - param.json schema requires a list (not nullable); never mutated
         "sky_deconvolved",
         "sky_residual",
         "sky_model",
         "point_spread_function",
         "primary_beam",
     ],
-    compressor=Blosc(cname="lz4", clevel=5),
+    compressor=None,
     processing_set_data_group_name: str = "corrected",
     single_precision_image: bool = True,
     thread_info: dict = None,
@@ -125,6 +123,7 @@ def image_cube_single_field(
     reduce_mode: str = "tree",
     reduce_n_batch: int = 2,
     output_shard_channels: int | None = None,
+    output_image_format: str = "zarr",
     task_time_kill_switch_seconds: float | None = None,
     monitor_resources_seconds: float | None = None,
 ):  # -> Tuple[xr.Dataset, ReturnDict]:
@@ -298,6 +297,18 @@ def image_cube_single_field(
         parallel file" pattern), cutting the output file count by up to
         ``output_shard_channels``x and greatly relieving the parallel-filesystem
         metadata server. ``None`` (default) keeps one file per channel.
+    output_image_format : str
+        On-disk format of the output image: ``"zarr"`` (default) or ``"fits"``
+        (requires ``skunk_works=True``; incompatible with
+        ``output_shard_channels``). With ``"fits"`` the driver pre-creates one
+        XRADIO-conformant FITS file per kept image variable
+        (``<image_store>/<VARIABLE>.fits``, readable with
+        :func:`xradio.image.open_image`) with a sparse full-cube data area, and
+        each node task ``pwrite``\\ s its frequency chunk -- a contiguous byte
+        range, since frequency is the slowest-varying FITS axis -- directly
+        into the shared files (no locking, no file creation). Kept
+        beam-fit-params variables become CASA-style multi-beam ``BEAMS`` table
+        extensions. uv-domain / complex variables cannot be written to FITS.
     task_time_kill_switch_seconds : float, optional
         Watchdog: if a node task's total wall time exceeds this many seconds, it
         writes an error log with that task's full timing breakdown and then raises,
@@ -331,34 +342,28 @@ def image_cube_single_field(
           grand total ``T_total``.
     """
 
-    import os
     import time
 
     import dask
-    import numpy as np
     import toolviper.utils.logger as logger
-    import xarray as xr
-    import zarr
     from graphviper.graph_tools import (
-        generate_airflow_workflow,
         generate_dask_workflow,
         map,
         processes_with_mpi,
         reduce,
     )
     from graphviper.graph_tools.coordinate_utils import make_parallel_coord
-    from xradio.image import make_empty_sky_image, write_image
+    from xradio.image import write_image
     from xradio.measurement_set import open_processing_set
 
     from astroviper.utils.data_group_tools import modify_data_groups_xds
-    from astroviper.utils.data_partitioning import (
-        calculate_data_chunking,
-        get_thread_info,
-    )
     from astroviper.utils.io import (
         create_empty_data_variables_on_disk,
         image_data_groups_for_kept_variables,
     )
+
+    if compressor is None:
+        compressor = Blosc(cname="lz4", clevel=5)
 
     assert memory_mode == "in_memory", (
         "Currently only in_memory is supported for memory_mode is implemented."
@@ -373,6 +378,21 @@ def image_cube_single_field(
             "output_shard_channels requires skunk_works=True (sharded output is "
             "written by the concurrent direct-blob writer)."
         )
+
+    # FITS output is written by the concurrent direct-pwrite (skunk_works) FITS
+    # writer into files pre-created by this driver; the standard write path has
+    # no FITS support, and Zarr sharding does not apply to FITS files.
+    if output_image_format == "fits":
+        if not skunk_works:
+            raise ValueError(
+                "output_image_format='fits' requires skunk_works=True (FITS "
+                "output is written by the concurrent direct-pwrite writer)."
+            )
+        if output_shard_channels is not None:
+            raise ValueError(
+                "output_shard_channels does not apply to FITS output "
+                "(output_image_format='fits')."
+            )
 
     # When restoring, the restored sky must be created on disk and written, so
     # ensure it is in the keep list (without mutating the caller's list).
@@ -415,7 +435,13 @@ def image_cube_single_field(
         )
 
     start = time.time()
-    write_image(img_xds, imagename=image_store, out_format="zarr", overwrite=overwrite)
+    if output_image_format == "zarr":
+        write_image(
+            img_xds, imagename=image_store, out_format="zarr", overwrite=overwrite
+        )
+    # For FITS output the empty files (headers + sparse data areas) are created
+    # after the processing set is opened, so the TELESCOP keyword can be read
+    # from it.
     timing_distributed_application["T_write_empty_image"] = time.time() - start
 
     # Determine number of chunks
@@ -442,16 +468,17 @@ def image_cube_single_field(
     # Add nan images (these will be overwritten with the actual image data but this ensures the coordinates and dtypes are correct and allows for lazy writing of the data)
     # create_empty_data_varable_on_disk(zarr_store, dv_names, dims, shape, chunk, variable_dtype, compressor)
     start = time.time()
-    create_empty_data_variables_on_disk(
-        image_store,
-        image_data_variables_keep,
-        shape_dict=img_xds.sizes,
-        parallel_coords=parallel_coords,
-        compressor=compressor,
-        double_precision=not single_precision_image,
-        data_variable_definitions="imaging",
-        shard_channels=output_shard_channels,
-    )
+    if output_image_format == "zarr":
+        create_empty_data_variables_on_disk(
+            image_store,
+            image_data_variables_keep,
+            shape_dict=img_xds.sizes,
+            parallel_coords=parallel_coords,
+            compressor=compressor,
+            double_precision=not single_precision_image,
+            data_variable_definitions="imaging",
+            shard_channels=output_shard_channels,
+        )
     timing_distributed_application["T_create_empty_data_variables"] = (
         time.time() - start
     )
@@ -485,6 +512,7 @@ def image_cube_single_field(
     input_params["restore"] = restore
     input_params["skunk_works"] = skunk_works
     input_params["output_shard_channels"] = output_shard_channels
+    input_params["output_image_format"] = output_image_format
     input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
 
     from graphviper.graph_tools.coordinate_utils import (
@@ -505,6 +533,32 @@ def image_cube_single_field(
         input_params["data_group"] = first_ms.ds.attrs["data_groups"][
             processing_set_data_group_name
         ]
+
+    # FITS output: pre-create one XRADIO-conformant FITS file per kept image
+    # variable (complete header + sparse full-cube data area + zero-filled
+    # BEAMS tables) so the node tasks only pwrite disjoint byte ranges. Done
+    # here -- after the processing set is open -- so TELESCOP can be read from
+    # it; timed into the same slot the Zarr path uses for its empty variables.
+    if output_image_format == "fits":
+        from astroviper.node_tasks.imaging.utils import create_empty_fits_images
+
+        start = time.time()
+        first_ms = next(iter(ps_xdt.values()))
+        telescope_name = (
+            first_ms.ds.attrs.get("observation_info", {}).get("telescope_name")
+            or "UNKNOWN"
+        )
+        create_empty_fits_images(
+            image_store,
+            img_xds,
+            image_data_variables_keep,
+            double_precision=not single_precision_image,
+            telescope_name=telescope_name,
+            overwrite=overwrite,
+        )
+        timing_distributed_application["T_create_empty_data_variables"] += (
+            time.time() - start
+        )
 
     start = time.time()
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
@@ -616,7 +670,8 @@ def image_cube_single_field(
         )
 
     start = time.time()
-    zarr.consolidate_metadata(image_store)
+    if output_image_format == "zarr":
+        zarr.consolidate_metadata(image_store)
     timing_distributed_application["T_consolidate_metadata"] = time.time() - start
 
     timing_distributed_application["T_total"] = time.time() - application_start

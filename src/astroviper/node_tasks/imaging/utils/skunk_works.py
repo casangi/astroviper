@@ -1295,7 +1295,7 @@ def record_shard_ost_map(zarr_store, array_names, out_path=None):
         )
         return None
 
-    for row, path in zip(rows, abs_paths):
+    for row, path in zip(rows, abs_paths, strict=False):
         info = stripe_info.get(path, {})
         osts = info.get("ost_indices", [])
         row["ost_index"] = osts[0] if osts else None

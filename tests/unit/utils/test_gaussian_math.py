@@ -170,16 +170,8 @@ class TestDeconvolveGaussianWithErrors:
         eps=1e-5,
     ):
         """Compute deconvolved parameter derivatives via finite differences."""
-        base = deconvolve_gaussian(
-            src_fwhm_maj,
-            src_fwhm_min,
-            src_pa,
-            beam_fwhm_maj,
-            beam_fwhm_min,
-            beam_pa,
-        )
         jac = np.zeros((3, 3))  # [output_idx, input_idx]
-        for j, (arr, idx) in enumerate([("maj", 0), ("min", 1), ("pa", 2)]):
+        for j, (_arr, _idx) in enumerate([("maj", 0), ("min", 1), ("pa", 2)]):
             params = [src_fwhm_maj, src_fwhm_min, src_pa]
             params[j] = params[j] + eps
             plus = deconvolve_gaussian(

@@ -1,7 +1,5 @@
 """Unit tests for :func:`next_fft_friendly_size`."""
 
-import pytest
-
 from astroviper.processing_functions.imaging.utils.fft_sizing import (
     next_fft_friendly_size,
 )
