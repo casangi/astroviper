@@ -114,8 +114,12 @@ def restore_image(
     beyond the single restored cube.  The convolution is a real FFT
     (``scipy.fft.rfft2`` / ``irfft2``) at the image dtype (single-precision
     images stay single precision), and the clean beam's FFT is computed once per
-    frequency and reused for every polarization.  Planes whose model is entirely
-    zero skip the convolution (the restored plane is just the residual).
+    frequency and reused for every polarization (the beam plane itself is freed
+    as soon as it is transformed).  Per polarization at most two extra planes
+    are live at once -- the model spectrum, multiplied by the beam in place,
+    and the inverse-transform output, with the residual added into the restored
+    cube without a further temporary.  Planes whose model is entirely zero skip
+    the convolution (the restored plane is just the residual).
 
     Parameters
     ----------
@@ -251,8 +255,10 @@ def restore_image(
                 ny, nx, major / delta, minor / delta, pa, residual.dtype
             )
             # FFT of the centred clean beam (centre shifted to the origin),
-            # computed once and reused for every polarization.
+            # computed once and reused for every polarization. Only the
+            # transform is used below, so the kernel plane is dropped now.
             kernel_ft = scipy.fft.rfft2(scipy.fft.ifftshift(kernel), workers=workers)
+            del kernel
 
             for pp in range(npol):
                 model_plane = model[tt, ff, pp]
@@ -260,12 +266,18 @@ def restore_image(
                     # Nothing cleaned in this plane: restored == residual.
                     restored[tt, ff, pp] = residual[tt, ff, pp]
                     continue
+                # At most two extra planes are live at any point: the model
+                # spectrum (beam applied in place) and the irfft2 output; the
+                # residual is added into the restored cube without a temporary.
+                model_ft = scipy.fft.rfft2(model_plane, workers=workers)
+                np.multiply(model_ft, kernel_ft, out=model_ft)
                 convolved_model = scipy.fft.irfft2(
-                    scipy.fft.rfft2(model_plane, workers=workers) * kernel_ft,
-                    s=(ny, nx),
-                    workers=workers,
+                    model_ft, s=(ny, nx), workers=workers
                 )
-                restored[tt, ff, pp] = convolved_model + residual[tt, ff, pp]
+                del model_ft
+                restored[tt, ff, pp] = convolved_model
+                del convolved_model
+                restored[tt, ff, pp] += residual[tt, ff, pp]
 
     # Store the restored sky, preserving the residual's dims, coords and attrs.
     img_xds[restored_sky_name] = residual_da.copy(data=restored)
