@@ -42,10 +42,12 @@ def _elliptical_gaussian_kernel(ny, nx, major_fwhm_pix, minor_fwhm_pix, pa, dtyp
     numpy.ndarray
         ``(ny, nx)`` unit-peak elliptical Gaussian.
     """
-    # Pixel offsets from the centre along l (axis 0) and m (axis 1). Computed in
-    # float64 for accuracy, broadcast to a 2-D grid, then cast to the image dtype.
-    di = (np.arange(ny, dtype=np.float64) - ny // 2)[:, None]
-    dj = (np.arange(nx, dtype=np.float64) - nx // 2)[None, :]
+    # Work at the image dtype (never below float32): pixel offsets are exact in
+    # float32 up to 2^24 and the Gaussian argument only needs ~7 significant
+    # digits, while full-plane float64 temporaries cost ~1 GB each at 11 250².
+    work_dtype = np.result_type(dtype, np.float32)
+    di = (np.arange(ny, dtype=work_dtype) - ny // 2)[:, None]
+    dj = (np.arange(nx, dtype=work_dtype) - nx // 2)[None, :]
 
     # point_spread_function_gaussian_fit measures the position angle from the m
     # axis (axis 1) towards the l axis (axis 0), the complement of the angle in
@@ -53,17 +55,29 @@ def _elliptical_gaussian_kernel(ny, nx, major_fwhm_pix, minor_fwhm_pix, pa, dtyp
     # this the major axis lies along (sin pa, -cos pa) and a beam built from a
     # fitted [major, minor, pa] reproduces that fit.
     theta = 0.5 * np.pi - pa
-    cos_t = np.cos(theta)
-    sin_t = np.sin(theta)
-    # Project onto the beam's principal axes (major along (cos theta, -sin theta)).
+    # Python-float scalars: NumPy-2 promotion keeps work_dtype planes at
+    # work_dtype for python-float operands, but a np.float64 scalar would
+    # silently promote every float32 plane back to float64.
+    cos_t = float(np.cos(theta))
+    sin_t = float(np.sin(theta))
+    sigma_major = float(major_fwhm_pix) / FWHM_factor
+    sigma_minor = float(minor_fwhm_pix) / FWHM_factor
+
+    # Project onto the beam's principal axes (major along (cos theta, -sin theta))
+    # and accumulate the Gaussian argument in place, so peak scratch is two
+    # (ny, nx) planes at work_dtype (the broadcasts of di/dj are the only
+    # full-plane allocations).
     u = di * cos_t - dj * sin_t  # major-axis coordinate (pixels)
+    u /= sigma_major
+    u *= u
     v = di * sin_t + dj * cos_t  # minor-axis coordinate (pixels)
-
-    sigma_major = major_fwhm_pix / FWHM_factor
-    sigma_minor = minor_fwhm_pix / FWHM_factor
-
-    kernel = np.exp(-0.5 * ((u / sigma_major) ** 2 + (v / sigma_minor) ** 2))
-    return kernel.astype(dtype, copy=False)
+    v /= sigma_minor
+    v *= v
+    u += v
+    del v
+    u *= -0.5
+    np.exp(u, out=u)
+    return u.astype(dtype, copy=False)
 
 
 def restore_image(
