@@ -1,7 +1,7 @@
 [project]
 name = "astroviper"
-version = "0.0.34"
-description = "Astro Visibility and Image Parallel Execution Reduction"
+version = "0.0.37"
+description = "Astro Visibility and Image Parallel Execution Reduction "
 authors = [{ name = "Jan-Willem Steeb", email = "jsteeb@nrao.edu"},
     {name = "Dave Mehringer", email="dmehring@nrao.edu"},
     {name = "Kumar Golap", email="kgolap@nrao.edu"},
@@ -14,10 +14,11 @@ requires-python = ">=3.11,<3.14"
 
 # ✅ Core runtime dependencies must live here
 dependencies = [
-  "graphviper>=0.0.36",
-  "numpy>=1.20.0",
-  "xradio[zarr]>=1.1.0",
-  "numba",
+  "graphviper>=0.0.51",
+  "numpy",
+  "opt_einsum",
+  "pyfftw",
+  "gdown"
 ]
 
 [project.optional-dependencies]
@@ -34,7 +35,8 @@ interactive = [
   "ipython",
   "jupyter-client",
   "bokeh",
-  "holoviews"
+  "holoviews",
+  "graphviz",
 ]
 
 docs = [
@@ -70,6 +72,8 @@ all = [
   "pandoc",
   "pre-commit",
   "nbstripout",
+  "bokeh",
+  "graphviz",
 ]
 
 [build-system]
@@ -79,7 +83,7 @@ requires = [
   "pybind11>=2.10.0",
   "setuptools",
   "wheel",
-  "numpy>=1.20.0"
+  "numpy"
 ]
 build-backend = "scikit_build_core.build"
 
@@ -89,6 +93,18 @@ build-dir = "build/{wheel_tag}"
 wheel.packages = ["src/astroviper"]
 
 [tool.scikit-build.cmake]
+# CMAKE_BUILD_TYPE for the C++ extensions. This is the lever for optimization /
+# debug flags: the shared cmake/AstroviperPybind.cmake intentionally leaves
+# opt-level to CMake instead of hand-rolling -O3. The reproducibility/standard
+# flags (-std=c++23, -ffp-contract, -stdlib=libc++, threads) apply regardless.
+#   Release        -> -O3 -DNDEBUG          (normal/CI; asserts off)
+#   Debug          -> -g (i.e. -O0)         (gdb/lldb; asserts + pybind checks on)
+#   RelWithDebInfo -> -O2 -g -DNDEBUG       (profiling with symbols)
+#   MinSizeRel     -> -Os -DNDEBUG          (smallest binary)
+# Override for one build without editing this file (Release stays the default):
+#   pip install -e . --no-build-isolation --config-settings=cmake.build-type=Debug
+#   SKBUILD_CMAKE_BUILD_TYPE=Debug pip install -e . --no-build-isolation
+# If a switch behaves oddly (stale cache), delete build/ and reinstall.
 build-type = "Release"
 
 [tool.scikit-build.build]
@@ -100,3 +116,44 @@ PYBIND11_FINDPYTHON = "ON"
 # (Optional) This block is ignored by scikit-build-core; safe to delete.
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+# Stale files (candidates for deletion) -- not worth linting. The example
+# notebook star-imports from the removed astroviper.core.* layout and cannot run.
+extend-exclude = [
+    "tests/component/untitled folder 2",
+    "examples/demo_standard_gridder.ipynb",
+]
+
+[tool.ruff.lint]
+# Ruff replaces isort + black (layout via `ruff format`, import sorting via the
+# "I" rules) and also lints for real defects and best practices:
+#   E4/E7/E9 -- pycodestyle errors (import placement, statement syntax, runtime)
+#   F        -- pyflakes: undefined names, unused imports, unused variables
+#   B        -- flake8-bugbear: likely bugs (mutable defaults, loop captures, ...)
+#   UP       -- pyupgrade: outdated syntax/typing (mirrors the pyupgrade hook)
+select = ["E4", "E7", "E9", "F", "B", "UP", "I"]
+# E741 (ambiguous variable name l/I/O): l and m are the standard radio-astronomy
+# direction-cosine coordinate names (see AGENTS.md section 8) and must keep
+# those names.
+ignore = ["E741"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tutorial notebooks introduce imports cell-by-cell as the narrative needs
+# them; that is deliberate style, not an error.
+"*.ipynb" = ["E402"]
+
+[tool.pytest.ini_options]
+# Silence noisy, non-actionable zarr V3 warnings across the whole test suite.
+# pytest's per-test warning capture resets import-time filters, so these must be
+# set here rather than only in src/astroviper/__init__.py (which covers
+# non-pytest runtime use). The first is matched by its specific category; the
+# second is matched by message because its category (zarr.errors.ZarrUserWarning)
+# is a broad base class we do not want to silence wholesale.
+filterwarnings = [
+    # Fixed-length UTF string dtypes (XRADIO Zarr stores) have no stable V3 spec.
+    "ignore::zarr.errors.UnstableSpecificationWarning",
+    # Consolidated metadata is not yet part of the Zarr V3 spec.
+    "ignore:Consolidated metadata is currently not part in the Zarr format 3 specification",
+]

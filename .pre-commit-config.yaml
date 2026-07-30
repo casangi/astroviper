@@ -30,22 +30,28 @@ repos:
       - id: absolufy-imports
         name: absolufy-imports
 
-  -   repo: https://github.com/pycqa/isort
-      rev: 5.13.2
-      hooks:
-      - id: isort
-        args: ["--filter-files"]
-        language_version: python3
-
-  -   repo: https://github.com/psf/black
-      rev: 22.8.0
-      hooks:
-      - id: black
-        language_version: python3
-        args:
-          - --target-version=py311
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.12.5
+    hooks:
+      - id: ruff-check        # linter + import sorting (see [tool.ruff.lint])
+        args: [--fix]
+      - id: ruff-format       # formatter (black replacement)
 
   - repo: https://github.com/kynan/nbstripout
     rev: 0.8.1
     hooks:
       - id: nbstripout
+
+  # Verify the shared imaging-parameter docstrings are in sync with the central
+  # registry (src/astroviper/processing_functions/imaging/_param_docs.py).
+  # Runs the tool as a standalone script so only libcst is needed (no package
+  # build / C++ compile); fix drift with `python -m astroviper.utils.param_docs sync`.
+  - repo: local
+    hooks:
+      - id: imaging-param-docs
+        name: imaging parameter docstring sync check
+        entry: python src/astroviper/utils/param_docs.py check
+        language: system
+        pass_filenames: false
+        files: >-
+          ^src/astroviper/(distributed_applications|node_tasks|processing_functions)/imaging/.*\.py$|^src/astroviper/utils/param_docs\.py$

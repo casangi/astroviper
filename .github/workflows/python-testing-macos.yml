@@ -14,3 +14,6 @@ on:
 jobs:
   call-testing-macos:
     uses: nrao/gh-actions-templates-public/.github/workflows/python-testing-macos-template.yml@main
+    with:
+      # astroviper's C++ extensions require C++23 (Apple Clang >= 16).
+      xcode-version: "26"

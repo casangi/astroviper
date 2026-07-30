@@ -1,9 +1,6 @@
-from xradio.measurement_set.processing_set_xdt import ProcessingSetXdt
-from xradio.measurement_set.measurement_set_xdt import MeasurementSetXdt
-
-import dask
 import numpy as np
 import xarray as xa
+from xradio.measurement_set.measurement_set_xdt import MeasurementSetXdt
 
 
 # I am surprised this is not some kind of standard function, but the
@@ -62,13 +59,7 @@ def square_up_last_dimension(v):
     return v2
 
 
-def square_up_last_dimension(v):
-    s = v.shape[:-1] + (2, 2)
-    v2 = np.reshape(v, s)
-    return v2
-
-
-class SingleFringeJones(object):
+class SingleFringeJones:
     def __init__(self, q):
         """ """
         self.q = q

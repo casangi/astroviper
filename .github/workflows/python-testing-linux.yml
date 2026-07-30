@@ -17,5 +17,7 @@ jobs:
     with:
       cov_project: "astroviper"
       test-path: "tests/"
+      # astroviper's C++ extensions require C++23 (GCC >= 14).
+      gcc-version: "14"
     secrets:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

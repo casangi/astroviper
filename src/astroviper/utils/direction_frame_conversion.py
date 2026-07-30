@@ -1,13 +1,12 @@
-from astropy.coordinates import SkyCoord, EarthLocation, AltAz
+import astropy.units as u
+import numpy as np
+from astropy.coordinates import AltAz, EarthLocation, SkyCoord
 from astropy.coordinates.erfa_astrom import (
-    erfa_astrom,
     ErfaAstrom,
     ErfaAstromInterpolator,
+    erfa_astrom,
 )
 from astropy.time import Time
-import astropy.units as u
-
-import numpy as np
 from scipy.interpolate import CubicSpline
 
 _SUPPORTED = ("ICRS", "ALTAZ")
