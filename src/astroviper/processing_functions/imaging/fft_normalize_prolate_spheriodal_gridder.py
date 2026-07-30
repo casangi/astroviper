@@ -165,8 +165,10 @@ def ifft_norm_img_xds(
     -----
     Peak memory is dominated by the raw UV grid
     (``time × frequency × polarization × u × v × 16`` bytes for complex128).
-    The FFT step adds at most one extra 2-D float64 plane per iteration,
-    which for a 12 000 × 12 000 grid is ≈ 1.15 GB.
+    When the grid is not in ``image_data_variables_keep`` (the common case)
+    each plane is transformed in place (``overwrite_input=True``); keeping the
+    grid adds one extra 2-D complex plane per iteration for the defensive
+    copy, ≈ 1.15 GB for a 12 000 × 12 000 complex128 grid.
     """
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {
@@ -242,6 +244,12 @@ def ifft_norm_img_xds(
         out_arr = img_xds[out_name].values  # numpy view for in-place writes
         img_xds[out_name].attrs["type"] = data_variable
 
+        # Each grid plane is read exactly once and the grid variable is
+        # deleted right after this loop unless explicitly kept, so the iFFT
+        # may destroy the plane in place and skip its defensive copy
+        # (≈ 1.5 GB per plane at 13 500² complex64).
+        grid_discarded = data_variable_out not in image_data_variables_keep
+
         for t in range(n_time):
             for f in range(n_freq):
                 for p in range(n_pol):
@@ -249,6 +257,7 @@ def ifft_norm_img_xds(
                         np.asarray(raw_grid[t, f, p], dtype=complex_dtype),
                         processing_function_threads=processing_function_threads,
                         fft_backend=fft_backend,
+                        overwrite_input=grid_discarded,
                     )
                     # In-place ops below preserve `plane`'s precision (the float64
                     # kernel / normalization are broadcast without upcasting).
@@ -434,6 +443,7 @@ def ifft_uv_to_lm(
     fft_plane_dims=(-2, -1),
     processing_function_threads=1,
     fft_backend="pyfftw",
+    overwrite_input=False,
 ):
     """Apply a 2-D inverse FFT to transform a UV grid to a sky-plane image.
 
@@ -465,6 +475,12 @@ def ifft_uv_to_lm(
         Number of threads passed to the FFT backend.  Default is ``1``.
     fft_backend : {"scipy", "pyfftw"}, optional
         FFT library to use.  Default is ``"pyfftw"``.
+    overwrite_input : bool, optional
+        If ``True`` the function may reuse ``grid_2d``'s buffer as scratch
+        space, destroying its contents (on the even-sized fast path this
+        skips the one plane-sized defensive copy — ≈ 1.5 GB for a
+        13 500 × 13 500 complex64 grid).  The caller must not use ``grid_2d``
+        after the call.  Default ``False`` (input preserved).
 
     Returns
     -------
@@ -486,7 +502,8 @@ def ifft_uv_to_lm(
         # Fold the ifftshift/fftshift into checkerboard multiplies (lower peak
         # memory, fewer passes): fftshift(ifft2(ifftshift(x))) == cb*ifft2(cb*x).
         # The padded grid axes are even (next_fft_friendly_size(even=True)).
-        work = grid_2d.copy()  # own the buffer; do not mutate the caller's grid
+        # Own the buffer unless the caller ceded it via overwrite_input.
+        work = grid_2d if overwrite_input else grid_2d.copy()
         _fold_shift_checkerboard(work, fft_plane_dims)
         sky = fft.ifft2(
             work,
