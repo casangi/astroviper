@@ -107,9 +107,11 @@ IMAGING_PARAM_DOCS = {
         "residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable."
     ),
     "image_store": "Path/URL of the on-disk Zarr image cube.",
-    "task_id": "Identifier of the frequency chunk being imaged.",
+    "task_id": "Identifier of the parallel chunk being processed.",
     "task_coords": (
-        'Per-chunk coordinate mapping; ``task_coords["frequency"]["data"]``\n'
-        "supplies this chunk's frequency axis."
+        "Per-chunk coordinate mapping; ``task_coords[<parallel dim>]`` supplies\n"
+        'this chunk\'s parallel coordinate values (``"data"``) and its\n'
+        '``"slice"`` into the full output array (for cube imaging the\n'
+        "parallel dim is ``frequency``)."
     ),
 }

@@ -384,7 +384,7 @@ class TestCalculateImagingWeightsDispatch(unittest.TestCase):
             freq,
             n_uv,
             dlm,
-            processing_function_threads=1: dw
+            processing_function_threads=1: (dw)
         )
         self.briggs_mock.return_value = np.zeros((2, 1, 1))
 

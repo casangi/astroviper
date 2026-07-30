@@ -103,7 +103,7 @@ def imaging_preparation_single_field(
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
     task_id : int, optional
-        Identifier of the frequency chunk being imaged.
+        Identifier of the parallel chunk being processed.
     Returns
     -------
     controller : IterationController
@@ -275,7 +275,7 @@ def image_cube_single_field(
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
     task_id : int, optional
-        Identifier of the frequency chunk being imaged.
+        Identifier of the parallel chunk being processed.
     Returns
     -------
     img_xds : xarray.Dataset

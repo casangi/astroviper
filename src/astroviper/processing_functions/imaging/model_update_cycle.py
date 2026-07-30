@@ -40,8 +40,9 @@ def model_update_cycle_cube_single_field(
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
     image_data_group_in_name : str, optional
-        Data group holding the residual image and (created) mask.  Default
-        ``"residual"``.
+        Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
+        ``"mask"``) roles name the input data variables.  Datasets without
+        data groups fall back to the conventional ``"SKY"`` variable.
     image_data_group_out_name : str, optional
         Data group that the updated sky model is registered under.  Default
         ``"model"``.

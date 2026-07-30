@@ -265,8 +265,9 @@ def residual_cycle_cube_single_field(
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
     image_data_group_in_name : str, optional
-        Image data group holding the sky model that is degridded.  Default
-        ``"model"``.
+        Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
+        ``"mask"``) roles name the input data variables.  Datasets without
+        data groups fall back to the conventional ``"SKY"`` variable.
     image_data_group_out_name : str, optional
         Image data group that the residual image is written into.  Default
         ``"residual"``.
