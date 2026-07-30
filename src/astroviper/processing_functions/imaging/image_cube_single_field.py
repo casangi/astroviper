@@ -499,6 +499,10 @@ def image_cube_single_field(
             image_data_group_in_model_name="model",
             image_data_group_out_restore_name="restored",
             processing_function_threads=processing_function_threads,
+            # The model cube is dead weight after the restore unless it is
+            # written to the output store; let the restore reuse its buffer
+            # instead of allocating a fresh restored cube.
+            consume_model="sky_model" not in image_data_variables_keep,
         )
         accumulate_timing(timing, restore_return_df)
 

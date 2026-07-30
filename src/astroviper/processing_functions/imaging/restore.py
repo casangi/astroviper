@@ -89,6 +89,7 @@ def restore_image(
     beam_fit_params_key: str = "beam_fit_params_point_spread_function",
     beam_polarization_index: int = 0,
     processing_function_threads: int = 1,
+    consume_model: bool = False,
     overwrite: bool = True,
 ):
     """Restore an image: model convolved with the clean beam plus the residual.
@@ -119,7 +120,9 @@ def restore_image(
     are live at once -- the model spectrum, multiplied by the beam in place,
     and the inverse-transform output, with the residual added into the restored
     cube without a further temporary.  Planes whose model is entirely zero skip
-    the convolution (the restored plane is just the residual).
+    the convolution (the restored plane is just the residual).  With
+    ``consume_model=True`` even the restored cube allocation is avoided: the
+    model cube's buffer is reused and the model variable dropped.
 
     Parameters
     ----------
@@ -154,6 +157,16 @@ def restore_image(
     processing_function_threads : int, optional
         Number of worker threads handed to ``scipy.fft`` for the per-plane
         FFTs.  Values ``<= 0`` use all available cores.  Default ``1``.
+    consume_model : bool, optional
+        If ``True`` the restored cube is written into the **model** variable's
+        buffer instead of a freshly allocated cube (each model plane is fully
+        read into its forward FFT before its slot is overwritten), and the
+        model data variable is removed from ``img_xds`` afterwards — the model
+        is destroyed.  Only set this when the model is not needed after the
+        restore (e.g. it is not written to the output store).  Saves one full
+        image cube of peak memory.  Requires the model and residual dtypes to
+        match; otherwise a fresh cube is allocated as for ``False``.  Default
+        ``False`` (model preserved).
     overwrite : bool, optional
         If ``True`` an existing restored data group / output variable is
         overwritten.  Default ``True``.
@@ -218,7 +231,8 @@ def restore_image(
     restored_sky_name = restored_group["sky"]
 
     residual_da = img_xds[residual_sky_name]
-    # ``.values`` are read-only views into the dataset; never written to.
+    # ``.values`` are views into the dataset; only written to when the model
+    # buffer is consumed as the restored cube (``consume_model``).
     residual = residual_da.values
     model = img_xds[model_sky_name].values
     # Beam-fit parameters: (time, frequency, polarization, beam_params)
@@ -238,8 +252,16 @@ def restore_image(
         else -1
     )
 
-    # Single output cube allocation; filled plane by plane below.
-    restored = np.empty_like(residual)
+    # Output cube, filled plane by plane below. With ``consume_model`` the
+    # model cube's buffer is reused (safe: every model plane is fully read
+    # into its forward FFT, or found empty, before its slot is overwritten);
+    # otherwise a single fresh cube is allocated.
+    consume = (
+        consume_model
+        and model.dtype == residual.dtype
+        and model_sky_name != residual_sky_name
+    )
+    restored = model if consume else np.empty_like(residual)
 
     for tt in range(nt):
         for ff in range(nf):
@@ -281,6 +303,11 @@ def restore_image(
 
     # Store the restored sky, preserving the residual's dims, coords and attrs.
     img_xds[restored_sky_name] = residual_da.copy(data=restored)
+
+    if consume and model_sky_name != restored_sky_name:
+        # The model buffer now lives on as the restored sky; drop the stale
+        # model data variable so nothing reads the overwritten planes.
+        del img_xds[model_sky_name]
 
     modify_data_groups_xds(
         img_xds,
