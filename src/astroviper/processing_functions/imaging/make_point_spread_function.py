@@ -424,8 +424,9 @@ def make_point_spread_function_single_field(
         Measurement-set data group that supplies the weights/uvw used for the
         UV-sampling grid.  Default ``"base"``.
     image_data_group_in_name : str, optional
-        Image data group read by the gridders/FFT (the same group the
-        ``UV_SAMPLING`` grid accumulates into).  Default ``"residual"``.
+        Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
+        ``"mask"``) roles name the input data variables.  Datasets without
+        data groups fall back to the conventional ``"SKY"`` variable.
     image_data_group_out_name : str, optional
         Image data group that the ``UV_SAMPLING`` and ``POINT_SPREAD_FUNCTION``
         variables are registered under.  Default ``"residual"``.

@@ -42,10 +42,12 @@ def _elliptical_gaussian_kernel(ny, nx, major_fwhm_pix, minor_fwhm_pix, pa, dtyp
     numpy.ndarray
         ``(ny, nx)`` unit-peak elliptical Gaussian.
     """
-    # Pixel offsets from the centre along l (axis 0) and m (axis 1). Computed in
-    # float64 for accuracy, broadcast to a 2-D grid, then cast to the image dtype.
-    di = (np.arange(ny, dtype=np.float64) - ny // 2)[:, None]
-    dj = (np.arange(nx, dtype=np.float64) - nx // 2)[None, :]
+    # Work at the image dtype (never below float32): pixel offsets are exact in
+    # float32 up to 2^24 and the Gaussian argument only needs ~7 significant
+    # digits, while full-plane float64 temporaries cost ~1 GB each at 11 250².
+    work_dtype = np.result_type(dtype, np.float32)
+    di = (np.arange(ny, dtype=work_dtype) - ny // 2)[:, None]
+    dj = (np.arange(nx, dtype=work_dtype) - nx // 2)[None, :]
 
     # point_spread_function_gaussian_fit measures the position angle from the m
     # axis (axis 1) towards the l axis (axis 0), the complement of the angle in
@@ -53,17 +55,29 @@ def _elliptical_gaussian_kernel(ny, nx, major_fwhm_pix, minor_fwhm_pix, pa, dtyp
     # this the major axis lies along (sin pa, -cos pa) and a beam built from a
     # fitted [major, minor, pa] reproduces that fit.
     theta = 0.5 * np.pi - pa
-    cos_t = np.cos(theta)
-    sin_t = np.sin(theta)
-    # Project onto the beam's principal axes (major along (cos theta, -sin theta)).
+    # Python-float scalars: NumPy-2 promotion keeps work_dtype planes at
+    # work_dtype for python-float operands, but a np.float64 scalar would
+    # silently promote every float32 plane back to float64.
+    cos_t = float(np.cos(theta))
+    sin_t = float(np.sin(theta))
+    sigma_major = float(major_fwhm_pix) / FWHM_factor
+    sigma_minor = float(minor_fwhm_pix) / FWHM_factor
+
+    # Project onto the beam's principal axes (major along (cos theta, -sin theta))
+    # and accumulate the Gaussian argument in place, so peak scratch is two
+    # (ny, nx) planes at work_dtype (the broadcasts of di/dj are the only
+    # full-plane allocations).
     u = di * cos_t - dj * sin_t  # major-axis coordinate (pixels)
+    u /= sigma_major
+    u *= u
     v = di * sin_t + dj * cos_t  # minor-axis coordinate (pixels)
-
-    sigma_major = major_fwhm_pix / FWHM_factor
-    sigma_minor = minor_fwhm_pix / FWHM_factor
-
-    kernel = np.exp(-0.5 * ((u / sigma_major) ** 2 + (v / sigma_minor) ** 2))
-    return kernel.astype(dtype, copy=False)
+    v /= sigma_minor
+    v *= v
+    u += v
+    del v
+    u *= -0.5
+    np.exp(u, out=u)
+    return u.astype(dtype, copy=False)
 
 
 def restore_image(
@@ -75,6 +89,7 @@ def restore_image(
     beam_fit_params_key: str = "beam_fit_params_point_spread_function",
     beam_polarization_index: int = 0,
     processing_function_threads: int = 1,
+    consume_model: bool = False,
     overwrite: bool = True,
 ):
     """Restore an image: model convolved with the clean beam plus the residual.
@@ -100,8 +115,14 @@ def restore_image(
     beyond the single restored cube.  The convolution is a real FFT
     (``scipy.fft.rfft2`` / ``irfft2``) at the image dtype (single-precision
     images stay single precision), and the clean beam's FFT is computed once per
-    frequency and reused for every polarization.  Planes whose model is entirely
-    zero skip the convolution (the restored plane is just the residual).
+    frequency and reused for every polarization (the beam plane itself is freed
+    as soon as it is transformed).  Per polarization at most two extra planes
+    are live at once -- the model spectrum, multiplied by the beam in place,
+    and the inverse-transform output, with the residual added into the restored
+    cube without a further temporary.  Planes whose model is entirely zero skip
+    the convolution (the restored plane is just the residual).  With
+    ``consume_model=True`` even the restored cube allocation is avoided: the
+    model cube's buffer is reused and the model variable dropped.
 
     Parameters
     ----------
@@ -136,6 +157,16 @@ def restore_image(
     processing_function_threads : int, optional
         Number of worker threads handed to ``scipy.fft`` for the per-plane
         FFTs.  Values ``<= 0`` use all available cores.  Default ``1``.
+    consume_model : bool, optional
+        If ``True`` the restored cube is written into the **model** variable's
+        buffer instead of a freshly allocated cube (each model plane is fully
+        read into its forward FFT before its slot is overwritten), and the
+        model data variable is removed from ``img_xds`` afterwards — the model
+        is destroyed.  Only set this when the model is not needed after the
+        restore (e.g. it is not written to the output store).  Saves one full
+        image cube of peak memory.  Requires the model and residual dtypes to
+        match; otherwise a fresh cube is allocated as for ``False``.  Default
+        ``False`` (model preserved).
     overwrite : bool, optional
         If ``True`` an existing restored data group / output variable is
         overwritten.  Default ``True``.
@@ -200,7 +231,8 @@ def restore_image(
     restored_sky_name = restored_group["sky"]
 
     residual_da = img_xds[residual_sky_name]
-    # ``.values`` are read-only views into the dataset; never written to.
+    # ``.values`` are views into the dataset; only written to when the model
+    # buffer is consumed as the restored cube (``consume_model``).
     residual = residual_da.values
     model = img_xds[model_sky_name].values
     # Beam-fit parameters: (time, frequency, polarization, beam_params)
@@ -220,8 +252,16 @@ def restore_image(
         else -1
     )
 
-    # Single output cube allocation; filled plane by plane below.
-    restored = np.empty_like(residual)
+    # Output cube, filled plane by plane below. With ``consume_model`` the
+    # model cube's buffer is reused (safe: every model plane is fully read
+    # into its forward FFT, or found empty, before its slot is overwritten);
+    # otherwise a single fresh cube is allocated.
+    consume = (
+        consume_model
+        and model.dtype == residual.dtype
+        and model_sky_name != residual_sky_name
+    )
+    restored = model if consume else np.empty_like(residual)
 
     for tt in range(nt):
         for ff in range(nf):
@@ -237,8 +277,10 @@ def restore_image(
                 ny, nx, major / delta, minor / delta, pa, residual.dtype
             )
             # FFT of the centred clean beam (centre shifted to the origin),
-            # computed once and reused for every polarization.
+            # computed once and reused for every polarization. Only the
+            # transform is used below, so the kernel plane is dropped now.
             kernel_ft = scipy.fft.rfft2(scipy.fft.ifftshift(kernel), workers=workers)
+            del kernel
 
             for pp in range(npol):
                 model_plane = model[tt, ff, pp]
@@ -246,15 +288,26 @@ def restore_image(
                     # Nothing cleaned in this plane: restored == residual.
                     restored[tt, ff, pp] = residual[tt, ff, pp]
                     continue
+                # At most two extra planes are live at any point: the model
+                # spectrum (beam applied in place) and the irfft2 output; the
+                # residual is added into the restored cube without a temporary.
+                model_ft = scipy.fft.rfft2(model_plane, workers=workers)
+                np.multiply(model_ft, kernel_ft, out=model_ft)
                 convolved_model = scipy.fft.irfft2(
-                    scipy.fft.rfft2(model_plane, workers=workers) * kernel_ft,
-                    s=(ny, nx),
-                    workers=workers,
+                    model_ft, s=(ny, nx), workers=workers
                 )
-                restored[tt, ff, pp] = convolved_model + residual[tt, ff, pp]
+                del model_ft
+                restored[tt, ff, pp] = convolved_model
+                del convolved_model
+                restored[tt, ff, pp] += residual[tt, ff, pp]
 
     # Store the restored sky, preserving the residual's dims, coords and attrs.
     img_xds[restored_sky_name] = residual_da.copy(data=restored)
+
+    if consume and model_sky_name != restored_sky_name:
+        # The model buffer now lives on as the restored sky; drop the stale
+        # model data variable so nothing reads the overwritten planes.
+        del img_xds[model_sky_name]
 
     modify_data_groups_xds(
         img_xds,

@@ -209,8 +209,10 @@ def image_cube_single_field(
           guarantees a minimum amount of cleaning per minor cycle even when the
           PSF sidelobe level is high.
     task_coords : dict
-        Per-chunk coordinate mapping; ``task_coords["frequency"]["data"]``
-        supplies this chunk's frequency axis.
+        Per-chunk coordinate mapping; ``task_coords[<parallel dim>]`` supplies
+        this chunk's parallel coordinate values (``"data"``) and its
+        ``"slice"`` into the full output array (for cube imaging the
+        parallel dim is ``frequency``).
     data_selection : dict
         Per-chunk ``{ms_name: {dim: slice}}`` selection injected by graphviper;
         used to load this chunk's data and to remap chunk-local channel numbers
@@ -265,7 +267,7 @@ def image_cube_single_field(
         (e.g. ``{"correlated_data": "VISIBILITY", "uvw": "UVW", ...}``), supplied
         by the distributed graph; only used when ``skunk_works`` is ``True``.
     task_id : int, optional
-        Identifier of the frequency chunk being imaged.
+        Identifier of the parallel chunk being processed.
     input_data : dict, optional
         Pre-loaded data for this chunk (supplied by the data-loading layer); when
         ``None`` (default) the data is loaded from ``input_data_store``.

@@ -53,29 +53,44 @@ def shares_param_docs(func):
 # Codegen engine (lazy heavy imports).
 # --------------------------------------------------------------------------- #
 def _load_registry():
-    """Return the imaging shared-parameter registry ``{param_name: description}``.
+    """Return the merged shared-parameter registry ``{param_name: description}``.
 
-    The registry module (``processing_functions/imaging/_param_docs.py``) is pure
-    data, so it is loaded directly from its file path rather than imported
-    through the package.  That lets the codegen run as a standalone script
-    (``python src/astroviper/utils/param_docs.py check``) with only ``libcst``
-    installed -- no need to build the C++ extensions or import ``astroviper``.
+    Each subdomain keeps its own registry module
+    (``processing_functions/<subdomain>/_param_docs.py``); they are merged
+    here, with duplicate parameter names across subdomains disallowed so a
+    description always has exactly one source of truth.  The registry modules
+    are pure data, so they are loaded directly from their file paths rather
+    than imported through the package.  That lets the codegen run as a
+    standalone script (``python src/astroviper/utils/param_docs.py check``)
+    with only ``libcst`` installed -- no need to build the C++ extensions or
+    import ``astroviper``.
     """
     import importlib.util
     import pathlib
 
-    reg_path = (
-        pathlib.Path(__file__).resolve().parents[1]
-        / "processing_functions"
-        / "imaging"
-        / "_param_docs.py"
+    processing_functions = pathlib.Path(__file__).resolve().parents[1] / (
+        "processing_functions"
     )
-    spec = importlib.util.spec_from_file_location(
-        "_astroviper_imaging_param_docs", reg_path
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.IMAGING_PARAM_DOCS
+    registries = [
+        ("imaging", "IMAGING_PARAM_DOCS"),
+        ("image_analysis", "IMAGE_ANALYSIS_PARAM_DOCS"),
+    ]
+    merged = {}
+    for subdomain, attr in registries:
+        reg_path = processing_functions / subdomain / "_param_docs.py"
+        spec = importlib.util.spec_from_file_location(
+            f"_astroviper_{subdomain}_param_docs", reg_path
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        registry = getattr(module, attr)
+        duplicates = merged.keys() & registry.keys()
+        assert not duplicates, (
+            "Shared parameter name(s) defined in more than one _param_docs.py "
+            f"registry: {sorted(duplicates)}"
+        )
+        merged.update(registry)
+    return merged
 
 
 def _target_files():
@@ -92,6 +107,9 @@ def _target_files():
         "processing_functions/imaging/model_update_cycle.py",
         "processing_functions/imaging/make_point_spread_function.py",
         "processing_functions/imaging/make_undeconvolved_image.py",
+        "distributed_applications/image_analysis/moments.py",
+        "node_tasks/image_analysis/moments.py",
+        "processing_functions/image_analysis/moments.py",
     ]
     return [root / r for r in rel]
 
