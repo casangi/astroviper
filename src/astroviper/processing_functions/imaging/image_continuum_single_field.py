@@ -1031,6 +1031,101 @@ def model_update_mtmfs_single_field(
 ###############################################################################
 
 
+def primary_beam_correct_restored_continuum(
+    img_xds,
+    *,
+    pblimit=0.2,
+    primary_beam_name="PRIMARY_BEAM",
+    restored_data_group_name="restored",
+    output_data_group_name="restored_pbcor",
+    output_variable_name="SKY_RESTORED_PBCOR",
+):
+    """PB-correct the restored Taylor-zero continuum image.
+
+    Only the final restored reference-frequency intensity image is corrected.
+    The model, residual Taylor stack, higher Taylor terms, and minor-cycle
+    calculations remain in the apparent-sky convention.
+    """
+    import numpy as np
+    import xarray as xr
+
+    from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+    if not 0.0 <= float(pblimit) < 1.0:
+        raise ValueError(
+            f"pblimit must satisfy 0 <= pblimit < 1; " f"received {pblimit}."
+        )
+
+    data_groups = img_xds.attrs.get("data_groups", {})
+
+    if restored_data_group_name not in data_groups:
+        raise KeyError(
+            f"Restored data group {restored_data_group_name!r} " "is missing."
+        )
+
+    restored_name = data_groups[restored_data_group_name].get("sky")
+
+    if restored_name is None or restored_name not in img_xds:
+        raise KeyError(
+            f"Restored data group {restored_data_group_name!r} "
+            "does not contain an accessible sky image."
+        )
+
+    if primary_beam_name not in img_xds:
+        raise KeyError(f"Primary-beam variable {primary_beam_name!r} is missing.")
+
+    restored = img_xds[restored_name]
+    primary_beam = img_xds[primary_beam_name]
+
+    # The averaged PB should no longer have a frequency axis. This check
+    # catches accidental retention of a chunk-local PB cube.
+    if "frequency" in primary_beam.dims:
+        if primary_beam.sizes["frequency"] != 1:
+            raise ValueError(
+                "The continuum PB correction requires one averaged "
+                "primary beam, not a multi-channel PB cube."
+            )
+
+        primary_beam = primary_beam.isel(
+            frequency=0,
+            drop=True,
+        )
+
+    valid = np.isfinite(primary_beam) & (primary_beam >= float(pblimit))
+
+    corrected = xr.where(
+        valid,
+        restored / primary_beam,
+        np.nan,
+    )
+
+    corrected.attrs = restored.attrs.copy()
+    corrected.attrs.update(
+        {
+            "description": (
+                "Restored Taylor-zero continuum intensity divided by "
+                "the globally averaged primary beam."
+            ),
+            "primary_beam_corrected": True,
+            "primary_beam_variable": primary_beam_name,
+            "pblimit": float(pblimit),
+        }
+    )
+
+    img_xds[output_variable_name] = corrected
+
+    modify_data_groups_xds(
+        img_xds,
+        data_group_out_name=output_data_group_name,
+        data_group_out={
+            "sky": output_variable_name,
+        },
+        description=("Primary-beam-corrected restored continuum intensity."),
+    )
+
+    return img_xds
+
+
 def restore_image(
     img_xds,
     image_data_group_in_residual_name="residual",

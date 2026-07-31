@@ -706,6 +706,12 @@ def combine_continuum_chunks(input_data, input_params):
     ``UV_SAMPLING_NORMALIZATION``
         ``(time, psf_taylor_order, polarization)``.
 
+    ``PRIMARY_BEAM_SUM``
+        ``(time, polarization, l, m)``
+
+    ``PRIMARY_BEAM_CHANNEL_COUNT``
+        ``scalar``
+
     All remaining dataset variables (for example metadata, coordinates, primary
     beam products, and other non-additive quantities) are copied from the first
     input dataset after verifying consistency across all inputs.
@@ -780,6 +786,8 @@ def combine_continuum_chunks(input_data, input_params):
                 "VISIBILITY_NORMALIZATION",
                 "UV_SAMPLING",
                 "UV_SAMPLING_NORMALIZATION",
+                "PRIMARY_BEAM_SUM",
+                "PRIMARY_BEAM_CHANNEL_COUNT",
             ),
         )
     )
@@ -1693,6 +1701,8 @@ def image_continuum_single_field(
     iteration_control_params: dict[str, Any],
     gridder: str = "prolate_spheroidal",
     deconvolver: str = "hogbom",
+    pbcor: bool = False,
+    pblimit: float = 0.2,
     instrument_polarization_basis: str = "linear",
     scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],
     field_name: str | None = None,
@@ -1899,6 +1909,8 @@ def image_continuum_single_field(
     input_params["gridder"] = gridder
     input_params["is_n_iter_0"] = True
     input_params["deconvolver"] = deconvolver
+    input_params["pbcor"] = bool(pbcor)
+    input_params["pblimit"] = float(pblimit)
     input_params["instrument_polarization_basis"] = instrument_polarization_basis
     input_params["single_precision_image"] = single_precision_image
     input_params["fft_backend"] = fft_backend

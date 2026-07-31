@@ -129,6 +129,95 @@ def _attach_continuum_metadata(
     return img_xds
 
 
+def _convert_primary_beam_to_average_accumulators(
+    img_xds,
+    *,
+    image_data_group_name="residual",
+):
+    """Replace a channelized PB cube by additive sum/count products.
+
+    The resulting variables can be summed by the distributed reducer. The
+    globally averaged primary beam is constructed in the first append node as
+
+        PRIMARY_BEAM = PRIMARY_BEAM_SUM / PRIMARY_BEAM_CHANNEL_COUNT.
+
+    This implementation computes an unweighted average over frequency channels.
+    It assumes that each frequency channel is represented by exactly one map
+    partition.
+    """
+    import numpy as np
+    import xarray as xr
+
+    data_groups = img_xds.attrs.get("data_groups", {})
+
+    if image_data_group_name not in data_groups:
+        raise KeyError(f"Image data group {image_data_group_name!r} is missing.")
+
+    image_data_group = data_groups[image_data_group_name]
+    primary_beam_name = image_data_group.get("primary_beam")
+
+    if primary_beam_name is None:
+        raise KeyError(
+            f"Image data group {image_data_group_name!r} does not "
+            "register a primary beam."
+        )
+
+    if primary_beam_name not in img_xds:
+        raise KeyError(
+            f"Registered primary-beam variable " f"{primary_beam_name!r} is missing."
+        )
+
+    primary_beam = img_xds[primary_beam_name]
+
+    if "frequency" not in primary_beam.dims:
+        raise ValueError(
+            f"{primary_beam_name!r} must contain a frequency "
+            "dimension before continuum averaging."
+        )
+
+    n_frequency = int(primary_beam.sizes["frequency"])
+
+    if n_frequency < 1:
+        raise ValueError("The local primary-beam cube contains no frequency planes.")
+
+    primary_beam_sum = primary_beam.sum(
+        dim="frequency",
+        skipna=False,
+    )
+
+    primary_beam_sum.attrs = primary_beam.attrs.copy()
+    primary_beam_sum.attrs.update(
+        {
+            "description": ("Partition-local sum of primary-beam frequency planes."),
+            "continuum_average_accumulator": "sum",
+            "n_frequency_planes": n_frequency,
+        }
+    )
+
+    primary_beam_count = xr.DataArray(
+        np.asarray(n_frequency, dtype=np.int64),
+        name="PRIMARY_BEAM_CHANNEL_COUNT",
+        attrs={
+            "description": (
+                "Number of frequency planes contributing to " "PRIMARY_BEAM_SUM."
+            ),
+            "continuum_average_accumulator": "count",
+        },
+    )
+
+    img_xds["PRIMARY_BEAM_SUM"] = primary_beam_sum
+    img_xds["PRIMARY_BEAM_CHANNEL_COUNT"] = primary_beam_count
+
+    # The chunk-local PB cube must not survive as the nominal global PB.
+    img_xds = img_xds.drop_vars(primary_beam_name)
+
+    image_data_group.pop("primary_beam", None)
+    image_data_group["primary_beam_sum"] = "PRIMARY_BEAM_SUM"
+    image_data_group["primary_beam_channel_count"] = "PRIMARY_BEAM_CHANNEL_COUNT"
+
+    return img_xds
+
+
 @shares_param_docs
 def imaging_setup_continuum_single_field(
     ps_xdt,
@@ -380,6 +469,11 @@ def imaging_setup_continuum_single_field(
         image_data_group_in_name=image_data_group_out_name,
         image_data_group_out_name=image_data_group_out_name,
         float_dtype=float_dtype,
+    )
+
+    img_xds = _convert_primary_beam_to_average_accumulators(
+        img_xds,
+        image_data_group_name=image_data_group_out_name,
     )
 
     T_primary_beam = float(primary_beam_return_df["T_primary_beam"].iloc[0])

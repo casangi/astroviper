@@ -10,6 +10,8 @@
             "type": ["str"],
             "allowed": ["hogbom", "hogbom_many_threads", "asp", "aspclean", "asp_clean"]
         },
+        "pbcor": { "type": "boolean" },
+        "pblimit": {"type": "float"},
         "instrument_polarization_basis": {
             "type": ["str"],
             "allowed": ["linear", "circular"]

@@ -275,6 +275,103 @@ def _attach_imaging_weights_continuum(
     return ps_xdt
 
 
+def _finalize_average_primary_beam(
+    img_xds,
+    *,
+    reference_frequency,
+    image_data_group_name="residual",
+):
+    """Construct the globally averaged continuum primary beam."""
+    import numpy as np
+    import xarray as xr
+
+    sum_name = "PRIMARY_BEAM_SUM"
+    count_name = "PRIMARY_BEAM_CHANNEL_COUNT"
+
+    count_value = int(np.asarray(img_xds[count_name].values).reshape(()))
+
+    if count_value <= 0:
+        raise ValueError("PRIMARY_BEAM_CHANNEL_COUNT must be positive.")
+
+    primary_beam = img_xds[sum_name] / float(count_value)
+
+    # The globally reduced continuum products use Taylor dimensions, not
+    # the chunk-local frequency dimension. Remove the stale frequency
+    # coordinate before creating the effective one-channel PB.
+    if "frequency" in img_xds.dims:
+        variables_with_frequency = [
+            name
+            for name, data_array in img_xds.data_vars.items()
+            if "frequency" in data_array.dims and name not in (sum_name, count_name)
+        ]
+
+        if variables_with_frequency:
+            raise ValueError(
+                "Cannot replace the chunk-local frequency dimension because "
+                "these variables still depend on it: "
+                f"{variables_with_frequency}."
+            )
+
+        img_xds = img_xds.drop_dims(
+            "frequency",
+            errors="ignore",
+        )
+
+    primary_beam = primary_beam.expand_dims(
+        frequency=np.asarray(
+            [float(reference_frequency)],
+            dtype=np.float64,
+        ),
+        axis=1,
+    )
+
+    primary_beam.attrs = img_xds[sum_name].attrs.copy()
+    primary_beam.attrs.update(
+        {
+            "description": (
+                "Continuum zeroth-order primary beam formed as the "
+                "average over all contributing frequency planes."
+            ),
+            "type": "primary_beam",
+            "continuum_pb_order": 0,
+            "n_frequency_planes": count_value,
+            "effective_frequency_hz": float(reference_frequency),
+            "effective_frequency_interpretation": (
+                "Coordinate label for the averaged continuum PB; the "
+                "numerical PB is an average over contributing channels."
+            ),
+        }
+    )
+
+    # Direct Variable assignment is safe now because the dataset has no
+    # conflicting frequency coordinate.
+    img_xds["PRIMARY_BEAM"] = xr.Variable(
+        primary_beam.dims,
+        primary_beam.data,
+        attrs=primary_beam.attrs.copy(),
+    )
+
+    data_groups = img_xds.attrs.setdefault("data_groups", {})
+    image_data_group = data_groups.setdefault(
+        image_data_group_name,
+        {},
+    )
+
+    image_data_group["primary_beam"] = "PRIMARY_BEAM"
+    image_data_group.pop("primary_beam_sum", None)
+    image_data_group.pop(
+        "primary_beam_channel_count",
+        None,
+    )
+
+    img_xds = img_xds.drop_vars(
+        [sum_name, count_name],
+        errors="ignore",
+    )
+
+    return img_xds
+
+
 ###############################################################################
 # Node task level functionality related to the residual update
 ###############################################################################
@@ -1348,6 +1445,14 @@ def _prepare_continuum_image(
             processing_function_threads=config["processing_function_threads"],
         )
 
+        # Form one globally averaged zeroth-order PB from the reduced
+        # map-task sum/count products.
+        img_xds = _finalize_average_primary_beam(
+            img_xds,
+            reference_frequency=config["reference_frequency"],
+            image_data_group_name=image_data_group_name,
+        )
+
         # Static variables to be shared with the minor loop controls
         static_variable_names = (
             "POINT_SPREAD_FUNCTION",
@@ -1562,7 +1667,22 @@ def continuum_finalize_node(
             ),
         )
 
+        if input_params.get("pbcor", False):
+            from astroviper.processing_functions.imaging.image_continuum_single_field import (
+                primary_beam_correct_restored_continuum,
+            )
+
+            img_xds = primary_beam_correct_restored_continuum(
+                img_xds,
+                pblimit=input_params.get("pblimit", 0.2),
+                primary_beam_name="PRIMARY_BEAM",
+                restored_data_group_name="restored",
+                output_data_group_name="restored_pbcor",
+                output_variable_name="SKY_RESTORED_PBCOR",
+            )
+
         input_data["timing_restore"] = restore_timing_df.reset_index(drop=True)
+
     else:
         input_data["timing_restore"] = None
 
