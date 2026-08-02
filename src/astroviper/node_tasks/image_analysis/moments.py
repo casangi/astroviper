@@ -44,6 +44,48 @@ def _open_image_lazy(input_image_store):
     return open_image(input_image_store)
 
 
+def _load_chunk_streaming(lazy_xds, variables, block_des, stream_axis):
+    """Load this task's chunk, iterating plane-by-plane along ``stream_axis``.
+
+    A single bulk ``.load()`` of a chunk that spans the full ``stream_axis``
+    is a memory bomb on Zarr v3 SHARDED stores: the sharding codec
+    materializes (roughly) a whole shard's decompressed inner chunks per
+    in-flight shard, ~70-170x the requested slice in measurements -- ~32 GB
+    per shard for the benchmark images (32-channel shards of ~1 GB
+    full-plane inner chunks). Reading one ``stream_axis`` plane at a time
+    decodes only the touched inner chunk(s), bounding the transient to
+    O(one inner chunk) at the same total I/O.
+
+    ``stream_axis`` is the moment axis: the one axis every task loads in
+    full. Variables without it are loaded directly. For stores whose on-disk
+    chunks span several ``stream_axis`` planes, per-plane reads re-decode
+    those chunks once per plane (correct, just slower) -- the benchmark
+    images store one plane per inner chunk, where per-plane is optimal.
+
+    Returns an in-memory ``xarray.Dataset`` equivalent to
+    ``lazy_xds[variables].isel(block_des).load()``.
+    """
+    import numpy as np
+    import xarray as xr
+
+    selected = lazy_xds[variables].isel(block_des)
+    loaded = xr.Dataset(coords=selected.coords, attrs=selected.attrs)
+    for name in variables:
+        var = selected[name]
+        if stream_axis not in var.dims:
+            loaded[name] = var.load()
+            continue
+        axis = var.dims.index(stream_axis)
+        out = np.empty(var.shape, dtype=var.dtype)
+        index = [slice(None)] * var.ndim
+        for i in range(var.sizes[stream_axis]):
+            index[axis] = i
+            out[tuple(index)] = var.isel({stream_axis: i}).values
+        loaded[name] = (var.dims, out)
+        loaded[name].attrs = dict(var.attrs)
+    return loaded
+
+
 @shares_param_docs
 def moments(
     input_image_store: str,
@@ -198,7 +240,7 @@ def moments(
         lazy_xds, image_data_group_in_name, use_mask
     )
     variables = [sky_name] + ([mask_name] if mask_name is not None else [])
-    img_xds = lazy_xds[variables].isel(block_des).load()
+    img_xds = _load_chunk_streaming(lazy_xds, variables, block_des, moment_axis)
     lazy_xds = None
     T_load = time.time() - start
 
