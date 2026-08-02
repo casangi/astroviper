@@ -32,7 +32,13 @@ def _open_image_lazy(input_image_store):
     if "zarr" in input_image_store:
         import xarray as xr
 
-        return xr.open_zarr(input_image_store)
+        # chunks=None -> zarr-backed lazy arrays WITHOUT dask, so .load()
+        # reads directly in this process. With the default (dask-backed)
+        # arrays, .load() inside a distributed worker ships the chunk-read
+        # graph to the ambient Client/scheduler -- tasks submitting tasks,
+        # whose inner futures get cancelled (FutureCancelledError) when the
+        # cluster is busy running the outer map tasks.
+        return xr.open_zarr(input_image_store, chunks=None)
     from xradio.image import open_image
 
     return open_image(input_image_store)
@@ -231,14 +237,32 @@ def moments(
     free_memory()
     logger.debug("Memory after moments node task: " + str(get_rss_gb()) + " GB")
 
+    # Execution identity + wall-clock anchor, mirroring the imaging node task:
+    # start_unixtime places the task on the run timeline (task-stream /
+    # cluster-usage plots); pid/thread/worker name give exact lane assignment.
+    import os
+    import socket
+    import threading
+
+    try:
+        from dask.distributed import get_worker
+
+        worker_name = str(get_worker().name)
+    except Exception:
+        worker_name = None
     return pd.DataFrame(
         [
             {
                 "task_id": task_id,
+                "start_unixtime": task_start,
                 "T_load": T_load,
                 "T_moments": T_moments,
                 "T_write": T_write,
                 "T_moments_task": time.time() - task_start,
+                "hostname": socket.gethostname(),
+                "process_pid": os.getpid(),
+                "thread_native_id": threading.get_native_id(),
+                "worker_name": worker_name,
             }
         ]
     )

@@ -834,21 +834,27 @@ def plot_task_stream(
         pre_rel = compute_start - t0_abs  # negative seconds
         post_end_rel = compute_end - t0_abs
     post = (T_compute - makespan) if T_compute else None
+    summary = []  # the printed decomposition, echoed at the top of the figure
+
+    def _p(line):
+        print(line)
+        summary.append(line)
+
     if title:
         print(f"run: {title}")
-    print(
+    _p(
         f"  workers                    : {n_workers} ({len(hosts)} hosts, "
         f"{n_lanes} reconstructed lanes)"
     )
-    print(f"  ideal time (sum/workers)   : {ideal:8.1f} s")
-    print(
+    _p(f"  ideal time (sum/workers)   : {ideal:8.1f} s")
+    _p(
         f"  task-window makespan       : {makespan:8.1f} s "
         f"(+{in_window_loss:.1f} s ramp/gaps/tail, "
         f"{100 * busy / (n_workers * makespan):.1f}% busy inside window)"
     )
     if T_compute:
         if pre_rel is not None:
-            print(
+            _p(
                 f"  T_compute (map+reduce)     : {T_compute:8.1f} s = "
                 f"{-pre_rel:.1f} s PRE first task ({pre_label}) + "
                 f"{makespan:.1f} s task window + "
@@ -856,24 +862,24 @@ def plot_task_stream(
                 + (f"   [anchors: {anchor_source}]" if anchor_source else "")
             )
         else:
-            print(
+            _p(
                 f"  T_compute (map+reduce)     : {T_compute:8.1f} s "
                 f"(+{post:.1f} s outside the task window)"
             )
-        print(f"  end-to-end efficiency      : {100 * ideal / T_compute:.1f}% of ideal")
+        _p(f"  end-to-end efficiency      : {100 * ideal / T_compute:.1f}% of ideal")
     # Ramp and tail: time to reach 95% of workers / time the last 5% of tasks
     # spend after the 95th-percentile end. (argmax = first True; searchsorted
     # is invalid here -- the running count is not monotonic.)
     reach = running >= 0.95 * n_workers
     ramp = float(ev_t[int(np.argmax(reach))]) if reach.any() else np.nan
     tail = makespan - np.quantile(tm["end"], 0.95)
-    print(f"  ramp to 95% busy           : {ramp:8.1f} s")
-    print(f"  straggler tail (p95->last) : {tail:8.1f} s")
+    _p(f"  ramp to 95% busy           : {ramp:8.1f} s")
+    _p(f"  straggler tail (p95->last) : {tail:8.1f} s")
     if len(tr):
         busy_r = tr["T_image_cube_task"].sum()
         inside = np.clip(np.minimum(tr["end"], makespan) - tr["start"], 0, None)
         overlap = float(inside.sum() / busy_r) if busy_r else 0.0
-        print(
+        _p(
             f"  reduce nodes (measured)    : {len(tr)} calls, {busy_r:8.1f} s "
             f"busy, window {tr['start'].min():.1f}-{tr['end'].max():.1f} s, "
             f"{100 * overlap:.0f}% of reduce busy inside the map window"
@@ -1007,6 +1013,17 @@ def plot_task_stream(
         f"ideal {ideal:.0f} s | task window {makespan:.0f} s | "
         + (f"T_compute {T_compute:.0f} s" if T_compute else ""),
         fontsize=12,
+    )
+    # Efficiency decomposition block above the title; it sits outside the
+    # figure edge, so it relies on the tight bounding box used when saving.
+    fig.text(
+        0.02,
+        1.002,
+        "\n".join(summary),
+        va="bottom",
+        ha="left",
+        fontsize=9,
+        family="monospace",
     )
     if save_path is not None:
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
