@@ -314,6 +314,7 @@ def imaging_setup_continuum_single_field(
 
     from astroviper.processing_functions.imaging.make_point_spread_function_continuum_single_field import (
         make_point_spread_function_continuum_single_field,
+        make_point_spread_function_mvc_single_field,
     )
     from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (
         make_primary_beam_single_field,
@@ -432,23 +433,42 @@ def imaging_setup_continuum_single_field(
     # -------------------------------------------------------------
     start = time.time()
 
-    (
-        img_xds,
-        point_spread_function_return_df,
-    ) = make_point_spread_function_continuum_single_field(
-        ps_xdt,
-        img_xds,
-        image_params,
-        nterms=nterms,
-        reference_frequency=reference_frequency_hz,
-        ms_data_group_in_name=ps_data_group_name,
-        image_data_group_in_name=image_data_group_out_name,
-        image_data_group_out_name=image_data_group_out_name,
-        image_data_variables_keep=image_data_variables_keep,
-        processing_function_threads=processing_function_threads,
-        fft_backend=fft_backend,
-        complex_dtype=complex_dtype,
-    )
+    if specmode == "mfs":
+        (
+            img_xds,
+            point_spread_function_return_df,
+        ) = make_point_spread_function_continuum_single_field(
+            ps_xdt,
+            img_xds,
+            image_params,
+            nterms=nterms,
+            reference_frequency=reference_frequency_hz,
+            ms_data_group_in_name=ps_data_group_name,
+            image_data_group_in_name=image_data_group_out_name,
+            image_data_group_out_name=image_data_group_out_name,
+            image_data_variables_keep=image_data_variables_keep,
+            processing_function_threads=processing_function_threads,
+            fft_backend=fft_backend,
+            complex_dtype=complex_dtype,
+        )
+    elif specmode == "mvc":
+        (
+            img_xds,
+            point_spread_function_return_df,
+        ) = make_point_spread_function_mvc_single_field(
+            ps_xdt,
+            img_xds,
+            image_params,
+            ms_data_group_in_name=ps_data_group_name,
+            image_data_group_in_name=image_data_group_out_name,
+            image_data_group_out_name=image_data_group_out_name,
+            processing_function_threads=processing_function_threads,
+            complex_dtype=complex_dtype,
+        )
+    else:
+        raise ValueError(
+            "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
+        )
 
     T_make_point_spread_function = time.time() - start
 

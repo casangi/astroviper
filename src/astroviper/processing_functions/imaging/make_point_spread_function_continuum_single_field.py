@@ -335,6 +335,92 @@ def _rename_psf_frequency_axis_to_taylor_order(
 
 
 @shares_param_docs
+def make_point_spread_function_mvc_single_field(
+    ps_xdt,
+    img_xds,
+    image_params,
+    ms_data_group_in_name="base",
+    image_data_group_in_name="residual",
+    image_data_group_out_name="residual",
+    gcf_oversampling=100,
+    gcf_support=7,
+    processing_function_threads=1,
+    complex_dtype=None,
+):
+    """Grid a frequency-resolved PSF cube for an MVC map partition.
+
+    Unlike direct MFS, MVC does not apply Taylor weights during gridding.  Each
+    input channel is retained as its own UV-sampling plane.  The distributed
+    reducer assembles these planes globally, and the append node converts the
+    normalized channel PSF cube into ``2 * nterms - 1`` Taylor Hessian planes.
+
+    Returns
+    -------
+    img_xds : xarray.Dataset
+        Dataset containing frequency-resolved ``UV_SAMPLING`` and
+        ``UV_SAMPLING_NORMALIZATION`` arrays.
+    return_df : pandas.DataFrame
+        One-row timing dataframe for kernel creation, visibility filtering, and
+        UV-sampling gridding.
+    """
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
+        create_prolate_spheroidal_kernel_1D,
+    )
+    from astroviper.processing_functions.imaging.make_point_spread_function import (
+        add_uv_sampling_grid_single_field,
+    )
+    from astroviper.processing_functions.imaging.utils import drop_auto_correlations
+
+    if complex_dtype is None:
+        complex_dtype = np.complex128
+
+    start = time.time()
+    cgk_1D = create_prolate_spheroidal_kernel_1D(
+        gcf_oversampling,
+        gcf_support,
+    )
+    T_gcf = time.time() - start
+
+    T_vis_mask = 0.0
+    T_uv_sampling_grid = 0.0
+
+    for _, ms_xdt in ps_xdt.items():
+        start = time.time()
+        drop_auto_correlations(ms_xdt)
+        T_vis_mask += time.time() - start
+
+        start = time.time()
+        add_uv_sampling_grid_single_field(
+            ms_xdt,
+            cgk_1D,
+            img_xds,
+            ms_data_group_in_name=ms_data_group_in_name,
+            image_data_group_in_name=image_data_group_in_name,
+            image_data_group_out_name=image_data_group_out_name,
+            image_data_group_out_modified={
+                "uv_sampling": "UV_SAMPLING",
+                "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
+            },
+            overwrite=True,
+            chan_mode="cube",
+            fft_padding=image_params["fft_padding"],
+            processing_function_threads=processing_function_threads,
+            complex_dtype=complex_dtype,
+        )
+        T_uv_sampling_grid += time.time() - start
+
+    return_df = pd.DataFrame(
+        {
+            "T_gcf": [T_gcf],
+            "T_vis_mask": [T_vis_mask],
+            "T_uv_sampling_grid": [T_uv_sampling_grid],
+        }
+    )
+
+    return img_xds, return_df
+
+
+@shares_param_docs
 def make_point_spread_function_continuum_single_field(
     ps_xdt,
     img_xds,

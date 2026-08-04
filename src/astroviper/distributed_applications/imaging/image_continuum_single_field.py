@@ -2357,13 +2357,12 @@ def image_continuum_single_field(
             if is_n_iter_0:
                 reduce_input_params = {
                     "specmode": "mvc",
-                    "additive_variables": (
-                        "UV_SAMPLING",
-                        "UV_SAMPLING_NORMALIZATION",
-                    ),
+                    "additive_variables": (),
                     "frequency_cube_variables": (
                         "VISIBILITY",
                         "VISIBILITY_NORMALIZATION",
+                        "UV_SAMPLING",
+                        "UV_SAMPLING_NORMALIZATION",
                     ),
                 }
             else:
@@ -2399,6 +2398,11 @@ def image_continuum_single_field(
         # This holds static quantities such as PSF and PB
         if not is_n_iter_0:
             append_input_params["static_xds"] = static_xds
+            if specmode == "mvc":
+                # Later map tasks consume the cached channel PBs for model
+                # prediction, but do not emit them again. Carry the same cache
+                # directly to the global residual conversion/minor-cycle node.
+                append_input_params["pb_cache_mapping"] = pb_cache_mapping
 
         # ---------------------------------------------------------
         # Execute one major cycle followed by one minor cycle.
@@ -2442,7 +2446,11 @@ def image_continuum_single_field(
             static_xds = cycle_return_dict["static_xds"]
 
             # The first minor-cycle result is the initial accumulated model.
-            model_xds = cycle_return_dict["image"][["SKY_MODEL"]].copy(deep=True)
+            model_variable_names = ["SKY_MODEL"]
+            if specmode == "mvc":
+                model_variable_names.append("PRIMARY_BEAM")
+
+            model_xds = cycle_return_dict["image"][model_variable_names].copy(deep=True)
 
         else:
             # Later minor cycles return a model increment.

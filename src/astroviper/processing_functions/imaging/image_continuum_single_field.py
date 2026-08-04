@@ -12,7 +12,6 @@ def copy_variable_without_alignment(
     source: xr.Dataset,
     name: str,
 ) -> xr.Dataset:
-
     """Copy a data variable without coordinate alignment.
 
     This helper copies the numerical values and metadata of a data variable from
@@ -398,6 +397,329 @@ def prepare_model_uv_continuum_single_field(
     return model_uv_xds
 
 
+def convert_mvc_cubes_to_taylor_normal_equations(
+    residual_cube,
+    psf_cube,
+    primary_beam_cube,
+    residual_normalization,
+    psf_normalization,
+    *,
+    nterms,
+    reference_frequency,
+    pblimit=0.2,
+):
+    """Convert MVC channel cubes into CASA-style MT-MFS normal equations.
+
+    The channel residuals are first remapped from the frequency-dependent
+    primary-beam convention to one common effective beam.  The returned
+    residual Taylor planes are weighted normal-equation right-hand sides, not
+    pixel-wise polynomial coefficients.  The PSF cube is converted with the
+    same spectral basis into ``2 * nterms - 1`` Hessian planes.
+
+    Parameters
+    ----------
+    residual_cube : xarray.DataArray
+        Channel residual images with dimensions
+        ``(time, frequency, polarization, l, m)``.
+    psf_cube : xarray.DataArray
+        Channel PSF images with the same dimensions as ``residual_cube``.
+    primary_beam_cube : xarray.DataArray
+        Frequency-dependent primary beam with the same dimensions.
+    residual_normalization : xarray.DataArray
+        Per-channel residual sum of imaging weights with dimensions
+        ``(time, frequency, polarization)``.
+    psf_normalization : xarray.DataArray
+        Per-channel PSF sum of imaging weights with dimensions
+        ``(time, frequency, polarization)``.
+    nterms : int
+        Number of sky-model Taylor coefficients.
+    reference_frequency : float
+        Taylor reference frequency in Hz.
+    pblimit : float, default 0.2
+        Primary-beam validity cutoff.
+
+    Returns
+    -------
+    residual_taylor : xarray.DataArray
+        ``nterms`` Taylor normal-equation right-hand sides.
+    psf_taylor : xarray.DataArray
+        ``2 * nterms - 1`` Taylor PSF/Hessian planes.
+    effective_primary_beam : xarray.DataArray
+        Imaging-weighted common primary beam, without a frequency dimension.
+
+    Notes
+    -----
+    With ``x_nu = (nu - nu0) / nu0`` and common beam ``Abar``, this implements
+
+    ``R'_nu = Abar * R_nu / A_nu``
+
+    followed by
+
+    ``b_t = sum(w_nu * x_nu**t * A_nu * R'_nu) / (sum(w_nu) * Abar)``
+
+    and
+
+    ``B_k = sum(w_nu * x_nu**k * A_nu * B_nu) / (sum(w_nu) * Abar)``.
+
+    The first expression reduces algebraically to the weighted residual moment,
+    while retaining CASA's primary-beam mask and common-beam convention.
+    """
+    import numpy as np
+    import xarray as xr
+
+    required_cube_dims = ("time", "frequency", "polarization", "l", "m")
+    required_normalization_dims = ("time", "frequency", "polarization")
+
+    cubes = {
+        "residual_cube": residual_cube,
+        "psf_cube": psf_cube,
+        "primary_beam_cube": primary_beam_cube,
+    }
+    for name, cube in cubes.items():
+        if cube.dims != required_cube_dims:
+            raise ValueError(
+                f"{name} has dimensions {cube.dims}; expected {required_cube_dims}."
+            )
+
+    normalizations = {
+        "residual_normalization": residual_normalization,
+        "psf_normalization": psf_normalization,
+    }
+    for name, normalization in normalizations.items():
+        if normalization.dims != required_normalization_dims:
+            raise ValueError(
+                f"{name} has dimensions {normalization.dims}; expected "
+                f"{required_normalization_dims}."
+            )
+
+    try:
+        xr.align(
+            residual_cube,
+            psf_cube,
+            primary_beam_cube,
+            join="exact",
+            copy=False,
+        )
+        xr.align(
+            residual_normalization,
+            psf_normalization,
+            residual_cube,
+            join="exact",
+            copy=False,
+            exclude={"l", "m"},
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "MVC cubes and normalizations are not coordinate-aligned."
+        ) from exc
+
+    nterms = int(nterms)
+    reference_frequency = float(reference_frequency)
+    pblimit = float(pblimit)
+
+    if nterms < 1:
+        raise ValueError(f"nterms must be positive; received {nterms}.")
+    if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
+        raise ValueError("reference_frequency must be finite and positive.")
+    if not np.isfinite(pblimit) or pblimit < 0.0:
+        raise ValueError("pblimit must be finite and non-negative.")
+
+    frequency = np.asarray(residual_cube.frequency.values, dtype=np.float64)
+    if frequency.size < nterms:
+        raise ValueError(
+            f"MVC requires at least nterms={nterms} channels; received "
+            f"{frequency.size}."
+        )
+
+    x_frequency = xr.DataArray(
+        (frequency - reference_frequency) / reference_frequency,
+        dims=("frequency",),
+        coords={"frequency": residual_cube.frequency},
+    )
+
+    def _clean_weights(normalization):
+        return xr.where(
+            np.isfinite(normalization) & (normalization > 0.0),
+            normalization.astype(np.float64),
+            0.0,
+        )
+
+    residual_weight = _clean_weights(residual_normalization)
+    psf_weight = _clean_weights(psf_normalization)
+    residual_weight_sum = residual_weight.sum(dim="frequency")
+    psf_weight_sum = psf_weight.sum(dim="frequency")
+
+    if bool((residual_weight_sum <= 0.0).any()):
+        raise ValueError("MVC residual normalization has an empty image plane.")
+    if bool((psf_weight_sum <= 0.0).any()):
+        raise ValueError("MVC PSF normalization has an empty image plane.")
+
+    finite_primary_beam = xr.where(
+        np.isfinite(primary_beam_cube),
+        primary_beam_cube,
+        0.0,
+    )
+    effective_primary_beam = (
+        (finite_primary_beam * psf_weight).sum(dim="frequency") / psf_weight_sum
+    ).transpose("time", "polarization", "l", "m")
+    effective_primary_beam.attrs = {
+        "description": "Imaging-weighted effective primary beam for MVC.",
+        "specmode": "mvc",
+        "pblimit": pblimit,
+    }
+
+    valid_channel_pb = np.isfinite(primary_beam_cube) & (primary_beam_cube > pblimit)
+    remapped_residual = xr.where(
+        valid_channel_pb,
+        effective_primary_beam * residual_cube / primary_beam_cube,
+        0.0,
+    )
+    valid_effective_pb = np.isfinite(effective_primary_beam) & (
+        effective_primary_beam > pblimit
+    )
+
+    residual_terms = []
+    for order in range(nterms):
+        numerator = (
+            residual_weight
+            * x_frequency**order
+            * finite_primary_beam
+            * remapped_residual
+        ).sum(dim="frequency")
+        denominator = residual_weight_sum * effective_primary_beam
+        term = xr.where(valid_effective_pb, numerator / denominator, 0.0)
+        residual_terms.append(term)
+
+    residual_taylor = xr.concat(
+        residual_terms,
+        dim=xr.IndexVariable("taylor_term", np.arange(nterms, dtype=np.int64)),
+    ).transpose("time", "taylor_term", "polarization", "l", "m")
+    residual_taylor.attrs = {
+        "description": "MVC Taylor residual normal-equation right-hand sides.",
+        "specmode": "mvc",
+        "reference_frequency": reference_frequency,
+        "nterms": nterms,
+        "pblimit": pblimit,
+    }
+
+    n_psf_taylor_terms = 2 * nterms - 1
+    psf_terms = []
+    finite_psf = xr.where(np.isfinite(psf_cube), psf_cube, 0.0)
+    for order in range(n_psf_taylor_terms):
+        numerator = (
+            psf_weight * x_frequency**order * finite_primary_beam * finite_psf
+        ).sum(dim="frequency")
+        denominator = psf_weight_sum * effective_primary_beam
+        term = xr.where(valid_effective_pb, numerator / denominator, 0.0)
+        psf_terms.append(term)
+
+    psf_taylor = xr.concat(
+        psf_terms,
+        dim=xr.IndexVariable(
+            "psf_taylor_order",
+            np.arange(n_psf_taylor_terms, dtype=np.int64),
+        ),
+    ).transpose("time", "psf_taylor_order", "polarization", "l", "m")
+    psf_taylor.attrs = {
+        "description": "MVC Taylor PSF/Hessian planes formed from the PSF cube.",
+        "type": "point_spread_function",
+        "specmode": "mvc",
+        "reference_frequency": reference_frequency,
+        "nterms": nterms,
+        "n_psf_taylor_terms": n_psf_taylor_terms,
+        "pblimit": pblimit,
+    }
+
+    return residual_taylor, psf_taylor, effective_primary_beam
+
+
+def apply_mvc_primary_beam_convention(
+    model_cube,
+    primary_beam_cube,
+    effective_primary_beam,
+):
+    """Map a common-beam MVC model cube to the channel-beam convention.
+
+    This applies ``M'_nu = M_nu * A_nu / Abar`` and sets pixels with a
+    non-finite or non-positive effective primary beam to zero.
+    """
+    import numpy as np
+
+    required_cube_dims = ("time", "frequency", "polarization", "l", "m")
+    required_beam_dims = ("time", "polarization", "l", "m")
+
+    if model_cube.dims != required_cube_dims:
+        raise ValueError(
+            f"model_cube has dimensions {model_cube.dims}; expected "
+            f"{required_cube_dims}."
+        )
+    if primary_beam_cube.dims != required_cube_dims:
+        raise ValueError(
+            "primary_beam_cube has dimensions "
+            f"{primary_beam_cube.dims}; expected {required_cube_dims}."
+        )
+    if effective_primary_beam.dims != required_beam_dims:
+        raise ValueError(
+            "effective_primary_beam has dimensions "
+            f"{effective_primary_beam.dims}; expected {required_beam_dims}."
+        )
+
+    if model_cube.shape != primary_beam_cube.shape:
+        raise ValueError(
+            "MVC model and channel primary beam have incompatible shapes: "
+            f"{model_cube.shape} and {primary_beam_cube.shape}."
+        )
+    expected_effective_shape = (
+        model_cube.sizes["time"],
+        model_cube.sizes["polarization"],
+        model_cube.sizes["l"],
+        model_cube.sizes["m"],
+    )
+    if effective_primary_beam.shape != expected_effective_shape:
+        raise ValueError(
+            "MVC model and effective primary beam have incompatible shapes: "
+            f"{model_cube.shape} and {effective_primary_beam.shape}."
+        )
+
+    # The Taylor model is in Stokes coordinates while the cached scalar PB is
+    # still labelled with the instrumental correlations.  The airy-disk PB is
+    # identical plane-by-plane, so validate every physical coordinate except
+    # the polarization labels and apply it positionally.
+    for coordinate in ("time", "frequency", "l", "m"):
+        if not np.array_equal(
+            model_cube.coords[coordinate].values,
+            primary_beam_cube.coords[coordinate].values,
+        ):
+            raise ValueError(
+                f"MVC model and channel primary beam {coordinate} coordinates "
+                "are not aligned."
+            )
+    for coordinate in ("time", "l", "m"):
+        if not np.array_equal(
+            model_cube.coords[coordinate].values,
+            effective_primary_beam.coords[coordinate].values,
+        ):
+            raise ValueError(
+                f"MVC model and effective primary beam {coordinate} coordinates "
+                "are not aligned."
+            )
+
+    effective_pb_data = np.asarray(effective_primary_beam.data)[:, None, ...]
+    valid_effective_pb = np.isfinite(effective_pb_data) & (effective_pb_data > 0.0)
+    result = model_cube.copy(
+        data=np.where(
+            valid_effective_pb,
+            np.asarray(model_cube.data)
+            * np.asarray(primary_beam_cube.data)
+            / effective_pb_data,
+            0.0,
+        )
+    )
+    result.attrs = model_cube.attrs.copy()
+    result.attrs["primary_beam_convention"] = "channel_pb_over_effective_pb"
+    return result
+
+
 @shares_param_docs
 def prepare_model_uv_mvc_single_field(
     model_xds,
@@ -410,7 +732,12 @@ def prepare_model_uv_mvc_single_field(
     fft_backend="pyfftw",
     image_data_group_name="model",
 ):
-    """Construct a local PB-weighted MVC model UV cube."""
+    """Construct a local MVC model UV cube in the channel-PB convention.
+
+    The Taylor model uses the common effective primary-beam convention.  Before
+    prediction this function evaluates the Taylor polynomial at each channel and
+    applies ``A_nu / Abar``, matching CASA's MVC major-cycle convention.
+    """
     import copy
 
     import numpy as np
@@ -494,7 +821,28 @@ def prepare_model_uv_mvc_single_field(
             f"model={model_cube.shape}, PB={primary_beam.shape}."
         )
 
-    model_cube_data = np.asarray(model_cube.data) * np.asarray(primary_beam.data)
+    if "PRIMARY_BEAM" not in model_xds:
+        raise KeyError(
+            "MVC model prediction requires the effective PRIMARY_BEAM carried "
+            "with the Taylor model."
+        )
+
+    effective_primary_beam = model_xds["PRIMARY_BEAM"]
+    if "frequency" not in effective_primary_beam.dims:
+        raise ValueError("MVC effective PRIMARY_BEAM must contain frequency.")
+    if effective_primary_beam.sizes["frequency"] != 1:
+        raise ValueError("MVC effective PRIMARY_BEAM must have one frequency plane.")
+
+    effective_primary_beam = effective_primary_beam.isel(
+        frequency=0,
+        drop=True,
+    ).transpose("time", "polarization", "l", "m")
+
+    model_cube = apply_mvc_primary_beam_convention(
+        model_cube,
+        primary_beam,
+        effective_primary_beam,
+    )
 
     mvc_xds = model_xds.drop_vars(
         list(model_xds.data_vars),
@@ -510,7 +858,7 @@ def prepare_model_uv_mvc_single_field(
     mvc_xds = mvc_xds.assign_coords(frequency=frequency_values)
 
     mvc_xds["SKY_MODEL_MVC"] = xr.DataArray(
-        model_cube_data,
+        model_cube.data,
         dims=(
             "time",
             "frequency",
@@ -533,7 +881,10 @@ def prepare_model_uv_mvc_single_field(
         data_group_out={
             "sky": "SKY_MODEL_MVC",
         },
-        description=("Frequency-dependent PB-weighted MVC model."),
+        description=(
+            "MVC model converted from the common effective-beam convention "
+            "to the channel-dependent primary-beam convention."
+        ),
     )
 
     mvc_xds = transform_polarization_basis(

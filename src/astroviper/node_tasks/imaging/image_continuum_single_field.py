@@ -1452,256 +1452,6 @@ def prepare_imaging_weights_continuum_node(
     }
 
 
-def fit_mvc_residual_cube_to_taylor_terms(
-    img_xds,
-    *,
-    nterms,
-    reference_frequency,
-    pblimit=0.2,
-    image_data_group_name="residual",
-    primary_beam_name="PRIMARY_BEAM",
-    output_name="SKY_RESIDUAL",
-    residual_cube_name=None,
-):
-    """PB-correct an MVC residual cube and fit image-domain Taylor terms."""
-    import numpy as np
-    import xarray as xr
-
-    data_groups = img_xds.attrs.get("data_groups", {})
-
-    if image_data_group_name not in data_groups:
-        raise KeyError(f"Image data group {image_data_group_name!r} is missing.")
-
-    data_group = data_groups[image_data_group_name]
-
-    if residual_cube_name is None:
-        residual_cube_name = data_group.get("sky")
-
-    if residual_cube_name is None:
-        raise KeyError(
-            f"Image data group {image_data_group_name!r} does not "
-            "register a residual sky variable."
-        )
-
-    if residual_cube_name not in img_xds:
-        raise KeyError(f"Residual cube {residual_cube_name!r} is missing.")
-
-    if primary_beam_name not in img_xds:
-        raise KeyError(f"Primary-beam cube {primary_beam_name!r} is missing.")
-
-    residual_cube = img_xds[residual_cube_name]
-    primary_beam = img_xds[primary_beam_name]
-
-    if "frequency" not in residual_cube.dims:
-        raise ValueError("MVC residual must contain a frequency axis.")
-
-    if "frequency" not in primary_beam.dims:
-        raise ValueError("MVC primary beam must contain a frequency axis.")
-
-    if residual_cube.sizes["frequency"] != (primary_beam.sizes["frequency"]):
-        raise ValueError(
-            "MVC residual and PB cubes have different " "frequency-axis lengths."
-        )
-
-    residual_frequency = np.asarray(
-        residual_cube.coords["frequency"].values,
-        dtype=np.float64,
-    )
-    primary_beam_frequency = np.asarray(
-        primary_beam.coords["frequency"].values,
-        dtype=np.float64,
-    )
-
-    if not np.array_equal(
-        residual_frequency,
-        primary_beam_frequency,
-    ):
-        raise ValueError(
-            "MVC residual and primary-beam frequency " "coordinates do not match."
-        )
-
-    nterms = int(nterms)
-    reference_frequency = float(reference_frequency)
-    pblimit = float(pblimit)
-
-    if nterms < 1:
-        raise ValueError(f"nterms must be positive; received {nterms}.")
-
-    if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
-        raise ValueError("reference_frequency must be finite and positive.")
-
-    frequency = residual_frequency
-
-    x = (frequency - reference_frequency) / reference_frequency
-
-    # -------------------------------------------------------------
-    # PB correction mask
-    # -------------------------------------------------------------
-    valid = np.isfinite(primary_beam) & (primary_beam >= pblimit)
-
-    # The current projector is global, not pixel dependent. Therefore use
-    # only pixels for which every frequency channel passes the PB cutoff.
-    valid_all_channels = valid.all(dim="frequency")
-
-    # Set invalid pixels to zero during the matrix multiplication so NaNs
-    # do not contaminate all Taylor terms.
-    corrected = xr.where(
-        valid_all_channels,
-        residual_cube / primary_beam,
-        0.0,
-    )
-
-    # -------------------------------------------------------------
-    # Channel weights
-    # -------------------------------------------------------------
-    normalization_name = data_group.get("visibility_normalization")
-
-    if normalization_name is None or normalization_name not in img_xds:
-        channel_weight = np.ones(
-            frequency.size,
-            dtype=np.float64,
-        )
-    else:
-        normalization = img_xds[normalization_name]
-
-        if "frequency" not in normalization.dims:
-            raise ValueError(
-                f"{normalization_name!r} must contain a " "frequency dimension."
-            )
-
-        # Initial implementation: combine time and polarization into one
-        # spectral weight per channel.
-        reduce_dims = [dim for dim in normalization.dims if dim != "frequency"]
-
-        channel_weight = np.asarray(
-            normalization.sum(
-                dim=reduce_dims,
-                skipna=True,
-            ).values,
-            dtype=np.float64,
-        )
-
-    channel_weight = np.where(
-        np.isfinite(channel_weight) & (channel_weight > 0.0),
-        channel_weight,
-        0.0,
-    )
-
-    if np.count_nonzero(channel_weight) < nterms:
-        raise ValueError(
-            "Too few positively weighted MVC channels support " f"nterms={nterms}."
-        )
-
-    # -------------------------------------------------------------
-    # Weighted Taylor projector
-    # -------------------------------------------------------------
-    design = np.stack(
-        [x**term for term in range(nterms)],
-        axis=1,
-    )
-
-    gram = design.T @ (channel_weight[:, None] * design)
-
-    if np.linalg.matrix_rank(gram) < nterms:
-        raise ValueError(
-            "The MVC channel sampling does not support " f"nterms={nterms}."
-        )
-
-    projector = np.linalg.solve(
-        gram,
-        design.T * channel_weight[None, :],
-    )
-
-    # -------------------------------------------------------------
-    # Apply projector
-    # -------------------------------------------------------------
-    frequency_axis = corrected.get_axis_num("frequency")
-
-    corrected_data = np.moveaxis(
-        np.asarray(corrected.data),
-        frequency_axis,
-        0,
-    )
-
-    taylor_data = np.einsum(
-        "tf,f...->t...",
-        projector,
-        corrected_data,
-        optimize=True,
-    )
-
-    taylor_data = np.moveaxis(
-        taylor_data,
-        0,
-        frequency_axis,
-    )
-
-    output_dims = list(corrected.dims)
-    output_dims[frequency_axis] = "taylor_term"
-
-    output_coords = {
-        name: coord for name, coord in corrected.coords.items() if name != "frequency"
-    }
-    output_coords["taylor_term"] = np.arange(
-        nterms,
-        dtype=np.int64,
-    )
-
-    taylor = xr.DataArray(
-        taylor_data,
-        dims=output_dims,
-        coords=output_coords,
-        attrs={
-            "description": ("MVC PB-corrected residual Taylor terms."),
-            "specmode": "mvc",
-            "reference_frequency": reference_frequency,
-            "nterms": nterms,
-            "pblimit": pblimit,
-            "primary_beam_variable": primary_beam_name,
-            "source_residual_cube": residual_cube_name,
-        },
-    )
-
-    # valid_all_channels has no frequency dimension. Xarray broadcasts it
-    # automatically across the new Taylor-term dimension.
-    taylor = xr.where(
-        valid_all_channels,
-        taylor,
-        np.nan,
-    )
-
-    # xr.where follows the dimension order of the condition and may move
-    # taylor_term behind the spatial dimensions. Restore the canonical
-    # continuum-image layout explicitly.
-    taylor = taylor.transpose(*output_dims)
-
-    expected_dims = tuple(output_dims)
-
-    if taylor.dims != expected_dims:
-        raise RuntimeError(
-            "The MVC Taylor residual has an unexpected dimension order: "
-            f"{taylor.dims}; expected {expected_dims}."
-        )
-
-    # xr.where may discard or replace attributes.
-    taylor.attrs.update(
-        {
-            "description": ("MVC PB-corrected residual Taylor terms."),
-            "specmode": "mvc",
-            "reference_frequency": reference_frequency,
-            "nterms": nterms,
-            "pblimit": pblimit,
-            "primary_beam_variable": primary_beam_name,
-            "source_residual_cube": residual_cube_name,
-        }
-    )
-
-    img_xds[output_name] = taylor
-    data_group["sky"] = output_name
-
-    return img_xds
-
-
 def assemble_mvc_primary_beam_cube(
     pb_cache_mapping,
 ):
@@ -1749,14 +1499,14 @@ def _prepare_continuum_image(
     Taylor residual terms. They are inverse Fourier-transformed directly into
     ``SKY_RESIDUAL(taylor_term)``.
 
-    For ``specmode='mvc'``, the reduced visibility grids retain their frequency
-    dimension. They are inverse Fourier-transformed into a residual image cube,
-    divided by the frequency-dependent primary beam, and fitted into
-    ``SKY_RESIDUAL(taylor_term)``.
+    For ``specmode='mvc'``, the reduced residual and first-cycle PSF grids retain
+    their frequency dimension.  They are inverse Fourier-transformed into
+    channel cubes and converted together into the Taylor normal-equation
+    right-hand sides and Hessian planes expected by the MT-MFS minor cycle.
 
-    In both modes, the PSF remains represented by the existing MT-MFS Taylor
-    Hessian stack. It is inverse Fourier-transformed and fitted only during the
-    first major cycle. Later cycles reinstall the cached static products.
+    MFS retains its direct Taylor-weighted PSF path.  MVC constructs its Taylor
+    PSFs from the channel PSF cube.  Both are fitted only during the first major
+    cycle; later cycles reinstall the cached static products.
 
     Parameters
     ----------
@@ -1799,6 +1549,7 @@ def _prepare_continuum_image(
         ifft_norm_img_xds,
     )
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        convert_mvc_cubes_to_taylor_normal_equations,
         point_spread_function_gaussian_fit_continuum,
     )
     from astroviper.processing_functions.imaging.make_point_spread_function_continuum_single_field import (
@@ -1887,6 +1638,27 @@ def _prepare_continuum_image(
 
     elif specmode == "mvc":
 
+        if initialize_static_products:
+            img_xds = ifft_norm_img_xds(
+                img_xds,
+                image_params=image_params,
+                image_data_group_in_name=image_data_group_name,
+                image_data_group_out_name=image_data_group_name,
+                image_data_group_out_modified={
+                    "point_spread_function": "POINT_SPREAD_FUNCTION_MVC_CUBE",
+                },
+                image_data_variables_keep=config["image_data_variables_keep"],
+                processing_function_threads=config["processing_function_threads"],
+                fft_backend=config["fft_backend"],
+                complex_dtype=config["complex_dtype"],
+            )
+
+            if "POINT_SPREAD_FUNCTION_MVC_CUBE" not in img_xds:
+                raise RuntimeError(
+                    "The global MVC PSF inverse FFT did not create the channel "
+                    "PSF cube."
+                )
+
         # ----------------------------------------------------------
         # Assemble the global frequency-dependent primary beam.
         # ----------------------------------------------------------
@@ -1903,30 +1675,48 @@ def _prepare_continuum_image(
         )
 
         # ----------------------------------------------------------
-        # Convert the PB-corrected residual cube to Taylor terms.
+        # Convert the channel residual and PSF cubes to one mutually
+        # consistent set of Taylor normal equations.
         # ----------------------------------------------------------
 
-        img_xds = fit_mvc_residual_cube_to_taylor_terms(
-            img_xds,
+        if initialize_static_products:
+            psf_cube = img_xds["POINT_SPREAD_FUNCTION_MVC_CUBE"]
+            psf_normalization = img_xds["UV_SAMPLING_NORMALIZATION"]
+        else:
+            # The static Taylor PSF is cached after the first cycle.  A later
+            # residual conversion still uses the same per-channel imaging
+            # normalization as the residual grid to reconstruct the common PB.
+            psf_cube = xr.zeros_like(img_xds["SKY_RESIDUAL_MVC_CUBE"])
+            psf_normalization = img_xds["VISIBILITY_NORMALIZATION"]
+
+        (
+            residual_taylor,
+            psf_taylor,
+            effective_primary_beam,
+        ) = convert_mvc_cubes_to_taylor_normal_equations(
+            img_xds["SKY_RESIDUAL_MVC_CUBE"],
+            psf_cube,
+            img_xds["PRIMARY_BEAM_MVC"],
+            img_xds["VISIBILITY_NORMALIZATION"],
+            psf_normalization,
             nterms=nterms,
             reference_frequency=reference_frequency,
             pblimit=input_params["pblimit"],
-            image_data_group_name=image_data_group_name,
-            primary_beam_name="PRIMARY_BEAM_MVC",
-            output_name="SKY_RESIDUAL",
-            residual_cube_name="SKY_RESIDUAL_MVC_CUBE",
         )
+
+        img_xds["SKY_RESIDUAL"] = residual_taylor
+        img_xds.attrs["data_groups"][image_data_group_name]["sky"] = "SKY_RESIDUAL"
+
+        if initialize_static_products:
+            img_xds["POINT_SPREAD_FUNCTION"] = psf_taylor
+            img_xds.attrs["data_groups"][image_data_group_name][
+                "point_spread_function"
+            ] = "POINT_SPREAD_FUNCTION"
 
         # ----------------------------------------------------------
         # Construct the effective PB used only by the minor loop.
         # ----------------------------------------------------------
 
-        effective_primary_beam = img_xds["PRIMARY_BEAM_MVC"].mean(
-            dim="frequency",
-            skipna=True,
-        )
-
-        # ----------------------------------------------------------
         # Remove every frequency-dependent MVC product.
         # ----------------------------------------------------------
 
@@ -1946,7 +1736,7 @@ def _prepare_continuum_image(
             )
 
         # ----------------------------------------------------------
-        # Recreate a singleton-frequency PB for masking only.
+        # Recreate the weighted common PB as a singleton-frequency image.
         # ----------------------------------------------------------
 
         if "time" in effective_primary_beam.dims:
@@ -1967,7 +1757,8 @@ def _prepare_continuum_image(
                 "description": "Effective MVC primary beam",
                 "type": "primary_beam",
                 "specmode": "mvc",
-                "primary_beam_usage": "minor_cycle",
+                "primary_beam_usage": "common_taylor_convention",
+                "method": "airy_disk",
             }
         )
 
@@ -1991,29 +1782,28 @@ def _prepare_continuum_image(
     # ------------------------------------------------------------------
 
     if initialize_static_products:
-        # The PSF/Hessian remains in the existing Taylor representation
-        # for both MFS and the first MVC implementation.
-        img_xds = ifft_norm_img_xds(
-            img_xds,
-            image_params=image_params,
-            image_data_group_in_name=image_data_group_name,
-            image_data_group_out_name=image_data_group_name,
-            image_data_group_out_modified={
-                "point_spread_function": "POINT_SPREAD_FUNCTION",
-            },
-            image_data_variables_keep=config["image_data_variables_keep"],
-            processing_function_threads=config["processing_function_threads"],
-            fft_backend=config["fft_backend"],
-            complex_dtype=config["complex_dtype"],
-        )
+        if specmode == "mfs":
+            img_xds = ifft_norm_img_xds(
+                img_xds,
+                image_params=image_params,
+                image_data_group_in_name=image_data_group_name,
+                image_data_group_out_name=image_data_group_name,
+                image_data_group_out_modified={
+                    "point_spread_function": "POINT_SPREAD_FUNCTION",
+                },
+                image_data_variables_keep=config["image_data_variables_keep"],
+                processing_function_threads=config["processing_function_threads"],
+                fft_backend=config["fft_backend"],
+                complex_dtype=config["complex_dtype"],
+            )
 
-        # psf taylor terms are stored along the frequency axis, but we have a different number of
-        # taylor terms than frequencies ==> repurpose
-        img_xds = _rename_psf_frequency_axis_to_taylor_order(
-            img_xds,
-            image_data_group_out_name=image_data_group_name,
-            n_psf_taylor_terms=n_psf_taylor_terms,
-        )
+            # Direct MFS PSF Taylor terms may emerge from the generic FFT helper
+            # on a frequency-like axis.  Re-label that axis without changing data.
+            img_xds = _rename_psf_frequency_axis_to_taylor_order(
+                img_xds,
+                image_data_group_out_name=image_data_group_name,
+                n_psf_taylor_terms=n_psf_taylor_terms,
+            )
 
         # register name of data group
         psf_name = img_xds.attrs["data_groups"][image_data_group_name][
