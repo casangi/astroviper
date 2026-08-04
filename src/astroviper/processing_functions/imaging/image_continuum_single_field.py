@@ -76,6 +76,7 @@ def imaging_preparation_continuum_single_field(
     img_xds,
     image_params,
     imaging_weights_params,
+    specmode="mfs",
     processing_set_data_group_name="corrected",
     single_precision_image=True,
     processing_function_threads=1,
@@ -170,6 +171,7 @@ def imaging_preparation_continuum_single_field(
         img_xds,
         image_params,
         imaging_weights_params,
+        specmode=specmode,
         processing_set_data_group_name=processing_set_data_group_name,
         single_precision_image=single_precision_image,
         processing_function_threads=processing_function_threads,
@@ -397,11 +399,176 @@ def prepare_model_uv_continuum_single_field(
 
 
 @shares_param_docs
+def prepare_model_uv_mvc_single_field(
+    model_xds,
+    primary_beam_xds,
+    frequency_values,
+    image_params,
+    instrument_polarization_basis="linear",
+    single_precision_image=True,
+    processing_function_threads=1,
+    fft_backend="pyfftw",
+    image_data_group_name="model",
+):
+    """Construct a local PB-weighted MVC model UV cube."""
+    import copy
+
+    import numpy as np
+    import xarray as xr
+
+    from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
+        transform_polarization_basis,
+    )
+    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+        fft_norm_img_xds,
+    )
+    from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+    frequency_values = np.asarray(
+        frequency_values,
+        dtype=np.float64,
+    )
+
+    reference_frequency = float(
+        image_params.get(
+            "reference_frequency",
+            image_params["reference_frequency_hz"],
+        )
+    )
+    nterms = int(image_params["nterms"])
+
+    model_name = model_xds.attrs["data_groups"][image_data_group_name]["sky"]
+
+    model_taylor = model_xds[model_name].isel(taylor_term=slice(0, nterms))
+
+    x = (frequency_values - reference_frequency) / reference_frequency
+
+    basis = xr.DataArray(
+        x[:, None] ** np.arange(nterms)[None, :],
+        dims=("frequency", "taylor_term"),
+        coords={
+            "frequency": frequency_values,
+            "taylor_term": model_taylor.coords["taylor_term"],
+        },
+    )
+
+    # Result:
+    # (time, frequency, polarization, l, m)
+    # Reconstruct the frequency-dependent image cube from the
+    # image-domain Taylor model.
+    model_cube = (model_taylor * basis).sum(dim="taylor_term")
+
+    # Xarray appends the new frequency dimension after the existing
+    # model dimensions. Restore the canonical image-cube ordering.
+    model_cube = model_cube.transpose(
+        "time",
+        "frequency",
+        "polarization",
+        "l",
+        "m",
+    )
+
+    pb_name = primary_beam_xds.attrs.get(
+        "primary_beam_name",
+        "PRIMARY_BEAM",
+    )
+    primary_beam = primary_beam_xds[pb_name]
+
+    if primary_beam.sizes["frequency"] != len(frequency_values):
+        raise ValueError(
+            "The cached MVC PB cube does not match the " "local model frequency axis."
+        )
+
+    primary_beam = primary_beam.transpose(
+        "time",
+        "frequency",
+        "polarization",
+        "l",
+        "m",
+    )
+
+    if model_cube.shape != primary_beam.shape:
+        raise ValueError(
+            "The reconstructed MVC model cube and cached primary "
+            "beam have incompatible shapes: "
+            f"model={model_cube.shape}, PB={primary_beam.shape}."
+        )
+
+    model_cube_data = np.asarray(model_cube.data) * np.asarray(primary_beam.data)
+
+    mvc_xds = model_xds.drop_vars(
+        list(model_xds.data_vars),
+        errors="ignore",
+    ).copy(deep=False)
+
+    if "taylor_term" in mvc_xds.dims:
+        mvc_xds = mvc_xds.drop_dims(
+            "taylor_term",
+            errors="ignore",
+        )
+
+    mvc_xds = mvc_xds.assign_coords(frequency=frequency_values)
+
+    mvc_xds["SKY_MODEL_MVC"] = xr.DataArray(
+        model_cube_data,
+        dims=(
+            "time",
+            "frequency",
+            "polarization",
+            "l",
+            "m",
+        ),
+        coords={
+            "time": model_cube.coords["time"],
+            "frequency": frequency_values,
+            "polarization": model_cube.coords["polarization"],
+            "l": model_cube.coords["l"],
+            "m": model_cube.coords["m"],
+        },
+    )
+
+    modify_data_groups_xds(
+        mvc_xds,
+        data_group_out_name=image_data_group_name,
+        data_group_out={
+            "sky": "SKY_MODEL_MVC",
+        },
+        description=("Frequency-dependent PB-weighted MVC model."),
+    )
+
+    mvc_xds = transform_polarization_basis(
+        mvc_xds,
+        new_polarization_basis=(instrument_polarization_basis),
+        overwrite=True,
+    )
+
+    complex_dtype = np.complex64 if single_precision_image else np.complex128
+
+    mvc_xds = fft_norm_img_xds(
+        mvc_xds,
+        image_params=image_params,
+        image_data_group_in_name=(image_data_group_name),
+        image_data_group_out_name=(image_data_group_name),
+        image_data_group_out_modified={
+            "visibility": "VISIBILITY_MODEL",
+        },
+        image_data_variables_keep=["sky"],
+        processing_function_threads=(processing_function_threads),
+        fft_backend=fft_backend,
+        complex_dtype=complex_dtype,
+    )
+
+    return mvc_xds
+
+
+@shares_param_docs
 def residual_update_continuum_single_field(
     ps_xdt,
     img_xds,
     image_params,
     imaging_weights_params,
+    specmode="mfs",
+    primary_beam_xds=None,
     processing_set_data_group_name="corrected",
     deconvolver="hogbom",
     instrument_polarization_basis="linear",
@@ -410,6 +577,7 @@ def residual_update_continuum_single_field(
     fft_backend="pyfftw",
     image_data_variables_keep=None,
     is_n_iter_0=True,
+    model_xds=None,
     model_uv_xds=None,
     task_id=0,
 ):
@@ -520,6 +688,7 @@ def residual_update_continuum_single_field(
             img_xds,
             image_params,
             imaging_weights_params,
+            specmode=specmode,
             processing_set_data_group_name=processing_set_data_group_name,
             single_precision_image=single_precision_image,
             processing_function_threads=processing_function_threads,
@@ -593,6 +762,9 @@ def residual_update_continuum_single_field(
         model_uv_xds,
         image_params,
         is_n_iter_0,
+        specmode=specmode,
+        model_xds=model_xds,
+        primary_beam_xds=primary_beam_xds,
         processing_set_data_group_name=processing_set_data_group_name,
         instrument_polarization_basis=instrument_polarization_basis,
         single_precision_image=single_precision_image,

@@ -8,6 +8,9 @@ def residual_cycle_continuum_single_field(
     model_uv_xds,
     image_params,
     is_n_iter_0,
+    specmode="mfs",
+    model_xds=None,
+    primary_beam_xds=None,
     processing_set_data_group_name="corrected",
     instrument_polarization_basis="linear",
     single_precision_image=True,
@@ -102,11 +105,12 @@ def residual_cycle_continuum_single_field(
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
         create_prolate_spheroidal_kernel_1D,
     )
-    from astroviper.processing_functions.imaging.make_undeconvolved_image_continuum import (
-        make_undeconvolved_image_continuum_single_field,
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        prepare_model_uv_mvc_single_field,
     )
     from astroviper.processing_functions.imaging.residual_cycle import (
         calculate_residual_visibilities,
+        make_visibility_model_single_field,
     )
 
     if image_data_variables_keep is None:
@@ -140,70 +144,160 @@ def residual_cycle_continuum_single_field(
     # predict the current model and form residual visibilities.
     # ------------------------------------------------------------
     if not is_n_iter_0:
-
-        # delete an old residual if present
-        residual_data_group = img_xds.attrs.get("data_groups", {}).get(
-            image_data_group_out_name,
-            {},
-        )
-
-        residual_sky_name = residual_data_group.get("sky")
-
-        if residual_sky_name is not None and residual_sky_name in img_xds:
-            img_xds.xr_img.delete_data_variables(variables=[residual_sky_name])
-
         start = time.time()
 
-        make_visibility_model_continuum_single_field(
-            ps_xdt,
-            model_uv_xds,
-            cgk_1D,
-            nterms=nterms,
-            reference_frequency=reference_frequency,
-            ms_data_group_out_name="model",
-            ms_data_group_out_modified={
-                "correlated_data": "VISIBILITY_MODEL",
-            },
-            image_data_group_in_name=image_data_group_in_name,
-            processing_function_threads=processing_function_threads,
-            fft_padding=image_params["fft_padding"],
-        )
+        if specmode == "mfs":
+            # delete an old residual if present
+            residual_data_group = img_xds.attrs.get("data_groups", {}).get(
+                image_data_group_out_name,
+                {},
+            )
+
+            residual_sky_name = residual_data_group.get("sky")
+
+            if residual_sky_name is not None and residual_sky_name in img_xds:
+                img_xds.xr_img.delete_data_variables(variables=[residual_sky_name])
+
+            start = time.time()
+
+            make_visibility_model_continuum_single_field(
+                ps_xdt,
+                model_uv_xds,
+                cgk_1D,
+                nterms=nterms,
+                reference_frequency=reference_frequency,
+                ms_data_group_out_name="model",
+                ms_data_group_out_modified={
+                    "correlated_data": "VISIBILITY_MODEL",
+                },
+                image_data_group_in_name=image_data_group_in_name,
+                processing_function_threads=processing_function_threads,
+                fft_padding=image_params["fft_padding"],
+            )
+
+            T_degrid += time.time() - start
+
+            start = time.time()
+
+            calculate_residual_visibilities(
+                ps_xdt,
+                ms_data_group_out_residual="residual",
+                ms_data_group_in_model="model",
+                ms_data_group_in_observed=ps_data_group_name,
+            )
+
+            T_residual_vis += time.time() - start
+
+            ps_data_group_name = "residual"
+
+        else:
+            if model_xds is None:
+                raise ValueError(
+                    "MVC requires the accumulated image-domain " "Taylor model."
+                )
+
+            if primary_beam_xds is None:
+                raise ValueError(
+                    "MVC requires the task-local frequency-dependent " "primary beam."
+                )
+
+            frequency_values = np.asarray(
+                img_xds.coords["frequency"].values,
+                dtype=np.float64,
+            )
+
+            local_model_uv_xds = prepare_model_uv_mvc_single_field(
+                model_xds,
+                primary_beam_xds,
+                frequency_values,
+                image_params,
+                instrument_polarization_basis=(instrument_polarization_basis),
+                single_precision_image=(single_precision_image),
+                processing_function_threads=(processing_function_threads),
+                fft_backend=fft_backend,
+                image_data_group_name=(image_data_group_in_name),
+            )
+
+            make_visibility_model_single_field(
+                ps_xdt,
+                local_model_uv_xds,
+                cgk_1D,
+                ms_data_group_out_name="model",
+                ms_data_group_out_modified={
+                    "correlated_data": "VISIBILITY_MODEL",
+                },
+                image_data_group_in_name=(image_data_group_in_name),
+                processing_function_threads=(processing_function_threads),
+                fft_padding=image_params["fft_padding"],
+            )
+
+            start = time.time()
+
+            calculate_residual_visibilities(
+                ps_xdt,
+                ms_data_group_out_residual="residual",
+                ms_data_group_in_model="model",
+                ms_data_group_in_observed=ps_data_group_name,
+            )
+
+            T_residual_vis += time.time() - start
+            ps_data_group_name = "residual"
 
         T_degrid += time.time() - start
-
-        start = time.time()
-
-        calculate_residual_visibilities(
-            ps_xdt,
-            ms_data_group_out_residual="residual",
-            ms_data_group_in_model="model",
-            ms_data_group_in_observed=ps_data_group_name,
-        )
-
-        T_residual_vis += time.time() - start
-
-        ps_data_group_name = "residual"
 
     # ------------------------------------------------------------
     # Grid residual
     # ------------------------------------------------------------
 
     start = time.time()
-    (
-        img_xds,
-        make_undeconvolved_image_return_df,
-    ) = make_undeconvolved_image_continuum_single_field(
-        ps_xdt,
-        img_xds,
-        image_params,
-        cgk_1D,
-        nterms=nterms,
-        reference_frequency=reference_frequency,
-        ms_data_group_in_name=ps_data_group_name,
-        image_data_group_out_name=image_data_group_out_name,
-        processing_function_threads=processing_function_threads,
-        complex_dtype=complex_dtype,
-    )
+
+    specmode = str(specmode).lower()
+
+    if specmode == "mfs":
+        from astroviper.processing_functions.imaging.make_undeconvolved_image_continuum import (
+            make_undeconvolved_image_continuum_single_field,
+        )
+
+        (
+            img_xds,
+            make_undeconvolved_image_return_df,
+        ) = make_undeconvolved_image_continuum_single_field(
+            ps_xdt,
+            img_xds,
+            image_params,
+            cgk_1D,
+            nterms=nterms,
+            reference_frequency=reference_frequency,
+            ms_data_group_in_name=ps_data_group_name,
+            image_data_group_out_name=image_data_group_out_name,
+            processing_function_threads=processing_function_threads,
+            complex_dtype=complex_dtype,
+        )
+
+    elif specmode == "mvc":
+        from astroviper.processing_functions.imaging.make_undeconvolved_image_continuum_mvc import (
+            make_undeconvolved_image_mvc_single_field,
+        )
+
+        (
+            img_xds,
+            make_undeconvolved_image_return_df,
+        ) = make_undeconvolved_image_mvc_single_field(
+            ps_xdt,
+            img_xds,
+            image_params,
+            cgk_1D,
+            ms_data_group_in_name=ps_data_group_name,
+            image_data_group_out_name=image_data_group_out_name,
+            processing_function_threads=processing_function_threads,
+            complex_dtype=complex_dtype,
+        )
+
+    else:
+        raise ValueError(
+            "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
+        )
+
     T_grid = time.time() - start
 
     return_df = pd.DataFrame(

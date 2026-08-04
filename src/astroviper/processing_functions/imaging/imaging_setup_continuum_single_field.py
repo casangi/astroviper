@@ -112,20 +112,15 @@ def _attach_continuum_metadata(
     *,
     nterms,
     reference_frequency_hz,
+    specmode,
 ):
-    """Attach metadata needed by the map/reduce continuum workflow.
-
-    The original input frequency coordinate is preserved. The actual Taylor
-    arrays are created by
-    ``make_point_spread_function_continuum_single_field``.
-    """
     img_xds.attrs["continuum_imaging"] = {
+        "specmode": specmode,
         "nterms": int(nterms),
         "reference_frequency_hz": float(reference_frequency_hz),
         "n_residual_taylor_terms": int(nterms),
         "n_psf_taylor_terms": int(2 * nterms - 1),
     }
-
     return img_xds
 
 
@@ -224,6 +219,7 @@ def imaging_setup_continuum_single_field(
     img_xds,
     image_params,
     imaging_weights_params,
+    specmode="mfs",
     processing_set_data_group_name="corrected",
     single_precision_image=True,
     processing_function_threads=1,
@@ -344,6 +340,7 @@ def imaging_setup_continuum_single_field(
         img_xds,
         nterms=nterms,
         reference_frequency_hz=reference_frequency_hz,
+        specmode=specmode,
     )
 
     # Create the residual group up front. The local Taylor PSFs, primary beam,
@@ -471,10 +468,25 @@ def imaging_setup_continuum_single_field(
         float_dtype=float_dtype,
     )
 
-    img_xds = _convert_primary_beam_to_average_accumulators(
-        img_xds,
-        image_data_group_name=image_data_group_out_name,
-    )
+    if specmode == "mfs":
+        img_xds = _convert_primary_beam_to_average_accumulators(
+            img_xds,
+            image_data_group_name=image_data_group_out_name,
+        )
+    else:
+        # MVC requires the full channel-dependent PB cube.
+        primary_beam_name = img_xds.attrs["data_groups"][image_data_group_out_name][
+            "primary_beam"
+        ]
+
+        img_xds[primary_beam_name].attrs.update(
+            {
+                "description": (
+                    "Partition-local frequency-dependent primary " "beam used by MVC."
+                ),
+                "specmode": "mvc",
+            }
+        )
 
     T_primary_beam = float(primary_beam_return_df["T_primary_beam"].iloc[0])
 

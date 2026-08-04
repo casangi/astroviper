@@ -12,6 +12,10 @@
         },
         "pbcor": { "type": "boolean" },
         "pblimit": {"type": "float"},
+        "specmode": {
+            "type": ["str"],
+            "allowed": ["mfs", "mvc"]
+        },
         "instrument_polarization_basis": {
             "type": ["str"],
             "allowed": ["linear", "circular"]

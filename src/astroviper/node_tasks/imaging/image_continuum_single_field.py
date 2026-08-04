@@ -385,6 +385,9 @@ def residual_update_continuum_single_field(
     data_selection,
     image_store,
     input_data_store,
+    specmode="mfs",
+    pb_cache_mapping=None,
+    model_xds=None,
     processing_set_data_group_name="corrected",
     instrument_polarization_basis="linear",
     single_precision_image=True,
@@ -503,7 +506,9 @@ def residual_update_continuum_single_field(
     import socket
     import time
 
+    import numpy as np
     import toolviper.utils.logger as logger
+    import xarray as xr
     from toolviper.utils.memory_management import get_rss_gb
     from xradio.image import make_empty_sky_image
 
@@ -536,6 +541,13 @@ def residual_update_continuum_single_field(
             "point_spread_function",
             "primary_beam",
         ]
+
+    specmode = str(specmode).lower()
+
+    if specmode not in ("mfs", "mvc"):
+        raise ValueError(
+            "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
+        )
 
     # Build the empty image in the correlation basis expected by the gridder.
     correlation_pol_coords = {
@@ -608,25 +620,176 @@ def residual_update_continuum_single_field(
         )
 
     # =============================================================
+    # Resolve the task-local MVC primary beam
+    # =============================================================
+
+    specmode = str(specmode).lower()
+
+    if specmode not in ("mfs", "mvc"):
+        raise ValueError(
+            "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
+        )
+
+    primary_beam_xds = None
+
+    if specmode == "mvc" and not is_n_iter_0:
+        if pb_cache_mapping is None:
+            raise ValueError("Later MVC major cycles require pb_cache_mapping.")
+
+        task_id = int(task_id)
+
+        if task_id not in pb_cache_mapping:
+            raise KeyError(
+                "No cached MVC primary beam exists for "
+                f"task {task_id}. Available task identifiers are "
+                f"{sorted(pb_cache_mapping)}."
+            )
+
+        primary_beam_xds = pb_cache_mapping[task_id]
+
+        if not isinstance(primary_beam_xds, xr.Dataset):
+            raise TypeError(
+                "The cached MVC primary beam for task "
+                f"{task_id} must be an xarray.Dataset; received "
+                f"{type(primary_beam_xds).__name__}."
+            )
+
+        primary_beam_name = primary_beam_xds.attrs.get(
+            "primary_beam_name",
+            "PRIMARY_BEAM",
+        )
+
+        if primary_beam_name not in primary_beam_xds:
+            raise KeyError(
+                "The cached MVC primary-beam dataset for task "
+                f"{task_id} does not contain "
+                f"{primary_beam_name!r}."
+            )
+
+        primary_beam = primary_beam_xds[primary_beam_name]
+
+        if "frequency" not in primary_beam.dims:
+            raise ValueError(
+                "The cached MVC primary beam must contain a " "frequency dimension."
+            )
+
+        expected_frequency = np.asarray(
+            task_coords["frequency"]["data"],
+            dtype=np.float64,
+        )
+
+        actual_frequency = np.asarray(
+            primary_beam.coords["frequency"].values,
+            dtype=np.float64,
+        )
+
+        if not np.array_equal(
+            actual_frequency,
+            expected_frequency,
+        ):
+            raise ValueError(
+                "The cached MVC primary-beam frequencies do not "
+                "match the frequencies assigned to this map task: "
+                f"cached={actual_frequency}, "
+                f"task={expected_frequency}."
+            )
+
+    # =============================================================
     # Run processing function
     # =============================================================
 
     # Run the continuum processing function.
-    (img_xds, timing_df,) = pf.imaging.residual_update_continuum_single_field(
+    img_xds, timing_df = pf.imaging.residual_update_continuum_single_field(
         ps_xdt,
         img_xds,
         image_params,
         imaging_weights_params,
-        processing_set_data_group_name=processing_set_data_group_name,
-        instrument_polarization_basis=instrument_polarization_basis,
+        processing_set_data_group_name=(processing_set_data_group_name),
+        instrument_polarization_basis=(instrument_polarization_basis),
         single_precision_image=single_precision_image,
-        processing_function_threads=processing_function_threads,
+        processing_function_threads=(processing_function_threads),
         fft_backend=fft_backend,
-        image_data_variables_keep=image_data_variables_keep,
+        image_data_variables_keep=(image_data_variables_keep),
         is_n_iter_0=is_n_iter_0,
         model_uv_xds=model_uv_xds,
+        model_xds=model_xds,
+        primary_beam_xds=primary_beam_xds,
+        specmode=specmode,
         task_id=task_id,
     )
+
+    # Retain the task-local frequency-dependent PB for MVC
+    pb_xds = None
+
+    if specmode == "mvc" and is_n_iter_0:
+        import xarray as xr
+
+        image_data_groups = img_xds.attrs.get(
+            "data_groups",
+            {},
+        )
+
+        if "residual" not in image_data_groups:
+            raise KeyError("MVC setup did not create the residual image data group.")
+
+        residual_data_group = image_data_groups["residual"]
+        primary_beam_name = residual_data_group.get("primary_beam")
+
+        if primary_beam_name is None:
+            raise KeyError(
+                "The MVC residual data group does not register a " "primary beam."
+            )
+
+        if primary_beam_name not in img_xds:
+            raise KeyError(
+                f"The MVC residual data group registers primary beam "
+                f"{primary_beam_name!r}, but that variable is absent."
+            )
+
+        primary_beam = img_xds[primary_beam_name]
+
+        if "frequency" not in primary_beam.dims:
+            raise ValueError(
+                "The MVC primary beam must retain its frequency " "dimension."
+            )
+
+        expected_frequency = np.asarray(
+            task_coords["frequency"]["data"],
+            dtype=np.float64,
+        )
+        actual_frequency = np.asarray(
+            primary_beam.coords["frequency"].values,
+            dtype=np.float64,
+        )
+
+        if not np.array_equal(
+            actual_frequency,
+            expected_frequency,
+        ):
+            raise ValueError(
+                "The MVC primary-beam frequencies do not match the "
+                "map-task frequencies."
+            )
+
+        pb_xds = xr.Dataset(
+            {
+                primary_beam_name: xr.Variable(
+                    dims=primary_beam.dims,
+                    data=primary_beam.data,
+                    attrs=primary_beam.attrs.copy(),
+                )
+            },
+            coords={
+                dim: primary_beam.coords[dim]
+                for dim in primary_beam.dims
+                if dim in primary_beam.coords
+            },
+            attrs={
+                "primary_beam_name": primary_beam_name,
+                "task_id": int(task_id),
+                "specmode": "mvc",
+            },
+        )
 
     # Preserve the first-cycle imaging weights for reuse by later major cycles.
     # They may have been loaded from the processing set or calculated in setup.
@@ -727,6 +890,11 @@ def residual_update_continuum_single_field(
     if weight_datasets:
         return_dict["task_id"] = int(task_id)
         return_dict["weight_datasets"] = weight_datasets
+
+    # Return primary beams per channel if present
+    if pb_xds is not None:
+        return_dict["task_id"] = int(task_id)
+        return_dict["pb_xds"] = pb_xds
 
     return return_dict
 
@@ -1284,6 +1452,285 @@ def prepare_imaging_weights_continuum_node(
     }
 
 
+def fit_mvc_residual_cube_to_taylor_terms(
+    img_xds,
+    *,
+    nterms,
+    reference_frequency,
+    pblimit=0.2,
+    image_data_group_name="residual",
+    primary_beam_name="PRIMARY_BEAM",
+    output_name="SKY_RESIDUAL",
+    residual_cube_name=None,
+):
+    """PB-correct an MVC residual cube and fit image-domain Taylor terms."""
+    import numpy as np
+    import xarray as xr
+
+    data_groups = img_xds.attrs.get("data_groups", {})
+
+    if image_data_group_name not in data_groups:
+        raise KeyError(f"Image data group {image_data_group_name!r} is missing.")
+
+    data_group = data_groups[image_data_group_name]
+
+    if residual_cube_name is None:
+        residual_cube_name = data_group.get("sky")
+
+    if residual_cube_name is None:
+        raise KeyError(
+            f"Image data group {image_data_group_name!r} does not "
+            "register a residual sky variable."
+        )
+
+    if residual_cube_name not in img_xds:
+        raise KeyError(f"Residual cube {residual_cube_name!r} is missing.")
+
+    if primary_beam_name not in img_xds:
+        raise KeyError(f"Primary-beam cube {primary_beam_name!r} is missing.")
+
+    residual_cube = img_xds[residual_cube_name]
+    primary_beam = img_xds[primary_beam_name]
+
+    if "frequency" not in residual_cube.dims:
+        raise ValueError("MVC residual must contain a frequency axis.")
+
+    if "frequency" not in primary_beam.dims:
+        raise ValueError("MVC primary beam must contain a frequency axis.")
+
+    if residual_cube.sizes["frequency"] != (primary_beam.sizes["frequency"]):
+        raise ValueError(
+            "MVC residual and PB cubes have different " "frequency-axis lengths."
+        )
+
+    residual_frequency = np.asarray(
+        residual_cube.coords["frequency"].values,
+        dtype=np.float64,
+    )
+    primary_beam_frequency = np.asarray(
+        primary_beam.coords["frequency"].values,
+        dtype=np.float64,
+    )
+
+    if not np.array_equal(
+        residual_frequency,
+        primary_beam_frequency,
+    ):
+        raise ValueError(
+            "MVC residual and primary-beam frequency " "coordinates do not match."
+        )
+
+    nterms = int(nterms)
+    reference_frequency = float(reference_frequency)
+    pblimit = float(pblimit)
+
+    if nterms < 1:
+        raise ValueError(f"nterms must be positive; received {nterms}.")
+
+    if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
+        raise ValueError("reference_frequency must be finite and positive.")
+
+    frequency = residual_frequency
+
+    x = (frequency - reference_frequency) / reference_frequency
+
+    # -------------------------------------------------------------
+    # PB correction mask
+    # -------------------------------------------------------------
+    valid = np.isfinite(primary_beam) & (primary_beam >= pblimit)
+
+    # The current projector is global, not pixel dependent. Therefore use
+    # only pixels for which every frequency channel passes the PB cutoff.
+    valid_all_channels = valid.all(dim="frequency")
+
+    # Set invalid pixels to zero during the matrix multiplication so NaNs
+    # do not contaminate all Taylor terms.
+    corrected = xr.where(
+        valid_all_channels,
+        residual_cube / primary_beam,
+        0.0,
+    )
+
+    # -------------------------------------------------------------
+    # Channel weights
+    # -------------------------------------------------------------
+    normalization_name = data_group.get("visibility_normalization")
+
+    if normalization_name is None or normalization_name not in img_xds:
+        channel_weight = np.ones(
+            frequency.size,
+            dtype=np.float64,
+        )
+    else:
+        normalization = img_xds[normalization_name]
+
+        if "frequency" not in normalization.dims:
+            raise ValueError(
+                f"{normalization_name!r} must contain a " "frequency dimension."
+            )
+
+        # Initial implementation: combine time and polarization into one
+        # spectral weight per channel.
+        reduce_dims = [dim for dim in normalization.dims if dim != "frequency"]
+
+        channel_weight = np.asarray(
+            normalization.sum(
+                dim=reduce_dims,
+                skipna=True,
+            ).values,
+            dtype=np.float64,
+        )
+
+    channel_weight = np.where(
+        np.isfinite(channel_weight) & (channel_weight > 0.0),
+        channel_weight,
+        0.0,
+    )
+
+    if np.count_nonzero(channel_weight) < nterms:
+        raise ValueError(
+            "Too few positively weighted MVC channels support " f"nterms={nterms}."
+        )
+
+    # -------------------------------------------------------------
+    # Weighted Taylor projector
+    # -------------------------------------------------------------
+    design = np.stack(
+        [x**term for term in range(nterms)],
+        axis=1,
+    )
+
+    gram = design.T @ (channel_weight[:, None] * design)
+
+    if np.linalg.matrix_rank(gram) < nterms:
+        raise ValueError(
+            "The MVC channel sampling does not support " f"nterms={nterms}."
+        )
+
+    projector = np.linalg.solve(
+        gram,
+        design.T * channel_weight[None, :],
+    )
+
+    # -------------------------------------------------------------
+    # Apply projector
+    # -------------------------------------------------------------
+    frequency_axis = corrected.get_axis_num("frequency")
+
+    corrected_data = np.moveaxis(
+        np.asarray(corrected.data),
+        frequency_axis,
+        0,
+    )
+
+    taylor_data = np.einsum(
+        "tf,f...->t...",
+        projector,
+        corrected_data,
+        optimize=True,
+    )
+
+    taylor_data = np.moveaxis(
+        taylor_data,
+        0,
+        frequency_axis,
+    )
+
+    output_dims = list(corrected.dims)
+    output_dims[frequency_axis] = "taylor_term"
+
+    output_coords = {
+        name: coord for name, coord in corrected.coords.items() if name != "frequency"
+    }
+    output_coords["taylor_term"] = np.arange(
+        nterms,
+        dtype=np.int64,
+    )
+
+    taylor = xr.DataArray(
+        taylor_data,
+        dims=output_dims,
+        coords=output_coords,
+        attrs={
+            "description": ("MVC PB-corrected residual Taylor terms."),
+            "specmode": "mvc",
+            "reference_frequency": reference_frequency,
+            "nterms": nterms,
+            "pblimit": pblimit,
+            "primary_beam_variable": primary_beam_name,
+            "source_residual_cube": residual_cube_name,
+        },
+    )
+
+    # valid_all_channels has no frequency dimension. Xarray broadcasts it
+    # automatically across the new Taylor-term dimension.
+    taylor = xr.where(
+        valid_all_channels,
+        taylor,
+        np.nan,
+    )
+
+    # xr.where follows the dimension order of the condition and may move
+    # taylor_term behind the spatial dimensions. Restore the canonical
+    # continuum-image layout explicitly.
+    taylor = taylor.transpose(*output_dims)
+
+    expected_dims = tuple(output_dims)
+
+    if taylor.dims != expected_dims:
+        raise RuntimeError(
+            "The MVC Taylor residual has an unexpected dimension order: "
+            f"{taylor.dims}; expected {expected_dims}."
+        )
+
+    # xr.where may discard or replace attributes.
+    taylor.attrs.update(
+        {
+            "description": ("MVC PB-corrected residual Taylor terms."),
+            "specmode": "mvc",
+            "reference_frequency": reference_frequency,
+            "nterms": nterms,
+            "pblimit": pblimit,
+            "primary_beam_variable": primary_beam_name,
+            "source_residual_cube": residual_cube_name,
+        }
+    )
+
+    img_xds[output_name] = taylor
+    data_group["sky"] = output_name
+
+    return img_xds
+
+
+def assemble_mvc_primary_beam_cube(
+    pb_cache_mapping,
+):
+    import xarray as xr
+
+    arrays = []
+
+    for task_id in sorted(pb_cache_mapping):
+        pb_xds = pb_cache_mapping[task_id]
+        pb_name = pb_xds.attrs.get(
+            "primary_beam_name",
+            "PRIMARY_BEAM",
+        )
+        arrays.append(pb_xds[pb_name])
+
+    primary_beam = xr.concat(
+        arrays,
+        dim="frequency",
+    ).sortby("frequency")
+
+    if len(set(primary_beam.frequency.values.tolist())) != (
+        primary_beam.sizes["frequency"]
+    ):
+        # Identical PBs from time/baseline partitions should not be summed.
+        primary_beam = primary_beam.groupby("frequency").first()
+
+    return primary_beam
+
+
 ###############################################################################
 # Node task level functionality related to the append node
 ###############################################################################
@@ -1294,22 +1741,57 @@ def _prepare_continuum_image(
     input_params,
     *,
     initialize_static_products,
+    pb_cache_mapping=None,
 ):
-    """Convert globally reduced UV products into image-domain products.
+    """Convert globally reduced MFS or MVC products to image-domain products.
 
-    This helper performs the operations shared by the minor-cycle and
-    finalization nodes:
+    For ``specmode='mfs'``, the reduced visibility grids already represent
+    Taylor residual terms. They are inverse Fourier-transformed directly into
+    ``SKY_RESIDUAL(taylor_term)``.
 
-    1. inverse FFT and normalize the reduced residual UV grids;
-    2. create and fit the globally reduced PSF on the first major cycle;
-    3. otherwise install cached static products;
-    4. convert the image dataset from correlation basis to Stokes.
+    For ``specmode='mvc'``, the reduced visibility grids retain their frequency
+    dimension. They are inverse Fourier-transformed into a residual image cube,
+    divided by the frequency-dependent primary beam, and fitted into
+    ``SKY_RESIDUAL(taylor_term)``.
+
+    In both modes, the PSF remains represented by the existing MT-MFS Taylor
+    Hessian stack. It is inverse Fourier-transformed and fitted only during the
+    first major cycle. Later cycles reinstall the cached static products.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Globally reduced image dataset produced by the distributed reduce stage.
+
+    input_params : dict
+        Parameters supplied to the append node. Must contain ``image_params``.
+        For later cycles, it must also contain ``static_xds``.
+
+    initialize_static_products : bool
+        If true, construct and cache the global PSF, restoring-beam fit, and
+        primary-beam products. This should be true only for the first major
+        cycle.
+
+    pb_cache_mapping : dict, optional
+        MVC mapping from map-task identifiers to their task-local
+        frequency-dependent primary-beam datasets. Required for MVC in every
+        call, unless it is also present in ``input_params``.
 
     Returns
     -------
-    tuple
-        ``(img_xds, static_xds, psf_fit_return_df)``.
+    img_xds : xarray.Dataset
+        Image-domain dataset containing Taylor residuals and static products.
+
+    static_xds : xarray.Dataset
+        Cached PSF, primary beam, beam-fit parameters, and maximum sidelobe.
+
+    psf_fit_return_df : pandas.DataFrame or None
+        PSF Gaussian-fit timing information. It is non-null only when static
+        products are initialized.
     """
+    import numpy as np
+    import xarray as xr
+
     from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
         transform_polarization_basis,
     )
@@ -1331,16 +1813,36 @@ def _prepare_continuum_image(
     reference_frequency = config["reference_frequency"]
     image_data_group_name = config["image_data_group_in_name"]
 
+    specmode = str(
+        input_params.get(
+            "specmode",
+            image_params.get("specmode", "mfs"),
+        )
+    ).lower()
+
+    if specmode not in ("mfs", "mvc"):
+        raise ValueError(
+            "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
+        )
+
+    if pb_cache_mapping is None:
+        pb_cache_mapping = input_params.get("pb_cache_mapping")
+
     # ----------------------------------------------------------
     # Global residual inverse FFT.
     # ----------------------------------------------------------
+
+    residual_output_name = (
+        "SKY_RESIDUAL" if specmode == "mfs" else "SKY_RESIDUAL_MVC_CUBE"
+    )
+
     img_xds = ifft_norm_img_xds(
         img_xds,
         image_params=image_params,
         image_data_group_in_name=image_data_group_name,
         image_data_group_out_name=image_data_group_name,
         image_data_group_out_modified={
-            "sky": "SKY_RESIDUAL",
+            "sky": residual_output_name,
         },
         image_data_variables_keep=config["image_data_variables_keep"],
         processing_function_threads=config["processing_function_threads"],
@@ -1348,38 +1850,149 @@ def _prepare_continuum_image(
         complex_dtype=config["complex_dtype"],
     )
 
-    # Sanity checks
-    if "SKY_RESIDUAL" not in img_xds:
+    if residual_output_name not in img_xds:
         raise RuntimeError(
-            "The global residual inverse FFT did not create SKY_RESIDUAL."
+            "The global residual inverse FFT did not "
+            f"create {residual_output_name!r}."
         )
 
-    if "taylor_term" not in img_xds["SKY_RESIDUAL"].dims:
-        raise RuntimeError("SKY_RESIDUAL does not contain the 'taylor_term' dimension.")
+    # ------------------------------------------------------------------
+    # Direct MFS: the inverse-FFT result is already a Taylor stack.
+    # ------------------------------------------------------------------
+    if specmode == "mfs":
 
-    actual_nterms = img_xds["SKY_RESIDUAL"].sizes["taylor_term"]
+        residual = img_xds["SKY_RESIDUAL"]
 
-    if actual_nterms != nterms:
-        raise ValueError(
-            "The residual Taylor stack is inconsistent with nterms: "
-            f"received {actual_nterms}, expected {nterms}."
+        if "taylor_term" not in residual.dims:
+            raise RuntimeError(
+                "SKY_RESIDUAL does not contain the 'taylor_term' dimension."
+            )
+
+        actual_nterms = img_xds["SKY_RESIDUAL"].sizes["taylor_term"]
+
+        if actual_nterms != nterms:
+            raise ValueError(
+                "The residual Taylor stack is inconsistent with nterms: "
+                f"received {actual_nterms}, expected {nterms}."
+            )
+
+        residual.attrs.update(
+            {
+                "description": "Continuum residual Taylor products.",
+                "nterms": nterms,
+                "reference_frequency": reference_frequency,
+                "placeholder": False,
+            }
         )
 
-    img_xds["SKY_RESIDUAL"].attrs.update(
-        {
-            "description": "Continuum residual Taylor products.",
-            "nterms": nterms,
-            "reference_frequency": reference_frequency,
-            "placeholder": False,
-        }
-    )
+    elif specmode == "mvc":
+
+        # ----------------------------------------------------------
+        # Assemble the global frequency-dependent primary beam.
+        # ----------------------------------------------------------
+
+        if pb_cache_mapping is None:
+            raise ValueError("MVC requires pb_cache_mapping.")
+
+        primary_beam_cube = assemble_mvc_primary_beam_cube(pb_cache_mapping)
+
+        img_xds["PRIMARY_BEAM_MVC"] = xr.Variable(
+            dims=primary_beam_cube.dims,
+            data=primary_beam_cube.data,
+            attrs=primary_beam_cube.attrs.copy(),
+        )
+
+        # ----------------------------------------------------------
+        # Convert the PB-corrected residual cube to Taylor terms.
+        # ----------------------------------------------------------
+
+        img_xds = fit_mvc_residual_cube_to_taylor_terms(
+            img_xds,
+            nterms=nterms,
+            reference_frequency=reference_frequency,
+            pblimit=input_params["pblimit"],
+            image_data_group_name=image_data_group_name,
+            primary_beam_name="PRIMARY_BEAM_MVC",
+            output_name="SKY_RESIDUAL",
+            residual_cube_name="SKY_RESIDUAL_MVC_CUBE",
+        )
+
+        # ----------------------------------------------------------
+        # Construct the effective PB used only by the minor loop.
+        # ----------------------------------------------------------
+
+        effective_primary_beam = img_xds["PRIMARY_BEAM_MVC"].mean(
+            dim="frequency",
+            skipna=True,
+        )
+
+        # ----------------------------------------------------------
+        # Remove every frequency-dependent MVC product.
+        # ----------------------------------------------------------
+
+        frequency_variables = [
+            name for name, da in img_xds.data_vars.items() if "frequency" in da.dims
+        ]
+
+        img_xds = img_xds.drop_vars(
+            frequency_variables,
+            errors="ignore",
+        )
+
+        if "frequency" in img_xds.dims:
+            img_xds = img_xds.drop_dims(
+                "frequency",
+                errors="ignore",
+            )
+
+        # ----------------------------------------------------------
+        # Recreate a singleton-frequency PB for masking only.
+        # ----------------------------------------------------------
+
+        if "time" in effective_primary_beam.dims:
+            frequency_axis = effective_primary_beam.dims.index("time") + 1
+        else:
+            frequency_axis = 0
+
+        effective_primary_beam = effective_primary_beam.expand_dims(
+            frequency=np.asarray(
+                [reference_frequency],
+                dtype=np.float64,
+            ),
+            axis=frequency_axis,
+        )
+
+        effective_primary_beam.attrs.update(
+            {
+                "description": "Effective MVC primary beam",
+                "type": "primary_beam",
+                "specmode": "mvc",
+                "primary_beam_usage": "minor_cycle",
+            }
+        )
+
+        img_xds["PRIMARY_BEAM"] = xr.Variable(
+            dims=effective_primary_beam.dims,
+            data=effective_primary_beam.data,
+            attrs=effective_primary_beam.attrs.copy(),
+        )
+
+        residual_group = img_xds.attrs.setdefault("data_groups", {},).setdefault(
+            image_data_group_name,
+            {},
+        )
+
+        residual_group["primary_beam"] = "PRIMARY_BEAM"
 
     psf_fit_return_df = None
 
+    # ------------------------------------------------------------------
+    # First major cycle: form and cache global static products.
+    # ------------------------------------------------------------------
+
     if initialize_static_products:
-        # ------------------------------------------------------
-        # Global PSF inverse FFT and beam fit.
-        # ------------------------------------------------------
+        # The PSF/Hessian remains in the existing Taylor representation
+        # for both MFS and the first MVC implementation.
         img_xds = ifft_norm_img_xds(
             img_xds,
             image_params=image_params,
@@ -1407,13 +2020,14 @@ def _prepare_continuum_image(
             "point_spread_function"
         ]
 
-        # sanity checks
         if psf_name not in img_xds:
             raise RuntimeError(
-                "The global PSF inverse FFT did not create " f"{psf_name!r}."
+                "The global PSF inverse FFT did not " f"create {psf_name!r}."
             )
 
-        if "psf_taylor_order" not in img_xds[psf_name].dims:
+        psf = img_xds[psf_name]
+
+        if "psf_taylor_order" not in psf.dims:
             raise RuntimeError(
                 f"{psf_name!r} does not contain the " "'psf_taylor_order' dimension."
             )
@@ -1445,13 +2059,53 @@ def _prepare_continuum_image(
             processing_function_threads=config["processing_function_threads"],
         )
 
-        # Form one globally averaged zeroth-order PB from the reduced
-        # map-task sum/count products.
-        img_xds = _finalize_average_primary_beam(
-            img_xds,
-            reference_frequency=config["reference_frequency"],
-            image_data_group_name=image_data_group_name,
-        )
+        # ----------------------------------------------------------
+        # Construct or validate the PB used by the minor-loop/static API.
+        # ----------------------------------------------------------
+
+        if specmode == "mfs":
+            # MFS still needs to convert the globally reduced sum/count
+            # accumulators into the singleton-frequency PRIMARY_BEAM.
+            img_xds = _finalize_average_primary_beam(
+                img_xds,
+                reference_frequency=reference_frequency,
+                image_data_group_name=image_data_group_name,
+            )
+
+        elif specmode == "mvc":
+            # MVC already constructed PRIMARY_BEAM immediately after the
+            # frequency-cube-to-Taylor conversion.
+            if "PRIMARY_BEAM" not in img_xds:
+                raise RuntimeError(
+                    "MVC image preparation did not construct PRIMARY_BEAM."
+                )
+
+            primary_beam = img_xds["PRIMARY_BEAM"]
+
+            expected_dims = (
+                "time",
+                "frequency",
+                "polarization",
+                "l",
+                "m",
+            )
+
+            if primary_beam.dims != expected_dims:
+                raise ValueError(
+                    "MVC PRIMARY_BEAM has unexpected dimensions: "
+                    f"{primary_beam.dims}; expected {expected_dims}."
+                )
+
+            if primary_beam.sizes["frequency"] != 1:
+                raise ValueError(
+                    "MVC PRIMARY_BEAM must have exactly one effective "
+                    "frequency plane."
+                )
+
+        else:
+            raise ValueError(
+                "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
+            )
 
         # Static variables to be shared with the minor loop controls
         static_variable_names = (
@@ -1461,17 +2115,21 @@ def _prepare_continuum_image(
             "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
         )
 
-        # sanity checks
         missing = [name for name in static_variable_names if name not in img_xds]
 
         if missing:
             raise KeyError(
-                "The first continuum global node could not construct "
-                f"all static products. Missing: {missing}."
+                "The first continuum global node could "
+                "not construct all static products. "
+                f"Missing: {missing}."
             )
 
         static_xds = img_xds[list(static_variable_names)].copy(deep=False)
         static_xds.attrs = dict(img_xds.attrs)
+
+    # ------------------------------------------------------------------
+    # Later major cycles: reinstall static products.
+    # ------------------------------------------------------------------
 
     else:
         # At later iterations, static_xds needs to be present already
@@ -1497,6 +2155,55 @@ def _prepare_continuum_image(
         new_polarization_basis="stokes",
         overwrite=True,
     )
+
+    # transform_polarization_basis may place polarization after the spatial
+    # dimensions. Restore the canonical layouts required by iteration control,
+    # masking, deconvolution, and restoration.
+    canonical_dimension_orders = {
+        "SKY_RESIDUAL": (
+            "time",
+            "taylor_term",
+            "polarization",
+            "l",
+            "m",
+        ),
+        "POINT_SPREAD_FUNCTION": (
+            "time",
+            "psf_taylor_order",
+            "polarization",
+            "l",
+            "m",
+        ),
+        "PRIMARY_BEAM": (
+            "time",
+            "frequency",
+            "polarization",
+            "l",
+            "m",
+        ),
+        "SKY_MODEL": (
+            "time",
+            "taylor_term",
+            "polarization",
+            "l",
+            "m",
+        ),
+    }
+
+    for variable_name, expected_dims in canonical_dimension_orders.items():
+        if variable_name not in img_xds:
+            continue
+
+        data_array = img_xds[variable_name]
+
+        if set(data_array.dims) != set(expected_dims):
+            raise ValueError(
+                f"{variable_name!r} has dimensions "
+                f"{data_array.dims}; expected the dimension set "
+                f"{expected_dims}."
+            )
+
+        img_xds[variable_name] = data_array.transpose(*expected_dims)
 
     return img_xds, static_xds, psf_fit_return_df
 
@@ -1542,10 +2249,16 @@ def continuum_minor_cycle_node(
     is_n_iter_0 = bool(input_params.get("is_n_iter_0", True))
 
     # prepare continuum image, this is doing 1.-4.
+    pb_cache_mapping = input_data.get(
+        "pb_cache_mapping",
+        input_params.get("pb_cache_mapping"),
+    )
+
     (img_xds, static_xds, psf_fit_return_df,) = _prepare_continuum_image(
         input_data["image"],
         input_params,
         initialize_static_products=is_n_iter_0,
+        pb_cache_mapping=pb_cache_mapping,
     )
 
     input_data["image"] = img_xds
@@ -1567,6 +2280,10 @@ def continuum_minor_cycle_node(
     # append node to the distributed driver.
     if weight_cache_mapping is not None:
         return_dict["weight_cache_mapping"] = weight_cache_mapping
+
+    # do the same with the channelized primary beams, if present
+    if pb_cache_mapping is not None:
+        return_dict["pb_cache_mapping"] = pb_cache_mapping
 
     return_dict["static_xds"] = static_xds
     return_dict["timing_psf_fit"] = (
@@ -1620,10 +2337,16 @@ def continuum_finalize_node(
         raise KeyError("continuum_finalize_node requires input_params['model_xds'].")
 
     # shared functionality with the minor loop
+    pb_cache_mapping = input_data.get(
+        "pb_cache_mapping",
+        input_params.get("pb_cache_mapping"),
+    )
+
     img_xds, static_xds, _ = _prepare_continuum_image(
         input_data["image"],
         input_params,
         initialize_static_products=False,
+        pb_cache_mapping=pb_cache_mapping,
     )
 
     model_xds = input_params["model_xds"]

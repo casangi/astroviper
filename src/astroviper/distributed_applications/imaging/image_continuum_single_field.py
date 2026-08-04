@@ -797,6 +797,26 @@ def combine_continuum_chunks(input_data, input_params):
     if not input_data:
         raise ValueError("combine_continuum_chunks received no inputs.")
 
+    # Extract the specmode
+    specmode = input_params.get("specmode")
+
+    if specmode is None:
+        specmode = (
+            input_data[0]["image"]
+            .attrs.get(
+                "continuum_imaging",
+                {},
+            )
+            .get("specmode", "mfs")
+        )
+
+    frequency_cube_variables = tuple(
+        input_params.get(
+            "frequency_cube_variables",
+            (),
+        )
+    )
+
     # ------------------------------------------------------------------
     # Helper functions
     # ------------------------------------------------------------------
@@ -936,6 +956,109 @@ def combine_continuum_chunks(input_data, input_params):
 
             destination[task_id] = weight_datasets
 
+    def _combine_frequency_cube_variable(
+        images,
+        variable_name,
+    ):
+        """Combine task-local MVC frequency cubes."""
+        import numpy as np
+        import xarray as xr
+
+        expanded = []
+
+        for input_index, image_xds in enumerate(images):
+            if variable_name not in image_xds:
+                raise KeyError(
+                    f"{variable_name!r} is missing from MVC input " f"{input_index}."
+                )
+
+            array = image_xds[variable_name]
+
+            if "frequency" not in array.dims:
+                raise ValueError(
+                    f"{variable_name!r} in MVC input {input_index} "
+                    "does not have a frequency dimension."
+                )
+
+            if "frequency" in array.coords:
+                frequency = np.asarray(
+                    array.coords["frequency"].values,
+                    dtype=np.float64,
+                )
+            elif "frequency" in image_xds.coords:
+                frequency = np.asarray(
+                    image_xds.coords["frequency"].values,
+                    dtype=np.float64,
+                )
+            else:
+                raise KeyError(
+                    f"Neither {variable_name!r} nor its parent "
+                    f"dataset in MVC input {input_index} contains "
+                    "a frequency coordinate."
+                )
+
+            if frequency.ndim != 1:
+                raise ValueError(
+                    f"The frequency coordinate in MVC input "
+                    f"{input_index} must be one-dimensional."
+                )
+
+            if frequency.size != array.sizes["frequency"]:
+                raise ValueError(
+                    f"Frequency length mismatch for {variable_name!r} "
+                    f"in MVC input {input_index}: "
+                    f"{frequency.size} != "
+                    f"{array.sizes['frequency']}."
+                )
+
+            if not np.all(np.isfinite(frequency)):
+                raise ValueError(
+                    f"The frequency coordinate in MVC input "
+                    f"{input_index} contains non-finite values."
+                )
+
+            # Discard task-dependent auxiliary coordinates such as velocity.
+            # Preserve only true dimension coordinates.
+            clean_coords = {
+                dim: array.coords[dim]
+                for dim in array.dims
+                if dim != "frequency" and dim in array.coords
+            }
+
+            clean_array = xr.DataArray(
+                data=array.data,
+                dims=array.dims,
+                coords=clean_coords,
+                attrs=array.attrs.copy(),
+                name=variable_name,
+            )
+
+            clean_array = clean_array.rename({"frequency": "_mvc_frequency_sample"})
+
+            clean_array = clean_array.assign_coords(
+                frequency=(
+                    "_mvc_frequency_sample",
+                    frequency,
+                )
+            )
+
+            expanded.append(clean_array)
+
+        concatenated = xr.concat(
+            expanded,
+            dim="_mvc_frequency_sample",
+            join="exact",
+            compat="override",
+            coords="minimal",
+        )
+
+        combined = concatenated.groupby("frequency").sum(dim="_mvc_frequency_sample")
+
+        combined = combined.sortby("frequency")
+        combined.attrs = images[0][variable_name].attrs.copy()
+
+        return combined
+
     # ------------------------------------------------------------------
     # Timing and deconvolution metadata
     # ------------------------------------------------------------------
@@ -945,6 +1068,8 @@ def combine_continuum_chunks(input_data, input_params):
     deconvolution_dicts = []
     # Optional: gather imaging weights
     weight_cache_mapping = {}
+    # Optional: gather channelized primary beams
+    pb_cache_mapping = {}
 
     for input_index, result in enumerate(input_data):
         if not isinstance(result, dict):
@@ -1006,6 +1131,29 @@ def combine_continuum_chunks(input_data, input_params):
                 input_index=input_index,
             )
 
+        # Gather primary beam mapping
+        if "pb_xds" in result:
+            task_id = int(result["task_id"])
+
+            if task_id in pb_cache_mapping:
+                raise ValueError(f"Duplicate MVC PB cache for task {task_id}.")
+
+            pb_cache_mapping[task_id] = result["pb_xds"]
+
+        if "pb_cache_mapping" in result:
+            incoming = result["pb_cache_mapping"]
+
+            if not isinstance(incoming, dict):
+                raise TypeError("pb_cache_mapping must be a dictionary.")
+
+            for task_id, pb_xds in incoming.items():
+                task_id = int(task_id)
+
+                if task_id in pb_cache_mapping:
+                    raise ValueError(f"Duplicate MVC PB cache for task {task_id}.")
+
+                pb_cache_mapping[task_id] = pb_xds
+
     # ------------------------------------------------------------------
     # Taylor-image reduction
     # ------------------------------------------------------------------
@@ -1028,6 +1176,61 @@ def combine_continuum_chunks(input_data, input_params):
     # Make a copy for the combined image
     # In this way, dimensions, shapes, metadata and coordinates are going to be correct
     combined_image = first_image.copy(deep=copy_image_deep)
+
+    # MVC frequency-cube products are reconstructed globally below.
+    # Do not retain the first map task's local frequency coordinate or
+    # frequency-dependent variables in the accumulator.
+    if specmode == "mvc" and frequency_cube_variables:
+        local_frequency_variables = [
+            name
+            for name, data_array in combined_image.data_vars.items()
+            if "frequency" in data_array.dims
+        ]
+
+        if local_frequency_variables:
+            combined_image = combined_image.drop_vars(
+                local_frequency_variables,
+                errors="ignore",
+            )
+
+        if "frequency" in combined_image.dims:
+            combined_image = combined_image.drop_dims(
+                "frequency",
+                errors="ignore",
+            )
+
+    # explicitly build the frequency cubes
+    for variable_name in frequency_cube_variables:
+        images = []
+
+        for input_index, result in enumerate(input_data):
+            if "image" not in result:
+                raise KeyError(f"input[{input_index}] does not contain 'image'.")
+
+            candidate_image = result["image"]
+
+            if variable_name not in candidate_image:
+                if strict:
+                    raise KeyError(
+                        f"Frequency-cube variable {variable_name!r} "
+                        f"is missing from input[{input_index}]."
+                    )
+                continue
+
+            images.append(candidate_image)
+
+        if images:
+            combined_variable = _combine_frequency_cube_variable(
+                images,
+                variable_name,
+            )
+
+            # Remove the copy inherited from the first image before installing the
+            # globally combined frequency cube.
+            if variable_name in combined_image:
+                combined_image = combined_image.drop_vars(variable_name)
+
+            combined_image[variable_name] = combined_variable
 
     for variable_name in additive_variables:
         if variable_name not in combined_image:
@@ -1116,6 +1319,9 @@ def combine_continuum_chunks(input_data, input_params):
 
     if weight_cache_mapping:
         return_dict["weight_cache_mapping"] = weight_cache_mapping
+
+    if pb_cache_mapping:
+        return_dict["pb_cache_mapping"] = pb_cache_mapping
 
     return return_dict
 
@@ -1703,6 +1909,7 @@ def image_continuum_single_field(
     deconvolver: str = "hogbom",
     pbcor: bool = False,
     pblimit: float = 0.2,
+    specmode: str = "mfs",
     instrument_polarization_basis: str = "linear",
     scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],
     field_name: str | None = None,
@@ -1802,6 +2009,19 @@ def image_continuum_single_field(
             "output_shard_channels requires skunk_works=True (sharded output is "
             "written by the concurrent direct-blob writer)."
         )
+
+    # Validate specmode
+    specmode = str(specmode).lower()
+    if specmode not in ("mfs", "mvc"):
+        raise ValueError(
+            "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
+        )
+
+    # not implemented by now
+    # if specmode == "mvc" and deconvolver != "mtmfs":
+    #    raise ValueError(
+    #        "specmode='mvc' requires deconvolver='mtmfs'."
+    #    )
 
     # When restoring, the restored sky must be created on disk and written, so
     # ensure it is in the keep list (without mutating the caller's list).
@@ -1911,6 +2131,7 @@ def image_continuum_single_field(
     input_params["deconvolver"] = deconvolver
     input_params["pbcor"] = bool(pbcor)
     input_params["pblimit"] = float(pblimit)
+    input_params["specmode"] = specmode
     input_params["instrument_polarization_basis"] = instrument_polarization_basis
     input_params["single_precision_image"] = single_precision_image
     input_params["fft_backend"] = fft_backend
@@ -2069,6 +2290,7 @@ def image_continuum_single_field(
         )
 
     weight_cache_mapping = weight_return_dict["weight_cache_mapping"]
+    pb_cache_mapping = None
 
     # ---------------------------------------------------------
     # Main loop
@@ -2101,8 +2323,8 @@ def image_continuum_single_field(
                     f"major cycle {n_major_cycles}."
                 )
 
-            if model_uv_xds is None:
-                raise RuntimeError("No Fourier-domain model is available.")
+            if specmode == "mfs" and model_uv_xds is None:
+                raise RuntimeError("No Fourier-domain MFS model is available.")
 
             if static_xds is None:
                 raise RuntimeError(
@@ -2113,18 +2335,46 @@ def image_continuum_single_field(
             cycle_input_params["model_uv_xds"] = model_uv_xds
             cycle_input_params["static_xds"] = static_xds
 
+            if specmode == "mvc":
+                cycle_input_params["model_xds"] = model_xds
+                cycle_input_params["pb_cache_mapping"] = pb_cache_mapping
+
         # During the first major cycle the PSF and residual Taylor products
         # are reduced. Later cycles only produce new residual products; the
         # static PSF/PB products are supplied by continuum_append_node.
-        if is_n_iter_0:
-            reduce_input_params = {}
+        if specmode == "mfs":
+            if is_n_iter_0:
+                reduce_input_params = {"specmode": "mfs"}
+            else:
+                reduce_input_params = {
+                    "specmode": "mfs",
+                    "additive_variables": (
+                        "VISIBILITY",
+                        "VISIBILITY_NORMALIZATION",
+                    ),
+                }
         else:
-            reduce_input_params = {
-                "additive_variables": (
-                    "VISIBILITY",
-                    "VISIBILITY_NORMALIZATION",
-                ),
-            }
+            if is_n_iter_0:
+                reduce_input_params = {
+                    "specmode": "mvc",
+                    "additive_variables": (
+                        "UV_SAMPLING",
+                        "UV_SAMPLING_NORMALIZATION",
+                    ),
+                    "frequency_cube_variables": (
+                        "VISIBILITY",
+                        "VISIBILITY_NORMALIZATION",
+                    ),
+                }
+            else:
+                reduce_input_params = {
+                    "specmode": "mvc",
+                    "additive_variables": (),
+                    "frequency_cube_variables": (
+                        "VISIBILITY",
+                        "VISIBILITY_NORMALIZATION",
+                    ),
+                }
 
         # ---------------------------------------------------------
         # Configure the global continuum minor-cycle append node.
@@ -2141,6 +2391,8 @@ def image_continuum_single_field(
             "image_data_variables_keep": image_data_variables_keep,
             "fft_backend": fft_backend,
             "single_precision_image": single_precision_image,
+            "specmode": specmode,
+            "pblimit": pblimit,
         }
 
         # In later major loops, a static_xds should be present
@@ -2221,15 +2473,20 @@ def image_continuum_single_field(
 
             model_xds["SKY_MODEL"].attrs = accumulated_model.attrs.copy()
 
-        # Prepare global Fourier-domain Taylor model grids for degridding
-        model_uv_xds = prepare_model_uv_continuum_single_field(
-            model_xds,
-            image_params=image_params,
-            instrument_polarization_basis=instrument_polarization_basis,
-            single_precision_image=single_precision_image,
-            processing_function_threads=processing_function_threads,
-            fft_backend=fft_backend,
-        )
+        if specmode == "mfs":
+            # Prepare global Fourier-domain Taylor model grids for degridding
+            model_uv_xds = prepare_model_uv_continuum_single_field(
+                model_xds,
+                image_params=image_params,
+                instrument_polarization_basis=instrument_polarization_basis,
+                single_precision_image=single_precision_image,
+                processing_function_threads=processing_function_threads,
+                fft_backend=fft_backend,
+            )
+        else:
+            # MVC evaluates the image-domain Taylor model, applies the
+            # task-local PB, and FFTs the resulting cube inside each map task.
+            model_uv_xds = None
 
         # if imaging weights are calculated locally at the imaging setup in the first major loop
         # we need to carry that state over
@@ -2251,6 +2508,17 @@ def image_continuum_single_field(
                     "cache: "
                     f"expected={sorted(expected_task_ids)}, "
                     f"received={sorted(actual_task_ids)}."
+                )
+
+        # Store frequency-dependent primary beam in the cache if running as mvc
+        if specmode == "mvc" and is_n_iter_0:
+            pb_cache_mapping = cycle_return_dict.get("pb_cache_mapping")
+            cycle_input_params["pb_cache_mapping"] = pb_cache_mapping
+
+            if pb_cache_mapping is None:
+                raise RuntimeError(
+                    "The first MVC major cycle did not return "
+                    "the frequency-dependent PB cache."
                 )
 
         # Update global iteration control information and break loop if converged
@@ -2276,30 +2544,52 @@ def image_continuum_single_field(
     # Final major cycle: recompute residual and restore
     # =============================================================
 
-    assert model_uv_xds is not None
+    if specmode == "mfs":
+        assert model_uv_xds is not None
+
     assert model_xds is not None
 
     final_input_params = dict(input_params)
 
     final_input_params["is_n_iter_0"] = False
     final_input_params["restore"] = True
-    final_input_params["model_uv_xds"] = model_uv_xds
     final_input_params["model_xds"] = model_xds
     final_input_params["static_xds"] = static_xds
+    final_input_params["specmode"] = specmode
+    final_input_params["pblimit"] = float(pblimit)
+    final_input_params["pb_cache_mapping"] = pb_cache_mapping
 
     final_input_params["weight_cache_mapping"] = weight_cache_mapping
+
+    if specmode == "mfs":
+        final_input_params["model_uv_xds"] = model_uv_xds
+    else:
+        final_input_params["model_uv_xds"] = None
+
+    if specmode == "mfs":
+        final_reduce_input_params = {
+            "specmode": "mfs",
+            "additive_variables": (
+                "VISIBILITY",
+                "VISIBILITY_NORMALIZATION",
+            ),
+        }
+    else:
+        final_reduce_input_params = {
+            "specmode": "mvc",
+            "additive_variables": (),
+            "frequency_cube_variables": (
+                "VISIBILITY",
+                "VISIBILITY_NORMALIZATION",
+            ),
+        }
 
     # Call the graph with continuum_finalize_node
     final_return_dict, graph_timings = compute_continuum_graph(
         ps_xdt=ps_xdt,
         node_task_data_mapping=node_task_data_mapping,
         cycle_input_params=final_input_params,
-        reduce_input_params={
-            "additive_variables": (
-                "VISIBILITY",
-                "VISIBILITY_NORMALIZATION",
-            ),
-        },
+        reduce_input_params=final_reduce_input_params,
         disk_chunk_sizes=disk_chunk_sizes,
         processing_set_data_group_name=processing_set_data_group_name,
         monitor_resources_seconds=monitor_resources_seconds,
