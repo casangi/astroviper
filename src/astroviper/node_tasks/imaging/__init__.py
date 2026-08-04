@@ -5,7 +5,6 @@ from astroviper.node_tasks.imaging.image_continuum_single_field import (
     degrid_imaging_weights_continuum_node,
     grid_imaging_weight_density_continuum_node,
     model_update_continuum_single_field,
-    prepare_imaging_weights_continuum_node,
     residual_update_continuum_single_field,
 )
 from astroviper.node_tasks.imaging.image_cube_single_field import (
@@ -18,7 +17,6 @@ __all__ = [
     "continuum_minor_cycle_node",
     "model_update_continuum_single_field",
     "residual_update_continuum_single_field",
-    "prepare_imaging_weights_continuum_node",
     "grid_imaging_weight_density_continuum_node",
     "degrid_imaging_weights_continuum_node",
     "feather",

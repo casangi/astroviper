@@ -72,12 +72,12 @@ def normalize_imaging_weight_params(imaging_weights_params):
 
     params = copy.deepcopy(imaging_weights_params)
 
+    if not check_imaging_weights_params(params):
+        raise ValueError("Invalid imaging-weight parameters.")
+
     if params["weighting"] == "uniform":
         params["weighting"] = "briggs"
         params["robust"] = -2.0
-
-    if not check_imaging_weights_params(params):
-        raise ValueError("Invalid imaging-weight parameters.")
 
     return params
 
