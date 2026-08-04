@@ -947,8 +947,10 @@ def residual_update_continuum_single_field(
     The residual-update stage predicts the model visibilities (except during the
     first major cycle), subtracts them from the observed visibilities, grids the
     resulting residual visibilities into Taylor-weighted UV-domain products, and
-    returns those products for global reduction. No inverse FFT, minor cycle, or
-    restoration is performed here.
+    returns those products for global reduction. For MVC, the channel-resolved
+    residual and first-cycle PSF grids are normalized and inverse transformed
+    locally before being returned. MFS retains the globally reduced inverse-FFT
+    path. No minor cycle or restoration is performed here.
 
     Parameters
     ----------
@@ -1008,6 +1010,7 @@ def residual_update_continuum_single_field(
 
     import time
 
+    import numpy as np
     import pandas as pd
 
     from astroviper.processing_functions.imaging.residual_cycle_continuum_single_field import (
@@ -1126,6 +1129,64 @@ def residual_update_continuum_single_field(
 
     timing["T_residual_cycle"] = time.time() - start
     accumulate_timing(timing, residual_return_df)
+
+    # MVC channels are exclusively owned by this map task. Normalize and
+    # inverse-transform them here so the distributed reducer carries cropped
+    # image cubes rather than padded UV grids. The normalization arrays remain
+    # in the dataset because the global Taylor conversion reuses them as
+    # spectral weights.
+    timing["T_local_ifft"] = 0.0
+
+    if str(specmode).lower() == "mvc":
+        from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+            ifft_norm_img_xds,
+        )
+
+        start = time.time()
+
+        img_xds = ifft_norm_img_xds(
+            img_xds,
+            image_params=image_params,
+            image_data_group_in_name="residual",
+            image_data_group_out_name="residual",
+            image_data_group_out_modified={
+                "sky": "SKY_RESIDUAL_MVC_CUBE",
+            },
+            image_data_variables_keep=[],
+            processing_function_threads=processing_function_threads,
+            fft_backend=fft_backend,
+            complex_dtype=(np.complex64 if single_precision_image else np.complex128),
+        )
+
+        if "SKY_RESIDUAL_MVC_CUBE" not in img_xds:
+            raise RuntimeError(
+                "The MVC map task did not create its channel residual image cube."
+            )
+
+        if is_n_iter_0:
+            img_xds = ifft_norm_img_xds(
+                img_xds,
+                image_params=image_params,
+                image_data_group_in_name="residual",
+                image_data_group_out_name="residual",
+                image_data_group_out_modified={
+                    "point_spread_function": "POINT_SPREAD_FUNCTION_MVC_CUBE",
+                },
+                image_data_variables_keep=[],
+                processing_function_threads=processing_function_threads,
+                fft_backend=fft_backend,
+                complex_dtype=(
+                    np.complex64 if single_precision_image else np.complex128
+                ),
+            )
+
+            if "POINT_SPREAD_FUNCTION_MVC_CUBE" not in img_xds:
+                raise RuntimeError(
+                    "The first MVC map task did not create its channel PSF image "
+                    "cube."
+                )
+
+        timing["T_local_ifft"] = time.time() - start
 
     timing["n_channels"] = img_xds.sizes.get(
         "frequency",

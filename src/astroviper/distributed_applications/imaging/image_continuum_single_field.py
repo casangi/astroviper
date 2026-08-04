@@ -1052,8 +1052,25 @@ def combine_continuum_chunks(input_data, input_params):
             coords="minimal",
         )
 
-        combined = concatenated.groupby("frequency").sum(dim="_mvc_frequency_sample")
+        combined_frequency = np.asarray(
+            concatenated.coords["frequency"].values,
+            dtype=np.float64,
+        )
+        unique_frequency, frequency_counts = np.unique(
+            combined_frequency,
+            return_counts=True,
+        )
+        duplicate_frequency = unique_frequency[frequency_counts > 1]
+        if duplicate_frequency.size:
+            raise ValueError(
+                "MVC node-local normalized image cubes require exclusive "
+                "frequency ownership. Duplicate channel coordinates were "
+                f"returned by multiple map tasks: {duplicate_frequency}."
+            )
 
+        combined = concatenated.swap_dims(
+            {"_mvc_frequency_sample": "frequency"}
+        ).drop_vars("_mvc_frequency_sample", errors="ignore")
         combined = combined.sortby("frequency")
         combined.attrs = images[0][variable_name].attrs.copy()
 
@@ -2359,9 +2376,9 @@ def image_continuum_single_field(
                     "specmode": "mvc",
                     "additive_variables": (),
                     "frequency_cube_variables": (
-                        "VISIBILITY",
+                        "SKY_RESIDUAL_MVC_CUBE",
                         "VISIBILITY_NORMALIZATION",
-                        "UV_SAMPLING",
+                        "POINT_SPREAD_FUNCTION_MVC_CUBE",
                         "UV_SAMPLING_NORMALIZATION",
                     ),
                 }
@@ -2370,7 +2387,7 @@ def image_continuum_single_field(
                     "specmode": "mvc",
                     "additive_variables": (),
                     "frequency_cube_variables": (
-                        "VISIBILITY",
+                        "SKY_RESIDUAL_MVC_CUBE",
                         "VISIBILITY_NORMALIZATION",
                     ),
                 }
@@ -2587,7 +2604,7 @@ def image_continuum_single_field(
             "specmode": "mvc",
             "additive_variables": (),
             "frequency_cube_variables": (
-                "VISIBILITY",
+                "SKY_RESIDUAL_MVC_CUBE",
                 "VISIBILITY_NORMALIZATION",
             ),
         }

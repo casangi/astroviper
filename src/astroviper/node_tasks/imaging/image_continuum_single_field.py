@@ -404,25 +404,29 @@ def residual_update_continuum_single_field(
     task_time_kill_switch_seconds=None,
     weight_cache_mapping=None,
 ):
-    """Compute one frequency chunk's continuum UV-grid products in memory.
+    """Compute one frequency chunk's continuum products in memory.
 
     This node task constructs the per-chunk image dataset, loads the corresponding
     visibility partition, and calls the continuum residual processing function.
 
     Unlike the cube imaging node task, this function performs no image writing.
-    Instead, it returns the chunk-local continuum UV-domain products that are
-    numerically accumulated by the GraphViper reduce stage. The global inverse FFT,
-    polarization conversion, minor cycle, and image restoration are performed only
-    after all frequency chunks have been reduced.
+    MFS returns chunk-local UV-domain products for numerical reduction. MVC
+    normalizes and inverse-transforms its exclusively owned channel grids locally,
+    then returns channel residual and first-cycle PSF image cubes for frequency
+    concatenation. Polarization conversion, Taylor normal-equation construction,
+    the minor cycle, and restoration remain global operations.
 
-    The returned dataset typically contains
+    The MFS dataset typically contains
 
     - ``VISIBILITY``;
     - ``VISIBILITY_NORMALIZATION``;
     - ``UV_SAMPLING``;
     - ``UV_SAMPLING_NORMALIZATION``;
 
-    together with any static metadata required by later processing stages.
+    MVC instead returns ``SKY_RESIDUAL_MVC_CUBE`` and, during the first major
+    cycle, ``POINT_SPREAD_FUNCTION_MVC_CUBE``. It retains both normalization
+    arrays because they are reused as spectral weights by the global Taylor
+    conversion.
 
     Parameters
     ----------
@@ -1499,10 +1503,11 @@ def _prepare_continuum_image(
     Taylor residual terms. They are inverse Fourier-transformed directly into
     ``SKY_RESIDUAL(taylor_term)``.
 
-    For ``specmode='mvc'``, the reduced residual and first-cycle PSF grids retain
-    their frequency dimension.  They are inverse Fourier-transformed into
-    channel cubes and converted together into the Taylor normal-equation
-    right-hand sides and Hessian planes expected by the MT-MFS minor cycle.
+    For ``specmode='mvc'``, map tasks have already normalized and inverse
+    Fourier-transformed their exclusively owned channels. The reducer concatenates
+    those residual and first-cycle PSF image cubes along frequency, and this
+    function converts them into the Taylor normal-equation right-hand sides and
+    Hessian planes expected by the MT-MFS minor cycle.
 
     MFS retains its direct Taylor-weighted PSF path.  MVC constructs its Taylor
     PSFs from the channel PSF cube.  Both are fitted only during the first major
@@ -1579,27 +1584,27 @@ def _prepare_continuum_image(
     if pb_cache_mapping is None:
         pb_cache_mapping = input_params.get("pb_cache_mapping")
 
-    # ----------------------------------------------------------
-    # Global residual inverse FFT.
-    # ----------------------------------------------------------
-
+    # MFS still reduces Taylor-weighted UV grids and therefore performs its
+    # inverse FFT globally. MVC map tasks already returned normalized channel
+    # residual and first-cycle PSF image cubes.
     residual_output_name = (
         "SKY_RESIDUAL" if specmode == "mfs" else "SKY_RESIDUAL_MVC_CUBE"
     )
 
-    img_xds = ifft_norm_img_xds(
-        img_xds,
-        image_params=image_params,
-        image_data_group_in_name=image_data_group_name,
-        image_data_group_out_name=image_data_group_name,
-        image_data_group_out_modified={
-            "sky": residual_output_name,
-        },
-        image_data_variables_keep=config["image_data_variables_keep"],
-        processing_function_threads=config["processing_function_threads"],
-        fft_backend=config["fft_backend"],
-        complex_dtype=config["complex_dtype"],
-    )
+    if specmode == "mfs":
+        img_xds = ifft_norm_img_xds(
+            img_xds,
+            image_params=image_params,
+            image_data_group_in_name=image_data_group_name,
+            image_data_group_out_name=image_data_group_name,
+            image_data_group_out_modified={
+                "sky": residual_output_name,
+            },
+            image_data_variables_keep=config["image_data_variables_keep"],
+            processing_function_threads=config["processing_function_threads"],
+            fft_backend=config["fft_backend"],
+            complex_dtype=config["complex_dtype"],
+        )
 
     if residual_output_name not in img_xds:
         raise RuntimeError(
@@ -1638,26 +1643,14 @@ def _prepare_continuum_image(
 
     elif specmode == "mvc":
 
-        if initialize_static_products:
-            img_xds = ifft_norm_img_xds(
-                img_xds,
-                image_params=image_params,
-                image_data_group_in_name=image_data_group_name,
-                image_data_group_out_name=image_data_group_name,
-                image_data_group_out_modified={
-                    "point_spread_function": "POINT_SPREAD_FUNCTION_MVC_CUBE",
-                },
-                image_data_variables_keep=config["image_data_variables_keep"],
-                processing_function_threads=config["processing_function_threads"],
-                fft_backend=config["fft_backend"],
-                complex_dtype=config["complex_dtype"],
+        if (
+            initialize_static_products
+            and "POINT_SPREAD_FUNCTION_MVC_CUBE" not in img_xds
+        ):
+            raise RuntimeError(
+                "The globally concatenated MVC products do not contain the "
+                "node-normalized channel PSF cube."
             )
-
-            if "POINT_SPREAD_FUNCTION_MVC_CUBE" not in img_xds:
-                raise RuntimeError(
-                    "The global MVC PSF inverse FFT did not create the channel "
-                    "PSF cube."
-                )
 
         # ----------------------------------------------------------
         # Assemble the global frequency-dependent primary beam.
