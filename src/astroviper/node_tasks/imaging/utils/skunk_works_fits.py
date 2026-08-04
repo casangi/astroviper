@@ -127,20 +127,43 @@ def _stokes_axis(pol_labels):
 
 
 def _frequency_axis(freq_values):
-    """FITS ``FREQ`` axis ``(crval, cdelt, crpix)`` for the channel centers."""
+    """FITS ``FREQ`` axis ``(crval, cdelt, crpix, max_deviation_hz)`` for the
+    channel centers.
+
+    A FITS axis is linear, and the imager never regrids spectrally, so a
+    non-uniform channel grid (normal when the imaged processing set
+    concatenates spectral windows) cannot be represented exactly. Such a grid
+    is approximated by the uniform axis through the first and last channel
+    centers, with a logged warning; ``max_deviation_hz`` is the worst
+    ``|true - linear|`` channel-center error (``0.0`` when the axis is exact)
+    and is recorded as a ``HISTORY`` card by :func:`_build_primary_header`.
+    """
+    import toolviper.utils.logger as logger
+
     freq_values = np.asarray(freq_values, dtype=np.float64)
     if freq_values.size == 1:
         # Any nonzero increment is valid for a single-channel axis (the reader
         # evaluates the axis only at the reference pixel).
-        return float(freq_values[0]), 1.0, 1.0
-    steps = np.diff(freq_values)
-    cdelt = float(steps[0])
-    if cdelt == 0.0 or not np.allclose(steps, cdelt, rtol=1e-6, atol=0.0):
+        return float(freq_values[0]), 1.0, 1.0, 0.0
+    cdelt = float((freq_values[-1] - freq_values[0]) / (freq_values.size - 1))
+    if cdelt == 0.0:
         raise ValueError(
-            "Frequency coordinates are not uniformly spaced; a linear FITS "
-            "FREQ axis cannot represent them."
+            "Frequency coordinates have zero overall span; a FITS FREQ axis "
+            "cannot represent them."
         )
-    return float(freq_values[0]), cdelt, 1.0
+    linear = freq_values[0] + cdelt * np.arange(freq_values.size)
+    max_deviation = float(np.max(np.abs(freq_values - linear)))
+    if max_deviation <= 1e-6 * abs(cdelt):
+        return float(freq_values[0]), cdelt, 1.0, 0.0
+    logger.warning(
+        "FITS FREQ axis: channel centers are not uniformly spaced (e.g. "
+        "concatenated spectral windows), which a linear FITS axis cannot "
+        "represent. Writing the uniform axis through the first and last "
+        f"centers instead; worst channel-center error {max_deviation:.6g} Hz "
+        f"({max_deviation / abs(cdelt):.3g} channel widths). A HISTORY card "
+        "records the approximation."
+    )
+    return float(freq_values[0]), cdelt, 1.0, max_deviation
 
 
 def _direction_axis_values(coord_values):
@@ -160,7 +183,9 @@ def _build_primary_header(
     ``RADESYS``/``EQUINOX``/``LONPOLE``/``LATPOLE``/``PC``, spectral axis +
     ``RESTFRQ``/``SPECSYS``, ``TELESCOP``, ``DATE-OBS``/``TIMESYS``), and every
     keyword written is one the reader consumes or excludes from the user attrs,
-    so nothing leaks into ``attrs["user"]`` on read.
+    so nothing leaks into ``attrs["user"]`` on read. A non-uniform frequency
+    grid is approximated (see :func:`_frequency_axis`) and noted in a
+    ``HISTORY`` card (also excluded by the reader).
     """
     from astropy.io import fits
     from astropy.time import Time
@@ -184,7 +209,9 @@ def _build_primary_header(
     cdelt1, crpix1 = _direction_axis_values(img_xds.l.values)
     cdelt2, crpix2 = _direction_axis_values(img_xds.m.values)
     crval3, cdelt3, crpix3 = _stokes_axis(img_xds.polarization.values)
-    crval4, cdelt4, crpix4 = _frequency_axis(img_xds.frequency.values)
+    crval4, cdelt4, crpix4, freq_max_deviation = _frequency_axis(
+        img_xds.frequency.values
+    )
     pc = csys["pixel_coordinate_transformation_matrix"]
     lonpole_deg, latpole_deg = np.degrees(csys["native_pole_direction"]["data"])
     time_attrs = img_xds.time.attrs
@@ -240,6 +267,12 @@ def _build_primary_header(
     header["DATE-OBS"] = obs_time.isot
     header["TIMESYS"] = time_attrs.get("scale", "utc").upper()
     header["ORIGIN"] = "AstroVIPER"
+    if freq_max_deviation != 0.0:
+        header["HISTORY"] = (
+            "FREQ axis approximates non-uniform channel centers (worst error "
+            f"{freq_max_deviation:.6g} Hz = "
+            f"{freq_max_deviation / abs(cdelt4):.3g} channel widths)."
+        )
     if has_beams_extension:
         header["CASAMBM"] = (True, "CASA multiple beams per channel/polarization")
     return header
