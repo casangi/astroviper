@@ -1998,6 +1998,9 @@ def image_continuum_single_field(
     from xradio.image import make_empty_sky_image, write_image
     from xradio.measurement_set import open_processing_set
 
+    from astroviper.processing_functions.imaging.check_imaging_parameters import (
+        check_imaging_weights_params,
+    )
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
         prepare_model_uv_continuum_single_field,
     )
@@ -2033,6 +2036,13 @@ def image_continuum_single_field(
         raise ValueError(
             "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
         )
+
+    # Validate once at the application boundary so every graph sees the same
+    # normalized scope. The checker defaults the scope to local and maps a
+    # requested global natural-weight calculation to its equivalent local path.
+    imaging_weights_params = dict(imaging_weights_params)
+    if not check_imaging_weights_params(imaging_weights_params):
+        raise ValueError("Invalid imaging_weights_params.")
 
     # not implemented by now
     # if specmode == "mvc" and deconvolver != "mtmfs":
@@ -2257,25 +2267,16 @@ def image_continuum_single_field(
         )
 
     weighting = imaging_weights_params["weighting"].lower()
+    weighting_scope = imaging_weights_params["weighting_scope"].lower()
 
-    if weighting == "natural":
-        (
-            weight_return_dict,
-            weight_graph_timings,
-        ) = prepare_continuum_imaging_weights_local(
-            ps_xdt=ps_xdt,
-            node_task_data_mapping=node_task_data_mapping,
-            input_params=weight_preparation_input_params,
-            disk_chunk_sizes=disk_chunk_sizes,
-            processing_set_data_group_name=(processing_set_data_group_name),
-            monitor_resources_seconds=monitor_resources_seconds,
-            task_priorities=task_priorities,
-            reduce_mode=reduce_mode,
-            reduce_n_batch=reduce_n_batch,
-        )
-
-    elif weighting in ("briggs", "uniform"):
-        if False:
+    if weighting in ("natural", "briggs", "briggs_abs", "uniform"):
+        if weighting_scope == "global":
+            if weighting not in ("briggs", "uniform"):
+                raise ValueError(
+                    "Global weighting scope currently supports only Briggs "
+                    "and uniform weighting; received "
+                    f"{imaging_weights_params['weighting']!r}."
+                )
             (
                 weight_return_dict,
                 weight_graph_timings,
@@ -2291,8 +2292,9 @@ def image_continuum_single_field(
                 reduce_n_batch=reduce_n_batch,
             )
         else:
-            weight_return_dict = {}
-            weight_return_dict["weight_cache_mapping"] = None
+            # Local weights are calculated inside every first-major-cycle map
+            # task, returned as a cache, and reattached in later cycles.
+            weight_return_dict = {"weight_cache_mapping": None}
             weight_graph_timings = {}
 
     else:

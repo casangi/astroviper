@@ -349,6 +349,28 @@ def check_imaging_weights_params(imaging_weights_params):
     ):
         params_passed = False
 
+    if not (
+        check_params(
+            imaging_weights_params,
+            "weighting_scope",
+            [str],
+            acceptable_data=["local", "global"],
+            default="local",
+        )
+    ):
+        params_passed = False
+
+    if (
+        params_passed
+        and imaging_weights_params["weighting"] == "natural"
+        and imaging_weights_params["weighting_scope"] == "global"
+    ):
+        logger.warning(
+            "Natural imaging weighting is identical for local and global "
+            "weighting scopes. Using weighting_scope='local'."
+        )
+        imaging_weights_params["weighting_scope"] = "local"
+
     return params_passed
 
 
