@@ -150,6 +150,34 @@ def _install_static_continuum_products(
         if name not in img_xds:
             source = static_xds[name]
 
+            if (
+                "frequency" in source.dims
+                and "frequency" in img_xds.dims
+                and source.sizes["frequency"] != img_xds.sizes["frequency"]
+            ):
+                frequency_users = [
+                    variable_name
+                    for variable_name, variable in img_xds.data_vars.items()
+                    if "frequency" in variable.dims
+                ]
+
+                if frequency_users:
+                    raise ValueError(
+                        "Cannot replace the chunk frequency coordinate while "
+                        f"variables still use it: {frequency_users}."
+                    )
+
+                img_xds = img_xds.drop_dims("frequency")
+
+            source_coords = {
+                dim: source.coords[dim]
+                for dim in source.dims
+                if dim in source.coords and dim not in img_xds.coords
+            }
+
+            if source_coords:
+                img_xds = img_xds.assign_coords(source_coords)
+
             img_xds[name] = xr.Variable(
                 source.dims,
                 source.data,
@@ -568,6 +596,7 @@ def residual_update_continuum_single_field(
         frequency_coords=task_coords["frequency"]["data"],
         pol_coords=correlation_pol_coords,
         time_coords=image_params["time_coords"],
+        spectral_reference=image_params.get("spectral_reference", "lsrk"),
         do_sky_coords=False,
     )
 
@@ -1920,6 +1949,8 @@ def continuum_minor_cycle_node(
         "pb_cache_mapping",
         input_params.get("pb_cache_mapping"),
     )
+    if pb_cache_mapping is None and "pb_xds" in input_data:
+        pb_cache_mapping = {int(input_data["task_id"]): input_data["pb_xds"]}
 
     (img_xds, static_xds, psf_fit_return_df,) = _prepare_continuum_image(
         input_data["image"],
@@ -1935,6 +1966,10 @@ def continuum_minor_cycle_node(
 
     # Preserve imaging weights collected during the first major-cycle reduce.
     weight_cache_mapping = input_data.get("weight_cache_mapping")
+    if weight_cache_mapping is None and "weight_datasets" in input_data:
+        weight_cache_mapping = {
+            int(input_data["task_id"]): input_data["weight_datasets"]
+        }
 
     # Run the model update.
     return_dict = model_update_continuum_single_field(

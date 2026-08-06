@@ -485,6 +485,9 @@ def imaging_setup_continuum_single_field(
         image_params,
         image_data_group_in_name=image_data_group_out_name,
         image_data_group_out_name=image_data_group_out_name,
+        list_dish_diameters=image_params.get("list_dish_diameters"),
+        list_blockage_diameters=image_params.get("list_blockage_diameters"),
+        ipower=image_params.get("primary_beam_ipower", 2),
         float_dtype=float_dtype,
     )
 

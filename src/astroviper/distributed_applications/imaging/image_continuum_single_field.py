@@ -1846,6 +1846,7 @@ def image_continuum_single_field(
     """
     import time
 
+    import numpy as np
     import toolviper.utils.logger as logger
     from graphviper.graph_tools.coordinate_utils import (
         get_disk_chunk_sizes,
@@ -1894,6 +1895,10 @@ def image_continuum_single_field(
             "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
         )
 
+    # Work with an application-local copy: continuum setup may augment the
+    # image parameters with metadata derived from the Processing Set.
+    image_params = dict(image_params)
+
     # Validate once at the application boundary so every graph sees the same
     # normalized scope. The checker defaults the scope to local and maps a
     # requested global natural-weight calculation to its equivalent local path.
@@ -1927,6 +1932,7 @@ def image_continuum_single_field(
         frequency_coords=image_params["frequency_coords"],
         pol_coords=image_params["polarization_coords"],
         time_coords=image_params["time_coords"],
+        spectral_reference=image_params.get("spectral_reference", "lsrk"),
         do_sky_coords=False,
     )
     timing_distributed_application["T_make_empty_image_xds"] = time.time() - start
@@ -2038,6 +2044,37 @@ def image_continuum_single_field(
     start = time.time()
     ps_xdt = open_processing_set(ps_store, scan_intents=scan_intents)
     timing_distributed_application["T_open_processing_set"] = time.time() - start
+
+    if len(ps_xdt) == 0:
+        raise ValueError(
+            "The Processing Set is empty after applying scan_intents="
+            f"{scan_intents!r}. Check the available scan intents before imaging."
+        )
+
+    if "list_dish_diameters" not in image_params:
+        antenna_xds = ps_xdt.xr_ps.get_combined_antenna_xds()
+        diameter_name = "ANTENNA_DISH_DIAMETER"
+
+        if diameter_name not in antenna_xds:
+            raise KeyError(
+                "Continuum primary-beam construction requires antenna dish "
+                f"diameters, but {diameter_name!r} is absent from antenna metadata."
+            )
+
+        dish_diameters = np.asarray(
+            antenna_xds[diameter_name].values,
+            dtype=np.float64,
+        )
+        dish_diameters = np.unique(dish_diameters[np.isfinite(dish_diameters)])
+
+        if dish_diameters.size != 1:
+            raise NotImplementedError(
+                "Single-field continuum primary-beam construction currently "
+                "requires one common antenna dish diameter; received "
+                f"{dish_diameters.tolist()}."
+            )
+
+        image_params["list_dish_diameters"] = dish_diameters.tolist()
 
     # The skunk-works node-task I/O path reconstructs the processing set from the
     # data group's variables only, so it needs the resolved role->variable
