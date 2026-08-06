@@ -16,6 +16,7 @@ def grid_imaging_weights(
     # Currently unused: the weight gridding kernel stays serial so weight sums
     # are bit-reproducible; accepted for API consistency across the stack.
     processing_function_threads: int = 1,
+    truncate_uv_cells: bool = False,
 ):
     """
     Grid per-visibility *data weights* onto a UV grid.
@@ -48,6 +49,9 @@ def grid_imaging_weights(
             the UV grid size.
     cell_size : tuple(float, float)
             Pixel scale (Δl, Δm) in radians along the two image axes.
+    truncate_uv_cells : bool, default ``False``
+        If True, use CASA continuum integer truncation. If False, assign to
+        the nearest UV-density cell.
 
     Returns
     -------
@@ -60,8 +64,10 @@ def grid_imaging_weights(
       ``assert weight.shape[3] < 3`` and currently grids only polarization 0.
       If you intend to combine polarizations (e.g., average PP and QQ),
       adjust the polarization logic in the jitted function accordingly.
-    * Rounding: to match historical Fortran/CASA behavior, UV pixel indices are
-      computed via ``int(x + 0.5)`` (rather than ``np.round``).
+    * Cell assignment defaults to nearest-cell ``int(x + 0.5)``. CASA's
+      continuum path instead uses ``int(x)`` after shifting coordinates into
+      the positive grid domain; select that behavior with
+      ``truncate_uv_cells=True``.
 
     See Also
     --------
@@ -87,11 +93,12 @@ def grid_imaging_weights(
         data_weight,
         n_uv,
         delta_lm,
+        truncate_uv_cells,
     )
 
 
-# When Numba JIT is used, Python's round is not used; we explicitly mimic legacy
-# Fortran/C rounding via int(x + 0.5) where x is non-negative (see below).
+# Python's round is not used: the kernel explicitly selects nearest-cell or
+# CASA continuum integer-truncation semantics.
 @jit(nopython=True, cache=True, nogil=True)  # fastmath can be enabled if desired
 def grid_imaging_weights_jit(
     grid: np.ndarray,
@@ -102,6 +109,7 @@ def grid_imaging_weights_jit(
     data_weights: np.ndarray,
     n_uv: list,
     delta_lm: list,
+    truncate_uv_cells: bool = False,
 ):
     """
     Jitted inner kernel to grid per-visibility *data weights* to a UV grid.
@@ -178,33 +186,54 @@ def grid_imaging_weights_jit(
                     u_pos_conj = -u + uv_center[0]
                     v_pos_conj = -v + uv_center[1]
 
-                    # Fortran/CASA-compatible rounding to nearest pixel (u_pos, v_pos >= 0).
-                    u_indx = int(u_pos + 0.5)
-                    v_indx = int(v_pos + 0.5)
-
-                    u_indx_conj = int(u_pos_conj + 0.5)
-                    v_indx_conj = int(v_pos_conj + 0.5)
+                    if truncate_uv_cells:
+                        # CASA continuum weighting uses C++ integer conversion
+                        # after shifting into the positive grid coordinate
+                        # system. This truncates toward zero (floor here).
+                        u_indx = int(u_pos)
+                        v_indx = int(v_pos)
+                        u_indx_conj = int(u_pos_conj)
+                        v_indx_conj = int(v_pos_conj)
+                    else:
+                        u_indx = int(u_pos + 0.5)
+                        v_indx = int(v_pos + 0.5)
+                        u_indx_conj = int(u_pos_conj + 0.5)
+                        v_indx_conj = int(v_pos_conj + 0.5)
 
                     # Bounds check for both direct and conjugate pixels.
-                    if (
+                    direct_in_bounds = (
                         (u_indx < n_u)
                         and (v_indx < n_v)
                         and (u_indx >= 0)
                         and (v_indx >= 0)
-                    ):
-                        weight = data_weights[i_time, i_baseline, i_chan, 0]
+                    )
+                    conjugate_in_bounds = (
+                        (u_indx_conj < n_u)
+                        and (v_indx_conj < n_v)
+                        and (u_indx_conj >= 0)
+                        and (v_indx_conj >= 0)
+                    )
+                    if truncate_uv_cells:
+                        direct_in_bounds = (
+                            direct_in_bounds and u_indx > 0 and v_indx > 0
+                        )
+                        conjugate_in_bounds = (
+                            conjugate_in_bounds and u_indx_conj > 0 and v_indx_conj > 0
+                        )
 
-                        if not np.isnan(weight):
-                            # Accumulate weight at (u, v) and its conjugate (-u, -v).
+                    weight = data_weights[i_time, i_baseline, i_chan, 0]
+
+                    if not np.isnan(weight):
+                        if direct_in_bounds:
                             grid[a_chan, 0, u_indx, v_indx] = (
                                 grid[a_chan, 0, u_indx, v_indx] + weight
                             )
+                            sum_weight[a_chan, 0] = sum_weight[a_chan, 0] + weight
+                        if conjugate_in_bounds:
                             grid[a_chan, 0, u_indx_conj, v_indx_conj] = (
                                 grid[a_chan, 0, u_indx_conj, v_indx_conj] + weight
                             )
-
-                            # Track total contribution (factor 2 for conjugate update).
-                            sum_weight[a_chan, 0] = sum_weight[a_chan, 0] + 2.0 * weight
+                            sum_weight[a_chan, 0] = sum_weight[a_chan, 0] + weight
     return
 
 
@@ -219,6 +248,7 @@ def degrid_imaging_weights(
     # Currently unused: the weight degridding kernel stays serial so weight
     # sums are bit-reproducible; accepted for API consistency across the stack.
     processing_function_threads: int = 1,
+    truncate_uv_cells: bool = False,
 ):
     """
     Sample a UV *imaging weight grid* at each visibility's (u, v) to form
@@ -241,6 +271,9 @@ def degrid_imaging_weights(
         Dictionary with required keys:
         - ``"image_size"`` : tuple(int, int), UV grid size.
         - ``"cell_size"`` : tuple(float, float), image pixel scale (Δl, Δm) in radians.
+    truncate_uv_cells : bool, default ``False``
+        If True, sample using CASA continuum integer truncation. If False,
+        sample the nearest UV-density cell.
 
     Returns
     -------
@@ -280,6 +313,7 @@ def degrid_imaging_weights(
         data_weight,
         n_uv,
         delta_lm,
+        truncate_uv_cells,
     )
 
     return imaging_weight
@@ -297,6 +331,7 @@ def degrid_imaging_weights_jit(
     data_weight,
     n_uv,
     delta_lm,
+    truncate_uv_cells=False,
 ):
     """
     Jitted kernel to sample a UV imaging-weight grid at each visibility and
@@ -336,8 +371,8 @@ def degrid_imaging_weights_jit(
     * The per-visibility imaging weight is initialized from
       ``data_weight`` (averaging pols if two are present—see code),
       then divided by the Briggs denominator sampled from the UV grid.
-    * Pixel indices are computed using the same rounding convention as the
-      gridding kernel (``int(x + 0.5)``).
+    * Pixel indices use the same selected cell-assignment convention as the
+      gridding kernel.
     """
 
     c = 299792458.0
@@ -372,16 +407,26 @@ def degrid_imaging_weights_jit(
                     u_pos = u + uv_center[0]
                     v_pos = v + uv_center[1]
 
-                    u_center_indx = int(u_pos + 0.5)
-                    v_center_indx = int(v_pos + 0.5)
+                    if truncate_uv_cells:
+                        u_center_indx = int(u_pos)
+                        v_center_indx = int(v_pos)
+                    else:
+                        u_center_indx = int(u_pos + 0.5)
+                        v_center_indx = int(v_pos + 0.5)
 
                     # Bounds/validity checks before sampling the grid.
-                    if (
+                    in_bounds = (
                         (u_center_indx < n_u)
                         and (v_center_indx < n_v)
                         and (u_center_indx >= 0)
                         and (v_center_indx >= 0)
-                    ):
+                    )
+                    if truncate_uv_cells:
+                        in_bounds = (
+                            in_bounds and u_center_indx > 0 and v_center_indx > 0
+                        )
+
+                    if in_bounds:
                         for i_pol in range(n_pol):
                             a_pol = pol_map[i_pol]
 

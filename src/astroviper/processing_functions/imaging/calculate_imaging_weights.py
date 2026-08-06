@@ -105,6 +105,74 @@ def prepare_local_data_weights(
     )
 
 
+def collapse_continuum_weight_density(weight_density_xds: xr.Dataset) -> xr.Dataset:
+    """Collapse channel-dependent density contributions for continuum Briggs.
+
+    CASA continuum weighting forms one common UV-density plane from every
+    selected channel before calculating a single Briggs factor. This function
+    performs that frequency collapse after distributed partitions have been
+    aligned and reduced.
+
+    Parameters
+    ----------
+    weight_density_xds : xarray.Dataset
+        Reduced dataset containing ``WEIGHT_DENSITY_GRID`` with dimensions
+        ``(frequency, weight_polarization, u, v)`` and ``SUM_WEIGHT`` with
+        dimensions ``(frequency, weight_polarization)``.
+
+    Returns
+    -------
+    xarray.Dataset
+        A copy containing one stored continuum density plane and one summed
+        weight plane. The ``continuum_frequency_collapsed`` attribute marks
+        that the singleton frequency coordinate represents all input channels.
+    """
+    required = ("WEIGHT_DENSITY_GRID", "SUM_WEIGHT")
+    missing = [name for name in required if name not in weight_density_xds]
+    if missing:
+        raise KeyError(f"Weight-density dataset is missing variables {missing}.")
+
+    density = weight_density_xds["WEIGHT_DENSITY_GRID"]
+    sum_weight = weight_density_xds["SUM_WEIGHT"]
+    expected_density_dims = ("frequency", "weight_polarization", "u", "v")
+    expected_sum_dims = ("frequency", "weight_polarization")
+    if density.dims != expected_density_dims:
+        raise ValueError(
+            f"WEIGHT_DENSITY_GRID dimensions are {density.dims}; expected "
+            f"{expected_density_dims}."
+        )
+    if sum_weight.dims != expected_sum_dims:
+        raise ValueError(
+            f"SUM_WEIGHT dimensions are {sum_weight.dims}; expected "
+            f"{expected_sum_dims}."
+        )
+    if density.sizes["frequency"] == 0:
+        raise ValueError("Cannot collapse an empty continuum frequency axis.")
+
+    n_input_frequency_channels = int(density.sizes["frequency"])
+    representative_frequency = float(
+        np.mean(np.asarray(weight_density_xds.frequency.values, dtype=np.float64))
+    )
+    collapsed_density = (
+        density.sum(dim="frequency")
+        .expand_dims(frequency=[representative_frequency])
+        .transpose(*expected_density_dims)
+    )
+    collapsed_sum_weight = (
+        sum_weight.sum(dim="frequency")
+        .expand_dims(frequency=[representative_frequency])
+        .transpose(*expected_sum_dims)
+    )
+
+    result = weight_density_xds.drop_vars(required).drop_dims("frequency")
+    result["WEIGHT_DENSITY_GRID"] = collapsed_density
+    result["SUM_WEIGHT"] = collapsed_sum_weight
+    result.attrs = weight_density_xds.attrs.copy()
+    result.attrs["continuum_frequency_collapsed"] = True
+    result.attrs["n_input_frequency_channels"] = n_input_frequency_channels
+    return result
+
+
 # @shares_param_docs
 def grid_imaging_weight_density_continuum(
     ps_xdt: xr.DataTree,
@@ -420,6 +488,7 @@ def grid_imaging_weight_density_continuum(
             n_uv,
             delta_lm,
             processing_function_threads=processing_function_threads,
+            truncate_uv_cells=True,
         )
 
         datasets_gridded += 1
@@ -688,6 +757,9 @@ def degrid_imaging_weights_continuum(
         global_weighting_xds.coords["frequency"].values,
         dtype=np.float64,
     )
+    continuum_frequency_collapsed = bool(
+        global_weighting_xds.attrs.get("continuum_frequency_collapsed", False)
+    )
 
     if global_frequency.ndim != 1:
         raise ValueError(
@@ -804,48 +876,66 @@ def degrid_imaging_weights_continuum(
                 "contains non-finite values."
             )
 
-        # Match local frequencies to global planes. Using nearest matching with
-        # a tight tolerance avoids depending on exact floating-point identity.
-        global_indices = []
-
-        for local_value in local_frequency:
-            close_indices = np.flatnonzero(
-                np.isclose(
-                    global_frequency,
-                    local_value,
-                    rtol=1.0e-12,
-                    atol=0.0,
+        if continuum_frequency_collapsed:
+            if global_frequency.size != 1:
+                raise ValueError(
+                    "A frequency-collapsed continuum density must contain "
+                    "exactly one stored density plane."
                 )
+            local_density_grid = np.repeat(
+                np.asarray(global_density_da.values),
+                local_frequency.size,
+                axis=0,
+            )
+            local_briggs_factors = np.repeat(
+                np.asarray(global_briggs_da.values),
+                local_frequency.size,
+                axis=1,
+            )
+        else:
+            # Match local frequencies to global planes. Using nearest matching
+            # with a tight tolerance avoids depending on exact floating-point
+            # identity.
+            global_indices = []
+
+            for local_value in local_frequency:
+                close_indices = np.flatnonzero(
+                    np.isclose(
+                        global_frequency,
+                        local_value,
+                        rtol=1.0e-12,
+                        atol=0.0,
+                    )
+                )
+
+                if close_indices.size == 0:
+                    raise KeyError(
+                        f"Frequency {local_value} Hz from child "
+                        f"{ms_name!r} is absent from the global "
+                        "weight-density grid."
+                    )
+
+                if close_indices.size > 1:
+                    raise ValueError(
+                        f"Frequency {local_value} Hz from child "
+                        f"{ms_name!r} matches multiple global planes."
+                    )
+
+                global_indices.append(int(close_indices[0]))
+
+            global_indices = np.asarray(
+                global_indices,
+                dtype=np.int64,
             )
 
-            if close_indices.size == 0:
-                raise KeyError(
-                    f"Frequency {local_value} Hz from child "
-                    f"{ms_name!r} is absent from the global "
-                    "weight-density grid."
-                )
+            # Preserve the local channel order expected by the degridding kernel.
+            local_density_grid = np.asarray(
+                global_density_da.isel(frequency=global_indices).values
+            )
 
-            if close_indices.size > 1:
-                raise ValueError(
-                    f"Frequency {local_value} Hz from child "
-                    f"{ms_name!r} matches multiple global planes."
-                )
-
-            global_indices.append(int(close_indices[0]))
-
-        global_indices = np.asarray(
-            global_indices,
-            dtype=np.int64,
-        )
-
-        # Preserve the local channel order expected by the degridding kernel.
-        local_density_grid = np.asarray(
-            global_density_da.isel(frequency=global_indices).values
-        )
-
-        local_briggs_factors = np.asarray(
-            global_briggs_da.isel(frequency=global_indices).values
-        )
+            local_briggs_factors = np.asarray(
+                global_briggs_da.isel(frequency=global_indices).values
+            )
 
         expected_local_density_shape = (
             local_frequency.size,
@@ -917,6 +1007,7 @@ def degrid_imaging_weights_continuum(
             n_uv,
             delta_lm,
             processing_function_threads=(processing_function_threads),
+            truncate_uv_cells=True,
         )
 
         imaging_weights = np.asarray(imaging_weights)
@@ -1011,6 +1102,7 @@ def calculate_imaging_weights(
     single_precision_gridding: bool = False,
     return_weight_density_grid: bool = False,
     processing_function_threads: int = 1,
+    truncate_uv_cells: bool = False,
 ) -> None | np.ndarray:
     """
     Calculate imaging weights for interferometric data.
@@ -1054,6 +1146,10 @@ def calculate_imaging_weights(
     processing_function_threads : int, default ``1``
         Number of threads handed to the per-processing-function (C++ / Numba /
         FFT) kernels.
+    truncate_uv_cells : bool, default ``False``
+        If True, assign shifted UV coordinates to density cells by integer
+        truncation, matching CASA continuum weighting. If False, use the
+        nearest-cell convention used by cube weighting.
 
     Returns
     -------
@@ -1212,6 +1308,7 @@ def calculate_imaging_weights(
             n_uv,
             delta_lm,
             processing_function_threads=processing_function_threads,
+            truncate_uv_cells=truncate_uv_cells,
         )
 
     briggs_factors = calculate_briggs_params(
@@ -1238,6 +1335,7 @@ def calculate_imaging_weights(
             n_uv,
             delta_lm,
             processing_function_threads=processing_function_threads,
+            truncate_uv_cells=truncate_uv_cells,
         )
 
         n_pol = ms_xdt.sizes["polarization"]

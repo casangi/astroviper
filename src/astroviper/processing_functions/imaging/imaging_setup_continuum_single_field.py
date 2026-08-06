@@ -395,6 +395,7 @@ def imaging_setup_continuum_single_field(
             },
             overwrite=True,
             processing_function_threads=processing_function_threads,
+            truncate_uv_cells=True,
         )
 
         weights_were_calculated = True

@@ -183,6 +183,7 @@ def prepare_continuum_imaging_weights_global(
     from graphviper.graph_tools import generate_dask_workflow, map, reduce
 
     from astroviper.processing_functions.imaging.calculate_imaging_weights import (
+        collapse_continuum_weight_density,
         normalize_imaging_weight_params,
     )
     from astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting import (
@@ -308,6 +309,16 @@ def prepare_continuum_imaging_weights_global(
             "WEIGHT_DENSITY_GRID and SUM_WEIGHT have different "
             "weight-polarization-axis lengths."
         )
+
+    # CASA continuum weighting (including specmode="mvc") forms one common
+    # density plane from every selected frequency before calculating the
+    # Briggs factor. The preceding tree reduction deliberately retains the
+    # physical planes so partitions can first be aligned exactly.
+    global_weight_density_xds = collapse_continuum_weight_density(
+        global_weight_density_xds
+    )
+    global_weight_density_da = global_weight_density_xds["WEIGHT_DENSITY_GRID"]
+    global_sum_weight_da = global_weight_density_xds["SUM_WEIGHT"]
 
     global_weight_density_grid = np.asarray(
         global_weight_density_da.values,
