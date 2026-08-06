@@ -124,24 +124,27 @@ def _attach_continuum_metadata(
     return img_xds
 
 
-def _convert_primary_beam_to_average_accumulators(
+def _convert_primary_beam_to_reference_frequency(
     img_xds,
     *,
+    image_params,
+    reference_frequency_hz,
+    float_dtype,
     image_data_group_name="residual",
 ):
-    """Replace a channelized PB cube by additive sum/count products.
+    """Replace an MFS channel PB cube by the PB evaluated at ``reffreq``.
 
-    The resulting variables can be summed by the distributed reducer. The
-    globally averaged primary beam is constructed in the first append node as
-
-        PRIMARY_BEAM = PRIMARY_BEAM_SUM / PRIMARY_BEAM_CHANNEL_COUNT.
-
-    This implementation computes an unweighted average over frequency channels.
-    It assumes that each frequency channel is represented by exactly one map
-    partition.
+    CASA's standard-gridder MFS path evaluates ``pb.tt0`` on the singleton
+    Taylor image at its spectral coordinate, i.e. at the MT-MFS reference
+    frequency.  The reference PB is independent of visibility partitioning and
+    imaging weights, so it is retained as a non-additive static product.
     """
     import numpy as np
     import xarray as xr
+
+    from astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric import (
+        airy_disk_rorder_v2,
+    )
 
     data_groups = img_xds.attrs.get("data_groups", {})
 
@@ -149,66 +152,57 @@ def _convert_primary_beam_to_average_accumulators(
         raise KeyError(f"Image data group {image_data_group_name!r} is missing.")
 
     image_data_group = data_groups[image_data_group_name]
-    primary_beam_name = image_data_group.get("primary_beam")
 
-    if primary_beam_name is None:
-        raise KeyError(
-            f"Image data group {image_data_group_name!r} does not "
-            "register a primary beam."
-        )
+    reference_frequency_hz = float(reference_frequency_hz)
+    if not np.isfinite(reference_frequency_hz) or reference_frequency_hz <= 0.0:
+        raise ValueError("reference_frequency_hz must be finite and positive.")
 
-    if primary_beam_name not in img_xds:
-        raise KeyError(
-            f"Registered primary-beam variable " f"{primary_beam_name!r} is missing."
-        )
+    dish_diameters = image_params.get("list_dish_diameters")
+    blockage_diameters = image_params.get("list_blockage_diameters")
+    if dish_diameters is None:
+        dish_diameters = np.asarray([10.7])
+    if blockage_diameters is None:
+        blockage_diameters = np.asarray([0.75])
 
-    primary_beam = img_xds[primary_beam_name]
-
-    if "frequency" not in primary_beam.dims:
-        raise ValueError(
-            f"{primary_beam_name!r} must contain a frequency "
-            "dimension before continuum averaging."
-        )
-
-    n_frequency = int(primary_beam.sizes["frequency"])
-
-    if n_frequency < 1:
-        raise ValueError("The local primary-beam cube contains no frequency planes.")
-
-    primary_beam_sum = primary_beam.sum(
-        dim="frequency",
-        skipna=False,
-    )
-
-    primary_beam_sum.attrs = primary_beam.attrs.copy()
-    primary_beam_sum.attrs.update(
-        {
-            "description": ("Partition-local sum of primary-beam frequency planes."),
-            "continuum_average_accumulator": "sum",
-            "n_frequency_planes": n_frequency,
-        }
-    )
-
-    primary_beam_count = xr.DataArray(
-        np.asarray(n_frequency, dtype=np.int64),
-        name="PRIMARY_BEAM_CHANNEL_COUNT",
+    pb_image_params = {
+        **image_params,
+        "image_center": (np.asarray(image_params["image_size"]) // 2).tolist(),
+    }
+    pb_params = {
+        "list_dish_diameters": np.asarray(dish_diameters),
+        "list_blockage_diameters": np.asarray(blockage_diameters),
+        "ipower": image_params.get("primary_beam_ipower", 2),
+    }
+    reference_data = airy_disk_rorder_v2(
+        np.asarray([reference_frequency_hz]),
+        img_xds.polarization.values,
+        pb_params,
+        pb_image_params,
+        dtype=float_dtype,
+    )[0, 0, ...][None, ...]
+    reference_primary_beam = xr.DataArray(
+        reference_data,
+        dims=("time", "polarization", "l", "m"),
+        coords={
+            dim: img_xds.coords[dim]
+            for dim in ("time", "polarization", "l", "m")
+            if dim in img_xds.coords
+        },
+        name="PRIMARY_BEAM_REFERENCE",
         attrs={
-            "description": (
-                "Number of frequency planes contributing to " "PRIMARY_BEAM_SUM."
-            ),
-            "continuum_average_accumulator": "count",
+            "description": "MFS primary beam evaluated at the reference frequency.",
+            "type": "primary_beam",
+            "method": "airy_disk",
+            "specmode": "mfs",
+            "continuum_pb_order": 0,
+            "reference_frequency_hz": reference_frequency_hz,
+            "frequency_interpretation": "direct_reference_frequency_evaluation",
         },
     )
 
-    img_xds["PRIMARY_BEAM_SUM"] = primary_beam_sum
-    img_xds["PRIMARY_BEAM_CHANNEL_COUNT"] = primary_beam_count
+    img_xds["PRIMARY_BEAM_REFERENCE"] = reference_primary_beam
 
-    # The chunk-local PB cube must not survive as the nominal global PB.
-    img_xds = img_xds.drop_vars(primary_beam_name)
-
-    image_data_group.pop("primary_beam", None)
-    image_data_group["primary_beam_sum"] = "PRIMARY_BEAM_SUM"
-    image_data_group["primary_beam_channel_count"] = "PRIMARY_BEAM_CHANNEL_COUNT"
+    image_data_group["primary_beam_reference"] = "PRIMARY_BEAM_REFERENCE"
 
     return img_xds
 
@@ -477,27 +471,27 @@ def imaging_setup_continuum_single_field(
     # Primary beam
     # -------------------------------------------------------------
     #
-    # This currently reuses the cube primary-beam routine. It therefore retains
-    # the chunk frequency coordinate. A later continuum-specific implementation
-    # may choose to evaluate the primary beam only at the common reference
-    # frequency or to form Taylor PB terms.
-    (img_xds, primary_beam_return_df,) = make_primary_beam_single_field(
-        img_xds,
-        image_params,
-        image_data_group_in_name=image_data_group_out_name,
-        image_data_group_out_name=image_data_group_out_name,
-        list_dish_diameters=image_params.get("list_dish_diameters"),
-        list_blockage_diameters=image_params.get("list_blockage_diameters"),
-        ipower=image_params.get("primary_beam_ipower", 2),
-        float_dtype=float_dtype,
-    )
-
     if specmode == "mfs":
-        img_xds = _convert_primary_beam_to_average_accumulators(
+        start = time.time()
+        img_xds = _convert_primary_beam_to_reference_frequency(
             img_xds,
+            image_params=image_params,
+            reference_frequency_hz=reference_frequency_hz,
+            float_dtype=float_dtype,
             image_data_group_name=image_data_group_out_name,
         )
+        primary_beam_return_df = pd.DataFrame({"T_primary_beam": [time.time() - start]})
     else:
+        (img_xds, primary_beam_return_df,) = make_primary_beam_single_field(
+            img_xds,
+            image_params,
+            image_data_group_in_name=image_data_group_out_name,
+            image_data_group_out_name=image_data_group_out_name,
+            list_dish_diameters=image_params.get("list_dish_diameters"),
+            list_blockage_diameters=image_params.get("list_blockage_diameters"),
+            ipower=image_params.get("primary_beam_ipower", 2),
+            float_dtype=float_dtype,
+        )
         # MVC requires the full channel-dependent PB cube.
         primary_beam_name = img_xds.attrs["data_groups"][image_data_group_out_name][
             "primary_beam"

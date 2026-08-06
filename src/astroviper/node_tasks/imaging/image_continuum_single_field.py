@@ -303,25 +303,20 @@ def _attach_imaging_weights_continuum(
     return ps_xdt
 
 
-def _finalize_average_primary_beam(
+def _finalize_reference_primary_beam(
     img_xds,
     *,
     reference_frequency,
     image_data_group_name="residual",
 ):
-    """Construct the globally averaged continuum primary beam."""
+    """Install the static MFS primary beam evaluated at reference frequency."""
     import numpy as np
     import xarray as xr
 
-    sum_name = "PRIMARY_BEAM_SUM"
-    count_name = "PRIMARY_BEAM_CHANNEL_COUNT"
-
-    count_value = int(np.asarray(img_xds[count_name].values).reshape(()))
-
-    if count_value <= 0:
-        raise ValueError("PRIMARY_BEAM_CHANNEL_COUNT must be positive.")
-
-    primary_beam = img_xds[sum_name] / float(count_value)
+    reference_name = "PRIMARY_BEAM_REFERENCE"
+    if reference_name not in img_xds:
+        raise KeyError(f"MFS image is missing {reference_name!r}.")
+    primary_beam = img_xds[reference_name]
 
     # The globally reduced continuum products use Taylor dimensions, not
     # the chunk-local frequency dimension. Remove the stale frequency
@@ -330,7 +325,7 @@ def _finalize_average_primary_beam(
         variables_with_frequency = [
             name
             for name, data_array in img_xds.data_vars.items()
-            if "frequency" in data_array.dims and name not in (sum_name, count_name)
+            if "frequency" in data_array.dims
         ]
 
         if variables_with_frequency:
@@ -353,21 +348,17 @@ def _finalize_average_primary_beam(
         axis=1,
     )
 
-    primary_beam.attrs = img_xds[sum_name].attrs.copy()
+    primary_beam.attrs = img_xds[reference_name].attrs.copy()
     primary_beam.attrs.update(
         {
             "description": (
-                "Continuum zeroth-order primary beam formed as the "
-                "average over all contributing frequency planes."
+                "Continuum zeroth-order primary beam evaluated directly "
+                "at the MT-MFS reference frequency."
             ),
             "type": "primary_beam",
             "continuum_pb_order": 0,
-            "n_frequency_planes": count_value,
             "effective_frequency_hz": float(reference_frequency),
-            "effective_frequency_interpretation": (
-                "Coordinate label for the averaged continuum PB; the "
-                "numerical PB is an average over contributing channels."
-            ),
+            "effective_frequency_interpretation": "direct_evaluation",
         }
     )
 
@@ -386,14 +377,10 @@ def _finalize_average_primary_beam(
     )
 
     image_data_group["primary_beam"] = "PRIMARY_BEAM"
-    image_data_group.pop("primary_beam_sum", None)
-    image_data_group.pop(
-        "primary_beam_channel_count",
-        None,
-    )
+    image_data_group.pop("primary_beam_reference", None)
 
     img_xds = img_xds.drop_vars(
-        [sum_name, count_name],
+        [reference_name],
         errors="ignore",
     )
 
@@ -1760,9 +1747,8 @@ def _prepare_continuum_image(
         # ----------------------------------------------------------
 
         if specmode == "mfs":
-            # MFS still needs to convert the globally reduced sum/count
-            # accumulators into the singleton-frequency PRIMARY_BEAM.
-            img_xds = _finalize_average_primary_beam(
+            # Install the static PB evaluated at the Taylor reference frequency.
+            img_xds = _finalize_reference_primary_beam(
                 img_xds,
                 reference_frequency=reference_frequency,
                 image_data_group_name=image_data_group_name,

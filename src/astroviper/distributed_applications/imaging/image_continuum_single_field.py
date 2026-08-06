@@ -574,11 +574,8 @@ def combine_continuum_chunks(input_data, input_params):
     ``UV_SAMPLING_NORMALIZATION``
         ``(time, psf_taylor_order, polarization)``.
 
-    ``PRIMARY_BEAM_SUM``
-        ``(time, polarization, l, m)``
-
-    ``PRIMARY_BEAM_CHANNEL_COUNT``
-        ``scalar``
+    MFS also carries ``PRIMARY_BEAM_REFERENCE`` with dimensions
+    ``(time, polarization, l, m)`` as a non-additive static product.
 
     All remaining dataset variables (for example metadata, coordinates, primary
     beam products, and other non-additive quantities) are copied from the first
@@ -654,14 +651,11 @@ def combine_continuum_chunks(input_data, input_params):
                 "VISIBILITY_NORMALIZATION",
                 "UV_SAMPLING",
                 "UV_SAMPLING_NORMALIZATION",
-                "PRIMARY_BEAM_SUM",
-                "PRIMARY_BEAM_CHANNEL_COUNT",
             ),
         )
     )
     strict = bool(input_params.get("strict", True))
     copy_image_deep = bool(input_params.get("copy_image_deep", True))
-
     if not input_data:
         raise ValueError("combine_continuum_chunks received no inputs.")
 
@@ -677,6 +671,13 @@ def combine_continuum_chunks(input_data, input_params):
             )
             .get("specmode", "mfs")
         )
+
+    static_variables = tuple(
+        input_params.get(
+            "static_variables",
+            ("PRIMARY_BEAM_REFERENCE",) if specmode == "mfs" else (),
+        )
+    )
 
     frequency_cube_variables = tuple(
         input_params.get(
@@ -1150,6 +1151,34 @@ def combine_continuum_chunks(input_data, input_params):
             candidate_image,
             input_index,
         )
+
+        for variable_name in static_variables:
+            reference_has_static = variable_name in combined_image
+            candidate_has_static = variable_name in candidate_image
+            if not reference_has_static and not candidate_has_static:
+                continue
+            if not reference_has_static:
+                combined_image[variable_name] = candidate_image[variable_name].copy(
+                    deep=True
+                )
+                continue
+            if not candidate_has_static:
+                continue
+            reference_static = combined_image[variable_name]
+            candidate_static = candidate_image[variable_name]
+            _validate_additive_variable(
+                reference_static, candidate_static, variable_name, input_index
+            )
+            if not np.allclose(
+                np.asarray(reference_static.values),
+                np.asarray(candidate_static.values),
+                rtol=1.0e-12,
+                atol=0.0,
+                equal_nan=True,
+            ):
+                raise ValueError(
+                    f"Static variable {variable_name!r} differs in input[{input_index}]."
+                )
 
         # combine for every additive variable
         for variable_name in additive_variables:
