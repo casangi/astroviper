@@ -43,44 +43,6 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
 DISTRIBUTED_APPLICATION_TIMING_TOTAL_KEY = "T_total"
 
 
-def _load_processing_set_chunk(load_params):
-    """Load a disk-level chunk of the processing set for the data loading layer.
-
-    Used as the ``data_loading_task`` argument of
-    :func:`graphviper.graph_tools.map.map` when ``disk_chunk_sizes`` is provided.
-    Each call reads one contiguous block of frequency channels (the native on-disk
-    chunk) and returns the loaded datasets as a plain dict.  The framework
-    sub-selects each map task's slice before invoking
-    :func:`NT_image_cube_single_field`, which uses the pre-loaded data directly
-    instead of re-reading from disk.
-
-    Parameters
-    ----------
-    load_params : dict
-        Must contain:
-
-        * ``"input_data_store"`` – path to the processing set Zarr store.
-        * ``"data_selection"`` – ``{xds_name: {dim: slice}}`` at disk-chunk
-          granularity as produced by
-          :func:`graphviper.graph_tools.map._build_load_stage`.
-        * ``"processing_set_data_group_name"`` – data group forwarded to
-          :func:`xradio.measurement_set.load_processing_set`.
-
-    Returns
-    -------
-    dict
-        ``{xds_name: xarray.Dataset}`` with the loaded disk-chunk data.
-    """
-    from xradio.measurement_set.load_processing_set import load_processing_set
-
-    return load_processing_set(
-        load_params["input_data_store"],
-        sel_parms=load_params["data_selection"],
-        data_group_name=load_params.get("processing_set_data_group_name"),
-        load_sub_datasets=False,
-    )
-
-
 @shares_param_docs
 @toolviper.utils.parameter.validate(config_dir=_PARAM_CONFIG_DIR)
 def image_cube_single_field(
@@ -106,7 +68,8 @@ def image_cube_single_field(
     single_precision_image: bool = True,
     thread_info: dict = None,
     processing_function_threads: int = 1,
-    n_chunks: int | None = None,
+    n_mapping_parallelism: dict[str, int | None] | None = None,
+    node_task_image_chunking: dict[str, int] | None = None,
     overwrite: bool = False,
     memory_mode: str = "in_memory",
     cache_directory: str = None,
@@ -114,7 +77,6 @@ def image_cube_single_field(
     write_imaging_weights_to_ps: bool = False,
     clear_cache: bool = True,
     vizualize_graph: bool = False,
-    disk_chunk_sizes: dict[str, int] | str | None = None,
     fft_backend="pyfftw",
     restore: bool = False,
     skunk_works: bool = False,
@@ -218,8 +180,27 @@ def image_cube_single_field(
         Thread information as returned by
         :func:`~astroviper.utils.data_partitioning.get_thread_info`. Queried
         automatically when ``None``.
-    n_chunks : int, optional
-            Number of frequency chunks to use for parallel processing. If None (default), the chunk count is auto-determined based on the image size, memory constraints, and available parallelism.
+    n_mapping_parallelism : dict, optional
+        Mapping parallelism of the distributed graph, as ``{parallel_axis:
+        n_chunks}``: the named axis is split into ``n_chunks`` chunks, with one
+        node task mapped over each chunk. Cube imaging always maps over
+        ``frequency``, so the only allowed key is ``"frequency"`` (e.g.
+        ``{"frequency": 500}``). An entry value of ``None``, or omitting the
+        parameter entirely (default), auto-determines the chunk count from the
+        image size, memory constraints, and available parallelism.
+    node_task_image_chunking : dict, optional
+        Additional on-disk (Zarr) chunking applied *within* each node task's
+        image chunk when it is written, as ``{dimension_name: chunk_size}``
+        with keys that appear in the image coordinates (e.g. ``{"l": 1024,
+        "m": 1024}`` to chunk the sky plane, or ``{"frequency": 1}`` to
+        subdivide a multi-channel task chunk). Without it each written chunk
+        spans the full extent of every non-parallelized dimension. A chunk
+        size given for ``frequency`` must divide the per-task chunk size so no
+        on-disk chunk straddles two node tasks. With ``output_shard_channels``
+        the values set the *inner* chunk shape of the sharded arrays, so
+        chunking within a shard (e.g. on ``l``/``m``) is possible. Not
+        applicable to ``output_image_format="fits"``. ``None`` (default)
+        applies no additional chunking to the image chunk being written.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
@@ -242,16 +223,6 @@ def image_cube_single_field(
         Whether to clear the cache after imaging. Default is True.
     vizualize_graph : bool
         Whether to vizualize the graph. Default is False.
-    disk_chunk_sizes : Union[Dict[str, int], str], optional
-        Native on-disk chunk sizes for parallel dimensions, e.g.
-        ``{"frequency": 200}``.  The graph gains a data loading layer: one load
-        node is created per unique disk chunk, each reading the full native
-        chunk once.  The mapping nodes then receive their sub-selected slice
-        from the pre-loaded chunk via ``input_params["input_data"]``, avoiding
-        redundant disk reads when many small mapping tasks fall within the same
-        on-disk chunk.  If ``Auto`` (default), the chunk sizes are
-        auto-detected from the processing set using
-        :func:`graphviper.graph_tools.coordinate_utils.get_disk_chunk_sizes`.
     fft_backend : str
         FFT backend used by the gridder normalization (``"pyfftw"`` or
         ``"scipy"``).
@@ -393,6 +364,15 @@ def image_cube_single_field(
                 "output_shard_channels does not apply to FITS output "
                 "(output_image_format='fits')."
             )
+        if node_task_image_chunking is not None:
+            raise ValueError(
+                "node_task_image_chunking does not apply to FITS output "
+                "(output_image_format='fits'): FITS files have no chunked "
+                "storage layout."
+            )
+
+    if n_mapping_parallelism is not None:
+        _validate_n_mapping_parallelism(n_mapping_parallelism)
 
     # When restoring, the restored sky must be created on disk and written, so
     # ensure it is in the keep list (without mutating the caller's list).
@@ -444,23 +424,36 @@ def image_cube_single_field(
     # from it.
     timing_distributed_application["T_write_empty_image"] = time.time() - start
 
-    # Determine number of chunks
+    # Determine the mapping parallelism (the number of frequency chunks, one
+    # node task per chunk). Cube imaging always maps over frequency, so the
+    # only consulted entry of n_mapping_parallelism is "frequency" (validated
+    # above); None auto-determines the count.
     start = time.time()
-    n_chunks = int(
-        calculate_number_of_chunks_for_cube_imaging(
-            img_xds, single_precision_image, n_chunks, thread_info
+    n_frequency_chunks = int(
+        calculate_mapping_parallelism_for_cube_imaging(
+            img_xds,
+            single_precision_image,
+            None
+            if n_mapping_parallelism is None
+            else n_mapping_parallelism["frequency"],
+            thread_info,
         )
     )
 
     # Make Parallel Coords
     parallel_coords = {}
     parallel_coords["frequency"] = make_parallel_coord(
-        coord=img_xds.frequency, n_chunks=n_chunks
+        coord=img_xds.frequency, n_chunks=n_frequency_chunks
     )
     logger.info(
         "Number of frequency chunks ... : "
         + str(len(parallel_coords["frequency"]["data_chunks"]))
     )
+
+    if node_task_image_chunking is not None:
+        _validate_node_task_image_chunking(
+            node_task_image_chunking, img_xds, parallel_coords
+        )
     timing_distributed_application["T_determine_chunks_and_parallel_coords"] = (
         time.time() - start
     )
@@ -478,6 +471,7 @@ def image_cube_single_field(
             double_precision=not single_precision_image,
             data_variable_definitions="imaging",
             shard_channels=output_shard_channels,
+            node_task_image_chunking=node_task_image_chunking,
         )
     timing_distributed_application["T_create_empty_data_variables"] = (
         time.time() - start
@@ -516,7 +510,6 @@ def image_cube_single_field(
     input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
 
     from graphviper.graph_tools.coordinate_utils import (
-        get_disk_chunk_sizes,
         interpolate_data_coords_onto_parallel_coords,
     )
 
@@ -566,14 +559,6 @@ def image_cube_single_field(
     )
     timing_distributed_application["T_interpolate_data_coords"] = time.time() - start
 
-    # Auto-detect native on-disk chunk sizes if not supplied by the caller.
-    if disk_chunk_sizes == "Auto":
-        disk_chunk_sizes = get_disk_chunk_sizes(ps_xdt, parallel_coords)
-        logger.info("Auto-detected disk chunk sizes: " + str(disk_chunk_sizes))
-    elif isinstance(disk_chunk_sizes, str):
-        # If disk_chunk_sizes is a string but not "Auto", treat as None
-        disk_chunk_sizes = None
-
     # frequency_coords is not used by node tasks (they use task_coords["frequency"]["data"])
     # so remove it to avoid embedding the full frequency axis in every task in the graph.
     input_params["image_params"] = {
@@ -604,12 +589,6 @@ def image_cube_single_field(
         node_task=node_tasks.imaging.image_cube_single_field,
         input_params=input_params,
         in_memory_compute=False,
-        # data_loading_task=_load_processing_set_chunk,
-        data_loading_task=None,
-        disk_chunk_sizes=disk_chunk_sizes,
-        load_node_input_params={
-            "processing_set_data_group_name": processing_set_data_group_name
-        },
         monitor_resources_seconds=monitor_resources_seconds,
         task_priorities=task_priorities,
     )
@@ -624,6 +603,52 @@ def image_cube_single_field(
         n_batch=reduce_n_batch,
     )
     timing_distributed_application["T_create_map_reduce_graph"] = time.time() - start
+
+    # One consolidated pre-compute summary of how the work is parallelized and
+    # how the output image is laid out on disk (mapping parallelism, sharding,
+    # chunking), so every run's log records the layout it actually used.
+    n_map_tasks = len(parallel_coords["frequency"]["data_chunks"])
+    channels_per_task = len(parallel_coords["frequency"]["data_chunks"][0])
+    layout_lines = [
+        "Parallelism and output-image layout:",
+        f"  mapping parallelism (n_mapping_parallelism): {n_map_tasks} node "
+        f"tasks, one per frequency chunk of ~{channels_per_task} channel(s). "
+        "For cube imaging the mapping parallelism is always on frequency.",
+    ]
+    if output_image_format == "fits":
+        layout_lines.append(
+            "  output format: FITS (one file per kept image variable); each "
+            "node task pwrites its channel block directly. Zarr sharding and "
+            "chunking parameters (output_shard_channels, "
+            "node_task_image_chunking) do not apply to FITS."
+        )
+    else:
+        if output_shard_channels:
+            layout_lines.append(
+                f"  sharding (output_shard_channels): Zarr v3 sharded arrays "
+                f"with {output_shard_channels} frequency channels packed per "
+                "shard file; node tasks write their chunk(s) into shared, "
+                "pre-created shard files at disjoint offsets."
+            )
+        else:
+            layout_lines.append(
+                "  sharding (output_shard_channels): none; one file per "
+                "written Zarr chunk."
+            )
+        if node_task_image_chunking:
+            layout_lines.append(
+                f"  chunking (node_task_image_chunking): "
+                f"{node_task_image_chunking}; each node task's image chunk is "
+                "split into multiple on-disk chunks along the listed "
+                "dimensions (unlisted dimensions stay unchunked)."
+            )
+        else:
+            layout_lines.append(
+                "  chunking (node_task_image_chunking): none; each node task "
+                "writes its whole image chunk as one on-disk chunk per "
+                "variable (full l/m extent)."
+            )
+    logger.info("\n".join(layout_lines))
 
     # Compute cube. Two interchangeable backends execute the same backend-agnostic
     # viper_graph: the default Dask backend (generate_dask_workflow + dask.compute)
@@ -825,15 +850,104 @@ def combine_return_data_frames(input_data, input_params):
     }
 
 
-def calculate_number_of_chunks_for_cube_imaging(
-    img_xds, single_precision_image, n_chunks, thread_info
+def _validate_n_mapping_parallelism(n_mapping_parallelism):
+    """Validate the cube-imaging ``n_mapping_parallelism`` dict.
+
+    Cube imaging always maps over ``frequency``, so the dict must have exactly
+    the key ``"frequency"``; its value is the number of frequency chunks (a
+    positive int), or ``None`` to auto-determine the count.
+
+    Raises
+    ------
+    ValueError
+        On any other key, or a non-positive/non-integer chunk count.
+    """
+    if set(n_mapping_parallelism) != {"frequency"}:
+        raise ValueError(
+            "n_mapping_parallelism must be a dict with the single key "
+            "'frequency' (cube imaging always maps over frequency), e.g. "
+            '{"frequency": 500}; got keys '
+            f"{sorted(n_mapping_parallelism)}."
+        )
+    count = n_mapping_parallelism["frequency"]
+    if count is not None and (
+        isinstance(count, bool) or not isinstance(count, int) or count < 1
+    ):
+        raise ValueError(
+            "n_mapping_parallelism['frequency'] must be a positive int or "
+            f"None (auto), got {count!r}."
+        )
+
+
+def _validate_node_task_image_chunking(
+    node_task_image_chunking, img_xds, parallel_coords
 ):
-    """Determine the number of frequency chunks for cube imaging.
+    """Validate ``node_task_image_chunking`` against the image and the mapping
+    parallelism.
+
+    Checks that every key is an image dimension (the image-domain dims of
+    ``img_xds`` plus the uv-domain ``u``/``v``), that every value is a positive
+    integer, and that a chunk size given for a parallelized dimension divides
+    every node task's chunk (except the last, which may be partial): the node
+    tasks write whole on-disk chunks, so a chunk straddling two tasks would be
+    written -- and clobbered -- by both.
+
+    Parameters
+    ----------
+    node_task_image_chunking : dict
+        ``{dimension_name: chunk_size}`` requested by the caller.
+    img_xds : xarray.Dataset
+        The (empty) image dataset providing the valid dimension names.
+    parallel_coords : dict
+        Parallel coordinates of the mapping (for cube imaging keyed by
+        ``frequency``), providing the per-task chunk lengths.
+
+    Raises
+    ------
+    ValueError
+        On an unknown dimension key, a non-positive/non-integer chunk size, or
+        a parallel-dimension chunk size that would straddle node tasks.
+    """
+    valid_dims = set(img_xds.sizes) | {"u", "v"}
+    for dim, size in node_task_image_chunking.items():
+        if dim not in valid_dims:
+            raise ValueError(
+                f"node_task_image_chunking key {dim!r} is not an image "
+                f"dimension; expected one of {sorted(valid_dims)}."
+            )
+        if isinstance(size, bool) or not isinstance(size, int) or size < 1:
+            raise ValueError(
+                f"node_task_image_chunking[{dim!r}] must be a positive int, "
+                f"got {size!r}."
+            )
+    for dim, parallel_coord in parallel_coords.items():
+        size = node_task_image_chunking.get(dim)
+        if size is None:
+            continue
+        chunk_lengths = [len(chunk) for chunk in parallel_coord["data_chunks"].values()]
+        # Sizes >= the per-task chunk are clipped to it on creation (no
+        # subdivision), so only the effective (clipped) size must align.
+        effective_size = min(size, chunk_lengths[0])
+        for task_chunk_length in chunk_lengths[:-1]:
+            if task_chunk_length % effective_size:
+                raise ValueError(
+                    f"node_task_image_chunking[{dim!r}]={size} must divide "
+                    f"every node task's {dim} chunk (found a task chunk of "
+                    f"length {task_chunk_length}); otherwise an on-disk chunk "
+                    "would straddle two node tasks and be written by both."
+                )
+
+
+def calculate_mapping_parallelism_for_cube_imaging(
+    img_xds, single_precision_image, n_frequency_chunks, thread_info
+):
+    """Determine the mapping parallelism (number of frequency chunks) for cube
+    imaging.
 
     Computes the memory required per single-frequency chunk and delegates to
     :func:`calculate_data_chunking` to find a chunk count that satisfies both
-    memory and parallelism constraints. If ``n_chunks`` is already provided it
-    is returned unchanged.
+    memory and parallelism constraints. If ``n_frequency_chunks`` is already
+    provided it is returned unchanged.
 
     Parameters
     ----------
@@ -843,8 +957,10 @@ def calculate_number_of_chunks_for_cube_imaging(
         If ``True``, use single-precision (complex64 / float32) memory estimates
         for the image-domain arrays; otherwise double-precision
         (complex128 / float64).
-    n_chunks : int or None
-        If not ``None``, this value is returned directly without any computation.
+    n_frequency_chunks : int or None
+        The requested frequency chunk count (the ``"frequency"`` entry of the
+        driver's ``n_mapping_parallelism`` dict). If not ``None``, this value
+        is returned directly without any computation.
     thread_info : dict or None
         Thread information as returned by :func:`get_thread_info`.
         If ``None``, thread information is queried automatically.
@@ -852,12 +968,13 @@ def calculate_number_of_chunks_for_cube_imaging(
     Returns
     -------
     int
-        Number of frequency chunks to use for the parallel imaging graph.
+        Number of frequency chunks (node tasks) to use for the parallel
+        imaging graph.
     """
     import toolviper.utils.logger as logger
 
-    if n_chunks is None:
-        # Calculate n_chunks
+    if n_frequency_chunks is None:
+        # Calculate the mapping parallelism from memory + thread constraints.
         from astroviper.utils.data_partitioning import bytes_in_dtype
 
         ## Determine the amount of memory required by the node task if all dimensions that chunking will occur on are singleton.
@@ -898,7 +1015,7 @@ def calculate_number_of_chunks_for_cube_imaging(
         if thread_info is None:
             thread_info = get_thread_info()
             logger.info("Thread info " + str(thread_info))
-        n_chunks = calculate_data_chunking(
+        n_frequency_chunks = calculate_data_chunking(
             memory_singleton_chunk,
             chunking_dims_sizes,
             thread_info,
@@ -906,9 +1023,10 @@ def calculate_number_of_chunks_for_cube_imaging(
             tasks_per_thread=4,
         )["frequency"]
         logger.info(
-            "Number of frequency chunks: "
-            + str(n_chunks)
+            "Auto-determined mapping parallelism (number of frequency "
+            "chunks): "
+            + str(n_frequency_chunks)
             + " frequency channels: "
             + str(chunking_dims_sizes)
         )
-    return n_chunks
+    return n_frequency_chunks

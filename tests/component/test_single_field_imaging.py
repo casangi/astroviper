@@ -9,7 +9,7 @@ reproduce its truth image to within ``TRUTH_RTOL``.
 
 The truth images are themselves astroviper output: a single canonical
 reference per base test, regenerated at double precision,
-``processing_function_threads=1``, ``n_chunks=1`` and ``skunk_works=False``
+``processing_function_threads=1``, ``n_mapping_parallelism=1`` and ``skunk_works=False``
 (see ``_regenerate_truth_images``). The old CASA reference images are no longer
 used.
 
@@ -64,7 +64,7 @@ _PS_STORE_DRIVE_ID = "1BRe3cD6YAWkn-jSPbClGGM9VlbxHP_yn"
 # Astroviper truth (reference) images. niter0 and niter100 each have a single
 # double-precision truth; multi_cycle has both a double- and a single-precision
 # truth because its deep CLEAN is precision-sensitive. All are regenerated at
-# processing_function_threads=1, n_chunks=1, skunk_works=False (see
+# processing_function_threads=1, n_mapping_parallelism=1, skunk_works=False (see
 # ``_regenerate_truth_images``); double-precision variants compare against the
 # double truth, single-precision variants against the single truth.
 TRUTH_IMAGE_NITER0 = "twhya_selfcal_5chans_lsrk_niter0_truth.img.zarr"
@@ -90,7 +90,7 @@ _TRUTH_IMAGE_DRIVE_IDS = {
 
 # Default (tight) per-channel relative-difference ceiling for the reproducible
 # variants. Double-precision multi_cycle and the niter0/niter100 tests reproduce
-# their truth to ~1e-13 (PRIMARY_BEAM ~5e-10 at n_chunks=5), so 1e-6 is a real
+# their truth to ~1e-13 (PRIMARY_BEAM ~5e-10 at n_mapping_parallelism=5), so 1e-6 is a real
 # regression guard with comfortable margin.
 TRUTH_RTOL = 1e-6
 
@@ -116,7 +116,7 @@ MULTI_CYCLE_DOUBLE_VS_SINGLE_RTOL = 0.15
 
 # Ceiling for the worst-case multi_cycle cross-config comparison
 # (test_single_field_imaging_multi_cycle_worst_case): double / 1 thread /
-# n_chunks=5 vs single / 12 threads / n_chunks=1, so precision, thread count and
+# n_mapping_parallelism=5 vs single / 12 threads / n_mapping_parallelism=1, so precision, thread count and
 # chunking all differ at once. Still dominated by the float32 peak-selection
 # bifurcation (~10% on one channel), so it shares the same loose ceiling.
 MULTI_CYCLE_WORST_CASE_RTOL = 0.15
@@ -157,10 +157,10 @@ IMAGING_WEIGHTS_PARAMS = {
 }
 
 # Per-base-test imaging configuration. Everything fixed for a base test lives
-# here; the per-variant knobs (``processing_function_threads``, ``n_chunks`` and
+# here; the per-variant knobs (``processing_function_threads``, ``n_mapping_parallelism`` and
 # ``single_precision_image``) are supplied by each test. ``skunk_works`` is
 # always False and the truth images are generated from these configs at double
-# precision, threads=1, n_chunks=1.
+# precision, threads=1, n_mapping_parallelism=1.
 _CONFIGS = {
     "niter0": {
         "iteration_control_params": {
@@ -182,7 +182,6 @@ _CONFIGS = {
             "uv_sampling_normalization",
         ],
         "single_precision_image": False,
-        "disk_chunk_sizes": {"frequency": 2},
         "extra_kwargs": {},
         "compare_variables": ["SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"],
     },
@@ -208,7 +207,6 @@ _CONFIGS = {
             "sky_restored",
         ],
         "single_precision_image": False,
-        "disk_chunk_sizes": {"frequency": 1},
         "extra_kwargs": {
             "write_visibility_model_to_ps": True,
             "fft_backend": "scipy",
@@ -244,7 +242,6 @@ _CONFIGS = {
             "sky_restored",
         ],
         "single_precision_image": False,
-        "disk_chunk_sizes": {"frequency": 5},
         "extra_kwargs": {
             "write_visibility_model_to_ps": True,
             "fft_backend": "scipy",
@@ -474,20 +471,22 @@ def _run_image_cube(
     image_store,
     *,
     processing_function_threads,
-    n_chunks,
+    n_mapping_parallelism,
     single_precision_image=None,
     skunk_works=False,
     output_shard_channels=None,
+    node_task_image_chunking=None,
 ):
     """Run ``image_cube_single_field`` for one base test ``kind`` and variant.
 
     Returns ``(return_dict, img_av_xds, image_params)``. The per-variant knobs are
-    ``processing_function_threads``, ``n_chunks`` and optionally
+    ``processing_function_threads``, ``n_mapping_parallelism`` and optionally
     ``single_precision_image`` (which overrides the config value when not None),
-    plus ``skunk_works`` / ``output_shard_channels`` to exercise the direct-write
-    and sharded-write paths. Everything else comes from ``_CONFIGS[kind]``, so the
+    plus ``skunk_works`` / ``output_shard_channels`` /
+    ``node_task_image_chunking`` to exercise the direct-write, sharded-write and
+    sub-chunked-write paths. Everything else comes from ``_CONFIGS[kind]``, so the
     truth images (generated from the same configs at double precision, threads=1,
-    n_chunks=1) and every variant share an identical imaging setup.
+    n_mapping_parallelism=1) and every variant share an identical imaging setup.
     """
     dask.config.set(scheduler="synchronous")
     config = _CONFIGS[kind]
@@ -509,12 +508,14 @@ def _run_image_cube(
         single_precision_image=single_precision_image,
         thread_info=None,
         processing_function_threads=processing_function_threads,
-        n_chunks=n_chunks,
+        # The variant knob is the frequency chunk COUNT; the driver takes the
+        # {parallel_axis: n_chunks} dict form (cube imaging: frequency only).
+        n_mapping_parallelism={"frequency": n_mapping_parallelism},
         overwrite=True,
-        disk_chunk_sizes=config["disk_chunk_sizes"],
         vizualize_graph=False,
         skunk_works=skunk_works,
         output_shard_channels=output_shard_channels,
+        node_task_image_chunking=node_task_image_chunking,
         **config["extra_kwargs"],
     )
     img_av_xds = xr.open_zarr(image_store)
@@ -671,7 +672,7 @@ def test_single_field_imaging_niter0(plot_saver, processing_function_threads):
         "niter0",
         image_store,
         processing_function_threads=processing_function_threads,
-        n_chunks=5,
+        n_mapping_parallelism=5,
     )
     truth_xds = xr.open_zarr(TRUTH_IMAGE_NITER0)
 
@@ -756,7 +757,7 @@ def test_single_field_imaging_niter0_sharded(plot_saver, processing_function_thr
         "niter0",
         store_plain,
         processing_function_threads=processing_function_threads,
-        n_chunks=5,
+        n_mapping_parallelism=5,
         skunk_works=True,
         output_shard_channels=None,
     )
@@ -769,7 +770,7 @@ def test_single_field_imaging_niter0_sharded(plot_saver, processing_function_thr
         "niter0",
         store_sharded,
         processing_function_threads=processing_function_threads,
-        n_chunks=5,
+        n_mapping_parallelism=5,
         skunk_works=True,
         output_shard_channels=2,
     )
@@ -831,6 +832,113 @@ def test_single_field_imaging_niter0_sharded(plot_saver, processing_function_thr
         )
 
 
+def test_single_field_imaging_niter0_node_task_image_chunking(plot_saver):
+    """``node_task_image_chunking`` must change only the on-disk chunk layout,
+    never the image: l/m sub-chunking of the 250x250 planes ({"l": 100, "m":
+    125} -> 3x2 chunks per plane, including a padded 50-row edge chunk) through
+    BOTH direct-write paths (plain and sharded) reproduces the plain
+    direct-write image and the niter0 truth, with the expected Zarr layout."""
+    import glob
+
+    import zarr
+
+    _ensure_ps_store()
+    _ensure_truth_image(TRUTH_IMAGE_NITER0)
+
+    chunking = {"l": 100, "m": 125}
+
+    # Reference: plain direct write, no sub-chunking.
+    store_plain = "twhya_selfcal_5chans_lsrk_niter0_skunk_ref_astroviper.img.zarr"
+    _, img_plain, _ = _run_image_cube(
+        "niter0",
+        store_plain,
+        processing_function_threads=4,
+        n_mapping_parallelism=5,
+        skunk_works=True,
+    )
+    # A: plain direct write with l/m sub-chunking.
+    store_chunked = "twhya_selfcal_5chans_lsrk_niter0_chunked_astroviper.img.zarr"
+    _, img_chunked, _ = _run_image_cube(
+        "niter0",
+        store_chunked,
+        processing_function_threads=4,
+        n_mapping_parallelism=5,
+        skunk_works=True,
+        node_task_image_chunking=chunking,
+    )
+    # B: sharded direct write with l/m sub-chunking (inner chunks).
+    store_sharded = (
+        "twhya_selfcal_5chans_lsrk_niter0_sharded_chunked_astroviper.img.zarr"
+    )
+    _, img_sharded, _ = _run_image_cube(
+        "niter0",
+        store_sharded,
+        processing_function_threads=4,
+        n_mapping_parallelism=5,
+        skunk_works=True,
+        output_shard_channels=2,
+        node_task_image_chunking=chunking,
+    )
+
+    compare_vars = _CONFIGS["niter0"]["compare_variables"]
+
+    # Same data as the un-chunked direct write (same allclose rationale as the
+    # sharded test: separate runs of the threaded gridder differ at ~1e-13).
+    for img_variant, label in ((img_chunked, "chunked"), (img_sharded, "sharded")):
+        for var in compare_vars:
+            assert np.allclose(
+                img_variant[var].values,
+                img_plain[var].values,
+                rtol=1e-8,
+                atol=1e-10,
+                equal_nan=True,
+            ), f"{var}: {label} sub-chunked write differs from plain direct write."
+
+    # Reproduces the truth image (valid stores, read via xarray).
+    truth_xds = xr.open_zarr(TRUTH_IMAGE_NITER0)
+    _compare_to_truth(
+        img_sharded,
+        truth_xds,
+        compare_vars,
+        plot_saver=plot_saver,
+        plot_prefix="niter0_sharded_node_task_image_chunking",
+    )
+
+    # The requested layout is what landed on disk.
+    for var in compare_vars:
+        arr = zarr.open_array(os.path.join(store_chunked, var))
+        assert arr.chunks[-2:] == (100, 125), f"{var}: unexpected l/m chunks"
+        arr = zarr.open_array(os.path.join(store_sharded, var))
+        assert arr.chunks[-2:] == (100, 125), f"{var}: unexpected inner chunks"
+        # One shard spans the full l/m extent, rounded UP to a multiple of the
+        # inner chunk as Zarr requires (l: ceil(250/100)*100 = 300).
+        assert arr.shards[-2:] == (300, 250), f"{var}: shard must span full l/m"
+        # Plain sub-chunked: 5 tasks x (3 l-chunks x 2 m-chunks) = 30 files;
+        # sharded: still ceil(5/2) = 3 shard files.
+        n_chunked = len(
+            [
+                f
+                for f in glob.glob(
+                    os.path.join(store_chunked, var, "c", "**"), recursive=True
+                )
+                if os.path.isfile(f)
+            ]
+        )
+        n_sharded = len(
+            [
+                f
+                for f in glob.glob(
+                    os.path.join(store_sharded, var, "c", "**"), recursive=True
+                )
+                if os.path.isfile(f)
+            ]
+        )
+        assert n_chunked == 30 and n_sharded == 3, (
+            f"{var}: expected 30 chunk files (plain) and 3 shard files "
+            f"(sharded), got {n_chunked} and {n_sharded}"
+        )
+
+
 @pytest.mark.parametrize("processing_function_threads", [1, 12])
 def test_single_field_imaging_niter100(plot_saver, processing_function_threads):
     _ensure_ps_store()
@@ -844,7 +952,7 @@ def test_single_field_imaging_niter100(plot_saver, processing_function_threads):
         "niter100",
         image_store,
         processing_function_threads=processing_function_threads,
-        n_chunks=5,
+        n_mapping_parallelism=5,
     )
     truth_xds = xr.open_zarr(TRUTH_IMAGE_NITER100)
 
@@ -867,7 +975,7 @@ def test_single_field_imaging_niter100(plot_saver, processing_function_threads):
 
 
 @pytest.mark.parametrize(
-    "processing_function_threads, n_chunks, single_precision_image, tol, dict_kind",
+    "processing_function_threads, n_mapping_parallelism, single_precision_image, tol, dict_kind",
     [
         (1, 5, False, TRUTH_RTOL, "double"),
         (12, 5, False, TRUTH_RTOL, "double"),
@@ -880,7 +988,7 @@ def test_single_field_imaging_niter100(plot_saver, processing_function_threads):
 def test_single_field_imaging_multi_cycle(
     plot_saver,
     processing_function_threads,
-    n_chunks,
+    n_mapping_parallelism,
     single_precision_image,
     tol,
     dict_kind,
@@ -896,13 +1004,13 @@ def test_single_field_imaging_multi_cycle(
 
     image_store = (
         "twhya_selfcal_5chans_lsrk_multi_cycle_astroviper_"
-        f"t{processing_function_threads}_c{n_chunks}_{precision_tag}.img.zarr"
+        f"t{processing_function_threads}_c{n_mapping_parallelism}_{precision_tag}.img.zarr"
     )
     return_dict, img_av_xds, _ = _run_image_cube(
         "multi_cycle",
         image_store,
         processing_function_threads=processing_function_threads,
-        n_chunks=n_chunks,
+        n_mapping_parallelism=n_mapping_parallelism,
         single_precision_image=single_precision_image,
     )
     truth_xds = xr.open_zarr(truth_image)
@@ -934,7 +1042,7 @@ def test_single_field_imaging_multi_cycle(
         _CONFIGS["multi_cycle"]["compare_variables"],
         plot_saver=plot_saver,
         plot_prefix=(
-            f"multi_cycle_t{processing_function_threads}_c{n_chunks}_{precision_tag}"
+            f"multi_cycle_t{processing_function_threads}_c{n_mapping_parallelism}_{precision_tag}"
         ),
         tol=tol,
     )
@@ -949,7 +1057,7 @@ def test_single_field_imaging_multi_cycle_double_vs_single(plot_saver):
     """Directly compare the double- and single-precision multi_cycle truths.
 
     A float32-vs-float64 comparison of the deep multi-cycle CLEAN. Both truths
-    are generated identically except for precision (threads=1, n_chunks=1), so
+    are generated identically except for precision (threads=1, n_mapping_parallelism=1), so
     this isolates the precision difference: the single-precision deep CLEAN can
     tip a peak-selection bifurcation on a channel, hence the deliberately loose
     ``MULTI_CYCLE_DOUBLE_VS_SINGLE_RTOL``. Generates the per-channel comparison
@@ -975,7 +1083,7 @@ def test_single_field_imaging_multi_cycle_worst_case(plot_saver):
     """Worst-case multi_cycle cross-config comparison.
 
     Compares the two most-divergent valid multi_cycle runs -- double precision /
-    1 thread / n_chunks=5 against single precision / 12 threads / n_chunks=1 --
+    1 thread / n_mapping_parallelism=5 against single precision / 12 threads / n_mapping_parallelism=1 --
     so every knob that can perturb the result (precision, thread count, chunking)
     differs at once. The spread is dominated by the float32 deep-CLEAN
     peak-selection bifurcation, hence the deliberately loose
@@ -988,14 +1096,14 @@ def test_single_field_imaging_multi_cycle_worst_case(plot_saver):
         "multi_cycle",
         "twhya_selfcal_5chans_lsrk_multi_cycle_worstcase_double_t1_c5.img.zarr",
         processing_function_threads=1,
-        n_chunks=5,
+        n_mapping_parallelism=5,
         single_precision_image=False,
     )
     _, single_xds, _ = _run_image_cube(
         "multi_cycle",
         "twhya_selfcal_5chans_lsrk_multi_cycle_worstcase_single_t12_c1.img.zarr",
         processing_function_threads=12,
-        n_chunks=1,
+        n_mapping_parallelism=1,
         single_precision_image=True,
     )
     _compare_to_truth(
@@ -1009,7 +1117,7 @@ def test_single_field_imaging_multi_cycle_worst_case(plot_saver):
 
 
 def _regenerate_truth_images():
-    """Regenerate every astroviper truth image at threads=1, n_chunks=1.
+    """Regenerate every astroviper truth image at threads=1, n_mapping_parallelism=1.
 
     niter0 and niter100 get a single double-precision truth each. multi_cycle
     gets two: a double-precision truth and a single-precision truth (its deep
@@ -1034,7 +1142,7 @@ def _regenerate_truth_images():
             kind,
             truth_image,
             processing_function_threads=1,
-            n_chunks=1,
+            n_mapping_parallelism=1,
             single_precision_image=single_precision_image,
         )
 

@@ -55,3 +55,76 @@ class TestImageDataGroupsForKeptVariables:
                 imaging_data_variables_and_dims_double_precision[key]["name"]
                 == imaging_data_variables_and_dims_single_precision[key]["name"]
             )
+
+
+class TestCreateEmptyDataVariablesNodeTaskImageChunking:
+    """On-disk chunk shapes produced by ``node_task_image_chunking``."""
+
+    @staticmethod
+    def _make_store(tmp_path, shard_channels=None, node_task_image_chunking=None):
+        import zarr
+
+        from astroviper.utils.io import create_empty_data_variables_on_disk
+
+        store = str(tmp_path / "img.zarr")
+        zarr.open_group(store, mode="w")
+        shape_dict = {
+            "time": 1,
+            "frequency": 8,
+            "polarization": 2,
+            "l": 16,
+            "m": 16,
+        }
+        freq_chunks = [list(range(2)) for _ in range(4)]  # 4 tasks x 2 channels
+        create_empty_data_variables_on_disk(
+            store,
+            ["sky_residual"],
+            shape_dict=shape_dict,
+            parallel_coords={"frequency": {"data_chunks": freq_chunks}},
+            compressor=None,
+            double_precision=False,
+            data_variable_definitions="imaging",
+            shard_channels=shard_channels,
+            node_task_image_chunking=node_task_image_chunking,
+        )
+        return store
+
+    def test_default_chunks_span_full_lm(self, tmp_path):
+        import zarr
+
+        store = self._make_store(tmp_path)
+        arr = zarr.open_array(store + "/SKY_RESIDUAL")
+        assert arr.chunks == (1, 2, 2, 16, 16)
+
+    def test_chunking_subdivides_lm_and_frequency(self, tmp_path):
+        import zarr
+
+        store = self._make_store(
+            tmp_path, node_task_image_chunking={"l": 8, "m": 4, "frequency": 1}
+        )
+        arr = zarr.open_array(store + "/SKY_RESIDUAL")
+        assert arr.chunks == (1, 1, 2, 8, 4)
+
+    def test_chunking_is_clipped_to_defaults(self, tmp_path):
+        import zarr
+
+        # Larger than the axis / per-task chunk -> clipped, never enlarged.
+        store = self._make_store(
+            tmp_path, node_task_image_chunking={"l": 999, "frequency": 999}
+        )
+        arr = zarr.open_array(store + "/SKY_RESIDUAL")
+        assert arr.chunks == (1, 2, 2, 16, 16)
+
+    def test_sharded_inner_chunking_keeps_one_shard_per_channel_block(self, tmp_path):
+        import zarr
+
+        store = self._make_store(
+            tmp_path,
+            shard_channels=4,
+            node_task_image_chunking={"l": 8, "m": 8},
+        )
+        arr = zarr.open_array(store + "/SKY_RESIDUAL")
+        # Shard: 4 channels per shard file, FULL l/m extent.
+        assert arr.shards == (1, 4, 2, 16, 16)
+        # Inner (read/write) chunk carries the l/m sub-chunking.
+        assert arr.chunks == (1, 2, 2, 8, 8)
