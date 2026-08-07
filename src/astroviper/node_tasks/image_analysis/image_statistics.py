@@ -1,8 +1,14 @@
-"""Directly callable image-statistics node task.
+"""Selection, loading, and local execution for image statistics.
 
-The node owns the complete local control path: inspect metadata, parse CASA-like
-selectors, merge them with an optional application partition, load only the
-effective selection, apply masks, and call pure processing functions.
+This module is the node-task layer of ``imstatistics``. It chooses the image
+variable, translates CASA-like selectors into source-image positions,
+intersects the logical user selection with a GraphVIPER node partition, loads
+only the required pixels and masks, and calls the pure processing functions.
+
+Selection and reduction are deliberately separate. For example,
+``chans="2~5"`` first restricts the input to four channels. If ``frequency`` is
+in ``axes``, those channels are reduced; otherwise they remain as a four-element
+output dimension. Unselected coordinates are not restored or zero-filled.
 """
 
 from __future__ import annotations
@@ -28,6 +34,21 @@ class ImageSelection:
     their intersection is exposed to storage through ``effective_indexers``.
     Keeping the two inputs separate prevents an execution partition from
     replacing or expanding the user's request.
+
+    Attributes
+    ----------
+    user_indexers : dict[str, numpy.ndarray]
+        Absolute zero-based source positions selected by user-facing
+        parameters. Every image dimension is present.
+    partition_indexers : dict[str, numpy.ndarray]
+        Absolute source positions assigned to this node. Relative GraphVIPER
+        positions are converted to source positions during construction.
+    effective_indexers : dict[str, numpy.ndarray]
+        Ordered user/partition intersection passed to storage.
+    boxes : tuple
+        Inclusive ``(l0, m0, l1, m1)`` boxes in source pixel coordinates.
+    reduction_dims : tuple[str, ...]
+        Dimensions removed by the requested reduction.
     """
 
     user_indexers: dict[str, np.ndarray]
@@ -266,7 +287,34 @@ def build_image_selection(
     timerange="",
     partition: dict[str, slice | np.ndarray] | None = None,
 ) -> ImageSelection:
-    """Normalize user and relative partition selectors, then intersect them."""
+    """Build one storage-ready selection from user and execution selectors.
+
+    Parameters
+    ----------
+    data : xarray.DataArray
+        Source image metadata. Pixel values need not be loaded.
+    axes : int, str, or sequence, default -1
+        Dimensions to reduce. ``-1`` and ``None`` mean every dimension.
+    region, box, chans, stokes, timerange
+        User-facing selectors accepted by :func:`image_statistics`.
+    partition : mapping, optional
+        Positional selector for one node, relative to the user selection.
+
+    Returns
+    -------
+    ImageSelection
+        User, partition, and effective positions in a common absolute
+        positional language.
+
+    Notes
+    -----
+    The order is ``user selection -> partition normalization -> intersection``.
+    A partition can therefore restrict but never expand the user request.
+
+    With five channels, ``chans="1~4"`` and partition
+    ``{"frequency": slice(1, 3)}`` produce user positions ``[1, 2, 3, 4]``
+    and effective source positions ``[2, 3]``.
+    """
     dims = tuple(data.dims)
     user_indexers = {dim: np.arange(data.sizes[dim], dtype=np.int64) for dim in dims}
     if "frequency" in dims:
@@ -454,19 +502,45 @@ def image_statistics(
     partition : mapping, optional
         Structured application-generated selector relative to the user
         selection. It is intersected with, never substituted for, user input.
+    data_selection : mapping, optional
+        GraphVIPER-injected equivalent of ``partition``. It may be nested under
+        the input name ``"image"``. Do not supply it together with
+        ``partition``.
     finalize : bool, default True
         Return public statistics when true, otherwise a mergeable partial state.
 
     Returns
     -------
     xarray.Dataset
-        Requested statistics over the dimensions not listed in ``axes``.
+        One variable per requested statistic. Reduced dimensions are absent;
+        every other selected dimension, including singleton dimensions, is
+        retained with its coordinates.
 
     Notes
     -----
-    Only the requested image variable and an optional named mask are loaded.
-    Parsing may iterate over short selector specifications; no Python loop
-    iterates over image samples, planes, channels, or storage chunks.
+    Selection precedes masking, and masking precedes reduction. Value filters
+    therefore operate only on selected pixels. NaN and masked samples do not
+    contribute to ``npts`` or numerical statistics.
+
+    Only the requested image variable and optional named mask are loaded. With
+    ``finalize=False``, the result is an internal ``min/max/sum/npts`` state;
+    ``mean`` is derived only after distributed sums and counts are merged.
+
+    Examples
+    --------
+    Sum selected channels while retaining the other dimensions::
+
+        image_statistics(
+            image, chans="2~5", axes="frequency", statistics=("sum",)
+        )
+
+    Calculate spatial statistics separately for each selected channel::
+
+        image_statistics(
+            image,
+            chans="2~5",
+            axes=("time", "polarization", "l", "m"),
+        )
     """
     from astroviper.processing_functions.image_analysis.statistics import (
         create_statistics_state,

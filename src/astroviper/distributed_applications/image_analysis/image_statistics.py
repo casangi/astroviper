@@ -1,4 +1,15 @@
-"""Distributed image-statistics application for on-disk images."""
+"""Distributed ``imstatistics`` application for on-disk images.
+
+The application applies the user selection before partitioning and builds a
+GraphVIPER map/reduce workflow over only that selected coordinate range. Each
+map node loads its pixel block and emits a compact ``min/max/sum/npts`` state;
+image pixels never pass through the reduction tree.
+
+If the partition dimension is reduced by ``axes``, partial states are merged
+numerically. If it is retained, disjoint outputs are concatenated along that
+dimension and sorted by coordinate. Thus partition count changes execution
+granularity, not the numerical result.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +20,7 @@ import xarray as xr
 
 
 def _reduce_statistics_states(input_data, input_params):
+    """Adapt GraphVIPER reduction inputs to the state merger."""
     from astroviper.processing_functions.image_analysis.statistics import (
         merge_statistics_states,
     )
@@ -27,7 +39,12 @@ def _automatic_partition_count(
     memory_limit_gib: float | None,
     working_memory_factor: float,
 ) -> int:
-    """Estimate partitions so one logical selected block fits in worker memory."""
+    """Estimate partitions from the selected image's in-memory footprint.
+
+    Uncompressed array bytes are multiplied by ``working_memory_factor`` to
+    allow for masks and temporary reductions. The result is capped at the
+    selected axis length, preventing empty partitions.
+    """
     from astroviper.utils.data_partitioning import get_thread_info
 
     if memory_limit_gib is None:
@@ -103,9 +120,29 @@ def image_statistics(
     xarray.Dataset
         Final statistics. Map nodes return only compact partial states.
 
+    Notes
+    -----
     The application partitions only the effective user selection. Every map
     node calls the same directly callable node task and returns a compact
     mergeable state; image pixels never enter the reduction tree.
+
+    Automatic partitioning estimates the uncompressed selected variable size,
+    not the compressed Zarr size. ``n_partitions`` affects resource usage but
+    must not affect coordinates or statistics.
+
+    Examples
+    --------
+    Compute global statistics using four frequency partitions::
+
+        image_statistics("image.zarr", n_partitions=4)
+
+    Retain frequency while reducing every other canonical image dimension::
+
+        image_statistics(
+            "image.zarr",
+            axes=("time", "polarization", "l", "m"),
+            n_partitions=4,
+        )
     """
     if not isinstance(image, (str, Path)):
         raise TypeError("The distributed application requires an on-disk image path")

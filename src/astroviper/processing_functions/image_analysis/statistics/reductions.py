@@ -1,9 +1,14 @@
-"""Mergeable image-statistics processing functions.
+"""Pure, mergeable numerical reductions for ``imstatistics``.
 
 This module contains no I/O and no graph construction.  A node task passes an
 already loaded, NumPy-backed image selection to :func:`create_statistics_state`.
 The resulting compact state can either be finalized immediately or combined
 associatively by a distributed reduction.
+
+The internal state stores ``min``, ``max``, ``sum``, and ``npts``. ``mean`` is
+not stored because partial means cannot be averaged when partitions contain
+different valid sample counts. It is derived from total ``sum / npts`` only
+after merging. NaNs represent invalid or masked pixels and are excluded.
 """
 
 from __future__ import annotations
@@ -43,6 +48,13 @@ def create_statistics_state(
     -------
     xarray.Dataset
         Compact state containing ``min``, ``max``, ``sum`` and ``npts``.
+
+    Notes
+    -----
+    Dimensions not named in ``dims`` are retained, including singleton
+    dimensions and coordinates. The state is independent of the requested
+    public statistics so every distributed node emits the same associative
+    payload.
     """
     if not isinstance(data, xr.DataArray):
         raise TypeError("data must be an xarray.DataArray")
@@ -74,9 +86,27 @@ def merge_statistics_states(
 ) -> xr.Dataset:
     """Associatively combine partial image-statistics states.
 
+    Parameters
+    ----------
+    states : iterable of xarray.Dataset
+        Partial states from :func:`create_statistics_state` or an earlier
+        reduction level.
+    partition_dim : str, optional
+        Dimension across which the source image was partitioned.
+    reduction_dims : sequence of str, optional
+        Dimensions reduced within each partial state.
+
+    Returns
+    -------
+    xarray.Dataset
+        Merged state containing ``min``, ``max``, ``sum``, and ``npts``.
+
     If ``partition_dim`` was reduced locally, partial values describe the same
     output coordinates and are numerically merged. If it was retained, the
     partial outputs are disjoint coordinate tiles and are concatenated.
+
+    Numerical merging requires exact coordinate alignment. This detects
+    mismatched node outputs instead of silently broadcasting them.
     """
     states = list(states)
     if not states:
@@ -148,7 +178,12 @@ STATISTIC_FUNCTIONS = {
 def finalize_statistics_state(
     state: xr.Dataset, statistics: Sequence[str] = _PUBLIC_NAMES
 ) -> xr.Dataset:
-    """Finalize a partial/merged state into requested public statistics."""
+    """Finalize a partial/merged state into requested public statistics.
+
+    Empty outputs (``npts == 0``) use NaN for ``min``, ``max``, ``sum``, and
+    ``mean`` while retaining integer zero for ``npts``. Requested names control
+    both membership and ordering of returned variables.
+    """
     requested = tuple(statistics)
     unknown = set(requested) - set(STATISTIC_FUNCTIONS)
     if unknown:

@@ -1,4 +1,9 @@
-"""Composable numerical reductions for image statistics."""
+"""Public processing-function API for mergeable image statistics.
+
+These functions accept already selected, loaded xarray objects. They do not
+parse CASA syntax, access storage, or construct GraphVIPER workflows; those
+responsibilities belong to the node-task and distributed-application layers.
+"""
 
 from astroviper.processing_functions.image_analysis.statistics.reductions import (
     STATISTIC_FUNCTIONS,
