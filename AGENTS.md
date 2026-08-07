@@ -488,11 +488,7 @@ per-variable nodes.
   unformatted code.
 - ❌ Introduce relative imports outside `__init__.py` re-exports.
 
-## 10. Definition of Done for New Features
-- Tests written with at least 80% coverage.
-- Example notebook created (start from `docs/notebook_template.ipynb`).
-- NumPy-style docstrings on all public functions.
-- Initial performance testing done using larger datasets and relevant timing comparison with CASA.
+
 
 ---
 
