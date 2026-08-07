@@ -1,8 +1,6 @@
-"""Image-analysis processing functions."""
+"""Composable numerical reductions for image statistics."""
 
-from astroviper.processing_functions.image_analysis.make_mask import make_mask
-from astroviper.processing_functions.image_analysis.moments import moments
-from astroviper.processing_functions.image_analysis.statistics import (
+from astroviper.processing_functions.image_analysis.statistics.reductions import (
     STATISTIC_FUNCTIONS,
     create_statistics_state,
     finalize_statistics_state,
@@ -24,6 +22,4 @@ __all__ = [
     "statistics_min",
     "statistics_npts",
     "statistics_sum",
-    "make_mask",
-    "moments",
 ]
