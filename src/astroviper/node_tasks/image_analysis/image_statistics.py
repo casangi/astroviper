@@ -222,10 +222,10 @@ def _polarization_indices(expression: str, coordinate: xr.DataArray) -> np.ndarr
 def _reduction_dims(axes, dims: tuple[str, ...]) -> tuple[str, ...]:
     if axes == -1 or axes is None:
         return dims
-    values = [axes] if isinstance(axes, (str, int, np.integer)) else list(axes)
+    values = [axes] if isinstance(axes, str | int | np.integer) else list(axes)
     result = []
     for value in values:
-        if isinstance(value, (int, np.integer)):
+        if isinstance(value, int | np.integer):
             value = dims[int(value)]
         if value not in dims:
             raise ValueError(f"Unknown statistics axis {value!r}")
@@ -259,7 +259,7 @@ def _choose_data_array(
 
 
 def _open_metadata(image, data_variable):
-    if isinstance(image, (str, Path)):
+    if isinstance(image, str | Path):
         dataset = xr.open_zarr(str(image))
     else:
         dataset = image
@@ -498,7 +498,9 @@ def image_statistics(
     includepix, excludepix : pair of float, optional
         Inclusive value range to retain or exclude, respectively.
     statistics : sequence of str
-        Any of ``min``, ``max``, ``sum``, ``mean``, and ``npts``.
+        Any of ``min``, ``minpos``, ``max``, ``maxpos``, ``sum``, ``sumsq``,
+        ``mean``, ``median``, ``medabsdevmed`` (or ``mad``), ``rms``,
+        ``sigma``, and ``npts``.
     partition : mapping, optional
         Structured application-generated selector relative to the user
         selection. It is intersected with, never substituted for, user input.
@@ -523,8 +525,8 @@ def image_statistics(
     contribute to ``npts`` or numerical statistics.
 
     Only the requested image variable and optional named mask are loaded. With
-    ``finalize=False``, the result is an internal ``min/max/sum/npts`` state;
-    ``mean`` is derived only after distributed sums and counts are merged.
+    ``finalize=False``, the result is a mergeable numerical state; derived
+    statistics are calculated only after distributed states are merged.
 
     Examples
     --------
@@ -567,7 +569,7 @@ def image_statistics(
 
     required = _required_variables(metadata, variable, mask)
 
-    if isinstance(image, (str, Path)):
+    if isinstance(image, str | Path):
         from xradio.image import load_image
 
         lazy_selection = load_image(str(image), block_des=selection.effective_indexers)
@@ -587,7 +589,12 @@ def image_statistics(
         includepix,
         excludepix,
     )
-    state = create_statistics_state(selected, selection.reduction_dims)
+    state = create_statistics_state(
+        selected,
+        selection.reduction_dims,
+        statistics=statistics,
+        positions=selection.effective_indexers,
+    )
     return finalize_statistics_state(state, statistics) if finalize else state
 
 

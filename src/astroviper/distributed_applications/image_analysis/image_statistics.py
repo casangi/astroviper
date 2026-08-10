@@ -2,7 +2,7 @@
 
 The application applies the user selection before partitioning and builds a
 GraphVIPER map/reduce workflow over only that selected coordinate range. Each
-map node loads its pixel block and emits a compact ``min/max/sum/npts`` state;
+map node loads its pixel block and emits a compact mergeable numerical state;
 image pixels never pass through the reduction tree.
 
 If the partition dimension is reduced by ``axes``, partial states are merged
@@ -144,7 +144,7 @@ def image_statistics(
             n_partitions=4,
         )
     """
-    if not isinstance(image, (str, Path)):
+    if not isinstance(image, str | Path):
         raise TypeError("The distributed application requires an on-disk image path")
     if mask is not None and not isinstance(mask, str):
         raise TypeError("Distributed on-disk masks must be named image variables")

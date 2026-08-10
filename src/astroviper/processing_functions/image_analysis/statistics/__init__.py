@@ -11,10 +11,17 @@ from astroviper.processing_functions.image_analysis.statistics.reductions import
     finalize_statistics_state,
     merge_statistics_states,
     statistics_max,
+    statistics_maxpos,
     statistics_mean,
+    statistics_medabsdevmed,
+    statistics_median,
     statistics_min,
+    statistics_minpos,
     statistics_npts,
+    statistics_rms,
+    statistics_sigma,
     statistics_sum,
+    statistics_sumsq,
 )
 
 __all__ = [
@@ -23,8 +30,15 @@ __all__ = [
     "finalize_statistics_state",
     "merge_statistics_states",
     "statistics_max",
+    "statistics_maxpos",
     "statistics_mean",
+    "statistics_medabsdevmed",
+    "statistics_median",
     "statistics_min",
+    "statistics_minpos",
     "statistics_npts",
+    "statistics_rms",
+    "statistics_sigma",
     "statistics_sum",
+    "statistics_sumsq",
 ]
