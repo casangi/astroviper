@@ -2,8 +2,9 @@
 
 The application applies the user selection before partitioning and builds a
 GraphVIPER map/reduce workflow over only that selected coordinate range. Each
-map node loads its pixel block and emits a compact mergeable numerical state;
-image pixels never pass through the reduction tree.
+map node loads its pixel block and emits a mergeable numerical state. Most
+statistics use a compact state; exact median statistics additionally retain
+the selected samples through the reduction tree.
 
 If the partition dimension is reduced by ``axes``, partial states are merged
 numerically. If it is retained, disjoint outputs are concatenated along that
@@ -95,11 +96,55 @@ def image_statistics(
     ----------
     image : str or pathlib.Path
         On-disk XRADIO/Zarr image. In-memory images should call the node task.
-    data_variable, axes, region, box, chans, stokes, timerange, mask, stretch,
-    includepix, excludepix, statistics
-        Same selection and statistics parameters as
-        :func:`astroviper.node_tasks.image_analysis.image_statistics`.
-        Distributed masks must be named variables in the image store.
+    data_variable : str, optional
+        Image data variable to analyze. Required when the dataset does not
+        contain exactly one image variable with the canonical image axes.
+    axes : int, str, or sequence, default -1
+        Dimensions reduced by every requested statistic. ``-1`` and ``None``
+        reduce all dimensions. Names such as ``("l", "m")`` are preferred;
+        integer axes follow the data variable's dimension order. Dimensions
+        not listed here are retained in every returned variable.
+    region : str, pathlib.Path, or dict, optional
+        Pixel-coordinate region selection. Accepted forms are a record with
+        ``blc`` and ``trc``, CRTF ``box[[...pix],[...pix]]`` text, or a CRTF
+        file containing pixel boxes.
+    box : str, optional
+        CASA inclusive pixel-box syntax ``"x0,y0,x1,y1"``. Additional groups
+        of four integers form a union of boxes. Specify either ``box`` or
+        ``region``, not both.
+    chans, timerange : str, optional
+        Zero-based frequency or time selections. Scalars, inclusive ``a~b``
+        ranges, stepped ``a~b^step`` ranges, comma/semicolon unions, and
+        ``<``, ``<=``, ``>``, and ``>=`` expressions are supported.
+    stokes : str, optional
+        Polarization labels, concatenated or comma-separated.
+    mask : str, optional
+        Name of a Boolean mask variable in the on-disk image. Mask values of
+        ``True`` include pixels. In-memory masks are supported by the node-task
+        interface but cannot be serialized into this distributed application.
+    stretch : bool, default False
+        Permit a named mask with fewer or degenerate dimensions to broadcast
+        across the selected image. Without stretching, mask dimensions and
+        sizes must exactly match the selected image.
+    includepix : pair of float, optional
+        Inclusive ``[low, high]`` pixel-value range to retain after selection
+        and masking.
+    excludepix : pair of float, optional
+        Inclusive ``[low, high]`` pixel-value range to exclude after selection
+        and masking.
+    statistics : sequence of str, default ("max", "min", "sum", "mean", "npts")
+        Statistics to return. Supported names are:
+
+        - ``"mean"``, ``"median"``, ``"min"``, ``"max"``, ``"sum"``,
+          ``"sumsq"``, ``"npts"``, ``"sigma"``, and ``"rms"``;
+        - ``"minpos"`` and ``"maxpos"`` for absolute pixel positions along
+          the reduced dimensions; and
+        - ``"medabsdevmed"`` for median absolute deviation from the median,
+          with ``"mad"`` accepted as an alias.
+
+        Only requested variables are returned. Exact ``median`` and median
+        absolute deviation retain selected samples in the distributed state;
+        all other statistics use compact partial summaries.
     partition_dim : str, default "frequency"
         Dimension divided among map nodes.
     n_partitions : int, optional
@@ -118,13 +163,18 @@ def image_statistics(
     Returns
     -------
     xarray.Dataset
-        Final statistics. Map nodes return only compact partial states.
+        One data variable per requested statistic. Unreduced dimensions and
+        their coordinates are retained. Position variables add a
+        ``statistics_axis`` dimension naming the reduced axes. Value
+        statistics preserve the input variable's units; ``npts`` and position
+        variables are unitless.
 
     Notes
     -----
     The application partitions only the effective user selection. Every map
-    node calls the same directly callable node task and returns a compact
-    mergeable state; image pixels never enter the reduction tree.
+    node calls the same directly callable node task and returns a mergeable
+    state. Exact median statistics carry selected samples through that state;
+    other requested statistics use compact partial summaries.
 
     Automatic partitioning estimates the uncompressed selected variable size,
     not the compressed Zarr size. ``n_partitions`` affects resource usage but
@@ -135,6 +185,16 @@ def image_statistics(
     Compute global statistics using four frequency partitions::
 
         image_statistics("image.zarr", n_partitions=4)
+
+    Compute only robust noise and peak-location statistics::
+
+        image_statistics(
+            "image.zarr",
+            axes=("l", "m"),
+            mask="MASK_SKY",
+            stretch=True,
+            statistics=("medabsdevmed", "rms", "max", "maxpos"),
+        )
 
     Retain frequency while reducing every other canonical image dimension::
 

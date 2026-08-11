@@ -128,7 +128,11 @@ def _extrema_positions(data, reduction_dims, retained_dims, positions):
 
     position_axes = []
     for dim in reduction_dims:
-        axis = np.asarray((positions or {}).get(dim, np.arange(data.sizes[dim])))
+        axis = (positions or {}).get(dim, np.arange(data.sizes[dim]))
+        if isinstance(axis, slice):
+            axis = np.arange(axis.start, axis.stop, axis.step, dtype=np.int64)
+        else:
+            axis = np.asarray(axis)
         if axis.shape != (data.sizes[dim],):
             raise ValueError(f"Positions for {dim!r} have the wrong length")
         position_axes.append(axis.astype(np.int64, copy=False))

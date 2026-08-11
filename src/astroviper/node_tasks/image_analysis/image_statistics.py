@@ -23,6 +23,7 @@ import xarray as xr
 
 _IMAGE_DIMS = ("time", "frequency", "polarization", "l", "m")
 _DEFAULT_STATISTICS = ("max", "min", "sum", "mean", "npts")
+ImageIndexer = slice | np.ndarray
 
 
 @dataclass(frozen=True)
@@ -37,28 +38,30 @@ class ImageSelection:
 
     Attributes
     ----------
-    user_indexers : dict[str, numpy.ndarray]
-        Absolute zero-based source positions selected by user-facing
-        parameters. Every image dimension is present.
-    partition_indexers : dict[str, numpy.ndarray]
+    user_indexers : dict[str, slice or numpy.ndarray]
+        Absolute zero-based source selection from user-facing parameters.
+        Regular selections remain compact slices; only irregular selections
+        use integer arrays. Every image dimension is present.
+    partition_indexers : dict[str, slice or numpy.ndarray]
         Absolute source positions assigned to this node. Relative GraphVIPER
         positions are converted to source positions during construction.
-    effective_indexers : dict[str, numpy.ndarray]
-        Ordered user/partition intersection passed to storage.
+    effective_indexers : dict[str, slice or numpy.ndarray]
+        Ordered user/partition intersection passed directly to ``isel`` or
+        XRADIO storage loading.
     boxes : tuple
         Inclusive ``(l0, m0, l1, m1)`` boxes in source pixel coordinates.
     reduction_dims : tuple[str, ...]
         Dimensions removed by the requested reduction.
     """
 
-    user_indexers: dict[str, np.ndarray]
-    partition_indexers: dict[str, np.ndarray]
-    effective_indexers: dict[str, np.ndarray]
+    user_indexers: dict[str, ImageIndexer]
+    partition_indexers: dict[str, ImageIndexer]
+    effective_indexers: dict[str, ImageIndexer]
     boxes: tuple[tuple[int, int, int, int], ...]
     reduction_dims: tuple[str, ...]
 
     @property
-    def indexers(self) -> dict[str, np.ndarray]:
+    def indexers(self) -> dict[str, ImageIndexer]:
         """Storage-ready indexers (compatibility alias)."""
         return self.effective_indexers
 
@@ -68,38 +71,210 @@ class ImageSelection:
 ImageSlicer = ImageSelection
 
 
-def _positions(selector, size: int) -> np.ndarray:
-    """Normalize one positional selector against an axis of ``size``."""
-    positions = np.arange(size, dtype=np.int64)
-    try:
-        selected = positions[selector]
-    except (IndexError, TypeError) as exc:
-        raise ValueError(f"Invalid positional selector {selector!r}") from exc
-    selected = np.atleast_1d(selected)
+def _compact_positions(positions: np.ndarray) -> ImageIndexer:
+    """Use the smallest supported representation for absolute positions.
+
+    Parameters
+    ----------
+    positions : numpy.ndarray
+        One-dimensional, ordered absolute pixel positions.
+
+    Returns
+    -------
+    slice or numpy.ndarray
+        A slice for a singleton or constant-positive-step progression. Empty,
+        descending, duplicated, and irregular positions remain arrays.
+
+    Notes
+    -----
+    This helper is primarily a fallback for selectors that already arrived as
+    arrays. Parsers should produce slices directly where possible so a large
+    temporary array is never allocated merely to compress it afterward.
+    """
+    positions = np.asarray(positions, dtype=np.int64)
+    if positions.ndim != 1:
+        raise ValueError("Positional index arrays must be one-dimensional")
+    if positions.size == 0:
+        return positions
+    if positions.size == 1:
+        position = int(positions[0])
+        return slice(position, position + 1, 1)
+    steps = np.diff(positions)
+    if np.all(steps == steps[0]) and steps[0] > 0:
+        return slice(int(positions[0]), int(positions[-1]) + 1, int(steps[0]))
+    return positions
+
+
+def _positions(selector, size: int) -> ImageIndexer:
+    """Normalize a selector relative to an axis without expanding slices.
+
+    Parameters
+    ----------
+    selector : int, slice, or array-like
+        Relative positional selector. Negative integer positions follow NumPy
+        semantics; a Boolean array must have length ``size``.
+    size : int
+        Length of the axis against which the selector is normalized.
+
+    Returns
+    -------
+    slice or numpy.ndarray
+        A concrete slice when the normalized positions are regular, otherwise
+        a one-dimensional integer array.
+
+    Raises
+    ------
+    ValueError
+        If an array selector is not one-dimensional or a Boolean selector has
+        the wrong length.
+    IndexError
+        If an integer position lies outside the axis.
+    """
+    if isinstance(selector, slice):
+        start, stop, step = selector.indices(size)
+        return slice(start, stop, step)
+    if isinstance(selector, int | np.integer):
+        position = int(selector)
+        position = position + size if position < 0 else position
+        if position < 0 or position >= size:
+            raise IndexError(f"Selection is outside axis length {size}")
+        return slice(position, position + 1, 1)
+    selected = np.asarray(selector)
     if selected.dtype == bool:
-        if selected.size != size:
+        if selected.ndim != 1 or selected.size != size:
             raise ValueError("Boolean positional selector has the wrong length")
-        selected = positions[selected]
-    selected = np.asarray(selected, dtype=np.int64)
+        selected = np.flatnonzero(selected)
+    elif selected.ndim != 1:
+        raise ValueError("Positional index arrays must be one-dimensional")
+    selected = selected.astype(np.int64, copy=False)
     selected = np.where(selected < 0, selected + size, selected)
     if np.any((selected < 0) | (selected >= size)):
         raise IndexError(f"Selection is outside axis length {size}")
-    return selected
+    return _compact_positions(selected)
 
 
-def _intersect_in_order(left: np.ndarray, right: np.ndarray) -> np.ndarray:
-    """Intersect positional arrays while preserving ``left`` ordering."""
-    return left[np.isin(left, right)]
+def _indexer_length(indexer: ImageIndexer) -> int:
+    """Return selected axis length without materializing a slice.
+
+    Parameters
+    ----------
+    indexer : slice or numpy.ndarray
+        Concrete compact image indexer.
+
+    Returns
+    -------
+    int
+        Number of selected positions.
+    """
+    if isinstance(indexer, slice):
+        return len(range(indexer.start, indexer.stop, indexer.step))
+    return len(indexer)
 
 
-def _index_expression(expression: str, size: int, name: str) -> np.ndarray:
+def _indexer_positions(indexer: ImageIndexer) -> np.ndarray:
+    """Materialize absolute positions for coordinate-dependent operations.
+
+    Parameters
+    ----------
+    indexer : slice or numpy.ndarray
+        Concrete compact image indexer.
+
+    Returns
+    -------
+    numpy.ndarray
+        Absolute integer pixel positions.
+
+    Notes
+    -----
+    Storage selection must use the compact indexer directly. This conversion is
+    reserved for operations such as constructing a disjoint-box union mask.
+    """
+    if isinstance(indexer, slice):
+        return np.arange(indexer.start, indexer.stop, indexer.step, dtype=np.int64)
+    return np.asarray(indexer, dtype=np.int64)
+
+
+def _take_indexer(source: ImageIndexer, relative_selector) -> ImageIndexer:
+    """Compose a worker-relative selector with a user image selection.
+
+    Parameters
+    ----------
+    source : slice or numpy.ndarray
+        Absolute positions selected by the user.
+    relative_selector : int, slice, or array-like
+        Worker selection expressed relative to ``source`` rather than the
+        original image axis.
+
+    Returns
+    -------
+    slice or numpy.ndarray
+        Absolute source-image selection for the worker. Slice-with-slice
+        composition remains constant-memory; irregular results remain arrays.
+
+    Examples
+    --------
+    ``slice(100, 200)`` with relative ``slice(20, 40)`` becomes absolute
+    ``slice(120, 140)``.
+    """
+    relative = _positions(relative_selector, _indexer_length(source))
+    if isinstance(source, slice):
+        source_range = range(source.start, source.stop, source.step)
+        if isinstance(relative, slice):
+            selected = source_range[relative]
+            return slice(selected.start, selected.stop, selected.step)
+        return _compact_positions(
+            source.start + np.asarray(relative, dtype=np.int64) * source.step
+        )
+    if isinstance(relative, slice):
+        return _compact_positions(source[relative])
+    return _compact_positions(source[relative])
+
+
+def _index_expression(expression: str, size: int, name: str) -> ImageIndexer:
+    """Parse a CASA-like integer-axis expression into a compact indexer.
+
+    Parameters
+    ----------
+    expression : str
+        Comma/semicolon-separated scalars, inclusive ``a~b`` ranges, stepped
+        ``a~b^step`` ranges, or ``<``, ``<=``, ``>``, and ``>=`` comparisons.
+        An empty expression selects the full axis.
+    size : int
+        Source-axis length.
+    name : str
+        User-facing selector name included in error messages, such as
+        ``"chans"`` or ``"timerange"``.
+
+    Returns
+    -------
+    slice or numpy.ndarray
+        A slice for a regular selection or regular union. A sorted, unique
+        integer array is returned only when the selected positions are
+        genuinely irregular.
+
+    Raises
+    ------
+    ValueError
+        If the syntax is unsupported, the step is invalid, or no positions are
+        specified.
+    IndexError
+        If a scalar or range endpoint is outside the axis.
+
+    Examples
+    --------
+    ``"2~20^2"`` becomes ``slice(2, 21, 2)`` while ``"1,4,8~10"`` becomes
+    ``array([1, 4, 8, 9, 10])``.
+    """
+    # An empty expression selects the full axis with a constant-memory slice.
     if expression is None or str(expression).strip() == "":
-        return np.arange(size, dtype=np.int64)
-    selected: list[np.ndarray] = []
+        return slice(0, size, 1)
+    selected: list[range] = []
+    # Parse every comma- or semicolon-separated union member independently.
     for raw_token in re.split(r"[;,]", str(expression)):
         token = raw_token.strip().replace(" ", "")
         if not token:
             continue
+        # Convert an inclusive, optionally stepped interval to a compact range.
         match = re.fullmatch(r"(-?\d+)~(-?\d+)(?:\^(\d+))?", token)
         if match:
             start, stop = int(match.group(1)), int(match.group(2))
@@ -107,38 +282,88 @@ def _index_expression(expression: str, size: int, name: str) -> np.ndarray:
             if step < 1:
                 raise ValueError(f"{name} range step must be positive")
             direction = 1 if stop >= start else -1
-            selected.append(np.arange(start, stop + direction, direction * step))
+            if start < -size or start >= size or stop < -size or stop >= size:
+                raise IndexError(f"{name} selection is outside axis length {size}")
+            values = range(start, stop + direction, direction * step)
+            crosses_zero = (start < 0 <= stop) or (stop < 0 <= start)
+            if not crosses_zero:
+                first = values[0] + size if values[0] < 0 else values[0]
+                last_value = values[-1]
+                last = last_value + size if last_value < 0 else last_value
+                selected.append(range(min(first, last), max(first, last) + 1, step))
+            else:
+                normalized = [value + size if value < 0 else value for value in values]
+                selected.extend(range(value, value + 1) for value in normalized)
             continue
+        # Convert a comparison to its equivalent bounded interval on the axis.
         match = re.fullmatch(r"(<=|>=|<|>)(-?\d+)", token)
         if match:
             op, boundary_text = match.groups()
             boundary = int(boundary_text)
-            values = np.arange(size, dtype=np.int64)
-            selected.append(
-                values[
-                    {
-                        "<": values < boundary,
-                        "<=": values <= boundary,
-                        ">": values > boundary,
-                        ">=": values >= boundary,
-                    }[op]
-                ]
-            )
+            if op == "<":
+                selected.append(range(0, min(max(boundary, 0), size)))
+            elif op == "<=":
+                selected.append(range(0, min(max(boundary + 1, 0), size)))
+            elif op == ">":
+                selected.append(range(min(max(boundary + 1, 0), size), size))
+            else:
+                selected.append(range(min(max(boundary, 0), size), size))
             continue
+        # Represent a scalar as a one-position interval to retain its dimension.
         if re.fullmatch(r"-?\d+", token):
-            selected.append(np.asarray([int(token)], dtype=np.int64))
+            position = int(token)
+            position = position + size if position < 0 else position
+            if position < 0 or position >= size:
+                raise IndexError(f"{name} selection is outside axis length {size}")
+            selected.append(range(position, position + 1))
             continue
         raise ValueError(f"Unsupported {name} selector token {raw_token!r}")
     if not selected:
         raise ValueError(f"{name} selection is empty")
-    indices = np.unique(np.concatenate(selected))
-    indices = np.where(indices < 0, indices + size, indices)
-    if np.any((indices < 0) | (indices >= size)):
-        raise IndexError(f"{name} selection is outside axis length {size}")
-    return indices.astype(np.int64)
+    # A single parsed interval maps directly to an isel-compatible slice.
+    if len(selected) == 1:
+        values = selected[0]
+        return slice(values.start, values.stop, values.step)
+    # Combine a regular union into one slice without expanding its positions.
+    nonempty = sorted((values for values in selected if values), key=lambda x: x.start)
+    if nonempty:
+        common_step = nonempty[0].step
+        first = nonempty[0].start
+        last = nonempty[0][-1]
+        regular_union = True
+        for values in nonempty[1:]:
+            if (
+                values.step != common_step
+                or (values.start - first) % common_step
+                or values.start > last + common_step
+            ):
+                regular_union = False
+                break
+            last = max(last, values[-1])
+        if regular_union:
+            return slice(first, last + 1, common_step)
+    # Materialize only a genuinely irregular union as sorted unique positions.
+    indices = np.unique(
+        np.fromiter((value for item in selected for value in item), int)
+    )
+    return _compact_positions(indices)
 
 
 def _parse_boxes(box: str | None, l_size: int, m_size: int):
+    """Parse inclusive pixel-box text into validated spatial bounds.
+
+    Parameters
+    ----------
+    box : str, optional
+        Comma-separated groups of ``l0,m0,l1,m1`` pixel coordinates.
+    l_size, m_size : int
+        Direction-plane axis lengths used for bounds validation.
+
+    Returns
+    -------
+    tuple of tuple of int
+        Inclusive ``(l0, m0, l1, m1)`` boxes.
+    """
     if box is None or str(box).strip() == "":
         return ()
     values = [int(value.strip()) for value in str(box).split(",") if value.strip()]
@@ -156,6 +381,26 @@ def _parse_boxes(box: str | None, l_size: int, m_size: int):
 
 
 def _region_boxes(region: Any, l_size: int, m_size: int):
+    """Extract pixel boxes from a region record, CRTF text, or CRTF file.
+
+    Parameters
+    ----------
+    region : dict, str, pathlib.Path, or None
+        Region record with ``blc``/``trc``, CRTF pixel-box text, plain box
+        coordinates, or a path containing one of those textual forms.
+    l_size, m_size : int
+        Direction-plane axis lengths used for bounds validation.
+
+    Returns
+    -------
+    tuple of tuple of int
+        Inclusive, validated pixel boxes.
+
+    Raises
+    ------
+    ValueError
+        If the region is not one of the supported pixel-box forms.
+    """
     if region is None or region == "":
         return ()
     if isinstance(region, dict):
@@ -190,10 +435,26 @@ def _region_boxes(region: Any, l_size: int, m_size: int):
     raise ValueError("Only pixel-coordinate box regions are currently supported")
 
 
-def _polarization_indices(expression: str, coordinate: xr.DataArray) -> np.ndarray:
+def _polarization_indices(expression: str, coordinate: xr.DataArray) -> ImageIndexer:
+    """Resolve polarization labels to a compact positional indexer.
+
+    Parameters
+    ----------
+    expression : str
+        One label, concatenated single-character labels, or comma-separated
+        labels. An empty expression selects every polarization.
+    coordinate : xarray.DataArray
+        Polarization coordinate whose values define valid labels and order.
+
+    Returns
+    -------
+    slice or numpy.ndarray
+        A slice when requested labels occupy a regular progression, otherwise
+        their integer positions.
+    """
     labels = [str(value) for value in coordinate.values]
     if expression is None or str(expression).strip() == "":
-        return np.arange(len(labels), dtype=np.int64)
+        return slice(0, len(labels), 1)
     text = str(expression).replace(" ", "")
     if "," in text:
         requested = [value for value in text.split(",") if value]
@@ -216,10 +477,26 @@ def _polarization_indices(expression: str, coordinate: xr.DataArray) -> np.ndarr
     unknown = set(requested) - set(labels)
     if unknown:
         raise ValueError(f"Unknown polarization labels: {sorted(unknown)}")
-    return np.asarray([labels.index(label) for label in requested], dtype=np.int64)
+    return _compact_positions(
+        np.asarray([labels.index(label) for label in requested], dtype=np.int64)
+    )
 
 
 def _reduction_dims(axes, dims: tuple[str, ...]) -> tuple[str, ...]:
+    """Normalize named or integer statistic axes to unique dimension names.
+
+    Parameters
+    ----------
+    axes : int, str, sequence, or None
+        Axes requested for reduction. ``-1`` and ``None`` select all axes.
+    dims : tuple of str
+        Image dimension order used to resolve integer axes.
+
+    Returns
+    -------
+    tuple of str
+        Unique dimensions in requested order.
+    """
     if axes == -1 or axes is None:
         return dims
     values = [axes] if isinstance(axes, str | int | np.integer) else list(axes)
@@ -237,6 +514,23 @@ def _reduction_dims(axes, dims: tuple[str, ...]) -> tuple[str, ...]:
 def _choose_data_array(
     image: xr.DataArray | xr.Dataset, data_variable: str | None
 ) -> tuple[xr.Dataset, str]:
+    """Normalize an image object and resolve the analyzed data variable.
+
+    Parameters
+    ----------
+    image : xarray.DataArray or xarray.Dataset
+        Image metadata or in-memory image.
+    data_variable : str, optional
+        Explicit variable name. If omitted from a dataset, exactly one variable
+        must contain all canonical image dimensions.
+
+    Returns
+    -------
+    xarray.Dataset
+        Dataset representation of ``image``.
+    str
+        Resolved image-variable name.
+    """
     if isinstance(image, xr.DataArray):
         name = data_variable or image.name or "IMAGE"
         return image.rename(name).to_dataset(), name
@@ -259,6 +553,22 @@ def _choose_data_array(
 
 
 def _open_metadata(image, data_variable):
+    """Open lazy Zarr metadata or normalize an in-memory image.
+
+    Parameters
+    ----------
+    image : str, pathlib.Path, xarray.DataArray, or xarray.Dataset
+        On-disk Zarr image or in-memory image object.
+    data_variable : str, optional
+        Explicit image-variable name.
+
+    Returns
+    -------
+    xarray.Dataset
+        Dataset whose on-disk variables remain lazy.
+    str
+        Resolved image-variable name.
+    """
     if isinstance(image, str | Path):
         dataset = xr.open_zarr(str(image))
     else:
@@ -267,7 +577,23 @@ def _open_metadata(image, data_variable):
 
 
 def _required_variables(metadata: xr.Dataset, variable: str, mask) -> list[str]:
-    """Return the only data variables that a local statistics task may load."""
+    """Identify the minimal set of data variables a node must load.
+
+    Parameters
+    ----------
+    metadata : xarray.Dataset
+        Source image metadata.
+    variable : str
+        Image data variable being analyzed.
+    mask : str or object
+        Named mask or an external mask. Only a named mask adds an on-disk
+        variable to the result.
+
+    Returns
+    -------
+    list of str
+        Image variable followed by the optional named mask variable.
+    """
     required = [variable]
     if isinstance(mask, str) and mask:
         if mask not in metadata:
@@ -312,11 +638,11 @@ def build_image_selection(
     A partition can therefore restrict but never expand the user request.
 
     With five channels, ``chans="1~4"`` and partition
-    ``{"frequency": slice(1, 3)}`` produce user positions ``[1, 2, 3, 4]``
-    and effective source positions ``[2, 3]``.
+    ``{"frequency": slice(1, 3)}`` produce the compact user indexer
+    ``slice(1, 5, 1)`` and effective source indexer ``slice(2, 4, 1)``.
     """
     dims = tuple(data.dims)
-    user_indexers = {dim: np.arange(data.sizes[dim], dtype=np.int64) for dim in dims}
+    user_indexers = {dim: slice(0, data.sizes[dim], 1) for dim in dims}
     if "frequency" in dims:
         user_indexers["frequency"] = _index_expression(
             chans, data.sizes["frequency"], "chans"
@@ -331,29 +657,31 @@ def build_image_selection(
         )
     if box and region:
         raise ValueError("Specify either region or box, not both")
-    boxes = _parse_boxes(box, data.sizes["l"], data.sizes["m"])
-    if region:
-        boxes = _region_boxes(region, data.sizes["l"], data.sizes["m"])
+    boxes = ()
+    if box or region:
+        if not {"l", "m"} <= set(dims):
+            raise ValueError("Pixel regions require both 'l' and 'm' dimensions")
+        boxes = _parse_boxes(box, data.sizes["l"], data.sizes["m"])
+        if region:
+            boxes = _region_boxes(region, data.sizes["l"], data.sizes["m"])
     if boxes:
-        user_indexers["l"] = np.arange(
-            min(item[0] for item in boxes), max(item[2] for item in boxes) + 1
+        user_indexers["l"] = slice(
+            min(item[0] for item in boxes), max(item[2] for item in boxes) + 1, 1
         )
-        user_indexers["m"] = np.arange(
-            min(item[1] for item in boxes), max(item[3] for item in boxes) + 1
+        user_indexers["m"] = slice(
+            min(item[1] for item in boxes), max(item[3] for item in boxes) + 1, 1
         )
 
-    partition_indexers = {dim: values.copy() for dim, values in user_indexers.items()}
+    partition_indexers = dict(user_indexers)
     for dim, relative_selector in (partition or {}).items():
         if dim not in dims:
             raise ValueError(f"Partition dimension {dim!r} is not present")
-        relative_positions = _positions(relative_selector, len(user_indexers[dim]))
-        partition_indexers[dim] = user_indexers[dim][relative_positions]
+        partition_indexers[dim] = _take_indexer(user_indexers[dim], relative_selector)
 
-    effective_indexers = {
-        dim: _intersect_in_order(user_indexers[dim], partition_indexers[dim])
-        for dim in dims
-    }
-    if any(values.size == 0 for values in effective_indexers.values()):
+    # Partitions are relative subsets of the user selection, so their normalized
+    # source indexers are already the effective intersection.
+    effective_indexers = partition_indexers
+    if any(_indexer_length(value) == 0 for value in effective_indexers.values()):
         raise ValueError("The image selection is empty")
     return ImageSelection(
         user_indexers=user_indexers,
@@ -368,10 +696,16 @@ build_image_slicer = build_image_selection
 
 
 def _box_mask(selected: xr.DataArray, selection: ImageSelection):
+    """Construct a Boolean union mask for multiple selected pixel boxes.
+
+    A single box is already represented exactly by the storage slices and does
+    not require a mask. Multiple boxes share a bounding storage rectangle; this
+    mask removes pixels in the rectangle that belong to none of the boxes.
+    """
     if len(selection.boxes) <= 1:
         return None
-    l_indices = selection.effective_indexers["l"]
-    m_indices = selection.effective_indexers["m"]
+    l_indices = _indexer_positions(selection.effective_indexers["l"])
+    m_indices = _indexer_positions(selection.effective_indexers["m"])
     li, mi = np.meshgrid(l_indices, m_indices, indexing="ij")
     mask = np.zeros((selected.sizes["l"], selected.sizes["m"]), dtype=bool)
     for l0, m0, l1, m1 in selection.boxes:
@@ -382,6 +716,7 @@ def _box_mask(selected: xr.DataArray, selection: ImageSelection):
 def _select_external_mask(
     mask: xr.DataArray, selection: ImageSelection
 ) -> xr.DataArray:
+    """Apply effective indexers to dimensions present in an external mask."""
     applicable = {
         dim: value
         for dim, value in selection.effective_indexers.items()
@@ -399,6 +734,28 @@ def _apply_masks(
     includepix,
     excludepix,
 ) -> xr.DataArray:
+    """Apply region, Boolean-mask, and value-range exclusions in order.
+
+    Parameters
+    ----------
+    data : xarray.DataArray
+        Loaded, selected image pixels.
+    dataset : xarray.Dataset
+        Loaded variables containing ``data`` and any named mask.
+    selection : ImageSelection
+        Effective selection and optional pixel boxes.
+    mask : str, xarray.DataArray, array-like, or None
+        Named or external Boolean mask. ``True`` pixels are retained.
+    stretch : bool
+        Whether a lower-dimensional mask may broadcast over the image.
+    includepix, excludepix : pair of float, optional
+        Inclusive value ranges to retain or exclude.
+
+    Returns
+    -------
+    xarray.DataArray
+        Image data with excluded samples represented by NaN.
+    """
     spatial_mask = _box_mask(data, selection)
     if spatial_mask is not None:
         data = data.where(spatial_mask)
