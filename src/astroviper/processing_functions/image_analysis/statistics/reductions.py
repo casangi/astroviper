@@ -121,32 +121,44 @@ def _extrema_positions(data, reduction_dims, retained_dims, positions):
     """Return absolute, lexicographically tie-broken extrema positions."""
     transposed = data.transpose(*retained_dims, *reduction_dims)
     retained_shape = tuple(data.sizes[dim] for dim in retained_dims)
+    reduction_shape = tuple(data.sizes[dim] for dim in reduction_dims)
     values = np.asarray(transposed).reshape((*retained_shape, -1))
     valid = ~np.isnan(values)
     min_indices = np.argmin(np.where(valid, values, np.inf), axis=-1)
     max_indices = np.argmax(np.where(valid, values, -np.inf), axis=-1)
 
-    position_axes = []
-    for dim in reduction_dims:
-        axis = (positions or {}).get(dim, np.arange(data.sizes[dim]))
-        if isinstance(axis, slice):
-            axis = np.arange(axis.start, axis.stop, axis.step, dtype=np.int64)
-        else:
-            axis = np.asarray(axis)
-        if axis.shape != (data.sizes[dim],):
-            raise ValueError(f"Positions for {dim!r} have the wrong length")
-        position_axes.append(axis.astype(np.int64, copy=False))
-    if position_axes:
-        grids = np.meshgrid(*position_axes, indexing="ij")
-        position_table = np.stack([grid.ravel() for grid in grids], axis=-1)
-    else:
-        position_table = np.empty((1, 0), dtype=np.int64)
+    def absolute_positions(flat_indices):
+        """Map only selected flat extrema indices to absolute source positions."""
+        if not reduction_dims:
+            return np.empty((*np.shape(flat_indices), 0), dtype=np.int64)
+        local_indices = np.unravel_index(flat_indices, reduction_shape)
+        absolute_axes = []
+        for dim, local in zip(reduction_dims, local_indices, strict=True):
+            indexer = (positions or {}).get(dim)
+            if indexer is None:
+                absolute = np.asarray(local, dtype=np.int64)
+            elif isinstance(indexer, slice):
+                if indexer.start is None or indexer.stop is None:
+                    raise ValueError(
+                        f"Positions slice for {dim!r} needs absolute start and stop"
+                    )
+                step = indexer.step or 1
+                if len(range(indexer.start, indexer.stop, step)) != data.sizes[dim]:
+                    raise ValueError(f"Positions for {dim!r} have the wrong length")
+                absolute = indexer.start + np.asarray(local) * step
+            else:
+                indexer = np.asarray(indexer, dtype=np.int64)
+                if indexer.shape != (data.sizes[dim],):
+                    raise ValueError(f"Positions for {dim!r} have the wrong length")
+                absolute = indexer[local]
+            absolute_axes.append(np.asarray(absolute, dtype=np.int64))
+        return np.stack(absolute_axes, axis=-1)
 
     any_valid = valid.any(axis=-1)
-    min_positions = position_table[min_indices]
-    max_positions = position_table[max_indices]
-    min_positions[~any_valid] = -1
-    max_positions[~any_valid] = -1
+    min_positions = absolute_positions(min_indices)
+    max_positions = absolute_positions(max_indices)
+    min_positions = np.where(np.expand_dims(any_valid, -1), min_positions, -1)
+    max_positions = np.where(np.expand_dims(any_valid, -1), max_positions, -1)
     coords = {dim: data.coords[dim] for dim in retained_dims if dim in data.coords}
     coords[_AXIS_DIM] = list(reduction_dims)
     dims = (*retained_dims, _AXIS_DIM)
