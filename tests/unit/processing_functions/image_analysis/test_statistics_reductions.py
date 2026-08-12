@@ -170,3 +170,76 @@ def test_empty_extrema_positions_are_negative_one():
 
     np.testing.assert_array_equal(result["minpos"], [-1, -1])
     np.testing.assert_array_equal(result["maxpos"], [-1, -1])
+
+
+def test_retained_partition_dimension_is_concatenated_and_sorted():
+    """Concatenate disjoint retained-axis states and restore coordinate order."""
+    data = xr.DataArray(
+        [[3.0, 4.0], [1.0, 2.0]],
+        dims=("frequency", "pixel"),
+        coords={"frequency": [20, 10]},
+    )
+    states = [
+        create_statistics_state(data.isel(frequency=slice(0, 1)), "pixel"),
+        create_statistics_state(data.isel(frequency=slice(1, 2)), "pixel"),
+    ]
+
+    result = finalize_statistics_state(
+        merge_statistics_states(
+            states, partition_dim="frequency", reduction_dims=("pixel",)
+        ),
+        ("mean", "npts"),
+    )
+
+    np.testing.assert_array_equal(result.frequency, [10, 20])
+    np.testing.assert_allclose(result["mean"], [1.5, 3.5])
+
+
+def test_statistics_state_and_finalizer_validation():
+    """Reject lazy/non-DataArray inputs, unknown dimensions, and unknown statistics."""
+    data = xr.DataArray([1.0, 2.0], dims="pixel")
+    with pytest.raises(TypeError, match="DataArray"):
+        create_statistics_state(np.array([1.0]), "pixel")
+    with pytest.raises(TypeError, match="loaded NumPy"):
+        create_statistics_state(data.chunk(), "pixel")
+    with pytest.raises(ValueError, match="Unknown reduction dimensions"):
+        create_statistics_state(data, "bad")
+    with pytest.raises(ValueError, match="Unknown statistics"):
+        finalize_statistics_state(create_statistics_state(data, "pixel"), ("bad",))
+
+
+def test_merge_state_validation_and_coordinate_alignment():
+    """Reject empty, incomplete, sample-inconsistent, and misaligned state lists."""
+    with pytest.raises(ValueError, match="At least one"):
+        merge_statistics_states([])
+
+    data = xr.DataArray(
+        [[1.0], [2.0]], dims=("channel", "pixel"), coords={"channel": [0, 1]}
+    )
+    complete = create_statistics_state(data, "pixel")
+    with pytest.raises(ValueError, match="missing"):
+        merge_statistics_states([complete.drop_vars("sumsq")])
+
+    sampled = create_statistics_state(data, "pixel", statistics=("median",))
+    with pytest.raises(ValueError, match="Only some"):
+        merge_statistics_states([sampled, complete], reduction_dims=("pixel",))
+
+    shifted = create_statistics_state(data.assign_coords(channel=[10, 11]), "pixel")
+    with pytest.raises(ValueError, match="align"):
+        merge_statistics_states([complete, shifted], reduction_dims=("pixel",))
+
+
+def test_median_requires_samples_in_state():
+    """Explain that exact robust finalization requires opting into sample storage."""
+    state = create_statistics_state(xr.DataArray([1.0, 2.0], dims="pixel"), "pixel")
+    with pytest.raises(ValueError, match="does not contain samples"):
+        finalize_statistics_state(state, ("median",))
+
+
+def test_position_indexer_length_validation():
+    """Reject absolute slice and array metadata that do not match selected data."""
+    data = xr.DataArray([1.0, 2.0], dims="pixel")
+    with pytest.raises(ValueError, match="wrong length"):
+        create_statistics_state(data, "pixel", positions={"pixel": slice(5, 6)})
+    with pytest.raises(ValueError, match="wrong length"):
+        create_statistics_state(data, "pixel", positions={"pixel": [5]})
