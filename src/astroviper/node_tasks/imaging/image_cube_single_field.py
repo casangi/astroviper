@@ -493,6 +493,14 @@ def image_cube_single_field(
         write_exc = exc
     T_write = time.time() - start
 
+    # DataTree parent<->child links are strong reference CYCLES: `ps_xdt =
+    # None` alone leaves the whole loaded chunk (~GBs of visibilities/weights)
+    # as cyclic garbage that only a full gc pass can free (2026-08-12 finding:
+    # ~2.9 GB/task ratcheting worker RSS). Sever the links first so the data
+    # dies by refcount right here. Safe on the load-layer dict path (no-op).
+    from astroviper.utils.data_tree import release_data_tree
+
+    release_data_tree(ps_xdt)
     img_xds = None
     ps_xdt = None
 
