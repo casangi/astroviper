@@ -1,4 +1,25 @@
-"""Lifecycle helpers for xarray DataTree objects."""
+"""Lifecycle helpers for xarray DataTree/Dataset objects."""
+
+
+def clear_cached_accessors(xds) -> None:
+    """Break the xarray cached-accessor reference cycle on ``xds``.
+
+    The first access to a registered accessor (e.g. xradio's
+    ``img_xds.xr_img``) stores the accessor instance in the object's
+    ``_cache`` dict, while the accessor keeps a strong reference back to the
+    object (``ImageXds._xds``) -- a reference cycle that pins the ENTIRE
+    dataset until a full garbage-collection pass. The 2026-08-12 Frontera
+    cycle reports traced ~2.5 GB per mapping task to exactly this:
+    ``_cache['xr_img'] -> ImageXds._xds -> Dataset -> POINT_SPREAD_FUNCTION/
+    SKY_RESIDUAL arrays``.
+
+    Clearing the cache severs the cycle; accessors are recreated lazily on
+    the next attribute access, so this is always safe. No-op for ``None`` and
+    for objects without a ``_cache`` dict.
+    """
+    cache = getattr(xds, "_cache", None)
+    if isinstance(cache, dict):
+        cache.clear()
 
 
 def release_data_tree(xdt) -> None:
@@ -29,4 +50,5 @@ def release_data_tree(xdt) -> None:
     if not isinstance(xdt, xr.DataTree):
         return
     for node in list(xdt.subtree)[::-1]:
+        clear_cached_accessors(node)
         node.children = {}
