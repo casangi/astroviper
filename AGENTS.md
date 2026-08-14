@@ -63,9 +63,9 @@ pytest --cov=astroviper tests # with coverage
 - Data is fetched with `toolviper.utils.data.download(...)`.
 - **Add or update tests for any code you change**, even if not asked.
 
-### Issue Management
+### Development Process
 
-[DEVELOPMENT_PROCESS.md](DEVELOPMENT_PROCESS.md)
+See [DEVELOPMENT_PROCESS.md](DEVELOPMENT_PROCESS.md) for more information.
 
 ### Formatting / pre-commit (required before committing)
 - **Ruff** is the formatter (`ruff format`, black-compatible) and the linter
