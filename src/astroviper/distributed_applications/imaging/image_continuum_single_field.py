@@ -33,12 +33,44 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
             ("create map/reduce/append graph", "T_create_map_reduce_graph"),
             ("generate dask graph", "T_generate_dask_graph"),
             ("compute graph", "T_compute_dask_graph"),
+            ("write final continuum image", "T_write_final_image"),
             ("consolidate metadata", "T_consolidate_metadata"),
         ],
     ),
 ]
 
 DISTRIBUTED_APPLICATION_TIMING_TOTAL_KEY = "T_total"
+
+
+def _continuum_image_for_disk(img_xds, image_data_variables_keep, pbcor=False):
+    """Return a lazy view containing the requested finalized continuum products.
+
+    Continuum products carry Taylor-term and PSF-Taylor-order dimensions that
+    cannot be represented by the frequency-cube placeholders created before the
+    graph runs.  This helper therefore derives the disk schema from the final
+    in-memory image itself and only removes products the caller did not request.
+    """
+    import copy
+
+    from astroviper.utils.io import imaging_data_variables_and_dims_double_precision
+
+    registry = imaging_data_variables_and_dims_double_precision
+    requested_names = {registry[key]["name"] for key in image_data_variables_keep}
+    if pbcor and "SKY_RESTORED_PBCOR" in img_xds:
+        requested_names.add("SKY_RESTORED_PBCOR")
+
+    output = img_xds.copy(deep=False)
+    # The XRADIO deletion accessor mutates its dataset in place; isolate the
+    # attributes while retaining zero-copy views of the large arrays.
+    output.attrs = copy.deepcopy(img_xds.attrs)
+    variables_to_drop = [
+        name for name in output.data_vars if name not in requested_names
+    ]
+    if variables_to_drop:
+        output.xr_img.delete_data_variables(variables=variables_to_drop)
+
+    return output
+
 
 ###############################################################################
 # The main functions to build and reduce graphviper graphs
@@ -2588,6 +2620,23 @@ def image_continuum_single_field(
 
     return_dict["static_xds"] = static_xds
     return_dict["n_major_cycles"] = n_major_cycles
+
+    # The initial on-disk arrays are cube-shaped NaN placeholders.  Continuum
+    # finalization instead produces Taylor-term products, so replace the store
+    # with the finalized dataset and let its real dimensions define the schema.
+    start = time.time()
+    output_image = _continuum_image_for_disk(
+        return_dict["image"],
+        image_data_variables_keep,
+        pbcor=pbcor,
+    )
+    write_image(
+        output_image,
+        imagename=image_store,
+        out_format="zarr",
+        overwrite=True,
+    )
+    timing_distributed_application["T_write_final_image"] = time.time() - start
 
     # Consolidate metadata
     start = time.time()
