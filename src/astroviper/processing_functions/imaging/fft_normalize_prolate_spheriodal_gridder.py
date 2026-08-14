@@ -414,8 +414,6 @@ def fft_norm_img_xds(
         # Process one 2-D plane at a time to keep FFT temporaries small.
         # At 12 000 × 12 000 this limits the extra allocation to ≈ 1.15 GB
         # instead of allocating the full (time, freq, pol, u, v) float64 array.
-        import matplotlib.pyplot as plt
-
         for t in range(n_time):
             for f in range(n_freq):
                 for p in range(n_pol):
@@ -429,9 +427,6 @@ def fft_norm_img_xds(
                         fft_backend=fft_backend,
                         complex_dtype=complex_dtype,
                     )
-
-        plt.show()
-
         if data_variable not in image_data_variables_keep:
             # Release the large grid from the dataset so it can be freed as soon
             # as `del raw_grid` is called after the loop.

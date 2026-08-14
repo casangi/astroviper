@@ -1661,6 +1661,13 @@ def primary_beam_correct_restored_continuum(
     restored = img_xds[restored_name]
     primary_beam = img_xds[primary_beam_name]
 
+    # Restoration operates on the Taylor-zero continuum plane.  The restored
+    # dataset may retain the model's Taylor axis for bookkeeping, but PB
+    # correction is a reference-frequency image product rather than a Taylor
+    # stack, so discard that singleton science selection explicitly.
+    if "taylor_term" in restored.dims:
+        restored = restored.isel(taylor_term=0, drop=True)
+
     # The averaged PB should no longer have a frequency axis. This check
     # catches accidental retention of a chunk-local PB cube.
     if "frequency" in primary_beam.dims:
