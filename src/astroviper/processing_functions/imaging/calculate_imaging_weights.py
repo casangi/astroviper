@@ -433,17 +433,26 @@ def grid_imaging_weight_density_continuum(
                 f"one-dimensional; received shape {ms_frequency.shape}."
             )
 
-        # grid_imaging_weights currently assumes that its output channel axis
-        # corresponds directly to the supplied frequency channels.
-        if ms_frequency.shape != frequency.shape or not np.allclose(
-            ms_frequency,
-            frequency,
+        frequency_matches = np.isclose(
+            ms_frequency[:, np.newaxis],
+            frequency[np.newaxis, :],
             rtol=1.0e-12,
             atol=0.0,
-        ):
+        )
+        match_counts = frequency_matches.sum(axis=1)
+        if np.any(match_counts != 1):
             raise ValueError(
                 f"The frequencies in processing-set child {ms_name!r} do not "
-                "match the local image frequency axis. "
+                "each match exactly one channel in the local image frequency "
+                "axis. "
+                f"MS frequencies={ms_frequency}; "
+                f"image frequencies={frequency}."
+            )
+        image_frequency_indices = np.argmax(frequency_matches, axis=1)
+        if np.unique(image_frequency_indices).size != ms_frequency.size:
+            raise ValueError(
+                f"The frequencies in processing-set child {ms_name!r} do not "
+                "map one-to-one onto the local image frequency axis. "
                 f"MS frequencies={ms_frequency}; "
                 f"image frequencies={frequency}."
             )
@@ -479,9 +488,31 @@ def grid_imaging_weight_density_continuum(
                 f"child {ms_name!r}."
             )
 
+        uses_full_frequency_axis = np.array_equal(
+            image_frequency_indices,
+            np.arange(frequency.size),
+        )
+        if uses_full_frequency_axis:
+            child_weight_density_grid = weight_density_grid
+            child_sum_weight = sum_weight
+        else:
+            child_weight_density_grid = np.zeros(
+                (
+                    ms_frequency.size,
+                    n_weight_polarization,
+                    n_uv[0],
+                    n_uv[1],
+                ),
+                dtype=density_dtype,
+            )
+            child_sum_weight = np.zeros(
+                (ms_frequency.size, n_weight_polarization),
+                dtype=np.float64,
+            )
+
         grid_imaging_weights(
-            weight_density_grid,
-            sum_weight,
+            child_weight_density_grid,
+            child_sum_weight,
             uvw,
             data_weight,
             ms_frequency,
@@ -490,6 +521,12 @@ def grid_imaging_weight_density_continuum(
             processing_function_threads=processing_function_threads,
             truncate_uv_cells=True,
         )
+
+        if not uses_full_frequency_axis:
+            weight_density_grid[
+                image_frequency_indices, ...
+            ] += child_weight_density_grid
+            sum_weight[image_frequency_indices, ...] += child_sum_weight
 
         datasets_gridded += 1
 

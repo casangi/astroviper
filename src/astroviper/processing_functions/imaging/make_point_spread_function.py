@@ -298,8 +298,15 @@ def add_uv_sampling_grid_single_field(
     n_chan = weight_imaging.shape[2]
 
     if chan_mode == "cube":
-        n_imag_chan = n_chan
-        frequency_map = (np.arange(0, n_chan)).astype(int)
+        from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+            map_visibility_frequencies_to_image,
+        )
+
+        n_imag_chan = img_xds.sizes["frequency"]
+        frequency_map = map_visibility_frequencies_to_image(
+            ms_xdt.frequency.values,
+            img_xds.frequency.values,
+        )
     else:  # continuum
         n_imag_chan = 1  # Making only one continuum image.
         frequency_map = (np.zeros(n_chan)).astype(int)

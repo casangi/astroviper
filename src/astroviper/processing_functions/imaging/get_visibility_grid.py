@@ -127,10 +127,17 @@ def get_visibility_grid_single_field(
 
     model_name = img_xds.attrs["data_groups"][image_data_group_in_name]["visibility"]
 
-    n_chan = img_xds.sizes["frequency"]
+    n_chan = ms_xds.sizes["frequency"]
     if chan_mode == "cube":
-        n_imag_chan = n_chan
-        frequency_map = (np.arange(0, n_chan)).astype(int)
+        from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+            map_visibility_frequencies_to_image,
+        )
+
+        n_imag_chan = img_xds.sizes["frequency"]
+        frequency_map = map_visibility_frequencies_to_image(
+            ms_xds.frequency.values,
+            img_xds.frequency.values,
+        )
     else:  # continuum
         n_imag_chan = 1  # Single continuum image collapsed across all channels.
         frequency_map = (np.zeros(n_chan)).astype(int)

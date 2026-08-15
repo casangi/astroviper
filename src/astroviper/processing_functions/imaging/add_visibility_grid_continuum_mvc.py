@@ -39,7 +39,9 @@ def add_visibility_grid_mvc_single_field(
     Repeated calls accumulate contributions from multiple measurement sets into
     the existing output arrays. All measurement sets accumulated into the same
     image dataset must have frequency coordinates matching the image frequency
-    coordinate exactly.
+    coordinate. A measurement-set child may cover a unique subset of the image
+    frequency axis; repeated calls accumulate different child subsets into the
+    shared image cube.
 
     Parameters
     ----------
@@ -53,8 +55,7 @@ def add_visibility_grid_mvc_single_field(
 
     img_xds : xarray.Dataset
         Image dataset receiving the frequency-resolved MVC UV grids. Its
-        ``frequency`` coordinate must match the frequency coordinate of
-        ``ms_xds``.
+        ``frequency`` coordinate must contain every frequency in ``ms_xds``.
 
     ms_data_group_in_name : str, optional
         Measurement-set data group containing the logical roles
@@ -98,14 +99,17 @@ def add_visibility_grid_mvc_single_field(
     3. divide each channel image by its corresponding primary beam;
     4. fit the corrected image cube into Taylor terms.
 
-    The current implementation assumes that the image and measurement-set
-    frequency axes have a one-to-one channel mapping.
+    Each measurement-set frequency must map one-to-one onto a channel in the
+    image frequency axis.
     """
     from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
         prolate_spheroidal_grid,
     )
     from astroviper.processing_functions.imaging.utils.fft_sizing import (
         padded_grid_size,
+    )
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        map_visibility_frequencies_to_image,
     )
     from astroviper.utils.data_group_tools import (
         create_data_groups_in_and_out,
@@ -263,21 +267,11 @@ def add_visibility_grid_mvc_single_field(
             f"{image_frequency_coord.shape}."
         )
 
-    if image_frequency_coord.size != n_chan:
-        raise ValueError(
-            "The image and measurement-set frequency axes have "
-            "different lengths: "
-            f"{image_frequency_coord.size} != {n_chan}."
-        )
-
-    if not np.array_equal(
-        image_frequency_coord,
+    frequency_map = map_visibility_frequencies_to_image(
         frequency_coord,
-    ):
-        raise ValueError(
-            "The MVC image and measurement-set frequency "
-            "coordinates must match exactly."
-        )
+        image_frequency_coord,
+    )
+    n_image_chan = image_frequency_coord.size
 
     if "polarization" not in img_xds.coords:
         raise KeyError(
@@ -312,12 +306,6 @@ def add_visibility_grid_mvc_single_field(
         dtype=np.int64,
     )
 
-    # MVC retains every frequency channel.
-    frequency_map = np.arange(
-        n_chan,
-        dtype=np.int64,
-    )
-
     pol_map = np.arange(
         n_pol,
         dtype=np.int64,
@@ -338,7 +326,7 @@ def add_visibility_grid_mvc_single_field(
 
     expected_grid_shape = (
         n_image_time,
-        n_chan,
+        n_image_chan,
         n_pol,
         n_uv[0],
         n_uv[1],
@@ -346,7 +334,7 @@ def add_visibility_grid_mvc_single_field(
 
     expected_normalization_shape = (
         n_image_time,
-        n_chan,
+        n_image_chan,
         n_pol,
     )
 
@@ -382,7 +370,7 @@ def add_visibility_grid_mvc_single_field(
                 "time": img_xds.coords["time"],
                 "frequency": (
                     "frequency",
-                    frequency_coord,
+                    image_frequency_coord,
                 ),
                 "polarization": img_xds.coords["polarization"],
             },
@@ -402,7 +390,7 @@ def add_visibility_grid_mvc_single_field(
                 "time": img_xds.coords["time"],
                 "frequency": (
                     "frequency",
-                    frequency_coord,
+                    image_frequency_coord,
                 ),
                 "polarization": img_xds.coords["polarization"],
             },
@@ -496,7 +484,7 @@ def add_visibility_grid_mvc_single_field(
             "description": ("Frequency-resolved MVC visibility UV grids."),
             "specmode": "mvc",
             "channel_mapping": "one_to_one",
-            "n_frequency_planes": n_chan,
+            "n_frequency_planes": n_image_chan,
         }
     )
 
@@ -505,6 +493,6 @@ def add_visibility_grid_mvc_single_field(
             "description": ("Per-frequency MVC visibility-grid normalization " "sums."),
             "specmode": "mvc",
             "channel_mapping": "one_to_one",
-            "n_frequency_planes": n_chan,
+            "n_frequency_planes": n_image_chan,
         }
     )
