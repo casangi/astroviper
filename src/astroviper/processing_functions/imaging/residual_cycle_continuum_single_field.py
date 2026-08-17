@@ -348,8 +348,9 @@ def make_visibility_model_continuum_single_field(
     where ``M_t`` denotes the Fourier-domain Taylor coefficient and ``ν_ref`` is
     the common continuum reference frequency.
 
-    The reconstructed frequency cube is presented to the existing cube degridder,
-    which produces predicted model visibilities in the measurement set.
+    The reconstructed frequency grid is passed directly to the shared standard
+    degridding primitive, which produces predicted model visibilities in the
+    measurement set.
 
     This reconstruction is repeated independently for every visibility partition,
     whereas the Fourier Taylor model itself is prepared only once after each global
@@ -377,9 +378,9 @@ def make_visibility_model_continuum_single_field(
     image_data_group_in_name : str, optional
         Image data group containing the Fourier Taylor model.
     processing_function_threads : int, optional
-        Number of threads supplied to the cube degridder.
+        Number of threads supplied to the standard degridder.
     fft_padding : float, optional
-        FFT padding factor forwarded to the cube implementation.
+        FFT padding factor used to interpret the continuum UV-grid geometry.
 
     Returns
     -------
@@ -387,22 +388,20 @@ def make_visibility_model_continuum_single_field(
 
     Notes
     -----
-    This function is currently implemented as a compatibility wrapper around the
-    existing cube degridder. For each processing-set partition it reconstructs a
-    temporary frequency cube from the stored Taylor coefficients and calls the
-    cube degridding implementation.
+    For each processing-set partition this continuum implementation reconstructs
+    the frequency-dependent UV grid from the stored Taylor coefficients and calls
+    the shared standard degridding primitive directly. It does not route model
+    prediction through the cube processing API.
 
     The Fourier-domain Taylor model is prepared only once after each global
     continuum minor cycle. Consequently, this function performs only the spectral
     reconstruction and degridding required for the current visibility partition.
     """
-    import copy
-
     import numpy as np
     import xarray as xr
 
-    from astroviper.processing_functions.imaging.get_visibility_grid import (
-        get_visibility_grid_single_field,
+    from astroviper.processing_functions.imaging.degrid_visibility_grid import (
+        degrid_visibility_grid_single_field,
     )
 
     # ------------------------------------------------------------
@@ -559,40 +558,23 @@ def make_visibility_model_continuum_single_field(
             *remaining_dimensions,
         )
 
-        # Construct a temporary cube-compatible image dataset. Its model data
-        # group still points to the same logical visibility-grid name, but that
-        # variable now has a frequency dimension rather than taylor_term.
-        cube_model_xds = xr.Dataset(attrs=copy.deepcopy(model_xds.attrs))
-
-        for coordinate_name, coordinate in model_xds.coords.items():
-            if coordinate_name in {"taylor_term", "frequency"}:
-                continue
-
-            if "taylor_term" in coordinate.dims:
-                continue
-
-            cube_model_xds = cube_model_xds.assign_coords(
-                {coordinate_name: coordinate.copy(deep=False)}
-            )
-
-        cube_model_xds = cube_model_xds.assign_coords(
-            frequency=("frequency", frequency_values)
-        )
-
-        cube_model_xds[model_visibility_name] = frequency_model_grid
-
-        # Run cube-specific degrid
-        get_visibility_grid_single_field(
+        # Degrid the continuum-owned reconstructed grid through the common
+        # numerical primitive; no cube processing function is involved.
+        degrid_visibility_grid_single_field(
             ms_xdt,
             cgk_1D,
-            cube_model_xds,
+            model_xds,
+            frequency_model_grid.values,
+            np.arange(frequency_values.size, dtype=np.int64),
             ms_data_group_out_name=ms_data_group_out_name,
             ms_data_group_out_modified=ms_data_group_out_modified,
-            image_data_group_in_name=image_data_group_in_name,
             overwrite=True,
-            chan_mode="cube",
             fft_padding=fft_padding,
             processing_function_threads=processing_function_threads,
+            description=(
+                "Continuum Taylor model reconstructed at visibility frequencies "
+                "and sampled with the standard degridder."
+            ),
         )
 
     return
