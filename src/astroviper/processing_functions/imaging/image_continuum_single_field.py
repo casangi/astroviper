@@ -187,6 +187,113 @@ def imaging_preparation_continuum_single_field(
     )
 
 
+def accumulate_continuum_model(
+    model_increment_xds,
+    previous_model_xds=None,
+    specmode="mfs",
+):
+    """Create the accumulated continuum model for the next residual update.
+
+    The model-update backend returns the initial model during the first cycle
+    and a model increment during every later cycle.  This helper normalizes
+    those two cases into one persistent model-state dataset.  It deliberately
+    performs positional array addition, matching the historical driver-side
+    accumulation after validating dimensions and shapes.
+
+    Parameters
+    ----------
+    model_increment_xds : xarray.Dataset
+        Image dataset returned by the current model-update cycle. It must
+        contain ``SKY_MODEL``. During the first MVC cycle it must also contain
+        the singleton effective ``PRIMARY_BEAM``.
+    previous_model_xds : xarray.Dataset, optional
+        Accumulated model returned by the preceding append node. If omitted,
+        the current model is copied as the initial accumulated state.
+    specmode : {"mfs", "mvc"}, default ``"mfs"``
+        Continuum execution mode. MVC retains the effective primary beam with
+        the accumulated Taylor model.
+
+    Returns
+    -------
+    xarray.Dataset
+        Independent, in-memory accumulated model state containing
+        ``SKY_MODEL`` and, for MVC, ``PRIMARY_BEAM``.
+
+    Raises
+    ------
+    TypeError
+        If either supplied model object is not an xarray dataset.
+    KeyError
+        If a required model or MVC primary-beam variable is absent.
+    ValueError
+        If the mode is unsupported or the increment layout differs from the
+        previous accumulated model.
+    """
+    import xarray as xr
+
+    if not isinstance(model_increment_xds, xr.Dataset):
+        raise TypeError(
+            "model_increment_xds must be an xarray.Dataset; received "
+            f"{type(model_increment_xds).__name__}."
+        )
+
+    specmode = str(specmode).lower()
+    if specmode not in ("mfs", "mvc"):
+        raise ValueError(
+            "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
+        )
+
+    if "SKY_MODEL" not in model_increment_xds:
+        raise KeyError("model_increment_xds does not contain 'SKY_MODEL'.")
+
+    if previous_model_xds is None:
+        model_variable_names = ["SKY_MODEL"]
+        if specmode == "mvc":
+            model_variable_names.append("PRIMARY_BEAM")
+
+        missing = [
+            name for name in model_variable_names if name not in model_increment_xds
+        ]
+        if missing:
+            raise KeyError(
+                "The initial continuum model state is missing required "
+                f"variables: {missing}."
+            )
+
+        return model_increment_xds[model_variable_names].copy(deep=True)
+
+    if not isinstance(previous_model_xds, xr.Dataset):
+        raise TypeError(
+            "previous_model_xds must be an xarray.Dataset; received "
+            f"{type(previous_model_xds).__name__}."
+        )
+    if "SKY_MODEL" not in previous_model_xds:
+        raise KeyError("previous_model_xds does not contain 'SKY_MODEL'.")
+
+    model_increment = model_increment_xds["SKY_MODEL"]
+    previous_model = previous_model_xds["SKY_MODEL"]
+
+    if model_increment.dims != previous_model.dims:
+        raise ValueError(
+            "The continuum model increment dimensions do not match the "
+            "accumulated model: "
+            f"{model_increment.dims} != {previous_model.dims}."
+        )
+    if model_increment.shape != previous_model.shape:
+        raise ValueError(
+            "The continuum model increment shape does not match the "
+            "accumulated model: "
+            f"{model_increment.shape} != {previous_model.shape}."
+        )
+
+    accumulated_model_xds = previous_model_xds.copy(deep=True)
+    accumulated_model = accumulated_model_xds["SKY_MODEL"]
+    accumulated_model.data = accumulated_model.data + model_increment.data
+    accumulated_model.attrs = previous_model.attrs.copy()
+
+    return accumulated_model_xds
+
+
 @shares_param_docs
 def prepare_model_uv_continuum_single_field(
     model_xds,

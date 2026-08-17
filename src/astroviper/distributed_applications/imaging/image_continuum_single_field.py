@@ -1931,9 +1931,6 @@ def image_continuum_single_field(
     from astroviper.processing_functions.imaging.check_imaging_parameters import (
         check_imaging_weights_params,
     )
-    from astroviper.processing_functions.imaging.image_continuum_single_field import (
-        prepare_model_uv_continuum_single_field,
-    )
     from astroviper.processing_functions.imaging.utils import (
         IMAGING_TIMING_PHASES,
         IMAGING_TIMING_TOTAL_KEY,
@@ -2375,6 +2372,7 @@ def image_continuum_single_field(
             "image_data_variables_keep": image_data_variables_keep,
             "fft_backend": fft_backend,
             "single_precision_image": single_precision_image,
+            "instrument_polarization_basis": instrument_polarization_basis,
             "specmode": specmode,
             "pblimit": pblimit,
         }
@@ -2383,6 +2381,7 @@ def image_continuum_single_field(
         # This holds static quantities such as PSF and PB
         if not is_n_iter_0:
             append_input_params["static_xds"] = static_xds
+            append_input_params["model_xds"] = model_xds
             if specmode == "mvc":
                 # Later map tasks consume the cached channel PBs for model
                 # prediction, but do not emit them again. Carry the same cache
@@ -2418,7 +2417,7 @@ def image_continuum_single_field(
         controller = cycle_return_dict["controller"]
 
         # ---------------------------------------------------------
-        # Initialize or update the state carried to the next cycle.
+        # Capture append-prepared state for the next cycle.
         # ---------------------------------------------------------
         if is_n_iter_0:
             if "static_xds" not in cycle_return_dict:
@@ -2430,56 +2429,25 @@ def image_continuum_single_field(
             # PSF, PB, PSF sidelobe level ...
             static_xds = cycle_return_dict["static_xds"]
 
-            # The first minor-cycle result is the initial accumulated model.
-            model_variable_names = ["SKY_MODEL"]
-            if specmode == "mvc":
-                model_variable_names.append("PRIMARY_BEAM")
-
-            model_xds = cycle_return_dict["image"][model_variable_names].copy(deep=True)
-
-        else:
-            # Later minor cycles return a model increment.
-            model_increment = cycle_return_dict["image"]["SKY_MODEL"]
-
-            if model_increment.dims != model_xds["SKY_MODEL"].dims:
-                raise ValueError(
-                    "The continuum model increment dimensions do not match "
-                    "the accumulated model: "
-                    f"{model_increment.dims} != "
-                    f"{model_xds['SKY_MODEL'].dims}."
-                )
-
-            if model_increment.shape != model_xds["SKY_MODEL"].shape:
-                raise ValueError(
-                    "The continuum model increment shape does not match "
-                    "the accumulated model: "
-                    f"{model_increment.shape} != "
-                    f"{model_xds['SKY_MODEL'].shape}."
-                )
-
-            # Update only the data so that coordinates such as the Stokes
-            # polarization labels remain unchanged.
-            accumulated_model = model_xds["SKY_MODEL"]
-
-            # Sum old model and model increment
-            model_xds["SKY_MODEL"].data = accumulated_model.data + model_increment.data
-
-            model_xds["SKY_MODEL"].attrs = accumulated_model.attrs.copy()
-
-        if specmode == "mfs":
-            # Prepare global Fourier-domain Taylor model grids for degridding
-            model_uv_xds = prepare_model_uv_continuum_single_field(
-                model_xds,
-                image_params=image_params,
-                instrument_polarization_basis=instrument_polarization_basis,
-                single_precision_image=single_precision_image,
-                processing_function_threads=processing_function_threads,
-                fft_backend=fft_backend,
+        if "model_xds" not in cycle_return_dict:
+            raise KeyError(
+                "The continuum append node did not return accumulated "
+                "'model_xds' state."
             )
-        else:
-            # MVC evaluates the image-domain Taylor model, applies the
-            # task-local PB, and FFTs the resulting cube inside each map task.
-            model_uv_xds = None
+        if "model_uv_xds" not in cycle_return_dict:
+            raise KeyError(
+                "The continuum append node did not return 'model_uv_xds' state."
+            )
+
+        model_xds = cycle_return_dict["model_xds"]
+        model_uv_xds = cycle_return_dict["model_uv_xds"]
+
+        if specmode == "mfs" and model_uv_xds is None:
+            raise RuntimeError(
+                "The MFS append node did not prepare the Fourier-domain model."
+            )
+        if specmode == "mvc" and model_uv_xds is not None:
+            raise RuntimeError("The MVC append node returned unexpected MFS UV state.")
 
         # if imaging weights are calculated locally at the imaging setup in the first major loop
         # we need to carry that state over

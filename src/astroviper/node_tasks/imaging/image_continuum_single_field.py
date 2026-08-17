@@ -1890,6 +1890,76 @@ def _prepare_continuum_image(
     return img_xds, static_xds, psf_fit_return_df
 
 
+def _prepare_post_update_continuum_model_state(model_increment_xds, input_params):
+    """Accumulate the model and prepare MFS Fourier state inside the append node.
+
+    The distributed application supplies the previous image-domain model as
+    append input and only forwards the two state objects returned here. All
+    numerical accumulation, polarization conversion, and Fourier preparation
+    are delegated to processing functions.
+
+    Parameters
+    ----------
+    model_increment_xds : xarray.Dataset
+        Image dataset produced by the current model-update cycle.
+    input_params : dict
+        Append-node configuration. Later cycles must provide ``model_xds``.
+
+    Returns
+    -------
+    model_xds : xarray.Dataset
+        Fully accumulated image-domain Taylor model.
+    model_uv_xds : xarray.Dataset or None
+        Fourier-domain MFS Taylor model, or ``None`` for MVC.
+    """
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        accumulate_continuum_model,
+        prepare_model_uv_continuum_single_field,
+    )
+
+    is_n_iter_0 = bool(input_params.get("is_n_iter_0", True))
+    previous_model_xds = input_params.get("model_xds")
+
+    if not is_n_iter_0 and previous_model_xds is None:
+        raise KeyError(
+            "Later continuum append nodes require input_params['model_xds']."
+        )
+
+    specmode = str(input_params.get("specmode", "mfs")).lower()
+    model_xds = accumulate_continuum_model(
+        model_increment_xds,
+        previous_model_xds=previous_model_xds,
+        specmode=specmode,
+    )
+
+    if specmode == "mfs":
+        model_uv_xds = prepare_model_uv_continuum_single_field(
+            model_xds,
+            image_params=input_params["image_params"],
+            instrument_polarization_basis=input_params.get(
+                "instrument_polarization_basis",
+                "linear",
+            ),
+            single_precision_image=input_params.get(
+                "single_precision_image",
+                True,
+            ),
+            processing_function_threads=input_params.get(
+                "processing_function_threads",
+                1,
+            ),
+            fft_backend=input_params.get("fft_backend", "pyfftw"),
+        )
+    elif specmode == "mvc":
+        model_uv_xds = None
+    else:
+        raise ValueError(
+            "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
+        )
+
+    return model_xds, model_uv_xds
+
+
 @shares_param_docs
 def continuum_minor_cycle_node(
     input_data,
@@ -1913,15 +1983,19 @@ def continuum_minor_cycle_node(
     4. installs the static continuum products (for example, the primary beam and
        fitted restoring beam parameters);
     5. executes one continuum minor cycle, updating the sky model and producing the
-       corresponding model increment.
+       corresponding model increment;
+    6. accumulates that increment into the persistent image-domain model and, for
+       MFS, prepares its Fourier-domain Taylor grids for the next residual update.
 
-    The updated sky model is returned to the distributed application, which then
-    computes a new set of Taylor-domain model visibility grids before launching the
-    next major cycle.
+    The accumulated image-domain model and the optional Fourier-domain MFS model
+    are returned to the distributed application as state objects. The application
+    forwards them to the next graph without performing numerical model operations.
 
     This node performs no distributed processing. It operates on the single,
     globally reduced continuum dataset produced by the GraphViper reduce stage.
     """
+
+    import time
 
     input_data = _unwrap_continuum_reduce_result(
         input_data,
@@ -1962,6 +2036,23 @@ def continuum_minor_cycle_node(
         input_data,
         model_update_input_params,
     )
+
+    # The append stage owns all numerical state preparation needed by the next
+    # residual-update graph. The distributed application only forwards these
+    # returned objects.
+    start = time.time()
+    model_xds, model_uv_xds = _prepare_post_update_continuum_model_state(
+        return_dict["image"],
+        input_params,
+    )
+    T_prepare_model_state = time.time() - start
+
+    return_dict["model_xds"] = model_xds
+    return_dict["model_uv_xds"] = model_uv_xds
+
+    timing_model_update = return_dict.get("timing_model_update")
+    if timing_model_update is not None:
+        timing_model_update["T_prepare_model_state"] = T_prepare_model_state
 
     # model_update_continuum_single_field constructs its own return dictionary,
     # so explicitly carry the first-cycle imaging-weight cache through the
