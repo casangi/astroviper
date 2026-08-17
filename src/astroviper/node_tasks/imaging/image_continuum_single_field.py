@@ -2367,6 +2367,52 @@ def model_update_continuum_single_field(
         "T_convergence": 0.0,
     }
 
+    # A dirty-image request still passes through the append node so static
+    # products and model state are prepared consistently, but it must not call
+    # a deconvolver whose contract requires a positive iteration count.
+    if int(iteration_control_params["niter"]) == 0:
+        import xarray as xr
+
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            MAJOR_ITER_LIMIT,
+            MAJOR_STOPCODE_DESCRIPTIONS,
+            MINOR_CONTINUE,
+            StopCode,
+        )
+
+        if "SKY_MODEL" not in img_xds:
+            img_xds["SKY_MODEL"] = xr.zeros_like(img_xds["SKY_RESIDUAL"])
+        img_xds.attrs.setdefault("data_groups", {})[image_data_group_out_name] = {
+            "sky": "SKY_MODEL"
+        }
+
+        controller.ensure_planes(
+            img_xds.sizes["time"],
+            1,
+            img_xds.sizes["polarization"],
+        )
+        controller.niter[...] = 0
+        controller.stopcode_major[...] = MAJOR_ITER_LIMIT
+        controller.stopcode_minor[...] = MINOR_CONTINUE
+        stopcode = StopCode(MAJOR_ITER_LIMIT, MINOR_CONTINUE)
+        stopdesc = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_ITER_LIMIT]
+        controller.stopcode = stopcode
+        controller.stopdescription = stopdesc
+
+        timing["T_model_update_node_task"] = time.time() - node_start
+        return {
+            "image": img_xds,
+            "timing_node_tasks": input_data.get("timing_node_tasks"),
+            "timing_model_update": pd.DataFrame(
+                {key: [value] for key, value in timing.items()}
+            ),
+            "deconvolution": combined_deconvolve_dict,
+            "controller": controller,
+            "stopcode": stopcode,
+            "stopdesc": stopdesc,
+            "is_n_iter_0": False,
+        }
+
     # -------------------------------------------------------------
     # Calculate the controls for this minor cycle.
     #

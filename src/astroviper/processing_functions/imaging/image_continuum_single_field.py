@@ -644,6 +644,17 @@ def convert_mvc_cubes_to_taylor_normal_equations(
         coords={"frequency": residual_cube.frequency},
     )
 
+    # Accumulate weights in float64 for numerical stability, then return image
+    # products at the precision requested by the input cube.
+    output_dtype = (
+        np.float32
+        if all(
+            np.dtype(cube.dtype).itemsize <= np.dtype(np.float32).itemsize
+            for cube in cubes.values()
+        )
+        else np.float64
+    )
+
     def _clean_weights(normalization):
         return xr.where(
             np.isfinite(normalization) & (normalization > 0.0),
@@ -736,6 +747,10 @@ def convert_mvc_cubes_to_taylor_normal_equations(
         "n_psf_taylor_terms": n_psf_taylor_terms,
         "pblimit": pblimit,
     }
+
+    residual_taylor = residual_taylor.astype(output_dtype, copy=False)
+    psf_taylor = psf_taylor.astype(output_dtype, copy=False)
+    effective_primary_beam = effective_primary_beam.astype(output_dtype, copy=False)
 
     return residual_taylor, psf_taylor, effective_primary_beam
 

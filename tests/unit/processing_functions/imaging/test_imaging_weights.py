@@ -23,13 +23,19 @@ import xarray as xr
 from astroviper.processing_functions.imaging.calculate_imaging_weights import (
     _equalize_parallel_hand_weights,
     calculate_imaging_weights,
+    grid_imaging_weight_density_continuum,
 )
 from astroviper.processing_functions.imaging.check_imaging_parameters import (
     check_imaging_weights_params,
 )
 
 _MS_DIMS = ("time", "baseline", "frequency", "polarization")
-_MOD_PATH = "astroviper.processing_functions.imaging.calculate_imaging_weights"
+_GRID_MOD_PATH = (
+    "astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights"
+)
+_BRIGGS_MOD_PATH = (
+    "astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -363,9 +369,9 @@ class TestCalculateImagingWeightsDispatch(unittest.TestCase):
         self.img_xds = _make_img_xds()
         # Patch the gridder, Briggs-factor, and degridder symbols as imported
         # into the calculate_imaging_weights module.
-        self.grid_patch = mock.patch(f"{_MOD_PATH}.grid_imaging_weights")
-        self.briggs_patch = mock.patch(f"{_MOD_PATH}.calculate_briggs_params")
-        self.degrid_patch = mock.patch(f"{_MOD_PATH}.degrid_imaging_weights")
+        self.grid_patch = mock.patch(f"{_GRID_MOD_PATH}.grid_imaging_weights")
+        self.briggs_patch = mock.patch(f"{_BRIGGS_MOD_PATH}.calculate_briggs_params")
+        self.degrid_patch = mock.patch(f"{_GRID_MOD_PATH}.degrid_imaging_weights")
 
         self.grid_mock = self.grid_patch.start()
         self.briggs_mock = self.briggs_patch.start()
@@ -377,7 +383,7 @@ class TestCalculateImagingWeightsDispatch(unittest.TestCase):
         # Degrid: return the equalized data_weight unchanged so the caller's
         # tile(..., n_pol) produces an output of the correct shape.
         self.degrid_mock.side_effect = (
-            lambda grid, uvw, dw, briggs, freq, n_uv, dlm, processing_function_threads=1: dw
+            lambda grid, uvw, dw, briggs, freq, n_uv, dlm, **kwargs: dw
         )
         self.briggs_mock.return_value = np.zeros((2, 1, 1))
 
@@ -449,6 +455,72 @@ class TestCalculateImagingWeightsDispatch(unittest.TestCase):
             return_weight_density_grid=True,
         )
         self.assertEqual(result.dtype, np.float32)
+
+
+class TestGridContinuumWeightDensity(unittest.TestCase):
+    """Frequency-partition handling in distributed global weighting."""
+
+    def setUp(self):
+        """Register the image accessor used to obtain cell sizes."""
+        import xradio.image.image_xds  # noqa: F401
+
+    def test_children_may_cover_disjoint_subsets_of_image_frequencies(self):
+        """Multiple MS children accumulate into their matching output channels."""
+        image_frequencies = np.array([1.00e9, 1.05e9, 1.10e9, 1.15e9])
+        ps_xdt = xr.DataTree()
+        for name, indices in (
+            ("low", [0, 1]),
+            ("high", [2, 3]),
+        ):
+            dataset = _make_ms_ds(
+                n_baseline=1,
+                n_chan=len(indices),
+                weight_per_pol=[2.0, 6.0],
+            ).assign_coords(frequency=image_frequencies[indices])
+            dataset["UVW"].values[...] = 0.0
+            ps_xdt[name] = xr.DataTree(dataset=dataset)
+
+        image = _make_img_xds(n_chan=image_frequencies.size).assign_coords(
+            frequency=image_frequencies
+        )
+        result = grid_imaging_weight_density_continuum(
+            ps_xdt,
+            image,
+            {
+                "weighting": "briggs",
+                "robust": 0.5,
+                "casa_weighting_implementation": True,
+            },
+        )
+
+        np.testing.assert_array_equal(result.frequency.values, image_frequencies)
+        self.assertTrue(np.all(result.SUM_WEIGHT.values > 0.0))
+        self.assertTrue(
+            np.all(
+                np.count_nonzero(
+                    result.WEIGHT_DENSITY_GRID.values,
+                    axis=(1, 2, 3),
+                )
+                > 0
+            )
+        )
+        self.assertEqual(result.attrs["n_processing_set_datasets_gridded"], 2)
+
+    def test_child_frequency_outside_image_axis_is_rejected(self):
+        """A genuinely absent visibility channel still raises a clear error."""
+        ps_xdt = _make_ps_xdt(n_chan=1)
+        ps_xdt["ms_0"].coords["frequency"] = [2.0e9]
+        image = _make_img_xds(n_chan=2)
+
+        with self.assertRaisesRegex(ValueError, "each match exactly one channel"):
+            grid_imaging_weight_density_continuum(
+                ps_xdt,
+                image,
+                {
+                    "weighting": "briggs",
+                    "robust": 0.5,
+                },
+            )
 
 
 # ---------------------------------------------------------------------------

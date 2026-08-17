@@ -175,6 +175,7 @@ def test_distributed_application_timing_summary_formats():
         "T_create_map_reduce_graph": 0.7,
         "T_generate_dask_graph": 0.8,
         "T_compute_dask_graph": 5.0,
+        "T_write_final_image": 0.25,
         "T_consolidate_metadata": 0.9,
         "T_total": 9.5,
     }

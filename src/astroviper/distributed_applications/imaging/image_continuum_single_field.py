@@ -544,6 +544,17 @@ def compute_continuum_imaging_weight_degrid_graph(
     result = dask.compute(dask_graph)[0]
     timings["T_compute_imaging_weight_degrid_graph"] = time.time() - start
 
+    # GraphViper does not call the reducer for a one-leaf graph, so normalize
+    # that map result to the same task-indexed schema produced by reduction.
+    if "weight_cache_mapping" not in result and {
+        "task_id",
+        "weight_datasets",
+    }.issubset(result):
+        result = dict(result)
+        result["weight_cache_mapping"] = {
+            int(result["task_id"]): result["weight_datasets"]
+        }
+
     if "weight_cache_mapping" not in result:
         raise RuntimeError(
             "The imaging-weight degrid graph did not return " "'weight_cache_mapping'."
