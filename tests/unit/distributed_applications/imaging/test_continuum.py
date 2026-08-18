@@ -17,6 +17,7 @@ from xradio.image import write_image
 from xradio.measurement_set import open_processing_set
 
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
+    _apply_exact_frequency_selection_to_continuum_mapping,
     _continuum_image_for_disk,
     calculate_number_of_chunks_for_continuum_imaging,
     combine_continuum_chunks,
@@ -30,6 +31,75 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
 TW_HYDRA_ARCHIVE = Path(__file__).parent / "data" / "tw_hydra_5chan_fixture.zip"
 TW_HYDRA_STORE_NAME = "twhya_selfcal_lsrk_5chans.ps.zarr"
 TW_HYDRA_RELATIVE_TOLERANCE = 1.0e-6
+
+
+def _frequency_mapping(task_frequency_chunks, child_frequencies):
+    """Build a minimal GraphVIPER-shaped mapping and Processing Set."""
+    processing_set = xr.DataTree()
+    processing_set["child"] = xr.Dataset(
+        coords={"frequency": np.asarray(child_frequencies, dtype=float)}
+    )
+    mapping = {
+        task_id: {
+            "task_coords": {
+                "frequency": {"data": np.asarray(frequencies, dtype=float)}
+            },
+            "data_selection": {},
+        }
+        for task_id, frequencies in enumerate(task_frequency_chunks)
+    }
+    return mapping, processing_set
+
+
+def test_exact_frequency_selection_reorders_a_nonmonotonic_child():
+    """Irregular integer indexers put a non-monotonic child in task order."""
+    mapping, processing_set = _frequency_mapping(
+        [[10.0, 11.0, 20.0], [21.0, 30.0, 31.0]],
+        [30.0, 31.0, 20.0, 21.0, 10.0, 11.0],
+    )
+
+    result = _apply_exact_frequency_selection_to_continuum_mapping(
+        mapping,
+        processing_set,
+    )
+
+    for task_id in result:
+        selector = result[task_id]["data_selection"]["child"]["frequency"]
+        assert isinstance(selector, np.ndarray)
+        selected = processing_set["child"].isel(frequency=selector).frequency.values
+        np.testing.assert_array_equal(
+            selected,
+            result[task_id]["task_coords"]["frequency"]["data"],
+        )
+
+
+def test_exact_frequency_selection_retains_lazy_contiguous_slices():
+    """Contiguous child indices remain slice indexers instead of arrays."""
+    mapping, processing_set = _frequency_mapping(
+        [[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]],
+        [30.0, 31.0, 20.0, 21.0, 10.0, 11.0],
+    )
+
+    result = _apply_exact_frequency_selection_to_continuum_mapping(
+        mapping,
+        processing_set,
+    )
+
+    selectors = [
+        result[task_id]["data_selection"]["child"]["frequency"] for task_id in result
+    ]
+    assert selectors == [slice(4, 6), slice(2, 4), slice(0, 2)]
+
+
+def test_exact_frequency_selection_rejects_unassigned_child_channels():
+    """The helper never silently drops a Processing Set frequency channel."""
+    mapping, processing_set = _frequency_mapping([[10.0]], [10.0, 20.0])
+
+    with pytest.raises(ValueError, match="not assigned exactly once"):
+        _apply_exact_frequency_selection_to_continuum_mapping(
+            mapping,
+            processing_set,
+        )
 
 
 @pytest.fixture(scope="module")

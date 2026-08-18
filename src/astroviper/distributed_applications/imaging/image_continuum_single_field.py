@@ -1748,6 +1748,158 @@ def combine_continuum_imaging_weight_chunks(
 ###############################################################################
 
 
+def _apply_exact_frequency_selection_to_continuum_mapping(
+    node_task_data_mapping,
+    ps_xdt,
+    *,
+    frequency_rtol=1.0e-12,
+    frequency_atol=0.0,
+):
+    """Replace interpolated continuum frequency selections with exact indexers.
+
+    GraphVIPER's generic coordinate interpolation converts chunk edges to
+    positional slices with ``searchsorted``.  CASA channel selections can leave a
+    Processing Set child with a non-monotonic frequency coordinate, for which
+    those interpolated slices are not valid.  This continuum-specific helper
+    retains the mapping and task coordinates created by GraphVIPER, but rebuilds
+    each child's frequency ``isel`` indexer from physical channel matches.
+
+    Consecutive ascending indices remain lazy slices.  Reordered or otherwise
+    irregular indices use an integer array, which also makes the loaded child
+    frequency order agree with the task image frequency order.
+
+    Parameters
+    ----------
+    node_task_data_mapping : dict
+        Mapping returned by
+        :func:`graphviper.graph_tools.coordinate_utils.interpolate_data_coords_onto_parallel_coords`.
+        It is updated in place and returned.
+    ps_xdt : xarray.DataTree
+        Open Processing Set whose children supply the on-disk frequency axes.
+    frequency_rtol, frequency_atol : float
+        Relative and absolute tolerances used only to accommodate floating-point
+        representations of the same physical channel coordinate.
+
+    Returns
+    -------
+    dict
+        ``node_task_data_mapping`` with exact per-child frequency indexers.
+
+    Raises
+    ------
+    ValueError
+        If a frequency coordinate is not one-dimensional, a match is ambiguous,
+        or any Processing Set channel is not assigned exactly once.
+    """
+    import numpy as np
+
+    def _slice_or_array(indices):
+        indices = np.asarray(indices, dtype=np.int64)
+        if indices.size == 1:
+            start = int(indices[0])
+            return slice(start, start + 1)
+
+        steps = np.diff(indices)
+        if np.all(steps == 1):
+            return slice(int(indices[0]), int(indices[-1]) + 1)
+
+        return indices
+
+    child_frequencies = {}
+    child_selection_counts = {}
+    for child_name, child_xdt in ps_xdt.items():
+        if "frequency" not in child_xdt.coords:
+            raise ValueError(
+                f"Processing Set child {child_name!r} has no frequency coordinate."
+            )
+
+        frequencies = np.asarray(child_xdt.coords["frequency"].values, dtype=float)
+        if frequencies.ndim != 1:
+            raise ValueError(
+                f"Processing Set child {child_name!r} frequency coordinate must "
+                f"be one-dimensional; received shape {frequencies.shape}."
+            )
+
+        child_frequencies[child_name] = frequencies
+        child_selection_counts[child_name] = np.zeros(frequencies.size, dtype=np.int64)
+
+    for task_id, task_mapping in node_task_data_mapping.items():
+        task_coords = task_mapping.get("task_coords", {})
+        if "frequency" not in task_coords:
+            raise ValueError(f"Continuum task {task_id} has no frequency coordinate.")
+
+        task_frequencies = np.asarray(
+            task_coords["frequency"]["data"],
+            dtype=float,
+        )
+        if task_frequencies.ndim != 1:
+            raise ValueError(
+                f"Continuum task {task_id} frequency coordinate must be "
+                f"one-dimensional; received shape {task_frequencies.shape}."
+            )
+
+        previous_selection = task_mapping.get("data_selection", {})
+        exact_selection = {}
+        task_match_counts = np.zeros(task_frequencies.size, dtype=np.int64)
+
+        for child_name, frequencies in child_frequencies.items():
+            matches = np.isclose(
+                task_frequencies[:, np.newaxis],
+                frequencies[np.newaxis, :],
+                rtol=frequency_rtol,
+                atol=frequency_atol,
+            )
+            matches_per_task_channel = matches.sum(axis=1)
+            matches_per_child_channel = matches.sum(axis=0)
+
+            if np.any(matches_per_task_channel > 1):
+                raise ValueError(
+                    f"Continuum task {task_id} has a frequency that matches more "
+                    f"than one channel in Processing Set child {child_name!r}."
+                )
+            if np.any(matches_per_child_channel > 1):
+                raise ValueError(
+                    f"Processing Set child {child_name!r} has a frequency that "
+                    f"matches more than one channel in continuum task {task_id}."
+                )
+
+            task_indices, child_indices = np.nonzero(matches)
+            if child_indices.size == 0:
+                continue
+
+            order = np.argsort(task_indices, kind="stable")
+            child_indices = child_indices[order]
+            task_indices = task_indices[order]
+
+            child_selection = dict(previous_selection.get(child_name, {}))
+            child_selection["frequency"] = _slice_or_array(child_indices)
+            exact_selection[child_name] = child_selection
+
+            task_match_counts[task_indices] += 1
+            child_selection_counts[child_name][child_indices] += 1
+
+        if np.any(task_match_counts == 0):
+            missing = task_frequencies[task_match_counts == 0]
+            raise ValueError(
+                f"Continuum task {task_id} contains frequencies that are absent "
+                f"from every Processing Set child: {missing}."
+            )
+
+        task_mapping["data_selection"] = exact_selection
+
+    for child_name, selection_counts in child_selection_counts.items():
+        if np.any(selection_counts != 1):
+            frequencies = child_frequencies[child_name][selection_counts != 1]
+            counts = selection_counts[selection_counts != 1]
+            raise ValueError(
+                f"Processing Set child {child_name!r} channels were not assigned "
+                "exactly once across continuum tasks. "
+                f"Frequencies={frequencies}; assignment counts={counts}."
+            )
+
+    return node_task_data_mapping
+
+
 def calculate_number_of_chunks_for_continuum_imaging(
     img_xds, single_precision_image, n_chunks, thread_info
 ):
@@ -2169,6 +2321,10 @@ def image_continuum_single_field(
     start = time.time()
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
         parallel_coords, ps_xdt
+    )
+    node_task_data_mapping = _apply_exact_frequency_selection_to_continuum_mapping(
+        node_task_data_mapping,
+        ps_xdt,
     )
     timing_distributed_application["T_interpolate_data_coords"] = time.time() - start
 
