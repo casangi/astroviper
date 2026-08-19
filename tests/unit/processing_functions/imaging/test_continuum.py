@@ -17,6 +17,8 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     accumulate_continuum_model,
     apply_mvc_primary_beam_convention,
     convert_mvc_cubes_to_taylor_normal_equations,
+    finalize_mvc_taylor_normal_equations,
+    make_mvc_taylor_normal_equation_contributions,
     prepare_model_uv_continuum_single_field,
     prepare_model_uv_mvc_single_field,
     primary_beam_correct_restored_continuum,
@@ -334,6 +336,47 @@ def test_mvc_conversion_preserves_single_precision_image_products():
     assert primary_beam.dtype == np.dtype(np.float32)
 
 
+def test_mvc_map_contributions_reduce_to_full_cube_result():
+    """Summed map Taylor products reproduce the former global cube conversion."""
+    frequency = np.array([0.8e9, 0.9e9, 1.1e9, 1.2e9])
+    residual_cube = _frequency_cube([2.0, 3.0, 7.0, 11.0], frequency)
+    psf_cube = _frequency_cube([1.0, 2.0, 4.0, 8.0], frequency)
+    primary_beam_cube = _frequency_cube([0.5, 0.7, 1.1, 1.3], frequency)
+    normalization = _frequency_normalization([1.0, 2.0, 3.0, 4.0], frequency)
+
+    expected = convert_mvc_cubes_to_taylor_normal_equations(
+        residual_cube,
+        psf_cube,
+        primary_beam_cube,
+        normalization,
+        normalization,
+        nterms=2,
+        reference_frequency=1.0e9,
+    )
+    chunks = []
+    for channel_indices in ([0, 1], [2, 3]):
+        selection = {"frequency": channel_indices}
+        chunks.append(
+            make_mvc_taylor_normal_equation_contributions(
+                residual_cube.isel(selection),
+                psf_cube.isel(selection),
+                primary_beam_cube.isel(selection),
+                normalization.isel(selection),
+                normalization.isel(selection),
+                nterms=2,
+                reference_frequency=1.0e9,
+            )
+        )
+
+    reduced = chunks[0].copy(deep=True)
+    for variable_name in reduced.data_vars:
+        reduced[variable_name] = reduced[variable_name] + chunks[1][variable_name]
+    actual = finalize_mvc_taylor_normal_equations(reduced)
+
+    for actual_array, expected_array in zip(actual, expected):
+        np.testing.assert_allclose(actual_array, expected_array)
+
+
 def test_mvc_prediction_applies_channel_over_effective_primary_beam():
     """MVC scales a common-beam model by each channel beam."""
     frequency = np.array([0.9e9, 1.1e9])
@@ -483,8 +526,16 @@ def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(monkeypatch, specm
         "astroviper.processing_functions.imaging.image_continuum_single_field"
     )
     image = xr.Dataset(
+        {
+            "PRIMARY_BEAM": xr.DataArray([1.0], dims=("frequency",)),
+            "VISIBILITY_NORMALIZATION": xr.DataArray([1.0], dims=("frequency",)),
+            "UV_SAMPLING_NORMALIZATION": xr.DataArray([1.0], dims=("frequency",)),
+        },
         coords={"frequency": [1.0e9]},
-        attrs={"type": "image_dataset", "data_groups": {}},
+        attrs={
+            "type": "image_dataset",
+            "data_groups": {"residual": {"primary_beam": "PRIMARY_BEAM"}},
+        },
     )
     monkeypatch.setattr(
         module,
@@ -506,6 +557,16 @@ def test_residual_update_wraps_setup_cycle_and_local_mvc_ifft(monkeypatch, specm
         "astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder."
         "ifft_norm_img_xds",
         fake_ifft,
+    )
+    monkeypatch.setattr(
+        module,
+        "make_mvc_taylor_normal_equation_contributions",
+        lambda *args, **kwargs: xr.Dataset(
+            {
+                "MVC_RESIDUAL_TAYLOR_NUMERATOR": xr.DataArray([0.0], dims=("x",)),
+                "MVC_RESIDUAL_WEIGHT_SUM": xr.DataArray([1.0], dims=("x",)),
+            }
+        ),
     )
     result, timing = residual_update_continuum_single_field(
         {}, image, {"nterms": 2}, {}, specmode=specmode, is_n_iter_0=True

@@ -504,7 +504,7 @@ def prepare_model_uv_continuum_single_field(
     return model_uv_xds
 
 
-def convert_mvc_cubes_to_taylor_normal_equations(
+def make_mvc_taylor_normal_equation_contributions(
     residual_cube,
     psf_cube,
     primary_beam_cube,
@@ -515,29 +515,36 @@ def convert_mvc_cubes_to_taylor_normal_equations(
     reference_frequency,
     pblimit=0.2,
 ):
-    """Convert MVC channel cubes into CASA-style MT-MFS normal equations.
+    """Form additive MVC Taylor products for one map-task frequency chunk.
 
-    The channel residuals are first remapped from the frequency-dependent
-    primary-beam convention to one common effective beam.  The returned
-    residual Taylor planes are weighted normal-equation right-hand sides, not
-    pixel-wise polynomial coefficients.  The PSF cube is converted with the
-    same spectral basis into ``2 * nterms - 1`` Hessian planes.
+    The returned dataset has no frequency dimension and can therefore be
+    combined by element-wise addition in the distributed reduce stage.  The
+    primary-beam division and Taylor moment construction happen here; only the
+    normalization by globally accumulated weights and the construction of the
+    effective beam remain for the append node.
+
+    Channel residuals are divided by their frequency-dependent primary beam,
+    then multiplied by that beam while forming the weighted Taylor moments.
+    This explicitly applies the PB convention in the map stage while retaining
+    the algebraically equivalent residual numerator.  The PSF cube is converted
+    with the same spectral basis into ``2 * nterms - 1`` Hessian numerators.
 
     Parameters
     ----------
     residual_cube : xarray.DataArray
         Channel residual images with dimensions
         ``(time, frequency, polarization, l, m)``.
-    psf_cube : xarray.DataArray
-        Channel PSF images with the same dimensions as ``residual_cube``.
+    psf_cube : xarray.DataArray or None
+        Channel PSF images with the same dimensions as ``residual_cube``. Use
+        ``None`` after the first major cycle.
     primary_beam_cube : xarray.DataArray
         Frequency-dependent primary beam with the same dimensions.
     residual_normalization : xarray.DataArray
         Per-channel residual sum of imaging weights with dimensions
         ``(time, frequency, polarization)``.
-    psf_normalization : xarray.DataArray
+    psf_normalization : xarray.DataArray or None
         Per-channel PSF sum of imaging weights with dimensions
-        ``(time, frequency, polarization)``.
+        ``(time, frequency, polarization)``. Required with ``psf_cube``.
     nterms : int
         Number of sky-model Taylor coefficients.
     reference_frequency : float
@@ -547,12 +554,10 @@ def convert_mvc_cubes_to_taylor_normal_equations(
 
     Returns
     -------
-    residual_taylor : xarray.DataArray
-        ``nterms`` Taylor normal-equation right-hand sides.
-    psf_taylor : xarray.DataArray
-        ``2 * nterms - 1`` Taylor PSF/Hessian planes.
-    effective_primary_beam : xarray.DataArray
-        Imaging-weighted common primary beam, without a frequency dimension.
+    xarray.Dataset
+        Additive residual Taylor numerators and residual-weight sum.  When a
+        PSF cube is supplied, also contains PSF Taylor numerators, the PSF
+        weight sum, and the PSF-weighted primary-beam sum.
 
     Notes
     -----
@@ -560,7 +565,10 @@ def convert_mvc_cubes_to_taylor_normal_equations(
 
     ``R'_nu = Abar * R_nu / A_nu``
 
-    followed by
+    followed by chunk-local Taylor accumulation.  The factor ``Abar`` is not
+    known until all chunks have been reduced.  In the residual equation it
+    cancels algebraically; for the PSF and effective beam it is applied by
+    :func:`finalize_mvc_taylor_normal_equations` in the append node.
 
     ``b_t = sum(w_nu * x_nu**t * A_nu * R'_nu) / (sum(w_nu) * Abar)``
 
@@ -579,19 +587,21 @@ def convert_mvc_cubes_to_taylor_normal_equations(
 
     cubes = {
         "residual_cube": residual_cube,
-        "psf_cube": psf_cube,
         "primary_beam_cube": primary_beam_cube,
     }
+    if psf_cube is not None:
+        cubes["psf_cube"] = psf_cube
     for name, cube in cubes.items():
         if cube.dims != required_cube_dims:
             raise ValueError(
                 f"{name} has dimensions {cube.dims}; expected {required_cube_dims}."
             )
 
-    normalizations = {
-        "residual_normalization": residual_normalization,
-        "psf_normalization": psf_normalization,
-    }
+    normalizations = {"residual_normalization": residual_normalization}
+    if psf_cube is not None:
+        if psf_normalization is None:
+            raise ValueError("psf_normalization is required when psf_cube is supplied.")
+        normalizations["psf_normalization"] = psf_normalization
     for name, normalization in normalizations.items():
         if normalization.dims != required_normalization_dims:
             raise ValueError(
@@ -600,21 +610,23 @@ def convert_mvc_cubes_to_taylor_normal_equations(
             )
 
     try:
-        xr.align(
-            residual_cube,
-            psf_cube,
-            primary_beam_cube,
-            join="exact",
-            copy=False,
-        )
+        xr.align(residual_cube, primary_beam_cube, join="exact", copy=False)
         xr.align(
             residual_normalization,
-            psf_normalization,
             residual_cube,
             join="exact",
             copy=False,
             exclude={"l", "m"},
         )
+        if psf_cube is not None:
+            xr.align(residual_cube, psf_cube, join="exact", copy=False)
+            xr.align(
+                psf_normalization,
+                residual_cube,
+                join="exact",
+                copy=False,
+                exclude={"l", "m"},
+            )
     except ValueError as exc:
         raise ValueError(
             "MVC cubes and normalizations are not coordinate-aligned."
@@ -632,11 +644,8 @@ def convert_mvc_cubes_to_taylor_normal_equations(
         raise ValueError("pblimit must be finite and non-negative.")
 
     frequency = np.asarray(residual_cube.frequency.values, dtype=np.float64)
-    if frequency.size < nterms:
-        raise ValueError(
-            f"MVC requires at least nterms={nterms} channels; received "
-            f"{frequency.size}."
-        )
+    if frequency.size == 0:
+        raise ValueError("An MVC map contribution requires at least one channel.")
 
     x_frequency = xr.DataArray(
         (frequency - reference_frequency) / reference_frequency,
@@ -663,37 +672,18 @@ def convert_mvc_cubes_to_taylor_normal_equations(
         )
 
     residual_weight = _clean_weights(residual_normalization)
-    psf_weight = _clean_weights(psf_normalization)
     residual_weight_sum = residual_weight.sum(dim="frequency")
-    psf_weight_sum = psf_weight.sum(dim="frequency")
-
-    if bool((residual_weight_sum <= 0.0).any()):
-        raise ValueError("MVC residual normalization has an empty image plane.")
-    if bool((psf_weight_sum <= 0.0).any()):
-        raise ValueError("MVC PSF normalization has an empty image plane.")
 
     finite_primary_beam = xr.where(
         np.isfinite(primary_beam_cube),
         primary_beam_cube,
         0.0,
     )
-    effective_primary_beam = (
-        (finite_primary_beam * psf_weight).sum(dim="frequency") / psf_weight_sum
-    ).transpose("time", "polarization", "l", "m")
-    effective_primary_beam.attrs = {
-        "description": "Imaging-weighted effective primary beam for MVC.",
-        "specmode": "mvc",
-        "pblimit": pblimit,
-    }
-
     valid_channel_pb = np.isfinite(primary_beam_cube) & (primary_beam_cube > pblimit)
-    remapped_residual = xr.where(
+    residual_over_primary_beam = xr.where(
         valid_channel_pb,
-        effective_primary_beam * residual_cube / primary_beam_cube,
+        residual_cube / primary_beam_cube,
         0.0,
-    )
-    valid_effective_pb = np.isfinite(effective_primary_beam) & (
-        effective_primary_beam > pblimit
     )
 
     residual_terms = []
@@ -702,57 +692,179 @@ def convert_mvc_cubes_to_taylor_normal_equations(
             residual_weight
             * x_frequency**order
             * finite_primary_beam
-            * remapped_residual
+            * residual_over_primary_beam
         ).sum(dim="frequency")
-        denominator = residual_weight_sum * effective_primary_beam
-        term = xr.where(valid_effective_pb, numerator / denominator, 0.0)
-        residual_terms.append(term)
+        residual_terms.append(numerator)
 
-    residual_taylor = xr.concat(
+    residual_numerator = xr.concat(
         residual_terms,
         dim=xr.IndexVariable("taylor_term", np.arange(nterms, dtype=np.int64)),
     ).transpose("time", "taylor_term", "polarization", "l", "m")
+    residual_numerator.attrs = {
+        "description": "Additive MVC Taylor residual numerators.",
+        "specmode": "mvc",
+        "reference_frequency": reference_frequency,
+        "nterms": nterms,
+        "pblimit": pblimit,
+    }
+    contributions = xr.Dataset(
+        {
+            "MVC_RESIDUAL_TAYLOR_NUMERATOR": residual_numerator,
+            "MVC_RESIDUAL_WEIGHT_SUM": residual_weight_sum,
+        },
+        attrs={
+            "specmode": "mvc",
+            "nterms": nterms,
+            "reference_frequency": reference_frequency,
+            "pblimit": pblimit,
+            "mvc_output_dtype": np.dtype(output_dtype).name,
+        },
+    )
+
+    if psf_cube is not None:
+        psf_weight = _clean_weights(psf_normalization)
+        psf_weight_sum = psf_weight.sum(dim="frequency")
+
+        n_psf_taylor_terms = 2 * nterms - 1
+        finite_psf = xr.where(np.isfinite(psf_cube), psf_cube, 0.0)
+        psf_terms = [
+            (psf_weight * x_frequency**order * finite_primary_beam * finite_psf).sum(
+                dim="frequency"
+            )
+            for order in range(n_psf_taylor_terms)
+        ]
+        psf_numerator = xr.concat(
+            psf_terms,
+            dim=xr.IndexVariable(
+                "psf_taylor_order",
+                np.arange(n_psf_taylor_terms, dtype=np.int64),
+            ),
+        ).transpose("time", "psf_taylor_order", "polarization", "l", "m")
+        psf_numerator.attrs = {
+            "description": "Additive MVC Taylor PSF numerators.",
+            "specmode": "mvc",
+            "reference_frequency": reference_frequency,
+            "nterms": nterms,
+            "n_psf_taylor_terms": n_psf_taylor_terms,
+            "pblimit": pblimit,
+        }
+        contributions["MVC_PSF_TAYLOR_NUMERATOR"] = psf_numerator
+        contributions["MVC_PSF_WEIGHT_SUM"] = psf_weight_sum
+        contributions["MVC_PRIMARY_BEAM_WEIGHTED_SUM"] = (
+            (finite_primary_beam * psf_weight)
+            .sum(dim="frequency")
+            .transpose("time", "polarization", "l", "m")
+        )
+
+    return contributions
+
+
+def finalize_mvc_taylor_normal_equations(
+    contributions,
+    *,
+    effective_primary_beam=None,
+):
+    """Normalize globally reduced MVC map contributions in the append node."""
+    import numpy as np
+    import xarray as xr
+
+    residual_sum = contributions["MVC_RESIDUAL_WEIGHT_SUM"]
+    if bool((residual_sum <= 0.0).any()):
+        raise ValueError("MVC residual normalization has an empty image plane.")
+
+    if effective_primary_beam is None:
+        psf_sum = contributions["MVC_PSF_WEIGHT_SUM"]
+        if bool((psf_sum <= 0.0).any()):
+            raise ValueError("MVC PSF normalization has an empty image plane.")
+        effective_primary_beam = (
+            contributions["MVC_PRIMARY_BEAM_WEIGHTED_SUM"] / psf_sum
+        ).transpose("time", "polarization", "l", "m")
+
+    pblimit = float(contributions.attrs.get("pblimit", 0.2))
+    valid_effective_pb = np.isfinite(effective_primary_beam) & (
+        effective_primary_beam > pblimit
+    )
+    residual_taylor = xr.where(
+        valid_effective_pb,
+        contributions["MVC_RESIDUAL_TAYLOR_NUMERATOR"] / residual_sum,
+        0.0,
+    )
+
+    psf_taylor = None
+    if "MVC_PSF_TAYLOR_NUMERATOR" in contributions:
+        psf_sum = contributions["MVC_PSF_WEIGHT_SUM"]
+        psf_taylor = xr.where(
+            valid_effective_pb,
+            contributions["MVC_PSF_TAYLOR_NUMERATOR"]
+            / (psf_sum * effective_primary_beam),
+            0.0,
+        )
+
+    output_dtype = np.dtype(contributions.attrs.get("mvc_output_dtype", "float64"))
+    residual_taylor = residual_taylor.astype(output_dtype, copy=False)
+    effective_primary_beam = effective_primary_beam.astype(output_dtype, copy=False)
+    if psf_taylor is not None:
+        psf_taylor = psf_taylor.astype(output_dtype, copy=False)
+
     residual_taylor.attrs = {
         "description": "MVC Taylor residual normal-equation right-hand sides.",
         "specmode": "mvc",
-        "reference_frequency": reference_frequency,
-        "nterms": nterms,
+        "reference_frequency": contributions.attrs.get("reference_frequency"),
+        "nterms": contributions.attrs.get("nterms"),
         "pblimit": pblimit,
     }
-
-    n_psf_taylor_terms = 2 * nterms - 1
-    psf_terms = []
-    finite_psf = xr.where(np.isfinite(psf_cube), psf_cube, 0.0)
-    for order in range(n_psf_taylor_terms):
-        numerator = (
-            psf_weight * x_frequency**order * finite_primary_beam * finite_psf
-        ).sum(dim="frequency")
-        denominator = psf_weight_sum * effective_primary_beam
-        term = xr.where(valid_effective_pb, numerator / denominator, 0.0)
-        psf_terms.append(term)
-
-    psf_taylor = xr.concat(
-        psf_terms,
-        dim=xr.IndexVariable(
-            "psf_taylor_order",
-            np.arange(n_psf_taylor_terms, dtype=np.int64),
-        ),
-    ).transpose("time", "psf_taylor_order", "polarization", "l", "m")
-    psf_taylor.attrs = {
-        "description": "MVC Taylor PSF/Hessian planes formed from the PSF cube.",
-        "type": "point_spread_function",
+    effective_primary_beam.attrs = {
+        "description": "Imaging-weighted effective primary beam for MVC.",
         "specmode": "mvc",
-        "reference_frequency": reference_frequency,
-        "nterms": nterms,
-        "n_psf_taylor_terms": n_psf_taylor_terms,
         "pblimit": pblimit,
     }
-
-    residual_taylor = residual_taylor.astype(output_dtype, copy=False)
-    psf_taylor = psf_taylor.astype(output_dtype, copy=False)
-    effective_primary_beam = effective_primary_beam.astype(output_dtype, copy=False)
+    if psf_taylor is not None:
+        psf_taylor.attrs = {
+            "description": "MVC Taylor PSF/Hessian planes formed in map tasks.",
+            "type": "point_spread_function",
+            "specmode": "mvc",
+            "reference_frequency": contributions.attrs.get("reference_frequency"),
+            "nterms": contributions.attrs.get("nterms"),
+            "n_psf_taylor_terms": psf_taylor.sizes["psf_taylor_order"],
+            "pblimit": pblimit,
+        }
 
     return residual_taylor, psf_taylor, effective_primary_beam
+
+
+def convert_mvc_cubes_to_taylor_normal_equations(
+    residual_cube,
+    psf_cube,
+    primary_beam_cube,
+    residual_normalization,
+    psf_normalization,
+    *,
+    nterms,
+    reference_frequency,
+    pblimit=0.2,
+):
+    """Convert complete MVC channel cubes into Taylor normal equations.
+
+    This compatibility entry point composes the map-contribution and append
+    finalization helpers.  Distributed imaging calls those two stages
+    separately so channel cubes never enter the reduce stage.
+    """
+    if residual_cube.sizes.get("frequency", 0) < int(nterms):
+        raise ValueError(
+            f"MVC requires at least nterms={int(nterms)} channels; received "
+            f"{residual_cube.sizes.get('frequency', 0)}."
+        )
+    contributions = make_mvc_taylor_normal_equation_contributions(
+        residual_cube,
+        psf_cube,
+        primary_beam_cube,
+        residual_normalization,
+        psf_normalization,
+        nterms=nterms,
+        reference_frequency=reference_frequency,
+        pblimit=pblimit,
+    )
+    return finalize_mvc_taylor_normal_equations(contributions)
 
 
 def apply_mvc_primary_beam_convention(
@@ -1053,6 +1165,7 @@ def residual_update_continuum_single_field(
     model_xds=None,
     model_uv_xds=None,
     task_id=0,
+    pblimit=0.2,
 ):
     """Perform one continuum major-cycle update for a single frequency chunk.
 
@@ -1119,6 +1232,9 @@ def residual_update_continuum_single_field(
 
     task_id : int, optional
         Identifier of the current frequency chunk.
+
+    pblimit : float, optional
+        Channel primary-beam cutoff used by MVC map-local Taylor construction.
 
     Returns
     -------
@@ -1307,6 +1423,42 @@ def residual_update_continuum_single_field(
                     "The first MVC map task did not create its channel PSF image "
                     "cube."
                 )
+
+        residual_group = img_xds.attrs["data_groups"]["residual"]
+        primary_beam_name = residual_group.get("primary_beam")
+        if primary_beam_name is not None and primary_beam_name in img_xds:
+            primary_beam = img_xds[primary_beam_name]
+        elif primary_beam_xds is not None:
+            primary_beam_name = primary_beam_xds.attrs.get(
+                "primary_beam_name",
+                "PRIMARY_BEAM",
+            )
+            primary_beam = primary_beam_xds[primary_beam_name]
+        else:
+            raise RuntimeError(
+                "MVC map-local Taylor construction requires its channel "
+                "primary beam."
+            )
+
+        contributions = make_mvc_taylor_normal_equation_contributions(
+            img_xds["SKY_RESIDUAL_MVC_CUBE"],
+            (img_xds["POINT_SPREAD_FUNCTION_MVC_CUBE"] if is_n_iter_0 else None),
+            primary_beam,
+            img_xds["VISIBILITY_NORMALIZATION"],
+            img_xds["UV_SAMPLING_NORMALIZATION"] if is_n_iter_0 else None,
+            nterms=image_params.get("nterms", 2),
+            reference_frequency=image_params.get(
+                "reference_frequency",
+                image_params.get(
+                    "reference_frequency_hz",
+                    float(np.mean(img_xds.coords["frequency"].values)),
+                ),
+            ),
+            pblimit=pblimit,
+        )
+        for variable_name, data_array in contributions.data_vars.items():
+            img_xds[variable_name] = data_array
+        img_xds.attrs.update(contributions.attrs)
 
         timing["T_local_ifft"] = time.time() - start
 

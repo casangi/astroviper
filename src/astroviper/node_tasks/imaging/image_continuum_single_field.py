@@ -415,6 +415,7 @@ def residual_update_continuum_single_field(
     is_n_iter_0=True,
     model_uv_xds=None,
     task_id=0,
+    pblimit=0.2,
     input_data=None,
     task_time_kill_switch_seconds=None,
     weight_cache_mapping=None,
@@ -426,10 +427,10 @@ def residual_update_continuum_single_field(
 
     Unlike the cube imaging node task, this function performs no image writing.
     MFS returns chunk-local UV-domain products for numerical reduction. MVC
-    normalizes and inverse-transforms its exclusively owned channel grids locally,
-    then returns channel residual and first-cycle PSF image cubes for frequency
-    concatenation. Polarization conversion, Taylor normal-equation construction,
-    the minor cycle, and restoration remain global operations.
+    normalizes and inverse-transforms its exclusively owned channel grids,
+    applies the channel primary-beam convention, and forms additive Taylor
+    numerators locally. Polarization conversion, final global normalization,
+    the minor cycle, and restoration remain append operations.
 
     The MFS dataset typically contains
 
@@ -438,10 +439,9 @@ def residual_update_continuum_single_field(
     - ``UV_SAMPLING``;
     - ``UV_SAMPLING_NORMALIZATION``;
 
-    MVC instead returns ``SKY_RESIDUAL_MVC_CUBE`` and, during the first major
-    cycle, ``POINT_SPREAD_FUNCTION_MVC_CUBE``. It retains both normalization
-    arrays because they are reused as spectral weights by the global Taylor
-    conversion.
+    MVC instead returns ``MVC_RESIDUAL_TAYLOR_NUMERATOR`` and
+    ``MVC_RESIDUAL_WEIGHT_SUM``. During the first major cycle it also returns
+    the additive Taylor PSF numerator, PSF weight sum, and weighted PB sum.
 
     Parameters
     ----------
@@ -503,6 +503,9 @@ def residual_update_continuum_single_field(
 
     task_id : int, optional
         Identifier of the frequency chunk.
+
+    pblimit : float, optional
+        Channel primary-beam cutoff used for MVC map-local Taylor products.
 
     input_data : dict, optional
         Preloaded visibility data for this chunk.
@@ -736,6 +739,7 @@ def residual_update_continuum_single_field(
         primary_beam_xds=primary_beam_xds,
         specmode=specmode,
         task_id=task_id,
+        pblimit=pblimit,
     )
 
     # Retain the task-local frequency-dependent PB for MVC
@@ -810,6 +814,19 @@ def residual_update_continuum_single_field(
                 "specmode": "mvc",
             },
         )
+
+    if specmode == "mvc":
+        # Taylor numerators and normalization sums have already been formed by
+        # this map task.  Keep the channel PB only in pb_xds for later model
+        # prediction and do not send any frequency-sized image through reduce.
+        frequency_variables = [
+            name
+            for name, data_array in img_xds.data_vars.items()
+            if "frequency" in data_array.dims
+        ]
+        img_xds = img_xds.drop_vars(frequency_variables, errors="ignore")
+        if "frequency" in img_xds.dims:
+            img_xds = img_xds.drop_dims("frequency", errors="ignore")
 
     # Preserve the first-cycle imaging weights for reuse by later major cycles.
     # They may have been loaded from the processing set or calculated in setup.
@@ -1356,35 +1373,6 @@ def degrid_imaging_weights_continuum_node(
     }
 
 
-def assemble_mvc_primary_beam_cube(
-    pb_cache_mapping,
-):
-    import xarray as xr
-
-    arrays = []
-
-    for task_id in sorted(pb_cache_mapping):
-        pb_xds = pb_cache_mapping[task_id]
-        pb_name = pb_xds.attrs.get(
-            "primary_beam_name",
-            "PRIMARY_BEAM",
-        )
-        arrays.append(pb_xds[pb_name])
-
-    primary_beam = xr.concat(
-        arrays,
-        dim="frequency",
-    ).sortby("frequency")
-
-    if len(set(primary_beam.frequency.values.tolist())) != (
-        primary_beam.sizes["frequency"]
-    ):
-        # Identical PBs from time/baseline partitions should not be summed.
-        primary_beam = primary_beam.groupby("frequency").first()
-
-    return primary_beam
-
-
 ###############################################################################
 # Node task level functionality related to the append node
 ###############################################################################
@@ -1404,10 +1392,10 @@ def _prepare_continuum_image(
     ``SKY_RESIDUAL(taylor_term)``.
 
     For ``specmode='mvc'``, map tasks have already normalized and inverse
-    Fourier-transformed their exclusively owned channels. The reducer concatenates
-    those residual and first-cycle PSF image cubes along frequency, and this
-    function converts them into the Taylor normal-equation right-hand sides and
-    Hessian planes expected by the MT-MFS minor cycle.
+    Fourier-transformed their exclusively owned channels, applied the channel
+    primary-beam convention, and constructed additive Taylor numerators. The
+    reducer sums those compact products; this function performs only their
+    global normalization and constructs the effective primary beam.
 
     MFS retains its direct Taylor-weighted PSF path.  MVC constructs its Taylor
     PSFs from the channel PSF cube.  Both are fitted only during the first major
@@ -1428,9 +1416,9 @@ def _prepare_continuum_image(
         cycle.
 
     pb_cache_mapping : dict, optional
-        MVC mapping from map-task identifiers to their task-local
-        frequency-dependent primary-beam datasets. Required for MVC in every
-        call, unless it is also present in ``input_params``.
+        MVC channel-primary-beam cache carried through the append node for
+        later map-task model prediction. Taylor image preparation itself uses
+        the already reduced PB sum rather than assembling this cache.
 
     Returns
     -------
@@ -1454,7 +1442,7 @@ def _prepare_continuum_image(
         ifft_norm_img_xds,
     )
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
-        convert_mvc_cubes_to_taylor_normal_equations,
+        finalize_mvc_taylor_normal_equations,
         point_spread_function_gaussian_fit_continuum,
     )
     from astroviper.processing_functions.imaging.make_point_spread_function_continuum_single_field import (
@@ -1485,11 +1473,8 @@ def _prepare_continuum_image(
         pb_cache_mapping = input_params.get("pb_cache_mapping")
 
     # MFS still reduces Taylor-weighted UV grids and therefore performs its
-    # inverse FFT globally. MVC map tasks already returned normalized channel
-    # residual and first-cycle PSF image cubes.
-    residual_output_name = (
-        "SKY_RESIDUAL" if specmode == "mfs" else "SKY_RESIDUAL_MVC_CUBE"
-    )
+    # inverse FFT globally. MVC map tasks already returned Taylor products.
+    residual_output_name = "SKY_RESIDUAL"
 
     if specmode == "mfs":
         img_xds = ifft_norm_img_xds(
@@ -1506,7 +1491,7 @@ def _prepare_continuum_image(
             complex_dtype=config["complex_dtype"],
         )
 
-    if residual_output_name not in img_xds:
+    if specmode == "mfs" and residual_output_name not in img_xds:
         raise RuntimeError(
             "The global residual inverse FFT did not "
             f"create {residual_output_name!r}."
@@ -1542,65 +1527,32 @@ def _prepare_continuum_image(
         )
 
     elif specmode == "mvc":
-
-        if (
-            initialize_static_products
-            and "POINT_SPREAD_FUNCTION_MVC_CUBE" not in img_xds
-        ):
-            raise RuntimeError(
-                "The globally concatenated MVC products do not contain the "
-                "node-normalized channel PSF cube."
-            )
-
-        # ----------------------------------------------------------
-        # Assemble the global frequency-dependent primary beam.
-        # ----------------------------------------------------------
-
-        if pb_cache_mapping is None:
-            raise ValueError("MVC requires pb_cache_mapping.")
-
-        primary_beam_cube = assemble_mvc_primary_beam_cube(pb_cache_mapping)
-
-        img_xds["PRIMARY_BEAM_MVC"] = xr.Variable(
-            dims=primary_beam_cube.dims,
-            data=primary_beam_cube.data,
-            attrs=primary_beam_cube.attrs.copy(),
-        )
-
-        # ----------------------------------------------------------
-        # Convert the channel residual and PSF cubes to one mutually
-        # consistent set of Taylor normal equations.
-        # ----------------------------------------------------------
-
-        if initialize_static_products:
-            psf_cube = img_xds["POINT_SPREAD_FUNCTION_MVC_CUBE"]
-            psf_normalization = img_xds["UV_SAMPLING_NORMALIZATION"]
-        else:
-            # The static Taylor PSF is cached after the first cycle.  A later
-            # residual conversion still uses the same per-channel imaging
-            # normalization as the residual grid to reconstruct the common PB.
-            psf_cube = xr.zeros_like(img_xds["SKY_RESIDUAL_MVC_CUBE"])
-            psf_normalization = img_xds["VISIBILITY_NORMALIZATION"]
+        effective_primary_beam = None
+        if not initialize_static_products:
+            static_primary_beam = input_params["static_xds"]["PRIMARY_BEAM"]
+            effective_primary_beam = static_primary_beam.isel(
+                frequency=0,
+                drop=True,
+            ).transpose("time", "polarization", "l", "m")
 
         (
             residual_taylor,
             psf_taylor,
             effective_primary_beam,
-        ) = convert_mvc_cubes_to_taylor_normal_equations(
-            img_xds["SKY_RESIDUAL_MVC_CUBE"],
-            psf_cube,
-            img_xds["PRIMARY_BEAM_MVC"],
-            img_xds["VISIBILITY_NORMALIZATION"],
-            psf_normalization,
-            nterms=nterms,
-            reference_frequency=reference_frequency,
-            pblimit=input_params["pblimit"],
+        ) = finalize_mvc_taylor_normal_equations(
+            img_xds,
+            effective_primary_beam=effective_primary_beam,
         )
 
         img_xds["SKY_RESIDUAL"] = residual_taylor
         img_xds.attrs["data_groups"][image_data_group_name]["sky"] = "SKY_RESIDUAL"
 
         if initialize_static_products:
+            if psf_taylor is None:
+                raise RuntimeError(
+                    "The first MVC reduction did not contain Taylor PSF "
+                    "contributions."
+                )
             img_xds["POINT_SPREAD_FUNCTION"] = psf_taylor
             img_xds.attrs["data_groups"][image_data_group_name][
                 "point_spread_function"
@@ -1610,23 +1562,10 @@ def _prepare_continuum_image(
         # Construct the effective PB used only by the minor loop.
         # ----------------------------------------------------------
 
-        # Remove every frequency-dependent MVC product.
-        # ----------------------------------------------------------
-
-        frequency_variables = [
-            name for name, da in img_xds.data_vars.items() if "frequency" in da.dims
+        contribution_variables = [
+            name for name in img_xds.data_vars if name.startswith("MVC_")
         ]
-
-        img_xds = img_xds.drop_vars(
-            frequency_variables,
-            errors="ignore",
-        )
-
-        if "frequency" in img_xds.dims:
-            img_xds = img_xds.drop_dims(
-                "frequency",
-                errors="ignore",
-            )
+        img_xds = img_xds.drop_vars(contribution_variables, errors="ignore")
 
         # ----------------------------------------------------------
         # Recreate the weighted common PB as a singleton-frequency image.

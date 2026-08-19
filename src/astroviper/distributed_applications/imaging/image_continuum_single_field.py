@@ -617,6 +617,12 @@ def combine_continuum_chunks(input_data, input_params):
     ``UV_SAMPLING_NORMALIZATION``
         ``(time, psf_taylor_order, polarization)``.
 
+    MVC supplies a mode-specific additive list. Every major cycle reduces
+    ``MVC_RESIDUAL_TAYLOR_NUMERATOR`` and ``MVC_RESIDUAL_WEIGHT_SUM``; the
+    first cycle additionally reduces ``MVC_PSF_TAYLOR_NUMERATOR``,
+    ``MVC_PSF_WEIGHT_SUM``, and ``MVC_PRIMARY_BEAM_WEIGHTED_SUM``. None of
+    these products has a frequency dimension.
+
     MFS also carries ``PRIMARY_BEAM_REFERENCE`` with dimensions
     ``(time, polarization, l, m)`` as a non-additive static product.
 
@@ -667,8 +673,8 @@ def combine_continuum_chunks(input_data, input_params):
     Notes
     -----
     This reducer performs an unnormalized accumulation of continuum products.
-    Any normalization by imaging weights, sum-of-weights, or Hessian terms is
-    performed later, after all frequency chunks have been reduced.
+    Any final normalization by globally accumulated weights or the effective
+    MVC primary beam is performed later, after all chunks have been reduced.
 
     The reducer assumes that all inputs were produced using identical continuum
     imaging parameters (for example, reference frequency, Taylor expansion, and
@@ -2506,21 +2512,20 @@ def image_continuum_single_field(
             if is_n_iter_0:
                 reduce_input_params = {
                     "specmode": "mvc",
-                    "additive_variables": (),
-                    "frequency_cube_variables": (
-                        "SKY_RESIDUAL_MVC_CUBE",
-                        "VISIBILITY_NORMALIZATION",
-                        "POINT_SPREAD_FUNCTION_MVC_CUBE",
-                        "UV_SAMPLING_NORMALIZATION",
+                    "additive_variables": (
+                        "MVC_RESIDUAL_TAYLOR_NUMERATOR",
+                        "MVC_RESIDUAL_WEIGHT_SUM",
+                        "MVC_PSF_TAYLOR_NUMERATOR",
+                        "MVC_PSF_WEIGHT_SUM",
+                        "MVC_PRIMARY_BEAM_WEIGHTED_SUM",
                     ),
                 }
             else:
                 reduce_input_params = {
                     "specmode": "mvc",
-                    "additive_variables": (),
-                    "frequency_cube_variables": (
-                        "SKY_RESIDUAL_MVC_CUBE",
-                        "VISIBILITY_NORMALIZATION",
+                    "additive_variables": (
+                        "MVC_RESIDUAL_TAYLOR_NUMERATOR",
+                        "MVC_RESIDUAL_WEIGHT_SUM",
                     ),
                 }
 
@@ -2705,10 +2710,9 @@ def image_continuum_single_field(
     else:
         final_reduce_input_params = {
             "specmode": "mvc",
-            "additive_variables": (),
-            "frequency_cube_variables": (
-                "SKY_RESIDUAL_MVC_CUBE",
-                "VISIBILITY_NORMALIZATION",
+            "additive_variables": (
+                "MVC_RESIDUAL_TAYLOR_NUMERATOR",
+                "MVC_RESIDUAL_WEIGHT_SUM",
             ),
         }
 
