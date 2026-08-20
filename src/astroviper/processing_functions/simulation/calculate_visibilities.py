@@ -52,8 +52,11 @@ def calculate_visibilities(
     mueller_selection: np.ndarray,
     processing_function_threads: int = 1,
     implementation: str = "cpp",
+    gaussian_source_flux: np.ndarray | None = None,
+    gaussian_source_ra_dec: np.ndarray | None = None,
+    gaussian_source_shape: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Simulate point-source visibilities for one in-memory chunk.
+    """Simulate the visibilities of point and Gaussian sources for one in-memory chunk.
 
     Parameters
     ----------
@@ -78,11 +81,106 @@ def calculate_visibilities(
     processing_function_threads : int
         Threads used by the C++ kernel (ignored by the NumPy implementation).
     implementation : {"numpy", "cpp"}
+    gaussian_source_flux : np.ndarray, [n_gaussian, n_time | 1, n_frequency | 1, 4], Jy, optional
+        Integrated flux of each Gaussian source in the four instrumental
+        correlations.  ``None`` (default) simulates no Gaussian sources.
+    gaussian_source_ra_dec : np.ndarray, [n_time | 1, n_gaussian, 2], radians, optional
+        Right ascension and declination of the Gaussian sources.
+    gaussian_source_shape : np.ndarray, [n_gaussian, 3], radians, optional
+        ``[major, minor, position angle]`` FWHM shape of each Gaussian source,
+        in the convention of the imaging clean beam
+        (:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`).
 
     Returns
     -------
     np.ndarray, [n_time, n_baseline, n_frequency, n_polarization] complex128
+
+    Notes
+    -----
+    A Gaussian source is a point source whose visibilities are multiplied by
+    the analytic Fourier transform of its sky Gaussian -- the imaging restore
+    module's :func:`~astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`
+    (the single source of truth for the Gaussian parametrisation) -- so it
+    shares the beam response, phase and kernel implementations of the point
+    sources and its integrated flux equals ``gaussian_source_flux``.
     """
+    point_args = (
+        uvw,
+        antenna1,
+        antenna2,
+        frequency,
+        polarization_index,
+        point_source_flux,
+        point_source_ra_dec,
+        phase_center_ra_dec,
+        pointing_ra_dec,
+        beam_model_map,
+        packed_beam_models,
+        parallactic_angle,
+        mueller_selection,
+        processing_function_threads,
+        implementation,
+    )
+    visibility = _calculate_point_source_visibilities(*point_args)
+
+    if gaussian_source_flux is not None:
+        from astroviper.processing_functions.imaging.restore import (
+            elliptical_gaussian_uv_taper,
+        )
+
+        gaussian_source_flux = np.asarray(gaussian_source_flux, dtype=np.float64)
+        gaussian_source_ra_dec = np.asarray(gaussian_source_ra_dec, dtype=np.float64)
+        gaussian_source_shape = np.asarray(gaussian_source_shape, dtype=np.float64)
+        # Baseline coordinates in wavelengths per channel:
+        # [n_time, n_baseline, n_frequency].
+        inverse_wavelength = frequency / 299792458.0
+        u = uvw[:, :, 0, None] * inverse_wavelength
+        v = uvw[:, :, 1, None] * inverse_wavelength
+        for source in range(gaussian_source_flux.shape[0]):
+            source_visibility = _calculate_point_source_visibilities(
+                uvw,
+                antenna1,
+                antenna2,
+                frequency,
+                polarization_index,
+                gaussian_source_flux[source : source + 1],
+                gaussian_source_ra_dec[:, source : source + 1, :],
+                phase_center_ra_dec,
+                pointing_ra_dec,
+                beam_model_map,
+                packed_beam_models,
+                parallactic_angle,
+                mueller_selection,
+                processing_function_threads,
+                implementation,
+            )
+            major, minor, pa = gaussian_source_shape[source]
+            source_visibility *= elliptical_gaussian_uv_taper(u, v, major, minor, pa)[
+                ..., None
+            ]
+            visibility += source_visibility
+
+    return visibility
+
+
+def _calculate_point_source_visibilities(
+    uvw,
+    antenna1,
+    antenna2,
+    frequency,
+    polarization_index,
+    point_source_flux,
+    point_source_ra_dec,
+    phase_center_ra_dec,
+    pointing_ra_dec,
+    beam_model_map,
+    packed_beam_models,
+    parallactic_angle,
+    mueller_selection,
+    processing_function_threads,
+    implementation,
+):
+    """Dispatch one point-source kernel evaluation (numpy or C++)."""
     if implementation == "numpy":
         return _calculate_visibilities_numpy(
             uvw,

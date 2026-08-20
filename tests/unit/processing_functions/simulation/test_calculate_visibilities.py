@@ -17,12 +17,16 @@ from astroviper.processing_functions.simulation.calculate_noise import (
 from astroviper.processing_functions.simulation.calculate_visibilities import (
     calculate_visibilities,
 )
+from astroviper.processing_functions.simulation.calculate_visibilities_cpp import (
+    cpp_kernel_available,
+)
 from astroviper.processing_functions.simulation.simulate_processing_set import (
     simulate_processing_set,
 )
 from astroviper.utils.beam_models import airy_disk_model
 from astroviper.utils.coordinate_transforms import sin_project
 from astroviper.utils.measurement_set_tools import polarization_index
+from astroviper.utils.telescope_layout import read_telescope_layout
 from tests.unit.processing_functions.simulation.legacy_fixtures import load_legacy
 
 IMPLEMENTATIONS = ["numpy"]
@@ -382,3 +386,91 @@ def test_cpp_kernel_threads_and_validation():
                np.zeros((1, 1, 2)), np.zeros(1, np.int64), [], np.zeros(1), np.zeros(1, np.int64), 1)  # fmt: skip
     with pytest.raises(ValueError):
         calculate_visibilities(*args, implementation="fortran")
+
+
+class TestGaussianSources:
+    """Gaussian sources: point-source kernel times the shared restore uv taper."""
+
+    def _pf_kwargs(self):
+        time = np.array(["2019-10-03T19:00:00.000"])
+        frequency = np.array([3.0e9])
+        phase_center = np.array([[5.2337, 0.7109]])
+        antenna_position = read_telescope_layout("vla.d").ANTENNA_POSITION.values[:8]
+        return dict(
+            time=time,
+            frequency=frequency,
+            polarization=["RR", "LL"],
+            antenna_position=antenna_position,
+            site_position=antenna_position.mean(axis=0),
+            phase_center_ra_dec=phase_center,
+            beam_models=[
+                {
+                    "func": "none",
+                    "dish_diameter": 25.0,
+                    "blockage_diameter": 0.0,
+                    "max_rad_1GHz": 0.014946999714,
+                }
+            ],
+            beam_model_map=np.zeros(len(antenna_position), dtype=int),
+            uvw_params=None,
+            noise_params=None,
+        )
+
+    def test_zero_size_gaussian_equals_point_source(self):
+        kwargs = self._pf_kwargs()
+        source = kwargs["phase_center_ra_dec"][:, None, :] + 1e-4
+        flux = np.array([[[[2.0, 0.0, 0.0, 2.0]]]])
+        point_xds, _ = simulate_processing_set(
+            point_source_flux=flux, point_source_ra_dec=source, **kwargs
+        )
+        gaussian_xds, _ = simulate_processing_set(
+            point_source_flux=np.zeros((1, 1, 1, 4)),
+            point_source_ra_dec=source,
+            gaussian_source_flux=flux,
+            gaussian_source_ra_dec=source,
+            gaussian_source_shape=np.zeros((1, 3)),
+            **kwargs,
+        )
+        np.testing.assert_allclose(
+            gaussian_xds.VISIBILITY.values, point_xds.VISIBILITY.values, rtol=1e-13
+        )
+
+    @pytest.mark.skipif(not cpp_kernel_available(), reason="C++ kernel not built")
+    def test_cpp_matches_numpy_and_taper_is_shared(self):
+        arcsec = np.pi / (180 * 3600)
+        kwargs = self._pf_kwargs()
+        source = kwargs["phase_center_ra_dec"][:, None, :] + 2e-4
+        flux = np.array([[[[3.0, 0.0, 0.0, 3.0]]]])
+        shape = np.array([[8 * arcsec, 3 * arcsec, 0.7]])
+        gaussian = dict(
+            point_source_flux=np.zeros((1, 1, 1, 4)),
+            point_source_ra_dec=source,
+            gaussian_source_flux=flux,
+            gaussian_source_ra_dec=source,
+            gaussian_source_shape=shape,
+        )
+        cpp_xds, _ = simulate_processing_set(implementation="cpp", **gaussian, **kwargs)
+        numpy_xds, _ = simulate_processing_set(
+            implementation="numpy", **gaussian, **kwargs
+        )
+        np.testing.assert_allclose(
+            cpp_xds.VISIBILITY.values, numpy_xds.VISIBILITY.values, rtol=1e-12
+        )
+
+        # The applied taper is exactly the imaging restore module's: dividing a
+        # Gaussian source's visibilities by the point-source visibilities of
+        # the same sky position recovers elliptical_gaussian_uv_taper.
+        from astroviper.processing_functions.imaging.restore import (
+            elliptical_gaussian_uv_taper,
+        )
+
+        point_xds, _ = simulate_processing_set(
+            point_source_flux=flux, point_source_ra_dec=source, **kwargs
+        )
+        ratio = cpp_xds.VISIBILITY.values[..., 0] / point_xds.VISIBILITY.values[..., 0]
+        u = cpp_xds.UVW.values[..., 0, None] * kwargs["frequency"] / 299792458.0
+        v = cpp_xds.UVW.values[..., 1, None] * kwargs["frequency"] / 299792458.0
+        np.testing.assert_allclose(
+            ratio.real, elliptical_gaussian_uv_taper(u, v, *shape[0]), rtol=1e-10
+        )
+        np.testing.assert_allclose(ratio.imag, 0.0, atol=1e-12)

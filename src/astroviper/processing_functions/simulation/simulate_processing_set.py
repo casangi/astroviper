@@ -50,8 +50,11 @@ def simulate_processing_set(
     processing_function_threads: int = 1,
     implementation: str = "cpp",
     random_seed: int | None = None,
+    gaussian_source_flux: np.ndarray | None = None,
+    gaussian_source_ra_dec: np.ndarray | None = None,
+    gaussian_source_shape: np.ndarray | None = None,
 ) -> tuple[xr.Dataset, dict]:
-    """Simulate the visibilities of a point-source sky for a block of times and channels.
+    """Simulate the visibilities of a point- and Gaussian-source sky for a block of times and channels.
 
     This is the science function behind the ``simulate_processing_set`` node task and
     distributed application: it computes the baseline ``uvw`` coordinates,
@@ -77,6 +80,16 @@ def simulate_processing_set(
         (``RR, RL, LR, LL`` or ``XX, XY, YX, YY``); singleton time/frequency axes broadcast.
     point_source_ra_dec : np.ndarray, [n_time | 1, n_source, 2], radians
         Right ascension and declination of the point sources (per time or fixed).
+    gaussian_source_flux : np.ndarray, [n_gaussian, n_time | 1, n_frequency | 1, 4], Jy, optional
+        Integrated flux of each Gaussian source in the four instrumental
+        correlations; singleton time/frequency axes broadcast.  ``None``
+        (default) simulates no Gaussian sources.
+    gaussian_source_ra_dec : np.ndarray, [n_time | 1, n_gaussian, 2], radians, optional
+        Right ascension and declination of the Gaussian sources (per time or fixed).
+    gaussian_source_shape : np.ndarray, [n_gaussian, 3], radians, optional
+        ``[major, minor, position angle]`` FWHM shape of each Gaussian source, in
+        the imaging clean-beam convention
+        (:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`).
     phase_center_ra_dec : np.ndarray, [n_time | 1, 2], radians
         Phase centre of the array per time (time-varying for mosaics) or fixed.
     beam_models : list
@@ -187,6 +200,9 @@ def simulate_processing_set(
         params["mueller_selection"],
         processing_function_threads=processing_function_threads,
         implementation=implementation,
+        gaussian_source_flux=gaussian_source_flux,
+        gaussian_source_ra_dec=gaussian_source_ra_dec,
+        gaussian_source_shape=gaussian_source_shape,
     )
     timing["T_visibilities"] = _time.time() - start
 

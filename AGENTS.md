@@ -173,6 +173,14 @@ into an MSv4 processing set that the driver created beforehand
 science lives in `processing_functions/simulation/` (`calculate_uvw`,
 `calculate_parallactic_angles`, `antenna_beams`, `calculate_visibilities` with
 a NumPy reference and the C++ `visibility_kernel_cpp`, `calculate_noise`).
+Gaussian sources are point sources multiplied by the analytic uv taper of the
+imaging clean beam — `elliptical_gaussian_uv_taper` in
+`processing_functions/imaging/restore.py` is the single source of truth for the
+Gaussian parametrisation (unit-tested against the image-plane kernel), shared
+by the restore step and the simulator; likewise the Airy voltage patterns in
+`processing_functions/imaging/primary_beam/airy_disk.py` are shared by the
+imaging primary beam (`ipower=2`, the CASA power-pattern definition) and the
+simulation antenna beams.
 Conventions: `uvw = antenna2 - antenna1` (MSv4); beam-image datasets are
 `JONES[parallactic_angle, frequency, polarization, l, m]`; polarizations are MSv4
 strings (`"RR"`, `"XX"`, ...). Data shipped in `src/astroviper/data/simulation/`.

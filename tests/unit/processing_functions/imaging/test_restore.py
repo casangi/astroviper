@@ -332,3 +332,37 @@ class TestRestoreImage:
         )
         out, _ = restore_image(xds)
         np.testing.assert_array_equal(out["SKY_RESTORED"].values, residual)
+
+
+class TestEllipticalGaussianUvTaper:
+    """The analytic uv taper is the Fourier transform of the image-plane kernel."""
+
+    def test_matches_fft_of_kernel(self):
+        from astroviper.processing_functions.imaging.restore import (
+            elliptical_gaussian_uv_taper,
+        )
+
+        ny = nx = 128
+        major, minor, pa = 9.0, 4.0, 0.6  # FWHM in pixels, pa in radians
+        kernel = _elliptical_gaussian_kernel(ny, nx, major, minor, pa, np.float64)
+        kernel_ft = np.fft.fftshift(np.abs(np.fft.fft2(np.fft.ifftshift(kernel))))
+        kernel_ft /= kernel_ft.max()
+        # Pixel-index frequencies; the sky l axis runs opposite to the l pixel
+        # index, so u = -f_l while v = +f_m.
+        u = -np.fft.fftshift(np.fft.fftfreq(ny))[:, None]
+        v = np.fft.fftshift(np.fft.fftfreq(nx))[None, :]
+        taper = elliptical_gaussian_uv_taper(u, v, major, minor, pa)
+        np.testing.assert_allclose(kernel_ft, taper, atol=1e-8)
+
+    def test_unit_at_origin_and_even(self):
+        from astroviper.processing_functions.imaging.restore import (
+            elliptical_gaussian_uv_taper,
+        )
+
+        assert elliptical_gaussian_uv_taper(0.0, 0.0, 1e-5, 5e-6, 0.3) == 1.0
+        u = np.array([100.0, -3000.0])
+        v = np.array([-200.0, 1500.0])
+        np.testing.assert_allclose(
+            elliptical_gaussian_uv_taper(u, v, 1e-5, 5e-6, 0.3),
+            elliptical_gaussian_uv_taper(-u, -v, 1e-5, 5e-6, 0.3),
+        )

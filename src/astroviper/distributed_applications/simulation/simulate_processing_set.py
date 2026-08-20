@@ -66,6 +66,9 @@ def simulate_processing_set(
     pointing_ra_dec: np.ndarray | list | None = None,
     uvw_params: dict | None = None,
     noise_params: dict | None = None,
+    gaussian_source_flux: np.ndarray | list | None = None,
+    gaussian_source_ra_dec: np.ndarray | list | None = None,
+    gaussian_source_shape: np.ndarray | list | None = None,
     direction_frame: str = "icrs",
     ms_name: str | None = None,
     n_time_chunks: int | None = None,
@@ -114,6 +117,16 @@ def simulate_processing_set(
         (``RR, RL, LR, LL`` or ``XX, XY, YX, YY``); singleton time/frequency axes broadcast.
     point_source_ra_dec : np.ndarray, [n_time | 1, n_source, 2], radians
         Right ascension and declination of the point sources (per time or fixed).
+    gaussian_source_flux : np.ndarray, [n_gaussian, n_time | 1, n_frequency | 1, 4], Jy, optional
+        Integrated flux of each Gaussian source in the four instrumental
+        correlations; singleton time/frequency axes broadcast.  ``None``
+        (default) simulates no Gaussian sources.
+    gaussian_source_ra_dec : np.ndarray, [n_time | 1, n_gaussian, 2], radians, optional
+        Right ascension and declination of the Gaussian sources (per time or fixed).
+    gaussian_source_shape : np.ndarray, [n_gaussian, 3], radians, optional
+        ``[major, minor, position angle]`` FWHM shape of each Gaussian source, in
+        the imaging clean-beam convention
+        (:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`).
     phase_center_ra_dec : np.ndarray, [n_time | 1, 2], radians
         Phase centre of the array per time (time-varying for mosaics) or fixed.
     beam_models : list
@@ -227,6 +240,10 @@ def simulate_processing_set(
     polarization = normalize_polarization(polarization)
     point_source_flux = np.asarray(point_source_flux, dtype=np.float64)
     point_source_ra_dec = np.asarray(point_source_ra_dec, dtype=np.float64)
+    if gaussian_source_flux is not None:
+        gaussian_source_flux = np.asarray(gaussian_source_flux, dtype=np.float64)
+        gaussian_source_ra_dec = np.asarray(gaussian_source_ra_dec, dtype=np.float64)
+        gaussian_source_shape = np.asarray(gaussian_source_shape, dtype=np.float64)
     phase_center_ra_dec = np.asarray(phase_center_ra_dec, dtype=np.float64)
     beam_model_map = np.asarray(beam_model_map, dtype=np.int64)
     if pointing_ra_dec is not None:
@@ -251,6 +268,10 @@ def simulate_processing_set(
         point_source_flux, point_source_ra_dec, phase_center_ra_dec, pointing_ra_dec,
         beam_model_map, len(beam_models), n_time, n_frequency, n_antenna,
     )  # fmt: skip
+    _check_gaussian_input_shapes(
+        gaussian_source_flux, gaussian_source_ra_dec, gaussian_source_shape,
+        n_time, n_frequency,
+    )  # fmt: skip
 
     antenna_position = np.asarray(antenna_xds.ANTENNA_POSITION.values, dtype=np.float64)
     telescope_name = str(antenna_xds.attrs.get("overall_telescope_name", "unknown"))
@@ -270,8 +291,14 @@ def simulate_processing_set(
         field_name_per_time,
         auto_correlations=uvw_params["auto_correlations"],
         description=(
-            f"Simulated visibilities of {point_source_ra_dec.shape[1]} point source(s) "
-            f"with astroviper.distributed_applications.simulation.simulate_processing_set."
+            f"Simulated visibilities of {point_source_ra_dec.shape[1]} point source(s)"
+            + (
+                f" and {gaussian_source_ra_dec.shape[1]} Gaussian source(s)"
+                if gaussian_source_ra_dec is not None
+                else ""
+            )
+            + " "
+            "with astroviper.distributed_applications.simulation.simulate_processing_set."
         ),
     )
     if ms_name is None:
@@ -358,6 +385,9 @@ def simulate_processing_set(
         "site_position": site_position,
         "point_source_flux": point_source_flux,
         "point_source_ra_dec": point_source_ra_dec,
+        "gaussian_source_flux": gaussian_source_flux,
+        "gaussian_source_ra_dec": gaussian_source_ra_dec,
+        "gaussian_source_shape": gaussian_source_shape,
         "phase_center_ra_dec": phase_center_ra_dec,
         "beam_models": list(beam_models),
         "beam_model_map": beam_model_map,
@@ -432,6 +462,38 @@ def simulate_processing_set(
         "ps_store": ps_store,
         "ms_name": ms_name,
     }
+
+
+def _check_gaussian_input_shapes(flux, source_ra_dec, shape, n_time, n_frequency):
+    if flux is None and source_ra_dec is None and shape is None:
+        return
+    if flux is None or source_ra_dec is None or shape is None:
+        raise ValueError(
+            "gaussian_source_flux, gaussian_source_ra_dec and gaussian_source_shape "
+            "must be given together (or all omitted)."
+        )
+    if flux.ndim != 4 or flux.shape[3] != 4:
+        raise ValueError(
+            f"gaussian_source_flux must have shape [n_gaussian, n_time|1, n_frequency|1, 4]; got {flux.shape}."
+        )
+    if source_ra_dec.ndim != 3 or source_ra_dec.shape[2] != 2:
+        raise ValueError(
+            f"gaussian_source_ra_dec must have shape [n_time|1, n_gaussian, 2]; got {source_ra_dec.shape}."
+        )
+    if flux.shape[0] != source_ra_dec.shape[1]:
+        raise ValueError(
+            "n_gaussian of gaussian_source_flux and gaussian_source_ra_dec differ."
+        )
+    if flux.shape[1] not in (1, n_time) or flux.shape[2] not in (1, n_frequency):
+        raise ValueError(
+            "gaussian_source_flux time/frequency axes must be 1 or match the simulated axes."
+        )
+    if source_ra_dec.shape[0] not in (1, n_time):
+        raise ValueError("gaussian_source_ra_dec time axis must be 1 or n_time.")
+    if shape.shape != (flux.shape[0], 3):
+        raise ValueError(
+            f"gaussian_source_shape must have shape [n_gaussian, 3]; got {shape.shape}."
+        )
 
 
 def _check_input_shapes(

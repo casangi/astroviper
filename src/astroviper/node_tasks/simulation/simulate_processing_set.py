@@ -48,6 +48,9 @@ def simulate_processing_set(
     data_selection: dict | None = None,
     task_id: int = 0,
     graph_mode: bool = True,
+    gaussian_source_flux: np.ndarray | None = None,
+    gaussian_source_ra_dec: np.ndarray | None = None,
+    gaussian_source_shape: np.ndarray | None = None,
 ):
     """Simulate the visibilities of one time/frequency chunk and write them to disk.
 
@@ -75,6 +78,16 @@ def simulate_processing_set(
         (``RR, RL, LR, LL`` or ``XX, XY, YX, YY``); singleton time/frequency axes broadcast.
     point_source_ra_dec : np.ndarray, [n_time | 1, n_source, 2], radians
         Right ascension and declination of the point sources (per time or fixed).
+    gaussian_source_flux : np.ndarray, [n_gaussian, n_time | 1, n_frequency | 1, 4], Jy, optional
+        Integrated flux of each Gaussian source in the four instrumental
+        correlations; singleton time/frequency axes broadcast.  ``None``
+        (default) simulates no Gaussian sources.
+    gaussian_source_ra_dec : np.ndarray, [n_time | 1, n_gaussian, 2], radians, optional
+        Right ascension and declination of the Gaussian sources (per time or fixed).
+    gaussian_source_shape : np.ndarray, [n_gaussian, 3], radians, optional
+        ``[major, minor, position angle]`` FWHM shape of each Gaussian source, in
+        the imaging clean-beam convention
+        (:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`).
     phase_center_ra_dec : np.ndarray, [n_time | 1, 2], radians
         Phase centre of the array per time (time-varying for mosaics) or fixed.
     beam_models : list
@@ -150,6 +163,9 @@ def simulate_processing_set(
     flux_chunk = _slice_time_axis(point_source_flux, 1, time_slice)
     flux_chunk = _slice_time_axis(flux_chunk, 2, frequency_slice)
     source_chunk = _slice_time_axis(point_source_ra_dec, 0, time_slice)
+    gaussian_flux_chunk = _slice_time_axis(gaussian_source_flux, 1, time_slice)
+    gaussian_flux_chunk = _slice_time_axis(gaussian_flux_chunk, 2, frequency_slice)
+    gaussian_source_chunk = _slice_time_axis(gaussian_source_ra_dec, 0, time_slice)
     phase_center_chunk = _slice_time_axis(phase_center_ra_dec, 0, time_slice)
     pointing_chunk = _slice_time_axis(pointing_ra_dec, 0, time_slice)
 
@@ -186,6 +202,9 @@ def simulate_processing_set(
         direction_frame=direction_frame,
         processing_function_threads=processing_function_threads,
         implementation=implementation,
+        gaussian_source_flux=gaussian_flux_chunk,
+        gaussian_source_ra_dec=gaussian_source_chunk,
+        gaussian_source_shape=gaussian_source_shape,
     )
     if not graph_mode:
         return xds

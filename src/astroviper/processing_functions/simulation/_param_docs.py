@@ -20,6 +20,19 @@ SIMULATION_PARAM_DOCS = {
     "point_source_ra_dec": (
         "Right ascension and declination of the point sources (per time or fixed)."
     ),
+    "gaussian_source_flux": (
+        "Integrated flux of each Gaussian source in the four instrumental\n"
+        "correlations; singleton time/frequency axes broadcast.  ``None``\n"
+        "(default) simulates no Gaussian sources."
+    ),
+    "gaussian_source_ra_dec": (
+        "Right ascension and declination of the Gaussian sources (per time or fixed)."
+    ),
+    "gaussian_source_shape": (
+        "``[major, minor, position angle]`` FWHM shape of each Gaussian source, in\n"
+        "the imaging clean-beam convention\n"
+        "(:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`)."
+    ),
     "phase_center_ra_dec": (
         "Phase centre of the array per time (time-varying for mosaics) or fixed."
     ),
