@@ -5,6 +5,7 @@ from astroviper.processing_functions import (
     flagging,
     image_analysis,
     imaging,
+    simulation,
     visibility_manipulation,
 )
 
@@ -14,4 +15,5 @@ __all__ = [
     "calibration",
     "image_analysis",
     "visibility_manipulation",
+    "simulation",
 ]

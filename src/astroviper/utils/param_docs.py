@@ -74,6 +74,7 @@ def _load_registry():
     registries = [
         ("imaging", "IMAGING_PARAM_DOCS"),
         ("image_analysis", "IMAGE_ANALYSIS_PARAM_DOCS"),
+        ("simulation", "SIMULATION_PARAM_DOCS"),
     ]
     merged = {}
     for subdomain, attr in registries:
@@ -110,6 +111,9 @@ def _target_files():
         "distributed_applications/image_analysis/moments.py",
         "node_tasks/image_analysis/moments.py",
         "processing_functions/image_analysis/moments.py",
+        "distributed_applications/simulation/simulate_processing_set.py",
+        "node_tasks/simulation/simulate_processing_set.py",
+        "processing_functions/simulation/simulate_processing_set.py",
     ]
     return [root / r for r in rel]
 

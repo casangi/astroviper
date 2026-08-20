@@ -77,8 +77,8 @@ pytest --cov=astroviper tests # with coverage
 Tutorials live under `docs/`, organised to **mirror the source module tree** —
 put a new notebook in the folder matching the layer + subdomain of the function
 it demonstrates:
-- `distributed_applications_tutorials/{imaging,image_analysis,model}/`
-- `processing_functions_tutorials/{imaging,image_analysis,visibility_manipulation}/`
+- `distributed_applications_tutorials/{imaging,image_analysis,model,simulation}/`
+- `processing_functions_tutorials/{imaging,image_analysis,visibility_manipulation,simulation}/`
 
 Notebooks must stay **output-stripped** (`nbstripout`) and
 **headless-executable** — they are run non-interactively (`nbconvert` /
@@ -126,8 +126,8 @@ src/astroviper/
 Each of layers 1–3 is further split by **subdomain**, mirrored across the
 layers where implemented (not every subdomain exists in every layer yet):
 `imaging`, `image_analysis`, `flagging`, `visibility_manipulation`,
-`calibration`, `model`. Additional **subdomains** (e.g. `simulation`) can be
-added in the future.
+`calibration`, `model`, `simulation`. Additional **subdomains** can be added in
+the future.
 
 ### Layer responsibilities & boundaries
 1. **`distributed_applications/`** — Constructs `parallel_coords`, maps a `node_task`
@@ -153,11 +153,32 @@ added in the future.
 
 ### Public API surface
 Each layer/subdomain re-exports its entry points via `__init__.py`. The imaging
-entry point is exposed at all three layers as `image_cube_single_field`:
+entry point is exposed at all three layers as `image_cube_single_field`, the
+simulation entry point as `simulate_processing_set`:
 ```python
 import astroviper.distributed_applications as distributed_applications
 distributed_applications.imaging.image_cube_single_field(...)
+distributed_applications.simulation.simulate_processing_set(...)
 ```
+
+### The `simulation` subdomain (port of SIRIUS)
+`simulate_processing_set` is a **pure generator**: there is no input processing
+set, so the distributed application maps the node task over
+`parallel_coords = {"time", "frequency"}` with `map(input_data={}, ...)` and
+each task writes its `(time, frequency)` block of `VISIBILITY/UVW/WEIGHT/FLAG`
+into an MSv4 processing set that the driver created beforehand
+(`utils/measurement_set_tools.py`: empty MSv4 skeleton + region writes;
+`utils/telescope_layout.py`: CASA `.cfg` layouts → `antenna_xds`;
+`utils/beam_models.py`: shipped Airy / beam-polynomial / Zernike models). The
+science lives in `processing_functions/simulation/` (`calculate_uvw`,
+`calculate_parallactic_angles`, `antenna_beams`, `calculate_visibilities` with
+a NumPy reference and the C++ `visibility_kernel_cpp`, `calculate_noise`).
+Conventions: `uvw = antenna2 - antenna1` (MSv4); beam-image datasets are
+`JONES[parallactic_angle, frequency, polarization, l, m]`; polarizations are MSv4
+strings (`"RR"`, `"XX"`, ...). Data shipped in `src/astroviper/data/simulation/`.
+Legacy SIRIUS reference fixtures live in
+`tests/unit/processing_functions/simulation/data/` (see
+`generate_legacy_fixtures.py` there).
 
 ---
 

@@ -3,6 +3,45 @@ full_dims_uv = ["time", "frequency", "polarization", "u", "v"]
 norm_dims = ["time", "frequency", "polarization"]
 beam_params_dims = ["time", "frequency", "polarization", "beam_params_label"]
 
+# Measurement Set v4 main-dataset variables written chunk-wise by the simulator
+# (see ``astroviper.utils.measurement_set_tools`` and the ``simulation`` subdomain).
+visibility_dims = ["time", "baseline_id", "frequency", "polarization"]
+uvw_dims = ["time", "baseline_id", "uvw_label"]
+
+visibility_data_variables_and_dims_double_precision = {
+    "visibility": {
+        "dims": visibility_dims,
+        "dtype": "<c16",
+        "name": "VISIBILITY",
+        "attrs": {"type": "quantity", "units": "Jy"},
+    },
+    "uvw": {
+        "dims": uvw_dims,
+        "dtype": "<f8",
+        "name": "UVW",
+        "attrs": {"type": "uvw", "units": "m", "frame": "icrs"},
+    },
+    "weight": {
+        "dims": visibility_dims,
+        "dtype": "<f8",
+        "name": "WEIGHT",
+        "attrs": {"type": "quantity", "units": "1/Jy^2"},
+    },
+    "flag": {"dims": visibility_dims, "dtype": "|b1", "name": "FLAG"},
+}
+
+visibility_data_variables_and_dims_single_precision = {
+    **visibility_data_variables_and_dims_double_precision,
+    "visibility": {
+        **visibility_data_variables_and_dims_double_precision["visibility"],
+        "dtype": "<c8",
+    },
+    "weight": {
+        **visibility_data_variables_and_dims_double_precision["weight"],
+        "dtype": "<f4",
+    },
+}
+
 imaging_data_variables_and_dims_double_precision = {
     "aperture": {"dims": full_dims_uv, "dtype": "<c16", "name": "APERTURE"},
     "aperture_normalization": {
@@ -338,6 +377,8 @@ def create_empty_data_variables_on_disk(
             fill_value = None
         elif dtype.kind in ("f", "c"):
             fill_value = np.nan
+        elif dtype.kind == "b":
+            fill_value = False
         else:
             fill_value = 0
 

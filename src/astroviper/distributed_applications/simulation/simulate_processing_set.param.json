@@ -1,0 +1,31 @@
+{
+    "simulate_processing_set": {
+        "ps_store": { "required": true, "type": ["str"] },
+        "antenna_xds": { "required": true, "type": ["Dataset"] },
+        "time_params": { "required": true, "type": ["dict"] },
+        "frequency_params": { "required": true, "type": ["dict"] },
+        "polarization": { "required": true, "type": ["list"] },
+        "point_source_flux": { "required": true, "type": ["ndarray", "list"] },
+        "point_source_ra_dec": { "required": true, "type": ["ndarray", "list"] },
+        "phase_center_ra_dec": { "required": true, "type": ["ndarray", "list"] },
+        "beam_models": { "required": true, "type": ["list"] },
+        "beam_model_map": { "required": true, "type": ["ndarray", "list"] },
+        "beam_params": { "type": ["dict"], "nullable": true },
+        "field_name": { "type": ["list", "str", "ndarray"], "nullable": true },
+        "pointing_ra_dec": { "type": ["ndarray", "list"], "nullable": true },
+        "uvw_params": { "type": ["dict"], "nullable": true },
+        "noise_params": { "type": ["dict"], "nullable": true },
+        "direction_frame": { "type": ["str"], "allowed": ["icrs", "fk5"] },
+        "ms_name": { "type": ["str"], "nullable": true },
+        "n_time_chunks": { "type": ["int"], "nullable": true, "min": 1 },
+        "n_frequency_chunks": { "type": ["int"], "nullable": true, "min": 1 },
+        "processing_function_threads": { "type": ["int"] },
+        "implementation": { "type": ["str"], "allowed": ["numpy", "cpp"] },
+        "compressor": { "nullable": true },
+        "overwrite": { "type": "boolean" },
+        "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },
+        "mpi_cluster_setup": { "type": ["dict"], "nullable": true },
+        "thread_info": { "type": ["dict"], "nullable": true },
+        "check_schema": { "type": "boolean" }
+    }
+}
