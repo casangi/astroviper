@@ -3,8 +3,10 @@
 Beam models are described in :mod:`astroviper.utils.beam_models`.  This module
 turns them into what the visibility kernel needs:
 
-* analytic Airy-disk responses (``casa_airy`` reproduces CASA ``PBMath1DAiry``
-  including its 10000-point lookup quantisation and constant truncation);
+* analytic Airy-disk responses, shared with the imaging primary-beam code
+  (:mod:`astroviper.processing_functions.imaging.primary_beam.airy_disk`;
+  ``casa_airy`` reproduces CASA ``PBMath1DAiry`` including its 10000-point
+  lookup quantisation and constant truncation);
 * 1-D beam polynomials (CASA ``PBMath1DPoly``);
 * Zernike aperture coefficients → Jones beam images
   ``JONES[parallactic_angle, frequency, polarization, l, m]`` via an inverse FFT
@@ -29,8 +31,14 @@ from collections.abc import Sequence
 
 import numpy as np
 import xarray as xr
-from scipy.special import j1
 
+from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
+    CASA_AIRY_N_SAMPLE,
+    CASA_AIRY_TWIDDLE,  # noqa: F401  (re-exported; part of the public API)
+    SPEED_OF_LIGHT,
+    airy_disk_response,
+    casa_airy_disk_response,
+)
 from astroviper.processing_functions.simulation.calculate_parallactic_angles import (
     calculate_parallactic_angles,
     find_representative_angles,
@@ -49,12 +57,7 @@ from astroviper.utils.coordinate_transforms import (
 )
 from astroviper.utils.measurement_set_tools import polarization_index
 
-SPEED_OF_LIGHT = 299792458.0
 ARCMIN_TO_RAD = np.pi / (180.0 * 60.0)
-# CASA PBMath truncates some constants when building its 1 GHz lookup table; this
-# factor reproduces CASA's Airy disk to ~7 significant figures (SIRIUS casa_twiddle).
-CASA_AIRY_TWIDDLE = (180 * 7.016 * SPEED_OF_LIGHT) / ((np.pi**2) * 1e9 * 1.566 * 24.5)
-CASA_AIRY_N_SAMPLE = 10000
 
 MAP_MUELLER_TO_JONES = np.array(
     [
@@ -91,109 +94,6 @@ def resolve_beam_params(beam_params: dict | None) -> dict:
 # ----------------------------------------------------------------------------
 # Analytic responses
 # ----------------------------------------------------------------------------
-def airy_disk_response(
-    l: np.ndarray,  # noqa: E741
-    m: np.ndarray,
-    frequency: np.ndarray,
-    dish_diameter: float,
-    blockage_diameter: float = 0.0,
-    ipower: int = 1,
-) -> np.ndarray:
-    """Airy-disk (voltage if ``ipower=1``, power if ``2``) response at directions ``(l, m)``.
-
-    Obscured Airy pattern ``(2 J1(r)/r - 2 e J1(e r)/r) / (1 - e^2)`` with
-    ``e = blockage / dish`` and ``r = |lm| k D / 2``.
-
-    Parameters
-    ----------
-    l, m : np.ndarray (broadcastable), radians
-    frequency : np.ndarray (broadcastable), Hz
-    dish_diameter, blockage_diameter : float, metres
-    ipower : int
-
-    Returns
-    -------
-    np.ndarray
-        Broadcast shape of ``l``, ``m`` and ``frequency``.
-    """
-    k = 2 * np.pi * np.asarray(frequency, dtype=np.float64) / SPEED_OF_LIGHT
-    r = (
-        np.sqrt(
-            np.asarray(l, dtype=np.float64) ** 2 + np.asarray(m, dtype=np.float64) ** 2
-        )
-        * k
-        * (dish_diameter / 2)
-    )
-    r = np.asarray(r)
-    safe = np.where(r == 0, 1.0, r)
-    if blockage_diameter == 0.0:
-        val = 2.0 * j1(safe) / safe
-    else:
-        e = blockage_diameter / dish_diameter
-        val = (2.0 * j1(safe) / safe - 2.0 * e * j1(safe * e) / safe) / (1.0 - e**2)
-    val = np.where(r == 0, 1.0, val)
-    return val**ipower
-
-
-def casa_airy_disk_response(
-    l: np.ndarray,  # noqa: E741
-    m: np.ndarray,
-    frequency: np.ndarray,
-    dish_diameter: float,
-    blockage_diameter: float,
-    max_rad_1GHz: float,
-    ipower: int = 1,
-    n_sample: int | None = CASA_AIRY_N_SAMPLE,
-) -> np.ndarray:
-    """CASA ``PBMath1DAiry`` compatible Airy-disk response.
-
-    CASA tabulates the pattern on ``n_sample`` radii out to ``max_rad_1GHz``
-    (scaled to the observing frequency) and truncates to the nearest lower sample;
-    :data:`CASA_AIRY_TWIDDLE` reproduces its truncated constants.  Directions
-    beyond ``max_rad_1GHz / (frequency / 1 GHz)`` are **not** zeroed here (see
-    :func:`sample_jones`).
-
-    Parameters
-    ----------
-    l, m : np.ndarray (broadcastable), radians
-    frequency : np.ndarray (broadcastable), Hz
-    dish_diameter, blockage_diameter : float, metres
-    max_rad_1GHz : float, radians
-    ipower : int
-    n_sample : int or None
-        ``None`` disables the lookup quantisation (exact ``arcsin`` argument).
-
-    Returns
-    -------
-    np.ndarray
-    """
-    frequency = np.asarray(frequency, dtype=np.float64)
-    k = 2 * np.pi * frequency / SPEED_OF_LIGHT
-    aperture = dish_diameter / 2
-    rho = np.sqrt(
-        np.asarray(l, dtype=np.float64) ** 2 + np.asarray(m, dtype=np.float64) ** 2
-    )
-    if n_sample is not None:
-        r_max = max_rad_1GHz / (frequency / 1e9)
-        r_inc = r_max / (n_sample - 1)
-        r = (np.trunc(rho / r_inc) * r_inc) * aperture * k * CASA_AIRY_TWIDDLE
-    else:
-        r = np.arcsin(rho * k * aperture)
-    r = np.asarray(r)
-    safe = np.where(r == 0, 1.0, r)
-    if blockage_diameter == 0.0:
-        val = 2.0 * j1(safe) / safe
-    else:
-        area_ratio = (dish_diameter / blockage_diameter) ** 2
-        length_ratio = dish_diameter / blockage_diameter
-        val = (
-            area_ratio * 2.0 * j1(safe) / safe
-            - 2.0 * j1(safe * length_ratio) / (safe * length_ratio)
-        ) / (area_ratio - 1.0)
-    val = np.where(r == 0, 1.0, val)
-    return val**ipower
-
-
 def polynomial_beam_response(
     l: np.ndarray,  # noqa: E741
     m: np.ndarray,

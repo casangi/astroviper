@@ -80,6 +80,7 @@ IMAGING_TIMING_PHASES = [
         ],
     ),
     ("RESTORE", "T_restore", []),
+    ("PRIMARY-BEAM CORRECTION", "T_correct_sky_by_primary_beam", []),
     (
         "NODE I/O",
         None,

@@ -76,6 +76,11 @@ imaging_data_variables_and_dims_double_precision = {
     "sky_model": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_MODEL"},
     "sky_residual": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_RESIDUAL"},
     "sky_restored": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_RESTORED"},
+    "sky_restored_primary_beam_corrected": {
+        "dims": full_dims_lm,
+        "dtype": "<f8",
+        "name": "SKY_RESTORED_PRIMARY_BEAM_CORRECTED",
+    },
     "sky": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY"},
     "mask": {
         "dims": full_dims_lm,
@@ -139,6 +144,11 @@ imaging_data_variables_and_dims_single_precision = {
     "sky_model": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_MODEL"},
     "sky_residual": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_RESIDUAL"},
     "sky_restored": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_RESTORED"},
+    "sky_restored_primary_beam_corrected": {
+        "dims": full_dims_lm,
+        "dtype": "<f4",
+        "name": "SKY_RESTORED_PRIMARY_BEAM_CORRECTED",
+    },
     "sky": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY"},
     "mask": {
         "dims": full_dims_lm,
@@ -190,6 +200,10 @@ imaging_data_variable_data_group_roles = {
     ),
     "sky_model": ("model", "sky"),
     "sky_restored": ("restored", "sky"),
+    "sky_restored_primary_beam_corrected": (
+        "restored",
+        "sky_primary_beam_corrected",
+    ),
 }
 
 

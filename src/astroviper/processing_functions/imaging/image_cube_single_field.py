@@ -177,6 +177,7 @@ def image_cube_single_field(
     fft_backend="pyfftw",
     image_data_variables_keep=None,
     restore=False,
+    primary_beam_correction=False,
     task_id=0,
 ):
     """Run the major/minor cycle CLEAN loop for one single-field image chunk.
@@ -274,6 +275,12 @@ def image_cube_single_field(
         If ``True`` produce a restored image after deconvolution: the model
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
+    primary_beam_correction : bool, optional
+        If ``True`` divide the restored sky by the (power) primary beam,
+        writing the ``sky_restored_primary_beam_corrected``
+        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable (CASA ``pbcor``);
+        pixels below the primary-beam cutoff are blanked with NaN.  Requires
+        ``restore``.
     task_id : int, optional
         Identifier of the parallel chunk being processed.
     Returns
@@ -505,6 +512,24 @@ def image_cube_single_field(
             consume_model="sky_model" not in image_data_variables_keep,
         )
         accumulate_timing(timing, restore_return_df)
+
+    # Primary-beam correction of the restored sky (CASA pbcor): a single
+    # division since PRIMARY_BEAM follows the CASA (power) definition. Uses
+    # the deconvolver's primary_beam_limit as the blanking cutoff when set,
+    # else the CASA pblimit default of 0.2.
+    timing["T_correct_sky_by_primary_beam"] = 0.0
+    if primary_beam_correction and restore and iteration_control_params["niter"] > 0:
+        from astroviper.processing_functions.imaging.correct_sky_by_primary_beam import (
+            correct_sky_by_primary_beam,
+        )
+
+        img_xds, pb_corr_return_df = correct_sky_by_primary_beam(
+            img_xds,
+            primary_beam_limit=(
+                iteration_control_params.get("primary_beam_limit", 0.0) or 0.2
+            ),
+        )
+        accumulate_timing(timing, pb_corr_return_df)
 
     timing["task_id"] = task_id
     timing["n_channels"] = img_xds.sizes["frequency"]

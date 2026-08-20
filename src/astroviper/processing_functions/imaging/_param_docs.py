@@ -101,6 +101,13 @@ IMAGING_PARAM_DOCS = {
         'Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,\n'
         '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).'
     ),
+    "primary_beam_correction": (
+        "If ``True`` divide the restored sky by the (power) primary beam,\n"
+        "writing the ``sky_restored_primary_beam_corrected``\n"
+        "(``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable (CASA ``pbcor``);\n"
+        "pixels below the primary-beam cutoff are blanked with NaN.  Requires\n"
+        "``restore``."
+    ),
     "restore": (
         "If ``True`` produce a restored image after deconvolution: the model\n"
         "convolved with the clean beam (the Gaussian fit to the PSF) plus the\n"

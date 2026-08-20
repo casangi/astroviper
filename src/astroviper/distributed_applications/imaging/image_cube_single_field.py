@@ -117,6 +117,7 @@ def image_cube_single_field(
     disk_chunk_sizes: dict[str, int] | str | None = None,
     fft_backend="pyfftw",
     restore: bool = False,
+    primary_beam_correction: bool = False,
     skunk_works: bool = False,
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
@@ -259,6 +260,12 @@ def image_cube_single_field(
         If ``True`` produce a restored image after deconvolution: the model
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
+    primary_beam_correction : bool, optional
+        If ``True`` divide the restored sky by the (power) primary beam,
+        writing the ``sky_restored_primary_beam_corrected``
+        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable (CASA ``pbcor``);
+        pixels below the primary-beam cutoff are blanked with NaN.  Requires
+        ``restore``.
     skunk_works : bool
         If ``True`` use the experimental performance I/O path in each node task:
         load only the data group's data variables straight from the Zarr chunk
@@ -398,6 +405,13 @@ def image_cube_single_field(
     # ensure it is in the keep list (without mutating the caller's list).
     if restore and "sky_restored" not in image_data_variables_keep:
         image_data_variables_keep = list(image_data_variables_keep) + ["sky_restored"]
+    if primary_beam_correction:
+        if not restore:
+            raise ValueError("primary_beam_correction requires restore=True.")
+        if "sky_restored_primary_beam_corrected" not in image_data_variables_keep:
+            image_data_variables_keep = list(image_data_variables_keep) + [
+                "sky_restored_primary_beam_corrected"
+            ]
 
     # Every driver step is timed into ``timing_distributed_application``; the
     # individual per-step timing log messages are replaced by the formatted
@@ -510,6 +524,7 @@ def image_cube_single_field(
     input_params["single_precision_image"] = single_precision_image
     input_params["fft_backend"] = fft_backend
     input_params["restore"] = restore
+    input_params["primary_beam_correction"] = primary_beam_correction
     input_params["skunk_works"] = skunk_works
     input_params["output_shard_channels"] = output_shard_channels
     input_params["output_image_format"] = output_image_format

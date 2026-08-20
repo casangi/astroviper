@@ -36,6 +36,7 @@
         "disk_chunk_sizes": { "type": ["dict", "str"], "nullable": true },
         "fft_backend": { "type": ["str"], "allowed": ["pyfftw", "scipy"] },
         "restore": { "type": "boolean" },
+        "primary_beam_correction": { "type": "boolean" },
         "skunk_works": { "type": "boolean" },
         "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },
         "mpi_cluster_setup": { "type": ["dict"], "nullable": true },
