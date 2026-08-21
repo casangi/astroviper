@@ -10,6 +10,7 @@
         "gaussian_source_flux": { "type": ["ndarray", "list"], "nullable": true },
         "gaussian_source_ra_dec": { "type": ["ndarray", "list"], "nullable": true },
         "gaussian_source_shape": { "type": ["ndarray", "list"], "nullable": true },
+        "ms_v2_path": { "type": "string", "nullable": true },
         "phase_center_ra_dec": { "required": true, "type": ["ndarray", "list"] },
         "beam_models": { "required": true, "type": ["list"] },
         "beam_model_map": { "required": true, "type": ["ndarray", "list"] },

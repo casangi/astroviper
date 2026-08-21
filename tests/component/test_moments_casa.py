@@ -1,108 +1,63 @@
-"""Component test: AstroVIPER moments vs CASA ``immoments`` on the same cube.
+"""Component test: AstroVIPER moments vs pre-computed CASA ``immoments`` references.
 
-Skipped automatically when ``casatasks``/``casatools`` are not installed.
+The CASA reference planes live in ``data/casa_moments_reference.npz``,
+generated once with ``data/generate_casa_moments_reference.py`` (which needs
+``casatools``; the test suite itself does not import CASA).  The fixture holds
+the synthetic line cube, the CASA ``fromarray`` frequency axis, the rest
+frequency, and every CASA moment plane (+ mask) compared below.
 
 Value moments (mean, median, std, rms, abs mean dev, max, min) are compared
 directly.  CASA expresses spectral coordinate-valued moments (and the
 ``integrated`` moment's channel width) in radio velocity (km/s) while
 AstroVIPER uses the native frequency axis (Hz); those are compared through the
 exact linear radio-velocity conversion ``v = c * (1 - f / f0)`` with ``f0``
-and the per-channel frequencies read back from the CASA image's coordinate
-system.
+and the per-channel frequencies stored in the reference file.
 """
+
+import os
 
 import numpy as np
 import pytest
 import xarray as xr
+from xradio.image import load_image, make_empty_sky_image, write_image
 
-casatools = pytest.importorskip("casatools")
-
-from xradio.image import load_image, make_empty_sky_image, write_image  # noqa: E402
-
-from astroviper.distributed_applications.image_analysis import moments  # noqa: E402
+from astroviper.distributed_applications.image_analysis import moments
 
 C_KM_S = 299792.458  # speed of light in km/s
 INCLUDE_RANGE = (0.1, 1e30)  # significant-emission cut for moments 1 and 2
 
-# (AstroVIPER name, CASA immoments code, CASA output suffix-free kind)
+REFERENCE_FILE = os.path.join(
+    os.path.dirname(__file__), "data", "casa_moments_reference.npz"
+)
+
 VALUE_MOMENTS = [
-    ("mean", -1),
-    ("median", 3),
-    ("standard_deviation", 5),
-    ("rms", 6),
-    ("abs_mean_dev", 7),
-    ("maximum", 8),
-    ("minimum", 10),
+    "mean",
+    "median",
+    "standard_deviation",
+    "rms",
+    "abs_mean_dev",
+    "maximum",
+    "minimum",
 ]
-COORD_MOMENTS = [
-    ("weighted_coord", 1),
-    ("maximum_coord", 9),
-    ("minimum_coord", 11),
-]
+COORD_MOMENTS = ["weighted_coord", "maximum_coord", "minimum_coord"]
 
 
-def _casa_moment(casa_image, code, outfile, includepix=None):
-    """Run CASA moments for one moment; return the (l, m) plane and its mask.
-
-    Uses the ``casatools`` image-tool ``moments`` method (the compute engine
-    behind ``casatasks.immoments``); the task wrapper's ``logsink`` logging
-    bus-errors inside pytest on macOS, the tool does not.
-    """
-    ia = casatools.image()
-    ia.open(casa_image)
-    kwargs = {} if includepix is None else {"includepix": includepix}
-    moment_image = ia.moments(
-        moments=[code], axis=3, outfile=outfile, drop=False, **kwargs
-    )
-    ia.close()
-    pixels = np.squeeze(moment_image.getchunk())  # (x=l, y=m)
-    mask = np.squeeze(moment_image.getchunk(getmask=True))
-    moment_image.close()
-    return pixels, mask
+def _casa_moment(reference, name):
+    """The pre-computed CASA (l, m) plane and mask of one moment."""
+    return reference[f"{name}_plane"], reference[f"{name}_mask"]
 
 
 @pytest.fixture(scope="module")
 def cubes(tmp_path_factory):
-    """One synthetic line cube written both as a CASA image and a Zarr image."""
+    """AstroVIPER moments of the reference cube, plus the CASA references."""
     tmp_path = tmp_path_factory.mktemp("moments_casa")
-    n_chan, n_l, n_m = 24, 48, 40
-    rng = np.random.default_rng(11)
-    l_idx, m_idx = np.meshgrid(np.arange(n_l), np.arange(n_m), indexing="ij")
-    spatial = np.exp(
-        -(((l_idx - n_l / 2) ** 2 + (m_idx - n_m / 2) ** 2) / (2 * 6.0**2))
-    )
-    chan = np.arange(n_chan)
-    center = n_chan / 2 + 4 * (l_idx - n_l / 2) / n_l
-    profile = np.exp(-((chan[:, None, None] - center[None]) ** 2) / (2 * 2.5**2))
-    sky = (spatial[None] * profile + rng.normal(0, 0.01, profile.shape)).astype(
-        np.float64
-    )  # (chan, l, m); no NaNs so CASA and AstroVIPER see identical pixels
+    reference = dict(np.load(REFERENCE_FILE))
+    sky = reference["sky"]  # (chan, l, m); no NaNs, identical pixels both sides
+    frequency = reference["frequency"]
+    n_l, n_m = sky.shape[1], sky.shape[2]
 
-    # CASA image: pixels ordered (x=l, y=m, stokes, chan) with the default
-    # coordinate system fromarray creates.
-    casa_image = str(tmp_path / "casa_input.im")
-    ia = casatools.image()
-    ia.fromarray(
-        outfile=casa_image,
-        pixels=np.transpose(sky, (1, 2, 0))[:, :, np.newaxis, :],
-        overwrite=True,
-    )
-    frequency = np.array(
-        [ia.toworld([0, 0, 0, c])["numeric"][3] for c in range(n_chan)]
-    )
-    # Put the rest frequency at band centre.  casacore stores the per-profile
-    # moment results in float32 (``calcMoments`` is ``Vector<Float>``), so with
-    # a rest frequency far from the band the velocities are ~1000 km/s and
-    # CASA's moment-2 cancellation error alone is ~0.25 km/s; centring keeps
-    # the velocities (and hence the float32 rounding) small on both sides.
-    rest_frequency = float(frequency.mean())
-    cs = ia.coordsys()
-    cs.setrestfrequency(value=f"{rest_frequency}Hz")
-    ia.setcoordsys(cs.torecord())
-    cs.done()
-    ia.close()
-
-    # AstroVIPER image with the SAME per-channel frequencies.
+    # AstroVIPER image with the SAME per-channel frequencies as the CASA image
+    # the references were computed from.
     rad_per_arcsec = np.pi / 180 / 3600
     img_xds = make_empty_sky_image(
         phase_center=[0.6, -0.2],
@@ -125,7 +80,8 @@ def cubes(tmp_path_factory):
     moments(
         input_image_store=zarr_input,
         moments_image_store=moments_store,
-        moments=[name for name, _ in VALUE_MOMENTS + COORD_MOMENTS]
+        moments=VALUE_MOMENTS
+        + COORD_MOMENTS
         + ["integrated", "weighted_dispersion_coord"],
         moment_axis="frequency",
         n_chunks=2,
@@ -144,12 +100,11 @@ def cubes(tmp_path_factory):
         overwrite=True,
     )
     return {
-        "tmp_path": tmp_path,
-        "casa_image": casa_image,
+        "reference": reference,
         "astroviper": load_image(moments_store),
         "astroviper_included": load_image(included_store),
         "frequency": frequency,
-        "rest_frequency": rest_frequency,
+        "rest_frequency": float(reference["rest_frequency"]),
     }
 
 
@@ -162,11 +117,9 @@ def _astroviper_plane(moments_xds, name):
     )
 
 
-@pytest.mark.parametrize(("name", "code"), VALUE_MOMENTS)
-def test_value_moments_match_casa(cubes, name, code):
-    casa_plane, _ = _casa_moment(
-        cubes["casa_image"], code, str(cubes["tmp_path"] / f"casa_{name}.im")
-    )
+@pytest.mark.parametrize("name", VALUE_MOMENTS)
+def test_value_moments_match_casa(cubes, name):
+    casa_plane, _ = _casa_moment(cubes["reference"], name)
     np.testing.assert_allclose(
         _astroviper_plane(cubes["astroviper"], name),
         casa_plane,
@@ -176,11 +129,9 @@ def test_value_moments_match_casa(cubes, name, code):
     )
 
 
-@pytest.mark.parametrize(("name", "code"), COORD_MOMENTS)
-def test_coordinate_moments_match_casa_in_velocity(cubes, name, code):
-    casa_plane, _ = _casa_moment(
-        cubes["casa_image"], code, str(cubes["tmp_path"] / f"casa_{name}.im")
-    )
+@pytest.mark.parametrize("name", COORD_MOMENTS)
+def test_coordinate_moments_match_casa_in_velocity(cubes, name):
+    casa_plane, _ = _casa_moment(cubes["reference"], name)
     ours_hz = _astroviper_plane(cubes["astroviper"], name)
     # radio velocity: v[km/s] = c * (1 - f / f0)
     ours_km_s = C_KM_S * (1 - ours_hz / cubes["rest_frequency"])
@@ -194,9 +145,7 @@ def test_coordinate_moments_match_casa_in_velocity(cubes, name, code):
 
 
 def test_integrated_matches_casa_up_to_channel_width_units(cubes):
-    casa_plane, _ = _casa_moment(
-        cubes["casa_image"], 0, str(cubes["tmp_path"] / "casa_integrated.im")
-    )
+    casa_plane, _ = _casa_moment(cubes["reference"], "integrated")
     ours = _astroviper_plane(cubes["astroviper"], "integrated")  # Jy/beam.Hz
     # CASA integrates over radio velocity: dv = (c / f0) * df, in km/s.
     scale = C_KM_S / cubes["rest_frequency"]
@@ -213,10 +162,7 @@ def test_dispersion_matches_casa_scaled_with_include_range(cubes):
     meaningless values (CASA takes ``sqrt(abs(...))`` where AstroVIPER yields
     NaN), so the comparison is made under the same include range."""
     casa_plane, casa_mask = _casa_moment(
-        cubes["casa_image"],
-        2,
-        str(cubes["tmp_path"] / "casa_dispersion.im"),
-        includepix=list(INCLUDE_RANGE),
+        cubes["reference"], "weighted_dispersion_coord_included"
     )
     ours = _astroviper_plane(
         cubes["astroviper_included"], "weighted_dispersion_coord"
@@ -234,12 +180,7 @@ def test_dispersion_matches_casa_scaled_with_include_range(cubes):
 
 
 def test_weighted_coord_matches_casa_with_include_range(cubes):
-    casa_plane, casa_mask = _casa_moment(
-        cubes["casa_image"],
-        1,
-        str(cubes["tmp_path"] / "casa_weighted_coord_inc.im"),
-        includepix=list(INCLUDE_RANGE),
-    )
+    casa_plane, casa_mask = _casa_moment(cubes["reference"], "weighted_coord_included")
     ours_hz = _astroviper_plane(cubes["astroviper_included"], "weighted_coord")
     ours_km_s = C_KM_S * (1 - ours_hz / cubes["rest_frequency"])
     both = casa_mask & np.isfinite(ours_hz)

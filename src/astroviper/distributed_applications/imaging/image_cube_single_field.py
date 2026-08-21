@@ -118,6 +118,7 @@ def image_cube_single_field(
     fft_backend="pyfftw",
     restore: bool = False,
     primary_beam_correction: bool = False,
+    psf_fitting_method: str = "astroviper",
     skunk_works: bool = False,
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
@@ -266,6 +267,10 @@ def image_cube_single_field(
         (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable (CASA ``pbcor``);
         pixels below the primary-beam cutoff are blanked with NaN.  Requires
         ``restore``.
+    psf_fitting_method : str, optional
+        Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
+        ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``
+        (the fit behind ``tclean``'s restoring beam).
     skunk_works : bool
         If ``True`` use the experimental performance I/O path in each node task:
         load only the data group's data variables straight from the Zarr chunk
@@ -525,6 +530,7 @@ def image_cube_single_field(
     input_params["fft_backend"] = fft_backend
     input_params["restore"] = restore
     input_params["primary_beam_correction"] = primary_beam_correction
+    input_params["psf_fitting_method"] = psf_fitting_method
     input_params["skunk_works"] = skunk_works
     input_params["output_shard_channels"] = output_shard_channels
     input_params["output_image_format"] = output_image_format

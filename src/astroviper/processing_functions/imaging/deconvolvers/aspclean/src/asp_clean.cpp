@@ -16,7 +16,6 @@
 #include <numeric>
 #include <thread>
 #include <vector>
-#include <iostream>
 
 #include "../include/asp_fft.hpp"
 #include "../include/asp_lbfgs.hpp"
@@ -303,8 +302,6 @@ private:
             psfWidth_ = psf_gaussian_width(psfd.data(), nx_, ny_);
         }
         if (psfWidth_ < 1.0) psfWidth_ = 1.0;
-
-        std::cout << "$$$$$$$$ The psfWidth_" << psfWidth_ << std::endl;
 
         setInitScaleXfrs();
         setInitScaleMasks();

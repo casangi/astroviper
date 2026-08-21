@@ -108,6 +108,11 @@ IMAGING_PARAM_DOCS = {
         "pixels below the primary-beam cutoff are blanked with NaN.  Requires\n"
         "``restore``."
     ),
+    "psf_fitting_method": (
+        'Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or\n'
+        '``"casa"``, the C++ port of CASA\'s ``StokesImageUtil::FitGaussianPSF``\n'
+        "(the fit behind ``tclean``'s restoring beam)."
+    ),
     "restore": (
         "If ``True`` produce a restored image after deconvolution: the model\n"
         "convolved with the clean beam (the Gaussian fit to the PSF) plus the\n"

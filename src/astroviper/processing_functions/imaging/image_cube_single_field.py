@@ -13,6 +13,7 @@ def imaging_preparation_single_field(
     processing_function_threads=1,
     fft_backend="pyfftw",
     image_data_variables_keep=None,
+    psf_fitting_method="astroviper",
     task_id=0,
 ):
     """Run the once-per-chunk imaging setup before the major-cycle loop.
@@ -156,6 +157,7 @@ def imaging_preparation_single_field(
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         image_data_variables_keep=image_data_variables_keep,
+        psf_fitting_method=psf_fitting_method,
     )
     T_setup = time.time() - start
 
@@ -178,6 +180,7 @@ def image_cube_single_field(
     image_data_variables_keep=None,
     restore=False,
     primary_beam_correction=False,
+    psf_fitting_method="astroviper",
     task_id=0,
 ):
     """Run the major/minor cycle CLEAN loop for one single-field image chunk.
@@ -281,6 +284,10 @@ def image_cube_single_field(
         (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable (CASA ``pbcor``);
         pixels below the primary-beam cutoff are blanked with NaN.  Requires
         ``restore``.
+    psf_fitting_method : str, optional
+        Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
+        ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``
+        (the fit behind ``tclean``'s restoring beam).
     task_id : int, optional
         Identifier of the parallel chunk being processed.
     Returns
@@ -339,6 +346,7 @@ def image_cube_single_field(
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         image_data_variables_keep=image_data_variables_keep,
+        psf_fitting_method=psf_fitting_method,
         task_id=task_id,
     )
 

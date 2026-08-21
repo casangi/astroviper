@@ -122,14 +122,17 @@ def make_time_coordinate(time_params: dict) -> dict:
     Parameters
     ----------
     time_params : dict
-        ``time_start`` (str, ``YYYY-MM-DDTHH:MM:SS.SSS`` UTC), ``time_delta``
-        (float, s; also the integration time) and ``n_samples`` (int).
+        ``time_start`` (str, ``YYYY-MM-DDTHH:MM:SS.SSS`` UTC; the start of the
+        first integration), ``time_delta`` (float, s; also the integration
+        time) and ``n_samples`` (int).
 
     Returns
     -------
     dict
         ``{"dims": "time", "data": unix seconds (UTC), "attrs": {...}}`` with the
-        MSv4 ``time`` coordinate attributes.
+        MSv4 ``time`` coordinate attributes.  Following the MS convention
+        (v2 and v4), each ``time`` value is the **midpoint** of its sampling
+        interval: ``time_start + (k + 1/2) * time_delta``.
     """
     from graphviper.graph_tools.coordinate_utils import make_time_coord
 
@@ -139,6 +142,8 @@ def make_time_coordinate(time_params: dict) -> dict:
         n_samples=time_params["n_samples"],
         time_scale="utc",
     )
+    # make_time_coord returns the start grid; shift to integration midpoints.
+    coord["data"] = np.asarray(coord["data"]) + 0.5 * float(time_params["time_delta"])
     coord["attrs"] = {
         "type": "time",
         "units": "s",

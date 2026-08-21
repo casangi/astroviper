@@ -22,6 +22,7 @@ def imaging_setup_single_field(
     fft_backend="pyfftw",
     image_data_variables_keep=None,
     image_data_group_out_name="residual",
+    psf_fitting_method="astroviper",
 ):
     """Perform the once-per-chunk imaging setup before the major-cycle loop.
 
@@ -182,6 +183,7 @@ def imaging_setup_single_field(
         },
         overwrite=True,
         processing_function_threads=processing_function_threads,
+        fitting_method=psf_fitting_method,
     )
     T_psf_fit = time.time() - start
 

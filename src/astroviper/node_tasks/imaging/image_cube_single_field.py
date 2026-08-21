@@ -129,6 +129,7 @@ def image_cube_single_field(
     image_data_variables_keep=None,
     restore=False,
     primary_beam_correction=False,
+    psf_fitting_method="astroviper",
     memory_mode="in_memory",
     skunk_works=False,
     data_group=None,
@@ -257,6 +258,10 @@ def image_cube_single_field(
         (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable (CASA ``pbcor``);
         pixels below the primary-beam cutoff are blanked with NaN.  Requires
         ``restore``.
+    psf_fitting_method : str, optional
+        Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
+        ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``
+        (the fit behind ``tclean``'s restoring beam).
     memory_mode : str, optional
         Only ``"in_memory"`` is implemented.  Default ``"in_memory"``.
     skunk_works : bool, optional
@@ -426,6 +431,7 @@ def image_cube_single_field(
         image_data_variables_keep=image_data_variables_keep,
         restore=restore,
         primary_beam_correction=primary_beam_correction,
+        psf_fitting_method=psf_fitting_method,
         task_id=task_id,
     )
 

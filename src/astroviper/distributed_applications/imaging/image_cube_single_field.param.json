@@ -37,6 +37,7 @@
         "fft_backend": { "type": ["str"], "allowed": ["pyfftw", "scipy"] },
         "restore": { "type": "boolean" },
         "primary_beam_correction": { "type": "boolean" },
+        "psf_fitting_method": { "type": "string", "allowed": ["astroviper", "casa"] },
         "skunk_works": { "type": "boolean" },
         "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },
         "mpi_cluster_setup": { "type": ["dict"], "nullable": true },

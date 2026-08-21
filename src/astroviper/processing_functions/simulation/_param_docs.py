@@ -33,6 +33,12 @@ SIMULATION_PARAM_DOCS = {
         "the imaging clean-beam convention\n"
         "(:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`)."
     ),
+    "ms_v2_path": (
+        "Additionally write the simulated MSv4 as a CASA Measurement Set v2 at\n"
+        "this path via the optional `arcae <https://github.com/ska-sa/arcae>`_\n"
+        "backend (``utils.measurement_set_v2.write_measurement_set_v2``).\n"
+        "Default ``None`` (no MSv2 output)."
+    ),
     "phase_center_ra_dec": (
         "Phase centre of the array per time (time-varying for mosaics) or fixed."
     ),

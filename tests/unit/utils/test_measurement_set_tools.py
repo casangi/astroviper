@@ -56,6 +56,12 @@ def test_time_and_frequency_coordinates():
     )
     assert tc["dims"] == "time"
     np.testing.assert_allclose(np.diff(tc["data"]), 10.0)
+    # MS convention: stamps are integration midpoints (start + delta / 2).
+    from astropy.time import Time
+
+    np.testing.assert_allclose(
+        tc["data"][0], Time("2019-10-03T19:00:00.000", scale="utc").unix + 5.0
+    )
     assert tc["attrs"]["format"] == "unix" and tc["attrs"]["scale"] == "utc"
     assert tc["attrs"]["integration_time"]["data"] == 10.0
     fc = make_frequency_coordinate(

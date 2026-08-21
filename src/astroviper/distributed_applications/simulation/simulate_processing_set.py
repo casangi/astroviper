@@ -31,6 +31,7 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
             ("generate dask graph", "T_generate_dask_graph"),
             ("compute dask graph", "T_compute_dask_graph"),
             ("consolidate metadata + schema check", "T_consolidate_metadata"),
+            ("write MSv2 (arcae)", "T_write_ms_v2"),
         ],
     ),
 ]
@@ -69,6 +70,7 @@ def simulate_processing_set(
     gaussian_source_flux: np.ndarray | list | None = None,
     gaussian_source_ra_dec: np.ndarray | list | None = None,
     gaussian_source_shape: np.ndarray | list | None = None,
+    ms_v2_path: str | None = None,
     direction_frame: str = "icrs",
     ms_name: str | None = None,
     n_time_chunks: int | None = None,
@@ -127,6 +129,11 @@ def simulate_processing_set(
         ``[major, minor, position angle]`` FWHM shape of each Gaussian source, in
         the imaging clean-beam convention
         (:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`).
+    ms_v2_path : str, optional
+        Additionally write the simulated MSv4 as a CASA Measurement Set v2 at
+        this path via the optional `arcae <https://github.com/ska-sa/arcae>`_
+        backend (``utils.measurement_set_v2.write_measurement_set_v2``).
+        Default ``None`` (no MSv2 output).
     phase_center_ra_dec : np.ndarray, [n_time | 1, 2], radians
         Phase centre of the array per time (time-varying for mosaics) or fixed.
     beam_models : list
@@ -445,6 +452,16 @@ def simulate_processing_set(
         if str(issues) != "No schema issues found":
             logger.warning(f"MSv4 schema check of {ps_store}: {issues}")
     timing_distributed_application["T_consolidate_metadata"] = _time.time() - start
+
+    if ms_v2_path is not None:
+        from astroviper.utils.measurement_set_v2 import write_measurement_set_v2
+
+        start = _time.time()
+        write_measurement_set_v2(
+            ps_store, ms_v2_path, ms_name=ms_name, overwrite=overwrite
+        )
+        timing_distributed_application["T_write_ms_v2"] = _time.time() - start
+
     timing_distributed_application["T_total"] = _time.time() - application_start
     logger.info(
         format_timing_summary(

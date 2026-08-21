@@ -28,6 +28,7 @@ def point_spread_function_gaussian_fit(
     cutoff: float = 0.35,
     interpolation_method: str = "splinef2d",
     processing_function_threads: int = 1,
+    fitting_method: str = "astroviper",
 ):
     """
     fit 2D gaussian to psf
@@ -70,6 +71,13 @@ def point_spread_function_gaussian_fit(
         Values ``<= 0`` fall back to ``os.cpu_count()``.  Each slice writes to
         its own output entry, so the threaded result is identical to the
         serial one.
+
+    fitting_method : str
+        ``"astroviper"`` (default) uses this module's spline-resampled
+        least-squares fit; ``"casa"`` uses the C++ port of CASA's
+        ``StokesImageUtil::FitGaussianPSF`` (CAS-13022, the fit behind
+        ``tclean``'s restoring beam), with ``cutoff`` as CASA ``psfcutoff``.
+        The maximum-sidelobe computation is identical for both.
 
     Returns
     -------
@@ -166,16 +174,32 @@ def point_spread_function_gaussian_fit(
     trc[..., 0] = np.minimum(trc[..., 0], main_lobe_im.shape[3] - 1)
     trc[..., 1] = np.minimum(trc[..., 1], main_lobe_im.shape[4] - 1)
 
-    ellipse_params = psf_gaussian_fit_core(
-        img_xds[psf_name].values,
-        blc,
-        trc,
-        sampling,
-        cutoff,
-        delta,
-        interpolation_method,
-        processing_function_threads=processing_function_threads,
-    )
+    if fitting_method == "casa":
+        from astroviper.processing_functions.image_analysis.psf_gaussian_fit_cpp import (
+            fit_psf_beam,
+        )
+
+        ellipse_params = fit_psf_beam(
+            img_xds[psf_name].values,
+            delta,
+            psfcutoff=cutoff,
+            processing_function_threads=processing_function_threads,
+        )
+    elif fitting_method == "astroviper":
+        ellipse_params = psf_gaussian_fit_core(
+            img_xds[psf_name].values,
+            blc,
+            trc,
+            sampling,
+            cutoff,
+            delta,
+            interpolation_method,
+            processing_function_threads=processing_function_threads,
+        )
+    else:
+        raise ValueError(
+            f"fitting_method must be 'astroviper' or 'casa', got {fitting_method!r}."
+        )
 
     # Uncomment line below to change beam_param units to arcsec and deg
     # psf_gaussian_fit_core returns bmaj and bmin in  and pa in deg.
