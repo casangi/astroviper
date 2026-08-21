@@ -99,9 +99,15 @@ def calculate_uvw(
     phase_center_ra_dec: np.ndarray,
     auto_correlations: bool = False,
     direction_frame: str = "icrs",
-    uvw_convention: str = "msv4",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Baseline ``uvw`` coordinates (metres) for every time.
+
+    Follows the archival / VLBI convention adopted by MSv4: the ``uvw`` of the
+    baseline ``(antenna1, antenna2)`` is the difference of the per-antenna
+    projections ``P(antenna1) - P(antenna2)``, which is what observatory-written
+    measurement sets (ALMA/VLA via CASA), VLBI correlators (CALC/DiFX) and AIPS
+    contain.  The visibility phase sign pairs with this choice in
+    :func:`~astroviper.processing_functions.simulation.calculate_visibilities`.
 
     Parameters
     ----------
@@ -116,17 +122,20 @@ def calculate_uvw(
         Include autocorrelation baselines.
     direction_frame : str
         Astropy frame of ``phase_center_ra_dec``.
-    uvw_convention : {"msv4", "sirius"}
-        ``"msv4"``: baseline vector is ``antenna2 - antenna1`` (MSv4 / casacore
-        convention, the default); ``"sirius"``: ``antenna1 - antenna2`` (legacy
-        SIRIUS).  The visibility phase sign follows the same choice in
-        :func:`~astroviper.processing_functions.simulation.calculate_visibilities`.
 
     Returns
     -------
     uvw : np.ndarray, [n_time, n_baseline, 3], metres
     antenna1, antenna2 : np.ndarray, [n_baseline] int
         Antenna indices of each baseline (``antenna1 <= antenna2``).
+
+    Notes
+    -----
+    The historical MSv2 definition text describes the opposite direction
+    (``POSITION2 - POSITION1``); decades of practice -- and therefore archives
+    and everything converted from them -- realise ``POSITION1 - POSITION2``
+    (see ``experiments/uvw_convention_investigation``).  AstroVIPER and the
+    MSv4 schema align with practice.
     """
     antenna1, antenna2 = baseline_antenna_pairs(
         np.shape(antenna_position)[0], auto_correlations
@@ -134,12 +143,5 @@ def calculate_uvw(
     antenna_uvw = calculate_antenna_uvw(
         antenna_position, site_position, time, phase_center_ra_dec, direction_frame
     )
-    if uvw_convention == "msv4":
-        uvw = antenna_uvw[:, antenna2, :] - antenna_uvw[:, antenna1, :]
-    elif uvw_convention == "sirius":
-        uvw = antenna_uvw[:, antenna1, :] - antenna_uvw[:, antenna2, :]
-    else:
-        raise ValueError(
-            f"uvw_convention must be 'msv4' or 'sirius', got {uvw_convention!r}."
-        )
+    uvw = antenna_uvw[:, antenna1, :] - antenna_uvw[:, antenna2, :]
     return np.ascontiguousarray(uvw), antenna1, antenna2

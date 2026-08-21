@@ -41,13 +41,13 @@ except ImportError:  # pragma: no cover
     pass
 
 
-def run_legacy_scenario(name, implementation="numpy", uvw_convention="sirius"):
+def run_legacy_scenario(name, implementation="numpy"):
     f = load_legacy(name)
     models, pa = evaluate_beam_models(
         f["beam_models"], f["time"], f["frequency"], f["phase_center_ra_dec"], f["site_position"],
         f["beam_params"], direction_frame="fk5",
     )  # fmt: skip
-    uvw = f["uvw"] if uvw_convention == "sirius" else -f["uvw"]
+    uvw = f["uvw"]  # legacy fixtures already use the archival (ant1 - ant2) convention
     vis = calculate_visibilities(
         uvw,
         f["antenna1"],
@@ -75,9 +75,6 @@ def run_legacy_scenario(name, implementation="numpy", uvw_convention="sirius"):
 def test_visibilities_match_legacy_exactly(name, implementation):
     vis, f = run_legacy_scenario(name, implementation)
     np.testing.assert_allclose(vis, f["visibility"], atol=1e-12)
-    # MSv4 uvw convention: conjugate visibilities
-    vis_msv4, _ = run_legacy_scenario(name, implementation, uvw_convention="msv4")
-    np.testing.assert_allclose(vis_msv4, np.conj(f["visibility"]), atol=1e-12)
 
 
 @pytest.mark.parametrize("implementation", IMPLEMENTATIONS)
@@ -275,7 +272,6 @@ def test_simulate_processing_set_processing_function_end_to_end():
         f["phase_center_ra_dec"],
         [airy_disk_model("aca"), airy_disk_model("alma")],
         f["beam_model_map"],
-        uvw_params={"uvw_convention": "sirius"},
         noise_params={"t_receiver": 50.0, "random_seed": 1},
         channel_width=0.5e9,
         integration_time=2000.0,
@@ -297,7 +293,6 @@ def test_simulate_processing_set_processing_function_end_to_end():
         f["time"], f["frequency"], [9, 12], f["antenna_position"], f["site_position"],
         f["point_source_flux"], f["point_source_ra_dec"], f["phase_center_ra_dec"],
         [airy_disk_model("aca"), airy_disk_model("alma")], f["beam_model_map"],
-        uvw_params={"uvw_convention": "sirius"},
     )  # fmt: skip
     np.testing.assert_allclose(xds0.VISIBILITY.values, f["visibility"], atol=1e-12)
     np.testing.assert_array_equal(xds0.WEIGHT.values, 1.0)
@@ -309,7 +304,6 @@ def test_simulate_processing_set_processing_function_end_to_end():
         unix, f["frequency"], ["XX", "YY"], f["antenna_position"], f["site_position"],
         f["point_source_flux"], f["point_source_ra_dec"], f["phase_center_ra_dec"],
         [airy_disk_model("aca"), airy_disk_model("alma")], f["beam_model_map"],
-        uvw_params={"uvw_convention": "sirius"},
     )  # fmt: skip
     np.testing.assert_allclose(xds1.VISIBILITY.values, f["visibility"], atol=1e-8)
 

@@ -108,8 +108,10 @@ def simulate_processing_set(
     pointing_ra_dec : np.ndarray, [n_time | 1, n_antenna | 1, 2], radians, optional
         Antenna pointing directions; ``None`` points every antenna at the phase centre.
     uvw_params : dict, optional
-        ``auto_correlations`` (bool, default False) and ``uvw_convention``
-        (``"msv4"`` = antenna2 - antenna1, default; or ``"sirius"``).
+        ``auto_correlations`` (bool, default False).  The uvw follow the
+        archival / VLBI convention adopted by MSv4:
+        ``uvw = P(antenna1) - P(antenna2)`` (see
+        :func:`~astroviper.processing_functions.simulation.calculate_uvw.calculate_uvw`).
     noise_params : dict, optional
         Thermal-noise system parameters (``casatools.simulator.setnoise`` tsys-manual
         model): ``t_receiver``, ``t_atmos``, ``tau``, ``ant_efficiency``,
@@ -138,7 +140,7 @@ def simulate_processing_set(
         polarization]`` (complex128), ``UVW[time, baseline_id, uvw_label]`` (m),
         ``WEIGHT`` and ``FLAG`` (all False), coordinates ``time``, ``frequency``,
         ``polarization``, ``baseline_id``, ``baseline_antenna1_id``/``2_id`` and
-        ``parallactic_angle``; attrs ``uvw_convention``.
+        ``parallactic_angle``.
     timing : dict
         ``T_uvw``, ``T_beams``, ``T_visibilities``, ``T_noise`` in seconds.
     """
@@ -152,7 +154,6 @@ def simulate_processing_set(
     params = resolve_beam_params(beam_params)
     uvw_params = {
         "auto_correlations": False,
-        "uvw_convention": "msv4",
         **(uvw_params or {}),
     }
     noise = resolve_noise_params(noise_params)
@@ -166,7 +167,6 @@ def simulate_processing_set(
         phase_center_ra_dec,
         auto_correlations=uvw_params["auto_correlations"],
         direction_frame=direction_frame,
-        uvw_convention=uvw_params["uvw_convention"],
     )
     timing["T_uvw"] = _time.time() - start
 
@@ -270,7 +270,6 @@ def simulate_processing_set(
             "uvw_label": ["u", "v", "w"],
             "parallactic_angle": ("time", parallactic_angle),
         },
-        attrs={"uvw_convention": uvw_params["uvw_convention"]},
     )
     xds["VISIBILITY"].attrs.update({"type": "quantity", "units": "Jy"})
     xds["UVW"].attrs.update({"type": "uvw", "units": "m", "frame": direction_frame})

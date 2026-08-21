@@ -189,7 +189,10 @@ simulation antenna beams. The PSF beam fit is switchable
 `StokesImageUtil::FitGaussianPSF` (CAS-13022,
 `processing_functions/image_analysis/psf_gaussian_fit_cpp/`) that reproduces
 `tclean`'s restoring beam exactly on the same PSF.
-Conventions: `uvw = antenna2 - antenna1` (MSv4); beam-image datasets are
+Conventions: `uvw = P(antenna1) - P(antenna2)` (the archival / VLBI /
+CASA-practice convention adopted by MSv4 -- note the historical MSv2 text says
+the opposite; see `experiments/uvw_convention_investigation`); beam-image
+datasets are
 `JONES[parallactic_angle, frequency, polarization, l, m]`; polarizations are MSv4
 strings (`"RR"`, `"XX"`, ...). Data shipped in `src/astroviper/data/simulation/`.
 Legacy SIRIUS reference fixtures live in

@@ -60,8 +60,10 @@ SIMULATION_PARAM_DOCS = {
         "Antenna pointing directions; ``None`` points every antenna at the phase centre."
     ),
     "uvw_params": (
-        "``auto_correlations`` (bool, default False) and ``uvw_convention``\n"
-        '(``"msv4"`` = antenna2 - antenna1, default; or ``"sirius"``).'
+        "``auto_correlations`` (bool, default False).  The uvw follow the\n"
+        "archival / VLBI convention adopted by MSv4:\n"
+        "``uvw = P(antenna1) - P(antenna2)`` (see\n"
+        ":func:`~astroviper.processing_functions.simulation.calculate_uvw.calculate_uvw`)."
     ),
     "noise_params": (
         "Thermal-noise system parameters (``casatools.simulator.setnoise`` tsys-manual\n"

@@ -156,8 +156,10 @@ def simulate_processing_set(
     pointing_ra_dec : np.ndarray, [n_time | 1, n_antenna | 1, 2], radians, optional
         Antenna pointing directions; ``None`` points every antenna at the phase centre.
     uvw_params : dict, optional
-        ``auto_correlations`` (bool, default False) and ``uvw_convention``
-        (``"msv4"`` = antenna2 - antenna1, default; or ``"sirius"``).
+        ``auto_correlations`` (bool, default False).  The uvw follow the
+        archival / VLBI convention adopted by MSv4:
+        ``uvw = P(antenna1) - P(antenna2)`` (see
+        :func:`~astroviper.processing_functions.simulation.calculate_uvw.calculate_uvw`).
     noise_params : dict, optional
         Thermal-noise system parameters (``casatools.simulator.setnoise`` tsys-manual
         model): ``t_receiver``, ``t_atmos``, ``tau``, ``ant_efficiency``,
@@ -257,7 +259,6 @@ def simulate_processing_set(
         pointing_ra_dec = np.asarray(pointing_ra_dec, dtype=np.float64)
     uvw_params = {
         "auto_correlations": False,
-        "uvw_convention": "msv4",
         **(uvw_params or {}),
     }
     beam_params = resolve_beam_params(beam_params)

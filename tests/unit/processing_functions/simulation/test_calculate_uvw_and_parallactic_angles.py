@@ -24,16 +24,19 @@ def test_uvw_matches_legacy(name):
         f["site_position"],
         f["time"],
         f["phase_center_ra_dec"],
-        uvw_convention="sirius",
     )
     np.testing.assert_array_equal(a1, f["antenna1"])
     np.testing.assert_array_equal(a2, f["antenna2"])
+    # Legacy SIRIUS used the archival / VLBI convention adopted by MSv4
+    # (uvw = P(antenna1) - P(antenna2)), so the fixtures match directly.
     np.testing.assert_allclose(uvw, f["uvw"], atol=1e-9)
-    # MSv4 convention is the negative (antenna2 - antenna1)
-    uvw_msv4, _, _ = calculate_uvw(
+    # Pin the convention explicitly against the per-antenna projections.
+    antenna_uvw = calculate_antenna_uvw(
         f["antenna_position"], f["site_position"], f["time"], f["phase_center_ra_dec"]
     )
-    np.testing.assert_allclose(uvw_msv4, -f["uvw"], atol=1e-9)
+    np.testing.assert_allclose(
+        uvw, antenna_uvw[:, a1, :] - antenna_uvw[:, a2, :], atol=1e-12
+    )
 
 
 def test_uvw_accepts_unix_times_and_auto_correlations():
@@ -55,14 +58,6 @@ def test_uvw_accepts_unix_times_and_auto_correlations():
     auto = a1 == a2
     np.testing.assert_allclose(uvw_unix[:, auto], 0.0, atol=1e-9)
     np.testing.assert_allclose(uvw_unix[:, ~auto], uvw_str, atol=1e-6)
-    with pytest.raises(ValueError):
-        calculate_uvw(
-            f["antenna_position"],
-            f["site_position"],
-            unix,
-            f["phase_center_ra_dec"],
-            uvw_convention="x",
-        )
 
 
 def test_antenna_uvw_w_points_to_phase_center():
@@ -82,7 +77,7 @@ def test_antenna_uvw_w_points_to_phase_center():
         f["time"][:1],
         f["phase_center_ra_dec"],
     )
-    np.testing.assert_allclose(ant_uvw[0, a2] - ant_uvw[0, a1], uvw[0], atol=1e-9)
+    np.testing.assert_allclose(ant_uvw[0, a1] - ant_uvw[0, a2], uvw[0], atol=1e-9)
 
 
 def test_parallactic_angles_match_legacy():

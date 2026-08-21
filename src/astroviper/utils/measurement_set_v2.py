@@ -8,11 +8,11 @@ the complete casacore Measurement Set skeleton -- the MAIN table plus every
 required subtable -- and the columns are then filled from the MSv4 datasets.
 
 Conventions follow what CASA's own simulator writes (verified against an
-``sm``-produced MS): MSv2 ``UVW`` carries the opposite sign of the MSv4
-``antenna2 - antenna1`` convention and ``DATA`` is conjugated accordingly (the
-same sky either way), ``TIME``/``TIME_CENTROID`` are integration midpoints in
-MJD UTC seconds, ``FLAG_CATEGORY`` cells are left undefined, and the ``STATE``
-and ``PROCESSOR`` subtables get one default row each.
+``sm``-produced MS): the MSv4 ``UVW`` and ``VISIBILITY`` follow the archival /
+VLBI convention (``uvw = P(antenna1) - P(antenna2)`` with the matching phase
+sign) and are copied verbatim, ``TIME``/``TIME_CENTROID`` are integration
+midpoints in MJD UTC seconds, ``FLAG_CATEGORY`` cells are left undefined, and
+the ``STATE`` and ``PROCESSOR`` subtables get one default row each.
 """
 
 from __future__ import annotations
@@ -143,11 +143,10 @@ def write_measurement_set_v2(ps_store, ms_path, ms_name=None, overwrite=False):
     )
 
     # ---------------- MAIN ----------------
-    # The MSv2 UVW sign convention is the opposite of MSv4's
-    # ``antenna2 - antenna1`` (what CASA's simulator writes); flipping uvw and
-    # conjugating the visibilities describes the identical sky.
-    uvw = -np.asarray(ms_xds.UVW.values, dtype=np.float64)
-    visibility = np.conj(np.asarray(ms_xds.VISIBILITY.values, dtype=np.complex64))
+    # MSv4 and MSv2 share the archival uvw/phase convention (see
+    # utils/measurement_set_tools and calculate_uvw): copy verbatim.
+    uvw = np.asarray(ms_xds.UVW.values, dtype=np.float64)
+    visibility = np.asarray(ms_xds.VISIBILITY.values, dtype=np.complex64)
     weight = np.asarray(ms_xds.WEIGHT.values, dtype=np.float32)
     flag = np.asarray(ms_xds.FLAG.values, dtype=bool)
 
