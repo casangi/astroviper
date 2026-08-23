@@ -21,6 +21,8 @@
         "n_mapping_parallelism": { "type": ["dict"], "nullable": true },
         "thread_info": { "type": ["dict"], "nullable": true },
         "compressor": { "nullable": true },
-        "overwrite": { "type": "boolean" }
+        "overwrite": { "type": "boolean" },
+        "memory_budget_gb": { "type": ["float", "int"], "min": 0 },
+        "monitor_resources_seconds": { "type": ["float", "int"], "nullable": true, "min": 0 }
     }
 }

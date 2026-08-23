@@ -52,6 +52,31 @@ class TestMomentsFullStack:
             group = result.attrs["data_groups"]["moment_" + name]
             assert group["sky"] == "SKY_MOMENT_" + name.upper()
 
+    def test_resource_monitoring_series_in_timing_frame(self, input_image, tmp_path):
+        """monitor_resources_seconds folds graphviper's per-task CPU / memory
+        series into the timing frame as list-valued columns (imaging layout)."""
+        pytest.importorskip("psutil")
+        path, img_xds = input_image
+        out = str(tmp_path / "moments_monitored.img.zarr")
+        timing = moments(
+            input_image_store=path,
+            moments_image_store=out,
+            moments=["maximum"],
+            moment_axis="frequency",
+            n_mapping_parallelism={"m": 2},
+            monitor_resources_seconds=0.01,
+        )
+        assert len(timing) == 2
+        for column in ("time_seconds", "cpu_percent", "memory_rss_bytes"):
+            assert column in timing.columns, column
+            assert all(isinstance(v, list) for v in timing[column])
+        assert (timing["sample_interval_seconds"] == 0.01).all()
+        assert "start_unixtime" in timing.columns
+        reference = reference_moments(
+            img_xds.SKY.values, axis=1, coord_values=img_xds.frequency.values
+        )
+        assert_moments_match(load_image(out), reference, axis=1)
+
     def test_m_moment_parallel_over_frequency(self, input_image, tmp_path):
         path, img_xds = input_image
         out = str(tmp_path / "moments_m.img.zarr")

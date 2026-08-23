@@ -140,7 +140,7 @@ def image_cube_single_field(
 ):
     """Image one frequency chunk of a single-field cube and write it to disk.
 
-    Thin node task: pins the malloc mmap threshold, builds the empty per-chunk
+    Thin node task: builds the empty per-chunk
     image in the correlation (instrument) polarization basis, loads (or receives)
     this chunk's visibilities, runs the science
     :func:`~astroviper.processing_functions.imaging.image_cube_single_field.image_cube_single_field`,

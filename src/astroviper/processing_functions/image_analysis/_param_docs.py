@@ -86,4 +86,14 @@ IMAGE_ANALYSIS_PARAM_DOCS = {
         "select along the parallel axis (chunking happens on the selected\n"
         "image)."
     ),
+    "memory_budget_gb": (
+        "Target size (GiB) of one decoded read block of a node task's chunk\n"
+        "along the moment axis (see\n"
+        ":func:`~astroviper.node_tasks.image_analysis.moments.moment_axis_read_block`):\n"
+        "a block spans a whole number of on-disk chunk lengths along the\n"
+        "moment axis and is capped at this size, so a task's peak memory is\n"
+        "roughly the output maps + this block + the zarr decode transient.\n"
+        "Also enters the distributed application's per-chunk memory estimate.\n"
+        "Ignored by the ``median`` slab path."
+    ),
 }

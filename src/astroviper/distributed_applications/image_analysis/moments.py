@@ -15,12 +15,56 @@ set of moment maps.  It follows the same approach as
    slice of every moment map in parallel via
    :func:`astroviper.utils.io.write_result_chunk_to_disk_using_zarr`.
 
-The moment axis itself can never be parallelized (every moment needs the full
-axis), so the graph is chunked along another axis: ``frequency`` by default,
-or ``m`` when the moment axis *is* ``frequency``.  The number of chunks is
-derived from a per-chunk memory estimate that accounts for the streaming
-science function's memory model (see
-:mod:`astroviper.processing_functions.image_analysis.moments`).
+The moment axis itself is never parallelized here (every moment needs the
+full axis), so the graph is chunked along another axis: ``frequency`` by
+default, or ``m`` when the moment axis *is* ``frequency``.
+
+Memory / I-O strategy
+---------------------
+The cost of a moments run is set by two things the workflow must respect for
+*any* on-disk layout: how much memory a task may use and how the store is
+chunked (a partial read of an on-disk chunk decodes the whole chunk).
+
+1. **Stream, never slab.** Every moment except ``median`` is computed by
+   streaming the moment axis through output-map-sized accumulators
+   (:class:`~astroviper.processing_functions.image_analysis.moments.MomentsAccumulator`).
+   The node task reads *blocks* of planes straight from the store
+   (:func:`~astroviper.node_tasks.image_analysis.moments.moment_axis_read_block`):
+   a block spans a whole number of on-disk chunk lengths along the moment
+   axis (so no chunk is decoded twice) and is capped at ``memory_budget_gb``.
+   Per-task memory is therefore ``O(output maps) + block + decode transient``
+   and does **not** grow with the length of the moment axis. Only ``median``
+   (which needs each pixel's whole profile) falls back to holding the chunk
+   slab, and only then does the moment-axis length enter the chunk count.
+2. **Size chunks from that model, not from the slab.** The chunk count along
+   the parallel axis is derived from the per-chunk estimate
+   ``accumulators(map cells) + memory_budget_gb + decode transient`` for
+   streamed moments (or the slab + median copies otherwise) and the
+   available threads / memory (:func:`calculate_data_chunking`). With
+   streaming, memory almost never constrains the chunk count, which frees
+   the choice for I/O efficiency (next point).
+3. **Align parallel chunks with on-disk chunks.** A task whose slice covers
+   a fraction ``f`` of an on-disk chunk along the parallel axis still decodes
+   the whole chunk, so total decode work is ``1/f`` x the store. Choose
+   ``n_mapping_parallelism`` such that each parallel chunk is a whole number
+   of on-disk chunks (``n_chunks = size / (k * chunk_len)``) whenever the
+   task count allows; when it does not (few on-disk chunks along the
+   parallel axis, many workers), the remaining amplification is
+   ``chunk_len / slice_width`` and it is cheaper to add parallelism along the
+   *moment* axis instead (point 4) than to split on-disk chunks further.
+4. **Associative moments can also be split along the moment axis.** For
+   single-pass moments (``moments_memory_model(...)["mergeable"]``) partial
+   accumulators over disjoint moment-axis segments merge exactly
+   (:meth:`MomentsAccumulator.merge`), so a map over (parallel-axis chunk x
+   moment-axis segment -- ideally shard-aligned) plus a reduce reads every
+   byte once with as many tasks as wanted. This driver does not build that
+   graph yet; the accumulator API is the building block for it.
+5. **Bound the decode transient explicitly.** Zarr decodes up to
+   ``zarr.config["async.concurrency"]`` chunks at once; with large on-disk
+   chunks this transient (compressed + decoded bytes per in-flight chunk)
+   rather than the block can dominate, so set the concurrency from the chunk
+   size and the budget (the Frontera script does this via
+   ``ZARR_ASYNC__CONCURRENCY``).
 """
 
 import os
@@ -45,6 +89,7 @@ from astroviper.processing_functions.image_analysis.moments import (
     moment_axis_units,
     moment_data_variable_key,
     moment_units,
+    moments_memory_model,
     normalize_moments,
     normalize_pixel_range,
     resolve_moments_input_variables,
@@ -95,10 +140,26 @@ def _open_input_image(input_image_store, selection):
 
 
 def _collect_dataframes(results, frames):
-    """Recursively collect the node tasks' timing DataFrames from the compute result."""
+    """Recursively collect the node tasks' timing frames from the compute result.
+
+    Each node task returns ``{"timing_node_tasks": DataFrame}``; when the graph
+    was built with ``monitor_resources_seconds`` graphviper adds a
+    ``"resource_usage"`` dict-of-series which is folded into that task's
+    one-row frame as list-valued columns (``time_seconds``, ``cpu_percent``,
+    ``memory_rss_bytes``, ...) plus scalars (``sample_interval_seconds``,
+    page-fault counts) -- the same layout as the imaging driver.
+    """
     import pandas as pd
 
-    if isinstance(results, pd.DataFrame):
+    if isinstance(results, dict) and "timing_node_tasks" in results:
+        timing = results["timing_node_tasks"]
+        usage = results.get("resource_usage")
+        if usage is not None:
+            timing = timing.copy()
+            for key, value in usage.items():
+                timing[key] = [value] if isinstance(value, list) else value
+        frames.append(timing)
+    elif isinstance(results, pd.DataFrame):
         frames.append(results)
     elif isinstance(results, list | tuple):
         for item in results:
@@ -121,6 +182,8 @@ def moments(
     thread_info: dict | None = None,
     compressor=None,
     overwrite: bool = False,
+    memory_budget_gb: float = 1.0,
+    monitor_resources_seconds: float | None = None,
 ):
     """Collapse an on-disk image along one axis into moment maps (CASA ``immoments``).
 
@@ -217,12 +280,33 @@ def moments(
     overwrite : bool, default False
         If ``True`` an existing ``moments_image_store`` is overwritten;
         otherwise its presence raises ``RuntimeError``.
+    memory_budget_gb : float, default 1.0
+        Target size (GiB) of one decoded read block of a node task's chunk
+        along the moment axis (see
+        :func:`~astroviper.node_tasks.image_analysis.moments.moment_axis_read_block`):
+        a block spans a whole number of on-disk chunk lengths along the
+        moment axis and is capped at this size, so a task's peak memory is
+        roughly the output maps + this block + the zarr decode transient.
+        Also enters the distributed application's per-chunk memory estimate.
+        Ignored by the ``median`` slab path.
+
+    monitor_resources_seconds : float, optional
+        If set, sample each node task's worker-process CPU / memory / I/O
+        usage every this many seconds (graphviper's
+        :func:`~graphviper.graph_tools.map.monitor_node_task`) and carry the
+        series into the returned frame as list-valued columns
+        (``time_seconds``, ``cpu_percent``, ``memory_rss_bytes`` and, on
+        Linux, ``read_bytes``/``write_bytes``/``read_chars``/``write_chars``)
+        plus the scalar ``sample_interval_seconds`` and page-fault counts.
+        Requires ``psutil``. ``None`` (default) disables monitoring.
 
     Returns
     -------
     pandas.DataFrame
-        Per-task timing frame (``task_id``, ``T_load``, ``T_moments``,
-        ``T_write``, ``T_moments_task``), one row per graph node.
+        Per-task timing frame (``task_id``, ``streamed``,
+        ``n_read_block_planes``, ``T_load``, ``T_moments``, ``T_write``,
+        ``T_moments_task``, ``start_unixtime``, ``hostname``, worker identity
+        and, when monitored, the resource series), one row per graph node.
 
     Raises
     ------
@@ -329,29 +413,36 @@ def moments(
         )
 
     # --- Determine chunking along the parallel axis ---------------------------
-    # Memory for a parallel-axis-size-1 chunk: the loaded sky slab (full moment
-    # axis), the optional mask, plus the science function's extra copies (one
-    # working copy + numpy's internal partition copy when a median-family
-    # moment filters pixels; see the processing-function module docstring).
-    # The streaming accumulators are map-sized and covered by the fudge factor.
+    # Memory for a parallel-axis-size-1 chunk (see the module docstring):
+    # * streamed moments (everything but median): output-map-sized
+    #   accumulators only -- up to ~10 float64/int64 maps (count, sums, running
+    #   extrema + indices, pass-2 state) plus the output maps, i.e. ~100 B per
+    #   map cell; the read block (memory_budget_gb) and the zarr decode
+    #   transient (taken as another budget's worth) are chunk-size independent
+    #   and enter as constant_memory.
+    # * median: the loaded sky slab (full moment axis), the optional mask, plus
+    #   the science function's extra copies (one working copy + numpy's
+    #   internal partition copy when pixels are filtered).
     start = time.time()
     itemsize = sky.dtype.itemsize
     singleton_chunk_sizes = dict(sky.sizes)
     del singleton_chunk_sizes[parallel_axis]
-    n_copies = 1.0
-    if mask_name is not None:
-        n_copies += 1.0 / itemsize
-    if "median" in moment_names:
+    singleton_cells = float(np.prod(np.array(list(singleton_chunk_sizes.values()))))
+    fudge_factor = 1.3
+    if moments_memory_model(moment_names)["requires_full_profile"]:
+        n_copies = 1.0
+        if mask_name is not None:
+            n_copies += 1.0 / itemsize
         filtering = include_range is not None or exclude_range is not None or use_mask
         n_copies += 2.0 if filtering else 1.0
-    fudge_factor = 1.3
-    memory_singleton_chunk = (
-        n_copies
-        * float(np.prod(np.array(list(singleton_chunk_sizes.values()))))
-        * itemsize
-        * fudge_factor
-        / (1024**3)
-    )
+        memory_singleton_chunk = (
+            n_copies * singleton_cells * itemsize * fudge_factor / (1024**3)
+        )
+        constant_memory = 0.0
+    else:
+        map_cells = singleton_cells / sky.sizes[moment_axis]
+        memory_singleton_chunk = map_cells * 100.0 * fudge_factor / (1024**3)
+        constant_memory = 2.0 * memory_budget_gb
     if thread_info is None:
         thread_info = get_thread_info()
     logger.debug("Thread info " + str(thread_info))
@@ -360,7 +451,7 @@ def moments(
             memory_singleton_chunk,
             {parallel_axis: sky.sizes[parallel_axis]},
             thread_info,
-            constant_memory=0,
+            constant_memory=constant_memory,
             # Moment tasks are light (one streaming reduction per chunk), so
             # per-task overhead matters: one task per thread balances the graph
             # without drowning small cubes in scheduling/IO overhead.
@@ -457,6 +548,7 @@ def moments(
         "use_mask": use_mask,
         "selection": selection,
         "moments_data_variables": moments_data_variables,
+        "memory_budget_gb": memory_budget_gb,
     }
 
     start = time.time()
@@ -466,6 +558,7 @@ def moments(
         node_task=_moments_node_task,
         input_params=input_params,
         in_memory_compute=False,
+        monitor_resources_seconds=monitor_resources_seconds,
     )
     dask_graph = generate_dask_workflow(viper_graph)
     logger.debug("Time to create moments graph " + str(time.time() - start) + "s")

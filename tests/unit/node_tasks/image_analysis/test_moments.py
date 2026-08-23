@@ -201,7 +201,144 @@ def test_returns_timing_frame(input_image, tmp_path):
         task_id=17,
         graph_mode=True,
     )
+    # Single-dict convention so graphviper's resource monitor can attach to it.
+    assert set(frame) == {"timing_node_tasks"}
+    frame = frame["timing_node_tasks"]
     assert isinstance(frame, pd.DataFrame)
     assert frame.loc[0, "task_id"] == 17
     for key in ("T_load", "T_moments", "T_write", "T_moments_task"):
         assert frame.loc[0, key] >= 0
+
+
+# ---------------------------------------------------------------------------
+# Streaming read path (memory strategy)
+# ---------------------------------------------------------------------------
+def test_read_block_follows_chunk_geometry_and_budget(tmp_path):
+    """Blocks span whole on-disk chunk lengths along the moment axis and are
+    capped by the memory budget (falling back to partial chunks only when a
+    single chunk length does not fit)."""
+    import importlib
+
+    node = importlib.import_module("astroviper.node_tasks.image_analysis.moments")
+    _open_image_lazy = node._open_image_lazy
+    moment_axis_read_block = node.moment_axis_read_block
+
+    img_xds = make_test_image_xds(n_frequency=12, n_l=16, n_m=16)
+    path = str(tmp_path / "chunked.img.zarr")
+    img_xds.to_zarr(
+        path,
+        mode="w",
+        zarr_format=3,
+        encoding={
+            "SKY": {"chunks": (1, 4, 2, 8, 8)},
+            "MASK": {"chunks": (1, 4, 2, 8, 8)},
+        },
+    )
+    lazy = _open_image_lazy(path)["SKY"]
+    block_des = {"m": slice(0, 8)}
+    plane_bytes = 2 * 16 * 8 * 4  # pol x l x m-slice x float32
+    gib = 1024**3
+    # Budget for 9 planes -> 2 chunk lengths (8 planes), not 9.
+    assert (
+        moment_axis_read_block(lazy, block_des, "frequency", 9 * plane_bytes / gib) == 8
+    )
+    # Ample budget -> all 12 planes (3 chunk lengths).
+    assert moment_axis_read_block(lazy, block_des, "frequency", 1.0) == 12
+    # Budget below one chunk length -> whole planes that fit (2), never 0.
+    assert (
+        moment_axis_read_block(lazy, block_des, "frequency", 2.5 * plane_bytes / gib)
+        == 2
+    )
+    assert moment_axis_read_block(lazy, block_des, "frequency", 0.0) == 1
+    # A non-chunked axis (polarization chunk = full axis) is read in one block.
+    assert moment_axis_read_block(lazy, {}, "polarization", 1.0) == 2
+
+
+def test_streaming_path_never_holds_the_chunk_slab(input_image, monkeypatch):
+    """For streamable moments the node task must read block-by-block and
+    never call the slab loader; median must use the slab loader."""
+    import importlib
+
+    node = importlib.import_module("astroviper.node_tasks.image_analysis.moments")
+
+    path, img_xds = input_image
+    calls = {"slab": 0}
+    original = node._load_chunk_streaming
+
+    def counting_loader(*args, **kwargs):
+        calls["slab"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(node, "_load_chunk_streaming", counting_loader)
+    common = dict(
+        input_image_store=path,
+        moments_image_store="unused",
+        moment_axis="frequency",
+        data_selection={"img": {"m": slice(2, 7)}},
+        graph_mode=False,
+        use_mask=True,
+    )
+    streamed = moments_node_task(
+        moments=["maximum", "abs_mean_dev", "integrated"],
+        memory_budget_gb=2 * 2 * 18 * 5 * 4 / 1024**3,  # two planes per block
+        **common,
+    )
+    assert calls["slab"] == 0
+    expected = moments_processing_function(
+        img_xds.isel(m=slice(2, 7)),
+        moments=["maximum", "abs_mean_dev", "integrated"],
+        moment_axis="frequency",
+        use_mask=True,
+    )
+    for name in ("maximum", "abs_mean_dev", "integrated"):
+        variable = "SKY_MOMENT_" + name.upper()
+        np.testing.assert_allclose(
+            streamed[variable].values,
+            expected[variable].values,
+            rtol=1e-6,
+            equal_nan=True,
+            err_msg=name,
+        )
+
+    moments_node_task(moments=["median"], **common)
+    assert calls["slab"] == 1
+
+
+def test_timing_frame_records_strategy(input_image, tmp_path):
+    path, img_xds = input_image
+    store = tmp_path / "out.img.zarr"
+    moment_names = ["maximum"]
+    keys = [moment_data_variable_key(n) for n in moment_names]
+    out = moments_processing_function(img_xds, moments=moment_names)
+    for v in out.variables:
+        out[v].encoding = {}
+    out.to_zarr(store, mode="w")
+    from graphviper.graph_tools.coordinate_utils import make_parallel_coord
+
+    from astroviper.utils.io import create_empty_data_variables_on_disk
+
+    parallel_coords = {"m": make_parallel_coord(coord=img_xds["m"], n_chunks=2)}
+    create_empty_data_variables_on_disk(
+        str(store),
+        keys,
+        shape_dict=dict(out.sizes),
+        parallel_coords=parallel_coords,
+        compressor=Blosc(cname="lz4", clevel=5),
+        double_precision=False,
+        data_variable_definitions=get_moments_data_variable_definitions(
+            moment_names, list(img_xds["SKY"].dims), True
+        ),
+    )
+    chunk = parallel_coords["m"]["data_chunks"][0]
+    df = moments_node_task(
+        input_image_store=path,
+        moments_image_store=str(store),
+        moments=moment_names,
+        moment_axis="frequency",
+        task_coords={"m": {"data": chunk, "slice": slice(0, len(chunk))}},
+        data_selection={"img": {"m": slice(0, len(chunk))}},
+        task_id=3,
+    )["timing_node_tasks"]
+    assert bool(df["streamed"].iloc[0]) is True
+    assert df["n_read_block_planes"].iloc[0] >= 1
+    assert {"T_load", "T_moments", "T_write", "T_moments_task"} <= set(df.columns)

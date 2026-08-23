@@ -44,23 +44,91 @@ def _open_image_lazy(input_image_store):
     return open_image(input_image_store)
 
 
-def _load_chunk_streaming(lazy_xds, variables, block_des, stream_axis):
-    """Load this task's chunk, iterating plane-by-plane along ``stream_axis``.
+def moment_axis_read_block(lazy_var, block_des, stream_axis, memory_budget_gb):
+    """Number of ``stream_axis`` planes to read per block, from the on-disk
+    chunk geometry and a memory budget.
 
-    A single bulk ``.load()`` of a chunk that spans the full ``stream_axis``
-    is a memory bomb on Zarr v3 SHARDED stores: the sharding codec
-    materializes (roughly) a whole shard's decompressed inner chunks per
-    in-flight shard, ~70-170x the requested slice in measurements -- ~32 GB
-    per shard for the benchmark images (32-channel shards of ~1 GB
-    full-plane inner chunks). Reading one ``stream_axis`` plane at a time
-    decodes only the touched inner chunk(s), bounding the transient to
-    O(one inner chunk) at the same total I/O.
+    A block is the unit read from the store and streamed through the moments
+    accumulator. Two competing constraints:
 
-    ``stream_axis`` is the moment axis: the one axis every task loads in
-    full. Variables without it are loaded directly. For stores whose on-disk
-    chunks span several ``stream_axis`` planes, per-plane reads re-decode
-    those chunks once per plane (correct, just slower) -- the benchmark
-    images store one plane per inner chunk, where per-plane is optimal.
+    * **Decode efficiency**: a partial read of an on-disk chunk decodes the
+      WHOLE chunk, so reading fewer planes than the chunk spans along
+      ``stream_axis`` re-decodes that chunk once per block -- a block should
+      cover a whole number of chunk lengths along the stream axis.
+    * **Memory**: the decoded block of this task's ``(l, m, ...)`` slice is
+      at most ``memory_budget_gb`` (plus the decode transient of the touched
+      chunks, which is bounded by the chunk size x the zarr read concurrency,
+      not by the block).
+
+    Returns the largest multiple of the chunk length along ``stream_axis``
+    (1 for unchunked / non-zarr stores) whose block fits the budget, and at
+    least 1 plane.
+    """
+    import numpy as np
+
+    chunks = lazy_var.encoding.get("chunks")
+    if chunks is None or len(chunks) != lazy_var.ndim:
+        chunk_len = 1
+    else:
+        chunk_len = max(1, int(chunks[lazy_var.dims.index(stream_axis)]))
+    selected = lazy_var.isel(block_des)
+    plane_bytes = (
+        float(np.prod([selected.sizes[d] for d in selected.dims if d != stream_axis]))
+        * selected.dtype.itemsize
+    )
+    n_planes = selected.sizes[stream_axis]
+    budget_bytes = max(memory_budget_gb, 0.0) * 1024**3
+    planes_in_budget = int(budget_bytes // max(plane_bytes, 1))
+    if planes_in_budget < chunk_len:
+        # The budget cannot even hold one chunk length: fall back to a whole
+        # number of planes (re-decoding the chunk per block; correct but
+        # slower) rather than overrunning the budget.
+        return max(1, min(planes_in_budget, n_planes))
+    return min(n_planes, chunk_len * max(1, planes_in_budget // chunk_len))
+
+
+def _make_plane_reader(lazy_xds, sky_name, mask_name, block_des, stream_axis, n_block):
+    """Build ``read_planes(start, stop)`` over the lazily opened store.
+
+    Each call reads ``[start, min(start + n_block, stop))`` of this task's
+    chunk along ``stream_axis`` (the sky and, if present, the mask) directly
+    from the zarr store into memory and returns them with ``stream_axis``
+    first -- the contract of
+    :func:`astroviper.processing_functions.image_analysis.moments.moments_streamed`.
+    """
+    import numpy as np
+
+    sky = lazy_xds[sky_name].isel(block_des)
+    mask = lazy_xds[mask_name].isel(block_des) if mask_name is not None else None
+    axis = sky.dims.index(stream_axis)
+
+    def read_planes(start, stop):
+        stop = min(stop, start + n_block)
+        sel = {stream_axis: slice(start, stop)}
+        planes = np.moveaxis(sky.isel(sel).values, axis, 0)
+        if mask is None:
+            return planes, None
+        if stream_axis in mask.dims:
+            mask_planes = np.moveaxis(
+                mask.isel(sel).values, mask.dims.index(stream_axis), 0
+            )
+        else:
+            mask_planes = np.broadcast_to(mask.values, planes.shape)
+        return planes, mask_planes
+
+    return read_planes
+
+
+def _load_chunk_streaming(lazy_xds, variables, block_des, stream_axis, n_block=1):
+    """Load this task's whole chunk into memory, reading ``n_block`` planes
+    of ``stream_axis`` at a time (the ``median`` path).
+
+    ``median`` needs every pixel's full profile at once, so the full chunk
+    slab (all ``stream_axis`` planes of this task's slice) must be held in
+    memory; the distributed application sizes the chunks for that. Reading
+    it in blocks (rather than one bulk ``.load()``) bounds the decode
+    transient to the chunks touched by one block instead of letting the
+    zarr sharding codec materialize whole shards.
 
     Returns an in-memory ``xarray.Dataset`` equivalent to
     ``lazy_xds[variables].isel(block_des).load()``.
@@ -78,9 +146,10 @@ def _load_chunk_streaming(lazy_xds, variables, block_des, stream_axis):
         axis = var.dims.index(stream_axis)
         out = np.empty(var.shape, dtype=var.dtype)
         index = [slice(None)] * var.ndim
-        for i in range(var.sizes[stream_axis]):
-            index[axis] = i
-            out[tuple(index)] = var.isel({stream_axis: i}).values
+        n = var.sizes[stream_axis]
+        for start in range(0, n, n_block):
+            index[axis] = slice(start, min(start + n_block, n))
+            out[tuple(index)] = var.isel({stream_axis: index[axis]}).values
         loaded[name] = (var.dims, out)
         loaded[name].attrs = dict(var.attrs)
     return loaded
@@ -102,8 +171,19 @@ def moments(
     data_selection=None,
     task_id=None,
     graph_mode: bool = True,
+    memory_budget_gb: float = 1.0,
 ):
     """Compute the moment maps of one image chunk and write them to Zarr.
+
+    Memory strategy: every moment except ``median`` is computed by
+    **streaming** the chunk along the moment axis straight from the store
+    (:func:`~astroviper.processing_functions.image_analysis.moments.moments_streamed`):
+    blocks of planes -- sized by :func:`moment_axis_read_block` to a whole
+    number of on-disk chunk lengths that fit ``memory_budget_gb`` -- are read,
+    folded into output-map-sized accumulators and dropped, so the task's
+    memory is O(output maps) + one block, independent of the length of the
+    moment axis. Only ``median`` (which needs every pixel's full profile)
+    loads the whole chunk slab (:func:`_load_chunk_streaming`).
 
     Parameters
     ----------
@@ -188,20 +268,31 @@ def moments(
         :func:`~astroviper.utils.io.write_result_chunk_to_disk_using_zarr`;
         if ``False`` the chunk dataset is returned instead of written (used
         for standalone testing).
+    memory_budget_gb : float, default 1.0
+        Target size (GiB) of one decoded read block of a node task's chunk
+        along the moment axis (see
+        :func:`~astroviper.node_tasks.image_analysis.moments.moment_axis_read_block`):
+        a block spans a whole number of on-disk chunk lengths along the
+        moment axis and is capped at this size, so a task's peak memory is
+        roughly the output maps + this block + the zarr decode transient.
+        Also enters the distributed application's per-chunk memory estimate.
+        Ignored by the ``median`` slab path.
 
     Returns
     -------
-    pandas.DataFrame or xarray.Dataset
-        One-row timing frame with ``T_load``, ``T_moments``, ``T_write`` and
-        the total ``T_moments_task`` (plus ``task_id``) when
-        ``graph_mode=True``; the per-chunk moments dataset when
-        ``graph_mode=False``.
+    dict or xarray.Dataset
+        ``{"timing_node_tasks": pandas.DataFrame}`` -- a one-row timing frame with ``T_load`` (streaming: time to open the
+        store and plan the read; median: the slab load), ``T_moments``
+        (streaming reads + accumulation), ``T_write`` and the total
+        ``T_moments_task`` (plus ``task_id``, ``n_read_block_planes`` and
+        ``streamed``) when ``graph_mode=True``; the per-chunk moments dataset
+        when ``graph_mode=False``.
     """
     import time
 
     import pandas as pd
     import toolviper.utils.logger as logger
-    from toolviper.utils.memory_management import free_memory, get_rss_gb, memory_setup
+    from toolviper.utils.memory_management import free_memory, get_rss_gb
 
     # Import the science function directly from its module: the module and the
     # function share the name "moments", so the package attribute
@@ -209,6 +300,8 @@ def moments(
     # import order.
     from astroviper.processing_functions.image_analysis.moments import (
         moment_data_variable_key,
+        moments_memory_model,
+        moments_streamed,
         normalize_moments,
     )
     from astroviper.processing_functions.image_analysis.moments import (
@@ -216,9 +309,10 @@ def moments(
     )
 
     task_start = time.time()
-    # Pin the mmap threshold before any large allocation so big buffers are
-    # returned to the OS on free (mirrors the imaging node tasks).
-    memory_setup(131072)
+    # No per-task allocator tuning (mallopt pins the mmap threshold and
+    # disables glibc's dynamic adaptation -- the production policy since the
+    # 2026-08 Frontera drift investigation is a clean allocator environment
+    # set once per worker, not per task).
     logger.debug("Memory at start of moments node task: " + str(get_rss_gb()) + " GB")
 
     if selection is None:
@@ -240,20 +334,54 @@ def moments(
         lazy_xds, image_data_group_in_name, use_mask
     )
     variables = [sky_name] + ([mask_name] if mask_name is not None else [])
-    img_xds = _load_chunk_streaming(lazy_xds, variables, block_des, moment_axis)
-    lazy_xds = None
+    moment_names = normalize_moments(moments)
+    streamed = not moments_memory_model(moment_names)["requires_full_profile"]
+    n_block = moment_axis_read_block(
+        lazy_xds[sky_name], block_des, moment_axis, memory_budget_gb
+    )
+    img_xds = None
+    if not streamed:
+        # 'median' needs the whole profile: load the chunk slab (in blocks).
+        img_xds = _load_chunk_streaming(
+            lazy_xds, variables, block_des, moment_axis, n_block=n_block
+        )
     T_load = time.time() - start
+    logger.debug(
+        f"moments task {task_id}: {'streaming' if streamed else 'slab'} path, "
+        f"{n_block} plane(s) per read block"
+    )
 
     start = time.time()
-    moments_img_xds = moments_processing_function(
-        img_xds,
-        moments=moments,
-        moment_axis=moment_axis,
-        image_data_group_in_name=image_data_group_in_name,
-        include_pixel_range=include_pixel_range,
-        exclude_pixel_range=exclude_pixel_range,
-        use_mask=use_mask,
-    )
+    if streamed:
+        selected = lazy_xds[variables].isel(block_des)
+        read_planes = _make_plane_reader(
+            lazy_xds, sky_name, mask_name, block_des, moment_axis, n_block
+        )
+        moments_img_xds = moments_streamed(
+            read_planes,
+            coords_xds=selected,
+            sky_dims=selected[sky_name].dims,
+            sky_name=sky_name,
+            sky_attrs=dict(selected[sky_name].attrs),
+            attrs=selected.attrs,
+            moments=moment_names,
+            moment_axis=moment_axis,
+            include_pixel_range=include_pixel_range,
+            exclude_pixel_range=exclude_pixel_range,
+        )
+        selected = None
+        read_planes = None
+    else:
+        moments_img_xds = moments_processing_function(
+            img_xds,
+            moments=moment_names,
+            moment_axis=moment_axis,
+            image_data_group_in_name=image_data_group_in_name,
+            include_pixel_range=include_pixel_range,
+            exclude_pixel_range=exclude_pixel_range,
+            use_mask=use_mask,
+        )
+    lazy_xds = None
     T_moments = time.time() - start
 
     if not graph_mode:
@@ -292,10 +420,12 @@ def moments(
         worker_name = str(get_worker().name)
     except Exception:
         worker_name = None
-    return pd.DataFrame(
+    timing_df = pd.DataFrame(
         [
             {
                 "task_id": task_id,
+                "streamed": streamed,
+                "n_read_block_planes": n_block,
                 "start_unixtime": task_start,
                 "T_load": T_load,
                 "T_moments": T_moments,
@@ -308,3 +438,6 @@ def moments(
             }
         ]
     )
+    # Single-dict return convention (as the imaging node task) so graphviper's
+    # optional resource monitor can attach its "resource_usage" series.
+    return {"timing_node_tasks": timing_df}
