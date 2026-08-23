@@ -466,6 +466,48 @@ def _check_deconvolve_dict(
                 ), f"plane {key} {field}: {val} != {exp_val}"
 
 
+def _check_image_statistics(return_dict, img_av_xds, expect_mask):
+    """The gathered per-plane statistics must describe the written cube: full
+    (time, frequency, polarization) extent in global frequency order, and the
+    NaN-ignoring mean / signed peak of every SKY_RESIDUAL plane must match a
+    direct recomputation from the image store (5 chunks -> exercises the
+    frequency concatenation in the reduce)."""
+    stats = return_dict["image_statistics"]
+    assert "sky_residual" in stats
+    residual_stats = stats["sky_residual"]
+    assert residual_stats.sizes == {
+        dim: img_av_xds.sizes[dim] for dim in ("time", "frequency", "polarization")
+    }
+    np.testing.assert_allclose(
+        residual_stats["frequency"].values, img_av_xds["frequency"].values
+    )
+    residual = (
+        img_av_xds["SKY_RESIDUAL"]
+        .transpose("time", "frequency", "polarization", "l", "m")
+        .values.astype(np.float64)
+    )
+    expected_mean = np.nanmean(residual, axis=(-2, -1))
+    np.testing.assert_allclose(
+        residual_stats["mean"].values, expected_mean, rtol=1e-6, atol=1e-12
+    )
+    flat = residual.reshape(residual.shape[:3] + (-1,))
+    peak_index = np.nanargmax(np.abs(flat), axis=-1)
+    expected_peak = np.take_along_axis(flat, peak_index[..., None], axis=-1)[..., 0]
+    np.testing.assert_allclose(
+        residual_stats["peak"].values, expected_peak, rtol=1e-6, atol=1e-12
+    )
+    assert bool(residual_stats.attrs["mask_present"]) is expect_mask
+    if expect_mask:
+        assert np.isfinite(residual_stats["peak_masked"].values).all()
+        assert (
+            residual_stats["n_pixels_masked"].values
+            <= residual_stats["n_pixels"].values
+        ).all()
+    else:
+        assert np.isnan(residual_stats["mean_masked"].values).all()
+    assert "T_image_statistics" in return_dict["timing_node_tasks"].columns
+
+
 def _run_image_cube(
     kind,
     image_store,
@@ -680,6 +722,7 @@ def test_single_field_imaging_niter0(plot_saver, processing_function_threads):
     print("imaging_metadata_pd", return_dict["timing_node_tasks"])
     print("deconvolve_dict (global channel numbering):")
     print_deconvolve_dict(return_dict["deconvolution"])
+    _check_image_statistics(return_dict, img_av_xds, expect_mask=False)
 
     _compare_to_truth(
         img_av_xds,
@@ -964,6 +1007,7 @@ def test_single_field_imaging_niter100(plot_saver, processing_function_threads):
     _check_deconvolve_dict(
         return_dict["deconvolution"], EXPECTED_DECONVOLVE_DICT_NITER100
     )
+    _check_image_statistics(return_dict, img_av_xds, expect_mask=True)
 
     _compare_to_truth(
         img_av_xds,

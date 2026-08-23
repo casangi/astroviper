@@ -307,6 +307,16 @@ def image_cube_single_field(
         * ``"deconvolution"`` is the merged per-plane
           :class:`~astroviper.processing_functions.imaging.utils.return_dict.ReturnDict`
           of convergence statistics (global channel numbering).
+        * ``"image_statistics"`` is ``{image_variable_key: xarray.Dataset}``
+          (``"sky_residual"``, ``"sky_restored"``, ``"sky_model"``, ... --
+          whichever were in memory in the node tasks) of NaN-ignoring
+          per-plane statistics over ``(l, m)``, each dataset with dims
+          ``(time, frequency, polarization)`` covering the whole cube in
+          frequency order and one variable per statistic (``mean``, ``median``,
+          ``max``, ``min``, ``peak``, ``sum``, ``rms``, ``std``, ``mad_sigma``,
+          ``n_pixels`` and their ``_masked`` twins); see
+          :func:`~astroviper.processing_functions.image_analysis.plane_statistics.calculate_plane_statistics`.
+          Computed in every node task right before its chunk is written.
         * ``"timing_distributed_application"`` is a dict of the driver-level
           step timings (``T_*`` seconds: building/writing the empty image,
           building the graph, computing it, consolidating metadata) plus the
@@ -750,29 +760,34 @@ def combine_return_data_frames(input_data, input_params):
     """Reduce per-chunk ``{"timing_node_tasks", "deconvolution"}`` results into one dict.
 
     Each node task returns a single dict with a ``"timing_node_tasks"`` one-row
-    :class:`pandas.DataFrame` and a ``"deconvolution"``
+    :class:`pandas.DataFrame`, a ``"deconvolution"``
     :class:`~astroviper.processing_functions.imaging.utils.return_dict.ReturnDict`
-    (already remapped to global channel numbers) for its channel chunk. This
-    reducer concatenates the timing frames (one row per chunk) and merges the
-    per-chunk deconvolution dicts with :func:`merge_return_dicts`. Because every
-    chunk covers a disjoint global channel range, the merge never collides.
+    (already remapped to global channel numbers) and an ``"image_statistics"``
+    ``{image_variable_key: xarray.Dataset}`` of per-plane statistics for its
+    channel chunk. This reducer concatenates the timing frames (one row per
+    chunk), merges the per-chunk deconvolution dicts with
+    :func:`merge_return_dicts` and concatenates the per-chunk statistics along
+    ``frequency`` (:func:`concatenate_plane_statistics`). Because every chunk
+    covers a disjoint global channel range, the merges never collide.
 
-    Returns the same ``{"timing_node_tasks", "deconvolution"}`` shape so it
-    composes under tree-mode reduction (its own output becomes an input at the
-    next level).
+    Returns the same ``{"timing_node_tasks", "deconvolution",
+    "image_statistics"}`` shape so it composes under tree-mode reduction (its
+    own output becomes an input at the next level).
 
     Parameters
     ----------
     input_data : list of dict
         Per-chunk (or partially reduced) results, each with
-        ``"timing_node_tasks"`` and ``"deconvolution"`` keys.
+        ``"timing_node_tasks"``, ``"deconvolution"`` and (optionally)
+        ``"image_statistics"`` keys.
     input_params : dict
         Unused; present for the GraphVIPER reduce signature.
 
     Returns
     -------
     dict
-        ``{"timing_node_tasks": pandas.DataFrame, "deconvolution": ReturnDict}``.
+        ``{"timing_node_tasks": pandas.DataFrame, "deconvolution": ReturnDict,
+        "image_statistics": dict, "timing_reduce_nodes": list}``.
     """
     import os
     import socket
@@ -781,6 +796,9 @@ def combine_return_data_frames(input_data, input_params):
 
     import pandas as pd
 
+    from astroviper.processing_functions.image_analysis.plane_statistics import (
+        concatenate_plane_statistics,
+    )
     from astroviper.processing_functions.imaging.utils.iteration_control import (
         merge_return_dicts,
     )
@@ -788,6 +806,7 @@ def combine_return_data_frames(input_data, input_params):
     t_start = time.time()
     timing_frames = []
     deconvolve_dicts = []
+    statistics_list = []
     # Per-reduce-node timing provenance: child reduce calls carry their records
     # in "timing_reduce_nodes" (leaf node-task results have none); pool them and
     # append this call's own record, so the final result holds one record per
@@ -811,6 +830,7 @@ def combine_return_data_frames(input_data, input_params):
                 timing[key] = [value] if isinstance(value, list) else value
         timing_frames.append(timing)
         deconvolve_dicts.append(result["deconvolution"])
+        statistics_list.append(result.get("image_statistics", {}))
         reduce_records.extend(result.get("timing_reduce_nodes", []))
 
     # ONE concat per reduce call: concatenating inside the loop re-copied the
@@ -818,6 +838,7 @@ def combine_return_data_frames(input_data, input_params):
     # cost on rank 0, which reduces 15360 one-row frames single-threaded).
     combined_timing = pd.concat(timing_frames, ignore_index=True)
     merged_deconvolve = merge_return_dicts(deconvolve_dicts)
+    merged_statistics = concatenate_plane_statistics(statistics_list)
     t_end = time.time()
     # Identity of the execution slot this reduce ran on, so the task-stream
     # analysis can place reduce nodes on their TRUE worker lane (matching the
@@ -846,6 +867,7 @@ def combine_return_data_frames(input_data, input_params):
     return {
         "timing_node_tasks": combined_timing,
         "deconvolution": merged_deconvolve,
+        "image_statistics": merged_statistics,
         "timing_reduce_nodes": reduce_records,
     }
 
