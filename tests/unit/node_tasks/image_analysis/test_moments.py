@@ -253,6 +253,26 @@ def test_read_block_follows_chunk_geometry_and_budget(tmp_path):
     # A non-chunked axis (polarization chunk = full axis) is read in one block.
     assert moment_axis_read_block(lazy, {}, "polarization", 1.0) == 2
 
+    # Sharded store: a request never spans more than one shard along the
+    # moment axis (nested zarr concurrency), even with an ample budget.
+    sharded = str(tmp_path / "sharded.img.zarr")
+    img_xds.to_zarr(
+        sharded,
+        mode="w",
+        zarr_format=3,
+        encoding={
+            "SKY": {"chunks": (1, 1, 2, 8, 8), "shards": (1, 4, 2, 16, 16)},
+            "MASK": {"chunks": (1, 1, 2, 8, 8), "shards": (1, 4, 2, 16, 16)},
+        },
+    )
+    lazy = _open_image_lazy(sharded)["SKY"]
+    assert moment_axis_read_block(lazy, block_des, "frequency", 1.0) == 4
+    # Budget below a shard length -> chunk multiples within the shard.
+    assert (
+        moment_axis_read_block(lazy, block_des, "frequency", 3.5 * plane_bytes / gib)
+        == 3
+    )
+
 
 def test_streaming_path_never_holds_the_chunk_slab(input_image, monkeypatch):
     """For streamable moments the node task must read block-by-block and

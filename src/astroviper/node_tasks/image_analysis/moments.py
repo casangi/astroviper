@@ -45,46 +45,65 @@ def _open_image_lazy(input_image_store):
 
 
 def moment_axis_read_block(lazy_var, block_des, stream_axis, memory_budget_gb):
-    """Number of ``stream_axis`` planes to read per block, from the on-disk
-    chunk geometry and a memory budget.
+    """Number of ``stream_axis`` planes to read per request, from the on-disk
+    chunk / shard geometry and a memory budget.
 
-    A block is the unit read from the store and streamed through the moments
-    accumulator. Two competing constraints:
+    A block is the unit read from the store (one zarr request) and streamed
+    through the moments accumulator. Three constraints:
 
     * **Decode efficiency**: a partial read of an on-disk chunk decodes the
-      WHOLE chunk, so reading fewer planes than the chunk spans along
-      ``stream_axis`` re-decodes that chunk once per block -- a block should
-      cover a whole number of chunk lengths along the stream axis.
-    * **Memory**: the decoded block of this task's ``(l, m, ...)`` slice is
-      at most ``memory_budget_gb`` (plus the decode transient of the touched
-      chunks, which is bounded by the chunk size x the zarr read concurrency,
-      not by the block).
+      WHOLE chunk, so a block should cover a whole number of chunk lengths
+      along ``stream_axis`` (else the chunk is re-decoded once per block).
+    * **Bounded decode transient**: zarr decodes the chunks of one request
+      concurrently, and for SHARDED stores the concurrency limit applies per
+      nesting level (shards x inner chunks per shard) -- a request spanning
+      many shards can hold far more decoded chunks than the limit suggests
+      (the 2026-08 MemoryErrors). A block therefore never exceeds ONE shard
+      length along ``stream_axis``, so a request touches exactly one shard
+      per on-disk chunk column of the task's tile.
+    * **Memory**: the decoded block of this task's tile is at most
+      ``memory_budget_gb``.
 
-    Returns the largest multiple of the chunk length along ``stream_axis``
-    (1 for unchunked / non-zarr stores) whose block fits the budget, and at
-    least 1 plane.
+    Returns the shard length if it fits the budget, else the largest multiple
+    of the chunk length that fits, else as many whole planes as fit (at least
+    1); always clamped to the axis length. Non-zarr / unchunked stores count
+    as chunk length 1 with no shards.
     """
     import numpy as np
 
+    axis = lazy_var.dims.index(stream_axis)
     chunks = lazy_var.encoding.get("chunks")
-    if chunks is None or len(chunks) != lazy_var.ndim:
-        chunk_len = 1
-    else:
-        chunk_len = max(1, int(chunks[lazy_var.dims.index(stream_axis)]))
+    shards = lazy_var.encoding.get("shards")
+    chunk_len = (
+        max(1, int(chunks[axis]))
+        if chunks is not None and len(chunks) == lazy_var.ndim
+        else 1
+    )
+    shard_len = (
+        max(chunk_len, int(shards[axis]))
+        if shards is not None and len(shards) == lazy_var.ndim
+        else None
+    )
     selected = lazy_var.isel(block_des)
+    n_planes = selected.sizes[stream_axis]
     plane_bytes = (
         float(np.prod([selected.sizes[d] for d in selected.dims if d != stream_axis]))
         * selected.dtype.itemsize
     )
-    n_planes = selected.sizes[stream_axis]
     budget_bytes = max(memory_budget_gb, 0.0) * 1024**3
     planes_in_budget = int(budget_bytes // max(plane_bytes, 1))
-    if planes_in_budget < chunk_len:
-        # The budget cannot even hold one chunk length: fall back to a whole
-        # number of planes (re-decoding the chunk per block; correct but
-        # slower) rather than overrunning the budget.
-        return max(1, min(planes_in_budget, n_planes))
-    return min(n_planes, chunk_len * max(1, planes_in_budget // chunk_len))
+    if shard_len is not None and planes_in_budget >= shard_len:
+        block = shard_len
+    elif planes_in_budget >= chunk_len:
+        block = chunk_len * (planes_in_budget // chunk_len)
+        if shard_len is not None:
+            block = min(block, shard_len)
+    else:
+        # The budget cannot even hold one chunk length: whole planes that fit
+        # (re-decoding the chunk per block; correct but slower) rather than
+        # overrunning the budget.
+        block = max(1, planes_in_budget)
+    return max(1, min(block, n_planes))
 
 
 def _make_plane_reader(lazy_xds, sky_name, mask_name, block_des, stream_axis, n_block):

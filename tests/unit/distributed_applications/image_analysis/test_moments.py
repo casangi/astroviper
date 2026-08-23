@@ -216,7 +216,7 @@ class TestMomentsOverwriteAndErrors:
                 n_mapping_parallelism={"frequency": 1},
             )
 
-    def test_mapping_parallelism_axis_l_raises(self, input_image, tmp_path):
+    def test_mapping_parallelism_axis_polarization_raises(self, input_image, tmp_path):
         path, _ = input_image
         with pytest.raises(ValueError, match="not in allowed axes"):
             moments(
@@ -224,19 +224,90 @@ class TestMomentsOverwriteAndErrors:
                 moments_image_store=str(tmp_path / "x.img.zarr"),
                 moments=["mean"],
                 moment_axis="frequency",
-                n_mapping_parallelism={"l": 1},
+                n_mapping_parallelism={"polarization": 2},
             )
 
-    def test_mapping_parallelism_multi_entry_dict_raises(self, input_image, tmp_path):
-        path, _ = input_image
-        with pytest.raises(ValueError, match="exactly one entry"):
-            moments(
-                input_image_store=path,
-                moments_image_store=str(tmp_path / "x.img.zarr"),
-                moments=["mean"],
-                moment_axis="frequency",
-                n_mapping_parallelism={"m": 2, "time": 2},
-            )
+
+class TestMomentsTiling:
+    """2-D (l, m) tiling aligned with the store's inner chunks -- the memory /
+    I-O strategy for large cubes (l decreases, so chunking runs in index space)."""
+
+    @pytest.fixture
+    def chunked_image(self, tmp_path):
+        img_xds = make_test_image_xds(n_frequency=6, n_l=18, n_m=14)
+        path = str(tmp_path / "chunked.img.zarr")
+        # inner chunks: 1 channel, full pol, 6 x 7 pixel tiles -> 3 x 2 tiles
+        img_xds.to_zarr(
+            path,
+            mode="w",
+            zarr_format=3,
+            encoding={
+                "SKY": {"chunks": (1, 1, 2, 6, 7)},
+                "MASK": {"chunks": (1, 1, 2, 6, 7)},
+            },
+        )
+        return path, img_xds
+
+    def test_auto_tiles_follow_on_disk_chunks_and_l_is_allowed(
+        self, chunked_image, tmp_path
+    ):
+        path, img_xds = chunked_image
+        out = str(tmp_path / "tiled.img.zarr")
+        timing = moments(
+            input_image_store=path,
+            moments_image_store=out,
+            moments=["maximum", "maximum_coord", "mean"],
+            moment_axis="frequency",
+            use_mask=True,
+            # default n_mapping_parallelism -> {"l": None, "m": None}
+        )
+        assert len(timing) == 3 * 2  # one task per (l, m) inner-chunk tile
+        result = load_image(out)
+        reference = reference_moments(
+            img_xds.SKY.values,
+            axis=1,
+            coord_values=img_xds.frequency.values,
+            mask=img_xds.MASK.values,
+        )
+        assert_moments_match(result, reference, axis=1)
+        # Output chunks follow the tiles.
+        import zarr
+
+        group = zarr.open_group(out, mode="r")
+        assert tuple(group["SKY_MOMENT_MAXIMUM"].chunks) == (1, 1, 2, 6, 7)
+        # l coordinate (decreasing) survives untouched.
+        np.testing.assert_allclose(result.l.values, img_xds.l.values)
+
+    def test_explicit_two_axis_counts(self, chunked_image, tmp_path):
+        path, img_xds = chunked_image
+        out = str(tmp_path / "tiled2.img.zarr")
+        timing = moments(
+            input_image_store=path,
+            moments_image_store=out,
+            moments=["rms"],
+            moment_axis="frequency",
+            n_mapping_parallelism={"l": 2, "m": 3},
+        )
+        assert len(timing) == 6
+        reference = reference_moments(
+            img_xds.SKY.values, axis=1, coord_values=img_xds.frequency.values
+        )
+        assert_moments_match(load_image(out), reference, axis=1)
+
+    def test_auto_frequency_tiles_when_collapsing_m(self, chunked_image, tmp_path):
+        path, img_xds = chunked_image
+        out = str(tmp_path / "tiled_m.img.zarr")
+        timing = moments(
+            input_image_store=path,
+            moments_image_store=out,
+            moments=["minimum"],
+            moment_axis="m",
+        )
+        assert len(timing) == 6  # one task per 1-channel on-disk chunk
+        reference = reference_moments(
+            img_xds.SKY.values, axis=4, coord_values=img_xds.m.values
+        )
+        assert_moments_match(load_image(out), reference, axis=4)
 
     def test_mapping_parallelism_bad_count_raises(self, input_image, tmp_path):
         path, _ = input_image
