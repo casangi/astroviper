@@ -15,7 +15,14 @@ from astroviper.processing_functions.image_analysis.plane_statistics import (
 DIMS = ("time", "frequency", "polarization", "l", "m")
 
 
-def _make_image(n_freq=3, n_pol=2, n_lm=16, with_mask=True, dtype=np.float32):
+def _make_image(
+    n_freq=3,
+    n_pol=2,
+    n_lm=16,
+    with_mask=True,
+    with_primary_beam=False,
+    dtype=np.float32,
+):
     rng = np.random.default_rng(1234)
     shape = (1, n_freq, n_pol, n_lm, n_lm)
     residual = rng.normal(size=shape).astype(dtype)
@@ -35,6 +42,11 @@ def _make_image(n_freq=3, n_pol=2, n_lm=16, with_mask=True, dtype=np.float32):
         mask[..., 4:12, 4:12] = True
         data_vars["MASK"] = (DIMS, mask)
         data_groups["residual"]["mask"] = "MASK"
+    if with_primary_beam:
+        primary_beam = np.zeros(shape)
+        primary_beam[..., 2:14, 2:14] = 0.5  # > the 0.2 default limit
+        data_vars["PRIMARY_BEAM"] = (DIMS, primary_beam)
+        data_groups["residual"]["primary_beam"] = "PRIMARY_BEAM"
     return xr.Dataset(
         data_vars,
         coords={
@@ -56,7 +68,11 @@ def test_statistics_match_numpy_and_ignore_nans():
     residual = img_xds["SKY_RESIDUAL"].values.astype(np.float64)
     mask = img_xds["MASK"].values
     ds = stats["sky_residual"]
-    assert ds.attrs == {"data_variable": "SKY_RESIDUAL", "mask_present": True}
+    assert ds.attrs == {
+        "data_variable": "SKY_RESIDUAL",
+        "mask_present": True,
+        "mask_source": "MASK",
+    }
     assert dict(ds.sizes) == {"time": 1, "frequency": 3, "polarization": 2}
     assert set(ds.data_vars) == set(PLANE_STATISTIC_NAMES) | {
         f"{name}_masked" for name in PLANE_STATISTIC_NAMES
@@ -96,16 +112,45 @@ def test_statistics_match_numpy_and_ignore_nans():
     )
 
 
-def test_no_mask_gives_nan_masked_statistics():
+def test_no_mask_and_no_primary_beam_gives_nan_masked_statistics():
     img_xds = _make_image(with_mask=False)
     ds = calculate_plane_statistics(img_xds)["sky_residual"]
     assert ds.attrs["mask_present"] is False
+    assert ds.attrs["mask_source"] is None
     assert np.isfinite(ds["mean"].values).all()
     for name in PLANE_STATISTIC_NAMES:
         if name == "n_pixels":
             assert (ds["n_pixels_masked"].values == 0).all()
         else:
             assert np.isnan(ds[f"{name}_masked"].values).all()
+
+
+def test_primary_beam_fallback_mask_when_no_clean_mask():
+    """No MASK (a niter=0 run): masked stats fall back to the valid-sky area
+    PRIMARY_BEAM > primary_beam_limit."""
+    img_xds = _make_image(with_mask=False, with_primary_beam=True)
+    ds = calculate_plane_statistics(img_xds)["sky_residual"]
+    assert ds.attrs["mask_present"] is True
+    assert ds.attrs["mask_source"] == "PRIMARY_BEAM > 0.2"
+    sky = img_xds["SKY_RESIDUAL"].values.astype(np.float64)
+    inside = sky[0, 1, 0, 2:14, 2:14]
+    sel = ds.isel(time=0, frequency=1, polarization=0)
+    assert sel["n_pixels_masked"] == 12 * 12
+    assert sel["mean_masked"] == pytest.approx(np.nanmean(inside))
+    assert sel["max_masked"] == pytest.approx(np.nanmax(inside))
+    # A stricter limit shrinks the area; limit=None disables the fallback.
+    strict = calculate_plane_statistics(img_xds, primary_beam_limit=0.6)["sky_residual"]
+    assert (strict["n_pixels_masked"].values == 0).all()
+    off = calculate_plane_statistics(img_xds, primary_beam_limit=None)["sky_residual"]
+    assert off.attrs["mask_present"] is False
+    assert np.isnan(off["mean_masked"].values).all()
+
+
+def test_clean_mask_wins_over_primary_beam_fallback():
+    img_xds = _make_image(with_mask=True, with_primary_beam=True)
+    ds = calculate_plane_statistics(img_xds)["sky_residual"]
+    assert ds.attrs["mask_source"] == "MASK"
+    assert (ds["n_pixels_masked"].values == 8 * 8).all()  # the MASK box, not the PB box
 
 
 def test_all_nan_plane_is_nan_with_zero_pixels():

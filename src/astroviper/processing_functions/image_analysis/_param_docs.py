@@ -96,4 +96,14 @@ IMAGE_ANALYSIS_PARAM_DOCS = {
         "Also enters the distributed application's per-chunk memory estimate.\n"
         "Ignored by the ``median`` slab path."
     ),
+    "dimension_flags": (
+        "Per-dimension flags over the FULL image: ``{dim: boolean array\n"
+        "(True = flagged) | list of [start, stop) index ranges}`` (see\n"
+        ":func:`~astroviper.processing_functions.image_analysis.moments.normalize_dimension_flags`).\n"
+        "Flagged moment-axis planes (e.g. noisy spectral-window edge channels\n"
+        "or telluric-line channels when collapsing ``frequency``) contribute\n"
+        "to no moment; flags on any other dimension exclude those pixels from\n"
+        "every plane, exactly like a ``False`` mask value. Node tasks receive\n"
+        "the flags sliced to their chunk."
+    ),
 }

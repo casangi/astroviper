@@ -314,7 +314,9 @@ def image_cube_single_field(
           ``(time, frequency, polarization)`` covering the whole cube in
           frequency order and one variable per statistic (``mean``, ``median``,
           ``max``, ``min``, ``peak``, ``sum``, ``rms``, ``std``, ``mad_sigma``,
-          ``n_pixels`` and their ``_masked`` twins); see
+          ``n_pixels`` and their ``_masked`` twins over the valid area --
+          the clean mask, or ``PRIMARY_BEAM > primary_beam_limit`` when no
+          mask exists, e.g. ``niter=0``); see
           :func:`~astroviper.processing_functions.image_analysis.plane_statistics.calculate_plane_statistics`.
           Computed in every node task right before its chunk is written.
         * ``"timing_distributed_application"`` is a dict of the driver-level

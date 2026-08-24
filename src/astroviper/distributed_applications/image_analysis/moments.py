@@ -90,6 +90,7 @@ from astroviper.processing_functions.image_analysis.moments import (
     moment_data_variable_key,
     moment_units,
     moments_memory_model,
+    normalize_dimension_flags,
     normalize_moments,
     normalize_pixel_range,
     resolve_moments_input_variables,
@@ -183,6 +184,7 @@ def moments(
     overwrite: bool = False,
     memory_budget_gb: float = 1.0,
     monitor_resources_seconds: float | None = None,
+    dimension_flags: dict | None = None,
 ):
     """Collapse an on-disk image along one axis into moment maps (CASA ``immoments``).
 
@@ -627,6 +629,11 @@ def moments(
         "selection": selection,
         "moments_data_variables": moments_data_variables,
         "memory_budget_gb": memory_budget_gb,
+        # Full-image flags, validated here once; each node task slices them to
+        # its chunk. Normalized so index-range lists reach workers as compact
+        # bool arrays.
+        "dimension_flags": normalize_dimension_flags(dimension_flags, dict(sky.sizes))
+        or None,
     }
 
     start = time.time()

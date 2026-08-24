@@ -728,6 +728,93 @@ def _validate_moments_request(
     return moment_names, include_range, exclude_range
 
 
+def normalize_dimension_flags(dimension_flags, sizes):
+    """Normalize per-dimension flags to boolean arrays (``True`` = flagged).
+
+    Parameters
+    ----------
+    dimension_flags : dict or None
+        ``{dim_name: flags}`` where ``flags`` is either a boolean array of the
+        dimension's length (``True`` = exclude that index from every moment)
+        or a list of ``[start, stop)`` integer index ranges to flag (e.g.
+        ``{"frequency": [[0, 2], [3838, 3842]]}``).
+    sizes : mapping
+        ``{dim_name: length}`` of the (chunk's) dimensions.
+
+    Returns
+    -------
+    dict
+        ``{dim_name: numpy bool array}`` restricted to dims in ``sizes``;
+        empty when ``dimension_flags`` is ``None``/empty.
+
+    Raises
+    ------
+    ValueError
+        If a flagged dimension is unknown or a boolean array's length does not
+        match the dimension.
+    """
+    if not dimension_flags:
+        return {}
+    normalized = {}
+    for dim, flags in dimension_flags.items():
+        if dim not in sizes:
+            raise ValueError(
+                f"dimension_flags dimension {dim!r} is not an image dimension "
+                f"(have {list(sizes)})."
+            )
+        flags = np.asarray(flags)
+        if flags.dtype == bool:
+            if flags.shape != (sizes[dim],):
+                raise ValueError(
+                    f"dimension_flags[{dim!r}] boolean array has length "
+                    f"{flags.shape}, expected ({sizes[dim]},)."
+                )
+            mask = flags.copy()
+        else:
+            mask = np.zeros(sizes[dim], dtype=bool)
+            for pair in np.atleast_2d(flags):
+                if len(pair) != 2:
+                    raise ValueError(
+                        f"dimension_flags[{dim!r}] index ranges must be "
+                        f"[start, stop) pairs; got {pair!r}."
+                    )
+                mask[int(pair[0]) : int(pair[1])] = True
+        normalized[dim] = mask
+    return normalized
+
+
+def _split_moment_axis_flags(dimension_flags, sky_dims, moment_axis, sizes):
+    """Split normalized flags into (moment-axis 1-D flags, map-shaped exclude).
+
+    Returns ``(axis_flags, map_exclude)``: ``axis_flags`` is a bool array over
+    the moment axis (``True`` = the whole plane is excluded) or ``None``;
+    ``map_exclude`` is a bool array of the output-map shape (``True`` = pixel
+    excluded from every plane) or ``None``. Both are built by broadcasting the
+    1-D per-dimension flags.
+    """
+    axis_flags = dimension_flags.get(moment_axis)
+    map_dims = [d for d in sky_dims if d != moment_axis]
+    map_exclude = None
+    for dim, flags in dimension_flags.items():
+        if dim == moment_axis:
+            continue
+        shape = [1] * len(map_dims)
+        shape[map_dims.index(dim)] = sizes[dim]
+        broadcast = flags.reshape(shape)
+        map_exclude = broadcast if map_exclude is None else (map_exclude | broadcast)
+    if map_exclude is not None:
+        map_exclude = np.broadcast_to(map_exclude, tuple(sizes[d] for d in map_dims))
+    return axis_flags, map_exclude
+
+
+def _combine_mask_with_flags(mask_plane, map_exclude):
+    """Combine an include-mask plane with a map-shaped exclusion (may be None)."""
+    if map_exclude is None:
+        return mask_plane
+    keep = ~map_exclude
+    return keep if mask_plane is None else (mask_plane & keep)
+
+
 def moments_streamed(
     read_planes,
     coords_xds: xr.Dataset,
@@ -739,6 +826,7 @@ def moments_streamed(
     moment_axis: str = "frequency",
     include_pixel_range=None,
     exclude_pixel_range=None,
+    dimension_flags=None,
 ) -> xr.Dataset:
     """Compute the moments of a chunk whose planes are read on demand.
 
@@ -765,6 +853,11 @@ def moments_streamed(
         dataset (see :func:`assemble_moments_dataset`).
     moments, moment_axis, include_pixel_range, exclude_pixel_range
         As for :func:`moments`.
+    dimension_flags : dict, optional
+        Per-dimension flags of the CHUNK (``True``/index ranges = exclude; see
+        :func:`normalize_dimension_flags`). Flagged moment-axis planes are
+        skipped entirely (not accumulated); flags on other dimensions exclude
+        those pixels from every plane, exactly like a ``False`` mask value.
 
     Returns
     -------
@@ -787,6 +880,13 @@ def moments_streamed(
         )
     map_shape = tuple(coords_xds.sizes[dim] for dim in sky_dims if dim != moment_axis)
     coord_values = _moment_axis_values(coords_xds, moment_axis)
+    sizes = {dim: coords_xds.sizes[dim] for dim in sky_dims}
+    axis_flags, map_exclude = _split_moment_axis_flags(
+        normalize_dimension_flags(dimension_flags, sizes),
+        sky_dims,
+        moment_axis,
+        sizes,
+    )
     accumulator = MomentsAccumulator(
         moment_names, coord_values, map_shape, include_range, exclude_range
     )
@@ -797,10 +897,15 @@ def moments_streamed(
             planes, mask_planes = read_planes(start, n_planes)
             planes = np.asarray(planes)
             for j in range(planes.shape[0]):
+                if axis_flags is not None and axis_flags[start + j]:
+                    continue  # flagged plane: contributes to no moment
                 accumulator.add_plane(
                     start + j,
                     planes[j],
-                    None if mask_planes is None else mask_planes[j],
+                    _combine_mask_with_flags(
+                        None if mask_planes is None else mask_planes[j],
+                        map_exclude,
+                    ),
                     pass_index=pass_index,
                 )
             start += planes.shape[0]
@@ -826,6 +931,7 @@ def moments(
     include_pixel_range=None,
     exclude_pixel_range=None,
     use_mask: bool = False,
+    dimension_flags=None,
 ) -> xr.Dataset:
     """Collapse an image along one axis into moment maps (CASA ``immoments``).
 
@@ -891,6 +997,15 @@ def moments(
     use_mask : bool, default False
         If ``True``, pixels where the input data group's mask variable is
         ``False`` are excluded (XRADIO convention: mask ``True`` = include).
+    dimension_flags : dict, optional
+        Per-dimension flags over the FULL image: ``{dim: boolean array
+        (True = flagged) | list of [start, stop) index ranges}`` (see
+        :func:`~astroviper.processing_functions.image_analysis.moments.normalize_dimension_flags`).
+        Flagged moment-axis planes (e.g. noisy spectral-window edge channels
+        or telluric-line channels when collapsing ``frequency``) contribute
+        to no moment; flags on any other dimension exclude those pixels from
+        every plane, exactly like a ``False`` mask value. Node tasks receive
+        the flags sliced to their chunk.
 
     Returns
     -------
@@ -932,10 +1047,19 @@ def moments(
     n_planes = data_planes.shape[0]
     map_shape = data_planes.shape[1:]
     coord_values = _moment_axis_values(img_xds, moment_axis)
+    sizes = {dim: img_xds.sizes[dim] for dim in sky.dims}
+    axis_flags, map_exclude = _split_moment_axis_flags(
+        normalize_dimension_flags(dimension_flags, sizes),
+        list(sky.dims),
+        moment_axis,
+        sizes,
+    )
     filtering = (
         include_range is not None
         or exclude_range is not None
         or mask_planes is not None
+        or axis_flags is not None
+        or map_exclude is not None
     )
 
     # ---- Stream plane-by-plane along the moment axis (1 or 2 passes) ----------
@@ -950,10 +1074,14 @@ def moments(
     )
     for pass_index in range(accumulator.n_passes):
         for i in range(n_planes):
+            if axis_flags is not None and axis_flags[i]:
+                continue  # flagged plane: contributes to no moment
             accumulator.add_plane(
                 i,
                 data_planes[i],
-                None if mask_planes is None else mask_planes[i],
+                _combine_mask_with_flags(
+                    None if mask_planes is None else mask_planes[i], map_exclude
+                ),
                 pass_index=pass_index,
             )
 
@@ -968,7 +1096,12 @@ def moments(
             else:
                 working = data_planes.astype(np.float64)
             for i in range(n_planes):
-                mask_plane = None if mask_planes is None else mask_planes[i]
+                if axis_flags is not None and axis_flags[i]:
+                    working[i] = np.nan  # flagged plane: excluded everywhere
+                    continue
+                mask_plane = _combine_mask_with_flags(
+                    None if mask_planes is None else mask_planes[i], map_exclude
+                )
                 working[i][~accumulator.valid_plane(data_planes[i], mask_plane)] = (
                     np.nan
                 )

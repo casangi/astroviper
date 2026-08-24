@@ -421,3 +421,115 @@ class TestStreamingAccumulator:
         two_pass = MomentsAccumulator(["abs_mean_dev"], coord, map_shape)
         with pytest.raises(ValueError, match="single-pass"):
             two_pass.merge(MomentsAccumulator(["abs_mean_dev"], coord, map_shape))
+
+
+class TestDimensionFlags:
+    """dimension_flags: flagged planes/pixels contribute to no moment."""
+
+    def test_moment_axis_flags_match_manual_exclusion(self):
+        img_xds = make_test_image_xds(n_frequency=8)
+        flags = np.zeros(8, dtype=bool)
+        flags[[0, 3, 7]] = True
+        flagged = moments(
+            img_xds,
+            moments=ALL_MOMENTS,
+            moment_axis="frequency",
+            dimension_flags={"frequency": flags},
+        )
+        # Reference: set the flagged planes to NaN (excluded pixels).
+        nan_xds = img_xds.copy(deep=True)
+        nan_xds["SKY"].values[:, flags] = np.nan
+        expected = moments(nan_xds, moments=ALL_MOMENTS, moment_axis="frequency")
+        for name in ALL_MOMENTS:
+            variable = "SKY_MOMENT_" + name.upper()
+            np.testing.assert_allclose(
+                flagged[variable].values,
+                expected[variable].values,
+                rtol=1e-6,
+                equal_nan=True,
+                err_msg=name,
+            )
+
+    def test_index_range_form_and_other_dimension_flags(self):
+        img_xds = make_test_image_xds(n_frequency=6, n_l=12, n_m=10)
+        result = moments(
+            img_xds,
+            moments=["mean", "maximum", "median"],
+            moment_axis="frequency",
+            dimension_flags={"frequency": [[0, 2]], "l": [[0, 3], [11, 12]]},
+        )
+        nan_xds = img_xds.copy(deep=True)
+        nan_xds["SKY"].values[:, :2] = np.nan
+        nan_xds["SKY"].values[..., :3, :] = np.nan
+        nan_xds["SKY"].values[..., 11:, :] = np.nan
+        expected = moments(
+            nan_xds, moments=["mean", "maximum", "median"], moment_axis="frequency"
+        )
+        for name in ("mean", "maximum", "median"):
+            variable = "SKY_MOMENT_" + name.upper()
+            np.testing.assert_allclose(
+                result[variable].values,
+                expected[variable].values,
+                rtol=1e-6,
+                equal_nan=True,
+                err_msg=name,
+            )
+
+    def test_streamed_matches_in_memory_with_flags(self):
+        from astroviper.processing_functions.image_analysis.moments import (
+            moments_streamed,
+        )
+
+        img_xds = make_test_image_xds(n_frequency=7)
+        flags = {"frequency": [[0, 1], [5, 7]], "m": [[0, 4]]}
+        expected = moments(
+            img_xds,
+            moments=["maximum", "abs_mean_dev", "rms"],
+            moment_axis="frequency",
+            use_mask=True,
+            dimension_flags=flags,
+        )
+        sky = img_xds["SKY"]
+        mask = img_xds["MASK"]
+
+        def read_planes(start, stop):
+            stop = min(stop, start + 2)
+            sel = {"frequency": slice(start, stop)}
+            return (
+                np.moveaxis(sky.isel(sel).values, 1, 0),
+                np.moveaxis(mask.isel(sel).values, 1, 0),
+            )
+
+        result = moments_streamed(
+            read_planes,
+            coords_xds=img_xds,
+            sky_dims=sky.dims,
+            sky_name="SKY",
+            sky_attrs=dict(sky.attrs),
+            attrs=img_xds.attrs,
+            moments=["maximum", "abs_mean_dev", "rms"],
+            moment_axis="frequency",
+            dimension_flags=flags,
+        )
+        for name in ("maximum", "abs_mean_dev", "rms"):
+            variable = "SKY_MOMENT_" + name.upper()
+            np.testing.assert_allclose(
+                result[variable].values,
+                expected[variable].values,
+                rtol=1e-6,
+                equal_nan=True,
+                err_msg=name,
+            )
+
+    def test_bad_flags_raise(self):
+        from astroviper.processing_functions.image_analysis.moments import (
+            normalize_dimension_flags,
+        )
+
+        img_xds = make_test_image_xds()
+        with pytest.raises(ValueError, match="not an image dimension"):
+            moments(img_xds, dimension_flags={"chan": [[0, 1]]})
+        with pytest.raises(ValueError, match="length"):
+            normalize_dimension_flags(
+                {"frequency": np.zeros(3, dtype=bool)}, {"frequency": 7}
+            )

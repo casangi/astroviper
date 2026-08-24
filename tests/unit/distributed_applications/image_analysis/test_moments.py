@@ -294,6 +294,26 @@ class TestMomentsTiling:
         )
         assert_moments_match(load_image(out), reference, axis=1)
 
+    def test_dimension_flags_through_the_graph(self, chunked_image, tmp_path):
+        """Full-image flags flow through the driver to every (l, m) tile."""
+        path, img_xds = chunked_image
+        out = str(tmp_path / "flagged.img.zarr")
+        flags = {"frequency": [[0, 1], [5, 6]]}  # spw-edge style
+        timing = moments(
+            input_image_store=path,
+            moments_image_store=out,
+            moments=["maximum", "mean"],
+            moment_axis="frequency",
+            dimension_flags=flags,
+        )
+        assert len(timing) == 3 * 2
+        nan_sky = img_xds.SKY.values.copy()
+        nan_sky[:, [0, 5]] = np.nan
+        reference = reference_moments(
+            nan_sky, axis=1, coord_values=img_xds.frequency.values
+        )
+        assert_moments_match(load_image(out), reference, axis=1)
+
     def test_auto_frequency_tiles_when_collapsing_m(self, chunked_image, tmp_path):
         path, img_xds = chunked_image
         out = str(tmp_path / "tiled_m.img.zarr")

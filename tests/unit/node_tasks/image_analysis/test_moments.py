@@ -362,3 +362,59 @@ def test_timing_frame_records_strategy(input_image, tmp_path):
     assert bool(df["streamed"].iloc[0]) is True
     assert df["n_read_block_planes"].iloc[0] >= 1
     assert {"T_load", "T_moments", "T_write", "T_moments_task"} <= set(df.columns)
+
+
+def test_dimension_flags_are_sliced_to_the_chunk(input_image):
+    """Full-image flags passed to the node task must be restricted to the
+    task's chunk selection before the science function sees them."""
+    path, img_xds = input_image
+    n_freq = img_xds.sizes["frequency"]
+    flags = np.zeros(n_freq, dtype=bool)
+    flags[[0, n_freq - 1]] = True  # spw-edge style flags
+    chunk = {"m": slice(3, 9)}
+    result = moments_node_task(
+        input_image_store=path,
+        moments_image_store="unused",
+        moments=["maximum", "mean"],
+        moment_axis="frequency",
+        data_selection={"img": chunk},
+        graph_mode=False,
+        dimension_flags={"frequency": flags},
+    )
+    expected = moments_processing_function(
+        img_xds.isel(chunk),
+        moments=["maximum", "mean"],
+        moment_axis="frequency",
+        dimension_flags={"frequency": flags},
+    )
+    for name in ("maximum", "mean"):
+        variable = "SKY_MOMENT_" + name.upper()
+        np.testing.assert_allclose(
+            result[variable].values,
+            expected[variable].values,
+            rtol=1e-6,
+            equal_nan=True,
+            err_msg=name,
+        )
+    # Flags along the chunked (parallel) dimension are sliced with it.
+    result_m = moments_node_task(
+        input_image_store=path,
+        moments_image_store="unused",
+        moments=["maximum"],
+        moment_axis="frequency",
+        data_selection={"img": chunk},
+        graph_mode=False,
+        dimension_flags={"m": [[0, 5]]},  # global m indices 0..4 -> chunk 3,4
+    )
+    expected_m = moments_processing_function(
+        img_xds.isel(chunk),
+        moments=["maximum"],
+        moment_axis="frequency",
+        dimension_flags={"m": [[0, 2]]},
+    )
+    np.testing.assert_allclose(
+        result_m["SKY_MOMENT_MAXIMUM"].values,
+        expected_m["SKY_MOMENT_MAXIMUM"].values,
+        rtol=1e-6,
+        equal_nan=True,
+    )

@@ -191,6 +191,7 @@ def moments(
     task_id=None,
     graph_mode: bool = True,
     memory_budget_gb: float = 1.0,
+    dimension_flags=None,
 ):
     """Compute the moment maps of one image chunk and write them to Zarr.
 
@@ -349,6 +350,26 @@ def moments(
 
     block_des = {**selection, **data_selection["img"]}
     lazy_xds = _open_image_lazy(input_image_store)
+    # dimension_flags are FULL-IMAGE flags (built once by the driver/caller);
+    # restrict each dimension's flag vector to this task's chunk with the
+    # same selection the data is loaded with.
+    if dimension_flags:
+        import numpy as np
+
+        chunk_flags = {}
+        for dim, flags in dimension_flags.items():
+            flags = np.asarray(flags)
+            if flags.dtype != bool:
+                from astroviper.processing_functions.image_analysis.moments import (
+                    normalize_dimension_flags,
+                )
+
+                flags = normalize_dimension_flags({dim: flags}, dict(lazy_xds.sizes))[
+                    dim
+                ]
+            chunk_flags[dim] = flags[block_des[dim]] if dim in block_des else flags
+        dimension_flags = chunk_flags
+
     sky_name, mask_name = resolve_moments_input_variables(
         lazy_xds, image_data_group_in_name, use_mask
     )
@@ -387,6 +408,7 @@ def moments(
             moment_axis=moment_axis,
             include_pixel_range=include_pixel_range,
             exclude_pixel_range=exclude_pixel_range,
+            dimension_flags=dimension_flags,
         )
         selected = None
         read_planes = None
@@ -399,6 +421,7 @@ def moments(
             include_pixel_range=include_pixel_range,
             exclude_pixel_range=exclude_pixel_range,
             use_mask=use_mask,
+            dimension_flags=dimension_flags,
         )
     lazy_xds = None
     T_moments = time.time() - start

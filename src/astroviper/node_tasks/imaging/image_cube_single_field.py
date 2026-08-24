@@ -305,7 +305,8 @@ def image_cube_single_field(
           frequencies and one variable per statistic (``mean``, ``median``,
           ``max``, ``min``, ``peak``, ``sum``, ``rms``, ``std``, ``mad_sigma``,
           ``n_pixels`` and their ``_masked`` twins restricted to the clean
-          mask); see
+          mask, or to ``PRIMARY_BEAM > primary_beam_limit`` when no mask
+          exists, e.g. ``niter=0``); see
           :func:`~astroviper.processing_functions.image_analysis.plane_statistics.calculate_plane_statistics`.
           The reduce concatenates the chunks along ``frequency``.
     """
@@ -448,7 +449,13 @@ def image_cube_single_field(
         calculate_plane_statistics,
     )
 
-    image_statistics = calculate_plane_statistics(img_xds)
+    image_statistics = calculate_plane_statistics(
+        img_xds,
+        # Masked statistics use the clean MASK when present; a niter=0 run has
+        # none, so the fallback mask PRIMARY_BEAM > primary_beam_limit (the
+        # same valid-sky cutoff the deconvolver would use) applies.
+        primary_beam_limit=iteration_control_params.get("primary_beam_limit", 0.2),
+    )
     T_image_statistics = time.time() - start
 
     start = time.time()

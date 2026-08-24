@@ -496,15 +496,17 @@ def _check_image_statistics(return_dict, img_av_xds, expect_mask):
     np.testing.assert_allclose(
         residual_stats["peak"].values, expected_peak, rtol=1e-6, atol=1e-12
     )
-    assert bool(residual_stats.attrs["mask_present"]) is expect_mask
+    # Masked statistics are always available: the clean MASK when the run
+    # deconvolved, else the PRIMARY_BEAM > primary_beam_limit fallback.
+    assert bool(residual_stats.attrs["mask_present"]) is True
     if expect_mask:
-        assert np.isfinite(residual_stats["peak_masked"].values).all()
-        assert (
-            residual_stats["n_pixels_masked"].values
-            <= residual_stats["n_pixels"].values
-        ).all()
+        assert residual_stats.attrs["mask_source"] == "MASK"
     else:
-        assert np.isnan(residual_stats["mean_masked"].values).all()
+        assert residual_stats.attrs["mask_source"] == "PRIMARY_BEAM > 0.2"
+    assert np.isfinite(residual_stats["peak_masked"].values).all()
+    assert (
+        residual_stats["n_pixels_masked"].values < residual_stats["n_pixels"].values
+    ).all()
     assert "T_image_statistics" in return_dict["timing_node_tasks"].columns
 
 

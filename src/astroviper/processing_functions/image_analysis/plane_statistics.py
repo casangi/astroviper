@@ -85,6 +85,7 @@ def calculate_plane_statistics(
     img_xds,
     image_data_variables=DEFAULT_STATISTICS_VARIABLES,
     mask_name=None,
+    primary_beam_limit=0.2,
 ):
     """Compute NaN-ignoring per-plane statistics of the image-domain variables.
 
@@ -108,10 +109,20 @@ def calculate_plane_statistics(
         :data:`DEFAULT_STATISTICS_VARIABLES`.
     mask_name : str, optional
         Name of the boolean mask data variable (same shape as the image
-        variables, ``True`` = inside the mask). ``None`` (default) resolves the
-        ``"mask"`` role of the ``"residual"`` data group if registered. When no
-        mask is available every ``*_masked`` statistic is NaN (and
-        ``n_pixels_masked`` is 0).
+        variables, ``True`` = keep the pixel; the ``*_masked`` statistics are
+        computed over the valid, not-masked-out area). ``None`` (default)
+        resolves the ``"mask"`` role of the ``"residual"`` data group if
+        registered; when that is absent (e.g. a ``niter=0`` run, which never
+        makes a clean mask) the fallback mask ``PRIMARY_BEAM >
+        primary_beam_limit`` is used (via the ``"primary_beam"`` role, plain
+        ``PRIMARY_BEAM`` otherwise). Only when neither a mask variable nor a
+        primary beam is available is every ``*_masked`` statistic NaN (and
+        ``n_pixels_masked`` 0). The mask actually applied is recorded in the
+        ``mask_source`` attr.
+    primary_beam_limit : float, optional
+        Cutoff (fraction of the peak primary beam) for the primary-beam
+        fallback mask, matching the iteration control's ``primary_beam_limit``.
+        Default 0.2. ``None`` disables the fallback.
 
     Returns
     -------
@@ -120,8 +131,10 @@ def calculate_plane_statistics(
         Each dataset has dims ``(time, frequency, polarization)`` with the
         coordinates of ``img_xds``, one float64 data variable per statistic in
         :data:`PLANE_STATISTIC_NAMES` plus its ``_masked`` twin, and the attrs
-        ``data_variable`` (the source name, e.g. ``"SKY_RESIDUAL"``) and
-        ``mask_present``.
+        ``data_variable`` (the source name, e.g. ``"SKY_RESIDUAL"``),
+        ``mask_present`` and ``mask_source`` (the mask variable name, a
+        ``"PRIMARY_BEAM > 0.2"``-style description of the fallback, or
+        ``None``).
 
     Examples
     --------
@@ -133,12 +146,34 @@ def calculate_plane_statistics(
 
     from astroviper.utils.io import imaging_data_variables_and_dims_double_precision
 
+    plane_dims_order = ("time", "frequency", "polarization")
     if mask_name is None:
         mask_name = img_xds.attrs.get("data_groups", {}).get("residual", {}).get("mask")
     mask_present = mask_name is not None and mask_name in img_xds
-    mask_values = img_xds[mask_name].values if mask_present else None
+    mask_values = None
+    mask_source = None
+    primary_beam = None
+    if mask_present:
+        mask_values = img_xds[mask_name].values
+        mask_source = mask_name
+    else:
+        # Fallback (e.g. a niter=0 run, where no MASK is ever made): mask =
+        # primary beam above ``primary_beam_limit`` -- the same valid-sky
+        # cutoff the deconvolver's make_mask would use. Evaluated per plane
+        # in the loop below, so no full boolean cube is allocated.
+        primary_beam_name = (
+            img_xds.attrs.get("data_groups", {})
+            .get("residual", {})
+            .get("primary_beam", "PRIMARY_BEAM")
+        )
+        if primary_beam_name in img_xds and primary_beam_limit is not None:
+            primary_beam = (
+                img_xds[primary_beam_name].transpose(*plane_dims_order, "l", "m").values
+            )
+            mask_present = True
+            mask_source = f"{primary_beam_name} > {primary_beam_limit}"
 
-    plane_dims = ("time", "frequency", "polarization")
+    plane_dims = plane_dims_order
     coords = {dim: img_xds.coords[dim] for dim in plane_dims}
     stat_names = list(PLANE_STATISTIC_NAMES) + [
         name + "_masked" for name in PLANE_STATISTIC_NAMES
@@ -167,7 +202,12 @@ def calculate_plane_statistics(
                         all_values
                     )
                     if mask_present:
-                        masked_values = plane[valid & mask_values[t, f, p]].astype(
+                        mask_plane = (
+                            mask_values[t, f, p]
+                            if mask_values is not None
+                            else primary_beam[t, f, p] > primary_beam_limit
+                        )
+                        masked_values = plane[valid & mask_plane].astype(
                             np.float64, copy=False
                         )
                         out[len(PLANE_STATISTIC_NAMES) :, t, f, p] = (
@@ -181,7 +221,11 @@ def calculate_plane_statistics(
         results[key] = xr.Dataset(
             {name: (plane_dims, out[i]) for i, name in enumerate(stat_names)},
             coords=coords,
-            attrs={"data_variable": variable_name, "mask_present": mask_present},
+            attrs={
+                "data_variable": variable_name,
+                "mask_present": mask_present,
+                "mask_source": mask_source,
+            },
         )
     return results
 
