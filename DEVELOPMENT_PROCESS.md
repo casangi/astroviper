@@ -1,24 +1,35 @@
 ## DEVELOPMENT_PROCESS.md
 
+### Issue Organization
+
+- The RADPS Roadmap Project contains all current and future issues for the Program.
+- Issues in the RADPS-roadmap repository will be created to track all feature development. Sub-issues will be created in the relevant individual repositories and linked to the top-level RADPS-roadmap issues.
+- Feature development RADPS-roadmap items should take less than one program increment (quarter) to complete and sub-issues should be sized to be one less sprint or less. Individual bug issues and maintenance items can be added as top-level RADPS-roadmap issues.
+- Bugs and maintenance issues should be created in the relevant repository and added to the RADPS Roadmap Project with the appropriate meta-data (at least PI and sprint). If a bug or maintenance requests spans multiple respositories, the issue can be created in the RADPS-roadmap repository and added to the RADPS Roadmap Project.
+
 
 ### Issue Management
 - All work must be associated with an issue.
 - The issue should have an accurate title and description.
-- If the issue only affects a single repository, create an issue in that repository.
-- If the issues affects multiple repository, create an issue in the RADPS-roadmap repository.
-- All issues should either be linked as sub-issues to an appropriate RADPS-roadmap items or included in the RADPS project as independent items. Talk to the RADPS product owner to determine how they would like to track the work.
 - Each PR should be linked to an issue.
 - Once an issue and PR are closed, a new issue and PR should be created for subsequent work.
 
 ### Branching Strategy.
 
-- Each feature and bugfix is implemented in a short-lived branch off main.
-- Features should kept as small as possible to maximize CI/CD throughput and avoid rollouts on failure.
+- Each feature and bugfix is implemented in a short-lived (less than a sprint) branch off main.
+- Features should be kept as small as possible to maximize CI/CD throughput and avoid rollouts on failure.
 - Every quarter, at feature freeze, a stable (release) branch is cut off main and tagged for the release
 - The QA testing phase runs on this stable branch, executing the acceptance/integration tests previously defined by stakeholders, while development for the next sprint continues in branches off main.
 - Any bug found on the stable branch is fixed on main branch first and added to stable branch so that main remains the source of all commits.
 - Release tags are permanent and can be checkout out at any time.
-- A defect found in an already-deployed release is fixed in a new feature branch created from the (permanent) release tag.
+- If it is deemed necessary to fix a defect in an already-deployed release, then it will be fixed in a new feature branch created from the (permanent) release tag.
+
+### Code Review and Pull Requests
+- Automated code review will check style, typos, inconsistencies in code, etc.
+- Human code review should forcus on the overall logic, domain consistency, etc.
+- PRs are gates. For a PR to merge, the following must be true:
+   - All tests from all workflows should pass.
+   - The code coverage report should be green and cannot have missing lines.
 
 ### Definition of Done for New Features
 - Tests written with at least 80% coverage.
