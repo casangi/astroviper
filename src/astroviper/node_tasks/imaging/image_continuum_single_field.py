@@ -2273,6 +2273,14 @@ def model_update_continuum_single_field(
     # Prepare control parameters
     img_xds = input_data["image"]
     iteration_control_params = input_params["iteration_control_params"]
+    if int(iteration_control_params["niter"]) > 0 and (
+        iteration_control_params.get("cycleniter") is None
+        or int(iteration_control_params["cycleniter"]) <= 0
+    ):
+        raise ValueError(
+            "Continuum cleaning requires an explicit positive cycleniter; "
+            "automatic cycleniter=-1 is not supported."
+        )
 
     deconvolver = input_params.get("deconvolver", "hogbom")
     processing_function_threads = input_params.get(
@@ -2295,7 +2303,13 @@ def model_update_continuum_single_field(
     # -------------------------------------------------------------
     controller = input_params.get("controller")
 
-    combined_deconvolve_dict = input_data.get("deconvolution")
+    # A fresh map/reduce graph does not contain the preceding append node's
+    # convergence history. Accept that persistent state through input_params so
+    # later cycle controls retain the measured peak and PSF sidelobe.
+    combined_deconvolve_dict = input_data.get(
+        "deconvolution",
+        input_params.get("deconvolution"),
+    )
 
     if combined_deconvolve_dict is None:
         combined_deconvolve_dict = ReturnDict()

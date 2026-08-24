@@ -26,6 +26,7 @@ import xarray as xr
 
 from astroviper.processing_functions.imaging.deconvolution import (
     _plane_peak_abs_signed,
+    _run_hogbom_with_cycle_checks,
     _validate_deconvolve_params,
     asp_clean,
     deconvolve,
@@ -341,6 +342,39 @@ class TestGetPhaseCenter:
 
 @requires_hogbom
 class TestHogbomCleanCube:
+    def test_long_cycle_stops_when_residual_rises_from_minimum(self):
+        """Long CLEAN cycles use CASA-sized batches and its 10% divergence test."""
+        residual = np.ones((1, 1, 1, 1, 1), dtype=np.float64)
+        model = np.zeros_like(residual)
+        calls = []
+
+        def fake_clean_cube(**kwargs):
+            calls.append(int(kwargs["max_iter"].item()))
+            peak = 0.8 if len(calls) == 1 else 0.9
+            kwargs["residual_cube"][...] = peak
+            return {
+                "iterations_performed": kwargs["max_iter"].copy(),
+                "final_peak": np.full((1, 1, 1), peak),
+            }
+
+        result = _run_hogbom_with_cycle_checks(
+            fake_clean_cube,
+            residual_cube=residual,
+            psf_cube=np.ones_like(residual),
+            model_cube=model,
+            peak_mask_cube=None,
+            mask_arg=np.array([], dtype=np.float64),
+            clean_box=(-1, -1, -1, -1),
+            niter_cube=np.full((1, 1, 1), 10000, dtype=np.int64),
+            cyclethreshold_cube=np.zeros((1, 1, 1), dtype=np.float64),
+            gain=0.1,
+            processing_function_threads=1,
+        )
+
+        assert calls == [2000, 2000]
+        assert result["iterations_performed"].item() == 4000
+        assert result["diverged"].item()
+
     def test_basic_cube_cleaned(self):
         nt, nf, npol, ny, nx = 1, 1, 1, 16, 16
         resid = np.zeros((nt, nf, npol, ny, nx), dtype=np.float32)

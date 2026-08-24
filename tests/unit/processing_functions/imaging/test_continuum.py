@@ -315,6 +315,35 @@ def test_mvc_conversion_forms_weighted_taylor_normal_equations():
     )
 
 
+def test_mvc_conversion_uses_psf_weights_for_common_response():
+    """MVC PSF and effective PB follow CASA's PSF-weight normalization."""
+    frequency = np.array([0.9e9, 1.1e9])
+    residual_weight = np.array([1.0, 3.0])
+    psf_weight = np.array([2.0, 2.0])
+    psf = np.array([1.0, 4.0])
+    pb = np.array([0.5, 1.5])
+
+    _, psf_taylor, effective_pb = convert_mvc_cubes_to_taylor_normal_equations(
+        _frequency_cube([2.0, 6.0], frequency),
+        _frequency_cube(psf, frequency),
+        _frequency_cube(pb, frequency),
+        _frequency_normalization(residual_weight, frequency),
+        _frequency_normalization(psf_weight, frequency),
+        nterms=1,
+        reference_frequency=1.0e9,
+        pblimit=0.2,
+    )
+
+    np.testing.assert_allclose(
+        effective_pb.squeeze(),
+        np.sum(psf_weight * pb) / np.sum(psf_weight),
+    )
+    np.testing.assert_allclose(
+        psf_taylor.squeeze(),
+        np.sum(psf_weight * pb * psf) / (np.sum(psf_weight) * effective_pb.squeeze()),
+    )
+
+
 def test_mvc_conversion_preserves_single_precision_image_products():
     """Float32 MVC cubes remain float32 despite float64 weight accumulation."""
     frequency = np.array([0.9e9, 1.1e9])

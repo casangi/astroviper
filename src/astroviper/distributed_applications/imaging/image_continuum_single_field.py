@@ -2012,6 +2012,17 @@ def calculate_number_of_chunks_for_continuum_imaging(
 ###############################################################################
 
 
+def _validate_continuum_cycleniter(iteration_control_params):
+    """Require an explicit minor-cycle length whenever continuum cleaning runs."""
+    niter = int(iteration_control_params["niter"])
+    cycleniter = iteration_control_params.get("cycleniter")
+    if niter > 0 and (cycleniter is None or int(cycleniter) <= 0):
+        raise ValueError(
+            "Continuum cleaning requires an explicit positive cycleniter; "
+            "automatic cycleniter=-1 is not supported."
+        )
+
+
 @shares_param_docs
 @toolviper.utils.parameter.validate(config_dir=_PARAM_CONFIG_DIR)
 def image_continuum_single_field(
@@ -2132,6 +2143,8 @@ def image_continuum_single_field(
         raise ValueError(
             "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
         )
+
+    _validate_continuum_cycleniter(iteration_control_params)
 
     # Work with an application-local copy: continuum setup may augment the
     # image parameters with metadata derived from the Processing Set.
@@ -2554,6 +2567,9 @@ def image_continuum_single_field(
         if not is_n_iter_0:
             append_input_params["static_xds"] = static_xds
             append_input_params["model_xds"] = model_xds
+            append_input_params["deconvolution"] = last_minor_return_dict[
+                "deconvolution"
+            ]
             if specmode == "mvc":
                 # Later map tasks consume the cached channel PBs for model
                 # prediction, but do not emit them again. Carry the same cache

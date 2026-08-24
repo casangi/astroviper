@@ -4,6 +4,7 @@ import xarray as xr
 
 from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
     FWHM_factor,
+    _max_sidelobe_after_gaussian_subtraction,
     extract_main_lobe,
 )
 from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
@@ -514,6 +515,53 @@ def test_extract_main_lobe_per_slice_independent():
     size_narrow = trc[0, 0, 0] - blc[0, 0, 0]
     size_wide = trc[0, 1, 0] - blc[0, 1, 0]
     assert np.all(size_wide > size_narrow)
+
+
+def test_extract_main_lobe_uses_largest_absolute_sidelobe():
+    """A negative sidelobe controls the minor-cycle safety threshold."""
+    data = np.zeros((1, 1, 1, 9, 9), dtype=np.float64)
+    data[0, 0, 0, 4, 4] = 1.0
+    data[0, 0, 0, 1, 1] = 0.2
+    data[0, 0, 0, 7, 7] = -0.4
+
+    _, _, _, max_sidelobe = extract_main_lobe(np.array([9, 9]), 0.35, data)
+
+    np.testing.assert_allclose(max_sidelobe, [[[0.4]]])
+
+
+def test_gaussian_subtraction_removes_main_beam_before_sidelobe_measurement():
+    """A fitted main beam is removed while a separate sidelobe remains."""
+    axis = np.arange(51) - 25
+    l_grid, m_grid = np.meshgrid(axis, axis, indexing="ij")
+    sigma = 4.0
+    psf = np.exp(-0.5 * (l_grid**2 + m_grid**2) / sigma**2)
+    psf[5, 5] += 0.25
+    data = psf[None, None, None, ...]
+    beam = np.array([[[[sigma * FWHM_factor, sigma * FWHM_factor, 0.0]]]])
+
+    result = _max_sidelobe_after_gaussian_subtraction(
+        data,
+        beam,
+        np.array([1.0, 1.0]),
+    )
+
+    np.testing.assert_allclose(result, [[[0.25]]], atol=1e-12)
+
+
+def test_gaussian_subtraction_keeps_negative_sidelobe_magnitude():
+    """CASA-style sidelobes include the magnitude of the PSF minimum."""
+    data = np.zeros((1, 1, 1, 21, 21), dtype=np.float64)
+    data[0, 0, 0, 10, 10] = 1.0
+    data[0, 0, 0, 2, 2] = -0.4
+    beam = np.array([[[[FWHM_factor, FWHM_factor, 0.0]]]])
+
+    result = _max_sidelobe_after_gaussian_subtraction(
+        data,
+        beam,
+        np.array([1.0, 1.0]),
+    )
+
+    np.testing.assert_allclose(result, [[[0.4]]])
 
 
 def test_psf_gaussian_fit_core_per_slice_boxes():

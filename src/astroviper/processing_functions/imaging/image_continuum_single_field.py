@@ -770,7 +770,10 @@ def finalize_mvc_taylor_normal_equations(
 
     residual_sum = contributions["MVC_RESIDUAL_WEIGHT_SUM"]
     if bool((residual_sum <= 0.0).any()):
-        raise ValueError("MVC residual normalization has an empty image plane.")
+        raise ValueError(
+            "MVC residual normalization has an empty image plane: "
+            f"values={np.asarray(residual_sum.values)!r}."
+        )
 
     if effective_primary_beam is None:
         psf_sum = contributions["MVC_PSF_WEIGHT_SUM"]

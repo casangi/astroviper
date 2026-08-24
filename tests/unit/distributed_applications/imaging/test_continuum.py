@@ -19,6 +19,7 @@ from xradio.measurement_set import open_processing_set
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
     _apply_exact_frequency_selection_to_continuum_mapping,
     _continuum_image_for_disk,
+    _validate_continuum_cycleniter,
     calculate_number_of_chunks_for_continuum_imaging,
     combine_continuum_chunks,
     combine_continuum_imaging_weight_chunks,
@@ -31,6 +32,19 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
 TW_HYDRA_ARCHIVE = Path(__file__).parent / "data" / "tw_hydra_5chan_fixture.zip"
 TW_HYDRA_STORE_NAME = "twhya_selfcal_lsrk_5chans.ps.zarr"
 TW_HYDRA_RELATIVE_TOLERANCE = 1.0e-6
+
+
+def test_continuum_cleaning_requires_explicit_positive_cycleniter():
+    """Automatic minor-cycle lengths are rejected before graph construction."""
+    with pytest.raises(ValueError, match="explicit positive cycleniter"):
+        _validate_continuum_cycleniter({"niter": 100, "cycleniter": -1})
+    with pytest.raises(ValueError, match="explicit positive cycleniter"):
+        _validate_continuum_cycleniter({"niter": 100})
+
+
+def test_continuum_dirty_image_does_not_require_cycleniter():
+    """A zero-iteration dirty image has no minor cycle to configure."""
+    _validate_continuum_cycleniter({"niter": 0, "cycleniter": -1})
 
 
 def _frequency_mapping(task_frequency_chunks, child_frequencies):
