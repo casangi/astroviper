@@ -108,6 +108,16 @@ _PARAM_CONFIG_DIR = os.path.dirname(__file__)
 # is fine; ``polarization`` is excluded because it is non-numeric and tiny.
 ALLOWED_PARALLEL_AXES = ("frequency", "l", "m", "time")
 
+# Streaming-read memory targets (see moment_axis_read_block and the
+# memory_budget_gb resolution in moments()): a task's TOTAL usage -- process
+# baseline + decoded read block + zarr decode transient + accumulators -- is
+# aimed at MOMENTS_MEMORY_FRACTION of the per-thread memory.
+# MOMENTS_TASK_BASELINE_GB is the measured non-read footprint (interpreter +
+# dask worker + xarray/zarr machinery + output maps: ~0.7 GB observed on the
+# 2026-08-23 Frontera run, kept with headroom).
+MOMENTS_MEMORY_FRACTION = 0.8
+MOMENTS_TASK_BASELINE_GB = 1.5
+
 
 def _open_input_image(input_image_store, selection):
     """Open the input image lazily and apply the user selection.
@@ -182,7 +192,7 @@ def moments(
     thread_info: dict | None = None,
     compressor=None,
     overwrite: bool = False,
-    memory_budget_gb: float = 1.0,
+    memory_budget_gb: float | None = None,
     monitor_resources_seconds: float | None = None,
     dimension_flags: dict | None = None,
 ):
@@ -283,14 +293,16 @@ def moments(
         If ``True`` an existing ``moments_image_store`` is overwritten;
         otherwise its presence raises ``RuntimeError``.
     memory_budget_gb : float, default 1.0
-        Target size (GiB) of one decoded read block of a node task's chunk
-        along the moment axis (see
-        :func:`~astroviper.node_tasks.image_analysis.moments.moment_axis_read_block`):
-        a block spans a whole number of on-disk chunk lengths along the
-        moment axis and is capped at this size, so a task's peak memory is
-        roughly the output maps + this block + the zarr decode transient.
-        Also enters the distributed application's per-chunk memory estimate.
-        Ignored by the ``median`` slab path.
+        Memory budget (GiB) for one streaming read request of a node task
+        along the moment axis, covering the decoded block AND the zarr
+        decode transient (see
+        :func:`~astroviper.node_tasks.image_analysis.moments.moment_axis_read_block`).
+        ``None`` (default) targets a TOTAL task footprint of ~80% of the
+        per-thread memory (``MOMENTS_MEMORY_FRACTION`` x memory_per_thread
+        minus the ``MOMENTS_TASK_BASELINE_GB`` process baseline) -- as few,
+        large read requests as the worker's memory allows; an explicit value
+        is clamped to that same ceiling. Ignored by the ``median`` slab
+        path.
 
     monitor_resources_seconds : float, optional
         If set, sample each node task's worker-process CPU / memory / I/O
@@ -461,14 +473,36 @@ def moments(
     if streamed:
         map_cells = singleton_cells / sky.sizes[moment_axis]
         memory_singleton_chunk = map_cells * 100.0 * fudge_factor / (1024**3)
-        # The read block may never take more than a quarter of a thread's
-        # memory (block + decode transient + accumulators must all fit): clamp
-        # the requested budget and hand the EFFECTIVE value to the node tasks.
-        memory_budget_gb = float(
-            min(memory_budget_gb, 0.25 * thread_info["memory_per_thread"])
+        # Resolve the read budget the node tasks stream with. The budget
+        # covers a request's WHOLE footprint (decoded block + zarr decode
+        # transient; see moment_axis_read_block), so the auto default targets
+        # MOMENTS_MEMORY_FRACTION of the per-thread memory minus the process
+        # baseline (interpreter + worker + accumulators) -- i.e. total task
+        # usage ~ 80%: fewer, larger read requests = lighter Lustre request
+        # load at the same byte count. An explicit memory_budget_gb is
+        # clamped to that same ceiling so a task can never outgrow its
+        # worker.
+        memory_per_thread = float(thread_info["memory_per_thread"])
+        # The baseline shrinks on small-memory threads (a laptop test thread
+        # has no 1.5 GB dask-worker footprint) so budget + baseline always
+        # leaves at least (1 - fraction) of the thread for the accumulators.
+        baseline_gb = min(MOMENTS_TASK_BASELINE_GB, 0.2 * memory_per_thread)
+        auto_budget = max(
+            0.05 * memory_per_thread,
+            MOMENTS_MEMORY_FRACTION * memory_per_thread - baseline_gb,
         )
-        constant_memory = 2.0 * memory_budget_gb
-        logger.debug(f"moments: effective read-block budget {memory_budget_gb:.3f} GiB")
+        memory_budget_gb = float(
+            auto_budget
+            if memory_budget_gb is None
+            else min(memory_budget_gb, auto_budget)
+        )
+        constant_memory = memory_budget_gb + baseline_gb
+        logger.info(
+            f"moments: read budget {memory_budget_gb:.2f} GiB per task "
+            f"(target {MOMENTS_MEMORY_FRACTION:.0%} of "
+            f"{memory_per_thread:.1f} GiB per thread, "
+            f"baseline {baseline_gb:.2f} GiB)"
+        )
 
     n_chunks = {}
     auto_axes = [axis for axis in parallel_axes if n_mapping_parallelism[axis] is None]

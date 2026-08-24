@@ -213,65 +213,72 @@ def test_returns_timing_frame(input_image, tmp_path):
 # ---------------------------------------------------------------------------
 # Streaming read path (memory strategy)
 # ---------------------------------------------------------------------------
-def test_read_block_follows_chunk_geometry_and_budget(tmp_path):
-    """Blocks span whole on-disk chunk lengths along the moment axis and are
-    capped by the memory budget (falling back to partial chunks only when a
-    single chunk length does not fit)."""
+def test_read_block_covers_block_plus_decode_transient(tmp_path):
+    """The block is the largest whole number of chunk/shard lengths whose
+    decoded block PLUS zarr decode transient fits the budget; fewer, larger
+    requests with an ample budget; never 0."""
     import importlib
+
+    import zarr
 
     node = importlib.import_module("astroviper.node_tasks.image_analysis.moments")
     _open_image_lazy = node._open_image_lazy
     moment_axis_read_block = node.moment_axis_read_block
 
     img_xds = make_test_image_xds(n_frequency=12, n_l=16, n_m=16)
-    path = str(tmp_path / "chunked.img.zarr")
-    img_xds.to_zarr(
-        path,
-        mode="w",
-        zarr_format=3,
-        encoding={
-            "SKY": {"chunks": (1, 4, 2, 8, 8)},
-            "MASK": {"chunks": (1, 4, 2, 8, 8)},
-        },
-    )
-    lazy = _open_image_lazy(path)["SKY"]
-    block_des = {"m": slice(0, 8)}
-    plane_bytes = 2 * 16 * 8 * 4  # pol x l x m-slice x float32
     gib = 1024**3
-    # Budget for 9 planes -> 2 chunk lengths (8 planes), not 9.
-    assert (
-        moment_axis_read_block(lazy, block_des, "frequency", 9 * plane_bytes / gib) == 8
-    )
-    # Ample budget -> all 12 planes (3 chunk lengths).
-    assert moment_axis_read_block(lazy, block_des, "frequency", 1.0) == 12
-    # Budget below one chunk length -> whole planes that fit (2), never 0.
-    assert (
-        moment_axis_read_block(lazy, block_des, "frequency", 2.5 * plane_bytes / gib)
-        == 2
-    )
-    assert moment_axis_read_block(lazy, block_des, "frequency", 0.0) == 1
-    # A non-chunked axis (polarization chunk = full axis) is read in one block.
-    assert moment_axis_read_block(lazy, {}, "polarization", 1.0) == 2
+    block_des = {"m": slice(0, 8)}
+    # Selected slice: pol(2) x l(16) x m(8) float32 -> 1024 B per plane.
 
-    # Sharded store: a request never spans more than one shard along the
-    # moment axis (nested zarr concurrency), even with an ample budget.
-    sharded = str(tmp_path / "sharded.img.zarr")
-    img_xds.to_zarr(
-        sharded,
-        mode="w",
-        zarr_format=3,
-        encoding={
-            "SKY": {"chunks": (1, 1, 2, 8, 8), "shards": (1, 4, 2, 16, 16)},
-            "MASK": {"chunks": (1, 1, 2, 8, 8), "shards": (1, 4, 2, 16, 16)},
-        },
-    )
-    lazy = _open_image_lazy(sharded)["SKY"]
-    assert moment_axis_read_block(lazy, block_des, "frequency", 1.0) == 4
-    # Budget below a shard length -> chunk multiples within the shard.
-    assert (
-        moment_axis_read_block(lazy, block_des, "frequency", 3.5 * plane_bytes / gib)
-        == 3
-    )
+    with zarr.config.set({"async.concurrency": 10}):
+        # --- unsharded: chunks (1, 4, 2, 8, 8) -> 2048 B chunks, the m-slice
+        # touches 2 l-chunk columns; transient = min(chunks, 10) x 2 x 2048.
+        path = str(tmp_path / "chunked.img.zarr")
+        img_xds.to_zarr(
+            path,
+            mode="w",
+            zarr_format=3,
+            encoding={
+                "SKY": {"chunks": (1, 4, 2, 8, 8)},
+                "MASK": {"chunks": (1, 4, 2, 8, 8)},
+            },
+        )
+        lazy = _open_image_lazy(path)["SKY"]
+        # block(4) = 4096 + 2 chunks in flight x 2 x 2048 = 12288 B;
+        # block(8) = 8192 + 4 x 2 x 2048 = 24576 B; block(12) = 36864 B.
+        assert moment_axis_read_block(lazy, block_des, "frequency", 1.0) == 12
+        assert moment_axis_read_block(lazy, block_des, "frequency", 25000 / gib) == 8
+        assert moment_axis_read_block(lazy, block_des, "frequency", 13000 / gib) == 4
+        # Budget below one chunk length + transient: whole planes, never 0.
+        assert moment_axis_read_block(lazy, block_des, "frequency", 9000 / gib) == 1
+        assert moment_axis_read_block(lazy, block_des, "frequency", 0.0) == 1
+
+        # --- sharded: chunks (1, 1, 2, 8, 8) in shards (1, 4, 2, 16, 16):
+        # step = one shard (4 planes), 8 inner chunks per shard for this tile,
+        # transient = min(shards, 10) x min(8, 10) x 2 x 512 B.
+        sharded = str(tmp_path / "sharded.img.zarr")
+        img_xds.to_zarr(
+            sharded,
+            mode="w",
+            zarr_format=3,
+            encoding={
+                "SKY": {"chunks": (1, 1, 2, 8, 8), "shards": (1, 4, 2, 16, 16)},
+                "MASK": {"chunks": (1, 1, 2, 8, 8), "shards": (1, 4, 2, 16, 16)},
+            },
+        )
+        lazy = _open_image_lazy(sharded)["SKY"]
+        # block(4) = 4096 + 8192 = 12288; block(8) = 8192 + 16384 = 24576;
+        # block(12) = 12288 + 24576 = 36864.
+        # An ample budget spans MULTIPLE shards (fewer, larger requests).
+        assert moment_axis_read_block(lazy, block_des, "frequency", 1.0) == 12
+        assert moment_axis_read_block(lazy, block_des, "frequency", 25000 / gib) == 8
+        assert moment_axis_read_block(lazy, block_des, "frequency", 13000 / gib) == 4
+        # Transient alone exceeds the budget: fall back to 1 plane.
+        assert moment_axis_read_block(lazy, block_des, "frequency", 4000 / gib) == 1
+
+    # A non-chunked axis (polarization chunk = full axis) is read in one block.
+    with zarr.config.set({"async.concurrency": 10}):
+        assert moment_axis_read_block(lazy, {}, "polarization", 1.0) == 2
 
 
 def test_streaming_path_never_holds_the_chunk_slab(input_image, monkeypatch):
@@ -361,6 +368,11 @@ def test_timing_frame_records_strategy(input_image, tmp_path):
     )["timing_node_tasks"]
     assert bool(df["streamed"].iloc[0]) is True
     assert df["n_read_block_planes"].iloc[0] >= 1
+    # T_moments splits into stream-read + accumulate on the streamed path.
+    assert 0.0 <= df["T_stream_read"].iloc[0] <= df["T_moments"].iloc[0]
+    assert df["T_accumulate"].iloc[0] == pytest.approx(
+        df["T_moments"].iloc[0] - df["T_stream_read"].iloc[0]
+    )
     assert {"T_load", "T_moments", "T_write", "T_moments_task"} <= set(df.columns)
 
 

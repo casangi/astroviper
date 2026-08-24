@@ -87,14 +87,16 @@ IMAGE_ANALYSIS_PARAM_DOCS = {
         "image)."
     ),
     "memory_budget_gb": (
-        "Target size (GiB) of one decoded read block of a node task's chunk\n"
-        "along the moment axis (see\n"
-        ":func:`~astroviper.node_tasks.image_analysis.moments.moment_axis_read_block`):\n"
-        "a block spans a whole number of on-disk chunk lengths along the\n"
-        "moment axis and is capped at this size, so a task's peak memory is\n"
-        "roughly the output maps + this block + the zarr decode transient.\n"
-        "Also enters the distributed application's per-chunk memory estimate.\n"
-        "Ignored by the ``median`` slab path."
+        "Memory budget (GiB) for one streaming read request of a node task\n"
+        "along the moment axis, covering the decoded block AND the zarr\n"
+        "decode transient (see\n"
+        ":func:`~astroviper.node_tasks.image_analysis.moments.moment_axis_read_block`).\n"
+        "``None`` (default) targets a TOTAL task footprint of ~80% of the\n"
+        "per-thread memory (``MOMENTS_MEMORY_FRACTION`` x memory_per_thread\n"
+        "minus the ``MOMENTS_TASK_BASELINE_GB`` process baseline) -- as few,\n"
+        "large read requests as the worker's memory allows; an explicit value\n"
+        "is clamped to that same ceiling. Ignored by the ``median`` slab\n"
+        "path."
     ),
     "dimension_flags": (
         "Per-dimension flags over the FULL image: ``{dim: boolean array\n"

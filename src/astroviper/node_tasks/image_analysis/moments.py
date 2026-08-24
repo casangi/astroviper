@@ -46,39 +46,37 @@ def _open_image_lazy(input_image_store):
 
 def moment_axis_read_block(lazy_var, block_des, stream_axis, memory_budget_gb):
     """Number of ``stream_axis`` planes to read per request, from the on-disk
-    chunk / shard geometry and a memory budget.
+    chunk / shard geometry and a TOTAL memory budget for the read.
 
     A block is the unit read from the store (one zarr request) and streamed
-    through the moments accumulator. Three constraints:
+    through the moments accumulator. Fewer, larger requests mean fewer
+    request round-trips and a deeper zarr read pipeline (lighter Lustre
+    request load at the same byte count), so the block is made as large as
+    ``memory_budget_gb`` allows, where the budget covers BOTH parts of a
+    request's footprint:
 
-    * **Decode efficiency**: a partial read of an on-disk chunk decodes the
-      WHOLE chunk, so a block should cover a whole number of chunk lengths
-      along ``stream_axis`` (else the chunk is re-decoded once per block).
-    * **Bounded decode transient**: zarr decodes the chunks of one request
-      concurrently, and for SHARDED stores the concurrency limit applies per
-      nesting level (shards x inner chunks per shard) -- a request spanning
-      many shards can hold far more decoded chunks than the limit suggests
-      (the 2026-08 MemoryErrors). A block therefore never exceeds ONE shard
-      length along ``stream_axis``, so a request touches exactly one shard
-      per on-disk chunk column of the task's tile.
-    * **Memory**: the decoded block of this task's tile is at most
-      ``memory_budget_gb``.
+    * the decoded **block** itself (``planes x plane_bytes``), and
+    * the zarr **decode transient**: zarr's concurrency limit applies per
+      nesting level of the sharding codec, so a request spanning ``k`` shards
+      holds up to ``min(k, L) x min(inner_chunks_per_shard, L)`` chunks in
+      flight (``L`` = ``zarr.config async.concurrency``), each ~ compressed +
+      decoded bytes (2 x chunk size). This is what OOMed the unbounded reads
+      (2026-08); making it part of the budget bounds it by construction.
 
-    Returns the shard length if it fits the budget, else the largest multiple
-    of the chunk length that fits, else as many whole planes as fit (at least
-    1); always clamped to the axis length. Non-zarr / unchunked stores count
-    as chunk length 1 with no shards.
+    The block is a whole number of shard lengths along ``stream_axis`` (chunk
+    lengths for unsharded stores) so no shard/chunk is decoded twice, and at
+    least 1 plane. The caller sets ``memory_budget_gb`` from the worker's
+    memory (e.g. the moments driver targets 80% of per-thread memory minus a
+    process baseline).
     """
     import numpy as np
+    import zarr
 
     axis = lazy_var.dims.index(stream_axis)
     chunks = lazy_var.encoding.get("chunks")
     shards = lazy_var.encoding.get("shards")
-    chunk_len = (
-        max(1, int(chunks[axis]))
-        if chunks is not None and len(chunks) == lazy_var.ndim
-        else 1
-    )
+    have_chunks = chunks is not None and len(chunks) == lazy_var.ndim
+    chunk_len = max(1, int(chunks[axis])) if have_chunks else 1
     shard_len = (
         max(chunk_len, int(shards[axis]))
         if shards is not None and len(shards) == lazy_var.ndim
@@ -86,24 +84,63 @@ def moment_axis_read_block(lazy_var, block_des, stream_axis, memory_budget_gb):
     )
     selected = lazy_var.isel(block_des)
     n_planes = selected.sizes[stream_axis]
+    itemsize = selected.dtype.itemsize
     plane_bytes = (
         float(np.prod([selected.sizes[d] for d in selected.dims if d != stream_axis]))
-        * selected.dtype.itemsize
+        * itemsize
     )
+    if memory_budget_gb is None:
+        # Standalone / slab-path default (the driver resolves an explicit
+        # value for the streamed path): a conservative 1 GiB read unit.
+        memory_budget_gb = 1.0
     budget_bytes = max(memory_budget_gb, 0.0) * 1024**3
-    planes_in_budget = int(budget_bytes // max(plane_bytes, 1))
-    if shard_len is not None and planes_in_budget >= shard_len:
-        block = shard_len
-    elif planes_in_budget >= chunk_len:
-        block = chunk_len * (planes_in_budget // chunk_len)
-        if shard_len is not None:
-            block = min(block, shard_len)
+
+    try:
+        concurrency = int(zarr.config.get("async.concurrency") or 10)
+    except Exception:
+        concurrency = 10
+    if have_chunks:
+        chunk_bytes = float(np.prod(chunks)) * itemsize
+        # Inner chunks the tile touches per stream-axis chunk row: one per
+        # touched chunk along every other dimension.
+        tile_chunk_columns = 1.0
+        for d, dim in enumerate(lazy_var.dims):
+            if dim == stream_axis:
+                continue
+            tile_chunk_columns *= float(-(-selected.sizes[dim] // max(1, chunks[d])))
     else:
-        # The budget cannot even hold one chunk length: whole planes that fit
-        # (re-decoding the chunk per block; correct but slower) rather than
-        # overrunning the budget.
-        block = max(1, planes_in_budget)
-    return max(1, min(block, n_planes))
+        chunk_bytes = plane_bytes
+        tile_chunk_columns = 1.0
+
+    def transient_bytes(block_planes):
+        """Compressed + decoded bytes zarr can hold in flight for one request."""
+        if shard_len is not None:
+            n_shards = -(-block_planes // shard_len)
+            inner_per_shard = tile_chunk_columns * (shard_len / chunk_len)
+            in_flight = min(n_shards, concurrency) * min(inner_per_shard, concurrency)
+        else:
+            n_chunks = tile_chunk_columns * -(-block_planes // chunk_len)
+            in_flight = min(n_chunks, concurrency)
+        return 2.0 * in_flight * chunk_bytes
+
+    step = shard_len if shard_len is not None else chunk_len
+    # Largest multiple of `step` whose block + decode transient fit the budget
+    # (the transient is a step function of the block, so scan multiples).
+    best = 0
+    max_units = max(1, -(-n_planes // step))
+    for units in range(1, max_units + 1):
+        block_planes = min(units * step, n_planes)
+        if block_planes * plane_bytes + transient_bytes(block_planes) > budget_bytes:
+            break
+        best = block_planes
+        if block_planes >= n_planes:
+            break
+    if best:
+        return best
+    # Not even one step fits: fall back to whole planes within the budget
+    # (re-decoding chunks across blocks; correct but slower), never 0.
+    planes_in_budget = int((budget_bytes - transient_bytes(1)) // max(plane_bytes, 1))
+    return max(1, min(planes_in_budget, n_planes))
 
 
 def _make_plane_reader(lazy_xds, sky_name, mask_name, block_des, stream_axis, n_block):
@@ -289,14 +326,16 @@ def moments(
         if ``False`` the chunk dataset is returned instead of written (used
         for standalone testing).
     memory_budget_gb : float, default 1.0
-        Target size (GiB) of one decoded read block of a node task's chunk
-        along the moment axis (see
-        :func:`~astroviper.node_tasks.image_analysis.moments.moment_axis_read_block`):
-        a block spans a whole number of on-disk chunk lengths along the
-        moment axis and is capped at this size, so a task's peak memory is
-        roughly the output maps + this block + the zarr decode transient.
-        Also enters the distributed application's per-chunk memory estimate.
-        Ignored by the ``median`` slab path.
+        Memory budget (GiB) for one streaming read request of a node task
+        along the moment axis, covering the decoded block AND the zarr
+        decode transient (see
+        :func:`~astroviper.node_tasks.image_analysis.moments.moment_axis_read_block`).
+        ``None`` (default) targets a TOTAL task footprint of ~80% of the
+        per-thread memory (``MOMENTS_MEMORY_FRACTION`` x memory_per_thread
+        minus the ``MOMENTS_TASK_BASELINE_GB`` process baseline) -- as few,
+        large read requests as the worker's memory allows; an explicit value
+        is clamped to that same ceiling. Ignored by the ``median`` slab
+        path.
 
     Returns
     -------
@@ -304,9 +343,10 @@ def moments(
         ``{"timing_node_tasks": pandas.DataFrame}`` -- a one-row timing frame with ``T_load`` (streaming: time to open the
         store and plan the read; median: the slab load), ``T_moments``
         (streaming reads + accumulation), ``T_write`` and the total
-        ``T_moments_task`` (plus ``task_id``, ``n_read_block_planes`` and
-        ``streamed``) when ``graph_mode=True``; the per-chunk moments dataset
-        when ``graph_mode=False``.
+        ``T_moments_task`` (plus ``task_id``, ``n_read_block_planes``,
+        ``streamed`` and -- streamed path only -- the ``T_moments`` split
+        ``T_stream_read`` / ``T_accumulate``) when ``graph_mode=True``; the
+        per-chunk moments dataset when ``graph_mode=False``.
     """
     import time
 
@@ -392,11 +432,24 @@ def moments(
     )
 
     start = time.time()
+    stream_read_seconds = 0.0
     if streamed:
         selected = lazy_xds[variables].isel(block_des)
-        read_planes = _make_plane_reader(
+        inner_read_planes = _make_plane_reader(
             lazy_xds, sky_name, mask_name, block_des, moment_axis, n_block
         )
+
+        def read_planes(block_start, block_stop):
+            # Accumulate the time spent reading/decoding so the timing frame
+            # can split T_moments into T_stream_read (I/O + decompress) and
+            # T_accumulate (the numpy accumulation) -- the two candidates for
+            # what bounds a task.
+            nonlocal stream_read_seconds
+            read_start = time.time()
+            result = inner_read_planes(block_start, block_stop)
+            stream_read_seconds += time.time() - read_start
+            return result
+
         moments_img_xds = moments_streamed(
             read_planes,
             coords_xds=selected,
@@ -471,6 +524,14 @@ def moments(
                 "start_unixtime": task_start,
                 "T_load": T_load,
                 "T_moments": T_moments,
+                # Streamed path only: T_moments = T_stream_read (zarr I/O +
+                # decompress inside the read_planes calls) + T_accumulate
+                # (accumulation + bookkeeping). NaN on the median slab path
+                # (there T_load carries the read).
+                "T_stream_read": stream_read_seconds if streamed else float("nan"),
+                "T_accumulate": (
+                    T_moments - stream_read_seconds if streamed else float("nan")
+                ),
                 "T_write": T_write,
                 "T_moments_task": time.time() - task_start,
                 "hostname": socket.gethostname(),
