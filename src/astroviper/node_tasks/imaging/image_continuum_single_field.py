@@ -180,7 +180,7 @@ def _install_static_continuum_products(
 
             img_xds[name] = xr.Variable(
                 source.dims,
-                source.data,
+                source.data.copy(),
                 attrs=source.attrs.copy(),
             )
 
@@ -1745,7 +1745,10 @@ def _prepare_continuum_image(
                 f"Missing: {missing}."
             )
 
-        static_xds = img_xds[list(static_variable_names)].copy(deep=False)
+        # Keep the correlation-basis cache independent: img_xds is converted
+        # to Stokes below, while later residual updates reinstall this cache
+        # and perform that conversion exactly once per cycle.
+        static_xds = img_xds[list(static_variable_names)].copy(deep=True)
         static_xds.attrs = dict(img_xds.attrs)
 
     # ------------------------------------------------------------------
@@ -1962,6 +1965,19 @@ def continuum_minor_cycle_node(
 
     model_update_input_params = dict(input_params)
     model_update_input_params.pop("static_xds", None)
+
+    # A residual-update reduce has no deconvolution work of its own, but keeps
+    # the result schema stable by returning an empty ReturnDict. Do not let
+    # that placeholder hide the history supplied by the previous model update.
+    reduced_deconvolution = input_data.get("deconvolution")
+    previous_deconvolution = input_params.get("deconvolution")
+    if (
+        reduced_deconvolution is not None
+        and not reduced_deconvolution.data
+        and previous_deconvolution is not None
+        and previous_deconvolution.data
+    ):
+        input_data["deconvolution"] = previous_deconvolution
 
     # Preserve imaging weights collected during the first major-cycle reduce.
     weight_cache_mapping = input_data.get("weight_cache_mapping")
@@ -2273,15 +2289,6 @@ def model_update_continuum_single_field(
     # Prepare control parameters
     img_xds = input_data["image"]
     iteration_control_params = input_params["iteration_control_params"]
-    if int(iteration_control_params["niter"]) > 0 and (
-        iteration_control_params.get("cycleniter") is None
-        or int(iteration_control_params["cycleniter"]) <= 0
-    ):
-        raise ValueError(
-            "Continuum cleaning requires an explicit positive cycleniter; "
-            "automatic cycleniter=-1 is not supported."
-        )
-
     deconvolver = input_params.get("deconvolver", "hogbom")
     processing_function_threads = input_params.get(
         "processing_function_threads",

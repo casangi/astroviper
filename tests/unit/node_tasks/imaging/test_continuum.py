@@ -6,6 +6,7 @@ import xarray as xr
 
 import astroviper.node_tasks.imaging.image_continuum_single_field as continuum_node
 import astroviper.processing_functions.imaging.image_continuum_single_field as continuum_processing
+from astroviper.processing_functions.imaging.utils import ReturnDict
 
 
 def _model_dataset(value):
@@ -129,6 +130,22 @@ def test_install_static_products_replaces_unused_frequency_coordinate():
     np.testing.assert_array_equal(result.frequency, [1.5e9])
 
 
+def test_install_static_products_does_not_alias_the_cache():
+    """Per-cycle polarization conversion must not mutate cached static arrays."""
+    static = _static_products()
+    result = continuum_node._install_static_continuum_products(
+        xr.Dataset(),
+        static,
+    )
+
+    result["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"].data[...] = 0.0
+
+    np.testing.assert_array_equal(
+        static["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"],
+        1.0,
+    )
+
+
 def test_install_static_products_rejects_frequency_still_in_use():
     """A live channel cube prevents replacement of its frequency coordinate."""
     image = xr.Dataset(
@@ -171,6 +188,47 @@ def test_minor_append_normalizes_single_leaf_cache_state(monkeypatch):
     )
     assert captured["pb_cache_mapping"] == {7: pb_xds}
     assert result["weight_cache_mapping"] == {7: weights}
+
+
+def test_minor_append_preserves_history_when_reduce_result_is_empty(monkeypatch):
+    """An empty reduce placeholder must not hide prior deconvolution history."""
+    reduced_history = ReturnDict()
+    previous_history = ReturnDict()
+    previous_history.add(
+        {"peakres": 2.5, "max_psf_sidelobe": 0.35},
+        time=0,
+        pol=0,
+        chan=0,
+    )
+    captured = {}
+
+    monkeypatch.setattr(
+        continuum_node,
+        "_prepare_continuum_image",
+        lambda image, input_params, **kwargs: (image, xr.Dataset(), None),
+    )
+
+    def fake_model_update(input_data, input_params):
+        captured["history"] = input_data["deconvolution"]
+        return {"image": input_data["image"]}
+
+    monkeypatch.setattr(
+        continuum_node,
+        "model_update_continuum_single_field",
+        fake_model_update,
+    )
+    monkeypatch.setattr(
+        continuum_node,
+        "_prepare_post_update_continuum_model_state",
+        lambda image, input_params: (xr.Dataset(), None),
+    )
+
+    continuum_node.continuum_minor_cycle_node(
+        {"image": xr.Dataset(), "deconvolution": reduced_history},
+        {"is_n_iter_0": False, "deconvolution": previous_history},
+    )
+
+    assert captured["history"] is previous_history
 
 
 def _empty_weight_image(**kwargs):
