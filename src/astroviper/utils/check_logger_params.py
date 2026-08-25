@@ -1,14 +1,10 @@
 # ducting - code is complex and might fail after some time if parameters is wrong. Sensable values are also checked. Gives printout of all wrong parameters. Dirty images alone has 14 parameters.
 
-import numpy as np
-from .check_params import check_params, _check_dataset
+from astroviper.utils.check_params import check_params
 
 
 def check_logger_params(logger_params):
-    import numbers
-
     params_passed = True
-    arc_sec_to_rad = np.pi / (3600 * 180)
 
     if not (check_params(logger_params, "log_to_term", [bool], default=True)):
         params_passed = False
@@ -31,10 +27,7 @@ def check_logger_params(logger_params):
 
 
 def check_worker_logger_params(logger_params):
-    import numbers
-
     params_passed = True
-    arc_sec_to_rad = np.pi / (3600 * 180)
 
     if not (check_params(logger_params, "log_to_term", [bool], default=False)):
         params_passed = False

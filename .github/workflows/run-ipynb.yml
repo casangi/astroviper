@@ -1,4 +1,5 @@
 # .github/workflows/python-testing-linux.yml
+# Test all notebooks.
 name: ipynb Tests
 
 on:
@@ -12,7 +13,10 @@ on:
       - '**.rst'
 
 jobs:
- 
+
   call-testing-linux:
-    uses: casangi/toolviper/.github/workflows/run-ipynb-template.yml@main
+    uses: nrao/gh-actions-templates-public/.github/workflows/run-ipynb-template.yml@main
+    with:
+      # astroviper's C++ extensions require C++23 (GCC >= 14).
+      gcc-version: "14"
     secrets: inherit

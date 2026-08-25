@@ -1,70 +1,47 @@
-from xradio.measurement_set.processing_set_xdt import ProcessingSetXdt
-from xradio.measurement_set.measurement_set_xdt import MeasurementSetXdt
-
-import dask
 import numpy as np
 import xarray as xa
-import datetime
+from xradio.measurement_set.measurement_set_xdt import MeasurementSetXdt
 
 
-from .utils import (
-    unique,
-    multiply_scalar_in_place
-    )
+# I am surprised this is not some kind of standard function, but the
+# pandas version scolds me for using it on a string.
+#
+# This implementation is O(n^2) but if that is ever an issue we are
+# doing something else very wrong.
+def unique(s):
+    "Get the unique characters in a string in the order they occur in the original"
+    u = []
+    for c in s:
+        if c not in u:
+            u.append(c)
+    return u
 
-def get_xds_antenna_polarizations(xds):
-    # (n_antenna, n_polarization_type)
-    pol_types = xds.antenna_xds.polarization_type.values
-    if not np.equal(pol_types, pol_types[0]).all:
-        raise ValueError("We don't implement distinct polarization types yet")
-    return pol_types[0]
 
-def extract_several_fringefit_coord_dict_entries_from_xds(xds: MeasurementSetXdt):
-    coord_dict = {
-        # Which time should we use? 
-        "time": [xds.time[0]],
-        "antenna_name": xds.antenna_xds.antenna_name.values,
-        "frequency": [xds.frequency.reference_frequency["data"]],
-        "receptor_label": xds.antenna_xds.receptor_label.values,
-    }
-    return coord_dict
-    
-def make_empty_cal_xds(xds: MeasurementSetXdt):
+def make_empty_cal_quantum(xds: MeasurementSetXdt):
     """
     args: xds, the measurement set used to get the axes we need for our calibration quantum
     """
-    coord_dict = extract_several_fringefit_coord_dict_entries_from_xds(xds)
+    pols_ant = unique("".join([c for c in "".join(xds.polarization.values)]))
+    coord_dict = {
+        "time": [xds.time.values[0]],
+        "antenna_name": xds.antenna_xds.antenna_name.values,
+        # We have to shift phase to that frequency, I guess,
+        # because otherwise it will be wrong.
+        "frequency": [xds.frequency.reference_frequency["data"]],
+        "polarization": pols_ant,
+        "cal_parameter": ["phase", "delay", "rate"],
+    }
     quantum_coords = xa.Coordinates(coords=coord_dict)
-    quantum_coords['frequency'].attrs = xds.frequency.attrs.copy()
-    multiply_scalar_in_place(xds.frequency.shape[0], quantum_coords['frequency'].attrs['channel_width'])
-    quantum_coords['time'].attrs = xds.time.attrs.copy()
     q = xa.Dataset(
         {
-            "CALPARAM_PHASE" : xa.DataArray(coords=quantum_coords),
-            "CALPARAM_DELAY" : xa.DataArray(coords=quantum_coords),
-            "CALPARAM_RATE" : xa.DataArray(coords=quantum_coords),
-            
-            "CALERROR_PHASE": xa.DataArray(coords=quantum_coords),
-            "CALERROR_DELAY": xa.DataArray(coords=quantum_coords),
-            "CALERROR_RATE": xa.DataArray(coords=quantum_coords),
+            "CALIBRATION_PARAMETER": xa.DataArray(coords=quantum_coords),
             "SNR": xa.DataArray(coords=quantum_coords),
             "ref_antenna": xa.DataArray(coords=(quantum_coords["time"],)).astype(
                 np.dtype("<U2")
             ),
-            "FLAGS": xa.DataArray(coords=quantum_coords).astype(bool),
-            ## FIXME: We need to do something about field_name, but I am not 100% what
-            # "field_name": xds.field_name # FIXME I think this might still be pretty bad!
         }
     )
-
-
     q.attrs["spectral_window_name"] = xds.frequency.spectral_window_name
-    q.attrs["type"] = "Fringefit CalXds"
-    q.attrs["type_version"] = "0.0"
-    q.attrs["schema_version"] = "0.0"
-    q.attrs["creator"] = {'software_name': 'astroviper.fringefit',
-                          'version': '0.0'}
-    q.attrs["creation_date"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     return q
 
 
@@ -82,61 +59,34 @@ def square_up_last_dimension(v):
     return v2
 
 
-def square_up_last_dimension(v):
-    s = v.shape[:-1] + (2, 2)
-    v2 = np.reshape(v, s)
-    return v2
-
-class SingleFringeJones(object):
-    def __init__(self, corr_xds):
-        """A class to handle applying the fringefit corrections
-
-        This requires calculating left and right Jones matrices (or
-        tensors with Jones matrix indices among others); once we have
-        these we can calculate new visibilities as
-
-           v_corr = left_jones @ v @ right_jones
-
-        The version implemented here doesn't handle interpolation in
-        time, however.
-        """
-
-        self.corr_xds = corr_xds
+class SingleFringeJones:
+    def __init__(self, q):
+        """ """
+        self.q = q
 
     def calc_antenna_jones(self, xds: MeasurementSetXdt):
-        """Calculate the Jones matrices each antenna
-
-        We calculate matrices for all the times and frequencies in xds for each antenna""" 
+        # We scrape all the metadata from an xds. Maybe this is wise, maybe not.
         frequency = xds.frequency
-
-        ref_freq = self.corr_xds.frequency[0]
-        dt = xds.time - self.corr_xds.time[0]
-        df = frequency - ref_freq
+        ref_freq = self.q.frequency.values[0]
+        dt = xds.time.values - self.q.time.values[0]
+        df = frequency.values - ref_freq
         # We upscale the dimensions so that things broadcast nicely:
         # We want a matrix of (n_time, n_ant, n_freq, n_pol)
-        coords = xa.Coordinates({'frequency' : xds.frequency,
-                                 'time' : xds.time,
-                                 })
-        
+        df_shaped = np.expand_dims(df, (0, 1, 3))  # frequency is dimension 2
+        dt_shaped = np.expand_dims(dt, (1, 2, 3))
+        cal = self.q.CALIBRATION_PARAMETER
         # (time, antenna_name, frequency, polarization, cal_parameter)
-        self.phi0 = self.corr_xds.CALPARAM_PHASE.interp(coords, method='nearest', kwargs={'fill_value':'extrapolate'})
-        self.tau = self.corr_xds.CALPARAM_DELAY.interp(coords, method='nearest', kwargs={'fill_value':'extrapolate'})
-        self.r = self.corr_xds.CALPARAM_RATE.interp(coords,  method='nearest', kwargs={'fill_value':'extrapolate'})
-
+        phi0 = cal[:, :, :, :, 0].values
+        tau = cal[:, :, :, :, 1].values
+        r = cal[:, :, :, :, 2].values
+        # These are compatible with the shape (n_time, n_ant, n_freq, n_pol)
         # Calculate phases:
-        self.phi = self.phi0 + 2 * np.pi * self.tau * df + 2*np.pi * ref_freq * self.r * dt
-        self.phi *= -1 # There's always a minus sign somewhere, and this one is here because it makes things better.
+        phi = phi0 + 2 * np.pi * tau * df_shaped + 2 * np.pi * ref_freq * r * dt_shaped
         # Shape: (n_time, n_ant, n_freq, n_pol)
-        antenna_jones = np.exp(1j * self.phi, dtype=complex)
+        antenna_jones = np.exp(1j * phi, dtype=complex)
         return antenna_jones
 
     def get_left_jones(self, antenna_jones, left_indices):
-        """
-        Turn the antenna-based Jones matrices into baseline-indexed matrices
-
-        We use the first antenna in the baseline here; see
-        get_right_jones for the second antenna.
-        """
         # antenna_jones has shape: (n_time, n_ant, n_freq, n_pol)
         # We map the left antenna in a baseline to the baseline dimension
         jones_diags_left0 = antenna_jones[:, left_indices, :, :]
@@ -146,12 +96,6 @@ class SingleFringeJones(object):
         return jones_diags_left
 
     def get_right_jones(self, antenna_jones, right_indices):
-        """
-        Turn the antenna-based Jones matrices into baseline-indexed matrices
-
-        We use the second antenna in the baseline here; see
-        get_left_jones for the first antenna.
-        """
         # antenna_jones has shape: (n_time, n_ant, n_freq, n_pol)
         # We map the left antenna in each baseline to the baseline dimension
         jones_diags_right0 = antenna_jones[:, right_indices, :, :]
@@ -165,15 +109,6 @@ class SingleFringeJones(object):
         return jones_diags_right
 
     def get_ant_to_baseline_maps(self, xds):
-        """
-        Get indices of antenna1 and antenna2 for each baseline
-
-        The only reason this deserves its own method is that antenna1
-        and antenna2 values are stored as names, which is very nice in
-        and of itself but here we need to do matrix arithmetic and
-        numerical indices are handier for that
-
-        """
         # Both antenna?_name values are n_baseline long
         baseline_antenna1_name = xds.baseline_antenna1_name.values
         baseline_antenna2_name = xds.baseline_antenna2_name.values
@@ -185,7 +120,10 @@ class SingleFringeJones(object):
         # And the same for right indices
         right_indices = [ant_num_map[n] for n in baseline_antenna2_name]
         return left_indices, right_indices
-    def apply_cal_vis(self, xds):
+
+    def apply_cal(self, xds):
+        if len(xds.time.values) == 0:
+            return xds
         antenna_jones = self.calc_antenna_jones(xds)
         left_indices, right_indices = self.get_ant_to_baseline_maps(xds)
         # v has shape (n_time, n_baseline, n_freq, 2, 2)
@@ -193,17 +131,8 @@ class SingleFringeJones(object):
         # Jones matrices for each visibility for left and right antennas on a baseline
         left_jones = self.get_left_jones(antenna_jones, left_indices)
         right_jones = self.get_right_jones(antenna_jones, right_indices)
-        # We have a very concise form for calibration:
+        # We have a very concise and pleasant form for calibration:
         v2 = left_jones @ v @ right_jones
-        return v2
-    
-    def apply_cal(self, xds, group_name='calibrated'):
-        """
-        Apply the calibration from our CorrXDS to a single xds
-        """
-        if len(xds.time.values) == 0:
-            return xds
-        v2 = self.apply_cal_vis(xds)
         # Reshape the visibilities back to (n_time, n_baseline, n_freq, 4)
         s3 = v2.shape[:-2] + (4,)
         v2 = v2.reshape(s3)
@@ -216,12 +145,10 @@ class SingleFringeJones(object):
         da = xa.DataArray(coords=coords, data=v2)
         new_xds = xds.assign({"VISIBILITY_CORRECTED": da})
         # Now we add the new data group:
-        new_xds.attrs["data_groups"][group_name] = {
+        xds.attrs["data_groups"]["calibrated"] = {
             "correlated_data": "VISIBILITY_CORRECTED",
             "flag": "FLAG",
             "weight": "WEIGHT",
             "uvw": "UVW",
         }
-        self.new_xds = new_xds
-        self.da = da
         return new_xds
