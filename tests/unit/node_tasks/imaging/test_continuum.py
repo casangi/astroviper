@@ -320,3 +320,56 @@ def test_weight_degrid_node_extracts_only_registered_weight_arrays(monkeypatch):
     assert set(cached) == {"WEIGHT_IMAGING"}
     assert cached.WEIGHT_IMAGING.attrs["units"] == "arbitrary"
     assert result["timing_node_tasks"].iloc[0].n_processing_set_children == 1
+
+
+def test_weight_degrid_node_writes_in_place_and_returns_no_array_cache(monkeypatch):
+    """In-place global weighting writes locally and keeps the graph result small."""
+    monkeypatch.setattr("xradio.image.make_empty_sky_image", _empty_weight_image)
+    child = xr.Dataset(
+        {
+            "WEIGHT_IMAGING": xr.DataArray(
+                np.ones((1, 1, 2, 2)),
+                dims=("time", "baseline", "frequency", "polarization"),
+            )
+        },
+        attrs={"data_groups": {"base": {"weight_imaging": "WEIGHT_IMAGING"}}},
+    )
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.calculate_imaging_weights."
+        "degrid_imaging_weights_continuum",
+        lambda *args, **kwargs: {"ms": child},
+    )
+    written = {}
+    monkeypatch.setattr(
+        continuum_node,
+        "_write_continuum_weights_in_place",
+        lambda ps_xdt, ps_store: written.update(processing_set=ps_xdt, store=ps_store),
+    )
+    params = _weight_node_params()
+    params.update(global_weighting_xds=xr.Dataset(), weight_memory_mode="in_place")
+
+    result = continuum_node.degrid_imaging_weights_continuum_node(**params)
+
+    assert result["weight_datasets"] == {}
+    assert written == {"processing_set": {"ms": child}, "store": "unused"}
+    assert result["timing_node_tasks"].iloc[0].n_processing_set_children == 1
+
+
+def test_stored_coordinate_indexer_supports_irregular_subsets():
+    """An irregular selected coordinate maps to exact on-disk positions."""
+    actual = continuum_node._stored_coordinate_indexer(
+        np.array([100.0, 101.0, 102.0, 103.0]),
+        np.array([103.0, 100.0, 102.0]),
+        "frequency",
+    )
+    np.testing.assert_array_equal(actual, [3, 0, 2])
+
+
+def test_stored_coordinate_indexer_rejects_missing_values():
+    """An in-place write fails rather than placing an unmatched coordinate."""
+    with pytest.raises(ValueError, match="absent from the in-place weight store"):
+        continuum_node._stored_coordinate_indexer(
+            np.array([100.0, 101.0]),
+            np.array([102.0]),
+            "frequency",
+        )

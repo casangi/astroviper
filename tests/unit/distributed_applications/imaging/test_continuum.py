@@ -5,6 +5,7 @@ These tests ensure the disk output uses those finalized dimensions and values,
 rather than retaining the frequency-cube NaN placeholders created at startup.
 """
 
+import shutil
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -478,6 +479,7 @@ def _run_tw_hydra_continuum(
     reduce_mode="tree",
     reduce_n_batch=2,
     cache_directory=None,
+    weight_memory_mode="in_memory",
     write_visibility_model_to_ps=False,
     write_imaging_weights_to_ps=False,
     clear_cache=True,
@@ -521,6 +523,7 @@ def _run_tw_hydra_continuum(
             n_chunks=n_chunks,
             overwrite=True,
             memory_mode="in_memory",
+            weight_memory_mode=weight_memory_mode,
             cache_directory=cache_directory,
             write_visibility_model_to_ps=write_visibility_model_to_ps,
             write_imaging_weights_to_ps=write_imaging_weights_to_ps,
@@ -534,6 +537,125 @@ def _run_tw_hydra_continuum(
             reduce_n_batch=reduce_n_batch,
         )
     return result, xr.open_zarr(output_store)
+
+
+@pytest.mark.parametrize(
+    ("specmode", "weighting"),
+    [
+        pytest.param(
+            "mfs",
+            {"weighting": "natural", "weighting_scope": "local"},
+            id="mfs-local",
+        ),
+        pytest.param(
+            "mfs",
+            {
+                "weighting": "briggs",
+                "robust": 0.5,
+                "weighting_scope": "global",
+                "casa_weighting_implementation": True,
+            },
+            id="mfs-global",
+        ),
+        pytest.param(
+            "mvc",
+            {"weighting": "natural", "weighting_scope": "local"},
+            id="mvc-local",
+        ),
+        pytest.param(
+            "mvc",
+            {
+                "weighting": "briggs",
+                "robust": 0.5,
+                "weighting_scope": "global",
+                "casa_weighting_implementation": True,
+            },
+            id="mvc-global",
+        ),
+    ],
+)
+def test_tw_hydra_in_place_weights_match_memory_and_are_cleaned(
+    tmp_path, tw_hydra_store, specmode, weighting
+):
+    """Task-local disk weights reproduce memory mode and are temporary by default."""
+    reference_processing_set = open_processing_set(str(tw_hydra_store))
+    _, reference = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / "reference.img.zarr",
+        reference_processing_set,
+        2,
+        specmode,
+        weighting,
+    )
+
+    in_place_store = tmp_path / "in_place.ps.zarr"
+    shutil.copytree(tw_hydra_store, in_place_store)
+    in_place_processing_set = open_processing_set(str(in_place_store))
+    _, actual = _run_tw_hydra_continuum(
+        in_place_store,
+        tmp_path / "in_place.img.zarr",
+        in_place_processing_set,
+        2,
+        specmode,
+        weighting,
+        weight_memory_mode="in_place",
+    )
+
+    for variable in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"):
+        np.testing.assert_allclose(
+            actual[variable],
+            reference[variable],
+            rtol=TW_HYDRA_RELATIVE_TOLERANCE,
+            atol=0.0,
+            equal_nan=True,
+        )
+
+    reopened = open_processing_set(str(in_place_store))
+    for _, ms_xdt in reopened.items():
+        assert "WEIGHT_IMAGING_CONTINUUM_CACHE" not in ms_xdt.ds
+        assert "weight_imaging" not in ms_xdt.ds.attrs["data_groups"]["base"]
+
+
+def test_tw_hydra_in_place_weights_can_be_retained(tmp_path, tw_hydra_store):
+    """The persistence flag keeps usable in-place weights registered in the PS."""
+    in_place_store = tmp_path / "retained.ps.zarr"
+    shutil.copytree(tw_hydra_store, in_place_store)
+    processing_set = open_processing_set(str(in_place_store))
+    _run_tw_hydra_continuum(
+        in_place_store,
+        tmp_path / "retained.img.zarr",
+        processing_set,
+        2,
+        "mfs",
+        {"weighting": "natural", "weighting_scope": "local"},
+        weight_memory_mode="in_place",
+        write_imaging_weights_to_ps=True,
+    )
+
+    reopened = open_processing_set(str(in_place_store))
+    for _, ms_xdt in reopened.items():
+        cache_name = ms_xdt.ds.attrs["data_groups"]["base"]["weight_imaging"]
+        assert cache_name == "WEIGHT_IMAGING_CONTINUUM_CACHE"
+        cached_weights = ms_xdt.ds[cache_name].values
+        # Flagged or absent samples may remain NaN, as they do in memory.  The
+        # cache is valid when it contains finite, positive imaging weights.
+        assert np.isfinite(cached_weights).any()
+        assert np.nanmax(cached_weights) > 0.0
+
+    # A later temporary run can safely replace and then remove a retained cache.
+    _run_tw_hydra_continuum(
+        in_place_store,
+        tmp_path / "rerun.img.zarr",
+        reopened,
+        2,
+        "mfs",
+        {"weighting": "natural", "weighting_scope": "local"},
+        weight_memory_mode="in_place",
+    )
+    cleaned = open_processing_set(str(in_place_store))
+    for _, ms_xdt in cleaned.items():
+        assert "WEIGHT_IMAGING_CONTINUUM_CACHE" not in ms_xdt.ds
+        assert "weight_imaging" not in ms_xdt.ds.attrs["data_groups"]["base"]
 
 
 @pytest.mark.parametrize(

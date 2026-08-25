@@ -1,5 +1,7 @@
 from astroviper.utils.param_docs import shares_param_docs
 
+_CONTINUUM_WEIGHT_CACHE_VARIABLE = "WEIGHT_IMAGING_CONTINUUM_CACHE"
+
 ###############################################################################
 # Generic helper functions
 ###############################################################################
@@ -45,6 +47,97 @@ def _write_task_kill_switch_log(
     except Exception as exc:
         # Never allow logging failure to mask the kill-switch exception.
         return f"(failed to write kill-switch log: {exc!r})"
+
+
+def _stored_coordinate_indexer(stored_values, selected_values, dimension):
+    """Map a loaded coordinate onto its exact positions in the Zarr store."""
+    import numpy as np
+
+    stored_values = np.asarray(stored_values)
+    selected_values = np.asarray(selected_values)
+    if np.array_equal(stored_values, selected_values):
+        return slice(None)
+
+    if np.unique(stored_values).size != stored_values.size:
+        raise ValueError(f"Stored coordinate {dimension!r} contains duplicate values.")
+
+    positions = {
+        value.item() if hasattr(value, "item") else value: index
+        for index, value in enumerate(stored_values)
+    }
+    try:
+        indices = np.asarray(
+            [
+                positions[value.item() if hasattr(value, "item") else value]
+                for value in selected_values
+            ],
+            dtype=np.int64,
+        )
+    except KeyError as exc:
+        raise ValueError(
+            f"Selected coordinate {dimension!r} contains value {exc.args[0]!r} "
+            "that is absent from the in-place weight store."
+        ) from exc
+
+    return indices
+
+
+def _write_continuum_weights_in_place(ps_xdt, ps_store):
+    """Write task-local imaging weights into disjoint Processing Set regions."""
+    import numpy as np
+    import zarr
+
+    root = zarr.open_group(ps_store, mode="r+")
+    for ms_name, ms_xdt in ps_xdt.items():
+        data_groups = ms_xdt.ds.attrs.get("data_groups", {})
+        weight_name = next(
+            (
+                group.get("weight_imaging")
+                for group in data_groups.values()
+                if group.get("weight_imaging") in ms_xdt.ds
+            ),
+            None,
+        )
+        if weight_name is None:
+            raise RuntimeError(
+                f"No calculated imaging weights are available for {ms_name!r}."
+            )
+
+        weight = ms_xdt.ds[weight_name]
+        ms_group = root[ms_name]
+        if _CONTINUUM_WEIGHT_CACHE_VARIABLE not in ms_group:
+            raise KeyError(
+                f"In-place weight array {_CONTINUUM_WEIGHT_CACHE_VARIABLE!r} "
+                f"has not been initialized for {ms_name!r}."
+            )
+
+        target = ms_group[_CONTINUUM_WEIGHT_CACHE_VARIABLE]
+        if target.metadata.zarr_format == 3:
+            dimensions = tuple(target.metadata.dimension_names)
+        else:
+            dimensions = tuple(target.attrs["_ARRAY_DIMENSIONS"])
+        if weight.dims != dimensions:
+            raise ValueError(
+                f"Calculated imaging-weight dimensions for {ms_name!r} are "
+                f"{weight.dims}; expected {dimensions}."
+            )
+
+        indexers = []
+        for dimension in dimensions:
+            if dimension not in weight.coords or dimension not in ms_group:
+                raise KeyError(
+                    f"Coordinate {dimension!r} required to write in-place "
+                    f"weights for {ms_name!r} is missing."
+                )
+            indexers.append(
+                _stored_coordinate_indexer(
+                    ms_group[dimension][:],
+                    weight.coords[dimension].values,
+                    dimension,
+                )
+            )
+
+        target.oindex[tuple(indexers)] = np.asarray(weight.values)
 
 
 def _unwrap_continuum_reduce_result(input_data, node_name):
@@ -410,6 +503,7 @@ def residual_update_continuum_single_field(
     fft_backend="pyfftw",
     image_data_variables_keep=None,
     memory_mode="in_memory",
+    weight_memory_mode="in_memory",
     skunk_works=False,
     data_group=None,
     is_n_iter_0=True,
@@ -446,47 +540,64 @@ def residual_update_continuum_single_field(
     Parameters
     ----------
     image_params : dict
-        Image geometry and output coordinates. In addition to the standard imaging
-        parameters, the continuum processing function may require entries such as
-        ``reference_frequency`` and ``nterms``.
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor.
 
     imaging_weights_params : dict
-        Imaging-weight configuration.
+        Weighting scheme configuration: ``weighting`` (``"natural"`` or
+        ``"briggs"``) and the Briggs ``robust`` parameter.
 
     task_coords : dict
-        Per-chunk coordinate mapping. ``task_coords["frequency"]["data"]``
-        supplies the frequency coordinates assigned to this worker.
+        Per-chunk coordinate mapping; ``task_coords["frequency"]["data"]``
+        supplies this chunk's frequency axis.
 
     data_selection : dict
         Visibility selection injected by GraphViper.
 
     image_store : str
-        Retained for task watchdog logging. This node task does not write image
-        products.
+        Path/URL of the on-disk Zarr image cube.
 
     input_data_store : str
         Processing-set store used when ``input_data`` is not supplied.
 
     processing_set_data_group_name : str, optional
-        Processing-set data group to image.
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
 
     instrument_polarization_basis : str, optional
-        Instrument correlation basis used during gridding.
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` (``XX``/``YY``) or ``"circular"`` (``RR``/``LL``). The
+        output image is always produced in the Stokes basis.
 
     single_precision_image : bool, optional
-        Whether image-domain arrays use single precision.
+        If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
+        images) are single precision (``complex64`` / ``float32``) and the minor
+        cycle runs in single precision; the visibilities always stay double
+        precision. If ``False`` the image-domain arrays are double precision.
 
     processing_function_threads : int, optional
-        Number of threads supplied to the imaging kernels.
+        Number of threads handed to the per-processing-function (C++ / Numba /
+        FFT) kernels.
 
     fft_backend : str, optional
-        FFT backend used by the processing function.
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
 
     image_data_variables_keep : list of str, optional
-        Logical image products retained in the returned dataset.
+        Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
+        ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
 
     memory_mode : str, optional
         Currently only ``"in_memory"`` is supported.
+
+    weight_memory_mode : {"in_memory", "in_place"}, optional
+        Storage policy for calculated continuum imaging weights. ``"in_memory"``
+        returns task-local weights to the driver and embeds them in subsequent
+        graphs. ``"in_place"`` writes each task's weights into the input
+        Processing Set and reloads only the required partition during each major
+        cycle, reducing scheduler and worker memory at the cost of additional
+        disk I/O. This option is intentionally separate from ``memory_mode`` in
+        the initial implementation; the two policies may be unified later.
 
     skunk_works : bool, optional
         Use the experimental direct-Zarr loading path.
@@ -502,7 +613,7 @@ def residual_update_continuum_single_field(
         Ignored during the first major cycle.
 
     task_id : int, optional
-        Identifier of the frequency chunk.
+        Identifier of the frequency chunk being imaged.
 
     pblimit : float, optional
         Channel primary-beam cutoff used for MVC map-local Taylor products.
@@ -556,6 +667,11 @@ def residual_update_continuum_single_field(
     assert (
         memory_mode == "in_memory"
     ), "Currently only memory_mode='in_memory' is implemented."
+    if weight_memory_mode not in ("in_memory", "in_place"):
+        raise ValueError(
+            "weight_memory_mode must be 'in_memory' or 'in_place'; received "
+            f"{weight_memory_mode!r}."
+        )
 
     if image_data_variables_keep is None:
         image_data_variables_keep = [
@@ -832,6 +948,7 @@ def residual_update_continuum_single_field(
     # They may have been loaded from the processing set or calculated in setup.
     weight_datasets = {}
 
+    T_write_imaging_weights = 0.0
     if is_n_iter_0 and weight_cache_mapping is None:
         import xarray as xr
 
@@ -863,6 +980,12 @@ def residual_update_continuum_single_field(
                 },
             )
 
+        if weight_memory_mode == "in_place":
+            start = time.time()
+            _write_continuum_weights_in_place(ps_xdt, input_data_store)
+            T_write_imaging_weights = time.time() - start
+            weight_datasets = {}
+
     # No output image writing is performed here. The Taylor products stay in
     # memory and flow directly into the GraphViper reduction stage.
 
@@ -880,6 +1003,7 @@ def residual_update_continuum_single_field(
 
     timing_df["T_make_empty_image"] = T_make_empty_image
     timing_df["T_load"] = T_load
+    timing_df["T_write_imaging_weights"] = T_write_imaging_weights
 
     # Keep this column for compatibility with the existing timing schema while
     # making it explicit that no writing occurred.
@@ -1155,6 +1279,7 @@ def degrid_imaging_weights_continuum_node(
     processing_set_data_group_name="corrected",
     instrument_polarization_basis="linear",
     processing_function_threads=1,
+    weight_memory_mode="in_memory",
     skunk_works=False,
     data_group=None,
     input_data=None,
@@ -1169,7 +1294,17 @@ def degrid_imaging_weights_continuum_node(
     samples, and returns only the resulting imaging-weight arrays.
 
     No density gridding or Briggs-factor calculation is performed here.
-    """
+
+    Parameters
+    ----------
+    weight_memory_mode : {"in_memory", "in_place"}, optional
+        Storage policy for calculated continuum imaging weights. ``"in_memory"``
+        returns task-local weights to the driver and embeds them in subsequent
+        graphs. ``"in_place"`` writes each task's weights into the input
+        Processing Set and reloads only the required partition during each major
+        cycle, reducing scheduler and worker memory at the cost of additional
+        disk I/O. This option is intentionally separate from ``memory_mode`` in
+        the initial implementation; the two policies may be unified later."""
     import time
 
     import pandas as pd
@@ -1183,6 +1318,12 @@ def degrid_imaging_weights_continuum_node(
 
     task_id = int(task_id)
     task_start = time.time()
+
+    if weight_memory_mode not in ("in_memory", "in_place"):
+        raise ValueError(
+            "weight_memory_mode must be 'in_memory' or 'in_place'; received "
+            f"{weight_memory_mode!r}."
+        )
 
     if not isinstance(global_weighting_xds, xr.Dataset):
         raise TypeError(
@@ -1342,6 +1483,15 @@ def degrid_imaging_weights_continuum_node(
         )
 
     T_extract_imaging_weights = time.time() - start
+    T_write_imaging_weights = 0.0
+    n_processing_set_children = len(weight_datasets)
+
+    if weight_memory_mode == "in_place":
+        start = time.time()
+        _write_continuum_weights_in_place(ps_xdt, input_data_store)
+        T_write_imaging_weights = time.time() - start
+        weight_datasets = {}
+
     task_total_time = time.time() - task_start
 
     timing_df = pd.DataFrame(
@@ -1351,15 +1501,16 @@ def degrid_imaging_weights_continuum_node(
             "T_make_empty_image": [T_make_empty_image],
             "T_degrid_imaging_weights": [T_degrid_imaging_weights],
             "T_extract_imaging_weights": [T_extract_imaging_weights],
+            "T_write_imaging_weights": [T_write_imaging_weights],
             "T_imaging_weight_degrid_node": [task_total_time],
             "n_frequency_channels": [img_xds.sizes.get("frequency", 0)],
-            "n_processing_set_children": [len(weight_datasets)],
+            "n_processing_set_children": [n_processing_set_children],
         }
     )
 
     logger.debug(
         "Finished continuum imaging-weight degrid task "
-        f"{task_id}: {len(weight_datasets)} processing-set children, "
+        f"{task_id}: {n_processing_set_children} processing-set children, "
         f"{task_total_time:.3f} s."
     )
 

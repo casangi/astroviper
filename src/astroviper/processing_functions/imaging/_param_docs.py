@@ -91,6 +91,15 @@ IMAGING_PARAM_DOCS = {
         "cycle runs in single precision; the visibilities always stay double\n"
         "precision. If ``False`` the image-domain arrays are double precision."
     ),
+    "weight_memory_mode": (
+        'Storage policy for calculated continuum imaging weights. ``"in_memory"``\n'
+        "returns task-local weights to the driver and embeds them in subsequent\n"
+        'graphs. ``"in_place"`` writes each task\'s weights into the input\n'
+        "Processing Set and reloads only the required partition during each major\n"
+        "cycle, reducing scheduler and worker memory at the cost of additional\n"
+        "disk I/O. This option is intentionally separate from ``memory_mode`` in\n"
+        "the initial implementation; the two policies may be unified later."
+    ),
     "processing_function_threads": (
         "Number of threads handed to the per-processing-function (C++ / Numba /\n"
         "FFT) kernels."
