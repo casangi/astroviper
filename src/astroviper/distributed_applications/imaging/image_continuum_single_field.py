@@ -43,6 +43,104 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
 DISTRIBUTED_APPLICATION_TIMING_TOTAL_KEY = "T_total"
 
 _CONTINUUM_WEIGHT_CACHE_VARIABLE = "WEIGHT_IMAGING_CONTINUUM_CACHE"
+_WIDEBAND_PRIMARY_BEAM_CACHE_GROUP = "_WIDEBAND_PRIMARY_BEAM_CACHE"
+_WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE = "PRIMARY_BEAM"
+
+
+def _create_wideband_primary_beam_cache_store(
+    image_store,
+    img_xds,
+    frequency_values,
+    instrument_polarization_basis,
+    single_precision_image,
+    compressor,
+):
+    """Create the temporary MVC channel-primary-beam cache in the image store."""
+    import numpy as np
+
+    root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
+    if _WIDEBAND_PRIMARY_BEAM_CACHE_GROUP in root:
+        del root[_WIDEBAND_PRIMARY_BEAM_CACHE_GROUP]
+    cache = root.create_group(_WIDEBAND_PRIMARY_BEAM_CACHE_GROUP)
+
+    frequencies = np.asarray(frequency_values, dtype=np.float64)
+    polarizations = {
+        "linear": ("XX", "YY"),
+        "circular": ("RR", "LL"),
+    }[instrument_polarization_basis]
+    dimensions = ("time", "frequency", "polarization", "l", "m")
+    shape = (
+        int(img_xds.sizes["time"]),
+        int(frequencies.size),
+        len(polarizations),
+        int(img_xds.sizes["l"]),
+        int(img_xds.sizes["m"]),
+    )
+    chunks = (
+        1,
+        1,
+        1,
+        min(512, shape[-2]),
+        min(512, shape[-1]),
+    )
+    zarr_format = root.metadata.zarr_format
+    array_options = {
+        "shape": shape,
+        "dtype": np.dtype("<f4" if single_precision_image else "<f8"),
+        "chunks": chunks,
+        "fill_value": np.nan,
+        "attributes": {
+            "description": "Temporary task-partitioned MVC primary-beam cache.",
+            "type": "primary_beam",
+            "method": "airy_disk",
+            "polarization_values": list(polarizations),
+        },
+    }
+    frequency_options = {
+        "data": frequencies,
+        "chunks": (min(1024, max(1, frequencies.size)),),
+    }
+    if zarr_format == 3:
+        array_options["dimension_names"] = dimensions
+        frequency_options["dimension_names"] = ("frequency",)
+    else:
+        array_options["compressor"] = compressor
+
+    primary_beam = cache.create_array(
+        _WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE,
+        **array_options,
+    )
+    frequency = cache.create_array("frequency", **frequency_options)
+    if zarr_format == 2:
+        primary_beam.attrs["_ARRAY_DIMENSIONS"] = list(dimensions)
+        frequency.attrs["_ARRAY_DIMENSIONS"] = ["frequency"]
+
+    zarr.consolidate_metadata(image_store)
+
+
+def _remove_wideband_primary_beam_cache(image_store):
+    """Remove the temporary MVC primary-beam cache if it exists."""
+    root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
+    if _WIDEBAND_PRIMARY_BEAM_CACHE_GROUP in root:
+        del root[_WIDEBAND_PRIMARY_BEAM_CACHE_GROUP]
+
+
+def _mapping_with_task_primary_beams(node_task_data_mapping, pb_cache_mapping):
+    """Attach only each task's own in-memory MVC primary beam to its mapping."""
+    expected = {int(task_id) for task_id in node_task_data_mapping}
+    actual = {int(task_id) for task_id in pb_cache_mapping}
+    if actual != expected:
+        raise ValueError(
+            "The MVC primary-beam cache does not match the continuum tasks: "
+            f"expected={sorted(expected)}, received={sorted(actual)}."
+        )
+
+    task_mapping = {}
+    for task_id, mapping in node_task_data_mapping.items():
+        task_id = int(task_id)
+        task_mapping[task_id] = dict(mapping)
+        task_mapping[task_id]["primary_beam_xds"] = pb_cache_mapping[task_id]
+    return task_mapping
 
 
 def _create_continuum_weight_cache_store(
@@ -2198,6 +2296,7 @@ def image_continuum_single_field(
     overwrite: bool = False,
     memory_mode: str = "in_memory",
     weight_memory_mode: str = "in_memory",
+    widebandpb_memory_mode: str = "in_memory",
     cache_directory: str | None = None,
     write_visibility_model_to_ps: bool = False,
     write_imaging_weights_to_ps: bool = False,
@@ -2250,7 +2349,14 @@ def image_continuum_single_field(
         Processing Set and reloads only the required partition during each major
         cycle, reducing scheduler and worker memory at the cost of additional
         disk I/O. This option is intentionally separate from ``memory_mode`` in
-        the initial implementation; the two policies may be unified later."""
+        the initial implementation; the two policies may be unified later.
+
+    widebandpb_memory_mode : {"in_memory", "in_place", "recompute"}, optional
+        MVC-only storage policy for the frequency-dependent primary beam.
+        ``"in_place"`` stores it temporarily in the image Zarr store and reads
+        only task-local channels, ``"recompute"`` regenerates the analytic beam
+        inside every later map, and ``"in_memory"`` retains it at the driver but
+        passes each map only its local beam. The setting is ignored for MFS."""
     import time
 
     import numpy as np
@@ -2285,6 +2391,11 @@ def image_continuum_single_field(
         raise ValueError(
             "weight_memory_mode must be 'in_memory' or 'in_place'; received "
             f"{weight_memory_mode!r}."
+        )
+    if widebandpb_memory_mode not in ("in_memory", "in_place", "recompute"):
+        raise ValueError(
+            "widebandpb_memory_mode must be 'in_memory', 'in_place', or "
+            f"'recompute'; received {widebandpb_memory_mode!r}."
         )
     if weight_memory_mode == "in_place" and skunk_works:
         raise NotImplementedError(
@@ -2425,6 +2536,7 @@ def image_continuum_single_field(
     input_params["image_data_variables_keep"] = image_data_variables_keep
     input_params["memory_mode"] = memory_mode
     input_params["weight_memory_mode"] = weight_memory_mode
+    input_params["widebandpb_memory_mode"] = widebandpb_memory_mode
     input_params["cache_directory"] = cache_directory
     input_params["write_visibility_model_to_ps"] = write_visibility_model_to_ps
     input_params["write_imaging_weights_to_ps"] = write_imaging_weights_to_ps
@@ -2510,6 +2622,20 @@ def image_continuum_single_field(
         ps_xdt,
     )
     timing_distributed_application["T_interpolate_data_coords"] = time.time() - start
+
+    if specmode == "mvc" and widebandpb_memory_mode == "in_place":
+        start = time.time()
+        _create_wideband_primary_beam_cache_store(
+            image_store,
+            img_xds,
+            image_params["frequency_coords"],
+            instrument_polarization_basis,
+            single_precision_image,
+            compressor,
+        )
+        timing_distributed_application["T_create_in_place_widebandpb_cache"] = (
+            time.time() - start
+        )
 
     original_weight_data_groups = None
     weight_cache_is_active = False
@@ -2695,7 +2821,6 @@ def image_continuum_single_field(
 
             if specmode == "mvc":
                 cycle_input_params["model_xds"] = model_xds
-                cycle_input_params["pb_cache_mapping"] = pb_cache_mapping
 
         # During the first major cycle the PSF and residual Taylor products
         # are reduced. Later cycles only produce new residual products; the
@@ -2760,20 +2885,26 @@ def image_continuum_single_field(
             append_input_params["deconvolution"] = last_minor_return_dict[
                 "deconvolution"
             ]
-            if specmode == "mvc":
-                # Later map tasks consume the cached channel PBs for model
-                # prediction, but do not emit them again. Carry the same cache
-                # directly to the global residual conversion/minor-cycle node.
-                append_input_params["pb_cache_mapping"] = pb_cache_mapping
 
         # ---------------------------------------------------------
         # Execute one major cycle followed by one minor cycle.
         # ---------------------------------------------------------
 
         # Call the graph with continuum_minor_cycle_node
+        cycle_node_task_data_mapping = node_task_data_mapping
+        if (
+            specmode == "mvc"
+            and not is_n_iter_0
+            and widebandpb_memory_mode == "in_memory"
+        ):
+            cycle_node_task_data_mapping = _mapping_with_task_primary_beams(
+                node_task_data_mapping,
+                pb_cache_mapping,
+            )
+
         cycle_return_dict, graph_timings = compute_continuum_graph(
             ps_xdt=ps_xdt,
-            node_task_data_mapping=node_task_data_mapping,
+            node_task_data_mapping=cycle_node_task_data_mapping,
             cycle_input_params=cycle_input_params,
             reduce_input_params=reduce_input_params,
             disk_chunk_sizes=disk_chunk_sizes,
@@ -2870,14 +3001,21 @@ def image_continuum_single_field(
             weight_cache_is_active = True
 
         # Store frequency-dependent primary beam in the cache if running as mvc
-        if specmode == "mvc" and is_n_iter_0:
+        if specmode == "mvc" and is_n_iter_0 and widebandpb_memory_mode == "in_memory":
             pb_cache_mapping = cycle_return_dict.get("pb_cache_mapping")
-            cycle_input_params["pb_cache_mapping"] = pb_cache_mapping
-
             if pb_cache_mapping is None:
                 raise RuntimeError(
                     "The first MVC major cycle did not return "
                     "the frequency-dependent PB cache."
+                )
+            expected_task_ids = {int(task_id) for task_id in node_task_data_mapping}
+            actual_task_ids = {int(task_id) for task_id in pb_cache_mapping}
+            if actual_task_ids != expected_task_ids:
+                raise RuntimeError(
+                    "The first MVC major cycle returned an incomplete primary-beam "
+                    "cache: "
+                    f"expected={sorted(expected_task_ids)}, "
+                    f"received={sorted(actual_task_ids)}."
                 )
 
         # Update global iteration control information and break loop if converged
@@ -2916,7 +3054,6 @@ def image_continuum_single_field(
     final_input_params["static_xds"] = static_xds
     final_input_params["specmode"] = specmode
     final_input_params["pblimit"] = float(pblimit)
-    final_input_params["pb_cache_mapping"] = pb_cache_mapping
 
     final_input_params["weight_cache_mapping"] = weight_cache_mapping
 
@@ -2943,9 +3080,16 @@ def image_continuum_single_field(
         }
 
     # Call the graph with continuum_finalize_node
+    final_node_task_data_mapping = node_task_data_mapping
+    if specmode == "mvc" and widebandpb_memory_mode == "in_memory":
+        final_node_task_data_mapping = _mapping_with_task_primary_beams(
+            node_task_data_mapping,
+            pb_cache_mapping,
+        )
+
     final_return_dict, graph_timings = compute_continuum_graph(
         ps_xdt=ps_xdt,
-        node_task_data_mapping=node_task_data_mapping,
+        node_task_data_mapping=final_node_task_data_mapping,
         cycle_input_params=final_input_params,
         reduce_input_params=final_reduce_input_params,
         disk_chunk_sizes=disk_chunk_sizes,
@@ -2995,6 +3139,8 @@ def image_continuum_single_field(
         image_data_variables_keep,
         pbcor=pbcor,
     )
+    if specmode == "mvc" and widebandpb_memory_mode == "in_place":
+        _remove_wideband_primary_beam_cache(image_store)
     write_image(
         output_image,
         imagename=image_store,

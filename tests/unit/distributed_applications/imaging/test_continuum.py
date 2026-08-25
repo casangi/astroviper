@@ -14,12 +14,14 @@ import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
+import zarr
 from xradio.image import write_image
 from xradio.measurement_set import open_processing_set
 
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
     _apply_exact_frequency_selection_to_continuum_mapping,
     _continuum_image_for_disk,
+    _mapping_with_task_primary_beams,
     calculate_number_of_chunks_for_continuum_imaging,
     combine_continuum_chunks,
     combine_continuum_imaging_weight_chunks,
@@ -480,6 +482,7 @@ def _run_tw_hydra_continuum(
     reduce_n_batch=2,
     cache_directory=None,
     weight_memory_mode="in_memory",
+    widebandpb_memory_mode="in_memory",
     write_visibility_model_to_ps=False,
     write_imaging_weights_to_ps=False,
     clear_cache=True,
@@ -524,6 +527,7 @@ def _run_tw_hydra_continuum(
             overwrite=True,
             memory_mode="in_memory",
             weight_memory_mode=weight_memory_mode,
+            widebandpb_memory_mode=widebandpb_memory_mode,
             cache_directory=cache_directory,
             write_visibility_model_to_ps=write_visibility_model_to_ps,
             write_imaging_weights_to_ps=write_imaging_weights_to_ps,
@@ -537,6 +541,94 @@ def _run_tw_hydra_continuum(
             reduce_n_batch=reduce_n_batch,
         )
     return result, xr.open_zarr(output_store)
+
+
+def test_task_primary_beam_mapping_contains_only_each_local_dataset():
+    """In-memory MVC graph inputs contain one PB partition, not the full cache."""
+    mapping = {
+        0: {"task_coords": {"frequency": {"data": np.array([1.0])}}},
+        1: {"task_coords": {"frequency": {"data": np.array([2.0])}}},
+    }
+    beams = {
+        0: xr.Dataset({"PRIMARY_BEAM": ("frequency", [10.0])}),
+        1: xr.Dataset({"PRIMARY_BEAM": ("frequency", [20.0])}),
+    }
+
+    actual = _mapping_with_task_primary_beams(mapping, beams)
+
+    assert actual[0]["primary_beam_xds"] is beams[0]
+    assert actual[1]["primary_beam_xds"] is beams[1]
+    assert "primary_beam_xds" not in mapping[0]
+    assert "pb_cache_mapping" not in actual[0]
+
+
+def test_task_primary_beam_mapping_rejects_incomplete_cache():
+    """A missing task PB fails before constructing an invalid distributed graph."""
+    with pytest.raises(ValueError, match="does not match the continuum tasks"):
+        _mapping_with_task_primary_beams({0: {}, 1: {}}, {0: xr.Dataset()})
+
+
+@pytest.mark.parametrize("widebandpb_memory_mode", ["in_place", "recompute"])
+def test_tw_hydra_widebandpb_memory_modes_match_in_memory(
+    tmp_path, tw_hydra_store, widebandpb_memory_mode
+):
+    """MVC disk-backed and recomputed PBs reproduce task-local memory results."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    _, reference = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / "widebandpb_reference.img.zarr",
+        processing_set,
+        2,
+        "mvc",
+        {"weighting": "natural", "weighting_scope": "local"},
+    )
+    output_store = tmp_path / f"widebandpb_{widebandpb_memory_mode}.img.zarr"
+    _, actual = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        output_store,
+        processing_set,
+        2,
+        "mvc",
+        {"weighting": "natural", "weighting_scope": "local"},
+        widebandpb_memory_mode=widebandpb_memory_mode,
+    )
+
+    for variable in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"):
+        np.testing.assert_allclose(
+            actual[variable],
+            reference[variable],
+            rtol=TW_HYDRA_RELATIVE_TOLERANCE,
+            atol=0.0,
+            equal_nan=True,
+        )
+    assert "_WIDEBAND_PRIMARY_BEAM_CACHE" not in zarr.open_group(output_store)
+
+
+def test_tw_hydra_mfs_ignores_widebandpb_memory_mode(tmp_path, tw_hydra_store):
+    """The MVC-specific PB storage keyword leaves MFS products unchanged."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    _, reference = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / "mfs_pb_reference.img.zarr",
+        processing_set,
+        2,
+        "mfs",
+        {"weighting": "natural", "weighting_scope": "local"},
+    )
+    output_store = tmp_path / "mfs_pb_in_place.img.zarr"
+    _, actual = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        output_store,
+        processing_set,
+        2,
+        "mfs",
+        {"weighting": "natural", "weighting_scope": "local"},
+        widebandpb_memory_mode="in_place",
+    )
+
+    for variable in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"):
+        np.testing.assert_array_equal(actual[variable], reference[variable])
+    assert "_WIDEBAND_PRIMARY_BEAM_CACHE" not in zarr.open_group(output_store)
 
 
 @pytest.mark.parametrize(
@@ -748,6 +840,52 @@ def test_tw_hydra_cleaning_runs_later_major_cycles_and_builds_a_model(
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
     assert np.isfinite(image.SKY_RESIDUAL.values).all()
     assert np.isfinite(image.SKY_MODEL.values).all()
+
+
+@pytest.mark.parametrize("widebandpb_memory_mode", ["in_place", "recompute"])
+def test_tw_hydra_widebandpb_modes_preserve_later_mvc_major_cycles(
+    tmp_path, tw_hydra_store, widebandpb_memory_mode
+):
+    """Both low-memory PB policies reproduce MVC prediction after real CLEAN."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    iteration_control_params = {
+        "niter": 20,
+        "nmajor": 2,
+        "threshold": 0.001,
+        "gain": 0.1,
+        "cyclefactor": 1.5,
+        "cycleniter": -1,
+        "minpsffraction": 0.05,
+        "maxpsffraction": 0.8,
+    }
+    _, reference = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / "clean_reference.img.zarr",
+        processing_set,
+        2,
+        "mvc",
+        {"weighting": "natural", "weighting_scope": "local"},
+        iteration_control_params=iteration_control_params,
+    )
+    _, actual = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / f"clean_{widebandpb_memory_mode}.img.zarr",
+        processing_set,
+        2,
+        "mvc",
+        {"weighting": "natural", "weighting_scope": "local"},
+        iteration_control_params=iteration_control_params,
+        widebandpb_memory_mode=widebandpb_memory_mode,
+    )
+
+    for variable in ("SKY_MODEL", "SKY_RESIDUAL"):
+        np.testing.assert_allclose(
+            actual[variable],
+            reference[variable],
+            rtol=TW_HYDRA_RELATIVE_TOLERANCE,
+            atol=1.0e-12,
+            equal_nan=True,
+        )
 
 
 def test_tw_hydra_restoration_and_pbcor_apply_the_primary_beam_limit(

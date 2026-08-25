@@ -367,7 +367,7 @@ def test_stored_coordinate_indexer_supports_irregular_subsets():
 
 def test_stored_coordinate_indexer_rejects_missing_values():
     """An in-place write fails rather than placing an unmatched coordinate."""
-    with pytest.raises(ValueError, match="absent from the in-place weight store"):
+    with pytest.raises(ValueError, match="absent from the in-place store"):
         continuum_node._stored_coordinate_indexer(
             np.array([100.0, 101.0]),
             np.array([102.0]),

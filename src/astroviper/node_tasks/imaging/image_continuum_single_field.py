@@ -1,6 +1,8 @@
 from astroviper.utils.param_docs import shares_param_docs
 
 _CONTINUUM_WEIGHT_CACHE_VARIABLE = "WEIGHT_IMAGING_CONTINUUM_CACHE"
+_WIDEBAND_PRIMARY_BEAM_CACHE_GROUP = "_WIDEBAND_PRIMARY_BEAM_CACHE"
+_WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE = "PRIMARY_BEAM"
 
 ###############################################################################
 # Generic helper functions
@@ -76,7 +78,7 @@ def _stored_coordinate_indexer(stored_values, selected_values, dimension):
     except KeyError as exc:
         raise ValueError(
             f"Selected coordinate {dimension!r} contains value {exc.args[0]!r} "
-            "that is absent from the in-place weight store."
+            "that is absent from the in-place store."
         ) from exc
 
     return indices
@@ -138,6 +140,178 @@ def _write_continuum_weights_in_place(ps_xdt, ps_store):
             )
 
         target.oindex[tuple(indexers)] = np.asarray(weight.values)
+
+
+def _extract_mvc_primary_beam_xds(img_xds, task_coords, task_id):
+    """Extract and validate one task's channel-dependent MVC primary beam."""
+    import numpy as np
+    import xarray as xr
+
+    image_data_groups = img_xds.attrs.get("data_groups", {})
+    if "residual" not in image_data_groups:
+        raise KeyError("MVC setup did not create the residual image data group.")
+    primary_beam_name = image_data_groups["residual"].get("primary_beam")
+    if primary_beam_name is None or primary_beam_name not in img_xds:
+        raise KeyError("The MVC residual data group has no primary beam.")
+
+    primary_beam = img_xds[primary_beam_name]
+    if "frequency" not in primary_beam.dims:
+        raise ValueError("The MVC primary beam must retain its frequency dimension.")
+    expected_frequency = np.asarray(task_coords["frequency"]["data"], dtype=np.float64)
+    actual_frequency = np.asarray(
+        primary_beam.coords["frequency"].values,
+        dtype=np.float64,
+    )
+    if not np.array_equal(actual_frequency, expected_frequency):
+        raise ValueError(
+            "The MVC primary-beam frequencies do not match the map-task frequencies."
+        )
+
+    return xr.Dataset(
+        {
+            primary_beam_name: xr.Variable(
+                dims=primary_beam.dims,
+                data=primary_beam.data,
+                attrs=primary_beam.attrs.copy(),
+            )
+        },
+        coords={
+            dim: primary_beam.coords[dim]
+            for dim in primary_beam.dims
+            if dim in primary_beam.coords
+        },
+        attrs={
+            "primary_beam_name": primary_beam_name,
+            "task_id": int(task_id),
+            "specmode": "mvc",
+        },
+    )
+
+
+def _write_wideband_primary_beam_in_place(primary_beam_xds, image_store):
+    """Write one task's MVC primary beam into its disjoint cache channels."""
+    import numpy as np
+    import zarr
+
+    root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
+    if _WIDEBAND_PRIMARY_BEAM_CACHE_GROUP not in root:
+        raise KeyError("The in-place MVC primary-beam cache has not been initialized.")
+    cache = root[_WIDEBAND_PRIMARY_BEAM_CACHE_GROUP]
+    target = cache[_WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE]
+    primary_beam_name = primary_beam_xds.attrs.get(
+        "primary_beam_name",
+        _WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE,
+    )
+    primary_beam = primary_beam_xds[primary_beam_name]
+    dimensions = (
+        tuple(target.metadata.dimension_names)
+        if target.metadata.zarr_format == 3
+        else tuple(target.attrs["_ARRAY_DIMENSIONS"])
+    )
+    if primary_beam.dims != dimensions:
+        raise ValueError(
+            f"MVC primary-beam dimensions are {primary_beam.dims}; "
+            f"expected {dimensions}."
+        )
+    frequency_indexer = _stored_coordinate_indexer(
+        cache["frequency"][:],
+        primary_beam.coords["frequency"].values,
+        "frequency",
+    )
+    target.oindex[
+        (
+            slice(None),
+            frequency_indexer,
+            slice(None),
+            slice(None),
+            slice(None),
+        )
+    ] = np.asarray(primary_beam.values)
+
+
+def _load_wideband_primary_beam_in_place(img_xds, image_store):
+    """Load only this task's MVC primary-beam channels from the image cache."""
+    import numpy as np
+    import xarray as xr
+    import zarr
+
+    root = zarr.open_group(image_store, mode="r", use_consolidated=False)
+    if _WIDEBAND_PRIMARY_BEAM_CACHE_GROUP not in root:
+        raise KeyError("The in-place MVC primary-beam cache is missing.")
+    cache = root[_WIDEBAND_PRIMARY_BEAM_CACHE_GROUP]
+    target = cache[_WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE]
+    frequency_values = np.asarray(img_xds.coords["frequency"].values, dtype=np.float64)
+    frequency_indexer = _stored_coordinate_indexer(
+        cache["frequency"][:],
+        frequency_values,
+        "frequency",
+    )
+    data = target.oindex[
+        (
+            slice(None),
+            frequency_indexer,
+            slice(None),
+            slice(None),
+            slice(None),
+        )
+    ]
+    dimensions = ("time", "frequency", "polarization", "l", "m")
+    primary_beam = xr.DataArray(
+        data,
+        dims=dimensions,
+        coords={dim: img_xds.coords[dim] for dim in dimensions},
+        attrs=dict(target.attrs),
+        name=_WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE,
+    )
+    return xr.Dataset(
+        {_WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE: primary_beam},
+        attrs={
+            "primary_beam_name": _WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE,
+            "specmode": "mvc",
+        },
+    )
+
+
+def _recompute_wideband_primary_beam(
+    img_xds,
+    image_params,
+    single_precision_image,
+    task_id,
+):
+    """Re-evaluate the analytic MVC primary beam for one task's channels."""
+    import copy
+
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (
+        make_primary_beam_single_field,
+    )
+
+    pb_img_xds = img_xds.copy(deep=False)
+    pb_img_xds.attrs = copy.deepcopy(img_xds.attrs)
+    pb_img_xds.attrs["type"] = "image_dataset"
+    pb_img_xds = pb_img_xds.xr_img.add_data_group(
+        new_data_group_name="residual",
+        new_data_group={
+            "description": "Task-local recomputed MVC primary beam.",
+            "date": "2026",
+        },
+    )
+    pb_img_xds, _ = make_primary_beam_single_field(
+        pb_img_xds,
+        image_params,
+        image_data_group_in_name="residual",
+        image_data_group_out_name="residual",
+        list_dish_diameters=image_params.get("list_dish_diameters"),
+        list_blockage_diameters=image_params.get("list_blockage_diameters"),
+        ipower=image_params.get("primary_beam_ipower", 2),
+        float_dtype=(np.float32 if single_precision_image else np.float64),
+    )
+    return _extract_mvc_primary_beam_xds(
+        pb_img_xds,
+        {"frequency": {"data": img_xds.coords["frequency"].values}},
+        task_id,
+    )
 
 
 def _unwrap_continuum_reduce_result(input_data, node_name):
@@ -504,6 +678,7 @@ def residual_update_continuum_single_field(
     image_data_variables_keep=None,
     memory_mode="in_memory",
     weight_memory_mode="in_memory",
+    widebandpb_memory_mode="in_memory",
     skunk_works=False,
     data_group=None,
     is_n_iter_0=True,
@@ -513,6 +688,7 @@ def residual_update_continuum_single_field(
     input_data=None,
     task_time_kill_switch_seconds=None,
     weight_cache_mapping=None,
+    primary_beam_xds=None,
 ):
     """Compute one frequency chunk's continuum products in memory.
 
@@ -599,6 +775,13 @@ def residual_update_continuum_single_field(
         disk I/O. This option is intentionally separate from ``memory_mode`` in
         the initial implementation; the two policies may be unified later.
 
+    widebandpb_memory_mode : {"in_memory", "in_place", "recompute"}, optional
+        MVC-only storage policy for the frequency-dependent primary beam.
+        ``"in_place"`` stores it temporarily in the image Zarr store and reads
+        only task-local channels, ``"recompute"`` regenerates the analytic beam
+        inside every later map, and ``"in_memory"`` retains it at the driver but
+        passes each map only its local beam. The setting is ignored for MFS.
+
     skunk_works : bool, optional
         Use the experimental direct-Zarr loading path.
 
@@ -671,6 +854,11 @@ def residual_update_continuum_single_field(
         raise ValueError(
             "weight_memory_mode must be 'in_memory' or 'in_place'; received "
             f"{weight_memory_mode!r}."
+        )
+    if widebandpb_memory_mode not in ("in_memory", "in_place", "recompute"):
+        raise ValueError(
+            "widebandpb_memory_mode must be 'in_memory', 'in_place', or "
+            f"'recompute'; received {widebandpb_memory_mode!r}."
         )
 
     if image_data_variables_keep is None:
@@ -769,22 +957,38 @@ def residual_update_continuum_single_field(
             "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
         )
 
-    primary_beam_xds = None
-
     if specmode == "mvc" and not is_n_iter_0:
-        if pb_cache_mapping is None:
-            raise ValueError("Later MVC major cycles require pb_cache_mapping.")
-
         task_id = int(task_id)
 
-        if task_id not in pb_cache_mapping:
-            raise KeyError(
-                "No cached MVC primary beam exists for "
-                f"task {task_id}. Available task identifiers are "
-                f"{sorted(pb_cache_mapping)}."
-            )
+        # Retain the old whole-mapping input as a node-level compatibility path;
+        # the distributed application now injects only the task-local dataset.
+        if primary_beam_xds is None and pb_cache_mapping is not None:
+            if task_id not in pb_cache_mapping:
+                raise KeyError(
+                    "No cached MVC primary beam exists for "
+                    f"task {task_id}. Available task identifiers are "
+                    f"{sorted(pb_cache_mapping)}."
+                )
+            primary_beam_xds = pb_cache_mapping[task_id]
 
-        primary_beam_xds = pb_cache_mapping[task_id]
+        if widebandpb_memory_mode == "in_place":
+            primary_beam_xds = _load_wideband_primary_beam_in_place(
+                img_xds,
+                image_store,
+            )
+        elif widebandpb_memory_mode == "recompute":
+            primary_beam_xds = _recompute_wideband_primary_beam(
+                img_xds,
+                image_params,
+                single_precision_image,
+                task_id,
+            )
+        elif primary_beam_xds is None:
+            raise ValueError(
+                "Later MVC major cycles with "
+                "widebandpb_memory_mode='in_memory' require a task-local "
+                "primary_beam_xds."
+            )
 
         if not isinstance(primary_beam_xds, xr.Dataset):
             raise TypeError(
@@ -861,75 +1065,15 @@ def residual_update_continuum_single_field(
     # Retain the task-local frequency-dependent PB for MVC
     pb_xds = None
 
-    if specmode == "mvc" and is_n_iter_0:
-        import xarray as xr
-
-        image_data_groups = img_xds.attrs.get(
-            "data_groups",
-            {},
-        )
-
-        if "residual" not in image_data_groups:
-            raise KeyError("MVC setup did not create the residual image data group.")
-
-        residual_data_group = image_data_groups["residual"]
-        primary_beam_name = residual_data_group.get("primary_beam")
-
-        if primary_beam_name is None:
-            raise KeyError(
-                "The MVC residual data group does not register a " "primary beam."
-            )
-
-        if primary_beam_name not in img_xds:
-            raise KeyError(
-                f"The MVC residual data group registers primary beam "
-                f"{primary_beam_name!r}, but that variable is absent."
-            )
-
-        primary_beam = img_xds[primary_beam_name]
-
-        if "frequency" not in primary_beam.dims:
-            raise ValueError(
-                "The MVC primary beam must retain its frequency " "dimension."
-            )
-
-        expected_frequency = np.asarray(
-            task_coords["frequency"]["data"],
-            dtype=np.float64,
-        )
-        actual_frequency = np.asarray(
-            primary_beam.coords["frequency"].values,
-            dtype=np.float64,
-        )
-
-        if not np.array_equal(
-            actual_frequency,
-            expected_frequency,
-        ):
-            raise ValueError(
-                "The MVC primary-beam frequencies do not match the "
-                "map-task frequencies."
-            )
-
-        pb_xds = xr.Dataset(
-            {
-                primary_beam_name: xr.Variable(
-                    dims=primary_beam.dims,
-                    data=primary_beam.data,
-                    attrs=primary_beam.attrs.copy(),
-                )
-            },
-            coords={
-                dim: primary_beam.coords[dim]
-                for dim in primary_beam.dims
-                if dim in primary_beam.coords
-            },
-            attrs={
-                "primary_beam_name": primary_beam_name,
-                "task_id": int(task_id),
-                "specmode": "mvc",
-            },
-        )
+    if (
+        specmode == "mvc"
+        and is_n_iter_0
+        and widebandpb_memory_mode in ("in_memory", "in_place")
+    ):
+        pb_xds = _extract_mvc_primary_beam_xds(img_xds, task_coords, task_id)
+        if widebandpb_memory_mode == "in_place":
+            _write_wideband_primary_beam_in_place(pb_xds, image_store)
+            pb_xds = None
 
     if specmode == "mvc":
         # Taylor numerators and normalization sums have already been formed by
