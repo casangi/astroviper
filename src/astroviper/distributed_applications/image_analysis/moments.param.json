@@ -1,0 +1,27 @@
+{
+    "moments": {
+        "input_image_store": { "required": true, "type": ["str"] },
+        "moments_image_store": { "required": true, "type": ["str"] },
+        "moments": { "type": ["list", "str", "int"] },
+        "moment_axis": {
+            "type": ["str"],
+            "allowed": ["l", "m", "frequency", "polarization", "time"]
+        },
+        "image_data_group_in_name": { "type": ["str"] },
+        "include_pixel_range": {
+            "type": ["list", "int", "float"],
+            "nullable": true
+        },
+        "exclude_pixel_range": {
+            "type": ["list", "int", "float"],
+            "nullable": true
+        },
+        "use_mask": { "type": "boolean" },
+        "selection": { "type": ["dict"], "nullable": true },
+        "parallel_axis": { "type": ["str"], "nullable": true },
+        "n_chunks": { "type": ["int"], "nullable": true, "min": 1 },
+        "thread_info": { "type": ["dict"], "nullable": true },
+        "compressor": { "nullable": true },
+        "overwrite": { "type": "boolean" }
+    }
+}
