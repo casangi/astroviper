@@ -19,6 +19,9 @@ import xarray as xr
 # Registers the `xr_img` accessor used by the function under test.
 import xradio.image.image_xds  # noqa: F401
 
+from astroviper.processing_functions.imaging.degrid_visibility_grid import (
+    degrid_visibility_grid_single_field,
+)
 from astroviper.processing_functions.imaging.get_visibility_grid import (
     get_visibility_grid_single_field,
 )
@@ -195,6 +198,48 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
         get_visibility_grid_single_field(ms_xds, cgk, img_xds)
         with self.assertRaises(AssertionError):
             get_visibility_grid_single_field(ms_xds, cgk, img_xds, overwrite=False)
+
+    def test_shared_primitive_rejects_frequency_map_with_wrong_length(self):
+        """The frequency map must contain one entry per visibility channel."""
+        ms_xds, img_xds, _ = _build_datasets(n_chan=2)
+        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+
+        with self.assertRaisesRegex(ValueError, "one grid-plane index"):
+            degrid_visibility_grid_single_field(
+                ms_xds,
+                cgk,
+                img_xds,
+                img_xds["SKY_MODEL"].values,
+                np.array([0], dtype=np.int64),
+            )
+
+    def test_shared_primitive_rejects_non_five_dimensional_grid(self):
+        """The shared primitive requires a five-dimensional UV grid."""
+        ms_xds, img_xds, _ = _build_datasets(n_chan=2)
+        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+
+        with self.assertRaisesRegex(ValueError, "grid must have dimensions"):
+            degrid_visibility_grid_single_field(
+                ms_xds,
+                cgk,
+                img_xds,
+                img_xds["SKY_MODEL"].values[0],
+                np.array([0, 1], dtype=np.int64),
+            )
+
+    def test_shared_primitive_rejects_out_of_range_frequency_map(self):
+        """Every mapped visibility channel must name an existing grid plane."""
+        ms_xds, img_xds, _ = _build_datasets(n_chan=2)
+        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+
+        with self.assertRaisesRegex(ValueError, "outside the UV grid"):
+            degrid_visibility_grid_single_field(
+                ms_xds,
+                cgk,
+                img_xds,
+                img_xds["SKY_MODEL"].values,
+                np.array([0, 2], dtype=np.int64),
+            )
 
     # ------------------------------------------------------------------
     # Skip behaviour
