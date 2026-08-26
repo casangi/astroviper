@@ -30,55 +30,66 @@ def convert_direction_frame(
     in_frame: str,
     out_frame: str,
     times: Time,
-    location: EarthLocation,
+    location: EarthLocation = None,
+    target_times: Time = None,
+    ephemeris: bool = False,
     interpolate: bool = False,
     time_resolution: float = 300.0,
 ) -> tuple:
     """
-    Convert between ALTAZ and ICRS.
-
-      ALTAZ → ICRS : v0, v1 = az, el  [deg]  →  returns ra,  dec [deg]
-      ICRS → ALTAZ : v0, v1 = ra, dec [deg]  →  returns az,  el  [deg]
-
+    Convert between direction frames.
+ 
+      ALTAZ -> ICRS : v0, v1 = az, el  [deg]  ->  returns ra,  dec [deg]
+      ICRS -> ALTAZ : v0, v1 = ra, dec [deg]  ->  returns az,  el  [deg]
+ 
     For each sample astropy applies the full ERFA chain (Earth rotation,
     polar motion, precession, nutation, aberration) at times[i] for location.
-
+ 
+    If ephemeris=True the input (v0, v1) live on a coarse time grid (times)
+    and are first interpolated to target_times in ICRS before converting.
+    Interpolation must happen in ICRS — not after conversion — because ALTAZ
+    changes non-linearly with Earth's rotation even for a fixed source.
+    Use is_ephemeris_ms() to determine this automatically from the MS.
+ 
     Parameters
     ----------
     v0, v1          : np.ndarray (N,)  input coordinates in degrees
-                      ALTAZ  → az  (-180°, 180°],  el  [-90°,  90°]
-                      ICRS   → ra  [0°,    360°),   dec [-90°,  90°]
+                      ALTAZ  -> az  (-180, 180],  el  [-90,  90]
+                      ICRS   -> ra  [0,    360),   dec [-90,  90]
     in_frame        : "ALTAZ", "ICRS", "FK5", "FK4", "GALACTIC", "HADEC"
-    out_frame       : "ALTAZ" , "ICRS", "FK5", "FK4", "GALACTIC", "HADEC"
+    out_frame       : "ALTAZ", "ICRS", "FK5", "FK4", "GALACTIC", "HADEC"
     times           : astropy Time (N,)  one timestamp per sample
-    location        : astropy EarthLocation
+    location        : astropy EarthLocation  required for ALTAZ / HADEC
+    target_times    : astropy Time (M,)  dense timestamps to interpolate onto;
+                      required when ephemeris=True
+    ephemeris       : if True, interpolate (v0, v1) from times to target_times
+                      in ICRS before converting; use is_ephemeris_ms() to set
     interpolate     : if True, use ErfaAstromInterpolator for a large speedup
-                      by interpolating Earth orientation parameters
-                      on a coarser time grid instead of every sample.
-                      Precision remains at micro-arcsecond level for typical
-                      time_resolution values.
+                      by interpolating Earth orientation parameters on a coarser
+                      time grid instead of every sample. Precision remains at
+                      micro-arcsecond level for typical time_resolution values.
     time_resolution : interpolation grid spacing in seconds (default 300 s).
                       Smaller = more precise but slower;
                       300 s gives ~0.05 µas error.
-
+ 
     Supported frames and coordinate ranges:
-      ICRS : ra [0°, 360°), dec [-90°, 90°] (≈ J2000 for most purposes)
-      FK5 : ra [0°, 360°), dec [-90°, 90°] (J2000 equatorial)
-      FK4 : ra [0°, 360°), dec [-90°, 90°] (B1950 equatorial)
-      GALACTIC : l [0°, 360°), b [-90°, 90°]
-      ALTAZ : az (-180°, 180°], el  [-90°, 90°] requires location + times
-      HADEC : ha (-180°, 180°], dec [-90°, 90°] requires location + times
-
+      ICRS    : ra [0, 360),    dec [-90, 90]  (approx J2000 for most purposes)
+      FK5     : ra [0, 360),    dec [-90, 90]  (J2000 equatorial)
+      FK4     : ra [0, 360),    dec [-90, 90]  (B1950 equatorial)
+      GALACTIC: l  [0, 360),    b   [-90, 90]
+      ALTAZ   : az (-180, 180], el  [-90, 90]  requires location + times
+      HADEC   : ha (-180, 180], dec [-90, 90]  requires location + times
+ 
     Returns
     -------
-    out0, out1 : np.ndarray (N,) in degrees
+    out0      : np.ndarray in degrees
+    out1      : np.ndarray in degrees
+    out_frame : str
     """
     fin, fout = in_frame.upper(), out_frame.upper()
 
     if fin not in _SUPPORTED_FRAMES:
-        raise ValueError(
-            f"Unknown input frame '{fin}'. Supported: {_SUPPORTED_FRAMES}"
-        )
+        raise ValueError(f"Unknown input frame '{fin}'. Supported: {_SUPPORTED_FRAMES}")
     if fout not in _SUPPORTED_FRAMES:
         raise ValueError(
             f"Unknown output frame '{fout}'. Supported: {_SUPPORTED_FRAMES}"
@@ -87,20 +98,18 @@ def convert_direction_frame(
         raise ValueError("in_frame and out_frame must differ.")
     loc_needed = fin in _LOCATION_DEPENDENT or fout in _LOCATION_DEPENDENT
     if loc_needed and location is None:
-        raise ValueError(
-            f"location is required for {_LOCATION_DEPENDENT} frames."
-        )
+        raise ValueError(f"location is required for {_LOCATION_DEPENDENT} frames.")
+
+    if ephemeris:
+        if target_times is None:
+            raise ValueError("target_times is required when ephemeris=True.")
+        v0, v1 = interpolate_direction_to_times(v0, v1, times, target_times)
+        times = target_times
 
     # Build location-dependent frames once over the full time array.
     # Astropy broadcasts (v0[i], v1[i]) against times[i] internally via ERFA.
-    altaz_frame = (
-        AltAz(location=location, obstime=times)
-        if location is not None else None
-    )
-    hadec_frame = (
-        HADec(location=location, obstime=times)
-        if location is not None else None
-    )
+    altaz_frame = AltAz(location=location, obstime=times) if "ALTAZ" in (fin, fout) else None
+    hadec_frame = HADec(location=location, obstime=times) if "HADEC" in (fin, fout) else None
 
     def _transform():
         coord = _build_skycoord(v0, v1, fin, altaz_frame, hadec_frame)
@@ -112,8 +121,7 @@ def convert_direction_frame(
     # `time_resolution` seconds and interpolates between those points,
     # instead of calling ERFA at every sample.
     # This gives up to ~100x speedup with micro-arcsecond precision loss.
-    if interpolate and (fin in _LOCATION_DEPENDENT
-                        or fout in _LOCATION_DEPENDENT):
+    if interpolate and (fin in _LOCATION_DEPENDENT or fout in _LOCATION_DEPENDENT):
         with erfa_astrom.set(ErfaAstromInterpolator(time_resolution * u.s)):
             return _transform()
     return _transform()
@@ -141,7 +149,8 @@ def _build_skycoord(v0, v1, frame, altaz_frame, hadec_frame):
 def _extract_coords(coord, frame, altaz_frame, hadec_frame):
     """
     Extract (v0, v1) [deg] from a SkyCoord in the output frame.
-    For ALTAZ output, az is normalised to (-180°, 180°] for MSv2 consistency.]
+    For ALTAZ/HADEC output, az/ha is normalised to (-180, 180] for MSv2
+    consistency.
     """
     if frame == "ICRS":
         c = coord.icrs
