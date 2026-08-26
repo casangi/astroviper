@@ -301,7 +301,9 @@ def add_visibility_grid_continuum_single_field(
     # Every residual Taylor image is normalized by the same
     # zeroth-order sum of imaging weights.
     #
-    normalization[...] = zeroth_normalization
+    # Repeated calls add separate processing-set children to the same Taylor
+    # grid, so their normalization sums must be accumulated in the same way.
+    normalization[...] += zeroth_normalization
 
     # Format output
     img_xds[visibility_name].attrs.update(

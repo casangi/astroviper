@@ -7,6 +7,9 @@ import numpy as np
 import pytest
 import xarray as xr
 
+from astroviper.processing_functions.imaging.add_visibility_grid_continuum import (
+    add_visibility_grid_continuum_single_field,
+)
 from astroviper.processing_functions.imaging.add_visibility_grid_continuum_mvc import (
     add_visibility_grid_mvc_single_field,
 )
@@ -249,6 +252,75 @@ def test_mvc_grid_accumulates_child_into_full_image_frequency_axis(monkeypatch):
     assert image.VISIBILITY.shape[1] == image_frequencies.size
     assert np.all(image.VISIBILITY_NORMALIZATION.values[:, [1, 3], ...] == 1.0)
     assert np.all(image.VISIBILITY_NORMALIZATION.values[:, [0, 2], ...] == 0.0)
+
+
+def test_mfs_grid_accumulates_normalization_across_processing_children(monkeypatch):
+    """Repeated MFS child grids retain every child's normalization sum."""
+    import xradio.image.image_xds  # noqa: F401
+
+    def make_child(weight):
+        visibility_shape = (1, 1, 1, 1)
+        return xr.Dataset(
+            {
+                "VISIBILITY": (
+                    ("time", "baseline", "frequency", "polarization"),
+                    np.ones(visibility_shape, dtype=np.complex128),
+                ),
+                "WEIGHT_IMAGING": (
+                    ("time", "baseline", "frequency", "polarization"),
+                    np.full(visibility_shape, weight, dtype=np.float64),
+                ),
+                "UVW": (
+                    ("time", "baseline", "uvw_label"),
+                    np.zeros((1, 1, 3), dtype=np.float64),
+                ),
+            },
+            coords={"frequency": [1.0e9]},
+            attrs={
+                "data_groups": {
+                    "base": {
+                        "correlated_data": "VISIBILITY",
+                        "weight_imaging": "WEIGHT_IMAGING",
+                        "uvw": "UVW",
+                    }
+                }
+            },
+        )
+
+    image = xr.Dataset(
+        coords={
+            "time": [0.0],
+            "polarization": ["XX"],
+            "l": np.arange(4) * 1.0e-5,
+            "m": np.arange(4) * 1.0e-5,
+        },
+        attrs={"type": "image_dataset", "data_groups": {"residual": {}}},
+    )
+
+    def fake_grid(grid, normalization, *args, **kwargs):
+        imaging_weight = args[6]
+        weight_sum = imaging_weight.sum(axis=(0, 1, 2))[None, None, :]
+        grid += weight_sum[..., None, None]
+        normalization += weight_sum
+
+    module_name = (
+        "astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp"
+    )
+    extension_module = ModuleType(module_name)
+    extension_module.prolate_spheroidal_grid = fake_grid
+    monkeypatch.setitem(sys.modules, module_name, extension_module)
+
+    for child_weight in (2.0, 3.0):
+        add_visibility_grid_continuum_single_field(
+            make_child(child_weight),
+            np.ones(8),
+            image,
+            nterms=1,
+            reference_frequency=1.0e9,
+        )
+
+    np.testing.assert_allclose(image.VISIBILITY_NORMALIZATION, 5.0)
+    np.testing.assert_allclose(image.VISIBILITY, 5.0)
 
 
 def _frequency_cube(values, frequency, polarization="I"):
