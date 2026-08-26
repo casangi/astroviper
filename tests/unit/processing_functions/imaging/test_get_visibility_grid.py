@@ -147,6 +147,32 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
         out = ms_xds["VISIBILITY_MODEL"].values
         self.assertTrue(np.all(out == 0.0))
 
+    def test_noncontiguous_model_grid_matches_contiguous_grid(self):
+        """A strided model-grid view is copied before entering the C++ kernel."""
+        contiguous_ms, contiguous_img, _ = _build_datasets(seed=42, sky_value=0.0j)
+        strided_ms, strided_img, _ = _build_datasets(seed=42, sky_value=0.0j)
+        rng = np.random.default_rng(7)
+        shape = contiguous_img["SKY_MODEL"].shape
+        model_grid = (
+            rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
+        ).astype(np.complex128)
+        contiguous_img["SKY_MODEL"].data = model_grid.copy()
+
+        backing = np.empty(shape[:-1] + (2 * shape[-1],), dtype=np.complex128)
+        strided_grid = backing[..., ::2]
+        strided_grid[...] = model_grid
+        self.assertFalse(strided_grid.flags.c_contiguous)
+        strided_img["SKY_MODEL"].data = strided_grid
+
+        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+        get_visibility_grid_single_field(contiguous_ms, cgk, contiguous_img)
+        get_visibility_grid_single_field(strided_ms, cgk, strided_img)
+
+        np.testing.assert_array_equal(
+            strided_ms["VISIBILITY_MODEL"].values,
+            contiguous_ms["VISIBILITY_MODEL"].values,
+        )
+
     # ------------------------------------------------------------------
     # Dataset plumbing
     # ------------------------------------------------------------------
