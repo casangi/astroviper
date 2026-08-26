@@ -166,54 +166,60 @@ def _extract_coords(coord, frame, altaz_frame, hadec_frame):
         return (c.ha.deg + 180) % 360 - 180, c.dec.deg
 
 
-def interpolate_pointing_to_spectral_times(
+def interpolate_direction_to_times(
     ra: np.ndarray,
     dec: np.ndarray,
-    pointing_times: Time,
-    ms: object,
+    source_times: Time,
+    target_times: Time,
 ) -> tuple:
     """
-    Interpolate (ra, dec) from pointing timestamps to the spectral timestamps.
-
-    Pointing and spectral data are sampled independently at different rates:
-      pointing_times : [t0, t1, ...]   from pointing_xds  (e.g. 5050 samples)
-      spectral_times : [T0, T1, ...]   from main.xds time (e.g. 15120 samples)
-
-    For each spectral timestamp Ti we interpolate ra and dec from the pointing
-    grid to get ra(Ti) and dec(Ti).
-
+    Interpolate (ra, dec) from source_times onto target_times.
+ 
+    Used by both the pointing and ephemeris pipelines:
+      - Pointing  : source_times = time_pointing,  target_times = visibility time
+      - Ephemeris : source_times = time_ephemeris, target_times = visibility time
+ 
+    RA is unwrapped before interpolation to avoid discontinuities at 0/360,
+    then re-wrapped to [0, 360) after.
+ 
     Parameters
     ----------
-    ra, dec         : np.ndarray ICRS coordinates at pointing_times [deg]
-    pointing_times  : astropy Time timestamps of the pointing samples
-    ms              : msv4 used to extract spectral timestamps from main.xds
-
+    ra, dec      : np.ndarray (N,)  ICRS coordinates at source_times [deg]
+                   ra [0, 360),  dec [-90, 90]
+    source_times : astropy Time (N,)  timestamps of the input samples
+    target_times : astropy Time (M,)  timestamps to interpolate onto
+ 
     Returns
     -------
-    ra_interp, dec_interp : np.ndarray interpolated at spectral times [deg]
-    spectral_times        : astropy Time the spectral timestamps used
+    ra_interp  : np.ndarray (M,)  ra [0, 360) [deg]
+    dec_interp : np.ndarray (M,)  dec [-90, 90] [deg]
     """
 
-    # -- extract spectral timestamps from main.xds ----------------------------
-    # spectral times live on the 'time' axis of the main dataset
-    main_xds = ms["main.xds"] if "main.xds" in ms.children else ms
-    t_raw = main_xds["time"].data * u.Unit(main_xds["time"].attrs["units"])
-    spec_times = Time(
-        t_raw,
-        format=main_xds["time"].attrs.get("format", "unix"),
-        scale=main_xds["time"].attrs.get("scale", "utc"),
-    )
+    t_src = source_times.unix
+    t_tgt = target_times.unix
+ 
+    ra_unwrapped = np.unwrap(np.deg2rad(ra))
+    ra_interp = np.rad2deg(CubicSpline(t_src, ra_unwrapped)(t_tgt)) % 360
+    dec_interp = CubicSpline(t_src, dec)(t_tgt)
+ 
+    return ra_interp, dec_interp
 
-    # -- convert both time axes to unix seconds for interpolation -------------
-    # scipy needs plain floats; unix seconds is a natural common reference
-    t_point = pointing_times.unix
-    t_spec = spec_times.unix
 
-    # -- interpolate ----------------------------------------------------------
-    # ra wraps at 0/360 — interpolate on the unwrapped values to avoid
-    # discontinuities near 0°/360°, then re-wrap to [0°, 360°)
-    ra_unwrapped = np.unwrap(np.deg2rad(ra))  # unwrap in radians
-    ra_interp = np.rad2deg(CubicSpline(t_point, ra_unwrapped)(t_spec)) % 360
-    dec_interp = CubicSpline(t_point, dec)(t_spec)
-
-    return ra_interp, dec_interp, spec_times
+def is_ephemeris_ms(ms) -> bool:
+    """
+    Return True if the MS contains ephemeris data.
+ 
+    Detection is based on field_and_source_xds.attrs["type"]:
+      "field_and_source_ephemeris" -> True
+      anything else                -> False
+ 
+    Parameters
+    ----------
+    ms : msv4 DataTree
+ 
+    Returns
+    -------
+    bool
+    """
+    fxds = ms.xr_ms.get_field_and_source_xds()
+    return fxds.attrs.get("type") == "field_and_source_ephemeris"
