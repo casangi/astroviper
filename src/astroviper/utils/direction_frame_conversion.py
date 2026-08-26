@@ -1,5 +1,10 @@
 from astropy.coordinates import (
-    SkyCoord, EarthLocation, AltAz, HADec, FK4, FK5,
+    SkyCoord,
+    EarthLocation,
+    AltAz,
+    HADec,
+    FK4,
+    FK5,
 )
 from astropy.coordinates.erfa_astrom import (
     erfa_astrom,
@@ -38,19 +43,16 @@ def convert_direction_frame(
 ) -> tuple:
     """
     Convert between direction frames.
- 
-      ALTAZ -> ICRS : v0, v1 = az, el  [deg]  ->  returns ra,  dec [deg]
-      ICRS -> ALTAZ : v0, v1 = ra, dec [deg]  ->  returns az,  el  [deg]
- 
+
     For each sample astropy applies the full ERFA chain (Earth rotation,
     polar motion, precession, nutation, aberration) at times[i] for location.
- 
+
     If ephemeris=True the input (v0, v1) live on a coarse time grid (times)
     and are first interpolated to target_times in ICRS before converting.
     Interpolation must happen in ICRS — not after conversion — because ALTAZ
     changes non-linearly with Earth's rotation even for a fixed source.
     Use is_ephemeris_ms() to determine this automatically from the MS.
- 
+
     Parameters
     ----------
     v0, v1          : np.ndarray (N,)  input coordinates in degrees
@@ -71,7 +73,7 @@ def convert_direction_frame(
     time_resolution : interpolation grid spacing in seconds (default 300 s).
                       Smaller = more precise but slower;
                       300 s gives ~0.05 µas error.
- 
+
     Supported frames and coordinate ranges:
       ICRS    : ra [0, 360),    dec [-90, 90]  (approx J2000 for most purposes)
       FK5     : ra [0, 360),    dec [-90, 90]  (J2000 equatorial)
@@ -79,7 +81,7 @@ def convert_direction_frame(
       GALACTIC: l  [0, 360),    b   [-90, 90]
       ALTAZ   : az (-180, 180], el  [-90, 90]  requires location + times
       HADEC   : ha (-180, 180], dec [-90, 90]  requires location + times
- 
+
     Returns
     -------
     out0      : np.ndarray in degrees
@@ -108,8 +110,12 @@ def convert_direction_frame(
 
     # Build location-dependent frames once over the full time array.
     # Astropy broadcasts (v0[i], v1[i]) against times[i] internally via ERFA.
-    altaz_frame = AltAz(location=location, obstime=times) if "ALTAZ" in (fin, fout) else None
-    hadec_frame = HADec(location=location, obstime=times) if "HADEC" in (fin, fout) else None
+    altaz_frame = (
+        AltAz(location=location, obstime=times) if "ALTAZ" in (fin, fout) else None
+    )
+    hadec_frame = (
+        HADec(location=location, obstime=times) if "HADEC" in (fin, fout) else None
+    )
 
     def _transform():
         coord = _build_skycoord(v0, v1, fin, altaz_frame, hadec_frame)
@@ -133,17 +139,17 @@ def _build_skycoord(v0, v1, frame, altaz_frame, hadec_frame):
     altaz_frame and hadec_frame are pre-built with location+obstime.
     """
     if frame == "ICRS":
-        return SkyCoord(ra=v0*u.deg, dec=v1*u.deg, frame="icrs")
+        return SkyCoord(ra=v0 * u.deg, dec=v1 * u.deg, frame="icrs")
     elif frame == "FK5":
-        return SkyCoord(ra=v0*u.deg, dec=v1*u.deg, frame=FK5(equinox="J2000"))
+        return SkyCoord(ra=v0 * u.deg, dec=v1 * u.deg, frame=FK5(equinox="J2000"))
     elif frame == "FK4":
-        return SkyCoord(ra=v0*u.deg, dec=v1*u.deg, frame=FK4(equinox="B1950"))
+        return SkyCoord(ra=v0 * u.deg, dec=v1 * u.deg, frame=FK4(equinox="B1950"))
     elif frame == "GALACTIC":
-        return SkyCoord(l=v0*u.deg, b=v1*u.deg, frame="galactic")
+        return SkyCoord(l=v0 * u.deg, b=v1 * u.deg, frame="galactic")
     elif frame == "ALTAZ":
-        return SkyCoord(az=v0*u.deg, alt=v1*u.deg, frame=altaz_frame)
+        return SkyCoord(az=v0 * u.deg, alt=v1 * u.deg, frame=altaz_frame)
     elif frame == "HADEC":
-        return SkyCoord(ha=v0*u.deg, dec=v1*u.deg, frame=hadec_frame)
+        return SkyCoord(ha=v0 * u.deg, dec=v1 * u.deg, frame=hadec_frame)
 
 
 def _extract_coords(coord, frame, altaz_frame, hadec_frame):
@@ -183,14 +189,14 @@ def interpolate_direction_to_times(
 ) -> tuple:
     """
     Interpolate (ra, dec) from source_times onto target_times.
- 
+
     Used by both the pointing and ephemeris pipelines:
       - Pointing  : source_times = time_pointing,  target_times = visibility time
       - Ephemeris : source_times = time_ephemeris, target_times = visibility time
- 
+
     RA is unwrapped before interpolation to avoid discontinuities at 0/360,
     then re-wrapped to [0, 360) after.
- 
+
     Parameters
     ----------
     ra, dec      : np.ndarray (N,)  ICRS coordinates at source_times [deg]
@@ -206,26 +212,26 @@ def interpolate_direction_to_times(
 
     t_src = source_times.unix
     t_tgt = target_times.unix
- 
+
     ra_unwrapped = np.unwrap(np.deg2rad(ra))
     ra_interp = np.rad2deg(CubicSpline(t_src, ra_unwrapped)(t_tgt)) % 360
     dec_interp = CubicSpline(t_src, dec)(t_tgt)
- 
+
     return ra_interp, dec_interp
 
 
 def is_ephemeris_ms(ms) -> bool:
     """
     Return True if the MS contains ephemeris data.
- 
+
     Detection is based on field_and_source_xds.attrs["type"]:
       "field_and_source_ephemeris" -> True
       anything else                -> False
- 
+
     Parameters
     ----------
     ms : msv4 DataTree
- 
+
     Returns
     -------
     bool
