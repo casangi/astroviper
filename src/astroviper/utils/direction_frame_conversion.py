@@ -203,7 +203,7 @@ def interpolate_direction_to_times(
                    ra [0, 360),  dec [-90, 90]
     source_times : astropy Time (N,)  timestamps of the input samples
     target_times : astropy Time (M,)  timestamps to interpolate onto
- 
+
     Returns
     -------
     ra_interp  : np.ndarray (M,)  ra [0, 360) [deg]
