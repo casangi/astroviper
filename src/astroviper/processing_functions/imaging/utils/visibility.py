@@ -12,7 +12,13 @@ def drop_auto_correlations(ms_xdt):
     restored before storing the dataset back.
 
     Idempotent: re-running on already-masked data keeps every baseline and is a
-    no-op, which is why the setup and each residual cycle can both call it.
+    TRUE no-op -- it returns before touching the dataset. This matters for
+    memory, not just speed: ``where(..., drop=True)`` fancy-indexes EVERY data
+    variable into a fresh array, so on a multi-cycle run (which calls this once
+    per residual cycle) the old spelling copied the entire measurement set --
+    observed + model + residual visibilities, weights, uvw -- every cycle,
+    transiently doubling the measurement set's residency (part of the
+    2026-08-16 multi-cycle OOM).
 
     Parameters
     ----------
@@ -23,6 +29,8 @@ def drop_auto_correlations(ms_xdt):
 
     # Keep only cross-correlations (antenna1 != antenna2).
     mask = ms_xdt["baseline_antenna1_name"] != ms_xdt["baseline_antenna2_name"]
+    if bool(mask.values.all()):
+        return  # nothing to drop (already masked, or no auto-correlations)
     masked_ds = ms_xdt.ds.where(mask, drop=True)
     for var_name, var in masked_ds.data_vars.items():
         data = var.data

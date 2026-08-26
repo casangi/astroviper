@@ -140,7 +140,7 @@ def image_cube_single_field(
 ):
     """Image one frequency chunk of a single-field cube and write it to disk.
 
-    Thin node task: pins the malloc mmap threshold, builds the empty per-chunk
+    Thin node task: builds the empty per-chunk
     image in the correlation (instrument) polarization basis, loads (or receives)
     this chunk's visibilities, runs the science
     :func:`~astroviper.processing_functions.imaging.image_cube_single_field.image_cube_single_field`,
@@ -297,6 +297,18 @@ def image_cube_single_field(
         * ``"deconvolution"`` : the per-plane deconvolution
           :class:`~astroviper.processing_functions.imaging.utils.return_dict.ReturnDict`,
           with channels remapped to global channel numbers.
+        * ``"image_statistics"`` : ``{image_variable_key: xarray.Dataset}`` of
+          NaN-ignoring per-plane statistics of the image-domain variables
+          present in memory (``sky_residual``, ``sky_restored``, ``sky_model``,
+          ...), computed over ``(l, m)`` *before* the chunk is written. Each
+          dataset has dims ``(time, frequency, polarization)`` for this chunk's
+          frequencies and one variable per statistic (``mean``, ``median``,
+          ``max``, ``min``, ``peak``, ``sum``, ``rms``, ``std``, ``mad_sigma``,
+          ``n_pixels`` and their ``_masked`` twins restricted to the clean
+          mask, or to ``PRIMARY_BEAM > primary_beam_limit`` when no mask
+          exists, e.g. ``niter=0``); see
+          :func:`~astroviper.processing_functions.image_analysis.plane_statistics.calculate_plane_statistics`.
+          The reduce concatenates the chunks along ``frequency``.
     """
     import time
 
@@ -401,6 +413,7 @@ def image_cube_single_field(
         return {
             "timing_node_tasks": pd.DataFrame({k: [v] for k, v in row.items()}),
             "deconvolution": ReturnDict(),
+            "image_statistics": {},
         }
     T_load = time.time() - start
 
@@ -426,6 +439,24 @@ def image_cube_single_field(
     combined_deconvolve_dict = _remap_deconvolve_dict_to_global_channels(
         combined_deconvolve_dict, data_selection
     )
+
+    # Per-plane (l, m) statistics of every image-domain variable in memory,
+    # taken BEFORE the write so they describe exactly what goes to disk (and
+    # survive a skipped write). Channels carry their global frequency values,
+    # so the reduce can concatenate chunks along ``frequency``.
+    start = time.time()
+    from astroviper.processing_functions.image_analysis.plane_statistics import (
+        calculate_plane_statistics,
+    )
+
+    image_statistics = calculate_plane_statistics(
+        img_xds,
+        # Masked statistics use the clean MASK when present; a niter=0 run has
+        # none, so the fallback mask PRIMARY_BEAM > primary_beam_limit (the
+        # same valid-sky cutoff the deconvolver would use) applies.
+        primary_beam_limit=iteration_control_params.get("primary_beam_limit", 0.2),
+    )
+    T_image_statistics = time.time() - start
 
     start = time.time()
     write_exc = None
@@ -493,6 +524,18 @@ def image_cube_single_field(
         write_exc = exc
     T_write = time.time() - start
 
+    # Two reference-cycle classes pin this task's gigabytes past `= None`
+    # (2026-08-12 findings; each survives until a full gc pass otherwise):
+    # 1. DataTree parent<->child links (the loaded chunk's tree), and
+    # 2. the xarray cached-accessor cycle on the image dataset
+    #    (_cache['xr_img'] <-> xradio ImageXds._xds, created by the
+    #    img_xds.xr_img.* calls in the processing functions).
+    # Sever both so everything dies by refcount right here. Both helpers are
+    # no-ops on the load-layer dict path / cache-less datasets.
+    from astroviper.utils.data_tree import clear_cached_accessors, release_data_tree
+
+    release_data_tree(ps_xdt)
+    clear_cached_accessors(img_xds)
     img_xds = None
     ps_xdt = None
 
@@ -507,6 +550,7 @@ def image_cube_single_field(
     task_total_time = time.time() - task_start
     timing_df["T_make_empty_image"] = T_make_empty_image
     timing_df["T_load"] = T_load
+    timing_df["T_image_statistics"] = T_image_statistics
     timing_df["T_write"] = T_write
     timing_df["T_image_cube_task"] = task_total_time
     # Wall-clock anchor so the task-stream analysis can place this task on the
@@ -585,4 +629,8 @@ def image_cube_single_field(
         printer=logger.debug,
     )
 
-    return {"timing_node_tasks": timing_df, "deconvolution": combined_deconvolve_dict}
+    return {
+        "timing_node_tasks": timing_df,
+        "deconvolution": combined_deconvolve_dict,
+        "image_statistics": image_statistics,
+    }

@@ -15,12 +15,56 @@ set of moment maps.  It follows the same approach as
    slice of every moment map in parallel via
    :func:`astroviper.utils.io.write_result_chunk_to_disk_using_zarr`.
 
-The moment axis itself can never be parallelized (every moment needs the full
-axis), so the graph is chunked along another axis: ``frequency`` by default,
-or ``m`` when the moment axis *is* ``frequency``.  The number of chunks is
-derived from a per-chunk memory estimate that accounts for the streaming
-science function's memory model (see
-:mod:`astroviper.processing_functions.image_analysis.moments`).
+The moment axis itself is never parallelized here (every moment needs the
+full axis), so the graph is chunked along another axis: ``frequency`` by
+default, or ``m`` when the moment axis *is* ``frequency``.
+
+Memory / I-O strategy
+---------------------
+The cost of a moments run is set by two things the workflow must respect for
+*any* on-disk layout: how much memory a task may use and how the store is
+chunked (a partial read of an on-disk chunk decodes the whole chunk).
+
+1. **Stream, never slab.** Every moment except ``median`` is computed by
+   streaming the moment axis through output-map-sized accumulators
+   (:class:`~astroviper.processing_functions.image_analysis.moments.MomentsAccumulator`).
+   The node task reads *blocks* of planes straight from the store
+   (:func:`~astroviper.node_tasks.image_analysis.moments.moment_axis_read_block`):
+   a block spans a whole number of on-disk chunk lengths along the moment
+   axis (so no chunk is decoded twice) and is capped at ``memory_budget_gb``.
+   Per-task memory is therefore ``O(output maps) + block + decode transient``
+   and does **not** grow with the length of the moment axis. Only ``median``
+   (which needs each pixel's whole profile) falls back to holding the chunk
+   slab, and only then does the moment-axis length enter the chunk count.
+2. **Size chunks from that model, not from the slab.** The chunk count along
+   the parallel axis is derived from the per-chunk estimate
+   ``accumulators(map cells) + memory_budget_gb + decode transient`` for
+   streamed moments (or the slab + median copies otherwise) and the
+   available threads / memory (:func:`calculate_data_chunking`). With
+   streaming, memory almost never constrains the chunk count, which frees
+   the choice for I/O efficiency (next point).
+3. **Align parallel chunks with on-disk chunks.** A task whose slice covers
+   a fraction ``f`` of an on-disk chunk along the parallel axis still decodes
+   the whole chunk, so total decode work is ``1/f`` x the store. Choose
+   ``n_mapping_parallelism`` such that each parallel chunk is a whole number
+   of on-disk chunks (``n_chunks = size / (k * chunk_len)``) whenever the
+   task count allows; when it does not (few on-disk chunks along the
+   parallel axis, many workers), the remaining amplification is
+   ``chunk_len / slice_width`` and it is cheaper to add parallelism along the
+   *moment* axis instead (point 4) than to split on-disk chunks further.
+4. **Associative moments can also be split along the moment axis.** For
+   single-pass moments (``moments_memory_model(...)["mergeable"]``) partial
+   accumulators over disjoint moment-axis segments merge exactly
+   (:meth:`MomentsAccumulator.merge`), so a map over (parallel-axis chunk x
+   moment-axis segment -- ideally shard-aligned) plus a reduce reads every
+   byte once with as many tasks as wanted. This driver does not build that
+   graph yet; the accumulator API is the building block for it.
+5. **Bound the decode transient explicitly.** Zarr decodes up to
+   ``zarr.config["async.concurrency"]`` chunks at once; with large on-disk
+   chunks this transient (compressed + decoded bytes per in-flight chunk)
+   rather than the block can dominate, so set the concurrency from the chunk
+   size and the budget (the Frontera script does this via
+   ``ZARR_ASYNC__CONCURRENCY``).
 """
 
 import os
@@ -45,6 +89,8 @@ from astroviper.processing_functions.image_analysis.moments import (
     moment_axis_units,
     moment_data_variable_key,
     moment_units,
+    moments_memory_model,
+    normalize_dimension_flags,
     normalize_moments,
     normalize_pixel_range,
     resolve_moments_input_variables,
@@ -57,11 +103,20 @@ from astroviper.utils.param_docs import shares_param_docs
 # at it.
 _PARAM_CONFIG_DIR = os.path.dirname(__file__)
 
-# Axes the graph may be chunked along.  ``l`` is excluded because GraphVIPER's
-# interpolate_data_coords_onto_parallel_coords requires a monotonically
-# increasing coordinate and the ``l`` coordinate decreases; ``polarization``
-# is excluded because its coordinate is non-numeric.
-ALLOWED_PARALLEL_AXES = ("frequency", "m", "time")
+# Axes the graph may be chunked along (any combination, never the moment
+# axis). Chunking is done in index space, so the decreasing ``l`` coordinate
+# is fine; ``polarization`` is excluded because it is non-numeric and tiny.
+ALLOWED_PARALLEL_AXES = ("frequency", "l", "m", "time")
+
+# Streaming-read memory targets (see moment_axis_read_block and the
+# memory_budget_gb resolution in moments()): a task's TOTAL usage -- process
+# baseline + decoded read block + zarr decode transient + accumulators -- is
+# aimed at MOMENTS_MEMORY_FRACTION of the per-thread memory.
+# MOMENTS_TASK_BASELINE_GB is the measured non-read footprint (interpreter +
+# dask worker + xarray/zarr machinery + output maps: ~0.7 GB observed on the
+# 2026-08-23 Frontera run, kept with headroom).
+MOMENTS_MEMORY_FRACTION = 0.8
+MOMENTS_TASK_BASELINE_GB = 1.5
 
 
 def _open_input_image(input_image_store, selection):
@@ -95,10 +150,26 @@ def _open_input_image(input_image_store, selection):
 
 
 def _collect_dataframes(results, frames):
-    """Recursively collect the node tasks' timing DataFrames from the compute result."""
+    """Recursively collect the node tasks' timing frames from the compute result.
+
+    Each node task returns ``{"timing_node_tasks": DataFrame}``; when the graph
+    was built with ``monitor_resources_seconds`` graphviper adds a
+    ``"resource_usage"`` dict-of-series which is folded into that task's
+    one-row frame as list-valued columns (``time_seconds``, ``cpu_percent``,
+    ``memory_rss_bytes``, ...) plus scalars (``sample_interval_seconds``,
+    page-fault counts) -- the same layout as the imaging driver.
+    """
     import pandas as pd
 
-    if isinstance(results, pd.DataFrame):
+    if isinstance(results, dict) and "timing_node_tasks" in results:
+        timing = results["timing_node_tasks"]
+        usage = results.get("resource_usage")
+        if usage is not None:
+            timing = timing.copy()
+            for key, value in usage.items():
+                timing[key] = [value] if isinstance(value, list) else value
+        frames.append(timing)
+    elif isinstance(results, pd.DataFrame):
         frames.append(results)
     elif isinstance(results, list | tuple):
         for item in results:
@@ -117,11 +188,13 @@ def moments(
     exclude_pixel_range: list | None = None,
     use_mask: bool = False,
     selection: dict | None = None,
-    parallel_axis: str | None = None,
-    n_chunks: int | None = None,
+    n_mapping_parallelism: dict[str, int | None] | None = None,
     thread_info: dict | None = None,
     compressor=None,
     overwrite: bool = False,
+    memory_budget_gb: float | None = None,
+    monitor_resources_seconds: float | None = None,
+    dimension_flags: dict | None = None,
 ):
     """Collapse an on-disk image along one axis into moment maps (CASA ``immoments``).
 
@@ -129,9 +202,10 @@ def moments(
     data variable (and one ``moment_<name>`` data group) per requested moment,
     with the moment axis kept as a degenerate dimension of size 1 whose
     numeric coordinates are the mean of the input coordinates.  The compute is
-    parallelized with a GraphVIPER map graph over ``parallel_axis`` (never the
-    moment axis); each node task loads only its own chunk of the sky (and
-    optional mask) variables and writes its own slice of every moment map.
+    parallelized with a GraphVIPER map graph over the axis named in
+    ``n_mapping_parallelism`` (never the moment axis); each node task loads
+    only its own chunk of the sky (and optional mask) variables and writes its
+    own slice of every moment map.
 
     Parameters
     ----------
@@ -196,14 +270,18 @@ def moments(
         AstroVIPER analogue of CASA's ``chans``/``stokes``/``box``.  Must not
         select along the parallel axis (chunking happens on the selected
         image).
-    parallel_axis : str, optional
-        Image dimension the graph is chunked along; never the moment axis.
-        One of ``"frequency"``, ``"m"`` or ``"time"``.  Default (``None``):
-        ``"frequency"``, or ``"m"`` when the moment axis is ``"frequency"``.
-    n_chunks : int, optional
-        Number of chunks along ``parallel_axis``.  If ``None`` (default), the
-        chunk count is auto-determined from the per-chunk memory estimate and
-        the available threads/memory.
+    n_mapping_parallelism : dict, optional
+        Mapping parallelism of the distributed graph, as a dict
+        ``{parallel_axis: n_chunks | None}`` over any combination of
+        ``"l"``, ``"m"``, ``"frequency"``, ``"time"`` (never the moment axis);
+        one node task is mapped over every tile of the chunk grid, e.g.
+        ``{"l": 18, "m": 18}`` = 324 tasks when collapsing ``frequency``. A
+        ``None`` count is automatic: one chunk per on-disk chunk along that
+        axis (tiles aligned with the store's inner chunks, so no chunk is
+        decoded by more than one task), split further only if such a tile
+        does not fit the per-thread memory. Default (``None``):
+        ``{"l": None, "m": None}`` (or ``{"frequency": None}`` when the
+        moment axis is ``l`` or ``m``).
     thread_info : dict, optional
         Thread information as returned by
         :func:`~astroviper.utils.data_partitioning.get_thread_info`; queried
@@ -214,18 +292,41 @@ def moments(
     overwrite : bool, default False
         If ``True`` an existing ``moments_image_store`` is overwritten;
         otherwise its presence raises ``RuntimeError``.
+    memory_budget_gb : float, default 1.0
+        Memory budget (GiB) for one streaming read request of a node task
+        along the moment axis, covering the decoded block AND the zarr
+        decode transient (see
+        :func:`~astroviper.node_tasks.image_analysis.moments.moment_axis_read_block`).
+        ``None`` (default) targets a TOTAL task footprint of ~80% of the
+        per-thread memory (``MOMENTS_MEMORY_FRACTION`` x memory_per_thread
+        minus the ``MOMENTS_TASK_BASELINE_GB`` process baseline) -- as few,
+        large read requests as the worker's memory allows; an explicit value
+        is clamped to that same ceiling. Ignored by the ``median`` slab
+        path.
+
+    monitor_resources_seconds : float, optional
+        If set, sample each node task's worker-process CPU / memory / I/O
+        usage every this many seconds (graphviper's
+        :func:`~graphviper.graph_tools.map.monitor_node_task`) and carry the
+        series into the returned frame as list-valued columns
+        (``time_seconds``, ``cpu_percent``, ``memory_rss_bytes`` and, on
+        Linux, ``read_bytes``/``write_bytes``/``read_chars``/``write_chars``)
+        plus the scalar ``sample_interval_seconds`` and page-fault counts.
+        Requires ``psutil``. ``None`` (default) disables monitoring.
 
     Returns
     -------
     pandas.DataFrame
-        Per-task timing frame (``task_id``, ``T_load``, ``T_moments``,
-        ``T_write``, ``T_moments_task``), one row per graph node.
+        Per-task timing frame (``task_id``, ``streamed``,
+        ``n_read_block_planes``, ``T_load``, ``T_moments``, ``T_write``,
+        ``T_moments_task``, ``start_unixtime``, ``hostname``, worker identity
+        and, when monitored, the resource series), one row per graph node.
 
     Raises
     ------
     ValueError
         If a moment / axis choice is invalid, both pixel ranges are given, or
-        ``selection`` selects along ``parallel_axis``.
+        ``selection`` selects along the parallel axis.
     RuntimeError
         If ``moments_image_store`` exists and ``overwrite=False``.
     """
@@ -277,82 +378,209 @@ def moments(
             f"(dims: {sky.dims})."
         )
 
-    # --- Choose and validate the parallel axis --------------------------------
-    if parallel_axis is None:
-        parallel_axis = "m" if moment_axis == "frequency" else "frequency"
-    if parallel_axis == moment_axis:
+    # --- Resolve and validate the mapping parallelism -------------------------
+    # n_mapping_parallelism is {parallel_axis: n_chunks | None} over ANY
+    # combination of non-moment axes (a 2-D (l, m) tiling is the natural
+    # choice when collapsing frequency). None = auto: one parallel chunk per
+    # on-disk chunk along that axis, so every task reads whole inner chunks
+    # and no chunk is decoded by more than one task.
+    if n_mapping_parallelism is None:
+        if moment_axis in ("l", "m"):
+            n_mapping_parallelism = {"frequency": None}
+        else:
+            n_mapping_parallelism = {"l": None, "m": None}
+    if not isinstance(n_mapping_parallelism, dict) or not n_mapping_parallelism:
         raise ValueError(
-            f"The moment axis '{moment_axis}' cannot be used for parallelism; "
-            f"choose a different parallel_axis."
+            "n_mapping_parallelism must be a non-empty dict "
+            f"{{parallel_axis: n_chunks | None}}; got {n_mapping_parallelism!r}."
         )
-    if parallel_axis not in ALLOWED_PARALLEL_AXES:
-        raise ValueError(
-            f"parallel_axis '{parallel_axis}' not in allowed axes "
-            f"{ALLOWED_PARALLEL_AXES} (the parallel coordinate must be numeric "
-            "and monotonically increasing)."
-        )
-    if parallel_axis not in sky.dims:
-        raise ValueError(
-            f"parallel_axis '{parallel_axis}' is not a dimension of {sky_name}."
-        )
-    if parallel_axis in selection:
-        raise ValueError(
-            "selection must not select along the parallel_axis "
-            f"('{parallel_axis}'); chunk indices are computed on the selected "
-            "image, but node tasks apply the selection and the chunk slices to "
-            "the on-disk image independently."
-        )
+    parallel_axes = list(n_mapping_parallelism)
+    for parallel_axis, n_parallel_chunks in n_mapping_parallelism.items():
+        if n_parallel_chunks is not None and (
+            isinstance(n_parallel_chunks, bool)
+            or not isinstance(n_parallel_chunks, int)
+            or n_parallel_chunks < 1
+        ):
+            raise ValueError(
+                f"n_mapping_parallelism[{parallel_axis!r}] must be a positive "
+                f"int or None (auto), got {n_parallel_chunks!r}."
+            )
+        if parallel_axis == moment_axis:
+            raise ValueError(
+                f"The moment axis '{moment_axis}' cannot be used for parallelism; "
+                "choose different n_mapping_parallelism axes."
+            )
+        if parallel_axis not in ALLOWED_PARALLEL_AXES:
+            raise ValueError(
+                f"n_mapping_parallelism axis '{parallel_axis}' not in allowed axes "
+                f"{ALLOWED_PARALLEL_AXES}."
+            )
+        if parallel_axis not in sky.dims:
+            raise ValueError(
+                f"n_mapping_parallelism axis '{parallel_axis}' is not a dimension "
+                f"of {sky_name}."
+            )
+        if parallel_axis in selection:
+            raise ValueError(
+                "selection must not select along a parallel axis "
+                f"('{parallel_axis}'); chunk indices are computed on the selected "
+                "image, but node tasks apply the selection and the chunk slices "
+                "to the on-disk image independently."
+            )
 
-    # --- Determine chunking along the parallel axis ---------------------------
-    # Memory for a parallel-axis-size-1 chunk: the loaded sky slab (full moment
-    # axis), the optional mask, plus the science function's extra copies (one
-    # working copy + numpy's internal partition copy when a median-family
-    # moment filters pixels; see the processing-function module docstring).
-    # The streaming accumulators are map-sized and covered by the fudge factor.
+    # --- Determine chunking along the parallel axes ---------------------------
+    # On-disk chunk geometry of the sky variable (zarr stores expose it via
+    # encoding; 1 = unknown / not chunked along that axis).
     start = time.time()
+    on_disk_chunks = sky.encoding.get("chunks")
+    if on_disk_chunks is not None and len(on_disk_chunks) == sky.ndim:
+        chunk_len = {
+            dim: int(c) for dim, c in zip(sky.dims, on_disk_chunks, strict=True)
+        }
+    else:
+        chunk_len = {dim: 1 for dim in sky.dims}
+
+    # Memory for the parallel-axes-size-1 cell (see the module docstring):
+    # * streamed moments (everything but median): output-map-sized
+    #   accumulators only -- up to ~10 float64/int64 maps (count, sums, running
+    #   extrema + indices, pass-2 state) plus the output maps, i.e. ~100 B per
+    #   map cell; the read block (memory_budget_gb) and the zarr decode
+    #   transient (taken as another budget's worth) are chunk-size independent
+    #   and enter as constant_memory.
+    # * median: the loaded sky slab (full moment axis), the optional mask, plus
+    #   the science function's extra copies (one working copy + numpy's
+    #   internal partition copy when pixels are filtered).
     itemsize = sky.dtype.itemsize
     singleton_chunk_sizes = dict(sky.sizes)
-    del singleton_chunk_sizes[parallel_axis]
-    n_copies = 1.0
-    if mask_name is not None:
-        n_copies += 1.0 / itemsize
-    if "median" in moment_names:
+    for parallel_axis in parallel_axes:
+        del singleton_chunk_sizes[parallel_axis]
+    singleton_cells = float(np.prod(np.array(list(singleton_chunk_sizes.values()))))
+    fudge_factor = 1.3
+    streamed = not moments_memory_model(moment_names)["requires_full_profile"]
+    if not streamed:
+        n_copies = 1.0
+        if mask_name is not None:
+            n_copies += 1.0 / itemsize
         filtering = include_range is not None or exclude_range is not None or use_mask
         n_copies += 2.0 if filtering else 1.0
-    fudge_factor = 1.3
-    memory_singleton_chunk = (
-        n_copies
-        * float(np.prod(np.array(list(singleton_chunk_sizes.values()))))
-        * itemsize
-        * fudge_factor
-        / (1024**3)
-    )
+        memory_singleton_chunk = (
+            n_copies * singleton_cells * itemsize * fudge_factor / (1024**3)
+        )
+        constant_memory = 0.0
     if thread_info is None:
         thread_info = get_thread_info()
     logger.debug("Thread info " + str(thread_info))
-    if n_chunks is None:
-        n_chunks_dict = calculate_data_chunking(
-            memory_singleton_chunk,
-            {parallel_axis: sky.sizes[parallel_axis]},
-            thread_info,
-            constant_memory=0,
-            # Moment tasks are light (one streaming reduction per chunk), so
-            # per-task overhead matters: one task per thread balances the graph
-            # without drowning small cubes in scheduling/IO overhead.
-            tasks_per_thread=1,
+    if streamed:
+        map_cells = singleton_cells / sky.sizes[moment_axis]
+        memory_singleton_chunk = map_cells * 100.0 * fudge_factor / (1024**3)
+        # Resolve the read budget the node tasks stream with. The budget
+        # covers a request's WHOLE footprint (decoded block + zarr decode
+        # transient; see moment_axis_read_block), so the auto default targets
+        # MOMENTS_MEMORY_FRACTION of the per-thread memory minus the process
+        # baseline (interpreter + worker + accumulators) -- i.e. total task
+        # usage ~ 80%: fewer, larger read requests = lighter Lustre request
+        # load at the same byte count. An explicit memory_budget_gb is
+        # clamped to that same ceiling so a task can never outgrow its
+        # worker.
+        memory_per_thread = float(thread_info["memory_per_thread"])
+        # The baseline shrinks on small-memory threads (a laptop test thread
+        # has no 1.5 GB dask-worker footprint) so budget + baseline always
+        # leaves at least (1 - fraction) of the thread for the accumulators.
+        baseline_gb = min(MOMENTS_TASK_BASELINE_GB, 0.2 * memory_per_thread)
+        auto_budget = max(
+            0.05 * memory_per_thread,
+            MOMENTS_MEMORY_FRACTION * memory_per_thread - baseline_gb,
         )
-        n_chunks = n_chunks_dict[parallel_axis]
+        memory_budget_gb = float(
+            auto_budget
+            if memory_budget_gb is None
+            else min(memory_budget_gb, auto_budget)
+        )
+        constant_memory = memory_budget_gb + baseline_gb
+        logger.info(
+            f"moments: read budget {memory_budget_gb:.2f} GiB per task "
+            f"(target {MOMENTS_MEMORY_FRACTION:.0%} of "
+            f"{memory_per_thread:.1f} GiB per thread, "
+            f"baseline {baseline_gb:.2f} GiB)"
+        )
 
+    n_chunks = {}
+    auto_axes = [axis for axis in parallel_axes if n_mapping_parallelism[axis] is None]
+    for parallel_axis in parallel_axes:
+        if n_mapping_parallelism[parallel_axis] is not None:
+            n_chunks[parallel_axis] = n_mapping_parallelism[parallel_axis]
+    if auto_axes:
+        # Aligned default: one task tile per on-disk chunk along each auto axis.
+        aligned = {
+            axis: max(1, -(-sky.sizes[axis] // chunk_len[axis])) for axis in auto_axes
+        }
+        # Memory check of that tile: cells of the fixed axes x the tile's extent
+        # along the auto axes x per-cell cost (+ constant). If it does not fit
+        # the per-thread memory, split the tile further along the auto axes
+        # (calculate_data_chunking does that over the tile's extent).
+        tile_cells = float(
+            np.prod([min(chunk_len[axis], sky.sizes[axis]) for axis in auto_axes])
+        )
+        fixed_explicit = float(
+            np.prod(
+                [
+                    -(-sky.sizes[axis] // n_chunks[axis])
+                    for axis in parallel_axes
+                    if axis not in auto_axes
+                ]
+            )
+        )
+        tile_memory = memory_singleton_chunk * tile_cells * fixed_explicit
+        if tile_memory + constant_memory <= thread_info["memory_per_thread"]:
+            n_chunks.update(aligned)
+            logger.debug(
+                f"moments: aligned tiling {aligned} (on-disk chunks {chunk_len}); "
+                f"tile memory ~{tile_memory:.2f} GiB + {constant_memory:.2f} GiB"
+            )
+        else:
+            logger.warning(
+                f"moments: an on-disk-chunk-aligned tile needs ~{tile_memory:.1f} "
+                f"GiB (+{constant_memory:.1f} GiB) but only "
+                f"{thread_info['memory_per_thread']:.1f} GiB per thread is "
+                "available; splitting tiles below the on-disk chunk size (each "
+                "on-disk chunk will be decoded by several tasks)."
+            )
+            split = calculate_data_chunking(
+                memory_singleton_chunk * fixed_explicit,
+                {axis: sky.sizes[axis] for axis in auto_axes},
+                thread_info,
+                constant_memory=constant_memory,
+                tasks_per_thread=1,
+            )
+            n_chunks.update({axis: split[axis] for axis in auto_axes})
+
+    # Parallel coordinates. graphviper interpolates the chunk edges onto the
+    # data coordinates, which requires monotonically increasing numeric
+    # coordinates -- ``l`` decreases on sky images -- so the chunking is done
+    # in INDEX space (np.arange) for every parallel axis: the resulting
+    # data_selection / task_coords slices are index based and identical in
+    # both spaces, and the node tasks only use those slices.
+    index_xds = img_xds.assign_coords(
+        {axis: np.arange(sky.sizes[axis], dtype=np.float64) for axis in parallel_axes}
+    )
     parallel_coords = {
         parallel_axis: make_parallel_coord(
-            coord=img_xds[parallel_axis], n_chunks=n_chunks
+            coord=index_xds[parallel_axis], n_chunks=n_chunks[parallel_axis]
         )
+        for parallel_axis in parallel_axes
     }
+    n_tasks = int(
+        np.prod([len(parallel_coords[axis]["data_chunks"]) for axis in parallel_axes])
+    )
     logger.info(
-        "Number of "
-        + parallel_axis
-        + " chunks: "
-        + str(len(parallel_coords[parallel_axis]["data_chunks"]))
+        "Moments parallel chunks: "
+        + ", ".join(
+            f"{axis}={len(parallel_coords[axis]['data_chunks'])}"
+            for axis in parallel_axes
+        )
+        + f" -> {n_tasks} node tasks (on-disk chunks "
+        + str({axis: chunk_len[axis] for axis in parallel_axes})
+        + ")"
     )
     T_determine_chunks = time.time() - start
 
@@ -416,7 +644,9 @@ def moments(
     T_create_output = time.time() - start
 
     # --- Build and run the map graph ------------------------------------------
-    input_data = {"img": img_xds}
+    # Interpolate in index space (see above); the graph's input_data only
+    # carries coordinates, so either dataset works for the map call.
+    input_data = {"img": index_xds}
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
         parallel_coords, input_data
     )
@@ -432,6 +662,12 @@ def moments(
         "use_mask": use_mask,
         "selection": selection,
         "moments_data_variables": moments_data_variables,
+        "memory_budget_gb": memory_budget_gb,
+        # Full-image flags, validated here once; each node task slices them to
+        # its chunk. Normalized so index-range lists reach workers as compact
+        # bool arrays.
+        "dimension_flags": normalize_dimension_flags(dimension_flags, dict(sky.sizes))
+        or None,
     }
 
     start = time.time()
@@ -441,6 +677,7 @@ def moments(
         node_task=_moments_node_task,
         input_params=input_params,
         in_memory_compute=False,
+        monitor_resources_seconds=monitor_resources_seconds,
     )
     dask_graph = generate_dask_workflow(viper_graph)
     logger.debug("Time to create moments graph " + str(time.time() - start) + "s")

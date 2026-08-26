@@ -22,7 +22,8 @@
         "single_precision_image": { "type": "boolean" },
         "thread_info": { "type": ["dict"], "nullable": true },
         "processing_function_threads": { "type": ["int"], "min": 1 },
-        "n_chunks": { "type": ["int"], "nullable": true, "min": 1 },
+        "n_mapping_parallelism": { "type": ["dict"], "nullable": true },
+        "node_task_image_chunking": { "type": ["dict"], "nullable": true },
         "overwrite": { "type": "boolean" },
         "memory_mode": {
             "type": ["str"],
@@ -33,7 +34,6 @@
         "write_imaging_weights_to_ps": { "type": "boolean" },
         "clear_cache": { "type": "boolean" },
         "vizualize_graph": { "type": "boolean" },
-        "disk_chunk_sizes": { "type": ["dict", "str"], "nullable": true },
         "fft_backend": { "type": ["str"], "allowed": ["pyfftw", "scipy"] },
         "restore": { "type": "boolean" },
         "skunk_works": { "type": "boolean" },

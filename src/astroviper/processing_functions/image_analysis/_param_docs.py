@@ -86,4 +86,26 @@ IMAGE_ANALYSIS_PARAM_DOCS = {
         "select along the parallel axis (chunking happens on the selected\n"
         "image)."
     ),
+    "memory_budget_gb": (
+        "Memory budget (GiB) for one streaming read request of a node task\n"
+        "along the moment axis, covering the decoded block AND the zarr\n"
+        "decode transient (see\n"
+        ":func:`~astroviper.node_tasks.image_analysis.moments.moment_axis_read_block`).\n"
+        "``None`` (default) targets a TOTAL task footprint of ~80% of the\n"
+        "per-thread memory (``MOMENTS_MEMORY_FRACTION`` x memory_per_thread\n"
+        "minus the ``MOMENTS_TASK_BASELINE_GB`` process baseline) -- as few,\n"
+        "large read requests as the worker's memory allows; an explicit value\n"
+        "is clamped to that same ceiling. Ignored by the ``median`` slab\n"
+        "path."
+    ),
+    "dimension_flags": (
+        "Per-dimension flags over the FULL image: ``{dim: boolean array\n"
+        "(True = flagged) | list of [start, stop) index ranges}`` (see\n"
+        ":func:`~astroviper.processing_functions.image_analysis.moments.normalize_dimension_flags`).\n"
+        "Flagged moment-axis planes (e.g. noisy spectral-window edge channels\n"
+        "or telluric-line channels when collapsing ``frequency``) contribute\n"
+        "to no moment; flags on any other dimension exclude those pixels from\n"
+        "every plane, exactly like a ``False`` mask value. Node tasks receive\n"
+        "the flags sliced to their chunk."
+    ),
 }

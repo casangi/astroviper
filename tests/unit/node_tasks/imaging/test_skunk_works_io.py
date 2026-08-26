@@ -322,7 +322,12 @@ def test_read_corrupt_plain_chunk_raises_labeled_eio(tmp_path, monkeypatch):
 # Direct chunk writer
 # --------------------------------------------------------------------------- #
 def _make_image_store(
-    tmp_path, compressor, freq_chunks, variables=("sky_residual",), shard_channels=None
+    tmp_path,
+    compressor,
+    freq_chunks,
+    variables=("sky_residual",),
+    shard_channels=None,
+    node_task_image_chunking=None,
 ):
     store = str(tmp_path / "img.zarr")
     zarr.open_group(store, mode="w")
@@ -343,6 +348,7 @@ def _make_image_store(
         double_precision=False,
         data_variable_definitions="imaging",
         shard_channels=shard_channels,
+        node_task_image_chunking=node_task_image_chunking,
     )
     return store
 
@@ -881,3 +887,132 @@ def test_parse_lfs_getstripe_composite_pfl_layout():
     parsed = _parse_lfs_getstripe(text, [path])
     assert parsed[path]["ost_indices"] == [5]
     assert parsed[path]["stripe_count"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# node_task_image_chunking: a task's region spans SEVERAL on-disk chunks
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("processing_function_threads", [1, 4])
+def test_write_roundtrip_node_task_image_chunking(
+    tmp_path, processing_function_threads
+):
+    """Plain-Zarr writer with node_task_image_chunking: each task's region is
+    split into several chunk files (l/m sub-chunking + frequency finer than the
+    per-task chunk) and still round-trips through stock zarr."""
+    import glob
+
+    freq_chunks = [list(range(2)), list(range(2))]  # 2 tasks x 2 channels
+    variables = ["sky_residual", "sky_model"]
+    store = _make_image_store(
+        tmp_path,
+        zarr.codecs.BloscCodec(cname="lz4", clevel=5),
+        freq_chunks,
+        variables,
+        node_task_image_chunking={"l": 8, "m": 8, "frequency": 1},
+    )
+    rng = np.random.default_rng(21)
+    vals = {v: rng.standard_normal((1, 2, 2, 16, 16)).astype("<f4") for v in variables}
+    img = xr.Dataset(
+        {
+            v.upper(): (["time", "frequency", "polarization", "l", "m"], vals[v])
+            for v in variables
+        }
+    )
+    task_coords = {"frequency": {"slice": slice(2, 4), "data": [0, 1]}}
+    write_result_chunk_to_disk_using_zarr_skunk_works(
+        store,
+        variables,
+        task_coords,
+        img,
+        processing_function_threads=processing_function_threads,
+    )
+    for v in variables:
+        apath = store + "/" + v.upper()
+        back = zarr.open_array(apath)[:, 2:4, :, :, :]
+        assert _equal(back, vals[v])
+        ours, _ = read_array_region(apath, {"frequency": slice(2, 4)})
+        assert _equal(ours, vals[v])
+        # 2 freq x 2 l x 2 m = 8 chunk files written for this task.
+        n_files = len(
+            [f for f in glob.glob(apath + "/c/**", recursive=True) if os.path.isfile(f)]
+        )
+        assert n_files == 8, f"{v}: expected 8 chunk files, got {n_files}"
+
+
+@pytest.mark.parametrize("processing_function_threads", [1, 4])
+def test_write_roundtrip_sharded_node_task_image_chunking(
+    tmp_path, processing_function_threads
+):
+    """Sharded writer with l/m inner sub-chunking: each single-channel task
+    writes several inner chunks into its shared shard file; readable by stock
+    zarr AND our reader; the shard count stays one per shard_channels."""
+    import glob
+    from concurrent.futures import ThreadPoolExecutor
+
+    nfreq, shard = 4, 2
+    freq_chunks = [[c] for c in range(nfreq)]
+    variables = ["sky_residual", "point_spread_function"]
+    store = _make_image_store(
+        tmp_path,
+        zarr.codecs.BloscCodec(cname="lz4", clevel=5),
+        freq_chunks,
+        variables,
+        shard_channels=shard,
+        node_task_image_chunking={"l": 8, "m": 8},
+    )
+    rng = np.random.default_rng(22)
+    vals = {
+        v: rng.standard_normal((1, nfreq, 2, 16, 16)).astype("<f4") for v in variables
+    }
+
+    def _write(k):
+        img = xr.Dataset(
+            {
+                v.upper(): (
+                    ["time", "frequency", "polarization", "l", "m"],
+                    vals[v][:, k : k + 1, :, :, :],
+                )
+                for v in variables
+            }
+        )
+        write_result_chunk_to_disk_sharded_skunk_works(
+            store,
+            variables,
+            {"frequency": {"slice": slice(k, k + 1)}},
+            img,
+            processing_function_threads=processing_function_threads,
+        )
+
+    # Write channels 0..2 concurrently; leave channel 3 UNWRITTEN.
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(_write, range(nfreq - 1)))
+
+    for v in variables:
+        apath = store + "/" + v.upper()
+        z = zarr.open_array(apath)[:]
+        ours, _ = read_array_region(apath, {})
+        for k in range(nfreq - 1):
+            assert _equal(z[:, k], vals[v][:, k]) and _equal(ours[:, k], vals[v][:, k])
+        assert np.isnan(z[:, 3]).all() and np.isnan(ours[:, 3]).all()
+        # Still one shard file per shard_channels channels (inner sub-chunking
+        # multiplies slots per shard, not shard files).
+        n_files = len(
+            [f for f in glob.glob(apath + "/c/**", recursive=True) if os.path.isfile(f)]
+        )
+        assert n_files == 2, f"{v}: expected 2 shard files, got {n_files}"
+
+
+def test_write_misaligned_region_raises(tmp_path):
+    """A task region not aligned to the on-disk chunk grid must be rejected (a
+    direct chunk write would clobber the neighbouring task's data)."""
+    freq_chunks = [list(range(2)), list(range(2))]  # chunk grid of 2 channels
+    store = _make_image_store(tmp_path, None, freq_chunks)
+    vals = np.random.default_rng(23).standard_normal((1, 2, 2, 16, 16)).astype("<f4")
+    img = xr.Dataset(
+        {"SKY_RESIDUAL": (["time", "frequency", "polarization", "l", "m"], vals)}
+    )
+    task_coords = {"frequency": {"slice": slice(1, 3), "data": [0, 1]}}
+    with pytest.raises(ValueError, match="not aligned"):
+        write_result_chunk_to_disk_using_zarr_skunk_works(
+            store, ["sky_residual"], task_coords, img
+        )

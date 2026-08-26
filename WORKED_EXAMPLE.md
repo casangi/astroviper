@@ -24,7 +24,7 @@ return_dict = image_cube_single_field(
     processing_set_data_group_name="base",
     single_precision_image=True,
     processing_function_threads=1,
-    n_chunks=5,
+    n_mapping_parallelism={"frequency": 5},
     restore=True,
     overwrite=True,
 )
@@ -36,8 +36,9 @@ The rest of this section walks down the layers behind that call:
 The user-facing function. Sequence:
 1. `make_empty_sky_image(...)` → `write_image(..., out_format="zarr")` (creates
    the image store with correct coords/dims).
-2. `calculate_number_of_chunks_for_cube_imaging(...)` → decide frequency chunk
-   count from per-channel memory estimate + available threads.
+2. `calculate_mapping_parallelism_for_cube_imaging(...)` → decide the mapping
+   parallelism (frequency chunk count) from per-channel memory estimate +
+   available threads.
 3. `make_parallel_coord(coord=img_xds.frequency, n_chunks=...)` → defines
    parallelism (imaging is **parallelized over frequency** for cubes).
 4. `create_empty_data_variables_on_disk(...)` → pre-allocate Zarr arrays
@@ -46,9 +47,8 @@ The user-facing function. Sequence:
 5. `open_processing_set(...)` (lazy) →
    `interpolate_data_coords_onto_parallel_coords(...)` → `node_task_data_mapping`.
 6. `map(input_data=ps_xdt, node_task=node_tasks.imaging.image_cube_single_field,
-   data_loading_task=_load_processing_set_chunk, disk_chunk_sizes=..., ...)` →
-   `reduce(..., mode="tree")` → `generate_dask_workflow` → `dask.compute` →
-   `zarr.consolidate_metadata`.
+   ...)` → `reduce(..., mode="tree")` → `generate_dask_workflow` →
+   `dask.compute` → `zarr.consolidate_metadata`.
 
 
 ### 12.2 Node task — `node_tasks/imaging/image_cube_single_field.py`
