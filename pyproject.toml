@@ -14,7 +14,7 @@ requires-python = ">=3.11,<3.14"
 
 # ✅ Core runtime dependencies must live here
 dependencies = [
-  "graphviper>=0.0.51",
+  "graphviper>=0.0.52",
   "numpy",
   "opt_einsum",
   "pyfftw",
