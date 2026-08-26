@@ -110,8 +110,8 @@ def point_spread_function_gaussian_fit(
         )
     if not isinstance(sampling, (list, tuple, np.ndarray)):
         raise TypeError("sampling must be a list, tuple, or numpy array")
-    if sampling[0] <= 0 or sampling[1] <= 0:
-        raise ValueError("sampling must be positive")
+    if sampling[0] <= 1 or sampling[1] <= 1:
+        raise ValueError("sampling must contain at least two points per axis")
     if type(sampling[0]) is not int or type(sampling[1]) is not int:
         raise TypeError("sampling must be integers")
     if cutoff < 0:
@@ -474,6 +474,10 @@ def psf_gaussian_fit_core(
         back to ``os.cpu_count()``. Each slice writes to its own entry in
         the output, so results are independent of the thread count.
     """
+    sampling = np.asarray(sampling)
+    if np.any(sampling <= 1):
+        raise ValueError("sampling must contain at least two points per axis")
+
     ellipse_params = np.zeros(image_to_fit.shape[0:3] + (3,), dtype=np.float64)
     if np.all(np.isnan(image_to_fit)):
         return ellipse_params + np.nan
@@ -528,8 +532,11 @@ def psf_gaussian_fit_core(
         yp_grid = np.repeat(interp_d1, d0_shape).reshape(d1_shape, d0_shape).T
         points = np.vstack((np.ravel(xp_grid), np.ravel(yp_grid))).T
 
-        bmaj_scale = np.abs(delta[0] * FWHM_factor / (sampling[0] / npix_window[0]))
-        bmin_scale = np.abs(delta[1] * FWHM_factor / (sampling[1] / npix_window[1]))
+        # ``npix_window`` pixels span ``npix_window - 1`` intervals, and the
+        # resampled grid spans the same distance with ``sampling - 1``
+        # intervals. Convert the fitted sigma from resampled-grid units to the
+        # physical image coordinates using that interval ratio.
+        resampled_pixel_size = np.abs(delta) * (npix_window - 1) / (sampling - 1)
 
         interp_image_to_fit = np.reshape(
             interpn(
@@ -560,14 +567,16 @@ def psf_gaussian_fit_core(
         else:
             res_x = res.x
 
+        fitted_fwhm = np.abs(res_x[0:2]) * resampled_pixel_size * FWHM_factor
+
         phi = res_x[2]
-        if np.argmax(res_x[0:2]) == 1:
+        if np.argmax(fitted_fwhm) == 1:
             phi = -(np.pi / 2 - phi)
         if phi < 0:
             phi = (phi + np.pi) % np.pi
 
-        ellipse_params[time, chan, pol, 0] = np.max(np.abs(res_x[0:2])) * bmaj_scale
-        ellipse_params[time, chan, pol, 1] = np.min(np.abs(res_x[0:2])) * bmin_scale
+        ellipse_params[time, chan, pol, 0] = np.max(fitted_fwhm)
+        ellipse_params[time, chan, pol, 1] = np.min(fitted_fwhm)
         ellipse_params[time, chan, pol, 2] = phi
 
     tasks = [

@@ -147,6 +147,13 @@ def test_zero_sampling():
         psf_gaussian_fit(ds, sampling=[0, 9])
 
 
+def test_single_point_sampling():
+    """A resampled axis needs at least two points to define an interval."""
+    ds = create_test_xds()
+    with pytest.raises(ValueError, match="at least two points"):
+        psf_gaussian_fit(ds, sampling=[1, 9])
+
+
 def test_single_value_sampling():
     """test single value sampling"""
     ds = create_test_xds()
@@ -381,6 +388,34 @@ def test_psf_gaussian_fit_core_simple_gaussian():
     assert result.shape == (1, 1, 1, 3)
     assert np.all(result[0, 0, 0, :2] > 0)
     assert np.isfinite(result[0, 0, 0, 2])
+
+
+def test_psf_gaussian_fit_core_uses_resampled_interval_scale():
+    """Resampling must preserve the physical FWHM of the original pixel grid."""
+    window_size = 17
+    sampling_size = 55
+    delta = np.array([0.2, 0.2])
+    sigma_pixels = 2.0
+    offsets = np.arange(window_size) - window_size // 2
+    l_grid, m_grid = np.meshgrid(offsets, offsets, indexing="ij")
+    gaussian = np.exp(-(l_grid**2 + m_grid**2) / (2.0 * sigma_pixels**2))[
+        None, None, None
+    ]
+
+    result = psf_gaussian_fit_core(
+        gaussian,
+        np.array([0, 0]),
+        np.array([window_size - 1, window_size - 1]),
+        np.array([sampling_size, sampling_size]),
+        0.35,
+        delta,
+        interpolation_method="splinef2d",
+    )
+
+    expected_fwhm = sigma_pixels * delta[0] * FWHM_factor
+    np.testing.assert_allclose(
+        result[0, 0, 0, :2], expected_fwhm, rtol=2.0e-3, atol=0.0
+    )
 
 
 def test_psf_gaussian_fit_core_all_nan():
