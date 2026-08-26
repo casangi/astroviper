@@ -10,14 +10,27 @@ match the analytic clean-beam convolution.
 """
 
 import numpy as np
+import pytest
 from astropy.coordinates import SkyCoord
 from xradio.image import load_image
 from xradio.measurement_set import open_processing_set
 
-import astroviper.distributed_applications as distributed_applications
-from astroviper.utils.beam_models import airy_disk_model
-from astroviper.utils.coordinate_transforms import sin_pixel_to_celestial_coord
-from astroviper.utils.telescope_layout import read_telescope_layout
+# OSError: an editable install with the simulation sources removed raises
+# FileNotFoundError instead of ImportError.
+try:
+    import astroviper.distributed_applications.simulation  # noqa: F401
+except (ImportError, OSError):
+    pytest.skip(
+        "requires the SIRIUS simulation port (branch 265-port-sirius)",
+        allow_module_level=True,
+    )
+
+import astroviper.distributed_applications as distributed_applications  # noqa: E402
+from astroviper.utils.beam_models import airy_disk_model  # noqa: E402
+from astroviper.utils.coordinate_transforms import (  # noqa: E402
+    sin_pixel_to_celestial_coord,
+)
+from astroviper.utils.telescope_layout import read_telescope_layout  # noqa: E402
 
 ARC = np.pi / (180 * 3600)
 PHASE_CENTER = SkyCoord(ra="19h59m28.5s", dec="-40d44m01.5s", frame="icrs")
