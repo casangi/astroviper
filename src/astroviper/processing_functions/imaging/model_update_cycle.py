@@ -24,7 +24,7 @@ def model_update_cycle_cube_single_field(
         model (output data group).  Modified in place.
     deconvolver : str
         Deconvolution algorithm for the minor cycle. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
-        (numba, threaded across *and* within planes -- faster when there are
+        (C++, threaded across *and* within planes -- faster when there are
         few planes, e.g. single-channel imaging) or ``"asp"``.
     deconvolve_params : dict
         Per-cycle deconvolution / iteration-control parameters passed straight to
@@ -37,11 +37,12 @@ def model_update_cycle_cube_single_field(
     is_n_iter_0 : bool
         ``True`` on the very first model update.  Currently informational.
     processing_function_threads : int, optional
-        Number of threads handed to the per-processing-function (C++ / Numba /
-        FFT) kernels.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     image_data_group_in_name : str, optional
-        Data group holding the residual image and (created) mask.  Default
-        ``"residual"``.
+        Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
+        ``"mask"``) roles name the input data variables.  Datasets without
+        data groups fall back to the conventional ``"SKY"`` variable.
     image_data_group_out_name : str, optional
         Data group that the updated sky model is registered under.  Default
         ``"model"``.

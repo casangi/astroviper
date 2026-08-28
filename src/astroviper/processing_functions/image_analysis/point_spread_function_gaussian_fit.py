@@ -21,10 +21,7 @@ def point_spread_function_gaussian_fit(
     img_xds: xr.Dataset,
     image_data_group_in_name="image",
     image_data_group_out_name="image",
-    image_data_group_out_modified={
-        "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
-        "max_sidelobe_point_spread_function": "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
-    },
+    image_data_group_out_modified=None,
     overwrite=True,
     npix_window: tuple = (41, 41),
     sampling: tuple = (55, 55),
@@ -97,8 +94,13 @@ def point_spread_function_gaussian_fit(
     - The maximum sidelobe level is a fraction of the PSF peak (dimensionless);
       it is ``0.0`` for an all-zero slice.
     """
+    if image_data_group_out_modified is None:
+        image_data_group_out_modified = {
+            "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+            "max_sidelobe_point_spread_function": "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
+        }
 
-    if not isinstance(npix_window, (list, tuple, np.ndarray)):
+    if not isinstance(npix_window, list | tuple | np.ndarray):
         raise TypeError("npix_window must be a list, tuple, or numpy array")
     if npix_window[0] <= 0 or npix_window[1] <= 0:
         raise ValueError("npix_window must be positive")
@@ -108,7 +110,7 @@ def point_spread_function_gaussian_fit(
         raise ValueError(
             "npix_window must be odd so the search window is centered on the peak"
         )
-    if not isinstance(sampling, (list, tuple, np.ndarray)):
+    if not isinstance(sampling, list | tuple | np.ndarray):
         raise TypeError("sampling must be a list, tuple, or numpy array")
     if sampling[0] <= 1 or sampling[1] <= 1:
         raise ValueError("sampling must contain at least two points per axis")
@@ -191,12 +193,12 @@ def point_spread_function_gaussian_fit(
         beam_params_label=["major", "minor", "pa"],
     )
 
-    img_xds[
-        image_data_group_out["beam_fit_params_point_spread_function"]
-    ] = xr.DataArray(
-        ellipse_params,
-        dims=["time", "frequency", "polarization", "beam_params"],
-        attrs={"unit": "rad"},
+    img_xds[image_data_group_out["beam_fit_params_point_spread_function"]] = (
+        xr.DataArray(
+            ellipse_params,
+            dims=["time", "frequency", "polarization", "beam_params"],
+            attrs={"unit": "rad"},
+        )
     )
 
     img_xds[image_data_group_out["max_sidelobe_point_spread_function"]] = xr.DataArray(

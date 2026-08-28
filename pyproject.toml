@@ -14,13 +14,10 @@ requires-python = ">=3.11,<3.14"
 
 # ✅ Core runtime dependencies must live here
 dependencies = [
-  "graphviper>=0.0.45",
-  "numpy>=1.20.0",
-  "xradio[zarr]>=1.2.2",
-  "numba",
+  "graphviper>=0.0.51",
+  "numpy",
   "opt_einsum",
   "pyfftw",
-  "graphviz",
   "gdown"
 ]
 
@@ -38,7 +35,8 @@ interactive = [
   "ipython",
   "jupyter-client",
   "bokeh",
-  "holoviews"
+  "holoviews",
+  "graphviz",
 ]
 
 docs = [
@@ -74,8 +72,8 @@ all = [
   "pandoc",
   "pre-commit",
   "nbstripout",
-  "memory_profiler",
-  "bokeh"
+  "bokeh",
+  "graphviz",
 ]
 
 [build-system]
@@ -85,7 +83,7 @@ requires = [
   "pybind11>=2.10.0",
   "setuptools",
   "wheel",
-  "numpy>=1.20.0"
+  "numpy"
 ]
 build-backend = "scikit_build_core.build"
 
@@ -119,10 +117,32 @@ PYBIND11_FINDPYTHON = "ON"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.isort]
-# Use black-compatible import formatting; without this, isort and black keep
-# rewriting each other's output and the pre-commit run never stabilizes.
-profile = "black"
+[tool.ruff]
+target-version = "py311"
+# Stale files (candidates for deletion) -- not worth linting. The example
+# notebook star-imports from the removed astroviper.core.* layout and cannot run.
+extend-exclude = [
+    "tests/component/untitled folder 2",
+    "examples/demo_standard_gridder.ipynb",
+]
+
+[tool.ruff.lint]
+# Ruff replaces isort + black (layout via `ruff format`, import sorting via the
+# "I" rules) and also lints for real defects and best practices:
+#   E4/E7/E9 -- pycodestyle errors (import placement, statement syntax, runtime)
+#   F        -- pyflakes: undefined names, unused imports, unused variables
+#   B        -- flake8-bugbear: likely bugs (mutable defaults, loop captures, ...)
+#   UP       -- pyupgrade: outdated syntax/typing (mirrors the pyupgrade hook)
+select = ["E4", "E7", "E9", "F", "B", "UP", "I"]
+# E741 (ambiguous variable name l/I/O): l and m are the standard radio-astronomy
+# direction-cosine coordinate names (see AGENTS.md section 8) and must keep
+# those names.
+ignore = ["E741"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tutorial notebooks introduce imports cell-by-cell as the narrative needs
+# them; that is deliberate style, not an error.
+"*.ipynb" = ["E402"]
 
 [tool.pytest.ini_options]
 # Silence noisy, non-actionable zarr V3 warnings across the whole test suite.

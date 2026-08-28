@@ -316,7 +316,7 @@ def _recompute_wideband_primary_beam(
 
 def _unwrap_continuum_reduce_result(input_data, node_name):
     """Return the dictionary produced by the continuum reduce stage."""
-    if isinstance(input_data, (list, tuple)):
+    if isinstance(input_data, list | tuple):
         if len(input_data) != 1:
             raise ValueError(
                 f"{node_name} expects exactly one reduced input, "
@@ -556,15 +556,15 @@ def _attach_imaging_weights_continuum(
                 f"{processing_set_data_group_name!r}."
             )
 
-        data_groups[processing_set_data_group_name][
-            "weight_imaging"
-        ] = weight_imaging_name
+        data_groups[processing_set_data_group_name]["weight_imaging"] = (
+            weight_imaging_name
+        )
 
         attached += 1
 
     if attached == 0:
         raise RuntimeError(
-            "No imaging-weight datasets were attached to the processing-set " "chunk."
+            "No imaging-weight datasets were attached to the processing-set chunk."
         )
 
     return ps_xdt
@@ -725,8 +725,10 @@ def residual_update_continuum_single_field(
         ``"briggs"``) and the Briggs ``robust`` parameter.
 
     task_coords : dict
-        Per-chunk coordinate mapping; ``task_coords["frequency"]["data"]``
-        supplies this chunk's frequency axis.
+        Per-chunk coordinate mapping; ``task_coords[<parallel dim>]`` supplies
+        this chunk's parallel coordinate values (``"data"``) and its
+        ``"slice"`` into the full output array (for cube imaging the
+        parallel dim is ``frequency``).
 
     data_selection : dict
         Visibility selection injected by GraphViper.
@@ -752,8 +754,8 @@ def residual_update_continuum_single_field(
         precision. If ``False`` the image-domain arrays are double precision.
 
     processing_function_threads : int, optional
-        Number of threads handed to the per-processing-function (C++ / Numba /
-        FFT) kernels.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
 
     fft_backend : str, optional
         FFT backend used by the gridder normalization (``"pyfftw"`` or
@@ -796,7 +798,7 @@ def residual_update_continuum_single_field(
         Ignored during the first major cycle.
 
     task_id : int, optional
-        Identifier of the frequency chunk being imaged.
+        Identifier of the parallel chunk being processed.
 
     pblimit : float, optional
         Channel primary-beam cutoff used for MVC map-local Taylor products.
@@ -847,9 +849,9 @@ def residual_update_continuum_single_field(
         + " GB"
     )
 
-    assert (
-        memory_mode == "in_memory"
-    ), "Currently only memory_mode='in_memory' is implemented."
+    assert memory_mode == "in_memory", (
+        "Currently only memory_mode='in_memory' is implemented."
+    )
     if weight_memory_mode not in ("in_memory", "in_place"):
         raise ValueError(
             "weight_memory_mode must be 'in_memory' or 'in_place'; received "
@@ -872,7 +874,7 @@ def residual_update_continuum_single_field(
 
     if specmode not in ("mfs", "mvc"):
         raise ValueError(
-            "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
+            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
         )
 
     # Build the empty image in the correlation basis expected by the gridder.
@@ -954,7 +956,7 @@ def residual_update_continuum_single_field(
 
     if specmode not in ("mfs", "mvc"):
         raise ValueError(
-            "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
+            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
         )
 
     if specmode == "mvc" and not is_n_iter_0:
@@ -1013,7 +1015,7 @@ def residual_update_continuum_single_field(
 
         if "frequency" not in primary_beam.dims:
             raise ValueError(
-                "The cached MVC primary beam must contain a " "frequency dimension."
+                "The cached MVC primary beam must contain a frequency dimension."
             )
 
         expected_frequency = np.asarray(
@@ -1513,8 +1515,7 @@ def degrid_imaging_weights_continuum_node(
     # -------------------------------------------------------------
     if "frequency" not in task_coords:
         raise KeyError(
-            "degrid_imaging_weights_continuum_node requires "
-            "task_coords['frequency']."
+            "degrid_imaging_weights_continuum_node requires task_coords['frequency']."
         )
 
     if "data" not in task_coords["frequency"]:
@@ -1761,7 +1762,7 @@ def _prepare_continuum_image(
 
     if specmode not in ("mfs", "mvc"):
         raise ValueError(
-            "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
+            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
         )
 
     if pb_cache_mapping is None:
@@ -1788,15 +1789,13 @@ def _prepare_continuum_image(
 
     if specmode == "mfs" and residual_output_name not in img_xds:
         raise RuntimeError(
-            "The global residual inverse FFT did not "
-            f"create {residual_output_name!r}."
+            f"The global residual inverse FFT did not create {residual_output_name!r}."
         )
 
     # ------------------------------------------------------------------
     # Direct MFS: the inverse-FFT result is already a Taylor stack.
     # ------------------------------------------------------------------
     if specmode == "mfs":
-
         residual = img_xds["SKY_RESIDUAL"]
 
         if "taylor_term" not in residual.dims:
@@ -1845,8 +1844,7 @@ def _prepare_continuum_image(
         if initialize_static_products:
             if psf_taylor is None:
                 raise RuntimeError(
-                    "The first MVC reduction did not contain Taylor PSF "
-                    "contributions."
+                    "The first MVC reduction did not contain Taylor PSF contributions."
                 )
             img_xds["POINT_SPREAD_FUNCTION"] = psf_taylor
             img_xds.attrs["data_groups"][image_data_group_name][
@@ -1895,7 +1893,10 @@ def _prepare_continuum_image(
             attrs=effective_primary_beam.attrs.copy(),
         )
 
-        residual_group = img_xds.attrs.setdefault("data_groups", {},).setdefault(
+        residual_group = img_xds.attrs.setdefault(
+            "data_groups",
+            {},
+        ).setdefault(
             image_data_group_name,
             {},
         )
@@ -1939,14 +1940,14 @@ def _prepare_continuum_image(
 
         if psf_name not in img_xds:
             raise RuntimeError(
-                "The global PSF inverse FFT did not " f"create {psf_name!r}."
+                f"The global PSF inverse FFT did not create {psf_name!r}."
             )
 
         psf = img_xds[psf_name]
 
         if "psf_taylor_order" not in psf.dims:
             raise RuntimeError(
-                f"{psf_name!r} does not contain the " "'psf_taylor_order' dimension."
+                f"{psf_name!r} does not contain the 'psf_taylor_order' dimension."
             )
 
         actual_psf_terms = img_xds[psf_name].sizes["psf_taylor_order"]
@@ -1969,7 +1970,10 @@ def _prepare_continuum_image(
         )
 
         # Fit point spread function
-        (img_xds, psf_fit_return_df,) = point_spread_function_gaussian_fit_continuum(
+        (
+            img_xds,
+            psf_fit_return_df,
+        ) = point_spread_function_gaussian_fit_continuum(
             img_xds,
             image_data_group_in_name=image_data_group_name,
             image_data_group_out_name=image_data_group_name,
@@ -2014,13 +2018,12 @@ def _prepare_continuum_image(
 
             if primary_beam.sizes["frequency"] != 1:
                 raise ValueError(
-                    "MVC PRIMARY_BEAM must have exactly one effective "
-                    "frequency plane."
+                    "MVC PRIMARY_BEAM must have exactly one effective frequency plane."
                 )
 
         else:
             raise ValueError(
-                "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
+                f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
             )
 
         # Static variables to be shared with the minor loop controls
@@ -2191,7 +2194,7 @@ def _prepare_post_update_continuum_model_state(model_increment_xds, input_params
         model_uv_xds = None
     else:
         raise ValueError(
-            "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
+            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
         )
 
     return model_xds, model_uv_xds
@@ -2249,7 +2252,11 @@ def continuum_minor_cycle_node(
     if pb_cache_mapping is None and "pb_xds" in input_data:
         pb_cache_mapping = {int(input_data["task_id"]): input_data["pb_xds"]}
 
-    (img_xds, static_xds, psf_fit_return_df,) = _prepare_continuum_image(
+    (
+        img_xds,
+        static_xds,
+        psf_fit_return_df,
+    ) = _prepare_continuum_image(
         input_data["image"],
         input_params,
         initialize_static_products=is_n_iter_0,
@@ -2557,7 +2564,7 @@ def model_update_continuum_single_field(
     # GraphViper append normally supplies the preceding graph result directly.
     # Accept a singleton list as well, in case the append execution wrapper
     # retains the reduce-style list convention.
-    if isinstance(input_data, (list, tuple)):
+    if isinstance(input_data, list | tuple):
         if len(input_data) != 1:
             raise ValueError(
                 "The continuum model-update append node expects exactly one "
@@ -2574,8 +2581,7 @@ def model_update_continuum_single_field(
 
     if "image" not in input_data:
         raise KeyError(
-            "The continuum reduce result does not contain the required "
-            "'image' entry."
+            "The continuum reduce result does not contain the required 'image' entry."
         )
 
     if "iteration_control_params" not in input_params:
@@ -2713,7 +2719,10 @@ def model_update_continuum_single_field(
     start = time.time()
 
     # placeholder for mtmfs
-    (deconvolve_dict, model_update_return_df,) = model_update_mtmfs_single_field(
+    (
+        deconvolve_dict,
+        model_update_return_df,
+    ) = model_update_mtmfs_single_field(
         img_xds,
         deconvolver,
         deconvolve_params,

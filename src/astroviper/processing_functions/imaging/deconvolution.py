@@ -1,15 +1,8 @@
-import copy
-import logging
-from typing import Optional, Tuple
-
 import numpy as np
 import toolviper.utils.logger as logger
 import xarray as xr
 
 from astroviper.processing_functions.image_analysis import image_statistics as imgstats
-from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
-    extract_main_lobe,
-)
 from astroviper.processing_functions.imaging.deconvolvers import aspclean, hogbom
 from astroviper.processing_functions.imaging.utils.return_dict import ReturnDict
 from astroviper.utils.data_group_tools import (
@@ -579,8 +572,6 @@ def deconvolve(
     else:
         zero_model = False
 
-    ntime = img_xds.sizes["time"]
-    nchan = img_xds.sizes["frequency"]
     npol = img_xds.sizes["polarization"]
     npol_psf = img_xds[psf_name].sizes["polarization"]
 
@@ -902,7 +893,7 @@ def hogbom_clean(
     ):
         if not isinstance(arr, np.ndarray) or arr.ndim != 5:
             raise ValueError(
-                f"{name} must be a 5D numpy array with shape " "(nt, nf, np, ny, nx)"
+                f"{name} must be a 5D numpy array with shape (nt, nf, np, ny, nx)"
             )
 
     if residual_cube.shape != model_cube.shape:
@@ -937,8 +928,7 @@ def hogbom_clean(
     logger.debug(f"Residual cube shape: {residual_cube.shape}")
     logger.debug(f"PSF cube shape: {psf_cube.shape}")
     logger.debug(
-        "Running Hogbom CLEAN on cube with processing_function_threads=%d"
-        % processing_function_threads
+        f"Running Hogbom CLEAN on cube with processing_function_threads={processing_function_threads}"
     )
 
     clean_box = deconvolve_params["clean_box"]
@@ -978,7 +968,7 @@ def hogbom_clean_many_threads(
     processing_function_threads: int = 1,
     mask_cube: np.ndarray | None = None,
 ):
-    """Hogbom CLEAN over a 5-D cube, threaded across AND within planes (numba).
+    """Hogbom CLEAN over a 5-D cube, threaded across AND within planes (C++).
 
     A drop-in alternative to :func:`hogbom_clean`. The C++ ``hogbom`` deconvolver
     parallelizes only *across* the ``(time, frequency, polarization)`` planes, so
@@ -1029,8 +1019,7 @@ def hogbom_clean_many_threads(
         )
 
     logger.debug(
-        "Running many-threads Hogbom CLEAN on cube with processing_function_threads=%d"
-        % processing_function_threads
+        f"Running many-threads Hogbom CLEAN on cube with processing_function_threads={processing_function_threads}"
     )
 
     clean_box = deconvolve_params["clean_box"]
@@ -1155,7 +1144,7 @@ def asp_clean(
     ):
         if not isinstance(arr, np.ndarray) or arr.ndim != 5:
             raise ValueError(
-                f"{name} must be a 5D numpy array with shape " "(nt, nf, np, ny, nx)"
+                f"{name} must be a 5D numpy array with shape (nt, nf, np, ny, nx)"
             )
 
     if residual_cube.shape != model_cube.shape:
@@ -1189,8 +1178,7 @@ def asp_clean(
     logger.debug(f"Residual cube shape: {residual_cube.shape}")
     logger.debug(f"PSF cube shape: {psf_cube.shape}")
     logger.debug(
-        "Running Asp CLEAN on cube with processing_function_threads=%d"
-        % processing_function_threads
+        f"Running Asp CLEAN on cube with processing_function_threads={processing_function_threads}"
     )
 
     # The Asp binding takes a numeric mask matching the image dtype (it is

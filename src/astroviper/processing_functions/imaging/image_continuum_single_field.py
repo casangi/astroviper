@@ -240,7 +240,7 @@ def accumulate_continuum_model(
     specmode = str(specmode).lower()
     if specmode not in ("mfs", "mvc"):
         raise ValueError(
-            "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
+            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
         )
 
     if "SKY_MODEL" not in model_increment_xds:
@@ -374,8 +374,7 @@ def prepare_model_uv_continuum_single_field(
 
     if not isinstance(model_xds, xr.Dataset):
         raise TypeError(
-            "model_xds must be an xarray.Dataset; received "
-            f"{type(model_xds).__name__}."
+            f"model_xds must be an xarray.Dataset; received {type(model_xds).__name__}."
         )
 
     if instrument_polarization_basis not in ("linear", "circular"):
@@ -408,7 +407,7 @@ def prepare_model_uv_continuum_single_field(
 
     if model_sky_name not in model_xds:
         raise KeyError(
-            f"Model sky variable {model_sky_name!r} is not present in " "model_xds."
+            f"Model sky variable {model_sky_name!r} is not present in model_xds."
         )
 
     model_sky = model_xds[model_sky_name]
@@ -466,8 +465,7 @@ def prepare_model_uv_continuum_single_field(
 
     if model_visibility_name is None:
         raise RuntimeError(
-            "fft_norm_continuum_img_xds did not register a model "
-            "visibility variable."
+            "fft_norm_continuum_img_xds did not register a model visibility variable."
         )
 
     if model_visibility_name not in model_uv_xds:
@@ -975,7 +973,6 @@ def prepare_model_uv_mvc_single_field(
     prediction this function evaluates the Taylor polynomial at each channel and
     applies ``A_nu / Abar``, matching CASA's MVC major-cycle convention.
     """
-    import copy
 
     import numpy as np
     import xarray as xr
@@ -1040,7 +1037,7 @@ def prepare_model_uv_mvc_single_field(
 
     if primary_beam.sizes["frequency"] != len(frequency_values):
         raise ValueError(
-            "The cached MVC PB cube does not match the " "local model frequency axis."
+            "The cached MVC PB cube does not match the local model frequency axis."
         )
 
     primary_beam = primary_beam.transpose(
@@ -1273,7 +1270,6 @@ def residual_update_continuum_single_field(
     # -------------------------------------------------------------
 
     if is_n_iter_0:
-
         (
             img_xds,
             setup_return_df,
@@ -1423,8 +1419,7 @@ def residual_update_continuum_single_field(
 
             if "POINT_SPREAD_FUNCTION_MVC_CUBE" not in img_xds:
                 raise RuntimeError(
-                    "The first MVC map task did not create its channel PSF image "
-                    "cube."
+                    "The first MVC map task did not create its channel PSF image cube."
                 )
 
         residual_group = img_xds.attrs["data_groups"]["residual"]
@@ -1439,8 +1434,7 @@ def residual_update_continuum_single_field(
             primary_beam = primary_beam_xds[primary_beam_name]
         else:
             raise RuntimeError(
-                "MVC map-local Taylor construction requires its channel "
-                "primary beam."
+                "MVC map-local Taylor construction requires its channel primary beam."
             )
 
         contributions = make_mvc_taylor_normal_equation_contributions(
@@ -1588,7 +1582,7 @@ def model_update_mtmfs_single_field(
 
     if "POINT_SPREAD_FUNCTION" not in img_xds:
         raise KeyError(
-            "The continuum image dataset does not contain " "POINT_SPREAD_FUNCTION."
+            "The continuum image dataset does not contain POINT_SPREAD_FUNCTION."
         )
 
     data_groups = img_xds.attrs.get("data_groups", {})
@@ -1612,7 +1606,7 @@ def model_update_mtmfs_single_field(
 
     if "psf_taylor_order" not in psf.dims:
         raise ValueError(
-            "POINT_SPREAD_FUNCTION must contain a " "'psf_taylor_order' dimension."
+            "POINT_SPREAD_FUNCTION must contain a 'psf_taylor_order' dimension."
         )
 
     if residual.sizes["taylor_term"] < 1:
@@ -1737,7 +1731,6 @@ def model_update_mtmfs_single_field(
     max_sidelobe_name = "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
 
     for variable_name, data_array in img_xds.data_vars.items():
-
         if variable_name == max_sidelobe_name:
             if data_array.dims == ("time", "polarization"):
                 hogbom_xds[variable_name] = xr.DataArray(
@@ -1768,7 +1761,7 @@ def model_update_mtmfs_single_field(
 
             else:
                 raise ValueError(
-                    f"{variable_name} has unsupported dimensions " f"{data_array.dims}."
+                    f"{variable_name} has unsupported dimensions {data_array.dims}."
                 )
 
         elif "taylor_term" in data_array.dims:
@@ -1858,8 +1851,7 @@ def model_update_mtmfs_single_field(
 
     if "taylor_term" not in img_xds["SKY_MODEL"].dims:
         raise ValueError(
-            "The continuum SKY_MODEL variable must contain a "
-            "'taylor_term' dimension."
+            "The continuum SKY_MODEL variable must contain a 'taylor_term' dimension."
         )
 
     # Use positional assignment because the Taylor coordinate need not
@@ -1913,16 +1905,12 @@ def primary_beam_correct_restored_continuum(
     from astroviper.utils.data_group_tools import modify_data_groups_xds
 
     if not 0.0 <= float(pblimit) < 1.0:
-        raise ValueError(
-            f"pblimit must satisfy 0 <= pblimit < 1; " f"received {pblimit}."
-        )
+        raise ValueError(f"pblimit must satisfy 0 <= pblimit < 1; received {pblimit}.")
 
     data_groups = img_xds.attrs.get("data_groups", {})
 
     if restored_data_group_name not in data_groups:
-        raise KeyError(
-            f"Restored data group {restored_data_group_name!r} " "is missing."
-        )
+        raise KeyError(f"Restored data group {restored_data_group_name!r} is missing.")
 
     restored_name = data_groups[restored_data_group_name].get("sky")
 
@@ -2358,9 +2346,9 @@ def restore_image(
 
     img_xds[restored_name] = restored_da
 
-    img_xds.attrs.setdefault("data_groups", {})[
-        image_data_group_out_restore_name
-    ] = copy.deepcopy(restored_group)
+    img_xds.attrs.setdefault("data_groups", {})[image_data_group_out_restore_name] = (
+        copy.deepcopy(restored_group)
+    )
 
     return img_xds, timing_df
 
@@ -2517,7 +2505,9 @@ def point_spread_function_gaussian_fit_continuum(
         dtype=np.float64,
     )
 
-    cube_psf_da = psf0_da.expand_dims(frequency=frequency_coord,).transpose(
+    cube_psf_da = psf0_da.expand_dims(
+        frequency=frequency_coord,
+    ).transpose(
         "time",
         "frequency",
         "polarization",

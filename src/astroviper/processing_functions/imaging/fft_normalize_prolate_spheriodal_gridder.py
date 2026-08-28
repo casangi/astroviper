@@ -6,8 +6,6 @@ import toolviper.utils.logger as logger
 import xarray as xr
 
 # from memory_profiler import profile
-from toolviper.utils.memory_management import get_rss_gb
-
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_correcting_image_1D,
 )
@@ -64,10 +62,10 @@ def _fft_module(backend):
 
             pyfftw.interfaces.cache.enable()
             return _pyfftw_fft
-        except ImportError:
+        except ImportError as err:
             raise ImportError(
                 "pyfftw is not installed. Install it with: pip install pyfftw"
-            )
+            ) from err
     raise ValueError(
         f"Unknown FFT backend '{backend}'. Supported values: 'scipy', 'pyfftw'."
     )
@@ -79,12 +77,9 @@ def ifft_norm_img_xds(
     image_params,
     image_data_group_in_name="single_field",
     image_data_group_out_name="single_field",
-    image_data_group_out_modified={
-        "sky": "SKY_RESIDUAL",
-        "point_spread_function": "POINT_SPREAD_FUNCTION",
-    },
+    image_data_group_out_modified=None,
     overwrite=True,
-    image_data_variables_keep=[],
+    image_data_variables_keep=None,
     processing_function_threads=1,
     fft_backend="pyfftw",
     complex_dtype=np.complex128,
@@ -170,9 +165,18 @@ def ifft_norm_img_xds(
     -----
     Peak memory is dominated by the raw UV grid
     (``time × frequency × polarization × u × v × 16`` bytes for complex128).
-    The FFT step adds at most one extra 2-D float64 plane per iteration,
-    which for a 12 000 × 12 000 grid is ≈ 1.15 GB.
+    When the grid is not in ``image_data_variables_keep`` (the common case)
+    each plane is transformed in place (``overwrite_input=True``); keeping the
+    grid adds one extra 2-D complex plane per iteration for the defensive
+    copy, ≈ 1.15 GB for a 12 000 × 12 000 complex128 grid.
     """
+    if image_data_group_out_modified is None:
+        image_data_group_out_modified = {
+            "sky": "SKY_RESIDUAL",
+            "point_spread_function": "POINT_SPREAD_FUNCTION",
+        }
+    if image_data_variables_keep is None:
+        image_data_variables_keep = []
 
     _image_params = image_params  # no mutation below; deep copy not needed
 
@@ -290,6 +294,12 @@ def ifft_norm_img_xds(
         out_arr = img_xds[out_name].values
         img_xds[out_name].attrs["type"] = data_variable
 
+        # Each grid plane is read exactly once and the grid variable is
+        # deleted right after this loop unless explicitly kept, so the iFFT
+        # may destroy the plane in place and skip its defensive copy
+        # (≈ 1.5 GB per plane at 13 500² complex64).
+        grid_discarded = data_variable_out not in image_data_variables_keep
+
         for t in range(n_time):
             for plane_index in range(n_planes):
                 for p in range(n_pol):
@@ -300,6 +310,7 @@ def ifft_norm_img_xds(
                         ),
                         processing_function_threads=processing_function_threads,
                         fft_backend=fft_backend,
+                        overwrite_input=grid_discarded,
                     )
                     plane /= kernel_image_1D_l[:, None]
                     plane /= kernel_image_1D_m[None, :]
@@ -336,14 +347,12 @@ def fft_norm_img_xds(
     image_params,
     image_data_group_in_name="model",
     image_data_group_out_name="model",
-    image_data_group_out_modified={
-        "visibility": "VISIBILITY_MODEL",
-    },
+    image_data_group_out_modified=None,
     overwrite=True,
-    image_data_variables_keep=[],
+    image_data_variables_keep=None,
     processing_function_threads=1,
     fft_backend="pyfftw",
-    data_variables_to_process=["sky"],
+    data_variables_to_process=None,
     complex_dtype=np.complex128,
 ):
     """Forward-transform a model sky image into a model UV grid.
@@ -356,6 +365,14 @@ def fft_norm_img_xds(
     (the degridder widens each grid cell to ``complex128`` for the
     accumulation), so only the image-domain grid is affected here.
     """
+    if image_data_group_out_modified is None:
+        image_data_group_out_modified = {
+            "visibility": "VISIBILITY_MODEL",
+        }
+    if image_data_variables_keep is None:
+        image_data_variables_keep = []
+    if data_variables_to_process is None:
+        data_variables_to_process = ["sky"]
 
     _image_params = image_params  # no mutation below; deep copy not needed
 
@@ -383,7 +400,6 @@ def fft_norm_img_xds(
         raw_grid = img_xds[grid_var_name].values  # (time, freq, pol, u, v)
 
         n_time, n_freq, n_pol = raw_grid.shape[:3]
-        image_size = np.asarray(_image_params["image_size"])
 
         out_name = data_group_out[fft_pair[data_variable]]
         if out_name not in img_xds:
@@ -476,6 +492,7 @@ def ifft_uv_to_lm(
     fft_plane_dims=(-2, -1),
     processing_function_threads=1,
     fft_backend="pyfftw",
+    overwrite_input=False,
 ):
     """Apply a 2-D inverse FFT to transform a UV grid to a sky-plane image.
 
@@ -507,6 +524,12 @@ def ifft_uv_to_lm(
         Number of threads passed to the FFT backend.  Default is ``1``.
     fft_backend : {"scipy", "pyfftw"}, optional
         FFT library to use.  Default is ``"pyfftw"``.
+    overwrite_input : bool, optional
+        If ``True`` the function may reuse ``grid_2d``'s buffer as scratch
+        space, destroying its contents (on the even-sized fast path this
+        skips the one plane-sized defensive copy — ≈ 1.5 GB for a
+        13 500 × 13 500 complex64 grid).  The caller must not use ``grid_2d``
+        after the call.  Default ``False`` (input preserved).
 
     Returns
     -------
@@ -528,7 +551,8 @@ def ifft_uv_to_lm(
         # Fold the ifftshift/fftshift into checkerboard multiplies (lower peak
         # memory, fewer passes): fftshift(ifft2(ifftshift(x))) == cb*ifft2(cb*x).
         # The padded grid axes are even (next_fft_friendly_size(even=True)).
-        work = grid_2d.copy()  # own the buffer; do not mutate the caller's grid
+        # Own the buffer unless the caller ceded it via overwrite_input.
+        work = grid_2d if overwrite_input else grid_2d.copy()
         _fold_shift_checkerboard(work, fft_plane_dims)
         sky = fft.ifft2(
             work,
@@ -794,7 +818,7 @@ def fft_norm_continuum_img_xds(
 
         if image_var_name not in img_xds:
             raise KeyError(
-                f"Input image variable {image_var_name!r} is not present " "in img_xds."
+                f"Input image variable {image_var_name!r} is not present in img_xds."
             )
 
         image_da = img_xds[image_var_name]
@@ -922,8 +946,7 @@ def fft_norm_continuum_img_xds(
             image_data_group_out_name,
             data_group_out,
             description=(
-                "Transformed continuum Taylor model from lm plane "
-                "to aperture uv plane."
+                "Transformed continuum Taylor model from lm plane to aperture uv plane."
             ),
         )
 

@@ -186,8 +186,6 @@ def image_data_groups_for_kept_variables(image_data_variables_keep):
 def write_result_chunk_to_disk_using_zarr(
     image_store, image_data_variables_keep, task_coords, img_xds
 ):
-    import time
-
     import zarr
 
     for dv in image_data_variables_keep:

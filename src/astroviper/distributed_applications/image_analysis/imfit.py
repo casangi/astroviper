@@ -13,7 +13,7 @@ import re
 import warnings
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any
 
 import dask.array as da
 import numpy as np
@@ -38,8 +38,8 @@ from astroviper.utils.sky_coordinates import (
     skycoord_to_lm_from_wcs,
 )
 
-Number = Union[int, float]
-MaskSpec = Optional[Union[str, Path, np.ndarray, xr.DataArray, da.Array]]
+Number = int | float
+MaskSpec = str | Path | np.ndarray | xr.DataArray | da.Array | None
 
 # Angular unit strings recognised when validating beam units.
 _ANGULAR_UNITS = {"rad", "arcsec", "arcmin", "deg"}
@@ -265,7 +265,7 @@ def _normalize_imfit_initial_guesses(
             out = dict(initial_guesses)
             comps = out.get("components")
             if (
-                isinstance(comps, (list, tuple))
+                isinstance(comps, list | tuple)
                 and len(comps) > 0
                 and isinstance(comps[0], Mapping)
             ):
@@ -275,7 +275,7 @@ def _normalize_imfit_initial_guesses(
             return out
         return _convert_world_component_guess_to_pixel(xds, initial_guesses)
     if (
-        isinstance(initial_guesses, (list, tuple))
+        isinstance(initial_guesses, list | tuple)
         and len(initial_guesses) > 0
         and isinstance(initial_guesses[0], Mapping)
     ):
@@ -352,7 +352,7 @@ def _resolve_mask(xds: xr.Dataset, mask_var: MaskSpec) -> MaskSpec | None:
     if mask_var is None:
         return None
 
-    if isinstance(mask_var, (np.ndarray, xr.DataArray, da.Array)):
+    if isinstance(mask_var, np.ndarray | xr.DataArray | da.Array):
         return mask_var
 
     if isinstance(mask_var, Path):
@@ -369,8 +369,7 @@ def _resolve_mask(xds: xr.Dataset, mask_var: MaskSpec) -> MaskSpec | None:
         return mask_var
 
     warnings.warn(
-        f"Mask variable {mask_var!r} not found in Dataset; "
-        "proceeding without a mask.",
+        f"Mask variable {mask_var!r} not found in Dataset; proceeding without a mask.",
         stacklevel=3,
     )
     return None
@@ -725,9 +724,9 @@ def _attach_sky_coordinates(ds: xr.Dataset, xds: xr.Dataset) -> xr.Dataset:
         )
         ds["right_ascension"] = ra
         ds["declination"] = dec
-        ds["right_ascension"].attrs[
-            "description"
-        ] = "Sky right ascension of component center."
+        ds["right_ascension"].attrs["description"] = (
+            "Sky right ascension of component center."
+        )
         ds["declination"].attrs["description"] = "Sky declination of component center."
         # Propagate RA/Dec errors from l/m errors via local Jacobian
         if "x0_world_err" in ds and "y0_world_err" in ds:
@@ -752,9 +751,9 @@ def _attach_sky_coordinates(ds: xr.Dataset, xds: xr.Dataset) -> xr.Dataset:
         )
         ds["Right Ascension"] = ra
         ds["Declination"] = dec
-        ds["Right Ascension"].attrs[
-            "description"
-        ] = "Sky right ascension of component center."
+        ds["Right Ascension"].attrs["description"] = (
+            "Sky right ascension of component center."
+        )
         ds["Right Ascension"].attrs.update(coord_attrs)
         ds["Declination"].attrs["description"] = "Sky declination of component center."
         ds["Declination"].attrs.update(coord_attrs)
@@ -843,9 +842,9 @@ def _attach_sky_coord_errors_from_grids(
     ds["declination_err"] = xr.DataArray(
         dec_err, dims=ds["y0_world_err"].dims, coords=ds["y0_world_err"].coords
     )
-    ds["right_ascension_err"].attrs[
-        "description"
-    ] = "1-sigma uncertainty of right ascension."
+    ds["right_ascension_err"].attrs["description"] = (
+        "1-sigma uncertainty of right ascension."
+    )
     ds["declination_err"].attrs["description"] = "1-sigma uncertainty of declination."
 
 
@@ -907,9 +906,9 @@ def _attach_sky_coord_errors_from_wcs(
     ds[f"{dec_name}_err"] = xr.DataArray(
         dec_err, dims=ds["y0_world_err"].dims, coords=ds["y0_world_err"].coords
     )
-    ds[f"{ra_name}_err"].attrs[
-        "description"
-    ] = "1-sigma uncertainty of Right Ascension."
+    ds[f"{ra_name}_err"].attrs["description"] = (
+        "1-sigma uncertainty of Right Ascension."
+    )
     ds[f"{dec_name}_err"].attrs["description"] = "1-sigma uncertainty of Declination."
 
 
@@ -998,24 +997,24 @@ def _deconvolve_and_attach(
     ds["sigma_minor_deconv"] = d_fwhm_min * FWHM2SIG
     ds["is_unresolved"] = is_unresolved
 
-    ds["fwhm_major_deconv"].attrs[
-        "description"
-    ] = "Deconvolved major-axis FWHM in world units. NaN if unresolved."
-    ds["fwhm_minor_deconv"].attrs[
-        "description"
-    ] = "Deconvolved minor-axis FWHM in world units. NaN if unresolved."
-    ds["pa_deconv"].attrs[
-        "description"
-    ] = "Deconvolved position angle (east of north) in radians. NaN if unresolved."
-    ds["sigma_major_deconv"].attrs[
-        "description"
-    ] = "Deconvolved major-axis sigma in world units. NaN if unresolved."
-    ds["sigma_minor_deconv"].attrs[
-        "description"
-    ] = "Deconvolved minor-axis sigma in world units. NaN if unresolved."
-    ds["is_unresolved"].attrs[
-        "description"
-    ] = "True if the source is unresolved (deconvolution failed)."
+    ds["fwhm_major_deconv"].attrs["description"] = (
+        "Deconvolved major-axis FWHM in world units. NaN if unresolved."
+    )
+    ds["fwhm_minor_deconv"].attrs["description"] = (
+        "Deconvolved minor-axis FWHM in world units. NaN if unresolved."
+    )
+    ds["pa_deconv"].attrs["description"] = (
+        "Deconvolved position angle (east of north) in radians. NaN if unresolved."
+    )
+    ds["sigma_major_deconv"].attrs["description"] = (
+        "Deconvolved major-axis sigma in world units. NaN if unresolved."
+    )
+    ds["sigma_minor_deconv"].attrs["description"] = (
+        "Deconvolved minor-axis sigma in world units. NaN if unresolved."
+    )
+    ds["is_unresolved"].attrs["description"] = (
+        "True if the source is unresolved (deconvolution failed)."
+    )
 
     # Upper limit: beam major FWHM when unresolved
     fwhm_upper = xr.where(is_unresolved, bmaj, np.nan)
@@ -1031,21 +1030,21 @@ def _deconvolve_and_attach(
         ds["pa_deconv_err"] = d_pa_err
         ds["sigma_major_deconv_err"] = d_fwhm_maj_err * FWHM2SIG
         ds["sigma_minor_deconv_err"] = d_fwhm_min_err * FWHM2SIG
-        ds["fwhm_major_deconv_err"].attrs[
-            "description"
-        ] = "1-sigma uncertainty of deconvolved major FWHM."
-        ds["fwhm_minor_deconv_err"].attrs[
-            "description"
-        ] = "1-sigma uncertainty of deconvolved minor FWHM."
-        ds["pa_deconv_err"].attrs[
-            "description"
-        ] = "1-sigma uncertainty of deconvolved PA."
-        ds["sigma_major_deconv_err"].attrs[
-            "description"
-        ] = "1-sigma uncertainty of deconvolved major sigma."
-        ds["sigma_minor_deconv_err"].attrs[
-            "description"
-        ] = "1-sigma uncertainty of deconvolved minor sigma."
+        ds["fwhm_major_deconv_err"].attrs["description"] = (
+            "1-sigma uncertainty of deconvolved major FWHM."
+        )
+        ds["fwhm_minor_deconv_err"].attrs["description"] = (
+            "1-sigma uncertainty of deconvolved minor FWHM."
+        )
+        ds["pa_deconv_err"].attrs["description"] = (
+            "1-sigma uncertainty of deconvolved PA."
+        )
+        ds["sigma_major_deconv_err"].attrs["description"] = (
+            "1-sigma uncertainty of deconvolved major sigma."
+        )
+        ds["sigma_minor_deconv_err"].attrs["description"] = (
+            "1-sigma uncertainty of deconvolved minor sigma."
+        )
 
     if is_marginally_resolved is not None:
         ds["is_marginally_resolved"] = is_marginally_resolved
@@ -1070,18 +1069,18 @@ def _deconvolve_and_attach(
         ds["fwhm_minor_deconv_pixel"] = d_fwhm_min / avg_scale
         ds["sigma_major_deconv_pixel"] = d_fwhm_maj * FWHM2SIG / avg_scale
         ds["sigma_minor_deconv_pixel"] = d_fwhm_min * FWHM2SIG / avg_scale
-        ds["fwhm_major_deconv_pixel"].attrs[
-            "description"
-        ] = "Deconvolved major-axis FWHM in pixels. NaN if unresolved."
-        ds["fwhm_minor_deconv_pixel"].attrs[
-            "description"
-        ] = "Deconvolved minor-axis FWHM in pixels. NaN if unresolved."
-        ds["sigma_major_deconv_pixel"].attrs[
-            "description"
-        ] = "Deconvolved major-axis sigma in pixels. NaN if unresolved."
-        ds["sigma_minor_deconv_pixel"].attrs[
-            "description"
-        ] = "Deconvolved minor-axis sigma in pixels. NaN if unresolved."
+        ds["fwhm_major_deconv_pixel"].attrs["description"] = (
+            "Deconvolved major-axis FWHM in pixels. NaN if unresolved."
+        )
+        ds["fwhm_minor_deconv_pixel"].attrs["description"] = (
+            "Deconvolved minor-axis FWHM in pixels. NaN if unresolved."
+        )
+        ds["sigma_major_deconv_pixel"].attrs["description"] = (
+            "Deconvolved major-axis sigma in pixels. NaN if unresolved."
+        )
+        ds["sigma_minor_deconv_pixel"].attrs["description"] = (
+            "Deconvolved minor-axis sigma in pixels. NaN if unresolved."
+        )
 
         if has_errors:
             ds["fwhm_major_deconv_pixel_err"] = d_fwhm_maj_err / avg_scale

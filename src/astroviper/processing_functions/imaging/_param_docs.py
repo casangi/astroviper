@@ -77,7 +77,7 @@ IMAGING_PARAM_DOCS = {
     "deconvolver": (
         "Deconvolution algorithm for the minor cycle. One of ``"
         '"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``\n'
-        "(numba, threaded across *and* within planes -- faster when there are\n"
+        "(C++, threaded across *and* within planes -- faster when there are\n"
         'few planes, e.g. single-channel imaging) or ``"asp"``.'
     ),
     "instrument_polarization_basis": (
@@ -108,12 +108,10 @@ IMAGING_PARAM_DOCS = {
         "passes each map only its local beam. The setting is ignored for MFS."
     ),
     "processing_function_threads": (
-        "Number of threads handed to the per-processing-function (C++ / Numba /\n"
-        "FFT) kernels."
+        "Number of threads handed to the per-processing-function (C++ / FFT)\nkernels."
     ),
     "fft_backend": (
-        'FFT backend used by the gridder normalization (``"pyfftw"`` or\n'
-        '``"scipy"``).'
+        'FFT backend used by the gridder normalization (``"pyfftw"`` or\n``"scipy"``).'
     ),
     "image_data_variables_keep": (
         'Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,\n'
@@ -125,9 +123,11 @@ IMAGING_PARAM_DOCS = {
         "residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable."
     ),
     "image_store": "Path/URL of the on-disk Zarr image cube.",
-    "task_id": "Identifier of the frequency chunk being imaged.",
+    "task_id": "Identifier of the parallel chunk being processed.",
     "task_coords": (
-        'Per-chunk coordinate mapping; ``task_coords["frequency"]["data"]``\n'
-        "supplies this chunk's frequency axis."
+        "Per-chunk coordinate mapping; ``task_coords[<parallel dim>]`` supplies\n"
+        'this chunk\'s parallel coordinate values (``"data"``) and its\n'
+        '``"slice"`` into the full output array (for cube imaging the\n'
+        "parallel dim is ``frequency``)."
     ),
 }

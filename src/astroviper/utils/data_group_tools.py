@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import xarray as xr
 
 # Keys inside a data group that are metadata rather than data-variable mappings.
@@ -66,7 +68,7 @@ def create_ps_xdt_data_groups_in_and_out(
     data_group_in_list = []
     data_group_out_list = []
 
-    for ms_name, ms_xdt in ps_xdt.items():
+    for ms_xdt in ps_xdt.values():
         # Validate and resolve data groups for each individual measurement set.
         data_group_in, data_group_out = create_data_groups_in_and_out(
             ms_xdt.ds,
@@ -201,9 +203,6 @@ def create_data_groups_in_and_out(
     return data_group_in, data_group_out
 
 
-from datetime import datetime, timezone
-
-
 def modify_data_groups_ps_xdt(
     ps_xdt: xr.DataTree,
     data_group_out_name: str,
@@ -298,7 +297,7 @@ def modify_data_groups_xds(
         Modifies ``xds.attrs["data_groups"]`` in place; no return value.
     """
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Register the output data group on this dataset.
     if "data_groups" not in xds.attrs:

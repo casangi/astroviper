@@ -8,9 +8,7 @@ def get_visibility_grid_single_field(
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
     ms_data_group_out_name: str = "model",
-    ms_data_group_out_modified: dict = {
-        "correlated_data": "VISIBILITY_MODEL",
-    },
+    ms_data_group_out_modified: dict | None = None,
     image_data_group_in_name: str = "model",
     overwrite: bool = True,
     chan_mode: str = "cube",
@@ -52,8 +50,7 @@ def get_visibility_grid_single_field(
         Image dataset holding the model UV grid.  Must expose an image data
         group under ``image_data_group_in_name`` whose ``"SKY"`` role names a
         data variable shaped ``(time, frequency, polarization, u, v)``, the
-        same ``(u, v)`` axis order used by
-        :func:`~astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid.prolate_spheroidal_grid_jit`.
+        same ``(u, v)`` axis order used by the C++ prolate-spheroidal gridder.
         Cell size and image dimensions are read directly from ``img_xds`` via
         ``img_xds.xr_img.get_lm_cell_size()`` and ``img_xds.sizes``.
     ms_data_group_out_name : str, default ``"model"``
@@ -63,7 +60,7 @@ def get_visibility_grid_single_field(
         Mapping of role keys to the data-variable names written into
         ``ms_xds``.  ``"correlated_data"`` stores the complex predicted
         visibilities.
-    image_data_group_in_name : str, default ``"model_visibility_grid"``
+    image_data_group_in_name : str, default ``"model"``
         Key of the image input data group in ``img_xds.attrs["data_groups"]``
         whose ``"SKY"`` role names the model UV grid.
     overwrite : bool, default ``True``
@@ -75,7 +72,8 @@ def get_visibility_grid_single_field(
         own image channel; ``"continuum"`` sources every visibility channel
         from image channel 0.
     processing_function_threads : int, default ``1``
-        Number of threads supplied to the C++ degridder.
+        Number of threads supplied to the C++ degridder; ``<= 0`` falls back
+        to the hardware concurrency.
 
     Returns
     -------

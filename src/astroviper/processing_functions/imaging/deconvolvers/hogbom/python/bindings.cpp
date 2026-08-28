@@ -163,12 +163,17 @@ py::tuple maximg_impl(py::array image_array, py::array mask_array) {
     }
 
     T fmin, fmax;
-    hclean::maximg<T>(
-        static_cast<const T*>(image_info.ptr),
-        domask, mask_ptr,
-        nx, ny,
-        fmin, fmax
-    );
+    {
+        // Full-image scan touches no Python objects; let other worker
+        // threads (Dask threads_per_worker > 1) run during it.
+        py::gil_scoped_release release;
+        hclean::maximg<T>(
+            static_cast<const T*>(image_info.ptr),
+            domask, mask_ptr,
+            nx, ny,
+            fmin, fmax
+        );
+    }
 
     return py::make_tuple(fmin, fmax);
 }
@@ -260,9 +265,14 @@ py::dict hclean_impl(
         yend = std::max(ybeg + 1, std::min(yend, ny));
     }
 
+    // The CLEAN loop below runs with the GIL released; the callbacks are
+    // invoked from inside that loop, so they re-acquire the GIL before
+    // touching any Python object. is_none() is a raw pointer comparison and
+    // is safe without the GIL, keeping the no-callback case GIL-free.
     std::function<void(int, int, int, T)> msgput_func =
         [progress_callback](int iter, int px, int py_coord, T peak) {
             if (!progress_callback.is_none()) {
+                py::gil_scoped_acquire acquire;
                 try {
                     progress_callback(iter, px, py_coord, peak);
                 } catch (const std::runtime_error& e) {
@@ -274,6 +284,7 @@ py::dict hclean_impl(
     std::function<void(int&)> stopnow_func =
         [stop_callback](int& should_stop) {
             if (!stop_callback.is_none()) {
+                py::gil_scoped_acquire acquire;
                 try {
                     py::object result = stop_callback();
                     should_stop = py::cast<bool>(result) ? 1 : 0;
@@ -284,34 +295,38 @@ py::dict hclean_impl(
             }
         };
 
-    // Run CLEAN directly on the Python-owned buffers.
+    // Run CLEAN directly on the Python-owned buffers, GIL released (the
+    // buffers are owned by the caller's arrays, which outlive this call).
     int final_iter = start_iter;
-    hclean::clean<T>(
-        static_cast<T*>(model_info.ptr),
-        static_cast<T*>(dirty_info.ptr),
-        static_cast<const T*>(psf_info.ptr),
-        domask, mask_ptr,
-        nx, ny,
-        xbeg, xend, ybeg, yend,
-        max_iter, start_iter, final_iter,
-        gain, threshold, speedup,
-        msgput_func, stopnow_func
-    );
-
-    // Post-CLEAN diagnostics; arrays remain in place.
     T total_flux = static_cast<T>(0);
-    const T* model_data = static_cast<const T*>(model_info.ptr);
-    for (int i = 0; i < ny * nx; ++i) {
-        total_flux += std::abs(model_data[i]);
-    }
-
     T final_min, final_max;
-    hclean::maximg<T>(
-        static_cast<const T*>(dirty_info.ptr),
-        domask, mask_ptr,
-        nx, ny,
-        final_min, final_max
-    );
+    {
+        py::gil_scoped_release release;
+        hclean::clean<T>(
+            static_cast<T*>(model_info.ptr),
+            static_cast<T*>(dirty_info.ptr),
+            static_cast<const T*>(psf_info.ptr),
+            domask, mask_ptr,
+            nx, ny,
+            xbeg, xend, ybeg, yend,
+            max_iter, start_iter, final_iter,
+            gain, threshold, speedup,
+            msgput_func, stopnow_func
+        );
+
+        // Post-CLEAN diagnostics; arrays remain in place.
+        const T* model_data = static_cast<const T*>(model_info.ptr);
+        for (int i = 0; i < ny * nx; ++i) {
+            total_flux += std::abs(model_data[i]);
+        }
+
+        hclean::maximg<T>(
+            static_cast<const T*>(dirty_info.ptr),
+            domask, mask_ptr,
+            nx, ny,
+            final_min, final_max
+        );
+    }
     T final_peak = std::max(std::abs(final_min), std::abs(final_max));
 
     py::dict results;
@@ -460,7 +475,10 @@ py::dict hclean_cube_impl(
     }
 
     // Assemble per-plane summary arrays. Plane ordering is C-contiguous
-    // over (time, frequency, polarization).
+    // over (time, frequency, polarization). The arrays are allocated (and
+    // their raw pointers taken) while holding the GIL; the summary scan
+    // itself traverses the full residual + model cubes, so it runs with the
+    // GIL released like the CLEAN loop above.
     py::array_t<int> iters_arr({nt, nf, np_img});
     std::memcpy(iters_arr.mutable_data(), iter_out.data(),
                 sizeof(int) * nplanes);
@@ -477,26 +495,29 @@ py::dict hclean_cube_impl(
     const std::size_t plane_size =
         static_cast<std::size_t>(ny) * static_cast<std::size_t>(nx);
 
-    for (int tt = 0; tt < nt; ++tt) {
-        for (int nn = 0; nn < nf; ++nn) {
-            for (int pp = 0; pp < np_img; ++pp) {
-                const std::size_t off =
-                    ((static_cast<std::size_t>(tt) * nf + nn) * np_img + pp) * plane_size;
+    {
+        py::gil_scoped_release release;
+        for (int tt = 0; tt < nt; ++tt) {
+            for (int nn = 0; nn < nf; ++nn) {
+                for (int pp = 0; pp < np_img; ++pp) {
+                    const std::size_t off =
+                        ((static_cast<std::size_t>(tt) * nf + nn) * np_img + pp) * plane_size;
 
-                T total = static_cast<T>(0);
-                for (std::size_t i = 0; i < plane_size; ++i) {
-                    total += std::abs(model_data[off + i]);
+                    T total = static_cast<T>(0);
+                    for (std::size_t i = 0; i < plane_size; ++i) {
+                        total += std::abs(model_data[off + i]);
+                    }
+                    T fmin_p, fmax_p;
+                    const bool* mptr = (domask && mask_ptr != nullptr) ? mask_ptr + off : nullptr;
+                    hclean::maximg<T>(residual_data + off, domask, mptr,
+                                      nx, ny, fmin_p, fmax_p);
+                    T fp_val = std::max(std::abs(fmin_p), std::abs(fmax_p));
+
+                    const int lin = (tt * nf + nn) * np_img + pp;
+                    fp[lin] = fp_val;
+                    tf[lin] = total;
+                    cv[lin] = (fp_val <= thres_ptr[lin]);
                 }
-                T fmin_p, fmax_p;
-                const bool* mptr = (domask && mask_ptr != nullptr) ? mask_ptr + off : nullptr;
-                hclean::maximg<T>(residual_data + off, domask, mptr,
-                                  nx, ny, fmin_p, fmax_p);
-                T fp_val = std::max(std::abs(fmin_p), std::abs(fmax_p));
-
-                const int lin = (tt * nf + nn) * np_img + pp;
-                fp[lin] = fp_val;
-                tf[lin] = total;
-                cv[lin] = (fp_val <= thres_ptr[lin]);
             }
         }
     }

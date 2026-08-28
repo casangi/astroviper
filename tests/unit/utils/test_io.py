@@ -1,7 +1,5 @@
 """Unit tests for :mod:`astroviper.utils.io` helpers."""
 
-import pytest
-
 from astroviper.utils.io import (
     image_data_groups_for_kept_variables,
     imaging_data_variable_data_group_roles,

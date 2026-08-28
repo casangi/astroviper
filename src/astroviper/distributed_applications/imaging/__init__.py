@@ -8,5 +8,6 @@ from astroviper.distributed_applications.imaging.image_cube_single_field import 
 
 __all__ = [
     "image_cube_single_field",
-    "image_continuum_single_field" "feather",
+    "image_continuum_single_field",
+    "feather",
 ]

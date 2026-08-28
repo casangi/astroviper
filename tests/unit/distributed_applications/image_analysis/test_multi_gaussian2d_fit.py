@@ -15,11 +15,10 @@ Run:
 
 from __future__ import annotations
 
-import builtins
-import importlib
 import math
 import os
 import sys
+import types
 import unittest
 
 import dask.array as da  # type: ignore
@@ -1796,9 +1795,7 @@ class TestNumPyFitting:  # (unittest.TestCase):
         ny, nx = 36, 36
         y, x = np.mgrid[0:ny, 0:nx]
         amp, x0, y0, sx, sy, th = 0.9, 18.0, 17.0, 3.0, 2.0, 0.0
-        z = amp * np.exp(
-            -((x - x0) ** 2) / (2 * sx**2) - ((y - y0) ** 2) / (2 * sy**2)
-        )
+        z = amp * np.exp(-((x - x0) ** 2) / (2 * sx**2) - ((y - y0) ** 2) / (2 * sy**2))
         base = xr.DataArray(z, dims=("y", "x")).assign_coords(
             y=np.arange(ny, dtype=float), x=np.arange(nx, dtype=float)
         )
@@ -1944,9 +1941,7 @@ class TestNumPyFitting:  # (unittest.TestCase):
         ny, nx = 32, 48
         y, x = np.mgrid[0:ny, 0:nx]
         amp, x0, y0, sx, sy, th = 0.9, 20.0, 14.0, 3.2, 2.1, 0.0
-        z = amp * np.exp(
-            -((x - x0) ** 2) / (2 * sx**2) - ((y - y0) ** 2) / (2 * sy**2)
-        )
+        z = amp * np.exp(-((x - x0) ** 2) / (2 * sx**2) - ((y - y0) ** 2) / (2 * sy**2))
 
         # x: descending, y: ascending → triggers idx reversal in _prep()
         xw = np.linspace(5.0, -7.0, nx, dtype=float)  # descending
@@ -2064,7 +2059,7 @@ class TestAPIHelpers:
         with pytest.raises((TypeError, ValueError, KeyError)):
             mg._normalize_initial_guesses(z, n, bad_sigma, None, None)
 
-    def test_init_components_list_len_mismatch_raises(self) -> None:
+    def test_init_components_list_len_mismatch_raises_covers_221_223(self) -> None:
         """Verify that component lists inside initial_guesses must contain exactly n_components entries."""
         z = np.zeros((16, 16), float)
         n = 2
@@ -2543,9 +2538,9 @@ class TestAngleEndToEndFitter(unittest.TestCase):
         # Expected wrap: ((θ + π/2) % π) − π/2  ∈ (-π/2, π/2]
         expected_wrapped = ((theta_math_true + np.pi / 2) % np.pi) - np.pi / 2
         assert (-np.pi / 2 - 1e-9) < th_m <= (np.pi / 2 + 1e-9)
-        assert (
-            abs(th_m - expected_wrapped) < 0.15
-        ), f"got {th_m}, expected ~{expected_wrapped}"
+        assert abs(th_m - expected_wrapped) < 0.15, (
+            f"got {th_m}, expected ~{expected_wrapped}"
+        )
 
         # Also verify PA report matches θ→PA conversion on the same fit if requested
         # (exercises publishing in requested convention).
@@ -3174,8 +3169,7 @@ class TestResultMetadataShortener:
         ny, nx = 32, 40
         y, x = np.mgrid[0:ny, 0:nx]
         img = 0.1 + np.exp(
-            -((x - nx / 2.0) ** 2) / (2 * 3.0**2)
-            - ((y - ny / 2.0) ** 2) / (2 * 2.0**2)
+            -((x - nx / 2.0) ** 2) / (2 * 3.0**2) - ((y - ny / 2.0) ** 2) / (2 * 2.0**2)
         )
         da = xr.DataArray(img, dims=("y", "x"))
 

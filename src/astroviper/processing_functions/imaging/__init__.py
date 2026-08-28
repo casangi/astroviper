@@ -14,7 +14,9 @@ __all__ = [
     "image_cube_single_field",
     "image_continuum_single_field",
     "accumulate_continuum_model",
+    "model_update_mtmfs_single_field",
     "prepare_model_uv_continuum_single_field",
+    "residual_update_continuum_single_field",
     "feather_core",
     "restore_image",
 ]

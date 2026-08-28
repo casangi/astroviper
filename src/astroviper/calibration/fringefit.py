@@ -1,20 +1,12 @@
-import datetime
-from typing import Dict, Union
-
 import dask
 import numpy as np
-import pandas as pd
 import xarray as xa
 from graphviper.graph_tools.coordinate_utils import (
     interpolate_data_coords_onto_parallel_coords,
-    make_frequency_coord,
     make_parallel_coord,
-    make_time_coord,
 )
 from graphviper.graph_tools.generate_dask_workflow import generate_dask_workflow
 from graphviper.graph_tools.map import map
-from graphviper.graph_tools.reduce import reduce
-from xradio.measurement_set.open_processing_set import open_processing_set
 from xradio.measurement_set.processing_set_xdt import ProcessingSetXdt
 
 from astroviper.calibration.fringe_cal_quantum import (
@@ -59,7 +51,6 @@ def _fringe_node_task(input_params: dict):
     name = xds.relative_to(xds.parent)
     q = make_empty_cal_quantum(xds)
     q.ref_antenna[0] = ref_ant
-    data_sub_selection = input_params["data_sub_selection"]
     allpols = "RL"  # FIXME data_sub_selection['polarization']
     xds2 = xds.isel(**data_selection[name])
     ddelay, drate = getFourierSpacings(xds2, npad)
@@ -81,9 +72,6 @@ def _fringe_node_task(input_params: dict):
     s2 = (npad * nt, npad * nf)  # Pad in time  # Pad in frequency
     fftvis = np.fft.fftshift(np.fft.fft2(normed, axes=(0, 2), s=s2), axes=(0, 2))
     npols = normed.shape[-1]
-    part_info = xds2.xr_ms.get_partition_info()
-    spw = part_info["spectral_window_name"]
-    t = xds2.time[0].values
     # Sometimes ref_ant has an autocorrelation; I think I'm allowed to
     # ignore it?  But if we set it up front and it gets overwritten by
     # actual data I guess that's fine too?

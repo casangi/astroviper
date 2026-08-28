@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from numbers import Real
-from typing import Any, Literal, Optional, Tuple, Union
+from typing import Any, Literal
 
 import dask.array as da
 import numpy as np
@@ -11,9 +11,9 @@ import xarray as xr
 from astroviper.utils._gaussian_math import normalize_angle as _normalize_theta
 from astroviper.utils._gaussian_math import sigma_from_fwhm as _sigma_from_fwhm
 
-ArrayLike2D = Union[np.ndarray, da.Array]
+ArrayLike2D = np.ndarray | da.Array
 OutputKind = Literal["match", "xarray", "numpy", "dask"]
-ReturnType = Union[xr.DataArray, np.ndarray, da.Array]
+ReturnType = xr.DataArray | np.ndarray | da.Array
 
 
 def _is_dask_array(obj: Any) -> bool:
@@ -74,7 +74,7 @@ def _coerce_to_xda(
     if isinstance(data, xr.DataArray):
         return data
 
-    if not isinstance(data, (np.ndarray, da.Array)):
+    if not isinstance(data, np.ndarray | da.Array):
         raise TypeError(
             "data must be a DataArray, a 2-D NumPy ndarray, or a Dask array"
         )

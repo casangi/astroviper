@@ -193,12 +193,12 @@ def residual_cycle_continuum_single_field(
         else:
             if model_xds is None:
                 raise ValueError(
-                    "MVC requires the accumulated image-domain " "Taylor model."
+                    "MVC requires the accumulated image-domain Taylor model."
                 )
 
             if primary_beam_xds is None:
                 raise ValueError(
-                    "MVC requires the task-local frequency-dependent " "primary beam."
+                    "MVC requires the task-local frequency-dependent primary beam."
                 )
 
             frequency_values = np.asarray(
@@ -295,7 +295,7 @@ def residual_cycle_continuum_single_field(
 
     else:
         raise ValueError(
-            "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
+            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
         )
 
     T_grid = time.time() - start
@@ -477,8 +477,7 @@ def make_visibility_model_continuum_single_field(
             frequency = ms_xdt["frequency"]
         else:
             raise KeyError(
-                "The measurement-set dataset does not contain a "
-                "'frequency' coordinate."
+                "The measurement-set dataset does not contain a 'frequency' coordinate."
             )
 
         if frequency.ndim != 1:
@@ -500,8 +499,7 @@ def make_visibility_model_continuum_single_field(
 
         if not np.all(np.isfinite(frequency_values)):
             raise ValueError(
-                "The measurement-set frequency coordinate contains "
-                "non-finite values."
+                "The measurement-set frequency coordinate contains non-finite values."
             )
 
         taylor_coordinate = np.arange(nterms, dtype=np.int64)

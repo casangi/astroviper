@@ -15,10 +15,7 @@ def add_visibility_grid_continuum_single_field(
     ms_data_group_in_name: str = "base",
     image_data_group_in_name: str = "residual",
     image_data_group_out_name: str = "residual",
-    image_data_group_out_modified: dict = {
-        "visibility": "VISIBILITY",
-        "visibility_normalization": "VISIBILITY_NORMALIZATION",
-    },
+    image_data_group_out_modified: dict | None = None,
     overwrite: bool = True,
     fft_padding: float = 1.2,
     processing_function_threads: int = 1,
@@ -109,6 +106,11 @@ def add_visibility_grid_continuum_single_field(
         complex_dtype = np.complex128
 
     # Prepare image data group
+    if image_data_group_out_modified is None:
+        image_data_group_out_modified = {
+            "visibility": "VISIBILITY",
+            "visibility_normalization": "VISIBILITY_NORMALIZATION",
+        }
     image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
 
     ms_data_group_in = ms_xds.attrs["data_groups"][ms_data_group_in_name]
@@ -256,7 +258,6 @@ def add_visibility_grid_continuum_single_field(
 
     # Gridding per Taylor term
     for taylor_term in range(nterms):
-
         # taylor weight
         taylor_factor = x**taylor_term
 
@@ -316,7 +317,7 @@ def add_visibility_grid_continuum_single_field(
     img_xds[normalization_name].attrs.update(
         {
             "description": (
-                "Normalization sums for MT-MFS Taylor-weighted visibility " "uv grids."
+                "Normalization sums for MT-MFS Taylor-weighted visibility uv grids."
             ),
             "nterms": nterms,
             "reference_frequency": reference_frequency,

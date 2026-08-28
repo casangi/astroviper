@@ -1,3 +1,5 @@
+# ruff: noqa: B018, E402
+
 import numpy as np
 from numcodecs import Blosc
 from toolviper.dask.client import local_client
@@ -145,11 +147,8 @@ monitor_resources_seconds = None
 
 ###############################################################################
 
-import os
-from typing import Any, Dict, Optional, Tuple, Union
 
 # import numpy as np
-import toolviper.utils.parameter
 import xarray as xr
 import zarr
 
@@ -157,7 +156,6 @@ import zarr
 from xradio.image import make_empty_sky_image
 
 import astroviper.node_tasks as node_tasks
-from astroviper.utils.param_docs import shares_param_docs
 
 # The toolviper parameter-check schema lives next to this module (rather than in
 # a central config/ directory) so it is easy to find; point the validator at it.
@@ -379,7 +377,6 @@ def combine_continuum_chunks(input_data, input_params):
     """
     import numpy as np
     import pandas as pd
-    import xarray as xr
 
     from astroviper.processing_functions.imaging.utils.iteration_control import (
         merge_return_dicts,
@@ -497,8 +494,7 @@ def combine_continuum_chunks(input_data, input_params):
             )
         except ValueError as exc:
             raise ValueError(
-                f"Coordinate mismatch for {variable_name!r} in "
-                f"input[{input_index}]."
+                f"Coordinate mismatch for {variable_name!r} in input[{input_index}]."
             ) from exc
 
     # ------------------------------------------------------------------
@@ -511,7 +507,7 @@ def combine_continuum_chunks(input_data, input_params):
     for result in input_data:
         if "timing_node_tasks" not in result:
             raise KeyError(
-                "Every continuum map/reduce result must contain " "'timing_node_tasks'."
+                "Every continuum map/reduce result must contain 'timing_node_tasks'."
             )
 
         timing = result["timing_node_tasks"]
@@ -686,25 +682,13 @@ def calculate_number_of_chunks_for_cube_imaging(
         fudge_factor = 1.2
         if single_precision_image:
             memory_singleton_chunk = fudge_factor * (
-                3
-                * n_pixels_single_frequency
-                * bytes_in_dtype["complex64"]
-                / (1024**3)
-                + 3
-                * n_pixels_single_frequency
-                * bytes_in_dtype["float32"]
-                / (1024**3)
+                3 * n_pixels_single_frequency * bytes_in_dtype["complex64"] / (1024**3)
+                + 3 * n_pixels_single_frequency * bytes_in_dtype["float32"] / (1024**3)
             )
         else:
             memory_singleton_chunk = fudge_factor * (
-                3
-                * n_pixels_single_frequency
-                * bytes_in_dtype["complex128"]
-                / (1024**3)
-                + 3
-                * n_pixels_single_frequency
-                * bytes_in_dtype["float64"]
-                / (1024**3)
+                3 * n_pixels_single_frequency * bytes_in_dtype["complex128"] / (1024**3)
+                + 3 * n_pixels_single_frequency * bytes_in_dtype["float64"] / (1024**3)
             )
 
         logger.info(
@@ -751,30 +735,26 @@ import time
 import dask
 import numpy as np
 import toolviper.utils.logger as logger
-import xarray as xr
-import zarr
 from graphviper.graph_tools import (
     append,
-    generate_airflow_workflow,
     generate_dask_workflow,
     map,
     processes_with_mpi,
     reduce,
 )
 from graphviper.graph_tools.coordinate_utils import make_parallel_coord
-from xradio.image import make_empty_sky_image, write_image
+from xradio.image import write_image
 from xradio.measurement_set import open_processing_set
 
 from astroviper.utils.data_group_tools import modify_data_groups_xds
-from astroviper.utils.data_partitioning import calculate_data_chunking, get_thread_info
 from astroviper.utils.io import (
     create_empty_data_variables_on_disk,
     image_data_groups_for_kept_variables,
 )
 
-assert (
-    memory_mode == "in_memory"
-), "Currently only in_memory is supported for memory_mode is implemented."
+assert memory_mode == "in_memory", (
+    "Currently only in_memory is supported for memory_mode is implemented."
+)
 
 # Sharded output is written by the concurrent direct-blob (skunk_works) writer;
 # the standard write path cannot safely write partial shards concurrently, so
@@ -1079,7 +1059,6 @@ logger.info(
 ###############################################################################
 
 import matplotlib.pyplot as plt
-import xarray as xr
 
 return_dict = dask.compute(dask_graph)[0]
 dirty_xds = return_dict["image"]

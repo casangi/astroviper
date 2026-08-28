@@ -1,7 +1,7 @@
 """Unit tests for the C++ prolate_spheroidal_grid extension.
 
 Coverage:
-  * Numerical agreement with the Numba reference (`prolate_spheroidal_grid_jit`)
+  * Numerical agreement with the pure-Python reference (`prolate_spheroidal_grid_reference`)
   * Serial vs multi-threaded equivalence
   * `processing_function_threads <= 0` auto-detects hardware concurrency
   * Accumulation semantics (two calls == one combined call)
@@ -15,10 +15,8 @@ Coverage:
 import unittest
 
 import numpy as np
+from reference_gridders import prolate_spheroidal_grid_reference
 
-from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid import (
-    prolate_spheroidal_grid_jit,
-)
 from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
     prolate_spheroidal_grid,
 )
@@ -118,7 +116,7 @@ def _run_cpp(inputs, processing_function_threads=1):
     return grid, norm
 
 
-def _run_jit(inputs):
+def _run_reference(inputs):
     grid, norm = _zero_grid(
         inputs["m_time"],
         inputs["m_chan"],
@@ -126,7 +124,7 @@ def _run_jit(inputs):
         inputs["m_u"],
         inputs["m_v"],
     )
-    prolate_spheroidal_grid_jit(
+    prolate_spheroidal_grid_reference(
         grid,
         norm,
         inputs["vis_data"],
@@ -149,11 +147,11 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
     # ------------------------------------------------------------------
     # Reference-oracle tests
     # ------------------------------------------------------------------
-    def test_matches_numba_reference(self):
-        """C++ gridder matches the numba reference bit-for-bit-ish."""
+    def test_matches_reference(self):
+        """C++ gridder matches the pure-Python reference bit-for-bit-ish."""
         inputs = _make_random_inputs(seed=1)
         cpp_grid, cpp_norm = _run_cpp(inputs, processing_function_threads=1)
-        ref_grid, ref_norm = _run_jit(inputs)
+        ref_grid, ref_norm = _run_reference(inputs)
         np.testing.assert_allclose(cpp_grid, ref_grid, rtol=0, atol=1e-12)
         np.testing.assert_allclose(cpp_norm, ref_norm, rtol=0, atol=1e-12)
         self.assertGreater(np.count_nonzero(cpp_grid), 0)
@@ -163,7 +161,7 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
         inputs = _make_random_inputs(n_vis_chan=4, m_chan=1, seed=2)
         inputs["frequency_map"] = np.zeros(4, dtype=np.int64)
         cpp_grid, cpp_norm = _run_cpp(inputs, processing_function_threads=1)
-        ref_grid, ref_norm = _run_jit(inputs)
+        ref_grid, ref_norm = _run_reference(inputs)
         np.testing.assert_allclose(cpp_grid, ref_grid, rtol=0, atol=1e-12)
         np.testing.assert_allclose(cpp_norm, ref_norm, rtol=0, atol=1e-12)
         # All energy must land in the single collapsed image channel.
@@ -175,7 +173,7 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
         inputs = _make_random_inputs(n_time=3, m_time=1, seed=3)
         inputs["time_map"] = np.zeros(3, dtype=np.int64)
         cpp_grid, _ = _run_cpp(inputs, processing_function_threads=1)
-        ref_grid, _ = _run_jit(inputs)
+        ref_grid, _ = _run_reference(inputs)
         np.testing.assert_allclose(cpp_grid, ref_grid, rtol=0, atol=1e-12)
         self.assertEqual(cpp_grid.shape[0], 1)
 
@@ -184,7 +182,7 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
         inputs = _make_random_inputs(n_pol=2, seed=4)
         inputs["pol_map"] = np.array([1, 0], dtype=np.int64)  # swap the two pols
         cpp_grid, _ = _run_cpp(inputs, processing_function_threads=1)
-        ref_grid, _ = _run_jit(inputs)
+        ref_grid, _ = _run_reference(inputs)
         np.testing.assert_allclose(cpp_grid, ref_grid, rtol=0, atol=1e-12)
 
     # ------------------------------------------------------------------
@@ -213,10 +211,10 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
         np.testing.assert_allclose(norm_auto, norm_serial, rtol=1e-10, atol=1e-10)
 
     def test_threaded_matches_reference(self):
-        """Threaded C++ output matches the numba reference within tolerance."""
+        """Threaded C++ output matches the pure-Python reference within tolerance."""
         inputs = _make_random_inputs(n_baseline=200, seed=7)
         cpp_grid, cpp_norm = _run_cpp(inputs, processing_function_threads=4)
-        ref_grid, ref_norm = _run_jit(inputs)
+        ref_grid, ref_norm = _run_reference(inputs)
         np.testing.assert_allclose(cpp_grid, ref_grid, rtol=1e-10, atol=1e-10)
         np.testing.assert_allclose(cpp_norm, ref_norm, rtol=1e-10, atol=1e-10)
 

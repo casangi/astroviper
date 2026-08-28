@@ -38,6 +38,44 @@ def _write_task_kill_switch_log(
         return f"(failed to write kill-switch log: {exc!r})"
 
 
+def _log_task_io_failure(phase, exc, task_id, image_store, data_selection, task_coords):
+    """Log a NON-FATAL node-task I/O failure; return its timing-row marker columns.
+
+    A chunk whose data cannot be read or whose result cannot be written (e.g. a
+    Lustre client eviction that outlives the reader/writer retry schedules, or a
+    corrupt input shard) must not abort the whole multi-node run: the caller
+    logs it here, marks the chunk's row in the timing frame with these columns
+    (``task_failed_phase`` / ``task_error`` / ``failed_channel_start``), and the
+    run continues with this chunk's channels left at the image store's fill
+    value. Failures stay queryable per run from the saved node-task frame.
+    """
+    import socket
+
+    import toolviper.utils.logger as logger
+
+    hostname = socket.gethostname()
+    chan_start = 0
+    for sel in (data_selection or {}).values():
+        freq_sel = sel.get("frequency") if isinstance(sel, dict) else None
+        if isinstance(freq_sel, slice) and freq_sel.start is not None:
+            chan_start = int(freq_sel.start)
+            break
+    n_channels = len(task_coords["frequency"]["data"])
+    logger.error(
+        f"node task {task_id} on {hostname}: {phase} FAILED for channels "
+        f"[{chan_start}, {chan_start + n_channels}) of {image_store}; skipping "
+        f"this chunk and continuing the run. Error: {exc!r}"
+    )
+    return {
+        "hostname": hostname,
+        "task_id": task_id,
+        "n_channels": n_channels,
+        "task_failed_phase": phase,
+        "task_error": repr(exc)[:500],
+        "failed_channel_start": chan_start,
+    }
+
+
 def _remap_deconvolve_dict_to_global_channels(combined_deconvolve_dict, data_selection):
     """Shift a chunk-local deconvolve ReturnDict onto global channel numbers.
 
@@ -67,9 +105,9 @@ def _remap_deconvolve_dict_to_global_channels(combined_deconvolve_dict, data_sel
 
     remapped = ReturnDict()
     for key, value in combined_deconvolve_dict.data.items():
-        remapped.data[
-            Key(time=key.time, pol=key.pol, chan=key.chan + chan_offset)
-        ] = value
+        remapped.data[Key(time=key.time, pol=key.pol, chan=key.chan + chan_offset)] = (
+            value
+        )
     return remapped
 
 
@@ -97,6 +135,7 @@ def image_cube_single_field(
     input_data=None,
     graph_mode=True,
     output_shard_channels=None,
+    output_image_format="zarr",
     task_time_kill_switch_seconds=None,
 ):
     """Image one frequency chunk of a single-field cube and write it to disk.
@@ -170,8 +209,10 @@ def image_cube_single_field(
           guarantees a minimum amount of cleaning per minor cycle even when the
           PSF sidelobe level is high.
     task_coords : dict
-        Per-chunk coordinate mapping; ``task_coords["frequency"]["data"]``
-        supplies this chunk's frequency axis.
+        Per-chunk coordinate mapping; ``task_coords[<parallel dim>]`` supplies
+        this chunk's parallel coordinate values (``"data"``) and its
+        ``"slice"`` into the full output array (for cube imaging the
+        parallel dim is ``frequency``).
     data_selection : dict
         Per-chunk ``{ms_name: {dim: slice}}`` selection injected by graphviper;
         used to load this chunk's data and to remap chunk-local channel numbers
@@ -185,7 +226,7 @@ def image_cube_single_field(
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     deconvolver : str, optional
         Deconvolution algorithm for the minor cycle. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
-        (numba, threaded across *and* within planes -- faster when there are
+        (C++, threaded across *and* within planes -- faster when there are
         few planes, e.g. single-channel imaging) or ``"asp"``.
     instrument_polarization_basis : str, optional
         Correlation (instrument) polarization basis the gridding is performed in:
@@ -197,8 +238,8 @@ def image_cube_single_field(
         cycle runs in single precision; the visibilities always stay double
         precision. If ``False`` the image-domain arrays are double precision.
     processing_function_threads : int, optional
-        Number of threads handed to the per-processing-function (C++ / Numba /
-        FFT) kernels.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     fft_backend : str, optional
         FFT backend used by the gridder normalization (``"pyfftw"`` or
         ``"scipy"``).
@@ -226,7 +267,7 @@ def image_cube_single_field(
         (e.g. ``{"correlated_data": "VISIBILITY", "uvw": "UVW", ...}``), supplied
         by the distributed graph; only used when ``skunk_works`` is ``True``.
     task_id : int, optional
-        Identifier of the frequency chunk being imaged.
+        Identifier of the parallel chunk being processed.
     input_data : dict, optional
         Pre-loaded data for this chunk (supplied by the data-loading layer); when
         ``None`` (default) the data is loaded from ``input_data_store``.
@@ -235,6 +276,13 @@ def image_cube_single_field(
         pre-allocated Zarr store with
         :func:`~astroviper.utils.io.write_result_chunk_to_disk_using_zarr`.  If
         ``False`` the whole chunk image is written with ``to_zarr``.
+    output_image_format : str, optional
+        On-disk format of the image store this task writes into: ``"zarr"``
+        (default) or ``"fits"``.  With ``"fits"`` the chunk is ``pwrite``-en
+        directly into the pre-created XRADIO-conformant FITS files
+        (:func:`~astroviper.node_tasks.imaging.utils.write_result_chunk_to_fits_skunk_works`;
+        the driver created them with
+        :func:`~astroviper.node_tasks.imaging.utils.create_empty_fits_images`).
 
     Returns
     -------
@@ -266,9 +314,9 @@ def image_cube_single_field(
         + " GB"
     )
 
-    assert (
-        memory_mode == "in_memory"
-    ), "Currently only memory_mode='in_memory' is implemented."
+    assert memory_mode == "in_memory", (
+        "Currently only memory_mode='in_memory' is implemented."
+    )
 
     if image_data_variables_keep is None:
         image_data_variables_keep = [
@@ -299,35 +347,61 @@ def image_cube_single_field(
     T_make_empty_image = time.time() - start
 
     start = time.time()
-    if input_data is not None:
-        # Data was pre-loaded by the data loading layer (disk-chunk granularity
-        # I/O coalescing). The framework has already applied the task-level
-        # sub-selection, so use the dict directly.
-        ps_xdt = input_data
-    elif skunk_works:
-        # Experimental performance path: read only this chunk's data-group
-        # variables straight from the Zarr chunk blobs and reconstruct the
-        # coordinates from the inputs (no datatree/coords/sub-datasets open).
-        from astroviper.node_tasks.imaging.utils import load_processing_set_skunk_works
+    try:
+        if input_data is not None:
+            # Data was pre-loaded by the data loading layer (disk-chunk granularity
+            # I/O coalescing). The framework has already applied the task-level
+            # sub-selection, so use the dict directly.
+            ps_xdt = input_data
+        elif skunk_works:
+            # Experimental performance path: read only this chunk's data-group
+            # variables straight from the Zarr chunk blobs and reconstruct the
+            # coordinates from the inputs (no datatree/coords/sub-datasets open).
+            from astroviper.node_tasks.imaging.utils import (
+                load_processing_set_skunk_works,
+            )
 
-        ps_xdt = load_processing_set_skunk_works(
-            input_data_store,
-            sel_parms=data_selection,
-            data_group=data_group,
-            processing_set_data_group_name=processing_set_data_group_name,
-            frequency_coords=task_coords["frequency"]["data"],
-            instrument_polarization_basis=instrument_polarization_basis,
-            processing_function_threads=processing_function_threads,
-        )
-    else:
-        from xradio.measurement_set.load_processing_set import load_processing_set
+            ps_xdt = load_processing_set_skunk_works(
+                input_data_store,
+                sel_parms=data_selection,
+                data_group=data_group,
+                processing_set_data_group_name=processing_set_data_group_name,
+                frequency_coords=task_coords["frequency"]["data"],
+                instrument_polarization_basis=instrument_polarization_basis,
+                processing_function_threads=processing_function_threads,
+            )
+        else:
+            from xradio.measurement_set.load_processing_set import load_processing_set
 
-        ps_xdt = load_processing_set(
-            input_data_store,
-            sel_parms=data_selection,
-            data_group_name=processing_set_data_group_name,
-            load_sub_datasets=False,
+            ps_xdt = load_processing_set(
+                input_data_store,
+                sel_parms=data_selection,
+                data_group_name=processing_set_data_group_name,
+                load_sub_datasets=False,
+            )
+    except Exception as exc:
+        # A chunk whose data cannot be read is skipped -- logged + marked in the
+        # timing frame -- instead of aborting the whole run (dask/MPI would
+        # otherwise tear down every node after this task exhausts its retries).
+        import pandas as pd
+
+        from astroviper.processing_functions.imaging.utils.return_dict import ReturnDict
+
+        row = _log_task_io_failure(
+            "load", exc, task_id, image_store, data_selection, task_coords
         )
+        row.update(
+            {
+                "T_make_empty_image": T_make_empty_image,
+                "T_load": time.time() - start,
+                "T_image_cube_task": time.time() - task_start,
+                "start_unixtime": task_start,
+            }
+        )
+        return {
+            "timing_node_tasks": pd.DataFrame({k: [v] for k, v in row.items()}),
+            "deconvolution": ReturnDict(),
+        }
     T_load = time.time() - start
 
     img_xds, timing_df, combined_deconvolve_dict = pf.imaging.image_cube_single_field(
@@ -354,46 +428,69 @@ def image_cube_single_field(
     )
 
     start = time.time()
-    if graph_mode and skunk_works and output_shard_channels:
-        # Sharded performance path: write this chunk's inner-chunk blob(s) into
-        # shared, pre-created Zarr v3 shard files (far fewer files -> metadata-server
-        # relief; the "single parallel file" pattern).
-        from astroviper.node_tasks.imaging.utils import (
-            write_result_chunk_to_disk_sharded_skunk_works,
-        )
+    write_exc = None
+    try:
+        if graph_mode and output_image_format == "fits":
+            # FITS performance path: pwrite this chunk's contiguous channel
+            # block (and its BEAMS-table rows) directly into the pre-created
+            # XRADIO-conformant FITS files -- disjoint byte ranges across
+            # tasks, no locking, no file creation.
+            from astroviper.node_tasks.imaging.utils import (
+                write_result_chunk_to_fits_skunk_works,
+            )
 
-        write_result_chunk_to_disk_sharded_skunk_works(
-            image_store,
-            image_data_variables_keep,
-            task_coords,
-            img_xds,
-            processing_function_threads=processing_function_threads,
-        )
-    elif graph_mode and skunk_works:
-        # Experimental performance path: encode and write only this chunk's
-        # blob(s) directly to the pre-created Zarr image store (no open_group).
-        from astroviper.node_tasks.imaging.utils import (
-            write_result_chunk_to_disk_using_zarr_skunk_works,
-        )
+            write_result_chunk_to_fits_skunk_works(
+                image_store,
+                image_data_variables_keep,
+                task_coords,
+                img_xds,
+                processing_function_threads=processing_function_threads,
+            )
+        elif graph_mode and skunk_works and output_shard_channels:
+            # Sharded performance path: write this chunk's inner-chunk blob(s) into
+            # shared, pre-created Zarr v3 shard files (far fewer files -> metadata-server
+            # relief; the "single parallel file" pattern).
+            from astroviper.node_tasks.imaging.utils import (
+                write_result_chunk_to_disk_sharded_skunk_works,
+            )
 
-        write_result_chunk_to_disk_using_zarr_skunk_works(
-            image_store,
-            image_data_variables_keep,
-            task_coords,
-            img_xds,
-            processing_function_threads=processing_function_threads,
-        )
-    elif graph_mode:
-        from astroviper.utils.io import write_result_chunk_to_disk_using_zarr
+            write_result_chunk_to_disk_sharded_skunk_works(
+                image_store,
+                image_data_variables_keep,
+                task_coords,
+                img_xds,
+                processing_function_threads=processing_function_threads,
+            )
+        elif graph_mode and skunk_works:
+            # Experimental performance path: encode and write only this chunk's
+            # blob(s) directly to the pre-created Zarr image store (no open_group).
+            from astroviper.node_tasks.imaging.utils import (
+                write_result_chunk_to_disk_using_zarr_skunk_works,
+            )
 
-        write_result_chunk_to_disk_using_zarr(
-            image_store,
-            image_data_variables_keep,
-            task_coords,
-            img_xds,
-        )
-    else:
-        img_xds.to_zarr(image_store, consolidated=True)
+            write_result_chunk_to_disk_using_zarr_skunk_works(
+                image_store,
+                image_data_variables_keep,
+                task_coords,
+                img_xds,
+                processing_function_threads=processing_function_threads,
+            )
+        elif graph_mode:
+            from astroviper.utils.io import write_result_chunk_to_disk_using_zarr
+
+            write_result_chunk_to_disk_using_zarr(
+                image_store,
+                image_data_variables_keep,
+                task_coords,
+                img_xds,
+            )
+        else:
+            img_xds.to_zarr(image_store, consolidated=True)
+    except Exception as exc:
+        # A chunk whose result cannot be written is skipped -- logged + marked
+        # below (after the timing columns are folded in) -- instead of aborting
+        # the whole run; its channels keep the image store's fill value.
+        write_exc = exc
     T_write = time.time() - start
 
     img_xds = None
@@ -412,19 +509,48 @@ def image_cube_single_field(
     timing_df["T_load"] = T_load
     timing_df["T_write"] = T_write
     timing_df["T_image_cube_task"] = task_total_time
+    # Wall-clock anchor so the task-stream analysis can place this task on the
+    # run's common timeline without needing the resource monitor (whose own
+    # anchor, recorded a hair earlier around the whole task, overwrites this
+    # column when monitor_resources_seconds is set).
+    timing_df["start_unixtime"] = task_start
     # Record which node ran this task so the per-chunk timing frame can be grouped
-    # by host (identify stragglers / a slow node in the sweep).
+    # by host (identify stragglers / a slow node in the sweep), plus the exact
+    # execution slot (process + thread + Dask worker name) so the task-stream
+    # analysis can reconstruct TRUE per-worker lanes -- and place reduce nodes
+    # (which record the same identity) on the lane they actually ran on --
+    # instead of inferring lanes by interval packing. worker_name is None
+    # outside a Dask worker (the MPI ranks).
+    import os
     import socket
+    import threading
 
     hostname = socket.gethostname()
     timing_df["hostname"] = hostname
+    timing_df["process_pid"] = os.getpid()
+    timing_df["thread_native_id"] = threading.get_native_id()
+    try:
+        from distributed import get_worker
+
+        timing_df["worker_name"] = str(get_worker().name)
+    except Exception:
+        timing_df["worker_name"] = None
+
+    if write_exc is not None:
+        for key, value in _log_task_io_failure(
+            "write", write_exc, task_id, image_store, data_selection, task_coords
+        ).items():
+            timing_df[key] = value
 
     # Timing kill switch: if this task overran the watchdog threshold, dump its
     # full timing breakdown to an error log and raise -- aborting the whole
     # distributed computation (fail fast on a pathological node/I-O stall rather
-    # than hang the run).
+    # than hang the run). A task already skipped for a write failure is exempt:
+    # its (long) retry schedule must not re-escalate into the abort this
+    # skip-and-log path exists to avoid.
     if (
-        task_time_kill_switch_seconds is not None
+        write_exc is None
+        and task_time_kill_switch_seconds is not None
         and task_total_time > task_time_kill_switch_seconds
     ):
         log_path = _write_task_kill_switch_log(

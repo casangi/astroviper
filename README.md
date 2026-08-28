@@ -40,17 +40,19 @@ pip install astroviper
 ```bash
 git clone git@github.com:casangi/astroviper.git
 cd astroviper
-pip install '.[all]'
-pre-commit install
+pip install -e '.[all]'     # builds the C++ extensions; '[all]' adds test/docs/interactive deps
+pre-commit install          # installs ruff + nbstripout git hooks
 ```
-
-On macOS, install python-casacore via conda-forge (as above) before running `pip install`.
-
-The `pre-commit install` step sets up git hooks that automatically run code
-formatting (black) and strip Jupyter notebook outputs (nbstripout) on every
-commit. This keeps diffs clean and prevents large binary outputs from bloating
-the repository.
-
-If `pre-commit` detects and makes any changes, those files will need to be
-re-staged before committing. This is to allow the developer to inspect the
-modified file before committing.
+- **macOS**: install casacore via conda *first*, because `pip install
+  python-casacore` does not work on macOS:
+  ```bash
+  conda install -c conda-forge python-casacore
+  ```
+  This is only needed if you will be converting MSv2s to MSv4s or opening CASA images.
+- **After editing any `.cpp` / `.hpp` / `CMakeLists.txt`** you must rebuild for
+  the change to take effect (the C++ is compiled at install time):
+  ```bash
+  pip install -e '.[all]'   # or: pip install .
+  ```
+  `scikit-build-core` caches in `build/{wheel_tag}/`; if a build behaves oddly,
+  delete `build/` and reinstall. The -e creates an editable Python installation.

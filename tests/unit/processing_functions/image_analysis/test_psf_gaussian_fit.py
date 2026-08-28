@@ -6,12 +6,10 @@ from astroviper.processing_functions.image_analysis.point_spread_function_gaussi
     FWHM_factor,
     _max_sidelobe_after_gaussian_subtraction,
     extract_main_lobe,
+    psf_gaussian_fit_core,
 )
 from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
     point_spread_function_gaussian_fit as psf_gaussian_fit,
-)
-from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
-    psf_gaussian_fit_core,
 )
 
 
@@ -284,12 +282,6 @@ def test_psf_gaussian_fit_orientation():
         result = psf_gaussian_fit(ds, npix_window=(21, 21), sampling=(55, 55))
         measured_angle = -np.rad2deg(
             float(result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, 2])
-        )
-        measured_bmaj = float(
-            result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, 0]
-        )
-        measured_bmin = float(
-            result["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"].data[0, 0, 0, 1]
         )
         # Allow for 180-degree ambiguity and some tolerance
         measured_angle -= 90

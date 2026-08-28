@@ -106,7 +106,7 @@ def add_uv_sampling_grid_continuum_single_field(
 
     if n_psf_taylor_terms < 1:
         raise ValueError(
-            "n_psf_taylor_terms must be at least 1; " f"received {n_psf_taylor_terms}."
+            f"n_psf_taylor_terms must be at least 1; received {n_psf_taylor_terms}."
         )
     if not np.isfinite(reference_frequency) or reference_frequency <= 0.0:
         raise ValueError(

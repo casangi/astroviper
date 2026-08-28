@@ -1,9 +1,7 @@
 import os
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any
 
-import numpy as np
 import toolviper.utils.parameter
-import xarray as xr
 import zarr
 from numcodecs import Blosc
 from xradio.image import make_empty_sky_image
@@ -94,16 +92,16 @@ def image_cube_single_field(
     gridder="prolate_spheroidal",
     deconvolver="hogbom",
     instrument_polarization_basis: str = "linear",
-    scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],
+    scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],  # noqa: B006 - param.json schema requires list/str (not nullable); never mutated
     field_name: str = None,
-    image_data_variables_keep: list[str] = [
+    image_data_variables_keep: list[str] = [  # noqa: B006 - param.json schema requires a list (not nullable); never mutated
         "sky_deconvolved",
         "sky_residual",
         "sky_model",
         "point_spread_function",
         "primary_beam",
     ],
-    compressor=Blosc(cname="lz4", clevel=5),
+    compressor=None,
     processing_set_data_group_name: str = "corrected",
     single_precision_image: bool = True,
     thread_info: dict = None,
@@ -125,6 +123,7 @@ def image_cube_single_field(
     reduce_mode: str = "tree",
     reduce_n_batch: int = 2,
     output_shard_channels: int | None = None,
+    output_image_format: str = "zarr",
     task_time_kill_switch_seconds: float | None = None,
     monitor_resources_seconds: float | None = None,
 ):  # -> Tuple[xr.Dataset, ReturnDict]:
@@ -196,7 +195,7 @@ def image_cube_single_field(
         of 100).
     deconvolver : str
         Deconvolution algorithm for the minor cycle. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
-        (numba, threaded across *and* within planes -- faster when there are
+        (C++, threaded across *and* within planes -- faster when there are
         few planes, e.g. single-channel imaging) or ``"asp"``.
     instrument_polarization_basis : str
         Correlation (instrument) polarization basis the gridding is performed in:
@@ -222,8 +221,8 @@ def image_cube_single_field(
     n_chunks : int, optional
             Number of frequency chunks to use for parallel processing. If None (default), the chunk count is auto-determined based on the image size, memory constraints, and available parallelism.
     processing_function_threads : int, optional
-        Number of threads handed to the per-processing-function (C++ / Numba /
-        FFT) kernels.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     overwrite : bool
         Whether to overwrite existing image. Default is False.
     memory_mode : str
@@ -298,6 +297,18 @@ def image_cube_single_field(
         parallel file" pattern), cutting the output file count by up to
         ``output_shard_channels``x and greatly relieving the parallel-filesystem
         metadata server. ``None`` (default) keeps one file per channel.
+    output_image_format : str
+        On-disk format of the output image: ``"zarr"`` (default) or ``"fits"``
+        (requires ``skunk_works=True``; incompatible with
+        ``output_shard_channels``). With ``"fits"`` the driver pre-creates one
+        XRADIO-conformant FITS file per kept image variable
+        (``<image_store>/<VARIABLE>.fits``, readable with
+        :func:`xradio.image.open_image`) with a sparse full-cube data area, and
+        each node task ``pwrite``\\ s its frequency chunk -- a contiguous byte
+        range, since frequency is the slowest-varying FITS axis -- directly
+        into the shared files (no locking, no file creation). Kept
+        beam-fit-params variables become CASA-style multi-beam ``BEAMS`` table
+        extensions. uv-domain / complex variables cannot be written to FITS.
     task_time_kill_switch_seconds : float, optional
         Watchdog: if a node task's total wall time exceeds this many seconds, it
         writes an error log with that task's full timing breakdown and then raises,
@@ -331,38 +342,32 @@ def image_cube_single_field(
           grand total ``T_total``.
     """
 
-    import os
     import time
 
     import dask
-    import numpy as np
     import toolviper.utils.logger as logger
-    import xarray as xr
-    import zarr
     from graphviper.graph_tools import (
-        generate_airflow_workflow,
         generate_dask_workflow,
         map,
         processes_with_mpi,
         reduce,
     )
     from graphviper.graph_tools.coordinate_utils import make_parallel_coord
-    from xradio.image import make_empty_sky_image, write_image
+    from xradio.image import write_image
     from xradio.measurement_set import open_processing_set
 
     from astroviper.utils.data_group_tools import modify_data_groups_xds
-    from astroviper.utils.data_partitioning import (
-        calculate_data_chunking,
-        get_thread_info,
-    )
     from astroviper.utils.io import (
         create_empty_data_variables_on_disk,
         image_data_groups_for_kept_variables,
     )
 
-    assert (
-        memory_mode == "in_memory"
-    ), "Currently only in_memory is supported for memory_mode is implemented."
+    if compressor is None:
+        compressor = Blosc(cname="lz4", clevel=5)
+
+    assert memory_mode == "in_memory", (
+        "Currently only in_memory is supported for memory_mode is implemented."
+    )
 
     # Sharded output is written by the concurrent direct-blob (skunk_works) writer;
     # the standard write path cannot safely write partial shards concurrently, so
@@ -373,6 +378,21 @@ def image_cube_single_field(
             "output_shard_channels requires skunk_works=True (sharded output is "
             "written by the concurrent direct-blob writer)."
         )
+
+    # FITS output is written by the concurrent direct-pwrite (skunk_works) FITS
+    # writer into files pre-created by this driver; the standard write path has
+    # no FITS support, and Zarr sharding does not apply to FITS files.
+    if output_image_format == "fits":
+        if not skunk_works:
+            raise ValueError(
+                "output_image_format='fits' requires skunk_works=True (FITS "
+                "output is written by the concurrent direct-pwrite writer)."
+            )
+        if output_shard_channels is not None:
+            raise ValueError(
+                "output_shard_channels does not apply to FITS output "
+                "(output_image_format='fits')."
+            )
 
     # When restoring, the restored sky must be created on disk and written, so
     # ensure it is in the keep list (without mutating the caller's list).
@@ -415,7 +435,13 @@ def image_cube_single_field(
         )
 
     start = time.time()
-    write_image(img_xds, imagename=image_store, out_format="zarr", overwrite=overwrite)
+    if output_image_format == "zarr":
+        write_image(
+            img_xds, imagename=image_store, out_format="zarr", overwrite=overwrite
+        )
+    # For FITS output the empty files (headers + sparse data areas) are created
+    # after the processing set is opened, so the TELESCOP keyword can be read
+    # from it.
     timing_distributed_application["T_write_empty_image"] = time.time() - start
 
     # Determine number of chunks
@@ -442,16 +468,17 @@ def image_cube_single_field(
     # Add nan images (these will be overwritten with the actual image data but this ensures the coordinates and dtypes are correct and allows for lazy writing of the data)
     # create_empty_data_varable_on_disk(zarr_store, dv_names, dims, shape, chunk, variable_dtype, compressor)
     start = time.time()
-    create_empty_data_variables_on_disk(
-        image_store,
-        image_data_variables_keep,
-        shape_dict=img_xds.sizes,
-        parallel_coords=parallel_coords,
-        compressor=compressor,
-        double_precision=not single_precision_image,
-        data_variable_definitions="imaging",
-        shard_channels=output_shard_channels,
-    )
+    if output_image_format == "zarr":
+        create_empty_data_variables_on_disk(
+            image_store,
+            image_data_variables_keep,
+            shape_dict=img_xds.sizes,
+            parallel_coords=parallel_coords,
+            compressor=compressor,
+            double_precision=not single_precision_image,
+            data_variable_definitions="imaging",
+            shard_channels=output_shard_channels,
+        )
     timing_distributed_application["T_create_empty_data_variables"] = (
         time.time() - start
     )
@@ -485,6 +512,7 @@ def image_cube_single_field(
     input_params["restore"] = restore
     input_params["skunk_works"] = skunk_works
     input_params["output_shard_channels"] = output_shard_channels
+    input_params["output_image_format"] = output_image_format
     input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
 
     from graphviper.graph_tools.coordinate_utils import (
@@ -505,6 +533,32 @@ def image_cube_single_field(
         input_params["data_group"] = first_ms.ds.attrs["data_groups"][
             processing_set_data_group_name
         ]
+
+    # FITS output: pre-create one XRADIO-conformant FITS file per kept image
+    # variable (complete header + sparse full-cube data area + zero-filled
+    # BEAMS tables) so the node tasks only pwrite disjoint byte ranges. Done
+    # here -- after the processing set is open -- so TELESCOP can be read from
+    # it; timed into the same slot the Zarr path uses for its empty variables.
+    if output_image_format == "fits":
+        from astroviper.node_tasks.imaging.utils import create_empty_fits_images
+
+        start = time.time()
+        first_ms = next(iter(ps_xdt.values()))
+        telescope_name = (
+            first_ms.ds.attrs.get("observation_info", {}).get("telescope_name")
+            or "UNKNOWN"
+        )
+        create_empty_fits_images(
+            image_store,
+            img_xds,
+            image_data_variables_keep,
+            double_precision=not single_precision_image,
+            telescope_name=telescope_name,
+            overwrite=overwrite,
+        )
+        timing_distributed_application["T_create_empty_data_variables"] += (
+            time.time() - start
+        )
 
     start = time.time()
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
@@ -586,7 +640,15 @@ def image_cube_single_field(
         timing_distributed_application["T_generate_dask_graph"] = 0.0
         start = time.time()
         return_dict = processes_with_mpi(viper_graph, mpi_cluster_setup)
-        timing_distributed_application["T_compute_dask_graph"] = time.time() - start
+        end = time.time()
+        timing_distributed_application["T_compute_dask_graph"] = end - start
+        # ABSOLUTE anchors of the compute call, saved with the overall row so
+        # the task-stream analysis can place the compute window on the same
+        # wall clock as the per-task start_unixtime values (exposing the
+        # pre-first-task cold-start gap directly instead of reconstructing it
+        # from creation_date).
+        timing_distributed_application["compute_start_unixtime"] = start
+        timing_distributed_application["compute_end_unixtime"] = end
     elif compute_backend == "dask":
         start = time.time()
         dask_graph = generate_dask_workflow(viper_graph)
@@ -597,14 +659,19 @@ def image_cube_single_field(
 
         start = time.time()
         return_dict = dask.compute(dask_graph)[0]
-        timing_distributed_application["T_compute_dask_graph"] = time.time() - start
+        end = time.time()
+        timing_distributed_application["T_compute_dask_graph"] = end - start
+        # Same absolute compute-call anchors as the MPI branch (see above).
+        timing_distributed_application["compute_start_unixtime"] = start
+        timing_distributed_application["compute_end_unixtime"] = end
     else:
         raise ValueError(
             f"Unknown compute_backend {compute_backend!r}; expected 'dask' or 'mpi'."
         )
 
     start = time.time()
-    zarr.consolidate_metadata(image_store)
+    if output_image_format == "zarr":
+        zarr.consolidate_metadata(image_store)
     timing_distributed_application["T_consolidate_metadata"] = time.time() - start
 
     timing_distributed_application["T_total"] = time.time() - application_start
@@ -682,14 +749,26 @@ def combine_return_data_frames(input_data, input_params):
     dict
         ``{"timing_node_tasks": pandas.DataFrame, "deconvolution": ReturnDict}``.
     """
+    import os
+    import socket
+    import threading
+    import time
+
     import pandas as pd
 
     from astroviper.processing_functions.imaging.utils.iteration_control import (
         merge_return_dicts,
     )
 
-    combined_timing = pd.DataFrame()
+    t_start = time.time()
+    timing_frames = []
     deconvolve_dicts = []
+    # Per-reduce-node timing provenance: child reduce calls carry their records
+    # in "timing_reduce_nodes" (leaf node-task results have none); pool them and
+    # append this call's own record, so the final result holds one record per
+    # reduce node of the whole tree -- on any backend (dask workers, the MPI
+    # manager, or the streaming cascade). The task-stream analysis draws these.
+    reduce_records = []
 
     for result in input_data:
         timing = result["timing_node_tasks"]
@@ -705,12 +784,44 @@ def combine_return_data_frames(input_data, input_params):
                 # a list series becomes ONE cell of the single row; scalars
                 # (sample_interval_seconds) broadcast.
                 timing[key] = [value] if isinstance(value, list) else value
-        combined_timing = pd.concat([combined_timing, timing], ignore_index=True)
+        timing_frames.append(timing)
         deconvolve_dicts.append(result["deconvolution"])
+        reduce_records.extend(result.get("timing_reduce_nodes", []))
 
+    # ONE concat per reduce call: concatenating inside the loop re-copied the
+    # accumulated rows for every input (O(k^2) row copies per call -- a real
+    # cost on rank 0, which reduces 15360 one-row frames single-threaded).
+    combined_timing = pd.concat(timing_frames, ignore_index=True)
+    merged_deconvolve = merge_return_dicts(deconvolve_dicts)
+    t_end = time.time()
+    # Identity of the execution slot this reduce ran on, so the task-stream
+    # analysis can place reduce nodes on their TRUE worker lane (matching the
+    # same columns recorded per map task) instead of interval-packing them
+    # into borrowed lanes. worker_name is the Dask worker (None on the MPI
+    # manager, which runs reduces outside any Dask worker).
+    try:
+        from distributed import get_worker
+
+        worker_name = str(get_worker().name)
+    except Exception:
+        worker_name = None
+    reduce_records.append(
+        {
+            "start_unixtime": t_start,
+            "end_unixtime": t_end,
+            "T_reduce_node": t_end - t_start,
+            "hostname": socket.gethostname(),
+            "process_pid": os.getpid(),
+            "thread_native_id": threading.get_native_id(),
+            "worker_name": worker_name,
+            "n_inputs": len(input_data),
+            "n_rows_out": int(len(combined_timing)),
+        }
+    )
     return {
         "timing_node_tasks": combined_timing,
-        "deconvolution": merge_return_dicts(deconvolve_dicts),
+        "deconvolution": merged_deconvolve,
+        "timing_reduce_nodes": reduce_records,
     }
 
 
@@ -761,25 +872,13 @@ def calculate_number_of_chunks_for_cube_imaging(
         fudge_factor = 1.2
         if single_precision_image:
             memory_singleton_chunk = fudge_factor * (
-                3
-                * n_pixels_single_frequency
-                * bytes_in_dtype["complex64"]
-                / (1024**3)
-                + 3
-                * n_pixels_single_frequency
-                * bytes_in_dtype["float32"]
-                / (1024**3)
+                3 * n_pixels_single_frequency * bytes_in_dtype["complex64"] / (1024**3)
+                + 3 * n_pixels_single_frequency * bytes_in_dtype["float32"] / (1024**3)
             )
         else:
             memory_singleton_chunk = fudge_factor * (
-                3
-                * n_pixels_single_frequency
-                * bytes_in_dtype["complex128"]
-                / (1024**3)
-                + 3
-                * n_pixels_single_frequency
-                * bytes_in_dtype["float64"]
-                / (1024**3)
+                3 * n_pixels_single_frequency * bytes_in_dtype["complex128"] / (1024**3)
+                + 3 * n_pixels_single_frequency * bytes_in_dtype["float64"] / (1024**3)
             )
 
         logger.info(

@@ -462,7 +462,7 @@ def imaging_setup_continuum_single_field(
         )
     else:
         raise ValueError(
-            "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
+            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
         )
 
     T_make_point_spread_function = time.time() - start
@@ -482,7 +482,10 @@ def imaging_setup_continuum_single_field(
         )
         primary_beam_return_df = pd.DataFrame({"T_primary_beam": [time.time() - start]})
     else:
-        (img_xds, primary_beam_return_df,) = make_primary_beam_single_field(
+        (
+            img_xds,
+            primary_beam_return_df,
+        ) = make_primary_beam_single_field(
             img_xds,
             image_params,
             image_data_group_in_name=image_data_group_out_name,
@@ -500,7 +503,7 @@ def imaging_setup_continuum_single_field(
         img_xds[primary_beam_name].attrs.update(
             {
                 "description": (
-                    "Partition-local frequency-dependent primary " "beam used by MVC."
+                    "Partition-local frequency-dependent primary beam used by MVC."
                 ),
                 "specmode": "mvc",
             }

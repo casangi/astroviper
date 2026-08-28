@@ -474,7 +474,7 @@ def test_mvc_map_contributions_reduce_to_full_cube_result():
         reduced[variable_name] = reduced[variable_name] + chunks[1][variable_name]
     actual = finalize_mvc_taylor_normal_equations(reduced)
 
-    for actual_array, expected_array in zip(actual, expected):
+    for actual_array, expected_array in zip(actual, expected, strict=False):
         np.testing.assert_allclose(actual_array, expected_array)
 
 

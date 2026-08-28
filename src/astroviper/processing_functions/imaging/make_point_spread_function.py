@@ -24,10 +24,7 @@ def add_uv_sampling_grid_mosaic(
     ms_data_group_in_name: str = "base",
     image_data_group_in_name: str = "mosaic",
     image_data_group_out_name: str = "mosaic",
-    image_data_group_out_modified: dict = {
-        "uv_sampling": "UV_SAMPLING",
-        "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
-    },
+    image_data_group_out_modified: dict | None = None,
     overwrite: bool = True,
     chan_mode: str = "cube",
     fft_padding: float = 1.2,
@@ -100,6 +97,11 @@ def add_uv_sampling_grid_mosaic(
         mosaic_grid_jit,
     )
 
+    if image_data_group_out_modified is None:
+        image_data_group_out_modified = {
+            "uv_sampling": "UV_SAMPLING",
+            "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
+        }
     _image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
 
     # Read the MS input data group directly; the MS is read-only here.
@@ -202,10 +204,7 @@ def add_uv_sampling_grid_single_field(
     ms_data_group_in_name: str = "base",
     image_data_group_in_name: str = "residual",
     image_data_group_out_name: str = "residual",
-    image_data_group_out_modified: dict = {
-        "uv_sampling": "UV_SAMPLING",
-        "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
-    },
+    image_data_group_out_modified: dict | None = None,
     overwrite: bool = True,
     chan_mode: str = "cube",
     fft_padding: float = 1.2,
@@ -281,6 +280,11 @@ def add_uv_sampling_grid_single_field(
     --------
     add_uv_sampling_grid_mosaic : Mosaic (direction-dependent GCF) variant.
     """
+    if image_data_group_out_modified is None:
+        image_data_group_out_modified = {
+            "uv_sampling": "UV_SAMPLING",
+            "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
+        }
     # Deep copy so that inputs are not modified
     _image_data_group_out_modified = copy.deepcopy(image_data_group_out_modified)
 
@@ -355,48 +359,26 @@ def add_uv_sampling_grid_single_field(
     frequency_coord = ms_xdt.frequency.values
     imaging_weight = ms_xdt[ms_data_group_in["weight_imaging"]].values
 
-    cpp_gridder = True
-    if cpp_gridder:
-        from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-            prolate_spheroidal_grid_uv_sampling,
-        )
+    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
+        prolate_spheroidal_grid_uv_sampling,
+    )
 
-        prolate_spheroidal_grid_uv_sampling(
-            grid,
-            normalization,
-            uvw,
-            frequency_coord,
-            frequency_map,
-            time_map,
-            pol_map,
-            imaging_weight,
-            cgk_1D,
-            n_uv,
-            delta_lm,
-            support=7,
-            oversampling=100,
-            processing_function_threads=processing_function_threads,
-        )
-    else:
-        from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid import (
-            prolate_spheroidal_grid_uv_sampling_jit,
-        )
-
-        prolate_spheroidal_grid_uv_sampling_jit(
-            grid,
-            normalization,
-            uvw,
-            frequency_coord,
-            frequency_map,
-            time_map,
-            pol_map,
-            imaging_weight,
-            cgk_1D,
-            n_uv,
-            delta_lm,
-            support=7,
-            oversampling=100,
-        )
+    prolate_spheroidal_grid_uv_sampling(
+        grid,
+        normalization,
+        uvw,
+        frequency_coord,
+        frequency_map,
+        time_map,
+        pol_map,
+        imaging_weight,
+        cgk_1D,
+        n_uv,
+        delta_lm,
+        support=7,
+        oversampling=100,
+        processing_function_threads=processing_function_threads,
+    )
 
 
 @shares_param_docs
@@ -449,8 +431,9 @@ def make_point_spread_function_single_field(
         Measurement-set data group that supplies the weights/uvw used for the
         UV-sampling grid.  Default ``"base"``.
     image_data_group_in_name : str, optional
-        Image data group read by the gridders/FFT (the same group the
-        ``UV_SAMPLING`` grid accumulates into).  Default ``"residual"``.
+        Key in the image's ``data_groups`` whose ``"sky"`` (and, optionally,
+        ``"mask"``) roles name the input data variables.  Datasets without
+        data groups fall back to the conventional ``"SKY"`` variable.
     image_data_group_out_name : str, optional
         Image data group that the ``UV_SAMPLING`` and ``POINT_SPREAD_FUNCTION``
         variables are registered under.  Default ``"residual"``.
@@ -463,8 +446,8 @@ def make_point_spread_function_single_field(
     gcf_support : int, optional
         Support (in pixels) of the gridding convolution kernel.  Default ``7``.
     processing_function_threads : int, optional
-        Number of threads handed to the per-processing-function (C++ / Numba /
-        FFT) kernels.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     fft_backend : str, optional
         FFT backend used by the gridder normalization (``"pyfftw"`` or
         ``"scipy"``).
@@ -508,7 +491,7 @@ def make_point_spread_function_single_field(
 
     T_vis_mask = 0.0
     T_uv_sampling_grid = 0.0
-    for ms_name, ms_xdt in ps_xdt.items():
+    for ms_xdt in ps_xdt.values():
         T_start_vis_mask = time.time()
         drop_auto_correlations(ms_xdt)
         T_vis_mask += time.time() - T_start_vis_mask

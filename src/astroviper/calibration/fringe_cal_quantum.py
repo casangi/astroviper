@@ -1,8 +1,6 @@
-import dask
 import numpy as np
 import xarray as xa
 from xradio.measurement_set.measurement_set_xdt import MeasurementSetXdt
-from xradio.measurement_set.processing_set_xdt import ProcessingSetXdt
 
 
 # I am surprised this is not some kind of standard function, but the
@@ -53,12 +51,6 @@ def nan_count(j):
 
 def number_count(j):
     return np.sum(~np.isnan(j))
-
-
-def square_up_last_dimension(v):
-    s = v.shape[:-1] + (2, 2)
-    v2 = np.reshape(v, s)
-    return v2
 
 
 def square_up_last_dimension(v):

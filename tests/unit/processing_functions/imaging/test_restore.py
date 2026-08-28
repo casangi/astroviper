@@ -19,7 +19,6 @@ import pytest
 import xarray as xr
 
 from astroviper.processing_functions.imaging.restore import (
-    FWHM_factor,
     _elliptical_gaussian_kernel,
     restore_image,
 )
@@ -241,8 +240,71 @@ class TestRestoreImage:
         np.testing.assert_array_equal(xds["SKY_RESIDUAL"].values, residual0)
         np.testing.assert_array_equal(xds["SKY_MODEL"].values, model0)
 
-    def test_nan_beam_falls_back_to_residual(self):
+    def test_consume_model_matches_default_and_drops_model(self):
+        # consume_model=True must give a bit-identical restored image while
+        # reusing the model cube's buffer and removing the model variable.
         delta = 1.0e-3
+        rng = np.random.default_rng(3)
+        residual = rng.standard_normal((1, 1, 2, 64, 64)).astype(np.float32) * 0.01
+        model = np.zeros((1, 1, 2, 64, 64), dtype=np.float32)
+        model[0, 0, :, 32, 32] = 3.0
+        beams = {(0, 0): (8.0 * delta, 4.0 * delta, 0.3)}
+
+        xds_default = _make_restore_xds(
+            beams=beams, residual=residual.copy(), model=model.copy()
+        )
+        out_default, _ = restore_image(xds_default)
+
+        xds_consume = _make_restore_xds(
+            beams=beams, residual=residual.copy(), model=model.copy()
+        )
+        model_buffer = xds_consume["SKY_MODEL"].values
+        out_consume, _ = restore_image(xds_consume, consume_model=True)
+
+        np.testing.assert_array_equal(
+            out_consume["SKY_RESTORED"].values, out_default["SKY_RESTORED"].values
+        )
+        assert np.shares_memory(out_consume["SKY_RESTORED"].values, model_buffer)
+        assert "SKY_MODEL" not in out_consume
+        np.testing.assert_array_equal(out_consume["SKY_RESIDUAL"].values, residual)
+
+    def test_consume_model_dtype_mismatch_falls_back(self):
+        # Model/residual dtype mismatch: the buffer cannot be reused, so the
+        # restore must fall back to allocating and preserve the model.
+        delta = 1.0e-3
+        rng = np.random.default_rng(4)
+        residual = rng.standard_normal((1, 1, 1, 32, 32)).astype(np.float32) * 0.01
+        model = np.zeros((1, 1, 1, 32, 32), dtype=np.float64)
+        model[0, 0, :, 16, 16] = 2.0
+        beams = {(0, 0): (6.0 * delta, 3.0 * delta, 0.0)}
+
+        xds_default = _make_restore_xds(
+            npol=1,
+            ny=32,
+            nx=32,
+            beams=beams,
+            residual=residual.copy(),
+            model=model.copy(),
+        )
+        out_default, _ = restore_image(xds_default)
+
+        xds_consume = _make_restore_xds(
+            npol=1,
+            ny=32,
+            nx=32,
+            beams=beams,
+            residual=residual.copy(),
+            model=model.copy(),
+        )
+        out_consume, _ = restore_image(xds_consume, consume_model=True)
+
+        np.testing.assert_array_equal(
+            out_consume["SKY_RESTORED"].values, out_default["SKY_RESTORED"].values
+        )
+        assert "SKY_MODEL" in out_consume
+        np.testing.assert_array_equal(out_consume["SKY_MODEL"].values, model)
+
+    def test_nan_beam_falls_back_to_residual(self):
         rng = np.random.default_rng(1)
         residual = rng.standard_normal((1, 1, 2, 32, 32)).astype(np.float32)
         model = np.zeros((1, 1, 2, 32, 32), dtype=np.float32)

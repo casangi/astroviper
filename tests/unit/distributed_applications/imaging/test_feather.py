@@ -114,16 +114,18 @@ class FeatherShared:
                 fx = xds_sd_temp if i == 0 else xds_int_temp
                 xds["SKY"][{"frequency": slice(min_chan, max_chan)}] = fx["SKY"].values
                 xds["SKY"].attrs = {"units": "Jy/beam"}
-                xds["BEAM_FIT_PARAMS_SKY"][
-                    {"frequency": slice(min_chan, max_chan)}
-                ] = fx["BEAM_FIT_PARAMS_SKY"].values
+                xds["BEAM_FIT_PARAMS_SKY"][{"frequency": slice(min_chan, max_chan)}] = (
+                    fx["BEAM_FIT_PARAMS_SKY"].values
+                )
                 xds["BEAM_FIT_PARAMS_SKY"].attrs = {"units": "rad"}
             if i == 0:
                 xds_sd = xds
             else:
                 xds_int = xds
 
-        for xds, outfile in zip([xds_sd, xds_int], [cls.sd_zarr, cls.int_zarr]):
+        for xds, outfile in zip(
+            [xds_sd, xds_int], [cls.sd_zarr, cls.int_zarr], strict=False
+        ):
             cls._rm(outfile)
             write_image(xds, outfile, "zarr")
 
@@ -161,7 +163,6 @@ class FeatherShared:
 
 
 class FeatherTest(FeatherShared, unittest.TestCase):
-
     # ------------------------------------------------------------------------
     def setUp(self):
         pass
@@ -252,7 +253,9 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
                 update()
                 download(cls.model_key)
             except Exception as e:
-                raise unittest.SkipTest(f"Could not download '{cls.model_key}': {e}")
+                raise unittest.SkipTest(
+                    f"Could not download '{cls.model_key}': {e}"
+                ) from e
 
         # Make the failure obvious if the download location differs
         if not os.path.exists(cls.model_image):
@@ -267,7 +270,6 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
         cls._rm(cls.model_image)
 
     def test_basic_stats_and_positions(self):
-
         feather_xds = load_image({"sky": self.feather_out})
         # expected shape from prior runs
         self.assertEqual(
@@ -289,7 +291,6 @@ class FeatherModelComparison(FeatherShared, unittest.TestCase):
         model_plane = model_xds.SKY.isel(frequency=0)
         fsum = float(feather_plane.sum().compute().values)
         msum = float(model_plane.sum().compute().values)
-        rel = fsum / msum - 1.0
         self.assertAlmostEqual(
             fsum, 21276.0859375, delta=1e-2, msg=f"feather sum got {fsum}"
         )

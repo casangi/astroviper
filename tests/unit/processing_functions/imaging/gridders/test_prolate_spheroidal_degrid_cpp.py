@@ -1,7 +1,7 @@
 """Unit tests for the C++ prolate_spheroidal_degrid extension.
 
 Coverage:
-  * Numerical agreement with the Numba reference (`prolate_spheroidal_degrid_jit`)
+  * Numerical agreement with the pure-Python reference (`prolate_spheroidal_degrid_reference`)
   * Serial vs multi-threaded equivalence (exact: no atomic collisions)
   * `processing_function_threads <= 0` auto-detects hardware concurrency
   * NaN UV / NaN vis / out-of-bounds samples are left unchanged
@@ -13,10 +13,8 @@ Coverage:
 import unittest
 
 import numpy as np
+from reference_gridders import prolate_spheroidal_degrid_reference
 
-from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_degrid import (
-    prolate_spheroidal_degrid_jit,
-)
 from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
     prolate_spheroidal_degrid,
 )
@@ -105,9 +103,9 @@ def _run_cpp(inputs, processing_function_threads=1):
     return vis_data
 
 
-def _run_jit(inputs):
+def _run_reference(inputs):
     vis_data = inputs["vis_data"].copy()
-    prolate_spheroidal_degrid_jit(
+    prolate_spheroidal_degrid_reference(
         inputs["grid"],
         vis_data,
         inputs["uvw"],
@@ -128,11 +126,11 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
     # ------------------------------------------------------------------
     # Reference-oracle tests
     # ------------------------------------------------------------------
-    def test_matches_numba_reference(self):
-        """Serial C++ degridder matches the numba reference bit-for-bit."""
+    def test_matches_reference(self):
+        """Serial C++ degridder matches the pure-Python reference bit-for-bit."""
         inputs = _make_random_inputs(seed=1)
         cpp = _run_cpp(inputs, processing_function_threads=1)
-        ref = _run_jit(inputs)
+        ref = _run_reference(inputs)
         np.testing.assert_allclose(cpp, ref, rtol=0, atol=1e-12)
         # Ensure the test exercises the interpolation path — a non-trivial
         # number of samples should have been written.
@@ -143,7 +141,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         inputs = _make_random_inputs(n_vis_chan=4, m_chan=1, seed=2)
         inputs["frequency_map"] = np.zeros(4, dtype=np.int64)
         cpp = _run_cpp(inputs, processing_function_threads=1)
-        ref = _run_jit(inputs)
+        ref = _run_reference(inputs)
         np.testing.assert_allclose(cpp, ref, rtol=0, atol=1e-12)
 
     def test_time_map_collapse(self):
@@ -151,7 +149,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         inputs = _make_random_inputs(n_time=3, m_time=1, seed=3)
         inputs["time_map"] = np.zeros(3, dtype=np.int64)
         cpp = _run_cpp(inputs, processing_function_threads=1)
-        ref = _run_jit(inputs)
+        ref = _run_reference(inputs)
         np.testing.assert_allclose(cpp, ref, rtol=0, atol=1e-12)
 
     def test_pol_map_reorder(self):
@@ -159,7 +157,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         inputs = _make_random_inputs(n_pol=2, seed=4)
         inputs["pol_map"] = np.array([1, 0], dtype=np.int64)
         cpp = _run_cpp(inputs, processing_function_threads=1)
-        ref = _run_jit(inputs)
+        ref = _run_reference(inputs)
         np.testing.assert_allclose(cpp, ref, rtol=0, atol=1e-12)
 
     # ------------------------------------------------------------------
@@ -187,10 +185,10 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         np.testing.assert_array_equal(auto, serial)
 
     def test_threaded_matches_reference(self):
-        """Threaded C++ output matches the numba reference within tolerance."""
+        """Threaded C++ output matches the pure-Python reference within tolerance."""
         inputs = _make_random_inputs(n_baseline=200, seed=7)
         cpp = _run_cpp(inputs, processing_function_threads=4)
-        ref = _run_jit(inputs)
+        ref = _run_reference(inputs)
         np.testing.assert_allclose(cpp, ref, rtol=0, atol=1e-12)
 
     # ------------------------------------------------------------------
@@ -205,7 +203,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         inputs["uvw"][:, 0, :] = np.nan  # baseline 0 is fully NaN
 
         cpp = _run_cpp(inputs, processing_function_threads=1)
-        ref = _run_jit(inputs)
+        ref = _run_reference(inputs)
         np.testing.assert_allclose(cpp, ref, rtol=0, atol=1e-12)
         # Baseline 0 stays untouched across every time/chan/pol.
         self.assertTrue(np.all(cpp[:, 0, :, :] == sentinel))
@@ -218,7 +216,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         inputs["vis_data"][0, 0, 0, 0] = complex(np.nan, np.nan)
 
         cpp = _run_cpp(inputs, processing_function_threads=1)
-        ref = _run_jit(inputs)
+        ref = _run_reference(inputs)
 
         self.assertTrue(np.isnan(cpp[0, 0, 0, 0].real))
         self.assertTrue(np.isnan(cpp[0, 0, 0, 0].imag))
@@ -354,8 +352,8 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         self.assertEqual(vis64.dtype, np.complex64)
         self.assertGreater(np.count_nonzero(vis64), 0)
 
-    def test_complex64_matches_numba_reference(self):
-        """C++ output into a complex64 buffer matches the numba reference within float32 precision."""
+    def test_complex64_matches_reference(self):
+        """C++ output into a complex64 buffer matches the pure-Python reference within float32 precision."""
         inputs = _make_random_inputs(seed=22)
         vis64 = np.zeros_like(inputs["vis_data"], dtype=np.complex64)
         prolate_spheroidal_degrid(
@@ -373,7 +371,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
             oversampling=OVERSAMPLING,
             processing_function_threads=1,
         )
-        ref = _run_jit(inputs)  # complex128 numba reference
+        ref = _run_reference(inputs)  # complex128 pure-Python reference
         np.testing.assert_allclose(
             vis64, ref.astype(np.complex64), rtol=1e-5, atol=1e-6
         )
@@ -401,8 +399,8 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
                 processing_function_threads=1,
             )
 
-    def test_jit_and_cpp_produce_same_result(self):
-        """End-to-end equivalence: jit and C++ produce the same vis_data for the
+    def test_reference_and_cpp_produce_same_result(self):
+        """End-to-end equivalence: reference and C++ produce the same vis_data for the
         same inputs across multiple seeds, baseline counts, channel maps, and
         thread counts."""
         configs = [
@@ -435,8 +433,8 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
                 cpp = _run_cpp(
                     inputs, processing_function_threads=processing_function_threads
                 )
-                jit = _run_jit(inputs)
-                np.testing.assert_allclose(cpp, jit, rtol=0, atol=1e-12)
+                ref = _run_reference(inputs)
+                np.testing.assert_allclose(cpp, ref, rtol=0, atol=1e-12)
 
     # ------------------------------------------------------------------
     # Binding input validation

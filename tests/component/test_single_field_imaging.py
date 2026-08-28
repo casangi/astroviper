@@ -415,24 +415,24 @@ def _check_deconvolve_dict(
     string_fields = {"stokes", "stop_description"}
 
     actual = {tuple(k): v for k, v in deconvolve_dict.data.items()}
-    assert set(actual) == set(
-        expected
-    ), f"deconvolve_dict planes {sorted(actual)} != expected {sorted(expected)}"
+    assert set(actual) == set(expected), (
+        f"deconvolve_dict planes {sorted(actual)} != expected {sorted(expected)}"
+    )
     for key, exp_fields in expected.items():
         got = actual[key]
-        assert set(got) == set(
-            exp_fields
-        ), f"plane {key}: fields {sorted(got)} != expected {sorted(exp_fields)}"
+        assert set(got) == set(exp_fields), (
+            f"plane {key}: fields {sorted(got)} != expected {sorted(exp_fields)}"
+        )
         for field, exp_val in exp_fields.items():
             val = got[field]
             if field == "stop_code":
-                assert (int(val.major), int(val.minor)) == tuple(
-                    exp_val
-                ), f"plane {key} stop_code {val} != {exp_val}"
+                assert (int(val.major), int(val.minor)) == tuple(exp_val), (
+                    f"plane {key} stop_code {val} != {exp_val}"
+                )
             elif field in string_fields:
-                assert (
-                    str(val) == exp_val
-                ), f"plane {key} {field}: {val!r} != {exp_val!r}"
+                assert str(val) == exp_val, (
+                    f"plane {key} {field}: {val!r} != {exp_val!r}"
+                )
             elif field in loose_fields:
                 # Checked BEFORE exact_int_fields so a field marked loose (e.g.
                 # iter_done for a single-precision dict) is compared loosely; for
@@ -457,9 +457,9 @@ def _check_deconvolve_dict(
                     atol=max(atol, loose_rtol * scale),
                 ), f"plane {key} {field} (loose |{loose_rtol}|): {val} != {exp_val}"
             elif field in exact_int_fields:
-                assert np.array_equal(
-                    np.asarray(val), np.asarray(exp_val)
-                ), f"plane {key} {field}: {val} != {exp_val}"
+                assert np.array_equal(np.asarray(val), np.asarray(exp_val)), (
+                    f"plane {key} {field}: {val} != {exp_val}"
+                )
             else:
                 assert np.allclose(
                     np.asarray(val, dtype=float),
@@ -724,9 +724,9 @@ def test_single_field_imaging_niter0(plot_saver, processing_function_threads):
         pb_parms,
         image_params,
     )[0, ...][None, ...]
-    assert np.allclose(
-        PB_v1, PB_v2
-    ), "airy_disk_rorder and airy_disk_rorder_v2 produced different primary beams."
+    assert np.allclose(PB_v1, PB_v2), (
+        "airy_disk_rorder and airy_disk_rorder_v2 produced different primary beams."
+    )
 
 
 @pytest.mark.parametrize("processing_function_threads", [1, 12])

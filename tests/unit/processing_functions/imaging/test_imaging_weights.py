@@ -28,6 +28,9 @@ from astroviper.processing_functions.imaging.calculate_imaging_weights import (
 from astroviper.processing_functions.imaging.check_imaging_parameters import (
     check_imaging_weights_params,
 )
+from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights import (
+    degrid_imaging_weights,
+)
 
 _MS_DIMS = ("time", "baseline", "frequency", "polarization")
 _GRID_MOD_PATH = (
@@ -36,6 +39,25 @@ _GRID_MOD_PATH = (
 _BRIGGS_MOD_PATH = (
     "astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting"
 )
+
+
+def test_degrid_imaging_weights_accepts_non_native_float_density_grid():
+    """Distributed density reductions normalize non-native floats for C++."""
+    density = np.zeros((1, 1, 4, 4), dtype=">f8")
+    density[0, 0, 2, 2] = 3.0
+
+    actual = degrid_imaging_weights(
+        density,
+        np.zeros((1, 1, 3), dtype=np.float64),
+        np.ones((1, 1, 1, 1), dtype=np.float64),
+        np.ones((2, 1, 1), dtype=np.float64),
+        np.asarray([1.0e9], dtype=np.float64),
+        np.asarray([4, 4], dtype=np.int64),
+        np.asarray([1.0e-5, 1.0e-5], dtype=np.float64),
+        processing_function_threads=1,
+    )
+
+    np.testing.assert_allclose(actual, 0.25, rtol=0.0, atol=0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +449,19 @@ class TestCalculateImagingWeightsDispatch(unittest.TestCase):
         self.assertEqual(self.grid_mock.call_count, 2)
         self.assertEqual(self.briggs_mock.call_count, 1)
         self.assertEqual(self.degrid_mock.call_count, 2)
+
+    def test_truncate_uv_cells_is_forwarded_to_grid_and_degrid(self):
+        """CASA continuum cell assignment reaches both C++ wrappers."""
+        ps_xdt = _make_ps_xdt()
+        calculate_imaging_weights(
+            ps_xdt,
+            self.img_xds,
+            imaging_weights_params={"weighting": "briggs", "robust": 0.5},
+            truncate_uv_cells=True,
+        )
+
+        self.assertTrue(self.grid_mock.call_args.kwargs["truncate_uv_cells"])
+        self.assertTrue(self.degrid_mock.call_args.kwargs["truncate_uv_cells"])
 
     def test_return_weight_density_grid_briggs(self):
         """With ``return_weight_density_grid=True`` on the Briggs path, the

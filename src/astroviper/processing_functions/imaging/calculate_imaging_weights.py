@@ -523,9 +523,9 @@ def grid_imaging_weight_density_continuum(
         )
 
         if not uses_full_frequency_axis:
-            weight_density_grid[
-                image_frequency_indices, ...
-            ] += child_weight_density_grid
+            weight_density_grid[image_frequency_indices, ...] += (
+                child_weight_density_grid
+            )
             sum_weight[image_frequency_indices, ...] += child_sum_weight
 
         datasets_gridded += 1
@@ -818,9 +818,7 @@ def degrid_imaging_weights_continuum(
     # ------------------------------------------------------------------
     for dimension_name in ("l", "m"):
         if dimension_name not in img_xds.sizes:
-            raise ValueError(
-                f"img_xds does not contain dimension " f"{dimension_name!r}."
-            )
+            raise ValueError(f"img_xds does not contain dimension {dimension_name!r}.")
 
     n_uv = np.asarray(
         [
@@ -1134,7 +1132,7 @@ def calculate_imaging_weights(
     imaging_weights_params: dict,
     ms_data_group_in_name: str = "base",
     ms_data_group_out_name: str = "imaging",
-    ms_data_group_out_modified: dict = {"weight_imaging": "WEIGHT_IMAGING"},
+    ms_data_group_out_modified: dict | None = None,
     overwrite: bool = False,
     single_precision_gridding: bool = False,
     return_weight_density_grid: bool = False,
@@ -1181,8 +1179,8 @@ def calculate_imaging_weights(
         also return the 2D weight-density grid (useful for debugging). Ignored
         for natural weighting, which always returns ``None``.
     processing_function_threads : int, default ``1``
-        Number of threads handed to the per-processing-function (C++ / Numba /
-        FFT) kernels.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     truncate_uv_cells : bool, default ``False``
         If True, assign shifted UV coordinates to density cells by integer
         truncation, matching CASA continuum weighting. If False, use the
@@ -1257,11 +1255,14 @@ def calculate_imaging_weights(
         modify_data_groups_ps_xdt,
     )
 
+    if ms_data_group_out_modified is None:
+        ms_data_group_out_modified = {"weight_imaging": "WEIGHT_IMAGING"}
+
     _imaging_weights_params = copy.deepcopy(imaging_weights_params)
     _ms_data_group_out_modified = copy.deepcopy(ms_data_group_out_modified)
-    assert check_imaging_weights_params(
-        _imaging_weights_params
-    ), "######### ERROR: imaging_weights_params checking failed"
+    assert check_imaging_weights_params(_imaging_weights_params), (
+        "######### ERROR: imaging_weights_params checking failed"
+    )
 
     # Uniform weighting is implemented as Briggs with robust = -2.0.
     if _imaging_weights_params["weighting"] == "uniform":
@@ -1288,7 +1289,7 @@ def calculate_imaging_weights(
         )
 
         # fill visibility column
-        for ms_name, ms_xdt in ps_xdt.items():
+        for ms_xdt in ps_xdt.values():
             data_weight = ms_xdt[ms_data_group_in["weight"]].values
             data_weight[ms_xdt[ms_data_group_in["flag"]] == 1] = np.nan
             data_weight = _equalize_parallel_hand_weights(
@@ -1326,7 +1327,7 @@ def calculate_imaging_weights(
     sum_weight = np.zeros((n_imag_chan, 1), dtype=np.double)
 
     # Grid the weights.
-    for ms_name, ms_xdt in ps_xdt.items():
+    for ms_xdt in ps_xdt.values():
         uvw = ms_xdt[ms_data_group_in["uvw"]].values
         data_weight = ms_xdt[ms_data_group_in["weight"]].values
         data_weight[ms_xdt[ms_data_group_in["flag"]] == 1] = np.nan
@@ -1353,7 +1354,7 @@ def calculate_imaging_weights(
     )  # 2 x chan x pol
 
     # Degrid the weights.
-    for ms_name, ms_xdt in ps_xdt.items():
+    for ms_xdt in ps_xdt.values():
         uvw = ms_xdt[ms_data_group_in["uvw"]].values
         data_weight = ms_xdt[ms_data_group_in["weight"]].values
         data_weight[ms_xdt[ms_data_group_in["flag"]] == 1] = np.nan

@@ -38,7 +38,7 @@ def get_thread_info(client=None):
             from distributed import Client
 
             client = Client.current()
-        except:  # Using default Dask schedular.
+        except Exception:  # Using default Dask schedular.
             import psutil
 
             cpu_cores = psutil.cpu_count()
@@ -54,12 +54,12 @@ def get_thread_info(client=None):
     n_threads = 0
 
     # client.cluster only exists for LocalCluster
-    if client.cluster == None:
+    if client.cluster is None:
         worker_items = client.scheduler_info()["workers"].items()
     else:
         worker_items = client.cluster.scheduler_info["workers"].items()
 
-    for worker_name, worker in worker_items:
+    for _worker_name, worker in worker_items:
         temp_memory_per_thread = (worker["memory_limit"] / worker["nthreads"]) / (
             1024**3
         )
@@ -202,7 +202,7 @@ def calculate_data_chunking(
     dims_names_arr = np.array(dims_names)
 
     if len(dims_names_arr) == 1:
-        n_chunks_dict = dict(zip([dims_names_arr[0]], [n_chunks]))
+        n_chunks_dict = dict(zip([dims_names_arr[0]], [n_chunks], strict=False))
         return n_chunks_dict
     else:
         factors = prime_factors(n_chunks)
@@ -210,9 +210,7 @@ def calculate_data_chunking(
         found_factors = False
 
         while not found_factors:
-
             if len(factors) > len(chunking_dims_sizes):
-
                 n_reduce = len(factors) - len(chunking_dims_sizes)
 
                 for i in range(n_reduce):
@@ -224,11 +222,11 @@ def calculate_data_chunking(
             elif len(factors) < len(chunking_dims_sizes):
                 while len(factors) < len(chunking_dims_sizes):
                     n_chunks = n_chunks + 1
-                    factors = prime_factors(n_chunks_inc)
+                    factors = prime_factors(n_chunks)
             else:
                 found_factors = True
 
         # print(len(chunking_dims_sizes), len(factors), factors)
 
-        n_chunks_dict = dict(zip(dims_names_arr, factors))
+        n_chunks_dict = dict(zip(dims_names_arr, factors, strict=False))
         return n_chunks_dict

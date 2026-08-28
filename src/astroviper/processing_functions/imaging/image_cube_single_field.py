@@ -94,8 +94,8 @@ def imaging_preparation_single_field(
         cycle runs in single precision; the visibilities always stay double
         precision. If ``False`` the image-domain arrays are double precision.
     processing_function_threads : int, optional
-        Number of threads handed to the per-processing-function (C++ / Numba /
-        FFT) kernels.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     fft_backend : str, optional
         FFT backend used by the gridder normalization (``"pyfftw"`` or
         ``"scipy"``).
@@ -103,7 +103,7 @@ def imaging_preparation_single_field(
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
     task_id : int, optional
-        Identifier of the frequency chunk being imaged.
+        Identifier of the parallel chunk being processed.
     Returns
     -------
     controller : IterationController
@@ -250,7 +250,7 @@ def image_cube_single_field(
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     deconvolver : str, optional
         Deconvolution algorithm for the minor cycle. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
-        (numba, threaded across *and* within planes -- faster when there are
+        (C++, threaded across *and* within planes -- faster when there are
         few planes, e.g. single-channel imaging) or ``"asp"``.
     instrument_polarization_basis : str, optional
         Correlation (instrument) polarization basis the gridding is performed in:
@@ -262,8 +262,8 @@ def image_cube_single_field(
         cycle runs in single precision; the visibilities always stay double
         precision. If ``False`` the image-domain arrays are double precision.
     processing_function_threads : int, optional
-        Number of threads handed to the per-processing-function (C++ / Numba /
-        FFT) kernels.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
     fft_backend : str, optional
         FFT backend used by the gridder normalization (``"pyfftw"`` or
         ``"scipy"``).
@@ -275,7 +275,7 @@ def image_cube_single_field(
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
     task_id : int, optional
-        Identifier of the frequency chunk being imaged.
+        Identifier of the parallel chunk being processed.
     Returns
     -------
     img_xds : xarray.Dataset
@@ -499,6 +499,10 @@ def image_cube_single_field(
             image_data_group_in_model_name="model",
             image_data_group_out_restore_name="restored",
             processing_function_threads=processing_function_threads,
+            # The model cube is dead weight after the restore unless it is
+            # written to the output store; let the restore reuse its buffer
+            # instead of allocating a fresh restored cube.
+            consume_model="sky_model" not in image_data_variables_keep,
         )
         accumulate_timing(timing, restore_return_df)
 

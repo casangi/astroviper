@@ -23,13 +23,12 @@ The major-cycle loop continues while *any* plane is still active.
 """
 
 from collections import namedtuple
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 
 from astroviper.processing_functions.imaging.utils.return_dict import (
     FIELD_ACCUM,
-    FIELD_SINGLE_VALUE,
     Key,
     ReturnDict,
 )
@@ -732,8 +731,10 @@ class IterationController:
             self.niter = np.full(needed, self._initial_niter, dtype=int)
             self.stopcode_major = np.full(needed, MAJOR_CONTINUE, dtype=int)
             self.stopcode_minor = np.full(needed, MINOR_CONTINUE, dtype=int)
-        elif any(n > c for n, c in zip(needed, self.niter.shape)):
-            grown = tuple(max(n, c) for n, c in zip(needed, self.niter.shape))
+        elif any(n > c for n, c in zip(needed, self.niter.shape, strict=False)):
+            grown = tuple(
+                max(n, c) for n, c in zip(needed, self.niter.shape, strict=False)
+            )
             sl = tuple(slice(0, d) for d in self.niter.shape)
             for attr, fill in (
                 ("niter", self._initial_niter),
@@ -1415,7 +1416,7 @@ class ConvergencePlots:
         cumulative_iters = np.concatenate([[0], np.cumsum(iter_done_history)])
 
         # Create peak residual curve (left y-axis)
-        peakres_data = list(zip(cumulative_iters, peakres_history))
+        peakres_data = list(zip(cumulative_iters, peakres_history, strict=False))
         peakres_curve = hv.Curve(
             peakres_data, kdims=["Cumulative Iterations"], vdims=["Peak Residual (Jy)"]
         ).opts(
@@ -1426,7 +1427,9 @@ class ConvergencePlots:
 
         # Create model flux curve (right y-axis) if available
         if model_flux_history and any(f is not None for f in model_flux_history):
-            modelflux_data = list(zip(cumulative_iters, model_flux_history))
+            modelflux_data = list(
+                zip(cumulative_iters, model_flux_history, strict=False)
+            )
             modelflux_curve = hv.Curve(
                 modelflux_data,
                 kdims=["Cumulative Iterations"],
@@ -1506,7 +1509,6 @@ class ConvergencePlots:
         # Lazy imports
         try:
             import holoviews as hv
-            import numpy as np
 
             hv.extension("bokeh")
         except ImportError as e:
@@ -1689,7 +1691,7 @@ def format_deconvolve_dict(combined_deconvolve_dict, float_format="{:.6g}"):
                 + [len(c) for c in cycle_labels]
             )
 
-            def row(label, cells):
+            def row(label, cells, cell_w=cell_w, label_w=label_w):
                 padded = " ".join(f"{c:>{cell_w}}" for c in cells)
                 return f"  {label:<{label_w}} : {padded}"
 

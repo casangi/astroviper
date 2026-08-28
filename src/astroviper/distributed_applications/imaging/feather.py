@@ -21,7 +21,6 @@ Zarr v3 compatible.
 import copy
 import os
 import time
-from typing import Union
 
 import numpy as np
 import toolviper.utils.logger as logger
@@ -67,11 +66,11 @@ def feather(
     highres: str,
     lowres: str,
     sdfactor: float = 1.0,
-    selection: dict = {},
+    selection: dict | None = None,
     thread_info=None,
     processing_function_threads: int = 1,
     fft_backend: str = "scipy",
-    compressor=Blosc(cname="lz4", clevel=5),
+    compressor=None,
 ):
     """Create an image from a single dish and interferometer image (feather).
 
@@ -123,6 +122,11 @@ def feather(
         get_thread_info,
     )
     from astroviper.utils.io import create_empty_data_variables_on_disk
+
+    if selection is None:
+        selection = {}
+    if compressor is None:
+        compressor = Blosc(cname="lz4", clevel=5)
 
     # --- Validate output spec -------------------------------------------------
     if outim is None or not isinstance(outim, dict):

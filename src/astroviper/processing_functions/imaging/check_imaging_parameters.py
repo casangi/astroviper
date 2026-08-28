@@ -9,7 +9,6 @@ def check_grid_params(grid_params):
     import numbers
 
     params_passed = True
-    arc_sec_to_rad = np.pi / (3600 * 180)
 
     if not (
         check_params(
@@ -63,7 +62,7 @@ def check_grid_params(grid_params):
     ):
         params_passed = False
 
-    if params_passed == True:
+    if params_passed:
         from astroviper.processing_functions.imaging.utils.fft_sizing import (
             padded_grid_size,
         )
@@ -215,7 +214,7 @@ def check_gcf_params(gcf_params):
             )
             params_passed = False
 
-    if params_passed == True:
+    if params_passed:
         gcf_params["oversampling"] = np.array(gcf_params["oversampling"]).astype(int)
         gcf_params["max_support"] = np.array(gcf_params["max_support"]).astype(int)
         # gcf_params['image_phase_center'] =  np.array(gcf_params['image_phase_center'])
@@ -301,7 +300,6 @@ def check_imaging_weights_params(imaging_weights_params):
     import numbers
 
     params_passed = True
-    arc_sec_to_rad = np.pi / (3600 * 180)
 
     if not (
         check_params(
@@ -378,7 +376,6 @@ def check_pb_params(img_dataset, pb_params):
     import numbers
 
     params_passed = True
-    arc_sec_to_rad = np.pi / (3600 * 180)
 
     # if not(check_params(pb_params, 'pb_name', [str], default='PB')): params_passed = False
 

@@ -117,10 +117,7 @@ class TestPsfWidth:
         yy, xx = np.mgrid[0:ny, 0:nx]
         sx, sy = 2.0, 4.0
         psf = np.exp(
-            -(
-                ((xx - nx // 2) ** 2) / (2 * sx**2)
-                + ((yy - ny // 2) ** 2) / (2 * sy**2)
-            )
+            -(((xx - nx // 2) ** 2) / (2 * sx**2) + ((yy - ny // 2) ** 2) / (2 * sy**2))
         )
         w = aspclean.psf_gaussian_width(np.ascontiguousarray(psf))
         kx = np.ceil(2.0 * np.sqrt(2.0 * np.log(2.0)) * sx)
@@ -202,7 +199,7 @@ class TestClean:
         dirty[40, 50] = 7.0
         model = np.zeros((ny, nx))
         resid = dirty.copy()
-        res = aspclean.clean(
+        aspclean.clean(
             resid,
             psf,
             model,
@@ -348,7 +345,6 @@ class TestCube:
     def _make_cube(self, nt, nf, npol, ny, nx, dtype=np.float64):
         psf = np.zeros((nt, nf, npol, ny, nx), dtype)
         resid = np.zeros((nt, nf, npol, ny, nx), dtype)
-        rng = np.random.default_rng(3)
         single_psf = _centered_psf(nx, ny, 2.0, dtype)
         for t in range(nt):
             for f in range(nf):

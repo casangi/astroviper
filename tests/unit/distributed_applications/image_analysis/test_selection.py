@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import math
 import os
-import re
 from pathlib import Path
 
 import dask.array as da
@@ -219,7 +218,7 @@ class TestExpressions:
         roi = select_mask(da, "circle[[32pix,32pix], 10pix]")
         bad = select_mask(da, "box[[0pix,0pix],[10pix,63pix]]")
         expr = "roi & -bad"  # using '-' instead of '~'
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             select_mask(da, select=expr, mask_source={"roi": roi, "bad": bad})
 
     def test_expression_unknown_name_keyerror_lists_available(self) -> None:
@@ -555,7 +554,7 @@ class TestApplySelect:
     def test_full_image_box_selects_all_pixels(self) -> None:
         ny, nx = 32, 48
         da = make_image(ny, nx)
-        s = f"box[[0pix,0pix],[{nx-1}pix,{ny-1}pix]]"
+        s = f"box[[0pix,0pix],[{nx - 1}pix,{ny - 1}pix]]"
         m = select_mask(da, select=s)
         assert int(m.values.sum()) == ny * nx
 
@@ -720,13 +719,12 @@ class TestSmartSplitPairs:
         ann = f"annulus[[{cx}pix,{cy}pix], [ {r1}pix, {r2}pix]]   "
         m_ann = select_mask(da, select=ann)
         m_outer = select_mask(da, select=f"circle[[{cx}pix,{cy}pix], {r2}pix]")
-        m_inner = select_mask(da, select=f"circle[[{cx}pix,{cy}pix], {r1}pix]")
         # Annulus includes the inner boundary (>= r1), while (outer & ~inner)
         # excludes it. Instead of equality, assert subset relations:
         # 1) Annulus is a subset of the outer circle
         assert bool((m_ann & ~m_outer).values.any()) is False
         # 2) A strict ring (outer minus a slightly smaller inner) is contained in annulus
-        m_inner_grow = select_mask(da, select=f"circle[[{cx}pix,{cy}pix], {r1+1}pix]")
+        m_inner_grow = select_mask(da, select=f"circle[[{cx}pix,{cy}pix], {r1 + 1}pix]")
         m_ring_subset = m_outer & ~m_inner_grow
         assert bool((m_ring_subset & ~m_ann).values.any()) is False
 
@@ -993,14 +991,11 @@ class TestReturnKinds:
         assert out.dtype == bool and out.shape == (ny, nx)
         # We don't assert exact chunking (implementation-defined fallback), only that it succeeded
 
-    def test_dataarray_numpy_else_branch_creation_attached_and_printed(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_dataarray_numpy_else_branch_creation_attached_and_printed(self) -> None:
         """
         Cover the else-branch in _coerce_return_kind for return_kind='dataarray-numpy':
             da_out = xr.DataArray(arr, dims=dims, coords=coords)
             if creation is not None:
-                print("********** covered *********")
                 da_out = da_out.assign_attrs({"creation": creation})
         Use ndarray `data` and ndarray `select` so the aligned mask is a NumPy array
         (not an xarray.DataArray), forcing the targeted branch.
@@ -1013,8 +1008,6 @@ class TestReturnKinds:
         out = select_mask(
             data, select=mask_np, return_kind="dataarray-numpy", creation_hint=hint
         )
-        # Assert printed marker from the covered branch
-        captured = capsys.readouterr()
         # Validate return object and attached creation attribute
         assert isinstance(out, xr.DataArray)
         assert out.dtype == bool and out.shape == (ny, nx)
@@ -1279,11 +1272,6 @@ class TestCombineWithCreationAPI:
             a, "|", b, return_kind="dataarray-dask", dask_chunks=chunks
         )
         assert isinstance(out, xr.DataArray) and hasattr(out.data, "chunks")
-        # chunks may be normalized into tuples-of-tuples by dask
-        got = tuple(
-            sum(([int(c) for c in ch] if isinstance(ch, tuple) else [int(ch)],), [])
-            for ch in out.data.chunks
-        )
         # Flatten each axis chunking and compare the sizes set (normalize expected to tuple)
         exp0 = tuple(
             [chunks[0]] * (ny // chunks[0])
@@ -2172,11 +2160,7 @@ class TestCrtfGlobalsAndOverrides:
         """When both global and per-line specify the same key, per-line wins."""
         sky = self._sky()
         # Global says I,Q,U,V (all); per-line restricts to just I.
-        crtf = (
-            "#CRTF\n"
-            "global corr=[I,Q,U,V]\n"
-            "box[[0pix,0pix],[19pix,19pix]] corr=[I]"
-        )
+        crtf = "#CRTF\nglobal corr=[I,Q,U,V]\nbox[[0pix,0pix],[19pix,19pix]] corr=[I]"
         mask = select_mask(sky, crtf)
         pol_any = mask.any(dim=["time", "frequency", "l", "m"])
         selected = list(sky.coords["polarization"].values[pol_any.values])
@@ -2450,9 +2434,9 @@ class TestCrtfWorldMode:
         ra = self._RA0_DEG
         crtf = (
             "#CRTF\n"
-            f"poly[[{ra - 2/3600:.6f}deg,{dec - 2/3600:.6f}deg],"
-            f"[{ra + 2/3600:.6f}deg,{dec - 2/3600:.6f}deg],"
-            f"[{ra:.6f}deg,{dec + 3/3600:.6f}deg]] coordsys=world"
+            f"poly[[{ra - 2 / 3600:.6f}deg,{dec - 2 / 3600:.6f}deg],"
+            f"[{ra + 2 / 3600:.6f}deg,{dec - 2 / 3600:.6f}deg],"
+            f"[{ra:.6f}deg,{dec + 3 / 3600:.6f}deg]] coordsys=world"
         )
         mask = select_mask(sky, crtf)
         assert mask.values.any()

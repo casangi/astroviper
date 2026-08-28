@@ -179,41 +179,84 @@ def _decode_unit(raw, shape, dtype, meta):
     return np.frombuffer(buf, dtype=dtype).reshape(shape, order=meta.get("order", "C"))
 
 
-def _read_shard_index(fd, file_size, meta, inner_per_shard):
+def _read_shard_index(fd, file_size, meta, inner_per_shard, path=""):
     """Read just a shard's inner-chunk byte index (its small header/footer).
 
     Returns a flat tuple of ``(offset, nbytes)`` pairs in C-order over the
     inner-chunk grid.  Only the index bytes are read -- not the chunk data --
     so a task that wants one channel does not pull the whole shard off disk.
+
+    A file smaller than its index, or a short ``pread`` of the index (Lustre
+    can return fewer bytes than requested WITHOUT raising during an eviction
+    window; both are also the signature of a truncated shard), raises
+    ``OSError(EIO)`` so :func:`_retry_transient_io` retries the whole shard
+    with a fresh descriptor; persistent truncation exhausts the schedule and
+    surfaces naming the file.
     """
     sh = meta["sharding"]
     n_inner = int(np.prod(inner_per_shard))
     has_crc = any(c["name"] == "crc32c" for c in sh.get("index_codecs", []))
     index_nbytes = n_inner * 16 + (4 if has_crc else 0)
+    if file_size < index_nbytes:
+        raise OSError(
+            errno.EIO,
+            f"shard {path or fd} smaller than its index "
+            f"({file_size} < {index_nbytes} bytes)",
+        )
     if sh.get("index_location", "end") == "start":
         index_blob = os.pread(fd, index_nbytes, 0)
     else:
         index_blob = os.pread(fd, index_nbytes, file_size - index_nbytes)
+    if len(index_blob) != index_nbytes:
+        raise OSError(
+            errno.EIO,
+            f"short read of shard index of {path or fd} "
+            f"({len(index_blob)}/{index_nbytes} bytes)",
+        )
     if has_crc:
         index_blob = index_blob[:-4]
     return struct.unpack("<" + "Q" * (2 * n_inner), index_blob)
 
 
-def _read_inner_chunk(fd, offsets, flat, inner_shape, sharding_cfg, dtype):
+def _read_inner_chunk(fd, offsets, flat, inner_shape, sharding_cfg, dtype, path=""):
     """``pread`` + decode one inner chunk (``flat`` C-order index) from a shard.
 
     Reads only that inner chunk's byte range from ``fd``; returns ``None`` for
     an empty (all-fill) inner chunk so the caller can fill it.  ``os.pread`` is
     positional -- it does not use or move the shared file offset -- so several
     threads may read disjoint inner chunks from the same ``fd`` concurrently.
+
+    A short ``pread`` (Lustre can return fewer bytes than requested WITHOUT
+    raising during an eviction window; an index entry pointing past EOF reads
+    short too) and a blob that fails to decode/reshape both raise
+    ``OSError(EIO)`` naming the shard and inner chunk, so
+    :func:`_retry_transient_io` retries the whole shard with a fresh
+    descriptor. Genuine on-disk corruption fails every attempt and surfaces as
+    that labeled error -- previously it escaped as a bare, unattributable,
+    never-retried ``Zstd decompression error: invalid input data`` (jobs
+    7861335 + 2026-07-20).
     """
     off = offsets[2 * flat]
     nbytes = offsets[2 * flat + 1]
     if off == _UINT64_MAX or nbytes == _UINT64_MAX:
         return None  # empty inner chunk -> caller fills
+    blob = os.pread(fd, nbytes, off)
+    if len(blob) != nbytes:
+        raise OSError(
+            errno.EIO,
+            f"short read of inner chunk {flat} of {path or fd} "
+            f"({len(blob)}/{nbytes} bytes at offset {off})",
+        )
     after = [c for c in sharding_cfg["codecs"] if c["name"] != "bytes"]
-    buf = _decode_bytes_bytes(os.pread(fd, nbytes, off), after)
-    return np.frombuffer(buf, dtype=dtype).reshape(inner_shape)
+    try:
+        buf = _decode_bytes_bytes(blob, after)
+        return np.frombuffer(buf, dtype=dtype).reshape(inner_shape)
+    except Exception as exc:
+        raise OSError(
+            errno.EIO,
+            f"decode of inner chunk {flat} of {path or fd} failed "
+            f"(offset {off}, {nbytes} bytes): {exc!r}",
+        ) from exc
 
 
 def _axis_overlaps(start, stop, csize):
@@ -299,12 +342,12 @@ def read_array_region(array_path, sel):
                     return
                 try:
                     offsets = _read_shard_index(
-                        fd, os.fstat(fd).st_size, meta, inner_per_shard
+                        fd, os.fstat(fd).st_size, meta, inner_per_shard, path
                     )
                     for within, out_sl, in_sl in items:
                         flat = int(np.ravel_multi_index(within, inner_per_shard))
                         arr = _read_inner_chunk(
-                            fd, offsets, flat, inner, meta["sharding"], dtype
+                            fd, offsets, flat, inner, meta["sharding"], dtype, path
                         )
                         out[out_sl] = fill if arr is None else arr[in_sl]
                 finally:
@@ -322,19 +365,29 @@ def read_array_region(array_path, sel):
         path = _chunk_path(array_path, meta, ci)
 
         # Absent chunk (never written) detected via ENOENT, not an exists()
-        # pre-check -- see the sharded branch for why.
+        # pre-check -- see the sharded branch for why. The decode runs INSIDE
+        # the retried unit as OSError(EIO), so a blob that fails to decode
+        # (stale/short page content during an eviction window, or real
+        # corruption) is re-read fresh and, if persistent, surfaces naming the
+        # chunk file instead of as a bare decompression error.
         def _read_chunk(path=path):
             try:
                 with open(path, "rb") as fh:
-                    return fh.read()
+                    raw = fh.read()
             except FileNotFoundError:
                 return None
+            try:
+                return _decode_unit(raw, oc, dtype, meta)
+            except Exception as exc:
+                raise OSError(
+                    errno.EIO,
+                    f"decode of chunk {path} failed ({len(raw)} bytes): {exc!r}",
+                ) from exc
 
-        raw = _retry_transient_io(f"chunk {path}", _read_chunk)
-        if raw is None:
+        arr = _retry_transient_io(f"chunk {path}", _read_chunk)
+        if arr is None:
             out[out_sl] = fill
             continue
-        arr = _decode_unit(raw, oc, dtype, meta)
         out[out_sl] = arr[tuple(slice(c[1], c[2]) for c in combo)]
     return out, dims
 
@@ -511,9 +564,7 @@ def _encode_chunk_blob(chunk, meta):
                     cname=cfg.get("cname", "lz4"),
                     clevel=cfg.get("clevel", 5),
                     shuffle=_BLOSC_SHUFFLE.get(cfg.get("shuffle"), 1),
-                ).encode(
-                    b
-                )  # ndarray -> correct typesize for shuffle
+                ).encode(b)  # ndarray -> correct typesize for shuffle
             elif name in ("gzip", "gz"):
                 out = numcodecs.GZip(level=cfg.get("level", 5)).encode(out)
             elif name == "crc32c":
@@ -954,9 +1005,12 @@ def _pwrite_shard_slot_with_eio_retry(shard_path, slot_offset, index_offset, blo
     stays poisoned, so retrying on the same fd cannot succeed. Redoing both
     pwrites after a partial failure is safe -- same bytes at the same disjoint
     offsets (idempotent), and the index entry is written last, so a reader
-    never sees an index pointing at an unwritten blob. Only the transient
-    eviction errnos (``_TRANSIENT_IO_ERRNOS``) are retried; every other error
-    propagates immediately.
+    never sees an index pointing at an unwritten blob. The ``os.close`` is part
+    of the retried unit too: an eviction can surface a failed writeback as EIO
+    at close() after apparently-successful pwrites (observed: Frontera job
+    7860369), and then the data may not be durable. Only the transient eviction
+    errnos (``_TRANSIENT_IO_ERRNOS``) are retried; every other error propagates
+    immediately.
     """
     import time
 
@@ -986,24 +1040,38 @@ def _pwrite_shard_slot_with_eio_retry(shard_path, slot_offset, index_offset, blo
         try:
             os.pwrite(fd, blob, slot_offset)
             os.pwrite(fd, struct.pack("<QQ", slot_offset, len(blob)), index_offset)
-            if attempt:
-                logger.warning(
-                    f"sharded writer: pwrite to {shard_path} succeeded on "
-                    f"attempt {attempt + 1} after transient I/O error."
-                )
-            return
         except OSError as exc:
-            if exc.errno not in _TRANSIENT_IO_ERRNOS:
-                raise
-            last_exc = exc
-            logger.warning(
-                f"sharded writer: {errno.errorcode.get(exc.errno, exc.errno)} "
-                f"writing slot at offset {slot_offset} of {shard_path} (attempt "
-                f"{attempt + 1}/{1 + len(_EIO_RETRY_BACKOFF_SECONDS)}); "
-                "reopening and retrying."
-            )
-        finally:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                pass  # the write already failed; a close error adds nothing
+            failure = exc
+        else:
+            try:
+                # close() is part of the retried unit: during an eviction
+                # window it can surface a failed writeback as EIO even though
+                # the pwrites above "succeeded", in which case the data may not
+                # be durable and the whole slot write must be redone. Linux
+                # releases the fd even when close() errors, so no second close.
+                os.close(fd)
+            except OSError as exc:
+                failure = exc
+            else:
+                if attempt:
+                    logger.warning(
+                        f"sharded writer: pwrite to {shard_path} succeeded on "
+                        f"attempt {attempt + 1} after transient I/O error."
+                    )
+                return
+        if failure.errno not in _TRANSIENT_IO_ERRNOS:
+            raise failure
+        last_exc = failure
+        logger.warning(
+            f"sharded writer: {errno.errorcode.get(failure.errno, failure.errno)} "
+            f"writing slot at offset {slot_offset} of {shard_path} (attempt "
+            f"{attempt + 1}/{1 + len(_EIO_RETRY_BACKOFF_SECONDS)}); "
+            "reopening and retrying."
+        )
     raise last_exc
 
 
@@ -1227,7 +1295,7 @@ def record_shard_ost_map(zarr_store, array_names, out_path=None):
         )
         return None
 
-    for row, path in zip(rows, abs_paths):
+    for row, path in zip(rows, abs_paths, strict=False):
         info = stripe_info.get(path, {})
         osts = info.get("ost_indices", [])
         row["ost_index"] = osts[0] if osts else None

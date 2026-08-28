@@ -1,6 +1,6 @@
 # AGENTS.md — AstroVIPER
 
-> A guide for developers and AI agents to developing code in AstroVIPER.
+> A guide for developers and AI agents for developing code in AstroVIPER.
 
 ---
 
@@ -12,15 +12,17 @@
 | Package | Role | Repo |
 | --- | --- | --- |
 | **ToolVIPER** | Logging, parameter checking, and Dask cluster tools | https://github.com/casangi/toolviper |
-| **XRADIO** | I/O + data model: Processing Sets(MS v4), image datasets, calibration datasets, schema, accessors | https://github.com/casangi/xradio |
+| **XRADIO** | I/O + data model: Processing Sets (MS v4), image datasets, calibration datasets, schema, accessors | https://github.com/casangi/xradio |
 | **GraphVIPER** | Concurrency: builds & runs Dask MapReduce graphs | https://github.com/casangi/graphviper |
 | **AstroVIPER** (this repo) | Science: flagging, calibration, imaging, image analysis, visibility manipulation, simulation | https://github.com/casangi/astroviper |
 | **FlowVIPER** | Data-processing workflows built from AstroVIPER's distributed applications | https://github.com/casangi/flowviper |
 
 Note that all the packages are still under development and functionality is not complete.
 
-- **Language**: Python `>=3.11,<3.14`, with performance-critical kernels in **C++23** (via pybind11).
-- **Data model**: everything is `xarray` (`DataArray` / `Dataset` /`DataTree`), persisted as **Zarr**.
+- **Language**: Python (supported versions: `requires-python` in
+  [`pyproject.toml`](pyproject.toml)), with performance-critical kernels in C++
+  (standard & compiler floor: [`cmake/AstroviperPybind.cmake`](cmake/AstroviperPybind.cmake)).
+- **Data model**: everything is `xarray` (`DataArray` / `Dataset` /`DataTree`).
 
 ## 2. Setup, Build & Test Commands
 
@@ -28,77 +30,28 @@ This package ships **compiled C++ extensions**, so it is **not** pure Python —
 the build system is `scikit-build-core` + `pybind11` + CMake.
 
 ### Install (developer)
-```bash
-git clone git@github.com:casangi/astroviper.git
-cd astroviper
-pip install -e '.[all]'     # builds the C++ extensions; '[all]' adds test/docs/interactive deps
-pre-commit install          # installs black + nbstripout git hooks
-```
-- **macOS**: install casacore via conda *first*, because `pip install
-  python-casacore` does not work on macOS:
-  ```bash
-  conda install -c conda-forge python-casacore
-  ```
-  This is only needed if you will be converting MSv2s to MSv4s or opening CASA images.
-- **After editing any `.cpp` / `.hpp` / `CMakeLists.txt`** you must rebuild for
-  the change to take effect (the C++ is compiled at install time):
-  ```bash
-  pip install -e '.[all]'   # or: pip install .
-  ```
-  `scikit-build-core` caches in `build/{wheel_tag}/`; if a build behaves oddly,
-  delete `build/` and reinstall. The -e creates an editable Python installation.
+See [README.md](README.md) for instructions.
 
-**All shared compiler settings live in one file: [`cmake/AstroviperPybind.cmake`](cmake/AstroviperPybind.cmake).**
-It finds `pybind11`/`Threads` once and defines:
-- an `INTERFACE` target `astroviper_cpp_flags` carrying the C++ standard
-  (`cxx_std_23`, strict — extensions off), the **`-ffp-contract=off`**
-  reproducibility flag (see [the memory contract](#6-the-python--c-memory-contract);
-  bit-identical IEEE-754 across compilers/arches — do not remove), `-stdlib=libc++`
-  for Clang, the `VERSION_INFO` define, and a `Threads::Threads` link; and
-- a helper `astroviper_add_pybind_module(NAME … SOURCES … [INCLUDE_DIRS …]
-  [DESTINATION …])` that creates the module, wires `include/`, applies the shared
-  flags, and installs it (`INCLUDE_DIRS` defaults to `include`; `DESTINATION`
-  defaults to the module's path relative to `src/`).
-
-To **change a flag for every kernel**, edit `cmake/AstroviperPybind.cmake` — and
-only that file. Optimization level / `-fPIC` are left to CMake's build type
-(`build-type=Release` is pinned in `pyproject.toml`); don't hand-roll `-O3`.
-
-Each module's `CMakeLists.txt` is ~3 lines: an `astroviper_add_pybind_module(...)`
-call, preceded by a small standalone-build bootstrap block. The root
-`CMakeLists.txt` only `include()`s the shared module and `add_subdirectory()`s
-each one. A single kernel can also be **built on its own** for fast iteration —
-`cmake -S <module_dir> -B build && cmake --build build` — and it picks up the
-exact same flags (the module finds and includes the shared file itself).
-
-### Build type (Release / Debug)
-`CMAKE_BUILD_TYPE` is set via `build-type` in `[tool.scikit-build.cmake]` of
-`pyproject.toml` (pinned to `Release`). It is the **only** lever for the
-optimization/debug flags — the shared cmake file deliberately leaves opt-level to
-CMake. The reproducibility/standard flags (`-std=c++23`, `-ffp-contract`,
-`-stdlib=libc++`, threads, `VERSION_INFO`) apply for **every** build type.
-
-| `build-type` | Flags | Notes |
-| --- | --- | --- |
-| `Release` | `-O3 -DNDEBUG` | default; asserts **off** |
-| `Debug` | `-g` (i.e. `-O0`) | asserts + pybind11 bounds checks **on** |
-| `RelWithDebInfo` | `-O2 -g -DNDEBUG` | profiling with symbols |
-| `MinSizeRel` | `-Os -DNDEBUG` | smallest binary |
-
-Override for a single build without editing `pyproject.toml` (keeps `Release` as
-the committed default):
-```bash
-pip install -e . --no-build-isolation --config-settings=cmake.build-type=Debug
-# or, equivalently, via the SKBUILD_<dotted-key-uppercased> env var:
-SKBUILD_CMAKE_BUILD_TYPE=Debug pip install -e . --no-build-isolation
-```
-If a switch behaves oddly (stale cache), `rm -rf build` first —
-`CMAKE_BUILD_TYPE` is cached per `build/{wheel_tag}/`.
+### C++ build configuration (documented at the source — not duplicated here)
+- **Compiler flags, C++ standard, toolchain floor, per-module build**: all
+  shared compiler settings for every kernel live in one file,
+  [`cmake/AstroviperPybind.cmake`](cmake/AstroviperPybind.cmake), and its
+  comments are the authoritative documentation (the `astroviper_cpp_flags`
+  target, the `astroviper_add_pybind_module(...)` helper, the standalone
+  single-kernel build, and the **`-ffp-contract=off`** reproducibility flag —
+  see [the memory contract](#6-the-python--c-memory-contract); do not remove
+  it). To change a flag for every kernel, edit that file — and only that file.
+- **Build type (Release / Debug / …)**: set solely via `build-type` in
+  `[tool.scikit-build.cmake]` of [`pyproject.toml`](pyproject.toml). The
+  comment block above that key is the authoritative documentation: the flags
+  each build type implies, how to override for a single build without editing
+  the file, and the stale-cache fix. Optimization level / `-fPIC` are left to
+  CMake's build type; don't hand-roll `-O3` in cmake.
 
 ### Tests (pytest)
 ```bash
 pytest tests/unit             # unit tests (fast; mirror src/ layout)
-pytest tests/component     # end-to-end science validation (slower, downloads data)
+pytest tests/component        # end-to-end science validation (slower, downloads data)
 pytest tests                  # everything
 pytest --cov=astroviper tests # with coverage
 ```
@@ -111,10 +64,12 @@ pytest --cov=astroviper tests # with coverage
 - **Add or update tests for any code you change**, even if not asked.
 
 ### Formatting / pre-commit (required before committing)
-- **Black** is the formatter. CI fails on unformatted code.
-- **isort** orders imports, configured with `profile = "black"` in
-  `pyproject.toml` (required: without it isort and black rewrite each other's
-  output forever). `pyupgrade` (py311+) and `absolufy-imports` also run.
+- **Ruff** is the formatter (`ruff format`, black-compatible) and the linter
+  (`ruff check --fix`): import sorting plus pyflakes (undefined names, unused
+  imports/variables), pycodestyle errors, bugbear, and pyupgrade rules — the
+  authoritative rule list lives in `[tool.ruff.lint]` of
+  [`pyproject.toml`](pyproject.toml). CI fails on unformatted code and lint
+  errors. `pyupgrade` (py311+) and `absolufy-imports` also run.
 - `nbstripout` strips notebook outputs (keeps diffs small, repo light).
 - If pre-commit rewrites files, **re-stage** them and commit again.
 
@@ -154,7 +109,7 @@ Notebooks must stay **output-stripped** (`nbstripout`) and
 AstroVIPER is organized into four layers. **Calls only ever go downward or horizontally**
 (distributed_applications → node_tasks → processing_functions → utils); never call upward. Note that
 a layer can call any layer lower than itself for example distributed_applications can call processing_functions
-and a layer can call horizontally for example a processing_function can call another processing_functions.
+and a layer can call horizontally for example a processing_function can call another processing_function.
 
 ```
 src/astroviper/
@@ -168,8 +123,11 @@ src/astroviper/
 └── utils/                (4) Helpers: data_group_tools, io, data_partitioning, check_params, …
 ```
 
-Each of layers 1–3 is further split by **subdomain** (mirrored across the
-layers): `imaging`, `image_analysis`, `flagging`, `visibility_manipulation`, `calibration` , `simulation`.
+Each of layers 1–3 is further split by **subdomain**, mirrored across the
+layers where implemented (not every subdomain exists in every layer yet):
+`imaging`, `image_analysis`, `flagging`, `visibility_manipulation`,
+`calibration`, `model`. Additional **subdomains** (e.g. `simulation`) can be
+added in the future.
 
 ### Layer responsibilities & boundaries
 1. **`distributed_applications/`** — Constructs `parallel_coords`, maps a `node_task`
@@ -191,13 +149,14 @@ layers): `imaging`, `image_analysis`, `flagging`, `visibility_manipulation`, `ca
 4. **`utils/`** — Cross-cutting helpers. Most important:
    `utils/data_group_tools.py` (data-group bookkeeping — read it before touching
    data groups) and `utils/io.py` (Zarr variable definitions + chunk writers).
+   The io.py will eventually move to XRADIO.
 
 ### Public API surface
 Each layer/subdomain re-exports its entry points via `__init__.py`. The imaging
 entry point is exposed at all three layers as `image_cube_single_field`:
 ```python
 import astroviper.distributed_applications as distributed_applications
-distributed_applications.imaging.image_cube_single_field(...)   # user-facing driver
+distributed_applications.imaging.image_cube_single_field(...)
 ```
 
 ---
@@ -250,19 +209,10 @@ overwriting. It is a dict stored at `xds.attrs["data_groups"]` and here is an MS
 ms_xds.attrs["data_groups"] = {
   "base":    {"correlated_data": "VISIBILITY",           "flag": "FLAG", "weight": "WEIGHT",         "uvw": "UVW"},
   "imaging": {"correlated_data": "VISIBILITY_CORRECTED", "flag": "FLAG", "weight": "WEIGHT_IMAGING", "uvw": "UVW"},
-  "model": {"correlated_data": "VISIBILITY_MODEL", "flag": "FLAG", "weight": "WEIGHT_IMAGING", "uvw": "UVW"},
+  "model": {"correlated_data": "VISIBILITY_MODEL", "uvw": "UVW"},
+  "calibrated": {"correlated_data": "VISIBILITY_CORRECTED", "flag": "FLAG_CORRECTED", "weight": "WEIGHT_CORRECTED", "uvw": "UVW"}
 }
 ```
-- **Keys = logical roles** (lowercase): `correlated_data`, `flag`, `weight`,
-  `uvw` (visibility side); `sky`, `visibility`, `point_spread_function`,
-  `primary_beam`, `mask`, `uv_sampling`, … (image side). Plus metadata keys
-  `date` and `description`.
-- **Values = data-variable names** (UPPERCASE). Groups may share variables
-  (above, `base` and `imaging` share `FLAG`/`UVW`).
-- A new version of a variable is the standard name + `_` + a descriptor, e.g.
-  `VISIBILITY` → `VISIBILITY_PHASE_SHIFTED`, `VISIBILITY_MODEL`,
-  `VISIBILITY_RESIDUAL`; `SKY` → `SKY_RESIDUAL`, `SKY_MODEL`.
-
 
 Here is an image example (image-side roles):
 ```python
@@ -276,6 +226,17 @@ img_xds.attrs["data_groups"] = {
 }
 ```
 
+- **Keys = logical roles examples** (lowercase): `correlated_data`, `flag`, `weight`,
+  `uvw`; `sky`, `visibility`, `point_spread_function`,
+  `primary_beam`, `mask`, `uv_sampling`, … (image side). Plus metadata keys
+  `date` and `description`.
+- **Values = data-variable names** (UPPERCASE). Groups may share variables
+  (above, `base` and `imaging` share `FLAG`/`UVW`).
+- A new version of a variable is the standard name + `_` + a descriptor, e.g.
+  `VISIBILITY` → `VISIBILITY_PHASE_SHIFTED`, `VISIBILITY_MODEL`,
+  `VISIBILITY_RESIDUAL`; `SKY` → `SKY_RESIDUAL`, `SKY_MODEL`.
+
+Not all keys need to be present for a given data group, and additional keys can be added as needed, but must be added to the schema in XRADIO. For example, the MSv4 data group model  does not have the key weight.
 
 ### Always use the tooling in `utils/data_group_tools.py`
 Do **not** mutate `attrs["data_groups"]` by hand. The standard two-step pattern
@@ -324,7 +285,7 @@ vocabulary so call sites read consistently:
 | `ms_data_group_in_name` / `ms_data_group_out_name` | measurement set | input / output group name |
 | `image_data_group_in_name` / `image_data_group_out_name` | image dataset | input / output group name |
 | `ms_data_group_out_modified` / `image_data_group_out_modified` | — | dict of role → new data-variable name for the output group |
-| `processing_set_data_group_name` | processing set | the (input) group name applied across **every** MS in a processing set — used by the drivers/node tasks that operate on a whole `ps_xdt` |
+| `processing_set_data_group_name` | processing set | the (input) group name applied across **every** MS in a processing set — used by the node tasks that operate on a whole `ps_xdt` |
 
 - Use `image_data_group_*`; use the explicit `_in_`/`_out_` split
   (not a single bare `..._data_group_name`).
@@ -343,33 +304,31 @@ vocabulary so call sites read consistently:
 ## 6. The Python ↔ C++ Memory Contract
 
 > **This is the most important performance/correctness rule in the repo.** It
-> applies to all pybind11 kernels (gridder, degridder, Hogbom, ASP).
+> applies to all pybind11 kernels (gridder, degridder, imaging weights, Hogbom,
+> ASP).
 
 **Python always owns and controls large-array memory. C++ is given pointers to
 read/write Python-owned NumPy buffers in place. No unnecessary copies are ever
 made.** Concretely, the bindings (`.../python/bindings.cpp`) follow these rules —
 match them in any new kernel:
 
-1. **Large arrays: typed without `forcecast`.** Declared as
+1. **Arrays: typed without `forcecast`.** Declared as
    `py::array_t<T, py::array::c_style>` (e.g. `complex128`, `float64`,
    `int64`). With no `forcecast`, a wrong dtype/layout raises immediately
    instead of silently allocating a converted copy. **Never add `forcecast` to a
    large array.**
-2. **Tiny arrays may keep `forcecast`.** Only genuinely small ones (`n_uv`,
-   `delta_lm` — 2 elements) use `c_style | forcecast` so callers aren't forced
-   to match an exact int width.
-3. **Explicit checks before compute**: verify `ndim`/shape, require
+2. **Explicit checks before compute**: verify `ndim`/shape, require
    C-contiguity (`require_c_contiguous(...)` — tells the caller to use
    `np.ascontiguousarray()` if needed), and for outputs require writeability
    (raise if `info.readonly` / `!arr.writeable()` — message: "modified in
    place").
-4. **In-place output.** Accumulators (`grid`, `normalization`) and CLEAN buffers
+3. **In-place output.** Accumulators (`grid`, `normalization`) and CLEAN buffers
    (residual/model cubes) are written through `mutable_data()` pointers; they
    are *not* returned. Repeated calls accumulate (e.g. summing over MSes).
-5. **Release the GIL during compute**: capture raw pointers, then
+4. **Release the GIL during compute**: capture raw pointers, then
    `py::gil_scoped_release release;` around the heavy loop. The NumPy buffers
    stay valid because Python owns them.
-6. **No implicit complex narrowing.** The gridder's `grid`/`normalization` and
+5. **No implicit complex narrowing.** The gridder's `grid`/`normalization` and
    the degridder's `grid`/`vis_data` are taken as untyped `py::array` precisely
    so pybind11 cannot safe-cast a `complex64` buffer into a `complex128`
    temporary (which would silently drop the caller's writes). The bindings
@@ -378,22 +337,11 @@ match them in any new kernel:
    float type; visibilities stay `complex128`), and the degridder reads a
    `complex64`/`complex128` grid and writes `complex64`/`complex128`
    visibilities in place — all four combinations are explicitly instantiated.
-7. **Threading inside the kernel** is via a `processing_function_threads` argument →
+6. **Threading inside the kernel** is via a `processing_function_threads` argument →
    `std::thread` workers; `processing_function_threads <= 0` falls back to
    `std::thread::hardware_concurrency()`, `1` runs serial. Concurrent writes to
    shared grid cells use lock-free `std::atomic_ref<double>` adds (C++20) —
    `complex<double>` is added as two `double` lanes.
-
-### Numba equivalent
-Numba kernels follow the same memory philosophy: decorate with
-`@jit(nopython=True, cache=True, nogil=True)` and **modify arrays in place**
-(`grid`, `normalization`, …). `nogil=True` lets them run under Dask threads.
-
-### Two levels of parallelism (don't conflate them)
-- **Across chunks**: the Dask graph (GraphVIPER) — one task per chunk.
-- **Within a task**: `processing_function_threads`, passed down unchanged from
-  the driver to the C++/Numba kernels (the same parameter name at every layer
-  of the stack).
 
 ---
 
@@ -411,13 +359,21 @@ GraphVIPER is a Dask MapReduce layer. The flow used by AstroVIPER:
    Maps each graph node → `{chunk_indices, parallel_dims, data_selection,
    task_coords}`.
 3. **`map(input_data, node_task_data_mapping, node_task, input_params, ...)`** —
-   builds the map stage. A `node_task` must take **a single dict** and return
-   **a single value**.
-4. **`reduce(viper_graph, reduce_fn, input_params, mode="tree"|"single_node")`** —
-   `reduce_fn(input_data, input_params)`.
+   builds the map stage.
+4. **`reduce(viper_graph, reduce_fn, input_params,
+   mode="tree"|"single_node"|"tree_n")`** — `reduce_fn(input_data,
+   input_params)`. `"tree"` is a binary tree, `"single_node"` reduces
+   everything in one task, and `"tree_n"` is the variable-arity tree
+   (`n_batch` inputs per reduce task).
 5. `generate_dask_workflow(viper_graph)` → `dask.compute(...)`.
 
 When applicable multiple instances of map-reduce can be done in a single distributed_application.
+
+### Two levels of parallelism (don't conflate them)
+- **GraphVIPER Map-Reduce**: Distributed parallelism using Dask or MPI
+- **Within a task**: `processing_function_threads`, passed down unchanged from
+  distributed_applications to the C++ kernels (the same parameter name at every layer of the
+  stack).
 
 ### Why this design (do not regress it)
 GraphVIPER deliberately **loads data inside compute nodes** rather than as
@@ -452,20 +408,20 @@ per-variable nodes.
     docs — matching `residual_cycle_cube_single_field` /
     `model_update_cycle_cube_single_field`. A one-time "(CASA's major/minor
     cycle)" parenthetical for orientation is fine.
-- **Formatting**: **Black** (enforced by CI + pre-commit). Don't hand-format.
+- **Formatting**: **Ruff** (enforced by CI + pre-commit). Don't hand-format.
 - **Imports**: prefer **absolute** imports (`from
   astroviper.processing_functions.imaging.residual_cycle import ...`). Relative
   imports appear only as short re-exports in `__init__.py` files. Heavy/optional
   deps (dask, zarr, matplotlib, the C++ ext, even numpy in some hot node-task
   paths) are frequently imported **inside functions** to keep worker import time
   and graph-serialization cost low — follow the local pattern in the file you're
-  editing.
+  editing. No * imports.
 - **Docstrings**: **NumPy-style** for all functions/classes (see
   `data_group_tools.py` and `add_visibility_grid.py` for exemplars — Parameters,
   Returns, Raises, See Also).
 - **Shared parameter docs (`astroviper.utils.param_docs`) — the rule for
   repeated APIs**: when the same parameter is spelled out in more than one
-  public function (the common case: the driver, node task, and processing
+  public function (the common case: the distributed applications, node task, and processing
   function of one feature all declaring `image_params`,
   `processing_function_threads`, …), its description must **not** be
   hand-copied between docstrings. Instead:
@@ -476,13 +432,13 @@ per-variable nodes.
      (`from astroviper.utils.param_docs import shares_param_docs`) and make
      sure the file is listed in `_target_files()` in `utils/param_docs.py`.
   3. Run `python -m astroviper.utils.param_docs sync` to rewrite the source
-     docstrings, then re-run black. `... param_docs check` runs in pre-commit
-     and CI and fails on drift.
+     docstrings, then re-run `ruff format`. `... param_docs check` runs in
+     pre-commit and CI and fails on drift.
   Only the *description* is shared — each function keeps its own
   `name : type, default ...` line, so defaults may differ per layer. This
   applies to **all future work with a repeated API**, not just imaging: a new
   subdomain gets its own `_param_docs.py` registry following the same pattern.
-  See §12.6 for the worked imaging example.
+  See [WORKED_EXAMPLE.md](WORKED_EXAMPLE.md) for the worked imaging example.
 - **Logging**: use the **toolviper** logger, not `print`:
   ```python
   import toolviper.utils.logger as logger
@@ -513,12 +469,13 @@ per-variable nodes.
 - Mirror existing patterns in `processing_functions/imaging/` for any new
   science function (data-group in/out resolution → compute in place → register
   group → return stats/timings).
-- Keep the C++ implementations consistent.
-- Pass `processing_function_threads` through unchanged from driver to kernels —
+- Keep new C++ kernels consistent with the §6 memory contract and with the
+  binding patterns of the existing kernels.
+- Pass `processing_function_threads` through unchanged from distributed applications to processing function kernels —
   the same parameter name is used at every layer.
 - Keep the layering: graph code in `distributed_applications/`, I/O in `node_tasks/`,
   science in `processing_functions/`.
-- Run `black`, `pytest`, and rebuild after C++ edits before finishing.
+- Run `ruff format`, `pytest`, and rebuild after C++ edits before finishing.
 
 **Don't**
 - ❌ Add `forcecast` to (or otherwise allow silent copies / dtype conversions of)
@@ -547,217 +504,6 @@ per-variable nodes.
   - Lazy vs eager (`open_`/`load_`): <https://xradio.readthedocs.io/en/latest/development.html#lazy-and-eager-functions>
 - GraphVIPER docs: <https://graphviper.readthedocs.io/en/latest/>
   - Graph building tutorial (map/reduce, `parallel_coords`): <https://graphviper.readthedocs.io/en/latest/graph_building_tutorial.html>
-- pybind11: <https://pybind11.readthedocs.io/> · scikit-build-core: <https://scikit-build-core.readthedocs.io/> · Numba: <https://numba.readthedocs.io/>
+- pybind11: <https://pybind11.readthedocs.io/> · scikit-build-core: <https://scikit-build-core.readthedocs.io/>
 
 ---
-
-## 12. How-To Example: Imaging Deep-Dive
-
-This is the subsystem to know best — use it as the worked example of how the
-four layers fit together. The cube single-field imager is implemented across all
-three code layers, each named `image_cube_single_field`. A typical user-facing
-call (see the tutorial notebook
-`docs/distributed_applications_tutorials/imaging/single_field_cube.ipynb` for a
-runnable end-to-end version):
-
-```python
-from astroviper.distributed_applications.imaging import image_cube_single_field
-
-return_dict = image_cube_single_field(
-    ps_store="twhya_selfcal_lsrk_5chans.ps.zarr",   # input processing set (Zarr)
-    image_store="twhya_clean.img.zarr",             # output image dataset (Zarr)
-    image_params=image_params,                       # image geometry + output coords
-    imaging_weights_params={"weighting": "briggs", "robust": 0.5},
-    iteration_control_params={"niter": 300, "nmajor": 3, "threshold": 0.001, "gain": 0.1},
-    gridder="prolate_spheroidal",
-    deconvolver="hogbom_many_threads",
-    image_data_variables_keep=["sky_residual", "sky_model", "mask",
-                               "point_spread_function", "primary_beam",
-                               "beam_fit_params_point_spread_function"],
-    processing_set_data_group_name="base",
-    single_precision_image=True,
-    processing_function_threads=1,
-    n_chunks=5,
-    restore=True,
-    overwrite=True,
-)
-```
-
-The rest of this section walks down the layers behind that call:
-
-### 12.1 Driver — `distributed_applications/imaging/image_cube_single_field.py`
-The user-facing function. Sequence:
-1. `make_empty_sky_image(...)` → `write_image(..., out_format="zarr")` (creates
-   the image store with correct coords/dims).
-2. `calculate_number_of_chunks_for_cube_imaging(...)` → decide frequency chunk
-   count from per-channel memory estimate + available threads.
-3. `make_parallel_coord(coord=img_xds.frequency, n_chunks=...)` → defines
-   parallelism (imaging is **parallelized over frequency** for cubes).
-4. `create_empty_data_variables_on_disk(...)` → pre-allocate Zarr arrays
-   (NaN-filled) for the variables in `image_data_variables_keep`, so map tasks
-   can **lazily write their own slice**.
-5. `open_processing_set(...)` (lazy) →
-   `interpolate_data_coords_onto_parallel_coords(...)` → `node_task_data_mapping`.
-6. `map(input_data=ps_xdt, node_task=node_tasks.imaging.image_cube_single_field,
-   data_loading_task=_load_processing_set_chunk, disk_chunk_sizes=..., ...)` →
-   `reduce(..., mode="tree")` → `generate_dask_workflow` → `dask.compute` →
-   `zarr.consolidate_metadata`.
-
-
-### 12.2 Node task — `node_tasks/imaging/image_cube_single_field.py`
-The node task has a **fully explicit, NumPy-documented, standalone-callable
-signature** (`image_cube_single_field(image_params, imaging_weights_params, ...,
-task_coords, data_selection, image_store, input_data_store, ..., graph_mode=True)`).
-1. Build the empty per-chunk `img_xds` (correlation pol labels derived from
-   `instrument_polarization_basis`).
-2. Get data: use `input_data` if the loading layer pre-loaded it, else
-   `load_processing_set(...)` (eager) for this chunk's `data_selection`.
-3. Call `pf.imaging.image_cube_single_field(ps_xdt, img_xds, image_params, ...)`
-   with explicit keyword arguments.
-4. Write the result slice to Zarr via
-   `astroviper.utils.io.write_result_chunk_to_disk_using_zarr(...)`.
-
-### 12.3 Science — `processing_functions/imaging/image_cube_single_field.py`
-The **iteration-control and bookkeeping helpers** (not science kernels) live in
-the `processing_functions/imaging/utils/` subpackage: `iteration_control.py`
-(`IterationController`, stop codes, `merge_return_dicts`,
-`get_calculate_cycle_controls`, the `get_*_from_returndict` extractors,
-`format_/print_deconvolve_dict`), `return_dict.py` (`ReturnDict`, `Key`),
-`timing.py` (`accumulate_timing`), and `visibility.py`
-(`drop_auto_correlations` — the shared cross-correlation filter used by the PSF
-and undeconvolved-image gridders; do not re-inline it). Import them from
-`astroviper.processing_functions.imaging.utils` (the package re-exports the
-public symbols).
-
-Runs the CLEAN loop of **residual update cycles** and **model update cycles**
-(CASA's *major* and *minor* cycles — use the update-cycle names in AstroVIPER)
-via `IterationController`:
-- **Residual update cycle** — `residual_cycle_cube_single_field(...)`: degrid
-  model → compute residual visibilities → grid → FFT-normalize → form residual
-  image (+ PSF on the first iteration), primary beam, and imaging weights
-  (first iteration only).
-- **Model update cycle** — `model_update_cycle_cube_single_field(...)` →
-  `deconvolve(...)` (Hogbom or ASP CLEAN in C++) updates the model image, with
-  a mask from `make_mask`.
-- Accumulate per-plane stats into a `ReturnDict`; check convergence; iterate.
-- A final residual update cycle produces the last residual image.
-- When `restore=True` (off by default), a final `restore_image(...)` step
-  (`processing_functions/imaging/restore.py`) convolves the model with the clean
-  beam (the per-frequency Gaussian fit to the PSF, in the `residual` data group)
-  and adds the residual, writing `SKY_RESTORED`. The driver auto-adds
-  `"sky_restored"` to `image_data_variables_keep` so it is created/written.
-
-### 12.4 Key processing functions & gridders
-> Naming convention: single-field imaging functions put the `single_field`
-> qualifier **at the end** (`make_point_spread_function_single_field`,
-> `make_primary_beam_single_field`, `make_undeconvolved_image_single_field`,
-> `imaging_setup_single_field`, …).
-
-- Weighting: `calculate_imaging_weights.py` (`"natural"`, `"briggs"`/robust).
-- Gridding (vis → uv grid): `add_visibility_grid.py`
-  (`add_visibility_grid_single_field`).
-- PSF / UV-sampling grid: `make_point_spread_function.py`
-  (`make_point_spread_function_single_field`, plus the
-  `add_uv_sampling_grid_single_field` / `add_uv_sampling_grid_mosaic` gridders
-  that build the PSF numerator — gridding the imaging weights *is* the first
-  step of forming the PSF).
-- Undeconvolved (dirty/residual) image gridding: `make_undeconvolved_image.py`
-  (`make_undeconvolved_image_single_field`).
-- Degridding (model uv grid → vis): `get_visibility_grid.py`.
-- FFT + normalization: `fft_normalize_prolate_spheriodal_gridder.py`.
-- Primary beam: `make_pb_symmetric.py` (airy disk).
-- Polarization: `image_analysis/transform_polarization_basis.py`
-  (stokes ↔ linear).
-- PSF fit: `image_analysis/point_spread_function_gaussian_fit.py`.
-- Restore: `restore.py` (`restore_image`) — clean-beam-convolved model plus
-  residual (FFT convolution, clean beam built from the residual group's
-  `beam_fit_params_point_spread_function`).
-- Deconvolvers: `deconvolution.py` dispatch → `deconvolvers/hogbom` (C++),
-  `deconvolvers/aspclean` (C++).
-- The standard gridder kernel exists in **two interchangeable** forms (the
-  Python wrapper picks via a `cpp_gridder` flag): Numba
-  (`gridders/prolate_spheroidal_grid.py::prolate_spheroidal_grid_jit`) and C++
-  (`gridders/prolate_spheroidal_grid_cpp`). **Keep both in sync** if you change
-  the gridding math.
-
-### 12.5 Imaging I/O conventions — `utils/io.py`
-- `imaging_data_variables_and_dims_double_precision` /
-  `..._single_precision` map each logical role → `{"dims", "dtype", "name"}`.
-  This is the single source of truth for image variable names, dims, and dtypes.
-- Standard dim tuples: `full_dims_lm = ["time","frequency","polarization","l","m"]`,
-  `full_dims_uv = [...,"u","v"]`, `norm_dims = ["time","frequency","polarization"]`.
-- `create_empty_data_variables_on_disk(...)` writes NaN-filled (or
-  fill-as-appropriate) Zarr arrays chunked along the parallel dim; handles Zarr
-  v2 and v3 (`_to_zarr_v3_codec`).
-- `write_result_chunk_to_disk_using_zarr(...)` writes each kept variable's slice
-  using the `task_coords` slices.
-
-#### Precision model (`single_precision_image`)
-The driver's `single_precision_image` (default `True`) controls **image-domain**
-precision only; visibilities are `complex128`:
-
-| Stage | `single_precision_image=True` | `=False` |
-| --- | --- | --- |
-| Observed/model/residual **visibilities** | `complex128` | `complex128` |
-| Gridded UV / UV-sampling grid | `complex64` | `complex128` |
-| Grid **normalization** accumulator | `float64` (always) | `float64` |
-| Sky / PSF / model **images** | `float32` | `float64` |
-| Model→vis **uv grid** (`fft_norm_img_xds`) | `complex64` | `complex128` |
-| Model-update-cycle **deconvolution** | `float32` | `float64` |
-
-Casting happens **after gridding, before the FFT**: the C++ gridder accumulates
-directly into a `complex64` grid (no extra full-resolution copy), the iFFT/FFT
-run at the grid precision, and the resulting images are `float32`. The
-degridder widens each (possibly `complex64`) model-grid cell to `complex128` and
-writes `complex128` model visibilities, so `residual = observed − model` is
-formed in double precision. Threading the precision: the driver sets
-`input_params["single_precision_image"]`; `residual_cycle` derives
-`complex_dtype`/`float_dtype` from it and forwards `complex_dtype` to the
-gridders (`add_visibility_grid_single_field`, `add_uv_sampling_grid_single_field`),
-to `fft_norm_img_xds`/`ifft_norm_img_xds`, and to the PSF builder. On-disk Zarr
-dtypes follow via `create_empty_data_variables_on_disk(double_precision=not
-single_precision_image)`.
-
-### 12.6 Layer interfaces & parameter-doc codegen
-Every imaging layer (driver, node task, science processing functions) exposes a
-**fully explicit, NumPy-documented, standalone-callable** signature — none of
-them take an opaque `input_params` dict. Two pieces of infrastructure keep that
-clean:
-
-- **Explicit node tasks (auto-adapted by graphviper)** — graphviper's `map`
-  invokes each node task with a single `input_params` dict (into which it injects
-  per-node keys: `task_id`, `task_coords`, `data_selection`, `input_data`, ...).
-  A node task may instead have a **fully explicit signature**: `map` adapts it
-  automatically via `graphviper.graph_tools.map.make_graph_node_task`, which
-  returns a thin `<name>_wrap(input_params)` adapter that expands the dict into
-  the function's declared keyword arguments, **forwarding only the keys it
-  declares** (extra keys the driver/graphviper add are dropped). Legacy node
-  tasks that take a single `input_params` dict are passed through unchanged. So
-  the driver passes the explicit `node_tasks.imaging.image_cube_single_field`
-  straight to `map` — **no astroviper-side wrapper** — and the node task stays a
-  real, documented, directly-callable function. The adapter lives in
-  **graphviper**, not astroviper, so graphviper users never see this detail.
-
-- **Parameter-doc codegen (`astroviper.utils.param_docs`)** — a parameter such as
-  `image_params` is spelled out in all three layers. Its canonical description
-  lives in **one** registry,
-  `processing_functions/imaging/_param_docs.py` (`IMAGING_PARAM_DOCS`,
-  `{param_name: description}`). Functions that share these descriptions are
-  marked with `@shares_param_docs`
-  (`from astroviper.utils.param_docs import shares_param_docs`). The codegen
-  rewrites the matching `Parameters` *descriptions* in the source files —
-  preserving each function's own `name : type` line (so functions can give a
-  parameter different defaults) and every other docstring section.
-
-  **Workflow:** edit a description in `_param_docs.py`, then
-  ```bash
-  python -m astroviper.utils.param_docs sync     # rewrite the source docstrings
-  python -m astroviper.utils.param_docs check    # verify in sync (CI / pre-commit)
-  ```
-  (`python src/astroviper/utils/param_docs.py sync|check` works too — the tool is
-  standalone and needs only `libcst`, no package build.) The
-  [`imaging-param-docs` pre-commit hook](.pre-commit-config.yaml) and the
-  [`param-docs` CI workflow](.github/workflows/param-docs.yml) run `check`. After
-  running `sync`, re-run **black** and commit. To bring a **new** function into
-  the system: decorate it `@shares_param_docs`, add its file to `_target_files()`
-  in `utils/param_docs.py` (if not already listed), and run `sync`.

@@ -2,7 +2,6 @@ import astropy.time
 import matplotlib.pyplot as plt
 import numpy as np
 import toolviper
-import xarray as xa
 from xradio.measurement_set import convert_msv2_to_processing_set
 from xradio.measurement_set.open_processing_set import open_processing_set
 

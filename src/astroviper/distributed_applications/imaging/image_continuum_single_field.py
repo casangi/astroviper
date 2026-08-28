@@ -520,7 +520,7 @@ def prepare_continuum_imaging_weights_global(
 
     if "weight_density" not in weight_density_result:
         raise KeyError(
-            "The weight-density graph result does not contain " "'weight_density'."
+            "The weight-density graph result does not contain 'weight_density'."
         )
 
     global_weight_density_xds = weight_density_result["weight_density"]
@@ -582,8 +582,7 @@ def prepare_continuum_imaging_weights_global(
         != global_sum_weight_da.sizes["frequency"]
     ):
         raise ValueError(
-            "WEIGHT_DENSITY_GRID and SUM_WEIGHT have different "
-            "frequency-axis lengths."
+            "WEIGHT_DENSITY_GRID and SUM_WEIGHT have different frequency-axis lengths."
         )
 
     if (
@@ -756,9 +755,7 @@ def compute_continuum_imaging_weight_degrid_graph(
     from graphviper.graph_tools import generate_dask_workflow, map, reduce
 
     if "global_weighting_xds" not in input_params:
-        raise KeyError(
-            "Graph 2 input parameters must contain " "'global_weighting_xds'."
-        )
+        raise KeyError("Graph 2 input parameters must contain 'global_weighting_xds'.")
 
     timings = {}
 
@@ -810,7 +807,7 @@ def compute_continuum_imaging_weight_degrid_graph(
 
     if "weight_cache_mapping" not in result:
         raise RuntimeError(
-            "The imaging-weight degrid graph did not return " "'weight_cache_mapping'."
+            "The imaging-weight degrid graph did not return 'weight_cache_mapping'."
         )
 
     expected_task_ids = set(range(len(node_task_data_mapping)))
@@ -1086,8 +1083,7 @@ def combine_continuum_chunks(input_data, input_params):
             )
         except ValueError as exc:
             raise ValueError(
-                f"Coordinate mismatch for {variable_name!r} in "
-                f"input[{input_index}]."
+                f"Coordinate mismatch for {variable_name!r} in input[{input_index}]."
             ) from exc
 
     def _merge_weight_mapping(
@@ -1108,9 +1104,7 @@ def combine_continuum_chunks(input_data, input_params):
             task_id = int(task_id)
 
             if task_id in destination:
-                raise ValueError(
-                    "Duplicate imaging-weight result for " f"task {task_id}."
-                )
+                raise ValueError(f"Duplicate imaging-weight result for task {task_id}.")
 
             if not isinstance(weight_datasets, dict):
                 raise TypeError(
@@ -1121,9 +1115,7 @@ def combine_continuum_chunks(input_data, input_params):
                 )
 
             if not weight_datasets:
-                raise ValueError(
-                    "Imaging-weight mapping for task " f"{task_id} is empty."
-                )
+                raise ValueError(f"Imaging-weight mapping for task {task_id} is empty.")
 
             destination[task_id] = weight_datasets
 
@@ -1140,7 +1132,7 @@ def combine_continuum_chunks(input_data, input_params):
         for input_index, image_xds in enumerate(images):
             if variable_name not in image_xds:
                 raise KeyError(
-                    f"{variable_name!r} is missing from MVC input " f"{input_index}."
+                    f"{variable_name!r} is missing from MVC input {input_index}."
                 )
 
             array = image_xds[variable_name]
@@ -1269,7 +1261,7 @@ def combine_continuum_chunks(input_data, input_params):
 
         if "timing_node_tasks" not in result:
             raise KeyError(
-                "Every continuum map/reduce result must contain " "'timing_node_tasks'."
+                "Every continuum map/reduce result must contain 'timing_node_tasks'."
             )
 
         timing = result["timing_node_tasks"]
@@ -1650,9 +1642,7 @@ def combine_continuum_weight_density_chunks(
             )
 
         if "weight_density" not in result:
-            raise KeyError(
-                f"input[{input_index}] does not contain " "'weight_density'."
-            )
+            raise KeyError(f"input[{input_index}] does not contain 'weight_density'.")
 
         density_xds = result["weight_density"]
 
@@ -1695,14 +1685,12 @@ def combine_continuum_weight_density_chunks(
 
         if not np.all(np.isfinite(frequency)):
             raise ValueError(
-                f"input[{input_index}] frequency coordinate contains "
-                "non-finite values."
+                f"input[{input_index}] frequency coordinate contains non-finite values."
             )
 
         if np.unique(frequency).size != frequency.size:
             raise ValueError(
-                f"input[{input_index}] frequency coordinate contains "
-                "duplicate values."
+                f"input[{input_index}] frequency coordinate contains duplicate values."
             )
 
         density = density_xds["WEIGHT_DENSITY_GRID"]
@@ -1768,8 +1756,7 @@ def combine_continuum_weight_density_chunks(
                     )
                 except ValueError as exc:
                     raise ValueError(
-                        f"Coordinate {dimension!r} differs for "
-                        f"input[{input_index}]."
+                        f"Coordinate {dimension!r} differs for input[{input_index}]."
                     ) from exc
 
         metadata_keys = (
@@ -1787,9 +1774,8 @@ def combine_continuum_weight_density_chunks(
             if reference_value is None or candidate_value is None:
                 continue
 
-            if isinstance(reference_value, (float, np.floating),) or isinstance(
-                candidate_value,
-                (float, np.floating),
+            if isinstance(reference_value, float | np.floating) or isinstance(
+                candidate_value, float | np.floating
             ):
                 if not np.isclose(
                     float(reference_value),
@@ -1835,7 +1821,7 @@ def combine_continuum_weight_density_chunks(
     for input_index, result in enumerate(input_data):
         if "timing_node_tasks" not in result:
             raise KeyError(
-                f"input[{input_index}] does not contain " "'timing_node_tasks'."
+                f"input[{input_index}] does not contain 'timing_node_tasks'."
             )
 
         timing_df = result["timing_node_tasks"]
@@ -1907,7 +1893,10 @@ def combine_continuum_weight_density_chunks(
     combined_xds.attrs["n_processing_set_datasets_gridded"] = int(
         sum(
             int(
-                _get_density_dataset(result, input_index,).attrs.get(
+                _get_density_dataset(
+                    result,
+                    input_index,
+                ).attrs.get(
                     "n_processing_set_datasets_gridded",
                     0,
                 )
@@ -2206,25 +2195,13 @@ def calculate_number_of_chunks_for_continuum_imaging(
         fudge_factor = 1.2
         if single_precision_image:
             memory_singleton_chunk = fudge_factor * (
-                3
-                * n_pixels_single_frequency
-                * bytes_in_dtype["complex64"]
-                / (1024**3)
-                + 3
-                * n_pixels_single_frequency
-                * bytes_in_dtype["float32"]
-                / (1024**3)
+                3 * n_pixels_single_frequency * bytes_in_dtype["complex64"] / (1024**3)
+                + 3 * n_pixels_single_frequency * bytes_in_dtype["float32"] / (1024**3)
             )
         else:
             memory_singleton_chunk = fudge_factor * (
-                3
-                * n_pixels_single_frequency
-                * bytes_in_dtype["complex128"]
-                / (1024**3)
-                + 3
-                * n_pixels_single_frequency
-                * bytes_in_dtype["float64"]
-                / (1024**3)
+                3 * n_pixels_single_frequency * bytes_in_dtype["complex128"] / (1024**3)
+                + 3 * n_pixels_single_frequency * bytes_in_dtype["float64"] / (1024**3)
             )
 
         logger.info(
@@ -2279,15 +2256,15 @@ def image_continuum_single_field(
     pblimit: float = 0.2,
     specmode: str = "mfs",
     instrument_polarization_basis: str = "linear",
-    scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],
+    scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],  # noqa: B006 - param.json requires list/str (not nullable); never mutated
     field_name: str | None = None,
-    image_data_variables_keep: list[str] = [
+    image_data_variables_keep: list[str] = [  # noqa: B006 - param.json requires a list (not nullable); never mutated
         "sky_residual",
         "point_spread_function",
         "primary_beam",
         "beam_fit_params_point_spread_function",
     ],
-    compressor=Blosc(cname="lz4", clevel=5),
+    compressor=None,
     processing_set_data_group_name: str = "base",
     single_precision_image: bool = False,
     thread_info: dict | None = None,
@@ -2384,9 +2361,12 @@ def image_continuum_single_field(
     )
     from astroviper.utils.timing import format_timing_summary
 
-    assert (
-        memory_mode == "in_memory"
-    ), "Currently only in_memory is supported for memory_mode is implemented."
+    if compressor is None:
+        compressor = Blosc(cname="lz4", clevel=5)
+
+    assert memory_mode == "in_memory", (
+        "Currently only in_memory is supported for memory_mode is implemented."
+    )
     if weight_memory_mode not in ("in_memory", "in_place"):
         raise ValueError(
             "weight_memory_mode must be 'in_memory' or 'in_place'; received "
@@ -2399,8 +2379,7 @@ def image_continuum_single_field(
         )
     if weight_memory_mode == "in_place" and skunk_works:
         raise NotImplementedError(
-            "weight_memory_mode='in_place' is not yet supported with "
-            "skunk_works=True."
+            "weight_memory_mode='in_place' is not yet supported with skunk_works=True."
         )
 
     # Sharded output is written by the concurrent direct-blob (skunk_works) writer;
@@ -2417,7 +2396,7 @@ def image_continuum_single_field(
     specmode = str(specmode).lower()
     if specmode not in ("mfs", "mvc"):
         raise ValueError(
-            "specmode must be either 'mfs' or 'mvc'; " f"received {specmode!r}."
+            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
         )
 
     # Work with an application-local copy: continuum setup may augment the
@@ -2784,7 +2763,6 @@ def image_continuum_single_field(
     # major stop code means that the CLEAN loop has converged or reached one
     # of its configured limits.
     while controller.stopcode.major == 0:
-
         n_major_cycles += 1
 
         logger.debug(f"Starting continuum major cycle {n_major_cycles}.")
@@ -2931,7 +2909,7 @@ def image_continuum_single_field(
         if is_n_iter_0:
             if "static_xds" not in cycle_return_dict:
                 raise KeyError(
-                    "The first continuum append node did not return " "'static_xds'."
+                    "The first continuum append node did not return 'static_xds'."
                 )
 
             # Static holding quantities that are only computed in the first major loop

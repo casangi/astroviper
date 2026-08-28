@@ -8,16 +8,23 @@ import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 import dask.array as da
 import numpy as np
 import xarray as xr
 from scipy.optimize import curve_fit
 
-Number = Union[int, float]
-ArrayOrDA = Union[np.ndarray, da.Array, xr.DataArray]
-MaskSpec = Union[np.ndarray, da.Array, xr.DataArray, str, Path]
+from astroviper.utils._gaussian_math import FWHM2SIG as _FWHM2SIG
+from astroviper.utils._gaussian_math import SIG2FWHM as _SIG2FWHM
+from astroviper.utils._gaussian_math import fwhm_from_sigma as _fwhm_from_sigma
+from astroviper.utils._gaussian_math import sigma_from_fwhm as _sigma_from_fwhm
+from astroviper.utils._gaussian_math import theta_math_to_pa as _theta_math_to_pa
+from astroviper.utils._gaussian_math import theta_pa_to_math as _theta_pa_to_math
+
+Number = int | float
+ArrayOrDA = np.ndarray | da.Array | xr.DataArray
+MaskSpec = np.ndarray | da.Array | xr.DataArray | str | Path
 
 # ----------------------- Core Gaussian pieces -----------------------
 
@@ -76,13 +83,6 @@ def _gauss2d_component(
     c = (st**2) / (2 * sx**2) + (ct**2) / (2 * sy**2)
     return amp * np.exp(-(a * x**2 + 2 * b * x * y + c * y**2))
 
-
-from astroviper.utils._gaussian_math import FWHM2SIG as _FWHM2SIG
-from astroviper.utils._gaussian_math import SIG2FWHM as _SIG2FWHM
-from astroviper.utils._gaussian_math import fwhm_from_sigma as _fwhm_from_sigma
-from astroviper.utils._gaussian_math import sigma_from_fwhm as _sigma_from_fwhm
-from astroviper.utils._gaussian_math import theta_math_to_pa as _theta_math_to_pa
-from astroviper.utils._gaussian_math import theta_pa_to_math as _theta_pa_to_math
 
 # ----------------------- Parameter packing helpers -----------------------
 
@@ -567,7 +567,7 @@ def _normalize_initial_guesses(
         init = [init]
 
     # NEW: top-level list/tuple of dicts (matches docstring)
-    if isinstance(init, (list, tuple)) and len(init) > 0 and isinstance(init[0], dict):
+    if isinstance(init, list | tuple) and len(init) > 0 and isinstance(init[0], dict):
         if len(init) != n:
             raise ValueError(f"initial_guesses list must have length n={n}")
         amps, x0, y0, sx, sy, th = _extract_params_from_comp_dicts(init, n)
@@ -593,7 +593,7 @@ def _normalize_initial_guesses(
             return _pack_params(offset, amps, x0, y0, sx, sy, th)
 
         if (
-            isinstance(init, (list, tuple))
+            isinstance(init, list | tuple)
             and len(init) > 0
             and isinstance(init[0], dict)
         ):
@@ -702,9 +702,9 @@ def _merge_bounds_multi(
             _set_range("offset", None, tuple(val))  # type: ignore[arg-type]
             continue
         if (
-            isinstance(val, (list, tuple))
+            isinstance(val, list | tuple)
             and len(val) == 2
-            and not isinstance(val[0], (list, tuple))
+            and not isinstance(val[0], list | tuple)
         ):
             _set_range(
                 canon, idx_in_comp, _to_sigma_rng(canon, (val[0], val[1]))
@@ -713,7 +713,9 @@ def _merge_bounds_multi(
             if len(val) != n:
                 raise ValueError(f"bounds[{key!r}] length must be n={n}")
             for i, rng in enumerate(val):  # type: ignore[assignment]
-                _set_range(canon, idx_in_comp, _to_sigma_rng(canon, tuple(rng)), comp_idx=i)  # type: ignore[arg-type]
+                _set_range(
+                    canon, idx_in_comp, _to_sigma_rng(canon, tuple(rng)), comp_idx=i
+                )  # type: ignore[arg-type]
     return lb, ub
 
 
@@ -1030,7 +1032,7 @@ def _multi_fit_plane_wrapper(
             peak_err,
             offset,
             offset_e,
-            bool(False),
+            False,
             varexp,
             resid2d,
             model2d,
@@ -1098,7 +1100,7 @@ def _multi_fit_plane_wrapper(
         peak_err,
         float(offset),
         offset_e,
-        bool(True),
+        True,
         float(varexp),
         resid2d,
         model2d,
@@ -1128,9 +1130,11 @@ def _ensure_dataarray(data: ArrayOrDA) -> xr.DataArray:
     """
     if isinstance(data, xr.DataArray):
         return data
-    if isinstance(data, (np.ndarray, da.Array)):
+    if isinstance(data, np.ndarray | da.Array):
         dims = [f"dim_{i}" for i in range(data.ndim)]
-        coords = {d: np.arange(s, dtype=float) for d, s in zip(dims, data.shape)}
+        coords = {
+            d: np.arange(s, dtype=float) for d, s in zip(dims, data.shape, strict=False)
+        }
         # Raw NumPy/Dask arrays arrive without semantic axis names. We wrap them
         # generically here; downstream dimension resolution applies the caller's
         # unlabeled_axis_order contract (or explicit dims= override) to decide
@@ -1341,7 +1345,7 @@ def _convert_init_theta(
         return _conv_arr(init)
 
     if (
-        isinstance(init, (list, tuple))
+        isinstance(init, list | tuple)
         and (len(init) == n)
         and isinstance(init[0], dict)
     ):
@@ -1352,7 +1356,7 @@ def _convert_init_theta(
         clone = dict(init)
         if isinstance(comps, np.ndarray):
             clone["components"] = _conv_arr(np.asarray(comps))
-        elif isinstance(comps, (list, tuple)) and comps and isinstance(comps[0], dict):
+        elif isinstance(comps, list | tuple) and comps and isinstance(comps[0], dict):
             clone["components"] = _conv_list_of_dicts(comps)  # type: ignore[arg-type]
         return clone
 
@@ -1681,18 +1685,18 @@ def _interp_centers_world(
     )
 
     # Self-documenting attrs
-    ds["x0_world"].attrs[
-        "description"
-    ] = "Component center x in world coordinates (interpolated from pixel index)."
-    ds["y0_world"].attrs[
-        "description"
-    ] = "Component center y in world coordinates (interpolated from pixel index)."
-    ds["x0_world_err"].attrs[
-        "description"
-    ] = "1-sigma uncertainty of x0_world via local axis slope."
-    ds["y0_world_err"].attrs[
-        "description"
-    ] = "1-sigma uncertainty of y0_world via local axis slope."
+    ds["x0_world"].attrs["description"] = (
+        "Component center x in world coordinates (interpolated from pixel index)."
+    )
+    ds["y0_world"].attrs["description"] = (
+        "Component center y in world coordinates (interpolated from pixel index)."
+    )
+    ds["x0_world_err"].attrs["description"] = (
+        "1-sigma uncertainty of x0_world via local axis slope."
+    )
+    ds["y0_world_err"].attrs["description"] = (
+        "1-sigma uncertainty of y0_world via local axis slope."
+    )
     return ds
 
 
@@ -2054,7 +2058,7 @@ def _resolve_fit_mask(
     if mask is None:
         return xr.ones_like(da_tr, dtype=bool)
 
-    if isinstance(mask, (str, Path)):
+    if isinstance(mask, str | Path):
         if mask_source is None:
             mda = _select_mask(da_tr, mask)
         else:
@@ -2203,9 +2207,7 @@ def _prepare_fit_configuration(
         if isinstance(ig, np.ndarray):
             ig = _convert_array_like_widths_to_sigma(ig)
         elif (
-            isinstance(ig, (list, tuple))
-            and len(ig) > 0
-            and not isinstance(ig[0], dict)
+            isinstance(ig, list | tuple) and len(ig) > 0 and not isinstance(ig[0], dict)
         ):
             ig = _convert_array_like_widths_to_sigma(ig)
     if isinstance(ig, dict) and "components" in ig:
@@ -2213,7 +2215,7 @@ def _prepare_fit_configuration(
         if initial_is_fwhm and (
             isinstance(comps, np.ndarray)
             or (
-                isinstance(comps, (list, tuple))
+                isinstance(comps, list | tuple)
                 and len(comps) > 0
                 and not isinstance(comps[0], dict)
             )
@@ -2221,7 +2223,7 @@ def _prepare_fit_configuration(
             arr = _convert_array_like_widths_to_sigma(comps)
             ig = dict(ig)
             ig["components"] = arr
-    elif isinstance(ig, (list, tuple)) and ig and isinstance(ig[0], dict):
+    elif isinstance(ig, list | tuple) and ig and isinstance(ig[0], dict):
         mapped: list[dict[str, Any]] = []
         for d in ig:
             dd = dict(d)
@@ -2277,7 +2279,7 @@ def _prepare_fit_configuration(
             major_pairs = _expand_bound_pairs(major_val)
             minor_pairs = _expand_bound_pairs(minor_val)
             for i, ((major_lo, major_hi), (minor_lo, minor_hi)) in enumerate(
-                zip(major_pairs, minor_pairs)
+                zip(major_pairs, minor_pairs, strict=False)
             ):
                 if major_lo < minor_lo or major_hi < minor_hi:
                     raise ValueError(
@@ -3333,14 +3335,14 @@ def _summarize_metadata_value(v, maxlen: int = 120):
     """
     if v is None:
         return None
-    if isinstance(v, (float, int, bool, str)):
+    if isinstance(v, float | int | bool | str):
         return v
     if isinstance(v, dict):
         out = {}
         for k, vv in list(v.items())[:50]:
             out[k] = _summarize_metadata_value(vv, maxlen // 2)
         return out
-    if isinstance(v, (list, tuple)):
+    if isinstance(v, list | tuple):
         return [_summarize_metadata_value(x, maxlen // 2) for x in list(v)[:50]]
     try:
         shape = tuple(getattr(v, "shape", ()))
@@ -3915,9 +3917,6 @@ def fit_multi_gaussian2d(
 
 # TODO: move to a plotting module
 
-import numpy as np
-from matplotlib.patches import Ellipse
-
 # ---- plotting helpers --------------------------------------------------------
 
 
@@ -4107,6 +4106,7 @@ def overlay_fit_components(
             warnings.warn(
                 "Missing size info (sigma/FWHM); drawing components without size.",
                 RuntimeWarning,
+                stacklevel=2,
             )
             sigx = np.zeros((n,), dtype=float)
             sigy = np.zeros((n,), dtype=float)
@@ -4121,6 +4121,7 @@ def overlay_fit_components(
             warnings.warn(
                 "Missing size info (FWHM/sigma); drawing components without size.",
                 RuntimeWarning,
+                stacklevel=2,
             )
             fwx = np.zeros((n,), dtype=float)
             fwy = np.zeros((n,), dtype=float)
@@ -4166,6 +4167,7 @@ def overlay_fit_components(
         warnings.warn(
             f"Missing theta for frame '{frame}' (and fallback frame); drawing axis-aligned ellipses.",
             RuntimeWarning,
+            stacklevel=2,
         )
         theta_deg = np.zeros((n,), dtype=float)
     else:
@@ -4208,7 +4210,7 @@ def overlay_fit_components(
             ax.text(
                 cx_i,
                 cy_i,
-                f"{i+1}",
+                f"{i + 1}",
                 ha="center",
                 va="center",
                 fontsize=9,
@@ -4290,7 +4292,7 @@ def plot_components(
         if isinstance(_param, Mapping):
             if dims_for_resolve is None:
                 _stored_dims = _param.get("dims")
-                if isinstance(_stored_dims, (list, tuple)) and len(_stored_dims) == 2:
+                if isinstance(_stored_dims, list | tuple) and len(_stored_dims) == 2:
                     dims_for_resolve = tuple(_stored_dims)
             _stored = _param.get("unlabeled_axis_order")
             if _stored is not None:
@@ -4433,8 +4435,9 @@ def plot_components(
     if show is None:
         in_ipy = False
         try:
-            get_ipython  # type: ignore[name-defined]
-            in_ipy = True
+            from IPython import get_ipython
+
+            in_ipy = get_ipython() is not None
         except Exception:
             pass
         show = not in_ipy

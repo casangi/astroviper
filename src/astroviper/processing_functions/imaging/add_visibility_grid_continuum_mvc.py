@@ -136,7 +136,7 @@ def add_visibility_grid_mvc_single_field(
 
     if not np.isfinite(fft_padding) or fft_padding < 1.0:
         raise ValueError(
-            "fft_padding must be finite and at least 1.0; " f"received {fft_padding}."
+            f"fft_padding must be finite and at least 1.0; received {fft_padding}."
         )
 
     if int(processing_function_threads) < 1:
@@ -154,7 +154,7 @@ def add_visibility_grid_mvc_single_field(
 
     if ms_data_group_in_name not in data_groups:
         raise KeyError(
-            f"Measurement-set data group " f"{ms_data_group_in_name!r} is missing."
+            f"Measurement-set data group {ms_data_group_in_name!r} is missing."
         )
 
     ms_data_group_in = data_groups[ms_data_group_in_name]
@@ -225,7 +225,7 @@ def add_visibility_grid_mvc_single_field(
 
     if "frequency" not in ms_xds.coords:
         raise KeyError(
-            "The measurement-set dataset does not contain a " "frequency coordinate."
+            "The measurement-set dataset does not contain a frequency coordinate."
         )
 
     frequency_coord = np.asarray(
@@ -249,11 +249,11 @@ def add_visibility_grid_mvc_single_field(
 
     if not np.all(np.isfinite(frequency_coord)):
         raise ValueError(
-            "The measurement-set frequency coordinate contains " "non-finite values."
+            "The measurement-set frequency coordinate contains non-finite values."
         )
 
     if "frequency" not in img_xds.coords:
-        raise KeyError("The MVC image dataset must contain a frequency " "coordinate.")
+        raise KeyError("The MVC image dataset must contain a frequency coordinate.")
 
     image_frequency_coord = np.asarray(
         img_xds.coords["frequency"].values,
@@ -274,9 +274,7 @@ def add_visibility_grid_mvc_single_field(
     n_image_chan = image_frequency_coord.size
 
     if "polarization" not in img_xds.coords:
-        raise KeyError(
-            "The MVC image dataset must contain a polarization " "coordinate."
-        )
+        raise KeyError("The MVC image dataset must contain a polarization coordinate.")
 
     if img_xds.sizes["polarization"] != n_pol:
         raise ValueError(
@@ -286,7 +284,7 @@ def add_visibility_grid_mvc_single_field(
         )
 
     if "time" not in img_xds.coords:
-        raise KeyError("The MVC image dataset must contain a time " "coordinate.")
+        raise KeyError("The MVC image dataset must contain a time coordinate.")
 
     # ------------------------------------------------------------------
     # Construct grid maps.
@@ -490,7 +488,7 @@ def add_visibility_grid_mvc_single_field(
 
     img_xds[normalization_name].attrs.update(
         {
-            "description": ("Per-frequency MVC visibility-grid normalization " "sums."),
+            "description": ("Per-frequency MVC visibility-grid normalization sums."),
             "specmode": "mvc",
             "channel_mapping": "one_to_one",
             "n_frequency_planes": n_image_chan,

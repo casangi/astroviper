@@ -45,6 +45,7 @@
         },
         "reduce_n_batch": { "type": ["int"], "min": 2 },
         "output_shard_channels": { "type": ["int"], "nullable": true, "min": 1 },
+        "output_image_format": { "type": ["str"], "allowed": ["zarr", "fits"] },
         "task_time_kill_switch_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 },
         "monitor_resources_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 }
     }

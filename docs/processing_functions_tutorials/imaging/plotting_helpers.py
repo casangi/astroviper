@@ -18,7 +18,7 @@ def plot_astroviper_vs_casa_weights_interactive(
     ax1.plot(casa, label="CASA WEIGHT")
 
     if robust == 2:
-        natural_weights = ms_xdt[f"WEIGHT"].isel(baseline_id=bl_idx, frequency=freq_idx)
+        natural_weights = ms_xdt["WEIGHT"].isel(baseline_id=bl_idx, frequency=freq_idx)
         ax1.plot(natural_weights, label="Natural WEIGHT", linestyle="--")
 
     ax1.set(
