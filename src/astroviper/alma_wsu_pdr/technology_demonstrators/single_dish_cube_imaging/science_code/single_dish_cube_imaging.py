@@ -1,7 +1,5 @@
 import os
 from pathlib import Path
-from datetime import datetime
-import json
 import math
 
 import xarray as xr
@@ -15,7 +13,6 @@ from astropy.time import Time as AstroTime
 from astropy.units import Unit as AstroUnit
 import astropy.units as u
 from astropy.units import Quantity
-from astropy.coordinates import SkyCoord
 from astropy import wcs
 
 from xradio.measurement_set.open_processing_set import open_processing_set
@@ -393,7 +390,7 @@ def compute_data_coordinates(
         image_definition["center_direction"].split(" ")
     )
     world_grid_center = SkyCoord(
-        f"{grid_center_ra_hms} {grid_center_dec_dms.replace(".", ":", 2)}",
+        f"{grid_center_ra_hms} {grid_center_dec_dms.replace('.', ':', 2)}",
         unit=(u.hourangle, u.deg),
         frame=frame.lower()
     )
