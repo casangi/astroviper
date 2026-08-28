@@ -25,7 +25,10 @@ def model_update_cycle_cube_single_field(
     deconvolver : str
         Deconvolution algorithm for the minor cycle. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
         (C++, threaded across *and* within planes -- faster when there are
-        few planes, e.g. single-channel imaging) or ``"asp"``.
+        few planes, e.g. single-channel imaging) or ``"asp"``. Long Högbom
+        cycles are checked in CASA-sized batches and stop a plane if its peak
+        becomes non-finite or rises more than 10% above the smallest measured
+        peak.
     deconvolve_params : dict
         Per-cycle deconvolution / iteration-control parameters passed straight to
         the deconvolver: the absolute ``threshold`` (floor) plus the adaptive

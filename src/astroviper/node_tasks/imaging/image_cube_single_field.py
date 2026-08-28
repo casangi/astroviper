@@ -192,14 +192,17 @@ def image_cube_single_field(
         - ``gain`` : CLEAN loop gain -- the fraction of the selected peak flux
           subtracted from the residual image each minor iteration
           (``0 < gain <= 1``).
-        - ``cyclefactor`` : Scaling applied to the brightest PSF sidelobe level
-          when setting the minor-cycle stopping depth (see ``cyclethreshold``
-          below). Larger values trigger the next major cycle sooner; smaller
-          values clean deeper before each residual update.
+        - ``cyclefactor`` : Scaling applied to the largest-magnitude PSF
+          sidelobe after subtracting the fitted Gaussian main beam. Both
+          positive and negative sidelobes constrain the minor-cycle stopping
+          depth (see ``cyclethreshold`` below). Larger values trigger the next
+          major cycle sooner; smaller values clean deeper before each residual
+          update.
         - ``cycleniter`` : Maximum number of minor-cycle iterations a plane may
           run before a major cycle is triggered. ``cycleniter=-1`` lets the
-          adaptive ``cyclethreshold`` govern the depth instead; otherwise the
-          count is clamped to never exceed the plane's remaining ``niter``.
+          adaptive ``cyclethreshold`` and Högbom stability checks govern the
+          depth instead; otherwise the count is clamped to never exceed the
+          plane's remaining ``niter``.
         - ``minpsffraction`` : Lower clamp on the PSF fraction used to set the
           minor-cycle threshold ``cyclethreshold = clamp(max_psf_sidelobe *
           cyclefactor, minpsffraction, maxpsffraction) * peak_residual`` (then
@@ -227,7 +230,10 @@ def image_cube_single_field(
     deconvolver : str, optional
         Deconvolution algorithm for the minor cycle. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
         (C++, threaded across *and* within planes -- faster when there are
-        few planes, e.g. single-channel imaging) or ``"asp"``.
+        few planes, e.g. single-channel imaging) or ``"asp"``. Long Högbom
+        cycles are checked in CASA-sized batches and stop a plane if its peak
+        becomes non-finite or rises more than 10% above the smallest measured
+        peak.
     instrument_polarization_basis : str, optional
         Correlation (instrument) polarization basis the gridding is performed in:
         ``"linear"`` (``XX``/``YY``) or ``"circular"`` (``RR``/``LL``). The

@@ -54,14 +54,17 @@ IMAGING_PARAM_DOCS = {
         "- ``gain`` : CLEAN loop gain -- the fraction of the selected peak flux\n"
         "  subtracted from the residual image each minor iteration\n"
         "  (``0 < gain <= 1``).\n"
-        "- ``cyclefactor`` : Scaling applied to the brightest PSF sidelobe level\n"
-        "  when setting the minor-cycle stopping depth (see ``cyclethreshold``\n"
-        "  below). Larger values trigger the next major cycle sooner; smaller\n"
-        "  values clean deeper before each residual update.\n"
+        "- ``cyclefactor`` : Scaling applied to the largest-magnitude PSF\n"
+        "  sidelobe after subtracting the fitted Gaussian main beam. Both\n"
+        "  positive and negative sidelobes constrain the minor-cycle stopping\n"
+        "  depth (see ``cyclethreshold`` below). Larger values trigger the next\n"
+        "  major cycle sooner; smaller values clean deeper before each residual\n"
+        "  update.\n"
         "- ``cycleniter`` : Maximum number of minor-cycle iterations a plane may\n"
         "  run before a major cycle is triggered. ``cycleniter=-1`` lets the\n"
-        "  adaptive ``cyclethreshold`` govern the depth instead; otherwise the\n"
-        "  count is clamped to never exceed the plane's remaining ``niter``.\n"
+        "  adaptive ``cyclethreshold`` and Högbom stability checks govern the\n"
+        "  depth instead; otherwise the count is clamped to never exceed the\n"
+        "  plane's remaining ``niter``.\n"
         "- ``minpsffraction`` : Lower clamp on the PSF fraction used to set the\n"
         "  minor-cycle threshold ``cyclethreshold = clamp(max_psf_sidelobe *\n"
         "  cyclefactor, minpsffraction, maxpsffraction) * peak_residual`` (then\n"
@@ -78,7 +81,10 @@ IMAGING_PARAM_DOCS = {
         "Deconvolution algorithm for the minor cycle. One of ``"
         '"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``\n'
         "(C++, threaded across *and* within planes -- faster when there are\n"
-        'few planes, e.g. single-channel imaging) or ``"asp"``.'
+        'few planes, e.g. single-channel imaging) or ``"asp"``. Long Högbom\n'
+        "cycles are checked in CASA-sized batches and stop a plane if its peak\n"
+        "becomes non-finite or rises more than 10% above the smallest measured\n"
+        "peak."
     ),
     "instrument_polarization_basis": (
         "Correlation (instrument) polarization basis the gridding is performed in:\n"
