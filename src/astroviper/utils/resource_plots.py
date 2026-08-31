@@ -21,8 +21,13 @@ Three complementary views:
   cluster doing at each moment of the run?"
 * :func:`plot_task_stream` -- a Dask-dashboard-style per-worker-process
   timeline: one lane per worker slot, each task drawn as load / science /
-  write segments, plus a running-task utilization panel and a printed
-  efficiency decomposition. Unlike the two views above it needs only the
+  write segments, plus a running-task utilization panel, a printed
+  efficiency decomposition and -- when the driver-step timings are available
+  -- a strip of the application's own setup (everything before compute:
+  creating/writing the empty image, opening the processing set, graph
+  construction), compute and finalize (metadata consolidation) phases, so
+  the timeline accounts for the entire ``image_cube_single_field`` call.
+  Unlike the two views above it needs only the
   wall-clock anchor ``start_unixtime`` (recorded by the node task itself),
   NOT the monitor's sampled series, so it works with
   ``monitor_resources_seconds=None``.
@@ -47,6 +52,114 @@ __all__ = [
 _LOAD_COLOR, _SCIENCE_COLOR, _WRITE_COLOR = "#0072B2", "#009E73", "#E69F00"
 _POST_COLOR = "#CC79A7"
 _PRE_COLOR = "#7f7f7f"
+
+# Driver ("distributed application") setup steps in execution order, keyed by
+# the T_* entries of ``timing_distributed_application``.  Kept in sync with
+# DISTRIBUTED_APPLICATION_TIMING_PHASES in
+# astroviper.distributed_applications.imaging.image_cube_single_field (listed
+# here rather than imported so this plotting utility stays free of imaging
+# imports; unknown/absent keys are simply skipped, so partial dicts render).
+_DRIVER_PRE_STEPS = [
+    ("create empty image xds", "T_make_empty_image_xds"),
+    ("write empty image", "T_write_empty_image"),
+    ("chunks + parallel coords", "T_determine_chunks_and_parallel_coords"),
+    ("create empty data vars", "T_create_empty_data_variables"),
+    ("open processing set", "T_open_processing_set"),
+    ("interpolate data coords", "T_interpolate_data_coords"),
+    ("build map/reduce graph", "T_create_map_reduce_graph"),
+    ("generate dask graph", "T_generate_dask_graph"),
+]
+_DRIVER_POST_STEPS = [("consolidate metadata", "T_consolidate_metadata")]
+_DRIVER_SETUP_LABEL = "setup"
+_DRIVER_COMPUTE_LABEL = "compute (task stream below)"
+_DRIVER_UNTIMED_LABEL = "driver (untimed)"
+# Everything before compute is drawn as ONE light-red "setup" segment (its
+# per-step breakdown goes to the printed summary and the HTML tooltip); the
+# compute window is near-white so it reads as "see the panels below", the
+# finalize steps get pale colors from the palette, untimed gaps gray.
+_DRIVER_SETUP_COLOR = "#fbb4ae"
+_DRIVER_STEP_COLORS = [
+    "#8dd3c7",
+    "#bebada",
+    "#80b1d3",
+    "#fdb462",
+    "#b3de69",
+    "#fccde5",
+    "#bc80bd",
+    "#ccebc5",
+    "#ffed6f",
+]
+_DRIVER_COMPUTE_COLOR = "#eef3fa"
+_DRIVER_UNTIMED_COLOR = "#d9d9d9"
+
+
+def _driver_timeline(driver_timing, compute_start, compute_end, t0_abs):
+    """Place the driver's setup/finalize steps on the run's wall clock.
+
+    ``driver_timing`` is the application's ``timing_distributed_application``
+    dict (or the same keys pulled from a benchmark overall row).  EVERYTHING
+    before the measured compute start is drawn as one "setup" segment (starting
+    at the absolute ``application_start_unixtime`` anchor when recorded --
+    since 2026-08-31 -- else at compute start minus the summed pre-compute step
+    timers); the post-compute steps run forward from the compute end, with any
+    leftover time before the ``application_end_unixtime`` anchor shown as an
+    "(untimed)" gray segment, so the timeline spans the ENTIRE application
+    call.
+
+    Returns ``(segments, app_start_rel, app_end_rel, color_of, setup_detail)``
+    -- segments as ``(label, start, end)`` in seconds relative to ``t0_abs``
+    (the first task start), ``color_of`` mapping each label to its color and
+    ``setup_detail`` the per-step ``(label, seconds)`` breakdown of the setup
+    segment -- or None when ``driver_timing`` or the compute anchors are
+    unavailable.
+    """
+    if not driver_timing or compute_start is None or compute_end is None:
+        return None
+
+    def get(key):
+        value = driver_timing.get(key)
+        if value is None:
+            return None
+        value = float(value)
+        return None if np.isnan(value) else value
+
+    pre = [(lbl, get(k)) for lbl, k in _DRIVER_PRE_STEPS if get(k) is not None]
+    post = [(lbl, get(k)) for lbl, k in _DRIVER_POST_STEPS if get(k) is not None]
+    if not pre and not post:
+        return None
+
+    rel_cs, rel_ce = compute_start - t0_abs, compute_end - t0_abs
+    setup_start = rel_cs - sum(dur for _, dur in pre)
+    app_start = get("application_start_unixtime")
+    app_start_rel = setup_start if app_start is None else app_start - t0_abs
+    setup_detail = list(pre)
+    if app_start is not None and setup_start - app_start_rel > 0.05:
+        setup_detail.insert(0, (_DRIVER_UNTIMED_LABEL, setup_start - app_start_rel))
+    segments = []
+    if rel_cs - app_start_rel > 0:
+        segments.append((_DRIVER_SETUP_LABEL, app_start_rel, rel_cs))
+    segments.append((_DRIVER_COMPUTE_LABEL, rel_cs, rel_ce))
+    cursor = rel_ce
+    for lbl, dur in post:
+        segments.append((lbl, cursor, cursor + dur))
+        cursor += dur
+    app_end = get("application_end_unixtime")
+    app_end_rel = cursor if app_end is None else app_end - t0_abs
+    if app_end is not None and app_end_rel - cursor > 0.05:
+        segments.append((_DRIVER_UNTIMED_LABEL, cursor, app_end_rel))
+
+    color_of, palette = {}, iter(_DRIVER_STEP_COLORS * 3)
+    for lbl, _, _ in segments:
+        if lbl not in color_of:
+            if lbl == _DRIVER_SETUP_LABEL:
+                color_of[lbl] = _DRIVER_SETUP_COLOR
+            elif lbl == _DRIVER_COMPUTE_LABEL:
+                color_of[lbl] = _DRIVER_COMPUTE_COLOR
+            elif lbl == _DRIVER_UNTIMED_LABEL:
+                color_of[lbl] = _DRIVER_UNTIMED_COLOR
+            else:
+                color_of[lbl] = next(palette)
+    return segments, app_start_rel, app_end_rel, color_of, setup_detail
 
 
 def _as_timing_frame(source):
@@ -445,22 +558,27 @@ def _write_task_stream_html(
     post_label,
     title,
     html_path,
+    driver=None,
 ):
-    """Write a standalone interactive HTML task stream: the same two panels as
-    the matplotlib figure, drawn as inline SVG with a JavaScript tooltip that
-    shows a bar's timing details on hover. Pure SVG + vanilla JS -- no
-    extra dependencies, works offline. One <rect> per task segment, so the
-    file grows with the task count (~a few MB for a 15k-task run)."""
+    """Write a standalone interactive HTML task stream: the same panels as
+    the matplotlib figure (including the driver strip when ``driver`` -- the
+    :func:`_driver_timeline` result -- is given), drawn as inline SVG with a
+    JavaScript tooltip that shows a bar's timing details on hover. Pure SVG +
+    vanilla JS -- no extra dependencies, works offline. One <rect> per task
+    segment, so the file grows with the task count (~a few MB for a 15k-task
+    run)."""
     import html as _html
 
     # ---- geometry (pixels) ----
     left, top, bottom = 95, 30, 42
     inner_w = 1500
     util_h, gap = 110, 16
+    driver_h, dgap = (26, 12) if driver is not None else (0, 0)
+    top_u = top + driver_h + dgap  # top of the utilization panel
     lane_px = max(3.0, min(14.0, 9000.0 / max(n_lanes, 1)))
     stream_h = lane_px * n_lanes
     width = left + inner_w + 20
-    height = top + util_h + gap + stream_h + bottom
+    height = top_u + util_h + gap + stream_h + bottom
 
     x0 = min(pre_rel, 0.0) if pre_rel is not None else 0.0
     x1 = (
@@ -468,6 +586,12 @@ def _write_task_stream_html(
         if post_end_rel is not None
         else max(T_compute or 0.0, makespan, float(t["end"].max()))
     )
+    app_total = None
+    if driver is not None:
+        d_segs, app_start_rel, app_end_rel, d_colors, d_setup = driver
+        app_total = app_end_rel - app_start_rel
+        x0 = min(x0, app_start_rel)
+        x1 = max(x1, app_end_rel)
     x1 *= 1.005
     sx = inner_w / (x1 - x0)
 
@@ -475,7 +599,7 @@ def _write_task_stream_html(
         return left + (sec - x0) * sx
 
     def Y(row):  # stream panel: row 0 at the bottom, like the matplotlib figure
-        return top + util_h + gap + stream_h - (row + 1) * lane_px
+        return top_u + util_h + gap + stream_h - (row + 1) * lane_px
 
     out = [
         f'<!DOCTYPE html><html><head><meta charset="utf-8">'
@@ -495,13 +619,37 @@ rect[data-i]:hover { stroke: #000; stroke-width: 0.8px; }
         f"<div style='font-size:13px;color:#444;margin-bottom:6px'>"
         f"ideal {ideal:.0f} s | task window {makespan:.0f} s"
         + (f" | T_compute {T_compute:.0f} s" if T_compute else "")
+        + (f" | application {app_total:.0f} s" if app_total is not None else "")
         + " &mdash; hover a bar for that task's timing</div>",
         f'<svg width="{width}" height="{height:.0f}" '
         f'xmlns="http://www.w3.org/2000/svg">',
     ]
 
-    # Pre/post shaded regions, spanning both panels.
-    panels_y0, panels_y1 = top, top + util_h + gap + stream_h
+    # ---- driver strip (application setup/finalize steps) ----
+    if driver is not None:
+        out.append(
+            f'<text class="axis" x="{left - 8}" '
+            f'y="{top + driver_h / 2 + 4:.0f}" text-anchor="end">driver</text>'
+        )
+        for lbl, s, e in d_segs:
+            text = f"driver: {lbl} · {e - s:.1f} s"
+            if lbl == _DRIVER_SETUP_LABEL:  # per-step breakdown on hover
+                text += "".join(f"\n  {sl} · {dur:.1f} s" for sl, dur in d_setup)
+            info = _html.escape(text).replace("\n", "&#10;")
+            out.append(
+                f'<rect x="{X(s):.1f}" y="{top}" '
+                f'width="{max((e - s) * sx, 0.5):.1f}" height="{driver_h}" '
+                f'fill="{d_colors[lbl]}" data-i="{info}"/>'
+            )
+            if (e - s) * sx > 7 * len(lbl) + 10:  # name the wide segments
+                out.append(
+                    f'<text class="note" x="{X((s + e) / 2):.1f}" '
+                    f'y="{top + driver_h / 2 + 4:.0f}" text-anchor="middle">'
+                    f"{_html.escape(lbl)}</text>"
+                )
+
+    # Pre/post shaded regions, spanning the utilization + stream panels.
+    panels_y0, panels_y1 = top_u, top_u + util_h + gap + stream_h
 
     def _vspan(a, b, color, opacity):
         out.append(
@@ -520,7 +668,7 @@ rect[data-i]:hover { stroke: #000; stroke-width: 0.8px; }
     r_max = max(float(np.max(running)), float(n_workers))
 
     def uy(v):
-        return top + util_h - v / (1.08 * r_max) * util_h
+        return top_u + util_h - v / (1.08 * r_max) * util_h
 
     pts = [f"{X(ev_t[0]):.1f},{uy(0):.1f}"]
     for i in range(len(ev_t)):  # step-after curve
@@ -540,7 +688,7 @@ rect[data-i]:hover { stroke: #000; stroke-width: 0.8px; }
         f"{n_workers} workers</text>"
     )
     out.append(
-        f'<text class="axis" x="{left - 8}" y="{top + util_h / 2:.0f}" '
+        f'<text class="axis" x="{left - 8}" y="{top_u + util_h / 2:.0f}" '
         f'text-anchor="end">running<tspan x="{left - 8}" dy="12">tasks'
         f"</tspan></text>"
     )
@@ -693,6 +841,7 @@ def plot_task_stream(
     compute_end=None,
     T_compute=None,
     n_workers=None,
+    driver_timing=None,
     anchor_source=None,
     title=None,
     save_path=None,
@@ -706,6 +855,16 @@ def plot_task_stream(
     worker slots with nothing to do -- with a running-task utilization panel
     on top, and prints the efficiency decomposition (ideal time, ramp-up,
     straggler tail, pre/post-map regions). Works for both compute backends.
+
+    When the driver-step timings are available (``driver_timing``, picked up
+    automatically from a return dict), a thin DRIVER strip is added above the
+    utilization panel: one light-red SETUP segment covering everything before
+    compute (creating/writing the empty image, opening the processing set,
+    building the map/reduce and dask graphs -- broken down per step in the
+    printed summary and in the HTML tooltip), the compute window, and the
+    finalize steps (consolidating metadata), placed on the same wall clock, so
+    the plot accounts for the ENTIRE time :func:`image_cube_single_field` was
+    running, not just the task window.
 
     Parameters
     ----------
@@ -734,6 +893,13 @@ def plot_task_stream(
     n_workers : int, optional
         Known worker-slot count of the cluster; default reconstructs it by
         packing the map tasks into lanes.
+    driver_timing : dict, optional
+        The application's ``timing_distributed_application`` dict (its ``T_*``
+        step durations plus, since 2026-08-31, the absolute
+        ``application_start_unixtime`` / ``application_end_unixtime`` anchors);
+        overrides the one from the return dict.  Enables the driver strip and
+        the application-total line of the printed decomposition; needs the
+        compute anchors to be placeable on the wall clock.
     anchor_source : str, optional
         Provenance note for the compute anchors, echoed in the printout.
     title : str, optional
@@ -775,6 +941,8 @@ def plot_task_stream(
             anchor_source = anchor_source or "measured"
         if T_compute is None:
             T_compute = timing.get("T_compute_dask_graph")
+        if driver_timing is None and timing:
+            driver_timing = timing
 
     pre_label = "pre-map: worker imports + graph submit"
     post_label = "post-map: reduce residue + gather/save"
@@ -834,6 +1002,12 @@ def plot_task_stream(
         pre_rel = compute_start - t0_abs  # negative seconds
         post_end_rel = compute_end - t0_abs
     post = (T_compute - makespan) if T_compute else None
+    driver = _driver_timeline(driver_timing, compute_start, compute_end, t0_abs)
+    if driver_timing and driver is None:
+        print(
+            "plot_task_stream: driver timings given but no absolute compute "
+            "anchors; cannot place the driver strip on the run timeline."
+        )
     summary = []  # the printed decomposition, echoed at the top of the figure
 
     def _p(line):
@@ -867,6 +1041,28 @@ def plot_task_stream(
                 f"(+{post:.1f} s outside the task window)"
             )
         _p(f"  end-to-end efficiency      : {100 * ideal / T_compute:.1f}% of ideal")
+    if driver is not None:
+        d_segs, app_start_rel, app_end_rel, d_colors, d_setup = driver
+        app_total = app_end_rel - app_start_rel
+        setup = pre_rel - app_start_rel
+        finalize = app_end_rel - post_end_rel
+        compute_span = post_end_rel - pre_rel
+        _p(
+            f"  application total          : {app_total:8.1f} s = "
+            f"{setup:.1f} s driver setup + {compute_span:.1f} s compute + "
+            f"{finalize:.1f} s finalize (entire image_cube_single_field call)"
+        )
+        steps = " | ".join(
+            [f"{lbl} {dur:.1f}" for lbl, dur in d_setup if dur >= 0.1]
+            + [
+                f"{lbl} {e - s:.1f}"
+                for lbl, s, e in d_segs
+                if lbl not in (_DRIVER_SETUP_LABEL, _DRIVER_COMPUTE_LABEL)
+                and e - s >= 0.1
+            ]
+        )
+        if steps:
+            _p(f"  driver steps (s)           : {steps}")
     # Ramp and tail: time to reach 95% of workers / time the last 5% of tasks
     # spend after the 95th-percentile end. (argmax = first True; searchsorted
     # is invalid here -- the running count is not monotonic.)
@@ -886,13 +1082,27 @@ def plot_task_stream(
         )
 
     # ---------------- figure ---------------------------------------------- #
-    fig, (ax_u, ax) = plt.subplots(
-        2,
-        1,
-        figsize=(15, 13),
-        sharex=True,
-        gridspec_kw={"height_ratios": [1, 5], "hspace": 0.04},
-    )
+    if driver is not None:
+        fig, (ax_d, ax_u, ax) = plt.subplots(
+            3,
+            1,
+            figsize=(15, 13.8),
+            sharex=True,
+            gridspec_kw={"height_ratios": [0.45, 1, 5], "hspace": 0.05},
+        )
+        for lbl, s, e in d_segs:
+            ax_d.add_patch(plt.Rectangle((s, 0), e - s, 1, color=d_colors[lbl], lw=0))
+        ax_d.set_ylim(0, 1)
+        ax_d.set_yticks([])
+        ax_d.set_ylabel("driver", fontsize=8)
+    else:
+        fig, (ax_u, ax) = plt.subplots(
+            2,
+            1,
+            figsize=(15, 13),
+            sharex=True,
+            gridspec_kw={"height_ratios": [1, 5], "hspace": 0.04},
+        )
 
     ax_u.fill_between(ev_t, running, step="post", color=_LOAD_COLOR, alpha=0.35, lw=0)
     ax_u.plot(ev_t, running, drawstyle="steps-post", color=_LOAD_COLOR, lw=1)
@@ -987,13 +1197,31 @@ def plot_task_stream(
     )
     ax.tick_params(axis="y", length=0)
     ax.set_ylim(-1, n_lanes)
-    left = pre_rel * 1.02 if pre_rel is not None else 0
+    left = pre_rel if pre_rel is not None else 0.0
     right = (
         post_end_rel
         if post_end_rel is not None
         else max(T_compute or 0, makespan, t["end"].max())
     )
-    ax.set_xlim(left, right * 1.005)
+    if driver is not None:
+        left = min(left, app_start_rel)
+        right = max(right, app_end_rel)
+    ax.set_xlim(left * 1.02 if left < 0 else left, right * 1.005)
+    if driver is not None:
+        # Name the wide driver segments in place; every step is identified in
+        # the legend below the figure (with its duration) regardless of width.
+        span = right - left
+        for lbl, s, e in d_segs:
+            if e - s > 0.04 * span:
+                ax_d.text(
+                    (s + e) / 2,
+                    0.5,
+                    lbl,
+                    ha="center",
+                    va="center",
+                    fontsize=7,
+                    color="#333333",
+                )
     ax.set_ylabel(f"worker processes ({n_lanes} lanes, grouped by host)")
     ax.set_xlabel("time since first task start (s)")
     handles = [
@@ -1008,10 +1236,30 @@ def plot_task_stream(
     ax.legend(
         handles=handles, loc="lower right", fontsize=8, frameon=True, framealpha=0.9
     )
+    if driver is not None:
+        # Driver-step legend below the figure (relies on the tight bounding
+        # box used when saving, like the summary block above the title).
+        d_dur = {}
+        for lbl, s, e in d_segs:
+            d_dur[lbl] = d_dur.get(lbl, 0.0) + (e - s)
+        fig.legend(
+            handles=[
+                Patch(color=d_colors[lbl], label=f"{lbl} ({dur:.1f} s)")
+                for lbl, dur in d_dur.items()
+            ],
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.005),
+            ncol=4,
+            fontsize=7,
+            frameon=False,
+            title="driver steps (top strip)",
+            title_fontsize=8,
+        )
     fig.suptitle(
         f"{title or 'task stream'}\n"
         f"ideal {ideal:.0f} s | task window {makespan:.0f} s | "
-        + (f"T_compute {T_compute:.0f} s" if T_compute else ""),
+        + (f"T_compute {T_compute:.0f} s" if T_compute else "")
+        + (f" | application {app_total:.0f} s" if driver is not None else ""),
         fontsize=12,
     )
     # Efficiency decomposition block above the title; it sits outside the
@@ -1045,5 +1293,6 @@ def plot_task_stream(
             post_label,
             title,
             html_path,
+            driver=driver,
         )
     return fig
