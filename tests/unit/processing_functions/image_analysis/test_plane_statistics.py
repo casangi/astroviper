@@ -126,7 +126,7 @@ def test_no_mask_and_no_primary_beam_gives_nan_masked_statistics():
 
 
 def test_primary_beam_fallback_mask_when_no_clean_mask():
-    """No MASK (a niter=0 run): masked stats fall back to the valid-sky area
+    """No MASK (a niter_per_plane=0 run): masked stats fall back to the valid-sky area
     PRIMARY_BEAM > primary_beam_limit."""
     img_xds = _make_image(with_mask=False, with_primary_beam=True)
     ds = calculate_plane_statistics(img_xds)["sky_residual"]

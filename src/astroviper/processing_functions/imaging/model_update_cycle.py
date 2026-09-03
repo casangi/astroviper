@@ -29,8 +29,8 @@ def model_update_cycle_cube_single_field(
     deconvolve_params : dict
         Per-cycle deconvolution / iteration-control parameters passed straight to
         the deconvolver: the absolute ``threshold`` (floor) plus the adaptive
-        ``cyclethreshold``, ``gain``, ``cycleniter``, ``niter_per_plane`` and
-        ``cyclethreshold_per_plane`` ...  The separate ``primary_beam_limit``
+        ``cycle_threshold``, ``gain``, ``cycle_niter``, ``cycle_niter_cap_pp`` and
+        ``cycle_threshold_pp`` ...  The separate ``primary_beam_limit``
         builds the primary-beam mask (a chunk-independent quantity, so the mask
         does not depend on how the cube was split across tasks); it is distinct
         from the deconvolver ``threshold``.

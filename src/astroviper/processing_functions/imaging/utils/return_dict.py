@@ -35,7 +35,7 @@ FIELD_ACCUM = {
 FIELD_SINGLE_VALUE = {
     "max_psf_sidelobe",  # PSF characteristic (doesn't change per cycle)
     "loop_gain",  # CLEAN gain parameter (constant)
-    "niter",  # Max iterations requested (parameter, not measurement)
+    "niter_per_plane",  # Max iterations requested (parameter, not measurement)
     "threshold",  # Threshold used (parameter, not measurement)
 }
 
@@ -58,7 +58,7 @@ class ReturnDict:
 
         For fields in FIELD_ACCUM (peakres, iter_done, masksum, peakres_nomask),
         values are appended to lists. For fields in FIELD_SINGLE_VALUE
-        (max_psf_sidelobe, loop_gain, niter, threshold), values replace previous values.
+        (max_psf_sidelobe, loop_gain, niter_per_plane, threshold), values replace previous values.
 
         Parameters:
         -----------
@@ -148,7 +148,7 @@ def return_dict_to_dataframe(return_dict):
         the derived columns ``n_cycles``, ``iter_total`` (total CLEAN
         iterations over all cycles -- 0 means the plane was never
         deconvolved), ``peakres_start`` / ``peakres_final`` and
-        ``model_flux_final``. Empty for an empty dict (e.g. a niter=0 run).
+        ``model_flux_final``. Empty for an empty dict (e.g. a niter_per_plane=0 run).
     """
     import pandas as pd
 

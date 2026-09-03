@@ -5,7 +5,7 @@ Tests cover:
 - ReturnDict core functionality (initialization, add, sel, to_dict, repr)
 - ReturnDict utility functions (merge, extraction)
 - IterationController initialization and parameter validation
-- Adaptive cyclethreshold calculation
+- Adaptive cycle_threshold calculation
 - Convergence checking with all stop codes
 - Count updates and state management
 - Threshold string parsing
@@ -410,7 +410,12 @@ class TestReturnDictFieldClassification(unittest.TestCase):
 
     def test_field_single_value_constants(self):
         """Test FIELD_SINGLE_VALUE contains expected fields."""
-        expected_fields = {"max_psf_sidelobe", "loop_gain", "niter", "threshold"}
+        expected_fields = {
+            "max_psf_sidelobe",
+            "loop_gain",
+            "niter_per_plane",
+            "threshold",
+        }
         self.assertEqual(FIELD_SINGLE_VALUE, expected_fields)
 
     def test_all_field_accum_become_lists(self):
@@ -451,7 +456,7 @@ class TestReturnDictFieldClassification(unittest.TestCase):
             {
                 "max_psf_sidelobe": 0.2,
                 "loop_gain": 0.1,
-                "niter": 1000,
+                "niter_per_plane": 1000,
                 "threshold": 0.01,
             },
             time=0,
@@ -769,17 +774,17 @@ class TestIterationControllerInitialization(unittest.TestCase):
         """Test controller with all default parameters."""
         controller = IterationController()
 
-        # niter is a per-plane array allocated lazily; _initial_niter holds the
+        # niter_per_plane is a per-plane array allocated lazily; _initial_niter_per_plane holds the
         # scalar per-plane budget until the first ReturnDict is seen.
-        self.assertIsNone(controller.niter)
-        self.assertEqual(controller._initial_niter, 1000)
+        self.assertIsNone(controller.niter_per_plane)
+        self.assertEqual(controller._initial_niter_per_plane, 1000)
         self.assertEqual(controller.nmajor, -1)
         self.assertEqual(controller.threshold, 0.0)
         self.assertEqual(controller.gain, 0.1)
-        self.assertEqual(controller.cyclefactor, 1.0)
+        self.assertEqual(controller.cycle_factor, 1.0)
         self.assertEqual(controller.minpsffraction, 0.05)
         self.assertEqual(controller.maxpsffraction, 0.8)
-        self.assertEqual(controller.cycleniter, -1)
+        self.assertEqual(controller.cycle_niter, -1)
         self.assertEqual(controller.nsigma, 0.0)
 
         # Tracking state
@@ -794,37 +799,37 @@ class TestIterationControllerInitialization(unittest.TestCase):
     def test_custom_initialization(self):
         """Test controller with custom parameters."""
         controller = IterationController(
-            niter=500,
+            niter_per_plane=500,
             nmajor=10,
             threshold=0.01,
             gain=0.2,
-            cyclefactor=1.5,
+            cycle_factor=1.5,
             minpsffraction=0.1,
             maxpsffraction=0.9,
-            cycleniter=100,
+            cycle_niter=100,
             nsigma=5.0,
         )
 
-        self.assertEqual(controller._initial_niter, 500)
-        self.assertIsNone(controller.niter)
+        self.assertEqual(controller._initial_niter_per_plane, 500)
+        self.assertIsNone(controller.niter_per_plane)
         self.assertEqual(controller.nmajor, 10)
         self.assertEqual(controller.threshold, 0.01)
         self.assertEqual(controller.gain, 0.2)
-        self.assertEqual(controller.cyclefactor, 1.5)
+        self.assertEqual(controller.cycle_factor, 1.5)
         self.assertEqual(controller.minpsffraction, 0.1)
         self.assertEqual(controller.maxpsffraction, 0.9)
-        self.assertEqual(controller.cycleniter, 100)
+        self.assertEqual(controller.cycle_niter, 100)
         self.assertEqual(controller.nsigma, 5.0)
 
 
 class TestCalculateCycleControls(unittest.TestCase):
-    """Test adaptive cyclethreshold calculation."""
+    """Test adaptive cycle_threshold calculation."""
 
     def setUp(self):
         """Create controller and test ReturnDict."""
         self.controller = IterationController(
-            niter=1000,
-            cyclefactor=1.5,
+            niter_per_plane=1000,
+            cycle_factor=1.5,
             minpsffraction=0.05,
             maxpsffraction=0.8,
         )
@@ -839,15 +844,15 @@ class TestCalculateCycleControls(unittest.TestCase):
             chan=0,
         )
 
-        cycleniter, cyclethresh = self.controller.calculate_cycle_controls(rd)
+        cycle_niter, cyclethresh = self.controller.calculate_cycle_controls(rd)
 
         # Expected: psf_fraction = 1.5 × 0.2 = 0.3
         #           cyclethresh = 0.3 × 1.0 = 0.3
-        self.assertEqual(cycleniter, 1000)
+        self.assertEqual(cycle_niter, 1000)
         self.assertAlmostEqual(cyclethresh, 0.3, places=10)
 
     def test_cyclethreshold_clamping_min(self):
-        """Test cyclethreshold clamping to minpsffraction."""
+        """Test cycle_threshold clamping to minpsffraction."""
         rd = ReturnDict()
         # Very small PSF sidelobe
         rd.add(
@@ -857,7 +862,7 @@ class TestCalculateCycleControls(unittest.TestCase):
             chan=0,
         )
 
-        cycleniter, cyclethresh = self.controller.calculate_cycle_controls(rd)
+        cycle_niter, cyclethresh = self.controller.calculate_cycle_controls(rd)
 
         # psf_fraction = 1.5 × 0.01 = 0.015
         # Clamped to minpsffraction = 0.05
@@ -865,7 +870,7 @@ class TestCalculateCycleControls(unittest.TestCase):
         self.assertEqual(cyclethresh, 0.05)
 
     def test_cyclethreshold_clamping_max(self):
-        """Test cyclethreshold clamping to maxpsffraction."""
+        """Test cycle_threshold clamping to maxpsffraction."""
         rd = ReturnDict()
         # Very large PSF sidelobe
         rd.add(
@@ -875,7 +880,7 @@ class TestCalculateCycleControls(unittest.TestCase):
             chan=0,
         )
 
-        cycleniter, cyclethresh = self.controller.calculate_cycle_controls(rd)
+        cycle_niter, cyclethresh = self.controller.calculate_cycle_controls(rd)
 
         # psf_fraction = 1.5 × 0.9 = 1.35
         # Clamped to maxpsffraction = 0.8
@@ -883,11 +888,11 @@ class TestCalculateCycleControls(unittest.TestCase):
         self.assertEqual(cyclethresh, 0.8)
 
     def test_cyclethreshold_respects_global_threshold(self):
-        """Test cyclethreshold respects global threshold as minimum."""
+        """Test cycle_threshold respects global threshold as minimum."""
         controller = IterationController(
-            niter=1000,
+            niter_per_plane=1000,
             threshold=0.5,  # High global threshold
-            cyclefactor=1.0,
+            cycle_factor=1.0,
         )
 
         rd = ReturnDict()
@@ -898,7 +903,7 @@ class TestCalculateCycleControls(unittest.TestCase):
             chan=0,
         )
 
-        cycleniter, cyclethresh = controller.calculate_cycle_controls(rd)
+        cycle_niter, cyclethresh = controller.calculate_cycle_controls(rd)
 
         # psf_fraction = 1.0 × 0.2 = 0.2
         # cyclethresh_calc = 0.2 × 1.0 = 0.2
@@ -906,10 +911,10 @@ class TestCalculateCycleControls(unittest.TestCase):
         self.assertEqual(cyclethresh, 0.5)
 
     def test_cycleniter_cap_applied(self):
-        """Test cycleniter cap is applied."""
+        """Test cycle_niter cap is applied."""
         controller = IterationController(
-            niter=1000,
-            cycleniter=100,  # Cap at 100 per cycle
+            niter_per_plane=1000,
+            cycle_niter=100,  # Cap at 100 per cycle
         )
 
         rd = ReturnDict()
@@ -920,16 +925,16 @@ class TestCalculateCycleControls(unittest.TestCase):
             chan=0,
         )
 
-        cycleniter, cyclethresh = controller.calculate_cycle_controls(rd)
+        cycle_niter, cyclethresh = controller.calculate_cycle_controls(rd)
 
         # Should use min(100, 1000) = 100
-        self.assertEqual(cycleniter, 100)
+        self.assertEqual(cycle_niter, 100)
 
     def test_cycleniter_respects_remaining_iterations(self):
-        """Test cycleniter respects remaining niter."""
+        """Test cycle_niter respects remaining niter_per_plane."""
         controller = IterationController(
-            niter=50,  # Only 50 iterations left
-            cycleniter=100,
+            niter_per_plane=50,  # Only 50 iterations left
+            cycle_niter=100,
         )
 
         rd = ReturnDict()
@@ -940,10 +945,10 @@ class TestCalculateCycleControls(unittest.TestCase):
             chan=0,
         )
 
-        cycleniter, cyclethresh = controller.calculate_cycle_controls(rd)
+        cycle_niter, cyclethresh = controller.calculate_cycle_controls(rd)
 
         # Should use min(100, 50) = 50
-        self.assertEqual(cycleniter, 50)
+        self.assertEqual(cycle_niter, 50)
 
     def test_default_psf_sidelobe_used(self):
         """Test default PSF sidelobe when not in ReturnDict."""
@@ -955,7 +960,7 @@ class TestCalculateCycleControls(unittest.TestCase):
             chan=0,
         )
 
-        cycleniter, cyclethresh = self.controller.calculate_cycle_controls(rd)
+        cycle_niter, cyclethresh = self.controller.calculate_cycle_controls(rd)
 
         # Should use default 0.2
         # psf_fraction = 1.5 × 0.2 = 0.3
@@ -969,7 +974,7 @@ class TestCheckConvergence(unittest.TestCase):
     def test_continue_when_not_converged(self):
         """Test continuing when no stopping criteria met."""
         controller = IterationController(
-            niter=1000,
+            niter_per_plane=1000,
             threshold=0.01,
         )
 
@@ -989,7 +994,7 @@ class TestCheckConvergence(unittest.TestCase):
 
     def test_stop_on_zero_mask(self):
         """Test stopping when mask is zero (priority 1)."""
-        controller = IterationController(niter=1000)
+        controller = IterationController(niter_per_plane=1000)
 
         rd = ReturnDict()
         rd.add(
@@ -1005,8 +1010,8 @@ class TestCheckConvergence(unittest.TestCase):
         self.assertIn("Zero mask", desc)
 
     def test_stop_on_iteration_limit(self):
-        """Test stopping when niter exhausted (priority 2)."""
-        controller = IterationController(niter=0)  # No iterations left
+        """Test stopping when niter_per_plane exhausted (priority 2)."""
+        controller = IterationController(niter_per_plane=0)  # No iterations left
 
         rd = ReturnDict()
         rd.add(
@@ -1024,7 +1029,7 @@ class TestCheckConvergence(unittest.TestCase):
     def test_stop_on_threshold(self):
         """Test stopping when threshold reached (priority 3)."""
         controller = IterationController(
-            niter=1000,
+            niter_per_plane=1000,
             threshold=0.5,  # Set threshold
         )
 
@@ -1044,7 +1049,7 @@ class TestCheckConvergence(unittest.TestCase):
     def test_threshold_exactly_at_limit(self):
         """Test stopping when peak residual exactly equals threshold."""
         controller = IterationController(
-            niter=1000,
+            niter_per_plane=1000,
             threshold=0.5,
         )
 
@@ -1063,7 +1068,7 @@ class TestCheckConvergence(unittest.TestCase):
     def test_stop_on_major_cycle_limit(self):
         """Test stopping when nmajor exhausted (priority 4)."""
         controller = IterationController(
-            niter=1000,
+            niter_per_plane=1000,
             nmajor=0,  # No major cycles left
             threshold=0.0,
         )
@@ -1084,7 +1089,7 @@ class TestCheckConvergence(unittest.TestCase):
     def test_priority_zero_mask_over_others(self):
         """Test zero mask has highest priority."""
         controller = IterationController(
-            niter=0,  # Also at iteration limit
+            niter_per_plane=0,  # Also at iteration limit
             nmajor=0,  # Also at major cycle limit
             threshold=1.0,  # Also below threshold
         )
@@ -1105,7 +1110,7 @@ class TestCheckConvergence(unittest.TestCase):
     def test_priority_iter_limit_over_threshold(self):
         """Test iteration limit has priority over threshold."""
         controller = IterationController(
-            niter=0,  # At iteration limit
+            niter_per_plane=0,  # At iteration limit
             threshold=1.0,  # Also below threshold
         )
 
@@ -1125,7 +1130,7 @@ class TestCheckConvergence(unittest.TestCase):
     def test_nmajor_unlimited_never_stops(self):
         """Test nmajor=-1 (unlimited) never triggers cycle limit."""
         controller = IterationController(
-            niter=1000,
+            niter_per_plane=1000,
             nmajor=-1,  # Unlimited
         )
 
@@ -1144,7 +1149,7 @@ class TestCheckConvergence(unittest.TestCase):
     def test_threshold_zero_never_stops(self):
         """Test threshold=0 (disabled) never triggers threshold stop."""
         controller = IterationController(
-            niter=1000,
+            niter_per_plane=1000,
             threshold=0.0,  # Disabled
         )
 
@@ -1163,7 +1168,7 @@ class TestCheckConvergence(unittest.TestCase):
 
     def test_stopcode_state_updated(self):
         """Test controller's internal stopcode is updated."""
-        controller = IterationController(niter=0)
+        controller = IterationController(niter_per_plane=0)
 
         rd = ReturnDict()
         rd.add({"peakres": 0.5, "masksum": 100}, time=0, pol=0, chan=0)
@@ -1180,25 +1185,25 @@ class TestUpdateCounts(unittest.TestCase):
 
     def test_basic_count_update(self):
         """Test basic count decrementing."""
-        controller = IterationController(niter=1000, nmajor=5)
+        controller = IterationController(niter_per_plane=1000, nmajor=5)
 
         rd = ReturnDict()
         rd.add({"iter_done": 100}, time=0, pol=0, chan=0)
 
         controller.update_counts(rd)
 
-        # niter: 1000 - 100 = 900 (per-plane, plane (0,0,0))
+        # niter_per_plane: 1000 - 100 = 900 (per-plane, plane (0,0,0))
         # nmajor: 5 - 1 = 4
         # major_done: 0 + 1 = 1
         # total_iter_done: 0 + 100 = 100
-        self.assertEqual(controller.niter[0, 0, 0], 900)
+        self.assertEqual(controller.niter_per_plane[0, 0, 0], 900)
         self.assertEqual(controller.nmajor, 4)
         self.assertEqual(controller.major_done, 1)
         self.assertEqual(controller.total_iter_done, 100)
 
     def test_multiple_updates(self):
         """Test multiple count updates accumulate correctly."""
-        controller = IterationController(niter=1000, nmajor=5)
+        controller = IterationController(niter_per_plane=1000, nmajor=5)
 
         rd1 = ReturnDict()
         rd1.add({"iter_done": 100}, time=0, pol=0, chan=0)
@@ -1209,14 +1214,14 @@ class TestUpdateCounts(unittest.TestCase):
         controller.update_counts(rd1)
         controller.update_counts(rd2)
 
-        self.assertEqual(controller.niter[0, 0, 0], 750)  # 1000 - 100 - 150
+        self.assertEqual(controller.niter_per_plane[0, 0, 0], 750)  # 1000 - 100 - 150
         self.assertEqual(controller.nmajor, 3)  # 5 - 1 - 1
         self.assertEqual(controller.major_done, 2)
         self.assertEqual(controller.total_iter_done, 250)  # 100 + 150
 
     def test_niter_floor_at_zero(self):
-        """Test niter doesn't go negative."""
-        controller = IterationController(niter=50)
+        """Test niter_per_plane doesn't go negative."""
+        controller = IterationController(niter_per_plane=50)
 
         rd = ReturnDict()
         rd.add({"iter_done": 100}, time=0, pol=0, chan=0)
@@ -1224,7 +1229,7 @@ class TestUpdateCounts(unittest.TestCase):
         controller.update_counts(rd)
 
         # Should floor at 0, not go negative
-        self.assertEqual(controller.niter[0, 0, 0], 0)
+        self.assertEqual(controller.niter_per_plane[0, 0, 0], 0)
 
     def test_nmajor_floor_at_zero(self):
         """Test nmajor doesn't go negative."""
@@ -1244,7 +1249,7 @@ class TestUpdateCounts(unittest.TestCase):
 
     def test_nmajor_unlimited_never_decrements(self):
         """Test nmajor=-1 (unlimited) never decrements."""
-        controller = IterationController(niter=1000, nmajor=-1)
+        controller = IterationController(niter_per_plane=1000, nmajor=-1)
 
         rd = ReturnDict()
         rd.add({"iter_done": 100}, time=0, pol=0, chan=0)
@@ -1257,7 +1262,7 @@ class TestUpdateCounts(unittest.TestCase):
 
     def test_update_with_multiple_planes(self):
         """Test update sums iterations across multiple planes."""
-        controller = IterationController(niter=1000)
+        controller = IterationController(niter_per_plane=1000)
 
         rd = ReturnDict()
         rd.add({"iter_done": 50}, time=0, pol=0, chan=0)
@@ -1266,18 +1271,24 @@ class TestUpdateCounts(unittest.TestCase):
 
         controller.update_counts(rd)
 
-        # Each plane's remaining niter is decremented independently by its own
+        # Each plane's remaining niter_per_plane is decremented independently by its own
         # iter_done. Arrays are indexed (time, chan, pol).
-        self.assertEqual(controller.niter[0, 0, 0], 950)  # Key(0,0,0): 1000-50
-        self.assertEqual(controller.niter[0, 1, 0], 970)  # Key(0,0,1): 1000-30
-        self.assertEqual(controller.niter[0, 0, 1], 980)  # Key(0,1,0): 1000-20
+        self.assertEqual(
+            controller.niter_per_plane[0, 0, 0], 950
+        )  # Key(0,0,0): 1000-50
+        self.assertEqual(
+            controller.niter_per_plane[0, 1, 0], 970
+        )  # Key(0,0,1): 1000-30
+        self.assertEqual(
+            controller.niter_per_plane[0, 0, 1], 980
+        )  # Key(0,1,0): 1000-20
         # total_iter_done sums across planes: 50 + 30 + 20 = 100
         self.assertEqual(controller.total_iter_done, 100)
         self.assertEqual(controller.major_done, 1)
 
     def test_no_update_when_converged(self):
         """Test update_counts does nothing when already converged."""
-        controller = IterationController(niter=1000, nmajor=5)
+        controller = IterationController(niter_per_plane=1000, nmajor=5)
 
         # Set converged state
         controller.stopcode = StopCode(major=MAJOR_THRESHOLD, minor=MINOR_CONTINUE)
@@ -1289,8 +1300,8 @@ class TestUpdateCounts(unittest.TestCase):
 
         # Counts should not change (update_counts returns early when converged,
         # so the per-plane array is never even allocated).
-        self.assertIsNone(controller.niter)
-        self.assertEqual(controller._initial_niter, 1000)
+        self.assertIsNone(controller.niter_per_plane)
+        self.assertEqual(controller._initial_niter_per_plane, 1000)
         self.assertEqual(controller.nmajor, 5)
         self.assertEqual(controller.major_done, 0)
         self.assertEqual(controller.total_iter_done, 0)
@@ -1300,25 +1311,25 @@ class TestUpdateParameters(unittest.TestCase):
     """Test interactive parameter updates with validation."""
 
     def test_update_niter(self):
-        """Test updating niter parameter."""
-        controller = IterationController(niter=1000)
+        """Test updating niter_per_plane parameter."""
+        controller = IterationController(niter_per_plane=1000)
 
-        code, msg = controller.update_parameters(niter=500)
+        code, msg = controller.update_parameters(niter_per_plane=500)
 
         self.assertEqual(code, 0)
         self.assertEqual(msg, "")
-        # niter sets the per-plane budget; with no array allocated yet this is
-        # reflected in _initial_niter.
-        self.assertEqual(controller._initial_niter, 500)
+        # niter_per_plane sets the per-plane budget; with no array allocated yet this is
+        # reflected in _initial_niter_per_plane.
+        self.assertEqual(controller._initial_niter_per_plane, 500)
 
     def test_update_cycleniter(self):
-        """Test updating cycleniter parameter."""
-        controller = IterationController(cycleniter=-1)
+        """Test updating cycle_niter parameter."""
+        controller = IterationController(cycle_niter=-1)
 
-        code, msg = controller.update_parameters(cycleniter=100)
+        code, msg = controller.update_parameters(cycle_niter=100)
 
         self.assertEqual(code, 0)
-        self.assertEqual(controller.cycleniter, 100)
+        self.assertEqual(controller.cycle_niter, 100)
 
     def test_update_nmajor(self):
         """Test updating nmajor parameter."""
@@ -1366,38 +1377,38 @@ class TestUpdateParameters(unittest.TestCase):
         self.assertAlmostEqual(controller.threshold, 0.0001)
 
     def test_update_cyclefactor(self):
-        """Test updating cyclefactor parameter."""
-        controller = IterationController(cyclefactor=1.0)
+        """Test updating cycle_factor parameter."""
+        controller = IterationController(cycle_factor=1.0)
 
-        code, msg = controller.update_parameters(cyclefactor=1.5)
+        code, msg = controller.update_parameters(cycle_factor=1.5)
 
         self.assertEqual(code, 0)
-        self.assertEqual(controller.cyclefactor, 1.5)
+        self.assertEqual(controller.cycle_factor, 1.5)
 
     def test_update_multiple_parameters(self):
         """Test updating multiple parameters at once."""
         controller = IterationController()
 
         code, msg = controller.update_parameters(
-            niter=500,
+            niter_per_plane=500,
             threshold="5mJy",
-            cyclefactor=1.5,
+            cycle_factor=1.5,
         )
 
         self.assertEqual(code, 0)
-        self.assertEqual(controller._initial_niter, 500)
+        self.assertEqual(controller._initial_niter_per_plane, 500)
         self.assertAlmostEqual(controller.threshold, 0.005)
-        self.assertEqual(controller.cyclefactor, 1.5)
+        self.assertEqual(controller.cycle_factor, 1.5)
 
     def test_reject_negative_niter(self):
-        """Test rejecting niter < -1."""
+        """Test rejecting niter_per_plane < -1."""
         controller = IterationController()
 
-        code, msg = controller.update_parameters(niter=-2)
+        code, msg = controller.update_parameters(niter_per_plane=-2)
 
         self.assertEqual(code, -1)
-        self.assertIn("niter must be >= -1", msg)
-        self.assertEqual(controller._initial_niter, 1000)  # Unchanged
+        self.assertIn("niter_per_plane must be >= -1", msg)
+        self.assertEqual(controller._initial_niter_per_plane, 1000)  # Unchanged
 
     def test_reject_negative_threshold_numeric(self):
         """Test rejecting negative numeric threshold."""
@@ -1418,18 +1429,18 @@ class TestUpdateParameters(unittest.TestCase):
         self.assertIn("threshold must be >= 0", msg)
 
     def test_reject_zero_cyclefactor(self):
-        """Test rejecting cyclefactor <= 0."""
+        """Test rejecting cycle_factor <= 0."""
         controller = IterationController()
 
-        code, msg = controller.update_parameters(cyclefactor=0)
+        code, msg = controller.update_parameters(cycle_factor=0)
 
         self.assertEqual(code, -1)
-        self.assertIn("cyclefactor must be > 0", msg)
+        self.assertIn("cycle_factor must be > 0", msg)
 
-        code, msg = controller.update_parameters(cyclefactor=-1.0)
+        code, msg = controller.update_parameters(cycle_factor=-1.0)
 
         self.assertEqual(code, -1)
-        self.assertIn("cyclefactor must be > 0", msg)
+        self.assertIn("cycle_factor must be > 0", msg)
 
     def test_reject_invalid_threshold_string(self):
         """Test rejecting threshold string with unknown units."""
@@ -1441,10 +1452,10 @@ class TestUpdateParameters(unittest.TestCase):
         self.assertIn("number with units", msg)
 
     def test_reject_non_numeric_niter(self):
-        """Test rejecting non-numeric niter."""
+        """Test rejecting non-numeric niter_per_plane."""
         controller = IterationController()
 
-        code, msg = controller.update_parameters(niter="abc")
+        code, msg = controller.update_parameters(niter_per_plane="abc")
 
         self.assertEqual(code, -1)
         self.assertIn("integer", msg)
@@ -1455,7 +1466,7 @@ class TestResetMethods(unittest.TestCase):
 
     def test_reset(self):
         """Test full reset restores initial state."""
-        controller = IterationController(niter=1000, nmajor=5)
+        controller = IterationController(niter_per_plane=1000, nmajor=5)
 
         # Simulate some work
         rd = ReturnDict()
@@ -1469,7 +1480,7 @@ class TestResetMethods(unittest.TestCase):
         controller.reset()
 
         # Should restore to initial state (per-plane array reset to the budget)
-        self.assertEqual(controller.niter[0, 0, 0], 1000)
+        self.assertEqual(controller.niter_per_plane[0, 0, 0], 1000)
         self.assertEqual(controller.major_done, 0)
         self.assertEqual(controller.total_iter_done, 0)
         self.assertEqual(controller.stopcode.major, MAJOR_CONTINUE)
@@ -1477,7 +1488,7 @@ class TestResetMethods(unittest.TestCase):
 
     def test_reset_stopcode_only(self):
         """Test reset_stopcode only resets convergence state."""
-        controller = IterationController(niter=1000)
+        controller = IterationController(niter_per_plane=1000)
 
         # Simulate some work
         rd = ReturnDict()
@@ -1495,7 +1506,7 @@ class TestResetMethods(unittest.TestCase):
         self.assertEqual(controller.stopcode.minor, MINOR_CONTINUE)
 
         # But counts should remain
-        self.assertEqual(controller.niter[0, 0, 0], 700)
+        self.assertEqual(controller.niter_per_plane[0, 0, 0], 700)
         self.assertEqual(controller.major_done, 1)
 
 
@@ -1505,10 +1516,10 @@ class TestGetState(unittest.TestCase):
     def test_get_state(self):
         """Test getting controller state as dictionary."""
         controller = IterationController(
-            niter=1000,
+            niter_per_plane=1000,
             nmajor=5,
             threshold=0.01,
-            cyclefactor=1.5,
+            cycle_factor=1.5,
         )
 
         # Simulate some work
@@ -1518,12 +1529,12 @@ class TestGetState(unittest.TestCase):
 
         state = controller.get_state()
 
-        # Check all fields present. niter is serialized per-plane (nested list).
-        self.assertEqual(state["niter"][0][0][0], 800)
+        # Check all fields present. niter_per_plane is serialized per-plane (nested list).
+        self.assertEqual(state["niter_per_plane"][0][0][0], 800)
         self.assertEqual(state["nmajor"], 4)
-        self.assertEqual(state["initial_niter"], 1000)
+        self.assertEqual(state["initial_niter_per_plane"], 1000)
         self.assertEqual(state["threshold"], 0.01)
-        self.assertEqual(state["cyclefactor"], 1.5)
+        self.assertEqual(state["cycle_factor"], 1.5)
         self.assertEqual(state["major_done"], 1)
         self.assertEqual(state["total_iter_done"], 200)
 
@@ -1539,10 +1550,10 @@ class TestFullMajorCycleWorkflow(unittest.TestCase):
     def test_basic_convergence_workflow(self):
         """Test basic major cycle workflow until convergence."""
         controller = IterationController(
-            niter=300,
+            niter_per_plane=300,
             nmajor=5,
             threshold=0.1,
-            cyclefactor=1.5,
+            cycle_factor=1.5,
         )
 
         # Simulate 3 major cycles with decreasing residual
@@ -1567,7 +1578,7 @@ class TestFullMajorCycleWorkflow(unittest.TestCase):
             )
 
             # Calculate cycle controls
-            cycleniter, cyclethresh = controller.calculate_cycle_controls(rd)
+            cycle_niter, cyclethresh = controller.calculate_cycle_controls(rd)
 
             # Update counts
             controller.update_counts(rd)
@@ -1584,12 +1595,12 @@ class TestFullMajorCycleWorkflow(unittest.TestCase):
         # Verify final state
         self.assertEqual(controller.major_done, 3)
         self.assertEqual(controller.total_iter_done, 250)
-        self.assertEqual(controller.niter[0, 0, 0], 50)  # 300 - 250
+        self.assertEqual(controller.niter_per_plane[0, 0, 0], 50)  # 300 - 250
 
     def test_iteration_limit_workflow(self):
         """Test workflow stopping at iteration limit."""
         controller = IterationController(
-            niter=250,  # Limited iterations
+            niter_per_plane=250,  # Limited iterations
             threshold=0.01,  # Low threshold (hard to reach)
         )
 
@@ -1613,7 +1624,7 @@ class TestFullMajorCycleWorkflow(unittest.TestCase):
 
             if stopcode.major != MAJOR_CONTINUE:
                 # Should stop after cycle 3 (3 × 100 = 300 > 250)
-                # But niter floors at 0 after cycle 2
+                # But niter_per_plane floors at 0 after cycle 2
                 self.assertEqual(cycle, 2)
                 self.assertEqual(stopcode.major, MAJOR_ITER_LIMIT)
                 break
@@ -1621,7 +1632,7 @@ class TestFullMajorCycleWorkflow(unittest.TestCase):
     def test_major_cycle_limit_workflow(self):
         """Test workflow stopping at major cycle limit."""
         controller = IterationController(
-            niter=1000,
+            niter_per_plane=1000,
             nmajor=3,  # Limited major cycles
             threshold=0.01,
         )
@@ -1659,7 +1670,7 @@ class TestFullMajorCycleWorkflow(unittest.TestCase):
     def test_zero_mask_workflow(self):
         """Test workflow stopping when mask becomes zero."""
         controller = IterationController(
-            niter=1000,
+            niter_per_plane=1000,
             threshold=0.1,
         )
 
@@ -1692,7 +1703,7 @@ class TestFullMajorCycleWorkflow(unittest.TestCase):
     def test_interactive_continue_workflow(self):
         """Test interactive workflow: stop, update params, continue."""
         controller = IterationController(
-            niter=100,
+            niter_per_plane=100,
             threshold=0.5,
         )
 
@@ -1716,7 +1727,7 @@ class TestFullMajorCycleWorkflow(unittest.TestCase):
         self.assertEqual(stopcode.major, MAJOR_ITER_LIMIT)
 
         # User decides to continue with more iterations
-        code, msg = controller.update_parameters(niter=200)
+        code, msg = controller.update_parameters(niter_per_plane=200)
         self.assertEqual(code, 0)
 
         # Reset stopcode to continue
@@ -1750,7 +1761,7 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
     def test_merge_and_converge_multi_channel(self):
         """Test merging results from multiple channels."""
         controller = IterationController(
-            niter=300,
+            niter_per_plane=300,
             threshold=0.1,
         )
 
@@ -1814,10 +1825,10 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
         # the threshold 0.1, so all planes stay active and the aggregate is
         # CONTINUE.
         self.assertEqual(stopcode.major, MAJOR_CONTINUE)
-        # Each channel's remaining niter is decremented by its own iter_done.
-        self.assertEqual(controller.niter[0, 0, 0], 250)  # chan0: 300-50
-        self.assertEqual(controller.niter[0, 1, 0], 240)  # chan1: 300-60
-        self.assertEqual(controller.niter[0, 2, 0], 260)  # chan2: 300-40
+        # Each channel's remaining niter_per_plane is decremented by its own iter_done.
+        self.assertEqual(controller.niter_per_plane[0, 0, 0], 250)  # chan0: 300-50
+        self.assertEqual(controller.niter_per_plane[0, 1, 0], 240)  # chan1: 300-60
+        self.assertEqual(controller.niter_per_plane[0, 2, 0], 260)  # chan2: 300-40
         self.assertEqual(controller.total_iter_done, 150)  # 50 + 60 + 40
 
     def test_partial_zero_mask_handling(self):

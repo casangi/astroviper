@@ -11,13 +11,13 @@ Per-plane iteration control
 All iteration control is performed independently for every
 ``(time, chan(frequency), pol)`` plane. Concretely:
 
-- ``niter`` is a per-plane array of remaining iterations
-  (:attr:`IterationController.niter`, shape ``(ntime, nchan, npol)``);
+- ``niter_per_plane`` is a per-plane array of remaining iterations
+  (:attr:`IterationController.niter_per_plane`, shape ``(ntime, nchan, npol)``);
 - every stopping criterion (zero mask, iteration limit, threshold, major-cycle
   limit) is evaluated per plane, and each plane carries its own stop code;
 - thresholds may differ per plane — :meth:`IterationController.per_plane_cycle_threshold`
-  produces a per-plane cyclethreshold array, and the deconvolvers accept
-  per-plane ``niter`` and ``threshold`` arrays.
+  produces a per-plane cycle_threshold array, and the deconvolvers accept
+  per-plane ``niter_per_plane`` and ``threshold`` arrays.
 
 The major-cycle loop continues while *any* plane is still active.
 """
@@ -47,15 +47,15 @@ StopCode = namedtuple("StopCode", ["major", "minor"])
 
 # Major cycle stop codes (global convergence)
 MAJOR_CONTINUE = 0  # Continue major cycles
-MAJOR_ITER_LIMIT = 1  # Reached total iteration limit (niter)
+MAJOR_ITER_LIMIT = 1  # Reached total iteration limit (niter_per_plane)
 MAJOR_THRESHOLD = 2  # Peak residual below global threshold
 MAJOR_ZERO_MASK = 7  # Zero mask (no valid pixels)
 MAJOR_CYCLE_LIMIT = 9  # Reached major cycle limit (nmajor)
 
 # Minor cycle stop codes (per-cycle convergence)
 MINOR_CONTINUE = 0  # Continue minor cycles
-MINOR_ITER_LIMIT = 1  # Reached per-cycle iteration limit (cycleniter)
-MINOR_THRESHOLD = 2  # Peak residual below cyclethreshold
+MINOR_ITER_LIMIT = 1  # Reached per-cycle iteration limit (cycle_niter)
+MINOR_THRESHOLD = 2  # Peak residual below cycle_threshold
 MINOR_DIVERGENCE = 4  # Possible divergence detected
 MINOR_ZERO_MASK = 7  # Zero mask detected during minor cycle
 
@@ -562,21 +562,21 @@ class IterationController:
     Per-plane iteration control
     ---------------------------
     All iteration control is performed independently for every
-    ``(time, chan(frequency), pol)`` plane. ``niter`` is a per-plane array,
+    ``(time, chan(frequency), pol)`` plane. ``niter_per_plane`` is a per-plane array,
     each plane carries its own stop code, and thresholds may differ per plane
     (:meth:`per_plane_cycle_threshold`). The deconvolvers are driven with
-    per-plane ``niter`` and ``threshold`` arrays. The major-cycle loop
+    per-plane ``niter_per_plane`` and ``threshold`` arrays. The major-cycle loop
     continues while *any* plane is still active; the aggregate ``stopcode``
     reported by :meth:`check_convergence` is CONTINUE until every plane has
     stopped.
 
     Attributes:
     -----------
-    niter : numpy.ndarray or None
+    niter_per_plane : numpy.ndarray or None
         Per-plane remaining minor-cycle iterations, shape
         ``(ntime, nchan, npol)`` indexed ``(time, chan, pol)``. Allocated
         lazily the first time a ReturnDict is seen (the cube shape is unknown
-        at construction); ``None`` until then. ``_initial_niter`` holds the
+        at construction); ``None`` until then. ``_initial_niter_per_plane`` holds the
         scalar per-plane budget.
     nmajor : int
         Maximum number of major cycles remaining (-1 = unlimited). Major cycles
@@ -585,14 +585,16 @@ class IterationController:
         Global stopping threshold (in Jy or image units)
     gain : float
         CLEAN loop gain (typically 0.1)
-    cyclefactor : float
-        Multiplier for PSF sidelobe to set cyclethreshold
+    cycle_factor : float
+        Multiplier for PSF sidelobe to set cycle_threshold
     minpsffraction : float
-        Minimum PSF fraction for cyclethreshold calculation
+        Minimum PSF fraction for cycle_threshold calculation
     maxpsffraction : float
-        Maximum PSF fraction for cyclethreshold calculation
-    cycleniter : int
-        Maximum iterations per minor cycle (-1 = use niter)
+        Maximum PSF fraction for cycle_threshold calculation
+    cycle_niter : int
+        Maximum iterations one plane may run in a single model update
+        cycle. ``-1`` lets the adaptive ``cycle_threshold`` govern the
+        depth instead.
     nsigma : float
         N-sigma threshold for stopping (0 = disabled)
 
@@ -614,14 +616,14 @@ class IterationController:
 
     def __init__(
         self,
-        niter: int = 1000,
+        niter_per_plane: int = 1000,
         nmajor: int = -1,
         threshold: float = 0.0,
         gain: float = 0.1,
-        cyclefactor: float = 1.0,
+        cycle_factor: float = 1.0,
         minpsffraction: float = 0.05,
         maxpsffraction: float = 0.8,
-        cycleniter: int = -1,
+        cycle_niter: int = -1,
         nsigma: float = 0.0,
     ):
         """
@@ -629,8 +631,12 @@ class IterationController:
 
         Parameters:
         -----------
-        niter : int, optional
-            Maximum total number of CLEAN iterations (default: 1000)
+        niter_per_plane : int, optional
+            Maximum CLEAN iterations for ONE plane, summed over all
+            residual update cycles (default: 1000). Every plane is seeded
+            with this full value; no budget is shared or split between
+            planes. This is the deliberate difference from CASA's
+            image-wide ``niter``.
 
         nmajor : int, optional
             Maximum number of major cycles (default: -1 for unlimited)
@@ -641,8 +647,8 @@ class IterationController:
         gain : float, optional
             CLEAN loop gain, range (0, 1] (default: 0.1)
 
-        cyclefactor : float, optional
-            Multiplier for adaptive cyclethreshold (default: 1.0)
+        cycle_factor : float, optional
+            Multiplier for adaptive cycle_threshold (default: 1.0)
 
         minpsffraction : float, optional
             Minimum PSF sidelobe fraction (default: 0.05)
@@ -650,18 +656,18 @@ class IterationController:
         maxpsffraction : float, optional
             Maximum PSF sidelobe fraction (default: 0.8)
 
-        cycleniter : int, optional
+        cycle_niter : int, optional
             Max iterations per minor cycle (default: -1)
 
         nsigma : float, optional
             N-sigma threshold for stopping (default: 0.0, disabled)
         """
-        # Iteration limits. niter is per-plane and allocated lazily (the cube
+        # Iteration limits. niter_per_plane is per-plane and allocated lazily (the cube
         # shape is not known until the first ReturnDict is seen); until then
-        # _initial_niter holds the scalar per-plane budget. See _ensure_state.
-        self._initial_niter = niter
-        self.niter = None
-        # Per-plane stop codes, same shape as self.niter (allocated lazily).
+        # _initial_niter_per_plane holds the scalar per-plane budget. See _ensure_state.
+        self._initial_niter_per_plane = niter_per_plane
+        self.niter_per_plane = None
+        # Per-plane stop codes, same shape as self.niter_per_plane (allocated lazily).
         self.stopcode_major = None
         self.stopcode_minor = None
         self.nmajor = nmajor
@@ -672,10 +678,10 @@ class IterationController:
 
         # CLEAN parameters
         self.gain = gain
-        self.cyclefactor = cyclefactor
+        self.cycle_factor = cycle_factor
         self.minpsffraction = minpsffraction
         self.maxpsffraction = maxpsffraction
-        self.cycleniter = cycleniter
+        self.cycle_niter = cycle_niter
 
         # Tracking state
         self.major_done = 0
@@ -683,7 +689,7 @@ class IterationController:
 
         # Convergence state (namedtuple matching CASA). self.stopcode is the
         # aggregate over all planes; per-plane codes live in stopcode_major /
-        # stopcode_minor (allocated lazily alongside niter).
+        # stopcode_minor (allocated lazily alongside niter_per_plane).
         self.stopcode = StopCode(major=MAJOR_CONTINUE, minor=MINOR_CONTINUE)
         self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_CONTINUE]
 
@@ -724,20 +730,25 @@ class IterationController:
         """Allocate (or grow) the per-plane arrays to the ``needed`` shape.
 
         ``needed`` is ``(ntime, nchan, npol)``. Newly allocated planes start at
-        the full per-plane budget (``_initial_niter``) with a CONTINUE stop
+        the full per-plane budget (``_initial_niter_per_plane``) with a CONTINUE stop
         code. Growing only ever enlarges the arrays (existing values kept).
         """
-        if self.niter is None:
-            self.niter = np.full(needed, self._initial_niter, dtype=int)
+        if self.niter_per_plane is None:
+            self.niter_per_plane = np.full(
+                needed, self._initial_niter_per_plane, dtype=int
+            )
             self.stopcode_major = np.full(needed, MAJOR_CONTINUE, dtype=int)
             self.stopcode_minor = np.full(needed, MINOR_CONTINUE, dtype=int)
-        elif any(n > c for n, c in zip(needed, self.niter.shape, strict=False)):
+        elif any(
+            n > c for n, c in zip(needed, self.niter_per_plane.shape, strict=False)
+        ):
             grown = tuple(
-                max(n, c) for n, c in zip(needed, self.niter.shape, strict=False)
+                max(n, c)
+                for n, c in zip(needed, self.niter_per_plane.shape, strict=False)
             )
-            sl = tuple(slice(0, d) for d in self.niter.shape)
+            sl = tuple(slice(0, d) for d in self.niter_per_plane.shape)
             for attr, fill in (
-                ("niter", self._initial_niter),
+                ("niter_per_plane", self._initial_niter_per_plane),
                 ("stopcode_major", MAJOR_CONTINUE),
                 ("stopcode_minor", MINOR_CONTINUE),
             ):
@@ -750,7 +761,7 @@ class IterationController:
 
         Iteration control is performed independently for every
         ``(time, chan, pol)`` plane. Callers that know the cube shape up front
-        (e.g. before the first deconvolution) call this so that ``niter`` is a
+        (e.g. before the first deconvolution) call this so that ``niter_per_plane`` is a
         fully-sized per-plane array by the time the deconvolver needs it.
         """
         self._ensure_shape((int(ntime), int(nchan), int(npol)))
@@ -779,16 +790,16 @@ class IterationController:
         chan: int | None = None,
     ) -> tuple[int, float]:
         """
-        Calculate cycleniter and cyclethreshold for the next minor cycle.
+        Calculate cycle_niter and cycle_threshold for the next minor cycle.
 
         Logic:
         ------
         1. Extract max_psf_sidelobe and peak_residual from return_dict
-        2. Start with remaining iterations (niter)
-        3. If cycleniter is set (>= 0), use minimum of (cycleniter, niter)
-        4. Calculate PSF fraction = max_psf_sidelobe * cyclefactor
+        2. Start with remaining iterations (niter_per_plane)
+        3. If cycle_niter is set (>= 0), use minimum of (cycle_niter, niter_per_plane)
+        4. Calculate PSF fraction = max_psf_sidelobe * cycle_factor
         5. Clamp PSF fraction to [minpsffraction, maxpsffraction]
-        6. cyclethreshold = max(psf_fraction * peak_residual, threshold)
+        6. cycle_threshold = max(psf_fraction * peak_residual, threshold)
 
         Parameters:
         -----------
@@ -808,17 +819,17 @@ class IterationController:
 
         Returns:
         --------
-        use_cycleniter : int
+        use_cycle_niter : int
             Number of iterations to perform in this minor cycle
 
-        cyclethreshold : float
+        cycle_threshold : float
             Stopping threshold for this minor cycle
 
         Example:
         --------
-        >>> controller = IterationController(niter=1000, cyclefactor=1.5)
+        >>> controller = IterationController(niter_per_plane=1000, cycle_factor=1.5)
         >>> # return_dict populated by deconvolver and PSF analysis
-        >>> cycleniter, cyclethresh = controller.calculate_cycle_controls(return_dict)
+        >>> cycle_niter, cyclethresh = controller.calculate_cycle_controls(return_dict)
         """
         # Extract needed values from ReturnDict
         max_psf_sidelobe = get_max_psf_sidelobe_from_returndict(
@@ -829,30 +840,30 @@ class IterationController:
         )
 
         # Start with all remaining iterations. The deconvolver takes a single
-        # scalar cycleniter, so the per-plane budget is reduced to the largest
+        # scalar cycle_niter, so the per-plane budget is reduced to the largest
         # remaining budget across planes. Before the per-plane array exists,
         # fall back to the initial per-plane budget.
-        if self.niter is None:
-            use_cycleniter = self._initial_niter
+        if self.niter_per_plane is None:
+            use_cycle_niter = self._initial_niter_per_plane
         else:
-            use_cycleniter = int(self.niter.max())
+            use_cycle_niter = int(self.niter_per_plane.max())
 
-        # If user forced a specific cycleniter, respect it
-        if self.cycleniter >= 0:
-            use_cycleniter = min(self.cycleniter, use_cycleniter)
+        # If user forced a specific cycle_niter, respect it
+        if self.cycle_niter >= 0:
+            use_cycle_niter = min(self.cycle_niter, use_cycle_niter)
 
-        # Calculate adaptive PSF fraction for cyclethreshold
-        psf_fraction = max_psf_sidelobe * self.cyclefactor
+        # Calculate adaptive PSF fraction for cycle_threshold
+        psf_fraction = max_psf_sidelobe * self.cycle_factor
 
         # Clamp to user-specified bounds
         psf_fraction = max(psf_fraction, self.minpsffraction)
         psf_fraction = min(psf_fraction, self.maxpsffraction)
 
-        # Set cyclethreshold as fraction of current peak residual
-        cyclethreshold = psf_fraction * peak_residual
-        cyclethreshold = max(cyclethreshold, self.threshold)
+        # Set cycle_threshold as fraction of current peak residual
+        cycle_threshold = psf_fraction * peak_residual
+        cycle_threshold = max(cycle_threshold, self.threshold)
 
-        return int(use_cycleniter), cyclethreshold
+        return int(use_cycle_niter), cycle_threshold
 
     def per_plane_cycle_threshold(
         self,
@@ -861,19 +872,19 @@ class IterationController:
         pol: int | None = None,
         chan: int | None = None,
     ) -> "np.ndarray":
-        """Compute the per-plane minor-cycle ``cyclethreshold`` array.
+        """Compute the per-plane minor-cycle ``cycle_threshold`` array.
 
-        The adaptive cyclethreshold is allowed to differ for every
+        The adaptive cycle_threshold is allowed to differ for every
         ``(time, chan, pol)`` plane. Each plane present in ``return_dict`` gets
         its own value::
 
-            clamp(max_psf_sidelobe * cyclefactor, minpsffraction, maxpsffraction)
+            clamp(max_psf_sidelobe * cycle_factor, minpsffraction, maxpsffraction)
                 * peak_residual,
 
         floored at the absolute user ``threshold``. Because each plane uses its
         own ``peak_residual``, the result is independent of how the cube was
         chunked across tasks. Planes not present in ``return_dict`` fall back to
-        the representative scalar cyclethreshold from
+        the representative scalar cycle_threshold from
         :meth:`calculate_cycle_controls`.
 
         Parameters
@@ -886,16 +897,18 @@ class IterationController:
         Returns
         -------
         numpy.ndarray
-            ``(ntime, nchan, npol)`` array of per-plane cyclethresholds, indexed
-            ``(time, chan, pol)`` to match :attr:`niter`.
+            ``(ntime, nchan, npol)`` array of per-plane cycle_thresholds, indexed
+            ``(time, chan, pol)`` to match :attr:`niter_per_plane`.
         """
         self._ensure_state(return_dict)
-        # Representative cyclethreshold, used only as the fallback for any plane
+        # Representative cycle_threshold, used only as the fallback for any plane
         # that has no entry in return_dict.
-        _, fallback_cyclethreshold = self.calculate_cycle_controls(
+        _, fallback_cycle_threshold = self.calculate_cycle_controls(
             return_dict, time=time, pol=pol, chan=chan
         )
-        cyclethreshold = np.full(self.niter.shape, fallback_cyclethreshold, dtype=float)
+        cycle_threshold = np.full(
+            self.niter_per_plane.shape, fallback_cycle_threshold, dtype=float
+        )
         for key, fields in return_dict.data.items():
             if not self._matches(key, time, pol, chan):
                 continue
@@ -903,11 +916,11 @@ class IterationController:
             peak = abs(self._latest(fields, "peakres", 0.0))
             sidelobe = self._latest(fields, "max_psf_sidelobe", 0.2)
             frac = min(
-                max(sidelobe * self.cyclefactor, self.minpsffraction),
+                max(sidelobe * self.cycle_factor, self.minpsffraction),
                 self.maxpsffraction,
             )
-            cyclethreshold[idx] = max(frac * peak, self.threshold)
-        return cyclethreshold
+            cycle_threshold[idx] = max(frac * peak, self.threshold)
+        return cycle_threshold
 
     def check_convergence(
         self,
@@ -928,13 +941,13 @@ class IterationController:
         Major Cycle Stopping Criteria (in order of precedence):
         --------------------------------------------------------
         1. Zero mask (stopcode 7): No valid pixels to clean
-        2. Iteration limit (stopcode 1): niter <= 0
+        2. Iteration limit (stopcode 1): niter_per_plane <= 0
         3. Threshold reached (stopcode 2): peak_residual <= threshold
         4. Major cycle limit (stopcode 9): nmajor == 0 (if not -1)
 
         Minor Cycle Stopping Criteria:
         -------------------------------
-        - Checked by deconvolver (cycleniter, cyclethreshold)
+        - Checked by deconvolver (cycle_niter, cycle_threshold)
         - Can be propagated via return_dict if needed
 
         Parameters:
@@ -971,12 +984,12 @@ class IterationController:
         writes that plane's own StopCode and description into the 'stop_code'
         and 'stop_description' fields of the corresponding ReturnDict entry,
         overwriting the placeholder set by the deconvolver. Also allocates /
-        updates the per-plane ``niter``, ``stopcode_major`` and
+        updates the per-plane ``niter_per_plane``, ``stopcode_major`` and
         ``stopcode_minor`` arrays.
 
         Example:
         --------
-        >>> controller = IterationController(niter=100, threshold=0.01)
+        >>> controller = IterationController(niter_per_plane=100, threshold=0.01)
         >>> # After running deconvolution...
         >>> stopcode, desc = controller.check_convergence(return_dict)
         >>> if stopcode.major != 0:
@@ -997,7 +1010,7 @@ class IterationController:
             idx = self._key_index(key)
             peak_residual = abs(self._latest(fields, "peakres", 0.0))
             masksum = self._latest(fields, "masksum", 0)
-            remaining = int(self.niter[idx])
+            remaining = int(self.niter_per_plane[idx])
 
             # Major cycle stopping criteria, in priority order (per plane):
             #   1 zero mask, 2 iteration limit, 3 threshold, 4 major-cycle limit
@@ -1055,7 +1068,7 @@ class IterationController:
         Updates:
         --------
         1. Extracts iterations_done from return_dict
-        2. Decrements niter by iterations_done
+        2. Decrements niter_per_plane by iterations_done
         3. Decrements nmajor by 1 (if not -1)
         4. Increments major_done and total_iter_done
         5. Enforces floor values (no negatives)
@@ -1077,11 +1090,13 @@ class IterationController:
 
         Example:
         --------
-        >>> controller = IterationController(niter=1000, nmajor=5)
+        >>> controller = IterationController(niter_per_plane=1000, nmajor=5)
         >>> # After major cycle completes...
         >>> controller.update_counts(return_dict)
-        >>> print(controller.niter, controller.nmajor, controller.major_done)
-        900 4 1
+        >>> # niter_per_plane is an (ntime, nchan, npol) array, one
+        >>> # remaining budget per plane -- not a scalar.
+        >>> print(controller.niter_per_plane, controller.nmajor, controller.major_done)
+        [[[900]]] 4 1
         """
         # Only update if not converged (check both major and minor)
         if (
@@ -1106,7 +1121,9 @@ class IterationController:
             idx = self._key_index(key)
             iters = int(self._latest(fields, "iter_done", 0))
             if self.stopcode_major[idx] == MAJOR_CONTINUE:
-                self.niter[idx] = max(int(self.niter[idx]) - iters, 0)
+                self.niter_per_plane[idx] = max(
+                    int(self.niter_per_plane[idx]) - iters, 0
+                )
             cycle_iters += iters
 
         # Update tracking counters
@@ -1115,11 +1132,11 @@ class IterationController:
 
     def update_parameters(
         self,
-        niter: int | None = None,
-        cycleniter: int | None = None,
+        niter_per_plane: int | None = None,
+        cycle_niter: int | None = None,
         nmajor: int | None = None,
         threshold: float | None = None,
-        cyclefactor: float | None = None,
+        cycle_factor: float | None = None,
     ) -> tuple[int, str]:
         """
         Update iteration control parameters with validation.
@@ -1129,10 +1146,10 @@ class IterationController:
 
         Parameters:
         -----------
-        niter : int, optional
+        niter_per_plane : int, optional
             New maximum iteration count
 
-        cycleniter : int, optional
+        cycle_niter : int, optional
             New iterations per minor cycle
 
         nmajor : int, optional
@@ -1141,7 +1158,7 @@ class IterationController:
         threshold : float or str, optional
             New stopping threshold (can include units like "10mJy")
 
-        cyclefactor : float, optional
+        cycle_factor : float, optional
             New cycle factor for adaptive thresholding
 
         Returns:
@@ -1152,28 +1169,28 @@ class IterationController:
         error_message : str
             Empty string if successful, error description if failed
         """
-        # Update and validate niter (the per-plane budget). Broadcast to all
+        # Update and validate niter_per_plane (the per-plane budget). Broadcast to all
         # existing planes if the per-plane array has already been allocated.
-        if niter is not None:
+        if niter_per_plane is not None:
             try:
-                niter_int = int(niter)
-                if niter_int < -1:
-                    return -1, "niter must be >= -1"
-                self._initial_niter = niter_int
-                if self.niter is not None:
-                    self.niter[...] = niter_int
+                niter_per_plane_int = int(niter_per_plane)
+                if niter_per_plane_int < -1:
+                    return -1, "niter_per_plane must be >= -1"
+                self._initial_niter_per_plane = niter_per_plane_int
+                if self.niter_per_plane is not None:
+                    self.niter_per_plane[...] = niter_per_plane_int
             except (ValueError, TypeError):
-                return -1, "niter must be an integer"
+                return -1, "niter_per_plane must be an integer"
 
-        # Update and validate cycleniter
-        if cycleniter is not None:
+        # Update and validate cycle_niter
+        if cycle_niter is not None:
             try:
-                cycleniter_int = int(cycleniter)
-                if cycleniter_int < -1:
-                    return -1, "cycleniter must be >= -1"
-                self.cycleniter = cycleniter_int
+                cycle_niter_int = int(cycle_niter)
+                if cycle_niter_int < -1:
+                    return -1, "cycle_niter must be >= -1"
+                self.cycle_niter = cycle_niter_int
             except (ValueError, TypeError):
-                return -1, "cycleniter must be an integer"
+                return -1, "cycle_niter must be an integer"
 
         # Update and validate nmajor
         if nmajor is not None:
@@ -1204,15 +1221,15 @@ class IterationController:
                     "threshold must be a number, or a number with units (Jy/mJy/uJy)",
                 )
 
-        # Update and validate cyclefactor
-        if cyclefactor is not None:
+        # Update and validate cycle_factor
+        if cycle_factor is not None:
             try:
-                cyclefactor_float = float(cyclefactor)
-                if cyclefactor_float <= 0:
-                    return -1, "cyclefactor must be > 0"
-                self.cyclefactor = cyclefactor_float
+                cycle_factor_float = float(cycle_factor)
+                if cycle_factor_float <= 0:
+                    return -1, "cycle_factor must be > 0"
+                self.cycle_factor = cycle_factor_float
             except (ValueError, TypeError):
-                return -1, "cyclefactor must be a number"
+                return -1, "cycle_factor must be a number"
 
         return 0, ""
 
@@ -1231,8 +1248,8 @@ class IterationController:
 
     def reset(self) -> None:
         """Reset the iteration controller to initial state."""
-        if self.niter is not None:
-            self.niter[...] = self._initial_niter
+        if self.niter_per_plane is not None:
+            self.niter_per_plane[...] = self._initial_niter_per_plane
             self.stopcode_major[...] = MAJOR_CONTINUE
             self.stopcode_minor[...] = MINOR_CONTINUE
         self.major_done = 0
@@ -1255,16 +1272,18 @@ class IterationController:
         to preserve the namedtuple structure across serialization.
         """
         return {
-            "niter": self.niter.tolist() if self.niter is not None else None,
+            "niter_per_plane": self.niter_per_plane.tolist()
+            if self.niter_per_plane is not None
+            else None,
             "nmajor": self.nmajor,
-            "initial_niter": self._initial_niter,
+            "initial_niter_per_plane": self._initial_niter_per_plane,
             "threshold": self.threshold,
             "nsigma": self.nsigma,
             "gain": self.gain,
-            "cyclefactor": self.cyclefactor,
+            "cycle_factor": self.cycle_factor,
             "minpsffraction": self.minpsffraction,
             "maxpsffraction": self.maxpsffraction,
-            "cycleniter": self.cycleniter,
+            "cycle_niter": self.cycle_niter,
             "major_done": self.major_done,
             "total_iter_done": self.total_iter_done,
             "stopcode": {"major": self.stopcode.major, "minor": self.stopcode.minor},
@@ -1614,7 +1633,7 @@ def format_deconvolve_dict(combined_deconvolve_dict, float_format="{:.6g}"):
     """Return a human-readable string representation of a deconvolution ReturnDict.
 
     A deconvolution ReturnDict maps ``Key(time, pol, chan)`` planes to field
-    dicts that mix constant parameters (``niter``, ``threshold``, ...) with
+    dicts that mix constant parameters (``niter_per_plane``, ``threshold``, ...) with
     per-major-cycle history lists (``peakres``, ``iter_done``, ``model_flux``,
     ...). The default ``repr`` dumps each plane on one very long line, which is
     hard to read. This formatter groups each plane, separates scalar parameters
@@ -1718,12 +1737,12 @@ def get_calculate_cycle_controls(
     iteration_control_params,
     image_data_group_in_name="residual",
 ):
-    """Compute the cycle iteration limit and cyclethreshold for the next model update.
+    """Compute the cycle iteration limit and cycle_threshold for the next model update.
 
     On the first model update (``is_n_iter_0``) the controls are derived from
     the freshly made dirty image (each plane's own peak residual); afterwards
     they are derived from the accumulated convergence statistics in
-    ``combined_deconvolve_dict``.  In both cases the per-plane cyclethreshold is
+    ``combined_deconvolve_dict``.  In both cases the per-plane cycle_threshold is
     built from each ``(time, frequency, polarization)`` plane's own peak
     residual, so the result is independent of how the cube was chunked across
     tasks.
@@ -1748,19 +1767,19 @@ def get_calculate_cycle_controls(
 
     Returns
     -------
-    cycle_niter : int
+    cycle_niter_cap : int
         Iteration limit for the next minor cycle.
-    cyclethreshold : float
-        Representative scalar cyclethreshold for the next minor cycle.
-    cyclethreshold_per_plane : numpy.ndarray
-        Per-plane cyclethresholds, indexed ``(time, frequency, polarization)``.
+    cycle_threshold : float
+        Representative scalar cycle_threshold for the next minor cycle.
+    cycle_threshold_pp : numpy.ndarray
+        Per-plane cycle_thresholds, indexed ``(time, frequency, polarization)``.
     """
     residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
     if is_n_iter_0:
         # First model update: there is no accumulated convergence history yet,
         # so seed a per-plane ReturnDict from the dirty image. Each
         # (time, frequency, polarization) plane contributes its OWN peak
-        # residual, so the resulting cyclethreshold is genuinely per-plane and
+        # residual, so the resulting cycle_threshold is genuinely per-plane and
         # therefore independent of how the cube was chunked across tasks.
         residual_abs = np.abs(img_xds[residual_data_group["sky"]].values)
         plane_peak = residual_abs.max(axis=(-2, -1))  # (ntime, nfreq, npol)
@@ -1789,10 +1808,10 @@ def get_calculate_cycle_controls(
     else:
         rd = combined_deconvolve_dict
 
-    cycle_niter, cyclethreshold = controller.calculate_cycle_controls(rd)
-    # Per-plane cyclethreshold so each (time, frequency, polarization) plane is
+    cycle_niter_cap, cycle_threshold = controller.calculate_cycle_controls(rd)
+    # Per-plane cycle_threshold so each (time, frequency, polarization) plane is
     # cleaned to its own threshold; chunk-independent because every plane uses
     # its own peak residual.
-    cyclethreshold_per_plane = controller.per_plane_cycle_threshold(rd)
+    cycle_threshold_pp = controller.per_plane_cycle_threshold(rd)
 
-    return cycle_niter, cyclethreshold, cyclethreshold_per_plane
+    return cycle_niter_cap, cycle_threshold, cycle_threshold_pp

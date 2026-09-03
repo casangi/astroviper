@@ -17,6 +17,11 @@ The tests exercise:
     and the exact reconstruction invariant residual = dirty - model (*) psf),
   * the zero-copy / in-place contract and input validation, and
   * the 5-D cube driver.
+
+
+NOTE: these tests call the aspclean C++ binding directly, so the keyword is
+the binding's own ``niter`` (aspclean/python/bindings.cpp), not the Python-side
+``niter_per_plane``. The two are renamed together in the C++ pass.
 """
 
 import numpy as np
@@ -364,16 +369,16 @@ class TestCube:
         rc = resid.copy()
         mc = model.copy()
         # Iteration control is per (time, frequency, polarization) plane:
-        # threshold is a float64 (nt, nf, np) array and niter an int32 one.
+        # threshold is a float64 (nt, nf, np) array and niter_per_plane an int32 one.
         threshold = np.full((nt, nf, npol), 0.05, dtype=np.float64)
-        niter = np.full((nt, nf, npol), 80, dtype=np.int32)
+        niter_per_plane = np.full((nt, nf, npol), 80, dtype=np.int32)
         out = aspclean.clean_cube(
             rc,
             psf,
             mc,
             gain=0.1,
             threshold=threshold,
-            niter=niter,
+            niter=niter_per_plane,
             fusedthreshold=0.1,
             processing_function_threads=2,
         )
@@ -406,14 +411,14 @@ class TestCube:
         model = np.zeros_like(resid)
         rc = resid.copy()
         threshold = np.full((nt, nf, npol), 0.05, dtype=np.float64)
-        niter = np.full((nt, nf, npol), 60, dtype=np.int32)
+        niter_per_plane = np.full((nt, nf, npol), 60, dtype=np.int32)
         out = aspclean.clean_cube(
             rc,
             psf1,
             model,
             gain=0.1,
             threshold=threshold,
-            niter=niter,
+            niter=niter_per_plane,
             fusedthreshold=0.1,
         )
         assert out["model_flux"].shape == (nt, nf, npol)
