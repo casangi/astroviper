@@ -38,6 +38,10 @@
             "type": ["str"],
             "allowed": ["in_memory", "in_place"]
         },
+        "visibility_memory_mode": {
+            "type": ["str"],
+            "allowed": ["in_memory", "in_place"]
+        },
         "widebandpb_memory_mode": {
             "type": ["str"],
             "allowed": ["in_place", "recompute", "in_memory"]

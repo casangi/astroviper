@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 
 from astroviper.utils.resource_plots import (
+    plot_application_task_stream,
     plot_cluster_resource_usage,
     plot_task_resource_usage,
 )
@@ -92,3 +93,47 @@ def test_cluster_plots_skip_unmonitored(capsys):
 def test_rejects_wrong_source_type():
     with pytest.raises(TypeError, match="timing_node_tasks"):
         plot_task_resource_usage([1, 2, 3])
+
+
+def test_application_task_stream_plots_every_graph(tmp_path):
+    """The application view retains and labels one worker stream per graph."""
+    graph_one = _monitored_frame(n_tasks=4)
+    graph_two = _monitored_frame(n_tasks=3)
+    graph_one["hostname"] = "worker"
+    graph_two["hostname"] = "worker"
+    graph_two["start_unixtime"] = graph_two["start_unixtime"].map(
+        lambda value: value + 40
+    )
+    result = {
+        "timing_graphs": [
+            {
+                "stage": "global weight density",
+                "timing_node_tasks": graph_one,
+                "compute_start_unixtime": graph_one.start_unixtime.min() - 1,
+                "compute_end_unixtime": graph_one.start_unixtime.max() + 25,
+                "T_compute": 41.0,
+            },
+            {
+                "stage": "major loop 1 (residual + minor cycle)",
+                "timing_node_tasks": graph_two,
+                "compute_start_unixtime": graph_two.start_unixtime.min() - 2,
+                "compute_end_unixtime": graph_two.start_unixtime.max() + 20,
+                "T_compute": 28.0,
+            },
+        ]
+    }
+    output = tmp_path / "application_task_stream.png"
+    figure = plot_application_task_stream(result, save_path=output)
+    assert figure is not None
+    assert len(figure.axes) == 2
+    assert "global weight density" in figure.axes[0].get_title(loc="left")
+    assert "major loop 1" in figure.axes[1].get_title(loc="left")
+    assert output.exists()
+
+
+def test_application_task_stream_keeps_old_results_optional(capsys):
+    """Results recorded before timing_graphs fail gracefully."""
+    assert (
+        plot_application_task_stream({"timing_node_tasks": _monitored_frame()}) is None
+    )
+    assert "no timing_graphs" in capsys.readouterr().out

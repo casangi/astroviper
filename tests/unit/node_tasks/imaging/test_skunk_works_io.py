@@ -490,7 +490,12 @@ def test_sharded_slot_overflow_raises(tmp_path):
 # Full processing-set reconstruction
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("processing_function_threads", [1, 4])
-def test_load_processing_set_reconstruction(tmp_path, processing_function_threads):
+@pytest.mark.parametrize("load_correlated_data", [True, False])
+def test_load_processing_set_reconstruction(
+    tmp_path,
+    processing_function_threads,
+    load_correlated_data,
+):
     ntime, nbl, nfreq, npol = 2, 6, 4, 2
     rng = np.random.default_rng(6)
     store = str(tmp_path / "ps.zarr")
@@ -538,9 +543,13 @@ def test_load_processing_set_reconstruction(tmp_path, processing_function_thread
         freq_values,
         "linear",
         processing_function_threads=processing_function_threads,
+        load_correlated_data=load_correlated_data,
     )
     ms = ps[ms_name]
-    assert _equal(ms["VISIBILITY"].values, vis[:, :, 1:3, :])
+    if load_correlated_data:
+        assert _equal(ms["VISIBILITY"].values, vis[:, :, 1:3, :])
+    else:
+        assert "VISIBILITY" not in ms
     assert _equal(ms["UVW"].values, uvw)
     assert _equal(ms["WEIGHT"].values, weight[:, :, 1:3, :])
     assert _equal(ms["FLAG"].values, flag[:, :, 1:3, :])

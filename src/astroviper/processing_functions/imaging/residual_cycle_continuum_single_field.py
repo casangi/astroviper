@@ -17,6 +17,7 @@ def residual_cycle_continuum_single_field(
     processing_function_threads=1,
     fft_backend="pyfftw",
     image_data_variables_keep=None,
+    visibility_memory_mode="in_place",
     image_data_group_in_name="model",
     image_data_group_out_name="residual",
     last_residual_cycle=False,
@@ -75,6 +76,15 @@ def residual_cycle_continuum_single_field(
         FFT backend used by the lower-level imaging functions.
     image_data_variables_keep : list of str, optional
         Image products retained in the returned dataset.
+    visibility_memory_mode : {"in_memory", "in_place"}, optional
+        MFS residual-update storage policy for the observed-data visibility grid.
+        ``"in_place"`` reloads the observed visibilities and grids their
+        visibility-domain residual during every residual-update cycle.
+        ``"in_memory"`` retains the globally reduced observed-data Taylor UV
+        grid from the first cycle; later map tasks grid only the predicted-model
+        contribution, and the append node subtracts it from the cached observed
+        grid before the inverse FFT. The setting currently applies only to MFS;
+        MVC requires ``"in_place"``.
     image_data_group_in_name : str, optional
         Image data group containing the current Taylor model.
     image_data_group_out_name : str, optional
@@ -115,6 +125,22 @@ def residual_cycle_continuum_single_field(
 
     if image_data_variables_keep is None:
         image_data_variables_keep = []
+
+    specmode = str(specmode).lower()
+    if specmode not in ("mfs", "mvc"):
+        raise ValueError(
+            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
+        )
+    if visibility_memory_mode not in ("in_memory", "in_place"):
+        raise ValueError(
+            "visibility_memory_mode must be 'in_memory' or 'in_place'; received "
+            f"{visibility_memory_mode!r}."
+        )
+    if specmode == "mvc" and visibility_memory_mode != "in_place":
+        raise ValueError(
+            "visibility_memory_mode='in_memory' is currently supported only "
+            "for specmode='mfs'."
+        )
 
     nterms = int(image_params.get("nterms", 2))
     reference_frequency = float(image_params["reference_frequency_hz"])
@@ -177,18 +203,23 @@ def residual_cycle_continuum_single_field(
 
             T_degrid += time.time() - start
 
-            start = time.time()
+            if visibility_memory_mode == "in_place":
+                start = time.time()
 
-            calculate_residual_visibilities(
-                ps_xdt,
-                ms_data_group_out_residual="residual",
-                ms_data_group_in_model="model",
-                ms_data_group_in_observed=ps_data_group_name,
-            )
+                calculate_residual_visibilities(
+                    ps_xdt,
+                    ms_data_group_out_residual="residual",
+                    ms_data_group_in_model="model",
+                    ms_data_group_in_observed=ps_data_group_name,
+                )
 
-            T_residual_vis += time.time() - start
-
-            ps_data_group_name = "residual"
+                T_residual_vis += time.time() - start
+                ps_data_group_name = "residual"
+            else:
+                # The globally reduced observed-data grid is retained by the
+                # append node. Grid only the predicted model contribution here;
+                # the append node forms observed minus model after reduction.
+                ps_data_group_name = "model"
 
         else:
             if model_xds is None:
@@ -250,8 +281,6 @@ def residual_cycle_continuum_single_field(
     # ------------------------------------------------------------
 
     start = time.time()
-
-    specmode = str(specmode).lower()
 
     if specmode == "mfs":
         from astroviper.processing_functions.imaging.make_undeconvolved_image_continuum import (

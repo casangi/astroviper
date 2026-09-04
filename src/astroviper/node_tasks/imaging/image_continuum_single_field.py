@@ -9,6 +9,24 @@ _WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE = "PRIMARY_BEAM"
 ###############################################################################
 
 
+def _add_task_execution_metadata(timing_df, task_start):
+    """Add the common wall-clock and worker identity columns in place."""
+    import os
+    import socket
+    import threading
+
+    timing_df["start_unixtime"] = task_start
+    timing_df["hostname"] = socket.gethostname()
+    timing_df["process_pid"] = os.getpid()
+    timing_df["thread_native_id"] = threading.get_native_id()
+    try:
+        from distributed import get_worker
+
+        timing_df["worker_name"] = str(get_worker().name)
+    except Exception:
+        timing_df["worker_name"] = None
+
+
 def _write_task_kill_switch_log(
     timing_df, task_total_time, threshold, image_store, task_id, hostname
 ):
@@ -678,6 +696,7 @@ def residual_update_continuum_single_field(
     image_data_variables_keep=None,
     memory_mode="in_memory",
     weight_memory_mode="in_memory",
+    visibility_memory_mode="in_place",
     widebandpb_memory_mode="in_memory",
     skunk_works=False,
     data_group=None,
@@ -777,6 +796,16 @@ def residual_update_continuum_single_field(
         disk I/O. This option is intentionally separate from ``memory_mode`` in
         the initial implementation; the two policies may be unified later.
 
+    visibility_memory_mode : {"in_memory", "in_place"}, optional
+        MFS residual-update storage policy for the observed-data visibility grid.
+        ``"in_place"`` reloads the observed visibilities and grids their
+        visibility-domain residual during every residual-update cycle.
+        ``"in_memory"`` retains the globally reduced observed-data Taylor UV
+        grid from the first cycle; later map tasks grid only the predicted-model
+        contribution, and the append node subtracts it from the cached observed
+        grid before the inverse FFT. The setting currently applies only to MFS;
+        MVC requires ``"in_place"``.
+
     widebandpb_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         MVC-only storage policy for the frequency-dependent primary beam.
         ``"in_place"`` stores it temporarily in the image Zarr store and reads
@@ -821,7 +850,6 @@ def residual_update_continuum_single_field(
         ``"timing_node_tasks"``
             One-row dataframe summarizing task timing information."""
 
-    import socket
     import time
 
     import numpy as np
@@ -857,6 +885,11 @@ def residual_update_continuum_single_field(
             "weight_memory_mode must be 'in_memory' or 'in_place'; received "
             f"{weight_memory_mode!r}."
         )
+    if visibility_memory_mode not in ("in_memory", "in_place"):
+        raise ValueError(
+            "visibility_memory_mode must be 'in_memory' or 'in_place'; received "
+            f"{visibility_memory_mode!r}."
+        )
     if widebandpb_memory_mode not in ("in_memory", "in_place", "recompute"):
         raise ValueError(
             "widebandpb_memory_mode must be 'in_memory', 'in_place', or "
@@ -875,6 +908,11 @@ def residual_update_continuum_single_field(
     if specmode not in ("mfs", "mvc"):
         raise ValueError(
             f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
+        )
+    if specmode == "mvc" and visibility_memory_mode != "in_place":
+        raise ValueError(
+            "visibility_memory_mode='in_memory' is currently supported only "
+            "for specmode='mfs'."
         )
 
     # Build the empty image in the correlation basis expected by the gridder.
@@ -901,6 +939,10 @@ def residual_update_continuum_single_field(
     # Load this map task's visibility partition.
     start = time.time()
 
+    omit_observed_visibility = (
+        specmode == "mfs" and visibility_memory_mode == "in_memory" and not is_n_iter_0
+    )
+
     if input_data is not None:
         # The optional GraphViper data-loading layer has already performed the
         # task-level sub-selection.
@@ -917,15 +959,26 @@ def residual_update_continuum_single_field(
             frequency_coords=task_coords["frequency"]["data"],
             instrument_polarization_basis=instrument_polarization_basis,
             processing_function_threads=processing_function_threads,
+            load_correlated_data=not omit_observed_visibility,
         )
 
     else:
         from xradio.measurement_set.load_processing_set import load_processing_set
 
+        drop_variables = None
+        if omit_observed_visibility:
+            if not isinstance(data_group, dict) or "correlated_data" not in data_group:
+                raise ValueError(
+                    "Cached-grid MFS loading requires the resolved processing-set "
+                    "data_group mapping."
+                )
+            drop_variables = [data_group["correlated_data"]]
+
         ps_xdt = load_processing_set(
             input_data_store,
             sel_parms=data_selection,
             data_group_name=processing_set_data_group_name,
+            drop_variables=drop_variables,
             load_sub_datasets=False,
         )
 
@@ -1055,6 +1108,7 @@ def residual_update_continuum_single_field(
         processing_function_threads=(processing_function_threads),
         fft_backend=fft_backend,
         image_data_variables_keep=(image_data_variables_keep),
+        visibility_memory_mode=visibility_memory_mode,
         is_n_iter_0=is_n_iter_0,
         model_uv_xds=model_uv_xds,
         model_xds=model_xds,
@@ -1155,8 +1209,8 @@ def residual_update_continuum_single_field(
     # making it explicit that no writing occurred.
     timing_df["T_image_cube_task"] = task_total_time
 
-    hostname = socket.gethostname()
-    timing_df["hostname"] = hostname
+    _add_task_execution_metadata(timing_df, task_start)
+    hostname = timing_df["hostname"].iloc[0]
 
     if (
         task_time_kill_switch_seconds is not None
@@ -1394,6 +1448,7 @@ def grid_imaging_weight_density_continuum_node(
             "n_frequency_channels": [weight_density_xds.sizes.get("frequency", 0)],
         }
     )
+    _add_task_execution_metadata(timing_df, task_start)
 
     logger.debug(
         "Finished continuum weight-density task "
@@ -1652,6 +1707,7 @@ def degrid_imaging_weights_continuum_node(
             "n_processing_set_children": [n_processing_set_children],
         }
     )
+    _add_task_execution_metadata(timing_df, task_start)
 
     logger.debug(
         "Finished continuum imaging-weight degrid task "
@@ -2200,6 +2256,87 @@ def _prepare_post_update_continuum_model_state(model_increment_xds, input_params
     return model_xds, model_uv_xds
 
 
+def _prepare_cached_mfs_residual_grid(input_data, input_params):
+    """Cache the first MFS observed grid or form a later residual grid.
+
+    Returns the newly captured observed-grid cache during the first cycle and
+    ``None`` otherwise. For later cycles the reduced model grid in
+    ``input_data["image"]`` is replaced by the observed-minus-model residual.
+    """
+    import copy
+
+    visibility_memory_mode = input_params.get(
+        "visibility_memory_mode",
+        "in_place",
+    )
+    if visibility_memory_mode == "in_place":
+        return None
+    if visibility_memory_mode != "in_memory":
+        raise ValueError(
+            "visibility_memory_mode must be 'in_memory' or 'in_place'; received "
+            f"{visibility_memory_mode!r}."
+        )
+
+    specmode = str(input_params.get("specmode", "mfs")).lower()
+    if specmode != "mfs":
+        raise ValueError(
+            "visibility_memory_mode='in_memory' is currently supported only "
+            "for specmode='mfs'."
+        )
+
+    image_data_group_name = input_params.get(
+        "image_data_group_in_name",
+        "residual",
+    )
+    image_xds = input_data["image"]
+    is_n_iter_0 = bool(input_params.get("is_n_iter_0", True))
+
+    if is_n_iter_0:
+        data_groups = image_xds.attrs.get("data_groups", {})
+        if image_data_group_name not in data_groups:
+            raise KeyError(
+                "The first MFS reduction does not contain image data group "
+                f"{image_data_group_name!r}."
+            )
+        data_group = data_groups[image_data_group_name]
+        cache_names = [
+            data_group.get("visibility"),
+            data_group.get("visibility_normalization"),
+        ]
+        if any(name is None for name in cache_names):
+            raise KeyError(
+                "The first MFS reduction does not register both visibility and "
+                "visibility_normalization products."
+            )
+        missing = [name for name in cache_names if name not in image_xds]
+        if missing:
+            raise KeyError(
+                f"The first MFS reduction cannot cache missing variables {missing}."
+            )
+        observed_grid_xds = image_xds[cache_names].copy(deep=True)
+        observed_grid_xds.attrs = copy.deepcopy(image_xds.attrs)
+        observed_grid_xds.attrs["visibility_grid_source"] = "observed_data"
+        return observed_grid_xds
+
+    observed_grid_xds = input_params.get("observed_visibility_grid_xds")
+    if observed_grid_xds is None:
+        raise KeyError(
+            "Later cached-grid MFS cycles require "
+            "input_params['observed_visibility_grid_xds']."
+        )
+
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        form_mfs_residual_grid_from_cache,
+    )
+
+    input_data["image"] = form_mfs_residual_grid_from_cache(
+        observed_grid_xds,
+        image_xds,
+        image_data_group_name=image_data_group_name,
+    )
+    return None
+
+
 @shares_param_docs
 def continuum_minor_cycle_node(
     input_data,
@@ -2243,6 +2380,11 @@ def continuum_minor_cycle_node(
     )
 
     is_n_iter_0 = bool(input_params.get("is_n_iter_0", True))
+
+    observed_visibility_grid_xds = _prepare_cached_mfs_residual_grid(
+        input_data,
+        input_params,
+    )
 
     # prepare continuum image, this is doing 1.-4.
     pb_cache_mapping = input_data.get(
@@ -2321,6 +2463,9 @@ def continuum_minor_cycle_node(
     if pb_cache_mapping is not None:
         return_dict["pb_cache_mapping"] = pb_cache_mapping
 
+    if observed_visibility_grid_xds is not None:
+        return_dict["observed_visibility_grid_xds"] = observed_visibility_grid_xds
+
     return_dict["static_xds"] = static_xds
     return_dict["timing_psf_fit"] = (
         None if psf_fit_return_df is None else psf_fit_return_df.reset_index(drop=True)
@@ -2371,6 +2516,8 @@ def continuum_finalize_node(
 
     if "model_xds" not in input_params:
         raise KeyError("continuum_finalize_node requires input_params['model_xds'].")
+
+    _prepare_cached_mfs_residual_grid(input_data, input_params)
 
     # shared functionality with the minor loop
     pb_cache_mapping = input_data.get(

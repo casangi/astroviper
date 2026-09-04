@@ -21,6 +21,70 @@ def _model_dataset(value):
     )
 
 
+def _mfs_uv_grid(value):
+    """Build a registered MFS Taylor grid for append-cache tests."""
+    return xr.Dataset(
+        {
+            "VISIBILITY": xr.DataArray(
+                np.full((1, 2, 1, 2, 2), value, dtype=np.complex128),
+                dims=("time", "taylor_term", "polarization", "u", "v"),
+            ),
+            "VISIBILITY_NORMALIZATION": xr.DataArray(
+                np.full((1, 2, 1), 3.0),
+                dims=("time", "taylor_term", "polarization"),
+            ),
+        },
+        attrs={
+            "data_groups": {
+                "residual": {
+                    "visibility": "VISIBILITY",
+                    "visibility_normalization": "VISIBILITY_NORMALIZATION",
+                }
+            }
+        },
+    )
+
+
+def test_first_cached_mfs_append_captures_an_independent_observed_grid():
+    """The first reduced GWVobs grid is copied before its inverse FFT."""
+    reduced = _mfs_uv_grid(5.0)
+
+    cached = continuum_node._prepare_cached_mfs_residual_grid(
+        {"image": reduced},
+        {
+            "specmode": "mfs",
+            "visibility_memory_mode": "in_memory",
+            "is_n_iter_0": True,
+        },
+    )
+
+    reduced.VISIBILITY.data[...] = 0.0
+    np.testing.assert_array_equal(cached.VISIBILITY, 5.0)
+    assert cached.attrs["visibility_grid_source"] == "observed_data"
+
+
+def test_later_cached_mfs_append_forms_residual_from_reduced_model_grid():
+    """A later append replaces GWDmodel with cached GWVobs-GWDmodel."""
+    input_data = {"image": _mfs_uv_grid(1.5)}
+
+    returned_cache = continuum_node._prepare_cached_mfs_residual_grid(
+        input_data,
+        {
+            "specmode": "mfs",
+            "visibility_memory_mode": "in_memory",
+            "is_n_iter_0": False,
+            "observed_visibility_grid_xds": _mfs_uv_grid(5.0),
+        },
+    )
+
+    assert returned_cache is None
+    np.testing.assert_array_equal(input_data["image"].VISIBILITY, 3.5)
+    np.testing.assert_array_equal(
+        input_data["image"].VISIBILITY_NORMALIZATION,
+        3.0,
+    )
+
+
 def test_mfs_append_accumulates_before_preparing_fourier_model(monkeypatch):
     """The append FFT consumes the fully accumulated post-update MFS model."""
     previous = _model_dataset(2.0)
@@ -294,6 +358,13 @@ def test_weight_density_node_returns_valid_reducer_leaf(monkeypatch):
     assert result["task_id"] == 4
     assert set(result["weight_density"]) == {"WEIGHT_DENSITY_GRID", "SUM_WEIGHT"}
     assert result["timing_node_tasks"].iloc[0].n_frequency_channels == 2
+    assert {
+        "start_unixtime",
+        "hostname",
+        "process_pid",
+        "thread_native_id",
+        "worker_name",
+    } <= set(result["timing_node_tasks"])
 
 
 def test_weight_degrid_node_extracts_only_registered_weight_arrays(monkeypatch):
@@ -320,6 +391,13 @@ def test_weight_degrid_node_extracts_only_registered_weight_arrays(monkeypatch):
     assert set(cached) == {"WEIGHT_IMAGING"}
     assert cached.WEIGHT_IMAGING.attrs["units"] == "arbitrary"
     assert result["timing_node_tasks"].iloc[0].n_processing_set_children == 1
+    assert {
+        "start_unixtime",
+        "hostname",
+        "process_pid",
+        "thread_native_id",
+        "worker_name",
+    } <= set(result["timing_node_tasks"])
 
 
 def test_weight_degrid_node_writes_in_place_and_returns_no_array_cache(monkeypatch):

@@ -330,6 +330,74 @@ def _continuum_image_for_disk(img_xds, image_data_variables_keep, pbcor=False):
 ###############################################################################
 
 
+def _graph_timing_record(stage, graph_result, graph_timings):
+    """Package one graph's compact task stream without changing its result."""
+    timing_node_tasks = graph_result.get("timing_node_tasks")
+    if timing_node_tasks is None:
+        return None
+
+    timing_node_tasks = timing_node_tasks.copy(deep=True)
+    if "T_image_cube_task" not in timing_node_tasks:
+        for total_column in (
+            "T_weight_density_node",
+            "T_imaging_weight_degrid_node",
+        ):
+            if total_column in timing_node_tasks:
+                timing_node_tasks["T_image_cube_task"] = timing_node_tasks[total_column]
+                break
+    if "T_make_empty_image" not in timing_node_tasks:
+        timing_node_tasks["T_make_empty_image"] = 0.0
+    if "T_load" not in timing_node_tasks:
+        timing_node_tasks["T_load"] = 0.0
+    if "T_write" not in timing_node_tasks:
+        write_columns = [
+            column for column in timing_node_tasks if column.startswith("T_write_")
+        ]
+        timing_node_tasks["T_write"] = (
+            timing_node_tasks[write_columns].sum(axis=1) if write_columns else 0.0
+        )
+
+    # The application-wide stream needs only scalar timing and worker identity.
+    # Retain sampled CPU/memory/I/O series in the historical final-graph frame
+    # instead of multiplying their memory cost by every major cycle.
+    timing_node_tasks = timing_node_tasks.drop(
+        columns=[
+            "time_seconds",
+            "cpu_percent",
+            "memory_rss_bytes",
+            "read_chars",
+            "write_chars",
+        ],
+        errors="ignore",
+    )
+
+    compute_duration = graph_timings.get("T_compute_dask_graph")
+    if compute_duration is None:
+        for duration_key in (
+            "T_compute_imaging_weight_graph",
+            "T_compute_imaging_weight_degrid_graph",
+        ):
+            if duration_key in graph_timings:
+                compute_duration = graph_timings[duration_key]
+                break
+
+    return {
+        "stage": stage,
+        "timing_node_tasks": timing_node_tasks,
+        "compute_start_unixtime": graph_timings.get("compute_start_unixtime"),
+        "compute_end_unixtime": graph_timings.get("compute_end_unixtime"),
+        "T_compute": compute_duration,
+    }
+
+
+def _accumulate_graph_timings(destination, graph_timings):
+    """Add duration values while excluding absolute wall-clock anchors."""
+    for key, value in graph_timings.items():
+        if key in {"compute_start_unixtime", "compute_end_unixtime"}:
+            continue
+        destination[key] = destination.get(key, 0.0) + value
+
+
 def compute_continuum_graph(
     *,
     ps_xdt,
@@ -442,8 +510,10 @@ def compute_continuum_graph(
     timings["T_generate_dask_graph"] = time.time() - start
 
     start = time.time()
+    timings["compute_start_unixtime"] = start
     graph_result = dask.compute(dask_graph)[0]
-    timings["T_compute_dask_graph"] = time.time() - start
+    timings["compute_end_unixtime"] = time.time()
+    timings["T_compute_dask_graph"] = timings["compute_end_unixtime"] - start
 
     return graph_result, timings
 
@@ -509,8 +579,23 @@ def prepare_continuum_imaging_weights_global(
     timings["T_generate_imaging_weight_dask_graph"] = time.time() - start
 
     start = time.time()
+    weight_density_timings = {"compute_start_unixtime": start}
     weight_density_result = dask.compute(dask_graph)[0]
-    timings["T_compute_imaging_weight_graph"] = time.time() - start
+    weight_density_timings["compute_end_unixtime"] = time.time()
+    weight_density_timings["T_compute_dask_graph"] = (
+        weight_density_timings["compute_end_unixtime"] - start
+    )
+    timings["T_compute_imaging_weight_graph"] = weight_density_timings[
+        "T_compute_dask_graph"
+    ]
+    graph_records = []
+    record = _graph_timing_record(
+        "global weight density",
+        weight_density_result,
+        weight_density_timings,
+    )
+    if record is not None:
+        graph_records.append(record)
 
     # =============================================================
     # Compute global Briggs factors
@@ -713,8 +798,14 @@ def prepare_continuum_imaging_weights_global(
         reduce_n_batch=reduce_n_batch,
     )
 
-    for key, value in weight_degrid_timings.items():
-        timings[key] = timings.get(key, 0.0) + value
+    _accumulate_graph_timings(timings, weight_degrid_timings)
+    record = _graph_timing_record(
+        "global weight degridding",
+        weight_result,
+        weight_degrid_timings,
+    )
+    if record is not None:
+        graph_records.append(record)
 
     if "weight_cache_mapping" not in weight_result:
         raise RuntimeError(
@@ -733,6 +824,7 @@ def prepare_continuum_imaging_weights_global(
             f"received={sorted(actual_task_ids)}."
         )
 
+    weight_result["timing_graphs"] = graph_records
     return weight_result, timings
 
 
@@ -791,8 +883,12 @@ def compute_continuum_imaging_weight_degrid_graph(
     timings["T_generate_imaging_weight_degrid_dask_graph"] = time.time() - start
 
     start = time.time()
+    timings["compute_start_unixtime"] = start
     result = dask.compute(dask_graph)[0]
-    timings["T_compute_imaging_weight_degrid_graph"] = time.time() - start
+    timings["compute_end_unixtime"] = time.time()
+    timings["T_compute_imaging_weight_degrid_graph"] = (
+        timings["compute_end_unixtime"] - start
+    )
 
     # GraphViper does not call the reducer for a one-leaf graph, so normalize
     # that map result to the same task-indexed schema produced by reduction.
@@ -1972,18 +2068,17 @@ def combine_continuum_imaging_weight_chunks(
 
         timing_df = result.get("timing_node_tasks")
 
+        resource_usage = result.get("resource_usage")
+        if resource_usage is not None and timing_df is not None:
+            timing_df = timing_df.copy()
+            for key, value in resource_usage.items():
+                timing_df[key] = [value] if isinstance(value, list) else value
+
         if timing_df is not None:
             combined_timing = pd.concat(
                 [combined_timing, timing_df],
                 ignore_index=True,
             )
-
-        resource_usage = result.get("resource_usage")
-
-        if resource_usage is not None and timing_df is not None:
-            # The map result's resource information can be added if desired.
-            # It is not needed for the numerical cache.
-            pass
 
     return {
         "weight_cache_mapping": weight_cache_mapping,
@@ -2273,6 +2368,7 @@ def image_continuum_single_field(
     overwrite: bool = False,
     memory_mode: str = "in_memory",
     weight_memory_mode: str = "in_memory",
+    visibility_memory_mode: str = "in_place",
     widebandpb_memory_mode: str = "in_memory",
     cache_directory: str | None = None,
     write_visibility_model_to_ps: bool = False,
@@ -2382,6 +2478,16 @@ def image_continuum_single_field(
         disk I/O. This option is intentionally separate from ``memory_mode`` in
         the initial implementation; the two policies may be unified later.
 
+    visibility_memory_mode : {"in_memory", "in_place"}, optional
+        MFS residual-update storage policy for the observed-data visibility grid.
+        ``"in_place"`` reloads the observed visibilities and grids their
+        visibility-domain residual during every residual-update cycle.
+        ``"in_memory"`` retains the globally reduced observed-data Taylor UV
+        grid from the first cycle; later map tasks grid only the predicted-model
+        contribution, and the append node subtracts it from the cached observed
+        grid before the inverse FFT. The setting currently applies only to MFS;
+        MVC requires ``"in_place"``.
+
     widebandpb_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         MVC-only storage policy for the frequency-dependent primary beam.
         ``"in_place"`` stores it temporarily in the image Zarr store and reads
@@ -2426,6 +2532,11 @@ def image_continuum_single_field(
             "weight_memory_mode must be 'in_memory' or 'in_place'; received "
             f"{weight_memory_mode!r}."
         )
+    if visibility_memory_mode not in ("in_memory", "in_place"):
+        raise ValueError(
+            "visibility_memory_mode must be 'in_memory' or 'in_place'; received "
+            f"{visibility_memory_mode!r}."
+        )
     if widebandpb_memory_mode not in ("in_memory", "in_place", "recompute"):
         raise ValueError(
             "widebandpb_memory_mode must be 'in_memory', 'in_place', or "
@@ -2451,6 +2562,11 @@ def image_continuum_single_field(
     if specmode not in ("mfs", "mvc"):
         raise ValueError(
             f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
+        )
+    if specmode == "mvc" and visibility_memory_mode != "in_place":
+        raise ValueError(
+            "visibility_memory_mode='in_memory' is currently supported only "
+            "for specmode='mfs'."
         )
 
     # Work with an application-local copy: continuum setup may augment the
@@ -2569,6 +2685,7 @@ def image_continuum_single_field(
     input_params["image_data_variables_keep"] = image_data_variables_keep
     input_params["memory_mode"] = memory_mode
     input_params["weight_memory_mode"] = weight_memory_mode
+    input_params["visibility_memory_mode"] = visibility_memory_mode
     input_params["widebandpb_memory_mode"] = widebandpb_memory_mode
     input_params["cache_directory"] = cache_directory
     input_params["write_visibility_model_to_ps"] = write_visibility_model_to_ps
@@ -2636,15 +2753,13 @@ def image_continuum_single_field(
 
         image_params["list_dish_diameters"] = dish_diameters.tolist()
 
-    # The skunk-works node-task I/O path reconstructs the processing set from the
-    # data group's variables only, so it needs the resolved role->variable
-    # mapping. Read it once here (from the first MS) and forward it to every
-    # node task rather than re-reading it per task.
-    if skunk_works:
-        first_ms = next(iter(ps_xdt.values()))
-        input_params["data_group"] = first_ms.ds.attrs["data_groups"][
-            processing_set_data_group_name
-        ]
+    # Node-task loaders need the resolved role->variable mapping. In addition to
+    # supporting the direct-Zarr path, this lets cached-grid MFS cycles omit the
+    # observed correlated-data variable from ordinary eager loads.
+    first_ms = next(iter(ps_xdt.values()))
+    input_params["data_group"] = first_ms.ds.attrs["data_groups"][
+        processing_set_data_group_name
+    ]
 
     start = time.time()
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
@@ -2726,8 +2841,10 @@ def image_continuum_single_field(
     static_xds = None
     model_xds = None
     model_uv_xds = None
+    observed_visibility_grid_xds = None
     last_minor_return_dict = None
     n_major_cycles = 0
+    timing_graphs = []
 
     # =============================================================
     # Prepare imaging weights once before entering the major loop
@@ -2801,10 +2918,11 @@ def image_continuum_single_field(
             f"{imaging_weights_params['weighting']!r}."
         )
 
-    for key, value in weight_graph_timings.items():
-        timing_distributed_application[key] = (
-            timing_distributed_application.get(key, 0.0) + value
-        )
+    _accumulate_graph_timings(
+        timing_distributed_application,
+        weight_graph_timings,
+    )
+    timing_graphs.extend(weight_return_dict.pop("timing_graphs", []))
 
     weight_cache_mapping = weight_return_dict["weight_cache_mapping"]
     pb_cache_mapping = None
@@ -2906,6 +3024,7 @@ def image_continuum_single_field(
             "single_precision_image": single_precision_image,
             "instrument_polarization_basis": instrument_polarization_basis,
             "specmode": specmode,
+            "visibility_memory_mode": visibility_memory_mode,
             "pblimit": pblimit,
         }
 
@@ -2917,6 +3036,15 @@ def image_continuum_single_field(
             append_input_params["deconvolution"] = last_minor_return_dict[
                 "deconvolution"
             ]
+            if visibility_memory_mode == "in_memory":
+                if observed_visibility_grid_xds is None:
+                    raise RuntimeError(
+                        "No cached observed-data MFS grid is available for "
+                        f"major cycle {n_major_cycles}."
+                    )
+                append_input_params["observed_visibility_grid_xds"] = (
+                    observed_visibility_grid_xds
+                )
 
         # ---------------------------------------------------------
         # Execute one major cycle followed by one minor cycle.
@@ -2949,9 +3077,18 @@ def image_continuum_single_field(
             append_input_params=append_input_params,
         )
 
-        # Gather timing information
-        for key, value in graph_timings.items():
-            timing_distributed_application[key] += value
+        # Gather timing information while retaining this graph's task stream.
+        _accumulate_graph_timings(
+            timing_distributed_application,
+            graph_timings,
+        )
+        record = _graph_timing_record(
+            f"major loop {n_major_cycles} (residual + minor cycle)",
+            cycle_return_dict,
+            graph_timings,
+        )
+        if record is not None:
+            timing_graphs.append(record)
 
         # Get current status for bookkeeping
         last_minor_return_dict = cycle_return_dict
@@ -2969,6 +3106,16 @@ def image_continuum_single_field(
             # Static holding quantities that are only computed in the first major loop
             # PSF, PB, PSF sidelobe level ...
             static_xds = cycle_return_dict["static_xds"]
+
+            if visibility_memory_mode == "in_memory":
+                observed_visibility_grid_xds = cycle_return_dict.get(
+                    "observed_visibility_grid_xds"
+                )
+                if observed_visibility_grid_xds is None:
+                    raise RuntimeError(
+                        "The first MFS cycle did not return its globally reduced "
+                        "observed-data visibility-grid cache."
+                    )
 
         if "model_xds" not in cycle_return_dict:
             raise KeyError(
@@ -3089,6 +3236,16 @@ def image_continuum_single_field(
 
     final_input_params["weight_cache_mapping"] = weight_cache_mapping
 
+    if visibility_memory_mode == "in_memory":
+        if observed_visibility_grid_xds is None:
+            raise RuntimeError(
+                "The final MFS residual update requires the cached observed-data "
+                "visibility grid."
+            )
+        final_input_params["observed_visibility_grid_xds"] = (
+            observed_visibility_grid_xds
+        )
+
     if specmode == "mfs":
         final_input_params["model_uv_xds"] = model_uv_xds
     else:
@@ -3134,9 +3291,18 @@ def image_continuum_single_field(
         append_input_params=final_input_params,
     )
 
-    # Gather timing information
-    for key, value in graph_timings.items():
-        timing_distributed_application[key] += value
+    # Gather timing information while retaining the final graph's task stream.
+    _accumulate_graph_timings(
+        timing_distributed_application,
+        graph_timings,
+    )
+    record = _graph_timing_record(
+        "final residual + restoration",
+        final_return_dict,
+        graph_timings,
+    )
+    if record is not None:
+        timing_graphs.append(record)
 
     # =============================================================
     # Assemble the final application result
@@ -3203,6 +3369,7 @@ def image_continuum_single_field(
     # the driver-level timing so the full return dict carries timing for both the
     # distributed application (this driver) and the per-chunk node tasks.
     return_dict["timing_distributed_application"] = timing_distributed_application
+    return_dict["timing_graphs"] = timing_graphs
 
     # Driver-level ("distributed application") timing breakdown.
     logger.info(

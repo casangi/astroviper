@@ -1146,6 +1146,124 @@ def prepare_model_uv_mvc_single_field(
     return mvc_xds
 
 
+def form_mfs_residual_grid_from_cache(
+    observed_grid_xds,
+    model_grid_xds,
+    image_data_group_name="residual",
+):
+    """Form an MFS residual UV grid from cached observed and model grids.
+
+    The two inputs are globally reduced Taylor-grid datasets. Their visibility
+    grids are subtracted, while the observed-data normalization is retained
+    unchanged because it represents the sum of imaging weights rather than a
+    visibility contribution. The model-grid normalization is intentionally
+    ignored: the gridder skips exactly zero model samples, so that auxiliary
+    sum need not equal the observed-data sum even though the model numerator is
+    correct.
+
+    Parameters
+    ----------
+    observed_grid_xds : xarray.Dataset
+        Cached globally reduced observed-data Taylor UV grid.
+    model_grid_xds : xarray.Dataset
+        Globally reduced predicted-model Taylor UV grid for the current cycle.
+    image_data_group_name : str, optional
+        Image data group registering ``visibility`` and
+        ``visibility_normalization`` in both datasets.
+
+    Returns
+    -------
+    xarray.Dataset
+        A copy of ``model_grid_xds`` whose visibility grid is
+        ``observed - model`` and whose normalization is the cached observed
+        normalization.
+    """
+    import copy
+
+    import numpy as np
+    import xarray as xr
+
+    def _registered_arrays(dataset, label):
+        if not isinstance(dataset, xr.Dataset):
+            raise TypeError(
+                f"{label} must be an xarray.Dataset; received {type(dataset).__name__}."
+            )
+        data_groups = dataset.attrs.get("data_groups", {})
+        if image_data_group_name not in data_groups:
+            raise KeyError(
+                f"{label} does not contain image data group {image_data_group_name!r}."
+            )
+        data_group = data_groups[image_data_group_name]
+        variable_names = {
+            role: data_group.get(role)
+            for role in ("visibility", "visibility_normalization")
+        }
+        missing_roles = [role for role, name in variable_names.items() if name is None]
+        if missing_roles:
+            raise KeyError(
+                f"{label} data group {image_data_group_name!r} does not register "
+                f"roles {missing_roles}."
+            )
+        missing_variables = [
+            name for name in variable_names.values() if name not in dataset
+        ]
+        if missing_variables:
+            raise KeyError(f"{label} is missing variables {missing_variables}.")
+        return variable_names
+
+    observed_names = _registered_arrays(observed_grid_xds, "observed_grid_xds")
+    model_names = _registered_arrays(model_grid_xds, "model_grid_xds")
+
+    observed_grid = observed_grid_xds[observed_names["visibility"]]
+    model_grid = model_grid_xds[model_names["visibility"]]
+    observed_normalization = observed_grid_xds[
+        observed_names["visibility_normalization"]
+    ]
+
+    try:
+        observed_grid, model_grid = xr.align(
+            observed_grid,
+            model_grid,
+            join="exact",
+            copy=False,
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "Cached observed and predicted-model MFS grids have incompatible "
+            "coordinates."
+        ) from exc
+
+    if observed_grid.dims != model_grid.dims or observed_grid.shape != model_grid.shape:
+        raise ValueError(
+            "Cached observed and predicted-model MFS visibility grids must have "
+            "identical dimensions and shapes."
+        )
+
+    residual_xds = model_grid_xds.copy(deep=False)
+    residual_xds.attrs = copy.deepcopy(model_grid_xds.attrs)
+    residual_values = np.subtract(
+        observed_grid.values,
+        model_grid.values,
+    )
+    residual_xds[model_names["visibility"]] = xr.DataArray(
+        residual_values,
+        dims=model_grid.dims,
+        coords=model_grid.coords,
+        attrs={
+            **model_grid.attrs,
+            "description": (
+                "MFS residual Taylor UV grid formed from cached observed-data "
+                "and reduced predicted-model grids."
+            ),
+        },
+    )
+    residual_xds[model_names["visibility_normalization"]] = observed_normalization.copy(
+        deep=True
+    )
+    residual_xds.attrs["visibility_grid_source"] = "cached_observed_minus_model"
+    return residual_xds
+
+
 @shares_param_docs
 def residual_update_continuum_single_field(
     ps_xdt,
@@ -1161,6 +1279,7 @@ def residual_update_continuum_single_field(
     processing_function_threads=1,
     fft_backend="pyfftw",
     image_data_variables_keep=None,
+    visibility_memory_mode="in_place",
     is_n_iter_0=True,
     model_xds=None,
     model_uv_xds=None,
@@ -1222,6 +1341,16 @@ def residual_update_continuum_single_field(
 
     image_data_variables_keep : list of str, optional
         Logical image products retained in the returned dataset.
+
+    visibility_memory_mode : {"in_memory", "in_place"}, optional
+        MFS residual-update storage policy for the observed-data visibility grid.
+        ``"in_place"`` reloads the observed visibilities and grids their
+        visibility-domain residual during every residual-update cycle.
+        ``"in_memory"`` retains the globally reduced observed-data Taylor UV
+        grid from the first cycle; later map tasks grid only the predicted-model
+        contribution, and the append node subtracts it from the cached observed
+        grid before the inverse FFT. The setting currently applies only to MFS;
+        MVC requires ``"in_place"``.
 
     is_n_iter_0 : bool, optional
         Indicates whether this is the first major cycle.
@@ -1362,6 +1491,7 @@ def residual_update_continuum_single_field(
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         image_data_variables_keep=image_data_variables_keep,
+        visibility_memory_mode=visibility_memory_mode,
     )
 
     timing["T_residual_cycle"] = time.time() - start

@@ -93,7 +93,22 @@ def degrid_visibility_grid_single_field(
 
     output_name = ms_data_group_out["correlated_data"]
     if output_name not in ms_xds:
-        input_visibility = ms_xds[ms_data_group_in["correlated_data"]]
+        input_visibility_name = ms_data_group_in["correlated_data"]
+        if input_visibility_name in ms_xds:
+            input_visibility = ms_xds[input_visibility_name]
+        else:
+            # Cached-grid continuum cycles deliberately avoid loading the
+            # observed visibility values. Imaging weights have the identical
+            # visibility layout and therefore provide a zero-allocation shape
+            # template for the degridded model array.
+            template_name = ms_data_group_in.get("weight_imaging")
+            if template_name is None or template_name not in ms_xds:
+                raise KeyError(
+                    f"Neither input visibility {input_visibility_name!r} nor a "
+                    "registered imaging-weight template is available for model "
+                    "visibility allocation."
+                )
+            input_visibility = ms_xds[template_name]
         ms_xds[output_name] = xr.DataArray(
             np.zeros(input_visibility.shape, dtype=np.complex128),
             dims=input_visibility.dims,

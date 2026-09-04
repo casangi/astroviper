@@ -21,6 +21,7 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     apply_mvc_primary_beam_convention,
     convert_mvc_cubes_to_taylor_normal_equations,
     finalize_mvc_taylor_normal_equations,
+    form_mfs_residual_grid_from_cache,
     make_mvc_taylor_normal_equation_contributions,
     prepare_model_uv_continuum_single_field,
     prepare_model_uv_mvc_single_field,
@@ -65,6 +66,57 @@ def test_accumulate_continuum_model_copies_initial_mvc_state():
     assert set(actual.data_vars) == {"SKY_MODEL", "PRIMARY_BEAM"}
     np.testing.assert_array_equal(actual["SKY_MODEL"], initial["SKY_MODEL"])
     assert actual["SKY_MODEL"].data is not initial["SKY_MODEL"].data
+
+
+def _mfs_grid_dataset(grid_value, normalization_value=4.0):
+    """Construct a registered, globally reduced MFS Taylor UV grid."""
+    dims = ("time", "taylor_term", "polarization", "u", "v")
+    normalization_dims = ("time", "taylor_term", "polarization")
+    return xr.Dataset(
+        {
+            "VISIBILITY": xr.DataArray(
+                np.full((1, 2, 1, 2, 2), grid_value, dtype=np.complex128),
+                dims=dims,
+            ),
+            "VISIBILITY_NORMALIZATION": xr.DataArray(
+                np.full((1, 2, 1), normalization_value, dtype=np.float64),
+                dims=normalization_dims,
+            ),
+        },
+        attrs={
+            "data_groups": {
+                "residual": {
+                    "visibility": "VISIBILITY",
+                    "visibility_normalization": "VISIBILITY_NORMALIZATION",
+                }
+            }
+        },
+    )
+
+
+def test_cached_mfs_grid_subtracts_model_but_preserves_normalization():
+    """Cached-grid MFS forms GWVobs-GWDmodel without subtracting weight sums."""
+    observed = _mfs_grid_dataset(5.0)
+    model = _mfs_grid_dataset(1.5)
+
+    residual = form_mfs_residual_grid_from_cache(observed, model)
+
+    np.testing.assert_array_equal(residual.VISIBILITY, 3.5)
+    np.testing.assert_array_equal(residual.VISIBILITY_NORMALIZATION, 4.0)
+    np.testing.assert_array_equal(observed.VISIBILITY, 5.0)
+    np.testing.assert_array_equal(model.VISIBILITY, 1.5)
+    assert residual.attrs["visibility_grid_source"] == "cached_observed_minus_model"
+
+
+def test_cached_mfs_grid_ignores_model_normalization():
+    """Zero predicted samples may reduce its sum; the observed sum must win."""
+    residual = form_mfs_residual_grid_from_cache(
+        _mfs_grid_dataset(5.0, normalization_value=4.0),
+        _mfs_grid_dataset(1.5, normalization_value=3.0),
+    )
+
+    np.testing.assert_array_equal(residual.VISIBILITY, 3.5)
+    np.testing.assert_array_equal(residual.VISIBILITY_NORMALIZATION, 4.0)
 
 
 def test_accumulate_continuum_model_adds_later_increment_positionally():
@@ -719,3 +771,51 @@ def test_shared_degridder_registers_output_and_calls_cpp_kernel(monkeypatch):
     )
     assert called["shape"] == (1, 2, 1, 2, 2)
     np.testing.assert_allclose(ms.VISIBILITY_MODEL, 3.0)
+
+
+def test_shared_degridder_allocates_model_from_weights_without_observed_data(
+    monkeypatch,
+):
+    """Cached-grid MFS prediction does not require loading visibility values."""
+    import xradio.image.image_xds  # noqa: F401
+
+    visibility_dims = ("time", "baseline_id", "frequency", "polarization")
+    ms = xr.Dataset(
+        {
+            "WEIGHT_IMAGING": (visibility_dims, np.ones((1, 1, 2, 1))),
+            "UVW": (("time", "baseline_id", "uvw_label"), np.zeros((1, 1, 3))),
+        },
+        coords={"frequency": [1.0e9, 1.1e9]},
+        attrs={
+            "data_groups": {
+                "base": {
+                    "correlated_data": "VISIBILITY",
+                    "uvw": "UVW",
+                    "weight_imaging": "WEIGHT_IMAGING",
+                }
+            }
+        },
+    )
+    geometry = xr.Dataset(
+        coords={"l": [0.0, 1.0], "m": [0.0, 1.0]},
+        attrs={"type": "image_dataset"},
+    )
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp."
+        "prolate_spheroidal_degrid",
+        lambda grid, vis, *args, **kwargs: vis.fill(2.0),
+    )
+
+    degrid_visibility_grid_single_field(
+        ms,
+        np.ones(351),
+        geometry,
+        np.ones((1, 2, 1, 2, 2), dtype=np.complex64),
+        [0, 1],
+        fft_padding=1.0,
+    )
+
+    assert "VISIBILITY" not in ms
+    assert ms.VISIBILITY_MODEL.dims == visibility_dims
+    np.testing.assert_array_equal(ms.VISIBILITY_MODEL, 2.0)

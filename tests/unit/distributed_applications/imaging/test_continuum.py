@@ -19,8 +19,10 @@ from xradio.image import write_image
 from xradio.measurement_set import open_processing_set
 
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
+    _accumulate_graph_timings,
     _apply_exact_frequency_selection_to_continuum_mapping,
     _continuum_image_for_disk,
+    _graph_timing_record,
     _mapping_with_task_primary_beams,
     calculate_number_of_chunks_for_continuum_imaging,
     combine_continuum_chunks,
@@ -358,6 +360,74 @@ def test_weight_cache_reducer_combines_leaf_and_partial_results():
     assert list(result["timing_node_tasks"].task_id) == [0, 1]
 
 
+def test_weight_cache_reducer_retains_resource_monitor_series():
+    """Weight-degridding graphs preserve GraphVIPER resource samples."""
+    result = combine_continuum_imaging_weight_chunks(
+        [
+            {
+                "task_id": 0,
+                "weight_datasets": {"a": 1},
+                "timing_node_tasks": pd.DataFrame(
+                    {"task_id": [0], "T_imaging_weight_degrid_node": [2.0]}
+                ),
+                "resource_usage": {
+                    "hostname": "worker-a",
+                    "start_unixtime": 100.0,
+                    "cpu_percent": [90.0, 100.0],
+                },
+            }
+        ],
+        {},
+    )
+    timing = result["timing_node_tasks"].iloc[0]
+    assert timing.hostname == "worker-a"
+    assert timing.start_unixtime == 100.0
+    assert timing.cpu_percent == [90.0, 100.0]
+
+
+def test_graph_timing_record_normalizes_weight_task_phases():
+    """Weight graphs expose the common columns used by task-stream plots."""
+    result = {
+        "timing_node_tasks": pd.DataFrame(
+            {
+                "task_id": [0],
+                "T_load": [1.0],
+                "T_weight_density_node": [3.0],
+                "hostname": ["worker-a"],
+                "start_unixtime": [101.0],
+            }
+        )
+    }
+    record = _graph_timing_record(
+        "global weight density",
+        result,
+        {
+            "compute_start_unixtime": 100.0,
+            "compute_end_unixtime": 104.0,
+            "T_compute_dask_graph": 4.0,
+        },
+    )
+    assert record["stage"] == "global weight density"
+    assert record["T_compute"] == 4.0
+    timing = record["timing_node_tasks"].iloc[0]
+    assert timing.T_image_cube_task == 3.0
+    assert timing.T_write == 0.0
+
+
+def test_graph_timing_accumulation_excludes_absolute_anchors():
+    """Per-graph wall-clock anchors are not summed into driver durations."""
+    destination = {"T_compute_dask_graph": 2.0}
+    _accumulate_graph_timings(
+        destination,
+        {
+            "T_compute_dask_graph": 3.0,
+            "compute_start_unixtime": 100.0,
+            "compute_end_unixtime": 103.0,
+        },
+    )
+    assert destination == {"T_compute_dask_graph": 5.0}
+
+
 def test_weight_degrid_graph_normalizes_a_single_map_leaf(monkeypatch):
     """A one-partition graph returns the same task-indexed cache as reduction."""
     leaf = {
@@ -482,6 +552,7 @@ def _run_tw_hydra_continuum(
     reduce_n_batch=2,
     cache_directory=None,
     weight_memory_mode="in_memory",
+    visibility_memory_mode="in_place",
     widebandpb_memory_mode="in_memory",
     write_visibility_model_to_ps=False,
     write_imaging_weights_to_ps=False,
@@ -527,6 +598,7 @@ def _run_tw_hydra_continuum(
             overwrite=True,
             memory_mode="in_memory",
             weight_memory_mode=weight_memory_mode,
+            visibility_memory_mode=visibility_memory_mode,
             widebandpb_memory_mode=widebandpb_memory_mode,
             cache_directory=cache_directory,
             write_visibility_model_to_ps=write_visibility_model_to_ps,
@@ -837,9 +909,84 @@ def test_tw_hydra_cleaning_runs_later_major_cycles_and_builds_a_model(
     )
 
     assert result["n_major_cycles"] >= 2
+    assert len(result["timing_graphs"]) == result["n_major_cycles"] + 1
+    assert result["timing_graphs"][0]["stage"].startswith("major loop 1")
+    assert result["timing_graphs"][-1]["stage"] == "final residual + restoration"
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
     assert np.isfinite(image.SKY_RESIDUAL.values).all()
     assert np.isfinite(image.SKY_MODEL.values).all()
+
+
+@pytest.mark.parametrize(
+    "weighting",
+    [
+        pytest.param(
+            {"weighting": "natural", "weighting_scope": "local"},
+            id="natural-local",
+        ),
+        pytest.param(
+            {
+                "weighting": "briggs",
+                "robust": 0.5,
+                "weighting_scope": "global",
+                "casa_weighting_implementation": True,
+            },
+            id="briggs-global",
+        ),
+    ],
+)
+def test_tw_hydra_cached_mfs_visibility_grid_matches_in_place_residuals(
+    tmp_path,
+    tw_hydra_store,
+    weighting,
+):
+    """Cached GWVobs reproduces visibility-domain subtraction through CLEAN."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    iteration_control_params = {
+        "niter": 20,
+        "nmajor": 2,
+        "threshold": 0.001,
+        "gain": 0.1,
+        "cyclefactor": 1.5,
+        "cycleniter": 5,
+        "minpsffraction": 0.05,
+        "maxpsffraction": 0.8,
+    }
+    reference_result, reference = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / f"visibility_{weighting['weighting']}_in_place.img.zarr",
+        processing_set,
+        2,
+        "mfs",
+        weighting,
+        iteration_control_params=iteration_control_params,
+        visibility_memory_mode="in_place",
+    )
+    cached_result, cached = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / f"visibility_{weighting['weighting']}_in_memory.img.zarr",
+        processing_set,
+        2,
+        "mfs",
+        weighting,
+        iteration_control_params=iteration_control_params,
+        visibility_memory_mode="in_memory",
+    )
+
+    assert cached_result["n_major_cycles"] == reference_result["n_major_cycles"]
+    for variable in (
+        "SKY_MODEL",
+        "SKY_RESIDUAL",
+        "POINT_SPREAD_FUNCTION",
+        "PRIMARY_BEAM",
+    ):
+        np.testing.assert_allclose(
+            cached[variable],
+            reference[variable],
+            rtol=TW_HYDRA_RELATIVE_TOLERANCE,
+            atol=1.0e-12,
+            equal_nan=True,
+        )
 
 
 @pytest.mark.parametrize("widebandpb_memory_mode", ["in_place", "recompute"])
@@ -1020,6 +1167,11 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
     )
 
     assert result["n_major_cycles"] >= 2
+    assert len(result["timing_graphs"]) == result["n_major_cycles"] + 3
+    assert [record["stage"] for record in result["timing_graphs"][:2]] == [
+        "global weight density",
+        "global weight degridding",
+    ]
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
     assert image.SKY_RESIDUAL.dtype == np.dtype(np.float32)
     assert np.isfinite(image.SKY_RESTORED.isel(taylor_term=0).values).all()
