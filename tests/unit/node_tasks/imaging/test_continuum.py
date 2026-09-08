@@ -45,6 +45,60 @@ def _mfs_uv_grid(value):
     )
 
 
+def test_install_continuum_clean_mask_broadcasts_and_registers_data_group():
+    """A 2-D user mask is broadcast across all Taylor residual planes."""
+    residual = xr.DataArray(
+        np.zeros((1, 2, 1, 2, 3)),
+        dims=("time", "taylor_term", "polarization", "l", "m"),
+        coords={
+            "time": [0.0],
+            "taylor_term": [0, 1],
+            "polarization": ["I"],
+            "l": [0, 1],
+            "m": [0, 1, 2],
+        },
+    )
+    image = xr.Dataset(
+        {"SKY_RESIDUAL": residual},
+        attrs={"data_groups": {"residual": {"sky": "SKY_RESIDUAL"}}},
+    )
+    mask = np.array([[True, False, True], [False, True, False]])
+
+    continuum_node._install_continuum_clean_mask(image, mask)
+
+    assert image["CLEAN_MASK"].dims == residual.dims
+    np.testing.assert_array_equal(
+        image["CLEAN_MASK"].isel(time=0, taylor_term=0, polarization=0), mask
+    )
+    np.testing.assert_array_equal(
+        image["CLEAN_MASK"].isel(time=0, taylor_term=1, polarization=0), mask
+    )
+    assert image.attrs["data_groups"]["residual"]["mask"] == "CLEAN_MASK"
+    assert (
+        "User-supplied continuum deconvolution mask installed"
+        in (image.attrs["data_groups"]["residual"]["description"])
+    )
+
+
+def test_install_continuum_clean_mask_rejects_wrong_shape():
+    """Node-level validation protects direct callers from mismatched masks."""
+    image = xr.Dataset(
+        {
+            "SKY_RESIDUAL": xr.DataArray(
+                np.zeros((1, 1, 1, 2, 3)),
+                dims=("time", "taylor_term", "polarization", "l", "m"),
+            )
+        },
+        attrs={"data_groups": {"residual": {"sky": "SKY_RESIDUAL"}}},
+    )
+
+    with pytest.raises(ValueError, match="expected"):
+        continuum_node._install_continuum_clean_mask(
+            image,
+            np.ones((3, 2), dtype=bool),
+        )
+
+
 def test_first_cached_mfs_append_captures_an_independent_observed_grid():
     """The first reduced GWVobs grid is copied before its inverse FFT."""
     reduced = _mfs_uv_grid(5.0)

@@ -22,6 +22,7 @@
         },
         "scan_intents": { "type": ["list", "str"] },
         "field_name": { "type": ["str"], "nullable": true },
+        "clean_mask": { "type": ["str"], "nullable": true },
         "image_data_variables_keep": { "type": ["list"], "struct type": ["str"] },
         "compressor": { "nullable": true },
         "processing_set_data_group_name": { "type": ["str"] },

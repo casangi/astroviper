@@ -2332,6 +2332,29 @@ def calculate_number_of_chunks_for_continuum_imaging(
     return n_chunks
 
 
+def _load_continuum_clean_mask(clean_mask, image_size):
+    """Load and validate an optional two-dimensional continuum CLEAN mask."""
+    if clean_mask is None:
+        return None
+
+    import numpy as np
+
+    clean_mask_array = np.squeeze(np.asarray(np.load(clean_mask)))
+    expected_shape = tuple(int(value) for value in image_size)
+    if clean_mask_array.ndim != 2 or clean_mask_array.shape != expected_shape:
+        raise ValueError(
+            "clean_mask must contain one 2-D image plane with shape "
+            f"{expected_shape}; received {clean_mask_array.shape}."
+        )
+    if not np.all(np.isfinite(clean_mask_array)):
+        raise ValueError("clean_mask contains non-finite values.")
+
+    clean_mask_array = np.ascontiguousarray(clean_mask_array > 0.5)
+    if not np.any(clean_mask_array):
+        raise ValueError("clean_mask does not select any pixels.")
+    return clean_mask_array
+
+
 ###############################################################################
 # Main distributed layer level function call
 ###############################################################################
@@ -2353,6 +2376,7 @@ def image_continuum_single_field(
     instrument_polarization_basis: str = "linear",
     scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],  # noqa: B006 - param.json requires list/str (not nullable); never mutated
     field_name: str | None = None,
+    clean_mask: str | None = None,
     image_data_variables_keep: list[str] = [  # noqa: B006 - param.json requires a list (not nullable); never mutated
         "sky_residual",
         "point_spread_function",
@@ -2469,6 +2493,10 @@ def image_continuum_single_field(
     gridder : str, optional
         Currently ``"prolate_spheroidal"``. MFS and MVC dispatch visibility,
         PSF, and prediction work to the shared C++ grid/degrid kernels.
+    clean_mask : str or None, optional
+        Path to a NumPy ``.npy`` file containing one two-dimensional CLEAN mask.
+        Its shape must equal ``image_params["image_size"]``. Finite values greater
+        than 0.5 select pixels in every continuum residual plane.
     weight_memory_mode : {"in_memory", "in_place"}, optional
         Storage policy for calculated continuum imaging weights. ``"in_memory"``
         returns task-local weights to the driver and embeds them in subsequent
@@ -2572,6 +2600,11 @@ def image_continuum_single_field(
     # Work with an application-local copy: continuum setup may augment the
     # image parameters with metadata derived from the Processing Set.
     image_params = dict(image_params)
+
+    clean_mask_array = _load_continuum_clean_mask(
+        clean_mask,
+        image_params["image_size"],
+    )
 
     # Validate once at the application boundary so every graph sees the same
     # normalized scope. The checker defaults the scope to local and maps a
@@ -2698,6 +2731,7 @@ def image_continuum_single_field(
     input_params["deconvolver"] = deconvolver
     input_params["pbcor"] = bool(pbcor)
     input_params["pblimit"] = float(pblimit)
+    input_params["clean_mask"] = clean_mask_array
     input_params["specmode"] = specmode
     input_params["instrument_polarization_basis"] = instrument_polarization_basis
     input_params["single_precision_image"] = single_precision_image
@@ -3026,6 +3060,7 @@ def image_continuum_single_field(
             "specmode": specmode,
             "visibility_memory_mode": visibility_memory_mode,
             "pblimit": pblimit,
+            "clean_mask": clean_mask_array,
         }
 
         # In later major loops, a static_xds should be present

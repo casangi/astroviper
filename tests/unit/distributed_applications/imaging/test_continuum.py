@@ -23,6 +23,7 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
     _apply_exact_frequency_selection_to_continuum_mapping,
     _continuum_image_for_disk,
     _graph_timing_record,
+    _load_continuum_clean_mask,
     _mapping_with_task_primary_beams,
     calculate_number_of_chunks_for_continuum_imaging,
     combine_continuum_chunks,
@@ -54,6 +55,43 @@ def _frequency_mapping(task_frequency_chunks, child_frequencies):
         for task_id, frequencies in enumerate(task_frequency_chunks)
     }
     return mapping, processing_set
+
+
+def test_load_continuum_clean_mask_returns_contiguous_boolean_plane(tmp_path):
+    """The public mask file is normalized to a C-contiguous Boolean plane."""
+    mask_path = tmp_path / "clean_mask.npy"
+    np.save(mask_path, np.array([[0.0, 1.0, 0.5], [0.6, -1.0, 2.0]]))
+
+    actual = _load_continuum_clean_mask(mask_path, [2, 3])
+
+    assert actual.dtype == np.bool_
+    assert actual.flags.c_contiguous
+    np.testing.assert_array_equal(
+        actual,
+        [[False, True, False], [True, False, True]],
+    )
+
+
+@pytest.mark.parametrize(
+    ("mask", "image_size", "message"),
+    [
+        (np.ones((2, 2)), [2, 3], "shape"),
+        (np.array([[1.0, np.nan], [0.0, 0.0]]), [2, 2], "non-finite"),
+        (np.zeros((2, 2)), [2, 2], "does not select any pixels"),
+    ],
+)
+def test_load_continuum_clean_mask_rejects_invalid_input(
+    tmp_path,
+    mask,
+    image_size,
+    message,
+):
+    """Invalid mask geometry, values, and empty selections fail early."""
+    mask_path = tmp_path / "invalid_clean_mask.npy"
+    np.save(mask_path, mask)
+
+    with pytest.raises(ValueError, match=message):
+        _load_continuum_clean_mask(mask_path, image_size)
 
 
 def test_exact_frequency_selection_reorders_a_nonmonotonic_child():

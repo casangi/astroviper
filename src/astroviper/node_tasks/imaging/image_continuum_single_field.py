@@ -677,6 +677,63 @@ def _finalize_reference_primary_beam(
 ###############################################################################
 
 
+def _install_continuum_clean_mask(
+    img_xds,
+    clean_mask,
+    image_data_group_name="residual",
+):
+    """Install a user-supplied 2-D mask on every continuum residual plane."""
+    if clean_mask is None:
+        return
+
+    import numpy as np
+    import xarray as xr
+
+    from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+    if "SKY_RESIDUAL" not in img_xds:
+        raise KeyError("The continuum image does not contain 'SKY_RESIDUAL'.")
+
+    residual = img_xds["SKY_RESIDUAL"]
+    if residual.dims[-2:] != ("l", "m"):
+        raise ValueError("SKY_RESIDUAL must end in the ('l', 'm') dimensions.")
+
+    mask_plane = np.asarray(clean_mask, dtype=bool)
+    expected_shape = (residual.sizes["l"], residual.sizes["m"])
+    if mask_plane.shape != expected_shape:
+        raise ValueError(
+            "The continuum clean mask has shape "
+            f"{mask_plane.shape}; expected {expected_shape}."
+        )
+
+    expanded = mask_plane.reshape((1,) * (residual.ndim - 2) + mask_plane.shape)
+    mask_values = np.broadcast_to(expanded, residual.shape).copy()
+    img_xds["CLEAN_MASK"] = xr.DataArray(
+        mask_values,
+        dims=residual.dims,
+        coords={dimension: residual.coords[dimension] for dimension in residual.dims},
+        attrs={
+            "description": "User-supplied continuum deconvolution mask.",
+            "type": "mask",
+        },
+    )
+
+    data_groups = img_xds.attrs.get("data_groups", {})
+    if image_data_group_name not in data_groups:
+        raise KeyError(
+            "The continuum image does not contain image data group "
+            f"{image_data_group_name!r}."
+        )
+    residual_group = dict(data_groups[image_data_group_name])
+    residual_group["mask"] = "CLEAN_MASK"
+    modify_data_groups_xds(
+        img_xds,
+        data_group_out_name=image_data_group_name,
+        data_group_out=residual_group,
+        description="User-supplied continuum deconvolution mask installed.",
+    )
+
+
 @shares_param_docs
 def residual_update_continuum_single_field(
     image_params,
@@ -2406,6 +2463,12 @@ def continuum_minor_cycle_node(
     )
 
     input_data["image"] = img_xds
+
+    _install_continuum_clean_mask(
+        img_xds,
+        input_params.get("clean_mask"),
+        input_params.get("image_data_group_in_name", "residual"),
+    )
 
     model_update_input_params = dict(input_params)
     model_update_input_params.pop("static_xds", None)
