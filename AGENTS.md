@@ -63,6 +63,10 @@ pytest --cov=astroviper tests # with coverage
 - Data is fetched with `toolviper.utils.data.download(...)`.
 - **Add or update tests for any code you change**, even if not asked.
 
+### Development Process
+
+See [DEVELOPMENT_PROCESS.md](DEVELOPMENT_PROCESS.md) for more information.
+
 ### Formatting / pre-commit (required before committing)
 - **Ruff** is the formatter (`ruff format`, black-compatible) and the linter
   (`ruff check --fix`): import sorting plus pyflakes (undefined names, unused
@@ -488,11 +492,7 @@ per-variable nodes.
   unformatted code.
 - ❌ Introduce relative imports outside `__init__.py` re-exports.
 
-## 10. Definition of Done for New Features
-- Tests written with at least 80% coverage.
-- Example notebook created (start from `docs/notebook_template.ipynb`).
-- NumPy-style docstrings on all public functions.
-- Initial performance testing done using larger datasets and relevant timing comparison with CASA.
+
 
 ---
 
