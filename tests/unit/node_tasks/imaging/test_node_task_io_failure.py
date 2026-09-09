@@ -46,7 +46,7 @@ def test_load_failure_returns_marked_row_instead_of_raising(tmp_path):
     assert df["task_id"].iloc[0] == 7
     assert df["task_error"].iloc[0]  # carries the original exception repr
     assert "T_image_cube_task" in df.columns
-    assert result["deconvolution"].data == {}  # empty ReturnDict merges cleanly
+    assert result["deconvolution"].data == {}  # empty ImagingDict merges cleanly
 
 
 def test_failed_rows_merge_through_the_standard_reduce(tmp_path):

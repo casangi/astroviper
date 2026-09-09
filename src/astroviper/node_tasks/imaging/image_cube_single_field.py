@@ -76,21 +76,21 @@ def _log_task_io_failure(phase, exc, task_id, image_store, data_selection, task_
     }
 
 
-def _remap_deconvolve_dict_to_global_channels(combined_deconvolve_dict, data_selection):
-    """Shift a chunk-local deconvolve ReturnDict onto global channel numbers.
+def _remap_imaging_dict_to_global_channels(combined_imaging_dict, data_selection):
+    """Shift a chunk-local deconvolve ImagingDict onto global channel numbers.
 
     The per-chunk ``image_cube_single_field`` labels channels ``0..N-1`` within
     the chunk. The global channel offset for this chunk is the start of the
     ``frequency`` slice in ``data_selection`` (frequency and channel are the
     same axis), e.g. ``{'ms_name': {'frequency': slice(2, 4)}}`` -> offset 2.
 
-    Returns a new ReturnDict whose ``Key.chan`` values are global channel
+    Returns a new ImagingDict whose ``Key.chan`` values are global channel
     numbers. A no-op returning the input unchanged when the offset is 0 (e.g. a
     single chunk starting at channel 0) or no frequency slice is present.
     """
-    from astroviper.processing_functions.imaging.utils.return_dict import (
+    from astroviper.processing_functions.imaging.utils.imaging_dict import (
+        ImagingDict,
         Key,
-        ReturnDict,
     )
 
     chan_offset = 0
@@ -101,10 +101,10 @@ def _remap_deconvolve_dict_to_global_channels(combined_deconvolve_dict, data_sel
             break
 
     if chan_offset == 0:
-        return combined_deconvolve_dict
+        return combined_imaging_dict
 
-    remapped = ReturnDict()
-    for key, value in combined_deconvolve_dict.data.items():
+    remapped = ImagingDict()
+    for key, value in combined_imaging_dict.data.items():
         remapped.data[Key(time=key.time, pol=key.pol, chan=key.chan + chan_offset)] = (
             value
         )
@@ -196,9 +196,9 @@ def image_cube_single_field(
           mask cutoff as a fraction of the peak primary beam, in ``[0, 1]``.
           Pixels where the primary beam is below this fraction are excluded from
           cleaning. A masking cutoff, distinct from ``threshold``.
-        - ``gain`` [CASA ``gain``] : CLEAN loop gain -- the fraction of the
+        - ``loop_gain`` [CASA ``gain``] : CLEAN loop gain -- the fraction of the
           selected peak flux subtracted from the residual image each iteration
-          (``0 < gain <= 1``).
+          (``0 < loop_gain <= 1``).
         - ``cycle_factor`` [CASA ``cyclefactor``] : Scaling applied to the
           brightest PSF sidelobe level when setting the model update cycle
           stopping depth (see ``cycle_threshold`` below). Larger values trigger
@@ -208,12 +208,12 @@ def image_cube_single_field(
           triggered. ``cycle_niter=-1`` lets the adaptive ``cycle_threshold``
           govern the depth instead; otherwise the count is clamped to never
           exceed the plane's remaining ``niter_per_plane``.
-        - ``minpsffraction`` [CASA ``minpsffraction``] : Lower clamp on the PSF
+        - ``min_psf_fraction`` [CASA ``minpsffraction``] : Lower clamp on the PSF
           fraction used to set ``cycle_threshold = clamp(max_psf_sidelobe *
-          cycle_factor, minpsffraction, maxpsffraction) * peak_residual`` (then
+          cycle_factor, min_psf_fraction, max_psf_fraction) * peak_residual`` (then
           floored at ``threshold``). Raising it limits how deep one model update
           cycle cleans.
-        - ``maxpsffraction`` [CASA ``maxpsffraction``] : Upper clamp on that same
+        - ``max_psf_fraction`` [CASA ``maxpsffraction``] : Upper clamp on that same
           PSF fraction; it guarantees a minimum amount of cleaning per model
           update cycle even when the PSF sidelobe level is high.
 
@@ -308,7 +308,7 @@ def image_cube_single_field(
           deconvolution, write, ...) plus ``task_id``, ``n_channels``,
           ``n_major_cycles`` and the total ``T_image_cube_task``.
         * ``"deconvolution"`` : the per-plane deconvolution
-          :class:`~astroviper.processing_functions.imaging.utils.return_dict.ReturnDict`,
+          :class:`~astroviper.processing_functions.imaging.utils.imaging_dict.ImagingDict`,
           with channels remapped to global channel numbers.
         * ``"image_statistics"`` : ``{image_variable_key: xarray.Dataset}`` of
           NaN-ignoring per-plane statistics of the image-domain variables
@@ -410,7 +410,9 @@ def image_cube_single_field(
         # otherwise tear down every node after this task exhausts its retries).
         import pandas as pd
 
-        from astroviper.processing_functions.imaging.utils.return_dict import ReturnDict
+        from astroviper.processing_functions.imaging.utils.imaging_dict import (
+            ImagingDict,
+        )
 
         row = _log_task_io_failure(
             "load", exc, task_id, image_store, data_selection, task_coords
@@ -425,12 +427,12 @@ def image_cube_single_field(
         )
         return {
             "timing_node_tasks": pd.DataFrame({k: [v] for k, v in row.items()}),
-            "deconvolution": ReturnDict(),
+            "deconvolution": ImagingDict(),
             "image_statistics": {},
         }
     T_load = time.time() - start
 
-    img_xds, timing_df, combined_deconvolve_dict = pf.imaging.image_cube_single_field(
+    img_xds, timing_df, combined_imaging_dict = pf.imaging.image_cube_single_field(
         ps_xdt,
         img_xds,
         image_params,
@@ -449,8 +451,8 @@ def image_cube_single_field(
 
     # The deconvolve dict's channels are chunk-local (0-based); remap them to
     # global channel numbers so the reduce can merge chunks correctly.
-    combined_deconvolve_dict = _remap_deconvolve_dict_to_global_channels(
-        combined_deconvolve_dict, data_selection
+    combined_imaging_dict = _remap_imaging_dict_to_global_channels(
+        combined_imaging_dict, data_selection
     )
 
     # Per-plane (l, m) statistics of every image-domain variable in memory,
@@ -644,6 +646,6 @@ def image_cube_single_field(
 
     return {
         "timing_node_tasks": timing_df,
-        "deconvolution": combined_deconvolve_dict,
+        "deconvolution": combined_imaging_dict,
         "image_statistics": image_statistics,
     }

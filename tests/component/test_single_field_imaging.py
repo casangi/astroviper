@@ -53,7 +53,7 @@ from astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric impo
     airy_disk_rorder_v2,
 )
 from astroviper.processing_functions.imaging.utils.iteration_control import (
-    print_deconvolve_dict,
+    print_imaging_dict,
 )
 
 PS_STORE = "twhya_selfcal_lsrk_5chans.ps.zarr"
@@ -103,7 +103,7 @@ TRUTH_RTOL = 1e-6
 # accumulated across a full test session can occasionally tip a channel, so a
 # 1e-6 image bound is flaky even single-threaded. Both single-precision variants
 # therefore use this loose image bound AND skip the exact deconvolution-dict
-# check (dict_kind=None); the double-precision variants are the tight ReturnDict
+# check (dict_kind=None); the double-precision variants are the tight ImagingDict
 # regression guard.
 MULTI_CYCLE_SINGLE_RTOL = 0.15
 
@@ -167,11 +167,11 @@ _CONFIGS = {
             "niter_per_plane": 0,
             "nmajor": 0,
             "threshold": 0.0,
-            "gain": 0.1,
+            "loop_gain": 0.1,
             "cycle_factor": 1.5,
             "cycle_niter": -1,
-            "minpsffraction": 0.05,
-            "maxpsffraction": 0.8,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
         },
         "image_data_variables_keep": [
             "sky_residual",
@@ -191,11 +191,11 @@ _CONFIGS = {
             "nmajor": 0,
             "threshold": 0.001,
             "primary_beam_limit": 0.2,
-            "gain": 0.1,
+            "loop_gain": 0.1,
             "cycle_factor": 1.5,
             "cycle_niter": -1,
-            "minpsffraction": 0.05,
-            "maxpsffraction": 0.2,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.2,
         },
         "image_data_variables_keep": [
             "sky_residual",
@@ -226,11 +226,11 @@ _CONFIGS = {
             "nmajor": 4,
             "threshold": 0.001,
             "primary_beam_limit": 0.2,
-            "gain": 0.1,
+            "loop_gain": 0.1,
             "cycle_factor": 1.5,
             "cycle_niter": -1,
-            "minpsffraction": 0.05,
-            "maxpsffraction": 0.8,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
         },
         "image_data_variables_keep": [
             "sky_residual",
@@ -382,15 +382,15 @@ def _image_params(ps_xdt):
     }
 
 
-def _check_deconvolve_dict(
-    deconvolve_dict,
+def _check_imaging_dict(
+    imaging_dict,
     expected,
     rtol=1e-5,
     atol=1e-8,
     loose_fields=frozenset(),
     loose_rtol=0.15,
 ):
-    """Assert every key and field of a deconvolve ReturnDict matches ``expected``.
+    """Assert every key and field of a deconvolve ImagingDict matches ``expected``.
 
     ``expected`` is keyed by ``(time, pol, chan)`` tuples, with ``stop_code``
     given as a ``(major, minor)`` tuple. Integer fields (niter_per_plane, iter_done,
@@ -411,9 +411,9 @@ def _check_deconvolve_dict(
     exact_int_fields = {"niter_per_plane", "iter_done", "masksum"}
     string_fields = {"stokes", "stop_description"}
 
-    actual = {tuple(k): v for k, v in deconvolve_dict.data.items()}
+    actual = {tuple(k): v for k, v in imaging_dict.data.items()}
     assert set(actual) == set(expected), (
-        f"deconvolve_dict planes {sorted(actual)} != expected {sorted(expected)}"
+        f"imaging_dict planes {sorted(actual)} != expected {sorted(expected)}"
     )
     for key, exp_fields in expected.items():
         got = actual[key]
@@ -466,13 +466,13 @@ def _check_deconvolve_dict(
                 ), f"plane {key} {field}: {val} != {exp_val}"
 
 
-def _check_image_statistics(return_dict, img_av_xds, expect_mask):
+def _check_image_statistics(imaging_dict, img_av_xds, expect_mask):
     """The gathered per-plane statistics must describe the written cube: full
     (time, frequency, polarization) extent in global frequency order, and the
     NaN-ignoring mean / signed peak of every SKY_RESIDUAL plane must match a
     direct recomputation from the image store (5 chunks -> exercises the
     frequency concatenation in the reduce)."""
-    stats = return_dict["image_statistics"]
+    stats = imaging_dict["image_statistics"]
     assert "sky_residual" in stats
     residual_stats = stats["sky_residual"]
     assert residual_stats.sizes == {
@@ -507,7 +507,7 @@ def _check_image_statistics(return_dict, img_av_xds, expect_mask):
     assert (
         residual_stats["n_pixels_masked"].values < residual_stats["n_pixels"].values
     ).all()
-    assert "T_image_statistics" in return_dict["timing_node_tasks"].columns
+    assert "T_image_statistics" in imaging_dict["timing_node_tasks"].columns
 
 
 def _run_image_cube(
@@ -523,7 +523,7 @@ def _run_image_cube(
 ):
     """Run ``image_cube_single_field`` for one base test ``kind`` and variant.
 
-    Returns ``(return_dict, img_av_xds, image_params)``. The per-variant knobs are
+    Returns ``(imaging_dict, img_av_xds, image_params)``. The per-variant knobs are
     ``processing_function_threads``, ``n_mapping_parallelism`` and optionally
     ``single_precision_image`` (which overrides the config value when not None),
     plus ``skunk_works`` / ``output_shard_channels`` /
@@ -538,7 +538,7 @@ def _run_image_cube(
         single_precision_image = config["single_precision_image"]
     ps_xdt = open_processing_set(PS_STORE)
     image_params = _image_params(ps_xdt)
-    return_dict = image_cube_single_field(
+    imaging_dict = image_cube_single_field(
         ps_store=PS_STORE,
         image_store=image_store,
         image_params=image_params,
@@ -563,7 +563,7 @@ def _run_image_cube(
         **config["extra_kwargs"],
     )
     img_av_xds = xr.open_zarr(image_store)
-    return return_dict, img_av_xds, image_params
+    return imaging_dict, img_av_xds, image_params
 
 
 def _compare_to_truth(
@@ -712,7 +712,7 @@ def test_single_field_imaging_niter0(plot_saver, processing_function_threads):
         "twhya_selfcal_5chans_lsrk_niter0_astroviper_"
         f"t{processing_function_threads}.img.zarr"
     )
-    return_dict, img_av_xds, image_params = _run_image_cube(
+    imaging_dict, img_av_xds, image_params = _run_image_cube(
         "niter0",
         image_store,
         processing_function_threads=processing_function_threads,
@@ -721,10 +721,10 @@ def test_single_field_imaging_niter0(plot_saver, processing_function_threads):
     truth_xds = xr.open_zarr(TRUTH_IMAGE_NITER0)
 
     print("&&&&&&&&&" * 10)
-    print("imaging_metadata_pd", return_dict["timing_node_tasks"])
-    print("deconvolve_dict (global channel numbering):")
-    print_deconvolve_dict(return_dict["deconvolution"])
-    _check_image_statistics(return_dict, img_av_xds, expect_mask=False)
+    print("imaging_metadata_pd", imaging_dict["timing_node_tasks"])
+    print("imaging_dict (global channel numbering):")
+    print_imaging_dict(imaging_dict["deconvolution"])
+    _check_image_statistics(imaging_dict, img_av_xds, expect_mask=False)
 
     _compare_to_truth(
         img_av_xds,
@@ -993,7 +993,7 @@ def test_single_field_imaging_niter100(plot_saver, processing_function_threads):
         "twhya_selfcal_5chans_lsrk_niter100_astroviper_"
         f"t{processing_function_threads}.img.zarr"
     )
-    return_dict, img_av_xds, _ = _run_image_cube(
+    imaging_dict, img_av_xds, _ = _run_image_cube(
         "niter100",
         image_store,
         processing_function_threads=processing_function_threads,
@@ -1003,13 +1003,13 @@ def test_single_field_imaging_niter100(plot_saver, processing_function_threads):
 
     print("&&&&&&&&&" * 10)
     print("imaging_metadata_pd:")
-    print(return_dict["timing_node_tasks"].to_string())
-    print("deconvolve_dict (global channel numbering):")
-    print_deconvolve_dict(return_dict["deconvolution"])
-    _check_deconvolve_dict(
-        return_dict["deconvolution"], EXPECTED_DECONVOLVE_DICT_NITER100
+    print(imaging_dict["timing_node_tasks"].to_string())
+    print("imaging_dict (global channel numbering):")
+    print_imaging_dict(imaging_dict["deconvolution"])
+    _check_imaging_dict(
+        imaging_dict["deconvolution"], EXPECTED_DECONVOLVE_DICT_NITER100
     )
-    _check_image_statistics(return_dict, img_av_xds, expect_mask=True)
+    _check_image_statistics(imaging_dict, img_av_xds, expect_mask=True)
 
     _compare_to_truth(
         img_av_xds,
@@ -1052,7 +1052,7 @@ def test_single_field_imaging_multi_cycle(
         "twhya_selfcal_5chans_lsrk_multi_cycle_astroviper_"
         f"t{processing_function_threads}_c{n_mapping_parallelism}_{precision_tag}.img.zarr"
     )
-    return_dict, img_av_xds, _ = _run_image_cube(
+    imaging_dict, img_av_xds, _ = _run_image_cube(
         "multi_cycle",
         image_store,
         processing_function_threads=processing_function_threads,
@@ -1061,7 +1061,7 @@ def test_single_field_imaging_multi_cycle(
     )
     truth_xds = xr.open_zarr(truth_image)
 
-    # Only the double-precision multi_cycle checks the deconvolution ReturnDict:
+    # Only the double-precision multi_cycle checks the deconvolution ImagingDict:
     # it is stable across thread count and chunking. The single-precision deep
     # CLEAN sits on a float32 peak-selection bifurcation (see
     # MULTI_CYCLE_SINGLE_RTOL), so its per-plane history is not reproducible
@@ -1075,8 +1075,8 @@ def test_single_field_imaging_multi_cycle(
         loose_fields = (
             _BIFURCATION_SENSITIVE_FIELDS if dict_kind == "single" else frozenset()
         )
-        _check_deconvolve_dict(
-            return_dict["deconvolution"],
+        _check_imaging_dict(
+            imaging_dict["deconvolution"],
             expected_dict,
             loose_fields=loose_fields,
             loose_rtol=MULTI_CYCLE_SINGLE_DICT_RTOL,
@@ -1093,10 +1093,10 @@ def test_single_field_imaging_multi_cycle(
         tol=tol,
     )
 
-    print(return_dict["timing_node_tasks"].T)
-    print(return_dict["timing_node_tasks"]["T_deconvolve"])
-    print(return_dict["timing_node_tasks"]["T_residual_cycle"])
-    print(return_dict["timing_node_tasks"]["T_image_cube_task"])
+    print(imaging_dict["timing_node_tasks"].T)
+    print(imaging_dict["timing_node_tasks"]["T_deconvolve"])
+    print(imaging_dict["timing_node_tasks"]["T_residual_cycle"])
+    print(imaging_dict["timing_node_tasks"]["T_image_cube_task"])
 
 
 def test_single_field_imaging_multi_cycle_double_vs_single(plot_saver):
@@ -1194,10 +1194,10 @@ def _regenerate_truth_images():
 
 
 # ---------------------------------------------------------------------------
-# Expected per-plane deconvolution ReturnDicts.
+# Expected per-plane deconvolution ImagingDicts.
 #
 # Keyed by ``(time, pol, chan)`` with each history list holding one entry per
-# major cycle; checked by ``_check_deconvolve_dict``. Within a precision they
+# major cycle; checked by ``_check_imaging_dict``. Within a precision they
 # are independent of thread count and chunking (iteration control is computed
 # per (time, frequency, polarization) plane). Only the double-precision
 # multi_cycle is pinned to a literal: the single-precision deep CLEAN is chaotic

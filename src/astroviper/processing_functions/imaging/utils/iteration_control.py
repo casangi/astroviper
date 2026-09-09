@@ -4,7 +4,7 @@ Iteration Control Module for Deconvolution Algorithms
 This module implements iteration control logic for deconvolution processes,
 adapted from CASA's iteration control implementation in _gclean.py and
 imager_return_dict.py. It has been streamlined to work with AstroViper's
-ReturnDict structure while retaining all original functionality.
+ImagingDict structure while retaining all original functionality.
 
 Per-plane iteration control
 ----------------------------
@@ -27,10 +27,10 @@ from typing import Any
 
 import numpy as np
 
-from astroviper.processing_functions.imaging.utils.return_dict import (
+from astroviper.processing_functions.imaging.utils.imaging_dict import (
     FIELD_ACCUM,
+    ImagingDict,
     Key,
-    ReturnDict,
 )
 
 HAVE_RETURNDICT = True
@@ -79,12 +79,12 @@ MINOR_STOPCODE_DESCRIPTIONS = {
 
 
 # ============================================================================
-# ReturnDict Utility Functions
+# ImagingDict Utility Functions
 # ============================================================================
 
 
-def _validate_returndict_selection(
-    return_dict: ReturnDict,
+def _validate_imaging_dict_selection(
+    imaging_dict: ImagingDict,
     selected: Any,
     time: int | None = None,
     pol: int | None = None,
@@ -94,14 +94,14 @@ def _validate_returndict_selection(
     Validate that sel() returned data when explicit filters were provided.
 
     Raises KeyError if explicit time/pol/chan values were specified but
-    no matching entries exist in the ReturnDict.
+    no matching entries exist in the ImagingDict.
 
     Parameters:
     -----------
-    return_dict : ReturnDict
-        The ReturnDict that was queried
+    imaging_dict : ImagingDict
+        The ImagingDict that was queried
     selected : Any
-        Result from return_dict.sel()
+        Result from imaging_dict.sel()
     time, pol, chan : Optional[int]
         The filter values that were used
 
@@ -132,9 +132,9 @@ def _validate_returndict_selection(
         filter_str = ", ".join(filter_parts)
 
         # Get available keys for the error message
-        available_keys = list(return_dict.data.keys())
+        available_keys = list(imaging_dict.data.keys())
         if len(available_keys) == 0:
-            available_str = "ReturnDict is empty"
+            available_str = "ImagingDict is empty"
         elif len(available_keys) <= 10:
             available_str = f"Available keys: {available_keys}"
         else:
@@ -143,15 +143,15 @@ def _validate_returndict_selection(
         raise KeyError(f"No entries found for {filter_str}. {available_str}")
 
 
-def merge_return_dicts(
-    return_dicts: list[ReturnDict],
+def merge_imaging_dicts(
+    imaging_dicts: list[ImagingDict],
     merge_strategy: str = "update",
-) -> ReturnDict:
+) -> ImagingDict:
     """
-    Merge multiple ReturnDict objects into a single ReturnDict.
+    Merge multiple ImagingDict objects into a single ImagingDict.
 
     This is essential for dask workflows where each node processes a subset
-    of (time, pol, chan) combinations and returns its own ReturnDict. Before
+    of (time, pol, chan) combinations and returns its own ImagingDict. Before
     making iteration control decisions, we need to merge all results.
 
     Merge Strategies:
@@ -170,8 +170,8 @@ def merge_return_dicts(
 
     Parameters:
     -----------
-    return_dicts : list of ReturnDict
-        List of ReturnDict objects to merge
+    imaging_dicts : list of ImagingDict
+        List of ImagingDict objects to merge
 
     merge_strategy : str, optional
         Strategy for handling conflicting keys. Options:
@@ -181,8 +181,8 @@ def merge_return_dicts(
 
     Returns:
     --------
-    merged : ReturnDict
-        Merged ReturnDict containing all data from input dicts
+    merged : ImagingDict
+        Merged ImagingDict containing all data from input dicts
 
     Raises:
     -------
@@ -192,25 +192,25 @@ def merge_return_dicts(
     Example:
     --------
     >>> # Dask workflow: 3 workers process different channels
-    >>> rd1 = ReturnDict()
+    >>> rd1 = ImagingDict()
     >>> rd1.add({'peakres': 0.5, 'iter_done': 100}, time=0, pol=0, chan=0)
     >>>
-    >>> rd2 = ReturnDict()
+    >>> rd2 = ImagingDict()
     >>> rd2.add({'peakres': 0.3, 'iter_done': 120}, time=0, pol=0, chan=1)
     >>>
-    >>> rd3 = ReturnDict()
+    >>> rd3 = ImagingDict()
     >>> rd3.add({'peakres': 0.4, 'iter_done': 110}, time=0, pol=0, chan=2)
     >>>
     >>> # Merge results
-    >>> merged = merge_return_dicts([rd1, rd2, rd3])
+    >>> merged = merge_imaging_dicts([rd1, rd2, rd3])
     >>> # merged now has 3 entries, one for each channel
     """
-    if not return_dicts:
-        return ReturnDict()
+    if not imaging_dicts:
+        return ImagingDict()
 
-    merged = ReturnDict()
+    merged = ImagingDict()
 
-    for rd in return_dicts:
+    for rd in imaging_dicts:
         for key, value in rd.data.items():
             if key in merged.data:
                 # Key conflict - apply merge strategy
@@ -258,23 +258,23 @@ def merge_return_dicts(
     return merged
 
 
-def get_peak_residual_from_returndict(
-    return_dict: ReturnDict,
+def get_peak_residual_from_imaging_dict(
+    imaging_dict: ImagingDict,
     use_mask: bool = True,
     time: int | None = None,
     pol: int | None = None,
     chan: int | None = None,
 ) -> float:
     """
-    Extract peak residual from ReturnDict structure.
+    Extract peak residual from ImagingDict structure.
 
     This adapts CASA's get_peakres() from imager_return_dict.py
-    to work with AstroViper's ReturnDict which uses (time, pol, chan) indexing.
+    to work with AstroViper's ImagingDict which uses (time, pol, chan) indexing.
 
     Parameters:
     -----------
-    return_dict : ReturnDict
-        ReturnDict instance containing deconvolution statistics
+    imaging_dict : ImagingDict
+        ImagingDict instance containing deconvolution statistics
 
     use_mask : bool, optional
         If True, use 'peakres' (masked). If False, use 'peakres_nomask' (default: True)
@@ -294,8 +294,8 @@ def get_peak_residual_from_returndict(
         Maximum peak residual across selected planes (latest value from history)
         Returns 0.0 if no valid data found
     """
-    selected = return_dict.sel(time=time, pol=pol, chan=chan)
-    _validate_returndict_selection(return_dict, selected, time, pol, chan)
+    selected = imaging_dict.sel(time=time, pol=pol, chan=chan)
+    _validate_imaging_dict_selection(imaging_dict, selected, time, pol, chan)
 
     if not isinstance(selected, list):
         selected = [selected] if selected is not None else []
@@ -326,19 +326,19 @@ def get_peak_residual_from_returndict(
     return peak
 
 
-def get_masksum_from_returndict(
-    return_dict: ReturnDict,
+def get_masksum_from_imaging_dict(
+    imaging_dict: ImagingDict,
     time: int | None = None,
     pol: int | None = None,
     chan: int | None = None,
 ) -> float:
     """
-    Calculate total mask sum from ReturnDict structure.
+    Calculate total mask sum from ImagingDict structure.
 
     Parameters:
     -----------
-    return_dict : ReturnDict
-        ReturnDict instance containing mask statistics
+    imaging_dict : ImagingDict
+        ImagingDict instance containing mask statistics
 
     time : int, optional
         Filter by specific time index (None = all times)
@@ -355,8 +355,8 @@ def get_masksum_from_returndict(
         Sum of latest mask values across selected planes
         Returns 0.0 if no mask data found
     """
-    selected = return_dict.sel(time=time, pol=pol, chan=chan)
-    _validate_returndict_selection(return_dict, selected, time, pol, chan)
+    selected = imaging_dict.sel(time=time, pol=pol, chan=chan)
+    _validate_imaging_dict_selection(imaging_dict, selected, time, pol, chan)
 
     if not isinstance(selected, list):
         selected = [selected] if selected is not None else []
@@ -376,19 +376,19 @@ def get_masksum_from_returndict(
     return total_masksum
 
 
-def get_iterations_done_from_returndict(
-    return_dict: ReturnDict,
+def get_iterations_done_from_imaging_dict(
+    imaging_dict: ImagingDict,
     time: int | None = None,
     pol: int | None = None,
     chan: int | None = None,
 ) -> int:
     """
-    Calculate total iterations done from ReturnDict structure.
+    Calculate total iterations done from ImagingDict structure.
 
     Parameters:
     -----------
-    return_dict : ReturnDict
-        ReturnDict instance containing iteration statistics
+    imaging_dict : ImagingDict
+        ImagingDict instance containing iteration statistics
 
     time : int, optional
         Filter by specific time index (None = all times)
@@ -404,8 +404,8 @@ def get_iterations_done_from_returndict(
     total_iterations : int
         Sum of all iterations done across entire history and selected planes
     """
-    selected = return_dict.sel(time=time, pol=pol, chan=chan)
-    _validate_returndict_selection(return_dict, selected, time, pol, chan)
+    selected = imaging_dict.sel(time=time, pol=pol, chan=chan)
+    _validate_imaging_dict_selection(imaging_dict, selected, time, pol, chan)
 
     if not isinstance(selected, list):
         selected = [selected] if selected is not None else []
@@ -425,22 +425,22 @@ def get_iterations_done_from_returndict(
     return total_iters
 
 
-def get_max_psf_sidelobe_from_returndict(
-    return_dict: ReturnDict,
+def get_max_psf_sidelobe_from_imaging_dict(
+    imaging_dict: ImagingDict,
     time: int | None = None,
     pol: int | None = None,
     chan: int | None = None,
 ) -> float:
     """
-    Extract maximum PSF sidelobe level from ReturnDict.
+    Extract maximum PSF sidelobe level from ImagingDict.
 
     This should be populated by psf_fitting.py analysis and stored
-    in the ReturnDict as 'max_psf_sidelobe'.
+    in the ImagingDict as 'max_psf_sidelobe'.
 
     Parameters:
     -----------
-    return_dict : ReturnDict
-        ReturnDict instance containing PSF analysis results
+    imaging_dict : ImagingDict
+        ImagingDict instance containing PSF analysis results
 
     time : int, optional
         Filter by specific time index (None = all times)
@@ -457,8 +457,8 @@ def get_max_psf_sidelobe_from_returndict(
         Maximum PSF sidelobe level across selected planes
         Returns 0.2 (conservative default) if not found
     """
-    selected = return_dict.sel(time=time, pol=pol, chan=chan)
-    _validate_returndict_selection(return_dict, selected, time, pol, chan)
+    selected = imaging_dict.sel(time=time, pol=pol, chan=chan)
+    _validate_imaging_dict_selection(imaging_dict, selected, time, pol, chan)
 
     if not isinstance(selected, list):
         selected = [selected] if selected is not None else []
@@ -478,14 +478,14 @@ def get_max_psf_sidelobe_from_returndict(
     return max_sidelobe
 
 
-def get_model_flux_from_returndict(
-    return_dict: ReturnDict,
+def get_model_flux_from_imaging_dict(
+    imaging_dict: ImagingDict,
     time: int | None = None,
     pol: int | None = None,
     chan: int | None = None,
 ) -> float:
     """
-    Extract cumulative model flux from ReturnDict structure.
+    Extract cumulative model flux from ImagingDict structure.
 
     The 'model_flux' field tracks the cumulative flux in the CLEAN model
     at each major cycle. This function returns the latest (most recent)
@@ -497,8 +497,8 @@ def get_model_flux_from_returndict(
 
     Parameters:
     -----------
-    return_dict : ReturnDict
-        ReturnDict instance containing deconvolution statistics
+    imaging_dict : ImagingDict
+        ImagingDict instance containing deconvolution statistics
 
     time : int, optional
         Filter by specific time index (None = all times)
@@ -517,14 +517,14 @@ def get_model_flux_from_returndict(
 
     Examples:
     ---------
-    >>> rd = ReturnDict()
+    >>> rd = ImagingDict()
     >>> rd.add({'model_flux': 1.5}, time=0, pol=0, chan=0)
     >>> rd.add({'model_flux': 2.3}, time=0, pol=0, chan=0)
-    >>> get_model_flux_from_returndict(rd, time=0, pol=0, chan=0)
+    >>> get_model_flux_from_imaging_dict(rd, time=0, pol=0, chan=0)
     2.3  # Latest cumulative flux
     """
-    selected = return_dict.sel(time=time, pol=pol, chan=chan)
-    _validate_returndict_selection(return_dict, selected, time, pol, chan)
+    selected = imaging_dict.sel(time=time, pol=pol, chan=chan)
+    _validate_imaging_dict_selection(imaging_dict, selected, time, pol, chan)
 
     if not isinstance(selected, list):
         selected = [selected] if selected is not None else []
@@ -556,7 +556,7 @@ class IterationController:
     Manages iteration control logic for deconvolution algorithms.
 
     The controller extracts needed statistics (peak residual, masksum, iterations
-    done, etc.) from ReturnDict internally, so callers don't need to manually
+    done, etc.) from ImagingDict internally, so callers don't need to manually
     pass individual values.
 
     Per-plane iteration control
@@ -575,7 +575,7 @@ class IterationController:
     niter_per_plane : numpy.ndarray or None
         Per-plane remaining minor-cycle iterations, shape
         ``(ntime, nchan, npol)`` indexed ``(time, chan, pol)``. Allocated
-        lazily the first time a ReturnDict is seen (the cube shape is unknown
+        lazily the first time a ImagingDict is seen (the cube shape is unknown
         at construction); ``None`` until then. ``_initial_niter_per_plane`` holds the
         scalar per-plane budget.
     nmajor : int
@@ -583,13 +583,13 @@ class IterationController:
         are global (shared across all planes).
     threshold : float
         Global stopping threshold (in Jy or image units)
-    gain : float
+    loop_gain : float
         CLEAN loop gain (typically 0.1)
     cycle_factor : float
         Multiplier for PSF sidelobe to set cycle_threshold
-    minpsffraction : float
+    min_psf_fraction : float
         Minimum PSF fraction for cycle_threshold calculation
-    maxpsffraction : float
+    max_psf_fraction : float
         Maximum PSF fraction for cycle_threshold calculation
     cycle_niter : int
         Maximum iterations one plane may run in a single model update
@@ -619,10 +619,10 @@ class IterationController:
         niter_per_plane: int = 1000,
         nmajor: int = -1,
         threshold: float = 0.0,
-        gain: float = 0.1,
+        loop_gain: float = 0.1,
         cycle_factor: float = 1.0,
-        minpsffraction: float = 0.05,
-        maxpsffraction: float = 0.8,
+        min_psf_fraction: float = 0.05,
+        max_psf_fraction: float = 0.8,
         cycle_niter: int = -1,
         nsigma: float = 0.0,
     ):
@@ -644,16 +644,16 @@ class IterationController:
         threshold : float, optional
             Global stopping threshold in Jy (default: 0.0)
 
-        gain : float, optional
+        loop_gain : float, optional
             CLEAN loop gain, range (0, 1] (default: 0.1)
 
         cycle_factor : float, optional
             Multiplier for adaptive cycle_threshold (default: 1.0)
 
-        minpsffraction : float, optional
+        min_psf_fraction : float, optional
             Minimum PSF sidelobe fraction (default: 0.05)
 
-        maxpsffraction : float, optional
+        max_psf_fraction : float, optional
             Maximum PSF sidelobe fraction (default: 0.8)
 
         cycle_niter : int, optional
@@ -663,7 +663,7 @@ class IterationController:
             N-sigma threshold for stopping (default: 0.0, disabled)
         """
         # Iteration limits. niter_per_plane is per-plane and allocated lazily (the cube
-        # shape is not known until the first ReturnDict is seen); until then
+        # shape is not known until the first ImagingDict is seen); until then
         # _initial_niter_per_plane holds the scalar per-plane budget. See _ensure_state.
         self._initial_niter_per_plane = niter_per_plane
         self.niter_per_plane = None
@@ -677,10 +677,10 @@ class IterationController:
         self.nsigma = nsigma
 
         # CLEAN parameters
-        self.gain = gain
+        self.loop_gain = loop_gain
         self.cycle_factor = cycle_factor
-        self.minpsffraction = minpsffraction
-        self.maxpsffraction = maxpsffraction
+        self.min_psf_fraction = min_psf_fraction
+        self.max_psf_fraction = max_psf_fraction
         self.cycle_niter = cycle_niter
 
         # Tracking state
@@ -699,7 +699,7 @@ class IterationController:
 
     @staticmethod
     def _matches(key, time, pol, chan):
-        """True if a ReturnDict key matches the (time, pol, chan) selection."""
+        """True if a ImagingDict key matches the (time, pol, chan) selection."""
         return (
             (time is None or key.time == time)
             and (pol is None or key.pol == pol)
@@ -708,10 +708,10 @@ class IterationController:
 
     @staticmethod
     def _key_index(key):
-        """Map a ReturnDict Key(time, pol, chan) to a (time, chan, pol) index.
+        """Map a ImagingDict Key(time, pol, chan) to a (time, chan, pol) index.
 
         The per-plane arrays follow the image-cube axis order
-        ``(time, chan, pol)``, whereas ReturnDict keys are
+        ``(time, chan, pol)``, whereas ImagingDict keys are
         ``(time, pol, chan)``.
         """
         return (int(key.time), int(key.chan), int(key.pol))
@@ -766,13 +766,13 @@ class IterationController:
         """
         self._ensure_shape((int(ntime), int(nchan), int(npol)))
 
-    def _ensure_state(self, return_dict):
-        """Allocate (or grow) the per-plane arrays to cover ``return_dict``.
+    def _ensure_state(self, imaging_dict):
+        """Allocate (or grow) the per-plane arrays to cover ``imaging_dict``.
 
-        The cube shape is inferred from the ReturnDict keys (max index + 1 on
-        each axis). A no-op when the ReturnDict is empty.
+        The cube shape is inferred from the ImagingDict keys (max index + 1 on
+        each axis). A no-op when the ImagingDict is empty.
         """
-        keys = list(return_dict.data.keys())
+        keys = list(imaging_dict.data.keys())
         if not keys:
             return
         needed = (
@@ -784,7 +784,7 @@ class IterationController:
 
     def calculate_cycle_controls(
         self,
-        return_dict: ReturnDict,
+        imaging_dict: ImagingDict,
         time: int | None = None,
         pol: int | None = None,
         chan: int | None = None,
@@ -794,17 +794,17 @@ class IterationController:
 
         Logic:
         ------
-        1. Extract max_psf_sidelobe and peak_residual from return_dict
+        1. Extract max_psf_sidelobe and peak_residual from imaging_dict
         2. Start with remaining iterations (niter_per_plane)
         3. If cycle_niter is set (>= 0), use minimum of (cycle_niter, niter_per_plane)
         4. Calculate PSF fraction = max_psf_sidelobe * cycle_factor
-        5. Clamp PSF fraction to [minpsffraction, maxpsffraction]
+        5. Clamp PSF fraction to [min_psf_fraction, max_psf_fraction]
         6. cycle_threshold = max(psf_fraction * peak_residual, threshold)
 
         Parameters:
         -----------
-        return_dict : ReturnDict
-            ReturnDict containing deconvolution statistics including:
+        imaging_dict : ImagingDict
+            ImagingDict containing deconvolution statistics including:
             - 'max_psf_sidelobe': Maximum PSF sidelobe level
             - 'peakres': Current peak residual
 
@@ -828,15 +828,15 @@ class IterationController:
         Example:
         --------
         >>> controller = IterationController(niter_per_plane=1000, cycle_factor=1.5)
-        >>> # return_dict populated by deconvolver and PSF analysis
-        >>> cycle_niter, cyclethresh = controller.calculate_cycle_controls(return_dict)
+        >>> # imaging_dict populated by deconvolver and PSF analysis
+        >>> cycle_niter, cyclethresh = controller.calculate_cycle_controls(imaging_dict)
         """
-        # Extract needed values from ReturnDict
-        max_psf_sidelobe = get_max_psf_sidelobe_from_returndict(
-            return_dict, time=time, pol=pol, chan=chan
+        # Extract needed values from ImagingDict
+        max_psf_sidelobe = get_max_psf_sidelobe_from_imaging_dict(
+            imaging_dict, time=time, pol=pol, chan=chan
         )
-        peak_residual = get_peak_residual_from_returndict(
-            return_dict, use_mask=True, time=time, pol=pol, chan=chan
+        peak_residual = get_peak_residual_from_imaging_dict(
+            imaging_dict, use_mask=True, time=time, pol=pol, chan=chan
         )
 
         # Start with all remaining iterations. The deconvolver takes a single
@@ -856,8 +856,8 @@ class IterationController:
         psf_fraction = max_psf_sidelobe * self.cycle_factor
 
         # Clamp to user-specified bounds
-        psf_fraction = max(psf_fraction, self.minpsffraction)
-        psf_fraction = min(psf_fraction, self.maxpsffraction)
+        psf_fraction = max(psf_fraction, self.min_psf_fraction)
+        psf_fraction = min(psf_fraction, self.max_psf_fraction)
 
         # Set cycle_threshold as fraction of current peak residual
         cycle_threshold = psf_fraction * peak_residual
@@ -867,7 +867,7 @@ class IterationController:
 
     def per_plane_cycle_threshold(
         self,
-        return_dict: ReturnDict,
+        imaging_dict: ImagingDict,
         time: int | None = None,
         pol: int | None = None,
         chan: int | None = None,
@@ -875,21 +875,21 @@ class IterationController:
         """Compute the per-plane minor-cycle ``cycle_threshold`` array.
 
         The adaptive cycle_threshold is allowed to differ for every
-        ``(time, chan, pol)`` plane. Each plane present in ``return_dict`` gets
+        ``(time, chan, pol)`` plane. Each plane present in ``imaging_dict`` gets
         its own value::
 
-            clamp(max_psf_sidelobe * cycle_factor, minpsffraction, maxpsffraction)
+            clamp(max_psf_sidelobe * cycle_factor, min_psf_fraction, max_psf_fraction)
                 * peak_residual,
 
         floored at the absolute user ``threshold``. Because each plane uses its
         own ``peak_residual``, the result is independent of how the cube was
-        chunked across tasks. Planes not present in ``return_dict`` fall back to
+        chunked across tasks. Planes not present in ``imaging_dict`` fall back to
         the representative scalar cycle_threshold from
         :meth:`calculate_cycle_controls`.
 
         Parameters
         ----------
-        return_dict : ReturnDict
+        imaging_dict : ImagingDict
             Per-plane statistics (``peakres`` and ``max_psf_sidelobe``).
         time, pol, chan : int, optional
             Restrict the computation to a selection (otherwise all planes).
@@ -900,31 +900,31 @@ class IterationController:
             ``(ntime, nchan, npol)`` array of per-plane cycle_thresholds, indexed
             ``(time, chan, pol)`` to match :attr:`niter_per_plane`.
         """
-        self._ensure_state(return_dict)
+        self._ensure_state(imaging_dict)
         # Representative cycle_threshold, used only as the fallback for any plane
-        # that has no entry in return_dict.
+        # that has no entry in imaging_dict.
         _, fallback_cycle_threshold = self.calculate_cycle_controls(
-            return_dict, time=time, pol=pol, chan=chan
+            imaging_dict, time=time, pol=pol, chan=chan
         )
         cycle_threshold = np.full(
             self.niter_per_plane.shape, fallback_cycle_threshold, dtype=float
         )
-        for key, fields in return_dict.data.items():
+        for key, fields in imaging_dict.data.items():
             if not self._matches(key, time, pol, chan):
                 continue
             idx = self._key_index(key)
             peak = abs(self._latest(fields, "peakres", 0.0))
             sidelobe = self._latest(fields, "max_psf_sidelobe", 0.2)
             frac = min(
-                max(sidelobe * self.cycle_factor, self.minpsffraction),
-                self.maxpsffraction,
+                max(sidelobe * self.cycle_factor, self.min_psf_fraction),
+                self.max_psf_fraction,
             )
             cycle_threshold[idx] = max(frac * peak, self.threshold)
         return cycle_threshold
 
     def check_convergence(
         self,
-        return_dict: ReturnDict,
+        imaging_dict: ImagingDict,
         time: int | None = None,
         pol: int | None = None,
         chan: int | None = None,
@@ -948,12 +948,12 @@ class IterationController:
         Minor Cycle Stopping Criteria:
         -------------------------------
         - Checked by deconvolver (cycle_niter, cycle_threshold)
-        - Can be propagated via return_dict if needed
+        - Can be propagated via imaging_dict if needed
 
         Parameters:
         -----------
-        return_dict : ReturnDict
-            ReturnDict containing deconvolution statistics including:
+        imaging_dict : ImagingDict
+            ImagingDict containing deconvolution statistics including:
             - 'peakres': Current peak residual
             - 'masksum': Sum of mask (number of valid pixels)
 
@@ -982,7 +982,7 @@ class IterationController:
         -------------
         Evaluates each selected ``(time, pol, chan)`` plane independently and
         writes that plane's own StopCode and description into the 'stop_code'
-        and 'stop_description' fields of the corresponding ReturnDict entry,
+        and 'stop_description' fields of the corresponding ImagingDict entry,
         overwriting the placeholder set by the deconvolver. Also allocates /
         updates the per-plane ``niter_per_plane``, ``stopcode_major`` and
         ``stopcode_minor`` arrays.
@@ -991,20 +991,20 @@ class IterationController:
         --------
         >>> controller = IterationController(niter_per_plane=100, threshold=0.01)
         >>> # After running deconvolution...
-        >>> stopcode, desc = controller.check_convergence(return_dict)
+        >>> stopcode, desc = controller.check_convergence(imaging_dict)
         >>> if stopcode.major != 0:
         >>>     print(f"Converged: {desc}")
         >>> # Check both major and minor
         >>> if stopcode.major != 0 or stopcode.minor != 0:
         >>>     print(f"Stopped: major={stopcode.major}, minor={stopcode.minor}")
         """
-        self._ensure_state(return_dict)
+        self._ensure_state(imaging_dict)
 
         # Evaluate every selected plane independently and record its own stop
         # code. The aggregate returned to the caller is CONTINUE while any
         # plane is still active.
         plane_majors = []
-        for key, fields in return_dict.data.items():
+        for key, fields in imaging_dict.data.items():
             if not self._matches(key, time, pol, chan):
                 continue
             idx = self._key_index(key)
@@ -1029,7 +1029,7 @@ class IterationController:
             self.stopcode_minor[idx] = MINOR_CONTINUE
             plane_majors.append(maj)
 
-            # Stamp this plane's stop code/description into the ReturnDict,
+            # Stamp this plane's stop code/description into the ImagingDict,
             # replacing the placeholder set by the deconvolver. Written
             # directly (not via add()) so it stays a single value.
             fields["stop_code"] = StopCode(major=maj, minor=MINOR_CONTINUE)
@@ -1037,7 +1037,7 @@ class IterationController:
 
         # Aggregate across the selected planes.
         if not plane_majors:
-            # No matching planes (e.g. an empty ReturnDict): nothing left to
+            # No matching planes (e.g. an empty ImagingDict): nothing left to
             # clean, so report a stop (matches the historical zero-mask result).
             agg_major = MAJOR_ZERO_MASK
             self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_ZERO_MASK]
@@ -1057,7 +1057,7 @@ class IterationController:
 
     def update_counts(
         self,
-        return_dict: ReturnDict,
+        imaging_dict: ImagingDict,
         time: int | None = None,
         pol: int | None = None,
         chan: int | None = None,
@@ -1067,7 +1067,7 @@ class IterationController:
 
         Updates:
         --------
-        1. Extracts iterations_done from return_dict
+        1. Extracts iterations_done from imaging_dict
         2. Decrements niter_per_plane by iterations_done
         3. Decrements nmajor by 1 (if not -1)
         4. Increments major_done and total_iter_done
@@ -1075,8 +1075,8 @@ class IterationController:
 
         Parameters:
         -----------
-        return_dict : ReturnDict
-            ReturnDict containing iteration statistics including:
+        imaging_dict : ImagingDict
+            ImagingDict containing iteration statistics including:
             - 'iter_done': Number of iterations completed in this major cycle
 
         time : int, optional
@@ -1092,7 +1092,7 @@ class IterationController:
         --------
         >>> controller = IterationController(niter_per_plane=1000, nmajor=5)
         >>> # After major cycle completes...
-        >>> controller.update_counts(return_dict)
+        >>> controller.update_counts(imaging_dict)
         >>> # niter_per_plane is an (ntime, nchan, npol) array, one
         >>> # remaining budget per plane -- not a scalar.
         >>> print(controller.niter_per_plane, controller.nmajor, controller.major_done)
@@ -1105,7 +1105,7 @@ class IterationController:
         ):
             return
 
-        self._ensure_state(return_dict)
+        self._ensure_state(imaging_dict)
 
         # Decrement the global major cycle count (major cycles are shared
         # across planes) once per call.
@@ -1115,7 +1115,7 @@ class IterationController:
         # Decrement each selected plane's remaining iterations by the work it
         # did this cycle. Planes that already stopped are left untouched.
         cycle_iters = 0
-        for key, fields in return_dict.data.items():
+        for key, fields in imaging_dict.data.items():
             if not self._matches(key, time, pol, chan):
                 continue
             idx = self._key_index(key)
@@ -1279,10 +1279,10 @@ class IterationController:
             "initial_niter_per_plane": self._initial_niter_per_plane,
             "threshold": self.threshold,
             "nsigma": self.nsigma,
-            "gain": self.gain,
+            "loop_gain": self.loop_gain,
             "cycle_factor": self.cycle_factor,
-            "minpsffraction": self.minpsffraction,
-            "maxpsffraction": self.maxpsffraction,
+            "min_psf_fraction": self.min_psf_fraction,
+            "max_psf_fraction": self.max_psf_fraction,
             "cycle_niter": self.cycle_niter,
             "major_done": self.major_done,
             "total_iter_done": self.total_iter_done,
@@ -1298,7 +1298,7 @@ class IterationController:
 
 class ConvergencePlots:
     """
-    Class for creating convergence visualization plots from ReturnDict.
+    Class for creating convergence visualization plots from ImagingDict.
 
     This class provides methods to create interactive HoloViews plots showing
     deconvolution convergence history, including peak residual evolution over
@@ -1306,19 +1306,19 @@ class ConvergencePlots:
 
     Parameters
     ----------
-    return_dict : ReturnDict
-        ReturnDict object with convergence history (peakres, iter_done fields)
+    imaging_dict : ImagingDict
+        ImagingDict object with convergence history (peakres, iter_done fields)
 
     Attributes
     ----------
-    return_dict : ReturnDict
-        The ReturnDict containing convergence data
+    imaging_dict : ImagingDict
+        The ImagingDict containing convergence data
     stokes_to_pol : dict
         Mapping from Stokes parameter names to polarization indices
 
     Examples
     --------
-    >>> rd = ReturnDict()
+    >>> rd = ImagingDict()
     >>> for cycle in range(5):
     ...     rd.add({'peakres': 1.0 * 0.7**cycle, 'iter_done': 100},
     ...            time=0, pol=0, chan=0)
@@ -1327,16 +1327,16 @@ class ConvergencePlots:
     >>> plot  # Display in Jupyter notebook
     """
 
-    def __init__(self, return_dict):
+    def __init__(self, imaging_dict):
         """
-        Initialize ConvergencePlots with a ReturnDict.
+        Initialize ConvergencePlots with a ImagingDict.
 
         Parameters
         ----------
-        return_dict : ReturnDict
-            ReturnDict object containing convergence history
+        imaging_dict : ImagingDict
+            ImagingDict object containing convergence history
         """
-        self.return_dict = return_dict
+        self.imaging_dict = imaging_dict
         self.stokes_to_pol = {"I": 0, "Q": 1, "U": 2, "V": 3}
 
         # Default plotting parameters (set by plot_history)
@@ -1380,7 +1380,7 @@ class ConvergencePlots:
         # Get data for this (time, pol, chan)
         key = Key(time=self.time, pol=pol_sel, chan=chan_sel)
 
-        if key not in self.return_dict.data:
+        if key not in self.imaging_dict.data:
             # Show error message
             return hv.Curve([]).opts(
                 title=f"No data for Time={self.time}, Stokes={stokes_sel}, Channel={chan_sel}",
@@ -1391,7 +1391,7 @@ class ConvergencePlots:
                 show_grid=True,
             )
 
-        data = self.return_dict.data[key]
+        data = self.imaging_dict.data[key]
 
         # Extract history
         peakres_history = data.get("peakres", [])
@@ -1517,7 +1517,7 @@ class ConvergencePlots:
         -----
         - Requires holoviews with bokeh backend
         - Uses lazy imports to avoid hard dependency
-        - Falls back to single-axis plot if no model_flux data in ReturnDict
+        - Falls back to single-axis plot if no model_flux data in ImagingDict
         """
         # Store plotting parameters as instance variables for access in make_plot
         self.time = time
@@ -1536,11 +1536,11 @@ class ConvergencePlots:
                 "Install with: pip install holoviews bokeh"
             ) from e
 
-        # Extract available channels and stokes from ReturnDict
-        available_keys = list(self.return_dict.data.keys())
+        # Extract available channels and stokes from ImagingDict
+        available_keys = list(self.imaging_dict.data.keys())
         if not available_keys:
             return hv.Curve([]).opts(
-                title="No data in ReturnDict",
+                title="No data in ImagingDict",
                 xlabel="Cumulative Iterations",
                 ylabel="Peak Residual (Jy)",
             )
@@ -1577,9 +1577,9 @@ class ConvergencePlots:
         return dmap
 
 
-def plot_convergence_history(return_dict, time=0, stokes="I", chan=0, **kwargs):
+def plot_convergence_history(imaging_dict, time=0, stokes="I", chan=0, **kwargs):
     """
-    Plot interactive convergence history from ReturnDict.
+    Plot interactive convergence history from ImagingDict.
 
     Convenience function that wraps ConvergencePlots.plot_history() for
     backward compatibility and quick plotting. Displays dual y-axis plot
@@ -1587,8 +1587,8 @@ def plot_convergence_history(return_dict, time=0, stokes="I", chan=0, **kwargs):
 
     Parameters
     ----------
-    return_dict : ReturnDict
-        ReturnDict object with convergence history (peakres, iter_done, model_flux fields)
+    imaging_dict : ImagingDict
+        ImagingDict object with convergence history (peakres, iter_done, model_flux fields)
     time : int, optional
         Time index to plot (default: 0)
     stokes : str, optional
@@ -1605,7 +1605,7 @@ def plot_convergence_history(return_dict, time=0, stokes="I", chan=0, **kwargs):
 
     Examples
     --------
-    >>> rd = ReturnDict()
+    >>> rd = ImagingDict()
     >>> for cycle in range(5):
     ...     rd.add({'peakres': 1.0 * 0.7**cycle, 'iter_done': 100, 'model_flux': 0.5 * cycle},
     ...            time=0, pol=0, chan=0)
@@ -1617,22 +1617,22 @@ def plot_convergence_history(return_dict, time=0, stokes="I", chan=0, **kwargs):
     - Requires holoviews with bokeh backend
     - Uses lazy imports to avoid hard dependency
     - Displays error message if selected (time, pol, chan) not found
-    - Falls back to single-axis plot if no model_flux data in ReturnDict
+    - Falls back to single-axis plot if no model_flux data in ImagingDict
     - For more control, use ConvergencePlots class directly
     """
-    plotter = ConvergencePlots(return_dict)
+    plotter = ConvergencePlots(imaging_dict)
     return plotter.plot_history(time=time, stokes=stokes, chan=chan, **kwargs)
 
 
 # ============================================================================
-# ReturnDict Pretty-Printing
+# ImagingDict Pretty-Printing
 # ============================================================================
 
 
-def format_deconvolve_dict(combined_deconvolve_dict, float_format="{:.6g}"):
-    """Return a human-readable string representation of a deconvolution ReturnDict.
+def format_imaging_dict(combined_imaging_dict, float_format="{:.6g}"):
+    """Return a human-readable string representation of a deconvolution ImagingDict.
 
-    A deconvolution ReturnDict maps ``Key(time, pol, chan)`` planes to field
+    A deconvolution ImagingDict maps ``Key(time, pol, chan)`` planes to field
     dicts that mix constant parameters (``niter_per_plane``, ``threshold``, ...) with
     per-major-cycle history lists (``peakres``, ``iter_done``, ``model_flux``,
     ...). The default ``repr`` dumps each plane on one very long line, which is
@@ -1643,8 +1643,8 @@ def format_deconvolve_dict(combined_deconvolve_dict, float_format="{:.6g}"):
 
     Parameters
     ----------
-    combined_deconvolve_dict : ReturnDict or dict
-        Either a ReturnDict instance or its underlying ``.data`` mapping of
+    combined_imaging_dict : ImagingDict or dict
+        Either a ImagingDict instance or its underlying ``.data`` mapping of
         ``Key(time, pol, chan)`` -> field dict.
     float_format : str, optional
         Format string applied to floating point values (default ``"{:.6g}"``).
@@ -1654,8 +1654,8 @@ def format_deconvolve_dict(combined_deconvolve_dict, float_format="{:.6g}"):
     str
         The formatted, multi-line representation.
     """
-    # Accept either a ReturnDict (exposes .data) or a plain mapping.
-    data = getattr(combined_deconvolve_dict, "data", combined_deconvolve_dict)
+    # Accept either a ImagingDict (exposes .data) or a plain mapping.
+    data = getattr(combined_imaging_dict, "data", combined_imaging_dict)
 
     def to_py(v):
         # Unwrap numpy scalars (np.float64, np.str_, ...) to native Python types.
@@ -1724,14 +1724,14 @@ def format_deconvolve_dict(combined_deconvolve_dict, float_format="{:.6g}"):
     return "\n".join(lines)
 
 
-def print_deconvolve_dict(combined_deconvolve_dict, float_format="{:.6g}"):
-    """Pretty-print a deconvolution ReturnDict. See :func:`format_deconvolve_dict`."""
-    print(format_deconvolve_dict(combined_deconvolve_dict, float_format=float_format))
+def print_imaging_dict(combined_imaging_dict, float_format="{:.6g}"):
+    """Pretty-print a deconvolution ImagingDict. See :func:`format_imaging_dict`."""
+    print(format_imaging_dict(combined_imaging_dict, float_format=float_format))
 
 
 def get_calculate_cycle_controls(
     controller,
-    combined_deconvolve_dict,
+    combined_imaging_dict,
     img_xds,
     is_n_iter_0,
     iteration_control_params,
@@ -1742,7 +1742,7 @@ def get_calculate_cycle_controls(
     On the first model update (``is_n_iter_0``) the controls are derived from
     the freshly made dirty image (each plane's own peak residual); afterwards
     they are derived from the accumulated convergence statistics in
-    ``combined_deconvolve_dict``.  In both cases the per-plane cycle_threshold is
+    ``combined_imaging_dict``.  In both cases the per-plane cycle_threshold is
     built from each ``(time, frequency, polarization)`` plane's own peak
     residual, so the result is independent of how the cube was chunked across
     tasks.
@@ -1752,7 +1752,7 @@ def get_calculate_cycle_controls(
     controller : IterationController
         Controller whose ``calculate_cycle_controls`` and
         ``per_plane_cycle_threshold`` drive the result.
-    combined_deconvolve_dict : ReturnDict
+    combined_imaging_dict : ImagingDict
         Accumulated per-plane convergence statistics (used when not the first
         model update).
     img_xds : xarray.Dataset
@@ -1760,7 +1760,7 @@ def get_calculate_cycle_controls(
     is_n_iter_0 : bool
         ``True`` for the first model update.
     iteration_control_params : dict
-        Iteration-control parameters (``maxpsffraction``, ``gain`` used to seed
+        Iteration-control parameters (``max_psf_fraction``, ``loop_gain`` used to seed
         the first model update).
     image_data_group_in_name : str, optional
         Image data group holding the residual image.  Default ``"residual"``.
@@ -1777,7 +1777,7 @@ def get_calculate_cycle_controls(
     residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
     if is_n_iter_0:
         # First model update: there is no accumulated convergence history yet,
-        # so seed a per-plane ReturnDict from the dirty image. Each
+        # so seed a per-plane ImagingDict from the dirty image. Each
         # (time, frequency, polarization) plane contributes its OWN peak
         # residual, so the resulting cycle_threshold is genuinely per-plane and
         # therefore independent of how the cube was chunked across tasks.
@@ -1785,7 +1785,7 @@ def get_calculate_cycle_controls(
         plane_peak = residual_abs.max(axis=(-2, -1))  # (ntime, nfreq, npol)
         ntime, nfreq, npol = plane_peak.shape
         masksum = img_xds.sizes["l"] * img_xds.sizes["m"]
-        rd = ReturnDict()
+        rd = ImagingDict()
         for tt in range(ntime):
             for nn in range(nfreq):
                 for pp in range(npol):
@@ -1797,16 +1797,16 @@ def get_calculate_cycle_controls(
                             "masksum": masksum,
                             "iter_done": 0,
                             "max_psf_sidelobe": iteration_control_params[
-                                "maxpsffraction"
+                                "max_psf_fraction"
                             ],
-                            "loop_gain": iteration_control_params["gain"],
+                            "loop_gain": iteration_control_params["loop_gain"],
                         },
                         time=tt,
                         pol=pp,
                         chan=nn,
                     )
     else:
-        rd = combined_deconvolve_dict
+        rd = combined_imaging_dict
 
     cycle_niter_cap, cycle_threshold = controller.calculate_cycle_controls(rd)
     # Per-plane cycle_threshold so each (time, frequency, polarization) plane is

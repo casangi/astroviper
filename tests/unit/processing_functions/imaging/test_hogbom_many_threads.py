@@ -44,12 +44,12 @@ def _data(n=128, npol=2, seed=0):
 
 def _params(npol, niter_per_plane=30, thr=-1.0):
     return {
-        "gain": 0.1,
+        "loop_gain": 0.1,
         "niter_per_plane": niter_per_plane,
         "threshold": 0.0,
         "clean_box": (-1, -1, -1, -1),
-        "minpsffraction": 0.05,
-        "maxpsffraction": 0.8,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
         "cycle_niter_cap_pp": np.full((1, 1, npol), niter_per_plane, np.int32),
         "cycle_threshold_pp": np.full((1, 1, npol), thr, np.float32),
     }

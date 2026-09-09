@@ -500,7 +500,7 @@ class TestMaskAndCleanBox:
 # ---------------------------------------------------------------------------
 
 
-class TestReturnDict:
+class TestImagingDict:
     def test_keys_present(self):
         ny, nx = 16, 16
         dirty = _point_source_residual(ny, nx, [(8, 8, 1.0)])

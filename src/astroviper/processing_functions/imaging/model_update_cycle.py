@@ -29,7 +29,7 @@ def model_update_cycle_cube_single_field(
     deconvolve_params : dict
         Per-cycle deconvolution / iteration-control parameters passed straight to
         the deconvolver: the absolute ``threshold`` (floor) plus the adaptive
-        ``cycle_threshold``, ``gain``, ``cycle_niter``, ``cycle_niter_cap_pp`` and
+        ``cycle_threshold``, ``loop_gain``, ``cycle_niter``, ``cycle_niter_cap_pp`` and
         ``cycle_threshold_pp`` ...  The separate ``primary_beam_limit``
         builds the primary-beam mask (a chunk-independent quantity, so the mask
         does not depend on how the cube was split across tasks); it is distinct
@@ -49,7 +49,7 @@ def model_update_cycle_cube_single_field(
 
     Returns
     -------
-    deconvolve_dict : ReturnDict
+    imaging_dict : ImagingDict
         Per-plane deconvolution statistics for this cycle.
     return_df : pandas.DataFrame
         One-row timing frame with the ``T_make_mask`` and ``T_deconvolve``
@@ -85,7 +85,7 @@ def model_update_cycle_cube_single_field(
         T_make_mask = time.time() - start
 
     start = time.time()
-    deconvolve_dict = deconvolve(
+    imaging_dict = deconvolve(
         img_xds=img_xds,
         algorithm=deconvolver,
         deconvolve_params=deconvolve_params,
@@ -99,4 +99,4 @@ def model_update_cycle_cube_single_field(
         {"T_make_mask": [T_make_mask], "T_deconvolve": [T_deconvolve]}
     )
 
-    return deconvolve_dict, return_df
+    return imaging_dict, return_df

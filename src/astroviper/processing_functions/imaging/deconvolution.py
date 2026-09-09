@@ -4,7 +4,7 @@ import xarray as xr
 
 from astroviper.processing_functions.image_analysis import image_statistics as imgstats
 from astroviper.processing_functions.imaging.deconvolvers import aspclean, hogbom
-from astroviper.processing_functions.imaging.utils.return_dict import ReturnDict
+from astroviper.processing_functions.imaging.utils.imaging_dict import ImagingDict
 from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
@@ -84,7 +84,7 @@ def _validate_deconvolve_params(deconvolve_params):
 
         Supported keys
 
-        - ``gain`` : float, CLEAN loop gain in ``(0, 1]``. Default 0.1.
+        - ``loop_gain`` : float, CLEAN loop gain in ``(0, 1]``. Default 0.1.
         - ``niter_per_plane`` : int, maximum number of iterations. Default 1000.
         - ``threshold`` : float, stopping threshold, non-negative.
           Default 0.0.
@@ -112,13 +112,13 @@ def _validate_deconvolve_params(deconvolve_params):
         deconvolve_params = {}
 
     default_params = {
-        "gain": 0.1,
+        "loop_gain": 0.1,
         "niter_per_plane": 1000,
         "threshold": 0.0,
         "primary_beam_limit": 0.0,
         "clean_box": (-1, -1, -1, -1),
-        "minpsffraction": 0.05,
-        "maxpsffraction": 0.8,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
     }
 
     for key, default_value in default_params.items():
@@ -130,9 +130,9 @@ def _validate_deconvolve_params(deconvolve_params):
             continue
 
         value = deconvolve_params[key]
-        if key == "gain":
+        if key == "loop_gain":
             if not (0 < value <= 1):
-                raise ValueError("CLEAN gain must be between 0 and 1.")
+                raise ValueError("CLEAN loop_gain must be between 0 and 1.")
         elif key == "niter_per_plane":
             if not (isinstance(value, int) and value > 0):
                 raise ValueError(
@@ -146,7 +146,7 @@ def _validate_deconvolve_params(deconvolve_params):
                 raise ValueError(
                     "Clean box must be a 4-tuple (xmin, xmax, ymin, ymax) or None."
                 )
-        elif key in ("minpsffraction", "maxpsffraction", "primary_beam_limit"):
+        elif key in ("min_psf_fraction", "max_psf_fraction", "primary_beam_limit"):
             if not (0 <= value <= 1):
                 raise ValueError(f"{key} must be between 0 and 1.")
 
@@ -289,7 +289,7 @@ def starting_statistics(
         Dictionary with keys ``start_peakres``, ``start_peakres_nomask``,
         and ``start_model_flux`` — each a ``(nt, nf, np)`` float64 array.
         Suitable for merging into the ``selected_calculations`` argument
-        of :func:`create_deconvolution_return_dict`.
+        of :func:`create_imaging_dict`.
     """
     residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
     model_data_group = img_xds.attrs["data_groups"][image_data_group_out_name]
@@ -326,7 +326,7 @@ def starting_statistics(
     }
 
 
-def create_deconvolution_return_dict(
+def create_imaging_dict(
     img_xds: xr.Dataset,
     image_data_group_in_name: str,
     image_data_group_out_name: str,
@@ -334,7 +334,7 @@ def create_deconvolution_return_dict(
     selected_calculations: dict,
 ):
     """
-    Build the per-plane :class:`ReturnDict` summarizing a CLEAN run.
+    Build the per-plane :class:`ImagingDict` summarizing a CLEAN run.
 
     Parameters
     ----------
@@ -350,7 +350,7 @@ def create_deconvolution_return_dict(
         Name of the modified output data group whose ``"sky"`` key
         resolves to the post-CLEAN model variable.
     deconvolve_params : dict
-        Validated deconvolution parameter dict; ``niter_per_plane`` and ``gain`` are
+        Validated deconvolution parameter dict; ``niter_per_plane`` and ``loop_gain`` are
         recorded per plane, along with the per-plane ``cycle_threshold`` that
         each plane was cleaned to (from ``cycle_threshold_pp`` when
         present, else the scalar ``cycle_threshold`` / ``threshold``).
@@ -366,7 +366,7 @@ def create_deconvolution_return_dict(
 
     Returns
     -------
-    ReturnDict
+    ImagingDict
         Per-plane deconvolution statistics indexed by
         ``(time, chan, pol)``.
     """
@@ -405,7 +405,7 @@ def create_deconvolution_return_dict(
         "cycle_threshold", deconvolve_params.get("threshold", None)
     )
 
-    returndict = ReturnDict()
+    imaging_dict = ImagingDict()
 
     for tt in range(ntime):
         for nn in range(nchan):
@@ -425,7 +425,7 @@ def create_deconvolution_return_dict(
                     "niter_per_plane": deconvolve_params.get("niter_per_plane", None),
                     "cycle_threshold": cycle_threshold,
                     "iter_done": int(iters[tt, nn, pp]),
-                    "loop_gain": deconvolve_params.get("gain", None),
+                    "loop_gain": deconvolve_params.get("loop_gain", None),
                     "min_psf_fraction": min_psf_fraction,
                     "max_psf_fraction": max_psf_fraction,
                     "max_psf_sidelobe": max_psf_sidelobe[tt, nn, pp],
@@ -442,9 +442,9 @@ def create_deconvolution_return_dict(
                     "masksum": masksum,
                 }
 
-                returndict.add(returnvals, time=tt, pol=pp, chan=nn)
+                imaging_dict.add(returnvals, time=tt, pol=pp, chan=nn)
 
-    return returndict
+    return imaging_dict
 
 
 def deconvolve(
@@ -503,7 +503,7 @@ def deconvolve(
 
     Returns
     -------
-    returndict : ReturnDict
+    imaging_dict : ImagingDict
         Per-plane deconvolution statistics, indexed by
         ``(time, chan, pol)``. Each entry contains iteration count, peak
         residuals before and after, model fluxes, and PSF bookkeeping.
@@ -591,8 +591,8 @@ def deconvolve(
 
     deconvolve_params = _validate_deconvolve_params(deconvolve_params)
 
-    max_psf_fraction = deconvolve_params["maxpsffraction"]
-    min_psf_fraction = deconvolve_params["minpsffraction"]
+    max_psf_fraction = deconvolve_params["max_psf_fraction"]
+    min_psf_fraction = deconvolve_params["min_psf_fraction"]
 
     # CLEAN mutates the residual/model numpy buffers in place. A lazy
     # (dask-backed) DataArray returns a *fresh* array from ``.values`` on every
@@ -699,7 +699,7 @@ def deconvolve(
 
     iters = np.asarray(results["iterations_performed"])
 
-    returndict = create_deconvolution_return_dict(
+    imaging_dict = create_imaging_dict(
         img_xds=img_xds,
         image_data_group_in_name=image_data_group_in_name,
         image_data_group_out_name=image_data_group_out_name,
@@ -713,7 +713,7 @@ def deconvolve(
             "masksum": masksum,
         },
     )
-    return returndict
+    return imaging_dict
 
 
 def hogbom_clean(
@@ -856,7 +856,7 @@ def hogbom_clean(
         mask_cube=mask_arg,
         clean_box=clean_box,
         max_iter=cycle_niter_cap_pp,
-        gain=deconvolve_params["gain"],
+        gain=deconvolve_params["loop_gain"],
         threshold=cycle_threshold_pp,
         processing_function_threads=int(processing_function_threads),
     )
@@ -945,7 +945,7 @@ def hogbom_clean_many_threads(
         mask_cube=mask_arg,
         clean_box=clean_box,
         max_iter=cycle_niter_cap_pp,
-        gain=deconvolve_params["gain"],
+        gain=deconvolve_params["loop_gain"],
         threshold=cycle_threshold_pp,
         processing_function_threads=int(processing_function_threads),
     )
@@ -987,7 +987,7 @@ def asp_clean(
         are **added** into this array in place. Must be C-contiguous,
         writeable, and share the dtype of ``residual_cube``.
     deconvolve_params : dict, optional
-        Algorithm parameters. The common keys (``gain``, ``niter_per_plane``,
+        Algorithm parameters. The common keys (``loop_gain``, ``niter_per_plane``,
         ``threshold``) are validated by
         :func:`_validate_deconvolve_params`. The following Asp-specific
         keys are read with sensible defaults if present:
@@ -1102,11 +1102,11 @@ def asp_clean(
         psf=psf_cube,
         model=model_cube,
         mask=mask_arg,
-        gain=deconvolve_params["gain"],
+        gain=deconvolve_params["loop_gain"],
         threshold=cycle_threshold_pp,
         # NOTE: the keyword is the C++ binding's own name
         # (aspclean/python/bindings.cpp: py::arg("niter")), not the Python-side
-        # parameter. Renaming it needs a rebuild -- deferred to the C++ pass.
+        # parameter.
         niter=cycle_niter_cap_pp,
         fusedthreshold=deconvolve_params.get("fusedthreshold", 0.0),
         psf_width=deconvolve_params.get("psf_width", 0.0),

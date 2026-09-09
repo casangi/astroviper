@@ -1,14 +1,14 @@
-"""Unit tests for the ReturnDict -> DataFrame flattening."""
+"""Unit tests for the ImagingDict -> DataFrame flattening."""
 
-from astroviper.processing_functions.imaging.utils.iteration_control import StopCode
-from astroviper.processing_functions.imaging.utils.return_dict import (
-    ReturnDict,
-    return_dict_to_dataframe,
+from astroviper.processing_functions.imaging.utils.imaging_dict import (
+    ImagingDict,
+    imaging_dict_to_dataframe,
 )
+from astroviper.processing_functions.imaging.utils.iteration_control import StopCode
 
 
-def _make_return_dict():
-    rd = ReturnDict()
+def _make_imaging_dict():
+    rd = ImagingDict()
     # channel 0: deconvolved over 2 cycles
     for cycle in range(2):
         rd.add(
@@ -51,7 +51,7 @@ def _make_return_dict():
 
 
 def test_flattens_history_and_stop_code():
-    df = return_dict_to_dataframe(_make_return_dict())
+    df = imaging_dict_to_dataframe(_make_imaging_dict())
     assert len(df) == 2
     row0 = df[(df.pol == 0) & (df.chan == 0)].iloc[0]
     assert row0["n_cycles"] == 2
@@ -67,6 +67,6 @@ def test_flattens_history_and_stop_code():
 
 
 def test_empty_dict_gives_empty_frame():
-    df = return_dict_to_dataframe(ReturnDict())
+    df = imaging_dict_to_dataframe(ImagingDict())
     assert df.empty
     assert "iter_total" in df.columns

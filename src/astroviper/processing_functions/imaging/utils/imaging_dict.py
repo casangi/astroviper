@@ -1,12 +1,12 @@
 """
-Module to hold the ReturnDict class. The ReturnDict class is a convenience
+Module to hold the ImagingDict class. The ImagingDict class is a convenience
 class around a regular nested dictionary, allowing for more flexible indexing
 and seaerching. By keeping it as a dict underneath, it remains generic
 and lightweight.
 
 History Tracking (Added 2025-12-10):
 -------------------------------------
-The ReturnDict.add() method now maintains convergence history by tracking
+The ImagingDict.add() method now maintains convergence history by tracking
 certain fields as lists (appending values) while keeping others as single
 values (replacing). This enables convergence visualization and monitoring
 deconvolution progress across major/minor cycles.
@@ -34,13 +34,13 @@ FIELD_ACCUM = {
 # Fields that remain single values (constant parameters)
 FIELD_SINGLE_VALUE = {
     "max_psf_sidelobe",  # PSF characteristic (doesn't change per cycle)
-    "loop_gain",  # CLEAN gain parameter (constant)
+    "loop_gain",  # CLEAN loop_gain parameter (constant)
     "niter_per_plane",  # Max iterations requested (parameter, not measurement)
     "threshold",  # Threshold used (parameter, not measurement)
 }
 
 
-class ReturnDict:
+class ImagingDict:
     def __init__(self):
         self._data = OrderedDict()
 
@@ -54,7 +54,7 @@ class ReturnDict:
 
     def add(self, value, time, pol, chan):
         """
-        Add value to ReturnDict with history tracking.
+        Add value to ImagingDict with history tracking.
 
         For fields in FIELD_ACCUM (peakres, iter_done, masksum, peakres_nomask),
         values are appended to lists. For fields in FIELD_SINGLE_VALUE
@@ -125,15 +125,15 @@ class ReturnDict:
         return "\n".join(lines)
 
 
-def return_dict_to_dataframe(return_dict):
-    """Flatten a deconvolution :class:`ReturnDict` to one row per plane.
+def imaging_dict_to_dataframe(imaging_dict):
+    """Flatten a deconvolution :class:`ImagingDict` to one row per plane.
 
     Used by the benchmark result saving (and any post-run analysis) to persist
     the per-plane convergence record in a tabular, feather-friendly form.
 
     Parameters
     ----------
-    return_dict : ReturnDict
+    imaging_dict : ImagingDict
         The merged per-plane deconvolution dict returned by
         ``image_cube_single_field`` (``Key(time, pol, chan)`` ->
         parameters, per-cycle history lists and the stop code).
@@ -153,7 +153,7 @@ def return_dict_to_dataframe(return_dict):
     import pandas as pd
 
     rows = []
-    for key, value in return_dict.data.items():
+    for key, value in imaging_dict.data.items():
         row = {"time_index": key.time, "pol": key.pol, "chan": key.chan}
         for field, field_value in value.items():
             if isinstance(field_value, tuple) and hasattr(field_value, "_fields"):

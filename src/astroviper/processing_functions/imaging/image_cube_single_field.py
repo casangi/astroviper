@@ -74,9 +74,9 @@ def imaging_preparation_single_field(
           mask cutoff as a fraction of the peak primary beam, in ``[0, 1]``.
           Pixels where the primary beam is below this fraction are excluded from
           cleaning. A masking cutoff, distinct from ``threshold``.
-        - ``gain`` [CASA ``gain``] : CLEAN loop gain -- the fraction of the
+        - ``loop_gain`` [CASA ``gain``] : CLEAN loop gain -- the fraction of the
           selected peak flux subtracted from the residual image each iteration
-          (``0 < gain <= 1``).
+          (``0 < loop_gain <= 1``).
         - ``cycle_factor`` [CASA ``cyclefactor``] : Scaling applied to the
           brightest PSF sidelobe level when setting the model update cycle
           stopping depth (see ``cycle_threshold`` below). Larger values trigger
@@ -86,12 +86,12 @@ def imaging_preparation_single_field(
           triggered. ``cycle_niter=-1`` lets the adaptive ``cycle_threshold``
           govern the depth instead; otherwise the count is clamped to never
           exceed the plane's remaining ``niter_per_plane``.
-        - ``minpsffraction`` [CASA ``minpsffraction``] : Lower clamp on the PSF
+        - ``min_psf_fraction`` [CASA ``minpsffraction``] : Lower clamp on the PSF
           fraction used to set ``cycle_threshold = clamp(max_psf_sidelobe *
-          cycle_factor, minpsffraction, maxpsffraction) * peak_residual`` (then
+          cycle_factor, min_psf_fraction, max_psf_fraction) * peak_residual`` (then
           floored at ``threshold``). Raising it limits how deep one model update
           cycle cleans.
-        - ``maxpsffraction`` [CASA ``maxpsffraction``] : Upper clamp on that same
+        - ``max_psf_fraction`` [CASA ``maxpsffraction``] : Upper clamp on that same
           PSF fraction; it guarantees a minimum amount of cleaning per model
           update cycle even when the PSF sidelobe level is high.
 
@@ -125,7 +125,7 @@ def imaging_preparation_single_field(
         Image dataset with the PSF and primary beam, in the Stokes basis.
     return_df : pandas.DataFrame
         One-row timing frame from the setup step.
-    combined_deconvolve_dict : ReturnDict
+    combined_imaging_dict : ImagingDict
         Empty accumulator for the per-plane convergence statistics.
     T_setup : float
         Wall-clock time of the setup step (seconds).
@@ -138,8 +138,8 @@ def imaging_preparation_single_field(
         imaging_setup_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (
+        ImagingDict,
         IterationController,
-        ReturnDict,
     )
 
     logger.debug("Processing chunk " + str(task_id))
@@ -148,13 +148,13 @@ def imaging_preparation_single_field(
         niter_per_plane=iteration_control_params["niter_per_plane"],
         nmajor=iteration_control_params["nmajor"],
         threshold=iteration_control_params["threshold"],
-        gain=iteration_control_params["gain"],
+        loop_gain=iteration_control_params["loop_gain"],
         cycle_factor=iteration_control_params["cycle_factor"],
-        minpsffraction=iteration_control_params["minpsffraction"],
-        maxpsffraction=iteration_control_params["maxpsffraction"],
+        min_psf_fraction=iteration_control_params["min_psf_fraction"],
+        max_psf_fraction=iteration_control_params["max_psf_fraction"],
         cycle_niter=iteration_control_params["cycle_niter"],
     )
-    combined_deconvolve_dict = ReturnDict()
+    combined_imaging_dict = ImagingDict()
 
     # Once-only imaging setup: imaging weights, PSF and primary beam. The dirty
     # image and the model update are NOT done here.
@@ -172,7 +172,7 @@ def imaging_preparation_single_field(
     )
     T_setup = time.time() - start
 
-    return controller, img_xds, return_df, combined_deconvolve_dict, T_setup
+    return controller, img_xds, return_df, combined_imaging_dict, T_setup
 
 
 @shares_param_docs
@@ -247,9 +247,9 @@ def image_cube_single_field(
           mask cutoff as a fraction of the peak primary beam, in ``[0, 1]``.
           Pixels where the primary beam is below this fraction are excluded from
           cleaning. A masking cutoff, distinct from ``threshold``.
-        - ``gain`` [CASA ``gain``] : CLEAN loop gain -- the fraction of the
+        - ``loop_gain`` [CASA ``gain``] : CLEAN loop gain -- the fraction of the
           selected peak flux subtracted from the residual image each iteration
-          (``0 < gain <= 1``).
+          (``0 < loop_gain <= 1``).
         - ``cycle_factor`` [CASA ``cyclefactor``] : Scaling applied to the
           brightest PSF sidelobe level when setting the model update cycle
           stopping depth (see ``cycle_threshold`` below). Larger values trigger
@@ -259,12 +259,12 @@ def image_cube_single_field(
           triggered. ``cycle_niter=-1`` lets the adaptive ``cycle_threshold``
           govern the depth instead; otherwise the count is clamped to never
           exceed the plane's remaining ``niter_per_plane``.
-        - ``minpsffraction`` [CASA ``minpsffraction``] : Lower clamp on the PSF
+        - ``min_psf_fraction`` [CASA ``minpsffraction``] : Lower clamp on the PSF
           fraction used to set ``cycle_threshold = clamp(max_psf_sidelobe *
-          cycle_factor, minpsffraction, maxpsffraction) * peak_residual`` (then
+          cycle_factor, min_psf_fraction, max_psf_fraction) * peak_residual`` (then
           floored at ``threshold``). Raising it limits how deep one model update
           cycle cleans.
-        - ``maxpsffraction`` [CASA ``maxpsffraction``] : Upper clamp on that same
+        - ``max_psf_fraction`` [CASA ``maxpsffraction``] : Upper clamp on that same
           PSF fraction; it guarantees a minimum amount of cleaning per model
           update cycle even when the PSF sidelobe level is high.
 
@@ -311,7 +311,7 @@ def image_cube_single_field(
     timing_df : pandas.DataFrame
         One-row frame with a ``T_*`` column per processing function plus
         ``task_id``, ``n_channels`` and ``n_major_cycles``.
-    combined_deconvolve_dict : ReturnDict
+    combined_imaging_dict : ImagingDict
         Per-plane convergence statistics for this chunk.  Channel labels are
         chunk-local (0-based); the node task remaps them to global channel
         numbers before the reduce.
@@ -328,10 +328,10 @@ def image_cube_single_field(
         residual_cycle_cube_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (
-        ReturnDict,
+        ImagingDict,
         accumulate_timing,
         get_calculate_cycle_controls,
-        merge_return_dicts,
+        merge_imaging_dicts,
     )
 
     if image_data_variables_keep is None:
@@ -345,7 +345,7 @@ def image_cube_single_field(
         controller,
         img_xds,
         setup_return_df,
-        combined_deconvolve_dict,
+        combined_imaging_dict,
         T_setup,
     ) = imaging_preparation_single_field(
         ps_xdt,
@@ -420,7 +420,7 @@ def image_cube_single_field(
                 cycle_threshold_pp,
             ) = get_calculate_cycle_controls(
                 controller,
-                combined_deconvolve_dict,
+                combined_imaging_dict,
                 img_xds,
                 is_n_iter_0,
                 iteration_control_params=iteration_control_params,
@@ -457,7 +457,7 @@ def image_cube_single_field(
             }
 
             (
-                deconvolve_dict,
+                imaging_dict,
                 model_update_return_df,
             ) = model_update_cycle_cube_single_field(
                 img_xds,
@@ -474,18 +474,18 @@ def image_cube_single_field(
             # print("cycle_niter_cap_pp: ", controller.niter_per_plane)
             # print("cycle_threshold_pp", cycle_threshold_pp)
         else:
-            deconvolve_dict = ReturnDict()
+            imaging_dict = ImagingDict()
 
         is_n_iter_0 = False
 
         start = time.time()
-        controller.update_counts(deconvolve_dict)
+        controller.update_counts(imaging_dict)
 
-        # check_convergence stamps the stop code into deconvolve_dict, so run
+        # check_convergence stamps the stop code into imaging_dict, so run
         # it before the merge to carry that stop code into the combined dict.
-        stopcode, stopdesc = controller.check_convergence(deconvolve_dict)
-        combined_deconvolve_dict = merge_return_dicts(
-            [combined_deconvolve_dict, deconvolve_dict]
+        stopcode, stopdesc = controller.check_convergence(imaging_dict)
+        combined_imaging_dict = merge_imaging_dicts(
+            [combined_imaging_dict, imaging_dict]
         )
         timing["T_convergence"] += time.time() - start
 
@@ -543,4 +543,4 @@ def image_cube_single_field(
 
     timing_df = pd.DataFrame({key: [value] for key, value in timing.items()})
 
-    return img_xds, timing_df, combined_deconvolve_dict
+    return img_xds, timing_df, combined_imaging_dict
