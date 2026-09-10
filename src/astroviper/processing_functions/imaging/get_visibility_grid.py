@@ -177,7 +177,7 @@ def get_visibility_grid_single_field(
             + " with get_visibility_grid_single_field.",
         )
 
-    grid = img_xds[model_name].values
+    grid = np.ascontiguousarray(img_xds[model_name].values)
     vis_data = ms_xds[ms_data_group_out["correlated_data"]].values
     uvw = ms_xds[ms_data_group_in["uvw"]].values
     frequency_coord = ms_xds.frequency.values
