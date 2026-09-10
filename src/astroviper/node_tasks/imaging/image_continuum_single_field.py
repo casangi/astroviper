@@ -1465,6 +1465,7 @@ def grid_imaging_weight_density_continuum_node(
         ms_data_group_in_name=processing_set_data_group_name,
         single_precision_gridding=single_precision_gridding,
         processing_function_threads=processing_function_threads,
+        collapse_frequency=True,
     )
 
     T_grid_weight_density = time.time() - start
@@ -1502,7 +1503,13 @@ def grid_imaging_weight_density_continuum_node(
             "T_make_empty_image": [T_make_empty_image],
             "T_grid_weight_density": [T_grid_weight_density],
             "T_weight_density_node": [task_total_time],
-            "n_frequency_channels": [weight_density_xds.sizes.get("frequency", 0)],
+            "n_frequency_channels": [
+                weight_density_xds.attrs.get(
+                    "n_input_frequency_channels",
+                    weight_density_xds.sizes.get("frequency", 0),
+                )
+            ],
+            "n_weight_density_planes": [weight_density_xds.sizes.get("frequency", 0)],
         }
     )
     _add_task_execution_metadata(timing_df, task_start)

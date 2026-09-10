@@ -23,6 +23,7 @@ import xarray as xr
 from astroviper.processing_functions.imaging.calculate_imaging_weights import (
     _equalize_parallel_hand_weights,
     calculate_imaging_weights,
+    collapse_continuum_weight_density,
     grid_imaging_weight_density_continuum,
 )
 from astroviper.processing_functions.imaging.check_imaging_parameters import (
@@ -556,6 +557,43 @@ class TestGridContinuumWeightDensity(unittest.TestCase):
                     "robust": 0.5,
                 },
             )
+
+    def test_direct_continuum_plane_matches_post_gridding_collapse(self):
+        """Direct map-side collapse preserves CASA and proper density values."""
+        ps_xdt = _make_ps_xdt(n_time=2, n_baseline=5, n_chan=3)
+        image = _make_img_xds(n_l=16, n_m=16, n_chan=3)
+
+        for casa_implementation in (False, True):
+            with self.subTest(casa_implementation=casa_implementation):
+                params = {
+                    "weighting": "briggs",
+                    "robust": 0.5,
+                    "casa_weighting_implementation": casa_implementation,
+                }
+                resolved = grid_imaging_weight_density_continuum(ps_xdt, image, params)
+                expected = collapse_continuum_weight_density(resolved)
+                actual = grid_imaging_weight_density_continuum(
+                    ps_xdt,
+                    image,
+                    params,
+                    collapse_frequency=True,
+                )
+
+                self.assertEqual(actual.sizes["frequency"], 1)
+                self.assertTrue(actual.attrs["continuum_frequency_collapsed"])
+                self.assertEqual(actual.attrs["n_input_frequency_channels"], 3)
+                np.testing.assert_allclose(
+                    actual.WEIGHT_DENSITY_GRID,
+                    expected.WEIGHT_DENSITY_GRID,
+                    rtol=1.0e-14,
+                    atol=0.0,
+                )
+                np.testing.assert_allclose(
+                    actual.SUM_WEIGHT,
+                    expected.SUM_WEIGHT,
+                    rtol=1.0e-14,
+                    atol=0.0,
+                )
 
 
 # ---------------------------------------------------------------------------

@@ -538,7 +538,6 @@ def prepare_continuum_imaging_weights_global(
     from graphviper.graph_tools import generate_dask_workflow, map, reduce
 
     from astroviper.processing_functions.imaging.calculate_imaging_weights import (
-        collapse_continuum_weight_density,
         normalize_imaging_weight_params,
     )
     from astroviper.processing_functions.imaging.imaging_weighting.briggs_weighting import (
@@ -679,13 +678,14 @@ def prepare_continuum_imaging_weights_global(
             "weight-polarization-axis lengths."
         )
 
-    # CASA continuum weighting (including specmode="mvc") forms one common
-    # density plane from every selected frequency before calculating the
-    # Briggs factor. The preceding tree reduction deliberately retains the
-    # physical planes so partitions can first be aligned exactly.
-    global_weight_density_xds = collapse_continuum_weight_density(
-        global_weight_density_xds
-    )
+    # Global continuum map tasks accumulate every selected channel directly
+    # into one density plane. Keeping that singleton layout through reduction
+    # avoids materializing a channel-by-UV-grid intermediate on the driver.
+    if not global_weight_density_xds.attrs.get("continuum_frequency_collapsed", False):
+        raise ValueError(
+            "Global continuum weight-density maps must return a frequency-"
+            "collapsed density plane."
+        )
     global_weight_density_da = global_weight_density_xds["WEIGHT_DENSITY_GRID"]
     global_sum_weight_da = global_weight_density_xds["SUM_WEIGHT"]
 
@@ -1661,13 +1661,18 @@ def combine_continuum_weight_density_chunks(
     Partially reduced inputs have the same structure, except that ``task_id``
     is omitted.
 
-    Inputs are aligned on their physical frequency coordinates using an outer
-    join. Contributions at matching frequencies are added, while disjoint
-    frequency planes are retained. Consequently, the reducer supports both
+    Frequency-resolved legacy inputs are aligned on their physical frequency
+    coordinates using an outer join. Contributions at matching frequencies are
+    added, while disjoint frequency planes are retained. Consequently, that
+    layout supports both
 
     * frequency partitioning, where tasks usually own disjoint channels; and
     * time or baseline partitioning, where multiple tasks contribute to the
       same frequency planes.
+
+    Global continuum map tasks instead return one frequency-collapsed plane.
+    Those planes are added positionally, avoiding expansion back to one plane
+    per physical channel during the reduce stage.
 
     Parameters
     ----------
@@ -1904,6 +1909,14 @@ def combine_continuum_weight_density_chunks(
     combined_xds = first_xds.copy(
         deep=copy_density_deep,
     )
+    frequency_collapsed = bool(
+        combined_xds.attrs.get("continuum_frequency_collapsed", False)
+    )
+    if frequency_collapsed and combined_xds.sizes["frequency"] != 1:
+        raise ValueError(
+            "A frequency-collapsed weight-density input must contain exactly "
+            "one frequency plane."
+        )
 
     # Ensure the two numerical accumulators own writable arrays.
     for variable_name in required_variables:
@@ -1960,6 +1973,27 @@ def combine_continuum_weight_density_chunks(
             input_index,
         )
 
+        candidate_frequency_collapsed = bool(
+            candidate_xds.attrs.get("continuum_frequency_collapsed", False)
+        )
+        if candidate_frequency_collapsed != frequency_collapsed:
+            raise ValueError(
+                "Continuum weight-density reduction cannot mix frequency-"
+                "collapsed and frequency-resolved inputs."
+            )
+
+        if frequency_collapsed:
+            if candidate_xds.sizes["frequency"] != 1:
+                raise ValueError(
+                    "A frequency-collapsed weight-density input must contain "
+                    "exactly one frequency plane."
+                )
+            for variable_name in required_variables:
+                combined_xds[variable_name].data[...] += np.asarray(
+                    candidate_xds[variable_name].values
+                )
+            continue
+
         # Outer alignment has the desired behavior:
         #
         # - overlapping frequencies are placed on the same planes and added;
@@ -1980,7 +2014,39 @@ def combine_continuum_weight_density_chunks(
 
     # Sort the final frequency axis because tree reduction and outer
     # alignment do not guarantee that channels remain globally ordered.
-    combined_xds = combined_xds.sortby("frequency")
+    if not frequency_collapsed:
+        combined_xds = combined_xds.sortby("frequency")
+
+    if frequency_collapsed:
+        collapsed_inputs = [
+            _get_density_dataset(result, input_index)
+            for input_index, result in enumerate(input_data)
+        ]
+        input_frequency_counts = np.asarray(
+            [
+                int(dataset.attrs.get("n_input_frequency_channels", 1))
+                for dataset in collapsed_inputs
+            ],
+            dtype=np.int64,
+        )
+        representative_frequencies = np.asarray(
+            [float(dataset.frequency.values[0]) for dataset in collapsed_inputs],
+            dtype=np.float64,
+        )
+        total_input_frequency_channels = int(input_frequency_counts.sum())
+        combined_xds = combined_xds.assign_coords(
+            frequency=[
+                float(
+                    np.average(
+                        representative_frequencies,
+                        weights=input_frequency_counts,
+                    )
+                )
+            ]
+        )
+        combined_xds.attrs["n_input_frequency_channels"] = (
+            total_input_frequency_channels
+        )
 
     combined_xds.attrs["n_weight_density_chunks_combined"] = int(len(combined_timing))
 

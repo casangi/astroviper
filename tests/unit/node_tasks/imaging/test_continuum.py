@@ -386,7 +386,10 @@ def test_weight_density_node_returns_valid_reducer_leaf(monkeypatch):
     """The first weighting node packages density products and timings."""
     monkeypatch.setattr("xradio.image.make_empty_sky_image", _empty_weight_image)
 
+    collapse_requests = []
+
     def fake_grid(ps_xdt, image, params, **kwargs):
+        collapse_requests.append(kwargs["collapse_frequency"])
         return xr.Dataset(
             {
                 "WEIGHT_DENSITY_GRID": (
@@ -410,6 +413,7 @@ def test_weight_density_node_returns_valid_reducer_leaf(monkeypatch):
         **_weight_node_params()
     )
     assert result["task_id"] == 4
+    assert collapse_requests == [True]
     assert set(result["weight_density"]) == {"WEIGHT_DENSITY_GRID", "SUM_WEIGHT"}
     assert result["timing_node_tasks"].iloc[0].n_frequency_channels == 2
     assert {

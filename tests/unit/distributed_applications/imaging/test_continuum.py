@@ -378,6 +378,26 @@ def test_weight_density_reducer_aligns_adds_and_sorts_channels():
     assert len(result["timing_node_tasks"]) == 2
 
 
+def test_weight_density_reducer_keeps_collapsed_maps_single_plane():
+    """Global continuum reduction adds singleton planes without frequency expansion."""
+    first = _weight_density([1.0e9], 2.0, 0)
+    second = _weight_density([1.2e9], 3.0, 1)
+    for leaf, n_channels in ((first, 5), (second, 7)):
+        leaf["weight_density"].attrs.update(
+            continuum_frequency_collapsed=True,
+            n_input_frequency_channels=n_channels,
+        )
+
+    result = combine_continuum_weight_density_chunks([first, second], {})
+    density = result["weight_density"]
+
+    assert density.sizes["frequency"] == 1
+    np.testing.assert_allclose(density.WEIGHT_DENSITY_GRID, 5.0)
+    np.testing.assert_allclose(density.SUM_WEIGHT, 5.0)
+    np.testing.assert_allclose(density.frequency, (1.0e9 * 5 + 1.2e9 * 7) / 12)
+    assert density.attrs["n_input_frequency_channels"] == 12
+
+
 def test_weight_cache_reducer_combines_leaf_and_partial_results():
     """Weight cache reduction is associative across leaf and partial schemas."""
     result = combine_continuum_imaging_weight_chunks(
@@ -504,7 +524,11 @@ def test_global_weight_preparation_builds_factors_and_returns_all_tasks(monkeypa
         "astroviper.distributed_applications.imaging.image_continuum_single_field"
     )
 
-    leaf = _weight_density([1.0e9, 1.1e9])
+    leaf = _weight_density([1.05e9])
+    leaf["weight_density"].attrs.update(
+        continuum_frequency_collapsed=True,
+        n_input_frequency_channels=2,
+    )
     graph_result = {"weight_density": leaf["weight_density"]}
     monkeypatch.setattr("graphviper.graph_tools.map", lambda **kwargs: "map")
     monkeypatch.setattr(
@@ -514,10 +538,6 @@ def test_global_weight_preparation_builds_factors_and_returns_all_tasks(monkeypa
         "graphviper.graph_tools.generate_dask_workflow", lambda graph: graph
     )
     monkeypatch.setattr("dask.compute", lambda graph: (graph_result,))
-    monkeypatch.setattr(
-        "astroviper.processing_functions.imaging.calculate_imaging_weights.collapse_continuum_weight_density",
-        lambda dataset: dataset.isel(frequency=slice(0, 1)),
-    )
     monkeypatch.setattr(
         "astroviper.processing_functions.imaging.calculate_imaging_weights.normalize_imaging_weight_params",
         lambda params: {"weighting": "briggs", "robust": 0.5},
@@ -881,7 +901,17 @@ def test_tw_hydra_in_place_weights_can_be_retained(tmp_path, tw_hydra_store):
                 "weighting_scope": "global",
                 "casa_weighting_implementation": True,
             },
-            id="mfs-briggs-global",
+            id="mfs-briggs-global-casa",
+        ),
+        pytest.param(
+            "mfs",
+            {
+                "weighting": "briggs",
+                "robust": 0.5,
+                "weighting_scope": "global",
+                "casa_weighting_implementation": False,
+            },
+            id="mfs-briggs-global-proper",
         ),
     ],
 )

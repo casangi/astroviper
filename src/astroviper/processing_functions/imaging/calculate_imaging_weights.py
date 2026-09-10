@@ -181,13 +181,15 @@ def grid_imaging_weight_density_continuum(
     ms_data_group_in_name: str = "base",
     single_precision_gridding: bool = False,
     processing_function_threads: int = 1,
+    collapse_frequency: bool = False,
 ) -> xr.Dataset:
     """Grid one visibility partition's contribution to the weight density.
 
     This function implements the first, partition-local stage of distributed
     Briggs or uniform weighting. It masks flagged data weights, equalizes the
     parallel-hand correlation weights, and grids the resulting weights onto a
-    channel-dependent UV-density grid.
+    UV-density grid. The distributed global-weighting path requests direct
+    accumulation into one continuum frequency plane.
 
     No Briggs factors are calculated and no weights are degridded back to the
     visibility samples. The returned density and sum-of-weight products are
@@ -223,6 +225,11 @@ def grid_imaging_weight_density_continuum(
     processing_function_threads : int, optional
         Number of threads supplied to the weight-density gridder.
 
+    collapse_frequency : bool, optional
+        If true, map every visibility channel directly into one common
+        continuum UV-density plane. If false, retain the channel-dependent
+        layout used by existing processing-function callers.
+
     Returns
     -------
     xarray.Dataset
@@ -236,9 +243,11 @@ def grid_imaging_weight_density_continuum(
             Partition-local sum of equalized data weights with dimensions
             ``(frequency, weight_polarization)``.
 
-        The physical frequency coordinate is retained so that a later reducer
-        can align and sum contributions from arbitrary time, baseline, or
-        frequency partitions.
+        With ``collapse_frequency=True``, the singleton frequency coordinate is
+        the mean input frequency and the
+        ``continuum_frequency_collapsed`` attribute records its continuum
+        meaning. Otherwise physical frequency coordinates are retained for
+        alignment by a later reducer.
 
     Notes
     -----
@@ -354,9 +363,15 @@ def grid_imaging_weight_density_continuum(
     # correlations during the later degrid stage.
     n_weight_polarization = 1
 
+    output_frequency = (
+        np.asarray([np.mean(frequency)], dtype=np.float64)
+        if collapse_frequency
+        else frequency
+    )
+
     weight_density_grid = np.zeros(
         (
-            frequency.size,
+            output_frequency.size,
             n_weight_polarization,
             n_uv[0],
             n_uv[1],
@@ -366,7 +381,7 @@ def grid_imaging_weight_density_continuum(
 
     sum_weight = np.zeros(
         (
-            frequency.size,
+            output_frequency.size,
             n_weight_polarization,
         ),
         dtype=np.float64,
@@ -488,11 +503,11 @@ def grid_imaging_weight_density_continuum(
                 f"child {ms_name!r}."
             )
 
-        uses_full_frequency_axis = np.array_equal(
+        uses_full_frequency_axis = not collapse_frequency and np.array_equal(
             image_frequency_indices,
             np.arange(frequency.size),
         )
-        if uses_full_frequency_axis:
+        if collapse_frequency or uses_full_frequency_axis:
             child_weight_density_grid = weight_density_grid
             child_sum_weight = sum_weight
         else:
@@ -520,9 +535,14 @@ def grid_imaging_weight_density_continuum(
             delta_lm,
             processing_function_threads=processing_function_threads,
             truncate_uv_cells=True,
+            channel_map=(
+                np.zeros(ms_frequency.size, dtype=np.int64)
+                if collapse_frequency
+                else None
+            ),
         )
 
-        if not uses_full_frequency_axis:
+        if not collapse_frequency and not uses_full_frequency_axis:
             weight_density_grid[image_frequency_indices, ...] += (
                 child_weight_density_grid
             )
@@ -550,7 +570,7 @@ def grid_imaging_weight_density_continuum(
                     "v",
                 ),
                 coords={
-                    "frequency": frequency,
+                    "frequency": output_frequency,
                     "weight_polarization": np.arange(
                         n_weight_polarization,
                         dtype=np.int64,
@@ -572,7 +592,7 @@ def grid_imaging_weight_density_continuum(
                     "weight_polarization",
                 ),
                 coords={
-                    "frequency": frequency,
+                    "frequency": output_frequency,
                     "weight_polarization": np.arange(
                         n_weight_polarization,
                         dtype=np.int64,
@@ -593,6 +613,8 @@ def grid_imaging_weight_density_continuum(
             "n_processing_set_datasets_gridded": datasets_gridded,
             "cell_size_l": float(delta_lm[0]),
             "cell_size_m": float(delta_lm[1]),
+            "continuum_frequency_collapsed": bool(collapse_frequency),
+            "n_input_frequency_channels": int(frequency.size),
         },
     )
 

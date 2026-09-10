@@ -14,6 +14,7 @@ def grid_imaging_weights(
     # are bit-reproducible; accepted for API consistency across the stack.
     processing_function_threads: int = 1,
     truncate_uv_cells: bool = False,
+    channel_map: np.ndarray | None = None,
 ):
     """
     Grid per-visibility *data weights* onto a UV grid.
@@ -50,6 +51,10 @@ def grid_imaging_weights(
     truncate_uv_cells : bool, default ``False``
         If True, use CASA continuum integer truncation after shifting UV
         coordinates into the grid domain. If False, use nearest-cell assignment.
+    channel_map : np.ndarray, optional
+        Integer output-grid plane for every visibility channel. By default each
+        channel is gridded into the plane with the same index. Supplying an
+        all-zero map accumulates all channels directly into one continuum plane.
 
     Returns
     -------
@@ -71,7 +76,20 @@ def grid_imaging_weights(
     )
 
     n_chan = data_weight.shape[2]  # number of *visibility* channels
-    chan_map = (np.arange(0, n_chan)).astype(int)  # identity channel map
+    if channel_map is None:
+        chan_map = np.arange(n_chan, dtype=np.int64)
+    else:
+        chan_map = np.ascontiguousarray(channel_map, dtype=np.int64)
+        if chan_map.shape != (n_chan,):
+            raise ValueError(
+                "channel_map must contain one entry per visibility channel; "
+                f"received shape {chan_map.shape}, expected {(n_chan,)}."
+            )
+        if np.any(chan_map < 0) or np.any(chan_map >= grid.shape[0]):
+            raise ValueError(
+                "channel_map contains an output plane outside the grid's "
+                f"frequency axis of length {grid.shape[0]}."
+            )
 
     # Only PP or (PP, QQ) is supported here; adjust if more pols are added later.
     assert data_weight.shape[3] < 3, "Polarization should be PP or PP, QQ."
