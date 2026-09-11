@@ -182,6 +182,14 @@ def _create_continuum_weight_cache_store(
         for group in original_data_groups[ms_name].values():
             if group.get("weight_imaging") == _CONTINUUM_WEIGHT_CACHE_VARIABLE:
                 group.pop("weight_imaging")
+        # Apply the same cleanup to the live in-memory metadata. Otherwise a
+        # rerun over a retained/interrupted cache sees the freshly reset NaN
+        # array as an already valid imaging-weight input and skips recomputing
+        # local weights.
+        for group in data_groups.values():
+            if group.get("weight_imaging") == _CONTINUUM_WEIGHT_CACHE_VARIABLE:
+                group.pop("weight_imaging")
+        root[ms_name].attrs["data_groups"] = copy.deepcopy(data_groups)
         data_group = data_groups[processing_set_data_group_name]
         source_weight_name = data_group.get("weight")
         if source_weight_name is None:
@@ -248,6 +256,8 @@ def _activate_continuum_weight_cache(
     processing_set_data_group_name,
 ):
     """Register the fully populated in-place weight cache for later loads."""
+    import numpy as np
+
     from astroviper.utils.data_group_tools import (
         create_data_groups_in_and_out,
         modify_data_groups_xds,
@@ -255,6 +265,21 @@ def _activate_continuum_weight_cache(
 
     root = zarr.open_group(ps_store, mode="r+")
     for ms_name, ms_xdt in ps_xdt.items():
+        weight_array = root[ms_name][_CONTINUUM_WEIGHT_CACHE_VARIABLE]
+        has_finite_positive_weight = False
+        for block_index in np.ndindex(weight_array.cdata_shape):
+            block = np.asarray(weight_array.blocks[block_index])
+            if np.any(np.isfinite(block) & (block > 0)):
+                has_finite_positive_weight = True
+                break
+        if not has_finite_positive_weight:
+            raise RuntimeError(
+                "The in-place continuum imaging-weight cache is incomplete: "
+                f"{ms_name!r}/{_CONTINUUM_WEIGHT_CACHE_VARIABLE!r} has no "
+                "finite positive values. Rebuild the generated Processing Set "
+                "before imaging."
+            )
+
         _, data_group_out = create_data_groups_in_and_out(
             ms_xdt.ds,
             data_group_in_name=processing_set_data_group_name,
@@ -384,6 +409,7 @@ def _graph_timing_record(stage, graph_result, graph_timings):
     return {
         "stage": stage,
         "timing_node_tasks": timing_node_tasks,
+        "timing_model_update": graph_result.get("timing_model_update"),
         "compute_start_unixtime": graph_timings.get("compute_start_unixtime"),
         "compute_end_unixtime": graph_timings.get("compute_end_unixtime"),
         "T_compute": compute_duration,
@@ -396,6 +422,23 @@ def _accumulate_graph_timings(destination, graph_timings):
         if key in {"compute_start_unixtime", "compute_end_unixtime"}:
             continue
         destination[key] = destination.get(key, 0.0) + value
+
+
+def _select_dask_append_worker():
+    """Choose one stable worker for stateful global append tasks.
+
+    A Resolve append keeps its fitted convolution operators in a process-local
+    cache. The continuum application computes each major cycle as a separate
+    Dask graph, so unrestricted append tasks can migrate between workers even
+    though the parallel map/reduce tasks should remain freely schedulable.
+    """
+    try:
+        from distributed import get_client
+
+        workers = sorted(get_client().scheduler_info().get("workers", {}))
+    except (ImportError, ValueError):
+        return None
+    return workers[0] if workers else None
 
 
 def compute_continuum_graph(
@@ -412,6 +455,7 @@ def compute_continuum_graph(
     reduce_n_batch,
     append_node=None,
     append_input_params=None,
+    append_worker=None,
 ):
     """The graph performs
 
@@ -441,8 +485,13 @@ def compute_continuum_graph(
          Number of inputs combined per reduction batch.
      append_node : callable, optional
          Global node executed after reduction.
-     append_input_params : dict, optional
-         Parameters forwarded to ``append_node``.
+    append_input_params : dict, optional
+        Parameters forwarded to ``append_node``.
+    append_worker : str, optional
+        Dask worker address on which the appended node must run. Map and reduce
+        tasks remain unrestricted. This is used to preserve process-local
+        state such as Resolve's fitted convolution-operator cache across major
+        cycles.
 
      Returns
      -------
@@ -496,7 +545,7 @@ def compute_continuum_graph(
     )
 
     # Append node: Either minor cycle or finalization
-    if append_node is not None:
+    if append_node is not None and append_worker is None:
         viper_graph = append(
             viper_graph,
             append_node,
@@ -507,6 +556,15 @@ def compute_continuum_graph(
 
     start = time.time()
     dask_graph = generate_dask_workflow(viper_graph)
+    if append_node is not None and append_worker is not None:
+        with dask.annotate(
+            workers=(append_worker,),
+            allow_other_workers=False,
+        ):
+            dask_graph = dask.delayed(append_node)(
+                dask_graph,
+                append_input_params,
+            )
     timings["T_generate_dask_graph"] = time.time() - start
 
     start = time.time()
@@ -2370,8 +2428,10 @@ def image_continuum_single_field(
     iteration_control_params: dict[str, Any],
     gridder: str = "prolate_spheroidal",
     deconvolver: str = "hogbom",
+    resolve_deconvolver_params: dict[str, Any] | None = None,
     pbcor: bool = False,
     pblimit: float = 0.2,
+    exact_residual_stopping: bool = False,
     specmode: str = "mfs",
     instrument_polarization_basis: str = "linear",
     scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],  # noqa: B006 - param.json requires list/str (not nullable); never mutated
@@ -2436,8 +2496,9 @@ def image_continuum_single_field(
 
     Unlike cube imaging, FFTs are performed only once after each
     minor cycle. Workers operate directly on UV-domain Taylor grids.
-    The current Taylor-zero compatibility minor loop accepts only
-    ``deconvolver="hogbom"`` and uses the shared C++ Högbom implementation.
+    The Taylor-zero minor loop accepts ``deconvolver="hogbom"`` for the shared
+    C++ CLEAN implementation or ``deconvolver="resolve"`` for image-domain
+    Bayesian deconvolution. Resolve currently updates Stokes I only.
 
     Parameters
     ----------
@@ -2493,6 +2554,16 @@ def image_continuum_single_field(
     gridder : str, optional
         Currently ``"prolate_spheroidal"``. MFS and MVC dispatch visibility,
         PSF, and prediction work to the shared C++ grid/degrid kernels.
+    resolve_deconvolver_params : dict or None, optional
+        Options passed to ``resolve.re.ResolveDeconvolverConfig`` when
+        ``deconvolver="resolve"``. In particular,
+        ``residual_tolerance`` and ``posterior_change_tolerance`` provide
+        Resolve-aware stopping criteria. This initial backend requires
+        ``nterms=1`` and reconstructs the single Stokes-I time plane.
+    exact_residual_stopping : bool, default False
+        Apply the absolute threshold only to the exact visibility-domain
+        Taylor-0 Stokes-I residual inside the common PB/clean-mask support.
+        Approximate minor residuals do not terminate the outer loop.
     clean_mask : str or None, optional
         Path to a NumPy ``.npy`` file containing one two-dimensional CLEAN mask.
         Its shape must equal ``image_params["image_size"]``. Finite values greater
@@ -2623,6 +2694,11 @@ def image_continuum_single_field(
     # ensure it is in the keep list (without mutating the caller's list).
     if restore and "sky_restored" not in image_data_variables_keep:
         image_data_variables_keep = list(image_data_variables_keep) + ["sky_restored"]
+    if deconvolver.lower() == "resolve":
+        image_data_variables_keep = list(image_data_variables_keep)
+        for posterior_product in ("sky_posterior_mean", "sky_posterior_std"):
+            if posterior_product not in image_data_variables_keep:
+                image_data_variables_keep.append(posterior_product)
 
     # Every driver step is timed into ``timing_distributed_application``; the
     # individual per-step timing log messages are replaced by the formatted
@@ -2731,6 +2807,7 @@ def image_continuum_single_field(
     input_params["deconvolver"] = deconvolver
     input_params["pbcor"] = bool(pbcor)
     input_params["pblimit"] = float(pblimit)
+    input_params["exact_residual_stopping"] = bool(exact_residual_stopping)
     input_params["clean_mask"] = clean_mask_array
     input_params["specmode"] = specmode
     input_params["instrument_polarization_basis"] = instrument_polarization_basis
@@ -2828,6 +2905,13 @@ def image_continuum_single_field(
             ps_store,
             processing_set_data_group_name,
         )
+        # Cache creation removes any retained/private weight registration from
+        # the live data group. Refresh the loader mapping captured above so the
+        # first local-weighting graph recomputes weights instead of reading the
+        # newly reset NaN cache.
+        input_params["data_group"] = copy.deepcopy(
+            first_ms.ds.attrs["data_groups"][processing_set_data_group_name]
+        )
         timing_distributed_application["T_create_in_place_weight_cache"] = (
             time.time() - start
         )
@@ -2877,8 +2961,15 @@ def image_continuum_single_field(
     model_uv_xds = None
     observed_visibility_grid_xds = None
     last_minor_return_dict = None
+    resolve_posterior_xds = None
+    exact_residual_history = []
     n_major_cycles = 0
     timing_graphs = []
+    resolve_append_worker = (
+        _select_dask_append_worker()
+        if deconvolver.lower() == "resolve" and compute_backend == "dask"
+        else None
+    )
 
     # =============================================================
     # Prepare imaging weights once before entering the major loop
@@ -3060,7 +3151,9 @@ def image_continuum_single_field(
             "specmode": specmode,
             "visibility_memory_mode": visibility_memory_mode,
             "pblimit": pblimit,
+            "exact_residual_stopping": bool(exact_residual_stopping),
             "clean_mask": clean_mask_array,
+            "resolve_deconvolver_params": resolve_deconvolver_params or {},
         }
 
         # In later major loops, a static_xds should be present
@@ -3071,6 +3164,9 @@ def image_continuum_single_field(
             append_input_params["deconvolution"] = last_minor_return_dict[
                 "deconvolution"
             ]
+            append_input_params["deconvolver_state"] = last_minor_return_dict.get(
+                "deconvolver_state"
+            )
             if visibility_memory_mode == "in_memory":
                 if observed_visibility_grid_xds is None:
                     raise RuntimeError(
@@ -3110,6 +3206,7 @@ def image_continuum_single_field(
             reduce_n_batch=reduce_n_batch,
             append_node=node_tasks.imaging.continuum_minor_cycle_node,
             append_input_params=append_input_params,
+            append_worker=resolve_append_worker,
         )
 
         # Gather timing information while retaining this graph's task stream.
@@ -3128,6 +3225,17 @@ def image_continuum_single_field(
         # Get current status for bookkeeping
         last_minor_return_dict = cycle_return_dict
         controller = cycle_return_dict["controller"]
+        if cycle_return_dict.get("exact_residual_peak") is not None:
+            exact_residual_history.append(
+                {
+                    "major_cycle": n_major_cycles,
+                    "peak_residual": float(cycle_return_dict["exact_residual_peak"]),
+                    "mask_pixels": int(cycle_return_dict["exact_residual_mask_sum"]),
+                    "minor_cycle_executed": bool(
+                        cycle_return_dict.get("minor_cycle_executed", True)
+                    ),
+                }
+            )
 
         # ---------------------------------------------------------
         # Capture append-prepared state for the next cycle.
@@ -3164,6 +3272,22 @@ def image_continuum_single_field(
 
         model_xds = cycle_return_dict["model_xds"]
         model_uv_xds = cycle_return_dict["model_uv_xds"]
+
+        if deconvolver.lower() == "resolve" and cycle_return_dict.get(
+            "minor_cycle_executed", True
+        ):
+            posterior_names = [
+                name
+                for name in ("SKY_POSTERIOR_MEAN", "SKY_POSTERIOR_STD")
+                if name in cycle_return_dict["image"]
+            ]
+            if posterior_names:
+                resolve_posterior_xds = cycle_return_dict["image"][
+                    posterior_names
+                ].copy(deep=True)
+                resolve_posterior_xds.attrs = copy.deepcopy(
+                    cycle_return_dict["image"].attrs
+                )
 
         if specmode == "mfs" and model_uv_xds is None:
             raise RuntimeError(
@@ -3268,6 +3392,8 @@ def image_continuum_single_field(
     final_input_params["static_xds"] = static_xds
     final_input_params["specmode"] = specmode
     final_input_params["pblimit"] = float(pblimit)
+    if deconvolver.lower() == "resolve" and resolve_posterior_xds is not None:
+        final_input_params["resolve_posterior_xds"] = resolve_posterior_xds
 
     final_input_params["weight_cache_mapping"] = weight_cache_mapping
 
@@ -3357,11 +3483,17 @@ def image_continuum_single_field(
         "stopcode",
         "stopdesc",
         "is_n_iter_0",
+        "deconvolver_state",
+        "timing_model_update",
     ):
         return_dict[key] = last_minor_return_dict[key]
 
     return_dict["static_xds"] = static_xds
     return_dict["n_major_cycles"] = n_major_cycles
+    if exact_residual_stopping:
+        final_exact = return_dict["image"].attrs.get("exact_residual_stopping", {})
+        return_dict["exact_residual_history"] = exact_residual_history
+        return_dict["exact_residual_stopping"] = copy.deepcopy(final_exact)
 
     # The initial on-disk arrays are cube-shaped NaN placeholders.  Continuum
     # finalization instead produces Taylor-term products, so replace the store

@@ -27,6 +27,20 @@ def _add_task_execution_metadata(timing_df, task_start):
         timing_df["worker_name"] = None
 
 
+def _prepare_xarray_dataset_for_transport(dataset):
+    """Return a zero-copy Dataset container without runtime accessor caches.
+
+    Xarray caches extension accessors on each Dataset instance. XRADIO's image
+    accessor holds a weak reference back to that instance, which Python's
+    pickle protocol cannot serialize. Map results cross a process boundary on
+    their way to GraphVIPER's reduce tasks, so construct a fresh shallow
+    container at that boundary. ``deep=False`` preserves the underlying array
+    objects, coordinates, indexes, attributes, encodings, and values while
+    deliberately leaving instance-local caches behind.
+    """
+    return dataset.copy(deep=False)
+
+
 def _write_task_kill_switch_log(
     timing_df, task_total_time, threshold, image_store, task_id, hostname
 ):
@@ -734,6 +748,65 @@ def _install_continuum_clean_mask(
     )
 
 
+def _measure_exact_continuum_residual(
+    img_xds,
+    *,
+    pblimit=0.2,
+    image_data_group_name="residual",
+):
+    """Measure Taylor-0 Stokes-I residual depth in the common PB/mask support."""
+    import numpy as np
+
+    data_groups = img_xds.attrs.get("data_groups", {})
+    if image_data_group_name not in data_groups:
+        raise KeyError(
+            "The continuum image does not contain image data group "
+            f"{image_data_group_name!r}."
+        )
+    data_group = data_groups[image_data_group_name]
+    residual_name = data_group.get("sky", "SKY_RESIDUAL")
+    if residual_name not in img_xds:
+        raise KeyError(f"The exact residual variable {residual_name!r} is absent.")
+
+    def _stokes_i_plane(data_array, plane_dimension=None):
+        indexers = {}
+        if plane_dimension is not None and plane_dimension in data_array.dims:
+            indexers[plane_dimension] = 0
+        for dimension in ("time", "frequency"):
+            if dimension in data_array.dims:
+                indexers[dimension] = 0
+        if "polarization" in data_array.dims:
+            values = [str(value) for value in data_array.polarization.values]
+            indexers["polarization"] = values.index("I") if "I" in values else 0
+        for dimension in data_array.dims:
+            if dimension not in {"l", "m"} and dimension not in indexers:
+                indexers[dimension] = 0
+        plane = data_array.isel(indexers, drop=True)
+        if plane.dims != ("l", "m"):
+            plane = plane.transpose("l", "m")
+        return np.asarray(plane.values.real, dtype=np.float64)
+
+    residual = _stokes_i_plane(img_xds[residual_name], "taylor_term")
+    support = np.isfinite(residual)
+
+    primary_beam_name = data_group.get("primary_beam")
+    if primary_beam_name is not None and primary_beam_name in img_xds:
+        primary_beam = _stokes_i_plane(img_xds[primary_beam_name])
+        peak_primary_beam = float(np.nanmax(primary_beam))
+        support &= np.isfinite(primary_beam) & (
+            primary_beam >= float(pblimit) * peak_primary_beam
+        )
+
+    mask_name = data_group.get("mask")
+    if mask_name is not None and mask_name in img_xds:
+        mask = _stokes_i_plane(img_xds[mask_name], "taylor_term")
+        support &= mask > 0.5
+
+    mask_sum = int(np.sum(support))
+    peak = 0.0 if mask_sum == 0 else float(np.max(np.abs(residual[support])))
+    return peak, mask_sum
+
+
 @shares_param_docs
 def residual_update_continuum_single_field(
     image_params,
@@ -1057,7 +1130,6 @@ def residual_update_continuum_single_field(
             processing_set_data_group_name=(processing_set_data_group_name),
             weight_imaging_name="WEIGHT_IMAGING",
         )
-
     # =============================================================
     # Resolve the task-local MVC primary beam
     # =============================================================
@@ -1300,7 +1372,7 @@ def residual_update_continuum_single_field(
     )
 
     return_dict = {
-        "image": img_xds,
+        "image": _prepare_xarray_dataset_for_transport(img_xds),
         "timing_node_tasks": timing_df,
     }
 
@@ -1952,7 +2024,15 @@ def _prepare_continuum_image(
         )
 
         img_xds["SKY_RESIDUAL"] = residual_taylor
-        img_xds.attrs["data_groups"][image_data_group_name]["sky"] = "SKY_RESIDUAL"
+        residual_group = img_xds.attrs["data_groups"][image_data_group_name]
+        residual_group["sky"] = "SKY_RESIDUAL"
+
+        # Preserve the globally reduced MVC weight sum through the minor-loop
+        # boundary.  Resolve needs its reciprocal to scale the normalized dirty
+        # image covariance, just as MFS uses VISIBILITY_NORMALIZATION.  The MVC
+        # Taylor conversion used to discard this value with the other temporary
+        # contribution arrays, causing Resolve to fall back to its unit scale.
+        residual_group["visibility_normalization"] = "MVC_RESIDUAL_WEIGHT_SUM"
 
         if initialize_static_products:
             if psf_taylor is None:
@@ -1969,7 +2049,9 @@ def _prepare_continuum_image(
         # ----------------------------------------------------------
 
         contribution_variables = [
-            name for name in img_xds.data_vars if name.startswith("MVC_")
+            name
+            for name in img_xds.data_vars
+            if name.startswith("MVC_") and name != "MVC_RESIDUAL_WEIGHT_SUM"
         ]
         img_xds = img_xds.drop_vars(contribution_variables, errors="ignore")
 
@@ -2566,6 +2648,8 @@ def continuum_finalize_node(
     produced by the final GraphViper reduce stage.
     """
 
+    import copy
+
     from astroviper.utils.data_group_tools import modify_data_groups_xds
 
     input_data = _unwrap_continuum_reduce_result(
@@ -2604,6 +2688,48 @@ def continuum_finalize_node(
         img_xds = img_xds.drop_vars("SKY_MODEL")
 
     img_xds["SKY_MODEL"] = model_xds["SKY_MODEL"].copy(deep=True)
+
+    resolve_posterior_xds = input_params.get("resolve_posterior_xds")
+    if resolve_posterior_xds is not None:
+        for variable_name in ("SKY_POSTERIOR_MEAN", "SKY_POSTERIOR_STD"):
+            if variable_name in resolve_posterior_xds:
+                img_xds[variable_name] = resolve_posterior_xds[variable_name].copy(
+                    deep=True
+                )
+        if "resolve_deconvolution" in resolve_posterior_xds.attrs:
+            img_xds.attrs["resolve_deconvolution"] = copy.deepcopy(
+                resolve_posterior_xds.attrs["resolve_deconvolution"]
+            )
+
+    if input_params.get("exact_residual_stopping", False):
+        _install_continuum_clean_mask(
+            img_xds,
+            input_params.get("clean_mask"),
+            input_params.get("image_data_group_in_name", "residual"),
+        )
+        exact_peak, exact_mask_sum = _measure_exact_continuum_residual(
+            img_xds,
+            pblimit=input_params.get("pblimit", 0.2),
+            image_data_group_name=input_params.get(
+                "image_data_group_in_name", "residual"
+            ),
+        )
+        exact_threshold = float(
+            input_params["iteration_control_params"].get("threshold", 0.0)
+        )
+        img_xds.attrs["exact_residual_stopping"] = {
+            "enabled": True,
+            "criterion": (
+                "max(abs(Taylor-0 Stokes-I exact visibility-domain residual))"
+            ),
+            "threshold": exact_threshold,
+            "peak_residual": exact_peak,
+            "mask_pixels": exact_mask_sum,
+            "pblimit": float(input_params.get("pblimit", 0.2)),
+            "threshold_reached": bool(
+                exact_threshold > 0 and exact_peak <= exact_threshold
+            ),
+        }
 
     modify_data_groups_xds(
         img_xds,
@@ -2838,6 +2964,100 @@ def model_update_continuum_single_field(
         "T_convergence": 0.0,
     }
 
+    # Every cycle begins with an exact visibility-domain residual calculation.
+    # Evaluate it before any minor update, including the dirty-image cycle, so
+    # an already-shallow field is not deconvolved unnecessarily.
+    exact_residual_stopping = bool(input_params.get("exact_residual_stopping", False))
+    exact_peak = None
+    exact_mask_sum = None
+    if exact_residual_stopping:
+        exact_peak, exact_mask_sum = _measure_exact_continuum_residual(
+            img_xds,
+            pblimit=input_params.get("pblimit", 0.2),
+            image_data_group_name=image_data_group_in_name,
+        )
+        exact_threshold = float(iteration_control_params.get("threshold", 0.0))
+        if exact_threshold > 0 and exact_peak <= exact_threshold:
+            import xarray as xr
+
+            from astroviper.processing_functions.imaging.utils.iteration_control import (
+                MAJOR_STOPCODE_DESCRIPTIONS,
+                MAJOR_THRESHOLD,
+                MINOR_CONTINUE,
+                StopCode,
+            )
+            from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+            # Return a zero increment. The append node's ordinary accumulation
+            # preserves the previous model and prepares its MFS UV state.
+            img_xds["SKY_MODEL"] = xr.zeros_like(img_xds["SKY_RESIDUAL"])
+            modify_data_groups_xds(
+                img_xds,
+                data_group_out_name=image_data_group_out_name,
+                data_group_out={"sky": "SKY_MODEL"},
+                description="No model increment: exact residual depth reached.",
+            )
+
+            exact_dict = ReturnDict()
+            exact_dict.add(
+                {
+                    "iter_done": 0,
+                    "peakres": exact_peak,
+                    "peakres_nomask": exact_peak,
+                    "start_peakres": exact_peak,
+                    "start_peakres_nomask": exact_peak,
+                    "model_flux": 0.0,
+                    "start_model_flux": 0.0,
+                    "max_psf_sidelobe": 0.0,
+                    "niter": 0,
+                    "threshold": exact_threshold,
+                    "stop_code": None,
+                    "converged": True,
+                    "exact_residual": True,
+                    "stokes": "I",
+                    "frequency": float(img_xds.attrs.get("reference_frequency", 0.0)),
+                    "time": img_xds["SKY_RESIDUAL"].coords["time"].values[0],
+                    "masksum": exact_mask_sum,
+                },
+                time=0,
+                pol=0,
+                chan=0,
+            )
+            combined_deconvolve_dict = merge_return_dicts(
+                [combined_deconvolve_dict, exact_dict]
+            )
+            controller.ensure_planes(
+                img_xds.sizes["time"],
+                1,
+                img_xds.sizes["polarization"],
+            )
+            controller.stopcode_major[...] = MAJOR_THRESHOLD
+            controller.stopcode_minor[...] = MINOR_CONTINUE
+            stopcode = StopCode(MAJOR_THRESHOLD, MINOR_CONTINUE)
+            stopdesc = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_THRESHOLD]
+            controller.stopcode = stopcode
+            controller.stopdescription = stopdesc
+
+            timing["T_model_update_node_task"] = time.time() - node_start
+            node_timing_df = pd.DataFrame(
+                {key: [value] for key, value in timing.items()}
+            )
+            _add_task_execution_metadata(node_timing_df, node_start)
+            return {
+                "image": img_xds,
+                "timing_node_tasks": input_data.get("timing_node_tasks"),
+                "timing_model_update": node_timing_df,
+                "deconvolution": combined_deconvolve_dict,
+                "controller": controller,
+                "stopcode": stopcode,
+                "stopdesc": stopdesc,
+                "is_n_iter_0": False,
+                "deconvolver_state": input_params.get("deconvolver_state"),
+                "minor_cycle_executed": False,
+                "exact_residual_peak": exact_peak,
+                "exact_residual_mask_sum": exact_mask_sum,
+            }
+
     # A dirty-image request still passes through the append node so static
     # products and model state are prepared consistently, but it must not call
     # a deconvolver whose contract requires a positive iteration count.
@@ -2871,17 +3091,21 @@ def model_update_continuum_single_field(
         controller.stopdescription = stopdesc
 
         timing["T_model_update_node_task"] = time.time() - node_start
+        node_timing_df = pd.DataFrame({key: [value] for key, value in timing.items()})
+        _add_task_execution_metadata(node_timing_df, node_start)
         return {
             "image": img_xds,
             "timing_node_tasks": input_data.get("timing_node_tasks"),
-            "timing_model_update": pd.DataFrame(
-                {key: [value] for key, value in timing.items()}
-            ),
+            "timing_model_update": node_timing_df,
             "deconvolution": combined_deconvolve_dict,
             "controller": controller,
             "stopcode": stopcode,
             "stopdesc": stopdesc,
             "is_n_iter_0": False,
+            "deconvolver_state": input_params.get("deconvolver_state"),
+            "minor_cycle_executed": False,
+            "exact_residual_peak": exact_peak,
+            "exact_residual_mask_sum": exact_mask_sum,
         }
 
     # -------------------------------------------------------------
@@ -2915,10 +3139,12 @@ def model_update_continuum_single_field(
 
     deconvolve_params = {
         **iteration_control_params,
+        "primary_beam_limit": float(input_params.get("pblimit", 0.2)),
         "cycleniter": cycle_niter,
         "cyclethreshold": cyclethreshold,
         "niter_per_plane": controller.niter.clip(max=cycle_niter),
         "cyclethreshold_per_plane": cyclethreshold_per_plane,
+        "resolve": input_params.get("resolve_deconvolver_params", {}),
     }
 
     # -------------------------------------------------------------
@@ -2932,6 +3158,7 @@ def model_update_continuum_single_field(
     (
         deconvolve_dict,
         model_update_return_df,
+        deconvolver_state,
     ) = model_update_mtmfs_single_field(
         img_xds,
         deconvolver,
@@ -2940,6 +3167,8 @@ def model_update_continuum_single_field(
         processing_function_threads=processing_function_threads,
         image_data_group_in_name=image_data_group_in_name,
         image_data_group_out_name=image_data_group_out_name,
+        previous_model_xds=input_params.get("model_xds"),
+        deconvolver_state=input_params.get("deconvolver_state"),
     )
 
     timing["T_model_update"] = time.time() - start
@@ -2951,7 +3180,25 @@ def model_update_continuum_single_field(
 
     controller.update_counts(deconvolve_dict)
 
-    stopcode, stopdesc = controller.check_convergence(deconvolve_dict)
+    # Resolve uses posterior/residual tolerances rather than CLEAN's loop-gain
+    # heuristics. Translate its backend-neutral convergence decision into the
+    # existing outer controller's remaining-iteration contract.
+    if exact_residual_stopping:
+        # This image contains the approximate minor residual. Defer the shared
+        # threshold decision until the next cycle has gridded the exact residual,
+        # while still honoring iteration and major-cycle ceilings.
+        controller_threshold = controller.threshold
+        controller.threshold = 0.0
+        stopcode, stopdesc = controller.check_convergence(deconvolve_dict)
+        controller.threshold = controller_threshold
+    else:
+        if (
+            deconvolver.lower() == "resolve"
+            and deconvolver_state is not None
+            and deconvolver_state.diagnostics.get("converged", False)
+        ):
+            controller.niter[...] = 0
+        stopcode, stopdesc = controller.check_convergence(deconvolve_dict)
 
     combined_deconvolve_dict = merge_return_dicts(
         [
@@ -2979,6 +3226,8 @@ def model_update_continuum_single_field(
             axis=1,
         )
 
+    _add_task_execution_metadata(node_timing_df, node_start)
+
     # Preserve the map/reduce timing separately rather than mixing rows from
     # different types of node task.
     return {
@@ -2990,4 +3239,8 @@ def model_update_continuum_single_field(
         "stopcode": stopcode,
         "stopdesc": stopdesc,
         "is_n_iter_0": False,
+        "deconvolver_state": deconvolver_state,
+        "minor_cycle_executed": True,
+        "exact_residual_peak": exact_peak,
+        "exact_residual_mask_sum": exact_mask_sum,
     }

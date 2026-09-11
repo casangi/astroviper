@@ -1614,14 +1614,15 @@ def model_update_mtmfs_single_field(
     processing_function_threads=1,
     image_data_group_in_name="residual",
     image_data_group_out_name="model",
+    previous_model_xds=None,
+    deconvolver_state=None,
 ):
     """Perform one continuum minor-cycle model update.
 
-    This function implements the current continuum deconvolution backend used by
-    the distributed MT-MFS imaging workflow. Until a native MT-MFS deconvolver is
-    available, the minor cycle is performed by temporarily projecting the
-    continuum dataset onto a single-frequency cube representation and reusing the
-    existing cube Högbom implementation.
+    This function dispatches the continuum Taylor-zero minor cycle to either the
+    existing cube Högbom implementation or Resolve's image-domain Bayesian
+    deconvolver. The latter keeps its posterior state between exact AstroViper
+    major cycles and returns a posterior-mean model increment.
 
     The procedure is
 
@@ -1659,8 +1660,7 @@ def model_update_mtmfs_single_field(
         function uses ``psf_taylor_order``.
 
     deconvolver : str
-        Name of the continuum deconvolver. Currently only ``"hogbom"`` is
-        supported.
+        ``"hogbom"`` or ``"resolve"``.
 
     deconvolve_params : dict
         Minor-cycle control parameters. These typically include entries such as
@@ -1679,6 +1679,13 @@ def model_update_mtmfs_single_field(
     image_data_group_out_name : str, optional
         Name of the output model data group.
 
+    previous_model_xds : xarray.Dataset, optional
+        Accumulated model from the preceding exact major cycle. Required by the
+        Resolve backend after its first update.
+
+    deconvolver_state : object, optional
+        Resolve posterior state returned by the preceding minor cycle.
+
     Returns
     -------
     deconvolve_dict : ReturnDict
@@ -1687,13 +1694,14 @@ def model_update_mtmfs_single_field(
     return_df : pandas.DataFrame
         Timing information for the continuum minor cycle.
 
+    deconvolver_state : object or None
+        Updated Resolve posterior state, or ``None`` for Högbom.
+
     Notes
     -----
-    This function is a compatibility layer that allows the continuum imaging
-    pipeline to reuse the existing cube deconvolution backend. Although the
-    surrounding imaging algorithm is MT-MFS, the current minor cycle operates
-    only on the zeroth Taylor coefficient. A future native MT-MFS deconvolver
-    will replace this implementation."""
+    Both backends currently operate on the zeroth Taylor coefficient. The
+    initial Resolve adapter updates only Stokes I and leaves other polarization
+    planes unchanged."""
     import copy
     import time
 
@@ -1701,10 +1709,11 @@ def model_update_mtmfs_single_field(
     import pandas as pd
     import xarray as xr
 
-    if deconvolver.lower() != "hogbom":
+    deconvolver = deconvolver.lower()
+    if deconvolver not in ("hogbom", "resolve"):
         raise NotImplementedError(
-            "Continuum deconvolution currently supports only "
-            "'hogbom' cleaning of Taylor term zero."
+            "Continuum deconvolution supports 'hogbom' and 'resolve' "
+            "for Taylor term zero."
         )
 
     if "SKY_RESIDUAL" not in img_xds:
@@ -1744,6 +1753,299 @@ def model_update_mtmfs_single_field(
 
     if psf.sizes["psf_taylor_order"] < 1:
         raise ValueError("POINT_SPREAD_FUNCTION contains no PSF Taylor terms.")
+
+    if deconvolver == "resolve":
+        import time
+
+        import pandas as pd
+        import xarray as xr
+
+        if residual.sizes.get("time", 1) != 1:
+            raise NotImplementedError(
+                "The initial Resolve continuum backend supports one time plane."
+            )
+        if residual.sizes["taylor_term"] != 1 or psf.sizes["psf_taylor_order"] != 1:
+            raise NotImplementedError(
+                "The initial Resolve continuum backend requires nterms=1; "
+                "coupled MT-MFS Taylor terms are not yet implemented."
+            )
+        polarization_values = [
+            str(value) for value in residual.coords["polarization"].values
+        ]
+        if "I" not in polarization_values:
+            raise NotImplementedError(
+                "The initial Resolve continuum backend requires a Stokes I plane."
+            )
+        polarization_index = polarization_values.index("I")
+
+        try:
+            from resolve.re import ResolveDeconvolver, ResolveDeconvolverConfig
+        except ImportError as exc:
+            raise ImportError(
+                "deconvolver='resolve' requires a Resolve installation with "
+                "resolve.re.ResolveDeconvolver."
+            ) from exc
+
+        # The continuum append path does not pass through the cube model-update
+        # helper which normally constructs the primary-beam mask.  Apply the
+        # same policy here so Resolve does not infer a positive diffuse sky in
+        # pixels outside the requested pblimit support.
+        if (
+            residual_data_group.get("mask") is None
+            and residual_data_group.get("primary_beam") in img_xds
+        ):
+            from astroviper.processing_functions.image_analysis.make_mask import (
+                make_mask,
+            )
+
+            make_mask(
+                img_xds,
+                primary_beam_limit=float(
+                    deconvolve_params.get("primary_beam_limit", 0.0)
+                ),
+                image_data_group_in_name=image_data_group_in_name,
+                image_data_group_out_name=image_data_group_in_name,
+                combine_mask=False,
+                overwrite=False,
+            )
+            data_groups = img_xds.attrs.get("data_groups", {})
+            residual_data_group = data_groups[image_data_group_in_name]
+
+        def _plane(data_array, plane_dimension):
+            indexers = {plane_dimension: 0}
+            if "time" in data_array.dims:
+                indexers["time"] = 0
+            if "polarization" in data_array.dims:
+                indexers["polarization"] = polarization_index
+            plane = data_array.isel(indexers, drop=True)
+            if plane.ndim != 2:
+                raise ValueError(
+                    f"Resolve deconvolution requires a 2-D plane; "
+                    f"{data_array.name} produced dimensions {plane.dims}."
+                )
+            return np.asarray(plane.values.real, dtype=np.float64), plane.dims
+
+        residual_plane, spatial_dims = _plane(residual, "taylor_term")
+        psf_plane, psf_spatial_dims = _plane(psf, "psf_taylor_order")
+        if psf_spatial_dims != spatial_dims or psf_plane.shape != residual_plane.shape:
+            raise ValueError("Resolve residual and PSF spatial layouts do not match.")
+
+        previous_plane = np.zeros_like(residual_plane)
+        if previous_model_xds is not None:
+            if "SKY_MODEL" not in previous_model_xds:
+                raise KeyError("previous_model_xds does not contain SKY_MODEL.")
+            previous_plane, previous_dims = _plane(
+                previous_model_xds["SKY_MODEL"], "taylor_term"
+            )
+            if previous_dims != spatial_dims:
+                raise ValueError(
+                    "Previous Resolve model spatial layout does not match."
+                )
+
+        mask = None
+        mask_name = residual_data_group.get("mask")
+        if mask_name is not None and mask_name in img_xds:
+            mask_array = img_xds[mask_name]
+            plane_dimension = (
+                "taylor_term" if "taylor_term" in mask_array.dims else None
+            )
+            indexers = {}
+            if plane_dimension is not None:
+                indexers[plane_dimension] = 0
+            for dimension in ("time", "frequency"):
+                if dimension in mask_array.dims:
+                    indexers[dimension] = 0
+            if "polarization" in mask_array.dims:
+                indexers["polarization"] = polarization_index
+            selected_mask = mask_array.isel(indexers, drop=True)
+            mask = np.asarray(selected_mask.values > 0.5, dtype=bool)
+            if mask.shape != residual_plane.shape:
+                raise ValueError(
+                    "Resolve deconvolution mask shape does not match the image."
+                )
+
+        resolve_options = dict(deconvolve_params.get("resolve", {}))
+        normalization_name = residual_data_group.get("visibility_normalization")
+        frozen_noise_scale = (
+            None
+            if deconvolver_state is None
+            else getattr(deconvolver_state, "noise_covariance_scale", None)
+        )
+        if (
+            "noise_covariance_scale" not in resolve_options
+            and frozen_noise_scale is not None
+        ):
+            # The positive covariance kernel is fitted on the first exact major
+            # cycle. Preserve its automatically derived normalization so tiny
+            # reduction-order differences in later visibility normalizations do
+            # not invalidate the fitted convolution-operator cache.
+            resolve_options["noise_covariance_scale"] = float(frozen_noise_scale)
+        elif (
+            "noise_covariance_scale" not in resolve_options
+            and normalization_name is not None
+            and normalization_name in img_xds
+        ):
+            normalization = img_xds[normalization_name]
+            normalization_indexers = {
+                dimension: 0
+                for dimension in normalization.dims
+                if dimension in ("time", "taylor_term", "frequency")
+            }
+            if "polarization" in normalization.dims:
+                normalization_indexers["polarization"] = min(
+                    polarization_index, normalization.sizes["polarization"] - 1
+                )
+            weight_sum = float(
+                np.asarray(
+                    normalization.isel(normalization_indexers, drop=True).values
+                ).real
+            )
+            if np.isfinite(weight_sum) and weight_sum > 0:
+                resolve_options["noise_covariance_scale"] = 1.0 / weight_sum
+        if "noise_covariance_scale" not in resolve_options:
+            raise ValueError(
+                "Resolve requires a positive image-noise normalization. Supply "
+                "resolve_deconvolver_params['noise_covariance_scale'] explicitly "
+                "or register a visibility_normalization variable in the residual "
+                "image data group."
+            )
+        config_fields = {
+            "epsilon",
+            "noise_kernel_mode",
+            "noise_kernel_fit_maxiter",
+            "noise_kernel_fit_gtol",
+            "prior_correlation_length_pixels",
+            "prior_spectral_slope",
+            "prior_log_stddev",
+            "prior_mean",
+            "n_samples",
+            "n_vi_iterations",
+            "maxiter",
+            "cg_maxiter",
+            "seed",
+            "enable_x64",
+            "noise_covariance_scale",
+            "residual_tolerance",
+            "posterior_change_tolerance",
+        }
+        unknown = set(resolve_options) - config_fields
+        if unknown:
+            raise ValueError(f"Unknown Resolve deconvolver options: {sorted(unknown)}")
+        config = ResolveDeconvolverConfig(**resolve_options)
+
+        pixel_size = []
+        for dimension in spatial_dims:
+            coordinate = residual.coords.get(dimension)
+            if coordinate is not None and coordinate.size > 1:
+                pixel_size.append(float(abs(np.diff(coordinate.values).mean())))
+            else:
+                pixel_size.append(1.0)
+
+        start = time.time()
+        cache_before = ResolveDeconvolver.convolution_cache_info()
+        engine = ResolveDeconvolver.from_psf(
+            psf_plane,
+            pixel_size=tuple(pixel_size),
+            mask=mask,
+            config=config,
+        )
+        cache_after = ResolveDeconvolver.convolution_cache_info()
+        operator_cache_hit = cache_after.hits > cache_before.hits
+        result = engine.update(
+            residual_plane,
+            previous_mean=previous_plane,
+            state=deconvolver_state,
+        )
+
+        if "SKY_MODEL" not in img_xds:
+            img_xds["SKY_MODEL"] = xr.zeros_like(img_xds["SKY_RESIDUAL"])
+        img_xds["SKY_MODEL"].data[:, 0, polarization_index, ...] = (
+            result.model_increment[np.newaxis, ...]
+        )
+
+        from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+        modify_data_groups_xds(
+            img_xds,
+            data_group_out_name=image_data_group_out_name,
+            data_group_out={"sky": "SKY_MODEL"},
+            description="Resolve posterior-mean model increment.",
+        )
+
+        if "SKY_POSTERIOR_STD" not in img_xds:
+            img_xds["SKY_POSTERIOR_STD"] = xr.zeros_like(img_xds["SKY_RESIDUAL"])
+        img_xds["SKY_POSTERIOR_STD"].data[:, 0, polarization_index, ...] = (
+            result.posterior_std[np.newaxis, ...]
+        )
+        if "SKY_POSTERIOR_MEAN" not in img_xds:
+            img_xds["SKY_POSTERIOR_MEAN"] = xr.zeros_like(img_xds["SKY_RESIDUAL"])
+        img_xds["SKY_POSTERIOR_MEAN"].data[:, 0, polarization_index, ...] = (
+            result.posterior_mean[np.newaxis, ...]
+        )
+
+        img_xds.attrs["resolve_deconvolution"] = {
+            "backend": "resolve",
+            "algorithm": "fast-resolve-image-likelihood",
+            "scope": "Taylor term 0, Stokes I, one time plane",
+            "mask_policy": "freeze model increment outside mask",
+            "positivity": "exponentiated Gaussian-process total intensity",
+            "operator_key": result.state.operator_key,
+            "major_cycle": int(result.state.major_cycle),
+            "prior": {
+                "mean": float(result.state.prior_mean),
+                "correlation_length_pixels": float(
+                    config.prior_correlation_length_pixels
+                ),
+                "spectral_slope": float(config.prior_spectral_slope),
+                "log_stddev": float(config.prior_log_stddev),
+            },
+            "noise_regularization_epsilon": float(config.epsilon),
+            "noise_covariance_scale": float(config.noise_covariance_scale),
+            "noise_kernel": engine.noise_kernel_diagnostics,
+            "operator_cache_hit": operator_cache_hit,
+            "diagnostics": result.diagnostics,
+        }
+
+        from astroviper.processing_functions.imaging.utils import ReturnDict
+
+        deconvolve_dict = ReturnDict()
+        max_sidelobe = float(
+            np.max(np.abs(img_xds["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"].values))
+        )
+        deconvolve_dict.add(
+            {
+                "iter_done": config.n_vi_iterations,
+                "peakres": result.diagnostics["peak_residual_after"],
+                "peakres_nomask": result.diagnostics["peak_residual_after"],
+                "start_peakres": result.diagnostics["peak_residual_before"],
+                "start_peakres_nomask": result.diagnostics["peak_residual_before"],
+                "model_flux": float(np.sum(result.posterior_mean)),
+                "start_model_flux": float(np.sum(previous_plane)),
+                "max_psf_sidelobe": max_sidelobe,
+                "niter": config.n_vi_iterations,
+                "threshold": float(deconvolve_params.get("threshold", 0.0)),
+                "stop_code": None,
+                "converged": result.diagnostics["converged"],
+                "relative_posterior_change": result.diagnostics[
+                    "relative_posterior_change"
+                ],
+                "stokes": "I",
+                "frequency": float(img_xds.attrs.get("reference_frequency", 0.0)),
+                "time": residual.coords["time"].values[0],
+                "masksum": int(np.sum(mask)) if mask is not None else mask,
+            },
+            time=0,
+            pol=polarization_index,
+            chan=0,
+        )
+        return_df = pd.DataFrame(
+            {
+                "T_resolve": [time.time() - start],
+                "resolve_major_cycle": [result.state.major_cycle],
+                "resolve_operator_cache_hit": [operator_cache_hit],
+            }
+        )
+        return deconvolve_dict, return_df, result.state
 
     # make a cube-compatible copy of the per-plane controls
     cube_deconvolve_params = copy.deepcopy(deconvolve_params)
@@ -2006,7 +2308,7 @@ def model_update_mtmfs_single_field(
             axis=1,
         )
 
-    return deconvolve_dict, return_df
+    return deconvolve_dict, return_df, None
 
 
 ###############################################################################

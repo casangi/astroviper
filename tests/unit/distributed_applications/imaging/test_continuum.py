@@ -20,6 +20,7 @@ from xradio.measurement_set import open_processing_set
 
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
     _accumulate_graph_timings,
+    _activate_continuum_weight_cache,
     _apply_exact_frequency_selection_to_continuum_mapping,
     _continuum_image_for_disk,
     _graph_timing_record,
@@ -92,6 +93,27 @@ def test_load_continuum_clean_mask_rejects_invalid_input(
 
     with pytest.raises(ValueError, match=message):
         _load_continuum_clean_mask(mask_path, image_size)
+
+
+def test_activate_weight_cache_rejects_an_unwritten_store(tmp_path):
+    """An interrupted all-NaN cache cannot be registered for residual imaging."""
+    store = tmp_path / "processing-set.zarr"
+    root = zarr.open_group(store, mode="w")
+    child = root.create_group("child")
+    child.create_array(
+        "WEIGHT_IMAGING_CONTINUUM_CACHE",
+        shape=(4,),
+        chunks=(2,),
+        dtype="f8",
+        fill_value=np.nan,
+    )
+
+    with pytest.raises(RuntimeError, match="incomplete"):
+        _activate_continuum_weight_cache(
+            {"child": object()},
+            str(store),
+            "base",
+        )
 
 
 def test_exact_frequency_selection_reorders_a_nonmonotonic_child():
@@ -595,6 +617,8 @@ def _run_tw_hydra_continuum(
     write_visibility_model_to_ps=False,
     write_imaging_weights_to_ps=False,
     clear_cache=True,
+    deconvolver="hogbom",
+    resolve_deconvolver_params=None,
 ):
     """Run one public distributed continuum configuration on TW Hydra."""
     if iteration_control_params is None:
@@ -616,7 +640,8 @@ def _run_tw_hydra_continuum(
             imaging_weights_params=weighting,
             iteration_control_params=iteration_control_params,
             gridder="prolate_spheroidal",
-            deconvolver="hogbom",
+            deconvolver=deconvolver,
+            resolve_deconvolver_params=resolve_deconvolver_params,
             restore=restore,
             pbcor=pbcor,
             pblimit=pblimit,
@@ -651,6 +676,72 @@ def _run_tw_hydra_continuum(
             reduce_n_batch=reduce_n_batch,
         )
     return result, xr.open_zarr(output_store)
+
+
+def test_tw_hydra_resolve_deconvolver_smoke(tmp_path, tw_hydra_store):
+    """The Resolve backend completes the existing continuum harness."""
+    from resolve.re import ResolveDeconvolver
+
+    ResolveDeconvolver.clear_convolution_cache()
+    processing_set = open_processing_set(str(tw_hydra_store))
+    iteration = {
+        "niter": 2,
+        "nmajor": 2,
+        "threshold": 0.0,
+        "gain": 0.1,
+        "cyclefactor": 1.5,
+        "cycleniter": 1,
+        "minpsffraction": 0.05,
+        "maxpsffraction": 0.8,
+    }
+    _, image = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / "resolve.img.zarr",
+        processing_set,
+        1,
+        "mfs",
+        {"weighting": "natural", "weighting_scope": "local"},
+        iteration_control_params=iteration,
+        image_param_overrides={"polarization_coords": ["I"], "nterms": 1},
+        deconvolver="resolve",
+        resolve_deconvolver_params={
+            "n_samples": 1,
+            "n_vi_iterations": 1,
+            "maxiter": 2,
+            "cg_maxiter": 5,
+            "prior_log_stddev": 0.5,
+            "seed": 11,
+        },
+    )
+    _, clean_image = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / "hogbom.img.zarr",
+        processing_set,
+        1,
+        "mfs",
+        {"weighting": "natural", "weighting_scope": "local"},
+        iteration_control_params=iteration,
+        image_param_overrides={"polarization_coords": ["I"], "nterms": 1},
+        deconvolver="hogbom",
+    )
+
+    model = np.asarray(image["SKY_MODEL"].values)
+    residual = np.asarray(image["SKY_RESIDUAL"].values)
+    assert np.all(np.isfinite(model))
+    assert np.all(np.isfinite(residual))
+    assert np.any(model != 0)
+    assert "SKY_POSTERIOR_MEAN" in image
+    assert "SKY_POSTERIOR_STD" in image
+    assert image.attrs["resolve_deconvolution"]["backend"] == "resolve"
+    assert ResolveDeconvolver.convolution_cache_info().misses == 1
+    assert ResolveDeconvolver.convolution_cache_info().hits >= 1
+
+    resolve_i = np.asarray(image["SKY_MODEL"].sel(polarization="I")).ravel()
+    clean_i = np.asarray(clean_image["SKY_MODEL"].sel(polarization="I")).ravel()
+    cosine_similarity = np.vdot(resolve_i, clean_i).real / (
+        np.linalg.norm(resolve_i) * np.linalg.norm(clean_i)
+    )
+    assert cosine_similarity > 0
 
 
 def test_task_primary_beam_mapping_contains_only_each_local_dataset():

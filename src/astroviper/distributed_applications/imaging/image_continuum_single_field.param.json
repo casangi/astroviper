@@ -8,10 +8,12 @@
         "gridder": { "type": ["str"], "allowed": ["prolate_spheroidal"] },
         "deconvolver": {
             "type": ["str"],
-            "allowed": ["hogbom", "hogbom_many_threads", "asp", "aspclean", "asp_clean"]
+            "allowed": ["hogbom", "hogbom_many_threads", "asp", "aspclean", "asp_clean", "resolve"]
         },
+        "resolve_deconvolver_params": { "type": ["dict"], "nullable": true },
         "pbcor": { "type": "boolean" },
         "pblimit": {"type": "float"},
+        "exact_residual_stopping": {"type": "boolean"},
         "specmode": {
             "type": ["str"],
             "allowed": ["mfs", "mvc"]

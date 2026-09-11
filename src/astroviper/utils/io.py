@@ -35,6 +35,16 @@ imaging_data_variables_and_dims_double_precision = {
     },
     "sky_dirty": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_DIRTY"},
     "sky_model": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_MODEL"},
+    "sky_posterior_mean": {
+        "dims": full_dims_lm,
+        "dtype": "<f8",
+        "name": "SKY_POSTERIOR_MEAN",
+    },
+    "sky_posterior_std": {
+        "dims": full_dims_lm,
+        "dtype": "<f8",
+        "name": "SKY_POSTERIOR_STD",
+    },
     "sky_residual": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_RESIDUAL"},
     "sky_restored": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_RESTORED"},
     "sky": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY"},
@@ -98,6 +108,16 @@ imaging_data_variables_and_dims_single_precision = {
     },
     "sky_dirty": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_DIRTY"},
     "sky_model": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_MODEL"},
+    "sky_posterior_mean": {
+        "dims": full_dims_lm,
+        "dtype": "<f4",
+        "name": "SKY_POSTERIOR_MEAN",
+    },
+    "sky_posterior_std": {
+        "dims": full_dims_lm,
+        "dtype": "<f4",
+        "name": "SKY_POSTERIOR_STD",
+    },
     "sky_residual": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_RESIDUAL"},
     "sky_restored": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_RESTORED"},
     "sky": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY"},

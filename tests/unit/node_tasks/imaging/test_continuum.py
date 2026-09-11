@@ -7,6 +7,10 @@ import xarray as xr
 import astroviper.node_tasks.imaging.image_continuum_single_field as continuum_node
 import astroviper.processing_functions.imaging.image_continuum_single_field as continuum_processing
 from astroviper.processing_functions.imaging.utils import ReturnDict
+from astroviper.processing_functions.imaging.utils.iteration_control import (
+    MAJOR_THRESHOLD,
+    IterationController,
+)
 
 
 def _model_dataset(value):
@@ -43,6 +47,41 @@ def _mfs_uv_grid(value):
             }
         },
     )
+
+
+def test_prepare_xarray_dataset_for_transport_drops_accessor_cache_zero_copy():
+    """The map boundary is pickle-safe without copying its large arrays."""
+    from distributed.protocol import serialize
+
+    image = xr.Dataset(
+        {
+            "SKY": xr.DataArray(
+                np.arange(4, dtype=np.float64).reshape(1, 1, 2, 2),
+                dims=("time", "polarization", "l", "m"),
+            )
+        },
+        coords={
+            "time": [0.0],
+            "polarization": ["I"],
+            "l": [0, 1],
+            "m": [0, 1],
+        },
+        attrs={
+            "type": "image_dataset",
+            "data_groups": {"base": {"sky": "SKY"}},
+        },
+    )
+
+    # Populate the XRADIO extension-accessor cache which contains the weakref
+    # that originally made continuum map results unpickleable.
+    _ = image.xr_img
+    transport = continuum_node._prepare_xarray_dataset_for_transport(image)
+
+    assert transport.identical(image)
+    assert transport["SKY"].data is image["SKY"].data
+    header, frames = serialize(transport, on_error="raise")
+    assert header["serializer"] in {"pickle", "dask"}
+    assert frames
 
 
 def test_install_continuum_clean_mask_broadcasts_and_registers_data_group():
@@ -97,6 +136,88 @@ def test_install_continuum_clean_mask_rejects_wrong_shape():
             image,
             np.ones((3, 2), dtype=bool),
         )
+
+
+def _exact_residual_image():
+    """Build a compact Taylor residual with PB and explicit CLEAN support."""
+    dimensions = ("time", "taylor_term", "polarization", "l", "m")
+    coordinates = {
+        "time": [0.0],
+        "taylor_term": [0],
+        "polarization": ["I"],
+        "l": [0, 1],
+        "m": [0, 1],
+    }
+    residual = np.array([[[[[0.1, 9.0], [0.2, 8.0]]]]])
+    primary_beam = np.array([[[[[1.0, 0.1], [0.8, 1.0]]]]])
+    clean_mask = np.array([[[[[1.0, 1.0], [1.0, 0.0]]]]])
+    return xr.Dataset(
+        {
+            "SKY_RESIDUAL": xr.DataArray(residual, dims=dimensions, coords=coordinates),
+            "PRIMARY_BEAM": xr.DataArray(
+                primary_beam, dims=dimensions, coords=coordinates
+            ),
+            "CLEAN_MASK": xr.DataArray(clean_mask, dims=dimensions, coords=coordinates),
+        },
+        attrs={
+            "data_groups": {
+                "residual": {
+                    "sky": "SKY_RESIDUAL",
+                    "primary_beam": "PRIMARY_BEAM",
+                    "mask": "CLEAN_MASK",
+                }
+            }
+        },
+    )
+
+
+def test_measure_exact_residual_uses_common_pb_and_clean_mask_support():
+    """Out-of-PB and explicitly masked peaks do not set the shared depth."""
+    peak, mask_sum = continuum_node._measure_exact_continuum_residual(
+        _exact_residual_image(), pblimit=0.2
+    )
+
+    assert peak == pytest.approx(0.2)
+    assert mask_sum == 2
+
+
+def test_exact_residual_threshold_stops_before_another_minor_update(monkeypatch):
+    """A post-major exact residual below threshold returns a zero increment."""
+    controller = IterationController(niter=100, nmajor=10, threshold=0.25)
+
+    def unexpected_model_update(*args, **kwargs):
+        raise AssertionError("No minor update may run after exact convergence")
+
+    monkeypatch.setattr(
+        continuum_processing,
+        "model_update_mtmfs_single_field",
+        unexpected_model_update,
+    )
+    result = continuum_node.model_update_continuum_single_field(
+        {"image": _exact_residual_image()},
+        {
+            "iteration_control_params": {
+                "niter": 100,
+                "nmajor": 10,
+                "threshold": 0.25,
+                "gain": 0.1,
+                "cyclefactor": 1.0,
+                "cycleniter": -1,
+                "minpsffraction": 0.05,
+                "maxpsffraction": 0.8,
+            },
+            "controller": controller,
+            "is_n_iter_0": False,
+            "exact_residual_stopping": True,
+            "pblimit": 0.2,
+        },
+    )
+
+    assert result["stopcode"].major == MAJOR_THRESHOLD
+    assert result["minor_cycle_executed"] is False
+    assert result["exact_residual_peak"] == pytest.approx(0.2)
+    assert result["exact_residual_mask_sum"] == 2
+    np.testing.assert_array_equal(result["image"]["SKY_MODEL"], 0.0)
 
 
 def test_first_cached_mfs_append_captures_an_independent_observed_grid():
