@@ -1,6 +1,7 @@
 from astroviper.utils.param_docs import shares_param_docs
 
 _CONTINUUM_WEIGHT_CACHE_VARIABLE = "WEIGHT_IMAGING_CONTINUUM_CACHE"
+_MFS_VISIBILITY_GRID_CACHE_GROUP = "_MFS_VISIBILITY_GRID_CACHE"
 _WIDEBAND_PRIMARY_BEAM_CACHE_GROUP = "_WIDEBAND_PRIMARY_BEAM_CACHE"
 _WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE = "PRIMARY_BEAM"
 
@@ -288,6 +289,48 @@ def _load_wideband_primary_beam_in_place(img_xds, image_store):
             "specmode": "mvc",
         },
     )
+
+
+def _write_mfs_visibility_grid_in_place(observed_grid_xds, image_store):
+    """Persist the globally reduced observed MFS Taylor grid in the image store."""
+    import xarray as xr
+    import zarr
+
+    if not isinstance(observed_grid_xds, xr.Dataset):
+        raise TypeError(
+            "observed_grid_xds must be an xarray.Dataset; received "
+            f"{type(observed_grid_xds).__name__}."
+        )
+
+    root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
+    if _MFS_VISIBILITY_GRID_CACHE_GROUP in root:
+        del root[_MFS_VISIBILITY_GRID_CACHE_GROUP]
+
+    observed_grid_xds.to_zarr(
+        image_store,
+        group=_MFS_VISIBILITY_GRID_CACHE_GROUP,
+        mode="a",
+        consolidated=False,
+    )
+
+
+def _load_mfs_visibility_grid_in_place(image_store):
+    """Load the globally reduced observed MFS Taylor grid from the image store."""
+    import xarray as xr
+    import zarr
+
+    root = zarr.open_group(image_store, mode="r", use_consolidated=False)
+    if _MFS_VISIBILITY_GRID_CACHE_GROUP not in root:
+        raise KeyError("The in-place MFS visibility-grid cache is missing.")
+
+    observed_grid_xds = xr.open_zarr(
+        image_store,
+        group=_MFS_VISIBILITY_GRID_CACHE_GROUP,
+        consolidated=False,
+    )
+    observed_grid_xds.load()
+    observed_grid_xds.close()
+    return observed_grid_xds
 
 
 def _recompute_wideband_primary_beam(
@@ -753,7 +796,7 @@ def residual_update_continuum_single_field(
     image_data_variables_keep=None,
     memory_mode="in_memory",
     weight_memory_mode="in_memory",
-    visibility_memory_mode="in_place",
+    visibility_memory_mode="recompute",
     widebandpb_memory_mode="in_memory",
     skunk_works=False,
     data_group=None,
@@ -853,15 +896,17 @@ def residual_update_continuum_single_field(
         disk I/O. This option is intentionally separate from ``memory_mode`` in
         the initial implementation; the two policies may be unified later.
 
-    visibility_memory_mode : {"in_memory", "in_place"}, optional
+    visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         MFS residual-update storage policy for the observed-data visibility grid.
-        ``"in_place"`` reloads the observed visibilities and grids their
-        visibility-domain residual during every residual-update cycle.
         ``"in_memory"`` retains the globally reduced observed-data Taylor UV
         grid from the first cycle; later map tasks grid only the predicted-model
         contribution, and the append node subtracts it from the cached observed
-        grid before the inverse FFT. The setting currently applies only to MFS;
-        MVC requires ``"in_place"``.
+        grid before the inverse FFT. ``"in_place"`` persists that same reduced
+        grid in a temporary group in the image Zarr store and reloads it in each
+        append node. ``"recompute"`` reloads the original observed visibilities
+        and grids their visibility-domain residual during every residual-update
+        cycle. Caching currently applies only to MFS; MVC requires
+        ``"recompute"``.
 
     widebandpb_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         MVC-only storage policy for the frequency-dependent primary beam.
@@ -942,10 +987,10 @@ def residual_update_continuum_single_field(
             "weight_memory_mode must be 'in_memory' or 'in_place'; received "
             f"{weight_memory_mode!r}."
         )
-    if visibility_memory_mode not in ("in_memory", "in_place"):
+    if visibility_memory_mode not in ("in_memory", "in_place", "recompute"):
         raise ValueError(
-            "visibility_memory_mode must be 'in_memory' or 'in_place'; received "
-            f"{visibility_memory_mode!r}."
+            "visibility_memory_mode must be 'in_memory', 'in_place', or "
+            f"'recompute'; received {visibility_memory_mode!r}."
         )
     if widebandpb_memory_mode not in ("in_memory", "in_place", "recompute"):
         raise ValueError(
@@ -966,10 +1011,10 @@ def residual_update_continuum_single_field(
         raise ValueError(
             f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
         )
-    if specmode == "mvc" and visibility_memory_mode != "in_place":
+    if specmode == "mvc" and visibility_memory_mode != "recompute":
         raise ValueError(
-            "visibility_memory_mode='in_memory' is currently supported only "
-            "for specmode='mfs'."
+            "visibility_memory_mode caching is currently supported only for "
+            "specmode='mfs'; MVC requires 'recompute'."
         )
 
     # Build the empty image in the correlation basis expected by the gridder.
@@ -997,7 +1042,9 @@ def residual_update_continuum_single_field(
     start = time.time()
 
     omit_observed_visibility = (
-        specmode == "mfs" and visibility_memory_mode == "in_memory" and not is_n_iter_0
+        specmode == "mfs"
+        and visibility_memory_mode in ("in_memory", "in_place")
+        and not is_n_iter_0
     )
 
     if input_data is not None:
@@ -2331,21 +2378,21 @@ def _prepare_cached_mfs_residual_grid(input_data, input_params):
 
     visibility_memory_mode = input_params.get(
         "visibility_memory_mode",
-        "in_place",
+        "recompute",
     )
-    if visibility_memory_mode == "in_place":
+    if visibility_memory_mode == "recompute":
         return None
-    if visibility_memory_mode != "in_memory":
+    if visibility_memory_mode not in ("in_memory", "in_place"):
         raise ValueError(
-            "visibility_memory_mode must be 'in_memory' or 'in_place'; received "
-            f"{visibility_memory_mode!r}."
+            "visibility_memory_mode must be 'in_memory', 'in_place', or "
+            f"'recompute'; received {visibility_memory_mode!r}."
         )
 
     specmode = str(input_params.get("specmode", "mfs")).lower()
     if specmode != "mfs":
         raise ValueError(
-            "visibility_memory_mode='in_memory' is currently supported only "
-            "for specmode='mfs'."
+            "visibility_memory_mode caching is currently supported only for "
+            "specmode='mfs'."
         )
 
     image_data_group_name = input_params.get(
@@ -2380,14 +2427,29 @@ def _prepare_cached_mfs_residual_grid(input_data, input_params):
         observed_grid_xds = image_xds[cache_names].copy(deep=True)
         observed_grid_xds.attrs = copy.deepcopy(image_xds.attrs)
         observed_grid_xds.attrs["visibility_grid_source"] = "observed_data"
+        if visibility_memory_mode == "in_place":
+            image_store = input_params.get("image_store")
+            if not image_store:
+                raise KeyError(
+                    "In-place MFS visibility caching requires "
+                    "input_params['image_store']."
+                )
+            _write_mfs_visibility_grid_in_place(observed_grid_xds, image_store)
+            return None
         return observed_grid_xds
 
-    observed_grid_xds = input_params.get("observed_visibility_grid_xds")
+    if visibility_memory_mode == "in_memory":
+        observed_grid_xds = input_params.get("observed_visibility_grid_xds")
+    else:
+        image_store = input_params.get("image_store")
+        if not image_store:
+            raise KeyError(
+                "In-place MFS visibility caching requires input_params['image_store']."
+            )
+        observed_grid_xds = _load_mfs_visibility_grid_in_place(image_store)
+
     if observed_grid_xds is None:
-        raise KeyError(
-            "Later cached-grid MFS cycles require "
-            "input_params['observed_visibility_grid_xds']."
-        )
+        raise KeyError("The cached observed-data MFS visibility grid is missing.")
 
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
         form_mfs_residual_grid_from_cache,

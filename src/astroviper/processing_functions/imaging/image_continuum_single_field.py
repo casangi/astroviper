@@ -1279,7 +1279,7 @@ def residual_update_continuum_single_field(
     processing_function_threads=1,
     fft_backend="pyfftw",
     image_data_variables_keep=None,
-    visibility_memory_mode="in_place",
+    visibility_memory_mode="recompute",
     is_n_iter_0=True,
     model_xds=None,
     model_uv_xds=None,
@@ -1342,15 +1342,17 @@ def residual_update_continuum_single_field(
     image_data_variables_keep : list of str, optional
         Logical image products retained in the returned dataset.
 
-    visibility_memory_mode : {"in_memory", "in_place"}, optional
+    visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         MFS residual-update storage policy for the observed-data visibility grid.
-        ``"in_place"`` reloads the observed visibilities and grids their
-        visibility-domain residual during every residual-update cycle.
         ``"in_memory"`` retains the globally reduced observed-data Taylor UV
         grid from the first cycle; later map tasks grid only the predicted-model
         contribution, and the append node subtracts it from the cached observed
-        grid before the inverse FFT. The setting currently applies only to MFS;
-        MVC requires ``"in_place"``.
+        grid before the inverse FFT. ``"in_place"`` persists that same reduced
+        grid in a temporary group in the image Zarr store and reloads it in each
+        append node. ``"recompute"`` reloads the original observed visibilities
+        and grids their visibility-domain residual during every residual-update
+        cycle. Caching currently applies only to MFS; MVC requires
+        ``"recompute"``.
 
     is_n_iter_0 : bool, optional
         Indicates whether this is the first major cycle.

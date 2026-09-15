@@ -610,7 +610,7 @@ def _run_tw_hydra_continuum(
     reduce_n_batch=2,
     cache_directory=None,
     weight_memory_mode="in_memory",
-    visibility_memory_mode="in_place",
+    visibility_memory_mode="recompute",
     widebandpb_memory_mode="in_memory",
     write_visibility_model_to_ps=False,
     write_imaging_weights_to_ps=False,
@@ -1003,7 +1003,7 @@ def test_tw_hydra_cleaning_runs_later_major_cycles_and_builds_a_model(
         ),
     ],
 )
-def test_tw_hydra_cached_mfs_visibility_grid_matches_in_place_residuals(
+def test_tw_hydra_cached_mfs_visibility_grids_match_recomputed_residuals(
     tmp_path,
     tw_hydra_store,
     weighting,
@@ -1022,39 +1022,45 @@ def test_tw_hydra_cached_mfs_visibility_grid_matches_in_place_residuals(
     }
     reference_result, reference = _run_tw_hydra_continuum(
         tw_hydra_store,
-        tmp_path / f"visibility_{weighting['weighting']}_in_place.img.zarr",
+        tmp_path / f"visibility_{weighting['weighting']}_recompute.img.zarr",
         processing_set,
         2,
         "mfs",
         weighting,
         iteration_control_params=iteration_control_params,
-        visibility_memory_mode="in_place",
+        visibility_memory_mode="recompute",
     )
-    cached_result, cached = _run_tw_hydra_continuum(
-        tw_hydra_store,
-        tmp_path / f"visibility_{weighting['weighting']}_in_memory.img.zarr",
-        processing_set,
-        2,
-        "mfs",
-        weighting,
-        iteration_control_params=iteration_control_params,
-        visibility_memory_mode="in_memory",
-    )
-
-    assert cached_result["n_major_cycles"] == reference_result["n_major_cycles"]
-    for variable in (
-        "SKY_MODEL",
-        "SKY_RESIDUAL",
-        "POINT_SPREAD_FUNCTION",
-        "PRIMARY_BEAM",
-    ):
-        np.testing.assert_allclose(
-            cached[variable],
-            reference[variable],
-            rtol=TW_HYDRA_RELATIVE_TOLERANCE,
-            atol=1.0e-12,
-            equal_nan=True,
+    for cache_mode in ("in_memory", "in_place"):
+        output_store = (
+            tmp_path / f"visibility_{weighting['weighting']}_{cache_mode}.img.zarr"
         )
+        cached_result, cached = _run_tw_hydra_continuum(
+            tw_hydra_store,
+            output_store,
+            processing_set,
+            2,
+            "mfs",
+            weighting,
+            iteration_control_params=iteration_control_params,
+            visibility_memory_mode=cache_mode,
+        )
+
+        assert cached_result["n_major_cycles"] == reference_result["n_major_cycles"]
+        for variable in (
+            "SKY_MODEL",
+            "SKY_RESIDUAL",
+            "POINT_SPREAD_FUNCTION",
+            "PRIMARY_BEAM",
+        ):
+            np.testing.assert_allclose(
+                cached[variable],
+                reference[variable],
+                rtol=TW_HYDRA_RELATIVE_TOLERANCE,
+                atol=1.0e-12,
+                equal_nan=True,
+            )
+
+        assert "_MFS_VISIBILITY_GRID_CACHE" not in zarr.open_group(output_store)
 
 
 @pytest.mark.parametrize("widebandpb_memory_mode", ["in_place", "recompute"])

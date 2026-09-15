@@ -108,13 +108,15 @@ IMAGING_PARAM_DOCS = {
     ),
     "visibility_memory_mode": (
         "MFS residual-update storage policy for the observed-data visibility grid.\n"
-        '``"in_place"`` reloads the observed visibilities and grids their\n'
-        "visibility-domain residual during every residual-update cycle.\n"
         '``"in_memory"`` retains the globally reduced observed-data Taylor UV\n'
         "grid from the first cycle; later map tasks grid only the predicted-model\n"
         "contribution, and the append node subtracts it from the cached observed\n"
-        "grid before the inverse FFT. The setting currently applies only to MFS;\n"
-        'MVC requires ``"in_place"``.'
+        'grid before the inverse FFT. ``"in_place"`` persists that same reduced\n'
+        "grid in a temporary group in the image Zarr store and reloads it in each\n"
+        'append node. ``"recompute"`` reloads the original observed visibilities\n'
+        "and grids their visibility-domain residual during every residual-update\n"
+        "cycle. Caching currently applies only to MFS; MVC requires\n"
+        '``"recompute"``.'
     ),
     "widebandpb_memory_mode": (
         "MVC-only storage policy for the frequency-dependent primary beam.\n"

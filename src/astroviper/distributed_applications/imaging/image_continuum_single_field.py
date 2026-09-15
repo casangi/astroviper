@@ -43,6 +43,7 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
 DISTRIBUTED_APPLICATION_TIMING_TOTAL_KEY = "T_total"
 
 _CONTINUUM_WEIGHT_CACHE_VARIABLE = "WEIGHT_IMAGING_CONTINUUM_CACHE"
+_MFS_VISIBILITY_GRID_CACHE_GROUP = "_MFS_VISIBILITY_GRID_CACHE"
 _WIDEBAND_PRIMARY_BEAM_CACHE_GROUP = "_WIDEBAND_PRIMARY_BEAM_CACHE"
 _WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE = "PRIMARY_BEAM"
 
@@ -123,6 +124,13 @@ def _remove_wideband_primary_beam_cache(image_store):
     root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
     if _WIDEBAND_PRIMARY_BEAM_CACHE_GROUP in root:
         del root[_WIDEBAND_PRIMARY_BEAM_CACHE_GROUP]
+
+
+def _remove_mfs_visibility_grid_cache(image_store):
+    """Remove the temporary disk-backed MFS observed-grid cache if present."""
+    root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
+    if _MFS_VISIBILITY_GRID_CACHE_GROUP in root:
+        del root[_MFS_VISIBILITY_GRID_CACHE_GROUP]
 
 
 def _mapping_with_task_primary_beams(node_task_data_mapping, pb_cache_mapping):
@@ -2458,7 +2466,7 @@ def image_continuum_single_field(
     overwrite: bool = False,
     memory_mode: str = "in_memory",
     weight_memory_mode: str = "in_memory",
-    visibility_memory_mode: str = "in_place",
+    visibility_memory_mode: str = "recompute",
     widebandpb_memory_mode: str = "in_memory",
     cache_directory: str | None = None,
     write_visibility_model_to_ps: bool = False,
@@ -2572,15 +2580,17 @@ def image_continuum_single_field(
         disk I/O. This option is intentionally separate from ``memory_mode`` in
         the initial implementation; the two policies may be unified later.
 
-    visibility_memory_mode : {"in_memory", "in_place"}, optional
+    visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         MFS residual-update storage policy for the observed-data visibility grid.
-        ``"in_place"`` reloads the observed visibilities and grids their
-        visibility-domain residual during every residual-update cycle.
         ``"in_memory"`` retains the globally reduced observed-data Taylor UV
         grid from the first cycle; later map tasks grid only the predicted-model
         contribution, and the append node subtracts it from the cached observed
-        grid before the inverse FFT. The setting currently applies only to MFS;
-        MVC requires ``"in_place"``.
+        grid before the inverse FFT. ``"in_place"`` persists that same reduced
+        grid in a temporary group in the image Zarr store and reloads it in each
+        append node. ``"recompute"`` reloads the original observed visibilities
+        and grids their visibility-domain residual during every residual-update
+        cycle. Caching currently applies only to MFS; MVC requires
+        ``"recompute"``.
 
     widebandpb_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         MVC-only storage policy for the frequency-dependent primary beam.
@@ -2626,10 +2636,10 @@ def image_continuum_single_field(
             "weight_memory_mode must be 'in_memory' or 'in_place'; received "
             f"{weight_memory_mode!r}."
         )
-    if visibility_memory_mode not in ("in_memory", "in_place"):
+    if visibility_memory_mode not in ("in_memory", "in_place", "recompute"):
         raise ValueError(
-            "visibility_memory_mode must be 'in_memory' or 'in_place'; received "
-            f"{visibility_memory_mode!r}."
+            "visibility_memory_mode must be 'in_memory', 'in_place', or "
+            f"'recompute'; received {visibility_memory_mode!r}."
         )
     if widebandpb_memory_mode not in ("in_memory", "in_place", "recompute"):
         raise ValueError(
@@ -2657,10 +2667,10 @@ def image_continuum_single_field(
         raise ValueError(
             f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
         )
-    if specmode == "mvc" and visibility_memory_mode != "in_place":
+    if specmode == "mvc" and visibility_memory_mode != "recompute":
         raise ValueError(
-            "visibility_memory_mode='in_memory' is currently supported only "
-            "for specmode='mfs'."
+            "visibility_memory_mode caching is currently supported only for "
+            "specmode='mfs'; MVC requires 'recompute'."
         )
 
     # Work with an application-local copy: continuum setup may augment the
@@ -3125,6 +3135,7 @@ def image_continuum_single_field(
             "instrument_polarization_basis": instrument_polarization_basis,
             "specmode": specmode,
             "visibility_memory_mode": visibility_memory_mode,
+            "image_store": image_store,
             "pblimit": pblimit,
             "clean_mask": clean_mask_array,
         }
@@ -3440,6 +3451,8 @@ def image_continuum_single_field(
     )
     if specmode == "mvc" and widebandpb_memory_mode == "in_place":
         _remove_wideband_primary_beam_cache(image_store)
+    if specmode == "mfs" and visibility_memory_mode == "in_place":
+        _remove_mfs_visibility_grid_cache(image_store)
     write_image(
         output_image,
         imagename=image_store,

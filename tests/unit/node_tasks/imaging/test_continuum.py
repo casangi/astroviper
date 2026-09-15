@@ -139,6 +139,62 @@ def test_later_cached_mfs_append_forms_residual_from_reduced_model_grid():
     )
 
 
+def test_in_place_mfs_append_persists_and_reloads_observed_grid(tmp_path):
+    """The disk-backed cache survives the first append and forms later residuals."""
+    image_store = tmp_path / "continuum.img.zarr"
+    xr.Dataset().to_zarr(image_store, mode="w")
+    reduced = _mfs_uv_grid(5.0)
+
+    returned_cache = continuum_node._prepare_cached_mfs_residual_grid(
+        {"image": reduced},
+        {
+            "specmode": "mfs",
+            "visibility_memory_mode": "in_place",
+            "is_n_iter_0": True,
+            "image_store": str(image_store),
+        },
+    )
+
+    assert returned_cache is None
+    persisted = continuum_node._load_mfs_visibility_grid_in_place(str(image_store))
+    np.testing.assert_array_equal(persisted.VISIBILITY, 5.0)
+    assert persisted.attrs["visibility_grid_source"] == "observed_data"
+
+    later_input = {"image": _mfs_uv_grid(1.5)}
+    continuum_node._prepare_cached_mfs_residual_grid(
+        later_input,
+        {
+            "specmode": "mfs",
+            "visibility_memory_mode": "in_place",
+            "is_n_iter_0": False,
+            "image_store": str(image_store),
+        },
+    )
+
+    np.testing.assert_array_equal(later_input["image"].VISIBILITY, 3.5)
+    np.testing.assert_array_equal(
+        later_input["image"].VISIBILITY_NORMALIZATION,
+        3.0,
+    )
+
+
+def test_recompute_mfs_append_does_not_require_or_modify_a_cache():
+    """Recompute mode leaves the freshly reduced visibility residual untouched."""
+    reduced = _mfs_uv_grid(2.5)
+
+    returned_cache = continuum_node._prepare_cached_mfs_residual_grid(
+        {"image": reduced},
+        {
+            "specmode": "mfs",
+            "visibility_memory_mode": "recompute",
+            "is_n_iter_0": False,
+        },
+    )
+
+    assert returned_cache is None
+    np.testing.assert_array_equal(reduced.VISIBILITY, 2.5)
+
+
 def test_mfs_append_accumulates_before_preparing_fourier_model(monkeypatch):
     """The append FFT consumes the fully accumulated post-update MFS model."""
     previous = _model_dataset(2.0)
