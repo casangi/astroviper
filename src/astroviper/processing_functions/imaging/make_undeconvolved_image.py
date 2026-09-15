@@ -11,7 +11,7 @@ def make_undeconvolved_image_single_field(
     img_xds,
     image_params,
     cgk_1D,
-    is_n_iter_0,
+    is_niter_0,
     ms_data_group_in_name="corrected",
     image_data_group_out_name="residual",
     processing_function_threads=1,
@@ -39,7 +39,7 @@ def make_undeconvolved_image_single_field(
         ``fft_padding`` gridding/FFT padding factor.
     cgk_1D : numpy.ndarray
         1-D prolate-spheroidal gridding convolution kernel.
-    is_n_iter_0 : bool
+    is_niter_0 : bool
         Accepted for call-site compatibility with the major-cycle loop;
         currently unused (the UV-sampling/PSF grid is built once in
         ``make_point_spread_function_single_field``).

@@ -6,7 +6,7 @@ def model_update_cycle_cube_single_field(
     img_xds,
     deconvolver,
     deconvolve_params,
-    is_n_iter_0,
+    is_niter_0,
     processing_function_threads=1,
     image_data_group_in_name="residual",
     image_data_group_out_name="model",
@@ -34,7 +34,7 @@ def model_update_cycle_cube_single_field(
         builds the primary-beam mask (a chunk-independent quantity, so the mask
         does not depend on how the cube was split across tasks); it is distinct
         from the deconvolver ``threshold``.
-    is_n_iter_0 : bool
+    is_niter_0 : bool
         ``True`` on the very first model update.  Currently informational.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)

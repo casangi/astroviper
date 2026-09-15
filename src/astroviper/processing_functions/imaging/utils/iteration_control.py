@@ -1730,17 +1730,74 @@ def print_imaging_dict(combined_imaging_dict, float_format="{:.6g}"):
     print(format_imaging_dict(combined_imaging_dict, float_format=float_format))
 
 
+def build_residual_imaging_dict(
+    img_xds, image_data_group_in_name, iteration_control_params
+):
+    """Seed a per-plane :class:`ImagingDict` of peak-residual/masksum stats
+    straight from the current residual image, no deconvolution involved.
+
+    Used both for a pre-deconvolve convergence check and, on the first model
+    update, as the seed for :func:`calculate_cycle_controls`.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Image dataset providing the residual image.
+    image_data_group_in_name : str
+        Name of the entry in ``img_xds.attrs["data_groups"]`` whose
+        ``"sky"`` key resolves to the residual variable.
+    iteration_control_params : dict
+        Iteration-control parameters; ``max_psf_fraction`` and ``loop_gain``
+        seed the placeholder per-plane fields.
+
+    Returns
+    -------
+    ImagingDict
+        Per-plane ``peakres``/``peakres_nomask``/``masksum``/``iter_done``
+        stats, indexed ``(time, chan, pol)``.
+    """
+    residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
+    residual_abs = np.abs(img_xds[residual_data_group["sky"]].values)
+    plane_peak = residual_abs.max(axis=(-2, -1))  # (ntime, nfreq, npol)
+    ntime, nfreq, npol = plane_peak.shape
+    masksum = imgstats.get_image_masksum(
+        img_xds, data_group_name=image_data_group_in_name
+    )
+    rd = ImagingDict()
+    for tt in range(ntime):
+        for nn in range(nfreq):
+            for pp in range(npol):
+                peak = float(plane_peak[tt, nn, pp])
+                rd.add(
+                    {
+                        "peakres": peak,
+                        "peakres_nomask": peak,
+                        "masksum": int(masksum[tt, nn, pp]),
+                        "iter_done": 0,
+                        "max_psf_sidelobe": iteration_control_params[
+                            "max_psf_fraction"
+                        ],
+                        "loop_gain": iteration_control_params["loop_gain"],
+                    },
+                    time=tt,
+                    pol=pp,
+                    chan=nn,
+                )
+    return rd
+
+
 def get_calculate_cycle_controls(
     controller,
     combined_imaging_dict,
     img_xds,
-    is_n_iter_0,
+    is_niter_0,
     iteration_control_params,
     image_data_group_in_name="residual",
+    residual_imaging_dict=None,
 ):
     """Compute the cycle iteration limit and cycle_threshold for the next model update.
 
-    On the first model update (``is_n_iter_0``) the controls are derived from
+    On the first model update (``is_niter_0``) the controls are derived from
     the freshly made dirty image (each plane's own peak residual); afterwards
     they are derived from the accumulated convergence statistics in
     ``combined_imaging_dict``.  In both cases the per-plane cycle_threshold is
@@ -1758,13 +1815,16 @@ def get_calculate_cycle_controls(
         model update).
     img_xds : xarray.Dataset
         Image dataset providing the residual image for the first model update.
-    is_n_iter_0 : bool
+    is_niter_0 : bool
         ``True`` for the first model update.
     iteration_control_params : dict
         Iteration-control parameters (``max_psf_fraction``, ``loop_gain`` used to seed
         the first model update).
     image_data_group_in_name : str, optional
         Image data group holding the residual image.  Default ``"residual"``.
+    residual_imaging_dict : ImagingDict, optional
+        Pre-built result of :func:`build_residual_imaging_dict`, reused on the
+        first model update instead of rebuilding it. Built here if omitted.
 
     Returns
     -------
@@ -1775,39 +1835,12 @@ def get_calculate_cycle_controls(
     cycle_threshold_pp : numpy.ndarray
         Per-plane cycle_thresholds, indexed ``(time, frequency, polarization)``.
     """
-    residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
-    if is_n_iter_0:
-        # First model update: there is no accumulated convergence history yet,
-        # so seed a per-plane ImagingDict from the dirty image. Each
-        # (time, frequency, polarization) plane contributes its OWN peak
-        # residual, so the resulting cycle_threshold is genuinely per-plane and
-        # therefore independent of how the cube was chunked across tasks.
-        residual_abs = np.abs(img_xds[residual_data_group["sky"]].values)
-        plane_peak = residual_abs.max(axis=(-2, -1))  # (ntime, nfreq, npol)
-        ntime, nfreq, npol = plane_peak.shape
-        masksum = imgstats.get_image_masksum(
-            img_xds, data_group_name=image_data_group_in_name
-        )
-        rd = ImagingDict()
-        for tt in range(ntime):
-            for nn in range(nfreq):
-                for pp in range(npol):
-                    peak = float(plane_peak[tt, nn, pp])
-                    rd.add(
-                        {
-                            "peakres": peak,
-                            "peakres_nomask": peak,
-                            "masksum": int(masksum[tt, nn, pp]),
-                            "iter_done": 0,
-                            "max_psf_sidelobe": iteration_control_params[
-                                "max_psf_fraction"
-                            ],
-                            "loop_gain": iteration_control_params["loop_gain"],
-                        },
-                        time=tt,
-                        pol=pp,
-                        chan=nn,
-                    )
+    if is_niter_0:
+        rd = residual_imaging_dict
+        if rd is None:
+            rd = build_residual_imaging_dict(
+                img_xds, image_data_group_in_name, iteration_control_params
+            )
     else:
         rd = combined_imaging_dict
 

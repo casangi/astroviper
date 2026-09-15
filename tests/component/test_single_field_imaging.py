@@ -53,6 +53,7 @@ from astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric impo
     airy_disk_rorder_v2,
 )
 from astroviper.processing_functions.imaging.utils.iteration_control import (
+    MAJOR_CYCLE_LIMIT,
     print_imaging_dict,
 )
 
@@ -188,7 +189,7 @@ _CONFIGS = {
     "niter100": {
         "iteration_control_params": {
             "niter_per_plane": 100,
-            "nmajor": 0,
+            "nmajor": 1,
             "threshold": 0.001,
             "primary_beam_limit": 0.2,
             "loop_gain": 0.1,
@@ -219,6 +220,30 @@ _CONFIGS = {
             "SKY_RESTORED",
             "MASK",
         ],
+    },
+    # Same numeric parameters as "niter100" except nmajor=0, which must run
+    # zero deconvolution -- so no MASK/SKY_MODEL/SKY_RESTORED is ever created.
+    "nmajor0": {
+        "iteration_control_params": {
+            "niter_per_plane": 100,
+            "nmajor": 0,
+            "threshold": 0.001,
+            "primary_beam_limit": 0.2,
+            "loop_gain": 0.1,
+            "cycle_factor": 1.5,
+            "cycle_niter": -1,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.2,
+        },
+        "image_data_variables_keep": [
+            "sky_residual",
+            "point_spread_function",
+            "primary_beam",
+            "beam_fit_params_point_spread_function",
+        ],
+        "single_precision_image": False,
+        "extra_kwargs": {},
+        "compare_variables": ["SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"],
     },
     "multi_cycle": {
         "iteration_control_params": {
@@ -1020,6 +1045,58 @@ def test_single_field_imaging_niter100(plot_saver, processing_function_threads):
     )
 
 
+@pytest.mark.parametrize("processing_function_threads", [1, 12])
+def test_single_field_imaging_nmajor0(plot_saver, processing_function_threads):
+    """nmajor=0 with niter_per_plane>0 must run zero deconvolution.
+
+    Regression test: nmajor=0 used to still run one full deconvolution
+    regardless of the setting. Per CASA's own documented ``nmajor`` contract,
+    0 means only the initial residual is computed -- no minor-cycle
+    iterations, no model, no mask.
+    """
+    _ensure_ps_store()
+
+    image_store = (
+        "twhya_selfcal_5chans_lsrk_nmajor0_astroviper_"
+        f"t{processing_function_threads}.img.zarr"
+    )
+    imaging_dict, img_av_xds, _ = _run_image_cube(
+        "nmajor0",
+        image_store,
+        processing_function_threads=processing_function_threads,
+        n_mapping_parallelism=5,
+    )
+
+    print("imaging_dict (global channel numbering):")
+    print_imaging_dict(imaging_dict["deconvolution"])
+
+    _check_image_statistics(imaging_dict, img_av_xds, expect_mask=False)
+    assert "SKY_MODEL" not in img_av_xds.data_vars
+    assert "model" not in img_av_xds.attrs.get("data_groups", {})
+
+    deconv = imaging_dict["deconvolution"]
+    n_planes = (
+        img_av_xds.sizes["time"]
+        * img_av_xds.sizes["frequency"]
+        * img_av_xds.sizes["polarization"]
+    )
+    assert len(deconv.data) == n_planes
+    expected_masksum = img_av_xds.sizes["l"] * img_av_xds.sizes["m"]
+    for key, fields in deconv.data.items():
+        assert fields["iter_done"] == [0], (
+            f"plane {key}: iter_done {fields['iter_done']} != [0] -- a "
+            "deconvolution ran despite nmajor=0"
+        )
+        assert fields["stop_code"] == (MAJOR_CYCLE_LIMIT, 0), (
+            f"plane {key}: stop_code {fields['stop_code']} != ({MAJOR_CYCLE_LIMIT}, 0)"
+        )
+        # No MASK exists (it's made during the model update, which never
+        # ran), so this is the full-pixel-count fallback, not a real mask sum.
+        assert fields["masksum"] == [expected_masksum], (
+            f"plane {key}: masksum {fields['masksum']} != [{expected_masksum}]"
+        )
+
+
 @pytest.mark.parametrize(
     "processing_function_threads, n_mapping_parallelism, single_precision_image, tol, dict_kind",
     [
@@ -1206,7 +1283,7 @@ def _regenerate_truth_images():
 # iteration-control behaviour intentionally changes.
 # ---------------------------------------------------------------------------
 
-# niter_per_plane=100, nmajor=0, threshold=0.001: deconvolves to the iteration limit
+# niter_per_plane=100, nmajor=1, threshold=0.001: deconvolves to the iteration limit
 # (the threshold is not reached) -> stop_code (1, 0).
 EXPECTED_DECONVOLVE_DICT_NITER100 = {
     (0, 0, 0): {

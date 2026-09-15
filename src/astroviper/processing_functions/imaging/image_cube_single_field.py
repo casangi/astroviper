@@ -328,8 +328,8 @@ def image_cube_single_field(
         residual_cycle_cube_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (
-        ImagingDict,
         accumulate_timing,
+        build_residual_imaging_dict,
         get_calculate_cycle_controls,
         merge_imaging_dicts,
     )
@@ -378,7 +378,7 @@ def image_cube_single_field(
     timing["T_iteration_control"] = 0.0
     timing["T_convergence"] = 0.0
 
-    is_n_iter_0 = True
+    is_niter_0 = True
     n_major_cycles = 0
     while controller.stopcode.major == 0:
         n_major_cycles += 1
@@ -390,7 +390,7 @@ def image_cube_single_field(
             ps_xdt,
             img_xds,
             image_params,
-            is_n_iter_0,
+            is_niter_0,
             processing_set_data_group_name=processing_set_data_group_name,
             instrument_polarization_basis=instrument_polarization_basis,
             single_precision_image=single_precision_image,
@@ -401,9 +401,18 @@ def image_cube_single_field(
         timing["T_residual_cycle"] += time.time() - start
         accumulate_timing(timing, residual_return_df)
 
+        # Check convergence against the fresh residual before deconvolving,
+        # so e.g. nmajor=0 stops here without spending any iterations.
+        residual_imaging_dict = build_residual_imaging_dict(
+            img_xds,
+            image_data_group_in_name="residual",
+            iteration_control_params=iteration_control_params,
+        )
+        pre_stopcode, pre_stopdesc = controller.check_convergence(residual_imaging_dict)
+
         # ---- Model-update phase (iteration control + deconvolve + convergence) ----
         model_phase_start = time.time()
-        if iteration_control_params["niter_per_plane"] > 0:
+        if pre_stopcode.major == 0 and iteration_control_params["niter_per_plane"] > 0:
             logger.debug("Doing model update")
             # Size the controller's per-plane state to this cube so iteration
             # control (niter_per_plane and threshold) is tracked independently for every
@@ -422,8 +431,9 @@ def image_cube_single_field(
                 controller,
                 combined_imaging_dict,
                 img_xds,
-                is_n_iter_0,
+                is_niter_0,
                 iteration_control_params=iteration_control_params,
+                residual_imaging_dict=residual_imaging_dict,
             )
             timing["T_iteration_control"] += time.time() - start
 
@@ -463,7 +473,7 @@ def image_cube_single_field(
                 img_xds,
                 deconvolver,
                 deconvolve_params,
-                is_n_iter_0=is_n_iter_0,
+                is_niter_0=is_niter_0,
                 processing_function_threads=processing_function_threads,
                 image_data_group_in_name="residual",
                 image_data_group_out_name="model",
@@ -473,10 +483,15 @@ def image_cube_single_field(
             # print("cycle_threshold: ", cycle_threshold)
             # print("cycle_niter_cap_pp: ", controller.niter_per_plane)
             # print("cycle_threshold_pp", cycle_threshold_pp)
-        else:
-            imaging_dict = ImagingDict()
 
-        is_n_iter_0 = False
+            # Only flip once a deconvolve actually runs: if every cycle is
+            # skipped, no model is ever created, and the final residual cycle
+            # below must not try to subtract one that doesn't exist.
+            is_niter_0 = False
+        else:
+            if pre_stopcode.major != 0:
+                logger.debug(f"  *** CONVERGED before model update: {pre_stopdesc} ***")
+            imaging_dict = residual_imaging_dict
 
         start = time.time()
         controller.update_counts(imaging_dict)
@@ -505,7 +520,7 @@ def image_cube_single_field(
             ps_xdt,
             img_xds,
             image_params,
-            is_n_iter_0,
+            is_niter_0,
             processing_set_data_group_name=processing_set_data_group_name,
             instrument_polarization_basis=instrument_polarization_basis,
             single_precision_image=single_precision_image,

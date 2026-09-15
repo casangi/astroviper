@@ -19,6 +19,7 @@ from astroviper.processing_functions.imaging.utils.imaging_dict import (
 from astroviper.processing_functions.imaging.utils.iteration_control import (
     IterationController,
     StopCode,
+    build_residual_imaging_dict,
     format_imaging_dict,
     get_calculate_cycle_controls,
     get_iterations_done_from_imaging_dict,
@@ -48,6 +49,7 @@ __all__ = [
     "IterationController",
     "StopCode",
     "merge_imaging_dicts",
+    "build_residual_imaging_dict",
     "get_calculate_cycle_controls",
     "get_peak_residual_from_imaging_dict",
     "get_masksum_from_imaging_dict",

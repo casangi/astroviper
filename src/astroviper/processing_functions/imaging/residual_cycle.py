@@ -210,7 +210,7 @@ def residual_cycle_cube_single_field(
     ps_xdt,
     img_xds,
     image_params,
-    is_n_iter_0,
+    is_niter_0,
     processing_set_data_group_name="corrected",
     instrument_polarization_basis="linear",
     single_precision_image=True,
@@ -241,7 +241,7 @@ def residual_cycle_cube_single_field(
         Image geometry and output coordinates: ``image_size``, ``cell_size``,
         ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
         ``fft_padding`` gridding/FFT padding factor.
-    is_n_iter_0 : bool
+    is_niter_0 : bool
         ``True`` for the very first (dirty image) cycle, where there is no sky
         model to degrid yet.  ``False`` for every later cycle.
     processing_set_data_group_name : str, optional
@@ -319,7 +319,7 @@ def residual_cycle_cube_single_field(
     T_residual_vis = 0.0
 
     # Degrid the current model and form the residual visibilities.
-    if not is_n_iter_0:
+    if not is_niter_0:
         residual_data_group = img_xds.attrs["data_groups"][image_data_group_out_name]
         # Delete the SKY_RESIDUAL so the gridded residual image is rebuilt below.
         img_xds.xr_img.delete_data_variables(variables=[residual_data_group["sky"]])
