@@ -19,11 +19,20 @@ import xarray as xr
 # Registers the `xr_img` accessor used by the function under test.
 import xradio.image.image_xds  # noqa: F401
 
+from astroviper.processing_functions.imaging.add_visibility_grid import (
+    add_visibility_grid_single_field,
+)
 from astroviper.processing_functions.imaging.degrid_visibility_grid import (
     degrid_visibility_grid_single_field,
 )
 from astroviper.processing_functions.imaging.get_visibility_grid import (
     get_visibility_grid_single_field,
+)
+from astroviper.processing_functions.imaging.make_point_spread_function import (
+    add_uv_sampling_grid_single_field,
+)
+from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+    map_visibility_frequencies_to_image,
 )
 
 # The pure-Python reference degridder (de-jitted copy of the retired numba
@@ -52,6 +61,8 @@ def _build_datasets(
     uv_extent=20.0,
     sky_value=2.0 + 0.0j,
     seed=0,
+    visibility_frequencies=None,
+    image_frequencies=None,
 ):
     """Build a minimal (ms_xds, img_xds, n_uv) triple for the degridder.
 
@@ -64,7 +75,13 @@ def _build_datasets(
     # l/m coordinates centred on zero so `get_lm_cell_size` returns `delta`.
     l_coord = (np.arange(n_l) - n_l / 2) * delta
     m_coord = (np.arange(n_m) - n_m / 2) * delta
-    freq = np.linspace(1.0e9, 1.1e9, n_chan)
+    if visibility_frequencies is None:
+        visibility_frequencies = np.linspace(1.0e9, 1.1e9, n_chan)
+    visibility_frequencies = np.asarray(visibility_frequencies, dtype=np.float64)
+    n_chan = visibility_frequencies.size
+    if image_frequencies is None:
+        image_frequencies = visibility_frequencies
+    image_frequencies = np.asarray(image_frequencies, dtype=np.float64)
 
     uvw = np.concatenate(
         [
@@ -86,7 +103,7 @@ def _build_datasets(
                 np.ones((n_time, n_baseline, n_chan, n_pol)),
             ),
         },
-        coords={"frequency": freq},
+        coords={"frequency": visibility_frequencies},
     )
     ms_xds.attrs["data_groups"] = {
         "base": {
@@ -98,7 +115,7 @@ def _build_datasets(
 
     # UV model grid: shape (m_time, m_chan, m_pol, n_u, n_v)
     sky_model = np.full(
-        (n_time, n_chan, n_pol, int(n_uv[0]), int(n_uv[1])),
+        (n_time, image_frequencies.size, n_pol, int(n_uv[0]), int(n_uv[1])),
         sky_value,
         dtype=np.complex128,
     )
@@ -109,7 +126,7 @@ def _build_datasets(
                 sky_model,
             ),
         },
-        coords={"l": l_coord, "m": m_coord, "frequency": freq},
+        coords={"l": l_coord, "m": m_coord, "frequency": image_frequencies},
     )
     img_xds.attrs["type"] = "image_dataset"
     # get_visibility_grid_single_field degrids the image-side "visibility" uv
@@ -119,6 +136,36 @@ def _build_datasets(
     }
 
     return ms_xds, img_xds, n_uv
+
+
+class TestFrequencyMapping(unittest.TestCase):
+    """Validate coordinate-based channel mapping and its ambiguity guards."""
+
+    def test_maps_identity_and_partitioned_frequency_axes(self):
+        """Identity axes and sparse child axes map to the expected planes."""
+        cases = (
+            ([1.0e9, 1.1e9], [1.0e9, 1.1e9], [0, 1]),
+            ([1.1e9, 1.3e9], [1.0e9, 1.1e9, 1.2e9, 1.3e9], [1, 3]),
+        )
+        for visibility, image, expected in cases:
+            with self.subTest(visibility=visibility, image=image):
+                result = map_visibility_frequencies_to_image(visibility, image)
+                np.testing.assert_array_equal(result, expected)
+                self.assertEqual(result.dtype, np.int64)
+
+    def test_rejects_invalid_frequency_coordinates(self):
+        """Non-1-D, non-finite, missing, and ambiguous coordinates fail."""
+        cases = (
+            ([[1.0e9]], [1.0e9], "one-dimensional"),
+            ([np.nan], [1.0e9], "finite"),
+            ([1.2e9], [1.0e9, 1.1e9], "exactly one"),
+            ([1.0e9], [1.0e9, 1.0e9], "exactly one"),
+            ([1.0e9, 1.0e9], [1.0e9], "one-to-one"),
+        )
+        for visibility, image, message in cases:
+            with self.subTest(visibility=visibility, image=image):
+                with self.assertRaisesRegex(ValueError, message):
+                    map_visibility_frequencies_to_image(visibility, image)
 
 
 class TestGetVisibilityGridSingleField(unittest.TestCase):
@@ -314,6 +361,43 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
                 np.full_like(out[:, :, c], chan_values[c]),
                 atol=1e-12,
             )
+
+    def test_cube_paths_map_partitioned_channels_to_full_image_axis(self):
+        """Visibility, PSF, and model paths use the same physical-frequency map."""
+        visibility_frequencies = [1.1e9, 1.3e9]
+        image_frequencies = [1.0e9, 1.1e9, 1.2e9, 1.3e9]
+        ms_xds, img_xds, _ = _build_datasets(
+            visibility_frequencies=visibility_frequencies,
+            image_frequencies=image_frequencies,
+            sky_value=0.0 + 0.0j,
+        )
+        img_xds.attrs["data_groups"]["residual"] = {}
+        cgk = create_prolate_spheroidal_kernel_1D(OVERSAMPLING, SUPPORT)
+
+        model_plane_values = np.array([1.0, 2.0, 3.0, 4.0])
+        for channel, value in enumerate(model_plane_values):
+            img_xds["SKY_MODEL"].values[:, channel] = value
+        get_visibility_grid_single_field(ms_xds, cgk, img_xds)
+        expected_model = np.broadcast_to(
+            np.array([2.0, 4.0])[np.newaxis, np.newaxis, :],
+            ms_xds["VISIBILITY_MODEL"].values[:, :, :, 0].shape,
+        )
+        np.testing.assert_allclose(
+            ms_xds["VISIBILITY_MODEL"].values[:, :, :, 0],
+            expected_model,
+            atol=1e-5,
+        )
+
+        ms_xds["VISIBILITY"].values[...] = 1.0 + 0.0j
+        add_visibility_grid_single_field(ms_xds, cgk, img_xds)
+        visibility_norm = img_xds["VISIBILITY_NORMALIZATION"].values[0, :, 0]
+        np.testing.assert_array_equal(visibility_norm[[0, 2]], 0.0)
+        self.assertTrue(np.all(visibility_norm[[1, 3]] > 0.0))
+
+        add_uv_sampling_grid_single_field(ms_xds, cgk, img_xds)
+        sampling_norm = img_xds["UV_SAMPLING_NORMALIZATION"].values[0, :, 0]
+        np.testing.assert_array_equal(sampling_norm[[0, 2]], 0.0)
+        self.assertTrue(np.all(sampling_norm[[1, 3]] > 0.0))
 
     # ------------------------------------------------------------------
     # Oracle: direct call to the pure-Python reference degridder
