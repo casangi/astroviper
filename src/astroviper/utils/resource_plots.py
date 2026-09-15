@@ -291,9 +291,9 @@ def plot_task_resource_usage(source, max_task_lines=200, save_prefix=None):
     axes["memory"] = _plot_task_series(
         df,
         "memory_rss_bytes",
-        "Resident memory (GB)",
+        "Resident memory (GiB)",
         "Node-task memory usage",
-        scale=1 / 1e9,
+        scale=1 / 2**30,
         max_task_lines=max_task_lines,
     )
     # I/O counters are cumulative over the worker process -> rebase per task.
@@ -301,9 +301,9 @@ def plot_task_resource_usage(source, max_task_lines=200, save_prefix=None):
     axes["io"] = _plot_task_series(
         df,
         "read_chars",
-        "I/O since task start (GB)",
+        "I/O since task start (GiB)",
         io_title,
-        scale=1 / 1e9,
+        scale=1 / 2**30,
         color="tab:blue",
         label_prefix="read: ",
         max_task_lines=max_task_lines,
@@ -313,9 +313,9 @@ def plot_task_resource_usage(source, max_task_lines=200, save_prefix=None):
         _plot_task_series(
             df,
             "write_chars",
-            "I/O since task start (GB)",
+            "I/O since task start (GiB)",
             io_title,
-            scale=1 / 1e9,
+            scale=1 / 2**30,
             ax=axes["io"],
             color="tab:orange",
             label_prefix="write: ",
@@ -331,7 +331,7 @@ def plot_task_resource_usage(source, max_task_lines=200, save_prefix=None):
 
 
 def plot_cluster_resource_usage(
-    source, core_capacity=None, memory_capacity_gb=None, save_prefix=None
+    source, core_capacity=None, memory_capacity_gib=None, save_prefix=None
 ):
     """Cluster-wide CPU / memory / I/O over the RUN's wall clock.
 
@@ -339,7 +339,7 @@ def plot_cluster_resource_usage(
     ``start_unixtime`` and the quantities are SUMMED over the tasks running at
     each instant: busy cores (sum of cpu_percent/100), total RSS of
     task-running worker processes (idle workers are not counted), and the
-    aggregate read/write rate (GB/s, from the per-task derivative of the
+    aggregate read/write rate (GiB/s, from the per-task derivative of the
     cumulative counters). Every figure also shows the number of concurrently
     running tasks on a right-hand axis.
 
@@ -351,8 +351,8 @@ def plot_cluster_resource_usage(
         cross-node placement relies on NTP-synced node clocks.
     core_capacity : int, optional
         Total cores of the allocation; drawn as a dashed capacity line.
-    memory_capacity_gb : float, optional
-        Total memory of the allocation (GB); drawn as a dashed capacity line.
+    memory_capacity_gib : float, optional
+        Total memory of the allocation (GiB); drawn as a dashed capacity line.
     save_prefix : str, optional
         If set, save ``<prefix>cluster_cpu/memory/io.png``.
 
@@ -399,7 +399,8 @@ def plot_cluster_resource_usage(
             np.interp(g, t_rel, np.asarray(row["cpu_percent"], dtype=float)) / 100.0
         )
         acc["rss"][mask] += (
-            np.interp(g, t_rel, np.asarray(row["memory_rss_bytes"], dtype=float)) / 1e9
+            np.interp(g, t_rel, np.asarray(row["memory_rss_bytes"], dtype=float))
+            / 2**30
         )
         if have_io:
             for col, key in (
@@ -407,7 +408,7 @@ def plot_cluster_resource_usage(
                 ("write_chars", "write_rate"),
             ):
                 c = np.asarray(row[col], dtype=float)
-                rate = np.gradient(c, t_rel) / 1e9 if len(c) > 1 else np.zeros(1)
+                rate = np.gradient(c, t_rel) / 2**30 if len(c) > 1 else np.zeros(1)
                 acc[key][mask] += np.interp(g, t_rel, rate)
 
     def _figure(title, ylabel, curves, capacity=None):
@@ -441,18 +442,18 @@ def plot_cluster_resource_usage(
     )
     axes["memory"] = _figure(
         "Cluster memory usage over the run (task-running workers only)",
-        "Total resident memory (GB)",
+        "Total resident memory (GiB)",
         [("total RSS", acc["rss"], "tab:blue")],
         capacity=(
             None
-            if memory_capacity_gb is None
-            else (f"capacity ({memory_capacity_gb:g} GB)", memory_capacity_gb)
+            if memory_capacity_gib is None
+            else (f"capacity ({memory_capacity_gib:g} GiB)", memory_capacity_gib)
         ),
     )
     if have_io:
         axes["io"] = _figure(
             "Cluster I/O rate over the run (syscall-level, counts network filesystems)",
-            "Aggregate I/O rate (GB/s)",
+            "Aggregate I/O rate (GiB/s)",
             [
                 ("read", acc["read_rate"], "tab:blue"),
                 ("write", acc["write_rate"], "tab:orange"),
@@ -559,6 +560,7 @@ def _write_task_stream_html(
     title,
     html_path,
     driver=None,
+    add_time_labels=False,
 ):
     """Write a standalone interactive HTML task stream: the same panels as
     the matplotlib figure (including the driver strip when ``driver`` -- the
@@ -570,10 +572,11 @@ def _write_task_stream_html(
     import html as _html
 
     # ---- geometry (pixels) ----
-    left, top, bottom = 95, 30, 42
+    left, top = 190, 44
+    bottom = 166 if add_time_labels else 72  # room for the t_0..t_3 marks
     inner_w = 1500
     util_h, gap = 110, 16
-    driver_h, dgap = (26, 12) if driver is not None else (0, 0)
+    driver_h, dgap = (36, 14) if driver is not None else (0, 0)
     top_u = top + driver_h + dgap  # top of the utilization panel
     lane_px = max(3.0, min(14.0, 9000.0 / max(n_lanes, 1)))
     stream_h = lane_px * n_lanes
@@ -608,15 +611,18 @@ def _write_task_stream_html(
 body { font-family: sans-serif; margin: 12px; }
 rect[data-i]:hover { stroke: #000; stroke-width: 0.8px; }
 #tt { position: fixed; display: none; background: #fffef5; border: 1px solid
-      #888; border-radius: 3px; padding: 5px 8px; font-size: 12px;
+      #888; border-radius: 3px; padding: 5px 8px; font-size: 18px;
       pointer-events: none; box-shadow: 2px 2px 5px rgba(0,0,0,0.25);
       white-space: pre; z-index: 10; }
-.axis { font-size: 11px; fill: #333; }
-.host { font-size: 9px; fill: #333; }
-.note { font-size: 11px; fill: #555; }
+.axis { font-size: 22px; fill: #333; }
+.host { font-size: 18px; fill: #333; }
+.note { font-size: 22px; fill: #555; }
+.tm { font-weight: bold; pointer-events: none; }
+.dt { font-weight: bold; pointer-events: none; fill: #fff;
+      stroke: #555; stroke-width: 2.5px; paint-order: stroke; }
 </style></head><body>""",
-        f"<h3 style='margin:4px 0'>{_html.escape(title or 'task stream')}</h3>",
-        f"<div style='font-size:13px;color:#444;margin-bottom:6px'>"
+        f"<h3 style='margin:4px 0;font-size:30px'>{_html.escape(title or 'task stream')}</h3>",
+        f"<div style='font-size:22px;color:#444;margin-bottom:6px'>"
         f"ideal {ideal:.0f} s | task window {makespan:.0f} s"
         + (f" | T_compute {T_compute:.0f} s" if T_compute else "")
         + (f" | application {app_total:.0f} s" if app_total is not None else "")
@@ -629,7 +635,7 @@ rect[data-i]:hover { stroke: #000; stroke-width: 0.8px; }
     if driver is not None:
         out.append(
             f'<text class="axis" x="{left - 8}" '
-            f'y="{top + driver_h / 2 + 4:.0f}" text-anchor="end">driver</text>'
+            f'y="{top + driver_h / 2 + 8:.0f}" text-anchor="end">driver</text>'
         )
         for lbl, s, e in d_segs:
             text = f"driver: {lbl} · {e - s:.1f} s"
@@ -641,10 +647,10 @@ rect[data-i]:hover { stroke: #000; stroke-width: 0.8px; }
                 f'width="{max((e - s) * sx, 0.5):.1f}" height="{driver_h}" '
                 f'fill="{d_colors[lbl]}" data-i="{info}"/>'
             )
-            if (e - s) * sx > 7 * len(lbl) + 10:  # name the wide segments
+            if (e - s) * sx > 13 * len(lbl) + 16:  # name the wide segments
                 out.append(
                     f'<text class="note" x="{X((s + e) / 2):.1f}" '
-                    f'y="{top + driver_h / 2 + 4:.0f}" text-anchor="middle">'
+                    f'y="{top + driver_h / 2 + 8:.0f}" text-anchor="middle">'
                     f"{_html.escape(lbl)}</text>"
                 )
 
@@ -689,7 +695,7 @@ rect[data-i]:hover { stroke: #000; stroke-width: 0.8px; }
     )
     out.append(
         f'<text class="axis" x="{left - 8}" y="{top_u + util_h / 2:.0f}" '
-        f'text-anchor="end">running<tspan x="{left - 8}" dy="12">tasks'
+        f'text-anchor="end">running<tspan x="{left - 8}" dy="24">tasks'
         f"</tspan></text>"
     )
 
@@ -703,6 +709,18 @@ rect[data-i]:hover { stroke: #000; stroke-width: 0.8px; }
             f'<rect x="{X(s):.1f}" y="{Y(row) + lane_px * 0.05:.1f}" '
             f'width="{max((e - s) * sx, 0.5):.1f}" height="{h:.1f}" '
             f'fill="{color}" data-i="{info}"/>'
+        )
+
+    def _tau(r):  # Δτ_i duration mark centered on a task bar (map or reduce)
+        fs = max(8.0, min(22.0, lane_px + 6.0))
+        y = Y(r["row"]) + lane_px / 2 + fs / 3
+        y -= 0.30 * lane_px * int(r.get("tau_level", 0))  # de-collision dodge
+        out.append(
+            f'<text class="dt" x="{X((r["start"] + r["end"]) / 2):.1f}" '
+            f'y="{y:.1f}" '
+            f'text-anchor="middle" font-size="{fs:.0f}">'
+            f'Δτ<tspan dy="{fs / 4:.0f}" font-size="{0.75 * fs:.0f}">'
+            f"{int(r['tau_index'])}</tspan></text>"
         )
 
     for _, r in t.iterrows():
@@ -724,6 +742,8 @@ rect[data-i]:hover { stroke: #000; stroke-width: 0.8px; }
                 _POST_COLOR,
                 f"reduce node · {r['end'] - r['start']:.1f} s\n{span}",
             )
+            if add_time_labels:
+                _tau(r)
             continue
         load_end = r["start"] + r["T_make_empty_image"] + r["T_load"]
         write_start = r["end"] - r["T_write"]
@@ -748,6 +768,8 @@ rect[data-i]:hover { stroke: #000; stroke-width: 0.8px; }
             _WRITE_COLOR,
             f"write · {r['end'] - write_start:.1f} s\n{span}",
         )
+        if add_time_labels:
+            _tau(r)
 
     # Host separators + sparse host labels (same sparsity as the PNG).
     bounds = t.groupby("host_idx")["row"].max().sort_index()
@@ -762,7 +784,7 @@ rect[data-i]:hover { stroke: #000; stroke-width: 0.8px; }
         rows = t.loc[t["host_idx"] == hi, "row"]
         out.append(
             f'<text class="host" x="{left - 6}" '
-            f'y="{Y(rows.mean()) + lane_px / 2 + 3:.1f}" '
+            f'y="{Y(rows.mean()) + lane_px / 2 + 6:.1f}" '
             f'text-anchor="end">{_html.escape(hosts[hi].split(".")[0])}'
             f"</text>"
         )
@@ -783,14 +805,32 @@ rect[data-i]:hover { stroke: #000; stroke-width: 0.8px; }
             f'y2="{ax_y + 5:.1f}" stroke="#333"/>'
         )
         out.append(
-            f'<text class="axis" x="{X(v):.1f}" y="{ax_y + 18:.1f}" '
+            f'<text class="axis" x="{X(v):.1f}" y="{ax_y + 28:.1f}" '
             f'text-anchor="middle">{v + 0.0:g}</text>'
         )
         v += tick
+    if add_time_labels:  # bold t_0..t_3 efficiency-derivation marks
+        marks = [(0.0, "1"), (makespan, "2")]
+        if driver is not None:
+            marks.append((app_start_rel, "0"))
+        t3 = post_end_rel if post_end_rel is not None else (T_compute or None)
+        if t3 is not None:
+            marks.append((t3, "3"))
+        marks.sort(key=lambda m: m[0])
+        last_x = None  # nearly coincident marks (e.g. t_2/t_3) dodge to a 2nd row
+        for x, sub in marks:
+            dodged = last_x is not None and (X(x) - X(last_x)) < 44
+            out.append(
+                f'<text class="axis tm" x="{X(x):.1f}" '
+                f'y="{ax_y + (104 if dodged else 66):.1f}" '
+                f'text-anchor="middle" font-size="28" font-style="italic">t'
+                f'<tspan dy="6" font-size="20">{sub}</tspan></text>'
+            )
+            last_x = None if dodged else x
     out.append(
         f'<text class="axis" x="{left + inner_w / 2:.0f}" '
-        f'y="{ax_y + 34:.1f}" text-anchor="middle">'
-        f"time since first task start (s)</text>"
+        f'y="{ax_y + (150 if add_time_labels else 56):.1f}" '
+        f'text-anchor="middle">time since first task start (s)</text>'
     )
 
     # Legend.
@@ -805,13 +845,13 @@ rect[data-i]:hover { stroke: #000; stroke-width: 0.8px; }
     ]
     for label, color in entries:
         out.append(
-            f'<rect x="{lx}" y="8" width="12" height="12" fill="{color}"'
+            f'<rect x="{lx}" y="12" width="20" height="20" fill="{color}"'
             f' fill-opacity="0.8"/>'
         )
         out.append(
-            f'<text class="axis" x="{lx + 16}" y="18">{_html.escape(label)}</text>'
+            f'<text class="axis" x="{lx + 26}" y="29">{_html.escape(label)}</text>'
         )
-        lx += 16 + 7 * len(label) + 22
+        lx += 26 + 12 * len(label) + 30
 
     out.append("</svg>")
     out.append("""<div id="tt"></div><script>
@@ -843,6 +883,7 @@ def plot_task_stream(
     n_workers=None,
     driver_timing=None,
     anchor_source=None,
+    add_time_labels=False,
     title=None,
     save_path=None,
     html_path=None,
@@ -902,6 +943,17 @@ def plot_task_stream(
         compute anchors to be placeable on the wall clock.
     anchor_source : str, optional
         Provenance note for the compute anchors, echoed in the printout.
+    add_time_labels : bool, optional
+        Annotate the timeline with the bold time marks used when deriving the
+        efficiencies: below the x-axis ``t_0`` (start of the driver setup;
+        needs the driver strip), ``t_1`` (first task start, x = 0), ``t_2``
+        (end of the mapping stage) and ``t_3`` (end of the reduce / post-map
+        region), plus each task's duration label ``Δτ_i`` centered on its bar
+        -- map AND measured reduce tasks alike (map tasks keep their recorded
+        task number, reduce tasks are numbered on in start order), matching
+        the paper's ``W = Σ Δτ_i``. Meant for small pedagogical runs (e.g.
+        the tutorial notebook) -- with thousands of tasks the per-task labels
+        overlap. Applied to the interactive HTML twin as well. Default False.
     title : str, optional
         Figure title prefix (e.g. a run name); default "task stream".
     save_path : str, optional
@@ -975,14 +1027,32 @@ def plot_task_stream(
                 red_rows[col] = reduce_frame[col].values
         tasks = pd.concat([tasks, red_rows], ignore_index=True)
     t, hosts, n_lanes = assign_task_stream_lanes(tasks)
+    # Δτ index over ALL tasks in START order: map tasks numbered as they
+    # started, then the reduce tasks numbered on, also in start order. Used by
+    # the add_time_labels marks and consistent with the paper's W = Σ Δτ_i,
+    # which includes the reduce tasks. The index is a label, not a channel id:
+    # the scheduler does not dispatch tasks in task_id order, so numbering by
+    # task_id put Δτ_0 wherever channel 0 happened to run (e.g. in the second
+    # wave) instead of on the first task started.
+    m = t["kind"] == "map"
+    map_order = t.loc[m].sort_values("start_unixtime", kind="stable").index
+    t.loc[map_order, "tau_index"] = np.arange(len(map_order))
+    nxt = len(map_order)
+    red_order = t.loc[~m].sort_values("start_unixtime", kind="stable").index
+    t.loc[red_order, "tau_index"] = np.arange(nxt, nxt + len(red_order))
+    t["tau_index"] = t["tau_index"].astype(int)
     tm = t[t["kind"] == "map"]
     tr = t[t["kind"] == "reduce"]
     makespan = tm["end"].max()
     # Worker count: recorded geometry when known, else a MAP-ONLY packing pass
     # (in the combined packing, reduce nodes borrow idle map lanes and bump map
     # tasks into overflow lanes, so combined lane counts overstate the workers).
+    # This is the parallelism p of the paper's Performance Measures section.
     n_workers = n_workers or assign_task_stream_lanes(map_only)[2]
-    ideal = tm["T_image_cube_task"].sum() / n_workers
+    # Total work W = Σ Δτ_i over ALL tasks (map + measured reduce) and the
+    # ideal time T_ideal = W / p.
+    work = float(tm["T_image_cube_task"].sum() + tr["T_image_cube_task"].sum())
+    ideal = work / n_workers
 
     # Utilization curve from start/end events (map tasks only; reduce gets its
     # own curve below when recorded).
@@ -995,7 +1065,7 @@ def plot_task_stream(
     # PRE-first-task and POST-last-task shares of T_compute are measured;
     # otherwise fall back to attributing everything after the window.
     busy = tm["T_image_cube_task"].sum()
-    in_window_loss = makespan - ideal
+    in_window_loss = makespan - busy / n_workers  # vs the MAP work only
     t0_abs = tasks["start_unixtime"].min()
     pre_rel = post_end_rel = None
     if compute_start is not None:
@@ -1003,6 +1073,9 @@ def plot_task_stream(
         post_end_rel = compute_end - t0_abs
     post = (T_compute - makespan) if T_compute else None
     driver = _driver_timeline(driver_timing, compute_start, compute_end, t0_abs)
+    # t_3 of the efficiency derivation: end of the reduce / post-map region
+    # (falls back to T_compute when the absolute anchors are missing).
+    t3_rel = post_end_rel if post_end_rel is not None else (T_compute or None)
     if driver_timing and driver is None:
         print(
             "plot_task_stream: driver timings given but no absolute compute "
@@ -1017,10 +1090,14 @@ def plot_task_stream(
     if title:
         print(f"run: {title}")
     _p(
-        f"  workers                    : {n_workers} ({len(hosts)} hosts, "
-        f"{n_lanes} reconstructed lanes)"
+        f"  parallelism p              : {n_workers} workers ({len(hosts)} "
+        f"hosts, {n_lanes} reconstructed lanes)"
     )
-    _p(f"  ideal time (sum/workers)   : {ideal:8.1f} s")
+    _p(
+        f"  T_ideal = W / p            : {ideal:8.1f} s "
+        f"(W = Σ Δτ_i = {work:.1f} s over {len(tm)} map + {len(tr)} reduce "
+        f"tasks)"
+    )
     _p(
         f"  task-window makespan       : {makespan:8.1f} s "
         f"(+{in_window_loss:.1f} s ramp/gaps/tail, "
@@ -1040,7 +1117,6 @@ def plot_task_stream(
                 f"  T_compute (map+reduce)     : {T_compute:8.1f} s "
                 f"(+{post:.1f} s outside the task window)"
             )
-        _p(f"  end-to-end efficiency      : {100 * ideal / T_compute:.1f}% of ideal")
     if driver is not None:
         d_segs, app_start_rel, app_end_rel, d_colors, d_setup = driver
         app_total = app_end_rel - app_start_rel
@@ -1063,6 +1139,22 @@ def plot_task_stream(
         )
         if steps:
             _p(f"  driver steps (s)           : {steps}")
+    # The two absolute parallel efficiencies of the paper's Performance
+    # Measures section, in the t_0..t_3 / Δτ_i notation of add_time_labels:
+    # T_ideal = W / p over the map-reduce window (t_1 = first task start = 0
+    # .. t_3 = end of reduce) resp. the end-to-end window (t_0 = application
+    # start .. t_3). W includes the reduce tasks.
+    if t3_rel is not None:
+        _p(
+            f"  E map-reduce               : "
+            f"{100 * ideal / t3_rel:8.1f} %   [= (W / p) / (t_3 - t_1)]"
+        )
+        if driver is not None:
+            _p(
+                f"  E end-to-end               : "
+                f"{100 * ideal / (t3_rel - app_start_rel):8.1f} % "
+                f"  [= (W / p) / (t_3 - t_0)]"
+            )
     # Ramp and tail: time to reach 95% of workers / time the last 5% of tasks
     # spend after the 95th-percentile end. (argmax = first True; searchsorted
     # is invalid here -- the running count is not monotonic.)
@@ -1092,9 +1184,24 @@ def plot_task_stream(
         )
         for lbl, s, e in d_segs:
             ax_d.add_patch(plt.Rectangle((s, 0), e - s, 1, color=d_colors[lbl], lw=0))
+        d_dur = {}
+        for lbl, s, e in d_segs:
+            d_dur[lbl] = d_dur.get(lbl, 0.0) + (e - s)
+        ax_d.legend(
+            handles=[
+                Patch(color=d_colors[lbl], label=f"{lbl} ({dur:.1f} s)")
+                for lbl, dur in d_dur.items()
+            ],
+            loc="upper left",
+            bbox_to_anchor=(1.005, 1.15),
+            fontsize=12,
+            frameon=False,
+            labelspacing=0.3,
+            handlelength=1.4,
+        )
         ax_d.set_ylim(0, 1)
         ax_d.set_yticks([])
-        ax_d.set_ylabel("driver", fontsize=8)
+        ax_d.set_ylabel("driver", fontsize=16)
     else:
         fig, (ax_u, ax) = plt.subplots(
             2,
@@ -1105,7 +1212,14 @@ def plot_task_stream(
         )
 
     ax_u.fill_between(ev_t, running, step="post", color=_LOAD_COLOR, alpha=0.35, lw=0)
-    ax_u.plot(ev_t, running, drawstyle="steps-post", color=_LOAD_COLOR, lw=1)
+    ax_u.plot(
+        ev_t,
+        running,
+        drawstyle="steps-post",
+        color=_LOAD_COLOR,
+        lw=1,
+        label="running map tasks",
+    )
     if len(tr):
         rev = np.concatenate([tr["start"].values, tr["end"].values])
         rdl = np.concatenate([np.ones(len(tr)), -np.ones(len(tr))])
@@ -1118,10 +1232,11 @@ def plot_task_stream(
             lw=1.2,
             label="running reduce nodes",
         )
-        ax_u.legend(loc="upper right", fontsize=8, frameon=False)
-    ax_u.axhline(n_workers, color="#666666", ls="--", lw=1)
-    ax_u.text(
-        0, n_workers, f" {n_workers} workers", va="bottom", fontsize=8, color="#666666"
+    ax_u.axhline(
+        n_workers, color="#666666", ls="--", lw=1, label=f"p = {n_workers} workers"
+    )
+    ax_u.legend(
+        loc="upper left", bbox_to_anchor=(1.005, 1.0), fontsize=14, frameon=False
     )
     if pre_rel is not None:
         ax_u.axvspan(pre_rel, 0, color=_PRE_COLOR, alpha=0.20)
@@ -1133,10 +1248,11 @@ def plot_task_stream(
             0.5 * n_workers,
             f"{post_label}\n{post:.0f} s",
             ha="center",
-            fontsize=8,
+            fontsize=16,
             color="#8a4a6d",
         )
-    ax_u.set_ylabel("running tasks")
+    ax_u.set_ylabel("running tasks", fontsize=20)
+    ax_u.tick_params(labelsize=20)
     ax_u.grid(True, alpha=0.25)
 
     seg_h = 0.9
@@ -1193,9 +1309,10 @@ def plot_task_stream(
     ax.set_yticks(
         [t.loc[t["host_idx"] == hi, "row"].mean() for hi in shown],
         [hosts[hi].split(".")[0] for hi in shown],
-        fontsize=6,
+        fontsize=12,
     )
     ax.tick_params(axis="y", length=0)
+    ax.tick_params(axis="x", labelsize=20)
     ax.set_ylim(-1, n_lanes)
     left = pre_rel if pre_rel is not None else 0.0
     right = (
@@ -1219,11 +1336,65 @@ def plot_task_stream(
                     lbl,
                     ha="center",
                     va="center",
-                    fontsize=7,
+                    fontsize=14,
                     color="#333333",
                 )
-    ax.set_ylabel(f"worker processes ({n_lanes} lanes, grouped by host)")
-    ax.set_xlabel("time since first task start (s)")
+    ax.set_ylabel(f"worker processes ({n_lanes} lanes, grouped by host)", fontsize=20)
+    ax.set_xlabel("time since first task start (s)", fontsize=20)
+    if add_time_labels:
+        # Bold efficiency-derivation marks: t_0..t_3 under the x-axis and each
+        # map task's duration Δτ_i on its bar (i = task number).
+        import matplotlib.transforms as mtransforms
+
+        marks = [(0.0, r"$\mathbf{t_1}$"), (makespan, r"$\mathbf{t_2}$")]
+        if driver is not None:
+            marks.append((app_start_rel, r"$\mathbf{t_0}$"))
+        if t3_rel is not None:
+            marks.append((t3_rel, r"$\mathbf{t_3}$"))
+        trans = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
+        marks.sort(key=lambda m: m[0])
+        last_x = None  # nearly coincident marks (e.g. t_2/t_3) dodge to a 2nd row
+        for x, lbl in marks:
+            dodged = last_x is not None and (x - last_x) < 0.055 * (right - left)
+            ax.text(
+                x,
+                -0.095 if dodged else -0.048,
+                lbl,
+                transform=trans,
+                ha="center",
+                va="top",
+                fontsize=26,
+            )
+            last_x = None if dodged else x
+        ax.xaxis.labelpad = 96  # keep the axis caption clear of the t marks
+        # Δτ_i on every task, map AND reduce (W = Σ Δτ_i over all). The white
+        # text gets a thin dark stroke so it stays readable where it spills
+        # past a narrow bar, and neighboring labels within a lane closer than
+        # the approximate label width dodge up/down within the lane band.
+        import matplotlib.patheffects as path_effects
+
+        stroke = [path_effects.withStroke(linewidth=2.5, foreground="#555555")]
+        w_est = 0.045 * (right - left)  # ~label width in data units
+        t["tau_level"] = 0  # shared with the HTML twin
+        last_in_lane = {}  # row -> (center_x, level) of the previous label
+        for i, r in t.sort_values(["row", "start"]).iterrows():
+            cx = (r["start"] + r["end"]) / 2
+            prev = last_in_lane.get(r["row"])
+            level = 0
+            if prev is not None and cx - prev[0] < w_est:
+                level = 1 if prev[1] != 1 else -1
+            last_in_lane[r["row"]] = (cx, level)
+            t.at[i, "tau_level"] = level
+            ax.text(
+                cx,
+                r["row"] + 0.30 * level,
+                rf"$\mathbf{{\Delta\tau_{{{int(r['tau_index'])}}}}}$",
+                ha="center",
+                va="center",
+                fontsize=18,
+                color="white",
+                path_effects=stroke,
+            )
     handles = [
         Patch(color=_LOAD_COLOR, label="load"),
         Patch(color=_SCIENCE_COLOR, label="science"),
@@ -1234,43 +1405,39 @@ def plot_task_stream(
     if len(tr):
         handles.insert(3, Patch(color=_POST_COLOR, label="reduce node (measured)"))
     ax.legend(
-        handles=handles, loc="lower right", fontsize=8, frameon=True, framealpha=0.9
+        handles=handles,
+        loc="upper left",
+        bbox_to_anchor=(1.005, 1.0),
+        fontsize=16,
+        frameon=False,
     )
-    if driver is not None:
-        # Driver-step legend below the figure (relies on the tight bounding
-        # box used when saving, like the summary block above the title).
-        d_dur = {}
-        for lbl, s, e in d_segs:
-            d_dur[lbl] = d_dur.get(lbl, 0.0) + (e - s)
-        fig.legend(
-            handles=[
-                Patch(color=d_colors[lbl], label=f"{lbl} ({dur:.1f} s)")
-                for lbl, dur in d_dur.items()
-            ],
-            loc="upper center",
-            bbox_to_anchor=(0.5, 0.005),
-            ncol=4,
-            fontsize=7,
-            frameon=False,
-            title="driver steps (top strip)",
-            title_fontsize=8,
-        )
     fig.suptitle(
         f"{title or 'task stream'}\n"
         f"ideal {ideal:.0f} s | task window {makespan:.0f} s | "
         + (f"T_compute {T_compute:.0f} s" if T_compute else "")
         + (f" | application {app_total:.0f} s" if driver is not None else ""),
-        fontsize=12,
+        fontsize=24,
     )
     # Efficiency decomposition block above the title; it sits outside the
     # figure edge, so it relies on the tight bounding box used when saving.
+    # Long lines (e.g. the driver-step breakdown) are wrapped so the block
+    # stays no wider than the figure at this font size.
+    import textwrap
+
+    wrapped = [
+        w
+        for line in summary
+        for w in textwrap.wrap(
+            line, width=88, subsequent_indent=" " * 31, drop_whitespace=False
+        )
+    ]
     fig.text(
         0.02,
         1.002,
-        "\n".join(summary),
+        "\n".join(wrapped),
         va="bottom",
         ha="left",
-        fontsize=9,
+        fontsize=18,
         family="monospace",
     )
     if save_path is not None:
@@ -1294,5 +1461,6 @@ def plot_task_stream(
             title,
             html_path,
             driver=driver,
+            add_time_labels=add_time_labels,
         )
     return fig
