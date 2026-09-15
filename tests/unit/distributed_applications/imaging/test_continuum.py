@@ -985,6 +985,7 @@ def test_tw_hydra_cleaning_runs_later_major_cycles_and_builds_a_model(
     assert np.isfinite(image.SKY_MODEL.values).all()
 
 
+@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
 @pytest.mark.parametrize(
     "weighting",
     [
@@ -1003,10 +1004,11 @@ def test_tw_hydra_cleaning_runs_later_major_cycles_and_builds_a_model(
         ),
     ],
 )
-def test_tw_hydra_cached_mfs_visibility_grids_match_recomputed_residuals(
+def test_tw_hydra_cached_visibility_grids_match_recomputed_residuals(
     tmp_path,
     tw_hydra_store,
     weighting,
+    specmode,
 ):
     """Cached GWVobs reproduces visibility-domain subtraction through CLEAN."""
     processing_set = open_processing_set(str(tw_hydra_store))
@@ -1022,24 +1024,25 @@ def test_tw_hydra_cached_mfs_visibility_grids_match_recomputed_residuals(
     }
     reference_result, reference = _run_tw_hydra_continuum(
         tw_hydra_store,
-        tmp_path / f"visibility_{weighting['weighting']}_recompute.img.zarr",
+        tmp_path / f"visibility_{specmode}_{weighting['weighting']}_recompute.img.zarr",
         processing_set,
         2,
-        "mfs",
+        specmode,
         weighting,
         iteration_control_params=iteration_control_params,
         visibility_memory_mode="recompute",
     )
     for cache_mode in ("in_memory", "in_place"):
         output_store = (
-            tmp_path / f"visibility_{weighting['weighting']}_{cache_mode}.img.zarr"
+            tmp_path
+            / f"visibility_{specmode}_{weighting['weighting']}_{cache_mode}.img.zarr"
         )
         cached_result, cached = _run_tw_hydra_continuum(
             tw_hydra_store,
             output_store,
             processing_set,
             2,
-            "mfs",
+            specmode,
             weighting,
             iteration_control_params=iteration_control_params,
             visibility_memory_mode=cache_mode,
@@ -1060,7 +1063,12 @@ def test_tw_hydra_cached_mfs_visibility_grids_match_recomputed_residuals(
                 equal_nan=True,
             )
 
-        assert "_MFS_VISIBILITY_GRID_CACHE" not in zarr.open_group(output_store)
+        cache_group = (
+            "_MFS_VISIBILITY_GRID_CACHE"
+            if specmode == "mfs"
+            else "_MVC_VISIBILITY_GRID_CACHE"
+        )
+        assert cache_group not in zarr.open_group(output_store)
 
 
 @pytest.mark.parametrize("widebandpb_memory_mode", ["in_place", "recompute"])

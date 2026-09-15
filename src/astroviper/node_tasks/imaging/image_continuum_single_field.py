@@ -2,6 +2,9 @@ from astroviper.utils.param_docs import shares_param_docs
 
 _CONTINUUM_WEIGHT_CACHE_VARIABLE = "WEIGHT_IMAGING_CONTINUUM_CACHE"
 _MFS_VISIBILITY_GRID_CACHE_GROUP = "_MFS_VISIBILITY_GRID_CACHE"
+_MVC_VISIBILITY_GRID_CACHE_GROUP = "_MVC_VISIBILITY_GRID_CACHE"
+_MVC_OBSERVED_VISIBILITY_CACHE = "_MVC_OBSERVED_VISIBILITY_CACHE"
+_MVC_OBSERVED_NORMALIZATION_CACHE = "_MVC_OBSERVED_NORMALIZATION_CACHE"
 _WIDEBAND_PRIMARY_BEAM_CACHE_GROUP = "_WIDEBAND_PRIMARY_BEAM_CACHE"
 _WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE = "PRIMARY_BEAM"
 
@@ -330,6 +333,123 @@ def _load_mfs_visibility_grid_in_place(image_store):
     )
     observed_grid_xds.load()
     observed_grid_xds.close()
+    return observed_grid_xds
+
+
+def _extract_mvc_observed_visibility_grid(img_xds):
+    """Remove and return the first-cycle MVC observed UV-grid cache payload."""
+    import copy
+
+    import xarray as xr
+
+    required = (
+        _MVC_OBSERVED_VISIBILITY_CACHE,
+        _MVC_OBSERVED_NORMALIZATION_CACHE,
+    )
+    missing = [name for name in required if name not in img_xds]
+    if missing:
+        raise KeyError(
+            f"The first MVC map result is missing cache variables {missing}."
+        )
+
+    observed_grid_xds = xr.Dataset(
+        {
+            "VISIBILITY": img_xds[_MVC_OBSERVED_VISIBILITY_CACHE].copy(deep=True),
+            "VISIBILITY_NORMALIZATION": img_xds[_MVC_OBSERVED_NORMALIZATION_CACHE].copy(
+                deep=True
+            ),
+        },
+        attrs=copy.deepcopy(img_xds.attrs),
+    )
+    observed_grid_xds.attrs.setdefault("data_groups", {}).setdefault(
+        "residual", {}
+    ).update(
+        {
+            "visibility": "VISIBILITY",
+            "visibility_normalization": "VISIBILITY_NORMALIZATION",
+        }
+    )
+    observed_grid_xds.attrs["visibility_grid_source"] = "observed_data"
+    img_xds = img_xds.drop_vars(required)
+    return img_xds, observed_grid_xds
+
+
+def _write_mvc_visibility_grid_in_place(observed_grid_xds, image_store):
+    """Write one task's disjoint MVC observed UV planes into the cache store."""
+    import numpy as np
+    import zarr
+
+    root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
+    if _MVC_VISIBILITY_GRID_CACHE_GROUP not in root:
+        raise KeyError("The in-place MVC visibility-grid cache is not initialized.")
+    cache = root[_MVC_VISIBILITY_GRID_CACHE_GROUP]
+    frequency_indexer = _stored_coordinate_indexer(
+        cache["frequency"][:],
+        observed_grid_xds.coords["frequency"].values,
+        "frequency",
+    )
+    cache["VISIBILITY"].oindex[
+        (slice(None), frequency_indexer, slice(None), slice(None), slice(None))
+    ] = np.asarray(observed_grid_xds["VISIBILITY"].values)
+    cache["VISIBILITY_NORMALIZATION"].oindex[
+        (slice(None), frequency_indexer, slice(None))
+    ] = np.asarray(observed_grid_xds["VISIBILITY_NORMALIZATION"].values)
+
+
+def _load_mvc_visibility_grid_in_place(img_xds, image_store):
+    """Load only this task's MVC observed UV planes from the image cache."""
+    import copy
+
+    import numpy as np
+    import xarray as xr
+    import zarr
+
+    root = zarr.open_group(image_store, mode="r", use_consolidated=False)
+    if _MVC_VISIBILITY_GRID_CACHE_GROUP not in root:
+        raise KeyError("The in-place MVC visibility-grid cache is missing.")
+    cache = root[_MVC_VISIBILITY_GRID_CACHE_GROUP]
+    frequency_values = np.asarray(img_xds.coords["frequency"].values, dtype=np.float64)
+    frequency_indexer = _stored_coordinate_indexer(
+        cache["frequency"][:], frequency_values, "frequency"
+    )
+    visibility = cache["VISIBILITY"].oindex[
+        (slice(None), frequency_indexer, slice(None), slice(None), slice(None))
+    ]
+    normalization = cache["VISIBILITY_NORMALIZATION"].oindex[
+        (slice(None), frequency_indexer, slice(None))
+    ]
+    observed_grid_xds = xr.Dataset(
+        {
+            "VISIBILITY": xr.DataArray(
+                visibility,
+                dims=("time", "frequency", "polarization", "u", "v"),
+                coords={
+                    "time": img_xds.coords["time"],
+                    "frequency": img_xds.coords["frequency"],
+                    "polarization": img_xds.coords["polarization"],
+                },
+            ),
+            "VISIBILITY_NORMALIZATION": xr.DataArray(
+                normalization,
+                dims=("time", "frequency", "polarization"),
+                coords={
+                    "time": img_xds.coords["time"],
+                    "frequency": img_xds.coords["frequency"],
+                    "polarization": img_xds.coords["polarization"],
+                },
+            ),
+        },
+        attrs=copy.deepcopy(img_xds.attrs),
+    )
+    observed_grid_xds.attrs.setdefault("data_groups", {}).setdefault(
+        "residual", {}
+    ).update(
+        {
+            "visibility": "VISIBILITY",
+            "visibility_normalization": "VISIBILITY_NORMALIZATION",
+        }
+    )
+    observed_grid_xds.attrs["visibility_grid_source"] = "observed_data"
     return observed_grid_xds
 
 
@@ -808,6 +928,7 @@ def residual_update_continuum_single_field(
     task_time_kill_switch_seconds=None,
     weight_cache_mapping=None,
     primary_beam_xds=None,
+    observed_visibility_grid_xds=None,
 ):
     """Compute one frequency chunk's continuum products in memory.
 
@@ -897,16 +1018,14 @@ def residual_update_continuum_single_field(
         the initial implementation; the two policies may be unified later.
 
     visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
-        MFS residual-update storage policy for the observed-data visibility grid.
-        ``"in_memory"`` retains the globally reduced observed-data Taylor UV
-        grid from the first cycle; later map tasks grid only the predicted-model
-        contribution, and the append node subtracts it from the cached observed
-        grid before the inverse FFT. ``"in_place"`` persists that same reduced
-        grid in a temporary group in the image Zarr store and reloads it in each
-        append node. ``"recompute"`` reloads the original observed visibilities
-        and grids their visibility-domain residual during every residual-update
-        cycle. Caching currently applies only to MFS; MVC requires
-        ``"recompute"``.
+        Continuum residual-update storage policy for observed visibility grids.
+        ``"in_memory"`` retains the first-cycle grid in driver memory, while
+        ``"in_place"`` stores it temporarily in the image Zarr store. Later
+        cycles grid only the predicted-model contribution and subtract it from
+        the cached observed grid. ``"recompute"`` instead reloads the original
+        observed visibilities and grids their visibility-domain residual every
+        cycle. MFS caches the globally reduced Taylor UV grid; MVC caches each
+        map task's exclusively owned frequency-resolved UV planes.
 
     widebandpb_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         MVC-only storage policy for the frequency-dependent primary beam.
@@ -1011,11 +1130,6 @@ def residual_update_continuum_single_field(
         raise ValueError(
             f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
         )
-    if specmode == "mvc" and visibility_memory_mode != "recompute":
-        raise ValueError(
-            "visibility_memory_mode caching is currently supported only for "
-            "specmode='mfs'; MVC requires 'recompute'."
-        )
 
     # Build the empty image in the correlation basis expected by the gridder.
     correlation_pol_coords = {
@@ -1042,9 +1156,7 @@ def residual_update_continuum_single_field(
     start = time.time()
 
     omit_observed_visibility = (
-        specmode == "mfs"
-        and visibility_memory_mode in ("in_memory", "in_place")
-        and not is_n_iter_0
+        visibility_memory_mode in ("in_memory", "in_place") and not is_n_iter_0
     )
 
     if input_data is not None:
@@ -1073,7 +1185,7 @@ def residual_update_continuum_single_field(
         if omit_observed_visibility:
             if not isinstance(data_group, dict) or "correlated_data" not in data_group:
                 raise ValueError(
-                    "Cached-grid MFS loading requires the resolved processing-set "
+                    "Cached-grid loading requires the resolved processing-set "
                     "data_group mapping."
                 )
             drop_variables = [data_group["correlated_data"]]
@@ -1196,6 +1308,20 @@ def residual_update_continuum_single_field(
                 f"task={expected_frequency}."
             )
 
+        if visibility_memory_mode == "in_place":
+            observed_visibility_grid_xds = _load_mvc_visibility_grid_in_place(
+                img_xds,
+                image_store,
+            )
+        elif (
+            visibility_memory_mode == "in_memory"
+            and observed_visibility_grid_xds is None
+        ):
+            raise ValueError(
+                "Later MVC major cycles with visibility_memory_mode='in_memory' "
+                "require a task-local observed_visibility_grid_xds."
+            )
+
     # =============================================================
     # Run processing function
     # =============================================================
@@ -1213,6 +1339,7 @@ def residual_update_continuum_single_field(
         fft_backend=fft_backend,
         image_data_variables_keep=(image_data_variables_keep),
         visibility_memory_mode=visibility_memory_mode,
+        observed_visibility_grid_xds=observed_visibility_grid_xds,
         is_n_iter_0=is_n_iter_0,
         model_uv_xds=model_uv_xds,
         model_xds=model_xds,
@@ -1224,6 +1351,7 @@ def residual_update_continuum_single_field(
 
     # Retain the task-local frequency-dependent PB for MVC
     pb_xds = None
+    mvc_observed_visibility_grid_xds = None
 
     if (
         specmode == "mvc"
@@ -1236,6 +1364,17 @@ def residual_update_continuum_single_field(
             pb_xds = None
 
     if specmode == "mvc":
+        if is_n_iter_0 and visibility_memory_mode != "recompute":
+            img_xds, mvc_observed_visibility_grid_xds = (
+                _extract_mvc_observed_visibility_grid(img_xds)
+            )
+            if visibility_memory_mode == "in_place":
+                _write_mvc_visibility_grid_in_place(
+                    mvc_observed_visibility_grid_xds,
+                    image_store,
+                )
+                mvc_observed_visibility_grid_xds = None
+
         # Taylor numerators and normalization sums have already been formed by
         # this map task.  Keep the channel PB only in pb_xds for later model
         # prediction and do not send any frequency-sized image through reduce.
@@ -1360,6 +1499,10 @@ def residual_update_continuum_single_field(
     if pb_xds is not None:
         return_dict["task_id"] = int(task_id)
         return_dict["pb_xds"] = pb_xds
+
+    if mvc_observed_visibility_grid_xds is not None:
+        return_dict["task_id"] = int(task_id)
+        return_dict["observed_visibility_grid_xds"] = mvc_observed_visibility_grid_xds
 
     return return_dict
 
@@ -2389,10 +2532,13 @@ def _prepare_cached_mfs_residual_grid(input_data, input_params):
         )
 
     specmode = str(input_params.get("specmode", "mfs")).lower()
+    if specmode == "mvc":
+        # MVC caches are task-local and have already been applied before each
+        # map task's inverse FFT and Taylor construction.
+        return None
     if specmode != "mfs":
         raise ValueError(
-            "visibility_memory_mode caching is currently supported only for "
-            "specmode='mfs'."
+            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
         )
 
     image_data_group_name = input_params.get(
@@ -2511,6 +2657,9 @@ def continuum_minor_cycle_node(
         input_data,
         input_params,
     )
+    observed_visibility_grid_mapping = input_data.get(
+        "observed_visibility_grid_mapping"
+    )
 
     # prepare continuum image, this is doing 1.-4.
     pb_cache_mapping = input_data.get(
@@ -2597,6 +2746,10 @@ def continuum_minor_cycle_node(
 
     if observed_visibility_grid_xds is not None:
         return_dict["observed_visibility_grid_xds"] = observed_visibility_grid_xds
+    if observed_visibility_grid_mapping is not None:
+        return_dict["observed_visibility_grid_mapping"] = (
+            observed_visibility_grid_mapping
+        )
 
     return_dict["static_xds"] = static_xds
     return_dict["timing_psf_fit"] = (

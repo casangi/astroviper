@@ -44,6 +44,7 @@ DISTRIBUTED_APPLICATION_TIMING_TOTAL_KEY = "T_total"
 
 _CONTINUUM_WEIGHT_CACHE_VARIABLE = "WEIGHT_IMAGING_CONTINUUM_CACHE"
 _MFS_VISIBILITY_GRID_CACHE_GROUP = "_MFS_VISIBILITY_GRID_CACHE"
+_MVC_VISIBILITY_GRID_CACHE_GROUP = "_MVC_VISIBILITY_GRID_CACHE"
 _WIDEBAND_PRIMARY_BEAM_CACHE_GROUP = "_WIDEBAND_PRIMARY_BEAM_CACHE"
 _WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE = "PRIMARY_BEAM"
 
@@ -133,6 +134,100 @@ def _remove_mfs_visibility_grid_cache(image_store):
         del root[_MFS_VISIBILITY_GRID_CACHE_GROUP]
 
 
+def _create_mvc_visibility_grid_cache_store(
+    image_store,
+    img_xds,
+    image_params,
+    frequency_values,
+    instrument_polarization_basis,
+    single_precision_image,
+    compressor,
+):
+    """Create the temporary frequency-resolved MVC observed-grid cache."""
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.utils.fft_sizing import (
+        padded_grid_size,
+    )
+
+    root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
+    if _MVC_VISIBILITY_GRID_CACHE_GROUP in root:
+        del root[_MVC_VISIBILITY_GRID_CACHE_GROUP]
+    cache = root.create_group(_MVC_VISIBILITY_GRID_CACHE_GROUP)
+
+    frequencies = np.asarray(frequency_values, dtype=np.float64)
+    polarizations = {
+        "linear": ("XX", "YY"),
+        "circular": ("RR", "LL"),
+    }[instrument_polarization_basis]
+    n_u, n_v = padded_grid_size(
+        (img_xds.sizes["l"], img_xds.sizes["m"]),
+        image_params["fft_padding"],
+    )
+    visibility_dims = ("time", "frequency", "polarization", "u", "v")
+    normalization_dims = ("time", "frequency", "polarization")
+    visibility_shape = (
+        int(img_xds.sizes["time"]),
+        int(frequencies.size),
+        len(polarizations),
+        int(n_u),
+        int(n_v),
+    )
+    normalization_shape = visibility_shape[:3]
+    zarr_format = root.metadata.zarr_format
+
+    visibility_options = {
+        "shape": visibility_shape,
+        "dtype": np.dtype("<c8" if single_precision_image else "<c16"),
+        "chunks": (
+            1,
+            1,
+            1,
+            min(256, int(n_u)),
+            min(256, int(n_v)),
+        ),
+        "fill_value": np.nan + 1j * np.nan,
+        "attributes": {"description": "Temporary MVC observed visibility grid."},
+    }
+    normalization_options = {
+        "shape": normalization_shape,
+        "dtype": np.dtype("<f8"),
+        "chunks": (1, 1, 1),
+        "fill_value": np.nan,
+        "attributes": {"description": "Temporary MVC visibility normalization."},
+    }
+    frequency_options = {
+        "data": frequencies,
+        "chunks": (min(1024, max(1, frequencies.size)),),
+    }
+    if zarr_format == 3:
+        visibility_options["dimension_names"] = visibility_dims
+        normalization_options["dimension_names"] = normalization_dims
+        frequency_options["dimension_names"] = ("frequency",)
+    else:
+        visibility_options["compressor"] = compressor
+        normalization_options["compressor"] = compressor
+
+    visibility = cache.create_array("VISIBILITY", **visibility_options)
+    normalization = cache.create_array(
+        "VISIBILITY_NORMALIZATION", **normalization_options
+    )
+    frequency = cache.create_array("frequency", **frequency_options)
+    if zarr_format == 2:
+        visibility.attrs["_ARRAY_DIMENSIONS"] = list(visibility_dims)
+        normalization.attrs["_ARRAY_DIMENSIONS"] = list(normalization_dims)
+        frequency.attrs["_ARRAY_DIMENSIONS"] = ["frequency"]
+
+    zarr.consolidate_metadata(image_store)
+
+
+def _remove_mvc_visibility_grid_cache(image_store):
+    """Remove the temporary disk-backed MVC observed-grid cache if present."""
+    root = zarr.open_group(image_store, mode="r+", use_consolidated=False)
+    if _MVC_VISIBILITY_GRID_CACHE_GROUP in root:
+        del root[_MVC_VISIBILITY_GRID_CACHE_GROUP]
+
+
 def _mapping_with_task_primary_beams(node_task_data_mapping, pb_cache_mapping):
     """Attach only each task's own in-memory MVC primary beam to its mapping."""
     expected = {int(task_id) for task_id in node_task_data_mapping}
@@ -148,6 +243,29 @@ def _mapping_with_task_primary_beams(node_task_data_mapping, pb_cache_mapping):
         task_id = int(task_id)
         task_mapping[task_id] = dict(mapping)
         task_mapping[task_id]["primary_beam_xds"] = pb_cache_mapping[task_id]
+    return task_mapping
+
+
+def _mapping_with_task_observed_grids(
+    node_task_data_mapping,
+    observed_visibility_grid_mapping,
+):
+    """Attach only each task's own in-memory MVC observed UV-grid cache."""
+    expected = {int(task_id) for task_id in node_task_data_mapping}
+    actual = {int(task_id) for task_id in observed_visibility_grid_mapping}
+    if actual != expected:
+        raise ValueError(
+            "The MVC visibility-grid cache does not match the continuum tasks: "
+            f"expected={sorted(expected)}, received={sorted(actual)}."
+        )
+
+    task_mapping = {}
+    for task_id, mapping in node_task_data_mapping.items():
+        task_id = int(task_id)
+        task_mapping[task_id] = dict(mapping)
+        task_mapping[task_id]["observed_visibility_grid_xds"] = (
+            observed_visibility_grid_mapping[task_id]
+        )
     return task_mapping
 
 
@@ -1354,6 +1472,8 @@ def combine_continuum_chunks(input_data, input_params):
     weight_cache_mapping = {}
     # Optional: gather channelized primary beams
     pb_cache_mapping = {}
+    # Optional: gather task-local MVC observed visibility grids
+    observed_visibility_grid_mapping = {}
 
     for input_index, result in enumerate(input_data):
         if not isinstance(result, dict):
@@ -1437,6 +1557,30 @@ def combine_continuum_chunks(input_data, input_params):
                     raise ValueError(f"Duplicate MVC PB cache for task {task_id}.")
 
                 pb_cache_mapping[task_id] = pb_xds
+
+        if "observed_visibility_grid_xds" in result:
+            task_id = int(result["task_id"])
+            if task_id in observed_visibility_grid_mapping:
+                raise ValueError(
+                    f"Duplicate MVC visibility-grid cache for task {task_id}."
+                )
+            observed_visibility_grid_mapping[task_id] = result[
+                "observed_visibility_grid_xds"
+            ]
+
+        if "observed_visibility_grid_mapping" in result:
+            incoming = result["observed_visibility_grid_mapping"]
+            if not isinstance(incoming, dict):
+                raise TypeError(
+                    "observed_visibility_grid_mapping must be a dictionary."
+                )
+            for task_id, observed_grid_xds in incoming.items():
+                task_id = int(task_id)
+                if task_id in observed_visibility_grid_mapping:
+                    raise ValueError(
+                        f"Duplicate MVC visibility-grid cache for task {task_id}."
+                    )
+                observed_visibility_grid_mapping[task_id] = observed_grid_xds
 
     # ------------------------------------------------------------------
     # Taylor-image reduction
@@ -1634,6 +1778,11 @@ def combine_continuum_chunks(input_data, input_params):
 
     if pb_cache_mapping:
         return_dict["pb_cache_mapping"] = pb_cache_mapping
+
+    if observed_visibility_grid_mapping:
+        return_dict["observed_visibility_grid_mapping"] = (
+            observed_visibility_grid_mapping
+        )
 
     return return_dict
 
@@ -2581,16 +2730,14 @@ def image_continuum_single_field(
         the initial implementation; the two policies may be unified later.
 
     visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
-        MFS residual-update storage policy for the observed-data visibility grid.
-        ``"in_memory"`` retains the globally reduced observed-data Taylor UV
-        grid from the first cycle; later map tasks grid only the predicted-model
-        contribution, and the append node subtracts it from the cached observed
-        grid before the inverse FFT. ``"in_place"`` persists that same reduced
-        grid in a temporary group in the image Zarr store and reloads it in each
-        append node. ``"recompute"`` reloads the original observed visibilities
-        and grids their visibility-domain residual during every residual-update
-        cycle. Caching currently applies only to MFS; MVC requires
-        ``"recompute"``.
+        Continuum residual-update storage policy for observed visibility grids.
+        ``"in_memory"`` retains the first-cycle grid in driver memory, while
+        ``"in_place"`` stores it temporarily in the image Zarr store. Later
+        cycles grid only the predicted-model contribution and subtract it from
+        the cached observed grid. ``"recompute"`` instead reloads the original
+        observed visibilities and grids their visibility-domain residual every
+        cycle. MFS caches the globally reduced Taylor UV grid; MVC caches each
+        map task's exclusively owned frequency-resolved UV planes.
 
     widebandpb_memory_mode : {"in_memory", "in_place", "recompute"}, optional
         MVC-only storage policy for the frequency-dependent primary beam.
@@ -2667,12 +2814,6 @@ def image_continuum_single_field(
         raise ValueError(
             f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
         )
-    if specmode == "mvc" and visibility_memory_mode != "recompute":
-        raise ValueError(
-            "visibility_memory_mode caching is currently supported only for "
-            "specmode='mfs'; MVC requires 'recompute'."
-        )
-
     # Work with an application-local copy: continuum setup may augment the
     # image parameters with metadata derived from the Processing Set.
     image_params = dict(image_params)
@@ -2895,6 +3036,21 @@ def image_continuum_single_field(
             time.time() - start
         )
 
+    if specmode == "mvc" and visibility_memory_mode == "in_place":
+        start = time.time()
+        _create_mvc_visibility_grid_cache_store(
+            image_store,
+            img_xds,
+            image_params,
+            image_params["frequency_coords"],
+            instrument_polarization_basis,
+            single_precision_image,
+            compressor,
+        )
+        timing_distributed_application["T_create_in_place_visibility_cache"] = (
+            time.time() - start
+        )
+
     original_weight_data_groups = None
     weight_cache_is_active = False
     if weight_memory_mode == "in_place":
@@ -2952,6 +3108,7 @@ def image_continuum_single_field(
     model_xds = None
     model_uv_xds = None
     observed_visibility_grid_xds = None
+    observed_visibility_grid_mapping = None
     last_minor_return_dict = None
     n_major_cycles = 0
     timing_graphs = []
@@ -3148,7 +3305,7 @@ def image_continuum_single_field(
             append_input_params["deconvolution"] = last_minor_return_dict[
                 "deconvolution"
             ]
-            if visibility_memory_mode == "in_memory":
+            if specmode == "mfs" and visibility_memory_mode == "in_memory":
                 if observed_visibility_grid_xds is None:
                     raise RuntimeError(
                         "No cached observed-data MFS grid is available for "
@@ -3172,6 +3329,15 @@ def image_continuum_single_field(
             cycle_node_task_data_mapping = _mapping_with_task_primary_beams(
                 node_task_data_mapping,
                 pb_cache_mapping,
+            )
+        if (
+            specmode == "mvc"
+            and not is_n_iter_0
+            and visibility_memory_mode == "in_memory"
+        ):
+            cycle_node_task_data_mapping = _mapping_with_task_observed_grids(
+                cycle_node_task_data_mapping,
+                observed_visibility_grid_mapping,
             )
 
         cycle_return_dict, graph_timings = compute_continuum_graph(
@@ -3219,7 +3385,7 @@ def image_continuum_single_field(
             # PSF, PB, PSF sidelobe level ...
             static_xds = cycle_return_dict["static_xds"]
 
-            if visibility_memory_mode == "in_memory":
+            if specmode == "mfs" and visibility_memory_mode == "in_memory":
                 observed_visibility_grid_xds = cycle_return_dict.get(
                     "observed_visibility_grid_xds"
                 )
@@ -3227,6 +3393,27 @@ def image_continuum_single_field(
                     raise RuntimeError(
                         "The first MFS cycle did not return its globally reduced "
                         "observed-data visibility-grid cache."
+                    )
+
+            if specmode == "mvc" and visibility_memory_mode == "in_memory":
+                observed_visibility_grid_mapping = cycle_return_dict.get(
+                    "observed_visibility_grid_mapping"
+                )
+                if observed_visibility_grid_mapping is None:
+                    raise RuntimeError(
+                        "The first MVC cycle did not return its task-local "
+                        "observed visibility-grid caches."
+                    )
+                expected_task_ids = {int(task_id) for task_id in node_task_data_mapping}
+                actual_task_ids = {
+                    int(task_id) for task_id in observed_visibility_grid_mapping
+                }
+                if actual_task_ids != expected_task_ids:
+                    raise RuntimeError(
+                        "The first MVC cycle returned an incomplete observed "
+                        "visibility-grid cache: "
+                        f"expected={sorted(expected_task_ids)}, "
+                        f"received={sorted(actual_task_ids)}."
                     )
 
         if "model_xds" not in cycle_return_dict:
@@ -3348,7 +3535,7 @@ def image_continuum_single_field(
 
     final_input_params["weight_cache_mapping"] = weight_cache_mapping
 
-    if visibility_memory_mode == "in_memory":
+    if specmode == "mfs" and visibility_memory_mode == "in_memory":
         if observed_visibility_grid_xds is None:
             raise RuntimeError(
                 "The final MFS residual update requires the cached observed-data "
@@ -3386,6 +3573,11 @@ def image_continuum_single_field(
         final_node_task_data_mapping = _mapping_with_task_primary_beams(
             node_task_data_mapping,
             pb_cache_mapping,
+        )
+    if specmode == "mvc" and visibility_memory_mode == "in_memory":
+        final_node_task_data_mapping = _mapping_with_task_observed_grids(
+            final_node_task_data_mapping,
+            observed_visibility_grid_mapping,
         )
 
     final_return_dict, graph_timings = compute_continuum_graph(
@@ -3451,6 +3643,8 @@ def image_continuum_single_field(
     )
     if specmode == "mvc" and widebandpb_memory_mode == "in_place":
         _remove_wideband_primary_beam_cache(image_store)
+    if specmode == "mvc" and visibility_memory_mode == "in_place":
+        _remove_mvc_visibility_grid_cache(image_store)
     if specmode == "mfs" and visibility_memory_mode == "in_place":
         _remove_mfs_visibility_grid_cache(image_store)
     write_image(

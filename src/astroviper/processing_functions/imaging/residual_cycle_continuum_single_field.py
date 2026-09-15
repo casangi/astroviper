@@ -18,6 +18,7 @@ def residual_cycle_continuum_single_field(
     fft_backend="pyfftw",
     image_data_variables_keep=None,
     visibility_memory_mode="recompute",
+    observed_visibility_grid_xds=None,
     image_data_group_in_name="model",
     image_data_group_out_name="residual",
     last_residual_cycle=False,
@@ -137,11 +138,6 @@ def residual_cycle_continuum_single_field(
         raise ValueError(
             "visibility_memory_mode must be 'in_memory', 'in_place', or "
             f"'recompute'; received {visibility_memory_mode!r}."
-        )
-    if specmode == "mvc" and visibility_memory_mode != "recompute":
-        raise ValueError(
-            "visibility_memory_mode caching is currently supported only for "
-            "specmode='mfs'; MVC requires 'recompute'."
         )
 
     nterms = int(image_params.get("nterms", 2))
@@ -266,15 +262,18 @@ def residual_cycle_continuum_single_field(
 
             start = time.time()
 
-            calculate_residual_visibilities(
-                ps_xdt,
-                ms_data_group_out_residual="residual",
-                ms_data_group_in_model="model",
-                ms_data_group_in_observed=ps_data_group_name,
-            )
+            if visibility_memory_mode == "recompute":
+                calculate_residual_visibilities(
+                    ps_xdt,
+                    ms_data_group_out_residual="residual",
+                    ms_data_group_in_model="model",
+                    ms_data_group_in_observed=ps_data_group_name,
+                )
 
-            T_residual_vis += time.time() - start
-            ps_data_group_name = "residual"
+                T_residual_vis += time.time() - start
+                ps_data_group_name = "residual"
+            else:
+                ps_data_group_name = "model"
 
         T_degrid += time.time() - start
 
@@ -323,6 +322,24 @@ def residual_cycle_continuum_single_field(
             processing_function_threads=processing_function_threads,
             complex_dtype=complex_dtype,
         )
+
+        if not is_n_iter_0 and visibility_memory_mode != "recompute":
+            if observed_visibility_grid_xds is None:
+                raise ValueError(
+                    "Cached-grid MVC cycles require a task-local observed "
+                    "visibility grid."
+                )
+            from astroviper.processing_functions.imaging.image_continuum_single_field import (
+                form_residual_grid_from_cache,
+            )
+
+            img_xds = form_residual_grid_from_cache(
+                observed_visibility_grid_xds,
+                img_xds,
+                image_data_group_name=image_data_group_out_name,
+                grid_kind="MVC",
+            )
+            img_xds.attrs["specmode"] = "mvc"
 
     else:
         raise ValueError(

@@ -195,6 +195,43 @@ def test_recompute_mfs_append_does_not_require_or_modify_a_cache():
     np.testing.assert_array_equal(reduced.VISIBILITY, 2.5)
 
 
+def test_extract_mvc_observed_grid_removes_private_map_payload():
+    """The MVC map returns its cache separately from reduced Taylor products."""
+    frequency = [1.0e9, 1.1e9]
+    image = xr.Dataset(
+        {
+            continuum_node._MVC_OBSERVED_VISIBILITY_CACHE: xr.DataArray(
+                np.full((1, 2, 1, 2, 2), 5.0 + 0.0j),
+                dims=("time", "frequency", "polarization", "u", "v"),
+                coords={"frequency": frequency},
+            ),
+            continuum_node._MVC_OBSERVED_NORMALIZATION_CACHE: xr.DataArray(
+                np.full((1, 2, 1), 4.0),
+                dims=("time", "frequency", "polarization"),
+                coords={"frequency": frequency},
+            ),
+            "MVC_RESIDUAL_TAYLOR_NUMERATOR": xr.DataArray(
+                np.ones((1, 2, 1, 2, 2)),
+                dims=("time", "taylor_term", "polarization", "l", "m"),
+            ),
+        },
+        attrs={"data_groups": {}},
+    )
+
+    reduced_image, observed = continuum_node._extract_mvc_observed_visibility_grid(
+        image
+    )
+
+    assert continuum_node._MVC_OBSERVED_VISIBILITY_CACHE not in reduced_image
+    assert continuum_node._MVC_OBSERVED_NORMALIZATION_CACHE not in reduced_image
+    np.testing.assert_array_equal(observed.VISIBILITY, 5.0)
+    np.testing.assert_array_equal(observed.VISIBILITY_NORMALIZATION, 4.0)
+    assert observed.attrs["data_groups"]["residual"] == {
+        "visibility": "VISIBILITY",
+        "visibility_normalization": "VISIBILITY_NORMALIZATION",
+    }
+
+
 def test_mfs_append_accumulates_before_preparing_fourier_model(monkeypatch):
     """The append FFT consumes the fully accumulated post-update MFS model."""
     previous = _model_dataset(2.0)

@@ -107,16 +107,19 @@ IMAGING_PARAM_DOCS = {
         "the initial implementation; the two policies may be unified later."
     ),
     "visibility_memory_mode": (
-        "MFS residual-update storage policy for the observed-data visibility grid.\n"
-        '``"in_memory"`` retains the globally reduced observed-data Taylor UV\n'
-        "grid from the first cycle; later map tasks grid only the predicted-model\n"
-        "contribution, and the append node subtracts it from the cached observed\n"
-        'grid before the inverse FFT. ``"in_place"`` persists that same reduced\n'
-        "grid in a temporary group in the image Zarr store and reloads it in each\n"
-        'append node. ``"recompute"`` reloads the original observed visibilities\n'
-        "and grids their visibility-domain residual during every residual-update\n"
-        "cycle. Caching currently applies only to MFS; MVC requires\n"
-        '``"recompute"``.'
+        "Continuum residual-update storage policy for observed visibility grids.\n"
+        '``"in_memory"`` retains the first-cycle grid in driver memory, while\n'
+        '``"in_place"`` stores it temporarily in the image Zarr store. Later\n'
+        "cycles grid only the predicted-model contribution and subtract it from\n"
+        'the cached observed grid. ``"recompute"`` instead reloads the original\n'
+        "observed visibilities and grids their visibility-domain residual every\n"
+        "cycle. MFS caches the globally reduced Taylor UV grid; MVC caches each\n"
+        "map task's exclusively owned frequency-resolved UV planes."
+    ),
+    "observed_visibility_grid_xds": (
+        "Task-local cached observed visibility grid used by later residual-update\n"
+        "cycles. The distributed application supplies this only for in-memory MVC\n"
+        "caching; other modes and first cycles leave it unset."
     ),
     "widebandpb_memory_mode": (
         "MVC-only storage policy for the frequency-dependent primary beam.\n"

@@ -2,6 +2,9 @@ import xarray as xr
 
 from astroviper.utils.param_docs import shares_param_docs
 
+_MVC_OBSERVED_VISIBILITY_CACHE = "_MVC_OBSERVED_VISIBILITY_CACHE"
+_MVC_OBSERVED_NORMALIZATION_CACHE = "_MVC_OBSERVED_NORMALIZATION_CACHE"
+
 ###############################################################################
 # Generic helper functions
 ###############################################################################
@@ -1146,15 +1149,17 @@ def prepare_model_uv_mvc_single_field(
     return mvc_xds
 
 
-def form_mfs_residual_grid_from_cache(
+def form_residual_grid_from_cache(
     observed_grid_xds,
     model_grid_xds,
     image_data_group_name="residual",
+    grid_kind="continuum",
 ):
-    """Form an MFS residual UV grid from cached observed and model grids.
+    """Form a residual UV grid from cached observed and model grids.
 
-    The two inputs are globally reduced Taylor-grid datasets. Their visibility
-    grids are subtracted, while the observed-data normalization is retained
+    The inputs may be globally reduced MFS Taylor grids or task-local,
+    frequency-resolved MVC grids. Their visibility grids are subtracted, while
+    the observed-data normalization is retained
     unchanged because it represents the sum of imaging weights rather than a
     visibility contribution. The model-grid normalization is intentionally
     ignored: the gridder skips exactly zero model samples, so that auxiliary
@@ -1164,12 +1169,14 @@ def form_mfs_residual_grid_from_cache(
     Parameters
     ----------
     observed_grid_xds : xarray.Dataset
-        Cached globally reduced observed-data Taylor UV grid.
+        Cached observed-data UV grid.
     model_grid_xds : xarray.Dataset
-        Globally reduced predicted-model Taylor UV grid for the current cycle.
+        Predicted-model UV grid for the current cycle.
     image_data_group_name : str, optional
         Image data group registering ``visibility`` and
         ``visibility_normalization`` in both datasets.
+    grid_kind : str, optional
+        Human-readable grid type used in diagnostics and metadata.
 
     Returns
     -------
@@ -1229,13 +1236,15 @@ def form_mfs_residual_grid_from_cache(
         )
     except ValueError as exc:
         raise ValueError(
-            "Cached observed and predicted-model MFS grids have incompatible "
+            f"Cached observed and predicted-model {grid_kind} grids have "
+            "incompatible "
             "coordinates."
         ) from exc
 
     if observed_grid.dims != model_grid.dims or observed_grid.shape != model_grid.shape:
         raise ValueError(
-            "Cached observed and predicted-model MFS visibility grids must have "
+            f"Cached observed and predicted-model {grid_kind} visibility grids "
+            "must have "
             "identical dimensions and shapes."
         )
 
@@ -1252,7 +1261,7 @@ def form_mfs_residual_grid_from_cache(
         attrs={
             **model_grid.attrs,
             "description": (
-                "MFS residual Taylor UV grid formed from cached observed-data "
+                f"{grid_kind.upper()} residual UV grid formed from cached observed-data "
                 "and reduced predicted-model grids."
             ),
         },
@@ -1262,6 +1271,20 @@ def form_mfs_residual_grid_from_cache(
     )
     residual_xds.attrs["visibility_grid_source"] = "cached_observed_minus_model"
     return residual_xds
+
+
+def form_mfs_residual_grid_from_cache(
+    observed_grid_xds,
+    model_grid_xds,
+    image_data_group_name="residual",
+):
+    """Form an MFS Taylor residual grid using the generic cache operation."""
+    return form_residual_grid_from_cache(
+        observed_grid_xds,
+        model_grid_xds,
+        image_data_group_name=image_data_group_name,
+        grid_kind="MFS",
+    )
 
 
 @shares_param_docs
@@ -1280,6 +1303,7 @@ def residual_update_continuum_single_field(
     fft_backend="pyfftw",
     image_data_variables_keep=None,
     visibility_memory_mode="recompute",
+    observed_visibility_grid_xds=None,
     is_n_iter_0=True,
     model_xds=None,
     model_uv_xds=None,
@@ -1494,6 +1518,7 @@ def residual_update_continuum_single_field(
         fft_backend=fft_backend,
         image_data_variables_keep=image_data_variables_keep,
         visibility_memory_mode=visibility_memory_mode,
+        observed_visibility_grid_xds=observed_visibility_grid_xds,
     )
 
     timing["T_residual_cycle"] = time.time() - start
@@ -1505,6 +1530,21 @@ def residual_update_continuum_single_field(
     # in the dataset because the global Taylor conversion reuses them as
     # spectral weights.
     timing["T_local_ifft"] = 0.0
+
+    mvc_observed_grid_xds = None
+    if (
+        str(specmode).lower() == "mvc"
+        and is_n_iter_0
+        and visibility_memory_mode != "recompute"
+    ):
+        residual_group = img_xds.attrs["data_groups"]["residual"]
+        visibility_name = residual_group["visibility"]
+        normalization_name = residual_group["visibility_normalization"]
+        mvc_observed_grid_xds = img_xds[[visibility_name, normalization_name]].copy(
+            deep=True
+        )
+        mvc_observed_grid_xds.attrs = img_xds.attrs.copy()
+        mvc_observed_grid_xds.attrs["visibility_grid_source"] = "observed_data"
 
     if str(specmode).lower() == "mvc":
         from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
@@ -1588,6 +1628,15 @@ def residual_update_continuum_single_field(
         for variable_name, data_array in contributions.data_vars.items():
             img_xds[variable_name] = data_array
         img_xds.attrs.update(contributions.attrs)
+
+        if mvc_observed_grid_xds is not None:
+            residual_group = mvc_observed_grid_xds.attrs["data_groups"]["residual"]
+            img_xds[_MVC_OBSERVED_VISIBILITY_CACHE] = mvc_observed_grid_xds[
+                residual_group["visibility"]
+            ]
+            img_xds[_MVC_OBSERVED_NORMALIZATION_CACHE] = mvc_observed_grid_xds[
+                residual_group["visibility_normalization"]
+            ]
 
         timing["T_local_ifft"] = time.time() - start
 

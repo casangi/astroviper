@@ -22,6 +22,7 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     convert_mvc_cubes_to_taylor_normal_equations,
     finalize_mvc_taylor_normal_equations,
     form_mfs_residual_grid_from_cache,
+    form_residual_grid_from_cache,
     make_mvc_taylor_normal_equation_contributions,
     prepare_model_uv_continuum_single_field,
     prepare_model_uv_mvc_single_field,
@@ -117,6 +118,50 @@ def test_cached_mfs_grid_ignores_model_normalization():
 
     np.testing.assert_array_equal(residual.VISIBILITY, 3.5)
     np.testing.assert_array_equal(residual.VISIBILITY_NORMALIZATION, 4.0)
+
+
+def test_cached_mvc_frequency_grid_subtracts_model_plane_by_plane():
+    """MVC cache subtraction preserves every task-local channel and weight sum."""
+    dims = ("time", "frequency", "polarization", "u", "v")
+    normalization_dims = ("time", "frequency", "polarization")
+    attrs = {
+        "data_groups": {
+            "residual": {
+                "visibility": "VISIBILITY",
+                "visibility_normalization": "VISIBILITY_NORMALIZATION",
+            }
+        }
+    }
+    coordinates = {"frequency": [1.0e9, 1.1e9]}
+    observed = xr.Dataset(
+        {
+            "VISIBILITY": xr.DataArray(
+                np.asarray([4.0, 7.0], dtype=np.complex128).reshape(1, 2, 1, 1, 1),
+                dims=dims,
+                coords=coordinates,
+            ),
+            "VISIBILITY_NORMALIZATION": xr.DataArray(
+                np.asarray([2.0, 3.0]).reshape(1, 2, 1),
+                dims=normalization_dims,
+                coords=coordinates,
+            ),
+        },
+        attrs=attrs,
+    )
+    model = observed.copy(deep=True)
+    model["VISIBILITY"].data[...] = np.asarray([1.0, 2.5]).reshape(1, 2, 1, 1, 1)
+    model["VISIBILITY_NORMALIZATION"].data[...] = 1.0
+
+    residual = form_residual_grid_from_cache(observed, model, grid_kind="MVC")
+
+    np.testing.assert_allclose(
+        residual.VISIBILITY.values.ravel(),
+        np.asarray([3.0, 4.5]),
+    )
+    np.testing.assert_array_equal(
+        residual.VISIBILITY_NORMALIZATION,
+        observed.VISIBILITY_NORMALIZATION,
+    )
 
 
 def test_accumulate_continuum_model_adds_later_increment_positionally():
