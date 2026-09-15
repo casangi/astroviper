@@ -362,7 +362,8 @@ def create_imaging_dict(
         - ``start_peakres_nomask`` : ``(nt, nf, np)`` unmasked starting peaks.
         - ``start_model_flux`` : ``(nt, nf, np)`` starting model fluxes.
         - ``min_psf_fraction``, ``max_psf_fraction``, ``max_psf_sidelobe``
-        - ``masksum``
+        - ``masksum`` : ``(nt, nf, np)`` per-plane count of valid (unmasked)
+          pixels.
 
     Returns
     -------
@@ -439,7 +440,7 @@ def create_imaging_dict(
                     "start_peakres_nomask": start_peakres_nomask[tt, nn, pp],
                     "peakres": peakres,
                     "peakres_nomask": peakres_nomask,
-                    "masksum": masksum,
+                    "masksum": int(masksum[tt, nn, pp]),
                 }
 
                 imaging_dict.add(returnvals, time=tt, pol=pp, chan=nn)
@@ -587,7 +588,9 @@ def deconvolve(
             f"(npol_psf = {npol_psf}, npol_image = {npol})"
         )
 
-    masksum = imgstats.get_image_masksum(img_xds, dv=residual_name)
+    masksum = imgstats.get_image_masksum(
+        img_xds, data_group_name=image_data_group_in_name
+    )
 
     deconvolve_params = _validate_deconvolve_params(deconvolve_params)
 

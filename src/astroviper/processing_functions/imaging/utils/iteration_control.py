@@ -27,6 +27,7 @@ from typing import Any
 
 import numpy as np
 
+from astroviper.processing_functions.image_analysis import image_statistics as imgstats
 from astroviper.processing_functions.imaging.utils.imaging_dict import (
     FIELD_ACCUM,
     ImagingDict,
@@ -1784,7 +1785,9 @@ def get_calculate_cycle_controls(
         residual_abs = np.abs(img_xds[residual_data_group["sky"]].values)
         plane_peak = residual_abs.max(axis=(-2, -1))  # (ntime, nfreq, npol)
         ntime, nfreq, npol = plane_peak.shape
-        masksum = img_xds.sizes["l"] * img_xds.sizes["m"]
+        masksum = imgstats.get_image_masksum(
+            img_xds, data_group_name=image_data_group_in_name
+        )
         rd = ImagingDict()
         for tt in range(ntime):
             for nn in range(nfreq):
@@ -1794,7 +1797,7 @@ def get_calculate_cycle_controls(
                         {
                             "peakres": peak,
                             "peakres_nomask": peak,
-                            "masksum": masksum,
+                            "masksum": int(masksum[tt, nn, pp]),
                             "iter_done": 0,
                             "max_psf_sidelobe": iteration_control_params[
                                 "max_psf_fraction"
