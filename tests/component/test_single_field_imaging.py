@@ -1227,7 +1227,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "start_peakres_nomask": [0.35750769883669886],
         "peakres": [-0.08899075577822424],
         "peakres_nomask": [-0.11071206252751019],
-        "masksum": [62500],
+        "masksum": [59771],
         "stop_description": "Reached the iteration limit",
     },
     (0, 1, 0): {
@@ -1248,7 +1248,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "start_peakres_nomask": [0.12055068831924319],
         "peakres": [0.07430471569361485],
         "peakres_nomask": [0.08951620816899497],
-        "masksum": [62500],
+        "masksum": [59771],
         "stop_description": "Reached the iteration limit",
     },
     (0, 0, 1): {
@@ -1269,7 +1269,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "start_peakres_nomask": [0.3351074869017025],
         "peakres": [0.09003297370692762],
         "peakres_nomask": [0.09003297370692762],
-        "masksum": [62500],
+        "masksum": [59771],
         "stop_description": "Reached the iteration limit",
     },
     (0, 1, 1): {
@@ -1290,7 +1290,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "start_peakres_nomask": [-0.11825339664330473],
         "peakres": [0.07750591941443867],
         "peakres_nomask": [-0.08463490573442017],
-        "masksum": [62500],
+        "masksum": [59771],
         "stop_description": "Reached the iteration limit",
     },
     (0, 0, 2): {
@@ -1311,7 +1311,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "start_peakres_nomask": [0.3380203777669396],
         "peakres": [0.08979484245919653],
         "peakres_nomask": [0.08979484245919653],
-        "masksum": [62500],
+        "masksum": [59771],
         "stop_description": "Reached the iteration limit",
     },
     (0, 1, 2): {
@@ -1332,7 +1332,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "start_peakres_nomask": [0.13011414045626285],
         "peakres": [-0.07639895031706921],
         "peakres_nomask": [-0.08528560955343739],
-        "masksum": [62500],
+        "masksum": [59771],
         "stop_description": "Reached the iteration limit",
     },
     (0, 0, 3): {
@@ -1353,7 +1353,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "start_peakres_nomask": [0.3250153884702824],
         "peakres": [0.09214764521763133],
         "peakres_nomask": [0.09214764521763133],
-        "masksum": [62500],
+        "masksum": [59771],
         "stop_description": "Reached the iteration limit",
     },
     (0, 1, 3): {
@@ -1374,7 +1374,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "start_peakres_nomask": [0.13275841330042387],
         "peakres": [0.07901175475017379],
         "peakres_nomask": [0.08541584586642978],
-        "masksum": [62500],
+        "masksum": [59771],
         "stop_description": "Reached the iteration limit",
     },
     (0, 0, 4): {
@@ -1395,7 +1395,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "start_peakres_nomask": [0.35334581919803215],
         "peakres": [0.08930366061252694],
         "peakres_nomask": [0.09027342549634497],
-        "masksum": [62500],
+        "masksum": [59771],
         "stop_description": "Reached the iteration limit",
     },
     (0, 1, 4): {
@@ -1416,7 +1416,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "start_peakres_nomask": [0.1105504622894227],
         "peakres": [0.07635328920165872],
         "peakres_nomask": [-0.09901618422777503],
-        "masksum": [62500],
+        "masksum": [59771],
         "stop_description": "Reached the iteration limit",
     },
 }
@@ -1473,7 +1473,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             -0.10285130475892759,
             -0.08985693562049257,
         ],
-        "masksum": [62500, 62500, 62500, 62500],
+        "masksum": [59771, 59771, 59771, 59771],
         "stop_description": "Reached the major cycle limit (nmajor)",
     },
     (0, 1, 0): {
@@ -1524,7 +1524,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             -0.05892657840905252,
             -0.04888484815084779,
         ],
-        "masksum": [62500, 62500, 62500, 62500],
+        "masksum": [59771, 59771, 59771, 59771],
         "stop_description": "Reached the major cycle limit (nmajor)",
     },
     (0, 0, 1): {
@@ -1575,7 +1575,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             -0.07955797944228352,
             -0.06498572800663095,
         ],
-        "masksum": [62500, 62500, 62500, 62500],
+        "masksum": [59771, 59771, 59771, 59771],
         "stop_description": "Reached the major cycle limit (nmajor)",
     },
     (0, 1, 1): {
@@ -1626,7 +1626,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             -0.05753203513591941,
             -0.04780307601839216,
         ],
-        "masksum": [62500, 62500, 62500, 62500],
+        "masksum": [59771, 59771, 59771, 59771],
         "stop_description": "Reached the major cycle limit (nmajor)",
     },
     (0, 0, 2): {
@@ -1677,7 +1677,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             0.0776866192006112,
             0.0643197276130056,
         ],
-        "masksum": [62500, 62500, 62500, 62500],
+        "masksum": [59771, 59771, 59771, 59771],
         "stop_description": "Reached the major cycle limit (nmajor)",
     },
     (0, 1, 2): {
@@ -1728,7 +1728,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             -0.0717053634202924,
             -0.052833260398108546,
         ],
-        "masksum": [62500, 62500, 62500, 62500],
+        "masksum": [59771, 59771, 59771, 59771],
         "stop_description": "Reached the major cycle limit (nmajor)",
     },
     (0, 0, 3): {
@@ -1779,7 +1779,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             0.07802848851809419,
             0.061966590096323146,
         ],
-        "masksum": [62500, 62500, 62500, 62500],
+        "masksum": [59771, 59771, 59771, 59771],
         "stop_description": "Reached the major cycle limit (nmajor)",
     },
     (0, 1, 3): {
@@ -1830,7 +1830,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             -0.05910770216233156,
             -0.0437291158976326,
         ],
-        "masksum": [62500, 62500, 62500, 62500],
+        "masksum": [59771, 59771, 59771, 59771],
         "stop_description": "Reached the major cycle limit (nmajor)",
     },
     (0, 0, 4): {
@@ -1881,7 +1881,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             0.08967755696001663,
             0.07547805510487447,
         ],
-        "masksum": [62500, 62500, 62500, 62500],
+        "masksum": [59771, 59771, 59771, 59771],
         "stop_description": "Reached the major cycle limit (nmajor)",
     },
     (0, 1, 4): {
@@ -1932,7 +1932,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             -0.05946674193127636,
             -0.04122865035022493,
         ],
-        "masksum": [62500, 62500, 62500, 62500],
+        "masksum": [59771, 59771, 59771, 59771],
         "stop_description": "Reached the major cycle limit (nmajor)",
     },
 }
