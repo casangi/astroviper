@@ -581,19 +581,67 @@ def _encode_chunk_blob(chunk, meta):
     return numcodecs.get_codec(comp).encode(arr) if comp else arr.tobytes()
 
 
-def _encode_one_variable(dv, image_store, task_coords, img_xds):
-    """Encode (compress) this task's chunk for one image variable to its on-disk
-    blob, WITHOUT writing it.
+def _fill_value(meta):
+    """The fill value used to pad partial (array-edge) chunks before encoding."""
+    fill = meta["fill_value"]
+    if fill is None or (isinstance(fill, float) and np.isnan(fill)):
+        fill = np.nan if meta["dtype"].kind in "fc" else 0
+    return fill
 
-    The chunk grid index is reconstructed from ``task_coords`` (parallel dims ->
-    ``slice.start // chunk_size``; other dims -> 0), the array is encoded with the
-    variable's on-disk codecs, and the ``(path, blob)`` for
-    ``<store>/<VAR>/c/<i0>/.../<iN>`` is returned.  Partial (edge) chunks are
+
+def _task_chunk_grid(dims, shape, chunk_shape, task_coords, array_path):
+    """Per-axis chunk overlaps of this task's write region with a chunk grid.
+
+    The task's region is the ``task_coords`` slice on each parallel dim and the
+    full axis on every other dim.  Returns the per-axis :func:`_axis_overlaps`
+    lists over a grid of ``chunk_shape``-sized chunks -- one entry per chunk the
+    region touches on that axis.  The region must be chunk-grid **aligned** on
+    every sliced dim: each written chunk file / shard slot is wholly owned by
+    one task, so a region starting or ending inside a chunk (other than the
+    array-edge partial chunk, which is padded) would clobber a neighbouring
+    task's data -- that is rejected here rather than corrupting the store.
+    """
+    per_axis = []
+    for ax, dim in enumerate(dims):
+        if dim in task_coords and isinstance(task_coords[dim].get("slice"), slice):
+            sel = task_coords[dim]["slice"]
+            start = sel.start or 0
+            stop = sel.stop if sel.stop is not None else shape[ax]
+        else:
+            start, stop = 0, shape[ax]
+        overlaps = _axis_overlaps(start, stop, chunk_shape[ax])
+        for ci, lo, hi, _out_lo, _out_hi in overlaps:
+            if lo != 0 or (
+                hi != chunk_shape[ax] and ci * chunk_shape[ax] + hi != shape[ax]
+            ):
+                raise ValueError(
+                    f"{array_path}: task region [{start}, {stop}) on dimension "
+                    f"{dim!r} is not aligned to the on-disk chunk grid (chunk "
+                    f"size {chunk_shape[ax]}); a direct chunk write would "
+                    "clobber a neighbouring task's data."
+                )
+        per_axis.append(overlaps)
+    return per_axis
+
+
+def _encode_one_variable(dv, image_store, task_coords, img_xds):
+    """Encode (compress) this task's region for one image variable to its
+    on-disk chunk blob(s), WITHOUT writing them.
+
+    The task's write region -- the ``task_coords`` slice on each parallel dim,
+    the full axis elsewhere -- may cover **several** chunks when the store was
+    created with ``node_task_image_chunking`` (e.g. l/m sub-chunking, or a
+    frequency chunk finer than the per-task chunk); without it the region is
+    exactly one chunk, as before.  Each covered chunk is encoded with the
+    variable's on-disk codecs and returned as ``(path, blob)`` for
+    ``<store>/<VAR>/c/<i0>/.../<iN>``; the region must be chunk-grid aligned
+    (guarded in :func:`_task_chunk_grid`).  Partial (array-edge) chunks are
     padded to the full chunk shape with the array's fill value so the blob
-    round-trips through Zarr.  Touches only this variable's own metadata, so it is
-    safe to run for several variables concurrently.  Splitting encode from the
-    disk write lets the CPU-bound compression run concurrently while the writes
-    stay serial (see :func:`write_result_chunk_to_disk_using_zarr_skunk_works`).
+    round-trips through Zarr.  Touches only this variable's own metadata, so it
+    is safe to run for several variables concurrently.  Splitting encode from
+    the disk write lets the CPU-bound compression run concurrently while the
+    writes stay serial (see
+    :func:`write_result_chunk_to_disk_using_zarr_skunk_works`).
     """
     name = dv.upper()
     array_path = os.path.join(image_store, name)
@@ -601,27 +649,22 @@ def _encode_one_variable(dv, image_store, task_coords, img_xds):
     oc = meta["outer_chunks"]
     dims = list(img_xds[name].dims)
 
-    chunk_index = []
-    for ax, dim in enumerate(dims):
-        if dim in task_coords and isinstance(task_coords[dim].get("slice"), slice):
-            start = task_coords[dim]["slice"].start or 0
-            chunk_index.append(start // oc[ax])
-        else:
-            chunk_index.append(0)
-
+    per_axis = _task_chunk_grid(dims, meta["shape"], oc, task_coords, array_path)
     values = np.asarray(img_xds[name].values)
-    if values.shape != tuple(oc):
-        fill = meta["fill_value"]
-        if fill is None or (isinstance(fill, float) and np.isnan(fill)):
-            fill = np.nan if meta["dtype"].kind in "fc" else 0
-        chunk = np.full(oc, fill, dtype=meta["dtype"])
-        chunk[tuple(slice(0, s) for s in values.shape)] = values
-    else:
-        chunk = values
+    fill = _fill_value(meta)
 
-    blob = _encode_chunk_blob(chunk, meta)
-    path = _chunk_path(array_path, meta, tuple(chunk_index))
-    return path, blob
+    encoded = []
+    for combo in product(*per_axis):
+        chunk_index = tuple(c[0] for c in combo)
+        piece = values[tuple(slice(c[3], c[4]) for c in combo)]
+        if piece.shape != tuple(oc):
+            chunk = np.full(oc, fill, dtype=meta["dtype"])
+            chunk[tuple(slice(0, s) for s in piece.shape)] = piece
+        else:
+            chunk = piece
+        blob = _encode_chunk_blob(chunk, meta)
+        encoded.append((_chunk_path(array_path, meta, chunk_index), blob))
+    return encoded
 
 
 def _write_blob(path, blob):
@@ -676,9 +719,11 @@ def write_result_chunk_to_disk_using_zarr_skunk_works(
     """
     variables = list(image_data_variables_keep)
 
-    # Phase 1: encode/compress (optionally concurrent across variables).
+    # Phase 1: encode/compress (optionally concurrent across variables). Each
+    # variable yields one blob per on-disk chunk its region covers (several
+    # when node_task_image_chunking subdivides the chunk grid).
     if processing_function_threads <= 1 or len(variables) <= 1:
-        encoded = [
+        encoded_per_variable = [
             _encode_one_variable(dv, image_store, task_coords, img_xds)
             for dv in variables
         ]
@@ -694,13 +739,14 @@ def write_result_chunk_to_disk_using_zarr_skunk_works(
                 )
                 for dv in variables
             ]
-            encoded = [
+            encoded_per_variable = [
                 f.result() for f in futures
             ]  # order matches variables; re-raises
 
     # Phase 2: write the blobs serially (one open file at a time for this task).
-    for path, blob in encoded:
-        _write_blob(path, blob)
+    for encoded in encoded_per_variable:
+        for path, blob in encoded:
+            _write_blob(path, blob)
 
 
 # ---------------------------------------------------------------------------
@@ -846,52 +892,53 @@ def precreate_sharded_files(array_path):
 
 
 def _encode_one_variable_sharded(dv, image_store, task_coords, img_xds):
-    """Encode this task's inner chunk for one variable and resolve where it goes in
-    its (pre-created) shard file.
+    """Encode this task's inner chunk(s) for one variable and resolve where each
+    goes in its (pre-created) shard file.
 
-    Returns ``(shard_path, slot_offset, index_offset, blob)``. Does not write.
+    The task's write region may cover **several** inner chunks when the store
+    was created with ``node_task_image_chunking`` (e.g. l/m sub-chunking, or a
+    frequency inner chunk finer than the per-task chunk); without it the region
+    is exactly one inner chunk, as before.  The region must be aligned to the
+    inner-chunk grid (guarded in :func:`_task_chunk_grid`).  Returns a list of
+    ``(shard_path, slot_offset, index_offset, blob)``. Does not write.
     """
     name = dv.upper()
     array_path = os.path.join(image_store, name)
     meta = _read_array_meta(array_path)
     _assert_sharded_no_index_crc(meta, array_path)
-    inner = meta["sharding"]["chunk_shape"]
+    inner = tuple(meta["sharding"]["chunk_shape"])
     dims = list(img_xds[name].dims)
 
-    # Global inner-chunk index (parallel dims -> slice.start // inner; else 0).
-    chunk_index = []
-    for ax, dim in enumerate(dims):
-        if dim in task_coords and isinstance(task_coords[dim].get("slice"), slice):
-            start = task_coords[dim]["slice"].start or 0
-            chunk_index.append(start // inner[ax])
-        else:
-            chunk_index.append(0)
-
+    per_axis = _task_chunk_grid(dims, meta["shape"], inner, task_coords, array_path)
     values = np.asarray(img_xds[name].values)
-    if values.shape != tuple(inner):
-        fill = meta["fill_value"]
-        if fill is None or (isinstance(fill, float) and np.isnan(fill)):
-            fill = np.nan if meta["dtype"].kind in "fc" else 0
-        chunk = np.full(inner, fill, dtype=meta["dtype"])
-        chunk[tuple(slice(0, s) for s in values.shape)] = values
-    else:
-        chunk = values
-
-    blob = _encode_inner_chunk(chunk, meta)
+    fill = _fill_value(meta)
     slot = _shard_slot_size(meta)
     ips, n_inner = _shard_inner_per_shard(meta)
-    if len(blob) > slot:
-        raise ValueError(
-            f"{name}: encoded inner chunk is {len(blob)} B but the shard slot is "
-            f"{slot} B. Increase the slot margin in _shard_slot_size."
-        )
-    shard_index = tuple(chunk_index[i] // ips[i] for i in range(len(chunk_index)))
-    within = tuple(chunk_index[i] % ips[i] for i in range(len(chunk_index)))
-    flat = int(np.ravel_multi_index(within, ips))
-    shard_path = _chunk_path(array_path, meta, shard_index)
-    slot_offset = flat * slot
-    index_offset = n_inner * slot + flat * 16
-    return shard_path, slot_offset, index_offset, blob
+
+    encoded = []
+    for combo in product(*per_axis):
+        # Global inner-chunk index of this piece of the region.
+        chunk_index = tuple(c[0] for c in combo)
+        piece = values[tuple(slice(c[3], c[4]) for c in combo)]
+        if piece.shape != inner:
+            chunk = np.full(inner, fill, dtype=meta["dtype"])
+            chunk[tuple(slice(0, s) for s in piece.shape)] = piece
+        else:
+            chunk = piece
+
+        blob = _encode_inner_chunk(chunk, meta)
+        if len(blob) > slot:
+            raise ValueError(
+                f"{name}: encoded inner chunk is {len(blob)} B but the shard "
+                f"slot is {slot} B. Increase the slot margin in "
+                "_shard_slot_size."
+            )
+        shard_index = tuple(chunk_index[i] // ips[i] for i in range(len(chunk_index)))
+        within = tuple(chunk_index[i] % ips[i] for i in range(len(chunk_index)))
+        flat = int(np.ravel_multi_index(within, ips))
+        shard_path = _chunk_path(array_path, meta, shard_index)
+        encoded.append((shard_path, flat * slot, n_inner * slot + flat * 16, blob))
+    return encoded
 
 
 def write_result_chunk_to_disk_sharded_skunk_works(
@@ -914,9 +961,11 @@ def write_result_chunk_to_disk_sharded_skunk_works(
     """
     variables = list(image_data_variables_keep)
 
-    # Phase 1: encode/compress each variable's inner chunk (optionally concurrent).
+    # Phase 1: encode/compress each variable's inner chunk(s) (optionally
+    # concurrent across variables; several inner chunks per variable when
+    # node_task_image_chunking subdivides the inner-chunk grid).
     if processing_function_threads <= 1 or len(variables) <= 1:
-        encoded = [
+        encoded_per_variable = [
             _encode_one_variable_sharded(dv, image_store, task_coords, img_xds)
             for dv in variables
         ]
@@ -932,12 +981,15 @@ def write_result_chunk_to_disk_sharded_skunk_works(
                 )
                 for dv in variables
             ]
-            encoded = [f.result() for f in futures]
+            encoded_per_variable = [f.result() for f in futures]
 
     # Phase 2: pwrite each inner chunk + its index entry into the shared shard
     # file (serial per task; disjoint offsets across tasks -> concurrency-safe).
-    for shard_path, slot_offset, index_offset, blob in encoded:
-        _pwrite_shard_slot_with_eio_retry(shard_path, slot_offset, index_offset, blob)
+    for encoded in encoded_per_variable:
+        for shard_path, slot_offset, index_offset, blob in encoded:
+            _pwrite_shard_slot_with_eio_retry(
+                shard_path, slot_offset, index_offset, blob
+            )
 
 
 # Transient-I/O retry schedule for the direct chunk reads and sharded pwrites:
