@@ -559,9 +559,9 @@ def deconvolve(
     residual_name = data_group_in["sky"]
     psf_name = data_group_in["point_spread_function"]
     model_name = data_group_out["sky"]
-    max_sidelobe_point_spread_function_name = data_group_out.get(
-        "max_sidelobe_point_spread_function", None
-    )
+    max_sidelobe_point_spread_function_name = data_group_out[
+        "max_sidelobe_point_spread_function"
+    ]
 
     if model_name not in img_xds.data_vars:
         img_xds[model_name] = xr.zeros_like(img_xds[residual_name])

@@ -1747,8 +1747,8 @@ def build_residual_imaging_dict(
         Name of the entry in ``img_xds.attrs["data_groups"]`` whose
         ``"sky"`` key resolves to the residual variable.
     iteration_control_params : dict
-        Iteration-control parameters; ``max_psf_fraction`` and ``loop_gain``
-        seed the placeholder per-plane fields.
+        Iteration-control parameters; ``loop_gain`` seeds the placeholder
+        per-plane field.
 
     Returns
     -------
@@ -1763,6 +1763,9 @@ def build_residual_imaging_dict(
     masksum = imgstats.get_image_masksum(
         img_xds, data_group_name=image_data_group_in_name
     )
+    max_psf_sidelobe_arr = img_xds[
+        residual_data_group["max_sidelobe_point_spread_function"]
+    ].values  # (ntime, nfreq, npol)
     rd = ImagingDict()
     for tt in range(ntime):
         for nn in range(nfreq):
@@ -1774,9 +1777,7 @@ def build_residual_imaging_dict(
                         "peakres_nomask": peak,
                         "masksum": int(masksum[tt, nn, pp]),
                         "iter_done": 0,
-                        "max_psf_sidelobe": iteration_control_params[
-                            "max_psf_fraction"
-                        ],
+                        "max_psf_sidelobe": float(max_psf_sidelobe_arr[tt, nn, pp]),
                         "loop_gain": iteration_control_params["loop_gain"],
                     },
                     time=tt,
