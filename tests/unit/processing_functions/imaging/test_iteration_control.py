@@ -14,6 +14,9 @@ Tests cover:
 
 import unittest
 
+import numpy as np
+import xarray as xr
+
 from astroviper.processing_functions.imaging.utils.imaging_dict import (
     FIELD_ACCUM,
     FIELD_SINGLE_VALUE,
@@ -29,6 +32,7 @@ from astroviper.processing_functions.imaging.utils.iteration_control import (  #
     MINOR_CONTINUE,
     IterationController,
     StopCode,
+    build_residual_imaging_dict,
     get_iterations_done_from_imaging_dict,
     get_masksum_from_imaging_dict,
     get_max_psf_sidelobe_from_imaging_dict,
@@ -966,6 +970,75 @@ class TestCalculateCycleControls(unittest.TestCase):
         # psf_fraction = 1.5 × 0.2 = 0.3
         # cyclethresh = 0.3 × 1.0 = 0.3
         self.assertAlmostEqual(cyclethresh, 0.3, places=10)
+
+
+class TestBuildResidualImagingDict(unittest.TestCase):
+    """Test seeding of the first-model-update ImagingDict from the residual image."""
+
+    def _make_img_xds(self, residual_peak, real_sidelobe):
+        residual = np.zeros((1, 1, 1, 4, 4))
+        residual[0, 0, 0, 1, 1] = residual_peak
+        sidelobe = np.full((1, 1, 1), real_sidelobe)
+        img_xds = xr.Dataset(
+            {
+                "SKY_RESIDUAL": (
+                    ("time", "frequency", "polarization", "l", "m"),
+                    residual,
+                ),
+                "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
+                    ("time", "frequency", "polarization"),
+                    sidelobe,
+                ),
+            }
+        )
+        img_xds.attrs["data_groups"] = {
+            "residual": {
+                "sky": "SKY_RESIDUAL",
+                "max_sidelobe_point_spread_function": (
+                    "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
+                ),
+            }
+        }
+        return img_xds
+
+    def test_max_psf_sidelobe_is_the_measured_value(self):
+        real_sidelobe = 0.3
+        img_xds = self._make_img_xds(residual_peak=1.0, real_sidelobe=real_sidelobe)
+        rd = build_residual_imaging_dict(
+            img_xds, "residual", {"loop_gain": 0.1, "max_psf_fraction": 0.9}
+        )
+        entry = rd.data[Key(time=0, chan=0, pol=0)]
+        self.assertEqual(entry["max_psf_sidelobe"], real_sidelobe)
+
+    def test_cycle_threshold_uses_measured_sidelobe_not_max_psf_fraction(self):
+        real_sidelobe = 0.3
+        residual_peak = 1.0
+        cycle_factor = 1.0
+        max_psf_fraction = 0.9
+        img_xds = self._make_img_xds(residual_peak, real_sidelobe)
+        rd = build_residual_imaging_dict(
+            img_xds,
+            "residual",
+            {
+                "loop_gain": 0.1,
+                "min_psf_fraction": 0.05,
+                "max_psf_fraction": max_psf_fraction,
+            },
+        )
+        controller = IterationController(
+            niter_per_plane=100,
+            cycle_factor=cycle_factor,
+            min_psf_fraction=0.05,
+            max_psf_fraction=max_psf_fraction,
+            threshold=0.0,
+        )
+
+        _, cyclethresh = controller.calculate_cycle_controls(rd)
+
+        self.assertAlmostEqual(
+            cyclethresh, real_sidelobe * cycle_factor * residual_peak
+        )
+        self.assertNotAlmostEqual(cyclethresh, max_psf_fraction * residual_peak)
 
 
 class TestCheckConvergence(unittest.TestCase):

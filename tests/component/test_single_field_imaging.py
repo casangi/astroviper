@@ -1137,6 +1137,14 @@ def test_single_field_imaging_multi_cycle(
         n_mapping_parallelism=n_mapping_parallelism,
         single_precision_image=single_precision_image,
     )
+    multi_cycle_params = _CONFIGS["multi_cycle"]["iteration_control_params"]
+    for fields in imaging_dict["deconvolution"].data.values():
+        psf_fraction = fields["max_psf_sidelobe"] * multi_cycle_params["cycle_factor"]
+        assert psf_fraction < multi_cycle_params["max_psf_fraction"], (
+            f"psf_fraction {psf_fraction} >= max_psf_fraction "
+            f"{multi_cycle_params['max_psf_fraction']}: this config no longer "
+            "exercises a non-saturating cycle_threshold"
+        )
     truth_xds = xr.open_zarr(truth_image)
 
     # Only the double-precision multi_cycle checks the deconvolution ImagingDict:
