@@ -107,7 +107,7 @@ def image(tmp_path, ps_store, name):
         processing_set_data_group_name="base",
         single_precision_image=False,
         processing_function_threads=1,
-        n_chunks=2,
+        n_mapping_parallelism={"frequency": 2},
         overwrite=True,
     )
     return load_image(image_store)

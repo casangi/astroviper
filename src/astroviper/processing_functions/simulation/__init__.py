@@ -13,6 +13,10 @@ from astroviper.processing_functions.simulation.calculate_uvw import calculate_u
 from astroviper.processing_functions.simulation.calculate_visibilities import (
     calculate_visibilities,
 )
+from astroviper.processing_functions.simulation.limb_darkened_disk import (
+    limb_darkened_disk_image,
+    limb_darkened_disk_uv_response,
+)
 from astroviper.processing_functions.simulation.simulate_processing_set import (
     simulate_processing_set,
 )
@@ -28,4 +32,6 @@ __all__ = [
     "make_airy_jones_beam",
     "make_polynomial_jones_beam",
     "make_mueller_matrix",
+    "limb_darkened_disk_uv_response",
+    "limb_darkened_disk_image",
 ]

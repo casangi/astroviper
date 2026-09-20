@@ -53,8 +53,12 @@ def simulate_processing_set(
     gaussian_source_flux: np.ndarray | None = None,
     gaussian_source_ra_dec: np.ndarray | None = None,
     gaussian_source_shape: np.ndarray | None = None,
+    disk_source_flux: np.ndarray | None = None,
+    disk_source_ra_dec: np.ndarray | None = None,
+    disk_source_shape: np.ndarray | None = None,
+    disk_source_limb_darkening: np.ndarray | None = None,
 ) -> tuple[xr.Dataset, dict]:
-    """Simulate the visibilities of a point- and Gaussian-source sky for a block of times and channels.
+    """Simulate the visibilities of a point-, Gaussian- and disk-source sky for a block of times and channels.
 
     This is the science function behind the ``simulate_processing_set`` node task and
     distributed application: it computes the baseline ``uvw`` coordinates,
@@ -90,6 +94,22 @@ def simulate_processing_set(
         ``[major, minor, position angle]`` FWHM shape of each Gaussian source, in
         the imaging clean-beam convention
         (:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`).
+    disk_source_flux : np.ndarray, [n_disk, n_time | 1, n_frequency | 1, 4], Jy, optional
+        Integrated flux of each limb-darkened disk source in the four
+        instrumental correlations; singleton time/frequency axes broadcast.
+        ``None`` (default) simulates no disk sources.
+    disk_source_ra_dec : np.ndarray, [n_time | 1, n_disk, 2], radians, optional
+        Right ascension and declination of the disk sources (per time or fixed).
+    disk_source_shape : np.ndarray, [n_disk, 3], radians, optional
+        ``[major, minor, position angle]`` outer diameters and orientation of
+        each (inclined) disk, in the Gaussian-source / clean-beam position-angle
+        convention
+        (:func:`astroviper.processing_functions.simulation.limb_darkened_disk.limb_darkened_disk_uv_response`).
+    disk_source_limb_darkening : np.ndarray, [n_disk] float, optional
+        Power-law limb-darkening exponent ``alpha`` of each disk
+        (``I ~ mu**alpha``, Hestroffer 1997): ``0`` uniform disk (the default
+        when ``None``), ``> 0`` darker towards the limb, ``-2 < alpha < 0`` limb
+        brightened, ``-2`` an infinitely thin ring.
     phase_center_ra_dec : np.ndarray, [n_time | 1, 2], radians
         Phase centre of the array per time (time-varying for mosaics) or fixed.
     beam_models : list
@@ -203,6 +223,10 @@ def simulate_processing_set(
         gaussian_source_flux=gaussian_source_flux,
         gaussian_source_ra_dec=gaussian_source_ra_dec,
         gaussian_source_shape=gaussian_source_shape,
+        disk_source_flux=disk_source_flux,
+        disk_source_ra_dec=disk_source_ra_dec,
+        disk_source_shape=disk_source_shape,
+        disk_source_limb_darkening=disk_source_limb_darkening,
     )
     timing["T_visibilities"] = _time.time() - start
 

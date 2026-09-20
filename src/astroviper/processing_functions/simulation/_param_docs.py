@@ -33,6 +33,26 @@ SIMULATION_PARAM_DOCS = {
         "the imaging clean-beam convention\n"
         "(:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`)."
     ),
+    "disk_source_flux": (
+        "Integrated flux of each limb-darkened disk source in the four\n"
+        "instrumental correlations; singleton time/frequency axes broadcast.\n"
+        "``None`` (default) simulates no disk sources."
+    ),
+    "disk_source_ra_dec": (
+        "Right ascension and declination of the disk sources (per time or fixed)."
+    ),
+    "disk_source_shape": (
+        "``[major, minor, position angle]`` outer diameters and orientation of\n"
+        "each (inclined) disk, in the Gaussian-source / clean-beam position-angle\n"
+        "convention\n"
+        "(:func:`astroviper.processing_functions.simulation.limb_darkened_disk.limb_darkened_disk_uv_response`)."
+    ),
+    "disk_source_limb_darkening": (
+        "Power-law limb-darkening exponent ``alpha`` of each disk\n"
+        "(``I ~ mu**alpha``, Hestroffer 1997): ``0`` uniform disk (the default\n"
+        "when ``None``), ``> 0`` darker towards the limb, ``-2 < alpha < 0`` limb\n"
+        "brightened, ``-2`` an infinitely thin ring."
+    ),
     "ms_v2_path": (
         "Additionally write the simulated MSv4 as a CASA Measurement Set v2 at\n"
         "this path via the optional `arcae <https://github.com/ska-sa/arcae>`_\n"

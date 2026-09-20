@@ -169,3 +169,52 @@ def test_automatic_chunking_and_validation_errors(tmp_path):
         run(tmp_path, overwrite=False)
     with pytest.raises(AssertionError):  # toolviper schema: unknown implementation
         run(tmp_path, implementation="fortran")
+
+
+def test_disk_sources_through_the_driver_match_the_processing_function(tmp_path):
+    """Limb-darkened disks are sliced per chunk and reach the processing function unchanged."""
+    from astroviper.processing_functions.simulation import (
+        limb_darkened_disk_uv_response,
+    )
+
+    arcsec = np.pi / (180 * 3600)
+    disk_flux = np.array([[[[2.0, 0, 0, 2.0]]], [[[0.5, 0, 0, 0.5]]]])
+    disk_ra_dec = np.concatenate([SRC, SRC + 1e-4], axis=1)  # [1, 2, 2]
+    disk_shape = np.array(
+        [[300 * arcsec, 200 * arcsec, 0.4], [120 * arcsec, 120 * arcsec, 0.0]]
+    )
+    limb_darkening = [1.0, -1.0]
+    result, kwargs = run(
+        tmp_path,
+        point_source_flux=np.zeros((1, 1, 1, 4)),
+        disk_source_flux=disk_flux,
+        disk_source_ra_dec=disk_ra_dec,
+        disk_source_shape=disk_shape,
+        disk_source_limb_darkening=limb_darkening,
+    )
+    ms = load_processing_set(result["ps_store"])["VLA_SBand"].ds
+    assert (
+        "2 limb-darkened disk source(s)"
+        in ms.attrs["data_groups"]["base"]["description"]
+    )
+    ant = kwargs["antenna_xds"]
+    ref, _ = simulate_processing_set_pf(
+        ms.time.values, ms.frequency.values, ["RR", "LL"], ant.ANTENNA_POSITION.values,
+        observatory_position("VLA"), np.zeros((1, 1, 1, 4)), SRC, PC, [airy_disk_model("vla")], np.zeros(8, int),
+        disk_source_flux=disk_flux, disk_source_ra_dec=disk_ra_dec, disk_source_shape=disk_shape,
+        disk_source_limb_darkening=np.array(limb_darkening),
+    )  # fmt: skip
+    np.testing.assert_allclose(ms.VISIBILITY.values, ref.VISIBILITY.values, atol=1e-12)
+    # the disks are resolved: the response departs from unity on the longer baselines
+    u = ms.UVW.values[..., 0, None] * ms.frequency.values / 299792458.0
+    v = ms.UVW.values[..., 1, None] * ms.frequency.values / 299792458.0
+    assert limb_darkened_disk_uv_response(u, v, *disk_shape[0], 1.0).min() < 0.9
+
+    with pytest.raises(ValueError, match="disk_source_shape"):
+        run(tmp_path, disk_source_flux=disk_flux, disk_source_ra_dec=disk_ra_dec,
+            disk_source_shape=disk_shape[:1])  # fmt: skip
+    with pytest.raises(ValueError, match="limb_darkening"):
+        run(tmp_path, disk_source_flux=disk_flux, disk_source_ra_dec=disk_ra_dec,
+            disk_source_shape=disk_shape, disk_source_limb_darkening=[0.0, -3.0])  # fmt: skip
+    with pytest.raises(ValueError, match="given together"):
+        run(tmp_path, disk_source_flux=disk_flux)

@@ -14,12 +14,22 @@ vector sampled at the source direction relative to the antenna pointing
 centre and ``n_s`` its ``n`` direction cosine
 (:func:`~astroviper.utils.coordinate_transforms.calculate_uvw_rotation`).
 
+Gaussian and limb-darkened disk sources are point sources whose visibilities
+are multiplied by the analytic visibility of their (unit-flux) sky profile --
+:func:`~astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`
+and :func:`~astroviper.processing_functions.simulation.limb_darkened_disk.limb_darkened_disk_uv_response`
+-- evaluated at the phase-centre ``(u, v)`` in wavelengths; the antenna beams
+are sampled at the source centre (valid for sources much smaller than the
+primary beam).
+
 This module holds the vectorised NumPy implementation (the reference used in the
 tests); ``implementation="cpp"`` selects the multithreaded C++ kernel when it is
 built.
 """
 
 from __future__ import annotations
+
+from functools import partial
 
 import numpy as np
 
@@ -55,8 +65,12 @@ def calculate_visibilities(
     gaussian_source_flux: np.ndarray | None = None,
     gaussian_source_ra_dec: np.ndarray | None = None,
     gaussian_source_shape: np.ndarray | None = None,
+    disk_source_flux: np.ndarray | None = None,
+    disk_source_ra_dec: np.ndarray | None = None,
+    disk_source_shape: np.ndarray | None = None,
+    disk_source_limb_darkening: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Simulate the visibilities of point and Gaussian sources for one in-memory chunk.
+    """Simulate the visibilities of point, Gaussian and limb-darkened disk sources for one in-memory chunk.
 
     Parameters
     ----------
@@ -90,6 +104,22 @@ def calculate_visibilities(
         ``[major, minor, position angle]`` FWHM shape of each Gaussian source,
         in the convention of the imaging clean beam
         (:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`).
+    disk_source_flux : np.ndarray, [n_disk, n_time | 1, n_frequency | 1, 4], Jy, optional
+        Integrated flux of each limb-darkened disk source in the four
+        instrumental correlations; singleton time/frequency axes broadcast.
+        ``None`` (default) simulates no disk sources.
+    disk_source_ra_dec : np.ndarray, [n_time | 1, n_disk, 2], radians, optional
+        Right ascension and declination of the disk sources (per time or fixed).
+    disk_source_shape : np.ndarray, [n_disk, 3], radians, optional
+        ``[major, minor, position angle]`` outer diameters and orientation of
+        each (inclined) disk, in the Gaussian-source / clean-beam position-angle
+        convention
+        (:func:`astroviper.processing_functions.simulation.limb_darkened_disk.limb_darkened_disk_uv_response`).
+    disk_source_limb_darkening : np.ndarray, [n_disk] float, optional
+        Power-law limb-darkening exponent ``alpha`` of each disk
+        (``I ~ mu**alpha``, Hestroffer 1997): ``0`` uniform disk (the default
+        when ``None``), ``> 0`` darker towards the limb, ``-2 < alpha < 0``
+        limb brightened, ``-2`` an infinitely thin ring.
 
     Returns
     -------
@@ -102,7 +132,11 @@ def calculate_visibilities(
     module's :func:`~astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`
     (the single source of truth for the Gaussian parametrisation) -- so it
     shares the beam response, phase and kernel implementations of the point
-    sources and its integrated flux equals ``gaussian_source_flux``.
+    sources and its integrated flux equals ``gaussian_source_flux``.  A
+    limb-darkened disk is treated the same way with
+    :func:`~astroviper.processing_functions.simulation.limb_darkened_disk.limb_darkened_disk_uv_response`
+    (Hestroffer 1997 power-law limb darkening; uniform disk, limb-brightened
+    shell and thin ring as special cases).
     """
     point_args = (
         uvw,
@@ -123,28 +157,73 @@ def calculate_visibilities(
     )
     visibility = _calculate_point_source_visibilities(*point_args)
 
+    # Extended sources: (flux, ra_dec, per-source analytic uv response) groups.
+    extended_sources = []
     if gaussian_source_flux is not None:
         from astroviper.processing_functions.imaging.restore import (
             elliptical_gaussian_uv_taper,
         )
 
-        gaussian_source_flux = np.asarray(gaussian_source_flux, dtype=np.float64)
-        gaussian_source_ra_dec = np.asarray(gaussian_source_ra_dec, dtype=np.float64)
-        gaussian_source_shape = np.asarray(gaussian_source_shape, dtype=np.float64)
+        extended_sources.append(
+            (
+                np.asarray(gaussian_source_flux, dtype=np.float64),
+                np.asarray(gaussian_source_ra_dec, dtype=np.float64),
+                [
+                    partial(
+                        elliptical_gaussian_uv_taper, major=major, minor=minor, pa=pa
+                    )
+                    for major, minor, pa in np.asarray(
+                        gaussian_source_shape, dtype=np.float64
+                    )
+                ],
+            )
+        )
+    if disk_source_flux is not None:
+        from astroviper.processing_functions.simulation.limb_darkened_disk import (
+            limb_darkened_disk_uv_response,
+        )
+
+        disk_source_shape = np.asarray(disk_source_shape, dtype=np.float64)
+        if disk_source_limb_darkening is None:
+            disk_source_limb_darkening = np.zeros(disk_source_shape.shape[0])
+        extended_sources.append(
+            (
+                np.asarray(disk_source_flux, dtype=np.float64),
+                np.asarray(disk_source_ra_dec, dtype=np.float64),
+                [
+                    partial(
+                        limb_darkened_disk_uv_response,
+                        major=major,
+                        minor=minor,
+                        pa=pa,
+                        limb_darkening=alpha,
+                    )
+                    for (major, minor, pa), alpha in zip(
+                        disk_source_shape,
+                        np.asarray(disk_source_limb_darkening, dtype=np.float64),
+                        strict=True,
+                    )
+                ],
+            )
+        )
+
+    if extended_sources:
         # Baseline coordinates in wavelengths per channel:
         # [n_time, n_baseline, n_frequency].
-        inverse_wavelength = frequency / 299792458.0
+        inverse_wavelength = np.asarray(frequency, dtype=np.float64) / SPEED_OF_LIGHT
+        uvw = np.asarray(uvw, dtype=np.float64)
         u = uvw[:, :, 0, None] * inverse_wavelength
         v = uvw[:, :, 1, None] * inverse_wavelength
-        for source in range(gaussian_source_flux.shape[0]):
+    for flux, ra_dec, uv_responses in extended_sources:
+        for source, uv_response in enumerate(uv_responses):
             source_visibility = _calculate_point_source_visibilities(
                 uvw,
                 antenna1,
                 antenna2,
                 frequency,
                 polarization_index,
-                gaussian_source_flux[source : source + 1],
-                gaussian_source_ra_dec[:, source : source + 1, :],
+                flux[source : source + 1],
+                ra_dec[:, source : source + 1, :],
                 phase_center_ra_dec,
                 pointing_ra_dec,
                 beam_model_map,
@@ -154,10 +233,7 @@ def calculate_visibilities(
                 processing_function_threads,
                 implementation,
             )
-            major, minor, pa = gaussian_source_shape[source]
-            source_visibility *= elliptical_gaussian_uv_taper(u, v, major, minor, pa)[
-                ..., None
-            ]
+            source_visibility *= uv_response(u, v)[..., None]
             visibility += source_visibility
 
     return visibility

@@ -70,6 +70,10 @@ def simulate_processing_set(
     gaussian_source_flux: np.ndarray | list | None = None,
     gaussian_source_ra_dec: np.ndarray | list | None = None,
     gaussian_source_shape: np.ndarray | list | None = None,
+    disk_source_flux: np.ndarray | list | None = None,
+    disk_source_ra_dec: np.ndarray | list | None = None,
+    disk_source_shape: np.ndarray | list | None = None,
+    disk_source_limb_darkening: np.ndarray | list | None = None,
     ms_v2_path: str | None = None,
     direction_frame: str = "icrs",
     ms_name: str | None = None,
@@ -84,7 +88,7 @@ def simulate_processing_set(
     thread_info: dict | None = None,
     check_schema: bool = True,
 ) -> dict:
-    """Simulate the visibilities of a point-source sky and write them as an MSv4 processing set.
+    """Simulate the visibilities of a point-, Gaussian- and disk-source sky and write them as an MSv4 processing set.
 
     Builds the time/frequency axes and all MSv4 metadata, creates the empty
     processing set on disk (one measurement set: one spectral window, one
@@ -129,6 +133,22 @@ def simulate_processing_set(
         ``[major, minor, position angle]`` FWHM shape of each Gaussian source, in
         the imaging clean-beam convention
         (:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`).
+    disk_source_flux : np.ndarray, [n_disk, n_time | 1, n_frequency | 1, 4], Jy, optional
+        Integrated flux of each limb-darkened disk source in the four
+        instrumental correlations; singleton time/frequency axes broadcast.
+        ``None`` (default) simulates no disk sources.
+    disk_source_ra_dec : np.ndarray, [n_time | 1, n_disk, 2], radians, optional
+        Right ascension and declination of the disk sources (per time or fixed).
+    disk_source_shape : np.ndarray, [n_disk, 3], radians, optional
+        ``[major, minor, position angle]`` outer diameters and orientation of
+        each (inclined) disk, in the Gaussian-source / clean-beam position-angle
+        convention
+        (:func:`astroviper.processing_functions.simulation.limb_darkened_disk.limb_darkened_disk_uv_response`).
+    disk_source_limb_darkening : np.ndarray, [n_disk] float, optional
+        Power-law limb-darkening exponent ``alpha`` of each disk
+        (``I ~ mu**alpha``, Hestroffer 1997): ``0`` uniform disk (the default
+        when ``None``), ``> 0`` darker towards the limb, ``-2 < alpha < 0`` limb
+        brightened, ``-2`` an infinitely thin ring.
     ms_v2_path : str, optional
         Additionally write the simulated MSv4 as a CASA Measurement Set v2 at
         this path via the optional `arcae <https://github.com/ska-sa/arcae>`_
@@ -253,6 +273,18 @@ def simulate_processing_set(
         gaussian_source_flux = np.asarray(gaussian_source_flux, dtype=np.float64)
         gaussian_source_ra_dec = np.asarray(gaussian_source_ra_dec, dtype=np.float64)
         gaussian_source_shape = np.asarray(gaussian_source_shape, dtype=np.float64)
+    if disk_source_flux is not None:
+        disk_source_flux = np.asarray(disk_source_flux, dtype=np.float64)
+    if disk_source_ra_dec is not None:
+        disk_source_ra_dec = np.asarray(disk_source_ra_dec, dtype=np.float64)
+    if disk_source_shape is not None:
+        disk_source_shape = np.asarray(disk_source_shape, dtype=np.float64)
+        if disk_source_limb_darkening is None and disk_source_shape.ndim == 2:
+            disk_source_limb_darkening = np.zeros(disk_source_shape.shape[0])
+    if disk_source_limb_darkening is not None:
+        disk_source_limb_darkening = np.asarray(
+            disk_source_limb_darkening, dtype=np.float64
+        )
     phase_center_ra_dec = np.asarray(phase_center_ra_dec, dtype=np.float64)
     beam_model_map = np.asarray(beam_model_map, dtype=np.int64)
     if pointing_ra_dec is not None:
@@ -276,9 +308,13 @@ def simulate_processing_set(
         point_source_flux, point_source_ra_dec, phase_center_ra_dec, pointing_ra_dec,
         beam_model_map, len(beam_models), n_time, n_frequency, n_antenna,
     )  # fmt: skip
-    _check_gaussian_input_shapes(
-        gaussian_source_flux, gaussian_source_ra_dec, gaussian_source_shape,
-        n_time, n_frequency,
+    _check_extended_source_shapes(
+        "gaussian", gaussian_source_flux, gaussian_source_ra_dec,
+        gaussian_source_shape, n_time, n_frequency,
+    )  # fmt: skip
+    _check_extended_source_shapes(
+        "disk", disk_source_flux, disk_source_ra_dec, disk_source_shape,
+        n_time, n_frequency, limb_darkening=disk_source_limb_darkening,
     )  # fmt: skip
 
     antenna_position = np.asarray(antenna_xds.ANTENNA_POSITION.values, dtype=np.float64)
@@ -301,8 +337,13 @@ def simulate_processing_set(
         description=(
             f"Simulated visibilities of {point_source_ra_dec.shape[1]} point source(s)"
             + (
-                f" and {gaussian_source_ra_dec.shape[1]} Gaussian source(s)"
+                f", {gaussian_source_ra_dec.shape[1]} Gaussian source(s)"
                 if gaussian_source_ra_dec is not None
+                else ""
+            )
+            + (
+                f", {disk_source_ra_dec.shape[1]} limb-darkened disk source(s)"
+                if disk_source_ra_dec is not None
                 else ""
             )
             + " "
@@ -396,6 +437,10 @@ def simulate_processing_set(
         "gaussian_source_flux": gaussian_source_flux,
         "gaussian_source_ra_dec": gaussian_source_ra_dec,
         "gaussian_source_shape": gaussian_source_shape,
+        "disk_source_flux": disk_source_flux,
+        "disk_source_ra_dec": disk_source_ra_dec,
+        "disk_source_shape": disk_source_shape,
+        "disk_source_limb_darkening": disk_source_limb_darkening,
         "phase_center_ra_dec": phase_center_ra_dec,
         "beam_models": list(beam_models),
         "beam_model_map": beam_model_map,
@@ -482,36 +527,52 @@ def simulate_processing_set(
     }
 
 
-def _check_gaussian_input_shapes(flux, source_ra_dec, shape, n_time, n_frequency):
+def _check_extended_source_shapes(
+    kind, flux, source_ra_dec, shape, n_time, n_frequency, limb_darkening=None
+):
+    """Validate the ``<kind>_source_*`` arrays of Gaussian (``kind="gaussian"``) or disk sources."""
     if flux is None and source_ra_dec is None and shape is None:
         return
     if flux is None or source_ra_dec is None or shape is None:
         raise ValueError(
-            "gaussian_source_flux, gaussian_source_ra_dec and gaussian_source_shape "
+            f"{kind}_source_flux, {kind}_source_ra_dec and {kind}_source_shape "
             "must be given together (or all omitted)."
         )
     if flux.ndim != 4 or flux.shape[3] != 4:
         raise ValueError(
-            f"gaussian_source_flux must have shape [n_gaussian, n_time|1, n_frequency|1, 4]; got {flux.shape}."
+            f"{kind}_source_flux must have shape [n_{kind}, n_time|1, n_frequency|1, 4]; got {flux.shape}."
         )
     if source_ra_dec.ndim != 3 or source_ra_dec.shape[2] != 2:
         raise ValueError(
-            f"gaussian_source_ra_dec must have shape [n_time|1, n_gaussian, 2]; got {source_ra_dec.shape}."
+            f"{kind}_source_ra_dec must have shape [n_time|1, n_{kind}, 2]; got {source_ra_dec.shape}."
         )
     if flux.shape[0] != source_ra_dec.shape[1]:
         raise ValueError(
-            "n_gaussian of gaussian_source_flux and gaussian_source_ra_dec differ."
+            f"n_{kind} of {kind}_source_flux and {kind}_source_ra_dec differ."
         )
     if flux.shape[1] not in (1, n_time) or flux.shape[2] not in (1, n_frequency):
         raise ValueError(
-            "gaussian_source_flux time/frequency axes must be 1 or match the simulated axes."
+            f"{kind}_source_flux time/frequency axes must be 1 or match the simulated axes."
         )
     if source_ra_dec.shape[0] not in (1, n_time):
-        raise ValueError("gaussian_source_ra_dec time axis must be 1 or n_time.")
+        raise ValueError(f"{kind}_source_ra_dec time axis must be 1 or n_time.")
     if shape.shape != (flux.shape[0], 3):
         raise ValueError(
-            f"gaussian_source_shape must have shape [n_gaussian, 3]; got {shape.shape}."
+            f"{kind}_source_shape must have shape [n_{kind}, 3]; got {shape.shape}."
         )
+    if kind == "disk":
+        if limb_darkening is None or limb_darkening.shape != (flux.shape[0],):
+            raise ValueError(
+                "disk_source_limb_darkening must have shape [n_disk]; got "
+                f"{None if limb_darkening is None else limb_darkening.shape}."
+            )
+        if np.any(limb_darkening < -2) or not np.all(np.isfinite(limb_darkening)):
+            raise ValueError(
+                "disk_source_limb_darkening exponents must be finite and >= -2 "
+                "(-2 is the thin-ring limit)."
+            )
+        if np.any(shape[:, :2] < 0):
+            raise ValueError("disk_source_shape diameters must be non-negative.")
 
 
 def _check_input_shapes(

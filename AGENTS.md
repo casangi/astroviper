@@ -181,10 +181,27 @@ Gaussian sources are point sources multiplied by the analytic uv taper of the
 imaging clean beam — `elliptical_gaussian_uv_taper` in
 `processing_functions/imaging/restore.py` is the single source of truth for the
 Gaussian parametrisation (unit-tested against the image-plane kernel), shared
-by the restore step and the simulator; likewise the Airy voltage patterns in
+by the restore step and the simulator. Limb-darkened (elliptical) disk sources
+work the same way with `limb_darkened_disk_uv_response` in
+`processing_functions/simulation/limb_darkened_disk.py` (Hestroffer 1997
+power-law limb darkening: uniform disk, limb-brightened shell and thin ring as
+special cases; its image-plane twin `limb_darkened_disk_image` is unit-tested
+as the Fourier pair and shares the `[major, minor, pa]` convention). Adding a
+new extended component means adding its unit-flux analytic uv response to the
+`extended_sources` loop of `calculate_visibilities` (the C++ kernel is
+untouched: it only ever sees point sources). Likewise the Airy voltage patterns in
 `processing_functions/imaging/primary_beam/airy_disk.py` are shared by the
 imaging primary beam (`ipower=2`, the CASA power-pattern definition) and the
-simulation antenna beams. The PSF beam fit is switchable
+simulation antenna beams. The Adaptive Scale Pixel
+deconvolver (`processing_functions/imaging/deconvolvers/aspclean/`, a port of
+CASA's `AspMatrixCleaner`) does its FFTs with the vendored
+`include/pocketfft_hdronly.h` (the BSD-3 header-only FFT behind NumPy/SciPy,
+kept verbatim with its licence block); its per-Aspen L-BFGS follows ALGLIB's
+scaled-variable conventions and is exposed for tests as
+`aspclean.lbfgs_minimize`. Two documented departures from CASA live in
+`src/asp_clean.cpp`: separable Aspen spectra with paired inverse transforms
+(same numbers, ~8x fewer FFTs) and a unit-consistent "diverging" guard. The
+PSF beam fit is switchable
 (`psf_fitting_method="astroviper" | "casa"`); `"casa"` is a C++ port of CASA's
 `StokesImageUtil::FitGaussianPSF` (CAS-13022,
 `processing_functions/image_analysis/psf_gaussian_fit_cpp/`) that reproduces

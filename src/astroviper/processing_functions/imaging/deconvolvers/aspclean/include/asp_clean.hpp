@@ -5,8 +5,15 @@
 // synthesis/ImagerObjects/SDAlgorithmAAspClean.{h,cc}. All casacore
 // dependencies (Matrix, FFTServer, IPosition, LogIO, ...) and the ALGLIB
 // L-BFGS dependency have been removed and replaced with the C++ standard
-// library plus the small self-contained headers asp_fft.hpp and
-// asp_lbfgs.hpp.
+// library plus the small self-contained headers asp_fft.hpp (FFTs via the
+// vendored pocketfft header) and asp_lbfgs.hpp.
+//
+// Two deliberate departures from CASA, both documented at the code:
+//  * the FFT bookkeeping (separable Aspen spectra, paired inverse transforms)
+//    computes the same quantities with roughly an eighth of the transforms;
+//  * the "diverging" guard bounds the peak of the fitted component's dirty
+//    response instead of the raw Aspen strength, which is not in Jy/beam and
+//    made CASA's test abort minor cycles on legitimate wide components.
 //
 // The algorithm finds, at each minor-cycle iteration, the best "Aspen" (a
 // Gaussian component whose amplitude, scale size and position are optimized by

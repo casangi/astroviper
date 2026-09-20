@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "../include/asp_clean.hpp"
+#include "../include/asp_lbfgs.hpp"
 
 namespace py = pybind11;
 
@@ -237,6 +238,27 @@ static py::array_t<double> convolve_helper(py::array a, py::array b) {
     return out;
 }
 
+// Test helper: run the deconvolver's L-BFGS on a Python objective
+// ``fg(x) -> (f, grad)``. Returns (x, f, iterations, evaluations).
+static py::tuple lbfgs_helper(py::function fg, std::vector<double> x, std::vector<double> scale,
+                              int max_iters, double epsg, double epsf, double epsx) {
+    if (x.size() != scale.size()) throw std::runtime_error("x and scale must have the same length");
+    asplbfgs::Options opt;
+    opt.max_iters = max_iters;
+    opt.epsg = epsg;
+    opt.epsf = epsf;
+    opt.epsx = epsx;
+    const asplbfgs::Report rep = asplbfgs::minimize(
+        x, scale,
+        [&fg](const std::vector<double>& xx, std::vector<double>& gg) {
+            py::tuple r = fg(xx).cast<py::tuple>();
+            gg = r[1].cast<std::vector<double>>();
+            return r[0].cast<double>();
+        },
+        opt);
+    return py::make_tuple(x, rep.f, rep.iterations, rep.evaluations);
+}
+
 PYBIND11_MODULE(_aspclean_ext, m) {
     m.doc() =
         "Adaptive Scale Pixel (Asp / AAspClean) deconvolution - dependency-free "
@@ -275,6 +297,13 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           "Estimate the PSF Gaussian width (mean FWHM in pixels) used to seed "
           "the Asp initial scale sizes.",
           py::arg("psf"));
+
+    m.def("lbfgs_minimize", &lbfgs_helper,
+          "Test helper: minimize a Python objective fg(x) -> (f, grad) with the "
+          "deconvolver's scaled L-BFGS (ALGLIB minlbfgs conventions). Returns "
+          "(x, f, iterations, evaluations).",
+          py::arg("fg"), py::arg("x"), py::arg("scale"), py::arg("max_iters") = 5,
+          py::arg("epsg") = 1e-3, py::arg("epsf") = 1e-3, py::arg("epsx") = 1e-3);
 
     m.def("convolve_centered", &convolve_helper,
           "Centred FFT-based circular convolution of two equally-shaped 2D "

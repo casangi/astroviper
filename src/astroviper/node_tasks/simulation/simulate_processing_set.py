@@ -51,14 +51,18 @@ def simulate_processing_set(
     gaussian_source_flux: np.ndarray | None = None,
     gaussian_source_ra_dec: np.ndarray | None = None,
     gaussian_source_shape: np.ndarray | None = None,
+    disk_source_flux: np.ndarray | None = None,
+    disk_source_ra_dec: np.ndarray | None = None,
+    disk_source_shape: np.ndarray | None = None,
+    disk_source_limb_darkening: np.ndarray | None = None,
 ):
     """Simulate the visibilities of one time/frequency chunk and write them to disk.
 
     The chunk is defined by ``task_coords`` (GraphVIPER): ``task_coords["time"]``
     and ``task_coords["frequency"]`` carry the coordinate values and the slices
     into the full axes, which are used to cut the time/frequency dependent
-    inputs (``point_source_flux``, ``point_source_ra_dec``,
-    ``phase_center_ra_dec``, ``pointing_ra_dec``).  The simulated ``VISIBILITY``,
+    inputs (the source fluxes and positions, ``phase_center_ra_dec``,
+    ``pointing_ra_dec``).  The simulated ``VISIBILITY``,
     ``UVW``, ``WEIGHT`` and ``FLAG`` are region-written into the MSv4 created by the
     distributed application.
 
@@ -88,6 +92,22 @@ def simulate_processing_set(
         ``[major, minor, position angle]`` FWHM shape of each Gaussian source, in
         the imaging clean-beam convention
         (:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`).
+    disk_source_flux : np.ndarray, [n_disk, n_time | 1, n_frequency | 1, 4], Jy, optional
+        Integrated flux of each limb-darkened disk source in the four
+        instrumental correlations; singleton time/frequency axes broadcast.
+        ``None`` (default) simulates no disk sources.
+    disk_source_ra_dec : np.ndarray, [n_time | 1, n_disk, 2], radians, optional
+        Right ascension and declination of the disk sources (per time or fixed).
+    disk_source_shape : np.ndarray, [n_disk, 3], radians, optional
+        ``[major, minor, position angle]`` outer diameters and orientation of
+        each (inclined) disk, in the Gaussian-source / clean-beam position-angle
+        convention
+        (:func:`astroviper.processing_functions.simulation.limb_darkened_disk.limb_darkened_disk_uv_response`).
+    disk_source_limb_darkening : np.ndarray, [n_disk] float, optional
+        Power-law limb-darkening exponent ``alpha`` of each disk
+        (``I ~ mu**alpha``, Hestroffer 1997): ``0`` uniform disk (the default
+        when ``None``), ``> 0`` darker towards the limb, ``-2 < alpha < 0`` limb
+        brightened, ``-2`` an infinitely thin ring.
     phase_center_ra_dec : np.ndarray, [n_time | 1, 2], radians
         Phase centre of the array per time (time-varying for mosaics) or fixed.
     beam_models : list
@@ -168,6 +188,9 @@ def simulate_processing_set(
     gaussian_flux_chunk = _slice_time_axis(gaussian_source_flux, 1, time_slice)
     gaussian_flux_chunk = _slice_time_axis(gaussian_flux_chunk, 2, frequency_slice)
     gaussian_source_chunk = _slice_time_axis(gaussian_source_ra_dec, 0, time_slice)
+    disk_flux_chunk = _slice_time_axis(disk_source_flux, 1, time_slice)
+    disk_flux_chunk = _slice_time_axis(disk_flux_chunk, 2, frequency_slice)
+    disk_source_chunk = _slice_time_axis(disk_source_ra_dec, 0, time_slice)
     phase_center_chunk = _slice_time_axis(phase_center_ra_dec, 0, time_slice)
     pointing_chunk = _slice_time_axis(pointing_ra_dec, 0, time_slice)
 
@@ -207,6 +230,10 @@ def simulate_processing_set(
         gaussian_source_flux=gaussian_flux_chunk,
         gaussian_source_ra_dec=gaussian_source_chunk,
         gaussian_source_shape=gaussian_source_shape,
+        disk_source_flux=disk_flux_chunk,
+        disk_source_ra_dec=disk_source_chunk,
+        disk_source_shape=disk_source_shape,
+        disk_source_limb_darkening=disk_source_limb_darkening,
     )
     if not graph_mode:
         return xds
