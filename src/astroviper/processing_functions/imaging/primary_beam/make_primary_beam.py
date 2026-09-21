@@ -13,8 +13,8 @@ def make_primary_beam_single_field(
 ):
     """Add an azimuthally-symmetric primary beam to a single-field image dataset.
 
-    Evaluates the obscured-Airy-disk voltage pattern (via
-    :func:`~astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric.airy_disk_rorder_v2`)
+    Evaluates the selected Airy prescription via
+    :func:`~astroviper.processing_functions.imaging.primary_beam.airy_disk.evaluate_primary_beam`
     for every frequency channel and writes it as the ``PRIMARY_BEAM`` data
     variable, registering it under ``image_data_group_out_name``.  The same beam
     is broadcast across polarization (a single dish diameter is assumed).
@@ -35,7 +35,9 @@ def make_primary_beam_single_field(
         Image geometry.  Must contain ``"image_size"`` (``(nx, ny)``) and
         ``"cell_size"`` (l, m cell size in radians).  The image centre is
         derived internally as ``image_size // 2``; the supplied dictionary is
-        not mutated.
+        not mutated. ``primary_beam_model`` selects ``airy`` (the default for
+        direct calls) or ``casa_airy``. The continuum driver resolves ``auto``
+        from telescope metadata before calling this function.
     image_data_group_in_name : str, optional
         Image data group whose existing entries are carried into the output
         group.  Default ``"residual"``.
@@ -74,8 +76,8 @@ def make_primary_beam_single_field(
     import pandas as pd
     import xarray as xr
 
-    from astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric import (
-        airy_disk_rorder_v2,
+    from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
+        evaluate_primary_beam,
     )
     from astroviper.utils.data_group_tools import (
         create_data_groups_in_and_out,
@@ -118,7 +120,7 @@ def make_primary_beam_single_field(
 
     img_xds["PRIMARY_BEAM"] = xr.DataArray(
         # Select the first (only) dish diameter and add a leading time axis.
-        airy_disk_rorder_v2(
+        evaluate_primary_beam(
             img_xds.frequency.values,
             img_xds.polarization.values,
             pb_params,
@@ -129,6 +131,11 @@ def make_primary_beam_single_field(
     )
     img_xds["PRIMARY_BEAM"].attrs["type"] = "primary_beam"
     img_xds["PRIMARY_BEAM"].attrs["method"] = "airy_disk"
+    img_xds["PRIMARY_BEAM"].attrs.update(
+        beam_model=image_params.get("primary_beam_model", "airy"),
+        dish_diameters_m=np.asarray(list_dish_diameters).tolist(),
+        blockage_diameters_m=np.asarray(list_blockage_diameters).tolist(),
+    )
 
     modify_data_groups_xds(
         img_xds,

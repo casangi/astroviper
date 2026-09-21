@@ -142,8 +142,8 @@ def _convert_primary_beam_to_reference_frequency(
     import numpy as np
     import xarray as xr
 
-    from astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric import (
-        airy_disk_rorder_v2,
+    from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
+        evaluate_primary_beam,
     )
 
     data_groups = img_xds.attrs.get("data_groups", {})
@@ -173,7 +173,7 @@ def _convert_primary_beam_to_reference_frequency(
         "list_blockage_diameters": np.asarray(blockage_diameters),
         "ipower": image_params.get("primary_beam_ipower", 2),
     }
-    reference_data = airy_disk_rorder_v2(
+    reference_data = evaluate_primary_beam(
         np.asarray([reference_frequency_hz]),
         img_xds.polarization.values,
         pb_params,
@@ -191,6 +191,9 @@ def _convert_primary_beam_to_reference_frequency(
         name="PRIMARY_BEAM_REFERENCE",
         attrs={
             "description": "MFS primary beam evaluated at the reference frequency.",
+            "beam_model": image_params.get("primary_beam_model", "airy"),
+            "dish_diameters_m": np.asarray(dish_diameters).tolist(),
+            "blockage_diameters_m": np.asarray(blockage_diameters).tolist(),
             "type": "primary_beam",
             "method": "airy_disk",
             "specmode": "mfs",

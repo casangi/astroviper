@@ -2747,7 +2747,6 @@ def image_continuum_single_field(
         passes each map only its local beam. The setting is ignored for MFS."""
     import time
 
-    import numpy as np
     import toolviper.utils.logger as logger
     from graphviper.graph_tools.coordinate_utils import (
         get_disk_chunk_sizes,
@@ -2979,30 +2978,14 @@ def image_continuum_single_field(
             f"{scan_intents!r}. Check the available scan intents before imaging."
         )
 
-    if "list_dish_diameters" not in image_params:
-        antenna_xds = ps_xdt.xr_ps.get_combined_antenna_xds()
-        diameter_name = "ANTENNA_DISH_DIAMETER"
+    from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
+        resolve_continuum_primary_beam,
+    )
 
-        if diameter_name not in antenna_xds:
-            raise KeyError(
-                "Continuum primary-beam construction requires antenna dish "
-                f"diameters, but {diameter_name!r} is absent from antenna metadata."
-            )
-
-        dish_diameters = np.asarray(
-            antenna_xds[diameter_name].values,
-            dtype=np.float64,
-        )
-        dish_diameters = np.unique(dish_diameters[np.isfinite(dish_diameters)])
-
-        if dish_diameters.size != 1:
-            raise NotImplementedError(
-                "Single-field continuum primary-beam construction currently "
-                "requires one common antenna dish diameter; received "
-                f"{dish_diameters.tolist()}."
-            )
-
-        image_params["list_dish_diameters"] = dish_diameters.tolist()
+    image_params = resolve_continuum_primary_beam(
+        image_params, ps_xdt.xr_ps.get_combined_antenna_xds()
+    )
+    input_params["image_params"] = image_params
 
     # Node-task loaders need the resolved role->variable mapping. In addition to
     # supporting the direct-Zarr path, this lets cached-grid MFS cycles omit the
