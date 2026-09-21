@@ -864,3 +864,53 @@ def test_shared_degridder_allocates_model_from_weights_without_observed_data(
     assert "VISIBILITY" not in ms
     assert ms.VISIBILITY_MODEL.dims == visibility_dims
     np.testing.assert_array_equal(ms.VISIBILITY_MODEL, 2.0)
+
+
+@pytest.mark.parametrize("explicit_mask", [False, True])
+def test_refreshed_continuum_statistics_use_taylor_zero_and_clean_support(
+    explicit_mask,
+):
+    """The stopping peak includes negative components and excludes masked pixels."""
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        continuum_residual_statistics,
+    )
+
+    values = np.array(
+        [
+            [
+                [[[-0.4, 8.0], [np.nan, 0.1]], [[-0.8, 9.0], [np.nan, 0.2]]],
+                [[[100.0, 100.0], [100.0, 100.0]], [[100.0, 100.0], [100.0, 100.0]]],
+            ]
+        ]
+    )
+    image = xr.Dataset(
+        {
+            "SKY_RESIDUAL": (("time", "taylor_term", "polarization", "l", "m"), values),
+            "PRIMARY_BEAM": (("l", "m"), [[1.0, 0.1], [0.8, 0.9]]),
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
+                ("time", "polarization"),
+                [[0.1, 0.2]],
+            ),
+        },
+        attrs={
+            "data_groups": {
+                "residual": {"sky": "SKY_RESIDUAL", "primary_beam": "PRIMARY_BEAM"}
+            }
+        },
+    )
+    if explicit_mask:
+        image["CLEAN_MASK"] = (("l", "m"), [[False, True], [False, False]])
+        image.attrs["data_groups"]["residual"]["mask"] = "CLEAN_MASK"
+    result = continuum_residual_statistics(image, 0.2)
+    entries = list(result.data.values())
+
+    def latest(entry, key):
+        return entry[key][-1] if isinstance(entry[key], list) else entry[key]
+
+    assert [latest(e, "peakres") for e in entries] == (
+        [8.0, 9.0] if explicit_mask else [0.4, 0.8]
+    )
+    assert [latest(e, "masksum") for e in entries] == (
+        [1, 1] if explicit_mask else [2, 2]
+    )
+    assert [latest(e, "peakres_nomask") for e in entries] == [8.0, 9.0]

@@ -602,3 +602,75 @@ def test_stored_coordinate_indexer_rejects_missing_values():
             np.array([102.0]),
             "frequency",
         )
+
+
+@pytest.mark.parametrize(
+    ("peak", "niter", "nmajor", "masked", "reason"),
+    [
+        (0.05, 100, 3, False, "threshold"),
+        (1.0, 0, 3, False, "iterations"),
+        (1.0, 100, 0, False, "cycles"),
+        (1.0, 100, 3, True, "mask"),
+    ],
+)
+def test_refreshed_stop_skips_model_update_and_preserves_counters(
+    monkeypatch, peak, niter, nmajor, masked, reason
+):
+    """Verified stopping never runs CLEAN or charges a verification as an update."""
+    from astroviper.processing_functions.imaging.utils.iteration_control import (
+        MAJOR_CYCLE_LIMIT,
+        MAJOR_ITER_LIMIT,
+        MAJOR_THRESHOLD,
+        MAJOR_ZERO_MASK,
+        IterationController,
+    )
+
+    controller = IterationController(niter=niter, nmajor=nmajor, threshold=0.1)
+    image = xr.Dataset(
+        {
+            "SKY_RESIDUAL": (
+                ("time", "taylor_term", "polarization", "l", "m"),
+                np.full((1, 1, 1, 2, 2), peak),
+            ),
+            "PRIMARY_BEAM": (("l", "m"), np.ones((2, 2))),
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (("time", "polarization"), [[0.1]]),
+        },
+        attrs={
+            "data_groups": {
+                "residual": {"sky": "SKY_RESIDUAL", "primary_beam": "PRIMARY_BEAM"}
+            }
+        },
+    )
+    if masked:
+        image["CLEAN_MASK"] = (("l", "m"), np.zeros((2, 2), dtype=bool))
+        image.attrs["data_groups"]["residual"]["mask"] = "CLEAN_MASK"
+
+    def unexpected_update(*args, **kwargs):
+        pytest.fail("A confirmed residual stop must not run a model update")
+
+    monkeypatch.setattr(
+        continuum_processing, "model_update_mtmfs_single_field", unexpected_update
+    )
+    result = continuum_node.model_update_continuum_single_field(
+        {"image": image},
+        {
+            "controller": controller,
+            "iteration_control_params": {
+                "niter": niter,
+                "primary_beam_limit": 0.2,
+            },
+        },
+    )
+    expected = {
+        "threshold": MAJOR_THRESHOLD,
+        "iterations": MAJOR_ITER_LIMIT,
+        "cycles": MAJOR_CYCLE_LIMIT,
+        "mask": MAJOR_ZERO_MASK,
+    }[reason]
+    assert result["residual_converged"]
+    assert result["stopcode"].major == expected
+    assert controller.total_iter_done == controller.major_done == 0
+    assert controller.nmajor == nmajor
+    assert np.all(controller.niter == niter)
+    assert not result["deconvolution"].data
+    assert np.all(result["image"].SKY_MODEL.values == 0)

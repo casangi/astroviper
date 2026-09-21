@@ -2614,7 +2614,7 @@ def continuum_minor_cycle_node(
     input_data,
     input_params,
 ):
-    """Prepare the globally reduced continuum image and execute one minor cycle.
+    """Prepare the reduced residual and choose model update or finalization.
 
     This node is executed exactly once per outer cycle control after all frequency chunks
     have been combined by the GraphViper reduce stage. Unlike the map node tasks,
@@ -2631,10 +2631,14 @@ def continuum_minor_cycle_node(
        Stokes basis;
     4. installs the static continuum products (for example, the primary beam and
        fitted restoring beam parameters);
-    5. executes one continuum minor cycle, updating the sky model and producing the
-       corresponding model increment;
-    6. accumulates that increment into the persistent image-domain model and, for
-       MFS, prepares its Fourier-domain Taylor grids for the next residual update.
+    5. checks convergence on the refreshed residual without consuming iterations;
+    6. if work remains, executes a model update, accumulates its increment, and
+       prepares the Fourier-domain MFS model for the next residual update;
+    7. otherwise, finalizes the accumulated model using this same residual.
+
+    The graph topology is fixed before execution. This append node selects the
+    model-update or finalization branch at runtime, after the residual is known.
+    Restoration is never executed on a branch that continues reconstruction.
 
     The accumulated image-domain model and the optional Fourier-domain MFS model
     are returned to the distributed application as state objects. The application
@@ -2721,10 +2725,16 @@ def continuum_minor_cycle_node(
     # residual-update graph. The distributed application only forwards these
     # returned objects.
     start = time.time()
-    model_xds, model_uv_xds = _prepare_post_update_continuum_model_state(
-        return_dict["image"],
-        input_params,
-    )
+    if return_dict.get("residual_converged", False) and not is_n_iter_0:
+        # No increment was fitted, so reuse the accumulated model and its
+        # Fourier state rather than preparing either a second time.
+        model_xds = input_params["model_xds"]
+        model_uv_xds = input_params.get("model_uv_xds")
+    else:
+        model_xds, model_uv_xds = _prepare_post_update_continuum_model_state(
+            return_dict["image"],
+            input_params,
+        )
     T_prepare_model_state = time.time() - start
 
     return_dict["model_xds"] = model_xds
@@ -2751,6 +2761,15 @@ def continuum_minor_cycle_node(
             observed_visibility_grid_mapping
         )
 
+    if return_dict.get("residual_converged", False):
+        finalize_params = dict(input_params)
+        finalize_params.update(
+            prepared_continuum_image=True,
+            static_xds=static_xds,
+            model_xds=model_xds,
+        )
+        return_dict = continuum_finalize_node(return_dict, finalize_params)
+
     return_dict["static_xds"] = static_xds
     return_dict["timing_psf_fit"] = (
         None if psf_fit_return_df is None else psf_fit_return_df.reset_index(drop=True)
@@ -2766,8 +2785,10 @@ def continuum_finalize_node(
 ):
     """Finalize the continuum imaging after the last major cycle.
 
-    This node is executed once after the final GraphViper reduce stage has
-    completed. It converts the globally accumulated continuum products into the
+    This node is called by the continuum append after convergence is verified.
+    With ``prepared_continuum_image=True``, it reuses that append's residual
+    without another FFT, normalization, or visibility calculation. It can also
+    prepare a reduced dataset when called directly. It converts the globally accumulated continuum products into the
     final image-domain representation and produces the restored continuum image.
 
     The node performs the following steps:
@@ -2802,20 +2823,24 @@ def continuum_finalize_node(
     if "model_xds" not in input_params:
         raise KeyError("continuum_finalize_node requires input_params['model_xds'].")
 
-    _prepare_cached_mfs_residual_grid(input_data, input_params)
+    if input_params.get("prepared_continuum_image", False):
+        img_xds = input_data["image"]
+        static_xds = input_params["static_xds"]
+    else:
+        _prepare_cached_mfs_residual_grid(input_data, input_params)
 
-    # shared functionality with the minor loop
-    pb_cache_mapping = input_data.get(
-        "pb_cache_mapping",
-        input_params.get("pb_cache_mapping"),
-    )
+        # shared functionality with the minor loop
+        pb_cache_mapping = input_data.get(
+            "pb_cache_mapping",
+            input_params.get("pb_cache_mapping"),
+        )
 
-    img_xds, static_xds, _ = _prepare_continuum_image(
-        input_data["image"],
-        input_params,
-        initialize_static_products=False,
-        pb_cache_mapping=pb_cache_mapping,
-    )
+        img_xds, static_xds, _ = _prepare_continuum_image(
+            input_data["image"],
+            input_params,
+            initialize_static_products=False,
+            pb_cache_mapping=pb_cache_mapping,
+        )
 
     model_xds = input_params["model_xds"]
 
@@ -2974,8 +2999,10 @@ def model_update_continuum_single_field(
         ``"controller"``
             Updated iteration controller.
 
-        ``"converged"``
-            Boolean indicating whether the imaging has converged.
+        ``"residual_converged"``
+            Whether the refreshed residual confirms a stopping condition,
+            including exhausted iteration limits. A post-update stop is only
+            provisional and returns ``False`` here.
     """
     import time
 
@@ -2983,11 +3010,11 @@ def model_update_continuum_single_field(
     import toolviper.utils.logger as logger
 
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        continuum_residual_statistics,
         model_update_mtmfs_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (
         ReturnDict,
-        get_calculate_cycle_controls,
         merge_return_dicts,
     )
 
@@ -3060,38 +3087,32 @@ def model_update_continuum_single_field(
         "T_convergence": 0.0,
     }
 
-    # A dirty-image request still passes through the append node so static
-    # products and model state are prepared consistently, but it must not call
-    # a deconvolver whose contract requires a positive iteration count.
-    if int(iteration_control_params["niter"]) == 0:
+    # The reduced residual describes the CURRENT accumulated model. Evaluate
+    # it before any new model update, including after a provisional threshold
+    # stop in the preceding update. Checking statistics consumes no budget.
+    start = time.time()
+    controller.ensure_planes(img_xds.sizes["time"], 1, img_xds.sizes["polarization"])
+    statistics = continuum_residual_statistics(
+        img_xds,
+        iteration_control_params.get("primary_beam_limit", 0.0),
+        image_data_group_in_name,
+    )
+    stopcode, stopdesc = controller.check_convergence(statistics)
+    if stopcode.major != 0:
         import xarray as xr
 
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
-            MAJOR_ITER_LIMIT,
-            MAJOR_STOPCODE_DESCRIPTIONS,
-            MINOR_CONTINUE,
-            StopCode,
+        from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+        # No new model components: the append node will retain the accumulated
+        # model, then restore this same residual only after this verified stop.
+        img_xds["SKY_MODEL"] = xr.zeros_like(img_xds["SKY_RESIDUAL"])
+        modify_data_groups_xds(
+            img_xds,
+            data_group_out_name=image_data_group_out_name,
+            data_group_out={"sky": "SKY_MODEL"},
+            description="Zero continuum model increment after residual verification.",
         )
-
-        if "SKY_MODEL" not in img_xds:
-            img_xds["SKY_MODEL"] = xr.zeros_like(img_xds["SKY_RESIDUAL"])
-        img_xds.attrs.setdefault("data_groups", {})[image_data_group_out_name] = {
-            "sky": "SKY_MODEL"
-        }
-
-        controller.ensure_planes(
-            img_xds.sizes["time"],
-            1,
-            img_xds.sizes["polarization"],
-        )
-        controller.niter[...] = 0
-        controller.stopcode_major[...] = MAJOR_ITER_LIMIT
-        controller.stopcode_minor[...] = MINOR_CONTINUE
-        stopcode = StopCode(MAJOR_ITER_LIMIT, MINOR_CONTINUE)
-        stopdesc = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_ITER_LIMIT]
-        controller.stopcode = stopcode
-        controller.stopdescription = stopdesc
-
+        timing["T_convergence"] = time.time() - start
         timing["T_model_update_node_task"] = time.time() - node_start
         return {
             "image": img_xds,
@@ -3103,35 +3124,15 @@ def model_update_continuum_single_field(
             "controller": controller,
             "stopcode": stopcode,
             "stopdesc": stopdesc,
+            "residual_statistics": statistics,
+            "residual_converged": True,
             "is_n_iter_0": False,
         }
 
-    # -------------------------------------------------------------
-    # Calculate the controls for this minor cycle.
-    #
-    # The temporary Taylor-0 Högbom implementation has one effective
-    # frequency plane. Independently controlled planes are therefore
-    # time x 1 x polarization.
-    # -------------------------------------------------------------
-    start = time.time()
-
-    controller.ensure_planes(
-        img_xds.sizes["time"],
-        1,
-        img_xds.sizes["polarization"],
-    )
-
-    (
-        cycle_niter,
-        cyclethreshold,
-        cyclethreshold_per_plane,
-    ) = get_calculate_cycle_controls(
-        controller,
-        combined_deconvolve_dict,
-        img_xds,
-        is_n_iter_0,
-        iteration_control_params=iteration_control_params,
-    )
+    # Controls also use the refreshed residual, rather than the previous
+    # approximate model-update residual. Iteration counters remain cumulative.
+    cycle_niter, cyclethreshold = controller.calculate_cycle_controls(statistics)
+    cyclethreshold_per_plane = controller.per_plane_cycle_threshold(statistics)
 
     timing["T_iteration_control"] = time.time() - start
 
@@ -3208,6 +3209,7 @@ def model_update_continuum_single_field(
         "timing_node_tasks": input_data.get("timing_node_tasks"),
         "timing_model_update": node_timing_df,
         "deconvolution": combined_deconvolve_dict,
+        "residual_converged": False,
         "controller": controller,
         "stopcode": stopcode,
         "stopdesc": stopdesc,

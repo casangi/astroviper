@@ -10,6 +10,80 @@ _MVC_OBSERVED_NORMALIZATION_CACHE = "_MVC_OBSERVED_NORMALIZATION_CACHE"
 ###############################################################################
 
 
+def continuum_residual_statistics(
+    img_xds,
+    primary_beam_limit,
+    image_data_group_in_name="residual",
+):
+    """Measure refreshed Taylor-zero residuals on the effective CLEAN support.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Prepared continuum image with residual and primary-beam products.
+    primary_beam_limit : float
+        Fraction of the peak primary beam used when no explicit mask is present,
+        matching the model-update mask convention.
+    image_data_group_in_name : str, optional
+        Data group naming the residual, primary beam, and optional CLEAN mask.
+
+    Returns
+    -------
+    ReturnDict
+        Per-time/polarization residual statistics, with channel index zero.
+        Measuring these statistics does not consume iterations or add a model
+        update to the deconvolution history.
+    """
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.utils import ReturnDict
+
+    group = img_xds.attrs["data_groups"][image_data_group_in_name]
+    residual = img_xds[group["sky"]].isel(taylor_term=0, drop=True)
+
+    def continuum_plane(array):
+        for dimension in ("taylor_term", "frequency", "psf_taylor_order"):
+            if dimension in array.dims:
+                array = array.isel({dimension: 0}, drop=True)
+        return array.broadcast_like(residual).transpose(*residual.dims).values
+
+    if group.get("mask") is not None:
+        support = continuum_plane(img_xds[group["mask"]]) > 0.5
+    else:
+        primary_beam = continuum_plane(img_xds[group["primary_beam"]])
+        support = primary_beam >= primary_beam_limit * np.nanmax(primary_beam)
+
+    values = residual.transpose("time", "polarization", "l", "m").values
+    support = (
+        xr.DataArray(support, dims=residual.dims)
+        .transpose("time", "polarization", "l", "m")
+        .values
+    )
+    statistics = ReturnDict()
+    for tt in range(values.shape[0]):
+        for pp in range(values.shape[1]):
+            absolute = np.abs(values[tt, pp])
+            finite = np.isfinite(absolute)
+            selected = support[tt, pp] & finite
+            statistics.add(
+                {
+                    "peakres": float(np.max(absolute[selected], initial=0.0)),
+                    "peakres_nomask": float(np.max(absolute[finite], initial=0.0)),
+                    "masksum": int(np.count_nonzero(selected)),
+                    "iter_done": 0,
+                    "max_psf_sidelobe": float(
+                        img_xds["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"]
+                        .isel(time=tt, polarization=pp)
+                        .values.reshape(-1)[0]
+                    ),
+                },
+                time=tt,
+                pol=pp,
+                chan=0,
+            )
+    return statistics
+
+
 def copy_variable_without_alignment(
     destination: xr.Dataset,
     source: xr.Dataset,

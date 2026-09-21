@@ -970,7 +970,8 @@ def test_tw_hydra_cleaning_runs_later_major_cycles_and_builds_a_model(
             "threshold": 0.001,
             "gain": 0.1,
             "cyclefactor": 1.5,
-            "cycleniter": -1,
+            # Force more than one update independently of the fitted sidelobe.
+            "cycleniter": 3,
             "minpsffraction": 0.05,
             "maxpsffraction": 0.8,
         },
@@ -1401,3 +1402,82 @@ def test_chunk_count_respects_override_and_calculates_when_absent(monkeypatch):
         )
         == 2
     )
+
+
+@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+@pytest.mark.parametrize(
+    "visibility_memory_mode", ["recompute", "in_memory", "in_place"]
+)
+@pytest.mark.parametrize(("niter", "expected_updates"), [(100, 3), (1, 1)])
+def test_refreshed_residual_resumes_after_provisional_threshold_without_restoring(
+    tmp_path,
+    tw_hydra_store,
+    monkeypatch,
+    specmode,
+    visibility_memory_mode,
+    niter,
+    expected_updates,
+):
+    """An optimistic minor-cycle peak cannot terminate the distributed driver."""
+    import astroviper.processing_functions.imaging.image_continuum_single_field as processing
+    from astroviper.processing_functions.imaging.utils.iteration_control import (
+        MAJOR_CYCLE_LIMIT,
+        MAJOR_ITER_LIMIT,
+    )
+
+    original_update = processing.model_update_mtmfs_single_field
+    original_restore = processing.restore_image
+    events = []
+
+    def optimistic_update(*args, **kwargs):
+        result, timings = original_update(*args, **kwargs)
+        events.append("update")
+        # Emulate an approximate minor-cycle residual below threshold, while
+        # keeping the actual model and visibility-based residual untouched.
+        for fields in result.data.values():
+            if isinstance(fields["peakres"], list):
+                fields["peakres"][-1] = 0.0
+            else:
+                fields["peakres"] = 0.0
+        return result, timings
+
+    def counted_restore(*args, **kwargs):
+        events.append("restore")
+        return original_restore(*args, **kwargs)
+
+    monkeypatch.setattr(
+        processing, "model_update_mtmfs_single_field", optimistic_update
+    )
+    monkeypatch.setattr(processing, "restore_image", counted_restore)
+    processing_set = open_processing_set(str(tw_hydra_store))
+    result, image = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / "verified.img.zarr",
+        processing_set,
+        2,
+        specmode,
+        {"weighting": "natural", "weighting_scope": "local"},
+        visibility_memory_mode=visibility_memory_mode,
+        image_param_overrides={"polarization_coords": ["I"], "nterms": 1},
+        iteration_control_params={
+            "niter": niter,
+            "nmajor": 3,
+            "threshold": 1e-8,
+            "gain": 0.1,
+            "cyclefactor": 1.5,
+            "cycleniter": 1,
+            "minpsffraction": 0.05,
+            "maxpsffraction": 0.8,
+        },
+    )
+    assert events == ["update"] * expected_updates + ["restore"]
+    assert result["stopcode"].major == (
+        MAJOR_CYCLE_LIMIT if niter == 100 else MAJOR_ITER_LIMIT
+    )
+    assert (
+        result["controller"].major_done == result["n_major_cycles"] == expected_updates
+    )
+    assert len(result["timing_graphs"]) == expected_updates + 1
+    assert result["controller"].total_iter_done > 0
+    assert np.nanmax(np.abs(image.SKY_RESIDUAL.values)) > 1e-8
+    assert result["residual_statistics"].data

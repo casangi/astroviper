@@ -3198,10 +3198,10 @@ def image_continuum_single_field(
     # Main loop
     # ---------------------------------------------------------
 
-    # The IterationController is updated inside the append node. A nonzero
-    # major stop code means that the CLEAN loop has converged or reached one
-    # of its configured limits.
-    while controller.stopcode.major == 0:
+    # Model-update stopping decisions are provisional. Every next residual
+    # update verifies convergence before its append node updates the model or
+    # restores the image. No residual or restoration is repeated on resumption.
+    while True:
         n_major_cycles += 1
 
         logger.debug(f"Starting continuum major cycle {n_major_cycles}.")
@@ -3295,6 +3295,8 @@ def image_continuum_single_field(
             "image_store": image_store,
             "pblimit": pblimit,
             "clean_mask": clean_mask_array,
+            "restore": True,
+            "pbcor": pbcor,
         }
 
         # In later major loops, a static_xds should be present
@@ -3302,6 +3304,7 @@ def image_continuum_single_field(
         if not is_n_iter_0:
             append_input_params["static_xds"] = static_xds
             append_input_params["model_xds"] = model_xds
+            append_input_params["model_uv_xds"] = model_uv_xds
             append_input_params["deconvolution"] = last_minor_return_dict[
                 "deconvolution"
             ]
@@ -3361,7 +3364,11 @@ def image_continuum_single_field(
             graph_timings,
         )
         record = _graph_timing_record(
-            f"major loop {n_major_cycles} (residual + minor cycle)",
+            (
+                "final residual + restoration"
+                if cycle_return_dict["residual_converged"]
+                else f"major loop {n_major_cycles} (residual + minor cycle)"
+            ),
             cycle_return_dict,
             graph_timings,
         )
@@ -3499,114 +3506,15 @@ def image_continuum_single_field(
         # Update global iteration control information and break loop if converged
         is_n_iter_0 = False
 
-        stopcode = cycle_return_dict["stopcode"]
-        stopdesc = cycle_return_dict["stopdesc"]
-
-        if stopcode.major != 0:
+        if cycle_return_dict["residual_converged"]:
+            # This graph verified the last model; it did not update it again.
+            n_major_cycles -= 1
+            final_return_dict = cycle_return_dict
             logger.debug(
-                "Continuum major/minor-cycle loop stopped after "
-                f"{n_major_cycles} major cycles: {stopdesc}"
+                "Continuum stopped after refreshed residual verification: "
+                f"{cycle_return_dict['stopdesc']}"
             )
             break
-
-    if last_minor_return_dict is None:
-        raise RuntimeError(
-            "The continuum major/minor-cycle loop completed without "
-            "executing a minor cycle."
-        )
-
-    # =============================================================
-    # Final major cycle: recompute residual and restore
-    # =============================================================
-
-    if specmode == "mfs":
-        assert model_uv_xds is not None
-
-    assert model_xds is not None
-
-    final_input_params = dict(input_params)
-
-    final_input_params["is_n_iter_0"] = False
-    final_input_params["restore"] = True
-    final_input_params["model_xds"] = model_xds
-    final_input_params["static_xds"] = static_xds
-    final_input_params["specmode"] = specmode
-    final_input_params["pblimit"] = float(pblimit)
-
-    final_input_params["weight_cache_mapping"] = weight_cache_mapping
-
-    if specmode == "mfs" and visibility_memory_mode == "in_memory":
-        if observed_visibility_grid_xds is None:
-            raise RuntimeError(
-                "The final MFS residual update requires the cached observed-data "
-                "visibility grid."
-            )
-        final_input_params["observed_visibility_grid_xds"] = (
-            observed_visibility_grid_xds
-        )
-
-    if specmode == "mfs":
-        final_input_params["model_uv_xds"] = model_uv_xds
-    else:
-        final_input_params["model_uv_xds"] = None
-
-    if specmode == "mfs":
-        final_reduce_input_params = {
-            "specmode": "mfs",
-            "additive_variables": (
-                "VISIBILITY",
-                "VISIBILITY_NORMALIZATION",
-            ),
-        }
-    else:
-        final_reduce_input_params = {
-            "specmode": "mvc",
-            "additive_variables": (
-                "MVC_RESIDUAL_TAYLOR_NUMERATOR",
-                "MVC_RESIDUAL_WEIGHT_SUM",
-            ),
-        }
-
-    # Call the graph with continuum_finalize_node
-    final_node_task_data_mapping = node_task_data_mapping
-    if specmode == "mvc" and widebandpb_memory_mode == "in_memory":
-        final_node_task_data_mapping = _mapping_with_task_primary_beams(
-            node_task_data_mapping,
-            pb_cache_mapping,
-        )
-    if specmode == "mvc" and visibility_memory_mode == "in_memory":
-        final_node_task_data_mapping = _mapping_with_task_observed_grids(
-            final_node_task_data_mapping,
-            observed_visibility_grid_mapping,
-        )
-
-    final_return_dict, graph_timings = compute_continuum_graph(
-        ps_xdt=ps_xdt,
-        node_task_data_mapping=final_node_task_data_mapping,
-        cycle_input_params=final_input_params,
-        reduce_input_params=final_reduce_input_params,
-        disk_chunk_sizes=disk_chunk_sizes,
-        processing_set_data_group_name=processing_set_data_group_name,
-        monitor_resources_seconds=monitor_resources_seconds,
-        task_priorities=task_priorities,
-        reduce_mode=reduce_mode,
-        reduce_n_batch=reduce_n_batch,
-        append_node=node_tasks.imaging.continuum_finalize_node,
-        append_input_params=final_input_params,
-    )
-
-    # Gather timing information while retaining the final graph's task stream.
-    _accumulate_graph_timings(
-        timing_distributed_application,
-        graph_timings,
-    )
-    record = _graph_timing_record(
-        "final residual + restoration",
-        final_return_dict,
-        graph_timings,
-    )
-    if record is not None:
-        timing_graphs.append(record)
 
     # =============================================================
     # Assemble the final application result
@@ -3618,16 +3526,8 @@ def image_continuum_single_field(
     # while the accumulated model comes from all preceding minor cycles.
     return_dict["image"]["SKY_MODEL"] = model_xds["SKY_MODEL"].copy(deep=True)
 
-    # Convergence and deconvolution state come from the last minor cycle,
-    # because the final graph contains no model-update append node.
-    for key in (
-        "controller",
-        "deconvolution",
-        "stopcode",
-        "stopdesc",
-        "is_n_iter_0",
-    ):
-        return_dict[key] = last_minor_return_dict[key]
+    # The final append returns refreshed stopping statistics and retains the
+    # cumulative model-update history without adding a fictitious update.
 
     return_dict["static_xds"] = static_xds
     return_dict["n_major_cycles"] = n_major_cycles
