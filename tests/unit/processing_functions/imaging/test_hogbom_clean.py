@@ -111,7 +111,8 @@ class TestBasicCorrectness:
 
     def test_partial_clean_with_small_gain(self):
         """With gain < 1 the residual should be reduced but not zero after
-        a single iteration; ``iter_done`` should equal ``max_iter`` when
+        a single reported CASA iteration (two updates); ``iter_done``
+        should equal ``max_iter`` when
         threshold is not reached."""
         ny, nx = 16, 16
         dirty = _point_source_residual(ny, nx, [(8, 8, 1.0)])
@@ -128,9 +129,9 @@ class TestBasicCorrectness:
         )
 
         assert result["iterations_performed"] == 1
-        # Residual at the source position should be reduced by gain.
-        assert dirty[8, 8] == pytest.approx(0.9, abs=1e-6)
-        assert model[8, 8] == pytest.approx(0.1, abs=1e-6)
+        # CASA includes index zero: max_iter=1 performs two gain updates.
+        assert dirty[8, 8] == pytest.approx(0.81, abs=1e-6)
+        assert model[8, 8] == pytest.approx(0.19, abs=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -1036,3 +1037,55 @@ class TestCubeReturnShapes:
 
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(
+    "start, budget, threshold, updates, reported",
+    [
+        (0, 5, 0.0, 6, 5),
+        (2, 5, 0.0, 4, 5),
+        (0, 100, 0.6, 5, 5),
+        (0, 0, 0.0, 0, 0),
+    ],
+)
+def test_casa_inclusive_update_limit(
+    dtype, start, budget, threshold, updates, reported
+):
+    """CASA's inclusive cap changes component count, not its reported index."""
+    residual = _delta_psf(16, 16, dtype)
+    psf = residual.copy()
+    model = np.zeros_like(residual)
+    result = hogbom.clean(
+        dirty_image=residual,
+        psf=psf,
+        model=model,
+        gain=0.1,
+        threshold=threshold,
+        max_iter=budget,
+        start_iter=start,
+    )
+    np.testing.assert_allclose(residual[8, 8], 0.9**updates, rtol=2e-6)
+    np.testing.assert_allclose(model[8, 8], 1 - 0.9**updates, atol=2e-6)
+    assert result["iterations_performed"] == reported
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("kernel", ["clean_cube", "clean_cube_many_threads"])
+def test_casa_inclusive_cube_limits(dtype, kernel):
+    """Both threaded paths preserve per-plane caps and inactive planes."""
+    residual = np.zeros((1, 1, 3, 16, 16), dtype=dtype)
+    residual[..., 8, 8] = 1
+    psf = residual.copy()
+    model = np.zeros_like(residual)
+    result = getattr(hogbom, kernel)(
+        residual_cube=residual,
+        psf_cube=psf,
+        model_cube=model,
+        gain=0.1,
+        max_iter=np.array([[[0, 1, 5]]], dtype=np.int32),
+        threshold=np.zeros((1, 1, 3), dtype=dtype),
+        processing_function_threads=2,
+    )
+    np.testing.assert_allclose(residual[0, 0, :, 8, 8], [1, 0.9**2, 0.9**6], rtol=2e-6)
+    np.testing.assert_array_equal(result["iterations_performed"], [[[0, 1, 5]]])

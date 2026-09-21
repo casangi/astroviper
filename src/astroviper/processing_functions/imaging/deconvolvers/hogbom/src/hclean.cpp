@@ -118,8 +118,11 @@ void clean(T* limage, T* limagestep, const T* lpsf,
     int px = 0;  // Convert from Fortran 1-based to 0-based
     int py = 0;
 
-    // Main iteration loop
-    for (iter = siter; iter < niter; ++iter) {
+    // Match CASA hclean.f: the model-update index is inclusive, while
+    // the returned index is capped at niter below. A positive budget of N
+    // can therefore perform N+1 updates when starting at zero.
+    // Keep zero-budget planes inactive (used by the Python controller).
+    for (iter = siter; niter > 0 && iter <= niter; ++iter) {
         absval = static_cast<T>(0);
         for (int iy = ybeg; iy < yend; ++iy) {
             for (int ix = xbeg; ix < xend; ++ix) {
@@ -443,13 +446,13 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
     const T zero_val = static_cast<T>(0);
     const T two_val = static_cast<T>(2);
 
-    for (int it = 0; it < max_niter; ++it) {
+    for (int it = 0; it <= max_niter; ++it) {
         // ---- peak search: per (plane, row) max |residual| within the box ----
         parallel_for([&](long r0, long r1) {
             for (long r = r0; r < r1; ++r) {
                 const int pl = static_cast<int>(r / ny);
                 const int iy = static_cast<int>(r % ny);
-                if (!active[pl] || it >= niter[pl] || iy < ybeg || iy >= yend) {
+                if (!active[pl] || (niter[pl] <= 0 || it > niter[pl]) || iy < ybeg || iy >= yend) {
                     row_max[r] = static_cast<T>(-1);
                     continue;
                 }
@@ -476,7 +479,7 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
         // ---- serial per-plane combine + convergence + model update ----
         bool any_active = false;
         for (int pl = 0; pl < nplanes; ++pl) {
-            if (!active[pl] || it >= niter[pl]) continue;
+            if (!active[pl] || (niter[pl] <= 0 || it > niter[pl])) continue;
             T best = static_cast<T>(-1);
             int py = ybeg, px = xbeg;
             const long base = static_cast<long>(pl) * ny;
@@ -497,7 +500,8 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
             peak_y[pl] = py;
             peak_x[pl] = px;
             peak_pv[pl] = pv;
-            iter_out[pl] += 1;
+            // CASA reports the capped index, not the extra component update.
+            iter_out[pl] = std::min(it + 1, niter[pl]);
             any_active = true;
         }
         if (!any_active) break;
@@ -507,7 +511,7 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
             for (long r = r0; r < r1; ++r) {
                 const int pl = static_cast<int>(r / ny);
                 const int iy = static_cast<int>(r % ny);
-                if (!active[pl] || it >= niter[pl]) continue;
+                if (!active[pl] || (niter[pl] <= 0 || it > niter[pl])) continue;
                 const int py = peak_y[pl];
                 const int px = peak_x[pl];
                 const T pv = peak_pv[pl];
