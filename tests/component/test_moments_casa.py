@@ -128,7 +128,7 @@ def cubes(tmp_path_factory):
         moments=[name for name, _ in VALUE_MOMENTS + COORD_MOMENTS]
         + ["integrated", "weighted_dispersion_coord"],
         moment_axis="frequency",
-        n_chunks=2,
+        n_mapping_parallelism={"m": 2},
         overwrite=True,
     )
     # Second run restricted to significant emission: the CASA-recommended way
@@ -140,7 +140,7 @@ def cubes(tmp_path_factory):
         moments=["weighted_coord", "weighted_dispersion_coord"],
         moment_axis="frequency",
         include_pixel_range=list(INCLUDE_RANGE),
-        n_chunks=2,
+        n_mapping_parallelism={"m": 2},
         overwrite=True,
     )
     return {
