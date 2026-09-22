@@ -252,6 +252,7 @@ def create_empty_data_variables_on_disk(
     double_precision,
     data_variable_definitions,
     shard_channels=None,
+    node_task_image_chunking=None,
 ):
     """Create multiple empty data variables on disk.
 
@@ -293,6 +294,18 @@ def create_empty_data_variables_on_disk(
         (metadata-server relief) and is written by
         :func:`astroviper.node_tasks.imaging.utils.write_result_chunk_to_disk_sharded_skunk_works`.
         ``None`` (default) keeps the original one-file-per-chunk layout.
+    node_task_image_chunking : dict, optional
+        Additional on-disk chunking applied *within* each node task's image
+        chunk, as ``{dimension_name: chunk_size}`` (e.g. ``{"l": 1024, "m":
+        1024}``). Without it, each variable's Zarr chunk spans the full extent
+        of every non-parallelized dimension and one node-task chunk of every
+        parallelized dimension. Each listed dimension's chunk size is reduced to
+        the given value (clipped to that default, so it can only subdivide);
+        dimensions not listed are unchanged. A parallelized dimension (e.g.
+        ``frequency``) may also be listed to subdivide the per-task chunk. For a
+        sharded array the values set the *inner* chunk shape while the shard
+        keeps covering the full extent of the non-parallelized dimensions.
+        ``None`` (default) applies no additional chunking.
     """
     import os
 
@@ -328,9 +341,12 @@ def create_empty_data_variables_on_disk(
         chunks = []
         for d in dims:
             if d in parallel_coords:
-                chunks.append(len(parallel_coords[d]["data_chunks"][0]))
+                chunk_size = len(parallel_coords[d]["data_chunks"][0])
             else:
-                chunks.append(shape_dict[d])
+                chunk_size = shape_dict[d]
+            if node_task_image_chunking and d in node_task_image_chunking:
+                chunk_size = min(int(node_task_image_chunking[d]), chunk_size)
+            chunks.append(chunk_size)
 
         dtype = np.dtype(dv_def["dtype"])
         extra_attrs = dv_def.get("attrs", {})
@@ -356,6 +372,12 @@ def create_empty_data_variables_on_disk(
                     step = inner[ax]  # inner chunk size on this parallel dim
                     want = min(int(shard_channels), shape[ax])
                     shard[ax] = max(step, (want // step) * step)  # multiple of inner
+                else:
+                    # The shard keeps covering the whole non-parallel axis even
+                    # when node_task_image_chunking subdivides its inner chunk
+                    # (rounded up to a multiple of the inner chunk, as Zarr
+                    # requires); more inner chunks per shard, not more shards.
+                    shard[ax] = -(-shape[ax] // inner[ax]) * inner[ax]
             inner_codecs = [BytesCodec()] + ([compressor] if compressor else [])
             sky = group.require_array(
                 dv_name,

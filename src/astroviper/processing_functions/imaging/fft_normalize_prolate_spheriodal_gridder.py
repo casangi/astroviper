@@ -373,26 +373,32 @@ def fft_norm_img_xds(
         #     )
         # )
 
-        # Process one 2-D plane at a time to keep FFT temporaries small.
-        # At 12 000 × 12 000 this limits the extra allocation to ≈ 1.15 GB
-        # instead of allocating the full (time, freq, pol, u, v) float64 array.
-        import matplotlib.pyplot as plt
-
+        # Process one 2-D plane at a time to keep FFT temporaries small, and do
+        # ALL arithmetic in place on the plane's own buffer. The out-of-place
+        # spelling ``out_arr[t, f, p] / kernel_image_1D_l[:, None] / ...`` is a
+        # memory disaster: the float64 kernel arrays PROMOTE a complex64 plane
+        # to complex128 (array/array promotion), allocating two full-grid
+        # complex128 temporaries (≈ 2.9 GB each at 13 500²) plus the cast back
+        # -- the 2026-08-16 multi-cycle OOM. In-place division by the float64
+        # kernels keeps the plane's dtype and allocates nothing (same pattern,
+        # same reason, as ifft_norm_img_xds above). The padded borders are
+        # zero, so dividing the full padded plane is harmless.
         for t in range(n_time):
             for f in range(n_freq):
                 for p in range(n_pol):
                     add_padding(raw_grid[t, f, p], out_arr[t, f, p])
+                    out_arr[t, f, p] /= kernel_image_1D_l[:, None]
+                    out_arr[t, f, p] /= kernel_image_1D_m[None, :]
 
+                    # The plane is the output buffer being overwritten anyway,
+                    # so the FFT may destroy it (skips the defensive copy).
                     out_arr[t, f, p] = fft_lm_to_uv(
-                        out_arr[t, f, p]
-                        / kernel_image_1D_l[:, None]
-                        / kernel_image_1D_m[None, :],
+                        out_arr[t, f, p],
                         processing_function_threads=processing_function_threads,
                         fft_backend=fft_backend,
                         complex_dtype=complex_dtype,
+                        overwrite_input=True,
                     )
-
-        plt.show()
 
         if data_variable not in image_data_variables_keep:
             # Release the large grid from the dataset so it can be freed as soon
@@ -467,8 +473,8 @@ def ifft_uv_to_lm(
     grid_2d : numpy.ndarray
         Input UV grid.  Can be any number of dimensions; the FFT is applied
         along ``fft_plane_dims``.  For the slice-by-slice path in
-        ``ifft_norm_img_xds`` this is a 2-D array of shape ``(u, v)``.
-        dtype must be complex128.
+        ``ifft_norm_img_xds`` this is a 2-D array of shape ``(u, v)``, in
+        either complex precision (``complex64`` or ``complex128``).
     fft_plane_dims : tuple of int, optional
         Axes over which to apply the 2-D FFT.  Default is ``(-2, -1)``.
     threads : int, optional
@@ -532,6 +538,7 @@ def fft_lm_to_uv(
     processing_function_threads=1,
     fft_backend="pyfftw",
     complex_dtype=np.complex128,
+    overwrite_input=False,
 ):
     """Apply a 2-D FFT to transform a sky-plane image to a UV grid.
 
@@ -562,6 +569,12 @@ def fft_lm_to_uv(
     complex_dtype : numpy dtype, optional
         Complex dtype the image is cast to and the grid is returned in.
         Default ``numpy.complex128``.
+    overwrite_input : bool, optional
+        If ``True`` and ``image`` is already ``complex_dtype``, the function
+        may use ``image``'s buffer as scratch space, destroying its contents
+        (skips the one plane-sized defensive copy — ≈ 1.5 GB for a
+        13 500 × 13 500 complex64 grid).  The caller must not rely on
+        ``image``'s contents after the call.  Default ``False``.
 
     Returns
     -------
@@ -576,8 +589,10 @@ def fft_lm_to_uv(
     if even:
         # Fold the shifts into checkerboard multiplies (see ifft_uv_to_lm):
         # fftshift(fft2(ifftshift(x))) == cb * fft2(cb * x).
-        if work is image:
-            work = work.copy()  # own the buffer if asarray returned a view
+        # Own the buffer unless the caller ceded it via overwrite_input
+        # (asarray is a no-copy view when the dtype already matches).
+        if work is image and not overwrite_input:
+            work = work.copy()
         _fold_shift_checkerboard(work, fft_plane_dims)
         uv = fft.fft2(
             work,
