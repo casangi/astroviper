@@ -14,13 +14,16 @@ import sys
 import unittest
 
 import numpy as np
-import xarray as xr
-
-# Registers the `xr_img` accessor used by the function under test.
-import xradio.image.image_xds  # noqa: F401
 
 from astroviper.processing_functions.imaging.get_visibility_grid import (
     get_visibility_grid_single_field,
+)
+from tests.unit.processing_functions.imaging.degrid_test_datasets import (
+    OVERSAMPLING,
+    SUPPORT,
+)
+from tests.unit.processing_functions.imaging.degrid_test_datasets import (
+    build_datasets as _build_datasets,
 )
 
 # The pure-Python reference degridder (de-jitted copy of the retired numba
@@ -32,90 +35,6 @@ from reference_gridders import prolate_spheroidal_degrid_reference
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_kernel_1D,
 )
-
-SUPPORT = 7
-OVERSAMPLING = 100
-
-
-def _build_datasets(
-    n_l=80,
-    n_m=80,
-    n_time=1,
-    n_baseline=16,
-    n_chan=2,
-    n_pol=2,
-    fft_padding=1.2,
-    delta=2.0e-5,
-    uv_extent=20.0,
-    sky_value=2.0 + 0.0j,
-    seed=0,
-):
-    """Build a minimal (ms_xds, img_xds, n_uv) triple for the degridder.
-
-    `img_xds` holds a UV-domain model grid (not a sky image) with shape
-    `(time, frequency, polarization, u, v)`.
-    """
-    rng = np.random.default_rng(seed)
-    n_uv = (fft_padding * np.array([n_l, n_m])).astype(int)
-
-    # l/m coordinates centred on zero so `get_lm_cell_size` returns `delta`.
-    l_coord = (np.arange(n_l) - n_l / 2) * delta
-    m_coord = (np.arange(n_m) - n_m / 2) * delta
-    freq = np.linspace(1.0e9, 1.1e9, n_chan)
-
-    uvw = np.concatenate(
-        [
-            rng.uniform(-uv_extent, uv_extent, (n_time, n_baseline, 2)),
-            np.zeros((n_time, n_baseline, 1)),
-        ],
-        axis=-1,
-    )
-
-    ms_xds = xr.Dataset(
-        data_vars={
-            "VISIBILITY": (
-                ("time", "baseline_id", "frequency", "polarization"),
-                np.zeros((n_time, n_baseline, n_chan, n_pol), dtype=np.complex128),
-            ),
-            "UVW": (("time", "baseline_id", "uvw_label"), uvw),
-            "WEIGHT_IMAGING": (
-                ("time", "baseline_id", "frequency", "polarization"),
-                np.ones((n_time, n_baseline, n_chan, n_pol)),
-            ),
-        },
-        coords={"frequency": freq},
-    )
-    ms_xds.attrs["data_groups"] = {
-        "base": {
-            "correlated_data": "VISIBILITY",
-            "uvw": "UVW",
-            "weight_imaging": "WEIGHT_IMAGING",
-        }
-    }
-
-    # UV model grid: shape (m_time, m_chan, m_pol, n_u, n_v)
-    sky_model = np.full(
-        (n_time, n_chan, n_pol, int(n_uv[0]), int(n_uv[1])),
-        sky_value,
-        dtype=np.complex128,
-    )
-    img_xds = xr.Dataset(
-        data_vars={
-            "SKY_MODEL": (
-                ("time", "frequency", "polarization", "u", "v"),
-                sky_model,
-            ),
-        },
-        coords={"l": l_coord, "m": m_coord, "frequency": freq},
-    )
-    img_xds.attrs["type"] = "image_dataset"
-    # get_visibility_grid_single_field degrids the image-side "visibility" uv
-    # grid (default input data group "model") into ms model visibilities.
-    img_xds.attrs["data_groups"] = {
-        "model": {"visibility": "SKY_MODEL"},
-    }
-
-    return ms_xds, img_xds, n_uv
 
 
 class TestGetVisibilityGridSingleField(unittest.TestCase):

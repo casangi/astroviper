@@ -1,12 +1,5 @@
-import copy
-
 import numpy as np
 import xarray as xr
-
-from astroviper.utils.data_group_tools import (
-    create_data_groups_in_and_out,
-    modify_data_groups_xds,
-)
 
 
 def get_visibility_grid_single_field(
@@ -36,30 +29,34 @@ def get_visibility_grid_single_field(
     This function is the inverse of
     :func:`~astroviper.processing_functions.imaging.add_visibility_grid.add_visibility_grid_single_field`:
     it predicts visibilities *from* a UV-plane model rather than gridding
-    observed visibilities onto a UV plane.  It uses the standard separable
-    prolate-spheroidal degridder (the C++ ``prolate_spheroidal_degrid``
-    kernel) and therefore does not require a GCF dataset.
+    observed visibilities onto a UV plane.  It uses the separable C++ prolate
+    spheroidal degridder (the standard gridder in CASA) and therefore does not
+    require a GCF dataset. Cube and continuum callers share that numerical
+    primitive without sharing their spectral-model preparation APIs.
 
     Parameters
     ----------
     ms_xds : xr.Dataset
         Measurement set dataset.  Must contain the data variables referenced
-        by ``ms_data_group_in_name`` (``correlated_data``, ``uvw``,
-        ``weight_imaging``) and a ``frequency`` coordinate.  On the first call
-        the output visibility data variable is created on ``ms_xds`` by
-        allocating an array shaped and dtyped like the input ``correlated_data``.
+        by ``ms_data_group_in_name`` (``correlated_data`` and ``uvw``) and a
+        ``frequency`` coordinate.  On the first call the output visibility
+        data variable is created on ``ms_xds`` as a ``complex128`` array shaped
+        like the input ``correlated_data``.
     cgk_1D : np.ndarray
         Oversampled 1-D prolate spheroidal wave function (PSWF) kernel.
         Shape ``(oversampling * (support // 2 + 1),)``; passed directly to
-        the C++ ``prolate_spheroidal_degrid`` kernel.
+        the prolate spheroidal degridder.
     img_xds : xr.Dataset
         Image dataset holding the model UV grid.  Must expose an image data
-        group under ``image_data_group_in_name`` whose ``"SKY"`` role names a
-        data variable shaped ``(time, frequency, polarization, u, v)``, the
-        same ``(u, v)`` axis order used by the C++
+        group under ``image_data_group_in_name`` whose ``"visibility"`` role
+        names a data variable shaped ``(time, frequency, polarization, u, v)``,
+        the same ``(u, v)`` axis order used by the C++
         ``prolate_spheroidal_grid`` kernel.
         Cell size and image dimensions are read directly from ``img_xds`` via
         ``img_xds.xr_img.get_lm_cell_size()`` and ``img_xds.sizes``.
+    ms_data_group_in_name : str, default ``"base"``
+        Key of the MS input data group in ``ms_xds.attrs["data_groups"]``.
+        Must provide the ``"correlated_data"`` and ``"uvw"`` role keys.
     ms_data_group_out_name : str, default ``"model"``
         Key under which the output data group is registered in
         ``ms_xds.attrs["data_groups"]``.
@@ -67,20 +64,24 @@ def get_visibility_grid_single_field(
         Mapping of role keys to the data-variable names written into
         ``ms_xds``.  ``"correlated_data"`` stores the complex predicted
         visibilities.
-    image_data_group_in_name : str, default ``"model_visibility_grid"``
+    image_data_group_in_name : str, default ``"model"``
         Key of the image input data group in ``img_xds.attrs["data_groups"]``
-        whose ``"SKY"`` role names the model UV grid.
+        whose ``"visibility"`` role names the model UV grid.
     overwrite : bool, default ``True``
         If ``True``, an existing output data group or output data variable is
         silently overwritten.  Defaults to ``True`` because this function is
         typically called repeatedly in an iterative cycle.
     chan_mode : str, default ``"cube"``
-        Channel mapping mode.  ``"cube"`` maps each visibility channel to its
-        own image channel; ``"continuum"`` sources every visibility channel
-        from image channel 0.
+        Channel mapping mode.  ``"cube"`` maps each visibility channel to the
+        image channel nearest in frequency (see
+        :func:`~astroviper.processing_functions.imaging.utils.frequency_mapping.map_visibility_frequencies_to_image`);
+        ``"continuum"`` sources every visibility channel from image channel 0.
+    fft_padding : float, default ``1.2``
+        Padding factor applied to the image size when computing the UV-grid
+        dimensions.
     processing_function_threads : int, default ``1``
-        Number of threads used by the C++ degridder; ``<= 0`` falls back to
-        the hardware concurrency.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
 
     Returns
     -------
@@ -88,116 +89,71 @@ def get_visibility_grid_single_field(
         Modifies ``ms_xds`` in place (output data variable and ``data_groups``
         attribute); no return value.
 
+    Raises
+    ------
+    ValueError
+        If, in ``"cube"`` mode, a visibility channel lies more than half an
+        image channel width from every image channel, or if the grid's
+        polarization axis does not match ``ms_xds``.
+
     Notes
     -----
     - Flags must be applied by the caller before invoking this function.  The
-      underlying C++ ``prolate_spheroidal_degrid`` kernel has no flag argument
-      and only skips samples whose ``vis_data`` value is ``NaN``.  Newly
+      underlying degridder has no flag argument and only skips samples whose
+      ``vis_data`` value is ``NaN``. Newly
       allocated output arrays are zero-initialised (not ``NaN``), so every
       visibility whose ``uvw`` is finite and whose support falls inside the
       grid will receive a prediction.
     - Time mapping is not currently implemented: every visibility time index
       is mapped to image time index 0.
+    - ``processing_function_threads <= 0`` lets the C++ degridder fall back
+      to the hardware concurrency; ``1`` runs serially.
 
     See Also
     --------
     astroviper.processing_functions.imaging.add_visibility_grid.add_visibility_grid_single_field :
         Forward (gridding) counterpart.
-    astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp.prolate_spheroidal_degrid :
-        C++ standard separable degridding kernel.
+    degrid_visibility_grid_single_field :
+        Shared prolate spheroidal gridder numerical primitive.
     """
     if ms_data_group_out_modified is None:
         ms_data_group_out_modified = {
             "correlated_data": "VISIBILITY_MODEL",
         }
-    _ms_data_group_out_modified = copy.deepcopy(ms_data_group_out_modified)
-
-    # Resolve the image input and output data groups, guarding against
-    # accidental overwrites according to the overwrite flag.
-    ms_data_group_in, ms_data_group_out = create_data_groups_in_and_out(
-        ms_xds,
-        data_group_in_name=ms_data_group_in_name,
-        data_group_out_name=ms_data_group_out_name,
-        data_group_out_modified=_ms_data_group_out_modified,
-        overwrite=overwrite,
-    )
-
     model_name = img_xds.attrs["data_groups"][image_data_group_in_name]["visibility"]
 
-    n_chan = img_xds.sizes["frequency"]
+    n_chan = ms_xds.sizes["frequency"]
     if chan_mode == "cube":
-        frequency_map = (np.arange(0, n_chan)).astype(int)
+        from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+            map_visibility_frequencies_to_image,
+        )
+
+        frequency_map = map_visibility_frequencies_to_image(
+            ms_xds.frequency.values,
+            img_xds.frequency.values,
+        )
     else:  # continuum
-        # Single continuum image collapsed across all channels.
         frequency_map = (np.zeros(n_chan)).astype(int)
 
-    # Time Map #Currently not implemented.
-    n_time = ms_xds.sizes["time"]
-    time_map = (np.zeros(n_time)).astype(int)
-
-    n_imag_pol = img_xds.sizes["polarization"]
-    pol_map = (np.arange(0, n_imag_pol)).astype(int)
-
-    from astroviper.processing_functions.imaging.utils.fft_sizing import (
-        padded_grid_size,
+    from astroviper.processing_functions.imaging.degrid_visibility_grid import (
+        degrid_visibility_grid_single_field,
     )
 
-    n_uv = padded_grid_size([img_xds.sizes["l"], img_xds.sizes["m"]], fft_padding)
-    delta_lm = img_xds.xr_img.get_lm_cell_size()
-
-    # Initialise the output visibility array on the first call; subsequent
-    # calls reuse (and overwrite) the existing data variable in place.
-    # The model visibilities are kept double precision (complex128): the
-    # visibilities stay double even when the image-domain model grid is single
-    # precision, and the residual = observed - model is formed in double
-    # precision. The C++ degridder widens each (possibly complex64) model-grid
-    # cell to complex128 for the accumulation, so it can write complex128 here.
-    if ms_data_group_out["correlated_data"] not in ms_xds:
-        ms_xds[ms_data_group_out["correlated_data"]] = xr.DataArray(
-            np.zeros(
-                (
-                    ms_xds.sizes["time"],
-                    ms_xds.sizes["baseline_id"],
-                    ms_xds.sizes["frequency"],
-                    ms_xds.sizes["polarization"],
-                ),
-                dtype=np.complex128,
-            ),
-            dims=["time", "baseline_id", "frequency", "polarization"],
-        )
-
-        modify_data_groups_xds(
-            ms_xds,
-            ms_data_group_out_name,
-            ms_data_group_out,
-            description="Degridded visibilities from img_xds "
-            + image_data_group_in_name
-            + " to ms_xds "
-            + ms_data_group_out_name
-            + " with get_visibility_grid_single_field.",
-        )
-
-    grid = img_xds[model_name].values
-    vis_data = ms_xds[ms_data_group_out["correlated_data"]].values
-    uvw = ms_xds[ms_data_group_in["uvw"]].values
-    frequency_coord = ms_xds.frequency.values
-
-    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-        prolate_spheroidal_degrid,
-    )
-
-    prolate_spheroidal_degrid(
-        grid,
-        vis_data,
-        uvw,
-        frequency_coord,
-        frequency_map,
-        time_map,
-        pol_map,
+    degrid_visibility_grid_single_field(
+        ms_xds,
         cgk_1D,
-        n_uv,
-        delta_lm,
-        support=7,
-        oversampling=100,
+        img_xds,
+        img_xds[model_name].values,
+        frequency_map,
+        ms_data_group_in_name=ms_data_group_in_name,
+        ms_data_group_out_name=ms_data_group_out_name,
+        ms_data_group_out_modified=ms_data_group_out_modified,
+        overwrite=overwrite,
+        fft_padding=fft_padding,
         processing_function_threads=processing_function_threads,
+        description="Degridded visibilities from img_xds "
+        + image_data_group_in_name
+        + " to ms_xds "
+        + ms_data_group_out_name
+        + " with get_visibility_grid_single_field.",
     )
