@@ -91,7 +91,7 @@ def add_uv_sampling_grid_mosaic(
 
     See Also
     --------
-    add_uv_sampling_grid_single_field : Non-mosaic (standard gridder) variant.
+    add_uv_sampling_grid_single_field : Non-mosaic (prolate spheroidal gridder) variant.
     """
     from astroviper.processing_functions.imaging.gridders.mosaic_grid import (
         mosaic_grid_jit,
@@ -221,9 +221,9 @@ def add_uv_sampling_grid_single_field(
     :func:`~astroviper.utils.data_group_tools.modify_data_groups_xds`.
 
     This function is the non-mosaic counterpart of
-    :func:`add_uv_sampling_grid_mosaic`.  It uses the standard separable prolate
-    spheroidal gridder rather than the direction-dependent mosaic gridder, so no
-    GCF dataset is required.
+    :func:`add_uv_sampling_grid_mosaic`.  It uses the separable prolate
+    spheroidal gridder (the standard gridder in CASA) rather than the
+    direction-dependent mosaic gridder, so no GCF dataset is required.
 
     Parameters
     ----------
@@ -232,7 +232,8 @@ def add_uv_sampling_grid_single_field(
         by ``ms_data_group_in_name`` (``uvw``, ``weight_imaging``) and a
         ``frequency`` coordinate.
     cgk_1D : np.ndarray
-        1-D convolutional gridding kernel used by the standard gridder.
+        1-D convolutional gridding kernel used by the prolate spheroidal
+        gridder.
         Shape ``(oversampling * support,)``.
     img_xds : xr.Dataset
         Image dataset that accumulates the UV-sampling grid.  The arrays
@@ -256,9 +257,11 @@ def add_uv_sampling_grid_single_field(
         are silently overwritten.  Defaults to ``True`` because this function
         is typically called in a loop that accumulates into the same arrays.
     chan_mode : str, default ``"cube"``
-        Channel mapping mode.  ``"cube"`` maps each input channel to its own
-        image channel; ``"continuum"`` collapses all input channels onto a
-        single image channel.
+        Channel mapping mode.  ``"cube"`` maps each input channel to the image
+        channel nearest in frequency (see
+        :func:`~astroviper.processing_functions.imaging.utils.frequency_mapping.map_visibility_frequencies_to_image`);
+        ``"continuum"`` collapses all input channels onto a single image
+        channel.
     fft_padding : float, default ``1.2``
         Padding factor applied to the image size when computing the UV-grid
         dimensions: ``n_uv = fft_padding * [img_xds.sizes["l"], img_xds.sizes["m"]]``.
