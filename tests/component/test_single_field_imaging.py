@@ -94,32 +94,18 @@ _TRUTH_IMAGE_DRIVE_IDS = {
 # regression guard with comfortable margin.
 TRUTH_RTOL = 1e-6
 
-# Loose ceiling for the single-precision multi_cycle image comparison -- used by
-# BOTH the 1- and 12-thread variants. At threshold=0.001 the float32 deep CLEAN
-# sits on a peak-selection bifurcation: a tiny float32 difference sends a channel
-# onto an alternate-but-valid branch that differs by ~10% in the image (and by a
-# few percent in the per-plane deconvolution history). The single-threaded run is
-# bit-identical to its truth in isolation, but floating-point / thread state
-# accumulated across a full test session can occasionally tip a channel, so a
-# 1e-6 image bound is flaky even single-threaded. Both single-precision variants
-# therefore use this loose image bound AND skip the exact deconvolution-dict
-# check (dict_kind=None); the double-precision variants are the tight ReturnDict
-# regression guard.
+# Deep float32 CLEAN may select different near-tied peaks after PSF rounding.
+# Compare the observable restored Stokes-I image, rather than requiring the
+# unconvolved component model or each residual pixel to reproduce its history.
+# These are TW Hydra regression bounds, not general science/QA2 tolerances.
+# The existing 15% peak-image ceiling is retained, with additional masked
+# restored-image L2/flux checks at 15% and residual RMS agreement at 5%.
+# Float64 references and shallow imaging retain the tight checks above.
 MULTI_CYCLE_SINGLE_RTOL = 0.15
-
-# Ceiling for the direct double-vs-single multi_cycle comparison
-# (test_single_field_imaging_multi_cycle_double_vs_single). float32 vs float64
-# differ by up to ~10% on the channel where the deep CLEAN tips a peak-selection
-# bifurcation, so this is deliberately loose -- it bounds the precision spread
-# while still catching a gross regression.
 MULTI_CYCLE_DOUBLE_VS_SINGLE_RTOL = 0.15
-
-# Ceiling for the worst-case multi_cycle cross-config comparison
-# (test_single_field_imaging_multi_cycle_worst_case): double / 1 thread /
-# n_mapping_parallelism=5 vs single / 12 threads / n_mapping_parallelism=1, so precision, thread count and
-# chunking all differ at once. Still dominated by the float32 peak-selection
-# bifurcation (~10% on one channel), so it shares the same loose ceiling.
 MULTI_CYCLE_WORST_CASE_RTOL = 0.15
+DEEP_CLEAN_RESIDUAL_RMS_RTOL = 0.05
+DEEP_CLEAN_PSF_RTOL = 1e-4
 
 # Deconvolve-dict floats computed FROM the float32 gridded seed: the per-major-
 # cycle CLEAN trajectory (model_flux, peakres, ...) plus the thresholds derived
@@ -566,6 +552,90 @@ def _run_image_cube(
     return return_dict, img_av_xds, image_params
 
 
+def _check_deep_clean_history(deconvolve_dict):
+    """Check the deep fixture's stopping contract without pinning its path."""
+    expected = EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE
+    assert set(deconvolve_dict.data) == set(expected)
+    controls = _CONFIGS["multi_cycle"]["iteration_control_params"]
+    for plane, fields in deconvolve_dict.data.items():
+        counts = np.asarray(fields["iter_done"])
+        assert len(counts) == controls["nmajor"], f"{plane}: missing update cycles"
+        assert np.all(counts >= 0)
+        assert fields["niter"] == controls["niter"]
+        assert counts.sum() == controls["niter"], f"{plane}: wrong iteration total"
+        code = fields["stop_code"]
+        assert (int(code.major), int(code.minor)) == (1, 0), (
+            f"{plane}: expected iteration-limit stop, got {code}"
+        )
+        assert np.isfinite(fields["cyclethreshold"]) and fields["cyclethreshold"] > 0
+        for key in ("peakres", "start_peakres", "model_flux"):
+            values = np.asarray(fields[key])
+            assert len(values) == len(counts) and np.all(np.isfinite(values)), (
+                f"{plane}: invalid {key} history"
+            )
+
+
+def _check_deep_clean_images(actual, reference, *, tol, polarization=0):
+    """Bound restored-image agreement and residual RMS for deep CLEAN.
+
+    The reference CLEAN mask defines one common aperture; no data-dependent
+    clipping or alignment is used. Integrated restored flux is compared through
+    image sums (the common pixel/beam area factors cancel after the beam check).
+    Like the existing image assertions, these science bounds apply to Stokes I;
+    Q remains visible in the diagnostic plots. The unconvolved component model
+    is checked for finiteness, but its pixel differences are diagnostic only.
+    """
+    for coord in ("time", "frequency", "polarization", "l", "m"):
+        np.testing.assert_array_equal(actual[coord].values, reference[coord].values)
+    np.testing.assert_array_equal(actual["MASK"].values, reference["MASK"].values)
+    for var in (
+        "PRIMARY_BEAM",
+        "POINT_SPREAD_FUNCTION",
+        "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+    ):
+        bound = TRUTH_RTOL if var == "PRIMARY_BEAM" else DEEP_CLEAN_PSF_RTOL
+        np.testing.assert_allclose(
+            actual[var].values,
+            reference[var].values,
+            rtol=bound,
+            atol=1e-10 if var == "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION" else bound,
+            err_msg=var,
+        )
+    for var in ("SKY_MODEL", "SKY_RESIDUAL", "SKY_RESTORED"):
+        assert np.all(np.isfinite(actual[var].values)), f"nonfinite {var}"
+        assert np.all(np.isfinite(reference[var].values)), f"nonfinite reference {var}"
+    for channel in range(reference.sizes["frequency"]):
+        selection = dict(time=0, frequency=channel, polarization=polarization)
+        mask = reference["MASK"].isel(**selection).values.astype(bool)
+        assert np.any(mask), f"channel {channel}: empty comparison aperture"
+
+        def values(dataset, var, selection=selection, mask=mask):
+            return np.asarray(dataset[var].isel(**selection).values, dtype=float)[mask]
+
+        image = values(actual, "SKY_RESTORED")
+        truth = values(reference, "SKY_RESTORED")
+        residual = values(actual, "SKY_RESIDUAL")
+        truth_residual = values(reference, "SKY_RESIDUAL")
+        norm = np.linalg.norm(truth)
+        flux = abs(truth.sum())
+        rms = np.sqrt(np.mean(truth_residual**2))
+        assert norm > 0 and flux > 0 and rms > 0, "degenerate reference"
+        metrics = {
+            "restored L2 difference": (np.linalg.norm(image - truth) / norm, tol),
+            "restored aperture flux difference": (
+                abs(image.sum() - truth.sum()) / flux,
+                tol,
+            ),
+            "residual RMS change": (
+                abs(np.sqrt(np.mean(residual**2)) / rms - 1),
+                DEEP_CLEAN_RESIDUAL_RMS_RTOL,
+            ),
+        }
+        for label, (value, limit) in metrics.items():
+            print(f"deep CLEAN channel {channel} {label}: {value:.6g} (limit {limit})")
+            assert value < limit, f"channel {channel}: {label} {value} exceeds {limit}"
+
+
 def _compare_to_truth(
     img_av_xds,
     truth_xds,
@@ -575,6 +645,7 @@ def _compare_to_truth(
     plot_prefix,
     polarization=0,
     tol=TRUTH_RTOL,
+    deep_clean=False,
 ):
     """Compare ``variables`` of ``img_av_xds`` against ``truth_xds`` per channel.
 
@@ -585,7 +656,10 @@ def _compare_to_truth(
     panel. A summary figure plots that peak relative difference against frequency
     for Stokes I and Q. Assertions (on ``polarization``) are deferred to a final
     pass so a single failing channel cannot prevent the remaining plots from
-    being saved. Every relative difference must be < ``tol``.
+    being saved. Every relative difference must be < ``tol`` by default.
+    With ``deep_clean=True``, model/residual maps remain diagnostic; only the
+    restored peak difference uses ``tol``. Additional observable and invariant
+    checks are applied by ``_check_deep_clean_images``.
     """
     n_freq = img_av_xds.sizes["frequency"]
     n_pol = img_av_xds.sizes["polarization"]
@@ -695,8 +769,14 @@ def _compare_to_truth(
     plot_saver(fig, f"{plot_prefix}_reldiff_vs_freq.png")
 
     # Final pass: assertions only (all plots have already been generated).
+    if deep_clean:
+        _check_deep_clean_images(
+            img_av_xds, truth_xds, tol=tol, polarization=polarization
+        )
     for i_f, channel_diffs in enumerate(per_channel_diffs):
         for var, rel_diff in channel_diffs.items():
+            if deep_clean and var != "SKY_RESTORED":
+                continue
             assert rel_diff < tol, (
                 f"{plot_prefix} channel {i_f}: {var} relative difference "
                 f"{rel_diff} exceeds tolerance {tol}. You broke something!"
@@ -1062,12 +1142,9 @@ def test_single_field_imaging_multi_cycle(
     )
     truth_xds = xr.open_zarr(truth_image)
 
-    # Only the double-precision multi_cycle checks the deconvolution ReturnDict:
-    # it is stable across thread count and chunking. The single-precision deep
-    # CLEAN sits on a float32 peak-selection bifurcation (see
-    # MULTI_CYCLE_SINGLE_RTOL), so its per-plane history is not reproducible
-    # tightly enough to pin -- both single-precision variants pass dict_kind=None
-    # and are validated only by the (loosely bounded) image comparison below.
+    # Float64 pins the full trajectory; float32 checks the stopping contract
+    # and observable images while allowing different component selections.
+    _check_deep_clean_history(return_dict["deconvolution"])
     expected_dict = {
         "double": EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE,
         None: None,
@@ -1092,6 +1169,7 @@ def test_single_field_imaging_multi_cycle(
             f"multi_cycle_t{processing_function_threads}_c{n_mapping_parallelism}_{precision_tag}"
         ),
         tol=tol,
+        deep_clean=single_precision_image,
     )
 
     print(return_dict["timing_node_tasks"].T)
@@ -1106,9 +1184,9 @@ def test_single_field_imaging_multi_cycle_double_vs_single(plot_saver):
     A float32-vs-float64 comparison of the deep multi-cycle CLEAN. Both truths
     are generated identically except for precision (threads=1, n_mapping_parallelism=1), so
     this isolates the precision difference: the single-precision deep CLEAN can
-    tip a peak-selection bifurcation on a channel, hence the deliberately loose
-    ``MULTI_CYCLE_DOUBLE_VS_SINGLE_RTOL``. Generates the per-channel comparison
-    plots (double / single / difference).
+    select different near-tied components. Restored-image and residual-RMS
+    criteria therefore replace component-by-component agreement. Generates
+    per-channel comparison plots (double / single / difference).
     """
     _ensure_truth_image(TRUTH_IMAGE_MULTI_CYCLE_DOUBLE)
     _ensure_truth_image(TRUTH_IMAGE_MULTI_CYCLE_SINGLE)
@@ -1123,6 +1201,7 @@ def test_single_field_imaging_multi_cycle_double_vs_single(plot_saver):
         plot_saver=plot_saver,
         plot_prefix="multi_cycle_double_vs_single",
         tol=MULTI_CYCLE_DOUBLE_VS_SINGLE_RTOL,
+        deep_clean=True,
     )
 
 
@@ -1132,27 +1211,29 @@ def test_single_field_imaging_multi_cycle_worst_case(plot_saver):
     Compares the two most-divergent valid multi_cycle runs -- double precision /
     1 thread / n_mapping_parallelism=5 against single precision / 12 threads / n_mapping_parallelism=1 --
     so every knob that can perturb the result (precision, thread count, chunking)
-    differs at once. The spread is dominated by the float32 deep-CLEAN
-    peak-selection bifurcation, hence the deliberately loose
-    ``MULTI_CYCLE_WORST_CASE_RTOL``. Generates the per-channel comparison plots.
+    differs at once. Deep-CLEAN component selection can differ, so the test
+    bounds restored-image agreement and residual RMS, plus stopping invariants.
+    Generates the per-channel comparison plots.
     Unlike the double-vs-single test, neither configuration is an on-disk truth,
     so both are imaged here.
     """
     _ensure_ps_store()
-    _, double_xds, _ = _run_image_cube(
+    double_result, double_xds, _ = _run_image_cube(
         "multi_cycle",
         "twhya_selfcal_5chans_lsrk_multi_cycle_worstcase_double_t1_c5.img.zarr",
         processing_function_threads=1,
         n_mapping_parallelism=5,
         single_precision_image=False,
     )
-    _, single_xds, _ = _run_image_cube(
+    single_result, single_xds, _ = _run_image_cube(
         "multi_cycle",
         "twhya_selfcal_5chans_lsrk_multi_cycle_worstcase_single_t12_c1.img.zarr",
         processing_function_threads=12,
         n_mapping_parallelism=1,
         single_precision_image=True,
     )
+    _check_deep_clean_history(double_result["deconvolution"])
+    _check_deep_clean_history(single_result["deconvolution"])
     _compare_to_truth(
         double_xds,
         single_xds,
@@ -1160,6 +1241,7 @@ def test_single_field_imaging_multi_cycle_worst_case(plot_saver):
         plot_saver=plot_saver,
         plot_prefix="multi_cycle_worst_case_double_t1_c5_vs_single_t12_c1",
         tol=MULTI_CYCLE_WORST_CASE_RTOL,
+        deep_clean=True,
     )
 
 

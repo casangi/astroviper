@@ -254,10 +254,13 @@ def _max_sidelobe_after_gaussian_subtraction(
         l_offset = (np.arange(psf_2d.shape[0]) - peak_l) * abs(delta[0])
         m_offset = (np.arange(psf_2d.shape[1]) - peak_m) * abs(delta[1])
         l_grid, m_grid = np.meshgrid(l_offset, m_offset, indexing="ij")
-        cos_pa = np.cos(beam[2])
-        sin_pa = np.sin(beam[2])
-        major_offset = l_grid * cos_pa - m_grid * sin_pa
-        minor_offset = l_grid * sin_pa + m_grid * cos_pa
+        # Match the fitted/restoring-beam PA convention: the major axis
+        # points along (sin(PA), -cos(PA)), so theta = pi/2 - PA.
+        theta = 0.5 * np.pi - beam[2]
+        cos_theta = np.cos(theta)
+        sin_theta = np.sin(theta)
+        major_offset = l_grid * cos_theta - m_grid * sin_theta
+        minor_offset = l_grid * sin_theta + m_grid * cos_theta
         sigma_major = beam[0] / FWHM_factor
         sigma_minor = beam[1] / FWHM_factor
         fitted_main_beam = peak * np.exp(
