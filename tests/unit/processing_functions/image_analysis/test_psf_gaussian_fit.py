@@ -575,6 +575,40 @@ def test_gaussian_subtraction_removes_main_beam_before_sidelobe_measurement():
     np.testing.assert_allclose(result, [[[0.25]]], atol=1e-12)
 
 
+@pytest.mark.parametrize("pa", [0.0, 0.35, np.pi / 4, np.pi / 2, 2.225])
+@pytest.mark.parametrize("cell", [(-1.0, 1.0), (-1.0, 1.7)])
+@pytest.mark.parametrize("sidelobe", [0.0, 0.2, -0.2])
+def test_gaussian_subtraction_respects_elliptical_beam_pa(pa, cell, sidelobe):
+    """An angular ellipse leaves only the independently added sidelobe."""
+    # Construct the PSF from its angular covariance, independently of the
+    # production Gaussian projections and restoration kernel. The fitted PA
+    # convention places the major axis along (sin(pa), -cos(pa)).
+    major_direction = np.array([np.sin(pa), -np.cos(pa)])
+    minor_direction = np.array([np.cos(pa), np.sin(pa)])
+    sigma_major, sigma_minor = 5.0, 2.5
+    covariance = sigma_major**2 * np.outer(
+        major_direction, major_direction
+    ) + sigma_minor**2 * np.outer(minor_direction, minor_direction)
+    l_grid, m_grid = np.meshgrid(
+        (np.arange(121) - 60) * abs(cell[0]),
+        (np.arange(101) - 50) * abs(cell[1]),
+        indexing="ij",
+    )
+    offsets = np.stack([l_grid, m_grid], axis=-1)
+    exponent = np.einsum(
+        "...i,ij,...j->...", offsets, np.linalg.inv(covariance), offsets
+    )
+    psf = np.exp(-0.5 * exponent)
+    psf[5, 5] += sidelobe
+    beam = np.array([[[[sigma_major * FWHM_factor, sigma_minor * FWHM_factor, pa]]]])
+
+    result = _max_sidelobe_after_gaussian_subtraction(
+        psf[None, None, None], beam, np.asarray(cell)
+    )
+
+    np.testing.assert_allclose(result, [[[abs(sidelobe)]]], rtol=0, atol=1e-12)
+
+
 def test_gaussian_subtraction_keeps_negative_sidelobe_magnitude():
     """CASA-style sidelobes include the magnitude of the PSF minimum."""
     data = np.zeros((1, 1, 1, 21, 21), dtype=np.float64)
