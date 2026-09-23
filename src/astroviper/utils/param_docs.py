@@ -107,6 +107,7 @@ def _target_files():
         "processing_functions/imaging/model_update_cycle.py",
         "processing_functions/imaging/make_point_spread_function.py",
         "processing_functions/imaging/make_undeconvolved_image.py",
+        "processing_functions/imaging/degrid_visibility_grid.py",
         "distributed_applications/image_analysis/moments.py",
         "node_tasks/image_analysis/moments.py",
         "processing_functions/image_analysis/moments.py",

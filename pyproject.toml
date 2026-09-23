@@ -119,11 +119,9 @@ where = ["src"]
 
 [tool.ruff]
 target-version = "py311"
-# Stale files (candidates for deletion) -- not worth linting. The example
-# notebook star-imports from the removed astroviper.core.* layout and cannot run.
+# Stale files (candidates for deletion) -- not worth linting.
 extend-exclude = [
     "tests/component/untitled folder 2",
-    "examples/demo_standard_gridder.ipynb",
 ]
 
 [tool.ruff.lint]

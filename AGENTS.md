@@ -95,7 +95,7 @@ Notebooks must stay **output-stripped** (`nbstripout`) and
   widget only re-render it. When a cell is purely an interactive explorer, a
   static fallback (e.g. a small multi-panel montage) is the most robust choice for
   the executed copy — see
-  `processing_functions_tutorials/imaging/demo_standard_grid.ipynb`.
+  `processing_functions_tutorials/imaging/demo_prolate_spheroidal_grid.ipynb`.
 - Always execute notebooks with a **per-cell timeout** so a genuinely stuck cell
   fails loudly instead of hanging the whole run.
 - **Heavy notebooks are slow, not hung.** Run the notebook suite **sequentially**
