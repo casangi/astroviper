@@ -27,6 +27,7 @@ from astroviper.processing_functions.imaging.utils.return_dict import (
     FIELD_SINGLE_VALUE,
     Key,
     ReturnDict,
+    return_dict_to_dataframe,
 )
 from astroviper.processing_functions.imaging.utils.timing import (
     IMAGING_TIMING_PHASES,
@@ -40,6 +41,7 @@ from astroviper.processing_functions.imaging.utils.visibility import (
 
 __all__ = [
     "ReturnDict",
+    "return_dict_to_dataframe",
     "Key",
     "FIELD_ACCUM",
     "FIELD_SINGLE_VALUE",

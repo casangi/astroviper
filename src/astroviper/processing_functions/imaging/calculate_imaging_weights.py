@@ -1160,6 +1160,8 @@ def calculate_imaging_weights(
     return_weight_density_grid: bool = False,
     processing_function_threads: int = 1,
     truncate_uv_cells: bool = False,
+    *,
+    frequency_matching: str = "nearest",
 ) -> None | np.ndarray:
     """
     Calculate imaging weights for interferometric data.
@@ -1207,6 +1209,11 @@ def calculate_imaging_weights(
         If True, assign shifted UV coordinates to density cells by integer
         truncation, matching CASA continuum weighting. If False, use the
         nearest-cell convention used by cube weighting.
+
+    frequency_matching : {"nearest", "exact"}, default "nearest"
+        Frequency mapping policy used for both weight gridding and degridding.
+        Cube callers use nearest-channel matching; continuum callers must use
+        exact one-to-one matching. Independent of ``truncate_uv_cells``.
 
     Returns
     -------
@@ -1271,6 +1278,9 @@ def calculate_imaging_weights(
     from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights import (
         degrid_imaging_weights,
         grid_imaging_weights,
+    )
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        map_visibility_frequencies_to_image,
     )
     from astroviper.utils.data_group_tools import (
         create_ps_xdt_data_groups_in_and_out,
@@ -1358,6 +1368,11 @@ def calculate_imaging_weights(
         )
 
         freq_chan = ms_xdt.frequency.values
+        # Same physical channel assignment as the visibility / PSF gridders,
+        # so the weight density is accumulated on the image channel planes.
+        frequency_map = map_visibility_frequencies_to_image(
+            freq_chan, img_xds.frequency.values, matching=frequency_matching
+        )
 
         grid_imaging_weights(
             weight_density_grid,
@@ -1369,6 +1384,7 @@ def calculate_imaging_weights(
             delta_lm,
             processing_function_threads=processing_function_threads,
             truncate_uv_cells=truncate_uv_cells,
+            frequency_map=frequency_map,
         )
 
     briggs_factors = calculate_briggs_params(
@@ -1385,6 +1401,9 @@ def calculate_imaging_weights(
         )
 
         freq_chan = ms_xdt.frequency.values
+        frequency_map = map_visibility_frequencies_to_image(
+            freq_chan, img_xds.frequency.values, matching=frequency_matching
+        )
 
         imaging_weights = degrid_imaging_weights(
             weight_density_grid,
@@ -1396,6 +1415,7 @@ def calculate_imaging_weights(
             delta_lm,
             processing_function_threads=processing_function_threads,
             truncate_uv_cells=truncate_uv_cells,
+            frequency_map=frequency_map,
         )
 
         n_pol = ms_xdt.sizes["polarization"]

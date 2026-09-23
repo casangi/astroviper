@@ -271,7 +271,8 @@ def test_primary_beam_correction_returns_restored_taylor_zero_only():
 def test_frequency_mapping_matches_unique_image_channels(visibility, image, expected):
     """Full and subset channel selections map to their unique image planes."""
     np.testing.assert_array_equal(
-        map_visibility_frequencies_to_image(visibility, image), expected
+        map_visibility_frequencies_to_image(visibility, image, matching="exact"),
+        expected,
     )
 
 
@@ -282,7 +283,7 @@ def test_frequency_mapping_matches_unique_image_channels(visibility, image, expe
 def test_frequency_mapping_rejects_missing_or_ambiguous_channels(visibility, image):
     """Missing and duplicate image frequencies cannot define a unique map."""
     with pytest.raises(ValueError, match="exactly one image frequency"):
-        map_visibility_frequencies_to_image(visibility, image)
+        map_visibility_frequencies_to_image(visibility, image, matching="exact")
 
 
 def test_mvc_grid_accumulates_child_into_full_image_frequency_axis(monkeypatch):

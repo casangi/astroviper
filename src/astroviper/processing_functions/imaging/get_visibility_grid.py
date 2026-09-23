@@ -29,30 +29,34 @@ def get_visibility_grid_single_field(
     This function is the inverse of
     :func:`~astroviper.processing_functions.imaging.add_visibility_grid.add_visibility_grid_single_field`:
     it predicts visibilities *from* a UV-plane model rather than gridding
-    observed visibilities onto a UV plane.  It uses the standard separable
-    C++ prolate-spheroidal degridder and therefore does not require a GCF
-    dataset. Cube and continuum callers share that numerical primitive without
-    sharing their spectral-model preparation APIs.
+    observed visibilities onto a UV plane.  It uses the separable C++ prolate
+    spheroidal degridder (the standard gridder in CASA) and therefore does not
+    require a GCF dataset. Cube and continuum callers share that numerical
+    primitive without sharing their spectral-model preparation APIs.
 
     Parameters
     ----------
     ms_xds : xr.Dataset
         Measurement set dataset.  Must contain the data variables referenced
-        by ``ms_data_group_in_name`` (``correlated_data``, ``uvw``,
-        ``weight_imaging``) and a ``frequency`` coordinate.  On the first call
-        the output visibility data variable is created on ``ms_xds`` by
-        allocating an array shaped and dtyped like the input ``correlated_data``.
+        by ``ms_data_group_in_name`` (``correlated_data`` and ``uvw``) and a
+        ``frequency`` coordinate.  On the first call the output visibility
+        data variable is created on ``ms_xds`` as a ``complex128`` array shaped
+        like the input ``correlated_data``.
     cgk_1D : np.ndarray
         Oversampled 1-D prolate spheroidal wave function (PSWF) kernel.
         Shape ``(oversampling * (support // 2 + 1),)``; passed directly to
-        the standard degridder.
+        the prolate spheroidal degridder.
     img_xds : xr.Dataset
         Image dataset holding the model UV grid.  Must expose an image data
-        group under ``image_data_group_in_name`` whose ``"SKY"`` role names a
-        data variable shaped ``(time, frequency, polarization, u, v)``, the
-        same ``(u, v)`` axis order used by the C++ prolate-spheroidal gridder.
+        group under ``image_data_group_in_name`` whose ``"visibility"`` role
+        names a data variable shaped ``(time, frequency, polarization, u, v)``,
+        the same ``(u, v)`` axis order used by the C++
+        ``prolate_spheroidal_grid`` kernel.
         Cell size and image dimensions are read directly from ``img_xds`` via
         ``img_xds.xr_img.get_lm_cell_size()`` and ``img_xds.sizes``.
+    ms_data_group_in_name : str, default ``"base"``
+        Key of the MS input data group in ``ms_xds.attrs["data_groups"]``.
+        Must provide the ``"correlated_data"`` and ``"uvw"`` role keys.
     ms_data_group_out_name : str, default ``"model"``
         Key under which the output data group is registered in
         ``ms_xds.attrs["data_groups"]``.
@@ -62,18 +66,22 @@ def get_visibility_grid_single_field(
         visibilities.
     image_data_group_in_name : str, default ``"model"``
         Key of the image input data group in ``img_xds.attrs["data_groups"]``
-        whose ``"SKY"`` role names the model UV grid.
+        whose ``"visibility"`` role names the model UV grid.
     overwrite : bool, default ``True``
         If ``True``, an existing output data group or output data variable is
         silently overwritten.  Defaults to ``True`` because this function is
         typically called repeatedly in an iterative cycle.
     chan_mode : str, default ``"cube"``
-        Channel mapping mode.  ``"cube"`` maps each visibility channel to its
-        own image channel; ``"continuum"`` sources every visibility channel
-        from image channel 0.
+        Channel mapping mode.  ``"cube"`` maps each visibility channel to the
+        image channel nearest in frequency (see
+        :func:`~astroviper.processing_functions.imaging.utils.frequency_mapping.map_visibility_frequencies_to_image`);
+        ``"continuum"`` sources every visibility channel from image channel 0.
+    fft_padding : float, default ``1.2``
+        Padding factor applied to the image size when computing the UV-grid
+        dimensions.
     processing_function_threads : int, default ``1``
-        Number of threads supplied to the C++ degridder; ``<= 0`` falls back
-        to the hardware concurrency.
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
 
     Returns
     -------
@@ -81,23 +89,32 @@ def get_visibility_grid_single_field(
         Modifies ``ms_xds`` in place (output data variable and ``data_groups``
         attribute); no return value.
 
+    Raises
+    ------
+    ValueError
+        If, in ``"cube"`` mode, a visibility channel lies more than half an
+        image channel width from every image channel, or if the grid's
+        polarization axis does not match ``ms_xds``.
+
     Notes
     -----
     - Flags must be applied by the caller before invoking this function.  The
       underlying degridder has no flag argument and only skips samples whose
-      ``vis_data`` value is ``NaN``.  Newly
+      ``vis_data`` value is ``NaN``. Newly
       allocated output arrays are zero-initialised (not ``NaN``), so every
       visibility whose ``uvw`` is finite and whose support falls inside the
       grid will receive a prediction.
     - Time mapping is not currently implemented: every visibility time index
       is mapped to image time index 0.
+    - ``processing_function_threads <= 0`` lets the C++ degridder fall back
+      to the hardware concurrency; ``1`` runs serially.
 
     See Also
     --------
     astroviper.processing_functions.imaging.add_visibility_grid.add_visibility_grid_single_field :
         Forward (gridding) counterpart.
     degrid_visibility_grid_single_field :
-        Shared standard-gridder numerical primitive.
+        Shared prolate spheroidal gridder numerical primitive.
     """
     model_name = img_xds.attrs["data_groups"][image_data_group_in_name]["visibility"]
 
@@ -110,6 +127,7 @@ def get_visibility_grid_single_field(
         frequency_map = map_visibility_frequencies_to_image(
             ms_xds.frequency.values,
             img_xds.frequency.values,
+            matching="nearest",
         )
     else:  # continuum
         frequency_map = (np.zeros(n_chan)).astype(int)

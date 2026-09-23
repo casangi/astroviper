@@ -406,7 +406,16 @@ class TestCalculateImagingWeightsDispatch(unittest.TestCase):
         # Degrid: return the equalized data_weight unchanged so the caller's
         # tile(..., n_pol) produces an output of the correct shape.
         self.degrid_mock.side_effect = (
-            lambda grid, uvw, dw, briggs, freq, n_uv, dlm, **kwargs: dw
+            lambda grid,
+            uvw,
+            dw,
+            briggs,
+            freq,
+            n_uv,
+            dlm,
+            processing_function_threads=1,
+            truncate_uv_cells=False,
+            frequency_map=None: (dw)
         )
         self.briggs_mock.return_value = np.zeros((2, 1, 1))
 
@@ -625,6 +634,59 @@ class TestCheckImagingWeightsParams(unittest.TestCase):
         (dispatch to Briggs is then handled by ``calculate_imaging_weights``)."""
         params = {"weighting": "uniform"}
         self.assertTrue(check_imaging_weights_params(params))
+
+
+# ---------------------------------------------------------------------------
+# Briggs path with the real kernels: physical channel mapping
+# ---------------------------------------------------------------------------
+class TestCalculateImagingWeightsFrequencyMap(unittest.TestCase):
+    """The weight density is accumulated on the *image* channel planes, using
+    the same physical-frequency map as the visibility and PSF gridders."""
+
+    def setUp(self):
+        import xradio.image.image_xds  # noqa: F401
+
+    def _partitioned_inputs(self):
+        # Two MS channels that sit on planes 1 and 3 of a four-channel image.
+        ms_ds = _make_ms_ds(n_chan=2).assign_coords(frequency=[1.1e9, 1.3e9])
+        ms_ds["UVW"].values[...] = 0.0  # every sample lands on the grid centre
+        ps_xdt = xr.DataTree()
+        ps_xdt["ms_0"] = xr.DataTree(dataset=ms_ds)
+        img_xds = _make_img_xds(n_chan=4).assign_coords(
+            frequency=np.linspace(1.0e9, 1.3e9, 4)
+        )
+        return ps_xdt, img_xds
+
+    def test_briggs_grids_ms_channels_onto_image_planes(self):
+        ps_xdt, img_xds = self._partitioned_inputs()
+
+        weight_density_grid = calculate_imaging_weights(
+            ps_xdt,
+            img_xds,
+            imaging_weights_params={"weighting": "briggs", "robust": 0.5},
+            return_weight_density_grid=True,
+        )
+
+        self.assertEqual(weight_density_grid.shape[0], 4)
+        np.testing.assert_array_equal(weight_density_grid[[0, 2]], 0.0)
+        self.assertTrue(np.all(weight_density_grid[[1, 3]].sum(axis=(1, 2, 3)) > 0))
+        imaging_weight = ps_xdt["ms_0"]["WEIGHT_IMAGING"].values
+        self.assertEqual(imaging_weight.shape[2], 2)
+        self.assertTrue(np.all(np.isfinite(imaging_weight)))
+        self.assertTrue(np.all(imaging_weight > 0.0))
+
+    def test_briggs_rejects_ms_channel_off_the_image_axis(self):
+        ps_xdt, img_xds = self._partitioned_inputs()
+        ps_xdt["ms_0"] = xr.DataTree(
+            dataset=ps_xdt["ms_0"].to_dataset().assign_coords(frequency=[1.1e9, 1.36e9])
+        )
+
+        with self.assertRaisesRegex(ValueError, "half an image channel width"):
+            calculate_imaging_weights(
+                ps_xdt,
+                img_xds,
+                imaging_weights_params={"weighting": "briggs", "robust": 0.5},
+            )
 
 
 if __name__ == "__main__":

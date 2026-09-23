@@ -267,3 +267,269 @@ def test_moment_registry_consistency():
     """The CASA code map and the canonical name list must stay in sync."""
     assert sorted(CASA_MOMENT_CODES.values()) == sorted(MOMENT_NAMES)
     assert ALL_MOMENTS == MOMENT_NAMES
+
+
+# ---------------------------------------------------------------------------
+# Streaming accumulator API (the memory-efficient production path)
+# ---------------------------------------------------------------------------
+class TestStreamingAccumulator:
+    STREAMABLE = [name for name in ALL_MOMENTS if name != "median"]
+
+    @staticmethod
+    def _stream(img_xds, names, n_block, axis="frequency", use_mask=True, **kw):
+        from astroviper.processing_functions.image_analysis.moments import (
+            moments_streamed,
+        )
+
+        sky = img_xds["SKY"]
+        ax = sky.dims.index(axis)
+        mask = img_xds["MASK"] if use_mask else None
+        calls = []
+
+        def read_planes(start, stop):
+            stop = min(stop, start + n_block)
+            calls.append((start, stop))
+            sel = {axis: slice(start, stop)}
+            planes = np.moveaxis(sky.isel(sel).values, ax, 0)
+            mask_planes = (
+                None if mask is None else np.moveaxis(mask.isel(sel).values, ax, 0)
+            )
+            return planes, mask_planes
+
+        result = moments_streamed(
+            read_planes,
+            coords_xds=img_xds,
+            sky_dims=sky.dims,
+            sky_name="SKY",
+            sky_attrs=dict(sky.attrs),
+            attrs=img_xds.attrs,
+            moments=names,
+            moment_axis=axis,
+            **kw,
+        )
+        return result, calls
+
+    @pytest.mark.parametrize("n_block", [1, 3, 100])
+    @pytest.mark.parametrize("axis", ["frequency", "polarization", "m"])
+    def test_streamed_matches_in_memory(self, n_block, axis):
+        img_xds = make_test_image_xds(dtype=np.float32)
+        expected = moments(
+            img_xds, moments=self.STREAMABLE, moment_axis=axis, use_mask=True
+        )
+        result, calls = self._stream(img_xds, self.STREAMABLE, n_block, axis=axis)
+        n = img_xds.sizes[axis]
+        # Two passes (abs_mean_dev / median_coord) over ceil(n / n_block) blocks.
+        assert len(calls) == 2 * -(-n // n_block)
+        for name in self.STREAMABLE:
+            variable = "SKY_MOMENT_" + name.upper()
+            assert result[variable].dtype == expected[variable].dtype, name
+            np.testing.assert_allclose(
+                result[variable].values,
+                expected[variable].values,
+                rtol=1e-6,
+                equal_nan=True,
+                err_msg=name,
+            )
+        assert (
+            result.attrs["data_groups"].keys() == expected.attrs["data_groups"].keys()
+        )
+        assert result.sizes == expected.sizes
+
+    def test_single_pass_streams_once_and_pixel_ranges_apply(self):
+        img_xds = make_test_image_xds()
+        names = ["maximum", "maximum_coord", "integrated", "rms"]
+        expected = moments(
+            img_xds,
+            moments=names,
+            moment_axis="frequency",
+            include_pixel_range=[-0.5, 2.0],
+            use_mask=False,
+        )
+        result, calls = self._stream(
+            img_xds, names, 2, use_mask=False, include_pixel_range=[-0.5, 2.0]
+        )
+        assert len(calls) == -(-img_xds.sizes["frequency"] // 2)  # one pass
+        for name in names:
+            variable = "SKY_MOMENT_" + name.upper()
+            np.testing.assert_allclose(
+                result[variable].values,
+                expected[variable].values,
+                rtol=1e-6,
+                equal_nan=True,
+                err_msg=name,
+            )
+
+    def test_median_is_rejected(self):
+        img_xds = make_test_image_xds()
+        with pytest.raises(ValueError, match="median"):
+            self._stream(img_xds, ["median"], 1)
+
+    def test_memory_model(self):
+        from astroviper.processing_functions.image_analysis.moments import (
+            moments_memory_model,
+        )
+
+        assert moments_memory_model(["maximum", "mean"]) == {
+            "n_passes": 1,
+            "requires_full_profile": False,
+            "mergeable": True,
+        }
+        assert moments_memory_model(["abs_mean_dev"]) == {
+            "n_passes": 2,
+            "requires_full_profile": False,
+            "mergeable": False,
+        }
+        assert moments_memory_model(["median", "rms"])["requires_full_profile"]
+        assert not moments_memory_model(["median"])["mergeable"]
+
+    def test_merge_of_moment_axis_segments_is_exact(self):
+        """Partial accumulators over disjoint frequency segments merge to the
+        full result (the building block of a moment-axis map + reduce)."""
+        from astroviper.processing_functions.image_analysis.moments import (
+            MomentsAccumulator,
+            _moment_axis_values,
+        )
+
+        img_xds = make_test_image_xds(dtype=np.float64)
+        names = [
+            "mean",
+            "integrated",
+            "weighted_coord",
+            "weighted_dispersion_coord",
+            "standard_deviation",
+            "rms",
+            "maximum",
+            "maximum_coord",
+            "minimum",
+            "minimum_coord",
+        ]
+        sky = img_xds["SKY"].values[0]  # frequency first already
+        mask = img_xds["MASK"].values[0]
+        coord = _moment_axis_values(img_xds, "frequency")
+        map_shape = sky.shape[1:]
+
+        full = MomentsAccumulator(names, coord, map_shape)
+        parts = [MomentsAccumulator(names, coord, map_shape) for _ in range(3)]
+        for i in range(sky.shape[0]):
+            full.add_plane(i, sky[i], mask[i])
+            parts[i % 3].add_plane(i, sky[i], mask[i])
+        merged = parts[2].merge(parts[0]).merge(parts[1])
+        a, b = full.finalize(), merged.finalize()
+        for name in names:
+            np.testing.assert_allclose(a[name], b[name], rtol=1e-12, equal_nan=True)
+
+        two_pass = MomentsAccumulator(["abs_mean_dev"], coord, map_shape)
+        with pytest.raises(ValueError, match="single-pass"):
+            two_pass.merge(MomentsAccumulator(["abs_mean_dev"], coord, map_shape))
+
+
+class TestDimensionFlags:
+    """dimension_flags: flagged planes/pixels contribute to no moment."""
+
+    def test_moment_axis_flags_match_manual_exclusion(self):
+        img_xds = make_test_image_xds(n_frequency=8)
+        flags = np.zeros(8, dtype=bool)
+        flags[[0, 3, 7]] = True
+        flagged = moments(
+            img_xds,
+            moments=ALL_MOMENTS,
+            moment_axis="frequency",
+            dimension_flags={"frequency": flags},
+        )
+        # Reference: set the flagged planes to NaN (excluded pixels).
+        nan_xds = img_xds.copy(deep=True)
+        nan_xds["SKY"].values[:, flags] = np.nan
+        expected = moments(nan_xds, moments=ALL_MOMENTS, moment_axis="frequency")
+        for name in ALL_MOMENTS:
+            variable = "SKY_MOMENT_" + name.upper()
+            np.testing.assert_allclose(
+                flagged[variable].values,
+                expected[variable].values,
+                rtol=1e-6,
+                equal_nan=True,
+                err_msg=name,
+            )
+
+    def test_index_range_form_and_other_dimension_flags(self):
+        img_xds = make_test_image_xds(n_frequency=6, n_l=12, n_m=10)
+        result = moments(
+            img_xds,
+            moments=["mean", "maximum", "median"],
+            moment_axis="frequency",
+            dimension_flags={"frequency": [[0, 2]], "l": [[0, 3], [11, 12]]},
+        )
+        nan_xds = img_xds.copy(deep=True)
+        nan_xds["SKY"].values[:, :2] = np.nan
+        nan_xds["SKY"].values[..., :3, :] = np.nan
+        nan_xds["SKY"].values[..., 11:, :] = np.nan
+        expected = moments(
+            nan_xds, moments=["mean", "maximum", "median"], moment_axis="frequency"
+        )
+        for name in ("mean", "maximum", "median"):
+            variable = "SKY_MOMENT_" + name.upper()
+            np.testing.assert_allclose(
+                result[variable].values,
+                expected[variable].values,
+                rtol=1e-6,
+                equal_nan=True,
+                err_msg=name,
+            )
+
+    def test_streamed_matches_in_memory_with_flags(self):
+        from astroviper.processing_functions.image_analysis.moments import (
+            moments_streamed,
+        )
+
+        img_xds = make_test_image_xds(n_frequency=7)
+        flags = {"frequency": [[0, 1], [5, 7]], "m": [[0, 4]]}
+        expected = moments(
+            img_xds,
+            moments=["maximum", "abs_mean_dev", "rms"],
+            moment_axis="frequency",
+            use_mask=True,
+            dimension_flags=flags,
+        )
+        sky = img_xds["SKY"]
+        mask = img_xds["MASK"]
+
+        def read_planes(start, stop):
+            stop = min(stop, start + 2)
+            sel = {"frequency": slice(start, stop)}
+            return (
+                np.moveaxis(sky.isel(sel).values, 1, 0),
+                np.moveaxis(mask.isel(sel).values, 1, 0),
+            )
+
+        result = moments_streamed(
+            read_planes,
+            coords_xds=img_xds,
+            sky_dims=sky.dims,
+            sky_name="SKY",
+            sky_attrs=dict(sky.attrs),
+            attrs=img_xds.attrs,
+            moments=["maximum", "abs_mean_dev", "rms"],
+            moment_axis="frequency",
+            dimension_flags=flags,
+        )
+        for name in ("maximum", "abs_mean_dev", "rms"):
+            variable = "SKY_MOMENT_" + name.upper()
+            np.testing.assert_allclose(
+                result[variable].values,
+                expected[variable].values,
+                rtol=1e-6,
+                equal_nan=True,
+                err_msg=name,
+            )
+
+    def test_bad_flags_raise(self):
+        from astroviper.processing_functions.image_analysis.moments import (
+            normalize_dimension_flags,
+        )
+
+        img_xds = make_test_image_xds()
+        with pytest.raises(ValueError, match="not an image dimension"):
+            moments(img_xds, dimension_flags={"chan": [[0, 1]]})
+        with pytest.raises(ValueError, match="length"):
+            normalize_dimension_flags(
+                {"frequency": np.zeros(3, dtype=bool)}, {"frequency": 7}
+            )

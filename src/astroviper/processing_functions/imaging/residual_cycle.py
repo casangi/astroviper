@@ -134,6 +134,7 @@ def imaging_setup_single_field(
         ms_data_group_out_name=ps_data_group_name,
         ms_data_group_out_modified={"weight_imaging": "WEIGHT_IMAGING"},
         processing_function_threads=processing_function_threads,
+        frequency_matching="nearest",
     )
     T_weights = time.time() - T_start_weight
 
@@ -364,6 +365,17 @@ def residual_cycle_cube_single_field(
         )
         T_degrid += time.time() - start
 
+        # The model uv grid is fully consumed by the degridder above and is
+        # rebuilt from the sky model by fft_norm_img_xds next cycle, so free
+        # its ~2.9 GB (13 500² x 2 pol complex64) now. Otherwise it sits
+        # resident through the gridding phase below, coexisting with the
+        # equally sized VISIBILITY grid -- at 14 workers per node that
+        # doubled grid residency was part of the 2026-08-16 multi-cycle OOM.
+        model_uv_grid_name = img_xds.attrs["data_groups"][image_data_group_in_name][
+            "visibility"
+        ]
+        img_xds.xr_img.delete_data_variables(variables=[model_uv_grid_name])
+
         start = time.time()
         calculate_residual_visibilities(
             ps_xdt,
@@ -550,6 +562,8 @@ def calculate_residual_visibilities(
         Input data group holding the observed visibilities.  Default ``"base"``.
     """
 
+    import numpy as np
+
     for ms_xdt in ps_xdt.values():
         ms_data_group_model = ms_xdt.attrs["data_groups"][ms_data_group_in_model]
 
@@ -563,10 +577,21 @@ def calculate_residual_visibilities(
             overwrite=True,
         )
 
-        ms_xdt[ms_data_group_residual["correlated_data"]] = (
-            ms_xdt[ms_data_group_observed["correlated_data"]]
-            - ms_xdt[ms_data_group_model["correlated_data"]]
-        )
+        residual_name = ms_data_group_residual["correlated_data"]
+        observed = ms_xdt[ms_data_group_observed["correlated_data"]]
+        model = ms_xdt[ms_data_group_model["correlated_data"]]
+        existing = ms_xdt.ds.get(residual_name)
+        if (
+            existing is not None
+            and existing.dtype == np.result_type(observed.dtype, model.dtype)
+            and existing.shape == observed.shape
+        ):
+            # Later cycles: subtract into the existing residual buffer instead
+            # of allocating a fresh full-size visibility array every cycle
+            # (which also left the old one transiently co-resident).
+            np.subtract(observed.values, model.values, out=existing.values)
+        else:
+            ms_xdt[residual_name] = observed - model
 
         modify_data_groups_xds(
             ms_xdt,
