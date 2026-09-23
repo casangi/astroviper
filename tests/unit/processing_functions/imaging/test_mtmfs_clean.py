@@ -219,13 +219,17 @@ class TestHessian:
 
     def test_float64_matches_float32_hessian(self):
         nterms, nx, ny = 2, 64, 64
-        h32 = mtmfs.hessian(make_psf_stack(nterms, nx, ny, np.float32), scales=[0.0, 6.0])
-        h64 = mtmfs.hessian(make_psf_stack(nterms, nx, ny, np.float64), scales=[0.0, 6.0])
+        h32 = mtmfs.hessian(
+            make_psf_stack(nterms, nx, ny, np.float32), scales=[0.0, 6.0]
+        )
+        h64 = mtmfs.hessian(
+            make_psf_stack(nterms, nx, ny, np.float64), scales=[0.0, 6.0]
+        )
         np.testing.assert_allclose(h32["hessian"], h64["hessian"], rtol=1e-5)
 
     def test_singular_hessian_raises(self):
         nterms, nx, ny = 2, 32, 32
-        psf = np.zeros((3, ny, nx), dtype=np.float32)
+        psf = np.zeros((2 * nterms - 1, ny, nx), dtype=np.float32)
         with pytest.raises(RuntimeError, match="Non-invertible Hessian"):
             mtmfs.hessian(psf)
 
@@ -443,7 +447,9 @@ class TestTcleanAnalogues:
 
     @pytest.mark.parametrize("bias,expected", [(1.5, 1.0), (-3.0, -1.0), (0.4, 0.4)])
     def test_smallscalebias_clamped(self, bias, expected):
-        out = mtmfs.hessian(make_psf_stack(1, 32, 32), scales=[0, 4], small_scale_bias=bias)
+        out = mtmfs.hessian(
+            make_psf_stack(1, 32, 32), scales=[0, 4], small_scale_bias=bias
+        )
         assert out["small_scale_bias"] == pytest.approx(expected)
 
     def test_default_scales_is_point_source(self):
@@ -462,7 +468,13 @@ class TestTcleanAnalogues:
         residual[0, 32, 32] = 1.0
         model = np.zeros_like(residual)
         out = mtmfs.clean(
-            residual, psf, model, scales=[5.0, 0.0], small_scale_bias=0.6, niter=5, gain=0.1
+            residual,
+            psf,
+            model,
+            scales=[5.0, 0.0],
+            small_scale_bias=0.6,
+            niter=5,
+            gain=0.1,
         )
         assert out["scales"] == [0.0, 5.0]
         assert out["iterations_performed"] == 5
@@ -513,7 +525,9 @@ class TestInPlaceContract:
         r_ptr = residual.__array_interface__["data"][0]
         m_ptr = model.__array_interface__["data"][0]
         r_before = residual.copy()
-        mtmfs.clean(residual, make_psf_stack(2, 48, 40), model, scales=[0.0, 4.0], niter=5)
+        mtmfs.clean(
+            residual, make_psf_stack(2, 48, 40), model, scales=[0.0, 4.0], niter=5
+        )
         assert residual.__array_interface__["data"][0] == r_ptr
         assert model.__array_interface__["data"][0] == m_ptr
         assert not np.array_equal(residual, r_before)
@@ -534,12 +548,16 @@ class TestInPlaceContract:
         residual_in = residual.copy()
         model = np.full_like(residual, 0.25)
         init = model.copy()
-        mtmfs.clean(residual, make_psf_stack(2, 48, 40), model, scales=[0.0, 4.0], niter=5)
+        mtmfs.clean(
+            residual, make_psf_stack(2, 48, 40), model, scales=[0.0, 4.0], niter=5
+        )
         delta = model - init
         assert np.any(delta != 0)
         assert np.any(model == 0.25)
         ref = expected_residual(residual_in, make_psf_stack(2, 48, 40), delta)
-        np.testing.assert_allclose(residual, ref, atol=2e-5 * np.max(np.abs(residual_in)))
+        np.testing.assert_allclose(
+            residual, ref, atol=2e-5 * np.max(np.abs(residual_in))
+        )
 
     def test_repeated_calls_are_independent(self):
         psf = make_psf_stack(2, 48, 40)
@@ -648,7 +666,9 @@ class TestArrayValidation:
         model = np.zeros_like(residual)
         psf = make_psf_stack(2, 48, 40)
         with pytest.raises(RuntimeError, match="dtype"):
-            mtmfs.clean(residual, psf, model, mask=np.ones(residual.shape[1:], dtype=bool))
+            mtmfs.clean(
+                residual, psf, model, mask=np.ones(residual.shape[1:], dtype=bool)
+            )
         with pytest.raises(RuntimeError, match="shape"):
             mtmfs.clean(residual, psf, model, mask=np.ones((40, 47), dtype=np.float32))
 
