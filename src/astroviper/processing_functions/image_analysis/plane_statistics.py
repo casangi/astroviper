@@ -112,7 +112,7 @@ def calculate_plane_statistics(
         variables, ``True`` = keep the pixel; the ``*_masked`` statistics are
         computed over the valid, not-masked-out area). ``None`` (default)
         resolves the ``"mask"`` role of the ``"residual"`` data group if
-        registered; when that is absent (e.g. a ``niter=0`` run, which never
+        registered; when that is absent (e.g. a ``niter_per_plane=0`` run, which never
         makes a clean mask) the fallback mask ``PRIMARY_BEAM >
         primary_beam_limit`` is used (via the ``"primary_beam"`` role, plain
         ``PRIMARY_BEAM`` otherwise). Only when neither a mask variable nor a
@@ -157,7 +157,7 @@ def calculate_plane_statistics(
         mask_values = img_xds[mask_name].values
         mask_source = mask_name
     else:
-        # Fallback (e.g. a niter=0 run, where no MASK is ever made): mask =
+        # Fallback (e.g. a niter_per_plane=0 run, where no MASK is ever made): mask =
         # primary beam above ``primary_beam_limit`` -- the same valid-sky
         # cutoff the deconvolver's make_mask would use. Evaluated per plane
         # in the loop below, so no full boolean cube is allocated.

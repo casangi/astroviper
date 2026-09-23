@@ -6,7 +6,7 @@ def model_update_cycle_cube_single_field(
     img_xds,
     deconvolver,
     deconvolve_params,
-    is_n_iter_0,
+    is_niter_0,
     processing_function_threads=1,
     image_data_group_in_name="residual",
     image_data_group_out_name="model",
@@ -29,12 +29,12 @@ def model_update_cycle_cube_single_field(
     deconvolve_params : dict
         Per-cycle deconvolution / iteration-control parameters passed straight to
         the deconvolver: the absolute ``threshold`` (floor) plus the adaptive
-        ``cyclethreshold``, ``gain``, ``cycleniter``, ``niter_per_plane`` and
-        ``cyclethreshold_per_plane`` ...  The separate ``primary_beam_limit``
+        ``cycle_threshold``, ``loop_gain``, ``cycle_niter``, ``cycle_niter_cap_pp`` and
+        ``cycle_threshold_pp`` ...  The separate ``primary_beam_limit``
         builds the primary-beam mask (a chunk-independent quantity, so the mask
         does not depend on how the cube was split across tasks); it is distinct
         from the deconvolver ``threshold``.
-    is_n_iter_0 : bool
+    is_niter_0 : bool
         ``True`` on the very first model update.  Currently informational.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
@@ -49,7 +49,7 @@ def model_update_cycle_cube_single_field(
 
     Returns
     -------
-    deconvolve_dict : ReturnDict
+    imaging_dict : ImagingDict
         Per-plane deconvolution statistics for this cycle.
     return_df : pandas.DataFrame
         One-row timing frame with the ``T_make_mask`` and ``T_deconvolve``
@@ -85,7 +85,7 @@ def model_update_cycle_cube_single_field(
         T_make_mask = time.time() - start
 
     start = time.time()
-    deconvolve_dict = deconvolve(
+    imaging_dict = deconvolve(
         img_xds=img_xds,
         algorithm=deconvolver,
         deconvolve_params=deconvolve_params,
@@ -99,4 +99,4 @@ def model_update_cycle_cube_single_field(
         {"T_make_mask": [T_make_mask], "T_deconvolve": [T_deconvolve]}
     )
 
-    return deconvolve_dict, return_df
+    return imaging_dict, return_df
