@@ -109,22 +109,22 @@ def map_visibility_frequencies_to_image(
                 f"image frequencies={image_frequencies}."
             )
 
-        channel_map = np.argmax(matches, axis=1).astype(np.int64)
-        if np.unique(channel_map).size != visibility_frequencies.size:
+        frequency_map = np.argmax(matches, axis=1).astype(np.int64)
+        if np.unique(frequency_map).size != visibility_frequencies.size:
             raise ValueError(
                 "Visibility frequencies must map one-to-one onto image frequencies; "
                 f"visibility frequencies={visibility_frequencies}; "
                 f"image frequencies={image_frequencies}."
             )
-        return channel_map
+        return frequency_map
 
     distances = np.abs(
         visibility_frequencies[:, np.newaxis] - image_frequencies[np.newaxis, :]
     )
-    channel_map = np.argmin(distances, axis=1).astype(np.int64)
-    nearest_distance = distances[np.arange(visibility_frequencies.size), channel_map]
+    frequency_map = np.argmin(distances, axis=1).astype(np.int64)
+    nearest_distance = distances[np.arange(visibility_frequencies.size), frequency_map]
     tolerance = _half_channel_widths(image_frequencies, visibility_frequencies)[
-        channel_map
+        frequency_map
     ]
 
     too_far = nearest_distance > tolerance
@@ -135,8 +135,8 @@ def map_visibility_frequencies_to_image(
             "from the nearest image channel centre; visibility channel indices="
             f"{offending.tolist()}, visibility frequencies="
             f"{visibility_frequencies[offending].tolist()} Hz, nearest image "
-            f"frequencies={image_frequencies[channel_map[offending]].tolist()} Hz, "
+            f"frequencies={image_frequencies[frequency_map[offending]].tolist()} Hz, "
             f"separations={nearest_distance[offending].tolist()} Hz, allowed="
             f"{tolerance[offending].tolist()} Hz."
         )
-    return channel_map
+    return frequency_map
