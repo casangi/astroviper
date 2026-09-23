@@ -38,10 +38,9 @@ def grid_imaging_weights(
     # Currently unused: the weight gridding kernel stays serial so weight sums
     # are bit-reproducible; accepted for API consistency across the stack.
     processing_function_threads: int = 1,
-    truncate_uv_cells: bool = False,
-    channel_map: np.ndarray | None = None,
-    *,
     frequency_map: np.ndarray | None = None,
+    *,
+    truncate_uv_cells: bool = False,
 ):
     """
     Grid per-visibility *data weights* onto a UV grid.
@@ -75,7 +74,8 @@ def grid_imaging_weights(
         per visibility channel. Pass the map returned by
         :func:`~astroviper.processing_functions.imaging.utils.frequency_mapping.map_visibility_frequencies_to_image`
         when the visibility channels are a subset of, or offset from, the
-        image frequency axis.
+        image frequency axis. An all-zero map accumulates all visibility
+        channels directly into one continuum density plane.
 
     n_uv : tuple(int, int)
             Target padded image size in pixels along (u, v). This is also
@@ -85,10 +85,6 @@ def grid_imaging_weights(
     truncate_uv_cells : bool, default ``False``
         If True, use CASA continuum integer truncation after shifting UV
         coordinates into the grid domain. If False, use nearest-cell assignment.
-    channel_map : np.ndarray, optional
-        Continuum-compatible alias for ``frequency_map``. Supplying an all-zero
-        map accumulates all channels directly into one continuum plane. Both
-        names use the same validation; specify at most one of them.
 
     Returns
     -------
@@ -109,10 +105,7 @@ def grid_imaging_weights(
         grid_imaging_weights as grid_imaging_weights_cpp,
     )
 
-    if channel_map is not None and frequency_map is not None:
-        raise ValueError("Specify only one of channel_map and frequency_map.")
-    selected_map = channel_map if channel_map is not None else frequency_map
-    chan_map = _resolve_frequency_map(selected_map, data_weight.shape[2], grid)
+    chan_map = _resolve_frequency_map(frequency_map, data_weight.shape[2], grid)
 
     # Only PP or (PP, QQ) is supported here; adjust if more pols are added later.
     assert data_weight.shape[3] < 3, "Polarization should be PP or PP, QQ."
@@ -143,9 +136,9 @@ def degrid_imaging_weights(
     # Currently unused: the weight degridding kernel stays serial so weight
     # sums are bit-reproducible; accepted for API consistency across the stack.
     processing_function_threads: int = 1,
-    truncate_uv_cells: bool = False,
-    *,
     frequency_map: np.ndarray | None = None,
+    *,
+    truncate_uv_cells: bool = False,
 ):
     """
     Sample a UV *imaging weight grid* at each visibility's (u, v) to form

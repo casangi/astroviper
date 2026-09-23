@@ -162,62 +162,32 @@ class TestGridImagingWeightsFrequencyMap(unittest.TestCase):
 
 
 @pytest.mark.parametrize("truncate", [False, True])
-def test_continuum_alias_collapses_channels_like_frequency_map(truncate):
+@pytest.mark.parametrize("positional", [False, True])
+def test_frequency_map_collapses_channels(truncate, positional):
     uvw, weights, frequencies = _visibilities(3)
-    outputs = []
-    for name in ("channel_map", "frequency_map"):
-        grid = np.zeros((1, 1, *N_UV))
-        total = np.zeros((1, 1))
-        grid_imaging_weights(
-            grid,
-            total,
-            uvw,
-            weights,
-            frequencies,
-            N_UV,
-            DELTA_LM,
-            truncate_uv_cells=truncate,
-            **{name: np.zeros(3, dtype=np.int64)},
-        )
-        np.testing.assert_allclose(total.sum(), 2 * weights.sum())
-        outputs.append(grid)
-    np.testing.assert_array_equal(*outputs)
-
-
-@pytest.mark.parametrize("mapping", [[0, 1], [1, 0]])
-def test_rejects_both_map_arguments_without_modifying_grid(mapping):
-    uvw, weights, frequencies = _visibilities(2)
-    grid = np.zeros((2, 1, *N_UV))
-    total = np.zeros((2, 1))
-    with pytest.raises(ValueError, match="only one of channel_map and frequency_map"):
-        grid_imaging_weights(
-            grid,
-            total,
-            uvw,
-            weights,
-            frequencies,
-            N_UV,
-            DELTA_LM,
-            channel_map=[0, 1],
-            frequency_map=mapping,
-        )
-    assert not grid.any() and not total.any()
-
-
-@pytest.mark.parametrize("mapping", [[0], [-1, 0], [0, 2]])
-def test_legacy_map_is_validated(mapping):
-    uvw, weights, frequencies = _visibilities(2)
-    with pytest.raises(ValueError):
-        grid_imaging_weights(
-            np.zeros((2, 1, *N_UV)),
-            np.zeros((2, 1)),
-            uvw,
-            weights,
-            frequencies,
-            N_UV,
-            DELTA_LM,
-            channel_map=mapping,
-        )
+    separate = np.zeros((3, 1, *N_UV))
+    separate_total = np.zeros((3, 1))
+    grid_imaging_weights(
+        separate,
+        separate_total,
+        uvw,
+        weights,
+        frequencies,
+        N_UV,
+        DELTA_LM,
+        truncate_uv_cells=truncate,
+    )
+    collapsed = np.zeros((1, 1, *N_UV))
+    total = np.zeros((1, 1))
+    mapping = np.zeros(3, dtype=np.int64)
+    args = (collapsed, total, uvw, weights, frequencies, N_UV, DELTA_LM)
+    if positional:
+        grid_imaging_weights(*args, 1, mapping, truncate_uv_cells=truncate)
+    else:
+        grid_imaging_weights(*args, frequency_map=mapping, truncate_uv_cells=truncate)
+    np.testing.assert_allclose(collapsed, separate.sum(axis=0, keepdims=True))
+    np.testing.assert_allclose(total, separate_total.sum(axis=0, keepdims=True))
+    np.testing.assert_allclose(total.sum(), 2 * weights.sum())
 
 
 @pytest.mark.parametrize("truncate", [False, True])

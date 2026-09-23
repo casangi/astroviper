@@ -535,7 +535,7 @@ def grid_imaging_weight_density_continuum(
             delta_lm,
             processing_function_threads=processing_function_threads,
             truncate_uv_cells=True,
-            channel_map=(
+            frequency_map=(
                 np.zeros(ms_frequency.size, dtype=np.int64)
                 if collapse_frequency
                 else None
