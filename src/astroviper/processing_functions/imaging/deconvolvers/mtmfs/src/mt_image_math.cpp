@@ -1,7 +1,6 @@
 // Port of CASA stdcleaner/StdImageMath.cc. The masked extremum is evaluated on
 // the fly (a[k]*mask[k]) rather than through a temporary product image; the
-// comparisons are identical, so the result (value, position, tie-breaking) is
-// unchanged while no allocation is made.
+// comparisons are identical, so value, position and tie-breaking are unchanged.
 
 #include "../include/mt_image_math.hpp"
 
@@ -14,6 +13,16 @@ T sum_array(const T* a, std::size_t n) {
     T total = static_cast<T>(0);
     for (std::size_t i = 0; i < n; ++i) total += a[i];
     return total;
+}
+
+template <typename T>
+T peak_abs(const T* a, std::size_t n) {
+    T peak = static_cast<T>(0);
+    for (std::size_t i = 0; i < n; ++i) {
+        const T w = std::abs(a[i]);
+        if (w > peak) peak = w;
+    }
+    return peak;
 }
 
 template <typename T>
@@ -72,6 +81,8 @@ PeakResult<T> find_max_abs_mask(const T* a, const T* mask, int nx, int ny) {
 
 template float sum_array<float>(const float*, std::size_t);
 template double sum_array<double>(const double*, std::size_t);
+template float peak_abs<float>(const float*, std::size_t);
+template double peak_abs<double>(const double*, std::size_t);
 template float peak_abs_masked<float>(const float*, const float*, std::size_t);
 template double peak_abs_masked<double>(const double*, const double*, std::size_t);
 template PeakResult<float> find_max_abs<float>(const float*, int, int);
