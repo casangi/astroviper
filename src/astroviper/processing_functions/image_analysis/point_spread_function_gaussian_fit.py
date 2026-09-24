@@ -33,9 +33,9 @@ def point_spread_function_gaussian_fit(
     fit 2D gaussian to psf
 
     For every (time, frequency, polarization) slice the main lobe of the PSF is
-    isolated, a 2D Gaussian is fit to it, and the largest value found outside
-    the main lobe (the maximum sidelobe level) is recorded. Both results are
-    written back into ``img_xds`` as new data variables.
+    isolated and a 2D Gaussian is fit to it. The maximum sidelobe is measured
+    after subtracting that fitted main beam, following CASA's cycle-threshold
+    convention. Both results are written back into ``img_xds``.
 
     Parameters
     ----------
@@ -82,7 +82,7 @@ def point_spread_function_gaussian_fit(
           ``[major, minor, pa]`` for each slice.
         - ``MAX_SIDELOBE_POINT_SPREAD_FUNCTION`` with dims
           ``(time, frequency, polarization)`` holding the maximum sidelobe
-          level (the largest PSF value outside the main lobe) for each slice.
+          magnitude after subtracting the fitted main beam for each slice.
 
         The l and m coordinates of the input data are assumed to be in radians.
         The units of beam size (major and minor) and position angle are in radians.
@@ -91,6 +91,11 @@ def point_spread_function_gaussian_fit(
     -----
     - Returns NaN values for beam parameters if the fitting fails
     - L-BFGS-B optimization method is used with bounds on parameters
+    - Fitted covariance is transformed from the resampled grid to angular
+      coordinates before extracting the major/minor FWHM and position angle.
+      This preserves rotated ellipses when the fitting window or sampling
+      has unequal axis scales. The major-axis direction is
+      ``(sin(pa), -cos(pa))`` in the physical ``(l, m)`` pixel-axis frame.
     - The maximum sidelobe level is a fraction of the PSF peak (dimensionless);
       it is ``0.0`` for an all-zero slice.
     """
@@ -112,8 +117,8 @@ def point_spread_function_gaussian_fit(
         )
     if not isinstance(sampling, list | tuple | np.ndarray):
         raise TypeError("sampling must be a list, tuple, or numpy array")
-    if sampling[0] <= 0 or sampling[1] <= 0:
-        raise ValueError("sampling must be positive")
+    if sampling[0] <= 1 or sampling[1] <= 1:
+        raise ValueError("sampling must contain at least two points per axis")
     if type(sampling[0]) is not int or type(sampling[1]) is not int:
         raise TypeError("sampling must be integers")
     if cutoff < 0:
@@ -176,6 +181,12 @@ def point_spread_function_gaussian_fit(
         interpolation_method,
         processing_function_threads=processing_function_threads,
     )
+    max_sidelobe = _max_sidelobe_after_gaussian_subtraction(
+        img_xds[psf_name].values,
+        ellipse_params,
+        delta,
+        fallback=max_sidelobe,
+    )
 
     # Uncomment line below to change beam_param units to arcsec and deg
     # psf_gaussian_fit_core returns bmaj and bmin in  and pa in deg.
@@ -209,6 +220,59 @@ def point_spread_function_gaussian_fit(
     )
 
     return img_xds
+
+
+def _max_sidelobe_after_gaussian_subtraction(
+    psf_image,
+    ellipse_params,
+    delta,
+    fallback=None,
+):
+    """Measure CASA-style PSF sidelobes after removing the fitted main beam."""
+    psf_image = np.asarray(psf_image)
+    ellipse_params = np.asarray(ellipse_params)
+    output = np.zeros(psf_image.shape[:3], dtype=np.float64)
+
+    for index in np.ndindex(psf_image.shape[:3]):
+        psf_2d = psf_image[index]
+        finite = np.isfinite(psf_2d)
+        beam = ellipse_params[index]
+        valid_beam = np.all(np.isfinite(beam)) and np.all(beam[:2] > 0.0)
+        if not np.any(finite) or not valid_beam:
+            if fallback is not None:
+                output[index] = fallback[index]
+            continue
+
+        finite_psf = np.where(finite, psf_2d, 0.0)
+        peak_l, peak_m = np.unravel_index(np.argmax(finite_psf), psf_2d.shape)
+        peak = finite_psf[peak_l, peak_m]
+        if peak <= 0.0:
+            if fallback is not None:
+                output[index] = fallback[index]
+            continue
+
+        l_offset = (np.arange(psf_2d.shape[0]) - peak_l) * abs(delta[0])
+        m_offset = (np.arange(psf_2d.shape[1]) - peak_m) * abs(delta[1])
+        l_grid, m_grid = np.meshgrid(l_offset, m_offset, indexing="ij")
+        # Match the fitted/restoring-beam PA convention: the major axis
+        # points along (sin(PA), -cos(PA)), so theta = pi/2 - PA.
+        theta = 0.5 * np.pi - beam[2]
+        cos_theta = np.cos(theta)
+        sin_theta = np.sin(theta)
+        major_offset = l_grid * cos_theta - m_grid * sin_theta
+        minor_offset = l_grid * sin_theta + m_grid * cos_theta
+        sigma_major = beam[0] / FWHM_factor
+        sigma_minor = beam[1] / FWHM_factor
+        fitted_main_beam = peak * np.exp(
+            -0.5
+            * ((major_offset / sigma_major) ** 2 + (minor_offset / sigma_minor) ** 2)
+        )
+
+        delobed_maximum = np.max(np.where(finite, psf_2d - fitted_main_beam, -np.inf))
+        original_minimum = np.min(np.where(finite, psf_2d, np.inf))
+        output[index] = max(abs(original_minimum), abs(delobed_maximum))
+
+    return output
 
 
 def _get_main_lobe_bounding_box(masked_psf_2d):
@@ -299,8 +363,10 @@ def _extract_main_lobe_2d(npix_window, threshold, psf_2d):
     main_lobe_label = labels[peak_l, peak_m]
     main_lobe_only = np.where(labels == main_lobe_label, windowed_psf, 0)
 
-    # Largest value that does not belong to the main lobe.
-    max_sidelobe = np.max(psf_2d * (labels != main_lobe_label))
+    # Cycle control depends on the largest sidelobe magnitude. A negative
+    # sidelobe is just as capable of destabilizing a minor cycle as a positive
+    # one, so do not discard it when estimating the safe cycle threshold.
+    max_sidelobe = np.max(np.abs(psf_2d) * (labels != main_lobe_label))
 
     blc, trc = _get_main_lobe_bounding_box(main_lobe_only)
     if blc is None:
@@ -417,6 +483,10 @@ def psf_gaussian_fit_core(
         back to ``os.cpu_count()``. Each slice writes to its own entry in
         the output, so results are independent of the thread count.
     """
+    sampling = np.asarray(sampling)
+    if np.any(sampling <= 1):
+        raise ValueError("sampling must contain at least two points per axis")
+
     ellipse_params = np.zeros(image_to_fit.shape[0:3] + (3,), dtype=np.float64)
     if np.all(np.isnan(image_to_fit)):
         return ellipse_params + np.nan
@@ -434,17 +504,12 @@ def psf_gaussian_fit_core(
         blc = np.broadcast_to(blc, (n_time, n_chan, n_pol, 2))
         trc = np.broadcast_to(trc, (n_time, n_chan, n_pol, 2))
 
-    # Pre-compute centred coordinate grids for beam_chi2 (depend only on sampling)
-    half_s = sampling // 2
-    ix = np.arange(sampling[0]) - half_s[0]
-    iy = np.arange(sampling[1]) - half_s[1]
-    x_grid = (
-        np.repeat(ix, sampling[1]).reshape(sampling[0], sampling[1]).astype(np.float64)
-    )
-    y_grid = (
-        np.repeat(iy, sampling[0])
-        .reshape(sampling[1], sampling[0])
-        .T.astype(np.float64)
+    # The interpolated image is transposed into (m, l) for the fit. Keep
+    # that order explicitly, including rectangular/even sampling grids.
+    x_grid, y_grid = np.meshgrid(
+        np.arange(sampling[1]) - (sampling[1] - 1) / 2.0,
+        np.arange(sampling[0]) - (sampling[0] - 1) / 2.0,
+        indexing="ij",
     )
 
     bound = [(None, None), (None, None), (-np.pi / 2, np.pi / 2)]
@@ -471,8 +536,11 @@ def psf_gaussian_fit_core(
         yp_grid = np.repeat(interp_d1, d0_shape).reshape(d1_shape, d0_shape).T
         points = np.vstack((np.ravel(xp_grid), np.ravel(yp_grid))).T
 
-        bmaj_scale = np.abs(delta[0] * FWHM_factor / (sampling[0] / npix_window[0]))
-        bmin_scale = np.abs(delta[1] * FWHM_factor / (sampling[1] / npix_window[1]))
+        # ``npix_window`` pixels span ``npix_window - 1`` intervals, and the
+        # resampled grid spans the same distance with ``sampling - 1``
+        # intervals. Convert the fitted sigma from resampled-grid units to the
+        # physical image coordinates using that interval ratio.
+        resampled_pixel_size = np.abs(delta) * (npix_window - 1) / (sampling - 1)
 
         interp_image_to_fit = np.reshape(
             interpn(
@@ -481,7 +549,7 @@ def psf_gaussian_fit_core(
                 points,
                 method=interpolation_method,
             ),
-            [sampling[1], sampling[0]],
+            tuple(sampling),
         ).T
         interp_image_to_fit[interp_image_to_fit < cutoff] = np.nan
 
@@ -495,23 +563,31 @@ def psf_gaussian_fit_core(
             args=(psf_ravel_masked, x_grid, y_grid, psf_mask),
             bounds=bound,
         )
-        if not res.success:
-            # Could retry with a lowered cutoff as CASA does, but since the
-            # cutoff is also used outside the loop, implementing retry would
-            # require some refactoring.
-            res_x = np.array([np.nan, np.nan, np.nan])
-        else:
-            res_x = res.x
+        if not res.success or not np.all(np.isfinite(res.x)):
+            # Preserve the failed-fit convention without passing NaNs to eigh.
+            ellipse_params[time, chan, pol] = np.nan
+            return
 
-        phi = res_x[2]
-        if np.argmax(res_x[0:2]) == 1:
-            phi = -(np.pi / 2 - phi)
-        if phi < 0:
-            phi = (phi + np.pi) % np.pi
+        # Principal widths in the resampled frame cannot be scaled separately
+        # by the l/m pixel increments: a rectangular fitting window generally
+        # makes those increments unequal. Transform the full covariance back
+        # to angular (l, m) coordinates before extracting axes and position angle.
+        width_x, width_y, rotation = res.x
+        cos_r, sin_r = np.cos(rotation), np.sin(rotation)
+        rotate = np.array([[cos_r, -sin_r], [sin_r, cos_r]])
+        covariance = rotate.T @ np.diag([width_x**2, width_y**2]) @ rotate
+        covariance = covariance[::-1, ::-1]  # undo the interpolation transpose
+        covariance *= np.outer(resampled_pixel_size, resampled_pixel_size)
+        variances, directions = np.linalg.eigh(covariance)
+        major_direction = directions[:, -1]
 
-        ellipse_params[time, chan, pol, 0] = np.max(np.abs(res_x[0:2])) * bmaj_scale
-        ellipse_params[time, chan, pol, 1] = np.min(np.abs(res_x[0:2])) * bmin_scale
-        ellipse_params[time, chan, pol, 2] = phi
+        ellipse_params[time, chan, pol, :2] = (
+            np.sqrt(np.maximum(variances[::-1], 0.0)) * FWHM_factor
+        )
+        # Match restoration: the major axis is (sin(pa), -cos(pa)) in (l, m).
+        ellipse_params[time, chan, pol, 2] = (
+            np.arctan2(major_direction[0], -major_direction[1]) % np.pi
+        )
 
     tasks = [
         (time, chan, pol)
