@@ -60,9 +60,20 @@ task_coords, data_selection, image_store, input_data_store, ..., graph_mode=True
 2. Get data: use `input_data` if the loading layer pre-loaded it, else
    `load_processing_set(...)` (eager) for this chunk's `data_selection`.
 3. Call `pf.imaging.image_cube_single_field(ps_xdt, img_xds, image_params, ...)`
-   with explicit keyword arguments.
-4. Write the result slice to Zarr via
-   `astroviper.utils.io.write_result_chunk_to_disk_using_zarr(...)`.
+   with explicit keyword arguments, **once per frequency channel** (the
+   visibility channels mapping onto that image channel as zero-copy views plus
+   a one-channel slice of the empty image), so every channel runs its own
+   imaging cycle loop and `max_cycles` counts per channel; the per-channel
+   results are assembled into the chunk image and the timing frames and
+   imaging dicts are combined. The processing function itself handles full
+   cubes (AGENTS.md §3 full-dimensionality rule).
+4. Write every finished on-disk frequency chunk (`image_chunking["frequency"]`
+   channels; by default the whole task) as soon as its channels are imaged, via
+   `astroviper.utils.io.write_result_chunk_to_disk_using_zarr(...)` (or the
+   skunk-works, sharded or FITS writer), taking its plane statistics first. At
+   most one chunk is held next to the channel being imaged, and a one-channel
+   chunk is written without any copy. `image_sharding` (a `{dimension: size}`
+   dict, any dimension) selects the sharded writer.
 
 ### 12.3 Science — `processing_functions/imaging/image_cube_single_field.py`
 The **iteration-control and bookkeeping helpers** (not science kernels) live in

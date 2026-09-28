@@ -543,16 +543,16 @@ def _run_image_cube(
     n_mapping_parallelism,
     single_precision_image=None,
     skunk_works=False,
-    output_shard_channels=None,
-    node_task_image_chunking=None,
+    image_sharding=None,
+    image_chunking=None,
 ):
     """Run ``image_cube_single_field`` for one base test ``kind`` and variant.
 
     Returns ``(imaging_dict, img_av_xds, image_params)``. The per-variant knobs are
     ``processing_function_threads``, ``n_mapping_parallelism`` and optionally
     ``single_precision_image`` (which overrides the config value when not None),
-    plus ``skunk_works`` / ``output_shard_channels`` /
-    ``node_task_image_chunking`` to exercise the direct-write, sharded-write and
+    plus ``skunk_works`` / ``image_sharding`` /
+    ``image_chunking`` to exercise the direct-write, sharded-write and
     sub-chunked-write paths. Everything else comes from ``_CONFIGS[kind]``, so the
     truth images (generated from the same configs at double precision, threads=1,
     n_mapping_parallelism=1) and every variant share an identical imaging setup.
@@ -583,8 +583,8 @@ def _run_image_cube(
         overwrite=True,
         vizualize_graph=False,
         skunk_works=skunk_works,
-        output_shard_channels=output_shard_channels,
-        node_task_image_chunking=node_task_image_chunking,
+        image_sharding=image_sharding,
+        image_chunking=image_chunking,
         **config["extra_kwargs"],
     )
     img_av_xds = xr.open_zarr(image_store)
@@ -802,7 +802,7 @@ def test_single_field_imaging_niter0(plot_saver, processing_function_threads):
 
 @pytest.mark.parametrize("processing_function_threads", [1, 12])
 def test_single_field_imaging_niter0_sharded(plot_saver, processing_function_threads):
-    """The sharded direct-write path (skunk_works=True + output_shard_channels)
+    """The sharded direct-write path (skunk_works=True + image_sharding)
     must produce the SAME image as the plain direct-write path while writing far
     fewer files -- many single-channel tasks writing into shared Zarr v3 shard
     files (the "single parallel file" pattern for metadata-server relief).
@@ -829,7 +829,7 @@ def test_single_field_imaging_niter0_sharded(plot_saver, processing_function_thr
         processing_function_threads=processing_function_threads,
         n_mapping_parallelism=5,
         skunk_works=True,
-        output_shard_channels=None,
+        image_sharding=None,
     )
     # B: sharded direct write (2 channels per shard).
     store_sharded = (
@@ -842,7 +842,7 @@ def test_single_field_imaging_niter0_sharded(plot_saver, processing_function_thr
         processing_function_threads=processing_function_threads,
         n_mapping_parallelism=5,
         skunk_works=True,
-        output_shard_channels=2,
+        image_sharding={"frequency": 2},
     )
 
     compare_vars = _CONFIGS["niter0"]["compare_variables"]
@@ -902,8 +902,8 @@ def test_single_field_imaging_niter0_sharded(plot_saver, processing_function_thr
         )
 
 
-def test_single_field_imaging_niter0_node_task_image_chunking(plot_saver):
-    """``node_task_image_chunking`` must change only the on-disk chunk layout,
+def test_single_field_imaging_niter0_image_chunking(plot_saver):
+    """``image_chunking`` must change only the on-disk chunk layout,
     never the image: l/m sub-chunking of the 250x250 planes ({"l": 100, "m":
     125} -> 3x2 chunks per plane, including a padded 50-row edge chunk) through
     BOTH direct-write paths (plain and sharded) reproduces the plain
@@ -934,7 +934,7 @@ def test_single_field_imaging_niter0_node_task_image_chunking(plot_saver):
         processing_function_threads=4,
         n_mapping_parallelism=5,
         skunk_works=True,
-        node_task_image_chunking=chunking,
+        image_chunking=chunking,
     )
     # B: sharded direct write with l/m sub-chunking (inner chunks).
     store_sharded = (
@@ -946,8 +946,8 @@ def test_single_field_imaging_niter0_node_task_image_chunking(plot_saver):
         processing_function_threads=4,
         n_mapping_parallelism=5,
         skunk_works=True,
-        output_shard_channels=2,
-        node_task_image_chunking=chunking,
+        image_sharding={"frequency": 2},
+        image_chunking=chunking,
     )
 
     compare_vars = _CONFIGS["niter0"]["compare_variables"]
@@ -971,7 +971,7 @@ def test_single_field_imaging_niter0_node_task_image_chunking(plot_saver):
         truth_xds,
         compare_vars,
         plot_saver=plot_saver,
-        plot_prefix="niter0_sharded_node_task_image_chunking",
+        plot_prefix="niter0_sharded_image_chunking",
     )
 
     # The requested layout is what landed on disk.

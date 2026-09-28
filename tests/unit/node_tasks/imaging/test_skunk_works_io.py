@@ -326,8 +326,8 @@ def _make_image_store(
     compressor,
     freq_chunks,
     variables=("sky_residual",),
-    shard_channels=None,
-    node_task_image_chunking=None,
+    image_chunking=None,
+    image_sharding=None,
 ):
     store = str(tmp_path / "img.zarr")
     zarr.open_group(store, mode="w")
@@ -347,8 +347,8 @@ def _make_image_store(
         compressor=compressor,
         double_precision=False,
         data_variable_definitions="imaging",
-        shard_channels=shard_channels,
-        node_task_image_chunking=node_task_image_chunking,
+        image_chunking=image_chunking,
+        image_sharding=image_sharding,
     )
     return store
 
@@ -420,7 +420,11 @@ def test_write_roundtrip_sharded(tmp_path, compressor, processing_function_threa
     freq_chunks = [[c] for c in range(nfreq)]  # 1 channel per imaging chunk (inner=1)
     variables = ["sky_residual", "point_spread_function"]
     store = _make_image_store(
-        tmp_path, compressor, freq_chunks, variables, shard_channels=shard
+        tmp_path,
+        compressor,
+        freq_chunks,
+        variables,
+        image_sharding={"frequency": shard},
     )
     rng = np.random.default_rng(11)
     vals = {
@@ -474,7 +478,7 @@ def test_sharded_slot_overflow_raises(tmp_path):
     from astroviper.node_tasks.imaging.utils import skunk_works as sw
 
     store = _make_image_store(
-        tmp_path, None, [[0], [1]], ["sky_residual"], shard_channels=2
+        tmp_path, None, [[0], [1]], ["sky_residual"], image_sharding={"frequency": 2}
     )
     vals = np.random.default_rng(12).standard_normal((1, 1, 2, 16, 16)).astype("<f4")
     img = xr.Dataset(
@@ -731,7 +735,9 @@ def test_compute_shard_task_priorities_wave_order(tmp_path):
     from astroviper.node_tasks.imaging.utils import compute_shard_task_priorities
 
     freq_chunks = [[c] for c in range(6)]
-    store = _make_image_store(tmp_path, None, freq_chunks, shard_channels=2)
+    store = _make_image_store(
+        tmp_path, None, freq_chunks, image_sharding={"frequency": 2}
+    )
 
     node_task_data_mapping = {
         i: {"task_coords": {"frequency": {"slice": slice(i, i + 1), "data": [i]}}}
@@ -754,7 +760,7 @@ def test_compute_shard_task_priorities_unsharded_returns_none(tmp_path):
     from astroviper.node_tasks.imaging.utils import compute_shard_task_priorities
 
     freq_chunks = [[c] for c in range(4)]
-    store = _make_image_store(tmp_path, None, freq_chunks, shard_channels=None)
+    store = _make_image_store(tmp_path, None, freq_chunks, image_sharding=None)
     mapping = {
         i: {"task_coords": {"frequency": {"slice": slice(i, i + 1)}}} for i in range(4)
     }
@@ -824,7 +830,7 @@ def test_record_shard_ost_map(tmp_path, monkeypatch):
     freq_chunks = [[c] for c in range(nfreq)]
     variables = ["sky_residual", "point_spread_function"]
     store = _make_image_store(
-        tmp_path, None, freq_chunks, variables, shard_channels=shard
+        tmp_path, None, freq_chunks, variables, image_sharding={"frequency": shard}
     )
 
     df = record_shard_ost_map(store, ["SKY_RESIDUAL", "POINT_SPREAD_FUNCTION"])
@@ -853,7 +859,9 @@ def test_record_shard_ost_map_without_lfs(tmp_path, monkeypatch):
     # record_shard_ost_map call, which on a Lustre host would write the sibling).
     monkeypatch.setattr("shutil.which", lambda name: None)
     freq_chunks = [[c] for c in range(4)]
-    store = _make_image_store(tmp_path, None, freq_chunks, shard_channels=2)
+    store = _make_image_store(
+        tmp_path, None, freq_chunks, image_sharding={"frequency": 2}
+    )
     assert record_shard_ost_map(store, ["SKY_RESIDUAL"]) is None
     assert not os.path.exists(store.rstrip("/") + "_shard_osts.ft")
 
@@ -890,13 +898,11 @@ def test_parse_lfs_getstripe_composite_pfl_layout():
 
 
 # --------------------------------------------------------------------------- #
-# node_task_image_chunking: a task's region spans SEVERAL on-disk chunks
+# image_chunking: a task's region spans SEVERAL on-disk chunks
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("processing_function_threads", [1, 4])
-def test_write_roundtrip_node_task_image_chunking(
-    tmp_path, processing_function_threads
-):
-    """Plain-Zarr writer with node_task_image_chunking: each task's region is
+def test_write_roundtrip_image_chunking(tmp_path, processing_function_threads):
+    """Plain-Zarr writer with image_chunking: each task's region is
     split into several chunk files (l/m sub-chunking + frequency finer than the
     per-task chunk) and still round-trips through stock zarr."""
     import glob
@@ -908,7 +914,7 @@ def test_write_roundtrip_node_task_image_chunking(
         zarr.codecs.BloscCodec(cname="lz4", clevel=5),
         freq_chunks,
         variables,
-        node_task_image_chunking={"l": 8, "m": 8, "frequency": 1},
+        image_chunking={"l": 8, "m": 8, "frequency": 1},
     )
     rng = np.random.default_rng(21)
     vals = {v: rng.standard_normal((1, 2, 2, 16, 16)).astype("<f4") for v in variables}
@@ -940,12 +946,10 @@ def test_write_roundtrip_node_task_image_chunking(
 
 
 @pytest.mark.parametrize("processing_function_threads", [1, 4])
-def test_write_roundtrip_sharded_node_task_image_chunking(
-    tmp_path, processing_function_threads
-):
+def test_write_roundtrip_sharded_image_chunking(tmp_path, processing_function_threads):
     """Sharded writer with l/m inner sub-chunking: each single-channel task
     writes several inner chunks into its shared shard file; readable by stock
-    zarr AND our reader; the shard count stays one per shard_channels."""
+    zarr AND our reader; the shard count stays one per image_sharding['frequency']."""
     import glob
     from concurrent.futures import ThreadPoolExecutor
 
@@ -957,8 +961,8 @@ def test_write_roundtrip_sharded_node_task_image_chunking(
         zarr.codecs.BloscCodec(cname="lz4", clevel=5),
         freq_chunks,
         variables,
-        shard_channels=shard,
-        node_task_image_chunking={"l": 8, "m": 8},
+        image_sharding={"frequency": shard},
+        image_chunking={"l": 8, "m": 8},
     )
     rng = np.random.default_rng(22)
     vals = {
@@ -994,12 +998,72 @@ def test_write_roundtrip_sharded_node_task_image_chunking(
         for k in range(nfreq - 1):
             assert _equal(z[:, k], vals[v][:, k]) and _equal(ours[:, k], vals[v][:, k])
         assert np.isnan(z[:, 3]).all() and np.isnan(ours[:, 3]).all()
-        # Still one shard file per shard_channels channels (inner sub-chunking
+        # Still one shard file per image_sharding['frequency'] channels (inner sub-chunking
         # multiplies slots per shard, not shard files).
         n_files = len(
             [f for f in glob.glob(apath + "/c/**", recursive=True) if os.path.isfile(f)]
         )
         assert n_files == 2, f"{v}: expected 2 shard files, got {n_files}"
+
+
+@pytest.mark.parametrize("processing_function_threads", [1, 4])
+def test_write_roundtrip_sharded_on_l_and_m(tmp_path, processing_function_threads):
+    """Sharding on any dimension: shards of 2 channels x 16 l x 8 m with
+    8x8 inner chunks -> 2 (frequency) x 1 (l) x 2 (m) = 4 shard files per
+    variable; four single-channel tasks write their inner chunks into them
+    concurrently and everything round-trips through stock zarr and our reader."""
+    import glob
+    from concurrent.futures import ThreadPoolExecutor
+
+    nfreq = 4
+    freq_chunks = [[c] for c in range(nfreq)]
+    variables = ["sky_residual", "sky_model"]
+    store = _make_image_store(
+        tmp_path,
+        zarr.codecs.BloscCodec(cname="lz4", clevel=5),
+        freq_chunks,
+        variables,
+        image_chunking={"l": 8, "m": 8},
+        image_sharding={"frequency": 2, "l": 16, "m": 8},
+    )
+    for v in variables:
+        arr = zarr.open_array(store + "/" + v.upper())
+        assert arr.shards == (1, 2, 2, 16, 8) and arr.chunks == (1, 1, 2, 8, 8)
+    rng = np.random.default_rng(24)
+    vals = {
+        v: rng.standard_normal((1, nfreq, 2, 16, 16)).astype("<f4") for v in variables
+    }
+
+    def _write(k):
+        img = xr.Dataset(
+            {
+                v.upper(): (
+                    ["time", "frequency", "polarization", "l", "m"],
+                    vals[v][:, k : k + 1, :, :, :],
+                )
+                for v in variables
+            }
+        )
+        write_result_chunk_to_disk_sharded_skunk_works(
+            store,
+            variables,
+            {"frequency": {"slice": slice(k, k + 1)}},
+            img,
+            processing_function_threads=processing_function_threads,
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(_write, range(nfreq)))
+
+    for v in variables:
+        apath = store + "/" + v.upper()
+        assert _equal(zarr.open_array(apath)[:], vals[v])
+        ours, _ = read_array_region(apath, {})
+        assert _equal(ours, vals[v])
+        n_files = len(
+            [f for f in glob.glob(apath + "/c/**", recursive=True) if os.path.isfile(f)]
+        )
+        assert n_files == 4, f"{v}: expected 4 shard files, got {n_files}"
 
 
 def test_write_misaligned_region_raises(tmp_path):

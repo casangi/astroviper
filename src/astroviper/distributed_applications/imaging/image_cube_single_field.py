@@ -69,7 +69,7 @@ def image_cube_single_field(
     thread_info: dict = None,
     processing_function_threads: int = 1,
     n_mapping_parallelism: dict[str, int | None] | None = None,
-    node_task_image_chunking: dict[str, int] | None = None,
+    image_chunking: dict[str, int] | None = None,
     overwrite: bool = False,
     memory_mode: str = "in_memory",
     cache_directory: str = None,
@@ -84,7 +84,7 @@ def image_cube_single_field(
     mpi_cluster_setup: dict[str, Any] | None = None,
     reduce_mode: str = "tree",
     reduce_n_batch: int = 2,
-    output_shard_channels: int | None = None,
+    image_sharding: dict[str, int] | None = None,
     output_image_format: str = "zarr",
     task_time_kill_switch_seconds: float | None = None,
     monitor_resources_seconds: float | None = None,
@@ -112,8 +112,12 @@ def image_cube_single_field(
         followed by one **model update** (deconvolve the residual image into
         the sky model). Every limit and threshold is applied independently to
         each ``(time, frequency, polarization)`` plane: a plane stops when it
-        meets its own criterion, and cycles continue until every plane has
-        stopped. The CASA ``tclean`` equivalent is given in brackets. Keys:
+        meets its own criterion. The imaging cycle loop runs separately for
+        every frequency channel (the node task images one channel at a time),
+        so a channel's cycles continue until all of its (time, polarization)
+        planes have stopped, and a channel that has stopped does no further
+        residual updates while the others carry on. The CASA ``tclean``
+        equivalent is given in brackets. Keys:
 
         - ``max_iter`` [CASA ``niter``] : Maximum number of deconvolution
           iterations (flux components) per plane, summed over all cycles. A
@@ -126,8 +130,9 @@ def image_cube_single_field(
           made by the residual update of the first cycle, and a closing
           residual update follows the last model update so that the written
           residual reflects the final model. ``max_cycles = 0`` makes only the
-          dirty image; ``max_cycles = -1`` removes the limit. Currently shared
-          by all planes of a chunk.
+          dirty image; ``max_cycles = -1`` removes the limit. Counted per
+          frequency channel: a channel that converges early stops cycling while
+          the others continue.
         - ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, as a
           float in Jy. A plane stops when its peak residual inside the clean
           mask falls to or below ``threshold``; the value is also a hard floor
@@ -211,19 +216,21 @@ def image_cube_single_field(
         ``{"frequency": 500}``). An entry value of ``None``, or omitting the
         parameter entirely (default), auto-determines the chunk count from the
         image size, memory constraints, and available parallelism.
-    node_task_image_chunking : dict, optional
-        Additional on-disk (Zarr) chunking applied *within* each node task's
-        image chunk when it is written, as ``{dimension_name: chunk_size}``
-        with keys that appear in the image coordinates (e.g. ``{"l": 1024,
-        "m": 1024}`` to chunk the sky plane, or ``{"frequency": 1}`` to
-        subdivide a multi-channel task chunk). Without it each written chunk
-        spans the full extent of every non-parallelized dimension. A chunk
-        size given for ``frequency`` must divide the per-task chunk size so no
-        on-disk chunk straddles two node tasks. With ``output_shard_channels``
-        the values set the *inner* chunk shape of the sharded arrays, so
-        chunking within a shard (e.g. on ``l``/``m``) is possible. Not
+    image_chunking : dict, optional
+        On-disk (Zarr) chunk shape of the written image, as ``{dimension_name:
+        chunk_size}`` with keys that appear in the image coordinates (e.g.
+        ``{"l": 1024, "m": 1024}`` to chunk the sky plane, or ``{"frequency":
+        1}`` to write and free every finished channel of a multi-channel node
+        task as soon as it is imaged). A dimension not listed keeps its
+        default: the node task's chunk on ``frequency`` and the full extent of
+        every other dimension. A chunk size may not exceed the node task's
+        extent on that dimension, and on ``frequency`` must divide the per-task
+        chunk so no on-disk chunk straddles two node tasks. The node task
+        writes each on-disk frequency chunk as soon as its channels are
+        imaged, holding at most one chunk in memory. With ``image_sharding``
+        the values are the *inner* chunk shape of the sharded arrays. Not
         applicable to ``output_image_format="fits"``. ``None`` (default)
-        applies no additional chunking to the image chunk being written.
+        writes one chunk per node task and variable.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
@@ -283,18 +290,23 @@ def image_cube_single_field(
     reduce_n_batch : int
         Fan-in per reduce node when ``reduce_mode="tree_n"`` (must be ``>= 2``).
         Ignored for the other modes.
-    output_shard_channels : int, optional
+    image_sharding : dict, optional
         If set (requires ``skunk_works=True``), write the output image as Zarr v3
-        **sharded** arrays with this many frequency channels packed into each shard
-        file, instead of one file per channel. Many single-channel tasks then write
-        into shared, pre-created shard files at disjoint offsets (the TACC "single
-        parallel file" pattern), cutting the output file count by up to
-        ``output_shard_channels``x and greatly relieving the parallel-filesystem
-        metadata server. ``None`` (default) keeps one file per channel.
+        **sharded** arrays with shard shape ``{dimension_name: shard_size}``,
+        e.g. ``{"frequency": 200}`` packs 200 channels into each shard file and
+        ``{"frequency": 32, "l": 2048, "m": 2048}`` also tiles the sky plane.
+        A shard must be a multiple of the on-disk chunk on its dimension
+        (``image_chunking``); a shard larger than the axis is clipped to it,
+        and a dimension not listed gets one shard per node task chunk on
+        ``frequency`` and the full axis elsewhere. Shards may span several node
+        tasks: they write into shared, pre-created shard files at disjoint
+        offsets (the TACC "single parallel file" pattern), cutting the output
+        file count and greatly relieving the parallel-filesystem metadata
+        server. ``None`` (default) keeps one file per written chunk.
     output_image_format : str
         On-disk format of the output image: ``"zarr"`` (default) or ``"fits"``
         (requires ``skunk_works=True``; incompatible with
-        ``output_shard_channels``). With ``"fits"`` the driver pre-creates one
+        ``image_sharding``). With ``"fits"`` the driver pre-creates one
         XRADIO-conformant FITS file per kept image variable
         (``<image_store>/<VARIABLE>.fits``, readable with
         :func:`xradio.image.open_image`) with a sparse full-cube data area, and
@@ -366,6 +378,7 @@ def image_cube_single_field(
     from astroviper.utils.io import (
         create_empty_data_variables_on_disk,
         image_data_groups_for_kept_variables,
+        validate_image_chunking_and_sharding,
     )
 
     if compressor is None:
@@ -379,9 +392,9 @@ def image_cube_single_field(
     # the standard write path cannot safely write partial shards concurrently, so
     # creating sharded arrays without it would corrupt the output. Fail fast rather
     # than silently create sharded arrays a non-concurrent writer will clobber.
-    if output_shard_channels is not None and not skunk_works:
+    if image_sharding and not skunk_works:
         raise ValueError(
-            "output_shard_channels requires skunk_works=True (sharded output is "
+            "image_sharding requires skunk_works=True (sharded output is "
             "written by the concurrent direct-blob writer)."
         )
 
@@ -394,14 +407,14 @@ def image_cube_single_field(
                 "output_image_format='fits' requires skunk_works=True (FITS "
                 "output is written by the concurrent direct-pwrite writer)."
             )
-        if output_shard_channels is not None:
+        if image_sharding:
             raise ValueError(
-                "output_shard_channels does not apply to FITS output "
+                "image_sharding does not apply to FITS output "
                 "(output_image_format='fits')."
             )
-        if node_task_image_chunking is not None:
+        if image_chunking:
             raise ValueError(
-                "node_task_image_chunking does not apply to FITS output "
+                "image_chunking does not apply to FITS output "
                 "(output_image_format='fits'): FITS files have no chunked "
                 "storage layout."
             )
@@ -485,10 +498,9 @@ def image_cube_single_field(
         + str(len(parallel_coords["frequency"]["data_chunks"]))
     )
 
-    if node_task_image_chunking is not None:
-        _validate_node_task_image_chunking(
-            node_task_image_chunking, img_xds, parallel_coords
-        )
+    validate_image_chunking_and_sharding(
+        image_chunking, image_sharding, dict(img_xds.sizes), parallel_coords
+    )
     timing_distributed_application["T_determine_chunks_and_parallel_coords"] = (
         time.time() - start
     )
@@ -505,8 +517,8 @@ def image_cube_single_field(
             compressor=compressor,
             double_precision=not single_precision_image,
             data_variable_definitions="imaging",
-            shard_channels=output_shard_channels,
-            node_task_image_chunking=node_task_image_chunking,
+            image_chunking=image_chunking,
+            image_sharding=image_sharding,
         )
     timing_distributed_application["T_create_empty_data_variables"] = (
         time.time() - start
@@ -540,7 +552,8 @@ def image_cube_single_field(
     input_params["fft_backend"] = fft_backend
     input_params["restore"] = restore
     input_params["skunk_works"] = skunk_works
-    input_params["output_shard_channels"] = output_shard_channels
+    input_params["image_chunking"] = image_chunking
+    input_params["image_sharding"] = image_sharding
     input_params["output_image_format"] = output_image_format
     input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
 
@@ -606,7 +619,7 @@ def image_cube_single_field(
     # few shards that consecutive task_ids share. Derived from the on-disk shard
     # layout of the first kept variable, for any combination of sharded dims.
     task_priorities = None
-    if skunk_works and output_shard_channels:
+    if skunk_works and image_sharding:
         from astroviper.node_tasks.imaging.utils import compute_shard_task_priorities
 
         task_priorities = compute_shard_task_priorities(
@@ -654,34 +667,34 @@ def image_cube_single_field(
         layout_lines.append(
             "  output format: FITS (one file per kept image variable); each "
             "node task pwrites its channel block directly. Zarr sharding and "
-            "chunking parameters (output_shard_channels, "
-            "node_task_image_chunking) do not apply to FITS."
+            "chunking parameters (image_sharding, image_chunking) do not apply "
+            "to FITS."
         )
     else:
-        if output_shard_channels:
+        if image_sharding:
             layout_lines.append(
-                f"  sharding (output_shard_channels): Zarr v3 sharded arrays "
-                f"with {output_shard_channels} frequency channels packed per "
-                "shard file; node tasks write their chunk(s) into shared, "
-                "pre-created shard files at disjoint offsets."
+                f"  sharding (image_sharding): Zarr v3 sharded arrays with shard "
+                f"shape {image_sharding} (unlisted dimensions: one shard per "
+                "node task chunk on frequency, the full axis elsewhere); node "
+                "tasks write their chunk(s) into shared, pre-created shard "
+                "files at disjoint offsets."
             )
         else:
             layout_lines.append(
-                "  sharding (output_shard_channels): none; one file per "
-                "written Zarr chunk."
+                "  sharding (image_sharding): none; one file per written Zarr chunk."
             )
-        if node_task_image_chunking:
+        if image_chunking:
             layout_lines.append(
-                f"  chunking (node_task_image_chunking): "
-                f"{node_task_image_chunking}; each node task's image chunk is "
-                "split into multiple on-disk chunks along the listed "
-                "dimensions (unlisted dimensions stay unchunked)."
+                f"  chunking (image_chunking): {image_chunking}; each node task "
+                "writes every finished on-disk frequency chunk as soon as its "
+                "channels are imaged, split along the listed dimensions "
+                "(unlisted dimensions stay unchunked)."
             )
         else:
             layout_lines.append(
-                "  chunking (node_task_image_chunking): none; each node task "
-                "writes its whole image chunk as one on-disk chunk per "
-                "variable (full l/m extent)."
+                "  chunking (image_chunking): none; each node task writes its "
+                "whole image chunk as one on-disk chunk per variable (full l/m "
+                "extent)."
             )
     logger.info("\n".join(layout_lines))
 
@@ -924,65 +937,6 @@ def _validate_n_mapping_parallelism(n_mapping_parallelism):
             "n_mapping_parallelism['frequency'] must be a positive int or "
             f"None (auto), got {count!r}."
         )
-
-
-def _validate_node_task_image_chunking(
-    node_task_image_chunking, img_xds, parallel_coords
-):
-    """Validate ``node_task_image_chunking`` against the image and the mapping
-    parallelism.
-
-    Checks that every key is an image dimension (the image-domain dims of
-    ``img_xds`` plus the uv-domain ``u``/``v``), that every value is a positive
-    integer, and that a chunk size given for a parallelized dimension divides
-    every node task's chunk (except the last, which may be partial): the node
-    tasks write whole on-disk chunks, so a chunk straddling two tasks would be
-    written -- and clobbered -- by both.
-
-    Parameters
-    ----------
-    node_task_image_chunking : dict
-        ``{dimension_name: chunk_size}`` requested by the caller.
-    img_xds : xarray.Dataset
-        The (empty) image dataset providing the valid dimension names.
-    parallel_coords : dict
-        Parallel coordinates of the mapping (for cube imaging keyed by
-        ``frequency``), providing the per-task chunk lengths.
-
-    Raises
-    ------
-    ValueError
-        On an unknown dimension key, a non-positive/non-integer chunk size, or
-        a parallel-dimension chunk size that would straddle node tasks.
-    """
-    valid_dims = set(img_xds.sizes) | {"u", "v"}
-    for dim, size in node_task_image_chunking.items():
-        if dim not in valid_dims:
-            raise ValueError(
-                f"node_task_image_chunking key {dim!r} is not an image "
-                f"dimension; expected one of {sorted(valid_dims)}."
-            )
-        if isinstance(size, bool) or not isinstance(size, int) or size < 1:
-            raise ValueError(
-                f"node_task_image_chunking[{dim!r}] must be a positive int, "
-                f"got {size!r}."
-            )
-    for dim, parallel_coord in parallel_coords.items():
-        size = node_task_image_chunking.get(dim)
-        if size is None:
-            continue
-        chunk_lengths = [len(chunk) for chunk in parallel_coord["data_chunks"].values()]
-        # Sizes >= the per-task chunk are clipped to it on creation (no
-        # subdivision), so only the effective (clipped) size must align.
-        effective_size = min(size, chunk_lengths[0])
-        for task_chunk_length in chunk_lengths[:-1]:
-            if task_chunk_length % effective_size:
-                raise ValueError(
-                    f"node_task_image_chunking[{dim!r}]={size} must divide "
-                    f"every node task's {dim} chunk (found a task chunk of "
-                    f"length {task_chunk_length}); otherwise an on-disk chunk "
-                    "would straddle two node tasks and be written by both."
-                )
 
 
 def calculate_mapping_parallelism_for_cube_imaging(

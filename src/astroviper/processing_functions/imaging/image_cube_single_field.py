@@ -47,8 +47,12 @@ def imaging_preparation_single_field(
         followed by one **model update** (deconvolve the residual image into
         the sky model). Every limit and threshold is applied independently to
         each ``(time, frequency, polarization)`` plane: a plane stops when it
-        meets its own criterion, and cycles continue until every plane has
-        stopped. The CASA ``tclean`` equivalent is given in brackets. Keys:
+        meets its own criterion. The imaging cycle loop runs separately for
+        every frequency channel (the node task images one channel at a time),
+        so a channel's cycles continue until all of its (time, polarization)
+        planes have stopped, and a channel that has stopped does no further
+        residual updates while the others carry on. The CASA ``tclean``
+        equivalent is given in brackets. Keys:
 
         - ``max_iter`` [CASA ``niter``] : Maximum number of deconvolution
           iterations (flux components) per plane, summed over all cycles. A
@@ -61,8 +65,9 @@ def imaging_preparation_single_field(
           made by the residual update of the first cycle, and a closing
           residual update follows the last model update so that the written
           residual reflects the final model. ``max_cycles = 0`` makes only the
-          dirty image; ``max_cycles = -1`` removes the limit. Currently shared
-          by all planes of a chunk.
+          dirty image; ``max_cycles = -1`` removes the limit. Counted per
+          frequency channel: a channel that converges early stops cycling while
+          the others continue.
         - ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, as a
           float in Jy. A plane stops when its peak residual inside the clean
           mask falls to or below ``threshold``; the value is also a hard floor
@@ -210,6 +215,13 @@ def image_cube_single_field(
     residual update that produces the final residual image.  Every processing
     function is timed; the totals are returned as a one-row timing frame.
 
+    Operates on the full ``(time, frequency, polarization, l, m)`` cube it is
+    given: every plane is controlled independently and the loop runs until all
+    planes have stopped. The imaging node task calls this function once per
+    frequency channel so that each channel runs its own imaging cycle loop (a
+    converged channel then does no further residual updates); nothing here
+    assumes a single channel, and multi-channel cubes are imaged in one call.
+
     Parameters
     ----------
     ps_xdt : xarray.DataTree
@@ -230,8 +242,12 @@ def image_cube_single_field(
         followed by one **model update** (deconvolve the residual image into
         the sky model). Every limit and threshold is applied independently to
         each ``(time, frequency, polarization)`` plane: a plane stops when it
-        meets its own criterion, and cycles continue until every plane has
-        stopped. The CASA ``tclean`` equivalent is given in brackets. Keys:
+        meets its own criterion. The imaging cycle loop runs separately for
+        every frequency channel (the node task images one channel at a time),
+        so a channel's cycles continue until all of its (time, polarization)
+        planes have stopped, and a channel that has stopped does no further
+        residual updates while the others carry on. The CASA ``tclean``
+        equivalent is given in brackets. Keys:
 
         - ``max_iter`` [CASA ``niter``] : Maximum number of deconvolution
           iterations (flux components) per plane, summed over all cycles. A
@@ -244,8 +260,9 @@ def image_cube_single_field(
           made by the residual update of the first cycle, and a closing
           residual update follows the last model update so that the written
           residual reflects the final model. ``max_cycles = 0`` makes only the
-          dirty image; ``max_cycles = -1`` removes the limit. Currently shared
-          by all planes of a chunk.
+          dirty image; ``max_cycles = -1`` removes the limit. Counted per
+          frequency channel: a channel that converges early stops cycling while
+          the others continue.
         - ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, as a
           float in Jy. A plane stops when its peak residual inside the clean
           mask falls to or below ``threshold``; the value is also a hard floor

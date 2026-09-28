@@ -44,27 +44,31 @@ def _log_task_io_failure(phase, exc, task_id, image_store, data_selection, task_
     A chunk whose data cannot be read or whose result cannot be written (e.g. a
     Lustre client eviction that outlives the reader/writer retry schedules, or a
     corrupt input shard) must not abort the whole multi-node run: the caller
-    logs it here, marks the chunk's row in the timing frame with these columns
-    (``task_failed_phase`` / ``task_error`` / ``failed_channel_start``), and the
-    run continues with this chunk's channels left at the image store's fill
-    value. Failures stay queryable per run from the saved node-task frame.
+    logs it here, marks the task's row in the timing frame with these columns
+    (``task_failed_phase`` / ``task_error`` / ``failed_channel_start`` /
+    ``failed_n_channels``), and the run continues with the failed channels left
+    at the image store's fill value. ``task_coords`` is the whole task's for a
+    load failure and one on-disk chunk's (see :func:`_chunk_task_coords`) for a
+    write failure. Failures stay queryable per run from the saved node-task
+    frame.
     """
     import socket
 
     import toolviper.utils.logger as logger
 
     hostname = socket.gethostname()
-    chan_start = 0
-    for sel in (data_selection or {}).values():
-        freq_sel = sel.get("frequency") if isinstance(sel, dict) else None
-        if isinstance(freq_sel, slice) and freq_sel.start is not None:
-            chan_start = int(freq_sel.start)
-            break
-    n_channels = len(task_coords["frequency"]["data"])
+    frequency = task_coords["frequency"]
+    frequency_slice = frequency.get("slice")
+    if isinstance(frequency_slice, slice) and frequency_slice.start is not None:
+        chan_start = int(frequency_slice.start)
+    else:
+        chan_start = _global_channel_offset(data_selection)
+    n_channels = len(frequency["data"])
     logger.error(
         f"node task {task_id} on {hostname}: {phase} FAILED for channels "
         f"[{chan_start}, {chan_start + n_channels}) of {image_store}; skipping "
-        f"this chunk and continuing the run. Error: {exc!r}"
+        "them and continuing the run. Error: "
+        f"{exc!r}"
     )
     return {
         "hostname": hostname,
@@ -73,7 +77,20 @@ def _log_task_io_failure(phase, exc, task_id, image_store, data_selection, task_
         "task_failed_phase": phase,
         "task_error": repr(exc)[:500],
         "failed_channel_start": chan_start,
+        "failed_n_channels": n_channels,
     }
+
+
+def _global_channel_offset(data_selection):
+    """Global channel number of this task's first channel: the start of the
+    ``frequency`` slice in ``data_selection`` (frequency and channel are the
+    same axis), e.g. ``{'ms_name': {'frequency': slice(2, 4)}}`` -> 2; 0 when
+    no frequency slice is present."""
+    for sel in (data_selection or {}).values():
+        freq_sel = sel.get("frequency") if isinstance(sel, dict) else None
+        if isinstance(freq_sel, slice) and freq_sel.start is not None:
+            return int(freq_sel.start)
+    return 0
 
 
 def _remap_imaging_dict_to_global_channels(combined_imaging_dict, data_selection):
@@ -88,27 +105,344 @@ def _remap_imaging_dict_to_global_channels(combined_imaging_dict, data_selection
     numbers. A no-op returning the input unchanged when the offset is 0 (e.g. a
     single chunk starting at channel 0) or no frequency slice is present.
     """
+
+    return _shift_imaging_dict_channels(
+        combined_imaging_dict, _global_channel_offset(data_selection)
+    )
+
+
+def _shift_imaging_dict_channels(imaging_dict, chan_offset):
+    """Return ``imaging_dict`` with every ``Key.chan`` shifted by ``chan_offset``.
+
+    The science function labels the channels of the cube it is handed
+    ``0..N-1``; the node task images one channel at a time, so each
+    per-channel dict comes back with ``chan == 0`` and is shifted onto its
+    chunk-local channel here (and onto the global channel number afterwards by
+    :func:`_remap_imaging_dict_to_global_channels`). Returns the input itself
+    for a zero offset.
+    """
     from astroviper.processing_functions.imaging.utils.imaging_dict import (
         ImagingDict,
         Key,
     )
 
-    chan_offset = 0
-    for sel in (data_selection or {}).values():
-        freq_sel = sel.get("frequency") if isinstance(sel, dict) else None
-        if isinstance(freq_sel, slice) and freq_sel.start is not None:
-            chan_offset = int(freq_sel.start)
-            break
-
     if chan_offset == 0:
-        return combined_imaging_dict
+        return imaging_dict
 
-    remapped = ImagingDict()
-    for key, value in combined_imaging_dict.data.items():
-        remapped.data[Key(time=key.time, pol=key.pol, chan=key.chan + chan_offset)] = (
+    shifted = ImagingDict()
+    for key, value in imaging_dict.data.items():
+        shifted.data[Key(time=key.time, pol=key.pol, chan=key.chan + chan_offset)] = (
             value
         )
-    return remapped
+    return shifted
+
+
+def _visibility_to_image_frequency_maps(ps_xdt, img_xds):
+    """Map every measurement set's visibility channels onto the chunk's image
+    channels (``{ms_name: int array of image channel indices}``), with the same
+    nearest-channel rule the gridders apply, so the per-channel loop hands the
+    science function exactly the visibility channels it would grid onto that
+    image channel.
+    """
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        map_visibility_frequencies_to_image,
+    )
+
+    return {
+        ms_name: map_visibility_frequencies_to_image(
+            ms_xdt.frequency.values, img_xds.frequency.values
+        )
+        for ms_name, ms_xdt in ps_xdt.items()
+    }
+
+
+def _select_processing_set_channel(ps_xdt, frequency_maps, chan_index):
+    """Slice the loaded chunk down to the visibility channels that map onto
+    image channel ``chan_index``.
+
+    Returns ``{ms_name: measurement-set node}`` holding zero-copy views of the
+    loaded arrays (the mapped visibility channels of a measurement set are a
+    contiguous run, so the frequency selection is a basic slice), each with its
+    own deep-copied ``attrs`` so the data groups and variables the processing
+    functions register (``WEIGHT_IMAGING``, ``VISIBILITY_MODEL``,
+    ``VISIBILITY_RESIDUAL`` and their data groups) never leak between channels
+    or back into the loaded chunk. Measurement sets without a visibility
+    channel on this image channel are left out; ``None`` when none remain.
+    """
+    import copy
+
+    import numpy as np
+
+    selected = {}
+    for ms_name, ms_xdt in ps_xdt.items():
+        vis_chans = np.flatnonzero(frequency_maps[ms_name] == chan_index)
+        if vis_chans.size == 0:
+            continue
+        first, last = int(vis_chans[0]), int(vis_chans[-1])
+        if last - first + 1 == vis_chans.size:
+            indexer = slice(first, last + 1)  # contiguous run: a view, no copy
+        else:
+            indexer = vis_chans  # not expected; fancy indexing copies
+        ms_chan = ms_xdt.isel(frequency=indexer)
+        ms_chan.attrs = copy.deepcopy(ms_xdt.attrs)
+        selected[ms_name] = ms_chan
+    return selected or None
+
+
+def _select_image_channel(img_xds, chan_index):
+    """One-channel slice of the empty chunk image with its own ``attrs`` copy
+    (the science function registers data groups on it in place)."""
+    import copy
+
+    img_chan = img_xds.isel(frequency=slice(chan_index, chan_index + 1))
+    img_chan.attrs = copy.deepcopy(img_xds.attrs)
+    return img_chan
+
+
+class _ImageChunkAccumulator:
+    """Gather consecutive per-channel science results into one on-disk
+    frequency chunk of ``n_channels`` channels starting at chunk-local channel
+    ``start``.
+
+    A one-channel chunk *is* the science result: nothing is allocated or
+    copied, so a single-channel task, or ``image_chunking={"frequency": 1}``,
+    adds no memory at all. A wider chunk gets one buffer per frequency-
+    dependent variable (data variables and non-index coordinates such as
+    ``velocity``), allocated at the chunk's channel count when the first result
+    arrives, into which every channel is copied straight away; of the first
+    result only the coordinates, attrs and static (frequency-independent)
+    variables are kept as the template, so at most one channel's arrays are
+    alive next to the chunk buffer. The ``frequency`` coordinate is the task's
+    own.
+    """
+
+    def __init__(self, chunk_img_xds, start, n_channels):
+        self.start = int(start)
+        self.stop = self.start + int(n_channels)
+        self._n = int(n_channels)
+        frequency = chunk_img_xds.coords["frequency"].isel(
+            frequency=slice(self.start, self.stop)
+        )
+        self._frequency = (("frequency",), frequency.values, dict(frequency.attrs))
+        self._filled = 0
+        self._single = None  # the result itself, for a one-channel chunk
+        self._buffers = None  # {name: (dims, ndarray, attrs)}
+        self._coord_names = None
+        self._template = None  # first result minus its frequency-dependent arrays
+
+    @property
+    def complete(self):
+        return self._filled == self._n
+
+    def insert(self, channel_xds, chan_index):
+        """Take chunk-local channel ``chan_index`` (consecutive) from ``channel_xds``."""
+        import numpy as np
+
+        if channel_xds.sizes.get("frequency") != 1:
+            raise ValueError(
+                "expected a one-channel science result, got "
+                f"{channel_xds.sizes.get('frequency')} channels"
+            )
+        expected = self.start + self._filled
+        if chan_index != expected:
+            raise ValueError(
+                f"channel {chan_index} arrived out of order; expected {expected}"
+            )
+        if self._n == 1:
+            self._single = channel_xds
+            self._filled = 1
+            return
+        if self._buffers is None:
+            self._buffers = {}
+            for name, var in channel_xds.variables.items():
+                if name == "frequency" or "frequency" not in var.dims:
+                    continue
+                shape = tuple(
+                    self._n if dim == "frequency" else size
+                    for dim, size in zip(var.dims, var.shape, strict=True)
+                )
+                self._buffers[name] = (
+                    var.dims,
+                    np.empty(shape, dtype=var.dtype),
+                    dict(var.attrs),
+                )
+            self._coord_names = set(channel_xds.coords)
+            self._template = channel_xds.drop_vars(list(self._buffers) + ["frequency"])
+        local = self._filled
+        for name, (dims, buffer, _attrs) in self._buffers.items():
+            if name not in channel_xds.variables:
+                raise RuntimeError(
+                    f"channel {chan_index} result is missing variable {name!r} "
+                    "present for the chunk's first channel"
+                )
+            var = channel_xds.variables[name]
+            if var.dims != dims:
+                raise RuntimeError(
+                    f"channel {chan_index} variable {name!r} has dims {var.dims}, "
+                    f"the chunk's first channel had {dims}"
+                )
+            index = [slice(None)] * len(dims)
+            index[dims.index("frequency")] = slice(local, local + 1)
+            buffer[tuple(index)] = var.values
+        self._filled += 1
+
+    def assemble(self):
+        """The finished chunk as one dataset (the result itself for one channel)."""
+        import copy
+
+        import xarray as xr
+
+        if not self.complete:
+            raise RuntimeError(
+                f"chunk [{self.start}, {self.stop}) has {self._filled} of "
+                f"{self._n} channels"
+            )
+        if self._n == 1:
+            return self._single
+        coords = {"frequency": self._frequency}
+        coords.update(self._template.coords)
+        data_vars = dict(self._template.data_vars)
+        for name, (dims, buffer, attrs) in self._buffers.items():
+            target = coords if name in self._coord_names else data_vars
+            target[name] = (dims, buffer, attrs)
+        return xr.Dataset(
+            data_vars, coords=coords, attrs=copy.deepcopy(self._template.attrs)
+        )
+
+
+def _chunk_task_coords(task_coords, data_selection, local_start, local_stop):
+    """``task_coords`` narrowed to chunk-local channels ``[local_start,
+    local_stop)``: the ``frequency`` entry carries that range's coordinate
+    values and its global ``slice`` (from the task's own slice, or the
+    ``data_selection`` offset when the task carries none), which is what every
+    writer uses to place the chunk in the image store."""
+    import numpy as np
+
+    frequency = dict(task_coords["frequency"])
+    task_slice = frequency.get("slice")
+    if isinstance(task_slice, slice) and task_slice.start is not None:
+        global_start = int(task_slice.start)
+    else:
+        global_start = _global_channel_offset(data_selection)
+    frequency["data"] = np.asarray(task_coords["frequency"]["data"])[
+        local_start:local_stop
+    ]
+    frequency["slice"] = slice(global_start + local_start, global_start + local_stop)
+    chunk_coords = dict(task_coords)
+    chunk_coords["frequency"] = frequency
+    return chunk_coords
+
+
+def _select_chunk_writer(
+    graph_mode,
+    skunk_works,
+    image_sharding,
+    output_image_format,
+    image_store,
+    image_data_variables_keep,
+    processing_function_threads,
+):
+    """The write path for this task's finished chunks, as a callable
+    ``write(chunk_xds, chunk_task_coords)``."""
+    if graph_mode and output_image_format == "fits":
+        # FITS performance path: pwrite the chunk's contiguous channel block
+        # (and its BEAMS-table rows) directly into the pre-created
+        # XRADIO-conformant FITS files -- disjoint byte ranges across tasks,
+        # no locking, no file creation.
+        from astroviper.node_tasks.imaging.utils import (
+            write_result_chunk_to_fits_skunk_works as writer,
+        )
+    elif graph_mode and skunk_works and image_sharding:
+        # Sharded performance path: write the chunk's inner-chunk blob(s) into
+        # shared, pre-created Zarr v3 shard files (far fewer files ->
+        # metadata-server relief; the "single parallel file" pattern).
+        from astroviper.node_tasks.imaging.utils import (
+            write_result_chunk_to_disk_sharded_skunk_works as writer,
+        )
+    elif graph_mode and skunk_works:
+        # Experimental performance path: encode and write only the chunk's
+        # blob(s) directly to the pre-created Zarr image store (no open_group).
+        from astroviper.node_tasks.imaging.utils import (
+            write_result_chunk_to_disk_using_zarr_skunk_works as writer,
+        )
+    elif graph_mode:
+        from astroviper.utils.io import write_result_chunk_to_disk_using_zarr
+
+        def write(chunk_xds, chunk_task_coords):
+            write_result_chunk_to_disk_using_zarr(
+                image_store, image_data_variables_keep, chunk_task_coords, chunk_xds
+            )
+
+        return write
+    else:
+
+        def write(chunk_xds, chunk_task_coords):
+            chunk_xds.to_zarr(image_store, consolidated=True)
+
+        return write
+
+    def write(chunk_xds, chunk_task_coords):
+        writer(
+            image_store,
+            image_data_variables_keep,
+            chunk_task_coords,
+            chunk_xds,
+            processing_function_threads=processing_function_threads,
+        )
+
+    return write
+
+
+def _concat_image_statistics(statistics_chunks):
+    """Concatenate the per-chunk ``{image_variable_key: Dataset}`` statistics
+    along ``frequency`` into the task's."""
+    import xarray as xr
+
+    if not statistics_chunks:
+        return {}
+    if len(statistics_chunks) == 1:
+        return statistics_chunks[0]
+    keys = list(statistics_chunks[0])
+    return {
+        key: xr.concat(
+            [chunk[key] for chunk in statistics_chunks if key in chunk],
+            dim="frequency",
+        )
+        for key in keys
+    }
+
+
+def _combine_channel_timing_frames(timing_frames):
+    """Fold the per-channel one-row timing frames into the chunk's one row.
+
+    ``T_*`` columns and per-channel counts (``n_channels``) are summed;
+    ``task_id`` is common to all channels; ``n_cycles`` becomes the largest
+    number of imaging cycles any channel of the chunk ran (what one shared loop
+    would have run for every channel) and ``n_cycles_total`` their sum (the
+    imaging cycles actually run).
+    """
+    import pandas as pd
+
+    columns = []
+    for frame in timing_frames:
+        for column in frame.columns:
+            if column not in columns:
+                columns.append(column)
+    combined = {}
+    for column in columns:
+        values = [
+            frame[column].iloc[0] for frame in timing_frames if column in frame.columns
+        ]
+        if column == "task_id":
+            combined[column] = values[0]
+        elif column == "n_cycles":
+            combined[column] = max(values)
+        else:
+            combined[column] = sum(values)
+    combined["n_cycles_total"] = sum(
+        frame["n_cycles"].iloc[0] for frame in timing_frames if "n_cycles" in frame
+    )
+    return pd.DataFrame({key: [value] for key, value in combined.items()})
 
 
 @shares_param_docs
@@ -134,7 +468,8 @@ def image_cube_single_field(
     task_id=0,
     input_data=None,
     graph_mode=True,
-    output_shard_channels=None,
+    image_chunking=None,
+    image_sharding=None,
     output_image_format="zarr",
     task_time_kill_switch_seconds=None,
 ):
@@ -143,9 +478,22 @@ def image_cube_single_field(
     Thin node task: builds the empty per-chunk
     image in the correlation (instrument) polarization basis, loads (or receives)
     this chunk's visibilities, runs the science
-    :func:`~astroviper.processing_functions.imaging.image_cube_single_field.image_cube_single_field`,
-    writes the result slice to the Zarr image store, and returns the timing and
-    deconvolution metadata.
+    :func:`~astroviper.processing_functions.imaging.image_cube_single_field.image_cube_single_field`
+    **once per frequency channel**, writes every finished on-disk frequency
+    chunk (``image_chunking["frequency"]`` channels; by default the whole
+    task) to the image store as soon as its channels are imaged, and returns
+    the timing and deconvolution metadata.
+
+    Imaging one channel at a time gives every channel its own imaging cycle
+    loop: a channel that has converged stops cycling -- no more degridding,
+    gridding or FFTs for it -- while the others carry on, and ``max_cycles``
+    counts per channel. Each call receives the visibility channels that map
+    onto that image channel (zero-copy views of the loaded chunk) and a
+    one-channel slice of the empty image; the science function itself handles
+    full ``(time, frequency, polarization, l, m)`` cubes and is unchanged.
+    Writing chunk by chunk keeps at most one chunk in memory next to the
+    channel being imaged, and a one-channel chunk -- a single-channel task or
+    ``image_chunking={"frequency": 1}`` -- is written without any copy.
 
     This function has a fully spelled-out signature so it can be called directly
     (standalone) outside of a graph.  When driven by
@@ -169,8 +517,12 @@ def image_cube_single_field(
         followed by one **model update** (deconvolve the residual image into
         the sky model). Every limit and threshold is applied independently to
         each ``(time, frequency, polarization)`` plane: a plane stops when it
-        meets its own criterion, and cycles continue until every plane has
-        stopped. The CASA ``tclean`` equivalent is given in brackets. Keys:
+        meets its own criterion. The imaging cycle loop runs separately for
+        every frequency channel (the node task images one channel at a time),
+        so a channel's cycles continue until all of its (time, polarization)
+        planes have stopped, and a channel that has stopped does no further
+        residual updates while the others carry on. The CASA ``tclean``
+        equivalent is given in brackets. Keys:
 
         - ``max_iter`` [CASA ``niter``] : Maximum number of deconvolution
           iterations (flux components) per plane, summed over all cycles. A
@@ -183,8 +535,9 @@ def image_cube_single_field(
           made by the residual update of the first cycle, and a closing
           residual update follows the last model update so that the written
           residual reflects the final model. ``max_cycles = 0`` makes only the
-          dirty image; ``max_cycles = -1`` removes the limit. Currently shared
-          by all planes of a chunk.
+          dirty image; ``max_cycles = -1`` removes the limit. Counted per
+          frequency channel: a channel that converges early stops cycling while
+          the others continue.
         - ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, as a
           float in Jy. A plane stops when its peak residual inside the clean
           mask falls to or below ``threshold``; the value is also a hard floor
@@ -299,6 +652,20 @@ def image_cube_single_field(
         pre-allocated Zarr store with
         :func:`~astroviper.utils.io.write_result_chunk_to_disk_using_zarr`.  If
         ``False`` the whole chunk image is written with ``to_zarr``.
+    image_chunking : dict, optional
+        On-disk chunk shape of the image store as ``{dimension_name:
+        chunk_size}`` (see the distributed application). Only its
+        ``"frequency"`` entry matters here: finished channels are gathered into
+        chunks of that many channels and every complete chunk is written -- and
+        freed -- right away, so the task holds at most one chunk plus the
+        channel being imaged (a one-channel chunk is written without any copy).
+        ``None`` (default) writes the whole task as one chunk.
+    image_sharding : dict, optional
+        Shard shape of the (Zarr v3 sharded) image store as ``{dimension_name:
+        shard_size}``; when set together with ``skunk_works`` the chunks are
+        written with
+        :func:`~astroviper.node_tasks.imaging.utils.write_result_chunk_to_disk_sharded_skunk_works`.
+        ``None`` (default) selects the unsharded writer.
     output_image_format : str, optional
         On-disk format of the image store this task writes into: ``"zarr"``
         (default) or ``"fits"``.  With ``"fits"`` the chunk is ``pwrite``-en
@@ -315,8 +682,15 @@ def image_cube_single_field(
         * ``"timing_node_tasks"`` : one-row :class:`pandas.DataFrame` with a
           ``T_*`` column per processing function (load, image build, weights,
           PSF, primary beam, gridding, FFT normalization, degridding,
-          deconvolution, write, ...) plus ``task_id``, ``n_channels``,
-          ``n_cycles`` and the total ``T_image_cube_task``.
+          deconvolution, write, ...) summed over the chunk's channels, plus
+          ``task_id``, ``n_channels``, ``n_cycles`` (the largest number of
+          imaging cycles any channel of the chunk ran), ``n_cycles_total``
+          (imaging cycles summed over the channels), ``T_channel_bookkeeping``
+          (slicing the chunk per channel and gathering the results into
+          on-disk chunks) and the total ``T_image_cube_task``. A write failure
+          marks the row with ``task_failed_phase``, ``task_error``,
+          ``failed_channel_start``, ``failed_n_channels`` (the first failed
+          chunk) and ``n_failed_chunks``.
         * ``"deconvolution"`` : the per-plane deconvolution
           :class:`~astroviper.processing_functions.imaging.utils.imaging_dict.ImagingDict`,
           with channels remapped to global channel numbers.
@@ -442,112 +816,155 @@ def image_cube_single_field(
         }
     T_load = time.time() - start
 
-    img_xds, timing_df, combined_imaging_dict = pf.imaging.image_cube_single_field(
-        ps_xdt,
-        img_xds,
-        image_params,
-        imaging_weights_params,
-        iteration_control_params,
-        processing_set_data_group_name=processing_set_data_group_name,
-        deconvolver=deconvolver,
-        instrument_polarization_basis=instrument_polarization_basis,
-        single_precision_image=single_precision_image,
-        processing_function_threads=processing_function_threads,
-        fft_backend=fft_backend,
-        image_data_variables_keep=image_data_variables_keep,
-        restore=restore,
-        task_id=task_id,
+    # ---- Imaging cycle loops, one frequency channel at a time ----
+    # The science function is called once per image channel, with the
+    # visibility channels that map onto it (zero-copy views of the loaded
+    # chunk) and a one-channel slice of the empty image, so every channel runs
+    # its own imaging cycle loop: a channel that has converged stops cycling
+    # (no further degridding, gridding or FFTs for it) while the others carry
+    # on, and ``max_cycles`` counts per channel. Finished channels are gathered
+    # into on-disk frequency chunks (``image_chunking["frequency"]`` channels;
+    # by default the whole task) and every complete chunk has its plane
+    # statistics taken, is written and is freed right away, so the task never
+    # holds more than one chunk plus the channel being imaged -- and with
+    # one-channel chunks nothing is ever copied. The science function itself
+    # handles full cubes -- looping over a dimension belongs here (AGENTS.md
+    # section 3), never inside a processing function.
+    from astroviper.processing_functions.image_analysis.plane_statistics import (
+        calculate_plane_statistics,
     )
+    from astroviper.processing_functions.imaging.utils.iteration_control import (
+        merge_imaging_dicts,
+    )
+    from astroviper.utils.data_tree import clear_cached_accessors, release_data_tree
+
+    n_chan = img_xds.sizes["frequency"]
+    # Channels per written chunk: the on-disk frequency chunk, clipped to this
+    # task (the cube's last task may be shorter). The whole-image ``to_zarr``
+    # of graph_mode=False is not chunk-aware, so there the task is one chunk.
+    if graph_mode and image_chunking and image_chunking.get("frequency"):
+        chunk_channels = min(int(image_chunking["frequency"]), n_chan)
+    else:
+        chunk_channels = n_chan
+    write_chunk = _select_chunk_writer(
+        graph_mode,
+        skunk_works,
+        image_sharding,
+        output_image_format,
+        image_store,
+        image_data_variables_keep,
+        processing_function_threads,
+    )
+    # Masked statistics use the clean MASK when present; a max_iter=0 run has
+    # none, so the fallback mask PRIMARY_BEAM > primary_beam_limit (the same
+    # valid-sky cutoff the deconvolver would use) applies.
+    primary_beam_limit = iteration_control_params.get("primary_beam_limit", 0.2)
+    frequency_maps = _visibility_to_image_frequency_maps(ps_xdt, img_xds)
+    timing_frames = []
+    imaging_dicts = []
+    statistics_chunks = []
+    write_failures = []  # (exception, chunk task_coords) per failed chunk write
+    accumulator = None
+    T_channel_bookkeeping = 0.0
+    T_image_statistics = 0.0
+    T_write = 0.0
+    for chan_index in range(n_chan):
+        start = time.time()
+        ps_chan = _select_processing_set_channel(ps_xdt, frequency_maps, chan_index)
+        if ps_chan is None:
+            # No visibility channel maps onto this image channel: hand over
+            # the whole chunk, which grids nothing onto it -- exactly what one
+            # full-cube call did for such a channel.
+            logger.debug(
+                f"Image channel {chan_index} of task {task_id} has no visibility "
+                "channels; imaging it from the full chunk."
+            )
+            ps_chan = ps_xdt
+        img_chan = _select_image_channel(img_xds, chan_index)
+        if accumulator is None:
+            accumulator = _ImageChunkAccumulator(
+                img_xds, chan_index, min(chunk_channels, n_chan - chan_index)
+            )
+        T_channel_bookkeeping += time.time() - start
+
+        img_chan, timing_chan, imaging_dict_chan = pf.imaging.image_cube_single_field(
+            ps_chan,
+            img_chan,
+            image_params,
+            imaging_weights_params,
+            iteration_control_params,
+            processing_set_data_group_name=processing_set_data_group_name,
+            deconvolver=deconvolver,
+            instrument_polarization_basis=instrument_polarization_basis,
+            single_precision_image=single_precision_image,
+            processing_function_threads=processing_function_threads,
+            fft_backend=fft_backend,
+            image_data_variables_keep=image_data_variables_keep,
+            restore=restore,
+            task_id=task_id,
+        )
+
+        start = time.time()
+        timing_frames.append(timing_chan)
+        imaging_dicts.append(
+            _shift_imaging_dict_channels(imaging_dict_chan, chan_index)
+        )
+        accumulator.insert(img_chan, chan_index)
+        # Drop this channel's objects right away: cached accessors would
+        # otherwise pin its arrays until a full garbage-collection pass.
+        clear_cached_accessors(img_chan)
+        if ps_chan is not ps_xdt:
+            for ms_chan in ps_chan.values():
+                clear_cached_accessors(ms_chan)
+        img_chan = None
+        ps_chan = None
+        if not accumulator.complete:
+            T_channel_bookkeeping += time.time() - start
+            continue
+
+        # ---- A whole on-disk frequency chunk is done: statistics, write, free ----
+        chunk_xds = accumulator.assemble()
+        chunk_task_coords = _chunk_task_coords(
+            task_coords, data_selection, accumulator.start, accumulator.stop
+        )
+        accumulator = None
+        T_channel_bookkeeping += time.time() - start
+
+        # Per-plane (l, m) statistics of every image-domain variable in memory,
+        # taken BEFORE the write so they describe exactly what goes to disk
+        # (and survive a skipped write). Channels carry their global frequency
+        # values, so the chunks -- and the reduce -- concatenate along
+        # ``frequency``.
+        start = time.time()
+        statistics_chunks.append(
+            calculate_plane_statistics(chunk_xds, primary_beam_limit=primary_beam_limit)
+        )
+        T_image_statistics += time.time() - start
+
+        start = time.time()
+        try:
+            write_chunk(chunk_xds, chunk_task_coords)
+        except Exception as exc:
+            # A chunk whose result cannot be written is skipped -- logged +
+            # marked in the timing row below -- instead of aborting the whole
+            # run; its channels keep the image store's fill value, and the
+            # task's other chunks are still written.
+            write_failures.append((exc, chunk_task_coords))
+        T_write += time.time() - start
+        clear_cached_accessors(chunk_xds)
+        chunk_xds = None
+
+    start = time.time()
+    timing_df = _combine_channel_timing_frames(timing_frames)
+    combined_imaging_dict = merge_imaging_dicts(imaging_dicts)
+    image_statistics = _concat_image_statistics(statistics_chunks)
+    timing_df["T_channel_bookkeeping"] = T_channel_bookkeeping + (time.time() - start)
 
     # The deconvolve dict's channels are chunk-local (0-based); remap them to
     # global channel numbers so the reduce can merge chunks correctly.
     combined_imaging_dict = _remap_imaging_dict_to_global_channels(
         combined_imaging_dict, data_selection
     )
-
-    # Per-plane (l, m) statistics of every image-domain variable in memory,
-    # taken BEFORE the write so they describe exactly what goes to disk (and
-    # survive a skipped write). Channels carry their global frequency values,
-    # so the reduce can concatenate chunks along ``frequency``.
-    start = time.time()
-    from astroviper.processing_functions.image_analysis.plane_statistics import (
-        calculate_plane_statistics,
-    )
-
-    image_statistics = calculate_plane_statistics(
-        img_xds,
-        # Masked statistics use the clean MASK when present; a max_iter=0 run has
-        # none, so the fallback mask PRIMARY_BEAM > primary_beam_limit (the
-        # same valid-sky cutoff the deconvolver would use) applies.
-        primary_beam_limit=iteration_control_params.get("primary_beam_limit", 0.2),
-    )
-    T_image_statistics = time.time() - start
-
-    start = time.time()
-    write_exc = None
-    try:
-        if graph_mode and output_image_format == "fits":
-            # FITS performance path: pwrite this chunk's contiguous channel
-            # block (and its BEAMS-table rows) directly into the pre-created
-            # XRADIO-conformant FITS files -- disjoint byte ranges across
-            # tasks, no locking, no file creation.
-            from astroviper.node_tasks.imaging.utils import (
-                write_result_chunk_to_fits_skunk_works,
-            )
-
-            write_result_chunk_to_fits_skunk_works(
-                image_store,
-                image_data_variables_keep,
-                task_coords,
-                img_xds,
-                processing_function_threads=processing_function_threads,
-            )
-        elif graph_mode and skunk_works and output_shard_channels:
-            # Sharded performance path: write this chunk's inner-chunk blob(s) into
-            # shared, pre-created Zarr v3 shard files (far fewer files -> metadata-server
-            # relief; the "single parallel file" pattern).
-            from astroviper.node_tasks.imaging.utils import (
-                write_result_chunk_to_disk_sharded_skunk_works,
-            )
-
-            write_result_chunk_to_disk_sharded_skunk_works(
-                image_store,
-                image_data_variables_keep,
-                task_coords,
-                img_xds,
-                processing_function_threads=processing_function_threads,
-            )
-        elif graph_mode and skunk_works:
-            # Experimental performance path: encode and write only this chunk's
-            # blob(s) directly to the pre-created Zarr image store (no open_group).
-            from astroviper.node_tasks.imaging.utils import (
-                write_result_chunk_to_disk_using_zarr_skunk_works,
-            )
-
-            write_result_chunk_to_disk_using_zarr_skunk_works(
-                image_store,
-                image_data_variables_keep,
-                task_coords,
-                img_xds,
-                processing_function_threads=processing_function_threads,
-            )
-        elif graph_mode:
-            from astroviper.utils.io import write_result_chunk_to_disk_using_zarr
-
-            write_result_chunk_to_disk_using_zarr(
-                image_store,
-                image_data_variables_keep,
-                task_coords,
-                img_xds,
-            )
-        else:
-            img_xds.to_zarr(image_store, consolidated=True)
-    except Exception as exc:
-        # A chunk whose result cannot be written is skipped -- logged + marked
-        # below (after the timing columns are folded in) -- instead of aborting
-        # the whole run; its channels keep the image store's fill value.
-        write_exc = exc
-    T_write = time.time() - start
 
     # Two reference-cycle classes pin this task's gigabytes past `= None`
     # (2026-08-12 findings; each survives until a full gc pass otherwise):
@@ -557,8 +974,6 @@ def image_cube_single_field(
     #    img_xds.xr_img.* calls in the processing functions).
     # Sever both so everything dies by refcount right here. Both helpers are
     # no-ops on the load-layer dict path / cache-less datasets.
-    from astroviper.utils.data_tree import clear_cached_accessors, release_data_tree
-
     release_data_tree(ps_xdt)
     clear_cached_accessors(img_xds)
     img_xds = None
@@ -605,11 +1020,23 @@ def image_cube_single_field(
     except Exception:
         timing_df["worker_name"] = None
 
-    if write_exc is not None:
-        for key, value in _log_task_io_failure(
-            "write", write_exc, task_id, image_store, data_selection, task_coords
-        ).items():
-            timing_df[key] = value
+    if write_failures:
+        # Log every failed chunk; the timing row records the first one plus
+        # the count, so failures stay queryable per run.
+        markers = [
+            _log_task_io_failure(
+                "write", exc, task_id, image_store, data_selection, chunk_coords
+            )
+            for exc, chunk_coords in write_failures
+        ]
+        for key in (
+            "task_failed_phase",
+            "task_error",
+            "failed_channel_start",
+            "failed_n_channels",
+        ):
+            timing_df[key] = markers[0][key]
+        timing_df["n_failed_chunks"] = len(write_failures)
 
     # Timing kill switch: if this task overran the watchdog threshold, dump its
     # full timing breakdown to an error log and raise -- aborting the whole
@@ -618,7 +1045,7 @@ def image_cube_single_field(
     # its (long) retry schedule must not re-escalate into the abort this
     # skip-and-log path exists to avoid.
     if (
-        write_exc is None
+        not write_failures
         and task_time_kill_switch_seconds is not None
         and task_total_time > task_time_kill_switch_seconds
     ):

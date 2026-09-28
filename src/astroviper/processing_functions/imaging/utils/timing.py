@@ -86,6 +86,7 @@ IMAGING_TIMING_PHASES = [
         [
             ("make empty image", "T_make_empty_image"),
             ("load visibilities", "T_load"),
+            ("channel loop bookkeeping", "T_channel_bookkeeping"),
             ("image statistics", "T_image_statistics"),
             ("write image", "T_write"),
         ],

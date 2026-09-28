@@ -143,6 +143,16 @@ added in the future.
    in-memory `xarray`/NumPy objects. **No I/O on the input or output data.**
    This is where gridders, weighting, FFT normalization, primary beams, and
    deconvolvers live. C++ kernels live in sub-packages here.
+   **Full-dimensionality rule:** a processing function must handle the full
+   dimensionality of the XRADIO-defined data structure it works on. A
+   function operating on an image always expects and processes
+   `(time, frequency, polarization, l, m)`; one operating on a measurement
+   set `(time, baseline_id, frequency, polarization)` — even when a caller
+   only hands it a single-channel slice. Looping over a dimension is the
+   node task's job (e.g. `node_tasks/imaging/image_cube_single_field.py`
+   images one frequency channel at a time so every channel runs its own
+   imaging cycle loop); never write a processing function that assumes a
+   single time, channel or polarization plane.
    > **Open question:** should temporary/cache data (e.g. a cfcache) be allowed
    > to be written to disk from this layer? Undecided — raise it before relying
    > on either answer.
@@ -478,6 +488,9 @@ per-variable nodes.
   the same parameter name is used at every layer.
 - Keep the layering: graph code in `distributed_applications/`, I/O in `node_tasks/`,
   science in `processing_functions/`.
+- Write processing functions for the full dimensionality of the XRADIO data
+  structure (image: `time, frequency, polarization, l, m`); put any loop over
+  a dimension (the per-channel imaging cycle loop) in the node task.
 - Run `ruff format`, `pytest`, and rebuild after C++ edits before finishing.
 
 **Don't**
@@ -487,6 +500,8 @@ per-variable nodes.
 - ❌ Lowercase a data-variable name or uppercase a coordinate name.
 - ❌ Put Dask/graph logic into `processing_functions/`, or science into
   `distributed_applications/`.
+- ❌ Write a processing function that only works on a single channel, time
+  or polarization plane (see the full-dimensionality rule in §3).
 - ❌ Commit notebook outputs (pre-commit's `nbstripout` enforces this) or
   unformatted code.
 - ❌ Introduce relative imports outside `__init__.py` re-exports.
