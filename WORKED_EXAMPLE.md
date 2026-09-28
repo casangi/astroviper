@@ -121,9 +121,9 @@ via `IterationController`:
   `beam_fit_params_point_spread_function`).
 - Deconvolvers: `deconvolution.py` dispatch → `deconvolvers/hogbom` (C++),
   `deconvolvers/aspclean` (C++).
-- The standard gridder kernel is implemented in C++
-  (`gridders/prolate_spheroidal_grid_cpp`); pure-Python reference copies used
-  as test oracles live in
+- The prolate spheroidal gridder kernel (the standard gridder in CASA) is
+  implemented in C++ (`gridders/prolate_spheroidal_grid_cpp`); pure-Python
+  reference copies used as test oracles live in
   `tests/unit/processing_functions/imaging/gridders/reference_gridders.py`.
   **Keep the references in sync** if you change the gridding math.
 
