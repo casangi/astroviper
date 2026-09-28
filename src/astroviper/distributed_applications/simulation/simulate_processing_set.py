@@ -57,11 +57,12 @@ def simulate_processing_set(
     time_params: dict,
     frequency_params: dict,
     polarization: list,
-    point_source_flux: np.ndarray | list,
-    point_source_ra_dec: np.ndarray | list,
     phase_center_ra_dec: np.ndarray | list,
     beam_models: list,
     beam_model_map: np.ndarray | list,
+    sky_components: list | None = None,
+    point_source_flux: np.ndarray | list | None = None,
+    point_source_ra_dec: np.ndarray | list | None = None,
     beam_params: dict | None = None,
     field_name: list | str | None = None,
     pointing_ra_dec: np.ndarray | list | None = None,
@@ -74,6 +75,9 @@ def simulate_processing_set(
     disk_source_ra_dec: np.ndarray | list | None = None,
     disk_source_shape: np.ndarray | list | None = None,
     disk_source_limb_darkening: np.ndarray | list | None = None,
+    gaussian_ring_source_flux: np.ndarray | list | None = None,
+    gaussian_ring_source_ra_dec: np.ndarray | list | None = None,
+    gaussian_ring_source_shape: np.ndarray | list | None = None,
     ms_v2_path: str | None = None,
     direction_frame: str = "icrs",
     ms_name: str | None = None,
@@ -88,7 +92,7 @@ def simulate_processing_set(
     thread_info: dict | None = None,
     check_schema: bool = True,
 ) -> dict:
-    """Simulate the visibilities of a point-, Gaussian- and disk-source sky and write them as an MSv4 processing set.
+    """Simulate the visibilities of a sky of analytic components and write them as an MSv4 processing set.
 
     Builds the time/frequency axes and all MSv4 metadata, creates the empty
     processing set on disk (one measurement set: one spectral window, one
@@ -118,10 +122,15 @@ def simulate_processing_set(
     polarization : list of str
         MSv4 polarization labels to simulate, a subset of one instrumental basis
         (``["RR", "RL", "LR", "LL"]`` or ``["XX", "XY", "YX", "YY"]``).
-    point_source_flux : np.ndarray, [n_source, n_time | 1, n_frequency | 1, 4], Jy
+    sky_components : list of dict, optional
+        Sky components of any kind (point, gaussian, disk, gaussian_ring,
+        m_ring, crescent, annulus, exponential_disk, tapered_power_law,
+        shapelet): ``{"kind", "flux", "ra_dec", <shape parameters>}`` as
+        described in :mod:`~astroviper.processing_functions.simulation.sky_components`.
+    point_source_flux : np.ndarray, [n_source, n_time | 1, n_frequency | 1, 4], Jy, optional
         Flux of every point source in the four instrumental correlations
         (``RR, RL, LR, LL`` or ``XX, XY, YX, YY``); singleton time/frequency axes broadcast.
-    point_source_ra_dec : np.ndarray, [n_time | 1, n_source, 2], radians
+    point_source_ra_dec : np.ndarray, [n_time | 1, n_source, 2], radians, optional
         Right ascension and declination of the point sources (per time or fixed).
     gaussian_source_flux : np.ndarray, [n_gaussian, n_time | 1, n_frequency | 1, 4], Jy, optional
         Integrated flux of each Gaussian source in the four instrumental
@@ -149,6 +158,20 @@ def simulate_processing_set(
         (``I ~ mu**alpha``, Hestroffer 1997): ``0`` uniform disk (the default
         when ``None``), ``> 0`` darker towards the limb, ``-2 < alpha < 0`` limb
         brightened, ``-2`` an infinitely thin ring.
+    gaussian_ring_source_flux : np.ndarray, [n_ring, n_time | 1, n_frequency | 1, 4], Jy, optional
+        Integrated flux of each Gaussian-broadened ring source (a thin ring
+        convolved with a circular Gaussian; ``radius = 0`` is a Gaussian, nested
+        rings model a protoplanetary disk) in the four instrumental
+        correlations; singleton time/frequency axes broadcast.  ``None``
+        (default) simulates no ring sources.
+    gaussian_ring_source_ra_dec : np.ndarray, [n_time | 1, n_ring, 2], radians, optional
+        Right ascension and declination of the ring sources (per time or fixed).
+    gaussian_ring_source_shape : np.ndarray, [n_ring, 4], radians, optional
+        ``[radius, fwhm, inclination, position angle]`` of each ring: ring radius
+        and FWHM of the broadening Gaussian (radians), inclination (radians,
+        ``0`` face-on) and the position angle of the major axis in the
+        Gaussian-source / clean-beam convention
+        (:func:`astroviper.processing_functions.simulation.gaussian_ring.gaussian_ring_uv_response`).
     ms_v2_path : str, optional
         Additionally write the simulated MSv4 as a CASA Measurement Set v2 at
         this path via the optional `arcae <https://github.com/ska-sa/arcae>`_
@@ -244,6 +267,11 @@ def simulate_processing_set(
         dish_diameters_of_beam_models,
         resolve_beam_params,
     )
+    from astroviper.processing_functions.simulation.sky_components import (
+        describe_sky_components,
+        normalize_sky_components,
+        sky_components_from_arrays,
+    )
     from astroviper.utils.data_partitioning import (
         calculate_data_chunking,
         get_thread_info,
@@ -267,8 +295,13 @@ def simulate_processing_set(
     # --- coordinates and MSv4 metadata ---------------------------------------
     start = _time.time()
     polarization = normalize_polarization(polarization)
-    point_source_flux = np.asarray(point_source_flux, dtype=np.float64)
-    point_source_ra_dec = np.asarray(point_source_ra_dec, dtype=np.float64)
+    if (point_source_flux is None) != (point_source_ra_dec is None):
+        raise ValueError(
+            "point_source_flux and point_source_ra_dec must be given together (or both omitted)."
+        )
+    if point_source_flux is not None:
+        point_source_flux = np.asarray(point_source_flux, dtype=np.float64)
+        point_source_ra_dec = np.asarray(point_source_ra_dec, dtype=np.float64)
     if gaussian_source_flux is not None:
         gaussian_source_flux = np.asarray(gaussian_source_flux, dtype=np.float64)
         gaussian_source_ra_dec = np.asarray(gaussian_source_ra_dec, dtype=np.float64)
@@ -284,6 +317,18 @@ def simulate_processing_set(
     if disk_source_limb_darkening is not None:
         disk_source_limb_darkening = np.asarray(
             disk_source_limb_darkening, dtype=np.float64
+        )
+    if gaussian_ring_source_flux is not None:
+        gaussian_ring_source_flux = np.asarray(
+            gaussian_ring_source_flux, dtype=np.float64
+        )
+    if gaussian_ring_source_ra_dec is not None:
+        gaussian_ring_source_ra_dec = np.asarray(
+            gaussian_ring_source_ra_dec, dtype=np.float64
+        )
+    if gaussian_ring_source_shape is not None:
+        gaussian_ring_source_shape = np.asarray(
+            gaussian_ring_source_shape, dtype=np.float64
         )
     phase_center_ra_dec = np.asarray(phase_center_ra_dec, dtype=np.float64)
     beam_model_map = np.asarray(beam_model_map, dtype=np.int64)
@@ -308,6 +353,9 @@ def simulate_processing_set(
         point_source_flux, point_source_ra_dec, phase_center_ra_dec, pointing_ra_dec,
         beam_model_map, len(beam_models), n_time, n_frequency, n_antenna,
     )  # fmt: skip
+    sky_components = normalize_sky_components(
+        sky_components, n_time, n_frequency, direction_frame
+    )
     _check_extended_source_shapes(
         "gaussian", gaussian_source_flux, gaussian_source_ra_dec,
         gaussian_source_shape, n_time, n_frequency,
@@ -316,10 +364,35 @@ def simulate_processing_set(
         "disk", disk_source_flux, disk_source_ra_dec, disk_source_shape,
         n_time, n_frequency, limb_darkening=disk_source_limb_darkening,
     )  # fmt: skip
+    _check_extended_source_shapes(
+        "gaussian_ring", gaussian_ring_source_flux, gaussian_ring_source_ra_dec,
+        gaussian_ring_source_shape, n_time, n_frequency,
+    )  # fmt: skip
 
     antenna_position = np.asarray(antenna_xds.ANTENNA_POSITION.values, dtype=np.float64)
     telescope_name = str(antenna_xds.attrs.get("overall_telescope_name", "unknown"))
     site_position = observatory_position(telescope_name, antenna_position)
+
+    all_components = []
+    if point_source_flux is not None:
+        all_components += sky_components_from_arrays(
+            "point", point_source_flux, point_source_ra_dec
+        )
+    for kind, flux, ra_dec, shape, extra in [
+        ("gaussian", gaussian_source_flux, gaussian_source_ra_dec, gaussian_source_shape, None),
+        ("disk", disk_source_flux, disk_source_ra_dec, disk_source_shape, disk_source_limb_darkening),
+        ("gaussian_ring", gaussian_ring_source_flux, gaussian_ring_source_ra_dec, gaussian_ring_source_shape, None),
+    ]:  # fmt: skip
+        if flux is not None:
+            all_components += sky_components_from_arrays(
+                kind, flux, ra_dec, shape, extra
+            )
+    all_components += sky_components
+    if not all_components:
+        raise ValueError(
+            "no sources: give sky_components and/or point_source_flux / point_source_ra_dec."
+        )
+    described = describe_sky_components(normalize_sky_components(all_components))
 
     field_name_per_time, unique_field_names, unique_phase_centers = resolve_fields(
         phase_center_ra_dec, field_name, n_time
@@ -335,19 +408,8 @@ def simulate_processing_set(
         field_name_per_time,
         auto_correlations=uvw_params["auto_correlations"],
         description=(
-            f"Simulated visibilities of {point_source_ra_dec.shape[1]} point source(s)"
-            + (
-                f", {gaussian_source_ra_dec.shape[1]} Gaussian source(s)"
-                if gaussian_source_ra_dec is not None
-                else ""
-            )
-            + (
-                f", {disk_source_ra_dec.shape[1]} limb-darkened disk source(s)"
-                if disk_source_ra_dec is not None
-                else ""
-            )
-            + " "
-            "with astroviper.distributed_applications.simulation.simulate_processing_set."
+            "Simulated visibilities of " + described + " with "
+            "astroviper.distributed_applications.simulation.simulate_processing_set."
         ),
     )
     if ms_name is None:
@@ -441,6 +503,10 @@ def simulate_processing_set(
         "disk_source_ra_dec": disk_source_ra_dec,
         "disk_source_shape": disk_source_shape,
         "disk_source_limb_darkening": disk_source_limb_darkening,
+        "gaussian_ring_source_flux": gaussian_ring_source_flux,
+        "gaussian_ring_source_ra_dec": gaussian_ring_source_ra_dec,
+        "gaussian_ring_source_shape": gaussian_ring_source_shape,
+        "sky_components": sky_components,
         "phase_center_ra_dec": phase_center_ra_dec,
         "beam_models": list(beam_models),
         "beam_model_map": beam_model_map,
@@ -527,10 +593,13 @@ def simulate_processing_set(
     }
 
 
+_EXTENDED_SOURCE_SHAPE_COLUMNS = {"gaussian": 3, "disk": 3, "gaussian_ring": 4}
+
+
 def _check_extended_source_shapes(
     kind, flux, source_ra_dec, shape, n_time, n_frequency, limb_darkening=None
 ):
-    """Validate the ``<kind>_source_*`` arrays of Gaussian (``kind="gaussian"``) or disk sources."""
+    """Validate the ``<kind>_source_*`` arrays of Gaussian, disk or Gaussian-ring sources."""
     if flux is None and source_ra_dec is None and shape is None:
         return
     if flux is None or source_ra_dec is None or shape is None:
@@ -556,10 +625,20 @@ def _check_extended_source_shapes(
         )
     if source_ra_dec.shape[0] not in (1, n_time):
         raise ValueError(f"{kind}_source_ra_dec time axis must be 1 or n_time.")
-    if shape.shape != (flux.shape[0], 3):
+    n_columns = _EXTENDED_SOURCE_SHAPE_COLUMNS[kind]
+    if shape.shape != (flux.shape[0], n_columns):
         raise ValueError(
-            f"{kind}_source_shape must have shape [n_{kind}, 3]; got {shape.shape}."
+            f"{kind}_source_shape must have shape [n_{kind}, {n_columns}]; got {shape.shape}."
         )
+    if kind == "gaussian_ring":
+        if np.any(shape[:, :2] < 0):
+            raise ValueError(
+                "gaussian_ring_source_shape radius and fwhm must be non-negative."
+            )
+        if np.any(shape[:, 2] < 0) or np.any(shape[:, 2] >= np.pi / 2):
+            raise ValueError(
+                "gaussian_ring_source_shape inclination must be in [0, pi/2) radians."
+            )
     if kind == "disk":
         if limb_darkening is None or limb_darkening.shape != (flux.shape[0],):
             raise ValueError(
@@ -586,6 +665,9 @@ def _check_input_shapes(
     n_frequency,
     n_antenna,
 ):
+    if flux is None:
+        flux = np.zeros((0, 1, 1, 4))
+        source_ra_dec = np.zeros((1, 0, 2))
     if flux.ndim != 4 or flux.shape[3] != 4:
         raise ValueError(
             f"point_source_flux must have shape [n_source, n_time|1, n_frequency|1, 4]; got {flux.shape}."

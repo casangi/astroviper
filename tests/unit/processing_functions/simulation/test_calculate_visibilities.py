@@ -451,20 +451,37 @@ class TestGaussianSources:
             cpp_xds.VISIBILITY.values, numpy_xds.VISIBILITY.values, rtol=1e-12
         )
 
-        # The applied taper is exactly the imaging restore module's: dividing a
-        # Gaussian source's visibilities by the point-source visibilities of
-        # the same sky position recovers elliptical_gaussian_uv_taper.
+        # The applied response is the Gaussian's analytic visibility including
+        # the w term, evaluated at the uvw rotated into the source frame:
+        # dividing a Gaussian source's visibilities by the point-source
+        # visibilities of the same sky position recovers it; at w = 0 that
+        # response is exactly the imaging restore module's taper (the single
+        # source of truth for the Gaussian parametrisation).
         from astroviper.processing_functions.imaging.restore import (
             elliptical_gaussian_uv_taper,
+        )
+        from astroviper.processing_functions.simulation.calculate_visibilities import (
+            source_frame_uvw,
+        )
+        from astroviper.processing_functions.simulation.gaussian_source import (
+            elliptical_gaussian_uv_response,
         )
 
         point_xds, _ = simulate_processing_set(
             point_source_flux=flux, point_source_ra_dec=source, **kwargs
         )
         ratio = cpp_xds.VISIBILITY.values[..., 0] / point_xds.VISIBILITY.values[..., 0]
-        u = cpp_xds.UVW.values[..., 0, None] * kwargs["frequency"] / 299792458.0
-        v = cpp_xds.UVW.values[..., 1, None] * kwargs["frequency"] / 299792458.0
-        np.testing.assert_allclose(
-            ratio.real, elliptical_gaussian_uv_taper(u, v, *shape[0]), rtol=1e-10
+        u, v, w = source_frame_uvw(
+            cpp_xds.UVW.values,
+            kwargs["frequency"],
+            kwargs["phase_center_ra_dec"],
+            source,
         )
-        np.testing.assert_allclose(ratio.imag, 0.0, atol=1e-12)
+        np.testing.assert_allclose(
+            ratio, elliptical_gaussian_uv_response(u, v, *shape[0], w=w), rtol=1e-10
+        )
+        assert np.abs(ratio.imag).max() > 1e-6  # the w term is in play
+        np.testing.assert_array_equal(
+            elliptical_gaussian_uv_response(u, v, *shape[0]),
+            elliptical_gaussian_uv_taper(u, v, *shape[0]),
+        )

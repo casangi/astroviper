@@ -218,3 +218,66 @@ def test_disk_sources_through_the_driver_match_the_processing_function(tmp_path)
             disk_source_shape=disk_shape, disk_source_limb_darkening=[0.0, -3.0])  # fmt: skip
     with pytest.raises(ValueError, match="given together"):
         run(tmp_path, disk_source_flux=disk_flux)
+
+
+def test_sky_components_through_the_driver(tmp_path):
+    """The unified component list is validated once, sliced per chunk and reaches the kernel intact."""
+    from astroviper.processing_functions.simulation import (
+        normalize_sky_components,
+        sky_components_from_arrays,
+    )
+
+    arcsec = np.pi / (180 * 3600)
+    n_time, n_frequency = TIME_PARAMS["n_samples"], FREQ_PARAMS["n_channels"]
+    # a time- and frequency-dependent point source, a SkyCoord-positioned annulus and
+    # an m-ring given through the list; the bulk point-source arrays stay usable alongside
+    spectrum = (
+        np.ones((n_time, n_frequency, 4)) * np.arange(1, n_time + 1)[:, None, None]
+    )
+    spectrum[..., 1:3] = 0.0
+    components = [
+        {"kind": "point", "flux": spectrum, "ra_dec": SRC[0, 0]},
+        {"kind": "annulus", "flux": 2.0, "ra_dec": SOURCE, "radius": 200 * arcsec,
+         "inner_radius": 120 * arcsec, "inclination": 0.4, "pa": 1.0, "fwhm": 20 * arcsec},
+        {"kind": "m_ring", "flux": [1.0, 0.0, 0.0, 0.8], "ra_dec": SRC[0, 0] + 1e-4,
+         "radius": 150 * arcsec, "beta": [0.3j], "fwhm": 40 * arcsec},
+    ]  # fmt: skip
+    result, kwargs = run(
+        tmp_path,
+        point_source_flux=np.array([0.5, 0, 0, 0.5])[None, None, None, :],
+        point_source_ra_dec=SRC + 2e-4,
+        sky_components=components,
+    )
+    ms = load_processing_set(result["ps_store"])["VLA_SBand"].ds
+    description = ms.attrs["data_groups"]["base"]["description"]
+    assert "2 point source(s), 1 annulus source(s), 1 m-ring source(s)" in description
+    ant = kwargs["antenna_xds"]
+    all_components = sky_components_from_arrays(
+        "point", kwargs["point_source_flux"], kwargs["point_source_ra_dec"]
+    ) + normalize_sky_components(components, n_time, n_frequency, "icrs")
+    ref, _ = simulate_processing_set_pf(
+        ms.time.values, ms.frequency.values, ["RR", "LL"], ant.ANTENNA_POSITION.values,
+        observatory_position("VLA"), None, None, PC, [airy_disk_model("vla")], np.zeros(8, int),
+        sky_components=all_components,
+    )  # fmt: skip
+    np.testing.assert_allclose(ms.VISIBILITY.values, ref.VISIBILITY.values, atol=1e-12)
+    assert np.abs(ms.VISIBILITY.values).max() > 3.0  # the sources are there
+    # the chunks saw different times: the point-source spectrum ramps with time
+    first = np.abs(ms.VISIBILITY.values[0, :, 0, 0]).mean()
+    last = np.abs(ms.VISIBILITY.values[-1, :, 0, 0]).mean()
+    assert last > first
+
+    with pytest.raises(ValueError, match="no sources"):
+        run(tmp_path, point_source_flux=None, point_source_ra_dec=None)
+    with pytest.raises(ValueError, match="unknown sky component kind"):
+        run(
+            tmp_path,
+            sky_components=[{"kind": "blob", "flux": 1.0, "ra_dec": SRC[0, 0]}],
+        )
+    with pytest.raises(ValueError, match="frequency axis"):
+        run(
+            tmp_path,
+            sky_components=[
+                {"kind": "point", "flux": np.ones((5, 4)), "ra_dec": SRC[0, 0]}
+            ],
+        )

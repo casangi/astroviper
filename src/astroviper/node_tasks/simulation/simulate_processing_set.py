@@ -55,6 +55,10 @@ def simulate_processing_set(
     disk_source_ra_dec: np.ndarray | None = None,
     disk_source_shape: np.ndarray | None = None,
     disk_source_limb_darkening: np.ndarray | None = None,
+    gaussian_ring_source_flux: np.ndarray | None = None,
+    gaussian_ring_source_ra_dec: np.ndarray | None = None,
+    gaussian_ring_source_shape: np.ndarray | None = None,
+    sky_components: list | None = None,
 ):
     """Simulate the visibilities of one time/frequency chunk and write them to disk.
 
@@ -77,10 +81,10 @@ def simulate_processing_set(
         ITRF geocentric antenna positions.
     site_position : np.ndarray, [3], metres
         ITRF geocentric array reference position.
-    point_source_flux : np.ndarray, [n_source, n_time | 1, n_frequency | 1, 4], Jy
+    point_source_flux : np.ndarray, [n_source, n_time | 1, n_frequency | 1, 4], Jy, or None
         Flux of every point source in the four instrumental correlations
         (``RR, RL, LR, LL`` or ``XX, XY, YX, YY``); singleton time/frequency axes broadcast.
-    point_source_ra_dec : np.ndarray, [n_time | 1, n_source, 2], radians
+    point_source_ra_dec : np.ndarray, [n_time | 1, n_source, 2], radians, or None
         Right ascension and declination of the point sources (per time or fixed).
     gaussian_source_flux : np.ndarray, [n_gaussian, n_time | 1, n_frequency | 1, 4], Jy, optional
         Integrated flux of each Gaussian source in the four instrumental
@@ -108,6 +112,25 @@ def simulate_processing_set(
         (``I ~ mu**alpha``, Hestroffer 1997): ``0`` uniform disk (the default
         when ``None``), ``> 0`` darker towards the limb, ``-2 < alpha < 0`` limb
         brightened, ``-2`` an infinitely thin ring.
+    gaussian_ring_source_flux : np.ndarray, [n_ring, n_time | 1, n_frequency | 1, 4], Jy, optional
+        Integrated flux of each Gaussian-broadened ring source (a thin ring
+        convolved with a circular Gaussian; ``radius = 0`` is a Gaussian, nested
+        rings model a protoplanetary disk) in the four instrumental
+        correlations; singleton time/frequency axes broadcast.  ``None``
+        (default) simulates no ring sources.
+    gaussian_ring_source_ra_dec : np.ndarray, [n_time | 1, n_ring, 2], radians, optional
+        Right ascension and declination of the ring sources (per time or fixed).
+    gaussian_ring_source_shape : np.ndarray, [n_ring, 4], radians, optional
+        ``[radius, fwhm, inclination, position angle]`` of each ring: ring radius
+        and FWHM of the broadening Gaussian (radians), inclination (radians,
+        ``0`` face-on) and the position angle of the major axis in the
+        Gaussian-source / clean-beam convention
+        (:func:`astroviper.processing_functions.simulation.gaussian_ring.gaussian_ring_uv_response`).
+    sky_components : list of dict, optional
+        Sky components of any kind (point, gaussian, disk, gaussian_ring,
+        m_ring, crescent, annulus, exponential_disk, tapered_power_law,
+        shapelet): ``{"kind", "flux", "ra_dec", <shape parameters>}`` as
+        described in :mod:`~astroviper.processing_functions.simulation.sky_components`.
     phase_center_ra_dec : np.ndarray, [n_time | 1, 2], radians
         Phase centre of the array per time (time-varying for mosaics) or fixed.
     beam_models : list
@@ -191,6 +214,19 @@ def simulate_processing_set(
     disk_flux_chunk = _slice_time_axis(disk_source_flux, 1, time_slice)
     disk_flux_chunk = _slice_time_axis(disk_flux_chunk, 2, frequency_slice)
     disk_source_chunk = _slice_time_axis(disk_source_ra_dec, 0, time_slice)
+    ring_flux_chunk = _slice_time_axis(gaussian_ring_source_flux, 1, time_slice)
+    ring_flux_chunk = _slice_time_axis(ring_flux_chunk, 2, frequency_slice)
+    ring_source_chunk = _slice_time_axis(gaussian_ring_source_ra_dec, 0, time_slice)
+    components_chunk = None
+    if sky_components:
+        from astroviper.processing_functions.simulation.sky_components import (
+            normalize_sky_components,
+            slice_sky_components,
+        )
+
+        components_chunk = slice_sky_components(
+            normalize_sky_components(sky_components), time_slice, frequency_slice
+        )
     phase_center_chunk = _slice_time_axis(phase_center_ra_dec, 0, time_slice)
     pointing_chunk = _slice_time_axis(pointing_ra_dec, 0, time_slice)
 
@@ -234,6 +270,10 @@ def simulate_processing_set(
         disk_source_ra_dec=disk_source_chunk,
         disk_source_shape=disk_source_shape,
         disk_source_limb_darkening=disk_source_limb_darkening,
+        gaussian_ring_source_flux=ring_flux_chunk,
+        gaussian_ring_source_ra_dec=ring_source_chunk,
+        gaussian_ring_source_shape=gaussian_ring_source_shape,
+        sky_components=components_chunk,
     )
     if not graph_mode:
         return xds

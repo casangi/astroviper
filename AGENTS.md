@@ -177,19 +177,54 @@ The simulator stamps `time` at integration midpoints (the MS convention); an
 optional MSv2 backend (`utils/measurement_set_v2.py`, `ms_v2_path=` on the
 driver) writes the simulated MSv4 as a CASA Measurement Set via
 [arcae](https://github.com/ska-sa/arcae), an optional dependency.
-Gaussian sources are point sources multiplied by the analytic uv taper of the
-imaging clean beam — `elliptical_gaussian_uv_taper` in
-`processing_functions/imaging/restore.py` is the single source of truth for the
-Gaussian parametrisation (unit-tested against the image-plane kernel), shared
-by the restore step and the simulator. Limb-darkened (elliptical) disk sources
-work the same way with `limb_darkened_disk_uv_response` in
-`processing_functions/simulation/limb_darkened_disk.py` (Hestroffer 1997
-power-law limb darkening: uniform disk, limb-brightened shell and thin ring as
-special cases; its image-plane twin `limb_darkened_disk_image` is unit-tested
-as the Fourier pair and shares the `[major, minor, pa]` convention). Adding a
-new extended component means adding its unit-flux analytic uv response to the
-`extended_sources` loop of `calculate_visibilities` (the C++ kernel is
-untouched: it only ever sees point sources). Likewise the Airy voltage patterns in
+**Sky components.** Every source is a *sky component*: a dict
+`{"kind", "flux", "ra_dec", <shape parameters>}` validated once by
+`processing_functions/simulation/sky_components.py` (`normalize_sky_components`,
+the `COMPONENT_KINDS` registry) and passed as the `sky_components` list through
+the driver, node task and processing function; the older per-kind arrays
+(`point_source_flux/ra_dec`, `gaussian_source_*`, `disk_source_*`,
+`gaussian_ring_source_*`) remain as a bulk interface and are converted with
+`sky_components_from_arrays`. Kinds: `point`, `gaussian`, `disk` (limb-darkened,
+Hestroffer 1997, optional blur), `gaussian_ring` ("Gaussian disk"), `m_ring`
+(EHT m-ring: thin ring with azimuthal modes, optional blur and stretch),
+`crescent` (Kamruddin and Dexter 2013, floor and blur), `annulus`,
+`exponential_disk`, `tapered_power_law` (`r^-gamma exp(-r^2/2r_c^2)`) and
+`shapelet` (Cartesian Gauss-Hermite). Each kind has a unit-flux analytic uv
+response `T(u, v, w)` (`<kind>_uv_response`) and an image-plane twin
+(`<kind>_image`; `sky_model_image` rasterises a whole list in Jy/pixel), all in
+one module per kind. The Gaussian delegates to `elliptical_gaussian_uv_taper`
+in `processing_functions/imaging/restore.py` at `w = 0` (the single source of
+truth for the `[major, minor, pa]` parametrisation, shared with the restore
+step). **Every extended component includes the w term**:
+`calculate_visibilities.source_frame_uvw` rotates the phase-centre uvw into the
+frame of each component (the same rotation the kernel uses for the centre
+phase, so the centre is exact) and the responses take `w`; the paraxial
+expansion `w (n - 1) ~ -w r^2/2` is the only approximation (second order in the
+component size). The shared numerics live in `component_series.py`: the
+limb-darkened-disk Sonine/Jacobi-Anger series for complex arguments
+(`uniform_disk_series`, used by disk, annulus and crescent), the exact Gaussian
+`blur_transform` (a blurred component = the sharp one at complex baseline `g k`
+and complex `w g`), and Gaussian *scale mixtures* with Gauss-Jacobi/Laguerre
+quadrature for the exponential and tapered power-law profiles; the m-ring is a
+Neumann series in the inclination coupling. The reference document is
+`dev/simulation/sky_components_memo.pdf`: one section per kind with an
+annotated 3-D figure (`figures_sky_components.py`), the brightness and the
+visibility formula exactly as implemented, special cases and implementation
+steps; `memo_equations_check.py` next to it re-implements every printed
+formula and compares it with the library (keep it passing when a formula
+changes). `sky_components_summary.pptx` is the slide summary. The derivations
+are also in `nested_gaussian_rings_memo_v2.pdf`; the unit tests
+(`test_w_term_and_gaussian_ring.py`, `test_extended_components.py`,
+`test_sky_components.py`) repeat them against grid and polar quadrature
+oracles, including dense point-source grids pushed through the simulator
+itself. Adding a new kind means: a module with `<kind>_uv_response(u, v, ...,
+w=0)` and `<kind>_image(l, m, ...)`, one `ComponentKind` entry in the registry,
+oracle tests, and nothing else (the C++ kernel is untouched: it only ever sees
+point sources). The EHT tutorial
+(`docs/distributed_applications_tutorials/simulation/eht_m87_simulation.ipynb`)
+replicates an eht-imaging (ehtim 1.3.2) simulation of M87* shipped as
+`data/simulation/eht2017_ehtim_reference.npz` (generator script alongside;
+ehtim's uv sign and Fourier conventions equal ours). Likewise the Airy voltage patterns in
 `processing_functions/imaging/primary_beam/airy_disk.py` are shared by the
 imaging primary beam (`ipower=2`, the CASA power-pattern definition) and the
 simulation antenna beams. The Adaptive Scale Pixel

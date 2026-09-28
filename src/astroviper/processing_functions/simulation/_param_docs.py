@@ -13,6 +13,12 @@ SIMULATION_PARAM_DOCS = {
         "MSv4 polarization labels to simulate, a subset of one instrumental basis\n"
         '(``["RR", "RL", "LR", "LL"]`` or ``["XX", "XY", "YX", "YY"]``).'
     ),
+    "sky_components": (
+        "Sky components of any kind (point, gaussian, disk, gaussian_ring,\n"
+        "m_ring, crescent, annulus, exponential_disk, tapered_power_law,\n"
+        'shapelet): ``{"kind", "flux", "ra_dec", <shape parameters>}`` as\n'
+        "described in :mod:`~astroviper.processing_functions.simulation.sky_components`."
+    ),
     "point_source_flux": (
         "Flux of every point source in the four instrumental correlations\n"
         "(``RR, RL, LR, LL`` or ``XX, XY, YX, YY``); singleton time/frequency axes broadcast."
@@ -52,6 +58,23 @@ SIMULATION_PARAM_DOCS = {
         "(``I ~ mu**alpha``, Hestroffer 1997): ``0`` uniform disk (the default\n"
         "when ``None``), ``> 0`` darker towards the limb, ``-2 < alpha < 0`` limb\n"
         "brightened, ``-2`` an infinitely thin ring."
+    ),
+    "gaussian_ring_source_flux": (
+        "Integrated flux of each Gaussian-broadened ring source (a thin ring\n"
+        "convolved with a circular Gaussian; ``radius = 0`` is a Gaussian, nested\n"
+        "rings model a protoplanetary disk) in the four instrumental\n"
+        "correlations; singleton time/frequency axes broadcast.  ``None``\n"
+        "(default) simulates no ring sources."
+    ),
+    "gaussian_ring_source_ra_dec": (
+        "Right ascension and declination of the ring sources (per time or fixed)."
+    ),
+    "gaussian_ring_source_shape": (
+        "``[radius, fwhm, inclination, position angle]`` of each ring: ring radius\n"
+        "and FWHM of the broadening Gaussian (radians), inclination (radians,\n"
+        "``0`` face-on) and the position angle of the major axis in the\n"
+        "Gaussian-source / clean-beam convention\n"
+        "(:func:`astroviper.processing_functions.simulation.gaussian_ring.gaussian_ring_uv_response`)."
     ),
     "ms_v2_path": (
         "Additionally write the simulated MSv4 as a CASA Measurement Set v2 at\n"
