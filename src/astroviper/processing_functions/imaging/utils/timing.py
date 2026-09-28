@@ -19,7 +19,7 @@ def accumulate_timing(timing, return_df, phase=None):
         When given, every ``T_<name>`` column is namespaced to
         ``T_<phase>_<name>`` before being accumulated.  This keeps timings that
         share a name across phases (e.g. ``T_transform_pol`` runs in both the
-        once-only preparation and every residual cycle) from being summed into a
+        once-only preparation and every residual update) from being summed into a
         single, indistinguishable number.  Non-``T_`` columns are unchanged.
     """
     if return_df is None:
@@ -55,8 +55,8 @@ IMAGING_TIMING_PHASES = [
         ],
     ),
     (
-        "RESIDUAL UPDATE (summed over major cycles)",
-        "T_residual_cycle",
+        "RESIDUAL UPDATE (summed over imaging cycles)",
+        "T_residual_update",
         [
             ("gcf kernel", "T_gcf"),
             ("pol transform", "T_transform_pol"),
@@ -70,8 +70,8 @@ IMAGING_TIMING_PHASES = [
         ],
     ),
     (
-        "MODEL UPDATE (summed over major cycles)",
-        "T_model_update_cycle",
+        "MODEL UPDATE (summed over imaging cycles)",
+        "T_model_update",
         [
             ("iteration control", "T_iteration_control"),
             ("make mask", "T_make_mask"),

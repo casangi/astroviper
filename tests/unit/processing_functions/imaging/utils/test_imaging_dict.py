@@ -18,8 +18,8 @@ def _make_imaging_dict():
                 "start_peakres": [0.11, 0.05][cycle],
                 "model_flux": [0.3, 0.42][cycle],
                 "masksum": 100,
-                "niter_per_plane": 5000,
-                "loop_gain": 0.1,
+                "max_iter": 5000,
+                "gain": 0.1,
                 "max_psf_sidelobe": 0.35,
             },
             time=0,
@@ -27,7 +27,10 @@ def _make_imaging_dict():
             chan=0,
         )
     rd.add(
-        {"stop_code": StopCode(major=2, minor=0), "stop_description": "threshold"},
+        {
+            "stop_code": StopCode(imaging=2, model_update=0),
+            "stop_description": "threshold",
+        },
         time=0,
         pol=0,
         chan=0,
@@ -39,9 +42,9 @@ def _make_imaging_dict():
             "peakres": 0.001,
             "start_peakres": 0.001,
             "model_flux": 0.0,
-            "stop_code": StopCode(major=2, minor=0),
+            "stop_code": StopCode(imaging=2, model_update=0),
             "stop_description": "threshold",
-            "niter_per_plane": 5000,
+            "max_iter": 5000,
         },
         time=0,
         pol=1,
@@ -59,7 +62,7 @@ def test_flattens_history_and_stop_code():
     assert row0["peakres_start"] == 0.11
     assert row0["peakres_final"] == 0.002
     assert row0["model_flux_final"] == 0.42
-    assert row0["stop_code_major"] == 2
+    assert row0["stop_code_imaging"] == 2
     assert row0["iter_done"] == [40, 25]  # history preserved as a list
     row1 = df[(df.pol == 1) & (df.chan == 1)].iloc[0]
     assert row1["iter_total"] == 0  # the "never deconvolved" marker

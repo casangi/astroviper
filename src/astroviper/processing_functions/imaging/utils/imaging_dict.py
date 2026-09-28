@@ -9,7 +9,7 @@ History Tracking (Added 2025-12-10):
 The ImagingDict.add() method now maintains convergence history by tracking
 certain fields as lists (appending values) while keeping others as single
 values (replacing). This enables convergence visualization and monitoring
-deconvolution progress across major/minor cycles.
+deconvolution progress across imaging cycles.
 """
 
 from collections import OrderedDict, namedtuple
@@ -34,8 +34,8 @@ FIELD_ACCUM = {
 # Fields that remain single values (constant parameters)
 FIELD_SINGLE_VALUE = {
     "max_psf_sidelobe",  # PSF characteristic (doesn't change per cycle)
-    "loop_gain",  # CLEAN loop_gain parameter (constant)
-    "niter_per_plane",  # Max iterations requested (parameter, not measurement)
+    "gain",  # CLEAN gain parameter (constant)
+    "max_iter",  # Max iterations requested (parameter, not measurement)
     "threshold",  # Threshold used (parameter, not measurement)
 }
 
@@ -58,7 +58,7 @@ class ImagingDict:
 
         For fields in FIELD_ACCUM (peakres, iter_done, masksum, peakres_nomask),
         values are appended to lists. For fields in FIELD_SINGLE_VALUE
-        (max_psf_sidelobe, loop_gain, niter_per_plane, threshold), values replace previous values.
+        (max_psf_sidelobe, gain, max_iter, threshold), values replace previous values.
 
         Parameters:
         -----------
@@ -142,13 +142,13 @@ def imaging_dict_to_dataframe(imaging_dict):
     -------
     pandas.DataFrame
         One row per ``(time, pol, chan)`` plane. Scalar fields become plain
-        columns (a ``StopCode`` namedtuple becomes ``stop_code_major`` /
-        ``stop_code_minor``); per-cycle history lists (``iter_done``,
+        columns (a ``StopCode`` namedtuple becomes ``stop_code_imaging`` /
+        ``stop_code_model_update``); per-cycle history lists (``iter_done``,
         ``peakres``, ...) are kept as list-valued columns AND summarized into
         the derived columns ``n_cycles``, ``iter_total`` (total CLEAN
         iterations over all cycles -- 0 means the plane was never
         deconvolved), ``peakres_start`` / ``peakres_final`` and
-        ``model_flux_final``. Empty for an empty dict (e.g. a niter_per_plane=0 run).
+        ``model_flux_final``. Empty for an empty dict (e.g. a max_iter=0 run).
     """
     import pandas as pd
 

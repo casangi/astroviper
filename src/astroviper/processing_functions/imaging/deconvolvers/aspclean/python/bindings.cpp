@@ -40,7 +40,7 @@ static py::buffer_info check_array(py::array& arr, const char* name, int ndim,
 template <typename T>
 static py::dict plane_impl(py::array residual, py::array psf, py::array model,
                            py::array mask, double gain, double threshold,
-                           int niter, double fusedthreshold, double psf_width,
+                           int max_iter_remaining, double fusedthreshold, double psf_width,
                            int largestscale, int stoppointmode, int norm_method,
                            bool verbose) {
     const int ny = static_cast<int>(residual.shape(0));
@@ -64,7 +64,7 @@ static py::dict plane_impl(py::array residual, py::array psf, py::array model,
         res = aspclean::aspclean_plane<T>(
             static_cast<T*>(ri.ptr), static_cast<T*>(mi.ptr),
             static_cast<const T*>(pi.ptr), mask_ptr, nx, ny, gain, threshold,
-            niter, fusedthreshold, psf_width, largestscale, stoppointmode,
+            max_iter_remaining, fusedthreshold, psf_width, largestscale, stoppointmode,
             norm_method, verbose);
     }
 
@@ -81,7 +81,7 @@ static py::dict plane_impl(py::array residual, py::array psf, py::array model,
 
 static py::dict clean_dispatch(py::array residual, py::array psf, py::array model,
                                py::array mask, double gain, double threshold,
-                               int niter, double fusedthreshold, double psf_width,
+                               int max_iter_remaining, double fusedthreshold, double psf_width,
                                int largestscale, int stoppointmode,
                                int norm_method, bool verbose) {
     if (residual.ndim() != 2)
@@ -89,11 +89,11 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
     auto dt = residual.dtype();
     if (dt.is(py::dtype::of<float>()))
         return plane_impl<float>(residual, psf, model, mask, gain, threshold,
-                                 niter, fusedthreshold, psf_width, largestscale,
+                                 max_iter_remaining, fusedthreshold, psf_width, largestscale,
                                  stoppointmode, norm_method, verbose);
     if (dt.is(py::dtype::of<double>()))
         return plane_impl<double>(residual, psf, model, mask, gain, threshold,
-                                  niter, fusedthreshold, psf_width, largestscale,
+                                  max_iter_remaining, fusedthreshold, psf_width, largestscale,
                                   stoppointmode, norm_method, verbose);
     throw std::runtime_error("residual must be float32 or float64");
 }
@@ -101,7 +101,7 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
 template <typename T>
 static py::dict cube_impl(py::array residual, py::array psf, py::array model,
                           py::array mask, double gain, py::array threshold,
-                          py::array niter, double fusedthreshold, double psf_width,
+                          py::array max_iter_remaining, double fusedthreshold, double psf_width,
                           int largestscale, int stoppointmode, int norm_method,
                           int processing_function_threads) {
     const int nt = static_cast<int>(residual.shape(0));
@@ -135,14 +135,14 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
         mask_ptr = static_cast<const T*>(ki.ptr);
     }
 
-    // Per-plane iteration control: threshold (float64) and niter (int32) are
+    // Per-plane iteration control: threshold (float64) and max_iter_remaining (int32) are
     // (nt, nf, np_img) arrays so every (time, frequency, polarization) plane
     // is cleaned with its own threshold and iteration limit.
     const std::vector<py::ssize_t> cshp = {nt, nf, np_img};
     py::buffer_info thr_info =
         check_array<double>(threshold, "threshold", 3, cshp, false);
     py::buffer_info nit_info =
-        check_array<int>(niter, "niter", 3, cshp, false);
+        check_array<int>(max_iter_remaining, "max_iter_remaining", 3, cshp, false);
     const double* thr_ptr = static_cast<const double*>(thr_info.ptr);
     const int* nit_ptr = static_cast<const int*>(nit_info.ptr);
 
@@ -186,7 +186,7 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
 
 static py::dict clean_cube_dispatch(py::array residual, py::array psf,
                                     py::array model, py::array mask, double gain,
-                                    py::array threshold, py::array niter,
+                                    py::array threshold, py::array max_iter_remaining,
                                     double fusedthreshold, double psf_width,
                                     int largestscale, int stoppointmode,
                                     int norm_method, int processing_function_threads) {
@@ -196,11 +196,11 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
     auto dt = residual.dtype();
     if (dt.is(py::dtype::of<float>()))
         return cube_impl<float>(residual, psf, model, mask, gain, threshold,
-                                niter, fusedthreshold, psf_width, largestscale,
+                                max_iter_remaining, fusedthreshold, psf_width, largestscale,
                                 stoppointmode, norm_method, processing_function_threads);
     if (dt.is(py::dtype::of<double>()))
         return cube_impl<double>(residual, psf, model, mask, gain, threshold,
-                                 niter, fusedthreshold, psf_width, largestscale,
+                                 max_iter_remaining, fusedthreshold, psf_width, largestscale,
                                  stoppointmode, norm_method, processing_function_threads);
     throw std::runtime_error("residual must be float32 or float64");
 }
@@ -244,29 +244,29 @@ PYBIND11_MODULE(_aspclean_ext, m) {
         "numpy buffers with no copies.";
 
     m.def("clean", &clean_dispatch,
-          "Run the Asp minor cycle on a single 2D plane in place. `residual` and "
+          "Run the Asp model update on a single 2D plane in place. `residual` and "
           "`model` (float32 or float64, C-contiguous, writeable) are modified: "
           "the residual replaces the dirty image and Asp/Hogbom components are "
           "accumulated into the model. `psf` and optional `mask` share the dtype "
           "and shape. psf_width <= 0 estimates the PSF width internally.",
           py::arg("residual"), py::arg("psf"), py::arg("model"),
           py::arg("mask") = py::array(), py::arg("gain") = 0.1,
-          py::arg("threshold") = 0.0, py::arg("niter") = 100,
+          py::arg("threshold") = 0.0, py::arg("max_iter_remaining") = 100,
           py::arg("fusedthreshold") = 0.0, py::arg("psf_width") = 0.0,
           py::arg("largestscale") = -1, py::arg("stoppointmode") = -1,
           py::arg("norm_method") = 1, py::arg("verbose") = false);
 
     m.def("clean_cube", &clean_cube_dispatch,
-          "Run the Asp minor cycle independently on every (time, frequency, "
+          "Run the Asp model update independently on every (time, frequency, "
           "polarization) plane of a 5D cube in place, across processing_function_threads worker "
           "threads. The PSF cube may be single-polarization (broadcast). "
           "Iteration control is independent per plane: threshold (float64) and "
-          "niter (int32) are (nt, nf, np) arrays giving each plane its own "
+          "max_iter_remaining (int32) are (nt, nf, np) arrays giving each plane its own "
           "threshold and iteration limit. Returns per-plane arrays of shape "
           "(nt, nf, np).",
           py::arg("residual"), py::arg("psf"), py::arg("model"),
           py::arg("mask") = py::array(), py::arg("gain") = 0.1,
-          py::arg("threshold") = py::array(), py::arg("niter") = py::array(),
+          py::arg("threshold") = py::array(), py::arg("max_iter_remaining") = py::array(),
           py::arg("fusedthreshold") = 0.0, py::arg("psf_width") = 0.0,
           py::arg("largestscale") = -1, py::arg("stoppointmode") = -1,
           py::arg("norm_method") = 1, py::arg("processing_function_threads") = 1);

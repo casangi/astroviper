@@ -53,7 +53,7 @@ from astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric impo
     airy_disk_rorder_v2,
 )
 from astroviper.processing_functions.imaging.utils.iteration_control import (
-    MAJOR_CYCLE_LIMIT,
+    IMAGING_MAX_CYCLES,
     print_imaging_dict,
 )
 
@@ -122,18 +122,18 @@ MULTI_CYCLE_DOUBLE_VS_SINGLE_RTOL = 0.15
 # bifurcation (~10% on one channel), so it shares the same loose ceiling.
 MULTI_CYCLE_WORST_CASE_RTOL = 0.15
 
-# Deconvolve-dict floats computed FROM the float32 gridded seed: the per-major-
+# Deconvolve-dict floats computed FROM the float32 gridded seed: the per-imaging-
 # cycle CLEAN trajectory (model_flux, peakres, ...) plus the thresholds derived
-# from it and from the PSF (cycle_threshold, max_psf_sidelobe). In single
+# from it and from the PSF (threshold_per_cycle, max_psf_sidelobe). In single
 # precision these differ cross-platform once the deep CLEAN tips a peak-selection
 # tie (~few %) or simply inherits the platform's float32 seed noise (~1e-4) --
 # see the TRUTH_RTOL comment above. For a single-precision dict they are compared
 # by MAGNITUDE at MULTI_CYCLE_SINGLE_DICT_RTOL with a peak-scaled atol (the peak-
 # residual sign flips at the bifurcation while its magnitude is stable). iter_done
-# is included because the minor-cycle count to reach the cycle threshold also
+# is included because the model update count to reach the cycle threshold also
 # bifurcates (~few %) once a channel tips. Everything else stays tight: the
-# remaining exact-int fields (niter_per_plane, masksum), stop_code, the strings, and the
-# config/coordinate floats (loop_gain, min/max_psf_fraction, frequency, time) are
+# remaining exact-int fields (max_iter, masksum), stop_code, the strings, and the
+# config/coordinate floats (gain, min/max_psf_fraction, frequency, time) are
 # all bit-reproducible. Double-precision dicts compare every field tightly.
 _BIFURCATION_SENSITIVE_FIELDS = frozenset(
     {
@@ -143,7 +143,7 @@ _BIFURCATION_SENSITIVE_FIELDS = frozenset(
         "peakres_nomask",
         "start_peakres",
         "start_peakres_nomask",
-        "cycle_threshold",
+        "threshold_per_cycle",
         "max_psf_sidelobe",
         "iter_done",
     }
@@ -165,12 +165,12 @@ IMAGING_WEIGHTS_PARAMS = {
 _CONFIGS = {
     "niter0": {
         "iteration_control_params": {
-            "niter_per_plane": 0,
-            "nmajor": 0,
+            "max_iter": 0,
+            "max_cycles": 0,
             "threshold": 0.0,
-            "loop_gain": 0.1,
-            "cycle_factor": 1.5,
-            "cycle_niter": -1,
+            "gain": 0.1,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": -1,
             "min_psf_fraction": 0.05,
             "max_psf_fraction": 0.8,
         },
@@ -188,13 +188,13 @@ _CONFIGS = {
     },
     "niter100": {
         "iteration_control_params": {
-            "niter_per_plane": 100,
-            "nmajor": 1,
+            "max_iter": 100,
+            "max_cycles": 1,
             "threshold": 0.001,
             "primary_beam_limit": 0.2,
-            "loop_gain": 0.1,
-            "cycle_factor": 1.5,
-            "cycle_niter": -1,
+            "gain": 0.1,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": -1,
             "min_psf_fraction": 0.05,
             "max_psf_fraction": 0.2,
         },
@@ -221,17 +221,17 @@ _CONFIGS = {
             "MASK",
         ],
     },
-    # Same numeric parameters as "niter100" except nmajor=0, which must run
+    # Same numeric parameters as "niter100" except max_cycles=0, which must run
     # zero deconvolution -- so no MASK/SKY_MODEL/SKY_RESTORED is ever created.
-    "nmajor0": {
+    "max_cycles0": {
         "iteration_control_params": {
-            "niter_per_plane": 100,
-            "nmajor": 0,
+            "max_iter": 100,
+            "max_cycles": 0,
             "threshold": 0.001,
             "primary_beam_limit": 0.2,
-            "loop_gain": 0.1,
-            "cycle_factor": 1.5,
-            "cycle_niter": -1,
+            "gain": 0.1,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": -1,
             "min_psf_fraction": 0.05,
             "max_psf_fraction": 0.2,
         },
@@ -247,13 +247,13 @@ _CONFIGS = {
     },
     "multi_cycle": {
         "iteration_control_params": {
-            "niter_per_plane": 10000,
-            "nmajor": 4,
+            "max_iter": 10000,
+            "max_cycles": 4,
             "threshold": 0.001,
             "primary_beam_limit": 0.2,
-            "loop_gain": 0.1,
-            "cycle_factor": 1.5,
-            "cycle_niter": -1,
+            "gain": 0.1,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": -1,
             "min_psf_fraction": 0.05,
             "max_psf_fraction": 0.8,
         },
@@ -418,7 +418,7 @@ def _check_imaging_dict(
     """Assert every key and field of a deconvolve ImagingDict matches ``expected``.
 
     ``expected`` is keyed by ``(time, pol, chan)`` tuples, with ``stop_code``
-    given as a ``(major, minor)`` tuple. Integer fields (niter_per_plane, iter_done,
+    given as an ``(imaging, model_update)`` tuple. Integer fields (max_iter, iter_done,
     masksum), string fields (stokes, stop_description) and the stop code are
     compared exactly; every other (floating-point) field -- scalar or per-cycle
     history list -- is compared with ``np.allclose`` at ``rtol``/``atol``.
@@ -428,12 +428,12 @@ def _check_imaging_dict(
     This is for the single-precision multi_cycle dict, whose per-cycle
     flux/residual trajectory bifurcates cross-platform and above one thread (see
     the TRUTH_RTOL comment): the peak-residual sign flips while its magnitude is
-    stable, and the minor-cycle count itself drifts, so those fields cannot be
-    pinned tightly, while niter_per_plane/stop_code/masksum still can. Regenerate the
+    stable, and the model update count itself drifts, so those fields cannot be
+    pinned tightly, while max_iter/stop_code/masksum still can. Regenerate the
     expected literals if the imaging or iteration-control behaviour intentionally
     changes.
     """
-    exact_int_fields = {"niter_per_plane", "iter_done", "masksum"}
+    exact_int_fields = {"max_iter", "iter_done", "masksum"}
     string_fields = {"stokes", "stop_description"}
 
     actual = {tuple(k): v for k, v in imaging_dict.data.items()}
@@ -448,7 +448,7 @@ def _check_imaging_dict(
         for field, exp_val in exp_fields.items():
             val = got[field]
             if field == "stop_code":
-                assert (int(val.major), int(val.minor)) == tuple(exp_val), (
+                assert (int(val.imaging), int(val.model_update)) == tuple(exp_val), (
                     f"plane {key} stop_code {val} != {exp_val}"
                 )
             elif field in string_fields:
@@ -1046,22 +1046,22 @@ def test_single_field_imaging_niter100(plot_saver, processing_function_threads):
 
 
 @pytest.mark.parametrize("processing_function_threads", [1, 12])
-def test_single_field_imaging_nmajor0(plot_saver, processing_function_threads):
-    """nmajor=0 with niter_per_plane>0 must run zero deconvolution.
+def test_single_field_imaging_max_cycles0(plot_saver, processing_function_threads):
+    """max_cycles=0 with max_iter>0 must run zero deconvolution.
 
-    Regression test: nmajor=0 used to still run one full deconvolution
-    regardless of the setting. Per CASA's own documented ``nmajor`` contract,
-    0 means only the initial residual is computed -- no minor-cycle
+    Regression test: max_cycles=0 used to still run one full deconvolution
+    regardless of the setting. Per CASA's own documented ``max_cycles`` contract,
+    0 means only the initial residual is computed -- no model update
     iterations, no model, no mask.
     """
     _ensure_ps_store()
 
     image_store = (
-        "twhya_selfcal_5chans_lsrk_nmajor0_astroviper_"
+        "twhya_selfcal_5chans_lsrk_max_cycles0_astroviper_"
         f"t{processing_function_threads}.img.zarr"
     )
     imaging_dict, img_av_xds, _ = _run_image_cube(
-        "nmajor0",
+        "max_cycles0",
         image_store,
         processing_function_threads=processing_function_threads,
         n_mapping_parallelism=5,
@@ -1085,12 +1085,12 @@ def test_single_field_imaging_nmajor0(plot_saver, processing_function_threads):
     for key, fields in deconv.data.items():
         assert fields["iter_done"] == [0], (
             f"plane {key}: iter_done {fields['iter_done']} != [0] -- a "
-            "deconvolution ran despite nmajor=0"
+            "deconvolution ran despite max_cycles=0"
         )
         assert fields["stop_code"] == (
-            MAJOR_CYCLE_LIMIT,
+            IMAGING_MAX_CYCLES,
             0,
-        ), f"plane {key}: stop_code {fields['stop_code']} != ({MAJOR_CYCLE_LIMIT}, 0)"
+        ), f"plane {key}: stop_code {fields['stop_code']} != ({IMAGING_MAX_CYCLES}, 0)"
         # No MASK exists (it's made during the model update, which never
         # ran), so this is the full-pixel-count fallback, not a real mask sum.
         assert fields["masksum"] == [expected_masksum], (
@@ -1139,11 +1139,13 @@ def test_single_field_imaging_multi_cycle(
     )
     multi_cycle_params = _CONFIGS["multi_cycle"]["iteration_control_params"]
     for fields in imaging_dict["deconvolution"].data.values():
-        psf_fraction = fields["max_psf_sidelobe"] * multi_cycle_params["cycle_factor"]
+        psf_fraction = (
+            fields["max_psf_sidelobe"] * multi_cycle_params["psf_sidelobe_factor"]
+        )
         assert psf_fraction < multi_cycle_params["max_psf_fraction"], (
             f"psf_fraction {psf_fraction} >= max_psf_fraction "
             f"{multi_cycle_params['max_psf_fraction']}: this config no longer "
-            "exercises a non-saturating cycle_threshold"
+            "exercises a non-saturating threshold_per_cycle"
         )
     truth_xds = xr.open_zarr(truth_image)
 
@@ -1181,7 +1183,7 @@ def test_single_field_imaging_multi_cycle(
 
     print(imaging_dict["timing_node_tasks"].T)
     print(imaging_dict["timing_node_tasks"]["T_deconvolve"])
-    print(imaging_dict["timing_node_tasks"]["T_residual_cycle"])
+    print(imaging_dict["timing_node_tasks"]["T_residual_update"])
     print(imaging_dict["timing_node_tasks"]["T_image_cube_task"])
 
 
@@ -1283,7 +1285,7 @@ def _regenerate_truth_images():
 # Expected per-plane deconvolution ImagingDicts.
 #
 # Keyed by ``(time, pol, chan)`` with each history list holding one entry per
-# major cycle; checked by ``_check_imaging_dict``. Within a precision they
+# imaging cycle; checked by ``_check_imaging_dict``. Within a precision they
 # are independent of thread count and chunking (iteration control is computed
 # per (time, frequency, polarization) plane). Only the double-precision
 # multi_cycle is pinned to a literal: the single-precision deep CLEAN is chaotic
@@ -1292,14 +1294,14 @@ def _regenerate_truth_images():
 # iteration-control behaviour intentionally changes.
 # ---------------------------------------------------------------------------
 
-# niter_per_plane=100, nmajor=1, threshold=0.001: deconvolves to the iteration limit
+# max_iter=100, max_cycles=1, threshold=0.001: deconvolves to the iteration limit
 # (the threshold is not reached) -> stop_code (1, 0).
 EXPECTED_DECONVOLVE_DICT_NITER100 = {
     (0, 0, 0): {
-        "niter_per_plane": 100,
-        "cycle_threshold": 0.07150153976733978,
+        "max_iter": 100,
+        "threshold_per_cycle": 0.07150153976733978,
         "iter_done": [100],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.3445475295671201,
@@ -1314,13 +1316,13 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "peakres": [-0.08899075577822424],
         "peakres_nomask": [-0.11071206252751019],
         "masksum": [59771],
-        "stop_description": "Reached the iteration limit",
+        "stop_description": "Reached max_iter",
     },
     (0, 1, 0): {
-        "niter_per_plane": 100,
-        "cycle_threshold": 0.02411013766384864,
+        "max_iter": 100,
+        "threshold_per_cycle": 0.02411013766384864,
         "iter_done": [100],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.3445475295671201,
@@ -1335,13 +1337,13 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "peakres": [0.07430471569361485],
         "peakres_nomask": [0.08951620816899497],
         "masksum": [59771],
-        "stop_description": "Reached the iteration limit",
+        "stop_description": "Reached max_iter",
     },
     (0, 0, 1): {
-        "niter_per_plane": 100,
-        "cycle_threshold": 0.06702149738034051,
+        "max_iter": 100,
+        "threshold_per_cycle": 0.06702149738034051,
         "iter_done": [100],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.344533866326935,
@@ -1356,13 +1358,13 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "peakres": [0.09003297370692762],
         "peakres_nomask": [0.09003297370692762],
         "masksum": [59771],
-        "stop_description": "Reached the iteration limit",
+        "stop_description": "Reached max_iter",
     },
     (0, 1, 1): {
-        "niter_per_plane": 100,
-        "cycle_threshold": 0.023650679328660947,
+        "max_iter": 100,
+        "threshold_per_cycle": 0.023650679328660947,
         "iter_done": [100],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.344533866326935,
@@ -1377,13 +1379,13 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "peakres": [0.07750591941443867],
         "peakres_nomask": [-0.08463490573442017],
         "masksum": [59771],
-        "stop_description": "Reached the iteration limit",
+        "stop_description": "Reached max_iter",
     },
     (0, 0, 2): {
-        "niter_per_plane": 100,
-        "cycle_threshold": 0.06760407555338792,
+        "max_iter": 100,
+        "threshold_per_cycle": 0.06760407555338792,
         "iter_done": [100],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.34448079976471313,
@@ -1398,13 +1400,13 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "peakres": [0.08979484245919653],
         "peakres_nomask": [0.08979484245919653],
         "masksum": [59771],
-        "stop_description": "Reached the iteration limit",
+        "stop_description": "Reached max_iter",
     },
     (0, 1, 2): {
-        "niter_per_plane": 100,
-        "cycle_threshold": 0.026022828091252573,
+        "max_iter": 100,
+        "threshold_per_cycle": 0.026022828091252573,
         "iter_done": [100],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.34448079976471313,
@@ -1419,13 +1421,13 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "peakres": [-0.07639895031706921],
         "peakres_nomask": [-0.08528560955343739],
         "masksum": [59771],
-        "stop_description": "Reached the iteration limit",
+        "stop_description": "Reached max_iter",
     },
     (0, 0, 3): {
-        "niter_per_plane": 100,
-        "cycle_threshold": 0.06500307769405649,
+        "max_iter": 100,
+        "threshold_per_cycle": 0.06500307769405649,
         "iter_done": [100],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.34447908250868625,
@@ -1440,13 +1442,13 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "peakres": [0.09214764521763133],
         "peakres_nomask": [0.09214764521763133],
         "masksum": [59771],
-        "stop_description": "Reached the iteration limit",
+        "stop_description": "Reached max_iter",
     },
     (0, 1, 3): {
-        "niter_per_plane": 100,
-        "cycle_threshold": 0.026551682660084775,
+        "max_iter": 100,
+        "threshold_per_cycle": 0.026551682660084775,
         "iter_done": [100],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.34447908250868625,
@@ -1461,13 +1463,13 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "peakres": [0.07901175475017379],
         "peakres_nomask": [0.08541584586642978],
         "masksum": [59771],
-        "stop_description": "Reached the iteration limit",
+        "stop_description": "Reached max_iter",
     },
     (0, 0, 4): {
-        "niter_per_plane": 100,
-        "cycle_threshold": 0.07066916383960643,
+        "max_iter": 100,
+        "threshold_per_cycle": 0.07066916383960643,
         "iter_done": [100],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.3444778231912157,
@@ -1482,13 +1484,13 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "peakres": [0.08930366061252694],
         "peakres_nomask": [0.09027342549634497],
         "masksum": [59771],
-        "stop_description": "Reached the iteration limit",
+        "stop_description": "Reached max_iter",
     },
     (0, 1, 4): {
-        "niter_per_plane": 100,
-        "cycle_threshold": 0.02211009245788454,
+        "max_iter": 100,
+        "threshold_per_cycle": 0.02211009245788454,
         "iter_done": [100],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.3444778231912157,
@@ -1503,19 +1505,19 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "peakres": [0.07635328920165872],
         "peakres_nomask": [-0.09901618422777503],
         "masksum": [59771],
-        "stop_description": "Reached the iteration limit",
+        "stop_description": "Reached max_iter",
     },
 }
 
 
-# niter_per_plane=10000, nmajor=4, threshold=0.001: deconvolves to the major-cycle limit
+# max_iter=10000, max_cycles=4, threshold=0.001: deconvolves to the imaging cycle limit
 # (the threshold is not reached) -> stop_code (9, 0).
 EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
     (0, 0, 0): {
-        "niter_per_plane": 10000,
-        "cycle_threshold": 0.024252558701240663,
+        "max_iter": 10000,
+        "threshold_per_cycle": 0.024252558701240663,
         "iter_done": [11, 76, 1023, 1924],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.3445475295671201,
@@ -1560,13 +1562,13 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             -0.0800230402190666,
         ],
         "masksum": [59771, 59771, 59771, 59771],
-        "stop_description": "Reached the major cycle limit (nmajor)",
+        "stop_description": "Reached max_cycles",
     },
     (0, 1, 0): {
-        "niter_per_plane": 10000,
-        "cycle_threshold": 0.008589264535699869,
+        "max_iter": 10000,
+        "threshold_per_cycle": 0.008589264535699869,
         "iter_done": [277, 1766, 2570, 5387],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.3445475295671201,
@@ -1611,13 +1613,13 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             -0.04422576792256286,
         ],
         "masksum": [59771, 59771, 59771, 59771],
-        "stop_description": "Reached the iteration limit",
+        "stop_description": "Reached max_iter",
     },
     (0, 0, 1): {
-        "niter_per_plane": 10000,
-        "cycle_threshold": 0.023107796093263362,
+        "max_iter": 10000,
+        "threshold_per_cycle": 0.023107796093263362,
         "iter_done": [10, 107, 1102, 1883],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.3445338663269349,
@@ -1662,13 +1664,13 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             -0.0514892150815555,
         ],
         "masksum": [59771, 59771, 59771, 59771],
-        "stop_description": "Reached the major cycle limit (nmajor)",
+        "stop_description": "Reached max_cycles",
     },
     (0, 1, 1): {
-        "niter_per_plane": 10000,
-        "cycle_threshold": 0.00842783921957595,
+        "max_iter": 10000,
+        "threshold_per_cycle": 0.00842783921957595,
         "iter_done": [374, 1816, 2422, 5388],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.3445338663269349,
@@ -1713,13 +1715,13 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             -0.04517774494592515,
         ],
         "masksum": [59771, 59771, 59771, 59771],
-        "stop_description": "Reached the iteration limit",
+        "stop_description": "Reached max_iter",
     },
     (0, 0, 2): {
-        "niter_per_plane": 10000,
-        "cycle_threshold": 0.02362857453720095,
+        "max_iter": 10000,
+        "threshold_per_cycle": 0.02362857453720095,
         "iter_done": [11, 93, 1005, 1936],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.34448079976471313,
@@ -1764,13 +1766,13 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             0.06078800869531658,
         ],
         "masksum": [59771, 59771, 59771, 59771],
-        "stop_description": "Reached the major cycle limit (nmajor)",
+        "stop_description": "Reached max_cycles",
     },
     (0, 1, 2): {
-        "niter_per_plane": 10000,
-        "cycle_threshold": 0.009246405635083868,
+        "max_iter": 10000,
+        "threshold_per_cycle": 0.009246405635083868,
         "iter_done": [217, 1686, 2238, 5859],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.34448079976471313,
@@ -1815,13 +1817,13 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             -0.042893374343737196,
         ],
         "masksum": [59771, 59771, 59771, 59771],
-        "stop_description": "Reached the iteration limit",
+        "stop_description": "Reached max_iter",
     },
     (0, 0, 3): {
-        "niter_per_plane": 10000,
-        "cycle_threshold": 0.022948435015752187,
+        "max_iter": 10000,
+        "threshold_per_cycle": 0.022948435015752187,
         "iter_done": [12, 124, 1210, 1876],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.34447908250868625,
@@ -1866,13 +1868,13 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             0.05669052146185564,
         ],
         "masksum": [59771, 59771, 59771, 59771],
-        "stop_description": "Reached the major cycle limit (nmajor)",
+        "stop_description": "Reached max_cycles",
     },
     (0, 1, 3): {
-        "niter_per_plane": 10000,
-        "cycle_threshold": 0.009450491017105673,
+        "max_iter": 10000,
+        "threshold_per_cycle": 0.009450491017105673,
         "iter_done": [245, 1642, 2219, 5894],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.34447908250868625,
@@ -1917,13 +1919,13 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             -0.03751927588056708,
         ],
         "masksum": [59771, 59771, 59771, 59771],
-        "stop_description": "Reached the iteration limit",
+        "stop_description": "Reached max_iter",
     },
     (0, 0, 4): {
-        "niter_per_plane": 10000,
-        "cycle_threshold": 0.024727279444843833,
+        "max_iter": 10000,
+        "threshold_per_cycle": 0.024727279444843833,
         "iter_done": [9, 79, 921, 1929],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.3444778231912157,
@@ -1968,13 +1970,13 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             0.06586690554646417,
         ],
         "masksum": [59771, 59771, 59771, 59771],
-        "stop_description": "Reached the major cycle limit (nmajor)",
+        "stop_description": "Reached max_cycles",
     },
     (0, 1, 4): {
-        "niter_per_plane": 10000,
-        "cycle_threshold": 0.007869158275764936,
+        "max_iter": 10000,
+        "threshold_per_cycle": 0.007869158275764936,
         "iter_done": [491, 1841, 2478, 5190],
-        "loop_gain": 0.1,
+        "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.3444778231912157,
@@ -2019,7 +2021,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
             -0.03440740388649981,
         ],
         "masksum": [59771, 59771, 59771, 59771],
-        "stop_description": "Reached the iteration limit",
+        "stop_description": "Reached max_iter",
     },
 }
 

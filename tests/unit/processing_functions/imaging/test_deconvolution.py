@@ -178,8 +178,8 @@ class TestValidateDeconvolveParams:
     def test_none_returns_defaults(self):
         result = _validate_deconvolve_params(None)
         assert result == {
-            "loop_gain": 0.1,
-            "niter_per_plane": 1000,
+            "gain": 0.1,
+            "max_iter": 1000,
             "threshold": 0.0,
             "primary_beam_limit": 0.0,
             "clean_box": (-1, -1, -1, -1),
@@ -189,8 +189,8 @@ class TestValidateDeconvolveParams:
 
     def test_empty_dict_returns_defaults(self):
         assert _validate_deconvolve_params({}) == {
-            "loop_gain": 0.1,
-            "niter_per_plane": 1000,
+            "gain": 0.1,
+            "max_iter": 1000,
             "threshold": 0.0,
             "primary_beam_limit": 0.0,
             "clean_box": (-1, -1, -1, -1),
@@ -199,9 +199,9 @@ class TestValidateDeconvolveParams:
         }
 
     def test_partial_params_filled(self):
-        result = _validate_deconvolve_params({"loop_gain": 0.05})
-        assert result["loop_gain"] == 0.05
-        assert result["niter_per_plane"] == 1000
+        result = _validate_deconvolve_params({"gain": 0.05})
+        assert result["gain"] == 0.05
+        assert result["max_iter"] == 1000
         assert result["threshold"] == 0.0
         assert result["clean_box"] == (-1, -1, -1, -1)
         assert result["min_psf_fraction"] == 0.05
@@ -209,8 +209,8 @@ class TestValidateDeconvolveParams:
 
     def test_full_valid_params_preserved(self):
         params = {
-            "loop_gain": 0.3,
-            "niter_per_plane": 42,
+            "gain": 0.3,
+            "max_iter": 42,
             "threshold": 1e-6,
             "clean_box": (1, 2, 3, 4),
             "min_psf_fraction": 0.1,
@@ -219,25 +219,25 @@ class TestValidateDeconvolveParams:
         result = _validate_deconvolve_params(params)
         assert result == params
 
-    @pytest.mark.parametrize("loop_gain", [0.01, 0.1, 0.5, 1.0])
-    def test_gain_accepts_valid(self, loop_gain):
-        result = _validate_deconvolve_params({"loop_gain": loop_gain})
-        assert result["loop_gain"] == loop_gain
+    @pytest.mark.parametrize("gain", [0.01, 0.1, 0.5, 1.0])
+    def test_gain_accepts_valid(self, gain):
+        result = _validate_deconvolve_params({"gain": gain})
+        assert result["gain"] == gain
 
-    @pytest.mark.parametrize("loop_gain", [0.0, -0.1, 1.1, 2.0])
-    def test_gain_rejects_invalid(self, loop_gain):
-        with pytest.raises(ValueError, match="CLEAN loop_gain"):
-            _validate_deconvolve_params({"loop_gain": loop_gain})
+    @pytest.mark.parametrize("gain", [0.0, -0.1, 1.1, 2.0])
+    def test_gain_rejects_invalid(self, gain):
+        with pytest.raises(ValueError, match="CLEAN gain"):
+            _validate_deconvolve_params({"gain": gain})
 
-    @pytest.mark.parametrize("niter_per_plane", [1, 100, 1000])
-    def test_niter_accepts_valid(self, niter_per_plane):
-        result = _validate_deconvolve_params({"niter_per_plane": niter_per_plane})
-        assert result["niter_per_plane"] == niter_per_plane
+    @pytest.mark.parametrize("max_iter", [1, 100, 1000])
+    def test_niter_accepts_valid(self, max_iter):
+        result = _validate_deconvolve_params({"max_iter": max_iter})
+        assert result["max_iter"] == max_iter
 
-    @pytest.mark.parametrize("niter_per_plane", [0, -1, 1.5, "100", None])
-    def test_niter_rejects_invalid(self, niter_per_plane):
+    @pytest.mark.parametrize("max_iter", [0, -1, 1.5, "100", None])
+    def test_niter_rejects_invalid(self, max_iter):
         with pytest.raises(ValueError, match="positive integer"):
-            _validate_deconvolve_params({"niter_per_plane": niter_per_plane})
+            _validate_deconvolve_params({"max_iter": max_iter})
 
     @pytest.mark.parametrize("threshold", [None, 0.0, 1e-6, 1.0])
     def test_threshold_accepts_valid(self, threshold):
@@ -265,7 +265,7 @@ class TestValidateDeconvolveParams:
             _validate_deconvolve_params({"clean_box": box})
 
     def test_does_not_mutate_other_keys(self):
-        params = {"loop_gain": 0.2, "extra": "ignored"}
+        params = {"gain": 0.2, "extra": "ignored"}
         result = _validate_deconvolve_params(params)
         assert result["extra"] == "ignored"
 
@@ -350,8 +350,8 @@ class TestHogbomCleanCube:
             psf_cube=psf,
             model_cube=model,
             deconvolve_params={
-                "loop_gain": 1.0,
-                "niter_per_plane": 10,
+                "gain": 1.0,
+                "max_iter": 10,
                 "threshold": 0.1,
             },
         )
@@ -372,7 +372,7 @@ class TestHogbomCleanCube:
             resid_a,
             psf,
             model_a,
-            {"loop_gain": 0.2, "niter_per_plane": 20, "threshold": 0.05},
+            {"gain": 0.2, "max_iter": 20, "threshold": 0.05},
             processing_function_threads=1,
         )
 
@@ -382,7 +382,7 @@ class TestHogbomCleanCube:
             resid_b,
             psf,
             model_b,
-            {"loop_gain": 0.2, "niter_per_plane": 20, "threshold": 0.05},
+            {"gain": 0.2, "max_iter": 20, "threshold": 0.05},
             processing_function_threads=4,
         )
 
@@ -401,7 +401,7 @@ class TestHogbomCleanCube:
             resid,
             psf,
             model,
-            {"loop_gain": 1.0, "niter_per_plane": 5, "threshold": 0.1},
+            {"gain": 1.0, "max_iter": 5, "threshold": 0.1},
         )
 
         for p in range(npol):
@@ -424,7 +424,7 @@ class TestHogbomCleanCube:
             resid,
             psf,
             model,
-            {"loop_gain": 1.0, "niter_per_plane": 5, "threshold": 0.1},
+            {"gain": 1.0, "max_iter": 5, "threshold": 0.1},
             mask_cube=mask,
         )
 
@@ -479,8 +479,8 @@ class TestDeconvolve:
         imaging_dict = deconvolve(
             img_xds=xds,
             deconvolve_params={
-                "loop_gain": 1.0,
-                "niter_per_plane": 5,
+                "gain": 1.0,
+                "max_iter": 5,
                 "threshold": 0.05,
             },
         )
@@ -490,9 +490,9 @@ class TestDeconvolve:
         entry = list(imaging_dict.data.values())[0]
         for field in (
             "iter_done",
-            "niter_per_plane",
-            "cycle_threshold",
-            "loop_gain",
+            "max_iter",
+            "threshold_per_cycle",
+            "gain",
             "peakres",
             "peakres_nomask",
             "masksum",
@@ -518,8 +518,8 @@ class TestDeconvolve:
         imaging_dict = deconvolve(
             img_xds=xds,
             deconvolve_params={
-                "loop_gain": 1.0,
-                "niter_per_plane": 5,
+                "gain": 1.0,
+                "max_iter": 5,
                 "threshold": 0.05,
             },
         )
@@ -535,8 +535,8 @@ class TestDeconvolve:
         imaging_dict = deconvolve(
             img_xds=xds,
             deconvolve_params={
-                "loop_gain": 1.0,
-                "niter_per_plane": 5,
+                "gain": 1.0,
+                "max_iter": 5,
                 "threshold": 0.05,
             },
         )
@@ -588,8 +588,8 @@ class TestDeconvolve:
         deconvolve(
             img_xds=xds_a,
             deconvolve_params={
-                "loop_gain": 0.2,
-                "niter_per_plane": 10,
+                "gain": 0.2,
+                "max_iter": 10,
                 "threshold": 0.05,
             },
             processing_function_threads=1,
@@ -597,8 +597,8 @@ class TestDeconvolve:
         deconvolve(
             img_xds=xds_b,
             deconvolve_params={
-                "loop_gain": 0.2,
-                "niter_per_plane": 10,
+                "gain": 0.2,
+                "max_iter": 10,
                 "threshold": 0.05,
             },
             processing_function_threads=4,
@@ -612,8 +612,8 @@ class TestDeconvolve:
         imaging_dict = deconvolve(
             img_xds=xds,
             deconvolve_params={
-                "loop_gain": 0.5,
-                "niter_per_plane": 20,
+                "gain": 0.5,
+                "max_iter": 20,
                 "threshold": 0.001,
             },
         )
@@ -638,7 +638,7 @@ class TestDeconvolve:
             if isinstance(entry["iter_done"], list)
             else entry["iter_done"]
         )
-        assert 0 <= iter_done <= entry["niter_per_plane"]
+        assert 0 <= iter_done <= entry["max_iter"]
 
     def test_deconvolve_with_mask(self):
         xds = _make_img_xds(nt=1, nf=1, npol=1, with_mask=True)
@@ -648,8 +648,8 @@ class TestDeconvolve:
         imaging_dict = deconvolve(
             img_xds=xds,
             deconvolve_params={
-                "loop_gain": 1.0,
-                "niter_per_plane": 5,
+                "gain": 1.0,
+                "max_iter": 5,
                 "threshold": 0.05,
             },
         )
@@ -688,8 +688,8 @@ class TestAspClean:
             psf_cube=psf,
             model_cube=model,
             deconvolve_params={
-                "loop_gain": 0.5,
-                "niter_per_plane": 50,
+                "gain": 0.5,
+                "max_iter": 50,
                 "threshold": 0.01,
                 "fusedthreshold": 0.5,
                 "psf_width": 1.0,
@@ -717,8 +717,8 @@ class TestAspClean:
             psf_cube=psf,
             model_cube=model,
             deconvolve_params={
-                "loop_gain": 0.1,
-                "niter_per_plane": 200,
+                "gain": 0.1,
+                "max_iter": 200,
                 "threshold": 0.01,
                 "fusedthreshold": 0.1,
             },
@@ -746,8 +746,8 @@ class TestAspClean:
             psf,
             ma,
             {
-                "loop_gain": 0.2,
-                "niter_per_plane": 40,
+                "gain": 0.2,
+                "max_iter": 40,
                 "threshold": 0.05,
                 "fusedthreshold": 0.1,
             },
@@ -759,8 +759,8 @@ class TestAspClean:
             psf,
             mb,
             {
-                "loop_gain": 0.2,
-                "niter_per_plane": 40,
+                "gain": 0.2,
+                "max_iter": 40,
                 "threshold": 0.05,
                 "fusedthreshold": 0.1,
             },
@@ -782,8 +782,8 @@ class TestAspClean:
             psf,
             model,
             {
-                "loop_gain": 0.5,
-                "niter_per_plane": 40,
+                "gain": 0.5,
+                "max_iter": 40,
                 "threshold": 0.01,
                 "fusedthreshold": 0.5,
                 "psf_width": 1.0,
@@ -812,8 +812,8 @@ class TestAspClean:
             psf,
             model,
             {
-                "loop_gain": 0.5,
-                "niter_per_plane": 60,
+                "gain": 0.5,
+                "max_iter": 60,
                 "threshold": 0.01,
                 "fusedthreshold": 0.5,
                 "psf_width": 1.0,
@@ -864,8 +864,8 @@ class TestDeconvolveAsp:
             img_xds=xds,
             algorithm="asp",
             deconvolve_params={
-                "loop_gain": 0.5,
-                "niter_per_plane": 50,
+                "gain": 0.5,
+                "max_iter": 50,
                 "threshold": 0.01,
                 "fusedthreshold": 0.5,
                 "psf_width": 1.0,
@@ -884,7 +884,7 @@ class TestDeconvolveAsp:
             img_xds=xds,
             algorithm=alias,
             deconvolve_params={
-                "niter_per_plane": 10,
+                "max_iter": 10,
                 "psf_width": 1.0,
                 "fusedthreshold": 0.5,
             },
@@ -898,8 +898,8 @@ class TestDeconvolveAsp:
             img_xds=xds,
             algorithm="asp",
             deconvolve_params={
-                "loop_gain": 0.5,
-                "niter_per_plane": 30,
+                "gain": 0.5,
+                "max_iter": 30,
                 "threshold": 0.01,
                 "fusedthreshold": 0.5,
                 "psf_width": 1.0,

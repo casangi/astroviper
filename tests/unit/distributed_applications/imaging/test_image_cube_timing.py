@@ -40,7 +40,7 @@ def _make_chunk_result(task_id, t_load, t_deconvolve, t_total, chan):
             {
                 "task_id": task_id,
                 "n_channels": 1,
-                "n_major_cycles": 2,
+                "n_cycles": 2,
                 "T_load": t_load,
                 "T_deconvolve": t_deconvolve,
                 IMAGING_TIMING_TOTAL_KEY: t_total,
@@ -147,7 +147,7 @@ def test_format_timing_summary_skips_string_metadata_columns():
             {
                 "task_id": 0,
                 "n_channels": 1,
-                "n_major_cycles": 2,
+                "n_cycles": 2,
                 "T_load": 1.0,
                 "T_deconvolve": 2.0,
                 IMAGING_TIMING_TOTAL_KEY: 4.0,

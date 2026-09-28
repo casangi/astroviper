@@ -403,14 +403,17 @@ per-variable nodes.
     `imsize`).
   - **Classes**: `CamelCase` (`IterationController`, `ReturnDict`).
   - **Consistency**: Parameter names should be consistent throughout the stack.
-  - **CLEAN terminology**: say **residual update cycle** and **model update
-    cycle** (not CASA's "major cycle" / "minor cycle") in code, docstrings, and
-    docs — matching `residual_cycle_cube_single_field` /
-    `model_update_cycle_cube_single_field`. A one-time "(CASA's major/minor
-    cycle)" parenthetical for orientation is fine.
+  - **CLEAN terminology**: an **imaging cycle** (or simply *cycle*) is one
+    **residual update** followed by one **model update**; use exactly these
+    three terms in code, docstrings, docs and notebooks, matching
+    `residual_update_cube_single_field` / `model_update_cube_single_field`
+    and the `max_cycles` / `max_iter_per_cycle` / `threshold_per_cycle`
+    parameters. Never call anything a major or minor cycle (major/minor axis
+    of a Gaussian beam is fine). CASA parameter names may be cited in brackets
+    for orientation, e.g. `max_cycles` [CASA `nmajor`].
 - **Formatting**: **Ruff** (enforced by CI + pre-commit). Don't hand-format.
 - **Imports**: prefer **absolute** imports (`from
-  astroviper.processing_functions.imaging.residual_cycle import ...`). Relative
+  astroviper.processing_functions.imaging.residual_update import ...`). Relative
   imports appear only as short re-exports in `__init__.py` files. Heavy/optional
   deps (dask, zarr, matplotlib, the C++ ext, even numpy in some hot node-task
   paths) are frequently imported **inside functions** to keep worker import time

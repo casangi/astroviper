@@ -78,7 +78,7 @@ class TestBasicCorrectness:
             model=model,
             gain=1.0,
             threshold=0.1,
-            max_iter=10,
+            max_iter_remaining=10,
         )
 
         assert result["iterations_performed"] >= 1
@@ -102,7 +102,7 @@ class TestBasicCorrectness:
             model=model,
             gain=1.0,
             threshold=0.1,
-            max_iter=50,
+            max_iter_remaining=50,
         )
 
         for iy, ix, amp in sources:
@@ -124,7 +124,7 @@ class TestBasicCorrectness:
             model=model,
             gain=0.1,
             threshold=0.0,
-            max_iter=1,
+            max_iter_remaining=1,
         )
 
         assert result["iterations_performed"] == 1
@@ -156,7 +156,7 @@ class TestInPlaceContract:
             model=model,
             gain=1.0,
             threshold=0.1,
-            max_iter=5,
+            max_iter_remaining=5,
         )
 
         assert dirty.__array_interface__["data"][0] == ptr_before
@@ -179,7 +179,7 @@ class TestInPlaceContract:
             model=model,
             gain=1.0,
             threshold=0.1,
-            max_iter=5,
+            max_iter_remaining=5,
         )
 
         assert model.__array_interface__["data"][0] == ptr_before
@@ -201,7 +201,7 @@ class TestInPlaceContract:
             model=model,
             gain=1.0,
             threshold=0.1,
-            max_iter=5,
+            max_iter_remaining=5,
         )
 
         # Prior value is preserved, new component added.
@@ -221,7 +221,7 @@ class TestInPlaceContract:
             model=model,
             gain=1.0,
             threshold=0.1,
-            max_iter=5,
+            max_iter_remaining=5,
         )
 
         assert np.array_equal(psf, psf_before)
@@ -245,7 +245,7 @@ class TestDtypeHandling:
             model=model,
             gain=1.0,
             threshold=0.1,
-            max_iter=5,
+            max_iter_remaining=5,
         )
 
         assert dirty.dtype == np.float64
@@ -345,7 +345,7 @@ class TestIterationControls:
             model=model,
             gain=0.05,
             threshold=0.0,
-            max_iter=7,
+            max_iter_remaining=7,
         )
 
         assert result["iterations_performed"] == 7
@@ -364,7 +364,7 @@ class TestIterationControls:
             model=model,
             gain=1.0,
             threshold=0.01,
-            max_iter=100,
+            max_iter_remaining=100,
         )
 
         assert result["iterations_performed"] <= 5
@@ -387,7 +387,7 @@ class TestIterationControls:
             model=model,
             gain=0.1,
             threshold=0.0,
-            max_iter=20,
+            max_iter_remaining=20,
             progress_callback=cb,
         )
 
@@ -414,7 +414,7 @@ class TestIterationControls:
             model=model,
             gain=0.01,
             threshold=0.0,
-            max_iter=1000,
+            max_iter_remaining=1000,
             stop_callback=stop,
         )
 
@@ -441,7 +441,7 @@ class TestMaskAndCleanBox:
             model=model,
             gain=1.0,
             threshold=0.1,
-            max_iter=10,
+            max_iter_remaining=10,
             clean_box=(15, 25, 15, 25),
         )
 
@@ -470,7 +470,7 @@ class TestMaskAndCleanBox:
             mask=mask,
             gain=1.0,
             threshold=0.1,
-            max_iter=10,
+            max_iter_remaining=10,
         )
 
         # Masked source is untouched; the unmasked one is cleaned.
@@ -513,7 +513,7 @@ class TestImagingDict:
             model=model,
             gain=1.0,
             threshold=0.1,
-            max_iter=5,
+            max_iter_remaining=5,
         )
 
         for key in (
@@ -539,7 +539,7 @@ class TestImagingDict:
             model=model,
             gain=1.0,
             threshold=0.1,
-            max_iter=20,
+            max_iter_remaining=20,
         )
 
         assert result["total_flux_cleaned"] == pytest.approx(
@@ -608,7 +608,7 @@ class TestCubeBasicCorrectness:
             model_cube=model,
             gain=1.0,
             threshold=_plane_threshold(resid, 0.1),
-            max_iter=_plane_iters(resid, 10),
+            max_iter_remaining=_plane_iters(resid, 10),
             processing_function_threads=1,
         )
 
@@ -641,7 +641,7 @@ class TestCubeBasicCorrectness:
             model_cube=model,
             gain=1.0,
             threshold=_plane_threshold(resid, 0.1),
-            max_iter=_plane_iters(resid, 10),
+            max_iter_remaining=_plane_iters(resid, 10),
             processing_function_threads=4,
         )
 
@@ -673,7 +673,7 @@ class TestCubeBasicCorrectness:
             model_cube=model,
             gain=1.0,
             threshold=_plane_threshold(resid, 0.1),
-            max_iter=_plane_iters(resid, 10),
+            max_iter_remaining=_plane_iters(resid, 10),
             processing_function_threads=2,
         )
 
@@ -698,7 +698,7 @@ class TestCubeBasicCorrectness:
             model_cube=model_a,
             gain=0.1,
             threshold=_plane_threshold(resid_a, 0.05),
-            max_iter=_plane_iters(resid_a, 30),
+            max_iter_remaining=_plane_iters(resid_a, 30),
             processing_function_threads=1,
         )
 
@@ -710,7 +710,7 @@ class TestCubeBasicCorrectness:
             model_cube=model_b,
             gain=0.1,
             threshold=_plane_threshold(resid_b, 0.05),
-            max_iter=_plane_iters(resid_b, 30),
+            max_iter_remaining=_plane_iters(resid_b, 30),
             processing_function_threads=4,
         )
 
@@ -738,7 +738,7 @@ class TestCubeBasicCorrectness:
             model_cube=model,
             gain=1.0,
             threshold=_plane_threshold(resid, 0.1),
-            max_iter=_plane_iters(resid, 10),
+            max_iter_remaining=_plane_iters(resid, 10),
             processing_function_threads=2,
         )
 
@@ -774,7 +774,7 @@ class TestCubeInPlaceContract:
             model_cube=model,
             gain=1.0,
             threshold=_plane_threshold(resid, 0.1),
-            max_iter=_plane_iters(resid, 5),
+            max_iter_remaining=_plane_iters(resid, 5),
             processing_function_threads=2,
         )
 
@@ -798,7 +798,7 @@ class TestCubeInPlaceContract:
             model_cube=model,
             gain=1.0,
             threshold=_plane_threshold(resid, 0.1),
-            max_iter=_plane_iters(resid, 5),
+            max_iter_remaining=_plane_iters(resid, 5),
             processing_function_threads=1,
         )
 
@@ -819,7 +819,7 @@ class TestCubeInPlaceContract:
             model_cube=model,
             gain=1.0,
             threshold=_plane_threshold(resid, 0.1),
-            max_iter=_plane_iters(resid, 5),
+            max_iter_remaining=_plane_iters(resid, 5),
             processing_function_threads=1,
         )
 
@@ -932,7 +932,7 @@ class TestCubeMaskAndBox:
             model_cube=model,
             gain=1.0,
             threshold=_plane_threshold(resid, 0.1),
-            max_iter=_plane_iters(resid, 10),
+            max_iter_remaining=_plane_iters(resid, 10),
             clean_box=(15, 25, 15, 25),
             processing_function_threads=1,
         )
@@ -966,7 +966,7 @@ class TestCubeMaskAndBox:
             mask_cube=mask,
             gain=1.0,
             threshold=_plane_threshold(resid, 0.1),
-            max_iter=_plane_iters(resid, 10),
+            max_iter_remaining=_plane_iters(resid, 10),
             processing_function_threads=1,
         )
 
@@ -1001,7 +1001,7 @@ class TestCubeReturnShapes:
             model_cube=model,
             gain=1.0,
             threshold=_plane_threshold(resid, 0.01),
-            max_iter=_plane_iters(resid, 5),
+            max_iter_remaining=_plane_iters(resid, 5),
             processing_function_threads=2,
         )
 
@@ -1028,7 +1028,7 @@ class TestCubeReturnShapes:
             model_cube=model,
             gain=1.0,
             threshold=_plane_threshold(resid, 0.1),
-            max_iter=_plane_iters(resid, 5),
+            max_iter_remaining=_plane_iters(resid, 5),
             processing_function_threads=64,
         )
         assert model[0, 0, 0, 4, 4] == pytest.approx(1.0, abs=1e-6)

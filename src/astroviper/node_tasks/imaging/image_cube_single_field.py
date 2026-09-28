@@ -163,64 +163,74 @@ def image_cube_single_field(
         Weighting scheme configuration: ``weighting`` (``"natural"`` or
         ``"briggs"``) and the Briggs ``robust`` parameter.
     iteration_control_params : dict
-        CLEAN iteration controls. Iteration control is performed
-        **independently per** ``(time, frequency, polarization)`` **plane**: each
-        plane carries its own iteration budget and stopping thresholds, and the
-        residual update cycle loop continues until *every* selected plane has
-        stopped.
+        CLEAN iteration controls. An **imaging cycle** (below simply a cycle)
+        is one **residual update** (degrid the model, form residual
+        visibilities, grid and inverse FFT them into the residual image)
+        followed by one **model update** (deconvolve the residual image into
+        the sky model). Every limit and threshold is applied independently to
+        each ``(time, frequency, polarization)`` plane: a plane stops when it
+        meets its own criterion, and cycles continue until every plane has
+        stopped. The CASA ``tclean`` equivalent is given in brackets. Keys:
 
-        Terminology: a **residual update cycle** recomputes the residual image
-        from the visibilities; a **model update cycle** deconvolves that residual
-        into the sky model (CASA calls these the major and minor cycle).
-
-        Keys, with the CASA ``tclean`` equivalent in brackets:
-
-        - ``niter_per_plane`` [CASA ``niter``] : Maximum number of CLEAN
-          iterations (flux components) for **one plane**, summed over all
-          residual update cycles. A plane stops once it has spent this budget.
-          ``niter_per_plane=0`` makes only the dirty image (no deconvolution).
-          *Differs from CASA*: CASA's ``niter`` is one budget for the whole
-          image; here every plane gets the full value, and no budget is shared
-          or split between planes.
-        - ``nmajor`` [CASA ``nmajor``] : Maximum number of deconvolving residual
-          update cycles. ``nmajor=N`` performs ``N`` deconvolutions -- the dirty
-          image is computed inside the first such cycle, matching CASA -- and
-          ``nmajor=-1`` removes the limit. Shared across planes (not tracked per
-          plane), unlike ``niter_per_plane``.
-        - ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, given
-          as a float in Jy. A plane stops when its peak residual inside the clean
-          mask falls to or below ``threshold``; the value is also a hard floor on
-          ``cycle_threshold`` (below). ``threshold=0`` disables the absolute stop.
-          *Differs from CASA*: a float in Jy only -- no ``'1mJy'`` strings.
-        - ``primary_beam_limit`` [CASA ``pblimit`` / ``pbmask``] : Primary-beam
+        - ``max_iter`` [CASA ``niter``] : Maximum number of deconvolution
+          iterations (flux components) per plane, summed over all cycles. A
+          plane stops once it has spent this budget. ``max_iter = 0`` makes
+          only the dirty image (no deconvolution). *Differs from CASA*: CASA's
+          ``niter`` is one budget for the whole image; here every plane gets
+          the full value, and no budget is shared or split between planes.
+        - ``max_cycles`` [CASA ``nmajor``] : Maximum number of cycles.
+          ``max_cycles = N`` performs ``N`` model updates; the dirty image is
+          made by the residual update of the first cycle, and a closing
+          residual update follows the last model update so that the written
+          residual reflects the final model. ``max_cycles = 0`` makes only the
+          dirty image; ``max_cycles = -1`` removes the limit. Currently shared
+          by all planes of a chunk.
+        - ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, as a
+          float in Jy. A plane stops when its peak residual inside the clean
+          mask falls to or below ``threshold``; the value is also a hard floor
+          on ``threshold_per_cycle``. ``threshold = 0`` disables the absolute
+          stop. *Differs from CASA*: a float in Jy only, no ``'1mJy'`` strings.
+        - ``threshold_sigma`` [CASA ``nsigma``] : Noise based stopping threshold
+          per plane, as a multiple of the plane's robust residual rms
+          (``1.4826 * MAD``). The effective threshold of a plane is
+          ``max(threshold, threshold_sigma * rms)`` and it floors
+          ``threshold_per_cycle`` in the same way. ``0`` disables it. Reserved:
+          accepted but not yet implemented.
+        - ``primary_beam_limit`` [CASA ``pblimit`` / ``pbmask``] : Primary beam
           mask cutoff as a fraction of the peak primary beam, in ``[0, 1]``.
-          Pixels where the primary beam is below this fraction are excluded from
-          cleaning. A masking cutoff, distinct from ``threshold``.
-        - ``loop_gain`` [CASA ``gain``] : CLEAN loop gain -- the fraction of the
-          selected peak flux subtracted from the residual image each iteration
-          (``0 < loop_gain <= 1``).
-        - ``cycle_factor`` [CASA ``cyclefactor``] : Scaling applied to the
-          brightest PSF sidelobe level when setting the model update cycle
-          stopping depth (see ``cycle_threshold`` below). Larger values trigger
-          the next residual update sooner; smaller values clean deeper first.
-        - ``cycle_niter`` [CASA ``cycleniter``] : Maximum number of iterations a
-          plane may run in one model update cycle before a residual update is
-          triggered. ``cycle_niter=-1`` lets the adaptive ``cycle_threshold``
-          govern the depth instead; otherwise the count is clamped to never
-          exceed the plane's remaining ``niter_per_plane``.
+          Pixels where the primary beam is below this fraction are excluded
+          from cleaning. A masking cutoff, distinct from ``threshold``.
+        - ``gain`` [CASA ``gain``] : CLEAN loop gain, the fraction of the
+          selected peak flux subtracted from the residual image at each
+          deconvolution iteration (``0 < gain <= 1``).
+        - ``psf_sidelobe_factor`` [CASA ``cyclefactor``] : Multiplier applied to
+          the measured peak PSF sidelobe level (``max_psf_sidelobe``) when
+          setting how deep one model update cleans (see
+          ``threshold_per_cycle``). Larger values trigger the next residual
+          update sooner; smaller values clean deeper before each residual
+          update.
+        - ``max_iter_per_cycle`` [CASA ``cycleniter``] : Maximum number of
+          deconvolution iterations a plane may run in one cycle's model update
+          before the next residual update is triggered. ``max_iter_per_cycle =
+          -1`` lets the adaptive ``threshold_per_cycle`` govern the depth
+          instead; otherwise the count is clamped to never exceed the plane's
+          remaining ``max_iter``.
         - ``min_psf_fraction`` [CASA ``minpsffraction``] : Lower clamp on the PSF
-          fraction used to set ``cycle_threshold = clamp(max_psf_sidelobe *
-          cycle_factor, min_psf_fraction, max_psf_fraction) * peak_residual`` (then
-          floored at ``threshold``). Raising it limits how deep one model update
-          cycle cleans.
-        - ``max_psf_fraction`` [CASA ``maxpsffraction``] : Upper clamp on that same
-          PSF fraction; it guarantees a minimum amount of cleaning per model
-          update cycle even when the PSF sidelobe level is high.
+          fraction defined below. Raising it limits how deep a single model
+          update cleans.
+        - ``max_psf_fraction`` [CASA ``maxpsffraction``] : Upper clamp on the
+          same PSF fraction; it guarantees a minimum amount of cleaning per
+          model update even when the PSF sidelobe level is high.
 
-        Two derived quantities appear in the deconvolution parameter dict and are
-        computed, not set by the caller: ``cycle_niter_cap``
-        (``min(cycle_niter, remaining niter_per_plane)``) and its per-plane array
-        ``cycle_niter_cap_pp``, alongside ``cycle_threshold_pp``.
+        Derived per plane before each model update (not set by the caller):
+        ``psf_fraction = clamp(max_psf_sidelobe * psf_sidelobe_factor,
+        min_psf_fraction, max_psf_fraction)`` is the fraction of the current
+        peak residual down to which one model update cleans, and
+        ``threshold_per_cycle = max(psf_fraction * peak_residual, threshold)``
+        is the stopping threshold of that model update, where
+        ``peak_residual`` is the plane's peak residual inside the mask at the
+        start of the cycle. The deconvolver also receives the per-plane
+        ``max_iter_per_cycle``, ``min(max_iter_per_cycle, remaining max_iter)``.
     task_coords : dict
         Per-chunk coordinate mapping; ``task_coords[<parallel dim>]`` supplies
         this chunk's parallel coordinate values (``"data"``) and its
@@ -238,7 +248,7 @@ def image_cube_single_field(
     processing_set_data_group_name : str, optional
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     deconvolver : str, optional
-        Deconvolution algorithm for the minor cycle. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
+        Deconvolution algorithm for the model update. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
         (C++, threaded across *and* within planes -- faster when there are
         few planes, e.g. single-channel imaging) or ``"asp"``.
     instrument_polarization_basis : str, optional
@@ -247,8 +257,8 @@ def image_cube_single_field(
         output image is always produced in the Stokes basis.
     single_precision_image : bool, optional
         If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
-        images) are single precision (``complex64`` / ``float32``) and the minor
-        cycle runs in single precision; the visibilities always stay double
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
         precision. If ``False`` the image-domain arrays are double precision.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
@@ -306,7 +316,7 @@ def image_cube_single_field(
           ``T_*`` column per processing function (load, image build, weights,
           PSF, primary beam, gridding, FFT normalization, degridding,
           deconvolution, write, ...) plus ``task_id``, ``n_channels``,
-          ``n_major_cycles`` and the total ``T_image_cube_task``.
+          ``n_cycles`` and the total ``T_image_cube_task``.
         * ``"deconvolution"`` : the per-plane deconvolution
           :class:`~astroviper.processing_functions.imaging.utils.imaging_dict.ImagingDict`,
           with channels remapped to global channel numbers.
@@ -319,7 +329,7 @@ def image_cube_single_field(
           ``max``, ``min``, ``peak``, ``sum``, ``rms``, ``std``, ``mad_sigma``,
           ``n_pixels`` and their ``_masked`` twins restricted to the clean
           mask, or to ``PRIMARY_BEAM > primary_beam_limit`` when no mask
-          exists, e.g. ``niter_per_plane=0``); see
+          exists, e.g. ``max_iter=0``); see
           :func:`~astroviper.processing_functions.image_analysis.plane_statistics.calculate_plane_statistics`.
           The reduce concatenates the chunks along ``frequency``.
     """
@@ -466,7 +476,7 @@ def image_cube_single_field(
 
     image_statistics = calculate_plane_statistics(
         img_xds,
-        # Masked statistics use the clean MASK when present; a niter_per_plane=0 run has
+        # Masked statistics use the clean MASK when present; a max_iter=0 run has
         # none, so the fallback mask PRIMARY_BEAM > primary_beam_limit (the
         # same valid-sky cutoff the deconvolver would use) applies.
         primary_beam_limit=iteration_control_params.get("primary_beam_limit", 0.2),

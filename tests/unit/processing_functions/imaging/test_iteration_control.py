@@ -5,11 +5,11 @@ Tests cover:
 - ImagingDict core functionality (initialization, add, sel, to_dict, repr)
 - ImagingDict utility functions (merge, extraction)
 - IterationController initialization and parameter validation
-- Adaptive cycle_threshold calculation
+- Adaptive threshold_per_cycle calculation
 - Convergence checking with all stop codes
 - Count updates and state management
 - Threshold string parsing
-- Full major cycle workflows
+- Full imaging cycle workflows
 """
 
 import unittest
@@ -24,12 +24,12 @@ from astroviper.processing_functions.imaging.utils.imaging_dict import (
     Key,
 )
 from astroviper.processing_functions.imaging.utils.iteration_control import (  # Stop codes; Utility functions; Main class
-    MAJOR_CONTINUE,
-    MAJOR_CYCLE_LIMIT,
-    MAJOR_ITER_LIMIT,
-    MAJOR_THRESHOLD,
-    MAJOR_ZERO_MASK,
-    MINOR_CONTINUE,
+    IMAGING_CONTINUE,
+    IMAGING_MAX_CYCLES,
+    IMAGING_MAX_ITER,
+    IMAGING_THRESHOLD,
+    IMAGING_ZERO_MASK,
+    MODEL_UPDATE_CONTINUE,
     IterationController,
     StopCode,
     build_residual_imaging_dict,
@@ -154,15 +154,15 @@ class TestImagingDictAdd(unittest.TestCase):
     def test_add_first_entry_field_single_value(self):
         """Test adding first entry with FIELD_SINGLE_VALUE fields."""
         rd = ImagingDict()
-        rd.add({"max_psf_sidelobe": 0.2, "loop_gain": 0.1}, time=0, pol=0, chan=0)
+        rd.add({"max_psf_sidelobe": 0.2, "gain": 0.1}, time=0, pol=0, chan=0)
 
         entry = rd.sel(time=0, pol=0, chan=0)
 
         # FIELD_SINGLE_VALUE fields should be stored as scalars
         self.assertEqual(entry["max_psf_sidelobe"], 0.2)
-        self.assertEqual(entry["loop_gain"], 0.1)
+        self.assertEqual(entry["gain"], 0.1)
         self.assertNotIsInstance(entry["max_psf_sidelobe"], list)
-        self.assertNotIsInstance(entry["loop_gain"], list)
+        self.assertNotIsInstance(entry["gain"], list)
 
     def test_add_first_entry_mixed_fields(self):
         """Test adding first entry with both FIELD_ACCUM and FIELD_SINGLE_VALUE."""
@@ -416,8 +416,8 @@ class TestImagingDictFieldClassification(unittest.TestCase):
         """Test FIELD_SINGLE_VALUE contains expected fields."""
         expected_fields = {
             "max_psf_sidelobe",
-            "loop_gain",
-            "niter_per_plane",
+            "gain",
+            "max_iter",
             "threshold",
         }
         self.assertEqual(FIELD_SINGLE_VALUE, expected_fields)
@@ -459,8 +459,8 @@ class TestImagingDictFieldClassification(unittest.TestCase):
         rd.add(
             {
                 "max_psf_sidelobe": 0.2,
-                "loop_gain": 0.1,
-                "niter_per_plane": 1000,
+                "gain": 0.1,
+                "max_iter": 1000,
                 "threshold": 0.01,
             },
             time=0,
@@ -778,67 +778,67 @@ class TestIterationControllerInitialization(unittest.TestCase):
         """Test controller with all default parameters."""
         controller = IterationController()
 
-        # niter_per_plane is a per-plane array allocated lazily; _initial_niter_per_plane holds the
+        # max_iter is a per-plane array allocated lazily; _max_iter holds the
         # scalar per-plane budget until the first ImagingDict is seen.
-        self.assertIsNone(controller.niter_per_plane)
-        self.assertEqual(controller._initial_niter_per_plane, 1000)
-        self.assertEqual(controller.nmajor, -1)
+        self.assertIsNone(controller.max_iter_remaining)
+        self.assertEqual(controller._max_iter, 1000)
+        self.assertEqual(controller.max_cycles, -1)
         self.assertEqual(controller.threshold, 0.0)
-        self.assertEqual(controller.loop_gain, 0.1)
-        self.assertEqual(controller.cycle_factor, 1.0)
+        self.assertEqual(controller.gain, 0.1)
+        self.assertEqual(controller.psf_sidelobe_factor, 1.0)
         self.assertEqual(controller.min_psf_fraction, 0.05)
         self.assertEqual(controller.max_psf_fraction, 0.8)
-        self.assertEqual(controller.cycle_niter, -1)
-        self.assertEqual(controller.nsigma, 0.0)
+        self.assertEqual(controller.max_iter_per_cycle, -1)
+        self.assertEqual(controller.threshold_sigma, 0.0)
 
         # Tracking state
-        self.assertEqual(controller.major_done, 0)
+        self.assertEqual(controller.cycles_done, 0)
         self.assertEqual(controller.total_iter_done, 0)
 
         # Convergence state
-        self.assertEqual(controller.stopcode.major, MAJOR_CONTINUE)
-        self.assertEqual(controller.stopcode.minor, MINOR_CONTINUE)
+        self.assertEqual(controller.stopcode.imaging, IMAGING_CONTINUE)
+        self.assertEqual(controller.stopcode.model_update, MODEL_UPDATE_CONTINUE)
         self.assertIn("Continue", controller.stopdescription)
 
     def test_custom_initialization(self):
         """Test controller with custom parameters."""
         controller = IterationController(
-            niter_per_plane=500,
-            nmajor=10,
+            max_iter=500,
+            max_cycles=10,
             threshold=0.01,
-            loop_gain=0.2,
-            cycle_factor=1.5,
+            gain=0.2,
+            psf_sidelobe_factor=1.5,
             min_psf_fraction=0.1,
             max_psf_fraction=0.9,
-            cycle_niter=100,
-            nsigma=5.0,
+            max_iter_per_cycle=100,
+            threshold_sigma=5.0,
         )
 
-        self.assertEqual(controller._initial_niter_per_plane, 500)
-        self.assertIsNone(controller.niter_per_plane)
-        self.assertEqual(controller.nmajor, 10)
+        self.assertEqual(controller._max_iter, 500)
+        self.assertIsNone(controller.max_iter_remaining)
+        self.assertEqual(controller.max_cycles, 10)
         self.assertEqual(controller.threshold, 0.01)
-        self.assertEqual(controller.loop_gain, 0.2)
-        self.assertEqual(controller.cycle_factor, 1.5)
+        self.assertEqual(controller.gain, 0.2)
+        self.assertEqual(controller.psf_sidelobe_factor, 1.5)
         self.assertEqual(controller.min_psf_fraction, 0.1)
         self.assertEqual(controller.max_psf_fraction, 0.9)
-        self.assertEqual(controller.cycle_niter, 100)
-        self.assertEqual(controller.nsigma, 5.0)
+        self.assertEqual(controller.max_iter_per_cycle, 100)
+        self.assertEqual(controller.threshold_sigma, 5.0)
 
 
 class TestCalculateCycleControls(unittest.TestCase):
-    """Test adaptive cycle_threshold calculation."""
+    """Test adaptive threshold_per_cycle calculation."""
 
     def setUp(self):
         """Create controller and test ImagingDict."""
         self.controller = IterationController(
-            niter_per_plane=1000,
-            cycle_factor=1.5,
+            max_iter=1000,
+            psf_sidelobe_factor=1.5,
             min_psf_fraction=0.05,
             max_psf_fraction=0.8,
         )
 
-    def test_basic_cyclethreshold_calculation(self):
+    def test_basic_threshold_per_cycle_calculation(self):
         """Test basic adaptive threshold calculation."""
         rd = ImagingDict()
         rd.add(
@@ -848,15 +848,17 @@ class TestCalculateCycleControls(unittest.TestCase):
             chan=0,
         )
 
-        cycle_niter, cyclethresh = self.controller.calculate_cycle_controls(rd)
+        max_iter_per_cycle, threshold_per_cycle = (
+            self.controller.calculate_cycle_controls(rd)
+        )
 
         # Expected: psf_fraction = 1.5 × 0.2 = 0.3
-        #           cyclethresh = 0.3 × 1.0 = 0.3
-        self.assertEqual(cycle_niter, 1000)
-        self.assertAlmostEqual(cyclethresh, 0.3, places=10)
+        #           threshold_per_cycle = 0.3 × 1.0 = 0.3
+        self.assertEqual(max_iter_per_cycle, 1000)
+        self.assertAlmostEqual(threshold_per_cycle, 0.3, places=10)
 
-    def test_cyclethreshold_clamping_min(self):
-        """Test cycle_threshold clamping to min_psf_fraction."""
+    def test_threshold_per_cycle_clamping_min(self):
+        """Test threshold_per_cycle clamping to min_psf_fraction."""
         rd = ImagingDict()
         # Very small PSF sidelobe
         rd.add(
@@ -866,15 +868,17 @@ class TestCalculateCycleControls(unittest.TestCase):
             chan=0,
         )
 
-        cycle_niter, cyclethresh = self.controller.calculate_cycle_controls(rd)
+        max_iter_per_cycle, threshold_per_cycle = (
+            self.controller.calculate_cycle_controls(rd)
+        )
 
         # psf_fraction = 1.5 × 0.01 = 0.015
         # Clamped to min_psf_fraction = 0.05
-        # cyclethresh = 0.05 × 1.0 = 0.05
-        self.assertEqual(cyclethresh, 0.05)
+        # threshold_per_cycle = 0.05 × 1.0 = 0.05
+        self.assertEqual(threshold_per_cycle, 0.05)
 
-    def test_cyclethreshold_clamping_max(self):
-        """Test cycle_threshold clamping to max_psf_fraction."""
+    def test_threshold_per_cycle_clamping_max(self):
+        """Test threshold_per_cycle clamping to max_psf_fraction."""
         rd = ImagingDict()
         # Very large PSF sidelobe
         rd.add(
@@ -884,19 +888,21 @@ class TestCalculateCycleControls(unittest.TestCase):
             chan=0,
         )
 
-        cycle_niter, cyclethresh = self.controller.calculate_cycle_controls(rd)
+        max_iter_per_cycle, threshold_per_cycle = (
+            self.controller.calculate_cycle_controls(rd)
+        )
 
         # psf_fraction = 1.5 × 0.9 = 1.35
         # Clamped to max_psf_fraction = 0.8
-        # cyclethresh = 0.8 × 1.0 = 0.8
-        self.assertEqual(cyclethresh, 0.8)
+        # threshold_per_cycle = 0.8 × 1.0 = 0.8
+        self.assertEqual(threshold_per_cycle, 0.8)
 
-    def test_cyclethreshold_respects_global_threshold(self):
-        """Test cycle_threshold respects global threshold as minimum."""
+    def test_threshold_per_cycle_respects_global_threshold(self):
+        """Test threshold_per_cycle respects global threshold as minimum."""
         controller = IterationController(
-            niter_per_plane=1000,
+            max_iter=1000,
             threshold=0.5,  # High global threshold
-            cycle_factor=1.0,
+            psf_sidelobe_factor=1.0,
         )
 
         rd = ImagingDict()
@@ -907,18 +913,20 @@ class TestCalculateCycleControls(unittest.TestCase):
             chan=0,
         )
 
-        cycle_niter, cyclethresh = controller.calculate_cycle_controls(rd)
+        max_iter_per_cycle, threshold_per_cycle = controller.calculate_cycle_controls(
+            rd
+        )
 
         # psf_fraction = 1.0 × 0.2 = 0.2
-        # cyclethresh_calc = 0.2 × 1.0 = 0.2
+        # threshold_per_cycle_calc = 0.2 × 1.0 = 0.2
         # But threshold = 0.5 is higher, so use that
-        self.assertEqual(cyclethresh, 0.5)
+        self.assertEqual(threshold_per_cycle, 0.5)
 
-    def test_cycleniter_cap_applied(self):
-        """Test cycle_niter cap is applied."""
+    def test_max_iter_per_cycle_cap_applied(self):
+        """Test max_iter_per_cycle cap is applied."""
         controller = IterationController(
-            niter_per_plane=1000,
-            cycle_niter=100,  # Cap at 100 per cycle
+            max_iter=1000,
+            max_iter_per_cycle=100,  # Cap at 100 per cycle
         )
 
         rd = ImagingDict()
@@ -929,16 +937,18 @@ class TestCalculateCycleControls(unittest.TestCase):
             chan=0,
         )
 
-        cycle_niter, cyclethresh = controller.calculate_cycle_controls(rd)
+        max_iter_per_cycle, threshold_per_cycle = controller.calculate_cycle_controls(
+            rd
+        )
 
         # Should use min(100, 1000) = 100
-        self.assertEqual(cycle_niter, 100)
+        self.assertEqual(max_iter_per_cycle, 100)
 
-    def test_cycleniter_respects_remaining_iterations(self):
-        """Test cycle_niter respects remaining niter_per_plane."""
+    def test_max_iter_per_cycle_respects_remaining_iterations(self):
+        """Test max_iter_per_cycle respects remaining max_iter."""
         controller = IterationController(
-            niter_per_plane=50,  # Only 50 iterations left
-            cycle_niter=100,
+            max_iter=50,  # Only 50 iterations left
+            max_iter_per_cycle=100,
         )
 
         rd = ImagingDict()
@@ -949,10 +959,12 @@ class TestCalculateCycleControls(unittest.TestCase):
             chan=0,
         )
 
-        cycle_niter, cyclethresh = controller.calculate_cycle_controls(rd)
+        max_iter_per_cycle, threshold_per_cycle = controller.calculate_cycle_controls(
+            rd
+        )
 
         # Should use min(100, 50) = 50
-        self.assertEqual(cycle_niter, 50)
+        self.assertEqual(max_iter_per_cycle, 50)
 
     def test_default_psf_sidelobe_used(self):
         """Test default PSF sidelobe when not in ImagingDict."""
@@ -964,12 +976,14 @@ class TestCalculateCycleControls(unittest.TestCase):
             chan=0,
         )
 
-        cycle_niter, cyclethresh = self.controller.calculate_cycle_controls(rd)
+        max_iter_per_cycle, threshold_per_cycle = (
+            self.controller.calculate_cycle_controls(rd)
+        )
 
         # Should use default 0.2
         # psf_fraction = 1.5 × 0.2 = 0.3
-        # cyclethresh = 0.3 × 1.0 = 0.3
-        self.assertAlmostEqual(cyclethresh, 0.3, places=10)
+        # threshold_per_cycle = 0.3 × 1.0 = 0.3
+        self.assertAlmostEqual(threshold_per_cycle, 0.3, places=10)
 
 
 class TestBuildResidualImagingDict(unittest.TestCase):
@@ -1005,40 +1019,40 @@ class TestBuildResidualImagingDict(unittest.TestCase):
         real_sidelobe = 0.3
         img_xds = self._make_img_xds(residual_peak=1.0, real_sidelobe=real_sidelobe)
         rd = build_residual_imaging_dict(
-            img_xds, "residual", {"loop_gain": 0.1, "max_psf_fraction": 0.9}
+            img_xds, "residual", {"gain": 0.1, "max_psf_fraction": 0.9}
         )
         entry = rd.data[Key(time=0, chan=0, pol=0)]
         self.assertEqual(entry["max_psf_sidelobe"], real_sidelobe)
 
-    def test_cycle_threshold_uses_measured_sidelobe_not_max_psf_fraction(self):
+    def test_threshold_per_cycle_uses_measured_sidelobe_not_max_psf_fraction(self):
         real_sidelobe = 0.3
         residual_peak = 1.0
-        cycle_factor = 1.0
+        psf_sidelobe_factor = 1.0
         max_psf_fraction = 0.9
         img_xds = self._make_img_xds(residual_peak, real_sidelobe)
         rd = build_residual_imaging_dict(
             img_xds,
             "residual",
             {
-                "loop_gain": 0.1,
+                "gain": 0.1,
                 "min_psf_fraction": 0.05,
                 "max_psf_fraction": max_psf_fraction,
             },
         )
         controller = IterationController(
-            niter_per_plane=100,
-            cycle_factor=cycle_factor,
+            max_iter=100,
+            psf_sidelobe_factor=psf_sidelobe_factor,
             min_psf_fraction=0.05,
             max_psf_fraction=max_psf_fraction,
             threshold=0.0,
         )
 
-        _, cyclethresh = controller.calculate_cycle_controls(rd)
+        _, threshold_per_cycle = controller.calculate_cycle_controls(rd)
 
         self.assertAlmostEqual(
-            cyclethresh, real_sidelobe * cycle_factor * residual_peak
+            threshold_per_cycle, real_sidelobe * psf_sidelobe_factor * residual_peak
         )
-        self.assertNotAlmostEqual(cyclethresh, max_psf_fraction * residual_peak)
+        self.assertNotAlmostEqual(threshold_per_cycle, max_psf_fraction * residual_peak)
 
 
 class TestCheckConvergence(unittest.TestCase):
@@ -1047,7 +1061,7 @@ class TestCheckConvergence(unittest.TestCase):
     def test_continue_when_not_converged(self):
         """Test continuing when no stopping criteria met."""
         controller = IterationController(
-            niter_per_plane=1000,
+            max_iter=1000,
             threshold=0.01,
         )
 
@@ -1061,13 +1075,13 @@ class TestCheckConvergence(unittest.TestCase):
 
         stopcode, desc = controller.check_convergence(rd)
 
-        self.assertEqual(stopcode.major, MAJOR_CONTINUE)
-        self.assertEqual(stopcode.minor, MINOR_CONTINUE)
+        self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
+        self.assertEqual(stopcode.model_update, MODEL_UPDATE_CONTINUE)
         self.assertIn("Continue", desc)
 
     def test_stop_on_zero_mask(self):
         """Test stopping when mask is zero (priority 1)."""
-        controller = IterationController(niter_per_plane=1000)
+        controller = IterationController(max_iter=1000)
 
         rd = ImagingDict()
         rd.add(
@@ -1079,12 +1093,12 @@ class TestCheckConvergence(unittest.TestCase):
 
         stopcode, desc = controller.check_convergence(rd)
 
-        self.assertEqual(stopcode.major, MAJOR_ZERO_MASK)
+        self.assertEqual(stopcode.imaging, IMAGING_ZERO_MASK)
         self.assertIn("Zero mask", desc)
 
     def test_stop_on_iteration_limit(self):
-        """Test stopping when niter_per_plane exhausted (priority 2)."""
-        controller = IterationController(niter_per_plane=0)  # No iterations left
+        """Test stopping when max_iter exhausted (priority 2)."""
+        controller = IterationController(max_iter=0)  # No iterations left
 
         rd = ImagingDict()
         rd.add(
@@ -1096,13 +1110,13 @@ class TestCheckConvergence(unittest.TestCase):
 
         stopcode, desc = controller.check_convergence(rd)
 
-        self.assertEqual(stopcode.major, MAJOR_ITER_LIMIT)
-        self.assertIn("iteration limit", desc)
+        self.assertEqual(stopcode.imaging, IMAGING_MAX_ITER)
+        self.assertIn("max_iter", desc)
 
     def test_stop_on_threshold(self):
         """Test stopping when threshold reached (priority 3)."""
         controller = IterationController(
-            niter_per_plane=1000,
+            max_iter=1000,
             threshold=0.5,  # Set threshold
         )
 
@@ -1116,13 +1130,13 @@ class TestCheckConvergence(unittest.TestCase):
 
         stopcode, desc = controller.check_convergence(rd)
 
-        self.assertEqual(stopcode.major, MAJOR_THRESHOLD)
+        self.assertEqual(stopcode.imaging, IMAGING_THRESHOLD)
         self.assertIn("threshold", desc)
 
     def test_threshold_exactly_at_limit(self):
         """Test stopping when peak residual exactly equals threshold."""
         controller = IterationController(
-            niter_per_plane=1000,
+            max_iter=1000,
             threshold=0.5,
         )
 
@@ -1136,13 +1150,13 @@ class TestCheckConvergence(unittest.TestCase):
 
         stopcode, desc = controller.check_convergence(rd)
 
-        self.assertEqual(stopcode.major, MAJOR_THRESHOLD)
+        self.assertEqual(stopcode.imaging, IMAGING_THRESHOLD)
 
-    def test_stop_on_major_cycle_limit(self):
-        """Test stopping when nmajor exhausted (priority 4)."""
+    def test_stop_on_max_cycles(self):
+        """Test stopping when max_cycles exhausted (priority 4)."""
         controller = IterationController(
-            niter_per_plane=1000,
-            nmajor=0,  # No major cycles left
+            max_iter=1000,
+            max_cycles=0,  # No imaging cycles left
             threshold=0.0,
         )
 
@@ -1156,14 +1170,14 @@ class TestCheckConvergence(unittest.TestCase):
 
         stopcode, desc = controller.check_convergence(rd)
 
-        self.assertEqual(stopcode.major, MAJOR_CYCLE_LIMIT)
-        self.assertIn("major cycle", desc)
+        self.assertEqual(stopcode.imaging, IMAGING_MAX_CYCLES)
+        self.assertIn("max_cycles", desc)
 
     def test_priority_zero_mask_over_others(self):
         """Test zero mask has highest priority."""
         controller = IterationController(
-            niter_per_plane=0,  # Also at iteration limit
-            nmajor=0,  # Also at major cycle limit
+            max_iter=0,  # Also at iteration limit
+            max_cycles=0,  # Also at imaging cycle limit
             threshold=1.0,  # Also below threshold
         )
 
@@ -1178,12 +1192,12 @@ class TestCheckConvergence(unittest.TestCase):
         stopcode, desc = controller.check_convergence(rd)
 
         # Zero mask should win
-        self.assertEqual(stopcode.major, MAJOR_ZERO_MASK)
+        self.assertEqual(stopcode.imaging, IMAGING_ZERO_MASK)
 
     def test_priority_iter_limit_over_threshold(self):
         """Test iteration limit has priority over threshold."""
         controller = IterationController(
-            niter_per_plane=0,  # At iteration limit
+            max_iter=0,  # At iteration limit
             threshold=1.0,  # Also below threshold
         )
 
@@ -1198,13 +1212,13 @@ class TestCheckConvergence(unittest.TestCase):
         stopcode, desc = controller.check_convergence(rd)
 
         # Iteration limit should win
-        self.assertEqual(stopcode.major, MAJOR_ITER_LIMIT)
+        self.assertEqual(stopcode.imaging, IMAGING_MAX_ITER)
 
-    def test_nmajor_unlimited_never_stops(self):
-        """Test nmajor=-1 (unlimited) never triggers cycle limit."""
+    def test_max_cycles_unlimited_never_stops(self):
+        """Test max_cycles=-1 (unlimited) never triggers cycle limit."""
         controller = IterationController(
-            niter_per_plane=1000,
-            nmajor=-1,  # Unlimited
+            max_iter=1000,
+            max_cycles=-1,  # Unlimited
         )
 
         rd = ImagingDict()
@@ -1217,12 +1231,12 @@ class TestCheckConvergence(unittest.TestCase):
 
         stopcode, desc = controller.check_convergence(rd)
 
-        self.assertEqual(stopcode.major, MAJOR_CONTINUE)
+        self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
 
     def test_threshold_zero_never_stops(self):
         """Test threshold=0 (disabled) never triggers threshold stop."""
         controller = IterationController(
-            niter_per_plane=1000,
+            max_iter=1000,
             threshold=0.0,  # Disabled
         )
 
@@ -1237,11 +1251,11 @@ class TestCheckConvergence(unittest.TestCase):
         stopcode, desc = controller.check_convergence(rd)
 
         # Should not stop on threshold
-        self.assertEqual(stopcode.major, MAJOR_CONTINUE)
+        self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
 
     def test_stopcode_state_updated(self):
         """Test controller's internal stopcode is updated."""
-        controller = IterationController(niter_per_plane=0)
+        controller = IterationController(max_iter=0)
 
         rd = ImagingDict()
         rd.add({"peakres": 0.5, "masksum": 100}, time=0, pol=0, chan=0)
@@ -1249,34 +1263,34 @@ class TestCheckConvergence(unittest.TestCase):
         stopcode, desc = controller.check_convergence(rd)
 
         # Internal state should match returned values
-        self.assertEqual(controller.stopcode.major, stopcode.major)
+        self.assertEqual(controller.stopcode.imaging, stopcode.imaging)
         self.assertEqual(controller.stopdescription, desc)
 
 
 class TestUpdateCounts(unittest.TestCase):
-    """Test iteration count updates after major cycles."""
+    """Test iteration count updates after imaging cycles."""
 
     def test_basic_count_update(self):
         """Test basic count decrementing."""
-        controller = IterationController(niter_per_plane=1000, nmajor=5)
+        controller = IterationController(max_iter=1000, max_cycles=5)
 
         rd = ImagingDict()
         rd.add({"iter_done": 100}, time=0, pol=0, chan=0)
 
         controller.update_counts(rd)
 
-        # niter_per_plane: 1000 - 100 = 900 (per-plane, plane (0,0,0))
-        # nmajor: 5 - 1 = 4
-        # major_done: 0 + 1 = 1
+        # max_iter: 1000 - 100 = 900 (per-plane, plane (0,0,0))
+        # max_cycles: 5 - 1 = 4
+        # cycles_done: 0 + 1 = 1
         # total_iter_done: 0 + 100 = 100
-        self.assertEqual(controller.niter_per_plane[0, 0, 0], 900)
-        self.assertEqual(controller.nmajor, 4)
-        self.assertEqual(controller.major_done, 1)
+        self.assertEqual(controller.max_iter_remaining[0, 0, 0], 900)
+        self.assertEqual(controller.max_cycles, 4)
+        self.assertEqual(controller.cycles_done, 1)
         self.assertEqual(controller.total_iter_done, 100)
 
     def test_multiple_updates(self):
         """Test multiple count updates accumulate correctly."""
-        controller = IterationController(niter_per_plane=1000, nmajor=5)
+        controller = IterationController(max_iter=1000, max_cycles=5)
 
         rd1 = ImagingDict()
         rd1.add({"iter_done": 100}, time=0, pol=0, chan=0)
@@ -1287,14 +1301,16 @@ class TestUpdateCounts(unittest.TestCase):
         controller.update_counts(rd1)
         controller.update_counts(rd2)
 
-        self.assertEqual(controller.niter_per_plane[0, 0, 0], 750)  # 1000 - 100 - 150
-        self.assertEqual(controller.nmajor, 3)  # 5 - 1 - 1
-        self.assertEqual(controller.major_done, 2)
+        self.assertEqual(
+            controller.max_iter_remaining[0, 0, 0], 750
+        )  # 1000 - 100 - 150
+        self.assertEqual(controller.max_cycles, 3)  # 5 - 1 - 1
+        self.assertEqual(controller.cycles_done, 2)
         self.assertEqual(controller.total_iter_done, 250)  # 100 + 150
 
-    def test_niter_floor_at_zero(self):
-        """Test niter_per_plane doesn't go negative."""
-        controller = IterationController(niter_per_plane=50)
+    def test_max_iter_floor_at_zero(self):
+        """Test max_iter doesn't go negative."""
+        controller = IterationController(max_iter=50)
 
         rd = ImagingDict()
         rd.add({"iter_done": 100}, time=0, pol=0, chan=0)
@@ -1302,11 +1318,11 @@ class TestUpdateCounts(unittest.TestCase):
         controller.update_counts(rd)
 
         # Should floor at 0, not go negative
-        self.assertEqual(controller.niter_per_plane[0, 0, 0], 0)
+        self.assertEqual(controller.max_iter_remaining[0, 0, 0], 0)
 
-    def test_nmajor_floor_at_zero(self):
-        """Test nmajor doesn't go negative."""
-        controller = IterationController(nmajor=1)
+    def test_max_cycles_floor_at_zero(self):
+        """Test max_cycles doesn't go negative."""
+        controller = IterationController(max_cycles=1)
 
         rd1 = ImagingDict()
         rd1.add({"iter_done": 50}, time=0, pol=0, chan=0)
@@ -1318,24 +1334,24 @@ class TestUpdateCounts(unittest.TestCase):
         controller.update_counts(rd2)
 
         # Should floor at 0, not go negative
-        self.assertEqual(controller.nmajor, 0)
+        self.assertEqual(controller.max_cycles, 0)
 
-    def test_nmajor_unlimited_never_decrements(self):
-        """Test nmajor=-1 (unlimited) never decrements."""
-        controller = IterationController(niter_per_plane=1000, nmajor=-1)
+    def test_max_cycles_unlimited_never_decrements(self):
+        """Test max_cycles=-1 (unlimited) never decrements."""
+        controller = IterationController(max_iter=1000, max_cycles=-1)
 
         rd = ImagingDict()
         rd.add({"iter_done": 100}, time=0, pol=0, chan=0)
 
         controller.update_counts(rd)
 
-        # nmajor should stay -1
-        self.assertEqual(controller.nmajor, -1)
-        self.assertEqual(controller.major_done, 1)
+        # max_cycles should stay -1
+        self.assertEqual(controller.max_cycles, -1)
+        self.assertEqual(controller.cycles_done, 1)
 
     def test_update_with_multiple_planes(self):
         """Test update sums iterations across multiple planes."""
-        controller = IterationController(niter_per_plane=1000)
+        controller = IterationController(max_iter=1000)
 
         rd = ImagingDict()
         rd.add({"iter_done": 50}, time=0, pol=0, chan=0)
@@ -1344,27 +1360,29 @@ class TestUpdateCounts(unittest.TestCase):
 
         controller.update_counts(rd)
 
-        # Each plane's remaining niter_per_plane is decremented independently by its own
+        # Each plane's remaining max_iter is decremented independently by its own
         # iter_done. Arrays are indexed (time, chan, pol).
         self.assertEqual(
-            controller.niter_per_plane[0, 0, 0], 950
+            controller.max_iter_remaining[0, 0, 0], 950
         )  # Key(0,0,0): 1000-50
         self.assertEqual(
-            controller.niter_per_plane[0, 1, 0], 970
+            controller.max_iter_remaining[0, 1, 0], 970
         )  # Key(0,0,1): 1000-30
         self.assertEqual(
-            controller.niter_per_plane[0, 0, 1], 980
+            controller.max_iter_remaining[0, 0, 1], 980
         )  # Key(0,1,0): 1000-20
         # total_iter_done sums across planes: 50 + 30 + 20 = 100
         self.assertEqual(controller.total_iter_done, 100)
-        self.assertEqual(controller.major_done, 1)
+        self.assertEqual(controller.cycles_done, 1)
 
     def test_no_update_when_converged(self):
         """Test update_counts does nothing when already converged."""
-        controller = IterationController(niter_per_plane=1000, nmajor=5)
+        controller = IterationController(max_iter=1000, max_cycles=5)
 
         # Set converged state
-        controller.stopcode = StopCode(major=MAJOR_THRESHOLD, minor=MINOR_CONTINUE)
+        controller.stopcode = StopCode(
+            imaging=IMAGING_THRESHOLD, model_update=MODEL_UPDATE_CONTINUE
+        )
 
         rd = ImagingDict()
         rd.add({"iter_done": 100}, time=0, pol=0, chan=0)
@@ -1373,45 +1391,45 @@ class TestUpdateCounts(unittest.TestCase):
 
         # Counts should not change (update_counts returns early when converged,
         # so the per-plane array is never even allocated).
-        self.assertIsNone(controller.niter_per_plane)
-        self.assertEqual(controller._initial_niter_per_plane, 1000)
-        self.assertEqual(controller.nmajor, 5)
-        self.assertEqual(controller.major_done, 0)
+        self.assertIsNone(controller.max_iter_remaining)
+        self.assertEqual(controller._max_iter, 1000)
+        self.assertEqual(controller.max_cycles, 5)
+        self.assertEqual(controller.cycles_done, 0)
         self.assertEqual(controller.total_iter_done, 0)
 
 
 class TestUpdateParameters(unittest.TestCase):
     """Test interactive parameter updates with validation."""
 
-    def test_update_niter(self):
-        """Test updating niter_per_plane parameter."""
-        controller = IterationController(niter_per_plane=1000)
+    def test_update_max_iter(self):
+        """Test updating max_iter parameter."""
+        controller = IterationController(max_iter=1000)
 
-        code, msg = controller.update_parameters(niter_per_plane=500)
+        code, msg = controller.update_parameters(max_iter=500)
 
         self.assertEqual(code, 0)
         self.assertEqual(msg, "")
-        # niter_per_plane sets the per-plane budget; with no array allocated yet this is
-        # reflected in _initial_niter_per_plane.
-        self.assertEqual(controller._initial_niter_per_plane, 500)
+        # max_iter sets the per-plane budget; with no array allocated yet this is
+        # reflected in _max_iter.
+        self.assertEqual(controller._max_iter, 500)
 
-    def test_update_cycleniter(self):
-        """Test updating cycle_niter parameter."""
-        controller = IterationController(cycle_niter=-1)
+    def test_update_max_iter_per_cycle(self):
+        """Test updating max_iter_per_cycle parameter."""
+        controller = IterationController(max_iter_per_cycle=-1)
 
-        code, msg = controller.update_parameters(cycle_niter=100)
-
-        self.assertEqual(code, 0)
-        self.assertEqual(controller.cycle_niter, 100)
-
-    def test_update_nmajor(self):
-        """Test updating nmajor parameter."""
-        controller = IterationController(nmajor=-1)
-
-        code, msg = controller.update_parameters(nmajor=10)
+        code, msg = controller.update_parameters(max_iter_per_cycle=100)
 
         self.assertEqual(code, 0)
-        self.assertEqual(controller.nmajor, 10)
+        self.assertEqual(controller.max_iter_per_cycle, 100)
+
+    def test_update_max_cycles(self):
+        """Test updating max_cycles parameter."""
+        controller = IterationController(max_cycles=-1)
+
+        code, msg = controller.update_parameters(max_cycles=10)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(controller.max_cycles, 10)
 
     def test_update_threshold_numeric(self):
         """Test updating threshold with numeric value."""
@@ -1450,38 +1468,38 @@ class TestUpdateParameters(unittest.TestCase):
         self.assertAlmostEqual(controller.threshold, 0.0001)
 
     def test_update_cyclefactor(self):
-        """Test updating cycle_factor parameter."""
-        controller = IterationController(cycle_factor=1.0)
+        """Test updating psf_sidelobe_factor parameter."""
+        controller = IterationController(psf_sidelobe_factor=1.0)
 
-        code, msg = controller.update_parameters(cycle_factor=1.5)
+        code, msg = controller.update_parameters(psf_sidelobe_factor=1.5)
 
         self.assertEqual(code, 0)
-        self.assertEqual(controller.cycle_factor, 1.5)
+        self.assertEqual(controller.psf_sidelobe_factor, 1.5)
 
     def test_update_multiple_parameters(self):
         """Test updating multiple parameters at once."""
         controller = IterationController()
 
         code, msg = controller.update_parameters(
-            niter_per_plane=500,
+            max_iter=500,
             threshold="5mJy",
-            cycle_factor=1.5,
+            psf_sidelobe_factor=1.5,
         )
 
         self.assertEqual(code, 0)
-        self.assertEqual(controller._initial_niter_per_plane, 500)
+        self.assertEqual(controller._max_iter, 500)
         self.assertAlmostEqual(controller.threshold, 0.005)
-        self.assertEqual(controller.cycle_factor, 1.5)
+        self.assertEqual(controller.psf_sidelobe_factor, 1.5)
 
-    def test_reject_negative_niter(self):
-        """Test rejecting niter_per_plane < -1."""
+    def test_reject_negative_max_iter(self):
+        """Test rejecting max_iter < -1."""
         controller = IterationController()
 
-        code, msg = controller.update_parameters(niter_per_plane=-2)
+        code, msg = controller.update_parameters(max_iter=-2)
 
         self.assertEqual(code, -1)
-        self.assertIn("niter_per_plane must be >= -1", msg)
-        self.assertEqual(controller._initial_niter_per_plane, 1000)  # Unchanged
+        self.assertIn("max_iter must be >= -1", msg)
+        self.assertEqual(controller._max_iter, 1000)  # Unchanged
 
     def test_reject_negative_threshold_numeric(self):
         """Test rejecting negative numeric threshold."""
@@ -1502,18 +1520,18 @@ class TestUpdateParameters(unittest.TestCase):
         self.assertIn("threshold must be >= 0", msg)
 
     def test_reject_zero_cyclefactor(self):
-        """Test rejecting cycle_factor <= 0."""
+        """Test rejecting psf_sidelobe_factor <= 0."""
         controller = IterationController()
 
-        code, msg = controller.update_parameters(cycle_factor=0)
+        code, msg = controller.update_parameters(psf_sidelobe_factor=0)
 
         self.assertEqual(code, -1)
-        self.assertIn("cycle_factor must be > 0", msg)
+        self.assertIn("psf_sidelobe_factor must be > 0", msg)
 
-        code, msg = controller.update_parameters(cycle_factor=-1.0)
+        code, msg = controller.update_parameters(psf_sidelobe_factor=-1.0)
 
         self.assertEqual(code, -1)
-        self.assertIn("cycle_factor must be > 0", msg)
+        self.assertIn("psf_sidelobe_factor must be > 0", msg)
 
     def test_reject_invalid_threshold_string(self):
         """Test rejecting threshold string with unknown units."""
@@ -1524,11 +1542,11 @@ class TestUpdateParameters(unittest.TestCase):
         self.assertEqual(code, -1)
         self.assertIn("number with units", msg)
 
-    def test_reject_non_numeric_niter(self):
-        """Test rejecting non-numeric niter_per_plane."""
+    def test_reject_non_numeric_max_iter(self):
+        """Test rejecting non-numeric max_iter."""
         controller = IterationController()
 
-        code, msg = controller.update_parameters(niter_per_plane="abc")
+        code, msg = controller.update_parameters(max_iter="abc")
 
         self.assertEqual(code, -1)
         self.assertIn("integer", msg)
@@ -1539,7 +1557,7 @@ class TestResetMethods(unittest.TestCase):
 
     def test_reset(self):
         """Test full reset restores initial state."""
-        controller = IterationController(niter_per_plane=1000, nmajor=5)
+        controller = IterationController(max_iter=1000, max_cycles=5)
 
         # Simulate some work
         rd = ImagingDict()
@@ -1547,21 +1565,23 @@ class TestResetMethods(unittest.TestCase):
         controller.update_counts(rd)
 
         # Modify stopcode
-        controller.stopcode = StopCode(major=MAJOR_THRESHOLD, minor=MINOR_CONTINUE)
+        controller.stopcode = StopCode(
+            imaging=IMAGING_THRESHOLD, model_update=MODEL_UPDATE_CONTINUE
+        )
 
         # Reset
         controller.reset()
 
         # Should restore to initial state (per-plane array reset to the budget)
-        self.assertEqual(controller.niter_per_plane[0, 0, 0], 1000)
-        self.assertEqual(controller.major_done, 0)
+        self.assertEqual(controller.max_iter_remaining[0, 0, 0], 1000)
+        self.assertEqual(controller.cycles_done, 0)
         self.assertEqual(controller.total_iter_done, 0)
-        self.assertEqual(controller.stopcode.major, MAJOR_CONTINUE)
-        self.assertEqual(controller.stopcode.minor, MINOR_CONTINUE)
+        self.assertEqual(controller.stopcode.imaging, IMAGING_CONTINUE)
+        self.assertEqual(controller.stopcode.model_update, MODEL_UPDATE_CONTINUE)
 
     def test_reset_stopcode_only(self):
         """Test reset_stopcode only resets convergence state."""
-        controller = IterationController(niter_per_plane=1000)
+        controller = IterationController(max_iter=1000)
 
         # Simulate some work
         rd = ImagingDict()
@@ -1569,18 +1589,20 @@ class TestResetMethods(unittest.TestCase):
         controller.update_counts(rd)
 
         # Set converged
-        controller.stopcode = StopCode(major=MAJOR_THRESHOLD, minor=MINOR_CONTINUE)
+        controller.stopcode = StopCode(
+            imaging=IMAGING_THRESHOLD, model_update=MODEL_UPDATE_CONTINUE
+        )
 
         # Reset only stopcode
         controller.reset_stopcode()
 
         # Stopcode should be reset
-        self.assertEqual(controller.stopcode.major, MAJOR_CONTINUE)
-        self.assertEqual(controller.stopcode.minor, MINOR_CONTINUE)
+        self.assertEqual(controller.stopcode.imaging, IMAGING_CONTINUE)
+        self.assertEqual(controller.stopcode.model_update, MODEL_UPDATE_CONTINUE)
 
         # But counts should remain
-        self.assertEqual(controller.niter_per_plane[0, 0, 0], 700)
-        self.assertEqual(controller.major_done, 1)
+        self.assertEqual(controller.max_iter_remaining[0, 0, 0], 700)
+        self.assertEqual(controller.cycles_done, 1)
 
 
 class TestGetState(unittest.TestCase):
@@ -1589,10 +1611,10 @@ class TestGetState(unittest.TestCase):
     def test_get_state(self):
         """Test getting controller state as dictionary."""
         controller = IterationController(
-            niter_per_plane=1000,
-            nmajor=5,
+            max_iter=1000,
+            max_cycles=5,
             threshold=0.01,
-            cycle_factor=1.5,
+            psf_sidelobe_factor=1.5,
         )
 
         # Simulate some work
@@ -1602,34 +1624,34 @@ class TestGetState(unittest.TestCase):
 
         state = controller.get_state()
 
-        # Check all fields present. niter_per_plane is serialized per-plane (nested list).
-        self.assertEqual(state["niter_per_plane"][0][0][0], 800)
-        self.assertEqual(state["nmajor"], 4)
-        self.assertEqual(state["initial_niter_per_plane"], 1000)
+        # Check all fields present. max_iter is serialized per-plane (nested list).
+        self.assertEqual(state["max_iter_remaining"][0][0][0], 800)
+        self.assertEqual(state["max_cycles"], 4)
+        self.assertEqual(state["max_iter"], 1000)
         self.assertEqual(state["threshold"], 0.01)
-        self.assertEqual(state["cycle_factor"], 1.5)
-        self.assertEqual(state["major_done"], 1)
+        self.assertEqual(state["psf_sidelobe_factor"], 1.5)
+        self.assertEqual(state["cycles_done"], 1)
         self.assertEqual(state["total_iter_done"], 200)
 
         # Stopcode should be serialized as dict
         self.assertIsInstance(state["stopcode"], dict)
-        self.assertEqual(state["stopcode"]["major"], MAJOR_CONTINUE)
-        self.assertEqual(state["stopcode"]["minor"], MINOR_CONTINUE)
+        self.assertEqual(state["stopcode"]["imaging"], IMAGING_CONTINUE)
+        self.assertEqual(state["stopcode"]["model_update"], MODEL_UPDATE_CONTINUE)
 
 
-class TestFullMajorCycleWorkflow(unittest.TestCase):
-    """Integration tests for complete major cycle workflows."""
+class TestFullImagingCycleWorkflow(unittest.TestCase):
+    """Integration tests for complete imaging cycle workflows."""
 
     def test_basic_convergence_workflow(self):
-        """Test basic major cycle workflow until convergence."""
+        """Test basic imaging cycle workflow until convergence."""
         controller = IterationController(
-            niter_per_plane=300,
-            nmajor=5,
+            max_iter=300,
+            max_cycles=5,
             threshold=0.1,
-            cycle_factor=1.5,
+            psf_sidelobe_factor=1.5,
         )
 
-        # Simulate 3 major cycles with decreasing residual
+        # Simulate 3 imaging cycles with decreasing residual
         residuals = [1.0, 0.5, 0.08]  # Last one below threshold
         iterations_per_cycle = [100, 100, 50]
 
@@ -1651,7 +1673,9 @@ class TestFullMajorCycleWorkflow(unittest.TestCase):
             )
 
             # Calculate cycle controls
-            cycle_niter, cyclethresh = controller.calculate_cycle_controls(rd)
+            max_iter_per_cycle, threshold_per_cycle = (
+                controller.calculate_cycle_controls(rd)
+            )
 
             # Update counts
             controller.update_counts(rd)
@@ -1659,25 +1683,25 @@ class TestFullMajorCycleWorkflow(unittest.TestCase):
             # Check convergence
             stopcode, desc = controller.check_convergence(rd)
 
-            if stopcode.major != MAJOR_CONTINUE:
+            if stopcode.imaging != IMAGING_CONTINUE:
                 # Should converge on cycle 3 (index 2)
                 self.assertEqual(cycle, 2)
-                self.assertEqual(stopcode.major, MAJOR_THRESHOLD)
+                self.assertEqual(stopcode.imaging, IMAGING_THRESHOLD)
                 break
 
         # Verify final state
-        self.assertEqual(controller.major_done, 3)
+        self.assertEqual(controller.cycles_done, 3)
         self.assertEqual(controller.total_iter_done, 250)
-        self.assertEqual(controller.niter_per_plane[0, 0, 0], 50)  # 300 - 250
+        self.assertEqual(controller.max_iter_remaining[0, 0, 0], 50)  # 300 - 250
 
     def test_iteration_limit_workflow(self):
         """Test workflow stopping at iteration limit."""
         controller = IterationController(
-            niter_per_plane=250,  # Limited iterations
+            max_iter=250,  # Limited iterations
             threshold=0.01,  # Low threshold (hard to reach)
         )
 
-        # Simulate major cycles
+        # Simulate imaging cycles
         for cycle in range(5):
             rd = ImagingDict()
             rd.add(
@@ -1695,22 +1719,22 @@ class TestFullMajorCycleWorkflow(unittest.TestCase):
             controller.update_counts(rd)
             stopcode, desc = controller.check_convergence(rd)
 
-            if stopcode.major != MAJOR_CONTINUE:
+            if stopcode.imaging != IMAGING_CONTINUE:
                 # Should stop after cycle 3 (3 × 100 = 300 > 250)
-                # But niter_per_plane floors at 0 after cycle 2
+                # But max_iter floors at 0 after cycle 2
                 self.assertEqual(cycle, 2)
-                self.assertEqual(stopcode.major, MAJOR_ITER_LIMIT)
+                self.assertEqual(stopcode.imaging, IMAGING_MAX_ITER)
                 break
 
-    def test_major_cycle_limit_workflow(self):
-        """Test workflow stopping at major cycle limit."""
+    def test_max_cycles_workflow(self):
+        """Test workflow stopping at imaging cycle limit."""
         controller = IterationController(
-            niter_per_plane=1000,
-            nmajor=3,  # Limited major cycles
+            max_iter=1000,
+            max_cycles=3,  # Limited imaging cycles
             threshold=0.01,
         )
 
-        # Simulate major cycles
+        # Simulate imaging cycles
         for cycle in range(5):
             rd = ImagingDict()
             rd.add(
@@ -1726,24 +1750,24 @@ class TestFullMajorCycleWorkflow(unittest.TestCase):
             )
 
             # Check convergence first, then update counts
-            # After 3 updates, nmajor will be 0, triggering stop
+            # After 3 updates, max_cycles will be 0, triggering stop
             controller.update_counts(rd)
             stopcode, desc = controller.check_convergence(rd)
 
-            if stopcode.major != MAJOR_CONTINUE:
-                # Should stop when nmajor reaches 0 after 3 cycles
-                # Cycle 0: nmajor 3→2, Cycle 1: nmajor 2→1, Cycle 2: nmajor 1→0
-                # Check on cycle 2 detects nmajor==0
+            if stopcode.imaging != IMAGING_CONTINUE:
+                # Should stop when max_cycles reaches 0 after 3 cycles
+                # Cycle 0: max_cycles 3→2, Cycle 1: max_cycles 2→1, Cycle 2: max_cycles 1→0
+                # Check on cycle 2 detects max_cycles==0
                 self.assertEqual(cycle, 2)
-                self.assertEqual(stopcode.major, MAJOR_CYCLE_LIMIT)
+                self.assertEqual(stopcode.imaging, IMAGING_MAX_CYCLES)
                 break
 
-        self.assertEqual(controller.major_done, 3)
+        self.assertEqual(controller.cycles_done, 3)
 
     def test_zero_mask_workflow(self):
         """Test workflow stopping when mask becomes zero."""
         controller = IterationController(
-            niter_per_plane=1000,
+            max_iter=1000,
             threshold=0.1,
         )
 
@@ -1767,16 +1791,16 @@ class TestFullMajorCycleWorkflow(unittest.TestCase):
             controller.update_counts(rd)
             stopcode, desc = controller.check_convergence(rd)
 
-            if stopcode.major != MAJOR_CONTINUE:
+            if stopcode.imaging != IMAGING_CONTINUE:
                 # Should stop when mask becomes zero
                 self.assertEqual(cycle, 2)
-                self.assertEqual(stopcode.major, MAJOR_ZERO_MASK)
+                self.assertEqual(stopcode.imaging, IMAGING_ZERO_MASK)
                 break
 
     def test_interactive_continue_workflow(self):
         """Test interactive workflow: stop, update params, continue."""
         controller = IterationController(
-            niter_per_plane=100,
+            max_iter=100,
             threshold=0.5,
         )
 
@@ -1797,10 +1821,10 @@ class TestFullMajorCycleWorkflow(unittest.TestCase):
         controller.update_counts(rd1)
         stopcode, desc = controller.check_convergence(rd1)
 
-        self.assertEqual(stopcode.major, MAJOR_ITER_LIMIT)
+        self.assertEqual(stopcode.imaging, IMAGING_MAX_ITER)
 
         # User decides to continue with more iterations
-        code, msg = controller.update_parameters(niter_per_plane=200)
+        code, msg = controller.update_parameters(max_iter=200)
         self.assertEqual(code, 0)
 
         # Reset stopcode to continue
@@ -1823,8 +1847,8 @@ class TestFullMajorCycleWorkflow(unittest.TestCase):
         controller.update_counts(rd2)
         stopcode, desc = controller.check_convergence(rd2)
 
-        self.assertEqual(stopcode.major, MAJOR_THRESHOLD)
-        self.assertEqual(controller.major_done, 2)
+        self.assertEqual(stopcode.imaging, IMAGING_THRESHOLD)
+        self.assertEqual(controller.cycles_done, 2)
         self.assertEqual(controller.total_iter_done, 200)
 
 
@@ -1834,7 +1858,7 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
     def test_merge_and_converge_multi_channel(self):
         """Test merging results from multiple channels."""
         controller = IterationController(
-            niter_per_plane=300,
+            max_iter=300,
             threshold=0.1,
         )
 
@@ -1897,11 +1921,11 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
         # Should not converge: every plane's own peak (0.5, 0.8, 0.3) is above
         # the threshold 0.1, so all planes stay active and the aggregate is
         # CONTINUE.
-        self.assertEqual(stopcode.major, MAJOR_CONTINUE)
-        # Each channel's remaining niter_per_plane is decremented by its own iter_done.
-        self.assertEqual(controller.niter_per_plane[0, 0, 0], 250)  # chan0: 300-50
-        self.assertEqual(controller.niter_per_plane[0, 1, 0], 240)  # chan1: 300-60
-        self.assertEqual(controller.niter_per_plane[0, 2, 0], 260)  # chan2: 300-40
+        self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
+        # Each channel's remaining max_iter is decremented by its own iter_done.
+        self.assertEqual(controller.max_iter_remaining[0, 0, 0], 250)  # chan0: 300-50
+        self.assertEqual(controller.max_iter_remaining[0, 1, 0], 240)  # chan1: 300-60
+        self.assertEqual(controller.max_iter_remaining[0, 2, 0], 260)  # chan2: 300-40
         self.assertEqual(controller.total_iter_done, 150)  # 50 + 60 + 40
 
     def test_partial_zero_mask_handling(self):
@@ -1947,10 +1971,14 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
         # Each plane stops for its own reason: chan 0 (zero mask) -> ZERO_MASK,
         # chan 1 (peak 0.3 <= threshold 0.5) -> THRESHOLD.
         stopcode, desc = controller.check_convergence(rd)
-        self.assertEqual(controller.stopcode_major[0, 0, 0], MAJOR_ZERO_MASK)  # chan 0
-        self.assertEqual(controller.stopcode_major[0, 1, 0], MAJOR_THRESHOLD)  # chan 1
+        self.assertEqual(
+            controller.stop_code_imaging[0, 0, 0], IMAGING_ZERO_MASK
+        )  # chan 0
+        self.assertEqual(
+            controller.stop_code_imaging[0, 1, 0], IMAGING_THRESHOLD
+        )  # chan 1
         # Both planes have stopped, so the aggregate is non-CONTINUE.
-        self.assertNotEqual(stopcode.major, MAJOR_CONTINUE)
+        self.assertNotEqual(stopcode.imaging, IMAGING_CONTINUE)
 
 
 # =============================================================================

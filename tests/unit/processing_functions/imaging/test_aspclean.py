@@ -19,9 +19,8 @@ The tests exercise:
   * the 5-D cube driver.
 
 
-NOTE: these tests call the aspclean C++ binding directly, so the keyword is
-the binding's own ``niter`` (aspclean/python/bindings.cpp), not the Python-side
-``niter_per_plane``. The two are renamed together in the C++ pass.
+The aspclean C++ binding takes the per-plane iteration cap as
+``max_iter_remaining`` (aspclean/python/bindings.cpp).
 """
 
 import numpy as np
@@ -151,7 +150,9 @@ class TestClean:
         psf, sky, dirty = self._make_scene()
         model = np.zeros_like(dirty)
         resid = dirty.copy()
-        res = aspclean.clean(resid, psf, model, gain=0.1, threshold=0.05, niter=100)
+        res = aspclean.clean(
+            resid, psf, model, gain=0.1, threshold=0.05, max_iter_remaining=100
+        )
         for key in (
             "iterations_performed",
             "retval",
@@ -170,7 +171,13 @@ class TestClean:
         resid = dirty.copy()
         peak0 = float(np.max(np.abs(resid)))
         aspclean.clean(
-            resid, psf, model, gain=0.1, threshold=0.01, niter=200, fusedthreshold=0.1
+            resid,
+            psf,
+            model,
+            gain=0.1,
+            threshold=0.01,
+            max_iter_remaining=200,
+            fusedthreshold=0.1,
         )
         peak1 = float(np.max(np.abs(resid)))
         assert peak1 < 0.2 * peak0  # residual substantially reduced
@@ -185,7 +192,13 @@ class TestClean:
         model = np.zeros_like(dirty)
         resid = dirty.copy()
         aspclean.clean(
-            resid, psf, model, gain=0.1, threshold=0.05, niter=150, fusedthreshold=0.1
+            resid,
+            psf,
+            model,
+            gain=0.1,
+            threshold=0.05,
+            max_iter_remaining=150,
+            fusedthreshold=0.1,
         )
         recon = aspclean.convolve_centered(
             model.astype(np.float64), psf.astype(np.float64)
@@ -210,7 +223,7 @@ class TestClean:
             model,
             gain=0.5,
             threshold=0.01,
-            niter=60,
+            max_iter_remaining=60,
             fusedthreshold=0.5,
             psf_width=1.0,
         )
@@ -219,7 +232,7 @@ class TestClean:
         assert model[40, 50] == pytest.approx(7.0, abs=0.1)
         assert model.sum() == pytest.approx(7.0, abs=0.1)
 
-    def test_major_cycles_monotonic_progress(self):
+    def test_imaging_cycles_monotonic_progress(self):
         psf, sky, dirty = self._make_scene()
         model = np.zeros_like(dirty)
         resid = dirty.copy()
@@ -231,7 +244,7 @@ class TestClean:
                 model,
                 gain=0.1,
                 threshold=0.001,
-                niter=100,
+                max_iter_remaining=100,
                 fusedthreshold=0.1,
             )
             peaks.append(float(np.max(np.abs(resid))))
@@ -264,7 +277,7 @@ class TestMask:
             mask=mask,
             gain=0.1,
             threshold=0.01,
-            niter=150,
+            max_iter_remaining=150,
             fusedthreshold=0.1,
         )
         outside = model[mask == 0]
@@ -278,7 +291,7 @@ class TestMask:
         mask = np.zeros((ny, nx))
         model = np.zeros_like(dirty)
         resid = dirty.copy()
-        res = aspclean.clean(resid, psf, model, mask=mask, niter=50)
+        res = aspclean.clean(resid, psf, model, mask=mask, max_iter_remaining=50)
         np.testing.assert_array_equal(resid, dirty)
         np.testing.assert_array_equal(model, np.zeros_like(model))
         assert res["model_flux"] == 0.0
@@ -299,7 +312,13 @@ class TestInPlaceContract:
         resid_id = resid.ctypes.data
         model_id = model.ctypes.data
         aspclean.clean(
-            resid, psf, model, gain=0.2, threshold=0.01, niter=50, fusedthreshold=0.1
+            resid,
+            psf,
+            model,
+            gain=0.2,
+            threshold=0.01,
+            max_iter_remaining=50,
+            fusedthreshold=0.1,
         )
         # same buffers (no reallocation), and they changed
         assert resid.ctypes.data == resid_id
@@ -369,16 +388,16 @@ class TestCube:
         rc = resid.copy()
         mc = model.copy()
         # Iteration control is per (time, frequency, polarization) plane:
-        # threshold is a float64 (nt, nf, np) array and niter_per_plane an int32 one.
+        # threshold is a float64 (nt, nf, np) array and max_iter an int32 one.
         threshold = np.full((nt, nf, npol), 0.05, dtype=np.float64)
-        niter_per_plane = np.full((nt, nf, npol), 80, dtype=np.int32)
+        max_iter = np.full((nt, nf, npol), 80, dtype=np.int32)
         out = aspclean.clean_cube(
             rc,
             psf,
             mc,
             gain=0.1,
             threshold=threshold,
-            niter=niter_per_plane,
+            max_iter_remaining=max_iter,
             fusedthreshold=0.1,
             processing_function_threads=2,
         )
@@ -397,7 +416,7 @@ class TestCube:
                         m1,
                         gain=0.1,
                         threshold=0.05,
-                        niter=80,
+                        max_iter_remaining=80,
                         fusedthreshold=0.1,
                     )
                     np.testing.assert_allclose(rc[t, f, p], r1, atol=1e-10)
@@ -411,14 +430,14 @@ class TestCube:
         model = np.zeros_like(resid)
         rc = resid.copy()
         threshold = np.full((nt, nf, npol), 0.05, dtype=np.float64)
-        niter_per_plane = np.full((nt, nf, npol), 60, dtype=np.int32)
+        max_iter = np.full((nt, nf, npol), 60, dtype=np.int32)
         out = aspclean.clean_cube(
             rc,
             psf1,
             model,
             gain=0.1,
             threshold=threshold,
-            niter=niter_per_plane,
+            max_iter_remaining=max_iter,
             fusedthreshold=0.1,
         )
         assert out["model_flux"].shape == (nt, nf, npol)

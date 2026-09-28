@@ -2,16 +2,16 @@ from astroviper.utils.param_docs import shares_param_docs
 
 
 @shares_param_docs
-def model_update_cycle_cube_single_field(
+def model_update_cube_single_field(
     img_xds,
     deconvolver,
     deconvolve_params,
-    is_niter_0,
+    model_exists,
     processing_function_threads=1,
     image_data_group_in_name="residual",
     image_data_group_out_name="model",
 ):
-    """Run one model-update (minor) cycle: build a mask and deconvolve.
+    """Run one model update: build a mask and deconvolve.
 
     Ensures a primary-beam mask exists on the input data group, then runs the
     configured deconvolver (Hogbom or Asp CLEAN) which updates the sky model in
@@ -23,19 +23,20 @@ def model_update_cycle_cube_single_field(
         Image dataset holding the residual image (input data group) and the sky
         model (output data group).  Modified in place.
     deconvolver : str
-        Deconvolution algorithm for the minor cycle. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
+        Deconvolution algorithm for the model update. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
         (C++, threaded across *and* within planes -- faster when there are
         few planes, e.g. single-channel imaging) or ``"asp"``.
     deconvolve_params : dict
         Per-cycle deconvolution / iteration-control parameters passed straight to
-        the deconvolver: the absolute ``threshold`` (floor) plus the adaptive
-        ``cycle_threshold``, ``loop_gain``, ``cycle_niter``, ``cycle_niter_cap_pp`` and
-        ``cycle_threshold_pp`` ...  The separate ``primary_beam_limit``
+        the deconvolver: ``gain``, the absolute ``threshold`` (floor) and the
+        per-plane ``max_iter_per_cycle`` and ``threshold_per_cycle`` arrays
+        computed by the iteration controller.  The separate ``primary_beam_limit``
         builds the primary-beam mask (a chunk-independent quantity, so the mask
         does not depend on how the cube was split across tasks); it is distinct
         from the deconvolver ``threshold``.
-    is_niter_0 : bool
-        ``True`` on the very first model update.  Currently informational.
+    model_exists : bool
+        ``False`` on the first model update (no model yet), ``True`` afterwards.
+        Currently informational.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
