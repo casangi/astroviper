@@ -281,3 +281,67 @@ def test_sky_components_through_the_driver(tmp_path):
                 {"kind": "point", "flux": np.ones((5, 4)), "ra_dec": SRC[0, 0]}
             ],
         )
+
+
+def test_sky_image_output(tmp_path):
+    """sky_image_params writes the simulated sky on the imager's grid as Stokes planes in Jy/pixel."""
+    from xradio.image import load_image
+
+    from astroviper.utils.coordinate_transforms import celestial_coord_to_sin_pixel
+
+    arcsec = np.pi / (180 * 3600)
+    image_size = [96, 96]
+    cell_size = [-10 * arcsec, 10 * arcsec]
+    second = PC[0]  # at the phase centre, far from the point source
+    components = [
+        # circular basis [RR, RL, LR, LL]: I = 2, Q = 0.4, U = 0, V = 1
+        {"kind": "point", "flux": [3.0, 0.4, 0.4, 1.0], "ra_dec": SRC[0, 0]},
+        {"kind": "gaussian", "flux": 2.0, "ra_dec": second, "major": 60 * arcsec,
+         "minor": 40 * arcsec, "pa": 0.3},
+    ]  # fmt: skip
+    store = str(tmp_path / "sky.img.zarr")
+    sky_image_params = {
+        "image_store": store,
+        "image_size": image_size,
+        "cell_size": cell_size,
+        "polarization_coords": ["I", "Q", "U", "V"],
+    }
+    result, _ = run(
+        tmp_path,
+        point_source_flux=None,
+        point_source_ra_dec=None,
+        sky_components=components,
+        sky_image_params=sky_image_params,
+    )
+    assert result["sky_image_store"] == store
+    assert result["timing_distributed_application"]["T_write_sky_image"] >= 0.0
+    img = load_image(store)
+    assert img.SKY.dims == ("time", "frequency", "polarization", "l", "m")
+    assert list(img.polarization.values) == ["I", "Q", "U", "V"]
+    assert img.sizes["frequency"] == FREQ_PARAMS["n_channels"]
+    assert (img.sizes["l"], img.sizes["m"]) == tuple(image_size)
+    assert img.attrs["data_groups"]["base"]["sky"] == "SKY"
+    sky = img.SKY.values[0]  # [frequency, polarization, l, m]
+    # the point source sits on the pixel the imaging convention predicts, with its Stokes fluxes
+    i, j = np.round(
+        celestial_coord_to_sin_pixel(PC[0], image_size, cell_size, SRC[0, 0])
+    ).astype(int)
+    np.testing.assert_allclose(sky[:, :, i, j], [[2.0, 0.4, 0.0, 1.0]] * 3, atol=1e-12)
+    # the (unpolarised) Gaussian integrates to its flux in Stokes I only
+    rest = sky.copy()
+    rest[:, :, i, j] = 0.0
+    np.testing.assert_allclose(
+        rest.sum(axis=(2, 3)), [[2.0, 0.0, 0.0, 0.0]] * 3, atol=1e-3
+    )
+    # the store is a readable XRADIO image with the simulated frequency axis
+    ms = load_processing_set(result["ps_store"])["VLA_SBand"].ds
+    np.testing.assert_allclose(img.frequency.values, ms.frequency.values)
+    with pytest.raises(ValueError, match="polarization_coords"):
+        run(
+            tmp_path,
+            sky_image_params={**sky_image_params, "polarization_coords": ["XX"]},
+        )
+    with pytest.raises(ValueError, match="unknown keys"):
+        run(tmp_path, sky_image_params={**sky_image_params, "cellsize": 1.0})
+    with pytest.raises(ValueError, match="time_index"):
+        run(tmp_path, sky_image_params={**sky_image_params, "time_index": 99})

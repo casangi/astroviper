@@ -53,8 +53,10 @@ from astroviper.processing_functions.simulation.sky_components import (
     component_image,
     component_uv_response,
     normalize_sky_components,
+    polarization_basis_of,
     sky_components_from_arrays,
     sky_model_image,
+    stokes_sky_model_images,
 )
 from astroviper.processing_functions.simulation.tapered_power_law import (
     tapered_power_law_image,
@@ -77,7 +79,9 @@ __all__ = [
     "sky_components_from_arrays",
     "component_uv_response",
     "component_image",
+    "polarization_basis_of",
     "sky_model_image",
+    "stokes_sky_model_images",
     "elliptical_gaussian_uv_response",
     "elliptical_gaussian_image",
     "limb_darkened_disk_uv_response",

@@ -445,6 +445,97 @@ def sky_model_image(
     return image
 
 
+# Coefficients of the four instrumental correlations ([XX, XY, YX, YY] or
+# [RR, RL, LR, LL], the order of a component's flux vector) that make each
+# Stokes parameter: I = (XX + YY)/2, Q = (XX - YY)/2, U = (XY + YX)/2,
+# V = (XY - YX)/(2i) for linear feeds; I = (RR + LL)/2, V = (RR - LL)/2,
+# Q = (RL + LR)/2, U = (RL - LR)/(2i) for circular feeds.
+_STOKES_FROM_CORRELATIONS = {
+    "linear": {
+        "I": ((0, 0.5), (3, 0.5)),
+        "Q": ((0, 0.5), (3, -0.5)),
+        "U": ((1, 0.5), (2, 0.5)),
+        "V": ((1, -0.5j), (2, 0.5j)),
+    },
+    "circular": {
+        "I": ((0, 0.5), (3, 0.5)),
+        "Q": ((1, 0.5), (2, 0.5)),
+        "U": ((1, -0.5j), (2, 0.5j)),
+        "V": ((0, 0.5), (3, -0.5)),
+    },
+}
+
+
+def polarization_basis_of(polarization):
+    """``"linear"`` for ``XX/XY/YX/YY`` labels, ``"circular"`` for ``RR/RL/LR/LL``."""
+    labels = {str(label).upper() for label in polarization}
+    if labels and labels <= {"XX", "XY", "YX", "YY"}:
+        return "linear"
+    if labels and labels <= {"RR", "RL", "LR", "LL"}:
+        return "circular"
+    raise ValueError(
+        f"polarization labels {sorted(labels)} are not one instrumental basis."
+    )
+
+
+def stokes_sky_model_images(
+    components,
+    l_axis,
+    m_axis,
+    phase_center_ra_dec,
+    polarization_basis,
+    stokes,
+    time_index=0,
+    frequency_index=0,
+):
+    """Rasterise a component list into Stokes planes, ``[n_stokes, n_l, n_m]`` in Jy/pixel.
+
+    Component fluxes are per instrumental correlation (see
+    :func:`normalize_sky_components`); each requested Stokes parameter is the
+    standard combination of the correlation images rasterised by
+    :func:`sky_model_image` (linear feeds: ``I = (XX + YY)/2``,
+    ``Q = (XX - YY)/2``, ``U = (XY + YX)/2``, ``V = (XY - YX)/(2i)``; circular
+    feeds: ``I = (RR + LL)/2``, ``V = (RR - LL)/2``, ``Q = (RL + LR)/2``,
+    ``U = (RL - LR)/(2i)``).  Component fluxes are real, so the cross-hand
+    difference (``V`` for linear feeds, ``U`` for circular feeds) is zero.
+
+    Parameters
+    ----------
+    components, l_axis, m_axis, phase_center_ra_dec, time_index, frequency_index
+        As for :func:`sky_model_image`.
+    polarization_basis : str
+        ``"linear"`` or ``"circular"`` (:func:`polarization_basis_of`).
+    stokes : list of str
+        Stokes parameters to produce, a subset of ``["I", "Q", "U", "V"]``.
+    """
+    table = _STOKES_FROM_CORRELATIONS[polarization_basis]
+    stokes = [str(label).upper() for label in stokes]
+    unknown = [label for label in stokes if label not in table]
+    if unknown:
+        raise ValueError(
+            f"unknown Stokes parameters {unknown}; expected a subset of I, Q, U, V."
+        )
+    needed = sorted({corr for label in stokes for corr, _ in table[label]})
+    planes = {
+        corr: sky_model_image(
+            components,
+            l_axis,
+            m_axis,
+            phase_center_ra_dec,
+            time_index,
+            frequency_index,
+            correlation=corr,
+        )
+        for corr in needed
+    }
+    out = np.zeros((len(stokes), len(l_axis), len(m_axis)), dtype=np.float64)
+    for k, label in enumerate(stokes):
+        out[k] = np.real(
+            sum(coefficient * planes[corr] for corr, coefficient in table[label])
+        )
+    return out
+
+
 def sky_components_from_arrays(kind, flux, ra_dec, shape=None, limb_darkening=None):
     """Convert the bulk ``<kind>_source_flux / _ra_dec / _shape`` arrays into component dicts.
 

@@ -31,7 +31,7 @@ IMAGE_SIZE = [200, 200]
 CELL_SIZE = np.array([-8.0, 8.0]) * np.pi / (180 * 3600)
 
 
-def simulate(tmp_path, name, flux, noise_params=None):
+def simulate(tmp_path, name, flux, noise_params=None, sky_image_params=None):
     ant = read_telescope_layout("vla.d")
     result = distributed_applications.simulation.simulate_processing_set(
         ps_store=str(tmp_path / f"{name}.ps.zarr"),
@@ -54,6 +54,7 @@ def simulate(tmp_path, name, flux, noise_params=None):
         beam_models=[airy_disk_model("vla")],
         beam_model_map=np.zeros(27, int),
         noise_params=noise_params,
+        sky_image_params=sky_image_params,
         n_time_chunks=2,
         n_frequency_chunks=2,
         overwrite=True,
@@ -114,10 +115,34 @@ def image(tmp_path, ps_store, name):
 
 
 def test_point_source_lands_on_expected_pixel(tmp_path):
-    result = simulate(tmp_path, "point", flux=2.0)
+    truth_store = str(tmp_path / "point_truth.img.zarr")
+    result = simulate(
+        tmp_path,
+        "point",
+        flux=2.0,
+        sky_image_params={
+            "image_store": truth_store,
+            "image_size": IMAGE_SIZE,
+            "cell_size": CELL_SIZE,
+            "polarization_coords": ["I"],
+        },
+    )
     img = image(tmp_path, result["ps_store"], "point")
     sky = img.SKY_RESIDUAL.values[0]  # [frequency, polarization, l, m]
     expected_pixel = celestial_coord_to_sin_pixel(PC, IMAGE_SIZE, CELL_SIZE, SRC)
+    # the simulator's own image of the sky uses the imager's grid: same axes, same pixel
+    truth = load_image(truth_store)
+    np.testing.assert_allclose(truth.l.values, img.l.values)
+    np.testing.assert_allclose(truth.m.values, img.m.values)
+    truth_sky = truth.SKY.values[0]
+    for i_chan in range(truth_sky.shape[0]):
+        i_t, j_t = np.unravel_index(
+            np.argmax(truth_sky[i_chan, 0]), truth_sky.shape[2:]
+        )
+        np.testing.assert_allclose([i_t, j_t], expected_pixel, atol=0.5)
+        assert (
+            truth_sky[i_chan, 0, i_t, j_t] == 2.0 and truth_sky[i_chan, 0].sum() == 2.0
+        )
     lm = sin_project(PC, SRC)
     frequency = img.frequency.values
     for i_chan in range(sky.shape[0]):
