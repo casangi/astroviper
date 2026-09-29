@@ -107,6 +107,15 @@ MULTI_CYCLE_SINGLE_RTOL = 0.15
 MULTI_CYCLE_DOUBLE_VS_SINGLE_RTOL = 0.15
 MULTI_CYCLE_WORST_CASE_RTOL = 0.15
 DEEP_CLEAN_RESIDUAL_RMS_RTOL = 0.05
+# Integrated restored flux is compared inside a source aperture taken from the
+# reference image (pixels above this fraction of the channel peak). The CLEAN
+# mask itself is the whole primary-beam-limited field, whose net flux is a
+# small difference of large positive and negative parts (about 5 percent of
+# its absolute flux here), so a flux ratio normalised by it amplified the
+# noise-level differences of a float32 CLEAN branch flip about twentyfold
+# (CI 2026-09-29: restored L2 difference 3 percent, net-flux ratio 17 percent).
+# Between CLEAN branches the source-aperture flux moves by under 0.3 percent.
+DEEP_CLEAN_SOURCE_APERTURE_FRACTION = 0.1
 DEEP_CLEAN_PSF_RTOL = 1e-4
 
 # Deconvolve-dict floats computed FROM the float32 gridded seed: the per-imaging-
@@ -613,9 +622,13 @@ def _check_deep_clean_history(deconvolve_dict):
 def _check_deep_clean_images(actual, reference, *, tol, polarization=0):
     """Bound restored-image agreement and residual RMS for deep CLEAN.
 
-    The reference CLEAN mask defines one common aperture; no data-dependent
-    clipping or alignment is used. Integrated restored flux is compared through
-    image sums (the common pixel/beam area factors cancel after the beam check).
+    The reference CLEAN mask defines one common comparison region for the L2
+    and residual-RMS bounds; nothing depends on the image under test.
+    Integrated restored flux is compared through image sums (the common
+    pixel/beam area factors cancel after the beam check) inside a source
+    aperture derived from the reference image alone (pixels above
+    ``DEEP_CLEAN_SOURCE_APERTURE_FRACTION`` of the channel peak), because the
+    net flux of the whole masked field is ill-conditioned (see the constant).
     Like the existing image assertions, these science bounds apply to Stokes I;
     Q remains visible in the diagnostic plots. The unconvolved component model
     is checked for finiteness, but its pixel differences are diagnostic only.
@@ -652,13 +665,14 @@ def _check_deep_clean_images(actual, reference, *, tol, polarization=0):
         residual = values(actual, "SKY_RESIDUAL")
         truth_residual = values(reference, "SKY_RESIDUAL")
         norm = np.linalg.norm(truth)
-        flux = abs(truth.sum())
+        source = truth > DEEP_CLEAN_SOURCE_APERTURE_FRACTION * truth.max()
+        flux = truth[source].sum()
         rms = np.sqrt(np.mean(truth_residual**2))
         assert norm > 0 and flux > 0 and rms > 0, "degenerate reference"
         metrics = {
             "restored L2 difference": (np.linalg.norm(image - truth) / norm, tol),
-            "restored aperture flux difference": (
-                abs(image.sum() - truth.sum()) / flux,
+            "restored source flux difference": (
+                abs(image[source].sum() - flux) / flux,
                 tol,
             ),
             "residual RMS change": (
