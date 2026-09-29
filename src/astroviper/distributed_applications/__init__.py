@@ -6,6 +6,7 @@ from astroviper.distributed_applications import (
     flagging,
     image_analysis,
     imaging,
+    simulation,
     visibility_manipulation,
 )
 
@@ -14,5 +15,6 @@ __all__ = [
     "flagging",
     "calibration",
     "image_analysis",
+    "simulation",
     "visibility_manipulation",
 ]

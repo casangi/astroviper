@@ -67,7 +67,7 @@ def test_task_plots_without_io_columns():
 
 def test_cluster_plots_sum_over_running_tasks():
     df = _monitored_frame()
-    axes = plot_cluster_resource_usage(df, core_capacity=8, memory_capacity_gb=64)
+    axes = plot_cluster_resource_usage(df, core_capacity=8, memory_capacity_gib=64)
     assert all(axes[k] is not None for k in ("cpu", "memory", "io"))
     # x-axis spans the whole run (last task starts at +15s and runs >=9.5s),
     # not just one task's duration.

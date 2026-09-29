@@ -12,6 +12,7 @@ try:
         clean,
         clean_cube,
         convolve_centered,
+        lbfgs_minimize,
         psf_gaussian_width,
     )
 except ImportError as e:
@@ -25,4 +26,5 @@ __all__ = [
     "clean_cube",
     "psf_gaussian_width",
     "convolve_centered",
+    "lbfgs_minimize",
 ]
