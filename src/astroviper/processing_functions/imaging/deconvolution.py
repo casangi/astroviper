@@ -721,6 +721,100 @@ def deconvolve(
     return imaging_dict
 
 
+def _hogbom_peak_cube(residual_cube, mask_cube, clean_box):
+    """Return the absolute residual peak in each CLEAN search region."""
+    _, _, _, ny, nx = residual_cube.shape
+    xbeg, xend, ybeg, yend = clean_box
+    xbeg = 0 if xbeg == -1 else max(0, min(xbeg, nx - 1))
+    xend = nx if xend == -1 else max(xbeg + 1, min(xend, nx))
+    ybeg = 0 if ybeg == -1 else max(0, min(ybeg, ny - 1))
+    yend = ny if yend == -1 else max(ybeg + 1, min(yend, ny))
+
+    search = np.abs(residual_cube[..., ybeg:yend, xbeg:xend])
+    if mask_cube is not None:
+        search = np.where(
+            mask_cube[..., ybeg:yend, xbeg:xend],
+            search,
+            0.0,
+        )
+    return np.max(search, axis=(-2, -1))
+
+
+def _run_hogbom_with_cycle_checks(
+    clean_cube,
+    *,
+    residual_cube,
+    psf_cube,
+    model_cube,
+    peak_mask_cube,
+    mask_arg,
+    clean_box,
+    max_iter_per_cycle,
+    threshold_per_cycle,
+    gain,
+    processing_function_threads,
+):
+    """Run CASA-sized CLEAN batches and stop planes whose residual diverges."""
+    iterations = np.zeros(max_iter_per_cycle.shape, dtype=np.int64)
+    final_peak = _hogbom_peak_cube(residual_cube, peak_mask_cube, clean_box)
+    minimum_peak = final_peak.copy()
+    diverged = np.zeros(max_iter_per_cycle.shape, dtype=bool)
+
+    active = (max_iter_per_cycle > 0) & (final_peak >= threshold_per_cycle)
+    while np.any(active):
+        remaining = np.maximum(max_iter_per_cycle - iterations, 0)
+        # CASA checks long minor cycles after 2000 iterations. Cycles shorter
+        # than 5000 iterations are executed as a single batch.
+        batch_max_iter_remaining = np.where(
+            remaining < 5000,
+            remaining,
+            np.minimum(remaining, 2000),
+        )
+        batch_max_iter_remaining = np.where(active, batch_max_iter_remaining, 0).astype(
+            max_iter_per_cycle.dtype
+        )
+        batch_max_iter_remaining = np.ascontiguousarray(batch_max_iter_remaining)
+
+        result = clean_cube(
+            residual_cube=residual_cube,
+            psf_cube=psf_cube,
+            model_cube=model_cube,
+            mask_cube=mask_arg,
+            clean_box=clean_box,
+            max_iter_remaining=batch_max_iter_remaining,
+            gain=gain,
+            threshold=threshold_per_cycle,
+            processing_function_threads=int(processing_function_threads),
+        )
+        performed = np.asarray(result["iterations_performed"], dtype=np.int64)
+        current_peak = np.asarray(result["final_peak"], dtype=final_peak.dtype)
+        iterations += performed
+        final_peak = np.where(active, current_peak, final_peak)
+
+        finite_minimum = np.isfinite(minimum_peak) & (minimum_peak > 0.0)
+        rose_from_minimum = finite_minimum & (final_peak > 1.1 * minimum_peak)
+        nonfinite = ~np.isfinite(final_peak)
+        diverged |= active & (rose_from_minimum | nonfinite)
+        minimum_peak = np.where(
+            np.isfinite(final_peak) & (final_peak < minimum_peak),
+            final_peak,
+            minimum_peak,
+        )
+
+        converged = final_peak <= threshold_per_cycle
+        exhausted = iterations >= max_iter_per_cycle
+        no_progress = performed <= 0
+        active &= ~(converged | exhausted | diverged | no_progress)
+
+    return {
+        "iterations_performed": iterations,
+        "final_peak": final_peak,
+        "total_flux_cleaned": np.sum(np.abs(model_cube), axis=(-2, -1)),
+        "converged": final_peak <= threshold_per_cycle,
+        "diverged": diverged,
+    }
+
+
 def hogbom_clean(
     residual_cube: np.ndarray,
     psf_cube: np.ndarray,
@@ -777,7 +871,8 @@ def hogbom_clean(
     dict
         Per-plane summary arrays with shape ``(nt, nf, np)`` and keys
         ``iterations_performed`` (int), ``final_peak`` (float),
-        ``total_flux_cleaned`` (float), and ``converged`` (bool). The
+        ``total_flux_cleaned`` (float), ``converged`` (bool), and ``diverged``
+        (bool). The
         final residual and model cubes are the caller-supplied arrays,
         updated in place.
 
@@ -854,15 +949,17 @@ def hogbom_clean(
         deconvolve_params, nt, nf, npol_img, residual_cube.dtype
     )
 
-    return hogbom.clean_cube(
+    return _run_hogbom_with_cycle_checks(
+        hogbom.clean_cube,
         residual_cube=residual_cube,
         psf_cube=psf_cube,
         model_cube=model_cube,
-        mask_cube=mask_arg,
+        peak_mask_cube=mask_cube,
+        mask_arg=mask_arg,
         clean_box=clean_box,
-        max_iter_remaining=max_iter_per_cycle,
+        max_iter_per_cycle=max_iter_per_cycle,
         gain=deconvolve_params["gain"],
-        threshold=threshold_per_cycle,
+        threshold_per_cycle=threshold_per_cycle,
         processing_function_threads=int(processing_function_threads),
     )
 
@@ -943,15 +1040,17 @@ def hogbom_clean_many_threads(
         deconvolve_params, nt, nf, npol_img, residual_cube.dtype
     )
 
-    return hogbom.clean_cube_many_threads(
+    return _run_hogbom_with_cycle_checks(
+        hogbom.clean_cube_many_threads,
         residual_cube=residual_cube,
         psf_cube=psf_cube,
         model_cube=model_cube,
-        mask_cube=mask_arg,
+        peak_mask_cube=mask_cube,
+        mask_arg=mask_arg,
         clean_box=clean_box,
-        max_iter_remaining=max_iter_per_cycle,
+        max_iter_per_cycle=max_iter_per_cycle,
         gain=deconvolve_params["gain"],
-        threshold=threshold_per_cycle,
+        threshold_per_cycle=threshold_per_cycle,
         processing_function_threads=int(processing_function_threads),
     )
 
