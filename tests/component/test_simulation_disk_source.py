@@ -52,9 +52,11 @@ CELL_SIZE = np.array([-CELL_ARCSEC, CELL_ARCSEC]) * ARC
 
 
 @pytest.mark.parametrize(
-    ("deconvolver", "niter"), [("hogbom_many_threads", 5000), ("asp", 3000)]
+    ("deconvolver", "max_iter"), [("hogbom_many_threads", 5000), ("asp", 3000)]
 )
-def test_protoplanetary_disk_is_simulated_and_recovered(tmp_path, deconvolver, niter):
+def test_protoplanetary_disk_is_simulated_and_recovered(
+    tmp_path, deconvolver, max_iter
+):
     ps_store = str(tmp_path / "disk_sim.ps.zarr")
     image_store = str(tmp_path / "disk_sim.img.zarr")
     antenna_xds = read_telescope_layout("alma.cycle8.4")
@@ -138,14 +140,14 @@ def test_protoplanetary_disk_is_simulated_and_recovered(tmp_path, deconvolver, n
             "casa_weighting_implementation": True,
         },
         iteration_control_params={
-            "niter": niter,
-            "nmajor": -1,
+            "max_iter": max_iter,
+            "max_cycles": -1,
             "threshold": 1e-4,
             "gain": 0.1,
-            "cyclefactor": 1.5,
-            "cycleniter": -1,
-            "minpsffraction": 0.05,
-            "maxpsffraction": 0.8,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": -1,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
             "primary_beam_limit": 0.2,
         },
         gridder="prolate_spheroidal",

@@ -16,14 +16,14 @@ def imaging_preparation_single_field(
     psf_fitting_method="astroviper",
     task_id=0,
 ):
-    """Run the once-per-chunk imaging setup before the major-cycle loop.
+    """Run the once-per-chunk imaging setup before the imaging cycle loop.
 
     Everything that is done a single time per chunk happens here:
 
     * construction of the :class:`IterationController` and the (empty) combined
       return dict, and
     * the imaging weights, the point spread function and the primary beam (via
-      :func:`~astroviper.processing_functions.imaging.residual_cycle.imaging_setup_single_field`).
+      :func:`~astroviper.processing_functions.imaging.residual_update.imaging_setup_single_field`).
 
     The dirty image and the first model update are deliberately NOT done here --
     they are the first iteration of the loop in :func:`image_cube_single_field`.
@@ -42,57 +42,85 @@ def imaging_preparation_single_field(
         Weighting scheme configuration: ``weighting`` (``"natural"`` or
         ``"briggs"``) and the Briggs ``robust`` parameter.
     iteration_control_params : dict
-        CLEAN minor/major-cycle iteration controls, matching the meaning of the
-        corresponding CASA ``tclean`` parameters. Iteration control is performed
-        **independently per** ``(time, frequency, polarization)`` **plane**: each
-        plane carries its own iteration budget and stopping thresholds, and the
-        major-cycle loop continues until *every* selected plane has stopped --
-        the one deliberate difference from CASA, whose ``niter`` budget is global
-        across the image. Keys:
+        CLEAN iteration controls. An **imaging cycle** (below simply a cycle)
+        is one **residual update** (degrid the model, form residual
+        visibilities, grid and inverse FFT them into the residual image)
+        followed by one **model update** (deconvolve the residual image into
+        the sky model). Every limit and threshold is applied independently to
+        each ``(time, frequency, polarization)`` plane: a plane stops when it
+        meets its own criterion. The imaging cycle loop runs separately for
+        every frequency channel (the node task images one channel at a time),
+        so a channel's cycles continue until all of its (time, polarization)
+        planes have stopped, and a channel that has stopped does no further
+        residual updates while the others carry on. The CASA ``tclean``
+        equivalent is given in brackets. Keys:
 
-        - ``niter`` : Maximum number of minor-cycle CLEAN iterations (flux
-          components) per plane, summed over all major cycles. A plane stops once
-          it has spent this budget; ``niter=0`` makes only the dirty image (no
-          deconvolution).
-        - ``nmajor`` : Maximum number of deconvolving major cycles (each a
-          residual update followed by a minor cycle). ``nmajor=N`` performs ``N``
-          deconvolutions -- the dirty image is computed inside the first such
-          cycle, matching CASA's ``nmajor`` -- and ``nmajor=-1`` removes the
-          major-cycle limit. Shared across planes (not tracked per plane).
-        - ``threshold`` : Absolute stopping threshold, given as a float in Jy. A
-          plane stops when its peak residual inside the clean mask falls to or
-          below ``threshold``; the value is also a hard floor on the
-          per-minor-cycle ``cyclethreshold`` (below). ``threshold=0`` disables
-          the absolute stop.
-        - ``primary_beam_limit`` : Primary-beam mask cutoff as a fraction of the
-          peak primary beam, in ``[0, 1]`` (the analogue of CASA's ``pblimit`` /
-          ``pbmask``). Pixels where the primary beam is below this fraction are
-          excluded from cleaning. A masking cutoff, distinct from ``threshold``.
-        - ``gain`` : CLEAN loop gain -- the fraction of the selected peak flux
-          subtracted from the residual image each minor iteration
-          (``0 < gain <= 1``).
-        - ``cyclefactor`` : Scaling applied to the brightest PSF sidelobe level
-          when setting the minor-cycle stopping depth (see ``cyclethreshold``
-          below). Larger values trigger the next major cycle sooner; smaller
-          values clean deeper before each residual update.
-        - ``cycleniter`` : Maximum number of minor-cycle iterations a plane may
-          run before a major cycle is triggered. ``cycleniter=-1`` lets the
-          adaptive ``cyclethreshold`` govern the depth instead; otherwise the
-          count is clamped to never exceed the plane's remaining ``niter``.
-        - ``minpsffraction`` : Lower clamp on the PSF fraction used to set the
-          minor-cycle threshold ``cyclethreshold = clamp(max_psf_sidelobe *
-          cyclefactor, minpsffraction, maxpsffraction) * peak_residual`` (then
-          floored at ``threshold``). Raising it limits how deep a single minor
-          cycle cleans.
-        - ``maxpsffraction`` : Upper clamp on that same PSF fraction; it
-          guarantees a minimum amount of cleaning per minor cycle even when the
-          PSF sidelobe level is high.
+        - ``max_iter`` [CASA ``niter``] : Maximum number of deconvolution
+          iterations (flux components) per plane, summed over all cycles. A
+          plane stops once it has spent this budget. ``max_iter = 0`` makes
+          only the dirty image (no deconvolution). *Differs from CASA*: CASA's
+          ``niter`` is one budget for the whole image; here every plane gets
+          the full value, and no budget is shared or split between planes.
+        - ``max_cycles`` [CASA ``nmajor``] : Maximum number of cycles.
+          ``max_cycles = N`` performs ``N`` model updates; the dirty image is
+          made by the residual update of the first cycle, and a closing
+          residual update follows the last model update so that the written
+          residual reflects the final model. ``max_cycles = 0`` makes only the
+          dirty image; ``max_cycles = -1`` removes the limit. Counted per
+          frequency channel: a channel that converges early stops cycling while
+          the others continue.
+        - ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, as a
+          float in Jy. A plane stops when its peak residual inside the clean
+          mask falls to or below ``threshold``; the value is also a hard floor
+          on ``threshold_per_cycle``. ``threshold = 0`` disables the absolute
+          stop. *Differs from CASA*: a float in Jy only, no ``'1mJy'`` strings.
+        - ``threshold_sigma`` [CASA ``nsigma``] : Noise based stopping threshold
+          per plane, as a multiple of the plane's robust residual rms
+          (``1.4826 * MAD``). The effective threshold of a plane is
+          ``max(threshold, threshold_sigma * rms)`` and it floors
+          ``threshold_per_cycle`` in the same way. ``0`` disables it. Reserved:
+          accepted but not yet implemented.
+        - ``primary_beam_limit`` [CASA ``pblimit`` / ``pbmask``] : Primary beam
+          mask cutoff as a fraction of the peak primary beam, in ``[0, 1]``.
+          Pixels where the primary beam is below this fraction are excluded
+          from cleaning. A masking cutoff, distinct from ``threshold``.
+        - ``gain`` [CASA ``gain``] : CLEAN loop gain, the fraction of the
+          selected peak flux subtracted from the residual image at each
+          deconvolution iteration (``0 < gain <= 1``).
+        - ``psf_sidelobe_factor`` [CASA ``cyclefactor``] : Multiplier applied to
+          the measured peak PSF sidelobe level (``max_psf_sidelobe``) when
+          setting how deep one model update cleans (see
+          ``threshold_per_cycle``). Larger values trigger the next residual
+          update sooner; smaller values clean deeper before each residual
+          update.
+        - ``max_iter_per_cycle`` [CASA ``cycleniter``] : Maximum number of
+          deconvolution iterations a plane may run in one cycle's model update
+          before the next residual update is triggered. ``max_iter_per_cycle =
+          -1`` lets the adaptive ``threshold_per_cycle`` govern the depth
+          instead; otherwise the count is clamped to never exceed the plane's
+          remaining ``max_iter``.
+        - ``min_psf_fraction`` [CASA ``minpsffraction``] : Lower clamp on the PSF
+          fraction defined below. Raising it limits how deep a single model
+          update cleans.
+        - ``max_psf_fraction`` [CASA ``maxpsffraction``] : Upper clamp on the
+          same PSF fraction; it guarantees a minimum amount of cleaning per
+          model update even when the PSF sidelobe level is high.
+
+        Derived per plane before each model update (not set by the caller):
+        ``psf_fraction = clamp(max_psf_sidelobe * psf_sidelobe_factor,
+        min_psf_fraction, max_psf_fraction)`` is the fraction of the current
+        peak residual down to which one model update cleans, and
+        ``threshold_per_cycle = max(psf_fraction * peak_residual, threshold)``
+        is the stopping threshold of that model update, where
+        ``peak_residual`` is the plane's peak residual inside the mask at the
+        start of the cycle. The deconvolver also receives the per-plane
+        ``max_iter_per_cycle``, ``min(max_iter_per_cycle, remaining max_iter)``.
     processing_set_data_group_name : str, optional
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     single_precision_image : bool, optional
         If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
-        images) are single precision (``complex64`` / ``float32``) and the minor
-        cycle runs in single precision; the visibilities always stay double
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
         precision. If ``False`` the image-domain arrays are double precision.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
@@ -108,12 +136,12 @@ def imaging_preparation_single_field(
     Returns
     -------
     controller : IterationController
-        Freshly constructed controller (``stopcode.major == 0``).
+        Freshly constructed controller (``stopcode.imaging == 0``).
     img_xds : xarray.Dataset
         Image dataset with the PSF and primary beam, in the Stokes basis.
     return_df : pandas.DataFrame
         One-row timing frame from the setup step.
-    combined_deconvolve_dict : ReturnDict
+    combined_imaging_dict : ImagingDict
         Empty accumulator for the per-plane convergence statistics.
     T_setup : float
         Wall-clock time of the setup step (seconds).
@@ -122,27 +150,27 @@ def imaging_preparation_single_field(
 
     import toolviper.utils.logger as logger
 
-    from astroviper.processing_functions.imaging.residual_cycle import (
+    from astroviper.processing_functions.imaging.residual_update import (
         imaging_setup_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (
+        ImagingDict,
         IterationController,
-        ReturnDict,
     )
 
     logger.debug("Processing chunk " + str(task_id))
 
     controller = IterationController(
-        niter=iteration_control_params["niter"],
-        nmajor=iteration_control_params["nmajor"],
+        max_iter=iteration_control_params["max_iter"],
+        max_cycles=iteration_control_params["max_cycles"],
         threshold=iteration_control_params["threshold"],
         gain=iteration_control_params["gain"],
-        cyclefactor=iteration_control_params["cyclefactor"],
-        minpsffraction=iteration_control_params["minpsffraction"],
-        maxpsffraction=iteration_control_params["maxpsffraction"],
-        cycleniter=iteration_control_params["cycleniter"],
+        psf_sidelobe_factor=iteration_control_params["psf_sidelobe_factor"],
+        min_psf_fraction=iteration_control_params["min_psf_fraction"],
+        max_psf_fraction=iteration_control_params["max_psf_fraction"],
+        max_iter_per_cycle=iteration_control_params["max_iter_per_cycle"],
     )
-    combined_deconvolve_dict = ReturnDict()
+    combined_imaging_dict = ImagingDict()
 
     # Once-only imaging setup: imaging weights, PSF and primary beam. The dirty
     # image and the model update are NOT done here.
@@ -161,7 +189,7 @@ def imaging_preparation_single_field(
     )
     T_setup = time.time() - start
 
-    return controller, img_xds, return_df, combined_deconvolve_dict, T_setup
+    return controller, img_xds, return_df, combined_imaging_dict, T_setup
 
 
 @shares_param_docs
@@ -183,13 +211,20 @@ def image_cube_single_field(
     psf_fitting_method="astroviper",
     task_id=0,
 ):
-    """Run the major/minor cycle CLEAN loop for one single-field image chunk.
+    """Run the imaging cycle CLEAN loop for one single-field image chunk.
 
     Performs the once-per-chunk setup (imaging weights, PSF, primary beam), then
-    iterates residual (major) and model-update (minor) cycles under the
+    iterates imaging cycles (a residual update followed by a model update) under the
     :class:`IterationController` until convergence, finishing with a last
-    residual cycle that produces the final residual image.  Every processing
+    residual update that produces the final residual image.  Every processing
     function is timed; the totals are returned as a one-row timing frame.
+
+    Operates on the full ``(time, frequency, polarization, l, m)`` cube it is
+    given: every plane is controlled independently and the loop runs until all
+    planes have stopped. The imaging node task calls this function once per
+    frequency channel so that each channel runs its own imaging cycle loop (a
+    converged channel then does no further residual updates); nothing here
+    assumes a single channel, and multi-channel cubes are imaged in one call.
 
     Parameters
     ----------
@@ -205,55 +240,83 @@ def image_cube_single_field(
         Weighting scheme configuration: ``weighting`` (``"natural"`` or
         ``"briggs"``) and the Briggs ``robust`` parameter.
     iteration_control_params : dict
-        CLEAN minor/major-cycle iteration controls, matching the meaning of the
-        corresponding CASA ``tclean`` parameters. Iteration control is performed
-        **independently per** ``(time, frequency, polarization)`` **plane**: each
-        plane carries its own iteration budget and stopping thresholds, and the
-        major-cycle loop continues until *every* selected plane has stopped --
-        the one deliberate difference from CASA, whose ``niter`` budget is global
-        across the image. Keys:
+        CLEAN iteration controls. An **imaging cycle** (below simply a cycle)
+        is one **residual update** (degrid the model, form residual
+        visibilities, grid and inverse FFT them into the residual image)
+        followed by one **model update** (deconvolve the residual image into
+        the sky model). Every limit and threshold is applied independently to
+        each ``(time, frequency, polarization)`` plane: a plane stops when it
+        meets its own criterion. The imaging cycle loop runs separately for
+        every frequency channel (the node task images one channel at a time),
+        so a channel's cycles continue until all of its (time, polarization)
+        planes have stopped, and a channel that has stopped does no further
+        residual updates while the others carry on. The CASA ``tclean``
+        equivalent is given in brackets. Keys:
 
-        - ``niter`` : Maximum number of minor-cycle CLEAN iterations (flux
-          components) per plane, summed over all major cycles. A plane stops once
-          it has spent this budget; ``niter=0`` makes only the dirty image (no
-          deconvolution).
-        - ``nmajor`` : Maximum number of deconvolving major cycles (each a
-          residual update followed by a minor cycle). ``nmajor=N`` performs ``N``
-          deconvolutions -- the dirty image is computed inside the first such
-          cycle, matching CASA's ``nmajor`` -- and ``nmajor=-1`` removes the
-          major-cycle limit. Shared across planes (not tracked per plane).
-        - ``threshold`` : Absolute stopping threshold, given as a float in Jy. A
-          plane stops when its peak residual inside the clean mask falls to or
-          below ``threshold``; the value is also a hard floor on the
-          per-minor-cycle ``cyclethreshold`` (below). ``threshold=0`` disables
-          the absolute stop.
-        - ``primary_beam_limit`` : Primary-beam mask cutoff as a fraction of the
-          peak primary beam, in ``[0, 1]`` (the analogue of CASA's ``pblimit`` /
-          ``pbmask``). Pixels where the primary beam is below this fraction are
-          excluded from cleaning. A masking cutoff, distinct from ``threshold``.
-        - ``gain`` : CLEAN loop gain -- the fraction of the selected peak flux
-          subtracted from the residual image each minor iteration
-          (``0 < gain <= 1``).
-        - ``cyclefactor`` : Scaling applied to the brightest PSF sidelobe level
-          when setting the minor-cycle stopping depth (see ``cyclethreshold``
-          below). Larger values trigger the next major cycle sooner; smaller
-          values clean deeper before each residual update.
-        - ``cycleniter`` : Maximum number of minor-cycle iterations a plane may
-          run before a major cycle is triggered. ``cycleniter=-1`` lets the
-          adaptive ``cyclethreshold`` govern the depth instead; otherwise the
-          count is clamped to never exceed the plane's remaining ``niter``.
-        - ``minpsffraction`` : Lower clamp on the PSF fraction used to set the
-          minor-cycle threshold ``cyclethreshold = clamp(max_psf_sidelobe *
-          cyclefactor, minpsffraction, maxpsffraction) * peak_residual`` (then
-          floored at ``threshold``). Raising it limits how deep a single minor
-          cycle cleans.
-        - ``maxpsffraction`` : Upper clamp on that same PSF fraction; it
-          guarantees a minimum amount of cleaning per minor cycle even when the
-          PSF sidelobe level is high.
+        - ``max_iter`` [CASA ``niter``] : Maximum number of deconvolution
+          iterations (flux components) per plane, summed over all cycles. A
+          plane stops once it has spent this budget. ``max_iter = 0`` makes
+          only the dirty image (no deconvolution). *Differs from CASA*: CASA's
+          ``niter`` is one budget for the whole image; here every plane gets
+          the full value, and no budget is shared or split between planes.
+        - ``max_cycles`` [CASA ``nmajor``] : Maximum number of cycles.
+          ``max_cycles = N`` performs ``N`` model updates; the dirty image is
+          made by the residual update of the first cycle, and a closing
+          residual update follows the last model update so that the written
+          residual reflects the final model. ``max_cycles = 0`` makes only the
+          dirty image; ``max_cycles = -1`` removes the limit. Counted per
+          frequency channel: a channel that converges early stops cycling while
+          the others continue.
+        - ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, as a
+          float in Jy. A plane stops when its peak residual inside the clean
+          mask falls to or below ``threshold``; the value is also a hard floor
+          on ``threshold_per_cycle``. ``threshold = 0`` disables the absolute
+          stop. *Differs from CASA*: a float in Jy only, no ``'1mJy'`` strings.
+        - ``threshold_sigma`` [CASA ``nsigma``] : Noise based stopping threshold
+          per plane, as a multiple of the plane's robust residual rms
+          (``1.4826 * MAD``). The effective threshold of a plane is
+          ``max(threshold, threshold_sigma * rms)`` and it floors
+          ``threshold_per_cycle`` in the same way. ``0`` disables it. Reserved:
+          accepted but not yet implemented.
+        - ``primary_beam_limit`` [CASA ``pblimit`` / ``pbmask``] : Primary beam
+          mask cutoff as a fraction of the peak primary beam, in ``[0, 1]``.
+          Pixels where the primary beam is below this fraction are excluded
+          from cleaning. A masking cutoff, distinct from ``threshold``.
+        - ``gain`` [CASA ``gain``] : CLEAN loop gain, the fraction of the
+          selected peak flux subtracted from the residual image at each
+          deconvolution iteration (``0 < gain <= 1``).
+        - ``psf_sidelobe_factor`` [CASA ``cyclefactor``] : Multiplier applied to
+          the measured peak PSF sidelobe level (``max_psf_sidelobe``) when
+          setting how deep one model update cleans (see
+          ``threshold_per_cycle``). Larger values trigger the next residual
+          update sooner; smaller values clean deeper before each residual
+          update.
+        - ``max_iter_per_cycle`` [CASA ``cycleniter``] : Maximum number of
+          deconvolution iterations a plane may run in one cycle's model update
+          before the next residual update is triggered. ``max_iter_per_cycle =
+          -1`` lets the adaptive ``threshold_per_cycle`` govern the depth
+          instead; otherwise the count is clamped to never exceed the plane's
+          remaining ``max_iter``.
+        - ``min_psf_fraction`` [CASA ``minpsffraction``] : Lower clamp on the PSF
+          fraction defined below. Raising it limits how deep a single model
+          update cleans.
+        - ``max_psf_fraction`` [CASA ``maxpsffraction``] : Upper clamp on the
+          same PSF fraction; it guarantees a minimum amount of cleaning per
+          model update even when the PSF sidelobe level is high.
+
+        Derived per plane before each model update (not set by the caller):
+        ``psf_fraction = clamp(max_psf_sidelobe * psf_sidelobe_factor,
+        min_psf_fraction, max_psf_fraction)`` is the fraction of the current
+        peak residual down to which one model update cleans, and
+        ``threshold_per_cycle = max(psf_fraction * peak_residual, threshold)``
+        is the stopping threshold of that model update, where
+        ``peak_residual`` is the plane's peak residual inside the mask at the
+        start of the cycle. The deconvolver also receives the per-plane
+        ``max_iter_per_cycle``, ``min(max_iter_per_cycle, remaining max_iter)``.
     processing_set_data_group_name : str, optional
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     deconvolver : str, optional
-        Deconvolution algorithm for the minor cycle. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
+        Deconvolution algorithm for the model update. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
         (C++, threaded across *and* within planes -- faster when there are
         few planes, e.g. single-channel imaging) or ``"asp"``.
     instrument_polarization_basis : str, optional
@@ -262,8 +325,8 @@ def image_cube_single_field(
         output image is always produced in the Stokes basis.
     single_precision_image : bool, optional
         If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
-        images) are single precision (``complex64`` / ``float32``) and the minor
-        cycle runs in single precision; the visibilities always stay double
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
         precision. If ``False`` the image-domain arrays are double precision.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
@@ -298,8 +361,8 @@ def image_cube_single_field(
         restored image.
     timing_df : pandas.DataFrame
         One-row frame with a ``T_*`` column per processing function plus
-        ``task_id``, ``n_channels`` and ``n_major_cycles``.
-    combined_deconvolve_dict : ReturnDict
+        ``task_id``, ``n_channels`` and ``n_cycles``.
+    combined_imaging_dict : ImagingDict
         Per-plane convergence statistics for this chunk.  Channel labels are
         chunk-local (0-based); the node task remaps them to global channel
         numbers before the reduce.
@@ -309,31 +372,31 @@ def image_cube_single_field(
     import pandas as pd
     import toolviper.utils.logger as logger
 
-    from astroviper.processing_functions.imaging.model_update_cycle import (
-        model_update_cycle_cube_single_field,
+    from astroviper.processing_functions.imaging.model_update import (
+        model_update_cube_single_field,
     )
-    from astroviper.processing_functions.imaging.residual_cycle import (
-        residual_cycle_cube_single_field,
+    from astroviper.processing_functions.imaging.residual_update import (
+        residual_update_cube_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (
-        ReturnDict,
         accumulate_timing,
+        build_residual_imaging_dict,
         get_calculate_cycle_controls,
-        merge_return_dicts,
+        merge_imaging_dicts,
     )
 
     if image_data_variables_keep is None:
         image_data_variables_keep = []
 
     # All once-only work -- controller setup, imaging weights, PSF and primary
-    # beam creation -- happens in the preparation step before the major-cycle
+    # beam creation -- happens in the preparation step before the imaging cycle
     # loop. The dirty image and the first model update are the first iteration
     # of the loop below.
     (
         controller,
         img_xds,
         setup_return_df,
-        combined_deconvolve_dict,
+        combined_imaging_dict,
         T_setup,
     ) = imaging_preparation_single_field(
         ps_xdt,
@@ -353,8 +416,8 @@ def image_cube_single_field(
     # Per-chunk timing accumulator, grouped by pipeline phase. The preparation
     # (setup) sub-timings are namespaced (``T_prep_*``) because several of them
     # (``T_transform_pol``, ``T_fft_norm``, ``T_gcf``, ...) share names with the
-    # residual cycle and would otherwise be summed into one indistinguishable
-    # number. Phase totals: T_prep, T_residual_cycle, T_model_update_cycle,
+    # residual update and would otherwise be summed into one indistinguishable
+    # number. Phase totals: T_prep, T_residual_update, T_model_update,
     # T_restore.
     timing = {"T_prep": T_setup}
     accumulate_timing(timing, setup_return_df, phase="prep")
@@ -362,24 +425,23 @@ def image_cube_single_field(
     # Phase totals plus the two model-phase leaves measured here: iteration
     # control and the convergence/merge bookkeeping run in this loop (not inside
     # a processing function), so they are timed inline.
-    timing["T_residual_cycle"] = 0.0
-    timing["T_model_update_cycle"] = 0.0
+    timing["T_residual_update"] = 0.0
+    timing["T_model_update"] = 0.0
     timing["T_iteration_control"] = 0.0
     timing["T_convergence"] = 0.0
 
-    is_n_iter_0 = True
-    n_major_cycles = 0
-    while controller.stopcode.major == 0:
-        n_major_cycles += 1
-        # print("*********** This is major cycle ", n_major_cycles)
+    model_exists = False
+    n_cycles = 0
+    while controller.stopcode.imaging == 0:
+        n_cycles += 1
 
         # ---- Residual-update phase ----
         start = time.time()
-        img_xds, residual_return_df = residual_cycle_cube_single_field(
+        img_xds, residual_return_df = residual_update_cube_single_field(
             ps_xdt,
             img_xds,
             image_params,
-            is_n_iter_0,
+            model_exists,
             processing_set_data_group_name=processing_set_data_group_name,
             instrument_polarization_basis=instrument_polarization_basis,
             single_precision_image=single_precision_image,
@@ -387,15 +449,24 @@ def image_cube_single_field(
             fft_backend=fft_backend,
             image_data_variables_keep=image_data_variables_keep,
         )
-        timing["T_residual_cycle"] += time.time() - start
+        timing["T_residual_update"] += time.time() - start
         accumulate_timing(timing, residual_return_df)
+
+        # Check convergence against the fresh residual before deconvolving,
+        # so e.g. max_cycles=0 stops here without spending any iterations.
+        residual_imaging_dict = build_residual_imaging_dict(
+            img_xds,
+            image_data_group_in_name="residual",
+            iteration_control_params=iteration_control_params,
+        )
+        pre_stopcode, pre_stopdesc = controller.check_convergence(residual_imaging_dict)
 
         # ---- Model-update phase (iteration control + deconvolve + convergence) ----
         model_phase_start = time.time()
-        if iteration_control_params["niter"] > 0:
+        if pre_stopcode.imaging == 0 and iteration_control_params["max_iter"] > 0:
             logger.debug("Doing model update")
             # Size the controller's per-plane state to this cube so iteration
-            # control (niter and threshold) is tracked independently for every
+            # control (max_iter and threshold) is tracked independently for every
             # (time, frequency, polarization) plane before the deconvolver runs.
             start = time.time()
             controller.ensure_planes(
@@ -403,93 +474,82 @@ def image_cube_single_field(
                 img_xds.sizes["frequency"],
                 img_xds.sizes["polarization"],
             )
-            (
-                cycle_niter,
-                cyclethreshold,
-                cyclethreshold_per_plane,
-            ) = get_calculate_cycle_controls(
+            max_iter_per_cycle, threshold_per_cycle = get_calculate_cycle_controls(
                 controller,
-                combined_deconvolve_dict,
+                combined_imaging_dict,
                 img_xds,
-                is_n_iter_0,
+                model_exists,
                 iteration_control_params=iteration_control_params,
+                residual_imaging_dict=residual_imaging_dict,
             )
             timing["T_iteration_control"] += time.time() - start
 
-            # Build the per-cycle deconvolution parameters as a fresh dict (the
-            # shared iteration_control_params is never mutated). ``threshold``
-            # stays the absolute user stopping threshold (the floor); the
-            # adaptive minor-cycle controls are the representative scalar
-            # ``cyclethreshold`` plus the per-plane remaining iterations and
-            # ``cyclethreshold_per_plane`` arrays that actually drive the
-            # deconvolver.
+            # Per-cycle deconvolution parameters as a fresh dict (the shared
+            # iteration_control_params is never mutated). ``threshold`` stays
+            # the absolute user stopping threshold (the floor); the per-plane
+            # ``max_iter_per_cycle`` (min(max_iter_per_cycle, remaining max_iter)
+            # for every plane) and ``threshold_per_cycle`` arrays drive the
+            # deconvolver. Without the per-cycle cap one model update would be
+            # handed the whole remaining budget and, with threshold_per_cycle 0,
+            # spend all of max_iter at once, collapsing the run to one cycle.
             deconvolve_params = {
                 **iteration_control_params,
-                "cycleniter": cycle_niter,
-                "cyclethreshold": cyclethreshold,
-                # Cap this minor cycle at cycle_niter (= min(cycleniter,
-                # remaining)). The deconvolver uses niter_per_plane as its
-                # per-plane max_iter and never reads "cycleniter"; without this
-                # clamp a single minor cycle is handed the full remaining budget
-                # and (when cyclethreshold is 0) consumes all of niter at once,
-                # collapsing the run to one major cycle. Clamping here makes
-                # cycleniter actually bound each minor cycle so nmajor major
-                # cycles run as intended. .clip returns a copy (the controller's
-                # own remaining-budget array is decremented later by update_counts).
-                "niter_per_plane": controller.niter.clip(max=cycle_niter),
-                "cyclethreshold_per_plane": cyclethreshold_per_plane,
+                "max_iter_per_cycle": max_iter_per_cycle,
+                "threshold_per_cycle": threshold_per_cycle,
             }
 
             (
-                deconvolve_dict,
+                imaging_dict,
                 model_update_return_df,
-            ) = model_update_cycle_cube_single_field(
+            ) = model_update_cube_single_field(
                 img_xds,
                 deconvolver,
                 deconvolve_params,
-                is_n_iter_0=is_n_iter_0,
+                model_exists=model_exists,
                 processing_function_threads=processing_function_threads,
                 image_data_group_in_name="residual",
                 image_data_group_out_name="model",
             )
             accumulate_timing(timing, model_update_return_df)
-            # print("cycleniter: ", cycle_niter)
-            # print("cyclethreshold: ", cyclethreshold)
-            # print("niter_per_plane: ", controller.niter)
-            # print("cyclethreshold_per_plane", cyclethreshold_per_plane)
-        else:
-            deconvolve_dict = ReturnDict()
 
-        is_n_iter_0 = False
+            # Only flip once a deconvolve actually runs: if every cycle is
+            # skipped, no model is ever created, and the closing residual update
+            # below must not try to subtract one that doesn't exist.
+            model_exists = True
+        else:
+            if pre_stopcode.imaging != 0:
+                logger.debug(f"  *** CONVERGED before model update: {pre_stopdesc} ***")
+            imaging_dict = residual_imaging_dict
 
         start = time.time()
-        controller.update_counts(deconvolve_dict)
+        controller.update_counts(imaging_dict)
 
-        # check_convergence stamps the stop code into deconvolve_dict, so run
+        # check_convergence stamps the stop code into imaging_dict, so run
         # it before the merge to carry that stop code into the combined dict.
-        stopcode, stopdesc = controller.check_convergence(deconvolve_dict)
-        combined_deconvolve_dict = merge_return_dicts(
-            [combined_deconvolve_dict, deconvolve_dict]
+        stopcode, stopdesc = controller.check_convergence(imaging_dict)
+        combined_imaging_dict = merge_imaging_dicts(
+            [combined_imaging_dict, imaging_dict]
         )
         timing["T_convergence"] += time.time() - start
 
         # Model-update phase total: iteration control + deconvolve +
-        # convergence (everything done after each residual cycle).
-        timing["T_model_update_cycle"] += time.time() - model_phase_start
+        # convergence (everything done after each residual update).
+        timing["T_model_update"] += time.time() - model_phase_start
 
-        if stopcode.major != 0:
+        if stopcode.imaging != 0:
             logger.debug(f"  *** CONVERGED: {stopdesc} ***")
             break
 
-    # Last residual cycle to compute the final residual image after the last
-    # model-update cycle.
-    if iteration_control_params["niter"] > 0:
+    # Closing residual update: the final residual image after the last model
+    # update. Skipped when no model update ever ran (the residual on img_xds is
+    # then already the dirty image).
+    if model_exists:
         start = time.time()
-        img_xds, residual_return_df = residual_cycle_cube_single_field(
+        img_xds, residual_return_df = residual_update_cube_single_field(
             ps_xdt,
             img_xds,
             image_params,
-            is_n_iter_0,
+            model_exists,
             processing_set_data_group_name=processing_set_data_group_name,
             instrument_polarization_basis=instrument_polarization_basis,
             single_precision_image=single_precision_image,
@@ -497,15 +557,15 @@ def image_cube_single_field(
             fft_backend=fft_backend,
             image_data_variables_keep=image_data_variables_keep,
         )
-        timing["T_residual_cycle"] += time.time() - start
+        timing["T_residual_update"] += time.time() - start
         accumulate_timing(timing, residual_return_df)
 
     # Restore: convolve the model with the clean beam and add the residual. Only
-    # meaningful once a model exists (niter > 0); the model/residual/beam-fit all
-    # live on img_xds at this point. restore_image self-times and returns a
-    # one-row timing frame (``T_restore``) folded in like the other steps.
+    # possible once a model exists; the model/residual/beam-fit all live on
+    # img_xds at this point. restore_image self-times and returns a one-row
+    # timing frame (``T_restore``) folded in like the other steps.
     timing["T_restore"] = 0.0
-    if restore and iteration_control_params["niter"] > 0:
+    if restore and model_exists:
         from astroviper.processing_functions.imaging.restore import restore_image
 
         img_xds, restore_return_df = restore_image(
@@ -526,7 +586,7 @@ def image_cube_single_field(
     # the deconvolver's primary_beam_limit as the blanking cutoff when set,
     # else the CASA pblimit default of 0.2.
     timing["T_correct_sky_by_primary_beam"] = 0.0
-    if primary_beam_correction and restore and iteration_control_params["niter"] > 0:
+    if primary_beam_correction and restore and iteration_control_params["max_iter"] > 0:
         from astroviper.processing_functions.imaging.correct_sky_by_primary_beam import (
             correct_sky_by_primary_beam,
         )
@@ -541,8 +601,8 @@ def image_cube_single_field(
 
     timing["task_id"] = task_id
     timing["n_channels"] = img_xds.sizes["frequency"]
-    timing["n_major_cycles"] = n_major_cycles
+    timing["n_cycles"] = n_cycles
 
     timing_df = pd.DataFrame({key: [value] for key, value in timing.items()})
 
-    return img_xds, timing_df, combined_deconvolve_dict
+    return img_xds, timing_df, combined_imaging_dict

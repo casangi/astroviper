@@ -15,7 +15,7 @@ return_dict = image_cube_single_field(
     image_store="twhya_clean.img.zarr",             # output image dataset (Zarr)
     image_params=image_params,                       # image geometry + output coords
     imaging_weights_params={"weighting": "briggs", "robust": 0.5},
-    iteration_control_params={"niter": 300, "nmajor": 3, "threshold": 0.001, "gain": 0.1},
+    iteration_control_params={"max_iter": 300, "max_cycles": 3, "threshold": 0.001, "gain": 0.1},
     gridder="prolate_spheroidal",
     deconvolver="hogbom_many_threads",
     image_data_variables_keep=["sky_residual", "sky_model", "mask",
@@ -60,34 +60,46 @@ task_coords, data_selection, image_store, input_data_store, ..., graph_mode=True
 2. Get data: use `input_data` if the loading layer pre-loaded it, else
    `load_processing_set(...)` (eager) for this chunk's `data_selection`.
 3. Call `pf.imaging.image_cube_single_field(ps_xdt, img_xds, image_params, ...)`
-   with explicit keyword arguments.
-4. Write the result slice to Zarr via
-   `astroviper.utils.io.write_result_chunk_to_disk_using_zarr(...)`.
+   with explicit keyword arguments, **once per frequency channel** (the
+   visibility channels mapping onto that image channel as zero-copy views plus
+   a one-channel slice of the empty image), so every channel runs its own
+   imaging cycle loop and `max_cycles` counts per channel; the per-channel
+   results are assembled into the chunk image and the timing frames and
+   imaging dicts are combined. The processing function itself handles full
+   cubes (AGENTS.md §3 full-dimensionality rule).
+4. Write every finished on-disk frequency chunk (`image_chunking["frequency"]`
+   channels; by default the whole task) as soon as its channels are imaged, via
+   `astroviper.utils.io.write_result_chunk_to_disk_using_zarr(...)` (or the
+   skunk-works, sharded or FITS writer), taking its plane statistics first. At
+   most one chunk is held next to the channel being imaged, and a one-channel
+   chunk is written without any copy. `image_sharding` (a `{dimension: size}`
+   dict, any dimension) selects the sharded writer.
 
 ### 12.3 Science — `processing_functions/imaging/image_cube_single_field.py`
 The **iteration-control and bookkeeping helpers** (not science kernels) live in
 the `processing_functions/imaging/utils/` subpackage: `iteration_control.py`
 (`IterationController`, stop codes, `merge_return_dicts`,
-`get_calculate_cycle_controls`, the `get_*_from_returndict` extractors,
-`format_/print_deconvolve_dict`), `return_dict.py` (`ReturnDict`, `Key`),
+`get_calculate_cycle_controls`, the `get_*_from_imaging_dict` extractors,
+`format_/print_imaging_dict`), `imaging_dict.py` (`ImagingDict`, `Key`),
 `timing.py` (`accumulate_timing`), and `visibility.py`
 (`drop_auto_correlations` — the shared cross-correlation filter used by the PSF
 and undeconvolved-image gridders; do not re-inline it). Import them from
 `astroviper.processing_functions.imaging.utils` (the package re-exports the
 public symbols).
 
-Runs the CLEAN loop of **residual update cycles** and **model update cycles**
-(CASA's *major* and *minor* cycles — use the update-cycle names in AstroVIPER)
+Runs the CLEAN loop of **imaging cycles**, each one **residual update**
+followed by one **model update** (the CASA names in brackets are for
+orientation only: `max_cycles` [CASA `nmajor`], `max_iter` [CASA `niter`]),
 via `IterationController`:
-- **Residual update cycle** — `residual_cycle_cube_single_field(...)`: degrid
+- **Residual update** — `residual_update_cube_single_field(...)`: degrid
   model → compute residual visibilities → grid → FFT-normalize → form residual
   image (+ PSF on the first iteration), primary beam, and imaging weights
   (first iteration only).
-- **Model update cycle** — `model_update_cycle_cube_single_field(...)` →
+- **Model update** — `model_update_cube_single_field(...)` →
   `deconvolve(...)` (Hogbom or ASP CLEAN in C++) updates the model image, with
   a mask from `make_mask`.
-- Accumulate per-plane stats into a `ReturnDict`; check convergence; iterate.
-- A final residual update cycle produces the last residual image.
+- Accumulate per-plane stats into an `ImagingDict`; check convergence; iterate.
+- A closing residual update produces the last residual image.
 - When `restore=True` (off by default), a final `restore_image(...)` step
   (`processing_functions/imaging/restore.py`) convolves the model with the clean
   beam (the per-frequency Gaussian fit to the PSF, in the `residual` data group)
@@ -150,7 +162,7 @@ precision only; visibilities are `complex128`:
 | Grid **normalization** accumulator | `float64` (always) | `float64` |
 | Sky / PSF / model **images** | `float32` | `float64` |
 | Model→vis **uv grid** (`fft_norm_img_xds`) | `complex64` | `complex128` |
-| Model-update-cycle **deconvolution** | `float32` | `float64` |
+| Model update **deconvolution** | `float32` | `float64` |
 
 Casting happens **after gridding, before the FFT**: the C++ gridder accumulates
 directly into a `complex64` grid (no extra full-resolution copy), the iFFT/FFT
@@ -158,7 +170,7 @@ run at the grid precision, and the resulting images are `float32`. The
 degridder widens each (possibly `complex64`) model-grid cell to `complex128` and
 writes `complex128` model visibilities, so `residual = observed − model` is
 formed in double precision. Threading the precision: the distributed applications sets
-`input_params["single_precision_image"]`; `residual_cycle` derives
+`input_params["single_precision_image"]`; `residual_update` derives
 `complex_dtype`/`float_dtype` from it and forwards `complex_dtype` to the
 gridders (`add_visibility_grid_single_field`, `add_uv_sampling_grid_single_field`),
 to `fft_norm_img_xds`/`ifft_norm_img_xds`, and to the PSF builder. On-disk Zarr

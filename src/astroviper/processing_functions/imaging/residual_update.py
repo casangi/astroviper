@@ -24,7 +24,7 @@ def imaging_setup_single_field(
     image_data_group_out_name="residual",
     psf_fitting_method="astroviper",
 ):
-    """Perform the once-per-chunk imaging setup before the major-cycle loop.
+    """Perform the once-per-chunk imaging setup before the imaging cycle loop.
 
     Everything here is independent of the sky model and therefore only needs to
     be computed a single time per chunk:
@@ -35,8 +35,8 @@ def imaging_setup_single_field(
     * the primary beam.
 
     The dirty image and the residual visibilities are NOT made here -- they are
-    per-cycle work done by :func:`residual_cycle_cube_single_field`.  The image
-    dataset is returned in the Stokes basis (the state the first residual cycle
+    per-cycle work done by :func:`residual_update_cube_single_field`.  The image
+    dataset is returned in the Stokes basis (the state the first residual update
     expects), with the residual data group created and populated with the PSF and
     primary beam.
 
@@ -58,8 +58,8 @@ def imaging_setup_single_field(
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     single_precision_image : bool, optional
         If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
-        images) are single precision (``complex64`` / ``float32``) and the minor
-        cycle runs in single precision; the visibilities always stay double
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
         precision. If ``False`` the image-domain arrays are double precision.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
@@ -208,11 +208,11 @@ def imaging_setup_single_field(
 # from memory_profiler import profile
 # @profile(precision=1)
 @shares_param_docs
-def residual_cycle_cube_single_field(
+def residual_update_cube_single_field(
     ps_xdt,
     img_xds,
     image_params,
-    is_n_iter_0,
+    model_exists,
     processing_set_data_group_name="corrected",
     instrument_polarization_basis="linear",
     single_precision_image=True,
@@ -221,9 +221,9 @@ def residual_cycle_cube_single_field(
     image_data_variables_keep=None,
     image_data_group_in_name="model",
     image_data_group_out_name="residual",
-    last_residual_cycle=False,
+    last_residual_update=False,
 ):
-    """Run one residual (major) cycle.
+    """Run one residual update.
 
     Degrids the current sky model, forms the residual visibilities, grids them
     and inverse-transforms the grid to a residual image.  The once-per-chunk
@@ -243,9 +243,10 @@ def residual_cycle_cube_single_field(
         Image geometry and output coordinates: ``image_size``, ``cell_size``,
         ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
         ``fft_padding`` gridding/FFT padding factor.
-    is_n_iter_0 : bool
-        ``True`` for the very first (dirty image) cycle, where there is no sky
-        model to degrid yet.  ``False`` for every later cycle.
+    model_exists : bool
+        ``False`` for the first residual update (the dirty image: there is no
+        sky model to degrid yet); ``True`` once a model update has run, in
+        which case the current model is degridded and subtracted first.
     processing_set_data_group_name : str, optional
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     instrument_polarization_basis : str, optional
@@ -254,8 +255,8 @@ def residual_cycle_cube_single_field(
         output image is always produced in the Stokes basis.
     single_precision_image : bool, optional
         If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
-        images) are single precision (``complex64`` / ``float32``) and the minor
-        cycle runs in single precision; the visibilities always stay double
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
         precision. If ``False`` the image-domain arrays are double precision.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
@@ -273,7 +274,7 @@ def residual_cycle_cube_single_field(
     image_data_group_out_name : str, optional
         Image data group that the residual image is written into.  Default
         ``"residual"``.
-    last_residual_cycle : bool, optional
+    last_residual_update : bool, optional
         Unused placeholder retained for call-site compatibility.
 
     Returns
@@ -321,7 +322,7 @@ def residual_cycle_cube_single_field(
     T_residual_vis = 0.0
 
     # Degrid the current model and form the residual visibilities.
-    if not is_n_iter_0:
+    if model_exists:
         residual_data_group = img_xds.attrs["data_groups"][image_data_group_out_name]
         # Delete the SKY_RESIDUAL so the gridded residual image is rebuilt below.
         img_xds.xr_img.delete_data_variables(variables=[residual_data_group["sky"]])
@@ -441,7 +442,7 @@ def residual_cycle_cube_single_field(
 
     from toolviper.utils.memory_management import get_rss_gb
 
-    logger.debug("Memory usage after residual cycle " + str(get_rss_gb()) + " GB")
+    logger.debug("Memory usage after residual update " + str(get_rss_gb()) + " GB")
     start = time.time()
     img_xds = transform_polarization_basis(
         img_xds, new_polarization_basis="stokes", overwrite=True

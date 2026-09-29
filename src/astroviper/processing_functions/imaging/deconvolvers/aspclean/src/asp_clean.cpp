@@ -272,12 +272,12 @@ template <typename T>
 class Cleaner {
 public:
     Cleaner(T* residual, T* model, const T* psf, const T* mask, int nx, int ny,
-            double gain, double threshold, int niter, double fusedthreshold,
+            double gain, double threshold, int max_iter_remaining, double fusedthreshold,
             double psf_width, int largestscale, int stoppointmode,
             int norm_method, bool verbose)
         : residual_(residual), model_(model), psf_(psf), mask_(mask),
           nx_(nx), ny_(ny), gain_(gain), threshold_(threshold),
-          maxNiter_(niter), fusedThreshold_(fusedthreshold),
+          maxNiter_(max_iter_remaining), fusedThreshold_(fusedthreshold),
           userLargestScale_(static_cast<double>(largestscale)),
           stopPointMode_(stoppointmode),
           normMethod_(norm_method <= 0 ? 1 : norm_method), verbose_(verbose),
@@ -703,7 +703,7 @@ private:
     }
 
     // -----------------------------------------------------------------------
-    // The minor cycle (AspMatrixCleaner::aspclean).
+    // The model update (AspMatrixCleaner::aspclean).
     // -----------------------------------------------------------------------
     int aspclean() {
         double totalFlux = 0.0;
@@ -981,11 +981,11 @@ double psf_gaussian_width(const double* psf, int nx, int ny) {
 template <typename T>
 AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
                          int nx, int ny, double gain, double threshold,
-                         int niter, double fusedthreshold, double psf_width,
+                         int max_iter_remaining, double fusedthreshold, double psf_width,
                          int largestscale, int stoppointmode, int norm_method,
                          bool verbose) {
     Cleaner<T> cleaner(residual, model, psf, mask, nx, ny, gain, threshold,
-                       niter, fusedthreshold, psf_width, largestscale,
+                       max_iter_remaining, fusedthreshold, psf_width, largestscale,
                        stoppointmode, norm_method, verbose);
     return cleaner.run();
 }
@@ -993,7 +993,7 @@ AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
 template <typename T>
 void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
                    int nf, int np_img, int np_psf, int nx, int ny, double gain,
-                   const double* threshold, const int* niter, double fusedthreshold,
+                   const double* threshold, const int* max_iter_remaining, double fusedthreshold,
                    double psf_width, int largestscale, int stoppointmode,
                    int norm_method, int processing_function_threads, AspResult* results) {
     const int nplanes = nt * nf * np_img;
@@ -1017,7 +1017,7 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
             // plane uses its own threshold and iteration limit.
             results[p] = aspclean_plane<T>(residual + img_off, model + img_off,
                                            psf + psf_off, maskp, nx, ny, gain,
-                                           threshold[p], niter[p], fusedthreshold,
+                                           threshold[p], max_iter_remaining[p], fusedthreshold,
                                            psf_width, largestscale, stoppointmode,
                                            norm_method, false);
         }

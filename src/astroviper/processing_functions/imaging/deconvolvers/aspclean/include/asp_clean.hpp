@@ -15,7 +15,7 @@
 //    response instead of the raw Aspen strength, which is not in Jy/beam and
 //    made CASA's test abort minor cycles on legitimate wide components.
 //
-// The algorithm finds, at each minor-cycle iteration, the best "Aspen" (a
+// The algorithm finds, at each model update iteration, the best "Aspen" (a
 // Gaussian component whose amplitude, scale size and position are optimized by
 // L-BFGS) from the residual, then subtracts its PSF response and adds it to
 // the model. It falls back to Hogbom-style point cleaning when the optimal
@@ -27,7 +27,7 @@
 namespace aspclean {
 
 struct AspResult {
-    int iterations = 0;            // minor-cycle iterations performed
+    int iterations = 0;            // model update iterations performed
     int retval = 0;               //  1 converged
                                   //  0 not converged, behaving normally
                                   // -1 stopped on consecutive smallest scale
@@ -50,7 +50,7 @@ double psf_gaussian_width(const double* psf, int nx, int ny);
 void convolve_centered(const double* a, const double* b, int nx, int ny,
                        double* out);
 
-// Run the Asp minor cycle on a single 2-D plane, in place.
+// Run the Asp model update on a single 2-D plane, in place.
 //   residual : [ny][nx] dirty image -> residual          (in/out, writable)
 //   model    : [ny][nx] model, components accumulated     (in/out, writable)
 //   psf      : [ny][nx] point spread function             (read only)
@@ -61,7 +61,7 @@ void convolve_centered(const double* a, const double* b, int nx, int ny,
 template <typename T>
 AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
                          int nx, int ny, double gain, double threshold,
-                         int niter, double fusedthreshold, double psf_width,
+                         int max_iter_remaining, double fusedthreshold, double psf_width,
                          int largestscale, int stoppointmode, int norm_method,
                          bool verbose);
 
@@ -70,14 +70,14 @@ AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
 // worker threads. The PSF cube may have np_psf == np_img or np_psf == 1
 // (Stokes-I broadcast). `results` must have length nt*nf*np_img.
 //
-// Iteration control is independent per plane: `threshold` and `niter` are
+// Iteration control is independent per plane: `threshold` and `max_iter_remaining` are
 // per-plane arrays of length nt*nf*np_img in (t, f, p) C-order, so every
 // (time, frequency, polarization) plane is cleaned with its own threshold
 // and iteration limit.
 template <typename T>
 void aspclean_cube(T* residual, T* model, const T* psf, const T* mask,
                    int nt, int nf, int np_img, int np_psf, int nx, int ny,
-                   double gain, const double* threshold, const int* niter,
+                   double gain, const double* threshold, const int* max_iter_remaining,
                    double fusedthreshold, double psf_width, int largestscale,
                    int stoppointmode, int norm_method, int processing_function_threads,
                    AspResult* results);
