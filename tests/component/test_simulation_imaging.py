@@ -31,7 +31,7 @@ IMAGE_SIZE = [200, 200]
 CELL_SIZE = np.array([-8.0, 8.0]) * np.pi / (180 * 3600)
 
 
-def simulate(tmp_path, name, flux, noise_params=None):
+def simulate(tmp_path, name, flux, noise_params=None, sky_image_params=None):
     ant = read_telescope_layout("vla.d")
     result = distributed_applications.simulation.simulate_processing_set(
         ps_store=str(tmp_path / f"{name}.ps.zarr"),
@@ -54,6 +54,7 @@ def simulate(tmp_path, name, flux, noise_params=None):
         beam_models=[airy_disk_model("vla")],
         beam_model_map=np.zeros(27, int),
         noise_params=noise_params,
+        sky_image_params=sky_image_params,
         n_time_chunks=2,
         n_frequency_chunks=2,
         overwrite=True,
@@ -75,7 +76,7 @@ def image(tmp_path, ps_store, name):
         "cell_size": CELL_SIZE,
         "phase_direction": phase_direction,
         "frequency_coords": ps_xdt.xr_ps.get_freq_axis().values,
-        "polarization_coords": ["I"],
+        "polarization_coords": ["I", "V"],
         "time_coords": [0],
         "fft_padding": 1.2,
         "cpp_gridder": True,
@@ -85,6 +86,7 @@ def image(tmp_path, ps_store, name):
         ps_store=ps_store,
         image_store=image_store,
         image_params=image_params,
+        instrument_polarization_basis="circular",
         imaging_weights_params={
             "weighting": "natural",
             "robust": 0.5,
@@ -114,10 +116,37 @@ def image(tmp_path, ps_store, name):
 
 
 def test_point_source_lands_on_expected_pixel(tmp_path):
-    result = simulate(tmp_path, "point", flux=2.0)
+    truth_store = str(tmp_path / "point_truth.img.zarr")
+    result = simulate(
+        tmp_path,
+        "point",
+        flux=2.0,
+        sky_image_params={
+            "image_store": truth_store,
+            "image_size": IMAGE_SIZE,
+            "cell_size": CELL_SIZE,
+            "polarization_coords": ["I"],
+        },
+    )
     img = image(tmp_path, result["ps_store"], "point")
     sky = img.SKY_RESIDUAL.values[0]  # [frequency, polarization, l, m]
+    assert list(img.polarization.values) == ["I", "V"]
+    # the source is unpolarised (RR = LL): Stokes V holds nothing
+    assert np.abs(sky[:, 1]).max() < 1e-12 * np.abs(sky[:, 0]).max()
     expected_pixel = celestial_coord_to_sin_pixel(PC, IMAGE_SIZE, CELL_SIZE, SRC)
+    # the simulator's own image of the sky uses the imager's grid: same axes, same pixel
+    truth = load_image(truth_store)
+    np.testing.assert_allclose(truth.l.values, img.l.values)
+    np.testing.assert_allclose(truth.m.values, img.m.values)
+    truth_sky = truth.SKY.values[0]
+    for i_chan in range(truth_sky.shape[0]):
+        i_t, j_t = np.unravel_index(
+            np.argmax(truth_sky[i_chan, 0]), truth_sky.shape[2:]
+        )
+        np.testing.assert_allclose([i_t, j_t], expected_pixel, atol=0.5)
+        assert (
+            truth_sky[i_chan, 0, i_t, j_t] == 2.0 and truth_sky[i_chan, 0].sum() == 2.0
+        )
     lm = sin_project(PC, SRC)
     frequency = img.frequency.values
     for i_chan in range(sky.shape[0]):
@@ -151,6 +180,12 @@ def test_noise_level_matches_theory(tmp_path):
     img = image(tmp_path, result["ps_store"], "noise")
     sky = img.SKY_RESIDUAL.values[0, :, 0]
     measured = sky.std(axis=(1, 2))
+    # Stokes V = (RR - LL) / 2 has the same noise as Stokes I = (RR + LL) / 2,
+    # and the two are independent
+    stokes_v = img.SKY_RESIDUAL.values[0, :, 1]
+    np.testing.assert_allclose(stokes_v.std(axis=(1, 2)), measured, rtol=0.2)
+    correlation = np.corrcoef(sky.ravel(), stokes_v.ravel())[0, 1]
+    assert abs(correlation) < 0.2
     # per-channel images use only that channel's visibilities
     n_chan = sky.shape[0]
     expected_per_chan = expected_rms * np.sqrt(n_chan)

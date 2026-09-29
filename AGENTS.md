@@ -199,6 +199,24 @@ PSF beam fit is switchable
 `processing_functions/image_analysis/psf_gaussian_fit_cpp/`) that reproduces
 `tclean`'s restoring beam exactly on the same PSF.
 
+**Polarization.** The residual update grids and degrids in the instrument
+(correlation) basis and the model update deconvolves in the Stokes basis;
+`transform_polarization_basis` converts the image dataset at the boundary
+between the two. Two modes are supported, fixed by
+`image_params["polarization_coords"]`
+(`processing_functions/imaging/utils/imaging_polarization.py`): the two parallel
+hands give `["I", "Q"]` (linear feeds) or `["I", "V"]` (circular feeds), and
+all four correlations give `["I", "Q", "U", "V"]`; any other request is
+refused. Only the correlations a request needs are loaded (the driver adds
+their index positions to every task's data selection). In a four-correlation
+basis the sky images are complex, because a cross hand is not conjugate
+symmetric on its own (`XY = U + iV`, `YX = U - iV`; `RL = Q + iU`,
+`LR = Q - iU`): `ifft_norm_img_xds` keeps them complex and the transform to
+Stokes takes the real part, so Stokes images are always real and the two-hand
+path is untouched. A sample with any loaded correlation flagged is dropped for
+all of them (no pseudo Stokes I), which gives every plane the same uv coverage
+and hence the same PSF.
+
 ---
 
 ## 4. Core Domain Concepts (from XRADIO)

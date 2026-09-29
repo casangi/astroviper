@@ -588,6 +588,60 @@ def test_load_processing_set_reconstruction(tmp_path, processing_function_thread
     assert int(mask.sum()) == 3
 
 
+def test_load_processing_set_selects_the_needed_correlations(tmp_path):
+    """A ``polarization`` entry in the selection keeps only those correlations
+    (the parallel hands of four-correlation data for Stokes I, Q)."""
+    ntime, nbl, nfreq, npol = 2, 3, 4, 4
+    rng = np.random.default_rng(8)
+    store = str(tmp_path / "ps.zarr")
+    ms_name = "ms0"
+    arrays = {
+        "VISIBILITY": rng.standard_normal((ntime, nbl, nfreq, npol)).astype("<c8"),
+        "WEIGHT": rng.standard_normal((ntime, nbl, nfreq, npol)).astype("<f4"),
+        "FLAG": (rng.random((ntime, nbl, nfreq, npol)) > 0.5).astype("|i1"),
+    }
+    uvw = rng.standard_normal((ntime, nbl, 3)).astype("<f8")
+    for name, data in arrays.items():
+        array = zarr.create_array(
+            f"{store}/{ms_name}/{name}",
+            shape=data.shape,
+            dtype=data.dtype,
+            dimension_names=DIMS,
+            chunks=(ntime, nbl, 1, npol),
+        )
+        array[:] = data
+    array = zarr.create_array(
+        f"{store}/{ms_name}/UVW",
+        shape=uvw.shape,
+        dtype=uvw.dtype,
+        dimension_names=("time", "baseline_id", "uvw_label"),
+        chunks=uvw.shape,
+    )
+    array[:] = uvw
+    data_group = {
+        "correlated_data": "VISIBILITY",
+        "uvw": "UVW",
+        "weight": "WEIGHT",
+        "flag": "FLAG",
+    }
+    freq_values = np.linspace(1.0e9, 1.3e9, nfreq)[1:3]
+
+    everything = load_processing_set_skunk_works(
+        store, {ms_name: {"frequency": slice(1, 3)}}, data_group, "base", freq_values
+    )[ms_name]
+    assert list(everything.polarization.values) == ["XX", "XY", "YX", "YY"]
+
+    selection = {ms_name: {"frequency": slice(1, 3), "polarization": [0, 3]}}
+    ms = load_processing_set_skunk_works(
+        store, selection, data_group, "base", freq_values
+    )[ms_name]
+    assert list(ms.polarization.values) == ["XX", "YY"]
+    for name, data in arrays.items():
+        assert _equal(ms[name].values, data[:, :, 1:3, :][..., [0, 3]]), name
+        assert ms[name].values.flags["C_CONTIGUOUS"]
+    assert _equal(ms["UVW"].values, uvw)
+
+
 # --------------------------------------------------------------------------- #
 # Transient-EIO retry in the sharded pwrite path
 # --------------------------------------------------------------------------- #

@@ -76,7 +76,7 @@ def _task_inputs(tmp_path, n_chan=3, data_selection=None, **overrides):
         "image_size": [4, 4],
         "cell_size": np.array([-1.0, 1.0]) * 4.85e-6,
         "time_coords": [0],
-        "polarization_coords": ["I"],
+        "polarization_coords": ["I", "Q"],
         "fft_padding": 1.2,
     }
     inputs = dict(
@@ -132,15 +132,16 @@ class _FakeScience:
         img_xds.attrs["data_groups"]["residual"] = {"sky": "SKY_RESIDUAL"}
 
         chan = len(self.calls) - 1
-        shape = (img_xds.sizes["time"], 1, 1, 4, 4)
-        img_xds = img_xds.assign_coords(polarization=["I"])
+        # the science function returns the Stokes planes of the two parallel hands
+        shape = (img_xds.sizes["time"], 1, 2, 4, 4)
+        img_xds = img_xds.assign_coords(polarization=["I", "Q"])
         img_xds["SKY_RESIDUAL"] = (
             ("time", "frequency", "polarization", "l", "m"),
             np.full(shape, float(chan), dtype=np.float32),
         )
         img_xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"] = (
             ("time", "frequency", "polarization", "beam_params_label"),
-            np.full((shape[0], 1, 1, 3), 10.0 * chan),
+            np.full((shape[0], 1, 2, 3), 10.0 * chan),
         )
         img_xds["STATIC"] = (("l", "m"), np.arange(16.0).reshape(4, 4))
         n_cycles = self.cycles_per_channel[chan]
@@ -204,7 +205,7 @@ def test_node_task_images_one_channel_at_a_time(tmp_path, fake_science):
             == 10.0 * chan
         ).all()
     np.testing.assert_array_equal(img["STATIC"].values, np.arange(16.0).reshape(4, 4))
-    assert list(img.polarization.values) == ["I"]
+    assert list(img.polarization.values) == ["I", "Q"]
 
     # Timing: T_* summed, n_cycles = max over channels, n_cycles_total = sum.
     timing = result["timing_node_tasks"]
@@ -246,7 +247,7 @@ def test_imaging_dict_channels_shift_onto_global_numbers(tmp_path, fake_science)
 # --------------------------------------------------------------------------- #
 def _make_store(tmp_path, n_total, task_chunks, image_chunking):
     """A pre-created image store (as the driver makes it) holding
-    ``sky_residual`` for ``n_total`` channels, 4x4 pixels, one polarization."""
+    ``sky_residual`` for ``n_total`` channels, 4x4 pixels, Stokes I and Q."""
     import zarr
 
     from astroviper.utils.io import create_empty_data_variables_on_disk
@@ -256,7 +257,7 @@ def _make_store(tmp_path, n_total, task_chunks, image_chunking):
     create_empty_data_variables_on_disk(
         store,
         ["sky_residual"],
-        shape_dict={"time": 1, "frequency": n_total, "polarization": 1, "l": 4, "m": 4},
+        shape_dict={"time": 1, "frequency": n_total, "polarization": 2, "l": 4, "m": 4},
         parallel_coords={"frequency": {"data_chunks": task_chunks}},
         compressor=None,
         double_precision=False,
@@ -319,7 +320,12 @@ def test_chunks_are_written_as_soon_as_complete(
     # Statistics are taken per chunk and concatenated along frequency.
     stats = result["image_statistics"]["sky_residual"]
     assert stats.sizes["frequency"] == 3
-    np.testing.assert_allclose(stats["max"].values.ravel(), [0.0, 1.0, 2.0])
+    # one value per channel and Stokes plane (I, Q)
+    assert stats.sizes["polarization"] == 2
+    for plane in range(2):
+        np.testing.assert_allclose(
+            stats["max"].isel(polarization=plane).values.ravel(), [0.0, 1.0, 2.0]
+        )
 
 
 def test_failed_chunk_write_is_skipped_and_logged(tmp_path, fake_science, write_spy):

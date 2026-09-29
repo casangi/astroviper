@@ -545,3 +545,53 @@ class TestCalculateImagingWeightsFrequencyMap(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Four correlations: a flagged correlation drops the sample for all of them
+# ---------------------------------------------------------------------------
+class TestFlaggedCorrelationsOfFourCorrelationData(unittest.TestCase):
+    def test_flagged_cross_hand_gives_nan_weight(self):
+        w = np.ones((1, 4, 1, 4))
+        w[0, 1, 0, 1] = np.nan  # XY flagged
+        w[0, 2, 0, 2] = np.nan  # YX flagged
+        w[0, 3, 0, 3] = np.nan  # YY flagged
+        for casa_weighting_implementation in (True, False):
+            out = _equalize_parallel_hand_weights(
+                w.copy(), casa_weighting_implementation
+            )
+            self.assertEqual(out.shape, (1, 4, 1, 1))
+            self.assertEqual(out[0, 0, 0, 0], 1.0)
+            self.assertTrue(np.isnan(out[0, 1:, 0, 0]).all())
+
+    def test_unflagged_cross_hands_do_not_change_the_weights(self):
+        rng = np.random.default_rng(1)
+        w = rng.uniform(0.5, 2.0, (2, 3, 2, 4))
+        two = w[..., [0, 3]]
+        for casa_weighting_implementation in (True, False):
+            np.testing.assert_array_equal(
+                _equalize_parallel_hand_weights(
+                    w.copy(), casa_weighting_implementation
+                ),
+                _equalize_parallel_hand_weights(
+                    two.copy(), casa_weighting_implementation
+                ),
+            )
+
+    def test_natural_weights_drop_the_sample_for_every_correlation(self):
+        ps_xdt = _make_ps_xdt(n_pol=4, weight_per_pol=[1.0, 1.0, 1.0, 1.0])
+        ms = ps_xdt["ms_0"]
+        ms["FLAG"].values[0, 1, 0, 2] = 1  # one cross hand of one sample
+        calculate_imaging_weights(
+            ps_xdt,
+            _make_img_xds(),
+            imaging_weights_params={"weighting": "natural"},
+            ms_data_group_in_name="base",
+            ms_data_group_out_name="base",
+        )
+        weight_imaging = ps_xdt["ms_0"]["WEIGHT_IMAGING"].values
+        self.assertEqual(weight_imaging.shape[-1], 4)
+        self.assertTrue(np.isnan(weight_imaging[0, 1, 0, :]).all())
+        unflagged = np.ones(weight_imaging.shape, dtype=bool)
+        unflagged[0, 1, 0, :] = False
+        np.testing.assert_array_equal(weight_imaging[unflagged], 1.0)

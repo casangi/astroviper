@@ -103,7 +103,10 @@ def image_cube_single_field(
     image_params : dict
         Image geometry and output coordinates: ``image_size``, ``cell_size``,
         ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
-        ``fft_padding`` gridding/FFT padding factor.
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
     imaging_weights_params : dict
         Weighting scheme configuration: ``weighting`` (``"natural"`` or
         ``"briggs"``) and the Briggs ``robust`` parameter.
@@ -191,8 +194,13 @@ def image_cube_single_field(
         few planes, e.g. single-channel imaging) or ``"asp"``.
     instrument_polarization_basis : str
         Correlation (instrument) polarization basis the gridding is performed in:
-        ``"linear"`` (``XX``/``YY``) or ``"circular"`` (``RR``/``LL``). The
-        output image is always produced in the Stokes basis.
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
     scan_intents : list[str]
         The scan intents to image.
     field_name : str
@@ -386,6 +394,10 @@ def image_cube_single_field(
     from xradio.image import write_image
     from xradio.measurement_set import open_processing_set
 
+    from astroviper.processing_functions.imaging.utils.imaging_polarization import (
+        correlation_selection,
+        correlations_for_stokes,
+    )
     from astroviper.utils.data_group_tools import modify_data_groups_xds
     from astroviper.utils.io import (
         create_empty_data_variables_on_disk,
@@ -451,6 +463,13 @@ def image_cube_single_field(
     # summary logged just before returning.
     timing_distributed_application = {}
     application_start = time.time()
+
+    # The residual update grids in the instrument basis and the model update
+    # deconvolves in Stokes, so the requested Stokes planes fix the correlations
+    # that are loaded and gridded. Checked here, before anything is created.
+    correlation_coords = correlations_for_stokes(
+        image_params["polarization_coords"], instrument_polarization_basis
+    )
 
     # Create an empty image on disk with the correct coordinates and dimensions.
     start = time.time()
@@ -627,6 +646,20 @@ def image_cube_single_field(
         parallel_coords, ps_xdt
     )
     timing_distributed_application["T_interpolate_data_coords"] = time.time() - start
+
+    # Load only the correlations that are needed: their index positions are
+    # added to the selection of every measurement set that holds more (or
+    # differently ordered) correlations. A set that holds exactly the needed
+    # ones keeps its selection unchanged.
+    for ms_name, ms_xdt in ps_xdt.items():
+        selection = correlation_selection(
+            ms_xdt.polarization.values, correlation_coords, ms_name
+        )
+        if selection is None:
+            continue
+        for task in node_task_data_mapping.values():
+            if task["data_selection"].get(ms_name) is not None:
+                task["data_selection"][ms_name]["polarization"] = selection
 
     # frequency_coords is not used by node tasks (they use task_coords["frequency"]["data"])
     # so remove it to avoid embedding the full frequency axis in every task in the graph.

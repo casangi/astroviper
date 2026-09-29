@@ -129,7 +129,7 @@ def test_protoplanetary_disk_is_simulated_and_recovered(
             "cell_size": CELL_SIZE,
             "phase_direction": phase_direction,
             "frequency_coords": ps_xdt.xr_ps.get_freq_axis().values,
-            "polarization_coords": ["I"],
+            "polarization_coords": ["I", "Q"],
             "time_coords": [0],
             "fft_padding": 1.2,
             "cpp_gridder": True,
@@ -171,7 +171,11 @@ def test_protoplanetary_disk_is_simulated_and_recovered(
     )
 
     img = load_image(image_store)
+    assert list(img.polarization.values) == ["I", "Q"]
     restored = img.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values[0, 0, 0]
+    # the disk and the star are unpolarised (XX = YY): Stokes Q holds nothing
+    stokes_q = img.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values[0, 0, 1]
+    assert np.nanmax(np.abs(stokes_q)) < 1e-9 * np.nanmax(restored)
     beam = img.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values[0, 0, 0]
     assert beam[0] < 0.6 * ARC  # the disk (2.4'') is well resolved
 

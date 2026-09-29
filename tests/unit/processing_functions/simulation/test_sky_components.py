@@ -16,9 +16,11 @@ from astroviper.processing_functions.simulation import (
     sky_model_image,
 )
 from astroviper.processing_functions.simulation.sky_components import (
+    as_correlation_flux,
     describe_sky_components,
     normalize_sky_component,
     slice_sky_components,
+    stokes_sky_model_images,
 )
 from astroviper.utils.coordinate_transforms import inverse_sin_project, sin_project
 from astroviper.utils.telescope_layout import read_telescope_layout
@@ -364,3 +366,93 @@ class TestKernelInterface:
         response = component_uv_response(normalize_sky_component(component), u, v, w=w)
         np.testing.assert_allclose(visibility, point * response[..., None], rtol=1e-12)
         assert np.abs(response).min() < 0.99
+
+
+class TestComplexCrossHandFluxes:
+    """Circular polarisation with linear feeds (or linear polarisation with circular
+    feeds) needs complex cross hands: XY = U + iV, YX = U - iV."""
+
+    STOKES = np.array([2.0, 0.3, -0.4, 0.25])  # I, Q, U, V
+
+    def linear_flux(self):
+        i, q, u, v = self.STOKES
+        return np.array([i + q, u + 1j * v, u - 1j * v, i - q])
+
+    def test_validation(self):
+        flux = self.linear_flux()
+        out = as_correlation_flux(flux)
+        assert out.dtype == np.complex128
+        np.testing.assert_array_equal(out, flux)
+        # complex input without any imaginary part stays real; real input is unchanged
+        assert as_correlation_flux(flux.real + 0j).dtype == np.float64
+        assert as_correlation_flux([1.0, 0.2, 0.2, 0.5]).dtype == np.float64
+        with pytest.raises(ValueError, match="complex conjugates"):
+            as_correlation_flux([1.0, 0.2 + 0.1j, 0.2 + 0.1j, 1.0])
+        with pytest.raises(ValueError, match="parallel-hand"):
+            as_correlation_flux([1.0 + 0.1j, 0.2, 0.2, 1.0])
+        with pytest.raises(ValueError, match="four correlations"):
+            as_correlation_flux(1.0 + 1j)
+        component = normalize_sky_component(
+            {"kind": "point", "flux": flux, "ra_dec": PC[0]}
+        )
+        assert component["flux"].dtype == np.complex128
+        assert component["flux"].shape == (1, 1, 4)
+        legacy = sky_components_from_arrays(
+            "point", flux[None, None, None, :], PC[None, :, :]
+        )
+        assert legacy[0]["flux"].dtype == np.complex128
+
+    @pytest.mark.parametrize("implementation", ["numpy", "cpp"])
+    def test_visibilities_carry_the_cross_hands(self, implementation):
+        """A source at the phase centre without a beam: every visibility equals the correlation flux."""
+        kwargs = pf_kwargs(n_time=2, n_frequency=2)
+        kwargs["polarization"] = ["XX", "XY", "YX", "YY"]
+        flux = self.linear_flux()
+        xds, _ = simulate_processing_set(
+            **kwargs,
+            point_source_flux=None,
+            point_source_ra_dec=None,
+            sky_components=[{"kind": "point", "flux": flux, "ra_dec": PC[0]}],
+            implementation=implementation,
+        )
+        visibility = xds.VISIBILITY.values  # [time, baseline, frequency, polarization]
+        np.testing.assert_allclose(
+            visibility, np.broadcast_to(flux, visibility.shape), atol=1e-12
+        )
+        # the legacy bulk arrays take the same complex fluxes
+        bulk, _ = simulate_processing_set(
+            **kwargs,
+            point_source_flux=flux[None, None, None, :],
+            point_source_ra_dec=PC[None, :, :],
+            implementation=implementation,
+        )
+        np.testing.assert_allclose(bulk.VISIBILITY.values, visibility, atol=1e-14)
+
+    def test_truth_image_stokes_planes(self):
+        l_axis = (np.arange(16) - 8) * -2e-5
+        m_axis = (np.arange(16) - 8) * 2e-5
+        position = inverse_sin_project(PC[0], np.array([l_axis[5], m_axis[11]]))
+        component = {"kind": "point", "flux": self.linear_flux(), "ra_dec": position}
+        planes = stokes_sky_model_images(
+            [component], l_axis, m_axis, PC[0], "linear", ["I", "Q", "U", "V"]
+        )
+        assert planes.dtype == np.float64
+        np.testing.assert_allclose(planes[:, 5, 11], self.STOKES, atol=1e-15)
+        assert np.count_nonzero(planes) == 4
+        # the cross-hand correlation planes themselves are complex, the parallel hands real
+        xy = sky_model_image([component], l_axis, m_axis, PC[0], correlation=1)
+        assert xy.dtype == np.complex128
+        assert xy[5, 11] == self.STOKES[2] + 1j * self.STOKES[3]
+        assert (
+            sky_model_image([component], l_axis, m_axis, PC[0], correlation=0).dtype
+            == np.float64
+        )
+        assert sky_model_image([component], l_axis, m_axis, PC[0]).dtype == np.float64
+        # circular feeds: RL = Q + iU
+        i, q, u, v = self.STOKES
+        circular = {"kind": "point", "ra_dec": position,
+                    "flux": [i + v, q + 1j * u, q - 1j * u, i - v]}  # fmt: skip
+        planes = stokes_sky_model_images(
+            [circular], l_axis, m_axis, PC[0], "circular", ["I", "Q", "U", "V"]
+        )
+        np.testing.assert_allclose(planes[:, 5, 11], self.STOKES, atol=1e-15)
