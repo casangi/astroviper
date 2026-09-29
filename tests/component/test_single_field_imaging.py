@@ -85,8 +85,8 @@ TRUTH_IMAGE_MULTI_CYCLE_SINGLE = (
 _TRUTH_IMAGE_DRIVE_IDS = {
     TRUTH_IMAGE_NITER0: "1uZrW7xs0dkEs1MQx3d_7yY9tolNGIWq6",
     TRUTH_IMAGE_NITER100: "1pX1ME9zrDp82Sd71_nrm3yMOVZqwpG_2",
-    TRUTH_IMAGE_MULTI_CYCLE_DOUBLE: "1kWY9IV8PixjOftt-xYPzXRASIOY1VDmi",
-    TRUTH_IMAGE_MULTI_CYCLE_SINGLE: "1GZaJnJzJw2B_x2RZhTAOofqOISVkkx7T",
+    TRUTH_IMAGE_MULTI_CYCLE_DOUBLE: "1KzjzH4rg4-UrXO2CZgcgri6KJWlH8qwR",
+    TRUTH_IMAGE_MULTI_CYCLE_SINGLE: "1CiiOg-pfwS7gbrzhUPM37feM1jWIjq1e",
 }
 
 # Default (tight) per-channel relative-difference ceiling for the reproducible
@@ -95,32 +95,18 @@ _TRUTH_IMAGE_DRIVE_IDS = {
 # regression guard with comfortable margin.
 TRUTH_RTOL = 1e-6
 
-# Loose ceiling for the single-precision multi_cycle image comparison -- used by
-# BOTH the 1- and 12-thread variants. At threshold=0.001 the float32 deep CLEAN
-# sits on a peak-selection bifurcation: a tiny float32 difference sends a channel
-# onto an alternate-but-valid branch that differs by ~10% in the image (and by a
-# few percent in the per-plane deconvolution history). The single-threaded run is
-# bit-identical to its truth in isolation, but floating-point / thread state
-# accumulated across a full test session can occasionally tip a channel, so a
-# 1e-6 image bound is flaky even single-threaded. Both single-precision variants
-# therefore use this loose image bound AND skip the exact deconvolution-dict
-# check (dict_kind=None); the double-precision variants are the tight ImagingDict
-# regression guard.
+# Deep float32 CLEAN may select different near-tied peaks after PSF rounding.
+# Compare the observable restored Stokes-I image, rather than requiring the
+# unconvolved component model or each residual pixel to reproduce its history.
+# These are TW Hydra regression bounds, not general science/QA2 tolerances.
+# The existing 15% peak-image ceiling is retained, with additional masked
+# restored-image L2/flux checks at 15% and residual RMS agreement at 5%.
+# Float64 references and shallow imaging retain the tight checks above.
 MULTI_CYCLE_SINGLE_RTOL = 0.15
-
-# Ceiling for the direct double-vs-single multi_cycle comparison
-# (test_single_field_imaging_multi_cycle_double_vs_single). float32 vs float64
-# differ by up to ~10% on the channel where the deep CLEAN tips a peak-selection
-# bifurcation, so this is deliberately loose -- it bounds the precision spread
-# while still catching a gross regression.
 MULTI_CYCLE_DOUBLE_VS_SINGLE_RTOL = 0.15
-
-# Ceiling for the worst-case multi_cycle cross-config comparison
-# (test_single_field_imaging_multi_cycle_worst_case): double / 1 thread /
-# n_mapping_parallelism=5 vs single / 12 threads / n_mapping_parallelism=1, so precision, thread count and
-# chunking all differ at once. Still dominated by the float32 peak-selection
-# bifurcation (~10% on one channel), so it shares the same loose ceiling.
 MULTI_CYCLE_WORST_CASE_RTOL = 0.15
+DEEP_CLEAN_RESIDUAL_RMS_RTOL = 0.05
+DEEP_CLEAN_PSF_RTOL = 1e-4
 
 # Deconvolve-dict floats computed FROM the float32 gridded seed: the per-imaging-
 # cycle CLEAN trajectory (model_flux, peakres, ...) plus the thresholds derived
@@ -591,6 +577,99 @@ def _run_image_cube(
     return imaging_dict, img_av_xds, image_params
 
 
+def _check_deep_clean_history(deconvolve_dict):
+    """Check the deep fixture's stopping contract without pinning its path."""
+    expected = EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE
+    assert set(deconvolve_dict.data) == set(expected)
+    controls = _CONFIGS["multi_cycle"]["iteration_control_params"]
+    for plane, fields in deconvolve_dict.data.items():
+        counts = np.asarray(fields["iter_done"])
+        # One entry per imaging cycle the plane's channel ran: a plane may spend
+        # its max_iter budget in fewer cycles than max_cycles (iteration control
+        # is per plane), never in more.
+        assert 1 <= len(counts) <= controls["max_cycles"], (
+            f"{plane}: {len(counts)} update cycles, expected at most "
+            f"{controls['max_cycles']}"
+        )
+        assert np.all(counts >= 0)
+        assert fields["max_iter"] == controls["max_iter"]
+        assert counts.sum() == controls["max_iter"], f"{plane}: wrong iteration total"
+        code = fields["stop_code"]
+        assert (int(code.imaging), int(code.model_update)) == (1, 0), (
+            f"{plane}: expected iteration-limit stop, got {code}"
+        )
+        assert (
+            np.isfinite(fields["threshold_per_cycle"])
+            and fields["threshold_per_cycle"] > 0
+        )
+        for key in ("peakres", "start_peakres", "model_flux"):
+            values = np.asarray(fields[key])
+            assert len(values) == len(counts) and np.all(np.isfinite(values)), (
+                f"{plane}: invalid {key} history"
+            )
+
+
+def _check_deep_clean_images(actual, reference, *, tol, polarization=0):
+    """Bound restored-image agreement and residual RMS for deep CLEAN.
+
+    The reference CLEAN mask defines one common aperture; no data-dependent
+    clipping or alignment is used. Integrated restored flux is compared through
+    image sums (the common pixel/beam area factors cancel after the beam check).
+    Like the existing image assertions, these science bounds apply to Stokes I;
+    Q remains visible in the diagnostic plots. The unconvolved component model
+    is checked for finiteness, but its pixel differences are diagnostic only.
+    """
+    for coord in ("time", "frequency", "polarization", "l", "m"):
+        np.testing.assert_array_equal(actual[coord].values, reference[coord].values)
+    np.testing.assert_array_equal(actual["MASK"].values, reference["MASK"].values)
+    for var in (
+        "PRIMARY_BEAM",
+        "POINT_SPREAD_FUNCTION",
+        "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+    ):
+        bound = TRUTH_RTOL if var == "PRIMARY_BEAM" else DEEP_CLEAN_PSF_RTOL
+        np.testing.assert_allclose(
+            actual[var].values,
+            reference[var].values,
+            rtol=bound,
+            atol=1e-10 if var == "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION" else bound,
+            err_msg=var,
+        )
+    for var in ("SKY_MODEL", "SKY_RESIDUAL", "SKY_RESTORED"):
+        assert np.all(np.isfinite(actual[var].values)), f"nonfinite {var}"
+        assert np.all(np.isfinite(reference[var].values)), f"nonfinite reference {var}"
+    for channel in range(reference.sizes["frequency"]):
+        selection = dict(time=0, frequency=channel, polarization=polarization)
+        mask = reference["MASK"].isel(**selection).values.astype(bool)
+        assert np.any(mask), f"channel {channel}: empty comparison aperture"
+
+        def values(dataset, var, selection=selection, mask=mask):
+            return np.asarray(dataset[var].isel(**selection).values, dtype=float)[mask]
+
+        image = values(actual, "SKY_RESTORED")
+        truth = values(reference, "SKY_RESTORED")
+        residual = values(actual, "SKY_RESIDUAL")
+        truth_residual = values(reference, "SKY_RESIDUAL")
+        norm = np.linalg.norm(truth)
+        flux = abs(truth.sum())
+        rms = np.sqrt(np.mean(truth_residual**2))
+        assert norm > 0 and flux > 0 and rms > 0, "degenerate reference"
+        metrics = {
+            "restored L2 difference": (np.linalg.norm(image - truth) / norm, tol),
+            "restored aperture flux difference": (
+                abs(image.sum() - truth.sum()) / flux,
+                tol,
+            ),
+            "residual RMS change": (
+                abs(np.sqrt(np.mean(residual**2)) / rms - 1),
+                DEEP_CLEAN_RESIDUAL_RMS_RTOL,
+            ),
+        }
+        for label, (value, limit) in metrics.items():
+            print(f"deep CLEAN channel {channel} {label}: {value:.6g} (limit {limit})")
+            assert value < limit, f"channel {channel}: {label} {value} exceeds {limit}"
+
+
 def _compare_to_truth(
     img_av_xds,
     truth_xds,
@@ -600,6 +679,7 @@ def _compare_to_truth(
     plot_prefix,
     polarization=0,
     tol=TRUTH_RTOL,
+    deep_clean=False,
 ):
     """Compare ``variables`` of ``img_av_xds`` against ``truth_xds`` per channel.
 
@@ -610,7 +690,10 @@ def _compare_to_truth(
     panel. A summary figure plots that peak relative difference against frequency
     for Stokes I and Q. Assertions (on ``polarization``) are deferred to a final
     pass so a single failing channel cannot prevent the remaining plots from
-    being saved. Every relative difference must be < ``tol``.
+    being saved. Every relative difference must be < ``tol`` by default.
+    With ``deep_clean=True``, model/residual maps remain diagnostic; only the
+    restored peak difference uses ``tol``. Additional observable and invariant
+    checks are applied by ``_check_deep_clean_images``.
     """
     n_freq = img_av_xds.sizes["frequency"]
     n_pol = img_av_xds.sizes["polarization"]
@@ -720,8 +803,14 @@ def _compare_to_truth(
     plot_saver(fig, f"{plot_prefix}_reldiff_vs_freq.png")
 
     # Final pass: assertions only (all plots have already been generated).
+    if deep_clean:
+        _check_deep_clean_images(
+            img_av_xds, truth_xds, tol=tol, polarization=polarization
+        )
     for i_f, channel_diffs in enumerate(per_channel_diffs):
         for var, rel_diff in channel_diffs.items():
+            if deep_clean and var != "SKY_RESTORED":
+                continue
             assert rel_diff < tol, (
                 f"{plot_prefix} channel {i_f}: {var} relative difference "
                 f"{rel_diff} exceeds tolerance {tol}. You broke something!"
@@ -759,13 +848,14 @@ def test_single_field_imaging_niter0(plot_saver, processing_function_threads):
         plot_prefix=f"niter0_t{processing_function_threads}",
     )
 
+    # Angular beam widths use the corrected resampled pixel-interval scale.
     psf_ref = [
         [
-            [3.09938237e-06, 2.32409432e-06, 2.22543281e00],
-            [3.09927976e-06, 2.32408319e-06, 2.22547993e00],
-            [3.09916079e-06, 2.32406462e-06, 2.22536627e00],
-            [3.09916724e-06, 2.32405466e-06, 2.22535443e00],
-            [3.09916185e-06, 2.32405054e-06, 2.22535528e00],
+            [2.971085492209819e-06, 2.227889975208082e-06, 2.2254328140061412],
+            [2.9709871340259003e-06, 2.2278793086101007e-06, 2.2254799335544933],
+            [2.9708730854565744e-06, 2.2278615092386934e-06, 2.225366271858412],
+            [2.970879276728119e-06, 2.227851957688052e-06, 2.225354427338833],
+            [2.970874104952147e-06, 2.227848011221223e-06, 2.2253552845366853],
         ]
     ]
     assert np.allclose(
@@ -1149,12 +1239,9 @@ def test_single_field_imaging_multi_cycle(
         )
     truth_xds = xr.open_zarr(truth_image)
 
-    # Only the double-precision multi_cycle checks the deconvolution ImagingDict:
-    # it is stable across thread count and chunking. The single-precision deep
-    # CLEAN sits on a float32 peak-selection bifurcation (see
-    # MULTI_CYCLE_SINGLE_RTOL), so its per-plane history is not reproducible
-    # tightly enough to pin -- both single-precision variants pass dict_kind=None
-    # and are validated only by the (loosely bounded) image comparison below.
+    # Float64 pins the full trajectory; float32 checks the stopping contract
+    # and observable images while allowing different component selections.
+    _check_deep_clean_history(imaging_dict["deconvolution"])
     expected_dict = {
         "double": EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE,
         None: None,
@@ -1179,6 +1266,7 @@ def test_single_field_imaging_multi_cycle(
             f"multi_cycle_t{processing_function_threads}_c{n_mapping_parallelism}_{precision_tag}"
         ),
         tol=tol,
+        deep_clean=single_precision_image,
     )
 
     print(imaging_dict["timing_node_tasks"].T)
@@ -1193,9 +1281,9 @@ def test_single_field_imaging_multi_cycle_double_vs_single(plot_saver):
     A float32-vs-float64 comparison of the deep multi-cycle CLEAN. Both truths
     are generated identically except for precision (threads=1, n_mapping_parallelism=1), so
     this isolates the precision difference: the single-precision deep CLEAN can
-    tip a peak-selection bifurcation on a channel, hence the deliberately loose
-    ``MULTI_CYCLE_DOUBLE_VS_SINGLE_RTOL``. Generates the per-channel comparison
-    plots (double / single / difference).
+    select different near-tied components. Restored-image and residual-RMS
+    criteria therefore replace component-by-component agreement. Generates
+    per-channel comparison plots (double / single / difference).
     """
     _ensure_truth_image(TRUTH_IMAGE_MULTI_CYCLE_DOUBLE)
     _ensure_truth_image(TRUTH_IMAGE_MULTI_CYCLE_SINGLE)
@@ -1210,6 +1298,7 @@ def test_single_field_imaging_multi_cycle_double_vs_single(plot_saver):
         plot_saver=plot_saver,
         plot_prefix="multi_cycle_double_vs_single",
         tol=MULTI_CYCLE_DOUBLE_VS_SINGLE_RTOL,
+        deep_clean=True,
     )
 
 
@@ -1219,27 +1308,29 @@ def test_single_field_imaging_multi_cycle_worst_case(plot_saver):
     Compares the two most-divergent valid multi_cycle runs -- double precision /
     1 thread / n_mapping_parallelism=5 against single precision / 12 threads / n_mapping_parallelism=1 --
     so every knob that can perturb the result (precision, thread count, chunking)
-    differs at once. The spread is dominated by the float32 deep-CLEAN
-    peak-selection bifurcation, hence the deliberately loose
-    ``MULTI_CYCLE_WORST_CASE_RTOL``. Generates the per-channel comparison plots.
+    differs at once. Deep-CLEAN component selection can differ, so the test
+    bounds restored-image agreement and residual RMS, plus stopping invariants.
+    Generates the per-channel comparison plots.
     Unlike the double-vs-single test, neither configuration is an on-disk truth,
     so both are imaged here.
     """
     _ensure_ps_store()
-    _, double_xds, _ = _run_image_cube(
+    double_result, double_xds, _ = _run_image_cube(
         "multi_cycle",
         "twhya_selfcal_5chans_lsrk_multi_cycle_worstcase_double_t1_c5.img.zarr",
         processing_function_threads=1,
         n_mapping_parallelism=5,
         single_precision_image=False,
     )
-    _, single_xds, _ = _run_image_cube(
+    single_result, single_xds, _ = _run_image_cube(
         "multi_cycle",
         "twhya_selfcal_5chans_lsrk_multi_cycle_worstcase_single_t12_c1.img.zarr",
         processing_function_threads=12,
         n_mapping_parallelism=1,
         single_precision_image=True,
     )
+    _check_deep_clean_history(double_result["deconvolution"])
+    _check_deep_clean_history(single_result["deconvolution"])
     _compare_to_truth(
         double_xds,
         single_xds,
@@ -1247,6 +1338,7 @@ def test_single_field_imaging_multi_cycle_worst_case(plot_saver):
         plot_saver=plot_saver,
         plot_prefix="multi_cycle_worst_case_double_t1_c5_vs_single_t12_c1",
         tol=MULTI_CYCLE_WORST_CASE_RTOL,
+        deep_clean=True,
     )
 
 
@@ -1296,6 +1388,9 @@ def _regenerate_truth_images():
 
 # max_iter=100, max_cycles=1, threshold=0.001: deconvolves to the iteration limit
 # (the threshold is not reached) -> stop_code (1, 0).
+# Regression values for corrected angular beams and Gaussian-subtracted PSF
+# sidelobes. Captured at float64, one thread and one frequency chunk; checked
+# across the thread/chunk variants above without changing their tolerances.
 EXPECTED_DECONVOLVE_DICT_NITER100 = {
     (0, 0, 0): {
         "max_iter": 100,
@@ -1304,7 +1399,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
-        "max_psf_sidelobe": 0.3445475295671201,
+        "max_psf_sidelobe": 0.231108601471129,
         "stop_code": (1, 0),
         "stokes": "I",
         "frequency": 372762580492.5155,
@@ -1325,7 +1420,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
-        "max_psf_sidelobe": 0.3445475295671201,
+        "max_psf_sidelobe": 0.231108601471129,
         "stop_code": (1, 0),
         "stokes": "Q",
         "frequency": 372762580492.5155,
@@ -1346,7 +1441,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
-        "max_psf_sidelobe": 0.344533866326935,
+        "max_psf_sidelobe": 0.2310736519306997,
         "stop_code": (1, 0),
         "stokes": "I",
         "frequency": 372763190875.0631,
@@ -1367,7 +1462,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
-        "max_psf_sidelobe": 0.344533866326935,
+        "max_psf_sidelobe": 0.2310736519306997,
         "stop_code": (1, 0),
         "stokes": "Q",
         "frequency": 372763190875.0631,
@@ -1388,7 +1483,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
-        "max_psf_sidelobe": 0.34448079976471313,
+        "max_psf_sidelobe": 0.2311566506315535,
         "stop_code": (1, 0),
         "stokes": "I",
         "frequency": 372763801257.61084,
@@ -1409,7 +1504,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
-        "max_psf_sidelobe": 0.34448079976471313,
+        "max_psf_sidelobe": 0.2311566506315535,
         "stop_code": (1, 0),
         "stokes": "Q",
         "frequency": 372763801257.61084,
@@ -1430,7 +1525,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
-        "max_psf_sidelobe": 0.34447908250868625,
+        "max_psf_sidelobe": 0.23118065024762535,
         "stop_code": (1, 0),
         "stokes": "I",
         "frequency": 372764411640.15845,
@@ -1451,7 +1546,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
-        "max_psf_sidelobe": 0.34447908250868625,
+        "max_psf_sidelobe": 0.23118065024762535,
         "stop_code": (1, 0),
         "stokes": "Q",
         "frequency": 372764411640.15845,
@@ -1472,7 +1567,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
-        "max_psf_sidelobe": 0.3444778231912157,
+        "max_psf_sidelobe": 0.23118394049874885,
         "stop_code": (1, 0),
         "stokes": "I",
         "frequency": 372765022022.7062,
@@ -1493,7 +1588,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
-        "max_psf_sidelobe": 0.3444778231912157,
+        "max_psf_sidelobe": 0.23118394049874885,
         "stop_code": (1, 0),
         "stokes": "Q",
         "frequency": 372765022022.7062,
@@ -1510,517 +1605,345 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
 }
 
 
-# max_iter=10000, max_cycles=4, threshold=0.001: deconvolves to the imaging cycle limit
-# (the threshold is not reached) -> stop_code (9, 0).
+# max_iter=10000, max_cycles=4, threshold=0.001: every plane spends its whole
+# max_iter budget before the threshold -> stop_code (1, 0). With the corrected
+# PSF sidelobe the Stokes-I planes need three cycles and the Q planes two; a Q
+# plane's trailing 0 is the cycle its channel's I plane still ran (the channel
+# keeps cycling until all of its planes have stopped). Regenerated with
+# threads=1, n_mapping_parallelism=1 from the merged iteration control.
 EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
     (0, 0, 0): {
         "max_iter": 10000,
-        "threshold_per_cycle": 0.024252558701240663,
-        "iter_done": [11, 76, 1023, 1924],
+        "threshold_per_cycle": 0.014797823006496055,
+        "iter_done": [31, 1454, 8515],
         "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
-        "max_psf_sidelobe": 0.3445475295671201,
-        "stop_code": (9, 0),
+        "max_psf_sidelobe": 0.23110860147112905,
+        "stop_code": (1, 0),
         "stokes": "I",
         "frequency": 372762580492.5155,
         "time": 0.0,
-        "start_model_flux": [
-            0.0,
-            0.266477791645658,
-            0.9398015880430332,
-            1.5450796878434885,
-        ],
-        "model_flux": [
-            0.266477791645658,
-            0.9398015880430332,
-            1.5450796878434885,
-            1.6373397802396736,
-        ],
+        "start_model_flux": [0.0, 0.5602668844333403, 1.6431071319200992],
+        "model_flux": [0.5602668844333403, 1.6431071319200992, 1.4483907340499969],
         "start_peakres": [
             0.35750769883669886,
-            0.1760016248418148,
-            0.09104866197796795,
-            -0.055544136615646104,
+            0.1237258194378737,
+            -0.05624936796906117,
         ],
         "start_peakres_nomask": [
             0.35750769883669886,
-            0.1760016248418148,
-            -0.1046821561650986,
-            -0.08186077451415369,
+            0.1237258194378737,
+            -0.07762679216881836,
         ],
-        "peakres": [
-            0.17600163217772208,
-            0.09087996061308365,
-            0.046926392094023335,
-            -0.024235450236373406,
-        ],
+        "peakres": [0.1232845445884236, 0.0426864914367821, 0.017427774231639978],
         "peakres_nomask": [
-            0.17600163217772208,
-            -0.11179093611588933,
-            0.09911994331839301,
-            -0.0800230402190666,
+            0.1232845445884236,
+            0.10009890204282897,
+            0.07504883284080817,
         ],
-        "masksum": [59771, 59771, 59771, 59771],
-        "stop_description": "Reached max_cycles",
-    },
-    (0, 1, 0): {
-        "max_iter": 10000,
-        "threshold_per_cycle": 0.008589264535699869,
-        "iter_done": [277, 1766, 2570, 5387],
-        "gain": 0.1,
-        "min_psf_fraction": 0.05,
-        "max_psf_fraction": 0.8,
-        "max_psf_sidelobe": 0.3445475295671201,
-        "stop_code": (1, 0),
-        "stokes": "Q",
-        "frequency": 372762580492.5155,
-        "time": 0.0,
-        "start_model_flux": [
-            0.0,
-            0.002346609070352404,
-            -0.0678477103374279,
-            -0.0798487732399655,
-        ],
-        "model_flux": [
-            0.002346609070352404,
-            -0.0678477103374279,
-            -0.07984877323996553,
-            -0.04136538374251138,
-        ],
-        "start_peakres": [
-            0.12055068831924316,
-            0.06477848098262928,
-            0.042544172988227213,
-            -0.02522960785177681,
-        ],
-        "start_peakres_nomask": [
-            0.12055068831924316,
-            0.07644024158522328,
-            -0.058782529270906214,
-            -0.05190258473525412,
-        ],
-        "peakres": [
-            -0.06228879865198774,
-            -0.03218375508693078,
-            0.01661940912572339,
-            -0.009534460238990095,
-        ],
-        "peakres_nomask": [
-            0.0854046653054091,
-            0.06369501461028046,
-            -0.0557052712798033,
-            -0.04422576792256286,
-        ],
-        "masksum": [59771, 59771, 59771, 59771],
+        "masksum": [59771, 59771, 59771],
         "stop_description": "Reached max_iter",
     },
     (0, 0, 1): {
         "max_iter": 10000,
-        "threshold_per_cycle": 0.023107796093263362,
-        "iter_done": [10, 107, 1102, 1883],
+        "threshold_per_cycle": 0.013802714477084825,
+        "iter_done": [38, 1692, 8270],
         "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
-        "max_psf_sidelobe": 0.3445338663269349,
-        "stop_code": (9, 0),
+        "max_psf_sidelobe": 0.23107365193069979,
+        "stop_code": (1, 0),
         "stokes": "I",
         "frequency": 372763190875.0631,
         "time": 0.0,
-        "start_model_flux": [
-            0.0,
-            0.23471307256874593,
-            0.8521021227248203,
-            1.3673150648817847,
-        ],
-        "model_flux": [
-            0.23471307256874593,
-            0.8521021227248203,
-            1.3673150648817847,
-            1.303170557774305,
-        ],
+        "start_model_flux": [0.0, 0.546842810446487, 1.375891862852172],
+        "model_flux": [0.546842810446487, 1.375891862852172, 1.329913506872468],
         "start_peakres": [
             0.33510748690170244,
-            0.1677109996770549,
-            0.08711906364015294,
-            -0.05286468968257206,
+            0.11827826147666219,
+            0.05569088170594465,
         ],
         "start_peakres_nomask": [
             0.33510748690170244,
-            0.1677109996770549,
-            0.08711906364015294,
-            -0.05714709735695725,
+            0.11827826147666219,
+            0.05569088170594465,
         ],
-        "peakres": [
-            0.1677110098355548,
-            0.08653743063343262,
-            -0.044713158563317014,
-            -0.02308952561404956,
-        ],
+        "peakres": [0.11493614208633254, -0.039821976995237665, 0.015372776307794008],
         "peakres_nomask": [
-            0.1677110098355548,
-            0.08653743063343262,
-            -0.07111797248702241,
-            -0.0514892150815555,
+            0.11493614208633254,
+            -0.07131388689445983,
+            0.039200769701866464,
         ],
-        "masksum": [59771, 59771, 59771, 59771],
-        "stop_description": "Reached max_cycles",
-    },
-    (0, 1, 1): {
-        "max_iter": 10000,
-        "threshold_per_cycle": 0.00842783921957595,
-        "iter_done": [374, 1816, 2422, 5388],
-        "gain": 0.1,
-        "min_psf_fraction": 0.05,
-        "max_psf_fraction": 0.8,
-        "max_psf_sidelobe": 0.3445338663269349,
-        "stop_code": (1, 0),
-        "stokes": "Q",
-        "frequency": 372763190875.0631,
-        "time": 0.0,
-        "start_model_flux": [
-            0.0,
-            0.13359284069216945,
-            0.14251676398083135,
-            0.05588688002592024,
-        ],
-        "model_flux": [
-            0.13359284069216945,
-            0.14251676398083135,
-            0.05588688002592024,
-            0.09238822398288804,
-        ],
-        "start_peakres": [
-            -0.11825339664330481,
-            -0.06286193799058443,
-            -0.037155861560668725,
-            -0.026816772520219793,
-        ],
-        "start_peakres_nomask": [
-            -0.11825339664330481,
-            -0.07249220990580761,
-            0.05270104601053335,
-            -0.04722748945367426,
-        ],
-        "peakres": [
-            0.06110582120238398,
-            0.031562441329796465,
-            -0.016307713199914402,
-            0.00905715511166769,
-        ],
-        "peakres_nomask": [
-            -0.08024381035334768,
-            -0.06275117641400255,
-            0.04762812279734664,
-            -0.04517774494592515,
-        ],
-        "masksum": [59771, 59771, 59771, 59771],
+        "masksum": [59771, 59771, 59771],
         "stop_description": "Reached max_iter",
     },
     (0, 0, 2): {
         "max_iter": 10000,
-        "threshold_per_cycle": 0.02362857453720095,
-        "iter_done": [11, 93, 1005, 1936],
+        "threshold_per_cycle": 0.014048008724954117,
+        "iter_done": [41, 1567, 8392],
         "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
-        "max_psf_sidelobe": 0.34448079976471313,
-        "stop_code": (9, 0),
+        "max_psf_sidelobe": 0.23115665063155355,
+        "stop_code": (1, 0),
         "stokes": "I",
         "frequency": 372763801257.61084,
         "time": 0.0,
-        "start_model_flux": [
-            0.0,
-            0.25564098769140364,
-            0.9376260977291562,
-            1.0844208970871145,
-        ],
-        "model_flux": [
-            0.25564098769140364,
-            0.9376260977291562,
-            1.0844208970871145,
-            1.2459223607317291,
-        ],
-        "start_peakres": [
-            0.3380203777669396,
-            0.171436880545477,
-            0.08759461811361757,
-            -0.05062226741457164,
-        ],
+        "start_model_flux": [0.0, 0.6716555728588062, 1.132564176191364],
+        "model_flux": [0.6716555728588062, 1.132564176191364, 1.0965181280656564],
+        "start_peakres": [0.3380203777669396, 0.1147143157949577, -0.04845986424009233],
         "start_peakres_nomask": [
             0.3380203777669396,
-            0.171436880545477,
-            0.08759461811361757,
-            0.06652075496676646,
+            0.1147143157949577,
+            0.06533023009264131,
         ],
-        "peakres": [
-            0.17143696771996772,
-            0.088500345056056,
-            0.045727898436022575,
-            -0.0236135989599286,
-        ],
+        "peakres": [0.11691955418646396, -0.04051511874904721, -0.016056785243101904],
         "peakres_nomask": [
-            0.17143696771996772,
-            0.088500345056056,
-            0.07309814208798811,
-            0.06078800869531658,
+            0.11691955418646396,
+            0.07656873681399787,
+            0.052036164529459285,
         ],
-        "masksum": [59771, 59771, 59771, 59771],
-        "stop_description": "Reached max_cycles",
-    },
-    (0, 1, 2): {
-        "max_iter": 10000,
-        "threshold_per_cycle": 0.009246405635083868,
-        "iter_done": [217, 1686, 2238, 5859],
-        "gain": 0.1,
-        "min_psf_fraction": 0.05,
-        "max_psf_fraction": 0.8,
-        "max_psf_sidelobe": 0.34448079976471313,
-        "stop_code": (1, 0),
-        "stokes": "Q",
-        "frequency": 372763801257.61084,
-        "time": 0.0,
-        "start_model_flux": [
-            0.0,
-            0.22840045066609416,
-            0.9729824631401286,
-            1.0720385223505806,
-        ],
-        "model_flux": [
-            0.22840045066609416,
-            0.9729824631401286,
-            1.0720385223505806,
-            1.1007886430574692,
-        ],
-        "start_peakres": [
-            0.13011414045626285,
-            -0.06862657848229893,
-            0.040737398786314896,
-            -0.028866143814934714,
-        ],
-        "start_peakres_nomask": [
-            0.13011414045626285,
-            -0.08666940224637258,
-            -0.0603298614184732,
-            -0.04578187193748555,
-        ],
-        "peakres": [
-            -0.06707066661441234,
-            -0.03463068459764041,
-            0.017894380260378977,
-            -0.009974518863489528,
-        ],
-        "peakres_nomask": [
-            -0.08532760699225204,
-            -0.07331702487443299,
-            -0.056304467919011954,
-            -0.042893374343737196,
-        ],
-        "masksum": [59771, 59771, 59771, 59771],
+        "masksum": [59771, 59771, 59771],
         "stop_description": "Reached max_iter",
     },
     (0, 0, 3): {
         "max_iter": 10000,
-        "threshold_per_cycle": 0.022948435015752187,
-        "iter_done": [12, 124, 1210, 1876],
+        "threshold_per_cycle": 0.013536769790077428,
+        "iter_done": [42, 1940, 8018],
         "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
-        "max_psf_sidelobe": 0.34447908250868625,
-        "stop_code": (9, 0),
+        "max_psf_sidelobe": 0.23118065024762538,
+        "stop_code": (1, 0),
         "stokes": "I",
         "frequency": 372764411640.15845,
         "time": 0.0,
-        "start_model_flux": [
-            0.0,
-            0.2633625948783184,
-            0.8386721347448733,
-            1.2562889475068728,
-        ],
-        "model_flux": [
-            0.2633625948783184,
-            0.8386721347448733,
-            1.2562889475068728,
-            1.3995162418153342,
-        ],
+        "start_model_flux": [0.0, 0.5675869165077814, 1.3037751367572954],
+        "model_flux": [0.5675869165077814, 1.3037751367572954, 1.4380871477069177],
         "start_peakres": [
             0.3250153884702824,
-            0.16638991674612114,
-            0.0857186452391113,
-            0.05145545055567953,
+            -0.11265308495163198,
+            0.04793778418655557,
         ],
         "start_peakres_nomask": [
             0.3250153884702824,
-            0.16638991674612114,
-            0.0857186452391113,
-            0.06078275575204331,
+            -0.11265308495163198,
+            0.05877558920266418,
         ],
-        "peakres": [
-            0.16638992181132906,
-            0.08595652979657822,
-            0.04441185968608806,
-            0.022936670567736305,
-        ],
+        "peakres": [-0.11258089288036224, 0.03903662864395654, -0.014463974333542434],
         "peakres_nomask": [
-            0.16638992181132906,
-            0.08595652979657822,
-            0.06541443897850122,
-            0.05669052146185564,
+            -0.11258089288036224,
+            -0.06702753588206142,
+            -0.0495558615443945,
         ],
-        "masksum": [59771, 59771, 59771, 59771],
-        "stop_description": "Reached max_cycles",
-    },
-    (0, 1, 3): {
-        "max_iter": 10000,
-        "threshold_per_cycle": 0.009450491017105673,
-        "iter_done": [245, 1642, 2219, 5894],
-        "gain": 0.1,
-        "min_psf_fraction": 0.05,
-        "max_psf_fraction": 0.8,
-        "max_psf_sidelobe": 0.34447908250868625,
-        "stop_code": (1, 0),
-        "stokes": "Q",
-        "frequency": 372764411640.15845,
-        "time": 0.0,
-        "start_model_flux": [
-            0.0,
-            0.037836485325203034,
-            -0.25760165615714,
-            -0.13860303737948382,
-        ],
-        "model_flux": [
-            0.037836485325203034,
-            -0.25760165615714,
-            -0.13860303737948382,
-            -0.17414966161420553,
-        ],
-        "start_peakres": [
-            0.13275841330042387,
-            0.07064360232205102,
-            0.04331809607062795,
-            0.025870666949353215,
-        ],
-        "start_peakres_nomask": [
-            0.13275841330042387,
-            0.07064360232205102,
-            -0.0535187697537822,
-            -0.04397573401707631,
-        ],
-        "peakres": [
-            0.06859647042825479,
-            -0.03542700921291946,
-            -0.01828943371206944,
-            -0.009813841961571713,
-        ],
-        "peakres_nomask": [
-            0.0852790203277767,
-            0.07203460788853885,
-            -0.05065849073527613,
-            -0.03751927588056708,
-        ],
-        "masksum": [59771, 59771, 59771, 59771],
+        "masksum": [59771, 59771, 59771],
         "stop_description": "Reached max_iter",
     },
     (0, 0, 4): {
         "max_iter": 10000,
-        "threshold_per_cycle": 0.024727279444843833,
-        "iter_done": [9, 79, 921, 1929],
+        "threshold_per_cycle": 0.014563664174467068,
+        "iter_done": [30, 1462, 8508],
         "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
-        "max_psf_sidelobe": 0.3444778231912157,
-        "stop_code": (9, 0),
+        "max_psf_sidelobe": 0.23118394049874885,
+        "stop_code": (1, 0),
         "stokes": "I",
         "frequency": 372765022022.7062,
         "time": 0.0,
-        "start_model_flux": [
-            0.0,
-            0.2287257815322335,
-            0.7039353345811761,
-            0.822063072252277,
-        ],
-        "model_flux": [
-            0.2287257815322335,
-            0.7039353345811761,
-            0.822063072252277,
-            0.9986251065488324,
-        ],
+        "start_model_flux": [0.0, 0.5123393893968381, 1.1005660584791976],
+        "model_flux": [0.5123393893968381, 1.1005660584791976, 1.7323326760863877],
         "start_peakres": [
             0.35334581919803215,
-            0.17961773451665386,
-            0.09228172196393122,
-            0.05453941747772631,
+            -0.12115886623533792,
+            0.05103481026619257,
         ],
         "start_peakres_nomask": [
             0.35334581919803215,
-            0.17961773451665386,
-            0.09228172196393122,
-            0.0658951124655933,
+            -0.12115886623533792,
+            0.06364792719833448,
         ],
-        "peakres": [
-            0.17961777845457289,
-            -0.09267151277771227,
-            -0.047854613137399755,
-            -0.02470090779226122,
-        ],
+        "peakres": [-0.12115987770296933, 0.04199733523314201, 0.018056185604855845],
         "peakres_nomask": [
-            0.17961777845457289,
-            -0.09267151277771227,
-            0.08345410599296911,
-            0.06586690554646417,
+            -0.12115987770296933,
+            0.08465841166779839,
+            0.057361037422493086,
         ],
-        "masksum": [59771, 59771, 59771, 59771],
-        "stop_description": "Reached max_cycles",
+        "masksum": [59771, 59771, 59771],
+        "stop_description": "Reached max_iter",
     },
-    (0, 1, 4): {
+    (0, 1, 0): {
         "max_iter": 10000,
-        "threshold_per_cycle": 0.007869158275764936,
-        "iter_done": [491, 1841, 2478, 5190],
+        "threshold_per_cycle": 0.00615673303017883,
+        "iter_done": [1249, 8751, 0],
         "gain": 0.1,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
-        "max_psf_sidelobe": 0.3444778231912157,
+        "max_psf_sidelobe": 0.23110860147112905,
+        "stop_code": (1, 0),
+        "stokes": "Q",
+        "frequency": 372762580492.5155,
+        "time": 0.0,
+        "start_model_flux": [0.0, -0.15001904080490325, -0.12331001420400337],
+        "model_flux": [-0.15001904080490325, -0.1233100142040032, -0.12331001420400337],
+        "start_peakres": [
+            0.12055068831924316,
+            0.05124297708295504,
+            -0.043311578019411726,
+        ],
+        "start_peakres_nomask": [
+            0.12055068831924316,
+            -0.059837348467394386,
+            -0.048167666516098676,
+        ],
+        "peakres": [-0.04177619690525315, -0.017759999674000167, -0.043311578019411726],
+        "peakres_nomask": [
+            -0.07571004712166887,
+            -0.05647284572266394,
+            -0.048167666516098676,
+        ],
+        "masksum": [59771, 59771, 59771],
+        "stop_description": "Reached max_iter",
+    },
+    (0, 1, 1): {
+        "max_iter": 10000,
+        "threshold_per_cycle": 0.006246340424523243,
+        "iter_done": [1455, 8545, 0],
+        "gain": 0.1,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+        "max_psf_sidelobe": 0.23107365193069979,
+        "stop_code": (1, 0),
+        "stokes": "Q",
+        "frequency": 372763190875.0631,
+        "time": 0.0,
+        "start_model_flux": [0.0, 0.20188716145540175, -0.029527332963924513],
+        "model_flux": [
+            0.20188716145540175,
+            -0.029527332963924513,
+            -0.029527332963924513,
+        ],
+        "start_peakres": [
+            -0.11825339664330481,
+            -0.04939229554638734,
+            0.048554513383396246,
+        ],
+        "start_peakres_nomask": [
+            -0.11825339664330481,
+            -0.056053764200729696,
+            0.048554513383396246,
+        ],
+        "peakres": [-0.040966024039890865, 0.018021210617864106, 0.048554513383396246],
+        "peakres_nomask": [
+            -0.07168867450552616,
+            -0.04920723870427831,
+            0.048554513383396246,
+        ],
+        "masksum": [59771, 59771, 59771],
+        "stop_description": "Reached max_iter",
+    },
+    (0, 1, 2): {
+        "max_iter": 10000,
+        "threshold_per_cycle": 0.006185799695115613,
+        "iter_done": [1136, 8864, 0],
+        "gain": 0.1,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+        "max_psf_sidelobe": 0.23115665063155355,
+        "stop_code": (1, 0),
+        "stokes": "Q",
+        "frequency": 372763801257.61084,
+        "time": 0.0,
+        "start_model_flux": [0.0, 0.9010725399886381, 0.7628881909011807],
+        "model_flux": [0.9010725399886381, 0.7628881909011807, 0.7628881909011807],
+        "start_peakres": [
+            0.13011414045626285,
+            0.052802597184059386,
+            -0.03651783672425387,
+        ],
+        "start_peakres_nomask": [
+            0.13011414045626285,
+            -0.07335019972010998,
+            -0.043319557620984134,
+        ],
+        "peakres": [0.04502931830791917, 0.01784013763888431, -0.03651783672425387],
+        "peakres_nomask": [
+            -0.07732641472996422,
+            -0.06097312553216146,
+            -0.043319557620984134,
+        ],
+        "masksum": [59771, 59771, 59771],
+        "stop_description": "Reached max_iter",
+    },
+    (0, 1, 3): {
+        "max_iter": 10000,
+        "threshold_per_cycle": 0.0066192832868921725,
+        "iter_done": [1145, 8855, 0],
+        "gain": 0.1,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+        "max_psf_sidelobe": 0.23118065024762538,
+        "stop_code": (1, 0),
+        "stokes": "Q",
+        "frequency": 372764411640.15845,
+        "time": 0.0,
+        "start_model_flux": [0.0, -0.028756971207468784, -0.1873408467907952],
+        "model_flux": [
+            -0.028756971207468784,
+            -0.18734084679079516,
+            -0.1873408467907952,
+        ],
+        "start_peakres": [
+            0.13275841330042387,
+            0.05023108618776247,
+            -0.041816543960843194,
+        ],
+        "start_peakres_nomask": [
+            0.13275841330042387,
+            -0.05864940890733065,
+            -0.04325671912712328,
+        ],
+        "peakres": [0.04602699490700152, 0.019088342903560585, -0.041816543960843194],
+        "peakres_nomask": [
+            0.08127201006021183,
+            -0.06200965521658366,
+            -0.04325671912712328,
+        ],
+        "masksum": [59771, 59771, 59771],
+        "stop_description": "Reached max_iter",
+    },
+    (0, 1, 4): {
+        "max_iter": 10000,
+        "threshold_per_cycle": 0.005199791602021965,
+        "iter_done": [1700, 8300, 0],
+        "gain": 0.1,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+        "max_psf_sidelobe": 0.23118394049874885,
         "stop_code": (1, 0),
         "stokes": "Q",
         "frequency": 372765022022.7062,
         "time": 0.0,
-        "start_model_flux": [
-            0.0,
-            -0.03619306999904138,
-            0.3319424025537877,
-            0.2077670607826005,
-        ],
-        "model_flux": [
-            -0.03619306999904138,
-            0.3319424025537877,
-            0.2077670607826005,
-            0.117209984046519,
-        ],
+        "start_model_flux": [0.0, 0.38905601391878286, 0.2957034542054737],
+        "model_flux": [0.38905601391878286, 0.2957034542054737, 0.2957034542054737],
         "start_peakres": [
             0.1105504622894227,
-            0.06105820212673002,
-            0.035341656745862676,
-            -0.022758584839489462,
+            0.045269414523434096,
+            -0.03280393170807103,
         ],
         "start_peakres_nomask": [
             0.1105504622894227,
-            -0.08614966191923752,
-            -0.05248690151994892,
-            -0.0369771435853148,
+            -0.0635819201526428,
+            0.040454326118758786,
         ],
-        "peakres": [
-            0.057103335841502005,
-            0.02949658897230555,
-            -0.015229153123928592,
-            -0.008795265944578343,
-        ],
+        "peakres": [0.038315304515217585, 0.014994673623101732, -0.03280393170807103],
         "peakres_nomask": [
-            -0.09788914760953364,
-            -0.07225153047741102,
-            -0.04796955539875363,
-            -0.03440740388649981,
+            -0.09061776461026301,
+            -0.046243095270477055,
+            0.040454326118758786,
         ],
-        "masksum": [59771, 59771, 59771, 59771],
+        "masksum": [59771, 59771, 59771],
         "stop_description": "Reached max_iter",
     },
 }
