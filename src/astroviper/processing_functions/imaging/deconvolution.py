@@ -760,7 +760,7 @@ def _run_hogbom_with_cycle_checks(
     minimum_peak = final_peak.copy()
     diverged = np.zeros(max_iter_per_cycle.shape, dtype=bool)
 
-    active = (max_iter_per_cycle > 0) & (final_peak > threshold_per_cycle)
+    active = (max_iter_per_cycle > 0) & (final_peak >= threshold_per_cycle)
     while np.any(active):
         remaining = np.maximum(max_iter_per_cycle - iterations, 0)
         # CASA checks long minor cycles after 2000 iterations. Cycles shorter

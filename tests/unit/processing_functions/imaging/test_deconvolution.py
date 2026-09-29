@@ -339,6 +339,36 @@ class TestGetPhaseCenter:
 
 @requires_hogbom
 class TestHogbomCleanCube:
+    def test_zero_peak_at_zero_threshold_consumes_short_cycle_budget(self):
+        """A zero plane follows the C++ equality behavior and cannot loop forever."""
+        residual = np.zeros((1, 1, 1, 1, 1), dtype=np.float64)
+        model = np.zeros_like(residual)
+        calls = []
+
+        def fake_clean_cube(**kwargs):
+            calls.append(int(kwargs["max_iter_remaining"].item()))
+            return {
+                "iterations_performed": kwargs["max_iter_remaining"].copy(),
+                "final_peak": np.zeros((1, 1, 1), dtype=np.float64),
+            }
+
+        result = _run_hogbom_with_cycle_checks(
+            fake_clean_cube,
+            residual_cube=residual,
+            psf_cube=np.ones_like(residual),
+            model_cube=model,
+            peak_mask_cube=None,
+            mask_arg=np.array([], dtype=np.float64),
+            clean_box=(-1, -1, -1, -1),
+            max_iter_per_cycle=np.full((1, 1, 1), 5, dtype=np.int64),
+            threshold_per_cycle=np.zeros((1, 1, 1), dtype=np.float64),
+            gain=0.1,
+            processing_function_threads=1,
+        )
+
+        assert calls == [5]
+        assert result["iterations_performed"].item() == 5
+
     def test_long_cycle_stops_when_residual_rises_from_minimum(self):
         """Long CLEAN cycles use CASA-sized batches and its 10% divergence test."""
         residual = np.ones((1, 1, 1, 1, 1), dtype=np.float64)
