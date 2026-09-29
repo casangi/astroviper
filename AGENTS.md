@@ -173,68 +173,15 @@ distributed_applications.simulation.simulate_processing_set(...)
 
 ### The `simulation` subdomain (port of SIRIUS)
 `simulate_processing_set` is a **pure generator**: there is no input processing
-set, so the distributed application maps the node task over
-`parallel_coords = {"time", "frequency"}` with `map(input_data={}, ...)` and
-each task writes its `(time, frequency)` block of `VISIBILITY/UVW/WEIGHT/FLAG`
-into an MSv4 processing set that the driver created beforehand
-(`utils/measurement_set_tools.py`: empty MSv4 skeleton + region writes;
-`utils/telescope_layout.py`: CASA `.cfg` layouts → `antenna_xds`;
-`utils/beam_models.py`: shipped Airy / beam-polynomial / Zernike models). The
-science lives in `processing_functions/simulation/` (`calculate_uvw`,
-`calculate_parallactic_angles`, `antenna_beams`, `calculate_visibilities` with
-a NumPy reference and the C++ `visibility_kernel_cpp`, `calculate_noise`).
-The simulator stamps `time` at integration midpoints (the MS convention); an
-optional MSv2 backend (`utils/measurement_set_v2.py`, `ms_v2_path=` on the
-driver) writes the simulated MSv4 as a CASA Measurement Set via
-[arcae](https://github.com/ska-sa/arcae), an optional dependency.
-**Sky components.** Every source is a *sky component*: a dict
-`{"kind", "flux", "ra_dec", <shape parameters>}` validated once by
-`processing_functions/simulation/sky_components.py` (`normalize_sky_components`,
-the `COMPONENT_KINDS` registry) and passed as the `sky_components` list through
-the driver, node task and processing function; the older per-kind arrays
-(`point_source_flux/ra_dec`, `gaussian_source_*`, `disk_source_*`,
-`gaussian_ring_source_*`) remain as a bulk interface and are converted with
-`sky_components_from_arrays`. Kinds: `point`, `gaussian`, `disk` (limb-darkened,
-Hestroffer 1997, optional blur), `gaussian_ring` ("Gaussian disk"), `m_ring`
-(EHT m-ring: thin ring with azimuthal modes, optional blur and stretch),
-`crescent` (Kamruddin and Dexter 2013, floor and blur), `annulus`,
-`exponential_disk`, `tapered_power_law` (`r^-gamma exp(-r^2/2r_c^2)`) and
-`shapelet` (Cartesian Gauss-Hermite). Each kind has a unit-flux analytic uv
-response `T(u, v, w)` (`<kind>_uv_response`) and an image-plane twin
-(`<kind>_image`; `sky_model_image` rasterises a whole list in Jy/pixel), all in
-one module per kind. The Gaussian delegates to `elliptical_gaussian_uv_taper`
-in `processing_functions/imaging/restore.py` at `w = 0` (the single source of
-truth for the `[major, minor, pa]` parametrisation, shared with the restore
-step). **Every extended component includes the w term**:
-`calculate_visibilities.source_frame_uvw` rotates the phase-centre uvw into the
-frame of each component (the same rotation the kernel uses for the centre
-phase, so the centre is exact) and the responses take `w`; the paraxial
-expansion `w (n - 1) ~ -w r^2/2` is the only approximation (second order in the
-component size). The shared numerics live in `component_series.py`: the
-limb-darkened-disk Sonine/Jacobi-Anger series for complex arguments
-(`uniform_disk_series`, used by disk, annulus and crescent), the exact Gaussian
-`blur_transform` (a blurred component = the sharp one at complex baseline `g k`
-and complex `w g`), and Gaussian *scale mixtures* with Gauss-Jacobi/Laguerre
-quadrature for the exponential and tapered power-law profiles; the m-ring is a
-Neumann series in the inclination coupling. The reference document is
-`dev/simulation/sky_components_memo.pdf`: one section per kind with an
-annotated 3-D figure (`figures_sky_components.py`), the brightness and the
-visibility formula exactly as implemented, special cases and implementation
-steps; `memo_equations_check.py` next to it re-implements every printed
-formula and compares it with the library (keep it passing when a formula
-changes). `sky_components_summary.pptx` is the slide summary. The derivations
-are also in `nested_gaussian_rings_memo_v2.pdf`; the unit tests
-(`test_w_term_and_gaussian_ring.py`, `test_extended_components.py`,
-`test_sky_components.py`) repeat them against grid and polar quadrature
-oracles, including dense point-source grids pushed through the simulator
-itself. Adding a new kind means: a module with `<kind>_uv_response(u, v, ...,
-w=0)` and `<kind>_image(l, m, ...)`, one `ComponentKind` entry in the registry,
-oracle tests, and nothing else (the C++ kernel is untouched: it only ever sees
-point sources). The EHT tutorial
-(`docs/distributed_applications_tutorials/simulation/eht_m87_simulation.ipynb`)
-replicates an eht-imaging (ehtim 1.3.2) simulation of M87* shipped as
-`data/simulation/eht2017_ehtim_reference.npz` (generator script alongside;
-ehtim's uv sign and Fourier conventions equal ours). Likewise the Airy voltage patterns in
+set; the node task is mapped over `parallel_coords = {"time", "frequency"}` and
+each task writes its block into an MSv4 skeleton the driver created. The
+subdomain itself (structure, the `sky_components` interface and its analytic
+kinds, uvw and beam conventions, shipped data, legacy fixtures, status) is
+documented in `SIRIUS_PORT_PLAN.md` at the repo root; keep that file current
+when the simulator changes.
+
+### Imaging implementation notes
+The Airy voltage patterns in
 `processing_functions/imaging/primary_beam/airy_disk.py` are shared by the
 imaging primary beam (`ipower=2`, the CASA power-pattern definition) and the
 simulation antenna beams. The Adaptive Scale Pixel
@@ -251,15 +198,6 @@ PSF beam fit is switchable
 `StokesImageUtil::FitGaussianPSF` (CAS-13022,
 `processing_functions/image_analysis/psf_gaussian_fit_cpp/`) that reproduces
 `tclean`'s restoring beam exactly on the same PSF.
-Conventions: `uvw = P(antenna1) - P(antenna2)` (the archival / VLBI /
-CASA-practice convention adopted by MSv4 -- note the historical MSv2 text says
-the opposite; see `experiments/uvw_convention_investigation`); beam-image
-datasets are
-`JONES[parallactic_angle, frequency, polarization, l, m]`; polarizations are MSv4
-strings (`"RR"`, `"XX"`, ...). Data shipped in `src/astroviper/data/simulation/`.
-Legacy SIRIUS reference fixtures live in
-`tests/unit/processing_functions/simulation/data/` (see
-`generate_legacy_fixtures.py` there).
 
 ---
 
