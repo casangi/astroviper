@@ -77,8 +77,8 @@ pytest --cov=astroviper tests # with coverage
 Tutorials live under `docs/`, organised to **mirror the source module tree** —
 put a new notebook in the folder matching the layer + subdomain of the function
 it demonstrates:
-- `distributed_applications_tutorials/{imaging,image_analysis,model}/`
-- `processing_functions_tutorials/{imaging,image_analysis,visibility_manipulation}/`
+- `distributed_applications_tutorials/{imaging,image_analysis,model,simulation}/`
+- `processing_functions_tutorials/{imaging,image_analysis,visibility_manipulation,simulation}/`
 
 Notebooks must stay **output-stripped** (`nbstripout`) and
 **headless-executable** — they are run non-interactively (`nbconvert` /
@@ -95,7 +95,7 @@ Notebooks must stay **output-stripped** (`nbstripout`) and
   widget only re-render it. When a cell is purely an interactive explorer, a
   static fallback (e.g. a small multi-panel montage) is the most robust choice for
   the executed copy — see
-  `processing_functions_tutorials/imaging/demo_standard_grid.ipynb`.
+  `processing_functions_tutorials/imaging/demo_prolate_spheroidal_grid.ipynb`.
 - Always execute notebooks with a **per-cell timeout** so a genuinely stuck cell
   fails loudly instead of hanging the whole run.
 - **Heavy notebooks are slow, not hung.** Run the notebook suite **sequentially**
@@ -126,8 +126,8 @@ src/astroviper/
 Each of layers 1–3 is further split by **subdomain**, mirrored across the
 layers where implemented (not every subdomain exists in every layer yet):
 `imaging`, `image_analysis`, `flagging`, `visibility_manipulation`,
-`calibration`, `model`. Additional **subdomains** (e.g. `simulation`) can be
-added in the future.
+`calibration`, `model`, `simulation`. Additional **subdomains** can be added in
+the future.
 
 ### Layer responsibilities & boundaries
 1. **`distributed_applications/`** — Constructs `parallel_coords`, maps a `node_task`
@@ -143,6 +143,16 @@ added in the future.
    in-memory `xarray`/NumPy objects. **No I/O on the input or output data.**
    This is where gridders, weighting, FFT normalization, primary beams, and
    deconvolvers live. C++ kernels live in sub-packages here.
+   **Full-dimensionality rule:** a processing function must handle the full
+   dimensionality of the XRADIO-defined data structure it works on. A
+   function operating on an image always expects and processes
+   `(time, frequency, polarization, l, m)`; one operating on a measurement
+   set `(time, baseline_id, frequency, polarization)` — even when a caller
+   only hands it a single-channel slice. Looping over a dimension is the
+   node task's job (e.g. `node_tasks/imaging/image_cube_single_field.py`
+   images one frequency channel at a time so every channel runs its own
+   imaging cycle loop); never write a processing function that assumes a
+   single time, channel or polarization plane.
    > **Open question:** should temporary/cache data (e.g. a cfcache) be allowed
    > to be written to disk from this layer? Undecided — raise it before relying
    > on either answer.
@@ -153,11 +163,41 @@ added in the future.
 
 ### Public API surface
 Each layer/subdomain re-exports its entry points via `__init__.py`. The imaging
-entry point is exposed at all three layers as `image_cube_single_field`:
+entry point is exposed at all three layers as `image_cube_single_field`, the
+simulation entry point as `simulate_processing_set`:
 ```python
 import astroviper.distributed_applications as distributed_applications
 distributed_applications.imaging.image_cube_single_field(...)
+distributed_applications.simulation.simulate_processing_set(...)
 ```
+
+### The `simulation` subdomain (port of SIRIUS)
+`simulate_processing_set` is a **pure generator**: there is no input processing
+set; the node task is mapped over `parallel_coords = {"time", "frequency"}` and
+each task writes its block into an MSv4 skeleton the driver created. The
+subdomain itself (structure, the `sky_components` interface and its analytic
+kinds, uvw and beam conventions, shipped data, legacy fixtures, status) is
+documented in `SIRIUS_PORT_PLAN.md` at the repo root; keep that file current
+when the simulator changes.
+
+### Imaging implementation notes
+The Airy voltage patterns in
+`processing_functions/imaging/primary_beam/airy_disk.py` are shared by the
+imaging primary beam (`ipower=2`, the CASA power-pattern definition) and the
+simulation antenna beams. The Adaptive Scale Pixel
+deconvolver (`processing_functions/imaging/deconvolvers/aspclean/`, a port of
+CASA's `AspMatrixCleaner`) does its FFTs with the vendored
+`include/pocketfft_hdronly.h` (the BSD-3 header-only FFT behind NumPy/SciPy,
+kept verbatim with its licence block); its per-Aspen L-BFGS follows ALGLIB's
+scaled-variable conventions and is exposed for tests as
+`aspclean.lbfgs_minimize`. Two documented departures from CASA live in
+`src/asp_clean.cpp`: separable Aspen spectra with paired inverse transforms
+(same numbers, ~8x fewer FFTs) and a unit-consistent "diverging" guard. The
+PSF beam fit is switchable
+(`psf_fitting_method="astroviper" | "casa"`); `"casa"` is a C++ port of CASA's
+`StokesImageUtil::FitGaussianPSF` (CAS-13022,
+`processing_functions/image_analysis/psf_gaussian_fit_cpp/`) that reproduces
+`tclean`'s restoring beam exactly on the same PSF.
 
 ---
 
@@ -403,14 +443,17 @@ per-variable nodes.
     `imsize`).
   - **Classes**: `CamelCase` (`IterationController`, `ReturnDict`).
   - **Consistency**: Parameter names should be consistent throughout the stack.
-  - **CLEAN terminology**: say **residual update cycle** and **model update
-    cycle** (not CASA's "major cycle" / "minor cycle") in code, docstrings, and
-    docs — matching `residual_cycle_cube_single_field` /
-    `model_update_cycle_cube_single_field`. A one-time "(CASA's major/minor
-    cycle)" parenthetical for orientation is fine.
+  - **CLEAN terminology**: an **imaging cycle** (or simply *cycle*) is one
+    **residual update** followed by one **model update**; use exactly these
+    three terms in code, docstrings, docs and notebooks, matching
+    `residual_update_cube_single_field` / `model_update_cube_single_field`
+    and the `max_cycles` / `max_iter_per_cycle` / `threshold_per_cycle`
+    parameters. Never call anything a major or minor cycle (major/minor axis
+    of a Gaussian beam is fine). CASA parameter names may be cited in brackets
+    for orientation, e.g. `max_cycles` [CASA `nmajor`].
 - **Formatting**: **Ruff** (enforced by CI + pre-commit). Don't hand-format.
 - **Imports**: prefer **absolute** imports (`from
-  astroviper.processing_functions.imaging.residual_cycle import ...`). Relative
+  astroviper.processing_functions.imaging.residual_update import ...`). Relative
   imports appear only as short re-exports in `__init__.py` files. Heavy/optional
   deps (dask, zarr, matplotlib, the C++ ext, even numpy in some hot node-task
   paths) are frequently imported **inside functions** to keep worker import time
@@ -475,6 +518,9 @@ per-variable nodes.
   the same parameter name is used at every layer.
 - Keep the layering: graph code in `distributed_applications/`, I/O in `node_tasks/`,
   science in `processing_functions/`.
+- Write processing functions for the full dimensionality of the XRADIO data
+  structure (image: `time, frequency, polarization, l, m`); put any loop over
+  a dimension (the per-channel imaging cycle loop) in the node task.
 - Run `ruff format`, `pytest`, and rebuild after C++ edits before finishing.
 
 **Don't**
@@ -484,6 +530,8 @@ per-variable nodes.
 - ❌ Lowercase a data-variable name or uppercase a coordinate name.
 - ❌ Put Dask/graph logic into `processing_functions/`, or science into
   `distributed_applications/`.
+- ❌ Write a processing function that only works on a single channel, time
+  or polarization plane (see the full-dimensionality rule in §3).
 - ❌ Commit notebook outputs (pre-commit's `nbstripout` enforces this) or
   unformatted code.
 - ❌ Introduce relative imports outside `__init__.py` re-exports.

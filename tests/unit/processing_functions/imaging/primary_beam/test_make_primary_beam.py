@@ -75,7 +75,7 @@ def test_make_primary_beam_single_field_basic():
 
     data = pb.values
     assert np.all(np.isfinite(data))
-    # The (voltage) beam peaks at the image centre with value 1.0.
+    # The (power) beam peaks at the image centre with value 1.0.
     for f in range(pb.sizes["frequency"]):
         plane = data[0, f, 0]
         assert plane[32, 32] == pytest.approx(1.0, abs=1e-6)
@@ -154,6 +154,37 @@ def test_make_primary_beam_single_field_frequency_scaling():
     pb = img_xds["PRIMARY_BEAM"].values
     # An off-centre pixel: the lower-frequency (wider) beam is larger there.
     assert pb[0, 0, 0, 32, 20] > pb[0, 1, 0, 32, 20]
+
+
+def test_primary_beam_is_casa_power_pattern():
+    """PRIMARY_BEAM follows the CASA definition: the shared CASA-compatible
+    Airy voltage pattern squared (power), identical to the simulation code."""
+    from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
+        casa_airy_disk_response,
+    )
+    from astroviper.processing_functions.simulation.antenna_beams import (
+        casa_airy_disk_response as simulation_casa_airy_disk_response,
+    )
+
+    assert simulation_casa_airy_disk_response is casa_airy_disk_response
+
+    img_xds, image_params = _make_empty_residual_image()
+    img_xds, _ = make_primary_beam_single_field(
+        img_xds,
+        image_params,
+        image_data_group_in_name="residual",
+        image_data_group_out_name="residual",
+    )
+    voltage = casa_airy_disk_response(
+        img_xds.l.values[:, None],
+        img_xds.m.values[None, :],
+        img_xds.frequency.values[0],
+        10.7,
+        0.75,
+        0.03113667385557884,
+        ipower=1,
+    )
+    np.testing.assert_array_equal(img_xds["PRIMARY_BEAM"].values[0, 0, 0], voltage**2)
 
 
 def test_airy_disk_rorder_versions_agree():

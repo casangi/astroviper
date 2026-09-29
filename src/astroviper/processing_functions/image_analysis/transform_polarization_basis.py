@@ -281,11 +281,13 @@ def transform_polarization_basis(
 
         # Skip uv-domain grids (e.g. VISIBILITY_MODEL). The residual update grids
         # and degrids in the telescope's NATIVE polarization basis while the model
-        # update works in Stokes, so a model-visibility uv grid is never the thing
-        # being basis-transformed. It also persists across major cycles (it is
-        # rebuilt by fft_norm each cycle), so it must not be deleted -- only
-        # skipped here. Transforming it would be wasteful (large complex grid,
-        # padded 1.2x) and pointless.
+        # update works in Stokes, so a uv grid is never the thing being
+        # basis-transformed -- transforming one would be wasteful (large complex
+        # grid, padded 1.2x) and pointless. Since 2026-08 the per-cycle grids are
+        # freed as soon as they are consumed (VISIBILITY_MODEL right after the
+        # degrid, VISIBILITY inside ifft_norm), so this skip is usually vacuous,
+        # but it must stay: it also protects any grid a caller chose to keep via
+        # image_data_variables_keep.
         if "u" in img_xds[var_name].dims or "v" in img_xds[var_name].dims:
             continue
 

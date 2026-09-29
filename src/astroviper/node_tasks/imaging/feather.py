@@ -54,15 +54,15 @@ def feather(input_params, graph_mode=True):
 
     import pandas as pd
     import toolviper.utils.logger as logger
-    from toolviper.utils.memory_management import free_memory, get_rss_gb, memory_setup
+    from toolviper.utils.memory_management import free_memory, get_rss_gb
     from xradio.image import load_image
 
     import astroviper.processing_functions as pf
 
     task_start = time.time()
-    # Pin the mmap threshold before any large allocation so big buffers are
-    # returned to the OS on free (mirrors the image_cube node task).
-    memory_setup(131072)
+    # No per-task allocator tuning (mirrors the image_cube node task): mallopt
+    # would disable glibc's dynamic mmap-threshold adaptation; the allocator
+    # environment is set once per worker instead.
 
     logger.debug("Memory at start of feather node task: " + str(get_rss_gb()) + " GB")
 

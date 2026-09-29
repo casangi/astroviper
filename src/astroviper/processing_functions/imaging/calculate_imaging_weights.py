@@ -14,6 +14,9 @@ from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weig
     degrid_imaging_weights,
     grid_imaging_weights,
 )
+from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+    map_visibility_frequencies_to_image,
+)
 from astroviper.utils.data_group_tools import (
     create_ps_xdt_data_groups_in_and_out,
     modify_data_groups_ps_xdt,
@@ -263,6 +266,11 @@ def calculate_imaging_weights(
         )
 
         freq_chan = ms_xdt.frequency.values
+        # Same physical channel assignment as the visibility / PSF gridders,
+        # so the weight density is accumulated on the image channel planes.
+        frequency_map = map_visibility_frequencies_to_image(
+            freq_chan, img_xds.frequency.values
+        )
 
         grid_imaging_weights(
             weight_density_grid,
@@ -273,6 +281,7 @@ def calculate_imaging_weights(
             n_uv,
             delta_lm,
             processing_function_threads=processing_function_threads,
+            frequency_map=frequency_map,
         )
 
     briggs_factors = calculate_briggs_params(
@@ -289,6 +298,9 @@ def calculate_imaging_weights(
         )
 
         freq_chan = ms_xdt.frequency.values
+        frequency_map = map_visibility_frequencies_to_image(
+            freq_chan, img_xds.frequency.values
+        )
 
         imaging_weights = degrid_imaging_weights(
             weight_density_grid,
@@ -299,6 +311,7 @@ def calculate_imaging_weights(
             n_uv,
             delta_lm,
             processing_function_threads=processing_function_threads,
+            frequency_map=frequency_map,
         )
 
         n_pol = ms_xdt.sizes["polarization"]
