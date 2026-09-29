@@ -630,7 +630,7 @@ def _encode_one_variable(dv, image_store, task_coords, img_xds):
 
     The task's write region -- the ``task_coords`` slice on each parallel dim,
     the full axis elsewhere -- may cover **several** chunks when the store was
-    created with ``node_task_image_chunking`` (e.g. l/m sub-chunking, or a
+    created with ``image_chunking`` (e.g. l/m sub-chunking, or a
     frequency chunk finer than the per-task chunk); without it the region is
     exactly one chunk, as before.  Each covered chunk is encoded with the
     variable's on-disk codecs and returned as ``(path, blob)`` for
@@ -721,7 +721,7 @@ def write_result_chunk_to_disk_using_zarr_skunk_works(
 
     # Phase 1: encode/compress (optionally concurrent across variables). Each
     # variable yields one blob per on-disk chunk its region covers (several
-    # when node_task_image_chunking subdivides the chunk grid).
+    # when image_chunking subdivides the chunk grid).
     if processing_function_threads <= 1 or len(variables) <= 1:
         encoded_per_variable = [
             _encode_one_variable(dv, image_store, task_coords, img_xds)
@@ -896,7 +896,7 @@ def _encode_one_variable_sharded(dv, image_store, task_coords, img_xds):
     goes in its (pre-created) shard file.
 
     The task's write region may cover **several** inner chunks when the store
-    was created with ``node_task_image_chunking`` (e.g. l/m sub-chunking, or a
+    was created with ``image_chunking`` (e.g. l/m sub-chunking, or a
     frequency inner chunk finer than the per-task chunk); without it the region
     is exactly one inner chunk, as before.  The region must be aligned to the
     inner-chunk grid (guarded in :func:`_task_chunk_grid`).  Returns a list of
@@ -963,7 +963,7 @@ def write_result_chunk_to_disk_sharded_skunk_works(
 
     # Phase 1: encode/compress each variable's inner chunk(s) (optionally
     # concurrent across variables; several inner chunks per variable when
-    # node_task_image_chunking subdivides the inner-chunk grid).
+    # image_chunking subdivides the inner-chunk grid).
     if processing_function_threads <= 1 or len(variables) <= 1:
         encoded_per_variable = [
             _encode_one_variable_sharded(dv, image_store, task_coords, img_xds)

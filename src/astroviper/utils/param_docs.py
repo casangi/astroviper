@@ -74,6 +74,7 @@ def _load_registry():
     registries = [
         ("imaging", "IMAGING_PARAM_DOCS"),
         ("image_analysis", "IMAGE_ANALYSIS_PARAM_DOCS"),
+        ("simulation", "SIMULATION_PARAM_DOCS"),
     ]
     merged = {}
     for subdomain, attr in registries:
@@ -103,14 +104,17 @@ def _target_files():
         "node_tasks/imaging/image_cube_single_field.py",
         "processing_functions/imaging/image_cube_single_field.py",
         "processing_functions/imaging/calculate_imaging_weights.py",
-        "processing_functions/imaging/residual_cycle.py",
-        "processing_functions/imaging/model_update_cycle.py",
+        "processing_functions/imaging/residual_update.py",
+        "processing_functions/imaging/model_update.py",
         "processing_functions/imaging/make_point_spread_function.py",
         "processing_functions/imaging/make_undeconvolved_image.py",
         "processing_functions/imaging/degrid_visibility_grid.py",
         "distributed_applications/image_analysis/moments.py",
         "node_tasks/image_analysis/moments.py",
         "processing_functions/image_analysis/moments.py",
+        "distributed_applications/simulation/simulate_processing_set.py",
+        "node_tasks/simulation/simulate_processing_set.py",
+        "processing_functions/simulation/simulate_processing_set.py",
     ]
     return [root / r for r in rel]
 

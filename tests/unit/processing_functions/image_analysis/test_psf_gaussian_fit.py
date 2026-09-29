@@ -545,7 +545,7 @@ def test_extract_main_lobe_per_slice_independent():
 
 
 def test_extract_main_lobe_uses_largest_absolute_sidelobe():
-    """A negative sidelobe controls the minor-cycle safety threshold."""
+    """A negative sidelobe controls the model update safety threshold."""
     data = np.zeros((1, 1, 1, 9, 9), dtype=np.float64)
     data[0, 0, 0, 4, 4] = 1.0
     data[0, 0, 0, 1, 1] = 0.2

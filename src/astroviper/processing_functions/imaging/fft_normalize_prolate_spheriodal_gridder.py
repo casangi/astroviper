@@ -152,7 +152,7 @@ def ifft_norm_img_xds(
         FFT library to use.  Default is ``"scipy"``.  Use ``"pyfftw"`` for
         potentially faster transforms when pyfftw is installed; plan caching
         is especially beneficial when the same grid shape is transformed
-        repeatedly across major cycles.
+        repeatedly across imaging cycles.
 
     Returns
     -------

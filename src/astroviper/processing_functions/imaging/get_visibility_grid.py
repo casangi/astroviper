@@ -70,7 +70,7 @@ def get_visibility_grid_single_field(
     overwrite : bool, default ``True``
         If ``True``, an existing output data group or output data variable is
         silently overwritten.  Defaults to ``True`` because this function is
-        typically called repeatedly in an iterative cycle.
+        typically called once per imaging cycle.
     chan_mode : str, default ``"cube"``
         Channel mapping mode.  ``"cube"`` maps each visibility channel to the
         image channel nearest in frequency (see

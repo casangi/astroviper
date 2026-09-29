@@ -52,6 +52,7 @@ docs = [
 
 all = [
   "python_casacore>=3.6.1; sys_platform != 'darwin'",
+  "arcae",
   "pytest",
   "pytest-cov",
   "pytest-html",
