@@ -65,3 +65,82 @@ class FFTDtypeAndOverwriteTest(unittest.TestCase):
         original = plane.copy()
         fft_lm_to_uv(plane, complex_dtype=np.complex64)
         np.testing.assert_array_equal(plane, original)
+
+
+class FourCorrelationSkyTest(unittest.TestCase):
+    """The sky of four correlations stays complex through the inverse FFT (a cross
+    hand is not conjugate symmetric on its own); two hands and the PSF are real."""
+
+    def _image(self, labels, seed=0):
+        import xarray as xr
+
+        n_uv, n_pol = 20, len(labels)
+        rng = np.random.default_rng(seed)
+        # four planes drawn once, so that the two-hand grids are the first two of them
+        grid = rng.normal(size=(1, 1, 4, n_uv, n_uv)) + 1j * rng.normal(
+            size=(1, 1, 4, n_uv, n_uv)
+        )
+        grid = np.ascontiguousarray(grid[:, :, :n_pol])
+        img_xds = xr.Dataset(
+            {
+                "VISIBILITY": (("time", "frequency", "polarization", "u", "v"), grid),
+                "VISIBILITY_NORMALIZATION": (
+                    ("time", "frequency", "polarization"),
+                    np.full((1, 1, n_pol), 2.0),
+                ),
+                "UV_SAMPLING": (
+                    ("time", "frequency", "polarization", "u", "v"),
+                    grid.copy(),
+                ),
+                "UV_SAMPLING_NORMALIZATION": (
+                    ("time", "frequency", "polarization"),
+                    np.full((1, 1, n_pol), 2.0),
+                ),
+            },
+            coords={"polarization": labels},
+        )
+        img_xds.attrs["type"] = "image_dataset"  # required by the xradio accessor
+        img_xds.attrs["data_groups"] = {
+            "residual": {
+                "visibility": "VISIBILITY",
+                "visibility_normalization": "VISIBILITY_NORMALIZATION",
+                "uv_sampling": "UV_SAMPLING",
+                "uv_sampling_normalization": "UV_SAMPLING_NORMALIZATION",
+            }
+        }
+        return img_xds
+
+    def _transform(self, labels):
+        from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+            ifft_norm_img_xds,
+        )
+
+        return ifft_norm_img_xds(
+            self._image(labels),
+            image_params={"image_size": [16, 16]},
+            image_data_group_in_name="residual",
+            image_data_group_out_name="residual",
+            image_data_group_out_modified={
+                "sky": "SKY_RESIDUAL",
+                "point_spread_function": "POINT_SPREAD_FUNCTION",
+            },
+            fft_backend="scipy",
+        )
+
+    def test_sky_is_complex_for_four_correlations_only(self):
+        four = self._transform(["XX", "XY", "YX", "YY"])
+        two = self._transform(["XX", "YY"])
+        self.assertEqual(four["SKY_RESIDUAL"].dtype, np.complex128)
+        self.assertEqual(four["POINT_SPREAD_FUNCTION"].dtype, np.float64)
+        self.assertEqual(two["SKY_RESIDUAL"].dtype, np.float64)
+        self.assertEqual(two["POINT_SPREAD_FUNCTION"].dtype, np.float64)
+        self.assertEqual(four["SKY_RESIDUAL"].shape, (1, 1, 4, 16, 16))
+        # the same grids: the two-hand image is the real part of the first planes
+        np.testing.assert_array_equal(
+            two["SKY_RESIDUAL"].values, four["SKY_RESIDUAL"].values[:, :, :2].real
+        )
+        self.assertGreater(np.abs(four["SKY_RESIDUAL"].values.imag).max(), 0.0)
+        np.testing.assert_array_equal(
+            two["POINT_SPREAD_FUNCTION"].values,
+            four["POINT_SPREAD_FUNCTION"].values[:, :, :2],
+        )

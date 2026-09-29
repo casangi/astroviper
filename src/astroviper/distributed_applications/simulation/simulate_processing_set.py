@@ -130,7 +130,9 @@ def simulate_processing_set(
         described in :mod:`~astroviper.processing_functions.simulation.sky_components`.
     point_source_flux : np.ndarray, [n_source, n_time | 1, n_frequency | 1, 4], Jy, optional
         Flux of every point source in the four instrumental correlations
-        (``RR, RL, LR, LL`` or ``XX, XY, YX, YY``); singleton time/frequency axes broadcast.
+        (``RR, RL, LR, LL`` or ``XX, XY, YX, YY``); singleton time/frequency axes
+        broadcast.  Real, or complex with conjugate cross hands (``XY = U + iV``,
+        ``YX = U - iV``; ``RL = Q + iU``, ``LR = Q - iU``).
     point_source_ra_dec : np.ndarray, [n_time | 1, n_source, 2], radians, optional
         Right ascension and declination of the point sources (per time or fixed).
     gaussian_source_flux : np.ndarray, [n_gaussian, n_time | 1, n_frequency | 1, 4], Jy, optional
@@ -190,9 +192,9 @@ def simulate_processing_set(
         correlations are simulated, else ``["I"]``), "time_index": which
         time sample of time-dependent fluxes and positions to draw
         (default 0)}``.  Point sources are added to the pixel they fall in;
-        extended components are sampled at the pixel centres.  Component
-        fluxes are real, so Stokes V (linear feeds) or U (circular feeds)
-        is zero.  Default ``None`` (no image).
+        extended components are sampled at the pixel centres.  Stokes V
+        (linear feeds) or U (circular feeds) needs complex cross-hand
+        fluxes and is zero otherwise.  Default ``None`` (no image).
     phase_center_ra_dec : np.ndarray, [n_time | 1, 2], radians
         Phase centre of the array per time (time-varying for mosaics) or fixed.
     beam_models : list
@@ -284,6 +286,7 @@ def simulate_processing_set(
         resolve_beam_params,
     )
     from astroviper.processing_functions.simulation.sky_components import (
+        as_correlation_flux,
         describe_sky_components,
         normalize_sky_components,
         sky_components_from_arrays,
@@ -316,14 +319,16 @@ def simulate_processing_set(
             "point_source_flux and point_source_ra_dec must be given together (or both omitted)."
         )
     if point_source_flux is not None:
-        point_source_flux = np.asarray(point_source_flux, dtype=np.float64)
+        point_source_flux = as_correlation_flux(point_source_flux, "point_source_flux")
         point_source_ra_dec = np.asarray(point_source_ra_dec, dtype=np.float64)
     if gaussian_source_flux is not None:
-        gaussian_source_flux = np.asarray(gaussian_source_flux, dtype=np.float64)
+        gaussian_source_flux = as_correlation_flux(
+            gaussian_source_flux, "gaussian_source_flux"
+        )
         gaussian_source_ra_dec = np.asarray(gaussian_source_ra_dec, dtype=np.float64)
         gaussian_source_shape = np.asarray(gaussian_source_shape, dtype=np.float64)
     if disk_source_flux is not None:
-        disk_source_flux = np.asarray(disk_source_flux, dtype=np.float64)
+        disk_source_flux = as_correlation_flux(disk_source_flux, "disk_source_flux")
     if disk_source_ra_dec is not None:
         disk_source_ra_dec = np.asarray(disk_source_ra_dec, dtype=np.float64)
     if disk_source_shape is not None:
@@ -335,8 +340,8 @@ def simulate_processing_set(
             disk_source_limb_darkening, dtype=np.float64
         )
     if gaussian_ring_source_flux is not None:
-        gaussian_ring_source_flux = np.asarray(
-            gaussian_ring_source_flux, dtype=np.float64
+        gaussian_ring_source_flux = as_correlation_flux(
+            gaussian_ring_source_flux, "gaussian_ring_source_flux"
         )
     if gaussian_ring_source_ra_dec is not None:
         gaussian_ring_source_ra_dec = np.asarray(

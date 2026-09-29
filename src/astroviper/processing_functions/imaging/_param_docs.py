@@ -18,7 +18,10 @@ IMAGING_PARAM_DOCS = {
     "image_params": (
         "Image geometry and output coordinates: ``image_size``, ``cell_size``,\n"
         "``phase_direction``, ``time_coords``, ``polarization_coords`` and the\n"
-        "``fft_padding`` gridding/FFT padding factor."
+        "``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is\n"
+        '``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image\n'
+        'the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four\n'
+        "correlations (see ``instrument_polarization_basis``)."
     ),
     "imaging_weights_params": (
         'Weighting scheme configuration: ``weighting`` (``"natural"`` or\n'
@@ -110,8 +113,13 @@ IMAGING_PARAM_DOCS = {
     ),
     "instrument_polarization_basis": (
         "Correlation (instrument) polarization basis the gridding is performed in:\n"
-        '``"linear"`` (``XX``/``YY``) or ``"circular"`` (``RR``/``LL``). The\n'
-        "output image is always produced in the Stokes basis."
+        '``"linear"`` or ``"circular"``. The residual update grids and degrids the\n'
+        "correlations of this basis and the model update deconvolves in the\n"
+        "Stokes basis, in which the image is written. The Stokes planes requested\n"
+        'in ``image_params["polarization_coords"]`` fix the correlations that are\n'
+        "loaded and gridded: the two parallel hands give ``I, Q`` (linear) or\n"
+        "``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample\n"
+        "is used only if none of its loaded correlations is flagged."
     ),
     "single_precision_image": (
         "If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model\n"

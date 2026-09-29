@@ -85,7 +85,9 @@ def simulate_processing_set(
         ITRF geocentric array reference position used for uvw and parallactic angles.
     point_source_flux : np.ndarray, [n_source, n_time | 1, n_frequency | 1, 4], Jy, or None
         Flux of every point source in the four instrumental correlations
-        (``RR, RL, LR, LL`` or ``XX, XY, YX, YY``); singleton time/frequency axes broadcast.
+        (``RR, RL, LR, LL`` or ``XX, XY, YX, YY``); singleton time/frequency axes
+        broadcast.  Real, or complex with conjugate cross hands (``XY = U + iV``,
+        ``YX = U - iV``; ``RL = Q + iU``, ``LR = Q - iU``).
     point_source_ra_dec : np.ndarray, [n_time | 1, n_source, 2], radians, or None
         Right ascension and declination of the point sources (per time or fixed).
     gaussian_source_flux : np.ndarray, [n_gaussian, n_time | 1, n_frequency | 1, 4], Jy, optional

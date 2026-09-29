@@ -50,6 +50,7 @@ from astroviper.processing_functions.simulation.simulate_processing_set import (
 )
 from astroviper.processing_functions.simulation.sky_components import (
     COMPONENT_KINDS,
+    as_correlation_flux,
     component_image,
     component_uv_response,
     normalize_sky_components,
@@ -79,6 +80,7 @@ __all__ = [
     "sky_components_from_arrays",
     "component_uv_response",
     "component_image",
+    "as_correlation_flux",
     "polarization_basis_of",
     "sky_model_image",
     "stokes_sky_model_images",
