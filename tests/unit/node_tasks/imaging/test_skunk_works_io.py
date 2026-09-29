@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import errno
 import os
+import threading
 import time
+import warnings
 
 import numpy as np
 import pytest
@@ -207,11 +209,29 @@ def test_read_non_transient_errno_propagates_immediately(tmp_path, monkeypatch):
         raise OSError(errno.EBADF, "Bad file descriptor")
 
     monkeypatch.setattr(os, "pread", bad_pread)
-    slept = []
-    monkeypatch.setattr(time, "sleep", lambda s: slept.append(s))
+    # ``time.sleep`` is process-global, so a background thread elsewhere in
+    # the session (a leaked poller, say) would be recorded too. The reader's
+    # retry backoff runs on the calling thread, so only count sleeps from this
+    # thread, and report any other sleeper so a contaminated session shows up.
+    slept, foreign = [], {}
+    test_thread = threading.get_ident()
+
+    def record_sleep(seconds):
+        if threading.get_ident() == test_thread:
+            slept.append(seconds)
+        else:
+            foreign[threading.current_thread().name] = seconds
+
+    monkeypatch.setattr(time, "sleep", record_sleep)
     with pytest.raises(OSError):
         read_array_region(path, {"frequency": slice(0, 4)})
     assert calls["n"] == 1 and not slept
+    if foreign:
+        warnings.warn(
+            f"time.sleep was called by other threads during this test: {foreign}",
+            RuntimeWarning,
+            stacklevel=1,
+        )
 
 
 def test_read_missing_shard_still_fills(tmp_path):
