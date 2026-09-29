@@ -95,7 +95,7 @@ def casa_airy_disk_response(
     return np.where(rho <= max_rad_1GHz / (frequency / 1e9), val**ipower, 0.0)
 
 
-def resolve_continuum_primary_beam(image_params, antenna_xds):
+def resolve_continuum_primary_beam(image_params, antenna_xds, *, specmode="mfs"):
     """Resolve a beam prescription without changing user parameters or metadata.
 
     Parameters
@@ -106,13 +106,19 @@ def resolve_continuum_primary_beam(image_params, antenna_xds):
         and ``primary_beam_max_radius_1ghz`` parameters take precedence.
     antenna_xds : xarray.Dataset
         Antenna metadata with physical diameters and telescope identification.
+    specmode : {"mfs", "mvc"}
+        MFS selects the VLA band at the continuum reference frequency; MVC
+        uses the first image channel, matching CASA makePBImage. Resolve once
+        before partitioning so every task uses the same prescription.
 
     Returns
     -------
     dict
         Copied parameters with a resolved prescription and aperture diameters.
-        Auto uses CASA's effective aperture only for ALMA/ACA; other telescopes
-        retain their physical diameter and existing Airy model.
+        Auto uses CASA's effective aperture for ALMA/ACA and its squint-free
+        Airy prescriptions for legacy VLA bands (including the NVSS fallback).
+        EVLA retains the physical Airy model. Explicit aperture parameters
+        remain authoritative.
     """
     params = dict(image_params)
     model = params.get("primary_beam_model", "auto")
@@ -128,8 +134,42 @@ def resolve_continuum_primary_beam(image_params, antenna_xds):
             str(antenna_xds.attrs.get("overall_telescope_name", "")).strip().upper()
         }
     is_alma = bool(names) and names.issubset({"ALMA", "ACA", "ALMASD"})
+    # PBMath::whichCommonPBtoUse selects these legacy VLA bands. Each uses
+    # PBMath1DAiry(25 m, 2.36 m, 0.8564 deg at 1 GHz); EVLA instead uses
+    # frequency-dependent polynomial beams. In band gaps CASA selects VLA_NVSS,
+    # which instead uses a 24.5-m unobstructed aperture with the same support.
+    reference_frequency = params.get(
+        "reference_frequency", params.get("reference_frequency_hz")
+    )
+    frequencies = np.asarray(params.get("frequency_coords", []), dtype=float)
+    if specmode == "mvc":
+        reference_frequency = frequencies.flat[0] if frequencies.size else np.nan
+    elif specmode != "mfs":
+        raise ValueError("specmode must be 'mfs' or 'mvc'.")
+    elif reference_frequency is None:
+        reference_frequency = np.mean(frequencies) if frequencies.size else np.nan
+    frequency_ghz = float(reference_frequency) / 1e9
+    is_vla = (
+        bool(names)
+        and all(name.startswith("VLA") for name in names)
+        and np.isfinite(frequency_ghz)
+        and frequency_ghz > 0
+    )
+    is_vla_band = is_vla and any(
+        lower < frequency_ghz < upper
+        for lower, upper in (
+            (0, 0.1),
+            (0.2, 0.4),
+            (1, 2),
+            (4, 7),
+            (7, 11),
+            (11, 19),
+            (19, 35),
+            (35, 55),
+        )
+    )
     if model == "auto":
-        model = "casa_airy" if is_alma else "airy"
+        model = "casa_airy" if is_alma or is_vla else "airy"
     params["primary_beam_model"] = model
 
     diameter_name = "ANTENNA_DISH_DIAMETER"
@@ -158,14 +198,25 @@ def resolve_continuum_primary_beam(image_params, antenna_xds):
                 raise ValueError(
                     "CASA-compatible ALMA beams require a 12-m or 7-m aperture, or an explicit effective diameter."
                 )
+        if is_vla and model == "casa_airy":
+            effective = 25.0 if is_vla_band else 24.5
         params["list_dish_diameters"] = [effective]
     if params.get("list_blockage_diameters") is None:
-        params["list_blockage_diameters"] = [0.75]
+        blockage = 0.75
+        if is_vla and model == "casa_airy":
+            blockage = 2.36 if is_vla_band else 0.0
+        params["list_blockage_diameters"] = [blockage]
     if model == "casa_airy":
         params.setdefault(
             "primary_beam_max_radius_1ghz",
             np.deg2rad(
-                3.568 if physical is not None and np.isclose(physical, 7.0) else 1.784
+                0.8564
+                if is_vla
+                else (
+                    3.568
+                    if physical is not None and np.isclose(physical, 7.0)
+                    else 1.784
+                )
             ),
         )
     return params

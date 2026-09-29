@@ -915,3 +915,21 @@ def test_refreshed_continuum_statistics_use_taylor_zero_and_clean_support(
         [1, 1] if explicit_mask else [2, 2]
     )
     assert [latest(e, "peakres_nomask") for e in entries] == [8.0, 9.0]
+
+
+def test_mvc_clips_channel_beams_before_effective_beam_and_psf_sum():
+    """CASA clips individual PB planes, retaining their normalization weights."""
+    frequency = np.array([0.9e9, 1.1e9])
+    residual, psf, pb = convert_mvc_cubes_to_taylor_normal_equations(
+        _frequency_cube([5.0, 100.0], frequency),
+        _frequency_cube([2.0, 10.0], frequency),
+        _frequency_cube([1.0, 0.1], frequency),
+        _frequency_normalization([1.0, 3.0], frequency),
+        _frequency_normalization([1.0, 3.0], frequency),
+        nterms=1,
+        reference_frequency=1e9,
+        pblimit=0.2,
+    )
+    np.testing.assert_allclose(pb.squeeze(), 0.25)
+    np.testing.assert_allclose(psf.squeeze(), 2.0)
+    np.testing.assert_allclose(residual.squeeze(), 1.25)

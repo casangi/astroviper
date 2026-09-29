@@ -17,3 +17,14 @@ offsets in radians derived from FITS CDELT/CRPIX, spectral frequency in Hz,
 CASA effective diameter in metres, maximum tabulated radius at 1 GHz in radians,
 and actual CASA power response. The selection does not filter on agreement with
 AstroVIPER. The regression tolerance is rtol=1e-6, atol=1e-7.
+
+`casa_vla_pb.npz`: full 200 x 200 primary-beam plane from the retained
+2026-09-24 harness CASA off-axis MFS reference (`casa_off_axis_mfs.npz`,
+`pb_t0`). Legacy VLA refim fixture, 1.5 GHz reference frequency, 10 arcsec
+pixels, pointing at pixel (100, 100), default tclean beam. This is independent
+CASA output; no AstroVIPER formula was used to generate the reference.
+
+The same archive includes 5120 regularly sampled pixels across all 20 channels
+of `casa_images/off_axis_mvc.pb`, with offsets and frequencies taken from the
+CASA coordinate record. This cube starts just below 1 GHz in LSRK and selects
+CASA VLA_NVSS (24.5 m, no blockage), whereas the MFS plane selects VLA_L.

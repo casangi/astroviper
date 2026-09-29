@@ -749,12 +749,11 @@ def make_mvc_taylor_normal_equation_contributions(
     residual_weight = _clean_weights(residual_normalization)
     residual_weight_sum = residual_weight.sum(dim="frequency")
 
-    finite_primary_beam = xr.where(
-        np.isfinite(primary_beam_cube),
-        primary_beam_cube,
-        0.0,
-    )
     valid_channel_pb = np.isfinite(primary_beam_cube) & (primary_beam_cube > pblimit)
+    # CASA SIImageStore::makePBImage zeros each channel below pblimit before
+    # cubeToTaylorSum forms either the effective PB or the PSF Taylor terms.
+    # Keep all channel weights in the denominator, including clipped channels.
+    finite_primary_beam = xr.where(valid_channel_pb, primary_beam_cube, 0.0)
     residual_over_primary_beam = xr.where(
         valid_channel_pb,
         residual_cube / primary_beam_cube,

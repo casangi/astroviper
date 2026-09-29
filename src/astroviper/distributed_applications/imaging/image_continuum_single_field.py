@@ -2983,7 +2983,7 @@ def image_continuum_single_field(
     )
 
     image_params = resolve_continuum_primary_beam(
-        image_params, ps_xdt.xr_ps.get_combined_antenna_xds()
+        image_params, ps_xdt.xr_ps.get_combined_antenna_xds(), specmode=specmode
     )
     input_params["image_params"] = image_params
 
