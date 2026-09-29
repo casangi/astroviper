@@ -37,6 +37,17 @@ variants, stop on the threshold.  The ``1e5`` variant additionally records
 the numerical floor of the cycle; its faint sources are judged against that
 measured floor.
 
+The ``1e5`` variant runs to the cycle limit at the numerical floor.  There the
+peak residual still falls on the whole, but it fluctuates from one cycle to
+the next, and differently on every platform: differences of 1e-13 Jy in the
+residual (rounding in the transforms) decide which pixel CLEAN picks, and from
+then on the peak residuals differ at the percent level.  Linux x86-64 and
+macOS arm64 agree to six digits for 14 cycles and part in cycle 15; rises of
+up to 5 percent above the lowest peak residual reached before have been seen.
+A falling peak residual therefore means that no cycle ends more than
+``PEAK_RESIDUAL_RISE`` above the lowest peak residual reached before it; a
+cycle that diverges rises without bound.
+
 Imaging ``I, Q`` from the four-correlation processing set must load only the
 parallel hands and reproduce the image of the two-hand data.
 
@@ -115,6 +126,9 @@ FLUX_RTOL = 0.01
 RESTORED_RTOL = 0.02
 FLOOR_SIGMA = 5.0
 FLOOR_GUARD_PIXELS = 2  # excluded around every source when measuring the floor
+# largest peak residual allowed after a cycle, relative to the lowest one reached
+# before it (fluctuations at the numerical floor: up to 1.05 seen)
+PEAK_RESIDUAL_RISE = 1.25
 IMAGING_WEIGHTS_PARAMS = {
     "weighting": "natural",
     "robust": 0.5,
@@ -517,8 +531,13 @@ def check_recovery(recovery, convergence, summary, strict):
         assert peakres[-1] < 0.1 * peakres[0], (
             f"{label}: peak residual did not fall: {peakres}"
         )
-        assert np.all(peakres[1:] <= 1.05 * peakres[:-1]), (
-            f"{label}: peak residual rose: {peakres}"
+        # at the numerical floor the peak residual fluctuates from cycle to cycle
+        # (see the module docstring): compare with the lowest value reached before
+        lowest_before = np.minimum.accumulate(peakres)[:-1]
+        rise = peakres[1:] / lowest_before
+        assert rise.max() <= PEAK_RESIDUAL_RISE, (
+            f"{label}: peak residual of cycle {rise.argmax() + 2} is {rise.max():.3f} times "
+            f"the lowest one reached before (limit {PEAK_RESIDUAL_RISE}): {peakres}"
         )
         if strict:
             assert plane.stop_code_imaging == IMAGING_THRESHOLD, (
