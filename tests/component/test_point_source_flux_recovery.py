@@ -7,6 +7,8 @@ correction) on data whose truth is known exactly:
 * ALMA in its most compact 12 m configuration (``alma.cycle8.1``: 43 antennas,
   baselines 15 to 161 m), a 2 h track near transit, 5 channels around 100 GHz,
   linear feeds, no noise.
+* The imaging grid samples the synthesized beam with five pixels across its
+  minor axis (0.7 arcsec cells).
 * 42 point sources on pixel centres of the imaging grid, spread out to the
   radius where the primary-beam power falls to 0.3, at least two synthesized
   beams apart.  Fluxes are log-uniform over a chosen dynamic range; every
@@ -75,10 +77,12 @@ from astroviper.utils.telescope_layout import read_telescope_layout
 ARCSEC = np.pi / (180 * 3600)
 LAYOUT = "alma.cycle8.1"  # most compact 12 m configuration
 N_SOURCES = 42
-IMAGE_SIZE = [256, 256]
-CELL_ARCSEC = 0.8  # about a fifth of the synthesized beam
+PIXELS_PER_BEAM = 5  # across the minor axis of the synthesized beam
+BEAM_MINOR_ARCSEC = 3.5  # natural weighting, in the highest channel
+CELL_ARCSEC = BEAM_MINOR_ARCSEC / PIXELS_PER_BEAM  # 0.7 arcsec
+IMAGE_SIZE = [288, 288]  # 202 arcsec: the primary beam down to the 1 percent level
 CELL_SIZE = np.array([-CELL_ARCSEC, CELL_ARCSEC]) * ARCSEC
-BEAM_ARCSEC = 4.0  # synthesized beam estimate: lambda / 161 m at 100 GHz
+BEAM_ARCSEC = 4.0  # synthesized beam (major axis) estimate: lambda / 161 m at 100 GHz
 MIN_SEPARATION_BEAMS = 2.0
 PB_POWER_LIMIT = 0.3  # sources out to the radius where the beam power is this
 LINE_WIDTH_CHANNELS = 0.7
@@ -521,10 +525,11 @@ def check_recovery(recovery, convergence, summary, strict):
                 f"{label}: stopped for another reason than the threshold "
                 f"(code {plane.stop_code_imaging})"
             )
-    # the synthesized beam is what the geometry assumed
-    assert summary["beam_arcsec"][:, 0].max() < 1.5 * BEAM_ARCSEC, summary[
-        "beam_arcsec"
-    ]
+    # the synthesized beam is what the geometry assumed, and it is sampled by at
+    # least PIXELS_PER_BEAM pixels across its minor axis in every channel
+    beam_arcsec = summary["beam_arcsec"]  # [channel, (major, minor)]
+    assert beam_arcsec[:, 0].max() < 1.5 * BEAM_ARCSEC, beam_arcsec
+    assert beam_arcsec[:, 1].min() >= PIXELS_PER_BEAM * CELL_ARCSEC, beam_arcsec
 
 
 def run_scenario(
