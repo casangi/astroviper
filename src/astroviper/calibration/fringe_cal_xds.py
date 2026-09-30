@@ -28,14 +28,16 @@ def make_empty_cal_quantum(xds: MeasurementSetXdt):
         # We have to shift phase to that frequency, I guess,
         # because otherwise it will be wrong.
         "frequency": [xds.frequency.reference_frequency["data"]],
-        "polarization": pols_ant,
-        "cal_parameter": ["phase", "delay", "rate"],
+        "receptor_label": xds.antenna_xds.receptor_label,
     }
     quantum_coords = xa.Coordinates(coords=coord_dict)
     q = xa.Dataset(
         {
-            "CALIBRATION_PARAMETER": xa.DataArray(coords=quantum_coords),
+            "CALPARAM_PHASE": xa.DataArray(coords=quantum_coords),
+            "CALPARAM_DELAY": xa.DataArray(coords=quantum_coords),
+            "CALPARAM_RATE": xa.DataArray(coords=quantum_coords),
             "SNR": xa.DataArray(coords=quantum_coords),
+            "FLAG": xa.DataArray(coords=quantum_coords).astype(bool),
             "ref_antenna": xa.DataArray(coords=(quantum_coords["time"],)).astype(
                 np.dtype("<U2")
             ),
@@ -48,10 +50,8 @@ def make_empty_cal_quantum(xds: MeasurementSetXdt):
 def nan_count(j):
     return np.sum(np.isnan(j))
 
-
 def number_count(j):
     return np.sum(~np.isnan(j))
-
 
 def square_up_last_dimension(v):
     s = v.shape[:-1] + (2, 2)
@@ -67,6 +67,7 @@ class SingleFringeJones:
     def calc_antenna_jones(self, xds: MeasurementSetXdt):
         # We scrape all the metadata from an xds. Maybe this is wise, maybe not.
         frequency = xds.frequency
+        # FIXME: this isn't the vibe
         ref_freq = self.q.frequency.values[0]
         dt = xds.time.values - self.q.time.values[0]
         df = frequency.values - ref_freq
@@ -74,14 +75,16 @@ class SingleFringeJones:
         # We want a matrix of (n_time, n_ant, n_freq, n_pol)
         df_shaped = np.expand_dims(df, (0, 1, 3))  # frequency is dimension 2
         dt_shaped = np.expand_dims(dt, (1, 2, 3))
-        cal = self.q.CALIBRATION_PARAMETER
-        # (time, antenna_name, frequency, polarization, cal_parameter)
-        phi0 = cal[:, :, :, :, 0].values
-        tau = cal[:, :, :, :, 1].values
-        r = cal[:, :, :, :, 2].values
-        # These are compatible with the shape (n_time, n_ant, n_freq, n_pol)
+
+        # (time, antenna_name, frequency, polarization)
+        phi0 = self.q.CALPARAM_PHASE.values
+        # phi0_shaped = np.expand_dims(phi0, (0, 1, 2, 3)) 
+        tau = self.q.CALPARAM_DELAY.values
+        r = self.q.CALPARAM_RATE.values
+        # These are compatible with the shape (n_time, n_ant, n_freq, n_receptors)
         # Calculate phases:
-        phi = phi0 + 2 * np.pi * tau * df_shaped + 2 * np.pi * ref_freq * r * dt_shaped
+        # FIXME this is driving me insane
+        phi = -1*(phi0 + 2*np.pi*tau * df_shaped + 2*np.pi*ref_freq*r * dt_shaped)
         # Shape: (n_time, n_ant, n_freq, n_pol)
         antenna_jones = np.exp(1j * phi, dtype=complex)
         return antenna_jones
@@ -112,10 +115,14 @@ class SingleFringeJones:
         # Both antenna?_name values are n_baseline long
         baseline_antenna1_name = xds.baseline_antenna1_name.values
         baseline_antenna2_name = xds.baseline_antenna2_name.values
-        # We make a map of antenna name to number:
-        antennas = xds.antenna_xds.antenna_name.values
+        # We make a map of antenna name to number.
+        # Note that we need the names from the cal table but the baseline_id
+        # from the xds itself.
+        antennas = self.q.antenna_name.values
         ant_num_map = {n: i for i, n in enumerate(antennas)}
         # Now we make n_baseline long list of left indices
+        # FIXME: if there's an antenna in the xds that isn't in the cal table
+        # this will asplode
         left_indices = [ant_num_map[n] for n in baseline_antenna1_name]
         # And the same for right indices
         right_indices = [ant_num_map[n] for n in baseline_antenna2_name]
