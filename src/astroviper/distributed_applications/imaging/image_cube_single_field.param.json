@@ -37,7 +37,6 @@
         "fft_backend": { "type": ["str"], "allowed": ["pyfftw", "scipy"] },
         "restore": { "type": "boolean" },
         "primary_beam_correction": { "type": "boolean" },
-        "primary_beam_correction_order": { "type": "string", "allowed": ["correct_then_restore", "restore_then_correct"] },
         "psf_fitting_method": { "type": "string", "allowed": ["astroviper", "casa"] },
         "skunk_works": { "type": "boolean" },
         "compute_backend": { "type": ["str"], "allowed": ["dask", "mpi"] },

@@ -80,7 +80,6 @@ def image_cube_single_field(
     fft_backend="pyfftw",
     restore: bool = False,
     primary_beam_correction: bool = False,
-    primary_beam_correction_order: str = "correct_then_restore",
     psf_fitting_method: str = "astroviper",
     skunk_works: bool = False,
     compute_backend: str = "dask",
@@ -274,22 +273,11 @@ def image_cube_single_field(
     primary_beam_correction : bool, optional
         If ``True`` write the primary beam corrected restored sky to the
         ``sky_restored_primary_beam_corrected``
-        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable, in the convention
-        of ``primary_beam_correction_order``; pixels below the primary beam
-        cutoff (``primary_beam_limit``) are blanked with NaN.  Requires
+        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable: the model divided
+        by the (power) primary beam and convolved with the clean beam, plus
+        the residual divided by the primary beam; pixels below the primary
+        beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires
         ``restore``.
-    primary_beam_correction_order : str, optional
-        Convention of the primary beam correction. ``"correct_then_restore"``
-        (default) divides the model and the residual by the (power) primary
-        beam ``P`` before the model is convolved with the clean beam ``B``:
-        ``(SKY_MODEL / P) * B + SKY_RESIDUAL / P``, which is exact for the
-        model part of the image. ``"restore_then_correct"`` divides the
-        restored image, ``SKY_RESTORED / P``, the convention of CASA
-        ``pbcor``; multiplication by ``P`` and convolution with ``B`` do not
-        commute, so it is exact only where the primary beam is flat across
-        the clean beam and puts antisymmetric lobes of several percent around
-        bright sources near the beam edge. Use it for comparisons with CASA
-        products.
     psf_fitting_method : str, optional
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
         ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``
@@ -467,16 +455,6 @@ def image_cube_single_field(
     if primary_beam_correction:
         if not restore:
             raise ValueError("primary_beam_correction requires restore=True.")
-        from astroviper.processing_functions.imaging.restore import (
-            PRIMARY_BEAM_CORRECTION_ORDERS,
-        )
-
-        if primary_beam_correction_order not in PRIMARY_BEAM_CORRECTION_ORDERS:
-            raise ValueError(
-                "primary_beam_correction_order must be one of "
-                f"{PRIMARY_BEAM_CORRECTION_ORDERS}; got "
-                f"{primary_beam_correction_order!r}."
-            )
         if "sky_restored_primary_beam_corrected" not in image_data_variables_keep:
             image_data_variables_keep = list(image_data_variables_keep) + [
                 "sky_restored_primary_beam_corrected"
@@ -614,7 +592,6 @@ def image_cube_single_field(
     input_params["fft_backend"] = fft_backend
     input_params["restore"] = restore
     input_params["primary_beam_correction"] = primary_beam_correction
-    input_params["primary_beam_correction_order"] = primary_beam_correction_order
     input_params["psf_fitting_method"] = psf_fitting_method
     input_params["skunk_works"] = skunk_works
     input_params["image_chunking"] = image_chunking

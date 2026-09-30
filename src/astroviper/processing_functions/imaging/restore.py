@@ -80,9 +80,6 @@ def _elliptical_gaussian_kernel(ny, nx, major_fwhm_pix, minor_fwhm_pix, pa, dtyp
     return u.astype(dtype, copy=False)
 
 
-PRIMARY_BEAM_CORRECTION_ORDERS = ("correct_then_restore", "restore_then_correct")
-
-
 def _clean_beam_kernel_ft(beam_params, ny, nx, delta, dtype, workers):
     """FFT of the centred clean beam of one frequency, ``None`` without a beam.
 
@@ -115,38 +112,25 @@ def _convolve_with_clean_beam(plane, kernel_ft, workers):
 def primary_beam_corrected_plane(
     primary_beam_plane,
     primary_beam_limit,
-    primary_beam_correction_order,
-    *,
-    model_plane=None,
-    residual_plane=None,
-    restored_plane=None,
+    model_plane,
+    residual_plane,
     kernel_ft=None,
     workers=1,
 ):
     """One plane of the primary beam corrected restored image.
 
     With ``P`` the (power) primary beam, ``M`` the model, ``R`` the residual
-    and ``B`` the clean beam, the two conventions are
+    and ``B`` the clean beam, the corrected plane is ``(M / P) * B + R / P``:
+    the model is divided by the primary beam where it is a pixel value and
+    then convolved with the clean beam, so a model that represents the
+    apparent sky ``I P`` gives the true sky convolved with the clean beam,
+    ``I * B``, exactly. Pixels where the primary beam is below
+    ``primary_beam_limit`` are blanked with NaN, and the model is taken as
+    zero there before the convolution.
 
-    ``"correct_then_restore"``
-        ``(M / P) * B + R / P``: the model is divided by the primary beam
-        where it is a pixel value, then convolved with the clean beam. For a
-        model that represents the apparent sky ``I P`` this gives the true sky
-        convolved with the clean beam, ``I * B``, exactly. The residual part
-        ``R / P`` is the same in both conventions. The default.
-    ``"restore_then_correct"``
-        ``(M * B + R) / P``: the restored image divided pixel by pixel, the
-        convention of CASA ``pbcor``. Multiplication by ``P`` and
-        convolution with ``B`` do not commute, so this is exact only where the
-        primary beam is flat across the clean beam: a point source of flux
-        ``F`` at ``x0`` comes out as ``F B(x - x0) P(x0) / P(x)``, exact at the
-        source and off beside it by up to the clean beam sigma times the
-        gradient of ``ln P``, several percent near the half power radius of a
-        compact configuration. Kept for comparisons with CASA products.
-
-    Pixels where the primary beam is below ``primary_beam_limit`` are blanked
-    with NaN in both conventions; the model is taken as zero there before the
-    convolution, so the blanking does not leak into the convolution.
+    CASA's ``pbcor`` divides the restored image instead, ``(M * B + R) / P``,
+    which differs from this wherever the primary beam changes across the
+    clean beam.
 
     Parameters
     ----------
@@ -154,12 +138,8 @@ def primary_beam_corrected_plane(
         The primary beam power of the plane.
     primary_beam_limit : float
         Cutoff of the primary beam power below which the plane is blanked.
-    primary_beam_correction_order : str
-        ``"correct_then_restore"`` or ``"restore_then_correct"``.
-    model_plane, residual_plane : numpy.ndarray, optional
-        Model and residual of the plane, needed for ``"correct_then_restore"``.
-    restored_plane : numpy.ndarray, optional
-        Restored plane, needed for ``"restore_then_correct"``.
+    model_plane, residual_plane : numpy.ndarray
+        Model and residual of the plane.
     kernel_ft : numpy.ndarray, optional
         Transform of the clean beam from :func:`_clean_beam_kernel_ft`;
         ``None`` (no clean beam) leaves the divided model unconvolved, as the
@@ -170,22 +150,9 @@ def primary_beam_corrected_plane(
     Returns
     -------
     numpy.ndarray
-        The corrected plane, at the dtype of the residual (or restored) plane.
+        The corrected plane, at the dtype of the residual plane.
     """
-    if primary_beam_correction_order not in PRIMARY_BEAM_CORRECTION_ORDERS:
-        raise ValueError(
-            "primary_beam_correction_order must be one of "
-            f"{PRIMARY_BEAM_CORRECTION_ORDERS}; got {primary_beam_correction_order!r}."
-        )
     inside = primary_beam_plane >= primary_beam_limit
-    if primary_beam_correction_order == "restore_then_correct":
-        if restored_plane is None:
-            raise ValueError("restore_then_correct needs restored_plane.")
-        corrected = np.full(restored_plane.shape, np.nan, dtype=restored_plane.dtype)
-        np.divide(restored_plane, primary_beam_plane, out=corrected, where=inside)
-        return corrected
-    if model_plane is None or residual_plane is None:
-        raise ValueError("correct_then_restore needs model_plane and residual_plane.")
     dtype = residual_plane.dtype
     # the model divided by the primary beam inside the cutoff, zero outside
     scaled = np.zeros(model_plane.shape, dtype=dtype)
@@ -262,7 +229,7 @@ def restore_image(
     beam_polarization_index: int = 0,
     processing_function_threads: int = 1,
     consume_model: bool = False,
-    primary_beam_correction_order: str | None = None,
+    primary_beam_correction: bool = False,
     primary_beam_limit: float = 0.2,
     primary_beam_key: str = "primary_beam",
     overwrite: bool = True,
@@ -284,15 +251,14 @@ def restore_image(
     The clean beam is normalised to unit peak, so a model point source of flux
     ``F`` (Jy) becomes a Gaussian of peak ``F`` Jy/beam.
 
-    With ``primary_beam_correction_order`` set, the primary beam corrected
-    restored image is made in the same pass and stored as
-    ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED`` (role
-    ``sky_primary_beam_corrected`` of the restored group). The default order,
-    ``"correct_then_restore"``, divides the model and the residual by the
+    With ``primary_beam_correction`` the primary beam corrected restored image
+    is made in the same pass and stored as
+    ``SKY_RESTORED_PRIMARY_BEAM_CORRECTED`` (role ``sky_primary_beam_corrected``
+    of the restored group): the model and the residual are divided by the
     primary beam before the convolution, ``(SKY_MODEL / P) * B + SKY_RESIDUAL
-    / P``, which is exact for the model part; ``"restore_then_correct"``
-    divides the restored image, ``SKY_RESTORED / P``, the convention of CASA
-    ``pbcor``. See :func:`primary_beam_corrected_plane` for the difference.
+    / P``, which is exact for the model part (see
+    :func:`primary_beam_corrected_plane`; CASA's ``pbcor`` divides the
+    restored image instead).
 
     Efficiency
     ----------
@@ -352,12 +318,10 @@ def restore_image(
         image cube of peak memory.  Requires the model and residual dtypes to
         match; otherwise a fresh cube is allocated as for ``False``.  Default
         ``False`` (model preserved).
-    primary_beam_correction_order : str, optional
-        ``None`` (default) makes no primary beam corrected image.
-        ``"correct_then_restore"`` corrects the model and the residual by the
-        primary beam before the convolution, ``"restore_then_correct"``
-        divides the restored image (CASA ``pbcor``). Needs the
-        ``primary_beam_key`` role in the residual data group.
+    primary_beam_correction : bool, optional
+        If ``True`` also make the primary beam corrected restored image
+        (needs the ``primary_beam_key`` role in the residual data group).
+        Default ``False``.
     primary_beam_limit : float, optional
         Primary beam (power) cutoff below which the corrected image is blanked
         with NaN, as a fraction of the beam peak.  Default ``0.2`` (the CASA
@@ -429,14 +393,8 @@ def restore_image(
     beam_name = residual_group[beam_fit_params_key]
     restored_sky_name = restored_group["sky"]
 
-    correct = primary_beam_correction_order is not None
+    correct = bool(primary_beam_correction)
     if correct:
-        if primary_beam_correction_order not in PRIMARY_BEAM_CORRECTION_ORDERS:
-            raise ValueError(
-                "primary_beam_correction_order must be one of "
-                f"{PRIMARY_BEAM_CORRECTION_ORDERS} or None; got "
-                f"{primary_beam_correction_order!r}."
-            )
         assert primary_beam_key in residual_group, (
             "Data group '"
             + image_data_group_in_residual_name
@@ -502,18 +460,17 @@ def restore_image(
             for pp in range(npol):
                 model_plane = model[tt, ff, pp]
                 residual_plane = residual[tt, ff, pp]
-                pb_pol = pp if correct and primary_beam.shape[2] == npol else 0
                 # With ``consume_model`` the restored plane overwrites the
-                # model slot, so the corrected plane that needs the model
+                # model slot, so the corrected plane, which needs the model,
                 # comes first.
-                if correct and primary_beam_correction_order == "correct_then_restore":
+                if correct:
                     start_correct = time.time()
+                    pb_pol = pp if primary_beam.shape[2] == npol else 0
                     corrected[tt, ff, pp] = primary_beam_corrected_plane(
                         primary_beam[tt, ff, pb_pol],
                         primary_beam_limit,
-                        primary_beam_correction_order,
-                        model_plane=model_plane,
-                        residual_plane=residual_plane,
+                        model_plane,
+                        residual_plane,
                         kernel_ft=kernel_ft,
                         workers=workers,
                     )
@@ -533,15 +490,6 @@ def restore_image(
                     restored[tt, ff, pp] = convolved_model
                     del convolved_model
                     restored[tt, ff, pp] += residual_plane
-                if correct and primary_beam_correction_order == "restore_then_correct":
-                    start_correct = time.time()
-                    corrected[tt, ff, pp] = primary_beam_corrected_plane(
-                        primary_beam[tt, ff, pb_pol],
-                        primary_beam_limit,
-                        primary_beam_correction_order,
-                        restored_plane=restored[tt, ff, pp],
-                    )
-                    T_correct += time.time() - start_correct
 
     # Store the restored sky, preserving the residual's dims, coords and attrs.
     img_xds[restored_sky_name] = residual_da.copy(data=restored)
@@ -557,9 +505,8 @@ def restore_image(
     description = "Restored image: clean-beam-convolved model plus residual."
     if correct:
         description += (
-            " Primary beam corrected restored image ("
-            + primary_beam_correction_order
-            + f", primary_beam_limit {primary_beam_limit})."
+            " Primary beam corrected restored image "
+            f"(primary_beam_limit {primary_beam_limit})."
         )
     modify_data_groups_xds(
         img_xds,

@@ -405,7 +405,7 @@ class TestPrimaryBeamCorrectionInRestore:
         )
         return residual, model
 
-    def test_correct_then_restore_is_exact_for_the_model(self):
+    def test_exact_for_the_model_part(self):
         # A point source of flux F: the corrected image is F x B(x - x0)
         # plus R / P, whatever the primary beam does across the clean beam.
         residual, model = self._inputs()
@@ -413,9 +413,7 @@ class TestPrimaryBeamCorrectionInRestore:
             _make_restore_xds(beams=self.beams, residual=residual, model=model)
         )
         primary_beam = xds["PRIMARY_BEAM"].values
-        out, return_df = restore_image(
-            xds, primary_beam_correction_order="correct_then_restore"
-        )
+        out, return_df = restore_image(xds, primary_beam_correction=True)
         corrected = out["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values
         inside = primary_beam >= 0.2
         # the true sky convolved with the beam: the restored image of the
@@ -443,44 +441,24 @@ class TestPrimaryBeamCorrectionInRestore:
         )[0]["SKY_RESTORED"].values
         np.testing.assert_array_equal(out["SKY_RESTORED"].values, plain)
 
-    def test_restore_then_correct_divides_the_restored_image(self):
+    def test_differs_from_dividing_the_restored_image_beside_a_source(self):
+        # Dividing the restored image (the CASA convention) carries the
+        # gradient of the primary beam across the clean beam; the two agree
+        # at the source pixel only.
         residual, model = self._inputs()
+        residual[...] = 0.0
         xds = _with_primary_beam(
             _make_restore_xds(beams=self.beams, residual=residual, model=model)
         )
         primary_beam = xds["PRIMARY_BEAM"].values
-        out, _ = restore_image(
-            xds, primary_beam_correction_order="restore_then_correct"
-        )
+        out, _ = restore_image(xds, primary_beam_correction=True)
         corrected = out["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values
-        inside = primary_beam >= 0.2
-        expected = out["SKY_RESTORED"].values / primary_beam
-        np.testing.assert_array_equal(
-            corrected[inside], expected[inside].astype(corrected.dtype)
-        )
-        assert np.isnan(corrected[~inside]).all()
-
-    def test_the_two_conventions_agree_at_the_source_and_differ_beside_it(self):
-        residual, model = self._inputs()
-        residual[...] = 0.0
-        outs = {}
-        for order in ("correct_then_restore", "restore_then_correct"):
-            xds = _with_primary_beam(
-                _make_restore_xds(
-                    beams=self.beams, residual=residual.copy(), model=model.copy()
-                )
-            )
-            outs[order] = restore_image(xds, primary_beam_correction_order=order)[0][
-                "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
-            ].values
-        first, second = outs["correct_then_restore"], outs["restore_then_correct"]
-        # exact at the source pixel in both conventions
+        divided = out["SKY_RESTORED"].values / primary_beam
         np.testing.assert_allclose(
-            first[0, 0, 0, 20, 44], second[0, 0, 0, 20, 44], rtol=1e-6
+            corrected[0, 0, 0, 20, 44], divided[0, 0, 0, 20, 44], rtol=1e-6
         )
-        # the CASA convention carries the primary beam gradient beside the source
         assert not np.allclose(
-            first[0, 0, 0, 16:25, 40:49], second[0, 0, 0, 16:25, 40:49], rtol=1e-3
+            corrected[0, 0, 0, 16:25, 40:49], divided[0, 0, 0, 16:25, 40:49], rtol=1e-3
         )
 
     def test_consume_model_gives_the_same_corrected_image(self):
@@ -490,19 +468,15 @@ class TestPrimaryBeamCorrectionInRestore:
                 beams=self.beams, residual=residual.copy(), model=model.copy()
             )
         )
-        reference = restore_image(
-            xds, primary_beam_correction_order="correct_then_restore"
-        )[0]
+        reference = restore_image(xds, primary_beam_correction=True)[0]
         xds = _with_primary_beam(
             _make_restore_xds(
                 beams=self.beams, residual=residual.copy(), model=model.copy()
             )
         )
-        consumed = restore_image(
-            xds,
-            consume_model=True,
-            primary_beam_correction_order="correct_then_restore",
-        )[0]
+        consumed = restore_image(xds, consume_model=True, primary_beam_correction=True)[
+            0
+        ]
         np.testing.assert_array_equal(
             consumed["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values,
             reference["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values,
@@ -517,9 +491,7 @@ class TestPrimaryBeamCorrectionInRestore:
             )
         )
         out, _ = restore_image(
-            xds,
-            primary_beam_correction_order="correct_then_restore",
-            primary_beam_limit=0.6,
+            xds, primary_beam_correction=True, primary_beam_limit=0.6
         )
         corrected = out["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"]
         assert corrected.dtype == np.float64
@@ -531,9 +503,7 @@ class TestPrimaryBeamCorrectionInRestore:
                 beams={(0, 0): (np.nan, np.nan, 0.0)}, residual=residual, model=model
             )
         )
-        out, _ = restore_image(
-            xds, primary_beam_correction_order="correct_then_restore"
-        )
+        out, _ = restore_image(xds, primary_beam_correction=True)
         primary_beam = xds["PRIMARY_BEAM"].values
         inside = primary_beam >= 0.2
         expected = (model + residual) / primary_beam
@@ -543,10 +513,8 @@ class TestPrimaryBeamCorrectionInRestore:
             rtol=1e-6,
         )
 
-    def test_unknown_order_is_refused(self):
+    def test_needs_the_primary_beam(self):
         residual, model = self._inputs()
-        xds = _with_primary_beam(
-            _make_restore_xds(beams=self.beams, residual=residual, model=model)
-        )
-        with pytest.raises(ValueError, match="primary_beam_correction_order"):
-            restore_image(xds, primary_beam_correction_order="divide")
+        xds = _make_restore_xds(beams=self.beams, residual=residual, model=model)
+        with pytest.raises(AssertionError, match="primary_beam"):
+            restore_image(xds, primary_beam_correction=True)

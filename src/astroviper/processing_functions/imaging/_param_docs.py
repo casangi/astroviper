@@ -140,23 +140,11 @@ IMAGING_PARAM_DOCS = {
     "primary_beam_correction": (
         "If ``True`` write the primary beam corrected restored sky to the\n"
         "``sky_restored_primary_beam_corrected``\n"
-        "(``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable, in the convention\n"
-        "of ``primary_beam_correction_order``; pixels below the primary beam\n"
-        "cutoff (``primary_beam_limit``) are blanked with NaN.  Requires\n"
+        "(``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable: the model divided\n"
+        "by the (power) primary beam and convolved with the clean beam, plus\n"
+        "the residual divided by the primary beam; pixels below the primary\n"
+        "beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires\n"
         "``restore``."
-    ),
-    "primary_beam_correction_order": (
-        'Convention of the primary beam correction. ``"correct_then_restore"``\n'
-        "(default) divides the model and the residual by the (power) primary\n"
-        "beam ``P`` before the model is convolved with the clean beam ``B``:\n"
-        "``(SKY_MODEL / P) * B + SKY_RESIDUAL / P``, which is exact for the\n"
-        'model part of the image. ``"restore_then_correct"`` divides the\n'
-        "restored image, ``SKY_RESTORED / P``, the convention of CASA\n"
-        "``pbcor``; multiplication by ``P`` and convolution with ``B`` do not\n"
-        "commute, so it is exact only where the primary beam is flat across\n"
-        "the clean beam and puts antisymmetric lobes of several percent around\n"
-        "bright sources near the beam edge. Use it for comparisons with CASA\n"
-        "products."
     ),
     "psf_fitting_method": (
         'Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or\n'

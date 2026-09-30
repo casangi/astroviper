@@ -1,6 +1,6 @@
-"""Unit tests for the primary beam correction of the restored sky, in both
-conventions (the model corrected before the restore step, the default, and the
-restored image divided as CASA pbcor does)."""
+"""Unit tests for the primary beam correction of the restored sky: the model
+divided by the primary beam and convolved with the clean beam, plus the residual
+divided by the primary beam."""
 
 import numpy as np
 import pytest
@@ -74,12 +74,12 @@ def _add_model_and_residual(img_xds, flux=2.0, source=(20, 8)):
     return img_xds
 
 
-def test_correct_then_restore_is_exact_for_a_point_source():
+def test_exact_for_a_point_source():
     from astroviper.processing_functions.imaging.restore import restore_image
 
     img_xds = _add_model_and_residual(_make_restored_image())
     primary_beam = img_xds["PRIMARY_BEAM"].values
-    img_xds, return_df = correct_sky_by_primary_beam(img_xds)  # the default convention
+    img_xds, return_df = correct_sky_by_primary_beam(img_xds)
     corrected = img_xds["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values
     inside = primary_beam >= 0.2
     # the true sky (flux / P at the source) convolved with the clean beam
@@ -92,30 +92,7 @@ def test_correct_then_restore_is_exact_for_a_point_source():
         corrected[inside], expected[inside], rtol=1e-9, atol=1e-12
     )
     assert np.isnan(corrected[~inside]).all()
-    assert "T_correct_sky_by_primary_beam" in return_df.columns
-
-
-def test_unknown_order_is_refused():
-    img_xds = _make_restored_image()
-    with pytest.raises(ValueError, match="primary_beam_correction_order"):
-        correct_sky_by_primary_beam(img_xds, primary_beam_correction_order="pbcor")
-
-
-def test_correct_sky_by_primary_beam_divides_and_blanks():
-    img_xds = _make_restored_image()
-    img_xds, return_df = correct_sky_by_primary_beam(
-        img_xds, primary_beam_correction_order="restore_then_correct"
-    )
-
-    assert "SKY_RESTORED_PRIMARY_BEAM_CORRECTED" in img_xds.data_vars
-    corrected = img_xds["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values
-    primary_beam = img_xds["PRIMARY_BEAM"].values
-    inside = primary_beam >= 0.2
-    # Inside the cutoff: exact division; outside: blanked with NaN.
-    np.testing.assert_array_equal(corrected[inside], (1.0 / primary_beam)[inside])
-    assert np.isnan(corrected[~inside]).all()
     assert inside.any() and (~inside).any()
-
     # Registered on the data group under the corrected-sky role.
     assert (
         img_xds.attrs["data_groups"]["restored"]["sky_primary_beam_corrected"]
@@ -124,25 +101,39 @@ def test_correct_sky_by_primary_beam_divides_and_blanks():
     assert "T_correct_sky_by_primary_beam" in return_df.columns
 
 
-def test_correct_sky_by_primary_beam_limit_and_dtype():
-    img_xds = _make_restored_image(sky_value=2.0, dtype=np.float32)
-    img_xds, _ = correct_sky_by_primary_beam(
-        img_xds,
-        primary_beam_limit=0.5,
-        primary_beam_correction_order="restore_then_correct",
-    )
+def test_residual_is_divided_by_the_primary_beam():
+    img_xds = _add_model_and_residual(_make_restored_image(), flux=0.0)
+    img_xds["SKY_RESIDUAL"].values[...] = 0.5
+    primary_beam = img_xds["PRIMARY_BEAM"].values
+    img_xds, _ = correct_sky_by_primary_beam(img_xds)
+    corrected = img_xds["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values
+    inside = primary_beam >= 0.2
+    np.testing.assert_array_equal(corrected[inside], 0.5 / primary_beam[inside])
+    assert np.isnan(corrected[~inside]).all()
+
+
+def test_limit_and_dtype():
+    img_xds = _add_model_and_residual(_make_restored_image(dtype=np.float32))
+    img_xds, _ = correct_sky_by_primary_beam(img_xds, primary_beam_limit=0.5)
     corrected = img_xds["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"]
     assert corrected.dtype == np.float32
     primary_beam = img_xds["PRIMARY_BEAM"].values
     assert np.isnan(corrected.values[primary_beam < 0.5]).all()
-    # Peak pixel: beam = 1 so the corrected value equals the sky value.
-    assert corrected.values[0, 0, 0, 16, 16] == pytest.approx(2.0)
+    assert np.isfinite(corrected.values[primary_beam >= 0.5]).all()
 
 
-def test_correct_sky_by_primary_beam_requires_primary_beam():
-    img_xds = _make_restored_image()
+def test_requires_primary_beam_model_and_beam_fit():
+    img_xds = _add_model_and_residual(_make_restored_image())
     del img_xds.attrs["data_groups"]["restored"]["primary_beam"]
     with pytest.raises(AssertionError, match="primary_beam"):
-        correct_sky_by_primary_beam(
-            img_xds, primary_beam_correction_order="restore_then_correct"
-        )
+        correct_sky_by_primary_beam(img_xds)
+    img_xds = _add_model_and_residual(_make_restored_image())
+    del img_xds.attrs["data_groups"]["model"]
+    with pytest.raises(AssertionError, match="model"):
+        correct_sky_by_primary_beam(img_xds)
+    img_xds = _add_model_and_residual(_make_restored_image())
+    del img_xds.attrs["data_groups"]["residual"][
+        "beam_fit_params_point_spread_function"
+    ]
+    with pytest.raises(AssertionError, match="Beam-fit"):
+        correct_sky_by_primary_beam(img_xds)

@@ -211,7 +211,6 @@ def image_cube_single_field(
     image_data_variables_keep=None,
     restore=False,
     primary_beam_correction=False,
-    primary_beam_correction_order="correct_then_restore",
     psf_fitting_method="astroviper",
     task_id=0,
 ):
@@ -356,22 +355,11 @@ def image_cube_single_field(
     primary_beam_correction : bool, optional
         If ``True`` write the primary beam corrected restored sky to the
         ``sky_restored_primary_beam_corrected``
-        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable, in the convention
-        of ``primary_beam_correction_order``; pixels below the primary beam
-        cutoff (``primary_beam_limit``) are blanked with NaN.  Requires
+        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable: the model divided
+        by the (power) primary beam and convolved with the clean beam, plus
+        the residual divided by the primary beam; pixels below the primary
+        beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires
         ``restore``.
-    primary_beam_correction_order : str, optional
-        Convention of the primary beam correction. ``"correct_then_restore"``
-        (default) divides the model and the residual by the (power) primary
-        beam ``P`` before the model is convolved with the clean beam ``B``:
-        ``(SKY_MODEL / P) * B + SKY_RESIDUAL / P``, which is exact for the
-        model part of the image. ``"restore_then_correct"`` divides the
-        restored image, ``SKY_RESTORED / P``, the convention of CASA
-        ``pbcor``; multiplication by ``P`` and convolution with ``B`` do not
-        commute, so it is exact only where the primary beam is flat across
-        the clean beam and puts antisymmetric lobes of several percent around
-        bright sources near the beam edge. Use it for comparisons with CASA
-        products.
     psf_fitting_method : str, optional
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
         ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``
@@ -591,11 +579,10 @@ def image_cube_single_field(
     # timing frame (``T_restore``) folded in like the other steps.
     timing["T_restore"] = 0.0
     # The primary beam corrected restored image is made in the same pass as
-    # the restored image: in the default order the model is divided by the
-    # primary beam before its convolution with the clean beam, which needs the
-    # model plane before the restore may overwrite it. The deconvolver's
-    # primary_beam_limit is the blanking cutoff when set, else the CASA pblimit
-    # default of 0.2.
+    # the restored image: the model is divided by the primary beam before its
+    # convolution with the clean beam, which needs the model plane before the
+    # restore may overwrite it. The deconvolver's primary_beam_limit is the
+    # blanking cutoff when set, else the CASA pblimit default of 0.2.
     timing["T_correct_sky_by_primary_beam"] = 0.0
     correct = (
         primary_beam_correction and restore and iteration_control_params["max_iter"] > 0
@@ -613,9 +600,7 @@ def image_cube_single_field(
             # written to the output store; let the restore reuse its buffer
             # instead of allocating a fresh restored cube.
             consume_model="sky_model" not in image_data_variables_keep,
-            primary_beam_correction_order=(
-                primary_beam_correction_order if correct else None
-            ),
+            primary_beam_correction=correct,
             primary_beam_limit=(
                 iteration_control_params.get("primary_beam_limit", 0.0) or 0.2
             ),
