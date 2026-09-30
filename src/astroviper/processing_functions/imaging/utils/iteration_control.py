@@ -14,7 +14,8 @@ All iteration control is performed independently for every
 - ``max_iter_remaining`` is a per-plane array of remaining iterations
   (:attr:`IterationController.max_iter_remaining`, shape ``(ntime, nchan, npol)``);
 - every stopping criterion (zero mask, iteration limit, threshold, imaging cycle
-  limit) is evaluated per plane, and each plane carries its own stop code;
+  limit, no progress) is evaluated per plane, and each plane carries its own
+  stop code;
 - thresholds may differ per plane — :meth:`IterationController.per_plane_threshold_per_cycle`
   produces a per-plane threshold_per_cycle array, and the deconvolvers accept
   per-plane ``max_iter_per_cycle`` and ``threshold_per_cycle`` arrays.
@@ -48,6 +49,7 @@ StopCode = namedtuple("StopCode", ["imaging", "model_update"])
 IMAGING_CONTINUE = 0  # Continue imaging cycles
 IMAGING_MAX_ITER = 1  # Reached total iteration limit (max_iter)
 IMAGING_THRESHOLD = 2  # Peak residual below global threshold
+IMAGING_NO_PROGRESS = 4  # Model updates no longer do any iteration
 IMAGING_ZERO_MASK = 7  # Zero mask (no valid pixels)
 IMAGING_MAX_CYCLES = 9  # Reached imaging cycle limit (max_cycles)
 
@@ -57,14 +59,22 @@ MODEL_UPDATE_MAX_ITER_PER_CYCLE = (
     1  # Reached per-cycle iteration limit (max_iter_per_cycle)
 )
 MODEL_UPDATE_THRESHOLD_PER_CYCLE = 2  # Peak residual below threshold_per_cycle
-MODEL_UPDATE_DIVERGENCE = 4  # Possible divergence detected
+MODEL_UPDATE_DIVERGENCE = 4  # Divergence detected by the deconvolver
 MODEL_UPDATE_ZERO_MASK = 7  # Zero mask detected during model update
+
+# A plane whose model update did no iteration cannot change its residual, so a
+# second identical imaging cycle would follow, and a third. One such model
+# update is tolerated (its threshold_per_cycle was set from the peak of the
+# previous cycle, which the residual update may have lowered); after this many
+# in a row the plane is stopped with IMAGING_NO_PROGRESS.
+NO_PROGRESS_MODEL_UPDATES = 2
 
 # Stop code descriptions for imaging cycle codes
 IMAGING_STOP_DESCRIPTIONS = {
     IMAGING_CONTINUE: "Continue imaging cycles",
     IMAGING_MAX_ITER: "Reached max_iter",
     IMAGING_THRESHOLD: "Reached threshold (peak residual within the mask)",
+    IMAGING_NO_PROGRESS: "No progress (model updates did no iterations)",
     IMAGING_ZERO_MASK: "Zero mask",
     IMAGING_MAX_CYCLES: "Reached max_cycles",
 }
@@ -598,6 +608,10 @@ class IterationController:
         depth instead.
     threshold_sigma : float
         N-sigma threshold for stopping (0 = disabled)
+    zero_iter_model_updates : numpy.ndarray or None
+        Per-plane count of consecutive model updates that did no iteration,
+        same shape as ``max_iter_remaining``. A plane is stopped with
+        ``IMAGING_NO_PROGRESS`` when it reaches ``NO_PROGRESS_MODEL_UPDATES``.
 
     Imaging cycle Tracking:
     ---------------------
@@ -671,6 +685,8 @@ class IterationController:
         # Per-plane stop codes, same shape as self.max_iter_remaining (allocated lazily).
         self.stop_code_imaging = None
         self.stop_code_model_update = None
+        # Per-plane consecutive model updates without any iteration.
+        self.zero_iter_model_updates = None
         self.max_cycles = max_cycles
 
         # Threshold parameters
@@ -742,6 +758,7 @@ class IterationController:
             self.stop_code_model_update = np.full(
                 needed, MODEL_UPDATE_CONTINUE, dtype=int
             )
+            self.zero_iter_model_updates = np.zeros(needed, dtype=int)
         elif any(
             n > c for n, c in zip(needed, self.max_iter_remaining.shape, strict=False)
         ):
@@ -751,9 +768,10 @@ class IterationController:
             )
             sl = tuple(slice(0, d) for d in self.max_iter_remaining.shape)
             for attr, fill in (
-                ("max_iter", self._max_iter),
+                ("max_iter_remaining", self._max_iter),
                 ("stop_code_imaging", IMAGING_CONTINUE),
                 ("stop_code_model_update", MODEL_UPDATE_CONTINUE),
+                ("zero_iter_model_updates", 0),
             ):
                 new = np.full(grown, fill, dtype=int)
                 new[sl] = getattr(self, attr)
@@ -933,6 +951,7 @@ class IterationController:
         time: int | None = None,
         pol: int | None = None,
         chan: int | None = None,
+        model_update_ran: bool = False,
     ) -> tuple[StopCode, str]:
         """
         Check if deconvolution has converged based on multiple criteria.
@@ -949,11 +968,21 @@ class IterationController:
         2. Iteration limit (stopcode 1): max_iter_remaining <= 0
         3. Threshold reached (stopcode 2): peak_residual <= threshold
         4. Imaging cycle limit (stopcode 9): max_cycles == 0 (if not -1)
+        5. No progress (stopcode 4): the plane's last
+           ``NO_PROGRESS_MODEL_UPDATES`` model updates did no iteration. Such
+           a plane cannot change its residual, so without this stop it would
+           cycle for ever whenever ``threshold`` is 0 and ``max_cycles`` is -1
+           (for example an all-zero Stokes plane).
 
         Model update Stopping Criteria:
         -------------------------------
-        - Checked by deconvolver (max_iter_per_cycle, threshold_per_cycle)
-        - Can be propagated via imaging_dict if needed
+        - Checked by the deconvolver (max_iter_per_cycle, threshold_per_cycle,
+          divergence).
+        - A diverged model update is reported through the ``stop_code``
+          placeholder of the ImagingDict entry and kept as the plane's model
+          update stop code (``MODEL_UPDATE_DIVERGENCE``). It does not end the
+          plane's imaging cycles: the next residual update recomputes the
+          true residual.
 
         Parameters:
         -----------
@@ -970,6 +999,12 @@ class IterationController:
 
         chan : int, optional
             Filter by specific channel index
+
+        model_update_ran : bool, optional
+            ``True`` when ``imaging_dict`` is the result of a model update that
+            ran in this imaging cycle; its ``iter_done`` then feeds the no
+            progress stop. ``False`` (default) for a check on the residual
+            alone, where no model update has run.
 
         Returns:
         --------
@@ -1017,8 +1052,16 @@ class IterationController:
             masksum = self._latest(fields, "masksum", 0)
             remaining = int(self.max_iter_remaining[idx])
 
+            # Consecutive model updates of this plane that did no iteration.
+            if model_update_ran:
+                if int(self._latest(fields, "iter_done", 0)) == 0:
+                    self.zero_iter_model_updates[idx] += 1
+                else:
+                    self.zero_iter_model_updates[idx] = 0
+
             # Imaging cycle stopping criteria, in priority order (per plane):
-            #   1 zero mask, 2 iteration limit, 3 threshold, 4 imaging cycle limit
+            #   1 zero mask, 2 iteration limit, 3 threshold, 4 imaging cycle
+            #   limit, 5 no progress
             if masksum == 0:
                 maj = IMAGING_ZERO_MASK
             elif remaining <= 0:
@@ -1027,19 +1070,29 @@ class IterationController:
                 maj = IMAGING_THRESHOLD
             elif self.max_cycles != -1 and self.max_cycles <= 0:
                 maj = IMAGING_MAX_CYCLES
+            elif self.zero_iter_model_updates[idx] >= NO_PROGRESS_MODEL_UPDATES:
+                maj = IMAGING_NO_PROGRESS
             else:
                 maj = IMAGING_CONTINUE
 
+            # The deconvolver reports a diverged model update through the
+            # stop_code placeholder of the entry; keep it as the plane's model
+            # update stop code.
+            placeholder = fields.get("stop_code", None)
+            model_update_code = (
+                int(placeholder.model_update)
+                if isinstance(placeholder, StopCode)
+                else MODEL_UPDATE_CONTINUE
+            )
+
             self.stop_code_imaging[idx] = maj
-            self.stop_code_model_update[idx] = MODEL_UPDATE_CONTINUE
+            self.stop_code_model_update[idx] = model_update_code
             plane_imaging_codes.append(maj)
 
             # Stamp this plane's stop code/description into the ImagingDict,
             # replacing the placeholder set by the deconvolver. Written
             # directly (not via add()) so it stays a single value.
-            fields["stop_code"] = StopCode(
-                imaging=maj, model_update=MODEL_UPDATE_CONTINUE
-            )
+            fields["stop_code"] = StopCode(imaging=maj, model_update=model_update_code)
             fields["stop_description"] = IMAGING_STOP_DESCRIPTIONS[maj]
 
         # Aggregate across the selected planes.
@@ -1261,6 +1314,7 @@ class IterationController:
             self.max_iter_remaining[...] = self._max_iter
             self.stop_code_imaging[...] = IMAGING_CONTINUE
             self.stop_code_model_update[...] = MODEL_UPDATE_CONTINUE
+            self.zero_iter_model_updates[...] = 0
         self.cycles_done = 0
         self.total_iter_done = 0
         self.stopcode = StopCode(
@@ -1277,6 +1331,7 @@ class IterationController:
         if self.stop_code_imaging is not None:
             self.stop_code_imaging[...] = IMAGING_CONTINUE
             self.stop_code_model_update[...] = MODEL_UPDATE_CONTINUE
+            self.zero_iter_model_updates[...] = 0
 
     def get_state(self) -> dict[str, Any]:
         """Get current state of the iteration controller as a dictionary.

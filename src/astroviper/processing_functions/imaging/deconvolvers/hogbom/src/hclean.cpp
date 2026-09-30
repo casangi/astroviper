@@ -100,6 +100,8 @@ void maximg(const T* limagestep, int domask, const bool* lmask,
  * @param cspeedup if > 0, adaptive threshold: thres * 2^(iter/cspeedup)
  * @param msgput callback function for status messages
  * @param stopnow callback function to check if stopping is requested
+ * @param divergence divergence test (see DivergenceControl)
+ * @param stop_reason output: why the plane stopped (a StopReason)
  */
 template<typename T>
 void clean(T* limage, T* limagestep, const T* lpsf,
@@ -108,9 +110,13 @@ void clean(T* limage, T* limagestep, const T* lpsf,
            int max_iter_remaining, int siter, int& iter, T gain, T thres,
            T cspeedup,
            std::function<void(int, int, int, T)> msgput,
-           std::function<void(int&)> stopnow) {
+           std::function<void(int&)> stopnow,
+           const DivergenceControl<T>& divergence,
+           int& stop_reason) {
 
     int yes = 0;
+    PlaneStopTest<T> stop_test;
+    stop_reason = STOP_NONE;
 
     // Find peak in image within clean box
     T maxval = static_cast<T>(0);
@@ -120,17 +126,23 @@ void clean(T* limage, T* limagestep, const T* lpsf,
 
     // Main iteration loop
     for (iter = siter; iter < max_iter_remaining; ++iter) {
+        // Peak of |residual| and sum of its squares over the clean box inside
+        // the mask, row by row (see scan_row): the first of equal peaks wins,
+        // lowest row, then lowest column.
         absval = static_cast<T>(0);
+        double sum_squares = 0.0;
         for (int iy = ybeg; iy < yend; ++iy) {
-            for (int ix = xbeg; ix < xend; ++ix) {
-                if ((domask == 0) || lmask[iy * nx + ix]) {
-                    T val = std::abs(limagestep[iy * nx + ix]);
-                    if (val > absval) {
-                        px = ix;
-                        py = iy;
-                        absval = val;
-                    }
-                }
+            const std::size_t row_offset = static_cast<std::size_t>(iy) * nx;
+            T row_max;
+            int row_ix;
+            sum_squares += scan_row<T>(
+                limagestep + row_offset,
+                (domask == 0) ? nullptr : lmask + row_offset,
+                xbeg, xend, row_max, row_ix);
+            if (row_max > absval) {
+                px = row_ix;
+                py = iy;
+                absval = row_max;
             }
         }
 
@@ -147,9 +159,15 @@ void clean(T* limage, T* limagestep, const T* lpsf,
             cthres = thres;
         }
 
-        // Check convergence criteria
-        if ((yes == 1) || (absval < cthres)) {
+        // Stop tests: a stop request, then the threshold and the divergence
+        // test (shared with the many-threads kernel through PlaneStopTest).
+        if (yes == 1) {
             break;  // goto 200 equivalent
+        }
+        const int reason = stop_test.check(absval, sum_squares, cthres, divergence);
+        if (reason != STOP_NONE) {
+            stop_reason = reason;
+            break;
         }
 
         // Output progress information
@@ -194,6 +212,12 @@ void clean(T* limage, T* limagestep, const T* lpsf,
         }
     }
 
+    // Ran the whole budget without meeting another stop test.
+    if (stop_reason == STOP_NONE && yes == 0 && max_iter_remaining > siter
+        && iter >= max_iter_remaining) {
+        stop_reason = STOP_MAX_ITER;
+    }
+
     // Output final status
     if (iter > siter) {
         msgput(iter, px, py, maxval);
@@ -219,7 +243,8 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
                 int ny, int nx,
                 int xbeg, int xend, int ybeg, int yend,
                 const int* max_iter_remaining, T gain, const T* thres, T cspeedup,
-                int processing_function_threads, int* iter_out) {
+                int processing_function_threads, int* iter_out,
+                const DivergenceControl<T>& divergence, int* stop_out) {
 
     const int nplanes = nt * nf * np_img;
     if (nplanes <= 0) {
@@ -256,14 +281,17 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
                 : nullptr;
 
             int iter_val = 0;
+            int reason = STOP_NONE;
             // Iteration control is independent per plane: each (t, f, p)
-            // plane uses its own maximum iteration count and threshold.
+            // plane uses its own maximum iteration count and threshold, and
+            // its own divergence state.
             clean<T>(model, residual, psf,
                      domask, mask,
                      nx, ny, xbeg, xend, ybeg, yend,
                      max_iter_remaining[plane], 0, iter_val, gain, thres[plane], cspeedup,
-                     noop_msgput, noop_stopnow);
+                     noop_msgput, noop_stopnow, divergence, reason);
             iter_out[plane] = iter_val;
+            stop_out[plane] = reason;
         }
     };
 
@@ -396,7 +424,8 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
                 int ny, int nx,
                 int xbeg, int xend, int ybeg, int yend,
                 const int* max_iter_remaining, T gain, const T* thres, T cspeedup,
-                int processing_function_threads, int* iter_out) {
+                int processing_function_threads, int* iter_out,
+                const DivergenceControl<T>& divergence, int* stop_out) {
 
     const int nplanes = nt * nf * np_img;
     if (nplanes <= 0) {
@@ -406,8 +435,13 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
         static_cast<std::size_t>(ny) * static_cast<std::size_t>(nx);
 
     std::vector<char> active(nplanes, 1);
+    std::vector<PlaneStopTest<T>> stop_test(nplanes);
+    for (int pl = 0; pl < nplanes; ++pl) {
+        stop_out[pl] = STOP_NONE;
+    }
     std::vector<T> row_max(static_cast<std::size_t>(nplanes) * ny);
     std::vector<int> row_ix(static_cast<std::size_t>(nplanes) * ny);
+    std::vector<double> row_sum_squares(static_cast<std::size_t>(nplanes) * ny, 0.0);
     std::vector<int> peak_y(nplanes, 0);
     std::vector<int> peak_x(nplanes, 0);
     std::vector<T> peak_pv(nplanes, static_cast<T>(0));
@@ -461,16 +495,9 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
                     ? mask_cube + static_cast<std::size_t>(pl) * plane_size
                                 + static_cast<std::size_t>(iy) * nx
                     : nullptr;
-                T m = static_cast<T>(0);
-                int mi = xbeg;
-                for (int ix = xbeg; ix < xend; ++ix) {
-                    if (!domask || msk[ix]) {
-                        T v = std::abs(res[ix]);
-                        if (v > m) { m = v; mi = ix; }
-                    }
-                }
-                row_max[r] = m;
-                row_ix[r] = mi;
+                // Same row scan as clean<T>: row maximum and row sum of squares.
+                row_sum_squares[r] = scan_row<T>(
+                    res, msk, xbeg, xend, row_max[r], row_ix[r]);
             }
         });
 
@@ -481,15 +508,25 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
             T best = static_cast<T>(-1);
             int py = ybeg, px = xbeg;
             const long base = static_cast<long>(pl) * ny;
+            // Row sums are added in row order, as in clean<T>, so the sum does
+            // not depend on how the rows were split over the threads.
+            double sum_squares = 0.0;
             for (int iy = ybeg; iy < yend; ++iy) {
                 T rm = row_max[base + iy];
                 if (rm > best) { best = rm; py = iy; px = row_ix[base + iy]; }
+                sum_squares += row_sum_squares[base + iy];
             }
             T cthres = thres[pl];
             if (cspeedup > zero_val) {
                 cthres = thres[pl] * std::pow(two_val, static_cast<T>(it) / cspeedup);
             }
-            if (best < cthres) { active[pl] = 0; continue; }
+            // Threshold and divergence tests, identical to clean<T>.
+            const int reason = stop_test[pl].check(best, sum_squares, cthres, divergence);
+            if (reason != STOP_NONE) {
+                active[pl] = 0;
+                stop_out[pl] = reason;
+                continue;
+            }
             T* res = residual_cube + static_cast<std::size_t>(pl) * plane_size;
             T* mod = model_cube + static_cast<std::size_t>(pl) * plane_size;
             T maxval = res[static_cast<std::size_t>(py) * nx + px];
@@ -536,6 +573,14 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
             }
         });
     }
+
+    // Planes that no stop test ended ran their whole budget.
+    for (int pl = 0; pl < nplanes; ++pl) {
+        if (stop_out[pl] == STOP_NONE && max_iter_remaining[pl] > 0
+            && iter_out[pl] >= max_iter_remaining[pl]) {
+            stop_out[pl] = STOP_MAX_ITER;
+        }
+    }
 }
 
 // Explicit template instantiations for float and double
@@ -551,7 +596,9 @@ template void clean<float>(float* limage, float* limagestep, const float* lpsf,
                           int max_iter_remaining, int siter, int& iter, float gain, float thres,
                           float cspeedup,
                           std::function<void(int, int, int, float)> msgput,
-                          std::function<void(int&)> stopnow);
+                          std::function<void(int&)> stopnow,
+                          const DivergenceControl<float>& divergence,
+                          int& stop_reason);
 
 template void clean<double>(double* limage, double* limagestep, const double* lpsf,
                            int domask, const bool* lmask, int nx, int ny,
@@ -559,7 +606,9 @@ template void clean<double>(double* limage, double* limagestep, const double* lp
                            int max_iter_remaining, int siter, int& iter, double gain, double thres,
                            double cspeedup,
                            std::function<void(int, int, int, double)> msgput,
-                           std::function<void(int&)> stopnow);
+                           std::function<void(int&)> stopnow,
+                          const DivergenceControl<double>& divergence,
+                          int& stop_reason);
 
 template void clean_cube<float>(float* residual_cube, float* model_cube,
                                 const float* psf_cube, int domask,
@@ -568,7 +617,8 @@ template void clean_cube<float>(float* residual_cube, float* model_cube,
                                 int ny, int nx,
                                 int xbeg, int xend, int ybeg, int yend,
                                 const int* max_iter_remaining, float gain, const float* thres, float cspeedup,
-                                int processing_function_threads, int* iter_out);
+                                int processing_function_threads, int* iter_out,
+                                const DivergenceControl<float>& divergence, int* stop_out);
 
 template void clean_cube<double>(double* residual_cube, double* model_cube,
                                  const double* psf_cube, int domask,
@@ -577,7 +627,8 @@ template void clean_cube<double>(double* residual_cube, double* model_cube,
                                  int ny, int nx,
                                  int xbeg, int xend, int ybeg, int yend,
                                  const int* max_iter_remaining, double gain, const double* thres, double cspeedup,
-                                 int processing_function_threads, int* iter_out);
+                                 int processing_function_threads, int* iter_out,
+                                const DivergenceControl<double>& divergence, int* stop_out);
 
 template void clean_cube_many_threads<float>(float* residual_cube, float* model_cube,
                                 const float* psf_cube, int domask,
@@ -586,7 +637,8 @@ template void clean_cube_many_threads<float>(float* residual_cube, float* model_
                                 int ny, int nx,
                                 int xbeg, int xend, int ybeg, int yend,
                                 const int* max_iter_remaining, float gain, const float* thres, float cspeedup,
-                                int processing_function_threads, int* iter_out);
+                                int processing_function_threads, int* iter_out,
+                                const DivergenceControl<float>& divergence, int* stop_out);
 
 template void clean_cube_many_threads<double>(double* residual_cube, double* model_cube,
                                  const double* psf_cube, int domask,
@@ -595,6 +647,7 @@ template void clean_cube_many_threads<double>(double* residual_cube, double* mod
                                  int ny, int nx,
                                  int xbeg, int xend, int ybeg, int yend,
                                  const int* max_iter_remaining, double gain, const double* thres, double cspeedup,
-                                 int processing_function_threads, int* iter_out);
+                                 int processing_function_threads, int* iter_out,
+                                const DivergenceControl<double>& divergence, int* stop_out);
 
 } // namespace hclean
