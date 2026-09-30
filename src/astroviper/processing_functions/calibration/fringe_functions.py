@@ -1,123 +1,9 @@
-import numpy as np
 import xarray as xr
-import dask
-from scipy.optimize import minimize
-
-# Types
-from collections.abc import Mapping, Iterable
-from typing import Any, Union
-from xarray.core.datatree import DataTree # As type
-
-# xradio, graphviper and astroviper imports
-from xradio.measurement_set.open_processing_set import (
-    open_processing_set,
-)
-from xradio.measurement_set import ProcessingSetXdt 
-
-from graphviper.graph_tools.map import map
-from graphviper.graph_tools.reduce import reduce
-from graphviper.graph_tools.generate_dask_workflow import generate_dask_workflow
-from graphviper.graph_tools.coordinate_utils import (
-    interpolate_data_coords_onto_parallel_coords,
-)
-
-from astroviper.calibration.fringe_cal_quantum import make_empty_cal_quantum
-
-from .utils import (unique,
-                    get_ps_polarization_coord,
-                    make_cal_map
-)
-
-def _fringe_global_node_task(input_params: dict):
-    """The dask task function for global fringefit
-
-    Currently requires the selected data to be in a single xds, which is bad and should be fixed."""
-    ps = input_params["ps"]
-    data_selection = input_params["data_selection"]
-    ref_ant = input_params["ref_ant"]
-    cal_map = input_params["cal_map"]
-    options = input_params["options"]
-    # FIXME: for now we do single band
-    xdses = [ps[k] for k in data_selection.keys() if ps[k].time.size > 0]
-    if len(xdses) > 1:
-        raise RuntimeError("We only do single xdses so far")
-    xds = xdses[0] 
-    spw_name = xds.frequency.attrs['spectral_window_name']
-    cal = cal_map[spw_name]
-    nvis = np.prod(xds.VISIBILITY.shape)
-    if nvis==0:
-        raise ValueError("No data to process")
-    name = xds.name #xds.relative_to(xds.parent)
-    # SNR shape? time, antenna_name, frequency, recptor_label 
-    good_ants0 = cal.antenna_name[np.any(cal.SNR[0, :, 0, :] > 0, axis=1)]
-    good_ants = [str(n) for n in good_ants0.values]
-    ns = XDSNewtonSolver(xds, cal, ref_ant=ref_ant, ants=good_ants, options=options)
-    new_q = ns.do_newton_solve()
-    return new_q
-
-
-def _fringefit_global_single(
-        ps: ProcessingSetXdt,
-        node_task_data_mapping: Mapping,
-        data_sub_selection: Mapping,
-        ref_ant: str,
-        cal_tree: DataTree,
-        options: dict
-):
-    """The top level Dask routine for FFT fringefit.
-
-    Currently each xds in a processing set is handled separately by the
-    node task function, which is an important shortcoming that needs to
-    be addressed soon.
-    """
-    input_params = {}
-    input_params["data_sub_selection"] = data_sub_selection
-    input_params["ps"] = ps
-    input_params["ref_ant"] = ref_ant
-    input_params["cal_map"] = make_cal_map(cal_tree)
-    input_params["options"] = options
-    graph = map(
-        input_data=ps,
-        node_task_data_mapping=node_task_data_mapping,
-        node_task=_fringe_global_node_task,
-        input_params=input_params,
-        in_memory_compute=False,
-    )
-    dask_graph = generate_dask_workflow(graph)
-    # Strip the singleton list wrapper at source
-    # dask.visualize(dask_graph, filename='least-squares.svg', optimize_graph=True)
-    [res] = dask.compute(dask_graph)
-    return res
-
-def fringefit_global_ps(ps: ProcessingSetXdt,
-                        ref_ant: str,
-                        unixtime: float,
-                        interval: float,
-                        cal_tree: DataTree,
-                        options: dict):
-    """Refines a fringefit calibration using an estimate from the fringefit stage
-
-    This preliminary version handles spectral windows separately and maps
-    the cal_tree spws to those in the data. The coupling between the
-    fft stage and the global stage shouldn't really work like this and
-    I should change it.
-
-    """
-    ps2 = ps.sel(time=slice(unixtime, unixtime + interval))
-    parallel_coords = {}
-    node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(
-        parallel_coords, ps2, ps_partition=["spectral_window_name"]
-    )
-    subsel = {}
-    res0 = _fringefit_global_single(ps2, node_task_data_mapping, subsel, ref_ant, cal_tree, options)
-    # Now we collect these into a single DataTree!
-    res_cal_tree = xr.DataTree(
-        children={f"part{i}": xr.DataTree(dataset=q) for i, q in enumerate(res0)}
-    )
-    return res_cal_tree
+import numpy as np
 
 class XDSNewtonSolver():
-    """The gritty details of the global stage of the fringefit solver are implemented in this class.
+    """The gritty details of the global stage of the fringefit solver
+    are implemented in this class.
 
     We minimize an objective function with a scipy routine using the
     scalar objective function itself, its derivative with respect to
@@ -133,6 +19,7 @@ class XDSNewtonSolver():
     parameters, and in that context the Jacobian is sometimes defined
     as the matrix of derivatives of the vector by the
     parameters. That's not what's going on here!
+
     """
     def __init__(self,
                  xds : xr.Dataset,
@@ -161,8 +48,8 @@ class XDSNewtonSolver():
             self.options = {}
         else:
             self.options = options
-        self.ordered_names = [name for name in xds.antenna_xds.antenna_name.values if name in self.ants]
-        # The indices here are the ones we will use as the basis for vectors and arrays in this class
+            self.ordered_names = [name for name in xds.antenna_xds.antenna_name.values if name in self.ants]
+            # The indices here are the ones we will use as the basis for vectors and arrays in this class
         self.ant_name_to_subset_array_ind = {name: i for i, name in enumerate(self.ordered_names)}
         self.bl_subset = [bl for (bl, (a1, a2)) in enumerate(zip(self.xds.baseline_antenna1_name.values,
                                                                  self.xds.baseline_antenna2_name.values))
@@ -324,7 +211,6 @@ class XDSNewtonSolver():
         cal = np.zeros((self.num_ants-1, 3), float)
         zero_rates = self.options.get('zerorates', False)
         for pol_ind, pol_hand in enumerate(self.pol_hands):
-            print(f"Newton solver: {pol_hand=}, {pol_ind=}, {self.pol_hands=}")
             self.setup_for_pol_hand(pol_hand)
             pt = self.xds.antenna_xds.polarization_type
             receptor_indices = (pt==pol_hand).argmax(dim='receptor_label')
@@ -344,9 +230,9 @@ class XDSNewtonSolver():
                     cal[i, 2] = self.cal_q['CALPARAM_RATE'].sel({'antenna_name': n,
                                                                  'receptor_label': receptor_label}).values
                     i += 1
-            cal /= np.expand_dims(self.xscale, (0,))
-            cal[:, 2] *= self.cal_q.frequency.values[0] # There is only 1 entry but
-            # print(f"Cal for {pol_ind=} on the way in is {cal}")
+                    cal /= np.expand_dims(self.xscale, (0,))
+                    cal[:, 2] *= self.cal_q.frequency.values[0] # There is only 1 entry but
+                    # print(f"Cal for {pol_ind=} on the way in is {cal}")
             cal_flat = np.reshape(cal[:,:], (-1,))
             res = minimize(self.calc_residual, cal_flat,
                            method='trust-exact',
@@ -359,7 +245,7 @@ class XDSNewtonSolver():
                                'gtol' : 1e-3 # gradient size (for BFGS)
                            }
                            )
-            print(f"{self.xds.name=} {res.success=} {res.nit=}")
+            # print(f"{self.xds.name=} {res.success=} {res.nit=}")
             if res.success:
                 snr = self.calc_snr(res)
                 cal_out = np.reshape(res.x, (-1, 3))
@@ -384,8 +270,9 @@ class XDSNewtonSolver():
                     else:
                         q.SNR.loc[d] = 1e9
             else:
-                # FIXME: Solver failed, we have to do something about that?
-                pass
+                for i, n in enumerate(self.ordered_names):
+                    d = dict(antenna_name=n, receptor_label=receptor_labels.loc[n])
+                    q.FLAG.loc(d) = True
         return q
     def calc_snr(self, res):
         # p is the number of parameters
@@ -406,3 +293,106 @@ class XDSNewtonSolver():
         # We have a different scaling factor here from in the single baseline case, which is kinda odd.
         snr = 1/2*np.sqrt(2)/np.sqrt(p1*p2) 
         return snr
+
+# 
+    
+class SingleFringeJones:
+    def __init__(self, q):
+        """SingleFringeJones has the logic needed to appply a fringefit solution to an xds"""
+        self.q = q
+
+    def calc_antenna_jones(self, xds: MeasurementSetXdt):
+        # We scrape all the metadata from an xds. Maybe this is wise, maybe not.
+        frequency = xds.frequency
+        # FIXME: this isn't the vibe
+        ref_freq = self.q.frequency.values[0]
+        dt = xds.time.values - self.q.time.values[0]
+        df = frequency.values - ref_freq
+        # We upscale the dimensions so that things broadcast nicely:
+        # We want a matrix of (n_time, n_ant, n_freq, n_pol)
+        df_shaped = np.expand_dims(df, (0, 1, 3))  # frequency is dimension 2
+        dt_shaped = np.expand_dims(dt, (1, 2, 3))
+
+        # (time, antenna_name, frequency, polarization)
+        phi0 = self.q.CALPARAM_PHASE.values
+        # phi0_shaped = np.expand_dims(phi0, (0, 1, 2, 3)) 
+        tau = self.q.CALPARAM_DELAY.values
+        r = self.q.CALPARAM_RATE.values
+        # These are compatible with the shape (n_time, n_ant, n_freq, n_receptors)
+        # Calculate phases:
+        # FIXME this is driving me insane
+        phi = -1*(phi0 + 2*np.pi*tau * df_shaped + 2*np.pi*ref_freq*r * dt_shaped)
+        # Shape: (n_time, n_ant, n_freq, n_pol)
+        antenna_jones = np.exp(1j * phi, dtype=complex)
+        return antenna_jones
+
+    def get_left_jones(self, antenna_jones, left_indices):
+        # antenna_jones has shape: (n_time, n_ant, n_freq, n_pol)
+        # We map the left antenna in a baseline to the baseline dimension
+        jones_diags_left0 = antenna_jones[:, left_indices, :, :]
+        # We square up the polarization axis to (2,2) for ease of multiplication
+        # (n_time, n_baseline, n_freq, 2, 2)
+        jones_diags_left = np.expand_dims(jones_diags_left0, (-1,)) * np.identity(2)
+        return jones_diags_left
+
+    def get_right_jones(self, antenna_jones, right_indices):
+        # antenna_jones has shape: (n_time, n_ant, n_freq, n_pol)
+        # We map the left antenna in each baseline to the baseline dimension
+        jones_diags_right0 = antenna_jones[:, right_indices, :, :]
+        jones_diags_right = np.expand_dims(jones_diags_right0, (-1,)) * np.identity(2)
+        # We square up the polarization axis to (2,2) for ease of multiplication
+        # (n_time, n_baseline, n_freq, 2, 2)
+        # and take the hermitian conjugate over the last two axes:
+        jones_diags_right = (
+            np.transpose(jones_diags_right, axes=(0, 1, 2, 4, 3))
+        ).conj()
+        return jones_diags_right
+
+    def get_ant_to_baseline_maps(self, xds):
+        # Both antenna?_name values are n_baseline long
+        baseline_antenna1_name = xds.baseline_antenna1_name.values
+        baseline_antenna2_name = xds.baseline_antenna2_name.values
+        # We make a map of antenna name to number.
+        # Note that we need the names from the cal table but the baseline_id
+        # from the xds itself.
+        antennas = self.q.antenna_name.values
+        ant_num_map = {n: i for i, n in enumerate(antennas)}
+        # Now we make n_baseline long list of left indices
+        # FIXME: if there's an antenna in the xds that isn't in the cal table
+        # this will asplode
+        left_indices = [ant_num_map[n] for n in baseline_antenna1_name]
+        # And the same for right indices
+        right_indices = [ant_num_map[n] for n in baseline_antenna2_name]
+        return left_indices, right_indices
+
+    def apply_cal(self, xds):
+        if len(xds.time.values) == 0:
+            return xds
+        antenna_jones = self.calc_antenna_jones(xds)
+        left_indices, right_indices = self.get_ant_to_baseline_maps(xds)
+        # v has shape (n_time, n_baseline, n_freq, 2, 2)
+        v = square_up_last_dimension(xds.VISIBILITY.values)
+        # Jones matrices for each visibility for left and right antennas on a baseline
+        left_jones = self.get_left_jones(antenna_jones, left_indices)
+        right_jones = self.get_right_jones(antenna_jones, right_indices)
+        # We have a very concise and pleasant form for calibration:
+        v2 = left_jones @ v @ right_jones
+        # Reshape the visibilities back to (n_time, n_baseline, n_freq, 4)
+        s3 = v2.shape[:-2] + (4,)
+        v2 = v2.reshape(s3)
+        coords = {
+            "time": xds.time,
+            "baseline_id": xds.baseline_id,
+            "frequency": xds.frequency,
+            "polarization": xds.polarization,
+        }
+        da = xr.DataArray(coords=coords, data=v2)
+        new_xds = xds.assign({"VISIBILITY_CORRECTED": da})
+        # Now we add the new data group:
+        xds.attrs["data_groups"]["calibrated"] = {
+            "correlated_data": "VISIBILITY_CORRECTED",
+            "flag": "FLAG",
+            "weight": "WEIGHT",
+            "uvw": "UVW",
+        }
+        return new_xds
