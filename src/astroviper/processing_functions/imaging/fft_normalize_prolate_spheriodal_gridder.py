@@ -152,14 +152,16 @@ def ifft_norm_img_xds(
         FFT library to use.  Default is ``"scipy"``.  Use ``"pyfftw"`` for
         potentially faster transforms when pyfftw is installed; plan caching
         is especially beneficial when the same grid shape is transformed
-        repeatedly across major cycles.
+        repeatedly across imaging cycles.
 
     Returns
     -------
     None
         ``img_xds`` is modified in place.  Sky / PSF / primary-beam arrays are
         added as new data variables with dimensions
-        ``(time, frequency, polarization, l, m)``.
+        ``(time, frequency, polarization, l, m)``.  They are real, except the
+        sky in a four-correlation basis (``XX, XY, YX, YY`` or
+        ``RR, RL, LR, LL``), which is complex until it is transformed to Stokes.
 
     Notes
     -----
@@ -199,6 +201,15 @@ def ifft_norm_img_xds(
         n_lm_padded=[img_xds.sizes["u"], img_xds.sizes["v"]]
     )
 
+    # The sky in a four-correlation basis is kept complex: a cross hand is not
+    # conjugate symmetric on its own, and its real and imaginary parts carry two
+    # Stokes parameters that transform_polarization_basis separates.
+    from astroviper.processing_functions.imaging.utils.imaging_polarization import (
+        is_four_correlation_basis,
+    )
+
+    complex_sky = is_four_correlation_basis(img_xds.polarization.values)
+
     # for data_variable in ["aperture", "uv_sampling", "visibility"]:
     for data_variable in image_data_group_out_modified:
         data_variable_out = fft_pair[
@@ -232,12 +243,14 @@ def ifft_norm_img_xds(
         float_out_dtype = (
             np.float32 if np.dtype(complex_dtype) == np.complex64 else np.float64
         )
+        keep_complex = complex_sky and data_variable == "sky"
+        out_dtype = np.dtype(complex_dtype) if keep_complex else float_out_dtype
         out_name = data_group_out[ifft_pair[data_variable_out]]
-        if out_name not in img_xds:
+        if out_name not in img_xds or img_xds[out_name].dtype != out_dtype:
             img_xds[out_name] = xr.DataArray(
                 np.empty(
                     (n_time, n_freq, n_pol, image_size[0], image_size[1]),
-                    dtype=float_out_dtype,
+                    dtype=out_dtype,
                 ),
                 dims=("time", "frequency", "polarization", "l", "m"),
             )
@@ -265,7 +278,9 @@ def ifft_norm_img_xds(
                     plane /= kernel_image_1D_m[None, :]
                     plane *= flux_scale / normalization[t, f, p]
 
-                    out_arr[t, f, p] = remove_padding(plane.real, image_size)
+                    out_arr[t, f, p] = remove_padding(
+                        plane if keep_complex else plane.real, image_size
+                    )
 
         if data_variable_out not in image_data_variables_keep:
             # Release the large grid from the dataset so it can be freed as soon
@@ -373,26 +388,32 @@ def fft_norm_img_xds(
         #     )
         # )
 
-        # Process one 2-D plane at a time to keep FFT temporaries small.
-        # At 12 000 × 12 000 this limits the extra allocation to ≈ 1.15 GB
-        # instead of allocating the full (time, freq, pol, u, v) float64 array.
-        import matplotlib.pyplot as plt
-
+        # Process one 2-D plane at a time to keep FFT temporaries small, and do
+        # ALL arithmetic in place on the plane's own buffer. The out-of-place
+        # spelling ``out_arr[t, f, p] / kernel_image_1D_l[:, None] / ...`` is a
+        # memory disaster: the float64 kernel arrays PROMOTE a complex64 plane
+        # to complex128 (array/array promotion), allocating two full-grid
+        # complex128 temporaries (≈ 2.9 GB each at 13 500²) plus the cast back
+        # -- the 2026-08-16 multi-cycle OOM. In-place division by the float64
+        # kernels keeps the plane's dtype and allocates nothing (same pattern,
+        # same reason, as ifft_norm_img_xds above). The padded borders are
+        # zero, so dividing the full padded plane is harmless.
         for t in range(n_time):
             for f in range(n_freq):
                 for p in range(n_pol):
                     add_padding(raw_grid[t, f, p], out_arr[t, f, p])
+                    out_arr[t, f, p] /= kernel_image_1D_l[:, None]
+                    out_arr[t, f, p] /= kernel_image_1D_m[None, :]
 
+                    # The plane is the output buffer being overwritten anyway,
+                    # so the FFT may destroy it (skips the defensive copy).
                     out_arr[t, f, p] = fft_lm_to_uv(
-                        out_arr[t, f, p]
-                        / kernel_image_1D_l[:, None]
-                        / kernel_image_1D_m[None, :],
+                        out_arr[t, f, p],
                         processing_function_threads=processing_function_threads,
                         fft_backend=fft_backend,
                         complex_dtype=complex_dtype,
+                        overwrite_input=True,
                     )
-
-        plt.show()
 
         if data_variable not in image_data_variables_keep:
             # Release the large grid from the dataset so it can be freed as soon
@@ -467,8 +488,8 @@ def ifft_uv_to_lm(
     grid_2d : numpy.ndarray
         Input UV grid.  Can be any number of dimensions; the FFT is applied
         along ``fft_plane_dims``.  For the slice-by-slice path in
-        ``ifft_norm_img_xds`` this is a 2-D array of shape ``(u, v)``.
-        dtype must be complex128.
+        ``ifft_norm_img_xds`` this is a 2-D array of shape ``(u, v)``, in
+        either complex precision (``complex64`` or ``complex128``).
     fft_plane_dims : tuple of int, optional
         Axes over which to apply the 2-D FFT.  Default is ``(-2, -1)``.
     threads : int, optional
@@ -532,6 +553,7 @@ def fft_lm_to_uv(
     processing_function_threads=1,
     fft_backend="pyfftw",
     complex_dtype=np.complex128,
+    overwrite_input=False,
 ):
     """Apply a 2-D FFT to transform a sky-plane image to a UV grid.
 
@@ -562,6 +584,12 @@ def fft_lm_to_uv(
     complex_dtype : numpy dtype, optional
         Complex dtype the image is cast to and the grid is returned in.
         Default ``numpy.complex128``.
+    overwrite_input : bool, optional
+        If ``True`` and ``image`` is already ``complex_dtype``, the function
+        may use ``image``'s buffer as scratch space, destroying its contents
+        (skips the one plane-sized defensive copy — ≈ 1.5 GB for a
+        13 500 × 13 500 complex64 grid).  The caller must not rely on
+        ``image``'s contents after the call.  Default ``False``.
 
     Returns
     -------
@@ -576,8 +604,10 @@ def fft_lm_to_uv(
     if even:
         # Fold the shifts into checkerboard multiplies (see ifft_uv_to_lm):
         # fftshift(fft2(ifftshift(x))) == cb * fft2(cb * x).
-        if work is image:
-            work = work.copy()  # own the buffer if asarray returned a view
+        # Own the buffer unless the caller ceded it via overwrite_input
+        # (asarray is a no-copy view when the dtype already matches).
+        if work is image and not overwrite_input:
+            work = work.copy()
         _fold_shift_checkerboard(work, fft_plane_dims)
         uv = fft.fft2(
             work,

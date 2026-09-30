@@ -212,7 +212,11 @@ def transform_polarization_basis(
     ----------
     img_xds : xr.Dataset
         Image dataset with a ``polarization`` dimension of size 2 or 4.
-        All data variables must share the same polarization axis.
+        All data variables must share the same polarization axis.  In a
+        four-correlation basis the sky images are complex (the cross hands
+        carry two Stokes parameters in their real and imaginary parts): the
+        conversion to Stokes returns real images, the conversion from Stokes
+        complex ones.  Masks are left untouched by these conversions.
     new_polarization_basis : str
         Target basis.  One of ``'stokes'``, ``'linear'``, or ``'circular'``
         for built-in conversions; any string is accepted when
@@ -262,9 +266,15 @@ def transform_polarization_basis(
         transformation_matrix,
     )
 
-    for var_name in img_xds.data_vars:
-        # if "type" in img_xds[var_name].attrs:
-        #     print("###### The type of the variable is ", var_name, img_xds[var_name].attrs["type"])
+    # A matrix with imaginary entries is one of the four-correlation
+    # conversions: the cross hands carry two Stokes parameters in their real and
+    # imaginary parts (XY = U + iV, YX = U - iV; RL = Q + iU, LR = Q - iU).
+    # Images in a four-correlation basis are therefore complex and Stokes images
+    # real, so the data type changes with the basis.
+    complex_conversion = bool(np.any(np.imag(matrix) != 0))
+    to_stokes = new_polarization_basis == "stokes"
+
+    for var_name in list(img_xds.data_vars):
         if (
             "type" in img_xds[var_name].attrs
             and img_xds[var_name].attrs["type"] == "point_spread_function"
@@ -281,17 +291,22 @@ def transform_polarization_basis(
 
         # Skip uv-domain grids (e.g. VISIBILITY_MODEL). The residual update grids
         # and degrids in the telescope's NATIVE polarization basis while the model
-        # update works in Stokes, so a model-visibility uv grid is never the thing
-        # being basis-transformed. It also persists across major cycles (it is
-        # rebuilt by fft_norm each cycle), so it must not be deleted -- only
-        # skipped here. Transforming it would be wasteful (large complex grid,
-        # padded 1.2x) and pointless.
+        # update works in Stokes, so a uv grid is never the thing being
+        # basis-transformed -- transforming one would be wasteful (large complex
+        # grid, padded 1.2x) and pointless. Since 2026-08 the per-cycle grids are
+        # freed as soon as they are consumed (VISIBILITY_MODEL right after the
+        # degrid, VISIBILITY inside ifft_norm), so this skip is usually vacuous,
+        # but it must stay: it also protects any grid a caller chose to keep via
+        # image_data_variables_keep.
         if "u" in img_xds[var_name].dims or "v" in img_xds[var_name].dims:
             continue
 
         if ("polarization" in img_xds[var_name].dims) and ("BEAM_FIT" not in var_name):
-            # print("###### The type of the variable is ", var_name, img_xds[var_name].attrs.keys())
-            # if not img_xds[var_name].attrs["type"] == "point_spread_function":
+            img_dtype = img_transformed_xds[var_name].dtype
+            if complex_conversion and img_dtype.kind not in "fc":
+                # Masks belong to their plane; they are not linear combinations
+                # of each other.
+                continue
             original_dims = list(img_transformed_xds[var_name].dims)
 
             # Cast the mixing matrix to the image's precision so xr.dot keeps the
@@ -299,7 +314,6 @@ def transform_polarization_basis(
             # images/grids to float64 / complex128 (the matrices are declared
             # float64 / complex128). Only the precision is matched; the matrix
             # stays real or complex as appropriate.
-            img_dtype = img_transformed_xds[var_name].dtype
             single = (img_dtype == np.float32) or (img_dtype == np.complex64)
             if np.iscomplexobj(matrix):
                 matrix_dtype = np.complex64 if single else np.complex128
@@ -310,13 +324,7 @@ def transform_polarization_basis(
                 dims=["polarization", "pol_in"],
                 coords={"polarization": out_pol_labels, "pol_in": in_pol_labels},
             )
-
-            # Use [:] slice assignment so the transposed result is copied
-            # into the DataArray's existing C-contiguous buffer. Writing
-            # `.values = rhs` instead would *replace* the buffer with the
-            # transposed view, which is strided and thus neither C- nor
-            # F-contiguous.
-            img_transformed_xds[var_name].values[:] = (
+            transformed = (
                 xr.dot(
                     transform_da,
                     img_transformed_xds[var_name].rename({"polarization": "pol_in"}),
@@ -326,6 +334,24 @@ def transform_polarization_basis(
                 .transpose(*original_dims)
                 .values
             )
+
+            if complex_conversion:
+                # The data type changes with the basis (complex correlations,
+                # real Stokes parameters), so the variable is replaced by a new
+                # C-contiguous array instead of being overwritten.
+                attrs = dict(img_transformed_xds[var_name].attrs)
+                if to_stokes:
+                    transformed = transformed.real
+                img_transformed_xds[var_name] = xr.DataArray(
+                    np.ascontiguousarray(transformed), dims=original_dims, attrs=attrs
+                )
+            else:
+                # Use [:] slice assignment so the transposed result is copied
+                # into the DataArray's existing C-contiguous buffer. Writing
+                # `.values = rhs` instead would *replace* the buffer with the
+                # transposed view, which is strided and thus neither C- nor
+                # F-contiguous.
+                img_transformed_xds[var_name].values[:] = transformed
 
     # Update the polarization labels in place on the (possibly copied) dataset
     # and return it. ``assign_coords`` would return a *new* object and leave the

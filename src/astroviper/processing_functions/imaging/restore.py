@@ -80,6 +80,60 @@ def _elliptical_gaussian_kernel(ny, nx, major_fwhm_pix, minor_fwhm_pix, pa, dtyp
     return u.astype(dtype, copy=False)
 
 
+def elliptical_gaussian_uv_taper(u, v, major, minor, pa):
+    """Analytic visibility taper of an elliptical-Gaussian sky component.
+
+    The Fourier transform of the same elliptical Gaussian that
+    :func:`_elliptical_gaussian_kernel` evaluates on the image plane (restore's
+    clean beam), normalised to a **unit-total-flux** component, so the taper is
+    1 at ``(u, v) = (0, 0)`` and multiplying a point source's visibilities by it
+    turns the point source into a Gaussian of the same integrated flux::
+
+        T(u, v) = exp(-(pi^2 / (4 ln 2)) * [ major^2 (u sin pa + v cos pa)^2
+                                           + minor^2 (u cos pa - v sin pa)^2 ])
+
+    This is the single source of truth the simulation subdomain uses to
+    simulate Gaussian sources (no duplicated Gaussian parametrisation); the
+    unit tests pin it to the FFT of :func:`_elliptical_gaussian_kernel`, so the
+    two cannot drift apart.  In sky coordinates the major axis lies along
+    ``(sin pa, cos pa)`` in ``(l, m)`` -- position angle measured from the
+    ``+m`` axis towards the ``+l`` axis -- which is the same beam that
+    ``[major, minor, pa]`` describes in ``BEAM_FIT_PARAMS`` / the restore step
+    (their pixel-index convention differs only by the sign of the ``l`` axis,
+    under which the Gaussian is invariant).
+
+    Parameters
+    ----------
+    u, v : numpy.ndarray (broadcastable), wavelengths
+        Baseline coordinates in units of the observing wavelength.
+    major, minor : float, radians
+        FWHM of the major and minor axes on the sky.
+    pa : float, radians
+        Position angle of the major axis.
+
+    Returns
+    -------
+    numpy.ndarray
+        Broadcast shape of ``u`` and ``v``; real taper in ``(0, 1]``.
+
+    See Also
+    --------
+    _elliptical_gaussian_kernel : the image-plane form (unit peak).
+    """
+    u = np.asarray(u, dtype=np.float64)
+    v = np.asarray(v, dtype=np.float64)
+    sin_pa = float(np.sin(pa))
+    cos_pa = float(np.cos(pa))
+    factor = np.pi**2 / (4.0 * np.log(2.0))
+    return np.exp(
+        -factor
+        * (
+            (float(major) * (u * sin_pa + v * cos_pa)) ** 2
+            + (float(minor) * (u * cos_pa - v * sin_pa)) ** 2
+        )
+    )
+
+
 def restore_image(
     img_xds: xr.Dataset,
     image_data_group_in_residual_name: str = "residual",

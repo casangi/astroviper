@@ -20,7 +20,7 @@
 #         ].VISIBILITY.field_and_source_xds.FIELD_PHASE_CENTER,
 #     }
 #     ms_name = "Antennae_North.cal.lsrk.split_00"
-#     n_chunks = None
+#     n_mapping_parallelism = None
 #     data_variables = ["sky", "point_spread_function", "primary_beam"]
 
 #     polarization_coord = ps[ms_name].polarization
@@ -32,7 +32,7 @@
 #         grid_params,
 #         polarization_coord=polarization_coord,
 #         frequency_coord=frequency_coord,
-#         n_chunks=n_chunks,
+#         n_mapping_parallelism=n_mapping_parallelism,
 #         data_variables=data_variables,
 #     )
 #     yield output

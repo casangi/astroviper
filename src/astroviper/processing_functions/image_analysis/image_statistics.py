@@ -6,39 +6,44 @@ plane images.
 import numpy as np
 
 
-def get_image_masksum(image_xds, dv="SKY"):
+def get_image_masksum(image_xds, data_group_name):
     """
-    Compute the sum of the mask in an image dataset.
+    Compute the per-plane sum of the mask in an image dataset.
 
     Parameters:
     -----------
     image_xds: xarray.Dataset
-        The image dataset with dimensions (y, x) or (time, frequency, polarization, y, x).
-    dv: str
-        The data variable in the xarray.Dataset to get the mask from.
-        Default is 'SKY'.
+        The image dataset with dimensions (time, frequency, polarization, l, m).
+    data_group_name: str
+        Name of the entry in ``image_xds.attrs["data_groups"]`` whose
+        ``"sky"`` key gives the data variable to size against and whose
+        optional ``"mask"`` key gives the mask data variable.
 
     Returns:
     --------
-    mask_sum: int
-        The sum of the mask values in the image.
+    mask_sum: numpy.ndarray
+        Sum of valid (unmasked) pixels per ``(time, frequency, polarization)``
+        plane.
     """
 
-    # maskname = image_xds[dv].active_mask
-    mask_name = "MASK_" + dv  # need to move to using data_groups
+    data_group = image_xds.attrs["data_groups"][data_group_name]
+    sky_name = data_group["sky"]
+    spatial_dims = image_xds[sky_name].dims[-2:]
+    mask_name = data_group.get("mask", None)
 
-    if mask_name in image_xds:
-        mask_xds = image_xds[mask_name]
-        mask_sum = int(mask_xds.sum().values)
+    if mask_name is not None and mask_name in image_xds:
+        mask_sum = image_xds[mask_name].sum(dim=spatial_dims).values
     else:
-        # No mask present = all pixels valid
-        mask_sum = int(np.prod(image_xds[dv].shape[-2:]))
+        # No mask present = all pixels valid, on every plane
+        n_pixels = int(np.prod(image_xds[sky_name].shape[-2:]))
+        plane_shape = image_xds[sky_name].shape[:-2]
+        mask_sum = np.full(plane_shape, n_pixels, dtype=int)
 
     return mask_sum
 
 
 def image_peak_residual(
-    image_xds, per_plane_stats=False, use_mask=True, dv="SKY_RESIDUAL"
+    image_xds, data_group_name, per_plane_stats=False, use_mask=True, dv="SKY_RESIDUAL"
 ):
     """
     Compute the peak residual of an image, optionally per plane.
@@ -46,7 +51,11 @@ def image_peak_residual(
     Parameters:
     -----------
     image_xds: xarray.Dataset
-        The image dataset with dimensions (y, x) or (time, frequency, polarization, y, x).
+        The image dataset with dimensions (time, frequency, polarization, l, m).
+    data_group_name: str
+        Name of the entry in ``image_xds.attrs["data_groups"]`` whose
+        optional ``"mask"`` key gives the mask data variable, used when
+        ``use_mask`` is True.
     per_plane_stats: bool
         If True, compute peak residual for each (time, frequency, polarization) plane.
         If False, compute peak residual for the entire image across all planes.
@@ -67,8 +76,8 @@ def image_peak_residual(
 
     # Apply the mask if requested
     if use_mask:
-        mask_name = "MASK_" + dv
-        if mask_name in image_xds:
+        mask_name = image_xds.attrs["data_groups"][data_group_name].get("mask", None)
+        if mask_name is not None and mask_name in image_xds:
             mask_xds = image_xds[mask_name]
             image_xds = image_xds.where(mask_xds)
 

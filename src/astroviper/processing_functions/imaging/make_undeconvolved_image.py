@@ -11,7 +11,7 @@ def make_undeconvolved_image_single_field(
     img_xds,
     image_params,
     cgk_1D,
-    is_n_iter_0,
+    model_exists,
     ms_data_group_in_name="corrected",
     image_data_group_out_name="residual",
     processing_function_threads=1,
@@ -36,11 +36,14 @@ def make_undeconvolved_image_single_field(
     image_params : dict
         Image geometry and output coordinates: ``image_size``, ``cell_size``,
         ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
-        ``fft_padding`` gridding/FFT padding factor.
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
     cgk_1D : numpy.ndarray
         1-D prolate-spheroidal gridding convolution kernel.
-    is_n_iter_0 : bool
-        Accepted for call-site compatibility with the major-cycle loop;
+    model_exists : bool
+        Accepted for call-site compatibility with the imaging cycle loop;
         currently unused (the UV-sampling/PSF grid is built once in
         ``make_point_spread_function_single_field``).
     ms_data_group_in_name : str, optional
