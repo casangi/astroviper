@@ -1,4 +1,6 @@
-"""Unit tests for the primary-beam correction of the restored sky."""
+"""Unit tests for the primary beam correction of the restored sky, in both
+conventions (the model corrected before the restore step, the default, and the
+restored image divided as CASA pbcor does)."""
 
 import numpy as np
 import pytest
@@ -48,9 +50,62 @@ def _make_restored_image(sky_value=1.0, dtype=np.float64):
     return img_xds
 
 
+def _add_model_and_residual(img_xds, flux=2.0, source=(20, 8)):
+    """Model with one point source, zero residual and a clean beam fit, so that
+    the default convention can be applied to the image."""
+    shape = img_xds["SKY_RESTORED"].shape
+    dims = img_xds["SKY_RESTORED"].dims
+    dtype = img_xds["SKY_RESTORED"].dtype
+    model = np.zeros(shape, dtype=dtype)
+    model[0, 0, 0, source[0], source[1]] = flux
+    img_xds["SKY_MODEL"] = xr.DataArray(model, dims=dims)
+    img_xds["SKY_RESIDUAL"] = xr.DataArray(np.zeros(shape, dtype=dtype), dims=dims)
+    cell = 8.0 * ARCSEC
+    img_xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"] = xr.DataArray(
+        np.array([[[[6.0 * cell, 3.0 * cell, 0.4]]]]),
+        dims=("time", "frequency", "polarization", "beam_params"),
+    )
+    img_xds.attrs["data_groups"]["model"] = {"sky": "SKY_MODEL"}
+    img_xds.attrs["data_groups"]["residual"] = {
+        "sky": "SKY_RESIDUAL",
+        "primary_beam": "PRIMARY_BEAM",
+        "beam_fit_params_point_spread_function": "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
+    }
+    return img_xds
+
+
+def test_correct_then_restore_is_exact_for_a_point_source():
+    from astroviper.processing_functions.imaging.restore import restore_image
+
+    img_xds = _add_model_and_residual(_make_restored_image())
+    primary_beam = img_xds["PRIMARY_BEAM"].values
+    img_xds, return_df = correct_sky_by_primary_beam(img_xds)  # the default convention
+    corrected = img_xds["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values
+    inside = primary_beam >= 0.2
+    # the true sky (flux / P at the source) convolved with the clean beam
+    reference = _add_model_and_residual(
+        _make_restored_image(), flux=2.0 / primary_beam[0, 0, 0, 20, 8]
+    )
+    reference, _ = restore_image(reference)
+    expected = reference["SKY_RESTORED"].values
+    np.testing.assert_allclose(
+        corrected[inside], expected[inside], rtol=1e-9, atol=1e-12
+    )
+    assert np.isnan(corrected[~inside]).all()
+    assert "T_correct_sky_by_primary_beam" in return_df.columns
+
+
+def test_unknown_order_is_refused():
+    img_xds = _make_restored_image()
+    with pytest.raises(ValueError, match="primary_beam_correction_order"):
+        correct_sky_by_primary_beam(img_xds, primary_beam_correction_order="pbcor")
+
+
 def test_correct_sky_by_primary_beam_divides_and_blanks():
     img_xds = _make_restored_image()
-    img_xds, return_df = correct_sky_by_primary_beam(img_xds)
+    img_xds, return_df = correct_sky_by_primary_beam(
+        img_xds, primary_beam_correction_order="restore_then_correct"
+    )
 
     assert "SKY_RESTORED_PRIMARY_BEAM_CORRECTED" in img_xds.data_vars
     corrected = img_xds["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values
@@ -71,7 +126,11 @@ def test_correct_sky_by_primary_beam_divides_and_blanks():
 
 def test_correct_sky_by_primary_beam_limit_and_dtype():
     img_xds = _make_restored_image(sky_value=2.0, dtype=np.float32)
-    img_xds, _ = correct_sky_by_primary_beam(img_xds, primary_beam_limit=0.5)
+    img_xds, _ = correct_sky_by_primary_beam(
+        img_xds,
+        primary_beam_limit=0.5,
+        primary_beam_correction_order="restore_then_correct",
+    )
     corrected = img_xds["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"]
     assert corrected.dtype == np.float32
     primary_beam = img_xds["PRIMARY_BEAM"].values
@@ -84,4 +143,6 @@ def test_correct_sky_by_primary_beam_requires_primary_beam():
     img_xds = _make_restored_image()
     del img_xds.attrs["data_groups"]["restored"]["primary_beam"]
     with pytest.raises(AssertionError, match="primary_beam"):
-        correct_sky_by_primary_beam(img_xds)
+        correct_sky_by_primary_beam(
+            img_xds, primary_beam_correction_order="restore_then_correct"
+        )

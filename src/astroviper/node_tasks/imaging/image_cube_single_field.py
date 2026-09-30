@@ -463,6 +463,7 @@ def image_cube_single_field(
     image_data_variables_keep=None,
     restore=False,
     primary_beam_correction=False,
+    primary_beam_correction_order="correct_then_restore",
     psf_fitting_method="astroviper",
     memory_mode="in_memory",
     skunk_works=False,
@@ -637,11 +638,24 @@ def image_cube_single_field(
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
     primary_beam_correction : bool, optional
-        If ``True`` divide the restored sky by the (power) primary beam,
-        writing the ``sky_restored_primary_beam_corrected``
-        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable (CASA ``pbcor``);
-        pixels below the primary-beam cutoff are blanked with NaN.  Requires
+        If ``True`` write the primary beam corrected restored sky to the
+        ``sky_restored_primary_beam_corrected``
+        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable, in the convention
+        of ``primary_beam_correction_order``; pixels below the primary beam
+        cutoff (``primary_beam_limit``) are blanked with NaN.  Requires
         ``restore``.
+    primary_beam_correction_order : str, optional
+        Convention of the primary beam correction. ``"correct_then_restore"``
+        (default) divides the model and the residual by the (power) primary
+        beam ``P`` before the model is convolved with the clean beam ``B``:
+        ``(SKY_MODEL / P) * B + SKY_RESIDUAL / P``, which is exact for the
+        model part of the image. ``"restore_then_correct"`` divides the
+        restored image, ``SKY_RESTORED / P``, the convention of CASA
+        ``pbcor``; multiplication by ``P`` and convolution with ``B`` do not
+        commute, so it is exact only where the primary beam is flat across
+        the clean beam and puts antisymmetric lobes of several percent around
+        bright sources near the beam edge. Use it for comparisons with CASA
+        products.
     psf_fitting_method : str, optional
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
         ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``
@@ -925,6 +939,7 @@ def image_cube_single_field(
             image_data_variables_keep=image_data_variables_keep,
             restore=restore,
             primary_beam_correction=primary_beam_correction,
+            primary_beam_correction_order=primary_beam_correction_order,
             psf_fitting_method=psf_fitting_method,
             task_id=task_id,
         )

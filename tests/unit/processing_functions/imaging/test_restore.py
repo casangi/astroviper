@@ -366,3 +366,187 @@ class TestEllipticalGaussianUvTaper:
             elliptical_gaussian_uv_taper(u, v, 1e-5, 5e-6, 0.3),
             elliptical_gaussian_uv_taper(-u, -v, 1e-5, 5e-6, 0.3),
         )
+
+
+# ---------------------------------------------------------------------------
+# primary beam correction in the restore pass
+# ---------------------------------------------------------------------------
+
+
+def _with_primary_beam(xds, primary_beam_limit=0.2):
+    """Add a primary beam that falls off across the image to the residual group.
+
+    The beam power falls linearly from 1 at the centre to 0 at the corner, so
+    it crosses ``primary_beam_limit`` inside the image and varies across the
+    clean beam.
+    """
+    ny, nx = xds["SKY_RESIDUAL"].shape[-2:]
+    radius = np.hypot(*np.meshgrid(np.arange(ny) - ny // 2, np.arange(nx) - nx // 2))
+    power = np.clip(1.0 - radius / (0.75 * max(ny, nx)), 0.0, None)
+    shape = xds["SKY_RESIDUAL"].shape
+    xds["PRIMARY_BEAM"] = xr.DataArray(
+        np.broadcast_to(power, shape).astype(xds["SKY_RESIDUAL"].dtype).copy(),
+        dims=xds["SKY_RESIDUAL"].dims,
+    )
+    xds.attrs["data_groups"]["residual"]["primary_beam"] = "PRIMARY_BEAM"
+    return xds
+
+
+class TestPrimaryBeamCorrectionInRestore:
+    delta = 1.0e-3
+    beams = {(0, 0): (8.0 * delta, 4.0 * delta, 0.3)}
+
+    def _inputs(self, dtype=np.float32, seed=5):
+        rng = np.random.default_rng(seed)
+        residual = rng.standard_normal((1, 1, 2, 64, 64)).astype(dtype) * 0.01
+        model = np.zeros((1, 1, 2, 64, 64), dtype=dtype)
+        model[0, 0, :, 20, 44] = (
+            3.0  # off centre, where the primary beam has a gradient
+        )
+        return residual, model
+
+    def test_correct_then_restore_is_exact_for_the_model(self):
+        # A point source of flux F: the corrected image is F x B(x - x0)
+        # plus R / P, whatever the primary beam does across the clean beam.
+        residual, model = self._inputs()
+        xds = _with_primary_beam(
+            _make_restore_xds(beams=self.beams, residual=residual, model=model)
+        )
+        primary_beam = xds["PRIMARY_BEAM"].values
+        out, return_df = restore_image(
+            xds, primary_beam_correction_order="correct_then_restore"
+        )
+        corrected = out["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values
+        inside = primary_beam >= 0.2
+        # the true sky convolved with the beam: the restored image of the
+        # model divided by the primary beam at the source, with no residual
+        true_flux = model / np.where(inside, primary_beam, np.nan)
+        reference = restore_image(
+            _make_restore_xds(
+                beams=self.beams,
+                residual=np.zeros_like(residual),
+                model=np.nan_to_num(true_flux).astype(model.dtype),
+            )
+        )[0]["SKY_RESTORED"].values
+        expected = reference + residual / primary_beam
+        np.testing.assert_allclose(
+            corrected[inside], expected[inside], rtol=1e-5, atol=1e-6
+        )
+        assert np.isnan(corrected[~inside]).all()
+        assert out.attrs["data_groups"]["restored"]["sky_primary_beam_corrected"] == (
+            "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+        )
+        assert list(return_df.columns) == ["T_restore", "T_correct_sky_by_primary_beam"]
+        # the restored image itself is unchanged by the correction
+        plain = restore_image(
+            _make_restore_xds(beams=self.beams, residual=residual, model=model)
+        )[0]["SKY_RESTORED"].values
+        np.testing.assert_array_equal(out["SKY_RESTORED"].values, plain)
+
+    def test_restore_then_correct_divides_the_restored_image(self):
+        residual, model = self._inputs()
+        xds = _with_primary_beam(
+            _make_restore_xds(beams=self.beams, residual=residual, model=model)
+        )
+        primary_beam = xds["PRIMARY_BEAM"].values
+        out, _ = restore_image(
+            xds, primary_beam_correction_order="restore_then_correct"
+        )
+        corrected = out["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values
+        inside = primary_beam >= 0.2
+        expected = out["SKY_RESTORED"].values / primary_beam
+        np.testing.assert_array_equal(
+            corrected[inside], expected[inside].astype(corrected.dtype)
+        )
+        assert np.isnan(corrected[~inside]).all()
+
+    def test_the_two_conventions_agree_at_the_source_and_differ_beside_it(self):
+        residual, model = self._inputs()
+        residual[...] = 0.0
+        outs = {}
+        for order in ("correct_then_restore", "restore_then_correct"):
+            xds = _with_primary_beam(
+                _make_restore_xds(
+                    beams=self.beams, residual=residual.copy(), model=model.copy()
+                )
+            )
+            outs[order] = restore_image(xds, primary_beam_correction_order=order)[0][
+                "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"
+            ].values
+        first, second = outs["correct_then_restore"], outs["restore_then_correct"]
+        # exact at the source pixel in both conventions
+        np.testing.assert_allclose(
+            first[0, 0, 0, 20, 44], second[0, 0, 0, 20, 44], rtol=1e-6
+        )
+        # the CASA convention carries the primary beam gradient beside the source
+        assert not np.allclose(
+            first[0, 0, 0, 16:25, 40:49], second[0, 0, 0, 16:25, 40:49], rtol=1e-3
+        )
+
+    def test_consume_model_gives_the_same_corrected_image(self):
+        residual, model = self._inputs()
+        xds = _with_primary_beam(
+            _make_restore_xds(
+                beams=self.beams, residual=residual.copy(), model=model.copy()
+            )
+        )
+        reference = restore_image(
+            xds, primary_beam_correction_order="correct_then_restore"
+        )[0]
+        xds = _with_primary_beam(
+            _make_restore_xds(
+                beams=self.beams, residual=residual.copy(), model=model.copy()
+            )
+        )
+        consumed = restore_image(
+            xds,
+            consume_model=True,
+            primary_beam_correction_order="correct_then_restore",
+        )[0]
+        np.testing.assert_array_equal(
+            consumed["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values,
+            reference["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values,
+        )
+        assert "SKY_MODEL" not in consumed
+
+    def test_limit_dtype_and_missing_beam(self):
+        residual, model = self._inputs(dtype=np.float64)
+        xds = _with_primary_beam(
+            _make_restore_xds(
+                beams=self.beams, residual=residual, model=model, dtype=np.float64
+            )
+        )
+        out, _ = restore_image(
+            xds,
+            primary_beam_correction_order="correct_then_restore",
+            primary_beam_limit=0.6,
+        )
+        corrected = out["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"]
+        assert corrected.dtype == np.float64
+        assert np.isnan(corrected.values[xds["PRIMARY_BEAM"].values < 0.6]).all()
+        # no clean beam: the model is not restored and not convolved
+        residual, model = self._inputs()
+        xds = _with_primary_beam(
+            _make_restore_xds(
+                beams={(0, 0): (np.nan, np.nan, 0.0)}, residual=residual, model=model
+            )
+        )
+        out, _ = restore_image(
+            xds, primary_beam_correction_order="correct_then_restore"
+        )
+        primary_beam = xds["PRIMARY_BEAM"].values
+        inside = primary_beam >= 0.2
+        expected = (model + residual) / primary_beam
+        np.testing.assert_allclose(
+            out["SKY_RESTORED_PRIMARY_BEAM_CORRECTED"].values[inside],
+            expected[inside],
+            rtol=1e-6,
+        )
+
+    def test_unknown_order_is_refused(self):
+        residual, model = self._inputs()
+        xds = _with_primary_beam(
+            _make_restore_xds(beams=self.beams, residual=residual, model=model)
+        )
+        with pytest.raises(ValueError, match="primary_beam_correction_order"):
+            restore_image(xds, primary_beam_correction_order="divide")
