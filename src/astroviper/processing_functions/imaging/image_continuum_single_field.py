@@ -104,7 +104,7 @@ def imaging_preparation_continuum_single_field(
       required by later processing stages.
 
     No model visibility prediction, residual visibility calculation, global
-    reduction, inverse FFT, minor cycle, or restoration is performed here. Those
+    reduction, inverse FFT, model update, or restoration is performed here. Those
     operations are handled by later stages of the continuum imaging workflow.
 
     Parameters
@@ -307,15 +307,15 @@ def prepare_model_uv_continuum_single_field(
     fft_backend="pyfftw",
     image_data_group_name="model",
 ):
-    """Prepare the Fourier-domain continuum model for the next major cycle.
+    """Prepare the Fourier-domain continuum model for the next imaging cycle.
 
-    This function is called once after each continuum minor cycle. It converts the
+    This function is called once after each continuum model update. It converts the
     updated image-domain continuum model from the Stokes basis into the
     instrumental correlation basis and Fourier-transforms every Taylor term to
     produce the corresponding model visibility grids.
 
     The resulting Fourier-domain model is shared by all frequency-chunk map
-    workers during the subsequent major cycle. Each worker reconstructs the model
+    workers during the subsequent imaging cycle. Each worker reconstructs the model
     visibilities at its local frequencies and degrids them directly, avoiding
     repeated polarization transformations and FFTs on every worker.
 
@@ -359,7 +359,7 @@ def prepare_model_uv_continuum_single_field(
     Notes
     -----
     This function performs the expensive polarization transformation and Fourier
-    transform only once per major cycle. The resulting Fourier-domain model is
+    transform only once per imaging cycle. The resulting Fourier-domain model is
     reused by every distributed map task, substantially reducing the computational
     cost of continuum degridding.
     """
@@ -537,7 +537,7 @@ def make_mvc_taylor_normal_equation_contributions(
         ``(time, frequency, polarization, l, m)``.
     psf_cube : xarray.DataArray or None
         Channel PSF images with the same dimensions as ``residual_cube``. Use
-        ``None`` after the first major cycle.
+        ``None`` after the first imaging cycle.
     primary_beam_cube : xarray.DataArray
         Frequency-dependent primary beam with the same dimensions.
     residual_normalization : xarray.DataArray
@@ -974,7 +974,7 @@ def prepare_model_uv_mvc_single_field(
 
     The Taylor model uses the common effective primary-beam convention.  Before
     prediction this function evaluates the Taylor polynomial at each channel and
-    applies ``A_nu / Abar``, matching CASA's MVC major-cycle convention.
+    applies ``A_nu / Abar``, matching CASA's MVC imaging-cycle convention.
     """
 
     import numpy as np
@@ -1310,25 +1310,25 @@ def residual_update_continuum_single_field(
     task_id=0,
     pblimit=0.2,
 ):
-    """Perform one continuum major-cycle update for a single frequency chunk.
+    """Perform one continuum imaging-cycle update for a single frequency chunk.
 
     This function is the primary processing entry point executed by the continuum
     map node task. It performs the operations required to compute the chunk-local
     continuum products that are later accumulated by the GraphViper reduce stage.
 
-    During the first major cycle, the function first executes the one-time imaging
+    During the first imaging cycle, the function first executes the one-time imaging
     preparation for the frequency chunk before computing the initial residual
-    products. During subsequent major cycles, it reuses the existing imaging
+    products. During subsequent imaging cycles, it reuses the existing imaging
     geometry, updates the imaging weights when required, and computes a new
     residual using the globally prepared Fourier-domain continuum model.
 
     The residual-update stage predicts the model visibilities (except during the
-    first major cycle), subtracts them from the observed visibilities, grids the
+    first imaging cycle), subtracts them from the observed visibilities, grids the
     resulting residual visibilities into Taylor-weighted UV-domain products, and
     returns those products for global reduction. For MVC, the channel-resolved
     residual and first-cycle PSF grids are normalized and inverse transformed
     locally before being returned. MFS retains the globally reduced inverse-FFT
-    path. No minor cycle or restoration is performed here.
+    path. No model update or restoration is performed here.
 
     Parameters
     ----------
@@ -1379,11 +1379,11 @@ def residual_update_continuum_single_field(
         ``"recompute"``.
 
     is_n_iter_0 : bool, optional
-        Indicates whether this is the first major cycle.
+        Indicates whether this is the first imaging cycle.
 
     model_uv_xds : xarray.Dataset, optional
         Globally prepared Fourier-domain Taylor model used for degridding during
-        all major cycles after the first.
+        all imaging cycles after the first.
 
     task_id : int, optional
         Identifier of the current frequency chunk.
@@ -1656,6 +1656,56 @@ def residual_update_continuum_single_field(
 ###############################################################################
 
 
+def build_continuum_residual_imaging_dict(
+    img_xds, image_data_group_in_name, iteration_control_params
+):
+    """Present Taylor-zero residual statistics as one plane to the controller.
+
+    Continuum Högbom updates only Taylor term zero. Its fitted sidelobe has
+    dimensions (time, polarization), whereas the shared controller expects
+    (time, frequency, polarization). Build a temporary view with one frequency
+    plane, broadcasting masks and sidelobes by dimension name. The original
+    Taylor products and cube workflow are unchanged.
+    """
+    import xarray as xr
+
+    from astroviper.processing_functions.imaging.utils import (
+        build_residual_imaging_dict,
+    )
+
+    data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
+
+    def plane_zero(array):
+        selection = {
+            dim: 0
+            for dim in ("taylor_term", "psf_taylor_order", "frequency")
+            if dim in array.dims
+        }
+        return array.isel(selection, drop=True)
+
+    residual = plane_zero(img_xds[data_group["sky"]]).expand_dims(frequency=[0.0])
+    residual = residual.transpose("time", "frequency", "polarization", "l", "m")
+    plane_template = residual.isel(l=0, m=0, drop=True)
+    sidelobe_name = data_group.get(
+        "max_sidelobe_point_spread_function", "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
+    )
+    sidelobe = plane_zero(img_xds[sidelobe_name]).broadcast_like(plane_template)
+    sidelobe = sidelobe.transpose("time", "frequency", "polarization")
+    variables = {"RESIDUAL": residual, "SIDELOBE": sidelobe}
+    roles = {"sky": "RESIDUAL", "max_sidelobe_point_spread_function": "SIDELOBE"}
+    mask_name = data_group.get("mask")
+    if mask_name is not None and mask_name in img_xds:
+        mask = plane_zero(img_xds[mask_name]).broadcast_like(residual)
+        variables["MASK"] = mask.transpose(*residual.dims)
+        roles["mask"] = "MASK"
+    view = xr.Dataset(
+        variables, attrs={"data_groups": {image_data_group_in_name: roles}}
+    )
+    return build_residual_imaging_dict(
+        view, image_data_group_in_name, iteration_control_params
+    )
+
+
 @shares_param_docs
 def model_update_mtmfs_single_field(
     img_xds,
@@ -1666,11 +1716,11 @@ def model_update_mtmfs_single_field(
     image_data_group_in_name="residual",
     image_data_group_out_name="model",
 ):
-    """Perform one continuum minor-cycle model update.
+    """Perform one continuum model-update model update.
 
     This function implements the current continuum deconvolution backend used by
     the distributed MT-MFS imaging workflow. Until a native MT-MFS deconvolver is
-    available, the minor cycle is performed by temporarily projecting the
+    available, the model update is performed by temporarily projecting the
     continuum dataset onto a single-frequency cube representation and reusing the
     existing cube Högbom implementation.
 
@@ -1698,9 +1748,9 @@ def model_update_mtmfs_single_field(
     copy the updated model back into
     SKY_MODEL[taylor_term=0]
 
-    Only the zeroth Taylor coefficient is modified during the minor cycle.
+    Only the zeroth Taylor coefficient is modified during the model update.
     Higher-order Taylor model terms are intentionally left unchanged and are
-    updated indirectly through the subsequent major cycle.
+    updated indirectly through the subsequent imaging cycle.
 
     Parameters
     ----------
@@ -1715,11 +1765,12 @@ def model_update_mtmfs_single_field(
 
     deconvolve_params : dict
         Minor-cycle control parameters. These typically include entries such as
-        ``cycleniter``, ``cyclethreshold``, ``niter_per_plane``, and
-        ``cyclethreshold_per_plane``.
+        ``max_iter``, ``max_iter_per_cycle``, and ``threshold_per_cycle``.
+        The per-cycle limits and thresholds accept scalars or per-plane arrays,
+        using the same keys as the cube deconvolver.
 
     is_n_iter_0 : bool, optional
-        Indicates whether this is the first minor cycle.
+        Indicates whether this is the first model update.
 
     processing_function_threads : int, optional
         Number of threads supplied to the deconvolution backend.
@@ -1732,17 +1783,17 @@ def model_update_mtmfs_single_field(
 
     Returns
     -------
-    deconvolve_dict : ReturnDict
+    deconvolve_dict : ImagingDict
         Deconvolution statistics returned by the Högbom implementation.
 
     return_df : pandas.DataFrame
-        Timing information for the continuum minor cycle.
+        Timing information for the continuum model update.
 
     Notes
     -----
     This function is a compatibility layer that allows the continuum imaging
     pipeline to reuse the existing cube deconvolution backend. Although the
-    surrounding imaging algorithm is MT-MFS, the current minor cycle operates
+    surrounding imaging algorithm is MT-MFS, the current model update operates
     only on the zeroth Taylor coefficient. A future native MT-MFS deconvolver
     will replace this implementation."""
     import copy
@@ -1800,12 +1851,12 @@ def model_update_mtmfs_single_field(
     cube_deconvolve_params = copy.deepcopy(deconvolve_params)
 
     for parameter_name in (
-        "niter_per_plane",
-        "cyclethreshold_per_plane",
+        "max_iter_per_cycle",
+        "threshold_per_cycle",
     ):
         parameter_value = cube_deconvolve_params.get(parameter_name)
 
-        if parameter_value is None:
+        if parameter_value is None or np.ndim(parameter_value) == 0:
             continue
 
         parameter_array = np.asarray(parameter_value)
@@ -1836,7 +1887,7 @@ def model_update_mtmfs_single_field(
     if max_sidelobe_name not in img_xds:
         raise KeyError(
             f"{max_sidelobe_name} is required before running the "
-            "continuum minor cycle. It must be created by "
+            "continuum model update. It must be created by "
             "point_spread_function_gaussian_fit_continuum() during "
             "the first append node and restored from static_xds during "
             "later append nodes."
@@ -1997,15 +2048,15 @@ def model_update_mtmfs_single_field(
     # ------------------------------------------------------------------
     start = time.time()
 
-    from astroviper.processing_functions.imaging.model_update_cycle import (
-        model_update_cycle_cube_single_field,
+    from astroviper.processing_functions.imaging.model_update import (
+        model_update_cube_single_field,
     )
 
-    deconvolve_dict, hogbom_return_df = model_update_cycle_cube_single_field(
+    deconvolve_dict, hogbom_return_df = model_update_cube_single_field(
         hogbom_xds,
         deconvolver,
         cube_deconvolve_params,
-        is_n_iter_0,
+        model_exists=not is_n_iter_0,
         processing_function_threads=processing_function_threads,
         image_data_group_in_name=image_data_group_in_name,
         image_data_group_out_name=image_data_group_out_name,
@@ -2077,7 +2128,7 @@ def primary_beam_correct_restored_continuum(
     """PB-correct the restored Taylor-zero continuum image.
 
     Only the final restored reference-frequency intensity image is corrected.
-    The model, residual Taylor stack, higher Taylor terms, and minor-cycle
+    The model, residual Taylor stack, higher Taylor terms, and model-update
     calculations remain in the apparent-sky convention.
     """
     import numpy as np

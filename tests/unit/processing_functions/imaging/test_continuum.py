@@ -271,7 +271,8 @@ def test_primary_beam_correction_returns_restored_taylor_zero_only():
 def test_frequency_mapping_matches_unique_image_channels(visibility, image, expected):
     """Full and subset channel selections map to their unique image planes."""
     np.testing.assert_array_equal(
-        map_visibility_frequencies_to_image(visibility, image), expected
+        map_visibility_frequencies_to_image(visibility, image, matching="exact"),
+        expected,
     )
 
 
@@ -282,7 +283,7 @@ def test_frequency_mapping_matches_unique_image_channels(visibility, image, expe
 def test_frequency_mapping_rejects_missing_or_ambiguous_channels(visibility, image):
     """Missing and duplicate image frequencies cannot define a unique map."""
     with pytest.raises(ValueError, match="exactly one image frequency"):
-        map_visibility_frequencies_to_image(visibility, image)
+        map_visibility_frequencies_to_image(visibility, image, matching="exact")
 
 
 def test_mvc_grid_accumulates_child_into_full_image_frequency_axis(monkeypatch):
@@ -864,3 +865,55 @@ def test_shared_degridder_allocates_model_from_weights_without_observed_data(
     assert "VISIBILITY" not in ms
     assert ms.VISIBILITY_MODEL.dims == visibility_dims
     np.testing.assert_array_equal(ms.VISIBILITY_MODEL, 2.0)
+
+
+@pytest.mark.parametrize("with_mask", [False, True])
+def test_continuum_statistics_use_only_taylor_zero_and_preserve_input(with_mask):
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        build_continuum_residual_imaging_dict,
+    )
+    from astroviper.processing_functions.imaging.utils import (
+        ImagingDict,
+        IterationController,
+        get_calculate_cycle_controls,
+    )
+
+    residual = np.full((2, 3, 2, 3, 4), 1000.0)
+    peaks = np.array([[2.0, 3.0], [4.0, 5.0]])
+    residual[:, 0] = peaks[..., None, None]
+    roles = {"sky": "RESIDUAL", "max_sidelobe_point_spread_function": "SIDELOBE"}
+    image = xr.Dataset(
+        {
+            "RESIDUAL": (("time", "taylor_term", "polarization", "l", "m"), residual),
+            # Deliberately reversed axes: expansion must use dimension names.
+            "SIDELOBE": (("polarization", "time"), np.full((2, 2), 0.2)),
+        },
+        attrs={"data_groups": {"residual": roles}},
+    )
+    if with_mask:
+        mask = np.ones((3, 4), dtype=bool)
+        mask[0] = False
+        image["MASK"] = (("l", "m"), mask)
+        roles["mask"] = "MASK"
+    original = image.copy(deep=True)
+    params = {"gain": 0.1}
+    stats = build_continuum_residual_imaging_dict(image, "residual", params)
+    assert len(stats.data) == 4
+    for key, values in stats.data.items():
+        assert key.chan == 0
+        assert values["peakres"] == [peaks[key.time, key.pol]]
+        assert values["masksum"] == [8 if with_mask else 12]
+        assert values["max_psf_sidelobe"] == 0.2
+    controller = IterationController(max_iter=10, max_iter_per_cycle=3)
+    limits, thresholds = get_calculate_cycle_controls(
+        controller,
+        ImagingDict(),
+        image,
+        model_exists=False,
+        iteration_control_params=params,
+        residual_imaging_dict=stats,
+    )
+    assert limits.shape == (2, 1, 2)
+    np.testing.assert_array_equal(limits, 3)
+    np.testing.assert_allclose(thresholds[:, 0], 0.2 * peaks)
+    xr.testing.assert_identical(image, original)

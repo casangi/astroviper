@@ -25,21 +25,21 @@ def residual_cycle_continuum_single_field(
 ):
     """Calculate the partition-local continuum residual Taylor products.
 
-    This function performs one continuum major-cycle residual update for a single
-    visibility partition. During the first major cycle it directly grids the
+    This function performs one continuum imaging-cycle residual update for a single
+    visibility partition. During the first imaging cycle it directly grids the
     observed visibilities into Taylor-weighted residual UV grids. During later
-    major cycles it first predicts the current sky model from the globally prepared
+    imaging cycles it first predicts the current sky model from the globally prepared
     Fourier-domain Taylor model, forms residual visibilities, and then grids those
     residuals.
 
     The processing-set partition is expected to already contain prepared imaging
-    weights. These are calculated before entering the continuum major-cycle loop
-    and are reused throughout all subsequent major cycles.
+    weights. These are calculated before entering the continuum imaging-cycle loop
+    and are reused throughout all subsequent imaging cycles.
 
     The function performs the following operations:
 
     * create the gridding convolution kernel;
-    * (later major cycles only)
+    * (later imaging cycles only)
         * reconstruct channel-dependent model visibility grids from the Fourier
           Taylor model;
         * degrid the model into predicted visibilities;
@@ -48,7 +48,7 @@ def residual_cycle_continuum_single_field(
     * inverse Fourier-transform and normalize the local Taylor products.
 
     The resulting Taylor residual images remain partition-local and are later
-    combined by the distributed reduction stage. No global reduction, minor cycle,
+    combined by the distributed reduction stage. No global reduction, model update,
     restoration, or Gaussian PSF fitting is performed here.
 
     Parameters
@@ -60,11 +60,11 @@ def residual_cycle_continuum_single_field(
         Continuum image dataset containing the partition-local static products.
     model_uv_xds : xarray.Dataset
         Globally prepared Fourier-domain Taylor model. This is only used after the
-        first major cycle.
+        first imaging cycle.
     image_params : dict
         Image geometry and continuum imaging parameters.
     is_n_iter_0 : bool
-        True for the first major cycle, in which no model prediction is required.
+        True for the first imaging cycle, in which no model prediction is required.
     processing_set_data_group_name : str, optional
         Processing-set data group containing the observed visibilities.
     instrument_polarization_basis : str, optional
@@ -94,7 +94,7 @@ def residual_cycle_continuum_single_field(
         Image data group receiving the residual Taylor products.
     last_residual_cycle : bool, optional
         Indicates whether this is the final residual calculation after the last
-        minor cycle.
+        model update.
 
     Returns
     -------
@@ -109,7 +109,7 @@ def residual_cycle_continuum_single_field(
     This function operates entirely on one visibility partition. The globally
     reduced Taylor residuals are produced later by the distributed reduction
     stage, after which the inverse FFT, Stokes conversion, normalization, and
-    minor-cycle processing are performed."""
+    model-update processing are performed."""
     import time
 
     import numpy as np
@@ -121,7 +121,7 @@ def residual_cycle_continuum_single_field(
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
         prepare_model_uv_mvc_single_field,
     )
-    from astroviper.processing_functions.imaging.residual_cycle import (
+    from astroviper.processing_functions.imaging.residual_update import (
         calculate_residual_visibilities,
         make_visibility_model_single_field,
     )
@@ -164,7 +164,7 @@ def residual_cycle_continuum_single_field(
     T_residual_vis = 0.0
 
     # ------------------------------------------------------------
-    # Later major cycles:
+    # Later imaging cycles:
     # predict the current model and form residual visibilities.
     # ------------------------------------------------------------
     if not is_n_iter_0:
@@ -382,7 +382,7 @@ def make_visibility_model_continuum_single_field(
 ):
     """Predict channel-dependent model visibilities from a Fourier Taylor model.
 
-    The continuum major cycle maintains the sky model as Fourier-transformed Taylor
+    The continuum imaging cycle maintains the sky model as Fourier-transformed Taylor
     coefficients rather than frequency images. This function reconstructs the model
     visibility grid at the actual observing frequencies of one processing-set
     partition and degrids that model into predicted visibilities.
@@ -402,7 +402,7 @@ def make_visibility_model_continuum_single_field(
 
     This reconstruction is repeated independently for every visibility partition,
     whereas the Fourier Taylor model itself is prepared only once after each global
-    minor-cycle update.
+    model-update update.
 
     Parameters
     ----------
@@ -442,7 +442,7 @@ def make_visibility_model_continuum_single_field(
     prediction through the cube processing API.
 
     The Fourier-domain Taylor model is prepared only once after each global
-    continuum minor cycle. Consequently, this function performs only the spectral
+    continuum model update. Consequently, this function performs only the spectral
     reconstruction and degridding required for the current visibility partition.
     """
     import numpy as np

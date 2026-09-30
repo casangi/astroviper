@@ -370,6 +370,16 @@ def make_point_spread_function_mvc_single_field(
         add_uv_sampling_grid_single_field,
     )
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        map_visibility_frequencies_to_image,
+    )
+
+    # MVC retains a separate plane for each visibility frequency. Validate
+    # that contract before calling the shared cube PSF gridder.
+    for ms_xdt in ps_xdt.values():
+        map_visibility_frequencies_to_image(
+            ms_xdt.frequency.values, img_xds.frequency.values, matching="exact"
+        )
 
     if complex_dtype is None:
         complex_dtype = np.complex128

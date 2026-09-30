@@ -21,7 +21,7 @@ template<typename T>
 void clean(T* limage, T* limagestep, const T* lpsf,
            int domask, const bool* lmask, int nx, int ny,
            int xbeg, int xend, int ybeg, int yend,
-           int niter, int siter, int& iter, T gain, T thres,
+           int max_iter_remaining, int siter, int& iter, T gain, T thres,
            T cspeedup,
            std::function<void(int, int, int, T)> msgput,
            std::function<void(int&)> stopnow);
@@ -58,7 +58,7 @@ void clean(T* limage, T* limagestep, const T* lpsf,
  * @param ny image height
  * @param nx image width
  * @param xbeg,xend,ybeg,yend per-plane clean box (0-based, exclusive upper)
- * @param niter per-plane maximum iterations; flat array of length
+ * @param max_iter_remaining per-plane maximum iterations; flat array of length
  *              nt*nf*np_img in (t, f, p) C-order (iteration control is
  *              independent for every time/frequency/polarization plane)
  * @param gain clean loop gain
@@ -75,7 +75,7 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
                 int nt, int nf, int np_img, int np_psf,
                 int ny, int nx,
                 int xbeg, int xend, int ybeg, int yend,
-                const int* niter, T gain, const T* thres, T cspeedup,
+                const int* max_iter_remaining, T gain, const T* thres, T cspeedup,
                 int processing_function_threads, int* iter_out);
 
 /**
@@ -98,7 +98,7 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
                 int nt, int nf, int np_img, int np_psf,
                 int ny, int nx,
                 int xbeg, int xend, int ybeg, int yend,
-                const int* niter, T gain, const T* thres, T cspeedup,
+                const int* max_iter_remaining, T gain, const T* thres, T cspeedup,
                 int processing_function_threads, int* iter_out);
 
 // Explicit template instantiation declarations
@@ -111,7 +111,7 @@ extern template void maximg<double>(const double* limagestep, int domask, const 
 extern template void clean<float>(float* limage, float* limagestep, const float* lpsf,
                                  int domask, const bool* lmask, int nx, int ny,
                                  int xbeg, int xend, int ybeg, int yend,
-                                 int niter, int siter, int& iter, float gain, float thres,
+                                 int max_iter_remaining, int siter, int& iter, float gain, float thres,
                                  float cspeedup,
                                  std::function<void(int, int, int, float)> msgput,
                                  std::function<void(int&)> stopnow);
@@ -119,7 +119,7 @@ extern template void clean<float>(float* limage, float* limagestep, const float*
 extern template void clean<double>(double* limage, double* limagestep, const double* lpsf,
                                   int domask, const bool* lmask, int nx, int ny,
                                   int xbeg, int xend, int ybeg, int yend,
-                                  int niter, int siter, int& iter, double gain, double thres,
+                                  int max_iter_remaining, int siter, int& iter, double gain, double thres,
                                   double cspeedup,
                                   std::function<void(int, int, int, double)> msgput,
                                   std::function<void(int&)> stopnow);
@@ -130,7 +130,7 @@ extern template void clean_cube<float>(float* residual_cube, float* model_cube,
                                        int nt, int nf, int np_img, int np_psf,
                                        int ny, int nx,
                                        int xbeg, int xend, int ybeg, int yend,
-                                       const int* niter, float gain, const float* thres, float cspeedup,
+                                       const int* max_iter_remaining, float gain, const float* thres, float cspeedup,
                                        int processing_function_threads, int* iter_out);
 
 extern template void clean_cube<double>(double* residual_cube, double* model_cube,
@@ -139,7 +139,7 @@ extern template void clean_cube<double>(double* residual_cube, double* model_cub
                                         int nt, int nf, int np_img, int np_psf,
                                         int ny, int nx,
                                         int xbeg, int xend, int ybeg, int yend,
-                                        const int* niter, double gain, const double* thres, double cspeedup,
+                                        const int* max_iter_remaining, double gain, const double* thres, double cspeedup,
                                         int processing_function_threads, int* iter_out);
 
 extern template void clean_cube_many_threads<float>(float* residual_cube, float* model_cube,
@@ -148,7 +148,7 @@ extern template void clean_cube_many_threads<float>(float* residual_cube, float*
                                        int nt, int nf, int np_img, int np_psf,
                                        int ny, int nx,
                                        int xbeg, int xend, int ybeg, int yend,
-                                       const int* niter, float gain, const float* thres, float cspeedup,
+                                       const int* max_iter_remaining, float gain, const float* thres, float cspeedup,
                                        int processing_function_threads, int* iter_out);
 
 extern template void clean_cube_many_threads<double>(double* residual_cube, double* model_cube,
@@ -157,7 +157,7 @@ extern template void clean_cube_many_threads<double>(double* residual_cube, doub
                                         int nt, int nf, int np_img, int np_psf,
                                         int ny, int nx,
                                         int xbeg, int xend, int ybeg, int yend,
-                                        const int* niter, double gain, const double* thres, double cspeedup,
+                                        const int* max_iter_remaining, double gain, const double* thres, double cspeedup,
                                         int processing_function_threads, int* iter_out);
 
 } // namespace hclean

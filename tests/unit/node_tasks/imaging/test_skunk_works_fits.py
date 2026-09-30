@@ -219,11 +219,35 @@ def test_non_consecutive_stokes_raises(tmp_path):
         )
 
 
-def test_non_uniform_frequency_raises(tmp_path):
-    with pytest.raises(ValueError, match="not uniformly spaced"):
+def test_non_uniform_frequency_approximated(tmp_path):
+    """A concatenated-SPW-style axis gets the uniform FREQ axis through the
+    first/last channel centers plus a HISTORY note (a linear FITS axis cannot
+    hold the true centers); the note stays out of XRADIO's user attrs."""
+    from astropy.io import fits
+    from xradio.image import open_image
+
+    freqs = np.concatenate([FREQS, 2e7 + FREQS])  # two "SPWs" 20 MHz apart
+    paths = create_empty_fits_images(
+        str(tmp_path / "img.fits"),
+        _empty_image(frequency_coords=freqs),
+        ["sky_residual"],
+    )
+    header = fits.getheader(paths["sky_residual"])
+    cdelt = (freqs[-1] - freqs[0]) / (freqs.size - 1)
+    assert header["CRVAL4"] == freqs[0]
+    assert np.isclose(header["CDELT4"], cdelt, rtol=1e-12)
+    assert header["CRPIX4"] == 1.0
+    assert any("non-uniform" in card for card in header["HISTORY"])
+    xds = open_image({"sky": paths["sky_residual"]})
+    assert np.allclose(xds.frequency.values, freqs[0] + cdelt * np.arange(freqs.size))
+    assert "history" not in xds.attrs.get("user", {})
+
+
+def test_zero_span_frequency_raises(tmp_path):
+    with pytest.raises(ValueError, match="zero overall span"):
         create_empty_fits_images(
             str(tmp_path / "img.fits"),
-            _empty_image(frequency_coords=[1e9, 2e9, 4e9]),
+            _empty_image(frequency_coords=[1e9, 1e9]),
             ["sky_residual"],
         )
 

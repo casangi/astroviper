@@ -485,7 +485,7 @@ def _graph_timing_record(stage, graph_result, graph_timings):
 
     # The application-wide stream needs only scalar timing and worker identity.
     # Retain sampled CPU/memory/I/O series in the historical final-graph frame
-    # instead of multiplying their memory cost by every major cycle.
+    # instead of multiplying their memory cost by every imaging cycle.
     timing_node_tasks = timing_node_tasks.drop(
         columns=[
             "time_seconds",
@@ -550,7 +550,7 @@ def compute_continuum_graph(
      node_task_data_mapping
          Mapping between processing-set coordinates and map-task coordinates.
      cycle_input_params : dict
-         Parameters forwarded to each residual major-cycle map task.
+         Parameters forwarded to each residual imaging-cycle map task.
      reduce_input_params : dict
          Parameters forwarded to :func:`combine_continuum_chunks`.
      disk_chunk_sizes : dict or None
@@ -621,7 +621,7 @@ def compute_continuum_graph(
         n_batch=reduce_n_batch,
     )
 
-    # Append node: Either minor cycle or finalization
+    # Append node: Either model update or finalization
     if append_node is not None:
         viper_graph = append(
             viper_graph,
@@ -1089,7 +1089,7 @@ def combine_continuum_chunks(input_data, input_params):
     ``UV_SAMPLING_NORMALIZATION``
         ``(time, psf_taylor_order, polarization)``.
 
-    MVC supplies a mode-specific additive list. Every major cycle reduces
+    MVC supplies a mode-specific additive list. Every imaging cycle reduces
     ``MVC_RESIDUAL_TAYLOR_NUMERATOR`` and ``MVC_RESIDUAL_WEIGHT_SUM``; the
     first cycle additionally reduces ``MVC_PSF_TAYLOR_NUMERATOR``,
     ``MVC_PSF_WEIGHT_SUM``, and ``MVC_PRIMARY_BEAM_WEIGHTED_SUM``. None of
@@ -1158,7 +1158,7 @@ def combine_continuum_chunks(input_data, input_params):
     import xarray as xr
 
     from astroviper.processing_functions.imaging.utils.iteration_control import (
-        merge_return_dicts,
+        merge_imaging_dicts,
     )
 
     if input_params is None:
@@ -1509,7 +1509,7 @@ def combine_continuum_chunks(input_data, input_params):
         if "deconvolution" in result:
             deconvolution_dicts.append(result["deconvolution"])
 
-        # Leaf result from a first-major-cycle map task.
+        # Leaf result from a first-imaging-cycle map task.
         #
         # Check for weight_datasets rather than task_id because
         # ordinary map tasks may also carry a task_id.
@@ -1759,13 +1759,15 @@ def combine_continuum_chunks(input_data, input_params):
     combined_image.attrs["continuum_additive_variables"] = list(additive_variables)
 
     if deconvolution_dicts:
-        combined_deconvolution = merge_return_dicts(deconvolution_dicts)
+        combined_deconvolution = merge_imaging_dicts(deconvolution_dicts)
     else:
         # Keep the output schema stable even when no input supplied
         # deconvolution metadata.
-        from astroviper.processing_functions.imaging.utils.return_dict import ReturnDict
+        from astroviper.processing_functions.imaging.utils.imaging_dict import (
+            ImagingDict,
+        )
 
-        combined_deconvolution = ReturnDict()
+        combined_deconvolution = ImagingDict()
 
     return_dict = {
         "image": combined_image,
@@ -2630,7 +2632,8 @@ def image_continuum_single_field(
     mpi_cluster_setup: dict[str, Any] | None = None,
     reduce_mode: str = "tree",
     reduce_n_batch: int = 2,
-    output_shard_channels: int | None = None,
+    image_sharding: dict[str, int] | None = None,
+    image_chunking: dict[str, int] | None = None,
     task_time_kill_switch_seconds: float | None = None,
     monitor_resources_seconds: float | None = None,
 ) -> dict:
@@ -2650,7 +2653,7 @@ def image_continuum_single_field(
         - grid Taylor residuals
         - reduce across frequency partitions
         - inverse FFT
-        - minor cycle
+        - model update
 
     Finalization
         - final residual image
@@ -2658,61 +2661,86 @@ def image_continuum_single_field(
         - write products
 
     Unlike cube imaging, FFTs are performed only once after each
-    minor cycle. Workers operate directly on UV-domain Taylor grids.
+    model update. Workers operate directly on UV-domain Taylor grids.
     The current Taylor-zero compatibility minor loop accepts only
     ``deconvolver="hogbom"`` and uses the shared C++ Högbom implementation.
 
     Parameters
     ----------
     iteration_control_params : dict
-        CLEAN minor/major-cycle iteration controls, matching the meaning of the
-        corresponding CASA ``tclean`` parameters. Iteration control is performed
-        **independently per** ``(time, frequency, polarization)`` **plane**: each
-        plane carries its own iteration budget and stopping thresholds, and the
-        major-cycle loop continues until *every* selected plane has stopped --
-        the one deliberate difference from CASA, whose ``niter`` budget is global
-        across the image. Keys:
+        CLEAN iteration controls. An **imaging cycle** (below simply a cycle)
+        is one **residual update** (degrid the model, form residual
+        visibilities, grid and inverse FFT them into the residual image)
+        followed by one **model update** (deconvolve the residual image into
+        the sky model). Every limit and threshold is applied independently to
+        each ``(time, frequency, polarization)`` plane: a plane stops when it
+        meets its own criterion. The imaging cycle loop runs separately for
+        every frequency channel (the node task images one channel at a time),
+        so a channel's cycles continue until all of its (time, polarization)
+        planes have stopped, and a channel that has stopped does no further
+        residual updates while the others carry on. The CASA ``tclean``
+        equivalent is given in brackets. Keys:
 
-        - ``niter`` : Maximum number of minor-cycle CLEAN iterations (flux
-          components) per plane, summed over all major cycles. A plane stops once
-          it has spent this budget; ``niter=0`` makes only the dirty image (no
-          deconvolution).
-        - ``nmajor`` : Maximum number of deconvolving major cycles (each a
-          residual update followed by a minor cycle). ``nmajor=N`` performs ``N``
-          deconvolutions -- the dirty image is computed inside the first such
-          cycle, matching CASA's ``nmajor`` -- and ``nmajor=-1`` removes the
-          major-cycle limit. Shared across planes (not tracked per plane).
-        - ``threshold`` : Absolute stopping threshold, given as a float in Jy. A
-          plane stops when its peak residual inside the clean mask falls to or
-          below ``threshold``; the value is also a hard floor on the
-          per-minor-cycle ``cyclethreshold`` (below). ``threshold=0`` disables
-          the absolute stop.
-        - ``primary_beam_limit`` : Primary-beam mask cutoff as a fraction of the
-          peak primary beam, in ``[0, 1]`` (the analogue of CASA's ``pblimit`` /
-          ``pbmask``). Pixels where the primary beam is below this fraction are
-          excluded from cleaning. A masking cutoff, distinct from ``threshold``.
-        - ``gain`` : CLEAN loop gain -- the fraction of the selected peak flux
-          subtracted from the residual image each minor iteration
-          (``0 < gain <= 1``).
-        - ``cyclefactor`` : Scaling applied to the largest-magnitude PSF
-          sidelobe after subtracting the fitted Gaussian main beam. Both
-          positive and negative sidelobes constrain the minor-cycle stopping
-          depth (see ``cyclethreshold`` below). Larger values trigger the next
-          major cycle sooner; smaller values clean deeper before each residual
+        - ``max_iter`` [CASA ``niter``] : Maximum number of deconvolution
+          iterations (flux components) per plane, summed over all cycles. A
+          plane stops once it has spent this budget. ``max_iter = 0`` makes
+          only the dirty image (no deconvolution). *Differs from CASA*: CASA's
+          ``niter`` is one budget for the whole image; here every plane gets
+          the full value, and no budget is shared or split between planes.
+        - ``max_cycles`` [CASA ``nmajor``] : Maximum number of cycles.
+          ``max_cycles = N`` performs ``N`` model updates; the dirty image is
+          made by the residual update of the first cycle, and a closing
+          residual update follows the last model update so that the written
+          residual reflects the final model. ``max_cycles = 0`` makes only the
+          dirty image; ``max_cycles = -1`` removes the limit. Counted per
+          frequency channel: a channel that converges early stops cycling while
+          the others continue.
+        - ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, as a
+          float in Jy. A plane stops when its peak residual inside the clean
+          mask falls to or below ``threshold``; the value is also a hard floor
+          on ``threshold_per_cycle``. ``threshold = 0`` disables the absolute
+          stop. *Differs from CASA*: a float in Jy only, no ``'1mJy'`` strings.
+        - ``threshold_sigma`` [CASA ``nsigma``] : Noise based stopping threshold
+          per plane, as a multiple of the plane's robust residual rms
+          (``1.4826 * MAD``). The effective threshold of a plane is
+          ``max(threshold, threshold_sigma * rms)`` and it floors
+          ``threshold_per_cycle`` in the same way. ``0`` disables it. Reserved:
+          accepted but not yet implemented.
+        - ``primary_beam_limit`` [CASA ``pblimit`` / ``pbmask``] : Primary beam
+          mask cutoff as a fraction of the peak primary beam, in ``[0, 1]``.
+          Pixels where the primary beam is below this fraction are excluded
+          from cleaning. A masking cutoff, distinct from ``threshold``.
+        - ``gain`` [CASA ``gain``] : CLEAN loop gain, the fraction of the
+          selected peak flux subtracted from the residual image at each
+          deconvolution iteration (``0 < gain <= 1``).
+        - ``psf_sidelobe_factor`` [CASA ``cyclefactor``] : Multiplier applied to
+          the measured peak PSF sidelobe level (``max_psf_sidelobe``) when
+          setting how deep one model update cleans (see
+          ``threshold_per_cycle``). Larger values trigger the next residual
+          update sooner; smaller values clean deeper before each residual
           update.
-        - ``cycleniter`` : Maximum number of minor-cycle iterations a plane may
-          run before a major cycle is triggered. ``cycleniter=-1`` lets the
-          adaptive ``cyclethreshold`` and Högbom stability checks govern the
-          depth instead; otherwise the count is clamped to never exceed the
-          plane's remaining ``niter``.
-        - ``minpsffraction`` : Lower clamp on the PSF fraction used to set the
-          minor-cycle threshold ``cyclethreshold = clamp(max_psf_sidelobe *
-          cyclefactor, minpsffraction, maxpsffraction) * peak_residual`` (then
-          floored at ``threshold``). Raising it limits how deep a single minor
-          cycle cleans.
-        - ``maxpsffraction`` : Upper clamp on that same PSF fraction; it
-          guarantees a minimum amount of cleaning per minor cycle even when the
-          PSF sidelobe level is high.
+        - ``max_iter_per_cycle`` [CASA ``cycleniter``] : Maximum number of
+          deconvolution iterations a plane may run in one cycle's model update
+          before the next residual update is triggered. ``max_iter_per_cycle =
+          -1`` lets the adaptive ``threshold_per_cycle`` govern the depth
+          instead; otherwise the count is clamped to never exceed the plane's
+          remaining ``max_iter``.
+        - ``min_psf_fraction`` [CASA ``minpsffraction``] : Lower clamp on the PSF
+          fraction defined below. Raising it limits how deep a single model
+          update cleans.
+        - ``max_psf_fraction`` [CASA ``maxpsffraction``] : Upper clamp on the
+          same PSF fraction; it guarantees a minimum amount of cleaning per
+          model update even when the PSF sidelobe level is high.
+
+        Derived per plane before each model update (not set by the caller):
+        ``psf_fraction = clamp(max_psf_sidelobe * psf_sidelobe_factor,
+        min_psf_fraction, max_psf_fraction)`` is the fraction of the current
+        peak residual down to which one model update cleans, and
+        ``threshold_per_cycle = max(psf_fraction * peak_residual, threshold)``
+        is the stopping threshold of that model update, where
+        ``peak_residual`` is the plane's peak residual inside the mask at the
+        start of the cycle. The deconvolver also receives the per-plane
+        ``max_iter_per_cycle``, ``min(max_iter_per_cycle, remaining max_iter)``.
     gridder : str, optional
         Currently ``"prolate_spheroidal"``. MFS and MVC dispatch visibility,
         PSF, and prediction work to the shared C++ grid/degrid kernels.
@@ -2720,6 +2748,15 @@ def image_continuum_single_field(
         Path to a NumPy ``.npy`` file containing one two-dimensional CLEAN mask.
         Its shape must equal ``image_params["image_size"]``. Finite values greater
         than 0.5 select pixels in every continuum residual plane.
+    image_sharding : dict, optional
+        Shard dimensions for the initial frequency-resolved Zarr arrays, e.g.
+        ``{"frequency": 2}``. Requires ``skunk_works=True``. Uses the same
+        dimension-based interface as cube imaging. Final continuum Taylor
+        products are written separately by the existing finalization path.
+    image_chunking : dict, optional
+        Chunk dimensions for the initial image arrays; for sharded arrays these
+        are the inner chunks. Unspecified dimensions use the task extent.
+        Chunk and shard sizes are validated by the shared image writer.
     weight_memory_mode : {"in_memory", "in_place"}, optional
         Storage policy for calculated continuum imaging weights. ``"in_memory"``
         returns task-local weights to the driver and embeds them in subsequent
@@ -2802,9 +2839,9 @@ def image_continuum_single_field(
     # the standard write path cannot safely write partial shards concurrently, so
     # creating sharded arrays without it would corrupt the output. Fail fast rather
     # than silently create sharded arrays a non-concurrent writer will clobber.
-    if output_shard_channels is not None and not skunk_works:
+    if image_sharding and not skunk_works:
         raise ValueError(
-            "output_shard_channels requires skunk_works=True (sharded output is "
+            "image_sharding requires skunk_works=True (sharded output is "
             "written by the concurrent direct-blob writer)."
         )
 
@@ -2913,7 +2950,8 @@ def image_continuum_single_field(
         compressor=compressor,
         double_precision=not single_precision_image,
         data_variable_definitions="imaging",
-        shard_channels=output_shard_channels,
+        image_sharding=image_sharding,
+        image_chunking=image_chunking,
     )
     timing_distributed_application["T_create_empty_data_variables"] = (
         time.time() - start
@@ -2955,18 +2993,20 @@ def image_continuum_single_field(
     input_params["fft_backend"] = fft_backend
     input_params["restore"] = restore
     input_params["skunk_works"] = skunk_works
-    input_params["output_shard_channels"] = output_shard_channels
+    input_params["image_sharding"] = image_sharding
+    input_params["image_chunking"] = image_chunking
     input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
 
     controller = IterationController(
-        niter=iteration_control_params["niter"],
-        nmajor=iteration_control_params["nmajor"],
+        max_iter=iteration_control_params["max_iter"],
+        max_cycles=iteration_control_params["max_cycles"],
+        threshold_sigma=iteration_control_params.get("threshold_sigma", 0.0),
         threshold=iteration_control_params["threshold"],
         gain=iteration_control_params["gain"],
-        cyclefactor=iteration_control_params["cyclefactor"],
-        minpsffraction=iteration_control_params["minpsffraction"],
-        maxpsffraction=iteration_control_params["maxpsffraction"],
-        cycleniter=iteration_control_params["cycleniter"],
+        psf_sidelobe_factor=iteration_control_params["psf_sidelobe_factor"],
+        min_psf_fraction=iteration_control_params["min_psf_fraction"],
+        max_psf_fraction=iteration_control_params["max_psf_fraction"],
+        max_iter_per_cycle=iteration_control_params["max_iter_per_cycle"],
     )
 
     start = time.time()
@@ -3084,7 +3124,7 @@ def image_continuum_single_field(
     # few shards that consecutive task_ids share. Derived from the on-disk shard
     # layout of the first kept variable, for any combination of sharded dims.
     task_priorities = None
-    if skunk_works and output_shard_channels:
+    if skunk_works and image_sharding:
         from astroviper.node_tasks.imaging.utils import compute_shard_task_priorities
 
         task_priorities = compute_shard_task_priorities(
@@ -3092,10 +3132,10 @@ def image_continuum_single_field(
         )
 
     # =============================================================
-    # Distributed major/minor-cycle loop
+    # Distributed major/model-update loop
     # =============================================================
 
-    # These timing entries accumulate over all major cycles
+    # These timing entries accumulate over all imaging cycles
     timing_distributed_application["T_create_map_reduce_append_graph"] = 0.0
 
     timing_distributed_application["T_generate_dask_graph"] = 0.0
@@ -3174,7 +3214,7 @@ def image_continuum_single_field(
                 weight_return_dict["weight_cache_mapping"] = None
                 weight_cache_is_active = True
         else:
-            # Local weights are calculated inside every first-major-cycle map
+            # Local weights are calculated inside every first-imaging-cycle map
             # task, returned as a cache, and reattached in later cycles.
             weight_return_dict = {"weight_cache_mapping": None}
             weight_graph_timings = {}
@@ -3201,27 +3241,27 @@ def image_continuum_single_field(
     # The IterationController is updated inside the append node. A nonzero
     # major stop code means that the CLEAN loop has converged or reached one
     # of its configured limits.
-    while controller.stopcode.major == 0:
+    while controller.stopcode.imaging == 0:
         n_major_cycles += 1
 
-        logger.debug(f"Starting continuum major cycle {n_major_cycles}.")
+        logger.debug(f"Starting continuum imaging cycle {n_major_cycles}.")
 
         # ---------------------------------------------------------
-        # Configure the distributed residual/major-cycle map tasks.
+        # Configure the distributed residual/imaging-cycle map tasks.
         # ---------------------------------------------------------
         cycle_input_params = dict(input_params)
 
         cycle_input_params["is_n_iter_0"] = is_n_iter_0
         cycle_input_params["restore"] = False
 
-        # Prepared once before the major-cycle loop.
+        # Prepared once before the imaging-cycle loop.
         cycle_input_params["weight_cache_mapping"] = weight_cache_mapping
 
         if not is_n_iter_0:
             if model_xds is None:
                 raise RuntimeError(
                     "No accumulated continuum model is available for "
-                    f"major cycle {n_major_cycles}."
+                    f"imaging cycle {n_major_cycles}."
                 )
 
             if specmode == "mfs" and model_uv_xds is None:
@@ -3230,7 +3270,7 @@ def image_continuum_single_field(
             if static_xds is None:
                 raise RuntimeError(
                     "No static continuum products are available for "
-                    f"major cycle {n_major_cycles}."
+                    f"imaging cycle {n_major_cycles}."
                 )
 
             cycle_input_params["model_uv_xds"] = model_uv_xds
@@ -3239,7 +3279,7 @@ def image_continuum_single_field(
             if specmode == "mvc":
                 cycle_input_params["model_xds"] = model_xds
 
-        # During the first major cycle the PSF and residual Taylor products
+        # During the first imaging cycle the PSF and residual Taylor products
         # are reduced. Later cycles only produce new residual products; the
         # static PSF/PB products are supplied by continuum_append_node.
         if specmode == "mfs":
@@ -3275,7 +3315,7 @@ def image_continuum_single_field(
                 }
 
         # ---------------------------------------------------------
-        # Configure the global continuum minor-cycle append node.
+        # Configure the global continuum model-update append node.
         # ---------------------------------------------------------
         append_input_params = {
             "iteration_control_params": iteration_control_params,
@@ -3309,14 +3349,14 @@ def image_continuum_single_field(
                 if observed_visibility_grid_xds is None:
                     raise RuntimeError(
                         "No cached observed-data MFS grid is available for "
-                        f"major cycle {n_major_cycles}."
+                        f"imaging cycle {n_major_cycles}."
                     )
                 append_input_params["observed_visibility_grid_xds"] = (
                     observed_visibility_grid_xds
                 )
 
         # ---------------------------------------------------------
-        # Execute one major cycle followed by one minor cycle.
+        # Execute one imaging cycle followed by one model update.
         # ---------------------------------------------------------
 
         # Call the graph with continuum_minor_cycle_node
@@ -3361,7 +3401,7 @@ def image_continuum_single_field(
             graph_timings,
         )
         record = _graph_timing_record(
-            f"major loop {n_major_cycles} (residual + minor cycle)",
+            f"major loop {n_major_cycles} (residual + model update)",
             cycle_return_dict,
             graph_timings,
         )
@@ -3447,7 +3487,7 @@ def image_continuum_single_field(
 
             if weight_cache_mapping is None:
                 raise RuntimeError(
-                    "The first major cycle did not return the locally calculated "
+                    "The first imaging cycle did not return the locally calculated "
                     "imaging-weight cache."
                 )
 
@@ -3456,7 +3496,7 @@ def image_continuum_single_field(
 
             if actual_task_ids != expected_task_ids:
                 raise RuntimeError(
-                    "The first major cycle returned an incomplete imaging-weight "
+                    "The first imaging cycle returned an incomplete imaging-weight "
                     "cache: "
                     f"expected={sorted(expected_task_ids)}, "
                     f"received={sorted(actual_task_ids)}."
@@ -3483,14 +3523,14 @@ def image_continuum_single_field(
             pb_cache_mapping = cycle_return_dict.get("pb_cache_mapping")
             if pb_cache_mapping is None:
                 raise RuntimeError(
-                    "The first MVC major cycle did not return "
+                    "The first MVC imaging cycle did not return "
                     "the frequency-dependent PB cache."
                 )
             expected_task_ids = {int(task_id) for task_id in node_task_data_mapping}
             actual_task_ids = {int(task_id) for task_id in pb_cache_mapping}
             if actual_task_ids != expected_task_ids:
                 raise RuntimeError(
-                    "The first MVC major cycle returned an incomplete primary-beam "
+                    "The first MVC imaging cycle returned an incomplete primary-beam "
                     "cache: "
                     f"expected={sorted(expected_task_ids)}, "
                     f"received={sorted(actual_task_ids)}."
@@ -3502,21 +3542,21 @@ def image_continuum_single_field(
         stopcode = cycle_return_dict["stopcode"]
         stopdesc = cycle_return_dict["stopdesc"]
 
-        if stopcode.major != 0:
+        if stopcode.imaging != 0:
             logger.debug(
-                "Continuum major/minor-cycle loop stopped after "
-                f"{n_major_cycles} major cycles: {stopdesc}"
+                "Continuum major/model-update loop stopped after "
+                f"{n_major_cycles} imaging cycles: {stopdesc}"
             )
             break
 
     if last_minor_return_dict is None:
         raise RuntimeError(
-            "The continuum major/minor-cycle loop completed without "
-            "executing a minor cycle."
+            "The continuum major/model-update loop completed without "
+            "executing a model update."
         )
 
     # =============================================================
-    # Final major cycle: recompute residual and restore
+    # Final imaging cycle: recompute residual and restore
     # =============================================================
 
     if specmode == "mfs":
@@ -3614,11 +3654,11 @@ def image_continuum_single_field(
 
     return_dict = final_return_dict
 
-    # The final major-cycle graph computes the final residual/restored image,
-    # while the accumulated model comes from all preceding minor cycles.
+    # The final imaging-cycle graph computes the final residual/restored image,
+    # while the accumulated model comes from all preceding model updates.
     return_dict["image"]["SKY_MODEL"] = model_xds["SKY_MODEL"].copy(deep=True)
 
-    # Convergence and deconvolution state come from the last minor cycle,
+    # Convergence and deconvolution state come from the last model update,
     # because the final graph contains no model-update append node.
     for key in (
         "controller",

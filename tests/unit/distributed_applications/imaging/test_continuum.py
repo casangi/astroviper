@@ -605,7 +605,8 @@ def _run_tw_hydra_continuum(
     single_precision_image=False,
     skunk_works=False,
     disk_chunk_sizes=None,
-    output_shard_channels=None,
+    image_sharding=None,
+    image_chunking=None,
     reduce_mode="tree",
     reduce_n_batch=2,
     cache_directory=None,
@@ -619,14 +620,14 @@ def _run_tw_hydra_continuum(
     """Run one public distributed continuum configuration on TW Hydra."""
     if iteration_control_params is None:
         iteration_control_params = {
-            "niter": 1,
-            "nmajor": 0,
+            "max_iter": 1,
+            "max_cycles": 0,
             "threshold": 1.0e30,
             "gain": 0.1,
-            "cyclefactor": 1.5,
-            "cycleniter": 1,
-            "minpsffraction": 0.05,
-            "maxpsffraction": 0.8,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": 1,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
         }
     with dask.config.set(scheduler="synchronous"):
         result = image_continuum_single_field(
@@ -664,7 +665,8 @@ def _run_tw_hydra_continuum(
             clear_cache=clear_cache,
             skunk_works=skunk_works,
             disk_chunk_sizes=disk_chunk_sizes,
-            output_shard_channels=output_shard_channels,
+            image_sharding=image_sharding,
+            image_chunking=image_chunking,
             vizualize_graph=False,
             compute_backend="dask",
             reduce_mode=reduce_mode,
@@ -955,7 +957,7 @@ def test_tw_hydra_distributed_continuum_is_partition_invariant(
 def test_tw_hydra_cleaning_runs_later_major_cycles_and_builds_a_model(
     tmp_path, tw_hydra_store, specmode
 ):
-    """An active threshold exercises prediction and cached later-cycle state."""
+    """A per-cycle cap exercises prediction and cached later-cycle state."""
     processing_set = open_processing_set(str(tw_hydra_store))
     result, image = _run_tw_hydra_continuum(
         tw_hydra_store,
@@ -965,14 +967,14 @@ def test_tw_hydra_cleaning_runs_later_major_cycles_and_builds_a_model(
         specmode,
         {"weighting": "natural", "weighting_scope": "local"},
         iteration_control_params={
-            "niter": 20,
-            "nmajor": 2,
+            "max_iter": 20,
+            "max_cycles": 2,
             "threshold": 0.001,
             "gain": 0.1,
-            "cyclefactor": 1.5,
-            "cycleniter": -1,
-            "minpsffraction": 0.05,
-            "maxpsffraction": 0.8,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": 5,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
         },
     )
 
@@ -1013,14 +1015,14 @@ def test_tw_hydra_cached_visibility_grids_match_recomputed_residuals(
     """Cached GWVobs reproduces visibility-domain subtraction through CLEAN."""
     processing_set = open_processing_set(str(tw_hydra_store))
     iteration_control_params = {
-        "niter": 20,
-        "nmajor": 2,
+        "max_iter": 20,
+        "max_cycles": 2,
         "threshold": 0.001,
         "gain": 0.1,
-        "cyclefactor": 1.5,
-        "cycleniter": 5,
-        "minpsffraction": 0.05,
-        "maxpsffraction": 0.8,
+        "psf_sidelobe_factor": 1.5,
+        "max_iter_per_cycle": 5,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
     }
     reference_result, reference = _run_tw_hydra_continuum(
         tw_hydra_store,
@@ -1078,14 +1080,14 @@ def test_tw_hydra_widebandpb_modes_preserve_later_mvc_major_cycles(
     """Both low-memory PB policies reproduce MVC prediction after real CLEAN."""
     processing_set = open_processing_set(str(tw_hydra_store))
     iteration_control_params = {
-        "niter": 20,
-        "nmajor": 2,
+        "max_iter": 20,
+        "max_cycles": 2,
         "threshold": 0.001,
         "gain": 0.1,
-        "cyclefactor": 1.5,
-        "cycleniter": -1,
-        "minpsffraction": 0.05,
-        "maxpsffraction": 0.8,
+        "psf_sidelobe_factor": 1.5,
+        "max_iter_per_cycle": -1,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
     }
     _, reference = _run_tw_hydra_continuum(
         tw_hydra_store,
@@ -1229,14 +1231,14 @@ def test_tw_hydra_mvc_global_cleaning_restoration_and_pbcor(tmp_path, tw_hydra_s
             "casa_weighting_implementation": True,
         },
         iteration_control_params={
-            "niter": 20,
-            "nmajor": 2,
+            "max_iter": 20,
+            "max_cycles": 2,
             "threshold": 0.001,
             "gain": 0.1,
-            "cyclefactor": 1.5,
-            "cycleniter": 5,
-            "minpsffraction": 0.05,
-            "maxpsffraction": 0.8,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": 5,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
         },
         image_param_overrides={
             "image_size": [96, 96],
@@ -1309,25 +1311,25 @@ def test_tw_hydra_remaining_weighting_schemes(
     assert np.isfinite(image.POINT_SPREAD_FUNCTION.values).all()
 
 
-def test_tw_hydra_direct_niter_zero_dirty_image(tmp_path, tw_hydra_store):
+def test_tw_hydra_direct_max_iter_zero_dirty_image(tmp_path, tw_hydra_store):
     """The public continuum application accepts a genuine zero-iteration run."""
     processing_set = open_processing_set(str(tw_hydra_store))
     _, image = _run_tw_hydra_continuum(
         tw_hydra_store,
-        tmp_path / "tw_hydra_niter_zero.img.zarr",
+        tmp_path / "tw_hydra_max_iter_zero.img.zarr",
         processing_set,
         2,
         "mfs",
         {"weighting": "natural", "weighting_scope": "local"},
         iteration_control_params={
-            "niter": 0,
-            "nmajor": 0,
+            "max_iter": 0,
+            "max_cycles": 0,
             "threshold": 0.0,
             "gain": 0.1,
-            "cyclefactor": 1.5,
-            "cycleniter": -1,
-            "minpsffraction": 0.05,
-            "maxpsffraction": 0.8,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": -1,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
         },
     )
 
@@ -1371,7 +1373,7 @@ def test_tw_hydra_alternate_reduction_and_sharded_direct_io(
         {"weighting": "natural", "weighting_scope": "local"},
         skunk_works=True,
         disk_chunk_sizes="Auto",
-        output_shard_channels=2,
+        image_sharding={"frequency": 2},
         reduce_mode=reduce_mode,
         reduce_n_batch=reduce_n_batch,
     )
@@ -1401,3 +1403,47 @@ def test_chunk_count_respects_override_and_calculates_when_absent(monkeypatch):
         )
         == 2
     )
+
+
+@pytest.mark.parametrize("sharding", [None, {"frequency": 2}])
+def test_continuum_initial_store_uses_shared_chunk_and_shard_api(
+    monkeypatch, tmp_path, tw_hydra_store, sharding
+):
+    """The public driver creates the requested on-disk layout before computing."""
+    import astroviper.utils.io as image_io
+
+    writer = image_io.create_empty_data_variables_on_disk
+    output = tmp_path / "layout.img.zarr"
+
+    class StoreCreated(Exception):
+        pass
+
+    def create_and_inspect(*args, **kwargs):
+        assert kwargs["image_sharding"] == sharding
+        assert kwargs["image_chunking"] == {"l": 1, "m": 1}
+        writer(*args, **kwargs)
+        array = zarr.open_array(str(output / "SKY_RESIDUAL"), mode="r")
+        assert array.chunks[-2:] == (1, 1)
+        assert array.chunks[1] == 1
+        if sharding:
+            assert array.shards[1] == 2
+        else:
+            assert array.shards is None
+        raise StoreCreated
+
+    monkeypatch.setattr(
+        image_io, "create_empty_data_variables_on_disk", create_and_inspect
+    )
+    processing_set = open_processing_set(str(tw_hydra_store))
+    with pytest.raises(StoreCreated):
+        _run_tw_hydra_continuum(
+            tw_hydra_store,
+            output,
+            processing_set,
+            5,
+            "mfs",
+            {"weighting": "natural", "weighting_scope": "local"},
+            skunk_works=True,
+            image_sharding=sharding,
+            image_chunking={"l": 1, "m": 1},
+        )

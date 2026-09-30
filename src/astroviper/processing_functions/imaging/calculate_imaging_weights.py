@@ -33,10 +33,12 @@ def _equalize_parallel_hand_weights(
     data_weight : numpy.ndarray
         Weight array with polarization on the last axis. For 2 polarizations, axes
         0 and 1 are treated as the parallel-hand pair (XX/YY or RR/LL). For 4
-        polarizations, axes 0 and 3 are treated as the parallel-hand pair and the
-        cross-hands are dropped (the current implementation propagates only the
-        parallel-hand equalization to the cross-hands; see Moellenbrock 2025
-        "A Small Complication"). For any other polarization count, the array is
+        polarizations, axes 0 and 3 are treated as the parallel-hand pair and
+        their equalized weight is used for all four correlations (see
+        Moellenbrock 2025 "A Small Complication"). A sample with a flagged
+        (``NaN``) weight in any correlation gets a ``NaN`` weight, so that it
+        is dropped for every correlation and all planes share one uv coverage
+        (no pseudo Stokes I). For any other polarization count, the array is
         returned unchanged.
     casa_weighting_implementation : bool
         If True, use the legacy CASA arithmetic-mean equalization. If False, use the
@@ -49,16 +51,21 @@ def _equalize_parallel_hand_weights(
         array unchanged if its polarization count is not 2 or 4.
     """
     n_pol = data_weight.shape[-1]
+    cross_flagged = None
     if n_pol == 2:
         w0, w1 = data_weight[..., 0], data_weight[..., 1]
     elif n_pol == 4:
         w0, w1 = data_weight[..., 0], data_weight[..., 3]
+        cross_flagged = np.isnan(data_weight[..., 1]) | np.isnan(data_weight[..., 2])
     else:
         return data_weight
     if casa_weighting_implementation:
         equalized = (w0 + w1) / 2
     else:
         equalized = (2 * w0 * w1) / (w0 + w1)
+    if cross_flagged is not None and cross_flagged.any():
+        # a flagged cross hand drops the sample for every correlation
+        equalized = np.where(cross_flagged, np.nan, equalized)
     return equalized[..., np.newaxis]
 
 
@@ -535,7 +542,7 @@ def grid_imaging_weight_density_continuum(
             delta_lm,
             processing_function_threads=processing_function_threads,
             truncate_uv_cells=True,
-            channel_map=(
+            frequency_map=(
                 np.zeros(ms_frequency.size, dtype=np.int64)
                 if collapse_frequency
                 else None
@@ -1160,6 +1167,7 @@ def calculate_imaging_weights(
     return_weight_density_grid: bool = False,
     processing_function_threads: int = 1,
     truncate_uv_cells: bool = False,
+    frequency_matching: str = "nearest",
 ) -> None | np.ndarray:
     """
     Calculate imaging weights for interferometric data.
@@ -1208,6 +1216,11 @@ def calculate_imaging_weights(
         truncation, matching CASA continuum weighting. If False, use the
         nearest-cell convention used by cube weighting.
 
+    frequency_matching : {"nearest", "exact"}, default "nearest"
+        Cube imaging assigns visibility frequencies to the nearest image
+        channel. Continuum callers use exact matching to preserve one-to-one
+        channel assignment. This policy is independent of UV-cell truncation.
+
     Returns
     -------
     weight_density_grid : numpy.ndarray, optional
@@ -1234,7 +1247,8 @@ def calculate_imaging_weights(
           equalized and the resulting weight is applied to all four
           polarizations. Cross-hand weights are not separately equalized in this
           implementation; see Moellenbrock 2025 "A Small Complication" for the
-          rationale and caveats.
+          rationale and caveats. A sample flagged in any of the four
+          correlations is dropped for all of them.
     - The equalization formula is selected by
       ``imaging_weights_params["casa_weighting_implementation"]`` (see Parameters
       above).
@@ -1271,6 +1285,9 @@ def calculate_imaging_weights(
     from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights import (
         degrid_imaging_weights,
         grid_imaging_weights,
+    )
+    from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+        map_visibility_frequencies_to_image,
     )
     from astroviper.utils.data_group_tools import (
         create_ps_xdt_data_groups_in_and_out,
@@ -1358,6 +1375,11 @@ def calculate_imaging_weights(
         )
 
         freq_chan = ms_xdt.frequency.values
+        # Same physical channel assignment as the visibility / PSF gridders,
+        # so the weight density is accumulated on the image channel planes.
+        frequency_map = map_visibility_frequencies_to_image(
+            freq_chan, img_xds.frequency.values, matching=frequency_matching
+        )
 
         grid_imaging_weights(
             weight_density_grid,
@@ -1369,6 +1391,7 @@ def calculate_imaging_weights(
             delta_lm,
             processing_function_threads=processing_function_threads,
             truncate_uv_cells=truncate_uv_cells,
+            frequency_map=frequency_map,
         )
 
     briggs_factors = calculate_briggs_params(
@@ -1385,6 +1408,9 @@ def calculate_imaging_weights(
         )
 
         freq_chan = ms_xdt.frequency.values
+        frequency_map = map_visibility_frequencies_to_image(
+            freq_chan, img_xds.frequency.values, matching=frequency_matching
+        )
 
         imaging_weights = degrid_imaging_weights(
             weight_density_grid,
@@ -1396,6 +1422,7 @@ def calculate_imaging_weights(
             delta_lm,
             processing_function_threads=processing_function_threads,
             truncate_uv_cells=truncate_uv_cells,
+            frequency_map=frequency_map,
         )
 
         n_pol = ms_xdt.sizes["polarization"]

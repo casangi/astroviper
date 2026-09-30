@@ -940,7 +940,7 @@ def residual_update_continuum_single_field(
     normalizes and inverse-transforms its exclusively owned channel grids,
     applies the channel primary-beam convention, and forms additive Taylor
     numerators locally. Polarization conversion, final global normalization,
-    the minor cycle, and restoration remain append operations.
+    the model update, and restoration remain append operations.
 
     The MFS dataset typically contains
 
@@ -950,7 +950,7 @@ def residual_update_continuum_single_field(
     - ``UV_SAMPLING_NORMALIZATION``;
 
     MVC instead returns ``MVC_RESIDUAL_TAYLOR_NUMERATOR`` and
-    ``MVC_RESIDUAL_WEIGHT_SUM``. During the first major cycle it also returns
+    ``MVC_RESIDUAL_WEIGHT_SUM``. During the first imaging cycle it also returns
     the additive Taylor PSF numerator, PSF weight sum, and weighted PB sum.
 
     Parameters
@@ -958,7 +958,10 @@ def residual_update_continuum_single_field(
     image_params : dict
         Image geometry and output coordinates: ``image_size``, ``cell_size``,
         ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
-        ``fft_padding`` gridding/FFT padding factor.
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
 
     imaging_weights_params : dict
         Weighting scheme configuration: ``weighting`` (``"natural"`` or
@@ -984,13 +987,18 @@ def residual_update_continuum_single_field(
 
     instrument_polarization_basis : str, optional
         Correlation (instrument) polarization basis the gridding is performed in:
-        ``"linear"`` (``XX``/``YY``) or ``"circular"`` (``RR``/``LL``). The
-        output image is always produced in the Stokes basis.
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
 
     single_precision_image : bool, optional
         If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
-        images) are single precision (``complex64`` / ``float32``) and the minor
-        cycle runs in single precision; the visibilities always stay double
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
         precision. If ``False`` the image-domain arrays are double precision.
 
     processing_function_threads : int, optional
@@ -1041,11 +1049,11 @@ def residual_update_continuum_single_field(
         Role-to-variable mapping used by the skunk-works loader.
 
     is_n_iter_0 : bool, optional
-        Indicates whether this is the first major cycle.
+        Indicates whether this is the first imaging cycle.
 
     model_uv_xds : xarray.Dataset, optional
         Precomputed Taylor-domain model visibility grids used for degridding.
-        Ignored during the first major cycle.
+        Ignored during the first imaging cycle.
 
     task_id : int, optional
         Identifier of the parallel chunk being processed.
@@ -1256,7 +1264,7 @@ def residual_update_continuum_single_field(
             )
         elif primary_beam_xds is None:
             raise ValueError(
-                "Later MVC major cycles with "
+                "Later MVC imaging cycles with "
                 "widebandpb_memory_mode='in_memory' require a task-local "
                 "primary_beam_xds."
             )
@@ -1318,7 +1326,7 @@ def residual_update_continuum_single_field(
             and observed_visibility_grid_xds is None
         ):
             raise ValueError(
-                "Later MVC major cycles with visibility_memory_mode='in_memory' "
+                "Later MVC imaging cycles with visibility_memory_mode='in_memory' "
                 "require a task-local observed_visibility_grid_xds."
             )
 
@@ -1387,7 +1395,7 @@ def residual_update_continuum_single_field(
         if "frequency" in img_xds.dims:
             img_xds = img_xds.drop_dims("frequency", errors="ignore")
 
-    # Preserve the first-cycle imaging weights for reuse by later major cycles.
+    # Preserve the first-cycle imaging weights for reuse by later imaging cycles.
     # They may have been loaded from the processing set or calculated in setup.
     weight_datasets = {}
 
@@ -2216,7 +2224,7 @@ def _prepare_continuum_image(
     psf_fit_return_df = None
 
     # ------------------------------------------------------------------
-    # First major cycle: form and cache global static products.
+    # First imaging cycle: form and cache global static products.
     # ------------------------------------------------------------------
 
     if initialize_static_products:
@@ -2360,7 +2368,7 @@ def _prepare_continuum_image(
         static_xds.attrs = dict(img_xds.attrs)
 
     # ------------------------------------------------------------------
-    # Later major cycles: reinstall static products.
+    # Later imaging cycles: reinstall static products.
     # ------------------------------------------------------------------
 
     else:
@@ -2614,7 +2622,7 @@ def continuum_minor_cycle_node(
     input_data,
     input_params,
 ):
-    """Prepare the globally reduced continuum image and execute one minor cycle.
+    """Prepare the globally reduced continuum image and execute one model update.
 
     This node is executed exactly once per outer cycle control after all frequency chunks
     have been combined by the GraphViper reduce stage. Unlike the map node tasks,
@@ -2631,7 +2639,7 @@ def continuum_minor_cycle_node(
        Stokes basis;
     4. installs the static continuum products (for example, the primary beam and
        fitted restoring beam parameters);
-    5. executes one continuum minor cycle, updating the sky model and producing the
+    5. executes one continuum model update, updating the sky model and producing the
        corresponding model increment;
     6. accumulates that increment into the persistent image-domain model and, for
        MFS, prepares its Fourier-domain Taylor grids for the next residual update.
@@ -2692,7 +2700,7 @@ def continuum_minor_cycle_node(
     model_update_input_params.pop("static_xds", None)
 
     # A residual-update reduce has no deconvolution work of its own, but keeps
-    # the result schema stable by returning an empty ReturnDict. Do not let
+    # the result schema stable by returning an empty ImagingDict. Do not let
     # that placeholder hide the history supplied by the previous model update.
     reduced_deconvolution = input_data.get("deconvolution")
     previous_deconvolution = input_params.get("deconvolution")
@@ -2704,7 +2712,7 @@ def continuum_minor_cycle_node(
     ):
         input_data["deconvolution"] = previous_deconvolution
 
-    # Preserve imaging weights collected during the first major-cycle reduce.
+    # Preserve imaging weights collected during the first imaging-cycle reduce.
     weight_cache_mapping = input_data.get("weight_cache_mapping")
     if weight_cache_mapping is None and "weight_datasets" in input_data:
         weight_cache_mapping = {
@@ -2764,7 +2772,7 @@ def continuum_finalize_node(
     input_data,
     input_params,
 ):
-    """Finalize the continuum imaging after the last major cycle.
+    """Finalize the continuum imaging after the last imaging cycle.
 
     This node is executed once after the final GraphViper reduce stage has
     completed. It converts the globally accumulated continuum products into the
@@ -2782,7 +2790,7 @@ def continuum_finalize_node(
        distributed application;
     5. removes intermediate products that are not requested in the final output.
 
-    Unlike the continuum minor-cycle node, this function performs no
+    Unlike the continuum model-update node, this function performs no
     deconvolution, no iteration-controller updates, and no distributed
     computation. It operates only on the single globally reduced continuum dataset
     produced by the final GraphViper reduce stage.
@@ -2896,7 +2904,7 @@ def model_update_continuum_single_field(
 
     This node is intended for the GraphViper append stage following the global
     reduce operation. It receives the globally accumulated continuum image
-    products, determines the minor-cycle parameters using the iteration
+    products, determines the model-update parameters using the iteration
     controller, executes one continuum model-update step, and returns the updated
     image dataset in memory.
 
@@ -2911,7 +2919,7 @@ def model_update_continuum_single_field(
     model_update_continuum_single_field
             │
             ├── updates the iteration controller
-            ├── determines the minor-cycle parameters
+            ├── determines the model-update parameters
             ├── calls model_update_cycle_mtmfs_single_field
             ├── updates the continuum sky model
             └── updates convergence information
@@ -2948,7 +2956,7 @@ def model_update_continuum_single_field(
             Number of threads passed to the model-update processing function.
 
         ``is_n_iter_0``
-            Whether this is the first major cycle. Defaults to ``True``.
+            Whether this is the first imaging cycle. Defaults to ``True``.
 
         ``controller``
             Existing :class:`IterationController`. If omitted, a new controller is
@@ -2983,12 +2991,13 @@ def model_update_continuum_single_field(
     import toolviper.utils.logger as logger
 
     from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        build_continuum_residual_imaging_dict,
         model_update_mtmfs_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (
-        ReturnDict,
+        ImagingDict,
         get_calculate_cycle_controls,
-        merge_return_dicts,
+        merge_imaging_dicts,
     )
 
     node_start = time.time()
@@ -3052,7 +3061,7 @@ def model_update_continuum_single_field(
     )
 
     if combined_deconvolve_dict is None:
-        combined_deconvolve_dict = ReturnDict()
+        combined_deconvolve_dict = ImagingDict()
 
     timing = {
         "T_iteration_control": 0.0,
@@ -3063,13 +3072,13 @@ def model_update_continuum_single_field(
     # A dirty-image request still passes through the append node so static
     # products and model state are prepared consistently, but it must not call
     # a deconvolver whose contract requires a positive iteration count.
-    if int(iteration_control_params["niter"]) == 0:
+    if int(iteration_control_params["max_iter"]) == 0:
         import xarray as xr
 
         from astroviper.processing_functions.imaging.utils.iteration_control import (
-            MAJOR_ITER_LIMIT,
-            MAJOR_STOPCODE_DESCRIPTIONS,
-            MINOR_CONTINUE,
+            IMAGING_MAX_ITER,
+            IMAGING_STOP_DESCRIPTIONS,
+            MODEL_UPDATE_CONTINUE,
             StopCode,
         )
 
@@ -3084,11 +3093,11 @@ def model_update_continuum_single_field(
             1,
             img_xds.sizes["polarization"],
         )
-        controller.niter[...] = 0
-        controller.stopcode_major[...] = MAJOR_ITER_LIMIT
-        controller.stopcode_minor[...] = MINOR_CONTINUE
-        stopcode = StopCode(MAJOR_ITER_LIMIT, MINOR_CONTINUE)
-        stopdesc = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_ITER_LIMIT]
+        controller.max_iter_remaining[...] = 0
+        controller.stop_code_imaging[...] = IMAGING_MAX_ITER
+        controller.stop_code_model_update[...] = MODEL_UPDATE_CONTINUE
+        stopcode = StopCode(IMAGING_MAX_ITER, MODEL_UPDATE_CONTINUE)
+        stopdesc = IMAGING_STOP_DESCRIPTIONS[IMAGING_MAX_ITER]
         controller.stopcode = stopcode
         controller.stopdescription = stopdesc
 
@@ -3107,7 +3116,7 @@ def model_update_continuum_single_field(
         }
 
     # -------------------------------------------------------------
-    # Calculate the controls for this minor cycle.
+    # Calculate the controls for this model update.
     #
     # The temporary Taylor-0 Högbom implementation has one effective
     # frequency plane. Independently controlled planes are therefore
@@ -3121,26 +3130,28 @@ def model_update_continuum_single_field(
         img_xds.sizes["polarization"],
     )
 
-    (
-        cycle_niter,
-        cyclethreshold,
-        cyclethreshold_per_plane,
-    ) = get_calculate_cycle_controls(
+    residual_imaging_dict = (
+        build_continuum_residual_imaging_dict(
+            img_xds, image_data_group_in_name, iteration_control_params
+        )
+        if is_n_iter_0
+        else None
+    )
+    max_iter_per_cycle, threshold_per_cycle = get_calculate_cycle_controls(
         controller,
         combined_deconvolve_dict,
         img_xds,
-        is_n_iter_0,
+        model_exists=not is_n_iter_0,
         iteration_control_params=iteration_control_params,
+        residual_imaging_dict=residual_imaging_dict,
     )
 
     timing["T_iteration_control"] = time.time() - start
 
     deconvolve_params = {
         **iteration_control_params,
-        "cycleniter": cycle_niter,
-        "cyclethreshold": cyclethreshold,
-        "niter_per_plane": controller.niter.clip(max=cycle_niter),
-        "cyclethreshold_per_plane": cyclethreshold_per_plane,
+        "max_iter_per_cycle": max_iter_per_cycle,
+        "threshold_per_cycle": threshold_per_cycle,
     }
 
     # -------------------------------------------------------------
@@ -3175,7 +3186,7 @@ def model_update_continuum_single_field(
 
     stopcode, stopdesc = controller.check_convergence(deconvolve_dict)
 
-    combined_deconvolve_dict = merge_return_dicts(
+    combined_deconvolve_dict = merge_imaging_dicts(
         [
             combined_deconvolve_dict,
             deconvolve_dict,
@@ -3187,7 +3198,7 @@ def model_update_continuum_single_field(
 
     logger.debug(
         "Continuum model update finished with "
-        f"major stop code {stopcode.major}: {stopdesc}"
+        f"major stop code {stopcode.imaging}: {stopdesc}"
     )
 
     node_timing_df = pd.DataFrame({key: [value] for key, value in timing.items()})

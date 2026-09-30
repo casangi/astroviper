@@ -224,9 +224,9 @@ def imaging_setup_continuum_single_field(
     """Prepare the partition-local static products for continuum MT-MFS imaging.
 
     This function performs the setup required once for each visibility partition
-    before the first continuum major cycle. It prepares all products that are
+    before the first continuum imaging cycle. It prepares all products that are
     independent of the current sky model and can therefore be reused throughout the
-    major-cycle iterations.
+    imaging-cycle iterations.
 
     Specifically, this function
 
@@ -299,7 +299,7 @@ def imaging_setup_continuum_single_field(
     -----
     This function prepares only partition-local quantities. The globally reduced
     Taylor PSFs, Gaussian restoring-beam fit, inverse FFT, normalization,
-    polarization conversion, minor cycle, and restoration are performed in later
+    polarization conversion, model update, and restoration are performed in later
     stages of the continuum imaging workflow after the map-task outputs have been
     combined.
     """
@@ -390,6 +390,7 @@ def imaging_setup_continuum_single_field(
             overwrite=True,
             processing_function_threads=processing_function_threads,
             truncate_uv_cells=True,
+            frequency_matching="exact",
         )
 
         weights_were_calculated = True

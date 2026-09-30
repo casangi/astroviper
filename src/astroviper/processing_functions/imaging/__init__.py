@@ -1,3 +1,6 @@
+from astroviper.processing_functions.imaging.correct_sky_by_primary_beam import (
+    correct_sky_by_primary_beam,
+)
 from astroviper.processing_functions.imaging.feather import feather_core
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
     accumulate_continuum_model,
@@ -19,4 +22,5 @@ __all__ = [
     "residual_update_continuum_single_field",
     "feather_core",
     "restore_image",
+    "correct_sky_by_primary_beam",
 ]

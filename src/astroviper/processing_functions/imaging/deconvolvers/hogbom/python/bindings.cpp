@@ -102,7 +102,7 @@ static py::buffer_info validate_inplace_cube(py::array& arr,
  * Validate a per-plane control array: dtype U, 3D with shape
  * (nt, nf, np_dim), and C-contiguous. Returns the buffer_info so the caller
  * can extract the raw pointer (length nt*nf*np_dim in (t, f, p) C-order)
- * without any copy. Used for the per-plane niter and threshold arrays so
+ * without any copy. Used for the per-plane max_iter_remaining and threshold arrays so
  * that iteration control is independent for each (time, frequency,
  * polarization) plane.
  */
@@ -208,7 +208,7 @@ py::dict hclean_impl(
     py::array model_image,
     py::array mask_array,
     py::tuple clean_box,
-    int max_iter,
+    int max_iter_remaining,
     int start_iter,
     T gain,
     T threshold,
@@ -309,7 +309,7 @@ py::dict hclean_impl(
             domask, mask_ptr,
             nx, ny,
             xbeg, xend, ybeg, yend,
-            max_iter, start_iter, final_iter,
+            max_iter_remaining, start_iter, final_iter,
             gain, threshold, speedup,
             msgput_func, stopnow_func
         );
@@ -355,7 +355,7 @@ py::dict hclean_cube_impl(
     py::array model_cube,
     py::array mask_cube,
     py::tuple clean_box,
-    py::array max_iter,
+    py::array max_iter_remaining,
     T gain,
     py::array threshold,
     T speedup,
@@ -433,14 +433,14 @@ py::dict hclean_cube_impl(
         yend = std::max(ybeg + 1, std::min(yend, ny));
     }
 
-    // Per-plane iteration control: niter (int32) and threshold (T) are
+    // Per-plane iteration control: max_iter_remaining (int32) and threshold (T) are
     // (nt, nf, np_img) arrays so every (time, frequency, polarization) plane
     // is cleaned with its own iteration limit and threshold.
-    py::buffer_info niter_info = validate_per_plane_array<int>(
-        max_iter, "max_iter", nt, nf, np_img);
+    py::buffer_info max_iter_info = validate_per_plane_array<int>(
+        max_iter_remaining, "max_iter_remaining", nt, nf, np_img);
     py::buffer_info thres_info = validate_per_plane_array<T>(
         threshold, "threshold", nt, nf, np_img);
-    const int* niter_ptr = static_cast<const int*>(niter_info.ptr);
+    const int* max_iter_ptr = static_cast<const int*>(max_iter_info.ptr);
     const T* thres_ptr = static_cast<const T*>(thres_info.ptr);
 
     const int nplanes = nt * nf * np_img;
@@ -458,7 +458,7 @@ py::dict hclean_cube_impl(
                 nt, nf, np_img, np_psf,
                 ny, nx,
                 xbeg, xend, ybeg, yend,
-                niter_ptr, gain, thres_ptr, speedup,
+                max_iter_ptr, gain, thres_ptr, speedup,
                 processing_function_threads, iter_out.data());
         } else {
             hclean::clean_cube<T>(
@@ -469,7 +469,7 @@ py::dict hclean_cube_impl(
                 nt, nf, np_img, np_psf,
                 ny, nx,
                 xbeg, xend, ybeg, yend,
-                niter_ptr, gain, thres_ptr, speedup,
+                max_iter_ptr, gain, thres_ptr, speedup,
                 processing_function_threads, iter_out.data());
         }
     }
@@ -541,7 +541,7 @@ static py::dict clean_dispatch(
     py::array model_image,
     py::array mask_array,
     py::tuple clean_box,
-    int max_iter,
+    int max_iter_remaining,
     int start_iter,
     double gain,
     double threshold,
@@ -553,7 +553,7 @@ static py::dict clean_dispatch(
     if (dt.is(py::dtype::of<float>())) {
         return hclean_impl<float>(
             dirty_image, psf_array, model_image, mask_array,
-            clean_box, max_iter, start_iter,
+            clean_box, max_iter_remaining, start_iter,
             static_cast<float>(gain),
             static_cast<float>(threshold),
             static_cast<float>(speedup),
@@ -561,7 +561,7 @@ static py::dict clean_dispatch(
     } else if (dt.is(py::dtype::of<double>())) {
         return hclean_impl<double>(
             dirty_image, psf_array, model_image, mask_array,
-            clean_box, max_iter, start_iter,
+            clean_box, max_iter_remaining, start_iter,
             gain, threshold, speedup,
             progress_callback, stop_callback);
     } else {
@@ -579,7 +579,7 @@ static py::dict clean_cube_dispatch(
     py::array model_cube,
     py::array mask_cube,
     py::tuple clean_box,
-    py::array max_iter,
+    py::array max_iter_remaining,
     double gain,
     py::array threshold,
     double speedup,
@@ -589,7 +589,7 @@ static py::dict clean_cube_dispatch(
     if (dt.is(py::dtype::of<float>())) {
         return hclean_cube_impl<float>(
             residual_cube, psf_cube, model_cube, mask_cube,
-            clean_box, max_iter,
+            clean_box, max_iter_remaining,
             static_cast<float>(gain),
             threshold,
             static_cast<float>(speedup),
@@ -597,7 +597,7 @@ static py::dict clean_cube_dispatch(
     } else if (dt.is(py::dtype::of<double>())) {
         return hclean_cube_impl<double>(
             residual_cube, psf_cube, model_cube, mask_cube,
-            clean_box, max_iter,
+            clean_box, max_iter_remaining,
             gain, threshold, speedup,
             processing_function_threads, /*many_threads=*/false);
     } else {
@@ -617,7 +617,7 @@ static py::dict clean_cube_many_threads_dispatch(
     py::array model_cube,
     py::array mask_cube,
     py::tuple clean_box,
-    py::array max_iter,
+    py::array max_iter_remaining,
     double gain,
     py::array threshold,
     double speedup,
@@ -627,7 +627,7 @@ static py::dict clean_cube_many_threads_dispatch(
     if (dt.is(py::dtype::of<float>())) {
         return hclean_cube_impl<float>(
             residual_cube, psf_cube, model_cube, mask_cube,
-            clean_box, max_iter,
+            clean_box, max_iter_remaining,
             static_cast<float>(gain),
             threshold,
             static_cast<float>(speedup),
@@ -635,7 +635,7 @@ static py::dict clean_cube_many_threads_dispatch(
     } else if (dt.is(py::dtype::of<double>())) {
         return hclean_cube_impl<double>(
             residual_cube, psf_cube, model_cube, mask_cube,
-            clean_box, max_iter,
+            clean_box, max_iter_remaining,
             gain, threshold, speedup,
             processing_function_threads, /*many_threads=*/true);
     } else {
@@ -672,7 +672,7 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           py::arg("model"),
           py::arg("mask") = py::array(),
           py::arg("clean_box") = py::make_tuple(-1, -1, -1, -1),
-          py::arg("max_iter") = 100,
+          py::arg("max_iter_remaining") = 100,
           py::arg("start_iter") = 0,
           py::arg("gain") = 0.1,
           py::arg("threshold") = 0.0,
@@ -689,7 +689,7 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           "cube, parallelized across planes with std::thread. The "
           "residual and model cubes are modified in place; the PSF cube "
           "may be single-polarization to broadcast across image pols. "
-          "Iteration control is independent per plane: max_iter and "
+          "Iteration control is independent per plane: max_iter_remaining and "
           "threshold are (nt, nf, np) arrays (int32 and matching the image "
           "dtype respectively) giving each (time, frequency, polarization) "
           "plane its own iteration limit and threshold. Returns per-plane "
@@ -700,7 +700,7 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           py::arg("model_cube"),
           py::arg("mask_cube") = py::array(),
           py::arg("clean_box") = py::make_tuple(-1, -1, -1, -1),
-          py::arg("max_iter") = py::array(),
+          py::arg("max_iter_remaining") = py::array(),
           py::arg("gain") = 0.1,
           py::arg("threshold") = py::array(),
           py::arg("speedup") = 0.0,
@@ -717,13 +717,13 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           "parallelized across planes AND within each plane (rows) with "
           "std::thread, so all processing_function_threads workers are used regardless of the "
           "plane count. Residual and model are modified in place; same "
-          "per-plane max_iter / threshold arrays and outputs as clean_cube.",
+          "per-plane max_iter_remaining / threshold arrays and outputs as clean_cube.",
           py::arg("residual_cube"),
           py::arg("psf_cube"),
           py::arg("model_cube"),
           py::arg("mask_cube") = py::array(),
           py::arg("clean_box") = py::make_tuple(-1, -1, -1, -1),
-          py::arg("max_iter") = py::array(),
+          py::arg("max_iter_remaining") = py::array(),
           py::arg("gain") = 0.1,
           py::arg("threshold") = py::array(),
           py::arg("speedup") = 0.0,

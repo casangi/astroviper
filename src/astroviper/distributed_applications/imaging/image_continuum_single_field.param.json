@@ -63,7 +63,8 @@
             "allowed": ["tree", "single_node", "tree_n"]
         },
         "reduce_n_batch": { "type": ["int"], "min": 2 },
-        "output_shard_channels": { "type": ["int"], "nullable": true, "min": 1 },
+        "image_sharding": { "type": ["dict"], "nullable": true },
+        "image_chunking": { "type": ["dict"], "nullable": true },
         "task_time_kill_switch_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 },
         "monitor_resources_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 }
     }

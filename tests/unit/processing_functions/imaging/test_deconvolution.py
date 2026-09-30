@@ -31,7 +31,7 @@ from astroviper.processing_functions.imaging.deconvolution import (
     get_phase_center,
     hogbom_clean,
 )
-from astroviper.processing_functions.imaging.utils.return_dict import ReturnDict
+from astroviper.processing_functions.imaging.utils.imaging_dict import ImagingDict
 
 try:
     from astroviper.processing_functions.imaging.deconvolvers import (  # noqa: F401
@@ -180,42 +180,42 @@ class TestValidateDeconvolveParams:
         result = _validate_deconvolve_params(None)
         assert result == {
             "gain": 0.1,
-            "niter": 1000,
+            "max_iter": 1000,
             "threshold": 0.0,
             "primary_beam_limit": 0.0,
             "clean_box": (-1, -1, -1, -1),
-            "minpsffraction": 0.05,
-            "maxpsffraction": 0.8,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
         }
 
     def test_empty_dict_returns_defaults(self):
         assert _validate_deconvolve_params({}) == {
             "gain": 0.1,
-            "niter": 1000,
+            "max_iter": 1000,
             "threshold": 0.0,
             "primary_beam_limit": 0.0,
             "clean_box": (-1, -1, -1, -1),
-            "minpsffraction": 0.05,
-            "maxpsffraction": 0.8,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
         }
 
     def test_partial_params_filled(self):
         result = _validate_deconvolve_params({"gain": 0.05})
         assert result["gain"] == 0.05
-        assert result["niter"] == 1000
+        assert result["max_iter"] == 1000
         assert result["threshold"] == 0.0
         assert result["clean_box"] == (-1, -1, -1, -1)
-        assert result["minpsffraction"] == 0.05
-        assert result["maxpsffraction"] == 0.8
+        assert result["min_psf_fraction"] == 0.05
+        assert result["max_psf_fraction"] == 0.8
 
     def test_full_valid_params_preserved(self):
         params = {
             "gain": 0.3,
-            "niter": 42,
+            "max_iter": 42,
             "threshold": 1e-6,
             "clean_box": (1, 2, 3, 4),
-            "minpsffraction": 0.1,
-            "maxpsffraction": 0.7,
+            "min_psf_fraction": 0.1,
+            "max_psf_fraction": 0.7,
         }
         result = _validate_deconvolve_params(params)
         assert result == params
@@ -230,15 +230,15 @@ class TestValidateDeconvolveParams:
         with pytest.raises(ValueError, match="CLEAN gain"):
             _validate_deconvolve_params({"gain": gain})
 
-    @pytest.mark.parametrize("niter", [1, 100, 1000])
-    def test_niter_accepts_valid(self, niter):
-        result = _validate_deconvolve_params({"niter": niter})
-        assert result["niter"] == niter
+    @pytest.mark.parametrize("max_iter", [1, 100, 1000])
+    def test_niter_accepts_valid(self, max_iter):
+        result = _validate_deconvolve_params({"max_iter": max_iter})
+        assert result["max_iter"] == max_iter
 
-    @pytest.mark.parametrize("niter", [0, -1, 1.5, "100", None])
-    def test_niter_rejects_invalid(self, niter):
+    @pytest.mark.parametrize("max_iter", [0, -1, 1.5, "100", None])
+    def test_niter_rejects_invalid(self, max_iter):
         with pytest.raises(ValueError, match="positive integer"):
-            _validate_deconvolve_params({"niter": niter})
+            _validate_deconvolve_params({"max_iter": max_iter})
 
     @pytest.mark.parametrize("threshold", [None, 0.0, 1e-6, 1.0])
     def test_threshold_accepts_valid(self, threshold):
@@ -339,6 +339,36 @@ class TestGetPhaseCenter:
 
 @requires_hogbom
 class TestHogbomCleanCube:
+    def test_zero_peak_at_zero_threshold_consumes_short_cycle_budget(self):
+        """A zero plane follows the C++ equality behavior and cannot loop forever."""
+        residual = np.zeros((1, 1, 1, 1, 1), dtype=np.float64)
+        model = np.zeros_like(residual)
+        calls = []
+
+        def fake_clean_cube(**kwargs):
+            calls.append(int(kwargs["max_iter_remaining"].item()))
+            return {
+                "iterations_performed": kwargs["max_iter_remaining"].copy(),
+                "final_peak": np.zeros((1, 1, 1), dtype=np.float64),
+            }
+
+        result = _run_hogbom_with_cycle_checks(
+            fake_clean_cube,
+            residual_cube=residual,
+            psf_cube=np.ones_like(residual),
+            model_cube=model,
+            peak_mask_cube=None,
+            mask_arg=np.array([], dtype=np.float64),
+            clean_box=(-1, -1, -1, -1),
+            max_iter_per_cycle=np.full((1, 1, 1), 5, dtype=np.int64),
+            threshold_per_cycle=np.zeros((1, 1, 1), dtype=np.float64),
+            gain=0.1,
+            processing_function_threads=1,
+        )
+
+        assert calls == [5]
+        assert result["iterations_performed"].item() == 5
+
     def test_long_cycle_stops_when_residual_rises_from_minimum(self):
         """Long CLEAN cycles use CASA-sized batches and its 10% divergence test."""
         residual = np.ones((1, 1, 1, 1, 1), dtype=np.float64)
@@ -346,11 +376,11 @@ class TestHogbomCleanCube:
         calls = []
 
         def fake_clean_cube(**kwargs):
-            calls.append(int(kwargs["max_iter"].item()))
+            calls.append(int(kwargs["max_iter_remaining"].item()))
             peak = 0.8 if len(calls) == 1 else 0.9
             kwargs["residual_cube"][...] = peak
             return {
-                "iterations_performed": kwargs["max_iter"].copy(),
+                "iterations_performed": kwargs["max_iter_remaining"].copy(),
                 "final_peak": np.full((1, 1, 1), peak),
             }
 
@@ -362,8 +392,8 @@ class TestHogbomCleanCube:
             peak_mask_cube=None,
             mask_arg=np.array([], dtype=np.float64),
             clean_box=(-1, -1, -1, -1),
-            niter_cube=np.full((1, 1, 1), 10000, dtype=np.int64),
-            cyclethreshold_cube=np.zeros((1, 1, 1), dtype=np.float64),
+            max_iter_per_cycle=np.full((1, 1, 1), 10000, dtype=np.int64),
+            threshold_per_cycle=np.zeros((1, 1, 1), dtype=np.float64),
             gain=0.1,
             processing_function_threads=1,
         )
@@ -383,7 +413,11 @@ class TestHogbomCleanCube:
             residual_cube=resid,
             psf_cube=psf,
             model_cube=model,
-            deconvolve_params={"gain": 1.0, "niter": 10, "threshold": 0.1},
+            deconvolve_params={
+                "gain": 1.0,
+                "max_iter": 10,
+                "threshold": 0.1,
+            },
         )
 
         assert result["iterations_performed"].shape == (nt, nf, npol)
@@ -402,7 +436,7 @@ class TestHogbomCleanCube:
             resid_a,
             psf,
             model_a,
-            {"gain": 0.2, "niter": 20, "threshold": 0.05},
+            {"gain": 0.2, "max_iter": 20, "threshold": 0.05},
             processing_function_threads=1,
         )
 
@@ -412,7 +446,7 @@ class TestHogbomCleanCube:
             resid_b,
             psf,
             model_b,
-            {"gain": 0.2, "niter": 20, "threshold": 0.05},
+            {"gain": 0.2, "max_iter": 20, "threshold": 0.05},
             processing_function_threads=4,
         )
 
@@ -427,7 +461,12 @@ class TestHogbomCleanCube:
         psf = _delta_psf_cube(nt, nf, 1, ny, nx)
         model = np.zeros_like(resid)
 
-        hogbom_clean(resid, psf, model, {"gain": 1.0, "niter": 5, "threshold": 0.1})
+        hogbom_clean(
+            resid,
+            psf,
+            model,
+            {"gain": 1.0, "max_iter": 5, "threshold": 0.1},
+        )
 
         for p in range(npol):
             assert model[0, 0, p, 8, 8] == pytest.approx(1.0 + p, abs=1e-6)
@@ -449,7 +488,7 @@ class TestHogbomCleanCube:
             resid,
             psf,
             model,
-            {"gain": 1.0, "niter": 5, "threshold": 0.1},
+            {"gain": 1.0, "max_iter": 5, "threshold": 0.1},
             mask_cube=mask,
         )
 
@@ -501,19 +540,23 @@ class TestHogbomCleanCube:
 class TestDeconvolve:
     def test_basic_single_plane(self):
         xds = _make_img_xds()
-        returndict = deconvolve(
+        imaging_dict = deconvolve(
             img_xds=xds,
-            deconvolve_params={"gain": 1.0, "niter": 5, "threshold": 0.05},
+            deconvolve_params={
+                "gain": 1.0,
+                "max_iter": 5,
+                "threshold": 0.05,
+            },
         )
 
-        assert isinstance(returndict, ReturnDict)
-        assert len(returndict.data) == 1  # 1 time * 1 freq * 1 pol
-        entry = list(returndict.data.values())[0]
+        assert isinstance(imaging_dict, ImagingDict)
+        assert len(imaging_dict.data) == 1  # 1 time * 1 freq * 1 pol
+        entry = list(imaging_dict.data.values())[0]
         for field in (
             "iter_done",
-            "niter",
-            "cyclethreshold",
-            "loop_gain",
+            "max_iter",
+            "threshold_per_cycle",
+            "gain",
             "peakres",
             "peakres_nomask",
             "masksum",
@@ -536,25 +579,33 @@ class TestDeconvolve:
     def test_multi_pol_returndict_entries(self):
         nt, nf, npol = 1, 1, 4
         xds = _make_img_xds(nt=nt, nf=nf, npol=npol)
-        returndict = deconvolve(
+        imaging_dict = deconvolve(
             img_xds=xds,
-            deconvolve_params={"gain": 1.0, "niter": 5, "threshold": 0.05},
+            deconvolve_params={
+                "gain": 1.0,
+                "max_iter": 5,
+                "threshold": 0.05,
+            },
         )
-        assert len(returndict.data) == nt * nf * npol
+        assert len(imaging_dict.data) == nt * nf * npol
         for p in range(npol):
-            entry = returndict.sel(pol=p)
+            entry = imaging_dict.sel(pol=p)
             assert isinstance(entry, dict)
             assert entry["stokes"] == ["I", "Q", "U", "V"][p]
 
     def test_multi_chan_returndict_frequencies(self):
         nt, nf, npol = 1, 3, 1
         xds = _make_img_xds(nt=nt, nf=nf, npol=npol)
-        returndict = deconvolve(
+        imaging_dict = deconvolve(
             img_xds=xds,
-            deconvolve_params={"gain": 1.0, "niter": 5, "threshold": 0.05},
+            deconvolve_params={
+                "gain": 1.0,
+                "max_iter": 5,
+                "threshold": 0.05,
+            },
         )
-        assert len(returndict.data) == nt * nf * npol
-        freqs = [float(returndict.sel(chan=c)["frequency"]) for c in range(nf)]
+        assert len(imaging_dict.data) == nt * nf * npol
+        freqs = [float(imaging_dict.sel(chan=c)["frequency"]) for c in range(nf)]
         assert len(set(freqs)) == nf
 
     def test_rejects_psf_pol_mismatch(self):
@@ -600,12 +651,20 @@ class TestDeconvolve:
 
         deconvolve(
             img_xds=xds_a,
-            deconvolve_params={"gain": 0.2, "niter": 10, "threshold": 0.05},
+            deconvolve_params={
+                "gain": 0.2,
+                "max_iter": 10,
+                "threshold": 0.05,
+            },
             processing_function_threads=1,
         )
         deconvolve(
             img_xds=xds_b,
-            deconvolve_params={"gain": 0.2, "niter": 10, "threshold": 0.05},
+            deconvolve_params={
+                "gain": 0.2,
+                "max_iter": 10,
+                "threshold": 0.05,
+            },
             processing_function_threads=4,
         )
 
@@ -614,11 +673,15 @@ class TestDeconvolve:
 
     def test_returndict_consistency(self):
         xds = _make_img_xds(nt=1, nf=1, npol=1)
-        returndict = deconvolve(
+        imaging_dict = deconvolve(
             img_xds=xds,
-            deconvolve_params={"gain": 0.5, "niter": 20, "threshold": 0.001},
+            deconvolve_params={
+                "gain": 0.5,
+                "max_iter": 20,
+                "threshold": 0.001,
+            },
         )
-        entry = list(returndict.data.values())[0]
+        entry = list(imaging_dict.data.values())[0]
 
         # start_peakres must be >= peakres (peak should decrease).
         start = (
@@ -639,21 +702,25 @@ class TestDeconvolve:
             if isinstance(entry["iter_done"], list)
             else entry["iter_done"]
         )
-        assert 0 <= iter_done <= entry["niter"]
+        assert 0 <= iter_done <= entry["max_iter"]
 
     def test_deconvolve_with_mask(self):
         xds = _make_img_xds(nt=1, nf=1, npol=1, with_mask=True)
         # Zero the mask at the source location; CLEAN should not touch it.
         xds["MASK_RESIDUAL"].values[0, 0, 0, 16, 16] = 0.0
 
-        returndict = deconvolve(
+        imaging_dict = deconvolve(
             img_xds=xds,
-            deconvolve_params={"gain": 1.0, "niter": 5, "threshold": 0.05},
+            deconvolve_params={
+                "gain": 1.0,
+                "max_iter": 5,
+                "threshold": 0.05,
+            },
         )
         # Source should survive since the pixel is masked out.
         assert xds["RESIDUAL"].values[0, 0, 0, 16, 16] == pytest.approx(1.0, abs=1e-6)
         assert xds["SKY_MODEL"].values[0, 0, 0, 16, 16] == pytest.approx(0.0, abs=1e-6)
-        assert isinstance(returndict, ReturnDict)
+        assert isinstance(imaging_dict, ImagingDict)
 
 
 # ---------------------------------------------------------------------------
@@ -686,7 +753,7 @@ class TestAspClean:
             model_cube=model,
             deconvolve_params={
                 "gain": 0.5,
-                "niter": 50,
+                "max_iter": 50,
                 "threshold": 0.01,
                 "fusedthreshold": 0.5,
                 "psf_width": 1.0,
@@ -715,7 +782,7 @@ class TestAspClean:
             model_cube=model,
             deconvolve_params={
                 "gain": 0.1,
-                "niter": 200,
+                "max_iter": 200,
                 "threshold": 0.01,
                 "fusedthreshold": 0.1,
             },
@@ -742,7 +809,12 @@ class TestAspClean:
             ra,
             psf,
             ma,
-            {"gain": 0.2, "niter": 40, "threshold": 0.05, "fusedthreshold": 0.1},
+            {
+                "gain": 0.2,
+                "max_iter": 40,
+                "threshold": 0.05,
+                "fusedthreshold": 0.1,
+            },
             processing_function_threads=1,
         )
         rb, mb = base.copy(), np.zeros_like(base)
@@ -750,7 +822,12 @@ class TestAspClean:
             rb,
             psf,
             mb,
-            {"gain": 0.2, "niter": 40, "threshold": 0.05, "fusedthreshold": 0.1},
+            {
+                "gain": 0.2,
+                "max_iter": 40,
+                "threshold": 0.05,
+                "fusedthreshold": 0.1,
+            },
             processing_function_threads=4,
         )
 
@@ -770,7 +847,7 @@ class TestAspClean:
             model,
             {
                 "gain": 0.5,
-                "niter": 40,
+                "max_iter": 40,
                 "threshold": 0.01,
                 "fusedthreshold": 0.5,
                 "psf_width": 1.0,
@@ -800,7 +877,7 @@ class TestAspClean:
             model,
             {
                 "gain": 0.5,
-                "niter": 60,
+                "max_iter": 60,
                 "threshold": 0.01,
                 "fusedthreshold": 0.5,
                 "psf_width": 1.0,
@@ -847,18 +924,18 @@ class TestAspClean:
 class TestDeconvolveAsp:
     def test_basic_single_plane(self):
         xds = _make_img_xds()
-        returndict = deconvolve(
+        imaging_dict = deconvolve(
             img_xds=xds,
             algorithm="asp",
             deconvolve_params={
                 "gain": 0.5,
-                "niter": 50,
+                "max_iter": 50,
                 "threshold": 0.01,
                 "fusedthreshold": 0.5,
                 "psf_width": 1.0,
             },
         )
-        assert isinstance(returndict, ReturnDict)
+        assert isinstance(imaging_dict, ImagingDict)
         assert "SKY_MODEL" in xds.data_vars
         # the point source is cleaned into the model
         assert xds["SKY_MODEL"].values[0, 0, 0, 16, 16] == pytest.approx(1.0, abs=0.1)
@@ -870,9 +947,13 @@ class TestDeconvolveAsp:
         rd = deconvolve(
             img_xds=xds,
             algorithm=alias,
-            deconvolve_params={"niter": 10, "psf_width": 1.0, "fusedthreshold": 0.5},
+            deconvolve_params={
+                "max_iter": 10,
+                "psf_width": 1.0,
+                "fusedthreshold": 0.5,
+            },
         )
-        assert isinstance(rd, ReturnDict)
+        assert isinstance(rd, ImagingDict)
 
     def test_multi_plane_returndict_entries(self):
         nt, nf, npol = 1, 2, 2
@@ -882,7 +963,7 @@ class TestDeconvolveAsp:
             algorithm="asp",
             deconvolve_params={
                 "gain": 0.5,
-                "niter": 30,
+                "max_iter": 30,
                 "threshold": 0.01,
                 "fusedthreshold": 0.5,
                 "psf_width": 1.0,

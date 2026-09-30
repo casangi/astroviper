@@ -6,7 +6,7 @@ import xarray as xr
 
 import astroviper.node_tasks.imaging.image_continuum_single_field as continuum_node
 import astroviper.processing_functions.imaging.image_continuum_single_field as continuum_processing
-from astroviper.processing_functions.imaging.utils import ReturnDict
+from astroviper.processing_functions.imaging.utils import ImagingDict
 
 
 def _model_dataset(value):
@@ -403,8 +403,8 @@ def test_minor_append_normalizes_single_leaf_cache_state(monkeypatch):
 
 def test_minor_append_preserves_history_when_reduce_result_is_empty(monkeypatch):
     """An empty reduce placeholder must not hide prior deconvolution history."""
-    reduced_history = ReturnDict()
-    previous_history = ReturnDict()
+    reduced_history = ImagingDict()
+    previous_history = ImagingDict()
     previous_history.add(
         {"peakres": 2.5, "max_psf_sidelobe": 0.35},
         time=0,
@@ -602,3 +602,111 @@ def test_stored_coordinate_indexer_rejects_missing_values():
             np.array([102.0]),
             "frequency",
         )
+
+
+@pytest.mark.parametrize("initial", [True, False])
+def test_model_update_passes_cube_parameter_names_to_backend(monkeypatch, initial):
+    """Node and Taylor adapter preserve the controller's per-plane controls."""
+    import astroviper.processing_functions.imaging.model_update as cube_update
+    import astroviper.processing_functions.imaging.utils as imaging_utils
+
+    dims = ("time", "taylor_term", "polarization", "l", "m")
+    image = xr.Dataset(
+        {
+            "SKY_RESIDUAL": (dims, np.ones((1, 2, 1, 3, 3))),
+            "SKY_MODEL": (dims, np.zeros((1, 2, 1, 3, 3))),
+            "POINT_SPREAD_FUNCTION": (
+                ("time", "psf_taylor_order", "polarization", "l", "m"),
+                np.ones((1, 3, 1, 3, 3)),
+            ),
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
+                ("time", "polarization"),
+                np.zeros((1, 1)),
+            ),
+        },
+        attrs={
+            "data_groups": {
+                "residual": {
+                    "sky": "SKY_RESIDUAL",
+                    "point_spread_function": "POINT_SPREAD_FUNCTION",
+                },
+                "model": {"sky": "SKY_MODEL"},
+            }
+        },
+    )
+    params = {
+        "max_iter": 17,
+        "max_cycles": 3,
+        "max_iter_per_cycle": 5,
+        "threshold": 0.01,
+        "gain": 0.1,
+        "psf_sidelobe_factor": 1.5,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    }
+    controller = imaging_utils.IterationController(**params)
+    iterations = np.array([[[4]]], dtype=np.int64)
+    thresholds = np.array([[[0.125]]])
+
+    def controls(
+        controller_arg,
+        history,
+        image_arg,
+        model_exists,
+        iteration_control_params,
+        residual_imaging_dict,
+    ):
+        assert controller_arg is controller
+        assert model_exists is (not initial)
+        assert iteration_control_params is params
+        return iterations, thresholds
+
+    class ReachedBackend(Exception):
+        pass
+
+    def backend(image_arg, deconvolver, deconvolve_params, model_exists, **kwargs):
+        assert model_exists is (not initial)
+        assert deconvolve_params["max_iter"] == 17
+        assert deconvolve_params["max_cycles"] == 3
+        np.testing.assert_array_equal(
+            deconvolve_params["max_iter_per_cycle"], iterations
+        )
+        np.testing.assert_array_equal(
+            deconvolve_params["threshold_per_cycle"], thresholds
+        )
+        assert not {
+            "niter",
+            "cycleniter",
+            "cyclethreshold",
+            "niter_per_plane",
+            "cyclethreshold_per_plane",
+        }.intersection(deconvolve_params)
+        assert image_arg.sizes["frequency"] == 1
+        raise ReachedBackend
+
+    monkeypatch.setattr(imaging_utils, "get_calculate_cycle_controls", controls)
+    monkeypatch.setattr(cube_update, "model_update_cube_single_field", backend)
+    with pytest.raises(ReachedBackend):
+        continuum_node.model_update_continuum_single_field(
+            {"image": image},
+            {
+                "iteration_control_params": params,
+                "controller": controller,
+                "is_n_iter_0": initial,
+            },
+        )
+    assert params["max_iter_per_cycle"] == 5
+
+
+def test_zero_max_iter_uses_current_controller_fields():
+    from astroviper.processing_functions.imaging.utils import IterationController
+
+    image = _model_dataset(0.0).rename({"SKY_MODEL": "SKY_RESIDUAL"})
+    controller = IterationController(max_iter=0)
+    result = continuum_node.model_update_continuum_single_field(
+        {"image": image},
+        {"iteration_control_params": {"max_iter": 0}, "controller": controller},
+    )
+    assert result["stopcode"].imaging == 1
+    assert result["stopcode"].model_update == 0
+    np.testing.assert_array_equal(controller.max_iter_remaining, 0)

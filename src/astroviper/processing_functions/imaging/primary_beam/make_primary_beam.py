@@ -8,16 +8,22 @@ def make_primary_beam_single_field(
     image_data_group_out_name="residual",
     list_dish_diameters=None,
     list_blockage_diameters=None,
-    ipower=1,
+    max_rad_1GHz=0.03113667385557884,
+    ipower=2,
     float_dtype=None,
 ):
     """Add an azimuthally-symmetric primary beam to a single-field image dataset.
 
-    Evaluates the obscured-Airy-disk voltage pattern (via
-    :func:`~astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric.airy_disk_rorder_v2`)
-    for every frequency channel and writes it as the ``PRIMARY_BEAM`` data
-    variable, registering it under ``image_data_group_out_name``.  The same beam
-    is broadcast across polarization (a single dish diameter is assumed).
+    Follows the CASA definition: the primary beam is the **power** sensitivity
+    pattern of the antenna, the square of the absolute value of the voltage
+    pattern (``P = |V| ** 2``).  The CASA ``PBMath1DAiry`` compatible obscured
+    Airy pattern is evaluated per frequency channel with
+    :func:`~astroviper.processing_functions.imaging.primary_beam.airy_disk.casa_airy_disk_response`
+    -- the same function the simulation subdomain uses for its antenna voltage
+    patterns -- and written as the ``PRIMARY_BEAM`` data variable (matching the
+    ``.pb`` image of ``tclean`` to float32 precision), registered under
+    ``image_data_group_out_name``.  The same beam is broadcast across
+    polarization (a single dish diameter is assumed).
 
     The beam is created in whatever polarization basis ``img_xds`` currently
     carries; because ``PRIMARY_BEAM`` is stamped with ``method="airy_disk"`` it
@@ -48,9 +54,12 @@ def make_primary_beam_single_field(
     list_blockage_diameters : array-like of float, optional
         Sub-reflector blockage diameters in metres.  Default
         ``numpy.array([0.75])``.
+    max_rad_1GHz : float, optional
+        CASA ``PBMath1DAiry`` maximum tabulated radius at 1 GHz in radians
+        (scaled to the observing frequency).  Default is CASA's ALMA value.
     ipower : int, optional
-        ``1`` returns the voltage pattern, ``2`` returns the power beam.
-        Default ``1``.
+        ``2`` returns the (power) primary beam -- the CASA definition;
+        ``1`` returns the voltage pattern.  Default ``2``.
     float_dtype : numpy.dtype, optional
         Floating-point precision for the primary beam.  Defaults to
         ``numpy.float64``.
@@ -65,8 +74,9 @@ def make_primary_beam_single_field(
 
     See Also
     --------
-    astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric.airy_disk_rorder_v2
+    astroviper.processing_functions.imaging.primary_beam.airy_disk.casa_airy_disk_response
     astroviper.processing_functions.imaging.make_point_spread_function.make_point_spread_function_single_field
+    astroviper.processing_functions.imaging.correct_sky_by_primary_beam.correct_sky_by_primary_beam
     """
     import time
 
@@ -74,8 +84,8 @@ def make_primary_beam_single_field(
     import pandas as pd
     import xarray as xr
 
-    from astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric import (
-        airy_disk_rorder_v2,
+    from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
+        casa_airy_disk_response,
     )
     from astroviper.utils.data_group_tools import (
         create_data_groups_in_and_out,
@@ -91,19 +101,6 @@ def make_primary_beam_single_field(
 
     start = time.time()
 
-    pb_params = {
-        "list_dish_diameters": np.asarray(list_dish_diameters),
-        "list_blockage_diameters": np.asarray(list_blockage_diameters),
-        "ipower": ipower,
-    }
-
-    # The airy-disk evaluation needs the image centre in pixels. Build a local
-    # copy of image_params so the caller's dictionary is not mutated.
-    pb_image_params = {
-        **image_params,
-        "image_center": (np.array(image_params["image_size"]) // 2).tolist(),
-    }
-
     data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
     if data_group.get("primary_beam", None) is not None:
         return img_xds, pd.DataFrame({"T_primary_beam": [0.0]})
@@ -116,15 +113,20 @@ def make_primary_beam_single_field(
         overwrite=False,
     )
 
+    # Evaluate the CASA-compatible Airy beam of the first (only) dish diameter
+    # on the image's (l, m) grid for every channel, then broadcast over
+    # polarization and add a leading time axis.
+    pb = casa_airy_disk_response(
+        img_xds.l.values[None, :, None],
+        img_xds.m.values[None, None, :],
+        img_xds.frequency.values[:, None, None],
+        float(np.asarray(list_dish_diameters)[0]),
+        float(np.asarray(list_blockage_diameters)[0]),
+        max_rad_1GHz,
+        ipower=ipower,
+    ).astype(float_dtype, copy=False)
     img_xds["PRIMARY_BEAM"] = xr.DataArray(
-        # Select the first (only) dish diameter and add a leading time axis.
-        airy_disk_rorder_v2(
-            img_xds.frequency.values,
-            img_xds.polarization.values,
-            pb_params,
-            pb_image_params,
-            dtype=float_dtype,
-        )[0, ...][None, ...],
+        np.tile(pb[None, :, None, :, :], (1, 1, img_xds.sizes["polarization"], 1, 1)),
         dims=("time", "frequency", "polarization", "l", "m"),
     )
     img_xds["PRIMARY_BEAM"].attrs["type"] = "primary_beam"

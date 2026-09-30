@@ -141,7 +141,7 @@ compute_backend = "dask"
 mpi_cluster_setup = None
 reduce_mode = "tree"
 reduce_n_batch = 2
-output_shard_channels = None
+image_sharding = None
 task_time_kill_switch_seconds = None
 monitor_resources_seconds = None
 
@@ -240,10 +240,10 @@ def combine_return_data_frames(input_data, input_params):
 
     Each node task returns a single dict with a ``"timing_node_tasks"`` one-row
     :class:`pandas.DataFrame` and a ``"deconvolution"``
-    :class:`~astroviper.processing_functions.imaging.utils.return_dict.ReturnDict`
+    :class:`~astroviper.processing_functions.imaging.utils.imaging_dict.ImagingDict`
     (already remapped to global channel numbers) for its channel chunk. This
     reducer concatenates the timing frames (one row per chunk) and merges the
-    per-chunk deconvolution dicts with :func:`merge_return_dicts`. Because every
+    per-chunk deconvolution dicts with :func:`merge_imaging_dicts`. Because every
     chunk covers a disjoint global channel range, the merge never collides.
 
     Returns the same ``{"timing_node_tasks", "deconvolution"}`` shape so it
@@ -261,12 +261,12 @@ def combine_return_data_frames(input_data, input_params):
     Returns
     -------
     dict
-        ``{"timing_node_tasks": pandas.DataFrame, "deconvolution": ReturnDict}``.
+        ``{"timing_node_tasks": pandas.DataFrame, "deconvolution": ImagingDict}``.
     """
     import pandas as pd
 
     from astroviper.processing_functions.imaging.utils.iteration_control import (
-        merge_return_dicts,
+        merge_imaging_dicts,
     )
 
     combined_timing = pd.DataFrame()
@@ -291,7 +291,7 @@ def combine_return_data_frames(input_data, input_params):
 
     return {
         "timing_node_tasks": combined_timing,
-        "deconvolution": merge_return_dicts(deconvolve_dicts),
+        "deconvolution": merge_imaging_dicts(deconvolve_dicts),
     }
 
 
@@ -379,7 +379,7 @@ def combine_continuum_chunks(input_data, input_params):
     import pandas as pd
 
     from astroviper.processing_functions.imaging.utils.iteration_control import (
-        merge_return_dicts,
+        merge_imaging_dicts,
     )
 
     if input_params is None:
@@ -620,13 +620,15 @@ def combine_continuum_chunks(input_data, input_params):
     combined_image.attrs["continuum_additive_variables"] = list(additive_variables)
 
     if deconvolution_dicts:
-        combined_deconvolution = merge_return_dicts(deconvolution_dicts)
+        combined_deconvolution = merge_imaging_dicts(deconvolution_dicts)
     else:
         # Keep the output schema stable even when no input supplied
         # deconvolution metadata.
-        from astroviper.processing_functions.imaging.utils.return_dict import ReturnDict
+        from astroviper.processing_functions.imaging.utils.imaging_dict import (
+            ImagingDict,
+        )
 
-        combined_deconvolution = ReturnDict()
+        combined_deconvolution = ImagingDict()
 
     return {
         "image": combined_image,
@@ -760,9 +762,9 @@ assert memory_mode == "in_memory", (
 # the standard write path cannot safely write partial shards concurrently, so
 # creating sharded arrays without it would corrupt the output. Fail fast rather
 # than silently create sharded arrays a non-concurrent writer will clobber.
-if output_shard_channels is not None and not skunk_works:
+if image_sharding and not skunk_works:
     raise ValueError(
-        "output_shard_channels requires skunk_works=True (sharded output is "
+        "image_sharding requires skunk_works=True (sharded output is "
         "written by the concurrent direct-blob writer)."
     )
 
@@ -842,7 +844,7 @@ create_empty_data_variables_on_disk(
     compressor=compressor,
     double_precision=not single_precision_image,
     data_variable_definitions="imaging",
-    shard_channels=output_shard_channels,
+    image_sharding=image_sharding,
 )
 timing_distributed_application["T_create_empty_data_variables"] = time.time() - start
 
@@ -874,7 +876,7 @@ input_params["single_precision_image"] = single_precision_image
 input_params["fft_backend"] = fft_backend
 input_params["restore"] = restore
 input_params["skunk_works"] = skunk_works
-input_params["output_shard_channels"] = output_shard_channels
+input_params["image_sharding"] = image_sharding
 input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
 
 from graphviper.graph_tools.coordinate_utils import (
@@ -922,7 +924,7 @@ input_params["image_params"] = {
 # few shards that consecutive task_ids share. Derived from the on-disk shard
 # layout of the first kept variable, for any combination of sharded dims.
 task_priorities = None
-if skunk_works and output_shard_channels:
+if skunk_works and image_sharding:
     from astroviper.node_tasks.imaging.utils import compute_shard_task_priorities
 
     task_priorities = compute_shard_task_priorities(
