@@ -17,6 +17,10 @@ The tests exercise:
     and the exact reconstruction invariant residual = dirty - model (*) psf),
   * the zero-copy / in-place contract and input validation, and
   * the 5-D cube driver.
+
+
+The aspclean C++ binding takes the per-plane iteration cap as
+``max_iter_remaining`` (aspclean/python/bindings.cpp).
 """
 
 import numpy as np
@@ -146,7 +150,9 @@ class TestClean:
         psf, sky, dirty = self._make_scene()
         model = np.zeros_like(dirty)
         resid = dirty.copy()
-        res = aspclean.clean(resid, psf, model, gain=0.1, threshold=0.05, niter=100)
+        res = aspclean.clean(
+            resid, psf, model, gain=0.1, threshold=0.05, max_iter_remaining=100
+        )
         for key in (
             "iterations_performed",
             "retval",
@@ -165,7 +171,13 @@ class TestClean:
         resid = dirty.copy()
         peak0 = float(np.max(np.abs(resid)))
         aspclean.clean(
-            resid, psf, model, gain=0.1, threshold=0.01, niter=200, fusedthreshold=0.1
+            resid,
+            psf,
+            model,
+            gain=0.1,
+            threshold=0.01,
+            max_iter_remaining=200,
+            fusedthreshold=0.1,
         )
         peak1 = float(np.max(np.abs(resid)))
         assert peak1 < 0.2 * peak0  # residual substantially reduced
@@ -180,7 +192,13 @@ class TestClean:
         model = np.zeros_like(dirty)
         resid = dirty.copy()
         aspclean.clean(
-            resid, psf, model, gain=0.1, threshold=0.05, niter=150, fusedthreshold=0.1
+            resid,
+            psf,
+            model,
+            gain=0.1,
+            threshold=0.05,
+            max_iter_remaining=150,
+            fusedthreshold=0.1,
         )
         recon = aspclean.convolve_centered(
             model.astype(np.float64), psf.astype(np.float64)
@@ -205,7 +223,7 @@ class TestClean:
             model,
             gain=0.5,
             threshold=0.01,
-            niter=60,
+            max_iter_remaining=60,
             fusedthreshold=0.5,
             psf_width=1.0,
         )
@@ -214,7 +232,7 @@ class TestClean:
         assert model[40, 50] == pytest.approx(7.0, abs=0.1)
         assert model.sum() == pytest.approx(7.0, abs=0.1)
 
-    def test_major_cycles_monotonic_progress(self):
+    def test_imaging_cycles_monotonic_progress(self):
         psf, sky, dirty = self._make_scene()
         model = np.zeros_like(dirty)
         resid = dirty.copy()
@@ -226,7 +244,7 @@ class TestClean:
                 model,
                 gain=0.1,
                 threshold=0.001,
-                niter=100,
+                max_iter_remaining=100,
                 fusedthreshold=0.1,
             )
             peaks.append(float(np.max(np.abs(resid))))
@@ -259,7 +277,7 @@ class TestMask:
             mask=mask,
             gain=0.1,
             threshold=0.01,
-            niter=150,
+            max_iter_remaining=150,
             fusedthreshold=0.1,
         )
         outside = model[mask == 0]
@@ -273,7 +291,7 @@ class TestMask:
         mask = np.zeros((ny, nx))
         model = np.zeros_like(dirty)
         resid = dirty.copy()
-        res = aspclean.clean(resid, psf, model, mask=mask, niter=50)
+        res = aspclean.clean(resid, psf, model, mask=mask, max_iter_remaining=50)
         np.testing.assert_array_equal(resid, dirty)
         np.testing.assert_array_equal(model, np.zeros_like(model))
         assert res["model_flux"] == 0.0
@@ -294,7 +312,13 @@ class TestInPlaceContract:
         resid_id = resid.ctypes.data
         model_id = model.ctypes.data
         aspclean.clean(
-            resid, psf, model, gain=0.2, threshold=0.01, niter=50, fusedthreshold=0.1
+            resid,
+            psf,
+            model,
+            gain=0.2,
+            threshold=0.01,
+            max_iter_remaining=50,
+            fusedthreshold=0.1,
         )
         # same buffers (no reallocation), and they changed
         assert resid.ctypes.data == resid_id
@@ -364,16 +388,16 @@ class TestCube:
         rc = resid.copy()
         mc = model.copy()
         # Iteration control is per (time, frequency, polarization) plane:
-        # threshold is a float64 (nt, nf, np) array and niter an int32 one.
+        # threshold is a float64 (nt, nf, np) array and max_iter an int32 one.
         threshold = np.full((nt, nf, npol), 0.05, dtype=np.float64)
-        niter = np.full((nt, nf, npol), 80, dtype=np.int32)
+        max_iter = np.full((nt, nf, npol), 80, dtype=np.int32)
         out = aspclean.clean_cube(
             rc,
             psf,
             mc,
             gain=0.1,
             threshold=threshold,
-            niter=niter,
+            max_iter_remaining=max_iter,
             fusedthreshold=0.1,
             processing_function_threads=2,
         )
@@ -392,7 +416,7 @@ class TestCube:
                         m1,
                         gain=0.1,
                         threshold=0.05,
-                        niter=80,
+                        max_iter_remaining=80,
                         fusedthreshold=0.1,
                     )
                     np.testing.assert_allclose(rc[t, f, p], r1, atol=1e-10)
@@ -406,15 +430,142 @@ class TestCube:
         model = np.zeros_like(resid)
         rc = resid.copy()
         threshold = np.full((nt, nf, npol), 0.05, dtype=np.float64)
-        niter = np.full((nt, nf, npol), 60, dtype=np.int32)
+        max_iter = np.full((nt, nf, npol), 60, dtype=np.int32)
         out = aspclean.clean_cube(
             rc,
             psf1,
             model,
             gain=0.1,
             threshold=threshold,
-            niter=niter,
+            max_iter_remaining=max_iter,
             fusedthreshold=0.1,
         )
         assert out["model_flux"].shape == (nt, nf, npol)
         assert np.all(out["model_flux"] > 0)
+
+
+# ---------------------------------------------------------------------------
+# The per-Aspen L-BFGS optimizer (ALGLIB minlbfgs conventions)
+# ---------------------------------------------------------------------------
+
+
+class TestLbfgs:
+    """The scaled L-BFGS behind the Aspen (amplitude, scale) fit.
+
+    The optimizer works in the scaled variables ``z = x / scale`` and takes a
+    unit-length first step there (ALGLIB's convention), so a badly scaled
+    problem is solved in a couple of steps and the first trial point never moves
+    a variable by more than its own scale. An earlier version preconditioned
+    with ``diag(scale^2)`` instead, which on the deconvolver's objective sent
+    the first trial step hundreds of scale lengths away, cost tens of
+    evaluations per Aspen and could accept garbage minima.
+    """
+
+    def test_badly_scaled_quadratic_converges_in_few_evaluations(self):
+        centre = np.array([2e-3, 3e3])
+        scale = [1e-3, 1e3]
+        calls = []
+
+        def fg(x):
+            x = np.asarray(x)
+            z = (x - centre) / scale
+            calls.append(np.array(x))
+            return float(z @ z), list(2 * z / scale)
+
+        x, f, iterations, evaluations = aspclean.lbfgs_minimize(
+            fg, [0.0, 0.0], scale, max_iters=20, epsg=1e-8, epsf=1e-12, epsx=1e-10
+        )
+        np.testing.assert_allclose(x, centre, rtol=1e-6)
+        assert f < 1e-10
+        assert evaluations <= 8
+        # the first trial point moved each variable by at most its own scale
+        first_step = np.abs(calls[1] - calls[0]) / scale
+        assert np.all(first_step <= 1.0 + 1e-12)
+
+    def test_never_increases_and_backtracks_on_overshoot(self):
+        # A narrow valley: a unit step in the scaled variable overshoots, so
+        # the line search must backtrack; the accepted sequence is monotone.
+        history = []
+
+        def fg(x):
+            v = 50.0 * (x[0] - 1.0) ** 2 + (x[1] + 2.0) ** 2
+            history.append(v)
+            return v, [100.0 * (x[0] - 1.0), 2.0 * (x[1] + 2.0)]
+
+        x, f, iterations, evaluations = aspclean.lbfgs_minimize(
+            fg, [0.0, 0.0], [1.0, 1.0], max_iters=5
+        )
+        assert iterations >= 1
+        assert f <= history[0]
+        # accepted objective values (a prefix scan of the history) decrease
+        accepted = [history[0]]
+        for v in history[1:]:
+            if v < accepted[-1]:
+                accepted.append(v)
+        assert accepted[-1] == f
+        assert evaluations <= 5 * 21  # never more than max_iters line searches
+
+
+# ---------------------------------------------------------------------------
+# Resolved sources: the case Asp exists for
+# ---------------------------------------------------------------------------
+
+
+class TestResolvedSource:
+    """A limb-darkened disk eight beams across, observed with a sparse-uv PSF.
+
+    Regression test for two failure modes of the first port on extended
+    emission: the per-Aspen L-BFGS jumping to a garbage (amplitude, scale)
+    pair, and the divergence guard (``retval == -3``) firing on legitimate
+    wide components because CASA's test compares the Aspen strength (not in
+    Jy/beam) with the peak residual. Both made every minor cycle stop after
+    one to three iterations without progress.
+    """
+
+    @staticmethod
+    def _scene():
+        from astroviper.processing_functions.simulation import (
+            limb_darkened_disk_image,
+        )
+
+        n = 128
+        rng = np.random.default_rng(1)
+        ku, kv = np.meshgrid(np.fft.fftfreq(n), np.fft.fftfreq(n), indexing="ij")
+        radius = np.hypot(ku, kv)
+        sampling = (
+            (radius > 0.01) & (radius < 0.12) & (rng.random((n, n)) < 0.25)
+        ).astype(float)
+        sampling += sampling[::-1, ::-1]  # Hermitian uv coverage
+        sampling[0, 0] = 0.0
+        psf = np.fft.fftshift(np.real(np.fft.ifft2(sampling)))
+        psf /= psf.max()
+        yy, xx = np.mgrid[0:n, 0:n]
+        l_grid = (xx - n // 2).astype(float)
+        m_grid = (yy - n // 2).astype(float)
+        sky = 5.0 * limb_darkened_disk_image(l_grid, m_grid, 40.0, 28.0, 0.8, 1.5)
+        dirty = np.real(
+            np.fft.ifft2(np.fft.fft2(sky) * np.fft.fft2(np.fft.ifftshift(psf)))
+        )
+        return (
+            np.ascontiguousarray(psf),
+            np.ascontiguousarray(sky),
+            np.ascontiguousarray(dirty),
+        )
+
+    def test_disk_is_cleaned_without_a_divergence_exit(self):
+        psf, sky, dirty = self._scene()
+        resid = dirty.copy()
+        model = np.zeros_like(dirty)
+        out = aspclean.clean(
+            resid, psf, model, gain=0.1, threshold=1e-4, max_iter_remaining=300
+        )
+        assert out["retval"] != -3  # no spurious "diverging" stop
+        assert out["iterations_performed"] >= 30  # the minor cycle actually ran
+        assert out["peak_residual"] < 0.2 * np.abs(dirty).max()
+        np.testing.assert_allclose(model.sum(), sky.sum(), rtol=0.15)
+        # the exact reconstruction invariant holds throughout
+        recon = aspclean.convolve_centered(model, psf)
+        assert np.max(np.abs(resid + recon - dirty)) < 1e-9 * np.abs(dirty).max()
+        # and the components are extended (hundreds of pixels above a tenth of
+        # the model peak), not a handful of delta spikes
+        assert np.count_nonzero(model > 0.1 * model.max()) > 100

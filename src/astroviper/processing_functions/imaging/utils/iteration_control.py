@@ -4,22 +4,22 @@ Iteration Control Module for Deconvolution Algorithms
 This module implements iteration control logic for deconvolution processes,
 adapted from CASA's iteration control implementation in _gclean.py and
 imager_return_dict.py. It has been streamlined to work with AstroViper's
-ReturnDict structure while retaining all original functionality.
+ImagingDict structure while retaining all original functionality.
 
 Per-plane iteration control
 ----------------------------
 All iteration control is performed independently for every
 ``(time, chan(frequency), pol)`` plane. Concretely:
 
-- ``niter`` is a per-plane array of remaining iterations
-  (:attr:`IterationController.niter`, shape ``(ntime, nchan, npol)``);
-- every stopping criterion (zero mask, iteration limit, threshold, major-cycle
+- ``max_iter_remaining`` is a per-plane array of remaining iterations
+  (:attr:`IterationController.max_iter_remaining`, shape ``(ntime, nchan, npol)``);
+- every stopping criterion (zero mask, iteration limit, threshold, imaging cycle
   limit) is evaluated per plane, and each plane carries its own stop code;
-- thresholds may differ per plane — :meth:`IterationController.per_plane_cycle_threshold`
-  produces a per-plane cyclethreshold array, and the deconvolvers accept
-  per-plane ``niter`` and ``threshold`` arrays.
+- thresholds may differ per plane — :meth:`IterationController.per_plane_threshold_per_cycle`
+  produces a per-plane threshold_per_cycle array, and the deconvolvers accept
+  per-plane ``max_iter_per_cycle`` and ``threshold_per_cycle`` arrays.
 
-The major-cycle loop continues while *any* plane is still active.
+The imaging cycle loop continues while *any* plane is still active.
 """
 
 from collections import namedtuple
@@ -27,64 +27,65 @@ from typing import Any
 
 import numpy as np
 
-from astroviper.processing_functions.imaging.utils.return_dict import (
+from astroviper.processing_functions.image_analysis import image_statistics as imgstats
+from astroviper.processing_functions.imaging.utils.imaging_dict import (
     FIELD_ACCUM,
+    ImagingDict,
     Key,
-    ReturnDict,
 )
-
-HAVE_RETURNDICT = True
 
 # Stop codes matching CASA's implementation
 # See: https://casadocs.readthedocs.io/en/stable/notebooks/synthesis_imaging.html#Returned-Dictionary
 # CASA Source: imager_return_dict.py:9-10, lines 463-565
 #
-# CASA uses a namedtuple StopCodes(major, minor) to separate major cycle and minor cycle
-# convergence criteria. This "deals with the degeneracy in stopcode numbers, while still
-# using the same definitions"
+# StopCode(imaging, model_update) separates the reason a plane's imaging cycles
+# ended from the reason its last model update ended, using CASA's stop code
+# numbering for both.
 
-StopCode = namedtuple("StopCode", ["major", "minor"])
+StopCode = namedtuple("StopCode", ["imaging", "model_update"])
 
-# Major cycle stop codes (global convergence)
-MAJOR_CONTINUE = 0  # Continue major cycles
-MAJOR_ITER_LIMIT = 1  # Reached total iteration limit (niter)
-MAJOR_THRESHOLD = 2  # Peak residual below global threshold
-MAJOR_ZERO_MASK = 7  # Zero mask (no valid pixels)
-MAJOR_CYCLE_LIMIT = 9  # Reached major cycle limit (nmajor)
+# Imaging cycle stop codes (global convergence)
+IMAGING_CONTINUE = 0  # Continue imaging cycles
+IMAGING_MAX_ITER = 1  # Reached total iteration limit (max_iter)
+IMAGING_THRESHOLD = 2  # Peak residual below global threshold
+IMAGING_ZERO_MASK = 7  # Zero mask (no valid pixels)
+IMAGING_MAX_CYCLES = 9  # Reached imaging cycle limit (max_cycles)
 
-# Minor cycle stop codes (per-cycle convergence)
-MINOR_CONTINUE = 0  # Continue minor cycles
-MINOR_ITER_LIMIT = 1  # Reached per-cycle iteration limit (cycleniter)
-MINOR_THRESHOLD = 2  # Peak residual below cyclethreshold
-MINOR_DIVERGENCE = 4  # Possible divergence detected
-MINOR_ZERO_MASK = 7  # Zero mask detected during minor cycle
+# Model update stop codes (per-cycle convergence)
+MODEL_UPDATE_CONTINUE = 0  # Continue model updates
+MODEL_UPDATE_MAX_ITER_PER_CYCLE = (
+    1  # Reached per-cycle iteration limit (max_iter_per_cycle)
+)
+MODEL_UPDATE_THRESHOLD_PER_CYCLE = 2  # Peak residual below threshold_per_cycle
+MODEL_UPDATE_DIVERGENCE = 4  # Possible divergence detected
+MODEL_UPDATE_ZERO_MASK = 7  # Zero mask detected during model update
 
-# Stop code descriptions for major cycle codes
-MAJOR_STOPCODE_DESCRIPTIONS = {
-    MAJOR_CONTINUE: "Continue iterations",
-    MAJOR_ITER_LIMIT: "Reached the iteration limit",
-    MAJOR_THRESHOLD: "Reached global stopping threshold (within mask)",
-    MAJOR_ZERO_MASK: "Zero mask",
-    MAJOR_CYCLE_LIMIT: "Reached the major cycle limit (nmajor)",
+# Stop code descriptions for imaging cycle codes
+IMAGING_STOP_DESCRIPTIONS = {
+    IMAGING_CONTINUE: "Continue imaging cycles",
+    IMAGING_MAX_ITER: "Reached max_iter",
+    IMAGING_THRESHOLD: "Reached threshold (peak residual within the mask)",
+    IMAGING_ZERO_MASK: "Zero mask",
+    IMAGING_MAX_CYCLES: "Reached max_cycles",
 }
 
-# Stop code descriptions for minor cycle codes
-MINOR_STOPCODE_DESCRIPTIONS = {
-    MINOR_CONTINUE: "Continue minor cycle",
-    MINOR_ITER_LIMIT: "Reached cycle iteration limit",
-    MINOR_THRESHOLD: "Reached cycle threshold",
-    MINOR_DIVERGENCE: "Possible divergence detected",
-    MINOR_ZERO_MASK: "Zero mask",
+# Stop code descriptions for model update codes
+MODEL_UPDATE_STOP_DESCRIPTIONS = {
+    MODEL_UPDATE_CONTINUE: "Continue model update",
+    MODEL_UPDATE_MAX_ITER_PER_CYCLE: "Reached max_iter_per_cycle",
+    MODEL_UPDATE_THRESHOLD_PER_CYCLE: "Reached threshold_per_cycle",
+    MODEL_UPDATE_DIVERGENCE: "Possible divergence detected",
+    MODEL_UPDATE_ZERO_MASK: "Zero mask",
 }
 
 
 # ============================================================================
-# ReturnDict Utility Functions
+# ImagingDict Utility Functions
 # ============================================================================
 
 
-def _validate_returndict_selection(
-    return_dict: ReturnDict,
+def _validate_imaging_dict_selection(
+    imaging_dict: ImagingDict,
     selected: Any,
     time: int | None = None,
     pol: int | None = None,
@@ -94,14 +95,14 @@ def _validate_returndict_selection(
     Validate that sel() returned data when explicit filters were provided.
 
     Raises KeyError if explicit time/pol/chan values were specified but
-    no matching entries exist in the ReturnDict.
+    no matching entries exist in the ImagingDict.
 
     Parameters:
     -----------
-    return_dict : ReturnDict
-        The ReturnDict that was queried
+    imaging_dict : ImagingDict
+        The ImagingDict that was queried
     selected : Any
-        Result from return_dict.sel()
+        Result from imaging_dict.sel()
     time, pol, chan : Optional[int]
         The filter values that were used
 
@@ -132,9 +133,9 @@ def _validate_returndict_selection(
         filter_str = ", ".join(filter_parts)
 
         # Get available keys for the error message
-        available_keys = list(return_dict.data.keys())
+        available_keys = list(imaging_dict.data.keys())
         if len(available_keys) == 0:
-            available_str = "ReturnDict is empty"
+            available_str = "ImagingDict is empty"
         elif len(available_keys) <= 10:
             available_str = f"Available keys: {available_keys}"
         else:
@@ -143,15 +144,15 @@ def _validate_returndict_selection(
         raise KeyError(f"No entries found for {filter_str}. {available_str}")
 
 
-def merge_return_dicts(
-    return_dicts: list[ReturnDict],
+def merge_imaging_dicts(
+    imaging_dicts: list[ImagingDict],
     merge_strategy: str = "update",
-) -> ReturnDict:
+) -> ImagingDict:
     """
-    Merge multiple ReturnDict objects into a single ReturnDict.
+    Merge multiple ImagingDict objects into a single ImagingDict.
 
     This is essential for dask workflows where each node processes a subset
-    of (time, pol, chan) combinations and returns its own ReturnDict. Before
+    of (time, pol, chan) combinations and returns its own ImagingDict. Before
     making iteration control decisions, we need to merge all results.
 
     Merge Strategies:
@@ -170,8 +171,8 @@ def merge_return_dicts(
 
     Parameters:
     -----------
-    return_dicts : list of ReturnDict
-        List of ReturnDict objects to merge
+    imaging_dicts : list of ImagingDict
+        List of ImagingDict objects to merge
 
     merge_strategy : str, optional
         Strategy for handling conflicting keys. Options:
@@ -181,8 +182,8 @@ def merge_return_dicts(
 
     Returns:
     --------
-    merged : ReturnDict
-        Merged ReturnDict containing all data from input dicts
+    merged : ImagingDict
+        Merged ImagingDict containing all data from input dicts
 
     Raises:
     -------
@@ -192,25 +193,25 @@ def merge_return_dicts(
     Example:
     --------
     >>> # Dask workflow: 3 workers process different channels
-    >>> rd1 = ReturnDict()
+    >>> rd1 = ImagingDict()
     >>> rd1.add({'peakres': 0.5, 'iter_done': 100}, time=0, pol=0, chan=0)
     >>>
-    >>> rd2 = ReturnDict()
+    >>> rd2 = ImagingDict()
     >>> rd2.add({'peakres': 0.3, 'iter_done': 120}, time=0, pol=0, chan=1)
     >>>
-    >>> rd3 = ReturnDict()
+    >>> rd3 = ImagingDict()
     >>> rd3.add({'peakres': 0.4, 'iter_done': 110}, time=0, pol=0, chan=2)
     >>>
     >>> # Merge results
-    >>> merged = merge_return_dicts([rd1, rd2, rd3])
+    >>> merged = merge_imaging_dicts([rd1, rd2, rd3])
     >>> # merged now has 3 entries, one for each channel
     """
-    if not return_dicts:
-        return ReturnDict()
+    if not imaging_dicts:
+        return ImagingDict()
 
-    merged = ReturnDict()
+    merged = ImagingDict()
 
-    for rd in return_dicts:
+    for rd in imaging_dicts:
         for key, value in rd.data.items():
             if key in merged.data:
                 # Key conflict - apply merge strategy
@@ -258,23 +259,23 @@ def merge_return_dicts(
     return merged
 
 
-def get_peak_residual_from_returndict(
-    return_dict: ReturnDict,
+def get_peak_residual_from_imaging_dict(
+    imaging_dict: ImagingDict,
     use_mask: bool = True,
     time: int | None = None,
     pol: int | None = None,
     chan: int | None = None,
 ) -> float:
     """
-    Extract peak residual from ReturnDict structure.
+    Extract peak residual from ImagingDict structure.
 
     This adapts CASA's get_peakres() from imager_return_dict.py
-    to work with AstroViper's ReturnDict which uses (time, pol, chan) indexing.
+    to work with AstroViper's ImagingDict which uses (time, pol, chan) indexing.
 
     Parameters:
     -----------
-    return_dict : ReturnDict
-        ReturnDict instance containing deconvolution statistics
+    imaging_dict : ImagingDict
+        ImagingDict instance containing deconvolution statistics
 
     use_mask : bool, optional
         If True, use 'peakres' (masked). If False, use 'peakres_nomask' (default: True)
@@ -294,8 +295,8 @@ def get_peak_residual_from_returndict(
         Maximum peak residual across selected planes (latest value from history)
         Returns 0.0 if no valid data found
     """
-    selected = return_dict.sel(time=time, pol=pol, chan=chan)
-    _validate_returndict_selection(return_dict, selected, time, pol, chan)
+    selected = imaging_dict.sel(time=time, pol=pol, chan=chan)
+    _validate_imaging_dict_selection(imaging_dict, selected, time, pol, chan)
 
     if not isinstance(selected, list):
         selected = [selected] if selected is not None else []
@@ -326,19 +327,19 @@ def get_peak_residual_from_returndict(
     return peak
 
 
-def get_masksum_from_returndict(
-    return_dict: ReturnDict,
+def get_masksum_from_imaging_dict(
+    imaging_dict: ImagingDict,
     time: int | None = None,
     pol: int | None = None,
     chan: int | None = None,
 ) -> float:
     """
-    Calculate total mask sum from ReturnDict structure.
+    Calculate total mask sum from ImagingDict structure.
 
     Parameters:
     -----------
-    return_dict : ReturnDict
-        ReturnDict instance containing mask statistics
+    imaging_dict : ImagingDict
+        ImagingDict instance containing mask statistics
 
     time : int, optional
         Filter by specific time index (None = all times)
@@ -355,8 +356,8 @@ def get_masksum_from_returndict(
         Sum of latest mask values across selected planes
         Returns 0.0 if no mask data found
     """
-    selected = return_dict.sel(time=time, pol=pol, chan=chan)
-    _validate_returndict_selection(return_dict, selected, time, pol, chan)
+    selected = imaging_dict.sel(time=time, pol=pol, chan=chan)
+    _validate_imaging_dict_selection(imaging_dict, selected, time, pol, chan)
 
     if not isinstance(selected, list):
         selected = [selected] if selected is not None else []
@@ -376,19 +377,19 @@ def get_masksum_from_returndict(
     return total_masksum
 
 
-def get_iterations_done_from_returndict(
-    return_dict: ReturnDict,
+def get_iterations_done_from_imaging_dict(
+    imaging_dict: ImagingDict,
     time: int | None = None,
     pol: int | None = None,
     chan: int | None = None,
 ) -> int:
     """
-    Calculate total iterations done from ReturnDict structure.
+    Calculate total iterations done from ImagingDict structure.
 
     Parameters:
     -----------
-    return_dict : ReturnDict
-        ReturnDict instance containing iteration statistics
+    imaging_dict : ImagingDict
+        ImagingDict instance containing iteration statistics
 
     time : int, optional
         Filter by specific time index (None = all times)
@@ -404,8 +405,8 @@ def get_iterations_done_from_returndict(
     total_iterations : int
         Sum of all iterations done across entire history and selected planes
     """
-    selected = return_dict.sel(time=time, pol=pol, chan=chan)
-    _validate_returndict_selection(return_dict, selected, time, pol, chan)
+    selected = imaging_dict.sel(time=time, pol=pol, chan=chan)
+    _validate_imaging_dict_selection(imaging_dict, selected, time, pol, chan)
 
     if not isinstance(selected, list):
         selected = [selected] if selected is not None else []
@@ -425,22 +426,22 @@ def get_iterations_done_from_returndict(
     return total_iters
 
 
-def get_max_psf_sidelobe_from_returndict(
-    return_dict: ReturnDict,
+def get_max_psf_sidelobe_from_imaging_dict(
+    imaging_dict: ImagingDict,
     time: int | None = None,
     pol: int | None = None,
     chan: int | None = None,
 ) -> float:
     """
-    Extract maximum PSF sidelobe level from ReturnDict.
+    Extract maximum PSF sidelobe level from ImagingDict.
 
     This should be populated by psf_fitting.py analysis and stored
-    in the ReturnDict as 'max_psf_sidelobe'.
+    in the ImagingDict as 'max_psf_sidelobe'.
 
     Parameters:
     -----------
-    return_dict : ReturnDict
-        ReturnDict instance containing PSF analysis results
+    imaging_dict : ImagingDict
+        ImagingDict instance containing PSF analysis results
 
     time : int, optional
         Filter by specific time index (None = all times)
@@ -457,8 +458,8 @@ def get_max_psf_sidelobe_from_returndict(
         Maximum PSF sidelobe level across selected planes
         Returns 0.2 (conservative default) if not found
     """
-    selected = return_dict.sel(time=time, pol=pol, chan=chan)
-    _validate_returndict_selection(return_dict, selected, time, pol, chan)
+    selected = imaging_dict.sel(time=time, pol=pol, chan=chan)
+    _validate_imaging_dict_selection(imaging_dict, selected, time, pol, chan)
 
     if not isinstance(selected, list):
         selected = [selected] if selected is not None else []
@@ -478,17 +479,17 @@ def get_max_psf_sidelobe_from_returndict(
     return max_sidelobe
 
 
-def get_model_flux_from_returndict(
-    return_dict: ReturnDict,
+def get_model_flux_from_imaging_dict(
+    imaging_dict: ImagingDict,
     time: int | None = None,
     pol: int | None = None,
     chan: int | None = None,
 ) -> float:
     """
-    Extract cumulative model flux from ReturnDict structure.
+    Extract cumulative model flux from ImagingDict structure.
 
     The 'model_flux' field tracks the cumulative flux in the CLEAN model
-    at each major cycle. This function returns the latest (most recent)
+    at each imaging cycle. This function returns the latest (most recent)
     cumulative flux value from the history.
 
     **History Tracking**: The model_flux field is history-tracked (stored as
@@ -497,8 +498,8 @@ def get_model_flux_from_returndict(
 
     Parameters:
     -----------
-    return_dict : ReturnDict
-        ReturnDict instance containing deconvolution statistics
+    imaging_dict : ImagingDict
+        ImagingDict instance containing deconvolution statistics
 
     time : int, optional
         Filter by specific time index (None = all times)
@@ -517,14 +518,14 @@ def get_model_flux_from_returndict(
 
     Examples:
     ---------
-    >>> rd = ReturnDict()
+    >>> rd = ImagingDict()
     >>> rd.add({'model_flux': 1.5}, time=0, pol=0, chan=0)
     >>> rd.add({'model_flux': 2.3}, time=0, pol=0, chan=0)
-    >>> get_model_flux_from_returndict(rd, time=0, pol=0, chan=0)
+    >>> get_model_flux_from_imaging_dict(rd, time=0, pol=0, chan=0)
     2.3  # Latest cumulative flux
     """
-    selected = return_dict.sel(time=time, pol=pol, chan=chan)
-    _validate_returndict_selection(return_dict, selected, time, pol, chan)
+    selected = imaging_dict.sel(time=time, pol=pol, chan=chan)
+    _validate_imaging_dict_selection(imaging_dict, selected, time, pol, chan)
 
     if not isinstance(selected, list):
         selected = [selected] if selected is not None else []
@@ -556,84 +557,90 @@ class IterationController:
     Manages iteration control logic for deconvolution algorithms.
 
     The controller extracts needed statistics (peak residual, masksum, iterations
-    done, etc.) from ReturnDict internally, so callers don't need to manually
+    done, etc.) from ImagingDict internally, so callers don't need to manually
     pass individual values.
 
     Per-plane iteration control
     ---------------------------
     All iteration control is performed independently for every
-    ``(time, chan(frequency), pol)`` plane. ``niter`` is a per-plane array,
+    ``(time, chan(frequency), pol)`` plane. ``max_iter_remaining`` is a per-plane array,
     each plane carries its own stop code, and thresholds may differ per plane
-    (:meth:`per_plane_cycle_threshold`). The deconvolvers are driven with
-    per-plane ``niter`` and ``threshold`` arrays. The major-cycle loop
+    (:meth:`per_plane_threshold_per_cycle`). The deconvolvers are driven with
+    per-plane ``max_iter_per_cycle`` and ``threshold_per_cycle`` arrays. The imaging cycle loop
     continues while *any* plane is still active; the aggregate ``stopcode``
     reported by :meth:`check_convergence` is CONTINUE until every plane has
     stopped.
 
     Attributes:
     -----------
-    niter : numpy.ndarray or None
-        Per-plane remaining minor-cycle iterations, shape
+    max_iter_remaining : numpy.ndarray or None
+        Per-plane remaining model update iterations, shape
         ``(ntime, nchan, npol)`` indexed ``(time, chan, pol)``. Allocated
-        lazily the first time a ReturnDict is seen (the cube shape is unknown
-        at construction); ``None`` until then. ``_initial_niter`` holds the
+        lazily the first time a ImagingDict is seen (the cube shape is unknown
+        at construction); ``None`` until then. ``_max_iter`` holds the
         scalar per-plane budget.
-    nmajor : int
-        Maximum number of major cycles remaining (-1 = unlimited). Major cycles
+    max_cycles : int
+        Maximum number of imaging cycles remaining (-1 = unlimited). Imaging cycles
         are global (shared across all planes).
     threshold : float
         Global stopping threshold (in Jy or image units)
     gain : float
         CLEAN loop gain (typically 0.1)
-    cyclefactor : float
-        Multiplier for PSF sidelobe to set cyclethreshold
-    minpsffraction : float
-        Minimum PSF fraction for cyclethreshold calculation
-    maxpsffraction : float
-        Maximum PSF fraction for cyclethreshold calculation
-    cycleniter : int
-        Maximum iterations per minor cycle (-1 = use niter)
-    nsigma : float
+    psf_sidelobe_factor : float
+        Multiplier for PSF sidelobe to set threshold_per_cycle
+    min_psf_fraction : float
+        Minimum PSF fraction for threshold_per_cycle calculation
+    max_psf_fraction : float
+        Maximum PSF fraction for threshold_per_cycle calculation
+    max_iter_per_cycle : int
+        Maximum iterations one plane may run in a single model update
+        cycle. ``-1`` lets the adaptive ``threshold_per_cycle`` govern the
+        depth instead.
+    threshold_sigma : float
         N-sigma threshold for stopping (0 = disabled)
 
-    Major Cycle Tracking:
+    Imaging cycle Tracking:
     ---------------------
-    major_done : int
-        Number of major cycles completed so far
+    cycles_done : int
+        Number of imaging cycles completed so far
     total_iter_done : int
-        Total number of minor cycle iterations completed
+        Total number of model update iterations completed
 
     Convergence State:
     ------------------
     stopcode : StopCode
-        Current stop code as namedtuple (major, minor)
-        Access via stopcode.major and stopcode.minor
+        Current stop code as namedtuple (imaging, model_update)
+        Access via stopcode.imaging and stopcode.model_update
     stopdescription : str
         Human-readable description of stop reason
     """
 
     def __init__(
         self,
-        niter: int = 1000,
-        nmajor: int = -1,
+        max_iter: int = 1000,
+        max_cycles: int = -1,
         threshold: float = 0.0,
         gain: float = 0.1,
-        cyclefactor: float = 1.0,
-        minpsffraction: float = 0.05,
-        maxpsffraction: float = 0.8,
-        cycleniter: int = -1,
-        nsigma: float = 0.0,
+        psf_sidelobe_factor: float = 1.0,
+        min_psf_fraction: float = 0.05,
+        max_psf_fraction: float = 0.8,
+        max_iter_per_cycle: int = -1,
+        threshold_sigma: float = 0.0,
     ):
         """
         Initialize the iteration controller with deconvolution parameters.
 
         Parameters:
         -----------
-        niter : int, optional
-            Maximum total number of CLEAN iterations (default: 1000)
+        max_iter : int, optional
+            Maximum CLEAN iterations for ONE plane, summed over all
+            imaging cycles (default: 1000). Every plane is seeded
+            with this full value; no budget is shared or split between
+            planes. This is the deliberate difference from CASA's
+            image-wide ``niter``.
 
-        nmajor : int, optional
-            Maximum number of major cycles (default: -1 for unlimited)
+        max_cycles : int, optional
+            Maximum number of imaging cycles (default: -1 for unlimited)
 
         threshold : float, optional
             Global stopping threshold in Jy (default: 0.0)
@@ -641,51 +648,53 @@ class IterationController:
         gain : float, optional
             CLEAN loop gain, range (0, 1] (default: 0.1)
 
-        cyclefactor : float, optional
-            Multiplier for adaptive cyclethreshold (default: 1.0)
+        psf_sidelobe_factor : float, optional
+            Multiplier for adaptive threshold_per_cycle (default: 1.0)
 
-        minpsffraction : float, optional
+        min_psf_fraction : float, optional
             Minimum PSF sidelobe fraction (default: 0.05)
 
-        maxpsffraction : float, optional
+        max_psf_fraction : float, optional
             Maximum PSF sidelobe fraction (default: 0.8)
 
-        cycleniter : int, optional
-            Max iterations per minor cycle (default: -1)
+        max_iter_per_cycle : int, optional
+            Max iterations per model update (default: -1)
 
-        nsigma : float, optional
+        threshold_sigma : float, optional
             N-sigma threshold for stopping (default: 0.0, disabled)
         """
-        # Iteration limits. niter is per-plane and allocated lazily (the cube
-        # shape is not known until the first ReturnDict is seen); until then
-        # _initial_niter holds the scalar per-plane budget. See _ensure_state.
-        self._initial_niter = niter
-        self.niter = None
-        # Per-plane stop codes, same shape as self.niter (allocated lazily).
-        self.stopcode_major = None
-        self.stopcode_minor = None
-        self.nmajor = nmajor
+        # Iteration limits. max_iter is per-plane and allocated lazily (the cube
+        # shape is not known until the first ImagingDict is seen); until then
+        # _max_iter holds the scalar per-plane budget. See _ensure_state.
+        self._max_iter = max_iter
+        self.max_iter_remaining = None
+        # Per-plane stop codes, same shape as self.max_iter_remaining (allocated lazily).
+        self.stop_code_imaging = None
+        self.stop_code_model_update = None
+        self.max_cycles = max_cycles
 
         # Threshold parameters
         self.threshold = threshold
-        self.nsigma = nsigma
+        self.threshold_sigma = threshold_sigma
 
         # CLEAN parameters
         self.gain = gain
-        self.cyclefactor = cyclefactor
-        self.minpsffraction = minpsffraction
-        self.maxpsffraction = maxpsffraction
-        self.cycleniter = cycleniter
+        self.psf_sidelobe_factor = psf_sidelobe_factor
+        self.min_psf_fraction = min_psf_fraction
+        self.max_psf_fraction = max_psf_fraction
+        self.max_iter_per_cycle = max_iter_per_cycle
 
         # Tracking state
-        self.major_done = 0
+        self.cycles_done = 0
         self.total_iter_done = 0
 
         # Convergence state (namedtuple matching CASA). self.stopcode is the
-        # aggregate over all planes; per-plane codes live in stopcode_major /
-        # stopcode_minor (allocated lazily alongside niter).
-        self.stopcode = StopCode(major=MAJOR_CONTINUE, minor=MINOR_CONTINUE)
-        self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_CONTINUE]
+        # aggregate over all planes; per-plane codes live in stop_code_imaging /
+        # stop_code_model_update (allocated lazily alongside max_iter).
+        self.stopcode = StopCode(
+            imaging=IMAGING_CONTINUE, model_update=MODEL_UPDATE_CONTINUE
+        )
+        self.stopdescription = IMAGING_STOP_DESCRIPTIONS[IMAGING_CONTINUE]
 
     # ------------------------------------------------------------------
     # Per-plane state helpers
@@ -693,7 +702,7 @@ class IterationController:
 
     @staticmethod
     def _matches(key, time, pol, chan):
-        """True if a ReturnDict key matches the (time, pol, chan) selection."""
+        """True if a ImagingDict key matches the (time, pol, chan) selection."""
         return (
             (time is None or key.time == time)
             and (pol is None or key.pol == pol)
@@ -702,10 +711,10 @@ class IterationController:
 
     @staticmethod
     def _key_index(key):
-        """Map a ReturnDict Key(time, pol, chan) to a (time, chan, pol) index.
+        """Map a ImagingDict Key(time, pol, chan) to a (time, chan, pol) index.
 
         The per-plane arrays follow the image-cube axis order
-        ``(time, chan, pol)``, whereas ReturnDict keys are
+        ``(time, chan, pol)``, whereas ImagingDict keys are
         ``(time, pol, chan)``.
         """
         return (int(key.time), int(key.chan), int(key.pol))
@@ -724,22 +733,27 @@ class IterationController:
         """Allocate (or grow) the per-plane arrays to the ``needed`` shape.
 
         ``needed`` is ``(ntime, nchan, npol)``. Newly allocated planes start at
-        the full per-plane budget (``_initial_niter``) with a CONTINUE stop
+        the full per-plane budget (``_max_iter``) with a CONTINUE stop
         code. Growing only ever enlarges the arrays (existing values kept).
         """
-        if self.niter is None:
-            self.niter = np.full(needed, self._initial_niter, dtype=int)
-            self.stopcode_major = np.full(needed, MAJOR_CONTINUE, dtype=int)
-            self.stopcode_minor = np.full(needed, MINOR_CONTINUE, dtype=int)
-        elif any(n > c for n, c in zip(needed, self.niter.shape, strict=False)):
-            grown = tuple(
-                max(n, c) for n, c in zip(needed, self.niter.shape, strict=False)
+        if self.max_iter_remaining is None:
+            self.max_iter_remaining = np.full(needed, self._max_iter, dtype=int)
+            self.stop_code_imaging = np.full(needed, IMAGING_CONTINUE, dtype=int)
+            self.stop_code_model_update = np.full(
+                needed, MODEL_UPDATE_CONTINUE, dtype=int
             )
-            sl = tuple(slice(0, d) for d in self.niter.shape)
+        elif any(
+            n > c for n, c in zip(needed, self.max_iter_remaining.shape, strict=False)
+        ):
+            grown = tuple(
+                max(n, c)
+                for n, c in zip(needed, self.max_iter_remaining.shape, strict=False)
+            )
+            sl = tuple(slice(0, d) for d in self.max_iter_remaining.shape)
             for attr, fill in (
-                ("niter", self._initial_niter),
-                ("stopcode_major", MAJOR_CONTINUE),
-                ("stopcode_minor", MINOR_CONTINUE),
+                ("max_iter", self._max_iter),
+                ("stop_code_imaging", IMAGING_CONTINUE),
+                ("stop_code_model_update", MODEL_UPDATE_CONTINUE),
             ):
                 new = np.full(grown, fill, dtype=int)
                 new[sl] = getattr(self, attr)
@@ -750,18 +764,18 @@ class IterationController:
 
         Iteration control is performed independently for every
         ``(time, chan, pol)`` plane. Callers that know the cube shape up front
-        (e.g. before the first deconvolution) call this so that ``niter`` is a
+        (e.g. before the first deconvolution) call this so that ``max_iter_remaining`` is a
         fully-sized per-plane array by the time the deconvolver needs it.
         """
         self._ensure_shape((int(ntime), int(nchan), int(npol)))
 
-    def _ensure_state(self, return_dict):
-        """Allocate (or grow) the per-plane arrays to cover ``return_dict``.
+    def _ensure_state(self, imaging_dict):
+        """Allocate (or grow) the per-plane arrays to cover ``imaging_dict``.
 
-        The cube shape is inferred from the ReturnDict keys (max index + 1 on
-        each axis). A no-op when the ReturnDict is empty.
+        The cube shape is inferred from the ImagingDict keys (max index + 1 on
+        each axis). A no-op when the ImagingDict is empty.
         """
-        keys = list(return_dict.data.keys())
+        keys = list(imaging_dict.data.keys())
         if not keys:
             return
         needed = (
@@ -773,27 +787,27 @@ class IterationController:
 
     def calculate_cycle_controls(
         self,
-        return_dict: ReturnDict,
+        imaging_dict: ImagingDict,
         time: int | None = None,
         pol: int | None = None,
         chan: int | None = None,
     ) -> tuple[int, float]:
         """
-        Calculate cycleniter and cyclethreshold for the next minor cycle.
+        Calculate max_iter_per_cycle and threshold_per_cycle for the next model update.
 
         Logic:
         ------
-        1. Extract max_psf_sidelobe and peak_residual from return_dict
-        2. Start with remaining iterations (niter)
-        3. If cycleniter is set (>= 0), use minimum of (cycleniter, niter)
-        4. Calculate PSF fraction = max_psf_sidelobe * cyclefactor
-        5. Clamp PSF fraction to [minpsffraction, maxpsffraction]
-        6. cyclethreshold = max(psf_fraction * peak_residual, threshold)
+        1. Extract max_psf_sidelobe and peak_residual from imaging_dict
+        2. Start with remaining iterations (max_iter_remaining)
+        3. If max_iter_per_cycle is set (>= 0), use minimum of (max_iter_per_cycle, max_iter_remaining)
+        4. Calculate PSF fraction = max_psf_sidelobe * psf_sidelobe_factor
+        5. Clamp PSF fraction to [min_psf_fraction, max_psf_fraction]
+        6. threshold_per_cycle = max(psf_fraction * peak_residual, threshold)
 
         Parameters:
         -----------
-        return_dict : ReturnDict
-            ReturnDict containing deconvolution statistics including:
+        imaging_dict : ImagingDict
+            ImagingDict containing deconvolution statistics including:
             - 'max_psf_sidelobe': Maximum PSF sidelobe level
             - 'peakres': Current peak residual
 
@@ -808,77 +822,79 @@ class IterationController:
 
         Returns:
         --------
-        use_cycleniter : int
-            Number of iterations to perform in this minor cycle
+        use_max_iter_per_cycle : int
+            Number of iterations to perform in this model update
 
-        cyclethreshold : float
-            Stopping threshold for this minor cycle
+        threshold_per_cycle : float
+            Stopping threshold for this model update
 
         Example:
         --------
-        >>> controller = IterationController(niter=1000, cyclefactor=1.5)
-        >>> # return_dict populated by deconvolver and PSF analysis
-        >>> cycleniter, cyclethresh = controller.calculate_cycle_controls(return_dict)
+        >>> controller = IterationController(max_iter=1000, psf_sidelobe_factor=1.5)
+        >>> # imaging_dict populated by deconvolver and PSF analysis
+        >>> max_iter_per_cycle, threshold_per_cycle = controller.calculate_cycle_controls(imaging_dict)
         """
-        # Extract needed values from ReturnDict
-        max_psf_sidelobe = get_max_psf_sidelobe_from_returndict(
-            return_dict, time=time, pol=pol, chan=chan
+        # Extract needed values from ImagingDict
+        max_psf_sidelobe = get_max_psf_sidelobe_from_imaging_dict(
+            imaging_dict, time=time, pol=pol, chan=chan
         )
-        peak_residual = get_peak_residual_from_returndict(
-            return_dict, use_mask=True, time=time, pol=pol, chan=chan
+        peak_residual = get_peak_residual_from_imaging_dict(
+            imaging_dict, use_mask=True, time=time, pol=pol, chan=chan
         )
 
         # Start with all remaining iterations. The deconvolver takes a single
-        # scalar cycleniter, so the per-plane budget is reduced to the largest
+        # scalar max_iter_per_cycle, so the per-plane budget is reduced to the largest
         # remaining budget across planes. Before the per-plane array exists,
         # fall back to the initial per-plane budget.
-        if self.niter is None:
-            use_cycleniter = self._initial_niter
+        if self.max_iter_remaining is None:
+            use_max_iter_per_cycle = self._max_iter
         else:
-            use_cycleniter = int(self.niter.max())
+            use_max_iter_per_cycle = int(self.max_iter_remaining.max())
 
-        # If user forced a specific cycleniter, respect it
-        if self.cycleniter >= 0:
-            use_cycleniter = min(self.cycleniter, use_cycleniter)
+        # If user forced a specific max_iter_per_cycle, respect it
+        if self.max_iter_per_cycle >= 0:
+            use_max_iter_per_cycle = min(
+                self.max_iter_per_cycle, use_max_iter_per_cycle
+            )
 
-        # Calculate adaptive PSF fraction for cyclethreshold
-        psf_fraction = max_psf_sidelobe * self.cyclefactor
+        # Calculate adaptive PSF fraction for threshold_per_cycle
+        psf_fraction = max_psf_sidelobe * self.psf_sidelobe_factor
 
         # Clamp to user-specified bounds
-        psf_fraction = max(psf_fraction, self.minpsffraction)
-        psf_fraction = min(psf_fraction, self.maxpsffraction)
+        psf_fraction = max(psf_fraction, self.min_psf_fraction)
+        psf_fraction = min(psf_fraction, self.max_psf_fraction)
 
-        # Set cyclethreshold as fraction of current peak residual
-        cyclethreshold = psf_fraction * peak_residual
-        cyclethreshold = max(cyclethreshold, self.threshold)
+        # Set threshold_per_cycle as fraction of current peak residual
+        threshold_per_cycle = psf_fraction * peak_residual
+        threshold_per_cycle = max(threshold_per_cycle, self.threshold)
 
-        return int(use_cycleniter), cyclethreshold
+        return int(use_max_iter_per_cycle), threshold_per_cycle
 
-    def per_plane_cycle_threshold(
+    def per_plane_threshold_per_cycle(
         self,
-        return_dict: ReturnDict,
+        imaging_dict: ImagingDict,
         time: int | None = None,
         pol: int | None = None,
         chan: int | None = None,
     ) -> "np.ndarray":
-        """Compute the per-plane minor-cycle ``cyclethreshold`` array.
+        """Compute the per-plane model update ``threshold_per_cycle`` array.
 
-        The adaptive cyclethreshold is allowed to differ for every
-        ``(time, chan, pol)`` plane. Each plane present in ``return_dict`` gets
+        The adaptive threshold_per_cycle is allowed to differ for every
+        ``(time, chan, pol)`` plane. Each plane present in ``imaging_dict`` gets
         its own value::
 
-            clamp(max_psf_sidelobe * cyclefactor, minpsffraction, maxpsffraction)
+            clamp(max_psf_sidelobe * psf_sidelobe_factor, min_psf_fraction, max_psf_fraction)
                 * peak_residual,
 
         floored at the absolute user ``threshold``. Because each plane uses its
         own ``peak_residual``, the result is independent of how the cube was
-        chunked across tasks. Planes not present in ``return_dict`` fall back to
-        the representative scalar cyclethreshold from
+        chunked across tasks. Planes not present in ``imaging_dict`` fall back to
+        the representative scalar threshold_per_cycle from
         :meth:`calculate_cycle_controls`.
 
         Parameters
         ----------
-        return_dict : ReturnDict
+        imaging_dict : ImagingDict
             Per-plane statistics (``peakres`` and ``max_psf_sidelobe``).
         time, pol, chan : int, optional
             Restrict the computation to a selection (otherwise all planes).
@@ -886,32 +902,34 @@ class IterationController:
         Returns
         -------
         numpy.ndarray
-            ``(ntime, nchan, npol)`` array of per-plane cyclethresholds, indexed
-            ``(time, chan, pol)`` to match :attr:`niter`.
+            ``(ntime, nchan, npol)`` array of per-plane threshold_per_cycle values, indexed
+            ``(time, chan, pol)`` to match :attr:`max_iter_remaining`.
         """
-        self._ensure_state(return_dict)
-        # Representative cyclethreshold, used only as the fallback for any plane
-        # that has no entry in return_dict.
-        _, fallback_cyclethreshold = self.calculate_cycle_controls(
-            return_dict, time=time, pol=pol, chan=chan
+        self._ensure_state(imaging_dict)
+        # Representative threshold_per_cycle, used only as the fallback for any plane
+        # that has no entry in imaging_dict.
+        _, fallback_threshold_per_cycle = self.calculate_cycle_controls(
+            imaging_dict, time=time, pol=pol, chan=chan
         )
-        cyclethreshold = np.full(self.niter.shape, fallback_cyclethreshold, dtype=float)
-        for key, fields in return_dict.data.items():
+        threshold_per_cycle = np.full(
+            self.max_iter_remaining.shape, fallback_threshold_per_cycle, dtype=float
+        )
+        for key, fields in imaging_dict.data.items():
             if not self._matches(key, time, pol, chan):
                 continue
             idx = self._key_index(key)
             peak = abs(self._latest(fields, "peakres", 0.0))
             sidelobe = self._latest(fields, "max_psf_sidelobe", 0.2)
             frac = min(
-                max(sidelobe * self.cyclefactor, self.minpsffraction),
-                self.maxpsffraction,
+                max(sidelobe * self.psf_sidelobe_factor, self.min_psf_fraction),
+                self.max_psf_fraction,
             )
-            cyclethreshold[idx] = max(frac * peak, self.threshold)
-        return cyclethreshold
+            threshold_per_cycle[idx] = max(frac * peak, self.threshold)
+        return threshold_per_cycle
 
     def check_convergence(
         self,
-        return_dict: ReturnDict,
+        imaging_dict: ImagingDict,
         time: int | None = None,
         pol: int | None = None,
         chan: int | None = None,
@@ -921,26 +939,26 @@ class IterationController:
 
         This implements CASA's convergence checking from imager_return_dict.py:463-565.
 
-        CASA uses a namedtuple StopCode(major, minor) to separate major cycle and
-        minor cycle convergence criteria. This handles the "degeneracy in stopcode
+        StopCode(imaging, model_update) separates the imaging cycle and
+        model update convergence criteria. This handles the "degeneracy in stopcode
         numbers" (CASA comment line 476-477).
 
-        Major Cycle Stopping Criteria (in order of precedence):
+        Imaging cycle Stopping Criteria (in order of precedence):
         --------------------------------------------------------
         1. Zero mask (stopcode 7): No valid pixels to clean
-        2. Iteration limit (stopcode 1): niter <= 0
+        2. Iteration limit (stopcode 1): max_iter_remaining <= 0
         3. Threshold reached (stopcode 2): peak_residual <= threshold
-        4. Major cycle limit (stopcode 9): nmajor == 0 (if not -1)
+        4. Imaging cycle limit (stopcode 9): max_cycles == 0 (if not -1)
 
-        Minor Cycle Stopping Criteria:
+        Model update Stopping Criteria:
         -------------------------------
-        - Checked by deconvolver (cycleniter, cyclethreshold)
-        - Can be propagated via return_dict if needed
+        - Checked by deconvolver (max_iter_per_cycle, threshold_per_cycle)
+        - Can be propagated via imaging_dict if needed
 
         Parameters:
         -----------
-        return_dict : ReturnDict
-            ReturnDict containing deconvolution statistics including:
+        imaging_dict : ImagingDict
+            ImagingDict containing deconvolution statistics including:
             - 'peakres': Current peak residual
             - 'masksum': Sum of mask (number of valid pixels)
 
@@ -956,11 +974,11 @@ class IterationController:
         Returns:
         --------
         stopcode : StopCode
-            Aggregate StopCode(major, minor) across the selected planes.
-            major=0 (CONTINUE) while *any* selected plane is still active;
+            Aggregate StopCode(imaging, model_update) across the selected planes.
+            imaging=0 (CONTINUE) while *any* selected plane is still active;
             once every plane has stopped it is a representative nonzero code
             (the shared code if uniform, else the largest). Per-plane codes
-            are available in ``stopcode_major`` / ``stopcode_minor``.
+            are available in ``stop_code_imaging`` / ``stop_code_model_update``.
 
         stopdescription : str
             Human-readable description of the aggregate stop reason.
@@ -969,102 +987,106 @@ class IterationController:
         -------------
         Evaluates each selected ``(time, pol, chan)`` plane independently and
         writes that plane's own StopCode and description into the 'stop_code'
-        and 'stop_description' fields of the corresponding ReturnDict entry,
+        and 'stop_description' fields of the corresponding ImagingDict entry,
         overwriting the placeholder set by the deconvolver. Also allocates /
-        updates the per-plane ``niter``, ``stopcode_major`` and
-        ``stopcode_minor`` arrays.
+        updates the per-plane ``max_iter_remaining``, ``stop_code_imaging`` and
+        ``stop_code_model_update`` arrays.
 
         Example:
         --------
-        >>> controller = IterationController(niter=100, threshold=0.01)
+        >>> controller = IterationController(max_iter=100, threshold=0.01)
         >>> # After running deconvolution...
-        >>> stopcode, desc = controller.check_convergence(return_dict)
-        >>> if stopcode.major != 0:
+        >>> stopcode, desc = controller.check_convergence(imaging_dict)
+        >>> if stopcode.imaging != 0:
         >>>     print(f"Converged: {desc}")
-        >>> # Check both major and minor
-        >>> if stopcode.major != 0 or stopcode.minor != 0:
-        >>>     print(f"Stopped: major={stopcode.major}, minor={stopcode.minor}")
+        >>> # Check both the imaging and the model update stop code
+        >>> if stopcode.imaging != 0 or stopcode.model_update != 0:
+        >>>     print(f"Stopped: imaging={stopcode.imaging}, model_update={stopcode.model_update}")
         """
-        self._ensure_state(return_dict)
+        self._ensure_state(imaging_dict)
 
         # Evaluate every selected plane independently and record its own stop
         # code. The aggregate returned to the caller is CONTINUE while any
         # plane is still active.
-        plane_majors = []
-        for key, fields in return_dict.data.items():
+        plane_imaging_codes = []
+        for key, fields in imaging_dict.data.items():
             if not self._matches(key, time, pol, chan):
                 continue
             idx = self._key_index(key)
             peak_residual = abs(self._latest(fields, "peakres", 0.0))
             masksum = self._latest(fields, "masksum", 0)
-            remaining = int(self.niter[idx])
+            remaining = int(self.max_iter_remaining[idx])
 
-            # Major cycle stopping criteria, in priority order (per plane):
-            #   1 zero mask, 2 iteration limit, 3 threshold, 4 major-cycle limit
+            # Imaging cycle stopping criteria, in priority order (per plane):
+            #   1 zero mask, 2 iteration limit, 3 threshold, 4 imaging cycle limit
             if masksum == 0:
-                maj = MAJOR_ZERO_MASK
+                maj = IMAGING_ZERO_MASK
             elif remaining <= 0:
-                maj = MAJOR_ITER_LIMIT
+                maj = IMAGING_MAX_ITER
             elif self.threshold > 0 and peak_residual <= self.threshold:
-                maj = MAJOR_THRESHOLD
-            elif self.nmajor != -1 and self.nmajor <= 0:
-                maj = MAJOR_CYCLE_LIMIT
+                maj = IMAGING_THRESHOLD
+            elif self.max_cycles != -1 and self.max_cycles <= 0:
+                maj = IMAGING_MAX_CYCLES
             else:
-                maj = MAJOR_CONTINUE
+                maj = IMAGING_CONTINUE
 
-            self.stopcode_major[idx] = maj
-            self.stopcode_minor[idx] = MINOR_CONTINUE
-            plane_majors.append(maj)
+            self.stop_code_imaging[idx] = maj
+            self.stop_code_model_update[idx] = MODEL_UPDATE_CONTINUE
+            plane_imaging_codes.append(maj)
 
-            # Stamp this plane's stop code/description into the ReturnDict,
+            # Stamp this plane's stop code/description into the ImagingDict,
             # replacing the placeholder set by the deconvolver. Written
             # directly (not via add()) so it stays a single value.
-            fields["stop_code"] = StopCode(major=maj, minor=MINOR_CONTINUE)
-            fields["stop_description"] = MAJOR_STOPCODE_DESCRIPTIONS[maj]
+            fields["stop_code"] = StopCode(
+                imaging=maj, model_update=MODEL_UPDATE_CONTINUE
+            )
+            fields["stop_description"] = IMAGING_STOP_DESCRIPTIONS[maj]
 
         # Aggregate across the selected planes.
-        if not plane_majors:
-            # No matching planes (e.g. an empty ReturnDict): nothing left to
+        if not plane_imaging_codes:
+            # No matching planes (e.g. an empty ImagingDict): nothing left to
             # clean, so report a stop (matches the historical zero-mask result).
-            agg_major = MAJOR_ZERO_MASK
-            self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_ZERO_MASK]
-        elif any(m == MAJOR_CONTINUE for m in plane_majors):
-            agg_major = MAJOR_CONTINUE
-            self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_CONTINUE]
-        elif len(set(plane_majors)) == 1:
-            agg_major = plane_majors[0]
-            self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[agg_major]
+            agg_imaging = IMAGING_ZERO_MASK
+            self.stopdescription = IMAGING_STOP_DESCRIPTIONS[IMAGING_ZERO_MASK]
+        elif any(m == IMAGING_CONTINUE for m in plane_imaging_codes):
+            agg_imaging = IMAGING_CONTINUE
+            self.stopdescription = IMAGING_STOP_DESCRIPTIONS[IMAGING_CONTINUE]
+        elif len(set(plane_imaging_codes)) == 1:
+            agg_imaging = plane_imaging_codes[0]
+            self.stopdescription = IMAGING_STOP_DESCRIPTIONS[agg_imaging]
         else:
             # All planes stopped, but for different reasons.
-            agg_major = max(plane_majors)
+            agg_imaging = max(plane_imaging_codes)
             self.stopdescription = "All planes stopped (mixed reasons)"
 
-        self.stopcode = StopCode(major=agg_major, minor=MINOR_CONTINUE)
+        self.stopcode = StopCode(
+            imaging=agg_imaging, model_update=MODEL_UPDATE_CONTINUE
+        )
         return self.stopcode, self.stopdescription
 
     def update_counts(
         self,
-        return_dict: ReturnDict,
+        imaging_dict: ImagingDict,
         time: int | None = None,
         pol: int | None = None,
         chan: int | None = None,
     ) -> None:
         """
-        Update iteration counts after a major cycle completes.
+        Update iteration counts after a imaging cycle completes.
 
         Updates:
         --------
-        1. Extracts iterations_done from return_dict
-        2. Decrements niter by iterations_done
-        3. Decrements nmajor by 1 (if not -1)
-        4. Increments major_done and total_iter_done
+        1. Extracts iterations_done from imaging_dict
+        2. Decrements max_iter_remaining by iterations_done
+        3. Decrements max_cycles by 1 (if not -1)
+        4. Increments cycles_done and total_iter_done
         5. Enforces floor values (no negatives)
 
         Parameters:
         -----------
-        return_dict : ReturnDict
-            ReturnDict containing iteration statistics including:
-            - 'iter_done': Number of iterations completed in this major cycle
+        imaging_dict : ImagingDict
+            ImagingDict containing iteration statistics including:
+            - 'iter_done': Number of iterations completed in this imaging cycle
 
         time : int, optional
             Filter by specific time index
@@ -1077,49 +1099,53 @@ class IterationController:
 
         Example:
         --------
-        >>> controller = IterationController(niter=1000, nmajor=5)
-        >>> # After major cycle completes...
-        >>> controller.update_counts(return_dict)
-        >>> print(controller.niter, controller.nmajor, controller.major_done)
-        900 4 1
+        >>> controller = IterationController(max_iter=1000, max_cycles=5)
+        >>> # After imaging cycle completes...
+        >>> controller.update_counts(imaging_dict)
+        >>> # max_iter_remaining is an (ntime, nchan, npol) array, one
+        >>> # remaining budget per plane -- not a scalar.
+        >>> print(controller.max_iter_remaining, controller.max_cycles, controller.cycles_done)
+        [[[900]]] 4 1
         """
-        # Only update if not converged (check both major and minor)
+        # Only update if not converged (check both the imaging and the model update code)
         if (
-            self.stopcode.major != MAJOR_CONTINUE
-            or self.stopcode.minor != MINOR_CONTINUE
+            self.stopcode.imaging != IMAGING_CONTINUE
+            or self.stopcode.model_update != MODEL_UPDATE_CONTINUE
         ):
             return
 
-        self._ensure_state(return_dict)
+        self._ensure_state(imaging_dict)
 
-        # Decrement the global major cycle count (major cycles are shared
+        # Decrement the global imaging cycle count (imaging cycles are shared
         # across planes) once per call.
-        if self.nmajor != -1:
-            self.nmajor = max(self.nmajor - 1, 0)
+        if self.max_cycles != -1:
+            self.max_cycles = max(self.max_cycles - 1, 0)
 
         # Decrement each selected plane's remaining iterations by the work it
         # did this cycle. Planes that already stopped are left untouched.
         cycle_iters = 0
-        for key, fields in return_dict.data.items():
+        for key, fields in imaging_dict.data.items():
             if not self._matches(key, time, pol, chan):
                 continue
             idx = self._key_index(key)
             iters = int(self._latest(fields, "iter_done", 0))
-            if self.stopcode_major[idx] == MAJOR_CONTINUE:
-                self.niter[idx] = max(int(self.niter[idx]) - iters, 0)
+            if self.stop_code_imaging[idx] == IMAGING_CONTINUE:
+                self.max_iter_remaining[idx] = max(
+                    int(self.max_iter_remaining[idx]) - iters, 0
+                )
             cycle_iters += iters
 
         # Update tracking counters
-        self.major_done += 1
+        self.cycles_done += 1
         self.total_iter_done += cycle_iters
 
     def update_parameters(
         self,
-        niter: int | None = None,
-        cycleniter: int | None = None,
-        nmajor: int | None = None,
+        max_iter: int | None = None,
+        max_iter_per_cycle: int | None = None,
+        max_cycles: int | None = None,
         threshold: float | None = None,
-        cyclefactor: float | None = None,
+        psf_sidelobe_factor: float | None = None,
     ) -> tuple[int, str]:
         """
         Update iteration control parameters with validation.
@@ -1129,19 +1155,19 @@ class IterationController:
 
         Parameters:
         -----------
-        niter : int, optional
+        max_iter : int, optional
             New maximum iteration count
 
-        cycleniter : int, optional
-            New iterations per minor cycle
+        max_iter_per_cycle : int, optional
+            New iterations per model update
 
-        nmajor : int, optional
-            New major cycle limit
+        max_cycles : int, optional
+            New imaging cycle limit
 
         threshold : float or str, optional
             New stopping threshold (can include units like "10mJy")
 
-        cyclefactor : float, optional
+        psf_sidelobe_factor : float, optional
             New cycle factor for adaptive thresholding
 
         Returns:
@@ -1152,38 +1178,38 @@ class IterationController:
         error_message : str
             Empty string if successful, error description if failed
         """
-        # Update and validate niter (the per-plane budget). Broadcast to all
-        # existing planes if the per-plane array has already been allocated.
-        if niter is not None:
+        # Update and validate max_iter (the total budget) and reset the per-plane
+        # max_iter_remaining array to it if that array has already been allocated.
+        if max_iter is not None:
             try:
-                niter_int = int(niter)
-                if niter_int < -1:
-                    return -1, "niter must be >= -1"
-                self._initial_niter = niter_int
-                if self.niter is not None:
-                    self.niter[...] = niter_int
+                max_iter_int = int(max_iter)
+                if max_iter_int < -1:
+                    return -1, "max_iter must be >= -1"
+                self._max_iter = max_iter_int
+                if self.max_iter_remaining is not None:
+                    self.max_iter_remaining[...] = max_iter_int
             except (ValueError, TypeError):
-                return -1, "niter must be an integer"
+                return -1, "max_iter must be an integer"
 
-        # Update and validate cycleniter
-        if cycleniter is not None:
+        # Update and validate max_iter_per_cycle
+        if max_iter_per_cycle is not None:
             try:
-                cycleniter_int = int(cycleniter)
-                if cycleniter_int < -1:
-                    return -1, "cycleniter must be >= -1"
-                self.cycleniter = cycleniter_int
+                max_iter_per_cycle_int = int(max_iter_per_cycle)
+                if max_iter_per_cycle_int < -1:
+                    return -1, "max_iter_per_cycle must be >= -1"
+                self.max_iter_per_cycle = max_iter_per_cycle_int
             except (ValueError, TypeError):
-                return -1, "cycleniter must be an integer"
+                return -1, "max_iter_per_cycle must be an integer"
 
-        # Update and validate nmajor
-        if nmajor is not None:
+        # Update and validate max_cycles
+        if max_cycles is not None:
             try:
-                nmajor_int = int(nmajor)
-                if nmajor_int < -1:
-                    return -1, "nmajor must be >= -1"
-                self.nmajor = nmajor_int
+                max_cycles_int = int(max_cycles)
+                if max_cycles_int < -1:
+                    return -1, "max_cycles must be >= -1"
+                self.max_cycles = max_cycles_int
             except (ValueError, TypeError):
-                return -1, "nmajor must be an integer"
+                return -1, "max_cycles must be an integer"
 
         # Update and validate threshold
         if threshold is not None:
@@ -1204,15 +1230,15 @@ class IterationController:
                     "threshold must be a number, or a number with units (Jy/mJy/uJy)",
                 )
 
-        # Update and validate cyclefactor
-        if cyclefactor is not None:
+        # Update and validate psf_sidelobe_factor
+        if psf_sidelobe_factor is not None:
             try:
-                cyclefactor_float = float(cyclefactor)
-                if cyclefactor_float <= 0:
-                    return -1, "cyclefactor must be > 0"
-                self.cyclefactor = cyclefactor_float
+                psf_sidelobe_factor_float = float(psf_sidelobe_factor)
+                if psf_sidelobe_factor_float <= 0:
+                    return -1, "psf_sidelobe_factor must be > 0"
+                self.psf_sidelobe_factor = psf_sidelobe_factor_float
             except (ValueError, TypeError):
-                return -1, "cyclefactor must be a number"
+                return -1, "psf_sidelobe_factor must be a number"
 
         return 0, ""
 
@@ -1231,43 +1257,52 @@ class IterationController:
 
     def reset(self) -> None:
         """Reset the iteration controller to initial state."""
-        if self.niter is not None:
-            self.niter[...] = self._initial_niter
-            self.stopcode_major[...] = MAJOR_CONTINUE
-            self.stopcode_minor[...] = MINOR_CONTINUE
-        self.major_done = 0
+        if self.max_iter_remaining is not None:
+            self.max_iter_remaining[...] = self._max_iter
+            self.stop_code_imaging[...] = IMAGING_CONTINUE
+            self.stop_code_model_update[...] = MODEL_UPDATE_CONTINUE
+        self.cycles_done = 0
         self.total_iter_done = 0
-        self.stopcode = StopCode(major=MAJOR_CONTINUE, minor=MINOR_CONTINUE)
-        self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_CONTINUE]
+        self.stopcode = StopCode(
+            imaging=IMAGING_CONTINUE, model_update=MODEL_UPDATE_CONTINUE
+        )
+        self.stopdescription = IMAGING_STOP_DESCRIPTIONS[IMAGING_CONTINUE]
 
     def reset_stopcode(self) -> None:
         """Reset the aggregate and per-plane stop codes of the controller."""
-        self.stopcode = StopCode(major=MAJOR_CONTINUE, minor=MINOR_CONTINUE)
-        self.stopdescription = MAJOR_STOPCODE_DESCRIPTIONS[MAJOR_CONTINUE]
-        if self.stopcode_major is not None:
-            self.stopcode_major[...] = MAJOR_CONTINUE
-            self.stopcode_minor[...] = MINOR_CONTINUE
+        self.stopcode = StopCode(
+            imaging=IMAGING_CONTINUE, model_update=MODEL_UPDATE_CONTINUE
+        )
+        self.stopdescription = IMAGING_STOP_DESCRIPTIONS[IMAGING_CONTINUE]
+        if self.stop_code_imaging is not None:
+            self.stop_code_imaging[...] = IMAGING_CONTINUE
+            self.stop_code_model_update[...] = MODEL_UPDATE_CONTINUE
 
     def get_state(self) -> dict[str, Any]:
         """Get current state of the iteration controller as a dictionary.
 
-        Note: The stopcode is serialized as a dict with 'major' and 'minor' keys
+        Note: The stopcode is serialized as a dict with 'imaging' and 'model_update' keys
         to preserve the namedtuple structure across serialization.
         """
         return {
-            "niter": self.niter.tolist() if self.niter is not None else None,
-            "nmajor": self.nmajor,
-            "initial_niter": self._initial_niter,
+            "max_iter_remaining": self.max_iter_remaining.tolist()
+            if self.max_iter_remaining is not None
+            else None,
+            "max_cycles": self.max_cycles,
+            "max_iter": self._max_iter,
             "threshold": self.threshold,
-            "nsigma": self.nsigma,
+            "threshold_sigma": self.threshold_sigma,
             "gain": self.gain,
-            "cyclefactor": self.cyclefactor,
-            "minpsffraction": self.minpsffraction,
-            "maxpsffraction": self.maxpsffraction,
-            "cycleniter": self.cycleniter,
-            "major_done": self.major_done,
+            "psf_sidelobe_factor": self.psf_sidelobe_factor,
+            "min_psf_fraction": self.min_psf_fraction,
+            "max_psf_fraction": self.max_psf_fraction,
+            "max_iter_per_cycle": self.max_iter_per_cycle,
+            "cycles_done": self.cycles_done,
             "total_iter_done": self.total_iter_done,
-            "stopcode": {"major": self.stopcode.major, "minor": self.stopcode.minor},
+            "stopcode": {
+                "imaging": self.stopcode.imaging,
+                "model_update": self.stopcode.model_update,
+            },
             "stopdescription": self.stopdescription,
         }
 
@@ -1279,7 +1314,7 @@ class IterationController:
 
 class ConvergencePlots:
     """
-    Class for creating convergence visualization plots from ReturnDict.
+    Class for creating convergence visualization plots from ImagingDict.
 
     This class provides methods to create interactive HoloViews plots showing
     deconvolution convergence history, including peak residual evolution over
@@ -1287,19 +1322,19 @@ class ConvergencePlots:
 
     Parameters
     ----------
-    return_dict : ReturnDict
-        ReturnDict object with convergence history (peakres, iter_done fields)
+    imaging_dict : ImagingDict
+        ImagingDict object with convergence history (peakres, iter_done fields)
 
     Attributes
     ----------
-    return_dict : ReturnDict
-        The ReturnDict containing convergence data
+    imaging_dict : ImagingDict
+        The ImagingDict containing convergence data
     stokes_to_pol : dict
         Mapping from Stokes parameter names to polarization indices
 
     Examples
     --------
-    >>> rd = ReturnDict()
+    >>> rd = ImagingDict()
     >>> for cycle in range(5):
     ...     rd.add({'peakres': 1.0 * 0.7**cycle, 'iter_done': 100},
     ...            time=0, pol=0, chan=0)
@@ -1308,16 +1343,16 @@ class ConvergencePlots:
     >>> plot  # Display in Jupyter notebook
     """
 
-    def __init__(self, return_dict):
+    def __init__(self, imaging_dict):
         """
-        Initialize ConvergencePlots with a ReturnDict.
+        Initialize ConvergencePlots with a ImagingDict.
 
         Parameters
         ----------
-        return_dict : ReturnDict
-            ReturnDict object containing convergence history
+        imaging_dict : ImagingDict
+            ImagingDict object containing convergence history
         """
-        self.return_dict = return_dict
+        self.imaging_dict = imaging_dict
         self.stokes_to_pol = {"I": 0, "Q": 1, "U": 2, "V": 3}
 
         # Default plotting parameters (set by plot_history)
@@ -1361,7 +1396,7 @@ class ConvergencePlots:
         # Get data for this (time, pol, chan)
         key = Key(time=self.time, pol=pol_sel, chan=chan_sel)
 
-        if key not in self.return_dict.data:
+        if key not in self.imaging_dict.data:
             # Show error message
             return hv.Curve([]).opts(
                 title=f"No data for Time={self.time}, Stokes={stokes_sel}, Channel={chan_sel}",
@@ -1372,7 +1407,7 @@ class ConvergencePlots:
                 show_grid=True,
             )
 
-        data = self.return_dict.data[key]
+        data = self.imaging_dict.data[key]
 
         # Extract history
         peakres_history = data.get("peakres", [])
@@ -1498,7 +1533,7 @@ class ConvergencePlots:
         -----
         - Requires holoviews with bokeh backend
         - Uses lazy imports to avoid hard dependency
-        - Falls back to single-axis plot if no model_flux data in ReturnDict
+        - Falls back to single-axis plot if no model_flux data in ImagingDict
         """
         # Store plotting parameters as instance variables for access in make_plot
         self.time = time
@@ -1517,11 +1552,11 @@ class ConvergencePlots:
                 "Install with: pip install holoviews bokeh"
             ) from e
 
-        # Extract available channels and stokes from ReturnDict
-        available_keys = list(self.return_dict.data.keys())
+        # Extract available channels and stokes from ImagingDict
+        available_keys = list(self.imaging_dict.data.keys())
         if not available_keys:
             return hv.Curve([]).opts(
-                title="No data in ReturnDict",
+                title="No data in ImagingDict",
                 xlabel="Cumulative Iterations",
                 ylabel="Peak Residual (Jy)",
             )
@@ -1558,9 +1593,9 @@ class ConvergencePlots:
         return dmap
 
 
-def plot_convergence_history(return_dict, time=0, stokes="I", chan=0, **kwargs):
+def plot_convergence_history(imaging_dict, time=0, stokes="I", chan=0, **kwargs):
     """
-    Plot interactive convergence history from ReturnDict.
+    Plot interactive convergence history from ImagingDict.
 
     Convenience function that wraps ConvergencePlots.plot_history() for
     backward compatibility and quick plotting. Displays dual y-axis plot
@@ -1568,8 +1603,8 @@ def plot_convergence_history(return_dict, time=0, stokes="I", chan=0, **kwargs):
 
     Parameters
     ----------
-    return_dict : ReturnDict
-        ReturnDict object with convergence history (peakres, iter_done, model_flux fields)
+    imaging_dict : ImagingDict
+        ImagingDict object with convergence history (peakres, iter_done, model_flux fields)
     time : int, optional
         Time index to plot (default: 0)
     stokes : str, optional
@@ -1586,7 +1621,7 @@ def plot_convergence_history(return_dict, time=0, stokes="I", chan=0, **kwargs):
 
     Examples
     --------
-    >>> rd = ReturnDict()
+    >>> rd = ImagingDict()
     >>> for cycle in range(5):
     ...     rd.add({'peakres': 1.0 * 0.7**cycle, 'iter_done': 100, 'model_flux': 0.5 * cycle},
     ...            time=0, pol=0, chan=0)
@@ -1598,34 +1633,34 @@ def plot_convergence_history(return_dict, time=0, stokes="I", chan=0, **kwargs):
     - Requires holoviews with bokeh backend
     - Uses lazy imports to avoid hard dependency
     - Displays error message if selected (time, pol, chan) not found
-    - Falls back to single-axis plot if no model_flux data in ReturnDict
+    - Falls back to single-axis plot if no model_flux data in ImagingDict
     - For more control, use ConvergencePlots class directly
     """
-    plotter = ConvergencePlots(return_dict)
+    plotter = ConvergencePlots(imaging_dict)
     return plotter.plot_history(time=time, stokes=stokes, chan=chan, **kwargs)
 
 
 # ============================================================================
-# ReturnDict Pretty-Printing
+# ImagingDict Pretty-Printing
 # ============================================================================
 
 
-def format_deconvolve_dict(combined_deconvolve_dict, float_format="{:.6g}"):
-    """Return a human-readable string representation of a deconvolution ReturnDict.
+def format_imaging_dict(combined_imaging_dict, float_format="{:.6g}"):
+    """Return a human-readable string representation of a deconvolution ImagingDict.
 
-    A deconvolution ReturnDict maps ``Key(time, pol, chan)`` planes to field
-    dicts that mix constant parameters (``niter``, ``threshold``, ...) with
-    per-major-cycle history lists (``peakres``, ``iter_done``, ``model_flux``,
+    A deconvolution ImagingDict maps ``Key(time, pol, chan)`` planes to field
+    dicts that mix constant parameters (``max_iter``, ``threshold``, ...) with
+    per-imaging cycle history lists (``peakres``, ``iter_done``, ``model_flux``,
     ...). The default ``repr`` dumps each plane on one very long line, which is
     hard to read. This formatter groups each plane, separates scalar parameters
     from the per-cycle history, and lays the history out as an aligned table
-    with one column per major cycle. Numpy scalars (``np.float64``, ``np.str_``)
+    with one column per imaging cycle. Numpy scalars (``np.float64``, ``np.str_``)
     are unwrapped so they print as plain values.
 
     Parameters
     ----------
-    combined_deconvolve_dict : ReturnDict or dict
-        Either a ReturnDict instance or its underlying ``.data`` mapping of
+    combined_imaging_dict : ImagingDict or dict
+        Either a ImagingDict instance or its underlying ``.data`` mapping of
         ``Key(time, pol, chan)`` -> field dict.
     float_format : str, optional
         Format string applied to floating point values (default ``"{:.6g}"``).
@@ -1635,8 +1670,8 @@ def format_deconvolve_dict(combined_deconvolve_dict, float_format="{:.6g}"):
     str
         The formatted, multi-line representation.
     """
-    # Accept either a ReturnDict (exposes .data) or a plain mapping.
-    data = getattr(combined_deconvolve_dict, "data", combined_deconvolve_dict)
+    # Accept either a ImagingDict (exposes .data) or a plain mapping.
+    data = getattr(combined_imaging_dict, "data", combined_imaging_dict)
 
     def to_py(v):
         # Unwrap numpy scalars (np.float64, np.str_, ...) to native Python types.
@@ -1679,7 +1714,7 @@ def format_deconvolve_dict(combined_deconvolve_dict, float_format="{:.6g}"):
             for f, v in scalar_items:
                 lines.append(f"  {f:<{label_w}} : {fmt(v)}")
 
-        # Per-cycle history table (one column per major cycle).
+        # Per-cycle history table (one column per imaging cycle).
         if history:
             n_cycles = max(len(v) for v in history.values())
             label_w = max([len(f) for f in history] + [len("cycle")])
@@ -1705,94 +1740,133 @@ def format_deconvolve_dict(combined_deconvolve_dict, float_format="{:.6g}"):
     return "\n".join(lines)
 
 
-def print_deconvolve_dict(combined_deconvolve_dict, float_format="{:.6g}"):
-    """Pretty-print a deconvolution ReturnDict. See :func:`format_deconvolve_dict`."""
-    print(format_deconvolve_dict(combined_deconvolve_dict, float_format=float_format))
+def print_imaging_dict(combined_imaging_dict, float_format="{:.6g}"):
+    """Pretty-print a deconvolution ImagingDict. See :func:`format_imaging_dict`."""
+    print(format_imaging_dict(combined_imaging_dict, float_format=float_format))
+
+
+def build_residual_imaging_dict(
+    img_xds, image_data_group_in_name, iteration_control_params
+):
+    """Seed a per-plane :class:`ImagingDict` of peak-residual/masksum stats
+    straight from the current residual image, no deconvolution involved.
+
+    Used both for a pre-deconvolve convergence check and, on the first model
+    update, as the seed for :func:`calculate_cycle_controls`.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Image dataset providing the residual image.
+    image_data_group_in_name : str
+        Name of the entry in ``img_xds.attrs["data_groups"]`` whose
+        ``"sky"`` key resolves to the residual variable.
+    iteration_control_params : dict
+        Iteration-control parameters; ``gain`` seeds the placeholder
+        per-plane field.
+
+    Returns
+    -------
+    ImagingDict
+        Per-plane ``peakres``/``peakres_nomask``/``masksum``/``iter_done``
+        stats, indexed ``(time, chan, pol)``.
+    """
+    residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
+    residual_abs = np.abs(img_xds[residual_data_group["sky"]].values)
+    plane_peak = residual_abs.max(axis=(-2, -1))  # (ntime, nfreq, npol)
+    ntime, nfreq, npol = plane_peak.shape
+    masksum = imgstats.get_image_masksum(
+        img_xds, data_group_name=image_data_group_in_name
+    )
+    max_psf_sidelobe_arr = img_xds[
+        residual_data_group["max_sidelobe_point_spread_function"]
+    ].values  # (ntime, nfreq, npol)
+    rd = ImagingDict()
+    for tt in range(ntime):
+        for nn in range(nfreq):
+            for pp in range(npol):
+                peak = float(plane_peak[tt, nn, pp])
+                rd.add(
+                    {
+                        "peakres": peak,
+                        "peakres_nomask": peak,
+                        "masksum": int(masksum[tt, nn, pp]),
+                        "iter_done": 0,
+                        "max_psf_sidelobe": float(max_psf_sidelobe_arr[tt, nn, pp]),
+                        "gain": iteration_control_params["gain"],
+                    },
+                    time=tt,
+                    pol=pp,
+                    chan=nn,
+                )
+    return rd
 
 
 def get_calculate_cycle_controls(
     controller,
-    combined_deconvolve_dict,
+    combined_imaging_dict,
     img_xds,
-    is_n_iter_0,
+    model_exists,
     iteration_control_params,
     image_data_group_in_name="residual",
+    residual_imaging_dict=None,
 ):
-    """Compute the cycle iteration limit and cyclethreshold for the next model update.
+    """Compute the per-plane ``max_iter_per_cycle`` and ``threshold_per_cycle`` for the next model update.
 
-    On the first model update (``is_n_iter_0``) the controls are derived from
-    the freshly made dirty image (each plane's own peak residual); afterwards
-    they are derived from the accumulated convergence statistics in
-    ``combined_deconvolve_dict``.  In both cases the per-plane cyclethreshold is
-    built from each ``(time, frequency, polarization)`` plane's own peak
-    residual, so the result is independent of how the cube was chunked across
-    tasks.
+    Before the first model update (``model_exists`` is ``False``) the controls
+    are derived from the freshly made dirty image (each plane's own peak
+    residual); afterwards they are derived from the accumulated convergence
+    statistics in ``combined_imaging_dict``.  Both arrays are built per
+    ``(time, frequency, polarization)`` plane from that plane's own state, so
+    the result is independent of how the cube was chunked across tasks.
 
     Parameters
     ----------
     controller : IterationController
         Controller whose ``calculate_cycle_controls`` and
-        ``per_plane_cycle_threshold`` drive the result.
-    combined_deconvolve_dict : ReturnDict
-        Accumulated per-plane convergence statistics (used when not the first
-        model update).
+        ``per_plane_threshold_per_cycle`` drive the result.
+    combined_imaging_dict : ImagingDict
+        Accumulated per-plane convergence statistics (used once a model
+        exists).
     img_xds : xarray.Dataset
         Image dataset providing the residual image for the first model update.
-    is_n_iter_0 : bool
-        ``True`` for the first model update.
+    model_exists : bool
+        ``False`` before the first model update, ``True`` afterwards.
     iteration_control_params : dict
-        Iteration-control parameters (``maxpsffraction``, ``gain`` used to seed
-        the first model update).
+        Iteration-control parameters (``gain`` seeds the first model update).
     image_data_group_in_name : str, optional
         Image data group holding the residual image.  Default ``"residual"``.
+    residual_imaging_dict : ImagingDict, optional
+        Pre-built result of :func:`build_residual_imaging_dict`, reused before
+        the first model update instead of rebuilding it. Built here if omitted.
 
     Returns
     -------
-    cycle_niter : int
-        Iteration limit for the next minor cycle.
-    cyclethreshold : float
-        Representative scalar cyclethreshold for the next minor cycle.
-    cyclethreshold_per_plane : numpy.ndarray
-        Per-plane cyclethresholds, indexed ``(time, frequency, polarization)``.
+    max_iter_per_cycle : numpy.ndarray
+        ``(time, frequency, polarization)`` int array: the iterations each
+        plane may spend in the next model update,
+        ``min(max_iter_per_cycle, remaining max_iter)`` per plane.
+    threshold_per_cycle : numpy.ndarray
+        ``(time, frequency, polarization)`` float array of per-plane stopping
+        thresholds for the next model update.
     """
-    residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
-    if is_n_iter_0:
-        # First model update: there is no accumulated convergence history yet,
-        # so seed a per-plane ReturnDict from the dirty image. Each
-        # (time, frequency, polarization) plane contributes its OWN peak
-        # residual, so the resulting cyclethreshold is genuinely per-plane and
-        # therefore independent of how the cube was chunked across tasks.
-        residual_abs = np.abs(img_xds[residual_data_group["sky"]].values)
-        plane_peak = residual_abs.max(axis=(-2, -1))  # (ntime, nfreq, npol)
-        ntime, nfreq, npol = plane_peak.shape
-        masksum = img_xds.sizes["l"] * img_xds.sizes["m"]
-        rd = ReturnDict()
-        for tt in range(ntime):
-            for nn in range(nfreq):
-                for pp in range(npol):
-                    peak = float(plane_peak[tt, nn, pp])
-                    rd.add(
-                        {
-                            "peakres": peak,
-                            "peakres_nomask": peak,
-                            "masksum": masksum,
-                            "iter_done": 0,
-                            "max_psf_sidelobe": iteration_control_params[
-                                "maxpsffraction"
-                            ],
-                            "loop_gain": iteration_control_params["gain"],
-                        },
-                        time=tt,
-                        pol=pp,
-                        chan=nn,
-                    )
+    if not model_exists:
+        rd = residual_imaging_dict
+        if rd is None:
+            rd = build_residual_imaging_dict(
+                img_xds, image_data_group_in_name, iteration_control_params
+            )
     else:
-        rd = combined_deconvolve_dict
+        rd = combined_imaging_dict
 
-    cycle_niter, cyclethreshold = controller.calculate_cycle_controls(rd)
-    # Per-plane cyclethreshold so each (time, frequency, polarization) plane is
-    # cleaned to its own threshold; chunk-independent because every plane uses
-    # its own peak residual.
-    cyclethreshold_per_plane = controller.per_plane_cycle_threshold(rd)
+    # Per-plane threshold_per_cycle so each plane is cleaned to its own depth
+    # (allocates the controller's per-plane state if needed).
+    threshold_per_cycle = controller.per_plane_threshold_per_cycle(rd)
+    # Scalar cap = min(max_iter_per_cycle, largest remaining budget); clipping
+    # the per-plane remaining budget with it gives each plane
+    # min(max_iter_per_cycle, its own remaining max_iter). .clip returns a
+    # copy; the controller's own budget is decremented later by update_counts.
+    max_iter_per_cycle_cap, _ = controller.calculate_cycle_controls(rd)
+    max_iter_per_cycle = controller.max_iter_remaining.clip(max=max_iter_per_cycle_cap)
 
-    return cycle_niter, cyclethreshold, cyclethreshold_per_plane
+    return max_iter_per_cycle, threshold_per_cycle

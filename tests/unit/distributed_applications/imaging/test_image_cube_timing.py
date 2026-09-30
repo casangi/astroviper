@@ -23,13 +23,13 @@ from astroviper.distributed_applications.imaging.image_cube_single_field import 
 from astroviper.processing_functions.imaging.utils import (
     IMAGING_TIMING_PHASES,
     IMAGING_TIMING_TOTAL_KEY,
-    ReturnDict,
+    ImagingDict,
 )
 from astroviper.utils.timing import format_timing_summary
 
 
 def _make_chunk_result(task_id, t_load, t_deconvolve, t_total, chan):
-    """One node-task-shaped result: a one-row timing frame + a ReturnDict.
+    """One node-task-shaped result: a one-row timing frame + a ImagingDict.
 
     The frame carries the string ``hostname`` column the real node task adds for
     straggler grouping, so the reduce/summary paths are exercised against the
@@ -40,7 +40,7 @@ def _make_chunk_result(task_id, t_load, t_deconvolve, t_total, chan):
             {
                 "task_id": task_id,
                 "n_channels": 1,
-                "n_major_cycles": 2,
+                "n_cycles": 2,
                 "T_load": t_load,
                 "T_deconvolve": t_deconvolve,
                 IMAGING_TIMING_TOTAL_KEY: t_total,
@@ -48,7 +48,7 @@ def _make_chunk_result(task_id, t_load, t_deconvolve, t_total, chan):
             }
         ]
     )
-    deconvolve = ReturnDict()
+    deconvolve = ImagingDict()
     deconvolve.add({"peakres": 1.0, "iter_done": 5}, time=0, pol=0, chan=chan)
     return {"timing_node_tasks": timing_df, "deconvolution": deconvolve}
 
@@ -87,7 +87,12 @@ def test_combine_return_data_frames_composes_under_tree_reduction():
     partial = combine_return_data_frames(leaves[:1], input_params={})
     # A partially-reduced result is itself a valid reducer input.
     final = combine_return_data_frames([partial, leaves[1]], input_params={})
-    assert set(final) == {"timing_node_tasks", "deconvolution", "timing_reduce_nodes"}
+    assert set(final) == {
+        "timing_node_tasks",
+        "deconvolution",
+        "image_statistics",
+        "timing_reduce_nodes",
+    }
     assert len(final["timing_node_tasks"]) == 2
     # One provenance record per reduce node of the tree: the partial reduce's
     # record is pooled forward and the final call appends its own.
@@ -142,7 +147,7 @@ def test_format_timing_summary_skips_string_metadata_columns():
             {
                 "task_id": 0,
                 "n_channels": 1,
-                "n_major_cycles": 2,
+                "n_cycles": 2,
                 "T_load": 1.0,
                 "T_deconvolve": 2.0,
                 IMAGING_TIMING_TOTAL_KEY: 4.0,

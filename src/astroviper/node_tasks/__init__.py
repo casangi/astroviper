@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from importlib import metadata
 
-from astroviper.node_tasks import image_analysis, imaging
+from astroviper.node_tasks import image_analysis, imaging, simulation
 
 __all__ = [
     "__version__",
     # Namespaced high-level modules (distributed API)
     "imaging",
     "image_analysis",
+    "simulation",
 ]
 
 # Package version
