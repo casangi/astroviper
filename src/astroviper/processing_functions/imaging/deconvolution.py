@@ -226,8 +226,11 @@ def _per_plane_iteration_controls(deconvolve_params, nt, nf, npol, threshold_dty
 
 def _plane_peak_abs_signed(arr, mask=None):
     """
-    Return the signed value at the absolute-value peak of a 2-D array,
-    optionally restricted to pixels where ``mask > 0.5``.
+    Return the signed value of a 2-D plane at its absolute-value peak.
+
+    The plane is scanned in blocks of rows
+    (:func:`~astroviper.processing_functions.image_analysis.image_statistics.plane_peak_abs_signed`),
+    so no copy of the plane is made.
 
     Parameters
     ----------
@@ -243,20 +246,7 @@ def _plane_peak_abs_signed(arr, mask=None):
         Signed value of ``arr`` at its absolute-value maximum within the
         mask. NaN if every pixel is masked.
     """
-    if mask is None:
-        absvals = np.abs(arr)
-    else:
-        valid = mask > 0.5
-        if not np.any(valid):
-            return float("nan")
-        absvals = np.where(valid, np.abs(arr), np.nan)
-    if np.all(np.isnan(absvals)):
-        return float("nan")
-    # Return the signed value at the absolute-value peak: locate the largest
-    # magnitude with nanargmax, then return arr at that index so a strong
-    # negative residual keeps its sign (as the name/docstring promise).
-    idx = np.unravel_index(np.nanargmax(absvals), absvals.shape)
-    return float(arr[idx])
+    return imgstats.plane_peak_abs_signed(arr, mask=mask)
 
 
 def starting_statistics(
@@ -722,7 +712,12 @@ def deconvolve(
 
 
 def _hogbom_peak_cube(residual_cube, mask_cube, clean_box):
-    """Return the absolute residual peak in each CLEAN search region."""
+    """Return the absolute residual peak in each CLEAN search region.
+
+    Every plane is scanned in blocks of rows, so no copy of the cube or of a
+    plane is made (``np.abs`` of the cube followed by ``np.where`` with the
+    mask used to allocate two of them for every model update).
+    """
     _, _, _, ny, nx = residual_cube.shape
     xbeg, xend, ybeg, yend = clean_box
     xbeg = 0 if xbeg == -1 else max(0, min(xbeg, nx - 1))
@@ -730,14 +725,16 @@ def _hogbom_peak_cube(residual_cube, mask_cube, clean_box):
     ybeg = 0 if ybeg == -1 else max(0, min(ybeg, ny - 1))
     yend = ny if yend == -1 else max(ybeg + 1, min(yend, ny))
 
-    search = np.abs(residual_cube[..., ybeg:yend, xbeg:xend])
-    if mask_cube is not None:
-        search = np.where(
-            mask_cube[..., ybeg:yend, xbeg:xend],
-            search,
-            0.0,
-        )
-    return np.max(search, axis=(-2, -1))
+    plane_shape = residual_cube.shape[:-2]
+    peak = np.zeros(plane_shape, dtype=np.float64)
+    for index in np.ndindex(plane_shape):
+        plane = residual_cube[index][ybeg:yend, xbeg:xend]
+        mask = None if mask_cube is None else mask_cube[index][ybeg:yend, xbeg:xend]
+        # the signed peak of the searched pixels; masked planes give NaN, and
+        # np.where(mask, |residual|, 0) gave 0 for them
+        value = imgstats.plane_peak_abs_signed(plane, mask=mask)
+        peak[index] = 0.0 if (mask is not None and np.isnan(value)) else abs(value)
+    return peak
 
 
 def _run_hogbom_with_cycle_checks(
@@ -809,7 +806,12 @@ def _run_hogbom_with_cycle_checks(
     return {
         "iterations_performed": iterations,
         "final_peak": final_peak,
-        "total_flux_cleaned": np.sum(np.abs(model_cube), axis=(-2, -1)),
+        "total_flux_cleaned": np.array(
+            [
+                imgstats.plane_abs_sum(model_cube[index])
+                for index in np.ndindex(model_cube.shape[:-2])
+            ]
+        ).reshape(model_cube.shape[:-2]),
         "converged": final_peak <= threshold_per_cycle,
         "diverged": diverged,
     }
