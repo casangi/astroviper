@@ -1486,7 +1486,13 @@ def test_tw_hydra_continuum_transfers_results_between_processes(
         },
         **kwargs,
     )
+    missing_scheduler = object()
+    original_scheduler = dask.config.get("scheduler", missing_scheduler)
     with (
+        # Client and graph execution both enter scheduler configuration
+        # contexts. Restore the caller's setting after every thread and
+        # client has finished, including when execution raises or times out.
+        dask.config.set(scheduler=dask.config.get("scheduler", None)),
         LocalCluster(
             n_workers=2,
             threads_per_worker=1,
@@ -1521,7 +1527,11 @@ def test_tw_hydra_continuum_transfers_results_between_processes(
             result, image = pending.result(timeout=90)
         finally:
             client.close()
-            pool.shutdown(wait=False, cancel_futures=True)
+            pool.shutdown(wait=True, cancel_futures=True)
+    assert dask.config.get("scheduler", missing_scheduler) is original_scheduler
+    # Do not override the scheduler here: later tests must be able to run
+    # ordinary Dask computations without this test's now-closed client.
+    assert dask.delayed(sum)([1, 2, 3]).compute() == 6
     assert result["n_major_cycles"] == 2
     # The helper reopens the output store lazily; read it locally after the
     # distributed client has closed.
