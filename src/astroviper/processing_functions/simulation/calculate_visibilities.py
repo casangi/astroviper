@@ -208,6 +208,7 @@ def calculate_visibilities(
     shapes allow.
     """
     from astroviper.processing_functions.simulation.sky_components import (
+        as_correlation_flux,
         component_uv_response,
         normalize_sky_components,
         sky_components_from_arrays,
@@ -253,7 +254,7 @@ def calculate_visibilities(
 
     point_groups = []
     if point_source_flux is not None:
-        point_source_flux = np.asarray(point_source_flux, dtype=np.float64)
+        point_source_flux = as_correlation_flux(point_source_flux, "point_source_flux")
         point_source_ra_dec = np.asarray(point_source_ra_dec, dtype=np.float64)
         if point_source_flux.shape[0] > 0:
             point_groups.append((point_source_flux, point_source_ra_dec))

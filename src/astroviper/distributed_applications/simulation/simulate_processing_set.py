@@ -79,6 +79,7 @@ def simulate_processing_set(
     gaussian_ring_source_ra_dec: np.ndarray | list | None = None,
     gaussian_ring_source_shape: np.ndarray | list | None = None,
     ms_v2_path: str | None = None,
+    sky_image_params: dict | None = None,
     direction_frame: str = "icrs",
     ms_name: str | None = None,
     n_time_chunks: int | None = None,
@@ -129,7 +130,9 @@ def simulate_processing_set(
         described in :mod:`~astroviper.processing_functions.simulation.sky_components`.
     point_source_flux : np.ndarray, [n_source, n_time | 1, n_frequency | 1, 4], Jy, optional
         Flux of every point source in the four instrumental correlations
-        (``RR, RL, LR, LL`` or ``XX, XY, YX, YY``); singleton time/frequency axes broadcast.
+        (``RR, RL, LR, LL`` or ``XX, XY, YX, YY``); singleton time/frequency axes
+        broadcast.  Real, or complex with conjugate cross hands (``XY = U + iV``,
+        ``YX = U - iV``; ``RL = Q + iU``, ``LR = Q - iU``).
     point_source_ra_dec : np.ndarray, [n_time | 1, n_source, 2], radians, optional
         Right ascension and declination of the point sources (per time or fixed).
     gaussian_source_flux : np.ndarray, [n_gaussian, n_time | 1, n_frequency | 1, 4], Jy, optional
@@ -177,6 +180,21 @@ def simulate_processing_set(
         this path via the optional `arcae <https://github.com/ska-sa/arcae>`_
         backend (``utils.measurement_set_v2.write_measurement_set_v2``).
         Default ``None`` (no MSv2 output).
+    sky_image_params : dict, optional
+        Also write the simulated sky itself (every component, no primary
+        beam) as an XRADIO image (Zarr) with the data variable ``SKY`` in
+        Jy/pixel on the imager's grid, so that imaging results can be
+        compared with the truth pixel by pixel: ``{"image_store": path,
+        "image_size": [n_l, n_m], "cell_size": [dl, dm] (radians, the
+        ``image_params`` convention of ``image_cube_single_field``),
+        "phase_direction": [ra, dec] radians (default: the phase centre),
+        "polarization_coords": Stokes labels (default all four when four
+        correlations are simulated, else ``["I"]``), "time_index": which
+        time sample of time-dependent fluxes and positions to draw
+        (default 0)}``.  Point sources are added to the pixel they fall in;
+        extended components are sampled at the pixel centres.  Stokes V
+        (linear feeds) or U (circular feeds) needs complex cross-hand
+        fluxes and is zero otherwise.  Default ``None`` (no image).
     phase_center_ra_dec : np.ndarray, [n_time | 1, 2], radians
         Phase centre of the array per time (time-varying for mosaics) or fixed.
     beam_models : list
@@ -268,6 +286,7 @@ def simulate_processing_set(
         resolve_beam_params,
     )
     from astroviper.processing_functions.simulation.sky_components import (
+        as_correlation_flux,
         describe_sky_components,
         normalize_sky_components,
         sky_components_from_arrays,
@@ -300,14 +319,16 @@ def simulate_processing_set(
             "point_source_flux and point_source_ra_dec must be given together (or both omitted)."
         )
     if point_source_flux is not None:
-        point_source_flux = np.asarray(point_source_flux, dtype=np.float64)
+        point_source_flux = as_correlation_flux(point_source_flux, "point_source_flux")
         point_source_ra_dec = np.asarray(point_source_ra_dec, dtype=np.float64)
     if gaussian_source_flux is not None:
-        gaussian_source_flux = np.asarray(gaussian_source_flux, dtype=np.float64)
+        gaussian_source_flux = as_correlation_flux(
+            gaussian_source_flux, "gaussian_source_flux"
+        )
         gaussian_source_ra_dec = np.asarray(gaussian_source_ra_dec, dtype=np.float64)
         gaussian_source_shape = np.asarray(gaussian_source_shape, dtype=np.float64)
     if disk_source_flux is not None:
-        disk_source_flux = np.asarray(disk_source_flux, dtype=np.float64)
+        disk_source_flux = as_correlation_flux(disk_source_flux, "disk_source_flux")
     if disk_source_ra_dec is not None:
         disk_source_ra_dec = np.asarray(disk_source_ra_dec, dtype=np.float64)
     if disk_source_shape is not None:
@@ -319,8 +340,8 @@ def simulate_processing_set(
             disk_source_limb_darkening, dtype=np.float64
         )
     if gaussian_ring_source_flux is not None:
-        gaussian_ring_source_flux = np.asarray(
-            gaussian_ring_source_flux, dtype=np.float64
+        gaussian_ring_source_flux = as_correlation_flux(
+            gaussian_ring_source_flux, "gaussian_ring_source_flux"
         )
     if gaussian_ring_source_ra_dec is not None:
         gaussian_ring_source_ra_dec = np.asarray(
@@ -392,7 +413,13 @@ def simulate_processing_set(
         raise ValueError(
             "no sources: give sky_components and/or point_source_flux / point_source_ra_dec."
         )
-    described = describe_sky_components(normalize_sky_components(all_components))
+    normalized_components = normalize_sky_components(
+        all_components, n_time, n_frequency, direction_frame
+    )
+    described = describe_sky_components(normalized_components)
+    sky_image = _resolve_sky_image_params(
+        sky_image_params, phase_center_ra_dec, polarization, n_time
+    )
 
     field_name_per_time, unique_field_names, unique_phase_centers = resolve_fields(
         phase_center_ra_dec, field_name, n_time
@@ -462,6 +489,14 @@ def simulate_processing_set(
     timing_distributed_application["T_determine_chunks_and_parallel_coords"] = (
         _time.time() - start
     )
+
+    # --- optional image of the simulated sky ----------------------------------
+    if sky_image is not None:
+        start = _time.time()
+        _write_sky_image(
+            sky_image, normalized_components, time_coord, frequency_coord, overwrite
+        )
+        timing_distributed_application["T_write_sky_image"] = _time.time() - start
 
     # --- empty MSv4 on disk ---------------------------------------------------
     start = _time.time()
@@ -590,6 +625,7 @@ def simulate_processing_set(
         "timing_distributed_application": timing_distributed_application,
         "ps_store": ps_store,
         "ms_name": ms_name,
+        "sky_image_store": None if sky_image is None else sky_image["image_store"],
     }
 
 
@@ -707,3 +743,140 @@ def _check_input_shapes(
         )
     if beam_model_map.min() < 0 or beam_model_map.max() >= n_beam_models:
         raise ValueError("beam_model_map indices must index into beam_models.")
+
+
+_STOKES_LABELS = ("I", "Q", "U", "V")
+_SKY_IMAGE_KEYS = {
+    "image_store",
+    "image_size",
+    "cell_size",
+    "phase_direction",
+    "polarization_coords",
+    "time_index",
+}
+
+
+def _resolve_sky_image_params(
+    sky_image_params, phase_center_ra_dec, polarization, n_time
+):
+    """Validate ``sky_image_params`` and fill in its defaults; ``None`` stays ``None``."""
+    if sky_image_params is None:
+        return None
+    from astroviper.processing_functions.simulation.sky_components import (
+        polarization_basis_of,
+    )
+
+    params = dict(sky_image_params)
+    unknown = sorted(set(params) - _SKY_IMAGE_KEYS)
+    if unknown:
+        raise ValueError(f"sky_image_params: unknown keys {unknown}.")
+    for key in ("image_store", "image_size", "cell_size"):
+        if key not in params:
+            raise ValueError(f"sky_image_params needs '{key}'.")
+    image_size = [int(n) for n in np.asarray(params["image_size"]).ravel()]
+    cell_size = [
+        float(c) for c in np.asarray(params["cell_size"], dtype=np.float64).ravel()
+    ]
+    if (
+        len(image_size) != 2
+        or min(image_size) < 1
+        or len(cell_size) != 2
+        or 0.0 in cell_size
+    ):
+        raise ValueError(
+            "sky_image_params: image_size must be two positive integers and "
+            "cell_size two non-zero angles in radians."
+        )
+    time_index = int(params.get("time_index", 0))
+    if not 0 <= time_index < n_time:
+        raise ValueError(
+            f"sky_image_params: time_index {time_index} is outside the {n_time} simulated times."
+        )
+    phase_direction = params.get("phase_direction")
+    if phase_direction is None:
+        phase_direction = phase_center_ra_dec[
+            time_index if phase_center_ra_dec.shape[0] > 1 else 0
+        ]
+    phase_direction = np.asarray(phase_direction, dtype=np.float64).reshape(2)
+    stokes = params.get("polarization_coords")
+    if stokes is None:
+        stokes = list(_STOKES_LABELS) if len(polarization) == 4 else ["I"]
+    stokes = [str(label).upper() for label in stokes]
+    bad = [label for label in stokes if label not in _STOKES_LABELS]
+    if bad:
+        raise ValueError(
+            f"sky_image_params: polarization_coords must be Stokes labels (I, Q, U, V); got {bad}."
+        )
+    return {
+        "image_store": str(params["image_store"]),
+        "image_size": image_size,
+        "cell_size": cell_size,
+        "phase_direction": phase_direction,
+        "polarization_coords": stokes,
+        "time_index": time_index,
+        "polarization_basis": polarization_basis_of(polarization),
+    }
+
+
+def _write_sky_image(sky_image, components, time_coord, frequency_coord, overwrite):
+    """Rasterise ``components`` on the imager's grid and write the XRADIO image (``SKY``, Jy/pixel)."""
+    import xarray as xr
+    from xradio.image import make_empty_sky_image, write_image
+
+    from astroviper.processing_functions.simulation.sky_components import (
+        stokes_sky_model_images,
+    )
+    from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+    time_index = sky_image["time_index"]
+    unix_seconds = float(np.asarray(time_coord["data"], dtype=np.float64)[time_index])
+    img_xds = make_empty_sky_image(
+        phase_center=sky_image["phase_direction"],
+        image_size=sky_image["image_size"],
+        cell_size=sky_image["cell_size"],
+        frequency_coords=np.asarray(frequency_coord["data"], dtype=np.float64),
+        pol_coords=sky_image["polarization_coords"],
+        time_coords=[
+            unix_seconds / 86400.0 + 40587.0
+        ],  # unix seconds (UTC) -> MJD days
+        do_sky_coords=False,
+    )
+    l_axis, m_axis = img_xds.l.values, img_xds.m.values
+    n_frequency = img_xds.sizes["frequency"]
+    sky = np.zeros(
+        (
+            1,
+            n_frequency,
+            len(sky_image["polarization_coords"]),
+            l_axis.size,
+            m_axis.size,
+        ),
+        dtype=np.float64,
+    )
+    for channel in range(n_frequency):
+        sky[0, channel] = stokes_sky_model_images(
+            components,
+            l_axis,
+            m_axis,
+            sky_image["phase_direction"],
+            sky_image["polarization_basis"],
+            sky_image["polarization_coords"],
+            time_index=time_index,
+            frequency_index=channel,
+        )
+    img_xds["SKY"] = xr.DataArray(
+        sky, dims=("time", "frequency", "polarization", "l", "m")
+    )
+    img_xds.attrs.get("data_groups", {}).pop("base", None)
+    modify_data_groups_xds(
+        img_xds,
+        data_group_out_name="base",
+        data_group_out={"sky": "SKY"},
+        description=(
+            "Simulated sky model in Jy/pixel (all components, no primary beam), "
+            "written by astroviper.distributed_applications.simulation.simulate_processing_set."
+        ),
+    )
+    write_image(
+        img_xds, sky_image["image_store"], out_format="zarr", overwrite=overwrite
+    )

@@ -15,6 +15,10 @@ with the keys
     correlations), ``[4]`` (the four instrumental correlations ``RR, RL, LR,
     LL`` or ``XX, XY, YX, YY``), ``[n_frequency | 1, 4]`` (a spectrum) or
     ``[n_time | 1, n_frequency | 1, 4]`` (time and frequency dependent).
+    The cross hands may be complex (:func:`as_correlation_flux`): linear
+    feeds see ``XX = I + Q``, ``XY = U + iV``, ``YX = U - iV``,
+    ``YY = I - Q``; circular feeds ``RR = I + V``, ``RL = Q + iU``,
+    ``LR = Q - iU``, ``LL = I - V``.
 ``ra_dec``
     Right ascension and declination in radians, ``[2]`` or ``[n_time | 1, 2]``
     (a moving source), or an :class:`astropy.coordinates.SkyCoord`.
@@ -194,8 +198,56 @@ def _as_angle(value, name, kind):
     return float(array) if array.ndim == 0 else array
 
 
+def as_correlation_flux(flux, name="flux"):
+    """Correlation fluxes as ``float64``, or ``complex128`` when the cross hands are complex.
+
+    Real input is returned as ``float64``.  Complex input describes circular
+    polarisation seen by linear feeds (``XY = U + iV``, ``YX = U - iV``) or
+    linear polarisation seen by circular feeds (``RL = Q + iU``,
+    ``LR = Q - iU``).  The four correlations are then on the last axis, the
+    parallel hands (first and last) must be real and the cross hands complex
+    conjugates of each other, so that the Stokes parameters are real.
+
+    Parameters
+    ----------
+    flux : array_like
+        Fluxes with the correlations on the last axis (or a real scalar).
+    name : str
+        Name used in error messages.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``float64`` when every value is real, otherwise ``complex128``.
+    """
+    flux = np.asarray(flux)
+    if not np.iscomplexobj(flux):
+        return flux.astype(np.float64)
+    flux = flux.astype(np.complex128)
+    if flux.ndim == 0 or flux.shape[-1] != 4:
+        raise ValueError(
+            f"{name}: complex fluxes need the four correlations on the last axis; "
+            f"got shape {flux.shape}."
+        )
+    if flux.size and np.all(np.isfinite(flux)):
+        tolerance = 1e-12 * float(np.abs(flux).max())
+        parallel = max(np.abs(flux[..., 0].imag).max(), np.abs(flux[..., 3].imag).max())
+        if parallel > tolerance:
+            raise ValueError(
+                f"{name}: the parallel-hand fluxes (first and last correlation) must be real."
+            )
+        if np.abs(flux[..., 1] - np.conj(flux[..., 2])).max() > tolerance:
+            raise ValueError(
+                f"{name}: the cross-hand fluxes must be complex conjugates of each other "
+                "(XY = U + iV, YX = U - iV; RL = Q + iU, LR = Q - iU)."
+            )
+    if not np.any(flux.imag):
+        return np.ascontiguousarray(flux.real)
+    return flux
+
+
 def _normalize_flux(flux, kind, n_time, n_frequency):
-    flux = np.asarray(flux, dtype=np.float64)
+    flux = as_correlation_flux(flux, f"{kind} flux")
     if flux.ndim == 0:
         flux = np.array([flux, 0.0, 0.0, flux])
     if flux.ndim == 1:
@@ -266,7 +318,8 @@ def normalize_sky_component(
     Returns
     -------
     dict
-        ``kind`` (str), ``flux`` (float64 ``[n_time|1, n_frequency|1, 4]``),
+        ``kind`` (str), ``flux`` (``[n_time|1, n_frequency|1, 4]``, float64
+        or complex128 when the cross hands are complex),
         ``ra_dec`` (float64 ``[n_time|1, 2]``), every shape parameter of the
         kind as a float / array, and ``name``.
     """
@@ -380,7 +433,7 @@ def component_flux(component, time_index=0, frequency_index=0, correlation=None)
         frequency_index if flux.shape[1] > 1 else 0,
     ]
     if correlation is None:
-        return 0.5 * (row[0] + row[3])
+        return np.real(0.5 * (row[0] + row[3]))
     return row[int(correlation)]
 
 
@@ -414,7 +467,8 @@ def sky_model_image(
     numpy.ndarray, [n_l, n_m]
         Point sources are added to the nearest pixel; extended components are
         their unit-flux surface brightness times flux and pixel area.  No
-        primary beam is applied.
+        primary beam is applied.  Real, except for a cross-hand correlation
+        of components with complex fluxes, which is complex.
     """
     from astroviper.utils.coordinate_transforms import sin_project
 
@@ -425,12 +479,22 @@ def sky_model_image(
     dm = m_axis[1] - m_axis[0]
     pixel_area = abs(dl * dm)
     l_grid, m_grid = np.meshgrid(l_axis, m_axis, indexing="ij")
-    image = np.zeros((l_axis.size, m_axis.size), dtype=np.float64)
-    for component in normalize_sky_components(components):
+    components = normalize_sky_components(components)
+    # only a cross hand of complex fluxes (XY = U + iV, ...) makes a complex plane
+    complex_plane = correlation in (1, 2) and any(
+        np.iscomplexobj(component["flux"]) for component in components
+    )
+    image = np.zeros(
+        (l_axis.size, m_axis.size),
+        dtype=np.complex128 if complex_plane else np.float64,
+    )
+    for component in components:
         ra_dec = component["ra_dec"]
         ra_dec = ra_dec[time_index if ra_dec.shape[0] > 1 else 0]
         l0, m0 = sin_project(phase_center, ra_dec)
         flux = component_flux(component, time_index, frequency_index, correlation)
+        if not complex_plane:
+            flux = np.real(flux)
         if component["kind"] == "point":
             i_l = int(np.round((l0 - l_axis[0]) / dl))
             i_m = int(np.round((m0 - m_axis[0]) / dm))
@@ -443,6 +507,98 @@ def sky_model_image(
             * component_image(component, l_grid - l0, m_grid - m0, pixel_area)
         )
     return image
+
+
+# Coefficients of the four instrumental correlations ([XX, XY, YX, YY] or
+# [RR, RL, LR, LL], the order of a component's flux vector) that make each
+# Stokes parameter: I = (XX + YY)/2, Q = (XX - YY)/2, U = (XY + YX)/2,
+# V = (XY - YX)/(2i) for linear feeds; I = (RR + LL)/2, V = (RR - LL)/2,
+# Q = (RL + LR)/2, U = (RL - LR)/(2i) for circular feeds.
+_STOKES_FROM_CORRELATIONS = {
+    "linear": {
+        "I": ((0, 0.5), (3, 0.5)),
+        "Q": ((0, 0.5), (3, -0.5)),
+        "U": ((1, 0.5), (2, 0.5)),
+        "V": ((1, -0.5j), (2, 0.5j)),
+    },
+    "circular": {
+        "I": ((0, 0.5), (3, 0.5)),
+        "Q": ((1, 0.5), (2, 0.5)),
+        "U": ((1, -0.5j), (2, 0.5j)),
+        "V": ((0, 0.5), (3, -0.5)),
+    },
+}
+
+
+def polarization_basis_of(polarization):
+    """``"linear"`` for ``XX/XY/YX/YY`` labels, ``"circular"`` for ``RR/RL/LR/LL``."""
+    labels = {str(label).upper() for label in polarization}
+    if labels and labels <= {"XX", "XY", "YX", "YY"}:
+        return "linear"
+    if labels and labels <= {"RR", "RL", "LR", "LL"}:
+        return "circular"
+    raise ValueError(
+        f"polarization labels {sorted(labels)} are not one instrumental basis."
+    )
+
+
+def stokes_sky_model_images(
+    components,
+    l_axis,
+    m_axis,
+    phase_center_ra_dec,
+    polarization_basis,
+    stokes,
+    time_index=0,
+    frequency_index=0,
+):
+    """Rasterise a component list into Stokes planes, ``[n_stokes, n_l, n_m]`` in Jy/pixel.
+
+    Component fluxes are per instrumental correlation (see
+    :func:`normalize_sky_components`); each requested Stokes parameter is the
+    standard combination of the correlation images rasterised by
+    :func:`sky_model_image` (linear feeds: ``I = (XX + YY)/2``,
+    ``Q = (XX - YY)/2``, ``U = (XY + YX)/2``, ``V = (XY - YX)/(2i)``; circular
+    feeds: ``I = (RR + LL)/2``, ``V = (RR - LL)/2``, ``Q = (RL + LR)/2``,
+    ``U = (RL - LR)/(2i)``).  The cross-hand difference (``V`` for linear
+    feeds, ``U`` for circular feeds) is zero unless the components have
+    complex cross-hand fluxes (:func:`as_correlation_flux`).
+
+    Parameters
+    ----------
+    components, l_axis, m_axis, phase_center_ra_dec, time_index, frequency_index
+        As for :func:`sky_model_image`.
+    polarization_basis : str
+        ``"linear"`` or ``"circular"`` (:func:`polarization_basis_of`).
+    stokes : list of str
+        Stokes parameters to produce, a subset of ``["I", "Q", "U", "V"]``.
+    """
+    table = _STOKES_FROM_CORRELATIONS[polarization_basis]
+    stokes = [str(label).upper() for label in stokes]
+    unknown = [label for label in stokes if label not in table]
+    if unknown:
+        raise ValueError(
+            f"unknown Stokes parameters {unknown}; expected a subset of I, Q, U, V."
+        )
+    needed = sorted({corr for label in stokes for corr, _ in table[label]})
+    planes = {
+        corr: sky_model_image(
+            components,
+            l_axis,
+            m_axis,
+            phase_center_ra_dec,
+            time_index,
+            frequency_index,
+            correlation=corr,
+        )
+        for corr in needed
+    }
+    out = np.zeros((len(stokes), len(l_axis), len(m_axis)), dtype=np.float64)
+    for k, label in enumerate(stokes):
+        out[k] = np.real(
+            sum(coefficient * planes[corr] for corr, coefficient in table[label])
+        )
+    return out
 
 
 def sky_components_from_arrays(kind, flux, ra_dec, shape=None, limb_darkening=None):
@@ -463,7 +619,7 @@ def sky_components_from_arrays(kind, flux, ra_dec, shape=None, limb_darkening=No
     -------
     list of dict (not yet normalised).
     """
-    flux = np.asarray(flux, dtype=np.float64)
+    flux = as_correlation_flux(flux, f"{kind}_source_flux")
     ra_dec = np.asarray(ra_dec, dtype=np.float64)
     if flux.ndim != 4 or ra_dec.ndim != 3 or flux.shape[0] != ra_dec.shape[1]:
         raise ValueError(

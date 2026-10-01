@@ -15,7 +15,7 @@ def _minimal_task_inputs(tmp_path):
         "image_size": [4, 4],
         "cell_size": np.array([-1.0, 1.0]) * 4.85e-6,
         "time_coords": [0],
-        "polarization_coords": ["I"],
+        "polarization_coords": ["I", "Q"],
         "fft_padding": 1.2,
     }
     task_coords = {"frequency": {"data": np.array([1.0e9, 1.1e9])}}

@@ -18,7 +18,10 @@ IMAGING_PARAM_DOCS = {
     "image_params": (
         "Image geometry and output coordinates: ``image_size``, ``cell_size``,\n"
         "``phase_direction``, ``time_coords``, ``polarization_coords`` and the\n"
-        "``fft_padding`` gridding/FFT padding factor."
+        "``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is\n"
+        '``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image\n'
+        'the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four\n'
+        "correlations (see ``instrument_polarization_basis``)."
     ),
     "imaging_weights_params": (
         'Weighting scheme configuration: ``weighting`` (``"natural"`` or\n'
@@ -88,15 +91,35 @@ IMAGING_PARAM_DOCS = {
         "- ``max_psf_fraction`` [CASA ``maxpsffraction``] : Upper clamp on the\n"
         "  same PSF fraction; it guarantees a minimum amount of cleaning per\n"
         "  model update even when the PSF sidelobe level is high.\n"
-        "- ``max_iter_divergence`` : Number of consecutive deconvolution\n"
-        "  iterations a plane's peak residual may stay above ``(1 + gain / 2)``\n"
-        "  times the lowest peak it has reached in the model update before that\n"
-        "  model update is stopped as diverged (Hogbom). A peak above\n"
-        "  ``(1 + gain)`` times the peak at the start of the model update, or a\n"
-        "  peak that is not finite, stops it at once. The next residual update\n"
-        "  then recomputes the true residual. Default 30; ``-1`` disables the\n"
-        "  test. *Differs from CASA*, which tests a fixed 10 percent rise once\n"
-        "  every 2000 iterations.\n"
+        "- ``max_iter_divergence`` : Divergence test of the model update\n"
+        "  (Hogbom). Number of consecutive deconvolution iterations the RMS of\n"
+        "  a plane's residual, taken over the clean mask, may be above\n"
+        "  ``(1 + gain / 10)`` times the lowest RMS it has reached in the model\n"
+        "  update before that model update is stopped as diverged. A peak\n"
+        "  above ``(1 + gain)`` times the peak at the start of the model\n"
+        "  update, or a peak that is not finite, stops it at once. The next\n"
+        "  residual update then recomputes the true residual and the cycles\n"
+        "  go on. Default 1, the first such iteration; ``-1`` disables the\n"
+        "  test. *Differs from CASA*, which tests the peak for a fixed 10\n"
+        "  percent rise once every 2000 iterations.\n"
+        "- ``entropy_stop`` : If ``True``, a plane stops once the entropy of\n"
+        "  its residual has passed its maximum. The entropy (Homan, Roth and\n"
+        "  Pushkarev 2024, AJ 167, 11) measures how much the residual looks\n"
+        "  like noise everywhere. It rises while the clean removes emission\n"
+        "  and falls once the clean fits noise. It is worked out after every\n"
+        "  residual update, and the plane stops when it is lower than in an\n"
+        "  earlier cycle. The fall is noticed one model update after the\n"
+        "  maximum and the model of that model update is kept, so a small\n"
+        "  ``max_iter_per_cycle`` makes the stop sharper. Default ``False``.\n"
+        "  No CASA equivalent.\n"
+        "- ``entropy_max_snr`` : The entropy of a plane is followed once the\n"
+        "  peak of its residual inside the clean mask is at most this many\n"
+        "  times the RMS of the residual. Above it the residual is dominated\n"
+        "  by the pattern of the point spread function. Default 6.\n"
+        "- ``entropy_spatial_bins`` : Number of spatial bins along each of the\n"
+        "  two image axes used for the entropy. Default 7.\n"
+        "- ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for\n"
+        "  the entropy. Default 10.\n"
         "\n"
         "A plane whose model updates do no iteration any more (two in a row)\n"
         "is stopped with the no progress stop code, so an all-zero plane cannot\n"
@@ -123,8 +146,13 @@ IMAGING_PARAM_DOCS = {
     ),
     "instrument_polarization_basis": (
         "Correlation (instrument) polarization basis the gridding is performed in:\n"
-        '``"linear"`` (``XX``/``YY``) or ``"circular"`` (``RR``/``LL``). The\n'
-        "output image is always produced in the Stokes basis."
+        '``"linear"`` or ``"circular"``. The residual update grids and degrids the\n'
+        "correlations of this basis and the model update deconvolves in the\n"
+        "Stokes basis, in which the image is written. The Stokes planes requested\n"
+        'in ``image_params["polarization_coords"]`` fix the correlations that are\n'
+        "loaded and gridded: the two parallel hands give ``I, Q`` (linear) or\n"
+        "``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample\n"
+        "is used only if none of its loaded correlations is flagged."
     ),
     "single_precision_image": (
         "If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model\n"

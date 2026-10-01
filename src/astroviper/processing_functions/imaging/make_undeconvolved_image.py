@@ -36,7 +36,10 @@ def make_undeconvolved_image_single_field(
     image_params : dict
         Image geometry and output coordinates: ``image_size``, ``cell_size``,
         ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
-        ``fft_padding`` gridding/FFT padding factor.
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
     cgk_1D : numpy.ndarray
         1-D prolate-spheroidal gridding convolution kernel.
     model_exists : bool

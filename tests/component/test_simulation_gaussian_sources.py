@@ -111,7 +111,7 @@ def test_gaussian_and_point_source_fluxes_recovered(tmp_path):
             "cell_size": CELL_SIZE,
             "phase_direction": phase_direction,
             "frequency_coords": ps_xdt.xr_ps.get_freq_axis().values,
-            "polarization_coords": ["I"],
+            "polarization_coords": ["I", "Q"],
             "time_coords": [0],
             "fft_padding": 1.2,
             "cpp_gridder": True,
@@ -153,7 +153,11 @@ def test_gaussian_and_point_source_fluxes_recovered(tmp_path):
     )
 
     img = load_image(image_store)
+    assert list(img.polarization.values) == ["I", "Q"]
     corrected = img.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values[0, 0, 0]
+    # the sources are unpolarised (XX = YY): Stokes Q holds nothing
+    stokes_q = img.SKY_RESTORED_PRIMARY_BEAM_CORRECTED.values[0, 0, 1]
+    assert np.nanmax(np.abs(stokes_q)) < 1e-9 * np.nanmax(corrected)
     primary_beam = img.PRIMARY_BEAM.values[0, 0, 0]
     beam = img.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values[0, 0, 0]
     beam_area = np.pi / (4 * np.log(2)) * beam[0] * beam[1]

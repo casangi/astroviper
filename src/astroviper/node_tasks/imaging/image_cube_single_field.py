@@ -508,7 +508,10 @@ def image_cube_single_field(
     image_params : dict
         Image geometry and output coordinates: ``image_size``, ``cell_size``,
         ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
-        ``fft_padding`` gridding/FFT padding factor.
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
     imaging_weights_params : dict
         Weighting scheme configuration: ``weighting`` (``"natural"`` or
         ``"briggs"``) and the Briggs ``robust`` parameter.
@@ -576,15 +579,35 @@ def image_cube_single_field(
         - ``max_psf_fraction`` [CASA ``maxpsffraction``] : Upper clamp on the
           same PSF fraction; it guarantees a minimum amount of cleaning per
           model update even when the PSF sidelobe level is high.
-        - ``max_iter_divergence`` : Number of consecutive deconvolution
-          iterations a plane's peak residual may stay above ``(1 + gain / 2)``
-          times the lowest peak it has reached in the model update before that
-          model update is stopped as diverged (Hogbom). A peak above
-          ``(1 + gain)`` times the peak at the start of the model update, or a
-          peak that is not finite, stops it at once. The next residual update
-          then recomputes the true residual. Default 30; ``-1`` disables the
-          test. *Differs from CASA*, which tests a fixed 10 percent rise once
-          every 2000 iterations.
+        - ``max_iter_divergence`` : Divergence test of the model update
+          (Hogbom). Number of consecutive deconvolution iterations the RMS of
+          a plane's residual, taken over the clean mask, may be above
+          ``(1 + gain / 10)`` times the lowest RMS it has reached in the model
+          update before that model update is stopped as diverged. A peak
+          above ``(1 + gain)`` times the peak at the start of the model
+          update, or a peak that is not finite, stops it at once. The next
+          residual update then recomputes the true residual and the cycles
+          go on. Default 1, the first such iteration; ``-1`` disables the
+          test. *Differs from CASA*, which tests the peak for a fixed 10
+          percent rise once every 2000 iterations.
+        - ``entropy_stop`` : If ``True``, a plane stops once the entropy of
+          its residual has passed its maximum. The entropy (Homan, Roth and
+          Pushkarev 2024, AJ 167, 11) measures how much the residual looks
+          like noise everywhere. It rises while the clean removes emission
+          and falls once the clean fits noise. It is worked out after every
+          residual update, and the plane stops when it is lower than in an
+          earlier cycle. The fall is noticed one model update after the
+          maximum and the model of that model update is kept, so a small
+          ``max_iter_per_cycle`` makes the stop sharper. Default ``False``.
+          No CASA equivalent.
+        - ``entropy_max_snr`` : The entropy of a plane is followed once the
+          peak of its residual inside the clean mask is at most this many
+          times the RMS of the residual. Above it the residual is dominated
+          by the pattern of the point spread function. Default 6.
+        - ``entropy_spatial_bins`` : Number of spatial bins along each of the
+          two image axes used for the entropy. Default 7.
+        - ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for
+          the entropy. Default 10.
 
         A plane whose model updates do no iteration any more (two in a row)
         is stopped with the no progress stop code, so an all-zero plane cannot
@@ -621,8 +644,13 @@ def image_cube_single_field(
         few planes, e.g. single-channel imaging) or ``"asp"``.
     instrument_polarization_basis : str, optional
         Correlation (instrument) polarization basis the gridding is performed in:
-        ``"linear"`` (``XX``/``YY``) or ``"circular"`` (``RR``/``LL``). The
-        output image is always produced in the Stokes basis.
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
     single_precision_image : bool, optional
         If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
         images) are single precision (``complex64`` / ``float32``) and the model
@@ -760,14 +788,17 @@ def image_cube_single_field(
         ]
 
     # Build the empty per-chunk image in the correlation (instrument)
-    # polarization basis the gridder works in. The two-feed correlation labels
-    # follow ``instrument_polarization_basis`` ("linear" -> XX/YY,
-    # "circular" -> RR/LL); the image is transformed to the Stokes output basis
-    # (image_params["polarization_coords"]) inside the science function.
-    correlation_pol_coords = {
-        "linear": ["XX", "YY"],
-        "circular": ["RR", "LL"],
-    }[instrument_polarization_basis]
+    # polarization basis the gridder works in. The requested Stokes planes
+    # (image_params["polarization_coords"]) fix the correlations: the two
+    # parallel hands for I, Q (linear) or I, V (circular), all four for
+    # I, Q, U, V. The science function transforms between the two bases.
+    from astroviper.processing_functions.imaging.utils.imaging_polarization import (
+        correlations_for_stokes,
+    )
+
+    correlation_pol_coords = correlations_for_stokes(
+        image_params["polarization_coords"], instrument_polarization_basis
+    )
     start = time.time()
     img_xds = make_empty_sky_image(
         phase_center=image_params["phase_direction"],

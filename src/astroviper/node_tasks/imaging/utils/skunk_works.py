@@ -455,7 +455,8 @@ def load_processing_set_skunk_works(
         Path to the processing-set Zarr store.
     sel_parms : dict
         ``{ms_name: {dim: slice}}`` selection for this task (from the graph).
-        The ``frequency`` slice gives the channel range to read.
+        The ``frequency`` slice gives the channel range to read and an optional
+        ``polarization`` list the index positions of the correlations to keep.
     data_group : dict
         Resolved role->variable mapping for ``processing_set_data_group_name``
         (e.g. ``{"correlated_data": "VISIBILITY", "uvw": "UVW", ...}``), passed
@@ -514,6 +515,14 @@ def load_processing_set_skunk_works(
         uvw, uvw_dims = results["uvw"]
         weight, w_dims = results["weight"]
         flag, f_dims = results["flag"]
+
+        # Keep only the correlations the imager grids (the chunk blobs hold
+        # every correlation, so the selection happens after the decode).
+        pol_sel = ms_sel.get("polarization") if isinstance(ms_sel, dict) else None
+        if pol_sel is not None:
+            vis = np.take(vis, pol_sel, axis=vis_dims.index("polarization"))
+            weight = np.take(weight, pol_sel, axis=w_dims.index("polarization"))
+            flag = np.take(flag, pol_sel, axis=f_dims.index("polarization"))
 
         npol = vis.shape[vis_dims.index("polarization")]
         pol_labels = _POL_LABELS[instrument_polarization_basis].get(

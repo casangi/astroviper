@@ -14,14 +14,15 @@ from astroviper.utils.data_group_tools import (
 # lg.setLevel(logging.DEBUG)
 
 # Divergence test of a Hogbom model update. A healthy clean does not lower its
-# peak residual monotonically: every subtraction changes all other pixels by
-# gain x PSF sidelobe, so the peak jitters above the lowest value it has
-# reached by an amount proportional to the loop gain (measured: at most about
-# 0.36 x gain). Both limits therefore scale with the gain. See
-# ``hogbom_clean`` and the memo "A gain aware divergence test for the Hogbom
-# model update".
-DIVERGENCE_SOFT_GAIN_FRACTION = 0.5  # soft limit: (1 + gain / 2) x lowest peak
-DIVERGENCE_HARD_GAIN_FRACTION = 1.0  # hard limit: (1 + gain) x starting peak
+# residual monotonically: every subtraction changes all other pixels by
+# gain x PSF sidelobe, so the residual jitters above the lowest level it has
+# reached by an amount proportional to the loop gain. The RMS of the residual
+# is an average over all searched pixels and jitters far less than the peak
+# (measured in healthy cleans: at most 0.09 x gain for the RMS, 0.44 x gain for
+# the peak), so the soft limit tests the RMS. Both limits scale with the gain.
+# See ``hogbom_clean``.
+DIVERGENCE_RMS_GAIN_FRACTION = 0.1  # soft limit: (1 + gain / 10) x lowest RMS
+DIVERGENCE_PEAK_GAIN_FRACTION = 1.0  # hard limit: (1 + gain) x starting peak
 
 # XXX : TODO: As of 2025-10-07 there is no way to supply an initial model image to the deconvolver
 
@@ -104,10 +105,11 @@ def _validate_deconvolve_params(deconvolve_params):
           Default 0.0.
         - ``clean_box`` : 4-tuple ``(xmin, xmax, ymin, ymax)``. Default
           ``(-1, -1, -1, -1)`` meaning the full image.
-        - ``max_iter_divergence`` : int, number of consecutive iterations a
-          plane's peak residual may stay above ``(1 + gain / 2)`` times the
-          lowest peak it has reached before its model update is stopped as
-          diverged (Hogbom). ``-1`` disables the divergence test. Default 30.
+        - ``max_iter_divergence`` : int, number of consecutive iterations the
+          RMS of a plane's residual may be above ``(1 + gain / 10)`` times the
+          lowest RMS it has reached before its model update is stopped as
+          diverged (Hogbom). ``-1`` disables the divergence test. Default 1:
+          the model update stops at the first such iteration.
 
     Returns
     -------
@@ -133,7 +135,7 @@ def _validate_deconvolve_params(deconvolve_params):
         "clean_box": (-1, -1, -1, -1),
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
-        "max_iter_divergence": 30,
+        "max_iter_divergence": 1,
     }
 
     for key, default_value in default_params.items():
@@ -179,10 +181,10 @@ def _validate_deconvolve_params(deconvolve_params):
 
 
 def _divergence_factors(gain):
-    """Soft and hard divergence factors of a Hogbom model update.
+    """Factors of the soft and the hard limit of the Hogbom divergence test.
 
-    Both scale with the loop gain, because the ordinary jitter of the peak
-    residual above its lowest value does (see ``hogbom_clean``).
+    Both scale with the loop gain, because the ordinary jitter of the residual
+    above its lowest level does (see ``hogbom_clean``).
 
     Parameters
     ----------
@@ -191,17 +193,18 @@ def _divergence_factors(gain):
 
     Returns
     -------
-    soft_factor : float
-        ``1 + gain / 2``. A plane whose peak stays above ``soft_factor`` times
-        the lowest peak it has reached for ``max_iter_divergence`` consecutive
-        iterations is stopped as diverged.
-    hard_factor : float
-        ``1 + gain``. A plane whose peak exceeds ``hard_factor`` times its peak
-        at the start of the model update is stopped at once.
+    rms_factor : float
+        ``1 + gain / 10``. A plane whose residual RMS stays above
+        ``rms_factor`` times the lowest RMS it has reached for
+        ``max_iter_divergence`` consecutive iterations is stopped as diverged
+        (soft limit).
+    peak_factor : float
+        ``1 + gain``. A plane whose peak exceeds ``peak_factor`` times its peak
+        at the start of the model update is stopped at once (hard limit).
     """
     return (
-        1.0 + DIVERGENCE_SOFT_GAIN_FRACTION * float(gain),
-        1.0 + DIVERGENCE_HARD_GAIN_FRACTION * float(gain),
+        1.0 + DIVERGENCE_RMS_GAIN_FRACTION * float(gain),
+        1.0 + DIVERGENCE_PEAK_GAIN_FRACTION * float(gain),
     )
 
 
@@ -882,12 +885,14 @@ def hogbom_clean(
     - it has spent its iteration budget (``max_iter_per_cycle``);
     - its peak residual is at or below its ``threshold_per_cycle`` (so an
       all-zero plane does no iterations);
-    - it diverges. A healthy clean's peak jitters above the lowest value it
-      has reached by up to about ``0.36 * gain``, so the test allows
-      ``(1 + gain / 2)`` times that lowest peak and stops the plane only when
-      its peak has stayed above this *soft limit* for ``max_iter_divergence``
-      consecutive iterations (default 30; ``-1`` disables the divergence
-      test). A runaway is stopped at once by the *hard limit*, a peak above
+    - it diverges. The test follows the RMS of the residual over the pixels
+      the peak search covers (the clean box inside the mask). In a healthy
+      clean the RMS rises by at most about ``0.09 * gain`` above the lowest
+      value it has reached, so the test allows ``(1 + gain / 10)`` times that
+      lowest RMS and stops the plane when its RMS has been above this *soft
+      limit* for ``max_iter_divergence`` consecutive iterations (default 1,
+      the first such iteration; ``-1`` disables the divergence test). A
+      runaway is stopped at once by the *hard limit*, a peak above
       ``(1 + gain)`` times the peak at the start of the model update. A peak
       that is not finite always stops the plane.
 
@@ -957,7 +962,7 @@ def hogbom_clean(
 
     # The stop tests (threshold, divergence) run inside the kernel at every
     # iteration; only the gain dependent limits are worked out here.
-    divergence_factor, divergence_hard_factor = _divergence_factors(
+    divergence_rms_factor, divergence_peak_factor = _divergence_factors(
         deconvolve_params["gain"]
     )
 
@@ -972,8 +977,8 @@ def hogbom_clean(
         threshold=threshold_per_cycle,
         processing_function_threads=int(processing_function_threads),
         max_iter_divergence=int(deconvolve_params["max_iter_divergence"]),
-        divergence_factor=divergence_factor,
-        divergence_hard_factor=divergence_hard_factor,
+        divergence_rms_factor=divergence_rms_factor,
+        divergence_peak_factor=divergence_peak_factor,
     )
 
 
@@ -1057,7 +1062,7 @@ def hogbom_clean_many_threads(
 
     # The stop tests (threshold, divergence) run inside the kernel at every
     # iteration; only the gain dependent limits are worked out here.
-    divergence_factor, divergence_hard_factor = _divergence_factors(
+    divergence_rms_factor, divergence_peak_factor = _divergence_factors(
         deconvolve_params["gain"]
     )
 
@@ -1072,8 +1077,8 @@ def hogbom_clean_many_threads(
         threshold=threshold_per_cycle,
         processing_function_threads=int(processing_function_threads),
         max_iter_divergence=int(deconvolve_params["max_iter_divergence"]),
-        divergence_factor=divergence_factor,
-        divergence_hard_factor=divergence_hard_factor,
+        divergence_rms_factor=divergence_rms_factor,
+        divergence_peak_factor=divergence_peak_factor,
     )
 
 

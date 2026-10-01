@@ -409,6 +409,8 @@ class TestImagingDictFieldClassification(unittest.TestCase):
             "start_peakres",
             "start_peakres_nomask",
             "start_model_flux",
+            "entropy",
+            "residual_snr",
         }
         self.assertEqual(FIELD_ACCUM, expected_fields)
 
@@ -437,6 +439,8 @@ class TestImagingDictFieldClassification(unittest.TestCase):
                 "start_peakres": 1.0,
                 "start_peakres_nomask": 1.1,
                 "start_model_flux": 0.0,
+                "entropy": 7.5,
+                "residual_snr": 3.0,
             },
             time=0,
             pol=0,
@@ -2332,6 +2336,397 @@ class TestPerPlaneStateGrowth(unittest.TestCase):
         # existing values kept, new planes start at the full budget
         self.assertEqual(controller.max_iter_remaining[0, 0, 0], 70)
         self.assertEqual(controller.max_iter_remaining[0, 2, 1], 100)
+        # the state of the entropy stop grows with them
+        self.assertEqual(controller.max_entropy.shape, (1, 3, 2))
+        self.assertEqual(controller.entropy_stopped.shape, (1, 3, 2))
+        self.assertTrue(np.isnan(controller.max_entropy).all())
+        self.assertFalse(controller.entropy_stopped.any())
+
+
+class TestEntropyStop(unittest.TestCase):
+    """The entropy of the residual rises while the clean removes emission and
+    falls once the clean fits noise. With ``entropy_stop`` a plane is stopped
+    when the entropy of its residual is lower than in an earlier imaging
+    cycle."""
+
+    @staticmethod
+    def _residual(entropy, snr=(3.0, 3.0), peakres=(0.5, 0.4)):
+        """ImagingDict of the residual of one residual update, two planes."""
+        rd = ImagingDict()
+        for pol in range(2):
+            rd.add(
+                {
+                    "peakres": peakres[pol],
+                    "masksum": 100,
+                    "iter_done": 0,
+                    "entropy": entropy[pol],
+                    "residual_snr": snr[pol],
+                },
+                time=0,
+                pol=pol,
+                chan=0,
+            )
+        return rd
+
+    @staticmethod
+    def _model_update(iter_done):
+        rd = ImagingDict()
+        for pol, iters in enumerate(iter_done):
+            rd.add(
+                {"peakres": 0.3, "masksum": 100, "iter_done": iters},
+                time=0,
+                pol=pol,
+                chan=0,
+            )
+        return rd
+
+    @staticmethod
+    def _controller(**kwargs):
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            IterationController,
+        )
+
+        params = dict(max_iter=1000, max_cycles=-1, threshold=0.0, entropy_stop=True)
+        params.update(kwargs)
+        return IterationController(**params)
+
+    def _cycle(self, controller, entropy, iter_done=(50, 50), **residual):
+        """One imaging cycle; returns the stop code after the residual update
+        and the per-plane budget of the model update that follows."""
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            IMAGING_CONTINUE,
+        )
+
+        rd = self._residual(entropy, **residual)
+        stopcode, _ = controller.check_convergence(rd)
+        if stopcode.imaging != IMAGING_CONTINUE:
+            return stopcode, None, rd
+        budget = controller.max_iter_remaining.copy()
+        budget[controller.entropy_stopped] = 0
+        update = self._model_update(np.minimum(iter_done, budget[0, 0]).tolist())
+        controller.update_counts(update)
+        controller.check_convergence(update, model_update_ran=True)
+        return stopcode, budget, update
+
+    def test_a_fall_of_the_entropy_stops_the_plane(self):
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            IMAGING_CONTINUE,
+            IMAGING_ENTROPY,
+            IMAGING_STOP_DESCRIPTIONS,
+        )
+
+        controller = self._controller()
+        stopcode, _, _ = self._cycle(controller, (7.50, 7.40))
+        self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
+        stopcode, _, _ = self._cycle(controller, (7.52, 7.45))
+        self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
+        np.testing.assert_allclose(controller.max_entropy[0, 0], [7.52, 7.45])
+        # pol 0 falls, pol 1 still rises: the channel cycles on for pol 1
+        stopcode, budget, update = self._cycle(controller, (7.51, 7.46))
+        self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
+        self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_ENTROPY)
+        self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_CONTINUE)
+        self.assertEqual(budget[0, 0].tolist(), [0, 900])
+        entries = list(update.data.values())
+        self.assertEqual(entries[0]["stop_code"].imaging, IMAGING_ENTROPY)
+        self.assertEqual(
+            entries[0]["stop_description"], IMAGING_STOP_DESCRIPTIONS[IMAGING_ENTROPY]
+        )
+        self.assertIn("entropy", entries[0]["stop_description"])
+        # pol 1 falls too: all planes have stopped
+        stopcode, _, rd = self._cycle(controller, (7.51, 7.44))
+        self.assertEqual(stopcode.imaging, IMAGING_ENTROPY)
+        self.assertEqual(controller.stop_code_imaging[0, 0].tolist(), [10, 10])
+        self.assertEqual([e["stop_code"].imaging for e in rd.data.values()], [10, 10])
+
+    def test_the_stop_is_final(self):
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            IMAGING_ENTROPY,
+        )
+
+        controller = self._controller()
+        self._cycle(controller, (7.50, 7.40))
+        self._cycle(controller, (7.49, 7.45))
+        self.assertTrue(controller.entropy_stopped[0, 0, 0])
+        # a higher entropy later on does not revive the plane, and model
+        # updates without iterations do not change its stop code
+        for entropy in ((7.60, 7.46), (7.70, 7.47), (7.80, 7.48)):
+            _, budget, _ = self._cycle(controller, entropy)
+            self.assertEqual(budget[0, 0, 0], 0)
+            self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_ENTROPY)
+        self.assertEqual(controller.max_entropy[0, 0, 0], 7.50)
+        # the plane spent 50 iterations, in the one model update it took part in
+        self.assertEqual(controller.max_iter_remaining[0, 0, 0], 950)
+
+    def test_entropy_that_is_not_a_number_is_skipped(self):
+        # image_residual_entropy returns no number while the peak of the
+        # residual is above entropy_max_snr times its RMS
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            IMAGING_CONTINUE,
+        )
+
+        controller = self._controller()
+        for entropy in ((np.nan, 7.2), (np.nan, 7.3), (7.5, 7.4), (7.6, 7.5)):
+            stopcode, _, _ = self._cycle(controller, entropy)
+            self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
+        np.testing.assert_allclose(controller.max_entropy[0, 0], [7.6, 7.5])
+        self.assertFalse(controller.entropy_stopped.any())
+
+    def test_equal_entropy_does_not_stop(self):
+        controller = self._controller()
+        for _ in range(3):
+            self._cycle(controller, (7.5, 7.5))
+        self.assertFalse(controller.entropy_stopped.any())
+
+    def test_off_by_default(self):
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            IMAGING_CONTINUE,
+        )
+
+        controller = self._controller(entropy_stop=False)
+        for entropy in ((7.5, 7.5), (7.4, 7.4), (7.3, 7.3)):
+            stopcode, budget, _ = self._cycle(controller, entropy)
+            self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
+        self.assertFalse(controller.entropy_stopped.any())
+        self.assertTrue(np.isnan(controller.max_entropy).all())
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            IterationController,
+        )
+
+        self.assertFalse(IterationController().entropy_stop)
+
+    def test_threshold_and_iteration_limit_come_first(self):
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            IMAGING_ENTROPY,
+            IMAGING_MAX_ITER,
+            IMAGING_THRESHOLD,
+        )
+
+        controller = self._controller(threshold=0.45, max_iter=100)
+        self._cycle(controller, (7.5, 7.5), iter_done=(100, 10))
+        # pol 0 has spent its budget, pol 1 is below the threshold; both fall
+        rd = self._residual((7.4, 7.4), peakres=(0.5, 0.4))
+        controller.check_convergence(rd)
+        self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_MAX_ITER)
+        self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_THRESHOLD)
+        self.assertTrue(controller.entropy_stopped.all())
+        self.assertNotEqual(IMAGING_ENTROPY, IMAGING_MAX_ITER)
+
+    def test_entropy_comes_before_the_cycle_limit(self):
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            IMAGING_ENTROPY,
+            IMAGING_MAX_CYCLES,
+        )
+
+        controller = self._controller(max_cycles=2)
+        self._cycle(controller, (7.5, 7.4))
+        self._cycle(controller, (7.4, 7.5))  # the last cycle allowed
+        rd = self._residual((7.4, 7.6))
+        stopcode, _ = controller.check_convergence(rd)
+        self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_ENTROPY)
+        self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_MAX_CYCLES)
+        self.assertEqual(stopcode.imaging, IMAGING_ENTROPY)  # highest of the two
+
+    def test_reset_clears_the_state(self):
+        controller = self._controller()
+        self._cycle(controller, (7.5, 7.4))
+        self._cycle(controller, (7.4, 7.5))
+        self.assertTrue(controller.entropy_stopped[0, 0, 0])
+        controller.reset_stopcode()
+        self.assertFalse(controller.entropy_stopped.any())
+        self.assertTrue(np.isnan(controller.max_entropy).all())
+        self._cycle(controller, (7.5, 7.4))
+        self._cycle(controller, (7.4, 7.5))
+        controller.reset()
+        self.assertFalse(controller.entropy_stopped.any())
+        self.assertTrue(np.isnan(controller.max_entropy).all())
+
+    def test_state_lists_the_parameters(self):
+        state = self._controller(
+            entropy_max_snr=5.0, entropy_spatial_bins=9, entropy_flux_bins=20
+        ).get_state()
+        self.assertIs(state["entropy_stop"], True)
+        self.assertEqual(state["entropy_max_snr"], 5.0)
+        self.assertEqual(state["entropy_spatial_bins"], 9)
+        self.assertEqual(state["entropy_flux_bins"], 20)
+
+    def test_cycle_controls_give_a_stopped_plane_no_iterations(self):
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            get_calculate_cycle_controls,
+        )
+
+        controller = self._controller(max_iter_per_cycle=200)
+        self._cycle(controller, (7.5, 7.4))
+        _, _, update = self._cycle(controller, (7.4, 7.5))
+        for fields in update.data.values():
+            fields["max_psf_sidelobe"] = 0.2
+        max_iter_per_cycle, _ = get_calculate_cycle_controls(
+            controller, update, None, True, {"gain": 0.1}
+        )
+        self.assertEqual(max_iter_per_cycle[0, 0].tolist(), [0, 200])
+        # the budget of the controller is not touched
+        self.assertEqual(controller.max_iter_remaining[0, 0].tolist(), [950, 900])
+
+
+class TestEntropyParameters(unittest.TestCase):
+    def test_defaults(self):
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            validate_entropy_params,
+        )
+
+        self.assertEqual(validate_entropy_params(None), (False, 6.0, 7, 10))
+        self.assertEqual(validate_entropy_params({"gain": 0.1}), (False, 6.0, 7, 10))
+
+    def test_values_are_taken_over(self):
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            validate_entropy_params,
+        )
+
+        out = validate_entropy_params(
+            {
+                "entropy_stop": True,
+                "entropy_max_snr": 5,
+                "entropy_spatial_bins": np.int64(9),
+                "entropy_flux_bins": 20,
+            }
+        )
+        self.assertEqual(out, (True, 5.0, 9, 20))
+        self.assertIsInstance(out[1], float)
+        self.assertIsInstance(out[2], int)
+
+    def test_wrong_values_are_refused(self):
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            IterationController,
+            validate_entropy_params,
+        )
+
+        for key, values in {
+            "entropy_stop": [1, 0, "True", None],
+            "entropy_max_snr": [0, -1.0, np.nan, np.inf, "6", True, None],
+            "entropy_spatial_bins": [0, -3, 7.0, "7", True, None],
+            "entropy_flux_bins": [0, -3, 10.0, "10", False, None],
+        }.items():
+            for value in values:
+                with self.assertRaisesRegex(ValueError, key):
+                    validate_entropy_params({key: value})
+                with self.assertRaisesRegex(ValueError, key):
+                    IterationController(**{key: value})
+
+
+class TestResidualEntropyInImagingDict(unittest.TestCase):
+    @staticmethod
+    def _img_xds(seed=0, n=64):
+        rng = np.random.default_rng(seed)
+        residual = rng.standard_normal((1, 2, 2, n, n))
+        residual[0, 1, 1, 10, 10] = 50.0  # peak far above 6 times the RMS
+        img_xds = xr.Dataset(
+            {
+                "SKY_RESIDUAL": (
+                    ("time", "frequency", "polarization", "l", "m"),
+                    residual,
+                ),
+                "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
+                    ("time", "frequency", "polarization"),
+                    np.full((1, 2, 2), 0.2),
+                ),
+            }
+        )
+        img_xds.attrs["data_groups"] = {
+            "residual": {
+                "sky": "SKY_RESIDUAL",
+                "max_sidelobe_point_spread_function": (
+                    "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
+                ),
+            }
+        }
+        return img_xds
+
+    def test_entropy_is_recorded_only_with_entropy_stop(self):
+        img_xds = self._img_xds()
+        off = build_residual_imaging_dict(img_xds, "residual", {"gain": 0.1})
+        for fields in off.data.values():
+            self.assertNotIn("entropy", fields)
+            self.assertNotIn("residual_snr", fields)
+        on = build_residual_imaging_dict(
+            img_xds, "residual", {"gain": 0.1, "entropy_stop": True}
+        )
+        self.assertEqual(len(on.data), 4)
+        for key, fields in on.data.items():
+            self.assertEqual(len(fields["entropy"]), 1)
+            self.assertEqual(len(fields["residual_snr"]), 1)
+            if (key.chan, key.pol) == (1, 1):
+                self.assertTrue(np.isnan(fields["entropy"][0]))
+                self.assertGreater(fields["residual_snr"][0], 30)
+            else:
+                # white noise in 49 spatial bins: close to ln(49) + 3.72
+                self.assertAlmostEqual(fields["entropy"][0], 7.3, delta=0.15)
+                self.assertLess(fields["residual_snr"][0], 6)
+
+    def test_parameters_reach_the_entropy(self):
+        img_xds = self._img_xds()
+        coarse = build_residual_imaging_dict(
+            img_xds,
+            "residual",
+            {
+                "gain": 0.1,
+                "entropy_stop": True,
+                "entropy_spatial_bins": 1,
+                "entropy_flux_bins": 2,
+            },
+        )
+        fine = build_residual_imaging_dict(
+            img_xds, "residual", {"gain": 0.1, "entropy_stop": True}
+        )
+        key = Key(time=0, chan=0, pol=0)
+        self.assertLess(coarse.data[key]["entropy"][0], 2.5)
+        self.assertGreater(fine.data[key]["entropy"][0], 7.0)
+        # a lower limit on the ratio of peak to RMS leaves the noise planes out
+        strict = build_residual_imaging_dict(
+            img_xds,
+            "residual",
+            {"gain": 0.1, "entropy_stop": True, "entropy_max_snr": 2.0},
+        )
+        self.assertTrue(np.isnan(strict.data[key]["entropy"][0]))
+
+    def test_wrong_parameter_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "entropy_stop"):
+            build_residual_imaging_dict(
+                self._img_xds(), "residual", {"gain": 0.1, "entropy_stop": "yes"}
+            )
+
+    def test_copy_into_the_result_of_a_model_update(self):
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            copy_residual_entropy,
+            merge_imaging_dicts,
+        )
+
+        img_xds = self._img_xds()
+        residual = build_residual_imaging_dict(
+            img_xds, "residual", {"gain": 0.1, "entropy_stop": True}
+        )
+        update = ImagingDict()
+        for key in residual.data:
+            update.add(
+                {"peakres": 0.1, "masksum": 10, "iter_done": 5},
+                time=key.time,
+                pol=key.pol,
+                chan=key.chan,
+            )
+        copy_residual_entropy(update, residual)
+        key = Key(time=0, chan=0, pol=1)
+        self.assertEqual(update.data[key]["entropy"], residual.data[key]["entropy"])
+        self.assertEqual(
+            update.data[key]["residual_snr"], residual.data[key]["residual_snr"]
+        )
+        # one value per imaging cycle in the merged record
+        merged = merge_imaging_dicts([update, update])
+        self.assertEqual(len(merged.data[key]["entropy"]), 2)
+        # nothing to copy without the entropy stop
+        plain = build_residual_imaging_dict(img_xds, "residual", {"gain": 0.1})
+        other = ImagingDict()
+        other.add({"peakres": 0.1, "masksum": 10, "iter_done": 5}, 0, 0, 0)
+        copy_residual_entropy(other, plain)
+        self.assertNotIn("entropy", other.data[Key(time=0, chan=0, pol=0)])
 
 
 if __name__ == "__main__":

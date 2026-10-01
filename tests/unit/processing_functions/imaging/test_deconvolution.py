@@ -194,7 +194,7 @@ class TestValidateDeconvolveParams:
             "clean_box": (-1, -1, -1, -1),
             "min_psf_fraction": 0.05,
             "max_psf_fraction": 0.8,
-            "max_iter_divergence": 30,
+            "max_iter_divergence": 1,
         }
 
     def test_empty_dict_returns_defaults(self):
@@ -206,7 +206,7 @@ class TestValidateDeconvolveParams:
             "clean_box": (-1, -1, -1, -1),
             "min_psf_fraction": 0.05,
             "max_psf_fraction": 0.8,
-            "max_iter_divergence": 30,
+            "max_iter_divergence": 1,
         }
 
     def test_partial_params_filled(self):
@@ -275,8 +275,8 @@ class TestValidateDeconvolveParams:
         with pytest.raises(ValueError, match="4-tuple"):
             _validate_deconvolve_params({"clean_box": box})
 
-    def test_max_iter_divergence_defaults_to_30(self):
-        assert _validate_deconvolve_params(None)["max_iter_divergence"] == 30
+    def test_max_iter_divergence_defaults_to_1(self):
+        assert _validate_deconvolve_params(None)["max_iter_divergence"] == 1
 
     @pytest.mark.parametrize("value", [-1, 1, 30, 5000, np.int32(7)])
     def test_max_iter_divergence_accepts_valid(self, value):
@@ -511,19 +511,20 @@ def _chain_problem(ny=8, nx=64, sidelobe=2.04, dtype=np.float64):
 class TestDivergenceFactors:
     @pytest.mark.parametrize("gain", [0.05, 0.1, 0.5, 1.0])
     def test_limits_scale_with_the_gain(self, gain):
-        soft, hard = _divergence_factors(gain)
-        assert soft == pytest.approx(1 + gain / 2)
-        assert hard == pytest.approx(1 + gain)
-        assert 1 < soft < hard
+        rms_factor, peak_factor = _divergence_factors(gain)
+        assert rms_factor == pytest.approx(1 + gain / 10)
+        assert peak_factor == pytest.approx(1 + gain)
+        assert 1 < rms_factor < peak_factor
 
 
 @requires_hogbom
 @pytest.mark.parametrize("clean", [hogbom_clean, hogbom_clean_many_threads])
 class TestHogbomDivergence:
     def test_diverging_plane_is_stopped(self, clean):
-        # gain 0.5: soft limit 1.25, hard limit 1.5; the peak grows by 1.02
-        # per iteration, so it is above the soft limit from iteration 12 and
-        # has been there for 5 iterations at iteration 16.
+        # gain 0.5: the soft limit is 1.05 times the lowest RMS, the hard limit
+        # 1.5 times the starting peak. After the first iteration the RMS of
+        # the chain is 1.136 times its starting value and it rises from there,
+        # so with a count of 5 the plane stops at iteration 5.
         residual, psf = _chain_problem()
         result = clean(
             residual_cube=residual,
@@ -536,18 +537,36 @@ class TestHogbomDivergence:
                 "max_iter_divergence": 5,
             },
         )
-        assert result["iterations_performed"].item() == 16
+        assert result["iterations_performed"].item() == 5
         assert bool(result["diverged"].item()) is True
         assert result["stop_code"].item() == MODEL_UPDATE_DIVERGENCE
 
-    def test_default_count_lets_the_hard_limit_act(self, clean):
-        # Default max_iter_divergence = 30: the hard limit fires first (21).
+    def test_default_stops_at_the_first_rise(self, clean):
+        # Default max_iter_divergence = 1.
         residual, psf = _chain_problem()
         result = clean(
             residual_cube=residual,
             psf_cube=psf,
             model_cube=np.zeros_like(residual),
             deconvolve_params={"gain": 0.5, "max_iter": 40, "threshold": 0.0},
+        )
+        assert result["iterations_performed"].item() == 1
+        assert bool(result["diverged"].item()) is True
+
+    def test_large_count_lets_the_hard_limit_act(self, clean):
+        # The peak passes 1.5 times its starting value at iteration 21, long
+        # before the soft limit has counted to 1000.
+        residual, psf = _chain_problem()
+        result = clean(
+            residual_cube=residual,
+            psf_cube=psf,
+            model_cube=np.zeros_like(residual),
+            deconvolve_params={
+                "gain": 0.5,
+                "max_iter": 40,
+                "threshold": 0.0,
+                "max_iter_divergence": 1000,
+            },
         )
         assert result["iterations_performed"].item() == 21
         assert bool(result["diverged"].item()) is True
@@ -607,7 +626,7 @@ class TestDeconvolveReportsDivergence:
             },
         )
         (entry,) = imaging_dict.data.values()
-        assert entry["iter_done"] == [16]
+        assert entry["iter_done"] == [5]
         # placeholder set by the deconvolver ...
         assert entry["stop_code"] == StopCode(IMAGING_CONTINUE, MODEL_UPDATE_DIVERGENCE)
         # ... and kept by the controller, which lets the imaging cycles go on:
@@ -618,7 +637,7 @@ class TestDeconvolveReportsDivergence:
         assert stopcode.imaging == IMAGING_CONTINUE
         assert entry["stop_code"].model_update == MODEL_UPDATE_DIVERGENCE
         assert controller.stop_code_model_update[0, 0, 0] == MODEL_UPDATE_DIVERGENCE
-        assert controller.max_iter_remaining[0, 0, 0] == 24
+        assert controller.max_iter_remaining[0, 0, 0] == 35
 
     def test_healthy_model_update_keeps_the_continue_code(self):
         xds = self._xds(sidelobe=0.0)

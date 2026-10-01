@@ -21,7 +21,9 @@ SIMULATION_PARAM_DOCS = {
     ),
     "point_source_flux": (
         "Flux of every point source in the four instrumental correlations\n"
-        "(``RR, RL, LR, LL`` or ``XX, XY, YX, YY``); singleton time/frequency axes broadcast."
+        "(``RR, RL, LR, LL`` or ``XX, XY, YX, YY``); singleton time/frequency axes\n"
+        "broadcast.  Real, or complex with conjugate cross hands (``XY = U + iV``,\n"
+        "``YX = U - iV``; ``RL = Q + iU``, ``LR = Q - iU``)."
     ),
     "point_source_ra_dec": (
         "Right ascension and declination of the point sources (per time or fixed)."

@@ -126,17 +126,23 @@ void clean(T* limage, T* limagestep, const T* lpsf,
 
     // Main iteration loop
     for (iter = siter; iter < max_iter_remaining; ++iter) {
+        // Peak of |residual| and sum of its squares over the clean box inside
+        // the mask, row by row (see scan_row): the first of equal peaks wins,
+        // lowest row, then lowest column.
         absval = static_cast<T>(0);
+        double sum_squares = 0.0;
         for (int iy = ybeg; iy < yend; ++iy) {
-            for (int ix = xbeg; ix < xend; ++ix) {
-                if ((domask == 0) || lmask[iy * nx + ix]) {
-                    T val = std::abs(limagestep[iy * nx + ix]);
-                    if (val > absval) {
-                        px = ix;
-                        py = iy;
-                        absval = val;
-                    }
-                }
+            const std::size_t row_offset = static_cast<std::size_t>(iy) * nx;
+            T row_max;
+            int row_ix;
+            sum_squares += scan_row<T>(
+                limagestep + row_offset,
+                (domask == 0) ? nullptr : lmask + row_offset,
+                xbeg, xend, row_max, row_ix);
+            if (row_max > absval) {
+                px = row_ix;
+                py = iy;
+                absval = row_max;
             }
         }
 
@@ -158,7 +164,7 @@ void clean(T* limage, T* limagestep, const T* lpsf,
         if (yes == 1) {
             break;  // goto 200 equivalent
         }
-        const int reason = stop_test.check(absval, cthres, divergence);
+        const int reason = stop_test.check(absval, sum_squares, cthres, divergence);
         if (reason != STOP_NONE) {
             stop_reason = reason;
             break;
@@ -435,6 +441,7 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
     }
     std::vector<T> row_max(static_cast<std::size_t>(nplanes) * ny);
     std::vector<int> row_ix(static_cast<std::size_t>(nplanes) * ny);
+    std::vector<double> row_sum_squares(static_cast<std::size_t>(nplanes) * ny, 0.0);
     std::vector<int> peak_y(nplanes, 0);
     std::vector<int> peak_x(nplanes, 0);
     std::vector<T> peak_pv(nplanes, static_cast<T>(0));
@@ -488,16 +495,9 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
                     ? mask_cube + static_cast<std::size_t>(pl) * plane_size
                                 + static_cast<std::size_t>(iy) * nx
                     : nullptr;
-                T m = static_cast<T>(0);
-                int mi = xbeg;
-                for (int ix = xbeg; ix < xend; ++ix) {
-                    if (!domask || msk[ix]) {
-                        T v = std::abs(res[ix]);
-                        if (v > m) { m = v; mi = ix; }
-                    }
-                }
-                row_max[r] = m;
-                row_ix[r] = mi;
+                // Same row scan as clean<T>: row maximum and row sum of squares.
+                row_sum_squares[r] = scan_row<T>(
+                    res, msk, xbeg, xend, row_max[r], row_ix[r]);
             }
         });
 
@@ -508,16 +508,20 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
             T best = static_cast<T>(-1);
             int py = ybeg, px = xbeg;
             const long base = static_cast<long>(pl) * ny;
+            // Row sums are added in row order, as in clean<T>, so the sum does
+            // not depend on how the rows were split over the threads.
+            double sum_squares = 0.0;
             for (int iy = ybeg; iy < yend; ++iy) {
                 T rm = row_max[base + iy];
                 if (rm > best) { best = rm; py = iy; px = row_ix[base + iy]; }
+                sum_squares += row_sum_squares[base + iy];
             }
             T cthres = thres[pl];
             if (cspeedup > zero_val) {
                 cthres = thres[pl] * std::pow(two_val, static_cast<T>(it) / cspeedup);
             }
             // Threshold and divergence tests, identical to clean<T>.
-            const int reason = stop_test[pl].check(best, cthres, divergence);
+            const int reason = stop_test[pl].check(best, sum_squares, cthres, divergence);
             if (reason != STOP_NONE) {
                 active[pl] = 0;
                 stop_out[pl] = reason;
