@@ -955,3 +955,22 @@ def test_refreshed_statistics_respect_clean_support(explicit_mask):
     assert fields["peakres_nomask"] == [10.0]
     assert fields["masksum"] == [2]
     assert fields["iter_done"] == [0]
+
+
+@pytest.mark.parametrize("clipped_pb", [0.1, 0.2, np.nan, np.inf])
+def test_mvc_clips_channel_beams_before_effective_beam_and_psf_sum(clipped_pb):
+    """Clipped channels contribute no PB/PSF signal but retain their weights."""
+    frequency = np.array([0.9e9, 1.1e9])
+    residual, psf, pb = convert_mvc_cubes_to_taylor_normal_equations(
+        _frequency_cube([5.0, 100.0], frequency),
+        _frequency_cube([2.0, 10.0], frequency),
+        _frequency_cube([1.0, clipped_pb], frequency),
+        _frequency_normalization([1.0, 3.0], frequency),
+        _frequency_normalization([1.0, 3.0], frequency),
+        nterms=1,
+        reference_frequency=1e9,
+        pblimit=0.2,
+    )
+    np.testing.assert_allclose(pb.squeeze(), 0.25)
+    np.testing.assert_allclose(psf.squeeze(), 2.0)
+    np.testing.assert_allclose(residual.squeeze(), 1.25)
