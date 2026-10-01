@@ -499,8 +499,8 @@ def _recompute_wideband_primary_beam(
 
     import numpy as np
 
-    from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (
-        make_primary_beam_single_field,
+    from astroviper.processing_functions.imaging.primary_beam.continuum_primary_beam import (
+        make_continuum_primary_beam_single_field,
     )
 
     pb_img_xds = img_xds.copy(deep=False)
@@ -513,7 +513,7 @@ def _recompute_wideband_primary_beam(
             "date": "2026",
         },
     )
-    pb_img_xds, _ = make_primary_beam_single_field(
+    pb_img_xds, _ = make_continuum_primary_beam_single_field(
         pb_img_xds,
         image_params,
         image_data_group_in_name="residual",

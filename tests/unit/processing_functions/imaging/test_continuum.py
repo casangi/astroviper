@@ -329,13 +329,13 @@ def test_mvc_grid_accumulates_child_into_full_image_frequency_axis(monkeypatch):
         },
         attrs={"type": "image_dataset", "data_groups": {"residual": {}}},
     )
-    observed_channel_map = None
+    observed_frequency_map = None
 
     def fake_grid(grid, normalization, *args, **kwargs):
-        nonlocal observed_channel_map
-        observed_channel_map = np.asarray(args[3])
-        grid[:, observed_channel_map, ...] = 1.0
-        normalization[:, observed_channel_map, ...] = 1.0
+        nonlocal observed_frequency_map
+        observed_frequency_map = np.asarray(args[3])
+        grid[:, observed_frequency_map, ...] = 1.0
+        normalization[:, observed_frequency_map, ...] = 1.0
 
     module_name = (
         "astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp"
@@ -346,7 +346,7 @@ def test_mvc_grid_accumulates_child_into_full_image_frequency_axis(monkeypatch):
 
     add_visibility_grid_mvc_single_field(ms_xds, np.ones(8), image)
 
-    np.testing.assert_array_equal(observed_channel_map, [1, 3])
+    np.testing.assert_array_equal(observed_frequency_map, [1, 3])
     assert image.VISIBILITY.shape[1] == image_frequencies.size
     assert np.all(image.VISIBILITY_NORMALIZATION.values[:, [1, 3], ...] == 1.0)
     assert np.all(image.VISIBILITY_NORMALIZATION.values[:, [0, 2], ...] == 0.0)

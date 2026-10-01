@@ -2788,10 +2788,23 @@ def image_continuum_single_field(
         ``"in_place"`` stores it temporarily in the image Zarr store and reads
         only task-local channels, ``"recompute"`` regenerates the analytic beam
         inside every later map, and ``"in_memory"`` retains it at the driver but
-        passes each map only its local beam. The setting is ignored for MFS."""
+        passes each map only its local beam. The setting is ignored for MFS.
+
+    Notes
+    -----
+    Continuum primary beams are selected once from antenna metadata before
+    frequency partitioning. ``image_params["primary_beam_model"]`` accepts
+    ``"auto"`` (default), ``"airy"`` (physical aperture), or ``"casa_airy"``.
+    Auto selects the CASA ALMA/ACA effective aperture and legacy VLA/NVSS
+    prescriptions. EVLA polynomial beams are not implemented; EVLA and other
+    telescopes retain the physical Airy fallback. Explicit dish/blockage lists
+    and ``primary_beam_max_radius_1ghz`` override the inferred values. MFS
+    selects the VLA band at its reference frequency; MVC uses the first image
+    channel and retains that selection across all partitions. These choices
+    affect only continuum imaging; cube imaging keeps its existing beam path.
+    """
     import time
 
-    import numpy as np
     import toolviper.utils.logger as logger
     from graphviper.graph_tools.coordinate_utils import (
         get_disk_chunk_sizes,
@@ -3026,30 +3039,16 @@ def image_continuum_single_field(
             f"{scan_intents!r}. Check the available scan intents before imaging."
         )
 
-    if "list_dish_diameters" not in image_params:
-        antenna_xds = ps_xdt.xr_ps.get_combined_antenna_xds()
-        diameter_name = "ANTENNA_DISH_DIAMETER"
+    from astroviper.processing_functions.imaging.primary_beam.continuum_primary_beam import (
+        resolve_continuum_primary_beam,
+    )
 
-        if diameter_name not in antenna_xds:
-            raise KeyError(
-                "Continuum primary-beam construction requires antenna dish "
-                f"diameters, but {diameter_name!r} is absent from antenna metadata."
-            )
-
-        dish_diameters = np.asarray(
-            antenna_xds[diameter_name].values,
-            dtype=np.float64,
-        )
-        dish_diameters = np.unique(dish_diameters[np.isfinite(dish_diameters)])
-
-        if dish_diameters.size != 1:
-            raise NotImplementedError(
-                "Single-field continuum primary-beam construction currently "
-                "requires one common antenna dish diameter; received "
-                f"{dish_diameters.tolist()}."
-            )
-
-        image_params["list_dish_diameters"] = dish_diameters.tolist()
+    # Resolve telescope/band once before task partitioning. Every MVC chunk
+    # must use the prescription selected from the full image frequency axis.
+    image_params = resolve_continuum_primary_beam(
+        image_params, ps_xdt.xr_ps.get_combined_antenna_xds(), specmode=specmode
+    )
+    input_params["image_params"] = image_params
 
     # Node-task loaders need the resolved role->variable mapping. In addition to
     # supporting the direct-Zarr path, this lets cached-grid MFS cycles omit the
