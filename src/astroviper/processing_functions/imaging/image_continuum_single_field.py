@@ -1664,16 +1664,17 @@ def build_continuum_residual_imaging_dict(
     Continuum Högbom updates only Taylor term zero. Its fitted sidelobe has
     dimensions (time, polarization), whereas the shared controller expects
     (time, frequency, polarization). Build a temporary view with one frequency
-    plane, broadcasting masks and sidelobes by dimension name. The original
-    Taylor products and cube workflow are unchanged.
+    plane, broadcasting masks and sidelobes by dimension name. Peaks are
+    measured on finite pixels in the explicit CLEAN mask, or the same PB
+    support as model_update when no explicit mask exists. No counters or
+    history entries are advanced. The cube workflow is unchanged.
     """
+    import numpy as np
     import xarray as xr
 
-    from astroviper.processing_functions.imaging.utils import (
-        build_residual_imaging_dict,
-    )
+    from astroviper.processing_functions.imaging.utils import ImagingDict
 
-    data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
+    group = img_xds.attrs["data_groups"][image_data_group_in_name]
 
     def plane_zero(array):
         selection = {
@@ -1683,27 +1684,54 @@ def build_continuum_residual_imaging_dict(
         }
         return array.isel(selection, drop=True)
 
-    residual = plane_zero(img_xds[data_group["sky"]]).expand_dims(frequency=[0.0])
-    residual = residual.transpose("time", "frequency", "polarization", "l", "m")
-    plane_template = residual.isel(l=0, m=0, drop=True)
-    sidelobe_name = data_group.get(
-        "max_sidelobe_point_spread_function", "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
+    residual = plane_zero(img_xds[group["sky"]]).transpose(
+        "time", "polarization", "l", "m"
     )
-    sidelobe = plane_zero(img_xds[sidelobe_name]).broadcast_like(plane_template)
-    sidelobe = sidelobe.transpose("time", "frequency", "polarization")
-    variables = {"RESIDUAL": residual, "SIDELOBE": sidelobe}
-    roles = {"sky": "RESIDUAL", "max_sidelobe_point_spread_function": "SIDELOBE"}
-    mask_name = data_group.get("mask")
-    if mask_name is not None and mask_name in img_xds:
-        mask = plane_zero(img_xds[mask_name]).broadcast_like(residual)
-        variables["MASK"] = mask.transpose(*residual.dims)
-        roles["mask"] = "MASK"
-    view = xr.Dataset(
-        variables, attrs={"data_groups": {image_data_group_in_name: roles}}
+    mask_name = group.get("mask")
+    if mask_name is not None:
+        support = plane_zero(img_xds[mask_name]).broadcast_like(residual) > 0.5
+    elif group.get("primary_beam") is not None:
+        pb = plane_zero(img_xds[group["primary_beam"]])
+        support = (
+            pb
+            >= iteration_control_params.get("primary_beam_limit", 0.0)
+            * pb.max(skipna=True)
+        ).broadcast_like(residual) & (pb != 0).broadcast_like(residual)
+    else:
+        support = xr.ones_like(residual, dtype=bool)
+    support = support.transpose(*residual.dims).values
+    absolute = np.abs(residual.values)
+    sidelobe = plane_zero(
+        img_xds[
+            group.get(
+                "max_sidelobe_point_spread_function",
+                "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
+            )
+        ]
     )
-    return build_residual_imaging_dict(
-        view, image_data_group_in_name, iteration_control_params
-    )
+    sidelobe = sidelobe.broadcast_like(residual.isel(l=0, m=0, drop=True))
+    sidelobe = sidelobe.transpose("time", "polarization").values
+    statistics = ImagingDict()
+    for tt in range(residual.sizes["time"]):
+        for pp in range(residual.sizes["polarization"]):
+            finite = np.isfinite(absolute[tt, pp])
+            selected = support[tt, pp] & finite
+            statistics.add(
+                {
+                    "peakres": float(np.max(absolute[tt, pp][selected], initial=0.0)),
+                    "peakres_nomask": float(
+                        np.max(absolute[tt, pp][finite], initial=0.0)
+                    ),
+                    "masksum": int(np.count_nonzero(selected)),
+                    "iter_done": 0,
+                    "max_psf_sidelobe": float(sidelobe[tt, pp]),
+                    "gain": iteration_control_params.get("gain", 0.1),
+                },
+                time=tt,
+                chan=0,
+                pol=pp,
+            )
+    return statistics
 
 
 @shares_param_docs

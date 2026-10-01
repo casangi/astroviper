@@ -657,7 +657,8 @@ def test_model_update_passes_cube_parameter_names_to_backend(monkeypatch, initia
         residual_imaging_dict,
     ):
         assert controller_arg is controller
-        assert model_exists is (not initial)
+        assert model_exists is False  # controls use the refreshed residual
+        assert residual_imaging_dict is not None
         assert iteration_control_params is params
         return iterations, thresholds
 
@@ -702,6 +703,8 @@ def test_zero_max_iter_uses_current_controller_fields():
     from astroviper.processing_functions.imaging.utils import IterationController
 
     image = _model_dataset(0.0).rename({"SKY_MODEL": "SKY_RESIDUAL"})
+    image.attrs["data_groups"]["residual"] = {"sky": "SKY_RESIDUAL"}
+    image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (("time", "polarization"), [[0.1]])
     controller = IterationController(max_iter=0)
     result = continuum_node.model_update_continuum_single_field(
         {"image": image},
@@ -744,3 +747,104 @@ def test_continuum_transfer_preserves_arrays_metadata_and_nested_datasets():
     assert restored["alias"] is restored
     assert restored["cache"][0][0][1] is restored["image"]
     assert restored["image"].xr_img._xds is restored["image"]
+
+
+@pytest.mark.parametrize(
+    ("peak", "max_iter", "max_cycles", "masked", "reason"),
+    [
+        (0.05, 100, 3, False, "threshold"),
+        (1.0, 0, 3, False, "iterations"),
+        (1.0, 100, 0, False, "cycles"),
+        (1.0, 100, 3, True, "mask"),
+    ],
+)
+def test_refreshed_stop_skips_model_update_and_preserves_counters(
+    monkeypatch, peak, max_iter, max_cycles, masked, reason
+):
+    """Verified stopping never runs CLEAN or charges a verification as an update."""
+    from astroviper.processing_functions.imaging.utils.iteration_control import (
+        IMAGING_MAX_CYCLES,
+        IMAGING_MAX_ITER,
+        IMAGING_THRESHOLD,
+        IMAGING_ZERO_MASK,
+        IterationController,
+    )
+
+    controller = IterationController(
+        max_iter=max_iter, max_cycles=max_cycles, threshold=0.1
+    )
+    image = xr.Dataset(
+        {
+            "SKY_RESIDUAL": (
+                ("time", "taylor_term", "polarization", "l", "m"),
+                np.full((1, 1, 1, 2, 2), peak),
+            ),
+            "PRIMARY_BEAM": (("l", "m"), np.ones((2, 2))),
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (("time", "polarization"), [[0.1]]),
+        },
+        attrs={
+            "data_groups": {
+                "residual": {"sky": "SKY_RESIDUAL", "primary_beam": "PRIMARY_BEAM"}
+            }
+        },
+    )
+    if masked:
+        image["CLEAN_MASK"] = (("l", "m"), np.zeros((2, 2), dtype=bool))
+        image.attrs["data_groups"]["residual"]["mask"] = "CLEAN_MASK"
+
+    def unexpected_update(*args, **kwargs):
+        pytest.fail("A confirmed residual stop must not run a model update")
+
+    monkeypatch.setattr(
+        continuum_processing, "model_update_mtmfs_single_field", unexpected_update
+    )
+    result = continuum_node.model_update_continuum_single_field(
+        {"image": image},
+        {
+            "controller": controller,
+            "iteration_control_params": {
+                "max_iter": max_iter,
+                "primary_beam_limit": 0.2,
+            },
+        },
+    )
+    expected = {
+        "threshold": IMAGING_THRESHOLD,
+        "iterations": IMAGING_MAX_ITER,
+        "cycles": IMAGING_MAX_CYCLES,
+        "mask": IMAGING_ZERO_MASK,
+    }[reason]
+    assert result["residual_converged"]
+    assert result["stopcode"].imaging == expected
+    assert controller.total_iter_done == controller.cycles_done == 0
+    assert controller.max_cycles == max_cycles
+    assert np.all(controller.max_iter_remaining == max_iter)
+    assert not result["deconvolution"].data
+    assert np.all(result["image"].SKY_MODEL.values == 0)
+
+
+def test_finalization_reuses_prepared_residual_without_another_transform(monkeypatch):
+    image = _model_dataset(0.25).rename({"SKY_MODEL": "SKY_RESIDUAL"})
+    image.attrs["data_groups"] = {"residual": {"sky": "SKY_RESIDUAL"}}
+    model = _model_dataset(0.75)
+    original_residual = image.SKY_RESIDUAL.data
+
+    def unexpected_prepare(*args, **kwargs):
+        pytest.fail("A verified residual must not be transformed a second time")
+
+    monkeypatch.setattr(continuum_node, "_prepare_continuum_image", unexpected_prepare)
+    monkeypatch.setattr(
+        continuum_node, "_prepare_cached_mfs_residual_grid", unexpected_prepare
+    )
+    result = continuum_node.continuum_finalize_node(
+        {"image": image, "residual_converged": True},
+        {
+            "prepared_continuum_image": True,
+            "static_xds": xr.Dataset(),
+            "model_xds": model,
+            "restore": False,
+        },
+    )
+    assert result["image"].SKY_RESIDUAL.data is original_residual
+    np.testing.assert_array_equal(result["image"].SKY_MODEL, model.SKY_MODEL)
+    assert result["residual_converged"]

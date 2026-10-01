@@ -917,3 +917,41 @@ def test_continuum_statistics_use_only_taylor_zero_and_preserve_input(with_mask)
     np.testing.assert_array_equal(limits, 3)
     np.testing.assert_allclose(thresholds[:, 0], 0.2 * peaks)
     xr.testing.assert_identical(image, original)
+
+
+@pytest.mark.parametrize("explicit_mask", [False, True])
+def test_refreshed_statistics_respect_clean_support(explicit_mask):
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        build_continuum_residual_imaging_dict,
+    )
+
+    image = xr.Dataset(
+        {
+            "R": (
+                ("time", "taylor_term", "polarization", "l", "m"),
+                np.array([[[[[0.05, 10.0], [np.nan, 0.02]]]]]),
+            ),
+            "PB": (("l", "m"), [[1.0, 0.1], [1.0, 1.0]]),
+            "S": (("time", "polarization"), [[0.2]]),
+        },
+        attrs={
+            "data_groups": {
+                "residual": {
+                    "sky": "R",
+                    "primary_beam": "PB",
+                    "max_sidelobe_point_spread_function": "S",
+                }
+            }
+        },
+    )
+    if explicit_mask:
+        image["MASK"] = (("l", "m"), [[True, False], [True, True]])
+        image.attrs["data_groups"]["residual"]["mask"] = "MASK"
+    stats = build_continuum_residual_imaging_dict(
+        image, "residual", {"primary_beam_limit": 0.2}
+    )
+    fields = next(iter(stats.data.values()))
+    assert fields["peakres"] == [0.05]
+    assert fields["peakres_nomask"] == [10.0]
+    assert fields["masksum"] == [2]
+    assert fields["iter_done"] == [0]
