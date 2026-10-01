@@ -710,3 +710,37 @@ def test_zero_max_iter_uses_current_controller_fields():
     assert result["stopcode"].imaging == 1
     assert result["stopcode"].model_update == 0
     np.testing.assert_array_equal(controller.max_iter_remaining, 0)
+
+
+def test_continuum_transfer_preserves_arrays_metadata_and_nested_datasets():
+    import pickle
+
+    image = _model_dataset(2.0)
+    nested = _model_dataset(3.0)
+    image.attrs["nested_dataset"] = nested
+    original = image.copy(deep=True)
+    array = image.SKY_MODEL.data
+    _ = image.xr_img
+    _ = nested.xr_img
+    payload = {"image": image, "cache": [{0: (nested, image)}]}
+    payload["alias"] = payload
+
+    result = continuum_node._prepare_continuum_result_for_transfer(payload)
+
+    assert result is payload
+    assert image.SKY_MODEL.data is array
+    assert not image._cache
+    assert not nested._cache
+    xr.testing.assert_equal(image, original)
+    assert image.attrs["data_groups"] == original.attrs["data_groups"]
+    assert image.attrs["nested_dataset"] is nested
+    xr.testing.assert_identical(nested, original.attrs["nested_dataset"])
+    restored = pickle.loads(pickle.dumps(result))
+    xr.testing.assert_equal(restored["image"], original)
+    assert restored["image"].attrs["data_groups"] == original.attrs["data_groups"]
+    xr.testing.assert_identical(
+        restored["image"].attrs["nested_dataset"], original.attrs["nested_dataset"]
+    )
+    assert restored["alias"] is restored
+    assert restored["cache"][0][0][1] is restored["image"]
+    assert restored["image"].xr_img._xds is restored["image"]

@@ -13,6 +13,41 @@ _WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE = "PRIMARY_BEAM"
 ###############################################################################
 
 
+def _prepare_continuum_result_for_transfer(result):
+    """Clear cached accessors before continuum datasets cross worker boundaries.
+
+    XRADIO accessors contain weak references that cannot be pickled. Walk
+    result containers and dataset attributes, including the nested weight,
+    primary-beam and visibility-grid caches. Only accessor caches are cleared;
+    arrays and scientific metadata stay in place. Accessors are recreated
+    lazily on the receiving worker. Repeated references are visited once.
+    """
+    import xarray as xr
+
+    from astroviper.utils.data_tree import clear_cached_accessors
+
+    seen = set()
+
+    def clear(value):
+        if not isinstance(value, xr.Dataset | dict | list | tuple):
+            return
+        if id(value) in seen:
+            return
+        seen.add(id(value))
+        if isinstance(value, xr.Dataset):
+            clear_cached_accessors(value)
+            clear(value.attrs)
+        elif isinstance(value, dict):
+            for child in value.values():
+                clear(child)
+        else:
+            for child in value:
+                clear(child)
+
+    clear(result)
+    return result
+
+
 def _add_task_execution_metadata(timing_df, task_start):
     """Add the common wall-clock and worker identity columns in place."""
     import os
@@ -1512,7 +1547,7 @@ def residual_update_continuum_single_field(
         return_dict["task_id"] = int(task_id)
         return_dict["observed_visibility_grid_xds"] = mvc_observed_visibility_grid_xds
 
-    return return_dict
+    return _prepare_continuum_result_for_transfer(return_dict)
 
 
 @shares_param_docs
@@ -1724,11 +1759,13 @@ def grid_imaging_weight_density_continuum_node(
     ps_xdt = None
     img_xds = None
 
-    return {
-        "task_id": task_id,
-        "weight_density": weight_density_xds,
-        "timing_node_tasks": timing_df,
-    }
+    return _prepare_continuum_result_for_transfer(
+        {
+            "task_id": task_id,
+            "weight_density": weight_density_xds,
+            "timing_node_tasks": timing_df,
+        }
+    )
 
 
 @shares_param_docs
@@ -1980,11 +2017,13 @@ def degrid_imaging_weights_continuum_node(
     ps_xdt = None
     img_xds = None
 
-    return {
-        "task_id": task_id,
-        "weight_datasets": weight_datasets,
-        "timing_node_tasks": timing_df,
-    }
+    return _prepare_continuum_result_for_transfer(
+        {
+            "task_id": task_id,
+            "weight_datasets": weight_datasets,
+            "timing_node_tasks": timing_df,
+        }
+    )
 
 
 ###############################################################################
@@ -2764,7 +2803,7 @@ def continuum_minor_cycle_node(
         None if psf_fit_return_df is None else psf_fit_return_df.reset_index(drop=True)
     )
 
-    return return_dict
+    return _prepare_continuum_result_for_transfer(return_dict)
 
 
 @shares_param_docs
@@ -2892,7 +2931,7 @@ def continuum_finalize_node(
     # state object as well as installing it in the output image.
     input_data["model_xds"] = model_xds
 
-    return input_data
+    return _prepare_continuum_result_for_transfer(input_data)
 
 
 @shares_param_docs
@@ -3102,18 +3141,20 @@ def model_update_continuum_single_field(
         controller.stopdescription = stopdesc
 
         timing["T_model_update_node_task"] = time.time() - node_start
-        return {
-            "image": img_xds,
-            "timing_node_tasks": input_data.get("timing_node_tasks"),
-            "timing_model_update": pd.DataFrame(
-                {key: [value] for key, value in timing.items()}
-            ),
-            "deconvolution": combined_deconvolve_dict,
-            "controller": controller,
-            "stopcode": stopcode,
-            "stopdesc": stopdesc,
-            "is_n_iter_0": False,
-        }
+        return _prepare_continuum_result_for_transfer(
+            {
+                "image": img_xds,
+                "timing_node_tasks": input_data.get("timing_node_tasks"),
+                "timing_model_update": pd.DataFrame(
+                    {key: [value] for key, value in timing.items()}
+                ),
+                "deconvolution": combined_deconvolve_dict,
+                "controller": controller,
+                "stopcode": stopcode,
+                "stopdesc": stopdesc,
+                "is_n_iter_0": False,
+            }
+        )
 
     # -------------------------------------------------------------
     # Calculate the controls for this model update.
@@ -3214,13 +3255,15 @@ def model_update_continuum_single_field(
 
     # Preserve the map/reduce timing separately rather than mixing rows from
     # different types of node task.
-    return {
-        "image": img_xds,
-        "timing_node_tasks": input_data.get("timing_node_tasks"),
-        "timing_model_update": node_timing_df,
-        "deconvolution": combined_deconvolve_dict,
-        "controller": controller,
-        "stopcode": stopcode,
-        "stopdesc": stopdesc,
-        "is_n_iter_0": False,
-    }
+    return _prepare_continuum_result_for_transfer(
+        {
+            "image": img_xds,
+            "timing_node_tasks": input_data.get("timing_node_tasks"),
+            "timing_model_update": node_timing_df,
+            "deconvolution": combined_deconvolve_dict,
+            "controller": controller,
+            "stopcode": stopcode,
+            "stopdesc": stopdesc,
+            "is_n_iter_0": False,
+        }
+    )

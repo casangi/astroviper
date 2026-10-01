@@ -13,6 +13,9 @@ import zarr
 from numcodecs import Blosc
 
 import astroviper.node_tasks as node_tasks
+from astroviper.node_tasks.imaging.image_continuum_single_field import (
+    _prepare_continuum_result_for_transfer,
+)
 from astroviper.utils.param_docs import shares_param_docs
 
 _PARAM_CONFIG_DIR = os.path.dirname(__file__)
@@ -1786,7 +1789,7 @@ def combine_continuum_chunks(input_data, input_params):
             observed_visibility_grid_mapping
         )
 
-    return return_dict
+    return _prepare_continuum_result_for_transfer(return_dict)
 
 
 def combine_continuum_weight_density_chunks(
@@ -2226,10 +2229,12 @@ def combine_continuum_weight_density_chunks(
         )
     )
 
-    return {
-        "weight_density": combined_xds,
-        "timing_node_tasks": combined_timing,
-    }
+    return _prepare_continuum_result_for_transfer(
+        {
+            "weight_density": combined_xds,
+            "timing_node_tasks": combined_timing,
+        }
+    )
 
 
 def combine_continuum_imaging_weight_chunks(
@@ -2305,10 +2310,12 @@ def combine_continuum_imaging_weight_chunks(
                 ignore_index=True,
             )
 
-    return {
-        "weight_cache_mapping": weight_cache_mapping,
-        "timing_node_tasks": combined_timing,
-    }
+    return _prepare_continuum_result_for_transfer(
+        {
+            "weight_cache_mapping": weight_cache_mapping,
+            "timing_node_tasks": combined_timing,
+        }
+    )
 
 
 ###############################################################################

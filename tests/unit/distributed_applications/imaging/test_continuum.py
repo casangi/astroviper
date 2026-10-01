@@ -616,6 +616,7 @@ def _run_tw_hydra_continuum(
     write_visibility_model_to_ps=False,
     write_imaging_weights_to_ps=False,
     clear_cache=True,
+    scheduler="synchronous",
 ):
     """Run one public distributed continuum configuration on TW Hydra."""
     if iteration_control_params is None:
@@ -629,7 +630,7 @@ def _run_tw_hydra_continuum(
             "min_psf_fraction": 0.05,
             "max_psf_fraction": 0.8,
         }
-    with dask.config.set(scheduler="synchronous"):
+    with dask.config.set(scheduler=scheduler):
         result = image_continuum_single_field(
             ps_store=str(store),
             image_store=str(output_store),
@@ -1447,3 +1448,90 @@ def test_continuum_initial_store_uses_shared_chunk_and_shard_api(
             image_sharding=sharding,
             image_chunking={"l": 1, "m": 1},
         )
+
+
+@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+def test_tw_hydra_continuum_transfers_results_between_processes(
+    tmp_path, tw_hydra_store, specmode
+):
+    from distributed import Client, LocalCluster
+
+    processing_set = open_processing_set(str(tw_hydra_store))
+    params = {
+        "max_iter": 20,
+        "max_cycles": 2,
+        "threshold": 0.001,
+        "gain": 0.1,
+        "psf_sidelobe_factor": 1.5,
+        "max_iter_per_cycle": 5,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    }
+    kwargs = dict(
+        iteration_control_params=params,
+        visibility_memory_mode="in_memory",
+        widebandpb_memory_mode="in_memory",
+    )
+    _, reference = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / "serial.zarr",
+        processing_set,
+        3,
+        specmode,
+        {
+            "weighting": "briggs",
+            "weighting_scope": "global",
+            "robust": 0.5,
+            "casa_weighting_implementation": True,
+        },
+        **kwargs,
+    )
+    with (
+        LocalCluster(
+            n_workers=2,
+            threads_per_worker=1,
+            processes=True,
+            memory_limit="2GB",
+            dashboard_address=None,
+        ) as cluster,
+        Client(cluster) as client,
+    ):
+        import concurrent.futures
+
+        # A broken transfer can leave Dask waiting instead of raising. Bound
+        # this regression so it reports a failure rather than hanging CI.
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        pending = pool.submit(
+            _run_tw_hydra_continuum,
+            tw_hydra_store,
+            tmp_path / "distributed.zarr",
+            processing_set,
+            3,
+            specmode,
+            {
+                "weighting": "briggs",
+                "weighting_scope": "global",
+                "robust": 0.5,
+                "casa_weighting_implementation": True,
+            },
+            scheduler=client,
+            **kwargs,
+        )
+        try:
+            result, image = pending.result(timeout=90)
+        finally:
+            client.close()
+            pool.shutdown(wait=False, cancel_futures=True)
+    assert result["n_major_cycles"] == 2
+    # The helper reopens the output store lazily; read it locally after the
+    # distributed client has closed.
+    with dask.config.set(scheduler="synchronous"):
+        for name in (
+            "SKY_MODEL",
+            "SKY_RESIDUAL",
+            "POINT_SPREAD_FUNCTION",
+            "PRIMARY_BEAM",
+        ):
+            np.testing.assert_allclose(
+                image[name], reference[name], rtol=1e-6, atol=1e-12
+            )
