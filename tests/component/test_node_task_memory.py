@@ -37,9 +37,9 @@ during all runs:
   call included, fails the test), then after one ``gc.collect()``:
 
   - the traced memory left by reference counting alone is within a small
-    budget, and that collection finds no object in a reference cycle (an
-    astropy unit xradio creates is the one known exception, see
-    ``cyclic_garbage``): memory held in reference cycles fails;
+    budget, and that collection finds no object in a reference cycle (the
+    lazy tree xarray's ``open_datatree`` drops is the one known exception,
+    see ``cyclic_garbage``): memory held in reference cycles fails;
   - the traced memory left after the collection is within a tight budget:
     memory still reachable (a cache, a module-level list) fails, even a
     fraction of a megabyte per node task;
@@ -181,7 +181,7 @@ ITERATION_CONTROL_PARAMS = {
 # cannot on the GitHub Linux runner builds of Python 3.12 and 3.13): the steps
 # at the peaks are done in place.
 #
-#   _load_processing_set         2.0 + 0.5   visibilities, weights, flags, uvw
+#   load_processing_set          2.0 + 0.5   visibilities, weights, flags, uvw
 #   imaging_setup_single_field  10.0 + 0.5   PSF, primary beam and imaging
 #                                            weights of two correlations, with
 #                                            the padded complex grid and FFT of
@@ -208,12 +208,11 @@ ITERATION_CONTROL_PARAMS = {
 #                                            3.8 planes here; CI installs
 #                                            numcodecs 0.16.5 and 0.17.0
 PHASES = [
-    # The node task's own loader until xradio's load_processing_set holds its
-    # tree while the accessor runs (see _load_processing_set); name xradio's
-    # load_processing_set here again when the node task goes back to it.
+    # xradio's loader, imported by the node task at every call, so the module
+    # attribute wrapped here is what it calls
     (
-        "astroviper.node_tasks.imaging.image_cube_single_field",
-        "_load_processing_set",
+        "xradio.measurement_set.load_processing_set",
+        "load_processing_set",
         2.5,
     ),
     (
@@ -296,17 +295,20 @@ FIRST_TASK_NATIVE_BUDGET_MB = 5.0
 FIRST_TASK_OUTSIDE_MALLOC_BUDGET_MB = 20.0
 THP_ALWAYS_FIRST_TASK_OUTSIDE_MALLOC_BUDGET_MB = 160.0
 # Every direct run, garbage collector off: traced memory left by reference
-# counting alone. Measured 0.184 to 0.192 MB: the free lists of CPython's
-# small objects (floats, tuples, lists, dicts) refill during the run after the
-# collection that ended the run before emptied them; nothing in reference
-# cycles. A leak of 0.17 MB per node task, reachable or in reference cycles,
-# fails it (the two checks below are finer: any object in a cycle, and a
-# reachable leak of 0.1 MB).
-REFCOUNT_RELEASE_BUDGET_MB = 0.35
+# counting alone. Measured 0.40 MB: 0.19 MB of CPython's small object free
+# lists (floats, tuples, lists, dicts), which refill during the run after the
+# collection that ended the run before emptied them, and 0.21 MB in the lazy
+# tree xarray's open_datatree drops when xradio's load_processing_set opens
+# the chunk (see cyclic_garbage; 0.19 MB and nothing in reference cycles with
+# a loader that opens the measurement set's group alone). A leak of 0.2 MB per
+# node task, reachable or in reference cycles, fails it (the two checks below
+# are finer: any object in a cycle outside that tree, and a reachable leak of
+# 0.1 MB).
+REFCOUNT_RELEASE_BUDGET_MB = 0.6
 # Every direct run: objects the collection after the reference counting
-# measurement finds in reference cycles, not counting astropy units (see
-# cyclic_garbage). Measured 0; any object a node task leaves in a reference
-# cycle fails it, whatever its size.
+# measurement finds in reference cycles, not counting the lazy tree xarray's
+# open_datatree drops (see cyclic_garbage). Measured 0; any other object a
+# node task leaves in a reference cycle fails it, whatever its size.
 CYCLIC_GARBAGE_BUDGET_OBJECTS = 0
 # Every direct run, after one gc.collect(): traced memory left, i.e. memory
 # still reachable. Measured -0.007 to +0.016 MB. A reachable leak of 0.11 MB
@@ -373,7 +375,7 @@ GROSS_UNTRACED_BUDGET_PLANES = 0.05
 # task of its own in every run), in planes, and the smallest untraced mapped
 # copy that fails (budget minus offset):
 #
-#   _load_processing_set         -0.40   0.65   zarr's read buffers
+#   load_processing_set          -0.40   0.65   zarr's read buffers
 #   imaging_setup_single_field   -0.25   0.50   (only without graphviper's
 #                                               memory management)
 #   residual_update              -0.08   0.33
@@ -1239,8 +1241,8 @@ def test_node_task_memory(tmp_path, monkeypatch):
         f" MB), {mb(driver_after_gc['traced'] - driver_start['traced'] - imports.added):+.2f}"
         f" MB after a collection that found {monitor.runs[0]['unreachable']} "
         f"objects in reference cycles "
-        f"({monitor.runs[0]['cyclic_garbage'].most_common(4)} not counting astropy "
-        "units, reported only)"
+        f"({monitor.runs[0]['cyclic_garbage'].most_common(4)} not counting "
+        "xarray's dropped lazy trees, reported only)"
     )
     if planes(driver_kept) > DRIVER_RELEASE_BUDGET_PLANES:
         failures.append(
@@ -1361,7 +1363,8 @@ def test_node_task_memory(tmp_path, monkeypatch):
             f" MB traced (budget {REFCOUNT_RELEASE_BUDGET_MB:.2f}); "
             f"{len(ran)} garbage collections inside the run (budget 0); "
             f"{run['unreachable']} objects in reference cycles, "
-            f"{sum(cycles.values())} not counting astropy units (budget "
+            f"{sum(cycles.values())} not counting xarray's dropped lazy trees "
+            f"(budget "
             f"{CYCLIC_GARBAGE_BUDGET_OBJECTS}); after a collection "
             f"{mb(after_gc['traced']):+.3f} MB traced (budget "
             f"{POST_GC_RELEASE_BUDGET_MB:.2f})"

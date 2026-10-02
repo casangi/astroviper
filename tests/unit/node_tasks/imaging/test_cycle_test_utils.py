@@ -1,18 +1,33 @@
-"""The cyclic garbage check of the memory tests leaves out the astropy unit
-self-cycle xradio creates, and nothing else."""
+"""The cyclic garbage check of the memory tests leaves out the lazy tree
+``xr.open_datatree`` drops, and nothing else."""
 
 from __future__ import annotations
 
 import gc
 
 import numpy as np
+import pytest
+import xarray as xr
 
 from tests.unit.node_tasks.imaging.cycle_test_utils import cyclic_garbage
 
 
+@pytest.fixture(scope="module")
+def store(tmp_path_factory):
+    """A zarr store of a root group and a sub-group, as a measurement set."""
+    path = str(tmp_path_factory.mktemp("store") / "two_groups.zarr")
+    root = xr.Dataset(
+        {"DATA": (("x", "y"), np.ones((4, 3)))}, coords={"x": np.arange(4)}
+    )
+    root.to_zarr(path, mode="w", consolidated=False)
+    child = xr.Dataset({"POSITION": (("antenna",), np.zeros(2))})
+    child.to_zarr(path, group="antenna_xds", mode="a", consolidated=False)
+    return path
+
+
 def _garbage_of(make):
     """What a collection finds after ``make()``, with the collector off;
-    a first call (imports, the parser's tables) is made outside."""
+    a first call (imports, caches) is made outside."""
     make()
     gc_was_enabled = gc.isenabled()
     gc.collect()
@@ -32,32 +47,29 @@ def _garbage_of(make):
     return garbage
 
 
-def _self_cached_units():
-    """New astropy units in their own ``_decomposed_cache``, as xradio's
-    ``_c.to("m/s")`` makes: every call parses "m/s" into a new unit, which
-    the parser holds until it parses the next string."""
-    import astropy.units as u
+def test_the_dropped_lazy_tree_is_left_out(store):
+    def make():
+        # dropped at once: xarray's backend tree is left behind
+        xr.open_datatree(store, engine="zarr", consolidated=False)
 
-    speed = 2.99792458e08 * u.m / u.s
-    for _ in range(3):
-        speed.to("m/s")
-    u.Unit("km")
-
-
-def test_the_self_cached_unit_is_left_out():
-    garbage = _garbage_of(_self_cached_units)
-    assert any(type(obj).__qualname__ == "CompositeUnit" for obj in garbage)
+    garbage = _garbage_of(make)
+    assert any(type(obj).__qualname__ == "DataTree" for obj in garbage)
     assert not cyclic_garbage(garbage)
 
 
-def test_a_cycle_through_an_astropy_quantity_is_counted():
-    import astropy.units as u
-
+def test_a_dropped_loaded_tree_is_counted(store):
     def make():
-        _self_cached_units()
-        flux = 1.0 * u.Jy
-        flux.holder = {"data": np.ones(10), "flux": flux}
+        # loaded in place, then dropped without release_data_tree
+        xr.open_datatree(store, engine="zarr", consolidated=False).load()
 
     left = cyclic_garbage(_garbage_of(make))
-    assert left["builtins.dict"] >= 1, left
-    assert left["astropy.units.quantity.Quantity"] == 1, left
+    assert left["xarray.core.datatree.DataTree"] >= 1, left
+
+
+def test_a_plain_cycle_is_counted():
+    def make():
+        holder = {"data": np.ones(10)}
+        holder["self"] = holder
+
+    left = cyclic_garbage(_garbage_of(make))
+    assert left["builtins.dict"] == 1, left

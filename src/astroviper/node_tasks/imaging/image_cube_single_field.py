@@ -81,83 +81,6 @@ def _log_task_io_failure(phase, exc, task_id, image_store, data_selection, task_
     }
 
 
-def _load_processing_set(ps_store, sel_parms, data_group_name):
-    """Load this task's selection of a processing set, without sub-datasets.
-
-    Does what ``xradio.measurement_set.load_processing_set(ps_store,
-    sel_parms, data_group_name, load_sub_datasets=False)`` does, holding every
-    tree in a local while its ``xr_ms`` accessor runs. Workaround for xradio
-    1.2.3, whose ``load_processing_set`` calls
-    ``xr.open_datatree(...).isel(...).xr_ms.sel(...)`` on a temporary tree:
-    the accessor holds only a weak reference to the tree, so a garbage
-    collection inside ``sel`` (another thread's allocations suffice) frees it
-    and ``sel`` raises ``ReferenceError`` (the load then fails and the task's
-    channels are skipped). Remove this function, and call xradio's
-    ``load_processing_set`` again, once astroviper requires an xradio release
-    whose ``load_processing_set`` binds the tree to a local before calling
-    ``xr_ms.sel`` (xradio AGENT.md, accessor rule 2).
-
-    Unlike xradio's version, it opens only each measurement set's own group,
-    with ``xr.open_dataset``, as a one-node tree: the sub-datasets are not
-    loaded, so they are not opened either. ``xr.open_datatree`` builds the
-    backend's tree of all groups and, while creating the default indexes,
-    maps it onto a new tree and drops the backend's one with its parent<->child
-    links intact (xarray 2026.9, ``_datatree_from_backend_datatree``): cyclic
-    garbage that holds the lazy zarr arrays of every group and that no
-    :func:`~astroviper.utils.data_tree.release_data_tree` of the returned
-    tree can reach. Here every tree but the returned one has no children and
-    dies by reference counting. The returned tree is the caller's to release.
-
-    Parameters
-    ----------
-    ps_store : str
-        Path or URL of the processing set (local or S3, as for xradio).
-    sel_parms : dict
-        ``{ms_name: {dimension: slice}}`` selection of every measurement set
-        to load.
-    data_group_name : str
-        Data group to select in every measurement set.
-
-    Returns
-    -------
-    xarray.DataTree
-        The processing set holding the loaded selections.
-    """
-    import posixpath
-
-    import s3fs
-    import xarray as xr
-    from xradio._utils.zarr.common import _get_file_system_and_items
-    from xradio.measurement_set.load_processing_set import load_processing_set
-
-    if not sel_parms:
-        # xradio's whole-processing-set branch already holds its tree in a local
-        # (it opens the processing set with xr.open_datatree, so xarray's backend
-        # tree is left as cyclic garbage; taken only for an empty selection).
-        return load_processing_set(
-            ps_store, data_group_name=data_group_name, load_sub_datasets=False
-        )
-
-    file_system, _ = _get_file_system_and_items(ps_store)
-    ps_xdt = xr.DataTree()
-    for ms_name, ms_isel in sel_parms.items():
-        ms_store = posixpath.join(ps_store, ms_name)
-        if isinstance(file_system, s3fs.core.S3FileSystem):
-            ms_store = s3fs.S3Map(root=ms_store, s3=file_system, check=False)
-        # The measurement set's own group only, as a one-node tree (see above).
-        opened = xr.DataTree(
-            dataset=xr.open_dataset(
-                ms_store, engine="zarr", cache=False, chunks=None, consolidated=False
-            )
-        )
-        selected = opened.isel(ms_isel) if ms_isel else opened
-        ms_xdt = selected.xr_ms.sel(data_group_name=data_group_name)
-        ps_xdt[ms_name] = ms_xdt
-        opened = selected = ms_xdt = None
-    ps_xdt.attrs["type"] = "processing_set"
-    return ps_xdt.load()
-
-
 def _global_channel_offset(data_selection):
     """Global channel number of this task's first channel: the start of the
     ``frequency`` slice in ``data_selection`` (frequency and channel are the
@@ -913,10 +836,13 @@ def image_cube_single_field(
                 processing_function_threads=processing_function_threads,
             )
         else:
-            ps_xdt = _load_processing_set(
+            from xradio.measurement_set.load_processing_set import load_processing_set
+
+            ps_xdt = load_processing_set(
                 input_data_store,
                 sel_parms=data_selection,
                 data_group_name=processing_set_data_group_name,
+                load_sub_datasets=False,
             )
     except Exception as exc:
         # A chunk whose data cannot be read is skipped -- logged + marked in the

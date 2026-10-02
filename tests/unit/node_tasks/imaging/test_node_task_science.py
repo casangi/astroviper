@@ -243,7 +243,9 @@ def test_node_task_releases_everything_by_reference_counting(node_task_inputs):
     distributed application runs it) leaves no object in a reference cycle,
     and no garbage collection runs inside it (a ``gc.collect()`` call
     included): the loaded chunk, the per-channel views, the image and every
-    lazy zarr and xarray object die by reference counting alone."""
+    lazy zarr and xarray object die by reference counting alone (the lazy
+    tree xarray's ``open_datatree`` drops is the one exception, see
+    :func:`cyclic_garbage`)."""
     from astroviper.node_tasks.imaging.image_cube_single_field import (
         image_cube_single_field,
     )
