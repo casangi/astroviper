@@ -89,8 +89,8 @@ _TRUTH_IMAGE_DRIVE_IDS = {
     # v4, regenerated 2026-10-02 for the RMS divergence test of the model
     # update (issue 290), which stops the deep CLEAN of this field earlier.
     # A new version keeps main's truths (the unversioned names) untouched.
-    TRUTH_IMAGE_MULTI_CYCLE_DOUBLE: None,  # upload pending
-    TRUTH_IMAGE_MULTI_CYCLE_SINGLE: None,  # upload pending
+    TRUTH_IMAGE_MULTI_CYCLE_DOUBLE: "1Hd0Z_tberoD3Jsday9qPencIoHa0ZSWF",
+    TRUTH_IMAGE_MULTI_CYCLE_SINGLE: "13CFsFAZG-bdCOay6wyzdYTHqJOfPnZ8a",
 }
 
 # Default (tight) per-channel relative-difference ceiling for the reproducible
