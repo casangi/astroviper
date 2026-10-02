@@ -353,10 +353,12 @@ def image_cube_single_field(
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
     primary_beam_correction : bool, optional
-        If ``True`` divide the restored sky by the (power) primary beam,
-        writing the ``sky_restored_primary_beam_corrected``
-        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable (CASA ``pbcor``);
-        pixels below the primary-beam cutoff are blanked with NaN.  Requires
+        If ``True`` write the primary beam corrected restored sky to the
+        ``sky_restored_primary_beam_corrected``
+        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable: the model divided
+        by the (power) primary beam and convolved with the clean beam, plus
+        the residual divided by the primary beam; pixels below the primary
+        beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires
         ``restore``.
     psf_fitting_method : str, optional
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
@@ -576,6 +578,15 @@ def image_cube_single_field(
     # img_xds at this point. restore_image self-times and returns a one-row
     # timing frame (``T_restore``) folded in like the other steps.
     timing["T_restore"] = 0.0
+    # The primary beam corrected restored image is made in the same pass as
+    # the restored image: the model is divided by the primary beam before its
+    # convolution with the clean beam, which needs the model plane before the
+    # restore may overwrite it. The deconvolver's primary_beam_limit is the
+    # blanking cutoff when set, else the CASA pblimit default of 0.2.
+    timing["T_correct_sky_by_primary_beam"] = 0.0
+    correct = (
+        primary_beam_correction and restore and iteration_control_params["max_iter"] > 0
+    )
     if restore and model_exists:
         from astroviper.processing_functions.imaging.restore import restore_image
 
@@ -589,26 +600,12 @@ def image_cube_single_field(
             # written to the output store; let the restore reuse its buffer
             # instead of allocating a fresh restored cube.
             consume_model="sky_model" not in image_data_variables_keep,
-        )
-        accumulate_timing(timing, restore_return_df)
-
-    # Primary-beam correction of the restored sky (CASA pbcor): a single
-    # division since PRIMARY_BEAM follows the CASA (power) definition. Uses
-    # the deconvolver's primary_beam_limit as the blanking cutoff when set,
-    # else the CASA pblimit default of 0.2.
-    timing["T_correct_sky_by_primary_beam"] = 0.0
-    if primary_beam_correction and restore and iteration_control_params["max_iter"] > 0:
-        from astroviper.processing_functions.imaging.correct_sky_by_primary_beam import (
-            correct_sky_by_primary_beam,
-        )
-
-        img_xds, pb_corr_return_df = correct_sky_by_primary_beam(
-            img_xds,
+            primary_beam_correction=correct,
             primary_beam_limit=(
                 iteration_control_params.get("primary_beam_limit", 0.0) or 0.2
             ),
         )
-        accumulate_timing(timing, pb_corr_return_df)
+        accumulate_timing(timing, restore_return_df)
 
     timing["task_id"] = task_id
     timing["n_channels"] = img_xds.sizes["frequency"]

@@ -138,10 +138,12 @@ IMAGING_PARAM_DOCS = {
         '``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).'
     ),
     "primary_beam_correction": (
-        "If ``True`` divide the restored sky by the (power) primary beam,\n"
-        "writing the ``sky_restored_primary_beam_corrected``\n"
-        "(``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable (CASA ``pbcor``);\n"
-        "pixels below the primary-beam cutoff are blanked with NaN.  Requires\n"
+        "If ``True`` write the primary beam corrected restored sky to the\n"
+        "``sky_restored_primary_beam_corrected``\n"
+        "(``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable: the model divided\n"
+        "by the (power) primary beam and convolved with the clean beam, plus\n"
+        "the residual divided by the primary beam; pixels below the primary\n"
+        "beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires\n"
         "``restore``."
     ),
     "psf_fitting_method": (
