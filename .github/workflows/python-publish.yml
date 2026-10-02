@@ -1,9 +1,22 @@
 # .github/workflows/python-publish.yml
+# Pull requests and merges to main build the wheels (CPython 3.12-3.14,
+# Linux x86_64/aarch64, macOS arm64) and sdist as a check; only a published
+# GitHub release uploads them to PyPI.
 name: Publish Python 🐍 distribution 📦 to PyPI and TestPyPI
 
 on:
   release:
     types: [published]
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - '**.rst'
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - '**.rst'
 
 jobs:
   # check-codecov-token:
@@ -13,8 +26,11 @@ jobs:
   #       run: echo "2 PYPI_TOKEN=${{ secrets.PYPI_TOKEN }}"
 
   call-publish:
-    uses: nrao/gh-actions-templates-public/.github/workflows/python-publish-cpp-cngi-template.yml@main
+    uses: nrao/gh-actions-templates-public/.github/workflows/python-publish-cpp-cngi-template.yml@17-ci-python-312-314-push-pr-split
     with:
       pypi-url: "https://pypi.org/project/astroviper"
+      # TODO: remove once toolviper, xradio and graphviper releases with
+      # requires-python "<3.15" are on PyPI (needed for the cp314 wheel test).
+      ignore-requires-python: true
     secrets:
       PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }} # Explicit pass instead of inherit
