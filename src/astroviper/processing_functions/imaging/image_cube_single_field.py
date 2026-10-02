@@ -108,6 +108,24 @@ def imaging_preparation_single_field(
         - ``max_psf_fraction`` [CASA ``maxpsffraction``] : Upper clamp on the
           same PSF fraction; it guarantees a minimum amount of cleaning per
           model update even when the PSF sidelobe level is high.
+        - ``entropy_stop`` : If ``True``, a plane stops once the entropy of
+          its residual has passed its maximum. The entropy (Homan, Roth and
+          Pushkarev 2024, AJ 167, 11) measures how much the residual looks
+          like noise everywhere. It rises while the clean removes emission
+          and falls once the clean fits noise. It is worked out after every
+          residual update, and the plane stops when it is lower than in an
+          earlier cycle. The fall is noticed one model update after the
+          maximum and the model of that model update is kept, so a small
+          ``max_iter_per_cycle`` makes the stop sharper. Default ``False``.
+          No CASA equivalent.
+        - ``entropy_max_snr`` : The entropy of a plane is followed once the
+          peak of its residual inside the clean mask is at most this many
+          times the RMS of the residual. Above it the residual is dominated
+          by the pattern of the point spread function. Default 6.
+        - ``entropy_spatial_bins`` : Number of spatial bins along each of the
+          two image axes used for the entropy. Default 7.
+        - ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for
+          the entropy. Default 10.
 
         Derived per plane before each model update (not set by the caller):
         ``psf_fraction = clamp(max_psf_sidelobe * psf_sidelobe_factor,
@@ -159,10 +177,15 @@ def imaging_preparation_single_field(
     from astroviper.processing_functions.imaging.utils import (
         ImagingDict,
         IterationController,
+        validate_entropy_params,
     )
 
     logger.debug("Processing chunk " + str(task_id))
 
+    # The entropy stop is optional: its keys take their defaults when absent.
+    entropy_stop, entropy_max_snr, entropy_spatial_bins, entropy_flux_bins = (
+        validate_entropy_params(iteration_control_params)
+    )
     controller = IterationController(
         max_iter=iteration_control_params["max_iter"],
         max_cycles=iteration_control_params["max_cycles"],
@@ -172,6 +195,10 @@ def imaging_preparation_single_field(
         min_psf_fraction=iteration_control_params["min_psf_fraction"],
         max_psf_fraction=iteration_control_params["max_psf_fraction"],
         max_iter_per_cycle=iteration_control_params["max_iter_per_cycle"],
+        entropy_stop=entropy_stop,
+        entropy_max_snr=entropy_max_snr,
+        entropy_spatial_bins=entropy_spatial_bins,
+        entropy_flux_bins=entropy_flux_bins,
     )
     combined_imaging_dict = ImagingDict()
 
@@ -309,6 +336,24 @@ def image_cube_single_field(
         - ``max_psf_fraction`` [CASA ``maxpsffraction``] : Upper clamp on the
           same PSF fraction; it guarantees a minimum amount of cleaning per
           model update even when the PSF sidelobe level is high.
+        - ``entropy_stop`` : If ``True``, a plane stops once the entropy of
+          its residual has passed its maximum. The entropy (Homan, Roth and
+          Pushkarev 2024, AJ 167, 11) measures how much the residual looks
+          like noise everywhere. It rises while the clean removes emission
+          and falls once the clean fits noise. It is worked out after every
+          residual update, and the plane stops when it is lower than in an
+          earlier cycle. The fall is noticed one model update after the
+          maximum and the model of that model update is kept, so a small
+          ``max_iter_per_cycle`` makes the stop sharper. Default ``False``.
+          No CASA equivalent.
+        - ``entropy_max_snr`` : The entropy of a plane is followed once the
+          peak of its residual inside the clean mask is at most this many
+          times the RMS of the residual. Above it the residual is dominated
+          by the pattern of the point spread function. Default 6.
+        - ``entropy_spatial_bins`` : Number of spatial bins along each of the
+          two image axes used for the entropy. Default 7.
+        - ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for
+          the entropy. Default 10.
 
         Derived per plane before each model update (not set by the caller):
         ``psf_fraction = clamp(max_psf_sidelobe * psf_sidelobe_factor,
@@ -392,6 +437,7 @@ def image_cube_single_field(
     from astroviper.processing_functions.imaging.utils import (
         accumulate_timing,
         build_residual_imaging_dict,
+        copy_residual_entropy,
         get_calculate_cycle_controls,
         merge_imaging_dicts,
     )
@@ -522,22 +568,31 @@ def image_cube_single_field(
                 image_data_group_out_name="model",
             )
             accumulate_timing(timing, model_update_return_df)
+            # The entropy belongs to the residual this model update started
+            # from (a no-op unless the entropy stop is on).
+            copy_residual_entropy(imaging_dict, residual_imaging_dict)
 
             # Only flip once a deconvolve actually runs: if every cycle is
             # skipped, no model is ever created, and the closing residual update
             # below must not try to subtract one that doesn't exist.
             model_exists = True
+            model_update_ran = True
         else:
             if pre_stopcode.imaging != 0:
                 logger.debug(f"  *** CONVERGED before model update: {pre_stopdesc} ***")
             imaging_dict = residual_imaging_dict
+            model_update_ran = False
 
         start = time.time()
         controller.update_counts(imaging_dict)
 
         # check_convergence stamps the stop code into imaging_dict, so run
         # it before the merge to carry that stop code into the combined dict.
-        stopcode, stopdesc = controller.check_convergence(imaging_dict)
+        # The entropy stop was decided above, on the fresh residual of this
+        # cycle; model_update_ran tells the controller which record it sees.
+        stopcode, stopdesc = controller.check_convergence(
+            imaging_dict, model_update_ran=model_update_ran
+        )
         combined_imaging_dict = merge_imaging_dicts(
             [combined_imaging_dict, imaging_dict]
         )
