@@ -81,6 +81,83 @@ def _log_task_io_failure(phase, exc, task_id, image_store, data_selection, task_
     }
 
 
+def _load_processing_set(ps_store, sel_parms, data_group_name):
+    """Load this task's selection of a processing set, without sub-datasets.
+
+    Does what ``xradio.measurement_set.load_processing_set(ps_store,
+    sel_parms, data_group_name, load_sub_datasets=False)`` does, holding every
+    tree in a local while its ``xr_ms`` accessor runs. Workaround for xradio
+    1.2.3, whose ``load_processing_set`` calls
+    ``xr.open_datatree(...).isel(...).xr_ms.sel(...)`` on a temporary tree:
+    the accessor holds only a weak reference to the tree, so a garbage
+    collection inside ``sel`` (another thread's allocations suffice) frees it
+    and ``sel`` raises ``ReferenceError`` (the load then fails and the task's
+    channels are skipped). Remove this function, and call xradio's
+    ``load_processing_set`` again, once astroviper requires an xradio release
+    whose ``load_processing_set`` binds the tree to a local before calling
+    ``xr_ms.sel`` (xradio AGENT.md, accessor rule 2).
+
+    Unlike xradio's version, it opens only each measurement set's own group,
+    with ``xr.open_dataset``, as a one-node tree: the sub-datasets are not
+    loaded, so they are not opened either. ``xr.open_datatree`` builds the
+    backend's tree of all groups and, while creating the default indexes,
+    maps it onto a new tree and drops the backend's one with its parent<->child
+    links intact (xarray 2026.9, ``_datatree_from_backend_datatree``): cyclic
+    garbage that holds the lazy zarr arrays of every group and that no
+    :func:`~astroviper.utils.data_tree.release_data_tree` of the returned
+    tree can reach. Here every tree but the returned one has no children and
+    dies by reference counting. The returned tree is the caller's to release.
+
+    Parameters
+    ----------
+    ps_store : str
+        Path or URL of the processing set (local or S3, as for xradio).
+    sel_parms : dict
+        ``{ms_name: {dimension: slice}}`` selection of every measurement set
+        to load.
+    data_group_name : str
+        Data group to select in every measurement set.
+
+    Returns
+    -------
+    xarray.DataTree
+        The processing set holding the loaded selections.
+    """
+    import posixpath
+
+    import s3fs
+    import xarray as xr
+    from xradio._utils.zarr.common import _get_file_system_and_items
+    from xradio.measurement_set.load_processing_set import load_processing_set
+
+    if not sel_parms:
+        # xradio's whole-processing-set branch already holds its tree in a local
+        # (it opens the processing set with xr.open_datatree, so xarray's backend
+        # tree is left as cyclic garbage; taken only for an empty selection).
+        return load_processing_set(
+            ps_store, data_group_name=data_group_name, load_sub_datasets=False
+        )
+
+    file_system, _ = _get_file_system_and_items(ps_store)
+    ps_xdt = xr.DataTree()
+    for ms_name, ms_isel in sel_parms.items():
+        ms_store = posixpath.join(ps_store, ms_name)
+        if isinstance(file_system, s3fs.core.S3FileSystem):
+            ms_store = s3fs.S3Map(root=ms_store, s3=file_system, check=False)
+        # The measurement set's own group only, as a one-node tree (see above).
+        opened = xr.DataTree(
+            dataset=xr.open_dataset(
+                ms_store, engine="zarr", cache=False, chunks=None, consolidated=False
+            )
+        )
+        selected = opened.isel(ms_isel) if ms_isel else opened
+        ms_xdt = selected.xr_ms.sel(data_group_name=data_group_name)
+        ps_xdt[ms_name] = ms_xdt
+        opened = selected = ms_xdt = None
+    ps_xdt.attrs["type"] = "processing_set"
+    return ps_xdt.load()
+
+
 def _global_channel_offset(data_selection):
     """Global channel number of this task's first channel: the start of the
     ``frequency`` slice in ``data_selection`` (frequency and channel are the
@@ -187,6 +264,39 @@ def _select_processing_set_channel(ps_xdt, frequency_maps, chan_index):
         ms_chan.attrs = copy.deepcopy(ms_xdt.attrs)
         selected[ms_name] = ms_chan
     return selected or None
+
+
+def _whole_processing_set_channel(ps_xdt):
+    """The whole loaded chunk, for an image channel no visibility channel maps
+    onto with the chunk's image axis.
+
+    The science function then maps the chunk's visibility channels onto that
+    one image channel with its own rule (see
+    :func:`~astroviper.processing_functions.imaging.utils.frequency_mapping.map_visibility_frequencies_to_image`):
+    a visibility channel within half a visibility channel spacing of it, or
+    the only visibility channel of the chunk at any distance, is gridded onto
+    it, and one farther away raises ``ValueError``. So, unlike in a call with
+    the whole image cube, where such a channel stays empty, a chunk of one
+    visibility channel is imaged onto it.
+
+    Like :func:`_select_processing_set_channel`, returns ``{ms_name:
+    measurement-set node}`` of zero-copy views of the loaded arrays, each with
+    its own deep-copied ``attrs``, so the variables and data groups the
+    processing functions register (``WEIGHT_IMAGING``, ``VISIBILITY_MODEL``,
+    ``VISIBILITY_RESIDUAL`` and their data groups) stay off the loaded chunk
+    and die with the channel. Handing over the loaded chunk itself would
+    register them on it, and the next channel's views would carry them into
+    the science function's no-overwrite checks (``AssertionError: Output data
+    variable WEIGHT_IMAGING already exists``).
+    """
+    import copy
+
+    selected = {}
+    for ms_name, ms_xdt in ps_xdt.items():
+        ms_chan = ms_xdt.isel(frequency=slice(None))
+        ms_chan.attrs = copy.deepcopy(ms_xdt.attrs)
+        selected[ms_name] = ms_chan
+    return selected
 
 
 def _select_image_channel(img_xds, chan_index):
@@ -803,13 +913,10 @@ def image_cube_single_field(
                 processing_function_threads=processing_function_threads,
             )
         else:
-            from xradio.measurement_set.load_processing_set import load_processing_set
-
-            ps_xdt = load_processing_set(
+            ps_xdt = _load_processing_set(
                 input_data_store,
                 sel_parms=data_selection,
                 data_group_name=processing_set_data_group_name,
-                load_sub_datasets=False,
             )
     except Exception as exc:
         # A chunk whose data cannot be read is skipped -- logged + marked in the
@@ -896,13 +1003,13 @@ def image_cube_single_field(
         ps_chan = _select_processing_set_channel(ps_xdt, frequency_maps, chan_index)
         if ps_chan is None:
             # No visibility channel maps onto this image channel: hand over
-            # the whole chunk, which grids nothing onto it -- exactly what one
-            # full-cube call did for such a channel.
+            # views of the whole chunk (see _whole_processing_set_channel for
+            # what the science function grids onto it).
             logger.debug(
                 f"Image channel {chan_index} of task {task_id} has no visibility "
                 "channels; imaging it from the full chunk."
             )
-            ps_chan = ps_xdt
+            ps_chan = _whole_processing_set_channel(ps_xdt)
         img_chan = _select_image_channel(img_xds, chan_index)
         if accumulator is None:
             accumulator = _ImageChunkAccumulator(
@@ -938,11 +1045,21 @@ def image_cube_single_field(
         # Drop this channel's objects right away: cached accessors would
         # otherwise pin its arrays until a full garbage-collection pass.
         clear_cached_accessors(img_chan)
-        if ps_chan is not ps_xdt:
-            for ms_chan in ps_chan.values():
-                clear_cached_accessors(ms_chan)
+        for ms_chan in ps_chan.values():
+            clear_cached_accessors(ms_chan)
+        # The loop variable would otherwise keep this channel's last
+        # measurement set, with its model and residual visibilities and
+        # imaging weights, alive through the statistics and the write.
+        ms_chan = None
         img_chan = None
         ps_chan = None
+        if chan_index == n_chan - 1:
+            # Every channel is imaged: free the loaded chunk (visibilities,
+            # weights, flags, uvw) before the last chunk's statistics and
+            # write instead of after them. Severing its parent<->child links
+            # lets it die by reference counting here.
+            release_data_tree(ps_xdt)
+            ps_xdt = None
         if not accumulator.complete:
             T_channel_bookkeeping += time.time() - start
             continue
@@ -993,12 +1110,14 @@ def image_cube_single_field(
 
     # Two reference-cycle classes pin this task's gigabytes past `= None`
     # (2026-08-12 findings; each survives until a full gc pass otherwise):
-    # 1. DataTree parent<->child links (the loaded chunk's tree), and
+    # 1. DataTree parent<->child links (the loaded chunk's tree, released
+    #    after the last channel's science call; released here only when the
+    #    loop did not run), and
     # 2. the xarray cached-accessor cycle on the image dataset
     #    (_cache['xr_img'] <-> xradio ImageXds._xds, created by the
     #    img_xds.xr_img.* calls in the processing functions).
     # Sever both so everything dies by refcount right here. Both helpers are
-    # no-ops on the load-layer dict path / cache-less datasets.
+    # no-ops on None, the load-layer dict path and cache-less datasets.
     release_data_tree(ps_xdt)
     clear_cached_accessors(img_xds)
     img_xds = None
