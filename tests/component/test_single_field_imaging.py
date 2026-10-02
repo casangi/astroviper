@@ -71,10 +71,10 @@ _PS_STORE_DRIVE_ID = "1BRe3cD6YAWkn-jSPbClGGM9VlbxHP_yn"
 TRUTH_IMAGE_NITER0 = "twhya_selfcal_5chans_lsrk_niter0_truth.img.zarr"
 TRUTH_IMAGE_NITER100 = "twhya_selfcal_5chans_lsrk_niter100_truth.img.zarr"
 TRUTH_IMAGE_MULTI_CYCLE_DOUBLE = (
-    "twhya_selfcal_5chans_lsrk_multi_cycle_double_truth.img.zarr"
+    "twhya_selfcal_5chans_lsrk_multi_cycle_double_truth_v4.img.zarr"
 )
 TRUTH_IMAGE_MULTI_CYCLE_SINGLE = (
-    "twhya_selfcal_5chans_lsrk_multi_cycle_single_truth.img.zarr"
+    "twhya_selfcal_5chans_lsrk_multi_cycle_single_truth_v4.img.zarr"
 )
 
 # Google Drive file IDs for the zipped truth images above. Each is a zipped
@@ -86,8 +86,11 @@ _TRUTH_IMAGE_DRIVE_IDS = {
     # Regenerated 2026-09-28 (power-pattern primary beam, branch 126 iteration control).
     TRUTH_IMAGE_NITER0: "1-jHOP_CBuczRmtni-WHWqtjnO-SvDAqk",
     TRUTH_IMAGE_NITER100: "1CT8Car1x2M31btFc_e8gbZLK1HP4-UMb",
-    TRUTH_IMAGE_MULTI_CYCLE_DOUBLE: "1yBe0dcwCuRayP6dq_BgFREJELGTALPRt",
-    TRUTH_IMAGE_MULTI_CYCLE_SINGLE: "1RA64QYxchWutFvYtRwv8IOMwq8nQzKKv",
+    # v4, regenerated 2026-10-02 for the RMS divergence test of the model
+    # update (issue 290), which stops the deep CLEAN of this field earlier.
+    # A new version keeps main's truths (the unversioned names) untouched.
+    TRUTH_IMAGE_MULTI_CYCLE_DOUBLE: None,  # upload pending
+    TRUTH_IMAGE_MULTI_CYCLE_SINGLE: None,  # upload pending
 }
 
 # Default (tight) per-channel relative-difference ceiling for the reproducible
@@ -310,6 +313,12 @@ def _download_zarr(zarr_name, file_id):
 
     if os.path.isdir(zarr_name):
         return  # already present locally -- nothing to download.
+    if file_id is None:
+        raise RuntimeError(
+            f"{zarr_name} is not on Google Drive yet: regenerate it with "
+            "'python test_single_field_imaging.py', or upload it and paste its "
+            "file id into _TRUTH_IMAGE_DRIVE_IDS"
+        )
 
     gdown = _import_gdown()
     zip_path = zarr_name + ".zip"
