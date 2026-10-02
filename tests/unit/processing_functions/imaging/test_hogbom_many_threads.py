@@ -43,10 +43,15 @@ def _data(n=128, npol=2, seed=0):
 
 
 def _params(npol, max_iter=30, thr=-1.0):
+    # The residual of _data is white noise, which is no image this PSF could
+    # have made: every subtraction of the broad PSF raises its RMS, and the
+    # divergence test would stop the clean. It is switched off here, where the
+    # kernels are compared at a fixed number of iterations.
     return {
         "gain": 0.1,
         "max_iter": max_iter,
         "threshold": 0.0,
+        "max_iter_divergence": -1,
         "clean_box": (-1, -1, -1, -1),
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
