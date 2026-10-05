@@ -802,3 +802,47 @@ def test_parity_extended_source(shape, dtype, nterms):
         np.testing.assert_allclose(
             result["hessian"][scale_index], reference, atol=2e-6, rtol=2e-4
         )
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("gain", [0.0, -1.0])
+@pytest.mark.parametrize("threshold,niter", [(0.0, 6), (1e-4, 50)])
+def test_adaptive_gain_cleans_past_three_iterations(dtype, gain, threshold, niter):
+    """A decreasing peak must not be classified as divergence in adaptive mode."""
+    psf = np.zeros((1, 32, 32), dtype=dtype)
+    psf[0, 16, 16] = 1.0
+    residual = psf.copy()
+    model = np.zeros_like(residual)
+
+    result = mtmfs.clean(
+        residual, psf, model, gain=gain, threshold=threshold, niter=niter
+    )
+
+    assert result["iterations_performed"] > 3
+    assert np.isfinite(residual).all() and np.isfinite(model).all()
+    if threshold:
+        assert result["stop_code"] == mtmfs.STOP_THRESHOLD
+        assert result["converged"]
+        assert result["peak_residual"] < threshold
+    else:
+        assert result["stop_code"] == mtmfs.STOP_MAX_ITER
+        assert result["iterations_performed"] == niter
+        assert not result["converged"]
+        # Three updates at gain 0.5, followed by three at the adaptive cap 0.6.
+        assert result["peak_residual"] == pytest.approx(0.5**3 * 0.4**3, rel=2e-5)
+    np.testing.assert_allclose(residual + model, psf, atol=2e-7)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_adaptive_gain_already_below_threshold(dtype):
+    """The preliminary threshold check still stops before selecting a component."""
+    psf = np.zeros((1, 32, 32), dtype=dtype)
+    psf[0, 16, 16] = 1.0
+    residual = psf * 0.01
+    original = residual.copy()
+    model = np.zeros_like(residual)
+    result = mtmfs.clean(residual, psf, model, gain=0.0, threshold=0.1, niter=20)
+    assert result["iterations_performed"] == 0
+    assert result["stop_code"] == mtmfs.STOP_THRESHOLD
+    np.testing.assert_array_equal(residual, original)
+    assert not np.any(model)

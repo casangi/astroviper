@@ -352,8 +352,8 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
 
     T loopgain = (gain > static_cast<T>(0)) ? gain : static_cast<T>(0.5);
     T fluxlimit = static_cast<T>(-1);
-    T prev_max = static_cast<T>(1e10);
-    T min_max = static_cast<T>(1e10);
+    T prev_max = static_cast<T>(0);
+    T min_max = static_cast<T>(0);
     T global_max_val = static_cast<T>(0);
     std::array<int, 2> global_max_pos{0, 0};
     int max_scale_index = 0;
@@ -362,27 +362,33 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
     std::vector<std::array<int, 2>> max_scale_pos(ns, {0, 0});
     std::vector<std::vector<T>> delta_model(nt, std::vector<T>(nimg, static_cast<T>(0)));
 
-    auto check_convergence = [&](int itercount) -> int {
+    auto check_convergence = [&](int itercount, bool component_selected) -> int {
         const PeakResult<T> pr =
             find_max_abs_mask<T>(mat_r[static_cast<std::size_t>(w.ind2(0, 0))].data(), vec_scale_masks[0].data(), nx, ny);
         const T norma = static_cast<T>(1.0 / w.mat_a[0][0]);
         const T rmaxval = std::abs(pr.value * norma);
         int flag = 0;
         if (std::abs(rmaxval) < std::max(threshold, fluxlimit)) flag = kStopThreshold;
-        if (itercount > 1 && gain <= static_cast<T>(0)) {
+        if (component_selected && itercount > 1 && gain <= static_cast<T>(0)) {
             loopgain = (global_max_val < prev_max) ? loopgain * static_cast<T>(1.5) : loopgain / static_cast<T>(1.5);
             loopgain = std::min(static_cast<T>(1) - stop_fraction, loopgain);
             loopgain = std::min(static_cast<T>(0.6), loopgain);
             if (loopgain < static_cast<T>(0.01)) flag = kStopDiverged;
-            if (std::abs((min_max - global_max_val) / min_max) > static_cast<T>(2)) flag = kStopDiverged;
+            // Selected scores are positive. A >200% increase means current >3*minimum;
+            // compare directly so a zero minimum can never cause division by zero.
+            if (global_max_val > static_cast<T>(3) * min_max) flag = kStopDiverged;
         }
-        prev_max = global_max_val;
-        min_max = std::min(min_max, std::abs(global_max_val));
+        // The preliminary threshold check has no component score yet. Seed
+        // history from the first real selection, not global_max_val's placeholder.
+        if (component_selected) {
+            prev_max = global_max_val;
+            min_max = (itercount == 0) ? global_max_val : std::min(min_max, global_max_val);
+        }
         if (flag == 0 && fluxlimit == static_cast<T>(-1)) fluxlimit = rmaxval * stop_fraction;
         return flag;
     };
 
-    int stop = check_convergence(0);
+    int stop = check_convergence(0, false);
     int iterdone = 0;
     if (stop == kStopThreshold) {
         out.iterations = 0;
@@ -495,7 +501,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                 }
 
             ++iterdone;
-            stop = check_convergence(itercount);
+            stop = check_convergence(itercount, true);
             if (stop) break;
         }
         if (stop == 0) stop = kStopMaxIter;
