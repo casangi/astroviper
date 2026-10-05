@@ -58,10 +58,11 @@ void backward_c2r(std::complex<T>* spec, T* real, int nx, int ny) {
 }
 
 template <typename T>
-void flip_quadrants(T* real, int nx, int ny, T* scratch) {
-    // fftshift: move [0,0] to the centre [ny/2, nx/2] (casacore flip, toZero=false).
-    const int hx = nx / 2;
-    const int hy = ny / 2;
+void recenter_convolution(T* real, int nx, int ny, T* scratch, int centered_kernel_count) {
+    // Cancel each kernel's center offset; handle parity independently per axis.
+    const int hx = (nx - (centered_kernel_count * (nx / 2)) % nx) % nx;
+    const int hy = (ny - (centered_kernel_count * (ny / 2)) % ny) % ny;
+    if (hx == 0 && hy == 0) return;
     for (int iy = 0; iy < ny; ++iy) {
         const int sy = (iy + hy) % ny;
         for (int ix = 0; ix < nx; ++ix) {
@@ -77,7 +78,7 @@ template void forward_r2c<float>(const float*, std::complex<float>*, int, int);
 template void forward_r2c<double>(const double*, std::complex<double>*, int, int);
 template void backward_c2r<float>(std::complex<float>*, float*, int, int);
 template void backward_c2r<double>(std::complex<double>*, double*, int, int);
-template void flip_quadrants<float>(float*, int, int, float*);
-template void flip_quadrants<double>(double*, int, int, double*);
+template void recenter_convolution<float>(float*, int, int, float*, int);
+template void recenter_convolution<double>(double*, int, int, double*, int);
 
 }  // namespace mtmfs

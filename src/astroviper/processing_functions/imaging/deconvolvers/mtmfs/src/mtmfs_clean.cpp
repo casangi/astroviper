@@ -207,6 +207,9 @@ struct Work {
                         const std::vector<complex_t>& x2 = scale_ft[static_cast<std::size_t>(s2)];
                         for (std::size_t k = 0; k < nspec(); ++k) work[k] = pf[k] * x1[k] * x2[k];
                         backward_c2r<T>(work.data(), full.data(), nx, ny);
+                        // Remove both scale centers before extracting the PSF patch.
+                        // Scale setup is complete, so reuse scale_img as scratch.
+                        recenter_convolution<T>(full.data(), nx, ny, scale_img.data(), 2);
                         extract_patch(full.data(), nx, ny, psf_peak_x, psf_peak_y, sup,
                                       cube_a[static_cast<std::size_t>(cross_index4(t1, t2, s1, s2))]);
                     }
@@ -306,7 +309,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
             std::vector<T>& sm = vec_scale_masks[static_cast<std::size_t>(s)];
             for (std::size_t k = 0; k < nspec; ++k) work[k] = mask_ft[k] * w.scale_ft[static_cast<std::size_t>(s)][k];
             backward_c2r<T>(work.data(), sm.data(), nx, ny);
-            flip_quadrants<T>(sm.data(), nx, ny, scratch.data());
+            recenter_convolution<T>(sm.data(), nx, ny, scratch.data(), 1);
             if (mask_threshold > static_cast<T>(0))
                 for (std::size_t k = 0; k < nimg; ++k)
                     sm[k] = (sm[k] > static_cast<T>(0.1)) ? static_cast<T>(1) : static_cast<T>(0);
@@ -342,7 +345,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                     work[k] = dirty_ft[k] * w.scale_ft[static_cast<std::size_t>(s)][k];
                 std::vector<T>& r = mat_r[static_cast<std::size_t>(w.ind2(t, s))];
                 backward_c2r<T>(work.data(), r.data(), nx, ny);
-                flip_quadrants<T>(r.data(), nx, ny, scratch.data());
+                recenter_convolution<T>(r.data(), nx, ny, scratch.data(), 1);
             }
         }
     }
@@ -507,7 +510,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                 const std::vector<typename Work<T>::complex_t>& pf = w.psf_ft[static_cast<std::size_t>(t1 + t2)];
                 for (std::size_t k = 0; k < nspec; ++k) work[k] = pf[k] * model_ft[k];
                 backward_c2r<T>(work.data(), smooth_mod.data(), nx, ny);
-                flip_quadrants<T>(smooth_mod.data(), nx, ny, scratch.data());
+                recenter_convolution<T>(smooth_mod.data(), nx, ny, scratch.data(), 1);
                 T* d = residual + static_cast<std::size_t>(t1) * nimg;
                 for (std::size_t k = 0; k < nimg; ++k) d[k] -= smooth_mod[k];
             }

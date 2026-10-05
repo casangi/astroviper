@@ -129,14 +129,15 @@ def np_convolve_origin(a, b):
 
 
 def np_convolve_centered(a, b):
-    ny, nx = a.shape
-    return np.roll(np_convolve_origin(a, b), shift=(ny // 2, nx // 2), axis=(0, 1))
+    """Convolve an image with a kernel whose origin is at its central pixel."""
+    return np_convolve_origin(a, np.fft.ifftshift(b))
 
 
 def np_hessian(psf_stack, nterms, scale_img):
     ny, nx = psf_stack.shape[1:]
     peak = np.unravel_index(np.argmax(np.abs(psf_stack[0])), (ny, nx))
-    sc2 = np_convolve_origin(scale_img, scale_img)
+    scale_origin = np.fft.ifftshift(scale_img)
+    sc2 = np_convolve_origin(scale_origin, scale_origin)
     h = np.zeros((nterms, nterms))
     for t1 in range(nterms):
         for t2 in range(nterms):
@@ -152,8 +153,8 @@ def expected_residual(residual_in, psf_stack, delta_model):
     for t1 in range(nterms):
         for t2 in range(nterms):
             out[t1] -= np_convolve_centered(
-                psf_stack[t1 + t2].astype(np.float64),
                 delta_model[t2].astype(np.float64),
+                psf_stack[t1 + t2].astype(np.float64),
             )
     return out
 
@@ -692,3 +693,112 @@ class TestArrayValidation:
         mtmfs.clean(residual, make_psf_stack(2, 48, 40), model, niter=3, gain=0.1)
         np.testing.assert_array_equal(view_r, residual)
         assert np.shares_memory(view_m, model) and np.any(view_m != 0)
+
+
+# Square and rectangular images with all four combinations of axis parity.
+_PARITY_SHAPES = [
+    (32, 32),
+    (33, 33),
+    (32, 33),
+    (33, 32),
+    (40, 48),
+    (41, 49),
+    (40, 49),
+    (41, 48),
+]
+
+
+def _parity_psf_stack(nterms, shape, dtype, gaussian=False):
+    """Make centered PSFs with a positive-definite Taylor peak matrix."""
+    ny, nx = shape
+    psf = np.zeros(shape)
+    psf[ny // 2, nx // 2] = 1.0
+    if gaussian:
+        yy, xx = np.indices(shape)
+        psf = np.exp(-((xx - nx // 2) ** 2 + (yy - ny // 2) ** 2) / 4.0)
+    amplitudes = [1.0, 0.0, 0.3, 0.0, 0.15]
+    return np.asarray(
+        [amplitude * psf for amplitude in amplitudes[: 2 * nterms - 1]], dtype=dtype
+    )
+
+
+def _parity_dirty_from_model(psf, model):
+    """Form the coupled dirty images independently of the C++ implementation."""
+    nterms = len(model)
+    return np.asarray(
+        [
+            sum(np_convolve_centered(model[t2], psf[t1 + t2]) for t2 in range(nterms))
+            for t1 in range(nterms)
+        ],
+        dtype=model.dtype,
+    )
+
+
+@pytest.mark.parametrize("shape", _PARITY_SHAPES)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("nterms", [1, 2, 3])
+@pytest.mark.parametrize(
+    "position", ["center", "off_center", "first_corner", "last_corner"]
+)
+def test_parity_masked_point_source(shape, dtype, nterms, position):
+    """Delta PSFs must clean the correct pixel even at a clipped patch boundary."""
+    ny, nx = shape
+    pixel = {
+        "center": (ny // 2, nx // 2),
+        "off_center": (7, 11),
+        "first_corner": (0, 0),
+        "last_corner": (ny - 1, nx - 1),
+    }[position]
+    psf = _parity_psf_stack(nterms, shape, dtype)
+    true_model = np.zeros((nterms, ny, nx), dtype=dtype)
+    true_model[:, pixel[0], pixel[1]] = [1.0, -0.5, 0.2][:nterms]
+    residual = _parity_dirty_from_model(psf, true_model)
+    residual_in = residual.copy()
+    model = np.zeros_like(residual)
+    mask = np.zeros(shape, dtype=dtype)
+    mask[pixel] = 1.0
+
+    result = mtmfs.clean(residual, psf, model, mask=mask, niter=5, gain=0.2)
+
+    assert result["iterations_performed"] == 5
+    np.testing.assert_allclose(model, true_model * (1.0 - 0.8**5), atol=2e-6, rtol=1e-5)
+    np.testing.assert_allclose(residual, residual_in * 0.8**5, atol=2e-6, rtol=1e-5)
+    expected_hessian = np.array(
+        [
+            [psf[t1 + t2, ny // 2, nx // 2] for t2 in range(nterms)]
+            for t1 in range(nterms)
+        ]
+    )
+    np.testing.assert_allclose(result["hessian"][0], expected_hessian, atol=1e-6)
+
+
+@pytest.mark.parametrize("shape", _PARITY_SHAPES)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("nterms", [1, 2, 3])
+def test_parity_extended_source(shape, dtype, nterms):
+    """Scale selection, Hessians and full residual reconstruction share one origin."""
+    ny, nx = shape
+    psf = _parity_psf_stack(nterms, shape, dtype, gaussian=True)
+    scale_image = np_make_scale(nx, ny, 4.0)
+    true_model = np.asarray(
+        [amplitude * scale_image for amplitude in [1.0, -0.5, 0.2][:nterms]],
+        dtype=dtype,
+    )
+    residual = _parity_dirty_from_model(psf, true_model)
+    residual_in = residual.copy()
+    model = np.zeros_like(residual)
+
+    result = mtmfs.clean(residual, psf, model, scales=[0.0, 4.0], niter=5, gain=0.2)
+
+    np.testing.assert_allclose(model, true_model * (1.0 - 0.8**5), atol=2e-6, rtol=2e-4)
+    np.testing.assert_allclose(
+        residual,
+        residual_in - _parity_dirty_from_model(psf, model),
+        atol=2e-6,
+        rtol=2e-4,
+    )
+    for scale_index, scale in enumerate([0.0, 4.0]):
+        reference = np_hessian(psf, nterms, np_make_scale(nx, ny, scale))
+        np.testing.assert_allclose(
+            result["hessian"][scale_index], reference, atol=2e-6, rtol=2e-4
+        )
