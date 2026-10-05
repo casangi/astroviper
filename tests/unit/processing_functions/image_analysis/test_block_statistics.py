@@ -81,6 +81,17 @@ class TestAbsMaxAndSum:
         plane[3, 3] = np.nan
         assert np.isnan(imgstats.plane_abs_max(plane))
 
+    def test_abs_max_with_mask(self, plane, mask):
+        mask[100, 5] = True
+        expected = np.where(mask, np.abs(plane), 0.0).max()
+        assert imgstats.plane_abs_max(plane, mask) == expected == 8.5
+        plane[1500, 17] = np.nan  # not selected
+        assert imgstats.plane_abs_max(plane, mask) == 8.5
+        plane[2099, 599] = np.nan
+        mask[2099, 599] = True  # selected, in the last block
+        assert np.isnan(imgstats.plane_abs_max(plane, mask))
+        assert imgstats.plane_abs_max(plane, np.zeros_like(mask)) == 0.0
+
     def test_abs_sum(self, plane):
         assert imgstats.plane_abs_sum(plane) == pytest.approx(
             np.abs(plane).sum(), rel=1e-12
@@ -117,6 +128,22 @@ class TestHogbomPeakCube:
             == 0.0
         )
 
+    def test_nan_matches_the_whole_cube_formula(self):
+        """A selected pixel that is not a number gives NaN; a search region
+        without a selected pixel gives 0."""
+        cube = np.ones((1, 4, 1, 6, 5))
+        mask = np.ones(cube.shape, dtype=bool)
+        cube[0, 0, 0, 2, 2] = np.nan  # selected
+        cube[0, 1, 0, 2, 2] = np.nan
+        mask[0, 1, 0, 2, 2] = False  # not selected
+        cube[0, 1, 0, 0, 0] = np.nan  # outside the clean box
+        cube[0, 2] = np.nan  # every selected pixel
+        mask[0, 3] = False  # no selected pixel
+        expected = np.where(mask, np.abs(cube), 0.0)[..., 1:, :].max(axis=(-2, -1))
+        peak = _hogbom_peak_cube(cube, mask, (-1, -1, 1, -1))
+        np.testing.assert_array_equal(peak, expected)
+        np.testing.assert_array_equal(peak.ravel(), [np.nan, 1.0, np.nan, 0.0])
+
 
 class TestNoPlaneSizedTemporaries:
     """Each helper allocates far less than the plane it scans."""
@@ -127,6 +154,7 @@ class TestNoPlaneSizedTemporaries:
             lambda plane, mask: imgstats.plane_peak_abs_signed(plane, mask),
             lambda plane, mask: imgstats.plane_peak_abs_signed(plane),
             lambda plane, mask: imgstats.plane_abs_max(plane),
+            lambda plane, mask: imgstats.plane_abs_max(plane, mask),
             lambda plane, mask: imgstats.plane_abs_sum(plane),
             lambda plane, mask: _hogbom_peak_cube(
                 plane[None, None, None], mask[None, None, None], (-1, -1, -1, -1)

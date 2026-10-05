@@ -159,26 +159,34 @@ def plane_peak_abs_signed(plane, mask=None):
     return float(plane[best_index])
 
 
-def plane_abs_max(plane):
+def plane_abs_max(plane, mask=None):
     """
     Largest absolute value of a plane, without a copy of the plane.
 
-    Not a number propagates, as with ``np.abs(plane).max()``.
+    Not a number propagates, as with ``np.abs(plane).max()``. With a mask the
+    result is ``np.where(mask, np.abs(plane), 0).max()``: a selected pixel that
+    is not a number gives NaN, and a plane with no selected pixel gives 0.
 
     Parameters
     ----------
     plane : numpy.ndarray
         2-D image plane.
+    mask : numpy.ndarray, optional
+        Array of the same shape; only pixels where ``mask`` is nonzero count.
 
     Returns
     -------
     float
-        ``np.abs(plane).max()``, computed block by block.
+        ``np.abs(plane).max()``, or ``np.where(mask, np.abs(plane), 0).max()``
+        with a mask, computed block by block.
     """
     rows = _rows_per_block(plane)
     best = np.float64(-np.inf)
     for start in range(0, plane.shape[0], rows):
-        best = np.maximum(best, np.abs(plane[start : start + rows]).max())
+        block = np.abs(plane[start : start + rows])
+        if mask is not None:
+            block[mask[start : start + rows] == 0] = 0.0
+        best = np.maximum(best, block.max())
     return float(best)
 
 

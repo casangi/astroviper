@@ -730,10 +730,8 @@ def _hogbom_peak_cube(residual_cube, mask_cube, clean_box):
     for index in np.ndindex(plane_shape):
         plane = residual_cube[index][ybeg:yend, xbeg:xend]
         mask = None if mask_cube is None else mask_cube[index][ybeg:yend, xbeg:xend]
-        # the signed peak of the searched pixels; masked planes give NaN, and
-        # np.where(mask, |residual|, 0) gave 0 for them
-        value = imgstats.plane_peak_abs_signed(plane, mask=mask)
-        peak[index] = 0.0 if (mask is not None and np.isnan(value)) else abs(value)
+        # np.where(mask, |residual|, 0).max(): NaN propagates, 0 if none selected
+        peak[index] = imgstats.plane_abs_max(plane, mask=mask)
     return peak
 
 
@@ -758,6 +756,11 @@ def _run_hogbom_with_cycle_checks(
     diverged = np.zeros(max_iter_per_cycle.shape, dtype=bool)
 
     active = (max_iter_per_cycle > 0) & (final_peak >= threshold_per_cycle)
+    if peak_mask_cube is not None:
+        # At threshold 0 the kernel cleans a default pixel when no selected pixel
+        # is nonzero. Skip the planes whose search region selects no pixel: the
+        # peak of their mask over the search region is 0.
+        active &= _hogbom_peak_cube(peak_mask_cube, None, clean_box) > 0
     while np.any(active):
         remaining = np.maximum(max_iter_per_cycle - iterations, 0)
         # CASA checks long minor cycles after 2000 iterations. Cycles shorter
@@ -784,7 +787,9 @@ def _run_hogbom_with_cycle_checks(
             processing_function_threads=int(processing_function_threads),
         )
         performed = np.asarray(result["iterations_performed"], dtype=np.int64)
-        current_peak = np.asarray(result["final_peak"], dtype=final_peak.dtype)
+        # The kernel's final peak covers the whole plane, skips NaN and is 1e20
+        # when no pixel counts, so the peak is taken over the search region.
+        current_peak = _hogbom_peak_cube(residual_cube, peak_mask_cube, clean_box)
         iterations += performed
         final_peak = np.where(active, current_peak, final_peak)
 
