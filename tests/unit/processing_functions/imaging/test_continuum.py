@@ -286,12 +286,15 @@ def test_frequency_mapping_rejects_missing_or_ambiguous_channels(visibility, ima
         map_visibility_frequencies_to_image(visibility, image, matching="exact")
 
 
-def test_mvc_grid_accumulates_child_into_full_image_frequency_axis(monkeypatch):
+@pytest.mark.parametrize("frequency_shift", [0.0, 1.0e6])
+def test_mvc_grid_accumulates_child_into_full_image_frequency_axis(
+    monkeypatch, frequency_shift
+):
     """MVC passes child channel indices and leaves unowned planes untouched."""
     import xradio.image.image_xds  # noqa: F401
 
     image_frequencies = np.array([1.0e9, 1.1e9, 1.2e9, 1.3e9])
-    child_frequencies = image_frequencies[[1, 3]]
+    child_frequencies = image_frequencies[[1, 3]] + frequency_shift
     visibility_shape = (1, 1, child_frequencies.size, 1)
     ms_xds = xr.Dataset(
         {

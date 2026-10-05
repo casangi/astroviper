@@ -349,8 +349,8 @@ def make_point_spread_function_mvc_single_field(
 ):
     """Grid a frequency-resolved PSF cube for an MVC map partition.
 
-    Unlike direct MFS, MVC does not apply Taylor weights during gridding.  Each
-    input channel is retained as its own UV-sampling plane.  The distributed
+    Unlike direct MFS, MVC does not apply Taylor weights during gridding.  Input
+    channels map to UV-sampling planes with the shared cube nearest-channel policy.  The distributed
     reducer assembles these planes globally, and the append node converts the
     normalized channel PSF cube into ``2 * nterms - 1`` Taylor Hessian planes.
 
@@ -374,11 +374,10 @@ def make_point_spread_function_mvc_single_field(
         map_visibility_frequencies_to_image,
     )
 
-    # MVC retains a separate plane for each visibility frequency. Validate
-    # that contract before calling the shared cube PSF gridder.
+    # Validate the shared cube nearest-channel policy before gridding.
     for ms_xdt in ps_xdt.values():
         map_visibility_frequencies_to_image(
-            ms_xdt.frequency.values, img_xds.frequency.values, matching="exact"
+            ms_xdt.frequency.values, img_xds.frequency.values, matching="nearest"
         )
 
     if complex_dtype is None:

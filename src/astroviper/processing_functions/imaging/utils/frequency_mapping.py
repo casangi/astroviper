@@ -50,8 +50,8 @@ def map_visibility_frequencies_to_image(
         have one channel any frequency maps onto that plane.
 
     matching : {"nearest", "exact"}, default "nearest"
-        Use main's nearest-channel assignment for cube imaging. Continuum
-        callers select "exact", requiring a unique one-to-one match.
+        Use the shared nearest-channel assignment for cube and continuum imaging.
+        The optional "exact" policy requires a unique one-to-one match.
     rtol, atol : float, optional
         Relative and absolute tolerances for exact matching with ``np.isclose``.
         Ignored for nearest matching. Defaults are 1e-12 and 0 Hz.

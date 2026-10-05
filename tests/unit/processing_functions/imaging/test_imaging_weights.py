@@ -558,7 +558,9 @@ class TestGridContinuumWeightDensity(unittest.TestCase):
         ps_xdt["ms_0"].coords["frequency"] = [2.0e9]
         image = _make_img_xds(n_chan=2)
 
-        with self.assertRaisesRegex(ValueError, "each match exactly one channel"):
+        with self.assertRaisesRegex(
+            ValueError, "more than half an image channel width"
+        ):
             grid_imaging_weight_density_continuum(
                 ps_xdt,
                 image,
@@ -566,6 +568,30 @@ class TestGridContinuumWeightDensity(unittest.TestCase):
                     "weighting": "briggs",
                     "robust": 0.5,
                 },
+            )
+
+    def test_nearest_mapping_sums_multiple_channels_into_one_plane(self):
+        """Global continuum density retains all many-to-one contributions."""
+        frequencies = np.array([1.01e9, 1.02e9, 1.11e9])
+        dataset = _make_ms_ds(n_baseline=1, n_chan=3, weight_per_pol=[2.0, 6.0])
+        dataset = dataset.assign_coords(frequency=frequencies)
+        dataset["UVW"].values[...] = 0.0
+        ps = xr.DataTree.from_dict({"ms": dataset})
+        params = {
+            "weighting": "briggs",
+            "robust": 0.5,
+            "casa_weighting_implementation": True,
+        }
+        fine = _make_img_xds(n_chan=3).assign_coords(frequency=frequencies)
+        coarse = _make_img_xds(n_chan=2).assign_coords(frequency=[1.0e9, 1.1e9])
+        reference = grid_imaging_weight_density_continuum(ps, fine, params)
+        actual = grid_imaging_weight_density_continuum(ps, coarse, params)
+        for name in ("WEIGHT_DENSITY_GRID", "SUM_WEIGHT"):
+            expected = np.stack(
+                [reference[name].values[:2].sum(axis=0), reference[name].values[2]]
+            )
+            np.testing.assert_allclose(
+                actual[name].values, expected, rtol=1e-14, atol=0
             )
 
     def test_direct_continuum_plane_matches_post_gridding_collapse(self):

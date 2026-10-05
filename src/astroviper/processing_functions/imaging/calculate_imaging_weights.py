@@ -455,29 +455,13 @@ def grid_imaging_weight_density_continuum(
                 f"one-dimensional; received shape {ms_frequency.shape}."
             )
 
-        frequency_matches = np.isclose(
-            ms_frequency[:, np.newaxis],
-            frequency[np.newaxis, :],
-            rtol=1.0e-12,
-            atol=0.0,
+        from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+            map_visibility_frequencies_to_image,
         )
-        match_counts = frequency_matches.sum(axis=1)
-        if np.any(match_counts != 1):
-            raise ValueError(
-                f"The frequencies in processing-set child {ms_name!r} do not "
-                "each match exactly one channel in the local image frequency "
-                "axis. "
-                f"MS frequencies={ms_frequency}; "
-                f"image frequencies={frequency}."
-            )
-        image_frequency_indices = np.argmax(frequency_matches, axis=1)
-        if np.unique(image_frequency_indices).size != ms_frequency.size:
-            raise ValueError(
-                f"The frequencies in processing-set child {ms_name!r} do not "
-                "map one-to-one onto the local image frequency axis. "
-                f"MS frequencies={ms_frequency}; "
-                f"image frequencies={frequency}."
-            )
+
+        image_frequency_indices = map_visibility_frequencies_to_image(
+            ms_frequency, frequency, matching="nearest"
+        )
 
         uvw = np.asarray(ms_xds[data_group["uvw"]].values)
 
@@ -550,10 +534,20 @@ def grid_imaging_weight_density_continuum(
         )
 
         if not collapse_frequency and not uses_full_frequency_axis:
-            weight_density_grid[image_frequency_indices, ...] += (
-                child_weight_density_grid
-            )
-            sum_weight[image_frequency_indices, ...] += child_sum_weight
+            # Repeated target indices must accumulate every observed channel.
+            # Advanced-index += alone would lose contributions for many-to-one maps.
+            if np.unique(image_frequency_indices).size == image_frequency_indices.size:
+                weight_density_grid[image_frequency_indices, ...] += (
+                    child_weight_density_grid
+                )
+                sum_weight[image_frequency_indices, ...] += child_sum_weight
+            else:
+                np.add.at(
+                    weight_density_grid,
+                    image_frequency_indices,
+                    child_weight_density_grid,
+                )
+                np.add.at(sum_weight, image_frequency_indices, child_sum_weight)
 
         datasets_gridded += 1
 
@@ -957,39 +951,12 @@ def degrid_imaging_weights_continuum(
                 axis=1,
             )
         else:
-            # Match local frequencies to global planes. Using nearest matching
-            # with a tight tolerance avoids depending on exact floating-point
-            # identity.
-            global_indices = []
+            from astroviper.processing_functions.imaging.utils.frequency_mapping import (
+                map_visibility_frequencies_to_image,
+            )
 
-            for local_value in local_frequency:
-                close_indices = np.flatnonzero(
-                    np.isclose(
-                        global_frequency,
-                        local_value,
-                        rtol=1.0e-12,
-                        atol=0.0,
-                    )
-                )
-
-                if close_indices.size == 0:
-                    raise KeyError(
-                        f"Frequency {local_value} Hz from child "
-                        f"{ms_name!r} is absent from the global "
-                        "weight-density grid."
-                    )
-
-                if close_indices.size > 1:
-                    raise ValueError(
-                        f"Frequency {local_value} Hz from child "
-                        f"{ms_name!r} matches multiple global planes."
-                    )
-
-                global_indices.append(int(close_indices[0]))
-
-            global_indices = np.asarray(
-                global_indices,
-                dtype=np.int64,
+            global_indices = map_visibility_frequencies_to_image(
+                local_frequency, global_frequency, matching="nearest"
             )
 
             # Preserve the local channel order expected by the degridding kernel.
@@ -1217,8 +1184,8 @@ def calculate_imaging_weights(
         nearest-cell convention used by cube weighting.
 
     frequency_matching : {"nearest", "exact"}, default "nearest"
-        Cube imaging assigns visibility frequencies to the nearest image
-        channel. Continuum callers use exact matching to preserve one-to-one
+        Cube and continuum imaging assign visibility frequencies to the nearest image
+        channel. Exact matching can optionally enforce one-to-one
         channel assignment. This policy is independent of UV-cell truncation.
 
     Returns

@@ -99,8 +99,8 @@ def add_visibility_grid_mvc_single_field(
     3. divide each channel image by its corresponding primary beam;
     4. fit the corrected image cube into Taylor terms.
 
-    Each measurement-set frequency must map one-to-one onto a channel in the
-    image frequency axis.
+    Measurement-set frequencies use the shared cube nearest-channel mapping
+    onto the image frequency axis, including many-to-one assignments.
     """
     from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
         prolate_spheroidal_grid,
@@ -270,7 +270,7 @@ def add_visibility_grid_mvc_single_field(
     frequency_map = map_visibility_frequencies_to_image(
         frequency_coord,
         image_frequency_coord,
-        matching="exact",
+        matching="nearest",
     )
     n_image_chan = image_frequency_coord.size
 
@@ -482,7 +482,7 @@ def add_visibility_grid_mvc_single_field(
         {
             "description": ("Frequency-resolved MVC visibility UV grids."),
             "specmode": "mvc",
-            "channel_mapping": "one_to_one",
+            "channel_mapping": "nearest",
             "n_frequency_planes": n_image_chan,
         }
     )
@@ -491,7 +491,7 @@ def add_visibility_grid_mvc_single_field(
         {
             "description": ("Per-frequency MVC visibility-grid normalization sums."),
             "specmode": "mvc",
-            "channel_mapping": "one_to_one",
+            "channel_mapping": "nearest",
             "n_frequency_planes": n_image_chan,
         }
     )
