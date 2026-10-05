@@ -131,7 +131,8 @@ IMAGING_PARAM_DOCS = {
         "precision. If ``False`` the image-domain arrays are double precision."
     ),
     "weight_memory_mode": (
-        'Storage policy for calculated continuum imaging weights. ``"in_memory"``\n'
+        'Storage policy for calculated continuum imaging weights (default: ``"in_place"``).\n'
+        '``"in_memory"``\n'
         "returns task-local weights to the driver and embeds them in subsequent\n"
         'graphs. ``"in_place"`` writes each task\'s weights into the input\n'
         "Processing Set and reloads only the required partition during each major\n"

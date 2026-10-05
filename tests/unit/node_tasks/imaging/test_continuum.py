@@ -537,6 +537,7 @@ def test_weight_degrid_node_extracts_only_registered_weight_arrays(monkeypatch):
     )
     params = _weight_node_params()
     params["global_weighting_xds"] = xr.Dataset()
+    params["weight_memory_mode"] = "in_memory"
     result = continuum_node.degrid_imaging_weights_continuum_node(**params)
     cached = result["weight_datasets"]["ms"]
     assert set(cached) == {"WEIGHT_IMAGING"}
@@ -575,7 +576,7 @@ def test_weight_degrid_node_writes_in_place_and_returns_no_array_cache(monkeypat
         lambda ps_xdt, ps_store: written.update(processing_set=ps_xdt, store=ps_store),
     )
     params = _weight_node_params()
-    params.update(global_weighting_xds=xr.Dataset(), weight_memory_mode="in_place")
+    params.update(global_weighting_xds=xr.Dataset())
 
     result = continuum_node.degrid_imaging_weights_continuum_node(**params)
 

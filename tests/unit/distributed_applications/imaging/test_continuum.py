@@ -657,7 +657,11 @@ def _run_tw_hydra_continuum(
             n_chunks=n_chunks,
             overwrite=True,
             memory_mode="in_memory",
-            weight_memory_mode=weight_memory_mode,
+            **(
+                {}
+                if weight_memory_mode is None
+                else {"weight_memory_mode": weight_memory_mode}
+            ),
             visibility_memory_mode=visibility_memory_mode,
             widebandpb_memory_mode=widebandpb_memory_mode,
             cache_directory=cache_directory,
@@ -823,7 +827,7 @@ def test_tw_hydra_in_place_weights_match_memory_and_are_cleaned(
         2,
         specmode,
         weighting,
-        weight_memory_mode="in_place",
+        weight_memory_mode=None,
     )
 
     for variable in ("SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"):

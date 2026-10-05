@@ -2623,7 +2623,7 @@ def image_continuum_single_field(
     n_chunks: int | None = None,
     overwrite: bool = False,
     memory_mode: str = "in_memory",
-    weight_memory_mode: str = "in_memory",
+    weight_memory_mode: str = "in_place",
     visibility_memory_mode: str = "recompute",
     widebandpb_memory_mode: str = "in_memory",
     cache_directory: str | None = None,
@@ -2765,7 +2765,8 @@ def image_continuum_single_field(
         are the inner chunks. Unspecified dimensions use the task extent.
         Chunk and shard sizes are validated by the shared image writer.
     weight_memory_mode : {"in_memory", "in_place"}, optional
-        Storage policy for calculated continuum imaging weights. ``"in_memory"``
+        Storage policy for calculated continuum imaging weights (default: ``"in_place"``).
+        ``"in_memory"``
         returns task-local weights to the driver and embeds them in subsequent
         graphs. ``"in_place"`` writes each task's weights into the input
         Processing Set and reloads only the required partition during each major

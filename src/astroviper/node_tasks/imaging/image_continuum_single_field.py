@@ -950,7 +950,7 @@ def residual_update_continuum_single_field(
     fft_backend="pyfftw",
     image_data_variables_keep=None,
     memory_mode="in_memory",
-    weight_memory_mode="in_memory",
+    weight_memory_mode="in_place",
     visibility_memory_mode="recompute",
     widebandpb_memory_mode="in_memory",
     skunk_works=False,
@@ -1052,7 +1052,8 @@ def residual_update_continuum_single_field(
         Currently only ``"in_memory"`` is supported.
 
     weight_memory_mode : {"in_memory", "in_place"}, optional
-        Storage policy for calculated continuum imaging weights. ``"in_memory"``
+        Storage policy for calculated continuum imaging weights (default: ``"in_place"``).
+        ``"in_memory"``
         returns task-local weights to the driver and embeds them in subsequent
         graphs. ``"in_place"`` writes each task's weights into the input
         Processing Set and reloads only the required partition during each major
@@ -1779,7 +1780,7 @@ def degrid_imaging_weights_continuum_node(
     processing_set_data_group_name="corrected",
     instrument_polarization_basis="linear",
     processing_function_threads=1,
-    weight_memory_mode="in_memory",
+    weight_memory_mode="in_place",
     skunk_works=False,
     data_group=None,
     input_data=None,
@@ -1798,7 +1799,8 @@ def degrid_imaging_weights_continuum_node(
     Parameters
     ----------
     weight_memory_mode : {"in_memory", "in_place"}, optional
-        Storage policy for calculated continuum imaging weights. ``"in_memory"``
+        Storage policy for calculated continuum imaging weights (default: ``"in_place"``).
+        ``"in_memory"``
         returns task-local weights to the driver and embeds them in subsequent
         graphs. ``"in_place"`` writes each task's weights into the input
         Processing Set and reloads only the required partition during each major
