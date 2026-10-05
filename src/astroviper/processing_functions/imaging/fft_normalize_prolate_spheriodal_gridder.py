@@ -152,14 +152,16 @@ def ifft_norm_img_xds(
         FFT library to use.  Default is ``"scipy"``.  Use ``"pyfftw"`` for
         potentially faster transforms when pyfftw is installed; plan caching
         is especially beneficial when the same grid shape is transformed
-        repeatedly across major cycles.
+        repeatedly across imaging cycles.
 
     Returns
     -------
     None
         ``img_xds`` is modified in place.  Sky / PSF / primary-beam arrays are
         added as new data variables with dimensions
-        ``(time, frequency, polarization, l, m)``.
+        ``(time, frequency, polarization, l, m)``.  They are real, except the
+        sky in a four-correlation basis (``XX, XY, YX, YY`` or
+        ``RR, RL, LR, LL``), which is complex until it is transformed to Stokes.
 
     Notes
     -----
@@ -199,6 +201,15 @@ def ifft_norm_img_xds(
         n_lm_padded=[img_xds.sizes["u"], img_xds.sizes["v"]]
     )
 
+    # The sky in a four-correlation basis is kept complex: a cross hand is not
+    # conjugate symmetric on its own, and its real and imaginary parts carry two
+    # Stokes parameters that transform_polarization_basis separates.
+    from astroviper.processing_functions.imaging.utils.imaging_polarization import (
+        is_four_correlation_basis,
+    )
+
+    complex_sky = is_four_correlation_basis(img_xds.polarization.values)
+
     # for data_variable in ["aperture", "uv_sampling", "visibility"]:
     for data_variable in image_data_group_out_modified:
         data_variable_out = fft_pair[
@@ -232,12 +243,14 @@ def ifft_norm_img_xds(
         float_out_dtype = (
             np.float32 if np.dtype(complex_dtype) == np.complex64 else np.float64
         )
+        keep_complex = complex_sky and data_variable == "sky"
+        out_dtype = np.dtype(complex_dtype) if keep_complex else float_out_dtype
         out_name = data_group_out[ifft_pair[data_variable_out]]
-        if out_name not in img_xds:
+        if out_name not in img_xds or img_xds[out_name].dtype != out_dtype:
             img_xds[out_name] = xr.DataArray(
                 np.empty(
                     (n_time, n_freq, n_pol, image_size[0], image_size[1]),
-                    dtype=float_out_dtype,
+                    dtype=out_dtype,
                 ),
                 dims=("time", "frequency", "polarization", "l", "m"),
             )
@@ -265,7 +278,9 @@ def ifft_norm_img_xds(
                     plane /= kernel_image_1D_m[None, :]
                     plane *= flux_scale / normalization[t, f, p]
 
-                    out_arr[t, f, p] = remove_padding(plane.real, image_size)
+                    out_arr[t, f, p] = remove_padding(
+                        plane if keep_complex else plane.real, image_size
+                    )
 
         if data_variable_out not in image_data_variables_keep:
             # Release the large grid from the dataset so it can be freed as soon

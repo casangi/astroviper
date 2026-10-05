@@ -455,7 +455,8 @@ def load_processing_set_skunk_works(
         Path to the processing-set Zarr store.
     sel_parms : dict
         ``{ms_name: {dim: slice}}`` selection for this task (from the graph).
-        The ``frequency`` slice gives the channel range to read.
+        The ``frequency`` slice gives the channel range to read and an optional
+        ``polarization`` list the index positions of the correlations to keep.
     data_group : dict
         Resolved role->variable mapping for ``processing_set_data_group_name``
         (e.g. ``{"correlated_data": "VISIBILITY", "uvw": "UVW", ...}``), passed
@@ -514,6 +515,14 @@ def load_processing_set_skunk_works(
         uvw, uvw_dims = results["uvw"]
         weight, w_dims = results["weight"]
         flag, f_dims = results["flag"]
+
+        # Keep only the correlations the imager grids (the chunk blobs hold
+        # every correlation, so the selection happens after the decode).
+        pol_sel = ms_sel.get("polarization") if isinstance(ms_sel, dict) else None
+        if pol_sel is not None:
+            vis = np.take(vis, pol_sel, axis=vis_dims.index("polarization"))
+            weight = np.take(weight, pol_sel, axis=w_dims.index("polarization"))
+            flag = np.take(flag, pol_sel, axis=f_dims.index("polarization"))
 
         npol = vis.shape[vis_dims.index("polarization")]
         pol_labels = _POL_LABELS[instrument_polarization_basis].get(
@@ -630,7 +639,7 @@ def _encode_one_variable(dv, image_store, task_coords, img_xds):
 
     The task's write region -- the ``task_coords`` slice on each parallel dim,
     the full axis elsewhere -- may cover **several** chunks when the store was
-    created with ``node_task_image_chunking`` (e.g. l/m sub-chunking, or a
+    created with ``image_chunking`` (e.g. l/m sub-chunking, or a
     frequency chunk finer than the per-task chunk); without it the region is
     exactly one chunk, as before.  Each covered chunk is encoded with the
     variable's on-disk codecs and returned as ``(path, blob)`` for
@@ -721,7 +730,7 @@ def write_result_chunk_to_disk_using_zarr_skunk_works(
 
     # Phase 1: encode/compress (optionally concurrent across variables). Each
     # variable yields one blob per on-disk chunk its region covers (several
-    # when node_task_image_chunking subdivides the chunk grid).
+    # when image_chunking subdivides the chunk grid).
     if processing_function_threads <= 1 or len(variables) <= 1:
         encoded_per_variable = [
             _encode_one_variable(dv, image_store, task_coords, img_xds)
@@ -896,7 +905,7 @@ def _encode_one_variable_sharded(dv, image_store, task_coords, img_xds):
     goes in its (pre-created) shard file.
 
     The task's write region may cover **several** inner chunks when the store
-    was created with ``node_task_image_chunking`` (e.g. l/m sub-chunking, or a
+    was created with ``image_chunking`` (e.g. l/m sub-chunking, or a
     frequency inner chunk finer than the per-task chunk); without it the region
     is exactly one inner chunk, as before.  The region must be aligned to the
     inner-chunk grid (guarded in :func:`_task_chunk_grid`).  Returns a list of
@@ -963,7 +972,7 @@ def write_result_chunk_to_disk_sharded_skunk_works(
 
     # Phase 1: encode/compress each variable's inner chunk(s) (optionally
     # concurrent across variables; several inner chunks per variable when
-    # node_task_image_chunking subdivides the inner-chunk grid).
+    # image_chunking subdivides the inner-chunk grid).
     if processing_function_threads <= 1 or len(variables) <= 1:
         encoded_per_variable = [
             _encode_one_variable_sharded(dv, image_store, task_coords, img_xds)

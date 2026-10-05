@@ -69,7 +69,7 @@ def image_cube_single_field(
     thread_info: dict = None,
     processing_function_threads: int = 1,
     n_mapping_parallelism: dict[str, int | None] | None = None,
-    node_task_image_chunking: dict[str, int] | None = None,
+    image_chunking: dict[str, int] | None = None,
     overwrite: bool = False,
     memory_mode: str = "in_memory",
     cache_directory: str = None,
@@ -79,16 +79,18 @@ def image_cube_single_field(
     vizualize_graph: bool = False,
     fft_backend="pyfftw",
     restore: bool = False,
+    primary_beam_correction: bool = False,
+    psf_fitting_method: str = "astroviper",
     skunk_works: bool = False,
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
     reduce_mode: str = "tree",
     reduce_n_batch: int = 2,
-    output_shard_channels: int | None = None,
+    image_sharding: dict[str, int] | None = None,
     output_image_format: str = "zarr",
     task_time_kill_switch_seconds: float | None = None,
     monitor_resources_seconds: float | None = None,
-):  # -> Tuple[xr.Dataset, ReturnDict]:
+):  # -> Tuple[xr.Dataset, ImagingDict]:
     """
     Create a spectral cube.
 
@@ -101,68 +103,104 @@ def image_cube_single_field(
     image_params : dict
         Image geometry and output coordinates: ``image_size``, ``cell_size``,
         ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
-        ``fft_padding`` gridding/FFT padding factor.
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
     imaging_weights_params : dict
         Weighting scheme configuration: ``weighting`` (``"natural"`` or
         ``"briggs"``) and the Briggs ``robust`` parameter.
     iteration_control_params : dict
-        CLEAN minor/major-cycle iteration controls, matching the meaning of the
-        corresponding CASA ``tclean`` parameters. Iteration control is performed
-        **independently per** ``(time, frequency, polarization)`` **plane**: each
-        plane carries its own iteration budget and stopping thresholds, and the
-        major-cycle loop continues until *every* selected plane has stopped --
-        the one deliberate difference from CASA, whose ``niter`` budget is global
-        across the image. Keys:
+        CLEAN iteration controls. An **imaging cycle** (below simply a cycle)
+        is one **residual update** (degrid the model, form residual
+        visibilities, grid and inverse FFT them into the residual image)
+        followed by one **model update** (deconvolve the residual image into
+        the sky model). Every limit and threshold is applied independently to
+        each ``(time, frequency, polarization)`` plane: a plane stops when it
+        meets its own criterion. The imaging cycle loop runs separately for
+        every frequency channel (the node task images one channel at a time),
+        so a channel's cycles continue until all of its (time, polarization)
+        planes have stopped, and a channel that has stopped does no further
+        residual updates while the others carry on. The CASA ``tclean``
+        equivalent is given in brackets. Keys:
 
-        - ``niter`` : Maximum number of minor-cycle CLEAN iterations (flux
-          components) per plane, summed over all major cycles. A plane stops once
-          it has spent this budget; ``niter=0`` makes only the dirty image (no
-          deconvolution).
-        - ``nmajor`` : Maximum number of deconvolving major cycles (each a
-          residual update followed by a minor cycle). ``nmajor=N`` performs ``N``
-          deconvolutions -- the dirty image is computed inside the first such
-          cycle, matching CASA's ``nmajor`` -- and ``nmajor=-1`` removes the
-          major-cycle limit. Shared across planes (not tracked per plane).
-        - ``threshold`` : Absolute stopping threshold, given as a float in Jy. A
-          plane stops when its peak residual inside the clean mask falls to or
-          below ``threshold``; the value is also a hard floor on the
-          per-minor-cycle ``cyclethreshold`` (below). ``threshold=0`` disables
-          the absolute stop.
-        - ``primary_beam_limit`` : Primary-beam mask cutoff as a fraction of the
-          peak primary beam, in ``[0, 1]`` (the analogue of CASA's ``pblimit`` /
-          ``pbmask``). Pixels where the primary beam is below this fraction are
-          excluded from cleaning. A masking cutoff, distinct from ``threshold``.
-        - ``gain`` : CLEAN loop gain -- the fraction of the selected peak flux
-          subtracted from the residual image each minor iteration
-          (``0 < gain <= 1``).
-        - ``cyclefactor`` : Scaling applied to the brightest PSF sidelobe level
-          when setting the minor-cycle stopping depth (see ``cyclethreshold``
-          below). Larger values trigger the next major cycle sooner; smaller
-          values clean deeper before each residual update.
-        - ``cycleniter`` : Maximum number of minor-cycle iterations a plane may
-          run before a major cycle is triggered. ``cycleniter=-1`` lets the
-          adaptive ``cyclethreshold`` govern the depth instead; otherwise the
-          count is clamped to never exceed the plane's remaining ``niter``.
-        - ``minpsffraction`` : Lower clamp on the PSF fraction used to set the
-          minor-cycle threshold ``cyclethreshold = clamp(max_psf_sidelobe *
-          cyclefactor, minpsffraction, maxpsffraction) * peak_residual`` (then
-          floored at ``threshold``). Raising it limits how deep a single minor
-          cycle cleans.
-        - ``maxpsffraction`` : Upper clamp on that same PSF fraction; it
-          guarantees a minimum amount of cleaning per minor cycle even when the
-          PSF sidelobe level is high.
+        - ``max_iter`` [CASA ``niter``] : Maximum number of deconvolution
+          iterations (flux components) per plane, summed over all cycles. A
+          plane stops once it has spent this budget. ``max_iter = 0`` makes
+          only the dirty image (no deconvolution). *Differs from CASA*: CASA's
+          ``niter`` is one budget for the whole image; here every plane gets
+          the full value, and no budget is shared or split between planes.
+        - ``max_cycles`` [CASA ``nmajor``] : Maximum number of cycles.
+          ``max_cycles = N`` performs ``N`` model updates; the dirty image is
+          made by the residual update of the first cycle, and a closing
+          residual update follows the last model update so that the written
+          residual reflects the final model. ``max_cycles = 0`` makes only the
+          dirty image; ``max_cycles = -1`` removes the limit. Counted per
+          frequency channel: a channel that converges early stops cycling while
+          the others continue.
+        - ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, as a
+          float in Jy. A plane stops when its peak residual inside the clean
+          mask falls to or below ``threshold``; the value is also a hard floor
+          on ``threshold_per_cycle``. ``threshold = 0`` disables the absolute
+          stop. *Differs from CASA*: a float in Jy only, no ``'1mJy'`` strings.
+        - ``threshold_sigma`` [CASA ``nsigma``] : Noise based stopping threshold
+          per plane, as a multiple of the plane's robust residual rms
+          (``1.4826 * MAD``). The effective threshold of a plane is
+          ``max(threshold, threshold_sigma * rms)`` and it floors
+          ``threshold_per_cycle`` in the same way. ``0`` disables it. Reserved:
+          accepted but not yet implemented.
+        - ``primary_beam_limit`` [CASA ``pblimit`` / ``pbmask``] : Primary beam
+          mask cutoff as a fraction of the peak primary beam, in ``[0, 1]``.
+          Pixels where the primary beam is below this fraction are excluded
+          from cleaning. A masking cutoff, distinct from ``threshold``.
+        - ``gain`` [CASA ``gain``] : CLEAN loop gain, the fraction of the
+          selected peak flux subtracted from the residual image at each
+          deconvolution iteration (``0 < gain <= 1``).
+        - ``psf_sidelobe_factor`` [CASA ``cyclefactor``] : Multiplier applied to
+          the measured peak PSF sidelobe level (``max_psf_sidelobe``) when
+          setting how deep one model update cleans (see
+          ``threshold_per_cycle``). Larger values trigger the next residual
+          update sooner; smaller values clean deeper before each residual
+          update.
+        - ``max_iter_per_cycle`` [CASA ``cycleniter``] : Maximum number of
+          deconvolution iterations a plane may run in one cycle's model update
+          before the next residual update is triggered. ``max_iter_per_cycle =
+          -1`` lets the adaptive ``threshold_per_cycle`` govern the depth
+          instead; otherwise the count is clamped to never exceed the plane's
+          remaining ``max_iter``.
+        - ``min_psf_fraction`` [CASA ``minpsffraction``] : Lower clamp on the PSF
+          fraction defined below. Raising it limits how deep a single model
+          update cleans.
+        - ``max_psf_fraction`` [CASA ``maxpsffraction``] : Upper clamp on the
+          same PSF fraction; it guarantees a minimum amount of cleaning per
+          model update even when the PSF sidelobe level is high.
+
+        Derived per plane before each model update (not set by the caller):
+        ``psf_fraction = clamp(max_psf_sidelobe * psf_sidelobe_factor,
+        min_psf_fraction, max_psf_fraction)`` is the fraction of the current
+        peak residual down to which one model update cleans, and
+        ``threshold_per_cycle = max(psf_fraction * peak_residual, threshold)``
+        is the stopping threshold of that model update, where
+        ``peak_residual`` is the plane's peak residual inside the mask at the
+        start of the cycle. The deconvolver also receives the per-plane
+        ``max_iter_per_cycle``, ``min(max_iter_per_cycle, remaining max_iter)``.
     gridder : str
         The gridder to use. Default ``"prolate_spheroidal"`` (a prolate
         spheroidal gridding convolution kernel with support 7x7 and oversampling
         of 100).
     deconvolver : str
-        Deconvolution algorithm for the minor cycle. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
+        Deconvolution algorithm for the model update. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
         (C++, threaded across *and* within planes -- faster when there are
         few planes, e.g. single-channel imaging) or ``"asp"``.
     instrument_polarization_basis : str
         Correlation (instrument) polarization basis the gridding is performed in:
-        ``"linear"`` (``XX``/``YY``) or ``"circular"`` (``RR``/``LL``). The
-        output image is always produced in the Stokes basis.
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
     scan_intents : list[str]
         The scan intents to image.
     field_name : str
@@ -173,8 +211,8 @@ def image_cube_single_field(
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     single_precision_image : bool
         If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
-        images) are single precision (``complex64`` / ``float32``) and the minor
-        cycle runs in single precision; the visibilities always stay double
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
         precision. If ``False`` the image-domain arrays are double precision.
     thread_info : dict, optional
         Thread information as returned by
@@ -188,19 +226,21 @@ def image_cube_single_field(
         ``{"frequency": 500}``). An entry value of ``None``, or omitting the
         parameter entirely (default), auto-determines the chunk count from the
         image size, memory constraints, and available parallelism.
-    node_task_image_chunking : dict, optional
-        Additional on-disk (Zarr) chunking applied *within* each node task's
-        image chunk when it is written, as ``{dimension_name: chunk_size}``
-        with keys that appear in the image coordinates (e.g. ``{"l": 1024,
-        "m": 1024}`` to chunk the sky plane, or ``{"frequency": 1}`` to
-        subdivide a multi-channel task chunk). Without it each written chunk
-        spans the full extent of every non-parallelized dimension. A chunk
-        size given for ``frequency`` must divide the per-task chunk size so no
-        on-disk chunk straddles two node tasks. With ``output_shard_channels``
-        the values set the *inner* chunk shape of the sharded arrays, so
-        chunking within a shard (e.g. on ``l``/``m``) is possible. Not
+    image_chunking : dict, optional
+        On-disk (Zarr) chunk shape of the written image, as ``{dimension_name:
+        chunk_size}`` with keys that appear in the image coordinates (e.g.
+        ``{"l": 1024, "m": 1024}`` to chunk the sky plane, or ``{"frequency":
+        1}`` to write and free every finished channel of a multi-channel node
+        task as soon as it is imaged). A dimension not listed keeps its
+        default: the node task's chunk on ``frequency`` and the full extent of
+        every other dimension. A chunk size may not exceed the node task's
+        extent on that dimension, and on ``frequency`` must divide the per-task
+        chunk so no on-disk chunk straddles two node tasks. The node task
+        writes each on-disk frequency chunk as soon as its channels are
+        imaged, holding at most one chunk in memory. With ``image_sharding``
+        the values are the *inner* chunk shape of the sharded arrays. Not
         applicable to ``output_image_format="fits"``. ``None`` (default)
-        applies no additional chunking to the image chunk being written.
+        writes one chunk per node task and variable.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
@@ -230,6 +270,16 @@ def image_cube_single_field(
         If ``True`` produce a restored image after deconvolution: the model
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
+    primary_beam_correction : bool, optional
+        If ``True`` divide the restored sky by the (power) primary beam,
+        writing the ``sky_restored_primary_beam_corrected``
+        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable (CASA ``pbcor``);
+        pixels below the primary-beam cutoff are blanked with NaN.  Requires
+        ``restore``.
+    psf_fitting_method : str, optional
+        Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
+        ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``
+        (the fit behind ``tclean``'s restoring beam).
     skunk_works : bool
         If ``True`` use the experimental performance I/O path in each node task:
         load only the data group's data variables straight from the Zarr chunk
@@ -260,18 +310,23 @@ def image_cube_single_field(
     reduce_n_batch : int
         Fan-in per reduce node when ``reduce_mode="tree_n"`` (must be ``>= 2``).
         Ignored for the other modes.
-    output_shard_channels : int, optional
+    image_sharding : dict, optional
         If set (requires ``skunk_works=True``), write the output image as Zarr v3
-        **sharded** arrays with this many frequency channels packed into each shard
-        file, instead of one file per channel. Many single-channel tasks then write
-        into shared, pre-created shard files at disjoint offsets (the TACC "single
-        parallel file" pattern), cutting the output file count by up to
-        ``output_shard_channels``x and greatly relieving the parallel-filesystem
-        metadata server. ``None`` (default) keeps one file per channel.
+        **sharded** arrays with shard shape ``{dimension_name: shard_size}``,
+        e.g. ``{"frequency": 200}`` packs 200 channels into each shard file and
+        ``{"frequency": 32, "l": 2048, "m": 2048}`` also tiles the sky plane.
+        A shard must be a multiple of the on-disk chunk on its dimension
+        (``image_chunking``); a shard larger than the axis is clipped to it,
+        and a dimension not listed gets one shard per node task chunk on
+        ``frequency`` and the full axis elsewhere. Shards may span several node
+        tasks: they write into shared, pre-created shard files at disjoint
+        offsets (the TACC "single parallel file" pattern), cutting the output
+        file count and greatly relieving the parallel-filesystem metadata
+        server. ``None`` (default) keeps one file per written chunk.
     output_image_format : str
         On-disk format of the output image: ``"zarr"`` (default) or ``"fits"``
         (requires ``skunk_works=True``; incompatible with
-        ``output_shard_channels``). With ``"fits"`` the driver pre-creates one
+        ``image_sharding``). With ``"fits"`` the driver pre-creates one
         XRADIO-conformant FITS file per kept image variable
         (``<image_store>/<VARIABLE>.fits``, readable with
         :func:`xradio.image.open_image`) with a sparse full-cube data area, and
@@ -305,7 +360,7 @@ def image_cube_single_field(
           frequency chunk and a ``T_*`` column per processing function (the
           per-node-task timings concatenated across chunks).
         * ``"deconvolution"`` is the merged per-plane
-          :class:`~astroviper.processing_functions.imaging.utils.return_dict.ReturnDict`
+          :class:`~astroviper.processing_functions.imaging.utils.imaging_dict.ImagingDict`
           of convergence statistics (global channel numbering).
         * ``"image_statistics"`` is ``{image_variable_key: xarray.Dataset}``
           (``"sky_residual"``, ``"sky_restored"``, ``"sky_model"``, ... --
@@ -316,13 +371,21 @@ def image_cube_single_field(
           ``max``, ``min``, ``peak``, ``sum``, ``rms``, ``std``, ``mad_sigma``,
           ``n_pixels`` and their ``_masked`` twins over the valid area --
           the clean mask, or ``PRIMARY_BEAM > primary_beam_limit`` when no
-          mask exists, e.g. ``niter=0``); see
+          mask exists, e.g. ``max_iter=0``); see
           :func:`~astroviper.processing_functions.image_analysis.plane_statistics.calculate_plane_statistics`.
           Computed in every node task right before its chunk is written.
         * ``"timing_distributed_application"`` is a dict of the driver-level
           step timings (``T_*`` seconds: building/writing the empty image,
           building the graph, computing it, consolidating metadata) plus the
           grand total ``T_total``.
+
+    Notes
+    -----
+    The Zarr image store is created with :func:`xradio.image.write_image`.
+    XRADIO versions that give image Zarr stores the ``.img.zarr`` extension
+    give it to an ``image_store`` without it (``cube.zarr`` gives
+    ``cube.img.zarr``), and the image is written to that store; an
+    ``image_store`` that ends in ``.img.zarr`` is kept by every version.
     """
 
     import time
@@ -336,13 +399,18 @@ def image_cube_single_field(
         reduce,
     )
     from graphviper.graph_tools.coordinate_utils import make_parallel_coord
-    from xradio.image import write_image
     from xradio.measurement_set import open_processing_set
 
+    from astroviper.processing_functions.imaging.utils.imaging_polarization import (
+        correlation_selection,
+        correlations_for_stokes,
+    )
     from astroviper.utils.data_group_tools import modify_data_groups_xds
     from astroviper.utils.io import (
         create_empty_data_variables_on_disk,
         image_data_groups_for_kept_variables,
+        validate_image_chunking_and_sharding,
+        write_zarr_image_store,
     )
 
     if compressor is None:
@@ -356,9 +424,9 @@ def image_cube_single_field(
     # the standard write path cannot safely write partial shards concurrently, so
     # creating sharded arrays without it would corrupt the output. Fail fast rather
     # than silently create sharded arrays a non-concurrent writer will clobber.
-    if output_shard_channels is not None and not skunk_works:
+    if image_sharding and not skunk_works:
         raise ValueError(
-            "output_shard_channels requires skunk_works=True (sharded output is "
+            "image_sharding requires skunk_works=True (sharded output is "
             "written by the concurrent direct-blob writer)."
         )
 
@@ -371,14 +439,14 @@ def image_cube_single_field(
                 "output_image_format='fits' requires skunk_works=True (FITS "
                 "output is written by the concurrent direct-pwrite writer)."
             )
-        if output_shard_channels is not None:
+        if image_sharding:
             raise ValueError(
-                "output_shard_channels does not apply to FITS output "
+                "image_sharding does not apply to FITS output "
                 "(output_image_format='fits')."
             )
-        if node_task_image_chunking is not None:
+        if image_chunking:
             raise ValueError(
-                "node_task_image_chunking does not apply to FITS output "
+                "image_chunking does not apply to FITS output "
                 "(output_image_format='fits'): FITS files have no chunked "
                 "storage layout."
             )
@@ -390,12 +458,26 @@ def image_cube_single_field(
     # ensure it is in the keep list (without mutating the caller's list).
     if restore and "sky_restored" not in image_data_variables_keep:
         image_data_variables_keep = list(image_data_variables_keep) + ["sky_restored"]
+    if primary_beam_correction:
+        if not restore:
+            raise ValueError("primary_beam_correction requires restore=True.")
+        if "sky_restored_primary_beam_corrected" not in image_data_variables_keep:
+            image_data_variables_keep = list(image_data_variables_keep) + [
+                "sky_restored_primary_beam_corrected"
+            ]
 
     # Every driver step is timed into ``timing_distributed_application``; the
     # individual per-step timing log messages are replaced by the formatted
     # summary logged just before returning.
     timing_distributed_application = {}
     application_start = time.time()
+
+    # The residual update grids in the instrument basis and the model update
+    # deconvolves in Stokes, so the requested Stokes planes fix the correlations
+    # that are loaded and gridded. Checked here, before anything is created.
+    correlation_coords = correlations_for_stokes(
+        image_params["polarization_coords"], instrument_polarization_basis
+    )
 
     # Create an empty image on disk with the correct coordinates and dimensions.
     start = time.time()
@@ -428,9 +510,10 @@ def image_cube_single_field(
 
     start = time.time()
     if output_image_format == "zarr":
-        write_image(
-            img_xds, imagename=image_store, out_format="zarr", overwrite=overwrite
-        )
+        # The store written can differ from the image_store given (the
+        # ".img.zarr" extension of newer XRADIO versions); everything below
+        # uses the store written.
+        image_store = write_zarr_image_store(img_xds, image_store, overwrite=overwrite)
     # For FITS output the empty files (headers + sparse data areas) are created
     # after the processing set is opened, so the TELESCOP keyword can be read
     # from it.
@@ -462,10 +545,9 @@ def image_cube_single_field(
         + str(len(parallel_coords["frequency"]["data_chunks"]))
     )
 
-    if node_task_image_chunking is not None:
-        _validate_node_task_image_chunking(
-            node_task_image_chunking, img_xds, parallel_coords
-        )
+    validate_image_chunking_and_sharding(
+        image_chunking, image_sharding, dict(img_xds.sizes), parallel_coords
+    )
     timing_distributed_application["T_determine_chunks_and_parallel_coords"] = (
         time.time() - start
     )
@@ -482,8 +564,8 @@ def image_cube_single_field(
             compressor=compressor,
             double_precision=not single_precision_image,
             data_variable_definitions="imaging",
-            shard_channels=output_shard_channels,
-            node_task_image_chunking=node_task_image_chunking,
+            image_chunking=image_chunking,
+            image_sharding=image_sharding,
         )
     timing_distributed_application["T_create_empty_data_variables"] = (
         time.time() - start
@@ -516,8 +598,11 @@ def image_cube_single_field(
     input_params["single_precision_image"] = single_precision_image
     input_params["fft_backend"] = fft_backend
     input_params["restore"] = restore
+    input_params["primary_beam_correction"] = primary_beam_correction
+    input_params["psf_fitting_method"] = psf_fitting_method
     input_params["skunk_works"] = skunk_works
-    input_params["output_shard_channels"] = output_shard_channels
+    input_params["image_chunking"] = image_chunking
+    input_params["image_sharding"] = image_sharding
     input_params["output_image_format"] = output_image_format
     input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
 
@@ -571,6 +656,20 @@ def image_cube_single_field(
     )
     timing_distributed_application["T_interpolate_data_coords"] = time.time() - start
 
+    # Load only the correlations that are needed: their index positions are
+    # added to the selection of every measurement set that holds more (or
+    # differently ordered) correlations. A set that holds exactly the needed
+    # ones keeps its selection unchanged.
+    for ms_name, ms_xdt in ps_xdt.items():
+        selection = correlation_selection(
+            ms_xdt.polarization.values, correlation_coords, ms_name
+        )
+        if selection is None:
+            continue
+        for task in node_task_data_mapping.values():
+            if task["data_selection"].get(ms_name) is not None:
+                task["data_selection"][ms_name]["polarization"] = selection
+
     # frequency_coords is not used by node tasks (they use task_coords["frequency"]["data"])
     # so remove it to avoid embedding the full frequency axis in every task in the graph.
     input_params["image_params"] = {
@@ -583,7 +682,7 @@ def image_cube_single_field(
     # few shards that consecutive task_ids share. Derived from the on-disk shard
     # layout of the first kept variable, for any combination of sharded dims.
     task_priorities = None
-    if skunk_works and output_shard_channels:
+    if skunk_works and image_sharding:
         from astroviper.node_tasks.imaging.utils import compute_shard_task_priorities
 
         task_priorities = compute_shard_task_priorities(
@@ -631,34 +730,34 @@ def image_cube_single_field(
         layout_lines.append(
             "  output format: FITS (one file per kept image variable); each "
             "node task pwrites its channel block directly. Zarr sharding and "
-            "chunking parameters (output_shard_channels, "
-            "node_task_image_chunking) do not apply to FITS."
+            "chunking parameters (image_sharding, image_chunking) do not apply "
+            "to FITS."
         )
     else:
-        if output_shard_channels:
+        if image_sharding:
             layout_lines.append(
-                f"  sharding (output_shard_channels): Zarr v3 sharded arrays "
-                f"with {output_shard_channels} frequency channels packed per "
-                "shard file; node tasks write their chunk(s) into shared, "
-                "pre-created shard files at disjoint offsets."
+                f"  sharding (image_sharding): Zarr v3 sharded arrays with shard "
+                f"shape {image_sharding} (unlisted dimensions: one shard per "
+                "node task chunk on frequency, the full axis elsewhere); node "
+                "tasks write their chunk(s) into shared, pre-created shard "
+                "files at disjoint offsets."
             )
         else:
             layout_lines.append(
-                "  sharding (output_shard_channels): none; one file per "
-                "written Zarr chunk."
+                "  sharding (image_sharding): none; one file per written Zarr chunk."
             )
-        if node_task_image_chunking:
+        if image_chunking:
             layout_lines.append(
-                f"  chunking (node_task_image_chunking): "
-                f"{node_task_image_chunking}; each node task's image chunk is "
-                "split into multiple on-disk chunks along the listed "
-                "dimensions (unlisted dimensions stay unchunked)."
+                f"  chunking (image_chunking): {image_chunking}; each node task "
+                "writes every finished on-disk frequency chunk as soon as its "
+                "channels are imaged, split along the listed dimensions "
+                "(unlisted dimensions stay unchunked)."
             )
         else:
             layout_lines.append(
-                "  chunking (node_task_image_chunking): none; each node task "
-                "writes its whole image chunk as one on-disk chunk per "
-                "variable (full l/m extent)."
+                "  chunking (image_chunking): none; each node task writes its "
+                "whole image chunk as one on-disk chunk per variable (full l/m "
+                "extent)."
             )
     logger.info("\n".join(layout_lines))
 
@@ -676,7 +775,7 @@ def image_cube_single_field(
             )
         timing_distributed_application["T_generate_dask_graph"] = 0.0
         start = time.time()
-        return_dict = processes_with_mpi(viper_graph, mpi_cluster_setup)
+        imaging_dict = processes_with_mpi(viper_graph, mpi_cluster_setup)
         end = time.time()
         timing_distributed_application["T_compute_dask_graph"] = end - start
         # ABSOLUTE anchors of the compute call, saved with the overall row so
@@ -695,7 +794,7 @@ def image_cube_single_field(
             dask.visualize(dask_graph, filename="cube_imaging.png")
 
         start = time.time()
-        return_dict = dask.compute(dask_graph)[0]
+        imaging_dict = dask.compute(dask_graph)[0]
         end = time.time()
         timing_distributed_application["T_compute_dask_graph"] = end - start
         # Same absolute compute-call anchors as the MPI branch (see above).
@@ -716,7 +815,7 @@ def image_cube_single_field(
     # The reduce already produced ``{"timing_node_tasks", "deconvolution"}``; add
     # the driver-level timing so the full return dict carries timing for both the
     # distributed application (this driver) and the per-chunk node tasks.
-    return_dict["timing_distributed_application"] = timing_distributed_application
+    imaging_dict["timing_distributed_application"] = timing_distributed_application
 
     from astroviper.processing_functions.imaging.utils import (
         IMAGING_TIMING_PHASES,
@@ -737,7 +836,7 @@ def image_cube_single_field(
 
     # Per-node-task timing summarized across all frequency chunks: the mean of
     # each timing column over all chunks, then the max (the slowest chunk).
-    timing_node_tasks = return_dict["timing_node_tasks"]
+    timing_node_tasks = imaging_dict["timing_node_tasks"]
     logger.info(
         format_timing_summary(
             timing_node_tasks.mean(numeric_only=True).to_dict(),
@@ -755,7 +854,7 @@ def image_cube_single_field(
         )
     )
 
-    return return_dict
+    return imaging_dict
 
 
 def combine_return_data_frames(input_data, input_params):
@@ -763,12 +862,12 @@ def combine_return_data_frames(input_data, input_params):
 
     Each node task returns a single dict with a ``"timing_node_tasks"`` one-row
     :class:`pandas.DataFrame`, a ``"deconvolution"``
-    :class:`~astroviper.processing_functions.imaging.utils.return_dict.ReturnDict`
+    :class:`~astroviper.processing_functions.imaging.utils.imaging_dict.ImagingDict`
     (already remapped to global channel numbers) and an ``"image_statistics"``
     ``{image_variable_key: xarray.Dataset}`` of per-plane statistics for its
     channel chunk. This reducer concatenates the timing frames (one row per
     chunk), merges the per-chunk deconvolution dicts with
-    :func:`merge_return_dicts` and concatenates the per-chunk statistics along
+    :func:`merge_imaging_dicts` and concatenates the per-chunk statistics along
     ``frequency`` (:func:`concatenate_plane_statistics`). Because every chunk
     covers a disjoint global channel range, the merges never collide.
 
@@ -788,7 +887,7 @@ def combine_return_data_frames(input_data, input_params):
     Returns
     -------
     dict
-        ``{"timing_node_tasks": pandas.DataFrame, "deconvolution": ReturnDict,
+        ``{"timing_node_tasks": pandas.DataFrame, "deconvolution": ImagingDict,
         "image_statistics": dict, "timing_reduce_nodes": list}``.
     """
     import os
@@ -802,12 +901,12 @@ def combine_return_data_frames(input_data, input_params):
         concatenate_plane_statistics,
     )
     from astroviper.processing_functions.imaging.utils.iteration_control import (
-        merge_return_dicts,
+        merge_imaging_dicts,
     )
 
     t_start = time.time()
     timing_frames = []
-    deconvolve_dicts = []
+    imaging_dicts = []
     statistics_list = []
     # Per-reduce-node timing provenance: child reduce calls carry their records
     # in "timing_reduce_nodes" (leaf node-task results have none); pool them and
@@ -831,7 +930,7 @@ def combine_return_data_frames(input_data, input_params):
                 # (sample_interval_seconds) broadcast.
                 timing[key] = [value] if isinstance(value, list) else value
         timing_frames.append(timing)
-        deconvolve_dicts.append(result["deconvolution"])
+        imaging_dicts.append(result["deconvolution"])
         statistics_list.append(result.get("image_statistics", {}))
         reduce_records.extend(result.get("timing_reduce_nodes", []))
 
@@ -839,7 +938,7 @@ def combine_return_data_frames(input_data, input_params):
     # accumulated rows for every input (O(k^2) row copies per call -- a real
     # cost on rank 0, which reduces 15360 one-row frames single-threaded).
     combined_timing = pd.concat(timing_frames, ignore_index=True)
-    merged_deconvolve = merge_return_dicts(deconvolve_dicts)
+    merged_deconvolve = merge_imaging_dicts(imaging_dicts)
     merged_statistics = concatenate_plane_statistics(statistics_list)
     t_end = time.time()
     # Identity of the execution slot this reduce ran on, so the task-stream
@@ -901,65 +1000,6 @@ def _validate_n_mapping_parallelism(n_mapping_parallelism):
             "n_mapping_parallelism['frequency'] must be a positive int or "
             f"None (auto), got {count!r}."
         )
-
-
-def _validate_node_task_image_chunking(
-    node_task_image_chunking, img_xds, parallel_coords
-):
-    """Validate ``node_task_image_chunking`` against the image and the mapping
-    parallelism.
-
-    Checks that every key is an image dimension (the image-domain dims of
-    ``img_xds`` plus the uv-domain ``u``/``v``), that every value is a positive
-    integer, and that a chunk size given for a parallelized dimension divides
-    every node task's chunk (except the last, which may be partial): the node
-    tasks write whole on-disk chunks, so a chunk straddling two tasks would be
-    written -- and clobbered -- by both.
-
-    Parameters
-    ----------
-    node_task_image_chunking : dict
-        ``{dimension_name: chunk_size}`` requested by the caller.
-    img_xds : xarray.Dataset
-        The (empty) image dataset providing the valid dimension names.
-    parallel_coords : dict
-        Parallel coordinates of the mapping (for cube imaging keyed by
-        ``frequency``), providing the per-task chunk lengths.
-
-    Raises
-    ------
-    ValueError
-        On an unknown dimension key, a non-positive/non-integer chunk size, or
-        a parallel-dimension chunk size that would straddle node tasks.
-    """
-    valid_dims = set(img_xds.sizes) | {"u", "v"}
-    for dim, size in node_task_image_chunking.items():
-        if dim not in valid_dims:
-            raise ValueError(
-                f"node_task_image_chunking key {dim!r} is not an image "
-                f"dimension; expected one of {sorted(valid_dims)}."
-            )
-        if isinstance(size, bool) or not isinstance(size, int) or size < 1:
-            raise ValueError(
-                f"node_task_image_chunking[{dim!r}] must be a positive int, "
-                f"got {size!r}."
-            )
-    for dim, parallel_coord in parallel_coords.items():
-        size = node_task_image_chunking.get(dim)
-        if size is None:
-            continue
-        chunk_lengths = [len(chunk) for chunk in parallel_coord["data_chunks"].values()]
-        # Sizes >= the per-task chunk are clipped to it on creation (no
-        # subdivision), so only the effective (clipped) size must align.
-        effective_size = min(size, chunk_lengths[0])
-        for task_chunk_length in chunk_lengths[:-1]:
-            if task_chunk_length % effective_size:
-                raise ValueError(
-                    f"node_task_image_chunking[{dim!r}]={size} must divide "
-                    f"every node task's {dim} chunk (found a task chunk of "
-                    f"length {task_chunk_length}); otherwise an on-disk chunk "
-                    "would straddle two node tasks and be written by both."
-                )
 
 
 def calculate_mapping_parallelism_for_cube_imaging(

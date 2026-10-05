@@ -1,0 +1,126 @@
+"""Single source of truth for shared simulation-parameter descriptions.
+
+Parameters that appear in more than one layer of the simulation stack (the
+distributed application, the node task and the processing function) are
+described **here**; ``python -m astroviper.utils.param_docs sync`` propagates the
+descriptions into every function decorated with
+:func:`~astroviper.utils.param_docs.shares_param_docs` (see
+``processing_functions/imaging/_param_docs.py`` for the pattern).
+"""
+
+SIMULATION_PARAM_DOCS = {
+    "polarization": (
+        "MSv4 polarization labels to simulate, a subset of one instrumental basis\n"
+        '(``["RR", "RL", "LR", "LL"]`` or ``["XX", "XY", "YX", "YY"]``).'
+    ),
+    "sky_components": (
+        "Sky components of any kind (point, gaussian, disk, gaussian_ring,\n"
+        "m_ring, crescent, annulus, exponential_disk, tapered_power_law,\n"
+        'shapelet): ``{"kind", "flux", "ra_dec", <shape parameters>}`` as\n'
+        "described in :mod:`~astroviper.processing_functions.simulation.sky_components`."
+    ),
+    "point_source_flux": (
+        "Flux of every point source in the four instrumental correlations\n"
+        "(``RR, RL, LR, LL`` or ``XX, XY, YX, YY``); singleton time/frequency axes\n"
+        "broadcast.  Real, or complex with conjugate cross hands (``XY = U + iV``,\n"
+        "``YX = U - iV``; ``RL = Q + iU``, ``LR = Q - iU``)."
+    ),
+    "point_source_ra_dec": (
+        "Right ascension and declination of the point sources (per time or fixed)."
+    ),
+    "gaussian_source_flux": (
+        "Integrated flux of each Gaussian source in the four instrumental\n"
+        "correlations; singleton time/frequency axes broadcast.  ``None``\n"
+        "(default) simulates no Gaussian sources."
+    ),
+    "gaussian_source_ra_dec": (
+        "Right ascension and declination of the Gaussian sources (per time or fixed)."
+    ),
+    "gaussian_source_shape": (
+        "``[major, minor, position angle]`` FWHM shape of each Gaussian source, in\n"
+        "the imaging clean-beam convention\n"
+        "(:func:`astroviper.processing_functions.imaging.restore.elliptical_gaussian_uv_taper`)."
+    ),
+    "disk_source_flux": (
+        "Integrated flux of each limb-darkened disk source in the four\n"
+        "instrumental correlations; singleton time/frequency axes broadcast.\n"
+        "``None`` (default) simulates no disk sources."
+    ),
+    "disk_source_ra_dec": (
+        "Right ascension and declination of the disk sources (per time or fixed)."
+    ),
+    "disk_source_shape": (
+        "``[major, minor, position angle]`` outer diameters and orientation of\n"
+        "each (inclined) disk, in the Gaussian-source / clean-beam position-angle\n"
+        "convention\n"
+        "(:func:`astroviper.processing_functions.simulation.limb_darkened_disk.limb_darkened_disk_uv_response`)."
+    ),
+    "disk_source_limb_darkening": (
+        "Power-law limb-darkening exponent ``alpha`` of each disk\n"
+        "(``I ~ mu**alpha``, Hestroffer 1997): ``0`` uniform disk (the default\n"
+        "when ``None``), ``> 0`` darker towards the limb, ``-2 < alpha < 0`` limb\n"
+        "brightened, ``-2`` an infinitely thin ring."
+    ),
+    "gaussian_ring_source_flux": (
+        "Integrated flux of each Gaussian-broadened ring source (a thin ring\n"
+        "convolved with a circular Gaussian; ``radius = 0`` is a Gaussian, nested\n"
+        "rings model a protoplanetary disk) in the four instrumental\n"
+        "correlations; singleton time/frequency axes broadcast.  ``None``\n"
+        "(default) simulates no ring sources."
+    ),
+    "gaussian_ring_source_ra_dec": (
+        "Right ascension and declination of the ring sources (per time or fixed)."
+    ),
+    "gaussian_ring_source_shape": (
+        "``[radius, fwhm, inclination, position angle]`` of each ring: ring radius\n"
+        "and FWHM of the broadening Gaussian (radians), inclination (radians,\n"
+        "``0`` face-on) and the position angle of the major axis in the\n"
+        "Gaussian-source / clean-beam convention\n"
+        "(:func:`astroviper.processing_functions.simulation.gaussian_ring.gaussian_ring_uv_response`)."
+    ),
+    "ms_v2_path": (
+        "Additionally write the simulated MSv4 as a CASA Measurement Set v2 at\n"
+        "this path via the optional `arcae <https://github.com/ska-sa/arcae>`_\n"
+        "backend (``utils.measurement_set_v2.write_measurement_set_v2``).\n"
+        "Default ``None`` (no MSv2 output)."
+    ),
+    "phase_center_ra_dec": (
+        "Phase centre of the array per time (time-varying for mosaics) or fixed."
+    ),
+    "beam_models": (
+        "Antenna beam models: analytic dicts, aperture (Zernike) coefficient\n"
+        "datasets, beam polynomial datasets or Jones image datasets\n"
+        "(see ``astroviper.utils.beam_models``)."
+    ),
+    "beam_model_map": "Index into ``beam_models`` for each antenna.",
+    "beam_params": (
+        "Beam evaluation parameters: ``mueller_selection`` (row-major indices of the\n"
+        "4x4 Mueller elements to apply, default ``[0, 5, 10, 15]``), ``pa_radius``\n"
+        "(rad; parallactic-angle spacing of the Zernike beam images, default 0.2),\n"
+        "``image_size`` (Zernike beam image size, default ``[1000, 1000]``),\n"
+        "``fov_scaling`` (beam image extent in units of the beam cut radius,\n"
+        'default 4) and ``zernike_freq_interp`` (default ``"nearest"``).'
+    ),
+    "pointing_ra_dec": (
+        "Antenna pointing directions; ``None`` points every antenna at the phase centre."
+    ),
+    "uvw_params": (
+        "``auto_correlations`` (bool, default False).  The uvw follow the\n"
+        "archival / VLBI convention adopted by MSv4:\n"
+        "``uvw = P(antenna1) - P(antenna2)`` (see\n"
+        ":func:`~astroviper.processing_functions.simulation.calculate_uvw.calculate_uvw`)."
+    ),
+    "noise_params": (
+        "Thermal-noise system parameters (``casatools.simulator.setnoise`` tsys-manual\n"
+        "model): ``t_receiver``, ``t_atmos``, ``tau``, ``ant_efficiency``,\n"
+        "``spill_efficiency``, ``corr_efficiency``, ``quantization_efficiency``,\n"
+        "``t_cmb`` and ``random_seed``; ``None`` disables noise (unit weights)."
+    ),
+    "direction_frame": (
+        'Astropy frame of all right ascension / declination inputs (``"icrs"`` or ``"fk5"``).'
+    ),
+    "implementation": (
+        'Visibility kernel implementation: ``"cpp"`` (multithreaded C++, default) or\n'
+        '``"numpy"`` (vectorised NumPy reference).'
+    ),
+}

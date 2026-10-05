@@ -384,7 +384,8 @@ class TestCalculateImagingWeightsDispatch(unittest.TestCase):
             freq,
             n_uv,
             dlm,
-            processing_function_threads=1: (dw)
+            processing_function_threads=1,
+            frequency_map=None: (dw)
         )
         self.briggs_mock.return_value = np.zeros((2, 1, 1))
 
@@ -489,5 +490,108 @@ class TestCheckImagingWeightsParams(unittest.TestCase):
         self.assertTrue(check_imaging_weights_params(params))
 
 
+# ---------------------------------------------------------------------------
+# Briggs path with the real kernels: physical channel mapping
+# ---------------------------------------------------------------------------
+class TestCalculateImagingWeightsFrequencyMap(unittest.TestCase):
+    """The weight density is accumulated on the *image* channel planes, using
+    the same physical-frequency map as the visibility and PSF gridders."""
+
+    def setUp(self):
+        import xradio.image.image_xds  # noqa: F401
+
+    def _partitioned_inputs(self):
+        # Two MS channels that sit on planes 1 and 3 of a four-channel image.
+        ms_ds = _make_ms_ds(n_chan=2).assign_coords(frequency=[1.1e9, 1.3e9])
+        ms_ds["UVW"].values[...] = 0.0  # every sample lands on the grid centre
+        ps_xdt = xr.DataTree()
+        ps_xdt["ms_0"] = xr.DataTree(dataset=ms_ds)
+        img_xds = _make_img_xds(n_chan=4).assign_coords(
+            frequency=np.linspace(1.0e9, 1.3e9, 4)
+        )
+        return ps_xdt, img_xds
+
+    def test_briggs_grids_ms_channels_onto_image_planes(self):
+        ps_xdt, img_xds = self._partitioned_inputs()
+
+        weight_density_grid = calculate_imaging_weights(
+            ps_xdt,
+            img_xds,
+            imaging_weights_params={"weighting": "briggs", "robust": 0.5},
+            return_weight_density_grid=True,
+        )
+
+        self.assertEqual(weight_density_grid.shape[0], 4)
+        np.testing.assert_array_equal(weight_density_grid[[0, 2]], 0.0)
+        self.assertTrue(np.all(weight_density_grid[[1, 3]].sum(axis=(1, 2, 3)) > 0))
+        imaging_weight = ps_xdt["ms_0"]["WEIGHT_IMAGING"].values
+        self.assertEqual(imaging_weight.shape[2], 2)
+        self.assertTrue(np.all(np.isfinite(imaging_weight)))
+        self.assertTrue(np.all(imaging_weight > 0.0))
+
+    def test_briggs_rejects_ms_channel_off_the_image_axis(self):
+        ps_xdt, img_xds = self._partitioned_inputs()
+        ps_xdt["ms_0"] = xr.DataTree(
+            dataset=ps_xdt["ms_0"].to_dataset().assign_coords(frequency=[1.1e9, 1.36e9])
+        )
+
+        with self.assertRaisesRegex(ValueError, "half an image channel width"):
+            calculate_imaging_weights(
+                ps_xdt,
+                img_xds,
+                imaging_weights_params={"weighting": "briggs", "robust": 0.5},
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Four correlations: a flagged correlation drops the sample for all of them
+# ---------------------------------------------------------------------------
+class TestFlaggedCorrelationsOfFourCorrelationData(unittest.TestCase):
+    def test_flagged_cross_hand_gives_nan_weight(self):
+        w = np.ones((1, 4, 1, 4))
+        w[0, 1, 0, 1] = np.nan  # XY flagged
+        w[0, 2, 0, 2] = np.nan  # YX flagged
+        w[0, 3, 0, 3] = np.nan  # YY flagged
+        for casa_weighting_implementation in (True, False):
+            out = _equalize_parallel_hand_weights(
+                w.copy(), casa_weighting_implementation
+            )
+            self.assertEqual(out.shape, (1, 4, 1, 1))
+            self.assertEqual(out[0, 0, 0, 0], 1.0)
+            self.assertTrue(np.isnan(out[0, 1:, 0, 0]).all())
+
+    def test_unflagged_cross_hands_do_not_change_the_weights(self):
+        rng = np.random.default_rng(1)
+        w = rng.uniform(0.5, 2.0, (2, 3, 2, 4))
+        two = w[..., [0, 3]]
+        for casa_weighting_implementation in (True, False):
+            np.testing.assert_array_equal(
+                _equalize_parallel_hand_weights(
+                    w.copy(), casa_weighting_implementation
+                ),
+                _equalize_parallel_hand_weights(
+                    two.copy(), casa_weighting_implementation
+                ),
+            )
+
+    def test_natural_weights_drop_the_sample_for_every_correlation(self):
+        ps_xdt = _make_ps_xdt(n_pol=4, weight_per_pol=[1.0, 1.0, 1.0, 1.0])
+        ms = ps_xdt["ms_0"]
+        ms["FLAG"].values[0, 1, 0, 2] = 1  # one cross hand of one sample
+        calculate_imaging_weights(
+            ps_xdt,
+            _make_img_xds(),
+            imaging_weights_params={"weighting": "natural"},
+            ms_data_group_in_name="base",
+            ms_data_group_out_name="base",
+        )
+        weight_imaging = ps_xdt["ms_0"]["WEIGHT_IMAGING"].values
+        self.assertEqual(weight_imaging.shape[-1], 4)
+        self.assertTrue(np.isnan(weight_imaging[0, 1, 0, :]).all())
+        unflagged = np.ones(weight_imaging.shape, dtype=bool)
+        unflagged[0, 1, 0, :] = False
+        np.testing.assert_array_equal(weight_imaging[unflagged], 1.0)
