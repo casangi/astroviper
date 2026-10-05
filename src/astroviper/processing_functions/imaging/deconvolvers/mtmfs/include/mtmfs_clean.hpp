@@ -33,7 +33,7 @@ enum StopCode : int {
 };
 
 constexpr int kSingularHessian = -2;
-constexpr int kMaxTaylorTerms = 16;
+constexpr int kMaxTaylorTerms = 4;
 
 template <typename T>
 struct CleanResult {

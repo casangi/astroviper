@@ -679,9 +679,9 @@ class TestArrayValidation:
             mtmfs.clean(residual, make_psf_stack(2, 48, 40), residual)
 
     def test_nterms_too_large_raises(self):
-        residual = np.zeros((17, 8, 8), dtype=np.float32)
+        residual = np.zeros((5, 8, 8), dtype=np.float32)
         model = np.zeros_like(residual)
-        psf = np.zeros((33, 8, 8), dtype=np.float32)
+        psf = np.zeros((9, 8, 8), dtype=np.float32)
         with pytest.raises(RuntimeError, match="too many Taylor terms"):
             mtmfs.clean(residual, psf, model)
 
@@ -846,3 +846,53 @@ def test_adaptive_gain_already_below_threshold(dtype):
     assert result["stop_code"] == mtmfs.STOP_THRESHOLD
     np.testing.assert_array_equal(residual, original)
     assert not np.any(model)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_four_taylor_terms_supported_by_all_entry_points(dtype):
+    """Four fitted terms need seven PSF planes, including for standalone Hessians."""
+    frequencies = np.linspace(-0.75, 0.75, 8)
+    moments = np.asarray(
+        [(frequencies**order).mean() for order in range(7)], dtype=dtype
+    )
+    psf = np.zeros((7, 16, 16), dtype=dtype)
+    psf[:, 8, 8] = moments
+    expected_hessian = moments[np.add.outer(np.arange(4), np.arange(4))]
+    true_model = np.zeros((4, 16, 16), dtype=dtype)
+    true_model[:, 8, 8] = [1.0, -0.5, 0.2, 0.1]
+    residual = np.zeros_like(true_model)
+    residual[:, 8, 8] = expected_hessian @ true_model[:, 8, 8]
+
+    hessian = mtmfs.hessian(psf)
+    assert hessian["nterms"] == 4
+    np.testing.assert_allclose(hessian["hessian"][0], expected_hessian, atol=1e-7)
+    principal = residual.copy()
+    mtmfs.principal_solution(principal, hessian["inverse_hessian"][0])
+    np.testing.assert_allclose(principal, true_model, atol=2e-5)
+
+    model = np.zeros_like(residual)
+    result = mtmfs.clean(residual, psf, model, niter=1, gain=1.0)
+    assert result["iterations_performed"] == 1
+    np.testing.assert_allclose(model, true_model, atol=2e-5)
+    np.testing.assert_allclose(residual, 0.0, atol=2e-6)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_five_taylor_terms_rejected_by_all_entry_points(dtype):
+    residual = np.zeros((5, 8, 8), dtype=dtype)
+    psf = np.zeros((9, 8, 8), dtype=dtype)
+    for call in (
+        lambda: mtmfs.clean(residual, psf, np.zeros_like(residual)),
+        lambda: mtmfs.hessian(psf),
+        lambda: mtmfs.principal_solution(residual, np.eye(5)),
+    ):
+        with pytest.raises(RuntimeError, match=r"too many Taylor terms \(max 4\)"):
+            call()
+
+
+@pytest.mark.parametrize("nplanes", [0, 2, 4, 6, 8])
+def test_hessian_rejects_empty_or_even_psf_stack(nplanes):
+    psf = np.zeros((nplanes, 8, 8), dtype=np.float64)
+    message = "at least one plane" if nplanes == 0 else "odd number of planes"
+    with pytest.raises(RuntimeError, match=message):
+        mtmfs.hessian(psf)

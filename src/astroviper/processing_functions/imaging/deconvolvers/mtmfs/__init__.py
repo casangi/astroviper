@@ -9,7 +9,8 @@ same style as :mod:`~astroviper.processing_functions.imaging.deconvolvers.hogbom
 ``clean`` runs one cycle in place on Python-owned numpy buffers: the
 ``residual`` and ``model`` Taylor-term stacks are written into directly and
 no copies are made on the C++ side. Every call takes all of its inputs and
-keeps nothing between calls.
+keeps nothing between calls. One to four Taylor terms are supported, requiring
+one, three, five, or seven PSF planes respectively.
 
 Layout: images are row-major ``(ny, nx)``; Taylor-term stacks are
 ``(nterms, ny, nx)`` and the PSF stack is ``(2 * nterms - 1, ny, nx)``.

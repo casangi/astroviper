@@ -36,15 +36,20 @@ py::buffer_info check_array(py::array& arr, const char* name, const std::vector<
     return info;
 }
 
-void stack_dims(const py::array& stack, const char* name, int& n, int& ny, int& nx) {
+void stack_dims(const py::array& stack, const char* name, int& n, int& ny, int& nx, bool psf_stack = false) {
     if (stack.ndim() != 3) throw std::runtime_error(std::string(name) + " must be a 3-D array (nterms, ny, nx)");
-    if (stack.shape(0) > mtmfs::kMaxTaylorTerms)
+    const py::ssize_t nplanes = stack.shape(0);
+    if (nplanes < 1) throw std::runtime_error(std::string(name) + " must have at least one plane");
+    if (psf_stack && nplanes % 2 == 0)
+        throw std::runtime_error("psf must have an odd number of planes (2*nterms-1)");
+    // Limit fitted Taylor terms, not the PSF's 2*nterms-1 planes.
+    const py::ssize_t nterms = psf_stack ? nplanes / 2 + 1 : nplanes;
+    if (nterms > mtmfs::kMaxTaylorTerms)
         throw std::runtime_error(std::string(name) + " has too many Taylor terms (max " +
                                  std::to_string(mtmfs::kMaxTaylorTerms) + ")");
     n = static_cast<int>(stack.shape(0));
     ny = static_cast<int>(stack.shape(1));
     nx = static_cast<int>(stack.shape(2));
-    if (n < 1) throw std::runtime_error(std::string(name) + " must have at least one Taylor term");
     if (ny < 2 || nx < 2) throw std::runtime_error(std::string(name) + " image dimensions must be >= 2 pixels");
 }
 
@@ -127,8 +132,7 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
 template <typename T>
 py::dict hessian_impl(py::array psf, const std::vector<float>& scales, float small_scale_bias) {
     int npsf, ny, nx;
-    stack_dims(psf, "psf", npsf, ny, nx);
-    if (npsf % 2 == 0) throw std::runtime_error("psf must have an odd number of Taylor terms (2*nterms-1)");
+    stack_dims(psf, "psf", npsf, ny, nx, true);
     const int nterms = npsf / 2 + 1;
     py::buffer_info pi = check_array<T>(psf, "psf", {npsf, ny, nx}, false);
 
@@ -190,7 +194,7 @@ PYBIND11_MODULE(_mtmfs_ext, m) {
         "Python owns the arrays; residual and model are updated in place with no copies.";
 
     m.def("clean", &clean_dispatch,
-          "One MTMFS model-update cycle in place. residual and model are (nterms, ny, nx) "
+          "One MTMFS model-update cycle in place, with 1 <= nterms <= 4. residual and model are (nterms, ny, nx) "
           "C-contiguous writeable arrays of the same dtype (float32 or float64). psf is "
           "(2*nterms-1, ny, nx), read-only. mask is an optional (ny, nx) array of the same "
           "dtype, or None. scales are pixel sizes (empty -> [0]; sorted and de-duplicated; "
@@ -205,13 +209,13 @@ PYBIND11_MODULE(_mtmfs_ext, m) {
           py::arg("mask_threshold") = 0.9);
 
     m.def("hessian", &hessian_dispatch,
-          "Taylor Hessians and inverses for a (2*nterms-1, ny, nx) PSF stack. Returns a dict "
+          "Taylor Hessians and inverses for a (2*nterms-1, ny, nx) PSF stack, with 1 <= nterms <= 4. Returns a dict "
           "with hessian and inverse_hessian of shape (nscales, nterms, nterms) float64, plus "
           "scales, small_scale_bias, psf_support and nterms.",
           py::arg("psf"), py::arg("scales") = std::vector<float>{}, py::arg("small_scale_bias") = 0.0f);
 
     m.def("principal_solution", &principal_dispatch,
-          "Replace residual in place by the principal solution "
+          "For 1 <= nterms <= 4, replace residual in place by the principal solution "
           "residual[t1] = sum_t2 inverse_hessian[t1, t2] * residual[t2]. "
           "inverse_hessian is (nterms, nterms) float64 (the delta-function scale inverse).",
           py::arg("residual"), py::arg("inverse_hessian"));
