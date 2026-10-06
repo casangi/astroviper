@@ -4,7 +4,7 @@ _MVC_OBSERVED_VISIBILITY_CACHE = "_MVC_OBSERVED_VISIBILITY_CACHE"
 _MVC_OBSERVED_NORMALIZATION_CACHE = "_MVC_OBSERVED_NORMALIZATION_CACHE"
 
 ###############################################################################
-# Processing Function level functionality related to the residual update
+# Imaging setup and PSF beam fitting
 ###############################################################################
 
 
@@ -22,29 +22,15 @@ def imaging_preparation_continuum_single_field(
     image_data_variables_keep=None,
     task_id=0,
 ):
-    """Run the once-per-chunk continuum imaging preparation.
+    """Prepare static products once per continuum map task.
 
-    This helper performs the setup work required only during the first major
-    cycle for one frequency-chunk map task. It delegates to
-    :func:`imaging_setup_continuum_single_field`, which prepares the chunk-local
-    visibility and UV-sampling products needed by the subsequent continuum
-    residual update.
-
-    The setup stage may include
-
-    * calculating and registering imaging weights;
-    * constructing the chunk-local visibility and UV-sampling grids;
-    * creating the corresponding normalization products;
-    * creating the primary beam when requested;
-    * establishing the continuum coordinates, metadata, and image data groups
-      required by later processing stages.
-
-    No model visibility prediction, residual visibility calculation, global
-    reduction, inverse FFT, model update, or restoration is performed here. Those
-    operations are handled by later stages of the continuum imaging workflow.
+    Require existing imaging weights and delegate metadata, PSF sampling-grid,
+    and primary-beam setup to :func:`imaging_setup_continuum_single_field`.
 
     Parameters
     ----------
+    specmode : {"mfs", "mvc"}
+        Select Taylor UV gridding or frequency-resolved MVC processing.
     ps_xdt : xarray.DataTree
         Visibility data for this frequency chunk.
 
@@ -126,111 +112,281 @@ def imaging_preparation_continuum_single_field(
     )
 
 
-def accumulate_continuum_model(
-    model_increment_xds,
-    previous_model_xds=None,
-    specmode="mfs",
+def point_spread_function_gaussian_fit_continuum(
+    img_xds,
+    image_data_group_in_name="residual",
+    image_data_group_out_name="residual",
+    processing_function_threads=1,
 ):
-    """Create the accumulated continuum model for the next residual update.
+    """Fit the restoring beam from the continuum point-spread function.
 
-    The model-update backend returns the initial model during the first cycle
-    and a model increment during every later cycle.  This helper normalizes
-    those two cases into one persistent model-state dataset.  It deliberately
-    performs positional array addition, matching the historical driver-side
-    accumulation after validating dimensions and shapes.
+    This function determines the restoring beam by temporarily projecting the
+    continuum point-spread function onto a one-channel cube representation and
+    reusing the existing cube Gaussian-fitting implementation.
+
+    The procedure is
+
+    continuum image dataset
+        │
+        ├── select PSF Taylor order 0
+        │
+        ▼
+    construct temporary one-channel cube dataset
+    (time, frequency=1, polarization, l, m)
+        │
+        ▼
+    call existing cube Gaussian-fit implementation
+        │
+        ├── fit the restoring beam
+        ├── determine the maximum PSF sidelobe
+        └── return beam-fit statistics
+        │
+        ▼
+    copy the fitted restoring-beam parameters and
+    maximum PSF sidelobe back into the
+    continuum dataset
+
+    Only the zeroth Taylor-order point-spread function is used for the beam fit.
 
     Parameters
     ----------
-    model_increment_xds : xarray.Dataset
-        Image dataset returned by the current model-update cycle. It must
-        contain ``SKY_MODEL``. During the first MVC cycle it must also contain
-        the singleton effective ``PRIMARY_BEAM``.
-    previous_model_xds : xarray.Dataset, optional
-        Accumulated model returned by the preceding append node. If omitted,
-        the current model is copied as the initial accumulated state.
-    specmode : {"mfs", "mvc"}, default ``"mfs"``
-        Continuum execution mode. MVC retains the effective primary beam with
-        the accumulated Taylor model.
+    img_xds : xarray.Dataset
+        Continuum image dataset containing the point-spread function.
+
+    image_data_group_in_name : str, optional
+        Name of the data group containing the continuum point-spread function.
+
+    image_data_group_out_name : str, optional
+        Name of the data group in which the fitted restoring-beam parameters are
+        registered.
+
+    processing_function_threads : int, optional
+        Number of threads supplied to the Gaussian-fitting backend.
 
     Returns
     -------
-    xarray.Dataset
-        Independent, in-memory accumulated model state containing
-        ``SKY_MODEL`` and, for MVC, ``PRIMARY_BEAM``.
+    img_xds : xarray.Dataset
+        Continuum dataset with the fitted restoring-beam parameters and maximum
+        PSF sidelobe added.
 
-    Raises
-    ------
-    TypeError
-        If either supplied model object is not an xarray dataset.
-    KeyError
-        If a required model or MVC primary-beam variable is absent.
-    ValueError
-        If the mode is unsupported or the increment layout differs from the
-        previous accumulated model.
-    """
+    return_df : pandas.DataFrame
+        Timing information returned by the Gaussian-fitting backend.
+
+    Notes
+    -----
+    This function is a compatibility layer around the existing cube
+    ``point_spread_function_gaussian_fit`` implementation. The restoring beam is
+    determined exclusively from the zeroth Taylor-order point-spread function,
+    which is the standard convention for MT-MFS imaging."""
+
+    import time
+    from copy import deepcopy
+
+    import numpy as np
+    import pandas as pd
     import xarray as xr
 
-    if not isinstance(model_increment_xds, xr.Dataset):
-        raise TypeError(
-            "model_increment_xds must be an xarray.Dataset; received "
-            f"{type(model_increment_xds).__name__}."
+    from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
+        point_spread_function_gaussian_fit,
+    )
+
+    beam_fit_key = "beam_fit_params_point_spread_function"
+    max_sidelobe_key = "max_sidelobe_point_spread_function"
+
+    # ------------------------------------------------------------------
+    # Validate the requested data groups and obtain the PSF variable.
+    # ------------------------------------------------------------------
+    data_groups = img_xds.attrs.get("data_groups", {})
+
+    if image_data_group_in_name not in data_groups:
+        raise KeyError(
+            f"Input data group {image_data_group_in_name!r} was not found. "
+            f"Available groups are {list(data_groups)}."
         )
 
-    specmode = str(specmode).lower()
-    if specmode not in ("mfs", "mvc"):
+    input_group = data_groups[image_data_group_in_name]
+
+    if "point_spread_function" not in input_group:
+        raise KeyError(
+            "'point_spread_function' was not found in data group "
+            f"{image_data_group_in_name!r}."
+        )
+
+    psf_name = input_group["point_spread_function"]
+
+    if psf_name not in img_xds:
+        raise KeyError(
+            f"PSF variable {psf_name!r}, registered in data group "
+            f"{image_data_group_in_name!r}, was not found in img_xds."
+        )
+
+    psf_da = img_xds[psf_name]
+
+    if "psf_taylor_order" not in psf_da.dims:
         raise ValueError(
-            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
+            f"Continuum PSF {psf_name!r} must contain the dimension "
+            f"'psf_taylor_order'. Found dimensions {psf_da.dims}."
         )
 
-    if "SKY_MODEL" not in model_increment_xds:
-        raise KeyError("model_increment_xds does not contain 'SKY_MODEL'.")
+    if psf_da.sizes["psf_taylor_order"] < 1:
+        raise ValueError(f"Continuum PSF {psf_name!r} has no Taylor-order entries.")
 
-    if previous_model_xds is None:
-        model_variable_names = ["SKY_MODEL"]
-        if specmode == "mvc":
-            model_variable_names.append("PRIMARY_BEAM")
+    required_psf_dims = {"time", "polarization", "l", "m"}
+    missing_psf_dims = required_psf_dims.difference(psf_da.dims)
 
-        missing = [
-            name for name in model_variable_names if name not in model_increment_xds
-        ]
-        if missing:
-            raise KeyError(
-                "The initial continuum model state is missing required "
-                f"variables: {missing}."
-            )
-
-        return model_increment_xds[model_variable_names].copy(deep=True)
-
-    if not isinstance(previous_model_xds, xr.Dataset):
-        raise TypeError(
-            "previous_model_xds must be an xarray.Dataset; received "
-            f"{type(previous_model_xds).__name__}."
-        )
-    if "SKY_MODEL" not in previous_model_xds:
-        raise KeyError("previous_model_xds does not contain 'SKY_MODEL'.")
-
-    model_increment = model_increment_xds["SKY_MODEL"]
-    previous_model = previous_model_xds["SKY_MODEL"]
-
-    if model_increment.dims != previous_model.dims:
+    if missing_psf_dims:
         raise ValueError(
-            "The continuum model increment dimensions do not match the "
-            "accumulated model: "
-            f"{model_increment.dims} != {previous_model.dims}."
-        )
-    if model_increment.shape != previous_model.shape:
-        raise ValueError(
-            "The continuum model increment shape does not match the "
-            "accumulated model: "
-            f"{model_increment.shape} != {previous_model.shape}."
+            f"Continuum PSF {psf_name!r} is missing required dimensions "
+            f"{sorted(missing_psf_dims)}. Found dimensions {psf_da.dims}."
         )
 
-    accumulated_model_xds = previous_model_xds.copy(deep=True)
-    accumulated_model = accumulated_model_xds["SKY_MODEL"]
-    accumulated_model.data = accumulated_model.data + model_increment.data
-    accumulated_model.attrs = previous_model.attrs.copy()
+    # ------------------------------------------------------------------
+    # Select the globally reduced zeroth-order PSF.
+    # ------------------------------------------------------------------
+    psf0_da = psf_da.isel(psf_taylor_order=0, drop=True)
 
-    return accumulated_model_xds
+    # The numerical frequency value is not used by the fit itself, but the
+    # cube routine requires a one-element frequency coordinate.
+    continuum_metadata = img_xds.attrs.get("continuum_imaging", {})
+
+    if "reference_frequency_hz" in continuum_metadata:
+        reference_frequency_hz = float(continuum_metadata["reference_frequency_hz"])
+    elif "frequency" in img_xds.coords and img_xds.frequency.size > 0:
+        reference_frequency_hz = float(
+            np.asarray(img_xds.frequency.values).reshape(-1)[0]
+        )
+    else:
+        # This is only a coordinate label for the temporary cube.
+        reference_frequency_hz = 0.0
+
+    frequency_coord = np.asarray(
+        [reference_frequency_hz],
+        dtype=np.float64,
+    )
+
+    cube_psf_da = psf0_da.expand_dims(
+        frequency=frequency_coord,
+    ).transpose(
+        "time",
+        "frequency",
+        "polarization",
+        "l",
+        "m",
+    )
+
+    # ------------------------------------------------------------------
+    # Build a minimal, one-frequency cube dataset.
+    # ------------------------------------------------------------------
+    cube_xds = xr.Dataset(
+        {
+            psf_name: cube_psf_da,
+        }
+    )
+
+    cube_xds.attrs = deepcopy(img_xds.attrs)
+    cube_xds.attrs["type"] = "image_dataset"
+
+    # The Gaussian fitter only needs the PSF registration. Using the same
+    # input and output group lets it add its beam-fit entries to this group.
+    cube_xds.attrs["data_groups"] = {
+        image_data_group_out_name: {
+            "point_spread_function": psf_name,
+        }
+    }
+
+    # ------------------------------------------------------------------
+    # Run the existing cube Gaussian-fit routine.
+    #
+    # The routine modifies and returns only the xarray.Dataset; it does not
+    # return a timing dataframe.
+    # ------------------------------------------------------------------
+    start = time.time()
+
+    cube_xds = point_spread_function_gaussian_fit(
+        cube_xds,
+        image_data_group_in_name=image_data_group_out_name,
+        image_data_group_out_name=image_data_group_out_name,
+        processing_function_threads=processing_function_threads,
+    )
+
+    return_df = pd.DataFrame(
+        {
+            "T_psf_fit": [time.time() - start],
+        }
+    )
+
+    cube_group = cube_xds.attrs["data_groups"][image_data_group_out_name]
+
+    if beam_fit_key not in cube_group:
+        raise KeyError(
+            f"The Gaussian fitter did not register {beam_fit_key!r} "
+            f"in data group {image_data_group_out_name!r}."
+        )
+
+    if max_sidelobe_key not in cube_group:
+        raise KeyError(
+            f"The Gaussian fitter did not register {max_sidelobe_key!r} "
+            f"in data group {image_data_group_out_name!r}."
+        )
+
+    beam_fit_name = cube_group[beam_fit_key]
+    max_sidelobe_name = cube_group[max_sidelobe_key]
+
+    if beam_fit_name not in cube_xds:
+        raise KeyError(
+            f"The fitted-beam variable {beam_fit_name!r} is not present "
+            "in the temporary cube dataset."
+        )
+
+    if max_sidelobe_name not in cube_xds:
+        raise KeyError(
+            f"The maximum-sidelobe variable {max_sidelobe_name!r} is not "
+            "present in the temporary cube dataset."
+        )
+
+    # ------------------------------------------------------------------
+    # Copy the one-channel fit back without retaining a frequency dimension.
+    #
+    # This avoids conflicting with any existing continuum frequency
+    # coordinate. The continuum restore wrapper should expand these arrays
+    # back to one frequency channel when constructing its temporary cube.
+    # ------------------------------------------------------------------
+    beam_fit_da = cube_xds[beam_fit_name]
+
+    if "frequency" in beam_fit_da.dims:
+        beam_fit_da = beam_fit_da.isel(frequency=0, drop=True)
+
+    max_sidelobe_da = cube_xds[max_sidelobe_name]
+
+    if "frequency" in max_sidelobe_da.dims:
+        max_sidelobe_da = max_sidelobe_da.isel(
+            frequency=0,
+            drop=True,
+        )
+
+    if "beam_params_label" in cube_xds.coords:
+        img_xds = img_xds.assign_coords(
+            beam_params_label=cube_xds.coords["beam_params_label"],
+        )
+
+    img_xds[beam_fit_name] = beam_fit_da
+    img_xds[max_sidelobe_name] = max_sidelobe_da
+
+    # Create the output group if input and output names differ.
+    if image_data_group_out_name not in img_xds.attrs["data_groups"]:
+        img_xds.attrs["data_groups"][image_data_group_out_name] = deepcopy(input_group)
+
+    output_group = img_xds.attrs["data_groups"][image_data_group_out_name]
+
+    output_group[beam_fit_key] = beam_fit_name
+    output_group[max_sidelobe_key] = max_sidelobe_name
+
+    return img_xds, return_df
+
+
+###############################################################################
+# Model prediction: MFS and MVC
+###############################################################################
 
 
 @shares_param_docs
@@ -439,6 +595,289 @@ def prepare_model_uv_continuum_single_field(
     )
 
     return model_uv_xds
+
+
+def apply_mvc_primary_beam_convention(
+    model_cube,
+    primary_beam_cube,
+    effective_primary_beam,
+):
+    """Map a common-beam MVC model cube to the channel-beam convention.
+
+    This applies ``M'_nu = M_nu * A_nu / Abar`` and sets pixels with a
+    non-finite or non-positive effective primary beam to zero.
+    """
+    import numpy as np
+
+    required_cube_dims = ("time", "frequency", "polarization", "l", "m")
+    required_beam_dims = ("time", "polarization", "l", "m")
+
+    if model_cube.dims != required_cube_dims:
+        raise ValueError(
+            f"model_cube has dimensions {model_cube.dims}; expected "
+            f"{required_cube_dims}."
+        )
+    if primary_beam_cube.dims != required_cube_dims:
+        raise ValueError(
+            "primary_beam_cube has dimensions "
+            f"{primary_beam_cube.dims}; expected {required_cube_dims}."
+        )
+    if effective_primary_beam.dims != required_beam_dims:
+        raise ValueError(
+            "effective_primary_beam has dimensions "
+            f"{effective_primary_beam.dims}; expected {required_beam_dims}."
+        )
+
+    if model_cube.shape != primary_beam_cube.shape:
+        raise ValueError(
+            "MVC model and channel primary beam have incompatible shapes: "
+            f"{model_cube.shape} and {primary_beam_cube.shape}."
+        )
+    expected_effective_shape = (
+        model_cube.sizes["time"],
+        model_cube.sizes["polarization"],
+        model_cube.sizes["l"],
+        model_cube.sizes["m"],
+    )
+    if effective_primary_beam.shape != expected_effective_shape:
+        raise ValueError(
+            "MVC model and effective primary beam have incompatible shapes: "
+            f"{model_cube.shape} and {effective_primary_beam.shape}."
+        )
+
+    # The Taylor model is in Stokes coordinates while the cached scalar PB is
+    # still labelled with the instrumental correlations.  The airy-disk PB is
+    # identical plane-by-plane, so validate every physical coordinate except
+    # the polarization labels and apply it positionally.
+    for coordinate in ("time", "frequency", "l", "m"):
+        if not np.array_equal(
+            model_cube.coords[coordinate].values,
+            primary_beam_cube.coords[coordinate].values,
+        ):
+            raise ValueError(
+                f"MVC model and channel primary beam {coordinate} coordinates "
+                "are not aligned."
+            )
+    for coordinate in ("time", "l", "m"):
+        if not np.array_equal(
+            model_cube.coords[coordinate].values,
+            effective_primary_beam.coords[coordinate].values,
+        ):
+            raise ValueError(
+                f"MVC model and effective primary beam {coordinate} coordinates "
+                "are not aligned."
+            )
+
+    effective_pb_data = np.asarray(effective_primary_beam.data)[:, None, ...]
+    valid_effective_pb = np.isfinite(effective_pb_data) & (effective_pb_data > 0.0)
+    result = model_cube.copy(
+        data=np.where(
+            valid_effective_pb,
+            np.asarray(model_cube.data)
+            * np.asarray(primary_beam_cube.data)
+            / effective_pb_data,
+            0.0,
+        )
+    )
+    result.attrs = model_cube.attrs.copy()
+    result.attrs["primary_beam_convention"] = "channel_pb_over_effective_pb"
+    return result
+
+
+@shares_param_docs
+def prepare_model_uv_mvc_single_field(
+    model_xds,
+    primary_beam_xds,
+    frequency_values,
+    image_params,
+    instrument_polarization_basis="linear",
+    single_precision_image=True,
+    processing_function_threads=1,
+    fft_backend="pyfftw",
+    image_data_group_name="model",
+):
+    """Construct a local MVC model UV cube in the channel-PB convention.
+
+    The Taylor model uses the common effective primary-beam convention.  Before
+    prediction this function evaluates the Taylor polynomial at each channel and
+    applies ``A_nu / Abar``, matching CASA's MVC imaging-cycle convention.
+    """
+
+    import numpy as np
+    import xarray as xr
+
+    from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
+        transform_polarization_basis,
+    )
+    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+        fft_norm_img_xds,
+    )
+    from astroviper.utils.data_group_tools import modify_data_groups_xds
+
+    frequency_values = np.asarray(
+        frequency_values,
+        dtype=np.float64,
+    )
+
+    reference_frequency = float(
+        image_params.get(
+            "reference_frequency",
+            image_params["reference_frequency_hz"],
+        )
+    )
+    nterms = int(image_params["nterms"])
+
+    model_name = model_xds.attrs["data_groups"][image_data_group_name]["sky"]
+
+    model_taylor = model_xds[model_name].isel(taylor_term=slice(0, nterms))
+
+    x = (frequency_values - reference_frequency) / reference_frequency
+
+    basis = xr.DataArray(
+        x[:, None] ** np.arange(nterms)[None, :],
+        dims=("frequency", "taylor_term"),
+        coords={
+            "frequency": frequency_values,
+            "taylor_term": model_taylor.coords["taylor_term"],
+        },
+    )
+
+    # Result:
+    # (time, frequency, polarization, l, m)
+    # Reconstruct the frequency-dependent image cube from the
+    # image-domain Taylor model.
+    model_cube = (model_taylor * basis).sum(dim="taylor_term")
+
+    # Xarray appends the new frequency dimension after the existing
+    # model dimensions. Restore the canonical image-cube ordering.
+    model_cube = model_cube.transpose(
+        "time",
+        "frequency",
+        "polarization",
+        "l",
+        "m",
+    )
+
+    pb_name = primary_beam_xds.attrs.get(
+        "primary_beam_name",
+        "PRIMARY_BEAM",
+    )
+    primary_beam = primary_beam_xds[pb_name]
+
+    if primary_beam.sizes["frequency"] != len(frequency_values):
+        raise ValueError(
+            "The cached MVC PB cube does not match the local model frequency axis."
+        )
+
+    primary_beam = primary_beam.transpose(
+        "time",
+        "frequency",
+        "polarization",
+        "l",
+        "m",
+    )
+
+    if model_cube.shape != primary_beam.shape:
+        raise ValueError(
+            "The reconstructed MVC model cube and cached primary "
+            "beam have incompatible shapes: "
+            f"model={model_cube.shape}, PB={primary_beam.shape}."
+        )
+
+    if "PRIMARY_BEAM" not in model_xds:
+        raise KeyError(
+            "MVC model prediction requires the effective PRIMARY_BEAM carried "
+            "with the Taylor model."
+        )
+
+    effective_primary_beam = model_xds["PRIMARY_BEAM"]
+    if "frequency" not in effective_primary_beam.dims:
+        raise ValueError("MVC effective PRIMARY_BEAM must contain frequency.")
+    if effective_primary_beam.sizes["frequency"] != 1:
+        raise ValueError("MVC effective PRIMARY_BEAM must have one frequency plane.")
+
+    effective_primary_beam = effective_primary_beam.isel(
+        frequency=0,
+        drop=True,
+    ).transpose("time", "polarization", "l", "m")
+
+    model_cube = apply_mvc_primary_beam_convention(
+        model_cube,
+        primary_beam,
+        effective_primary_beam,
+    )
+
+    mvc_xds = model_xds.drop_vars(
+        list(model_xds.data_vars),
+        errors="ignore",
+    ).copy(deep=False)
+
+    if "taylor_term" in mvc_xds.dims:
+        mvc_xds = mvc_xds.drop_dims(
+            "taylor_term",
+            errors="ignore",
+        )
+
+    mvc_xds = mvc_xds.assign_coords(frequency=frequency_values)
+
+    mvc_xds["SKY_MODEL_MVC"] = xr.DataArray(
+        model_cube.data,
+        dims=(
+            "time",
+            "frequency",
+            "polarization",
+            "l",
+            "m",
+        ),
+        coords={
+            "time": model_cube.coords["time"],
+            "frequency": frequency_values,
+            "polarization": model_cube.coords["polarization"],
+            "l": model_cube.coords["l"],
+            "m": model_cube.coords["m"],
+        },
+    )
+
+    modify_data_groups_xds(
+        mvc_xds,
+        data_group_out_name=image_data_group_name,
+        data_group_out={
+            "sky": "SKY_MODEL_MVC",
+        },
+        description=(
+            "MVC model converted from the common effective-beam convention "
+            "to the channel-dependent primary-beam convention."
+        ),
+    )
+
+    mvc_xds = transform_polarization_basis(
+        mvc_xds,
+        new_polarization_basis=(instrument_polarization_basis),
+        overwrite=True,
+    )
+
+    complex_dtype = np.complex64 if single_precision_image else np.complex128
+
+    mvc_xds = fft_norm_img_xds(
+        mvc_xds,
+        image_params=image_params,
+        image_data_group_in_name=(image_data_group_name),
+        image_data_group_out_name=(image_data_group_name),
+        image_data_group_out_modified={
+            "visibility": "VISIBILITY_MODEL",
+        },
+        image_data_variables_keep=["sky"],
+        processing_function_threads=(processing_function_threads),
+        fft_backend=fft_backend,
+        complex_dtype=complex_dtype,
+    )
+
+    return mvc_xds
+
+
+###############################################################################
+# MVC Taylor contributions and normalization
+###############################################################################
 
 
 def make_mvc_taylor_normal_equation_contributions(
@@ -805,282 +1244,9 @@ def convert_mvc_cubes_to_taylor_normal_equations(
     return finalize_mvc_taylor_normal_equations(contributions)
 
 
-def apply_mvc_primary_beam_convention(
-    model_cube,
-    primary_beam_cube,
-    effective_primary_beam,
-):
-    """Map a common-beam MVC model cube to the channel-beam convention.
-
-    This applies ``M'_nu = M_nu * A_nu / Abar`` and sets pixels with a
-    non-finite or non-positive effective primary beam to zero.
-    """
-    import numpy as np
-
-    required_cube_dims = ("time", "frequency", "polarization", "l", "m")
-    required_beam_dims = ("time", "polarization", "l", "m")
-
-    if model_cube.dims != required_cube_dims:
-        raise ValueError(
-            f"model_cube has dimensions {model_cube.dims}; expected "
-            f"{required_cube_dims}."
-        )
-    if primary_beam_cube.dims != required_cube_dims:
-        raise ValueError(
-            "primary_beam_cube has dimensions "
-            f"{primary_beam_cube.dims}; expected {required_cube_dims}."
-        )
-    if effective_primary_beam.dims != required_beam_dims:
-        raise ValueError(
-            "effective_primary_beam has dimensions "
-            f"{effective_primary_beam.dims}; expected {required_beam_dims}."
-        )
-
-    if model_cube.shape != primary_beam_cube.shape:
-        raise ValueError(
-            "MVC model and channel primary beam have incompatible shapes: "
-            f"{model_cube.shape} and {primary_beam_cube.shape}."
-        )
-    expected_effective_shape = (
-        model_cube.sizes["time"],
-        model_cube.sizes["polarization"],
-        model_cube.sizes["l"],
-        model_cube.sizes["m"],
-    )
-    if effective_primary_beam.shape != expected_effective_shape:
-        raise ValueError(
-            "MVC model and effective primary beam have incompatible shapes: "
-            f"{model_cube.shape} and {effective_primary_beam.shape}."
-        )
-
-    # The Taylor model is in Stokes coordinates while the cached scalar PB is
-    # still labelled with the instrumental correlations.  The airy-disk PB is
-    # identical plane-by-plane, so validate every physical coordinate except
-    # the polarization labels and apply it positionally.
-    for coordinate in ("time", "frequency", "l", "m"):
-        if not np.array_equal(
-            model_cube.coords[coordinate].values,
-            primary_beam_cube.coords[coordinate].values,
-        ):
-            raise ValueError(
-                f"MVC model and channel primary beam {coordinate} coordinates "
-                "are not aligned."
-            )
-    for coordinate in ("time", "l", "m"):
-        if not np.array_equal(
-            model_cube.coords[coordinate].values,
-            effective_primary_beam.coords[coordinate].values,
-        ):
-            raise ValueError(
-                f"MVC model and effective primary beam {coordinate} coordinates "
-                "are not aligned."
-            )
-
-    effective_pb_data = np.asarray(effective_primary_beam.data)[:, None, ...]
-    valid_effective_pb = np.isfinite(effective_pb_data) & (effective_pb_data > 0.0)
-    result = model_cube.copy(
-        data=np.where(
-            valid_effective_pb,
-            np.asarray(model_cube.data)
-            * np.asarray(primary_beam_cube.data)
-            / effective_pb_data,
-            0.0,
-        )
-    )
-    result.attrs = model_cube.attrs.copy()
-    result.attrs["primary_beam_convention"] = "channel_pb_over_effective_pb"
-    return result
-
-
-@shares_param_docs
-def prepare_model_uv_mvc_single_field(
-    model_xds,
-    primary_beam_xds,
-    frequency_values,
-    image_params,
-    instrument_polarization_basis="linear",
-    single_precision_image=True,
-    processing_function_threads=1,
-    fft_backend="pyfftw",
-    image_data_group_name="model",
-):
-    """Construct a local MVC model UV cube in the channel-PB convention.
-
-    The Taylor model uses the common effective primary-beam convention.  Before
-    prediction this function evaluates the Taylor polynomial at each channel and
-    applies ``A_nu / Abar``, matching CASA's MVC imaging-cycle convention.
-    """
-
-    import numpy as np
-    import xarray as xr
-
-    from astroviper.processing_functions.image_analysis.transform_polarization_basis import (
-        transform_polarization_basis,
-    )
-    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
-        fft_norm_img_xds,
-    )
-    from astroviper.utils.data_group_tools import modify_data_groups_xds
-
-    frequency_values = np.asarray(
-        frequency_values,
-        dtype=np.float64,
-    )
-
-    reference_frequency = float(
-        image_params.get(
-            "reference_frequency",
-            image_params["reference_frequency_hz"],
-        )
-    )
-    nterms = int(image_params["nterms"])
-
-    model_name = model_xds.attrs["data_groups"][image_data_group_name]["sky"]
-
-    model_taylor = model_xds[model_name].isel(taylor_term=slice(0, nterms))
-
-    x = (frequency_values - reference_frequency) / reference_frequency
-
-    basis = xr.DataArray(
-        x[:, None] ** np.arange(nterms)[None, :],
-        dims=("frequency", "taylor_term"),
-        coords={
-            "frequency": frequency_values,
-            "taylor_term": model_taylor.coords["taylor_term"],
-        },
-    )
-
-    # Result:
-    # (time, frequency, polarization, l, m)
-    # Reconstruct the frequency-dependent image cube from the
-    # image-domain Taylor model.
-    model_cube = (model_taylor * basis).sum(dim="taylor_term")
-
-    # Xarray appends the new frequency dimension after the existing
-    # model dimensions. Restore the canonical image-cube ordering.
-    model_cube = model_cube.transpose(
-        "time",
-        "frequency",
-        "polarization",
-        "l",
-        "m",
-    )
-
-    pb_name = primary_beam_xds.attrs.get(
-        "primary_beam_name",
-        "PRIMARY_BEAM",
-    )
-    primary_beam = primary_beam_xds[pb_name]
-
-    if primary_beam.sizes["frequency"] != len(frequency_values):
-        raise ValueError(
-            "The cached MVC PB cube does not match the local model frequency axis."
-        )
-
-    primary_beam = primary_beam.transpose(
-        "time",
-        "frequency",
-        "polarization",
-        "l",
-        "m",
-    )
-
-    if model_cube.shape != primary_beam.shape:
-        raise ValueError(
-            "The reconstructed MVC model cube and cached primary "
-            "beam have incompatible shapes: "
-            f"model={model_cube.shape}, PB={primary_beam.shape}."
-        )
-
-    if "PRIMARY_BEAM" not in model_xds:
-        raise KeyError(
-            "MVC model prediction requires the effective PRIMARY_BEAM carried "
-            "with the Taylor model."
-        )
-
-    effective_primary_beam = model_xds["PRIMARY_BEAM"]
-    if "frequency" not in effective_primary_beam.dims:
-        raise ValueError("MVC effective PRIMARY_BEAM must contain frequency.")
-    if effective_primary_beam.sizes["frequency"] != 1:
-        raise ValueError("MVC effective PRIMARY_BEAM must have one frequency plane.")
-
-    effective_primary_beam = effective_primary_beam.isel(
-        frequency=0,
-        drop=True,
-    ).transpose("time", "polarization", "l", "m")
-
-    model_cube = apply_mvc_primary_beam_convention(
-        model_cube,
-        primary_beam,
-        effective_primary_beam,
-    )
-
-    mvc_xds = model_xds.drop_vars(
-        list(model_xds.data_vars),
-        errors="ignore",
-    ).copy(deep=False)
-
-    if "taylor_term" in mvc_xds.dims:
-        mvc_xds = mvc_xds.drop_dims(
-            "taylor_term",
-            errors="ignore",
-        )
-
-    mvc_xds = mvc_xds.assign_coords(frequency=frequency_values)
-
-    mvc_xds["SKY_MODEL_MVC"] = xr.DataArray(
-        model_cube.data,
-        dims=(
-            "time",
-            "frequency",
-            "polarization",
-            "l",
-            "m",
-        ),
-        coords={
-            "time": model_cube.coords["time"],
-            "frequency": frequency_values,
-            "polarization": model_cube.coords["polarization"],
-            "l": model_cube.coords["l"],
-            "m": model_cube.coords["m"],
-        },
-    )
-
-    modify_data_groups_xds(
-        mvc_xds,
-        data_group_out_name=image_data_group_name,
-        data_group_out={
-            "sky": "SKY_MODEL_MVC",
-        },
-        description=(
-            "MVC model converted from the common effective-beam convention "
-            "to the channel-dependent primary-beam convention."
-        ),
-    )
-
-    mvc_xds = transform_polarization_basis(
-        mvc_xds,
-        new_polarization_basis=(instrument_polarization_basis),
-        overwrite=True,
-    )
-
-    complex_dtype = np.complex64 if single_precision_image else np.complex128
-
-    mvc_xds = fft_norm_img_xds(
-        mvc_xds,
-        image_params=image_params,
-        image_data_group_in_name=(image_data_group_name),
-        image_data_group_out_name=(image_data_group_name),
-        image_data_group_out_modified={
-            "visibility": "VISIBILITY_MODEL",
-        },
-        image_data_variables_keep=["sky"],
-        processing_function_threads=(processing_function_threads),
-        fft_backend=fft_backend,
-        complex_dtype=complex_dtype,
-    )
-
-    return mvc_xds
+###############################################################################
+# Residual updates and observed-grid caching
+###############################################################################
 
 
 def form_residual_grid_from_cache(
@@ -1266,6 +1432,14 @@ def residual_update_continuum_single_field(
 
     Parameters
     ----------
+    specmode : {"mfs", "mvc"}
+        Select Taylor UV gridding or frequency-resolved MVC processing.
+    primary_beam_xds : xarray.Dataset, optional
+        Cached primary beam for this MVC partition.
+    observed_visibility_grid_xds : xarray.Dataset, optional
+        Cached observed UV planes for this MVC partition.
+    model_xds : xarray.Dataset, optional
+        Accumulated image-domain Taylor model used for MVC prediction.
     ps_xdt : xarray.DataTree
         Visibility data for this frequency chunk.
 
@@ -1301,17 +1475,9 @@ def residual_update_continuum_single_field(
         Logical image products retained in the returned dataset.
 
     visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
-        MFS residual-update storage policy for the observed-data visibility grid.
-        ``"in_memory"`` retains the globally reduced observed-data Taylor UV
-        grid from the first cycle; later map tasks grid only the predicted-model
-        contribution, and the append node subtracts it from the cached observed
-        grid before the inverse FFT. ``"in_place"`` persists that same reduced
-        grid in a temporary group in the image Zarr store and reloads it in each
-        append node. ``"recompute"`` reloads the original observed visibilities
-        and grids their visibility-domain residual during every residual-update
-        cycle. Caching currently applies only to MFS; MVC requires
-        ``"recompute"``.
-
+        Cache observed UV grids in memory or the image store, or recompute
+        residual visibilities each cycle. MFS caches reduced Taylor grids;
+        MVC caches each map task's frequency planes.
     is_n_iter_0 : bool, optional
         Indicates whether this is the first imaging cycle.
 
@@ -1328,8 +1494,8 @@ def residual_update_continuum_single_field(
     Returns
     -------
     img_xds : xarray.Dataset
-        Chunk-local continuum dataset containing the UV-domain products required
-        by the GraphViper reduce stage.
+        Chunk-local MFS UV products or MVC frequency images for subsequent
+        map-local Taylor conversion.
 
     timing_df : pandas.DataFrame
         Timing summary for the setup (when applicable) and residual-update
@@ -1586,7 +1752,7 @@ def residual_update_continuum_single_field(
 
 
 ###############################################################################
-# Processing Function level functionality related to the model update
+# Convergence statistics and model updates
 ###############################################################################
 
 
@@ -1678,7 +1844,7 @@ def model_update_mtmfs_single_field(
     image_data_group_in_name="residual",
     image_data_group_out_name="model",
 ):
-    """Perform one continuum model-update model update.
+    """Perform one continuum model update.
 
     This function implements the current continuum deconvolution backend used by
     the distributed MT-MFS imaging workflow. Until a native MT-MFS deconvolver is
@@ -1711,8 +1877,8 @@ def model_update_mtmfs_single_field(
     SKY_MODEL[taylor_term=0]
 
     Only the zeroth Taylor coefficient is modified during the model update.
-    Higher-order Taylor model terms are intentionally left unchanged and are
-    updated indirectly through the subsequent imaging cycle.
+    Higher-order model terms remain unchanged; subsequent residual updates
+    recalculate the residual Taylor terms.
 
     Parameters
     ----------
@@ -2073,107 +2239,116 @@ def model_update_mtmfs_single_field(
     return deconvolve_dict, return_df
 
 
-###############################################################################
-# Processing function level functionality to initialize and finish imaging
-###############################################################################
-
-
-def primary_beam_correct_restored_continuum(
-    img_xds,
-    *,
-    pblimit=0.2,
-    primary_beam_name="PRIMARY_BEAM",
-    restored_data_group_name="restored",
-    output_data_group_name="restored_pbcor",
-    output_variable_name="SKY_RESTORED_PBCOR",
+def accumulate_continuum_model(
+    model_increment_xds,
+    previous_model_xds=None,
+    specmode="mfs",
 ):
-    """PB-correct the restored Taylor-zero continuum image.
+    """Create the accumulated continuum model for the next residual update.
 
-    Only the final restored reference-frequency intensity image is corrected.
-    The model, residual Taylor stack, higher Taylor terms, and model-update
-    calculations remain in the apparent-sky convention.
+    The model-update backend returns the initial model during the first cycle
+    and a model increment during every later cycle.  This helper normalizes
+    those two cases into one persistent model-state dataset.  It deliberately
+    performs positional array addition, matching the historical driver-side
+    accumulation after validating dimensions and shapes.
+
+    Parameters
+    ----------
+    model_increment_xds : xarray.Dataset
+        Image dataset returned by the current model-update cycle. It must
+        contain ``SKY_MODEL``. During the first MVC cycle it must also contain
+        the singleton effective ``PRIMARY_BEAM``.
+    previous_model_xds : xarray.Dataset, optional
+        Accumulated model returned by the preceding append node. If omitted,
+        the current model is copied as the initial accumulated state.
+    specmode : {"mfs", "mvc"}, default ``"mfs"``
+        Continuum execution mode. MVC retains the effective primary beam with
+        the accumulated Taylor model.
+
+    Returns
+    -------
+    xarray.Dataset
+        Independent, in-memory accumulated model state containing
+        ``SKY_MODEL`` and, for MVC, ``PRIMARY_BEAM``.
+
+    Raises
+    ------
+    TypeError
+        If either supplied model object is not an xarray dataset.
+    KeyError
+        If a required model or MVC primary-beam variable is absent.
+    ValueError
+        If the mode is unsupported or the increment layout differs from the
+        previous accumulated model.
     """
-    import numpy as np
     import xarray as xr
 
-    from astroviper.utils.data_group_tools import modify_data_groups_xds
-
-    if not 0.0 <= float(pblimit) < 1.0:
-        raise ValueError(f"pblimit must satisfy 0 <= pblimit < 1; received {pblimit}.")
-
-    data_groups = img_xds.attrs.get("data_groups", {})
-
-    if restored_data_group_name not in data_groups:
-        raise KeyError(f"Restored data group {restored_data_group_name!r} is missing.")
-
-    restored_name = data_groups[restored_data_group_name].get("sky")
-
-    if restored_name is None or restored_name not in img_xds:
-        raise KeyError(
-            f"Restored data group {restored_data_group_name!r} "
-            "does not contain an accessible sky image."
+    if not isinstance(model_increment_xds, xr.Dataset):
+        raise TypeError(
+            "model_increment_xds must be an xarray.Dataset; received "
+            f"{type(model_increment_xds).__name__}."
         )
 
-    if primary_beam_name not in img_xds:
-        raise KeyError(f"Primary-beam variable {primary_beam_name!r} is missing.")
+    specmode = str(specmode).lower()
+    if specmode not in ("mfs", "mvc"):
+        raise ValueError(
+            f"specmode must be either 'mfs' or 'mvc'; received {specmode!r}."
+        )
 
-    restored = img_xds[restored_name]
-    primary_beam = img_xds[primary_beam_name]
+    if "SKY_MODEL" not in model_increment_xds:
+        raise KeyError("model_increment_xds does not contain 'SKY_MODEL'.")
 
-    # Restoration operates on the Taylor-zero continuum plane.  The restored
-    # dataset may retain the model's Taylor axis for bookkeeping, but PB
-    # correction is a reference-frequency image product rather than a Taylor
-    # stack, so discard that singleton science selection explicitly.
-    if "taylor_term" in restored.dims:
-        restored = restored.isel(taylor_term=0, drop=True)
+    if previous_model_xds is None:
+        model_variable_names = ["SKY_MODEL"]
+        if specmode == "mvc":
+            model_variable_names.append("PRIMARY_BEAM")
 
-    # The averaged PB should no longer have a frequency axis. This check
-    # catches accidental retention of a chunk-local PB cube.
-    if "frequency" in primary_beam.dims:
-        if primary_beam.sizes["frequency"] != 1:
-            raise ValueError(
-                "The continuum PB correction requires one averaged "
-                "primary beam, not a multi-channel PB cube."
+        missing = [
+            name for name in model_variable_names if name not in model_increment_xds
+        ]
+        if missing:
+            raise KeyError(
+                "The initial continuum model state is missing required "
+                f"variables: {missing}."
             )
 
-        primary_beam = primary_beam.isel(
-            frequency=0,
-            drop=True,
+        return model_increment_xds[model_variable_names].copy(deep=True)
+
+    if not isinstance(previous_model_xds, xr.Dataset):
+        raise TypeError(
+            "previous_model_xds must be an xarray.Dataset; received "
+            f"{type(previous_model_xds).__name__}."
+        )
+    if "SKY_MODEL" not in previous_model_xds:
+        raise KeyError("previous_model_xds does not contain 'SKY_MODEL'.")
+
+    model_increment = model_increment_xds["SKY_MODEL"]
+    previous_model = previous_model_xds["SKY_MODEL"]
+
+    if model_increment.dims != previous_model.dims:
+        raise ValueError(
+            "The continuum model increment dimensions do not match the "
+            "accumulated model: "
+            f"{model_increment.dims} != {previous_model.dims}."
+        )
+    if model_increment.shape != previous_model.shape:
+        raise ValueError(
+            "The continuum model increment shape does not match the "
+            "accumulated model: "
+            f"{model_increment.shape} != {previous_model.shape}."
         )
 
-    valid = np.isfinite(primary_beam) & (primary_beam >= float(pblimit))
+    accumulated_model_xds = previous_model_xds.copy(deep=True)
+    accumulated_model = accumulated_model_xds["SKY_MODEL"]
+    accumulated_model.data = accumulated_model.data + model_increment.data
+    accumulated_model.attrs = previous_model.attrs.copy()
 
-    corrected = xr.where(
-        valid,
-        restored / primary_beam,
-        np.nan,
-    )
+    return accumulated_model_xds
 
-    corrected.attrs = restored.attrs.copy()
-    corrected.attrs.update(
-        {
-            "description": (
-                "Restored Taylor-zero continuum intensity divided by "
-                "the globally averaged primary beam."
-            ),
-            "primary_beam_corrected": True,
-            "primary_beam_variable": primary_beam_name,
-            "pblimit": float(pblimit),
-        }
-    )
 
-    img_xds[output_variable_name] = corrected
-
-    modify_data_groups_xds(
-        img_xds,
-        data_group_out_name=output_data_group_name,
-        data_group_out={
-            "sky": output_variable_name,
-        },
-        description=("Primary-beam-corrected restored continuum intensity."),
-    )
-
-    return img_xds
+###############################################################################
+# Restoration and primary-beam correction
+###############################################################################
 
 
 def restore_image(
@@ -2547,273 +2722,99 @@ def restore_image(
     return img_xds, timing_df
 
 
-def point_spread_function_gaussian_fit_continuum(
+def primary_beam_correct_restored_continuum(
     img_xds,
-    image_data_group_in_name="residual",
-    image_data_group_out_name="residual",
-    processing_function_threads=1,
+    *,
+    pblimit=0.2,
+    primary_beam_name="PRIMARY_BEAM",
+    restored_data_group_name="restored",
+    output_data_group_name="restored_pbcor",
+    output_variable_name="SKY_RESTORED_PBCOR",
 ):
-    """Fit the restoring beam from the continuum point-spread function.
+    """PB-correct the restored Taylor-zero continuum image.
 
-    This function determines the restoring beam by temporarily projecting the
-    continuum point-spread function onto a one-channel cube representation and
-    reusing the existing cube Gaussian-fitting implementation.
-
-    The procedure is
-
-    continuum image dataset
-        │
-        ├── select PSF Taylor order 0
-        │
-        ▼
-    construct temporary one-channel cube dataset
-    (time, frequency=1, polarization, l, m)
-        │
-        ▼
-    call existing cube Gaussian-fit implementation
-        │
-        ├── fit the restoring beam
-        ├── determine the maximum PSF sidelobe
-        └── return beam-fit statistics
-        │
-        ▼
-    copy the fitted restoring-beam parameters and
-    maximum PSF sidelobe back into the
-    continuum dataset
-
-    Only the zeroth Taylor-order point-spread function is used for the beam fit.
-
-    Parameters
-    ----------
-    img_xds : xarray.Dataset
-        Continuum image dataset containing the point-spread function.
-
-    image_data_group_in_name : str, optional
-        Name of the data group containing the continuum point-spread function.
-
-    image_data_group_out_name : str, optional
-        Name of the data group in which the fitted restoring-beam parameters are
-        registered.
-
-    processing_function_threads : int, optional
-        Number of threads supplied to the Gaussian-fitting backend.
-
-    Returns
-    -------
-    img_xds : xarray.Dataset
-        Continuum dataset with the fitted restoring-beam parameters and maximum
-        PSF sidelobe added.
-
-    return_df : pandas.DataFrame
-        Timing information returned by the Gaussian-fitting backend.
-
-    Notes
-    -----
-    This function is a compatibility layer around the existing cube
-    ``point_spread_function_gaussian_fit`` implementation. The restoring beam is
-    determined exclusively from the zeroth Taylor-order point-spread function,
-    which is the standard convention for MT-MFS imaging."""
-
-    import time
-    from copy import deepcopy
-
+    Only the final restored reference-frequency intensity image is corrected.
+    The model, residual Taylor stack, higher Taylor terms, and model-update
+    calculations remain in the apparent-sky convention.
+    """
     import numpy as np
-    import pandas as pd
     import xarray as xr
 
-    from astroviper.processing_functions.image_analysis.point_spread_function_gaussian_fit import (
-        point_spread_function_gaussian_fit,
-    )
+    from astroviper.utils.data_group_tools import modify_data_groups_xds
 
-    beam_fit_key = "beam_fit_params_point_spread_function"
-    max_sidelobe_key = "max_sidelobe_point_spread_function"
+    if not 0.0 <= float(pblimit) < 1.0:
+        raise ValueError(f"pblimit must satisfy 0 <= pblimit < 1; received {pblimit}.")
 
-    # ------------------------------------------------------------------
-    # Validate the requested data groups and obtain the PSF variable.
-    # ------------------------------------------------------------------
     data_groups = img_xds.attrs.get("data_groups", {})
 
-    if image_data_group_in_name not in data_groups:
+    if restored_data_group_name not in data_groups:
+        raise KeyError(f"Restored data group {restored_data_group_name!r} is missing.")
+
+    restored_name = data_groups[restored_data_group_name].get("sky")
+
+    if restored_name is None or restored_name not in img_xds:
         raise KeyError(
-            f"Input data group {image_data_group_in_name!r} was not found. "
-            f"Available groups are {list(data_groups)}."
+            f"Restored data group {restored_data_group_name!r} "
+            "does not contain an accessible sky image."
         )
 
-    input_group = data_groups[image_data_group_in_name]
+    if primary_beam_name not in img_xds:
+        raise KeyError(f"Primary-beam variable {primary_beam_name!r} is missing.")
 
-    if "point_spread_function" not in input_group:
-        raise KeyError(
-            "'point_spread_function' was not found in data group "
-            f"{image_data_group_in_name!r}."
-        )
+    restored = img_xds[restored_name]
+    primary_beam = img_xds[primary_beam_name]
 
-    psf_name = input_group["point_spread_function"]
+    # Restoration operates on the Taylor-zero continuum plane.  The restored
+    # dataset may retain the model's Taylor axis for bookkeeping, but PB
+    # correction is a reference-frequency image product rather than a Taylor
+    # stack, so discard that singleton science selection explicitly.
+    if "taylor_term" in restored.dims:
+        restored = restored.isel(taylor_term=0, drop=True)
 
-    if psf_name not in img_xds:
-        raise KeyError(
-            f"PSF variable {psf_name!r}, registered in data group "
-            f"{image_data_group_in_name!r}, was not found in img_xds."
-        )
+    # The averaged PB should no longer have a frequency axis. This check
+    # catches accidental retention of a chunk-local PB cube.
+    if "frequency" in primary_beam.dims:
+        if primary_beam.sizes["frequency"] != 1:
+            raise ValueError(
+                "The continuum PB correction requires one averaged "
+                "primary beam, not a multi-channel PB cube."
+            )
 
-    psf_da = img_xds[psf_name]
-
-    if "psf_taylor_order" not in psf_da.dims:
-        raise ValueError(
-            f"Continuum PSF {psf_name!r} must contain the dimension "
-            f"'psf_taylor_order'. Found dimensions {psf_da.dims}."
-        )
-
-    if psf_da.sizes["psf_taylor_order"] < 1:
-        raise ValueError(f"Continuum PSF {psf_name!r} has no Taylor-order entries.")
-
-    required_psf_dims = {"time", "polarization", "l", "m"}
-    missing_psf_dims = required_psf_dims.difference(psf_da.dims)
-
-    if missing_psf_dims:
-        raise ValueError(
-            f"Continuum PSF {psf_name!r} is missing required dimensions "
-            f"{sorted(missing_psf_dims)}. Found dimensions {psf_da.dims}."
-        )
-
-    # ------------------------------------------------------------------
-    # Select the globally reduced zeroth-order PSF.
-    # ------------------------------------------------------------------
-    psf0_da = psf_da.isel(psf_taylor_order=0, drop=True)
-
-    # The numerical frequency value is not used by the fit itself, but the
-    # cube routine requires a one-element frequency coordinate.
-    continuum_metadata = img_xds.attrs.get("continuum_imaging", {})
-
-    if "reference_frequency_hz" in continuum_metadata:
-        reference_frequency_hz = float(continuum_metadata["reference_frequency_hz"])
-    elif "frequency" in img_xds.coords and img_xds.frequency.size > 0:
-        reference_frequency_hz = float(
-            np.asarray(img_xds.frequency.values).reshape(-1)[0]
-        )
-    else:
-        # This is only a coordinate label for the temporary cube.
-        reference_frequency_hz = 0.0
-
-    frequency_coord = np.asarray(
-        [reference_frequency_hz],
-        dtype=np.float64,
-    )
-
-    cube_psf_da = psf0_da.expand_dims(
-        frequency=frequency_coord,
-    ).transpose(
-        "time",
-        "frequency",
-        "polarization",
-        "l",
-        "m",
-    )
-
-    # ------------------------------------------------------------------
-    # Build a minimal, one-frequency cube dataset.
-    # ------------------------------------------------------------------
-    cube_xds = xr.Dataset(
-        {
-            psf_name: cube_psf_da,
-        }
-    )
-
-    cube_xds.attrs = deepcopy(img_xds.attrs)
-    cube_xds.attrs["type"] = "image_dataset"
-
-    # The Gaussian fitter only needs the PSF registration. Using the same
-    # input and output group lets it add its beam-fit entries to this group.
-    cube_xds.attrs["data_groups"] = {
-        image_data_group_out_name: {
-            "point_spread_function": psf_name,
-        }
-    }
-
-    # ------------------------------------------------------------------
-    # Run the existing cube Gaussian-fit routine.
-    #
-    # The routine modifies and returns only the xarray.Dataset; it does not
-    # return a timing dataframe.
-    # ------------------------------------------------------------------
-    start = time.time()
-
-    cube_xds = point_spread_function_gaussian_fit(
-        cube_xds,
-        image_data_group_in_name=image_data_group_out_name,
-        image_data_group_out_name=image_data_group_out_name,
-        processing_function_threads=processing_function_threads,
-    )
-
-    return_df = pd.DataFrame(
-        {
-            "T_psf_fit": [time.time() - start],
-        }
-    )
-
-    cube_group = cube_xds.attrs["data_groups"][image_data_group_out_name]
-
-    if beam_fit_key not in cube_group:
-        raise KeyError(
-            f"The Gaussian fitter did not register {beam_fit_key!r} "
-            f"in data group {image_data_group_out_name!r}."
-        )
-
-    if max_sidelobe_key not in cube_group:
-        raise KeyError(
-            f"The Gaussian fitter did not register {max_sidelobe_key!r} "
-            f"in data group {image_data_group_out_name!r}."
-        )
-
-    beam_fit_name = cube_group[beam_fit_key]
-    max_sidelobe_name = cube_group[max_sidelobe_key]
-
-    if beam_fit_name not in cube_xds:
-        raise KeyError(
-            f"The fitted-beam variable {beam_fit_name!r} is not present "
-            "in the temporary cube dataset."
-        )
-
-    if max_sidelobe_name not in cube_xds:
-        raise KeyError(
-            f"The maximum-sidelobe variable {max_sidelobe_name!r} is not "
-            "present in the temporary cube dataset."
-        )
-
-    # ------------------------------------------------------------------
-    # Copy the one-channel fit back without retaining a frequency dimension.
-    #
-    # This avoids conflicting with any existing continuum frequency
-    # coordinate. The continuum restore wrapper should expand these arrays
-    # back to one frequency channel when constructing its temporary cube.
-    # ------------------------------------------------------------------
-    beam_fit_da = cube_xds[beam_fit_name]
-
-    if "frequency" in beam_fit_da.dims:
-        beam_fit_da = beam_fit_da.isel(frequency=0, drop=True)
-
-    max_sidelobe_da = cube_xds[max_sidelobe_name]
-
-    if "frequency" in max_sidelobe_da.dims:
-        max_sidelobe_da = max_sidelobe_da.isel(
+        primary_beam = primary_beam.isel(
             frequency=0,
             drop=True,
         )
 
-    if "beam_params_label" in cube_xds.coords:
-        img_xds = img_xds.assign_coords(
-            beam_params_label=cube_xds.coords["beam_params_label"],
-        )
+    valid = np.isfinite(primary_beam) & (primary_beam >= float(pblimit))
 
-    img_xds[beam_fit_name] = beam_fit_da
-    img_xds[max_sidelobe_name] = max_sidelobe_da
+    corrected = xr.where(
+        valid,
+        restored / primary_beam,
+        np.nan,
+    )
 
-    # Create the output group if input and output names differ.
-    if image_data_group_out_name not in img_xds.attrs["data_groups"]:
-        img_xds.attrs["data_groups"][image_data_group_out_name] = deepcopy(input_group)
+    corrected.attrs = restored.attrs.copy()
+    corrected.attrs.update(
+        {
+            "description": (
+                "Restored Taylor-zero continuum intensity divided by "
+                "the globally averaged primary beam."
+            ),
+            "primary_beam_corrected": True,
+            "primary_beam_variable": primary_beam_name,
+            "pblimit": float(pblimit),
+        }
+    )
 
-    output_group = img_xds.attrs["data_groups"][image_data_group_out_name]
+    img_xds[output_variable_name] = corrected
 
-    output_group[beam_fit_key] = beam_fit_name
-    output_group[max_sidelobe_key] = max_sidelobe_name
+    modify_data_groups_xds(
+        img_xds,
+        data_group_out_name=output_data_group_name,
+        data_group_out={
+            "sky": output_variable_name,
+        },
+        description=("Primary-beam-corrected restored continuum intensity."),
+    )
 
-    return img_xds, return_df
+    return img_xds

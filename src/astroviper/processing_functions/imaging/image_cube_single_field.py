@@ -52,10 +52,12 @@ def imaging_preparation_single_field(
         the sky model). Every limit and threshold is applied independently to
         each ``(time, frequency, polarization)`` plane: a plane stops when it
         meets its own criterion. The imaging cycle loop runs separately for
-        every frequency channel (the node task images one channel at a time),
+        every frequency channel in cube imaging (one channel per node task),
         so a channel's cycles continue until all of its (time, polarization)
         planes have stopped, and a channel that has stopped does no further
-        residual updates while the others carry on. The CASA ``tclean``
+        residual updates while the others carry on. Continuum instead updates
+        Taylor-zero planes after reduction across frequency partitions; higher
+        Taylor terms have no independent CLEAN loop. The CASA ``tclean``
         equivalent is given in brackets. Keys:
 
         - ``max_iter`` [CASA ``niter``] : Maximum number of deconvolution
@@ -253,10 +255,12 @@ def image_cube_single_field(
         the sky model). Every limit and threshold is applied independently to
         each ``(time, frequency, polarization)`` plane: a plane stops when it
         meets its own criterion. The imaging cycle loop runs separately for
-        every frequency channel (the node task images one channel at a time),
+        every frequency channel in cube imaging (one channel per node task),
         so a channel's cycles continue until all of its (time, polarization)
         planes have stopped, and a channel that has stopped does no further
-        residual updates while the others carry on. The CASA ``tclean``
+        residual updates while the others carry on. Continuum instead updates
+        Taylor-zero planes after reduction across frequency partitions; higher
+        Taylor terms have no independent CLEAN loop. The CASA ``tclean``
         equivalent is given in brackets. Keys:
 
         - ``max_iter`` [CASA ``niter``] : Maximum number of deconvolution

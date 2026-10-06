@@ -75,9 +75,7 @@ def _write_task_kill_switch_log(
     the path written (or a placeholder string if writing failed). Used by the
     ``task_time_kill_switch_seconds`` watchdog before it raises to abort the run.
 
-    ``image_store`` is retained in the node-task API for compatibility and as a
-    convenient location for watchdog logs, even though this continuum map task
-    does not write its image products to disk.
+    ``image_store`` determines the log directory.
     """
     import os
     import time as _time
@@ -973,7 +971,8 @@ def residual_update_continuum_single_field(
     This node task constructs the per-chunk image dataset, loads the corresponding
     visibility partition, and calls the continuum residual processing function.
 
-    Unlike the cube imaging node task, this function performs no image writing.
+    This node can write temporary weight, visibility-grid, and PB caches;
+    final image publication occurs in the append node.
     MFS returns chunk-local UV-domain products for numerical reduction. MVC
     normalizes and inverse-transforms its exclusively owned channel grids,
     applies the channel primary-beam convention, and forms additive Taylor
@@ -993,6 +992,18 @@ def residual_update_continuum_single_field(
 
     Parameters
     ----------
+    specmode : {"mfs", "mvc"}
+        Select Taylor UV gridding or frequency-resolved MVC processing.
+    model_xds : xarray.Dataset, optional
+        Accumulated image-domain Taylor model used for MVC prediction.
+    weight_cache_mapping : dict, optional
+        Task-indexed prepared imaging weights.
+    primary_beam_xds : xarray.Dataset, optional
+        Cached primary beam for this MVC partition.
+    observed_visibility_grid_xds : xarray.Dataset, optional
+        Task-local cached observed visibility grid used by later residual-update
+        cycles. The distributed application supplies this only for in-memory MVC
+        caching; other modes and first cycles leave it unset.
     image_params : dict
         Image geometry and output coordinates: ``image_size``, ``cell_size``,
         ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
@@ -1113,7 +1124,7 @@ def residual_update_continuum_single_field(
         Dictionary containing
 
         ``"image"``
-            Chunk-local continuum UV-domain products.
+            MFS Taylor UV products or additive MVC Taylor contributions.
 
         ``"timing_node_tasks"``
             One-row dataframe summarizing task timing information."""
@@ -1784,7 +1795,8 @@ def degrid_imaging_weights_continuum_node(
     weighting graph. It loads one processing-set partition, selects the
     corresponding planes from the globally reduced weight-density products,
     degrids the global Briggs weighting solution onto the local visibility
-    samples, and returns only the resulting imaging-weight arrays.
+    samples, and returns the weights or persists them in the Processing Set
+    according to ``weight_memory_mode``, together with timing metadata.
 
     No density gridding or Briggs-factor calculation is performed here.
 
@@ -2653,8 +2665,8 @@ def continuum_minor_cycle_node(
 
     The node performs the following steps:
 
-    1. converts the reduced UV-domain continuum products into image-domain
-       quantities by applying the global inverse FFT;
+    1. inverse FFTs reduced MFS UV grids, or finalizes reduced MVC Taylor
+       contributions;
     2. normalizes the residual image and PSF using the accumulated imaging-weight
        products;
     3. converts the image from the instrument correlation basis to the requested
@@ -2666,7 +2678,7 @@ def continuum_minor_cycle_node(
        finalizes the accumulated model using this same prepared residual.
 
     The graph topology stays fixed: the append chooses the branch at runtime.
-    Restoration is only performed after refreshed-residual stopping is confirmed.
+    Optional restoration follows refreshed-residual stopping confirmation.
 
     The accumulated image-domain model and the optional Fourier-domain MFS model
     are returned to the distributed application as state objects. The application
@@ -2807,30 +2819,12 @@ def continuum_finalize_node(
     input_data,
     input_params,
 ):
-    """Finalize the continuum imaging after the last imaging cycle.
+    """Write final continuum products, optionally restoring the model.
 
-    The continuum append calls this only after verifying a stop on the fresh
-    residual. With ``prepared_continuum_image=True``, it reuses that image
-    without another FFT or normalization. Direct calls can still prepare
-    reduced products. It converts the globally accumulated continuum products into the
-    final image-domain representation and produces the restored continuum image.
-
-    The node performs the following steps:
-
-    1. converts the reduced UV-domain continuum products into the final residual
-       image by applying the global inverse FFT;
-    2. converts the image from the instrument correlation basis to the requested
-       Stokes basis;
-    3. uses the cached static imaging products (for example, the primary beam and
-       fitted restoring beam parameters);
-    4. restores the image using the accumulated sky model already provided by the
-       distributed application;
-    5. removes intermediate products that are not requested in the final output.
-
-    Unlike the continuum model-update node, this function performs no
-    deconvolution, no iteration-controller updates, and no distributed
-    computation. It operates only on the single globally reduced continuum dataset
-    produced by the final GraphViper reduce stage.
+    Reuse the verified residual when ``prepared_continuum_image=True``.
+    Otherwise prepare reduced MFS UV grids or MVC Taylor contributions first.
+    Reuse static products and remove unrequested intermediates; do not perform
+    another model update or change iteration budgets.
     """
 
     from astroviper.utils.data_group_tools import modify_data_groups_xds
@@ -2961,7 +2955,7 @@ def model_update_continuum_single_field(
             │
             ├── updates the iteration controller
             ├── determines the model-update parameters
-            ├── calls model_update_cycle_mtmfs_single_field
+            ├── calls model_update_mtmfs_single_field
             ├── updates the continuum sky model
             └── updates convergence information
             │

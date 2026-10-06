@@ -306,10 +306,9 @@ def make_point_spread_function_mvc_single_field(
 ):
     """Grid a frequency-resolved PSF cube for an MVC map partition.
 
-    Unlike direct MFS, MVC does not apply Taylor weights during gridding.  Input
-    channels map to UV-sampling planes with the shared cube nearest-channel policy.  The distributed
-    reducer assembles these planes globally, and the append node converts the
-    normalized channel PSF cube into ``2 * nterms - 1`` Taylor Hessian planes.
+    Unlike direct MFS, MVC does not apply Taylor weights during gridding.  Channels use the shared cube nearest-channel policy. Map tasks subsequently
+    FFT these planes and form ``2*nterms-1`` Taylor Hessian contributions;
+    reduction combines the contributions before global normalization.
 
     Returns
     -------
@@ -403,7 +402,7 @@ def make_point_spread_function_continuum_single_field(
     fft_backend="pyfftw",
     complex_dtype=None,
 ):
-    """Build the MT-MFS Taylor PSF stack for one continuum-imaging chunk.
+    """Build the MT-MFS Taylor UV-sampling stack for one continuum-imaging chunk.
 
     For ``nterms`` sky-model Taylor coefficients, this function produces
 
@@ -418,11 +417,11 @@ def make_point_spread_function_continuum_single_field(
     -------
     img_xds : xarray.Dataset
         Image dataset containing ``UV_SAMPLING``,
-        ``UV_SAMPLING_NORMALIZATION``, and ``POINT_SPREAD_FUNCTION`` with a
+        ``UV_SAMPLING_NORMALIZATION`` with a
         ``psf_taylor_order`` dimension.
     return_df : pandas.DataFrame
         One-row timing frame with ``T_gcf``, ``T_vis_mask``,
-        ``T_uv_sampling_grid``, and ``T_fft_norm``.
+        and ``T_uv_sampling_grid``.
     """
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
         create_prolate_spheroidal_kernel_1D,

@@ -25,8 +25,8 @@ def add_visibility_grid_mvc_single_field(
 
     MVC retains the frequency axis through gridding and image formation.
     Therefore, unlike direct MT-MFS gridding, this function applies no Taylor
-    weights and does not collapse input channels onto Taylor UV planes. Input
-    channel ``i`` is mapped directly to output frequency plane ``i``.
+    weights and does not collapse input channels onto Taylor UV planes. Channels use the shared cube nearest-channel mapping, including
+    many-to-one assignments.
 
     The generated arrays have dimensions
 
@@ -37,11 +37,7 @@ def add_visibility_grid_mvc_single_field(
     ``VISIBILITY_NORMALIZATION(time, frequency, polarization)``.
 
     Repeated calls accumulate contributions from multiple measurement sets into
-    the existing output arrays. All measurement sets accumulated into the same
-    image dataset must have frequency coordinates matching the image frequency
-    coordinate. A measurement-set child may cover a unique subset of the image
-    frequency axis; repeated calls accumulate different child subsets into the
-    shared image cube.
+    the existing output arrays. Each measurement-set child is mapped onto the output frequency axis.
 
     Parameters
     ----------
@@ -55,7 +51,7 @@ def add_visibility_grid_mvc_single_field(
 
     img_xds : xarray.Dataset
         Image dataset receiving the frequency-resolved MVC UV grids. Its
-        ``frequency`` coordinate must contain every frequency in ``ms_xds``.
+        ``frequency`` coordinate defines the output planes.
 
     ms_data_group_in_name : str, optional
         Measurement-set data group containing the logical roles
@@ -94,13 +90,10 @@ def add_visibility_grid_mvc_single_field(
     This function only performs the frequency-resolved gridding stage of MVC.
     The global workflow must subsequently
 
-    1. reduce matching frequency planes across map tasks;
-    2. inverse Fourier-transform and normalize the frequency cube;
-    3. divide each channel image by its corresponding primary beam;
-    4. fit the corrected image cube into Taylor terms.
+    1. inverse FFT each map task's frequency planes;
+    2. apply channel-dependent PB correction and form Taylor contributions;
+    3. reduce those contributions and normalize the global Taylor products.
 
-    Measurement-set frequencies use the shared cube nearest-channel mapping
-    onto the image frequency axis, including many-to-one assignments.
     """
     from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
         prolate_spheroidal_grid,

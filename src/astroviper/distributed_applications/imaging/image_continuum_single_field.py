@@ -564,42 +564,42 @@ def compute_continuum_graph(
 
     map -> reduce -> append_node
 
-     Parameters
-     ----------
-     ps_xdt
-         Processing set used as the map input.
-     node_task_data_mapping
-         Mapping between processing-set coordinates and map-task coordinates.
-     cycle_input_params : dict
-         Parameters forwarded to each residual imaging-cycle map task.
-     reduce_input_params : dict
-         Parameters forwarded to :func:`combine_continuum_chunks`.
-     disk_chunk_sizes : dict or None
-         Native disk-level chunk sizes used by the GraphVIPER map stage.
-     processing_set_data_group_name : str
-         Processing-set data group loaded by each map task.
-     monitor_resources_seconds : float or None
-         Resource-monitor sampling interval for map tasks.
-     task_priorities
-         Optional GraphVIPER task priorities.
-     reduce_mode : str
-         GraphVIPER reduction mode.
-     reduce_n_batch : int
-         Number of inputs combined per reduction batch.
-     append_node : callable, optional
-         Global node executed after reduction.
-     append_input_params : dict, optional
-         Parameters forwarded to ``append_node``.
+    Parameters
+    ----------
+    ps_xdt
+        Processing set used as the map input.
+    node_task_data_mapping
+        Mapping between processing-set coordinates and map-task coordinates.
+    cycle_input_params : dict
+        Parameters forwarded to each residual imaging-cycle map task.
+    reduce_input_params : dict
+        Parameters forwarded to :func:`combine_continuum_chunks`.
+    disk_chunk_sizes : dict or None
+        Native disk-level chunk sizes used by the GraphVIPER map stage.
+    processing_set_data_group_name : str
+        Processing-set data group loaded by each map task.
+    monitor_resources_seconds : float or None
+        Resource-monitor sampling interval for map tasks.
+    task_priorities
+        Optional GraphVIPER task priorities.
+    reduce_mode : str
+        GraphVIPER reduction mode.
+    reduce_n_batch : int
+        Number of inputs combined per reduction batch.
+    append_node : callable, optional
+        Global node executed after reduction.
+    append_input_params : dict, optional
+        Parameters forwarded to ``append_node``.
 
-     Returns
-     -------
-     dict
-         Computed result of the map/reduce or map/reduce/append graph.
+    Returns
+    -------
+    tuple
+        Graph result and graph-construction/execution timing dictionary.
 
-     Raises
-     ------
-     ValueError
-         If only one of ``append_node`` and ``append_input_params`` is supplied.
+    Raises
+    ------
+    ValueError
+        If only one of ``append_node`` and ``append_input_params`` is supplied.
     """
     import time
 
@@ -677,6 +677,12 @@ def prepare_continuum_imaging_weights_global(
     reduce_mode="tree",
     reduce_n_batch=2,
 ):
+    """Prepare global weights with density-reduction and lookup graphs.
+
+    Collapse density frequency planes before reduction, calculate Briggs
+    factors, then attach or persist each partition's imaging weights.
+    Return the weight mapping and graph timings.
+    """
     import time
 
     import dask
@@ -2585,36 +2591,111 @@ def image_continuum_single_field(
     task_time_kill_switch_seconds: float | None = None,
     monitor_resources_seconds: float | None = None,
 ) -> dict:
-    """
-    Distributed MT-MFS continuum imaging.
+    """Run distributed MFS or MVC continuum imaging.
 
-    Pipeline
-    --------
-
-    Initialization
-        - prepare static imaging quantities
-        - build Dask graph
-
-    Major cycle
-        - predict model visibilities
-        - compute residual visibilities
-        - grid Taylor residuals
-        - reduce across frequency partitions
-        - inverse FFT
-        - model update
-
-    Finalization
-        - final residual image
-        - restoration
-        - write products
-
-    Unlike cube imaging, FFTs are performed only once after each
-    model update. Workers operate directly on UV-domain Taylor grids.
-    The current Taylor-zero compatibility minor loop accepts only
-    ``deconvolver="hogbom"`` and uses the shared C++ Högbom implementation.
+    MFS reduces Taylor UV grids before the global inverse FFT. MVC performs
+    channel FFTs and PB correction in map tasks, then reduces Taylor
+    contributions. Both accept only ``deconvolver="hogbom"``, update Taylor term zero, and verify
+    refreshed residuals before finalization. Restoration is optional.
 
     Parameters
     ----------
+    ps_store : str
+        Input Processing Set and output image-store paths.
+    image_store : str
+        Path/URL of the on-disk Zarr image cube.
+    pbcor : bool
+        Request PB-corrected output and model restoration, respectively.
+    restore : bool
+        If ``True`` produce a restored image after deconvolution: the model
+        convolved with the clean beam (the Gaussian fit to the PSF) plus the
+        residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
+    scan_intents : list of str or str, optional
+        Visibility selection by intent and field.
+    field_name : list of str or str, optional
+        Visibility selection by intent and field.
+    memory_mode : object
+        Processing-set loading and cache configuration forwarded to map tasks.
+    cache_directory : object
+        Processing-set loading and cache configuration forwarded to map tasks.
+    clear_cache : object
+        Processing-set loading and cache configuration forwarded to map tasks.
+    write_visibility_model_to_ps : bool
+        Request persistence of predicted visibilities and imaging weights.
+    write_imaging_weights_to_ps : bool
+        Request persistence of predicted visibilities and imaging weights.
+    compute_backend : object
+        Reserved interface options; this continuum driver executes with Dask.
+    mpi_cluster_setup : object
+        Reserved interface options; this continuum driver executes with Dask.
+    reduce_mode : str and int
+        Reduction topology and batch size.
+    reduce_n_batch : str and int
+        Reduction topology and batch size.
+    task_time_kill_switch_seconds : float, optional
+        Node runtime limit and resource sampling interval.
+    monitor_resources_seconds : float, optional
+        Node runtime limit and resource sampling interval.
+    image_params : dict
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
+    imaging_weights_params : dict
+        Weighting scheme configuration: ``weighting`` (``"natural"`` or
+        ``"briggs"``) and the Briggs ``robust`` parameter.
+    specmode : {"mfs", "mvc"}
+        Taylor UV gridding or channel-image Taylor construction.
+    deconvolver : str
+        Deconvolution algorithm for the model update. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
+        (C++, threaded across *and* within planes -- faster when there are
+        few planes, e.g. single-channel imaging) or ``"asp"``. Long Högbom
+        cycles are checked in CASA-sized batches and stop a plane if its peak
+        becomes non-finite or rises more than 10% above the smallest measured
+        peak.
+    pblimit : float
+        PB cutoff for MVC channel correction and final PB correction.
+    instrument_polarization_basis : str
+        Correlation (instrument) polarization basis the gridding is performed in:
+        ``"linear"`` or ``"circular"``. The residual update grids and degrids the
+        correlations of this basis and the model update deconvolves in the
+        Stokes basis, in which the image is written. The Stokes planes requested
+        in ``image_params["polarization_coords"]`` fix the correlations that are
+        loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
+        ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
+        is used only if none of its loaded correlations is flagged.
+    image_data_variables_keep : list of str
+        Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
+        ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+    compressor : object, optional
+        Output Zarr compressor.
+    processing_set_data_group_name : str
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
+    single_precision_image : bool
+        If ``True`` the image-domain arrays (gridded uv grids and sky/PSF/model
+        images) are single precision (``complex64`` / ``float32``) and the model
+        update runs in single precision; the visibilities always stay double
+        precision. If ``False`` the image-domain arrays are double precision.
+    thread_info : dict, optional
+        Resource description used for partition planning.
+    processing_function_threads : int
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
+    n_chunks : int, optional
+        Requested number of map partitions.
+    overwrite : bool
+        Allow replacement of the output image store.
+    vizualize_graph : bool
+        Write graph visualizations.
+    disk_chunk_sizes : dict or str, optional
+        Input chunk sizes; ``"Auto"`` infers native storage chunks.
+    fft_backend : str
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
+    skunk_works : bool
+        Enable the experimental storage path; required for sharded output.
     iteration_control_params : dict
         CLEAN iteration controls. An **imaging cycle** (below simply a cycle)
         is one **residual update** (degrid the model, form residual
@@ -2623,10 +2704,12 @@ def image_continuum_single_field(
         the sky model). Every limit and threshold is applied independently to
         each ``(time, frequency, polarization)`` plane: a plane stops when it
         meets its own criterion. The imaging cycle loop runs separately for
-        every frequency channel (the node task images one channel at a time),
+        every frequency channel in cube imaging (one channel per node task),
         so a channel's cycles continue until all of its (time, polarization)
         planes have stopped, and a channel that has stopped does no further
-        residual updates while the others carry on. The CASA ``tclean``
+        residual updates while the others carry on. Continuum instead updates
+        Taylor-zero planes after reduction across frequency partitions; higher
+        Taylor terms have no independent CLEAN loop. The CASA ``tclean``
         equivalent is given in brackets. Keys:
 
         - ``max_iter`` [CASA ``niter``] : Maximum number of deconvolution
@@ -2734,6 +2817,9 @@ def image_continuum_single_field(
 
     Notes
     -----
+    The continuum Högbom adapter uses float32 for its temporary model-update
+    arrays, independently of the gridding/image precision setting.
+
     Continuum primary beams are selected once from antenna metadata before
     frequency partitioning. ``image_params["primary_beam_model"]`` accepts
     ``"auto"`` (default), ``"airy"`` (physical aperture), or ``"casa_airy"``.
@@ -2744,6 +2830,12 @@ def image_continuum_single_field(
     selects the VLA band at its reference frequency; MVC uses the first image
     channel and retains that selection across all partitions. These choices
     affect only continuum imaging; cube imaging keeps its existing beam path.
+
+    Returns
+    -------
+    dict
+        Final node results, deconvolution statistics, and node/graph/driver
+        timings. Image products are written to ``image_store``.
     """
     import time
 

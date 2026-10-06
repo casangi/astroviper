@@ -6,21 +6,9 @@ from astroviper.utils.param_docs import shares_param_docs
 
 
 def _get_reference_frequency_hz(image_params, img_xds):
-    """Resolve the MT-MFS reference frequency in Hz.
-
-    Resolution order:
-
-    1. ``image_params["reference_frequency"]``;
-    2. ``image_params["reference_frequency_hz"]``;
-    3. weighted/unweighted mean is intentionally *not* guessed here;
-    4. if no explicit value is supplied, use the arithmetic mean of the image
-       frequency coordinate as a temporary fallback.
-
-    The fallback keeps the first implementation usable, but callers should
-    normally provide an explicit reference frequency that is common to all map
-    tasks. Otherwise every frequency chunk would choose a different Taylor
-    expansion point, and the chunk-local Taylor products could not be reduced
-    consistently.
+    """Resolve reference_frequency, then reference_frequency_hz, then the
+    arithmetic mean of the image frequencies. Distributed callers must supply
+    one common reference frequency before partitioning.
     """
     if "reference_frequency" in image_params:
         reference_frequency = image_params["reference_frequency"]
@@ -114,6 +102,7 @@ def _attach_continuum_metadata(
     reference_frequency_hz,
     specmode,
 ):
+    """Attach validated Taylor-expansion metadata to the image dataset."""
     img_xds.attrs["continuum_imaging"] = {
         "specmode": specmode,
         "nterms": int(nterms),
@@ -224,37 +213,18 @@ def imaging_setup_continuum_single_field(
     image_data_variables_keep=None,
     image_data_group_out_name="residual",
 ):
-    """Prepare the partition-local static products for continuum MT-MFS imaging.
+    """Prepare static products for one continuum partition.
 
-    This function performs the setup required once for each visibility partition
-    before the first continuum imaging cycle. It prepares all products that are
-    independent of the current sky model and can therefore be reused throughout the
-    imaging-cycle iterations.
-
-    Specifically, this function
-
-    * validates the continuum Taylor-expansion parameters;
-    * attaches continuum metadata to the image dataset;
-    * creates the continuum residual image data group;
-    * verifies that imaging weights have already been prepared and attached to the
-      processing-set partition;
-    * constructs the partition-local Taylor PSF/Hessian products;
-    * constructs the primary beam.
-
-    The dirty/residual Taylor images are intentionally **not** calculated here.
-    They are generated during
-    :func:`residual_cycle_continuum_single_field`.
-
-    Likewise, the restoring-beam fit is intentionally deferred until after the
-    global reduction of the Taylor PSFs. Fitting the beam from a partition-local
-    zeroth-order PSF is not equivalent to fitting the globally accumulated PSF.
-
-    For ``nterms = N``, this function generates ``2N-1`` local PSF/Hessian Taylor
-    orders. For example, ``nterms=2`` produces the local Taylor orders
-    ``H_0``, ``H_1``, and ``H_2``.
+    Require prepared imaging weights, attach continuum metadata, and build
+    the primary beam and UV sampling grids. MFS produces ``2*nterms-1``
+    Taylor sampling planes; MVC retains frequency planes for map-local FFT
+    and Taylor conversion. Residual calculation and global beam fitting follow
+    in later stages.
 
     Parameters
     ----------
+    specmode : {"mfs", "mvc"}
+        Select Taylor UV gridding or frequency-resolved MVC processing.
     ps_xdt : xarray.DataTree or mapping
         Processing-set partition containing the visibility data and previously
         prepared imaging weights.
@@ -293,18 +263,11 @@ def imaging_setup_continuum_single_field(
     Returns
     -------
     img_xds : xarray.Dataset
-        Continuum image dataset containing the partition-local Taylor PSF/Hessian
-        products, primary beam, and continuum metadata.
+        Dataset containing MFS Taylor or MVC frequency UV-sampling products,
+        the primary beam, and continuum metadata.
     return_df : pandas.DataFrame
         One-row timing dataframe summarizing the setup stage.
 
-    Notes
-    -----
-    This function prepares only partition-local quantities. The globally reduced
-    Taylor PSFs, Gaussian restoring-beam fit, inverse FFT, normalization,
-    polarization conversion, model update, and restoration are performed in later
-    stages of the continuum imaging workflow after the map-task outputs have been
-    combined.
     """
     import pandas as pd
     import toolviper.utils.logger as logger

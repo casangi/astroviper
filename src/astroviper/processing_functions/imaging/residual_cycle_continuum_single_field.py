@@ -23,36 +23,24 @@ def residual_cycle_continuum_single_field(
     image_data_group_out_name="residual",
     last_residual_cycle=False,
 ):
-    """Calculate the partition-local continuum residual Taylor products.
+    """Grid residual products for one continuum visibility partition.
 
-    This function performs one continuum imaging-cycle residual update for a single
-    visibility partition. During the first imaging cycle it directly grids the
-    observed visibilities into Taylor-weighted residual UV grids. During later
-    imaging cycles it first predicts the current sky model from the globally prepared
-    Fourier-domain Taylor model, forms residual visibilities, and then grids those
-    residuals.
-
-    The processing-set partition is expected to already contain prepared imaging
-    weights. These are calculated before entering the continuum imaging-cycle loop
-    and are reused throughout all subsequent imaging cycles.
-
-    The function performs the following operations:
-
-    * create the gridding convolution kernel;
-    * (later imaging cycles only)
-        * reconstruct channel-dependent model visibility grids from the Fourier
-          Taylor model;
-        * degrid the model into predicted visibilities;
-        * form residual visibilities;
-    * grid the residual visibilities into partition-local Taylor residual UV grids;
-    * inverse Fourier-transform and normalize the local Taylor products.
-
-    The resulting Taylor residual images remain partition-local and are later
-    combined by the distributed reduction stage. No global reduction, model update,
-    restoration, or Gaussian PSF fitting is performed here.
+    Use prepared imaging weights. The first cycle grids observed data; later
+    cycles predict the model and grid residuals, or model contributions for
+    subtraction from cached observed grids. MFS produces Taylor UV planes;
+    MVC produces frequency-resolved UV planes. FFT and normalization occur
+    in the calling workflow.
 
     Parameters
     ----------
+    specmode : {"mfs", "mvc"}
+        Select Taylor UV gridding or frequency-resolved MVC processing.
+    model_xds : xarray.Dataset, optional
+        Accumulated image-domain Taylor model used for MVC prediction.
+    primary_beam_xds : xarray.Dataset, optional
+        Cached primary beam for this MVC partition.
+    observed_visibility_grid_xds : xarray.Dataset, optional
+        Cached observed UV planes for this MVC partition.
     ps_xdt : xarray.DataTree or mapping
         Processing-set partition containing the observed (or residual)
         visibilities together with previously prepared imaging weights.
@@ -78,16 +66,9 @@ def residual_cycle_continuum_single_field(
     image_data_variables_keep : list of str, optional
         Image products retained in the returned dataset.
     visibility_memory_mode : {"in_memory", "in_place", "recompute"}, optional
-        MFS residual-update storage policy for the observed-data visibility grid.
-        ``"in_memory"`` retains the globally reduced observed-data Taylor UV
-        grid from the first cycle; later map tasks grid only the predicted-model
-        contribution, and the append node subtracts it from the cached observed
-        grid before the inverse FFT. ``"in_place"`` persists that same reduced
-        grid in a temporary group in the image Zarr store and reloads it in each
-        append node. ``"recompute"`` reloads the original observed visibilities
-        and grids their visibility-domain residual during every residual-update
-        cycle. Caching currently applies only to MFS; MVC requires
-        ``"recompute"``.
+        Cache observed UV grids in memory or the image store, or recompute
+        residual visibilities each cycle. MFS caches reduced Taylor grids;
+        MVC caches each map task's frequency planes.
     image_data_group_in_name : str, optional
         Image data group containing the current Taylor model.
     image_data_group_out_name : str, optional
@@ -104,12 +85,7 @@ def residual_cycle_continuum_single_field(
     return_df : pandas.DataFrame
         Timing summary for the residual-update stage.
 
-    Notes
-    -----
-    This function operates entirely on one visibility partition. The globally
-    reduced Taylor residuals are produced later by the distributed reduction
-    stage, after which the inverse FFT, Stokes conversion, normalization, and
-    model-update processing are performed."""
+    """
     import time
 
     import numpy as np
