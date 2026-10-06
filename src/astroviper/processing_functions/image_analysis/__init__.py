@@ -20,6 +20,11 @@ from astroviper.processing_functions.image_analysis.statistics import (
     statistics_sum,
     statistics_sumsq,
 )
+from astroviper.processing_functions.image_analysis.plane_statistics import (
+    calculate_plane_statistics,
+    concatenate_plane_statistics,
+    plane_statistics_to_dataframe,
+)
 
 __all__ = [
     "STATISTIC_FUNCTIONS",
@@ -40,4 +45,7 @@ __all__ = [
     "statistics_sumsq",
     "make_mask",
     "moments",
+    "calculate_plane_statistics",
+    "concatenate_plane_statistics",
+    "plane_statistics_to_dataframe",
 ]

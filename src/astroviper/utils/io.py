@@ -3,6 +3,45 @@ full_dims_uv = ["time", "frequency", "polarization", "u", "v"]
 norm_dims = ["time", "frequency", "polarization"]
 beam_params_dims = ["time", "frequency", "polarization", "beam_params_label"]
 
+# Measurement Set v4 main-dataset variables written chunk-wise by the simulator
+# (see ``astroviper.utils.measurement_set_tools`` and the ``simulation`` subdomain).
+visibility_dims = ["time", "baseline_id", "frequency", "polarization"]
+uvw_dims = ["time", "baseline_id", "uvw_label"]
+
+visibility_data_variables_and_dims_double_precision = {
+    "visibility": {
+        "dims": visibility_dims,
+        "dtype": "<c16",
+        "name": "VISIBILITY",
+        "attrs": {"type": "quantity", "units": "Jy"},
+    },
+    "uvw": {
+        "dims": uvw_dims,
+        "dtype": "<f8",
+        "name": "UVW",
+        "attrs": {"type": "uvw", "units": "m", "frame": "icrs"},
+    },
+    "weight": {
+        "dims": visibility_dims,
+        "dtype": "<f8",
+        "name": "WEIGHT",
+        "attrs": {"type": "quantity", "units": "1/Jy^2"},
+    },
+    "flag": {"dims": visibility_dims, "dtype": "|b1", "name": "FLAG"},
+}
+
+visibility_data_variables_and_dims_single_precision = {
+    **visibility_data_variables_and_dims_double_precision,
+    "visibility": {
+        **visibility_data_variables_and_dims_double_precision["visibility"],
+        "dtype": "<c8",
+    },
+    "weight": {
+        **visibility_data_variables_and_dims_double_precision["weight"],
+        "dtype": "<f4",
+    },
+}
+
 imaging_data_variables_and_dims_double_precision = {
     "aperture": {"dims": full_dims_uv, "dtype": "<c16", "name": "APERTURE"},
     "aperture_normalization": {
@@ -37,6 +76,11 @@ imaging_data_variables_and_dims_double_precision = {
     "sky_model": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_MODEL"},
     "sky_residual": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_RESIDUAL"},
     "sky_restored": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY_RESTORED"},
+    "sky_restored_primary_beam_corrected": {
+        "dims": full_dims_lm,
+        "dtype": "<f8",
+        "name": "SKY_RESTORED_PRIMARY_BEAM_CORRECTED",
+    },
     "sky": {"dims": full_dims_lm, "dtype": "<f8", "name": "SKY"},
     "mask": {
         "dims": full_dims_lm,
@@ -100,6 +144,11 @@ imaging_data_variables_and_dims_single_precision = {
     "sky_model": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_MODEL"},
     "sky_residual": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_RESIDUAL"},
     "sky_restored": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY_RESTORED"},
+    "sky_restored_primary_beam_corrected": {
+        "dims": full_dims_lm,
+        "dtype": "<f4",
+        "name": "SKY_RESTORED_PRIMARY_BEAM_CORRECTED",
+    },
     "sky": {"dims": full_dims_lm, "dtype": "<f4", "name": "SKY"},
     "mask": {
         "dims": full_dims_lm,
@@ -151,6 +200,10 @@ imaging_data_variable_data_group_roles = {
     ),
     "sky_model": ("model", "sky"),
     "sky_restored": ("restored", "sky"),
+    "sky_restored_primary_beam_corrected": (
+        "restored",
+        "sky_primary_beam_corrected",
+    ),
 }
 
 
@@ -243,6 +296,186 @@ def _to_zarr_v3_codec(compressor):
     )
 
 
+def _task_extent(dim, shape_dict, parallel_coords):
+    """Extent of one node task along ``dim``: the first task's chunk on a
+    parallelized dimension, the whole axis otherwise."""
+    if parallel_coords and dim in parallel_coords:
+        return len(parallel_coords[dim]["data_chunks"][0])
+    return int(shape_dict[dim])
+
+
+def _task_chunk_lengths(dim, parallel_coords):
+    """Per-task chunk lengths along the parallelized dimension ``dim``."""
+    data_chunks = parallel_coords[dim]["data_chunks"]
+    chunks = data_chunks.values() if isinstance(data_chunks, dict) else data_chunks
+    return [len(chunk) for chunk in chunks]
+
+
+def validate_image_chunking_and_sharding(
+    image_chunking, image_sharding, shape_dict, parallel_coords, extra_dims=("u", "v")
+):
+    """Validate the on-disk image chunking and sharding against the image and
+    the mapping parallelism.
+
+    Rules, per dimension:
+
+    * every key of ``image_chunking`` / ``image_sharding`` is an image dimension
+      (a key of ``shape_dict``, or one of ``extra_dims`` -- the uv-domain
+      ``u``/``v`` -- which are accepted but not checked further) and every value
+      a positive int;
+    * ``image_chunking[dim]`` is at most the node task's extent on ``dim`` (the
+      per-task chunk of a parallelized dimension, the whole axis otherwise) and,
+      on a parallelized dimension, divides every node task's chunk except the
+      last (the array-edge partial chunk): node tasks write whole on-disk
+      chunks, so a chunk straddling two tasks would be written -- and
+      clobbered -- by both;
+    * ``image_sharding[dim]`` is a multiple of the on-disk chunk on ``dim`` (Zarr
+      requires a shard to hold whole chunks); the chunk defaults to the task
+      extent when ``dim`` is not in ``image_chunking``. Shards may span several
+      node tasks (the fixed-slot sharded writer is concurrency-safe), and a
+      shard larger than the axis is clipped to it on creation, so neither is an
+      error.
+
+    Parameters
+    ----------
+    image_chunking : dict or None
+        ``{dimension_name: chunk_size}`` requested by the caller.
+    image_sharding : dict or None
+        ``{dimension_name: shard_size}`` requested by the caller.
+    shape_dict : dict
+        ``{dimension_name: size}`` of the image being written.
+    parallel_coords : dict or None
+        Parallel coordinates of the mapping (for cube imaging keyed by
+        ``frequency``), providing the per-task chunk lengths.
+    extra_dims : tuple of str, optional
+        Dimension names accepted as keys although absent from ``shape_dict``.
+
+    Raises
+    ------
+    ValueError
+        On an unknown dimension key, a non-positive / non-integer size, a chunk
+        larger than the task extent or not dividing the task chunks, or a shard
+        that is not a multiple of its chunk.
+    """
+    chunking = dict(image_chunking or {})
+    sharding = dict(image_sharding or {})
+    valid_dims = set(shape_dict) | set(extra_dims)
+    for label, mapping in (("image_chunking", chunking), ("image_sharding", sharding)):
+        for dim, size in mapping.items():
+            if dim not in valid_dims:
+                raise ValueError(
+                    f"{label} key {dim!r} is not an image dimension; expected one "
+                    f"of {sorted(valid_dims)}."
+                )
+            if isinstance(size, bool) or not isinstance(size, int) or size < 1:
+                raise ValueError(
+                    f"{label}[{dim!r}] must be a positive int, got {size!r}."
+                )
+    for dim, size in chunking.items():
+        if dim not in shape_dict:
+            continue
+        extent = _task_extent(dim, shape_dict, parallel_coords)
+        if size > extent:
+            raise ValueError(
+                f"image_chunking[{dim!r}]={size} exceeds the {dim} extent of one "
+                f"node task ({extent}); an on-disk chunk cannot be larger than "
+                "what one node task writes."
+            )
+        if parallel_coords and dim in parallel_coords:
+            for task_length in _task_chunk_lengths(dim, parallel_coords)[:-1]:
+                if task_length % size:
+                    raise ValueError(
+                        f"image_chunking[{dim!r}]={size} must divide every node "
+                        f"task's {dim} chunk (found a task chunk of length "
+                        f"{task_length}); otherwise an on-disk chunk would "
+                        "straddle two node tasks and be written by both."
+                    )
+    for dim, size in sharding.items():
+        if dim not in shape_dict:
+            continue
+        chunk = chunking.get(dim, _task_extent(dim, shape_dict, parallel_coords))
+        if size < int(shape_dict[dim]) and size % chunk:
+            raise ValueError(
+                f"image_sharding[{dim!r}]={size} must be a multiple of the on-disk "
+                f"chunk on {dim} ({chunk}); set image_chunking[{dim!r}] to a "
+                "divisor of the shard size."
+            )
+
+
+def image_chunk_and_shard_shapes(
+    dims, shape_dict, parallel_coords, image_chunking=None, image_sharding=None
+):
+    """On-disk (inner) chunk shape and shard shape of a variable with ``dims``.
+
+    The chunk on a dimension is ``image_chunking[dim]`` when given, else the
+    node task's extent (its per-task chunk on a parallelized dimension, the
+    whole axis otherwise). The shard is ``image_sharding[dim]`` when given,
+    clipped to the axis and rounded up to a multiple of the chunk, else the
+    task extent rounded up to a multiple of the chunk (one shard per task
+    chunk on a parallelized dimension, the whole axis otherwise). Assumes
+    :func:`validate_image_chunking_and_sharding` passed.
+
+    Returns
+    -------
+    chunks, shards : list of int
+        Per-axis chunk and shard sizes, in ``dims`` order. ``shards`` is only
+        meaningful for a sharded array.
+    """
+    chunking = image_chunking or {}
+    sharding = image_sharding or {}
+    chunks, shards = [], []
+    for dim in dims:
+        extent = _task_extent(dim, shape_dict, parallel_coords)
+        chunk = int(chunking.get(dim, extent))
+        want = min(int(sharding.get(dim, extent)), int(shape_dict[dim]))
+        chunks.append(chunk)
+        shards.append(max(chunk, -(-want // chunk) * chunk))
+    return chunks, shards
+
+
+def write_zarr_image_store(img_xds, image_store, overwrite=False):
+    """Write an image dataset to a Zarr store and return the path of the store.
+
+    The store is written with :func:`xradio.image.write_image`. XRADIO
+    versions that give image Zarr stores the ``.img.zarr`` extension keep a
+    name that ends in ``.img.zarr``, replace a bare ``.zarr`` extension
+    (``out.zarr`` gives ``out.img.zarr``), append ``.img.zarr`` to any other
+    name and return the paths written; earlier versions write ``image_store``
+    as given and return ``None``. Code that opens the store, adds data
+    variables to it or passes it on must use the returned path; a name that
+    ends in ``.img.zarr`` is kept by every XRADIO version.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Image dataset to write (coordinates, attributes and any data
+        variables).
+    image_store : str
+        Requested path of the Zarr store.
+    overwrite : bool, default False
+        If ``True``, replace an existing store.
+
+    Returns
+    -------
+    str
+        Path of the Zarr store written.
+
+    Raises
+    ------
+    FileExistsError
+        If the store to be written exists and ``overwrite`` is ``False``;
+        XRADIO raises it before anything is written.
+    """
+    from xradio.image import write_image
+
+    written_paths = write_image(
+        img_xds, imagename=image_store, out_format="zarr", overwrite=overwrite
+    )
+    if written_paths:
+        return written_paths[0]
+    return image_store
+
+
 def create_empty_data_variables_on_disk(
     zarr_store,
     data_variables,
@@ -251,7 +484,8 @@ def create_empty_data_variables_on_disk(
     compressor,
     double_precision,
     data_variable_definitions,
-    shard_channels=None,
+    image_chunking=None,
+    image_sharding=None,
 ):
     """Create multiple empty data variables on disk.
 
@@ -283,13 +517,25 @@ def create_empty_data_variables_on_disk(
         Dictionary mapping variable names to their definition dicts (with keys
         ``"dims"``, ``"dtype"``, ``"name"``), or the string ``"imaging"`` to
         select the built-in imaging variable definitions.
-    shard_channels : int, optional
-        If set (and Zarr v3), create each array as a Zarr v3 **sharded** array:
-        the per-task chunk (from ``parallel_coords``) becomes the inner chunk, and
-        ``shard_channels`` inner chunks along each parallel dimension are packed
-        into one shard file (index CRC disabled so concurrent single-chunk writers
-        can each set their own index entry). The shard files are pre-created sparse
-        with an empty index. This replaces one-file-per-chunk with far fewer files
+    image_chunking : dict, optional
+        On-disk chunk shape as ``{dimension_name: chunk_size}`` (e.g. ``{"l":
+        1024, "m": 1024}`` to chunk the sky plane, ``{"frequency": 1}`` for
+        one-channel chunks). A dimension not listed defaults to the node task's
+        extent: its per-task chunk (from ``parallel_coords``) on a parallelized
+        dimension, the whole axis otherwise. A chunk may not exceed that extent
+        and must divide the per-task chunk of a parallelized dimension (see
+        :func:`validate_image_chunking_and_sharding`). For a sharded array this
+        is the *inner* chunk shape. ``None`` (default) uses the defaults on
+        every dimension.
+    image_sharding : dict, optional
+        If set (and Zarr v3), create each array as a Zarr v3 **sharded** array
+        with shard shape ``{dimension_name: shard_size}``: a shard must be a
+        multiple of the chunk on its dimension (a shard larger than the axis is
+        clipped to it), and a dimension not listed gets one shard per node task
+        chunk on a parallelized dimension and the whole axis otherwise. The
+        index CRC is disabled so concurrent single-chunk writers can each set
+        their own index entry, and the shard files are pre-created sparse with
+        an empty index. This replaces one-file-per-chunk with far fewer files
         (metadata-server relief) and is written by
         :func:`astroviper.node_tasks.imaging.utils.write_result_chunk_to_disk_sharded_skunk_works`.
         ``None`` (default) keeps the original one-file-per-chunk layout.
@@ -302,12 +548,15 @@ def create_empty_data_variables_on_disk(
     _ZARR_V3 = int(zarr.__version__.split(".")[0]) >= 3
     group = zarr.open_group(zarr_store, mode="r+")
 
-    if shard_channels and not _ZARR_V3:
+    validate_image_chunking_and_sharding(
+        image_chunking, image_sharding, shape_dict, parallel_coords
+    )
+    if image_sharding and not _ZARR_V3:
         raise ValueError(
-            "shard_channels (output sharding) requires Zarr v3; the installed "
+            "image_sharding (output sharding) requires Zarr v3; the installed "
             "zarr is v2."
         )
-    sharded = bool(shard_channels) and _ZARR_V3
+    sharded = bool(image_sharding) and _ZARR_V3
 
     if _ZARR_V3 and compressor is not None:
         compressor = _to_zarr_v3_codec(compressor)
@@ -325,12 +574,9 @@ def create_empty_data_variables_on_disk(
 
         shape = tuple(shape_dict[dim] for dim in dims)
 
-        chunks = []
-        for d in dims:
-            if d in parallel_coords:
-                chunks.append(len(parallel_coords[d]["data_chunks"][0]))
-            else:
-                chunks.append(shape_dict[d])
+        chunks, shard = image_chunk_and_shard_shapes(
+            dims, shape_dict, parallel_coords, image_chunking, image_sharding
+        )
 
         dtype = np.dtype(dv_def["dtype"])
         extra_attrs = dv_def.get("attrs", {})
@@ -338,24 +584,19 @@ def create_empty_data_variables_on_disk(
             fill_value = None
         elif dtype.kind in ("f", "c"):
             fill_value = np.nan
+        elif dtype.kind == "b":
+            fill_value = False
         else:
             fill_value = 0
 
         dv_name = dv_def["name"]
         if sharded:
-            # Sharded array: `chunks` becomes the INNER chunk; pack `shard_channels`
-            # inner chunks along each parallel dim into one shard. Index CRC is
-            # disabled so independent single-chunk writers can set their own index
-            # entries (see write_result_chunk_to_disk_sharded_skunk_works).
+            # Sharded array: `chunks` is the INNER chunk shape and `shard` the
+            # shard shape (see image_chunk_and_shard_shapes). The index CRC is
+            # disabled so independent single-chunk writers can set their own
+            # index entries (see write_result_chunk_to_disk_sharded_skunk_works).
             from zarr.codecs import BytesCodec, ShardingCodec
 
-            inner = list(chunks)
-            shard = list(chunks)
-            for ax, d in enumerate(dims):
-                if d in parallel_coords:
-                    step = inner[ax]  # inner chunk size on this parallel dim
-                    want = min(int(shard_channels), shape[ax])
-                    shard[ax] = max(step, (want // step) * step)  # multiple of inner
             inner_codecs = [BytesCodec()] + ([compressor] if compressor else [])
             sky = group.require_array(
                 dv_name,
@@ -364,7 +605,7 @@ def create_empty_data_variables_on_disk(
                 dtype=dtype,
                 fill_value=fill_value,
                 serializer=ShardingCodec(
-                    chunk_shape=tuple(inner),
+                    chunk_shape=tuple(chunks),
                     codecs=inner_codecs,
                     index_codecs=[BytesCodec()],  # no crc32c -> concurrent-writer safe
                     index_location="end",
@@ -376,7 +617,7 @@ def create_empty_data_variables_on_disk(
             sky = group.require_array(
                 dv_name,
                 shape=shape,
-                chunks=chunks,
+                chunks=tuple(chunks),
                 dtype=dtype,
                 fill_value=fill_value,
                 compressors=[compressor] if compressor else [],

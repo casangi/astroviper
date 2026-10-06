@@ -18,10 +18,12 @@
         },
         "use_mask": { "type": "boolean" },
         "selection": { "type": ["dict"], "nullable": true },
-        "parallel_axis": { "type": ["str"], "nullable": true },
-        "n_chunks": { "type": ["int"], "nullable": true, "min": 1 },
+        "n_mapping_parallelism": { "type": ["dict"], "nullable": true },
         "thread_info": { "type": ["dict"], "nullable": true },
         "compressor": { "nullable": true },
-        "overwrite": { "type": "boolean" }
+        "overwrite": { "type": "boolean" },
+        "memory_budget_gb": { "type": ["float", "int"], "nullable": true, "min": 0 },
+        "monitor_resources_seconds": { "type": ["float", "int"], "nullable": true, "min": 0 },
+        "dimension_flags": { "type": ["dict"], "nullable": true }
     }
 }
