@@ -28,8 +28,9 @@ The engine is optional: it exists only in XRADIO releases that carry it and
 with a casacore backend (python-casacore or casatools).
 :func:`msv2_engine_available` tells whether it is there and
 :func:`require_msv2_engine` raises an ``ImportError`` that names what is
-missing. Module level imports only the standard library, so importing this
-module never needs the engine.
+missing. Module level imports only the standard library and the docstring
+marker of :mod:`astroviper.utils.param_docs`, so importing this module never
+needs the engine.
 
 python-casacore holds the GIL, so MSv2 reads do not overlap within a process:
 run dask with one thread per worker (``threads_per_worker=1``) or the MPI
@@ -42,6 +43,8 @@ The Zarr processing-set sibling of this path is
 from __future__ import annotations
 
 import os
+
+from astroviper.utils.param_docs import shares_param_docs
 
 #: Data-group roles the imaging reads, in the order the variables are kept.
 _DATA_GROUP_ROLES = ("correlated_data", "flag", "weight", "uvw")
@@ -235,6 +238,7 @@ def open_processing_set_skunk_works_msv2(
     return ps_xdt
 
 
+@shares_param_docs
 def add_lazy_input_data(ps_xdt, node_task_data_mapping, processing_set_data_group_name):
     """Add every node task's lazily indexed data to the graph mapping, in place.
 
@@ -272,7 +276,7 @@ def add_lazy_input_data(ps_xdt, node_task_data_mapping, processing_set_data_grou
         whose selection is ``None`` is taken whole, as the production loader
         does.
     processing_set_data_group_name : str
-        Data group to image.
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
 
     Raises
     ------
