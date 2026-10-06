@@ -141,8 +141,8 @@ def require_msv2_engine():
         raise ImportError(
             "Imaging a Measurement Set v2 directly needs XRADIO's xradio_msv2 "
             f"engine, but {reason}. Install an XRADIO release with the engine "
-            "(1.2.5 or later) and python-casacore (pip install "
-            "'astroviper[python_casacore]'), or convert the Measurement Set "
+            "(XRADIO 1.2.4 and older do not have it) and python-casacore (pip "
+            "install 'astroviper[python_casacore]'), or convert the Measurement Set "
             "with xradio.measurement_set.convert_msv2_to_processing_set and "
             "image the processing set."
         )

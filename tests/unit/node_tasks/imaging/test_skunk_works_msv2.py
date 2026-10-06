@@ -552,6 +552,8 @@ def test_require_msv2_engine_message(monkeypatch):
         "open_msv2",
     ):
         assert text in message
+    # No release that does not exist yet is named.
+    assert "1.2.5" not in message
 
 
 def test_require_msv2_engine_returns_open_msv2(monkeypatch):
