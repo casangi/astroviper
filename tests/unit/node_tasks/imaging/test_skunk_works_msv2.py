@@ -627,6 +627,17 @@ def test_open_empty_after_scan_intents(open_recorder):
         )
 
 
+def test_open_empty_after_a_scan_intent_string(open_recorder):
+    """The driver also accepts one scan intent as a string; the message names
+    it whole."""
+    open_recorder.result = xr.DataTree()
+    with pytest.raises(ValueError, match=r"\['OBSERVE_TARGET#ON_SOURCE'\]"):
+        open_processing_set_skunk_works_msv2(
+            "/data.ms", scan_intents="OBSERVE_TARGET#ON_SOURCE"
+        )
+    assert open_recorder.calls[0][1]["scan_intents"] == "OBSERVE_TARGET#ON_SOURCE"
+
+
 def test_open_empty_measurement_set(open_recorder):
     open_recorder.result = xr.DataTree()
     with pytest.raises(ValueError, match=r"no visibilities"):

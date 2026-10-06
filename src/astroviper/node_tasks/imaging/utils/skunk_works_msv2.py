@@ -173,7 +173,7 @@ def open_processing_set_skunk_works_msv2(
     ms_path : str or os.PathLike
         Path of the Measurement Set v2 (made absolute, so that the node tasks
         read the same Measurement Set from any working directory).
-    scan_intents : list of str, optional
+    scan_intents : str or list of str, optional
         Keep only the MSv4s with one of these scan intents (as
         :func:`xradio.measurement_set.open_processing_set`). ``None``
         (default) keeps every MSv4.
@@ -221,6 +221,8 @@ def open_processing_set_skunk_works_msv2(
     )
     if not ps_xdt.children:
         if scan_intents is not None:
+            if isinstance(scan_intents, str):
+                scan_intents = [scan_intents]
             raise ValueError(
                 f"No measurement set of {ms_path} has one of the scan intents "
                 f"{list(scan_intents)}. Pass scan_intents=None to image every "
