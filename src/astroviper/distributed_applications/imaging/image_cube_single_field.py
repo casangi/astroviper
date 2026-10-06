@@ -381,6 +381,14 @@ def image_cube_single_field(
           step timings (``T_*`` seconds: building/writing the empty image,
           building the graph, computing it, consolidating metadata) plus the
           grand total ``T_total``.
+
+    Notes
+    -----
+    The Zarr image store is created with :func:`xradio.image.write_image`.
+    XRADIO versions that give image Zarr stores the ``.img.zarr`` extension
+    give it to an ``image_store`` without it (``cube.zarr`` gives
+    ``cube.img.zarr``), and the image is written to that store; an
+    ``image_store`` that ends in ``.img.zarr`` is kept by every version.
     """
 
     import time
@@ -394,7 +402,6 @@ def image_cube_single_field(
         reduce,
     )
     from graphviper.graph_tools.coordinate_utils import make_parallel_coord
-    from xradio.image import write_image
     from xradio.measurement_set import open_processing_set
 
     from astroviper.processing_functions.imaging.utils.imaging_polarization import (
@@ -406,6 +413,7 @@ def image_cube_single_field(
         create_empty_data_variables_on_disk,
         image_data_groups_for_kept_variables,
         validate_image_chunking_and_sharding,
+        write_zarr_image_store,
     )
 
     if compressor is None:
@@ -505,9 +513,10 @@ def image_cube_single_field(
 
     start = time.time()
     if output_image_format == "zarr":
-        write_image(
-            img_xds, imagename=image_store, out_format="zarr", overwrite=overwrite
-        )
+        # The store written can differ from the image_store given (the
+        # ".img.zarr" extension of newer XRADIO versions); everything below
+        # uses the store written.
+        image_store = write_zarr_image_store(img_xds, image_store, overwrite=overwrite)
     # For FITS output the empty files (headers + sparse data areas) are created
     # after the processing set is opened, so the TELESCOP keyword can be read
     # from it.

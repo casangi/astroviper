@@ -78,10 +78,15 @@ def feather(
     ----------
     outim : dict
         Output image information.  Must contain ``"name"`` (the directory the
-        Zarr image is written to).  Optional ``"overwrite"`` (bool, default
-        ``False``).  Only the Zarr format is written; convert afterwards if
-        another format is needed.  The store is created up front and written to
-        chunk-by-chunk in parallel.
+        Zarr image is written to; XRADIO versions that give image Zarr stores
+        the ``.img.zarr`` extension give it to a name without it, e.g.
+        ``feather.zarr`` gives ``feather.img.zarr``; a name that ends in
+        ``.img.zarr`` is kept by every version).  Optional ``"overwrite"``
+        (bool, default ``False``): ``True`` replaces an existing store the
+        image is written to; with ``False``, ``RuntimeError`` is raised if
+        that store or ``"name"`` exists.  Only the Zarr format is written;
+        convert afterwards if another format is needed.  The store is created
+        up front and written to chunk-by-chunk in parallel.
     highres : str
         Path to the interferometer (high-resolution) image (a ``.zarr`` store or
         an XRADIO image directory).
@@ -114,14 +119,16 @@ def feather(
         make_parallel_coord,
     )
     from graphviper.graph_tools.map import map
-    from xradio.image import write_image
 
     from astroviper.utils.data_partitioning import (
         bytes_in_dtype,
         calculate_data_chunking,
         get_thread_info,
     )
-    from astroviper.utils.io import create_empty_data_variables_on_disk
+    from astroviper.utils.io import (
+        create_empty_data_variables_on_disk,
+        write_zarr_image_store,
+    )
 
     if selection is None:
         selection = {}
@@ -215,17 +222,24 @@ def feather(
     # Zarr-v3-compatible default codec.
     for name in featherd_img_xds.variables:
         featherd_img_xds[name].encoding = {}
-    write_image(
-        featherd_img_xds,
-        imagename=outim["name"],
-        out_format="zarr",
-        overwrite=outim["overwrite"],
-    )
+    # The store written can differ from outim["name"] (the ".img.zarr" extension
+    # of newer XRADIO versions); everything below uses the store written. The
+    # check above tests outim["name"]; XRADIO raises FileExistsError, before
+    # writing anything, if the store written exists.
+    try:
+        image_store = write_zarr_image_store(
+            featherd_img_xds, outim["name"], overwrite=outim["overwrite"]
+        )
+    except FileExistsError as exc:
+        raise RuntimeError(
+            "Already existing image store will not be overwritten. To "
+            f"overwrite it, set outim['overwrite'] = True ({exc})"
+        ) from exc
 
     # Pre-allocate the SKY data variable (NaN-filled) so each map task can lazily
     # write its own frequency slice in parallel (Zarr v3 compatible).
     create_empty_data_variables_on_disk(
-        outim["name"],
+        image_store,
         ["sky"],
         shape_dict=int_xds.sizes,
         parallel_coords=parallel_coords,
@@ -242,7 +256,7 @@ def feather(
 
     input_params = {
         "input_data_store": {"sd": lowres, "int": highres},
-        "image_store": outim["name"],
+        "image_store": image_store,
         "image_data_variables_keep": ["sky"],
         "axes": ("l", "m"),
         "sdfactor": sdfactor,
@@ -268,4 +282,4 @@ def feather(
     dask.compute(dask_graph)
     logger.info("Time to compute() feather " + str(time.time() - t0) + "s")
 
-    zarr.consolidate_metadata(outim["name"])
+    zarr.consolidate_metadata(image_store)

@@ -34,8 +34,10 @@ The rest of this section walks down the layers behind that call:
 
 ### 12.1 Driver — `distributed_applications/imaging/image_cube_single_field.py`
 The user-facing function. Sequence:
-1. `make_empty_sky_image(...)` → `write_image(..., out_format="zarr")` (creates
-   the image store with correct coords/dims).
+1. `make_empty_sky_image(...)` → `astroviper.utils.io.write_zarr_image_store(...)`
+   (XRADIO's `write_image(..., out_format="zarr")`: creates the image store with
+   correct coords/dims and returns its path, which newer XRADIO versions give
+   the `.img.zarr` extension; every later step uses that path).
 2. `calculate_mapping_parallelism_for_cube_imaging(...)` → decide the mapping
    parallelism (frequency chunk count) from per-channel memory estimate +
    available threads.
