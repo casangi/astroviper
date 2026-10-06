@@ -200,15 +200,17 @@ def _assert_nothing_written(tmp_path):
 
 
 class _OpenMSv2:
-    """Stands in for XRADIO's ``open_msv2``: records its calls, returns an
-    empty processing set (as when no MSv4 has one of the scan intents)."""
+    """Stands in for XRADIO's ``open_msv2``: records its calls, returns
+    ``result`` (default: an empty processing set, as when no MSv4 has one of
+    the scan intents)."""
 
     def __init__(self):
         self.calls = []
+        self.result = xr.DataTree()
 
     def __call__(self, ms_path, **kwargs):
         self.calls.append((ms_path, kwargs))
-        return xr.DataTree()
+        return self.result
 
 
 @pytest.fixture
@@ -297,6 +299,53 @@ def test_msv2_no_measurement_set_after_scan_intents(tmp_path, stand_in_open_msv2
             "partition_scheme": ["FIELD_ID"],
         },
     )
+
+
+@pytest.mark.parametrize(
+    "data_groups, match",
+    [
+        (
+            {
+                "base": {
+                    "correlated_data": "VISIBILITY",
+                    "flag": "FLAG",
+                    "weight": "WEIGHT",
+                    "uvw": "UVW",
+                }
+            },
+            r"input_0 has no data group 'corrected' \(it has \['base'\]\)",
+        ),
+        (
+            {
+                "corrected": {
+                    "correlated_data": "SPECTRUM_CORRECTED",
+                    "flag": "FLAG",
+                    "weight": "WEIGHT",
+                }
+            },
+            r"has no \['uvw'\].*single-dish",
+        ),
+    ],
+    ids=["missing_group", "single_dish"],
+)
+def test_msv2_data_group_refused_before_anything_is_written(
+    tmp_path, stand_in_open_msv2, data_groups, match
+):
+    """An MSv4 without the data group, or whose group lacks a role the imaging
+    reads, is refused right after the open: no image store is left behind."""
+    stand_in_open_msv2.result = xr.DataTree.from_dict(
+        {"input_0": xr.Dataset(attrs={"data_groups": data_groups})}
+    )
+    ms_path = _measurement_set_like(tmp_path)
+    with pytest.raises(ValueError, match=match):
+        _image_cube(
+            ms_path,
+            str(tmp_path / "cube.img.zarr"),
+            [1e11],
+            processing_set_data_group_name="corrected",
+        )
+    assert len(stand_in_open_msv2.calls) == 1
+    _assert_nothing_written(tmp_path)
 
 
 @pytest.fixture
@@ -397,6 +446,25 @@ def test_msv2_images_equal_skunk_works_on_the_conversion(
     _assert_imaged(result)
     _assert_imaged(skunk_works)
     _assert_images_equal(msv2_store, skunk_works_store)
+
+
+@requires_msv2_engine
+def test_msv2_missing_data_group_with_the_engine(
+    imageable_msv2, tmp_path, synchronous_dask
+):
+    """Through the engine: the generated Measurement Set has no MODEL_DATA, so
+    no ``model`` data group; the run is refused before the image store is
+    created."""
+    output = tmp_path / "output"
+    output.mkdir()
+    with pytest.raises(ValueError, match=r"no data group 'model'"):
+        _image_cube(
+            imageable_msv2,
+            str(output / "msv2.img.zarr"),
+            100e9 + 1e6 * np.arange(16),
+            processing_set_data_group_name="model",
+        )
+    assert os.listdir(output) == []
 
 
 def _file_state(path):

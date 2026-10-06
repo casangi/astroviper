@@ -115,8 +115,11 @@ def image_cube_single_field(
         Measurement Set, so ``write_visibility_model_to_ps`` and
         ``write_imaging_weights_to_ps`` are refused. These errors are raised
         before anything is written: ``skunk_works=False``, no engine, a
-        write-back flag, a refused ``msv2_open_options`` key, or no MSv4 left
-        after ``scan_intents``. See the Notes for deployment.
+        write-back flag, a refused ``msv2_open_options`` key, no MSv4 left
+        after ``scan_intents``, or an MSv4 without the data group
+        ``processing_set_data_group_name`` or without one of the roles the
+        imaging reads (a single-dish MSv4 has no ``uvw``). See the Notes for
+        deployment.
     image_store : str
         Path/URL of the on-disk Zarr image cube.
     image_params : dict
@@ -551,12 +554,14 @@ def image_cube_single_field(
         image_params["polarization_coords"], instrument_polarization_basis
     )
 
-    # A Measurement Set v2 is opened before anything is written, so that its
-    # errors (a refused msv2_open_options key, no MSv4 left after
-    # scan_intents, a Measurement Set the engine cannot read) leave no image
-    # behind. Lazy: only the metadata is read here.
+    # A Measurement Set v2 is opened and its data group checked before
+    # anything is written, so that their errors (a refused msv2_open_options
+    # key, no MSv4 left after scan_intents, a Measurement Set the engine
+    # cannot read, an MSv4 without the data group or one of the roles the
+    # imaging reads) leave no image behind. Lazy: only the metadata is read.
     if input_is_msv2:
         from astroviper.node_tasks.imaging.utils import (
+            check_data_group_skunk_works_msv2,
             open_processing_set_skunk_works_msv2,
         )
 
@@ -565,6 +570,7 @@ def image_cube_single_field(
             ps_store, scan_intents=scan_intents, msv2_open_options=msv2_open_options
         )
         timing_distributed_application["T_open_processing_set"] = time.time() - start
+        check_data_group_skunk_works_msv2(ps_xdt, processing_set_data_group_name)
 
     # Create an empty image on disk with the correct coordinates and dimensions.
     start = time.time()

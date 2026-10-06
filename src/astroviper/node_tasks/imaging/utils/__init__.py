@@ -15,6 +15,7 @@ from astroviper.node_tasks.imaging.utils.skunk_works_fits import (
 )
 from astroviper.node_tasks.imaging.utils.skunk_works_msv2 import (
     add_lazy_input_data,
+    check_data_group_skunk_works_msv2,
     is_fatal_load_error,
     load_processing_set_skunk_works_msv2,
     msv2_engine_available,
@@ -24,6 +25,7 @@ from astroviper.node_tasks.imaging.utils.skunk_works_msv2 import (
 
 __all__ = [
     "add_lazy_input_data",
+    "check_data_group_skunk_works_msv2",
     "compute_shard_task_priorities",
     "create_empty_fits_images",
     "is_fatal_load_error",

@@ -220,8 +220,10 @@ and hence the same PSF.
 **Measurement Set v2 input (skunk works).** `image_cube_single_field` also
 images a Measurement Set v2 directly when `skunk_works=True`
 (`utils/measurement_set_v2.py::is_measurement_set_v2` detects it; guards in
-the driver refuse `skunk_works=False`, a missing engine, the write-back flags
-and an empty `scan_intents` selection before anything is written). AstroVIPER
+the driver refuse `skunk_works=False`, a missing engine, the write-back flags,
+an empty `scan_intents` selection and an MSv4 without the data group (or one
+of its four roles; `check_data_group_skunk_works_msv2`) before anything is
+written). AstroVIPER
 has no MSv2 reader of its own: the driver opens the MS lazily with XRADIO's
 `xradio_msv2` engine (`open_msv2`, `array_backend="xarray"`,
 `partition_cache="read"` so the input is never written), builds the graph

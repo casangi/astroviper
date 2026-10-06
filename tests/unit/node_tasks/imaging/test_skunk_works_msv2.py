@@ -32,6 +32,7 @@ from xarray.core import indexing
 
 from astroviper.node_tasks.imaging.utils import (
     add_lazy_input_data,
+    check_data_group_skunk_works_msv2,
     is_fatal_load_error,
     load_processing_set_skunk_works_msv2,
     msv2_engine_available,
@@ -282,13 +283,28 @@ def test_add_lazy_input_data_shares_one_subset_per_ms():
     assert first.sizes["frequency"] == 2 and second.sizes["frequency"] == 3
 
 
-def test_add_lazy_input_data_missing_group():
+def _add_lazy_input_data(ps_xdt, group):
+    add_lazy_input_data(ps_xdt, make_mapping(), group)
+
+
+#: The data-group checks: the mapping step, and the driver's check right after
+#: the open (before anything is written).
+data_group_checks = pytest.mark.parametrize(
+    "check",
+    [_add_lazy_input_data, check_data_group_skunk_works_msv2],
+    ids=["add_lazy_input_data", "check_data_group"],
+)
+
+
+@data_group_checks
+def test_data_group_missing(check):
     ps_xdt = make_lazy_ps([])
     with pytest.raises(ValueError, match=r"ms_0 has no data group 'imaging'"):
-        add_lazy_input_data(ps_xdt, make_mapping(), "imaging")
+        check(ps_xdt, "imaging")
 
 
-def test_add_lazy_input_data_single_dish():
+@data_group_checks
+def test_data_group_single_dish(check):
     """A data group without uvw (a single-dish MSv4) is refused."""
     ps_xdt = make_lazy_ps([])
     dataset = ps_xdt["ms_0"].to_dataset()
@@ -297,14 +313,33 @@ def test_add_lazy_input_data_single_dish():
     }
     ps_xdt["ms_0"] = xr.DataTree(dataset)
     with pytest.raises(ValueError, match=r"has no \['uvw'\].*single-dish"):
-        add_lazy_input_data(ps_xdt, make_mapping(), "base")
+        check(ps_xdt, "base")
 
 
-def test_add_lazy_input_data_missing_variable():
+@data_group_checks
+def test_data_group_missing_variable(check):
     ps_xdt = make_lazy_ps([])
     ps_xdt["ms_1"] = xr.DataTree(ps_xdt["ms_1"].to_dataset().drop_vars("WEIGHT"))
     with pytest.raises(ValueError, match=r"ms_1 lacks the variables \['WEIGHT'\]"):
-        add_lazy_input_data(ps_xdt, make_mapping(), "base")
+        check(ps_xdt, "base")
+
+
+@pytest.mark.parametrize("group", ["base", "corrected"])
+def test_check_data_group_reads_nothing(group):
+    reads = []
+    check_data_group_skunk_works_msv2(make_lazy_ps(reads), group)
+    assert reads == []
+
+
+def test_check_data_group_checks_every_measurement_set():
+    """The driver's check covers every MSv4, also one that no task selects
+    (which the mapping step never looks at)."""
+    ps_xdt = make_lazy_ps([])
+    ps_xdt["ms_1"] = xr.DataTree(ps_xdt["ms_1"].to_dataset().drop_vars("WEIGHT"))
+    mapping = {0: {"data_selection": {"ms_0": {"frequency": slice(0, 2)}}}}
+    add_lazy_input_data(ps_xdt, mapping, "base")
+    with pytest.raises(ValueError, match=r"ms_1 lacks the variables"):
+        check_data_group_skunk_works_msv2(ps_xdt, "base")
 
 
 # --------------------------------------------------------------------------- #

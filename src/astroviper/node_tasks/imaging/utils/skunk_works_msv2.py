@@ -5,8 +5,9 @@ A Measurement Set v2 is imaged without converting it, through XRADIO's
 
 * the distributed application opens the MSv2 lazily
   (:func:`open_processing_set_skunk_works_msv2`: metadata only, the main data
-  variables are lazily indexed arrays) and builds the graph mapping exactly as
-  for a Zarr processing set;
+  variables are lazily indexed arrays), checks the data group to image
+  (:func:`check_data_group_skunk_works_msv2`, before anything is written) and
+  builds the graph mapping exactly as for a Zarr processing set;
 * :func:`add_lazy_input_data` then gives every node task the lazily indexed
   selection of its data under the mapping key ``lazy_input_data``: per MSv4,
   the data group's four variables (``correlated_data``, ``flag``, ``weight``,
@@ -239,6 +240,40 @@ def open_processing_set_skunk_works_msv2(
 
 
 @shares_param_docs
+def check_data_group_skunk_works_msv2(ps_xdt, processing_set_data_group_name):
+    """Check that every MSv4 can be imaged with the data group.
+
+    The checks of :func:`add_lazy_input_data`, on every MSv4 of the
+    processing set: each must have the data group, the group must have the
+    four roles the imaging reads (``correlated_data``, ``flag``, ``weight``,
+    ``uvw``) and the MSv4 must have their variables. The distributed
+    application runs them right after the open, so that these errors are
+    raised before anything is written. Only metadata is read.
+
+    Every MSv4 is checked, also one whose frequencies no task images (the
+    data groups follow the Measurement Set's columns: ``base`` from DATA,
+    ``corrected`` from CORRECTED_DATA, so its MSv4s rarely differ).
+
+    Parameters
+    ----------
+    ps_xdt : xarray.DataTree
+        Lazily opened processing set, as
+        :func:`open_processing_set_skunk_works_msv2` returns it.
+    processing_set_data_group_name : str
+        Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
+
+    Raises
+    ------
+    ValueError
+        If an MSv4 has no such data group, or the group lacks a role the
+        imaging reads (a single-dish MSv4 has no ``uvw``), or a variable of
+        the group is missing from the MSv4.
+    """
+    for ms_name, ms_xdt in ps_xdt.children.items():
+        _checked_data_group(ms_xdt, ms_name, processing_set_data_group_name)
+
+
+@shares_param_docs
 def add_lazy_input_data(ps_xdt, node_task_data_mapping, processing_set_data_group_name):
     """Add every node task's lazily indexed data to the graph mapping, in place.
 
@@ -299,8 +334,8 @@ def add_lazy_input_data(ps_xdt, node_task_data_mapping, processing_set_data_grou
         task["lazy_input_data"] = lazy_input_data
 
 
-def _data_group_dataset(ms_xdt, ms_name, data_group_name):
-    """The data group's variables of one MSv4, with the kept coordinates only.
+def _checked_data_group(ms_xdt, ms_name, data_group_name):
+    """One MSv4's data group, checked for what the imaging reads.
 
     Parameters
     ----------
@@ -313,11 +348,13 @@ def _data_group_dataset(ms_xdt, ms_name, data_group_name):
 
     Returns
     -------
-    xarray.Dataset
-        Lazy dataset: the group's four variables, the kept coordinates (the
-        baseline antenna names as codes, see
-        :func:`_encode_baseline_antenna_names`) and
-        ``attrs["data_groups"] = {data_group_name: group}``.
+    data_group : dict
+        A copy of the data group.
+    names : list of str
+        Its variables of the roles the imaging reads, in the order of
+        ``_DATA_GROUP_ROLES``.
+    dataset : xarray.Dataset
+        The MSv4's own (lazy) dataset.
 
     Raises
     ------
@@ -348,6 +385,36 @@ def _data_group_dataset(ms_xdt, ms_name, data_group_name):
             f"Measurement set {ms_name} lacks the variables {missing_variables} "
             f"of its data group {data_group_name!r}."
         )
+    return data_group, names, dataset
+
+
+def _data_group_dataset(ms_xdt, ms_name, data_group_name):
+    """The data group's variables of one MSv4, with the kept coordinates only.
+
+    Parameters
+    ----------
+    ms_xdt : xarray.DataTree
+        One MSv4 of the lazily opened processing set.
+    ms_name : str
+        Its name (for the error messages).
+    data_group_name : str
+        Data group to image.
+
+    Returns
+    -------
+    xarray.Dataset
+        Lazy dataset: the group's four variables, the kept coordinates (the
+        baseline antenna names as codes, see
+        :func:`_encode_baseline_antenna_names`) and
+        ``attrs["data_groups"] = {data_group_name: group}``.
+
+    Raises
+    ------
+    ValueError
+        If the group, one of its four roles or one of its variables is
+        missing (see :func:`_checked_data_group`).
+    """
+    data_group, names, dataset = _checked_data_group(ms_xdt, ms_name, data_group_name)
     dataset = dataset[names]
     dataset = dataset.drop_vars(
         [name for name in dataset.coords if name not in _KEPT_COORDINATES]
