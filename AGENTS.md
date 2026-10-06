@@ -217,6 +217,26 @@ path is untouched. A sample with any loaded correlation flagged is dropped for
 all of them (no pseudo Stokes I), which gives every plane the same uv coverage
 and hence the same PSF.
 
+**Measurement Set v2 input (skunk works).** `image_cube_single_field` also
+images a Measurement Set v2 directly when `skunk_works=True`
+(`utils/measurement_set_v2.py::is_measurement_set_v2` detects it; guards in
+the driver refuse `skunk_works=False`, a missing engine, the write-back flags
+and an empty `scan_intents` selection before anything is written). AstroVIPER
+has no MSv2 reader of its own: the driver opens the MS lazily with XRADIO's
+`xradio_msv2` engine (`open_msv2`, `array_backend="xarray"`,
+`partition_cache="read"` so the input is never written), builds the graph
+mapping exactly as for a Zarr processing set, and `add_lazy_input_data`
+gives every task, under the mapping key `lazy_input_data`, the lazily indexed
+data-group variables of its selection (baseline names as integer codes into a
+name table, to keep the graph payload small). The node task reads them with
+`load_processing_set_skunk_works_msv2`
+(`node_tasks/imaging/utils/skunk_works_msv2.py`); an `MSv2ChangedError` aborts
+the run instead of skipping the chunk. Every value comes from the engine, so
+the images equal those of the MS converted with
+`convert_msv2_to_processing_set` (same `partition_scheme`). python-casacore
+holds the GIL: deploy with processes (Dask `threads_per_worker=1`, or MPI),
+not threads.
+
 ---
 
 ## 4. Core Domain Concepts (from XRADIO)
