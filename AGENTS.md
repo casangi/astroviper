@@ -223,10 +223,11 @@ images a Measurement Set v2 directly when `skunk_works=True`
 the driver refuse `skunk_works=False`, a missing engine, the write-back flags,
 an empty `scan_intents` selection and an MSv4 without the data group (or one
 of its four roles; `check_data_group_skunk_works_msv2`) before anything is
-written). AstroVIPER
-has no MSv2 reader of its own: the driver opens the MS lazily with XRADIO's
-`xradio_msv2` engine (`open_msv2`, `array_backend="xarray"`,
-`partition_cache="read"` so the input is never written), builds the graph
+written). AstroVIPER has no MSv2 reader of its own: the driver opens the MS
+lazily with XRADIO's `xradio_msv2` engine (`open_msv2`,
+`array_backend="xarray"`, `partition_cache="read"` unless
+`XRADIO_MSV2_PARTITION_CACHE` is set, so with the default options the input
+is never written), builds the graph
 mapping exactly as for a Zarr processing set, and `add_lazy_input_data`
 gives every task, under the mapping key `lazy_input_data`, the lazily indexed
 data-group variables of its selection (baseline names as integer codes into a

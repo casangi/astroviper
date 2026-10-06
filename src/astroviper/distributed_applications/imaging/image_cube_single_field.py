@@ -111,12 +111,14 @@ def image_cube_single_field(
         conversion (:func:`xradio.measurement_set.convert_msv2_to_processing_set`
         with the same ``partition_scheme``, see ``msv2_open_options``): the
         same MSv4s, data groups, frequencies, correlations and visibility
-        values are imaged. The run never writes into the
-        Measurement Set, so ``write_visibility_model_to_ps`` and
-        ``write_imaging_weights_to_ps`` are refused. These errors are raised
-        before anything is written: ``skunk_works=False``, no engine, a
-        write-back flag, a refused ``msv2_open_options`` key, no MSv4 left
-        after ``scan_intents``, or an MSv4 without the data group
+        values are imaged. ``write_visibility_model_to_ps`` and
+        ``write_imaging_weights_to_ps`` are refused, and with the default open
+        options the run never writes into the Measurement Set (a
+        ``partition_cache`` that stores partitions writes them into it, see
+        ``msv2_open_options``). These errors are raised before anything is
+        written: ``skunk_works=False``, no engine, a write-back flag, a
+        refused ``msv2_open_options`` key, no MSv4 left after
+        ``scan_intents``, or an MSv4 without the data group
         ``processing_set_data_group_name`` or without one of the roles the
         imaging reads (a single-dish MSv4 has no ``uvw``). See the Notes for
         deployment.
@@ -385,7 +387,10 @@ def image_cube_single_field(
         the pointing) and ``partition_cache="read"`` unless the environment
         variable ``XRADIO_MSV2_PARTITION_CACHE`` is set (partitions stored in
         the Measurement Set by an earlier open are used, but none are stored:
-        the run never writes into its input). Other engine options include
+        the run never writes into its input). A ``partition_cache`` mode that
+        stores partitions (``"auto"`` or ``"rebuild"``), given here or in that
+        environment variable, writes them into the Measurement Set (an
+        ``XRADIO_PARTITIONS`` sub-table). Other engine options include
         ``partition_scheme`` (default ``[]``, as the converter's, so the MSv4s
         are those of a default conversion) and ``skip_columns``.
         ``array_backend`` and ``scan_intents`` are set by the driver and

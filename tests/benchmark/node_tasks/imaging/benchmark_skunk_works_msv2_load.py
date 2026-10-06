@@ -38,8 +38,10 @@ task. It also reports
 Requirements: XRADIO with the ``xradio_msv2`` engine and python-casacore.
 Data: a Measurement Set v2 path, or the name of a ToolVIPER test dataset
 (downloaded into ``--work-dir`` with ``toolviper.utils.data.download``). The
-benchmark never writes into the Measurement Set; ``--convert`` writes the two
-processing sets into ``--work-dir``.
+benchmark never writes into the Measurement Set, unless
+``XRADIO_MSV2_PARTITION_CACHE`` selects a mode that stores partitions
+(``"auto"`` or ``"rebuild"``); ``--convert`` writes the two processing sets
+into ``--work-dir``.
 
 Examples::
 

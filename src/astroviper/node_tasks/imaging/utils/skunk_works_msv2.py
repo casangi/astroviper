@@ -169,6 +169,9 @@ def open_processing_set_skunk_works_msv2(
       ``XRADIO_MSV2_PARTITION_CACHE`` is set: the partitions stored in the MS
       by an earlier open are used, but the run never writes into its input
       Measurement Set (otherwise the engine's first open stores them there).
+      With that environment variable, or a ``partition_cache`` in
+      ``msv2_open_options``, XRADIO's mode applies, and ``"auto"`` or
+      ``"rebuild"`` store the partitions in the Measurement Set.
     * the engine's ``partition_scheme`` (``[]``, as the converter's), so the
       MSv4 names and data equal those of a default conversion.
 
