@@ -42,20 +42,23 @@ def _transform(image, dtype, overwrite=True):
     )
 
 
+@pytest.mark.parametrize("plane_dim", ["taylor_term", "psf_taylor_order"])
 @pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
 @pytest.mark.parametrize("four", [False, True])
-def test_taylor_and_frequency_planes_agree_and_replace_wrong_dtype(dtype, four):
+def test_taylor_and_frequency_planes_agree_and_replace_wrong_dtype(
+    dtype, four, plane_dim
+):
     cube = _transform(_image("frequency", four), dtype)
-    taylor = _image("taylor_term", four)
+    taylor = _image(plane_dim, four)
     # Existing output with correct geometry but incompatible precision/type.
     taylor["RESULT"] = (
-        ("time", "taylor_term", "polarization", "l", "m"),
+        ("time", plane_dim, "polarization", "l", "m"),
         np.zeros((1, 2, 4 if four else 1, 16, 16), dtype=np.int32),
     )
     result = _transform(taylor, dtype)["RESULT"]
     expected = dtype if four else (np.float32 if dtype == np.complex64 else np.float64)
     assert result.dtype == expected
-    assert result.dims == ("time", "taylor_term", "polarization", "l", "m")
+    assert result.dims == ("time", plane_dim, "polarization", "l", "m")
     np.testing.assert_array_equal(result.values, cube["RESULT"].values)
     if four:
         assert np.max(np.abs(result.values.imag)) > 0

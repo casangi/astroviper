@@ -203,7 +203,7 @@ def test_global_weight_preparation_reports_corrupt_upstream_results(
         ("coordinates", "Coordinate"),
         ("robust", "metadata"),
         ("weighting", "metadata"),
-        ("collapse", "mix frequency"),
+        ("collapse", "frequency-collapsed"),
         ("planes", "exactly one frequency"),
         ("timing", "timing_node_tasks"),
         ("timing_type", "DataFrame"),

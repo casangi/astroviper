@@ -362,20 +362,46 @@ def _weight_density(frequencies, value=1.0, task_id=0):
     }
 
 
-def test_weight_density_reducer_aligns_adds_and_sorts_channels():
-    """Global density reduction adds overlaps and retains disjoint channels."""
-    result = combine_continuum_weight_density_chunks(
-        [
-            _weight_density([1.1e9, 1.2e9], 1.0, 0),
-            _weight_density([1.0e9, 1.1e9], 2.0, 1),
-        ],
-        {},
+@pytest.mark.parametrize("position", [0, 1])
+@pytest.mark.parametrize("frequencies", [[1.1e9], [1.0e9, 1.1e9]])
+def test_weight_density_reducer_rejects_uncollapsed_inputs(position, frequencies):
+    """Even a singleton requires the explicit continuum-collapse contract."""
+    valid = _weight_density([1.2e9])
+    valid["weight_density"].attrs["continuum_frequency_collapsed"] = True
+    leaves = [valid, valid]
+    leaves[position] = _weight_density(frequencies)
+    with pytest.raises(ValueError, match="frequency-collapsed"):
+        combine_continuum_weight_density_chunks(leaves, {})
+
+
+def test_weight_density_reducer_is_associative_and_preserves_inputs():
+    leaves = [
+        _weight_density([frequency], value, i)
+        for i, (frequency, value) in enumerate(
+            [(1.0e9, 2.0), (1.2e9, 3.0), (1.4e9, 7.0)]
+        )
+    ]
+    for leaf, count in zip(leaves, [2, 3, 5], strict=True):
+        leaf["weight_density"].attrs.update(
+            continuum_frequency_collapsed=True, n_input_frequency_channels=count
+        )
+    originals = [leaf["weight_density"].copy(deep=True) for leaf in leaves]
+    flat = combine_continuum_weight_density_chunks(leaves, {})
+    partial = combine_continuum_weight_density_chunks(leaves[:2], {})
+    tree = combine_continuum_weight_density_chunks([partial, leaves[2]], {})
+    xr.testing.assert_allclose(flat["weight_density"], tree["weight_density"])
+    actual = tree["weight_density"]
+    np.testing.assert_allclose(actual.WEIGHT_DENSITY_GRID, 12.0)
+    np.testing.assert_allclose(actual.SUM_WEIGHT, 12.0)
+    np.testing.assert_allclose(
+        actual.frequency, [(1.0e9 * 2 + 1.2e9 * 3 + 1.4e9 * 5) / 10]
     )
-    density = result["weight_density"]
-    np.testing.assert_array_equal(density.frequency, [1.0e9, 1.1e9, 1.2e9])
-    np.testing.assert_allclose(density.WEIGHT_DENSITY_GRID[:, 0, 0, 0], [2, 3, 1])
-    assert density.attrs["n_processing_set_datasets_gridded"] == 2
-    assert len(result["timing_node_tasks"]) == 2
+    assert actual.attrs["n_input_frequency_channels"] == 10
+    assert actual.attrs["n_processing_set_datasets_gridded"] == 3
+    assert actual.attrs["n_weight_density_chunks_combined"] == 3
+    assert len(tree["timing_node_tasks"]) == 3
+    for leaf, original in zip(leaves, originals, strict=True):
+        xr.testing.assert_identical(leaf["weight_density"], original)
 
 
 def test_weight_density_reducer_keeps_collapsed_maps_single_plane():

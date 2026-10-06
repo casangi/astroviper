@@ -1841,18 +1841,11 @@ def combine_continuum_weight_density_chunks(
     Partially reduced inputs have the same structure, except that ``task_id``
     is omitted.
 
-    Frequency-resolved legacy inputs are aligned on their physical frequency
-    coordinates using an outer join. Contributions at matching frequencies are
-    added, while disjoint frequency planes are retained. Consequently, that
-    layout supports both
-
-    * frequency partitioning, where tasks usually own disjoint channels; and
-    * time or baseline partitioning, where multiple tasks contribute to the
-      same frequency planes.
-
-    Global continuum map tasks instead return one frequency-collapsed plane.
-    Those planes are added positionally, avoiding expansion back to one plane
-    per physical channel during the reduce stage.
+    Every input must carry ``continuum_frequency_collapsed=True`` and contain
+    one frequency plane. These planes are added positionally, without aligning
+    their representative frequency coordinates or expanding channel grids.
+    Channel counts and their representative frequencies are combined across
+    tree levels; geometry, weighting metadata and timing remain validated.
 
     Parameters
     ----------
@@ -1867,11 +1860,11 @@ def combine_continuum_weight_density_chunks(
             accumulation. Defaults to ``True``.
 
         ``frequency_rtol`` : float, optional
-            Relative tolerance used when validating frequency coordinates.
+            Relative tolerance used when comparing numeric weighting metadata.
             Defaults to ``1e-12``.
 
         ``frequency_atol`` : float, optional
-            Absolute tolerance used when validating frequency coordinates.
+            Absolute tolerance used when comparing numeric weighting metadata.
             Defaults to ``0.0``.
 
     Returns
@@ -2002,6 +1995,16 @@ def combine_continuum_weight_density_chunks(
                 f"{expected_sum_weight_dims}."
             )
 
+        if not density_xds.attrs.get("continuum_frequency_collapsed", False):
+            raise ValueError(
+                f"input[{input_index}] must contain a frequency-collapsed "
+                "continuum weight-density grid."
+            )
+        if frequency.size != 1:
+            raise ValueError(
+                f"input[{input_index}] must contain exactly one frequency plane."
+            )
+
         return density_xds
 
     # -------------------------------------------------------------
@@ -2081,22 +2084,11 @@ def combine_continuum_weight_density_chunks(
     # -------------------------------------------------------------
     # Initialize accumulation.
     # -------------------------------------------------------------
-    first_xds = _get_density_dataset(
-        input_data[0],
-        0,
-    )
-
-    combined_xds = first_xds.copy(
-        deep=copy_density_deep,
-    )
-    frequency_collapsed = bool(
-        combined_xds.attrs.get("continuum_frequency_collapsed", False)
-    )
-    if frequency_collapsed and combined_xds.sizes["frequency"] != 1:
-        raise ValueError(
-            "A frequency-collapsed weight-density input must contain exactly "
-            "one frequency plane."
-        )
+    density_inputs = [
+        _get_density_dataset(result, input_index)
+        for input_index, result in enumerate(input_data)
+    ]
+    combined_xds = density_inputs[0].copy(deep=copy_density_deep)
 
     # Ensure the two numerical accumulators own writable arrays.
     for variable_name in required_variables:
@@ -2138,113 +2130,44 @@ def combine_continuum_weight_density_chunks(
     # -------------------------------------------------------------
     # Accumulate remaining density datasets.
     # -------------------------------------------------------------
-    for input_index, result in enumerate(
-        input_data[1:],
-        start=1,
-    ):
-        candidate_xds = _get_density_dataset(
-            result,
-            input_index,
-        )
-
-        _validate_compatible_layout(
-            combined_xds,
-            candidate_xds,
-            input_index,
-        )
-
-        candidate_frequency_collapsed = bool(
-            candidate_xds.attrs.get("continuum_frequency_collapsed", False)
-        )
-        if candidate_frequency_collapsed != frequency_collapsed:
-            raise ValueError(
-                "Continuum weight-density reduction cannot mix frequency-"
-                "collapsed and frequency-resolved inputs."
-            )
-
-        if frequency_collapsed:
-            if candidate_xds.sizes["frequency"] != 1:
-                raise ValueError(
-                    "A frequency-collapsed weight-density input must contain "
-                    "exactly one frequency plane."
-                )
-            for variable_name in required_variables:
-                combined_xds[variable_name].data[...] += np.asarray(
-                    candidate_xds[variable_name].values
-                )
-            continue
-
-        # Outer alignment has the desired behavior:
-        #
-        # - overlapping frequencies are placed on the same planes and added;
-        # - disjoint frequencies are retained;
-        # - missing planes are filled with zero.
-        combined_xds, candidate_xds = xr.align(
-            combined_xds,
-            candidate_xds,
-            join="outer",
-            copy=False,
-            fill_value=0.0,
-        )
-
+    for input_index, candidate_xds in enumerate(density_inputs[1:], start=1):
+        _validate_compatible_layout(combined_xds, candidate_xds, input_index)
         for variable_name in required_variables:
-            combined_xds[variable_name] = (
-                combined_xds[variable_name] + candidate_xds[variable_name]
+            combined_xds[variable_name].data[...] += np.asarray(
+                candidate_xds[variable_name].values
             )
 
-    # Sort the final frequency axis because tree reduction and outer
-    # alignment do not guarantee that channels remain globally ordered.
-    if not frequency_collapsed:
-        combined_xds = combined_xds.sortby("frequency")
-
-    if frequency_collapsed:
-        collapsed_inputs = [
-            _get_density_dataset(result, input_index)
-            for input_index, result in enumerate(input_data)
-        ]
-        input_frequency_counts = np.asarray(
-            [
-                int(dataset.attrs.get("n_input_frequency_channels", 1))
-                for dataset in collapsed_inputs
-            ],
-            dtype=np.int64,
-        )
-        representative_frequencies = np.asarray(
-            [float(dataset.frequency.values[0]) for dataset in collapsed_inputs],
-            dtype=np.float64,
-        )
-        total_input_frequency_channels = int(input_frequency_counts.sum())
-        combined_xds = combined_xds.assign_coords(
-            frequency=[
-                float(
-                    np.average(
-                        representative_frequencies,
-                        weights=input_frequency_counts,
-                    )
+    input_frequency_counts = np.asarray(
+        [
+            int(dataset.attrs.get("n_input_frequency_channels", 1))
+            for dataset in density_inputs
+        ],
+        dtype=np.int64,
+    )
+    representative_frequencies = np.asarray(
+        [float(dataset.frequency.values[0]) for dataset in density_inputs],
+        dtype=np.float64,
+    )
+    total_input_frequency_channels = int(input_frequency_counts.sum())
+    combined_xds = combined_xds.assign_coords(
+        frequency=[
+            float(
+                np.average(
+                    representative_frequencies,
+                    weights=input_frequency_counts,
                 )
-            ]
-        )
-        combined_xds.attrs["n_input_frequency_channels"] = (
-            total_input_frequency_channels
-        )
+            )
+        ]
+    )
+    combined_xds.attrs["n_input_frequency_channels"] = total_input_frequency_channels
 
     combined_xds.attrs["n_weight_density_chunks_combined"] = int(len(combined_timing))
 
     # This count is additive across tree-reduction levels because the input
     # datasets carry the number of original MS datasets represented.
-    combined_xds.attrs["n_processing_set_datasets_gridded"] = int(
-        sum(
-            int(
-                _get_density_dataset(
-                    result,
-                    input_index,
-                ).attrs.get(
-                    "n_processing_set_datasets_gridded",
-                    0,
-                )
-            )
-            for input_index, result in enumerate(input_data)
-        )
+    combined_xds.attrs["n_processing_set_datasets_gridded"] = sum(
+        int(dataset.attrs.get("n_processing_set_datasets_gridded", 0))
+        for dataset in density_inputs
     )
 
     return _prepare_continuum_result_for_transfer(

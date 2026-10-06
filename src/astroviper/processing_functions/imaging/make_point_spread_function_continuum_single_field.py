@@ -291,49 +291,6 @@ def add_uv_sampling_grid_continuum_single_field(
     target_normalization[...] = target_normalization[:, 0:1, :]
 
 
-def _rename_psf_frequency_axis_to_taylor_order(
-    img_xds: xr.Dataset,
-    *,
-    image_data_group_out_name: str,
-    n_psf_taylor_terms: int,
-) -> xr.Dataset:
-    """Rename a legacy FFT output axis from ``frequency`` to Taylor order.
-
-    This helper is only needed if ``ifft_norm_img_xds`` creates its output with
-    a hard-coded ``frequency`` dimension.  If it already preserves
-    ``psf_taylor_order``, this function is a no-op.
-    """
-    data_group = img_xds.attrs["data_groups"][image_data_group_out_name]
-    variable_roles = (
-        "uv_sampling",
-        "uv_sampling_normalization",
-        "point_spread_function",
-    )
-
-    for role in variable_roles:
-        variable_name = data_group.get(role)
-        if variable_name is None or variable_name not in img_xds:
-            continue
-
-        data_array = img_xds[variable_name]
-        if "psf_taylor_order" in data_array.dims:
-            continue
-        if "frequency" not in data_array.dims:
-            continue
-        if data_array.sizes["frequency"] != n_psf_taylor_terms:
-            continue
-
-        renamed = data_array.rename({"frequency": "psf_taylor_order"}).assign_coords(
-            psf_taylor_order=np.arange(
-                n_psf_taylor_terms,
-                dtype=np.int64,
-            )
-        )
-        img_xds[variable_name] = renamed
-
-    return img_xds
-
-
 @shares_param_docs
 def make_point_spread_function_mvc_single_field(
     ps_xdt,

@@ -945,7 +945,6 @@ def residual_update_continuum_single_field(
     image_store,
     input_data_store,
     specmode="mfs",
-    pb_cache_mapping=None,
     model_xds=None,
     processing_set_data_group_name="corrected",
     instrument_polarization_basis="linear",
@@ -1278,17 +1277,6 @@ def residual_update_continuum_single_field(
 
     if specmode == "mvc" and not is_n_iter_0:
         task_id = int(task_id)
-
-        # Retain the old whole-mapping input as a node-level compatibility path;
-        # the distributed application now injects only the task-local dataset.
-        if primary_beam_xds is None and pb_cache_mapping is not None:
-            if task_id not in pb_cache_mapping:
-                raise KeyError(
-                    "No cached MVC primary beam exists for "
-                    f"task {task_id}. Available task identifiers are "
-                    f"{sorted(pb_cache_mapping)}."
-                )
-            primary_beam_xds = pb_cache_mapping[task_id]
 
         if widebandpb_memory_mode == "in_place":
             primary_beam_xds = _load_wideband_primary_beam_in_place(
@@ -2104,9 +2092,6 @@ def _prepare_continuum_image(
         finalize_mvc_taylor_normal_equations,
         point_spread_function_gaussian_fit_continuum,
     )
-    from astroviper.processing_functions.imaging.make_point_spread_function_continuum_single_field import (
-        _rename_psf_frequency_axis_to_taylor_order,
-    )
 
     config = _resolve_continuum_append_configuration(input_params)
 
@@ -2286,14 +2271,6 @@ def _prepare_continuum_image(
                 processing_function_threads=config["processing_function_threads"],
                 fft_backend=config["fft_backend"],
                 complex_dtype=config["complex_dtype"],
-            )
-
-            # Direct MFS PSF Taylor terms may emerge from the generic FFT helper
-            # on a frequency-like axis.  Re-label that axis without changing data.
-            img_xds = _rename_psf_frequency_axis_to_taylor_order(
-                img_xds,
-                image_data_group_out_name=image_data_group_name,
-                n_psf_taylor_terms=n_psf_taylor_terms,
             )
 
         # register name of data group

@@ -11,7 +11,6 @@ from astroviper.processing_functions.imaging.add_visibility_grid_continuum_mvc i
     add_visibility_grid_mvc_single_field,
 )
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
-    copy_variable_without_alignment,
     prepare_model_uv_continuum_single_field,
 )
 from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
@@ -79,29 +78,6 @@ def test_setup_checks_weights_in_every_child(fault):
     elif fault == "variable":
         children["second"] = children["second"].drop_vars("W")
     assert _imaging_weights_are_available(children, "base") is (fault == "none")
-
-
-def test_positional_copy_preserves_destination_coordinates_and_source_attributes():
-    source = xr.Dataset(
-        {"A": ("frequency", [3.0, 4.0], {"unit": "Jy"})},
-        coords={"frequency": [1.0, 2.0]},
-    )
-    destination = xr.Dataset(coords={"frequency": [2.0, 1.0]})
-    result = copy_variable_without_alignment(destination, source, "A")
-    assert result is destination
-    np.testing.assert_array_equal(result.frequency, [2.0, 1.0])
-    np.testing.assert_array_equal(result.A, [3.0, 4.0])
-    result.A.attrs["unit"] = "other"
-    assert source.A.attrs["unit"] == "Jy"
-
-
-def test_positional_copy_rejects_size_mismatch():
-    with pytest.raises(ValueError, match="incompatible size"):
-        copy_variable_without_alignment(
-            xr.Dataset(coords={"frequency": [1.0]}),
-            xr.Dataset({"A": ("frequency", [3.0, 4.0])}),
-            "A",
-        )
 
 
 @pytest.fixture

@@ -1,71 +1,7 @@
-import xarray as xr
-
 from astroviper.utils.param_docs import shares_param_docs
 
 _MVC_OBSERVED_VISIBILITY_CACHE = "_MVC_OBSERVED_VISIBILITY_CACHE"
 _MVC_OBSERVED_NORMALIZATION_CACHE = "_MVC_OBSERVED_NORMALIZATION_CACHE"
-
-###############################################################################
-# Generic helper functions
-###############################################################################
-
-
-def copy_variable_without_alignment(
-    destination: xr.Dataset,
-    source: xr.Dataset,
-    name: str,
-) -> xr.Dataset:
-    """Copy a data variable without coordinate alignment.
-
-    This helper copies the numerical values and metadata of a data variable from
-    one :class:`xarray.Dataset` to another while preserving the destination
-    dataset's coordinates and indexing.
-
-    Unlike a normal xarray assignment, which aligns arrays by coordinate labels,
-    this function performs a positional copy of the underlying array data. This is
-    useful when the source and destination datasets are known to have identical
-    array layouts but differ in coordinates or auxiliary metadata.
-
-    Parameters
-    ----------
-    destination_xds : xarray.Dataset
-        Dataset receiving the copied variable.
-
-    source_xds : xarray.Dataset
-        Dataset providing the variable to copy.
-
-    variable_name : str
-        Name of the data variable to copy.
-
-    Returns
-    -------
-    xarray.Dataset
-        The destination dataset with the copied variable. Variable attributes are
-        preserved, while the destination dataset's coordinates and data-group
-        definitions remain unchanged.
-
-    Notes
-    -----
-    This helper should only be used when the source and destination variables are
-    known to have identical dimensions and shapes. No coordinate alignment or
-    broadcasting is performed."""
-
-    source_da = source[name]
-
-    for dim, size in source_da.sizes.items():
-        if dim in destination.sizes and destination.sizes[dim] != size:
-            raise ValueError(
-                f"{name}: incompatible size for dimension {dim!r}: "
-                f"source={size}, destination={destination.sizes[dim]}"
-            )
-
-    destination[name] = xr.Variable(
-        dims=source_da.dims,
-        data=source_da.data,
-        attrs=source_da.attrs.copy(),
-    )
-    return destination
-
 
 ###############################################################################
 # Processing Function level functionality related to the residual update
