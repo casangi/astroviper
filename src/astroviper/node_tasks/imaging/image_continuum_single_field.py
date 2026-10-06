@@ -146,7 +146,7 @@ def _write_continuum_weights_in_place(ps_xdt, ps_store):
     import numpy as np
     import zarr
 
-    root = zarr.open_group(ps_store, mode="r+")
+    root = zarr.open_group(ps_store, mode="r+", use_consolidated=False)
     for ms_name, ms_xdt in ps_xdt.items():
         data_groups = ms_xdt.ds.attrs.get("data_groups", {})
         weight_name = next(
@@ -163,7 +163,9 @@ def _write_continuum_weights_in_place(ps_xdt, ps_store):
             )
 
         weight = ms_xdt.ds[weight_name]
-        ms_group = root[ms_name]
+        ms_group = zarr.open_group(
+            root.store, path=ms_name, mode="r+", use_consolidated=False
+        )
         if _CONTINUUM_WEIGHT_CACHE_VARIABLE not in ms_group:
             raise KeyError(
                 f"In-place weight array {_CONTINUUM_WEIGHT_CACHE_VARIABLE!r} "
@@ -349,6 +351,8 @@ def _write_mfs_visibility_grid_in_place(observed_grid_xds, image_store):
         group=_MFS_VISIBILITY_GRID_CACHE_GROUP,
         mode="a",
         consolidated=False,
+        # A new subgroup must use the existing root format, not xarray's default.
+        zarr_format=root.metadata.zarr_format,
     )
 
 

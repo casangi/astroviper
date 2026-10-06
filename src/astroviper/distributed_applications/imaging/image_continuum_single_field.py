@@ -294,7 +294,7 @@ def _create_continuum_weight_cache_store(
     import numpy as np
 
     original_data_groups = {}
-    root = zarr.open_group(ps_store, mode="r+")
+    root = zarr.open_group(ps_store, mode="r+", use_consolidated=False)
 
     for ms_name, ms_xdt in ps_xdt.items():
         data_groups = ms_xdt.ds.attrs.get("data_groups", {})
@@ -319,7 +319,11 @@ def _create_continuum_weight_cache_store(
                 f"{ms_name!r} does not register an input weight."
             )
 
-        ms_group = root[ms_name]
+        # Open the child directly: disabling root consolidation does not
+        # disable a child's own consolidated metadata.
+        ms_group = zarr.open_group(
+            root.store, path=ms_name, mode="r+", use_consolidated=False
+        )
         if source_weight_name not in ms_group:
             raise KeyError(
                 f"Registered input weight {source_weight_name!r} is absent "
@@ -367,6 +371,9 @@ def _create_continuum_weight_cache_store(
             **create_options,
         )
 
+    # Refresh children as well as the root for readers opening either level.
+    for ms_name in ps_xdt:
+        zarr.consolidate_metadata(ps_store, path=ms_name)
     zarr.consolidate_metadata(ps_store)
     return original_data_groups
 
@@ -382,7 +389,7 @@ def _activate_continuum_weight_cache(
         modify_data_groups_xds,
     )
 
-    root = zarr.open_group(ps_store, mode="r+")
+    root = zarr.open_group(ps_store, mode="r+", use_consolidated=False)
     for ms_name, ms_xdt in ps_xdt.items():
         _, data_group_out = create_data_groups_in_and_out(
             ms_xdt.ds,
@@ -399,10 +406,14 @@ def _activate_continuum_weight_cache(
             data_group_out=data_group_out,
             description="AstroVIPER continuum imaging-weight cache.",
         )
-        root[ms_name].attrs["data_groups"] = copy.deepcopy(
-            ms_xdt.ds.attrs["data_groups"]
+        ms_group = zarr.open_group(
+            root.store, path=ms_name, mode="r+", use_consolidated=False
         )
+        ms_group.attrs["data_groups"] = copy.deepcopy(ms_xdt.ds.attrs["data_groups"])
 
+    # Refresh children as well as the root for readers opening either level.
+    for ms_name in ps_xdt:
+        zarr.consolidate_metadata(ps_store, path=ms_name)
     zarr.consolidate_metadata(ps_store)
 
 
@@ -412,15 +423,22 @@ def _remove_continuum_weight_cache(
     original_data_groups,
 ):
     """Remove temporary in-place weights and restore original data groups."""
-    root = zarr.open_group(ps_store, mode="r+")
+    root = zarr.open_group(ps_store, mode="r+", use_consolidated=False)
     for ms_name, ms_xdt in ps_xdt.items():
-        ms_group = root[ms_name]
+        # Open the child directly: disabling root consolidation does not
+        # disable a child's own consolidated metadata.
+        ms_group = zarr.open_group(
+            root.store, path=ms_name, mode="r+", use_consolidated=False
+        )
         if _CONTINUUM_WEIGHT_CACHE_VARIABLE in ms_group:
             del ms_group[_CONTINUUM_WEIGHT_CACHE_VARIABLE]
         restored = copy.deepcopy(original_data_groups[ms_name])
         ms_xdt.ds.attrs["data_groups"] = restored
         ms_group.attrs["data_groups"] = copy.deepcopy(restored)
 
+    # Refresh children as well as the root for readers opening either level.
+    for ms_name in ps_xdt:
+        zarr.consolidate_metadata(ps_store, path=ms_name)
     zarr.consolidate_metadata(ps_store)
 
 
