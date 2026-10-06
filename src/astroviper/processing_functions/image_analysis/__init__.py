@@ -2,6 +2,11 @@
 
 from astroviper.processing_functions.image_analysis.make_mask import make_mask
 from astroviper.processing_functions.image_analysis.moments import moments
+from astroviper.processing_functions.image_analysis.plane_statistics import (
+    calculate_plane_statistics,
+    concatenate_plane_statistics,
+    plane_statistics_to_dataframe,
+)
 from astroviper.processing_functions.image_analysis.statistics import (
     STATISTIC_FUNCTIONS,
     create_statistics_state,
@@ -19,11 +24,6 @@ from astroviper.processing_functions.image_analysis.statistics import (
     statistics_sigma,
     statistics_sum,
     statistics_sumsq,
-)
-from astroviper.processing_functions.image_analysis.plane_statistics import (
-    calculate_plane_statistics,
-    concatenate_plane_statistics,
-    plane_statistics_to_dataframe,
 )
 
 __all__ = [
