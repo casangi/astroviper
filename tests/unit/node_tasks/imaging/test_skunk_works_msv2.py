@@ -17,6 +17,7 @@ Two kinds of tests:
 from __future__ import annotations
 
 import copy
+import io
 import multiprocessing
 import os
 import pickle
@@ -837,8 +838,10 @@ def _graph_mapping(ps_xdt, n_chunks):
 @pytest.mark.parametrize("group", ["base", "corrected"])
 def test_mapping_and_tasks_equal_production(opened_msv2, imageable_msv2_ps, group):
     """The MSv4 names, frequency axis and graph mapping equal those of the
-    converted processing set, and so does every task's load, including the
-    task that straddles both spectral windows."""
+    converted processing set, and so does every task's load: 5 tasks over the
+    32 channels, so every MSv4 has a task inside its channels (neither at its
+    first nor at its last channel), and one task straddles both spectral
+    windows."""
     from xradio.measurement_set import open_processing_set
 
     converted = open_processing_set(imageable_msv2_ps)
@@ -847,9 +850,9 @@ def test_mapping_and_tasks_equal_production(opened_msv2, imageable_msv2_ps, grou
         opened_msv2.xr_ps.get_freq_axis().values,
         converted.xr_ps.get_freq_axis().values,
     )
-    mapping = _graph_mapping(opened_msv2, n_chunks=3)
-    converted_mapping = _graph_mapping(converted, n_chunks=3)
-    assert len(mapping) == len(converted_mapping) == 3
+    mapping = _graph_mapping(opened_msv2, n_chunks=5)
+    converted_mapping = _graph_mapping(converted, n_chunks=5)
+    assert len(mapping) == len(converted_mapping) == 5
     for task_id, task in mapping.items():
         assert task["data_selection"] == converted_mapping[task_id]["data_selection"]
         np.testing.assert_array_equal(
@@ -857,6 +860,16 @@ def test_mapping_and_tasks_equal_production(opened_msv2, imageable_msv2_ps, grou
             converted_mapping[task_id]["task_coords"]["frequency"]["data"],
         )
     assert max(len(task["data_selection"]) for task in mapping.values()) == 4
+    interior = {
+        ms_name
+        for task in mapping.values()
+        for ms_name, selection in task["data_selection"].items()
+        if 0
+        < selection["frequency"].start
+        < selection["frequency"].stop
+        < opened_msv2[ms_name].sizes["frequency"]
+    }
+    assert interior == set(opened_msv2.children)
     for task in mapping.values():  # the imaging's correlation selection
         for selection in task["data_selection"].values():
             selection["polarization"] = [1, 0]
@@ -886,11 +899,40 @@ def test_open_scan_intents(imageable_msv2):
         )
 
 
+def _casacore_objects(value):
+    """The casacore objects (or classes) that pickling ``value`` meets.
+
+    python-casacore's tables cannot be pickled, so pickling may then fail; the
+    objects met before the failure are returned.
+    """
+    found = []
+
+    class Pickler(pickle.Pickler):
+        def reducer_override(self, obj):
+            module = getattr(obj, "__module__", None) if isinstance(obj, type) else None
+            module = module or type(obj).__module__
+            if str(module).split(".")[0] == "casacore":
+                found.append(obj)
+            return NotImplemented
+
+    try:
+        Pickler(io.BytesIO()).dump(value)
+    except Exception:
+        if not found:
+            raise
+    return found
+
+
 @requires_msv2_engine
-def test_spawned_process_reads_a_pickled_task(opened_msv2):
-    """A task's payload pickles without an open table, stays small (the
-    baseline names travel as codes), and a spawned process (no state shared
-    with this one) reads the same values and rebuilds the same names."""
+def test_spawned_process_reads_a_pickled_task(opened_msv2, imageable_msv2):
+    """A task's payload pickles without an open table (no casacore object in
+    it), stays small (the baseline names travel as codes), and a spawned
+    process (no state shared with this one) reads the same values and
+    rebuilds the same names."""
+    from casacore import tables
+
+    with tables.table(imageable_msv2, ack=False) as table:  # the check sees one
+        assert _casacore_objects({"table": table})
     mapping = _graph_mapping(opened_msv2, n_chunks=3)
     for task in mapping.values():
         for selection in task["data_selection"].values():
@@ -900,6 +942,7 @@ def test_spawned_process_reads_a_pickled_task(opened_msv2):
         (task["lazy_input_data"] for task in mapping.values()), key=len
     )
     assert len(lazy_input_data) == 4
+    assert _casacore_objects(lazy_input_data) == []
     for ms_name, dataset in lazy_input_data.items():
         assert set(dataset.coords) == SHIPPED_COORDINATES
         payload = len(pickle.dumps(dataset))

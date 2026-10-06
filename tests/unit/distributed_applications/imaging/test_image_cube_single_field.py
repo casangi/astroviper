@@ -404,21 +404,27 @@ def test_msv2_images_equal_production_on_the_conversion(
 ):
     """The Measurement Set v2, imaged directly, gives the images of its
     conversion imaged by the production path, bit for bit: both spectral
-    windows (one decreasing) in 3 tasks, one of which straddles them, with
-    whole-cell tiles (``base``) and narrow tiles (``corrected``)."""
+    windows (16 channels each, one decreasing) in 5 tasks of 7, 7, 7, 7 and 4
+    channels, so that each spectral window has a task inside its channels
+    (neither at its first nor at its last channel) and one task straddles
+    both, with whole-cell tiles (``base``) and narrow tiles (``corrected``)."""
     frequencies = open_processing_set(imageable_msv2_ps).xr_ps.get_freq_axis().values
     assert frequencies.size == 32
     msv2_store = str(tmp_path / "msv2.img.zarr")
     production_store = str(tmp_path / "production.img.zarr")
-    common = dict(processing_set_data_group_name=group, max_iter=max_iter)
+    common = dict(
+        processing_set_data_group_name=group,
+        max_iter=max_iter,
+        n_mapping_parallelism={"frequency": 5},
+    )
 
     result = _image_cube(imageable_msv2, msv2_store, frequencies, **common)
     production = _image_cube(
         imageable_msv2_ps, production_store, frequencies, skunk_works=False, **common
     )
 
-    _assert_imaged(result)
-    _assert_imaged(production)
+    _assert_imaged(result, n_tasks=5)
+    _assert_imaged(production, n_tasks=5)
     _assert_images_equal(msv2_store, production_store)
     timing = result["timing_distributed_application"]
     assert TIMING_KEYS <= set(timing)
