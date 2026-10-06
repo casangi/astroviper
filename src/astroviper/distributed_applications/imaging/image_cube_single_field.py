@@ -805,6 +805,14 @@ def image_cube_single_field(
             f"Unknown compute_backend {compute_backend!r}; expected 'dask' or 'mpi'."
         )
 
+    # The processing set is not needed any more. Severing its parent<->child
+    # links lets it, with the lazy arrays and dask graphs of every node, die by
+    # reference counting when the driver returns, not as cyclic garbage.
+    from astroviper.utils.data_tree import release_data_tree
+
+    release_data_tree(ps_xdt)
+    ps_xdt = None
+
     start = time.time()
     if output_image_format == "zarr":
         zarr.consolidate_metadata(image_store)
