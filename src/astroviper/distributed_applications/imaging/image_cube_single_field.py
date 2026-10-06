@@ -56,7 +56,7 @@ def image_cube_single_field(
     gridder="prolate_spheroidal",
     deconvolver="hogbom",
     instrument_polarization_basis: str = "linear",
-    scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],  # noqa: B006 - param.json schema requires list/str (not nullable); never mutated
+    scan_intents: list[str] | None = ["OBSERVE_TARGET#ON_SOURCE"],  # noqa: B006 - None means every intent, so the default stays a list; never mutated
     field_name: str = None,
     image_data_variables_keep: list[str] = [  # noqa: B006 - param.json schema requires a list (not nullable); never mutated
         "sky_deconvolved",
