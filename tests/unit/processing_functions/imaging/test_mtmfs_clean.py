@@ -18,6 +18,9 @@ Organised as:
   * statelessness, the zero-copy contract and input validation.
 """
 
+import runpy
+import sys
+
 import numpy as np
 import pytest
 
@@ -33,6 +36,14 @@ except ImportError as e:  # pragma: no cover
 pytestmark = pytest.mark.skipif(
     not MTMFS_AVAILABLE, reason="MTMFS extension not compiled/available"
 )
+
+
+def test_missing_extension(monkeypatch):
+    monkeypatch.setitem(sys.modules, f"{mtmfs.__name__}._mtmfs_ext", None)
+    with pytest.raises(
+        ImportError, match="Failed to import MTMFS CLEAN extension module"
+    ):
+        runpy.run_path(mtmfs.__file__)
 
 
 _PSF_AMP = np.array([1.0, 0.4, 0.5, 0.3, 0.45], dtype=np.float32)
