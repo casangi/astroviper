@@ -272,6 +272,38 @@ def test_add_lazy_input_data_whole_ms_without_selection():
         assert dataset.sizes["polarization"] == 2
 
 
+def test_add_lazy_input_data_on_a_task_that_selects_nothing():
+    """A task that selects no MSv4 gets an empty ``lazy_input_data``.
+    GraphVIPER's map reuses one parameter dict across the tasks (it updates
+    it with each task, then deep-copies it), so without the key such a task
+    would inherit the previous task's selections."""
+    ps_xdt = make_lazy_ps([])
+    mapping = {
+        0: {"data_selection": {"ms_0": {"frequency": slice(0, 2)}}},
+        1: {"data_selection": {}},
+    }
+    add_lazy_input_data(ps_xdt, mapping, "base")
+    assert mapping[1]["lazy_input_data"] == {}
+
+    input_params, node_task_parameters = {}, []  # as GraphVIPER's map
+    for task in mapping.values():
+        input_params.update(task)
+        node_task_parameters.append(copy.deepcopy(input_params))
+    assert list(node_task_parameters[0]["lazy_input_data"]) == ["ms_0"]
+    assert node_task_parameters[1]["lazy_input_data"] == {}
+
+
+def test_add_lazy_input_data_leaves_the_input_attrs_alone():
+    """The per-task datasets get attrs of their own; the MSv4's data groups
+    are not modified."""
+    ps_xdt = make_lazy_ps([])
+    before = copy.deepcopy(dict(ps_xdt["ms_0"].attrs))
+    mapping = make_mapping()
+    add_lazy_input_data(ps_xdt, mapping, "base")
+    mapping[0]["lazy_input_data"]["ms_0"].attrs["data_groups"]["base"]["flag"] = "X"
+    assert dict(ps_xdt["ms_0"].attrs) == before
+
+
 def test_add_lazy_input_data_shares_one_subset_per_ms():
     """The per-MSv4 subset is built once; each task indexes it."""
     ps_xdt = make_lazy_ps([])

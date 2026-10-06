@@ -325,6 +325,10 @@ def add_lazy_input_data(ps_xdt, node_task_data_mapping, processing_set_data_grou
     """
     data_group_datasets = {}
     for task in node_task_data_mapping.values():
+        # Set on every task, as {} for a task that selects no MSv4: GraphVIPER's
+        # map reuses one parameter dict across the tasks (it updates it with
+        # each task, then deep-copies it), so a task without the key would
+        # inherit the previous task's lazy_input_data.
         lazy_input_data = {}
         for ms_name, selection in task["data_selection"].items():
             if ms_name not in data_group_datasets:
@@ -422,6 +426,10 @@ def _data_group_dataset(ms_xdt, ms_name, data_group_name):
     dataset = dataset.drop_vars(
         [name for name in dataset.coords if name not in _KEPT_COORDINATES]
     )
+    # The attrs of this new, minimal per-task dataset are built here, as the
+    # Zarr skunk loader builds its datasets' (not with data_group_tools, which
+    # resolve and register groups on an existing dataset). The input MSv4's
+    # attrs are not touched: data_group is a copy.
     dataset.attrs = {"data_groups": {data_group_name: data_group}}
     return _encode_baseline_antenna_names(dataset)
 
