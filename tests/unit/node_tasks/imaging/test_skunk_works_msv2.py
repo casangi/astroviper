@@ -46,12 +46,13 @@ requires_msv2_engine = pytest.mark.skipif(
 )
 
 ROLES = ("correlated_data", "flag", "weight", "uvw")
-KEPT_COORDINATES = {
-    "frequency",
-    "polarization",
-    "baseline_antenna1_name",
-    "baseline_antenna2_name",
-}
+NAME_COORDINATES = ("baseline_antenna1_name", "baseline_antenna2_name")
+CODE_COORDINATES = ("baseline_antenna1_code", "baseline_antenna2_code")
+NAME_TABLE = "baseline_antenna_name_table"
+# The coordinates of a loaded task, and of a task's lazy selection (the
+# baseline antenna names shipped as codes).
+KEPT_COORDINATES = {"frequency", "polarization", *NAME_COORDINATES}
+SHIPPED_COORDINATES = {"frequency", "polarization", *CODE_COORDINATES}
 VISIBILITY_DIMS = ("time", "baseline_id", "frequency", "polarization")
 
 
@@ -218,8 +219,9 @@ def test_add_lazy_input_data_selections(group):
             source = ps_xdt[ms_name].to_dataset()
             data_group = source.attrs["data_groups"][group]
             assert list(dataset.data_vars) == [data_group[role] for role in ROLES]
-            assert set(dataset.coords) == KEPT_COORDINATES
-            assert dataset.attrs == {"data_groups": {group: data_group}}
+            assert set(dataset.coords) == SHIPPED_COORDINATES
+            assert set(dataset.attrs) == {"data_groups", NAME_TABLE}
+            assert dataset.attrs["data_groups"] == {group: data_group}
             want = source.isel(task["data_selection"][ms_name])
             assert dict(dataset.sizes) == {
                 "time": 3,
@@ -377,6 +379,100 @@ def test_load_leaves_the_task_selection_lazy():
 
 def test_load_with_no_measurement_set():
     assert len(load_processing_set_skunk_works_msv2({}).children) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Baseline antenna names as integer codes (not gated)
+# --------------------------------------------------------------------------- #
+def test_baseline_codes_rebuild_the_names_exactly():
+    """The selections carry small integer codes and one name table; the load
+    rebuilds the name coordinates exactly (values, dtype, attributes)."""
+    ps_xdt = make_lazy_ps([], antenna_prefix="DV")
+    source = ps_xdt["ms_0"].to_dataset()
+    source = source.assign_coords(
+        baseline_antenna1_name=source.baseline_antenna1_name.assign_attrs(
+            description="first antenna"
+        )
+    )
+    ps_xdt["ms_0"] = xr.DataTree(source)
+    mapping = make_mapping()
+    add_lazy_input_data(ps_xdt, mapping, "base")
+
+    shipped = mapping[1]["lazy_input_data"]["ms_0"]
+    table = shipped.attrs[NAME_TABLE]
+    np.testing.assert_array_equal(table, ["DV0", "DV1", "DV2", "DV3"])
+    for name, code_name in zip(NAME_COORDINATES, CODE_COORDINATES, strict=True):
+        assert shipped[code_name].dtype == np.uint8
+        assert shipped[code_name].dims == ("baseline_id",)
+        np.testing.assert_array_equal(table[shipped[code_name].values], source[name])
+
+    loaded = load_processing_set_skunk_works_msv2(mapping[1]["lazy_input_data"])
+
+    for ms_name in ("ms_0", "ms_1"):
+        got = loaded[ms_name].to_dataset()
+        want = ps_xdt[ms_name].to_dataset()
+        assert set(got.coords) == KEPT_COORDINATES
+        assert NAME_TABLE not in got.attrs
+        for name in NAME_COORDINATES:
+            xr.testing.assert_identical(got[name].variable, want[name].variable)
+    assert loaded["ms_0"]["baseline_antenna1_name"].attrs == {
+        "description": "first antenna"
+    }
+
+
+@pytest.mark.parametrize(
+    ("n_names", "dtype"), [(1, np.uint8), (256, np.uint8), (257, np.uint16)]
+)
+def test_baseline_codes_use_the_smallest_unsigned_type(n_names, dtype):
+    names = np.array([f"A{k:04d}" for k in range(n_names)])
+    dataset = xr.Dataset(
+        coords={
+            "baseline_antenna1_name": ("baseline_id", names),
+            "baseline_antenna2_name": ("baseline_id", names[::-1]),
+        }
+    )
+    encoded = skunk_works_msv2._encode_baseline_antenna_names(dataset)
+    assert encoded["baseline_antenna1_code"].dtype == dtype
+    assert encoded.attrs[NAME_TABLE].size == n_names
+    xr.testing.assert_identical(
+        skunk_works_msv2._decode_baseline_antenna_names(encoded), dataset
+    )
+
+
+def test_baseline_codes_without_names():
+    """A dataset without name coordinates, or without a name table, passes
+    through unchanged."""
+    dataset = xr.Dataset(coords={"frequency": [1.0, 2.0]})
+    assert skunk_works_msv2._encode_baseline_antenna_names(dataset) is dataset
+    named = dataset.assign_coords(baseline_antenna1_name=("baseline_id", ["A", "B"]))
+    assert skunk_works_msv2._decode_baseline_antenna_names(named) is named
+
+
+def test_baseline_codes_with_one_name_coordinate():
+    """A dataset with only one of the two name coordinates round-trips."""
+    named = xr.Dataset(coords={"baseline_antenna1_name": ("baseline_id", ["B", "A"])})
+    encoded = skunk_works_msv2._encode_baseline_antenna_names(named)
+    assert set(encoded.coords) == {"baseline_antenna1_code"}
+    xr.testing.assert_identical(
+        skunk_works_msv2._decode_baseline_antenna_names(encoded), named
+    )
+
+
+def test_baseline_codes_shrink_the_payload():
+    """For an array with many antennas the names, repeated per baseline,
+    dominate a task's coordinates; the codes and the table are far smaller."""
+    ps_xdt = make_lazy_ps([], ms_names=("ms_0",), n_antenna=40, antenna_prefix="PAD")
+    mapping = {0: {"data_selection": {"ms_0": {"frequency": slice(0, 1)}}}}
+    add_lazy_input_data(ps_xdt, mapping, "base")
+    shipped = mapping[0]["lazy_input_data"]["ms_0"]
+
+    names = pickle.dumps([ps_xdt["ms_0"][name].variable for name in NAME_COORDINATES])
+    codes = pickle.dumps(
+        [shipped[name].variable for name in CODE_COORDINATES]
+        + [shipped.attrs[NAME_TABLE]]
+    )
+    assert shipped.sizes["baseline_id"] == 780
+    assert len(codes) < len(names) / 4
 
 
 # --------------------------------------------------------------------------- #
@@ -606,6 +702,7 @@ def assert_equals_production(loaded, production, group):
             assert got[name].values.flags.writeable
         assert set(got.coords) == KEPT_COORDINATES
         for name in KEPT_COORDINATES:
+            assert got[name].dtype == want[name].dtype, (ms_name, name)
             np.testing.assert_array_equal(
                 got[name].values, want[name].values, err_msg=f"{ms_name} {name}"
             )
@@ -711,8 +808,9 @@ def test_open_scan_intents(imageable_msv2):
 
 @requires_msv2_engine
 def test_spawned_process_reads_a_pickled_task(opened_msv2):
-    """A task's payload pickles without an open table, stays small, and a
-    spawned process (no state shared with this one) reads the same values."""
+    """A task's payload pickles without an open table, stays small (the
+    baseline names travel as codes), and a spawned process (no state shared
+    with this one) reads the same values and rebuilds the same names."""
     mapping = _graph_mapping(opened_msv2, n_chunks=3)
     for task in mapping.values():
         for selection in task["data_selection"].values():
@@ -722,8 +820,18 @@ def test_spawned_process_reads_a_pickled_task(opened_msv2):
         (task["lazy_input_data"] for task in mapping.values()), key=len
     )
     assert len(lazy_input_data) == 4
-    for dataset in lazy_input_data.values():
-        assert len(pickle.dumps(dataset)) < 16_000
+    for ms_name, dataset in lazy_input_data.items():
+        assert set(dataset.coords) == SHIPPED_COORDINATES
+        payload = len(pickle.dumps(dataset))
+        assert payload < 16_000
+        # The same selection with the name strings instead of the codes.
+        with_names = dataset.drop_vars(list(CODE_COORDINATES)).assign_coords(
+            {name: opened_msv2[ms_name][name].variable for name in NAME_COORDINATES}
+        )
+        with_names.attrs = {
+            key: value for key, value in dataset.attrs.items() if key != NAME_TABLE
+        }
+        assert payload < len(pickle.dumps(with_names))
 
     with ProcessPoolExecutor(
         max_workers=1, mp_context=multiprocessing.get_context("spawn")
@@ -732,9 +840,13 @@ def test_spawned_process_reads_a_pickled_task(opened_msv2):
             load_processing_set_skunk_works_msv2, lazy_input_data
         ).result(timeout=300)
 
-    xr.testing.assert_identical(
-        spawned, load_processing_set_skunk_works_msv2(lazy_input_data)
-    )
+    loaded = load_processing_set_skunk_works_msv2(lazy_input_data)
+    xr.testing.assert_identical(spawned, loaded)
+    for ms_name in lazy_input_data:
+        for name in NAME_COORDINATES:
+            xr.testing.assert_identical(
+                spawned[ms_name][name].variable, opened_msv2[ms_name][name].variable
+            )
 
 
 def _file_state(path):

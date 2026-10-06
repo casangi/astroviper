@@ -11,9 +11,12 @@ A Measurement Set v2 is imaged without converting it, through XRADIO's
   selection of its data under the mapping key ``lazy_input_data``: per MSv4,
   the data group's four variables (``correlated_data``, ``flag``, ``weight``,
   ``uvw``) restricted to the task's ``data_selection``, with the coordinates
-  the imaging reads (``frequency``, ``polarization``,
-  ``baseline_antenna1_name``, ``baseline_antenna2_name``);
-* the node task reads it with :func:`load_processing_set_skunk_works_msv2`.
+  the imaging reads (``frequency``, ``polarization`` and the baseline antenna
+  names, shipped as small integer codes into a per-MSv4 name table, which
+  keeps the graph payload small for arrays with many baselines);
+* the node task reads it with :func:`load_processing_set_skunk_works_msv2`,
+  which rebuilds ``baseline_antenna1_name`` and ``baseline_antenna2_name``
+  exactly.
 
 Every value is read by the engine, so a Measurement Set v2 is imaged as the
 processing set that :func:`xradio.measurement_set.convert_msv2_to_processing_set`
@@ -51,6 +54,17 @@ _KEPT_COORDINATES = (
     "baseline_antenna1_name",
     "baseline_antenna2_name",
 )
+
+#: Baseline antenna-name coordinates -> the integer-code coordinates that
+#: replace them in the per-task selections.
+_BASELINE_NAME_CODES = {
+    "baseline_antenna1_name": "baseline_antenna1_code",
+    "baseline_antenna2_name": "baseline_antenna2_code",
+}
+
+#: ``attrs`` key of a per-task selection: the antenna names its baseline codes
+#: index (the sorted unique names of both coordinates).
+_ANTENNA_NAME_TABLE = "baseline_antenna_name_table"
 
 #: Arguments of ``open_msv2`` that the distributed application sets itself:
 #: they are refused in ``msv2_open_options`` (name -> what sets it).
@@ -230,13 +244,20 @@ def add_lazy_input_data(ps_xdt, node_task_data_mapping, processing_set_data_grou
       ``weight``, ``uvw``), indexed with the task's selection (its
       ``frequency`` slice and, when present, its ``polarization`` index list)
       but not read;
-    * only the coordinates the imaging reads (``frequency``, ``polarization``,
-      ``baseline_antenna1_name``, ``baseline_antenna2_name``);
-    * ``attrs = {"data_groups": {processing_set_data_group_name: group}}``.
+    * only the coordinates the imaging reads: ``frequency``,
+      ``polarization``, and the baseline antenna names as integer codes
+      (``baseline_antenna1_code`` and ``baseline_antenna2_code``, of the
+      smallest unsigned integer type) into the MSv4's antenna-name table;
+    * ``attrs``: ``{"data_groups": {processing_set_data_group_name: group},
+      "baseline_antenna_name_table": names}``.
+
+    The codes keep the graph payload small: GraphVIPER copies and pickles
+    every task's parameters, and the names, repeated per baseline, would
+    dominate it for arrays with many antennas.
 
     GraphVIPER's ``map`` forwards the key to every node task that declares a
     ``lazy_input_data`` parameter; the node task reads it with
-    :func:`load_processing_set_skunk_works_msv2`.
+    :func:`load_processing_set_skunk_works_msv2`, which rebuilds the names.
 
     Parameters
     ----------
@@ -287,8 +308,10 @@ def _data_group_dataset(ms_xdt, ms_name, data_group_name):
     Returns
     -------
     xarray.Dataset
-        Lazy dataset: the group's four variables, the kept coordinates and
-        ``attrs = {"data_groups": {data_group_name: group}}``.
+        Lazy dataset: the group's four variables, the kept coordinates (the
+        baseline antenna names as codes, see
+        :func:`_encode_baseline_antenna_names`) and
+        ``attrs["data_groups"] = {data_group_name: group}``.
 
     Raises
     ------
@@ -324,6 +347,96 @@ def _data_group_dataset(ms_xdt, ms_name, data_group_name):
         [name for name in dataset.coords if name not in _KEPT_COORDINATES]
     )
     dataset.attrs = {"data_groups": {data_group_name: data_group}}
+    return _encode_baseline_antenna_names(dataset)
+
+
+def _encode_baseline_antenna_names(dataset):
+    """Replace the baseline antenna-name coordinates by integer codes.
+
+    Each name coordinate becomes a code coordinate of the smallest unsigned
+    integer type into one table of the sorted unique names of both, stored in
+    ``attrs["baseline_antenna_name_table"]``. A code coordinate keeps the
+    name coordinate's dtype and attributes in its own attributes, so that
+    :func:`_decode_baseline_antenna_names` rebuilds it exactly.
+
+    Parameters
+    ----------
+    dataset : xarray.Dataset
+        A dataset with zero, one or both of the name coordinates.
+
+    Returns
+    -------
+    xarray.Dataset
+        The dataset with codes (unchanged without name coordinates).
+    """
+    import numpy as np
+    import xarray as xr
+
+    names = [name for name in _BASELINE_NAME_CODES if name in dataset.coords]
+    if not names:
+        return dataset
+    values = [dataset[name].values for name in names]
+    table, codes = np.unique(
+        np.concatenate([value.ravel() for value in values]), return_inverse=True
+    )
+    codes = codes.astype(np.min_scalar_type(max(table.size - 1, 0)))
+    code_coordinates = {}
+    start = 0
+    for name, value in zip(names, values, strict=True):
+        coordinate = dataset[name]
+        code_coordinates[_BASELINE_NAME_CODES[name]] = xr.Variable(
+            coordinate.dims,
+            codes[start : start + value.size].reshape(value.shape),
+            attrs={
+                "name_dtype": coordinate.dtype.str,
+                "name_attrs": dict(coordinate.attrs),
+            },
+        )
+        start += value.size
+    dataset = dataset.drop_vars(names).assign_coords(code_coordinates)
+    dataset.attrs[_ANTENNA_NAME_TABLE] = table
+    return dataset
+
+
+def _decode_baseline_antenna_names(dataset):
+    """Rebuild the baseline antenna-name coordinates from their codes.
+
+    The inverse of :func:`_encode_baseline_antenna_names`: the names, their
+    dtype and attributes are those of the coordinates that were encoded.
+
+    Parameters
+    ----------
+    dataset : xarray.Dataset
+        A computed per-task dataset.
+
+    Returns
+    -------
+    xarray.Dataset
+        The dataset with name coordinates and without the codes and the name
+        table (unchanged without a name table).
+    """
+    import numpy as np
+    import xarray as xr
+
+    if _ANTENNA_NAME_TABLE not in dataset.attrs:
+        return dataset
+    table = np.asarray(dataset.attrs[_ANTENNA_NAME_TABLE])
+    name_coordinates = {}
+    for name, code_name in _BASELINE_NAME_CODES.items():
+        if code_name not in dataset.coords:
+            continue
+        code = dataset[code_name]
+        name_coordinates[name] = xr.Variable(
+            code.dims,
+            table[code.values].astype(code.attrs["name_dtype"]),
+            attrs=dict(code.attrs["name_attrs"]),
+        )
+    dataset = dataset.drop_vars(
+        list(_BASELINE_NAME_CODES.values()), errors="ignore"
+    ).assign_coords(name_coordinates)
+    dataset.attrs = {
+        key: value for key, value in dataset.attrs.items() if key != _ANTENNA_NAME_TABLE
+    }
     return dataset
 
 
@@ -331,7 +444,8 @@ def load_processing_set_skunk_works_msv2(lazy_input_data):
     """Read a node task's lazily indexed data into a processing set.
 
     Each dataset is computed into a new one (the lazy datasets in the task's
-    parameters stay unread, so nothing is held for the task's life). The data
+    parameters stay unread, so nothing is held for the task's life), and its
+    baseline antenna names are rebuilt exactly from their codes. The data
     variables are made NumPy arrays that are C-contiguous and writeable (the
     imaging weights are computed in place in ``WEIGHT``); an array is copied
     only when it is not already so.
@@ -363,7 +477,7 @@ def load_processing_set_skunk_works_msv2(lazy_input_data):
 
     nodes = {}
     for ms_name, lazy_dataset in lazy_input_data.items():
-        dataset = lazy_dataset.compute()
+        dataset = _decode_baseline_antenna_names(lazy_dataset.compute())
         for name, variable in dataset.data_vars.items():
             values = variable.values
             if not (values.flags.c_contiguous and values.flags.writeable):
