@@ -24,12 +24,17 @@ _POSITION_NAMES = ("minpos", "maxpos")
 _SAMPLE_NAME = "__statistics_samples__"
 _SAMPLE_DIM = "__statistics_sample__"
 _AXIS_DIM = "statistics_axis"
-_DEFAULT_PUBLIC_NAMES = (
-    *_STATE_NAMES,
+DEFAULT_STATISTICS = (
+    "min",
+    "max",
+    "sum",
+    "sumsq",
+    "npts",
     "mean",
     "rms",
     "sigma",
-    *_POSITION_NAMES,
+    "minpos",
+    "maxpos",
 )
 
 
@@ -373,9 +378,12 @@ STATISTIC_FUNCTIONS = {
 
 
 def finalize_statistics_state(
-    state: xr.Dataset, statistics: Sequence[str] = _DEFAULT_PUBLIC_NAMES
+    state: xr.Dataset, statistics: Sequence[str] = DEFAULT_STATISTICS
 ) -> xr.Dataset:
     """Finalize a partial/merged state into requested public statistics.
+
+    Defaults to :data:`DEFAULT_STATISTICS`, shared by the application and node
+    task. Pass explicit names to request additional statistics.
 
     Empty outputs (``npts == 0``) use NaN for ``min``, ``max``, ``sum``, and
     ``mean`` while retaining integer zero for ``npts``. Requested names control

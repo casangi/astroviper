@@ -198,3 +198,48 @@ def test_distributed_and_node_on_disk_match_node_in_memory(image_store, monkeypa
 
     xr.testing.assert_allclose(node_on_disk, node_in_memory)
     xr.testing.assert_allclose(distributed, node_in_memory)
+
+
+@pytest.mark.parametrize("n_partitions", [1, 2, 4])
+def test_default_statistics_match_across_layers(image_store, monkeypatch, n_partitions):
+    """Keep default output membership, order, and values consistent across layers."""
+    from astroviper.node_tasks.image_analysis.image_statistics import (
+        image_statistics as direct_statistics,
+    )
+    from astroviper.processing_functions.image_analysis.statistics import (
+        create_statistics_state,
+        finalize_statistics_state,
+    )
+
+    path, dataset = image_store
+    monkeypatch.setattr(
+        "xradio.image.load_image",
+        lambda store, block_des: xr.open_zarr(store).isel(block_des),
+    )
+    expected = {
+        "min": 0.0,
+        "max": 95.0,
+        "sum": 4560.0,
+        "sumsq": 290320.0,
+        "npts": 96,
+        "mean": 47.5,
+        "rms": np.sqrt(290320.0 / 96),
+        "sigma": np.sqrt(776.0),
+        "minpos": [0, 0, 0, 0, 0],
+        "maxpos": [0, 3, 1, 2, 3],
+    }
+    results = [
+        statistics_module.image_statistics(
+            path, data_variable="SKY", n_partitions=n_partitions
+        ),
+        direct_statistics(dataset, data_variable="SKY"),
+        finalize_statistics_state(
+            create_statistics_state(dataset["SKY"], dataset["SKY"].dims)
+        ),
+    ]
+    for result in results:
+        assert list(result.data_vars) == list(expected)
+        for name, value in expected.items():
+            np.testing.assert_allclose(result[name].values, value)
+    for result in results[1:]:
+        xr.testing.assert_identical(results[0], result)

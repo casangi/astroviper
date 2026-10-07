@@ -21,8 +21,9 @@ from typing import Any
 import numpy as np
 import xarray as xr
 
+from astroviper.processing_functions.image_analysis.statistics import DEFAULT_STATISTICS
+
 _IMAGE_DIMS = ("time", "frequency", "polarization", "l", "m")
-_DEFAULT_STATISTICS = ("max", "min", "sum", "mean", "npts")
 ImageIndexer = slice | np.ndarray
 
 
@@ -817,7 +818,7 @@ def image_statistics(
     stretch: bool = False,
     includepix=None,
     excludepix=None,
-    statistics=_DEFAULT_STATISTICS,
+    statistics=DEFAULT_STATISTICS,
     partition: dict[str, slice | np.ndarray] | None = None,
     data_selection: dict | None = None,
     finalize: bool = True,
@@ -854,7 +855,7 @@ def image_statistics(
         Allow lower-dimensional or degenerate masks to broadcast.
     includepix, excludepix : pair of float, optional
         Inclusive value range to retain or exclude, respectively.
-    statistics : sequence of str
+    statistics : sequence of str, default DEFAULT_STATISTICS
         Any of ``min``, ``minpos``, ``max``, ``maxpos``, ``sum``, ``sumsq``,
         ``mean``, ``median``, ``medabsdevmed`` (or ``mad``), ``rms``,
         ``sigma``, and ``npts``.

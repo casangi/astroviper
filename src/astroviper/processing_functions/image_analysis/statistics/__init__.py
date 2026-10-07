@@ -6,6 +6,7 @@ responsibilities belong to the node-task and distributed-application layers.
 """
 
 from astroviper.processing_functions.image_analysis.statistics.reductions import (
+    DEFAULT_STATISTICS,
     STATISTIC_FUNCTIONS,
     create_statistics_state,
     finalize_statistics_state,
@@ -25,6 +26,7 @@ from astroviper.processing_functions.image_analysis.statistics.reductions import
 )
 
 __all__ = [
+    "DEFAULT_STATISTICS",
     "STATISTIC_FUNCTIONS",
     "create_statistics_state",
     "finalize_statistics_state",

@@ -8,6 +8,7 @@ from astroviper.processing_functions.image_analysis.plane_statistics import (
     plane_statistics_to_dataframe,
 )
 from astroviper.processing_functions.image_analysis.statistics import (
+    DEFAULT_STATISTICS,
     STATISTIC_FUNCTIONS,
     create_statistics_state,
     finalize_statistics_state,
@@ -27,6 +28,7 @@ from astroviper.processing_functions.image_analysis.statistics import (
 )
 
 __all__ = [
+    "DEFAULT_STATISTICS",
     "STATISTIC_FUNCTIONS",
     "create_statistics_state",
     "finalize_statistics_state",

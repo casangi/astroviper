@@ -19,6 +19,8 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+from astroviper.processing_functions.image_analysis.statistics import DEFAULT_STATISTICS
+
 
 def _reduce_statistics_states(input_data, input_params):
     """Adapt GraphVIPER reduction inputs to the state merger."""
@@ -82,7 +84,7 @@ def image_statistics(
     stretch: bool = False,
     includepix=None,
     excludepix=None,
-    statistics=("max", "min", "sum", "mean", "npts"),
+    statistics=DEFAULT_STATISTICS,
     partition_dim: str = "frequency",
     n_partitions: int | None = None,
     memory_limit_gib: float | None = None,
@@ -132,7 +134,7 @@ def image_statistics(
     excludepix : pair of float, optional
         Inclusive ``[low, high]`` pixel-value range to exclude after selection
         and masking.
-    statistics : sequence of str, default ("max", "min", "sum", "mean", "npts")
+    statistics : sequence of str, default DEFAULT_STATISTICS
         Statistics to return. Supported names are:
 
         - ``"mean"``, ``"median"``, ``"min"``, ``"max"``, ``"sum"``,
