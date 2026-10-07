@@ -19,7 +19,14 @@ def _half_channel_widths(image_frequencies, visibility_frequencies):
     return np.full(image_frequencies.shape, np.inf)
 
 
-def map_visibility_frequencies_to_image(visibility_frequencies, image_frequencies):
+def map_visibility_frequencies_to_image(
+    visibility_frequencies,
+    image_frequencies,
+    *,
+    matching="nearest",
+    rtol=1e-12,
+    atol=0.0,
+):
     """Map each visibility channel onto its nearest image-frequency channel.
 
     Every visibility channel is assigned to the image channel whose centre
@@ -42,6 +49,13 @@ def map_visibility_frequencies_to_image(visibility_frequencies, image_frequencie
         channel the visibility spacing is used instead, and when both axes
         have one channel any frequency maps onto that plane.
 
+    matching : {"nearest", "exact"}, default "nearest"
+        Use the shared nearest-channel assignment for cube and continuum imaging.
+        The optional "exact" policy requires a unique one-to-one match.
+    rtol, atol : float, optional
+        Relative and absolute tolerances for exact matching with ``np.isclose``.
+        Ignored for nearest matching. Defaults are 1e-12 and 0 Hz.
+
     Returns
     -------
     numpy.ndarray
@@ -52,8 +66,12 @@ def map_visibility_frequencies_to_image(visibility_frequencies, image_frequencie
     ValueError
         If either coordinate is not one-dimensional and finite, or if a
         visibility frequency lies more than half an image channel width from
-        every image channel centre.
+        every image channel centre, or exact matching is missing, ambiguous,
+        or not one-to-one. Also raised for an unknown matching policy.
     """
+    if matching not in ("nearest", "exact"):
+        raise ValueError("matching must be 'nearest' or 'exact'.")
+
     visibility_frequencies = np.asarray(visibility_frequencies, dtype=np.float64)
     image_frequencies = np.asarray(image_frequencies, dtype=np.float64)
 
@@ -66,13 +84,37 @@ def map_visibility_frequencies_to_image(visibility_frequencies, image_frequencie
     ):
         raise ValueError("Visibility and image frequencies must be finite.")
 
+    if matching == "exact":
+        matches = np.isclose(
+            visibility_frequencies[:, np.newaxis],
+            image_frequencies[np.newaxis, :],
+            rtol=rtol,
+            atol=atol,
+        )
+        match_counts = matches.sum(axis=1)
+        if np.any(match_counts != 1):
+            raise ValueError(
+                "Each visibility frequency must match exactly one image frequency; "
+                f"visibility frequencies={visibility_frequencies}; "
+                f"image frequencies={image_frequencies}."
+            )
+
+        frequency_map = np.argmax(matches, axis=1).astype(np.int64)
+        if np.unique(frequency_map).size != visibility_frequencies.size:
+            raise ValueError(
+                "Visibility frequencies must map one-to-one onto image frequencies; "
+                f"visibility frequencies={visibility_frequencies}; "
+                f"image frequencies={image_frequencies}."
+            )
+        return frequency_map
+
     distances = np.abs(
         visibility_frequencies[:, np.newaxis] - image_frequencies[np.newaxis, :]
     )
-    channel_map = np.argmin(distances, axis=1).astype(np.int64)
-    nearest_distance = distances[np.arange(visibility_frequencies.size), channel_map]
+    frequency_map = np.argmin(distances, axis=1).astype(np.int64)
+    nearest_distance = distances[np.arange(visibility_frequencies.size), frequency_map]
     tolerance = _half_channel_widths(image_frequencies, visibility_frequencies)[
-        channel_map
+        frequency_map
     ]
 
     too_far = nearest_distance > tolerance
@@ -83,8 +125,8 @@ def map_visibility_frequencies_to_image(visibility_frequencies, image_frequencie
             "from the nearest image channel centre; visibility channel indices="
             f"{offending.tolist()}, visibility frequencies="
             f"{visibility_frequencies[offending].tolist()} Hz, nearest image "
-            f"frequencies={image_frequencies[channel_map[offending]].tolist()} Hz, "
+            f"frequencies={image_frequencies[frequency_map[offending]].tolist()} Hz, "
             f"separations={nearest_distance[offending].tolist()} Hz, allowed="
             f"{tolerance[offending].tolist()} Hz."
         )
-    return channel_map
+    return frequency_map

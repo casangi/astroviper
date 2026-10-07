@@ -35,10 +35,12 @@ IMAGING_PARAM_DOCS = {
         "the sky model). Every limit and threshold is applied independently to\n"
         "each ``(time, frequency, polarization)`` plane: a plane stops when it\n"
         "meets its own criterion. The imaging cycle loop runs separately for\n"
-        "every frequency channel (the node task images one channel at a time),\n"
+        "every frequency channel in cube imaging (one channel per node task),\n"
         "so a channel's cycles continue until all of its (time, polarization)\n"
         "planes have stopped, and a channel that has stopped does no further\n"
-        "residual updates while the others carry on. The CASA ``tclean``\n"
+        "residual updates while the others carry on. Continuum instead updates\n"
+        "Taylor-zero planes after reduction across frequency partitions; higher\n"
+        "Taylor terms have no independent CLEAN loop. The CASA ``tclean``\n"
         "equivalent is given in brackets. Keys:\n"
         "\n"
         "- ``max_iter`` [CASA ``niter``] : Maximum number of deconvolution\n"
@@ -109,7 +111,10 @@ IMAGING_PARAM_DOCS = {
         "Deconvolution algorithm for the model update. One of ``"
         '"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``\n'
         "(C++, threaded across *and* within planes -- faster when there are\n"
-        'few planes, e.g. single-channel imaging) or ``"asp"``.'
+        'few planes, e.g. single-channel imaging) or ``"asp"``. Long Högbom\n'
+        "cycles are checked in CASA-sized batches and stop a plane if its peak\n"
+        "becomes non-finite or rises more than 10% above the smallest measured\n"
+        "peak."
     ),
     "instrument_polarization_basis": (
         "Correlation (instrument) polarization basis the gridding is performed in:\n"
@@ -126,6 +131,38 @@ IMAGING_PARAM_DOCS = {
         "images) are single precision (``complex64`` / ``float32``) and the model\n"
         "update runs in single precision; the visibilities always stay double\n"
         "precision. If ``False`` the image-domain arrays are double precision."
+    ),
+    "weight_memory_mode": (
+        'Storage policy for calculated continuum imaging weights (default: ``"in_place"``).\n'
+        '``"in_memory"``\n'
+        "returns task-local weights to the driver and embeds them in subsequent\n"
+        'graphs. ``"in_place"`` writes each task\'s weights into the input\n'
+        "Processing Set and reloads only the required partition during each major\n"
+        "cycle, reducing scheduler and worker memory at the cost of additional\n"
+        "disk I/O. This option is intentionally separate from ``memory_mode`` in\n"
+        "the initial implementation; the two policies may be unified later."
+    ),
+    "visibility_memory_mode": (
+        "Continuum residual-update storage policy for observed visibility grids.\n"
+        '``"in_memory"`` retains the first-cycle grid in driver memory, while\n'
+        '``"in_place"`` stores it temporarily in the image Zarr store. Later\n'
+        "cycles grid only the predicted-model contribution and subtract it from\n"
+        'the cached observed grid. ``"recompute"`` instead reloads the original\n'
+        "observed visibilities and grids their visibility-domain residual every\n"
+        "cycle. MFS caches the globally reduced Taylor UV grid; MVC caches each\n"
+        "map task's exclusively owned frequency-resolved UV planes."
+    ),
+    "observed_visibility_grid_xds": (
+        "Task-local cached observed visibility grid used by later residual-update\n"
+        "cycles. The distributed application supplies this only for in-memory MVC\n"
+        "caching; other modes and first cycles leave it unset."
+    ),
+    "widebandpb_memory_mode": (
+        "MVC-only storage policy for the frequency-dependent primary beam.\n"
+        '``"in_place"`` stores it temporarily in the image Zarr store and reads\n'
+        'only task-local channels, ``"recompute"`` regenerates the analytic beam\n'
+        'inside every later map, and ``"in_memory"`` retains it at the driver but\n'
+        "passes each map only its local beam. The setting is ignored for MFS."
     ),
     "processing_function_threads": (
         "Number of threads handed to the per-processing-function (C++ / FFT)\nkernels."

@@ -146,6 +146,50 @@ class TestDegridVisibilityGridSingleField(unittest.TestCase):
         self.assertIn("test description", groups["model"]["description"])
         np.testing.assert_allclose(out.values, 2.0 + 0.0j, atol=1e-5)
 
+    def test_cached_prediction_uses_weight_template_and_reuses_output(self):
+        """Cached continuum prediction needs no observed visibility array."""
+        ms, image, _ = build_datasets(n_chan=2)
+        ms["WEIGHT_IMAGING"] = ms["VISIBILITY"].real.copy(deep=True)
+        ms.attrs["data_groups"]["base"]["weight_imaging"] = "WEIGHT_IMAGING"
+        ms = ms.drop_vars("VISIBILITY")
+        grid = image["SKY_MODEL"].values.astype(np.complex64)
+        mapping = np.arange(2, dtype=np.int64)
+        degrid_visibility_grid_single_field(ms, self.cgk, image, grid, mapping)
+        output = ms["VISIBILITY_MODEL"].values
+        self.assertEqual(output.dtype, np.complex128)
+        self.assertEqual(ms["VISIBILITY_MODEL"].dims, ms["WEIGHT_IMAGING"].dims)
+        np.testing.assert_allclose(output, 2.0, atol=1e-5)
+        grid *= 2
+        degrid_visibility_grid_single_field(ms, self.cgk, image, grid, mapping)
+        self.assertIs(ms["VISIBILITY_MODEL"].values, output)
+        np.testing.assert_allclose(output, 4.0, atol=1e-5)
+
+    def test_noncontiguous_grid_matches_contiguous_grid(self):
+        """The shared primitive protects both cube and continuum callers."""
+        ms, image, _ = build_datasets(n_chan=2)
+        grid = image["SKY_MODEL"].values.copy()
+        grid[:, 1] *= 3
+        other = ms.copy(deep=True)
+        strided = np.asfortranarray(grid)
+        self.assertFalse(strided.flags.c_contiguous)
+        mapping = np.arange(2, dtype=np.int64)
+        degrid_visibility_grid_single_field(ms, self.cgk, image, grid, mapping)
+        degrid_visibility_grid_single_field(other, self.cgk, image, strided, mapping)
+        np.testing.assert_array_equal(ms["VISIBILITY_MODEL"], other["VISIBILITY_MODEL"])
+
+    def test_missing_allocation_template_reports_error(self):
+        ms, image, _ = build_datasets(n_chan=2)
+        ms = ms.assign_coords(polarization=np.arange(ms.sizes["polarization"]))
+        ms = ms.drop_vars(["VISIBILITY", "WEIGHT_IMAGING"])
+        with self.assertRaisesRegex(KeyError, "imaging-weight template"):
+            degrid_visibility_grid_single_field(
+                ms,
+                self.cgk,
+                image,
+                image["SKY_MODEL"].values,
+                np.arange(2, dtype=np.int64),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -431,6 +431,7 @@ def load_processing_set_skunk_works(
     frequency_coords,
     instrument_polarization_basis="linear",
     processing_function_threads=1,
+    load_correlated_data=True,
 ):
     """Reconstruct a minimal processing set for cube imaging from chunk blobs.
 
@@ -471,6 +472,10 @@ def load_processing_set_skunk_works(
         Maximum number of threads used to read this MS's arrays concurrently.
         Default ``1`` (serial).  File reads and the numcodecs decode both
         release the GIL, so threading overlaps the per-array I/O latency.
+    load_correlated_data : bool, optional
+        If false, omit the observed correlated-data array. This is used by
+        cached-grid MFS residual updates, which require only UVW, flags, and
+        imaging weights to predict and grid the model contribution.
     """
     import xarray as xr
 
@@ -491,10 +496,6 @@ def load_processing_set_skunk_works(
         # GIL, so threads overlap the per-array read latency instead of paying
         # it one array at a time.
         reads = {
-            "correlated_data": (
-                os.path.join(ms_path, data_group["correlated_data"]),
-                {"frequency": freq_sel},
-            ),
             "uvw": (os.path.join(ms_path, data_group["uvw"]), {}),
             "weight": (
                 os.path.join(ms_path, data_group["weight"]),
@@ -505,36 +506,43 @@ def load_processing_set_skunk_works(
                 {"frequency": freq_sel},
             ),
         }
+        if load_correlated_data:
+            reads["correlated_data"] = (
+                os.path.join(ms_path, data_group["correlated_data"]),
+                {"frequency": freq_sel},
+            )
         for coord_name in ("baseline_antenna1_name", "baseline_antenna2_name"):
             if os.path.isdir(os.path.join(ms_path, coord_name)):
                 reads[coord_name] = (os.path.join(ms_path, coord_name), {})
 
         results = _read_arrays_concurrently(reads, processing_function_threads)
 
-        vis, vis_dims = results["correlated_data"]
         uvw, uvw_dims = results["uvw"]
         weight, w_dims = results["weight"]
         flag, f_dims = results["flag"]
 
-        # Keep only the correlations the imager grids (the chunk blobs hold
-        # every correlation, so the selection happens after the decode).
+        # Select the requested correlations even when cached-grid cycles omit
+        # observed visibilities. Weights and flags are always loaded.
         pol_sel = ms_sel.get("polarization") if isinstance(ms_sel, dict) else None
         if pol_sel is not None:
-            vis = np.take(vis, pol_sel, axis=vis_dims.index("polarization"))
             weight = np.take(weight, pol_sel, axis=w_dims.index("polarization"))
             flag = np.take(flag, pol_sel, axis=f_dims.index("polarization"))
 
-        npol = vis.shape[vis_dims.index("polarization")]
+        npol = weight.shape[w_dims.index("polarization")]
         pol_labels = _POL_LABELS[instrument_polarization_basis].get(
             npol, [f"P{i}" for i in range(npol)]
         )
 
         data_vars = {
-            data_group["correlated_data"]: (vis_dims, vis),
             data_group["uvw"]: (uvw_dims, uvw),
             data_group["weight"]: (w_dims, weight),
             data_group["flag"]: (f_dims, flag),
         }
+        if load_correlated_data:
+            vis, vis_dims = results["correlated_data"]
+            if pol_sel is not None:
+                vis = np.take(vis, pol_sel, axis=vis_dims.index("polarization"))
+            data_vars[data_group["correlated_data"]] = (vis_dims, vis)
         coords = {
             "frequency": ("frequency", freq_values),
             "polarization": ("polarization", pol_labels),

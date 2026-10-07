@@ -1,0 +1,855 @@
+"""Unit tests for continuum map, reduce-root, and append node tasks."""
+
+import numpy as np
+import pytest
+import xarray as xr
+
+import astroviper.node_tasks.imaging.image_continuum_single_field as continuum_node
+import astroviper.processing_functions.imaging.image_continuum_single_field as continuum_processing
+from astroviper.processing_functions.imaging.utils import ImagingDict
+
+
+def _model_dataset(value):
+    return xr.Dataset(
+        {
+            "SKY_MODEL": xr.DataArray(
+                np.full((1, 2, 1, 2, 2), value, dtype=np.float64),
+                dims=("time", "taylor_term", "polarization", "l", "m"),
+            )
+        },
+        attrs={"data_groups": {"model": {"sky": "SKY_MODEL"}}},
+    )
+
+
+def _mfs_uv_grid(value):
+    """Build a registered MFS Taylor grid for append-cache tests."""
+    return xr.Dataset(
+        {
+            "VISIBILITY": xr.DataArray(
+                np.full((1, 2, 1, 2, 2), value, dtype=np.complex128),
+                dims=("time", "taylor_term", "polarization", "u", "v"),
+            ),
+            "VISIBILITY_NORMALIZATION": xr.DataArray(
+                np.full((1, 2, 1), 3.0),
+                dims=("time", "taylor_term", "polarization"),
+            ),
+        },
+        attrs={
+            "data_groups": {
+                "residual": {
+                    "visibility": "VISIBILITY",
+                    "visibility_normalization": "VISIBILITY_NORMALIZATION",
+                }
+            }
+        },
+    )
+
+
+def test_install_continuum_clean_mask_broadcasts_and_registers_data_group():
+    """A 2-D user mask is broadcast across all Taylor residual planes."""
+    residual = xr.DataArray(
+        np.zeros((1, 2, 1, 2, 3)),
+        dims=("time", "taylor_term", "polarization", "l", "m"),
+        coords={
+            "time": [0.0],
+            "taylor_term": [0, 1],
+            "polarization": ["I"],
+            "l": [0, 1],
+            "m": [0, 1, 2],
+        },
+    )
+    image = xr.Dataset(
+        {"SKY_RESIDUAL": residual},
+        attrs={"data_groups": {"residual": {"sky": "SKY_RESIDUAL"}}},
+    )
+    mask = np.array([[True, False, True], [False, True, False]])
+
+    continuum_node._install_continuum_clean_mask(image, mask)
+
+    assert image["CLEAN_MASK"].dims == residual.dims
+    np.testing.assert_array_equal(
+        image["CLEAN_MASK"].isel(time=0, taylor_term=0, polarization=0), mask
+    )
+    np.testing.assert_array_equal(
+        image["CLEAN_MASK"].isel(time=0, taylor_term=1, polarization=0), mask
+    )
+    assert image.attrs["data_groups"]["residual"]["mask"] == "CLEAN_MASK"
+    assert (
+        "User-supplied continuum deconvolution mask installed"
+        in (image.attrs["data_groups"]["residual"]["description"])
+    )
+
+
+def test_install_continuum_clean_mask_rejects_wrong_shape():
+    """Node-level validation protects direct callers from mismatched masks."""
+    image = xr.Dataset(
+        {
+            "SKY_RESIDUAL": xr.DataArray(
+                np.zeros((1, 1, 1, 2, 3)),
+                dims=("time", "taylor_term", "polarization", "l", "m"),
+            )
+        },
+        attrs={"data_groups": {"residual": {"sky": "SKY_RESIDUAL"}}},
+    )
+
+    with pytest.raises(ValueError, match="expected"):
+        continuum_node._install_continuum_clean_mask(
+            image,
+            np.ones((3, 2), dtype=bool),
+        )
+
+
+def test_first_cached_mfs_append_captures_an_independent_observed_grid():
+    """The first reduced GWVobs grid is copied before its inverse FFT."""
+    reduced = _mfs_uv_grid(5.0)
+
+    cached = continuum_node._prepare_cached_mfs_residual_grid(
+        {"image": reduced},
+        {
+            "specmode": "mfs",
+            "visibility_memory_mode": "in_memory",
+            "is_n_iter_0": True,
+        },
+    )
+
+    reduced.VISIBILITY.data[...] = 0.0
+    np.testing.assert_array_equal(cached.VISIBILITY, 5.0)
+    assert cached.attrs["visibility_grid_source"] == "observed_data"
+
+
+def test_later_cached_mfs_append_forms_residual_from_reduced_model_grid():
+    """A later append replaces GWDmodel with cached GWVobs-GWDmodel."""
+    input_data = {"image": _mfs_uv_grid(1.5)}
+
+    returned_cache = continuum_node._prepare_cached_mfs_residual_grid(
+        input_data,
+        {
+            "specmode": "mfs",
+            "visibility_memory_mode": "in_memory",
+            "is_n_iter_0": False,
+            "observed_visibility_grid_xds": _mfs_uv_grid(5.0),
+        },
+    )
+
+    assert returned_cache is None
+    np.testing.assert_array_equal(input_data["image"].VISIBILITY, 3.5)
+    np.testing.assert_array_equal(
+        input_data["image"].VISIBILITY_NORMALIZATION,
+        3.0,
+    )
+
+
+def test_in_place_mfs_append_persists_and_reloads_observed_grid(tmp_path):
+    """The disk-backed cache survives the first append and forms later residuals."""
+    image_store = tmp_path / "continuum.img.zarr"
+    xr.Dataset().to_zarr(image_store, mode="w")
+    reduced = _mfs_uv_grid(5.0)
+
+    returned_cache = continuum_node._prepare_cached_mfs_residual_grid(
+        {"image": reduced},
+        {
+            "specmode": "mfs",
+            "visibility_memory_mode": "in_place",
+            "is_n_iter_0": True,
+            "image_store": str(image_store),
+        },
+    )
+
+    assert returned_cache is None
+    persisted = continuum_node._load_mfs_visibility_grid_in_place(str(image_store))
+    np.testing.assert_array_equal(persisted.VISIBILITY, 5.0)
+    assert persisted.attrs["visibility_grid_source"] == "observed_data"
+
+    later_input = {"image": _mfs_uv_grid(1.5)}
+    continuum_node._prepare_cached_mfs_residual_grid(
+        later_input,
+        {
+            "specmode": "mfs",
+            "visibility_memory_mode": "in_place",
+            "is_n_iter_0": False,
+            "image_store": str(image_store),
+        },
+    )
+
+    np.testing.assert_array_equal(later_input["image"].VISIBILITY, 3.5)
+    np.testing.assert_array_equal(
+        later_input["image"].VISIBILITY_NORMALIZATION,
+        3.0,
+    )
+
+
+def test_recompute_mfs_append_does_not_require_or_modify_a_cache():
+    """Recompute mode leaves the freshly reduced visibility residual untouched."""
+    reduced = _mfs_uv_grid(2.5)
+
+    returned_cache = continuum_node._prepare_cached_mfs_residual_grid(
+        {"image": reduced},
+        {
+            "specmode": "mfs",
+            "visibility_memory_mode": "recompute",
+            "is_n_iter_0": False,
+        },
+    )
+
+    assert returned_cache is None
+    np.testing.assert_array_equal(reduced.VISIBILITY, 2.5)
+
+
+def test_extract_mvc_observed_grid_removes_private_map_payload():
+    """The MVC map returns its cache separately from reduced Taylor products."""
+    frequency = [1.0e9, 1.1e9]
+    image = xr.Dataset(
+        {
+            continuum_node._MVC_OBSERVED_VISIBILITY_CACHE: xr.DataArray(
+                np.full((1, 2, 1, 2, 2), 5.0 + 0.0j),
+                dims=("time", "frequency", "polarization", "u", "v"),
+                coords={"frequency": frequency},
+            ),
+            continuum_node._MVC_OBSERVED_NORMALIZATION_CACHE: xr.DataArray(
+                np.full((1, 2, 1), 4.0),
+                dims=("time", "frequency", "polarization"),
+                coords={"frequency": frequency},
+            ),
+            "MVC_RESIDUAL_TAYLOR_NUMERATOR": xr.DataArray(
+                np.ones((1, 2, 1, 2, 2)),
+                dims=("time", "taylor_term", "polarization", "l", "m"),
+            ),
+        },
+        attrs={"data_groups": {}},
+    )
+
+    reduced_image, observed = continuum_node._extract_mvc_observed_visibility_grid(
+        image
+    )
+
+    assert continuum_node._MVC_OBSERVED_VISIBILITY_CACHE not in reduced_image
+    assert continuum_node._MVC_OBSERVED_NORMALIZATION_CACHE not in reduced_image
+    np.testing.assert_array_equal(observed.VISIBILITY, 5.0)
+    np.testing.assert_array_equal(observed.VISIBILITY_NORMALIZATION, 4.0)
+    assert observed.attrs["data_groups"]["residual"] == {
+        "visibility": "VISIBILITY",
+        "visibility_normalization": "VISIBILITY_NORMALIZATION",
+    }
+
+
+def test_mfs_append_accumulates_before_preparing_fourier_model(monkeypatch):
+    """The append FFT consumes the fully accumulated post-update MFS model."""
+    previous = _model_dataset(2.0)
+    increment = _model_dataset(0.5)
+    captured = {}
+    expected_uv = xr.Dataset({"VISIBILITY_MODEL": xr.DataArray([7.0])})
+
+    def fake_prepare(model_xds, **kwargs):
+        captured["model"] = model_xds.copy(deep=True)
+        captured["kwargs"] = kwargs
+        return expected_uv
+
+    monkeypatch.setattr(
+        continuum_processing,
+        "prepare_model_uv_continuum_single_field",
+        fake_prepare,
+    )
+
+    model_xds, model_uv_xds = continuum_node._prepare_post_update_continuum_model_state(
+        increment,
+        {
+            "is_n_iter_0": False,
+            "model_xds": previous,
+            "specmode": "mfs",
+            "image_params": {"nterms": 2},
+            "instrument_polarization_basis": "circular",
+            "single_precision_image": False,
+            "processing_function_threads": 3,
+            "fft_backend": "scipy",
+        },
+    )
+
+    np.testing.assert_array_equal(model_xds["SKY_MODEL"], 2.5)
+    np.testing.assert_array_equal(captured["model"]["SKY_MODEL"], 2.5)
+    assert model_uv_xds is expected_uv
+    assert captured["kwargs"]["instrument_polarization_basis"] == "circular"
+    assert captured["kwargs"]["single_precision_image"] is False
+    assert captured["kwargs"]["processing_function_threads"] == 3
+    assert captured["kwargs"]["fft_backend"] == "scipy"
+
+
+def test_mvc_append_returns_accumulated_image_model_without_global_fft(monkeypatch):
+    """MVC accumulation stays in the append node and does not invoke MFS FFT."""
+    previous = _model_dataset(2.0)
+    increment = _model_dataset(0.5)
+
+    def unexpected_prepare(*args, **kwargs):
+        raise AssertionError("MVC must not prepare a global Fourier model")
+
+    monkeypatch.setattr(
+        continuum_processing,
+        "prepare_model_uv_continuum_single_field",
+        unexpected_prepare,
+    )
+
+    model_xds, model_uv_xds = continuum_node._prepare_post_update_continuum_model_state(
+        increment,
+        {
+            "is_n_iter_0": False,
+            "model_xds": previous,
+            "specmode": "mvc",
+        },
+    )
+
+    np.testing.assert_array_equal(model_xds["SKY_MODEL"], 2.5)
+    assert model_uv_xds is None
+
+
+def _static_products():
+    """Build static PSF, PB, beam-fit, and sidelobe products."""
+    return xr.Dataset(
+        {
+            "POINT_SPREAD_FUNCTION": xr.DataArray(
+                np.ones((1, 3, 1, 2, 2)),
+                dims=("time", "psf_taylor_order", "polarization", "l", "m"),
+            ),
+            "PRIMARY_BEAM": xr.DataArray(
+                np.ones((1, 1, 1, 2, 2)),
+                dims=("time", "frequency", "polarization", "l", "m"),
+            ),
+            "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION": xr.DataArray(
+                np.ones((1, 1, 3)),
+                dims=("time", "polarization", "beam_params_label"),
+            ),
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": xr.DataArray(
+                np.ones((1, 1)), dims=("time", "polarization")
+            ),
+        },
+        coords={"frequency": [1.5e9]},
+    )
+
+
+def test_install_static_products_replaces_unused_frequency_coordinate():
+    """Reference frequency replaces a chunk coordinate no variable uses."""
+    image = xr.Dataset(
+        {
+            "SKY_RESIDUAL": xr.DataArray(
+                np.zeros((1, 2, 1, 2, 2)),
+                dims=("time", "taylor_term", "polarization", "l", "m"),
+            )
+        },
+        coords={"frequency": [1.0e9, 2.0e9]},
+    )
+    result = continuum_node._install_static_continuum_products(
+        image, _static_products()
+    )
+    np.testing.assert_array_equal(result.frequency, [1.5e9])
+
+
+def test_install_static_products_does_not_alias_the_cache():
+    """Per-cycle polarization conversion must not mutate cached static arrays."""
+    static = _static_products()
+    result = continuum_node._install_static_continuum_products(
+        xr.Dataset(),
+        static,
+    )
+
+    result["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"].data[...] = 0.0
+
+    np.testing.assert_array_equal(
+        static["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"],
+        1.0,
+    )
+
+
+def test_install_static_products_rejects_frequency_still_in_use():
+    """A live channel cube prevents replacement of its frequency coordinate."""
+    image = xr.Dataset(
+        {"CHANNEL_DATA": (("frequency", "l", "m"), np.zeros((2, 2, 2)))},
+        coords={"frequency": [1.0e9, 2.0e9]},
+    )
+    with pytest.raises(ValueError, match="variables still use it"):
+        continuum_node._install_static_continuum_products(image, _static_products())
+
+
+def test_minor_append_normalizes_single_leaf_cache_state(monkeypatch):
+    """A one-leaf result becomes task-keyed PB and weight cache mappings."""
+    pb_xds = xr.Dataset({"PRIMARY_BEAM": xr.DataArray([1.0], dims=("frequency",))})
+    weights = {"ms_0": xr.Dataset({"WEIGHT_IMAGING": xr.DataArray([1.0])})}
+    captured = {}
+
+    def fake_prepare(image, input_params, **kwargs):
+        captured.update(kwargs)
+        return image, xr.Dataset(), None
+
+    monkeypatch.setattr(continuum_node, "_prepare_continuum_image", fake_prepare)
+    monkeypatch.setattr(
+        continuum_node,
+        "model_update_continuum_single_field",
+        lambda input_data, input_params: {"image": input_data["image"]},
+    )
+    monkeypatch.setattr(
+        continuum_node,
+        "_prepare_post_update_continuum_model_state",
+        lambda image, input_params: (xr.Dataset(), None),
+    )
+    result = continuum_node.continuum_minor_cycle_node(
+        {
+            "image": xr.Dataset(),
+            "task_id": 7,
+            "pb_xds": pb_xds,
+            "weight_datasets": weights,
+        },
+        {"is_n_iter_0": True},
+    )
+    assert captured["pb_cache_mapping"] == {7: pb_xds}
+    assert result["weight_cache_mapping"] == {7: weights}
+
+
+def test_minor_append_preserves_history_when_reduce_result_is_empty(monkeypatch):
+    """An empty reduce placeholder must not hide prior deconvolution history."""
+    reduced_history = ImagingDict()
+    previous_history = ImagingDict()
+    previous_history.add(
+        {"peakres": 2.5, "max_psf_sidelobe": 0.35},
+        time=0,
+        pol=0,
+        chan=0,
+    )
+    captured = {}
+
+    monkeypatch.setattr(
+        continuum_node,
+        "_prepare_continuum_image",
+        lambda image, input_params, **kwargs: (image, xr.Dataset(), None),
+    )
+
+    def fake_model_update(input_data, input_params):
+        captured["history"] = input_data["deconvolution"]
+        return {"image": input_data["image"]}
+
+    monkeypatch.setattr(
+        continuum_node,
+        "model_update_continuum_single_field",
+        fake_model_update,
+    )
+    monkeypatch.setattr(
+        continuum_node,
+        "_prepare_post_update_continuum_model_state",
+        lambda image, input_params: (xr.Dataset(), None),
+    )
+
+    continuum_node.continuum_minor_cycle_node(
+        {"image": xr.Dataset(), "deconvolution": reduced_history},
+        {"is_n_iter_0": False, "deconvolution": previous_history},
+    )
+
+    assert captured["history"] is previous_history
+
+
+def _empty_weight_image(**kwargs):
+    """Return the image geometry expected by weighting node tests."""
+    frequency = kwargs["frequency_coords"]
+    return xr.Dataset(
+        coords={
+            "time": kwargs["time_coords"],
+            "frequency": frequency,
+            "polarization": kwargs["pol_coords"],
+            "l": np.arange(2),
+            "m": np.arange(2),
+        }
+    )
+
+
+def _weight_node_params():
+    """Return compact common parameters for weighting nodes."""
+    return {
+        "image_params": {
+            "phase_direction": [0.0, 0.0],
+            "image_size": [2, 2],
+            "cell_size": [1.0, 1.0],
+            "time_coords": [0.0],
+        },
+        "imaging_weights_params": {"weighting": "briggs", "robust": 0.5},
+        "task_coords": {"frequency": {"data": np.array([1.0e9, 1.1e9])}},
+        "data_selection": {},
+        "input_data_store": "unused",
+        "processing_set_data_group_name": "base",
+        "input_data": {"ms": xr.Dataset()},
+        "task_id": 4,
+    }
+
+
+def test_weight_density_node_returns_valid_reducer_leaf(monkeypatch):
+    """The first weighting node packages density products and timings."""
+    monkeypatch.setattr("xradio.image.make_empty_sky_image", _empty_weight_image)
+
+    collapse_requests = []
+
+    def fake_grid(ps_xdt, image, params, **kwargs):
+        collapse_requests.append(kwargs["collapse_frequency"])
+        return xr.Dataset(
+            {
+                "WEIGHT_DENSITY_GRID": (
+                    ("frequency", "weight_polarization", "u", "v"),
+                    np.ones((2, 1, 2, 2)),
+                ),
+                "SUM_WEIGHT": (
+                    ("frequency", "weight_polarization"),
+                    np.ones((2, 1)),
+                ),
+            },
+            coords={"frequency": [1.0e9, 1.1e9]},
+        )
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.calculate_imaging_weights."
+        "grid_imaging_weight_density_continuum",
+        fake_grid,
+    )
+    result = continuum_node.grid_imaging_weight_density_continuum_node(
+        **_weight_node_params()
+    )
+    assert result["task_id"] == 4
+    assert collapse_requests == [True]
+    assert set(result["weight_density"]) == {"WEIGHT_DENSITY_GRID", "SUM_WEIGHT"}
+    assert result["timing_node_tasks"].iloc[0].n_frequency_channels == 2
+    assert {
+        "start_unixtime",
+        "hostname",
+        "process_pid",
+        "thread_native_id",
+        "worker_name",
+    } <= set(result["timing_node_tasks"])
+
+
+def test_weight_degrid_node_extracts_only_registered_weight_arrays(monkeypatch):
+    """The second weighting node returns lightweight per-child weight caches."""
+    monkeypatch.setattr("xradio.image.make_empty_sky_image", _empty_weight_image)
+    weight = xr.DataArray(
+        np.ones((1, 1, 2, 2)),
+        dims=("time", "baseline", "frequency", "polarization"),
+        attrs={"units": "arbitrary"},
+    )
+    child = xr.Dataset(
+        {"WEIGHT_IMAGING": weight},
+        attrs={"data_groups": {"base": {"weight_imaging": "WEIGHT_IMAGING"}}},
+    )
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.calculate_imaging_weights."
+        "degrid_imaging_weights_continuum",
+        lambda *args, **kwargs: {"ms": child},
+    )
+    params = _weight_node_params()
+    params["global_weighting_xds"] = xr.Dataset()
+    params["weight_memory_mode"] = "in_memory"
+    result = continuum_node.degrid_imaging_weights_continuum_node(**params)
+    cached = result["weight_datasets"]["ms"]
+    assert set(cached) == {"WEIGHT_IMAGING"}
+    assert cached.WEIGHT_IMAGING.attrs["units"] == "arbitrary"
+    assert result["timing_node_tasks"].iloc[0].n_processing_set_children == 1
+    assert {
+        "start_unixtime",
+        "hostname",
+        "process_pid",
+        "thread_native_id",
+        "worker_name",
+    } <= set(result["timing_node_tasks"])
+
+
+def test_weight_degrid_node_writes_in_place_and_returns_no_array_cache(monkeypatch):
+    """In-place global weighting writes locally and keeps the graph result small."""
+    monkeypatch.setattr("xradio.image.make_empty_sky_image", _empty_weight_image)
+    child = xr.Dataset(
+        {
+            "WEIGHT_IMAGING": xr.DataArray(
+                np.ones((1, 1, 2, 2)),
+                dims=("time", "baseline", "frequency", "polarization"),
+            )
+        },
+        attrs={"data_groups": {"base": {"weight_imaging": "WEIGHT_IMAGING"}}},
+    )
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.calculate_imaging_weights."
+        "degrid_imaging_weights_continuum",
+        lambda *args, **kwargs: {"ms": child},
+    )
+    written = {}
+    monkeypatch.setattr(
+        continuum_node,
+        "_write_continuum_weights_in_place",
+        lambda ps_xdt, ps_store: written.update(processing_set=ps_xdt, store=ps_store),
+    )
+    params = _weight_node_params()
+    params.update(global_weighting_xds=xr.Dataset())
+
+    result = continuum_node.degrid_imaging_weights_continuum_node(**params)
+
+    assert result["weight_datasets"] == {}
+    assert written == {"processing_set": {"ms": child}, "store": "unused"}
+    assert result["timing_node_tasks"].iloc[0].n_processing_set_children == 1
+
+
+def test_stored_coordinate_indexer_supports_irregular_subsets():
+    """An irregular selected coordinate maps to exact on-disk positions."""
+    actual = continuum_node._stored_coordinate_indexer(
+        np.array([100.0, 101.0, 102.0, 103.0]),
+        np.array([103.0, 100.0, 102.0]),
+        "frequency",
+    )
+    np.testing.assert_array_equal(actual, [3, 0, 2])
+
+
+def test_stored_coordinate_indexer_rejects_missing_values():
+    """An in-place write fails rather than placing an unmatched coordinate."""
+    with pytest.raises(ValueError, match="absent from the in-place store"):
+        continuum_node._stored_coordinate_indexer(
+            np.array([100.0, 101.0]),
+            np.array([102.0]),
+            "frequency",
+        )
+
+
+@pytest.mark.parametrize("initial", [True, False])
+def test_model_update_passes_cube_parameter_names_to_backend(monkeypatch, initial):
+    """Node and Taylor adapter preserve the controller's per-plane controls."""
+    import astroviper.processing_functions.imaging.model_update as cube_update
+    import astroviper.processing_functions.imaging.utils as imaging_utils
+
+    dims = ("time", "taylor_term", "polarization", "l", "m")
+    image = xr.Dataset(
+        {
+            "SKY_RESIDUAL": (dims, np.ones((1, 2, 1, 3, 3))),
+            "SKY_MODEL": (dims, np.zeros((1, 2, 1, 3, 3))),
+            "POINT_SPREAD_FUNCTION": (
+                ("time", "psf_taylor_order", "polarization", "l", "m"),
+                np.ones((1, 3, 1, 3, 3)),
+            ),
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
+                ("time", "polarization"),
+                np.zeros((1, 1)),
+            ),
+        },
+        attrs={
+            "data_groups": {
+                "residual": {
+                    "sky": "SKY_RESIDUAL",
+                    "point_spread_function": "POINT_SPREAD_FUNCTION",
+                },
+                "model": {"sky": "SKY_MODEL"},
+            }
+        },
+    )
+    params = {
+        "max_iter": 17,
+        "max_cycles": 3,
+        "max_iter_per_cycle": 5,
+        "threshold": 0.01,
+        "gain": 0.1,
+        "psf_sidelobe_factor": 1.5,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+    }
+    controller = imaging_utils.IterationController(**params)
+    iterations = np.array([[[4]]], dtype=np.int64)
+    thresholds = np.array([[[0.125]]])
+
+    def controls(
+        controller_arg,
+        history,
+        image_arg,
+        model_exists,
+        iteration_control_params,
+        residual_imaging_dict,
+    ):
+        assert controller_arg is controller
+        assert model_exists is False  # controls use the refreshed residual
+        assert residual_imaging_dict is not None
+        assert iteration_control_params is params
+        return iterations, thresholds
+
+    class ReachedBackend(Exception):
+        pass
+
+    def backend(image_arg, deconvolver, deconvolve_params, model_exists, **kwargs):
+        assert model_exists is (not initial)
+        assert deconvolve_params["max_iter"] == 17
+        assert deconvolve_params["max_cycles"] == 3
+        np.testing.assert_array_equal(
+            deconvolve_params["max_iter_per_cycle"], iterations
+        )
+        np.testing.assert_array_equal(
+            deconvolve_params["threshold_per_cycle"], thresholds
+        )
+        assert not {
+            "niter",
+            "cycleniter",
+            "cyclethreshold",
+            "niter_per_plane",
+            "cyclethreshold_per_plane",
+        }.intersection(deconvolve_params)
+        assert image_arg.sizes["frequency"] == 1
+        raise ReachedBackend
+
+    monkeypatch.setattr(imaging_utils, "get_calculate_cycle_controls", controls)
+    monkeypatch.setattr(cube_update, "model_update_cube_single_field", backend)
+    with pytest.raises(ReachedBackend):
+        continuum_node.model_update_continuum_single_field(
+            {"image": image},
+            {
+                "iteration_control_params": params,
+                "controller": controller,
+                "is_n_iter_0": initial,
+            },
+        )
+    assert params["max_iter_per_cycle"] == 5
+
+
+def test_zero_max_iter_uses_current_controller_fields():
+    from astroviper.processing_functions.imaging.utils import IterationController
+
+    image = _model_dataset(0.0).rename({"SKY_MODEL": "SKY_RESIDUAL"})
+    image.attrs["data_groups"]["residual"] = {"sky": "SKY_RESIDUAL"}
+    image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (("time", "polarization"), [[0.1]])
+    controller = IterationController(max_iter=0)
+    result = continuum_node.model_update_continuum_single_field(
+        {"image": image},
+        {"iteration_control_params": {"max_iter": 0}, "controller": controller},
+    )
+    assert result["stopcode"].imaging == 1
+    assert result["stopcode"].model_update == 0
+    np.testing.assert_array_equal(controller.max_iter_remaining, 0)
+
+
+@pytest.mark.parametrize("legacy_cache", [False, True])
+def test_continuum_transfer_preserves_arrays_metadata_and_nested_datasets(legacy_cache):
+    import pickle
+
+    image = _model_dataset(2.0)
+    nested = _model_dataset(3.0)
+    image.attrs["nested_dataset"] = nested
+    original = image.copy(deep=True)
+    array = image.SKY_MODEL.data
+    _ = image.xr_img
+    _ = nested.xr_img
+    if legacy_cache:
+        image._cache = {"xr_img": image.xr_img}
+        nested._cache = {"xr_img": nested.xr_img}
+    payload = {"image": image, "cache": [{0: (nested, image)}]}
+    payload["alias"] = payload
+
+    result = continuum_node._prepare_continuum_result_for_transfer(payload)
+
+    assert result is payload
+    assert image.SKY_MODEL.data is array
+    assert not getattr(image, "_cache", None)
+    assert not getattr(nested, "_cache", None)
+    xr.testing.assert_equal(image, original)
+    assert image.attrs["data_groups"] == original.attrs["data_groups"]
+    assert image.attrs["nested_dataset"] is nested
+    xr.testing.assert_identical(nested, original.attrs["nested_dataset"])
+    restored = pickle.loads(pickle.dumps(result))
+    xr.testing.assert_equal(restored["image"], original)
+    assert restored["image"].attrs["data_groups"] == original.attrs["data_groups"]
+    xr.testing.assert_identical(
+        restored["image"].attrs["nested_dataset"], original.attrs["nested_dataset"]
+    )
+    assert restored["alias"] is restored
+    assert restored["cache"][0][0][1] is restored["image"]
+    assert restored["image"].xr_img._xds is restored["image"]
+
+
+@pytest.mark.parametrize(
+    ("peak", "max_iter", "max_cycles", "masked", "reason"),
+    [
+        (0.05, 100, 3, False, "threshold"),
+        (1.0, 0, 3, False, "iterations"),
+        (1.0, 100, 0, False, "cycles"),
+        (1.0, 100, 3, True, "mask"),
+    ],
+)
+def test_refreshed_stop_skips_model_update_and_preserves_counters(
+    monkeypatch, peak, max_iter, max_cycles, masked, reason
+):
+    """Verified stopping never runs CLEAN or charges a verification as an update."""
+    from astroviper.processing_functions.imaging.utils.iteration_control import (
+        IMAGING_MAX_CYCLES,
+        IMAGING_MAX_ITER,
+        IMAGING_THRESHOLD,
+        IMAGING_ZERO_MASK,
+        IterationController,
+    )
+
+    controller = IterationController(
+        max_iter=max_iter, max_cycles=max_cycles, threshold=0.1
+    )
+    image = xr.Dataset(
+        {
+            "SKY_RESIDUAL": (
+                ("time", "taylor_term", "polarization", "l", "m"),
+                np.full((1, 1, 1, 2, 2), peak),
+            ),
+            "PRIMARY_BEAM": (("l", "m"), np.ones((2, 2))),
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (("time", "polarization"), [[0.1]]),
+        },
+        attrs={
+            "data_groups": {
+                "residual": {"sky": "SKY_RESIDUAL", "primary_beam": "PRIMARY_BEAM"}
+            }
+        },
+    )
+    if masked:
+        image["CLEAN_MASK"] = (("l", "m"), np.zeros((2, 2), dtype=bool))
+        image.attrs["data_groups"]["residual"]["mask"] = "CLEAN_MASK"
+
+    def unexpected_update(*args, **kwargs):
+        pytest.fail("A confirmed residual stop must not run a model update")
+
+    monkeypatch.setattr(
+        continuum_processing, "model_update_mtmfs_single_field", unexpected_update
+    )
+    result = continuum_node.model_update_continuum_single_field(
+        {"image": image},
+        {
+            "controller": controller,
+            "iteration_control_params": {
+                "max_iter": max_iter,
+                "primary_beam_limit": 0.2,
+            },
+        },
+    )
+    expected = {
+        "threshold": IMAGING_THRESHOLD,
+        "iterations": IMAGING_MAX_ITER,
+        "cycles": IMAGING_MAX_CYCLES,
+        "mask": IMAGING_ZERO_MASK,
+    }[reason]
+    assert result["residual_converged"]
+    assert result["stopcode"].imaging == expected
+    assert controller.total_iter_done == controller.cycles_done == 0
+    assert controller.max_cycles == max_cycles
+    assert np.all(controller.max_iter_remaining == max_iter)
+    assert not result["deconvolution"].data
+    assert np.all(result["image"].SKY_MODEL.values == 0)
+
+
+def test_finalization_reuses_prepared_residual_without_another_transform(monkeypatch):
+    image = _model_dataset(0.25).rename({"SKY_MODEL": "SKY_RESIDUAL"})
+    image.attrs["data_groups"] = {"residual": {"sky": "SKY_RESIDUAL"}}
+    model = _model_dataset(0.75)
+    original_residual = image.SKY_RESIDUAL.data
+
+    def unexpected_prepare(*args, **kwargs):
+        pytest.fail("A verified residual must not be transformed a second time")
+
+    monkeypatch.setattr(continuum_node, "_prepare_continuum_image", unexpected_prepare)
+    monkeypatch.setattr(
+        continuum_node, "_prepare_cached_mfs_residual_grid", unexpected_prepare
+    )
+    result = continuum_node.continuum_finalize_node(
+        {"image": image, "residual_converged": True},
+        {
+            "prepared_continuum_image": True,
+            "static_xds": xr.Dataset(),
+            "model_xds": model,
+            "restore": False,
+        },
+    )
+    assert result["image"].SKY_RESIDUAL.data is original_residual
+    np.testing.assert_array_equal(result["image"].SKY_MODEL, model.SKY_MODEL)
+    assert result["residual_converged"]

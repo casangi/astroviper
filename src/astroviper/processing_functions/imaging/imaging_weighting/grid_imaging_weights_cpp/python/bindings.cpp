@@ -42,7 +42,8 @@ void grid_imaging_weights_bind(
     py::array_t<double,  py::array::c_style>                         data_weights, // (n_time, n_baseline, n_vis_chan, n_pol) float64
     py::array_t<int64_t, py::array::c_style | py::array::forcecast>  n_uv,        // (2,) — tiny, forcecast OK
     py::array_t<double,  py::array::c_style | py::array::forcecast>  delta_lm,    // (2,) — tiny, forcecast OK
-    int processing_function_threads
+    int processing_function_threads,
+    bool truncate_uv_cells
 ) {
     (void)processing_function_threads;  // serial kernel: bit-reproducible sums
 
@@ -110,14 +111,16 @@ void grid_imaging_weights_bind(
         imaging_weighting::grid_imaging_weights<double>(
             grid_ptr, sum_ptr, uvw_ptr, freq_ptr, chan_map_ptr, wt_ptr,
             n_chan_g, n_pol_g, m_u, m_v,
-            n_time, n_baseline, n_vis_chan, n_pol, dl, dm);
+            n_time, n_baseline, n_vis_chan, n_pol, dl, dm,
+            truncate_uv_cells);
     } else {
         float* grid_ptr = static_cast<float*>(grid_info.ptr);
         py::gil_scoped_release release;
         imaging_weighting::grid_imaging_weights<float>(
             grid_ptr, sum_ptr, uvw_ptr, freq_ptr, chan_map_ptr, wt_ptr,
             n_chan_g, n_pol_g, m_u, m_v,
-            n_time, n_baseline, n_vis_chan, n_pol, dl, dm);
+            n_time, n_baseline, n_vis_chan, n_pol, dl, dm,
+            truncate_uv_cells);
     }
 }
 
@@ -135,7 +138,8 @@ void degrid_imaging_weights_bind(
     py::array_t<double,  py::array::c_style>                         data_weight,    // (n_time, n_baseline, n_vis_chan, n_pol) float64
     py::array_t<int64_t, py::array::c_style | py::array::forcecast>  n_uv,           // (2,) — tiny, forcecast OK
     py::array_t<double,  py::array::c_style | py::array::forcecast>  delta_lm,       // (2,) — tiny, forcecast OK
-    int processing_function_threads
+    int processing_function_threads,
+    bool truncate_uv_cells
 ) {
     (void)processing_function_threads;  // serial kernel: bit-reproducible sums
 
@@ -211,7 +215,8 @@ void degrid_imaging_weights_bind(
             out_ptr, grid_ptr, briggs_ptr, uvw_ptr, freq_ptr,
             chan_map_ptr, pol_map_ptr, wt_ptr,
             n_chan_g, n_pol_g, m_u, m_v,
-            n_time, n_baseline, n_vis_chan, n_pol, n_pol_out, dl, dm);
+            n_time, n_baseline, n_vis_chan, n_pol, n_pol_out, dl, dm,
+            truncate_uv_cells);
     } else {
         const float* grid_ptr = static_cast<const float*>(grid_info.ptr);
         py::gil_scoped_release release;
@@ -219,7 +224,8 @@ void degrid_imaging_weights_bind(
             out_ptr, grid_ptr, briggs_ptr, uvw_ptr, freq_ptr,
             chan_map_ptr, pol_map_ptr, wt_ptr,
             n_chan_g, n_pol_g, m_u, m_v,
-            n_time, n_baseline, n_vis_chan, n_pol, n_pol_out, dl, dm);
+            n_time, n_baseline, n_vis_chan, n_pol, n_pol_out, dl, dm,
+            truncate_uv_cells);
     }
 }
 
@@ -241,7 +247,8 @@ PYBIND11_MODULE(_grid_imaging_weights_ext, m) {
           py::arg("data_weights"),
           py::arg("n_uv"),
           py::arg("delta_lm"),
-          py::arg("processing_function_threads") = 1);
+          py::arg("processing_function_threads") = 1,
+          py::arg("truncate_uv_cells") = false);
 
     m.def("degrid_imaging_weights",
           &degrid_imaging_weights_bind,
@@ -261,5 +268,6 @@ PYBIND11_MODULE(_grid_imaging_weights_ext, m) {
           py::arg("data_weight"),
           py::arg("n_uv"),
           py::arg("delta_lm"),
-          py::arg("processing_function_threads") = 1);
+          py::arg("processing_function_threads") = 1,
+          py::arg("truncate_uv_cells") = false);
 }

@@ -51,7 +51,9 @@ repos:
       - id: imaging-param-docs
         name: imaging parameter docstring sync check
         entry: python src/astroviper/utils/param_docs.py check
-        language: system
+        language: python
+        additional_dependencies:
+          - libcst
         pass_filenames: false
         files: >-
           ^src/astroviper/(distributed_applications|node_tasks|processing_functions)/imaging/.*\.py$|^src/astroviper/utils/param_docs\.py$
