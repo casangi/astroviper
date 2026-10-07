@@ -285,3 +285,107 @@ def test_peak_across_layers_and_partitions(tmp_path, monkeypatch, axes, n_partit
         plane = calculate_plane_statistics(dataset, mask_name="MASK")["sky_residual"]
         np.testing.assert_allclose(direct["peak"], plane["peak_masked"])
         np.testing.assert_allclose(direct["peak"].values.ravel(), [9.0, -9.0])
+
+
+@pytest.mark.parametrize("dtype, offset", [(np.float32, 1e4), (np.float64, 1e8)])
+@pytest.mark.parametrize("n_partitions", [1, 2, 4])
+def test_distributed_std_large_offset(
+    tmp_path, monkeypatch, dtype, offset, n_partitions
+):
+    """Default statistics keep a small population spread despite a large offset."""
+    from astroviper.node_tasks.image_analysis.image_statistics import (
+        image_statistics as direct_statistics,
+    )
+
+    values = (offset + np.arange(4, dtype=dtype)).reshape(1, 4, 1, 1, 1)
+    data = xr.DataArray(
+        values,
+        dims=("time", "frequency", "polarization", "l", "m"),
+        coords={
+            "time": [0],
+            "frequency": np.arange(4),
+            "polarization": ["I"],
+            "l": [0],
+            "m": [0],
+        },
+        name="SKY",
+    )
+    path = str(tmp_path / "precision.zarr")
+    data.to_dataset().to_zarr(path)
+    monkeypatch.setattr(
+        "xradio.image.load_image",
+        lambda store, block_des: xr.open_zarr(store).isel(block_des),
+    )
+    results = [
+        direct_statistics(data),
+        statistics_module.image_statistics(path, n_partitions=n_partitions),
+    ]
+    for result in results:
+        np.testing.assert_allclose(
+            result["std"], np.std(values.astype(np.float64)), rtol=1e-12
+        )
+        for name in result.data_vars:
+            if name not in ("minpos", "maxpos"):
+                assert result[name].dtype == np.dtype("float64")
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("masked", [False, True])
+@pytest.mark.parametrize("n_partitions", [1, 2, 4])
+def test_single_plane_distributed_matches_plane_statistics(
+    tmp_path, monkeypatch, dtype, masked, n_partitions
+):
+    """Every shared statistic agrees when one plane is split into spatial chunks."""
+    from astroviper.processing_functions.image_analysis.plane_statistics import (
+        PLANE_STATISTIC_NAMES,
+        calculate_plane_statistics,
+    )
+
+    values = np.array(
+        [
+            [np.nan, np.nan, np.nan, np.nan, np.nan],
+            [9, 1, 4, 2, -3],
+            [-9, 8, 3, np.nan, 7],
+            [6, 5, -2, 0, 1],
+        ],
+        dtype=dtype,
+    ).reshape(1, 1, 1, 4, 5)
+    data = xr.DataArray(
+        values,
+        dims=("time", "frequency", "polarization", "l", "m"),
+        coords={
+            "time": [0],
+            "frequency": [100],
+            "polarization": ["I"],
+            "l": np.arange(4),
+            "m": np.arange(5),
+        },
+        attrs={"units": "Jy/beam"},
+    )
+    mask = xr.ones_like(data, dtype=bool)
+    mask.values[..., 1, :] = False
+    mask.values[..., 3, 3:] = False
+    dataset = xr.Dataset({"SKY_RESIDUAL": data, "MASK": mask})
+    path = str(tmp_path / "single-plane.zarr")
+    dataset.chunk({"l": 1}).to_zarr(path)
+    monkeypatch.setattr(
+        "xradio.image.load_image",
+        lambda store, block_des: xr.open_zarr(store).isel(block_des),
+    )
+    expected = calculate_plane_statistics(dataset, mask_name="MASK")["sky_residual"]
+    result = statistics_module.image_statistics(
+        path,
+        data_variable="SKY_RESIDUAL",
+        axes=("l", "m"),
+        mask="MASK" if masked else None,
+        statistics=PLANE_STATISTIC_NAMES,
+        partition_dim="l",
+        n_partitions=n_partitions,
+    )
+    suffix = "_masked" if masked else ""
+    assert list(result.data_vars) == list(PLANE_STATISTIC_NAMES)
+    for name in PLANE_STATISTIC_NAMES:
+        reference = expected[name + suffix].rename(name)
+        xr.testing.assert_allclose(result[name], reference, rtol=1e-12, atol=1e-12)
+        assert result[name].dtype == reference.dtype == np.dtype("float64")
+    assert result["peak"].item() == (-9.0 if masked else 9.0)

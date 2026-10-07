@@ -314,3 +314,47 @@ def test_pixel_count_is_float64(values, expected):
     ):
         assert result.dtype == np.dtype("float64")
         assert result.item() == expected
+
+
+@pytest.mark.parametrize(
+    "dtype, offset", [(np.float32, 1e4), (np.float64, 1e8), (np.float32, 1e20)]
+)
+@pytest.mark.parametrize("merge_mode", ["direct", "flat", "tree"])
+def test_precision_matches_plane_statistics(dtype, offset, merge_mode):
+    """Preserve small spreads, float64 outputs, and empty planes through merges."""
+    from astroviper.processing_functions.image_analysis.plane_statistics import (
+        PLANE_STATISTIC_NAMES,
+        calculate_plane_statistics,
+    )
+
+    values = np.full((1, 2, 1, 1, 6), np.nan, dtype=dtype)
+    values[0, 0, 0, 0, 2:] = offset + np.arange(4, dtype=dtype)
+    data = xr.DataArray(
+        values,
+        dims=("time", "frequency", "polarization", "l", "m"),
+        coords={"time": [0], "frequency": [100, 101], "polarization": ["I"]},
+        name="SKY_RESIDUAL",
+    )
+    kwargs = dict(statistics=PLANE_STATISTIC_NAMES)
+    if merge_mode == "direct":
+        state = create_statistics_state(data, ("l", "m"), **kwargs)
+    else:
+        states = [
+            create_statistics_state(
+                data.isel(m=slice(start, stop)),
+                ("l", "m"),
+                positions={"m": slice(start, stop)},
+                **kwargs,
+            )
+            for start, stop in [(0, 2), (2, 3), (3, 6)]
+        ]
+        merge_kwargs = dict(partition_dim="m", reduction_dims=("l", "m"))
+        if merge_mode == "tree":
+            states = [merge_statistics_states(states[1:], **merge_kwargs), states[0]]
+        state = merge_statistics_states(states, **merge_kwargs)
+    result = finalize_statistics_state(state, PLANE_STATISTIC_NAMES)
+    expected = calculate_plane_statistics(data.to_dataset())["sky_residual"]
+    for name in PLANE_STATISTIC_NAMES:
+        assert result[name].dtype == np.dtype("float64")
+        np.testing.assert_allclose(result[name], expected[name], rtol=1e-12, atol=1e-12)
+    assert data.dtype == dtype

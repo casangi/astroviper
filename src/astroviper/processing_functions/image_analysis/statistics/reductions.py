@@ -6,9 +6,12 @@ The resulting compact state can either be finalized immediately or combined
 associatively by a distributed reduction.
 
 The internal state stores ``min``, ``max``, ``sum``, ``sumsq``, and ``n_pixels``.
-Derived statistics are not stored because partial means, RMS values, and
-standard deviations cannot be combined directly when partitions contain
-different valid sample counts. NaNs represent invalid or masked pixels and are
+The state also stores a mean and centered squared deviations for stable
+variance merging. Shared NumPy routines in ``_array_statistics`` perform the
+calculations; this module handles xarray metadata and partition coordinates.
+Public derived statistics are finalized after merging because partial means,
+RMS values, and standard deviations cannot be combined directly when partitions
+contain different valid sample counts. NaNs represent invalid or masked pixels and are
 excluded.
 """
 
@@ -19,7 +22,11 @@ from collections.abc import Iterable, Sequence
 import numpy as np
 import xarray as xr
 
-_STATE_NAMES = ("min", "max", "sum", "sumsq", "n_pixels")
+from astroviper.processing_functions.image_analysis.statistics import _array_statistics
+
+_MEAN_NAME = _array_statistics.MEAN_NAME
+_M2_NAME = _array_statistics.M2_NAME
+_STATE_NAMES = _array_statistics.STATE_NAMES
 _POSITION_NAMES = ("minpos", "maxpos")
 _SAMPLE_NAME = "__statistics_samples__"
 _SAMPLE_DIM = "__statistics_sample__"
@@ -62,6 +69,7 @@ def create_statistics_state(
     ----------
     data : xarray.DataArray
         NumPy-backed, already selected image pixels. NaNs are excluded.
+        Calculations and retained median samples use float64 precision.
     dims : sequence of str or str
         Named dimensions reduced by the statistics.
     statistics : sequence of str, optional
@@ -75,7 +83,7 @@ def create_statistics_state(
     -------
     xarray.Dataset
         Compact state containing ``min``, ``max``, ``sum``, ``sumsq`` and
-        ``n_pixels``.
+        ``n_pixels``, plus internal mean and centered squared deviations.
 
     Notes
     -----
@@ -92,52 +100,48 @@ def create_statistics_state(
             "load the selected chunk in the node-task layer"
         )
     reduction_dims = _normalize_dims(data, dims)
-    valid = data.notnull()
-    n_pixels = valid.sum(dim=reduction_dims).astype(np.int64)
-    squared = data * data
-    state = xr.Dataset(
-        {
-            "min": data.min(dim=reduction_dims, skipna=True),
-            "max": data.max(dim=reduction_dims, skipna=True),
-            "sum": data.sum(dim=reduction_dims, skipna=True),
-            "sumsq": squared.sum(dim=reduction_dims, skipna=True),
-            "n_pixels": n_pixels,
-        }
-    )
     retained_dims = tuple(dim for dim in data.dims if dim not in reduction_dims)
-    state.update(_extrema_positions(data, reduction_dims, retained_dims, positions))
+    sample_count = int(np.prod([data.sizes[dim] for dim in reduction_dims]))
+    sample_shape = tuple(data.sizes[dim] for dim in retained_dims) + (sample_count,)
+    samples = np.asarray(
+        data.transpose(*retained_dims, *reduction_dims).data, dtype=np.float64
+    ).reshape(sample_shape)
+    summary = _array_statistics.summarize_samples(samples)
+    coords = {
+        name: coord
+        for name, coord in data.coords.items()
+        if set(coord.dims).issubset(retained_dims)
+    }
+    state = xr.Dataset(
+        {name: (retained_dims, summary[name]) for name in _STATE_NAMES}, coords=coords
+    )
+    state.update(
+        _extrema_positions(data, reduction_dims, retained_dims, positions, summary)
+    )
     if {"median", "mad_sigma"} & set(statistics):
-        transposed = data.transpose(*retained_dims, *reduction_dims)
-        sample_count = int(np.prod([data.sizes[dim] for dim in reduction_dims]))
-        sample_shape = tuple(data.sizes[dim] for dim in retained_dims) + (sample_count,)
-        sample_coords = {
-            dim: data.coords[dim] for dim in retained_dims if dim in data.coords
-        }
         state[_SAMPLE_NAME] = xr.DataArray(
-            np.asarray(transposed).reshape(sample_shape),
-            dims=(*retained_dims, _SAMPLE_DIM),
-            coords=sample_coords,
+            samples, dims=(*retained_dims, _SAMPLE_DIM), coords=coords
         )
     state.attrs["reduction_dims"] = list(reduction_dims)
     state.attrs["data_attrs"] = dict(data.attrs)
     return state
 
 
-def _extrema_positions(data, reduction_dims, retained_dims, positions):
-    """Return absolute, lexicographically tie-broken extrema positions."""
-    transposed = data.transpose(*retained_dims, *reduction_dims)
-    retained_shape = tuple(data.sizes[dim] for dim in retained_dims)
+def _extrema_positions(data, reduction_dims, retained_dims, positions, summary):
+    """Map backend extrema indices to absolute image positions."""
     reduction_shape = tuple(data.sizes[dim] for dim in reduction_dims)
-    values = np.asarray(transposed).reshape((*retained_shape, -1))
-    valid = ~np.isnan(values)
-    min_indices = np.argmin(np.where(valid, values, np.inf), axis=-1)
-    max_indices = np.argmax(np.where(valid, values, -np.inf), axis=-1)
+    min_indices = summary["min_index"]
+    max_indices = summary["max_index"]
 
     def absolute_positions(flat_indices):
         """Map only selected flat extrema indices to absolute source positions."""
         if not reduction_dims:
             return np.empty((*np.shape(flat_indices), 0), dtype=np.int64)
-        local_indices = np.unravel_index(flat_indices, reduction_shape)
+        if not all(reduction_shape):
+            return np.full(
+                (*np.shape(flat_indices), len(reduction_dims)), -1, dtype=np.int64
+            )
+        local_indices = np.unravel_index(np.maximum(flat_indices, 0), reduction_shape)
         absolute_axes = []
         for dim, local in zip(reduction_dims, local_indices, strict=True):
             indexer = (positions or {}).get(dim)
@@ -160,7 +164,7 @@ def _extrema_positions(data, reduction_dims, retained_dims, positions):
             absolute_axes.append(np.asarray(absolute, dtype=np.int64))
         return np.stack(absolute_axes, axis=-1)
 
-    any_valid = valid.any(axis=-1)
+    any_valid = summary["n_pixels"] > 0
     min_positions = absolute_positions(min_indices)
     max_positions = absolute_positions(max_indices)
     min_positions = np.where(np.expand_dims(any_valid, -1), min_positions, -1)
@@ -196,7 +200,7 @@ def merge_statistics_states(
     -------
     xarray.Dataset
         Merged state containing ``min``, ``max``, ``sum``, ``sumsq``, and
-        ``n_pixels``.
+        ``n_pixels``, plus internal mean and centered squared deviations.
 
     If ``partition_dim`` was reduced locally, partial values describe the same
     output coordinates and are numerically merged. If it was retained, the
@@ -224,20 +228,19 @@ def merge_statistics_states(
     aligned = xr.align(
         *(state[list(_STATE_NAMES)] for state in states), join="exact", copy=False
     )
-    partial_dim = "__statistics_partial__"
-    mins = xr.concat([state["min"] for state in aligned], dim=partial_dim)
-    maxs = xr.concat([state["max"] for state in aligned], dim=partial_dim)
-    sums = xr.concat([state["sum"] for state in aligned], dim=partial_dim)
-    sumsqs = xr.concat([state["sumsq"] for state in aligned], dim=partial_dim)
-    counts = xr.concat([state["n_pixels"] for state in aligned], dim=partial_dim)
+    template = aligned[0]["n_pixels"]
+    combined = _array_statistics.merge_summaries(
+        [
+            {
+                name: partial[name].transpose(*template.dims).values
+                for name in _STATE_NAMES
+            }
+            for partial in aligned
+        ]
+    )
     result = xr.Dataset(
-        {
-            "min": mins.min(dim=partial_dim, skipna=True),
-            "max": maxs.max(dim=partial_dim, skipna=True),
-            "sum": sums.sum(dim=partial_dim, skipna=True),
-            "sumsq": sumsqs.sum(dim=partial_dim, skipna=True),
-            "n_pixels": counts.sum(dim=partial_dim).astype(np.int64),
-        }
+        {name: (template.dims, combined[name]) for name in _STATE_NAMES},
+        coords=template.coords,
     )
     result.update(_merge_extrema_positions(states, result))
     sample_presence = [_SAMPLE_NAME in state for state in states]
@@ -282,14 +285,50 @@ def _merge_extrema_positions(states, merged):
     return output
 
 
+def _value_statistics(state, names):
+    """Evaluate shared NumPy routines and attach the state's output coordinates."""
+    if not names:
+        return {}
+    template = state["min"]
+    summary = {
+        name: state[name].transpose(*template.dims).values for name in _STATE_NAMES
+    }
+    samples = None
+    if {"median", "mad_sigma"}.intersection(names):
+        required = "median" if "median" in names else "mad_sigma"
+        samples = (
+            _require_samples(state, required)
+            .transpose(*template.dims, _SAMPLE_DIM)
+            .values
+        )
+    minimum_first = None
+    if "peak" in names:
+        minimum_first = np.zeros(template.shape, dtype=bool)
+        tied = np.ones(template.shape, dtype=bool)
+        min_positions = state["minpos"].transpose(*template.dims, _AXIS_DIM).values
+        max_positions = state["maxpos"].transpose(*template.dims, _AXIS_DIM).values
+        for axis in range(state.sizes[_AXIS_DIM]):
+            minimum_first |= tied & (
+                min_positions[..., axis] < max_positions[..., axis]
+            )
+            tied &= min_positions[..., axis] == max_positions[..., axis]
+    values = _array_statistics.finalize_summary(
+        summary, names, samples=samples, minimum_first=minimum_first
+    )
+    return {
+        name: xr.DataArray(value, dims=template.dims, coords=template.coords, name=name)
+        for name, value in values.items()
+    }
+
+
 def statistics_min(state: xr.Dataset) -> xr.DataArray:
     """Return the valid minimum from a mergeable statistics state."""
-    return state["min"].where(state["n_pixels"] > 0)
+    return _value_statistics(state, ("min",))["min"]
 
 
 def statistics_max(state: xr.Dataset) -> xr.DataArray:
     """Return the valid maximum from a mergeable statistics state."""
-    return state["max"].where(state["n_pixels"] > 0)
+    return _value_statistics(state, ("max",))["max"]
 
 
 def statistics_peak(state: xr.Dataset) -> xr.DataArray:
@@ -299,57 +338,42 @@ def statistics_peak(state: xr.Dataset) -> xr.DataArray:
     order, matching plane statistics for spatial reductions. Empty selections
     return NaN. Existing extrema and positions suffice even after merging.
     """
-    minimum = state["min"]
-    maximum = state["max"]
-    minimum_first = xr.zeros_like(minimum, dtype=bool)
-    tied_positions = xr.ones_like(minimum, dtype=bool)
-    for axis in range(state.sizes[_AXIS_DIM]):
-        min_position = state["minpos"].isel({_AXIS_DIM: axis}, drop=True)
-        max_position = state["maxpos"].isel({_AXIS_DIM: axis}, drop=True)
-        minimum_first |= tied_positions & (min_position < max_position)
-        tied_positions &= min_position == max_position
-    choose_minimum = (abs(minimum) > abs(maximum)) | (
-        (abs(minimum) == abs(maximum)) & minimum_first
-    )
-    return xr.where(choose_minimum, minimum, maximum).where(state["n_pixels"] > 0)
+    return _value_statistics(state, ("peak",))["peak"]
 
 
 def statistics_sum(state: xr.Dataset) -> xr.DataArray:
     """Return the valid sum from a mergeable statistics state."""
-    return state["sum"].where(state["n_pixels"] > 0)
+    return _value_statistics(state, ("sum",))["sum"]
 
 
 def statistics_n_pixels(state: xr.Dataset) -> xr.DataArray:
     """Return the valid pixel count as float64, matching plane statistics."""
-    return state["n_pixels"].astype(np.float64)
+    return _value_statistics(state, ("n_pixels",))["n_pixels"]
 
 
 def statistics_sumsq(state: xr.Dataset) -> xr.DataArray:
     """Return the sum of squared valid samples."""
-    return state["sumsq"].where(state["n_pixels"] > 0)
+    return _value_statistics(state, ("sumsq",))["sumsq"]
 
 
 def statistics_mean(state: xr.Dataset) -> xr.DataArray:
     """Return ``sum / n_pixels`` from a mergeable statistics state."""
-    return (state["sum"] / state["n_pixels"]).where(state["n_pixels"] > 0)
+    return _value_statistics(state, ("mean",))["mean"]
 
 
 def statistics_rms(state: xr.Dataset) -> xr.DataArray:
     """Return the root mean square of valid samples."""
-    return np.sqrt(state["sumsq"] / state["n_pixels"]).where(state["n_pixels"] > 0)
+    return _value_statistics(state, ("rms",))["rms"]
 
 
 def statistics_std(state: xr.Dataset) -> xr.DataArray:
     """Return the population standard deviation of valid samples.
 
-    The centered sum of squares is divided by ``n_pixels`` (``ddof=0``). A single valid
-    sample has zero spread. The maximum guards against a tiny negative
-    numerator caused by floating-point roundoff.
+    Float64 centered squared deviations are accumulated locally and merged
+    using the parallel variance formula. Dividing by ``n_pixels`` gives
+    population variance (``ddof=0``) without subtracting large raw moments.
     """
-    count = state["n_pixels"]
-    centered_sumsq = state["sumsq"] - state["sum"] * state["sum"] / count
-    variance = centered_sumsq.clip(min=0) / count
-    return xr.where(count > 1, np.sqrt(variance), 0.0).where(count > 0)
+    return _value_statistics(state, ("std",))["std"]
 
 
 def _require_samples(state: xr.Dataset, statistic: str) -> xr.DataArray:
@@ -363,7 +387,7 @@ def _require_samples(state: xr.Dataset, statistic: str) -> xr.DataArray:
 
 def statistics_median(state: xr.Dataset) -> xr.DataArray:
     """Return the exact median of valid samples."""
-    return _require_samples(state, "median").median(dim=_SAMPLE_DIM, skipna=True)
+    return _value_statistics(state, ("median",))["median"]
 
 
 def statistics_mad_sigma(state: xr.Dataset) -> xr.DataArray:
@@ -371,9 +395,7 @@ def statistics_mad_sigma(state: xr.Dataset) -> xr.DataArray:
 
     The Gaussian scaling matches the robust noise estimate in plane statistics.
     """
-    samples = _require_samples(state, "mad_sigma")
-    median = samples.median(dim=_SAMPLE_DIM, skipna=True)
-    return 1.4826 * abs(samples - median).median(dim=_SAMPLE_DIM, skipna=True)
+    return _value_statistics(state, ("mad_sigma",))["mad_sigma"]
 
 
 def statistics_minpos(state: xr.Dataset) -> xr.DataArray:
@@ -419,8 +441,14 @@ def finalize_statistics_state(
     unknown = set(requested) - set(STATISTIC_FUNCTIONS)
     if unknown:
         raise ValueError(f"Unknown statistics: {sorted(unknown)}")
+    values = _value_statistics(
+        state, tuple(name for name in requested if name not in _POSITION_NAMES)
+    )
     result = xr.Dataset(
-        {name: STATISTIC_FUNCTIONS[name](state).rename(name) for name in requested}
+        {
+            name: state[name] if name in _POSITION_NAMES else values[name]
+            for name in requested
+        }
     )
     result.attrs["reduction_dims"] = list(state.attrs.get("reduction_dims", ()))
     data_attrs = dict(state.attrs.get("data_attrs", {}))
