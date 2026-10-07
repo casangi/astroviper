@@ -1,13 +1,11 @@
-"""Image-analysis processing functions."""
+"""Public processing-function API for mergeable image statistics.
 
-from astroviper.processing_functions.image_analysis.make_mask import make_mask
-from astroviper.processing_functions.image_analysis.moments import moments
-from astroviper.processing_functions.image_analysis.plane_statistics import (
-    calculate_plane_statistics,
-    concatenate_plane_statistics,
-    plane_statistics_to_dataframe,
-)
-from astroviper.processing_functions.image_analysis.statistics import (
+These functions accept already selected, loaded xarray objects. They do not
+parse CASA syntax, access storage, or construct GraphVIPER workflows; those
+responsibilities belong to the node-task and distributed-application layers.
+"""
+
+from astroviper.processing_functions.image_analysis.statistics.reductions import (
     DEFAULT_STATISTICS,
     STATISTIC_FUNCTIONS,
     create_statistics_state,
@@ -47,9 +45,4 @@ __all__ = [
     "statistics_std",
     "statistics_sum",
     "statistics_sumsq",
-    "make_mask",
-    "moments",
-    "calculate_plane_statistics",
-    "concatenate_plane_statistics",
-    "plane_statistics_to_dataframe",
 ]
