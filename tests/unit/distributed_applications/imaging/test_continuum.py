@@ -7,6 +7,7 @@ rather than retaining the frequency-cube NaN placeholders created at startup.
 
 import shutil
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from zipfile import ZipFile
 
 import dask
@@ -34,7 +35,6 @@ from astroviper.distributed_applications.imaging.image_continuum_single_field im
     prepare_continuum_imaging_weights_global,
 )
 
-TW_HYDRA_ARCHIVE = Path(__file__).parent / "data" / "tw_hydra_5chan_fixture.zip"
 TW_HYDRA_STORE_NAME = "twhya_selfcal_lsrk_5chans.ps.zarr"
 TW_HYDRA_RELATIVE_TOLERANCE = 1.0e-6
 
@@ -146,12 +146,15 @@ def test_exact_frequency_selection_rejects_unassigned_child_channels():
 
 
 @pytest.fixture(scope="module")
-def tw_hydra_store(tmp_path_factory):
-    """Extract the repository's five-channel TW Hydra processing-set fixture."""
-    fixture_directory = tmp_path_factory.mktemp("tw_hydra_continuum")
-    with ZipFile(TW_HYDRA_ARCHIVE) as archive:
-        archive.extractall(fixture_directory)
-    return fixture_directory / TW_HYDRA_STORE_NAME
+def tw_hydra_store(tmp_path_factory, tw_hydra_archive):
+    """Extract a writable copy of the downloaded TW Hydra processing set."""
+    with TemporaryDirectory(
+        prefix="tw_hydra_continuum_", dir=tmp_path_factory.getbasetemp()
+    ) as directory:
+        fixture_directory = Path(directory)
+        with ZipFile(tw_hydra_archive) as archive:
+            archive.extractall(fixture_directory)
+        yield fixture_directory / TW_HYDRA_STORE_NAME
 
 
 def _final_continuum_image():

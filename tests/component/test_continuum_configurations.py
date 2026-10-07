@@ -1,4 +1,4 @@
-"""Small continuum software regressions, with no CASA or remote data dependency.
+"""Small continuum software regressions, using downloaded reference data and no CASA dependency.
 
 Every MFS/MVC x local/global x CASA/native weighting configuration runs through
 multiple imaging cycles. Changing reduction topology and all cache modes must
@@ -6,6 +6,7 @@ preserve its products. Different algorithm configurations need not agree.
 """
 
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from zipfile import ZipFile
 
 import dask
@@ -18,37 +19,35 @@ from astroviper.distributed_applications.imaging import image_continuum_single_f
 
 
 @pytest.fixture
-def continuum_input(tmp_path):
-    archive_path = (
-        Path(__file__).parents[1]
-        / "unit/distributed_applications/imaging/data/tw_hydra_5chan_fixture.zip"
-    )
-    with ZipFile(archive_path) as archive:
-        archive.extractall(tmp_path)
-    store = tmp_path / "twhya_selfcal_lsrk_5chans.ps.zarr"
-    processing_set = open_processing_set(str(store))
-    fields = processing_set.xr_ps.get_combined_field_and_source_xds()
-    frequency = processing_set.xr_ps.get_freq_axis().values
-    params = dict(
-        image_size=[64, 64],
-        cell_size=np.array([-0.2, 0.2]) * np.pi / (180 * 3600),
-        phase_direction=fields.FIELD_PHASE_CENTER_DIRECTION.sel(
-            field_name=fields.attrs["center_field_name"]
-        ).values,
-        frequency_coords=frequency,
-        polarization_coords=["I", "Q"],
-        time_coords=[0],
-        fft_padding=1.2,
-        cpp_gridder=True,
-        nterms=2,
-        reference_frequency=float(np.mean(frequency)),
-        reference_frequency_hz=float(np.mean(frequency)),
-    )
-    mask = np.zeros((64, 64), dtype=bool)
-    mask[20:44, 20:44] = True
-    mask_path = tmp_path / "mask.npy"
-    np.save(mask_path, mask)
-    return store, params, mask_path, mask
+def continuum_input(tmp_path, tw_hydra_archive):
+    with TemporaryDirectory(prefix="continuum_input_", dir=tmp_path) as directory:
+        input_directory = Path(directory)
+        with ZipFile(tw_hydra_archive) as archive:
+            archive.extractall(input_directory)
+        store = input_directory / "twhya_selfcal_lsrk_5chans.ps.zarr"
+        processing_set = open_processing_set(str(store))
+        fields = processing_set.xr_ps.get_combined_field_and_source_xds()
+        frequency = processing_set.xr_ps.get_freq_axis().values
+        params = dict(
+            image_size=[64, 64],
+            cell_size=np.array([-0.2, 0.2]) * np.pi / (180 * 3600),
+            phase_direction=fields.FIELD_PHASE_CENTER_DIRECTION.sel(
+                field_name=fields.attrs["center_field_name"]
+            ).values,
+            frequency_coords=frequency,
+            polarization_coords=["I", "Q"],
+            time_coords=[0],
+            fft_padding=1.2,
+            cpp_gridder=True,
+            nterms=2,
+            reference_frequency=float(np.mean(frequency)),
+            reference_frequency_hz=float(np.mean(frequency)),
+        )
+        mask = np.zeros((64, 64), dtype=bool)
+        mask[20:44, 20:44] = True
+        mask_path = input_directory / "mask.npy"
+        np.save(mask_path, mask)
+        yield store, params, mask_path, mask
 
 
 def _run(

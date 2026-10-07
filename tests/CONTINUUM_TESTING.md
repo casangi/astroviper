@@ -27,9 +27,9 @@ Paths below are relative to `tests/`.
 - `unit/distributed_applications/imaging/test_continuum_reduction_contracts.py`:
   reducer consistency, validation and task-local cache ownership.
 - `component/test_continuum_configurations.py`: eight configuration regressions
-  using the bundled five-channel TW Hydra fixture. No CASA installation,
-  external harness checkout, Google Drive access or new reference archive is
-  needed. Each case extracts its own writable Processing Set.
+  using the five-channel TW Hydra fixture downloaded from the same Google
+  Drive file as the cube notebook. No CASA installation or external harness
+  checkout is needed. Each case extracts its own writable Processing Set.
 
 The component comparisons are within each algorithm configuration. They do
 **not** require MFS and MVC, local and global weighting, or native and CASA
@@ -88,7 +88,7 @@ Restoration, model-update and cached-MFS rejection tests also verify that the
 input image remains unchanged on those early failure paths. The tests use
 ordinary xarray objects; they do not fabricate impossible dimension states to
 force otherwise unreachable guards. Existing complete imaging regressions
-continue to use the already bundled fixture, unchanged.
+use the same downloaded TW Hydra fixture, unchanged.
 
 ## Execution variants and lifecycle regressions
 
@@ -220,3 +220,16 @@ verified byte-for-byte against the GCC-14-built installation in `viper`. Ruff
 lint/format, parameter documentation sync and `git diff --check` pass.
 The coverage table above records the pre-fix implementation and was not
 remeasured for this storage patch.
+
+## External input and primary-beam references
+
+TW Hydra is downloaded once per session by `tw_hydra_archive` from Google
+Drive file `1BRe3cD6YAWkn-jSPbClGGM9VlbxHP_yn`, shared with the cube notebook
+and cube component tests. Tests extract separate writable copies. The archive
+is deleted at session teardown, and extracted fixture inputs are deleted at
+their test/module teardown, including on failures. Generated test outputs
+remain subject to pytest's normal temporary-directory retention.
+
+Primary-beam tests embed small tables of independent CASA output values;
+no PB data downloads are required.
+The extensive image-level comparisons remain in the external scientific harness.
