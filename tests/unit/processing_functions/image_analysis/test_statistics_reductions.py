@@ -10,7 +10,7 @@ from astroviper.processing_functions.image_analysis.statistics import (
 
 
 def test_second_moment_statistics_ignore_nan_and_preserve_retained_dims():
-    """Verify sumsq, RMS, and sigma exclude NaNs and retain plane coordinates."""
+    """Verify sumsq, RMS, and std exclude NaNs and retain plane coordinates."""
     data = xr.DataArray(
         [[1.0, 2.0, np.nan], [3.0, 3.0, 3.0]],
         dims=("channel", "pixel"),
@@ -19,7 +19,7 @@ def test_second_moment_statistics_ignore_nan_and_preserve_retained_dims():
 
     result = finalize_statistics_state(
         create_statistics_state(data, "pixel"),
-        ("sumsq", "rms", "sigma"),
+        ("sumsq", "rms", "std"),
     )
 
     expected_coords = {"channel": [10, 11]}
@@ -32,8 +32,8 @@ def test_second_moment_statistics_ignore_nan_and_preserve_retained_dims():
         xr.DataArray([np.sqrt(2.5), 3.0], dims="channel", coords=expected_coords),
     )
     xr.testing.assert_allclose(
-        result["sigma"],
-        xr.DataArray([np.sqrt(0.5), 0.0], dims="channel", coords=expected_coords),
+        result["std"],
+        xr.DataArray([0.5, 0.0], dims="channel", coords=expected_coords),
     )
 
 
@@ -49,30 +49,30 @@ def test_second_moment_statistics_merge_from_unequal_partitions():
         merge_statistics_states(
             states, partition_dim="pixel", reduction_dims=("pixel",)
         ),
-        ("mean", "sumsq", "rms", "sigma", "npts"),
+        ("mean", "sumsq", "rms", "std", "n_pixels"),
     )
 
     assert result["mean"].item() == pytest.approx(11 / 3)
     assert result["sumsq"].item() == pytest.approx(69)
     assert result["rms"].item() == pytest.approx(np.sqrt(23))
-    assert result["sigma"].item() == pytest.approx(np.std([1.0, 2.0, 8.0], ddof=1))
-    assert result["npts"].item() == 3
+    assert result["std"].item() == pytest.approx(np.std([1.0, 2.0, 8.0], ddof=0))
+    assert result["n_pixels"].item() == 3
 
 
 @pytest.mark.parametrize("count", [0, 1])
-def test_sigma_edge_cases(count):
+def test_std_edge_cases(count):
     """Define second-moment outputs for empty and single-sample reductions."""
     values = [4.0] * count + [np.nan] * (1 - count)
     state = create_statistics_state(xr.DataArray(values, dims="pixel"), "pixel")
 
-    result = finalize_statistics_state(state, ("sumsq", "rms", "sigma"))
+    result = finalize_statistics_state(state, ("sumsq", "rms", "std"))
 
     if count == 0:
         assert all(np.isnan(result[name].item()) for name in result.data_vars)
     else:
         assert result["sumsq"].item() == 16
         assert result["rms"].item() == 4
-        assert result["sigma"].item() == 0
+        assert result["std"].item() == 0
 
 
 def test_order_statistics_and_absolute_extrema_positions():
@@ -86,16 +86,16 @@ def test_order_statistics_and_absolute_extrema_positions():
     state = create_statistics_state(
         data,
         "pixel",
-        statistics=("median", "medabsdevmed"),
+        statistics=("median", "mad_sigma"),
         positions={"pixel": [10, 11, 12, 13]},
     )
 
     result = finalize_statistics_state(
-        state, ("median", "medabsdevmed", "minpos", "maxpos")
+        state, ("median", "mad_sigma", "minpos", "maxpos")
     )
 
     np.testing.assert_allclose(result["median"], [5.0, 6.0])
-    np.testing.assert_allclose(result["medabsdevmed"], [4.0, 2.0])
+    np.testing.assert_allclose(result["mad_sigma"], 1.4826 * np.array([4.0, 2.0]))
     np.testing.assert_array_equal(result["minpos"], [[11], [10]])
     # The equal maxima in channel 101 use the first absolute pixel position.
     np.testing.assert_array_equal(result["maxpos"], [[12], [11]])
@@ -109,13 +109,13 @@ def test_positions_and_exact_median_merge_across_reduced_partition():
         create_statistics_state(
             data.isel(pixel=slice(0, 2)),
             "pixel",
-            statistics=("median", "medabsdevmed"),
+            statistics=("median", "mad_sigma"),
             positions={"pixel": [20, 21]},
         ),
         create_statistics_state(
             data.isel(pixel=slice(2, 4)),
             "pixel",
-            statistics=("median", "medabsdevmed"),
+            statistics=("median", "mad_sigma"),
             positions={"pixel": [22, 23]},
         ),
     ]
@@ -124,11 +124,11 @@ def test_positions_and_exact_median_merge_across_reduced_partition():
     )
 
     result = finalize_statistics_state(
-        merged, ("median", "medabsdevmed", "minpos", "maxpos")
+        merged, ("median", "mad_sigma", "minpos", "maxpos")
     )
 
     assert result["median"].item() == 5.5
-    assert result["medabsdevmed"].item() == 2.5
+    assert result["mad_sigma"].item() == pytest.approx(1.4826 * 2.5)
     np.testing.assert_array_equal(result["minpos"], [21])
     np.testing.assert_array_equal(result["maxpos"], [20])
 
@@ -188,7 +188,7 @@ def test_retained_partition_dimension_is_concatenated_and_sorted():
         merge_statistics_states(
             states, partition_dim="frequency", reduction_dims=("pixel",)
         ),
-        ("mean", "npts"),
+        ("mean", "n_pixels"),
     )
 
     np.testing.assert_array_equal(result.frequency, [10, 20])
@@ -243,3 +243,74 @@ def test_position_indexer_length_validation():
         create_statistics_state(data, "pixel", positions={"pixel": slice(5, 6)})
     with pytest.raises(ValueError, match="wrong length"):
         create_statistics_state(data, "pixel", positions={"pixel": [5]})
+
+
+@pytest.mark.parametrize("values", [[1.0, 2.0, 8.0, np.nan], [4.0], [np.nan]])
+@pytest.mark.parametrize("statistic", ["std", "mad_sigma"])
+def test_spread_matches_plane_statistics(values, statistic):
+    """Both independent implementations use the same spread normalization."""
+    from astroviper.processing_functions.image_analysis.plane_statistics import (
+        calculate_plane_statistics,
+    )
+
+    data = xr.DataArray(
+        np.array(values).reshape(1, 1, 1, 1, -1),
+        dims=("time", "frequency", "polarization", "l", "m"),
+        coords={"time": [0], "frequency": [100], "polarization": ["I"]},
+        name="SKY_RESIDUAL",
+    )
+    result = finalize_statistics_state(
+        create_statistics_state(data, ("l", "m"), statistics=(statistic,)),
+        (statistic,),
+    )
+    plane_result = calculate_plane_statistics(data.to_dataset())["sky_residual"]
+    xr.testing.assert_allclose(result[statistic], plane_result[statistic])
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        ([2.0, -9.0, 4.0], -9.0),
+        ([-2.0, 9.0], 9.0),
+        ([-9.0, 9.0], -9.0),
+        ([9.0, -9.0], 9.0),
+        ([np.nan, -3.0], -3.0),
+        ([np.nan, np.nan], np.nan),
+        ([0.0, 0.0], 0.0),
+        ([4.0, 4.0], 4.0),
+    ],
+)
+def test_peak_preserves_sign_and_ties_after_merge(values, expected):
+    """Peak agrees with the first largest-magnitude pixel, even with reversed chunks."""
+    data = xr.DataArray(values, dims="pixel", attrs={"units": "Jy/beam"})
+    states = [
+        create_statistics_state(
+            data.isel(pixel=slice(i, i + 1)), "pixel", positions={"pixel": [i]}
+        )
+        for i in range(len(values))
+    ]
+    merged = merge_statistics_states(
+        states[::-1], partition_dim="pixel", reduction_dims=("pixel",)
+    )
+    for state in (create_statistics_state(data, "pixel"), merged):
+        result = finalize_statistics_state(state, ("peak",))
+        np.testing.assert_allclose(result["peak"], expected)
+        assert result["peak"].attrs["units"] == "Jy/beam"
+
+
+@pytest.mark.parametrize(
+    "values, expected", [([1.0, np.nan, 3.0], 2.0), ([np.nan], 0.0)]
+)
+def test_pixel_count_is_float64(values, expected):
+    """Expose floating-point counts, including zero for an all-NaN selection."""
+    from astroviper.processing_functions.image_analysis.statistics import (
+        statistics_n_pixels,
+    )
+
+    state = create_statistics_state(xr.DataArray(values, dims="pixel"), "pixel")
+    for result in (
+        statistics_n_pixels(state),
+        finalize_statistics_state(state, ("n_pixels",))["n_pixels"],
+    ):
+        assert result.dtype == np.dtype("float64")
+        assert result.item() == expected

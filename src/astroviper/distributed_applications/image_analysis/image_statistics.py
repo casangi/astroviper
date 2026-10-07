@@ -138,11 +138,11 @@ def image_statistics(
         Statistics to return. Supported names are:
 
         - ``"mean"``, ``"median"``, ``"min"``, ``"max"``, ``"sum"``,
-          ``"sumsq"``, ``"npts"``, ``"sigma"``, and ``"rms"``;
+          ``"sumsq"``, ``"n_pixels"``, ``"std"``, and ``"rms"``;
+        - ``"peak"`` for the signed value with the largest absolute magnitude;
         - ``"minpos"`` and ``"maxpos"`` for absolute pixel positions along
           the reduced dimensions; and
-        - ``"medabsdevmed"`` for median absolute deviation from the median,
-          with ``"mad"`` accepted as an alias.
+        - ``"mad_sigma"`` for Gaussian-scaled median absolute deviation.
 
         Only requested variables are returned. Exact ``median`` and median
         absolute deviation retain selected samples in the distributed state;
@@ -168,11 +168,14 @@ def image_statistics(
         One data variable per requested statistic. Unreduced dimensions and
         their coordinates are retained. Position variables add a
         ``statistics_axis`` dimension naming the reduced axes. Value
-        statistics preserve the input variable's units; ``npts`` and position
+        statistics preserve the input variable's units; ``n_pixels`` and position
         variables are unitless.
 
     Notes
     -----
+    Standard deviation uses population normalization (division by N).
+    ``mad_sigma`` returns 1.4826 times the median absolute deviation.
+
     The application partitions only the effective user selection. Every map
     node calls the same directly callable node task and returns a mergeable
     state. Exact median statistics carry selected samples through that state;
@@ -195,7 +198,7 @@ def image_statistics(
             axes=("l", "m"),
             mask="MASK_SKY",
             stretch=True,
-            statistics=("medabsdevmed", "rms", "max", "maxpos"),
+            statistics=("mad_sigma", "rms", "max", "maxpos"),
         )
 
     Retain frequency while reducing every other canonical image dimension::

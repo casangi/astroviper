@@ -857,8 +857,9 @@ def image_statistics(
         Inclusive value range to retain or exclude, respectively.
     statistics : sequence of str, default DEFAULT_STATISTICS
         Any of ``min``, ``minpos``, ``max``, ``maxpos``, ``sum``, ``sumsq``,
-        ``mean``, ``median``, ``medabsdevmed`` (or ``mad``), ``rms``,
-        ``sigma``, and ``npts``.
+        ``mean``, ``median``, ``mad_sigma``, ``rms``,
+        ``std``, ``peak``, and ``n_pixels``. ``peak`` is the signed value
+        with the largest absolute magnitude.
     partition : mapping, optional
         Structured application-generated selector relative to the user
         selection. It is intersected with, never substituted for, user input.
@@ -878,9 +879,12 @@ def image_statistics(
 
     Notes
     -----
+    Standard deviation uses population normalization (division by N).
+    ``mad_sigma`` returns 1.4826 times the median absolute deviation.
+
     Selection precedes masking, and masking precedes reduction. Value filters
     therefore operate only on selected pixels. NaN and masked samples do not
-    contribute to ``npts`` or numerical statistics.
+    contribute to ``n_pixels`` or numerical statistics.
 
     Only the requested image variable and optional named mask are loaded. With
     ``finalize=False``, the result is a mergeable numerical state; derived

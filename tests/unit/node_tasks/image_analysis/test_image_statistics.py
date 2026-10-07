@@ -70,22 +70,22 @@ def test_mask_multiple_axes_shape_units_and_positions():
             "maxpos",
             "min",
             "minpos",
-            "sigma",
+            "std",
             "rms",
-            "medabsdevmed",
+            "mad_sigma",
             "sum",
-            "npts",
+            "n_pixels",
         ),
     )
 
     assert result.sizes == {"frequency": 1, "statistics_axis": 2}
-    assert result["npts"].item() == 7
+    assert result["n_pixels"].item() == 7
     assert result["min"].item() == 10
     assert result["max"].item() == 16
     np.testing.assert_array_equal(result["minpos"], [[0, 1]])
     np.testing.assert_array_equal(result["maxpos"], [[2, 1]])
     assert result["median"].item() == 13
-    assert result["medabsdevmed"].item() == 2
+    assert result["mad_sigma"].item() == pytest.approx(1.4826 * 2)
     assert result["mean"].attrs["units"] == "Jy/beam"
 
 
@@ -167,11 +167,11 @@ def test_on_disk_selection_loads_only_required_variables(image_store, monkeypatc
         axes=("l", "m"),
         mask="MASK_SKY",
         stretch=True,
-        statistics=("mean", "npts"),
+        statistics=("mean", "n_pixels"),
     )
 
     assert loaded["indexers"]["frequency"] == slice(1, 3, 1)
-    assert set(result.data_vars) == {"mean", "npts"}
+    assert set(result.data_vars) == {"mean", "n_pixels"}
     expected = image_cube.SKY.isel(frequency=slice(1, 3)).where(image_cube.MASK_SKY)
     xr.testing.assert_allclose(result["mean"], expected.mean(("l", "m")))
 
@@ -184,13 +184,13 @@ def test_region_union_and_value_filters(image_cube):
         region={"blc": [1, 1], "trc": [3, 4]},
         includepix=(0, 300),
         excludepix=(100, 199),
-        statistics=("min", "max", "npts"),
+        statistics=("min", "max", "n_pixels"),
     )
     selected = image_cube.SKY.isel(l=slice(1, 4), m=slice(1, 5))
     expected = selected.where((selected <= 300) & ((selected < 100) | (selected > 199)))
     assert result["min"].item() == expected.min().item()
     assert result["max"].item() == expected.max().item()
-    assert result["npts"].item() == expected.count().item()
+    assert result["n_pixels"].item() == expected.count().item()
 
 
 def test_multiple_boxes_exclude_bounding_rectangle_gaps(image_cube):
@@ -198,9 +198,9 @@ def test_multiple_boxes_exclude_bounding_rectangle_gaps(image_cube):
     result = image_statistics(
         image_cube.SKY.isel(time=0, frequency=0, polarization=0, drop=False),
         box="0,0,0,0,3,4,3,4",
-        statistics=("sum", "npts"),
+        statistics=("sum", "n_pixels"),
     )
-    assert result["npts"].item() == 2
+    assert result["n_pixels"].item() == 2
     assert result["sum"].item() == 0 + 19
 
 
@@ -303,14 +303,14 @@ def test_multicharacter_polarizations_and_integer_axes():
 def test_full_shape_and_spatial_array_masks(image_cube):
     """Accept both full-dimensional and stretched two-dimensional array masks."""
     full_mask = np.ones(image_cube.SKY.shape, dtype=bool)
-    full = image_statistics(image_cube.SKY, mask=full_mask, statistics=("npts",))
-    assert full["npts"].item() == image_cube.SKY.size
+    full = image_statistics(image_cube.SKY, mask=full_mask, statistics=("n_pixels",))
+    assert full["n_pixels"].item() == image_cube.SKY.size
 
     spatial_mask = np.eye(4, 5, dtype=bool)
     spatial = image_statistics(
         image_cube.SKY,
         mask=spatial_mask,
         stretch=True,
-        statistics=("npts",),
+        statistics=("n_pixels",),
     )
-    assert spatial["npts"].item() == 2 * 4 * 2 * 4
+    assert spatial["n_pixels"].item() == 2 * 4 * 2 * 4

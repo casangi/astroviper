@@ -165,7 +165,7 @@ def test_distributed_and_node_on_disk_match_node_in_memory(image_store, monkeypa
         "xradio.image.load_image",
         lambda store, block_des: xr.open_zarr(store).isel(block_des),
     )
-    statistics = ("mean", "max", "maxpos", "npts")
+    statistics = ("mean", "max", "maxpos", "n_pixels")
     distributed = statistics_module.image_statistics(
         path,
         data_variable="SKY",
@@ -219,12 +219,13 @@ def test_default_statistics_match_across_layers(image_store, monkeypatch, n_part
     expected = {
         "min": 0.0,
         "max": 95.0,
+        "peak": 95.0,
         "sum": 4560.0,
         "sumsq": 290320.0,
-        "npts": 96,
+        "n_pixels": 96.0,
         "mean": 47.5,
         "rms": np.sqrt(290320.0 / 96),
-        "sigma": np.sqrt(776.0),
+        "std": np.std(np.arange(96.0), ddof=0),
         "minpos": [0, 0, 0, 0, 0],
         "maxpos": [0, 3, 1, 2, 3],
     }
@@ -238,8 +239,49 @@ def test_default_statistics_match_across_layers(image_store, monkeypatch, n_part
         ),
     ]
     for result in results:
+        assert result["n_pixels"].dtype == np.dtype("float64")
         assert list(result.data_vars) == list(expected)
         for name, value in expected.items():
             np.testing.assert_allclose(result[name].values, value)
     for result in results[1:]:
         xr.testing.assert_identical(results[0], result)
+
+
+@pytest.mark.parametrize("axes", [("l", "m"), ("frequency", "l", "m")])
+@pytest.mark.parametrize("n_partitions", [1, 2])
+def test_peak_across_layers_and_partitions(tmp_path, monkeypatch, axes, n_partitions):
+    """Keep peak signs and tie ordering with retained or reduced partitions and masks."""
+    from astroviper.node_tasks.image_analysis.image_statistics import (
+        image_statistics as direct_statistics,
+    )
+    from astroviper.processing_functions.image_analysis.plane_statistics import (
+        calculate_plane_statistics,
+    )
+
+    data = xr.DataArray(
+        np.array([9.0, -9.0, 100.0, -9.0, 9.0, np.nan]).reshape(1, 2, 1, 1, 3),
+        dims=("time", "frequency", "polarization", "l", "m"),
+        coords={"time": [0], "frequency": [100, 101], "polarization": ["I"]},
+        attrs={"units": "Jy/beam"},
+    )
+    dataset = xr.Dataset({"SKY_RESIDUAL": data, "MASK": data < 100})
+    path = str(tmp_path / "peak.zarr")
+    dataset.to_zarr(path)
+    monkeypatch.setattr(
+        "xradio.image.load_image",
+        lambda store, block_des: xr.open_zarr(store).isel(block_des),
+    )
+    kwargs = dict(
+        data_variable="SKY_RESIDUAL", axes=axes, mask="MASK", statistics=("peak",)
+    )
+    distributed = statistics_module.image_statistics(
+        path, n_partitions=n_partitions, **kwargs
+    )
+    direct = direct_statistics(dataset, **kwargs)
+    xr.testing.assert_identical(distributed, direct)
+    if "frequency" in axes:
+        assert direct["peak"].item() == 9.0
+    else:
+        plane = calculate_plane_statistics(dataset, mask_name="MASK")["sky_residual"]
+        np.testing.assert_allclose(direct["peak"], plane["peak_masked"])
+        np.testing.assert_allclose(direct["peak"].values.ravel(), [9.0, -9.0])
