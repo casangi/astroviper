@@ -1504,7 +1504,7 @@ def test_tw_hydra_continuum_transfers_results_between_processes(
     )
     _, reference = _run_tw_hydra_continuum(
         tw_hydra_store,
-        tmp_path / "serial.zarr",
+        tmp_path / "serial.img.zarr",
         processing_set,
         3,
         specmode,
@@ -1540,7 +1540,7 @@ def test_tw_hydra_continuum_transfers_results_between_processes(
         pending = pool.submit(
             _run_tw_hydra_continuum,
             tw_hydra_store,
-            tmp_path / "distributed.zarr",
+            tmp_path / "distributed.img.zarr",
             processing_set,
             3,
             specmode,

@@ -52,7 +52,16 @@ def continuum_input(tmp_path):
 
 
 def _run(
-    store, params, mask_path, output, specmode, scope, casa, cache_mode, reduce_mode
+    store,
+    params,
+    mask_path,
+    output,
+    specmode,
+    scope,
+    casa,
+    cache_mode,
+    reduce_mode,
+    read_output=None,
 ):
     with dask.config.set(scheduler="synchronous"):
         result = image_continuum_single_field(
@@ -103,7 +112,7 @@ def _run(
             compute_backend="dask",
             reduce_mode=reduce_mode,
         )
-    with xr.open_zarr(output) as stored:
+    with xr.open_zarr(output if read_output is None else read_output) as stored:
         image = stored.load()
     return result, image
 
@@ -121,7 +130,7 @@ def test_continuum_configuration_cache_and_reduction_regression(
         store,
         params,
         mask_path,
-        tmp_path / "reference.zarr",
+        tmp_path / "reference.img.zarr",
         specmode,
         scope,
         casa,
@@ -132,7 +141,7 @@ def test_continuum_configuration_cache_and_reduction_regression(
         store,
         params,
         mask_path,
-        tmp_path / "cached.zarr",
+        tmp_path / "cached.img.zarr",
         specmode,
         scope,
         casa,
@@ -185,3 +194,45 @@ def test_continuum_configuration_cache_and_reduction_regression(
     assert corrected.dims == ("time", "polarization", "l", "m")
     valid = beam > 0.2
     xr.testing.assert_allclose(corrected.where(valid), (restored / beam).where(valid))
+
+
+@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+def test_continuum_uses_writer_resolved_path(
+    tmp_path, continuum_input, monkeypatch, specmode
+):
+    """Follow XRADIO's returned path for allocation, caches, and final output."""
+    import xradio.image
+
+    store, params, mask_path, _ = continuum_input
+    requested = tmp_path / "requested.zarr"
+    resolved = tmp_path / "requested.img.zarr"
+    real_write = xradio.image.write_image
+    calls = []
+
+    def write_with_resolved_path(image, imagename, **kwargs):
+        calls.append(str(imagename))
+        destination = str(resolved) if str(imagename) == str(requested) else imagename
+        real_write(image, imagename=destination, **kwargs)
+        return [str(destination)]
+
+    # Emulate the modern writer contract even with older supported XRADIO.
+    monkeypatch.setattr(xradio.image, "write_image", write_with_resolved_path)
+    result, image = _run(
+        store,
+        params,
+        mask_path,
+        requested,
+        specmode,
+        "global",
+        True,
+        "in_place",
+        "tree",
+        read_output=resolved,
+    )
+    assert calls == [str(requested), str(resolved)]
+    assert not requested.exists()
+    assert resolved.is_dir()
+    assert result["n_major_cycles"] == 2
+    assert np.isfinite(image.SKY_RESIDUAL).all()
+    assert "SKY_RESTORED_PBCOR" in image
+    assert not any("CACHE" in name or "MVC_" in name for name in image.data_vars)

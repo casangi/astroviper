@@ -2820,6 +2820,9 @@ def image_continuum_single_field(
     The continuum Högbom adapter uses float32 for its temporary model-update
     arrays, independently of the gridding/image precision setting.
 
+    XRADIO may normalize the output suffix to ``.img.zarr``. All subsequent
+    allocation, cache access, and output use the path returned by its writer.
+
     Continuum primary beams are selected once from antenna metadata before
     frequency partitioning. ``image_params["primary_beam_model"]`` accepts
     ``"auto"`` (default), ``"airy"`` (physical aperture), or ``"casa_airy"``.
@@ -2860,6 +2863,7 @@ def image_continuum_single_field(
     from astroviper.utils.io import (
         create_empty_data_variables_on_disk,
         image_data_groups_for_kept_variables,
+        write_zarr_image_store,
     )
     from astroviper.utils.timing import format_timing_summary
 
@@ -2969,7 +2973,7 @@ def image_continuum_single_field(
         )
 
     start = time.time()
-    write_image(img_xds, imagename=image_store, out_format="zarr", overwrite=overwrite)
+    image_store = write_zarr_image_store(img_xds, image_store, overwrite=overwrite)
     timing_distributed_application["T_write_empty_image"] = time.time() - start
 
     # Determine number of chunks

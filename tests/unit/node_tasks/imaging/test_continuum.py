@@ -716,7 +716,8 @@ def test_zero_max_iter_uses_current_controller_fields():
     np.testing.assert_array_equal(controller.max_iter_remaining, 0)
 
 
-def test_continuum_transfer_preserves_arrays_metadata_and_nested_datasets():
+@pytest.mark.parametrize("legacy_cache", [False, True])
+def test_continuum_transfer_preserves_arrays_metadata_and_nested_datasets(legacy_cache):
     import pickle
 
     image = _model_dataset(2.0)
@@ -726,6 +727,9 @@ def test_continuum_transfer_preserves_arrays_metadata_and_nested_datasets():
     array = image.SKY_MODEL.data
     _ = image.xr_img
     _ = nested.xr_img
+    if legacy_cache:
+        image._cache = {"xr_img": image.xr_img}
+        nested._cache = {"xr_img": nested.xr_img}
     payload = {"image": image, "cache": [{0: (nested, image)}]}
     payload["alias"] = payload
 
@@ -733,8 +737,8 @@ def test_continuum_transfer_preserves_arrays_metadata_and_nested_datasets():
 
     assert result is payload
     assert image.SKY_MODEL.data is array
-    assert not image._cache
-    assert not nested._cache
+    assert not getattr(image, "_cache", None)
+    assert not getattr(nested, "_cache", None)
     xr.testing.assert_equal(image, original)
     assert image.attrs["data_groups"] == original.attrs["data_groups"]
     assert image.attrs["nested_dataset"] is nested
