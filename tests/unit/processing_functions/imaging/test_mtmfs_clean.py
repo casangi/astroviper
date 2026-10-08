@@ -233,6 +233,22 @@ class TestHessian:
             for t2 in range(nterms):
                 assert H[t1, t2] == pytest.approx(float(psf[t1 + t2][peak]), rel=2e-5)
 
+    def test_scale_kernel_uses_image_working_precision(self):
+        """The float64 path must not quantise a multi-scale kernel to float32."""
+        nx = ny = 96
+        scale = float(np.float32(11.3))
+        reference = np.sum(np_make_scale(nx, ny, scale) ** 2)
+        errors = {}
+        for dtype in (np.float32, np.float64):
+            psf = np.zeros((1, ny, nx), dtype=dtype)
+            psf[0, ny // 2, nx // 2] = 1.0
+            measured = mtmfs.hessian(psf, scales=[scale])["hessian"][0, 0, 0]
+            errors[dtype] = abs(measured - reference)
+
+        assert errors[np.float64] < 1e-14
+        assert errors[np.float32] > 1e-10
+        assert errors[np.float64] < errors[np.float32] * 1e-6
+
     def test_float64_matches_float32_hessian(self):
         nterms, nx, ny = 2, 64, 64
         h32 = mtmfs.hessian(

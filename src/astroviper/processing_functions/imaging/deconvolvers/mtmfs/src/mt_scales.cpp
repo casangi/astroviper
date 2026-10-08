@@ -1,7 +1,7 @@
 // Port of CASA stdcleaner/StdScales.cc (casacore MatrixCleaner::spheroidal /
-// makeScale). The floating-point promotions (double reference coordinates,
-// float image values, float volume accumulator) mirror the casacore original so
-// results match it to float precision. Indexing is row-major pointer arithmetic.
+// makeScale). Arithmetic follows the image working precision so the float64
+// imaging path does not quantise its scale kernels to float32. Indexing is
+// row-major pointer arithmetic.
 
 #include "../include/mt_scales.hpp"
 
@@ -13,40 +13,43 @@ namespace mtmfs {
 
 namespace {
 inline double square(double x) { return x * x; }
-}  // namespace
 
-float spheroidal(float nu) {
-    if (nu <= 0.0f) return 1.0f;
-    if (nu >= 1.0f) return 0.0f;
+template <typename T>
+T spheroidal_impl(T nu) {
+    if (nu <= static_cast<T>(0)) return static_cast<T>(1);
+    if (nu >= static_cast<T>(1)) return static_cast<T>(0);
 
     // Coefficients as [row][part] with part 0 for nu in [0,0.75), 1 otherwise.
-    static const float p[5][2] = {{8.203343e-2f, 4.028559e-3f},
-                                  {-3.644705e-1f, -3.697768e-2f},
-                                  {6.278660e-1f, 1.021332e-1f},
-                                  {-5.335581e-1f, -1.201436e-1f},
-                                  {2.312756e-1f, 6.412774e-2f}};
-    static const float q[3][2] = {{1.0000000e0f, 1.0000000e0f},
-                                  {8.212018e-1f, 9.599102e-1f},
-                                  {2.078043e-1f, 2.918724e-1f}};
+    static const T p[5][2] = {{static_cast<T>(8.203343e-2), static_cast<T>(4.028559e-3)},
+                              {static_cast<T>(-3.644705e-1), static_cast<T>(-3.697768e-2)},
+                              {static_cast<T>(6.278660e-1), static_cast<T>(1.021332e-1)},
+                              {static_cast<T>(-5.335581e-1), static_cast<T>(-1.201436e-1)},
+                              {static_cast<T>(2.312756e-1), static_cast<T>(6.412774e-2)}};
+    static const T q[3][2] = {{static_cast<T>(1.0000000e0), static_cast<T>(1.0000000e0)},
+                              {static_cast<T>(8.212018e-1), static_cast<T>(9.599102e-1)},
+                              {static_cast<T>(2.078043e-1), static_cast<T>(2.918724e-1)}};
     int part = 0;
-    float nuend = 0.0f;
-    if (nu >= 0.0f && nu < 0.75f) {
+    T nuend = static_cast<T>(0);
+    if (nu >= static_cast<T>(0) && nu < static_cast<T>(0.75)) {
         part = 0;
-        nuend = 0.75f;
-    } else if (nu >= 0.75f && nu <= 1.00f) {
+        nuend = static_cast<T>(0.75);
+    } else if (nu >= static_cast<T>(0.75) && nu <= static_cast<T>(1)) {
         part = 1;
-        nuend = 1.0f;
+        nuend = static_cast<T>(1);
     }
 
-    float top = p[0][part];
-    const float delnusq = static_cast<float>(std::pow(static_cast<double>(nu), 2.0) -
-                                             std::pow(static_cast<double>(nuend), 2.0));
-    for (int k = 1; k < 5; ++k) top += p[k][part] * std::pow(delnusq, static_cast<float>(k));
-    float bot = q[0][part];
-    for (int k = 1; k < 3; ++k) bot += q[k][part] * std::pow(delnusq, static_cast<float>(k));
+    T top = p[0][part];
+    const T delnusq = static_cast<T>(std::pow(static_cast<double>(nu), 2.0) -
+                                     std::pow(static_cast<double>(nuend), 2.0));
+    for (int k = 1; k < 5; ++k) top += p[k][part] * std::pow(delnusq, static_cast<T>(k));
+    T bot = q[0][part];
+    for (int k = 1; k < 3; ++k) bot += q[k][part] * std::pow(delnusq, static_cast<T>(k));
 
-    return (bot != 0.0f) ? (top / bot) : 0.0f;
+    return (bot != static_cast<T>(0)) ? (top / bot) : static_cast<T>(0);
 }
+}  // namespace
+
+float spheroidal(float nu) { return spheroidal_impl<float>(nu); }
 
 template <typename T>
 void make_scale(T* scale, int nx, int ny, float scale_size) {
@@ -66,23 +69,26 @@ void make_scale(T* scale, int nx, int ny, float scale_size) {
     const int minj = std::max(0, static_cast<int>(refj - scale_size));
     const int maxj = std::min(ny - 1, static_cast<int>(refj + scale_size));
 
-    float volume = 0.0f;
+    T volume = static_cast<T>(0);
     for (int j = minj; j <= maxj; ++j) {
-        const float ypart = static_cast<float>(square((refj - double(j)) / scale_size));
+        const T ypart = static_cast<T>(square((refj - double(j)) / scale_size));
         for (int i = mini; i <= maxi; ++i) {
-            const float rad2 = static_cast<float>(ypart + square((refi - double(i)) / scale_size));
+            const T rad2 = static_cast<T>(ypart + square((refi - double(i)) / scale_size));
             T& px = scale[static_cast<std::size_t>(j) * nx + i];
-            if (rad2 < 1.0f) {
-                const float rad = (rad2 <= 0.0f) ? 0.0f : std::sqrt(rad2);
-                const float v = static_cast<float>((1.0 - rad2) * spheroidal(rad));
-                px = static_cast<T>(v);
+            if (rad2 < static_cast<T>(1)) {
+                const T rad = (rad2 <= static_cast<T>(0)) ? static_cast<T>(0) : std::sqrt(rad2);
+                // Retain the original float-path promotion while allowing the
+                // double path to keep its full working precision.
+                const T v = static_cast<T>((1.0 - static_cast<double>(rad2)) *
+                                           static_cast<double>(spheroidal_impl<T>(rad)));
+                px = v;
                 volume += v;
             } else {
                 px = static_cast<T>(0);
             }
         }
     }
-    for (std::size_t k = 0; k < nimg; ++k) scale[k] /= static_cast<T>(volume);
+    for (std::size_t k = 0; k < nimg; ++k) scale[k] /= volume;
 }
 
 template void make_scale<float>(float*, int, int, float);
