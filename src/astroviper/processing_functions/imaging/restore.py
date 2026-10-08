@@ -141,6 +141,7 @@ def primary_beam_corrected_plane(
     residual_plane,
     kernel_ft=None,
     workers=1,
+    out=None,
 ):
     """One plane of the primary beam corrected restored image.
 
@@ -171,23 +172,37 @@ def primary_beam_corrected_plane(
         restore step leaves the model unrestored.
     workers : int, optional
         Threads handed to ``scipy.fft``.
+    out : numpy.ndarray, optional
+        Plane, at the dtype of the residual plane, the result is written to;
+        a new one by default.
 
     Returns
     -------
     numpy.ndarray
-        The corrected plane, at the dtype of the residual plane.
+        The corrected plane, at the dtype of the residual plane (``out`` when
+        given).
     """
     inside = primary_beam_plane >= primary_beam_limit
-    dtype = residual_plane.dtype
+    if out is None:
+        out = np.empty(residual_plane.shape, dtype=residual_plane.dtype)
     # the model divided by the primary beam inside the cutoff, zero outside
-    scaled = np.zeros(model_plane.shape, dtype=dtype)
-    np.divide(model_plane, primary_beam_plane, out=scaled, where=inside)
-    if kernel_ft is not None and scaled.any():
-        scaled = _convolve_with_clean_beam(scaled, kernel_ft, workers)
-    corrected = np.full(residual_plane.shape, np.nan, dtype=dtype)
-    np.divide(residual_plane, primary_beam_plane, out=corrected, where=inside)
-    np.add(corrected, scaled, out=corrected, where=inside)
-    return corrected
+    out.fill(0)
+    np.divide(model_plane, primary_beam_plane, out=out, where=inside)
+    convolve = kernel_ft is not None and out.any()
+    if convolve:
+        # only the spectrum of the divided model is kept; ``out`` is reused
+        scaled = scipy.fft.rfft2(out, workers=workers)
+        np.multiply(scaled, kernel_ft, out=scaled)
+    else:
+        scaled = out.copy()
+    out.fill(np.nan)
+    np.divide(residual_plane, primary_beam_plane, out=out, where=inside)
+    del inside
+    if convolve:
+        scaled = _inverse_rfft2(scaled, out.shape, workers)
+    # NaN outside the cutoff stays NaN
+    out += scaled
+    return out
 
 
 def elliptical_gaussian_uv_taper(u, v, major, minor, pa):
@@ -493,13 +508,14 @@ def restore_image(
                 if correct:
                     start_correct = time.time()
                     pb_pol = pp if primary_beam.shape[2] == npol else 0
-                    corrected[tt, ff, pp] = primary_beam_corrected_plane(
+                    primary_beam_corrected_plane(
                         primary_beam[tt, ff, pb_pol],
                         primary_beam_limit,
                         model_plane,
                         residual_plane,
                         kernel_ft=kernel_ft,
                         workers=workers,
+                        out=corrected[tt, ff, pp],
                     )
                     T_correct += time.time() - start_correct
                 if kernel_ft is None or not model_plane.any():
