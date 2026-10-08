@@ -2,6 +2,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <cstdint>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -77,7 +78,10 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
     py::buffer_info ri = check_array<T>(residual, "residual", stack, true);
     py::buffer_info mi = check_array<T>(model, "model", stack, true);
     py::buffer_info pi = check_array<T>(psf, "psf", psf_shape, false);
-    if (ri.ptr == mi.ptr) throw std::runtime_error("residual and model must be distinct arrays");
+    const auto r0 = reinterpret_cast<std::uintptr_t>(ri.ptr), m0 = reinterpret_cast<std::uintptr_t>(mi.ptr);
+    const auto nbytes = static_cast<std::uintptr_t>(ri.size * ri.itemsize);
+    if (r0 < m0 + nbytes && m0 < r0 + nbytes)
+        throw std::runtime_error("residual and model must be distinct, non-overlapping arrays");
 
     const T* mask_ptr = nullptr;
     py::array mask_arr;

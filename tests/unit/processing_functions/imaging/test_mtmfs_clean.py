@@ -817,6 +817,9 @@ class TestArrayValidation:
         residual = make_dirty_stack(2, 48, 40)
         with pytest.raises(RuntimeError, match="distinct"):
             mtmfs.clean(residual, make_psf_stack(2, 48, 40), residual)
+        buf = make_dirty_stack(3, 48, 40)
+        with pytest.raises(RuntimeError, match="distinct"):
+            mtmfs.clean(buf[0:2], make_psf_stack(2, 48, 40), buf[1:3])
 
     def test_nterms_too_large_raises(self):
         residual = np.zeros((5, 8, 8), dtype=np.float32)
