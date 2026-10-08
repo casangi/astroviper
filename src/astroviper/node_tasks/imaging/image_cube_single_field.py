@@ -502,6 +502,7 @@ def image_cube_single_field(
     data_group=None,
     task_id=0,
     input_data=None,
+    lazy_input_data=None,
     graph_mode=True,
     image_chunking=None,
     image_sharding=None,
@@ -635,7 +636,8 @@ def image_cube_single_field(
         Path/URL of the on-disk Zarr image cube.
     input_data_store : str
         Path/URL of the processing-set Zarr store to load this chunk's
-        visibilities from (used only when ``input_data`` is ``None``).
+        visibilities from (used only when ``input_data`` and
+        ``lazy_input_data`` are ``None``).
     processing_set_data_group_name : str, optional
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     deconvolver : str, optional
@@ -700,6 +702,22 @@ def image_cube_single_field(
     input_data : dict, optional
         Pre-loaded data for this chunk (supplied by the data-loading layer); when
         ``None`` (default) the data is loaded from ``input_data_store``.
+    lazy_input_data : dict, optional
+        ``{ms_name: xarray.Dataset}``: this chunk's data, not yet read. For a
+        Measurement Set v2 ``ps_store`` the distributed application opens the
+        Measurement Set with XRADIO's ``xradio_msv2`` engine and gives every
+        task, per MSv4 of its ``data_selection``, the data group's variables
+        already restricted to that selection (lazily indexed arrays; see
+        :func:`~astroviper.node_tasks.imaging.utils.add_lazy_input_data`).
+        The task reads them with
+        :func:`~astroviper.node_tasks.imaging.utils.load_processing_set_skunk_works_msv2`
+        (used only when ``input_data`` is ``None``; ``skunk_works`` and
+        ``data_group`` are not consulted for the read). Any read error skips
+        the chunk, as for the other inputs, except
+        ``xradio.measurement_set.MSv2ChangedError``: the Measurement Set
+        changed after the distributed application opened it, so the graph no
+        longer describes it and the error is raised, aborting the run. ``None``
+        (default): the data is loaded from ``input_data_store``.
     graph_mode : bool, optional
         If ``True`` (default) each kept variable's slice is written into the
         pre-allocated Zarr store with
@@ -818,6 +836,15 @@ def image_cube_single_field(
             # I/O coalescing). The framework has already applied the task-level
             # sub-selection, so use the dict directly.
             ps_xdt = input_data
+        elif lazy_input_data is not None:
+            # Measurement Set v2: read the lazily indexed selection that the
+            # distributed application attached to this task (the values are
+            # read by XRADIO's xradio_msv2 engine).
+            from astroviper.node_tasks.imaging.utils import (
+                load_processing_set_skunk_works_msv2,
+            )
+
+            ps_xdt = load_processing_set_skunk_works_msv2(lazy_input_data)
         elif skunk_works:
             # Experimental performance path: read only this chunk's data-group
             # variables straight from the Zarr chunk blobs and reconstruct the
@@ -845,6 +872,13 @@ def image_cube_single_field(
                 load_sub_datasets=False,
             )
     except Exception as exc:
+        # A Measurement Set v2 that changed after the distributed application
+        # opened it no longer matches the graph: every remaining task would be
+        # inconsistent, which a skipped chunk would hide, so the run aborts.
+        from astroviper.node_tasks.imaging.utils import is_fatal_load_error
+
+        if is_fatal_load_error(exc):
+            raise
         # A chunk whose data cannot be read is skipped -- logged + marked in the
         # timing frame -- instead of aborting the whole run (dask/MPI would
         # otherwise tear down every node after this task exhausts its retries).
