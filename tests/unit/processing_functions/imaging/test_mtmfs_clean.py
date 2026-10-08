@@ -1232,6 +1232,37 @@ def test_large_scale_component_is_not_truncated():
     np.testing.assert_array_equal(model[0] != 0, kernel != 0)
 
 
+@pytest.mark.parametrize("shape", [(40, 160), (160, 40)])
+def test_rectangular_patch_keeps_long_axis_sidelobes(shape):
+    """The in-loop update must not clamp both PSF axes to the short image axis."""
+    ny, nx = shape
+    cy, cx = ny // 2, nx // 2
+    psf = np.zeros((1, ny, nx), dtype=np.float32)
+    psf[0, cy, cx] = 1.0
+    if nx > ny:
+        psf[0, cy, cx + 30] = 0.5
+    else:
+        psf[0, cy + 30, cx] = 0.5
+    residual = psf.copy()
+    model = np.zeros_like(residual)
+
+    out = mtmfs.clean(
+        residual,
+        psf,
+        model,
+        gain=1.0,
+        threshold=1e-6,
+        max_iter_remaining=2,
+    )
+
+    assert out["iterations_performed"] == 1
+    assert out["stop_code"] == mtmfs.STOP_THRESHOLD
+    assert out["psf_support"] == 80
+    assert model[0, cy, cx] == pytest.approx(1.0)
+    assert np.count_nonzero(model) == 1
+    np.testing.assert_allclose(residual, 0.0, atol=2e-7)
+
+
 def test_clean_returns_hessians_of_effective_scales():
     nterms, nx, ny, scales = 2, 64, 64, [6.0, 0.0]
     psf = make_psf_stack(nterms, nx, ny)

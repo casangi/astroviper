@@ -23,12 +23,22 @@ namespace mtmfs {
 
 namespace {
 
-int find_beam_patch(float max_scale_size, int nx, int ny, float psf_beam, float nbeams) {
+int beam_patch_extent(float max_scale_size, float psf_beam, float nbeams) {
     int psupport = static_cast<int>(std::sqrt(psf_beam * psf_beam + max_scale_size * max_scale_size) * nbeams);
     if (psupport < psf_beam * nbeams) psupport = static_cast<int>(psf_beam * nbeams);
-    if (psupport > nx || psupport > ny) psupport = std::min(nx, ny);
     if (psupport % 2 != 0) psupport -= 1;
     return psupport;
+}
+
+std::array<int, 2> beam_patch_shape(float max_scale_size, int nx, int ny, float psf_beam, float nbeams) {
+    const int extent = beam_patch_extent(max_scale_size, psf_beam, nbeams);
+    std::array<int, 2> shape{std::min(extent, nx), std::min(extent, ny)};
+    // Preserve the existing even-sized centring convention independently on
+    // each axis. Do not clamp both axes to min(nx, ny): on a rectangular image
+    // that discards valid PSF sidelobes along the long axis.
+    for (int& size : shape)
+        if (size % 2 != 0) --size;
+    return shape;
 }
 
 inline int clampi(int v, int lo, int hi) { return std::max(lo, std::min(v, hi)); }
@@ -122,14 +132,14 @@ std::string hessian_context(int scale_index, float scale) {
 }
 
 template <typename T>
-void extract_patch(const T* full, int nx, int ny, int cx, int cy, int sup, std::vector<T>& out) {
-    out.assign(static_cast<std::size_t>(sup) * sup, static_cast<T>(0));
-    for (int j = 0; j < sup; ++j)
-        for (int i = 0; i < sup; ++i) {
-            const int fy = cy - sup / 2 + j;
-            const int fx = cx - sup / 2 + i;
+void extract_patch(const T* full, int nx, int ny, int cx, int cy, int sup_x, int sup_y, std::vector<T>& out) {
+    out.assign(static_cast<std::size_t>(sup_x) * sup_y, static_cast<T>(0));
+    for (int j = 0; j < sup_y; ++j)
+        for (int i = 0; i < sup_x; ++i) {
+            const int fy = cy - sup_y / 2 + j;
+            const int fx = cx - sup_x / 2 + i;
             if (fy < 0 || fy >= ny || fx < 0 || fx >= nx) continue;
-            out[static_cast<std::size_t>(j) * sup + i] = full[static_cast<std::size_t>(fy) * nx + fx];
+            out[static_cast<std::size_t>(j) * sup_x + i] = full[static_cast<std::size_t>(fy) * nx + fx];
         }
 }
 
@@ -150,7 +160,7 @@ struct Work {
     using complex_t = std::complex<T>;
 
     int nx = 0, ny = 0, ncx = 0, nterms = 0, npsf = 0, nscales = 0;
-    int psf_peak_x = 0, psf_peak_y = 0, psf_support = 0;
+    int psf_peak_x = 0, psf_peak_y = 0, psf_support = 0, psf_support_x = 0, psf_support_y = 0;
     float small_scale_bias = 0.0f;
 
     std::vector<float> scales;
@@ -195,11 +205,11 @@ struct Work {
 
         {
             const T* p0 = psf;
-            const int supp = find_beam_patch(0.0f, nx, ny, 4.0f, 20.0f);
-            const int blc0 = (nx > supp) ? nx / 2 - supp / 2 : 0;
-            const int blc1 = (ny > supp) ? ny / 2 - supp / 2 : 0;
-            const int trc0 = (nx > supp) ? nx / 2 + supp / 2 : nx;
-            const int trc1 = (ny > supp) ? ny / 2 + supp / 2 : ny;
+            const std::array<int, 2> support = beam_patch_shape(0.0f, nx, ny, 4.0f, 20.0f);
+            const int blc0 = nx / 2 - support[0] / 2;
+            const int blc1 = ny / 2 - support[1] / 2;
+            const int trc0 = blc0 + support[0];
+            const int trc1 = blc1 + support[1];
             T max_val = static_cast<T>(0);
             psf_peak_x = nx / 2;
             psf_peak_y = ny / 2;
@@ -216,7 +226,11 @@ struct Work {
                 throw std::invalid_argument("Taylor-zero PSF must have a non-zero absolute peak");
         }
 
-        psf_support = find_beam_patch(scales[static_cast<std::size_t>(nscales - 1)], nx, ny, 4.0f, 20.0f);
+        const std::array<int, 2> support =
+            beam_patch_shape(scales[static_cast<std::size_t>(nscales - 1)], nx, ny, 4.0f, 20.0f);
+        psf_support_x = support[0];
+        psf_support_y = support[1];
+        psf_support = std::max(psf_support_x, psf_support_y);
         scale_bias.assign(nscales, static_cast<T>(1));
         if (nscales > 1)
             for (int s = 0; s < nscales; ++s)
@@ -228,13 +242,14 @@ struct Work {
         for (int s = 0; s < nscales; ++s) {
             make_scale<T>(scale_img.data(), nx, ny, scales[static_cast<std::size_t>(s)]);
             forward_r2c<T>(scale_img.data(), scale_ft[static_cast<std::size_t>(s)].data(), nx, ny);
-            extract_patch(scale_img.data(), nx, ny, nx / 2, ny / 2, psf_support, vec_scales[static_cast<std::size_t>(s)]);
+            extract_patch(scale_img.data(), nx, ny, nx / 2, ny / 2, psf_support_x, psf_support_y,
+                          vec_scales[static_cast<std::size_t>(s)]);
         }
 
         const int nt = nterms;
         const int ns = nscales;
-        const int sup = psf_support;
-        const std::size_t peak_local = static_cast<std::size_t>(sup / 2) * sup + (sup / 2);
+        const std::size_t peak_local =
+            static_cast<std::size_t>(psf_support_y / 2) * psf_support_x + (psf_support_x / 2);
         const int ntotal4d = (ns * (ns + 1) / 2) * (nt * (nt + 1) / 2);
         cube_a.assign(static_cast<std::size_t>(ntotal4d), std::vector<T>());
         mat_a.assign(ns, std::vector<double>(static_cast<std::size_t>(nt) * nt, 0.0));
@@ -255,7 +270,7 @@ struct Work {
                         // Remove both scale centers before extracting the PSF patch.
                         // Scale setup is complete, so reuse scale_img as scratch.
                         recenter_convolution<T>(full.data(), nx, ny, scale_img.data(), 2);
-                        extract_patch(full.data(), nx, ny, psf_peak_x, psf_peak_y, sup,
+                        extract_patch(full.data(), nx, ny, psf_peak_x, psf_peak_y, psf_support_x, psf_support_y,
                                       cube_a[static_cast<std::size_t>(cross_index4(t1, t2, s1, s2))]);
                     }
 
@@ -519,17 +534,16 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
             }
 
             const std::array<int, 2> shape{nx, ny};
-            const std::array<int, 2> psf_shape{w.psf_support, w.psf_support};
-            const std::array<int, 2> psf_peak_local{w.psf_support / 2, w.psf_support / 2};
-            blc = {global_max_pos[0] - w.psf_support / 2, global_max_pos[1] - w.psf_support / 2};
-            trc = {global_max_pos[0] + w.psf_support / 2 - 1, global_max_pos[1] + w.psf_support / 2 - 1};
+            const std::array<int, 2> psf_shape{w.psf_support_x, w.psf_support_y};
+            const std::array<int, 2> psf_peak_local{w.psf_support_x / 2, w.psf_support_y / 2};
+            blc = {global_max_pos[0] - psf_peak_local[0], global_max_pos[1] - psf_peak_local[1]};
+            trc = {blc[0] + w.psf_support_x - 1, blc[1] + w.psf_support_y - 1};
             verify_box(blc, trc, shape);
             blc_psf = {blc[0] + psf_peak_local[0] - global_max_pos[0], blc[1] + psf_peak_local[1] - global_max_pos[1]};
             trc_psf = {trc[0] + psf_peak_local[0] - global_max_pos[0], trc[1] + psf_peak_local[1] - global_max_pos[1]};
             verify_box(blc_psf, trc_psf, psf_shape);
             make_boxes_same_size(blc, trc, blc_psf, trc_psf);
 
-            const int sup = w.psf_support;
             const std::vector<T>& scale_sub = w.vec_scales[static_cast<std::size_t>(max_scale_index)];
             const int bw = trc[0] - blc[0];
             const int bh = trc[1] - blc[1];
@@ -542,7 +556,8 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                 for (int dy = 0; dy <= bh; ++dy)
                     for (int dx = 0; dx <= bw; ++dx) {
                         const std::size_t km = static_cast<std::size_t>(blc[1] + dy) * nx + (blc[0] + dx);
-                        const std::size_t kp = static_cast<std::size_t>(blc_psf[1] + dy) * sup + (blc_psf[0] + dx);
+                        const std::size_t kp =
+                            static_cast<std::size_t>(blc_psf[1] + dy) * w.psf_support_x + (blc_psf[0] + dx);
                         const T add = scale_sub[kp] * loopgain * coeff;
                         mdl[km] += add;
                         dlt[km] += add;
@@ -558,8 +573,9 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                         for (int dy = 0; dy <= bh; ++dy)
                             for (int dx = 0; dx <= bw; ++dx) {
                                 const std::size_t kr = static_cast<std::size_t>(blc[1] + dy) * nx + (blc[0] + dx);
-                                const std::size_t kp =
-                                    static_cast<std::size_t>(blc_psf[1] + dy) * sup + (blc_psf[0] + dx);
+                                const std::size_t kp = static_cast<std::size_t>(blc_psf[1] + dy) *
+                                                           w.psf_support_x +
+                                                       (blc_psf[0] + dx);
                                 resid[kr] -= smooth[kp] * g;
                             }
                     }
