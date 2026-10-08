@@ -240,6 +240,13 @@ class TestHessian:
         )
         np.testing.assert_allclose(h32["hessian"], h64["hessian"], rtol=1e-5)
 
+    def test_psf_peak_search_covers_last_row(self):
+        """On a 2-pixel axis the PSF centre is the last row and must be found."""
+        psf = np.zeros((1, 2, 16), dtype=np.float64)
+        psf[0, 1, 8] = 1.0
+        psf[0, 0, 8] = 0.5
+        assert mtmfs.hessian(psf)["hessian"][0, 0, 0] == pytest.approx(1.0)
+
     def test_singular_hessian_raises(self):
         nterms, nx, ny = 2, 32, 32
         psf = np.zeros((2 * nterms - 1, ny, nx), dtype=np.float32)

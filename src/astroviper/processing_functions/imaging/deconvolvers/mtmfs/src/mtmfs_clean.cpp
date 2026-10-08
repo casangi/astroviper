@@ -166,8 +166,8 @@ struct Work {
             const int supp = find_beam_patch(0.0f, nx, ny, 4.0f, 20.0f);
             const int blc0 = (nx > supp) ? nx / 2 - supp / 2 : 0;
             const int blc1 = (ny > supp) ? ny / 2 - supp / 2 : 0;
-            const int trc0 = (nx > supp) ? nx / 2 + supp / 2 : nx - 1;
-            const int trc1 = (ny > supp) ? ny / 2 + supp / 2 : ny - 1;
+            const int trc0 = (nx > supp) ? nx / 2 + supp / 2 : nx;
+            const int trc1 = (ny > supp) ? ny / 2 + supp / 2 : ny;
             T max_val = static_cast<T>(0);
             psf_peak_x = nx / 2;
             psf_peak_y = ny / 2;
