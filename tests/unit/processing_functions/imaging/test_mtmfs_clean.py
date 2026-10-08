@@ -684,6 +684,33 @@ class TestArrayValidation:
         with pytest.raises(RuntimeError, match="shape"):
             mtmfs.clean(residual, psf, model, mask=np.ones((40, 47), dtype=np.float32))
 
+    @pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+    @pytest.mark.parametrize("target", ["residual", "psf", "mask"])
+    def test_non_finite_input_raises(self, bad, target):
+        residual = make_dirty_stack(2, 48, 40)
+        model = np.zeros_like(residual)
+        psf = make_psf_stack(2, 48, 40)
+        mask = np.ones(residual.shape[1:], dtype=residual.dtype)
+        {"residual": residual[1], "psf": psf[2], "mask": mask}[target][0, 0] = bad
+        residual_in = residual.copy()
+        with pytest.raises(ValueError, match="must be finite"):
+            mtmfs.clean(residual, psf, model, mask=mask)
+        np.testing.assert_array_equal(residual, residual_in)
+        assert not np.any(model)
+        if target == "psf":
+            with pytest.raises(ValueError, match="psf must be finite"):
+                mtmfs.hessian(psf)
+
+    def test_non_finite_mask_threshold_raises(self):
+        residual = make_dirty_stack(1, 32, 32)
+        with pytest.raises(ValueError, match="mask_threshold"):
+            mtmfs.clean(
+                residual,
+                make_psf_stack(1, 32, 32),
+                np.zeros_like(residual),
+                mask_threshold=np.nan,
+            )
+
     def test_same_buffer_for_residual_and_model_raises(self):
         residual = make_dirty_stack(2, 48, 40)
         with pytest.raises(RuntimeError, match="distinct"):

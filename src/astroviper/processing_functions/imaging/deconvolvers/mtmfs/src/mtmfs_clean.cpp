@@ -99,6 +99,11 @@ void extract_patch(const T* full, int nx, int ny, int cx, int cy, int sup, std::
         }
 }
 
+template <typename T>
+bool all_finite(const T* a, std::size_t n) {
+    return std::all_of(a, a + n, [](T v) { return std::isfinite(v); });
+}
+
 void check_geometry(int nterms, int nx, int ny) {
     if (nterms < 1 || nterms > kMaxTaylorTerms)
         throw std::invalid_argument("nterms must be in [1, " + std::to_string(kMaxTaylorTerms) + "]");
@@ -146,6 +151,8 @@ struct Work {
     }
 
     int setup_from_psf(const T* psf) {
+        if (!all_finite(psf, static_cast<std::size_t>(npsf) * nimg()))
+            throw std::invalid_argument("psf must be finite");
         psf_ft.assign(npsf, std::vector<complex_t>(nspec(), complex_t(0, 0)));
         for (int order = 0; order < npsf; ++order)
             forward_r2c<T>(psf + static_cast<std::size_t>(order) * nimg(), psf_ft[static_cast<std::size_t>(order)].data(),
@@ -279,11 +286,15 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                      T stop_fraction, T mask_threshold) {
     if (niter < 0) throw std::invalid_argument("niter must be >= 0");
     if (!std::isfinite(static_cast<double>(gain)) || !std::isfinite(static_cast<double>(threshold)) ||
-        !std::isfinite(static_cast<double>(stop_fraction)))
-        throw std::invalid_argument("gain, threshold and stop_fraction must be finite");
+        !std::isfinite(static_cast<double>(stop_fraction)) || !std::isfinite(static_cast<double>(mask_threshold)))
+        throw std::invalid_argument("gain, threshold, stop_fraction and mask_threshold must be finite");
 
     Work<T> w;
     w.init(nterms, nx, ny, scales, small_scale_bias);
+    // A non-finite pixel spreads through every FFT convolution and ends the search as converged.
+    if (!all_finite(residual, static_cast<std::size_t>(nterms) * w.nimg()) ||
+        (mask != nullptr && !all_finite(mask, w.nimg())))
+        throw std::invalid_argument("residual and mask must be finite");
     if (w.setup_from_psf(psf) == kSingularHessian)
         throw std::runtime_error(
             "MT-Cleaner error : Non-invertible Hessian. Please check if the multi-frequency data "
