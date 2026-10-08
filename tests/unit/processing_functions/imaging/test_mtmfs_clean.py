@@ -2,7 +2,7 @@
 Unit tests for the stateless MTMFS CLEAN functions
 (``astroviper.processing_functions.imaging.deconvolvers.mtmfs``).
 
-Casacore-free port of the model-update cycle behind CASA tclean's
+Casacore-free port of the model update behind CASA tclean's
 ``deconvolver='mtmfs'`` (``SDAlgorithmMSMFS`` / ``MultiTermMatrixCleaner``),
 exposed as free functions (``clean``, ``hessian``, ``principal_solution``)
 in the style of the hogbom module. Residual and model stacks are written

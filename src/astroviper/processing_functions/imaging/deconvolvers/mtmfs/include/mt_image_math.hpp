@@ -1,6 +1,6 @@
 #pragma once
 
-// Small image reductions shared by the MTMFS kernel and its Python binding.
+// Small image reductions used by the MTMFS kernel.
 //
 // Port of CASA's casacore-free `stdcleaner/StdImageMath.{h,cc}`, which replaces
 // the casacore ArrayMath sum()/max(abs()) helpers and MatrixCleaner's

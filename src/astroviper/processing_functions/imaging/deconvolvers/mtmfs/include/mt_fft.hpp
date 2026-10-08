@@ -13,8 +13,9 @@
 // Images are row-major with logical shape (ny, nx): element (ix, iy) lives at
 // index iy*nx + ix. The half-complex spectrum is row-major (ny, nx/2 + 1).
 //
-// None of these functions allocate: callers own every buffer, including the
-// scratch needed to recenter a convolution. The kernels are pure functions
+// Callers own every input and output buffer, including the scratch needed to
+// recenter a convolution; PocketFFT allocates its plan and scratch internally
+// on each transform. The kernels are pure functions
 // of their arguments and may be called concurrently on distinct buffers.
 
 #include <complex>

@@ -2,7 +2,7 @@
 
 // Multi-Term Multi-Frequency Synthesis (MTMFS) CLEAN -- stateless kernel.
 //
-// The model-update cycle behind CASA tclean's `deconvolver='mtmfs'`
+// The model update behind CASA tclean's `deconvolver='mtmfs'`
 // (SDAlgorithmMSMFS driving MultiTermMatrixCleaner::mtclean), ported from
 // CASA's casacore-free stdcleaner/StdMultiTermCleaner and exposed as free
 // functions in the style of deconvolvers/hogbom (hclean::clean).
@@ -63,7 +63,7 @@ int taylor_hessian(const T* psf, int nterms, int nx, int ny, std::vector<float>&
                    float small_scale_bias, std::vector<double>& hessian,
                    std::vector<double>& inverse_hessian, int& psf_support);
 
-// One MTMFS model-update cycle in place (MultiTermMatrixCleaner::mtclean).
+// One MTMFS model update in place (MultiTermMatrixCleaner::mtclean).
 //   residual : (nterms, ny, nx) in/out
 //   model    : (nterms, ny, nx) in/out
 //   psf      : (2*nterms-1, ny, nx) read-only

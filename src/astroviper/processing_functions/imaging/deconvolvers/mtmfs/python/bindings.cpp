@@ -200,13 +200,20 @@ PYBIND11_MODULE(_mtmfs_ext, m) {
         "Python owns the arrays; residual and model are updated in place with no copies.";
 
     m.def("clean", &clean_dispatch,
-          "One MTMFS model-update cycle in place, with 1 <= nterms <= 4. residual and model are (nterms, ny, nx) "
+          "One MTMFS model update in place, with 1 <= nterms <= 4. residual and model are (nterms, ny, nx) "
           "C-contiguous writeable arrays of the same dtype (float32 or float64). psf is "
           "(2*nterms-1, ny, nx), read-only. mask is an optional (ny, nx) array of the same "
           "dtype, or None. scales are pixel sizes (empty -> [0]; sorted and de-duplicated; "
           "sizes larger than half the image are dropped). small_scale_bias is clamped to "
-          "[-1, 1]. gain <= 0 selects casacore adaptive gain. Returns a dict with "
-          "iterations_performed, peak_residual (max |residual[0]*mask|), model_flux "
+          "[-1, 1]. gain <= 0 selects casacore adaptive gain. max_iter_remaining [CASA niter] caps the "
+          "components added in this call. The call stops when max |residual[0] convolved with the smallest "
+          "scale| over that scale's mask, divided by hessian[0, 0, 0] (the PSF peak when the smallest scale "
+          "is 0), falls below max(threshold, stop_fraction times its initial value); that estimate is "
+          "updated only inside the psf_support patch, so the returned residual can still exceed threshold. "
+          "mask_threshold > 0 binarises each scale-convolved mask at 0.1 (its value is otherwise unused). The "
+          "residual is updated at the end of the call by a circular FFT convolution of the new components "
+          "with the PSF. Returns a dict with "
+          "iterations_performed, peak_residual (max |residual[0]*mask|, not divided by the PSF peak), model_flux "
           "(sum of model[0]), converged (engine stop on threshold or empty search), "
           "stop_code, scales, small_scale_bias, psf_support, hessian and inverse_hessian.",
           py::arg("residual"), py::arg("psf"), py::arg("model"), py::arg("mask") = py::none(),

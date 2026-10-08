@@ -1,7 +1,7 @@
-// Stateless MTMFS CLEAN: one-shot free functions. Working state lives on the
-// stack for the duration of the call and is discarded on return. Port of
+// Stateless MTMFS CLEAN: one-shot free functions. Working state is owned by the
+// call and freed on return. Port of
 // CASA stdcleaner/StdMultiTermCleaner.cc (casacore-free MultiTermMatrixCleaner)
-// with caller-owned residual/model (no copies) and a per-cycle delta model
+// with caller-owned residual/model (no copies) and a per-call delta model
 // instead of the casacore initial-model snapshot.
 
 #include "../include/mtmfs_clean.hpp"

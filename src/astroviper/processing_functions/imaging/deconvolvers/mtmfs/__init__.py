@@ -1,12 +1,12 @@
 """
 Multi-Term Multi-Frequency Synthesis (MTMFS) deconvolution.
 
-A casacore-free, stateless port of the model-update cycle behind CASA
+A casacore-free, stateless port of the model update behind CASA
 tclean's ``deconvolver='mtmfs'`` (``SDAlgorithmMSMFS`` driving
 ``MultiTermMatrixCleaner``), wrapped with pybind11 as free functions in the
 same style as :mod:`~astroviper.processing_functions.imaging.deconvolvers.hogbom`.
 
-``clean`` runs one cycle in place on Python-owned numpy buffers: the
+``clean`` runs one model update in place on Python-owned numpy buffers: the
 ``residual`` and ``model`` Taylor-term stacks are written into directly and
 no copies are made on the C++ side. Every call takes all of its inputs and
 keeps nothing between calls. One to four Taylor terms are supported, requiring
