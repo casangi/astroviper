@@ -46,6 +46,7 @@ struct CleanResult {
     std::vector<float> scales;
     std::vector<double> hessian;
     std::vector<double> inverse_hessian;
+    std::vector<double> hessian_condition_number;
 };
 
 // Empty -> {0}; sorted ascending and unique; sizes larger than half the image
@@ -61,7 +62,8 @@ float clamp_small_scale_bias(float bias);
 template <typename T>
 int taylor_hessian(const T* psf, int nterms, int nx, int ny, std::vector<float>& scales,
                    float small_scale_bias, std::vector<double>& hessian,
-                   std::vector<double>& inverse_hessian, int& psf_support);
+                   std::vector<double>& inverse_hessian,
+                   std::vector<double>& hessian_condition_number, int& psf_support);
 
 // One MTMFS model update in place (MultiTermMatrixCleaner::mtclean).
 //   residual : (nterms, ny, nx) in/out
@@ -82,9 +84,11 @@ template <typename T>
 void principal_solution(T* residual, const double* inverse_hessian, int nterms, int nx, int ny);
 
 extern template int taylor_hessian<float>(const float*, int, int, int, std::vector<float>&, float,
-                                          std::vector<double>&, std::vector<double>&, int&);
+                                          std::vector<double>&, std::vector<double>&,
+                                          std::vector<double>&, int&);
 extern template int taylor_hessian<double>(const double*, int, int, int, std::vector<float>&, float,
-                                           std::vector<double>&, std::vector<double>&, int&);
+                                           std::vector<double>&, std::vector<double>&,
+                                           std::vector<double>&, int&);
 extern template CleanResult<float> clean<float>(float*, float*, const float*, const float*, int, int, int,
                                                 const std::vector<float>&, float, int, float, float, float, float);
 extern template CleanResult<double> clean<double>(double*, double*, const double*, const double*, int, int, int,

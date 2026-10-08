@@ -11,6 +11,7 @@
 #include <cmath>
 #include <complex>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -56,7 +57,15 @@ void make_boxes_same_size(std::array<int, 2>& blc1, std::array<int, 2>& trc1, st
     }
 }
 
-bool invert_spd(const std::vector<double>& A, int n, std::vector<double>& Ainv, double rel_tol) {
+struct HessianFailure {
+    int pivot_index = -1;
+    double pivot = 0.0;
+    double diagonal = 0.0;
+    double minimum_pivot = 0.0;
+};
+
+bool invert_spd(const std::vector<double>& A, int n, std::vector<double>& Ainv, double rel_tol,
+                HessianFailure& failure) {
     std::vector<double> L(static_cast<std::size_t>(n) * n, 0.0);
     for (int i = 0; i < n; ++i)
         for (int j = 0; j <= i; ++j) {
@@ -66,7 +75,12 @@ bool invert_spd(const std::vector<double>& A, int n, std::vector<double>& Ainv, 
             if (i == j) {
                 // Relative to the diagonal: a singular Hessian built in finite precision
                 // leaves a round-off pivot of either sign. NaN fails the test too.
-                if (!(sum > rel_tol * A[static_cast<std::size_t>(i) * n + i])) return false;
+                const double diagonal = A[static_cast<std::size_t>(i) * n + i];
+                const double minimum_pivot = rel_tol * diagonal;
+                if (!(diagonal > 0.0) || !(sum > minimum_pivot)) {
+                    failure = {i, sum, diagonal, minimum_pivot};
+                    return false;
+                }
                 L[static_cast<std::size_t>(i) * n + i] = std::sqrt(sum);
             } else {
                 L[static_cast<std::size_t>(i) * n + j] = sum / L[static_cast<std::size_t>(j) * n + j];
@@ -88,6 +102,23 @@ bool invert_spd(const std::vector<double>& A, int n, std::vector<double>& Ainv, 
         for (int i = 0; i < n; ++i) Ainv[static_cast<std::size_t>(i) * n + col] = x[i];
     }
     return true;
+}
+
+double matrix_infinity_norm(const std::vector<double>& matrix, int n) {
+    double norm = 0.0;
+    for (int row = 0; row < n; ++row) {
+        double row_sum = 0.0;
+        for (int col = 0; col < n; ++col)
+            row_sum += std::abs(matrix[static_cast<std::size_t>(row) * n + col]);
+        norm = std::max(norm, row_sum);
+    }
+    return norm;
+}
+
+std::string hessian_context(int scale_index, float scale) {
+    std::ostringstream message;
+    message << " at scale index " << scale_index << " (scale=" << scale << " pixels)";
+    return message.str();
 }
 
 template <typename T>
@@ -129,6 +160,7 @@ struct Work {
     std::vector<std::vector<T>> vec_scales;
     std::vector<std::vector<double>> mat_a;
     std::vector<std::vector<double>> inv_mat_a;
+    std::vector<double> hessian_condition_number;
     std::vector<std::vector<T>> cube_a;
 
     std::size_t nimg() const { return static_cast<std::size_t>(nx) * ny; }
@@ -180,6 +212,8 @@ struct Work {
                         psf_peak_y = j;
                     }
                 }
+            if (!(max_val > static_cast<T>(0)))
+                throw std::invalid_argument("Taylor-zero PSF must have a non-zero absolute peak");
         }
 
         psf_support = find_beam_patch(scales[static_cast<std::size_t>(nscales - 1)], nx, ny, 4.0f, 20.0f);
@@ -205,6 +239,7 @@ struct Work {
         cube_a.assign(static_cast<std::size_t>(ntotal4d), std::vector<T>());
         mat_a.assign(ns, std::vector<double>(static_cast<std::size_t>(nt) * nt, 0.0));
         inv_mat_a.assign(ns, std::vector<double>(static_cast<std::size_t>(nt) * nt, 0.0));
+        hessian_condition_number.assign(ns, 0.0);
 
         std::vector<complex_t> work(nspec());
         std::vector<T> full(nimg());
@@ -229,9 +264,32 @@ struct Work {
                 for (int t2 = 0; t2 < nt; ++t2)
                     mat_a[static_cast<std::size_t>(scale)][static_cast<std::size_t>(t1) * nt + t2] = static_cast<double>(
                         cube_a[static_cast<std::size_t>(cross_index4(t1, t2, scale, scale))][peak_local]);
+            const double normalization = mat_a[static_cast<std::size_t>(scale)][0];
+            if (!(normalization > 0.0)) {
+                std::ostringstream message;
+                message << "Invalid Taylor Hessian" << hessian_context(scale, scales[static_cast<std::size_t>(scale)])
+                        << ": H[0,0]=" << normalization << " must be finite and greater than zero";
+                throw std::runtime_error(message.str());
+            }
+            HessianFailure failure;
             if (!invert_spd(mat_a[static_cast<std::size_t>(scale)], nt, inv_mat_a[static_cast<std::size_t>(scale)],
-                            100 * std::numeric_limits<T>::epsilon()))
-                return kSingularHessian;
+                            100 * std::numeric_limits<T>::epsilon(), failure)) {
+                std::ostringstream message;
+                message << "Non-invertible Hessian"
+                        << hessian_context(scale, scales[static_cast<std::size_t>(scale)]) << ": Taylor pivot "
+                        << failure.pivot_index << " is " << failure.pivot << "; required > "
+                        << failure.minimum_pivot << " (diagonal=" << failure.diagonal << ")";
+                throw std::runtime_error(message.str());
+            }
+            const double condition_number =
+                matrix_infinity_norm(mat_a[static_cast<std::size_t>(scale)], nt) *
+                matrix_infinity_norm(inv_mat_a[static_cast<std::size_t>(scale)], nt);
+            if (!std::isfinite(condition_number)) {
+                throw std::runtime_error("Invalid inverse Taylor Hessian" +
+                                         hessian_context(scale, scales[static_cast<std::size_t>(scale)]) +
+                                         ": condition number is non-finite");
+            }
+            hessian_condition_number[static_cast<std::size_t>(scale)] = condition_number;
         }
         return 0;
     }
@@ -274,13 +332,17 @@ float clamp_small_scale_bias(float bias) {
 
 template <typename T>
 int taylor_hessian(const T* psf, int nterms, int nx, int ny, std::vector<float>& scales, float small_scale_bias,
-                   std::vector<double>& hessian, std::vector<double>& inverse_hessian, int& psf_support) {
+                   std::vector<double>& hessian, std::vector<double>& inverse_hessian,
+                   std::vector<double>& hessian_condition_number, int& psf_support) {
     Work<T> w;
     w.init(nterms, nx, ny, scales, small_scale_bias);
     const int rc = w.setup_from_psf(psf);
     scales = w.scales;
     psf_support = w.psf_support;
-    if (rc == 0) w.pack_hessians(hessian, inverse_hessian);
+    if (rc == 0) {
+        w.pack_hessians(hessian, inverse_hessian);
+        hessian_condition_number = w.hessian_condition_number;
+    }
     return rc;
 }
 
@@ -309,6 +371,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
     out.small_scale_bias = w.small_scale_bias;
     out.psf_support = w.psf_support;
     w.pack_hessians(out.hessian, out.inverse_hessian);
+    out.hessian_condition_number = w.hessian_condition_number;
 
     const int ns = w.nscales;
     const int nt = w.nterms;
@@ -555,9 +618,9 @@ void principal_solution(T* residual, const double* inverse_hessian, int nterms, 
 }
 
 template int taylor_hessian<float>(const float*, int, int, int, std::vector<float>&, float, std::vector<double>&,
-                                   std::vector<double>&, int&);
+                                   std::vector<double>&, std::vector<double>&, int&);
 template int taylor_hessian<double>(const double*, int, int, int, std::vector<float>&, float, std::vector<double>&,
-                                    std::vector<double>&, int&);
+                                    std::vector<double>&, std::vector<double>&, int&);
 template CleanResult<float> clean<float>(float*, float*, const float*, const float*, int, int, int,
                                          const std::vector<float>&, float, int, float, float, float, float);
 template CleanResult<double> clean<double>(double*, double*, const double*, const double*, int, int, int,

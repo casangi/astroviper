@@ -60,6 +60,12 @@ py::array_t<double> hessian_array(const std::vector<double>& m, int nscales, int
     return out;
 }
 
+py::array_t<double> vector_array(const std::vector<double>& values) {
+    py::array_t<double> out(values.size());
+    std::memcpy(out.mutable_data(), values.data(), sizeof(double) * values.size());
+    return out;
+}
+
 template <typename T>
 py::dict clean_impl(py::array residual, py::array psf, py::array model, py::object mask_obj,
                     const std::vector<float>& scales, float small_scale_bias, int max_iter_remaining, double gain,
@@ -114,6 +120,7 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
     out["psf_support"] = result.psf_support;
     out["hessian"] = hessian_array(result.hessian, nscales, nterms);
     out["inverse_hessian"] = hessian_array(result.inverse_hessian, nscales, nterms);
+    out["hessian_condition_number"] = vector_array(result.hessian_condition_number);
     return out;
 }
 
@@ -137,13 +144,13 @@ py::dict hessian_impl(py::array psf, const std::vector<float>& scales, float sma
     py::buffer_info pi = check_array<T>(psf, "psf", {npsf, ny, nx}, false);
 
     std::vector<float> eff = scales;
-    std::vector<double> H, invH;
+    std::vector<double> H, invH, condition_number;
     int support = 0;
     int rc;
     {
         py::gil_scoped_release release;
         rc = mtmfs::taylor_hessian<T>(static_cast<const T*>(pi.ptr), nterms, nx, ny, eff, small_scale_bias, H, invH,
-                                      support);
+                                      condition_number, support);
     }
     if (rc == mtmfs::kSingularHessian)
         throw std::runtime_error(
@@ -153,6 +160,7 @@ py::dict hessian_impl(py::array psf, const std::vector<float>& scales, float sma
     py::dict out;
     out["hessian"] = hessian_array(H, static_cast<int>(eff.size()), nterms);
     out["inverse_hessian"] = hessian_array(invH, static_cast<int>(eff.size()), nterms);
+    out["hessian_condition_number"] = vector_array(condition_number);
     out["scales"] = eff;
     out["small_scale_bias"] = mtmfs::clamp_small_scale_bias(small_scale_bias);
     out["psf_support"] = support;
@@ -209,7 +217,8 @@ PYBIND11_MODULE(_mtmfs_ext, m) {
           "with the PSF. Returns a dict with "
           "iterations_performed, peak_residual (max |residual[0]*mask|, not divided by the PSF peak), model_flux "
           "(sum of model[0]), converged (engine stop on threshold or empty search), "
-          "stop_code, scales, small_scale_bias, psf_support, hessian and inverse_hessian.",
+          "stop_code, scales, small_scale_bias, psf_support, hessian, inverse_hessian and the per-scale "
+          "infinity-norm hessian_condition_number.",
           py::arg("residual"), py::arg("psf"), py::arg("model"), py::arg("mask") = py::none(),
           py::arg("scales") = std::vector<float>{}, py::arg("small_scale_bias") = 0.0f,
           py::arg("max_iter_remaining") = 100, py::arg("gain") = 0.1, py::arg("threshold") = 0.0,
@@ -217,8 +226,8 @@ PYBIND11_MODULE(_mtmfs_ext, m) {
 
     m.def("hessian", &hessian_dispatch,
           "Taylor Hessians and inverses for a (2*nterms-1, ny, nx) PSF stack, with 1 <= nterms <= 4. Returns a dict "
-          "with hessian and inverse_hessian of shape (nscales, nterms, nterms) float64, plus "
-          "scales, small_scale_bias, psf_support and nterms.",
+          "with hessian and inverse_hessian of shape (nscales, nterms, nterms) float64, the per-scale "
+          "infinity-norm hessian_condition_number, plus scales, small_scale_bias, psf_support and nterms.",
           py::arg("psf"), py::arg("scales") = std::vector<float>{}, py::arg("small_scale_bias") = 0.0f);
 
     m.def("principal_solution", &principal_dispatch,

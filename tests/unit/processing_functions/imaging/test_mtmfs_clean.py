@@ -220,6 +220,9 @@ class TestHessian:
             np.testing.assert_allclose(
                 out["inverse_hessian"][s], np.linalg.inv(out["hessian"][s]), rtol=2e-5
             )
+            assert out["hessian_condition_number"][s] == pytest.approx(
+                np.linalg.cond(out["hessian"][s], p=np.inf), rel=1e-12
+            )
 
     def test_delta_scale_hessian_is_psf_peak_amplitudes(self):
         nterms, nx, ny = 2, 64, 64
@@ -250,7 +253,15 @@ class TestHessian:
     def test_singular_hessian_raises(self):
         nterms, nx, ny = 2, 32, 32
         psf = np.zeros((2 * nterms - 1, ny, nx), dtype=np.float32)
-        with pytest.raises(RuntimeError, match="Non-invertible Hessian"):
+        with pytest.raises(ValueError, match="non-zero absolute peak"):
+            mtmfs.hessian(psf)
+
+    def test_nonpositive_taylor_zero_normalization_raises(self):
+        psf = np.zeros((1, 16, 16), dtype=np.float64)
+        psf[0, 8, 8] = -1.0
+        with pytest.raises(
+            RuntimeError, match=r"Invalid Taylor Hessian at scale index 0.*H\[0,0\]=-1"
+        ):
             mtmfs.hessian(psf)
 
     @pytest.mark.parametrize("dtype", [np.float32, np.float64])
@@ -273,7 +284,10 @@ class TestHessian:
             for t in range(5):
                 psf[t] += x**t * beam
         psf = np.ascontiguousarray(psf / psf[0, ny // 2, nx // 2], dtype=dtype)
-        with pytest.raises(RuntimeError, match="Non-invertible Hessian"):
+        with pytest.raises(
+            RuntimeError,
+            match=r"Non-invertible Hessian at scale index 0.*Taylor pivot 2",
+        ):
             mtmfs.hessian(psf, scales=[0.0, 2.0])
         residual = np.zeros((3, ny, nx), dtype=dtype)
         with pytest.raises(RuntimeError, match="Non-invertible Hessian"):
@@ -1228,6 +1242,9 @@ def test_clean_returns_hessians_of_effective_scales():
     ref = mtmfs.hessian(psf, scales=scales)
     np.testing.assert_array_equal(out["hessian"], ref["hessian"])
     np.testing.assert_array_equal(out["inverse_hessian"], ref["inverse_hessian"])
+    np.testing.assert_array_equal(
+        out["hessian_condition_number"], ref["hessian_condition_number"]
+    )
 
 
 def test_concurrent_calls_match_serial():
