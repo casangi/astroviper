@@ -245,6 +245,44 @@ class TestHessian:
         with pytest.raises(RuntimeError, match="Non-invertible Hessian"):
             mtmfs.hessian(psf)
 
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    @pytest.mark.parametrize(
+        "x1,x2", [(-0.25, 0.05), (-0.1, 0.2), (-0.05, 0.25), (-0.15, 0.15)]
+    )
+    def test_numerically_singular_hessian_raises(self, dtype, x1, x2):
+        """Two channels cannot constrain three Taylor terms (rank-2 Hessian)."""
+        ny, nx = 64, 64
+        yy, xx = np.mgrid[0:ny, 0:nx]
+        psf = np.zeros((5, ny, nx))
+        for x in (x1, x2):
+            beam = np.exp(
+                -0.5
+                * (
+                    ((xx - nx // 2) * (1 + x) / 2.0) ** 2
+                    + ((yy - ny // 2) * (1 + x) / 3.0) ** 2
+                )
+            )
+            for t in range(5):
+                psf[t] += x**t * beam
+        psf = np.ascontiguousarray(psf / psf[0, ny // 2, nx // 2], dtype=dtype)
+        with pytest.raises(RuntimeError, match="Non-invertible Hessian"):
+            mtmfs.hessian(psf, scales=[0.0, 2.0])
+        residual = np.zeros((3, ny, nx), dtype=dtype)
+        with pytest.raises(RuntimeError, match="Non-invertible Hessian"):
+            mtmfs.clean(residual, psf, np.zeros_like(residual))
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_ill_conditioned_hessian_is_accepted(self, dtype):
+        """Four terms with the reference frequency at the band edge stay invertible."""
+        frequencies = np.linspace(0.0, 1.0, 64)
+        moments = [(frequencies**order).mean() for order in range(7)]
+        psf = np.zeros((7, 16, 16), dtype=dtype)
+        psf[:, 8, 8] = moments
+        out = mtmfs.hessian(psf)
+        np.testing.assert_allclose(
+            out["inverse_hessian"][0], np.linalg.inv(out["hessian"][0]), rtol=1e-3
+        )
+
     def test_unsorted_scales_are_sorted(self):
         nx = ny = 128
         psf = make_psf_stack(1, nx, ny)

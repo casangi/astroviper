@@ -10,6 +10,7 @@
 #include <array>
 #include <cmath>
 #include <complex>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -55,7 +56,7 @@ void make_boxes_same_size(std::array<int, 2>& blc1, std::array<int, 2>& trc1, st
     }
 }
 
-bool invert_spd(const std::vector<double>& A, int n, std::vector<double>& Ainv) {
+bool invert_spd(const std::vector<double>& A, int n, std::vector<double>& Ainv, double rel_tol) {
     std::vector<double> L(static_cast<std::size_t>(n) * n, 0.0);
     for (int i = 0; i < n; ++i)
         for (int j = 0; j <= i; ++j) {
@@ -63,7 +64,9 @@ bool invert_spd(const std::vector<double>& A, int n, std::vector<double>& Ainv) 
             for (int k = 0; k < j; ++k)
                 sum -= L[static_cast<std::size_t>(i) * n + k] * L[static_cast<std::size_t>(j) * n + k];
             if (i == j) {
-                if (sum <= 0.0) return false;
+                // Relative to the diagonal: a singular Hessian built in finite precision
+                // leaves a round-off pivot of either sign. NaN fails the test too.
+                if (!(sum > rel_tol * A[static_cast<std::size_t>(i) * n + i])) return false;
                 L[static_cast<std::size_t>(i) * n + i] = std::sqrt(sum);
             } else {
                 L[static_cast<std::size_t>(i) * n + j] = sum / L[static_cast<std::size_t>(j) * n + j];
@@ -226,7 +229,8 @@ struct Work {
                 for (int t2 = 0; t2 < nt; ++t2)
                     mat_a[static_cast<std::size_t>(scale)][static_cast<std::size_t>(t1) * nt + t2] = static_cast<double>(
                         cube_a[static_cast<std::size_t>(cross_index4(t1, t2, scale, scale))][peak_local]);
-            if (!invert_spd(mat_a[static_cast<std::size_t>(scale)], nt, inv_mat_a[static_cast<std::size_t>(scale)]))
+            if (!invert_spd(mat_a[static_cast<std::size_t>(scale)], nt, inv_mat_a[static_cast<std::size_t>(scale)],
+                            100 * std::numeric_limits<T>::epsilon()))
                 return kSingularHessian;
         }
         return 0;
