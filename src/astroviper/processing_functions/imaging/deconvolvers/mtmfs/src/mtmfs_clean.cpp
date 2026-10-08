@@ -348,7 +348,6 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
     }
 
     std::vector<std::vector<T>> mat_r(static_cast<std::size_t>(nt) * ns, std::vector<T>(nimg, static_cast<T>(0)));
-    std::vector<std::vector<T>> vec_work(ns, std::vector<T>(nimg, static_cast<T>(0)));
     {
         std::vector<typename Work<T>::complex_t> dirty_ft(nspec), work(nspec);
         std::vector<T> scratch(nimg);
@@ -363,6 +362,8 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
             }
         }
     }
+    w.scale_ft.clear();  // not needed once the masks and RHS are built
+    std::vector<std::vector<T>> vec_work(ns, std::vector<T>(nimg, static_cast<T>(0)));
 
     T loopgain = (gain > static_cast<T>(0)) ? gain : static_cast<T>(0.5);
     T fluxlimit = static_cast<T>(-1);
@@ -509,6 +510,11 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
         out.iterations = iterdone;
         out.stop_code = stop;
 
+        // Free the search state before allocating the residual-update buffers.
+        mat_r.clear();
+        vec_work.clear();
+        vec_scale_masks.clear();
+        w.cube_a.clear();
         std::vector<T> smooth_mod(nimg), scratch(nimg);
         std::vector<typename Work<T>::complex_t> model_ft(nspec), work(nspec);
         for (int t2 = 0; t2 < nt; ++t2) {
