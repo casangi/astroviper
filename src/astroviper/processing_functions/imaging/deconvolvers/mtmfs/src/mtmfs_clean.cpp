@@ -348,7 +348,6 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
     }
 
     std::vector<std::vector<T>> mat_r(static_cast<std::size_t>(nt) * ns, std::vector<T>(nimg, static_cast<T>(0)));
-    std::vector<std::vector<T>> mat_coeffs(static_cast<std::size_t>(nt) * ns, std::vector<T>(nimg, static_cast<T>(0)));
     std::vector<std::vector<T>> vec_work(ns, std::vector<T>(nimg, static_cast<T>(0)));
     {
         std::vector<typename Work<T>::complex_t> dirty_ft(nspec), work(nspec);
@@ -376,6 +375,13 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
     std::vector<T> max_scale_val(ns, static_cast<T>(0));
     std::vector<std::array<int, 2>> max_scale_pos(ns, {0, 0});
     std::vector<std::vector<T>> delta_model(nt, std::vector<T>(nimg, static_cast<T>(0)));
+    auto coeff_at = [&](int scale, int t1, std::size_t k) -> T {
+        T c = static_cast<T>(0);
+        for (int t2 = 0; t2 < nt; ++t2)
+            c += static_cast<T>(w.inv_mat_a[static_cast<std::size_t>(scale)][static_cast<std::size_t>(t1) * nt + t2]) *
+                 mat_r[static_cast<std::size_t>(w.ind2(t2, scale))][k];
+        return c;
+    };
 
     auto check_convergence = [&](int itercount, bool component_selected) -> int {
         const PeakResult<T> pr =
@@ -416,35 +422,16 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                 trc = {nx - 1, ny - 1};
             }
             for (int scale = 0; scale < ns; ++scale) {
-                for (int t1 = 0; t1 < nt; ++t1) {
-                    std::vector<T>& coeffs = mat_coeffs[static_cast<std::size_t>(w.ind2(t1, scale))];
-                    for (int iy = blc[1]; iy <= trc[1]; ++iy)
-                        for (int ix = blc[0]; ix <= trc[0]; ++ix)
-                            coeffs[static_cast<std::size_t>(iy) * nx + ix] = static_cast<T>(0);
-                    for (int t2 = 0; t2 < nt; ++t2) {
-                        const T inv = static_cast<T>(
-                            w.inv_mat_a[static_cast<std::size_t>(scale)][static_cast<std::size_t>(t1) * nt + t2]);
-                        const std::vector<T>& rhs = mat_r[static_cast<std::size_t>(w.ind2(t2, scale))];
-                        for (int iy = blc[1]; iy <= trc[1]; ++iy)
-                            for (int ix = blc[0]; ix <= trc[0]; ++ix) {
-                                const std::size_t k = static_cast<std::size_t>(iy) * nx + ix;
-                                coeffs[k] += inv * rhs[k];
-                            }
-                    }
-                }
+                // Score sum_t1 c[t1] * R[t1], with c = H^-1 R evaluated per pixel (coeff_at).
                 std::vector<T>& work = vec_work[static_cast<std::size_t>(scale)];
                 for (int iy = blc[1]; iy <= trc[1]; ++iy)
-                    for (int ix = blc[0]; ix <= trc[0]; ++ix)
-                        work[static_cast<std::size_t>(iy) * nx + ix] = static_cast<T>(0);
-                for (int t1 = 0; t1 < nt; ++t1) {
-                    const std::vector<T>& coeffs = mat_coeffs[static_cast<std::size_t>(w.ind2(t1, scale))];
-                    const std::vector<T>& resid = mat_r[static_cast<std::size_t>(w.ind2(t1, scale))];
-                    for (int iy = blc[1]; iy <= trc[1]; ++iy)
-                        for (int ix = blc[0]; ix <= trc[0]; ++ix) {
-                            const std::size_t k = static_cast<std::size_t>(iy) * nx + ix;
-                            work[k] += coeffs[k] * resid[k];
-                        }
-                }
+                    for (int ix = blc[0]; ix <= trc[0]; ++ix) {
+                        const std::size_t k = static_cast<std::size_t>(iy) * nx + ix;
+                        T acc = static_cast<T>(0);
+                        for (int t1 = 0; t1 < nt; ++t1)
+                            acc += coeff_at(scale, t1, k) * mat_r[static_cast<std::size_t>(w.ind2(t1, scale))][k];
+                        work[k] = acc;
+                    }
                 const PeakResult<T> pr = find_max_abs_mask<T>(
                     work.data(), vec_scale_masks[static_cast<std::size_t>(scale)].data(), nx, ny);
                 max_scale_val[static_cast<std::size_t>(scale)] = pr.value;
@@ -482,8 +469,10 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
             const std::vector<T>& scale_sub = w.vec_scales[static_cast<std::size_t>(max_scale_index)];
             const int bw = trc[0] - blc[0];
             const int bh = trc[1] - blc[1];
+            std::array<T, kMaxTaylorTerms> coeffs{};
+            for (int t = 0; t < nt; ++t) coeffs[t] = coeff_at(max_scale_index, t, gpk);
             for (int t = 0; t < nt; ++t) {
-                const T coeff = mat_coeffs[static_cast<std::size_t>(w.ind2(t, max_scale_index))][gpk];
+                const T coeff = coeffs[t];
                 T* mdl = model + static_cast<std::size_t>(t) * nimg;
                 std::vector<T>& dlt = delta_model[static_cast<std::size_t>(t)];
                 for (int dy = 0; dy <= bh; ++dy)
@@ -495,9 +484,6 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                         dlt[km] += add;
                     }
             }
-            std::vector<T> coeffs(nt);
-            for (int t = 0; t < nt; ++t)
-                coeffs[t] = mat_coeffs[static_cast<std::size_t>(w.ind2(t, max_scale_index))][gpk];
             for (int scale = 0; scale < ns; ++scale)
                 for (int t1 = 0; t1 < nt; ++t1) {
                     std::vector<T>& resid = mat_r[static_cast<std::size_t>(w.ind2(t1, scale))];
