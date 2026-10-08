@@ -364,11 +364,11 @@ int taylor_hessian(const T* psf, int nterms, int nx, int ny, std::vector<float>&
 template <typename T>
 CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nterms, int nx, int ny,
                      const std::vector<float>& scales, float small_scale_bias, int max_iter_remaining, T gain,
-                     T threshold, T stop_fraction, T mask_threshold) {
+                     T threshold, T psf_fraction, T mask_threshold) {
     if (max_iter_remaining < 0) throw std::invalid_argument("max_iter_remaining must be >= 0");
     if (!std::isfinite(static_cast<double>(gain)) || !std::isfinite(static_cast<double>(threshold)) ||
-        !std::isfinite(static_cast<double>(stop_fraction)) || !std::isfinite(static_cast<double>(mask_threshold)))
-        throw std::invalid_argument("gain, threshold, stop_fraction and mask_threshold must be finite");
+        !std::isfinite(static_cast<double>(psf_fraction)) || !std::isfinite(static_cast<double>(mask_threshold)))
+        throw std::invalid_argument("gain, threshold, psf_fraction and mask_threshold must be finite");
 
     Work<T> w;
     w.init(nterms, nx, ny, scales, small_scale_bias);
@@ -471,7 +471,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
         if (std::abs(rmaxval) < std::max(threshold, fluxlimit)) flag = kStopThreshold;
         if (component_selected && itercount > 1 && gain <= static_cast<T>(0)) {
             loopgain = (global_max_val < prev_max) ? loopgain * static_cast<T>(1.5) : loopgain / static_cast<T>(1.5);
-            loopgain = std::min(static_cast<T>(1) - stop_fraction, loopgain);
+            loopgain = std::min(static_cast<T>(1) - psf_fraction, loopgain);
             loopgain = std::min(static_cast<T>(0.6), loopgain);
             if (loopgain < static_cast<T>(0.01)) flag = kStopDiverged;
             // Selected scores are positive. A >200% increase means current >3*minimum;
@@ -484,7 +484,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
             prev_max = global_max_val;
             min_max = (itercount == 0) ? global_max_val : std::min(min_max, global_max_val);
         }
-        if (flag == 0 && fluxlimit == static_cast<T>(-1)) fluxlimit = rmaxval * stop_fraction;
+        if (flag == 0 && fluxlimit == static_cast<T>(-1)) fluxlimit = rmaxval * psf_fraction;
         return flag;
     };
 

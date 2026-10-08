@@ -338,7 +338,7 @@ class TestMtclean:
             max_iter_remaining=niter,
             gain=gain,
             threshold=1e-5,
-            stop_fraction=0.1,
+            psf_fraction=0.1,
         )
         assert 0 < out["iterations_performed"] <= niter
         for t in range(nterms):
@@ -365,7 +365,7 @@ class TestMtclean:
             max_iter_remaining=10,
             gain=0.1,
             threshold=1e-5,
-            stop_fraction=0.1,
+            psf_fraction=0.1,
         )
         o64 = mtmfs.clean(
             res64,
@@ -375,7 +375,7 @@ class TestMtclean:
             max_iter_remaining=10,
             gain=0.1,
             threshold=1e-5,
-            stop_fraction=0.1,
+            psf_fraction=0.1,
         )
         assert o32["iterations_performed"] == o64["iterations_performed"]
         np.testing.assert_allclose(mod32, mod64, rtol=1e-3, atol=1e-5)
@@ -1173,16 +1173,14 @@ def test_adaptive_gain_reports_divergence():
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
-def test_stop_fraction_caps_adaptive_gain(dtype):
-    """After three components the gain rises to min(0.75, 1 - stop_fraction, 0.6)."""
+def test_psf_fraction_caps_adaptive_gain(dtype):
+    """After three components the gain rises to min(0.75, 1 - psf_fraction, 0.6)."""
     psf = np.zeros((1, 32, 32), dtype=dtype)
     psf[0, 16, 16] = 1.0
     residual = np.zeros_like(psf)
     residual[0, 4, 4:28:4] = [1.0, 0.95, 0.9, 0.85, 0.8, 0.75]
     model = np.zeros_like(residual)
-    mtmfs.clean(
-        residual, psf, model, gain=0.0, stop_fraction=0.45, max_iter_remaining=4
-    )
+    mtmfs.clean(residual, psf, model, gain=0.0, psf_fraction=0.45, max_iter_remaining=4)
     np.testing.assert_allclose(
         model[0, 4, 4:28:4], [0.5, 0.475, 0.45, 0.55 * 0.85, 0.0, 0.0], rtol=1e-6
     )
@@ -1194,14 +1192,14 @@ def test_stop_fraction_caps_adaptive_gain(dtype):
         psf,
         np.zeros_like(residual),
         gain=0.0,
-        stop_fraction=0.995,
+        psf_fraction=0.995,
         max_iter_remaining=10,
     )
     assert result["stop_code"] == mtmfs.STOP_DIVERGED
     assert result["iterations_performed"] == 3
 
 
-def test_stop_fraction_stops_at_fraction_of_initial_peak():
+def test_psf_fraction_stops_at_fraction_of_initial_peak():
     psf = np.zeros((1, 32, 32), dtype=np.float32)
     psf[0, 16, 16] = 1.0
     residual = psf.copy()
@@ -1210,7 +1208,7 @@ def test_stop_fraction_stops_at_fraction_of_initial_peak():
         psf,
         np.zeros_like(residual),
         gain=0.1,
-        stop_fraction=0.5,
+        psf_fraction=0.5,
         max_iter_remaining=50,
     )
     assert result["stop_code"] == mtmfs.STOP_THRESHOLD
