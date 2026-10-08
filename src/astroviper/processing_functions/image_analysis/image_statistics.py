@@ -222,3 +222,138 @@ def image_residual_entropy(
         entropy[index] = float(-(fraction * np.log(fraction)).sum())
 
     return entropy, snr
+
+
+# ----------------------------------------------------------------------------
+# Plane statistics without full size temporaries
+# ----------------------------------------------------------------------------
+#
+# ``np.abs(plane)`` or ``np.where(mask, plane, nan)`` allocates a copy of the
+# whole plane, and a cube wide ``np.abs(cube)`` a copy of the whole cube. Inside
+# the imaging cycle such copies are made for every plane of every residual
+# update and model update, so the helpers below scan the plane in blocks of
+# rows and never hold more than one block of temporaries.
+
+SCAN_BLOCK_ELEMENTS = 1 << 18  # about 2 MB of float64 per block
+
+
+def _rows_per_block(plane):
+    """Rows of ``plane`` that make a block of about ``SCAN_BLOCK_ELEMENTS``."""
+    return max(1, SCAN_BLOCK_ELEMENTS // max(1, plane.shape[-1]))
+
+
+def plane_peak_abs_signed(plane, mask=None):
+    """
+    Signed value of a plane at its largest absolute value, without a copy of
+    the plane.
+
+    Pixels that are not a number are ignored, as are pixels outside the mask.
+    Among equal absolute values the first in row major order is taken, so the
+    result is the same as ``plane[np.nanargmax(np.abs(plane))]`` (with the
+    mask applied) but only a block of rows is ever copied.
+
+    Parameters
+    ----------
+    plane : numpy.ndarray
+        2-D image plane.
+    mask : numpy.ndarray, optional
+        Array of the same shape; only pixels where ``mask > 0.5`` count.
+
+    Returns
+    -------
+    float
+        Signed value at the absolute peak. NaN when no pixel counts.
+    """
+    rows = _rows_per_block(plane)
+    best = -1.0
+    best_index = None
+    n_columns = plane.shape[-1]
+    for start in range(0, plane.shape[0], rows):
+        block = plane[start : start + rows]
+        magnitude = np.abs(block)
+        magnitude[np.isnan(magnitude)] = -1.0
+        if mask is not None:
+            magnitude[~(mask[start : start + rows] > 0.5)] = -1.0
+        flat = int(np.argmax(magnitude))
+        value = float(magnitude.flat[flat])
+        if value > best:
+            best = value
+            best_index = (start + flat // n_columns, flat % n_columns)
+    if best_index is None or best < 0.0:
+        return float("nan")
+    return float(plane[best_index])
+
+
+def plane_abs_max(plane, mask=None):
+    """
+    Largest absolute value of a plane, without a copy of the plane.
+
+    Not a number propagates, as with ``np.abs(plane).max()``. With a mask the
+    result is ``np.where(mask, np.abs(plane), 0).max()``: a selected pixel that
+    is not a number gives NaN, and a plane with no selected pixel gives 0.
+
+    Parameters
+    ----------
+    plane : numpy.ndarray
+        2-D image plane.
+    mask : numpy.ndarray, optional
+        Array of the same shape; only pixels where ``mask`` is nonzero count.
+
+    Returns
+    -------
+    float
+        ``np.abs(plane).max()``, or ``np.where(mask, np.abs(plane), 0).max()``
+        with a mask, computed block by block.
+    """
+    rows = _rows_per_block(plane)
+    best = np.float64(-np.inf)
+    for start in range(0, plane.shape[0], rows):
+        block = np.abs(plane[start : start + rows])
+        if mask is not None:
+            block[mask[start : start + rows] == 0] = 0.0
+        best = np.maximum(best, block.max())
+    return float(best)
+
+
+def plane_abs_sum(plane):
+    """
+    Sum of the absolute values of a plane, without a copy of the plane.
+
+    Parameters
+    ----------
+    plane : numpy.ndarray
+        2-D image plane.
+
+    Returns
+    -------
+    float
+        ``np.abs(plane).sum()``, accumulated in float64 block by block.
+    """
+    rows = _rows_per_block(plane)
+    total = np.float64(0.0)
+    for start in range(0, plane.shape[0], rows):
+        total += np.abs(plane[start : start + rows]).sum(dtype=np.float64)
+    return float(total)
+
+
+def cube_plane_abs_max(cube):
+    """
+    Largest absolute value of every plane of a cube, without a copy of the
+    cube.
+
+    Parameters
+    ----------
+    cube : numpy.ndarray
+        Array whose last two axes are the image plane.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``np.abs(cube).max(axis=(-2, -1))`` as float64, computed plane by
+        plane and block by block.
+    """
+    plane_shape = cube.shape[:-2]
+    result = np.empty(plane_shape, dtype=np.float64)
+    for index in np.ndindex(plane_shape):
+        result[index] = plane_abs_max(cube[index])
+    return result

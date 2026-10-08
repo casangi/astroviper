@@ -368,6 +368,7 @@ def residual_update_cube_single_field(
             ps_xdt,
             img_xds,
             cgk_1D,
+            ms_data_group_in_name=ps_data_group_name,
             ms_data_group_out_name="model",
             ms_data_group_out_modified={
                 "correlated_data": "VISIBILITY_MODEL",
@@ -491,6 +492,7 @@ def make_visibility_model_single_field(
     ps_xdt,
     img_xds,
     cgk_1D,
+    ms_data_group_in_name="base",
     ms_data_group_out_name="model",
     ms_data_group_out_modified=None,
     image_data_group_in_name="model",
@@ -513,6 +515,12 @@ def make_visibility_model_single_field(
         Image dataset holding the model uv-grid to degrid from.
     cgk_1D : numpy.ndarray
         1-D prolate-spheroidal gridding convolution kernel.
+    ms_data_group_in_name : str, optional
+        Measurement-set data group being imaged (the caller's
+        ``processing_set_data_group_name``).  The degridder reads its ``uvw``
+        and the shape of its ``correlated_data``, and the output group inherits
+        its remaining roles (``flag``, ``weight``, ...).  Must exist in every
+        measurement set.  Default ``"base"``.
     ms_data_group_out_name : str, optional
         Measurement-set data group for the model visibilities.  Default
         ``"model"``.
@@ -535,6 +543,7 @@ def make_visibility_model_single_field(
             ms_xdt,
             cgk_1D,
             img_xds,
+            ms_data_group_in_name=ms_data_group_in_name,
             ms_data_group_out_name=ms_data_group_out_name,
             ms_data_group_out_modified=ms_data_group_out_modified,
             image_data_group_in_name=image_data_group_in_name,

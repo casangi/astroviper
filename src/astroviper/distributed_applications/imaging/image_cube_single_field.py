@@ -32,6 +32,8 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
             ("create empty data vars on disk", "T_create_empty_data_variables"),
             ("open processing set", "T_open_processing_set"),
             ("interpolate data coords", "T_interpolate_data_coords"),
+            # Measurement Set v2 input only (0.0 for a processing set).
+            ("add lazy input data", "T_add_lazy_input_data"),
             ("create map/reduce graph", "T_create_map_reduce_graph"),
             ("generate dask graph", "T_generate_dask_graph"),
             ("compute dask graph", "T_compute_dask_graph"),
@@ -54,7 +56,7 @@ def image_cube_single_field(
     gridder="prolate_spheroidal",
     deconvolver="hogbom",
     instrument_polarization_basis: str = "linear",
-    scan_intents: list[str] = ["OBSERVE_TARGET#ON_SOURCE"],  # noqa: B006 - param.json schema requires list/str (not nullable); never mutated
+    scan_intents: list[str] | None = ["OBSERVE_TARGET#ON_SOURCE"],  # noqa: B006 - None means every intent, so the default stays a list; never mutated
     field_name: str = None,
     image_data_variables_keep: list[str] = [  # noqa: B006 - param.json schema requires a list (not nullable); never mutated
         "sky_deconvolved",
@@ -90,6 +92,7 @@ def image_cube_single_field(
     output_image_format: str = "zarr",
     task_time_kill_switch_seconds: float | None = None,
     monitor_resources_seconds: float | None = None,
+    msv2_open_options: dict[str, Any] | None = None,
 ):  # -> Tuple[xr.Dataset, ImagingDict]:
     """
     Create a spectral cube.
@@ -97,7 +100,28 @@ def image_cube_single_field(
     Parameters
     ----------
     ps_store : str
-        String of the path and name of the processing set.
+        Path of the input visibilities: a processing set (Zarr store) or, with
+        ``skunk_works=True``, a Measurement Set v2 (a casacore table directory,
+        see :func:`~astroviper.utils.measurement_set_v2.is_measurement_set_v2`).
+        A Measurement Set v2 is imaged without converting it: the driver opens
+        it with XRADIO's ``xradio_msv2`` engine
+        (:func:`xradio.measurement_set.open_msv2`, in the XRADIO releases that
+        carry it, with python-casacore) and every node task reads only its own
+        selection through the engine. The images equal those of its
+        conversion (:func:`xradio.measurement_set.convert_msv2_to_processing_set`
+        with the same ``partition_scheme``, see ``msv2_open_options``): the
+        same MSv4s, data groups, frequencies, correlations and visibility
+        values are imaged. ``write_visibility_model_to_ps`` and
+        ``write_imaging_weights_to_ps`` are refused, and with the default open
+        options the run never writes into the Measurement Set (a
+        ``partition_cache`` that stores partitions writes them into it, see
+        ``msv2_open_options``). These errors are raised before anything is
+        written: ``skunk_works=False``, no engine, a write-back flag, a
+        refused ``msv2_open_options`` key, no MSv4 left after
+        ``scan_intents``, or an MSv4 without the data group
+        ``processing_set_data_group_name`` or without one of the roles the
+        imaging reads (a single-dish MSv4 has no ``uvw``). See the Notes for
+        deployment.
     image_store : str
         Path/URL of the on-disk Zarr image cube.
     image_params : dict
@@ -219,8 +243,10 @@ def image_cube_single_field(
         loaded and gridded: the two parallel hands give ``I, Q`` (linear) or
         ``I, V`` (circular), all four correlations give ``I, Q, U, V``. A sample
         is used only if none of its loaded correlations is flagged.
-    scan_intents : list[str]
-        The scan intents to image.
+    scan_intents : list[str] or None
+        The scan intents to image. ``None`` images every scan intent (a
+        Measurement Set v2 from CASA often lacks the default
+        ``"OBSERVE_TARGET#ON_SOURCE"``).
     field_name : str
         The field to image. If None, the first field in the processing set will be used
     compressor : numcodecs compressor
@@ -305,7 +331,10 @@ def image_cube_single_field(
         sub-datasets) and write each result chunk's blob directly to the
         pre-created image store, bypassing the asyncio Zarr dataset API. The
         processing set and image are assumed to share the same frequency
-        coordinate. Default ``False``.
+        coordinate. A Measurement Set v2 ``ps_store`` requires ``True``: its
+        node tasks read their data through XRADIO's ``xradio_msv2`` engine
+        instead, with the Measurement Set's own frequencies (see
+        ``ps_store``), and write with this path. Default ``False``.
     compute_backend : str
         Engine used to execute the map/reduce graph. ``"dask"`` (default) builds
         a ``dask.delayed`` graph with
@@ -369,6 +398,22 @@ def image_cube_single_field(
         scalar ``sample_interval_seconds``. Per-task attribution is exact only
         with one concurrent task per worker process. Requires ``psutil``.
         ``None`` (default) disables monitoring.
+    msv2_open_options : dict, optional
+        Options of XRADIO's ``xradio_msv2`` engine for a Measurement Set v2
+        ``ps_store`` (ignored for a processing set); they override the
+        driver's defaults: ``with_pointing=False`` (the imaging does not read
+        the pointing) and ``partition_cache="read"`` unless the environment
+        variable ``XRADIO_MSV2_PARTITION_CACHE`` is set (partitions stored in
+        the Measurement Set by an earlier open are used, but none are stored:
+        the run never writes into its input). A ``partition_cache`` mode that
+        stores partitions (``"auto"`` or ``"rebuild"``), given here or in that
+        environment variable, writes them into the Measurement Set (an
+        ``XRADIO_PARTITIONS`` sub-table). Other engine options include
+        ``partition_scheme`` (default ``[]``, as the converter's, so the MSv4s
+        are those of a default conversion) and ``skip_columns``.
+        ``array_backend`` and ``scan_intents`` are set by the driver and
+        refused here (``ValueError``; pass the ``scan_intents`` parameter).
+        ``None`` (default): the defaults.
     Returns
     -------
     dict
@@ -394,8 +439,28 @@ def image_cube_single_field(
           Computed in every node task right before its chunk is written.
         * ``"timing_distributed_application"`` is a dict of the driver-level
           step timings (``T_*`` seconds: building/writing the empty image,
-          building the graph, computing it, consolidating metadata) plus the
-          grand total ``T_total``.
+          opening the input, building the graph, computing it, consolidating
+          metadata; ``T_add_lazy_input_data`` is ``0.0`` for a processing set)
+          plus the grand total ``T_total``.
+
+    Notes
+    -----
+    The Zarr image store is created with :func:`xradio.image.write_image`.
+    XRADIO versions that give image Zarr stores the ``.img.zarr`` extension
+    give it to an ``image_store`` without it (``cube.zarr`` gives
+    ``cube.img.zarr``), and the image is written to that store; an
+    ``image_store`` that ends in ``.img.zarr`` is kept by every version.
+
+    Deploying a Measurement Set v2 ``ps_store``: python-casacore holds the
+    GIL, so the Measurement Set reads of one process do not overlap. Run Dask
+    with one thread per worker process (``threads_per_worker=1``) or the MPI
+    backend; ``processing_function_threads`` still threads the C++ kernels
+    and the writes. Every task reads the storage tiles of the Measurement Set
+    that hold its channels, so check the DATA (or CORRECTED_DATA) tile shape
+    before an at-scale run: when a tile spans every channel of a spectral
+    window, every task reads whole rows, and converting the Measurement Set
+    first (:func:`xradio.measurement_set.convert_msv2_to_processing_set`) or
+    using fewer, wider tasks is faster.
     """
 
     import time
@@ -409,7 +474,6 @@ def image_cube_single_field(
         reduce,
     )
     from graphviper.graph_tools.coordinate_utils import make_parallel_coord
-    from xradio.image import write_image
     from xradio.measurement_set import open_processing_set
 
     from astroviper.processing_functions.imaging.utils.imaging_polarization import (
@@ -421,7 +485,9 @@ def image_cube_single_field(
         create_empty_data_variables_on_disk,
         image_data_groups_for_kept_variables,
         validate_image_chunking_and_sharding,
+        write_zarr_image_store,
     )
+    from astroviper.utils.measurement_set_v2 import is_measurement_set_v2
 
     if compressor is None:
         compressor = Blosc(cname="lz4", clevel=5)
@@ -461,6 +527,28 @@ def image_cube_single_field(
                 "storage layout."
             )
 
+    # A Measurement Set v2 is read by the skunk-works node-task path only
+    # (through XRADIO's xradio_msv2 engine); the production path loads Zarr
+    # processing sets. Checked here, before anything is written.
+    input_is_msv2 = is_measurement_set_v2(ps_store)
+    if input_is_msv2:
+        if not skunk_works:
+            raise ValueError(
+                f"{ps_store} is a Measurement Set v2, which is imaged with "
+                "skunk_works=True only; or convert it with "
+                "xradio.measurement_set.convert_msv2_to_processing_set and image "
+                "the processing set."
+            )
+        if write_visibility_model_to_ps or write_imaging_weights_to_ps:
+            raise ValueError(
+                "write_visibility_model_to_ps and write_imaging_weights_to_ps "
+                f"must be False for a Measurement Set v2 ps_store ({ps_store}): "
+                "an imaging run never writes into its input Measurement Set."
+            )
+        from astroviper.node_tasks.imaging.utils import require_msv2_engine
+
+        require_msv2_engine()
+
     if n_mapping_parallelism is not None:
         _validate_n_mapping_parallelism(n_mapping_parallelism)
 
@@ -488,6 +576,24 @@ def image_cube_single_field(
     correlation_coords = correlations_for_stokes(
         image_params["polarization_coords"], instrument_polarization_basis
     )
+
+    # A Measurement Set v2 is opened and its data group checked before
+    # anything is written, so that their errors (a refused msv2_open_options
+    # key, no MSv4 left after scan_intents, a Measurement Set the engine
+    # cannot read, an MSv4 without the data group or one of the roles the
+    # imaging reads) leave no image behind. Lazy: only the metadata is read.
+    if input_is_msv2:
+        from astroviper.node_tasks.imaging.utils import (
+            check_data_group_skunk_works_msv2,
+            open_processing_set_skunk_works_msv2,
+        )
+
+        start = time.time()
+        ps_xdt = open_processing_set_skunk_works_msv2(
+            ps_store, scan_intents=scan_intents, msv2_open_options=msv2_open_options
+        )
+        timing_distributed_application["T_open_processing_set"] = time.time() - start
+        check_data_group_skunk_works_msv2(ps_xdt, processing_set_data_group_name)
 
     # Create an empty image on disk with the correct coordinates and dimensions.
     start = time.time()
@@ -520,9 +626,10 @@ def image_cube_single_field(
 
     start = time.time()
     if output_image_format == "zarr":
-        write_image(
-            img_xds, imagename=image_store, out_format="zarr", overwrite=overwrite
-        )
+        # The store written can differ from the image_store given (the
+        # ".img.zarr" extension of newer XRADIO versions); everything below
+        # uses the store written.
+        image_store = write_zarr_image_store(img_xds, image_store, overwrite=overwrite)
     # For FITS output the empty files (headers + sparse data areas) are created
     # after the processing set is opened, so the TELESCOP keyword can be read
     # from it.
@@ -619,15 +726,17 @@ def image_cube_single_field(
         interpolate_data_coords_onto_parallel_coords,
     )
 
-    start = time.time()
-    ps_xdt = open_processing_set(ps_store, scan_intents=scan_intents)
-    timing_distributed_application["T_open_processing_set"] = time.time() - start
+    if not input_is_msv2:  # (a Measurement Set v2 was opened above)
+        start = time.time()
+        ps_xdt = open_processing_set(ps_store, scan_intents=scan_intents)
+        timing_distributed_application["T_open_processing_set"] = time.time() - start
 
     # The skunk-works node-task I/O path reconstructs the processing set from the
     # data group's variables only, so it needs the resolved role->variable
     # mapping. Read it once here (from the first MS) and forward it to every
-    # node task rather than re-reading it per task.
-    if skunk_works:
+    # node task rather than re-reading it per task. (The lazy inputs of a
+    # Measurement Set v2 carry each MSv4's own data group instead.)
+    if skunk_works and not input_is_msv2:
         first_ms = next(iter(ps_xdt.values()))
         input_params["data_group"] = first_ms.ds.attrs["data_groups"][
             processing_set_data_group_name
@@ -678,6 +787,20 @@ def image_cube_single_field(
         for task in node_task_data_mapping.values():
             if task["data_selection"].get(ms_name) is not None:
                 task["data_selection"][ms_name]["polarization"] = selection
+
+    # Measurement Set v2: every task gets the lazily indexed data-group
+    # variables of its final data selection (mapping key "lazy_input_data",
+    # forwarded by graphviper's map to the node task), which it reads itself
+    # through XRADIO's engine. Nothing is read here.
+    timing_distributed_application["T_add_lazy_input_data"] = 0.0
+    if input_is_msv2:
+        from astroviper.node_tasks.imaging.utils import add_lazy_input_data
+
+        start = time.time()
+        add_lazy_input_data(
+            ps_xdt, node_task_data_mapping, processing_set_data_group_name
+        )
+        timing_distributed_application["T_add_lazy_input_data"] = time.time() - start
 
     # frequency_coords is not used by node tasks (they use task_coords["frequency"]["data"])
     # so remove it to avoid embedding the full frequency axis in every task in the graph.
@@ -813,6 +936,14 @@ def image_cube_single_field(
         raise ValueError(
             f"Unknown compute_backend {compute_backend!r}; expected 'dask' or 'mpi'."
         )
+
+    # The processing set is not needed any more. Severing its parent<->child
+    # links lets it, with the lazy arrays and dask graphs of every node, die by
+    # reference counting when the driver returns, not as cyclic garbage.
+    from astroviper.utils.data_tree import release_data_tree
+
+    release_data_tree(ps_xdt)
+    ps_xdt = None
 
     start = time.time()
     if output_image_format == "zarr":
