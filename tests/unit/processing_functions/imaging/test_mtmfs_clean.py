@@ -18,6 +18,7 @@ Organised as:
   * statelessness, the zero-copy contract and input validation.
 """
 
+import pickle
 import runpy
 import sys
 
@@ -710,6 +711,24 @@ class TestArrayValidation:
             mtmfs.clean(residual, psf, np.zeros((2, 48, 40), dtype=np.float32))
         with pytest.raises(RuntimeError, match="3-D"):
             mtmfs.clean(residual[0], psf[0], model[0])
+
+    def test_equal_dtype_from_pickle_is_accepted(self):
+        """An equal but non-builtin dtype object (pickle, Dask, Zarr) is used in place."""
+        residual, psf, model, mask = pickle.loads(
+            pickle.dumps(
+                (
+                    make_dirty_stack(2, 48, 40),
+                    make_psf_stack(2, 48, 40),
+                    np.zeros((2, 40, 48), dtype=np.float32),
+                    np.ones((40, 48), dtype=np.float32),
+                )
+            )
+        )
+        out = mtmfs.clean(residual, psf, model, mask=mask)
+        assert out["iterations_performed"] > 0 and np.any(model)
+        mtmfs.principal_solution(residual, mtmfs.hessian(psf)["inverse_hessian"][0])
+        with pytest.raises(RuntimeError, match="float32 or float64"):
+            mtmfs.clean(residual.astype(">f4"), psf, model)
 
     def test_mask_validation(self):
         residual = make_dirty_stack(2, 48, 40)

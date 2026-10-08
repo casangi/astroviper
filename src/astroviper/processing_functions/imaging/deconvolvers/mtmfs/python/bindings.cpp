@@ -15,7 +15,7 @@ namespace {
 
 template <typename T>
 py::buffer_info check_array(py::array& arr, const char* name, const std::vector<py::ssize_t>& shape, bool writable) {
-    if (!arr.dtype().is(py::dtype::of<T>()))
+    if (!py::isinstance<py::array_t<T>>(arr))
         throw std::runtime_error(std::string(name) + " has wrong dtype; expected " +
                                  py::cast<std::string>(py::dtype::of<T>().attr("name")) + " but got " +
                                  py::cast<std::string>(arr.dtype().attr("name")));
@@ -120,10 +120,10 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
 static py::dict clean_dispatch(py::array residual, py::array psf, py::array model, py::object mask,
                                const std::vector<float>& scales, float small_scale_bias, int niter, double gain,
                                double threshold, double stop_fraction, double mask_threshold) {
-    if (residual.dtype().is(py::dtype::of<float>()))
+    if (py::isinstance<py::array_t<float>>(residual))
         return clean_impl<float>(residual, psf, model, mask, scales, small_scale_bias, niter, gain, threshold,
                                  stop_fraction, mask_threshold);
-    if (residual.dtype().is(py::dtype::of<double>()))
+    if (py::isinstance<py::array_t<double>>(residual))
         return clean_impl<double>(residual, psf, model, mask, scales, small_scale_bias, niter, gain, threshold,
                                   stop_fraction, mask_threshold);
     throw std::runtime_error("residual must be float32 or float64");
@@ -161,8 +161,8 @@ py::dict hessian_impl(py::array psf, const std::vector<float>& scales, float sma
 }
 
 static py::dict hessian_dispatch(py::array psf, const std::vector<float>& scales, float small_scale_bias) {
-    if (psf.dtype().is(py::dtype::of<float>())) return hessian_impl<float>(psf, scales, small_scale_bias);
-    if (psf.dtype().is(py::dtype::of<double>())) return hessian_impl<double>(psf, scales, small_scale_bias);
+    if (py::isinstance<py::array_t<float>>(psf)) return hessian_impl<float>(psf, scales, small_scale_bias);
+    if (py::isinstance<py::array_t<double>>(psf)) return hessian_impl<double>(psf, scales, small_scale_bias);
     throw std::runtime_error("psf must be float32 or float64");
 }
 
@@ -177,9 +177,9 @@ void principal_impl(py::array residual, py::array inverse_hessian) {
 }
 
 static void principal_dispatch(py::array residual, py::array inverse_hessian) {
-    if (residual.dtype().is(py::dtype::of<float>()))
+    if (py::isinstance<py::array_t<float>>(residual))
         principal_impl<float>(residual, inverse_hessian);
-    else if (residual.dtype().is(py::dtype::of<double>()))
+    else if (py::isinstance<py::array_t<double>>(residual))
         principal_impl<double>(residual, inverse_hessian);
     else
         throw std::runtime_error("residual must be float32 or float64");
