@@ -783,6 +783,8 @@ class TestArrayValidation:
             )
         with pytest.raises(RuntimeError, match="shape"):
             mtmfs.clean(residual, psf, model, mask=np.ones((40, 47), dtype=np.float32))
+        with pytest.raises(TypeError, match="mask must be a numpy.ndarray"):
+            mtmfs.clean(residual, psf, model, mask=np.ones((40, 48)).tolist())
 
     @pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
     @pytest.mark.parametrize("target", ["residual", "psf", "mask"])

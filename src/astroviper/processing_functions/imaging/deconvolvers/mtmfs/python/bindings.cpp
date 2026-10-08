@@ -83,7 +83,9 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
     py::array mask_arr;
     py::buffer_info ki;
     if (!mask_obj.is_none()) {
-        mask_arr = py::cast<py::array>(mask_obj);
+        // No py::cast: it would silently copy a list or other array-like into a new array.
+        if (!py::isinstance<py::array>(mask_obj)) throw py::type_error("mask must be a numpy.ndarray or None");
+        mask_arr = py::reinterpret_borrow<py::array>(mask_obj);
         if (mask_arr.size() > 0) {
             ki = check_array<T>(mask_arr, "mask", {ny, nx}, false);
             mask_ptr = static_cast<const T*>(ki.ptr);
