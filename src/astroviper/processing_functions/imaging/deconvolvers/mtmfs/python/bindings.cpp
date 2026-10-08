@@ -60,12 +60,6 @@ py::array_t<double> hessian_array(const std::vector<double>& m, int nscales, int
     return out;
 }
 
-py::array_t<double> matrix_array(const std::vector<double>& m, int n) {
-    py::array_t<double> out({n, n});
-    std::memcpy(out.mutable_data(), m.data(), sizeof(double) * m.size());
-    return out;
-}
-
 template <typename T>
 py::dict clean_impl(py::array residual, py::array psf, py::array model, py::object mask_obj,
                     const std::vector<float>& scales, float small_scale_bias, int max_iter_remaining, double gain,
