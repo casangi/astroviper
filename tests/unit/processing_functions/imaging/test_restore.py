@@ -20,6 +20,7 @@ import xarray as xr
 
 from astroviper.processing_functions.imaging.restore import (
     _elliptical_gaussian_kernel,
+    _inverse_rfft2,
     restore_image,
 )
 
@@ -518,3 +519,35 @@ class TestPrimaryBeamCorrectionInRestore:
         xds = _make_restore_xds(beams=self.beams, residual=residual, model=model)
         with pytest.raises(AssertionError, match="primary_beam"):
             restore_image(xds, primary_beam_correction=True)
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (64, 64),
+        (63, 50),
+        (50, 63),
+        (500, 480),
+        (127, 131),  # primes: Bluestein plans on both axes
+        (1009, 1013),
+        (6000, 1),
+    ],
+)
+def test_inverse_rfft2_is_irfft2_bit_for_bit(shape, dtype, workers):
+    """restore_image's two-step inverse real FFT (no hidden copy of the half
+    spectrum) gives exactly scipy.fft.irfft2's result, for even, odd and prime
+    sizes, both image dtypes and more than one worker."""
+    import scipy.fft
+
+    rng = np.random.default_rng(sum(shape))
+    plane = rng.standard_normal(shape).astype(dtype)
+    beam = np.exp(-rng.uniform(0.0, 3.0, size=(shape[0], shape[1] // 2 + 1)))
+    spectrum = scipy.fft.rfft2(plane)
+    spectrum *= beam.astype(dtype)
+    expected = scipy.fft.irfft2(spectrum, s=shape, workers=workers)
+    result = _inverse_rfft2(spectrum.copy(), shape, workers)
+    assert result.dtype == expected.dtype == dtype
+    assert result.shape == expected.shape == shape
+    assert result.tobytes() == expected.tobytes()

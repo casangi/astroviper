@@ -80,6 +80,30 @@ def _elliptical_gaussian_kernel(ny, nx, major_fwhm_pix, minor_fwhm_pix, pa, dtyp
     return u.astype(dtype, copy=False)
 
 
+def _inverse_rfft2(spectrum, shape, workers):
+    """``scipy.fft.irfft2(spectrum, s=shape, workers=workers)``, element for
+    element, without its hidden temporary. ``spectrum`` is overwritten.
+
+    scipy's two-axis inverse real FFT (pocketfft in scipy 1.17, ducc0 in
+    1.18) runs the complex inverse transform along the first axis into a
+    temporary copy of the whole half spectrum, allocated in C++ (one image
+    plane that tracemalloc does not see), then the complex-to-real transform
+    along the last axis, scaled by ``1 / (ny * nx)``. The same two transforms
+    are done here, the first in place in ``spectrum``, both unscaled
+    (``norm="forward"`` of an inverse transform), and the result is then
+    multiplied by the factor scipy computes, ``1 / (ny * nx)`` in long double
+    rounded to the image dtype: the same operations on the same values, so
+    the same result, without the temporary.
+    """
+    ny, nx = shape
+    spectrum = scipy.fft.ifft(
+        spectrum, axis=-2, norm="forward", overwrite_x=True, workers=workers
+    )
+    image = scipy.fft.irfft(spectrum, n=nx, axis=-1, norm="forward", workers=workers)
+    image *= image.dtype.type(np.longdouble(1) / np.longdouble(ny * nx))
+    return image
+
+
 def _clean_beam_kernel_ft(beam_params, ny, nx, delta, dtype, workers):
     """FFT of the centred clean beam of one frequency, ``None`` without a beam.
 
@@ -100,13 +124,14 @@ def _clean_beam_kernel_ft(beam_params, ny, nx, delta, dtype, workers):
 def _convolve_with_clean_beam(plane, kernel_ft, workers):
     """``plane`` convolved with the clean beam whose transform is ``kernel_ft``.
 
-    A real FFT at the dtype of the plane; the spectrum is multiplied in place,
-    so at most the spectrum and the output are live besides the plane.
+    A real FFT at the dtype of the plane; the spectrum is multiplied in place
+    and inverse transformed with :func:`_inverse_rfft2`, so at most the
+    spectrum and the output are live besides the plane.
     """
     ny, nx = plane.shape
     plane_ft = scipy.fft.rfft2(plane, workers=workers)
     np.multiply(plane_ft, kernel_ft, out=plane_ft)
-    return scipy.fft.irfft2(plane_ft, s=(ny, nx), workers=workers)
+    return _inverse_rfft2(plane_ft, (ny, nx), workers)
 
 
 def primary_beam_corrected_plane(
@@ -264,7 +289,9 @@ def restore_image(
     ----------
     The work is done plane by plane so no full-cube temporaries are allocated
     beyond the single restored cube.  The convolution is a real FFT
-    (``scipy.fft.rfft2`` / ``irfft2``) at the image dtype (single-precision
+    (``scipy.fft.rfft2`` / ``irfft2``, the inverse done in two in-place steps
+    that give the same result without scipy's hidden copy of the spectrum,
+    see ``_inverse_rfft2``) at the image dtype (single-precision
     images stay single precision), and the clean beam's FFT is computed once per
     frequency and reused for every polarization (the beam plane itself is freed
     as soon as it is transformed).  Per polarization at most two extra planes
@@ -481,9 +508,10 @@ def restore_image(
                     restored[tt, ff, pp] = residual_plane
                 else:
                     # At most two extra planes are live at any point: the
-                    # model spectrum (beam applied in place) and the irfft2
-                    # output; the residual is added into the restored cube
-                    # without a temporary.
+                    # model spectrum (beam applied in place, then inverse
+                    # transformed in place along l) and the convolved model;
+                    # the residual is added into the restored cube without a
+                    # temporary.
                     convolved_model = _convolve_with_clean_beam(
                         model_plane, kernel_ft, workers
                     )

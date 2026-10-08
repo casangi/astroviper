@@ -1772,8 +1772,10 @@ def build_residual_imaging_dict(
         stats, indexed ``(time, chan, pol)``.
     """
     residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
-    residual_abs = np.abs(img_xds[residual_data_group["sky"]].values)
-    plane_peak = residual_abs.max(axis=(-2, -1))  # (ntime, nfreq, npol)
+    # plane by plane and block by block: no copy of the residual cube
+    plane_peak = imgstats.cube_plane_abs_max(
+        img_xds[residual_data_group["sky"]].values
+    )  # (ntime, nfreq, npol)
     ntime, nfreq, npol = plane_peak.shape
     masksum = imgstats.get_image_masksum(
         img_xds, data_group_name=image_data_group_in_name
