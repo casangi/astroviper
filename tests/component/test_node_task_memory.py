@@ -18,7 +18,7 @@ during all runs:
   copy made by ``np.abs``, ``np.where``, ``astype`` or a pybind11 cast shows
   up there exactly, on every platform;
 * every phase of the node task (loading, imaging setup, residual update,
-  model update, restore, primary beam correction, statistics, write) is
+  model update, restore with primary beam correction, statistics, write) is
   wrapped, and the traced memory a phase adds at its own peak above its start
   is compared with a budget for that phase, in every run. One global peak
   would hide a copy made in a phase that peaks below another one: a copy of
@@ -191,10 +191,9 @@ ITERATION_CONTROL_PARAMS = {
 #   model_update                 2.5 + 0.5   the model cube of two planes is
 #                                            created in the first call; later
 #                                            calls add nothing
-#   restore_image                5.0 + 0.5   restored image of two planes and
-#                                            the FFT convolution
-#   correct_sky_by_primary_beam  4.0 + 0.5   corrected image of two planes and
-#                                            the temporaries of the division
+#   restore_image                7.0 + 0.5   restored and primary beam
+#                                            corrected images of two planes
+#                                            each and the FFT convolution
 #   calculate_plane_statistics   3.2 + 0.5   plane statistics temporaries
 #   write_result_chunk           2.0 + 0.5   the Blosc output buffer of one
 #                                            variable (its two planes are one
@@ -230,12 +229,7 @@ PHASES = [
         "model_update_cube_single_field",
         3.0,
     ),
-    ("astroviper.processing_functions.imaging.restore", "restore_image", 5.5),
-    (
-        "astroviper.processing_functions.imaging.correct_sky_by_primary_beam",
-        "correct_sky_by_primary_beam",
-        4.5,
-    ),
+    ("astroviper.processing_functions.imaging.restore", "restore_image", 7.5),
     (
         "astroviper.processing_functions.image_analysis.plane_statistics",
         "calculate_plane_statistics",
@@ -245,11 +239,10 @@ PHASES = [
 ]
 # The whole node task: the peak of the traced memory above its value at the
 # start of the node task, the largest of (traced memory held at the start of
-# a phase + what the phase adds). Measured 17.47 to 17.48 planes, in the
-# third residual update (10.84 held + 6.64); the primary beam correction
-# (16.84), the statistics (12.26 + 3.22) and the write (12.26 + 2.00) stay
-# below it.
-TRACEMALLOC_BUDGET_PLANES = 17.5 + 0.5
+# a phase + what the phase adds). Measured 17.83 to 17.84 planes, in the
+# restore (10.83 held + 7.00); the third residual update (17.47), the
+# statistics (12.26 + 3.22) and the write (12.26 + 2.00) stay below it.
+TRACEMALLOC_BUDGET_PLANES = 18.0
 # --- release budgets ---------------------------------------------------------
 # Run 1, the whole call of the distributed application, garbage collector on
 # as in production: traced memory kept, without the modules it imports for
@@ -380,12 +373,12 @@ GROSS_UNTRACED_BUDGET_PLANES = 0.05
 #                                               memory management)
 #   residual_update              -0.08   0.33
 #   model_update                 -0.02   0.27
-#   restore_image                -2.00   2.25   the restored cube (two planes)
-#                                               is allocated first and written
+#   restore_image                -2.00   2.25   the restored and corrected
+#                                               cubes (two planes each) are
+#                                               allocated first and written
 #                                               plane by plane after the clean
 #                                               beam's FFT, where the traced
 #                                               peak is
-#   correct_sky_by_primary_beam  -0.28   0.53
 #   calculate_plane_statistics   -0.22   0.47   (only without graphviper's
 #                                               memory management)
 #   write_result_chunk           -0.36   0.61   the Blosc output buffer,

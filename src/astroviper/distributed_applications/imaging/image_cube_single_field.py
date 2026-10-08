@@ -297,10 +297,12 @@ def image_cube_single_field(
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
     primary_beam_correction : bool, optional
-        If ``True`` divide the restored sky by the (power) primary beam,
-        writing the ``sky_restored_primary_beam_corrected``
-        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable (CASA ``pbcor``);
-        pixels below the primary-beam cutoff are blanked with NaN.  Requires
+        If ``True`` write the primary beam corrected restored sky to the
+        ``sky_restored_primary_beam_corrected``
+        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable: the model divided
+        by the (power) primary beam and convolved with the clean beam, plus
+        the residual divided by the primary beam; pixels below the primary
+        beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires
         ``restore``.
     psf_fitting_method : str, optional
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
