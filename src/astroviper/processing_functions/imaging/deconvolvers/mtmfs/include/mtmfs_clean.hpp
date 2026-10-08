@@ -72,8 +72,8 @@ int taylor_hessian(const T* psf, int nterms, int nx, int ny, std::vector<float>&
 //   mask_threshold > 0 binarises the scale-convolved mask at 0.1 (CASA)
 template <typename T>
 CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nterms, int nx, int ny,
-                     const std::vector<float>& scales, float small_scale_bias, int niter, T gain, T threshold,
-                     T stop_fraction, T mask_threshold);
+                     const std::vector<float>& scales, float small_scale_bias, int max_iter_remaining, T gain,
+                     T threshold, T stop_fraction, T mask_threshold);
 
 // residual[t1] = sum_t2 inverse_hessian[t1, t2] * residual[t2] in place
 // (MultiTermMatrixCleaner::computeprincipalsolution). inverse_hessian is
