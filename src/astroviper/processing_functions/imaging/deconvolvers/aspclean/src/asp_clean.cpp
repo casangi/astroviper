@@ -274,14 +274,15 @@ public:
     Cleaner(T* residual, T* model, const T* psf, const T* mask, int nx, int ny,
             double gain, double threshold, int max_iter_remaining, double fusedthreshold,
             double psf_width, int largestscale, int stoppointmode,
-            int norm_method, bool verbose)
+            int norm_method, bool verbose,
+            const deconvolvers::DivergenceControl<double>& divergence)
         : residual_(residual), model_(model), psf_(psf), mask_(mask),
           nx_(nx), ny_(ny), gain_(gain), threshold_(threshold),
           maxNiter_(max_iter_remaining), fusedThreshold_(fusedthreshold),
           userLargestScale_(static_cast<double>(largestscale)),
           stopPointMode_(stoppointmode),
           normMethod_(norm_method <= 0 ? 1 : norm_method), verbose_(verbose),
-          psfWidthInput_(psf_width) {}
+          psfWidthInput_(psf_width), divergence_(divergence) {}
 
     AspResult run() {
         setup();
@@ -318,6 +319,7 @@ private:
     int normMethod_;
     bool verbose_;
     double psfWidthInput_;
+    deconvolvers::DivergenceControl<double> divergence_;
 
     // --- derived / state ---
     double psfWidth_ = 0.0;
@@ -350,6 +352,8 @@ private:
     int iteration_ = 0, startingIter_ = 0;
     double maximumResidual_ = 0.0, totalFlux_ = 0.0;
     std::vector<double> goodAspActiveSet_, goodAspAmplitude_;
+    deconvolvers::PlaneStopTest<double> stopTest_;
+    double sumSquares_ = 0.0;  // of the masked residual, set with peakResidual_
 
     // ---- accessors into caller buffers ----
     double dirtyAt(int i, int j) const {
@@ -689,13 +693,16 @@ private:
         return goodAspActiveSet_;
     }
 
-    // Peak |residual| over the scale-0 mask (itsInitScaleMasks[0]).
+    // Peak |residual| over the scale-0 mask (itsInitScaleMasks[0]); the sum
+    // of the squares of the same masked residual goes to sumSquares_.
     double peakResidualMasked() {
         double minVal = dirtyAt(0, 0) * initScaleMasks_[0](0, 0);
         double maxVal = minVal;
+        sumSquares_ = 0.0;
         for (int j = 0; j < ny_; ++j)
             for (int i = 0; i < nx_; ++i) {
                 const double v = dirtyAt(i, j) * initScaleMasks_[0](i, j);
+                sumSquares_ += v * v;
                 if (v > maxVal) maxVal = v;
                 if (v < minVal) minVal = v;
             }
@@ -774,6 +781,14 @@ private:
             // 0. below cycle threshold
             if (std::abs(peakResidual_) < computeThreshold()) {
                 converged = 1;
+                switchedToHogbom_ = false;
+                break;
+            }
+            // Divergence test shared with the other deconvolvers, on the
+            // masked residual of the threshold test.
+            if (stopTest_.check_divergence(std::abs(peakResidual_), sumSquares_,
+                                           divergence_) != deconvolvers::STOP_NONE) {
+                converged = -3;
                 switchedToHogbom_ = false;
                 break;
             }
@@ -983,10 +998,11 @@ AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
                          int nx, int ny, double gain, double threshold,
                          int max_iter_remaining, double fusedthreshold, double psf_width,
                          int largestscale, int stoppointmode, int norm_method,
-                         bool verbose) {
+                         bool verbose,
+                         const deconvolvers::DivergenceControl<double>& divergence) {
     Cleaner<T> cleaner(residual, model, psf, mask, nx, ny, gain, threshold,
                        max_iter_remaining, fusedthreshold, psf_width, largestscale,
-                       stoppointmode, norm_method, verbose);
+                       stoppointmode, norm_method, verbose, divergence);
     return cleaner.run();
 }
 
@@ -995,7 +1011,9 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
                    int nf, int np_img, int np_psf, int nx, int ny, double gain,
                    const double* threshold, const int* max_iter_remaining, double fusedthreshold,
                    double psf_width, int largestscale, int stoppointmode,
-                   int norm_method, int processing_function_threads, AspResult* results) {
+                   int norm_method, int processing_function_threads,
+                   const deconvolvers::DivergenceControl<double>& divergence,
+                   AspResult* results) {
     const int nplanes = nt * nf * np_img;
     if (nplanes <= 0) return;
     const std::size_t plane = static_cast<std::size_t>(ny) * nx;
@@ -1019,7 +1037,7 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
                                            psf + psf_off, maskp, nx, ny, gain,
                                            threshold[p], max_iter_remaining[p], fusedthreshold,
                                            psf_width, largestscale, stoppointmode,
-                                           norm_method, false);
+                                           norm_method, false, divergence);
         }
     };
 
@@ -1037,17 +1055,22 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
 // Explicit instantiations for float and double image buffers.
 template AspResult aspclean_plane<float>(float*, float*, const float*, const float*,
                                          int, int, double, double, int, double,
-                                         double, int, int, int, bool);
+                                         double, int, int, int, bool,
+                                         const deconvolvers::DivergenceControl<double>&);
 template AspResult aspclean_plane<double>(double*, double*, const double*, const double*,
                                           int, int, double, double, int, double,
-                                          double, int, int, int, bool);
+                                          double, int, int, int, bool,
+                                          const deconvolvers::DivergenceControl<double>&);
 template void aspclean_cube<float>(float*, float*, const float*, const float*, int,
                                    int, int, int, int, int, double, const double*,
                                    const int*, double, double, int, int, int, int,
+                                   const deconvolvers::DivergenceControl<double>&,
                                    AspResult*);
 template void aspclean_cube<double>(double*, double*, const double*, const double*,
                                     int, int, int, int, int, int, double,
                                     const double*, const int*, double, double, int,
-                                    int, int, int, AspResult*);
+                                    int, int, int,
+                                    const deconvolvers::DivergenceControl<double>&,
+                                    AspResult*);
 
 }  // namespace aspclean

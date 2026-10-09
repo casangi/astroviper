@@ -613,8 +613,8 @@ def image_cube_single_field(
         - ``max_psf_fraction`` [CASA ``maxpsffraction``] : Upper clamp on the
           same PSF fraction; it guarantees a minimum amount of cleaning per
           model update even when the PSF sidelobe level is high.
-        - ``max_iter_divergence`` : Divergence test of the model update
-          (Hogbom). Number of consecutive deconvolution iterations the RMS of
+        - ``max_iter_divergence`` : Divergence test of the model update.
+          Number of consecutive deconvolution iterations the RMS of
           a plane's residual, taken over the clean mask, may be above
           ``(1 + gain / 10)`` times the lowest RMS it has reached in the model
           update before that model update is stopped as diverged. A peak

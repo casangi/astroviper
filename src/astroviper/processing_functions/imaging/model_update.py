@@ -31,7 +31,7 @@ def model_update_cube_single_field(
         the deconvolver: ``gain``, the absolute ``threshold`` (floor) and the
         per-plane ``max_iter_per_cycle`` and ``threshold_per_cycle`` arrays
         computed by the iteration controller.  ``max_iter_divergence`` (default
-        1, ``-1`` disables) is the divergence test of the Hogbom kernels: a
+        1, ``-1`` disables) is the divergence test of the deconvolvers: a
         plane stops its model update when the RMS of its residual inside the
         mask has been above ``(1 + gain / 10)`` times the lowest RMS reached
         for that many iterations in a row, or at once when the peak exceeds

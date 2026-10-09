@@ -24,6 +24,8 @@
 
 #include <cstddef>
 
+#include "../../include/plane_stop_test.hpp"
+
 namespace aspclean {
 
 struct AspResult {
@@ -32,7 +34,8 @@ struct AspResult {
                                   //  0 not converged, behaving normally
                                   // -1 stopped on consecutive smallest scale
                                   // -2 large-scale negative / diverging
-                                  // -3 diverging
+                                  // -3 diverging (CASA's guard or the divergence
+                                  //    test shared with the other deconvolvers)
     double peak_residual = 0.0;   // |peak| of the (masked) residual at exit
     double model_flux = 0.0;      // sum of the model image at exit
     bool switched_to_hogbom = false;
@@ -57,13 +60,15 @@ void convolve_centered(const double* a, const double* b, int nx, int ny,
 //   mask     : [ny][nx] clean mask, or nullptr for "clean everywhere"
 // `psf_width <= 0` requests an internal PSF Gaussian-width estimate.
 // `largestscale < 0`, `stoppointmode < 0`, `norm_method == 1` reproduce the
-// CASA defaults. No copies of the caller's buffers are made.
+// CASA defaults. `divergence` is the divergence test shared with the other
+// deconvolvers (plane_stop_test.hpp). No copies of the caller's buffers are made.
 template <typename T>
 AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
                          int nx, int ny, double gain, double threshold,
                          int max_iter_remaining, double fusedthreshold, double psf_width,
                          int largestscale, int stoppointmode, int norm_method,
-                         bool verbose);
+                         bool verbose,
+                         const deconvolvers::DivergenceControl<double>& divergence);
 
 // Run aspclean_plane independently on every (time, frequency, polarization)
 // plane of a 5-D cube [nt, nf, np, ny, nx], in place, across `processing_function_threads`
@@ -80,6 +85,7 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask,
                    double gain, const double* threshold, const int* max_iter_remaining,
                    double fusedthreshold, double psf_width, int largestscale,
                    int stoppointmode, int norm_method, int processing_function_threads,
+                   const deconvolvers::DivergenceControl<double>& divergence,
                    AspResult* results);
 
 }  // namespace aspclean

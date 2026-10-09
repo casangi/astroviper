@@ -573,6 +573,20 @@ def _chain_problem(ny=8, nx=64, sidelobe=2.04, dtype=np.float64):
     return residual, psf
 
 
+def _spreading_problem(n=32, dtype=np.float64):
+    """A point source and a PSF with 24 sidelobes of -0.3 on a square ring:
+    a subtraction at gain 0.9 lowers the peak (1 -> 0.27) and raises the RMS
+    of the residual 1.33 times (see test_aspclean.py)."""
+    residual = np.zeros((1, 1, 1, n, n), dtype=dtype)
+    residual[0, 0, 0, n // 2, n // 2] = 1.0
+    psf = np.zeros((1, 1, 1, n, n), dtype=dtype)
+    c = n // 2
+    psf[..., c - 3 : c + 4, c - 3 : c + 4] = -0.3
+    psf[..., c - 2 : c + 3, c - 2 : c + 3] = 0.0
+    psf[..., c, c] = 1.0
+    return residual, psf
+
+
 class TestDivergenceFactors:
     @pytest.mark.parametrize("gain", [0.05, 0.1, 0.5, 1.0])
     def test_limits_scale_with_the_gain(self, gain):
@@ -1095,6 +1109,30 @@ class TestAspClean:
         with pytest.raises(ValueError, match="polarization"):
             asp_clean(resid, psf, model)
 
+    @pytest.mark.parametrize(("max_iter_divergence", "iterations"), [(1, 2), (-1, 4)])
+    def test_divergence_test_follows_max_iter_divergence(
+        self, max_iter_divergence, iterations
+    ):
+        """The shared test stops the model update at the first rise of the
+        RMS; without it CASA's guard stops it later."""
+        residual, psf = _spreading_problem()
+        result = asp_clean(
+            residual,
+            psf,
+            np.zeros_like(residual),
+            {
+                "gain": 0.9,
+                "max_iter": 40,
+                "threshold": 0.0,
+                "psf_width": 1.0,
+                "largestscale": 0,
+                "max_iter_divergence": max_iter_divergence,
+            },
+        )
+        assert result["iterations_performed"].item() == iterations
+        assert result["diverged"].item()
+        assert result["retval"].item() == -3
+
 
 # ---------------------------------------------------------------------------
 # deconvolve end-to-end with algorithm="asp"
@@ -1151,6 +1189,26 @@ class TestDeconvolveAsp:
             },
         )
         assert len(rd.data) == nt * nf * npol
+
+    def test_diverged_model_update_reaches_the_controller(self):
+        xds = _make_img_xds(dtype=np.float64)
+        residual, psf = _spreading_problem()
+        xds["RESIDUAL"].values[...] = residual
+        xds["POINT_SPREAD_FUNCTION"].values[...] = psf
+        imaging_dict = deconvolve(
+            img_xds=xds,
+            algorithm="asp",
+            deconvolve_params={
+                "gain": 0.9,
+                "max_iter": 40,
+                "threshold": 0.0,
+                "psf_width": 1.0,
+                "largestscale": 0,
+            },
+        )
+        (entry,) = imaging_dict.data.values()
+        assert entry["iter_done"] == [2]
+        assert entry["stop_code"] == StopCode(IMAGING_CONTINUE, MODEL_UPDATE_DIVERGENCE)
 
 
 if __name__ == "__main__":  # pragma: no cover

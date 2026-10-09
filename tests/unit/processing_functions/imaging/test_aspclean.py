@@ -157,6 +157,7 @@ class TestClean:
             "iterations_performed",
             "retval",
             "converged",
+            "diverged",
             "peak_residual",
             "model_flux",
             "switched_to_hogbom",
@@ -442,6 +443,167 @@ class TestCube:
         )
         assert out["model_flux"].shape == (nt, nf, npol)
         assert np.all(out["model_flux"] > 0)
+
+
+# ---------------------------------------------------------------------------
+# Divergence test shared with the other deconvolvers
+# ---------------------------------------------------------------------------
+
+
+class TestDivergence:
+    """The divergence test of deconvolvers/include/plane_stop_test.hpp.
+
+    The spreading PSF has 24 sidelobes of -0.3 on a square ring around its
+    peak, so a subtraction at gain 0.9 lowers the peak of a point source from
+    1 to 0.27 but raises the RMS of the residual 1.33 times: the soft limit
+    stops the model update, CASA's guard (also retval -3) only later. The
+    chain PSF has one sidelobe of -1.2, so the peak grows 1.08 times per
+    iteration. Asp counts the iteration whose check stops it.
+    """
+
+    # _divergence_factors(0.9)
+    RMS_FACTOR = 1.09
+    PEAK_FACTOR = 1.9
+
+    @staticmethod
+    def _spreading(dtype=np.float64, n=32):
+        residual = np.zeros((n, n), dtype=dtype)
+        residual[n // 2, n // 2] = 1.0
+        psf = np.zeros((n, n), dtype=dtype)
+        c = n // 2
+        psf[c - 3 : c + 4, c - 3 : c + 4] = -0.3
+        psf[c - 2 : c + 3, c - 2 : c + 3] = 0.0
+        psf[c, c] = 1.0
+        return residual, psf
+
+    @staticmethod
+    def _chain(dtype=np.float64):
+        residual = np.zeros((8, 64), dtype=dtype)
+        residual[4, 2] = 1.0
+        psf = np.zeros((8, 64), dtype=dtype)
+        psf[4, 32] = 1.0
+        psf[4, 33] = -1.2
+        return residual, psf
+
+    @staticmethod
+    def _clean(scene, **kwargs):
+        residual, psf = scene
+        model = np.zeros_like(residual)
+        result = aspclean.clean(
+            residual,
+            psf,
+            model,
+            gain=0.9,
+            threshold=0.0,
+            max_iter_remaining=40,
+            psf_width=1.0,
+            largestscale=0,
+            **kwargs,
+        )
+        return result, residual, model
+
+    def test_default_leaves_the_test_off(self):
+        result, residual, model = self._clean(self._spreading())
+        off, residual_off, model_off = self._clean(
+            self._spreading(), max_iter_divergence=-1
+        )
+        # CASA's guard ends both
+        assert result["iterations_performed"] == off["iterations_performed"] == 4
+        assert result["retval"] == off["retval"] == -3
+        np.testing.assert_array_equal(residual, residual_off)
+        np.testing.assert_array_equal(model, model_off)
+
+    @pytest.mark.parametrize("dtype", [np.float64, np.float32])
+    def test_rms_rise_stops_the_model_update(self, dtype):
+        result, _, model = self._clean(
+            self._spreading(dtype),
+            max_iter_divergence=1,
+            divergence_rms_factor=self.RMS_FACTOR,
+            divergence_peak_factor=self.PEAK_FACTOR,
+        )
+        assert result["iterations_performed"] == 2
+        assert result["retval"] == -3
+        assert result["diverged"]
+        assert not result["converged"]
+        # the peak fell; the RMS rose
+        assert result["peak_residual"] == pytest.approx(0.27, rel=1e-5)
+        assert np.count_nonzero(model) == 1
+
+    def test_consecutive_iterations_above_the_soft_limit(self):
+        result, _, _ = self._clean(
+            self._spreading(),
+            max_iter_divergence=2,
+            divergence_rms_factor=self.RMS_FACTOR,
+            divergence_peak_factor=self.PEAK_FACTOR,
+        )
+        assert result["iterations_performed"] == 3
+        assert result["diverged"]
+
+    def test_hard_limit(self):
+        result, _, _ = self._clean(
+            self._chain(),
+            max_iter_divergence=1,
+            divergence_rms_factor=1e9,
+            divergence_peak_factor=1.05,
+        )
+        assert result["iterations_performed"] == 2
+        assert result["diverged"]
+        assert result["peak_residual"] == pytest.approx(1.08)
+
+    def test_healthy_clean_is_unchanged(self):
+        psf, _, dirty = TestClean()._make_scene()
+        results = []
+        for kwargs in (
+            {},
+            {
+                "max_iter_divergence": 1,
+                "divergence_rms_factor": 1.01,
+                "divergence_peak_factor": 1.1,
+            },
+        ):
+            residual = dirty.copy()
+            model = np.zeros_like(dirty)
+            result = aspclean.clean(
+                residual,
+                psf,
+                model,
+                gain=0.1,
+                threshold=0.05,
+                max_iter_remaining=100,
+                **kwargs,
+            )
+            results.append((result, residual, model))
+        (result, residual, model), (on, residual_on, model_on) = results
+        assert not on["diverged"]
+        assert on["iterations_performed"] == result["iterations_performed"]
+        np.testing.assert_array_equal(residual_on, residual)
+        np.testing.assert_array_equal(model_on, model)
+
+    def test_cube_reports_diverged_per_plane(self):
+        spreading_residual, spreading_psf = self._spreading()
+        residual = np.zeros((1, 1, 2) + spreading_residual.shape)
+        psf = np.zeros_like(residual)
+        residual[0, 0, 0] = spreading_residual
+        psf[0, 0, 0] = spreading_psf
+        # plane 1: the same point source and a delta PSF
+        residual[0, 0, 1] = spreading_residual
+        psf[0, 0, 1, 16, 16] = 1.0
+        model = np.zeros_like(residual)
+        result = aspclean.clean_cube(
+            residual,
+            psf,
+            model,
+            gain=0.9,
+            threshold=np.zeros((1, 1, 2)),
+            max_iter_remaining=np.full((1, 1, 2), 40, dtype=np.int32),
+            psf_width=1.0,
+            largestscale=0,
+            max_iter_divergence=1,
+            divergence_rms_factor=self.RMS_FACTOR,
+            divergence_peak_factor=self.PEAK_FACTOR,
+        )
+        np.testing.assert_array_equal(result["diverged"], [[[True, False]]])
+        np.testing.assert_array_equal(result["retval"][0, 0, 0], -3)
 
 
 # ---------------------------------------------------------------------------
