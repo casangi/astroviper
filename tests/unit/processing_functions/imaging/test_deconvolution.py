@@ -479,7 +479,8 @@ class TestHogbomCleanCube:
         assert not model.any()
 
     def test_search_region_without_selected_pixel_is_not_cleaned(self):
-        """At a zero threshold the kernel would clean a default pixel."""
+        """A search region without a selected pixel has peak 0, so the kernel
+        stops on the threshold test without cleaning."""
         resid = np.ones((1, 1, 1, 16, 16), dtype=np.float32)
         model = np.zeros_like(resid)
         mask = np.zeros(resid.shape, dtype=bool)
@@ -498,7 +499,8 @@ class TestHogbomCleanCube:
         assert not model.any()
 
     def test_clean_box_excluding_brighter_emission_does_not_diverge(self):
-        """The peak after a batch is taken over the clean box, as before it."""
+        """The peak and the RMS are taken over the clean box, so brighter
+        emission outside it does not trip the divergence test."""
         resid = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
         resid[0, 0, 0, 2, 2] = 10.0  # outside the clean box
         resid[0, 0, 0, 8, 8] = 1.0

@@ -977,8 +977,10 @@ def hogbom_clean(
       limit* for ``max_iter_divergence`` consecutive iterations (default 1,
       the first such iteration; ``-1`` disables the divergence test). A
       runaway is stopped at once by the *hard limit*, a peak above
-      ``(1 + gain)`` times the peak at the start of the model update. A peak
-      that is not finite always stops the plane.
+      ``(1 + gain)`` times the peak at the start of the model update. An
+      infinite peak always stops the plane. A plane whose search region
+      holds a pixel that is not a number gets no iterations instead
+      (``stop_code`` 0, not ``diverged``).
 
     A diverged model update does not end the plane's imaging cycles: the next
     residual update recomputes the true residual and cleaning resumes from it.
