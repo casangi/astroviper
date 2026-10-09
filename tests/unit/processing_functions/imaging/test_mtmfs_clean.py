@@ -1217,14 +1217,16 @@ def test_psf_fraction_caps_adaptive_gain(dtype):
 
 
 def _negative_transfer_problem(dtype=np.float32):
-    """The PSF and residual of test_adaptive_gain_reports_divergence: every
+    """The PSF and checkerboard of test_adaptive_gain_reports_divergence, with
+    amplitudes spread by 20 percent so that no rounding decides a tie: every
     component makes the residual grow."""
     psf = np.zeros((1, 32, 32), dtype=dtype)
     psf[0, 16, 16] = 1.0
     psf[0, [15, 17, 16, 16], [16, 16, 15, 17]] = 0.9
     yy, xx = np.indices((32, 32))
     box = (abs(yy - 16) < 6) & (abs(xx - 16) < 6)
-    residual = np.where((yy + xx) % 2 == 0, 1.0, -1.0) * box
+    amplitude = 1.0 + 0.2 * _lcg_noise(32 * 32, 7).reshape(32, 32).astype(np.float64)
+    residual = np.where((yy + xx) % 2 == 0, 1.0, -1.0) * box * amplitude
     return np.ascontiguousarray(residual[None], dtype=dtype), psf
 
 
@@ -1251,7 +1253,7 @@ def test_divergence_test_is_off_by_default():
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
-@pytest.mark.parametrize(("gain", "iterations"), [(0.1, 3), (0.5, 2)])
+@pytest.mark.parametrize(("gain", "iterations"), [(0.1, 4), (0.5, 2)])
 def test_divergence_test_stops_a_fixed_gain_runaway(dtype, gain, iterations):
     """The divergence test shared with the other deconvolvers, with the factors
     deconvolve() derives from the gain (_divergence_factors)."""
@@ -1272,11 +1274,12 @@ def test_divergence_test_stops_a_fixed_gain_runaway(dtype, gain, iterations):
     assert result["iterations_performed"] == iterations
 
 
-@pytest.mark.parametrize(("max_iter_divergence", "iterations"), [(1, 5), (3, 7)])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(("max_iter_divergence", "iterations"), [(1, 4), (3, 6)])
 def test_divergence_soft_limit_counts_consecutive_components(
-    max_iter_divergence, iterations
+    dtype, max_iter_divergence, iterations
 ):
-    residual, psf = _negative_transfer_problem()
+    residual, psf = _negative_transfer_problem(dtype)
     result = mtmfs.clean(
         residual,
         psf,
@@ -1289,6 +1292,26 @@ def test_divergence_soft_limit_counts_consecutive_components(
     )
     assert result["stop_code"] == mtmfs.STOP_DIVERGED
     assert result["iterations_performed"] == iterations
+
+
+def test_divergence_rms_is_taken_inside_the_mask():
+    # one pixel of the runaway is selected: its RMS does not grow
+    residual, psf = _negative_transfer_problem()
+    mask = np.zeros((32, 32), dtype=np.float32)
+    mask[16, 16] = 1.0
+    result = mtmfs.clean(
+        residual,
+        psf,
+        np.zeros_like(residual),
+        mask=mask,
+        gain=0.1,
+        max_iter_remaining=200,
+        max_iter_divergence=1,
+        divergence_rms_factor=1.01,
+        divergence_peak_factor=1.1,
+    )
+    assert result["stop_code"] == mtmfs.STOP_MAX_ITER
+    assert result["iterations_performed"] == 200
 
 
 def test_divergence_at_the_first_check_places_nothing():
