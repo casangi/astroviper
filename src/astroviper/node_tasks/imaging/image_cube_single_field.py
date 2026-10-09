@@ -189,6 +189,39 @@ def _select_processing_set_channel(ps_xdt, frequency_maps, chan_index):
     return selected or None
 
 
+def _whole_processing_set_channel(ps_xdt):
+    """The whole loaded chunk, for an image channel no visibility channel maps
+    onto with the chunk's image axis.
+
+    The science function then maps the chunk's visibility channels onto that
+    one image channel with its own rule (see
+    :func:`~astroviper.processing_functions.imaging.utils.frequency_mapping.map_visibility_frequencies_to_image`):
+    a visibility channel within half a visibility channel spacing of it, or
+    the only visibility channel of the chunk at any distance, is gridded onto
+    it, and one farther away raises ``ValueError``. So, unlike in a call with
+    the whole image cube, where such a channel stays empty, a chunk of one
+    visibility channel is imaged onto it.
+
+    Like :func:`_select_processing_set_channel`, returns ``{ms_name:
+    measurement-set node}`` of zero-copy views of the loaded arrays, each with
+    its own deep-copied ``attrs``, so the variables and data groups the
+    processing functions register (``WEIGHT_IMAGING``, ``VISIBILITY_MODEL``,
+    ``VISIBILITY_RESIDUAL`` and their data groups) stay off the loaded chunk
+    and die with the channel. Handing over the loaded chunk itself would
+    register them on it, and the next channel's views would carry them into
+    the science function's no-overwrite checks (``AssertionError: Output data
+    variable WEIGHT_IMAGING already exists``).
+    """
+    import copy
+
+    selected = {}
+    for ms_name, ms_xdt in ps_xdt.items():
+        ms_chan = ms_xdt.isel(frequency=slice(None))
+        ms_chan.attrs = copy.deepcopy(ms_xdt.attrs)
+        selected[ms_name] = ms_chan
+    return selected
+
+
 def _select_image_channel(img_xds, chan_index):
     """One-channel slice of the empty chunk image with its own ``attrs`` copy
     (the science function registers data groups on it in place)."""
@@ -469,6 +502,7 @@ def image_cube_single_field(
     data_group=None,
     task_id=0,
     input_data=None,
+    lazy_input_data=None,
     graph_mode=True,
     image_chunking=None,
     image_sharding=None,
@@ -590,6 +624,24 @@ def image_cube_single_field(
           go on. Default 1, the first such iteration; ``-1`` disables the
           test. *Differs from CASA*, which tests the peak for a fixed 10
           percent rise once every 2000 iterations.
+        - ``entropy_stop`` : If ``True``, a plane stops once the entropy of
+          its residual has passed its maximum. The entropy (Homan, Roth and
+          Pushkarev 2024, AJ 167, 11) measures how much the residual looks
+          like noise everywhere. It rises while the clean removes emission
+          and falls once the clean fits noise. It is worked out after every
+          residual update, and the plane stops when it is lower than in an
+          earlier cycle. The fall is noticed one model update after the
+          maximum and the model of that model update is kept, so a small
+          ``max_iter_per_cycle`` makes the stop sharper. Default ``False``.
+          No CASA equivalent.
+        - ``entropy_max_snr`` : The entropy of a plane is followed once the
+          peak of its residual inside the clean mask is at most this many
+          times the RMS of the residual. Above it the residual is dominated
+          by the pattern of the point spread function. Default 6.
+        - ``entropy_spatial_bins`` : Number of spatial bins along each of the
+          two image axes used for the entropy. Default 7.
+        - ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for
+          the entropy. Default 10.
 
         A plane whose model updates do no iteration any more (two in a row)
         is stopped with the no progress stop code, so an all-zero plane cannot
@@ -617,7 +669,8 @@ def image_cube_single_field(
         Path/URL of the on-disk Zarr image cube.
     input_data_store : str
         Path/URL of the processing-set Zarr store to load this chunk's
-        visibilities from (used only when ``input_data`` is ``None``).
+        visibilities from (used only when ``input_data`` and
+        ``lazy_input_data`` are ``None``).
     processing_set_data_group_name : str, optional
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     deconvolver : str, optional
@@ -652,10 +705,12 @@ def image_cube_single_field(
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
     primary_beam_correction : bool, optional
-        If ``True`` divide the restored sky by the (power) primary beam,
-        writing the ``sky_restored_primary_beam_corrected``
-        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable (CASA ``pbcor``);
-        pixels below the primary-beam cutoff are blanked with NaN.  Requires
+        If ``True`` write the primary beam corrected restored sky to the
+        ``sky_restored_primary_beam_corrected``
+        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable: the model divided
+        by the (power) primary beam and convolved with the clean beam, plus
+        the residual divided by the primary beam; pixels below the primary
+        beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires
         ``restore``.
     psf_fitting_method : str, optional
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
@@ -682,6 +737,22 @@ def image_cube_single_field(
     input_data : dict, optional
         Pre-loaded data for this chunk (supplied by the data-loading layer); when
         ``None`` (default) the data is loaded from ``input_data_store``.
+    lazy_input_data : dict, optional
+        ``{ms_name: xarray.Dataset}``: this chunk's data, not yet read. For a
+        Measurement Set v2 ``ps_store`` the distributed application opens the
+        Measurement Set with XRADIO's ``xradio_msv2`` engine and gives every
+        task, per MSv4 of its ``data_selection``, the data group's variables
+        already restricted to that selection (lazily indexed arrays; see
+        :func:`~astroviper.node_tasks.imaging.utils.add_lazy_input_data`).
+        The task reads them with
+        :func:`~astroviper.node_tasks.imaging.utils.load_processing_set_skunk_works_msv2`
+        (used only when ``input_data`` is ``None``; ``skunk_works`` and
+        ``data_group`` are not consulted for the read). Any read error skips
+        the chunk, as for the other inputs, except
+        ``xradio.measurement_set.MSv2ChangedError``: the Measurement Set
+        changed after the distributed application opened it, so the graph no
+        longer describes it and the error is raised, aborting the run. ``None``
+        (default): the data is loaded from ``input_data_store``.
     graph_mode : bool, optional
         If ``True`` (default) each kept variable's slice is written into the
         pre-allocated Zarr store with
@@ -800,6 +871,15 @@ def image_cube_single_field(
             # I/O coalescing). The framework has already applied the task-level
             # sub-selection, so use the dict directly.
             ps_xdt = input_data
+        elif lazy_input_data is not None:
+            # Measurement Set v2: read the lazily indexed selection that the
+            # distributed application attached to this task (the values are
+            # read by XRADIO's xradio_msv2 engine).
+            from astroviper.node_tasks.imaging.utils import (
+                load_processing_set_skunk_works_msv2,
+            )
+
+            ps_xdt = load_processing_set_skunk_works_msv2(lazy_input_data)
         elif skunk_works:
             # Experimental performance path: read only this chunk's data-group
             # variables straight from the Zarr chunk blobs and reconstruct the
@@ -827,6 +907,13 @@ def image_cube_single_field(
                 load_sub_datasets=False,
             )
     except Exception as exc:
+        # A Measurement Set v2 that changed after the distributed application
+        # opened it no longer matches the graph: every remaining task would be
+        # inconsistent, which a skipped chunk would hide, so the run aborts.
+        from astroviper.node_tasks.imaging.utils import is_fatal_load_error
+
+        if is_fatal_load_error(exc):
+            raise
         # A chunk whose data cannot be read is skipped -- logged + marked in the
         # timing frame -- instead of aborting the whole run (dask/MPI would
         # otherwise tear down every node after this task exhausts its retries).
@@ -911,13 +998,13 @@ def image_cube_single_field(
         ps_chan = _select_processing_set_channel(ps_xdt, frequency_maps, chan_index)
         if ps_chan is None:
             # No visibility channel maps onto this image channel: hand over
-            # the whole chunk, which grids nothing onto it -- exactly what one
-            # full-cube call did for such a channel.
+            # views of the whole chunk (see _whole_processing_set_channel for
+            # what the science function grids onto it).
             logger.debug(
                 f"Image channel {chan_index} of task {task_id} has no visibility "
                 "channels; imaging it from the full chunk."
             )
-            ps_chan = ps_xdt
+            ps_chan = _whole_processing_set_channel(ps_xdt)
         img_chan = _select_image_channel(img_xds, chan_index)
         if accumulator is None:
             accumulator = _ImageChunkAccumulator(
@@ -953,11 +1040,21 @@ def image_cube_single_field(
         # Drop this channel's objects right away: cached accessors would
         # otherwise pin its arrays until a full garbage-collection pass.
         clear_cached_accessors(img_chan)
-        if ps_chan is not ps_xdt:
-            for ms_chan in ps_chan.values():
-                clear_cached_accessors(ms_chan)
+        for ms_chan in ps_chan.values():
+            clear_cached_accessors(ms_chan)
+        # The loop variable would otherwise keep this channel's last
+        # measurement set, with its model and residual visibilities and
+        # imaging weights, alive through the statistics and the write.
+        ms_chan = None
         img_chan = None
         ps_chan = None
+        if chan_index == n_chan - 1:
+            # Every channel is imaged: free the loaded chunk (visibilities,
+            # weights, flags, uvw) before the last chunk's statistics and
+            # write instead of after them. Severing its parent<->child links
+            # lets it die by reference counting here.
+            release_data_tree(ps_xdt)
+            ps_xdt = None
         if not accumulator.complete:
             T_channel_bookkeeping += time.time() - start
             continue
@@ -1008,12 +1105,14 @@ def image_cube_single_field(
 
     # Two reference-cycle classes pin this task's gigabytes past `= None`
     # (2026-08-12 findings; each survives until a full gc pass otherwise):
-    # 1. DataTree parent<->child links (the loaded chunk's tree), and
+    # 1. DataTree parent<->child links (the loaded chunk's tree, released
+    #    after the last channel's science call; released here only when the
+    #    loop did not run), and
     # 2. the xarray cached-accessor cycle on the image dataset
     #    (_cache['xr_img'] <-> xradio ImageXds._xds, created by the
     #    img_xds.xr_img.* calls in the processing functions).
     # Sever both so everything dies by refcount right here. Both helpers are
-    # no-ops on the load-layer dict path / cache-less datasets.
+    # no-ops on None, the load-layer dict path and cache-less datasets.
     release_data_tree(ps_xdt)
     clear_cached_accessors(img_xds)
     img_xds = None

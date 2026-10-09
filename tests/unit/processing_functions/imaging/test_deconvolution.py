@@ -456,6 +456,71 @@ class TestHogbomCleanCube:
         assert resid[0, 0, 0, 5, 5] == pytest.approx(10.0, abs=1e-6)
         assert model[0, 0, 0, 10, 10] == pytest.approx(3.0, abs=1e-6)
 
+    def test_selected_nan_stops_the_plane_unconverged(self):
+        """A selected pixel that is not a number makes the peak NaN, so the
+        plane is neither cleaned nor reported as converged."""
+        resid = np.zeros((1, 2, 1, 16, 16), dtype=np.float32)
+        resid[0, 0] = np.nan  # every selected pixel
+        resid[0, 1, 0, 8, 8] = 2.5
+        resid[0, 1, 0, 3, 3] = np.nan  # one selected pixel
+        model = np.zeros_like(resid)
+
+        result = hogbom_clean(
+            resid,
+            _delta_psf_cube(1, 2, 1, 16, 16),
+            model,
+            {"gain": 1.0, "max_iter": 10, "threshold": 0.1},
+            mask_cube=np.ones(resid.shape, dtype=bool),
+        )
+
+        assert np.isnan(result["final_peak"]).all()
+        assert not result["converged"].any()
+        assert not result["iterations_performed"].any()
+        assert not model.any()
+
+    def test_search_region_without_selected_pixel_is_not_cleaned(self):
+        """At a zero threshold the kernel would clean a default pixel."""
+        resid = np.ones((1, 1, 1, 16, 16), dtype=np.float32)
+        model = np.zeros_like(resid)
+        mask = np.zeros(resid.shape, dtype=bool)
+        mask[0, 0, 0, 2, 2] = True  # outside the clean box
+
+        result = hogbom_clean(
+            resid,
+            _delta_psf_cube(1, 1, 1, 16, 16),
+            model,
+            {"max_iter": 10, "threshold": 0.0, "clean_box": (5, 12, 5, 12)},
+            mask_cube=mask,
+        )
+
+        assert result["iterations_performed"].item() == 0
+        assert result["final_peak"].item() == 0.0
+        assert not model.any()
+
+    def test_clean_box_excluding_brighter_emission_does_not_diverge(self):
+        """The peak after a batch is taken over the clean box, as before it."""
+        resid = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
+        resid[0, 0, 0, 2, 2] = 10.0  # outside the clean box
+        resid[0, 0, 0, 8, 8] = 1.0
+        model = np.zeros_like(resid)
+
+        result = hogbom_clean(
+            resid,
+            _delta_psf_cube(1, 1, 1, 16, 16),
+            model,
+            {
+                "gain": 0.5,
+                "max_iter": 20,
+                "threshold": 0.01,
+                "clean_box": (5, 12, 5, 12),
+            },
+        )
+
+        assert not result["diverged"].item()
+        assert result["converged"].item()
+        assert result["final_peak"].item() == pytest.approx(0.5**7)
+        assert resid[0, 0, 0, 2, 2] == 10.0
+
     def test_rejects_non_5d(self):
         arr = np.zeros((16, 16), dtype=np.float32)
         with pytest.raises(ValueError, match="5D"):

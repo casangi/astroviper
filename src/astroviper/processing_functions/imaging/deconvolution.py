@@ -281,8 +281,11 @@ def _per_plane_iteration_controls(deconvolve_params, nt, nf, npol, threshold_dty
 
 def _plane_peak_abs_signed(arr, mask=None):
     """
-    Return the signed value at the absolute-value peak of a 2-D array,
-    optionally restricted to pixels where ``mask > 0.5``.
+    Return the signed value of a 2-D plane at its absolute-value peak.
+
+    The plane is scanned in blocks of rows
+    (:func:`~astroviper.processing_functions.image_analysis.image_statistics.plane_peak_abs_signed`),
+    so no copy of the plane is made.
 
     Parameters
     ----------
@@ -298,20 +301,7 @@ def _plane_peak_abs_signed(arr, mask=None):
         Signed value of ``arr`` at its absolute-value maximum within the
         mask. NaN if every pixel is masked.
     """
-    if mask is None:
-        absvals = np.abs(arr)
-    else:
-        valid = mask > 0.5
-        if not np.any(valid):
-            return float("nan")
-        absvals = np.where(valid, np.abs(arr), np.nan)
-    if np.all(np.isnan(absvals)):
-        return float("nan")
-    # Return the signed value at the absolute-value peak: locate the largest
-    # magnitude with nanargmax, then return arr at that index so a strong
-    # negative residual keeps its sign (as the name/docstring promise).
-    idx = np.unravel_index(np.nanargmax(absvals), absvals.shape)
-    return float(arr[idx])
+    return imgstats.plane_peak_abs_signed(arr, mask=mask)
 
 
 def starting_statistics(
@@ -806,6 +796,79 @@ def deconvolve(
     return imaging_dict
 
 
+def _hogbom_peak_cube(residual_cube, mask_cube, clean_box):
+    """Return the absolute residual peak in each CLEAN search region.
+
+    Every plane is scanned in blocks of rows, so no copy of the cube or of a
+    plane is made (``np.abs`` of the cube followed by ``np.where`` with the
+    mask used to allocate two of them for every model update).
+    """
+    _, _, _, ny, nx = residual_cube.shape
+    xbeg, xend, ybeg, yend = clean_box
+    xbeg = 0 if xbeg == -1 else max(0, min(xbeg, nx - 1))
+    xend = nx if xend == -1 else max(xbeg + 1, min(xend, nx))
+    ybeg = 0 if ybeg == -1 else max(0, min(ybeg, ny - 1))
+    yend = ny if yend == -1 else max(ybeg + 1, min(yend, ny))
+
+    plane_shape = residual_cube.shape[:-2]
+    peak = np.zeros(plane_shape, dtype=np.float64)
+    for index in np.ndindex(plane_shape):
+        plane = residual_cube[index][ybeg:yend, xbeg:xend]
+        mask = None if mask_cube is None else mask_cube[index][ybeg:yend, xbeg:xend]
+        # np.where(mask, |residual|, 0).max(): NaN propagates, 0 if none selected
+        peak[index] = imgstats.plane_abs_max(plane, mask=mask)
+    return peak
+
+
+def _run_hogbom(
+    clean_cube,
+    *,
+    residual_cube,
+    psf_cube,
+    model_cube,
+    peak_mask_cube,
+    mask_arg,
+    clean_box,
+    max_iter_per_cycle,
+    threshold_per_cycle,
+    deconvolve_params,
+    processing_function_threads,
+):
+    """Run a Hogbom kernel once over the cube; its stop tests run inside it.
+
+    The kernel skips pixels that are not a number, so a plane whose peak over
+    the search region is not a number gets no iterations. The final peak is
+    taken over the search region, as the starting one (the kernel's covers the
+    whole plane, skips NaN and is 1e20 when no pixel counts).
+    """
+    start_peak = _hogbom_peak_cube(residual_cube, peak_mask_cube, clean_box)
+    max_iter_remaining = np.where(np.isnan(start_peak), 0, max_iter_per_cycle).astype(
+        max_iter_per_cycle.dtype
+    )
+    # Only the gain dependent limits of the divergence test are worked out here.
+    divergence_rms_factor, divergence_peak_factor = _divergence_factors(
+        deconvolve_params["gain"]
+    )
+    result = clean_cube(
+        residual_cube=residual_cube,
+        psf_cube=psf_cube,
+        model_cube=model_cube,
+        mask_cube=mask_arg,
+        clean_box=clean_box,
+        max_iter_remaining=max_iter_remaining,
+        gain=deconvolve_params["gain"],
+        threshold=threshold_per_cycle,
+        processing_function_threads=int(processing_function_threads),
+        max_iter_divergence=int(deconvolve_params["max_iter_divergence"]),
+        divergence_rms_factor=divergence_rms_factor,
+        divergence_peak_factor=divergence_peak_factor,
+    )
+    final_peak = _hogbom_peak_cube(residual_cube, peak_mask_cube, clean_box)
+    result["final_peak"] = final_peak
+    result["converged"] = final_peak <= threshold_per_cycle
+    return result
+
+
 def hogbom_clean(
     residual_cube: np.ndarray,
     psf_cube: np.ndarray,
@@ -960,25 +1023,18 @@ def hogbom_clean(
         deconvolve_params, nt, nf, npol_img, residual_cube.dtype
     )
 
-    # The stop tests (threshold, divergence) run inside the kernel at every
-    # iteration; only the gain dependent limits are worked out here.
-    divergence_rms_factor, divergence_peak_factor = _divergence_factors(
-        deconvolve_params["gain"]
-    )
-
-    return hogbom.clean_cube(
+    return _run_hogbom(
+        hogbom.clean_cube,
         residual_cube=residual_cube,
         psf_cube=psf_cube,
         model_cube=model_cube,
-        mask_cube=mask_arg,
+        peak_mask_cube=mask_cube,
+        mask_arg=mask_arg,
         clean_box=clean_box,
-        max_iter_remaining=max_iter_per_cycle,
-        gain=deconvolve_params["gain"],
-        threshold=threshold_per_cycle,
-        processing_function_threads=int(processing_function_threads),
-        max_iter_divergence=int(deconvolve_params["max_iter_divergence"]),
-        divergence_rms_factor=divergence_rms_factor,
-        divergence_peak_factor=divergence_peak_factor,
+        max_iter_per_cycle=max_iter_per_cycle,
+        threshold_per_cycle=threshold_per_cycle,
+        deconvolve_params=deconvolve_params,
+        processing_function_threads=processing_function_threads,
     )
 
 
@@ -1060,25 +1116,18 @@ def hogbom_clean_many_threads(
         deconvolve_params, nt, nf, npol_img, residual_cube.dtype
     )
 
-    # The stop tests (threshold, divergence) run inside the kernel at every
-    # iteration; only the gain dependent limits are worked out here.
-    divergence_rms_factor, divergence_peak_factor = _divergence_factors(
-        deconvolve_params["gain"]
-    )
-
-    return hogbom.clean_cube_many_threads(
+    return _run_hogbom(
+        hogbom.clean_cube_many_threads,
         residual_cube=residual_cube,
         psf_cube=psf_cube,
         model_cube=model_cube,
-        mask_cube=mask_arg,
+        peak_mask_cube=mask_cube,
+        mask_arg=mask_arg,
         clean_box=clean_box,
-        max_iter_remaining=max_iter_per_cycle,
-        gain=deconvolve_params["gain"],
-        threshold=threshold_per_cycle,
-        processing_function_threads=int(processing_function_threads),
-        max_iter_divergence=int(deconvolve_params["max_iter_divergence"]),
-        divergence_rms_factor=divergence_rms_factor,
-        divergence_peak_factor=divergence_peak_factor,
+        max_iter_per_cycle=max_iter_per_cycle,
+        threshold_per_cycle=threshold_per_cycle,
+        deconvolve_params=deconvolve_params,
+        processing_function_threads=processing_function_threads,
     )
 
 

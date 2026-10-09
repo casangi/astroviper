@@ -1,17 +1,88 @@
-"""Unit tests for the arcae MSv2 backend of the simulator."""
+"""Unit tests for the Measurement Set v2 helpers: detection, and the arcae MSv2
+backend of the simulator."""
 
 import importlib.util
+import pathlib
 
 import numpy as np
 import pytest
 
+from astroviper.utils.measurement_set_v2 import is_measurement_set_v2
+
 arcae_missing = importlib.util.find_spec("arcae") is None
 
-pytestmark = pytest.mark.skipif(
+# Only the simulator's writer needs arcae; the detection tests always run.
+requires_arcae = pytest.mark.skipif(
     arcae_missing, reason="optional dependency arcae not installed"
 )
 
 MJD_UNIX_OFFSET_SECONDS = 3506716800.0
+
+
+# --------------------------------------------------------------------------- #
+# is_measurement_set_v2
+# --------------------------------------------------------------------------- #
+def _make_table_dir(path):
+    """A directory shaped like a casacore table (``table.dat`` + a subtable)."""
+    path.mkdir()
+    (path / "table.dat").write_bytes(b"\0")
+    (path / "table.f0").write_bytes(b"\0")
+    (path / "ANTENNA").mkdir()
+    (path / "ANTENNA" / "table.dat").write_bytes(b"\0")
+    return path
+
+
+def test_is_measurement_set_v2_table_directory(tmp_path):
+    ms_path = _make_table_dir(tmp_path / "data.ms")
+    assert is_measurement_set_v2(str(ms_path))
+    assert is_measurement_set_v2(ms_path)  # os.PathLike
+    assert is_measurement_set_v2(str(ms_path) + "/")
+
+
+def test_is_measurement_set_v2_expands_user(tmp_path, monkeypatch):
+    _make_table_dir(tmp_path / "data.ms")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert is_measurement_set_v2("~/data.ms")
+
+
+@pytest.mark.parametrize("zarr_metadata", ["zarr.json", ".zgroup", ".zattrs"])
+def test_is_measurement_set_v2_zarr_store(tmp_path, zarr_metadata):
+    """A Zarr store (v3 or v2 metadata) is never an MSv2, even next to a
+    ``table.dat``."""
+    store = tmp_path / "data.ps.zarr"
+    store.mkdir()
+    (store / zarr_metadata).write_text("{}")
+    assert not is_measurement_set_v2(str(store))
+    (store / "table.dat").write_bytes(b"\0")
+    assert not is_measurement_set_v2(str(store))
+
+
+def test_is_measurement_set_v2_not_a_table(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert not is_measurement_set_v2(str(empty))
+    file_path = tmp_path / "table.dat"
+    file_path.write_bytes(b"\0")
+    assert not is_measurement_set_v2(str(file_path))  # a file, not a directory
+    assert not is_measurement_set_v2(str(tmp_path / "missing.ms"))
+    assert not is_measurement_set_v2("s3://bucket/data.ps.zarr")
+
+
+@pytest.mark.parametrize("not_a_path", [None, 3, b"data.ms", ["data.ms"]])
+def test_is_measurement_set_v2_not_a_path(not_a_path):
+    assert not is_measurement_set_v2(not_a_path)
+
+
+def test_is_measurement_set_v2_relative_path(tmp_path, monkeypatch):
+    _make_table_dir(tmp_path / "data.ms")
+    monkeypatch.chdir(tmp_path)
+    assert is_measurement_set_v2("data.ms")
+    assert is_measurement_set_v2(pathlib.Path("data.ms"))
+
+
+# --------------------------------------------------------------------------- #
+# write_measurement_set_v2 (arcae)
+# --------------------------------------------------------------------------- #
 
 
 @pytest.fixture(scope="module")
@@ -57,6 +128,7 @@ def simulated_ms(tmp_path_factory):
     return ps_store, ms_path
 
 
+@requires_arcae
 def test_main_table_round_trip(simulated_ms):
     """MAIN carries the MSv4 content in MSv2 conventions (uvw sign, conjugate)."""
     from arcae.lib.arrow_tables import Table
@@ -83,6 +155,7 @@ def test_main_table_round_trip(simulated_ms):
     table.close()
 
 
+@requires_arcae
 def test_subtables(simulated_ms):
     from arcae.lib.arrow_tables import Table
 
@@ -103,6 +176,7 @@ def test_subtables(simulated_ms):
     field.close()
 
 
+@requires_arcae
 def test_overwrite_flag(simulated_ms):
     from astroviper.utils.measurement_set_v2 import write_measurement_set_v2
 
@@ -112,6 +186,7 @@ def test_overwrite_flag(simulated_ms):
     write_measurement_set_v2(ps_store, ms_path, overwrite=True)
 
 
+@requires_arcae
 def test_measurement_set_structure(simulated_ms):
     """The written set is a coherent casacore Measurement Set: the subtables are
     reachable through the MAIN table's keywords (the ``::`` syntax below) and

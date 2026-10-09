@@ -13,9 +13,9 @@ All iteration control is performed independently for every
 
 - ``max_iter_remaining`` is a per-plane array of remaining iterations
   (:attr:`IterationController.max_iter_remaining`, shape ``(ntime, nchan, npol)``);
-- every stopping criterion (zero mask, iteration limit, threshold, imaging cycle
-  limit, no progress) is evaluated per plane, and each plane carries its own
-  stop code;
+- every stopping criterion (zero mask, iteration limit, threshold, residual
+  entropy, imaging cycle limit, no progress) is evaluated per plane, and
+  each plane carries its own stop code;
 - thresholds may differ per plane — :meth:`IterationController.per_plane_threshold_per_cycle`
   produces a per-plane threshold_per_cycle array, and the deconvolvers accept
   per-plane ``max_iter_per_cycle`` and ``threshold_per_cycle`` arrays.
@@ -52,6 +52,7 @@ IMAGING_THRESHOLD = 2  # Peak residual below global threshold
 IMAGING_NO_PROGRESS = 4  # Model updates no longer do any iteration
 IMAGING_ZERO_MASK = 7  # Zero mask (no valid pixels)
 IMAGING_MAX_CYCLES = 9  # Reached imaging cycle limit (max_cycles)
+IMAGING_ENTROPY = 10  # Entropy of the residual passed its maximum (entropy_stop)
 
 # Model update stop codes (per-cycle convergence)
 MODEL_UPDATE_CONTINUE = 0  # Continue model updates
@@ -77,6 +78,7 @@ IMAGING_STOP_DESCRIPTIONS = {
     IMAGING_NO_PROGRESS: "No progress (model updates did no iterations)",
     IMAGING_ZERO_MASK: "Zero mask",
     IMAGING_MAX_CYCLES: "Reached max_cycles",
+    IMAGING_ENTROPY: "Residual entropy passed its maximum",
 }
 
 # Stop code descriptions for model update codes
@@ -557,6 +559,68 @@ def get_model_flux_from_imaging_dict(
     return total_flux
 
 
+ENTROPY_PARAM_DEFAULTS = {
+    "entropy_stop": False,
+    "entropy_max_snr": 6.0,
+    "entropy_spatial_bins": 7,
+    "entropy_flux_bins": 10,
+}
+
+
+def validate_entropy_params(iteration_control_params):
+    """Entropy stop parameters of ``iteration_control_params``, with defaults.
+
+    Parameters
+    ----------
+    iteration_control_params : dict or None
+        Iteration control parameters. The keys ``entropy_stop``,
+        ``entropy_max_snr``, ``entropy_spatial_bins`` and
+        ``entropy_flux_bins`` are read; a missing key takes its default
+        (``False``, ``6.0``, ``7`` and ``10``).
+
+    Returns
+    -------
+    entropy_stop : bool
+        Whether the entropy of the residual stops the imaging cycles.
+    entropy_max_snr : float
+        Ratio of the peak to the RMS of the residual below which the entropy
+        is followed.
+    entropy_spatial_bins : int
+        Spatial bins per image axis.
+    entropy_flux_bins : int
+        Flux bins per unit of RMS.
+
+    Raises
+    ------
+    ValueError
+        If ``entropy_stop`` is not a bool, ``entropy_max_snr`` is not a
+        positive number, or a number of bins is not a positive integer.
+    """
+    params = {**ENTROPY_PARAM_DEFAULTS, **(iteration_control_params or {})}
+    entropy_stop = params["entropy_stop"]
+    if not isinstance(entropy_stop, bool | np.bool_):
+        raise ValueError(f"entropy_stop must be a bool; got {entropy_stop!r}.")
+    max_snr = params["entropy_max_snr"]
+    if (
+        isinstance(max_snr, bool)
+        or not isinstance(max_snr, int | float | np.integer | np.floating)
+        or not np.isfinite(max_snr)
+        or max_snr <= 0
+    ):
+        raise ValueError(f"entropy_max_snr must be a positive number; got {max_snr!r}.")
+    bins = []
+    for key in ("entropy_spatial_bins", "entropy_flux_bins"):
+        value = params[key]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | np.integer)
+            or value < 1
+        ):
+            raise ValueError(f"{key} must be a positive integer; got {value!r}.")
+        bins.append(int(value))
+    return bool(entropy_stop), float(max_snr), bins[0], bins[1]
+
+
 # ============================================================================
 # IterationController Class
 # ============================================================================
@@ -612,6 +676,24 @@ class IterationController:
         Per-plane count of consecutive model updates that did no iteration,
         same shape as ``max_iter_remaining``. A plane is stopped with
         ``IMAGING_NO_PROGRESS`` when it reaches ``NO_PROGRESS_MODEL_UPDATES``.
+    entropy_stop : bool
+        Whether the entropy of the residual stops the imaging cycles of a
+        plane (see :meth:`check_convergence`).
+    entropy_max_snr : float
+        The entropy of a plane is followed once the peak of its residual is at
+        most this many times the RMS of the residual.
+    entropy_spatial_bins : int
+        Spatial bins per image axis of the entropy.
+    entropy_flux_bins : int
+        Flux bins per unit of RMS of the entropy.
+    max_entropy : numpy.ndarray or None
+        Per-plane highest entropy of the residual in the imaging cycles so
+        far, not a number while none has been recorded. Same shape as
+        ``max_iter_remaining``.
+    entropy_stopped : numpy.ndarray or None
+        Per-plane flag, set once the entropy stop has ended the imaging cycles
+        of the plane. Such a plane gets no more iterations and keeps the stop
+        code ``IMAGING_ENTROPY``.
 
     Imaging cycle Tracking:
     ---------------------
@@ -640,6 +722,10 @@ class IterationController:
         max_psf_fraction: float = 0.8,
         max_iter_per_cycle: int = -1,
         threshold_sigma: float = 0.0,
+        entropy_stop: bool = False,
+        entropy_max_snr: float = 6.0,
+        entropy_spatial_bins: int = 7,
+        entropy_flux_bins: int = 10,
     ):
         """
         Initialize the iteration controller with deconvolution parameters.
@@ -676,7 +762,36 @@ class IterationController:
 
         threshold_sigma : float, optional
             N-sigma threshold for stopping (default: 0.0, disabled)
+
+        entropy_stop : bool, optional
+            Stop the imaging cycles of a plane once the entropy of its
+            residual has passed its maximum (default: False)
+
+        entropy_max_snr : float, optional
+            Ratio of the peak to the RMS of the residual below which the
+            entropy is followed (default: 6.0)
+
+        entropy_spatial_bins : int, optional
+            Spatial bins per image axis of the entropy (default: 7)
+
+        entropy_flux_bins : int, optional
+            Flux bins per unit of RMS of the entropy (default: 10)
+
+        Raises:
+        -------
+        ValueError
+            If one of the entropy parameters has a wrong type or value.
         """
+        entropy_stop, entropy_max_snr, entropy_spatial_bins, entropy_flux_bins = (
+            validate_entropy_params(
+                {
+                    "entropy_stop": entropy_stop,
+                    "entropy_max_snr": entropy_max_snr,
+                    "entropy_spatial_bins": entropy_spatial_bins,
+                    "entropy_flux_bins": entropy_flux_bins,
+                }
+            )
+        )
         # Iteration limits. max_iter is per-plane and allocated lazily (the cube
         # shape is not known until the first ImagingDict is seen); until then
         # _max_iter holds the scalar per-plane budget. See _ensure_state.
@@ -687,6 +802,13 @@ class IterationController:
         self.stop_code_model_update = None
         # Per-plane consecutive model updates without any iteration.
         self.zero_iter_model_updates = None
+        # Entropy stop: parameters and per-plane state (allocated lazily).
+        self.entropy_stop = entropy_stop
+        self.entropy_max_snr = entropy_max_snr
+        self.entropy_spatial_bins = entropy_spatial_bins
+        self.entropy_flux_bins = entropy_flux_bins
+        self.max_entropy = None
+        self.entropy_stopped = None
         self.max_cycles = max_cycles
 
         # Threshold parameters
@@ -759,6 +881,8 @@ class IterationController:
                 needed, MODEL_UPDATE_CONTINUE, dtype=int
             )
             self.zero_iter_model_updates = np.zeros(needed, dtype=int)
+            self.max_entropy = np.full(needed, np.nan, dtype=float)
+            self.entropy_stopped = np.zeros(needed, dtype=bool)
         elif any(
             n > c for n, c in zip(needed, self.max_iter_remaining.shape, strict=False)
         ):
@@ -767,13 +891,15 @@ class IterationController:
                 for n, c in zip(needed, self.max_iter_remaining.shape, strict=False)
             )
             sl = tuple(slice(0, d) for d in self.max_iter_remaining.shape)
-            for attr, fill in (
-                ("max_iter_remaining", self._max_iter),
-                ("stop_code_imaging", IMAGING_CONTINUE),
-                ("stop_code_model_update", MODEL_UPDATE_CONTINUE),
-                ("zero_iter_model_updates", 0),
+            for attr, fill, dtype in (
+                ("max_iter_remaining", self._max_iter, int),
+                ("stop_code_imaging", IMAGING_CONTINUE, int),
+                ("stop_code_model_update", MODEL_UPDATE_CONTINUE, int),
+                ("zero_iter_model_updates", 0, int),
+                ("max_entropy", np.nan, float),
+                ("entropy_stopped", False, bool),
             ):
-                new = np.full(grown, fill, dtype=int)
+                new = np.full(grown, fill, dtype=dtype)
                 new[sl] = getattr(self, attr)
                 setattr(self, attr, new)
 
@@ -967,8 +1093,21 @@ class IterationController:
         1. Zero mask (stopcode 7): No valid pixels to clean
         2. Iteration limit (stopcode 1): max_iter_remaining <= 0
         3. Threshold reached (stopcode 2): peak_residual <= threshold
-        4. Imaging cycle limit (stopcode 9): max_cycles == 0 (if not -1)
-        5. No progress (stopcode 4): the plane's last
+        4. Residual entropy (stopcode 10), only with ``entropy_stop``: the
+           entropy of the plane's residual (``entropy`` in the ImagingDict,
+           see :func:`build_residual_imaging_dict`) is lower than the highest
+           entropy of an earlier imaging cycle. The entropy rises while the
+           clean removes emission and falls once the clean starts to fit
+           noise (Homan, Roth and Pushkarev 2024, AJ 167, 11), so a fall means
+           that the maximum has been passed. Only residuals whose peak is at
+           most ``entropy_max_snr`` times their RMS count. The stop is final
+           for the plane: it gets no more iterations and keeps this stop code.
+           The test is made on the residual of a residual update
+           (``model_update_ran`` False), so it notices the fall one model
+           update after the maximum; the model of that last model update is
+           kept.
+        5. Imaging cycle limit (stopcode 9): max_cycles == 0 (if not -1)
+        6. No progress (stopcode 4): the plane's last
            ``NO_PROGRESS_MODEL_UPDATES`` model updates did no iteration. Such
            a plane cannot change its residual, so without this stop it would
            cycle for ever whenever ``threshold`` is 0 and ``max_cycles`` is -1
@@ -999,6 +1138,11 @@ class IterationController:
 
         chan : int, optional
             Filter by specific channel index
+        model_update_ran : bool, optional
+            ``True`` when ``imaging_dict`` is the result of a model update that
+            ran in this imaging cycle. ``False`` (default) for a check on the
+            residual alone, where no model update has run; the entropy stop is
+            decided on such a check.
 
         model_update_ran : bool, optional
             ``True`` when ``imaging_dict`` is the result of a model update that
@@ -1059,15 +1203,22 @@ class IterationController:
                 else:
                     self.zero_iter_model_updates[idx] = 0
 
+            # Entropy of the fresh residual of this plane against the highest
+            # entropy of its earlier imaging cycles.
+            if self.entropy_stop and not model_update_ran:
+                self._follow_entropy(idx, fields)
+
             # Imaging cycle stopping criteria, in priority order (per plane):
-            #   1 zero mask, 2 iteration limit, 3 threshold, 4 imaging cycle
-            #   limit, 5 no progress
+            #   1 zero mask, 2 iteration limit, 3 threshold, 4 residual entropy,
+            #   5 imaging cycle limit, 6 no progress
             if masksum == 0:
                 maj = IMAGING_ZERO_MASK
             elif remaining <= 0:
                 maj = IMAGING_MAX_ITER
             elif self.threshold > 0 and peak_residual <= self.threshold:
                 maj = IMAGING_THRESHOLD
+            elif self.entropy_stopped[idx]:
+                maj = IMAGING_ENTROPY
             elif self.max_cycles != -1 and self.max_cycles <= 0:
                 maj = IMAGING_MAX_CYCLES
             elif self.zero_iter_model_updates[idx] >= NO_PROGRESS_MODEL_UPDATES:
@@ -1116,6 +1267,28 @@ class IterationController:
             imaging=agg_imaging, model_update=MODEL_UPDATE_CONTINUE
         )
         return self.stopcode, self.stopdescription
+
+    def _follow_entropy(self, idx, fields):
+        """Entropy stop of one plane, from the residual of a residual update.
+
+        ``fields`` is the plane's ImagingDict entry. Its latest ``entropy`` is
+        compared with the highest entropy of the plane's earlier imaging
+        cycles (``max_entropy``): a lower value sets ``entropy_stopped``, a
+        higher one becomes the new maximum. An entry without an entropy, or
+        with one that is not a number (the peak of the residual is above
+        ``entropy_max_snr`` times its RMS), changes nothing. Nor does any
+        entropy of a plane that has been stopped already.
+        """
+        if self.entropy_stopped[idx]:
+            return
+        entropy = self._latest(fields, "entropy", np.nan)
+        if entropy is None or not np.isfinite(entropy):
+            return
+        highest = self.max_entropy[idx]
+        if np.isfinite(highest) and entropy < highest:
+            self.entropy_stopped[idx] = True
+        elif not np.isfinite(highest) or entropy > highest:
+            self.max_entropy[idx] = entropy
 
     def update_counts(
         self,
@@ -1315,6 +1488,8 @@ class IterationController:
             self.stop_code_imaging[...] = IMAGING_CONTINUE
             self.stop_code_model_update[...] = MODEL_UPDATE_CONTINUE
             self.zero_iter_model_updates[...] = 0
+            self.max_entropy[...] = np.nan
+            self.entropy_stopped[...] = False
         self.cycles_done = 0
         self.total_iter_done = 0
         self.stopcode = StopCode(
@@ -1332,6 +1507,8 @@ class IterationController:
             self.stop_code_imaging[...] = IMAGING_CONTINUE
             self.stop_code_model_update[...] = MODEL_UPDATE_CONTINUE
             self.zero_iter_model_updates[...] = 0
+            self.max_entropy[...] = np.nan
+            self.entropy_stopped[...] = False
 
     def get_state(self) -> dict[str, Any]:
         """Get current state of the iteration controller as a dictionary.
@@ -1352,6 +1529,10 @@ class IterationController:
             "min_psf_fraction": self.min_psf_fraction,
             "max_psf_fraction": self.max_psf_fraction,
             "max_iter_per_cycle": self.max_iter_per_cycle,
+            "entropy_stop": self.entropy_stop,
+            "entropy_max_snr": self.entropy_max_snr,
+            "entropy_spatial_bins": self.entropy_spatial_bins,
+            "entropy_flux_bins": self.entropy_flux_bins,
             "cycles_done": self.cycles_done,
             "total_iter_done": self.total_iter_done,
             "stopcode": {
@@ -1818,17 +1999,27 @@ def build_residual_imaging_dict(
         ``"sky"`` key resolves to the residual variable.
     iteration_control_params : dict
         Iteration-control parameters; ``gain`` seeds the placeholder
-        per-plane field.
+        per-plane field. With ``entropy_stop`` the entropy of the residual is
+        worked out as well (``entropy_max_snr``, ``entropy_spatial_bins``,
+        ``entropy_flux_bins``).
 
     Returns
     -------
     ImagingDict
         Per-plane ``peakres``/``peakres_nomask``/``masksum``/``iter_done``
-        stats, indexed ``(time, chan, pol)``.
+        stats, indexed ``(time, chan, pol)``. With ``entropy_stop`` also
+        ``entropy`` and ``residual_snr``, the entropy of the residual and the
+        ratio of its peak to its RMS
+        (:func:`~astroviper.processing_functions.image_analysis.image_statistics.image_residual_entropy`).
     """
+    entropy_stop, entropy_max_snr, entropy_spatial_bins, entropy_flux_bins = (
+        validate_entropy_params(iteration_control_params)
+    )
     residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
-    residual_abs = np.abs(img_xds[residual_data_group["sky"]].values)
-    plane_peak = residual_abs.max(axis=(-2, -1))  # (ntime, nfreq, npol)
+    # plane by plane and block by block: no copy of the residual cube
+    plane_peak = imgstats.cube_plane_abs_max(
+        img_xds[residual_data_group["sky"]].values
+    )  # (ntime, nfreq, npol)
     ntime, nfreq, npol = plane_peak.shape
     masksum = imgstats.get_image_masksum(
         img_xds, data_group_name=image_data_group_in_name
@@ -1836,25 +2027,59 @@ def build_residual_imaging_dict(
     max_psf_sidelobe_arr = img_xds[
         residual_data_group["max_sidelobe_point_spread_function"]
     ].values  # (ntime, nfreq, npol)
+    if entropy_stop:
+        entropy, residual_snr = imgstats.image_residual_entropy(
+            img_xds,
+            data_group_name=image_data_group_in_name,
+            spatial_bins=entropy_spatial_bins,
+            flux_bins=entropy_flux_bins,
+            max_snr=entropy_max_snr,
+        )
     rd = ImagingDict()
     for tt in range(ntime):
         for nn in range(nfreq):
             for pp in range(npol):
                 peak = float(plane_peak[tt, nn, pp])
-                rd.add(
-                    {
-                        "peakres": peak,
-                        "peakres_nomask": peak,
-                        "masksum": int(masksum[tt, nn, pp]),
-                        "iter_done": 0,
-                        "max_psf_sidelobe": float(max_psf_sidelobe_arr[tt, nn, pp]),
-                        "gain": iteration_control_params["gain"],
-                    },
-                    time=tt,
-                    pol=pp,
-                    chan=nn,
-                )
+                fields = {
+                    "peakres": peak,
+                    "peakres_nomask": peak,
+                    "masksum": int(masksum[tt, nn, pp]),
+                    "iter_done": 0,
+                    "max_psf_sidelobe": float(max_psf_sidelobe_arr[tt, nn, pp]),
+                    "gain": iteration_control_params["gain"],
+                }
+                if entropy_stop:
+                    fields["entropy"] = float(entropy[tt, nn, pp])
+                    fields["residual_snr"] = float(residual_snr[tt, nn, pp])
+                rd.add(fields, time=tt, pol=pp, chan=nn)
     return rd
+
+
+def copy_residual_entropy(imaging_dict, residual_imaging_dict):
+    """Record the entropy of the residual in the result of a model update.
+
+    A model update reports what the deconvolver did. The entropy belongs to
+    the residual the model update started from, which
+    :func:`build_residual_imaging_dict` has measured. This copies ``entropy``
+    and ``residual_snr`` of every plane into ``imaging_dict``, so that the
+    merged record holds one value per imaging cycle.
+
+    Parameters
+    ----------
+    imaging_dict : ImagingDict
+        Result of the model update. Modified in place.
+    residual_imaging_dict : ImagingDict
+        Statistics of the residual the model update started from.
+    """
+    for key, residual_fields in residual_imaging_dict.data.items():
+        if key not in imaging_dict.data:
+            continue
+        for field in ("entropy", "residual_snr"):
+            if field in residual_fields:
+                value = residual_fields[field]
+                imaging_dict.data[key][field] = (
+                    list(value) if isinstance(value, list) else [value]
+                )
 
 
 def get_calculate_cycle_controls(
@@ -1923,5 +2148,9 @@ def get_calculate_cycle_controls(
     # copy; the controller's own budget is decremented later by update_counts.
     max_iter_per_cycle_cap, _ = controller.calculate_cycle_controls(rd)
     max_iter_per_cycle = controller.max_iter_remaining.clip(max=max_iter_per_cycle_cap)
+    # A plane that the entropy stop has ended is not cleaned any further while
+    # the other planes of its channel carry on.
+    if controller.entropy_stopped is not None:
+        max_iter_per_cycle[controller.entropy_stopped] = 0
 
     return max_iter_per_cycle, threshold_per_cycle

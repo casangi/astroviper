@@ -119,6 +119,24 @@ def imaging_preparation_single_field(
           go on. Default 1, the first such iteration; ``-1`` disables the
           test. *Differs from CASA*, which tests the peak for a fixed 10
           percent rise once every 2000 iterations.
+        - ``entropy_stop`` : If ``True``, a plane stops once the entropy of
+          its residual has passed its maximum. The entropy (Homan, Roth and
+          Pushkarev 2024, AJ 167, 11) measures how much the residual looks
+          like noise everywhere. It rises while the clean removes emission
+          and falls once the clean fits noise. It is worked out after every
+          residual update, and the plane stops when it is lower than in an
+          earlier cycle. The fall is noticed one model update after the
+          maximum and the model of that model update is kept, so a small
+          ``max_iter_per_cycle`` makes the stop sharper. Default ``False``.
+          No CASA equivalent.
+        - ``entropy_max_snr`` : The entropy of a plane is followed once the
+          peak of its residual inside the clean mask is at most this many
+          times the RMS of the residual. Above it the residual is dominated
+          by the pattern of the point spread function. Default 6.
+        - ``entropy_spatial_bins`` : Number of spatial bins along each of the
+          two image axes used for the entropy. Default 7.
+        - ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for
+          the entropy. Default 10.
 
         A plane whose model updates do no iteration any more (two in a row)
         is stopped with the no progress stop code, so an all-zero plane cannot
@@ -174,10 +192,15 @@ def imaging_preparation_single_field(
     from astroviper.processing_functions.imaging.utils import (
         ImagingDict,
         IterationController,
+        validate_entropy_params,
     )
 
     logger.debug("Processing chunk " + str(task_id))
 
+    # The entropy stop is optional: its keys take their defaults when absent.
+    entropy_stop, entropy_max_snr, entropy_spatial_bins, entropy_flux_bins = (
+        validate_entropy_params(iteration_control_params)
+    )
     controller = IterationController(
         max_iter=iteration_control_params["max_iter"],
         max_cycles=iteration_control_params["max_cycles"],
@@ -187,6 +210,10 @@ def imaging_preparation_single_field(
         min_psf_fraction=iteration_control_params["min_psf_fraction"],
         max_psf_fraction=iteration_control_params["max_psf_fraction"],
         max_iter_per_cycle=iteration_control_params["max_iter_per_cycle"],
+        entropy_stop=entropy_stop,
+        entropy_max_snr=entropy_max_snr,
+        entropy_spatial_bins=entropy_spatial_bins,
+        entropy_flux_bins=entropy_flux_bins,
     )
     combined_imaging_dict = ImagingDict()
 
@@ -335,6 +362,24 @@ def image_cube_single_field(
           go on. Default 1, the first such iteration; ``-1`` disables the
           test. *Differs from CASA*, which tests the peak for a fixed 10
           percent rise once every 2000 iterations.
+        - ``entropy_stop`` : If ``True``, a plane stops once the entropy of
+          its residual has passed its maximum. The entropy (Homan, Roth and
+          Pushkarev 2024, AJ 167, 11) measures how much the residual looks
+          like noise everywhere. It rises while the clean removes emission
+          and falls once the clean fits noise. It is worked out after every
+          residual update, and the plane stops when it is lower than in an
+          earlier cycle. The fall is noticed one model update after the
+          maximum and the model of that model update is kept, so a small
+          ``max_iter_per_cycle`` makes the stop sharper. Default ``False``.
+          No CASA equivalent.
+        - ``entropy_max_snr`` : The entropy of a plane is followed once the
+          peak of its residual inside the clean mask is at most this many
+          times the RMS of the residual. Above it the residual is dominated
+          by the pattern of the point spread function. Default 6.
+        - ``entropy_spatial_bins`` : Number of spatial bins along each of the
+          two image axes used for the entropy. Default 7.
+        - ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for
+          the entropy. Default 10.
 
         A plane whose model updates do no iteration any more (two in a row)
         is stopped with the no progress stop code, so an all-zero plane cannot
@@ -383,10 +428,12 @@ def image_cube_single_field(
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
         residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable.
     primary_beam_correction : bool, optional
-        If ``True`` divide the restored sky by the (power) primary beam,
-        writing the ``sky_restored_primary_beam_corrected``
-        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable (CASA ``pbcor``);
-        pixels below the primary-beam cutoff are blanked with NaN.  Requires
+        If ``True`` write the primary beam corrected restored sky to the
+        ``sky_restored_primary_beam_corrected``
+        (``SKY_RESTORED_PRIMARY_BEAM_CORRECTED``) variable: the model divided
+        by the (power) primary beam and convolved with the clean beam, plus
+        the residual divided by the primary beam; pixels below the primary
+        beam cutoff (``primary_beam_limit``) are blanked with NaN.  Requires
         ``restore``.
     psf_fitting_method : str, optional
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
@@ -422,6 +469,7 @@ def image_cube_single_field(
     from astroviper.processing_functions.imaging.utils import (
         accumulate_timing,
         build_residual_imaging_dict,
+        copy_residual_entropy,
         get_calculate_cycle_controls,
         merge_imaging_dicts,
     )
@@ -552,6 +600,9 @@ def image_cube_single_field(
                 image_data_group_out_name="model",
             )
             accumulate_timing(timing, model_update_return_df)
+            # The entropy belongs to the residual this model update started
+            # from (a no-op unless the entropy stop is on).
+            copy_residual_entropy(imaging_dict, residual_imaging_dict)
 
             # Only flip once a deconvolve actually runs: if every cycle is
             # skipped, no model is ever created, and the closing residual update
@@ -572,6 +623,8 @@ def image_cube_single_field(
         # It also applies the no progress stop: a plane whose model updates do
         # no iteration any more (an all-zero plane, say) cannot change its
         # residual and is stopped instead of cycling for ever.
+        # The entropy stop was decided above, on the fresh residual of this
+        # cycle; model_update_ran tells the controller which record it sees.
         stopcode, stopdesc = controller.check_convergence(
             imaging_dict, model_update_ran=model_update_ran
         )
@@ -613,6 +666,15 @@ def image_cube_single_field(
     # img_xds at this point. restore_image self-times and returns a one-row
     # timing frame (``T_restore``) folded in like the other steps.
     timing["T_restore"] = 0.0
+    # The primary beam corrected restored image is made in the same pass as
+    # the restored image: the model is divided by the primary beam before its
+    # convolution with the clean beam, which needs the model plane before the
+    # restore may overwrite it. The deconvolver's primary_beam_limit is the
+    # blanking cutoff when set, else the CASA pblimit default of 0.2.
+    timing["T_correct_sky_by_primary_beam"] = 0.0
+    correct = (
+        primary_beam_correction and restore and iteration_control_params["max_iter"] > 0
+    )
     if restore and model_exists:
         from astroviper.processing_functions.imaging.restore import restore_image
 
@@ -626,26 +688,12 @@ def image_cube_single_field(
             # written to the output store; let the restore reuse its buffer
             # instead of allocating a fresh restored cube.
             consume_model="sky_model" not in image_data_variables_keep,
-        )
-        accumulate_timing(timing, restore_return_df)
-
-    # Primary-beam correction of the restored sky (CASA pbcor): a single
-    # division since PRIMARY_BEAM follows the CASA (power) definition. Uses
-    # the deconvolver's primary_beam_limit as the blanking cutoff when set,
-    # else the CASA pblimit default of 0.2.
-    timing["T_correct_sky_by_primary_beam"] = 0.0
-    if primary_beam_correction and restore and iteration_control_params["max_iter"] > 0:
-        from astroviper.processing_functions.imaging.correct_sky_by_primary_beam import (
-            correct_sky_by_primary_beam,
-        )
-
-        img_xds, pb_corr_return_df = correct_sky_by_primary_beam(
-            img_xds,
+            primary_beam_correction=correct,
             primary_beam_limit=(
                 iteration_control_params.get("primary_beam_limit", 0.0) or 0.2
             ),
         )
-        accumulate_timing(timing, pb_corr_return_df)
+        accumulate_timing(timing, restore_return_df)
 
     timing["task_id"] = task_id
     timing["n_channels"] = img_xds.sizes["frequency"]
