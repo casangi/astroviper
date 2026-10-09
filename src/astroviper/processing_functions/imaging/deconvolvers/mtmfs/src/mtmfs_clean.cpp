@@ -364,7 +364,8 @@ int taylor_hessian(const T* psf, int nterms, int nx, int ny, std::vector<float>&
 template <typename T>
 CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nterms, int nx, int ny,
                      const std::vector<float>& scales, float small_scale_bias, int max_iter_remaining, T gain,
-                     T threshold, T psf_fraction, T mask_threshold) {
+                     T threshold, T psf_fraction, T mask_threshold,
+                     const deconvolvers::DivergenceControl<T>& divergence) {
     if (max_iter_remaining < 0) throw std::invalid_argument("max_iter_remaining must be >= 0");
     if (!std::isfinite(static_cast<double>(gain)) || !std::isfinite(static_cast<double>(threshold)) ||
         !std::isfinite(static_cast<double>(psf_fraction)) || !std::isfinite(static_cast<double>(mask_threshold)))
@@ -454,6 +455,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
     std::vector<T> max_scale_val(ns, static_cast<T>(0));
     std::vector<std::array<int, 2>> max_scale_pos(ns, {0, 0});
     std::vector<std::vector<T>> delta_model(nt, std::vector<T>(nimg, static_cast<T>(0)));
+    deconvolvers::PlaneStopTest<T> stop_test;
     auto coeff_at = [&](int scale, int t1, std::size_t k) -> T {
         T c = static_cast<T>(0);
         for (int t2 = 0; t2 < nt; ++t2)
@@ -463,12 +465,18 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
     };
 
     auto check_convergence = [&](int itercount, bool component_selected) -> int {
-        const PeakResult<T> pr =
-            find_max_abs_mask<T>(mat_r[static_cast<std::size_t>(w.ind2(0, 0))].data(), vec_scale_masks[0].data(), nx, ny);
+        double sum_squares = 0.0;
+        const PeakResult<T> pr = find_max_abs_mask<T>(mat_r[static_cast<std::size_t>(w.ind2(0, 0))].data(),
+                                                      vec_scale_masks[0].data(), nx, ny, sum_squares);
         const T norma = static_cast<T>(1.0 / w.mat_a[0][0]);
         const T rmaxval = std::abs(pr.value * norma);
         int flag = 0;
-        if (std::abs(rmaxval) < std::max(threshold, fluxlimit)) flag = kStopThreshold;
+        if (std::abs(rmaxval) < std::max(threshold, fluxlimit))
+            flag = kStopThreshold;
+        // Divergence test shared with the other deconvolvers, on the image and
+        // pixels of the threshold test.
+        else if (stop_test.check_divergence(rmaxval, sum_squares, divergence) != deconvolvers::STOP_NONE)
+            flag = kStopDiverged;
         if (component_selected && itercount > 1 && gain <= static_cast<T>(0)) {
             loopgain = (global_max_val < prev_max) ? loopgain * static_cast<T>(1.5) : loopgain / static_cast<T>(1.5);
             loopgain = std::min(static_cast<T>(1) - psf_fraction, loopgain);
@@ -490,9 +498,9 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
 
     int stop = check_convergence(0, false);
     int iterdone = 0;
-    if (stop == kStopThreshold) {
+    if (stop != 0) {
         out.iterations = 0;
-        out.stop_code = kStopThreshold;
+        out.stop_code = stop;
     } else {
         for (int itercount = 0; itercount < max_iter_remaining; ++itercount) {
             global_max_val = static_cast<T>(-1e10);
@@ -638,9 +646,11 @@ template int taylor_hessian<float>(const float*, int, int, int, std::vector<floa
 template int taylor_hessian<double>(const double*, int, int, int, std::vector<float>&, float, std::vector<double>&,
                                     std::vector<double>&, std::vector<double>&, int&);
 template CleanResult<float> clean<float>(float*, float*, const float*, const float*, int, int, int,
-                                         const std::vector<float>&, float, int, float, float, float, float);
+                                         const std::vector<float>&, float, int, float, float, float, float,
+                                         const deconvolvers::DivergenceControl<float>&);
 template CleanResult<double> clean<double>(double*, double*, const double*, const double*, int, int, int,
-                                           const std::vector<float>&, float, int, double, double, double, double);
+                                           const std::vector<float>&, float, int, double, double, double, double,
+                                           const deconvolvers::DivergenceControl<double>&);
 template void principal_solution<float>(float*, const double*, int, int, int);
 template void principal_solution<double>(double*, const double*, int, int, int);
 

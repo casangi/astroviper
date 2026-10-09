@@ -718,6 +718,7 @@ class TestInPlaceContract:
             "peak_residual",
             "model_flux",
             "converged",
+            "diverged",
             "stop_code",
             "scales",
             "small_scale_bias",
@@ -1213,6 +1214,160 @@ def test_psf_fraction_caps_adaptive_gain(dtype):
     )
     assert result["stop_code"] == mtmfs.STOP_DIVERGED
     assert result["iterations_performed"] == 3
+
+
+def _negative_transfer_problem(dtype=np.float32):
+    """The PSF and residual of test_adaptive_gain_reports_divergence: every
+    component makes the residual grow."""
+    psf = np.zeros((1, 32, 32), dtype=dtype)
+    psf[0, 16, 16] = 1.0
+    psf[0, [15, 17, 16, 16], [16, 16, 15, 17]] = 0.9
+    yy, xx = np.indices((32, 32))
+    box = (abs(yy - 16) < 6) & (abs(xx - 16) < 6)
+    residual = np.where((yy + xx) % 2 == 0, 1.0, -1.0) * box
+    return np.ascontiguousarray(residual[None], dtype=dtype), psf
+
+
+def test_divergence_test_is_off_by_default():
+    residual, psf = _negative_transfer_problem()
+    model = np.zeros_like(residual)
+    result = mtmfs.clean(residual, psf, model, gain=0.1, max_iter_remaining=200)
+    # with a fixed gain nothing else stops the runaway
+    assert result["stop_code"] == mtmfs.STOP_MAX_ITER
+    assert result["iterations_performed"] == 200
+    assert not result["diverged"]
+    off_residual, _ = _negative_transfer_problem()
+    off_model = np.zeros_like(off_residual)
+    mtmfs.clean(
+        off_residual,
+        psf,
+        off_model,
+        gain=0.1,
+        max_iter_remaining=200,
+        max_iter_divergence=-1,
+    )
+    np.testing.assert_array_equal(off_residual, residual)
+    np.testing.assert_array_equal(off_model, model)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(("gain", "iterations"), [(0.1, 3), (0.5, 2)])
+def test_divergence_test_stops_a_fixed_gain_runaway(dtype, gain, iterations):
+    """The divergence test shared with the other deconvolvers, with the factors
+    deconvolve() derives from the gain (_divergence_factors)."""
+    residual, psf = _negative_transfer_problem(dtype)
+    result = mtmfs.clean(
+        residual,
+        psf,
+        np.zeros_like(residual),
+        gain=gain,
+        max_iter_remaining=200,
+        max_iter_divergence=1,
+        divergence_rms_factor=1 + gain / 10,
+        divergence_peak_factor=1 + gain,
+    )
+    assert result["stop_code"] == mtmfs.STOP_DIVERGED
+    assert result["diverged"]
+    assert not result["converged"]
+    assert result["iterations_performed"] == iterations
+
+
+@pytest.mark.parametrize(("max_iter_divergence", "iterations"), [(1, 5), (3, 7)])
+def test_divergence_soft_limit_counts_consecutive_components(
+    max_iter_divergence, iterations
+):
+    residual, psf = _negative_transfer_problem()
+    result = mtmfs.clean(
+        residual,
+        psf,
+        np.zeros_like(residual),
+        gain=0.1,
+        max_iter_remaining=200,
+        max_iter_divergence=max_iter_divergence,
+        divergence_rms_factor=1.01,
+        divergence_peak_factor=1e9,
+    )
+    assert result["stop_code"] == mtmfs.STOP_DIVERGED
+    assert result["iterations_performed"] == iterations
+
+
+def test_divergence_at_the_first_check_places_nothing():
+    residual, psf = _negative_transfer_problem()
+    residual_in = residual.copy()
+    model = np.zeros_like(residual)
+    result = mtmfs.clean(
+        residual,
+        psf,
+        model,
+        gain=0.1,
+        max_iter_remaining=200,
+        max_iter_divergence=1,
+        divergence_peak_factor=0.5,
+    )
+    assert result["stop_code"] == mtmfs.STOP_DIVERGED
+    assert result["iterations_performed"] == 0
+    assert not model.any()
+    np.testing.assert_array_equal(residual, residual_in)
+
+
+@pytest.mark.parametrize("nterms", [1, 2])
+def test_divergence_test_leaves_a_healthy_clean_unchanged(nterms):
+    psf = _tclean_like_psf(nterms, 100, 100)
+    true_model = np.zeros((nterms, 100, 100), dtype=np.float32)
+    true_model[0, 50, 50] = 1.0
+    if nterms == 2:
+        true_model[1, 50, 50] = -0.5
+    dirty = _dirty_from_model(psf, true_model)
+    runs = []
+    for kwargs in (
+        {},
+        {
+            "max_iter_divergence": 1,
+            "divergence_rms_factor": 1.01,
+            "divergence_peak_factor": 1.1,
+        },
+    ):
+        residual = dirty.copy()
+        model = np.zeros_like(residual)
+        result = mtmfs.clean(
+            residual,
+            psf,
+            model,
+            max_iter_remaining=50,
+            gain=0.1,
+            threshold=1e-4,
+            **kwargs,
+        )
+        runs.append((result, residual, model))
+    (result, residual, model), (on, residual_on, model_on) = runs
+    assert not on["diverged"]
+    assert on["iterations_performed"] == result["iterations_performed"]
+    np.testing.assert_array_equal(residual_on, residual)
+    np.testing.assert_array_equal(model_on, model)
+
+
+def test_divergence_test_does_not_stop_a_multiscale_clean():
+    """Large-scale components change the residual inside the scale-0 mask
+    without tripping the test."""
+    psf = _tclean_like_psf(1, 200, 200)
+    yy, xx = np.mgrid[0:200, 0:200]
+    blob = 3.0 * np.exp(-((xx - 100) ** 2 + (yy - 100) ** 2) / (2.0 * 15.0**2))
+    residual = _dirty_from_model(psf, np.ascontiguousarray(blob[None], np.float32))
+    model = np.zeros_like(residual)
+    for _cycle in range(3):
+        result = mtmfs.clean(
+            residual,
+            psf,
+            model,
+            scales=[0, 20, 40, 100],
+            small_scale_bias=0.9,
+            max_iter_remaining=100,
+            gain=0.1,
+            max_iter_divergence=1,
+            divergence_rms_factor=1.01,
+            divergence_peak_factor=1.1,
+        )
+        assert result["stop_code"] == mtmfs.STOP_MAX_ITER
 
 
 def test_psf_fraction_stops_at_fraction_of_initial_peak():
