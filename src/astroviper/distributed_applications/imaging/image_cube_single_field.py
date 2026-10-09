@@ -198,6 +198,17 @@ def image_cube_single_field(
         - ``max_psf_fraction`` [CASA ``maxpsffraction``] : Upper clamp on the
           same PSF fraction; it guarantees a minimum amount of cleaning per
           model update even when the PSF sidelobe level is high.
+        - ``max_iter_divergence`` : Divergence test of the model update
+          (Hogbom). Number of consecutive deconvolution iterations the RMS of
+          a plane's residual, taken over the clean mask, may be above
+          ``(1 + gain / 10)`` times the lowest RMS it has reached in the model
+          update before that model update is stopped as diverged. A peak
+          above ``(1 + gain)`` times the peak at the start of the model
+          update, or a peak that is not finite, stops it at once. The next
+          residual update then recomputes the true residual and the cycles
+          go on. Default 1, the first such iteration; ``-1`` disables the
+          test. *Differs from CASA*, which tests the peak for a fixed 10
+          percent rise once every 2000 iterations.
         - ``entropy_stop`` : If ``True``, a plane stops once the entropy of
           its residual has passed its maximum. The entropy (Homan, Roth and
           Pushkarev 2024, AJ 167, 11) measures how much the residual looks
@@ -216,6 +227,10 @@ def image_cube_single_field(
           two image axes used for the entropy. Default 7.
         - ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for
           the entropy. Default 10.
+
+        A plane whose model updates do no iteration any more (two in a row)
+        is stopped with the no progress stop code, so an all-zero plane cannot
+        keep its channel cycling.
 
         Derived per plane before each model update (not set by the caller):
         ``psf_fraction = clamp(max_psf_sidelobe * psf_sidelobe_factor,
