@@ -202,6 +202,51 @@ def test_residual_update_with_model_uses_the_imaged_data_group(data_group_name):
     assert residual_peak < 1e-2 * dirty_peak
 
 
+def test_imaging_setup_uses_the_primary_beam_params():
+    """primary_beam_params reach the primary beam of the setup (the VLA beam here)."""
+    from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
+        casa_airy_disk_response,
+    )
+    from astroviper.utils.beam_models import airy_disk_model
+
+    image_params = {
+        "image_size": IMAGE_SIZE,
+        "cell_size": CELL_SIZE,
+        "phase_direction": np.array([1.0, 0.5]),
+        "time_coords": [0],
+        "polarization_coords": ["I", "Q"],
+        "fft_padding": 1.2,
+    }
+    common = dict(
+        processing_set_data_group_name="base",
+        single_precision_image=False,
+        fft_backend="scipy",
+    )
+    beams = {}
+    for name, params in (("default", None), ("vla", {"telescope": "vla"})):
+        img_xds, _ = imaging_setup_single_field(
+            _point_source_processing_set("base"),
+            _empty_image(),
+            image_params,
+            {"weighting": "natural"},
+            primary_beam_params=params,
+            **common,
+        )
+        beams[name] = img_xds["PRIMARY_BEAM"].values[0, 0, 0]
+    vla = airy_disk_model("vla")
+    expected = casa_airy_disk_response(
+        _empty_image().l.values[:, None],
+        _empty_image().m.values[None, :],
+        FREQUENCY,
+        vla["dish_diameter"],
+        vla["blockage_diameter"],
+        vla["max_rad_1GHz"],
+        ipower=2,
+    )
+    np.testing.assert_array_equal(beams["vla"], expected)
+    assert not np.allclose(beams["vla"], beams["default"])
+
+
 @pytest.mark.parametrize("data_group_name", ["base", "corrected"])
 def test_make_visibility_model_reads_the_input_data_group(data_group_name):
     """Every MS is degridded against ``ms_data_group_in_name``."""

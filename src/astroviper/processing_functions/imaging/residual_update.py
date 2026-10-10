@@ -24,6 +24,7 @@ def imaging_setup_single_field(
     image_data_group_out_name="residual",
     psf_fitting_method="astroviper",
     gridding_kernel_params=None,
+    primary_beam_params=None,
 ):
     """Perform the once-per-chunk imaging setup before the imaging cycle loop.
 
@@ -97,6 +98,17 @@ def imaging_setup_single_field(
         the defaults ``{"type": "prolate_spheroidal", "support": 7,
         "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
         defaults.
+    primary_beam_params : dict, optional
+        The primary beam of the imager, the power pattern of CASA's obscured Airy
+        disk that gives the clean mask and the primary beam correction:
+        ``telescope`` (``"alma"``, ``"aca"``, ``"vla"`` or ``"ngvla"``, CASA's
+        PBMath values of :func:`~astroviper.utils.beam_models.airy_disk_model`),
+        ``effective_dish_diameter`` and ``blockage_diameter`` (metres) and
+        ``max_rad_1GHz`` (CASA's maximum radius of the beam table at 1 GHz in
+        radians, scaled as 1 / frequency, which sets the radius sampling of the
+        beam). Numbers given with a telescope override that telescope's values;
+        no telescope means ``"alma"``. ``None`` is the ALMA 12 m beam (10.7 m,
+        0.75 m, 1.784 deg at 1 GHz).
 
     Returns
     -------
@@ -123,6 +135,7 @@ def imaging_setup_single_field(
     )
     from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (
         make_primary_beam_single_field,
+        resolve_primary_beam_params,
     )
 
     if image_data_variables_keep is None:
@@ -188,6 +201,7 @@ def imaging_setup_single_field(
         image_data_group_in_name=image_data_group_out_name,
         image_data_group_out_name=image_data_group_out_name,
         float_dtype=float_dtype,
+        **resolve_primary_beam_params(primary_beam_params),
     )
     T_primary_beam = float(primary_beam_return_df["T_primary_beam"].iloc[0])
 

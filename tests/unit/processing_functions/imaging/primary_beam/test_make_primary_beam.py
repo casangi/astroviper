@@ -16,7 +16,9 @@ from astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric impo
 )
 from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (
     make_primary_beam_single_field,
+    resolve_primary_beam_params,
 )
+from astroviper.utils.beam_models import airy_disk_model
 
 ARCSEC = np.pi / (180 * 3600)
 
@@ -205,3 +207,105 @@ def test_airy_disk_rorder_versions_agree():
     pb_v2 = airy_disk_rorder_v2(freq_chan, pol, pb_params, grid_params)
     assert pb_v1.shape == pb_v2.shape
     np.testing.assert_allclose(pb_v1, pb_v2, atol=1e-4)
+
+
+def _primary_beam(
+    primary_beam_params, frequency_coords=(1.0e9, 1.5e9), cell_arcsec=80.0
+):
+    img_xds, image_params = _make_empty_residual_image(
+        cell_arcsec=cell_arcsec, frequency_coords=frequency_coords
+    )
+    img_xds, _ = make_primary_beam_single_field(
+        img_xds,
+        image_params,
+        image_data_group_in_name="residual",
+        image_data_group_out_name="residual",
+        **resolve_primary_beam_params(primary_beam_params),
+    )
+    return img_xds
+
+
+def test_primary_beam_params_none_and_alma_are_the_default_beam():
+    """primary_beam_params None and {"telescope": "alma"} give today's beam bit for bit."""
+    img_xds, image_params = _make_empty_residual_image(
+        cell_arcsec=80.0, frequency_coords=(1.0e9, 1.5e9)
+    )
+    img_xds, _ = make_primary_beam_single_field(
+        img_xds,
+        image_params,
+        image_data_group_in_name="residual",
+        image_data_group_out_name="residual",
+    )
+    default = img_xds["PRIMARY_BEAM"].values
+    assert resolve_primary_beam_params(None) == {}
+    for params in (None, {"telescope": "alma"}, {"telescope": "ALMA"}):
+        np.testing.assert_array_equal(
+            _primary_beam(params)["PRIMARY_BEAM"].values, default
+        )
+
+
+def test_primary_beam_params_vla_beam():
+    """{"telescope": "vla"} is the 24.5 m beam without blockage, sampled as CASA's VLA table."""
+    from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
+        casa_airy_disk_response,
+    )
+
+    vla = airy_disk_model("vla")
+    img_xds = _primary_beam({"telescope": "vla"})
+    pb = img_xds["PRIMARY_BEAM"].values[0, :, 0]
+    l_axis, m_axis = img_xds.l.values[:, None], img_xds.m.values[None, :]
+    for f, frequency in enumerate(img_xds.frequency.values):
+        expected = casa_airy_disk_response(
+            l_axis, m_axis, frequency, 24.5, 0.0, vla["max_rad_1GHz"], ipower=2
+        )
+        np.testing.assert_array_equal(pb[f], expected)
+        # the VLA table radius, not ALMA's, sets the sampling of the beam
+        alma_sampling = casa_airy_disk_response(
+            l_axis,
+            m_axis,
+            frequency,
+            24.5,
+            0.0,
+            airy_disk_model("alma")["max_rad_1GHz"],
+            ipower=2,
+        )
+        assert not np.array_equal(pb[f], alma_sampling)
+    alma = _primary_beam(None)["PRIMARY_BEAM"].values[0, :, 0]
+    assert not np.allclose(pb, alma)
+
+
+def test_primary_beam_params_numbers_equal_to_a_telescope_give_its_beam():
+    """Explicit numbers equal to a telescope's give its beam; numbers override a telescope."""
+    vla = airy_disk_model("vla")
+    explicit = {
+        "effective_dish_diameter": vla["dish_diameter"],
+        "blockage_diameter": vla["blockage_diameter"],
+        "max_rad_1GHz": vla["max_rad_1GHz"],
+    }
+    by_name = _primary_beam({"telescope": "vla"})["PRIMARY_BEAM"].values
+    np.testing.assert_array_equal(
+        _primary_beam(explicit)["PRIMARY_BEAM"].values, by_name
+    )
+    overridden = _primary_beam({"telescope": "vla", "effective_dish_diameter": 25.0})
+    np.testing.assert_array_equal(
+        overridden["PRIMARY_BEAM"].values,
+        _primary_beam({**explicit, "effective_dish_diameter": 25.0})[
+            "PRIMARY_BEAM"
+        ].values,
+    )
+    assert not np.array_equal(overridden["PRIMARY_BEAM"].values, by_name)
+
+
+@pytest.mark.parametrize(
+    "primary_beam_params, match",
+    [
+        ({"telescope": "gbt"}, "telescope"),
+        ({"dish_diameter": 12.0}, "unknown primary_beam_params"),
+        ({"effective_dish_diameter": 0.0}, "effective_dish_diameter > 0"),
+        ({"blockage_diameter": 11.0}, "blockage_diameter"),
+        ({"max_rad_1GHz": 0.0}, "max_rad_1GHz > 0"),
+    ],
+)
+def test_primary_beam_params_refused(primary_beam_params, match):
+    with pytest.raises(ValueError, match=match):
+        resolve_primary_beam_params(primary_beam_params)

@@ -140,3 +140,72 @@ def make_primary_beam_single_field(
     )
 
     return img_xds, pd.DataFrame({"T_primary_beam": [time.time() - start]})
+
+
+PRIMARY_BEAM_PARAMS_KEYS = (
+    "telescope",
+    "effective_dish_diameter",
+    "blockage_diameter",
+    "max_rad_1GHz",
+)
+
+
+def resolve_primary_beam_params(primary_beam_params=None):
+    """Keyword arguments of :func:`make_primary_beam_single_field` for ``primary_beam_params``.
+
+    Parameters
+    ----------
+    primary_beam_params : dict, optional
+        ``telescope`` (a key of :data:`astroviper.utils.beam_models.AIRY_DISK_MODELS`,
+        default ``"alma"``) and the numbers ``effective_dish_diameter``,
+        ``blockage_diameter`` (metres) and ``max_rad_1GHz`` (radians), which
+        override the telescope's values.
+
+    Returns
+    -------
+    dict
+        ``{}`` for ``None`` (the function's ALMA defaults), else
+        ``list_dish_diameters``, ``list_blockage_diameters`` and ``max_rad_1GHz``.
+
+    Raises
+    ------
+    ValueError
+        For an unknown key or telescope, or a beam that is not physical.
+    """
+    import numpy as np
+
+    from astroviper.utils.beam_models import AIRY_DISK_MODELS, airy_disk_model
+
+    if primary_beam_params is None:
+        return {}
+    unknown = set(primary_beam_params) - set(PRIMARY_BEAM_PARAMS_KEYS)
+    if unknown:
+        raise ValueError(
+            f"unknown primary_beam_params key(s) {sorted(unknown)}; expected "
+            f"{list(PRIMARY_BEAM_PARAMS_KEYS)}"
+        )
+    telescope = str(primary_beam_params.get("telescope", "alma"))
+    if telescope.lower() not in AIRY_DISK_MODELS:
+        raise ValueError(
+            f"primary_beam_params['telescope'] {telescope!r} is not one of "
+            f"{sorted(AIRY_DISK_MODELS)}"
+        )
+    model = airy_disk_model(telescope)
+    dish = float(
+        primary_beam_params.get("effective_dish_diameter", model["dish_diameter"])
+    )
+    blockage = float(
+        primary_beam_params.get("blockage_diameter", model["blockage_diameter"])
+    )
+    max_rad = float(primary_beam_params.get("max_rad_1GHz", model["max_rad_1GHz"]))
+    if not (dish > 0.0 and 0.0 <= blockage < dish and max_rad > 0.0):
+        raise ValueError(
+            "primary_beam_params need effective_dish_diameter > 0, "
+            "0 <= blockage_diameter < effective_dish_diameter and max_rad_1GHz > 0; "
+            f"got {dish}, {blockage}, {max_rad}"
+        )
+    return {
+        "list_dish_diameters": np.array([dish]),
+        "list_blockage_diameters": np.array([blockage]),
+        "max_rad_1GHz": max_rad,
+    }

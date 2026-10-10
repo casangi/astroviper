@@ -84,6 +84,7 @@ def image_cube_single_field(
     primary_beam_correction: bool = False,
     psf_fitting_method: str = "astroviper",
     gridding_kernel_params: dict[str, Any] | None = None,
+    primary_beam_params: dict[str, Any] | None = None,
     skunk_works: bool = False,
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
@@ -362,6 +363,17 @@ def image_cube_single_field(
         the defaults ``{"type": "prolate_spheroidal", "support": 7,
         "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
         defaults.
+    primary_beam_params : dict, optional
+        The primary beam of the imager, the power pattern of CASA's obscured Airy
+        disk that gives the clean mask and the primary beam correction:
+        ``telescope`` (``"alma"``, ``"aca"``, ``"vla"`` or ``"ngvla"``, CASA's
+        PBMath values of :func:`~astroviper.utils.beam_models.airy_disk_model`),
+        ``effective_dish_diameter`` and ``blockage_diameter`` (metres) and
+        ``max_rad_1GHz`` (CASA's maximum radius of the beam table at 1 GHz in
+        radians, scaled as 1 / frequency, which sets the radius sampling of the
+        beam). Numbers given with a telescope override that telescope's values;
+        no telescope means ``"alma"``. ``None`` is the ALMA 12 m beam (10.7 m,
+        0.75 m, 1.784 deg at 1 GHz).
     skunk_works : bool
         If ``True`` use the experimental performance I/O path in each node task:
         load only the data group's data variables straight from the Zarr chunk
@@ -755,6 +767,7 @@ def image_cube_single_field(
     input_params["primary_beam_correction"] = primary_beam_correction
     input_params["psf_fitting_method"] = psf_fitting_method
     input_params["gridding_kernel_params"] = gridding_kernel_params
+    input_params["primary_beam_params"] = primary_beam_params
     input_params["skunk_works"] = skunk_works
     input_params["image_chunking"] = image_chunking
     input_params["image_sharding"] = image_sharding

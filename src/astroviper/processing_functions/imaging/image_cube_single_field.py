@@ -15,6 +15,7 @@ def imaging_preparation_single_field(
     image_data_variables_keep=None,
     psf_fitting_method="astroviper",
     gridding_kernel_params=None,
+    primary_beam_params=None,
     task_id=0,
 ):
     """Run the once-per-chunk imaging setup before the imaging cycle loop.
@@ -188,6 +189,17 @@ def imaging_preparation_single_field(
         the defaults ``{"type": "prolate_spheroidal", "support": 7,
         "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
         defaults.
+    primary_beam_params : dict, optional
+        The primary beam of the imager, the power pattern of CASA's obscured Airy
+        disk that gives the clean mask and the primary beam correction:
+        ``telescope`` (``"alma"``, ``"aca"``, ``"vla"`` or ``"ngvla"``, CASA's
+        PBMath values of :func:`~astroviper.utils.beam_models.airy_disk_model`),
+        ``effective_dish_diameter`` and ``blockage_diameter`` (metres) and
+        ``max_rad_1GHz`` (CASA's maximum radius of the beam table at 1 GHz in
+        radians, scaled as 1 / frequency, which sets the radius sampling of the
+        beam). Numbers given with a telescope override that telescope's values;
+        no telescope means ``"alma"``. ``None`` is the ALMA 12 m beam (10.7 m,
+        0.75 m, 1.784 deg at 1 GHz).
     task_id : int, optional
         Identifier of the parallel chunk being processed.
     Returns
@@ -253,6 +265,7 @@ def imaging_preparation_single_field(
         image_data_variables_keep=image_data_variables_keep,
         psf_fitting_method=psf_fitting_method,
         gridding_kernel_params=gridding_kernel_params,
+        primary_beam_params=primary_beam_params,
     )
     T_setup = time.time() - start
 
@@ -277,6 +290,7 @@ def image_cube_single_field(
     primary_beam_correction=False,
     psf_fitting_method="astroviper",
     gridding_kernel_params=None,
+    primary_beam_params=None,
     task_id=0,
 ):
     """Run the imaging cycle CLEAN loop for one single-field image chunk.
@@ -482,6 +496,17 @@ def image_cube_single_field(
         the defaults ``{"type": "prolate_spheroidal", "support": 7,
         "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
         defaults.
+    primary_beam_params : dict, optional
+        The primary beam of the imager, the power pattern of CASA's obscured Airy
+        disk that gives the clean mask and the primary beam correction:
+        ``telescope`` (``"alma"``, ``"aca"``, ``"vla"`` or ``"ngvla"``, CASA's
+        PBMath values of :func:`~astroviper.utils.beam_models.airy_disk_model`),
+        ``effective_dish_diameter`` and ``blockage_diameter`` (metres) and
+        ``max_rad_1GHz`` (CASA's maximum radius of the beam table at 1 GHz in
+        radians, scaled as 1 / frequency, which sets the radius sampling of the
+        beam). Numbers given with a telescope override that telescope's values;
+        no telescope means ``"alma"``. ``None`` is the ALMA 12 m beam (10.7 m,
+        0.75 m, 1.784 deg at 1 GHz).
     task_id : int, optional
         Identifier of the parallel chunk being processed.
     Returns
@@ -543,6 +568,7 @@ def image_cube_single_field(
         image_data_variables_keep=image_data_variables_keep,
         psf_fitting_method=psf_fitting_method,
         gridding_kernel_params=gridding_kernel_params,
+        primary_beam_params=primary_beam_params,
         task_id=task_id,
     )
 
