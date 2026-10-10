@@ -2731,3 +2731,52 @@ class TestResidualEntropyInImagingDict(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPerStokesThreshold(unittest.TestCase):
+    """``threshold`` with one value per polarization (Stokes) plane."""
+
+    @staticmethod
+    def _planes(peaks):
+        rd = ImagingDict()
+        for pol, peak in enumerate(peaks):
+            rd.add(
+                {"peakres": peak, "masksum": 100, "max_psf_sidelobe": 0.2},
+                time=0,
+                pol=pol,
+                chan=0,
+            )
+        return rd
+
+    def test_each_plane_stops_at_its_own_threshold(self):
+        controller = IterationController(max_iter=1000, threshold=[1e-3, 1e-4])
+        controller.check_convergence(self._planes([5e-4, 5e-4]))
+        self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_THRESHOLD)
+        self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_CONTINUE)
+
+    def test_threshold_per_cycle_is_floored_per_plane(self):
+        controller = IterationController(
+            max_iter=1000, threshold=[1e-3, 1e-4], psf_sidelobe_factor=1.0
+        )
+        controller.ensure_planes(1, 1, 2)
+        per_plane = controller.per_plane_threshold_per_cycle(self._planes([2e-3, 2e-3]))
+        np.testing.assert_allclose(per_plane[0, 0], [1e-3, 0.2 * 2e-3])
+
+    def test_one_value_applies_to_every_plane(self):
+        controller = IterationController(max_iter=1000, threshold=1e-3)
+        controller.check_convergence(self._planes([5e-4, 2e-3]))
+        self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_THRESHOLD)
+        self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_CONTINUE)
+
+    def test_one_value_per_plane_is_required(self):
+        controller = IterationController(max_iter=1000, threshold=[1e-3, 1e-4, 1e-5])
+        with self.assertRaisesRegex(ValueError, "polarization planes"):
+            controller.ensure_planes(1, 1, 2)
+
+    def test_negative_value_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "threshold"):
+            IterationController(max_iter=1000, threshold=[1e-3, -1e-4])
+
+    def test_state_lists_the_thresholds(self):
+        controller = IterationController(max_iter=1000, threshold=[1e-3, 1e-4])
+        self.assertEqual(controller.get_state()["threshold"], [1e-3, 1e-4])

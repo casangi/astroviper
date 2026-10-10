@@ -259,6 +259,12 @@ class TestValidateDeconvolveParams:
         with pytest.raises(ValueError, match="non-negative"):
             _validate_deconvolve_params({"threshold": -0.1})
 
+    def test_threshold_accepts_one_value_per_stokes_plane(self):
+        result = _validate_deconvolve_params({"threshold": [1e-3, 0.0, 2e-4, 2e-4]})
+        assert result["threshold"] == [1e-3, 0.0, 2e-4, 2e-4]
+        with pytest.raises(ValueError, match="non-negative"):
+            _validate_deconvolve_params({"threshold": [1e-3, -1e-4]})
+
     @pytest.mark.parametrize(
         "box",
         [None, (-1, -1, -1, -1), (0, 10, 0, 10), (5, 15, 10, 20)],

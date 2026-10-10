@@ -156,7 +156,7 @@ def _validate_deconvolve_params(deconvolve_params):
                     "Maximum number of iterations must be a positive integer."
                 )
         elif key == "threshold":
-            if value is not None and value < 0:
+            if value is not None and np.min(value) < 0:
                 raise ValueError("Threshold must be non-negative or None.")
         elif key == "clean_box":
             if value is not None and not (isinstance(value, tuple) and len(value) == 4):

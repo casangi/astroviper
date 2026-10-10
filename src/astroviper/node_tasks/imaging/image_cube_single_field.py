@@ -580,10 +580,13 @@ def image_cube_single_field(
           frequency channel: a channel that converges early stops cycling while
           the others continue.
         - ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, as a
-          float in Jy. A plane stops when its peak residual inside the clean
-          mask falls to or below ``threshold``; the value is also a hard floor
-          on ``threshold_per_cycle``. ``threshold = 0`` disables the absolute
-          stop. *Differs from CASA*: a float in Jy only, no ``'1mJy'`` strings.
+          float in Jy, or a list of one float per Stokes plane in the order of
+          ``polarization_coords`` (the floors of the Stokes planes of noise free
+          data scale with their fluxes). A plane stops when its peak residual
+          inside the clean mask falls to or below its threshold; the value is
+          also a hard floor on ``threshold_per_cycle``. ``0`` disables the
+          absolute stop. *Differs from CASA*: floats in Jy only, no ``'1mJy'``
+          strings.
         - ``threshold_sigma`` [CASA ``nsigma``] : Noise based stopping threshold
           per plane, as a multiple of the plane's robust residual rms
           (``1.4826 * MAD``). The effective threshold of a plane is

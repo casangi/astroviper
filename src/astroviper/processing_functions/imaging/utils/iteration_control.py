@@ -811,8 +811,15 @@ class IterationController:
         self.entropy_stopped = None
         self.max_cycles = max_cycles
 
-        # Threshold parameters
-        self.threshold = threshold
+        # Threshold parameters: one value for every plane, or one per
+        # polarization plane (the floors of noise free Stokes planes scale
+        # with their fluxes)
+        if np.ndim(threshold) == 0:
+            self.threshold = threshold
+        else:
+            self.threshold = tuple(float(value) for value in threshold)
+            if min(self.threshold) < 0:
+                raise ValueError(f"threshold must be >= 0; got {self.threshold}")
         self.threshold_sigma = threshold_sigma
 
         # CLEAN parameters
@@ -867,6 +874,12 @@ class IterationController:
             return value[-1] if value else default
         return value
 
+    def _plane_threshold(self, pol):
+        """The absolute threshold of polarization plane ``pol`` (``None``: the lowest)."""
+        if np.ndim(self.threshold) == 0:
+            return self.threshold
+        return min(self.threshold) if pol is None else self.threshold[pol]
+
     def _ensure_shape(self, needed):
         """Allocate (or grow) the per-plane arrays to the ``needed`` shape.
 
@@ -874,6 +887,11 @@ class IterationController:
         the full per-plane budget (``_max_iter``) with a CONTINUE stop
         code. Growing only ever enlarges the arrays (existing values kept).
         """
+        if np.ndim(self.threshold) and len(self.threshold) != needed[2]:
+            raise ValueError(
+                f"threshold has {len(self.threshold)} values for {needed[2]} "
+                "polarization planes; give one value or one per plane"
+            )
         if self.max_iter_remaining is None:
             self.max_iter_remaining = np.full(needed, self._max_iter, dtype=int)
             self.stop_code_imaging = np.full(needed, IMAGING_CONTINUE, dtype=int)
@@ -1010,7 +1028,7 @@ class IterationController:
 
         # Set threshold_per_cycle as fraction of current peak residual
         threshold_per_cycle = psf_fraction * peak_residual
-        threshold_per_cycle = max(threshold_per_cycle, self.threshold)
+        threshold_per_cycle = max(threshold_per_cycle, self._plane_threshold(pol))
 
         return int(use_max_iter_per_cycle), threshold_per_cycle
 
@@ -1068,7 +1086,7 @@ class IterationController:
                 max(sidelobe * self.psf_sidelobe_factor, self.min_psf_fraction),
                 self.max_psf_fraction,
             )
-            threshold_per_cycle[idx] = max(frac * peak, self.threshold)
+            threshold_per_cycle[idx] = max(frac * peak, self._plane_threshold(idx[2]))
         return threshold_per_cycle
 
     def check_convergence(
@@ -1195,6 +1213,7 @@ class IterationController:
             peak_residual = abs(self._latest(fields, "peakres", 0.0))
             masksum = self._latest(fields, "masksum", 0)
             remaining = int(self.max_iter_remaining[idx])
+            threshold = self._plane_threshold(idx[2])
 
             # Consecutive model updates of this plane that did no iteration.
             if model_update_ran:
@@ -1215,7 +1234,7 @@ class IterationController:
                 maj = IMAGING_ZERO_MASK
             elif remaining <= 0:
                 maj = IMAGING_MAX_ITER
-            elif self.threshold > 0 and peak_residual <= self.threshold:
+            elif threshold > 0 and peak_residual <= threshold:
                 maj = IMAGING_THRESHOLD
             elif self.entropy_stopped[idx]:
                 maj = IMAGING_ENTROPY
@@ -1522,7 +1541,9 @@ class IterationController:
             else None,
             "max_cycles": self.max_cycles,
             "max_iter": self._max_iter,
-            "threshold": self.threshold,
+            "threshold": list(self.threshold)
+            if np.ndim(self.threshold)
+            else self.threshold,
             "threshold_sigma": self.threshold_sigma,
             "gain": self.gain,
             "psf_sidelobe_factor": self.psf_sidelobe_factor,
