@@ -105,7 +105,11 @@ SIMULATION_PARAM_DOCS = {
         "Antenna pointing directions; ``None`` points every antenna at the phase centre."
     ),
     "uvw_params": (
-        "``auto_correlations`` (bool, default False).  The uvw follow the\n"
+        "``auto_correlations`` (bool, default False) and ``w_term`` (bool,\n"
+        "default True; ``False`` zeroes the ``w`` coordinate before the\n"
+        "visibilities are computed, the two dimensional approximation without\n"
+        "the ``w (n - 1)`` phase, so that an imager without w projection can be\n"
+        "tested against an exactly consistent sky).  The uvw follow the\n"
         "archival / VLBI convention adopted by MSv4:\n"
         "``uvw = P(antenna1) - P(antenna2)`` (see\n"
         ":func:`~astroviper.processing_functions.simulation.calculate_uvw.calculate_uvw`)."

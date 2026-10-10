@@ -153,7 +153,11 @@ def simulate_processing_set(
     pointing_ra_dec : np.ndarray, [n_time | 1, n_antenna | 1, 2], radians, optional
         Antenna pointing directions; ``None`` points every antenna at the phase centre.
     uvw_params : dict, optional
-        ``auto_correlations`` (bool, default False).  The uvw follow the
+        ``auto_correlations`` (bool, default False) and ``w_term`` (bool,
+        default True; ``False`` zeroes the ``w`` coordinate before the
+        visibilities are computed, the two dimensional approximation without
+        the ``w (n - 1)`` phase, so that an imager without w projection can be
+        tested against an exactly consistent sky).  The uvw follow the
         archival / VLBI convention adopted by MSv4:
         ``uvw = P(antenna1) - P(antenna2)`` (see
         :func:`~astroviper.processing_functions.simulation.calculate_uvw.calculate_uvw`).
@@ -199,6 +203,7 @@ def simulate_processing_set(
     params = resolve_beam_params(beam_params)
     uvw_params = {
         "auto_correlations": False,
+        "w_term": True,
         **(uvw_params or {}),
     }
     noise = resolve_noise_params(noise_params)
@@ -213,6 +218,8 @@ def simulate_processing_set(
         auto_correlations=uvw_params["auto_correlations"],
         direction_frame=direction_frame,
     )
+    if not uvw_params["w_term"]:
+        uvw[..., 2] = 0.0
     timing["T_uvw"] = _time.time() - start
 
     start = _time.time()

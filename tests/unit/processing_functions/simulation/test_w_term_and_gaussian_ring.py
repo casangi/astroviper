@@ -30,7 +30,7 @@ from astroviper.processing_functions.simulation.calculate_visibilities_cpp impor
     cpp_kernel_available,
 )
 from astroviper.processing_functions.simulation.gaussian_source import FWHM_TO_SIGMA
-from astroviper.utils.coordinate_transforms import inverse_sin_project
+from astroviper.utils.coordinate_transforms import inverse_sin_project, sin_project
 from astroviper.utils.telescope_layout import read_telescope_layout
 
 ARCSEC = np.pi / (180 * 3600)
@@ -391,4 +391,41 @@ class TestGaussianRingSources:
         )
         np.testing.assert_allclose(
             ring_only.VISIBILITY.values, gaussian.VISIBILITY.values, rtol=1e-12
+        )
+
+
+class TestWTermSwitch:
+    """``uvw_params["w_term"] = False`` is the two dimensional approximation."""
+
+    def test_w_term_off_zeroes_w_and_drops_its_phase(self):
+        kwargs = TestGaussianRingSources._pf_kwargs(None)
+        pc = kwargs["phase_center_ra_dec"]
+        sources = np.stack([pc[0] + np.array([3e-3, -2e-3])])[None]
+        flux = np.array([[[[1.5, 0, 0, 1.5]]]])
+        full, _ = simulate_processing_set(
+            point_source_flux=flux, point_source_ra_dec=sources, **kwargs
+        )
+        flat, _ = simulate_processing_set(
+            point_source_flux=flux,
+            point_source_ra_dec=sources,
+            uvw_params={"w_term": False},
+            **kwargs,
+        )
+        assert np.all(flat.UVW.values[..., 2] == 0.0)
+        assert np.any(full.UVW.values[..., 2] != 0.0)
+        np.testing.assert_allclose(flat.UVW.values[..., :2], full.UVW.values[..., :2])
+        # the two dimensional visibilities are the full ones without the
+        # w (n - 1) phase, n the direction cosine of the source
+        l, m = sin_project(pc[0], sources[0, 0])
+        n_minus_1 = np.sqrt(1.0 - l * l - m * m) - 1.0
+        wavelength = 299792458.0 / kwargs["frequency"]
+        dropped = 2.0 * np.pi * full.UVW.values[..., 2:3] / wavelength * n_minus_1
+        ratio = flat.VISIBILITY.values / full.VISIBILITY.values
+        assert np.abs(np.abs(ratio) - 1.0).max() < 1e-12
+        assert np.abs(dropped).max() > 1e-3  # a phase worth dropping
+        np.testing.assert_allclose(
+            np.abs(np.angle(ratio)),
+            np.broadcast_to(np.abs(dropped)[..., None], ratio.shape),
+            rtol=1e-6,
+            atol=1e-9,
         )
