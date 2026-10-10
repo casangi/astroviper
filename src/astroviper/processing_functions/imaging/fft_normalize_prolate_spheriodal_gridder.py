@@ -6,9 +6,6 @@ import toolviper.utils.logger as logger
 import xarray as xr
 
 # from memory_profiler import profile
-from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
-    create_prolate_spheroidal_correcting_image_1D,
-)
 from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
@@ -83,6 +80,7 @@ def ifft_norm_img_xds(
     processing_function_threads=1,
     fft_backend="pyfftw",
     complex_dtype=np.complex128,
+    gridding_kernel=None,
 ):
     """Normalize and inverse-Fourier-transform gridded UV data to sky images.
 
@@ -93,8 +91,10 @@ def ifft_norm_img_xds(
     2. Applies a 2-D inverse FFT (UV → lm) independently on each
        ``(time, frequency, polarization)`` slice so that only one 2-D plane
        is in memory during the transform.
-    3. Divides in-place by the prolate-spheroidal gridding-correction function
-       along each image axis.
+    3. Divides in-place by the gridding kernel's correction function along
+       each image axis (``gridding_kernel``, a
+       :class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`;
+       ``None`` is the default prolate spheroidal kernel).
     4. Crops the zero-padded margins to the requested ``image_size``.
     5. Normalises by the corresponding grid-weight sum, replacing zero weights
        with 1 to avoid division by zero.
@@ -190,16 +190,14 @@ def ifft_norm_img_xds(
         overwrite=overwrite,
     )
 
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
-        create_prolate_spheroidal_correcting_image_1D,
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        make_gridding_kernel,
     )
 
-    (
-        kernel_image_1D_l,
-        kernel_image_1D_m,
-    ) = create_prolate_spheroidal_correcting_image_1D(
-        n_lm_padded=[img_xds.sizes["u"], img_xds.sizes["v"]]
-    )
+    if gridding_kernel is None:
+        gridding_kernel = make_gridding_kernel()
+    kernel_image_1D_l = gridding_kernel.correction_1D(img_xds.sizes["u"])
+    kernel_image_1D_m = gridding_kernel.correction_1D(img_xds.sizes["v"])
 
     # The sky in a four-correlation basis is kept complex: a cross hand is not
     # conjugate symmetric on its own, and its real and imaginary parts carry two
@@ -315,10 +313,16 @@ def fft_norm_img_xds(
     fft_backend="pyfftw",
     data_variables_to_process=None,
     complex_dtype=np.complex128,
+    gridding_kernel=None,
 ):
     """Forward-transform a model sky image into a model UV grid.
 
     Options are data_variables_to_process = ["primary_beam", "point_spread_function", "sky"]
+
+    The image is divided by the gridding kernel's correction function before
+    the transform (``gridding_kernel``, a
+    :class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`;
+    ``None`` is the default prolate spheroidal kernel).
 
     ``complex_dtype`` sets the precision of the output model UV grid
     (``complex64`` for a single-precision image, ``complex128`` otherwise). The
@@ -377,10 +381,14 @@ def fft_norm_img_xds(
         out_arr = img_xds[out_name].values  # numpy view for in-place writes
         img_xds[out_name].attrs["type"] = data_variable
 
-        (
-            kernel_image_1D_l,
-            kernel_image_1D_m,
-        ) = create_prolate_spheroidal_correcting_image_1D(n_lm_padded=n_uv)
+        if gridding_kernel is None:
+            from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+                make_gridding_kernel,
+            )
+
+            gridding_kernel = make_gridding_kernel()
+        kernel_image_1D_l = gridding_kernel.correction_1D(n_uv[0])
+        kernel_image_1D_m = gridding_kernel.correction_1D(n_uv[1])
 
         # kernel_image_1D_l, kernel_image_1D_m = (
         #     create_prolate_spheroidal_correcting_image_1D(

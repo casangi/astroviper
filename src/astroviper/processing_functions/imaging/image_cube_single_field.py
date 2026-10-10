@@ -14,6 +14,7 @@ def imaging_preparation_single_field(
     fft_backend="pyfftw",
     image_data_variables_keep=None,
     psf_fitting_method="astroviper",
+    gridding_kernel_params=None,
     task_id=0,
 ):
     """Run the once-per-chunk imaging setup before the imaging cycle loop.
@@ -167,6 +168,17 @@ def imaging_preparation_single_field(
     image_data_variables_keep : list of str, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal"``), ``support`` (the odd number of
+        grid points the kernel spans along one axis; 7 for the prolate
+        spheroidal kernel, Schwab's rational approximation of the ``m = 6``,
+        ``alpha = 1`` function) and ``oversampling`` (samples of the kernel
+        table per uv cell; the kernel is read at the nearest sample, so the
+        lookup error, and with it the floor the imaging cycle converges to,
+        falls as 1 over this number). Missing keys take the defaults
+        ``{"type": "prolate_spheroidal", "support": 7, "oversampling":
+        100}``; ``None`` is all defaults.
     task_id : int, optional
         Identifier of the parallel chunk being processed.
     Returns
@@ -231,6 +243,7 @@ def imaging_preparation_single_field(
         fft_backend=fft_backend,
         image_data_variables_keep=image_data_variables_keep,
         psf_fitting_method=psf_fitting_method,
+        gridding_kernel_params=gridding_kernel_params,
     )
     T_setup = time.time() - start
 
@@ -254,6 +267,7 @@ def image_cube_single_field(
     restore=False,
     primary_beam_correction=False,
     psf_fitting_method="astroviper",
+    gridding_kernel_params=None,
     task_id=0,
 ):
     """Run the imaging cycle CLEAN loop for one single-field image chunk.
@@ -439,6 +453,17 @@ def image_cube_single_field(
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
         ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``
         (the fit behind ``tclean``'s restoring beam).
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal"``), ``support`` (the odd number of
+        grid points the kernel spans along one axis; 7 for the prolate
+        spheroidal kernel, Schwab's rational approximation of the ``m = 6``,
+        ``alpha = 1`` function) and ``oversampling`` (samples of the kernel
+        table per uv cell; the kernel is read at the nearest sample, so the
+        lookup error, and with it the floor the imaging cycle converges to,
+        falls as 1 over this number). Missing keys take the defaults
+        ``{"type": "prolate_spheroidal", "support": 7, "oversampling":
+        100}``; ``None`` is all defaults.
     task_id : int, optional
         Identifier of the parallel chunk being processed.
     Returns
@@ -499,6 +524,7 @@ def image_cube_single_field(
         fft_backend=fft_backend,
         image_data_variables_keep=image_data_variables_keep,
         psf_fitting_method=psf_fitting_method,
+        gridding_kernel_params=gridding_kernel_params,
         task_id=task_id,
     )
 
@@ -537,6 +563,7 @@ def image_cube_single_field(
             processing_function_threads=processing_function_threads,
             fft_backend=fft_backend,
             image_data_variables_keep=image_data_variables_keep,
+            gridding_kernel_params=gridding_kernel_params,
         )
         timing["T_residual_update"] += time.time() - start
         accumulate_timing(timing, residual_return_df)
@@ -657,6 +684,7 @@ def image_cube_single_field(
             processing_function_threads=processing_function_threads,
             fft_backend=fft_backend,
             image_data_variables_keep=image_data_variables_keep,
+            gridding_kernel_params=gridding_kernel_params,
         )
         timing["T_residual_update"] += time.time() - start
         accumulate_timing(timing, residual_return_df)

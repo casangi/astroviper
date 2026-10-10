@@ -497,6 +497,7 @@ def image_cube_single_field(
     restore=False,
     primary_beam_correction=False,
     psf_fitting_method="astroviper",
+    gridding_kernel_params=None,
     memory_mode="in_memory",
     skunk_works=False,
     data_group=None,
@@ -716,6 +717,17 @@ def image_cube_single_field(
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
         ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``
         (the fit behind ``tclean``'s restoring beam).
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal"``), ``support`` (the odd number of
+        grid points the kernel spans along one axis; 7 for the prolate
+        spheroidal kernel, Schwab's rational approximation of the ``m = 6``,
+        ``alpha = 1`` function) and ``oversampling`` (samples of the kernel
+        table per uv cell; the kernel is read at the nearest sample, so the
+        lookup error, and with it the floor the imaging cycle converges to,
+        falls as 1 over this number). Missing keys take the defaults
+        ``{"type": "prolate_spheroidal", "support": 7, "oversampling":
+        100}``; ``None`` is all defaults.
     memory_mode : str, optional
         Only ``"in_memory"`` is implemented.  Default ``"in_memory"``.
     skunk_works : bool, optional
@@ -1028,6 +1040,7 @@ def image_cube_single_field(
             restore=restore,
             primary_beam_correction=primary_beam_correction,
             psf_fitting_method=psf_fitting_method,
+            gridding_kernel_params=gridding_kernel_params,
             task_id=task_id,
         )
 

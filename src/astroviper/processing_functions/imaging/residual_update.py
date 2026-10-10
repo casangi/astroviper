@@ -23,6 +23,7 @@ def imaging_setup_single_field(
     image_data_variables_keep=None,
     image_data_group_out_name="residual",
     psf_fitting_method="astroviper",
+    gridding_kernel_params=None,
 ):
     """Perform the once-per-chunk imaging setup before the imaging cycle loop.
 
@@ -76,6 +77,17 @@ def imaging_setup_single_field(
     image_data_group_out_name : str, optional
         Image data group that the PSF, primary beam and residual image are
         registered under.  Default ``"residual"``.
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal"``), ``support`` (the odd number of
+        grid points the kernel spans along one axis; 7 for the prolate
+        spheroidal kernel, Schwab's rational approximation of the ``m = 6``,
+        ``alpha = 1`` function) and ``oversampling`` (samples of the kernel
+        table per uv cell; the kernel is read at the nearest sample, so the
+        lookup error, and with it the floor the imaging cycle converges to,
+        falls as 1 over this number). Missing keys take the defaults
+        ``{"type": "prolate_spheroidal", "support": 7, "oversampling":
+        100}``; ``None`` is all defaults.
 
     Returns
     -------
@@ -152,6 +164,7 @@ def imaging_setup_single_field(
         image_data_group_in_name=image_data_group_out_name,
         image_data_group_out_name=image_data_group_out_name,
         image_data_variables_keep=image_data_variables_keep,
+        gridding_kernel_params=gridding_kernel_params,
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,
@@ -225,6 +238,7 @@ def residual_update_cube_single_field(
     image_data_group_in_name="model",
     image_data_group_out_name="residual",
     last_residual_update=False,
+    gridding_kernel_params=None,
 ):
     """Run one residual update.
 
@@ -287,6 +301,17 @@ def residual_update_cube_single_field(
         ``"residual"``.
     last_residual_update : bool, optional
         Unused placeholder retained for call-site compatibility.
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal"``), ``support`` (the odd number of
+        grid points the kernel spans along one axis; 7 for the prolate
+        spheroidal kernel, Schwab's rational approximation of the ``m = 6``,
+        ``alpha = 1`` function) and ``oversampling`` (samples of the kernel
+        table per uv cell; the kernel is read at the nearest sample, so the
+        lookup error, and with it the floor the imaging cycle converges to,
+        falls as 1 over this number). Missing keys take the defaults
+        ``{"type": "prolate_spheroidal", "support": 7, "oversampling":
+        100}``; ``None`` is all defaults.
 
     Returns
     -------
@@ -308,8 +333,8 @@ def residual_update_cube_single_field(
         fft_norm_img_xds,
         ifft_norm_img_xds,
     )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
-        create_prolate_spheroidal_kernel_1D,
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        make_gridding_kernel,
     )
 
     if image_data_variables_keep is None:
@@ -323,7 +348,7 @@ def residual_update_cube_single_field(
     ps_data_group_name = processing_set_data_group_name
 
     T_start_gcf = time.time()
-    cgk_1D = create_prolate_spheroidal_kernel_1D(100, 7)
+    cgk_1D = make_gridding_kernel(gridding_kernel_params)
     T_gcf = time.time() - T_start_gcf
 
     T_transform_pol = 0.0
@@ -360,6 +385,7 @@ def residual_update_cube_single_field(
             processing_function_threads=processing_function_threads,
             fft_backend=fft_backend,
             complex_dtype=complex_dtype,
+            gridding_kernel=cgk_1D,
         )
         T_fft_degrid += time.time() - start
 
@@ -449,6 +475,7 @@ def residual_update_cube_single_field(
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,
+        gridding_kernel=cgk_1D,
     )
     T_fft_grid += time.time() - start
 

@@ -231,10 +231,10 @@ def add_uv_sampling_grid_single_field(
         Measurement set dataset.  Must contain the data variables referenced
         by ``ms_data_group_in_name`` (``uvw``, ``weight_imaging``) and a
         ``frequency`` coordinate.
-    cgk_1D : np.ndarray
-        1-D convolutional gridding kernel used by the prolate spheroidal
-        gridder.
-        Shape ``(oversampling * support,)``.
+    cgk_1D : GriddingKernel or np.ndarray
+        The gridding kernel
+        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
+        or the bare table of the default prolate spheroidal kernel of support 7.
     img_xds : xr.Dataset
         Image dataset that accumulates the UV-sampling grid.  The arrays
         named by ``image_data_group_out_modified`` are created on the first call
@@ -365,7 +365,11 @@ def add_uv_sampling_grid_single_field(
     from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
         prolate_spheroidal_grid_uv_sampling,
     )
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        as_gridding_kernel,
+    )
 
+    kernel = as_gridding_kernel(cgk_1D)
     prolate_spheroidal_grid_uv_sampling(
         grid,
         normalization,
@@ -375,11 +379,11 @@ def add_uv_sampling_grid_single_field(
         time_map,
         pol_map,
         imaging_weight,
-        cgk_1D,
+        kernel.table,
         n_uv,
         delta_lm,
-        support=7,
-        oversampling=100,
+        support=kernel.support,
+        oversampling=kernel.oversampling,
         processing_function_threads=processing_function_threads,
     )
 
@@ -393,8 +397,7 @@ def make_point_spread_function_single_field(
     image_data_group_in_name="residual",
     image_data_group_out_name="residual",
     image_data_variables_keep=None,
-    gcf_oversampling=100,
-    gcf_support=7,
+    gridding_kernel_params=None,
     processing_function_threads=1,
     fft_backend="pyfftw",
     complex_dtype=None,
@@ -446,11 +449,17 @@ def make_point_spread_function_single_field(
     image_data_variables_keep : list of str, optional
         Logical image-variable keys to retain on disk (e.g. ``"sky_residual"``,
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
-    gcf_oversampling : int, optional
-        Oversampling of the prolate-spheroidal gridding convolution kernel.
-        Default ``100``.
-    gcf_support : int, optional
-        Support (in pixels) of the gridding convolution kernel.  Default ``7``.
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal"``), ``support`` (the odd number of
+        grid points the kernel spans along one axis; 7 for the prolate
+        spheroidal kernel, Schwab's rational approximation of the ``m = 6``,
+        ``alpha = 1`` function) and ``oversampling`` (samples of the kernel
+        table per uv cell; the kernel is read at the nearest sample, so the
+        lookup error, and with it the floor the imaging cycle converges to,
+        falls as 1 over this number). Missing keys take the defaults
+        ``{"type": "prolate_spheroidal", "support": 7, "oversampling":
+        100}``; ``None`` is all defaults.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
@@ -481,8 +490,8 @@ def make_point_spread_function_single_field(
     from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
         ifft_norm_img_xds,
     )
-    from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
-        create_prolate_spheroidal_kernel_1D,
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        make_gridding_kernel,
     )
     from astroviper.processing_functions.imaging.utils import drop_auto_correlations
 
@@ -492,7 +501,7 @@ def make_point_spread_function_single_field(
         image_data_variables_keep = []
 
     T_start_gcf = time.time()
-    cgk_1D = create_prolate_spheroidal_kernel_1D(gcf_oversampling, gcf_support)
+    cgk_1D = make_gridding_kernel(gridding_kernel_params)
     T_gcf = time.time() - T_start_gcf
 
     T_vis_mask = 0.0
@@ -535,6 +544,7 @@ def make_point_spread_function_single_field(
         processing_function_threads=processing_function_threads,
         fft_backend=fft_backend,
         complex_dtype=complex_dtype,
+        gridding_kernel=cgk_1D,
     )
     T_fft_norm = time.time() - T_start_fft_norm
 

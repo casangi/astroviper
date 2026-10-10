@@ -226,10 +226,12 @@ def add_visibility_grid_single_field(
         Measurement set dataset.  Must contain the data variables referenced
         by ``ms_data_group_in_name`` (``correlated_data``, ``uvw``,
         ``weight_imaging``) and a ``frequency`` coordinate.
-    cgk_1D : np.ndarray
-        1-D convolutional gridding kernel used by the prolate spheroidal
-        gridder.  Shape ``(oversampling * support,)``; passed directly to the
-        C++ ``prolate_spheroidal_grid`` kernel.
+    cgk_1D : GriddingKernel or np.ndarray
+        The gridding kernel
+        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`,
+        whose table, support and oversampling go to the C++
+        ``prolate_spheroidal_grid`` kernel), or the bare table of the default
+        prolate spheroidal kernel of support 7.
     img_xds : xr.Dataset
         Image dataset that accumulates the gridded visibilities.  The arrays
         named by ``image_data_group_out_modified`` are created on the first call
@@ -366,7 +368,11 @@ def add_visibility_grid_single_field(
     from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
         prolate_spheroidal_grid,
     )
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        as_gridding_kernel,
+    )
 
+    kernel = as_gridding_kernel(cgk_1D)
     prolate_spheroidal_grid(
         grid,
         normalization,
@@ -377,10 +383,10 @@ def add_visibility_grid_single_field(
         time_map,
         pol_map,
         imaging_weight,
-        cgk_1D,
+        kernel.table,
         n_uv,
         delta_lm,
-        support=7,
-        oversampling=100,
+        support=kernel.support,
+        oversampling=kernel.oversampling,
         processing_function_threads=processing_function_threads,
     )

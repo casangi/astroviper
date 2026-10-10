@@ -83,6 +83,7 @@ def image_cube_single_field(
     restore: bool = False,
     primary_beam_correction: bool = False,
     psf_fitting_method: str = "astroviper",
+    gridding_kernel_params: dict[str, Any] | None = None,
     skunk_works: bool = False,
     compute_backend: str = "dask",
     mpi_cluster_setup: dict[str, Any] | None = None,
@@ -341,6 +342,17 @@ def image_cube_single_field(
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
         ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``
         (the fit behind ``tclean``'s restoring beam).
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal"``), ``support`` (the odd number of
+        grid points the kernel spans along one axis; 7 for the prolate
+        spheroidal kernel, Schwab's rational approximation of the ``m = 6``,
+        ``alpha = 1`` function) and ``oversampling`` (samples of the kernel
+        table per uv cell; the kernel is read at the nearest sample, so the
+        lookup error, and with it the floor the imaging cycle converges to,
+        falls as 1 over this number). Missing keys take the defaults
+        ``{"type": "prolate_spheroidal", "support": 7, "oversampling":
+        100}``; ``None`` is all defaults.
     skunk_works : bool
         If ``True`` use the experimental performance I/O path in each node task:
         load only the data group's data variables straight from the Zarr chunk
@@ -733,6 +745,7 @@ def image_cube_single_field(
     input_params["restore"] = restore
     input_params["primary_beam_correction"] = primary_beam_correction
     input_params["psf_fitting_method"] = psf_fitting_method
+    input_params["gridding_kernel_params"] = gridding_kernel_params
     input_params["skunk_works"] = skunk_works
     input_params["image_chunking"] = image_chunking
     input_params["image_sharding"] = image_sharding

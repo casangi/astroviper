@@ -40,9 +40,10 @@ def degrid_visibility_grid_single_field(
         Measurement-set partition modified in place with model visibilities.
         Must expose the ``correlated_data`` and ``uvw`` roles of
         ``ms_data_group_in_name`` and a ``frequency`` coordinate.
-    cgk_1D : numpy.ndarray
-        One-dimensional prolate spheroidal convolution kernel, shape
-        ``(oversampling * (support // 2 + 1),)``.
+    cgk_1D : GriddingKernel or np.ndarray
+        The gridding kernel
+        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
+        or the bare table of the default prolate spheroidal kernel of support 7.
     img_xds : xarray.Dataset
         Image geometry supplying direction-cell sizes and unpadded image shape.
     grid : numpy.ndarray
@@ -167,7 +168,11 @@ def degrid_visibility_grid_single_field(
     from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
         prolate_spheroidal_degrid,
     )
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        as_gridding_kernel,
+    )
 
+    kernel = as_gridding_kernel(cgk_1D)
     prolate_spheroidal_degrid(
         grid,
         vis_data,
@@ -176,10 +181,10 @@ def degrid_visibility_grid_single_field(
         frequency_map,
         time_map,
         pol_map,
-        cgk_1D,
+        kernel.table,
         n_uv,
         delta_lm,
-        support=7,
-        oversampling=100,
+        support=kernel.support,
+        oversampling=kernel.oversampling,
         processing_function_threads=processing_function_threads,
     )
