@@ -29,18 +29,24 @@ IMAGING_PARAM_DOCS = {
     ),
     "gridding_kernel_params": (
         "The gridding convolution kernel the gridder and degridder use:\n"
-        '``type`` (``"prolate_spheroidal"``), ``support`` (the odd number of\n'
-        "grid points the kernel spans along one axis; 7 for the prolate\n"
-        "spheroidal kernel, Schwab's rational approximation of the ``m = 6``,\n"
-        "``alpha = 1`` function), ``oversampling`` (samples of the kernel\n"
-        "table per uv cell) and ``interpolation`` (how the gridders read the\n"
-        'table at a stencil point: ``"nearest"`` takes the nearest sample, so\n'
-        "the lookup error, and with it the floor the imaging cycle converges\n"
-        'to, falls as 1 over the oversampling; ``"linear"`` interpolates the\n'
-        "two neighbouring samples and the error falls as 1 over its square).\n"
-        'Missing keys take the defaults ``{"type": "prolate_spheroidal",\n'
-        '"support": 7, "oversampling": 100, "interpolation": "nearest"}``;\n'
-        "``None`` is all defaults."
+        '``type`` (``"prolate_spheroidal"``, Schwab\'s rational approximation\n'
+        "of the ``m = 6``, ``alpha = 1`` function with its analytic correction,\n"
+        'the kernel CASA uses; ``"exponential_semicircle"``, the modified\n'
+        "exponential of a semicircle of Barnett et al. 2019 and Arras et al.\n"
+        "2021 shaped for the image region the ``fft_padding`` keeps; or\n"
+        '``"least_misfit"``, the table that minimises the map error over that\n'
+        "region for the lookup used, after Ye et al. 2020), ``support`` (the\n"
+        "odd number of grid points the kernel spans along one axis; 7 for the\n"
+        "prolate spheroidal kernel, any odd number from 3 for the others),\n"
+        "``oversampling`` (samples of the kernel table per uv cell) and\n"
+        "``interpolation`` (how the gridders read the table at a stencil\n"
+        'point: ``"nearest"`` takes the nearest sample, so the lookup error,\n'
+        "and with it the floor the imaging cycle converges to, falls as 1 over\n"
+        'the oversampling; ``"linear"`` interpolates the two neighbouring\n'
+        "samples and the error falls as 1 over its square). Missing keys take\n"
+        'the defaults ``{"type": "prolate_spheroidal", "support": 7,\n'
+        '"oversampling": 100, "interpolation": "nearest"}``; ``None`` is all\n'
+        "defaults."
     ),
     "iteration_control_params": (
         "CLEAN iteration controls. An **imaging cycle** (below simply a cycle)\n"

@@ -452,18 +452,24 @@ def make_point_spread_function_single_field(
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
-        ``type`` (``"prolate_spheroidal"``), ``support`` (the odd number of
-        grid points the kernel spans along one axis; 7 for the prolate
-        spheroidal kernel, Schwab's rational approximation of the ``m = 6``,
-        ``alpha = 1`` function), ``oversampling`` (samples of the kernel
-        table per uv cell) and ``interpolation`` (how the gridders read the
-        table at a stencil point: ``"nearest"`` takes the nearest sample, so
-        the lookup error, and with it the floor the imaging cycle converges
-        to, falls as 1 over the oversampling; ``"linear"`` interpolates the
-        two neighbouring samples and the error falls as 1 over its square).
-        Missing keys take the defaults ``{"type": "prolate_spheroidal",
-        "support": 7, "oversampling": 100, "interpolation": "nearest"}``;
-        ``None`` is all defaults.
+        ``type`` (``"prolate_spheroidal"``, Schwab's rational approximation
+        of the ``m = 6``, ``alpha = 1`` function with its analytic correction,
+        the kernel CASA uses; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for the image region the ``fft_padding`` keeps; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        prolate spheroidal kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "prolate_spheroidal", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
+        defaults.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
@@ -505,7 +511,7 @@ def make_point_spread_function_single_field(
         image_data_variables_keep = []
 
     T_start_gcf = time.time()
-    cgk_1D = make_gridding_kernel(gridding_kernel_params)
+    cgk_1D = make_gridding_kernel(gridding_kernel_params, image_params["fft_padding"])
     T_gcf = time.time() - T_start_gcf
 
     T_vis_mask = 0.0
