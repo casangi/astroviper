@@ -358,11 +358,12 @@ class GriddingKernel:
     def map_error(self, x, offsets_per_cell=4):
         """The rms map error of the kernel at image positions ``x``.
 
-        The gridded response of a unit visibility minus the ideal fringe,
-        in units of the fringe, as the rms over the position of the
-        visibility within a uv cell: the kernel's aliasing plus the error
-        of its table lookup. It is what limits the residual of a
-        self consistent imaging cycle.
+        The degridded visibility of a unit source at ``x`` over the ideal
+        fringe, minus 1, as the rms over the position of the visibility
+        within a uv cell: the kernel's aliasing plus the error of its table
+        lookup, with the degridder's division by the stencil sum and the
+        correction applied. It is what limits the residual of a self
+        consistent imaging cycle (one axis; the two axes multiply).
 
         Parameters
         ----------
@@ -382,7 +383,8 @@ class GriddingKernel:
         values = self.stencil_values(offsets)  # (n_off, W)
         rel = np.arange(self.support) - self.support // 2
         phase = np.exp(2j * np.pi * np.multiply.outer(rel, x.ravel()))  # (W, n_x)
-        response = values @ phase / self.transform(x.ravel())
+        response = values @ phase / values.sum(axis=1)[:, None]
+        response /= self.correction(x.ravel())[None, :]
         fringe = np.exp(-2j * np.pi * np.multiply.outer(offsets, x.ravel()))
         error = np.sqrt(np.mean(np.abs(response - fringe) ** 2, axis=0))
         return error.reshape(x.shape)

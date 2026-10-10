@@ -11,23 +11,28 @@ what is minimised, and the image plane correction is the transform of the
 kernel applied (:func:`~.kernel_lookup.table_transform`).
 
 For a visibility whose nearest grid point is ``offset`` cells away, the
-gridders put the stencil values :math:`C_i` on the grid points
+gridder puts the stencil values :math:`C_i` on the grid points
 :math:`i - W // 2` cells from that grid point, which after the FFT and the
-correction :math:`h(x)` gives the response
-:math:`A(x) / h(x) = \\sum_i C_i e^{2 \\pi \\imath (i - W//2) x} / h(x)` to
-compare with the fringe :math:`e^{-2 \\pi \\imath \\, \\mathrm{offset} \\, x}`
-of the visibility itself (``x`` in units of the padded image width). The
-misfit
+correction :math:`h(x)` (normalised to 1 at the image centre) gives the
+response :math:`A(x) / h(x) = \\sum_i C_i e^{2 \\pi \\imath (i - W//2) x} / h(x)`
+to compare with the fringe
+:math:`e^{-2 \\pi \\imath \\, \\mathrm{offset} \\, x}` of the visibility itself
+(``x`` in units of the padded image width). The degridder combines the same
+stencil values but divides by their sum :math:`S = \\sum_i C_i`, so its
+response is :math:`A(x) / (S h(x))`; the degridded model visibilities set the
+floor of a self consistent imaging cycle, the gridder the dirty image and the
+point spread function. The misfit is the mean of the two,
 
 .. math::
+    \\frac{1}{2} \\int_{-1/2}^{1/2} d\\,\\mathrm{offset} \\int_{-x_0}^{x_0} dx \\,
+    \\Big( \\Big| \\frac{A(x)}{h(x)} - e^{-2 \\pi \\imath \\, \\mathrm{offset} \\, x}
+    \\Big|^2 + \\Big| \\frac{A(x)}{S h(x)} - e^{-2 \\pi \\imath \\, \\mathrm{offset} \\, x}
+    \\Big|^2 \\Big)
 
-    \\int_{-1/2}^{1/2} d\\,\\mathrm{offset} \\int_{-x_0}^{x_0} dx \\,
-    \\Big| \\frac{A(x)}{h(x)} - e^{-2 \\pi \\imath \\, \\mathrm{offset} \\, x}
-    \\Big|^2
-
-is quadratic in the table for a given correction; the solver alternates
-the least squares solution of the table with the update of the correction
-from the table until the misfit stops decreasing.
+(a table designed for the degridder alone lets the stencil sum vary with the
+offset and makes the gridder many times worse), minimised over the table by
+damped Gauss-Newton iterations with :math:`A`, :math:`S` and :math:`h` (the
+transform of the kernel applied) all linear in the table.
 """
 
 from __future__ import annotations
@@ -53,7 +58,7 @@ def _quadrature_x(x0, n_x):
 
 
 def misfit(table, support, oversampling, interpolation, x0, offsets=None, n_x=96):
-    """The rms map error of a kernel table over the image kept.
+    """The rms map error of the gridder and the degridder with a kernel table.
 
     The root of the misfit of the module docstring (per unit offset range
     and per unit image width), with the correction the transform of the
@@ -84,14 +89,19 @@ def misfit(table, support, oversampling, interpolation, x0, offsets=None, n_x=96
     rel = np.arange(int(support)) - int(support) // 2
     indices, weights = stencil_lookup(support, oversampling, interpolation, offsets)
     values = np.sum(np.asarray(table)[indices] * weights, axis=-2)  # (n_off, W)
-    # the response in units of the kernel's transform (the correction, with
-    # the kernel's scale): A(x) / c(x), independent of the table's scale
-    transform = table_transform(table, oversampling, interpolation, x)
+    # the gridded response A(x) / (T(0) h(x)) (the grid normalised by the mean
+    # stencil sum T(0)) and the degridded A(x) / (S h(x)), h the correction
+    # normalised at the centre; independent of the table's scale
+    centre = table_transform(table, oversampling, interpolation, 0.0)
+    correction = table_transform(table, oversampling, interpolation, x) / centre
     basis = np.exp(2j * np.pi * np.multiply.outer(rel, x))  # (W, n_x)
-    response = values @ basis / transform  # (n_off, n_x)
     target = np.exp(-2j * np.pi * np.multiply.outer(offsets, x))
-    error = np.abs(response - target) ** 2
-    return float(np.sqrt(np.sum(error @ w_x) / offsets.size / x0))
+    squares = []
+    for norm in (np.full(offsets.size, centre), values.sum(axis=1)):
+        response = values @ basis / norm[:, None] / correction
+        error = np.abs(response - target) ** 2
+        squares.append(np.sum(error @ w_x) / offsets.size / x0)
+    return float(np.sqrt(0.5 * sum(squares)))
 
 
 # the largest table solved for directly; finer tables are resampled from it
@@ -109,9 +119,10 @@ class _MisfitProblem:
     """The misfit of a kernel table and its Gauss-Newton normal equations.
 
     Everything that does not depend on the table is precomputed: the lookup
-    matrix ``P`` (stencil values ``= P @ table``), the fringe and response
-    phases on the quadrature nodes, and the rows ``G`` of the table
-    transform at the nodes (``transform = table @ G``).
+    matrix ``P`` (stencil values ``= P @ table``), the matrix ``Z`` that sums
+    the stencil of each offset (stencil sums ``= Z @ P @ table``), the fringe
+    and response phases on the quadrature nodes, and the rows ``G`` of the
+    table transform at the nodes (``transform = table @ G``).
     """
 
     def __init__(self, support, oversampling, interpolation, x0, offsets_per_cell, n_x):
@@ -141,6 +152,12 @@ class _MisfitProblem:
         self.P = P[:, self.used].tocsr()
         self.n_table = n_table
         self.n_offsets = n_offsets
+        self.Z = scipy.sparse.kron(
+            scipy.sparse.identity(n_offsets, format="csr"),
+            np.ones((1, support)),
+            format="csr",
+        )  # (n_off, n_off W)
+        self.stencil_sum_rows = (self.Z @ self.P).tocsr()  # (n_off, n_used)
 
         self.x, self.w_x = _quadrature_x(x0, n_x)
         x = self.x
@@ -148,16 +165,9 @@ class _MisfitProblem:
         self.fringe = np.exp(
             -2j * np.pi * np.multiply.outer(self.offsets, x)
         )  # (n_off, n_x)
-        # cos(2 pi (rel_i - rel_j) x) (W, W, n_x); cos(2 pi (rel_i + offset) x) (n_off W, n_x)
+        # cos(2 pi (rel_i - rel_j) x) (W, W, n_x)
         self.cos_pair = np.cos(
             2.0 * np.pi * np.multiply.outer(np.subtract.outer(rel, rel), x)
-        )
-        cos_target = np.cos(
-            2.0 * np.pi * np.multiply.outer(np.add.outer(self.offsets, rel), x)
-        )
-        self.U = (
-            np.asarray(self.P.T @ cos_target.reshape(n_offsets * support, -1))
-            * self.omega
         )
         # the transform of the used entries at the nodes and at the centre
         k = self.used.astype(np.float64)
@@ -179,44 +189,32 @@ class _MisfitProblem:
     def stencil(self, solution):
         return np.asarray(self.P @ solution).reshape(self.n_offsets, self.support)
 
+    def _response(self, solution, normalised):
+        """Stencil sums, transform and the response A / (S c) (``S = 1`` for the gridder)."""
+        C = self.stencil(solution)
+        S = C.sum(axis=1) if normalised else np.ones(self.n_offsets)
+        c = solution @ self.G
+        return S, c, (C @ self.phase) / S[:, None] / c[None, :]
+
     def misfit(self, solution):
-        response = self.stencil(solution) @ self.phase / (solution @ self.G)
-        error = np.abs(response - self.fringe) ** 2
-        return float(np.sqrt((error @ self.w_x).sum() * self.omega / self.x0))
+        squares = []
+        for normalised in (False, True):
+            _, _, response = self._response(solution, normalised)
+            error = np.abs(response - self.fringe) ** 2
+            squares.append((error @ self.w_x).sum() * self.omega / self.x0)
+        return float(np.sqrt(0.5 * sum(squares)))
 
     def gauss_newton_step(self, solution, damping):
         """The constrained, damped Gauss-Newton step from ``solution``.
 
-        The misfit residual ``E = A / c - t`` (response over transform minus
-        fringe) has the Jacobian ``J = (B - (A / c) g) / c`` with respect to
-        the table (``B`` the response, ``g`` the transform rows); its normal
-        equations are assembled from the sparse response term and rank
-        ``n_x`` transform terms, and solved with the constraint that the
-        transform at the image centre does not change.
+        The normal equations of the gridder and the degridder residuals are
+        added (see :meth:`_normal_equations`) and solved with the constraint
+        that the transform at the image centre does not change.
         """
-        import scipy.sparse
-
-        W = self.support
-        C = self.stencil(solution)  # (n_off, W)
-        c = solution @ self.G  # (n_x,)
-        w = self.w_x / c**2
-        # S_q T and T^T S_q T for every node q
-        CQ = np.einsum("si,ijq->sjq", C, self.cos_pair).reshape(self.n_offsets * W, -1)
-        ST = np.asarray(self.P.T @ CQ) * self.omega  # (n_used, n_x)
-        a = np.einsum("sjq,sj->q", CQ.reshape(self.n_offsets, W, -1), C) * self.omega
-        Q = self.cos_pair @ w  # (W, W)
-        Q_block = scipy.sparse.kron(
-            scipy.sparse.identity(self.n_offsets, format="csr"),
-            scipy.sparse.csr_matrix(Q),
-            format="csr",
-        )
-        normal = (self.P.T @ Q_block @ self.P).toarray() * self.omega
-        cross = (ST * (w / c)) @ self.G.T
-        normal -= cross + cross.T
-        normal += (self.G * (w * a / c**2)) @ self.G.T
-        uT = solution @ self.U  # (n_x,)
-        gradient = ST @ w - self.U @ (self.w_x / c)
-        gradient -= self.G @ ((self.w_x / c**2) * (a / c - uT))
+        normal, gradient = self._normal_equations(solution, False)
+        normal_d, gradient_d = self._normal_equations(solution, True)
+        normal += normal_d
+        gradient += gradient_d
         n = solution.size
         scale = np.diag(normal).copy()
         scale[scale <= 0.0] = np.max(scale)
@@ -227,8 +225,62 @@ class _MisfitProblem:
         kkt[n, :n] = self.g0
         rhs = np.zeros(n + 1)
         rhs[:n] = -gradient
-        step = np.linalg.solve(kkt, rhs)[:n]
-        return step
+        return np.linalg.solve(kkt, rhs)[:n]
+
+    def _normal_equations(self, solution, normalised):
+        """Gauss-Newton normal matrix and gradient of one residual.
+
+        The residual ``E = R - t`` with the response ``R = A / (S c)`` (``A``
+        the stencil response, ``S`` the stencil sum for the degridder or 1 for
+        the gridder, ``c`` the transform, all linear in the table) has the
+        Jacobian ``J = B / (S c) - R (s / S + g / c)`` with respect to the table
+        (``B`` the response rows, ``s`` the stencil sum rows, zero for the
+        gridder, ``g`` the transform rows); the normal equations are assembled
+        from the sparse lookup.
+        """
+        import scipy.sparse
+
+        W = self.support
+        S, c, R = self._response(solution, normalised)
+        E = R - self.fringe
+        w = self.w_x
+        sum_rows = self.stencil_sum_rows if normalised else 0.0 * self.stencil_sum_rows
+        # B^H B / (S c)^2: per offset the W x W block cos_pair weighted by w / c^2
+        Q = self.cos_pair @ (w / c**2)  # (W, W)
+        Q_block = scipy.sparse.kron(
+            scipy.sparse.diags(self.omega / S**2),
+            scipy.sparse.csr_matrix(Q),
+            format="csr",
+        )
+        normal = (self.P.T @ Q_block @ self.P).toarray()
+        # Re B^H (u R) on the stencil points, and its sum over the nodes
+        weighted_R = R * (w / c)[None, :] * self.omega / S[:, None]  # (n_off, n_x)
+        H = np.real(np.conj(self.phase)[None, :, :] * weighted_R[:, None, :])
+        V = np.asarray(self.P.T @ H.reshape(self.n_offsets * W, -1))  # (n_used, n_x)
+        Zr = H.sum(axis=2).reshape(-1)  # (n_off W,)
+        Y = (self.Z @ self.P.multiply(Zr[:, None])).tocsr()  # (n_off, n_used)
+        cross = (Y.T @ scipy.sparse.diags(1.0 / S) @ sum_rows).toarray()
+        cross += V @ (self.G / c[None, :]).T
+        normal -= cross + cross.T
+        # |R|^2 (s / S + g / c)(s / S + g / c)^T
+        R2 = np.abs(R) ** 2 * w[None, :] * self.omega  # (n_off, n_x)
+        a1 = R2.sum(axis=1)
+        a2 = R2.sum(axis=0)
+        K = R2 / S[:, None] / c[None, :]
+        sK = np.asarray(sum_rows.T @ K)  # (n_used, n_x)
+        normal += (sum_rows.T @ scipy.sparse.diags(a1 / S**2) @ sum_rows).toarray()
+        normal += sK @ self.G.T + self.G @ sK.T
+        normal += (self.G * (a2 / c**2)) @ self.G.T
+        # gradient Re J^H E
+        weighted_E = E * (w / c)[None, :] * self.omega / S[:, None]
+        HE = np.real(np.conj(self.phase)[None, :, :] * weighted_E[:, None, :]).sum(
+            axis=2
+        )
+        RE = np.real(np.conj(R) * E) * w[None, :] * self.omega
+        gradient = np.asarray(self.P.T @ HE.reshape(-1))
+        gradient -= np.asarray(sum_rows.T @ (RE.sum(axis=1) / S))
+        gradient -= self.G @ (RE.sum(axis=0) / c)
+        return normal, gradient
 
 
 def _solve_least_misfit(problem, start, max_iterations, tolerance):

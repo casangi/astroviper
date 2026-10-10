@@ -371,4 +371,65 @@ class TestCorrection:
         prolate = make_gridding_kernel(
             {"interpolation": "linear", "oversampling": 1000}
         )
-        assert np.all(prolate.map_error(x) > 15 * linear)
+        assert np.all(prolate.map_error(x) > 10 * linear)
+
+
+class TestDefaultAndTableCorrections:
+    def test_only_the_default_keeps_the_analytic_correction(self):
+        """The default is bit for bit the analytic correction; any other sampling
+        or lookup of the prolate kernel is corrected by its table transform."""
+        n = 3750
+        default = make_gridding_kernel()
+        np.testing.assert_array_equal(
+            default.correction_1D(n),
+            create_prolate_spheroidal_correcting_image_1D([n, n])[0],
+        )
+        for params in ({"oversampling": 1000}, {"interpolation": "linear"}):
+            kernel = make_gridding_kernel(params)
+            x = coordinates(n)
+            expected = table_transform(
+                kernel.table, kernel.oversampling, kernel.interpolation, x
+            ) / table_transform(
+                kernel.table, kernel.oversampling, kernel.interpolation, 0.0
+            )
+            np.testing.assert_allclose(
+                kernel.correction_1D(n), np.maximum(expected, CORRECTION_FLOOR)
+            )
+
+    def test_analytic_correction_of_the_sampled_table_is_biased(self):
+        """Sampled at 100 per cell with the nearest lookup, the table's transform is
+        the analytic correction times sinc(x / 100): a flux bias of
+        -(pi x / M)^2 / 6 for the analytic correction, 2.9e-5 at x = 0.42."""
+        kernel = make_gridding_kernel()
+        x = np.linspace(0.0, 0.42, 43)
+        ratio = table_transform(kernel.table, 100, "nearest", x) / table_transform(
+            kernel.table, 100, "nearest", 0.0
+        )
+        ratio /= kernel.correction(x)
+        np.testing.assert_allclose(ratio, np.sinc(x / 100), rtol=0, atol=1e-6)
+        assert 1.0 - ratio[-1] == pytest.approx((np.pi * 0.42 / 100) ** 2 / 6, rel=0.05)
+
+    @pytest.mark.parametrize("kernel_type", ["exponential_semicircle", "least_misfit"])
+    def test_designed_kernels_refuse_a_small_padding(self, kernel_type):
+        with pytest.raises(ValueError, match="fft_padding >= 1.05"):
+            make_gridding_kernel({"type": kernel_type}, 1.02)
+
+
+def test_least_misfit_table_is_the_same_in_another_process():
+    """The least misfit solve gives the same table on every process."""
+    import subprocess
+    import sys
+
+    code = (
+        "from astroviper.processing_functions.imaging.gridding_convolution_functions."
+        "gridding_kernel import make_gridding_kernel; import hashlib; "
+        "k = make_gridding_kernel({'type': 'least_misfit', 'oversampling': 100, "
+        "'interpolation': 'linear'}, 1.2); print(hashlib.sha256(k.table.tobytes()).hexdigest())"
+    )
+    digests = {
+        subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        for _ in range(2)
+    }
+    assert len(digests) == 1
