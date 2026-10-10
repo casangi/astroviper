@@ -45,6 +45,8 @@ namespace prolate_spheroidal {
  * @param delta_m          Image cell size in m (radians)
  * @param support          Full convolution support width in grid pixels
  * @param oversampling     Oversampling factor of cgk_1D
+ * @param interpolation    Kernel lookup: 0 nearest table entry, 1 linear interpolation
+ *                         (kernel_lookup.hpp)
  * @param processing_function_threads      Number of worker threads. Values <= 0 fall back to
  *                         std::thread::hardware_concurrency(); 1 runs serial.
  */
@@ -63,7 +65,7 @@ void prolate_spheroidal_grid(
     int m_time_g, int m_chan_g, int m_pol_g, int m_u, int m_v,
     int n_time, int n_baseline, int n_vis_chan, int n_pol,
     double delta_l, double delta_m,
-    int support, int oversampling,
+    int support, int oversampling, int interpolation,
     int processing_function_threads
 );
 
@@ -72,14 +74,14 @@ extern template void prolate_spheroidal_grid<double>(
     const double*, const int64_t*, const int64_t*, const int64_t*,
     const double*, const double*,
     int, int, int, int, int, int, int, int, int,
-    double, double, int, int, int);
+    double, double, int, int, int, int);
 
 extern template void prolate_spheroidal_grid<float>(
     std::complex<float>*, double*, const std::complex<double>*, const double*,
     const double*, const int64_t*, const int64_t*, const int64_t*,
     const double*, const double*,
     int, int, int, int, int, int, int, int, int,
-    double, double, int, int, int);
+    double, double, int, int, int, int);
 
 /**
  * Grid imaging weights onto a UV plane to form the UV-sampling function (PSF numerator).
@@ -104,7 +106,7 @@ void prolate_spheroidal_grid_uv_sampling(
     int m_time_g, int m_chan_g, int m_pol_g, int m_u, int m_v,
     int n_time, int n_baseline, int n_vis_chan, int n_pol,
     double delta_l, double delta_m,
-    int support, int oversampling,
+    int support, int oversampling, int interpolation,
     int processing_function_threads
 );
 
@@ -112,12 +114,12 @@ extern template void prolate_spheroidal_grid_uv_sampling<double>(
     std::complex<double>*, double*, const double*, const double*,
     const int64_t*, const int64_t*, const int64_t*, const double*, const double*,
     int, int, int, int, int, int, int, int, int,
-    double, double, int, int, int);
+    double, double, int, int, int, int);
 
 extern template void prolate_spheroidal_grid_uv_sampling<float>(
     std::complex<float>*, double*, const double*, const double*,
     const int64_t*, const int64_t*, const int64_t*, const double*, const double*,
     int, int, int, int, int, int, int, int, int,
-    double, double, int, int, int);
+    double, double, int, int, int, int);
 
 } // namespace prolate_spheroidal

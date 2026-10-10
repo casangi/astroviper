@@ -83,7 +83,7 @@ def _make_random_inputs(
     )
 
 
-def _run_cpp(inputs, processing_function_threads=1):
+def _run_cpp(inputs, processing_function_threads=1, interpolation=0):
     vis_data = inputs["vis_data"].copy()
     prolate_spheroidal_degrid(
         inputs["grid"],
@@ -98,12 +98,13 @@ def _run_cpp(inputs, processing_function_threads=1):
         inputs["delta_lm"],
         support=SUPPORT,
         oversampling=OVERSAMPLING,
+        interpolation=interpolation,
         processing_function_threads=processing_function_threads,
     )
     return vis_data
 
 
-def _run_reference(inputs):
+def _run_reference(inputs, interpolation=0):
     vis_data = inputs["vis_data"].copy()
     prolate_spheroidal_degrid_reference(
         inputs["grid"],
@@ -118,6 +119,7 @@ def _run_reference(inputs):
         inputs["delta_lm"],
         support=SUPPORT,
         oversampling=OVERSAMPLING,
+        interpolation=interpolation,
     )
     return vis_data
 
@@ -465,3 +467,95 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDegridKernelInterpolation(unittest.TestCase):
+    """The linear interpolation of the kernel table (interpolation=1)."""
+
+    def test_linear_matches_reference(self):
+        inputs = _make_random_inputs(seed=3)
+        cpp = _run_cpp(inputs, processing_function_threads=1, interpolation=1)
+        ref = _run_reference(inputs, interpolation=1)
+        np.testing.assert_allclose(cpp, ref, rtol=0, atol=1e-12)
+        self.assertGreater(np.count_nonzero(cpp), 0)
+
+    def test_linear_threaded_matches_serial(self):
+        inputs = _make_random_inputs(seed=4)
+        serial = _run_cpp(inputs, processing_function_threads=1, interpolation=1)
+        threaded = _run_cpp(inputs, processing_function_threads=4, interpolation=1)
+        np.testing.assert_allclose(threaded, serial, rtol=0, atol=1e-12)
+
+    def test_linear_differs_from_nearest_by_the_table_step(self):
+        """Linear and nearest read the same table: they differ, by no more
+        than the kernel changes over one table sample."""
+        inputs = _make_random_inputs(seed=5)
+        nearest = _run_cpp(inputs, interpolation=0)
+        linear = _run_cpp(inputs, interpolation=1)
+        difference = np.abs(linear - nearest).max()
+        self.assertGreater(difference, 0.0)
+        self.assertLess(difference, 0.05 * np.abs(nearest).max())
+
+    def test_unknown_interpolation_reads_nearest(self):
+        """Only 1 selects linear; any other code is the nearest lookup."""
+        inputs = _make_random_inputs(seed=6)
+        np.testing.assert_array_equal(
+            _run_cpp(inputs, interpolation=7), _run_cpp(inputs, interpolation=0)
+        )
+
+
+def _gaussian_kernel_table(support, oversampling):
+    """A kernel table of another support: a Gaussian over the half width,
+    zero in the last cell, in the layout the gridders read."""
+    half = support // 2
+    distance = np.arange(oversampling * (half + 1)) / oversampling
+    table = np.exp(-0.5 * (distance / (0.45 * half)) ** 2)
+    table[oversampling * half :] = 0.0
+    return table
+
+
+class TestDegridOtherSupports(unittest.TestCase):
+    """The stencil and the table layout are generic in the support."""
+
+    def test_other_supports_match_reference(self):
+        from reference_gridders import prolate_spheroidal_degrid_reference
+
+        for support in (3, 5, 9, 11):
+            for interpolation in (0, 1):
+                with self.subTest(support=support, interpolation=interpolation):
+                    inputs = _make_random_inputs(seed=10 + support)
+                    inputs["cgk_1D"] = _gaussian_kernel_table(support, OVERSAMPLING)
+                    cpp = inputs["vis_data"].copy()
+                    prolate_spheroidal_degrid(
+                        inputs["grid"],
+                        cpp,
+                        inputs["uvw"],
+                        inputs["frequency_coord"],
+                        inputs["frequency_map"],
+                        inputs["time_map"],
+                        inputs["pol_map"],
+                        inputs["cgk_1D"],
+                        inputs["n_uv"],
+                        inputs["delta_lm"],
+                        support=support,
+                        oversampling=OVERSAMPLING,
+                        interpolation=interpolation,
+                        processing_function_threads=2,
+                    )
+                    ref = inputs["vis_data"].copy()
+                    prolate_spheroidal_degrid_reference(
+                        inputs["grid"],
+                        ref,
+                        inputs["uvw"],
+                        inputs["frequency_coord"],
+                        inputs["frequency_map"],
+                        inputs["time_map"],
+                        inputs["pol_map"],
+                        inputs["cgk_1D"],
+                        inputs["n_uv"],
+                        inputs["delta_lm"],
+                        support=support,
+                        oversampling=OVERSAMPLING,
+                        interpolation=interpolation,
+                    )
+                    np.testing.assert_allclose(cpp, ref, rtol=0, atol=1e-12)
+                    self.assertGreater(np.count_nonzero(cpp), 0)

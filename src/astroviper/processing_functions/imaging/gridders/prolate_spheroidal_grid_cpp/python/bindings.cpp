@@ -56,6 +56,7 @@ void prolate_spheroidal_grid_bind(
     py::array_t<double,  py::array::c_style | py::array::forcecast>  delta_lm,      // (2,) — tiny, forcecast OK
     int support,
     int oversampling,
+    int interpolation,
     int processing_function_threads
 ) {
     auto grid_info  = grid.request();
@@ -128,7 +129,8 @@ void prolate_spheroidal_grid_bind(
             freq_map_ptr, time_map_ptr, pol_map_ptr, wt_ptr, cgk_ptr,
             m_time_g, m_chan_g, m_pol_g, m_u, m_v,
             n_time, n_baseline, n_vis_chan, n_pol,
-            dl, dm, support, oversampling, processing_function_threads);
+            dl, dm, support, oversampling, interpolation,
+            processing_function_threads);
     } else {
         cflt* grid_ptr = static_cast<cflt*>(grid_info.ptr);
         py::gil_scoped_release release;
@@ -137,7 +139,8 @@ void prolate_spheroidal_grid_bind(
             freq_map_ptr, time_map_ptr, pol_map_ptr, wt_ptr, cgk_ptr,
             m_time_g, m_chan_g, m_pol_g, m_u, m_v,
             n_time, n_baseline, n_vis_chan, n_pol,
-            dl, dm, support, oversampling, processing_function_threads);
+            dl, dm, support, oversampling, interpolation,
+            processing_function_threads);
     }
 }
 
@@ -158,6 +161,7 @@ void prolate_spheroidal_grid_uv_sampling_bind(
     py::array_t<double,  py::array::c_style | py::array::forcecast>  delta_lm,
     int support,
     int oversampling,
+    int interpolation,
     int processing_function_threads
 ) {
     auto grid_info = grid.request();
@@ -222,7 +226,8 @@ void prolate_spheroidal_grid_uv_sampling_bind(
             freq_map_ptr, time_map_ptr, pol_map_ptr, wt_ptr, cgk_ptr,
             m_time_g, m_chan_g, m_pol_g, m_u, m_v,
             n_time, n_baseline, n_vis_chan, n_pol,
-            dl, dm, support, oversampling, processing_function_threads);
+            dl, dm, support, oversampling, interpolation,
+            processing_function_threads);
     } else {
         cflt* grid_ptr = static_cast<cflt*>(grid_info.ptr);
         py::gil_scoped_release release;
@@ -231,7 +236,8 @@ void prolate_spheroidal_grid_uv_sampling_bind(
             freq_map_ptr, time_map_ptr, pol_map_ptr, wt_ptr, cgk_ptr,
             m_time_g, m_chan_g, m_pol_g, m_u, m_v,
             n_time, n_baseline, n_vis_chan, n_pol,
-            dl, dm, support, oversampling, processing_function_threads);
+            dl, dm, support, oversampling, interpolation,
+            processing_function_threads);
     }
 }
 
@@ -261,6 +267,7 @@ void prolate_spheroidal_degrid_bind(
     py::array_t<double,  py::array::c_style | py::array::forcecast>  delta_lm,      // (2,) — tiny, forcecast OK
     int support,
     int oversampling,
+    int interpolation,
     int processing_function_threads
 ) {
     auto grid_info = grid.request();
@@ -339,7 +346,8 @@ void prolate_spheroidal_degrid_bind(
             freq_map_ptr, time_map_ptr, pol_map_ptr, cgk_ptr,
             m_time_g, m_chan_g, m_pol_g, m_u, m_v,
             n_time, n_baseline, n_vis_chan, n_pol,
-            dl, dm, support, oversampling, processing_function_threads);
+            dl, dm, support, oversampling, interpolation,
+            processing_function_threads);
     };
 
     if (grid_is_c128 && vis_is_c128) {
@@ -377,6 +385,7 @@ PYBIND11_MODULE(_prolate_spheroidal_grid_ext, m) {
           py::arg("delta_lm"),
           py::arg("support"),
           py::arg("oversampling"),
+          py::arg("interpolation") = 0,
           py::arg("processing_function_threads") = 1);
 
     m.def("prolate_spheroidal_grid_uv_sampling",
@@ -398,6 +407,7 @@ PYBIND11_MODULE(_prolate_spheroidal_grid_ext, m) {
           py::arg("delta_lm"),
           py::arg("support"),
           py::arg("oversampling"),
+          py::arg("interpolation") = 0,
           py::arg("processing_function_threads") = 1);
 
     m.def("prolate_spheroidal_degrid",
@@ -420,5 +430,6 @@ PYBIND11_MODULE(_prolate_spheroidal_grid_ext, m) {
           py::arg("delta_lm"),
           py::arg("support"),
           py::arg("oversampling"),
+          py::arg("interpolation") = 0,
           py::arg("processing_function_threads") = 1);
 }

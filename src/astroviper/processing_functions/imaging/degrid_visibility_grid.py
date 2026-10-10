@@ -186,5 +186,6 @@ def degrid_visibility_grid_single_field(
         delta_lm,
         support=kernel.support,
         oversampling=kernel.oversampling,
+        interpolation=kernel.interpolation_code,
         processing_function_threads=processing_function_threads,
     )

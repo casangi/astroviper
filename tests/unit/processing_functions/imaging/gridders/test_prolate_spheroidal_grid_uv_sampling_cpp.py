@@ -84,7 +84,7 @@ def _make_random_inputs(
     )
 
 
-def _run_cpp(inputs, processing_function_threads=1):
+def _run_cpp(inputs, processing_function_threads=1, interpolation=0):
     grid, norm = _zero_grid(
         inputs["m_time"],
         inputs["m_chan"],
@@ -106,12 +106,13 @@ def _run_cpp(inputs, processing_function_threads=1):
         inputs["delta_lm"],
         support=SUPPORT,
         oversampling=OVERSAMPLING,
+        interpolation=interpolation,
         processing_function_threads=processing_function_threads,
     )
     return grid, norm
 
 
-def _run_reference(inputs):
+def _run_reference(inputs, interpolation=0):
     grid, norm = _zero_grid(
         inputs["m_time"],
         inputs["m_chan"],
@@ -133,6 +134,7 @@ def _run_reference(inputs):
         inputs["delta_lm"],
         support=SUPPORT,
         oversampling=OVERSAMPLING,
+        interpolation=interpolation,
     )
     return grid, norm
 
@@ -418,3 +420,17 @@ class TestProlateSpheroidalGridUVSamplingCpp(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUvSamplingKernelInterpolation(unittest.TestCase):
+    """The linear interpolation of the kernel table (interpolation=1)."""
+
+    def test_linear_matches_reference(self):
+        inputs = _make_random_inputs(seed=3)
+        cpp_grid, cpp_norm = _run_cpp(
+            inputs, processing_function_threads=1, interpolation=1
+        )
+        ref_grid, ref_norm = _run_reference(inputs, interpolation=1)
+        np.testing.assert_allclose(cpp_grid, ref_grid, rtol=0, atol=1e-10)
+        np.testing.assert_allclose(cpp_norm, ref_norm, rtol=0, atol=1e-10)
+        self.assertGreater(np.count_nonzero(cpp_grid), 0)

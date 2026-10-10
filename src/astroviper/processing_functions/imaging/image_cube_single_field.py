@@ -173,12 +173,15 @@ def imaging_preparation_single_field(
         ``type`` (``"prolate_spheroidal"``), ``support`` (the odd number of
         grid points the kernel spans along one axis; 7 for the prolate
         spheroidal kernel, Schwab's rational approximation of the ``m = 6``,
-        ``alpha = 1`` function) and ``oversampling`` (samples of the kernel
-        table per uv cell; the kernel is read at the nearest sample, so the
-        lookup error, and with it the floor the imaging cycle converges to,
-        falls as 1 over this number). Missing keys take the defaults
-        ``{"type": "prolate_spheroidal", "support": 7, "oversampling":
-        100}``; ``None`` is all defaults.
+        ``alpha = 1`` function), ``oversampling`` (samples of the kernel
+        table per uv cell) and ``interpolation`` (how the gridders read the
+        table at a stencil point: ``"nearest"`` takes the nearest sample, so
+        the lookup error, and with it the floor the imaging cycle converges
+        to, falls as 1 over the oversampling; ``"linear"`` interpolates the
+        two neighbouring samples and the error falls as 1 over its square).
+        Missing keys take the defaults ``{"type": "prolate_spheroidal",
+        "support": 7, "oversampling": 100, "interpolation": "nearest"}``;
+        ``None`` is all defaults.
     task_id : int, optional
         Identifier of the parallel chunk being processed.
     Returns
@@ -458,12 +461,15 @@ def image_cube_single_field(
         ``type`` (``"prolate_spheroidal"``), ``support`` (the odd number of
         grid points the kernel spans along one axis; 7 for the prolate
         spheroidal kernel, Schwab's rational approximation of the ``m = 6``,
-        ``alpha = 1`` function) and ``oversampling`` (samples of the kernel
-        table per uv cell; the kernel is read at the nearest sample, so the
-        lookup error, and with it the floor the imaging cycle converges to,
-        falls as 1 over this number). Missing keys take the defaults
-        ``{"type": "prolate_spheroidal", "support": 7, "oversampling":
-        100}``; ``None`` is all defaults.
+        ``alpha = 1`` function), ``oversampling`` (samples of the kernel
+        table per uv cell) and ``interpolation`` (how the gridders read the
+        table at a stencil point: ``"nearest"`` takes the nearest sample, so
+        the lookup error, and with it the floor the imaging cycle converges
+        to, falls as 1 over the oversampling; ``"linear"`` interpolates the
+        two neighbouring samples and the error falls as 1 over its square).
+        Missing keys take the defaults ``{"type": "prolate_spheroidal",
+        "support": 7, "oversampling": 100, "interpolation": "nearest"}``;
+        ``None`` is all defaults.
     task_id : int, optional
         Identifier of the parallel chunk being processed.
     Returns

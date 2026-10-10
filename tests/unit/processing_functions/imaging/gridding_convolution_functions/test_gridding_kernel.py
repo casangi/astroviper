@@ -89,3 +89,25 @@ class TestKernel:
     def test_table_size_is_checked(self):
         with pytest.raises(ValueError, match="entries"):
             GriddingKernel(np.zeros(399), 7, 100)
+
+
+class TestInterpolation:
+    def test_default_is_nearest_and_linear_is_selectable(self):
+        assert make_gridding_kernel().interpolation == "nearest"
+        assert make_gridding_kernel().interpolation_code == 0
+        kernel = make_gridding_kernel({"interpolation": "linear"})
+        assert kernel.interpolation == "linear" and kernel.interpolation_code == 1
+        assert kernel.params["interpolation"] == "linear"
+        assert "linear" in repr(kernel)
+
+    def test_unknown_interpolation_is_refused(self):
+        with pytest.raises(ValueError, match="interpolation"):
+            resolve_gridding_kernel_params({"interpolation": "cubic"})
+        with pytest.raises(ValueError, match="interpolation"):
+            GriddingKernel(np.zeros(400), 7, 100, interpolation="cubic")
+
+
+def test_prolate_spheroidal_table_exists_for_support_7_only():
+    with pytest.raises(ValueError, match="spans 7 grid points"):
+        create_prolate_spheroidal_kernel_1D(100, 9)
+    assert create_prolate_spheroidal_kernel_1D(100, 7).size == 400

@@ -21,12 +21,15 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_
 )
 
 KERNEL_TYPES = ("prolate_spheroidal",)
+# how the gridders read the kernel table: the C++ codes of kernel_lookup.hpp
+INTERPOLATIONS = {"nearest": 0, "linear": 1}
 # the support (number of grid points the kernel spans) each kernel type accepts
 PROLATE_SPHEROIDAL_SUPPORT = 7
 DEFAULT_GRIDDING_KERNEL_PARAMS = {
     "type": "prolate_spheroidal",
     "support": PROLATE_SPHEROIDAL_SUPPORT,
     "oversampling": 100,
+    "interpolation": "nearest",
 }
 
 
@@ -39,9 +42,12 @@ def resolve_gridding_kernel_params(gridding_kernel_params=None):
         Keys ``type`` (``"prolate_spheroidal"``), ``support`` (the odd number
         of grid points the kernel spans along one axis; the prolate spheroidal
         kernel exists for 7 only, Schwab's rational approximation of the
-        ``m = 6``, ``alpha = 1`` function) and ``oversampling`` (samples of
-        the kernel table per uv cell, an integer of at least 1). Missing keys
-        take the defaults of :data:`DEFAULT_GRIDDING_KERNEL_PARAMS`.
+        ``m = 6``, ``alpha = 1`` function), ``oversampling`` (samples of the
+        kernel table per uv cell, an integer of at least 1) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, ``"linear"``
+        interpolates the two neighbouring samples). Missing keys take the
+        defaults of :data:`DEFAULT_GRIDDING_KERNEL_PARAMS`.
 
     Returns
     -------
@@ -86,6 +92,11 @@ def resolve_gridding_kernel_params(gridding_kernel_params=None):
             "gridding_kernel_params['oversampling'] must be a positive integer, "
             f"got {oversampling!r}"
         )
+    if params["interpolation"] not in INTERPOLATIONS:
+        raise ValueError(
+            f"gridding_kernel_params['interpolation'] {params['interpolation']!r} "
+            f"is not one of {tuple(INTERPOLATIONS)}"
+        )
     params["support"] = int(support)
     params["oversampling"] = int(oversampling)
     return params
@@ -108,9 +119,18 @@ class GriddingKernel:
         Samples of the table per uv cell.
     kernel_type : str
         The kernel type the table holds (a key of :data:`KERNEL_TYPES`).
+    interpolation : str
+        How the gridders read the table (a key of :data:`INTERPOLATIONS`).
     """
 
-    def __init__(self, table, support, oversampling, kernel_type="prolate_spheroidal"):
+    def __init__(
+        self,
+        table,
+        support,
+        oversampling,
+        kernel_type="prolate_spheroidal",
+        interpolation="nearest",
+    ):
         table = np.ascontiguousarray(table, dtype=np.float64)
         expected = oversampling * (support // 2 + 1)
         if table.ndim != 1 or table.size != expected:
@@ -118,15 +138,18 @@ class GriddingKernel:
                 f"a kernel table of support {support} and oversampling "
                 f"{oversampling} has {expected} entries, got shape {table.shape}"
             )
+        if interpolation not in INTERPOLATIONS:
+            raise ValueError(f"unknown kernel interpolation {interpolation!r}")
         self.table = table
         self.support = int(support)
         self.oversampling = int(oversampling)
         self.kernel_type = kernel_type
+        self.interpolation = interpolation
 
     def __repr__(self):
         return (
             f"GriddingKernel({self.kernel_type}, support={self.support}, "
-            f"oversampling={self.oversampling})"
+            f"oversampling={self.oversampling}, interpolation={self.interpolation})"
         )
 
     @property
@@ -136,7 +159,13 @@ class GriddingKernel:
             "type": self.kernel_type,
             "support": self.support,
             "oversampling": self.oversampling,
+            "interpolation": self.interpolation,
         }
+
+    @property
+    def interpolation_code(self):
+        """The ``interpolation`` argument of the C++ gridders."""
+        return INTERPOLATIONS[self.interpolation]
 
     def correction_1D(self, n_pixels):
         """The image plane correction along one axis of the padded image.
@@ -180,7 +209,11 @@ def make_gridding_kernel(gridding_kernel_params=None):
             params["oversampling"], params["support"]
         )
         return GriddingKernel(
-            table, params["support"], params["oversampling"], params["type"]
+            table,
+            params["support"],
+            params["oversampling"],
+            params["type"],
+            params["interpolation"],
         )
     raise ValueError(f"no builder for kernel type {params['type']!r}")
 

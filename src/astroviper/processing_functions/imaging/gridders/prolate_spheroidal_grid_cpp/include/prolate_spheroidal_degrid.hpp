@@ -45,7 +45,7 @@ void prolate_spheroidal_degrid(
     int m_time_g, int m_chan_g, int m_pol_g, int m_u, int m_v,
     int n_time, int n_baseline, int n_vis_chan, int n_pol,
     double delta_l, double delta_m,
-    int support, int oversampling,
+    int support, int oversampling, int interpolation,
     int processing_function_threads
 );
 
@@ -54,7 +54,7 @@ void prolate_spheroidal_degrid(
         const std::complex<GRIDT>*, VIST*, const double*, const double*,       \
         const int64_t*, const int64_t*, const int64_t*, const double*,         \
         int, int, int, int, int, int, int, int, int,                           \
-        double, double, int, int, int);
+        double, double, int, int, int, int);
 
 PS_DEGRID_EXTERN(double, std::complex<float>)
 PS_DEGRID_EXTERN(double, std::complex<double>)

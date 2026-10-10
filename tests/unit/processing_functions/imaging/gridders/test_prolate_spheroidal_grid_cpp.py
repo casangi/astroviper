@@ -88,7 +88,7 @@ def _make_random_inputs(
     )
 
 
-def _run_cpp(inputs, processing_function_threads=1):
+def _run_cpp(inputs, processing_function_threads=1, interpolation=0):
     grid, norm = _zero_grid(
         inputs["m_time"],
         inputs["m_chan"],
@@ -111,12 +111,13 @@ def _run_cpp(inputs, processing_function_threads=1):
         inputs["delta_lm"],
         support=SUPPORT,
         oversampling=OVERSAMPLING,
+        interpolation=interpolation,
         processing_function_threads=processing_function_threads,
     )
     return grid, norm
 
 
-def _run_reference(inputs):
+def _run_reference(inputs, interpolation=0):
     grid, norm = _zero_grid(
         inputs["m_time"],
         inputs["m_chan"],
@@ -139,6 +140,7 @@ def _run_reference(inputs):
         inputs["delta_lm"],
         support=SUPPORT,
         oversampling=OVERSAMPLING,
+        interpolation=interpolation,
     )
     return grid, norm
 
@@ -581,3 +583,91 @@ class TestSinglePrecisionDegrid(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestGridKernelInterpolation(unittest.TestCase):
+    """The linear interpolation of the kernel table (interpolation=1)."""
+
+    def test_linear_matches_reference(self):
+        inputs = _make_random_inputs(seed=3)
+        cpp_grid, cpp_norm = _run_cpp(
+            inputs, processing_function_threads=1, interpolation=1
+        )
+        ref_grid, ref_norm = _run_reference(inputs, interpolation=1)
+        np.testing.assert_allclose(cpp_grid, ref_grid, rtol=0, atol=1e-10)
+        np.testing.assert_allclose(cpp_norm, ref_norm, rtol=0, atol=1e-10)
+        self.assertGreater(np.count_nonzero(cpp_grid), 0)
+
+    def test_linear_differs_from_nearest_by_the_table_step(self):
+        inputs = _make_random_inputs(seed=5)
+        nearest, _ = _run_cpp(inputs, interpolation=0)
+        linear, _ = _run_cpp(inputs, interpolation=1)
+        difference = np.abs(linear - nearest).max()
+        self.assertGreater(difference, 0.0)
+        self.assertLess(difference, 0.05 * np.abs(nearest).max())
+
+
+class TestGridOtherSupports(unittest.TestCase):
+    """The stencil and the table layout are generic in the support."""
+
+    def test_other_supports_match_reference(self):
+        for support in (3, 5, 9, 11):
+            for interpolation in (0, 1):
+                with self.subTest(support=support, interpolation=interpolation):
+                    inputs = _make_random_inputs(seed=10 + support)
+                    half = support // 2
+                    distance = np.arange(OVERSAMPLING * (half + 1)) / OVERSAMPLING
+                    table = np.exp(-0.5 * (distance / (0.45 * half)) ** 2)
+                    table[OVERSAMPLING * half :] = 0.0
+                    inputs["cgk_1D"] = table
+                    grid, norm = _zero_grid(
+                        inputs["m_time"],
+                        inputs["m_chan"],
+                        inputs["m_pol"],
+                        inputs["m_u"],
+                        inputs["m_v"],
+                    )
+                    prolate_spheroidal_grid(
+                        grid,
+                        norm,
+                        inputs["vis_data"],
+                        inputs["uvw"],
+                        inputs["frequency_coord"],
+                        inputs["frequency_map"],
+                        inputs["time_map"],
+                        inputs["pol_map"],
+                        inputs["weight"],
+                        inputs["cgk_1D"],
+                        inputs["n_uv"],
+                        inputs["delta_lm"],
+                        support=support,
+                        oversampling=OVERSAMPLING,
+                        interpolation=interpolation,
+                        processing_function_threads=2,
+                    )
+                    ref_grid, ref_norm = _zero_grid(
+                        inputs["m_time"],
+                        inputs["m_chan"],
+                        inputs["m_pol"],
+                        inputs["m_u"],
+                        inputs["m_v"],
+                    )
+                    prolate_spheroidal_grid_reference(
+                        ref_grid,
+                        ref_norm,
+                        inputs["vis_data"],
+                        inputs["uvw"],
+                        inputs["frequency_coord"],
+                        inputs["frequency_map"],
+                        inputs["time_map"],
+                        inputs["pol_map"],
+                        inputs["weight"],
+                        inputs["cgk_1D"],
+                        inputs["n_uv"],
+                        inputs["delta_lm"],
+                        support=support,
+                        oversampling=OVERSAMPLING,
+                        interpolation=interpolation,
+                    )
+                    np.testing.assert_allclose(grid, ref_grid, rtol=0, atol=1e-10)
+                    np.testing.assert_allclose(norm, ref_norm, rtol=0, atol=1e-10)

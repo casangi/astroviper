@@ -15,6 +15,32 @@ import math
 import numpy as np
 
 
+def kernel_values(cgk_1D, support, oversampling, interpolation, offset):
+    """Kernel values at the ``support`` stencil points of one visibility
+    (``kernel_lookup.hpp``): ``offset`` is the nearest grid point minus the
+    visibility position in cells; ``interpolation`` 0 takes the nearest table
+    entry with the gridders' historical rounding (one rounding of the offset
+    shared by the stencil), 1 interpolates the two neighbouring entries."""
+    support_center = support // 2
+    values = np.zeros(support)
+    if interpolation == 1:
+        last = oversampling * (support_center + 1) - 1
+        center = offset * oversampling
+        for i in range(support):
+            pos = abs(oversampling * (i - support_center) + center)
+            k = min(int(pos), last)
+            k1 = min(k + 1, last)
+            w = pos - k
+            values[i] = cgk_1D[k] * (1.0 - w) + cgk_1D[k1] * w
+    else:
+        center_offset_indx = math.floor(offset * oversampling + 0.5)
+        for i in range(support):
+            values[i] = cgk_1D[
+                abs(oversampling * (i - support_center) + center_offset_indx)
+            ]
+    return values
+
+
 def prolate_spheroidal_grid_reference(
     grid,
     normalization,
@@ -30,6 +56,7 @@ def prolate_spheroidal_grid_reference(
     delta_lm,
     support,
     oversampling,
+    interpolation=0,
 ):
     """Grid weighted visibilities onto a UV plane (reference implementation).
 
@@ -81,10 +108,20 @@ def prolate_spheroidal_grid_reference(
                     and (u_center_indx - support_center >= 0)
                     and (v_center_indx - support_center >= 0)
                 ):
-                    u_offset = u_center_indx - u_pos
-                    u_center_offset_indx = math.floor(u_offset * oversampling + 0.5)
-                    v_offset = v_center_indx - v_pos
-                    v_center_offset_indx = math.floor(v_offset * oversampling + 0.5)
+                    conv_u_values = kernel_values(
+                        cgk_1D,
+                        support,
+                        oversampling,
+                        interpolation,
+                        u_center_indx - u_pos,
+                    )
+                    conv_v_values = kernel_values(
+                        cgk_1D,
+                        support,
+                        oversampling,
+                        interpolation,
+                        v_center_indx - v_pos,
+                    )
 
                     for i_pol in range(n_pol):
                         sel_weight = weight[i_time, i_baseline, i_chan, i_pol]
@@ -99,17 +136,11 @@ def prolate_spheroidal_grid_reference(
 
                             for i_u in range(start_support, end_support):
                                 u_indx = u_center_indx + i_u
-                                u_offset_indx = np.abs(
-                                    oversampling * i_u + u_center_offset_indx
-                                )
-                                conv_u = cgk_1D[u_offset_indx]
+                                conv_u = conv_u_values[i_u - start_support]
 
                                 for i_v in range(start_support, end_support):
                                     v_indx = v_center_indx + i_v
-                                    v_offset_indx = np.abs(
-                                        oversampling * i_v + v_center_offset_indx
-                                    )
-                                    conv_v = cgk_1D[v_offset_indx]
+                                    conv_v = conv_v_values[i_v - start_support]
                                     conv = conv_u * conv_v
 
                                     grid[a_time, a_chan, a_pol, u_indx, v_indx] = (
@@ -138,6 +169,7 @@ def prolate_spheroidal_grid_uv_sampling_reference(
     delta_lm,
     support,
     oversampling,
+    interpolation=0,
 ):
     """Grid imaging weights onto a UV plane (PSF numerator; reference)."""
     c = 299792458.0
@@ -183,10 +215,20 @@ def prolate_spheroidal_grid_uv_sampling_reference(
                     and (u_center_indx - support_center >= 0)
                     and (v_center_indx - support_center >= 0)
                 ):
-                    u_offset = u_center_indx - u_pos
-                    u_center_offset_indx = math.floor(u_offset * oversampling + 0.5)
-                    v_offset = v_center_indx - v_pos
-                    v_center_offset_indx = math.floor(v_offset * oversampling + 0.5)
+                    conv_u_values = kernel_values(
+                        cgk_1D,
+                        support,
+                        oversampling,
+                        interpolation,
+                        u_center_indx - u_pos,
+                    )
+                    conv_v_values = kernel_values(
+                        cgk_1D,
+                        support,
+                        oversampling,
+                        interpolation,
+                        v_center_indx - v_pos,
+                    )
 
                     for i_pol in range(n_pol):
                         weight_data = weight[i_time, i_baseline, i_chan, i_pol]
@@ -197,17 +239,11 @@ def prolate_spheroidal_grid_uv_sampling_reference(
 
                             for i_u in range(start_support, end_support):
                                 u_indx = u_center_indx + i_u
-                                u_offset_indx = np.abs(
-                                    oversampling * i_u + u_center_offset_indx
-                                )
-                                conv_u = cgk_1D[u_offset_indx]
+                                conv_u = conv_u_values[i_u - start_support]
 
                                 for i_v in range(start_support, end_support):
                                     v_indx = v_center_indx + i_v
-                                    v_offset_indx = np.abs(
-                                        oversampling * i_v + v_center_offset_indx
-                                    )
-                                    conv_v = cgk_1D[v_offset_indx]
+                                    conv_v = conv_v_values[i_v - start_support]
                                     conv = conv_u * conv_v
 
                                     grid[a_time, a_chan, a_pol, u_indx, v_indx] = (
@@ -236,6 +272,7 @@ def prolate_spheroidal_degrid_reference(
     delta_lm,
     support,
     oversampling,
+    interpolation=0,
 ):
     """Sample (degrid) a model UV grid at visibility coordinates (reference).
 
@@ -286,10 +323,20 @@ def prolate_spheroidal_degrid_reference(
                     and (u_center_indx - support_center >= 0)
                     and (v_center_indx - support_center >= 0)
                 ):
-                    u_offset = u_center_indx - u_pos
-                    u_center_offset_indx = math.floor(u_offset * oversampling + 0.5)
-                    v_offset = v_center_indx - v_pos
-                    v_center_offset_indx = math.floor(v_offset * oversampling + 0.5)
+                    conv_u_values = kernel_values(
+                        cgk_1D,
+                        support,
+                        oversampling,
+                        interpolation,
+                        u_center_indx - u_pos,
+                    )
+                    conv_v_values = kernel_values(
+                        cgk_1D,
+                        support,
+                        oversampling,
+                        interpolation,
+                        v_center_indx - v_pos,
+                    )
 
                     for i_pol in range(n_pol):
                         a_pol = pol_map[i_pol]
@@ -299,17 +346,11 @@ def prolate_spheroidal_degrid_reference(
                         if not np.isnan(vis_data[i_time, i_baseline, i_chan, i_pol]):
                             for i_u in range(start_support, end_support):
                                 u_indx = u_center_indx + i_u
-                                u_offset_indx = np.abs(
-                                    oversampling * i_u + u_center_offset_indx
-                                )
-                                conv_u = cgk_1D[u_offset_indx]
+                                conv_u = conv_u_values[i_u - start_support]
 
                                 for i_v in range(start_support, end_support):
                                     v_indx = v_center_indx + i_v
-                                    v_offset_indx = np.abs(
-                                        oversampling * i_v + v_center_offset_indx
-                                    )
-                                    conv_v = cgk_1D[v_offset_indx]
+                                    conv_v = conv_v_values[i_v - start_support]
                                     conv = conv_u * conv_v
                                     degrid_value += (
                                         conv

@@ -32,12 +32,15 @@ IMAGING_PARAM_DOCS = {
         '``type`` (``"prolate_spheroidal"``), ``support`` (the odd number of\n'
         "grid points the kernel spans along one axis; 7 for the prolate\n"
         "spheroidal kernel, Schwab's rational approximation of the ``m = 6``,\n"
-        "``alpha = 1`` function) and ``oversampling`` (samples of the kernel\n"
-        "table per uv cell; the kernel is read at the nearest sample, so the\n"
-        "lookup error, and with it the floor the imaging cycle converges to,\n"
-        "falls as 1 over this number). Missing keys take the defaults\n"
-        '``{"type": "prolate_spheroidal", "support": 7, "oversampling":\n'
-        "100}``; ``None`` is all defaults."
+        "``alpha = 1`` function), ``oversampling`` (samples of the kernel\n"
+        "table per uv cell) and ``interpolation`` (how the gridders read the\n"
+        'table at a stencil point: ``"nearest"`` takes the nearest sample, so\n'
+        "the lookup error, and with it the floor the imaging cycle converges\n"
+        'to, falls as 1 over the oversampling; ``"linear"`` interpolates the\n'
+        "two neighbouring samples and the error falls as 1 over its square).\n"
+        'Missing keys take the defaults ``{"type": "prolate_spheroidal",\n'
+        '"support": 7, "oversampling": 100, "interpolation": "nearest"}``;\n'
+        "``None`` is all defaults."
     ),
     "iteration_control_params": (
         "CLEAN iteration controls. An **imaging cycle** (below simply a cycle)\n"

@@ -1,4 +1,5 @@
 #include "../include/prolate_spheroidal_degrid.hpp"
+#include "../include/kernel_lookup.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -22,7 +23,7 @@ void prolate_spheroidal_degrid(
     int m_time_g, int m_chan_g, int m_pol_g, int m_u, int m_v,
     int n_time, int n_baseline, int n_vis_chan, int n_pol,
     double delta_l, double delta_m,
-    int support, int oversampling,
+    int support, int oversampling, int interpolation,
     int processing_function_threads
 ) {
     constexpr double c = 299792458.0;
@@ -68,6 +69,9 @@ void prolate_spheroidal_degrid(
         const int vis_b_off = vis_t_off + i_baseline * vis_bl_stride;
         const int uvw_b_off = uvw_t_off + i_baseline * uvw_bl_stride;
 
+        // kernel values of the stencil along u and v, per visibility
+        std::vector<double> conv_u(support), conv_v(support);
+
         for (int i_chan = 0; i_chan < n_vis_chan; ++i_chan) {
             const int a_chan = frequency_map[i_chan];
 
@@ -100,13 +104,10 @@ void prolate_spheroidal_degrid(
             const int u_center_indx = static_cast<int>(u_center);
             const int v_center_indx = static_cast<int>(v_center);
 
-            const double u_offset = u_center_indx - u_pos;
-            const int    u_center_offset_indx =
-                static_cast<int>(std::floor(u_offset * oversampling + 0.5));
-
-            const double v_offset = v_center_indx - v_pos;
-            const int    v_center_offset_indx =
-                static_cast<int>(std::floor(v_offset * oversampling + 0.5));
+            stencil_kernel_values(cgk_1D, support, oversampling, interpolation,
+                                  u_center_indx - u_pos, conv_u.data());
+            stencil_kernel_values(cgk_1D, support, oversampling, interpolation,
+                                  v_center_indx - v_pos, conv_v.data());
 
             const int vis_c_off = vis_b_off + i_chan * vis_chan_stride;
 
@@ -133,18 +134,14 @@ void prolate_spheroidal_degrid(
                 // `grid` (v, stride 1) is accessed with unit stride.
                 for (int i_u = start_support; i_u < end_support; ++i_u) {
                     const int u_indx = u_center_indx + i_u;
-                    const int u_offset_indx =
-                        std::abs(oversampling * i_u + u_center_offset_indx);
-                    const double conv_u = cgk_1D[u_offset_indx];
+                    const double kernel_u = conv_u[i_u - start_support];
 
                     const std::complex<GridT>* grid_row =
                         grid + grid_base + u_indx * m_v;
 
                     for (int i_v = start_support; i_v < end_support; ++i_v) {
                         const int v_indx = v_center_indx + i_v;
-                        const int v_offset_indx =
-                            std::abs(oversampling * i_v + v_center_offset_indx);
-                        const double conv = conv_u * cgk_1D[v_offset_indx];
+                        const double conv = kernel_u * conv_v[i_v - start_support];
 
                         // Widen the (possibly single-precision) grid cell to
                         // complex<double> so the accumulation stays double.
@@ -210,7 +207,7 @@ void prolate_spheroidal_degrid(
         const std::complex<GRIDT>*, VIST*, const double*, const double*,       \
         const int64_t*, const int64_t*, const int64_t*, const double*,         \
         int, int, int, int, int, int, int, int, int,                           \
-        double, double, int, int, int);
+        double, double, int, int, int, int);
 
 PS_DEGRID_INSTANTIATE(double, std::complex<float>)
 PS_DEGRID_INSTANTIATE(double, std::complex<double>)

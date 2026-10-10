@@ -92,6 +92,21 @@ def create_prolate_spheroidal_correcting_image_1D(n_lm_padded):
 
 
 def create_prolate_spheroidal_kernel_1D(oversampling, support):
+    """The half kernel table of the prolate spheroidal gridding kernel.
+
+    Entry ``k`` is the kernel ``k / oversampling`` uv cells from its centre,
+    out to ``support // 2`` cells, followed by one cell of zeros. The function
+    is Schwab's rational approximation of the ``m = 6``, ``alpha = 1``
+    spheroidal function, which spans 6 cells, 7 grid points: another
+    ``support`` would stretch that function over a width it was not
+    optimised for and break the image plane correction that goes with it, so
+    it is refused.
+    """
+    if support != 7:
+        raise ValueError(
+            "the prolate spheroidal kernel is Schwab's approximation of the "
+            f"m = 6, alpha = 1 function and spans 7 grid points; got support {support}"
+        )
     support_center = support // 2
     u = np.arange(oversampling * (support_center)) / (support_center * oversampling)
 
