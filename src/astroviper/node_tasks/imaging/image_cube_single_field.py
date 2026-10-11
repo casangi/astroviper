@@ -366,6 +366,28 @@ def _chunk_task_coords(task_coords, data_selection, local_start, local_stop):
     return chunk_coords
 
 
+def _channel_cycle_control_params(
+    cycle_control_params, task_coords, data_selection, chan_index
+):
+    """``cycle_control_params`` of chunk-local channel ``chan_index``: a per
+    channel ``threshold`` (one row of Stokes plane values per image channel)
+    is replaced by the row of the channel's global number (see
+    :func:`_chunk_task_coords`); any other ``threshold`` leaves the dict as
+    it is."""
+    import numpy as np
+
+    threshold = cycle_control_params.get("threshold")
+    if np.ndim(threshold) != 2:
+        return cycle_control_params
+    channel = _chunk_task_coords(
+        task_coords, data_selection, chan_index, chan_index + 1
+    )["frequency"]["slice"].start
+    return {
+        **cycle_control_params,
+        "threshold": [float(value) for value in threshold[channel]],
+    }
+
+
 def _select_chunk_writer(
     graph_mode,
     skunk_works,
@@ -582,7 +604,11 @@ def image_cube_single_field(
         - ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, as a
           float in Jy, or a list of one float per Stokes plane in the order of
           ``polarization_coords`` (the floors of the Stokes planes of noise free
-          data scale with their fluxes). A plane stops when its peak residual
+          data scale with their fluxes). The distributed application and the
+          node task also take a nested list of shape (n_frequency,
+          n_polarization), one row per image channel in the order of the image
+          frequency coordinate; each channel gets its row. A plane stops when its
+          peak residual
           inside the clean mask falls to or below its threshold; the value is
           also a hard floor on ``threshold_per_cycle``. ``0`` disables the
           absolute stop. *Differs from CASA*: floats in Jy only, no ``'1mJy'``
@@ -1053,7 +1079,9 @@ def image_cube_single_field(
             img_chan,
             image_params,
             imaging_weights_params,
-            cycle_control_params,
+            _channel_cycle_control_params(
+                cycle_control_params, task_coords, data_selection, chan_index
+            ),
             processing_set_data_group_name=processing_set_data_group_name,
             deconvolver=deconvolver,
             instrument_polarization_basis=instrument_polarization_basis,

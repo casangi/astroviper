@@ -52,6 +52,7 @@
         "output_image_format": { "type": ["str"], "allowed": ["zarr", "fits"] },
         "task_time_kill_switch_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 },
         "monitor_resources_seconds": { "type": ["int", "float"], "nullable": true, "min": 0 },
-        "msv2_open_options": { "type": ["dict"], "nullable": true }
+        "msv2_open_options": { "type": ["dict"], "nullable": true },
+        "parameters_file": { "type": ["str"], "nullable": true }
     }
 }

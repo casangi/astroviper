@@ -1,3 +1,6 @@
+import functools
+import inspect
+import json
 import os
 from typing import Any
 
@@ -44,8 +47,70 @@ DISTRIBUTED_APPLICATION_TIMING_PHASES = [
 
 DISTRIBUTED_APPLICATION_TIMING_TOTAL_KEY = "T_total"
 
+# The image_params entries a parameters file holds as JSON lists and the imager
+# takes as arrays.
+_PARAMETERS_FILE_ARRAY_IMAGE_PARAMS = (
+    "cell_size",
+    "phase_direction",
+    "frequency_coords",
+)
+
+
+def read_parameters_file(parameters_file):
+    """The ``image_cube_single_field`` arguments of a parameters file.
+
+    Parameters
+    ----------
+    parameters_file : str
+        JSON file whose ``"image_cube_single_field"`` block maps argument
+        names to values, as
+        :func:`~astroviper.distributed_applications.imaging.image_cube_single_field_delphi.image_cube_single_field_delphi`
+        writes it.
+
+    Returns
+    -------
+    dict
+        The block, with the ``cell_size``, ``phase_direction`` and
+        ``frequency_coords`` of ``image_params`` as float arrays and without a
+        ``parameters_file`` entry.
+    """
+    import numpy as np
+
+    with open(parameters_file) as file:
+        arguments = dict(json.load(file)["image_cube_single_field"])
+    arguments.pop("parameters_file", None)
+    if isinstance(arguments.get("image_params"), dict):
+        image_params = dict(arguments["image_params"])
+        for key in _PARAMETERS_FILE_ARRAY_IMAGE_PARAMS:
+            if image_params.get(key) is not None:
+                image_params[key] = np.asarray(image_params[key], dtype=float)
+        arguments["image_params"] = image_params
+    return arguments
+
+
+def _apply_parameters_file(function):
+    """Fill the arguments of ``function`` that the caller leaves out from its ``parameters_file``.
+
+    The arguments the caller passes (by position or keyword) are found by
+    binding the call to the signature and win over the file; without a
+    ``parameters_file`` the call is forwarded unchanged.
+    """
+    signature = inspect.signature(function)
+
+    @functools.wraps(function)
+    def wrapper(*args, **kwargs):
+        arguments = signature.bind_partial(*args, **kwargs).arguments
+        if arguments.get("parameters_file") is None:
+            return function(*args, **kwargs)
+        return function(
+            **{**read_parameters_file(arguments["parameters_file"]), **arguments}
+        )
+
+    return wrapper
+
 
 @shares_param_docs
+@_apply_parameters_file
 @toolviper.utils.parameter.validate(config_dir=_PARAM_CONFIG_DIR)
 def image_cube_single_field(
     ps_store: str,
@@ -95,6 +160,7 @@ def image_cube_single_field(
     task_time_kill_switch_seconds: float | None = None,
     monitor_resources_seconds: float | None = None,
     msv2_open_options: dict[str, Any] | None = None,
+    parameters_file: str | None = None,
 ):  # -> Tuple[xr.Dataset, ImagingDict]:
     """
     Create a spectral cube.
@@ -167,7 +233,11 @@ def image_cube_single_field(
         - ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, as a
           float in Jy, or a list of one float per Stokes plane in the order of
           ``polarization_coords`` (the floors of the Stokes planes of noise free
-          data scale with their fluxes). A plane stops when its peak residual
+          data scale with their fluxes). The distributed application and the
+          node task also take a nested list of shape (n_frequency,
+          n_polarization), one row per image channel in the order of the image
+          frequency coordinate; each channel gets its row. A plane stops when its
+          peak residual
           inside the clean mask falls to or below its threshold; the value is
           also a hard floor on ``threshold_per_cycle``. ``0`` disables the
           absolute stop. *Differs from CASA*: floats in Jy only, no ``'1mJy'``
@@ -467,6 +537,15 @@ def image_cube_single_field(
         ``array_backend`` and ``scan_intents`` are set by the driver and
         refused here (``ValueError``; pass the ``scan_intents`` parameter).
         ``None`` (default): the defaults.
+    parameters_file : str, optional
+        JSON file whose ``"image_cube_single_field"`` block gives the
+        arguments, as
+        :func:`~astroviper.distributed_applications.imaging.image_cube_single_field_delphi.image_cube_single_field_delphi`
+        writes it (every argument but this one, so that
+        ``image_cube_single_field(parameters_file=...)`` reproduces its run).
+        An argument passed in the call replaces the file's value as a whole
+        (an ``image_params`` given replaces the file's ``image_params``).
+        ``None`` (default): every argument comes from the call.
     Returns
     -------
     dict
@@ -519,6 +598,7 @@ def image_cube_single_field(
     import time
 
     import dask
+    import numpy as np
     import toolviper.utils.logger as logger
     from graphviper.graph_tools import (
         generate_dask_workflow,
@@ -629,6 +709,19 @@ def image_cube_single_field(
     correlation_coords = correlations_for_stokes(
         image_params["polarization_coords"], instrument_polarization_basis
     )
+    # A per channel threshold has one row of Stokes plane values per image
+    # channel (each node task hands its channels their rows).
+    threshold_shape = np.shape(cycle_control_params.get("threshold", 0.0))
+    if len(threshold_shape) == 2 and threshold_shape != (
+        len(image_params["frequency_coords"]),
+        len(image_params["polarization_coords"]),
+    ):
+        raise ValueError(
+            f"a per channel cycle_control_params['threshold'] has shape "
+            f"{threshold_shape}; expected (n_frequency, n_polarization) = "
+            f"({len(image_params['frequency_coords'])}, "
+            f"{len(image_params['polarization_coords'])})"
+        )
 
     # A Measurement Set v2 is opened and its data group checked before
     # anything is written, so that their errors (a refused msv2_open_options

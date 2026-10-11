@@ -77,7 +77,11 @@ def imaging_preparation_single_field(
         - ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, as a
           float in Jy, or a list of one float per Stokes plane in the order of
           ``polarization_coords`` (the floors of the Stokes planes of noise free
-          data scale with their fluxes). A plane stops when its peak residual
+          data scale with their fluxes). The distributed application and the
+          node task also take a nested list of shape (n_frequency,
+          n_polarization), one row per image channel in the order of the image
+          frequency coordinate; each channel gets its row. A plane stops when its
+          peak residual
           inside the clean mask falls to or below its threshold; the value is
           also a hard floor on ``threshold_per_cycle``. ``0`` disables the
           absolute stop. *Differs from CASA*: floats in Jy only, no ``'1mJy'``
@@ -358,7 +362,11 @@ def image_cube_single_field(
         - ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, as a
           float in Jy, or a list of one float per Stokes plane in the order of
           ``polarization_coords`` (the floors of the Stokes planes of noise free
-          data scale with their fluxes). A plane stops when its peak residual
+          data scale with their fluxes). The distributed application and the
+          node task also take a nested list of shape (n_frequency,
+          n_polarization), one row per image channel in the order of the image
+          frequency coordinate; each channel gets its row. A plane stops when its
+          peak residual
           inside the clean mask falls to or below its threshold; the value is
           also a hard floor on ``threshold_per_cycle``. ``0`` disables the
           absolute stop. *Differs from CASA*: floats in Jy only, no ``'1mJy'``

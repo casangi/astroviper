@@ -108,3 +108,69 @@ def test_one_threshold_per_stokes_plane():
     _check_valid(params)
     assert params["threshold"] == [2.046e-5, 5e-6, 5e-6, 5e-6]
     assert params["max_cycles"] == 5 + EXTRA_CYCLES
+
+
+def _point_spread_function_xds(sensitivity, max_sidelobe):
+    """The two variables of the PSF pass the noisy controls read."""
+    import numpy as np
+    import xarray as xr
+
+    dims = ("frequency", "polarization")
+    coords = {"frequency": [1.0e11, 1.1e11], "polarization": ["I", "Q"]}
+    return xr.Dataset(
+        {
+            "SENSITIVITY": (dims, np.asarray(sensitivity, dtype=float)),
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
+                dims,
+                np.asarray(max_sidelobe, dtype=float),
+            ),
+        },
+        coords=coords,
+    )
+
+
+def test_noisy_cycle_control_params_per_channel_threshold():
+    """n_sigma x sensitivity per channel and plane; cycles from the largest sidelobe."""
+    import math
+
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
+        noisy_cycle_control_params,
+    )
+
+    xds = _point_spread_function_xds(
+        [[1e-3, 2e-3], [3e-3, 4e-3]], [[0.1, 0.2], [0.3, 0.6]]
+    )
+    params = noisy_cycle_control_params(
+        xds, n_sigma=3.0, max_dynamic_range=1e4, primary_beam_limit=0.3
+    )
+    assert set(params) == CYCLE_CONTROL_KEYS
+    np.testing.assert_allclose(params["threshold"], [[3e-3, 6e-3], [9e-3, 12e-3]])
+    fraction = PSF_SIDELOBE_FACTOR * 0.6
+    expected = math.ceil(math.log(1e4 / 3.0) / math.log(1.0 / fraction))
+    assert params["max_cycles"] == expected + EXTRA_CYCLES
+    assert params["max_iter_per_cycle"] == NOISY_MAX_ITER_PER_CYCLE
+    assert params["entropy_stop"] is True
+    assert params["max_iter"] == 200000
+    assert params["gain"] == 0.1
+    assert params["max_iter_divergence"] == 1
+    assert params["primary_beam_limit"] == 0.3
+    # Accepted by the deconvolver's validation, row by row.
+    for row in params["threshold"]:
+        _validate_deconvolve_params({**params, "threshold": row})
+
+
+def test_noisy_cycle_control_params_transposed_dataset_and_invalid():
+    """The threshold follows (frequency, polarization) whatever the dataset order."""
+    import numpy as np
+
+    from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
+        noisy_cycle_control_params,
+    )
+
+    xds = _point_spread_function_xds([[1.0, 2.0], [3.0, 4.0]], [[0.1] * 2] * 2)
+    params = noisy_cycle_control_params(xds.transpose("polarization", "frequency"))
+    np.testing.assert_allclose(params["threshold"], [[2.0, 4.0], [6.0, 8.0]])
+    with pytest.raises(ValueError):
+        noisy_cycle_control_params(xds, n_sigma=0.0)

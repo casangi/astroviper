@@ -164,3 +164,80 @@ def alma_cycle_control_params(
             }
         )
     return params
+
+
+def noisy_cycle_control_params(
+    point_spread_function_xds,
+    *,
+    n_sigma=2.0,
+    max_dynamic_range=1e5,
+    gain=0.1,
+    max_iter=200000,
+    primary_beam_limit=0.2,
+):
+    """``cycle_control_params`` for noisy data from the PSF pass of the cube.
+
+    The threshold of every plane is ``n_sigma`` times its theoretical point
+    source sensitivity, the entropy stop is on and every model update is
+    capped at ``NOISY_MAX_ITER_PER_CYCLE`` iterations (the noisy controls of the
+    memo). ``max_cycles`` is the number of imaging cycles that bring a peak
+    ``max_dynamic_range`` times the sensitivity down to ``n_sigma`` times it
+    (:func:`predicted_imaging_cycles`) with the PSF fraction of the largest
+    ``max_psf_sidelobe`` of the cube, plus ``EXTRA_CYCLES``.
+
+    Parameters
+    ----------
+    point_spread_function_xds : xarray.Dataset
+        The result of
+        :func:`~astroviper.distributed_applications.imaging.point_spread_function_cube_single_field.point_spread_function_cube_single_field`:
+        ``SENSITIVITY`` and ``MAX_SIDELOBE_POINT_SPREAD_FUNCTION`` with dims
+        ``(frequency, polarization)``.
+    n_sigma : float, optional
+        Threshold in units of the sensitivity of the plane.
+    max_dynamic_range : float, optional
+        Largest ratio of the peak residual of a dirty plane to its sensitivity
+        the controls allow for.
+    gain : float, optional
+        CLEAN loop gain.
+    max_iter : int, optional
+        Total iteration budget of a plane.
+    primary_beam_limit : float, optional
+        Primary beam mask cutoff.
+
+    Returns
+    -------
+    dict
+        Every key of ``cycle_control_params`` with Python numbers; ``threshold``
+        is a per channel threshold, a nested list of shape
+        ``(n_frequency, n_polarization)`` in the order of the dataset's
+        ``frequency`` and ``polarization`` coordinates.
+
+    Raises
+    ------
+    ValueError
+        For a non positive ``n_sigma`` or ``max_dynamic_range``.
+    """
+    sensitivity = point_spread_function_xds["SENSITIVITY"].transpose(
+        "frequency", "polarization"
+    )
+    fraction = psf_fraction(
+        float(
+            np.nanmax(point_spread_function_xds["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"])
+        )
+    )
+    cycles = predicted_imaging_cycles(max_dynamic_range, n_sigma, fraction)
+    return {
+        "max_iter": int(max_iter),
+        "max_cycles": cycles + EXTRA_CYCLES,
+        "threshold": np.nan_to_num(
+            n_sigma * np.asarray(sensitivity, dtype=float), posinf=0.0
+        ).tolist(),
+        "gain": float(gain),
+        "psf_sidelobe_factor": PSF_SIDELOBE_FACTOR,
+        "min_psf_fraction": MIN_PSF_FRACTION,
+        "max_psf_fraction": MAX_PSF_FRACTION,
+        "max_iter_per_cycle": NOISY_MAX_ITER_PER_CYCLE,
+        "max_iter_divergence": 1,
+        "primary_beam_limit": float(primary_beam_limit),
+        "entropy_stop": True,
+    }
