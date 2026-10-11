@@ -29,8 +29,7 @@ def get_visibility_grid_single_field(
     This function is the inverse of
     :func:`~astroviper.processing_functions.imaging.add_visibility_grid.add_visibility_grid_single_field`:
     it predicts visibilities *from* a UV-plane model rather than gridding
-    observed visibilities onto a UV plane.  It uses the separable C++ prolate
-    spheroidal degridder (the standard gridder in CASA) and therefore does not
+    observed visibilities onto a UV plane.  It uses the separable C++ anti-aliasing degridder (the standard gridder in CASA) and therefore does not
     require a GCF dataset. Cube and continuum callers share that numerical
     primitive without sharing their spectral-model preparation APIs.
 
@@ -51,7 +50,7 @@ def get_visibility_grid_single_field(
         group under ``image_data_group_in_name`` whose ``"visibility"`` role
         names a data variable shaped ``(time, frequency, polarization, u, v)``,
         the same ``(u, v)`` axis order used by the C++
-        ``prolate_spheroidal_grid`` kernel.
+        ``anti_alias_grid`` kernel.
         Cell size and image dimensions are read directly from ``img_xds`` via
         ``img_xds.xr_img.get_lm_cell_size()`` and ``img_xds.sizes``.
     ms_data_group_in_name : str, default ``"base"``
@@ -114,7 +113,7 @@ def get_visibility_grid_single_field(
     astroviper.processing_functions.imaging.add_visibility_grid.add_visibility_grid_single_field :
         Forward (gridding) counterpart.
     degrid_visibility_grid_single_field :
-        Shared prolate spheroidal gridder numerical primitive.
+        Shared anti-aliasing gridder numerical primitive.
     """
     if ms_data_group_out_modified is None:
         ms_data_group_out_modified = {

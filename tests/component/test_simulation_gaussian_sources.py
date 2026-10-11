@@ -132,7 +132,7 @@ def test_gaussian_and_point_source_fluxes_recovered(tmp_path):
             "max_psf_fraction": 0.8,
             "primary_beam_limit": 0.2,
         },
-        gridder="prolate_spheroidal",
+        gridder="anti_alias",
         deconvolver="asp",
         scan_intents="OBSERVE_TARGET#ON_SOURCE",
         image_data_variables_keep=[

@@ -489,7 +489,7 @@ def image(
         imaging_weights_params=IMAGING_WEIGHTS_PARAMS,
         cycle_control_params=controls,
         instrument_polarization_basis="linear",
-        gridder="prolate_spheroidal",
+        gridder="anti_alias",
         gridding_kernel_params=gridding_kernel_params,
         deconvolver="hogbom",
         scan_intents="OBSERVE_TARGET#ON_SOURCE",

@@ -102,7 +102,7 @@ def image(tmp_path, ps_store, name):
             "min_psf_fraction": 0.05,
             "max_psf_fraction": 0.8,
         },  # fmt: skip
-        gridder="prolate_spheroidal",
+        gridder="anti_alias",
         deconvolver="hogbom_many_threads",
         scan_intents="OBSERVE_TARGET#ON_SOURCE",
         image_data_variables_keep=["sky_residual", "point_spread_function"],

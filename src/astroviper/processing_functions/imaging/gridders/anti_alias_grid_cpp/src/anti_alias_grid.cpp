@@ -1,4 +1,4 @@
-#include "../include/prolate_spheroidal_grid.hpp"
+#include "../include/anti_alias_grid.hpp"
 #include "../include/kernel_lookup.hpp"
 
 #include <algorithm>
@@ -9,7 +9,7 @@
 #include <thread>
 #include <vector>
 
-namespace prolate_spheroidal {
+namespace anti_alias {
 
 namespace {
 
@@ -44,7 +44,7 @@ inline void atomic_add_complex(std::complex<GridT>* target,
 } // namespace
 
 template <typename GridT>
-void prolate_spheroidal_grid(
+void anti_alias_grid(
     std::complex<GridT>* grid,
     double* normalization,
     const std::complex<double>* vis_data,
@@ -241,7 +241,7 @@ void prolate_spheroidal_grid(
 
 
 template <typename GridT>
-void prolate_spheroidal_grid_uv_sampling(
+void anti_alias_grid_uv_sampling(
     std::complex<GridT>* grid,
     double* normalization,
     const double* uvw,
@@ -286,7 +286,7 @@ void prolate_spheroidal_grid_uv_sampling(
     const int uvw_time_stride = n_baseline * uvw_bl_stride;
 
     // Per-(time, baseline) kernel; same threading/atomic strategy as
-    // prolate_spheroidal_grid.
+    // anti_alias_grid.
     auto process_time_baseline = [&](int i_time, int i_baseline) {
         const int a_time    = time_map[i_time];
         const int wt_t_off  = i_time * wt_time_stride;
@@ -423,30 +423,30 @@ void prolate_spheroidal_grid_uv_sampling(
 }
 
 // Explicit instantiations for the supported grid precisions.
-template void prolate_spheroidal_grid<double>(
+template void anti_alias_grid<double>(
     std::complex<double>*, double*, const std::complex<double>*, const double*,
     const double*, const int64_t*, const int64_t*, const int64_t*,
     const double*, const double*,
     int, int, int, int, int, int, int, int, int,
     double, double, int, int, int, int);
 
-template void prolate_spheroidal_grid<float>(
+template void anti_alias_grid<float>(
     std::complex<float>*, double*, const std::complex<double>*, const double*,
     const double*, const int64_t*, const int64_t*, const int64_t*,
     const double*, const double*,
     int, int, int, int, int, int, int, int, int,
     double, double, int, int, int, int);
 
-template void prolate_spheroidal_grid_uv_sampling<double>(
+template void anti_alias_grid_uv_sampling<double>(
     std::complex<double>*, double*, const double*, const double*,
     const int64_t*, const int64_t*, const int64_t*, const double*, const double*,
     int, int, int, int, int, int, int, int, int,
     double, double, int, int, int, int);
 
-template void prolate_spheroidal_grid_uv_sampling<float>(
+template void anti_alias_grid_uv_sampling<float>(
     std::complex<float>*, double*, const double*, const double*,
     const int64_t*, const int64_t*, const int64_t*, const double*, const double*,
     int, int, int, int, int, int, int, int, int,
     double, double, int, int, int, int);
 
-} // namespace prolate_spheroidal
+} // namespace anti_alias

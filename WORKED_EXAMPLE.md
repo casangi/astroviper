@@ -16,7 +16,7 @@ return_dict = image_cube_single_field(
     image_params=image_params,                       # image geometry + output coords
     imaging_weights_params={"weighting": "briggs", "robust": 0.5},
     cycle_control_params={"max_iter": 300, "max_cycles": 3, "threshold": 0.001, "gain": 0.1},
-    gridder="prolate_spheroidal",
+    gridder="anti_alias",
     deconvolver="hogbom_many_threads",
     image_data_variables_keep=["sky_residual", "sky_model", "mask",
                                "point_spread_function", "primary_beam",
@@ -125,7 +125,7 @@ via `CycleController`:
 - Undeconvolved (dirty/residual) image gridding: `make_undeconvolved_image.py`
   (`make_undeconvolved_image_single_field`).
 - Degridding (model uv grid → vis): `get_visibility_grid.py`.
-- FFT + normalization: `fft_normalize_prolate_spheriodal_gridder.py`.
+- FFT + normalization: `fft_normalize_anti_alias_gridder.py`.
 - Primary beam: `make_pb_symmetric.py` (airy disk).
 - Polarization: `image_analysis/transform_polarization_basis.py`
   (stokes ↔ linear).
@@ -135,8 +135,8 @@ via `CycleController`:
   `beam_fit_params_point_spread_function`).
 - Deconvolvers: `deconvolution.py` dispatch → `deconvolvers/hogbom` (C++),
   `deconvolvers/aspclean` (C++).
-- The prolate spheroidal gridder kernel (the standard gridder in CASA) is
-  implemented in C++ (`gridders/prolate_spheroidal_grid_cpp`); pure-Python
+- The anti-aliasing gridder kernel (the standard gridder in CASA) is
+  implemented in C++ (`gridders/anti_alias_grid_cpp`); pure-Python
   reference copies used as test oracles live in
   `tests/unit/processing_functions/imaging/gridders/reference_gridders.py`.
   **Keep the references in sync** if you change the gridding math.

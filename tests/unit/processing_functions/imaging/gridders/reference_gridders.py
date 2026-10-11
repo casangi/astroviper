@@ -1,9 +1,9 @@
-"""Pure-Python reference implementations of the prolate spheroidal gridders.
+"""Pure-Python reference implementations of the anti-aliasing gridders.
 
 These are exact, de-jitted copies of the retired numba kernels
 (``prolate_spheroidal_grid_jit``, ``prolate_spheroidal_grid_uv_sampling_jit``,
 ``prolate_spheroidal_degrid_jit``) kept solely as independent test oracles for
-the C++ extension (`prolate_spheroidal_grid_cpp`). They are slow — pure Python
+the C++ extension (`anti_alias_grid_cpp`). They are slow — pure Python
 loops — but the unit-test inputs are small.
 
 Do not use these in production code; the C++ kernels are the only supported
@@ -41,7 +41,7 @@ def kernel_values(cgk_1D, support, oversampling, interpolation, offset):
     return values
 
 
-def prolate_spheroidal_grid_reference(
+def anti_alias_grid_reference(
     grid,
     normalization,
     vis_data,
@@ -155,7 +155,7 @@ def prolate_spheroidal_grid_reference(
     return
 
 
-def prolate_spheroidal_grid_uv_sampling_reference(
+def anti_alias_grid_uv_sampling_reference(
     grid,
     normalization,
     uvw,
@@ -259,7 +259,7 @@ def prolate_spheroidal_grid_uv_sampling_reference(
     return
 
 
-def prolate_spheroidal_degrid_reference(
+def anti_alias_degrid_reference(
     grid,
     vis_data,
     uvw,

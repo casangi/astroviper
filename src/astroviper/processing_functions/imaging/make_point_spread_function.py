@@ -91,7 +91,7 @@ def add_uv_sampling_grid_mosaic(
 
     See Also
     --------
-    add_uv_sampling_grid_single_field : Non-mosaic (prolate spheroidal gridder) variant.
+    add_uv_sampling_grid_single_field : Non-mosaic (anti-aliasing gridder) variant.
     """
     from astroviper.processing_functions.imaging.gridders.mosaic_grid import (
         mosaic_grid_jit,
@@ -221,8 +221,7 @@ def add_uv_sampling_grid_single_field(
     :func:`~astroviper.utils.data_group_tools.modify_data_groups_xds`.
 
     This function is the non-mosaic counterpart of
-    :func:`add_uv_sampling_grid_mosaic`.  It uses the separable prolate
-    spheroidal gridder (the standard gridder in CASA) rather than the
+    :func:`add_uv_sampling_grid_mosaic`.  It uses the separable anti-aliasing gridder (the standard gridder in CASA) rather than the
     direction-dependent mosaic gridder, so no GCF dataset is required.
 
     Parameters
@@ -362,15 +361,15 @@ def add_uv_sampling_grid_single_field(
     frequency_coord = ms_xdt.frequency.values
     imaging_weight = ms_xdt[ms_data_group_in["weight_imaging"]].values
 
-    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-        prolate_spheroidal_grid_uv_sampling,
+    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+        anti_alias_grid_uv_sampling,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         as_gridding_kernel,
     )
 
     kernel = as_gridding_kernel(cgk_1D)
-    prolate_spheroidal_grid_uv_sampling(
+    anti_alias_grid_uv_sampling(
         grid,
         normalization,
         uvw,
@@ -497,7 +496,7 @@ def make_point_spread_function_single_field(
 
     import pandas as pd
 
-    from astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder import (
+    from astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder import (
         ifft_norm_img_xds,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (

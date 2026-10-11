@@ -3,8 +3,8 @@
 #include <complex>
 #include <cstdint>
 #include <stdexcept>
-#include "../include/prolate_spheroidal_grid.hpp"
-#include "../include/prolate_spheroidal_degrid.hpp"
+#include "../include/anti_alias_grid.hpp"
+#include "../include/anti_alias_degrid.hpp"
 
 namespace py = pybind11;
 
@@ -28,7 +28,7 @@ static void require_c_contiguous(const py::buffer_info& info, const char* name) 
 }
 
 // ---------------------------------------------------------------------------
-// prolate_spheroidal_grid
+// anti_alias_grid
 //
 // The complex UV grid is an image-domain array and may be single (complex64) or
 // double (complex128) precision. It is taken as an untyped py::array and the
@@ -41,7 +41,7 @@ static void require_c_contiguous(const py::buffer_info& info, const char* name) 
 // are genuinely tiny (n_uv, delta_lm — 2 elements each) keep forcecast so
 // callers aren't forced to match an exact int width.
 // ---------------------------------------------------------------------------
-void prolate_spheroidal_grid_bind(
+void anti_alias_grid_bind(
     py::array                                                        grid,          // (m_time, m_chan, m_pol, m_u, m_v)  complex64 or complex128, writable
     py::array_t<double,  py::array::c_style>                         normalization, // (m_time, m_chan, m_pol)             float64     writable
     py::array_t<cdbl,    py::array::c_style>                         vis_data,      // (n_time, n_baseline, n_chan, n_pol) complex128
@@ -124,7 +124,7 @@ void prolate_spheroidal_grid_bind(
     if (grid_is_c128) {
         cdbl* grid_ptr = static_cast<cdbl*>(grid_info.ptr);
         py::gil_scoped_release release;
-        prolate_spheroidal::prolate_spheroidal_grid<double>(
+        anti_alias::anti_alias_grid<double>(
             grid_ptr, norm_ptr, vis_ptr, uvw_ptr, freq_ptr,
             freq_map_ptr, time_map_ptr, pol_map_ptr, wt_ptr, cgk_ptr,
             m_time_g, m_chan_g, m_pol_g, m_u, m_v,
@@ -134,7 +134,7 @@ void prolate_spheroidal_grid_bind(
     } else {
         cflt* grid_ptr = static_cast<cflt*>(grid_info.ptr);
         py::gil_scoped_release release;
-        prolate_spheroidal::prolate_spheroidal_grid<float>(
+        anti_alias::anti_alias_grid<float>(
             grid_ptr, norm_ptr, vis_ptr, uvw_ptr, freq_ptr,
             freq_map_ptr, time_map_ptr, pol_map_ptr, wt_ptr, cgk_ptr,
             m_time_g, m_chan_g, m_pol_g, m_u, m_v,
@@ -145,9 +145,9 @@ void prolate_spheroidal_grid_bind(
 }
 
 // ---------------------------------------------------------------------------
-// prolate_spheroidal_grid_uv_sampling
+// anti_alias_grid_uv_sampling
 // ---------------------------------------------------------------------------
-void prolate_spheroidal_grid_uv_sampling_bind(
+void anti_alias_grid_uv_sampling_bind(
     py::array                                                        grid,
     py::array_t<double,  py::array::c_style>                         normalization,
     py::array_t<double,  py::array::c_style>                         uvw,
@@ -221,7 +221,7 @@ void prolate_spheroidal_grid_uv_sampling_bind(
     if (grid_is_c128) {
         cdbl* grid_ptr = static_cast<cdbl*>(grid_info.ptr);
         py::gil_scoped_release release;
-        prolate_spheroidal::prolate_spheroidal_grid_uv_sampling<double>(
+        anti_alias::anti_alias_grid_uv_sampling<double>(
             grid_ptr, norm_ptr, uvw_ptr, freq_ptr,
             freq_map_ptr, time_map_ptr, pol_map_ptr, wt_ptr, cgk_ptr,
             m_time_g, m_chan_g, m_pol_g, m_u, m_v,
@@ -231,7 +231,7 @@ void prolate_spheroidal_grid_uv_sampling_bind(
     } else {
         cflt* grid_ptr = static_cast<cflt*>(grid_info.ptr);
         py::gil_scoped_release release;
-        prolate_spheroidal::prolate_spheroidal_grid_uv_sampling<float>(
+        anti_alias::anti_alias_grid_uv_sampling<float>(
             grid_ptr, norm_ptr, uvw_ptr, freq_ptr,
             freq_map_ptr, time_map_ptr, pol_map_ptr, wt_ptr, cgk_ptr,
             m_time_g, m_chan_g, m_pol_g, m_u, m_v,
@@ -242,10 +242,10 @@ void prolate_spheroidal_grid_uv_sampling_bind(
 }
 
 // ---------------------------------------------------------------------------
-// prolate_spheroidal_degrid
+// anti_alias_degrid
 //
-// Inverse of prolate_spheroidal_grid: samples the model `grid` at each
-// visibility coordinate using the same prolate spheroidal kernel, and writes
+// Inverse of anti_alias_grid: samples the model `grid` at each
+// visibility coordinate using the same anti-aliasing kernel, and writes
 // the convolution-interpolated value into `vis_data` in place.
 //
 // Both `grid` (a single- or double-precision image-domain array) and
@@ -254,7 +254,7 @@ void prolate_spheroidal_grid_uv_sampling_bind(
 // writeability are checked explicitly; the four (grid dtype) x (vis dtype)
 // combinations are dispatched to the templated kernel and written in place.
 // ---------------------------------------------------------------------------
-void prolate_spheroidal_degrid_bind(
+void anti_alias_degrid_bind(
     py::array                                                        grid,          // (m_time, m_chan, m_pol, m_u, m_v)   complex64 or complex128, read
     py::array                                                        vis_data,      // (n_time, n_baseline, n_chan, n_pol) complex64 or complex128, writable
     py::array_t<double,  py::array::c_style>                         uvw,           // (n_time, n_baseline, 3)             float64
@@ -341,7 +341,7 @@ void prolate_spheroidal_degrid_bind(
             static_cast<const std::complex<GridT>*>(grid_ptr_raw);
         VisT* vp = static_cast<VisT*>(vis_ptr_raw);
         py::gil_scoped_release release;
-        prolate_spheroidal::prolate_spheroidal_degrid<GridT, VisT>(
+        anti_alias::anti_alias_degrid<GridT, VisT>(
             gp, vp, uvw_ptr, freq_ptr,
             freq_map_ptr, time_map_ptr, pol_map_ptr, cgk_ptr,
             m_time_g, m_chan_g, m_pol_g, m_u, m_v,
@@ -361,12 +361,12 @@ void prolate_spheroidal_degrid_bind(
     }
 }
 
-PYBIND11_MODULE(_prolate_spheroidal_grid_ext, m) {
-    m.doc() = "C++ prolate spheroidal convolution gridder (UV gridding)";
+PYBIND11_MODULE(_anti_alias_grid_ext, m) {
+    m.doc() = "C++ anti-aliasing convolution gridder (UV gridding)";
 
-    m.def("prolate_spheroidal_grid",
-          &prolate_spheroidal_grid_bind,
-          "Grid weighted visibilities onto a UV plane using a prolate spheroidal "
+    m.def("anti_alias_grid",
+          &anti_alias_grid_bind,
+          "Grid weighted visibilities onto a UV plane using an anti-aliasing "
           "kernel (in-place). The grid may be complex64 or complex128; the "
           "visibilities stay complex128. processing_function_threads selects the number of "
           "std::thread workers; <= 0 falls back to "
@@ -388,8 +388,8 @@ PYBIND11_MODULE(_prolate_spheroidal_grid_ext, m) {
           py::arg("interpolation") = 0,
           py::arg("processing_function_threads") = 1);
 
-    m.def("prolate_spheroidal_grid_uv_sampling",
-          &prolate_spheroidal_grid_uv_sampling_bind,
+    m.def("anti_alias_grid_uv_sampling",
+          &anti_alias_grid_uv_sampling_bind,
           "Grid imaging weights onto a UV plane (PSF / UV-sampling function, "
           "in-place). The grid may be complex64 or complex128. processing_function_threads "
           "selects the number of std::thread workers; <= 0 falls back to "
@@ -410,10 +410,10 @@ PYBIND11_MODULE(_prolate_spheroidal_grid_ext, m) {
           py::arg("interpolation") = 0,
           py::arg("processing_function_threads") = 1);
 
-    m.def("prolate_spheroidal_degrid",
-          &prolate_spheroidal_degrid_bind,
-          "Sample (degrid) a model UV grid at visibility coordinates using a "
-          "prolate spheroidal kernel. The model grid may be complex64 or "
+    m.def("anti_alias_degrid",
+          &anti_alias_degrid_bind,
+          "Sample (degrid) a model UV grid at visibility coordinates using an "
+          "anti-aliasing kernel. The model grid may be complex64 or "
           "complex128 and the visibilities complex64 or complex128; writes "
           "interpolated values into vis_data in place. processing_function_threads selects the "
           "number of std::thread workers; <= 0 falls back to "

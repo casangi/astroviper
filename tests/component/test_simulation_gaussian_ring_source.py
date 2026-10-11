@@ -142,7 +142,7 @@ def test_gaussian_disk_is_simulated_and_recovered(tmp_path):
             "max_psf_fraction": 0.8,
             "primary_beam_limit": 0.2,
         },
-        gridder="prolate_spheroidal",
+        gridder="anti_alias",
         deconvolver="hogbom_many_threads",
         scan_intents="OBSERVE_TARGET#ON_SOURCE",
         image_data_variables_keep=[

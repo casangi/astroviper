@@ -1,4 +1,4 @@
-#include "../include/prolate_spheroidal_degrid.hpp"
+#include "../include/anti_alias_degrid.hpp"
 #include "../include/kernel_lookup.hpp"
 
 #include <algorithm>
@@ -8,10 +8,10 @@
 #include <thread>
 #include <vector>
 
-namespace prolate_spheroidal {
+namespace anti_alias {
 
 template <typename GridT, typename VisT>
-void prolate_spheroidal_degrid(
+void anti_alias_degrid(
     const std::complex<GridT>* grid,
     VisT* vis_data,
     const double* uvw,
@@ -202,18 +202,18 @@ void prolate_spheroidal_degrid(
     for (auto& th : threads) th.join();
 }
 
-#define PS_DEGRID_INSTANTIATE(GRIDT, VIST)                                     \
-    template void prolate_spheroidal_degrid<GRIDT, VIST>(                      \
+#define AA_DEGRID_INSTANTIATE(GRIDT, VIST)                                     \
+    template void anti_alias_degrid<GRIDT, VIST>(                      \
         const std::complex<GRIDT>*, VIST*, const double*, const double*,       \
         const int64_t*, const int64_t*, const int64_t*, const double*,         \
         int, int, int, int, int, int, int, int, int,                           \
         double, double, int, int, int, int);
 
-PS_DEGRID_INSTANTIATE(double, std::complex<float>)
-PS_DEGRID_INSTANTIATE(double, std::complex<double>)
-PS_DEGRID_INSTANTIATE(float, std::complex<float>)
-PS_DEGRID_INSTANTIATE(float, std::complex<double>)
+AA_DEGRID_INSTANTIATE(double, std::complex<float>)
+AA_DEGRID_INSTANTIATE(double, std::complex<double>)
+AA_DEGRID_INSTANTIATE(float, std::complex<float>)
+AA_DEGRID_INSTANTIATE(float, std::complex<double>)
 
-#undef PS_DEGRID_INSTANTIATE
+#undef AA_DEGRID_INSTANTIATE
 
-} // namespace prolate_spheroidal
+} // namespace anti_alias

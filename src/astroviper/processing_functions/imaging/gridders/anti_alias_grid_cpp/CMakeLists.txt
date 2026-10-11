@@ -6,7 +6,7 @@ cmake_minimum_required(VERSION 3.15...3.27)
 # directory on the module path. When built from the repo root these are already
 # set and the include_guard in AstroviperPybind.cmake makes include() a no-op.
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    project(astroviper_prolate_spheroidal_grid LANGUAGES CXX)
+    project(astroviper_anti_alias_grid LANGUAGES CXX)
     get_filename_component(_av_repo_root
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../.." ABSOLUTE)
     list(APPEND CMAKE_MODULE_PATH "${_av_repo_root}/cmake")
@@ -15,8 +15,8 @@ endif()
 include(AstroviperPybind)
 
 astroviper_add_pybind_module(
-    NAME _prolate_spheroidal_grid_ext
-    SOURCES src/prolate_spheroidal_grid.cpp
-            src/prolate_spheroidal_degrid.cpp
+    NAME _anti_alias_grid_ext
+    SOURCES src/anti_alias_grid.cpp
+            src/anti_alias_degrid.cpp
             python/bindings.cpp
 )

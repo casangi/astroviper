@@ -1,7 +1,7 @@
-"""Unit tests for the C++ prolate_spheroidal_degrid extension.
+"""Unit tests for the C++ anti_alias_degrid extension.
 
 Coverage:
-  * Numerical agreement with the pure-Python reference (`prolate_spheroidal_degrid_reference`)
+  * Numerical agreement with the pure-Python reference (`anti_alias_degrid_reference`)
   * Serial vs multi-threaded equivalence (exact: no atomic collisions)
   * `processing_function_threads <= 0` auto-detects hardware concurrency
   * NaN UV / NaN vis / out-of-bounds samples are left unchanged
@@ -13,10 +13,10 @@ Coverage:
 import unittest
 
 import numpy as np
-from reference_gridders import prolate_spheroidal_degrid_reference
+from reference_gridders import anti_alias_degrid_reference
 
-from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-    prolate_spheroidal_degrid,
+from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+    anti_alias_degrid,
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_kernel_1D,
@@ -85,7 +85,7 @@ def _make_random_inputs(
 
 def _run_cpp(inputs, processing_function_threads=1, interpolation=0):
     vis_data = inputs["vis_data"].copy()
-    prolate_spheroidal_degrid(
+    anti_alias_degrid(
         inputs["grid"],
         vis_data,
         inputs["uvw"],
@@ -106,7 +106,7 @@ def _run_cpp(inputs, processing_function_threads=1, interpolation=0):
 
 def _run_reference(inputs, interpolation=0):
     vis_data = inputs["vis_data"].copy()
-    prolate_spheroidal_degrid_reference(
+    anti_alias_degrid_reference(
         inputs["grid"],
         vis_data,
         inputs["uvw"],
@@ -124,7 +124,7 @@ def _run_reference(inputs, interpolation=0):
     return vis_data
 
 
-class TestProlateSpheroidalDegridCpp(unittest.TestCase):
+class TestAntiAliasDegridCpp(unittest.TestCase):
     # ------------------------------------------------------------------
     # Reference-oracle tests
     # ------------------------------------------------------------------
@@ -266,7 +266,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         n_uv = np.array([m_u, m_v], dtype=np.int64)
         delta_lm = np.array([1.0e-4, 1.0e-4], dtype=np.float64)
 
-        prolate_spheroidal_degrid(
+        anti_alias_degrid(
             grid,
             vis_data,
             uvw,
@@ -303,7 +303,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         vis = inputs["vis_data"]  # complex128, owned by Python
         self.assertEqual(vis.dtype, np.complex128)
         addr_before = vis.ctypes.data
-        prolate_spheroidal_degrid(
+        anti_alias_degrid(
             inputs["grid"],
             vis,
             inputs["uvw"],
@@ -335,7 +335,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         inputs = _make_random_inputs(seed=21)
         vis64 = np.zeros_like(inputs["vis_data"], dtype=np.complex64)
         addr_before = vis64.ctypes.data
-        prolate_spheroidal_degrid(
+        anti_alias_degrid(
             inputs["grid"],
             vis64,
             inputs["uvw"],
@@ -358,7 +358,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
         """C++ output into a complex64 buffer matches the pure-Python reference within float32 precision."""
         inputs = _make_random_inputs(seed=22)
         vis64 = np.zeros_like(inputs["vis_data"], dtype=np.complex64)
-        prolate_spheroidal_degrid(
+        anti_alias_degrid(
             inputs["grid"],
             vis64,
             inputs["uvw"],
@@ -385,7 +385,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
             inputs["vis_data"], dtype=np.float64
         )  # real, not complex
         with self.assertRaises(RuntimeError):
-            prolate_spheroidal_degrid(
+            anti_alias_degrid(
                 inputs["grid"],
                 bad_vis,
                 inputs["uvw"],
@@ -448,7 +448,7 @@ class TestProlateSpheroidalDegridCpp(unittest.TestCase):
             dtype=np.complex128,
         )  # 4-D, not 5-D
         with self.assertRaises(RuntimeError):
-            prolate_spheroidal_degrid(
+            anti_alias_degrid(
                 bad_grid,
                 inputs["vis_data"].copy(),
                 inputs["uvw"],
@@ -517,7 +517,7 @@ class TestDegridOtherSupports(unittest.TestCase):
     """The stencil and the table layout are generic in the support."""
 
     def test_other_supports_match_reference(self):
-        from reference_gridders import prolate_spheroidal_degrid_reference
+        from reference_gridders import anti_alias_degrid_reference
 
         for support in (3, 5, 9, 11):
             for interpolation in (0, 1):
@@ -525,7 +525,7 @@ class TestDegridOtherSupports(unittest.TestCase):
                     inputs = _make_random_inputs(seed=10 + support)
                     inputs["cgk_1D"] = _gaussian_kernel_table(support, OVERSAMPLING)
                     cpp = inputs["vis_data"].copy()
-                    prolate_spheroidal_degrid(
+                    anti_alias_degrid(
                         inputs["grid"],
                         cpp,
                         inputs["uvw"],
@@ -542,7 +542,7 @@ class TestDegridOtherSupports(unittest.TestCase):
                         processing_function_threads=2,
                     )
                     ref = inputs["vis_data"].copy()
-                    prolate_spheroidal_degrid_reference(
+                    anti_alias_degrid_reference(
                         inputs["grid"],
                         ref,
                         inputs["uvw"],

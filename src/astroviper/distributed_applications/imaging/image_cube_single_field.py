@@ -118,7 +118,7 @@ def image_cube_single_field(
     image_params: dict[str, Any],
     imaging_weights_params: dict[str, Any],
     cycle_control_params: dict[str, Any],
-    gridder="prolate_spheroidal",
+    gridder="anti_alias",
     deconvolver="hogbom",
     instrument_polarization_basis: str = "linear",
     scan_intents: list[str] | None = ["OBSERVE_TARGET#ON_SOURCE"],  # noqa: B006 - None means every intent, so the default stays a list; never mutated
@@ -317,9 +317,9 @@ def image_cube_single_field(
         start of the cycle. The deconvolver also receives the per-plane
         ``max_iter_per_cycle``, ``min(max_iter_per_cycle, remaining max_iter)``.
     gridder : str
-        The gridder to use. Default ``"prolate_spheroidal"`` (a prolate
-        spheroidal gridding convolution kernel with support 7x7 and oversampling
-        of 100).
+        The gridder to use. Default ``"anti_alias"``: convolutional gridding
+        with the anti-aliasing kernel of ``gridding_kernel_params`` (by default
+        the prolate spheroidal kernel of support 7 and oversampling 100).
     deconvolver : str
         Deconvolution algorithm for the model update. One of ``"hogbom"`` (C++, threaded across planes), ``"hogbom_many_threads"``
         (C++, threaded across *and* within planes -- faster when there are

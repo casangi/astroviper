@@ -1017,7 +1017,7 @@ def image(work_dir, ps_store, image_params):
             },
             cycle_control_params=CYCLE_CONTROL_PARAMS,
             instrument_polarization_basis="linear",
-            gridder="prolate_spheroidal",
+            gridder="anti_alias",
             deconvolver="hogbom",
             scan_intents="OBSERVE_TARGET#ON_SOURCE",
             image_data_variables_keep=[

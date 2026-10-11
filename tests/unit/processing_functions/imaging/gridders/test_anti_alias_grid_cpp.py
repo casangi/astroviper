@@ -1,7 +1,7 @@
-"""Unit tests for the C++ prolate_spheroidal_grid extension.
+"""Unit tests for the C++ anti_alias_grid extension.
 
 Coverage:
-  * Numerical agreement with the pure-Python reference (`prolate_spheroidal_grid_reference`)
+  * Numerical agreement with the pure-Python reference (`anti_alias_grid_reference`)
   * Serial vs multi-threaded equivalence
   * `processing_function_threads <= 0` auto-detects hardware concurrency
   * Accumulation semantics (two calls == one combined call)
@@ -15,10 +15,10 @@ Coverage:
 import unittest
 
 import numpy as np
-from reference_gridders import prolate_spheroidal_grid_reference
+from reference_gridders import anti_alias_grid_reference
 
-from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-    prolate_spheroidal_grid,
+from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+    anti_alias_grid,
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_kernel_1D,
@@ -96,7 +96,7 @@ def _run_cpp(inputs, processing_function_threads=1, interpolation=0):
         inputs["m_u"],
         inputs["m_v"],
     )
-    prolate_spheroidal_grid(
+    anti_alias_grid(
         grid,
         norm,
         inputs["vis_data"],
@@ -125,7 +125,7 @@ def _run_reference(inputs, interpolation=0):
         inputs["m_u"],
         inputs["m_v"],
     )
-    prolate_spheroidal_grid_reference(
+    anti_alias_grid_reference(
         grid,
         norm,
         inputs["vis_data"],
@@ -145,7 +145,7 @@ def _run_reference(inputs, interpolation=0):
     return grid, norm
 
 
-class TestProlateSpheroidalGridCpp(unittest.TestCase):
+class TestAntiAliasGridCpp(unittest.TestCase):
     # ------------------------------------------------------------------
     # Reference-oracle tests
     # ------------------------------------------------------------------
@@ -247,7 +247,7 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
             inputs["m_v"],
         )
         for part in (first, second):
-            prolate_spheroidal_grid(
+            anti_alias_grid(
                 grid,
                 norm,
                 np.ascontiguousarray(part["vis_data"]),
@@ -381,7 +381,7 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
         n_uv = np.array([m_u, m_v], dtype=np.int64)
         delta_lm = np.array([1.0e-4, 1.0e-4], dtype=np.float64)
 
-        prolate_spheroidal_grid(
+        anti_alias_grid(
             grid,
             norm,
             vis,
@@ -431,7 +431,7 @@ class TestProlateSpheroidalGridCpp(unittest.TestCase):
             (inputs["m_time"], inputs["m_chan"], inputs["m_pol"]), dtype=np.float64
         )
         with self.assertRaises(RuntimeError):
-            prolate_spheroidal_grid(
+            anti_alias_grid(
                 bad_grid,
                 norm,
                 inputs["vis_data"],
@@ -465,7 +465,7 @@ class TestSinglePrecisionGrid(unittest.TestCase):
 
         grid64 = np.zeros(grid128.shape, dtype=np.complex64)
         norm64 = np.zeros(norm128.shape, dtype=np.float64)
-        prolate_spheroidal_grid(
+        anti_alias_grid(
             grid64,
             norm64,
             inputs["vis_data"],
@@ -511,7 +511,7 @@ class TestSinglePrecisionGrid(unittest.TestCase):
                 (inputs["m_time"], inputs["m_chan"], inputs["m_pol"]),
                 dtype=np.float64,
             )
-            prolate_spheroidal_grid(
+            anti_alias_grid(
                 grid,
                 norm,
                 inputs["vis_data"],
@@ -541,8 +541,8 @@ class TestSinglePrecisionDegrid(unittest.TestCase):
     """Single-precision (complex64) model grid degridded to double visibilities."""
 
     def test_complex64_grid_degrid_to_complex128_vis(self):
-        from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-            prolate_spheroidal_degrid,
+        from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+            anti_alias_degrid,
         )
 
         inputs = _make_random_inputs(seed=3)
@@ -553,7 +553,7 @@ class TestSinglePrecisionDegrid(unittest.TestCase):
 
         def degrid(grid):
             vis = np.zeros((n_time, n_baseline, n_vis_chan, n_pol), dtype=np.complex128)
-            prolate_spheroidal_degrid(
+            anti_alias_degrid(
                 grid,
                 vis,
                 inputs["uvw"],
@@ -627,7 +627,7 @@ class TestGridOtherSupports(unittest.TestCase):
                         inputs["m_u"],
                         inputs["m_v"],
                     )
-                    prolate_spheroidal_grid(
+                    anti_alias_grid(
                         grid,
                         norm,
                         inputs["vis_data"],
@@ -652,7 +652,7 @@ class TestGridOtherSupports(unittest.TestCase):
                         inputs["m_u"],
                         inputs["m_v"],
                     )
-                    prolate_spheroidal_grid_reference(
+                    anti_alias_grid_reference(
                         ref_grid,
                         ref_norm,
                         inputs["vis_data"],

@@ -90,7 +90,7 @@ def add_visibility_grid_mosaic(
 
     See Also
     --------
-    add_visibility_grid_single_field : Non-mosaic (prolate spheroidal gridder) variant.
+    add_visibility_grid_single_field : Non-mosaic (anti-aliasing gridder) variant.
     mosaic_grid_jit : Mosaic gridding kernel (pure Python; currently unmaintained).
     """
     if image_data_group_out_modified is None:
@@ -215,8 +215,7 @@ def add_visibility_grid_single_field(
     :func:`~astroviper.utils.data_group_tools.modify_data_groups_xds`.
 
     This function is the non-mosaic counterpart of
-    :func:`add_visibility_grid_mosaic`.  It uses the separable prolate
-    spheroidal gridder (the C++ ``prolate_spheroidal_grid`` kernel, the
+    :func:`add_visibility_grid_mosaic`.  It uses the separable anti-aliasing gridder (the C++ ``anti_alias_grid`` kernel, the
     standard gridder in CASA) rather than the direction-dependent mosaic
     gridder, so no GCF dataset is required.
 
@@ -230,7 +229,7 @@ def add_visibility_grid_single_field(
         The gridding kernel
         (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`,
         whose table, support and oversampling go to the C++
-        ``prolate_spheroidal_grid`` kernel), or the bare table of the default
+        ``anti_alias_grid`` kernel), or the bare table of the default
         prolate spheroidal kernel of support 7.
     img_xds : xr.Dataset
         Image dataset that accumulates the gridded visibilities.  The arrays
@@ -278,8 +277,8 @@ def add_visibility_grid_single_field(
     See Also
     --------
     add_visibility_grid_mosaic : Mosaic (direction-dependent GCF) variant.
-    astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp.prolate_spheroidal_grid :
-        C++ separable prolate spheroidal gridding kernel.
+    astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp.anti_alias_grid :
+        C++ separable anti-aliasing gridder.
     """
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {
@@ -365,15 +364,15 @@ def add_visibility_grid_single_field(
     frequency_coord = ms_xds.frequency.values
     imaging_weight = ms_xds[ms_data_group_in["weight_imaging"]].values
 
-    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-        prolate_spheroidal_grid,
+    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+        anti_alias_grid,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         as_gridding_kernel,
     )
 
     kernel = as_gridding_kernel(cgk_1D)
-    prolate_spheroidal_grid(
+    anti_alias_grid(
         grid,
         normalization,
         vis_data,

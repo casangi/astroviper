@@ -4,7 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 
-namespace prolate_spheroidal {
+namespace anti_alias {
 
 /**
  * Kernel interpolation of the sampled gridding kernel table.
@@ -64,4 +64,4 @@ inline void stencil_kernel_values(
     }
 }
 
-} // namespace prolate_spheroidal
+} // namespace anti_alias

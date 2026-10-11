@@ -1,4 +1,4 @@
-"""Shared prolate spheroidal gridder visibility prediction primitive."""
+"""Shared anti-aliasing gridder visibility prediction primitive."""
 
 import copy
 
@@ -25,12 +25,12 @@ def degrid_visibility_grid_single_field(
     overwrite: bool = True,
     fft_padding: float = 1.2,
     processing_function_threads: int = 1,
-    description: str = "Degridded prolate spheroidal gridder model visibilities.",
+    description: str = "Degridded anti-aliasing gridder model visibilities.",
 ):
     """Sample a prepared UV grid directly onto visibility coordinates.
 
     This is the shared numerical primitive beneath cube and continuum model
-    prediction with the prolate spheroidal gridder (the standard gridder in
+    prediction with the anti-aliasing gridder (the standard gridder in
     CASA). Callers own the spectral representation of ``grid`` and supply the
     mapping from each visibility channel to its corresponding grid plane.
 
@@ -165,15 +165,15 @@ def degrid_visibility_grid_single_field(
     n_uv = padded_grid_size([img_xds.sizes["l"], img_xds.sizes["m"]], fft_padding)
     delta_lm = img_xds.xr_img.get_lm_cell_size()
 
-    from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-        prolate_spheroidal_degrid,
+    from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+        anti_alias_degrid,
     )
     from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
         as_gridding_kernel,
     )
 
     kernel = as_gridding_kernel(cgk_1D)
-    prolate_spheroidal_degrid(
+    anti_alias_degrid(
         grid,
         vis_data,
         uvw,

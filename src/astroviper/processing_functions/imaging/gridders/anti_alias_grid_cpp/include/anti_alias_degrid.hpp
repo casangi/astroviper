@@ -3,13 +3,13 @@
 #include <complex>
 #include <cstdint>
 
-namespace prolate_spheroidal {
+namespace anti_alias {
 
 /**
- * Sample (degrid) a model UV grid at visibility coordinates using a prolate
- * spheroidal convolution kernel.
+ * Sample (degrid) a model UV grid at visibility coordinates using an
+ * anti-aliasing convolution kernel.
  *
- * Inverse of ::prolate_spheroidal_grid. For each non-NaN visibility sample
+ * Inverse of ::anti_alias_grid. For each non-NaN visibility sample
  * whose convolution support falls fully inside the grid, writes
  *
  *     vis_data[i_time, i_baseline, i_chan, i_pol] =
@@ -33,7 +33,7 @@ namespace prolate_spheroidal {
  * @tparam VisT  Visibility element type: std::complex<float> or std::complex<double>.
  */
 template <typename GridT, typename VisT>
-void prolate_spheroidal_degrid(
+void anti_alias_degrid(
     const std::complex<GridT>* grid,
     VisT* vis_data,
     const double* uvw,
@@ -49,18 +49,18 @@ void prolate_spheroidal_degrid(
     int processing_function_threads
 );
 
-#define PS_DEGRID_EXTERN(GRIDT, VIST)                                          \
-    extern template void prolate_spheroidal_degrid<GRIDT, VIST>(               \
+#define AA_DEGRID_EXTERN(GRIDT, VIST)                                          \
+    extern template void anti_alias_degrid<GRIDT, VIST>(               \
         const std::complex<GRIDT>*, VIST*, const double*, const double*,       \
         const int64_t*, const int64_t*, const int64_t*, const double*,         \
         int, int, int, int, int, int, int, int, int,                           \
         double, double, int, int, int, int);
 
-PS_DEGRID_EXTERN(double, std::complex<float>)
-PS_DEGRID_EXTERN(double, std::complex<double>)
-PS_DEGRID_EXTERN(float, std::complex<float>)
-PS_DEGRID_EXTERN(float, std::complex<double>)
+AA_DEGRID_EXTERN(double, std::complex<float>)
+AA_DEGRID_EXTERN(double, std::complex<double>)
+AA_DEGRID_EXTERN(float, std::complex<float>)
+AA_DEGRID_EXTERN(float, std::complex<double>)
 
-#undef PS_DEGRID_EXTERN
+#undef AA_DEGRID_EXTERN
 
-} // namespace prolate_spheroidal
+} // namespace anti_alias

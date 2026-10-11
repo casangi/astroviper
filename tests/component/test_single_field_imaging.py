@@ -574,7 +574,7 @@ def _run_image_cube(
         image_params=image_params,
         imaging_weights_params=IMAGING_WEIGHTS_PARAMS,
         cycle_control_params=config["cycle_control_params"],
-        gridder="prolate_spheroidal",
+        gridder="anti_alias",
         deconvolver="hogbom_many_threads",
         scan_intents="OBSERVE_TARGET#ON_SOURCE",
         image_data_variables_keep=config["image_data_variables_keep"],

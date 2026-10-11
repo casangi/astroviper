@@ -21,7 +21,7 @@ def make_undeconvolved_image_single_field(
 
     Drops auto-correlations and grids the visibilities (``VISIBILITY`` /
     ``VISIBILITY_NORMALIZATION``).  Together with the inverse FFT
-    (:func:`~astroviper.processing_functions.imaging.fft_normalize_prolate_spheriodal_gridder.ifft_norm_img_xds`)
+    (:func:`~astroviper.processing_functions.imaging.fft_normalize_anti_alias_gridder.ifft_norm_img_xds`)
     this produces the undeconvolved (dirty/residual) image.  In the single-field
     imager the UV-sampling grid that becomes the PSF is built once, separately,
     by

@@ -3,10 +3,10 @@
 #include <complex>
 #include <cstdint>
 
-namespace prolate_spheroidal {
+namespace anti_alias {
 
 /**
- * Grid weighted visibilities onto a UV plane using a prolate spheroidal convolution kernel.
+ * Grid weighted visibilities onto a UV plane using an anti-aliasing convolution kernel.
  *
  * Accumulates weighted, convolved visibility samples into grid and the
  * corresponding sum of convolution weights into normalization. Both arrays
@@ -31,7 +31,7 @@ namespace prolate_spheroidal {
  * @param time_map         Maps vis time index to image time index, shape (n_time,)
  * @param pol_map          Maps vis pol index to image pol index, shape (n_pol,)
  * @param weight           Imaging weights, shape (n_time, n_baseline, n_vis_chan, n_pol)
- * @param cgk_1D           Oversampled 1-D prolate spheroidal kernel
+ * @param cgk_1D           Oversampled 1-D anti-aliasing kernel (prolate spheroidal by default)
  * @param m_time_g         Grid time dimension
  * @param m_chan_g         Grid channel dimension
  * @param m_pol_g          Grid polarization dimension
@@ -51,7 +51,7 @@ namespace prolate_spheroidal {
  *                         std::thread::hardware_concurrency(); 1 runs serial.
  */
 template <typename GridT>
-void prolate_spheroidal_grid(
+void anti_alias_grid(
     std::complex<GridT>* grid,
     double* normalization,
     const std::complex<double>* vis_data,
@@ -69,14 +69,14 @@ void prolate_spheroidal_grid(
     int processing_function_threads
 );
 
-extern template void prolate_spheroidal_grid<double>(
+extern template void anti_alias_grid<double>(
     std::complex<double>*, double*, const std::complex<double>*, const double*,
     const double*, const int64_t*, const int64_t*, const int64_t*,
     const double*, const double*,
     int, int, int, int, int, int, int, int, int,
     double, double, int, int, int, int);
 
-extern template void prolate_spheroidal_grid<float>(
+extern template void anti_alias_grid<float>(
     std::complex<float>*, double*, const std::complex<double>*, const double*,
     const double*, const int64_t*, const int64_t*, const int64_t*,
     const double*, const double*,
@@ -88,12 +88,12 @@ extern template void prolate_spheroidal_grid<float>(
  *
  * PSF variant: grids imaging weights instead of weighted visibility data. The
  * grid element precision is templated on @p GridT exactly as in
- * ::prolate_spheroidal_grid.
+ * ::anti_alias_grid.
  *
  * @tparam GridT  Grid element type: ``float`` or ``double``.
  */
 template <typename GridT>
-void prolate_spheroidal_grid_uv_sampling(
+void anti_alias_grid_uv_sampling(
     std::complex<GridT>* grid,
     double* normalization,
     const double* uvw,
@@ -110,16 +110,16 @@ void prolate_spheroidal_grid_uv_sampling(
     int processing_function_threads
 );
 
-extern template void prolate_spheroidal_grid_uv_sampling<double>(
+extern template void anti_alias_grid_uv_sampling<double>(
     std::complex<double>*, double*, const double*, const double*,
     const int64_t*, const int64_t*, const int64_t*, const double*, const double*,
     int, int, int, int, int, int, int, int, int,
     double, double, int, int, int, int);
 
-extern template void prolate_spheroidal_grid_uv_sampling<float>(
+extern template void anti_alias_grid_uv_sampling<float>(
     std::complex<float>*, double*, const double*, const double*,
     const int64_t*, const int64_t*, const int64_t*, const double*, const double*,
     int, int, int, int, int, int, int, int, int,
     double, double, int, int, int, int);
 
-} // namespace prolate_spheroidal
+} // namespace anti_alias

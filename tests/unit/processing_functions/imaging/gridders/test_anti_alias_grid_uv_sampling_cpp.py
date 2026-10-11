@@ -1,8 +1,8 @@
-"""Unit tests for the C++ prolate_spheroidal_grid_uv_sampling extension.
+"""Unit tests for the C++ anti_alias_grid_uv_sampling extension.
 
 Coverage:
   * Numerical agreement with the pure-Python reference
-    (`prolate_spheroidal_grid_uv_sampling_reference`)
+    (`anti_alias_grid_uv_sampling_reference`)
   * Serial vs multi-threaded equivalence
   * `processing_function_threads <= 0` auto-detects hardware concurrency
   * Accumulation semantics (two calls == one combined call)
@@ -17,10 +17,10 @@ Coverage:
 import unittest
 
 import numpy as np
-from reference_gridders import prolate_spheroidal_grid_uv_sampling_reference
+from reference_gridders import anti_alias_grid_uv_sampling_reference
 
-from astroviper.processing_functions.imaging.gridders.prolate_spheroidal_grid_cpp import (
-    prolate_spheroidal_grid_uv_sampling,
+from astroviper.processing_functions.imaging.gridders.anti_alias_grid_cpp import (
+    anti_alias_grid_uv_sampling,
 )
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_kernel_1D,
@@ -92,7 +92,7 @@ def _run_cpp(inputs, processing_function_threads=1, interpolation=0):
         inputs["m_u"],
         inputs["m_v"],
     )
-    prolate_spheroidal_grid_uv_sampling(
+    anti_alias_grid_uv_sampling(
         grid,
         norm,
         inputs["uvw"],
@@ -120,7 +120,7 @@ def _run_reference(inputs, interpolation=0):
         inputs["m_u"],
         inputs["m_v"],
     )
-    prolate_spheroidal_grid_uv_sampling_reference(
+    anti_alias_grid_uv_sampling_reference(
         grid,
         norm,
         inputs["uvw"],
@@ -139,7 +139,7 @@ def _run_reference(inputs, interpolation=0):
     return grid, norm
 
 
-class TestProlateSpheroidalGridUVSamplingCpp(unittest.TestCase):
+class TestAntiAliasGridUVSamplingCpp(unittest.TestCase):
     # ------------------------------------------------------------------
     # Reference-oracle tests
     # ------------------------------------------------------------------
@@ -237,7 +237,7 @@ class TestProlateSpheroidalGridUVSamplingCpp(unittest.TestCase):
             inputs["m_v"],
         )
         for part in (first, second):
-            prolate_spheroidal_grid_uv_sampling(
+            anti_alias_grid_uv_sampling(
                 grid,
                 norm,
                 np.ascontiguousarray(part["uvw"]),
@@ -351,7 +351,7 @@ class TestProlateSpheroidalGridUVSamplingCpp(unittest.TestCase):
         n_uv = np.array([m_u, m_v], dtype=np.int64)
         delta_lm = np.array([1.0e-4, 1.0e-4], dtype=np.float64)
 
-        prolate_spheroidal_grid_uv_sampling(
+        anti_alias_grid_uv_sampling(
             grid,
             norm,
             uvw,
@@ -400,7 +400,7 @@ class TestProlateSpheroidalGridUVSamplingCpp(unittest.TestCase):
             (inputs["m_time"], inputs["m_chan"], inputs["m_pol"]), dtype=np.float64
         )
         with self.assertRaises(RuntimeError):
-            prolate_spheroidal_grid_uv_sampling(
+            anti_alias_grid_uv_sampling(
                 bad_grid,
                 norm,
                 inputs["uvw"],
