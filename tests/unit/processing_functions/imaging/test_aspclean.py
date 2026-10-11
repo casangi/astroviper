@@ -387,7 +387,7 @@ class TestCube:
 
         rc = resid.copy()
         mc = model.copy()
-        # Iteration control is per (time, frequency, polarization) plane:
+        # Cycle control is per (time, frequency, polarization) plane:
         # threshold is a float64 (nt, nf, np) array and max_iter an int32 one.
         threshold = np.full((nt, nf, npol), 0.05, dtype=np.float64)
         max_iter = np.full((nt, nf, npol), 80, dtype=np.int32)

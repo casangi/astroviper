@@ -131,7 +131,7 @@ def test_gaussian_disk_is_simulated_and_recovered(tmp_path):
             "robust": 0.5,
             "casa_weighting_implementation": True,
         },
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": 5000,
             "max_cycles": -1,
             "threshold": 1e-4,

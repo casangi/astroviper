@@ -50,7 +50,7 @@ def _minimal_task_inputs(tmp_path):
     return dict(
         image_params=image_params,
         imaging_weights_params={"weighting": "natural"},
-        iteration_control_params={"max_iter": 0},
+        cycle_control_params={"max_iter": 0},
         task_coords=task_coords,
         data_selection=data_selection,
         image_store=str(tmp_path / "img.zarr"),

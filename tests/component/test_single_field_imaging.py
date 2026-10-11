@@ -52,7 +52,7 @@ from astroviper.processing_functions.imaging.primary_beam.make_pb_symmetric impo
     airy_disk_rorder,
     airy_disk_rorder_v2,
 )
-from astroviper.processing_functions.imaging.utils.iteration_control import (
+from astroviper.processing_functions.imaging.utils.cycle_control import (
     IMAGING_MAX_CYCLES,
     print_imaging_dict,
 )
@@ -163,7 +163,7 @@ IMAGING_WEIGHTS_PARAMS = {
 # precision, threads=1, n_mapping_parallelism=1.
 _CONFIGS = {
     "niter0": {
-        "iteration_control_params": {
+        "cycle_control_params": {
             "max_iter": 0,
             "max_cycles": 0,
             "threshold": 0.0,
@@ -186,7 +186,7 @@ _CONFIGS = {
         "compare_variables": ["SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"],
     },
     "niter100": {
-        "iteration_control_params": {
+        "cycle_control_params": {
             "max_iter": 100,
             "max_cycles": 1,
             "threshold": 0.001,
@@ -223,7 +223,7 @@ _CONFIGS = {
     # Same numeric parameters as "niter100" except max_cycles=0, which must run
     # zero deconvolution -- so no MASK/SKY_MODEL/SKY_RESTORED is ever created.
     "max_cycles0": {
-        "iteration_control_params": {
+        "cycle_control_params": {
             "max_iter": 100,
             "max_cycles": 0,
             "threshold": 0.001,
@@ -245,7 +245,7 @@ _CONFIGS = {
         "compare_variables": ["SKY_RESIDUAL", "POINT_SPREAD_FUNCTION", "PRIMARY_BEAM"],
     },
     "multi_cycle": {
-        "iteration_control_params": {
+        "cycle_control_params": {
             "max_iter": 10000,
             "max_cycles": 4,
             "threshold": 0.001,
@@ -435,7 +435,7 @@ def _check_imaging_dict(
     the TRUTH_RTOL comment): the peak-residual sign flips while its magnitude is
     stable, and the model update count itself drifts, so those fields cannot be
     pinned tightly, while max_iter/stop_code/masksum still can. Regenerate the
-    expected literals if the imaging or iteration-control behaviour intentionally
+    expected literals if the imaging or cycle control behaviour intentionally
     changes.
     """
     exact_int_fields = {"max_iter", "iter_done", "masksum"}
@@ -573,7 +573,7 @@ def _run_image_cube(
         image_store=image_store,
         image_params=image_params,
         imaging_weights_params=IMAGING_WEIGHTS_PARAMS,
-        iteration_control_params=config["iteration_control_params"],
+        cycle_control_params=config["cycle_control_params"],
         gridder="prolate_spheroidal",
         deconvolver="hogbom_many_threads",
         scan_intents="OBSERVE_TARGET#ON_SOURCE",
@@ -600,11 +600,11 @@ def _check_deep_clean_history(deconvolve_dict):
     """Check the deep fixture's stopping contract without pinning its path."""
     expected = EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE
     assert set(deconvolve_dict.data) == set(expected)
-    controls = _CONFIGS["multi_cycle"]["iteration_control_params"]
+    controls = _CONFIGS["multi_cycle"]["cycle_control_params"]
     for plane, fields in deconvolve_dict.data.items():
         counts = np.asarray(fields["iter_done"])
         # One entry per imaging cycle the plane's channel ran: a plane may spend
-        # its max_iter budget in fewer cycles than max_cycles (iteration control
+        # its max_iter budget in fewer cycles than max_cycles (cycle control
         # is per plane), never in more.
         assert 1 <= len(counts) <= controls["max_cycles"], (
             f"{plane}: {len(counts)} update cycles, expected at most "
@@ -1251,7 +1251,7 @@ def test_single_field_imaging_multi_cycle(
         n_mapping_parallelism=n_mapping_parallelism,
         single_precision_image=single_precision_image,
     )
-    multi_cycle_params = _CONFIGS["multi_cycle"]["iteration_control_params"]
+    multi_cycle_params = _CONFIGS["multi_cycle"]["cycle_control_params"]
     for fields in imaging_dict["deconvolution"].data.values():
         psf_fraction = (
             fields["max_psf_sidelobe"] * multi_cycle_params["psf_sidelobe_factor"]
@@ -1402,12 +1402,12 @@ def _regenerate_truth_images():
 #
 # Keyed by ``(time, pol, chan)`` with each history list holding one entry per
 # imaging cycle; checked by ``_check_imaging_dict``. Within a precision they
-# are independent of thread count and chunking (iteration control is computed
+# are independent of thread count and chunking (cycle control is computed
 # per (time, frequency, polarization) plane). Only the double-precision
 # multi_cycle is pinned to a literal: the single-precision deep CLEAN is chaotic
 # near the float32 peak-selection bifurcation (see MULTI_CYCLE_SINGLE_RTOL), so
 # it is not checked against a literal. Regenerate if the imaging or
-# iteration-control behaviour intentionally changes.
+# cycle control behaviour intentionally changes.
 # ---------------------------------------------------------------------------
 
 # max_iter=100, max_cycles=1, threshold=0.001: deconvolves to the iteration limit

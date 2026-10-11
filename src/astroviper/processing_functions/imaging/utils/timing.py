@@ -73,7 +73,7 @@ IMAGING_TIMING_PHASES = [
         "MODEL UPDATE (summed over imaging cycles)",
         "T_model_update",
         [
-            ("iteration control", "T_iteration_control"),
+            ("cycle control", "T_cycle_control"),
             ("make mask", "T_make_mask"),
             ("deconvolve", "T_deconvolve"),
             ("convergence / merge", "T_convergence"),

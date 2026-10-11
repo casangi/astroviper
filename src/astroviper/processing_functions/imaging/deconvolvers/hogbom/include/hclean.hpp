@@ -6,8 +6,8 @@
 namespace hclean {
 
 /**
- * Why a plane's Hogbom model update ended. The values follow the iteration
- * controller's model update stop codes (imaging/utils/iteration_control.py).
+ * Why a plane's Hogbom model update ended. The values follow the cycle
+ * controller's model update stop codes (imaging/utils/cycle_control.py).
  */
 enum StopReason : int {
     STOP_NONE = 0,       ///< did not run (no iteration budget) or stopped on request
@@ -196,7 +196,7 @@ void clean(T* limage, T* limagestep, const T* lpsf,
  * @param nx image width
  * @param xbeg,xend,ybeg,yend per-plane clean box (0-based, exclusive upper)
  * @param max_iter_remaining per-plane maximum iterations; flat array of length
- *              nt*nf*np_img in (t, f, p) C-order (iteration control is
+ *              nt*nf*np_img in (t, f, p) C-order (cycle control is
  *              independent for every time/frequency/polarization plane)
  * @param gain clean loop gain
  * @param thres per-plane flux cleaning threshold; flat array of length

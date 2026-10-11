@@ -1,26 +1,26 @@
-"""Unit tests for the ALMA iteration control heuristics."""
+"""Unit tests for the ALMA cycle control heuristics."""
 
 import pytest
 
 from astroviper.processing_functions.imaging.deconvolution import (
     _validate_deconvolve_params,
 )
-from astroviper.processing_functions.imaging.utils.iteration_control import (
+from astroviper.processing_functions.imaging.utils.cycle_control import (
     validate_entropy_params,
 )
-from astroviper.processing_functions.imaging.utils.iteration_control_heuristics import (
+from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
     EXTRA_CYCLES,
     MAX_PSF_FRACTION,
     MIN_PSF_FRACTION,
     NOISY_CYCLE_SAFETY,
     NOISY_MAX_ITER_PER_CYCLE,
     PSF_SIDELOBE_FACTOR,
-    alma_iteration_control_params,
+    alma_cycle_control_params,
     predicted_imaging_cycles,
     psf_fraction,
 )
 
-ITERATION_CONTROL_KEYS = {
+CYCLE_CONTROL_KEYS = {
     "max_iter",
     "max_cycles",
     "threshold",
@@ -65,7 +65,7 @@ def test_psf_fraction_is_clamped():
 
 
 def _check_valid(params):
-    assert set(params) == ITERATION_CONTROL_KEYS
+    assert set(params) == CYCLE_CONTROL_KEYS
     for key in ("max_iter", "max_cycles", "max_iter_per_cycle", "max_iter_divergence"):
         assert type(params[key]) is int, key
     validate_entropy_params(params)
@@ -73,17 +73,17 @@ def _check_valid(params):
 
 
 def test_noise_free_params():
-    params = alma_iteration_control_params(0.219, 0.637, 2.046e-5)
+    params = alma_cycle_control_params(0.219, 0.637, 2.046e-5)
     _check_valid(params)
     assert params["threshold"] == 2.046e-5
     assert params["max_cycles"] == 5 + EXTRA_CYCLES
     assert params["max_iter_per_cycle"] == -1
     assert params["entropy_stop"] is False
-    assert alma_iteration_control_params(0.219, 0.637, 2.046e-5) == params
+    assert alma_cycle_control_params(0.219, 0.637, 2.046e-5) == params
 
 
 def test_noisy_params():
-    params = alma_iteration_control_params(
+    params = alma_cycle_control_params(
         0.219, 0.637, 0.0, noisy=True, thermal_noise=0.048
     )
     _check_valid(params)
@@ -97,14 +97,14 @@ def test_noisy_params():
 @pytest.mark.parametrize("thermal_noise", [None, 0.0])
 def test_noisy_params_need_the_thermal_noise(thermal_noise):
     with pytest.raises(ValueError, match="thermal_noise"):
-        alma_iteration_control_params(
+        alma_cycle_control_params(
             0.219, 0.637, 0.0, noisy=True, thermal_noise=thermal_noise
         )
 
 
 def test_one_threshold_per_stokes_plane():
     """A threshold per Stokes plane passes through; Stokes I sets the cycles."""
-    params = alma_iteration_control_params(0.219, 0.637, [2.046e-5, 5e-6, 5e-6, 5e-6])
+    params = alma_cycle_control_params(0.219, 0.637, [2.046e-5, 5e-6, 5e-6, 5e-6])
     _check_valid(params)
     assert params["threshold"] == [2.046e-5, 5e-6, 5e-6, 5e-6]
     assert params["max_cycles"] == 5 + EXTRA_CYCLES

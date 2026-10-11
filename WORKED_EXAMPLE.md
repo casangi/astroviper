@@ -15,7 +15,7 @@ return_dict = image_cube_single_field(
     image_store="twhya_clean.img.zarr",             # output image dataset (Zarr)
     image_params=image_params,                       # image geometry + output coords
     imaging_weights_params={"weighting": "briggs", "robust": 0.5},
-    iteration_control_params={"max_iter": 300, "max_cycles": 3, "threshold": 0.001, "gain": 0.1},
+    cycle_control_params={"max_iter": 300, "max_cycles": 3, "threshold": 0.001, "gain": 0.1},
     gridder="prolate_spheroidal",
     deconvolver="hogbom_many_threads",
     image_data_variables_keep=["sky_residual", "sky_model", "mask",
@@ -78,10 +78,10 @@ task_coords, data_selection, image_store, input_data_store, ..., graph_mode=True
    dict, any dimension) selects the sharded writer.
 
 ### 12.3 Science — `processing_functions/imaging/image_cube_single_field.py`
-The **iteration-control and bookkeeping helpers** (not science kernels) live in
-the `processing_functions/imaging/utils/` subpackage: `iteration_control.py`
-(`IterationController`, stop codes, `merge_return_dicts`,
-`get_calculate_cycle_controls`, the `get_*_from_imaging_dict` extractors,
+The **cycle control and bookkeeping helpers** (not science kernels) live in
+the `processing_functions/imaging/utils/` subpackage: `cycle_control.py`
+(`CycleController`, stop codes, `merge_return_dicts`,
+`get_per_cycle_limits`, the `get_*_from_imaging_dict` extractors,
 `format_/print_imaging_dict`), `imaging_dict.py` (`ImagingDict`, `Key`),
 `timing.py` (`accumulate_timing`), and `visibility.py`
 (`drop_auto_correlations` — the shared cross-correlation filter used by the PSF
@@ -92,7 +92,7 @@ public symbols).
 Runs the CLEAN loop of **imaging cycles**, each one **residual update**
 followed by one **model update** (the CASA names in brackets are for
 orientation only: `max_cycles` [CASA `nmajor`], `max_iter` [CASA `niter`]),
-via `IterationController`:
+via `CycleController`:
 - **Residual update** — `residual_update_cube_single_field(...)`: degrid
   model → compute residual visibilities → grid → FFT-normalize → form residual
   image (+ PSF on the first iteration), primary beam, and imaging weights

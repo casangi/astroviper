@@ -1,22 +1,22 @@
 """
-Iteration Control Module for Deconvolution Algorithms
+Cycle Control Module for Deconvolution Algorithms
 
-This module implements iteration control logic for deconvolution processes,
+This module implements cycle control logic for deconvolution processes,
 adapted from CASA's iteration control implementation in _gclean.py and
 imager_return_dict.py. It has been streamlined to work with AstroViper's
 ImagingDict structure while retaining all original functionality.
 
-Per-plane iteration control
+Per-plane cycle control
 ----------------------------
-All iteration control is performed independently for every
+All cycle control is performed independently for every
 ``(time, chan(frequency), pol)`` plane. Concretely:
 
 - ``max_iter_remaining`` is a per-plane array of remaining iterations
-  (:attr:`IterationController.max_iter_remaining`, shape ``(ntime, nchan, npol)``);
+  (:attr:`CycleController.max_iter_remaining`, shape ``(ntime, nchan, npol)``);
 - every stopping criterion (zero mask, iteration limit, threshold, residual
   entropy, imaging cycle limit, no progress) is evaluated per plane, and
   each plane carries its own stop code;
-- thresholds may differ per plane — :meth:`IterationController.per_plane_threshold_per_cycle`
+- thresholds may differ per plane — :meth:`CycleController.per_plane_threshold_per_cycle`
   produces a per-plane threshold_per_cycle array, and the deconvolvers accept
   per-plane ``max_iter_per_cycle`` and ``threshold_per_cycle`` arrays.
 
@@ -165,7 +165,7 @@ def merge_imaging_dicts(
 
     This is essential for dask workflows where each node processes a subset
     of (time, pol, chan) combinations and returns its own ImagingDict. Before
-    making iteration control decisions, we need to merge all results.
+    making cycle control decisions, we need to merge all results.
 
     Merge Strategies:
     -----------------
@@ -567,13 +567,13 @@ ENTROPY_PARAM_DEFAULTS = {
 }
 
 
-def validate_entropy_params(iteration_control_params):
-    """Entropy stop parameters of ``iteration_control_params``, with defaults.
+def validate_entropy_params(cycle_control_params):
+    """Entropy stop parameters of ``cycle_control_params``, with defaults.
 
     Parameters
     ----------
-    iteration_control_params : dict or None
-        Iteration control parameters. The keys ``entropy_stop``,
+    cycle_control_params : dict or None
+        Cycle control parameters. The keys ``entropy_stop``,
         ``entropy_max_snr``, ``entropy_spatial_bins`` and
         ``entropy_flux_bins`` are read; a missing key takes its default
         (``False``, ``6.0``, ``7`` and ``10``).
@@ -596,7 +596,7 @@ def validate_entropy_params(iteration_control_params):
         If ``entropy_stop`` is not a bool, ``entropy_max_snr`` is not a
         positive number, or a number of bins is not a positive integer.
     """
-    params = {**ENTROPY_PARAM_DEFAULTS, **(iteration_control_params or {})}
+    params = {**ENTROPY_PARAM_DEFAULTS, **(cycle_control_params or {})}
     entropy_stop = params["entropy_stop"]
     if not isinstance(entropy_stop, bool | np.bool_):
         raise ValueError(f"entropy_stop must be a bool; got {entropy_stop!r}.")
@@ -622,21 +622,21 @@ def validate_entropy_params(iteration_control_params):
 
 
 # ============================================================================
-# IterationController Class
+# CycleController Class
 # ============================================================================
 
 
-class IterationController:
+class CycleController:
     """
-    Manages iteration control logic for deconvolution algorithms.
+    Manages cycle control logic for deconvolution algorithms.
 
     The controller extracts needed statistics (peak residual, masksum, iterations
     done, etc.) from ImagingDict internally, so callers don't need to manually
     pass individual values.
 
-    Per-plane iteration control
+    Per-plane cycle control
     ---------------------------
-    All iteration control is performed independently for every
+    All cycle control is performed independently for every
     ``(time, chan(frequency), pol)`` plane. ``max_iter_remaining`` is a per-plane array,
     each plane carries its own stop code, and thresholds may differ per plane
     (:meth:`per_plane_threshold_per_cycle`). The deconvolvers are driven with
@@ -728,7 +728,7 @@ class IterationController:
         entropy_flux_bins: int = 10,
     ):
         """
-        Initialize the iteration controller with deconvolution parameters.
+        Initialize the cycle controller with deconvolution parameters.
 
         Parameters:
         -----------
@@ -924,7 +924,7 @@ class IterationController:
     def ensure_planes(self, ntime, nchan, npol):
         """Pre-allocate per-plane state for an ``(ntime, nchan, npol)`` cube.
 
-        Iteration control is performed independently for every
+        Cycle control is performed independently for every
         ``(time, chan, pol)`` plane. Callers that know the cube shape up front
         (e.g. before the first deconvolution) call this so that ``max_iter_remaining`` is a
         fully-sized per-plane array by the time the deconvolver needs it.
@@ -947,7 +947,7 @@ class IterationController:
         )
         self._ensure_shape(needed)
 
-    def calculate_cycle_controls(
+    def calculate_per_cycle_limits(
         self,
         imaging_dict: ImagingDict,
         time: int | None = None,
@@ -992,9 +992,9 @@ class IterationController:
 
         Example:
         --------
-        >>> controller = IterationController(max_iter=1000, psf_sidelobe_factor=1.5)
+        >>> controller = CycleController(max_iter=1000, psf_sidelobe_factor=1.5)
         >>> # imaging_dict populated by deconvolver and PSF analysis
-        >>> max_iter_per_cycle, threshold_per_cycle = controller.calculate_cycle_controls(imaging_dict)
+        >>> max_iter_per_cycle, threshold_per_cycle = controller.calculate_per_cycle_limits(imaging_dict)
         """
         # Extract needed values from ImagingDict
         max_psf_sidelobe = get_max_psf_sidelobe_from_imaging_dict(
@@ -1052,7 +1052,7 @@ class IterationController:
         own ``peak_residual``, the result is independent of how the cube was
         chunked across tasks. Planes not present in ``imaging_dict`` fall back to
         the representative scalar threshold_per_cycle from
-        :meth:`calculate_cycle_controls`.
+        :meth:`calculate_per_cycle_limits`.
 
         Parameters
         ----------
@@ -1070,7 +1070,7 @@ class IterationController:
         self._ensure_state(imaging_dict)
         # Representative threshold_per_cycle, used only as the fallback for any plane
         # that has no entry in imaging_dict.
-        _, fallback_threshold_per_cycle = self.calculate_cycle_controls(
+        _, fallback_threshold_per_cycle = self.calculate_per_cycle_limits(
             imaging_dict, time=time, pol=pol, chan=chan
         )
         threshold_per_cycle = np.full(
@@ -1191,7 +1191,7 @@ class IterationController:
 
         Example:
         --------
-        >>> controller = IterationController(max_iter=100, threshold=0.01)
+        >>> controller = CycleController(max_iter=100, threshold=0.01)
         >>> # After running deconvolution...
         >>> stopcode, desc = controller.check_convergence(imaging_dict)
         >>> if stopcode.imaging != 0:
@@ -1344,7 +1344,7 @@ class IterationController:
 
         Example:
         --------
-        >>> controller = IterationController(max_iter=1000, max_cycles=5)
+        >>> controller = CycleController(max_iter=1000, max_cycles=5)
         >>> # After imaging cycle completes...
         >>> controller.update_counts(imaging_dict)
         >>> # max_iter_remaining is an (ntime, nchan, npol) array, one
@@ -1393,7 +1393,7 @@ class IterationController:
         psf_sidelobe_factor: float | None = None,
     ) -> tuple[int, str]:
         """
-        Update iteration control parameters with validation.
+        Update cycle control parameters with validation.
 
         This implements CASA's interactive parameter update from _gclean.py:127-180.
         Used in interactive clean workflows.
@@ -1501,7 +1501,7 @@ class IterationController:
             raise ValueError(f"Unknown units in threshold string: {threshold_str}")
 
     def reset(self) -> None:
-        """Reset the iteration controller to initial state."""
+        """Reset the cycle controller to initial state."""
         if self.max_iter_remaining is not None:
             self.max_iter_remaining[...] = self._max_iter
             self.stop_code_imaging[...] = IMAGING_CONTINUE
@@ -1530,7 +1530,7 @@ class IterationController:
             self.entropy_stopped[...] = False
 
     def get_state(self) -> dict[str, Any]:
-        """Get current state of the iteration controller as a dictionary.
+        """Get current state of the cycle controller as a dictionary.
 
         Note: The stopcode is serialized as a dict with 'imaging' and 'model_update' keys
         to preserve the namedtuple structure across serialization.
@@ -2003,13 +2003,13 @@ def print_imaging_dict(combined_imaging_dict, float_format="{:.6g}"):
 
 
 def build_residual_imaging_dict(
-    img_xds, image_data_group_in_name, iteration_control_params
+    img_xds, image_data_group_in_name, cycle_control_params
 ):
     """Seed a per-plane :class:`ImagingDict` of peak-residual/masksum stats
     straight from the current residual image, no deconvolution involved.
 
     Used both for a pre-deconvolve convergence check and, on the first model
-    update, as the seed for :func:`calculate_cycle_controls`.
+    update, as the seed for :func:`calculate_per_cycle_limits`.
 
     Parameters
     ----------
@@ -2018,8 +2018,8 @@ def build_residual_imaging_dict(
     image_data_group_in_name : str
         Name of the entry in ``img_xds.attrs["data_groups"]`` whose
         ``"sky"`` key resolves to the residual variable.
-    iteration_control_params : dict
-        Iteration-control parameters; ``gain`` seeds the placeholder
+    cycle_control_params : dict
+        Cycle control parameters; ``gain`` seeds the placeholder
         per-plane field. With ``entropy_stop`` the entropy of the residual is
         worked out as well (``entropy_max_snr``, ``entropy_spatial_bins``,
         ``entropy_flux_bins``).
@@ -2034,7 +2034,7 @@ def build_residual_imaging_dict(
         (:func:`~astroviper.processing_functions.image_analysis.image_statistics.image_residual_entropy`).
     """
     entropy_stop, entropy_max_snr, entropy_spatial_bins, entropy_flux_bins = (
-        validate_entropy_params(iteration_control_params)
+        validate_entropy_params(cycle_control_params)
     )
     residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
     # plane by plane and block by block: no copy of the residual cube
@@ -2067,7 +2067,7 @@ def build_residual_imaging_dict(
                     "masksum": int(masksum[tt, nn, pp]),
                     "iter_done": 0,
                     "max_psf_sidelobe": float(max_psf_sidelobe_arr[tt, nn, pp]),
-                    "gain": iteration_control_params["gain"],
+                    "gain": cycle_control_params["gain"],
                 }
                 if entropy_stop:
                     fields["entropy"] = float(entropy[tt, nn, pp])
@@ -2103,12 +2103,12 @@ def copy_residual_entropy(imaging_dict, residual_imaging_dict):
                 )
 
 
-def get_calculate_cycle_controls(
+def get_per_cycle_limits(
     controller,
     combined_imaging_dict,
     img_xds,
     model_exists,
-    iteration_control_params,
+    cycle_control_params,
     image_data_group_in_name="residual",
     residual_imaging_dict=None,
 ):
@@ -2123,8 +2123,8 @@ def get_calculate_cycle_controls(
 
     Parameters
     ----------
-    controller : IterationController
-        Controller whose ``calculate_cycle_controls`` and
+    controller : CycleController
+        Controller whose ``calculate_per_cycle_limits`` and
         ``per_plane_threshold_per_cycle`` drive the result.
     combined_imaging_dict : ImagingDict
         Accumulated per-plane convergence statistics (used once a model
@@ -2133,8 +2133,8 @@ def get_calculate_cycle_controls(
         Image dataset providing the residual image for the first model update.
     model_exists : bool
         ``False`` before the first model update, ``True`` afterwards.
-    iteration_control_params : dict
-        Iteration-control parameters (``gain`` seeds the first model update).
+    cycle_control_params : dict
+        Cycle control parameters (``gain`` seeds the first model update).
     image_data_group_in_name : str, optional
         Image data group holding the residual image.  Default ``"residual"``.
     residual_imaging_dict : ImagingDict, optional
@@ -2155,7 +2155,7 @@ def get_calculate_cycle_controls(
         rd = residual_imaging_dict
         if rd is None:
             rd = build_residual_imaging_dict(
-                img_xds, image_data_group_in_name, iteration_control_params
+                img_xds, image_data_group_in_name, cycle_control_params
             )
     else:
         rd = combined_imaging_dict
@@ -2167,7 +2167,7 @@ def get_calculate_cycle_controls(
     # the per-plane remaining budget with it gives each plane
     # min(max_iter_per_cycle, its own remaining max_iter). .clip returns a
     # copy; the controller's own budget is decremented later by update_counts.
-    max_iter_per_cycle_cap, _ = controller.calculate_cycle_controls(rd)
+    max_iter_per_cycle_cap, _ = controller.calculate_per_cycle_limits(rd)
     max_iter_per_cycle = controller.max_iter_remaining.clip(max=max_iter_per_cycle_cap)
     # A plane that the entropy stop has ended is not cleaned any further while
     # the other planes of its channel carry on.

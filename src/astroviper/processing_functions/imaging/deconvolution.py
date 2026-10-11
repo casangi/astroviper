@@ -208,16 +208,16 @@ def _divergence_factors(gain):
     )
 
 
-def _per_plane_iteration_controls(deconvolve_params, nt, nf, npol, threshold_dtype):
+def _per_plane_per_cycle_limits(deconvolve_params, nt, nf, npol, threshold_dtype):
     """Build the per-plane ``max_iter_per_cycle`` and ``threshold_per_cycle`` cubes.
 
-    Iteration control is performed independently for every
+    Cycle control is performed independently for every
     ``(time, frequency, polarization)`` plane, so the deconvolvers are driven
     with a per-plane iteration limit and a per-plane stopping threshold rather
     than single scalars. ``deconvolve_params["max_iter_per_cycle"]`` and
     ``deconvolve_params["threshold_per_cycle"]`` may each be either a scalar
     (standalone calls) or an ``(nt, nf, npol)`` array (supplied by the
-    :class:`IterationController`, indexed ``(time, frequency, polarization)``).
+    :class:`CycleController`, indexed ``(time, frequency, polarization)``).
     A scalar is broadcast to every plane; an absent ``max_iter_per_cycle`` or
     a negative one falls back to ``max_iter``, and an absent
     ``threshold_per_cycle`` falls back to the absolute ``threshold``.
@@ -416,7 +416,7 @@ def create_imaging_dict(
         Optional key: ``diverged``, an ``(nt, nf, np)`` bool array of the
         planes whose model update the deconvolver stopped as diverged. Their
         ``stop_code`` placeholder carries the model update divergence code,
-        which the :class:`IterationController` keeps when it stamps the
+        which the :class:`CycleController` keeps when it stamps the
         imaging stop code.
 
     Returns
@@ -452,7 +452,7 @@ def create_imaging_dict(
     masksum = selected_calculations["masksum"]
     diverged = selected_calculations.get("diverged", None)
     if diverged is not None:
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
             IMAGING_CONTINUE,
             MODEL_UPDATE_DIVERGENCE,
             StopCode,
@@ -1017,9 +1017,9 @@ def hogbom_clean(
         mask_cube if mask_cube is not None else np.array([], dtype=residual_cube.dtype)
     )
 
-    # Per-plane iteration control: each (time, frequency, polarization) plane
+    # Per-plane cycle control: each (time, frequency, polarization) plane
     # is cleaned with its own iteration limit and threshold_per_cycle.
-    max_iter_per_cycle, threshold_per_cycle = _per_plane_iteration_controls(
+    max_iter_per_cycle, threshold_per_cycle = _per_plane_per_cycle_limits(
         deconvolve_params, nt, nf, npol_img, residual_cube.dtype
     )
 
@@ -1110,9 +1110,9 @@ def hogbom_clean_many_threads(
         mask_cube if mask_cube is not None else np.array([], dtype=residual_cube.dtype)
     )
 
-    # Per-plane iteration control: each plane has its own iteration limit and
-    # threshold_per_cycle (shared with the C++ path via _per_plane_iteration_controls).
-    max_iter_per_cycle, threshold_per_cycle = _per_plane_iteration_controls(
+    # Per-plane cycle control: each plane has its own iteration limit and
+    # threshold_per_cycle (shared with the C++ path via _per_plane_per_cycle_limits).
+    max_iter_per_cycle, threshold_per_cycle = _per_plane_per_cycle_limits(
         deconvolve_params, nt, nf, npol_img, residual_cube.dtype
     )
 
@@ -1270,10 +1270,10 @@ def asp_clean(
     else:
         mask_arg = np.array([], dtype=residual_cube.dtype)
 
-    # Per-plane iteration control: each (time, frequency, polarization) plane
+    # Per-plane cycle control: each (time, frequency, polarization) plane
     # is cleaned with its own iteration limit and threshold_per_cycle. Asp uses a
     # float64 threshold_per_cycle regardless of the image dtype.
-    max_iter_per_cycle, threshold_per_cycle = _per_plane_iteration_controls(
+    max_iter_per_cycle, threshold_per_cycle = _per_plane_per_cycle_limits(
         deconvolve_params, nt, nf, npol_img, np.float64
     )
 

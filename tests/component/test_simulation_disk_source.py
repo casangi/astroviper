@@ -139,7 +139,7 @@ def test_protoplanetary_disk_is_simulated_and_recovered(
             "robust": 0.5,
             "casa_weighting_implementation": True,
         },
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": max_iter,
             "max_cycles": -1,
             "threshold": 1e-4,

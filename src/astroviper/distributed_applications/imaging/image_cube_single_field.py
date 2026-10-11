@@ -52,7 +52,7 @@ def image_cube_single_field(
     image_store: str,
     image_params: dict[str, Any],
     imaging_weights_params: dict[str, Any],
-    iteration_control_params: dict[str, Any],
+    cycle_control_params: dict[str, Any],
     gridder="prolate_spheroidal",
     deconvolver="hogbom",
     instrument_polarization_basis: str = "linear",
@@ -136,8 +136,8 @@ def image_cube_single_field(
     imaging_weights_params : dict
         Weighting scheme configuration: ``weighting`` (``"natural"`` or
         ``"briggs"``) and the Briggs ``robust`` parameter.
-    iteration_control_params : dict
-        CLEAN iteration controls. An **imaging cycle** (below simply a cycle)
+    cycle_control_params : dict
+        CLEAN cycle controls. An **imaging cycle** (below simply a cycle)
         is one **residual update** (degrid the model, form residual
         visibilities, grid and inverse FFT them into the residual image)
         followed by one **model update** (deconvolve the residual image into
@@ -760,7 +760,7 @@ def image_cube_single_field(
     input_params["write_imaging_weights_to_ps"] = write_imaging_weights_to_ps
     input_params["clear_cache"] = clear_cache
     input_params["processing_function_threads"] = processing_function_threads
-    input_params["iteration_control_params"] = iteration_control_params
+    input_params["cycle_control_params"] = cycle_control_params
     input_params["gridder"] = gridder
     input_params["deconvolver"] = deconvolver
     input_params["instrument_polarization_basis"] = instrument_polarization_basis
@@ -1095,7 +1095,7 @@ def combine_return_data_frames(input_data, input_params):
     from astroviper.processing_functions.image_analysis.plane_statistics import (
         concatenate_plane_statistics,
     )
-    from astroviper.processing_functions.imaging.utils.iteration_control import (
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
         merge_imaging_dicts,
     )
 

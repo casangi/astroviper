@@ -121,7 +121,7 @@ def test_gaussian_and_point_source_fluxes_recovered(tmp_path):
             "robust": 0.5,
             "casa_weighting_implementation": True,
         },
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": 3000,
             "max_cycles": -1,
             "threshold": 2e-4,

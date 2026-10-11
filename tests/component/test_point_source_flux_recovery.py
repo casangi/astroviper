@@ -1,7 +1,7 @@
 """Component test: CLEAN flux recovery for a field of point sources (ALMA, compact array).
 
 The scenario exercises the whole imaging cycle (residual updates in the
-instrument basis, model updates in Stokes, iteration control, primary-beam
+instrument basis, model updates in Stokes, cycle control, primary-beam
 correction) on data whose truth is known exactly:
 
 * ALMA in its most compact 12 m configuration (``alma.cycle8.1``: 43 antennas,
@@ -23,8 +23,8 @@ correction) on data whose truth is known exactly:
   modes of the imager are run: the two parallel hands ``XX, YY`` give Stokes
   ``I, Q`` and all four correlations give ``I, Q, U, V``.
 * The imaging parameters are the ones that reproduce the truth best in a scan
-  of the iteration controls and the FFT padding (see
-  :func:`iteration_control_params`): an FFT padding of 2, short model updates
+  of the cycle controls and the FFT padding (see
+  :func:`cycle_control_params`): an FFT padding of 2, short model updates
   and a stopping threshold at the numerical floor of the imaging cycle, which
   is set by the gridding and lies near ``3e-6`` of the brightest source.
 
@@ -55,7 +55,7 @@ Imaging ``I, Q`` from the four-correlation processing set must load only the
 parallel hands and reproduce the image of the two-hand data.
 
 With thermal noise added to the visibilities the entropy stop of the
-iteration control (``entropy_stop``) must end the clean of every plane where
+cycle control (``entropy_stop``) must end the clean of every plane where
 the residual looks most like noise: with a residual at the level of the
 thermal noise, and with a restored image as close to the truth as the noise
 allows.
@@ -70,7 +70,7 @@ and the gridding kernel (``C8_KERNEL``, the exponential of a semicircle of
 support 7 with linear lookup in a table of 300 samples per cell) lies below
 a third of it. The floor is measured, not assumed: the residual one residual
 update leaves for the true model (the oracle). The controls come from
-``alma_iteration_control_params`` (threshold 1.2 times the masked peak of the
+``alma_cycle_control_params`` (threshold 1.2 times the masked peak of the
 oracle); every plane must stop on the threshold within the predicted number
 of cycles plus two, with the residual and the error image at the oracle's
 floor and nothing of it absorbed into the model. With typical Band 10 noise
@@ -103,17 +103,17 @@ from astroviper.distributed_applications.imaging import image_cube_single_field
 from astroviper.processing_functions.imaging.restore import (
     _elliptical_gaussian_kernel,
 )
-from astroviper.processing_functions.imaging.utils.imaging_dict import (
-    imaging_dict_to_dataframe,
-)
-from astroviper.processing_functions.imaging.utils.iteration_control import (
+from astroviper.processing_functions.imaging.utils.cycle_control import (
     IMAGING_ENTROPY,
     IMAGING_THRESHOLD,
 )
-from astroviper.processing_functions.imaging.utils.iteration_control_heuristics import (
-    alma_iteration_control_params,
+from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
+    alma_cycle_control_params,
     predicted_imaging_cycles,
     psf_fraction,
+)
+from astroviper.processing_functions.imaging.utils.imaging_dict import (
+    imaging_dict_to_dataframe,
 )
 from astroviper.processing_functions.simulation.antenna_beams import (
     casa_airy_disk_response,
@@ -159,7 +159,7 @@ POLARIZATION_MODES = {
 }
 # RA = local sidereal time at ALMA one hour into the track (16h18m), Dec at the zenith
 PHASE_CENTER = np.array([4.267, np.deg2rad(-23.0)])
-# imaging parameters of the best deconvolution (see iteration_control_params)
+# imaging parameters of the best deconvolution (see cycle_control_params)
 FFT_PADDING = 2.0
 THRESHOLD = 3.3e-6  # Jy, for F_MAX = 1 Jy: the numerical floor of the imaging cycle
 MAX_ITER_PER_CYCLE = 300
@@ -409,8 +409,8 @@ def simulate(
     return ps_store, truth_store
 
 
-def iteration_control_params(dynamic_range):
-    """The iteration controls that reproduce the truth best.
+def cycle_control_params(dynamic_range):
+    """The cycle controls that reproduce the truth best.
 
     A scan of the controls on this field (restored image against the truth
     convolved with the clean beam, and the fluxes at the source positions)
@@ -460,7 +460,7 @@ def image(
 ):
     """Hogbom CLEAN at double precision with restore and PB correction, in the Stokes planes of ``mode``.
 
-    ``controls`` replaces the iteration controls of :func:`iteration_control_params`.
+    ``controls`` replaces the cycle controls of :func:`cycle_control_params`.
     """
     ps_xdt = open_processing_set(ps_store)
     combined = ps_xdt.xr_ps.get_combined_field_and_source_xds()
@@ -481,13 +481,13 @@ def image(
     }
     image_store = f"{work_dir}/{tag}.img.zarr"
     if controls is None:
-        controls = iteration_control_params(dynamic_range)
+        controls = cycle_control_params(dynamic_range)
     result = image_cube_single_field(
         ps_store=ps_store,
         image_store=image_store,
         image_params=image_params,
         imaging_weights_params=IMAGING_WEIGHTS_PARAMS,
-        iteration_control_params=controls,
+        cycle_control_params=controls,
         instrument_polarization_basis="linear",
         gridder="prolate_spheroidal",
         gridding_kernel_params=gridding_kernel_params,
@@ -828,7 +828,7 @@ def test_entropy_stop_with_thermal_noise(tmp_path):
     sigma = 1.0 / np.sqrt(np.nanmax(ms_xdt.WEIGHT.values))
     n_visibilities = ms_xdt.sizes["time"] * ms_xdt.sizes["baseline_id"]
     thermal_noise = sigma / np.sqrt(2 * n_visibilities)
-    controls = iteration_control_params(1e3)
+    controls = cycle_control_params(1e3)
     controls.update(
         {
             "threshold": 0.0,
@@ -1109,13 +1109,13 @@ def run_c8(work_dir, size, w_term, noise):
         reference = sigma / np.sqrt(
             2 * ms_xdt.sizes["time"] * ms_xdt.sizes["baseline_id"]
         )
-        controls = alma_iteration_control_params(
+        controls = alma_cycle_control_params(
             oracle["max_psf_sidelobe"], oracle["dirty_peak"], 0.0, noisy=True,
             thermal_noise=reference,
         )  # fmt: skip
     else:
         reference = C8_THRESHOLD_FACTOR * oracle_floors["peak"]
-        controls = alma_iteration_control_params(
+        controls = alma_cycle_control_params(
             oracle["max_psf_sidelobe"], oracle["dirty_peak"], reference
         )
     tracemalloc.start()

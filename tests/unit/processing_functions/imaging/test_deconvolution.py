@@ -32,14 +32,14 @@ from astroviper.processing_functions.imaging.deconvolution import (
     hogbom_clean,
     hogbom_clean_many_threads,
 )
-from astroviper.processing_functions.imaging.utils.imaging_dict import ImagingDict
-from astroviper.processing_functions.imaging.utils.iteration_control import (
+from astroviper.processing_functions.imaging.utils.cycle_control import (
     IMAGING_CONTINUE,
     MODEL_UPDATE_CONTINUE,
     MODEL_UPDATE_DIVERGENCE,
-    IterationController,
+    CycleController,
     StopCode,
 )
+from astroviper.processing_functions.imaging.utils.imaging_dict import ImagingDict
 
 try:
     from astroviper.processing_functions.imaging.deconvolvers import (  # noqa: F401
@@ -702,7 +702,7 @@ class TestDeconvolveReportsDivergence:
         assert entry["stop_code"] == StopCode(IMAGING_CONTINUE, MODEL_UPDATE_DIVERGENCE)
         # ... and kept by the controller, which lets the imaging cycles go on:
         # the next residual update recomputes the true residual.
-        controller = IterationController(max_iter=40, threshold=0.0, gain=0.5)
+        controller = CycleController(max_iter=40, threshold=0.0, gain=0.5)
         controller.update_counts(imaging_dict)
         stopcode, _ = controller.check_convergence(imaging_dict, model_update_ran=True)
         assert stopcode.imaging == IMAGING_CONTINUE
@@ -718,7 +718,7 @@ class TestDeconvolveReportsDivergence:
         )
         (entry,) = imaging_dict.data.values()
         assert entry["stop_code"] is None
-        controller = IterationController(max_iter=40, threshold=0.0, gain=0.5)
+        controller = CycleController(max_iter=40, threshold=0.0, gain=0.5)
         controller.check_convergence(imaging_dict, model_update_ran=True)
         assert entry["stop_code"].model_update == MODEL_UPDATE_CONTINUE
 

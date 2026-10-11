@@ -7,7 +7,7 @@ def imaging_preparation_single_field(
     img_xds,
     image_params,
     imaging_weights_params,
-    iteration_control_params,
+    cycle_control_params,
     processing_set_data_group_name="corrected",
     single_precision_image=True,
     processing_function_threads=1,
@@ -22,7 +22,7 @@ def imaging_preparation_single_field(
 
     Everything that is done a single time per chunk happens here:
 
-    * construction of the :class:`IterationController` and the (empty) combined
+    * construction of the :class:`CycleController` and the (empty) combined
       return dict, and
     * the imaging weights, the point spread function and the primary beam (via
       :func:`~astroviper.processing_functions.imaging.residual_update.imaging_setup_single_field`).
@@ -46,8 +46,8 @@ def imaging_preparation_single_field(
     imaging_weights_params : dict
         Weighting scheme configuration: ``weighting`` (``"natural"`` or
         ``"briggs"``) and the Briggs ``robust`` parameter.
-    iteration_control_params : dict
-        CLEAN iteration controls. An **imaging cycle** (below simply a cycle)
+    cycle_control_params : dict
+        CLEAN cycle controls. An **imaging cycle** (below simply a cycle)
         is one **residual update** (degrid the model, form residual
         visibilities, grid and inverse FFT them into the residual image)
         followed by one **model update** (deconvolve the residual image into
@@ -207,7 +207,7 @@ def imaging_preparation_single_field(
         Identifier of the parallel chunk being processed.
     Returns
     -------
-    controller : IterationController
+    controller : CycleController
         Freshly constructed controller (``stopcode.imaging == 0``).
     img_xds : xarray.Dataset
         Image dataset with the PSF and primary beam, in the Stokes basis.
@@ -226,8 +226,8 @@ def imaging_preparation_single_field(
         imaging_setup_single_field,
     )
     from astroviper.processing_functions.imaging.utils import (
+        CycleController,
         ImagingDict,
-        IterationController,
         validate_entropy_params,
     )
 
@@ -235,17 +235,17 @@ def imaging_preparation_single_field(
 
     # The entropy stop is optional: its keys take their defaults when absent.
     entropy_stop, entropy_max_snr, entropy_spatial_bins, entropy_flux_bins = (
-        validate_entropy_params(iteration_control_params)
+        validate_entropy_params(cycle_control_params)
     )
-    controller = IterationController(
-        max_iter=iteration_control_params["max_iter"],
-        max_cycles=iteration_control_params["max_cycles"],
-        threshold=iteration_control_params["threshold"],
-        gain=iteration_control_params["gain"],
-        psf_sidelobe_factor=iteration_control_params["psf_sidelobe_factor"],
-        min_psf_fraction=iteration_control_params["min_psf_fraction"],
-        max_psf_fraction=iteration_control_params["max_psf_fraction"],
-        max_iter_per_cycle=iteration_control_params["max_iter_per_cycle"],
+    controller = CycleController(
+        max_iter=cycle_control_params["max_iter"],
+        max_cycles=cycle_control_params["max_cycles"],
+        threshold=cycle_control_params["threshold"],
+        gain=cycle_control_params["gain"],
+        psf_sidelobe_factor=cycle_control_params["psf_sidelobe_factor"],
+        min_psf_fraction=cycle_control_params["min_psf_fraction"],
+        max_psf_fraction=cycle_control_params["max_psf_fraction"],
+        max_iter_per_cycle=cycle_control_params["max_iter_per_cycle"],
         entropy_stop=entropy_stop,
         entropy_max_snr=entropy_max_snr,
         entropy_spatial_bins=entropy_spatial_bins,
@@ -281,7 +281,7 @@ def image_cube_single_field(
     img_xds,
     image_params,
     imaging_weights_params,
-    iteration_control_params,
+    cycle_control_params,
     processing_set_data_group_name="corrected",
     deconvolver="hogbom",
     instrument_polarization_basis="linear",
@@ -300,7 +300,7 @@ def image_cube_single_field(
 
     Performs the once-per-chunk setup (imaging weights, PSF, primary beam), then
     iterates imaging cycles (a residual update followed by a model update) under the
-    :class:`IterationController` until convergence, finishing with a last
+    :class:`CycleController` until convergence, finishing with a last
     residual update that produces the final residual image.  Every processing
     function is timed; the totals are returned as a one-row timing frame.
 
@@ -327,8 +327,8 @@ def image_cube_single_field(
     imaging_weights_params : dict
         Weighting scheme configuration: ``weighting`` (``"natural"`` or
         ``"briggs"``) and the Briggs ``robust`` parameter.
-    iteration_control_params : dict
-        CLEAN iteration controls. An **imaging cycle** (below simply a cycle)
+    cycle_control_params : dict
+        CLEAN cycle controls. An **imaging cycle** (below simply a cycle)
         is one **residual update** (degrid the model, form residual
         visibilities, grid and inverse FFT them into the residual image)
         followed by one **model update** (deconvolve the residual image into
@@ -544,7 +544,7 @@ def image_cube_single_field(
         accumulate_timing,
         build_residual_imaging_dict,
         copy_residual_entropy,
-        get_calculate_cycle_controls,
+        get_per_cycle_limits,
         merge_imaging_dicts,
     )
 
@@ -566,7 +566,7 @@ def image_cube_single_field(
         img_xds,
         image_params,
         imaging_weights_params,
-        iteration_control_params,
+        cycle_control_params,
         processing_set_data_group_name=processing_set_data_group_name,
         single_precision_image=single_precision_image,
         processing_function_threads=processing_function_threads,
@@ -587,12 +587,12 @@ def image_cube_single_field(
     timing = {"T_prep": T_setup}
     accumulate_timing(timing, setup_return_df, phase="prep")
 
-    # Phase totals plus the two model-phase leaves measured here: iteration
+    # Phase totals plus the two model-phase leaves measured here: cycle
     # control and the convergence/merge bookkeeping run in this loop (not inside
     # a processing function), so they are timed inline.
     timing["T_residual_update"] = 0.0
     timing["T_model_update"] = 0.0
-    timing["T_iteration_control"] = 0.0
+    timing["T_cycle_control"] = 0.0
     timing["T_convergence"] = 0.0
 
     model_exists = False
@@ -623,15 +623,15 @@ def image_cube_single_field(
         residual_imaging_dict = build_residual_imaging_dict(
             img_xds,
             image_data_group_in_name="residual",
-            iteration_control_params=iteration_control_params,
+            cycle_control_params=cycle_control_params,
         )
         pre_stopcode, pre_stopdesc = controller.check_convergence(residual_imaging_dict)
 
-        # ---- Model-update phase (iteration control + deconvolve + convergence) ----
+        # ---- Model-update phase (cycle control + deconvolve + convergence) ----
         model_phase_start = time.time()
-        if pre_stopcode.imaging == 0 and iteration_control_params["max_iter"] > 0:
+        if pre_stopcode.imaging == 0 and cycle_control_params["max_iter"] > 0:
             logger.debug("Doing model update")
-            # Size the controller's per-plane state to this cube so iteration
+            # Size the controller's per-plane state to this cube so cycle
             # control (max_iter and threshold) is tracked independently for every
             # (time, frequency, polarization) plane before the deconvolver runs.
             start = time.time()
@@ -640,18 +640,18 @@ def image_cube_single_field(
                 img_xds.sizes["frequency"],
                 img_xds.sizes["polarization"],
             )
-            max_iter_per_cycle, threshold_per_cycle = get_calculate_cycle_controls(
+            max_iter_per_cycle, threshold_per_cycle = get_per_cycle_limits(
                 controller,
                 combined_imaging_dict,
                 img_xds,
                 model_exists,
-                iteration_control_params=iteration_control_params,
+                cycle_control_params=cycle_control_params,
                 residual_imaging_dict=residual_imaging_dict,
             )
-            timing["T_iteration_control"] += time.time() - start
+            timing["T_cycle_control"] += time.time() - start
 
             # Per-cycle deconvolution parameters as a fresh dict (the shared
-            # iteration_control_params is never mutated). ``threshold`` stays
+            # cycle_control_params is never mutated). ``threshold`` stays
             # the absolute user stopping threshold (the floor); the per-plane
             # ``max_iter_per_cycle`` (min(max_iter_per_cycle, remaining max_iter)
             # for every plane) and ``threshold_per_cycle`` arrays drive the
@@ -659,7 +659,7 @@ def image_cube_single_field(
             # handed the whole remaining budget and, with threshold_per_cycle 0,
             # spend all of max_iter at once, collapsing the run to one cycle.
             deconvolve_params = {
-                **iteration_control_params,
+                **cycle_control_params,
                 "max_iter_per_cycle": max_iter_per_cycle,
                 "threshold_per_cycle": threshold_per_cycle,
             }
@@ -710,7 +710,7 @@ def image_cube_single_field(
         )
         timing["T_convergence"] += time.time() - start
 
-        # Model-update phase total: iteration control + deconvolve +
+        # Model-update phase total: cycle control + deconvolve +
         # convergence (everything done after each residual update).
         timing["T_model_update"] += time.time() - model_phase_start
 
@@ -751,7 +751,7 @@ def image_cube_single_field(
     # blanking cutoff when set, else the CASA pblimit default of 0.2.
     timing["T_correct_sky_by_primary_beam"] = 0.0
     correct = (
-        primary_beam_correction and restore and iteration_control_params["max_iter"] > 0
+        primary_beam_correction and restore and cycle_control_params["max_iter"] > 0
     )
     if restore and model_exists:
         from astroviper.processing_functions.imaging.restore import restore_image
@@ -768,7 +768,7 @@ def image_cube_single_field(
             consume_model="sky_model" not in image_data_variables_keep,
             primary_beam_correction=correct,
             primary_beam_limit=(
-                iteration_control_params.get("primary_beam_limit", 0.0) or 0.2
+                cycle_control_params.get("primary_beam_limit", 0.0) or 0.2
             ),
         )
         accumulate_timing(timing, restore_return_df)

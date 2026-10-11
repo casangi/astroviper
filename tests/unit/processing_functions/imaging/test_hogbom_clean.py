@@ -577,7 +577,7 @@ def _point_sources_cube(nt, nf, npol, ny, nx, per_plane_sources, dtype=np.float3
 def _plane_iters(residual_cube, value):
     """Per-plane ``max_iter`` array for ``clean_cube``.
 
-    Iteration control is independent per (time, frequency, polarization)
+    Cycle control is independent per (time, frequency, polarization)
     plane: ``max_iter`` is an int32 array of shape ``(nt, nf, np)``.
     """
     return np.full(residual_cube.shape[:3], value, dtype=np.int32)

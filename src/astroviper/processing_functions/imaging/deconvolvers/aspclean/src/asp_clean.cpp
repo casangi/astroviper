@@ -1013,7 +1013,7 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
             const std::size_t psf_off =
                 ((static_cast<std::size_t>(tt) * nf + nn) * np_psf + pidx) * plane;
             const T* maskp = mask ? mask + img_off : nullptr;
-            // Iteration control is independent per plane: each (t, f, p)
+            // Cycle control is independent per plane: each (t, f, p)
             // plane uses its own threshold and iteration limit.
             results[p] = aspclean_plane<T>(residual + img_off, model + img_off,
                                            psf + psf_off, maskp, nx, ny, gain,

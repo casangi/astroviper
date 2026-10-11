@@ -136,7 +136,7 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
         mask_ptr = static_cast<const T*>(ki.ptr);
     }
 
-    // Per-plane iteration control: threshold (float64) and max_iter_remaining (int32) are
+    // Per-plane cycle control: threshold (float64) and max_iter_remaining (int32) are
     // (nt, nf, np_img) arrays so every (time, frequency, polarization) plane
     // is cleaned with its own threshold and iteration limit.
     const std::vector<py::ssize_t> cshp = {nt, nf, np_img};
@@ -282,7 +282,7 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           "Run the Asp model update independently on every (time, frequency, "
           "polarization) plane of a 5D cube in place, across processing_function_threads worker "
           "threads. The PSF cube may be single-polarization (broadcast). "
-          "Iteration control is independent per plane: threshold (float64) and "
+          "Cycle control is independent per plane: threshold (float64) and "
           "max_iter_remaining (int32) are (nt, nf, np) arrays giving each plane its own "
           "threshold and iteration limit. Returns per-plane arrays of shape "
           "(nt, nf, np).",

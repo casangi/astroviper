@@ -70,7 +70,7 @@ AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
 // worker threads. The PSF cube may have np_psf == np_img or np_psf == 1
 // (Stokes-I broadcast). `results` must have length nt*nf*np_img.
 //
-// Iteration control is independent per plane: `threshold` and `max_iter_remaining` are
+// Cycle control is independent per plane: `threshold` and `max_iter_remaining` are
 // per-plane arrays of length nt*nf*np_img in (t, f, p) C-order, so every
 // (time, frequency, polarization) plane is cleaned with its own threshold
 // and iteration limit.

@@ -282,7 +282,7 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
 
             int iter_val = 0;
             int reason = STOP_NONE;
-            // Iteration control is independent per plane: each (t, f, p)
+            // Cycle control is independent per plane: each (t, f, p)
             // plane uses its own maximum iteration count and threshold, and
             // its own divergence state.
             clean<T>(model, residual, psf,

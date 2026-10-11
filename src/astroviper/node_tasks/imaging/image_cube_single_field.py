@@ -482,7 +482,7 @@ def _combine_channel_timing_frames(timing_frames):
 def image_cube_single_field(
     image_params,
     imaging_weights_params,
-    iteration_control_params,
+    cycle_control_params,
     task_coords,
     data_selection,
     image_store,
@@ -551,8 +551,8 @@ def image_cube_single_field(
     imaging_weights_params : dict
         Weighting scheme configuration: ``weighting`` (``"natural"`` or
         ``"briggs"``) and the Briggs ``robust`` parameter.
-    iteration_control_params : dict
-        CLEAN iteration controls. An **imaging cycle** (below simply a cycle)
+    cycle_control_params : dict
+        CLEAN cycle controls. An **imaging cycle** (below simply a cycle)
         is one **residual update** (degrid the model, form residual
         visibilities, grid and inverse FFT them into the residual image)
         followed by one **model update** (deconvolve the residual image into
@@ -994,7 +994,7 @@ def image_cube_single_field(
     from astroviper.processing_functions.image_analysis.plane_statistics import (
         calculate_plane_statistics,
     )
-    from astroviper.processing_functions.imaging.utils.iteration_control import (
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
         merge_imaging_dicts,
     )
     from astroviper.utils.data_tree import clear_cached_accessors, release_data_tree
@@ -1019,7 +1019,7 @@ def image_cube_single_field(
     # Masked statistics use the clean MASK when present; a max_iter=0 run has
     # none, so the fallback mask PRIMARY_BEAM > primary_beam_limit (the same
     # valid-sky cutoff the deconvolver would use) applies.
-    primary_beam_limit = iteration_control_params.get("primary_beam_limit", 0.2)
+    primary_beam_limit = cycle_control_params.get("primary_beam_limit", 0.2)
     frequency_maps = _visibility_to_image_frequency_maps(ps_xdt, img_xds)
     timing_frames = []
     imaging_dicts = []
@@ -1053,7 +1053,7 @@ def image_cube_single_field(
             img_chan,
             image_params,
             imaging_weights_params,
-            iteration_control_params,
+            cycle_control_params,
             processing_set_data_group_name=processing_set_data_group_name,
             deconvolver=deconvolver,
             instrument_polarization_basis=instrument_polarization_basis,

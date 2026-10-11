@@ -92,7 +92,7 @@ def image(tmp_path, ps_store, name):
             "robust": 0.5,
             "casa_weighting_implementation": True,
         },
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": 0,
             "max_cycles": 0,
             "threshold": 0.0,

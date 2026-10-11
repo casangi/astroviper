@@ -103,7 +103,7 @@ static py::buffer_info validate_inplace_cube(py::array& arr,
  * (nt, nf, np_dim), and C-contiguous. Returns the buffer_info so the caller
  * can extract the raw pointer (length nt*nf*np_dim in (t, f, p) C-order)
  * without any copy. Used for the per-plane max_iter_remaining and threshold arrays so
- * that iteration control is independent for each (time, frequency,
+ * that cycle control is independent for each (time, frequency,
  * polarization) plane.
  */
 template<typename U>
@@ -455,7 +455,7 @@ py::dict hclean_cube_impl(
         yend = std::max(ybeg + 1, std::min(yend, ny));
     }
 
-    // Per-plane iteration control: max_iter_remaining (int32) and threshold (T) are
+    // Per-plane cycle control: max_iter_remaining (int32) and threshold (T) are
     // (nt, nf, np_img) arrays so every (time, frequency, polarization) plane
     // is cleaned with its own iteration limit and threshold.
     py::buffer_info max_iter_info = validate_per_plane_array<int>(
@@ -759,7 +759,7 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           "cube, parallelized across planes with std::thread. The "
           "residual and model cubes are modified in place; the PSF cube "
           "may be single-polarization to broadcast across image pols. "
-          "Iteration control is independent per plane: max_iter_remaining and "
+          "Cycle control is independent per plane: max_iter_remaining and "
           "threshold are (nt, nf, np) arrays (int32 and matching the image "
           "dtype respectively) giving each (time, frequency, polarization) "
           "plane its own iteration limit and threshold. A plane stops when "

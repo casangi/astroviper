@@ -1,10 +1,10 @@
 """
-Unit tests for the iteration control module.
+Unit tests for the cycle control module.
 
 Tests cover:
 - ImagingDict core functionality (initialization, add, sel, to_dict, repr)
 - ImagingDict utility functions (merge, extraction)
-- IterationController initialization and parameter validation
+- CycleController initialization and parameter validation
 - Adaptive threshold_per_cycle calculation
 - Convergence checking with all stop codes
 - Count updates and state management
@@ -17,20 +17,14 @@ import unittest
 import numpy as np
 import xarray as xr
 
-from astroviper.processing_functions.imaging.utils.imaging_dict import (
-    FIELD_ACCUM,
-    FIELD_SINGLE_VALUE,
-    ImagingDict,
-    Key,
-)
-from astroviper.processing_functions.imaging.utils.iteration_control import (  # Stop codes; Utility functions; Main class
+from astroviper.processing_functions.imaging.utils.cycle_control import (  # Stop codes; Utility functions; Main class
     IMAGING_CONTINUE,
     IMAGING_MAX_CYCLES,
     IMAGING_MAX_ITER,
     IMAGING_THRESHOLD,
     IMAGING_ZERO_MASK,
     MODEL_UPDATE_CONTINUE,
-    IterationController,
+    CycleController,
     StopCode,
     build_residual_imaging_dict,
     get_iterations_done_from_imaging_dict,
@@ -39,6 +33,12 @@ from astroviper.processing_functions.imaging.utils.iteration_control import (  #
     get_model_flux_from_imaging_dict,
     get_peak_residual_from_imaging_dict,
     merge_imaging_dicts,
+)
+from astroviper.processing_functions.imaging.utils.imaging_dict import (
+    FIELD_ACCUM,
+    FIELD_SINGLE_VALUE,
+    ImagingDict,
+    Key,
 )
 
 # =============================================================================
@@ -775,12 +775,12 @@ class TestImagingDictUtilities(unittest.TestCase):
         self.assertEqual(masksum, 0.0)
 
 
-class TestIterationControllerInitialization(unittest.TestCase):
-    """Test IterationController initialization and default values."""
+class TestCycleControllerInitialization(unittest.TestCase):
+    """Test CycleController initialization and default values."""
 
     def test_default_initialization(self):
         """Test controller with all default parameters."""
-        controller = IterationController()
+        controller = CycleController()
 
         # max_iter is a per-plane array allocated lazily; _max_iter holds the
         # scalar per-plane budget until the first ImagingDict is seen.
@@ -806,7 +806,7 @@ class TestIterationControllerInitialization(unittest.TestCase):
 
     def test_custom_initialization(self):
         """Test controller with custom parameters."""
-        controller = IterationController(
+        controller = CycleController(
             max_iter=500,
             max_cycles=10,
             threshold=0.01,
@@ -830,12 +830,12 @@ class TestIterationControllerInitialization(unittest.TestCase):
         self.assertEqual(controller.threshold_sigma, 5.0)
 
 
-class TestCalculateCycleControls(unittest.TestCase):
+class TestCalculatePerCycleLimits(unittest.TestCase):
     """Test adaptive threshold_per_cycle calculation."""
 
     def setUp(self):
         """Create controller and test ImagingDict."""
-        self.controller = IterationController(
+        self.controller = CycleController(
             max_iter=1000,
             psf_sidelobe_factor=1.5,
             min_psf_fraction=0.05,
@@ -853,7 +853,7 @@ class TestCalculateCycleControls(unittest.TestCase):
         )
 
         max_iter_per_cycle, threshold_per_cycle = (
-            self.controller.calculate_cycle_controls(rd)
+            self.controller.calculate_per_cycle_limits(rd)
         )
 
         # Expected: psf_fraction = 1.5 × 0.2 = 0.3
@@ -873,7 +873,7 @@ class TestCalculateCycleControls(unittest.TestCase):
         )
 
         max_iter_per_cycle, threshold_per_cycle = (
-            self.controller.calculate_cycle_controls(rd)
+            self.controller.calculate_per_cycle_limits(rd)
         )
 
         # psf_fraction = 1.5 × 0.01 = 0.015
@@ -893,7 +893,7 @@ class TestCalculateCycleControls(unittest.TestCase):
         )
 
         max_iter_per_cycle, threshold_per_cycle = (
-            self.controller.calculate_cycle_controls(rd)
+            self.controller.calculate_per_cycle_limits(rd)
         )
 
         # psf_fraction = 1.5 × 0.9 = 1.35
@@ -903,7 +903,7 @@ class TestCalculateCycleControls(unittest.TestCase):
 
     def test_threshold_per_cycle_respects_global_threshold(self):
         """Test threshold_per_cycle respects global threshold as minimum."""
-        controller = IterationController(
+        controller = CycleController(
             max_iter=1000,
             threshold=0.5,  # High global threshold
             psf_sidelobe_factor=1.0,
@@ -917,7 +917,7 @@ class TestCalculateCycleControls(unittest.TestCase):
             chan=0,
         )
 
-        max_iter_per_cycle, threshold_per_cycle = controller.calculate_cycle_controls(
+        max_iter_per_cycle, threshold_per_cycle = controller.calculate_per_cycle_limits(
             rd
         )
 
@@ -928,7 +928,7 @@ class TestCalculateCycleControls(unittest.TestCase):
 
     def test_max_iter_per_cycle_cap_applied(self):
         """Test max_iter_per_cycle cap is applied."""
-        controller = IterationController(
+        controller = CycleController(
             max_iter=1000,
             max_iter_per_cycle=100,  # Cap at 100 per cycle
         )
@@ -941,7 +941,7 @@ class TestCalculateCycleControls(unittest.TestCase):
             chan=0,
         )
 
-        max_iter_per_cycle, threshold_per_cycle = controller.calculate_cycle_controls(
+        max_iter_per_cycle, threshold_per_cycle = controller.calculate_per_cycle_limits(
             rd
         )
 
@@ -950,7 +950,7 @@ class TestCalculateCycleControls(unittest.TestCase):
 
     def test_max_iter_per_cycle_respects_remaining_iterations(self):
         """Test max_iter_per_cycle respects remaining max_iter."""
-        controller = IterationController(
+        controller = CycleController(
             max_iter=50,  # Only 50 iterations left
             max_iter_per_cycle=100,
         )
@@ -963,7 +963,7 @@ class TestCalculateCycleControls(unittest.TestCase):
             chan=0,
         )
 
-        max_iter_per_cycle, threshold_per_cycle = controller.calculate_cycle_controls(
+        max_iter_per_cycle, threshold_per_cycle = controller.calculate_per_cycle_limits(
             rd
         )
 
@@ -981,7 +981,7 @@ class TestCalculateCycleControls(unittest.TestCase):
         )
 
         max_iter_per_cycle, threshold_per_cycle = (
-            self.controller.calculate_cycle_controls(rd)
+            self.controller.calculate_per_cycle_limits(rd)
         )
 
         # Should use default 0.2
@@ -1043,7 +1043,7 @@ class TestBuildResidualImagingDict(unittest.TestCase):
                 "max_psf_fraction": max_psf_fraction,
             },
         )
-        controller = IterationController(
+        controller = CycleController(
             max_iter=100,
             psf_sidelobe_factor=psf_sidelobe_factor,
             min_psf_fraction=0.05,
@@ -1051,7 +1051,7 @@ class TestBuildResidualImagingDict(unittest.TestCase):
             threshold=0.0,
         )
 
-        _, threshold_per_cycle = controller.calculate_cycle_controls(rd)
+        _, threshold_per_cycle = controller.calculate_per_cycle_limits(rd)
 
         self.assertAlmostEqual(
             threshold_per_cycle, real_sidelobe * psf_sidelobe_factor * residual_peak
@@ -1064,7 +1064,7 @@ class TestCheckConvergence(unittest.TestCase):
 
     def test_continue_when_not_converged(self):
         """Test continuing when no stopping criteria met."""
-        controller = IterationController(
+        controller = CycleController(
             max_iter=1000,
             threshold=0.01,
         )
@@ -1085,7 +1085,7 @@ class TestCheckConvergence(unittest.TestCase):
 
     def test_stop_on_zero_mask(self):
         """Test stopping when mask is zero (priority 1)."""
-        controller = IterationController(max_iter=1000)
+        controller = CycleController(max_iter=1000)
 
         rd = ImagingDict()
         rd.add(
@@ -1102,7 +1102,7 @@ class TestCheckConvergence(unittest.TestCase):
 
     def test_stop_on_iteration_limit(self):
         """Test stopping when max_iter exhausted (priority 2)."""
-        controller = IterationController(max_iter=0)  # No iterations left
+        controller = CycleController(max_iter=0)  # No iterations left
 
         rd = ImagingDict()
         rd.add(
@@ -1119,7 +1119,7 @@ class TestCheckConvergence(unittest.TestCase):
 
     def test_stop_on_threshold(self):
         """Test stopping when threshold reached (priority 3)."""
-        controller = IterationController(
+        controller = CycleController(
             max_iter=1000,
             threshold=0.5,  # Set threshold
         )
@@ -1139,7 +1139,7 @@ class TestCheckConvergence(unittest.TestCase):
 
     def test_threshold_exactly_at_limit(self):
         """Test stopping when peak residual exactly equals threshold."""
-        controller = IterationController(
+        controller = CycleController(
             max_iter=1000,
             threshold=0.5,
         )
@@ -1158,7 +1158,7 @@ class TestCheckConvergence(unittest.TestCase):
 
     def test_stop_on_max_cycles(self):
         """Test stopping when max_cycles exhausted (priority 4)."""
-        controller = IterationController(
+        controller = CycleController(
             max_iter=1000,
             max_cycles=0,  # No imaging cycles left
             threshold=0.0,
@@ -1179,7 +1179,7 @@ class TestCheckConvergence(unittest.TestCase):
 
     def test_priority_zero_mask_over_others(self):
         """Test zero mask has highest priority."""
-        controller = IterationController(
+        controller = CycleController(
             max_iter=0,  # Also at iteration limit
             max_cycles=0,  # Also at imaging cycle limit
             threshold=1.0,  # Also below threshold
@@ -1200,7 +1200,7 @@ class TestCheckConvergence(unittest.TestCase):
 
     def test_priority_iter_limit_over_threshold(self):
         """Test iteration limit has priority over threshold."""
-        controller = IterationController(
+        controller = CycleController(
             max_iter=0,  # At iteration limit
             threshold=1.0,  # Also below threshold
         )
@@ -1220,7 +1220,7 @@ class TestCheckConvergence(unittest.TestCase):
 
     def test_max_cycles_unlimited_never_stops(self):
         """Test max_cycles=-1 (unlimited) never triggers cycle limit."""
-        controller = IterationController(
+        controller = CycleController(
             max_iter=1000,
             max_cycles=-1,  # Unlimited
         )
@@ -1239,7 +1239,7 @@ class TestCheckConvergence(unittest.TestCase):
 
     def test_threshold_zero_never_stops(self):
         """Test threshold=0 (disabled) never triggers threshold stop."""
-        controller = IterationController(
+        controller = CycleController(
             max_iter=1000,
             threshold=0.0,  # Disabled
         )
@@ -1259,7 +1259,7 @@ class TestCheckConvergence(unittest.TestCase):
 
     def test_stopcode_state_updated(self):
         """Test controller's internal stopcode is updated."""
-        controller = IterationController(max_iter=0)
+        controller = CycleController(max_iter=0)
 
         rd = ImagingDict()
         rd.add({"peakres": 0.5, "masksum": 100}, time=0, pol=0, chan=0)
@@ -1276,7 +1276,7 @@ class TestUpdateCounts(unittest.TestCase):
 
     def test_basic_count_update(self):
         """Test basic count decrementing."""
-        controller = IterationController(max_iter=1000, max_cycles=5)
+        controller = CycleController(max_iter=1000, max_cycles=5)
 
         rd = ImagingDict()
         rd.add({"iter_done": 100}, time=0, pol=0, chan=0)
@@ -1294,7 +1294,7 @@ class TestUpdateCounts(unittest.TestCase):
 
     def test_multiple_updates(self):
         """Test multiple count updates accumulate correctly."""
-        controller = IterationController(max_iter=1000, max_cycles=5)
+        controller = CycleController(max_iter=1000, max_cycles=5)
 
         rd1 = ImagingDict()
         rd1.add({"iter_done": 100}, time=0, pol=0, chan=0)
@@ -1314,7 +1314,7 @@ class TestUpdateCounts(unittest.TestCase):
 
     def test_max_iter_floor_at_zero(self):
         """Test max_iter doesn't go negative."""
-        controller = IterationController(max_iter=50)
+        controller = CycleController(max_iter=50)
 
         rd = ImagingDict()
         rd.add({"iter_done": 100}, time=0, pol=0, chan=0)
@@ -1326,7 +1326,7 @@ class TestUpdateCounts(unittest.TestCase):
 
     def test_max_cycles_floor_at_zero(self):
         """Test max_cycles doesn't go negative."""
-        controller = IterationController(max_cycles=1)
+        controller = CycleController(max_cycles=1)
 
         rd1 = ImagingDict()
         rd1.add({"iter_done": 50}, time=0, pol=0, chan=0)
@@ -1342,7 +1342,7 @@ class TestUpdateCounts(unittest.TestCase):
 
     def test_max_cycles_unlimited_never_decrements(self):
         """Test max_cycles=-1 (unlimited) never decrements."""
-        controller = IterationController(max_iter=1000, max_cycles=-1)
+        controller = CycleController(max_iter=1000, max_cycles=-1)
 
         rd = ImagingDict()
         rd.add({"iter_done": 100}, time=0, pol=0, chan=0)
@@ -1355,7 +1355,7 @@ class TestUpdateCounts(unittest.TestCase):
 
     def test_update_with_multiple_planes(self):
         """Test update sums iterations across multiple planes."""
-        controller = IterationController(max_iter=1000)
+        controller = CycleController(max_iter=1000)
 
         rd = ImagingDict()
         rd.add({"iter_done": 50}, time=0, pol=0, chan=0)
@@ -1381,7 +1381,7 @@ class TestUpdateCounts(unittest.TestCase):
 
     def test_no_update_when_converged(self):
         """Test update_counts does nothing when already converged."""
-        controller = IterationController(max_iter=1000, max_cycles=5)
+        controller = CycleController(max_iter=1000, max_cycles=5)
 
         # Set converged state
         controller.stopcode = StopCode(
@@ -1407,7 +1407,7 @@ class TestUpdateParameters(unittest.TestCase):
 
     def test_update_max_iter(self):
         """Test updating max_iter parameter."""
-        controller = IterationController(max_iter=1000)
+        controller = CycleController(max_iter=1000)
 
         code, msg = controller.update_parameters(max_iter=500)
 
@@ -1419,7 +1419,7 @@ class TestUpdateParameters(unittest.TestCase):
 
     def test_update_max_iter_per_cycle(self):
         """Test updating max_iter_per_cycle parameter."""
-        controller = IterationController(max_iter_per_cycle=-1)
+        controller = CycleController(max_iter_per_cycle=-1)
 
         code, msg = controller.update_parameters(max_iter_per_cycle=100)
 
@@ -1428,7 +1428,7 @@ class TestUpdateParameters(unittest.TestCase):
 
     def test_update_max_cycles(self):
         """Test updating max_cycles parameter."""
-        controller = IterationController(max_cycles=-1)
+        controller = CycleController(max_cycles=-1)
 
         code, msg = controller.update_parameters(max_cycles=10)
 
@@ -1437,7 +1437,7 @@ class TestUpdateParameters(unittest.TestCase):
 
     def test_update_threshold_numeric(self):
         """Test updating threshold with numeric value."""
-        controller = IterationController(threshold=0.0)
+        controller = CycleController(threshold=0.0)
 
         code, msg = controller.update_parameters(threshold=0.5)
 
@@ -1446,7 +1446,7 @@ class TestUpdateParameters(unittest.TestCase):
 
     def test_update_threshold_string_jy(self):
         """Test updating threshold with Jy string."""
-        controller = IterationController()
+        controller = CycleController()
 
         code, msg = controller.update_parameters(threshold="0.5Jy")
 
@@ -1455,7 +1455,7 @@ class TestUpdateParameters(unittest.TestCase):
 
     def test_update_threshold_string_mjy(self):
         """Test updating threshold with mJy string."""
-        controller = IterationController()
+        controller = CycleController()
 
         code, msg = controller.update_parameters(threshold="10mJy")
 
@@ -1464,7 +1464,7 @@ class TestUpdateParameters(unittest.TestCase):
 
     def test_update_threshold_string_ujy(self):
         """Test updating threshold with uJy string."""
-        controller = IterationController()
+        controller = CycleController()
 
         code, msg = controller.update_parameters(threshold="100uJy")
 
@@ -1473,7 +1473,7 @@ class TestUpdateParameters(unittest.TestCase):
 
     def test_update_cyclefactor(self):
         """Test updating psf_sidelobe_factor parameter."""
-        controller = IterationController(psf_sidelobe_factor=1.0)
+        controller = CycleController(psf_sidelobe_factor=1.0)
 
         code, msg = controller.update_parameters(psf_sidelobe_factor=1.5)
 
@@ -1482,7 +1482,7 @@ class TestUpdateParameters(unittest.TestCase):
 
     def test_update_multiple_parameters(self):
         """Test updating multiple parameters at once."""
-        controller = IterationController()
+        controller = CycleController()
 
         code, msg = controller.update_parameters(
             max_iter=500,
@@ -1497,7 +1497,7 @@ class TestUpdateParameters(unittest.TestCase):
 
     def test_reject_negative_max_iter(self):
         """Test rejecting max_iter < -1."""
-        controller = IterationController()
+        controller = CycleController()
 
         code, msg = controller.update_parameters(max_iter=-2)
 
@@ -1507,7 +1507,7 @@ class TestUpdateParameters(unittest.TestCase):
 
     def test_reject_negative_threshold_numeric(self):
         """Test rejecting negative numeric threshold."""
-        controller = IterationController()
+        controller = CycleController()
 
         code, msg = controller.update_parameters(threshold=-0.5)
 
@@ -1516,7 +1516,7 @@ class TestUpdateParameters(unittest.TestCase):
 
     def test_reject_negative_threshold_string(self):
         """Test rejecting negative threshold string (Bug #1 fix)."""
-        controller = IterationController()
+        controller = CycleController()
 
         code, msg = controller.update_parameters(threshold="-10mJy")
 
@@ -1525,7 +1525,7 @@ class TestUpdateParameters(unittest.TestCase):
 
     def test_reject_zero_cyclefactor(self):
         """Test rejecting psf_sidelobe_factor <= 0."""
-        controller = IterationController()
+        controller = CycleController()
 
         code, msg = controller.update_parameters(psf_sidelobe_factor=0)
 
@@ -1539,7 +1539,7 @@ class TestUpdateParameters(unittest.TestCase):
 
     def test_reject_invalid_threshold_string(self):
         """Test rejecting threshold string with unknown units."""
-        controller = IterationController()
+        controller = CycleController()
 
         code, msg = controller.update_parameters(threshold="10kJy")
 
@@ -1548,7 +1548,7 @@ class TestUpdateParameters(unittest.TestCase):
 
     def test_reject_non_numeric_max_iter(self):
         """Test rejecting non-numeric max_iter."""
-        controller = IterationController()
+        controller = CycleController()
 
         code, msg = controller.update_parameters(max_iter="abc")
 
@@ -1561,7 +1561,7 @@ class TestResetMethods(unittest.TestCase):
 
     def test_reset(self):
         """Test full reset restores initial state."""
-        controller = IterationController(max_iter=1000, max_cycles=5)
+        controller = CycleController(max_iter=1000, max_cycles=5)
 
         # Simulate some work
         rd = ImagingDict()
@@ -1585,7 +1585,7 @@ class TestResetMethods(unittest.TestCase):
 
     def test_reset_stopcode_only(self):
         """Test reset_stopcode only resets convergence state."""
-        controller = IterationController(max_iter=1000)
+        controller = CycleController(max_iter=1000)
 
         # Simulate some work
         rd = ImagingDict()
@@ -1614,7 +1614,7 @@ class TestGetState(unittest.TestCase):
 
     def test_get_state(self):
         """Test getting controller state as dictionary."""
-        controller = IterationController(
+        controller = CycleController(
             max_iter=1000,
             max_cycles=5,
             threshold=0.01,
@@ -1648,7 +1648,7 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
 
     def test_basic_convergence_workflow(self):
         """Test basic imaging cycle workflow until convergence."""
-        controller = IterationController(
+        controller = CycleController(
             max_iter=300,
             max_cycles=5,
             threshold=0.1,
@@ -1676,9 +1676,9 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
                 chan=0,
             )
 
-            # Calculate cycle controls
+            # Calculate per cycle limits
             max_iter_per_cycle, threshold_per_cycle = (
-                controller.calculate_cycle_controls(rd)
+                controller.calculate_per_cycle_limits(rd)
             )
 
             # Update counts
@@ -1700,7 +1700,7 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
 
     def test_iteration_limit_workflow(self):
         """Test workflow stopping at iteration limit."""
-        controller = IterationController(
+        controller = CycleController(
             max_iter=250,  # Limited iterations
             threshold=0.01,  # Low threshold (hard to reach)
         )
@@ -1732,7 +1732,7 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
 
     def test_max_cycles_workflow(self):
         """Test workflow stopping at imaging cycle limit."""
-        controller = IterationController(
+        controller = CycleController(
             max_iter=1000,
             max_cycles=3,  # Limited imaging cycles
             threshold=0.01,
@@ -1770,7 +1770,7 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
 
     def test_zero_mask_workflow(self):
         """Test workflow stopping when mask becomes zero."""
-        controller = IterationController(
+        controller = CycleController(
             max_iter=1000,
             threshold=0.1,
         )
@@ -1803,7 +1803,7 @@ class TestFullImagingCycleWorkflow(unittest.TestCase):
 
     def test_interactive_continue_workflow(self):
         """Test interactive workflow: stop, update params, continue."""
-        controller = IterationController(
+        controller = CycleController(
             max_iter=100,
             threshold=0.5,
         )
@@ -1861,7 +1861,7 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
 
     def test_merge_and_converge_multi_channel(self):
         """Test merging results from multiple channels."""
-        controller = IterationController(
+        controller = CycleController(
             max_iter=300,
             threshold=0.1,
         )
@@ -1939,7 +1939,7 @@ class TestMultiPlaneWorkflows(unittest.TestCase):
         ZERO_MASK while the valid plane stops on its own threshold; the
         aggregate reports that all planes have stopped.
         """
-        controller = IterationController(threshold=0.5)
+        controller = CycleController(threshold=0.5)
 
         # Chan 0: zero mask, Chan 1: valid
         rd = ImagingDict()
@@ -2182,16 +2182,16 @@ class TestNoProgressStop(unittest.TestCase):
         return rd
 
     def _controller(self, **kwargs):
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
-            IterationController,
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            CycleController,
         )
 
         params = dict(max_iter=100, max_cycles=-1, threshold=0.0)
         params.update(kwargs)
-        return IterationController(**params)
+        return CycleController(**params)
 
     def test_two_model_updates_without_iterations_stop_the_plane(self):
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
             IMAGING_CONTINUE,
             IMAGING_NO_PROGRESS,
             IMAGING_STOP_DESCRIPTIONS,
@@ -2219,7 +2219,7 @@ class TestNoProgressStop(unittest.TestCase):
         self.assertIn("No progress", entry["stop_description"])
 
     def test_imaging_cycles_end_when_the_other_plane_stops_too(self):
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
             IMAGING_MAX_ITER,
             IMAGING_NO_PROGRESS,
         )
@@ -2237,7 +2237,7 @@ class TestNoProgressStop(unittest.TestCase):
         self.assertEqual(description, "All planes stopped (mixed reasons)")
 
     def test_one_model_update_without_iterations_is_tolerated(self):
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
             IMAGING_CONTINUE,
         )
 
@@ -2251,7 +2251,7 @@ class TestNoProgressStop(unittest.TestCase):
         self.assertEqual(controller.zero_iter_model_updates[0, 0, 1], 0)
 
     def test_checks_without_a_model_update_do_not_count(self):
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
             IMAGING_CONTINUE,
         )
 
@@ -2264,7 +2264,7 @@ class TestNoProgressStop(unittest.TestCase):
         self.assertEqual(int(controller.zero_iter_model_updates.sum()), 0)
 
     def test_other_stop_codes_take_precedence(self):
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
             IMAGING_MAX_CYCLES,
             IMAGING_THRESHOLD,
         )
@@ -2288,7 +2288,7 @@ class TestNoProgressStop(unittest.TestCase):
         self.assertEqual(int(controller.zero_iter_model_updates.max()), 0)
 
     def test_model_update_divergence_code_is_kept(self):
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
             IMAGING_CONTINUE,
             MODEL_UPDATE_CONTINUE,
             MODEL_UPDATE_DIVERGENCE,
@@ -2315,11 +2315,11 @@ class TestNoProgressStop(unittest.TestCase):
 
 class TestPerPlaneStateGrowth(unittest.TestCase):
     def test_arrays_grow_when_a_larger_plane_index_appears(self):
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
-            IterationController,
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            CycleController,
         )
 
-        controller = IterationController(max_iter=100)
+        controller = CycleController(max_iter=100)
         small = ImagingDict()
         small.add(
             {"peakres": 1.0, "masksum": 10, "iter_done": 30}, time=0, pol=0, chan=0
@@ -2382,18 +2382,18 @@ class TestEntropyStop(unittest.TestCase):
 
     @staticmethod
     def _controller(**kwargs):
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
-            IterationController,
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            CycleController,
         )
 
         params = dict(max_iter=1000, max_cycles=-1, threshold=0.0, entropy_stop=True)
         params.update(kwargs)
-        return IterationController(**params)
+        return CycleController(**params)
 
     def _cycle(self, controller, entropy, iter_done=(50, 50), **residual):
         """One imaging cycle; returns the stop code after the residual update
         and the per-plane budget of the model update that follows."""
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
             IMAGING_CONTINUE,
         )
 
@@ -2409,7 +2409,7 @@ class TestEntropyStop(unittest.TestCase):
         return stopcode, budget, update
 
     def test_a_fall_of_the_entropy_stops_the_plane(self):
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
             IMAGING_CONTINUE,
             IMAGING_ENTROPY,
             IMAGING_STOP_DESCRIPTIONS,
@@ -2440,7 +2440,7 @@ class TestEntropyStop(unittest.TestCase):
         self.assertEqual([e["stop_code"].imaging for e in rd.data.values()], [10, 10])
 
     def test_the_stop_is_final(self):
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
             IMAGING_ENTROPY,
         )
 
@@ -2461,7 +2461,7 @@ class TestEntropyStop(unittest.TestCase):
     def test_entropy_that_is_not_a_number_is_skipped(self):
         # image_residual_entropy returns no number while the peak of the
         # residual is above entropy_max_snr times its RMS
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
             IMAGING_CONTINUE,
         )
 
@@ -2479,7 +2479,7 @@ class TestEntropyStop(unittest.TestCase):
         self.assertFalse(controller.entropy_stopped.any())
 
     def test_off_by_default(self):
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
             IMAGING_CONTINUE,
         )
 
@@ -2489,14 +2489,14 @@ class TestEntropyStop(unittest.TestCase):
             self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
         self.assertFalse(controller.entropy_stopped.any())
         self.assertTrue(np.isnan(controller.max_entropy).all())
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
-            IterationController,
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            CycleController,
         )
 
-        self.assertFalse(IterationController().entropy_stop)
+        self.assertFalse(CycleController().entropy_stop)
 
     def test_threshold_and_iteration_limit_come_first(self):
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
             IMAGING_ENTROPY,
             IMAGING_MAX_ITER,
             IMAGING_THRESHOLD,
@@ -2513,7 +2513,7 @@ class TestEntropyStop(unittest.TestCase):
         self.assertNotEqual(IMAGING_ENTROPY, IMAGING_MAX_ITER)
 
     def test_entropy_comes_before_the_cycle_limit(self):
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
             IMAGING_ENTROPY,
             IMAGING_MAX_CYCLES,
         )
@@ -2550,9 +2550,9 @@ class TestEntropyStop(unittest.TestCase):
         self.assertEqual(state["entropy_spatial_bins"], 9)
         self.assertEqual(state["entropy_flux_bins"], 20)
 
-    def test_cycle_controls_give_a_stopped_plane_no_iterations(self):
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
-            get_calculate_cycle_controls,
+    def test_per_cycle_limits_give_a_stopped_plane_no_iterations(self):
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            get_per_cycle_limits,
         )
 
         controller = self._controller(max_iter_per_cycle=200)
@@ -2560,7 +2560,7 @@ class TestEntropyStop(unittest.TestCase):
         _, _, update = self._cycle(controller, (7.4, 7.5))
         for fields in update.data.values():
             fields["max_psf_sidelobe"] = 0.2
-        max_iter_per_cycle, _ = get_calculate_cycle_controls(
+        max_iter_per_cycle, _ = get_per_cycle_limits(
             controller, update, None, True, {"gain": 0.1}
         )
         self.assertEqual(max_iter_per_cycle[0, 0].tolist(), [0, 200])
@@ -2570,7 +2570,7 @@ class TestEntropyStop(unittest.TestCase):
 
 class TestEntropyParameters(unittest.TestCase):
     def test_defaults(self):
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
             validate_entropy_params,
         )
 
@@ -2578,7 +2578,7 @@ class TestEntropyParameters(unittest.TestCase):
         self.assertEqual(validate_entropy_params({"gain": 0.1}), (False, 6.0, 7, 10))
 
     def test_values_are_taken_over(self):
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
             validate_entropy_params,
         )
 
@@ -2595,8 +2595,8 @@ class TestEntropyParameters(unittest.TestCase):
         self.assertIsInstance(out[2], int)
 
     def test_wrong_values_are_refused(self):
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
-            IterationController,
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            CycleController,
             validate_entropy_params,
         )
 
@@ -2610,7 +2610,7 @@ class TestEntropyParameters(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, key):
                     validate_entropy_params({key: value})
                 with self.assertRaisesRegex(ValueError, key):
-                    IterationController(**{key: value})
+                    CycleController(**{key: value})
 
 
 class TestResidualEntropyInImagingDict(unittest.TestCase):
@@ -2695,7 +2695,7 @@ class TestResidualEntropyInImagingDict(unittest.TestCase):
             )
 
     def test_copy_into_the_result_of_a_model_update(self):
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
             copy_residual_entropy,
             merge_imaging_dicts,
         )
@@ -2749,13 +2749,13 @@ class TestPerStokesThreshold(unittest.TestCase):
         return rd
 
     def test_each_plane_stops_at_its_own_threshold(self):
-        controller = IterationController(max_iter=1000, threshold=[1e-3, 1e-4])
+        controller = CycleController(max_iter=1000, threshold=[1e-3, 1e-4])
         controller.check_convergence(self._planes([5e-4, 5e-4]))
         self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_THRESHOLD)
         self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_CONTINUE)
 
     def test_threshold_per_cycle_is_floored_per_plane(self):
-        controller = IterationController(
+        controller = CycleController(
             max_iter=1000, threshold=[1e-3, 1e-4], psf_sidelobe_factor=1.0
         )
         controller.ensure_planes(1, 1, 2)
@@ -2763,20 +2763,20 @@ class TestPerStokesThreshold(unittest.TestCase):
         np.testing.assert_allclose(per_plane[0, 0], [1e-3, 0.2 * 2e-3])
 
     def test_one_value_applies_to_every_plane(self):
-        controller = IterationController(max_iter=1000, threshold=1e-3)
+        controller = CycleController(max_iter=1000, threshold=1e-3)
         controller.check_convergence(self._planes([5e-4, 2e-3]))
         self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_THRESHOLD)
         self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_CONTINUE)
 
     def test_one_value_per_plane_is_required(self):
-        controller = IterationController(max_iter=1000, threshold=[1e-3, 1e-4, 1e-5])
+        controller = CycleController(max_iter=1000, threshold=[1e-3, 1e-4, 1e-5])
         with self.assertRaisesRegex(ValueError, "polarization planes"):
             controller.ensure_planes(1, 1, 2)
 
     def test_negative_value_is_refused(self):
         with self.assertRaisesRegex(ValueError, "threshold"):
-            IterationController(max_iter=1000, threshold=[1e-3, -1e-4])
+            CycleController(max_iter=1000, threshold=[1e-3, -1e-4])
 
     def test_state_lists_the_thresholds(self):
-        controller = IterationController(max_iter=1000, threshold=[1e-3, 1e-4])
+        controller = CycleController(max_iter=1000, threshold=[1e-3, 1e-4])
         self.assertEqual(controller.get_state()["threshold"], [1e-3, 1e-4])

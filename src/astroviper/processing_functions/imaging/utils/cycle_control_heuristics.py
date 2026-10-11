@@ -1,4 +1,4 @@
-"""Iteration control parameters for ALMA single field cubes from the observables of a first run.
+"""Cycle control parameters for ALMA single field cubes from the observables of a first run.
 
 A model update runs until the peak residual of a plane falls to its
 ``threshold_per_cycle``, the PSF fraction
@@ -80,7 +80,7 @@ def predicted_imaging_cycles(peak_residual, reference_level, psf_fraction):
     )
 
 
-def alma_iteration_control_params(
+def alma_cycle_control_params(
     max_psf_sidelobe,
     peak_residual,
     threshold,
@@ -91,7 +91,7 @@ def alma_iteration_control_params(
     max_iter=200000,
     primary_beam_limit=0.2,
 ):
-    """``iteration_control_params`` for an ALMA single field cube.
+    """``cycle_control_params`` for an ALMA single field cube.
 
     Parameters
     ----------
@@ -122,7 +122,7 @@ def alma_iteration_control_params(
     Returns
     -------
     dict
-        Every key of ``iteration_control_params`` with Python numbers.
+        Every key of ``cycle_control_params`` with Python numbers.
 
     Raises
     ------

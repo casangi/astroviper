@@ -482,7 +482,7 @@ per-variable nodes.
     `SKY_MODEL`).
   - **Functions / variables**: `snake_case`, **descriptive** (`image_size`, not
     `imsize`).
-  - **Classes**: `CamelCase` (`IterationController`, `ReturnDict`).
+  - **Classes**: `CamelCase` (`CycleController`, `ReturnDict`).
   - **Consistency**: Parameter names should be consistent throughout the stack.
   - **CLEAN terminology**: an **imaging cycle** (or simply *cycle*) is one
     **residual update** followed by one **model update**; use exactly these

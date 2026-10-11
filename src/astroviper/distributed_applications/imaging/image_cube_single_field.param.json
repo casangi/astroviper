@@ -4,7 +4,7 @@
         "image_store": { "required": true, "type": ["str"] },
         "image_params": { "required": true, "type": ["dict"] },
         "imaging_weights_params": { "required": true, "type": ["dict"] },
-        "iteration_control_params": { "required": true, "type": ["dict"] },
+        "cycle_control_params": { "required": true, "type": ["dict"] },
         "gridder": { "type": ["str"], "allowed": ["prolate_spheroidal"] },
         "deconvolver": {
             "type": ["str"],

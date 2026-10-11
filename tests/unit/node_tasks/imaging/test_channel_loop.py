@@ -82,7 +82,7 @@ def _task_inputs(tmp_path, n_chan=3, data_selection=None, **overrides):
     inputs = dict(
         image_params=image_params,
         imaging_weights_params={"weighting": "natural"},
-        iteration_control_params={"max_iter": 10, "max_cycles": 3},
+        cycle_control_params={"max_iter": 10, "max_cycles": 3},
         task_coords={"frequency": {"data": VIS_FREQUENCIES[:n_chan]}},
         data_selection=data_selection or {"ms_a": {"frequency": slice(0, n_chan)}},
         image_store=str(tmp_path / "img.zarr"),
@@ -109,7 +109,7 @@ class _FakeScience:
         img_xds,
         image_params,
         imaging_weights_params,
-        iteration_control_params,
+        cycle_control_params,
         **kwargs,
     ):
         vis_frequencies = {

@@ -98,7 +98,7 @@ def test_image_store_name_without_img_zarr_extension(tmp_path):
             "robust": 0.5,
             "casa_weighting_implementation": True,
         },
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": 0,
             "max_cycles": 0,
             "threshold": 0.0,
@@ -163,7 +163,7 @@ def _image_cube(ps_store, image_store, frequency_coords, **overrides):
             "robust": 0.5,
             "casa_weighting_implementation": True,
         },
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": max_iter,
             "max_cycles": 2 if max_iter else 0,
             "threshold": 0.0,

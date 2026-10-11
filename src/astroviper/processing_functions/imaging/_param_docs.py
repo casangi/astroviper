@@ -60,8 +60,8 @@ IMAGING_PARAM_DOCS = {
         'no telescope means ``"alma"``. ``None`` is the ALMA 12 m beam (10.7 m,\n'
         "0.75 m, 1.784 deg at 1 GHz)."
     ),
-    "iteration_control_params": (
-        "CLEAN iteration controls. An **imaging cycle** (below simply a cycle)\n"
+    "cycle_control_params": (
+        "CLEAN cycle controls. An **imaging cycle** (below simply a cycle)\n"
         "is one **residual update** (degrid the model, form residual\n"
         "visibilities, grid and inverse FFT them into the residual image)\n"
         "followed by one **model update** (deconvolve the residual image into\n"
