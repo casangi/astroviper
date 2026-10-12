@@ -15,7 +15,11 @@ on:
 jobs:
 
   call-testing-linux:
-    uses: nrao/gh-actions-templates-public/.github/workflows/run-ipynb-template.yml@main
+    # Pinned to the last working template. At 22215c6 (@main) a commented-out
+    # line inside the backslash-continued nbconvert command ends the
+    # continuation, so the job stops after the first notebook with
+    # "command not found" (exit 127). Return to @main once the template is fixed.
+    uses: nrao/gh-actions-templates-public/.github/workflows/run-ipynb-template.yml@86e00adecd19943005a5a8f56995decf772a0d9a
     with:
       # astroviper's C++ extensions require C++23 (GCC >= 14).
       gcc-version: "14"

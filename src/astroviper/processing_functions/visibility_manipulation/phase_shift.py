@@ -3,6 +3,7 @@ import copy
 # import numba  # numba disabled (dependency removed)
 import numpy as np
 import xarray as xr
+import xradio.measurement_set  # noqa: F401 -- registers the xr_ms accessor
 
 # from numba import jit  # numba disabled (dependency removed)
 from scipy import constants

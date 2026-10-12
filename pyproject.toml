@@ -1,6 +1,6 @@
 [project]
 name = "astroviper"
-version = "0.0.39"
+version = "0.0.40"
 description = "Astro Visibility and Image Parallel Execution Reduction "
 authors = [{ name = "Jan-Willem Steeb", email = "jsteeb@nrao.edu"},
     {name = "Dave Mehringer", email="dmehring@nrao.edu"},
@@ -14,7 +14,8 @@ requires-python = ">=3.11,<3.14"
 
 # ✅ Core runtime dependencies must live here
 dependencies = [
-  "graphviper>=0.0.52",
+  "graphviper>=0.0.53",
+  "xradio[zarr]>=1.2.4",
   "numpy",
   "opt_einsum",
   "pyfftw",

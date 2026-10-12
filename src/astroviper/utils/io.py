@@ -433,6 +433,49 @@ def image_chunk_and_shard_shapes(
     return chunks, shards
 
 
+def write_zarr_image_store(img_xds, image_store, overwrite=False):
+    """Write an image dataset to a Zarr store and return the path of the store.
+
+    The store is written with :func:`xradio.image.write_image`. XRADIO
+    versions that give image Zarr stores the ``.img.zarr`` extension keep a
+    name that ends in ``.img.zarr``, replace a bare ``.zarr`` extension
+    (``out.zarr`` gives ``out.img.zarr``), append ``.img.zarr`` to any other
+    name and return the paths written; earlier versions write ``image_store``
+    as given and return ``None``. Code that opens the store, adds data
+    variables to it or passes it on must use the returned path; a name that
+    ends in ``.img.zarr`` is kept by every XRADIO version.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Image dataset to write (coordinates, attributes and any data
+        variables).
+    image_store : str
+        Requested path of the Zarr store.
+    overwrite : bool, default False
+        If ``True``, replace an existing store.
+
+    Returns
+    -------
+    str
+        Path of the Zarr store written.
+
+    Raises
+    ------
+    FileExistsError
+        If the store to be written exists and ``overwrite`` is ``False``;
+        XRADIO raises it before anything is written.
+    """
+    from xradio.image import write_image
+
+    written_paths = write_image(
+        img_xds, imagename=image_store, out_format="zarr", overwrite=overwrite
+    )
+    if written_paths:
+        return written_paths[0]
+    return image_store
+
+
 def create_empty_data_variables_on_disk(
     zarr_store,
     data_variables,

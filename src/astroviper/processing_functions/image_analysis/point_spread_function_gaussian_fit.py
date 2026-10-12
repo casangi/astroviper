@@ -167,17 +167,21 @@ def point_spread_function_gaussian_fit(
     #    npix_window, cutoff, px, py, psf2d, delta
     # )
     # print(" after find_n_points blc, trc=", blc, trc)
-    main_lobe_im, blc, trc, max_sidelobe = extract_main_lobe(
+    # Only the per-slice boxes and sidelobe levels are needed here; the main-lobe
+    # cube extract_main_lobe also returns (one PSF-sized array) is dropped at once
+    # instead of being held through the fit and the sidelobe measurement.
+    psf_shape = img_xds[psf_name].shape
+    blc, trc, max_sidelobe = extract_main_lobe(
         npix_window, cutoff, img_xds[psf_name].values
-    )
+    )[1:]
     # blc/trc are per-slice arrays of shape (time, frequency, polarization, 2).
     # Expand each slice's fitting window and clamp it to the image bounds.
     blc = blc - expand_pixel
     trc = trc + expand_pixel
     # print(" blc, trc after expanding=", blc, trc)
     blc = np.maximum(blc, 0)
-    trc[..., 0] = np.minimum(trc[..., 0], main_lobe_im.shape[3] - 1)
-    trc[..., 1] = np.minimum(trc[..., 1], main_lobe_im.shape[4] - 1)
+    trc[..., 0] = np.minimum(trc[..., 0], psf_shape[3] - 1)
+    trc[..., 1] = np.minimum(trc[..., 1], psf_shape[4] - 1)
 
     if fitting_method == "casa":
         from astroviper.processing_functions.image_analysis.psf_gaussian_fit_cpp import (
@@ -258,45 +262,70 @@ def _max_sidelobe_after_gaussian_subtraction(
     output = np.zeros(psf_image.shape[:3], dtype=np.float64)
 
     for index in np.ndindex(psf_image.shape[:3]):
-        psf_2d = psf_image[index]
-        finite = np.isfinite(psf_2d)
-        beam = ellipse_params[index]
-        valid_beam = np.all(np.isfinite(beam)) and np.all(beam[:2] > 0.0)
-        if not np.any(finite) or not valid_beam:
+        sidelobe = _max_sidelobe_2d(psf_image[index], ellipse_params[index], delta)
+        if sidelobe is None:
             if fallback is not None:
                 output[index] = fallback[index]
             continue
-
-        finite_psf = np.where(finite, psf_2d, 0.0)
-        peak_l, peak_m = np.unravel_index(np.argmax(finite_psf), psf_2d.shape)
-        peak = finite_psf[peak_l, peak_m]
-        if peak <= 0.0:
-            if fallback is not None:
-                output[index] = fallback[index]
-            continue
-
-        l_offset = (np.arange(psf_2d.shape[0]) - peak_l) * abs(delta[0])
-        m_offset = (np.arange(psf_2d.shape[1]) - peak_m) * abs(delta[1])
-        l_grid, m_grid = np.meshgrid(l_offset, m_offset, indexing="ij")
-        # Match the fitted/restoring-beam PA convention: the major axis
-        # points along (sin(PA), -cos(PA)), so theta = pi/2 - PA.
-        theta = 0.5 * np.pi - beam[2]
-        cos_theta = np.cos(theta)
-        sin_theta = np.sin(theta)
-        major_offset = l_grid * cos_theta - m_grid * sin_theta
-        minor_offset = l_grid * sin_theta + m_grid * cos_theta
-        sigma_major = beam[0] / FWHM_factor
-        sigma_minor = beam[1] / FWHM_factor
-        fitted_main_beam = peak * np.exp(
-            -0.5
-            * ((major_offset / sigma_major) ** 2 + (minor_offset / sigma_minor) ** 2)
-        )
-
-        delobed_maximum = np.max(np.where(finite, psf_2d - fitted_main_beam, -np.inf))
-        original_minimum = np.min(np.where(finite, psf_2d, np.inf))
-        output[index] = max(abs(original_minimum), abs(delobed_maximum))
+        output[index] = sidelobe
 
     return output
+
+
+def _max_sidelobe_2d(psf_2d, beam, delta):
+    """Sidelobe level of one (l, m) PSF slice after subtracting its fitted beam.
+
+    Returns ``None`` when the slice has no finite pixel, no valid beam or no
+    positive peak. Every plane-sized array lives in this function, so nothing
+    is carried from one slice to the next, and every plane-sized step writes
+    into an existing buffer: the peak is two planes and a boolean mask, the
+    same whether or not NumPy can reuse the temporaries of a chained
+    expression (it cannot on the GitHub Linux runner builds of Python 3.12 and
+    3.13). The arithmetic is the same, element by element, as evaluating
+    ``peak * exp(-((major / sigma_major)**2 + (minor / sigma_minor)**2) / 2)``
+    on meshgrids, so the result is identical.
+    """
+    finite = np.isfinite(psf_2d)
+    valid_beam = np.all(np.isfinite(beam)) and np.all(beam[:2] > 0.0)
+    if not np.any(finite) or not valid_beam:
+        return None
+
+    finite_psf = psf_2d if finite.all() else np.where(finite, psf_2d, 0.0)
+    peak_l, peak_m = np.unravel_index(np.argmax(finite_psf), psf_2d.shape)
+    peak = finite_psf[peak_l, peak_m]
+    del finite_psf
+    if peak <= 0.0:
+        return None
+
+    l_offset = (np.arange(psf_2d.shape[0]) - peak_l) * abs(delta[0])
+    m_offset = (np.arange(psf_2d.shape[1]) - peak_m) * abs(delta[1])
+    # Match the fitted/restoring-beam PA convention: the major axis
+    # points along (sin(PA), -cos(PA)), so theta = pi/2 - PA.
+    theta = 0.5 * np.pi - beam[2]
+    cos_theta = np.cos(theta)
+    sin_theta = np.sin(theta)
+    sigma_major = beam[0] / FWHM_factor
+    sigma_minor = beam[1] / FWHM_factor
+
+    # (major / sigma_major)**2 with major = l cos(theta) - m sin(theta)
+    work = np.subtract.outer(l_offset * cos_theta, m_offset * sin_theta)
+    work /= sigma_major
+    np.square(work, out=work)
+    # (minor / sigma_minor)**2 with minor = l sin(theta) + m cos(theta)
+    minor = np.add.outer(l_offset * sin_theta, m_offset * cos_theta)
+    minor /= sigma_minor
+    np.square(minor, out=minor)
+    work += minor
+    del minor
+    # fitted main beam, then the PSF minus the fitted main beam
+    work *= -0.5
+    np.exp(work, out=work)
+    work *= peak
+    np.subtract(psf_2d, work, out=work)
+
+    delobed_maximum = np.max(work, where=finite, initial=-np.inf)
+    original_minimum = np.min(psf_2d, where=finite, initial=np.inf)
+    return max(abs(original_minimum), abs(delobed_maximum))
 
 
 def _get_main_lobe_bounding_box(masked_psf_2d):
@@ -390,7 +419,12 @@ def _extract_main_lobe_2d(npix_window, threshold, psf_2d):
     # Cycle control depends on the largest sidelobe magnitude. A negative
     # sidelobe is just as capable of destabilizing a model update as a positive
     # one, so do not discard it when estimating the safe cycle threshold.
-    max_sidelobe = np.max(np.abs(psf_2d) * (labels != main_lobe_label))
+    # In place, so that no third plane is made whether or not NumPy reuses the
+    # temporary of a chained expression.
+    sidelobes = np.abs(psf_2d)
+    sidelobes *= labels != main_lobe_label
+    max_sidelobe = np.max(sidelobes)
+    del sidelobes
 
     blc, trc = _get_main_lobe_bounding_box(main_lobe_only)
     if blc is None:
@@ -444,6 +478,8 @@ def extract_main_lobe(npix_window, threshold, psf_image):
                     npix_window, threshold, psf_image[itime, ifreq, ipol]
                 )
                 main_lobe_only[itime, ifreq, ipol] = lobe_2d
+                # free the slice before the next one is extracted
+                del lobe_2d
                 blc[itime, ifreq, ipol] = slice_blc
                 trc[itime, ifreq, ipol] = slice_trc
                 max_sidelobe[itime, ifreq, ipol] = slice_sidelobe

@@ -194,7 +194,10 @@ def simulate_processing_set(
         (default 0)}``.  Point sources are added to the pixel they fall in;
         extended components are sampled at the pixel centres.  Stokes V
         (linear feeds) or U (circular feeds) needs complex cross-hand
-        fluxes and is zero otherwise.  Default ``None`` (no image).
+        fluxes and is zero otherwise.  XRADIO versions that give image Zarr
+        stores the ``.img.zarr`` extension give it to a path without it
+        (``sky.zarr`` gives ``sky.img.zarr``); the store written is returned
+        as ``"sky_image_store"``.  Default ``None`` (no image).
     phase_center_ra_dec : np.ndarray, [n_time | 1, 2], radians
         Phase centre of the array per time (time-varying for mosaics) or fixed.
     beam_models : list
@@ -262,7 +265,10 @@ def simulate_processing_set(
     -------
     dict
         ``{"timing_node_tasks": pandas.DataFrame (one row per task),
-        "timing_distributed_application": dict, "ps_store": str, "ms_name": str}``.
+        "timing_distributed_application": dict, "ps_store": str, "ms_name": str,
+        "sky_image_store": str or None}``; ``"sky_image_store"`` is the path of
+        the Zarr store the sky image was written to (``None`` without
+        ``sky_image_params``).
 
     See Also
     --------
@@ -491,9 +497,10 @@ def simulate_processing_set(
     )
 
     # --- optional image of the simulated sky ----------------------------------
+    sky_image_store = None
     if sky_image is not None:
         start = _time.time()
-        _write_sky_image(
+        sky_image_store = _write_sky_image(
             sky_image, normalized_components, time_coord, frequency_coord, overwrite
         )
         timing_distributed_application["T_write_sky_image"] = _time.time() - start
@@ -625,7 +632,7 @@ def simulate_processing_set(
         "timing_distributed_application": timing_distributed_application,
         "ps_store": ps_store,
         "ms_name": ms_name,
-        "sky_image_store": None if sky_image is None else sky_image["image_store"],
+        "sky_image_store": sky_image_store,
     }
 
 
@@ -819,14 +826,16 @@ def _resolve_sky_image_params(
 
 
 def _write_sky_image(sky_image, components, time_coord, frequency_coord, overwrite):
-    """Rasterise ``components`` on the imager's grid and write the XRADIO image (``SKY``, Jy/pixel)."""
+    """Rasterise ``components`` on the imager's grid, write the XRADIO image
+    (``SKY``, Jy/pixel) and return the path of the Zarr store written."""
     import xarray as xr
-    from xradio.image import make_empty_sky_image, write_image
+    from xradio.image import make_empty_sky_image
 
     from astroviper.processing_functions.simulation.sky_components import (
         stokes_sky_model_images,
     )
     from astroviper.utils.data_group_tools import modify_data_groups_xds
+    from astroviper.utils.io import write_zarr_image_store
 
     time_index = sky_image["time_index"]
     unix_seconds = float(np.asarray(time_coord["data"], dtype=np.float64)[time_index])
@@ -877,6 +886,6 @@ def _write_sky_image(sky_image, components, time_coord, frequency_coord, overwri
             "written by astroviper.distributed_applications.simulation.simulate_processing_set."
         ),
     )
-    write_image(
-        img_xds, sky_image["image_store"], out_format="zarr", overwrite=overwrite
+    return write_zarr_image_store(
+        img_xds, sky_image["image_store"], overwrite=overwrite
     )

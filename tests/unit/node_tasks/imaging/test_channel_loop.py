@@ -242,6 +242,118 @@ def test_imaging_dict_channels_shift_onto_global_numbers(tmp_path, fake_science)
     assert sorted(key.chan for key in result["deconvolution"].data) == [5, 6, 7]
 
 
+@pytest.mark.parametrize("image_chunking", [{"frequency": 1}, None])
+def test_channel_measurement_sets_die_before_the_statistics(
+    tmp_path, monkeypatch, fake_science, image_chunking
+):
+    """The measurement sets the science function was handed for a channel
+    (which then hold its model and residual visibilities and imaging
+    weights) are freed by reference counting as soon as the channel is
+    imaged, before the chunk's statistics and write."""
+    import gc
+    import weakref
+
+    import astroviper.processing_functions.image_analysis.plane_statistics as ps_mod
+    import astroviper.processing_functions.imaging as pf_imaging
+    from astroviper.node_tasks.imaging.image_cube_single_field import (
+        image_cube_single_field,
+    )
+
+    handed = []
+
+    def science_keeping_weakrefs(ps_xdt, *args, **kwargs):
+        handed.extend(weakref.ref(ms_xdt) for ms_xdt in ps_xdt.values())
+        return fake_science(ps_xdt, *args, **kwargs)
+
+    monkeypatch.setattr(pf_imaging, "image_cube_single_field", science_keeping_weakrefs)
+    statistics = ps_mod.calculate_plane_statistics
+    alive_at_statistics = []
+
+    def statistics_checking(*args, **kwargs):
+        alive_at_statistics.append(sum(ref() is not None for ref in handed))
+        return statistics(*args, **kwargs)
+
+    monkeypatch.setattr(ps_mod, "calculate_plane_statistics", statistics_checking)
+    overrides = {}
+    if image_chunking is not None:
+        overrides = dict(
+            image_store=_make_store(tmp_path, 3, [[0, 1, 2]], image_chunking),
+            graph_mode=True,
+            image_chunking=image_chunking,
+        )
+    inputs = _task_inputs(tmp_path, **overrides)
+    ps_xdt = _fake_processing_set({"ms_a": VIS_FREQUENCIES})
+    gc_was_enabled = gc.isenabled()
+    gc.disable()  # reference counting alone
+    try:
+        image_cube_single_field(**inputs, input_data=ps_xdt)
+    finally:
+        if gc_was_enabled:
+            gc.enable()
+
+    assert len(handed) == 3
+    assert alive_at_statistics == [0] * len(alive_at_statistics)
+    assert len(alive_at_statistics) == (3 if image_chunking else 1)
+
+
+def test_channel_without_visibilities_leaves_the_loaded_chunk_untouched(
+    tmp_path, monkeypatch, fake_science
+):
+    """An image channel no visibility channel maps onto is imaged from the
+    whole loaded chunk, handed over as views with their own attrs: the
+    variables and data groups the science function registers stay off the
+    loaded tree, and die by reference counting before the statistics."""
+    import gc
+    import weakref
+
+    import astroviper.processing_functions.image_analysis.plane_statistics as ps_mod
+    import astroviper.processing_functions.imaging as pf_imaging
+    from astroviper.node_tasks.imaging.image_cube_single_field import (
+        image_cube_single_field,
+    )
+
+    handed = []
+
+    def science_registering(ps_xdt, *args, **kwargs):
+        for ms_xdt in ps_xdt.values():
+            # what the residual update does: register model visibilities
+            ms_xdt["VISIBILITY_MODEL"] = ms_xdt["VISIBILITY"] * 0
+            handed.append(weakref.ref(ms_xdt))
+        return fake_science(ps_xdt, *args, **kwargs)
+
+    monkeypatch.setattr(pf_imaging, "image_cube_single_field", science_registering)
+    statistics = ps_mod.calculate_plane_statistics
+    alive_at_statistics = []
+
+    def statistics_checking(*args, **kwargs):
+        alive_at_statistics.append(sum(ref() is not None for ref in handed))
+        return statistics(*args, **kwargs)
+
+    monkeypatch.setattr(ps_mod, "calculate_plane_statistics", statistics_checking)
+    # visibility channels on the first and the last image channel only
+    ps_xdt = _fake_processing_set({"ms_a": VIS_FREQUENCIES[[0, 2]]})
+    ms_a = ps_xdt["ms_a"]
+    original_groups = copy.deepcopy(ms_a.attrs["data_groups"])
+    gc_was_enabled = gc.isenabled()
+    gc.disable()  # reference counting alone
+    try:
+        image_cube_single_field(**_task_inputs(tmp_path), input_data=ps_xdt)
+    finally:
+        if gc_was_enabled:
+            gc.enable()
+
+    # channel 1 was imaged from the whole chunk, the others from their own
+    assert [c["vis_frequencies"]["ms_a"].tolist() for c in fake_science.calls] == [
+        [VIS_FREQUENCIES[0]],
+        VIS_FREQUENCIES[[0, 2]].tolist(),
+        [VIS_FREQUENCIES[2]],
+    ]
+    assert "VISIBILITY_MODEL" not in ms_a
+    assert ms_a.attrs["data_groups"] == original_groups
+    assert len(handed) == 3
+    assert alive_at_statistics == [0]
+
+
 # --------------------------------------------------------------------------- #
 # Chunk-wise writes: a chunk is written as soon as its channels are imaged
 # --------------------------------------------------------------------------- #

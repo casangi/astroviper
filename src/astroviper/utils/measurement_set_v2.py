@@ -1,4 +1,8 @@
-"""Write a simulated MSv4 processing set as a CASA Measurement Set v2 via arcae.
+"""CASA Measurement Set v2 helpers: detection, and writing a simulated MSv4.
+
+:func:`is_measurement_set_v2` tells a Measurement Set v2 directory from a
+processing set (a Zarr store) without importing casacore; the imaging
+distributed applications use it to route an MSv2 ``ps_store``.
 
 Optional backend of the simulator (the SIRIUS ``write_to_ms`` equivalent):
 ``write_measurement_set_v2`` converts one simulated MSv4 into an MSv2 on disk
@@ -50,6 +54,47 @@ _MAIN_DATA_COLUMN_DESC = {
         "valueType": "COMPLEX",
     }
 }
+
+# Metadata files of a Zarr group (v3, then v2): their presence means a Zarr
+# store, never a casacore table.
+_ZARR_METADATA_FILES = ("zarr.json", ".zgroup", ".zattrs")
+
+
+def is_measurement_set_v2(path):
+    """Whether ``path`` is a local casacore Measurement Set v2 directory.
+
+    A routing check only, using the standard library (no casacore import): a
+    local directory that holds a casacore table (its ``table.dat``) and no
+    Zarr metadata (``zarr.json``, ``.zgroup`` or ``.zattrs``). XRADIO's
+    ``xradio_msv2`` engine validates the Measurement Set fully when it opens
+    it.
+
+    Parameters
+    ----------
+    path : str or os.PathLike
+        Candidate path, e.g. a ``ps_store``: a processing set (Zarr store) or a
+        Measurement Set v2. A leading ``~`` is expanded.
+
+    Returns
+    -------
+    bool
+        ``True`` for a Measurement Set v2 directory; ``False`` for anything
+        else (a Zarr processing set, a URL, a file, a missing path, or an
+        object that is not a path).
+
+    Examples
+    --------
+    >>> is_measurement_set_v2("s3://bucket/data.ps.zarr")
+    False
+    """
+    if not isinstance(path, str | os.PathLike):
+        return False
+    path = os.path.expanduser(os.fspath(path))
+    if not os.path.isdir(path):
+        return False
+    if any(os.path.exists(os.path.join(path, name)) for name in _ZARR_METADATA_FILES):
+        return False
+    return os.path.isfile(os.path.join(path, "table.dat"))
 
 
 def _require_arcae():
