@@ -604,6 +604,42 @@ class TestDivergence:
         )
         np.testing.assert_array_equal(result["diverged"], [[[True, False]]])
         np.testing.assert_array_equal(result["retval"][0, 0, 0], -3)
+        # the shared test, not CASA's guard (iteration 4), stops plane 0
+        np.testing.assert_array_equal(result["iterations_performed"], [[[2, 40]]])
+
+    def test_rms_is_taken_inside_the_mask(self):
+        # the sidelobes that raise the RMS fall outside a 3 x 3 mask
+        residual, psf = self._spreading()
+        mask = np.zeros_like(residual)
+        mask[15:18, 15:18] = 1.0
+        model = np.zeros_like(residual)
+        result = aspclean.clean(
+            residual,
+            psf,
+            model,
+            mask=mask,
+            gain=0.9,
+            threshold=0.0,
+            max_iter_remaining=40,
+            psf_width=1.0,
+            largestscale=0,
+            max_iter_divergence=1,
+            divergence_rms_factor=self.RMS_FACTOR,
+            divergence_peak_factor=self.PEAK_FACTOR,
+        )
+        assert result["iterations_performed"] > 2
+        assert result["peak_residual"] < 1e-6
+
+    def test_infinite_peak_stops_the_model_update(self):
+        # also with the binding's defaults, which leave the two limits off
+        residual, psf = self._spreading()
+        residual[5, 5] = np.inf
+        model = np.zeros_like(residual)
+        result = aspclean.clean(residual, psf, model, gain=0.9, psf_width=1.0)
+        assert result["iterations_performed"] == 1
+        assert result["retval"] == -3
+        assert result["diverged"]
+        assert not model.any()
 
 
 # ---------------------------------------------------------------------------

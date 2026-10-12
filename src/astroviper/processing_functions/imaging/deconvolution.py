@@ -210,13 +210,16 @@ def _divergence_factors(gain):
     )
 
 
-def _divergence_kwargs(deconvolve_params):
+def _divergence_kwargs(deconvolve_params, peak_limit=True):
     """Divergence test arguments of the deconvolver kernels.
 
     Parameters
     ----------
     deconvolve_params : dict
         Validated deconvolution parameters (:func:`_validate_deconvolve_params`).
+    peak_limit : bool, optional
+        ``False`` leaves out the hard limit: ``divergence_peak_factor`` is
+        infinite. Default ``True``.
 
     Returns
     -------
@@ -228,7 +231,7 @@ def _divergence_kwargs(deconvolve_params):
     return {
         "max_iter_divergence": int(deconvolve_params["max_iter_divergence"]),
         "divergence_rms_factor": rms_factor,
-        "divergence_peak_factor": peak_factor,
+        "divergence_peak_factor": peak_factor if peak_limit else np.inf,
     }
 
 
@@ -1225,9 +1228,11 @@ def asp_clean(
         ``iterations_performed`` (int), ``retval`` (int), ``converged``
         (bool), ``diverged`` (bool), ``peak_residual`` (float), and
         ``model_flux`` (float). A plane stops as diverged (``retval`` -3)
-        on CASA's diverging guard or on the divergence test of
-        :func:`hogbom_clean` (``max_iter_divergence``). The final residual
-        and model cubes are the caller-supplied arrays, updated in place.
+        on CASA's diverging guard, on the soft limit of the divergence test
+        of :func:`hogbom_clean` (``max_iter_divergence``) or on an infinite
+        peak; CASA's guard takes the place of the hard limit. The final
+        residual and model cubes are the caller-supplied arrays, updated in
+        place.
 
     Raises
     ------
@@ -1311,5 +1316,9 @@ def asp_clean(
         stoppointmode=deconvolve_params.get("stoppointmode", -1),
         norm_method=deconvolve_params.get("norm_method", 1),
         processing_function_threads=int(processing_function_threads),
-        **_divergence_kwargs(deconvolve_params),
+        # Aspen subtractions can raise the peak of a healthy residual by more
+        # than the gain while its RMS falls (by up to 27 percent at gain 0.1 in
+        # the field of test_simulation_gaussian_sources.py), so the hard limit
+        # is left to CASA's diverging guard, which bounds the peak itself.
+        **_divergence_kwargs(deconvolve_params, peak_limit=False),
     )

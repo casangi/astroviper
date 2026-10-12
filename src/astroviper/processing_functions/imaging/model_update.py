@@ -31,12 +31,13 @@ def model_update_cube_single_field(
         the deconvolver: ``gain``, the absolute ``threshold`` (floor) and the
         per-plane ``max_iter_per_cycle`` and ``threshold_per_cycle`` arrays
         computed by the iteration controller.  ``max_iter_divergence`` (default
-        1, ``-1`` disables) is the divergence test of the deconvolvers: a
-        plane stops its model update when the RMS of its residual inside the
-        mask has been above ``(1 + gain / 10)`` times the lowest RMS reached
-        for that many iterations in a row, or at once when the peak exceeds
-        ``(1 + gain)`` times the peak at the start of the model update or is
-        not finite.  The
+        1, ``-1`` disables its two limits) is the divergence test of the
+        deconvolvers: a plane stops its model update when the RMS of its
+        residual inside the mask has been above ``(1 + gain / 10)`` times the
+        lowest RMS reached for that many iterations in a row or, for Hogbom,
+        at once when the peak exceeds ``(1 + gain)`` times the peak at the
+        start of the model update (Asp bounds its peak with CASA's own
+        guard). An infinite peak always stops it.  The
         separate ``primary_beam_limit`` builds the primary-beam mask (a
         chunk-independent quantity, so the mask does not depend on how the cube
         was split across tasks); it is distinct from the deconvolver

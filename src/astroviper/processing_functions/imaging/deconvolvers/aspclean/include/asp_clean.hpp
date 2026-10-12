@@ -14,6 +14,10 @@
 //  * the "diverging" guard bounds the peak of the fitted component's dirty
 //    response instead of the raw Aspen strength, which is not in Jy/beam and
 //    made CASA's test abort minor cycles on legitimate wide components.
+// The model update also stops on the divergence test shared with the other
+// deconvolvers (../../include/plane_stop_test.hpp): its two limits are off
+// unless the caller enables them, an infinite peak always stops the model
+// update. astroviper's Python layer enables the RMS limit only.
 //
 // The algorithm finds, at each model update iteration, the best "Aspen" (a
 // Gaussian component whose amplitude, scale size and position are optimized by

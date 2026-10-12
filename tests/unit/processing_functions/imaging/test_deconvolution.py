@@ -1133,6 +1133,20 @@ class TestAspClean:
         assert result["diverged"].item()
         assert result["retval"].item() == -3
 
+    def test_hard_limit_is_left_to_casas_guard(self, monkeypatch):
+        captured = {}
+
+        def clean_cube(**kwargs):
+            captured.update(kwargs)
+            return {}
+
+        monkeypatch.setattr(aspclean, "clean_cube", clean_cube)
+        residual, psf = _spreading_problem()
+        asp_clean(residual, psf, np.zeros_like(residual), {"gain": 0.2})
+        assert captured["max_iter_divergence"] == 1
+        assert captured["divergence_rms_factor"] == _divergence_factors(0.2)[0]
+        assert captured["divergence_peak_factor"] == np.inf
+
 
 # ---------------------------------------------------------------------------
 # deconvolve end-to-end with algorithm="asp"

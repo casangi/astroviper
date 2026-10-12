@@ -54,7 +54,7 @@ def _covariance(major, minor, pa):
     return sigma_major * np.outer(e, e) + sigma_minor * np.outer(p, p)
 
 
-def test_gaussian_and_point_source_fluxes_recovered(tmp_path):
+def test_gaussian_and_point_source_fluxes_recovered(tmp_path, monkeypatch):
     ps_store = str(tmp_path / "gaussian_sim.ps.zarr")
     image_store = str(tmp_path / "gaussian_sim.img.zarr")
 
@@ -103,6 +103,20 @@ def test_gaussian_and_point_source_fluxes_recovered(tmp_path):
     phase_direction = combined.FIELD_PHASE_CENTER_DIRECTION.sel(
         field_name=combined.attrs["center_field_name"]
     ).values
+    # The Asp model updates of this healthy clean must not stop as diverged:
+    # Aspen subtractions raise its peak by more than the gain while the RMS
+    # falls. The graph runs in this process (no Dask client).
+    from astroviper.processing_functions.imaging import deconvolution
+
+    asp_clean = deconvolution.asp_clean
+    diverged = []
+
+    def recording_asp_clean(*args, **kwargs):
+        result = asp_clean(*args, **kwargs)
+        diverged.append(bool(np.any(result["diverged"])))
+        return result
+
+    monkeypatch.setattr(deconvolution, "asp_clean", recording_asp_clean)
     distributed_applications.imaging.image_cube_single_field(
         ps_store=ps_store,
         image_store=image_store,
@@ -151,6 +165,8 @@ def test_gaussian_and_point_source_fluxes_recovered(tmp_path):
         restore=True,
         primary_beam_correction=True,
     )
+
+    assert diverged and not any(diverged)
 
     img = load_image(image_store)
     assert list(img.polarization.values) == ["I", "Q"]

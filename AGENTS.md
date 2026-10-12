@@ -192,7 +192,11 @@ kept verbatim with its licence block); its per-Aspen L-BFGS follows ALGLIB's
 scaled-variable conventions and is exposed for tests as
 `aspclean.lbfgs_minimize`. Two documented departures from CASA live in
 `src/asp_clean.cpp`: separable Aspen spectra with paired inverse transforms
-(same numbers, ~8x fewer FFTs) and a unit-consistent "diverging" guard. The
+(same numbers, ~8x fewer FFTs) and a unit-consistent "diverging" guard. Like
+Hogbom and MTMFS it also takes the divergence test shared by the
+deconvolvers (`deconvolvers/include/plane_stop_test.hpp`); `asp_clean()`
+enables its RMS limit only (an infinite peak still stops it), as the guard
+bounds the peak. The
 PSF beam fit is switchable
 (`psf_fitting_method="astroviper" | "casa"`); `"casa"` is a C++ port of CASA's
 `StokesImageUtil::FitGaussianPSF` (CAS-13022,

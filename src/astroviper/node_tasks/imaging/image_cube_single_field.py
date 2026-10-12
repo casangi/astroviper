@@ -617,13 +617,14 @@ def image_cube_single_field(
           Number of consecutive deconvolution iterations the RMS of
           a plane's residual, taken over the clean mask, may be above
           ``(1 + gain / 10)`` times the lowest RMS it has reached in the model
-          update before that model update is stopped as diverged. A peak
-          above ``(1 + gain)`` times the peak at the start of the model
-          update, or a peak that is not finite, stops it at once. The next
+          update before that model update is stopped as diverged. For Hogbom
+          a peak above ``(1 + gain)`` times the peak at the start of the
+          model update stops it at once (Asp bounds its peak with CASA's own
+          guard instead), and an infinite peak always does. The next
           residual update then recomputes the true residual and the cycles
           go on. Default 1, the first such iteration; ``-1`` disables the
-          test. *Differs from CASA*, which tests the peak for a fixed 10
-          percent rise once every 2000 iterations.
+          two limits. *Differs from CASA*, whose Hogbom tests the peak for a
+          fixed 10 percent rise once every 2000 iterations.
         - ``entropy_stop`` : If ``True``, a plane stops once the entropy of
           its residual has passed its maximum. The entropy (Homan, Roth and
           Pushkarev 2024, AJ 167, 11) measures how much the residual looks
