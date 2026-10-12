@@ -8,16 +8,17 @@
 // library plus the small self-contained headers asp_fft.hpp (FFTs via the
 // vendored pocketfft header) and asp_lbfgs.hpp.
 //
-// Two deliberate departures from CASA, both documented at the code:
+// Deliberate departures from CASA, documented at the code:
 //  * the FFT bookkeeping (separable Aspen spectra, paired inverse transforms)
 //    computes the same quantities with roughly an eighth of the transforms;
-//  * the "diverging" guard bounds the peak of the fitted component's dirty
-//    response instead of the raw Aspen strength, which is not in Jy/beam and
-//    made CASA's test abort minor cycles on legitimate wide components.
-// The model update also stops on the divergence test shared with the other
-// deconvolvers (../../include/plane_stop_test.hpp): its two limits are off
-// unless the caller enables them, an infinite peak always stops the model
-// update. astroviper's Python layer enables the RMS limit only.
+//  * the residual update covers the whole image, not a PSF-sized box;
+//  * there is no "diverging" guard (AspMatrixCleaner "5. Diverging" in CASA
+//    6.7.5.18 and LibRA fc54ee25): the model update stops on the divergence
+//    test shared with
+//    the other deconvolvers (../../include/plane_stop_test.hpp), whose two
+//    limits are off unless the caller enables them; an infinite peak always
+//    stops the model update. astroviper's Python layer gives Asp the RMS
+//    limit with the factor (1 + gain) and no peak limit.
 //
 // The algorithm finds, at each model update iteration, the best "Aspen" (a
 // Gaussian component whose amplitude, scale size and position are optimized by
@@ -38,8 +39,8 @@ struct AspResult {
                                   //  0 not converged, behaving normally
                                   // -1 stopped on consecutive smallest scale
                                   // -2 large-scale negative / diverging
-                                  // -3 diverging (CASA's guard or the divergence
-                                  //    test shared with the other deconvolvers)
+                                  // -3 diverging (the divergence test shared
+                                  //    with the other deconvolvers)
     double peak_residual = 0.0;   // |peak| of the (masked) residual at exit
     double model_flux = 0.0;      // sum of the model image at exit
     bool switched_to_hogbom = false;

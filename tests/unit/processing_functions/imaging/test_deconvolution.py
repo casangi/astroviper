@@ -1111,12 +1111,15 @@ class TestAspClean:
         with pytest.raises(ValueError, match="polarization"):
             asp_clean(resid, psf, model)
 
-    @pytest.mark.parametrize(("max_iter_divergence", "iterations"), [(1, 2), (-1, 4)])
+    @pytest.mark.parametrize(
+        ("max_iter_divergence", "iterations", "diverged"),
+        [(1, 6, True), (-1, 40, False)],
+    )
     def test_divergence_test_follows_max_iter_divergence(
-        self, max_iter_divergence, iterations
+        self, max_iter_divergence, iterations, diverged
     ):
-        """The shared test stops the model update at the first rise of the
-        RMS; without it CASA's guard stops it later."""
+        """The model update stops once the RMS is above (1 + gain) times its
+        lowest value; without the test nothing stops the runaway."""
         residual, psf = _spreading_problem()
         result = asp_clean(
             residual,
@@ -1132,10 +1135,10 @@ class TestAspClean:
             },
         )
         assert result["iterations_performed"].item() == iterations
-        assert result["diverged"].item()
-        assert result["retval"].item() == -3
+        assert result["diverged"].item() == diverged
+        assert (result["retval"].item() == -3) == diverged
 
-    def test_hard_limit_is_left_to_casas_guard(self, monkeypatch):
+    def test_rms_limit_takes_the_hard_factor_and_no_peak_limit(self, monkeypatch):
         captured = {}
 
         def clean_cube(**kwargs):
@@ -1146,7 +1149,7 @@ class TestAspClean:
         residual, psf = _spreading_problem()
         asp_clean(residual, psf, np.zeros_like(residual), {"gain": 0.2})
         assert captured["max_iter_divergence"] == 1
-        assert captured["divergence_rms_factor"] == _divergence_factors(0.2)[0]
+        assert captured["divergence_rms_factor"] == _divergence_factors(0.2)[1]
         assert captured["divergence_peak_factor"] == np.inf
 
 
@@ -1223,7 +1226,7 @@ class TestDeconvolveAsp:
             },
         )
         (entry,) = imaging_dict.data.values()
-        assert entry["iter_done"] == [2]
+        assert entry["iter_done"] == [6]
         assert entry["stop_code"] == StopCode(IMAGING_CONTINUE, MODEL_UPDATE_DIVERGENCE)
 
 

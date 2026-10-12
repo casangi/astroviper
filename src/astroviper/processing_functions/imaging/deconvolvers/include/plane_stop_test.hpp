@@ -36,7 +36,9 @@ enum StopReason : int {
  *
  * max_iter_divergence < 0 disables the first two tests. The caller derives
  * the factors from the loop gain: rms_factor = 1 + gain / 10 and
- * peak_factor = 1 + gain (infinite for Asp, whose own guard bounds the peak).
+ * peak_factor = 1 + gain. For Asp, whose least-squares components can raise
+ * the peak of a healthy residual and its RMS by more than gain / 10, the
+ * caller passes rms_factor = 1 + gain and an infinite peak_factor.
  *
  * The kernels hand the stop test the sum of the squares and not the RMS. The
  * number of pixels of a plane does not change during a model update, so

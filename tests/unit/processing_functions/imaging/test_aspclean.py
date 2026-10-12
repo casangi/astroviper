@@ -456,7 +456,7 @@ class TestDivergence:
     The spreading PSF has 24 sidelobes of -0.3 on a square ring around its
     peak, so a subtraction at gain 0.9 lowers the peak of a point source from
     1 to 0.27 but raises the RMS of the residual 1.33 times: the soft limit
-    stops the model update, CASA's guard (also retval -3) only later. The
+    stops the model update; with the test off nothing stops this runaway. The
     chain PSF has one sidelobe of -1.2, so the peak grows 1.08 times per
     iteration. Asp counts the iteration whose check stops it.
     """
@@ -507,9 +507,9 @@ class TestDivergence:
         off, residual_off, model_off = self._clean(
             self._spreading(), max_iter_divergence=-1
         )
-        # CASA's guard ends both
-        assert result["iterations_performed"] == off["iterations_performed"] == 4
-        assert result["retval"] == off["retval"] == -3
+        # nothing else stops the runaway: both spend their budget
+        assert result["iterations_performed"] == off["iterations_performed"] == 40
+        assert result["retval"] == off["retval"] == 0
         np.testing.assert_array_equal(residual, residual_off)
         np.testing.assert_array_equal(model, model_off)
 
@@ -528,6 +528,43 @@ class TestDivergence:
         # the peak fell; the RMS rose
         assert result["peak_residual"] == pytest.approx(0.27, rel=1e-5)
         assert np.count_nonzero(model) == 1
+
+    @pytest.mark.parametrize(("max_iter_divergence", "iterations"), [(1, 6), (2, 7)])
+    def test_asp_limits_stop_the_runaway(self, max_iter_divergence, iterations):
+        # The limits asp_clean() passes at gain 0.9: (1 + gain) on the RMS and
+        # no peak limit. Five subtractions raise the RMS 1.94 times.
+        result, _, _ = self._clean(
+            self._spreading(),
+            max_iter_divergence=max_iter_divergence,
+            divergence_rms_factor=self.PEAK_FACTOR,
+            divergence_peak_factor=np.inf,
+        )
+        assert result["iterations_performed"] == iterations
+        assert result["diverged"]
+
+    def test_peak_above_1500_is_cleaned(self):
+        # The "5. Diverging" guard of CASA 6.7.5.18 and LibRA (fc54ee25)
+        # started its lowest peak at 1000, so it stopped any plane with a peak
+        # above 1500 at once (casa master has dropped that test).
+        psf, _, dirty = TestClean()._make_scene()
+        results = []
+        for scale in (1.0, 1e4):
+            residual = dirty * scale
+            model = np.zeros_like(dirty)
+            result = aspclean.clean(
+                residual,
+                psf,
+                model,
+                gain=0.1,
+                threshold=0.05 * scale,
+                max_iter_remaining=100,
+            )
+            results.append((result, model.sum() / scale))
+        (unit, unit_flux), (scaled, scaled_flux) = results
+        assert scaled["iterations_performed"] > 1
+        assert not scaled["diverged"]
+        assert scaled["retval"] == unit["retval"]
+        assert scaled_flux == pytest.approx(unit_flux, rel=1e-6)
 
     def test_consecutive_iterations_above_the_soft_limit(self):
         result, _, _ = self._clean(
@@ -604,7 +641,7 @@ class TestDivergence:
         )
         np.testing.assert_array_equal(result["diverged"], [[[True, False]]])
         np.testing.assert_array_equal(result["retval"][0, 0, 0], -3)
-        # the shared test, not CASA's guard (iteration 4), stops plane 0
+        # the shared test stops plane 0
         np.testing.assert_array_equal(result["iterations_performed"], [[[2, 40]]])
 
     def test_rms_is_taken_inside_the_mask(self):
@@ -714,10 +751,10 @@ class TestResolvedSource:
 
     Regression test for two failure modes of the first port on extended
     emission: the per-Aspen L-BFGS jumping to a garbage (amplitude, scale)
-    pair, and the divergence guard (``retval == -3``) firing on legitimate
-    wide components because CASA's test compares the Aspen strength (not in
-    Jy/beam) with the peak residual. Both made every minor cycle stop after
-    one to three iterations without progress.
+    pair, and a spurious divergence stop (``retval == -3``) on legitimate
+    wide components. Both made every model update stop after one to three
+    iterations without progress. The test runs with the divergence limits
+    asp_clean() passes, which must not fire here.
     """
 
     @staticmethod
@@ -755,7 +792,15 @@ class TestResolvedSource:
         resid = dirty.copy()
         model = np.zeros_like(dirty)
         out = aspclean.clean(
-            resid, psf, model, gain=0.1, threshold=1e-4, max_iter_remaining=300
+            resid,
+            psf,
+            model,
+            gain=0.1,
+            threshold=1e-4,
+            max_iter_remaining=300,
+            max_iter_divergence=1,
+            divergence_rms_factor=1.1,
+            divergence_peak_factor=np.inf,
         )
         assert out["retval"] != -3  # no spurious "diverging" stop
         assert out["iterations_performed"] >= 30  # the minor cycle actually ran

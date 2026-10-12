@@ -716,8 +716,6 @@ private:
         double totalFlux = 0.0;
         int converged = 0;
         int stopPointModeCounter = 0;
-        double tmpMaximumResidual = 0.0;
-        double minMaximumResidual = 1000.0;
         double initRMSResidual = 1000.0;
 
         iteration_ = startingIter_;
@@ -771,12 +769,7 @@ private:
             totalFlux += (strengthOptimum_ * gain_);
             totalFlux_ = totalFlux;
 
-            if (ii == startingIter_) {
-                maximumResidual_ = std::abs(peakResidual_);
-                tmpMaximumResidual = maximumResidual_;
-            }
-            if (std::abs(minMaximumResidual) > std::abs(peakResidual_))
-                minMaximumResidual = std::abs(peakResidual_);
+            if (ii == startingIter_) maximumResidual_ = std::abs(peakResidual_);
 
             // 0. below cycle threshold
             if (std::abs(peakResidual_) < computeThreshold()) {
@@ -785,7 +778,13 @@ private:
                 break;
             }
             // Divergence test shared with the other deconvolvers, on the
-            // masked residual of the threshold test.
+            // masked residual of the threshold test. It replaces the
+            // "5. Diverging" guard of AspMatrixCleaner in CASA 6.7.5.18 and
+            // LibRA (main at fc54ee25, AspMatrixCleaner.cc L515-518). Its fixed
+            // factor 1.5 stops healthy Asp model updates, and its running
+            // minimum starts at 1000, so a plane with a peak above 1500
+            // stopped at once. casa master has dropped the running minimum
+            // and keeps the two factor 1.5 tests against the starting peak.
             if (stopTest_.check_divergence(std::abs(peakResidual_), sumSquares_,
                                            divergence_) != deconvolvers::STOP_NONE) {
                 converged = -3;
@@ -814,35 +813,10 @@ private:
                 }
             }
             // PSF (*) scale, centred at the optimum position (the scale image is
-            // separable, so its spectrum needs no 2-D forward transform). Needed
-            // both for the divergence test and for the residual update.
+            // separable, so its spectrum needs no 2-D forward transform).
             std::vector<cd> scaleXfr = scale_image_spectrum(nx_, ny_, usedScale, posOptI_, posOptJ_);
             std::vector<double> psfConvScale;
             conv_from_spectra(psfXfr_, scaleXfr, nx_, ny_, psfConvScale);
-
-            // 5. diverging. CASA compares |strengthOptimum| itself with the
-            // initial peak residual, but the strength multiplies a scale image
-            // normalised to 1 / (sqrt(2 pi) scale), so it is not in Jy/beam:
-            // for an Aspen much wider than the PSF the strength legitimately
-            // exceeds the peak by the ratio scale / (2.5 psf_sigma^2) and the
-            // CASA test aborts the minor cycle on perfectly good components
-            // (any Aspen wider than ~4 beams on a 5-pixel beam). The peak of
-            // the fitted component's dirty-image response, |strength| *
-            // max|psf (*) scale|, is the unit-consistent quantity the test is
-            // meant to bound; the residual-based parts are unchanged.
-            double componentPeak = 0.0;
-            for (double v : psfConvScale) componentPeak = std::max(componentPeak, std::fabs(v));
-            componentPeak *= std::abs(strengthOptimum_);
-            if ((componentPeak - std::abs(tmpMaximumResidual)) >
-                    (std::abs(tmpMaximumResidual) / 2.0) ||
-                (std::abs(peakResidual_) - std::abs(tmpMaximumResidual)) >
-                    (std::abs(tmpMaximumResidual) / 2.0) ||
-                (std::abs(peakResidual_) - std::abs(minMaximumResidual)) >
-                    (std::abs(minMaximumResidual) / 2.0)) {
-                converged = -3;
-                switchedToHogbom_ = false;
-                break;
-            }
 
             // --- update model and residual with the optimum scale ---
             // CASA restricts both updates to a PSF-sized box around the

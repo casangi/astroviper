@@ -36,8 +36,9 @@ def model_update_cube_single_field(
         residual inside the mask has been above ``(1 + gain / 10)`` times the
         lowest RMS reached for that many iterations in a row or, for Hogbom,
         at once when the peak exceeds ``(1 + gain)`` times the peak at the
-        start of the model update (Asp bounds its peak with CASA's own
-        guard). An infinite peak always stops it.  The
+        start of the model update (Asp has no peak limit and allows
+        ``(1 + gain)`` times the lowest RMS). An infinite peak always stops
+        it.  The
         separate ``primary_beam_limit`` builds the primary-beam mask (a
         chunk-independent quantity, so the mask does not depend on how the cube
         was split across tasks); it is distinct from the deconvolver
