@@ -290,8 +290,9 @@ def moments(
         Compressor applied to each on-disk chunk of the moment maps.  Default
         ``Blosc(cname="lz4", clevel=5)``.
     overwrite : bool, default False
-        If ``True`` an existing ``moments_image_store`` is overwritten;
-        otherwise its presence raises ``RuntimeError``.
+        If ``True`` an existing store the moment maps are written to is
+        overwritten; otherwise its presence, or that of
+        ``moments_image_store``, raises ``RuntimeError`` (see Notes).
     memory_budget_gb : float, default 1.0
         Memory budget (GiB) for one streaming read request of a node task
         along the moment axis, covering the decoded block AND the zarr
@@ -328,7 +329,19 @@ def moments(
         If a moment / axis choice is invalid, both pixel ranges are given, or
         ``selection`` selects along the parallel axis.
     RuntimeError
-        If ``moments_image_store`` exists and ``overwrite=False``.
+        If ``overwrite=False`` and ``moments_image_store`` or the store the
+        moment maps are written to (see Notes) exists.
+
+    Notes
+    -----
+    The output store is created with :func:`xradio.image.write_image`.
+    XRADIO versions that give image Zarr stores the ``.img.zarr`` extension
+    give it to a ``moments_image_store`` without it (``moments.zarr`` gives
+    ``moments.img.zarr``), and the moment maps are written to that store; a
+    ``moments_image_store`` that ends in ``.img.zarr`` is kept by every
+    version. With ``overwrite=False``, ``RuntimeError`` is raised if either
+    ``moments_image_store`` or that store exists; ``overwrite=True`` replaces
+    only the store the moment maps are written to.
     """
     import dask
     import pandas as pd
@@ -339,13 +352,15 @@ def moments(
         make_parallel_coord,
     )
     from graphviper.graph_tools.map import map
-    from xradio.image import write_image
 
     from astroviper.utils.data_partitioning import (
         calculate_data_chunking,
         get_thread_info,
     )
-    from astroviper.utils.io import create_empty_data_variables_on_disk
+    from astroviper.utils.io import (
+        create_empty_data_variables_on_disk,
+        write_zarr_image_store,
+    )
 
     if selection is None:
         selection = {}
@@ -609,12 +624,20 @@ def moments(
     # spec Zarr v3's to_zarr rejects (mirrors the feather driver).
     for variable_name in moments_img_xds.variables:
         moments_img_xds[variable_name].encoding = {}
-    write_image(
-        moments_img_xds,
-        imagename=moments_image_store,
-        out_format="zarr",
-        overwrite=overwrite,
-    )
+    # The store written can differ from the moments_image_store given (the
+    # ".img.zarr" extension of newer XRADIO versions); everything below uses
+    # the store written. The check above tests the moments_image_store given;
+    # XRADIO raises FileExistsError, before writing anything, if the store
+    # written exists.
+    try:
+        moments_image_store = write_zarr_image_store(
+            moments_img_xds, moments_image_store, overwrite=overwrite
+        )
+    except FileExistsError as exc:
+        raise RuntimeError(
+            "Already existing image store will not be overwritten. To "
+            f"overwrite it, set overwrite=True ({exc})"
+        ) from exc
 
     # Pre-allocate the moment data variables (NaN-filled) so each map task can
     # lazily write its own slice in parallel.  Image-valued moments follow the
