@@ -566,6 +566,44 @@ class TestDivergence:
         assert scaled["retval"] == unit["retval"]
         assert scaled_flux == pytest.approx(unit_flux, rel=1e-6)
 
+    @pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+    @pytest.mark.parametrize("dtype", [np.float64, np.float32])
+    @pytest.mark.parametrize("mask_value", [0.0, 0.5])
+    def test_non_finite_pixels_outside_the_mask_take_no_part(
+        self, bad, dtype, mask_value
+    ):
+        psf, _, dirty = TestClean()._make_scene(dtype)
+        mask = np.zeros_like(dirty)
+        mask[20:110, 20:110] = 1.0
+        # a mask value up to 0.99 is outside the search region too
+        mask[0, 0] = mask[5, 120] = mask_value
+        finite = dirty.copy()
+        finite[0, 0] = finite[5, 120] = 0.0
+        # pixel (0, 0) seeded the peak search, which then stopped the plane
+        # at once; elsewhere the scale convolutions spread the value
+        nan = finite.copy()
+        nan[0, 0] = nan[5, 120] = bad
+        out = []
+        for residual in (finite, nan):
+            model = np.zeros_like(dirty)
+            result = aspclean.clean(
+                residual,
+                psf,
+                model,
+                mask=mask,
+                gain=0.1,
+                threshold=0.05,
+                max_iter_remaining=100,
+            )
+            out.append((result, model))
+        (ref, model_ref), (result, model) = out
+        assert result["iterations_performed"] == ref["iterations_performed"]
+        assert result["retval"] == ref["retval"]
+        np.testing.assert_array_equal(model, model_ref)
+        assert np.array_equal(nan[[0, 5], [0, 120]], [bad, bad], equal_nan=True)
+        keep = np.isfinite(nan)
+        np.testing.assert_array_equal(nan[keep], finite[keep])
+
     def test_consecutive_iterations_above_the_soft_limit(self):
         result, _, _ = self._clean(
             self._spreading(),

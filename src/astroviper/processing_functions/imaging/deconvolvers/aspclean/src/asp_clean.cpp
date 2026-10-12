@@ -24,6 +24,7 @@
 #include <deque>
 #include <numeric>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "../include/asp_fft.hpp"
@@ -37,6 +38,8 @@ using aspfft::cd;
 
 constexpr double kTwoPi = 6.283185307179586476925286766559;
 constexpr double kSqrtTwoPi = 2.5066282746310002;
+// A pixel belongs to the search region where the mask is above this value.
+constexpr double kMaskThreshold = 0.99;
 
 // ---------------------------------------------------------------------------
 // Lightweight column-compatible 2-D matrix of doubles.
@@ -331,7 +334,7 @@ private:
     std::vector<Mat> initScaleMasks_;        // itsInitScaleMasks
     std::vector<Mat> dirtyConvInitScales_;   // itsDirtyConvInitScales
     Mat maskMat_;                            // itsMask (always present)
-    double maskThreshold_ = 0.99;
+    double maskThreshold_ = kMaskThreshold;
     bool noClean_ = false;
     int blc0_ = 0, blc1_ = 0, trc0_ = 0, trc1_ = 0;  // blcDirty/trcDirty bbox
 
@@ -694,10 +697,11 @@ private:
     }
 
     // Peak |residual| over the scale-0 mask (itsInitScaleMasks[0]); the sum
-    // of the squares of the same masked residual goes to sumSquares_.
+    // of the squares of the same masked residual goes to sumSquares_. The
+    // search starts from zero, so a pixel that is not a number is skipped.
     double peakResidualMasked() {
-        double minVal = dirtyAt(0, 0) * initScaleMasks_[0](0, 0);
-        double maxVal = minVal;
+        double minVal = 0.0;
+        double maxVal = 0.0;
         sumSquares_ = 0.0;
         for (int j = 0; j < ny_; ++j)
             for (int i = 0; i < nx_; ++i) {
@@ -974,10 +978,25 @@ AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
                          int largestscale, int stoppointmode, int norm_method,
                          bool verbose,
                          const deconvolvers::DivergenceControl<double>& divergence) {
+    // A pixel outside the search region that is not finite would spread over
+    // the plane through the scale convolutions and the fit: it is zero during
+    // the model update and gets its value back afterwards.
+    std::vector<std::pair<std::size_t, T>> nonFinite;
+    if (mask != nullptr) {
+        const std::size_t n = static_cast<std::size_t>(nx) * ny;
+        for (std::size_t k = 0; k < n; ++k)
+            if (!(static_cast<double>(mask[k]) > kMaskThreshold) &&
+                !std::isfinite(residual[k])) {
+                nonFinite.emplace_back(k, residual[k]);
+                residual[k] = T(0);
+            }
+    }
     Cleaner<T> cleaner(residual, model, psf, mask, nx, ny, gain, threshold,
                        max_iter_remaining, fusedthreshold, psf_width, largestscale,
                        stoppointmode, norm_method, verbose, divergence);
-    return cleaner.run();
+    const AspResult result = cleaner.run();
+    for (const auto& [k, value] : nonFinite) residual[k] = value;
+    return result;
 }
 
 template <typename T>

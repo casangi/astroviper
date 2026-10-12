@@ -1138,6 +1138,45 @@ class TestAspClean:
         assert result["diverged"].item() == diverged
         assert (result["retval"].item() == -3) == diverged
 
+    def test_plane_with_nan_in_the_search_region_gets_no_iterations(self):
+        residual, psf = _spreading_problem()
+        residual[0, 0, 0, 3, 3] = np.nan
+        model = np.zeros_like(residual)
+        result = asp_clean(
+            residual,
+            psf,
+            model,
+            {"gain": 0.1, "max_iter": 40, "threshold": 0.0, "psf_width": 1.0},
+        )
+        assert result["iterations_performed"].item() == 0
+        assert not result["diverged"].item()
+        assert not model.any()
+
+    @pytest.mark.parametrize("mask_dtype", [bool, np.float64])
+    def test_nan_outside_the_mask_changes_nothing(self, mask_dtype):
+        out = []
+        for value in (0.0, np.nan):
+            residual, psf = _spreading_problem()
+            mask = np.zeros(residual.shape, dtype=mask_dtype)
+            mask[..., 8:24, 8:24] = 1
+            residual[0, 0, 0, 0, 0] = value
+            model = np.zeros_like(residual)
+            result = asp_clean(
+                residual,
+                psf,
+                model,
+                {"gain": 0.1, "max_iter": 40, "threshold": 0.0, "psf_width": 1.0},
+                mask_cube=mask,
+            )
+            out.append((result, residual, model))
+        (ref, _, model_ref), (result, residual, model) = out
+        assert (
+            result["iterations_performed"].item() == ref["iterations_performed"].item()
+        )
+        assert result["retval"].item() == ref["retval"].item()
+        np.testing.assert_array_equal(model, model_ref)
+        assert np.isnan(residual[0, 0, 0, 0, 0])
+
     def test_rms_limit_takes_the_hard_factor_and_no_peak_limit(self, monkeypatch):
         captured = {}
 

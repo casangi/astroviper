@@ -19,6 +19,9 @@
 //    limits are off unless the caller enables them; an infinite peak always
 //    stops the model update. astroviper's Python layer gives Asp the RMS
 //    limit with the factor (1 + gain) and no peak limit.
+// A residual pixel outside the search region (mask not above 0.99) that is
+// not finite is zero during the model update and gets its value back
+// afterwards.
 //
 // The algorithm finds, at each model update iteration, the best "Aspen" (a
 // Gaussian component whose amplitude, scale size and position are optimized by

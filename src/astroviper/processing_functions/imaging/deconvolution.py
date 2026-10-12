@@ -1240,8 +1240,12 @@ def asp_clean(
         ``(1 + gain)`` times the lowest RMS of the model update for
         ``max_iter_divergence`` consecutive iterations, or when its peak is
         infinite. Asp has no peak limit: its least-squares components can
-        raise the peak of a healthy residual. The final residual and model
-        cubes are the caller-supplied arrays, updated in place.
+        raise the peak of a healthy residual. A plane whose search region (the
+        pixels whose mask value is above 0.99, or the whole plane without a
+        mask) holds a pixel that is not a number gets no iterations (not
+        ``diverged``); pixels outside the search region that are not finite are
+        zero during the model update and keep their value. The final residual
+        and model cubes are the caller-supplied arrays, updated in place.
 
     Raises
     ------
@@ -1309,6 +1313,13 @@ def asp_clean(
     # float64 threshold_per_cycle regardless of the image dtype.
     max_iter_per_cycle, threshold_per_cycle = _per_plane_iteration_controls(
         deconvolve_params, nt, nf, npol_img, np.float64
+    )
+    # A plane whose search region (mask above the kernel's 0.99) holds a pixel
+    # that is not a number gets no iterations, as with the Hogbom kernels.
+    search = None if mask_cube is None else mask_cube > 0.99
+    start_peak = _hogbom_peak_cube(residual_cube, search, (-1, -1, -1, -1))
+    max_iter_per_cycle = np.where(np.isnan(start_peak), 0, max_iter_per_cycle).astype(
+        max_iter_per_cycle.dtype
     )
 
     return aspclean.clean_cube(
