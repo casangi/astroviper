@@ -73,7 +73,30 @@ def imaging_preparation_single_field(
           residual reflects the final model. ``max_cycles = 0`` makes only the
           dirty image; ``max_cycles = -1`` removes the limit. Counted per
           frequency channel: a channel that converges early stops cycling while
-          the others continue.
+          the others continue. ``max_cycles = "auto"`` predicts the limit of a
+          channel from its dirty image: every plane takes ``P0``, its peak
+          residual at the start of the first cycle (the ``peak_residual``
+          below), ``f``, its PSF fraction (below), and ``L``, its threshold or,
+          when that is 0, its theoretical point source sensitivity, worked out
+          from the imaging weights as the ``SENSITIVITY`` of
+          ``point_spread_function_cube_single_field``;
+          ``n = ceil(ln(P0 / L) / ln(1 / f))`` cycles (at least 1) bring the
+          peak down to ``L``, and the plane's limit is ``n + 3`` against a
+          threshold and ``3 * n`` against the sensitivity (``EXTRA_CYCLES``
+          and ``NOISY_CYCLE_SAFETY`` of
+          :mod:`~astroviper.processing_functions.imaging.utils.cycle_control_heuristics`).
+          The sensitivity is the thermal noise of the plane when the weights
+          are absolute (``WEIGHT = 1 / sigma**2``). With unit weights, as a
+          simulation without noise writes them, it is not a noise level but
+          about 1 over the square root of the number of visibilities (natural
+          weighting; 1e-3 for a million) in the units of the data; the limit
+          grows only with ``ln(P0 / L)``, and on the same prediction ``3 * n``
+          cycles bring the peak down to ``P0 * (L / P0)**3``. The channel's
+          ``max_cycles`` is the largest limit of its planes (at least 1; a
+          plane without a pixel in the clean mask, with a peak of 0 or without
+          data is left out) and then counts down like a number. Every plane
+          records its limit as ``max_cycles_auto`` in the returned convergence
+          record. Needs ``max_psf_fraction < 1``.
         - ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, as a
           float in Jy, or a list of one float per Stokes plane in the order of
           ``polarization_coords`` (the floors of the Stokes planes of noise free
@@ -146,6 +169,21 @@ def imaging_preparation_single_field(
           two image axes used for the entropy. Default 7.
         - ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for
           the entropy. Default 10.
+        - ``record_iteration_history`` : If ``True``, every model update
+          records, for every plane and every deconvolution iteration, the peak
+          residual the iteration cleaned (signed, in the units of the residual
+          image) and the RMS of the residual inside the clean mask after its
+          subtraction, to follow the deconvolution in detail. The returned
+          convergence record holds them as ``iteration_peak_residual`` and
+          ``iteration_residual_rms``: per plane one array per cycle, with one
+          value per iteration of that cycle's model update (empty for a cycle
+          without one), so the record grows by two float64 values per
+          iteration done. A debugging and tuning tool: the images are the same
+          to the bit with and without it, and the RMS is the sum of squares
+          the peak search of the next iteration makes anyway, so it costs no
+          extra pass over the image per iteration. Hogbom deconvolvers only:
+          ``deconvolver="asp"`` raises ``ValueError``. Default ``False``.
+          No CASA equivalent.
 
         A plane whose model updates do no iteration any more (two in a row)
         is stopped with the no progress stop code, so an all-zero plane cannot
@@ -178,24 +216,30 @@ def imaging_preparation_single_field(
         ``"sky_model"``, ``"point_spread_function"``, ``"primary_beam"``).
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
-        ``type`` (``"prolate_spheroidal"``, Schwab's rational approximation
-        of the ``m = 6``, ``alpha = 1`` function with its analytic correction,
-        the kernel CASA uses; ``"exponential_semicircle"``, the modified
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
         exponential of a semicircle of Barnett et al. 2019 and Arras et al.
-        2021 shaped for the image region the ``fft_padding`` keeps; or
+        2021 shaped for that region; or
         ``"least_misfit"``, the table that minimises the map error over that
         region for the lookup used, after Ye et al. 2020), ``support`` (the
         odd number of grid points the kernel spans along one axis; 7 for the
-        prolate spheroidal kernel, any odd number from 3 for the others),
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
         ``oversampling`` (samples of the kernel table per uv cell) and
         ``interpolation`` (how the gridders read the table at a stencil
         point: ``"nearest"`` takes the nearest sample, so the lookup error,
         and with it the floor the imaging cycle converges to, falls as 1 over
         the oversampling; ``"linear"`` interpolates the two neighbouring
         samples and the error falls as 1 over its square). Missing keys take
-        the defaults ``{"type": "prolate_spheroidal", "support": 7,
+        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
         "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
-        defaults.
+        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
+        ``least_misfit`` kernel whose image plane correction falls below 1e-6
+        of its centre value at the edge of the image kept (a support too large
+        for the ``fft_padding``, e.g. 17 at 1.05) is refused.
     primary_beam_params : dict, optional
         The primary beam of the imager, the power pattern of CASA's obscured Airy
         disk that gives the clean mask and the primary beam correction:
@@ -358,7 +402,30 @@ def image_cube_single_field(
           residual reflects the final model. ``max_cycles = 0`` makes only the
           dirty image; ``max_cycles = -1`` removes the limit. Counted per
           frequency channel: a channel that converges early stops cycling while
-          the others continue.
+          the others continue. ``max_cycles = "auto"`` predicts the limit of a
+          channel from its dirty image: every plane takes ``P0``, its peak
+          residual at the start of the first cycle (the ``peak_residual``
+          below), ``f``, its PSF fraction (below), and ``L``, its threshold or,
+          when that is 0, its theoretical point source sensitivity, worked out
+          from the imaging weights as the ``SENSITIVITY`` of
+          ``point_spread_function_cube_single_field``;
+          ``n = ceil(ln(P0 / L) / ln(1 / f))`` cycles (at least 1) bring the
+          peak down to ``L``, and the plane's limit is ``n + 3`` against a
+          threshold and ``3 * n`` against the sensitivity (``EXTRA_CYCLES``
+          and ``NOISY_CYCLE_SAFETY`` of
+          :mod:`~astroviper.processing_functions.imaging.utils.cycle_control_heuristics`).
+          The sensitivity is the thermal noise of the plane when the weights
+          are absolute (``WEIGHT = 1 / sigma**2``). With unit weights, as a
+          simulation without noise writes them, it is not a noise level but
+          about 1 over the square root of the number of visibilities (natural
+          weighting; 1e-3 for a million) in the units of the data; the limit
+          grows only with ``ln(P0 / L)``, and on the same prediction ``3 * n``
+          cycles bring the peak down to ``P0 * (L / P0)**3``. The channel's
+          ``max_cycles`` is the largest limit of its planes (at least 1; a
+          plane without a pixel in the clean mask, with a peak of 0 or without
+          data is left out) and then counts down like a number. Every plane
+          records its limit as ``max_cycles_auto`` in the returned convergence
+          record. Needs ``max_psf_fraction < 1``.
         - ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, as a
           float in Jy, or a list of one float per Stokes plane in the order of
           ``polarization_coords`` (the floors of the Stokes planes of noise free
@@ -431,6 +498,21 @@ def image_cube_single_field(
           two image axes used for the entropy. Default 7.
         - ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for
           the entropy. Default 10.
+        - ``record_iteration_history`` : If ``True``, every model update
+          records, for every plane and every deconvolution iteration, the peak
+          residual the iteration cleaned (signed, in the units of the residual
+          image) and the RMS of the residual inside the clean mask after its
+          subtraction, to follow the deconvolution in detail. The returned
+          convergence record holds them as ``iteration_peak_residual`` and
+          ``iteration_residual_rms``: per plane one array per cycle, with one
+          value per iteration of that cycle's model update (empty for a cycle
+          without one), so the record grows by two float64 values per
+          iteration done. A debugging and tuning tool: the images are the same
+          to the bit with and without it, and the RMS is the sum of squares
+          the peak search of the next iteration makes anyway, so it costs no
+          extra pass over the image per iteration. Hogbom deconvolvers only:
+          ``deconvolver="asp"`` raises ``ValueError``. Default ``False``.
+          No CASA equivalent.
 
         A plane whose model updates do no iteration any more (two in a row)
         is stopped with the no progress stop code, so an all-zero plane cannot
@@ -492,24 +574,30 @@ def image_cube_single_field(
         (the fit behind ``tclean``'s restoring beam).
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
-        ``type`` (``"prolate_spheroidal"``, Schwab's rational approximation
-        of the ``m = 6``, ``alpha = 1`` function with its analytic correction,
-        the kernel CASA uses; ``"exponential_semicircle"``, the modified
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
         exponential of a semicircle of Barnett et al. 2019 and Arras et al.
-        2021 shaped for the image region the ``fft_padding`` keeps; or
+        2021 shaped for that region; or
         ``"least_misfit"``, the table that minimises the map error over that
         region for the lookup used, after Ye et al. 2020), ``support`` (the
         odd number of grid points the kernel spans along one axis; 7 for the
-        prolate spheroidal kernel, any odd number from 3 for the others),
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
         ``oversampling`` (samples of the kernel table per uv cell) and
         ``interpolation`` (how the gridders read the table at a stencil
         point: ``"nearest"`` takes the nearest sample, so the lookup error,
         and with it the floor the imaging cycle converges to, falls as 1 over
         the oversampling; ``"linear"`` interpolates the two neighbouring
         samples and the error falls as 1 over its square). Missing keys take
-        the defaults ``{"type": "prolate_spheroidal", "support": 7,
+        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
         "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
-        defaults.
+        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
+        ``least_misfit`` kernel whose image plane correction falls below 1e-6
+        of its centre value at the edge of the image kept (a support too large
+        for the ``fft_padding``, e.g. 17 at 1.05) is refused.
     primary_beam_params : dict, optional
         The primary beam of the imager, the power pattern of CASA's obscured Airy
         disk that gives the clean mask and the primary beam correction:
@@ -535,13 +623,21 @@ def image_cube_single_field(
     combined_imaging_dict : ImagingDict
         Per-plane convergence statistics for this chunk.  Channel labels are
         chunk-local (0-based); the node task remaps them to global channel
-        numbers before the reduce.
+        numbers before the reduce.  With ``record_iteration_history`` every
+        plane holds, per cycle, the ``iteration_peak_residual`` and
+        ``iteration_residual_rms`` of its model update (one value per
+        iteration; empty for a cycle without a model update); with
+        ``max_cycles="auto"`` it holds ``max_cycles_auto``, the limit predicted
+        for the plane (the channel's limit is the largest of its planes').
     """
     import time
 
     import pandas as pd
     import toolviper.utils.logger as logger
 
+    from astroviper.processing_functions.imaging.deconvolution import (
+        validate_record_iteration_history,
+    )
     from astroviper.processing_functions.imaging.model_update import (
         model_update_cube_single_field,
     )
@@ -554,10 +650,16 @@ def image_cube_single_field(
         copy_residual_entropy,
         get_per_cycle_limits,
         merge_imaging_dicts,
+        resolve_auto_max_cycles,
     )
 
     if image_data_variables_keep is None:
         image_data_variables_keep = []
+    # Only the Hogbom deconvolvers record the iteration history: refused
+    # before any imaging work is done.
+    validate_record_iteration_history(
+        deconvolver, cycle_control_params.get("record_iteration_history", False)
+    )
 
     # All once-only work -- controller setup, imaging weights, PSF and primary
     # beam creation -- happens in the preparation step before the imaging cycle
@@ -632,6 +734,18 @@ def image_cube_single_field(
             img_xds,
             image_data_group_in_name="residual",
             cycle_control_params=cycle_control_params,
+        )
+        # max_cycles="auto" becomes a number from the dirty image, the
+        # residual of the first cycle, and for a plane with threshold 0 from
+        # the sensitivity of the imaging weights (a no-op afterwards, and for
+        # a number).
+        resolve_auto_max_cycles(
+            controller,
+            residual_imaging_dict,
+            ps_xdt,
+            img_xds,
+            cycle_control_params,
+            processing_set_data_group_name=processing_set_data_group_name,
         )
         pre_stopcode, pre_stopdesc = controller.check_convergence(residual_imaging_dict)
 

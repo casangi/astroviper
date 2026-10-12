@@ -195,6 +195,7 @@ class TestValidateDeconvolveParams:
             "min_psf_fraction": 0.05,
             "max_psf_fraction": 0.8,
             "max_iter_divergence": 1,
+            "record_iteration_history": False,
         }
 
     def test_empty_dict_returns_defaults(self):
@@ -207,6 +208,7 @@ class TestValidateDeconvolveParams:
             "min_psf_fraction": 0.05,
             "max_psf_fraction": 0.8,
             "max_iter_divergence": 1,
+            "record_iteration_history": False,
         }
 
     def test_partial_params_filled(self):

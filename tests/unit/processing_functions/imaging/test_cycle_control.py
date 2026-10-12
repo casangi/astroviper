@@ -411,6 +411,8 @@ class TestImagingDictFieldClassification(unittest.TestCase):
             "start_model_flux",
             "entropy",
             "residual_snr",
+            "iteration_peak_residual",
+            "iteration_residual_rms",
         }
         self.assertEqual(FIELD_ACCUM, expected_fields)
 
@@ -421,6 +423,7 @@ class TestImagingDictFieldClassification(unittest.TestCase):
             "gain",
             "max_iter",
             "threshold",
+            "max_cycles_auto",
         }
         self.assertEqual(FIELD_SINGLE_VALUE, expected_fields)
 
@@ -441,6 +444,8 @@ class TestImagingDictFieldClassification(unittest.TestCase):
                 "start_model_flux": 0.0,
                 "entropy": 7.5,
                 "residual_snr": 3.0,
+                "iteration_peak_residual": np.array([1.0, 0.9]),
+                "iteration_residual_rms": np.array([0.2, 0.19]),
             },
             time=0,
             pol=0,
@@ -466,6 +471,7 @@ class TestImagingDictFieldClassification(unittest.TestCase):
                 "gain": 0.1,
                 "max_iter": 1000,
                 "threshold": 0.01,
+                "max_cycles_auto": 7,
             },
             time=0,
             pol=0,

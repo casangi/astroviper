@@ -19,7 +19,9 @@ from astroviper.processing_functions.imaging.utils.cycle_control import (
     get_per_cycle_limits,
     merge_imaging_dicts,
     print_imaging_dict,
+    resolve_auto_max_cycles,
     validate_entropy_params,
+    validate_max_cycles,
 )
 from astroviper.processing_functions.imaging.utils.fft_sizing import (
     next_fft_friendly_size,
@@ -28,6 +30,7 @@ from astroviper.processing_functions.imaging.utils.fft_sizing import (
 from astroviper.processing_functions.imaging.utils.imaging_dict import (
     FIELD_ACCUM,
     FIELD_SINGLE_VALUE,
+    ITERATION_HISTORY_FIELDS,
     ImagingDict,
     Key,
     imaging_dict_to_dataframe,
@@ -48,12 +51,15 @@ __all__ = [
     "Key",
     "FIELD_ACCUM",
     "FIELD_SINGLE_VALUE",
+    "ITERATION_HISTORY_FIELDS",
     "CycleController",
     "StopCode",
     "merge_imaging_dicts",
     "build_residual_imaging_dict",
     "copy_residual_entropy",
     "validate_entropy_params",
+    "validate_max_cycles",
+    "resolve_auto_max_cycles",
     "get_per_cycle_limits",
     "get_peak_residual_from_imaging_dict",
     "get_masksum_from_imaging_dict",

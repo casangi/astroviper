@@ -4,7 +4,10 @@ import xarray as xr
 
 from astroviper.processing_functions.image_analysis import image_statistics as imgstats
 from astroviper.processing_functions.imaging.deconvolvers import aspclean, hogbom
-from astroviper.processing_functions.imaging.utils.imaging_dict import ImagingDict
+from astroviper.processing_functions.imaging.utils.imaging_dict import (
+    ITERATION_HISTORY_FIELDS,
+    ImagingDict,
+)
 from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
@@ -23,6 +26,10 @@ from astroviper.utils.data_group_tools import (
 # See ``hogbom_clean``.
 DIVERGENCE_RMS_GAIN_FRACTION = 0.1  # soft limit: (1 + gain / 10) x lowest RMS
 DIVERGENCE_PEAK_GAIN_FRACTION = 1.0  # hard limit: (1 + gain) x starting peak
+
+# The deconvolvers that record the history of every iteration of a model
+# update (``record_iteration_history``).
+ITERATION_HISTORY_ALGORITHMS = ("hogbom", "hogbom_many_threads")
 
 # XXX : TODO: As of 2025-10-07 there is no way to supply an initial model image to the deconvolver
 
@@ -110,6 +117,9 @@ def _validate_deconvolve_params(deconvolve_params):
           lowest RMS it has reached before its model update is stopped as
           diverged (Hogbom). ``-1`` disables the divergence test. Default 1:
           the model update stops at the first such iteration.
+        - ``record_iteration_history`` : bool, record the peak residual and
+          the residual RMS of every iteration (Hogbom only, see
+          :func:`hogbom_clean`). Default ``False``.
 
     Returns
     -------
@@ -136,6 +146,7 @@ def _validate_deconvolve_params(deconvolve_params):
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_iter_divergence": 1,
+        "record_iteration_history": False,
     }
 
     for key, default_value in default_params.items():
@@ -176,8 +187,50 @@ def _validate_deconvolve_params(deconvolve_params):
                     "max_iter_divergence must be a positive integer, or -1 to "
                     f"disable the divergence test; got {value!r}."
                 )
+        elif key == "record_iteration_history":
+            if not isinstance(value, bool | np.bool_):
+                raise ValueError(
+                    f"record_iteration_history must be a bool; got {value!r}."
+                )
 
     return deconvolve_params
+
+
+def validate_record_iteration_history(deconvolver, record_iteration_history):
+    """Refuse ``record_iteration_history`` for a deconvolver that cannot record it.
+
+    The Hogbom kernels record, for every iteration, the residual peak the
+    iteration cleaned and the RMS of the residual after its subtraction. An
+    Asp iteration subtracts a fitted Aspen (a component with a scale and an
+    amplitude that is not in Jy/beam) instead of the PSF at a residual peak,
+    so it has no such peak to record.
+
+    Parameters
+    ----------
+    deconvolver : str
+        Deconvolution algorithm (case insensitive).
+    record_iteration_history : bool
+        Whether the iteration history is requested.
+
+    Raises
+    ------
+    ValueError
+        If ``record_iteration_history`` is not a bool, or if the history is
+        requested from a deconvolver other than ``"hogbom"`` or
+        ``"hogbom_many_threads"``.
+    """
+    if not isinstance(record_iteration_history, bool | np.bool_):
+        raise ValueError(
+            "record_iteration_history must be a bool; got "
+            f"{record_iteration_history!r}."
+        )
+    if record_iteration_history and (
+        deconvolver.lower() not in ITERATION_HISTORY_ALGORITHMS
+    ):
+        raise ValueError(
+            "record_iteration_history is supported by the Hogbom deconvolvers "
+            f"{ITERATION_HISTORY_ALGORITHMS} only; got deconvolver {deconvolver!r}."
+        )
 
 
 def _divergence_factors(gain):
@@ -419,6 +472,11 @@ def create_imaging_dict(
         which the :class:`CycleController` keeps when it stamps the
         imaging stop code.
 
+        Optional keys ``iteration_peak_residual`` and
+        ``iteration_residual_rms``: the iteration history of the
+        deconvolver, nested lists indexed ``[t][f][p]`` of 1-D float64 arrays
+        (see :func:`hogbom_clean`). Every plane's entry gets its array.
+
     Returns
     -------
     ImagingDict
@@ -451,6 +509,11 @@ def create_imaging_dict(
     max_psf_sidelobe = selected_calculations["max_psf_sidelobe"]
     masksum = selected_calculations["masksum"]
     diverged = selected_calculations.get("diverged", None)
+    iteration_history = {
+        field: selected_calculations[field]
+        for field in ITERATION_HISTORY_FIELDS
+        if field in selected_calculations
+    }
     if diverged is not None:
         from astroviper.processing_functions.imaging.utils.cycle_control import (
             IMAGING_CONTINUE,
@@ -509,6 +572,8 @@ def create_imaging_dict(
                     "peakres_nomask": peakres_nomask,
                     "masksum": int(masksum[tt, nn, pp]),
                 }
+                for field, history in iteration_history.items():
+                    returnvals[field] = history[tt][nn][pp]
 
                 imaging_dict.add(returnvals, time=tt, pol=pp, chan=nn)
 
@@ -575,12 +640,18 @@ def deconvolve(
         Per-plane deconvolution statistics, indexed by
         ``(time, chan, pol)``. Each entry contains iteration count, peak
         residuals before and after, model fluxes, and PSF bookkeeping.
+        With ``record_iteration_history`` every entry also holds
+        ``iteration_peak_residual`` and ``iteration_residual_rms``, 1-D
+        float64 arrays with one value per iteration of the plane (see
+        :func:`hogbom_clean`).
 
     Raises
     ------
     ValueError
-        If ``algorithm`` is not recognized, or if the PSF polarization
-        dimension is incompatible with the image polarization dimension.
+        If ``algorithm`` is not recognized, if the PSF polarization
+        dimension is incompatible with the image polarization dimension,
+        or if ``record_iteration_history`` is requested from the Asp
+        algorithm (see :func:`validate_record_iteration_history`).
 
     Notes
     -----
@@ -611,6 +682,10 @@ def deconvolve(
         "asp_clean",
     ):
         raise ValueError(f"Deconvolution algorithm '{algorithm}' not recognized.")
+    # Refused before the model is created on img_xds.
+    validate_record_iteration_history(
+        algorithm_l, (deconvolve_params or {}).get("record_iteration_history", False)
+    )
 
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {"sky": "SKY_MODEL"}
@@ -791,6 +866,11 @@ def deconvolve(
             "max_psf_sidelobe": max_psf_sidelobe,
             "masksum": masksum,
             "diverged": diverged,
+            **{
+                field: results[field]
+                for field in ITERATION_HISTORY_FIELDS
+                if field in results
+            },
         },
     )
     return imaging_dict
@@ -862,6 +942,7 @@ def _run_hogbom(
         max_iter_divergence=int(deconvolve_params["max_iter_divergence"]),
         divergence_rms_factor=divergence_rms_factor,
         divergence_peak_factor=divergence_peak_factor,
+        record_iteration_history=bool(deconvolve_params["record_iteration_history"]),
     )
     final_peak = _hogbom_peak_cube(residual_cube, peak_mask_cube, clean_box)
     result["final_peak"] = final_peak
@@ -928,7 +1009,12 @@ def hogbom_clean(
         ``total_flux_cleaned`` (float), ``converged`` (bool), ``stop_code``
         (int: 1 iteration budget spent, 2 threshold reached, 4 diverged, 0
         did not run) and ``diverged`` (bool). The final residual and model
-        cubes are the caller-supplied arrays, updated in place.
+        cubes are the caller-supplied arrays, updated in place. With
+        ``record_iteration_history`` (``deconvolve_params``) also
+        ``iteration_peak_residual`` and ``iteration_residual_rms``, the
+        iteration history: nested lists indexed ``[t][f][p]`` of 1-D float64
+        arrays, one per plane with one value per iteration of the plane
+        (see Notes).
 
     Raises
     ------
@@ -961,6 +1047,21 @@ def hogbom_clean(
 
     A diverged model update does not end the plane's imaging cycles: the next
     residual update recomputes the true residual and cleaning resumes from it.
+
+    **Iteration history.** With ``record_iteration_history`` every plane
+    records, for iteration ``k`` of the model update,
+    ``iteration_peak_residual[k]``, the signed residual value at the peak of
+    ``|residual|`` the iteration cleaned (it subtracts ``gain`` times this
+    value times the PSF; Jy/beam, as the residual image), and
+    ``iteration_residual_rms[k]``, the RMS (about zero) of the residual after
+    that subtraction over the pixels the peak search covers (the clean box
+    inside the mask). The RMS costs no extra pass over the image: the peak
+    search of every iteration already sums the squares of the residual for
+    the divergence test, so the RMS after iteration ``k`` is exactly the sum
+    found by the search of iteration ``k + 1``; only a plane that spends its
+    whole budget is scanned once more, for the RMS after its last iteration.
+    Recording does not change the residual or the model: they are the same
+    to the bit with and without it.
     """
     deconvolve_params = _validate_deconvolve_params(deconvolve_params)
 
@@ -1213,9 +1314,15 @@ def asp_clean(
     ------
     ValueError
         If the input arrays are not 5-D, do not share a floating-point
-        dtype, or have incompatible shapes.
+        dtype, or have incompatible shapes, or if ``record_iteration_history``
+        is requested: an Asp iteration subtracts a fitted Aspen, not the PSF
+        at a residual peak, so only the Hogbom kernels record the iteration
+        history (see :func:`validate_record_iteration_history`).
     """
     deconvolve_params = _validate_deconvolve_params(deconvolve_params)
+    validate_record_iteration_history(
+        "asp", deconvolve_params["record_iteration_history"]
+    )
 
     for name, arr in (
         ("residual_cube", residual_cube),

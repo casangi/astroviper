@@ -31,7 +31,13 @@ FIELD_ACCUM = {
     "start_model_flux",  # Model flux at start of each cycle (Jy)
     "entropy",  # Entropy of the residual at the start of each cycle
     "residual_snr",  # Peak / RMS of the residual at the start of each cycle
+    "iteration_peak_residual",  # Signed peak residual of every iteration (Jy/beam)
+    "iteration_residual_rms",  # Residual RMS after every iteration (Jy/beam)
 }
+
+# The iteration history of the model updates (record_iteration_history): per
+# cycle a 1-D array with one value per iteration of that cycle's model update.
+ITERATION_HISTORY_FIELDS = ("iteration_peak_residual", "iteration_residual_rms")
 
 # Fields that remain single values (constant parameters)
 FIELD_SINGLE_VALUE = {
@@ -39,6 +45,7 @@ FIELD_SINGLE_VALUE = {
     "gain",  # CLEAN gain parameter (constant)
     "max_iter",  # Max iterations requested (parameter, not measurement)
     "threshold",  # Threshold used (parameter, not measurement)
+    "max_cycles_auto",  # Imaging cycles max_cycles="auto" gives the plane
 }
 
 
@@ -150,7 +157,11 @@ def imaging_dict_to_dataframe(imaging_dict):
         the derived columns ``n_cycles``, ``iter_total`` (total CLEAN
         iterations over all cycles -- 0 means the plane was never
         deconvolved), ``peakres_start`` / ``peakres_final`` and
-        ``model_flux_final``. Empty for an empty dict (e.g. a max_iter=0 run).
+        ``model_flux_final``. The iteration history
+        (``iteration_peak_residual``, ``iteration_residual_rms``; only with
+        ``record_iteration_history``) is a list of one 1-D array per cycle,
+        which feather stores as a list of lists. Empty for an empty dict
+        (e.g. a max_iter=0 run).
     """
     import pandas as pd
 

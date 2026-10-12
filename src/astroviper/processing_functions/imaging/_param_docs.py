@@ -29,24 +29,30 @@ IMAGING_PARAM_DOCS = {
     ),
     "gridding_kernel_params": (
         "The gridding convolution kernel the gridder and degridder use:\n"
-        '``type`` (``"prolate_spheroidal"``, Schwab\'s rational approximation\n'
-        "of the ``m = 6``, ``alpha = 1`` function with its analytic correction,\n"
-        'the kernel CASA uses; ``"exponential_semicircle"``, the modified\n'
+        '``type`` (``"prolate_spheroidal_casa"``, Schwab\'s rational\n'
+        "approximation of the ``m = 6``, ``alpha = 1`` function with its\n"
+        'analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,\n'
+        "the generalised prolate spheroidal function of Schwab 1984 with its\n"
+        "bandwidth and weight exponent chosen for the image region the\n"
+        '``fft_padding`` keeps; ``"exponential_semicircle"``, the modified\n'
         "exponential of a semicircle of Barnett et al. 2019 and Arras et al.\n"
-        "2021 shaped for the image region the ``fft_padding`` keeps; or\n"
+        "2021 shaped for that region; or\n"
         '``"least_misfit"``, the table that minimises the map error over that\n'
         "region for the lookup used, after Ye et al. 2020), ``support`` (the\n"
         "odd number of grid points the kernel spans along one axis; 7 for the\n"
-        "prolate spheroidal kernel, any odd number from 3 for the others),\n"
+        "``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),\n"
         "``oversampling`` (samples of the kernel table per uv cell) and\n"
         "``interpolation`` (how the gridders read the table at a stencil\n"
         'point: ``"nearest"`` takes the nearest sample, so the lookup error,\n'
         "and with it the floor the imaging cycle converges to, falls as 1 over\n"
         'the oversampling; ``"linear"`` interpolates the two neighbouring\n'
         "samples and the error falls as 1 over its square). Missing keys take\n"
-        'the defaults ``{"type": "prolate_spheroidal", "support": 7,\n'
+        'the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,\n'
         '"oversampling": 100, "interpolation": "nearest"}``; ``None`` is all\n'
-        "defaults."
+        "defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or\n"
+        "``least_misfit`` kernel whose image plane correction falls below 1e-6\n"
+        "of its centre value at the edge of the image kept (a support too large\n"
+        "for the ``fft_padding``, e.g. 17 at 1.05) is refused."
     ),
     "primary_beam_params": (
         "The primary beam of the imager, the power pattern of CASA's obscured Airy\n"
@@ -87,7 +93,30 @@ IMAGING_PARAM_DOCS = {
         "  residual reflects the final model. ``max_cycles = 0`` makes only the\n"
         "  dirty image; ``max_cycles = -1`` removes the limit. Counted per\n"
         "  frequency channel: a channel that converges early stops cycling while\n"
-        "  the others continue.\n"
+        '  the others continue. ``max_cycles = "auto"`` predicts the limit of a\n'
+        "  channel from its dirty image: every plane takes ``P0``, its peak\n"
+        "  residual at the start of the first cycle (the ``peak_residual``\n"
+        "  below), ``f``, its PSF fraction (below), and ``L``, its threshold or,\n"
+        "  when that is 0, its theoretical point source sensitivity, worked out\n"
+        "  from the imaging weights as the ``SENSITIVITY`` of\n"
+        "  ``point_spread_function_cube_single_field``;\n"
+        "  ``n = ceil(ln(P0 / L) / ln(1 / f))`` cycles (at least 1) bring the\n"
+        "  peak down to ``L``, and the plane's limit is ``n + 3`` against a\n"
+        "  threshold and ``3 * n`` against the sensitivity (``EXTRA_CYCLES``\n"
+        "  and ``NOISY_CYCLE_SAFETY`` of\n"
+        "  :mod:`~astroviper.processing_functions.imaging.utils.cycle_control_heuristics`).\n"
+        "  The sensitivity is the thermal noise of the plane when the weights\n"
+        "  are absolute (``WEIGHT = 1 / sigma**2``). With unit weights, as a\n"
+        "  simulation without noise writes them, it is not a noise level but\n"
+        "  about 1 over the square root of the number of visibilities (natural\n"
+        "  weighting; 1e-3 for a million) in the units of the data; the limit\n"
+        "  grows only with ``ln(P0 / L)``, and on the same prediction ``3 * n``\n"
+        "  cycles bring the peak down to ``P0 * (L / P0)**3``. The channel's\n"
+        "  ``max_cycles`` is the largest limit of its planes (at least 1; a\n"
+        "  plane without a pixel in the clean mask, with a peak of 0 or without\n"
+        "  data is left out) and then counts down like a number. Every plane\n"
+        "  records its limit as ``max_cycles_auto`` in the returned convergence\n"
+        "  record. Needs ``max_psf_fraction < 1``.\n"
         "- ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, as a\n"
         "  float in Jy, or a list of one float per Stokes plane in the order of\n"
         "  ``polarization_coords`` (the floors of the Stokes planes of noise free\n"
@@ -160,6 +189,21 @@ IMAGING_PARAM_DOCS = {
         "  two image axes used for the entropy. Default 7.\n"
         "- ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for\n"
         "  the entropy. Default 10.\n"
+        "- ``record_iteration_history`` : If ``True``, every model update\n"
+        "  records, for every plane and every deconvolution iteration, the peak\n"
+        "  residual the iteration cleaned (signed, in the units of the residual\n"
+        "  image) and the RMS of the residual inside the clean mask after its\n"
+        "  subtraction, to follow the deconvolution in detail. The returned\n"
+        "  convergence record holds them as ``iteration_peak_residual`` and\n"
+        "  ``iteration_residual_rms``: per plane one array per cycle, with one\n"
+        "  value per iteration of that cycle's model update (empty for a cycle\n"
+        "  without one), so the record grows by two float64 values per\n"
+        "  iteration done. A debugging and tuning tool: the images are the same\n"
+        "  to the bit with and without it, and the RMS is the sum of squares\n"
+        "  the peak search of the next iteration makes anyway, so it costs no\n"
+        "  extra pass over the image per iteration. Hogbom deconvolvers only:\n"
+        '  ``deconvolver="asp"`` raises ``ValueError``. Default ``False``.\n'
+        "  No CASA equivalent.\n"
         "\n"
         "A plane whose model updates do no iteration any more (two in a row)\n"
         "is stopped with the no progress stop code, so an all-zero plane cannot\n"

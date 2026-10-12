@@ -29,8 +29,14 @@ from typing import Any
 import numpy as np
 
 from astroviper.processing_functions.image_analysis import image_statistics as imgstats
+from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
+    EXTRA_CYCLES,
+    NOISY_CYCLE_SAFETY,
+    predicted_imaging_cycles,
+)
 from astroviper.processing_functions.imaging.utils.imaging_dict import (
     FIELD_ACCUM,
+    ITERATION_HISTORY_FIELDS,
     ImagingDict,
     Key,
 )
@@ -69,6 +75,10 @@ MODEL_UPDATE_ZERO_MASK = 7  # Zero mask detected during model update
 # previous cycle, which the residual update may have lowered); after this many
 # in a row the plane is stopped with IMAGING_NO_PROGRESS.
 NO_PROGRESS_MODEL_UPDATES = 2
+
+# max_cycles="auto": the limit is predicted from the dirty image (see
+# CycleController.resolve_max_cycles).
+AUTO_MAX_CYCLES = "auto"
 
 # Stop code descriptions for imaging cycle codes
 IMAGING_STOP_DESCRIPTIONS = {
@@ -621,6 +631,56 @@ def validate_entropy_params(cycle_control_params):
     return bool(entropy_stop), float(max_snr), bins[0], bins[1]
 
 
+def _is_auto_max_cycles(max_cycles):
+    """True for a ``max_cycles`` that is still ``"auto"`` (not resolved)."""
+    return isinstance(max_cycles, str) and max_cycles == AUTO_MAX_CYCLES
+
+
+def validate_max_cycles(max_cycles, max_psf_fraction=None):
+    """``max_cycles`` checked: an integer of at least -1, or ``"auto"``.
+
+    Parameters
+    ----------
+    max_cycles : int or str
+        Maximum number of imaging cycles, ``-1`` for no limit, or ``"auto"``
+        to predict it from the dirty image
+        (:meth:`CycleController.resolve_max_cycles`). An integral float
+        (``5.0``) is taken as the integer.
+    max_psf_fraction : float, optional
+        The upper clamp of the PSF fraction, which ``"auto"`` needs below 1
+        (the cycles needed to clean down grow without bound as the PSF
+        fraction approaches 1). Not checked when omitted.
+
+    Returns
+    -------
+    int or str
+        ``max_cycles`` as an ``int``, or ``"auto"``.
+
+    Raises
+    ------
+    ValueError
+        For anything else: a float that is not an integer, a bool, an integer
+        below -1 or any other string; or for ``"auto"`` with a
+        ``max_psf_fraction`` of 1 or more.
+    """
+    if _is_auto_max_cycles(max_cycles):
+        if max_psf_fraction is not None and max_psf_fraction >= 1:
+            raise ValueError(
+                f'max_cycles="{AUTO_MAX_CYCLES}" needs a max_psf_fraction below '
+                f"1; got {max_psf_fraction!r}."
+            )
+        return max_cycles
+    integral = isinstance(max_cycles, int | np.integer) or (
+        isinstance(max_cycles, float | np.floating) and float(max_cycles).is_integer()
+    )
+    if isinstance(max_cycles, bool | np.bool_) or not integral or max_cycles < -1:
+        raise ValueError(
+            f'max_cycles must be an integer >= -1 or "{AUTO_MAX_CYCLES}"; '
+            f"got {max_cycles!r}."
+        )
+    return int(max_cycles)
+
+
 # ============================================================================
 # CycleController Class
 # ============================================================================
@@ -653,9 +713,16 @@ class CycleController:
         lazily the first time a ImagingDict is seen (the cube shape is unknown
         at construction); ``None`` until then. ``_max_iter`` holds the
         scalar per-plane budget.
-    max_cycles : int
+    max_cycles : int or str
         Maximum number of imaging cycles remaining (-1 = unlimited). Imaging cycles
-        are global (shared across all planes).
+        are global (shared across all planes). ``"auto"`` until
+        :meth:`resolve_max_cycles` has predicted it from the dirty image.
+    max_cycles_auto : dict or None
+        With ``max_cycles="auto"``, the limit predicted for every plane,
+        ``{(time, chan, pol): int or None}`` (``None`` for a plane nothing
+        could be predicted for), set by :meth:`resolve_max_cycles` and stamped
+        into every checked ImagingDict entry as ``max_cycles_auto``. ``None``
+        otherwise.
     threshold : float
         Global stopping threshold (in Jy or image units)
     gain : float
@@ -714,7 +781,7 @@ class CycleController:
     def __init__(
         self,
         max_iter: int = 1000,
-        max_cycles: int = -1,
+        max_cycles: int | str = -1,
         threshold: float = 0.0,
         gain: float = 0.1,
         psf_sidelobe_factor: float = 1.0,
@@ -739,8 +806,11 @@ class CycleController:
             planes. This is the deliberate difference from CASA's
             image-wide ``niter``.
 
-        max_cycles : int, optional
-            Maximum number of imaging cycles (default: -1 for unlimited)
+        max_cycles : int or str, optional
+            Maximum number of imaging cycles (default: -1 for unlimited), or
+            ``"auto"`` to predict it from the dirty image (see
+            :meth:`resolve_max_cycles`). An integral float (``5.0``) is taken
+            as the integer.
 
         threshold : float, optional
             Global stopping threshold in Jy (default: 0.0)
@@ -780,7 +850,11 @@ class CycleController:
         Raises:
         -------
         ValueError
-            If one of the entropy parameters has a wrong type or value.
+            If one of the entropy parameters has a wrong type or value, if
+            ``max_cycles`` is neither an integer >= -1 nor ``"auto"``, or if
+            it is ``"auto"`` with a ``max_psf_fraction`` of 1 or more (the
+            cycles needed to clean down grow without bound as the PSF
+            fraction approaches 1).
         """
         entropy_stop, entropy_max_snr, entropy_spatial_bins, entropy_flux_bins = (
             validate_entropy_params(
@@ -809,7 +883,8 @@ class CycleController:
         self.entropy_flux_bins = entropy_flux_bins
         self.max_entropy = None
         self.entropy_stopped = None
-        self.max_cycles = max_cycles
+        self.max_cycles = validate_max_cycles(max_cycles, max_psf_fraction)
+        self.max_cycles_auto = None
 
         # Threshold parameters: one value for every plane, or one per
         # polarization plane (the floors of noise free Stokes planes scale
@@ -1089,6 +1164,120 @@ class CycleController:
             threshold_per_cycle[idx] = max(frac * peak, self._plane_threshold(idx[2]))
         return threshold_per_cycle
 
+    def resolve_max_cycles(self, imaging_dict, sensitivity=None, mask_pixels=None):
+        """Predict ``max_cycles="auto"`` from the dirty image.
+
+        A no-op unless ``max_cycles`` is ``"auto"``. ``imaging_dict`` holds
+        the statistics of the residual of the first residual update, the
+        dirty image (:func:`build_residual_imaging_dict`). For every plane:
+
+        - ``P0`` is its peak residual (``peakres``), the peak its first model
+          update starts from and sets its ``threshold_per_cycle`` from;
+        - ``f`` is its PSF fraction, ``clamp(max_psf_sidelobe *
+          psf_sidelobe_factor, min_psf_fraction, max_psf_fraction)``;
+        - ``L`` is its threshold if that is above 0, else its theoretical
+          point source sensitivity (``sensitivity``);
+        - ``n = predicted_imaging_cycles(P0, L, f)``, the imaging cycles that
+          bring the peak down from ``P0`` to ``L`` when every model update
+          cleans to ``f`` times the peak it starts from (one cycle for
+          ``f = 0``).
+
+        The limit of the plane is ``n + EXTRA_CYCLES`` when ``L`` is its
+        threshold and ``NOISY_CYCLE_SAFETY * n`` when ``L`` is its
+        sensitivity (the controls of
+        :mod:`~astroviper.processing_functions.imaging.utils.cycle_control_heuristics`).
+        The sensitivity is the noise of the plane when the weights are
+        absolute (``WEIGHT = 1 / sigma**2``). With unit weights (``WEIGHT =
+        1``, as a simulation without noise writes them) it is not a noise
+        level but, for natural weighting, about 1 over the square root of the
+        number of visibilities, in the units of the data (1e-3 for a
+        million). The limit grows only with ``ln(P0 / L)``: on the same
+        prediction, ``NOISY_CYCLE_SAFETY * n`` cycles bring the peak down to
+        ``P0 * (L / P0)**NOISY_CYCLE_SAFETY``.
+        ``max_cycles`` becomes the largest limit over the planes, at least 1,
+        and from then on counts down like a number given by the caller. A
+        plane nothing can be predicted for is left out: one without a pixel
+        in its clean mask, with a peak or a level ``L`` that is 0 or not
+        finite (an infinite sensitivity: no data), or with a PSF fraction
+        that is not a number.
+
+        Parameters
+        ----------
+        imaging_dict : ImagingDict
+            Statistics of the dirty image of every plane: ``peakres``,
+            ``max_psf_sidelobe`` and ``masksum``.
+        sensitivity : numpy.ndarray, optional
+            ``(ntime, nchan, npol)`` theoretical point source sensitivity of
+            the planes, indexed ``(time, chan, pol)``: the ``SENSITIVITY`` of
+            :func:`~astroviper.processing_functions.imaging.weight_statistics.calculate_weight_statistics_single_field`.
+            Needed for the planes whose threshold is 0, which are left out
+            without it.
+        mask_pixels : numpy.ndarray, optional
+            ``(ntime, nchan, npol)`` number of pixels in the clean mask of the
+            planes, indexed ``(time, chan, pol)``; the ``masksum`` of the
+            entries when omitted.
+
+        Returns
+        -------
+        int
+            ``max_cycles``, resolved.
+        """
+        if not _is_auto_max_cycles(self.max_cycles):
+            return self.max_cycles
+        limits = {}
+        for key, fields in imaging_dict.data.items():
+            idx = self._key_index(key)
+            peak = abs(float(self._latest(fields, "peakres", 0.0)))
+            pixels = (
+                self._latest(fields, "masksum", 0)
+                if mask_pixels is None
+                else mask_pixels[idx]
+            )
+            threshold = self._plane_threshold(idx[2])
+            if threshold > 0:
+                level = float(threshold)
+            else:
+                level = np.nan if sensitivity is None else float(sensitivity[idx])
+            fraction = min(
+                max(
+                    self._latest(fields, "max_psf_sidelobe", 0.2)
+                    * self.psf_sidelobe_factor,
+                    self.min_psf_fraction,
+                ),
+                self.max_psf_fraction,
+            )
+            if not (
+                pixels > 0
+                and np.isfinite(peak)
+                and peak > 0
+                and np.isfinite(level)
+                and level > 0
+                and np.isfinite(fraction)
+            ):
+                limits[idx] = None
+                continue
+            cycles = (
+                1 if fraction <= 0 else predicted_imaging_cycles(peak, level, fraction)
+            )
+            limits[idx] = (
+                cycles + EXTRA_CYCLES if threshold > 0 else NOISY_CYCLE_SAFETY * cycles
+            )
+        self.max_cycles_auto = limits
+        self.max_cycles = max(
+            (limit for limit in limits.values() if limit is not None), default=1
+        )
+        return self.max_cycles
+
+    def _require_resolved_max_cycles(self):
+        """Raise while ``max_cycles`` is still ``"auto"``."""
+        if _is_auto_max_cycles(self.max_cycles):
+            raise ValueError(
+                f'max_cycles="{AUTO_MAX_CYCLES}" is not resolved yet: call '
+                "resolve_max_cycles with the dirty image (resolve_auto_max_cycles "
+                "in the imaging cycle loop) before the cycles are checked or "
+                "counted."
+            )
+
     def check_convergence(
         self,
         imaging_dict: ImagingDict,
@@ -1124,7 +1313,9 @@ class CycleController:
            (``model_update_ran`` False), so it notices the fall one model
            update after the maximum; the model of that last model update is
            kept.
-        5. Imaging cycle limit (stopcode 9): max_cycles == 0 (if not -1)
+        5. Imaging cycle limit (stopcode 9): max_cycles == 0 (if not -1). A
+           ``max_cycles="auto"`` has to be resolved first
+           (:meth:`resolve_max_cycles`).
         6. No progress (stopcode 4): the plane's last
            ``NO_PROGRESS_MODEL_UPDATES`` model updates did no iteration. Such
            a plane cannot change its residual, so without this stop it would
@@ -1185,9 +1376,16 @@ class CycleController:
         Evaluates each selected ``(time, pol, chan)`` plane independently and
         writes that plane's own StopCode and description into the 'stop_code'
         and 'stop_description' fields of the corresponding ImagingDict entry,
-        overwriting the placeholder set by the deconvolver. Also allocates /
+        overwriting the placeholder set by the deconvolver. With
+        ``max_cycles="auto"`` the entry also gets the plane's predicted limit
+        as 'max_cycles_auto' (:attr:`max_cycles_auto`). Also allocates /
         updates the per-plane ``max_iter_remaining``, ``stop_code_imaging`` and
         ``stop_code_model_update`` arrays.
+
+        Raises:
+        -------
+        ValueError
+            While ``max_cycles`` is an unresolved ``"auto"``.
 
         Example:
         --------
@@ -1201,6 +1399,7 @@ class CycleController:
         >>>     print(f"Stopped: imaging={stopcode.imaging}, model_update={stopcode.model_update}")
         """
         self._ensure_state(imaging_dict)
+        self._require_resolved_max_cycles()
 
         # Evaluate every selected plane independently and record its own stop
         # code. The aggregate returned to the caller is CONTINUE while any
@@ -1264,6 +1463,8 @@ class CycleController:
             # directly (not via add()) so it stays a single value.
             fields["stop_code"] = StopCode(imaging=maj, model_update=model_update_code)
             fields["stop_description"] = IMAGING_STOP_DESCRIPTIONS[maj]
+            if self.max_cycles_auto is not None:
+                fields["max_cycles_auto"] = self.max_cycles_auto.get(idx)
 
         # Aggregate across the selected planes.
         if not plane_imaging_codes:
@@ -1342,6 +1543,12 @@ class CycleController:
         chan : int, optional
             Filter by specific channel index
 
+        Raises:
+        -------
+        ValueError
+            While ``max_cycles`` is an unresolved ``"auto"``
+            (:meth:`resolve_max_cycles`).
+
         Example:
         --------
         >>> controller = CycleController(max_iter=1000, max_cycles=5)
@@ -1360,6 +1567,7 @@ class CycleController:
             return
 
         self._ensure_state(imaging_dict)
+        self._require_resolved_max_cycles()
 
         # Decrement the global imaging cycle count (imaging cycles are shared
         # across planes) once per call.
@@ -1407,7 +1615,9 @@ class CycleController:
             New iterations per model update
 
         max_cycles : int, optional
-            New imaging cycle limit
+            New imaging cycle limit (checked by :func:`validate_max_cycles`).
+            ``"auto"`` is refused: it is given when the controller is
+            created and resolved from the dirty image.
 
         threshold : float or str, optional
             New stopping threshold (can include units like "10mJy")
@@ -1448,13 +1658,16 @@ class CycleController:
 
         # Update and validate max_cycles
         if max_cycles is not None:
+            if _is_auto_max_cycles(max_cycles):
+                return (
+                    -1,
+                    f'max_cycles="{AUTO_MAX_CYCLES}" is given when the controller '
+                    "is created (it is resolved from the dirty image), not updated",
+                )
             try:
-                max_cycles_int = int(max_cycles)
-                if max_cycles_int < -1:
-                    return -1, "max_cycles must be >= -1"
-                self.max_cycles = max_cycles_int
-            except (ValueError, TypeError):
-                return -1, "max_cycles must be an integer"
+                self.max_cycles = validate_max_cycles(max_cycles)
+            except ValueError:
+                return -1, f"max_cycles must be an integer >= -1; got {max_cycles!r}"
 
         # Update and validate threshold
         if threshold is not None:
@@ -1912,7 +2125,9 @@ def format_imaging_dict(combined_imaging_dict, float_format="{:.6g}"):
     hard to read. This formatter groups each plane, separates scalar parameters
     from the per-cycle history, and lays the history out as an aligned table
     with one column per imaging cycle. Numpy scalars (``np.float64``, ``np.str_``)
-    are unwrapped so they print as plain values.
+    are unwrapped so they print as plain values; an array in the history (the
+    iteration history of a model update, ``record_iteration_history``) prints
+    as the number of its values.
 
     Parameters
     ----------
@@ -1935,6 +2150,8 @@ def format_imaging_dict(combined_imaging_dict, float_format="{:.6g}"):
         return v.item() if hasattr(v, "item") else v
 
     def fmt(v):
+        if isinstance(v, np.ndarray) and v.ndim:
+            return f"<{v.size} values>"
         v = to_py(v)
         if v is None:
             return "None"
@@ -2032,9 +2249,16 @@ def build_residual_imaging_dict(
         ``entropy`` and ``residual_snr``, the entropy of the residual and the
         ratio of its peak to its RMS
         (:func:`~astroviper.processing_functions.image_analysis.image_statistics.image_residual_entropy`).
+        With ``record_iteration_history`` also an empty
+        ``iteration_peak_residual`` and ``iteration_residual_rms`` (no
+        iteration ran), so that a merged record holds one iteration history
+        per entry of ``iter_done``.
     """
     entropy_stop, entropy_max_snr, entropy_spatial_bins, entropy_flux_bins = (
         validate_entropy_params(cycle_control_params)
+    )
+    record_iteration_history = cycle_control_params.get(
+        "record_iteration_history", False
     )
     residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
     # plane by plane and block by block: no copy of the residual cube
@@ -2072,6 +2296,9 @@ def build_residual_imaging_dict(
                 if entropy_stop:
                     fields["entropy"] = float(entropy[tt, nn, pp])
                     fields["residual_snr"] = float(residual_snr[tt, nn, pp])
+                if record_iteration_history:
+                    for field in ITERATION_HISTORY_FIELDS:
+                        fields[field] = np.empty(0)
                 rd.add(fields, time=tt, pol=pp, chan=nn)
     return rd
 
@@ -2175,3 +2402,107 @@ def get_per_cycle_limits(
         max_iter_per_cycle[controller.entropy_stopped] = 0
 
     return max_iter_per_cycle, threshold_per_cycle
+
+
+def resolve_auto_max_cycles(
+    controller,
+    residual_imaging_dict,
+    ps_xdt,
+    img_xds,
+    cycle_control_params,
+    processing_set_data_group_name="corrected",
+    image_data_group_in_name="residual",
+):
+    """Resolve ``max_cycles="auto"`` of ``controller`` from the dirty image.
+
+    A no-op unless the controller's ``max_cycles`` is still ``"auto"``: the
+    imaging cycle loop calls it after every residual update, and only the
+    first one, which makes the dirty image, resolves it (see
+    :meth:`CycleController.resolve_max_cycles`). The clean mask is the mask
+    of the residual data group or, before the first model update has made it,
+    the mask that model update makes
+    (:func:`~astroviper.processing_functions.image_analysis.make_mask.make_mask`
+    with ``primary_beam_limit``). The level of a plane whose threshold is 0
+    is its theoretical point source sensitivity, the ``SENSITIVITY`` the
+    point spread function pass reports, from the imaging weights of
+    ``ps_xdt``
+    (:func:`~astroviper.processing_functions.imaging.weight_statistics.calculate_weight_statistics_single_field`;
+    the noise of the plane when the weights are absolute, see
+    :meth:`CycleController.resolve_max_cycles`). It takes one pass over the
+    weights, made only when such a plane has a pixel in its clean mask.
+    ``ps_xdt`` and ``img_xds`` are not modified.
+
+    Parameters
+    ----------
+    controller : CycleController
+        Controller whose ``max_cycles`` is resolved.
+    residual_imaging_dict : ImagingDict
+        :func:`build_residual_imaging_dict` of the dirty image.
+    ps_xdt : xarray.DataTree
+        The visibilities imaged, whose data group holds the imaging weights
+        (``weight_imaging``).
+    img_xds : xarray.Dataset
+        Image dataset holding the dirty image and the primary beam, in the
+        Stokes basis.
+    cycle_control_params : dict
+        Cycle control parameters; ``primary_beam_limit`` (default 0) gives the
+        clean mask of the first model update.
+    processing_set_data_group_name : str, optional
+        Measurement-set data group of the weights. Default ``"corrected"``.
+    image_data_group_in_name : str, optional
+        Image data group holding the residual image. Default ``"residual"``.
+
+    Returns
+    -------
+    int
+        The controller's ``max_cycles``.
+    """
+    if not _is_auto_max_cycles(controller.max_cycles):
+        return controller.max_cycles
+    import xarray as xr
+
+    from astroviper.processing_functions.image_analysis.make_mask import make_mask
+    from astroviper.processing_functions.imaging.weight_statistics import (
+        calculate_weight_statistics_single_field,
+    )
+
+    data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
+    mask_name = data_group.get("mask", None)
+    if mask_name is not None and mask_name in img_xds:
+        mask = img_xds[mask_name].values
+    else:
+        # The mask the first model update will make, made on a dataset of its
+        # own so that img_xds and its data groups are left as they are.
+        primary_beam_name = data_group["primary_beam"]
+        probe = xr.Dataset(
+            {primary_beam_name: img_xds[primary_beam_name]},
+            attrs={"data_groups": {"residual": {"primary_beam": primary_beam_name}}},
+        )
+        make_mask(
+            probe,
+            primary_beam_limit=cycle_control_params.get("primary_beam_limit", 0.0),
+            image_data_group_in_name="residual",
+            image_data_group_out_name="residual",
+        )
+        mask = probe["MASK"].values
+    mask = mask.astype(bool, copy=False)
+    mask_pixels = mask.sum(axis=(-2, -1))
+    # The weights are read only for a plane whose level is its sensitivity
+    # (threshold not above 0, as in resolve_max_cycles) and that has a clean
+    # mask. Planes are (time, chan, pol), the order of the controller's
+    # per-plane state; the sensitivity, (frequency, polarization), goes to
+    # every time plane.
+    sensitivity = None
+    if any(
+        not controller._plane_threshold(index[2]) > 0 and mask_pixels[index] > 0
+        for index in np.ndindex(mask_pixels.shape)
+    ):
+        statistics = calculate_weight_statistics_single_field(
+            ps_xdt, img_xds, processing_set_data_group_name
+        )
+        sensitivity = np.broadcast_to(
+            statistics["SENSITIVITY"].values, mask_pixels.shape
+        )
+    return controller.resolve_max_cycles(
+        residual_imaging_dict, sensitivity=sensitivity, mask_pixels=mask_pixels
+    )

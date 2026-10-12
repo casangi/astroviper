@@ -93,24 +93,30 @@ def point_spread_function_cube_single_field(
         (the fit behind ``tclean``'s restoring beam).
     gridding_kernel_params : dict, optional
         The gridding convolution kernel the gridder and degridder use:
-        ``type`` (``"prolate_spheroidal"``, Schwab's rational approximation
-        of the ``m = 6``, ``alpha = 1`` function with its analytic correction,
-        the kernel CASA uses; ``"exponential_semicircle"``, the modified
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
         exponential of a semicircle of Barnett et al. 2019 and Arras et al.
-        2021 shaped for the image region the ``fft_padding`` keeps; or
+        2021 shaped for that region; or
         ``"least_misfit"``, the table that minimises the map error over that
         region for the lookup used, after Ye et al. 2020), ``support`` (the
         odd number of grid points the kernel spans along one axis; 7 for the
-        prolate spheroidal kernel, any odd number from 3 for the others),
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
         ``oversampling`` (samples of the kernel table per uv cell) and
         ``interpolation`` (how the gridders read the table at a stencil
         point: ``"nearest"`` takes the nearest sample, so the lookup error,
         and with it the floor the imaging cycle converges to, falls as 1 over
         the oversampling; ``"linear"`` interpolates the two neighbouring
         samples and the error falls as 1 over its square). Missing keys take
-        the defaults ``{"type": "prolate_spheroidal", "support": 7,
+        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
         "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
-        defaults.
+        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
+        ``least_misfit`` kernel whose image plane correction falls below 1e-6
+        of its centre value at the edge of the image kept (a support too large
+        for the ``fft_padding``, e.g. 17 at 1.05) is refused.
     primary_beam_params : dict, optional
         The primary beam of the imager, the power pattern of CASA's obscured Airy
         disk that gives the clean mask and the primary beam correction:

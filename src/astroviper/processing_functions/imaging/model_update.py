@@ -36,7 +36,11 @@ def model_update_cube_single_field(
         mask has been above ``(1 + gain / 10)`` times the lowest RMS reached
         for that many iterations in a row, or at once when the peak exceeds
         ``(1 + gain)`` times the peak at the start of the model update or is
-        not finite.  The
+        not finite.  ``record_iteration_history`` (default ``False``; Hogbom
+        only) records the peak residual and the residual RMS of every
+        iteration (see
+        :func:`~astroviper.processing_functions.imaging.deconvolution.hogbom_clean`).
+        The
         separate ``primary_beam_limit`` builds the primary-beam mask (a
         chunk-independent quantity, so the mask does not depend on how the cube
         was split across tasks); it is distinct from the deconvolver
@@ -60,7 +64,9 @@ def model_update_cube_single_field(
     imaging_dict : ImagingDict
         Per-plane deconvolution statistics for this cycle. A plane that the
         divergence test stopped carries the model update stop code
-        ``MODEL_UPDATE_DIVERGENCE``.
+        ``MODEL_UPDATE_DIVERGENCE``. With ``record_iteration_history`` every
+        plane also carries its ``iteration_peak_residual`` and
+        ``iteration_residual_rms``.
     return_df : pandas.DataFrame
         One-row timing frame with the ``T_make_mask`` and ``T_deconvolve``
         columns.
