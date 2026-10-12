@@ -9,15 +9,20 @@ This module holds the parameters that select the kernel, the
 :class:`GriddingKernel` that carries the table and makes the correction, and
 the factory the imaging functions use.
 
-Three kernel types exist:
+Four kernel types exist:
 
-``prolate_spheroidal``
+``prolate_spheroidal_casa``
     Schwab's rational approximation of the ``m = 6``, ``alpha = 1``
     spheroidal function (support 7 only); the kernel CASA uses. The default
     sampling (oversampling 100, nearest lookup) keeps Schwab's analytic
     correction; any other sampling or lookup is corrected by the transform of
     the table applied. It concentrates the kernel's transform within the
     unpadded image, so it does not profit from the FFT padding.
+``prolate_spheroidal``
+    The generalised prolate spheroidal function of Schwab (1984), any odd
+    support, with its bandwidth and weight exponent chosen for the image
+    region the padding keeps
+    (:mod:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_generalized_prolate_spheroidal`).
 ``exponential_semicircle``
     The modified exponential of a semicircle of Barnett et al. (2019) and
     Arras et al. (2021), any odd support, with its shape chosen for the
@@ -29,7 +34,7 @@ Three kernel types exist:
     gridders apply, after Ye et al. (2020)
     (:mod:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_least_misfit`).
 
-The corrections of the last two are the transforms of the kernels the
+The corrections of the last three are the transforms of the kernels the
 gridders apply, the sampled tables with their lookup
 (:func:`~astroviper.processing_functions.imaging.gridding_convolution_functions.kernel_lookup.table_transform`).
 """
@@ -52,13 +57,18 @@ from astroviper.processing_functions.imaging.gridding_convolution_functions.kern
     table_transform,
 )
 
-KERNEL_TYPES = ("prolate_spheroidal", "exponential_semicircle", "least_misfit")
+KERNEL_TYPES = (
+    "prolate_spheroidal_casa",
+    "prolate_spheroidal",
+    "exponential_semicircle",
+    "least_misfit",
+)
 # the support (number of grid points the kernel spans) each kernel type accepts
 PROLATE_SPHEROIDAL_SUPPORT = 7
 MIN_SUPPORT = 3
 MIN_DESIGN_PADDING = 1.05
 DEFAULT_GRIDDING_KERNEL_PARAMS = {
-    "type": "prolate_spheroidal",
+    "type": "prolate_spheroidal_casa",
     "support": PROLATE_SPHEROIDAL_SUPPORT,
     "oversampling": 100,
     "interpolation": "nearest",
@@ -87,15 +97,15 @@ def resolve_gridding_kernel_params(gridding_kernel_params=None):
     ----------
     gridding_kernel_params : dict, optional
         Keys ``type`` (one of :data:`KERNEL_TYPES`), ``support`` (the odd
-        number of grid points the kernel spans along one axis; the prolate
-        spheroidal kernel exists for 7 only, Schwab's rational approximation
-        of the ``m = 6``, ``alpha = 1`` function, the others for any odd
-        support of at least 3), ``oversampling`` (samples of the kernel table
-        per uv cell, an integer of at least 1) and ``interpolation`` (how the
-        gridders read the table at a stencil point: ``"nearest"`` takes the
-        nearest sample, ``"linear"`` interpolates the two neighbouring
-        samples). Missing keys take the defaults of
-        :data:`DEFAULT_GRIDDING_KERNEL_PARAMS`.
+        number of grid points the kernel spans along one axis; the
+        ``prolate_spheroidal_casa`` kernel exists for 7 only, Schwab's
+        rational approximation of the ``m = 6``, ``alpha = 1`` function, the
+        others for any odd support of at least 3), ``oversampling`` (samples
+        of the kernel table per uv cell, an integer of at least 1) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, ``"linear"``
+        interpolates the two neighbouring samples). Missing keys take the
+        defaults of :data:`DEFAULT_GRIDDING_KERNEL_PARAMS`.
 
     Returns
     -------
@@ -132,11 +142,15 @@ def resolve_gridding_kernel_params(gridding_kernel_params=None):
             "gridding_kernel_params['support'] must be an odd integer of at least "
             f"{MIN_SUPPORT}, got {support!r}"
         )
-    if params["type"] == "prolate_spheroidal" and support != PROLATE_SPHEROIDAL_SUPPORT:
+    if (
+        params["type"] == "prolate_spheroidal_casa"
+        and support != PROLATE_SPHEROIDAL_SUPPORT
+    ):
         raise ValueError(
-            "the prolate spheroidal kernel is Schwab's rational approximation of "
-            f"the m = 6, alpha = 1 function and spans {PROLATE_SPHEROIDAL_SUPPORT} "
-            f"grid points; got support {support}"
+            "the prolate_spheroidal_casa kernel is Schwab's rational approximation "
+            f"of the m = 6, alpha = 1 function and spans {PROLATE_SPHEROIDAL_SUPPORT} "
+            f"grid points; got support {support} (the prolate_spheroidal kernel "
+            "takes any odd support)"
         )
     oversampling = params["oversampling"]
     if not isinstance(oversampling, int | np.integer) or oversampling < 1:
@@ -157,10 +171,10 @@ def resolve_gridding_kernel_params(gridding_kernel_params=None):
 def kept_half_width(fft_padding):
     """Half width of the image kept, in units of the padded image width.
 
-    The kernels designed for the padding (``exponential_semicircle`` and
-    ``least_misfit``) suppress the aliases of the periodic FFT image over
-    ``|x| <= 1 / (2 * fft_padding)``, the image that remains after the
-    padding is cropped.
+    The kernels designed for the padding (``prolate_spheroidal``,
+    ``exponential_semicircle`` and ``least_misfit``) suppress the aliases
+    of the periodic FFT image over ``|x| <= 1 / (2 * fft_padding)``, the
+    image that remains after the padding is cropped.
 
     Parameters
     ----------
@@ -173,15 +187,16 @@ def kept_half_width(fft_padding):
     """
     if fft_padding is None:
         raise ValueError(
-            "the exponential_semicircle and least_misfit gridding kernels are "
-            "designed for the image region the padding keeps: pass fft_padding"
+            "the prolate_spheroidal, exponential_semicircle and least_misfit "
+            "gridding kernels are designed for the image region the padding "
+            "keeps: pass fft_padding"
         )
     fft_padding = float(fft_padding)
     if fft_padding < MIN_DESIGN_PADDING:
         raise ValueError(
-            "the exponential_semicircle and least_misfit gridding kernels need "
-            f"fft_padding >= {MIN_DESIGN_PADDING} to suppress the aliases at the "
-            f"edge of the image kept; got {fft_padding}"
+            "the prolate_spheroidal, exponential_semicircle and least_misfit "
+            f"gridding kernels need fft_padding >= {MIN_DESIGN_PADDING} to suppress "
+            f"the aliases at the edge of the image kept; got {fft_padding}"
         )
     return 0.5 / fft_padding
 
@@ -209,12 +224,13 @@ class GriddingKernel:
         The image plane correction at image coordinates (an array in units
         of the padded image width, ``[-0.5, 0.5)`` spanning the padded
         image), normalised to 1 at the image centre. The default is Schwab's
-        correction of the prolate spheroidal kernel; the other kernel types
-        pass the transform of the kernel applied.
+        correction of the ``prolate_spheroidal_casa`` kernel; the other kernel
+        types pass the transform of the kernel applied.
     shape : dict, optional
         The numbers that define the kernel beyond the four parameters (the
-        shape parameters of the exponential of a semicircle, the aliasing
-        error or misfit, the padding designed for), for the record.
+        shape parameters of the prolate spheroidal function or of the
+        exponential of a semicircle, the aliasing error or misfit, the
+        padding designed for), for the record.
     """
 
     def __init__(
@@ -222,7 +238,7 @@ class GriddingKernel:
         table,
         support,
         oversampling,
-        kernel_type="prolate_spheroidal",
+        kernel_type="prolate_spheroidal_casa",
         interpolation="nearest",
         correction=None,
         shape=None,
@@ -414,16 +430,24 @@ def make_gridding_kernel(gridding_kernel_params=None, fft_padding=None):
         See :func:`resolve_gridding_kernel_params`.
     fft_padding : float, optional
         The padding factor of the FFT grid, which sets the image region the
-        ``exponential_semicircle`` and ``least_misfit`` kernels are designed
-        for (:func:`kept_half_width`); the prolate spheroidal kernel does
-        not depend on it.
+        ``prolate_spheroidal``, ``exponential_semicircle`` and
+        ``least_misfit`` kernels are designed for (:func:`kept_half_width`);
+        the ``prolate_spheroidal_casa`` kernel does not depend on it.
 
     Returns
     -------
     GriddingKernel
+
+    Raises
+    ------
+    ValueError
+        For parameters :func:`resolve_gridding_kernel_params` refuses, a
+        padding :func:`kept_half_width` refuses, or a kernel designed for the
+        padding whose correction at the edge of the image kept is below
+        :data:`CORRECTION_FLOOR` (a support too large for the padding).
     """
     params = resolve_gridding_kernel_params(gridding_kernel_params)
-    if params["type"] == "prolate_spheroidal":
+    if params["type"] == "prolate_spheroidal_casa":
         fft_padding = None  # the kernel does not depend on it
     elif fft_padding is not None:
         fft_padding = float(fft_padding)
@@ -446,7 +470,7 @@ def _make_gridding_kernel(
         "oversampling": oversampling,
         "interpolation": interpolation,
     }
-    if params["type"] == "prolate_spheroidal":
+    if params["type"] == "prolate_spheroidal_casa":
         table = create_prolate_spheroidal_kernel_1D(oversampling, support)
         correction = None  # Schwab's analytic correction, the default bit for bit
         if (oversampling, interpolation) != (
@@ -488,15 +512,41 @@ def _make_gridding_kernel(
             oversampling, support, interpolation, x0
         )
         shape = {"misfit": info["misfit"], "fft_padding": float(fft_padding)}
+    elif params["type"] == "prolate_spheroidal":
+        from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_generalized_prolate_spheroidal import (
+            create_generalized_prolate_spheroidal_kernel_1D,
+            generalized_prolate_spheroidal_parameters,
+        )
+
+        c, alpha, error = generalized_prolate_spheroidal_parameters(support, x0)
+        table = create_generalized_prolate_spheroidal_kernel_1D(
+            oversampling, support, c, alpha
+        )
+        shape = {
+            "c": c,
+            "alpha": alpha,
+            "aliasing_error": error,
+            "fft_padding": float(fft_padding),
+        }
     else:  # pragma: no cover - resolve_gridding_kernel_params checks the type
         raise ValueError(f"no builder for kernel type {params['type']!r}")
+    correction = _table_correction(table, oversampling, interpolation)
+    edge = float(correction(x0))
+    if not edge >= CORRECTION_FLOOR:  # refuses a NaN too
+        raise ValueError(
+            f"the {params['type']} gridding kernel of support {support} designed "
+            f"for fft_padding {fft_padding} has a correction of {edge:.2g} at the "
+            f"edge of the image kept, below the floor of {CORRECTION_FLOOR:g} the "
+            "correction is clamped at, so the image near that edge would be scaled "
+            "wrongly: use a larger fft_padding or a smaller support"
+        )
     kernel = GriddingKernel(
         table,
         support,
         oversampling,
         params["type"],
         interpolation,
-        correction=_table_correction(table, oversampling, interpolation),
+        correction=correction,
         shape=shape,
     )
     kernel.table.setflags(write=False)

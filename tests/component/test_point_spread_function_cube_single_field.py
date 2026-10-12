@@ -155,7 +155,9 @@ def test_returned_dataset_layout(noise_processing_set, natural_point_spread_func
     assert properties.attrs["image_size"] == IMAGE_SIZE
     assert properties.attrs["fft_padding"] == 1.2
     assert properties.attrs["psf_fitting_method"] == "astroviper"
-    assert properties.attrs["gridding_kernel_params"]["type"] == "prolate_spheroidal"
+    assert (
+        properties.attrs["gridding_kernel_params"]["type"] == "prolate_spheroidal_casa"
+    )
     np.testing.assert_array_equal(properties.FLAGGED_FRACTION.values, 0.0)
     assert np.all(properties.UV_DISTANCE_MAX > properties.UV_DISTANCE_MIN)
     assert np.all(properties.ABS_W_MAX > 0)

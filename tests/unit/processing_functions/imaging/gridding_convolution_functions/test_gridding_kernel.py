@@ -63,6 +63,7 @@ class TestKernel:
         )
         assert kernel.table.size == 100 * 4
         assert kernel.params == DEFAULT_GRIDDING_KERNEL_PARAMS
+        assert kernel.kernel_type == "prolate_spheroidal_casa"
 
     def test_table_layout(self):
         """Entry k is the kernel k / oversampling cells from the centre and the
@@ -91,6 +92,7 @@ class TestKernel:
         kernel = as_gridding_kernel(table)
         assert isinstance(kernel, GriddingKernel)
         assert (kernel.support, kernel.oversampling) == (7, 25)
+        assert kernel.kernel_type == "prolate_spheroidal_casa"
         assert as_gridding_kernel(kernel) is kernel
         with pytest.raises(ValueError, match="bare kernel table"):
             as_gridding_kernel(np.zeros(10))
@@ -327,7 +329,9 @@ class TestLeastMisfit:
 
 
 class TestCorrection:
-    @pytest.mark.parametrize("kernel_type", ["exponential_semicircle", "least_misfit"])
+    @pytest.mark.parametrize(
+        "kernel_type", ["prolate_spheroidal", "exponential_semicircle", "least_misfit"]
+    )
     def test_numerical_corrections_are_the_table_transform(self, kernel_type):
         kernel = make_gridding_kernel(
             {"type": kernel_type, "oversampling": 50, "interpolation": "linear"},
@@ -409,10 +413,64 @@ class TestDefaultAndTableCorrections:
         np.testing.assert_allclose(ratio, np.sinc(x / 100), rtol=0, atol=1e-6)
         assert 1.0 - ratio[-1] == pytest.approx((np.pi * 0.42 / 100) ** 2 / 6, rel=0.05)
 
-    @pytest.mark.parametrize("kernel_type", ["exponential_semicircle", "least_misfit"])
+    @pytest.mark.parametrize(
+        "kernel_type", ["prolate_spheroidal", "exponential_semicircle", "least_misfit"]
+    )
     def test_designed_kernels_refuse_a_small_padding(self, kernel_type):
         with pytest.raises(ValueError, match="fft_padding >= 1.05"):
             make_gridding_kernel({"type": kernel_type}, 1.02)
+
+    @pytest.mark.parametrize(
+        "kernel_type", ["prolate_spheroidal", "exponential_semicircle", "least_misfit"]
+    )
+    def test_designed_kernels_refuse_a_correction_below_the_floor(self, kernel_type):
+        """Support 17 at a padding of 1.05: the correction at the edge of the
+        image kept is about 1e-7, so the floor would clamp the outer image."""
+        with pytest.raises(
+            ValueError,
+            match=f"the {kernel_type} gridding kernel of support 17 designed for "
+            "fft_padding 1.05 has a correction of .* below the floor of 1e-06",
+        ):
+            make_gridding_kernel({"type": kernel_type, "support": 17}, 1.05)
+
+    @pytest.mark.parametrize(
+        "kernel_type", ["prolate_spheroidal", "exponential_semicircle"]
+    )
+    def test_every_listed_shape_builds(self, kernel_type):
+        """Every support and padding of the shape tables is well above the
+        floor at the edge of the image kept (about 1e-4 at the least, support
+        17 at 1.2)."""
+        from astroviper.processing_functions.imaging.gridding_convolution_functions import (
+            gcf_exponential_semicircle,
+            gcf_generalized_prolate_spheroidal,
+        )
+
+        shapes = {
+            "prolate_spheroidal": gcf_generalized_prolate_spheroidal.SHAPE_TABLE,
+            "exponential_semicircle": gcf_exponential_semicircle.SHAPE_TABLE,
+        }[kernel_type]
+        for support, fft_padding in shapes:
+            kernel = make_gridding_kernel(
+                {"type": kernel_type, "support": support}, fft_padding
+            )
+            x0 = kept_half_width(fft_padding)
+            edge = kernel.transform(x0) / kernel.transform(0.0)
+            assert edge > 10 * CORRECTION_FLOOR, (support, fft_padding)
+
+    def test_default_kernel_is_not_checked(self):
+        """The prolate_spheroidal_casa kernel does not depend on the padding: at
+        one that refuses the designed kernels of support 17 the default is the
+        same kernel, with its analytic correction bit for bit."""
+        n = 3750
+        default = make_gridding_kernel()
+        assert make_gridding_kernel(None, 1.05) is default
+        np.testing.assert_array_equal(
+            default.table, create_prolate_spheroidal_kernel_1D(100, 7)
+        )
+        np.testing.assert_array_equal(
+            default.correction_1D(n),
+            create_prolate_spheroidal_correcting_image_1D([n, n])[0],
+        )
 
 
 def test_least_misfit_table_is_the_same_in_another_process():

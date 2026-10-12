@@ -176,7 +176,7 @@ IMAGING_WEIGHTS_PARAMS = {
     "casa_weighting_implementation": True,
 }
 CASA_KERNEL = {
-    "type": "prolate_spheroidal",
+    "type": "prolate_spheroidal_casa",
     "support": 7,
     "oversampling": 100,
     "interpolation": "nearest",
