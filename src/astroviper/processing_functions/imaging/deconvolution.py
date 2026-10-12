@@ -16,13 +16,15 @@ from astroviper.utils.data_group_tools import (
 # lg = logger.get_logger()
 # lg.setLevel(logging.DEBUG)
 
-# Divergence test of a Hogbom model update. A healthy clean does not lower its
+# Divergence test of a model update, shared by the deconvolvers
+# (deconvolvers/include/plane_stop_test.hpp). A healthy clean does not lower its
 # residual monotonically: every subtraction changes all other pixels by
 # gain x PSF sidelobe, so the residual jitters above the lowest level it has
 # reached by an amount proportional to the loop gain. The RMS of the residual
 # is an average over all searched pixels and jitters far less than the peak
-# (measured in healthy cleans: at most 0.09 x gain for the RMS, 0.44 x gain for
-# the peak), so the soft limit tests the RMS. Both limits scale with the gain.
+# (measured in healthy Hogbom cleans: at most 0.09 x gain for the RMS, 0.44 x
+# gain for the peak), so the soft limit tests the RMS. Both limits scale with
+# the gain.
 # See ``hogbom_clean``.
 DIVERGENCE_RMS_GAIN_FRACTION = 0.1  # soft limit: (1 + gain / 10) x lowest RMS
 DIVERGENCE_PEAK_GAIN_FRACTION = 1.0  # hard limit: (1 + gain) x starting peak
@@ -113,9 +115,10 @@ def _validate_deconvolve_params(deconvolve_params):
         - ``clean_box`` : 4-tuple ``(xmin, xmax, ymin, ymax)``. Default
           ``(-1, -1, -1, -1)`` meaning the full image.
         - ``max_iter_divergence`` : int, number of consecutive iterations the
-          RMS of a plane's residual may be above ``(1 + gain / 10)`` times the
+          RMS of a plane's residual may be above ``(1 + gain / 10)`` times
+          (``(1 + gain)`` for :func:`asp_clean`) the
           lowest RMS it has reached before its model update is stopped as
-          diverged (Hogbom). ``-1`` disables the divergence test. Default 1:
+          diverged. ``-1`` disables the divergence test. Default 1:
           the model update stops at the first such iteration.
         - ``record_iteration_history`` : bool, record the peak residual and
           the residual RMS of every iteration (Hogbom only, see
@@ -234,7 +237,7 @@ def validate_record_iteration_history(deconvolver, record_iteration_history):
 
 
 def _divergence_factors(gain):
-    """Factors of the soft and the hard limit of the Hogbom divergence test.
+    """Factors of the soft and the hard limit of the divergence test.
 
     Both scale with the loop gain, because the ordinary jitter of the residual
     above its lowest level does (see ``hogbom_clean``).
@@ -259,6 +262,36 @@ def _divergence_factors(gain):
         1.0 + DIVERGENCE_RMS_GAIN_FRACTION * float(gain),
         1.0 + DIVERGENCE_PEAK_GAIN_FRACTION * float(gain),
     )
+
+
+def _divergence_kwargs(deconvolve_params, asp=False):
+    """Divergence test arguments of the deconvolver kernels.
+
+    Parameters
+    ----------
+    deconvolve_params : dict
+        Validated deconvolution parameters (:func:`_validate_deconvolve_params`).
+    asp : bool, optional
+        ``True`` gives the limits of the Asp kernel. Its least-squares
+        components can raise the peak of a healthy residual, and its RMS by
+        more than ``gain / 10``, so the RMS limit takes the factor of the hard
+        limit, ``1 + gain``, and there is no peak limit
+        (``divergence_peak_factor`` is infinite). Default ``False``.
+
+    Returns
+    -------
+    dict
+        ``max_iter_divergence``, ``divergence_rms_factor`` and
+        ``divergence_peak_factor`` (see :func:`_divergence_factors`).
+    """
+    rms_factor, peak_factor = _divergence_factors(deconvolve_params["gain"])
+    if asp:
+        rms_factor, peak_factor = peak_factor, np.inf
+    return {
+        "max_iter_divergence": int(deconvolve_params["max_iter_divergence"]),
+        "divergence_rms_factor": rms_factor,
+        "divergence_peak_factor": peak_factor,
+    }
 
 
 def _per_plane_per_cycle_limits(deconvolve_params, nt, nf, npol, threshold_dtype):
@@ -925,10 +958,6 @@ def _run_hogbom(
     max_iter_remaining = np.where(np.isnan(start_peak), 0, max_iter_per_cycle).astype(
         max_iter_per_cycle.dtype
     )
-    # Only the gain dependent limits of the divergence test are worked out here.
-    divergence_rms_factor, divergence_peak_factor = _divergence_factors(
-        deconvolve_params["gain"]
-    )
     result = clean_cube(
         residual_cube=residual_cube,
         psf_cube=psf_cube,
@@ -939,9 +968,7 @@ def _run_hogbom(
         gain=deconvolve_params["gain"],
         threshold=threshold_per_cycle,
         processing_function_threads=int(processing_function_threads),
-        max_iter_divergence=int(deconvolve_params["max_iter_divergence"]),
-        divergence_rms_factor=divergence_rms_factor,
-        divergence_peak_factor=divergence_peak_factor,
+        **_divergence_kwargs(deconvolve_params),
         record_iteration_history=bool(deconvolve_params["record_iteration_history"]),
     )
     final_peak = _hogbom_peak_cube(residual_cube, peak_mask_cube, clean_box)
@@ -1042,8 +1069,10 @@ def hogbom_clean(
       limit* for ``max_iter_divergence`` consecutive iterations (default 1,
       the first such iteration; ``-1`` disables the divergence test). A
       runaway is stopped at once by the *hard limit*, a peak above
-      ``(1 + gain)`` times the peak at the start of the model update. A peak
-      that is not finite always stops the plane.
+      ``(1 + gain)`` times the peak at the start of the model update. An
+      infinite peak always stops the plane. A plane whose search region
+      holds a pixel that is not a number gets no iterations instead
+      (``stop_code`` 0, not ``diverged``).
 
     A diverged model update does not end the plane's imaging cycles: the next
     residual update recomputes the true residual and cleaning resumes from it.
@@ -1306,9 +1335,18 @@ def asp_clean(
     dict
         Per-plane summary arrays with shape ``(nt, nf, np)`` and keys
         ``iterations_performed`` (int), ``retval`` (int), ``converged``
-        (bool), ``peak_residual`` (float), and ``model_flux`` (float).
-        The final residual and model cubes are the caller-supplied
-        arrays, updated in place.
+        (bool), ``diverged`` (bool), ``peak_residual`` (float), and
+        ``model_flux`` (float). A plane stops as diverged (``retval`` -3)
+        when the RMS of its residual inside the mask has been above
+        ``(1 + gain)`` times the lowest RMS of the model update for
+        ``max_iter_divergence`` consecutive iterations, or when its peak is
+        infinite. Asp has no peak limit: its least-squares components can
+        raise the peak of a healthy residual. A plane whose search region (the
+        pixels whose mask value is above 0.99, or the whole plane without a
+        mask) holds a pixel that is not a number gets no iterations (not
+        ``diverged``); pixels outside the search region that are not finite are
+        zero during the model update and keep their value. The final residual
+        and model cubes are the caller-supplied arrays, updated in place.
 
     Raises
     ------
@@ -1383,6 +1421,13 @@ def asp_clean(
     max_iter_per_cycle, threshold_per_cycle = _per_plane_per_cycle_limits(
         deconvolve_params, nt, nf, npol_img, np.float64
     )
+    # A plane whose search region (mask above the kernel's 0.99) holds a pixel
+    # that is not a number gets no iterations, as with the Hogbom kernels.
+    search = None if mask_cube is None else mask_cube > 0.99
+    start_peak = _hogbom_peak_cube(residual_cube, search, (-1, -1, -1, -1))
+    max_iter_per_cycle = np.where(np.isnan(start_peak), 0, max_iter_per_cycle).astype(
+        max_iter_per_cycle.dtype
+    )
 
     return aspclean.clean_cube(
         residual=residual_cube,
@@ -1398,4 +1443,5 @@ def asp_clean(
         stoppointmode=deconvolve_params.get("stoppointmode", -1),
         norm_method=deconvolve_params.get("norm_method", 1),
         processing_function_threads=int(processing_function_threads),
+        **_divergence_kwargs(deconvolve_params, asp=True),
     )

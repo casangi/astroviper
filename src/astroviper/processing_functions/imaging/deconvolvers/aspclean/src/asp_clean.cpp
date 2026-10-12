@@ -24,6 +24,7 @@
 #include <deque>
 #include <numeric>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "../include/asp_fft.hpp"
@@ -37,6 +38,8 @@ using aspfft::cd;
 
 constexpr double kTwoPi = 6.283185307179586476925286766559;
 constexpr double kSqrtTwoPi = 2.5066282746310002;
+// A pixel belongs to the search region where the mask is above this value.
+constexpr double kMaskThreshold = 0.99;
 
 // ---------------------------------------------------------------------------
 // Lightweight column-compatible 2-D matrix of doubles.
@@ -274,14 +277,15 @@ public:
     Cleaner(T* residual, T* model, const T* psf, const T* mask, int nx, int ny,
             double gain, double threshold, int max_iter_remaining, double fusedthreshold,
             double psf_width, int largestscale, int stoppointmode,
-            int norm_method, bool verbose)
+            int norm_method, bool verbose,
+            const deconvolvers::DivergenceControl<double>& divergence)
         : residual_(residual), model_(model), psf_(psf), mask_(mask),
           nx_(nx), ny_(ny), gain_(gain), threshold_(threshold),
           maxNiter_(max_iter_remaining), fusedThreshold_(fusedthreshold),
           userLargestScale_(static_cast<double>(largestscale)),
           stopPointMode_(stoppointmode),
           normMethod_(norm_method <= 0 ? 1 : norm_method), verbose_(verbose),
-          psfWidthInput_(psf_width) {}
+          psfWidthInput_(psf_width), divergence_(divergence) {}
 
     AspResult run() {
         setup();
@@ -318,6 +322,7 @@ private:
     int normMethod_;
     bool verbose_;
     double psfWidthInput_;
+    deconvolvers::DivergenceControl<double> divergence_;
 
     // --- derived / state ---
     double psfWidth_ = 0.0;
@@ -329,7 +334,7 @@ private:
     std::vector<Mat> initScaleMasks_;        // itsInitScaleMasks
     std::vector<Mat> dirtyConvInitScales_;   // itsDirtyConvInitScales
     Mat maskMat_;                            // itsMask (always present)
-    double maskThreshold_ = 0.99;
+    double maskThreshold_ = kMaskThreshold;
     bool noClean_ = false;
     int blc0_ = 0, blc1_ = 0, trc0_ = 0, trc1_ = 0;  // blcDirty/trcDirty bbox
 
@@ -350,6 +355,8 @@ private:
     int iteration_ = 0, startingIter_ = 0;
     double maximumResidual_ = 0.0, totalFlux_ = 0.0;
     std::vector<double> goodAspActiveSet_, goodAspAmplitude_;
+    deconvolvers::PlaneStopTest<double> stopTest_;
+    double sumSquares_ = 0.0;  // of the masked residual, set with peakResidual_
 
     // ---- accessors into caller buffers ----
     double dirtyAt(int i, int j) const {
@@ -689,13 +696,17 @@ private:
         return goodAspActiveSet_;
     }
 
-    // Peak |residual| over the scale-0 mask (itsInitScaleMasks[0]).
+    // Peak |residual| over the scale-0 mask (itsInitScaleMasks[0]); the sum
+    // of the squares of the same masked residual goes to sumSquares_. The
+    // search starts from zero, so a pixel that is not a number is skipped.
     double peakResidualMasked() {
-        double minVal = dirtyAt(0, 0) * initScaleMasks_[0](0, 0);
-        double maxVal = minVal;
+        double minVal = 0.0;
+        double maxVal = 0.0;
+        sumSquares_ = 0.0;
         for (int j = 0; j < ny_; ++j)
             for (int i = 0; i < nx_; ++i) {
                 const double v = dirtyAt(i, j) * initScaleMasks_[0](i, j);
+                sumSquares_ += v * v;
                 if (v > maxVal) maxVal = v;
                 if (v < minVal) minVal = v;
             }
@@ -709,8 +720,6 @@ private:
         double totalFlux = 0.0;
         int converged = 0;
         int stopPointModeCounter = 0;
-        double tmpMaximumResidual = 0.0;
-        double minMaximumResidual = 1000.0;
         double initRMSResidual = 1000.0;
 
         iteration_ = startingIter_;
@@ -764,16 +773,25 @@ private:
             totalFlux += (strengthOptimum_ * gain_);
             totalFlux_ = totalFlux;
 
-            if (ii == startingIter_) {
-                maximumResidual_ = std::abs(peakResidual_);
-                tmpMaximumResidual = maximumResidual_;
-            }
-            if (std::abs(minMaximumResidual) > std::abs(peakResidual_))
-                minMaximumResidual = std::abs(peakResidual_);
+            if (ii == startingIter_) maximumResidual_ = std::abs(peakResidual_);
 
             // 0. below cycle threshold
             if (std::abs(peakResidual_) < computeThreshold()) {
                 converged = 1;
+                switchedToHogbom_ = false;
+                break;
+            }
+            // Divergence test shared with the other deconvolvers, on the
+            // masked residual of the threshold test. It replaces the
+            // "5. Diverging" guard of AspMatrixCleaner in CASA 6.7.5.18 and
+            // LibRA (main at fc54ee25, AspMatrixCleaner.cc L515-518). Its fixed
+            // factor 1.5 stops healthy Asp model updates, and its running
+            // minimum starts at 1000, so a plane with a peak above 1500
+            // stopped at once. casa master has dropped the running minimum
+            // and keeps the two factor 1.5 tests against the starting peak.
+            if (stopTest_.check_divergence(std::abs(peakResidual_), sumSquares_,
+                                           divergence_) != deconvolvers::STOP_NONE) {
+                converged = -3;
                 switchedToHogbom_ = false;
                 break;
             }
@@ -799,35 +817,10 @@ private:
                 }
             }
             // PSF (*) scale, centred at the optimum position (the scale image is
-            // separable, so its spectrum needs no 2-D forward transform). Needed
-            // both for the divergence test and for the residual update.
+            // separable, so its spectrum needs no 2-D forward transform).
             std::vector<cd> scaleXfr = scale_image_spectrum(nx_, ny_, usedScale, posOptI_, posOptJ_);
             std::vector<double> psfConvScale;
             conv_from_spectra(psfXfr_, scaleXfr, nx_, ny_, psfConvScale);
-
-            // 5. diverging. CASA compares |strengthOptimum| itself with the
-            // initial peak residual, but the strength multiplies a scale image
-            // normalised to 1 / (sqrt(2 pi) scale), so it is not in Jy/beam:
-            // for an Aspen much wider than the PSF the strength legitimately
-            // exceeds the peak by the ratio scale / (2.5 psf_sigma^2) and the
-            // CASA test aborts the minor cycle on perfectly good components
-            // (any Aspen wider than ~4 beams on a 5-pixel beam). The peak of
-            // the fitted component's dirty-image response, |strength| *
-            // max|psf (*) scale|, is the unit-consistent quantity the test is
-            // meant to bound; the residual-based parts are unchanged.
-            double componentPeak = 0.0;
-            for (double v : psfConvScale) componentPeak = std::max(componentPeak, std::fabs(v));
-            componentPeak *= std::abs(strengthOptimum_);
-            if ((componentPeak - std::abs(tmpMaximumResidual)) >
-                    (std::abs(tmpMaximumResidual) / 2.0) ||
-                (std::abs(peakResidual_) - std::abs(tmpMaximumResidual)) >
-                    (std::abs(tmpMaximumResidual) / 2.0) ||
-                (std::abs(peakResidual_) - std::abs(minMaximumResidual)) >
-                    (std::abs(minMaximumResidual) / 2.0)) {
-                converged = -3;
-                switchedToHogbom_ = false;
-                break;
-            }
 
             // --- update model and residual with the optimum scale ---
             // CASA restricts both updates to a PSF-sized box around the
@@ -983,11 +976,27 @@ AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
                          int nx, int ny, double gain, double threshold,
                          int max_iter_remaining, double fusedthreshold, double psf_width,
                          int largestscale, int stoppointmode, int norm_method,
-                         bool verbose) {
+                         bool verbose,
+                         const deconvolvers::DivergenceControl<double>& divergence) {
+    // A pixel outside the search region that is not finite would spread over
+    // the plane through the scale convolutions and the fit: it is zero during
+    // the model update and gets its value back afterwards.
+    std::vector<std::pair<std::size_t, T>> nonFinite;
+    if (mask != nullptr) {
+        const std::size_t n = static_cast<std::size_t>(nx) * ny;
+        for (std::size_t k = 0; k < n; ++k)
+            if (!(static_cast<double>(mask[k]) > kMaskThreshold) &&
+                !std::isfinite(residual[k])) {
+                nonFinite.emplace_back(k, residual[k]);
+                residual[k] = T(0);
+            }
+    }
     Cleaner<T> cleaner(residual, model, psf, mask, nx, ny, gain, threshold,
                        max_iter_remaining, fusedthreshold, psf_width, largestscale,
-                       stoppointmode, norm_method, verbose);
-    return cleaner.run();
+                       stoppointmode, norm_method, verbose, divergence);
+    const AspResult result = cleaner.run();
+    for (const auto& [k, value] : nonFinite) residual[k] = value;
+    return result;
 }
 
 template <typename T>
@@ -995,7 +1004,9 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
                    int nf, int np_img, int np_psf, int nx, int ny, double gain,
                    const double* threshold, const int* max_iter_remaining, double fusedthreshold,
                    double psf_width, int largestscale, int stoppointmode,
-                   int norm_method, int processing_function_threads, AspResult* results) {
+                   int norm_method, int processing_function_threads,
+                   const deconvolvers::DivergenceControl<double>& divergence,
+                   AspResult* results) {
     const int nplanes = nt * nf * np_img;
     if (nplanes <= 0) return;
     const std::size_t plane = static_cast<std::size_t>(ny) * nx;
@@ -1019,7 +1030,7 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
                                            psf + psf_off, maskp, nx, ny, gain,
                                            threshold[p], max_iter_remaining[p], fusedthreshold,
                                            psf_width, largestscale, stoppointmode,
-                                           norm_method, false);
+                                           norm_method, false, divergence);
         }
     };
 
@@ -1037,17 +1048,22 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
 // Explicit instantiations for float and double image buffers.
 template AspResult aspclean_plane<float>(float*, float*, const float*, const float*,
                                          int, int, double, double, int, double,
-                                         double, int, int, int, bool);
+                                         double, int, int, int, bool,
+                                         const deconvolvers::DivergenceControl<double>&);
 template AspResult aspclean_plane<double>(double*, double*, const double*, const double*,
                                           int, int, double, double, int, double,
-                                          double, int, int, int, bool);
+                                          double, int, int, int, bool,
+                                          const deconvolvers::DivergenceControl<double>&);
 template void aspclean_cube<float>(float*, float*, const float*, const float*, int,
                                    int, int, int, int, int, double, const double*,
                                    const int*, double, double, int, int, int, int,
+                                   const deconvolvers::DivergenceControl<double>&,
                                    AspResult*);
 template void aspclean_cube<double>(double*, double*, const double*, const double*,
                                     int, int, int, int, int, int, double,
                                     const double*, const int*, double, double, int,
-                                    int, int, int, AspResult*);
+                                    int, int, int,
+                                    const deconvolvers::DivergenceControl<double>&,
+                                    AspResult*);
 
 }  // namespace aspclean

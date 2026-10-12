@@ -31,14 +31,16 @@ def model_update_cube_single_field(
         the deconvolver: ``gain``, the absolute ``threshold`` (floor) and the
         per-plane ``max_iter_per_cycle`` and ``threshold_per_cycle`` arrays
         computed by the cycle controller.  ``max_iter_divergence`` (default
-        1, ``-1`` disables) is the divergence test of the Hogbom kernels: a
-        plane stops its model update when the RMS of its residual inside the
-        mask has been above ``(1 + gain / 10)`` times the lowest RMS reached
-        for that many iterations in a row, or at once when the peak exceeds
-        ``(1 + gain)`` times the peak at the start of the model update or is
-        not finite.  ``record_iteration_history`` (default ``False``; Hogbom
-        only) records the peak residual and the residual RMS of every
-        iteration (see
+        1, ``-1`` disables its two limits) is the divergence test of the
+        deconvolvers: a plane stops its model update when the RMS of its
+        residual inside the mask has been above ``(1 + gain / 10)`` times the
+        lowest RMS reached for that many iterations in a row or, for Hogbom,
+        at once when the peak exceeds ``(1 + gain)`` times the peak at the
+        start of the model update (Asp has no peak limit and allows
+        ``(1 + gain)`` times the lowest RMS). An infinite peak always stops
+        it.  ``record_iteration_history`` (default ``False``; Hogbom only)
+        records the peak residual and the residual RMS of every iteration
+        (see
         :func:`~astroviper.processing_functions.imaging.deconvolution.hogbom_clean`).
         The
         separate ``primary_beam_limit`` builds the primary-beam mask (a

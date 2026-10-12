@@ -487,7 +487,8 @@ class TestHogbomCleanCube:
         assert not model.any()
 
     def test_search_region_without_selected_pixel_is_not_cleaned(self):
-        """At a zero threshold the kernel would clean a default pixel."""
+        """A search region without a selected pixel has peak 0, so the kernel
+        stops on the threshold test without cleaning."""
         resid = np.ones((1, 1, 1, 16, 16), dtype=np.float32)
         model = np.zeros_like(resid)
         mask = np.zeros(resid.shape, dtype=bool)
@@ -506,7 +507,8 @@ class TestHogbomCleanCube:
         assert not model.any()
 
     def test_clean_box_excluding_brighter_emission_does_not_diverge(self):
-        """The peak after a batch is taken over the clean box, as before it."""
+        """The peak and the RMS are taken over the clean box, so brighter
+        emission outside it does not trip the divergence test."""
         resid = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
         resid[0, 0, 0, 2, 2] = 10.0  # outside the clean box
         resid[0, 0, 0, 8, 8] = 1.0
@@ -578,6 +580,20 @@ def _chain_problem(ny=8, nx=64, sidelobe=2.04, dtype=np.float64):
     psf = np.zeros((1, 1, 1, ny, nx), dtype=dtype)
     psf[0, 0, 0, ny // 2, nx // 2] = 1.0
     psf[0, 0, 0, ny // 2, nx // 2 + 1] = -sidelobe
+    return residual, psf
+
+
+def _spreading_problem(n=32, dtype=np.float64):
+    """A point source and a PSF with 24 sidelobes of -0.3 on a square ring:
+    a subtraction at gain 0.9 lowers the peak (1 -> 0.27) and raises the RMS
+    of the residual 1.33 times (see test_aspclean.py)."""
+    residual = np.zeros((1, 1, 1, n, n), dtype=dtype)
+    residual[0, 0, 0, n // 2, n // 2] = 1.0
+    psf = np.zeros((1, 1, 1, n, n), dtype=dtype)
+    c = n // 2
+    psf[..., c - 3 : c + 4, c - 3 : c + 4] = -0.3
+    psf[..., c - 2 : c + 3, c - 2 : c + 3] = 0.0
+    psf[..., c, c] = 1.0
     return residual, psf
 
 
@@ -1103,6 +1119,86 @@ class TestAspClean:
         with pytest.raises(ValueError, match="polarization"):
             asp_clean(resid, psf, model)
 
+    @pytest.mark.parametrize(
+        ("max_iter_divergence", "iterations", "diverged"),
+        [(1, 6, True), (-1, 40, False)],
+    )
+    def test_divergence_test_follows_max_iter_divergence(
+        self, max_iter_divergence, iterations, diverged
+    ):
+        """The model update stops once the RMS is above (1 + gain) times its
+        lowest value; without the test nothing stops the runaway."""
+        residual, psf = _spreading_problem()
+        result = asp_clean(
+            residual,
+            psf,
+            np.zeros_like(residual),
+            {
+                "gain": 0.9,
+                "max_iter": 40,
+                "threshold": 0.0,
+                "psf_width": 1.0,
+                "largestscale": 0,
+                "max_iter_divergence": max_iter_divergence,
+            },
+        )
+        assert result["iterations_performed"].item() == iterations
+        assert result["diverged"].item() == diverged
+        assert (result["retval"].item() == -3) == diverged
+
+    def test_plane_with_nan_in_the_search_region_gets_no_iterations(self):
+        residual, psf = _spreading_problem()
+        residual[0, 0, 0, 3, 3] = np.nan
+        model = np.zeros_like(residual)
+        result = asp_clean(
+            residual,
+            psf,
+            model,
+            {"gain": 0.1, "max_iter": 40, "threshold": 0.0, "psf_width": 1.0},
+        )
+        assert result["iterations_performed"].item() == 0
+        assert not result["diverged"].item()
+        assert not model.any()
+
+    @pytest.mark.parametrize("mask_dtype", [bool, np.float64])
+    def test_nan_outside_the_mask_changes_nothing(self, mask_dtype):
+        out = []
+        for value in (0.0, np.nan):
+            residual, psf = _spreading_problem()
+            mask = np.zeros(residual.shape, dtype=mask_dtype)
+            mask[..., 8:24, 8:24] = 1
+            residual[0, 0, 0, 0, 0] = value
+            model = np.zeros_like(residual)
+            result = asp_clean(
+                residual,
+                psf,
+                model,
+                {"gain": 0.1, "max_iter": 40, "threshold": 0.0, "psf_width": 1.0},
+                mask_cube=mask,
+            )
+            out.append((result, residual, model))
+        (ref, _, model_ref), (result, residual, model) = out
+        assert (
+            result["iterations_performed"].item() == ref["iterations_performed"].item()
+        )
+        assert result["retval"].item() == ref["retval"].item()
+        np.testing.assert_array_equal(model, model_ref)
+        assert np.isnan(residual[0, 0, 0, 0, 0])
+
+    def test_rms_limit_takes_the_hard_factor_and_no_peak_limit(self, monkeypatch):
+        captured = {}
+
+        def clean_cube(**kwargs):
+            captured.update(kwargs)
+            return {}
+
+        monkeypatch.setattr(aspclean, "clean_cube", clean_cube)
+        residual, psf = _spreading_problem()
+        asp_clean(residual, psf, np.zeros_like(residual), {"gain": 0.2})
+        assert captured["max_iter_divergence"] == 1
+        assert captured["divergence_rms_factor"] == _divergence_factors(0.2)[1]
+        assert captured["divergence_peak_factor"] == np.inf
+
 
 # ---------------------------------------------------------------------------
 # deconvolve end-to-end with algorithm="asp"
@@ -1159,6 +1255,26 @@ class TestDeconvolveAsp:
             },
         )
         assert len(rd.data) == nt * nf * npol
+
+    def test_diverged_model_update_reaches_the_controller(self):
+        xds = _make_img_xds(dtype=np.float64)
+        residual, psf = _spreading_problem()
+        xds["RESIDUAL"].values[...] = residual
+        xds["POINT_SPREAD_FUNCTION"].values[...] = psf
+        imaging_dict = deconvolve(
+            img_xds=xds,
+            algorithm="asp",
+            deconvolve_params={
+                "gain": 0.9,
+                "max_iter": 40,
+                "threshold": 0.0,
+                "psf_width": 1.0,
+                "largestscale": 0,
+            },
+        )
+        (entry,) = imaging_dict.data.values()
+        assert entry["iter_done"] == [6]
+        assert entry["stop_code"] == StopCode(IMAGING_CONTINUE, MODEL_UPDATE_DIVERGENCE)
 
 
 if __name__ == "__main__":  # pragma: no cover

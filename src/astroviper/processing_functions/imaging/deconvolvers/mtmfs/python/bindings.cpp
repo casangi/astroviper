@@ -69,7 +69,8 @@ py::array_t<double> vector_array(const std::vector<double>& values) {
 template <typename T>
 py::dict clean_impl(py::array residual, py::array psf, py::array model, py::object mask_obj,
                     const std::vector<float>& scales, float small_scale_bias, int max_iter_remaining, double gain,
-                    double threshold, double psf_fraction, double mask_threshold) {
+                    double threshold, double psf_fraction, double mask_threshold, int max_iter_divergence,
+                    double divergence_rms_factor, double divergence_peak_factor) {
     int nterms, ny, nx;
     stack_dims(residual, "residual", nterms, ny, nx);
     const std::vector<py::ssize_t> stack = {nterms, ny, nx};
@@ -100,12 +101,16 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
     T* mod = static_cast<T*>(mi.ptr);
     const T* psf_ptr = static_cast<const T*>(pi.ptr);
 
+    deconvolvers::DivergenceControl<T> divergence;
+    divergence.max_iter_divergence = max_iter_divergence;
+    divergence.rms_factor = divergence_rms_factor;
+    divergence.peak_factor = static_cast<T>(divergence_peak_factor);
     mtmfs::CleanResult<T> result;
     {
         py::gil_scoped_release release;
         result = mtmfs::clean<T>(res, mod, psf_ptr, mask_ptr, nterms, nx, ny, scales, small_scale_bias,
                                  max_iter_remaining, static_cast<T>(gain), static_cast<T>(threshold),
-                                 static_cast<T>(psf_fraction), static_cast<T>(mask_threshold));
+                                 static_cast<T>(psf_fraction), static_cast<T>(mask_threshold), divergence);
     }
 
     const int nscales = static_cast<int>(result.scales.size());
@@ -114,6 +119,7 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
     out["peak_residual"] = result.peak_residual;
     out["model_flux"] = result.model_flux;
     out["converged"] = (result.stop_code == mtmfs::kStopThreshold || result.stop_code == mtmfs::kStopNothingToClean);
+    out["diverged"] = (result.stop_code == mtmfs::kStopDiverged);
     out["stop_code"] = result.stop_code;
     out["scales"] = result.scales;
     out["small_scale_bias"] = result.small_scale_bias;
@@ -126,13 +132,17 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
 
 static py::dict clean_dispatch(py::array residual, py::array psf, py::array model, py::object mask,
                                const std::vector<float>& scales, float small_scale_bias, int max_iter_remaining,
-                               double gain, double threshold, double psf_fraction, double mask_threshold) {
+                               double gain, double threshold, double psf_fraction, double mask_threshold,
+                               int max_iter_divergence, double divergence_rms_factor,
+                               double divergence_peak_factor) {
     if (py::isinstance<py::array_t<float>>(residual))
         return clean_impl<float>(residual, psf, model, mask, scales, small_scale_bias, max_iter_remaining, gain,
-                                 threshold, psf_fraction, mask_threshold);
+                                 threshold, psf_fraction, mask_threshold, max_iter_divergence,
+                                 divergence_rms_factor, divergence_peak_factor);
     if (py::isinstance<py::array_t<double>>(residual))
         return clean_impl<double>(residual, psf, model, mask, scales, small_scale_bias, max_iter_remaining, gain,
-                                  threshold, psf_fraction, mask_threshold);
+                                  threshold, psf_fraction, mask_threshold, max_iter_divergence,
+                                  divergence_rms_factor, divergence_peak_factor);
     throw std::runtime_error("residual must be float32 or float64");
 }
 
@@ -213,16 +223,23 @@ PYBIND11_MODULE(_mtmfs_ext, m) {
           "is 0), falls below max(threshold, psf_fraction times its initial value); that estimate is "
           "updated only inside the psf_support patch, so the returned residual can still exceed threshold. "
           "mask_threshold > 0 binarises each scale-convolved mask at 0.1 (its value is otherwise unused). The "
+          "call also stops as diverged (stop_code -1) on the divergence test shared with the other "
+          "deconvolvers, applied to that estimate and to the sum of the squares of the same masked image: "
+          "its RMS above divergence_rms_factor times its lowest value for max_iter_divergence consecutive "
+          "components, its peak above divergence_peak_factor times its starting value, or a peak that is "
+          "not finite (max_iter_divergence < 0 disables the first two tests). The "
           "residual is updated at the end of the call by a circular FFT convolution of the new components "
           "with the PSF. Returns a dict with "
           "iterations_performed, peak_residual (max |residual[0]*mask|, not divided by the PSF peak), model_flux "
-          "(sum of model[0]), converged (engine stop on threshold or empty search), "
+          "(sum of model[0]), converged (engine stop on threshold or empty search), diverged, "
           "stop_code, scales, small_scale_bias, psf_support, hessian, inverse_hessian and the per-scale "
           "infinity-norm hessian_condition_number.",
           py::arg("residual"), py::arg("psf"), py::arg("model"), py::arg("mask") = py::none(),
           py::arg("scales") = std::vector<float>{}, py::arg("small_scale_bias") = 0.0f,
           py::arg("max_iter_remaining") = 100, py::arg("gain") = 0.1, py::arg("threshold") = 0.0,
-          py::arg("psf_fraction") = 0.0, py::arg("mask_threshold") = 0.9);
+          py::arg("psf_fraction") = 0.0, py::arg("mask_threshold") = 0.9,
+          py::arg("max_iter_divergence") = -1, py::arg("divergence_rms_factor") = 1.0,
+          py::arg("divergence_peak_factor") = 1.0);
 
     m.def("hessian", &hessian_dispatch,
           "Taylor Hessians and inverses for a (2*nterms-1, ny, nx) PSF stack, with 1 <= nterms <= 4. Returns a dict "

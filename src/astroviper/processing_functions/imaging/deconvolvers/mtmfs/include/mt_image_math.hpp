@@ -43,6 +43,11 @@ PeakResult<T> find_max_abs(const T* a, int nx, int ny);
 template <typename T>
 PeakResult<T> find_max_abs_mask(const T* a, const T* mask, int nx, int ny);
 
+// The same, also returning the sum of the squares of a*mask, accumulated in
+// double precision in the same pass.
+template <typename T>
+PeakResult<T> find_max_abs_mask(const T* a, const T* mask, int nx, int ny, double& sum_squares);
+
 extern template float sum_array<float>(const float*, std::size_t);
 extern template double sum_array<double>(const double*, std::size_t);
 extern template float peak_abs<float>(const float*, std::size_t);
@@ -53,5 +58,7 @@ extern template PeakResult<float> find_max_abs<float>(const float*, int, int);
 extern template PeakResult<double> find_max_abs<double>(const double*, int, int);
 extern template PeakResult<float> find_max_abs_mask<float>(const float*, const float*, int, int);
 extern template PeakResult<double> find_max_abs_mask<double>(const double*, const double*, int, int);
+extern template PeakResult<float> find_max_abs_mask<float>(const float*, const float*, int, int, double&);
+extern template PeakResult<double> find_max_abs_mask<double>(const double*, const double*, int, int, double&);
 
 }  // namespace mtmfs

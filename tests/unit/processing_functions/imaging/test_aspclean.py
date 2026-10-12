@@ -157,6 +157,7 @@ class TestClean:
             "iterations_performed",
             "retval",
             "converged",
+            "diverged",
             "peak_residual",
             "model_flux",
             "switched_to_hogbom",
@@ -445,6 +446,278 @@ class TestCube:
 
 
 # ---------------------------------------------------------------------------
+# Divergence test shared with the other deconvolvers
+# ---------------------------------------------------------------------------
+
+
+class TestDivergence:
+    """The divergence test of deconvolvers/include/plane_stop_test.hpp.
+
+    The spreading PSF has 24 sidelobes of -0.3 on a square ring around its
+    peak, so a subtraction at gain 0.9 lowers the peak of a point source from
+    1 to 0.27 but raises the RMS of the residual 1.33 times: the soft limit
+    stops the model update; with the test off nothing stops this runaway. The
+    chain PSF has one sidelobe of -1.2, so the peak grows 1.08 times per
+    iteration. Asp counts the iteration whose check stops it.
+    """
+
+    # _divergence_factors(0.9)
+    RMS_FACTOR = 1.09
+    PEAK_FACTOR = 1.9
+
+    @staticmethod
+    def _spreading(dtype=np.float64, n=32):
+        residual = np.zeros((n, n), dtype=dtype)
+        residual[n // 2, n // 2] = 1.0
+        psf = np.zeros((n, n), dtype=dtype)
+        c = n // 2
+        psf[c - 3 : c + 4, c - 3 : c + 4] = -0.3
+        psf[c - 2 : c + 3, c - 2 : c + 3] = 0.0
+        psf[c, c] = 1.0
+        return residual, psf
+
+    @staticmethod
+    def _chain(dtype=np.float64):
+        residual = np.zeros((8, 64), dtype=dtype)
+        residual[4, 2] = 1.0
+        psf = np.zeros((8, 64), dtype=dtype)
+        psf[4, 32] = 1.0
+        psf[4, 33] = -1.2
+        return residual, psf
+
+    @staticmethod
+    def _clean(scene, **kwargs):
+        residual, psf = scene
+        model = np.zeros_like(residual)
+        result = aspclean.clean(
+            residual,
+            psf,
+            model,
+            gain=0.9,
+            threshold=0.0,
+            max_iter_remaining=40,
+            psf_width=1.0,
+            largestscale=0,
+            **kwargs,
+        )
+        return result, residual, model
+
+    def test_default_leaves_the_test_off(self):
+        result, residual, model = self._clean(self._spreading())
+        off, residual_off, model_off = self._clean(
+            self._spreading(), max_iter_divergence=-1
+        )
+        # nothing else stops the runaway: both spend their budget
+        assert result["iterations_performed"] == off["iterations_performed"] == 40
+        assert result["retval"] == off["retval"] == 0
+        np.testing.assert_array_equal(residual, residual_off)
+        np.testing.assert_array_equal(model, model_off)
+
+    @pytest.mark.parametrize("dtype", [np.float64, np.float32])
+    def test_rms_rise_stops_the_model_update(self, dtype):
+        result, _, model = self._clean(
+            self._spreading(dtype),
+            max_iter_divergence=1,
+            divergence_rms_factor=self.RMS_FACTOR,
+            divergence_peak_factor=self.PEAK_FACTOR,
+        )
+        assert result["iterations_performed"] == 2
+        assert result["retval"] == -3
+        assert result["diverged"]
+        assert not result["converged"]
+        # the peak fell; the RMS rose
+        assert result["peak_residual"] == pytest.approx(0.27, rel=1e-5)
+        assert np.count_nonzero(model) == 1
+
+    @pytest.mark.parametrize(("max_iter_divergence", "iterations"), [(1, 6), (2, 7)])
+    def test_asp_limits_stop_the_runaway(self, max_iter_divergence, iterations):
+        # The limits asp_clean() passes at gain 0.9: (1 + gain) on the RMS and
+        # no peak limit. Five subtractions raise the RMS 1.94 times.
+        result, _, _ = self._clean(
+            self._spreading(),
+            max_iter_divergence=max_iter_divergence,
+            divergence_rms_factor=self.PEAK_FACTOR,
+            divergence_peak_factor=np.inf,
+        )
+        assert result["iterations_performed"] == iterations
+        assert result["diverged"]
+
+    def test_peak_above_1500_is_cleaned(self):
+        # The "5. Diverging" guard of CASA 6.7.5.18 and LibRA (fc54ee25)
+        # started its lowest peak at 1000, so it stopped any plane with a peak
+        # above 1500 at once (casa master has dropped that test).
+        psf, _, dirty = TestClean()._make_scene()
+        results = []
+        for scale in (1.0, 1e4):
+            residual = dirty * scale
+            model = np.zeros_like(dirty)
+            result = aspclean.clean(
+                residual,
+                psf,
+                model,
+                gain=0.1,
+                threshold=0.05 * scale,
+                max_iter_remaining=100,
+            )
+            results.append((result, model.sum() / scale))
+        (unit, unit_flux), (scaled, scaled_flux) = results
+        assert scaled["iterations_performed"] > 1
+        assert not scaled["diverged"]
+        assert scaled["retval"] == unit["retval"]
+        assert scaled_flux == pytest.approx(unit_flux, rel=1e-6)
+
+    @pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+    @pytest.mark.parametrize("dtype", [np.float64, np.float32])
+    @pytest.mark.parametrize("mask_value", [0.0, 0.5])
+    def test_non_finite_pixels_outside_the_mask_take_no_part(
+        self, bad, dtype, mask_value
+    ):
+        psf, _, dirty = TestClean()._make_scene(dtype)
+        mask = np.zeros_like(dirty)
+        mask[20:110, 20:110] = 1.0
+        # a mask value up to 0.99 is outside the search region too
+        mask[0, 0] = mask[5, 120] = mask_value
+        finite = dirty.copy()
+        finite[0, 0] = finite[5, 120] = 0.0
+        # pixel (0, 0) seeded the peak search, which then stopped the plane
+        # at once; elsewhere the scale convolutions spread the value
+        nan = finite.copy()
+        nan[0, 0] = nan[5, 120] = bad
+        out = []
+        for residual in (finite, nan):
+            model = np.zeros_like(dirty)
+            result = aspclean.clean(
+                residual,
+                psf,
+                model,
+                mask=mask,
+                gain=0.1,
+                threshold=0.05,
+                max_iter_remaining=100,
+            )
+            out.append((result, model))
+        (ref, model_ref), (result, model) = out
+        assert result["iterations_performed"] == ref["iterations_performed"]
+        assert result["retval"] == ref["retval"]
+        np.testing.assert_array_equal(model, model_ref)
+        assert np.array_equal(nan[[0, 5], [0, 120]], [bad, bad], equal_nan=True)
+        keep = np.isfinite(nan)
+        np.testing.assert_array_equal(nan[keep], finite[keep])
+
+    def test_consecutive_iterations_above_the_soft_limit(self):
+        result, _, _ = self._clean(
+            self._spreading(),
+            max_iter_divergence=2,
+            divergence_rms_factor=self.RMS_FACTOR,
+            divergence_peak_factor=self.PEAK_FACTOR,
+        )
+        assert result["iterations_performed"] == 3
+        assert result["diverged"]
+
+    def test_hard_limit(self):
+        result, _, _ = self._clean(
+            self._chain(),
+            max_iter_divergence=1,
+            divergence_rms_factor=1e9,
+            divergence_peak_factor=1.05,
+        )
+        assert result["iterations_performed"] == 2
+        assert result["diverged"]
+        assert result["peak_residual"] == pytest.approx(1.08)
+
+    def test_healthy_clean_is_unchanged(self):
+        psf, _, dirty = TestClean()._make_scene()
+        results = []
+        for kwargs in (
+            {},
+            {
+                "max_iter_divergence": 1,
+                "divergence_rms_factor": 1.01,
+                "divergence_peak_factor": 1.1,
+            },
+        ):
+            residual = dirty.copy()
+            model = np.zeros_like(dirty)
+            result = aspclean.clean(
+                residual,
+                psf,
+                model,
+                gain=0.1,
+                threshold=0.05,
+                max_iter_remaining=100,
+                **kwargs,
+            )
+            results.append((result, residual, model))
+        (result, residual, model), (on, residual_on, model_on) = results
+        assert not on["diverged"]
+        assert on["iterations_performed"] == result["iterations_performed"]
+        np.testing.assert_array_equal(residual_on, residual)
+        np.testing.assert_array_equal(model_on, model)
+
+    def test_cube_reports_diverged_per_plane(self):
+        spreading_residual, spreading_psf = self._spreading()
+        residual = np.zeros((1, 1, 2) + spreading_residual.shape)
+        psf = np.zeros_like(residual)
+        residual[0, 0, 0] = spreading_residual
+        psf[0, 0, 0] = spreading_psf
+        # plane 1: the same point source and a delta PSF
+        residual[0, 0, 1] = spreading_residual
+        psf[0, 0, 1, 16, 16] = 1.0
+        model = np.zeros_like(residual)
+        result = aspclean.clean_cube(
+            residual,
+            psf,
+            model,
+            gain=0.9,
+            threshold=np.zeros((1, 1, 2)),
+            max_iter_remaining=np.full((1, 1, 2), 40, dtype=np.int32),
+            psf_width=1.0,
+            largestscale=0,
+            max_iter_divergence=1,
+            divergence_rms_factor=self.RMS_FACTOR,
+            divergence_peak_factor=self.PEAK_FACTOR,
+        )
+        np.testing.assert_array_equal(result["diverged"], [[[True, False]]])
+        np.testing.assert_array_equal(result["retval"][0, 0, 0], -3)
+        # the shared test stops plane 0
+        np.testing.assert_array_equal(result["iterations_performed"], [[[2, 40]]])
+
+    def test_rms_is_taken_inside_the_mask(self):
+        # the sidelobes that raise the RMS fall outside a 3 x 3 mask
+        residual, psf = self._spreading()
+        mask = np.zeros_like(residual)
+        mask[15:18, 15:18] = 1.0
+        model = np.zeros_like(residual)
+        result = aspclean.clean(
+            residual,
+            psf,
+            model,
+            mask=mask,
+            gain=0.9,
+            threshold=0.0,
+            max_iter_remaining=40,
+            psf_width=1.0,
+            largestscale=0,
+            max_iter_divergence=1,
+            divergence_rms_factor=self.RMS_FACTOR,
+            divergence_peak_factor=self.PEAK_FACTOR,
+        )
+        assert result["iterations_performed"] > 2
+        assert result["peak_residual"] < 1e-6
+
+    def test_infinite_peak_stops_the_model_update(self):
+        # also with the binding's defaults, which leave the two limits off
+        residual, psf = self._spreading()
+        residual[5, 5] = np.inf
+        model = np.zeros_like(residual)
+        result = aspclean.clean(residual, psf, model, gain=0.9, psf_width=1.0)
+        assert result["iterations_performed"] == 1
+        assert result["retval"] == -3
+        assert result["diverged"]
+        assert not model.any()
+
+
+# ---------------------------------------------------------------------------
 # The per-Aspen L-BFGS optimizer (ALGLIB minlbfgs conventions)
 # ---------------------------------------------------------------------------
 
@@ -516,10 +789,10 @@ class TestResolvedSource:
 
     Regression test for two failure modes of the first port on extended
     emission: the per-Aspen L-BFGS jumping to a garbage (amplitude, scale)
-    pair, and the divergence guard (``retval == -3``) firing on legitimate
-    wide components because CASA's test compares the Aspen strength (not in
-    Jy/beam) with the peak residual. Both made every minor cycle stop after
-    one to three iterations without progress.
+    pair, and a spurious divergence stop (``retval == -3``) on legitimate
+    wide components. Both made every model update stop after one to three
+    iterations without progress. The test runs with the divergence limits
+    asp_clean() passes, which must not fire here.
     """
 
     @staticmethod
@@ -557,7 +830,15 @@ class TestResolvedSource:
         resid = dirty.copy()
         model = np.zeros_like(dirty)
         out = aspclean.clean(
-            resid, psf, model, gain=0.1, threshold=1e-4, max_iter_remaining=300
+            resid,
+            psf,
+            model,
+            gain=0.1,
+            threshold=1e-4,
+            max_iter_remaining=300,
+            max_iter_divergence=1,
+            divergence_rms_factor=1.1,
+            divergence_peak_factor=np.inf,
         )
         assert out["retval"] != -3  # no spurious "diverging" stop
         assert out["iterations_performed"] >= 30  # the minor cycle actually ran

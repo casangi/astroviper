@@ -1349,15 +1349,10 @@ class CycleController:
             Filter by specific channel index
         model_update_ran : bool, optional
             ``True`` when ``imaging_dict`` is the result of a model update that
-            ran in this imaging cycle. ``False`` (default) for a check on the
-            residual alone, where no model update has run; the entropy stop is
-            decided on such a check.
-
-        model_update_ran : bool, optional
-            ``True`` when ``imaging_dict`` is the result of a model update that
             ran in this imaging cycle; its ``iter_done`` then feeds the no
             progress stop. ``False`` (default) for a check on the residual
-            alone, where no model update has run.
+            alone, where no model update has run; the entropy stop is decided
+            on such a check.
 
         Returns:
         --------
