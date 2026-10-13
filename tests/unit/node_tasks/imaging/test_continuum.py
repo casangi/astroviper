@@ -1,6 +1,7 @@
 """Unit tests for continuum map, reduce-root, and append node tasks."""
 
 import numpy as np
+import pandas as pd
 import pytest
 import xarray as xr
 
@@ -698,6 +699,162 @@ def test_model_update_passes_cube_parameter_names_to_backend(monkeypatch, initia
             },
         )
     assert params["max_iter_per_cycle"] == 5
+
+
+def test_native_mtmfs_node_updates_controller_counts_and_statistics(monkeypatch):
+    """The append node preserves native MT-MFS accounting and diagnostics."""
+    from astroviper.processing_functions.imaging.utils import (
+        IterationController,
+        StopCode,
+    )
+    from astroviper.processing_functions.imaging.utils.iteration_control import (
+        IMAGING_CONTINUE,
+        MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+    )
+
+    dims = ("time", "taylor_term", "polarization", "l", "m")
+    image = xr.Dataset(
+        {
+            "SKY_RESIDUAL": (dims, np.ones((1, 2, 2, 4, 4))),
+            "POINT_SPREAD_FUNCTION": (
+                ("time", "psf_taylor_order", "polarization", "l", "m"),
+                np.ones((1, 3, 2, 4, 4)),
+            ),
+            "PRIMARY_BEAM": (("l", "m"), np.ones((4, 4))),
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
+                ("time", "polarization"),
+                [[0.1, 0.2]],
+            ),
+        },
+        coords={
+            "time": [0.0],
+            "taylor_term": [0, 1],
+            "psf_taylor_order": [0, 1, 2],
+            "polarization": ["I", "Q"],
+            "l": np.arange(4),
+            "m": np.arange(4),
+        },
+        attrs={
+            "data_groups": {
+                "residual": {
+                    "sky": "SKY_RESIDUAL",
+                    "point_spread_function": "POINT_SPREAD_FUNCTION",
+                    "primary_beam": "PRIMARY_BEAM",
+                }
+            }
+        },
+    )
+    params = {
+        "max_iter": 10,
+        "max_cycles": 3,
+        "threshold": 0.0,
+        "gain": 0.1,
+        "max_iter_per_cycle": 2,
+        "psf_sidelobe_factor": 1.0,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+        "primary_beam_limit": 0.2,
+    }
+    controller = IterationController(
+        **{key: value for key, value in params.items() if key != "primary_beam_limit"}
+    )
+
+    def native_backend(image_arg, deconvolver, controls, **kwargs):
+        assert deconvolver == "mtmfs"
+        assert controls["max_iter_per_cycle"].shape == (1, 1, 2)
+        assert controls["threshold_per_cycle"].shape == (1, 1, 2)
+        image_arg["SKY_MODEL"] = xr.zeros_like(image_arg.SKY_RESIDUAL)
+        image_arg.SKY_MODEL.loc[{"taylor_term": 0}] = 1.0
+        image_arg.SKY_MODEL.loc[{"taylor_term": 1}] = -0.25
+        result = ImagingDict()
+        for pol, iterations in enumerate((1, 2)):
+            result.add(
+                {
+                    "iter_done": iterations,
+                    "peakres": 0.5,
+                    "masksum": 16,
+                    "model_flux": float(16 * (pol + 1)),
+                    "max_psf_sidelobe": 0.1 * (pol + 1),
+                    "stop_code": StopCode(
+                        imaging=IMAGING_CONTINUE,
+                        model_update=MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+                    ),
+                    "stop_description": "Reached max_iter_per_cycle",
+                    "scales": np.asarray([0.0]),
+                    "hessian_condition_number": np.asarray([2.0 + pol]),
+                },
+                time=0,
+                pol=pol,
+                chan=0,
+            )
+        return result, pd.DataFrame({"T_mtmfs": [0.25]})
+
+    monkeypatch.setattr(
+        continuum_processing, "model_update_mtmfs_single_field", native_backend
+    )
+    result = continuum_node.model_update_continuum_single_field(
+        {"image": image},
+        {
+            "controller": controller,
+            "deconvolver": "mtmfs",
+            "iteration_control_params": params,
+        },
+    )
+
+    assert not result["residual_converged"]
+    assert result["stopcode"] == StopCode(
+        imaging=IMAGING_CONTINUE,
+        model_update=MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+    )
+    assert result["stopdesc"] == "Reached max_iter_per_cycle"
+    assert controller.total_iter_done == 3
+    assert controller.cycles_done == 1
+    assert controller.max_cycles == 2
+    np.testing.assert_array_equal(controller.max_iter_remaining[0, 0], [9, 8])
+    np.testing.assert_array_equal(
+        controller.stop_code_model_update[0, 0],
+        [MODEL_UPDATE_MAX_ITER_PER_CYCLE, MODEL_UPDATE_MAX_ITER_PER_CYCLE],
+    )
+    assert result["timing_model_update"].loc[0, "T_mtmfs"] == pytest.approx(0.25)
+    assert len(result["deconvolution"].data) == 2
+    for fields in result["deconvolution"].data.values():
+        assert fields["stop_code"].model_update == MODEL_UPDATE_MAX_ITER_PER_CYCLE
+        assert np.isfinite(fields["hessian_condition_number"]).all()
+
+
+def test_later_mfs_cycle_predicts_with_all_accumulated_taylor_terms(monkeypatch):
+    """Every Taylor increment reaches later-cycle MFS prediction unchanged."""
+    previous = _model_dataset(0.0)
+    previous.SKY_MODEL.loc[{"taylor_term": 0}] = 1.0
+    previous.SKY_MODEL.loc[{"taylor_term": 1}] = 10.0
+    increment = _model_dataset(0.0)
+    increment.SKY_MODEL.loc[{"taylor_term": 0}] = 2.0
+    increment.SKY_MODEL.loc[{"taylor_term": 1}] = 20.0
+    predicted = xr.Dataset({"VISIBILITY_MODEL": ("marker", [1.0])})
+
+    def prepare_model(model_xds, **kwargs):
+        np.testing.assert_array_equal(model_xds.SKY_MODEL.isel(taylor_term=0), 3.0)
+        np.testing.assert_array_equal(model_xds.SKY_MODEL.isel(taylor_term=1), 30.0)
+        return predicted
+
+    monkeypatch.setattr(
+        continuum_processing,
+        "prepare_model_uv_continuum_single_field",
+        prepare_model,
+    )
+    accumulated, model_uv = continuum_node._prepare_post_update_continuum_model_state(
+        increment,
+        {
+            "is_n_iter_0": False,
+            "model_xds": previous,
+            "specmode": "mfs",
+            "image_params": {},
+        },
+    )
+
+    np.testing.assert_array_equal(accumulated.SKY_MODEL.isel(taylor_term=0), 3.0)
+    np.testing.assert_array_equal(accumulated.SKY_MODEL.isel(taylor_term=1), 30.0)
+    assert model_uv is predicted
 
 
 def test_zero_max_iter_uses_current_controller_fields():

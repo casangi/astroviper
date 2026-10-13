@@ -18,6 +18,78 @@ from astroviper.processing_functions.imaging.utils import ImagingDict
 from tests.utils.continuum_images import make_continuum_image
 
 
+def _native_mtmfs_continuum_image(nterms, shape, dtype, support_kind):
+    """Build coupled Taylor point sources for the real continuum adapter."""
+    ntime, npol = 2, 2
+    nl, nm = shape
+    frequencies = np.linspace(-0.75, 0.75, nterms + 4)
+    moments = np.asarray(
+        [(frequencies**order).mean() for order in range(2 * nterms - 1)],
+        dtype=dtype,
+    )
+    hessian = moments[np.add.outer(np.arange(nterms), np.arange(nterms))]
+    psf = np.zeros((ntime, 2 * nterms - 1, npol, nl, nm), dtype=dtype)
+    residual = np.zeros((ntime, nterms, npol, nl, nm), dtype=dtype)
+    expected_model = np.zeros_like(residual)
+    source = (nl // 2, nm // 2)
+    for tt in range(ntime):
+        for pp in range(npol):
+            coefficients = np.asarray(
+                [
+                    (1.0 + 0.25 * tt + 0.125 * pp) * ((-0.4) ** order)
+                    for order in range(nterms)
+                ],
+                dtype=dtype,
+            )
+            psf[tt, :, pp, source[0], source[1]] = moments
+            residual[tt, :, pp, source[0], source[1]] = hessian @ coefficients
+            expected_model[tt, :, pp, source[0], source[1]] = coefficients
+
+    coords = {
+        "time": np.arange(ntime, dtype=float),
+        "taylor_term": np.arange(nterms),
+        "psf_taylor_order": np.arange(2 * nterms - 1),
+        "polarization": ["I", "Q"],
+        "l": np.arange(nl),
+        "m": np.arange(nm),
+    }
+    image = xr.Dataset(
+        {
+            "SKY_RESIDUAL": (
+                ("time", "taylor_term", "polarization", "l", "m"),
+                residual,
+            ),
+            "POINT_SPREAD_FUNCTION": (
+                ("time", "psf_taylor_order", "polarization", "l", "m"),
+                psf,
+            ),
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
+                ("time", "polarization"),
+                np.zeros((ntime, npol), dtype=dtype),
+            ),
+        },
+        coords=coords,
+        attrs={
+            "reference_frequency": 1.0e9,
+            "data_groups": {
+                "residual": {
+                    "sky": "SKY_RESIDUAL",
+                    "point_spread_function": "POINT_SPREAD_FUNCTION",
+                }
+            },
+        },
+    )
+    support = np.zeros(shape, dtype=dtype)
+    support[source] = 1.0
+    if support_kind == "mask":
+        image["CLEAN_MASK"] = (("l", "m"), support)
+        image.attrs["data_groups"]["residual"]["mask"] = "CLEAN_MASK"
+    else:
+        image["PRIMARY_BEAM"] = (("l", "m"), support)
+        image.attrs["data_groups"]["residual"]["primary_beam"] = "PRIMARY_BEAM"
+    return image, expected_model
+
+
 @pytest.mark.parametrize(
     "psf_axis", [None, "frequency", "taylor_term", "psf_taylor_order"]
 )
@@ -150,6 +222,55 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
     np.testing.assert_array_equal(fields["scales"], [0.0])
     np.testing.assert_array_equal(fields["hessian_condition_number"], [2.0])
     assert "T_mtmfs" in timing
+
+
+@pytest.mark.parametrize(
+    "nterms,image_shape",
+    [(2, (8, 8)), (3, (7, 10)), (4, (10, 7))],
+)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("support_kind", ["mask", "primary_beam"])
+def test_native_mtmfs_adapter_covers_all_planes_terms_and_supports(
+    nterms, image_shape, dtype, support_kind
+):
+    """The real adapter preserves every plane and Taylor model coefficient."""
+    image, expected_model = _native_mtmfs_continuum_image(
+        nterms, image_shape, dtype, support_kind
+    )
+    residual_snapshot = image.SKY_RESIDUAL.copy(deep=True)
+    iterations = np.ones((2, 1, 2), dtype=np.int64)
+    thresholds = np.zeros((2, 1, 2), dtype=dtype)
+
+    statistics, timing = model_update_mtmfs_single_field(
+        image,
+        "mtmfs",
+        {
+            "max_iter": 1,
+            "max_iter_per_cycle": iterations,
+            "threshold_per_cycle": thresholds,
+            "gain": 1.0,
+            "scales": [0.0],
+            "primary_beam_limit": 0.5,
+        },
+    )
+
+    xr.testing.assert_identical(image.SKY_RESIDUAL, residual_snapshot)
+    np.testing.assert_allclose(image.SKY_MODEL, expected_model, rtol=2e-4, atol=2e-5)
+    assert image.SKY_MODEL.dtype == dtype
+    assert len(statistics.data) == 4
+    for key, fields in statistics.data.items():
+        assert fields["iter_done"] == [1]
+        assert fields["masksum"] == [1]
+        assert fields["stop_code"].model_update in {
+            mtmfs.MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+            mtmfs.MODEL_UPDATE_THRESHOLD_PER_CYCLE,
+        }
+        assert fields["model_flux"] == [
+            pytest.approx(expected_model[key.time, 0, key.pol].sum(), rel=2e-4)
+        ]
+        np.testing.assert_array_equal(fields["scales"], [0.0])
+        assert np.isfinite(fields["hessian_condition_number"]).all()
+    assert timing.loc[0, "T_mtmfs"] >= 0.0
 
 
 def test_single_term_mtmfs_must_be_resolved_by_public_api(monkeypatch):

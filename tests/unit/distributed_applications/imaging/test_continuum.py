@@ -626,6 +626,7 @@ def _run_tw_hydra_continuum(
     specmode,
     weighting,
     *,
+    deconvolver="hogbom",
     iteration_control_params=None,
     image_param_overrides=None,
     restore=False,
@@ -667,7 +668,7 @@ def _run_tw_hydra_continuum(
             imaging_weights_params=weighting,
             iteration_control_params=iteration_control_params,
             gridder="prolate_spheroidal",
-            deconvolver="hogbom",
+            deconvolver=deconvolver,
             restore=restore,
             pbcor=pbcor,
             pblimit=pblimit,
@@ -1019,6 +1020,82 @@ def test_tw_hydra_cleaning_runs_later_major_cycles_and_builds_a_model(
     assert np.nanmax(np.abs(image.SKY_MODEL.values)) > 0.0
     assert np.isfinite(image.SKY_RESIDUAL.values).all()
     assert np.isfinite(image.SKY_MODEL.values).all()
+
+
+@pytest.mark.parametrize("specmode", ["mfs", "mvc"])
+def test_tw_hydra_native_mtmfs_matches_reduction_and_visibility_cache_modes(
+    tmp_path, tw_hydra_store, specmode
+):
+    """Native MT-MFS survives later cycles across distributed execution modes."""
+    processing_set = open_processing_set(str(tw_hydra_store))
+    iteration_control_params = {
+        "max_iter": 2,
+        "max_cycles": 2,
+        "threshold": 0.0,
+        "gain": 0.1,
+        "psf_sidelobe_factor": 1.5,
+        "max_iter_per_cycle": 1,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+        "scales": [0.0],
+        "small_scale_bias": 0.0,
+        "mask_threshold": 0.9,
+    }
+    common = {
+        "deconvolver": "mtmfs",
+        "iteration_control_params": iteration_control_params,
+    }
+    reference_result, reference = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / f"native_mtmfs_{specmode}_tree_recompute.img.zarr",
+        processing_set,
+        2,
+        specmode,
+        {"weighting": "natural", "weighting_scope": "local"},
+        reduce_mode="tree",
+        visibility_memory_mode="recompute",
+        **common,
+    )
+    cached_result, cached = _run_tw_hydra_continuum(
+        tw_hydra_store,
+        tmp_path / f"native_mtmfs_{specmode}_single_cached.img.zarr",
+        processing_set,
+        2,
+        specmode,
+        {"weighting": "natural", "weighting_scope": "local"},
+        reduce_mode="single_node",
+        visibility_memory_mode="in_memory",
+        **common,
+    )
+
+    for result, image in (
+        (reference_result, reference),
+        (cached_result, cached),
+    ):
+        assert result["n_major_cycles"] == 2
+        assert result["controller"].cycles_done == 2
+        assert result["controller"].total_iter_done > 0
+        assert result["deconvolution"].data
+        assert image.SKY_MODEL.sizes["taylor_term"] == 2
+        assert np.nanmax(np.abs(image.SKY_MODEL.isel(taylor_term=0))) > 0.0
+        assert np.nanmax(np.abs(image.SKY_MODEL.isel(taylor_term=1))) > 0.0
+        for fields in result["deconvolution"].data.values():
+            assert np.isfinite(fields["hessian_condition_number"]).all()
+            np.testing.assert_array_equal(fields["scales"], [0.0])
+
+    for variable in (
+        "SKY_MODEL",
+        "SKY_RESIDUAL",
+        "POINT_SPREAD_FUNCTION",
+        "PRIMARY_BEAM",
+    ):
+        np.testing.assert_allclose(
+            cached[variable],
+            reference[variable],
+            rtol=TW_HYDRA_RELATIVE_TOLERANCE,
+            atol=1.0e-12,
+            equal_nan=True,
+        )
 
 
 @pytest.mark.parametrize("specmode", ["mfs", "mvc"])
