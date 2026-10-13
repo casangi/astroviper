@@ -5,9 +5,40 @@ import pytest
 import xarray as xr
 
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
+    _resolve_continuum_deconvolver,
     combine_continuum_imaging_weight_chunks,
     combine_continuum_weight_density_chunks,
 )
+
+
+def test_public_api_resolves_single_term_mtmfs_to_hogbom():
+    with pytest.warns(UserWarning, match="nterms=1.*falling back.*hogbom"):
+        resolved = _resolve_continuum_deconvolver("mtmfs", {"nterms": 1})
+
+    assert resolved == "hogbom"
+
+
+@pytest.mark.parametrize("nterms", [2, 3, 4])
+def test_public_api_preserves_supported_mtmfs_taylor_orders(nterms):
+    assert _resolve_continuum_deconvolver("mtmfs", {"nterms": nterms}) == "mtmfs"
+
+
+@pytest.mark.parametrize(
+    "params,error,message",
+    [
+        ({}, KeyError, "must contain 'nterms'"),
+        ({"nterms": 1.0}, TypeError, "must be an integer"),
+        ({"nterms": 0}, ValueError, "between 2 and 4"),
+        ({"nterms": 5}, ValueError, "between 2 and 4"),
+    ],
+)
+def test_public_api_rejects_invalid_mtmfs_taylor_orders(params, error, message):
+    with pytest.raises(error, match=message):
+        _resolve_continuum_deconvolver("mtmfs", params)
+
+
+def test_non_mtmfs_deconvolver_does_not_require_nterms():
+    assert _resolve_continuum_deconvolver("hogbom", {}) == "hogbom"
 
 
 @pytest.mark.parametrize(

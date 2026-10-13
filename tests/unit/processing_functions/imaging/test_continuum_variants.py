@@ -152,7 +152,7 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
     assert "T_mtmfs" in timing
 
 
-def test_single_term_mtmfs_warns_and_falls_back_to_hogbom(monkeypatch):
+def test_single_term_mtmfs_must_be_resolved_by_public_api(monkeypatch):
     image = make_continuum_image().isel(
         taylor_term=slice(0, 1), psf_taylor_order=slice(0, 1)
     )
@@ -178,14 +178,14 @@ def test_single_term_mtmfs_warns_and_falls_back_to_hogbom(monkeypatch):
         "model_update_cube_single_field",
         hogbom_backend,
     )
-    with pytest.warns(UserWarning, match="nterms=1.*falling back"):
+    with pytest.raises(ValueError, match="requires 2 to 4 Taylor terms"):
         model_update_mtmfs_single_field(
             image,
             "mtmfs",
             {"max_iter": 1, "max_iter_per_cycle": 1, "gain": 0.1},
         )
 
-    assert called == ["hogbom"]
+    assert called == []
 
 
 def test_restoration_reports_incomplete_backend_result(monkeypatch):

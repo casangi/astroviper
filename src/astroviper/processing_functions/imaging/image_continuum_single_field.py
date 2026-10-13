@@ -2109,8 +2109,9 @@ def model_update_mtmfs_single_field(
 
     deconvolver : str
         ``"mtmfs"`` uses the native Taylor-stack deconvolver for two to four
-        Taylor terms. ``"hogbom"`` cleans Taylor term zero. Requesting MT-MFS
-        with one Taylor term emits a warning and falls back to Högbom.
+        Taylor terms. ``"hogbom"`` cleans Taylor term zero. The public
+        continuum-imaging API resolves an MT-MFS request with one Taylor term
+        to Högbom before this processing-function boundary.
 
     deconvolve_params : dict
         Minor-cycle control parameters. These typically include entries such as
@@ -2196,17 +2197,6 @@ def model_update_mtmfs_single_field(
 
     if psf.sizes["psf_taylor_order"] < 1:
         raise ValueError("POINT_SPREAD_FUNCTION contains no PSF Taylor terms.")
-
-    if deconvolver == "mtmfs" and residual.sizes["taylor_term"] == 1:
-        import warnings
-
-        warnings.warn(
-            "deconvolver='mtmfs' was requested with nterms=1; falling back "
-            "to deconvolver='hogbom'.",
-            UserWarning,
-            stacklevel=2,
-        )
-        deconvolver = "hogbom"
 
     # make a cube-compatible copy of the per-plane controls
     cube_deconvolve_params = copy.deepcopy(deconvolve_params)

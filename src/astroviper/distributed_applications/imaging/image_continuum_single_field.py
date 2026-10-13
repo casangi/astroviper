@@ -2555,6 +2555,40 @@ def _load_continuum_clean_mask(clean_mask, image_size):
     return clean_mask_array
 
 
+def _resolve_continuum_deconvolver(deconvolver, image_params):
+    """Resolve user-facing continuum deconvolver choices before graph creation."""
+    import operator
+    import warnings
+
+    deconvolver = str(deconvolver).lower()
+    if deconvolver != "mtmfs":
+        return deconvolver
+
+    if "nterms" not in image_params:
+        raise KeyError("image_params must contain 'nterms' when deconvolver='mtmfs'.")
+    try:
+        nterms = operator.index(image_params["nterms"])
+    except TypeError as exc:
+        raise TypeError(
+            "image_params['nterms'] must be an integer when deconvolver='mtmfs'."
+        ) from exc
+
+    if nterms == 1:
+        warnings.warn(
+            "deconvolver='mtmfs' was requested with nterms=1; falling back "
+            "to deconvolver='hogbom'.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return "hogbom"
+    if not 2 <= nterms <= 4:
+        raise ValueError(
+            "deconvolver='mtmfs' requires image_params['nterms'] between "
+            f"2 and 4; received {nterms}."
+        )
+    return deconvolver
+
+
 ###############################################################################
 # Main distributed layer level function call
 ###############################################################################
@@ -2960,6 +2994,7 @@ def image_continuum_single_field(
     # Work with an application-local copy: continuum setup may augment the
     # image parameters with metadata derived from the Processing Set.
     image_params = dict(image_params)
+    deconvolver = _resolve_continuum_deconvolver(deconvolver, image_params)
 
     clean_mask_array = _load_continuum_clean_mask(
         clean_mask,
