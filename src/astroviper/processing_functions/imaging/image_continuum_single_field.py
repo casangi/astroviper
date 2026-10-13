@@ -1767,12 +1767,24 @@ def build_continuum_residual_imaging_dict(
     plane, broadcasting masks and sidelobes by dimension name. Peaks are
     measured on finite pixels in the explicit CLEAN mask, or the same PB
     support as model_update when no explicit mask exists. No counters or
-    history entries are advanced. The cube workflow is unchanged.
+    history entries are advanced. When entropy stopping is enabled, residual
+    entropy and SNR are measured on Taylor term zero using that same clean
+    support. The cube workflow is unchanged.
     """
     import numpy as np
     import xarray as xr
 
-    from astroviper.processing_functions.imaging.utils import ImagingDict
+    from astroviper.processing_functions.image_analysis import (
+        image_statistics as imgstats,
+    )
+    from astroviper.processing_functions.imaging.utils import (
+        ImagingDict,
+        validate_entropy_params,
+    )
+
+    entropy_stop, entropy_max_snr, entropy_spatial_bins, entropy_flux_bins = (
+        validate_entropy_params(iteration_control_params)
+    )
 
     group = img_xds.attrs["data_groups"][image_data_group_in_name]
 
@@ -1811,22 +1823,42 @@ def build_continuum_residual_imaging_dict(
     )
     sidelobe = sidelobe.broadcast_like(residual.isel(l=0, m=0, drop=True))
     sidelobe = sidelobe.transpose("time", "polarization").values
+    if entropy_stop:
+        entropy_residual = residual.expand_dims(frequency=[0], axis=1)
+        entropy_image = entropy_residual.to_dataset(name="SKY_RESIDUAL")
+        entropy_image["CLEAN_MASK"] = xr.DataArray(
+            support[:, np.newaxis],
+            dims=entropy_residual.dims,
+            coords=entropy_residual.coords,
+        )
+        entropy_image.attrs["data_groups"] = {
+            "residual": {"sky": "SKY_RESIDUAL", "mask": "CLEAN_MASK"}
+        }
+        entropy, residual_snr = imgstats.image_residual_entropy(
+            entropy_image,
+            data_group_name="residual",
+            spatial_bins=entropy_spatial_bins,
+            flux_bins=entropy_flux_bins,
+            max_snr=entropy_max_snr,
+        )
     statistics = ImagingDict()
     for tt in range(residual.sizes["time"]):
         for pp in range(residual.sizes["polarization"]):
             finite = np.isfinite(absolute[tt, pp])
             selected = support[tt, pp] & finite
+            fields = {
+                "peakres": float(np.max(absolute[tt, pp][selected], initial=0.0)),
+                "peakres_nomask": float(np.max(absolute[tt, pp][finite], initial=0.0)),
+                "masksum": int(np.count_nonzero(selected)),
+                "iter_done": 0,
+                "max_psf_sidelobe": float(sidelobe[tt, pp]),
+                "gain": iteration_control_params.get("gain", 0.1),
+            }
+            if entropy_stop:
+                fields["entropy"] = float(entropy[tt, 0, pp])
+                fields["residual_snr"] = float(residual_snr[tt, 0, pp])
             statistics.add(
-                {
-                    "peakres": float(np.max(absolute[tt, pp][selected], initial=0.0)),
-                    "peakres_nomask": float(
-                        np.max(absolute[tt, pp][finite], initial=0.0)
-                    ),
-                    "masksum": int(np.count_nonzero(selected)),
-                    "iter_done": 0,
-                    "max_psf_sidelobe": float(sidelobe[tt, pp]),
-                    "gain": iteration_control_params.get("gain", 0.1),
-                },
+                fields,
                 time=tt,
                 chan=0,
                 pol=pp,

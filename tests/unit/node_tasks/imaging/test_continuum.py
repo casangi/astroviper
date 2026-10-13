@@ -716,6 +716,70 @@ def test_zero_max_iter_uses_current_controller_fields():
     np.testing.assert_array_equal(controller.max_iter_remaining, 0)
 
 
+def test_refreshed_continuum_residual_can_stop_on_entropy(monkeypatch):
+    from astroviper.processing_functions.imaging.utils.iteration_control import (
+        IMAGING_ENTROPY,
+        IterationController,
+    )
+
+    rng = np.random.default_rng(20261013)
+    residual = rng.standard_normal((1, 1, 1, 32, 32))
+    image = xr.Dataset(
+        {
+            "SKY_RESIDUAL": (
+                ("time", "taylor_term", "polarization", "l", "m"),
+                residual,
+            ),
+            "PRIMARY_BEAM": (("l", "m"), np.ones((32, 32))),
+            "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (
+                ("time", "polarization"),
+                [[0.1]],
+            ),
+        },
+        attrs={
+            "data_groups": {
+                "residual": {
+                    "sky": "SKY_RESIDUAL",
+                    "primary_beam": "PRIMARY_BEAM",
+                    "max_sidelobe_point_spread_function": (
+                        "MAX_SIDELOBE_POINT_SPREAD_FUNCTION"
+                    ),
+                }
+            }
+        },
+    )
+    controller = IterationController(max_iter=100, entropy_stop=True)
+    controller.ensure_planes(1, 1, 1)
+    controller.max_entropy[0, 0, 0] = 1.0e6
+
+    def unexpected_update(*args, **kwargs):
+        pytest.fail("An entropy-stopped residual must not run a model update")
+
+    monkeypatch.setattr(
+        continuum_processing, "model_update_mtmfs_single_field", unexpected_update
+    )
+    result = continuum_node.model_update_continuum_single_field(
+        {"image": image},
+        {
+            "controller": controller,
+            "iteration_control_params": {
+                "max_iter": 100,
+                "gain": 0.1,
+                "primary_beam_limit": 0.2,
+                "entropy_stop": True,
+            },
+        },
+    )
+
+    assert result["residual_converged"]
+    assert result["stopcode"].imaging == IMAGING_ENTROPY
+    assert controller.entropy_stopped[0, 0, 0]
+    fields = next(iter(result["residual_statistics"].data.values()))
+    assert np.isfinite(fields["entropy"][0])
+    assert np.isfinite(fields["residual_snr"][0])
+    assert np.all(result["image"].SKY_MODEL.values == 0)
+
+
 @pytest.mark.parametrize("legacy_cache", [False, True])
 def test_continuum_transfer_preserves_arrays_metadata_and_nested_datasets(legacy_cache):
     import pickle

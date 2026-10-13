@@ -3032,6 +3032,7 @@ def model_update_continuum_single_field(
     )
     from astroviper.processing_functions.imaging.utils import (
         ImagingDict,
+        copy_residual_entropy,
         get_calculate_cycle_controls,
         merge_imaging_dicts,
     )
@@ -3184,6 +3185,7 @@ def model_update_continuum_single_field(
         image_data_group_in_name=image_data_group_in_name,
         image_data_group_out_name=image_data_group_out_name,
     )
+    copy_residual_entropy(deconvolve_dict, residual_imaging_dict)
 
     timing["T_model_update"] = time.time() - start
 
@@ -3194,7 +3196,9 @@ def model_update_continuum_single_field(
 
     controller.update_counts(deconvolve_dict)
 
-    stopcode, stopdesc = controller.check_convergence(deconvolve_dict)
+    stopcode, stopdesc = controller.check_convergence(
+        deconvolve_dict, model_update_ran=True
+    )
 
     combined_deconvolve_dict = merge_imaging_dicts(
         [

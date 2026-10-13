@@ -8,6 +8,7 @@ import pytest
 import xarray as xr
 
 from astroviper.distributed_applications.imaging.image_continuum_single_field import (
+    _make_continuum_iteration_controller,
     combine_continuum_chunks,
     combine_continuum_weight_density_chunks,
 )
@@ -19,6 +20,50 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
 driver = importlib.import_module(
     "astroviper.distributed_applications.imaging.image_continuum_single_field"
 )
+
+
+def test_continuum_controller_receives_entropy_parameters():
+    params = {
+        "max_iter": 100,
+        "max_cycles": 5,
+        "threshold": 0.0,
+        "gain": 0.1,
+        "psf_sidelobe_factor": 1.0,
+        "min_psf_fraction": 0.05,
+        "max_psf_fraction": 0.8,
+        "max_iter_per_cycle": 20,
+        "entropy_stop": True,
+        "entropy_max_snr": 4.5,
+        "entropy_spatial_bins": 5,
+        "entropy_flux_bins": 8,
+    }
+
+    controller = _make_continuum_iteration_controller(params)
+
+    assert controller.entropy_stop is True
+    assert controller.entropy_max_snr == 4.5
+    assert controller.entropy_spatial_bins == 5
+    assert controller.entropy_flux_bins == 8
+
+
+def test_continuum_controller_uses_entropy_defaults():
+    controller = _make_continuum_iteration_controller(
+        {
+            "max_iter": 100,
+            "max_cycles": 5,
+            "threshold": 0.0,
+            "gain": 0.1,
+            "psf_sidelobe_factor": 1.0,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
+            "max_iter_per_cycle": 20,
+        }
+    )
+
+    assert controller.entropy_stop is False
+    assert controller.entropy_max_snr == 6.0
+    assert controller.entropy_spatial_bins == 7
+    assert controller.entropy_flux_bins == 10
 
 
 @pytest.mark.parametrize("partition", [(7,), (1, 6), (2, 1, 4), (1, 1, 1, 1, 1, 1, 1)])

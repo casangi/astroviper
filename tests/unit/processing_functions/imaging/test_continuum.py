@@ -35,6 +35,7 @@ from astroviper.processing_functions.imaging.imaging_setup_continuum_single_fiel
 from astroviper.processing_functions.imaging.residual_cycle_continuum_single_field import (
     make_visibility_model_continuum_single_field,
 )
+from astroviper.processing_functions.imaging.utils import Key
 from astroviper.processing_functions.imaging.utils.frequency_mapping import (
     map_visibility_frequencies_to_image,
 )
@@ -920,6 +921,54 @@ def test_continuum_statistics_use_only_taylor_zero_and_preserve_input(with_mask)
     np.testing.assert_array_equal(limits, 3)
     np.testing.assert_allclose(thresholds[:, 0], 0.2 * peaks)
     xr.testing.assert_identical(image, original)
+
+
+def test_continuum_statistics_record_taylor_zero_entropy_only_when_enabled():
+    from astroviper.processing_functions.imaging.image_continuum_single_field import (
+        build_continuum_residual_imaging_dict,
+    )
+
+    rng = np.random.default_rng(20261013)
+    residual = rng.standard_normal((1, 2, 2, 48, 40))
+    residual[0, 1] = 1000.0  # Higher Taylor terms must not affect entropy.
+    residual[0, 0, 1, 12, 15] = 50.0
+    image = xr.Dataset(
+        {
+            "RESIDUAL": (("time", "taylor_term", "polarization", "l", "m"), residual),
+            "SIDELOBE": (("time", "polarization"), [[0.2, 0.2]]),
+        },
+        attrs={
+            "data_groups": {
+                "residual": {
+                    "sky": "RESIDUAL",
+                    "max_sidelobe_point_spread_function": "SIDELOBE",
+                }
+            }
+        },
+    )
+
+    disabled = build_continuum_residual_imaging_dict(image, "residual", {"gain": 0.1})
+    for fields in disabled.data.values():
+        assert "entropy" not in fields
+        assert "residual_snr" not in fields
+
+    enabled = build_continuum_residual_imaging_dict(
+        image,
+        "residual",
+        {
+            "gain": 0.1,
+            "entropy_stop": True,
+            "entropy_max_snr": 6.0,
+            "entropy_spatial_bins": 5,
+            "entropy_flux_bins": 8,
+        },
+    )
+    quiet = enabled.data[Key(time=0, chan=0, pol=0)]
+    bright = enabled.data[Key(time=0, chan=0, pol=1)]
+    assert np.isfinite(quiet["entropy"][0])
+    assert quiet["residual_snr"][0] < 6.0
+    assert np.isnan(bright["entropy"][0])
+    assert bright["residual_snr"][0] > 6.0
 
 
 @pytest.mark.parametrize("explicit_mask", [False, True])

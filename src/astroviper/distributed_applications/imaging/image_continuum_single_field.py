@@ -52,6 +52,27 @@ _WIDEBAND_PRIMARY_BEAM_CACHE_GROUP = "_WIDEBAND_PRIMARY_BEAM_CACHE"
 _WIDEBAND_PRIMARY_BEAM_CACHE_VARIABLE = "PRIMARY_BEAM"
 
 
+def _make_continuum_iteration_controller(iteration_control_params):
+    """Build the shared controller with every continuum iteration option."""
+    from astroviper.processing_functions.imaging.utils import IterationController
+
+    return IterationController(
+        max_iter=iteration_control_params["max_iter"],
+        max_cycles=iteration_control_params["max_cycles"],
+        threshold_sigma=iteration_control_params.get("threshold_sigma", 0.0),
+        threshold=iteration_control_params["threshold"],
+        gain=iteration_control_params["gain"],
+        psf_sidelobe_factor=iteration_control_params["psf_sidelobe_factor"],
+        min_psf_fraction=iteration_control_params["min_psf_fraction"],
+        max_psf_fraction=iteration_control_params["max_psf_fraction"],
+        max_iter_per_cycle=iteration_control_params["max_iter_per_cycle"],
+        entropy_stop=iteration_control_params.get("entropy_stop", False),
+        entropy_max_snr=iteration_control_params.get("entropy_max_snr", 6.0),
+        entropy_spatial_bins=iteration_control_params.get("entropy_spatial_bins", 7),
+        entropy_flux_bins=iteration_control_params.get("entropy_flux_bins", 10),
+    )
+
+
 def _create_wideband_primary_beam_cache_store(
     image_store,
     img_xds,
@@ -2762,6 +2783,24 @@ def image_continuum_single_field(
         - ``max_psf_fraction`` [CASA ``maxpsffraction``] : Upper clamp on the
           same PSF fraction; it guarantees a minimum amount of cleaning per
           model update even when the PSF sidelobe level is high.
+        - ``entropy_stop`` : If ``True``, a plane stops once the entropy of
+          its residual has passed its maximum. The entropy (Homan, Roth and
+          Pushkarev 2024, AJ 167, 11) measures how much the residual looks
+          like noise everywhere. It rises while the clean removes emission
+          and falls once the clean fits noise. It is worked out after every
+          residual update, and the plane stops when it is lower than in an
+          earlier cycle. The fall is noticed one model update after the
+          maximum and the model of that model update is kept, so a small
+          ``max_iter_per_cycle`` makes the stop sharper. Default ``False``.
+          No CASA equivalent.
+        - ``entropy_max_snr`` : The entropy of a plane is followed once the
+          peak of its residual inside the clean mask is at most this many
+          times the RMS of the residual. Above it the residual is dominated
+          by the pattern of the point spread function. Default 6.
+        - ``entropy_spatial_bins`` : Number of spatial bins along each of the
+          two image axes used for the entropy. Default 7.
+        - ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for
+          the entropy. Default 10.
 
         Derived per plane before each model update (not set by the caller):
         ``psf_fraction = clamp(max_psf_sidelobe * psf_sidelobe_factor,
@@ -2857,7 +2896,6 @@ def image_continuum_single_field(
     from astroviper.processing_functions.imaging.utils import (
         IMAGING_TIMING_PHASES,
         IMAGING_TIMING_TOTAL_KEY,
-        IterationController,
     )
     from astroviper.utils.data_group_tools import modify_data_groups_xds
     from astroviper.utils.io import (
@@ -3055,17 +3093,7 @@ def image_continuum_single_field(
     input_params["image_chunking"] = image_chunking
     input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
 
-    controller = IterationController(
-        max_iter=iteration_control_params["max_iter"],
-        max_cycles=iteration_control_params["max_cycles"],
-        threshold_sigma=iteration_control_params.get("threshold_sigma", 0.0),
-        threshold=iteration_control_params["threshold"],
-        gain=iteration_control_params["gain"],
-        psf_sidelobe_factor=iteration_control_params["psf_sidelobe_factor"],
-        min_psf_fraction=iteration_control_params["min_psf_fraction"],
-        max_psf_fraction=iteration_control_params["max_psf_fraction"],
-        max_iter_per_cycle=iteration_control_params["max_iter_per_cycle"],
-    )
+    controller = _make_continuum_iteration_controller(iteration_control_params)
 
     start = time.time()
     ps_xdt = open_processing_set(ps_store, scan_intents=scan_intents)
