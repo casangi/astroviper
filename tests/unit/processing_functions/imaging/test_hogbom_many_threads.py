@@ -55,7 +55,7 @@ def _params(npol, max_iter=30, thr=-1.0):
         "clean_box": (-1, -1, -1, -1),
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
-        "max_iter_per_cycle": np.full((1, 1, npol), max_iter, np.int32),
+        "max_iter_per_cycle_updated": np.full((1, 1, npol), max_iter, np.int32),
         "threshold_per_cycle": np.full((1, 1, npol), thr, np.float32),
     }
 

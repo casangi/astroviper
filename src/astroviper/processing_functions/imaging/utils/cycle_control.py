@@ -6,19 +6,26 @@ adapted from CASA's iteration control implementation in _gclean.py and
 imager_return_dict.py. It has been streamlined to work with AstroViper's
 ImagingDict structure while retaining all original functionality.
 
+Cycle control is the stop test between the residual update and the model
+update: it decides whether a plane gets another imaging cycle and sets the
+limits of its next model update. Iteration control is the stop test inside
+the model update, made by the deconvolver at every iteration against those
+limits (``max_iter_per_cycle_updated``, ``threshold_per_cycle``).
+
 Per-plane cycle control
 ----------------------------
 All cycle control is performed independently for every
 ``(time, chan(frequency), pol)`` plane. Concretely:
 
-- ``max_iter_remaining`` is a per-plane array of remaining iterations
-  (:attr:`CycleController.max_iter_remaining`, shape ``(ntime, nchan, npol)``);
+- ``max_iter_remaining`` is a per-plane array of the iterations left of
+  ``max_iter`` (:attr:`CycleController.max_iter_remaining`, shape
+  ``(ntime, nchan, npol)``);
 - every stopping criterion (zero mask, iteration limit, threshold, residual
   entropy, imaging cycle limit, no progress) is evaluated per plane, and
   each plane carries its own stop code;
 - thresholds may differ per plane — :meth:`CycleController.per_plane_threshold_per_cycle`
   produces a per-plane threshold_per_cycle array, and the deconvolvers accept
-  per-plane ``max_iter_per_cycle`` and ``threshold_per_cycle`` arrays.
+  per-plane ``max_iter_per_cycle_updated`` and ``threshold_per_cycle`` arrays.
 
 The imaging cycle loop continues while *any* plane is still active.
 """
@@ -56,18 +63,21 @@ IMAGING_CONTINUE = 0  # Continue imaging cycles
 IMAGING_MAX_ITER = 1  # Reached total iteration limit (max_iter)
 IMAGING_THRESHOLD = 2  # Peak residual below global threshold
 IMAGING_NO_PROGRESS = 4  # Model updates no longer do any iteration
+IMAGING_DIVERGENCE = 5  # Last max_cycles_divergence model updates diverged
 IMAGING_ZERO_MASK = 7  # Zero mask (no valid pixels)
 IMAGING_MAX_CYCLES = 9  # Reached imaging cycle limit (max_cycles)
 IMAGING_ENTROPY = 10  # Entropy of the residual passed its maximum (entropy_stop)
 
-# Model update stop codes (per-cycle convergence)
-MODEL_UPDATE_CONTINUE = 0  # Continue model updates
+# Model update stop codes (per-cycle convergence): the iteration control stop
+# code the deconvolver reports for every plane (deconvolvers/include/
+# plane_stop_test.hpp)
+MODEL_UPDATE_CONTINUE = 0  # No model update ran (no iterations allotted)
 MODEL_UPDATE_MAX_ITER_PER_CYCLE = (
-    1  # Reached per-cycle iteration limit (max_iter_per_cycle)
+    1  # Reached per-cycle iteration limit (max_iter_per_cycle_updated)
 )
 MODEL_UPDATE_THRESHOLD_PER_CYCLE = 2  # Peak residual below threshold_per_cycle
 MODEL_UPDATE_DIVERGENCE = 4  # Divergence detected by the deconvolver
-MODEL_UPDATE_ZERO_MASK = 7  # Zero mask detected during model update
+MODEL_UPDATE_ALGORITHM = 5  # A stop test of the deconvolver itself (Asp)
 
 # A plane whose model update did no iteration cannot change its residual, so a
 # second identical imaging cycle would follow, and a third. One such model
@@ -86,6 +96,7 @@ IMAGING_STOP_DESCRIPTIONS = {
     IMAGING_MAX_ITER: "Reached max_iter",
     IMAGING_THRESHOLD: "Reached threshold (peak residual within the mask)",
     IMAGING_NO_PROGRESS: "No progress (model updates did no iterations)",
+    IMAGING_DIVERGENCE: "Model updates diverged max_cycles_divergence times in a row",
     IMAGING_ZERO_MASK: "Zero mask",
     IMAGING_MAX_CYCLES: "Reached max_cycles",
     IMAGING_ENTROPY: "Residual entropy passed its maximum",
@@ -93,11 +104,11 @@ IMAGING_STOP_DESCRIPTIONS = {
 
 # Stop code descriptions for model update codes
 MODEL_UPDATE_STOP_DESCRIPTIONS = {
-    MODEL_UPDATE_CONTINUE: "Continue model update",
-    MODEL_UPDATE_MAX_ITER_PER_CYCLE: "Reached max_iter_per_cycle",
+    MODEL_UPDATE_CONTINUE: "No model update ran",
+    MODEL_UPDATE_MAX_ITER_PER_CYCLE: "Reached max_iter_per_cycle_updated",
     MODEL_UPDATE_THRESHOLD_PER_CYCLE: "Reached threshold_per_cycle",
     MODEL_UPDATE_DIVERGENCE: "Possible divergence detected",
-    MODEL_UPDATE_ZERO_MASK: "Zero mask",
+    MODEL_UPDATE_ALGORITHM: "Stopped by a test of the deconvolver itself",
 }
 
 
@@ -700,7 +711,7 @@ class CycleController:
     ``(time, chan(frequency), pol)`` plane. ``max_iter_remaining`` is a per-plane array,
     each plane carries its own stop code, and thresholds may differ per plane
     (:meth:`per_plane_threshold_per_cycle`). The deconvolvers are driven with
-    per-plane ``max_iter_per_cycle`` and ``threshold_per_cycle`` arrays. The imaging cycle loop
+    per-plane ``max_iter_per_cycle_updated`` and ``threshold_per_cycle`` arrays. The imaging cycle loop
     continues while *any* plane is still active; the aggregate ``stopcode``
     reported by :meth:`check_convergence` is CONTINUE until every plane has
     stopped.
@@ -708,7 +719,7 @@ class CycleController:
     Attributes:
     -----------
     max_iter_remaining : numpy.ndarray or None
-        Per-plane remaining model update iterations, shape
+        Per-plane iterations left of ``max_iter`` over all cycles, shape
         ``(ntime, nchan, npol)`` indexed ``(time, chan, pol)``. Allocated
         lazily the first time a ImagingDict is seen (the cube shape is unknown
         at construction); ``None`` until then. ``_max_iter`` holds the
@@ -743,6 +754,16 @@ class CycleController:
         Per-plane count of consecutive model updates that did no iteration,
         same shape as ``max_iter_remaining``. A plane is stopped with
         ``IMAGING_NO_PROGRESS`` when it reaches ``NO_PROGRESS_MODEL_UPDATES``.
+    max_cycles_divergence : int
+        Number of model updates in a row that may end diverged before the
+        plane is stopped with ``IMAGING_DIVERGENCE``; ``-1`` disables it.
+    diverged_model_updates : numpy.ndarray or None
+        Per-plane count of consecutive model updates that ended diverged,
+        same shape as ``max_iter_remaining``.
+    divergence_stopped : numpy.ndarray or None
+        Per-plane flag, set once the divergence stop has ended the imaging
+        cycles of the plane. Such a plane gets no more iterations and keeps
+        the stop code ``IMAGING_DIVERGENCE``.
     entropy_stop : bool
         Whether the entropy of the residual stops the imaging cycles of a
         plane (see :meth:`check_convergence`).
@@ -793,6 +814,7 @@ class CycleController:
         entropy_max_snr: float = 6.0,
         entropy_spatial_bins: int = 7,
         entropy_flux_bins: int = 10,
+        max_cycles_divergence: int = -1,
     ):
         """
         Initialize the cycle controller with deconvolution parameters.
@@ -847,10 +869,15 @@ class CycleController:
         entropy_flux_bins : int, optional
             Flux bins per unit of RMS of the entropy (default: 10)
 
+        max_cycles_divergence : int, optional
+            Stop a plane once this many of its model updates in a row ended
+            diverged (default: -1, disabled)
+
         Raises:
         -------
         ValueError
-            If one of the entropy parameters has a wrong type or value, if
+            If ``max_cycles_divergence`` is not -1 or a positive integer, if
+            one of the entropy parameters has a wrong type or value, if
             ``max_cycles`` is neither an integer >= -1 nor ``"auto"``, or if
             it is ``"auto"`` with a ``max_psf_fraction`` of 1 or more (the
             cycles needed to clean down grow without bound as the PSF
@@ -883,6 +910,19 @@ class CycleController:
         self.entropy_flux_bins = entropy_flux_bins
         self.max_entropy = None
         self.entropy_stopped = None
+        # Divergence stop: parameter and per-plane state (allocated lazily).
+        if (
+            isinstance(max_cycles_divergence, bool)
+            or not isinstance(max_cycles_divergence, int | np.integer)
+            or not (max_cycles_divergence == -1 or max_cycles_divergence >= 1)
+        ):
+            raise ValueError(
+                "max_cycles_divergence must be -1 or a positive integer; got "
+                f"{max_cycles_divergence!r}."
+            )
+        self.max_cycles_divergence = int(max_cycles_divergence)
+        self.diverged_model_updates = None
+        self.divergence_stopped = None
         self.max_cycles = validate_max_cycles(max_cycles, max_psf_fraction)
         self.max_cycles_auto = None
 
@@ -976,6 +1016,8 @@ class CycleController:
             self.zero_iter_model_updates = np.zeros(needed, dtype=int)
             self.max_entropy = np.full(needed, np.nan, dtype=float)
             self.entropy_stopped = np.zeros(needed, dtype=bool)
+            self.diverged_model_updates = np.zeros(needed, dtype=int)
+            self.divergence_stopped = np.zeros(needed, dtype=bool)
         elif any(
             n > c for n, c in zip(needed, self.max_iter_remaining.shape, strict=False)
         ):
@@ -991,6 +1033,8 @@ class CycleController:
                 ("zero_iter_model_updates", 0, int),
                 ("max_entropy", np.nan, float),
                 ("entropy_stopped", False, bool),
+                ("diverged_model_updates", 0, int),
+                ("divergence_stopped", False, bool),
             ):
                 new = np.full(grown, fill, dtype=dtype)
                 new[sl] = getattr(self, attr)
@@ -1030,13 +1074,13 @@ class CycleController:
         chan: int | None = None,
     ) -> tuple[int, float]:
         """
-        Calculate max_iter_per_cycle and threshold_per_cycle for the next model update.
+        Calculate max_iter_per_cycle_updated and threshold_per_cycle for the next model update.
 
         Logic:
         ------
         1. Extract max_psf_sidelobe and peak_residual from imaging_dict
-        2. Start with remaining iterations (max_iter_remaining)
-        3. If max_iter_per_cycle is set (>= 0), use minimum of (max_iter_per_cycle, max_iter_remaining)
+        2. Start with the largest remaining budget over the planes (max_iter_remaining)
+        3. If max_iter_per_cycle is set (>= 0), max_iter_per_cycle_updated = min(max_iter_per_cycle, that budget)
         4. Calculate PSF fraction = max_psf_sidelobe * psf_sidelobe_factor
         5. Clamp PSF fraction to [min_psf_fraction, max_psf_fraction]
         6. threshold_per_cycle = max(psf_fraction * peak_residual, threshold)
@@ -1059,8 +1103,10 @@ class CycleController:
 
         Returns:
         --------
-        use_max_iter_per_cycle : int
-            Number of iterations to perform in this model update
+        max_iter_per_cycle_updated : int
+            Iteration limit of the next model update over the selected planes
+            (:func:`get_per_cycle_limits` caps each plane's own
+            ``max_iter_remaining`` with it)
 
         threshold_per_cycle : float
             Stopping threshold for this model update
@@ -1069,7 +1115,7 @@ class CycleController:
         --------
         >>> controller = CycleController(max_iter=1000, psf_sidelobe_factor=1.5)
         >>> # imaging_dict populated by deconvolver and PSF analysis
-        >>> max_iter_per_cycle, threshold_per_cycle = controller.calculate_per_cycle_limits(imaging_dict)
+        >>> max_iter_per_cycle_updated, threshold_per_cycle = controller.calculate_per_cycle_limits(imaging_dict)
         """
         # Extract needed values from ImagingDict
         max_psf_sidelobe = get_max_psf_sidelobe_from_imaging_dict(
@@ -1079,19 +1125,19 @@ class CycleController:
             imaging_dict, use_mask=True, time=time, pol=pol, chan=chan
         )
 
-        # Start with all remaining iterations. The deconvolver takes a single
-        # scalar max_iter_per_cycle, so the per-plane budget is reduced to the largest
-        # remaining budget across planes. Before the per-plane array exists,
-        # fall back to the initial per-plane budget.
+        # Start with all remaining iterations: the largest remaining budget
+        # across planes (get_per_cycle_limits caps every plane's own budget
+        # with the result). Before the per-plane array exists, fall back to
+        # the initial per-plane budget.
         if self.max_iter_remaining is None:
-            use_max_iter_per_cycle = self._max_iter
+            max_iter_per_cycle_updated = self._max_iter
         else:
-            use_max_iter_per_cycle = int(self.max_iter_remaining.max())
+            max_iter_per_cycle_updated = int(self.max_iter_remaining.max())
 
         # If user forced a specific max_iter_per_cycle, respect it
         if self.max_iter_per_cycle >= 0:
-            use_max_iter_per_cycle = min(
-                self.max_iter_per_cycle, use_max_iter_per_cycle
+            max_iter_per_cycle_updated = min(
+                self.max_iter_per_cycle, max_iter_per_cycle_updated
             )
 
         # Calculate adaptive PSF fraction for threshold_per_cycle
@@ -1105,7 +1151,7 @@ class CycleController:
         threshold_per_cycle = psf_fraction * peak_residual
         threshold_per_cycle = max(threshold_per_cycle, self._plane_threshold(pol))
 
-        return int(use_max_iter_per_cycle), threshold_per_cycle
+        return int(max_iter_per_cycle_updated), threshold_per_cycle
 
     def per_plane_threshold_per_cycle(
         self,
@@ -1287,7 +1333,7 @@ class CycleController:
         model_update_ran: bool = False,
     ) -> tuple[StopCode, str]:
         """
-        Check if deconvolution has converged based on multiple criteria.
+        Cycle control: check whether every plane gets another imaging cycle.
 
         This implements CASA's convergence checking from imager_return_dict.py:463-565.
 
@@ -1313,10 +1359,14 @@ class CycleController:
            (``model_update_ran`` False), so it notices the fall one model
            update after the maximum; the model of that last model update is
            kept.
-        5. Imaging cycle limit (stopcode 9): max_cycles == 0 (if not -1). A
+        5. Divergence (stopcode 5), only with ``max_cycles_divergence`` > 0:
+           the plane's last ``max_cycles_divergence`` model updates all ended
+           diverged. The stop is final for the plane: it gets no more
+           iterations and keeps this stop code.
+        6. Imaging cycle limit (stopcode 9): max_cycles == 0 (if not -1). A
            ``max_cycles="auto"`` has to be resolved first
            (:meth:`resolve_max_cycles`).
-        6. No progress (stopcode 4): the plane's last
+        7. No progress (stopcode 4): the plane's last
            ``NO_PROGRESS_MODEL_UPDATES`` model updates did no iteration. Such
            a plane cannot change its residual, so without this stop it would
            cycle for ever whenever ``threshold`` is 0 and ``max_cycles`` is -1
@@ -1324,13 +1374,19 @@ class CycleController:
 
         Model update Stopping Criteria:
         -------------------------------
-        - Checked by the deconvolver (max_iter_per_cycle, threshold_per_cycle,
-          divergence).
-        - A diverged model update is reported through the ``stop_code``
-          placeholder of the ImagingDict entry and kept as the plane's model
-          update stop code (``MODEL_UPDATE_DIVERGENCE``). It does not end the
-          plane's imaging cycles: the next residual update recomputes the
-          true residual.
+        - Checked by the deconvolver (iteration control:
+          max_iter_per_cycle_updated, threshold_per_cycle, divergence, and
+          for Asp tests of its own).
+        - The deconvolver reports why every plane's model update ended through
+          the ``stop_code`` placeholder of the ImagingDict entry (1
+          ``MODEL_UPDATE_MAX_ITER_PER_CYCLE``, 2
+          ``MODEL_UPDATE_THRESHOLD_PER_CYCLE``, 4 ``MODEL_UPDATE_DIVERGENCE``,
+          5 ``MODEL_UPDATE_ALGORITHM``, 0 did not run). It becomes the plane's
+          model update stop code and is kept until a later model update runs
+          for the plane: a check on the residual alone, or a model update
+          that gave the plane no iterations, leaves it as it is. A diverged
+          model update does not end the plane's imaging cycles by itself: the
+          next residual update recomputes the true residual.
 
         Parameters:
         -----------
@@ -1421,9 +1477,36 @@ class CycleController:
             if self.entropy_stop and not model_update_ran:
                 self._follow_entropy(idx, fields)
 
+            # The deconvolver reports why the model update ended through the
+            # stop_code placeholder of the entry; it stays the plane's model
+            # update stop code until a later model update runs for the plane
+            # (a plane given no iterations reports MODEL_UPDATE_CONTINUE).
+            placeholder = fields.get("stop_code", None)
+            reported = (
+                int(placeholder.model_update)
+                if isinstance(placeholder, StopCode)
+                else MODEL_UPDATE_CONTINUE
+            )
+            if reported != MODEL_UPDATE_CONTINUE:
+                self.stop_code_model_update[idx] = reported
+            model_update_code = int(self.stop_code_model_update[idx])
+
+            # Consecutive model updates of this plane that ended diverged; a
+            # model update that did not run for the plane changes nothing.
+            if model_update_ran and reported != MODEL_UPDATE_CONTINUE:
+                if reported == MODEL_UPDATE_DIVERGENCE:
+                    self.diverged_model_updates[idx] += 1
+                else:
+                    self.diverged_model_updates[idx] = 0
+                if (
+                    self.max_cycles_divergence > 0
+                    and self.diverged_model_updates[idx] >= self.max_cycles_divergence
+                ):
+                    self.divergence_stopped[idx] = True
+
             # Imaging cycle stopping criteria, in priority order (per plane):
             #   1 zero mask, 2 iteration limit, 3 threshold, 4 residual entropy,
-            #   5 imaging cycle limit, 6 no progress
+            #   5 divergence, 6 imaging cycle limit, 7 no progress
             if masksum == 0:
                 maj = IMAGING_ZERO_MASK
             elif remaining <= 0:
@@ -1432,6 +1515,8 @@ class CycleController:
                 maj = IMAGING_THRESHOLD
             elif self.entropy_stopped[idx]:
                 maj = IMAGING_ENTROPY
+            elif self.divergence_stopped[idx]:
+                maj = IMAGING_DIVERGENCE
             elif self.max_cycles != -1 and self.max_cycles <= 0:
                 maj = IMAGING_MAX_CYCLES
             elif self.zero_iter_model_updates[idx] >= NO_PROGRESS_MODEL_UPDATES:
@@ -1439,18 +1524,7 @@ class CycleController:
             else:
                 maj = IMAGING_CONTINUE
 
-            # The deconvolver reports a diverged model update through the
-            # stop_code placeholder of the entry; keep it as the plane's model
-            # update stop code.
-            placeholder = fields.get("stop_code", None)
-            model_update_code = (
-                int(placeholder.model_update)
-                if isinstance(placeholder, StopCode)
-                else MODEL_UPDATE_CONTINUE
-            )
-
             self.stop_code_imaging[idx] = maj
-            self.stop_code_model_update[idx] = model_update_code
             plane_imaging_codes.append(maj)
 
             # Stamp this plane's stop code/description into the ImagingDict,
@@ -1717,6 +1791,8 @@ class CycleController:
             self.zero_iter_model_updates[...] = 0
             self.max_entropy[...] = np.nan
             self.entropy_stopped[...] = False
+            self.diverged_model_updates[...] = 0
+            self.divergence_stopped[...] = False
         self.cycles_done = 0
         self.total_iter_done = 0
         self.stopcode = StopCode(
@@ -1736,6 +1812,8 @@ class CycleController:
             self.zero_iter_model_updates[...] = 0
             self.max_entropy[...] = np.nan
             self.entropy_stopped[...] = False
+            self.diverged_model_updates[...] = 0
+            self.divergence_stopped[...] = False
 
     def get_state(self) -> dict[str, Any]:
         """Get current state of the cycle controller as a dictionary.
@@ -1762,6 +1840,7 @@ class CycleController:
             "entropy_max_snr": self.entropy_max_snr,
             "entropy_spatial_bins": self.entropy_spatial_bins,
             "entropy_flux_bins": self.entropy_flux_bins,
+            "max_cycles_divergence": self.max_cycles_divergence,
             "cycles_done": self.cycles_done,
             "total_iter_done": self.total_iter_done,
             "stopcode": {
@@ -2334,7 +2413,7 @@ def get_per_cycle_limits(
     image_data_group_in_name="residual",
     residual_imaging_dict=None,
 ):
-    """Compute the per-plane ``max_iter_per_cycle`` and ``threshold_per_cycle`` for the next model update.
+    """Compute the per-plane ``max_iter_per_cycle_updated`` and ``threshold_per_cycle`` for the next model update.
 
     Before the first model update (``model_exists`` is ``False``) the controls
     are derived from the freshly made dirty image (each plane's own peak
@@ -2365,10 +2444,11 @@ def get_per_cycle_limits(
 
     Returns
     -------
-    max_iter_per_cycle : numpy.ndarray
+    max_iter_per_cycle_updated : numpy.ndarray
         ``(time, frequency, polarization)`` int array: the iterations each
         plane may spend in the next model update,
-        ``min(max_iter_per_cycle, remaining max_iter)`` per plane.
+        ``min(max_iter_per_cycle, max_iter_remaining)`` per plane (0 for a
+        plane the entropy or divergence stop has ended).
     threshold_per_cycle : numpy.ndarray
         ``(time, frequency, polarization)`` float array of per-plane stopping
         thresholds for the next model update.
@@ -2387,16 +2467,20 @@ def get_per_cycle_limits(
     threshold_per_cycle = controller.per_plane_threshold_per_cycle(rd)
     # Scalar cap = min(max_iter_per_cycle, largest remaining budget); clipping
     # the per-plane remaining budget with it gives each plane
-    # min(max_iter_per_cycle, its own remaining max_iter). .clip returns a
+    # min(max_iter_per_cycle, its own max_iter_remaining). .clip returns a
     # copy; the controller's own budget is decremented later by update_counts.
     max_iter_per_cycle_cap, _ = controller.calculate_per_cycle_limits(rd)
-    max_iter_per_cycle = controller.max_iter_remaining.clip(max=max_iter_per_cycle_cap)
-    # A plane that the entropy stop has ended is not cleaned any further while
-    # the other planes of its channel carry on.
+    max_iter_per_cycle_updated = controller.max_iter_remaining.clip(
+        max=max_iter_per_cycle_cap
+    )
+    # A plane that the entropy or divergence stop has ended is not cleaned any
+    # further while the other planes of its channel carry on.
     if controller.entropy_stopped is not None:
-        max_iter_per_cycle[controller.entropy_stopped] = 0
+        max_iter_per_cycle_updated[controller.entropy_stopped] = 0
+    if controller.divergence_stopped is not None:
+        max_iter_per_cycle_updated[controller.divergence_stopped] = 0
 
-    return max_iter_per_cycle, threshold_per_cycle
+    return max_iter_per_cycle_updated, threshold_per_cycle
 
 
 def resolve_auto_max_cycles(

@@ -85,9 +85,13 @@ def _run_cube(
         residual_cube=residual,
         psf_cube=psf,
         model_cube=model,
-        max_iter_remaining=np.full(residual.shape[:3], max_iter, dtype=np.int32),
+        max_iter_per_cycle_updated=np.full(
+            residual.shape[:3], max_iter, dtype=np.int32
+        ),
         gain=gain,
-        threshold=np.full(residual.shape[:3], threshold, dtype=residual.dtype),
+        threshold_per_cycle=np.full(
+            residual.shape[:3], threshold, dtype=residual.dtype
+        ),
         processing_function_threads=threads,
         **divergence,
     )
@@ -558,9 +562,9 @@ class TestSinglePlaneClean:
             dirty_image=residual,
             psf=psf,
             model=model,
-            max_iter_remaining=max_iter,
+            max_iter_per_cycle_updated=max_iter,
             gain=0.5,
-            threshold=0.0,
+            threshold_per_cycle=0.0,
             **divergence,
         )
 
@@ -603,9 +607,9 @@ class TestSinglePlaneClean:
             dirty_image=single_residual,
             psf=psf,
             model=single_model,
-            max_iter_remaining=400,
+            max_iter_per_cycle_updated=400,
             gain=gain,
-            threshold=0.0,
+            threshold_per_cycle=0.0,
             max_iter_divergence=1,
             divergence_rms_factor=1 + gain / 10,
             divergence_peak_factor=1 + gain,

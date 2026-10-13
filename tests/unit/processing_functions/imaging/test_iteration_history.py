@@ -137,9 +137,9 @@ def _run(kernel, residual, psf, mask, max_iter, threshold=0.0, clean_box=None, *
             model=model,
             mask=mask,
             clean_box=clean_box,
-            max_iter_remaining=max_iter,
+            max_iter_per_cycle_updated=max_iter,
             gain=GAIN,
-            threshold=threshold,
+            threshold_per_cycle=threshold,
             **kw,
         )
         return result, residual, model
@@ -151,9 +151,9 @@ def _run(kernel, residual, psf, mask, max_iter, threshold=0.0, clean_box=None, *
         model_cube=model,
         mask_cube=np.ascontiguousarray(mask[None, None, None]),
         clean_box=clean_box,
-        max_iter_remaining=np.full((1, 1, 1), max_iter, np.int32),
+        max_iter_per_cycle_updated=np.full((1, 1, 1), max_iter, np.int32),
         gain=GAIN,
-        threshold=np.full((1, 1, 1), threshold, residual.dtype),
+        threshold_per_cycle=np.full((1, 1, 1), threshold, residual.dtype),
         processing_function_threads=3,
         **kw,
     )
@@ -294,9 +294,9 @@ class TestKernelHistory:
                 psf_cube=psf_cube,
                 model_cube=np.zeros_like(cube),
                 mask_cube=mask,
-                max_iter_remaining=max_iter,
+                max_iter_per_cycle_updated=max_iter,
                 gain=GAIN,
-                threshold=threshold,
+                threshold_per_cycle=threshold,
                 processing_function_threads=4,
                 record_iteration_history=True,
             )

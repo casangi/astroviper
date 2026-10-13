@@ -947,12 +947,12 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
             chan=0,
         )
 
-        max_iter_per_cycle, threshold_per_cycle = controller.calculate_per_cycle_limits(
-            rd
+        max_iter_per_cycle_updated, threshold_per_cycle = (
+            controller.calculate_per_cycle_limits(rd)
         )
 
         # Should use min(100, 1000) = 100
-        self.assertEqual(max_iter_per_cycle, 100)
+        self.assertEqual(max_iter_per_cycle_updated, 100)
 
     def test_max_iter_per_cycle_respects_remaining_iterations(self):
         """Test max_iter_per_cycle respects remaining max_iter."""
@@ -969,12 +969,12 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
             chan=0,
         )
 
-        max_iter_per_cycle, threshold_per_cycle = controller.calculate_per_cycle_limits(
-            rd
+        max_iter_per_cycle_updated, threshold_per_cycle = (
+            controller.calculate_per_cycle_limits(rd)
         )
 
         # Should use min(100, 50) = 50
-        self.assertEqual(max_iter_per_cycle, 50)
+        self.assertEqual(max_iter_per_cycle_updated, 50)
 
     def test_default_psf_sidelobe_used(self):
         """Test default PSF sidelobe when not in ImagingDict."""
@@ -2319,6 +2319,191 @@ class TestNoProgressStop(unittest.TestCase):
         )
 
 
+class TestModelUpdateStopCode(unittest.TestCase):
+    """The stop code the deconvolver reports for every plane (iteration
+    control) reaches the controller and stays until the next model update;
+    with ``max_cycles_divergence`` repeated divergence stops the plane (cycle
+    control)."""
+
+    _model_update = staticmethod(TestNoProgressStop._model_update)
+
+    @staticmethod
+    def _controller(**kwargs):
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            CycleController,
+        )
+
+        params = dict(max_iter=1000, max_cycles=-1, threshold=0.0)
+        params.update(kwargs)
+        return CycleController(**params)
+
+    def _run(self, controller, codes, iter_done=(10, 10)):
+        """One model update of the two planes, ending with ``codes``."""
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            StopCode,
+        )
+
+        rd = self._model_update(
+            iter_done=iter_done,
+            stop_codes=tuple(StopCode(IMAGING_CONTINUE, code) for code in codes),
+        )
+        controller.update_counts(rd)
+        stopcode, _ = controller.check_convergence(rd, model_update_ran=True)
+        return stopcode, rd
+
+    def test_every_code_reaches_the_controller(self):
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            MODEL_UPDATE_ALGORITHM,
+            MODEL_UPDATE_DIVERGENCE,
+            MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+            MODEL_UPDATE_THRESHOLD_PER_CYCLE,
+        )
+
+        controller = self._controller()
+        for codes in (
+            (MODEL_UPDATE_MAX_ITER_PER_CYCLE, MODEL_UPDATE_THRESHOLD_PER_CYCLE),
+            (MODEL_UPDATE_DIVERGENCE, MODEL_UPDATE_ALGORITHM),
+        ):
+            stopcode, rd = self._run(controller, codes)
+            self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
+            self.assertEqual(
+                controller.stop_code_model_update[0, 0].tolist(), list(codes)
+            )
+            self.assertEqual(
+                [e["stop_code"].model_update for e in rd.data.values()], list(codes)
+            )
+
+    def test_a_check_on_the_residual_keeps_the_code(self):
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            MODEL_UPDATE_DIVERGENCE,
+            MODEL_UPDATE_THRESHOLD_PER_CYCLE,
+        )
+
+        codes = [MODEL_UPDATE_THRESHOLD_PER_CYCLE, MODEL_UPDATE_DIVERGENCE]
+        controller = self._controller()
+        self._run(controller, codes)
+        # the residual of the next residual update carries no stop code
+        residual = self._model_update(iter_done=(0, 0))
+        controller.check_convergence(residual)
+        self.assertEqual(controller.stop_code_model_update[0, 0].tolist(), codes)
+        self.assertEqual(
+            [e["stop_code"].model_update for e in residual.data.values()], codes
+        )
+
+    def test_a_model_update_that_did_not_run_keeps_the_code(self):
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            MODEL_UPDATE_DIVERGENCE,
+            MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+        )
+
+        codes = [MODEL_UPDATE_MAX_ITER_PER_CYCLE, MODEL_UPDATE_DIVERGENCE]
+        controller = self._controller()
+        self._run(controller, codes)
+        # both planes given no iterations (e.g. their max_iter is spent while
+        # another plane of the channel still cleans)
+        _, rd = self._run(
+            controller, (MODEL_UPDATE_CONTINUE, MODEL_UPDATE_CONTINUE), (0, 0)
+        )
+        self.assertEqual(controller.stop_code_model_update[0, 0].tolist(), codes)
+        self.assertEqual([e["stop_code"].model_update for e in rd.data.values()], codes)
+        # nor does it count for, or break, a run of diverged model updates
+        self.assertEqual(controller.diverged_model_updates[0, 0].tolist(), [0, 1])
+
+    def test_repeated_divergence_stops_the_plane(self):
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            IMAGING_DIVERGENCE,
+            IMAGING_STOP_DESCRIPTIONS,
+            MODEL_UPDATE_DIVERGENCE,
+            MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+            get_per_cycle_limits,
+        )
+
+        diverged = (MODEL_UPDATE_DIVERGENCE, MODEL_UPDATE_MAX_ITER_PER_CYCLE)
+        controller = self._controller(max_cycles_divergence=2)
+        self._run(controller, diverged)
+        self.assertEqual(
+            controller.stop_code_imaging[0, 0].tolist(),
+            [IMAGING_CONTINUE, IMAGING_CONTINUE],
+        )
+        stopcode, rd = self._run(controller, diverged)
+        # pol 1 carries on, so the imaging cycles go on
+        self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
+        self.assertEqual(
+            controller.stop_code_imaging[0, 0].tolist(),
+            [IMAGING_DIVERGENCE, IMAGING_CONTINUE],
+        )
+        entry = rd.data[list(rd.data)[0]]
+        self.assertEqual(
+            entry["stop_description"], IMAGING_STOP_DESCRIPTIONS[IMAGING_DIVERGENCE]
+        )
+        # the plane gets no more iterations ...
+        for fields in rd.data.values():
+            fields["max_psf_sidelobe"] = 0.2
+        limits, _ = get_per_cycle_limits(controller, rd, None, True, {"gain": 0.1})
+        self.assertEqual(limits[0, 0].tolist(), [0, 980])
+        # ... and the stop is final
+        self._run(
+            controller,
+            (MODEL_UPDATE_CONTINUE, MODEL_UPDATE_MAX_ITER_PER_CYCLE),
+            (0, 10),
+        )
+        self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_DIVERGENCE)
+
+    def test_the_divergence_must_be_in_a_row(self):
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            MODEL_UPDATE_DIVERGENCE,
+            MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+        )
+
+        controller = self._controller(max_cycles_divergence=2)
+        for first in (
+            MODEL_UPDATE_DIVERGENCE,
+            MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+            MODEL_UPDATE_DIVERGENCE,
+        ):
+            stopcode, _ = self._run(
+                controller, (first, MODEL_UPDATE_MAX_ITER_PER_CYCLE)
+            )
+            self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
+        self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_CONTINUE)
+        self.assertEqual(controller.diverged_model_updates[0, 0, 0], 1)
+
+    def test_off_by_default(self):
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            MODEL_UPDATE_DIVERGENCE,
+        )
+
+        controller = self._controller()
+        for _ in range(5):
+            stopcode, _ = self._run(
+                controller, (MODEL_UPDATE_DIVERGENCE, MODEL_UPDATE_DIVERGENCE)
+            )
+            self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
+        self.assertEqual(controller.max_cycles_divergence, -1)
+        self.assertFalse(controller.divergence_stopped.any())
+
+    def test_invalid_values_are_refused(self):
+        for value in (0, -2, 1.5, True, "2"):
+            with self.assertRaises(ValueError):
+                self._controller(max_cycles_divergence=value)
+
+    def test_reset_clears_the_divergence_state(self):
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            MODEL_UPDATE_DIVERGENCE,
+            MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+        )
+
+        controller = self._controller(max_cycles_divergence=1)
+        self._run(
+            controller, (MODEL_UPDATE_DIVERGENCE, MODEL_UPDATE_MAX_ITER_PER_CYCLE)
+        )
+        self.assertTrue(controller.divergence_stopped[0, 0, 0])
+        controller.reset()
+        self.assertFalse(controller.divergence_stopped.any())
+        self.assertEqual(int(controller.diverged_model_updates.max()), 0)
+        self.assertEqual(controller.get_state()["max_cycles_divergence"], 1)
+
+
 class TestPerPlaneStateGrowth(unittest.TestCase):
     def test_arrays_grow_when_a_larger_plane_index_appears(self):
         from astroviper.processing_functions.imaging.utils.cycle_control import (
@@ -2566,10 +2751,10 @@ class TestEntropyStop(unittest.TestCase):
         _, _, update = self._cycle(controller, (7.4, 7.5))
         for fields in update.data.values():
             fields["max_psf_sidelobe"] = 0.2
-        max_iter_per_cycle, _ = get_per_cycle_limits(
+        max_iter_per_cycle_updated, _ = get_per_cycle_limits(
             controller, update, None, True, {"gain": 0.1}
         )
-        self.assertEqual(max_iter_per_cycle[0, 0].tolist(), [0, 200])
+        self.assertEqual(max_iter_per_cycle_updated[0, 0].tolist(), [0, 200])
         # the budget of the controller is not touched
         self.assertEqual(controller.max_iter_remaining[0, 0].tolist(), [950, 900])
 

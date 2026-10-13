@@ -27,10 +27,10 @@ def model_update_cube_single_field(
         (C++, threaded across *and* within planes -- faster when there are
         few planes, e.g. single-channel imaging) or ``"asp"``.
     deconvolve_params : dict
-        Per-cycle deconvolution / cycle control parameters passed straight to
-        the deconvolver: ``gain``, the absolute ``threshold`` (floor) and the
-        per-plane ``max_iter_per_cycle`` and ``threshold_per_cycle`` arrays
-        computed by the cycle controller.  ``max_iter_divergence`` (default
+        Per-cycle deconvolution / iteration control parameters passed straight
+        to the deconvolver: ``gain``, the absolute ``threshold`` (floor) and
+        the per-plane ``max_iter_per_cycle_updated`` and ``threshold_per_cycle``
+        arrays computed by the cycle controller.  ``max_iter_divergence`` (default
         1, ``-1`` disables its two limits) is the divergence test of the
         deconvolvers: a plane stops its model update when the RMS of its
         residual inside the mask has been above ``(1 + gain / 10)`` times the
@@ -64,9 +64,11 @@ def model_update_cube_single_field(
     Returns
     -------
     imaging_dict : ImagingDict
-        Per-plane deconvolution statistics for this cycle. A plane that the
-        divergence test stopped carries the model update stop code
-        ``MODEL_UPDATE_DIVERGENCE``. With ``record_iteration_history`` every
+        Per-plane deconvolution statistics for this cycle. Every plane
+        carries the reason the deconvolver ended its model update as the
+        model update stop code (iteration control: ``MODEL_UPDATE_*`` of
+        :mod:`~astroviper.processing_functions.imaging.utils.cycle_control`).
+        With ``record_iteration_history`` every
         plane also carries its ``iteration_peak_residual`` and
         ``iteration_residual_rms``.
     return_df : pandas.DataFrame

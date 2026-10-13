@@ -614,7 +614,9 @@ def _check_deep_clean_history(deconvolve_dict):
         assert fields["max_iter"] == controls["max_iter"]
         assert counts.sum() == controls["max_iter"], f"{plane}: wrong iteration total"
         code = fields["stop_code"]
-        assert (int(code.imaging), int(code.model_update)) == (1, 0), (
+        # imaging: max_iter spent; model update: the last one that ran for
+        # the plane spent its max_iter_per_cycle_updated
+        assert (int(code.imaging), int(code.model_update)) == (1, 1), (
             f"{plane}: expected iteration-limit stop, got {code}"
         )
         assert (
@@ -1411,7 +1413,8 @@ def _regenerate_truth_images():
 # ---------------------------------------------------------------------------
 
 # max_iter=100, max_cycles=1, threshold=0.001: deconvolves to the iteration limit
-# (the threshold is not reached) -> stop_code (1, 0).
+# (the threshold is not reached) -> stop_code (1, 1): max_iter is spent, and
+# the model update spent its max_iter_per_cycle_updated.
 # Regression values for corrected angular beams and Gaussian-subtracted PSF
 # sidelobes. Captured at float64, one thread and one frequency chunk; checked
 # across the thread/chunk variants above without changing their tolerances.
@@ -1424,7 +1427,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23110860147112905,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "I",
         "frequency": 372762580492.5155,
         "time": 0.0,
@@ -1445,7 +1448,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23110860147112905,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "Q",
         "frequency": 372762580492.5155,
         "time": 0.0,
@@ -1466,7 +1469,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23107365193069979,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "I",
         "frequency": 372763190875.0631,
         "time": 0.0,
@@ -1487,7 +1490,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23107365193069979,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "Q",
         "frequency": 372763190875.0631,
         "time": 0.0,
@@ -1508,7 +1511,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23115665063155355,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "I",
         "frequency": 372763801257.61084,
         "time": 0.0,
@@ -1529,7 +1532,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23115665063155355,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "Q",
         "frequency": 372763801257.61084,
         "time": 0.0,
@@ -1550,7 +1553,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23118065024762538,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "I",
         "frequency": 372764411640.15845,
         "time": 0.0,
@@ -1571,7 +1574,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23118065024762538,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "Q",
         "frequency": 372764411640.15845,
         "time": 0.0,
@@ -1592,7 +1595,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23118394049874885,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "I",
         "frequency": 372765022022.7062,
         "time": 0.0,
@@ -1613,7 +1616,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23118394049874885,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "Q",
         "frequency": 372765022022.7062,
         "time": 0.0,
@@ -1630,7 +1633,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
 
 
 # max_iter=10000, max_cycles=4, threshold=0.001: every plane spends its whole
-# max_iter budget before the threshold -> stop_code (1, 0). This deep clean
+# max_iter budget before the threshold -> stop_code (1, 1). This deep clean
 # trips the divergence test of the Hogbom kernel (max_iter_divergence, default
 # 1): the long model updates (the second one of the Q planes, the third one of
 # the I planes) are stopped about 2000 iterations before their budget ends,
@@ -1639,7 +1642,9 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
 # imaging cycle from the recomputed residual. The RMS of the final residual is
 # 40 percent lower than what the same run reaches with the test switched off.
 # A Q plane's trailing 0 is the cycle its channel's I plane still ran (the
-# channel keeps cycling until all of its planes have stopped). Plane (0, 1, 3)
+# channel keeps cycling until all of its planes have stopped); the Q plane
+# keeps the model update stop code of its last model update that ran, 1.
+# Plane (0, 1, 3)
 # reaches its threshold_per_cycle before it diverges. Regenerated with
 # threads=1, n_mapping_parallelism=1.
 EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
@@ -1651,7 +1656,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23110860147112905,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "I",
         "frequency": 372762580492.5155,
         "time": 0.0,
@@ -1702,7 +1707,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23110860147112905,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "Q",
         "frequency": 372762580492.5155,
         "time": 0.0,
@@ -1753,7 +1758,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23107365193069979,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "I",
         "frequency": 372763190875.0631,
         "time": 0.0,
@@ -1804,7 +1809,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23107365193069979,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "Q",
         "frequency": 372763190875.0631,
         "time": 0.0,
@@ -1855,7 +1860,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23115665063155355,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "I",
         "frequency": 372763801257.61084,
         "time": 0.0,
@@ -1906,7 +1911,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23115665063155355,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "Q",
         "frequency": 372763801257.61084,
         "time": 0.0,
@@ -1957,7 +1962,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23118065024762538,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "I",
         "frequency": 372764411640.15845,
         "time": 0.0,
@@ -2008,7 +2013,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23118065024762538,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "Q",
         "frequency": 372764411640.15845,
         "time": 0.0,
@@ -2059,7 +2064,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23118394049874885,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "I",
         "frequency": 372765022022.7062,
         "time": 0.0,
@@ -2110,7 +2115,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23118394049874885,
-        "stop_code": (1, 0),
+        "stop_code": (1, 1),
         "stokes": "Q",
         "frequency": 372765022022.7062,
         "time": 0.0,

@@ -24,7 +24,9 @@ from astroviper.processing_functions.imaging.utils.cycle_control import (
     IMAGING_CONTINUE,
     IMAGING_MAX_CYCLES,
     IMAGING_THRESHOLD,
+    MODEL_UPDATE_MAX_ITER_PER_CYCLE,
     CycleController,
+    StopCode,
     resolve_auto_max_cycles,
     validate_max_cycles,
 )
@@ -590,6 +592,19 @@ class TestImagingCycleLoop:
         assert stokes_i["stop_code"].imaging == IMAGING_MAX_CYCLES
         assert len(stokes_i["iter_done"]) == timing["n_cycles"].iloc[0]
         assert timing["n_cycles"].iloc[0] == stokes_i["max_cycles_auto"]
+
+    def test_the_record_carries_the_model_update_stop_code(self):
+        """Every model update of two iterations spends them: the record keeps
+        the stop code of the deconvolver next to the imaging stop code."""
+        _, timing, record = _image({"max_cycles": 3, "max_iter_per_cycle": 2})
+        assert timing["n_cycles"].iloc[0] == 3
+        assert record.data[STOKES_I]["stop_code"] == StopCode(
+            IMAGING_MAX_CYCLES, MODEL_UPDATE_MAX_ITER_PER_CYCLE
+        )
+
+    def test_max_cycles_divergence_reaches_the_controller(self):
+        with pytest.raises(ValueError, match="max_cycles_divergence"):
+            _image({"max_cycles_divergence": 0})
 
     def test_sensitivity_reference(self):
         """Threshold 0: every plane predicts its limit from the thermal noise

@@ -44,6 +44,10 @@ struct AspResult {
                                   // -2 large-scale negative / diverging
                                   // -3 diverging (the divergence test shared
                                   //    with the other deconvolvers)
+    int stop_code = deconvolvers::STOP_NONE;  // why the model update ended, as
+                                  // the other deconvolvers report it; Asp's own
+                                  // tests (optimum strength, end of a Hogbom
+                                  // run, stop point mode) are STOP_ALGORITHM
     double peak_residual = 0.0;   // |peak| of the (masked) residual at exit
     double model_flux = 0.0;      // sum of the model image at exit
     bool switched_to_hogbom = false;
@@ -72,8 +76,8 @@ void convolve_centered(const double* a, const double* b, int nx, int ny,
 // deconvolvers (plane_stop_test.hpp). No copies of the caller's buffers are made.
 template <typename T>
 AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
-                         int nx, int ny, double gain, double threshold,
-                         int max_iter_remaining, double fusedthreshold, double psf_width,
+                         int nx, int ny, double gain, double threshold_per_cycle,
+                         int max_iter_per_cycle_updated, double fusedthreshold, double psf_width,
                          int largestscale, int stoppointmode, int norm_method,
                          bool verbose,
                          const deconvolvers::DivergenceControl<double>& divergence);
@@ -83,14 +87,15 @@ AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
 // worker threads. The PSF cube may have np_psf == np_img or np_psf == 1
 // (Stokes-I broadcast). `results` must have length nt*nf*np_img.
 //
-// Cycle control is independent per plane: `threshold` and `max_iter_remaining` are
-// per-plane arrays of length nt*nf*np_img in (t, f, p) C-order, so every
-// (time, frequency, polarization) plane is cleaned with its own threshold
-// and iteration limit.
+// Iteration control is independent per plane: `threshold_per_cycle` and
+// `max_iter_per_cycle_updated` are per-plane arrays of length nt*nf*np_img in
+// (t, f, p) C-order, so every (time, frequency, polarization) plane is cleaned
+// with its own threshold and iteration limit.
 template <typename T>
 void aspclean_cube(T* residual, T* model, const T* psf, const T* mask,
                    int nt, int nf, int np_img, int np_psf, int nx, int ny,
-                   double gain, const double* threshold, const int* max_iter_remaining,
+                   double gain, const double* threshold_per_cycle,
+                   const int* max_iter_per_cycle_updated,
                    double fusedthreshold, double psf_width, int largestscale,
                    int stoppointmode, int norm_method, int processing_function_threads,
                    const deconvolvers::DivergenceControl<double>& divergence,

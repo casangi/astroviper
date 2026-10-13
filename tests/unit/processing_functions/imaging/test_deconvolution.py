@@ -34,8 +34,8 @@ from astroviper.processing_functions.imaging.deconvolution import (
 )
 from astroviper.processing_functions.imaging.utils.cycle_control import (
     IMAGING_CONTINUE,
-    MODEL_UPDATE_CONTINUE,
     MODEL_UPDATE_DIVERGENCE,
+    MODEL_UPDATE_MAX_ITER_PER_CYCLE,
     CycleController,
     StopCode,
 )
@@ -728,17 +728,23 @@ class TestDeconvolveReportsDivergence:
         assert controller.stop_code_model_update[0, 0, 0] == MODEL_UPDATE_DIVERGENCE
         assert controller.max_iter_remaining[0, 0, 0] == 35
 
-    def test_healthy_model_update_keeps_the_continue_code(self):
+    def test_healthy_model_update_reports_its_stop_code(self):
         xds = self._xds(sidelobe=0.0)
         imaging_dict = deconvolve(
             img_xds=xds,
             deconvolve_params={"gain": 0.5, "max_iter": 10, "threshold": 0.0},
         )
         (entry,) = imaging_dict.data.values()
-        assert entry["stop_code"] is None
+        assert entry["iter_done"] == [10]
+        assert entry["stop_code"] == StopCode(
+            IMAGING_CONTINUE, MODEL_UPDATE_MAX_ITER_PER_CYCLE
+        )
         controller = CycleController(max_iter=40, threshold=0.0, gain=0.5)
         controller.check_convergence(imaging_dict, model_update_ran=True)
-        assert entry["stop_code"].model_update == MODEL_UPDATE_CONTINUE
+        assert entry["stop_code"].model_update == MODEL_UPDATE_MAX_ITER_PER_CYCLE
+        assert controller.stop_code_model_update[0, 0, 0] == (
+            MODEL_UPDATE_MAX_ITER_PER_CYCLE
+        )
 
 
 @requires_hogbom

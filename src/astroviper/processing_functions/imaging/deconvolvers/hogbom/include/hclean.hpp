@@ -119,8 +119,8 @@ void maximg(const T* limagestep, int domask, const bool* lmask,
  * Templated Hogbom CLEAN algorithm implementation on a single 2D plane.
  * The mask is a bool array; pixels with mask == true are considered in the
  * peak search and in the RMS of the divergence test. The plane stops when it
- * has spent max_iter_remaining, when its peak is at or below thres, or when
- * the divergence test fires (see DivergenceControl); stop_reason reports which
+ * has spent max_iter_per_cycle_updated, when its peak is at or below thres, or
+ * when the divergence test fires (see DivergenceControl); stop_reason reports which
  * (a StopReason). A history that is not null receives the record of every
  * iteration (IterationHistory); a null history records nothing.
  */
@@ -128,7 +128,7 @@ template<typename T>
 void clean(T* limage, T* limagestep, const T* lpsf,
            int domask, const bool* lmask, int nx, int ny,
            int xbeg, int xend, int ybeg, int yend,
-           int max_iter_remaining, int siter, int& iter, T gain, T thres,
+           int max_iter_per_cycle_updated, int siter, int& iter, T gain, T thres,
            T cspeedup,
            std::function<void(int, int, int, T)> msgput,
            std::function<void(int&)> stopnow,
@@ -167,8 +167,8 @@ void clean(T* limage, T* limagestep, const T* lpsf,
  * @param ny image height
  * @param nx image width
  * @param xbeg,xend,ybeg,yend per-plane clean box (0-based, exclusive upper)
- * @param max_iter_remaining per-plane maximum iterations; flat array of length
- *              nt*nf*np_img in (t, f, p) C-order (cycle control is
+ * @param max_iter_per_cycle_updated per-plane maximum iterations; flat array of
+ *              length nt*nf*np_img in (t, f, p) C-order (iteration control is
  *              independent for every time/frequency/polarization plane)
  * @param gain clean loop gain
  * @param thres per-plane flux cleaning threshold; flat array of length
@@ -190,7 +190,7 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
                 int nt, int nf, int np_img, int np_psf,
                 int ny, int nx,
                 int xbeg, int xend, int ybeg, int yend,
-                const int* max_iter_remaining, T gain, const T* thres, T cspeedup,
+                const int* max_iter_per_cycle_updated, T gain, const T* thres, T cspeedup,
                 int processing_function_threads, int* iter_out,
                 const DivergenceControl<T>& divergence, int* stop_out,
                 IterationHistory* history);
@@ -215,7 +215,7 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
                 int nt, int nf, int np_img, int np_psf,
                 int ny, int nx,
                 int xbeg, int xend, int ybeg, int yend,
-                const int* max_iter_remaining, T gain, const T* thres, T cspeedup,
+                const int* max_iter_per_cycle_updated, T gain, const T* thres, T cspeedup,
                 int processing_function_threads, int* iter_out,
                 const DivergenceControl<T>& divergence, int* stop_out,
                 IterationHistory* history);
@@ -230,7 +230,7 @@ extern template void maximg<double>(const double* limagestep, int domask, const 
 extern template void clean<float>(float* limage, float* limagestep, const float* lpsf,
                                  int domask, const bool* lmask, int nx, int ny,
                                  int xbeg, int xend, int ybeg, int yend,
-                                 int max_iter_remaining, int siter, int& iter, float gain, float thres,
+                                 int max_iter_per_cycle_updated, int siter, int& iter, float gain, float thres,
                                  float cspeedup,
                                  std::function<void(int, int, int, float)> msgput,
                                  std::function<void(int&)> stopnow,
@@ -240,7 +240,7 @@ extern template void clean<float>(float* limage, float* limagestep, const float*
 extern template void clean<double>(double* limage, double* limagestep, const double* lpsf,
                                   int domask, const bool* lmask, int nx, int ny,
                                   int xbeg, int xend, int ybeg, int yend,
-                                  int max_iter_remaining, int siter, int& iter, double gain, double thres,
+                                  int max_iter_per_cycle_updated, int siter, int& iter, double gain, double thres,
                                   double cspeedup,
                                   std::function<void(int, int, int, double)> msgput,
                                   std::function<void(int&)> stopnow,
@@ -253,7 +253,7 @@ extern template void clean_cube<float>(float* residual_cube, float* model_cube,
                                        int nt, int nf, int np_img, int np_psf,
                                        int ny, int nx,
                                        int xbeg, int xend, int ybeg, int yend,
-                                       const int* max_iter_remaining, float gain, const float* thres, float cspeedup,
+                                       const int* max_iter_per_cycle_updated, float gain, const float* thres, float cspeedup,
                                        int processing_function_threads, int* iter_out,
                 const DivergenceControl<float>& divergence, int* stop_out,
                 IterationHistory* history);
@@ -264,7 +264,7 @@ extern template void clean_cube<double>(double* residual_cube, double* model_cub
                                         int nt, int nf, int np_img, int np_psf,
                                         int ny, int nx,
                                         int xbeg, int xend, int ybeg, int yend,
-                                        const int* max_iter_remaining, double gain, const double* thres, double cspeedup,
+                                        const int* max_iter_per_cycle_updated, double gain, const double* thres, double cspeedup,
                                         int processing_function_threads, int* iter_out,
                 const DivergenceControl<double>& divergence, int* stop_out,
                 IterationHistory* history);
@@ -275,7 +275,7 @@ extern template void clean_cube_many_threads<float>(float* residual_cube, float*
                                        int nt, int nf, int np_img, int np_psf,
                                        int ny, int nx,
                                        int xbeg, int xend, int ybeg, int yend,
-                                       const int* max_iter_remaining, float gain, const float* thres, float cspeedup,
+                                       const int* max_iter_per_cycle_updated, float gain, const float* thres, float cspeedup,
                                        int processing_function_threads, int* iter_out,
                 const DivergenceControl<float>& divergence, int* stop_out,
                 IterationHistory* history);
@@ -286,7 +286,7 @@ extern template void clean_cube_many_threads<double>(double* residual_cube, doub
                                         int nt, int nf, int np_img, int np_psf,
                                         int ny, int nx,
                                         int xbeg, int xend, int ybeg, int yend,
-                                        const int* max_iter_remaining, double gain, const double* thres, double cspeedup,
+                                        const int* max_iter_per_cycle_updated, double gain, const double* thres, double cspeedup,
                                         int processing_function_threads, int* iter_out,
                 const DivergenceControl<double>& divergence, int* stop_out,
                 IterationHistory* history);

@@ -499,7 +499,11 @@ per-variable nodes.
     and the `max_cycles` / `max_iter_per_cycle` / `threshold_per_cycle`
     parameters. Never call anything a major or minor cycle (major/minor axis
     of a Gaussian beam is fine). CASA parameter names may be cited in brackets
-    for orientation, e.g. `max_cycles` [CASA `nmajor`].
+    for orientation, e.g. `max_cycles` [CASA `nmajor`]. **Cycle control** is
+    the stop test between the residual update and the model update
+    (`CycleController`); **iteration control** is the stop test inside the
+    model update (the deconvolver kernels). A quantity keeps one name from the
+    cycle controller down to the kernel arguments.
 - **Formatting**: **Ruff** (enforced by CI + pre-commit). Don't hand-format.
 - **Imports**: prefer **absolute** imports (`from
   astroviper.processing_functions.imaging.residual_update import ...`). Relative
