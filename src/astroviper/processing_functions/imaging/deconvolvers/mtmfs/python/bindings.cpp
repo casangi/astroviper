@@ -78,10 +78,16 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
     py::buffer_info ri = check_array<T>(residual, "residual", stack, true);
     py::buffer_info mi = check_array<T>(model, "model", stack, true);
     py::buffer_info pi = check_array<T>(psf, "psf", psf_shape, false);
-    const auto r0 = reinterpret_cast<std::uintptr_t>(ri.ptr), m0 = reinterpret_cast<std::uintptr_t>(mi.ptr);
-    const auto nbytes = static_cast<std::uintptr_t>(ri.size * ri.itemsize);
-    if (r0 < m0 + nbytes && m0 < r0 + nbytes)
+    auto overlaps = [](const py::buffer_info& a, const py::buffer_info& b) {
+        const auto a0 = reinterpret_cast<std::uintptr_t>(a.ptr), b0 = reinterpret_cast<std::uintptr_t>(b.ptr);
+        const auto an = static_cast<std::uintptr_t>(a.size * a.itemsize);
+        const auto bn = static_cast<std::uintptr_t>(b.size * b.itemsize);
+        return a0 < b0 + bn && b0 < a0 + an;
+    };
+    if (overlaps(ri, mi))
         throw std::runtime_error("residual and model must be distinct, non-overlapping arrays");
+    if (overlaps(ri, pi) || overlaps(mi, pi))
+        throw std::runtime_error("writable residual and model arrays must not overlap psf");
 
     const T* mask_ptr = nullptr;
     py::array mask_arr;
@@ -95,6 +101,8 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
             mask_ptr = static_cast<const T*>(ki.ptr);
         }
     }
+    if (mask_ptr != nullptr && (overlaps(ri, ki) || overlaps(mi, ki)))
+        throw std::runtime_error("writable residual and model arrays must not overlap mask");
 
     T* res = static_cast<T*>(ri.ptr);
     T* mod = static_cast<T*>(mi.ptr);
@@ -205,7 +213,7 @@ PYBIND11_MODULE(_mtmfs_ext, m) {
           "One MTMFS model update in place, with 1 <= nterms <= 4. residual and model are (nterms, ny, nx) "
           "C-contiguous writeable arrays of the same dtype (float32 or float64). psf is "
           "(2*nterms-1, ny, nx), read-only. mask is an optional (ny, nx) array of the same "
-          "dtype, or None. scales are pixel sizes (empty -> [0]; sorted and de-duplicated; "
+          "dtype, or None. scales are pixel sizes (empty -> [0]; otherwise 0 is required; sorted and de-duplicated; "
           "sizes larger than half the image are dropped). small_scale_bias is clamped to "
           "[-1, 1]. gain <= 0 selects casacore adaptive gain. max_iter_per_cycle [CASA cycleniter] caps the "
           "components added in this call. The call stops when max |residual[0] convolved with the smallest "

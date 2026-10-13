@@ -49,8 +49,9 @@ struct CleanResult {
     std::vector<double> hessian_condition_number;
 };
 
-// Empty -> {0}; sorted ascending and unique; sizes larger than half the image
-// are dropped (MultiTermMatrixCleaner::verifyScaleSizes).
+// Empty -> {0}; otherwise 0 must be present and is the smallest effective
+// scale. Sorted ascending and unique; sizes larger than half the image are
+// dropped (MultiTermMatrixCleaner::verifyScaleSizes).
 std::vector<float> effective_scales(const std::vector<float>& scales, int nx, int ny);
 
 // SDAlgorithmMSMFS::initializeDeconvolver: clamp to [-1, 1].

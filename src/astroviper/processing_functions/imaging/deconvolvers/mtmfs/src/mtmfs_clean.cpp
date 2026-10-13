@@ -337,6 +337,8 @@ std::vector<float> effective_scales(const std::vector<float>& scales, int nx, in
     if (kept.empty()) throw std::invalid_argument("all scale sizes are larger than half the image size");
     std::sort(kept.begin(), kept.end());
     kept.erase(std::unique(kept.begin(), kept.end()), kept.end());
+    if (kept.front() != 0.0f)
+        throw std::invalid_argument("effective scale sizes must include 0 as the smallest scale");
     return kept;
 }
 
@@ -372,13 +374,16 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
         throw std::invalid_argument("gain, threshold_per_cycle and mask_threshold must be finite");
     if (threshold_per_cycle < static_cast<T>(0))
         throw std::invalid_argument("threshold_per_cycle must be >= 0");
+    if (gain > static_cast<T>(1))
+        throw std::invalid_argument("fixed gain must be <= 1; gain <= 0 selects adaptive gain");
 
     Work<T> w;
     w.init(nterms, nx, ny, scales, small_scale_bias);
     // A non-finite pixel spreads through every FFT convolution and ends the search as converged.
     if (!all_finite(residual, static_cast<std::size_t>(nterms) * w.nimg()) ||
+        !all_finite(model, static_cast<std::size_t>(nterms) * w.nimg()) ||
         (mask != nullptr && !all_finite(mask, w.nimg())))
-        throw std::invalid_argument("residual and mask must be finite");
+        throw std::invalid_argument("residual, model and mask must be finite");
     if (w.setup_from_psf(psf) == kSingularHessian)
         throw std::runtime_error(
             "MT-Cleaner error : Non-invertible Hessian. Please check if the multi-frequency data "
@@ -621,6 +626,10 @@ template <typename T>
 void principal_solution(T* residual, const double* inverse_hessian, int nterms, int nx, int ny) {
     check_geometry(nterms, nx, ny);
     const std::size_t n = static_cast<std::size_t>(nx) * ny;
+    if (!all_finite(residual, static_cast<std::size_t>(nterms) * n))
+        throw std::invalid_argument("residual must be finite");
+    if (!all_finite(inverse_hessian, static_cast<std::size_t>(nterms) * nterms))
+        throw std::invalid_argument("inverse_hessian must be finite");
     std::vector<T> in(nterms);
     for (std::size_t k = 0; k < n; ++k) {
         for (int t = 0; t < nterms; ++t) in[t] = residual[static_cast<std::size_t>(t) * n + k];
