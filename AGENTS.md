@@ -190,9 +190,17 @@ CASA's `AspMatrixCleaner`) does its FFTs with the vendored
 `include/pocketfft_hdronly.h` (the BSD-3 header-only FFT behind NumPy/SciPy,
 kept verbatim with its licence block); its per-Aspen L-BFGS follows ALGLIB's
 scaled-variable conventions and is exposed for tests as
-`aspclean.lbfgs_minimize`. Two documented departures from CASA live in
+`aspclean.lbfgs_minimize`. Documented departures from CASA live in
 `src/asp_clean.cpp`: separable Aspen spectra with paired inverse transforms
-(same numbers, ~8x fewer FFTs) and a unit-consistent "diverging" guard. The
+(same numbers, ~8x fewer FFTs), a residual update over the whole image, and
+no "diverging" guard (`AspMatrixCleaner` "5. Diverging" of CASA and LibRA).
+Like Hogbom and MTMFS it takes the divergence test shared by the
+deconvolvers (`deconvolvers/include/plane_stop_test.hpp`); `asp_clean()`
+gives it the RMS limit at `(1 + gain)` times the lowest RMS and no peak
+limit, as Asp's least-squares components can raise the peak of a healthy
+residual. Compare Asp with LibRA's copy (ARDG-NRAO/LibRA); its pixel shift
+fix is not needed, because these convolutions are centred on odd and even
+axes. The
 PSF beam fit is switchable
 (`psf_fitting_method="astroviper" | "casa"`); `"casa"` is a C++ port of CASA's
 `StokesImageUtil::FitGaussianPSF` (CAS-13022,

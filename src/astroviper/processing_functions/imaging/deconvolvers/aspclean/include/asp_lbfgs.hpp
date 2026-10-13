@@ -19,8 +19,8 @@
 // version of this file used H0 = diag(s^2) instead, which for the Asp objective
 // (gradients of order the image sum of squares) produced first trial steps of
 // hundreds of scale lengths, tens of wasted line-search evaluations per Aspen
-// (each costing FFTs) and occasional acceptance of garbage minima that then
-// tripped the cleaner's divergence guard. Later steps use the standard
+// (each costing FFTs) and occasional acceptance of garbage minima. Later
+// steps use the standard
 // two-loop recursion with H0 = (s'y / y'y) I and a backtracking Armijo line
 // search with quadratic interpolation; the function value never increases.
 // Exact bit-for-bit agreement with

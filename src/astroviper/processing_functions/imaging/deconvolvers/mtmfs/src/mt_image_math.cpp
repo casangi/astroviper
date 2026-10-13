@@ -79,6 +79,19 @@ PeakResult<T> find_max_abs_mask(const T* a, const T* mask, int nx, int ny) {
     return extremum_by_magnitude<T>([a, mask](std::size_t k) { return a[k] * mask[k]; }, nx, ny);
 }
 
+template <typename T>
+PeakResult<T> find_max_abs_mask(const T* a, const T* mask, int nx, int ny, double& sum_squares) {
+    // extremum_by_magnitude evaluates every element exactly once.
+    sum_squares = 0.0;
+    return extremum_by_magnitude<T>(
+        [a, mask, &sum_squares](std::size_t k) {
+            const T v = a[k] * mask[k];
+            sum_squares += static_cast<double>(v) * static_cast<double>(v);
+            return v;
+        },
+        nx, ny);
+}
+
 template float sum_array<float>(const float*, std::size_t);
 template double sum_array<double>(const double*, std::size_t);
 template float peak_abs<float>(const float*, std::size_t);
@@ -89,5 +102,7 @@ template PeakResult<float> find_max_abs<float>(const float*, int, int);
 template PeakResult<double> find_max_abs<double>(const double*, int, int);
 template PeakResult<float> find_max_abs_mask<float>(const float*, const float*, int, int);
 template PeakResult<double> find_max_abs_mask<double>(const double*, const double*, int, int);
+template PeakResult<float> find_max_abs_mask<float>(const float*, const float*, int, int, double&);
+template PeakResult<double> find_max_abs_mask<double>(const double*, const double*, int, int, double&);
 
 }  // namespace mtmfs

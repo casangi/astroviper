@@ -2156,6 +2156,163 @@ class TestImagingDictKeyValidation(unittest.TestCase):
         self.assertNotIn("pol=None", error_msg)
 
 
+class TestNoProgressStop(unittest.TestCase):
+    """A plane whose model updates do no iteration any more cannot change its
+    residual; with ``threshold = 0`` and ``max_cycles = -1`` nothing else would
+    ever stop it, so it is stopped with the no progress code."""
+
+    @staticmethod
+    def _model_update(iter_done, peakres=(0.5, 0.0), stop_codes=(None, None)):
+        """ImagingDict of one model update for two planes (pol 0 and pol 1)."""
+        rd = ImagingDict()
+        for pol, (iters, peak, code) in enumerate(
+            zip(iter_done, peakres, stop_codes, strict=True)
+        ):
+            rd.add(
+                {
+                    "peakres": peak,
+                    "masksum": 100,
+                    "iter_done": iters,
+                    "stop_code": code,
+                },
+                time=0,
+                pol=pol,
+                chan=0,
+            )
+        return rd
+
+    def _controller(self, **kwargs):
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            IterationController,
+        )
+
+        params = dict(max_iter=100, max_cycles=-1, threshold=0.0)
+        params.update(kwargs)
+        return IterationController(**params)
+
+    def test_two_model_updates_without_iterations_stop_the_plane(self):
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            IMAGING_CONTINUE,
+            IMAGING_NO_PROGRESS,
+            IMAGING_STOP_DESCRIPTIONS,
+        )
+
+        controller = self._controller()
+        first = self._model_update(iter_done=(10, 0))
+        controller.update_counts(first)
+        stopcode, _ = controller.check_convergence(first, model_update_ran=True)
+        self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
+        self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_CONTINUE)
+
+        second = self._model_update(iter_done=(10, 0))
+        controller.update_counts(second)
+        stopcode, _ = controller.check_convergence(second, model_update_ran=True)
+        # pol 0 still cleans, so the imaging cycles go on ...
+        self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
+        # ... but pol 1 is stopped.
+        self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_NO_PROGRESS)
+        entry = second.data[list(second.data)[1]]
+        self.assertEqual(entry["stop_code"].imaging, IMAGING_NO_PROGRESS)
+        self.assertEqual(
+            entry["stop_description"], IMAGING_STOP_DESCRIPTIONS[IMAGING_NO_PROGRESS]
+        )
+        self.assertIn("No progress", entry["stop_description"])
+
+    def test_imaging_cycles_end_when_the_other_plane_stops_too(self):
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            IMAGING_MAX_ITER,
+            IMAGING_NO_PROGRESS,
+        )
+
+        controller = self._controller(max_iter=20)
+        for iters in ((10, 0), (10, 0)):
+            rd = self._model_update(iter_done=iters)
+            controller.update_counts(rd)
+            stopcode, description = controller.check_convergence(
+                rd, model_update_ran=True
+            )
+        self.assertNotEqual(stopcode.imaging, 0)
+        self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_MAX_ITER)
+        self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_NO_PROGRESS)
+        self.assertEqual(description, "All planes stopped (mixed reasons)")
+
+    def test_one_model_update_without_iterations_is_tolerated(self):
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            IMAGING_CONTINUE,
+        )
+
+        controller = self._controller()
+        for iters in ((10, 0), (10, 7), (10, 0), (10, 3)):
+            rd = self._model_update(iter_done=iters)
+            controller.update_counts(rd)
+            stopcode, _ = controller.check_convergence(rd, model_update_ran=True)
+            self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
+            self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_CONTINUE)
+        self.assertEqual(controller.zero_iter_model_updates[0, 0, 1], 0)
+
+    def test_checks_without_a_model_update_do_not_count(self):
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            IMAGING_CONTINUE,
+        )
+
+        controller = self._controller()
+        # The residual-only check of every imaging cycle carries iter_done = 0.
+        for _ in range(5):
+            rd = self._model_update(iter_done=(0, 0))
+            stopcode, _ = controller.check_convergence(rd)
+            self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
+        self.assertEqual(int(controller.zero_iter_model_updates.sum()), 0)
+
+    def test_other_stop_codes_take_precedence(self):
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            IMAGING_MAX_CYCLES,
+            IMAGING_THRESHOLD,
+        )
+
+        controller = self._controller(threshold=0.1, max_cycles=2)
+        for _ in range(2):
+            rd = self._model_update(iter_done=(0, 0), peakres=(0.5, 0.05))
+            controller.update_counts(rd)
+            controller.check_convergence(rd, model_update_ran=True)
+        # pol 1 is below the threshold; pol 0 has used up max_cycles.
+        self.assertEqual(controller.stop_code_imaging[0, 0, 1], IMAGING_THRESHOLD)
+        self.assertEqual(controller.stop_code_imaging[0, 0, 0], IMAGING_MAX_CYCLES)
+
+    def test_reset_clears_the_count(self):
+        controller = self._controller()
+        for _ in range(2):
+            rd = self._model_update(iter_done=(0, 0))
+            controller.check_convergence(rd, model_update_ran=True)
+        self.assertEqual(int(controller.zero_iter_model_updates.max()), 2)
+        controller.reset()
+        self.assertEqual(int(controller.zero_iter_model_updates.max()), 0)
+
+    def test_model_update_divergence_code_is_kept(self):
+        from astroviper.processing_functions.imaging.utils.iteration_control import (
+            IMAGING_CONTINUE,
+            MODEL_UPDATE_CONTINUE,
+            MODEL_UPDATE_DIVERGENCE,
+            StopCode,
+        )
+
+        controller = self._controller()
+        rd = self._model_update(
+            iter_done=(40, 12),
+            stop_codes=(StopCode(IMAGING_CONTINUE, MODEL_UPDATE_DIVERGENCE), None),
+        )
+        controller.update_counts(rd)
+        stopcode, _ = controller.check_convergence(rd, model_update_ran=True)
+        # A diverged model update does not end the imaging cycles.
+        self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
+        self.assertEqual(stopcode.model_update, MODEL_UPDATE_CONTINUE)
+        entries = list(rd.data.values())
+        self.assertEqual(entries[0]["stop_code"].model_update, MODEL_UPDATE_DIVERGENCE)
+        self.assertEqual(entries[1]["stop_code"].model_update, MODEL_UPDATE_CONTINUE)
+        self.assertEqual(
+            controller.stop_code_model_update[0, 0, 0], MODEL_UPDATE_DIVERGENCE
+        )
+
+
 class TestPerPlaneStateGrowth(unittest.TestCase):
     def test_arrays_grow_when_a_larger_plane_index_appears(self):
         from astroviper.processing_functions.imaging.utils.iteration_control import (
@@ -2175,6 +2332,7 @@ class TestPerPlaneStateGrowth(unittest.TestCase):
         )
         controller.check_convergence(large, model_update_ran=True)
         self.assertEqual(controller.max_iter_remaining.shape, (1, 3, 2))
+        self.assertEqual(controller.zero_iter_model_updates.shape, (1, 3, 2))
         # existing values kept, new planes start at the full budget
         self.assertEqual(controller.max_iter_remaining[0, 0, 0], 70)
         self.assertEqual(controller.max_iter_remaining[0, 2, 1], 100)
