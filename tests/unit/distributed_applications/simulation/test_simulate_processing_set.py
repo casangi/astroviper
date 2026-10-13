@@ -49,7 +49,7 @@ def run(tmp_path, **overrides):
         point_source_flux=np.array([1.0, 0, 0, 1.0])[None, None, None, :],
         point_source_ra_dec=SRC,
         phase_center_ra_dec=PC,
-        beam_models=[airy_disk_model("vla")],
+        beam_models=[airy_disk_model("vla_nvss")],
         beam_model_map=np.zeros(8, int),
         n_time_chunks=2,
         n_frequency_chunks=3,
@@ -91,7 +91,7 @@ def test_full_stack_matches_processing_function(tmp_path):
     ant = kwargs["antenna_xds"]
     ref, _ = simulate_processing_set_pf(
         ms.time.values, ms.frequency.values, ["RR", "LL"], ant.ANTENNA_POSITION.values,
-        observatory_position("VLA"), kwargs["point_source_flux"], SRC, PC, [airy_disk_model("vla")], np.zeros(8, int),
+        observatory_position("VLA"), kwargs["point_source_flux"], SRC, PC, [airy_disk_model("vla_nvss")], np.zeros(8, int),
     )  # fmt: skip
     np.testing.assert_allclose(ms.VISIBILITY.values, ref.VISIBILITY.values, atol=1e-12)
     np.testing.assert_allclose(ms.UVW.values, ref.UVW.values, atol=1e-9)
@@ -111,7 +111,7 @@ def test_mosaic_fields_noise_and_zernike(tmp_path):
         phase_center_ra_dec=phase_centers,
         field_name=["A", "A", "B", "B"],
         polarization=["RR", "RL", "LR", "LL"],
-        beam_models=[zpc, airy_disk_model("vla")],
+        beam_models=[zpc, airy_disk_model("vla_nvss")],
         beam_model_map=np.array([0, 0, 0, 0, 1, 1, 1, 1]),
         beam_params={"image_size": [128, 128], "mueller_selection": np.arange(16)},
         noise_params={"t_receiver": 50.0, "random_seed": 3},
@@ -139,7 +139,7 @@ def test_mosaic_fields_noise_and_zernike(tmp_path):
         phase_center_ra_dec=phase_centers,
         field_name=["A", "A", "B", "B"],
         polarization=["RR", "RL", "LR", "LL"],
-        beam_models=[zpc, airy_disk_model("vla")],
+        beam_models=[zpc, airy_disk_model("vla_nvss")],
         beam_model_map=np.array([0, 0, 0, 0, 1, 1, 1, 1]),
         beam_params={"image_size": [128, 128], "mueller_selection": np.arange(16)},
         noise_params={"t_receiver": 50.0, "random_seed": 3},
@@ -200,7 +200,7 @@ def test_disk_sources_through_the_driver_match_the_processing_function(tmp_path)
     ant = kwargs["antenna_xds"]
     ref, _ = simulate_processing_set_pf(
         ms.time.values, ms.frequency.values, ["RR", "LL"], ant.ANTENNA_POSITION.values,
-        observatory_position("VLA"), np.zeros((1, 1, 1, 4)), SRC, PC, [airy_disk_model("vla")], np.zeros(8, int),
+        observatory_position("VLA"), np.zeros((1, 1, 1, 4)), SRC, PC, [airy_disk_model("vla_nvss")], np.zeros(8, int),
         disk_source_flux=disk_flux, disk_source_ra_dec=disk_ra_dec, disk_source_shape=disk_shape,
         disk_source_limb_darkening=np.array(limb_darkening),
     )  # fmt: skip
@@ -257,7 +257,7 @@ def test_sky_components_through_the_driver(tmp_path):
     ) + normalize_sky_components(components, n_time, n_frequency, "icrs")
     ref, _ = simulate_processing_set_pf(
         ms.time.values, ms.frequency.values, ["RR", "LL"], ant.ANTENNA_POSITION.values,
-        observatory_position("VLA"), None, None, PC, [airy_disk_model("vla")], np.zeros(8, int),
+        observatory_position("VLA"), None, None, PC, [airy_disk_model("vla_nvss")], np.zeros(8, int),
         sky_components=all_components,
     )  # fmt: skip
     np.testing.assert_allclose(ms.VISIBILITY.values, ref.VISIBILITY.values, atol=1e-12)

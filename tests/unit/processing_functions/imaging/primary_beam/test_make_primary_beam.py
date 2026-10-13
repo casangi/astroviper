@@ -159,8 +159,9 @@ def test_make_primary_beam_single_field_frequency_scaling():
 
 
 def test_primary_beam_is_casa_power_pattern():
-    """PRIMARY_BEAM follows the CASA definition: the shared CASA-compatible
-    Airy voltage pattern squared (power), identical to the simulation code."""
+    """PRIMARY_BEAM follows the CASA definition: for the CASA variant, the
+    shared CASA-compatible Airy voltage pattern squared (power), identical to
+    the simulation code."""
     from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
         casa_airy_disk_response,
     )
@@ -176,6 +177,7 @@ def test_primary_beam_is_casa_power_pattern():
         image_params,
         image_data_group_in_name="residual",
         image_data_group_out_name="residual",
+        beam_model=airy_disk_model("alma", func="casa_airy"),
     )
     voltage = casa_airy_disk_response(
         img_xds.l.values[:, None],
@@ -195,17 +197,18 @@ def test_primary_beam_is_casa_power_pattern():
 
 
 def test_primary_beam_is_the_airy_disk_inside_max_rad_and_zero_beyond():
-    """The ALMA beam is CASA's Airy power pattern, as before the cut, bit for bit
+    """CASA's ALMA beam is its Airy power pattern, as before the cut, bit for bit
     inside max_rad_1GHz / (frequency / 1 GHz) and zero beyond it, as CASA's .pb."""
     from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
         casa_airy_disk_response,
     )
 
-    max_rad = airy_disk_model("alma")["max_rad_1GHz"]
+    casa = airy_disk_model("alma", func="casa_airy")
+    max_rad = casa["max_rad_1GHz"]
     img_xds, image_params = _make_empty_residual_image(
         frequency_coords=(1.0e11, 2.3e11, 9.5e11)
     )
-    img_xds, _ = make_primary_beam_single_field(img_xds, image_params)
+    img_xds, _ = make_primary_beam_single_field(img_xds, image_params, beam_model=casa)
     l_axis = img_xds.l.values[None, :, None]
     m_axis = img_xds.m.values[None, None, :]
     frequency = img_xds.frequency.values[:, None, None]
@@ -217,6 +220,50 @@ def test_primary_beam_is_the_airy_disk_inside_max_rad_and_zero_beyond():
     np.testing.assert_array_equal(
         img_xds["PRIMARY_BEAM"].values[0, :, 0], np.where(outside, 0.0, uncut)
     )
+
+
+@pytest.mark.parametrize(
+    "telescope, frequency_coords, cell_arcsec",
+    [
+        ("alma", (1.0e11, 2.3e11), 2.0),
+        ("aca", (1.0e11, 2.3e11), 4.0),
+        ("ngvla", (3.0e10, 9.3e10), 4.0),
+    ],
+)
+def test_default_primary_beam_is_the_uncut_textbook_airy_disk(
+    telescope, frequency_coords, cell_arcsec
+):
+    """The default beam of a telescope is the textbook Airy power pattern, bit
+    for bit, with its first sidelobe beyond CASA's table radius."""
+    from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
+        airy_disk_response,
+    )
+
+    img_xds = _primary_beam(
+        {"telescope": telescope},
+        frequency_coords=frequency_coords,
+        cell_arcsec=cell_arcsec,
+    )
+    model = airy_disk_model(telescope)
+    l_axis = img_xds.l.values[None, :, None]
+    m_axis = img_xds.m.values[None, None, :]
+    frequency = img_xds.frequency.values[:, None, None]
+    expected = airy_disk_response(
+        l_axis,
+        m_axis,
+        frequency,
+        model["dish_diameter"],
+        model["blockage_diameter"],
+        ipower=2,
+    )
+    pb = img_xds["PRIMARY_BEAM"].values[0, :, 0]
+    np.testing.assert_array_equal(pb, expected)
+    cut = airy_disk_model(telescope, func="casa_airy")["max_rad_1GHz"] / (
+        frequency / 1e9
+    )
+    beyond = np.hypot(l_axis, m_axis) >= cut
+    assert beyond.any(axis=(1, 2)).all()
+    assert (pb[np.broadcast_to(beyond, pb.shape)] > 1e-3).any()
 
 
 def test_airy_disk_rorder_versions_agree():
@@ -275,41 +322,50 @@ def test_primary_beam_params_none_and_alma_are_the_default_beam():
 
 
 def test_primary_beam_params_vla_beam():
-    """{"telescope": "vla"} is CASA's EVLA beam polynomial: the coefficients CASA
-    picks (34052 MHz at the 33 GHz tie, 43948 MHz in Q band at 45 GHz), a
-    58 arcmin table at 1 GHz and zero beyond it."""
-    from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (
-        EVLA_MAX_RAD_1GHZ,
-    )
+    """{"telescope": "vla"} is the EVLA beam polynomial: the coefficients CASA
+    picks (34052 MHz at the 33 GHz tie, 43948 MHz in Q band at 45 GHz) at the
+    exact radius, and zero beyond 58 arcmin at 1 GHz; with n_sample, on CASA's
+    lookup table."""
     from astroviper.processing_functions.simulation.antenna_beams import (
         polynomial_beam_response,
     )
-    from astroviper.utils.beam_models import read_beam_polynomial_coefficients
-
-    assert EVLA_MAX_RAD_1GHZ == pytest.approx(58.0 / 60.0 * np.pi / 180.0, rel=1e-15)
-    bpc = read_beam_polynomial_coefficients("EVLA_")
-    assert bpc.attrs["max_rad_1GHz"] == EVLA_MAX_RAD_1GHZ
-    img_xds = _primary_beam(
-        {"telescope": "vla"}, frequency_coords=(33e9, 45e9), cell_arcsec=4.0
+    from astroviper.utils.beam_models import (
+        EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ,
+        read_beam_polynomial_coefficients,
     )
-    pb = img_xds["PRIMARY_BEAM"]
-    assert pb.attrs["method"] == "beam_polynomial"
-    l_axis, m_axis = img_xds.l.values[:, None], img_xds.m.values[None, :]
-    for f, table_frequency in enumerate((34052e6, 43948e6)):
-        frequency = img_xds.frequency.values[f]
-        expected = polynomial_beam_response(
-            l_axis,
-            m_axis,
-            frequency,
-            bpc.BPC.sel(frequency=table_frequency).values[0],
-            EVLA_MAX_RAD_1GHZ,
-            ipower=2,
-        )
-        outside = np.hypot(l_axis, m_axis) >= EVLA_MAX_RAD_1GHZ / (frequency / 1e9)
-        assert outside.any() and not outside.all()
-        np.testing.assert_array_equal(
-            pb.values[0, f, 0], np.where(outside, 0.0, expected)
-        )
+
+    assert EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ == pytest.approx(
+        58.0 / 60.0 * np.pi / 180.0, rel=1e-15
+    )
+    bpc = read_beam_polynomial_coefficients("EVLA_")
+    assert bpc.attrs["max_rad_1GHz"] == EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ
+    casa = read_beam_polynomial_coefficients("EVLA_", n_sample=10000)
+    for n_sample, params in (
+        (None, {"telescope": "vla"}),
+        (10000, {"beam_model": casa}),
+    ):
+        img_xds = _primary_beam(params, frequency_coords=(33e9, 45e9), cell_arcsec=4.0)
+        pb = img_xds["PRIMARY_BEAM"]
+        assert pb.attrs["method"] == "beam_polynomial"
+        l_axis, m_axis = img_xds.l.values[:, None], img_xds.m.values[None, :]
+        for f, table_frequency in enumerate((34052e6, 43948e6)):
+            frequency = img_xds.frequency.values[f]
+            expected = polynomial_beam_response(
+                l_axis,
+                m_axis,
+                frequency,
+                bpc.BPC.sel(frequency=table_frequency).values[0],
+                EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ,
+                ipower=2,
+                n_sample=n_sample,
+            )
+            outside = np.hypot(l_axis, m_axis) >= EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ / (
+                frequency / 1e9
+            )
+            assert outside.any() and not outside.all()
+            np.testing.assert_array_equal(
+                pb.values[0, f, 0], np.where(outside, 0.0, expected)
+            )
     resolved = resolve_primary_beam_params({"telescope": "vla", "max_rad_1GHz": 0.02})
     assert resolved["beam_model"].attrs["max_rad_1GHz"] == 0.02
 
@@ -347,6 +403,7 @@ def test_primary_beam_params_numbers_equal_to_a_telescope_give_its_beam():
         ({"telescope": "vla", "effective_dish_diameter": 25.0}, "do not apply"),
         ({"telescope": "VLA", "blockage_diameter": 1.0}, "do not apply"),
         ({"telescope": "vla", "max_rad_1GHz": 0.0}, "max_rad_1GHz > 0"),
+        ({"telescope": "vla", "max_rad_1GHz": None}, "max_rad_1GHz > 0"),
     ],
 )
 def test_primary_beam_params_refused(primary_beam_params, match):
@@ -354,35 +411,38 @@ def test_primary_beam_params_refused(primary_beam_params, match):
         resolve_primary_beam_params(primary_beam_params)
 
 
-def _beam_model(name):
+def _beam_model(name, casa=False):
     from astroviper.utils.beam_models import read_beam_polynomial_coefficients
 
     if name == "EVLA_":
-        return read_beam_polynomial_coefficients(name)
-    return airy_disk_model(name)
+        return read_beam_polynomial_coefficients(name, n_sample=10000 if casa else None)
+    return airy_disk_model(name, func="casa_airy" if casa else None)
 
 
+@pytest.mark.parametrize("casa", [False, True])
 @pytest.mark.parametrize(
     "name, frequency_coords",
     [
         ("alma", (90e9, 230e9, 345e9)),
         ("aca", (90e9, 230e9)),
         ("ngvla", (30e9, 93e9)),
-        ("vla", (1.5e9, 3e9)),
+        ("vla_nvss", (1.5e9, 3e9)),
         ("EVLA_", (2.01e9, 3e9, 4.5e9)),
     ],
 )
-def test_primary_beam_is_the_simulator_beam(name, frequency_coords):
+def test_primary_beam_is_the_simulator_beam(name, frequency_coords, casa):
     """The primary beam of a beam model is |J_pp|**2 of the simulator's
-    sample_jones for that model, inside and beyond max_rad_1GHz."""
+    sample_jones for that model, inside and beyond CASA's max_rad_1GHz."""
     from astroviper.processing_functions.simulation.antenna_beams import (
         evaluate_beam_models,
         pack_beam_models,
         sample_jones,
     )
 
-    model = _beam_model(name)
-    max_rad = (model if isinstance(model, dict) else model.attrs)["max_rad_1GHz"]
+    model = _beam_model(name, casa)
+    max_rad = (_beam_model(name, casa=True) if name != "EVLA_" else model.attrs)[
+        "max_rad_1GHz"
+    ]
     # the image reaches 1.5 times the cut at the lowest frequency
     cell_arcsec = 1.5 * max_rad / (min(frequency_coords) / 1e9) / 32 / ARCSEC
     img_xds = _primary_beam(
@@ -504,7 +564,7 @@ def test_primary_beam_of_a_zernike_model_refused():
 def test_primary_beam_of_func_none_is_uniform():
     """func "none" is 1 out to max_rad_1GHz, not an Airy disk."""
     pb = _primary_beam(
-        {"beam_model": {**airy_disk_model("alma"), "func": "none"}},
+        {"beam_model": airy_disk_model("alma", func="none")},
         frequency_coords=(1.0e11,),
         cell_arcsec=2.0,
     )["PRIMARY_BEAM"]

@@ -21,11 +21,13 @@ struct BeamModel {
     double dish_diameter = 0.0;
     double blockage_diameter = 0.0;
 
-    // polynomial: coefficients[n_frequency, n_coefficient]
+    // polynomial: coefficients[n_frequency, n_coefficient]; radius quantised
+    // to a CASA lookup of poly_n_sample radii out to max_rad_1GHz, or exact if 0
     const double* poly_frequency = nullptr;
     const double* poly_coefficients = nullptr;
     std::int64_t n_poly_frequency = 0;
     std::int64_t n_poly_coefficient = 0;
+    std::int64_t poly_n_sample = 0;
 
     // Jones image: jones[n_pa, n_frequency, n_pol, n_l, n_m]
     const std::complex<double>* jones = nullptr;

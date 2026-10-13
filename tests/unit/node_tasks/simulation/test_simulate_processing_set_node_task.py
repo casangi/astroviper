@@ -70,7 +70,7 @@ def setup(tmp_path):
         point_source_flux=flux,
         point_source_ra_dec=src,
         phase_center_ra_dec=pc,
-        beam_models=[airy_disk_model("vla")],
+        beam_models=[airy_disk_model("vla_nvss")],
         beam_model_map=np.zeros(6, int),
         uvw_params={"auto_correlations": False},
         noise_params={"t_receiver": 50.0, "random_seed": 11},

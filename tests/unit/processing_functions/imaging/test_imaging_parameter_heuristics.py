@@ -4,10 +4,8 @@ import numpy as np
 import pytest
 
 from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
+    airy_disk_response,
     casa_airy_disk_response,
-)
-from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (
-    EVLA_MAX_RAD_1GHZ,
 )
 from astroviper.processing_functions.imaging.utils.fft_sizing import (
     next_fft_friendly_size,
@@ -30,6 +28,7 @@ from astroviper.processing_functions.simulation.antenna_beams import (
     polynomial_beam_response,
 )
 from astroviper.utils.beam_models import (
+    EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ,
     airy_disk_model,
     read_beam_polynomial_coefficients,
 )
@@ -89,21 +88,20 @@ def test_stokes_for_correlations_invalid(correlations):
 @pytest.mark.parametrize("telescope", ["alma", "aca", "ngvla"])
 @pytest.mark.parametrize("level", [0.5, 0.2, 0.05])
 def test_primary_beam_radius_is_the_level_of_the_imager_beam(telescope, level):
-    """The imager's power pattern equals ``level`` at the radius (to the CASA
-    table quantisation) and lies above it inside."""
+    """The imager's power pattern equals ``level`` at the radius and lies above
+    it inside."""
     model = airy_disk_model(telescope)
     frequency = 100e9
     radius = primary_beam_radius(frequency, level, {"telescope": telescope})
 
     def beam(r):
         return float(
-            casa_airy_disk_response(
+            airy_disk_response(
                 r,
                 0.0,
                 frequency,
                 model["dish_diameter"],
                 model["blockage_diameter"],
-                model["max_rad_1GHz"],
                 ipower=2,
             )
         )
@@ -150,17 +148,18 @@ def _uncut_airy_disk_radius(frequency, level, model, n_scan=4096):
 def test_primary_beam_radius_of_an_airy_disk_is_that_without_the_cut(
     telescope, level, frequency
 ):
-    """The main lobe crosses the level inside max_rad_1GHz, so the zero beyond
-    it leaves the radius unchanged to the bit."""
+    """For CASA's Airy disk the main lobe crosses the level inside max_rad_1GHz,
+    so the zero beyond it leaves the radius unchanged to the bit."""
+    casa = airy_disk_model(telescope, func="casa_airy")
     assert primary_beam_radius(
-        frequency, level, {"telescope": telescope}
-    ) == _uncut_airy_disk_radius(frequency, level, airy_disk_model(telescope))
+        frequency, level, {"beam_model": casa}
+    ) == _uncut_airy_disk_radius(frequency, level, casa)
 
 
 @pytest.mark.parametrize("level", [0.5, 0.2, 0.05])
 def test_primary_beam_radius_is_the_level_of_the_imager_vla_beam(level):
-    """For "vla" the imager's beam is CASA's EVLA polynomial; 100 and 200 GHz lie
-    in no band, so both take the last entry (43948 MHz)."""
+    """For "vla" the imager's beam is the EVLA polynomial at the exact radius;
+    100 and 200 GHz lie in no band, so both take the last entry (43948 MHz)."""
     frequency = 100e9
     radius = primary_beam_radius(frequency, level, {"telescope": "vla"})
     coefficients = (
@@ -170,7 +169,13 @@ def test_primary_beam_radius_is_the_level_of_the_imager_vla_beam(level):
     def beam(r):
         return float(
             polynomial_beam_response(
-                r, 0.0, frequency, coefficients, EVLA_MAX_RAD_1GHZ, ipower=2
+                r,
+                0.0,
+                frequency,
+                coefficients,
+                EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ,
+                2,
+                n_sample=None,
             )
         )
 
@@ -187,8 +192,12 @@ def test_primary_beam_radius_is_the_level_of_the_imager_vla_beam(level):
 )
 def test_primary_beam_radius_vla_is_that_of_tclean(frequency, radius_tclean):
     """The 0.2 radius in lambda / 25 m of tclean's .pb for an EVLA measurement
-    set (CASA 6.7.5)."""
-    radius = primary_beam_radius(frequency, 0.2, {"telescope": "vla"})
+    set (CASA 6.7.5), for CASA's lookup table."""
+    radius = primary_beam_radius(
+        frequency,
+        0.2,
+        {"beam_model": read_beam_polynomial_coefficients("EVLA_", n_sample=10000)},
+    )
     assert radius / (SPEED_OF_LIGHT / frequency / 25.0) == pytest.approx(
         radius_tclean, rel=1e-3
     )
@@ -199,7 +208,9 @@ def test_primary_beam_radius_vla_below_the_beam_at_its_cut():
     the imager's beam is cut to zero, so the 0.1 radius is that cut."""
     frequency = 350e6
     radius = primary_beam_radius(frequency, 0.1, {"telescope": "vla"})
-    assert radius == pytest.approx(EVLA_MAX_RAD_1GHZ / (frequency / 1e9), rel=1e-9)
+    assert radius == pytest.approx(
+        EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ / (frequency / 1e9), rel=1e-9
+    )
 
 
 def test_primary_beam_radius_alma_half_power_width_and_default():

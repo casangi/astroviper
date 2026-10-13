@@ -57,23 +57,28 @@ IMAGING_PARAM_DOCS = {
     "primary_beam_params": (
         "The primary beam of the imager, the power pattern that gives the clean\n"
         'mask and the primary beam correction: ``telescope`` (``"alma"``,\n'
-        '``"aca"`` or ``"ngvla"``, CASA\'s obscured Airy disk with the PBMath\n'
-        "values of :func:`~astroviper.utils.beam_models.airy_disk_model`;\n"
-        '``"vla"``, CASA\'s EVLA beam polynomial ``PBMath1DEVLA``, with the\n'
-        "coefficients CASA picks for each channel and a 58 arcmin table at\n"
-        "1 GHz), ``effective_dish_diameter`` and ``blockage_diameter`` (metres;\n"
-        'refused for ``"vla"``) and ``max_rad_1GHz`` (CASA\'s maximum radius of\n'
-        "the beam table at 1 GHz in radians, scaled as 1 / frequency, which sets\n"
-        "the radius sampling of the beam; the beam is zero beyond\n"
-        "it). Numbers given with a telescope override that telescope's values;\n"
+        '``"aca"`` or ``"ngvla"``, the textbook obscured Airy disk with the\n'
+        "diameters of :func:`~astroviper.utils.beam_models.airy_disk_model`, no\n"
+        'cut; ``"vla"``, the EVLA beam polynomial of CASA\'s ``PBMath1DEVLA``,\n'
+        "with the coefficients CASA picks for each channel (of its two 10052 MHz\n"
+        "rows, the first), at the exact radius and zero beyond 58 arcmin at\n"
+        "1 GHz, past the 5 percent power level its polynomials were fitted\n"
+        "to), ``effective_dish_diameter`` and\n"
+        '``blockage_diameter`` (metres; refused for ``"vla"``) and\n'
+        "``max_rad_1GHz`` (radians at 1 GHz, scaled as 1 / frequency, beyond\n"
+        "which the beam is zero; ``None`` is no cut for an Airy disk). Numbers\n"
+        "given with a telescope override that telescope's values;\n"
         'no telescope means ``"alma"``. ``None`` is the ALMA 12 m beam (10.7 m,\n'
-        "0.75 m, 1.784 deg at 1 GHz). Or ``beam_model`` alone: an analytic dict\n"
+        "0.75 m, no cut). Or ``beam_model`` alone: an analytic dict\n"
         "or a beam-polynomial dataset as ``simulate_processing_set`` takes it in\n"
         '``beam_models`` (``"vla"`` is\n'
         '``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square\n'
         "of the voltage pattern the simulator applies for the model, computed by\n"
         "the same function\n"
         "(:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`).\n"
+        "The CASA variants, to compare with the ``.pb`` of ``tclean``, are such\n"
+        'models: ``airy_disk_model(telescope, func="casa_airy")`` and\n'
+        '``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.\n'
         "Zernike aperture models and Jones images are not supported: they are\n"
         "not azimuthally symmetric and depend on the parallactic angle."
     ),

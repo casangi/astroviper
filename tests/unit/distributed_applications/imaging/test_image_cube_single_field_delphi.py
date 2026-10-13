@@ -71,7 +71,7 @@ def ps_store(tmp_path_factory):
         point_source_flux=np.array([1.0, 0, 0, 1.0])[None, None, None, :],
         point_source_ra_dec=PC[None, None, :],
         phase_center_ra_dec=PC[None, :],
-        beam_models=[airy_disk_model("vla")],
+        beam_models=[airy_disk_model("vla_nvss")],
         beam_model_map=np.zeros(N_ANTENNA, int),
         n_time_chunks=1,
         n_frequency_chunks=2,

@@ -150,7 +150,7 @@ def primary_beam_radius(frequency, level, primary_beam_params=None, n_scan=4096)
     (:func:`~astroviper.processing_functions.imaging.primary_beam.make_primary_beam.resolve_primary_beam_params`
     and the power pattern of
     :func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`,
-    zero beyond ``max_rad_1GHz / (frequency / 1 GHz)``), and the radius is the
+    zero beyond ``max_rad_1GHz / (frequency / 1 GHz)``, if any), and the radius is the
     first crossing of the main lobe, found on a scan out to ``1.5 lambda / D``
     for an Airy disk (else to just past ``max_rad_1GHz / (frequency / 1 GHz)``)
     and refined with Brent's method.

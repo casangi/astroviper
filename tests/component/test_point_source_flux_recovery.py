@@ -61,7 +61,7 @@ thermal noise, and with a restored image as close to the truth as the noise
 allows.
 
 ALMA C8 (``alma.cycle8.8``, baselines to 8.5 km) at 950 GHz takes the field
-to the primary beam power 0.2 radius (3276 pixels of 2.8 mas, five across
+to the primary beam power 0.2 radius (3256 pixels of 2.8 mas, five across
 the minor axis of the beam), one channel, the two parallel hands of
 unpolarized sources: the 1 Jy source on the lattice site farthest out along
 an image axis, a 0.5 Jy source near the centre. There the w term, which the
@@ -116,7 +116,8 @@ from astroviper.processing_functions.imaging.utils.imaging_dict import (
     imaging_dict_to_dataframe,
 )
 from astroviper.processing_functions.simulation.antenna_beams import (
-    casa_airy_disk_response,
+    pack_beam_models,
+    symmetric_beam_response,
 )
 from astroviper.utils.beam_models import airy_disk_model
 from astroviper.utils.coordinate_transforms import inverse_sin_project
@@ -206,7 +207,7 @@ C8_FREQUENCY_PARAMS = {
 C8_CELL_ARCSEC = 2.8e-3  # a fifth of the fitted minor axis, 14.17 mas (natural weights)
 C8_BEAM_ARCSEC = 16.4e-3  # fitted major axis
 # image half widths in pixels: the CI probe, and the primary beam power 0.2 radius
-C8_HALF_WIDTH = {"probe": 500, "full": 1638}
+C8_HALF_WIDTH = {"probe": 500, "full": 1628}
 C8_FFT_PADDING = 1.2
 C8_KERNEL = {
     "type": "exponential_semicircle",
@@ -228,12 +229,9 @@ def frequencies():
 
 
 def primary_beam_power(radius, frequency):
-    """ALMA 12 m (CASA Airy) primary-beam power at ``radius`` radians from the axis."""
-    model = airy_disk_model("alma")
-    voltage = casa_airy_disk_response(
-        radius, 0.0, frequency, model["dish_diameter"], model["blockage_diameter"], model["max_rad_1GHz"]
-    )  # fmt: skip
-    return float(voltage) ** 2
+    """ALMA 12 m primary-beam power at ``radius`` radians from the axis, as the simulator and the imager compute it."""
+    (model,) = pack_beam_models([airy_disk_model("alma")])
+    return float(symmetric_beam_response(model, radius, 0.0, frequency, ipower=2))
 
 
 def build_scenario(dynamic_range, seed=0):
@@ -262,7 +260,8 @@ def build_scenario(dynamic_range, seed=0):
         offset = spacing / 2 if row % 2 else 0.0
         for col in range(-n_rows * 2, n_rows * 2 + 1):
             dj = int(round(col * spacing + offset))
-            if np.hypot(di, dj) <= r_max_pix - 1.5:
+            # the +-1 pixel jitter moves a source at most sqrt(2) pixels outward
+            if np.hypot(di, dj) <= r_max_pix - np.sqrt(2):
                 candidates.append((di, dj))
     assert len(candidates) >= N_SOURCES, (
         f"only {len(candidates)} lattice sites for {N_SOURCES} sources"
@@ -1228,7 +1227,7 @@ def test_c8_kernel_lowers_the_floor(tmp_path):
 
 
 @pytest.mark.skipif(
-    not FULL_C8, reason="3276 pixel images: set ASTROVIPER_FULL_C8_TEST=1"
+    not FULL_C8, reason="3256 pixel images: set ASTROVIPER_FULL_C8_TEST=1"
 )
 @pytest.mark.parametrize("noise", [None, "band10"])
 @pytest.mark.parametrize("w_term", [True, False], ids=["w_term", "no_w_term"])

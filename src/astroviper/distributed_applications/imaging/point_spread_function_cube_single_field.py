@@ -115,23 +115,28 @@ def point_spread_function_cube_single_field(
     primary_beam_params : dict, optional
         The primary beam of the imager, the power pattern that gives the clean
         mask and the primary beam correction: ``telescope`` (``"alma"``,
-        ``"aca"`` or ``"ngvla"``, CASA's obscured Airy disk with the PBMath
-        values of :func:`~astroviper.utils.beam_models.airy_disk_model`;
-        ``"vla"``, CASA's EVLA beam polynomial ``PBMath1DEVLA``, with the
-        coefficients CASA picks for each channel and a 58 arcmin table at
-        1 GHz), ``effective_dish_diameter`` and ``blockage_diameter`` (metres;
-        refused for ``"vla"``) and ``max_rad_1GHz`` (CASA's maximum radius of
-        the beam table at 1 GHz in radians, scaled as 1 / frequency, which sets
-        the radius sampling of the beam; the beam is zero beyond
-        it). Numbers given with a telescope override that telescope's values;
+        ``"aca"`` or ``"ngvla"``, the textbook obscured Airy disk with the
+        diameters of :func:`~astroviper.utils.beam_models.airy_disk_model`, no
+        cut; ``"vla"``, the EVLA beam polynomial of CASA's ``PBMath1DEVLA``,
+        with the coefficients CASA picks for each channel (of its two 10052 MHz
+        rows, the first), at the exact radius and zero beyond 58 arcmin at
+        1 GHz, past the 5 percent power level its polynomials were fitted
+        to), ``effective_dish_diameter`` and
+        ``blockage_diameter`` (metres; refused for ``"vla"``) and
+        ``max_rad_1GHz`` (radians at 1 GHz, scaled as 1 / frequency, beyond
+        which the beam is zero; ``None`` is no cut for an Airy disk). Numbers
+        given with a telescope override that telescope's values;
         no telescope means ``"alma"``. ``None`` is the ALMA 12 m beam (10.7 m,
-        0.75 m, 1.784 deg at 1 GHz). Or ``beam_model`` alone: an analytic dict
+        0.75 m, no cut). Or ``beam_model`` alone: an analytic dict
         or a beam-polynomial dataset as ``simulate_processing_set`` takes it in
         ``beam_models`` (``"vla"`` is
         ``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square
         of the voltage pattern the simulator applies for the model, computed by
         the same function
         (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`).
+        The CASA variants, to compare with the ``.pb`` of ``tclean``, are such
+        models: ``airy_disk_model(telescope, func="casa_airy")`` and
+        ``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.
         Zernike aperture models and Jones images are not supported: they are
         not azimuthally symmetric and depend on the parallactic angle.
     psf_fitting_method : str, optional

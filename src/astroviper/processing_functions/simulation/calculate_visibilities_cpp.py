@@ -32,6 +32,7 @@ def _packed_model_for_cpp(model: dict) -> dict:
         out["coefficients"] = np.ascontiguousarray(
             model["coefficients"], dtype=np.float64
         )
+        out["n_sample"] = 0 if model["n_sample"] is None else int(model["n_sample"])
     elif model["kind"] == "jones_image":
         out["jones"] = np.ascontiguousarray(model["jones"], dtype=np.complex128)
         out["parallactic_angle"] = np.ascontiguousarray(

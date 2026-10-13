@@ -273,7 +273,7 @@ def test_simulate_processing_set_processing_function_end_to_end():
         f["point_source_flux"],
         f["point_source_ra_dec"],
         f["phase_center_ra_dec"],
-        [airy_disk_model("aca"), airy_disk_model("alma")],
+        f["beam_models"],
         f["beam_model_map"],
         noise_params={"t_receiver": 50.0, "random_seed": 1},
         channel_width=0.5e9,
@@ -295,7 +295,7 @@ def test_simulate_processing_set_processing_function_end_to_end():
     xds0, _ = simulate_processing_set(
         f["time"], f["frequency"], [9, 12], f["antenna_position"], f["site_position"],
         f["point_source_flux"], f["point_source_ra_dec"], f["phase_center_ra_dec"],
-        [airy_disk_model("aca"), airy_disk_model("alma")], f["beam_model_map"],
+        f["beam_models"], f["beam_model_map"],
     )  # fmt: skip
     np.testing.assert_allclose(xds0.VISIBILITY.values, f["visibility"], atol=1e-12)
     np.testing.assert_array_equal(xds0.WEIGHT.values, 1.0)
@@ -306,7 +306,7 @@ def test_simulate_processing_set_processing_function_end_to_end():
     xds1, _ = simulate_processing_set(
         unix, f["frequency"], ["XX", "YY"], f["antenna_position"], f["site_position"],
         f["point_source_flux"], f["point_source_ra_dec"], f["phase_center_ra_dec"],
-        [airy_disk_model("aca"), airy_disk_model("alma")], f["beam_model_map"],
+        f["beam_models"], f["beam_model_map"],
     )  # fmt: skip
     np.testing.assert_allclose(xds1.VISIBILITY.values, f["visibility"], atol=1e-8)
 
@@ -356,6 +356,74 @@ def test_cpp_kernel_matches_numpy_with_the_casa_beam_polynomial_rows():
     nearest = visibilities([bpc], "numpy")
     np.testing.assert_array_equal(vis_numpy[:, :, 0], nearest[:, :, 0])
     assert not np.isclose(vis_numpy[:, :, 1:], nearest[:, :, 1:], rtol=1e-6).any()
+
+
+def _one_baseline_visibilities(beam_model, frequency, offset, implementation):
+    """One baseline, one unit point source ``offset`` radians north of the phase centre."""
+    phase_center = np.array([[1.0, 0.5]])
+    flux = np.zeros((1, 1, 1, 4), complex)
+    flux[..., [0, 3]] = 1.0
+    models, pa = evaluate_beam_models(
+        [beam_model], np.zeros(1), frequency, phase_center, np.zeros(3)
+    )
+    return calculate_visibilities(
+        np.array([[[120.0, -40.0, 3.0]]]), np.array([0]), np.array([1]), frequency,
+        np.array([0, 3]), flux, phase_center[None] + [0.0, offset], phase_center, None,
+        np.zeros(2, int), pack_beam_models(models), pa, np.array([0, 5, 10, 15]),
+        implementation=implementation,
+    )  # fmt: skip
+
+
+@pytest.mark.skipif("cpp" not in IMPLEMENTATIONS, reason="C++ kernel not built")
+@pytest.mark.parametrize(
+    "name, frequency",
+    [("alma", 100e9), ("aca", 230e9), ("ngvla", 30e9), ("vla_nvss", 3e9)],
+)
+def test_cpp_kernel_matches_numpy_for_the_uncut_airy_disk(name, frequency):
+    """The textbook Airy disk, also in its first sidelobe beyond CASA's table
+    radius, where it is not cut."""
+    model = airy_disk_model(name)
+    frequency = np.array([frequency, 1.1 * frequency])
+    cut = airy_disk_model(name, func="casa_airy")["max_rad_1GHz"] / (frequency[0] / 1e9)
+    first_sidelobe = 1.635 * SPEED_OF_LIGHT / frequency[0] / model["dish_diameter"]
+    assert first_sidelobe > cut
+    for offset in (0.0, 0.5 * cut, first_sidelobe):
+        vis_numpy = _one_baseline_visibilities(model, frequency, offset, "numpy")
+        np.testing.assert_allclose(
+            _one_baseline_visibilities(model, frequency, offset, "cpp"),
+            vis_numpy,
+            atol=1e-13,
+            rtol=0,
+        )
+    assert np.all(np.abs(vis_numpy) > 1e-3)
+
+
+@pytest.mark.skipif("cpp" not in IMPLEMENTATIONS, reason="C++ kernel not built")
+def test_cpp_kernel_matches_numpy_for_the_exact_beam_polynomial():
+    """The EVLA polynomial at the exact radius, not CASA's lookup, in both
+    kernels, and zero beyond its 58 arcmin table."""
+    frequency = np.array([1.5e9, 3e9])
+    exact = read_beam_polynomial_coefficients("EVLA_")
+    casa = read_beam_polynomial_coefficients("EVLA_", n_sample=10000)
+    cut = exact.attrs["max_rad_1GHz"] / (frequency[-1] / 1e9)
+    for offset in (0.2 * cut, 0.5 * cut, 1.2 * cut):
+        vis = {
+            (model, implementation): _one_baseline_visibilities(
+                bpc, frequency, offset, implementation
+            )
+            for model, bpc in (("exact", exact), ("casa", casa))
+            for implementation in IMPLEMENTATIONS
+        }
+        for model in ("exact", "casa"):
+            np.testing.assert_allclose(
+                vis[model, "cpp"], vis[model, "numpy"], atol=1e-13, rtol=0
+            )
+        if offset < cut:
+            assert not np.isclose(
+                vis["exact", "numpy"], vis["casa", "numpy"], rtol=1e-9
+            ).any()
+        else:
+            np.testing.assert_array_equal(vis["exact", "numpy"][:, :, 1], 0.0)
 
 
 @pytest.mark.skipif("cpp" not in IMPLEMENTATIONS, reason="C++ kernel not built")
@@ -410,6 +478,15 @@ def test_cpp_kernel_threads_and_validation():
         kernel(vis, np.zeros((1, 1, 3)), np.zeros(1, np.int64), np.zeros(1, np.int64), np.ones(1), np.zeros(1, np.int64),
                np.zeros((1, 1, 1, 4), complex), np.zeros((1, 1, 3)), np.ones((1, 1)), np.zeros((1, 1, 2)),
                np.zeros((1, 1, 2)), np.zeros(1, np.int64), [], np.zeros(1), np.zeros(1, np.int64), 1)  # fmt: skip
+    polynomial, _ = evaluate_beam_models(
+        [read_beam_polynomial_coefficients("EVLA_")], f["time"], f["frequency"],
+        f["phase_center_ra_dec"], f["site_position"],
+    )  # fmt: skip
+    polynomial = pack_beam_models(polynomial)[0]
+    for n_sample in (1, -1):
+        bad = [{**polynomial, "n_sample": n_sample}] * len(args[10])
+        with pytest.raises(RuntimeError, match="n_sample"):
+            calculate_visibilities(*args[:10], bad, *args[11:], implementation="cpp")
     with pytest.raises(ValueError):
         calculate_visibilities(*args, implementation="fortran")
 

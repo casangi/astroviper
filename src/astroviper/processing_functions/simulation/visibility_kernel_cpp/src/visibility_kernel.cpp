@@ -136,8 +136,12 @@ inline void sample_jones(const BeamModel& bm, double l, double m, double freq,
     } else if (bm.kind == 1) {
         const std::int64_t i_chan = nearest_index(bm.poly_frequency, bm.n_poly_frequency, freq);
         const double* coef = bm.poly_coefficients + i_chan * bm.n_poly_coefficient;
-        const double r_inc = (bm.max_rad_1GHz / (freq / 1e9)) / (kCasaAiryNSample - 1);
-        const double r = (std::trunc(rho / r_inc) * r_inc) * (freq / 1e9) / kArcminToRad;
+        double rho_table = rho;
+        if (bm.poly_n_sample > 0) {
+            const double r_inc = (bm.max_rad_1GHz / (freq / 1e9)) / (bm.poly_n_sample - 1);
+            rho_table = std::trunc(rho / r_inc) * r_inc;
+        }
+        const double r = rho_table * (freq / 1e9) / kArcminToRad;
         double beam = 0.0;
         for (std::int64_t i = 0; i < bm.n_poly_coefficient; ++i) beam += coef[i] * std::pow(r, 2.0 * i);
         beam = beam < 0.0 ? 0.0 : std::sqrt(beam);

@@ -6,6 +6,9 @@ import os
 
 import numpy as np
 
+from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
+    CASA_AIRY_N_SAMPLE,
+)
 from astroviper.utils.beam_models import (
     DEG_TO_RAD,
     airy_disk_model,
@@ -15,21 +18,27 @@ from astroviper.utils.beam_models import (
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
-# beam models used by each legacy scenario (same order as in the generator)
+# beam models used by each legacy scenario (same order as in the generator);
+# SIRIUS used CASA's Airy disk and lookup table.
 LEGACY_BEAM_MODELS = {
-    "vla_airy": lambda: [airy_disk_model("vla")],
-    "vla_airy_pointing": lambda: [airy_disk_model("vla")],
-    "alma_het_mosaic_noise": lambda: [airy_disk_model("aca"), airy_disk_model("alma")],
+    "vla_airy": lambda: [airy_disk_model("vla_nvss", func="casa_airy")],
+    "vla_airy_pointing": lambda: [airy_disk_model("vla_nvss", func="casa_airy")],
+    "alma_het_mosaic_noise": lambda: [
+        airy_disk_model("aca", func="casa_airy"),
+        airy_disk_model("alma", func="casa_airy"),
+    ],
     # SIRIUS made this fixture with 0.8564 deg, not CASA's 58 arcmin EVLA table.
     "evla_polynomial_beam": lambda: [
-        read_beam_polynomial_coefficients("EVLA_", max_rad_1GHz=0.8564 * DEG_TO_RAD)
+        read_beam_polynomial_coefficients(
+            "EVLA_", max_rad_1GHz=0.8564 * DEG_TO_RAD, n_sample=CASA_AIRY_N_SAMPLE
+        )
     ],
     "evla_zernike_beam": lambda: [
         read_aperture_polynomial_coefficients("EVLA_avg_zcoeffs_SBand_lookup")
     ],
     "evla_mixed_beams": lambda: [
         read_aperture_polynomial_coefficients("EVLA_avg_zcoeffs_SBand_lookup"),
-        airy_disk_model("vla"),
+        airy_disk_model("vla_nvss", func="casa_airy"),
     ],
 }
 LEGACY_BEAM_IMAGE_SIZE = {

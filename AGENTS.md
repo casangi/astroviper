@@ -181,10 +181,13 @@ documented in `SIRIUS_PORT_PLAN.md` at the repo root; keep that file current
 when the simulator changes.
 
 ### Imaging implementation notes
-The Airy voltage patterns in
-`processing_functions/imaging/primary_beam/airy_disk.py` are shared by the
-imaging primary beam (`ipower=2`, the CASA power-pattern definition) and the
-simulation antenna beams. The Adaptive Scale Pixel
+The imaging primary beam (`ipower=2`, the CASA power-pattern definition) and
+the simulator's analytic and beam-polynomial antenna beams are evaluated by one
+function, `processing_functions/simulation/antenna_beams.py::symmetric_beam_response`
+(the C++ visibility kernel reproduces it): the obscured Airy disks of
+`processing_functions/imaging/primary_beam/airy_disk.py` (textbook by default,
+CASA's `PBMath1DAiry` with `func="casa_airy"`) and the EVLA beam polynomial,
+zero beyond `max_rad_1GHz` when the model has one. The Adaptive Scale Pixel
 deconvolver (`processing_functions/imaging/deconvolvers/aspclean/`, a port of
 CASA's `AspMatrixCleaner`) does its FFTs with the vendored
 `include/pocketfft_hdronly.h` (the BSD-3 header-only FFT behind NumPy/SciPy,

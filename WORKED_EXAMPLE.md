@@ -126,7 +126,9 @@ via `CycleController`:
   (`make_undeconvolved_image_single_field`).
 - Degridding (model uv grid → vis): `get_visibility_grid.py`.
 - FFT + normalization: `fft_normalize_anti_alias_gridder.py`.
-- Primary beam: `make_pb_symmetric.py` (airy disk).
+- Primary beam: `primary_beam/make_primary_beam.py`
+  (`make_primary_beam_single_field`, evaluated with
+  `simulation/antenna_beams.py::symmetric_beam_response`).
 - Polarization: `image_analysis/transform_polarization_basis.py`
   (stokes ↔ linear).
 - PSF fit: `image_analysis/point_spread_function_gaussian_fit.py`.

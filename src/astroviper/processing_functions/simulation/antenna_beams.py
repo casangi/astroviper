@@ -33,6 +33,7 @@ from collections.abc import Sequence
 
 import numpy as np
 import xarray as xr
+from scipy.special import jn_zeros
 
 from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
     CASA_AIRY_N_SAMPLE,
@@ -204,10 +205,18 @@ def make_airy_jones_beam(
 ) -> xr.Dataset:
     """Jones beam image of an analytic (Airy) model, for inspection/plotting.
 
+    The diagonal is the voltage pattern of :func:`symmetric_beam_response`,
+    the beam the simulator samples, zero beyond the model's cut.
+
     Parameters
     ----------
     model : dict
-        Analytic beam model (see :mod:`astroviper.utils.beam_models`).
+        Analytic beam model (see :mod:`astroviper.utils.beam_models`); without
+        a cut, the image is sized on the first null of the unblocked Airy disk
+        of its dish instead, and its ``max_rad_1GHz`` attr is the circle
+        inscribed in it at the lowest frequency, the cut samplers apply when
+        the image is a beam model, as they clamp to the edge of the image
+        beyond; ``JONES`` itself is not zeroed there.
     frequency : np.ndarray, [n_frequency], Hz
     beam_params : dict, optional
     polarization : sequence of str
@@ -221,14 +230,28 @@ def make_airy_jones_beam(
     model = normalize_beam_model_dict(model)
     params = resolve_beam_params(beam_params)
     frequency = np.atleast_1d(np.asarray(frequency, dtype=np.float64))
-    cell_size = beam_image_cell_size(model["max_rad_1GHz"], frequency, params)
+    max_rad = model["max_rad_1GHz"]
+    if max_rad is None:
+        max_rad = (
+            jn_zeros(1, 1)[0] * SPEED_OF_LIGHT / (np.pi * 1e9 * model["dish_diameter"])
+        )
+    cell_size = beam_image_cell_size(max_rad, frequency, params)
     l, m = beam_image_coordinates(params["image_size"], cell_size)  # noqa: E741
-    resp = _analytic_response(
-        model, l[None, :, None], m[None, None, :], frequency[:, None, None]
+    resp = symmetric_beam_response(
+        pack_beam_models([model])[0],
+        l[None, :, None],
+        m[None, None, :],
+        frequency[:, None, None],
     )  # [n_freq, n_l, n_m]
     jones = np.repeat(resp[None, :, None, :, :], len(polarization), axis=2).astype(
         np.complex128
     )
+    if model["max_rad_1GHz"] is None:
+        model["max_rad_1GHz"] = (
+            min(np.abs(l[[0, -1]]).min(), np.abs(m[[0, -1]]).min())
+            * frequency.min()
+            / 1e9
+        )
     return _jones_image_xds(jones, [0.0], frequency, polarization, l, m, model)
 
 
@@ -246,13 +269,13 @@ def make_polynomial_jones_beam(
     cell_size = beam_image_cell_size(max_rad, frequency, params)
     l, m = beam_image_coordinates(params["image_size"], cell_size)  # noqa: E741
     resp = np.empty((len(frequency), len(l), len(m)))
-    i_chan = beam_polynomial_coefficient_index(bpc_xds, frequency)
+    packed_model = pack_beam_models(
+        evaluate_beam_models(
+            [bpc_xds], np.zeros(1), frequency, np.zeros((1, 2)), np.zeros(3)
+        )[0]
+    )[0]
     for i, f in enumerate(frequency):
-        coef = bpc_xds.BPC.values[i_chan[i], 0, :]
-        resp[i] = polynomial_beam_response(
-            l[:, None], m[None, :], f, coef, max_rad, 1, n_sample=None
-        )
-        resp[i][np.hypot(l[:, None], m[None, :]) >= max_rad / (f / 1e9)] = 0.0
+        resp[i] = symmetric_beam_response(packed_model, l[:, None], m[None, :], f)
     jones = np.repeat(resp[None, :, None, :, :], len(polarization), axis=2).astype(
         np.complex128
     )
@@ -552,8 +575,9 @@ def pack_beam_models(evaluated_beam_models: Sequence) -> list[dict]:
     -------
     list of dict
         Each with ``kind`` plus, depending on the kind: ``func``,
-        ``dish_diameter``, ``blockage_diameter``, ``max_rad_1GHz`` (analytic);
-        ``frequency``, ``coefficients[n_frequency, n_coefficients]`` (polynomial);
+        ``dish_diameter``, ``blockage_diameter``, ``max_rad_1GHz`` (analytic;
+        ``inf`` for no cut); ``frequency``,
+        ``coefficients[n_frequency, n_coefficients]``, ``n_sample`` (polynomial);
         ``jones[n_pa, n_frequency, n_pol, n_l, n_m]``, ``parallactic_angle``,
         ``frequency``, ``polarization_index``, ``cell_size_l``, ``cell_size_m``
         (Jones image).
@@ -569,10 +593,15 @@ def pack_beam_models(evaluated_beam_models: Sequence) -> list[dict]:
                     "func": model["func"],
                     "dish_diameter": float(model["dish_diameter"]),
                     "blockage_diameter": float(model["blockage_diameter"]),
-                    "max_rad_1GHz": float(model["max_rad_1GHz"]),
+                    "max_rad_1GHz": _packed_max_rad(model["max_rad_1GHz"]),
                 }
             )
         elif kind == "beam_polynomial_coefficients":
+            n_sample = model.attrs.get("n_sample")
+            if n_sample is not None and int(n_sample) < 2:
+                raise ValueError(
+                    f"n_sample must be None (exact radius) or at least 2; got {n_sample!r}"
+                )
             packed.append(
                 {
                     "kind": "polynomial",
@@ -582,6 +611,7 @@ def pack_beam_models(evaluated_beam_models: Sequence) -> list[dict]:
                     ),
                     "dish_diameter": float(model.attrs["dish_diameter"]),
                     "max_rad_1GHz": float(model.attrs["max_rad_1GHz"]),
+                    "n_sample": n_sample,
                 }
             )
         elif kind == "jones_image":
@@ -601,7 +631,7 @@ def pack_beam_models(evaluated_beam_models: Sequence) -> list[dict]:
                     "cell_size_l": float(l[1] - l[0]),
                     "cell_size_m": float(m[1] - m[0]),
                     "dish_diameter": float(model.attrs["dish_diameter"]),
-                    "max_rad_1GHz": float(model.attrs["max_rad_1GHz"]),
+                    "max_rad_1GHz": _packed_max_rad(model.attrs["max_rad_1GHz"]),
                 }
             )
         else:
@@ -610,6 +640,10 @@ def pack_beam_models(evaluated_beam_models: Sequence) -> list[dict]:
                 "evaluate_beam_models() before packing."
             )
     return packed
+
+
+def _packed_max_rad(max_rad_1GHz):
+    return np.inf if max_rad_1GHz is None else float(max_rad_1GHz)
 
 
 # ----------------------------------------------------------------------------
@@ -698,6 +732,7 @@ def symmetric_beam_response(
             packed_model["coefficients"][i_chan],
             packed_model["max_rad_1GHz"],
             ipower,
+            packed_model["n_sample"],
         )
     else:
         raise ValueError(

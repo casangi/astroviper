@@ -5,8 +5,11 @@ Three kinds of **antenna (voltage) beam models** are understood by the simulator
 
 1. **Analytic** — a dict ``{"func": "casa_airy" | "airy" | "none",
    "dish_diameter": m, "blockage_diameter": m, "max_rad_1GHz": rad}``.
-   ``max_rad_1GHz`` is the radius (at 1 GHz) beyond which the beam is zero; the
-   values in :data:`AIRY_DISK_MODELS` are CASA's ``PBMath`` defaults.
+   ``max_rad_1GHz`` is the radius (at 1 GHz) beyond which the beam is zero;
+   ``None`` is no cut (only for ``"airy"``; ``"casa_airy"`` needs its table radius).
+   :data:`AIRY_DISK_MODELS` are textbook obscured Airy disks without a cut;
+   :func:`airy_disk_model` with ``func="casa_airy"`` gives CASA's
+   ``PBMath1DAiry`` with the ``PBMath`` table radius.
 2. **Aperture (Zernike) polynomial coefficients** — an ``xr.Dataset`` with
    ``ZPC[frequency, polarization, coefficient]`` (complex) and
    ``ETA[frequency, polarization, coefficient]`` and attrs ``dish_diameter``,
@@ -16,7 +19,9 @@ Three kinds of **antenna (voltage) beam models** are understood by the simulator
    ``BPC[frequency, polarization, coefficient]``: CASA ``PBMath1DPoly``-style
    1-D power-beam polynomials in ``r`` (arcmin at 1 GHz), e.g. the EVLA models;
    :func:`beam_polynomial_coefficient_index` picks the row CASA uses at a
-   frequency.
+   frequency.  They are evaluated at the exact radius ``|lm|``, or, with an
+   ``n_sample`` attr, at the radius of CASA's lookup table of ``n_sample``
+   radii out to ``max_rad_1GHz``.
 
 The legacy SIRIUS coordinate names (``chan``, ``pol``, ``coef_indx``,
 ``dish_diam``) are translated by :func:`normalize_beam_model_xds`.
@@ -33,37 +38,39 @@ import xarray as xr
 
 DEG_TO_RAD = np.pi / 180.0
 
-# CASA PBMath.cc max radii (degrees at 1 GHz) converted to radians.
+# Effective dish and blockage diameters (metres) of the textbook Airy disk; no cut.
 AIRY_DISK_MODELS: dict[str, dict] = {
-    "vla": {
-        "func": "casa_airy",
+    "vla_nvss": {
+        "func": "airy",
         "dish_diameter": 24.5,
         "blockage_diameter": 0.0,
-        "max_rad_1GHz": 0.8564 * DEG_TO_RAD,
+        "max_rad_1GHz": None,
     },
     "aca": {
-        "func": "casa_airy",
+        "func": "airy",
         "dish_diameter": 6.25,
         "blockage_diameter": 0.75,
-        "max_rad_1GHz": 3.568 * DEG_TO_RAD,
+        "max_rad_1GHz": None,
     },
     "alma": {
-        "func": "casa_airy",
+        "func": "airy",
         "dish_diameter": 10.7,
         "blockage_diameter": 0.75,
-        "max_rad_1GHz": 1.784 * DEG_TO_RAD,
+        "max_rad_1GHz": None,
     },
     "ngvla": {
-        "func": "casa_airy",
+        "func": "airy",
         "dish_diameter": 18.0,
         "blockage_diameter": 0.0,
-        "max_rad_1GHz": 1.5 * DEG_TO_RAD,
+        "max_rad_1GHz": None,
     },
 }
 
+# CASA PBMath.cc max radii (degrees at 1 GHz) converted to radians.
 _MAX_RAD_1GHZ_BY_TELESCOPE = {
     "evla": 0.8564 * DEG_TO_RAD,
     "vla": 0.8564 * DEG_TO_RAD,
+    "vla_nvss": 0.8564 * DEG_TO_RAD,
     "ngvla": 1.5 * DEG_TO_RAD,
     "alma": 1.784 * DEG_TO_RAD,
     "aca": 3.568 * DEG_TO_RAD,
@@ -119,17 +126,20 @@ def list_beam_polynomial_coefficient_models() -> list[str]:
 
 
 def airy_disk_model(name: str, func: str | None = None) -> dict:
-    """Copy of one of :data:`AIRY_DISK_MODELS` (``"vla"``, ``"aca"``, ``"alma"``, ``"ngvla"``).
+    """Copy of one of :data:`AIRY_DISK_MODELS` (``"vla_nvss"``, ``"aca"``, ``"alma"``, ``"ngvla"``).
 
     Parameters
     ----------
     name : str
     func : str, optional
-        Override the beam function (``"casa_airy"``, ``"airy"`` or ``"none"``).
+        Override the beam function (``"casa_airy"``, ``"airy"`` or ``"none"``);
+        any but ``"airy"`` is zero beyond CASA's ``PBMath`` table radius.
     """
     model = dict(AIRY_DISK_MODELS[name.lower()])
     if func is not None:
         model["func"] = func
+    if model["func"] != "airy":
+        model["max_rad_1GHz"] = _MAX_RAD_1GHZ_BY_TELESCOPE[name.lower()]
     return model
 
 
@@ -143,6 +153,8 @@ def normalize_beam_model_dict(model: dict) -> dict:
     for required in ("dish_diameter", "max_rad_1GHz"):
         if required not in out:
             raise ValueError(f"Analytic beam model is missing '{required}': {model}")
+    if out["func"] in ("casa_airy", "none") and out["max_rad_1GHz"] is None:
+        raise ValueError(f"A {out['func']!r} beam model needs max_rad_1GHz: {model}")
     return out
 
 
@@ -272,6 +284,7 @@ def read_beam_polynomial_coefficients(
     telescope_name: str | None = None,
     max_coefficients: int = 5,
     polarization: str = "RR",
+    n_sample: int | None = None,
 ) -> xr.Dataset:
     """Read a CASA ``PBMath1DPoly`` style coefficient text file (e.g. the EVLA bands).
 
@@ -293,6 +306,10 @@ def read_beam_polynomial_coefficients(
     max_coefficients : int
     polarization : str
         Label of the single (unpolarised) polarization axis entry.
+    n_sample : int, optional
+        Evaluate the polynomial at the radius of CASA's lookup table of
+        ``n_sample`` (at least 2) radii out to ``max_rad_1GHz`` (10000 in CASA), stored
+        as the ``n_sample`` attr; ``None`` evaluates it at the exact radius.
 
     Returns
     -------
@@ -302,6 +319,10 @@ def read_beam_polynomial_coefficients(
         :func:`read_aperture_polynomial_coefficients` and ``band_definitions``
         (``[name, start_Hz, end_Hz]`` per band, in file order).
     """
+    if n_sample is not None and int(n_sample) < 2:
+        raise ValueError(
+            f"n_sample must be None (exact radius) or at least 2; got {n_sample!r}"
+        )
     path = model
     if not os.path.isfile(path):
         path = os.path.join(
@@ -380,6 +401,8 @@ def read_beam_polynomial_coefficients(
             "band_definitions": band_definitions,
         },
     )
+    if n_sample is not None:
+        xds.attrs["n_sample"] = int(n_sample)
     xds.frequency.attrs.update({"units": "Hz", "type": "spectral_coord"})
     return xds
 

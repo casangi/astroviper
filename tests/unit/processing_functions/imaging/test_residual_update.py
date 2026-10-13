@@ -205,13 +205,13 @@ def test_residual_update_with_model_uses_the_imaged_data_group(data_group_name):
 def test_imaging_setup_uses_the_primary_beam_params():
     """primary_beam_params reach the primary beam of the setup (the VLA beam here),
     which the transform to Stokes leaves alone."""
-    from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (
-        EVLA_MAX_RAD_1GHZ,
-    )
     from astroviper.processing_functions.simulation.antenna_beams import (
         polynomial_beam_response,
     )
-    from astroviper.utils.beam_models import read_beam_polynomial_coefficients
+    from astroviper.utils.beam_models import (
+        EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ,
+        read_beam_polynomial_coefficients,
+    )
 
     image_params = {
         "image_size": IMAGE_SIZE,
@@ -242,8 +242,9 @@ def test_imaging_setup_uses_the_primary_beam_params():
         _empty_image().m.values[None, :],
         FREQUENCY,
         read_beam_polynomial_coefficients("EVLA_").BPC.sel(frequency=1424e6).values[0],
-        EVLA_MAX_RAD_1GHZ,
+        EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ,
         ipower=2,
+        n_sample=None,
     )
     for plane in beams["vla"]:  # I and Q
         np.testing.assert_array_equal(plane, expected)
