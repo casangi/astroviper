@@ -203,6 +203,92 @@ class TestMomentsOverwriteAndErrors:
             )
         assert "SKY_MOMENT_MEAN" in load_image(out).data_vars
 
+    def test_store_name_without_img_zarr_extension(self, input_image, tmp_path):
+        """A ``.zarr`` name is written as given by earlier XRADIO versions and as
+        ``.img.zarr`` by later ones; the moment maps go into the store written."""
+        path, img_xds = input_image
+        moments(
+            input_image_store=path,
+            moments_image_store=str(tmp_path / "bare.zarr"),
+            moments=["mean", "maximum"],
+            moment_axis="frequency",
+            n_mapping_parallelism={"m": 2},
+        )
+        stores = [
+            store
+            for store in (tmp_path / "bare.zarr", tmp_path / "bare.img.zarr")
+            if store.exists()
+        ]
+        assert len(stores) == 1
+        reference = reference_moments(
+            img_xds.SKY.values, axis=1, coord_values=img_xds.frequency.values
+        )
+        assert_moments_match(load_image(str(stores[0])), reference, axis=1)
+
+    def test_no_overwrite_raises_for_existing_name_given(self, input_image, tmp_path):
+        """An existing ``moments_image_store`` raises with every XRADIO version,
+        also when the moment maps would go to ``stale.img.zarr``."""
+        path, _ = input_image
+        out = tmp_path / "stale.zarr"
+        out.mkdir()
+        with pytest.raises(RuntimeError, match="will not be overwritten"):
+            moments(
+                input_image_store=path,
+                moments_image_store=str(out),
+                moments=["mean"],
+                n_mapping_parallelism={"m": 1},
+            )
+        assert list(out.iterdir()) == []
+        assert not (tmp_path / "stale.img.zarr").exists()
+
+    def test_no_overwrite_raises_for_existing_store_written(
+        self, input_image, tmp_path, monkeypatch
+    ):
+        """The overwrite check before the write tests the name given; the
+        FileExistsError XRADIO raises for an existing store written (another
+        path with the ``.img.zarr`` extension) becomes the same RuntimeError."""
+        import xradio.image
+
+        path, _ = input_image
+        xradio_error = FileExistsError("Output path bare.img.zarr already exists.")
+
+        def write_image(*args, **kwargs):
+            raise xradio_error
+
+        monkeypatch.setattr(xradio.image, "write_image", write_image)
+        with pytest.raises(RuntimeError, match="will not be overwritten") as caught:
+            moments(
+                input_image_store=path,
+                moments_image_store=str(tmp_path / "bare.zarr"),
+                moments=["mean"],
+                n_mapping_parallelism={"m": 1},
+            )
+        assert caught.value.__cause__ is xradio_error
+        assert str(xradio_error) in str(caught.value)
+
+    def test_no_overwrite_with_existing_img_zarr_store(self, input_image, tmp_path):
+        """``bare.img.zarr`` exists and ``bare.zarr`` is given: XRADIO versions
+        that give the store the ``.img.zarr`` extension raise RuntimeError and
+        leave the store unchanged; earlier versions write ``bare.zarr``."""
+        path, _ = input_image
+        existing = tmp_path / "bare.img.zarr"
+        existing.mkdir()
+        try:
+            moments(
+                input_image_store=path,
+                moments_image_store=str(tmp_path / "bare.zarr"),
+                moments=["mean"],
+                n_mapping_parallelism={"m": 1},
+            )
+        except RuntimeError as exc:
+            assert "will not be overwritten" in str(exc)
+            assert isinstance(exc.__cause__, FileExistsError)
+            assert not (tmp_path / "bare.zarr").exists()
+        else:
+            moment_maps = load_image(str(tmp_path / "bare.zarr"))
+            assert "SKY_MOMENT_MEAN" in moment_maps.data_vars
+        assert list(existing.iterdir()) == []
+
     def test_mapping_parallelism_axis_equal_to_moment_axis_raises(
         self, input_image, tmp_path
     ):

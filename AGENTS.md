@@ -190,9 +190,17 @@ CASA's `AspMatrixCleaner`) does its FFTs with the vendored
 `include/pocketfft_hdronly.h` (the BSD-3 header-only FFT behind NumPy/SciPy,
 kept verbatim with its licence block); its per-Aspen L-BFGS follows ALGLIB's
 scaled-variable conventions and is exposed for tests as
-`aspclean.lbfgs_minimize`. Two documented departures from CASA live in
+`aspclean.lbfgs_minimize`. Documented departures from CASA live in
 `src/asp_clean.cpp`: separable Aspen spectra with paired inverse transforms
-(same numbers, ~8x fewer FFTs) and a unit-consistent "diverging" guard. The
+(same numbers, ~8x fewer FFTs), a residual update over the whole image, and
+no "diverging" guard (`AspMatrixCleaner` "5. Diverging" of CASA and LibRA).
+Like Hogbom and MTMFS it takes the divergence test shared by the
+deconvolvers (`deconvolvers/include/plane_stop_test.hpp`); `asp_clean()`
+gives it the RMS limit at `(1 + gain)` times the lowest RMS and no peak
+limit, as Asp's least-squares components can raise the peak of a healthy
+residual. Compare Asp with LibRA's copy (ARDG-NRAO/LibRA); its pixel shift
+fix is not needed, because these convolutions are centred on odd and even
+axes. The
 PSF beam fit is switchable
 (`psf_fitting_method="astroviper" | "casa"`); `"casa"` is a C++ port of CASA's
 `StokesImageUtil::FitGaussianPSF` (CAS-13022,
@@ -216,6 +224,29 @@ Stokes takes the real part, so Stokes images are always real and the two-hand
 path is untouched. A sample with any loaded correlation flagged is dropped for
 all of them (no pseudo Stokes I), which gives every plane the same uv coverage
 and hence the same PSF.
+
+**Measurement Set v2 input (skunk works).** `image_cube_single_field` also
+images a Measurement Set v2 directly when `skunk_works=True`
+(`utils/measurement_set_v2.py::is_measurement_set_v2` detects it; guards in
+the driver refuse `skunk_works=False`, a missing engine, the write-back flags,
+an empty `scan_intents` selection and an MSv4 without the data group (or one
+of its four roles; `check_data_group_skunk_works_msv2`) before anything is
+written). AstroVIPER has no MSv2 reader of its own: the driver opens the MS
+lazily with XRADIO's `xradio_msv2` engine (`open_msv2`,
+`array_backend="xarray"`, `partition_cache="read"` unless
+`XRADIO_MSV2_PARTITION_CACHE` is set, so with the default options the input
+is never written), builds the graph
+mapping exactly as for a Zarr processing set, and `add_lazy_input_data`
+gives every task, under the mapping key `lazy_input_data`, the lazily indexed
+data-group variables of its selection (baseline names as integer codes into a
+name table, to keep the graph payload small). The node task reads them with
+`load_processing_set_skunk_works_msv2`
+(`node_tasks/imaging/utils/skunk_works_msv2.py`); an `MSv2ChangedError` aborts
+the run instead of skipping the chunk. Every value comes from the engine, so
+the images equal those of the MS converted with
+`convert_msv2_to_processing_set` (same `partition_scheme`). python-casacore
+holds the GIL: deploy with processes (Dask `threads_per_worker=1`, or MPI),
+not threads.
 
 ---
 

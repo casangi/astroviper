@@ -20,6 +20,7 @@ from astroviper.processing_functions.imaging.utils.iteration_control import (
     IterationController,
     StopCode,
     build_residual_imaging_dict,
+    copy_residual_entropy,
     format_imaging_dict,
     get_calculate_cycle_controls,
     get_iterations_done_from_imaging_dict,
@@ -29,6 +30,7 @@ from astroviper.processing_functions.imaging.utils.iteration_control import (
     get_peak_residual_from_imaging_dict,
     merge_imaging_dicts,
     print_imaging_dict,
+    validate_entropy_params,
 )
 from astroviper.processing_functions.imaging.utils.timing import (
     IMAGING_TIMING_PHASES,
@@ -50,6 +52,8 @@ __all__ = [
     "StopCode",
     "merge_imaging_dicts",
     "build_residual_imaging_dict",
+    "copy_residual_entropy",
+    "validate_entropy_params",
     "get_calculate_cycle_controls",
     "get_peak_residual_from_imaging_dict",
     "get_masksum_from_imaging_dict",

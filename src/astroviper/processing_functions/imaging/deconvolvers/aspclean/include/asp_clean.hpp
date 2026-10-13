@@ -8,12 +8,20 @@
 // library plus the small self-contained headers asp_fft.hpp (FFTs via the
 // vendored pocketfft header) and asp_lbfgs.hpp.
 //
-// Two deliberate departures from CASA, both documented at the code:
+// Deliberate departures from CASA, documented at the code:
 //  * the FFT bookkeeping (separable Aspen spectra, paired inverse transforms)
 //    computes the same quantities with roughly an eighth of the transforms;
-//  * the "diverging" guard bounds the peak of the fitted component's dirty
-//    response instead of the raw Aspen strength, which is not in Jy/beam and
-//    made CASA's test abort minor cycles on legitimate wide components.
+//  * the residual update covers the whole image, not a PSF-sized box;
+//  * there is no "diverging" guard (AspMatrixCleaner "5. Diverging" in CASA
+//    6.7.5.18 and LibRA fc54ee25): the model update stops on the divergence
+//    test shared with
+//    the other deconvolvers (../../include/plane_stop_test.hpp), whose two
+//    limits are off unless the caller enables them; an infinite peak always
+//    stops the model update. astroviper's Python layer gives Asp the RMS
+//    limit with the factor (1 + gain) and no peak limit.
+// A residual pixel outside the search region (mask not above 0.99) that is
+// not finite is zero during the model update and gets its value back
+// afterwards.
 //
 // The algorithm finds, at each model update iteration, the best "Aspen" (a
 // Gaussian component whose amplitude, scale size and position are optimized by
@@ -24,6 +32,8 @@
 
 #include <cstddef>
 
+#include "../../include/plane_stop_test.hpp"
+
 namespace aspclean {
 
 struct AspResult {
@@ -32,7 +42,8 @@ struct AspResult {
                                   //  0 not converged, behaving normally
                                   // -1 stopped on consecutive smallest scale
                                   // -2 large-scale negative / diverging
-                                  // -3 diverging
+                                  // -3 diverging (the divergence test shared
+                                  //    with the other deconvolvers)
     double peak_residual = 0.0;   // |peak| of the (masked) residual at exit
     double model_flux = 0.0;      // sum of the model image at exit
     bool switched_to_hogbom = false;
@@ -57,13 +68,15 @@ void convolve_centered(const double* a, const double* b, int nx, int ny,
 //   mask     : [ny][nx] clean mask, or nullptr for "clean everywhere"
 // `psf_width <= 0` requests an internal PSF Gaussian-width estimate.
 // `largestscale < 0`, `stoppointmode < 0`, `norm_method == 1` reproduce the
-// CASA defaults. No copies of the caller's buffers are made.
+// CASA defaults. `divergence` is the divergence test shared with the other
+// deconvolvers (plane_stop_test.hpp). No copies of the caller's buffers are made.
 template <typename T>
 AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
                          int nx, int ny, double gain, double threshold,
                          int max_iter_remaining, double fusedthreshold, double psf_width,
                          int largestscale, int stoppointmode, int norm_method,
-                         bool verbose);
+                         bool verbose,
+                         const deconvolvers::DivergenceControl<double>& divergence);
 
 // Run aspclean_plane independently on every (time, frequency, polarization)
 // plane of a 5-D cube [nt, nf, np, ny, nx], in place, across `processing_function_threads`
@@ -80,6 +93,7 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask,
                    double gain, const double* threshold, const int* max_iter_remaining,
                    double fusedthreshold, double psf_width, int largestscale,
                    int stoppointmode, int norm_method, int processing_function_threads,
+                   const deconvolvers::DivergenceControl<double>& divergence,
                    AspResult* results);
 
 }  // namespace aspclean

@@ -5,6 +5,7 @@ import copy
 import os
 import shutil
 import unittest
+from unittest import mock
 
 import dask.array as da
 import numpy as np
@@ -24,10 +25,12 @@ class FeatherShared:
 
     int_image = "feather_sim_vla_c1_pI.im"
     sd_image = "feather_sim_sd_c1_pI.im"
-    feather_out = "feather.zarr"
+    # Image Zarr stores end in ".img.zarr": XRADIO versions that give image
+    # stores that extension write these names as given, like earlier versions.
+    feather_out = "feather.img.zarr"
     feather_expected = "feather.im"  # expected output for comparison
-    int_zarr = "int.zarr"
-    sd_zarr = "sd.zarr"
+    int_zarr = "int.img.zarr"
+    sd_zarr = "sd.img.zarr"
 
     @staticmethod
     def _rm(path: str) -> None:
@@ -200,6 +203,76 @@ class FeatherTest(FeatherShared, unittest.TestCase):
             "Incorrect sky values",
         )
         self._rm(self.feather_expected)  # cleanup after test
+
+    def test_output_name_without_img_zarr_extension(self):
+        """A ``.zarr`` output name is written as given by earlier XRADIO versions
+        and as ``.img.zarr`` by later ones; feather fills the store written."""
+        self._ensure_inputs()
+        stores = ["feather_bare.zarr", "feather_bare.img.zarr"]
+        for store in stores:
+            self._rm(store)
+        window = slice(480, 544)  # small l/m window keeps this run fast
+        try:
+            feather(
+                outim={"name": "feather_bare.zarr", "overwrite": False},
+                highres=self.int_zarr,
+                lowres=self.sd_zarr,
+                sdfactor=1,
+                selection={"l": window, "m": window},
+            )
+            written = [store for store in stores if os.path.isdir(store)]
+            self.assertEqual(len(written), 1, f"stores written: {written}")
+            feather_xds = load_image(written[0])
+            self.assertEqual(feather_xds["SKY"].shape, (1, 16, 1, 64, 64))
+            # every frequency chunk was written into the pre-allocated store
+            self.assertFalse(np.isnan(feather_xds["SKY"].values).any())
+        finally:
+            for store in stores:
+                self._rm(store)
+
+    def test_no_overwrite_raises_for_existing_name_given(self):
+        """An existing ``outim["name"]`` raises with every XRADIO version, also
+        when the image would be written to ``feather_stale.img.zarr``."""
+        stores = ["feather_stale.zarr", "feather_stale.img.zarr"]
+        for store in stores:
+            self._rm(store)
+        os.mkdir(stores[0])
+        try:
+            with self.assertRaisesRegex(RuntimeError, "will not be overwritten"):
+                feather(
+                    outim={"name": stores[0], "overwrite": False},
+                    highres=self.int_zarr,
+                    lowres=self.sd_zarr,
+                    sdfactor=1,
+                )
+            self.assertEqual(os.listdir(stores[0]), [])
+            self.assertFalse(os.path.exists(stores[1]))
+        finally:
+            for store in stores:
+                self._rm(store)
+
+    def test_no_overwrite_raises_for_existing_store_written(self):
+        """The overwrite check before the write tests ``outim["name"]``; the
+        FileExistsError XRADIO raises for an existing store written (another
+        path with the ``.img.zarr`` extension) becomes the same RuntimeError."""
+        self._ensure_inputs()
+        self._rm("feather_bare.zarr")
+        xradio_error = FileExistsError(
+            "Output path feather_bare.img.zarr already exists."
+        )
+        with (
+            mock.patch("xradio.image.write_image", side_effect=xradio_error),
+            self.assertRaisesRegex(RuntimeError, "will not be overwritten") as caught,
+        ):
+            feather(
+                outim={"name": "feather_bare.zarr", "overwrite": False},
+                highres=self.int_zarr,
+                lowres=self.sd_zarr,
+                sdfactor=1,
+            )
+        self.assertIs(caught.exception.__cause__, xradio_error)
+        self.assertIn(str(xradio_error), str(caught.exception))
+        self.assertIn("outim['overwrite'] = True", str(caught.exception))
 
     def test_overwrite(self):
         """Test overwrite option using prebuilt int/sd zarr inputs"""

@@ -1,5 +1,7 @@
 """Unit tests for :mod:`astroviper.utils.io` helpers."""
 
+import pytest
+
 from astroviper.utils.io import (
     image_data_groups_for_kept_variables,
     imaging_data_variable_data_group_roles,
@@ -157,3 +159,72 @@ class TestCreateEmptyDataVariablesImageChunkingSharding:
         # A shard on l needs an l chunk that divides it (default chunk = 16).
         with pytest.raises(ValueError, match=r"image_sharding\['l'\]=8"):
             self._make_store(tmp_path, image_sharding={"l": 8})
+
+
+class TestWriteZarrImageStore:
+    """``write_zarr_image_store`` returns the store ``write_image`` wrote: XRADIO
+    versions that give image Zarr stores the ``.img.zarr`` extension return the
+    paths they wrote, earlier versions return ``None`` and keep the name."""
+
+    @staticmethod
+    def _image_xds():
+        import numpy as np
+        from xradio.image import make_empty_sky_image
+
+        return make_empty_sky_image(
+            phase_center=[0.6, -0.2],
+            image_size=[8, 6],
+            cell_size=[1e-5, 1e-5],
+            frequency_coords=np.array([1.4e9, 1.5e9]),
+            pol_coords=["I"],
+            time_coords=[0],
+        )
+
+    def test_img_zarr_name_is_the_store_written(self, tmp_path):
+        import xarray as xr
+
+        from astroviper.utils.io import write_zarr_image_store
+
+        image_store = str(tmp_path / "cube.img.zarr")
+        assert write_zarr_image_store(self._image_xds(), image_store) == image_store
+        assert xr.open_zarr(image_store).sizes["frequency"] == 2
+
+    def test_returned_path_is_the_store_written(self, tmp_path):
+        """A bare ``.zarr`` name is kept or becomes ``.img.zarr``, depending on
+        the XRADIO version; the path returned is the store on disk."""
+        import os
+
+        import xarray as xr
+
+        from astroviper.utils.io import write_zarr_image_store
+
+        image_store = write_zarr_image_store(
+            self._image_xds(), str(tmp_path / "cube.zarr")
+        )
+        assert image_store in (
+            str(tmp_path / "cube.zarr"),
+            str(tmp_path / "cube.img.zarr"),
+        )
+        assert os.listdir(tmp_path) == [os.path.basename(image_store)]
+        assert xr.open_zarr(image_store).sizes["l"] == 8
+
+    @pytest.mark.parametrize(
+        "returned, expected",
+        [(None, "cube.zarr"), (["/data/cube.img.zarr"], "/data/cube.img.zarr")],
+        ids=["xradio_returns_none", "xradio_returns_paths"],
+    )
+    def test_uses_path_returned_by_write_image(self, monkeypatch, returned, expected):
+        import xradio.image
+
+        from astroviper.utils.io import write_zarr_image_store
+
+        calls = []
+
+        def fake_write_image(xds, imagename, out_format, overwrite):
+            calls.append((xds, imagename, out_format, overwrite))
+            return returned
+
+        monkeypatch.setattr(xradio.image, "write_image", fake_write_image)
+        img_xds = object()
+        assert write_zarr_image_store(img_xds, "cube.zarr", overwrite=True) == expected
+        assert calls == [(img_xds, "cube.zarr", "zarr", True)]

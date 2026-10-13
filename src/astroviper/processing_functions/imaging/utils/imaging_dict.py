@@ -29,6 +29,8 @@ FIELD_ACCUM = {
     "start_peakres",  # Peak residual at start of each cycle (Jy)
     "start_peakres_nomask",  # Peak residual (no mask) at start of each cycle (Jy)
     "start_model_flux",  # Model flux at start of each cycle (Jy)
+    "entropy",  # Entropy of the residual at the start of each cycle
+    "residual_snr",  # Peak / RMS of the residual at the start of each cycle
 }
 
 # Fields that remain single values (constant parameters)

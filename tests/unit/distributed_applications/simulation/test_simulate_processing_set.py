@@ -345,3 +345,28 @@ def test_sky_image_output(tmp_path):
         run(tmp_path, sky_image_params={**sky_image_params, "cellsize": 1.0})
     with pytest.raises(ValueError, match="time_index"):
         run(tmp_path, sky_image_params={**sky_image_params, "time_index": 99})
+
+
+def test_sky_image_store_is_the_store_written(tmp_path):
+    """A ``.zarr`` sky image name is written as given by earlier XRADIO versions
+    and as ``.img.zarr`` by later ones; ``sky_image_store`` names that store."""
+    from xradio.image import load_image
+
+    arcsec = np.pi / (180 * 3600)
+    result, _ = run(
+        tmp_path,
+        sky_image_params={
+            "image_store": str(tmp_path / "sky.zarr"),
+            "image_size": [16, 16],
+            # 640 arcsec field: holds the point source ~250 arcsec off centre
+            "cell_size": [-40 * arcsec, 40 * arcsec],
+        },
+    )
+    assert result["sky_image_store"] in (
+        str(tmp_path / "sky.zarr"),
+        str(tmp_path / "sky.img.zarr"),
+    )
+    img = load_image(result["sky_image_store"])
+    assert list(img.polarization.values) == ["I"]
+    # RR = LL = 1 Jy: Stokes I = 1 Jy in every channel
+    np.testing.assert_allclose(img.SKY.values.sum(axis=(2, 3, 4)), [[1.0] * 3])
