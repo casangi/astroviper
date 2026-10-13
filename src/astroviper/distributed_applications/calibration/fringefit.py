@@ -1,6 +1,10 @@
 import dask
 import numpy as np
-import xarray as xa
+import xarray as xr
+
+from typing import (Union, Mapping)
+
+
 from graphviper.graph_tools.coordinate_utils import (
     interpolate_data_coords_onto_parallel_coords,
     make_parallel_coord,
@@ -10,9 +14,19 @@ from graphviper.graph_tools.map import map
 from xradio.measurement_set.processing_set_xdt import ProcessingSetXdt
 
 from astroviper.distributed_applications.calibration.fringe_cal_xds import (
-    SingleFringeJones,
     make_empty_cal_xds,
 )
+
+from astroviper.processing_functions.calibration.fringe_functions import (
+    SingleFringeJones,
+)
+
+from astroviper.node_tasks.calibration.fringefit_tasks import (
+    _fringe_fft_node_task,
+    _fringe_global_node_task
+)
+
+from .utils import make_cal_map
 
 
 def _fringefit_fft_single(
@@ -29,7 +43,7 @@ def _fringefit_fft_single(
     graph = map(
         input_data=ps,
         node_task_data_mapping=node_task_data_mapping,
-        node_task=_fringe_node_task,
+        node_task=_fringe_fft_node_task,
         input_params=input_params,
         in_memory_compute=False,
     )
@@ -61,10 +75,10 @@ def fringefit_fft_ps(ps: ProcessingSetXdt, ref_ant: str, unixtime: float, interv
         parallel_coords, ps2, ps_partition=["spectral_window_name"]
     )
     subsel = {}
-    res0 = _fringefit_single(ps2, node_task_data_mapping, subsel, ref_ant)
+    res0 = _fringefit_fft_single(ps2, node_task_data_mapping, subsel, ref_ant)
     # Now we collect these into a single DataTree!
-    res_cal_tree = xa.DataTree(
-        children={f"part{i}": xa.DataTree(dataset=q) for i, q in enumerate(res0)}
+    res_cal_tree = xr.DataTree(
+        children={f"part{i}": xr.DataTree(dataset=q) for i, q in enumerate(res0)}
     )
     return res_cal_tree
 
@@ -73,7 +87,7 @@ def _fringefit_global_single(
         node_task_data_mapping: Mapping,
         data_sub_selection: Mapping,
         ref_ant: str,
-        cal_tree: DataTree,
+        cal_tree: xr.DataTree,
         options: dict
 ):
     """The top level Dask routine for FFT fringefit.
@@ -96,8 +110,6 @@ def _fringefit_global_single(
         in_memory_compute=False,
     )
     dask_graph = generate_dask_workflow(graph)
-    # Strip the singleton list wrapper at source
-    # dask.visualize(dask_graph, filename='least-squares.svg', optimize_graph=True)
     [res] = dask.compute(dask_graph)
     return res
 
@@ -105,7 +117,7 @@ def fringefit_global_ps(ps: ProcessingSetXdt,
                         ref_ant: str,
                         unixtime: float,
                         interval: float,
-                        cal_tree: DataTree,
+                        cal_tree: xr.DataTree,
                         options: dict):
     """Refines a fringefit calibration using an estimate from the fringefit stage
 
@@ -129,7 +141,7 @@ def fringefit_global_ps(ps: ProcessingSetXdt,
     return res_cal_tree
 
 def apply_cal_ps(
-    ps: ProcessingSetXdt, cal_tree: xa.DataTree, unixtime: float, interval: float
+    ps: ProcessingSetXdt, cal_tree: xr.DataTree, unixtime: float, interval: float
 ):
     """Apply a cal_tree to a time slice of a processing set"""
     ps2 = ps.sel(time=slice(unixtime, unixtime + interval))
@@ -167,7 +179,7 @@ def _apply_cal_task(
     return new_xds
 
 def apply_cal_dask(
-    ps: ProcessingSetXdt, cal_tree: xa.DataTree
+    ps: ProcessingSetXdt, cal_tree: xr.DataTree
 ):
     parallel_coords = {}
     node_task_data_mapping = interpolate_data_coords_onto_parallel_coords(

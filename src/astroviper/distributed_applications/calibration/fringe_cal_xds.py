@@ -3,18 +3,9 @@ import xarray as xa
 from xradio.measurement_set.measurement_set_xdt import MeasurementSetXdt
 
 
-# I am surprised this is not some kind of standard function, but the
-# pandas version scolds me for using it on a string.
-#
-# This implementation is O(n^2) but if that is ever an issue we are
-# doing something else very wrong.
 def unique(s):
     "Get the unique characters in a string in the order they occur in the original"
-    u = []
-    for c in s:
-        if c not in u:
-            u.append(c)
-    return u
+    return list(set(s))
 
 
 def make_empty_cal_xds(xds: MeasurementSetXdt):
@@ -52,10 +43,4 @@ def nan_count(j):
 
 def number_count(j):
     return np.sum(~np.isnan(j))
-
-def square_up_last_dimension(v):
-    s = v.shape[:-1] + (2, 2)
-    v2 = np.reshape(v, s)
-    return v2
-
 

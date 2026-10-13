@@ -71,8 +71,13 @@ import os
 import time
 
 import numpy as np
+import toolviper
+print(dir(toolviper))
+import toolviper.utils
 import toolviper.utils.logger as logger
-import toolviper.utils.parameter
+from toolviper.utils import (
+    validate
+    )
 import xarray as xr
 from numcodecs import Blosc
 
@@ -177,7 +182,8 @@ def _collect_dataframes(results, frames):
 
 
 @shares_param_docs
-@toolviper.utils.parameter.validate(config_dir=_PARAM_CONFIG_DIR)
+#@toolviper.utils.parameter.validate(config_dir=_PARAM_CONFIG_DIR)
+@toolviper.utils.validate(config_dir=_PARAM_CONFIG_DIR)
 def moments(
     input_image_store: str,
     moments_image_store: str,
