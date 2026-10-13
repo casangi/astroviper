@@ -4,6 +4,7 @@ import warnings
 import astropy.units as u
 import numpy as np
 import xarray
+import xradio.measurement_set  # noqa: F401 -- registers the xr_ms accessor
 from astropy.coordinates import EarthLocation, SkyCoord, SpectralCoord
 from astropy.time import Time
 from scipy.interpolate import interp1d

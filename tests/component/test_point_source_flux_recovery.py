@@ -19,10 +19,14 @@ correction) on data whose truth is known exactly:
 * The simulator also writes the true sky on the imaging grid
   (``sky_image_params``), so every comparison is pixel by pixel.
 * Imaging: natural weights, Hogbom CLEAN at double precision, restore and
-  primary-beam correction, absolute threshold well below the faintest source,
-  several residual update cycles.  Both polarization modes of the imager are
-  run: the two parallel hands ``XX, YY`` give Stokes ``I, Q`` and all four
-  correlations give ``I, Q, U, V``.
+  primary-beam correction, several residual update cycles.  Both polarization
+  modes of the imager are run: the two parallel hands ``XX, YY`` give Stokes
+  ``I, Q`` and all four correlations give ``I, Q, U, V``.
+* The imaging parameters are the ones that reproduce the truth best in a scan
+  of the iteration controls and the FFT padding (see
+  :func:`iteration_control_params`): an FFT padding of 2, short model updates
+  and a stopping threshold at the numerical floor of the imaging cycle, which
+  is set by the gridding and lies near ``3e-6`` of the brightest source.
 
 For every source, channel and Stokes parameter the CLEAN model flux (a 3 x 3
 pixel box divided by the primary beam) must match the truth to 1 percent of
@@ -33,23 +37,28 @@ beam; the residual alone understates the floor because CLEAN absorbs it into
 the model).  The restored, primary-beam corrected image must match the truth
 convolved with the imager's own clean beam to 2 percent.  Every plane must
 cycle at least twice with a falling peak residual and, in the strict
-variants, stop on the threshold.  The ``1e5`` variant additionally records
-the numerical floor of the cycle; its faint sources are judged against that
-measured floor.
+variants, stop on the threshold.  The sources of the ``1e5`` variant reach
+below the numerical floor; they are judged against the measured floor.
 
-The ``1e5`` variant runs to the cycle limit at the numerical floor.  There the
-peak residual still falls on the whole, but it fluctuates from one cycle to
-the next, and differently on every platform: differences of 1e-13 Jy in the
-residual (rounding in the transforms) decide which pixel CLEAN picks, and from
-then on the peak residuals differ at the percent level.  Linux x86-64 and
-macOS arm64 agree to six digits for 14 cycles and part in cycle 15; rises of
-up to 5 percent above the lowest peak residual reached before have been seen.
-A falling peak residual therefore means that no cycle ends more than
+Near the numerical floor the peak residual still falls on the whole, but it
+fluctuates from one cycle to the next, and differently on every platform:
+differences of 1e-13 Jy in the residual (rounding in the transforms) decide
+which pixel CLEAN picks, and from then on the peak residuals differ at the
+percent level.  In a clean that runs into the floor, Linux x86-64 and macOS
+arm64 agree to six digits for 14 cycles and part in cycle 15; rises of up to 5
+percent above the lowest peak residual reached before have been seen.  A
+falling peak residual therefore means that no cycle ends more than
 ``PEAK_RESIDUAL_RISE`` above the lowest peak residual reached before it; a
 cycle that diverges rises without bound.
 
 Imaging ``I, Q`` from the four-correlation processing set must load only the
 parallel hands and reproduce the image of the two-hand data.
+
+With thermal noise added to the visibilities the entropy stop of the
+iteration control (``entropy_stop``) must end the clean of every plane where
+the residual looks most like noise: with a residual at the level of the
+thermal noise, and with a restored image as close to the truth as the noise
+allows.
 
 The scenario builder and the analysis are plain functions so that
 ``dev/imaging/alma_point_source_recovery`` can rerun them and plot the result.
@@ -76,6 +85,7 @@ from astroviper.processing_functions.imaging.utils.imaging_dict import (
     imaging_dict_to_dataframe,
 )
 from astroviper.processing_functions.imaging.utils.iteration_control import (
+    IMAGING_ENTROPY,
     IMAGING_THRESHOLD,
 )
 from astroviper.processing_functions.simulation.antenna_beams import (
@@ -122,6 +132,10 @@ POLARIZATION_MODES = {
 }
 # RA = local sidereal time at ALMA one hour into the track (16h18m), Dec at the zenith
 PHASE_CENTER = np.array([4.267, np.deg2rad(-23.0)])
+# imaging parameters of the best deconvolution (see iteration_control_params)
+FFT_PADDING = 2.0
+THRESHOLD = 3.3e-6  # Jy, for F_MAX = 1 Jy: the numerical floor of the imaging cycle
+MAX_ITER_PER_CYCLE = 300
 FLUX_RTOL = 0.01
 RESTORED_RTOL = 0.02
 FLOOR_SIGMA = 5.0
@@ -281,8 +295,11 @@ def build_scenario(dynamic_range, seed=0):
     }
 
 
-def simulate(work_dir, scenario, tag, mode="four_correlations"):
-    """Simulate the field and write the truth image; returns the two store paths."""
+def simulate(work_dir, scenario, tag, mode="four_correlations", noise_params=None):
+    """Simulate the field and write the truth image; returns the two store paths.
+
+    ``noise_params`` adds thermal noise (``None``: no noise, unit weights).
+    """
     antenna_xds = read_telescope_layout(LAYOUT)
     ps_store = f"{work_dir}/{tag}.ps.zarr"
     truth_store = f"{work_dir}/{tag}_truth.img.zarr"
@@ -296,6 +313,7 @@ def simulate(work_dir, scenario, tag, mode="four_correlations"):
         phase_center_ra_dec=PHASE_CENTER[None, :],
         beam_models=[airy_disk_model("alma")],
         beam_model_map=np.zeros(antenna_xds.sizes["antenna_name"], int),
+        noise_params=noise_params,
         sky_image_params={
             "image_store": truth_store,
             "image_size": IMAGE_SIZE,
@@ -308,15 +326,34 @@ def simulate(work_dir, scenario, tag, mode="four_correlations"):
 
 
 def iteration_control_params(dynamic_range):
-    """Threshold 300 times below the faintest source, room for many cycles."""
+    """The iteration controls that reproduce the truth best.
+
+    A scan of the controls on this field (restored image against the truth
+    convolved with the clean beam, and the fluxes at the source positions)
+    gave:
+
+    - ``threshold``: the residual update is accurate to about ``3e-6`` of the
+      brightest source (gridding), whatever the dynamic range of the field.
+      Cleaning below that level adds spurious components and makes the
+      fluxes of the sources worse, so the threshold sits at that floor and
+      does not follow the faintest source.
+    - ``max_iter_per_cycle``: short model updates, so that the residual is
+      recomputed often.
+    - ``gain``, ``psf_sidelobe_factor`` and the PSF fractions make no
+      difference to the result on this field; a gain above 0.1 is worse
+      once the clean reaches the floor.
+
+    The FFT padding of 2 (``FFT_PADDING``) lowers the floor by a third
+    against a padding of 1.2.
+    """
     return {
         "max_iter": 200000,
         "max_cycles": 40,
-        "threshold": F_MAX / dynamic_range / 300.0,
+        "threshold": THRESHOLD * F_MAX,
         "primary_beam_limit": 0.2,
         "gain": 0.1,
         "psf_sidelobe_factor": 1.5,
-        "max_iter_per_cycle": 3000,
+        "max_iter_per_cycle": MAX_ITER_PER_CYCLE,
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
     }
@@ -330,8 +367,12 @@ def image(
     mode="four_correlations",
     n_mapping_parallelism=5,
     polarization_coords=None,
+    controls=None,
 ):
-    """Hogbom CLEAN at double precision with restore and PB correction, in the Stokes planes of ``mode``."""
+    """Hogbom CLEAN at double precision with restore and PB correction, in the Stokes planes of ``mode``.
+
+    ``controls`` replaces the iteration controls of :func:`iteration_control_params`.
+    """
     ps_xdt = open_processing_set(ps_store)
     combined = ps_xdt.xr_ps.get_combined_field_and_source_xds()
     phase_direction = combined.FIELD_PHASE_CENTER_DIRECTION.sel(
@@ -346,11 +387,12 @@ def image(
         "frequency_coords": ps_xdt.xr_ps.get_freq_axis().values,
         "polarization_coords": polarization_coords,
         "time_coords": [0],
-        "fft_padding": 1.2,
+        "fft_padding": FFT_PADDING,
         "cpp_gridder": True,
     }
     image_store = f"{work_dir}/{tag}.img.zarr"
-    controls = iteration_control_params(dynamic_range)
+    if controls is None:
+        controls = iteration_control_params(dynamic_range)
     result = image_cube_single_field(
         ps_store=ps_store,
         image_store=image_store,
@@ -673,3 +715,73 @@ def test_parallel_hands_of_four_correlation_data(tmp_path):
             )
     with pytest.raises(ValueError, match="needed for the requested Stokes planes"):
         image(str(tmp_path), ps_two, "refused", 1e3, "four_correlations")
+
+
+def test_entropy_stop_with_thermal_noise(tmp_path):
+    """With noise in the data the entropy stop ends every plane at a residual
+    of the level of the thermal noise, close to the truth."""
+    scenario = build_scenario(1e3)
+    ps_store, truth_store = simulate(
+        str(tmp_path), scenario, "noise", noise_params={"random_seed": 7}
+    )
+    (ms_xdt,) = list(load_processing_set(ps_store).values())
+    # natural weights: the noise of a Stokes image is that of one visibility
+    # over the root of the number of visibilities of the two hands it uses
+    sigma = 1.0 / np.sqrt(np.nanmax(ms_xdt.WEIGHT.values))
+    n_visibilities = ms_xdt.sizes["time"] * ms_xdt.sizes["baseline_id"]
+    thermal_noise = sigma / np.sqrt(2 * n_visibilities)
+    controls = iteration_control_params(1e3)
+    controls.update(
+        {
+            "threshold": 0.0,
+            "max_cycles": -1,
+            "max_iter_per_cycle": 100,
+            "entropy_stop": True,
+        }
+    )
+    image_store, deconvolution, _ = image(
+        str(tmp_path), ps_store, "noise", 1e3, controls=controls
+    )
+    convergence = imaging_dict_to_dataframe(deconvolution)
+    assert len(convergence) == len(frequencies()) * len(STOKES)
+    assert (convergence.stop_code_imaging == IMAGING_ENTROPY).all(), convergence[
+        ["chan", "pol", "stop_code_imaging"]
+    ].to_string()
+    # the clean stopped long before its budget, and Stokes I, which holds the
+    # flux, took more iterations than the other planes
+    assert convergence.iter_total.max() < 3000
+    stokes_i = convergence[convergence.pol == 0].iter_total
+    assert stokes_i.min() > convergence[convergence.pol != 0].iter_total.max()
+    for _, plane in convergence.iterrows():
+        entropy = np.asarray(plane.entropy, dtype=float)
+        followed = entropy[np.isfinite(entropy)]
+        # one entropy per imaging cycle; the last one recorded for a cycle in
+        # which the plane cleaned lies below the highest one
+        assert len(entropy) == plane.n_cycles
+        assert followed.max() > followed[-1]
+
+    img = load_image(image_store)
+    truth = load_image(truth_store)
+    residual = img.SKY_RESIDUAL.values[0]
+    restored = img.SKY_RESTORED.values[0]
+    primary_beam = np.nan_to_num(img.PRIMARY_BEAM.values[0])
+    mask = img.MASK.values[0].astype(bool)
+    beam = img.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values[0]
+    truth_sky = truth.SKY.values[0]
+    for c in range(residual.shape[0]):
+        for k in range(residual.shape[1]):
+            inside = mask[c, k]
+            residual_rms = np.sqrt(np.mean(residual[c, k][inside] ** 2))
+            assert 0.6 * thermal_noise < residual_rms < 1.4 * thermal_noise, (
+                c,
+                k,
+                residual_rms,
+                thermal_noise,
+            )
+            # the restored image against the truth as the imager sees it
+            # (attenuated by the primary beam), convolved with the clean beam
+            convolved = restore_truth(
+                truth_sky[c, k] * primary_beam[c, k], beam[c, 0], CELL_SIZE
+            )
+            error = np.sqrt(np.mean((convolved - restored[c, k])[inside] ** 2))
+            assert error < 1.3 * thermal_noise, (c, k, error, thermal_noise)

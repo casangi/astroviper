@@ -625,6 +625,113 @@ def test_gaussian_subtraction_keeps_negative_sidelobe_magnitude():
     np.testing.assert_allclose(result, [[[0.4]]])
 
 
+def _max_sidelobe_reference(psf_image, ellipse_params, delta, fallback):
+    """The sidelobe measurement written with meshgrids and whole-plane
+    expressions, as before it was done in place: the in-place version must
+    give the same numbers bit for bit."""
+    output = np.zeros(psf_image.shape[:3], dtype=np.float64)
+    for index in np.ndindex(psf_image.shape[:3]):
+        psf_2d = psf_image[index]
+        finite = np.isfinite(psf_2d)
+        beam = ellipse_params[index]
+        valid_beam = np.all(np.isfinite(beam)) and np.all(beam[:2] > 0.0)
+        finite_psf = np.where(finite, psf_2d, 0.0)
+        peak_l, peak_m = np.unravel_index(np.argmax(finite_psf), psf_2d.shape)
+        peak = finite_psf[peak_l, peak_m]
+        if not np.any(finite) or not valid_beam or peak <= 0.0:
+            output[index] = fallback[index]
+            continue
+        l_grid, m_grid = np.meshgrid(
+            (np.arange(psf_2d.shape[0]) - peak_l) * abs(delta[0]),
+            (np.arange(psf_2d.shape[1]) - peak_m) * abs(delta[1]),
+            indexing="ij",
+        )
+        theta = 0.5 * np.pi - beam[2]
+        major = l_grid * np.cos(theta) - m_grid * np.sin(theta)
+        minor = l_grid * np.sin(theta) + m_grid * np.cos(theta)
+        fitted = peak * np.exp(
+            -0.5
+            * (
+                (major / (beam[0] / FWHM_factor)) ** 2
+                + (minor / (beam[1] / FWHM_factor)) ** 2
+            )
+        )
+        delobed_maximum = np.max(np.where(finite, psf_2d - fitted, -np.inf))
+        original_minimum = np.min(np.where(finite, psf_2d, np.inf))
+        output[index] = max(abs(original_minimum), abs(delobed_maximum))
+    return output
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])
+def test_gaussian_subtraction_matches_whole_plane_formula(dtype):
+    """Bitwise the same as the whole-plane formula, slice by slice, with
+    non-finite pixels, a zero slice and an invalid beam falling back."""
+    rng = np.random.default_rng(7)
+    n_l, n_m = 61, 47
+    l_grid, m_grid = np.meshgrid(
+        np.arange(n_l) - 30.3, np.arange(n_m) - 22.6, indexing="ij"
+    )
+    psf = np.empty((1, 3, 2, n_l, n_m), dtype=dtype)
+    beam = np.empty((1, 3, 2, 3))
+    for index in np.ndindex(psf.shape[:3]):
+        sigma_l, sigma_m = rng.uniform(2.0, 6.0, size=2)
+        psf[index] = np.exp(
+            -0.5 * ((l_grid / sigma_l) ** 2 + (m_grid / sigma_m) ** 2)
+        ) + 0.05 * rng.standard_normal((n_l, n_m))
+        beam[index] = [
+            FWHM_factor * max(sigma_l, sigma_m) * 0.05,
+            FWHM_factor * min(sigma_l, sigma_m) * 0.05,
+            rng.uniform(-np.pi, np.pi),
+        ]
+    psf[0, 0, 1, 3, 4] = np.nan
+    psf[0, 0, 1, 50, 9] = np.inf
+    psf[0, 1, 0, 20:25, 30] = -np.inf
+    psf[0, 1, 1] = 0.0  # no positive peak: fallback
+    beam[0, 2, 0, 0] = np.nan  # invalid beam: fallback
+    delta = np.array([-0.05, 0.07])
+    fallback = rng.uniform(0.1, 0.2, size=psf.shape[:3])
+
+    result = _max_sidelobe_after_gaussian_subtraction(
+        psf, beam, delta, fallback=fallback
+    )
+
+    np.testing.assert_array_equal(
+        result, _max_sidelobe_reference(psf, beam, delta, fallback)
+    )
+    assert result[0, 1, 1] == fallback[0, 1, 1]
+    assert result[0, 2, 0] == fallback[0, 2, 0]
+
+
+def test_gaussian_subtraction_peak_memory():
+    """The sidelobe measurement holds two planes and a mask at its peak,
+    whether or not NumPy reuses the temporaries of chained expressions (the
+    whole-plane formula held eight planes, nine without that reuse)."""
+    import tracemalloc
+
+    n = 600
+    plane_bytes = n * n * 8
+    psf = np.zeros((1, 1, 2, n, n))
+    axis = np.arange(n) - n // 2
+    psf[..., :, :] = np.exp(-0.5 * (axis[:, None] ** 2 + axis[None, :] ** 2) / 9.0)
+    psf[0, 0, 1, 0, 0] = np.nan
+    beam = np.tile([3.0 * FWHM_factor, 3.0 * FWHM_factor, 0.0], (1, 1, 2, 1))
+
+    # Leave tracing that someone else started (e.g. pytest -X tracemalloc) on.
+    was_tracing = tracemalloc.is_tracing()
+    if not was_tracing:
+        tracemalloc.start()
+    try:
+        before, _ = tracemalloc.get_traced_memory()
+        tracemalloc.reset_peak()
+        _max_sidelobe_after_gaussian_subtraction(psf, beam, np.array([1.0, 1.0]))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        if not was_tracing:
+            tracemalloc.stop()
+
+    assert (peak - before) / plane_bytes < 2.5, (peak - before) / plane_bytes
+
+
 def test_psf_gaussian_fit_core_per_slice_boxes():
     """Per-slice blc/trc arrays must fit each slice with its own window."""
     shape = (1, 2, 1, 81, 81)

@@ -28,6 +28,11 @@ owns a disjoint set of chunks, so reads and writes are embarrassingly parallel.
 The functions deliberately do not remove or replace the production
 :func:`astroviper.utils.io.write_result_chunk_to_disk_using_zarr` /
 ``load_processing_set`` paths; they are selected by the ``skunk_works`` flag.
+
+A Measurement Set v2 input of this path (``ps_store`` a Measurement Set v2,
+``skunk_works=True``) is read by the sibling module
+:mod:`astroviper.node_tasks.imaging.utils.skunk_works_msv2` instead, through
+XRADIO's ``xradio_msv2`` engine; the writers here serve both inputs.
 """
 
 from __future__ import annotations

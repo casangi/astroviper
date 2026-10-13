@@ -15,5 +15,10 @@ on:
 jobs:
   test:
     uses: nrao/gh-actions-templates-public/.github/workflows/python-testing-integration-template.yml@main
+    # TEMPORARY, DROP BEFORE MERGE: test against XRADIO's Measurement Set v2
+    # engine branch (casangi/xradio#630, stacked on #625) so the MSv2 tests
+    # run; once it is on XRADIO main the default ref (main) carries it.
+    with:
+      xradio_ref: 629-msv2-xarray-backend
     secrets:
       TESTVIPER_DISPATCH_TOKEN: ${{ secrets.TESTVIPER_DISPATCH_TOKEN }}
