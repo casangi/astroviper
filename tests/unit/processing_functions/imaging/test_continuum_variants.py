@@ -9,7 +9,6 @@ import xarray as xr
 
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
     convert_mvc_cubes_to_taylor_normal_equations,
-    primary_beam_correct_restored_continuum,
     restore_image,
 )
 from tests.utils.continuum_images import make_continuum_image
@@ -66,27 +65,29 @@ def test_restoration_rejects_remaining_invalid_layouts(fault, message):
 def test_pb_correction_cutoff_includes_exact_boundary(dtype):
     limit = dtype(0.25)
     values = np.array(
-        [
-            np.nextafter(limit, dtype(0)),
-            limit,
-            np.nextafter(limit, dtype(1)),
-            np.nan,
-            np.inf,
-        ],
+        [np.nextafter(limit, dtype(0)), limit, np.nextafter(limit, dtype(1)), np.nan],
         dtype=dtype,
     )
-    image = xr.Dataset(
-        {
-            "SKY_RESTORED": ("l", np.full(5, 2.0, dtype=dtype)),
-            "PRIMARY_BEAM": ("l", values),
-        },
-        attrs={"data_groups": {"restored": {"sky": "SKY_RESTORED"}}},
+    image = make_continuum_image()
+    for name in ("SKY_MODEL", "SKY_RESIDUAL", "POINT_SPREAD_FUNCTION"):
+        image[name] = image[name].astype(dtype)
+    primary_beam = np.tile(values, 16).reshape(1, 1, 8, 8)
+    image["PRIMARY_BEAM"] = xr.DataArray(
+        primary_beam,
+        dims=("time", "polarization", "l", "m"),
+        coords={key: image.coords[key] for key in ("time", "polarization", "l", "m")},
     )
-    result = primary_beam_correct_restored_continuum(image, pblimit=float(limit))
-    np.testing.assert_array_equal(
-        np.isfinite(result.SKY_RESTORED_PBCOR), [False, True, True, False, False]
+
+    result, _ = restore_image(
+        image,
+        primary_beam_correction=True,
+        primary_beam_limit=float(limit),
     )
-    np.testing.assert_allclose(result.SKY_RESTORED_PBCOR.values[1:3], 2 / values[1:3])
+    finite = np.isfinite(result.SKY_RESTORED_PBCOR.values[0, 0])
+    np.testing.assert_array_equal(finite[:, 0::4], False)
+    np.testing.assert_array_equal(finite[:, 1::4], True)
+    np.testing.assert_array_equal(finite[:, 2::4], True)
+    np.testing.assert_array_equal(finite[:, 3::4], False)
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])

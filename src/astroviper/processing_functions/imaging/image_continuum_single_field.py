@@ -2389,6 +2389,9 @@ def restore_image(
     image_data_group_in_model_name="model",
     image_data_group_out_restore_name="restored",
     processing_function_threads=1,
+    primary_beam_correction=False,
+    primary_beam_limit=0.2,
+    primary_beam_key="primary_beam",
 ):
     """Restore the continuum image.
 
@@ -2414,7 +2417,9 @@ def restore_image(
         │
         ├── convolve the model with the restoring beam
         ├── add the residual image
-        └── produce the restored image
+        ├── optionally divide model and residual by the primary beam
+        │   before restoring the model
+        └── produce the restored image and PB-corrected image
         │
         ▼
     copy the restored image back into the
@@ -2441,10 +2446,22 @@ def restore_image(
     processing_function_threads : int, optional
         Number of threads supplied to the cube restoration backend.
 
+    primary_beam_correction : bool, optional
+        If ``True``, also produce the primary-beam-corrected Taylor-zero image
+        using the shared cube-restoration convention
+        ``(model / primary_beam) * clean_beam + residual / primary_beam``.
+
+    primary_beam_limit : float, optional
+        Primary-beam cutoff below which the corrected image is blanked.
+
+    primary_beam_key : str, optional
+        Role key of the primary beam in the residual data group.
+
     Returns
     -------
     img_xds : xarray.Dataset
-        Continuum dataset with the restored Taylor-zero image added.
+        Continuum dataset with the restored Taylor-zero image and, when
+        requested, its primary-beam-corrected counterpart added.
 
     timing_df : pandas.DataFrame
         Timing information returned by the restoration backend.
@@ -2454,7 +2471,9 @@ def restore_image(
     This function is a compatibility layer around the existing cube restoration
     routine. Although the surrounding imaging algorithm is MT-MFS, the current
     restoration operates only on the zeroth Taylor coefficient and therefore
-    produces the restored reference-frequency continuum image."""
+    produces the restored reference-frequency continuum image. Primary-beam
+    correction follows the shared cube restoration convention from ``main``;
+    it is not a post-restoration division."""
 
     import copy
 
@@ -2487,6 +2506,12 @@ def restore_image(
 
     residual_group = data_groups[image_data_group_in_residual_name]
     model_group = data_groups[image_data_group_in_model_name]
+
+    if primary_beam_correction and not 0.0 <= float(primary_beam_limit) < 1.0:
+        raise ValueError(
+            "primary_beam_limit must satisfy 0 <= primary_beam_limit < 1; "
+            f"received {primary_beam_limit}."
+        )
 
     residual_name = residual_group.get("sky")
     model_name = model_group.get("sky")
@@ -2696,6 +2721,70 @@ def restore_image(
 
     cube_xds[beam_name] = cube_beam_da.transpose(*expected_beam_dims)
 
+    # The continuum primary beam is already reduced to the reference-frequency
+    # plane. Present it to the shared restoration backend as a one-channel cube.
+    if primary_beam_correction:
+        primary_beam_name = residual_group.get(primary_beam_key)
+        if primary_beam_name is None:
+            raise KeyError(
+                f"Residual data group {image_data_group_in_residual_name!r} "
+                f"does not define {primary_beam_key!r}."
+            )
+        if primary_beam_name not in img_xds:
+            raise KeyError(
+                f"Primary-beam variable {primary_beam_name!r} is missing from img_xds."
+            )
+
+        primary_beam_da = img_xds[primary_beam_name]
+        if "frequency" in primary_beam_da.dims:
+            if primary_beam_da.sizes["frequency"] != 1:
+                raise ValueError(
+                    "Continuum restoration requires one averaged primary-beam "
+                    "plane, not a multi-channel primary-beam cube."
+                )
+            cube_primary_beam_da = primary_beam_da.isel(
+                frequency=slice(0, 1)
+            ).assign_coords(frequency=cube_xds.coords["frequency"])
+        elif "taylor_term" in primary_beam_da.dims:
+            cube_primary_beam_da = (
+                primary_beam_da.isel(taylor_term=slice(0, 1))
+                .rename({"taylor_term": "frequency"})
+                .assign_coords(frequency=cube_xds.coords["frequency"])
+            )
+        else:
+            frequency_axis = (
+                primary_beam_da.dims.index("time") + 1
+                if "time" in primary_beam_da.dims
+                else 0
+            )
+            cube_primary_beam_da = primary_beam_da.expand_dims(
+                frequency=cube_xds.coords["frequency"].values,
+                axis=frequency_axis,
+            )
+
+        expected_primary_beam_dims = (
+            "time",
+            "frequency",
+            "polarization",
+            "l",
+            "m",
+        )
+        missing_primary_beam_dims = [
+            dim
+            for dim in expected_primary_beam_dims
+            if dim not in cube_primary_beam_da.dims
+        ]
+        if missing_primary_beam_dims:
+            raise ValueError(
+                f"Primary-beam variable {primary_beam_name!r} cannot be converted "
+                f"to the expected cube dimensions {expected_primary_beam_dims}. "
+                f"Missing dimensions: {missing_primary_beam_dims}; "
+                f"found {cube_primary_beam_da.dims}."
+            )
+        cube_xds[primary_beam_name] = cube_primary_beam_da.transpose(
+            *expected_primary_beam_dims
+        )
+
     # Ensure the temporary cube data-group registrations refer to variables
     # actually installed above.
     cube_data_groups = cube_xds.attrs.setdefault("data_groups", {})
@@ -2707,6 +2796,8 @@ def restore_image(
     cube_residual_group["sky"] = residual_name
     cube_residual_group["point_spread_function"] = psf_name
     cube_residual_group[beam_fit_key] = beam_name
+    if primary_beam_correction:
+        cube_residual_group[primary_beam_key] = primary_beam_name
 
     cube_model_group = cube_data_groups.setdefault(
         image_data_group_in_model_name,
@@ -2723,6 +2814,9 @@ def restore_image(
         image_data_group_in_model_name=image_data_group_in_model_name,
         image_data_group_out_restore_name=(image_data_group_out_restore_name),
         processing_function_threads=processing_function_threads,
+        primary_beam_correction=primary_beam_correction,
+        primary_beam_limit=primary_beam_limit,
+        primary_beam_key=primary_beam_key,
     )
 
     restored_group = cube_xds.attrs["data_groups"][image_data_group_out_restore_name]
@@ -2747,106 +2841,27 @@ def restore_image(
 
     img_xds[restored_name] = restored_da
 
+    continuum_restored_group = copy.deepcopy(restored_group)
+    if primary_beam_correction:
+        corrected_name = restored_group["sky_primary_beam_corrected"]
+        if corrected_name not in cube_xds:
+            raise RuntimeError(
+                "The cube restoration routine registered primary-beam-corrected "
+                f"variable {corrected_name!r}, but did not create it."
+            )
+        continuum_corrected_name = "SKY_RESTORED_PBCOR"
+        img_xds[continuum_corrected_name] = cube_xds[corrected_name].isel(
+            frequency=0, drop=True
+        )
+        continuum_restored_group["sky_primary_beam_corrected"] = (
+            continuum_corrected_name
+        )
+        img_xds.attrs.setdefault("data_groups", {})["restored_pbcor"] = {
+            "sky": continuum_corrected_name
+        }
+
     img_xds.attrs.setdefault("data_groups", {})[image_data_group_out_restore_name] = (
-        copy.deepcopy(restored_group)
+        continuum_restored_group
     )
 
     return img_xds, timing_df
-
-
-def primary_beam_correct_restored_continuum(
-    img_xds,
-    *,
-    pblimit=0.2,
-    primary_beam_name="PRIMARY_BEAM",
-    restored_data_group_name="restored",
-    output_data_group_name="restored_pbcor",
-    output_variable_name="SKY_RESTORED_PBCOR",
-):
-    """PB-correct the restored Taylor-zero continuum image.
-
-    Only the final restored reference-frequency intensity image is corrected.
-    The model, residual Taylor stack, higher Taylor terms, and model-update
-    calculations remain in the apparent-sky convention.
-    """
-    import numpy as np
-    import xarray as xr
-
-    from astroviper.utils.data_group_tools import modify_data_groups_xds
-
-    if not 0.0 <= float(pblimit) < 1.0:
-        raise ValueError(f"pblimit must satisfy 0 <= pblimit < 1; received {pblimit}.")
-
-    data_groups = img_xds.attrs.get("data_groups", {})
-
-    if restored_data_group_name not in data_groups:
-        raise KeyError(f"Restored data group {restored_data_group_name!r} is missing.")
-
-    restored_name = data_groups[restored_data_group_name].get("sky")
-
-    if restored_name is None or restored_name not in img_xds:
-        raise KeyError(
-            f"Restored data group {restored_data_group_name!r} "
-            "does not contain an accessible sky image."
-        )
-
-    if primary_beam_name not in img_xds:
-        raise KeyError(f"Primary-beam variable {primary_beam_name!r} is missing.")
-
-    restored = img_xds[restored_name]
-    primary_beam = img_xds[primary_beam_name]
-
-    # Restoration operates on the Taylor-zero continuum plane.  The restored
-    # dataset may retain the model's Taylor axis for bookkeeping, but PB
-    # correction is a reference-frequency image product rather than a Taylor
-    # stack, so discard that singleton science selection explicitly.
-    if "taylor_term" in restored.dims:
-        restored = restored.isel(taylor_term=0, drop=True)
-
-    # The averaged PB should no longer have a frequency axis. This check
-    # catches accidental retention of a chunk-local PB cube.
-    if "frequency" in primary_beam.dims:
-        if primary_beam.sizes["frequency"] != 1:
-            raise ValueError(
-                "The continuum PB correction requires one averaged "
-                "primary beam, not a multi-channel PB cube."
-            )
-
-        primary_beam = primary_beam.isel(
-            frequency=0,
-            drop=True,
-        )
-
-    valid = np.isfinite(primary_beam) & (primary_beam >= float(pblimit))
-
-    corrected = xr.where(
-        valid,
-        restored / primary_beam,
-        np.nan,
-    )
-
-    corrected.attrs = restored.attrs.copy()
-    corrected.attrs.update(
-        {
-            "description": (
-                "Restored Taylor-zero continuum intensity divided by "
-                "the globally averaged primary beam."
-            ),
-            "primary_beam_corrected": True,
-            "primary_beam_variable": primary_beam_name,
-            "pblimit": float(pblimit),
-        }
-    )
-
-    img_xds[output_variable_name] = corrected
-
-    modify_data_groups_xds(
-        img_xds,
-        data_group_out_name=output_data_group_name,
-        data_group_out={
-            "sky": output_variable_name,
-        },
-        description=("Primary-beam-corrected restored continuum intensity."),
-    )
-
-    return img_xds

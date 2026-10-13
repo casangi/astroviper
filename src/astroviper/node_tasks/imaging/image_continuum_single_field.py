@@ -2899,21 +2899,9 @@ def continuum_finalize_node(
                 "processing_function_threads",
                 1,
             ),
+            primary_beam_correction=input_params.get("pbcor", False),
+            primary_beam_limit=input_params.get("pblimit", 0.2),
         )
-
-        if input_params.get("pbcor", False):
-            from astroviper.processing_functions.imaging.image_continuum_single_field import (
-                primary_beam_correct_restored_continuum,
-            )
-
-            img_xds = primary_beam_correct_restored_continuum(
-                img_xds,
-                pblimit=input_params.get("pblimit", 0.2),
-                primary_beam_name="PRIMARY_BEAM",
-                restored_data_group_name="restored",
-                output_data_group_name="restored_pbcor",
-                output_variable_name="SKY_RESTORED_PBCOR",
-            )
 
         input_data["timing_restore"] = restore_timing_df.reset_index(drop=True)
 

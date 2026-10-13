@@ -26,8 +26,8 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     make_mvc_taylor_normal_equation_contributions,
     prepare_model_uv_continuum_single_field,
     prepare_model_uv_mvc_single_field,
-    primary_beam_correct_restored_continuum,
     residual_update_continuum_single_field,
+    restore_image,
 )
 from astroviper.processing_functions.imaging.imaging_setup_continuum_single_field import (
     _convert_primary_beam_to_reference_frequency,
@@ -39,6 +39,7 @@ from astroviper.processing_functions.imaging.utils import Key
 from astroviper.processing_functions.imaging.utils.frequency_mapping import (
     map_visibility_frequencies_to_image,
 )
+from tests.utils.continuum_images import make_continuum_image
 
 
 def _model_dataset(value, *, include_primary_beam=False):
@@ -231,35 +232,40 @@ def test_continuum_prediction_calls_shared_degridder_with_frequency_grid(monkeyp
 
 
 def test_primary_beam_correction_returns_restored_taylor_zero_only():
-    """The PB-corrected continuum image has no Taylor-stack dimension."""
-    image = xr.Dataset(
-        {
-            "SKY_RESTORED": (
-                ("time", "taylor_term", "polarization", "l", "m"),
-                np.asarray([[[[[4.0, 4.0]]], [[[40.0, 40.0]]]]]),
-            ),
-            "PRIMARY_BEAM": (
-                ("time", "frequency", "polarization", "l", "m"),
-                np.asarray([[[[[1.0, 0.1]]]]]),
-            ),
-        },
-        coords={
-            "time": [0],
-            "taylor_term": [0, 1],
-            "frequency": [1.5e9],
-            "polarization": ["I"],
-            "l": [0.0],
-            "m": [0.0, 1.0],
-        },
-        attrs={
-            "type": "image_dataset",
-            "data_groups": {"restored": {"sky": "SKY_RESTORED"}},
-        },
+    """PB correction uses the model-first convention and drops Taylor axes."""
+    from astroviper.processing_functions.imaging.restore import (
+        _clean_beam_kernel_ft,
+        primary_beam_corrected_plane,
     )
-    result = primary_beam_correct_restored_continuum(image, pblimit=0.2)
+
+    image = make_continuum_image()
+    primary_beam = np.linspace(0.25, 1.0, 64).reshape(1, 1, 8, 8)
+    image["PRIMARY_BEAM"].data[...] = primary_beam
+    model = image.SKY_MODEL.isel(taylor_term=0).values.copy()
+    residual = image.SKY_RESIDUAL.isel(taylor_term=0).values.copy()
+    beam = image.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values
+
+    result, _ = restore_image(
+        image,
+        primary_beam_correction=True,
+        primary_beam_limit=0.2,
+    )
     corrected = result["SKY_RESTORED_PBCOR"]
     assert corrected.dims == ("time", "polarization", "l", "m")
-    np.testing.assert_allclose(corrected.values, [[[[4.0, np.nan]]]], equal_nan=True)
+
+    kernel_ft = _clean_beam_kernel_ft(beam[0, 0], 8, 8, 1.0e-5, model.dtype, 1)
+    expected = primary_beam_corrected_plane(
+        primary_beam[0, 0],
+        0.2,
+        model[0, 0],
+        residual[0, 0],
+        kernel_ft=kernel_ft,
+    )
+    np.testing.assert_allclose(corrected.values[0, 0], expected)
+    old_post_restore_division = (
+        result.SKY_RESTORED.isel(taylor_term=0).values[0, 0] / primary_beam[0, 0]
+    )
+    assert not np.allclose(corrected.values[0, 0], old_post_restore_division)
 
 
 @pytest.mark.parametrize(

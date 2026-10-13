@@ -10,8 +10,9 @@ from astroviper.processing_functions.imaging.image_continuum_single_field import
     finalize_mvc_taylor_normal_equations,
     form_residual_grid_from_cache,
     make_mvc_taylor_normal_equation_contributions,
-    primary_beam_correct_restored_continuum,
+    restore_image,
 )
+from tests.utils.continuum_images import make_continuum_image
 
 
 def _mvc_inputs(dtype=np.float64):
@@ -234,34 +235,30 @@ def test_model_accumulation_rejects_incompatible_state(specmode, fault):
     [
         "channel_beam",
         "missing_beam",
-        "missing_restored",
+        "missing_model",
         "negative_limit",
         "unit_limit",
     ],
 )
 def test_pb_correction_rejects_invalid_final_products(fault):
     """An unreduced channel beam must not broadcast a continuum image to a cube."""
-    image = xr.Dataset(
-        {
-            "RESTORED": (
-                ("time", "taylor_term", "polarization", "l", "m"),
-                np.ones((1, 2, 1, 2, 2)),
-            ),
-            "PRIMARY_BEAM": (
-                ("time", "frequency", "polarization", "l", "m"),
-                np.ones((1, 2 if fault == "channel_beam" else 1, 1, 2, 2)),
-            ),
-        },
-        attrs={"data_groups": {"restored": {"sky": "RESTORED"}}},
-    )
+    image = make_continuum_image()
+    if fault == "channel_beam":
+        image["PRIMARY_BEAM"] = image.PRIMARY_BEAM.expand_dims(
+            frequency=[100.0, 110.0], axis=1
+        )
     pblimit = 0.2
     if fault == "missing_beam":
         image = image.drop_vars("PRIMARY_BEAM")
-    elif fault == "missing_restored":
-        image = image.drop_vars("RESTORED")
+    elif fault == "missing_model":
+        image = image.drop_vars("SKY_MODEL")
     elif fault == "negative_limit":
         pblimit = -0.1
     elif fault == "unit_limit":
         pblimit = 1.0
     with pytest.raises(KeyError if fault.startswith("missing") else ValueError):
-        primary_beam_correct_restored_continuum(image, pblimit=pblimit)
+        restore_image(
+            image,
+            primary_beam_correction=True,
+            primary_beam_limit=pblimit,
+        )

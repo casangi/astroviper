@@ -2626,7 +2626,10 @@ def image_continuum_single_field(
     image_store : str
         Path/URL of the on-disk Zarr image cube.
     pbcor : bool
-        Request PB-corrected output and model restoration, respectively.
+        If ``True``, also write ``SKY_RESTORED_PBCOR`` using the shared
+        model-first restoration convention: divide the model by the primary
+        beam before clean-beam convolution, then add the residual divided by
+        the primary beam. Requires ``restore=True``.
     restore : bool
         If ``True`` produce a restored image after deconvolution: the model
         convolved with the clean beam (the Gaussian fit to the PSF) plus the
@@ -2677,7 +2680,8 @@ def image_continuum_single_field(
         becomes non-finite or rises more than 10% above the smallest measured
         peak.
     pblimit : float
-        PB cutoff for MVC channel correction and final PB correction.
+        PB cutoff for MVC channel correction and final model-first PB-corrected
+        restoration. Pixels below this limit are blanked with NaN.
     instrument_polarization_basis : str
         Correlation (instrument) polarization basis the gridding is performed in:
         ``"linear"`` or ``"circular"``. The residual update grids and degrids the
