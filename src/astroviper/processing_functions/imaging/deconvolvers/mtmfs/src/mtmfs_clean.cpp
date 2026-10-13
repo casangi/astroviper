@@ -496,7 +496,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
     int stop = check_convergence(0, false);
     int iterdone = 0;
     if (stop == kStopThreshold) {
-        out.iterations = 0;
+        out.iter_done = 0;
         out.stop_code = kStopThreshold;
     } else {
         for (int itercount = 0; itercount < max_iter_per_cycle; ++itercount) {
@@ -591,7 +591,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
             if (stop) break;
         }
         if (stop == 0) stop = kStopMaxIter;
-        out.iterations = iterdone;
+        out.iter_done = iterdone;
         out.stop_code = stop;
 
         // Free the search state before allocating the residual-update buffers.
@@ -615,9 +615,9 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
     }
 
     if (mask != nullptr)
-        out.peak_residual = peak_abs_masked<T>(residual, mask, nimg);
+        out.peakres = peak_abs_masked<T>(residual, mask, nimg);
     else
-        out.peak_residual = peak_abs<T>(residual, nimg);
+        out.peakres = peak_abs<T>(residual, nimg);
     out.model_flux = sum_array<T>(model, nimg);
     return out;
 }

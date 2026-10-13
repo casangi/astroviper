@@ -1882,7 +1882,11 @@ def _model_update_native_mtmfs(
     import pandas as pd
 
     from astroviper.processing_functions.imaging.deconvolvers import mtmfs
-    from astroviper.processing_functions.imaging.utils import ImagingDict
+    from astroviper.processing_functions.imaging.utils import ImagingDict, StopCode
+    from astroviper.processing_functions.imaging.utils.iteration_control import (
+        IMAGING_CONTINUE,
+        MODEL_UPDATE_STOP_DESCRIPTIONS,
+    )
 
     residual_da = img_xds[residual_name].transpose(
         "time", "taylor_term", "polarization", "l", "m"
@@ -2012,27 +2016,30 @@ def _model_update_native_mtmfs(
             )
             model[tt, :, pp, :, :] = model_work
             final_selected = support[tt, pp] & np.isfinite(residual_work[0])
+            model_update_stop_code = int(result["stop_code"])
             fields = {
                 "max_iter": deconvolve_params.get("max_iter"),
                 "threshold_per_cycle": threshold_per_cycle,
-                "iter_done": int(result["iterations_performed"]),
+                "iter_done": int(result["iter_done"]),
                 "gain": deconvolve_params.get("gain", 0.1),
                 "max_psf_sidelobe": float(max_sidelobe[tt, pp]),
-                "stop_code": result["stop_code"],
+                "stop_code": StopCode(
+                    imaging=IMAGING_CONTINUE,
+                    model_update=model_update_stop_code,
+                ),
+                "stop_description": MODEL_UPDATE_STOP_DESCRIPTIONS[
+                    model_update_stop_code
+                ],
                 "stokes": img_xds.coords["polarization"].values[pp],
                 "frequency": img_xds.attrs.get("reference_frequency", 0.0),
                 "time": img_xds.coords["time"].values[tt],
                 "start_model_flux": 0.0,
-                "model_flux": float(model_work[0].sum()),
+                "model_flux": float(result["model_flux"]),
                 "start_peakres": start_peak,
                 "start_peakres_nomask": start_peak_nomask,
-                "peakres": float(
-                    np.max(np.abs(residual_work[0][final_selected]), initial=0.0)
-                ),
+                "peakres": float(result["peakres"]),
                 "peakres_nomask": float(np.max(np.abs(residual_work[0]), initial=0.0)),
                 "masksum": int(np.count_nonzero(final_selected)),
-                "mtmfs_converged": bool(result["converged"]),
-                "mtmfs_stop_code": int(result["stop_code"]),
                 "scales": result["scales"],
                 "hessian_condition_number": result["hessian_condition_number"],
             }

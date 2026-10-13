@@ -118,8 +118,8 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
 
     const int nscales = static_cast<int>(result.scales.size());
     py::dict out;
-    out["iterations_performed"] = result.iterations;
-    out["peak_residual"] = result.peak_residual;
+    out["iter_done"] = result.iter_done;
+    out["peakres"] = result.peakres;
     out["model_flux"] = result.model_flux;
     out["converged"] = (result.stop_code == mtmfs::kStopThreshold || result.stop_code == mtmfs::kStopNothingToClean);
     out["stop_code"] = result.stop_code;
@@ -223,7 +223,7 @@ PYBIND11_MODULE(_mtmfs_ext, m) {
           "mask_threshold > 0 binarises each scale-convolved mask at 0.1 (its value is otherwise unused). The "
           "residual is updated at the end of the call by a circular FFT convolution of the new components "
           "with the PSF. Returns a dict with "
-          "iterations_performed, peak_residual (max |residual[0]*mask|, not divided by the PSF peak), model_flux "
+          "iter_done, peakres (max |residual[0]*mask|, not divided by the PSF peak), model_flux "
           "(sum of model[0]), converged (engine stop on threshold_per_cycle or empty search), "
           "stop_code, scales, small_scale_bias, psf_support, hessian, inverse_hessian and the per-scale "
           "infinity-norm hessian_condition_number.",

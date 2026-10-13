@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 import xarray as xr
 
+from astroviper.processing_functions.imaging.deconvolvers import mtmfs
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
     accumulate_continuum_model,
     convert_mvc_cubes_to_taylor_normal_equations,
@@ -96,11 +97,11 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
         model[0] = dtype(1.0)
         model[1] = dtype(2.0)
         return {
-            "iterations_performed": 3,
-            "peak_residual": 0.125,
+            "iter_done": 3,
+            "peakres": 0.125,
             "model_flux": float(model[0].sum()),
             "converged": False,
-            "stop_code": 0,
+            "stop_code": mtmfs.MODEL_UPDATE_MAX_ITER_PER_CYCLE,
             "scales": np.asarray([0.0]),
             "hessian_condition_number": np.asarray([2.0]),
         }
@@ -140,7 +141,14 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
     )
     fields = next(iter(statistics.data.values()))
     assert fields["iter_done"] == [3]
-    assert fields["mtmfs_stop_code"] == 0
+    assert fields["stop_code"].model_update == mtmfs.MODEL_UPDATE_MAX_ITER_PER_CYCLE
+    assert fields["stop_description"] == "Reached max_iter_per_cycle"
+    assert fields["peakres"] == [pytest.approx(0.125)]
+    assert fields["model_flux"] == [pytest.approx(64.0)]
+    assert fields["masksum"] == [64]
+    assert fields["max_psf_sidelobe"] == pytest.approx(0.2)
+    np.testing.assert_array_equal(fields["scales"], [0.0])
+    np.testing.assert_array_equal(fields["hessian_condition_number"], [2.0])
     assert "T_mtmfs" in timing
 
 

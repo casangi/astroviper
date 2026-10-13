@@ -59,6 +59,7 @@ MODEL_UPDATE_MAX_ITER_PER_CYCLE = (
     1  # Reached per-cycle iteration limit (max_iter_per_cycle)
 )
 MODEL_UPDATE_THRESHOLD_PER_CYCLE = 2  # Peak residual below threshold_per_cycle
+MODEL_UPDATE_NOTHING_TO_CLEAN = 3  # Native search found no positive component
 MODEL_UPDATE_DIVERGENCE = 4  # Possible divergence detected
 MODEL_UPDATE_ZERO_MASK = 7  # Zero mask detected during model update
 
@@ -77,6 +78,7 @@ MODEL_UPDATE_STOP_DESCRIPTIONS = {
     MODEL_UPDATE_CONTINUE: "Continue model update",
     MODEL_UPDATE_MAX_ITER_PER_CYCLE: "Reached max_iter_per_cycle",
     MODEL_UPDATE_THRESHOLD_PER_CYCLE: "Reached threshold_per_cycle",
+    MODEL_UPDATE_NOTHING_TO_CLEAN: "Nothing left to clean",
     MODEL_UPDATE_DIVERGENCE: "Possible divergence detected",
     MODEL_UPDATE_ZERO_MASK: "Zero mask",
 }

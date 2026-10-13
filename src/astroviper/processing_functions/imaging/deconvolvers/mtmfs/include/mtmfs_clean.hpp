@@ -26,10 +26,11 @@
 namespace mtmfs {
 
 enum StopCode : int {
-    kStopMaxIter = 0,
-    kStopThreshold = 1,
-    kStopNothingToClean = 2,
-    kStopDiverged = -1,
+    kContinue = 0,
+    kStopMaxIter = 1,
+    kStopThreshold = 2,
+    kStopNothingToClean = 3,
+    kStopDiverged = 4,
 };
 
 constexpr int kSingularHessian = -2;
@@ -37,9 +38,9 @@ constexpr int kMaxTaylorTerms = 4;
 
 template <typename T>
 struct CleanResult {
-    int iterations = 0;
+    int iter_done = 0;
     int stop_code = kStopMaxIter;
-    T peak_residual = 0;
+    T peakres = 0;
     T model_flux = 0;
     int psf_support = 0;
     float small_scale_bias = 0.0f;
