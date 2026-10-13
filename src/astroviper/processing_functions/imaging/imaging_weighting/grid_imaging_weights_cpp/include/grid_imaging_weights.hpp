@@ -28,7 +28,7 @@ void grid_imaging_weights(
     const double* data_weights,
     int n_chan_g, int n_pol_g, int m_u, int m_v,
     int n_time, int n_baseline, int n_vis_chan, int n_pol,
-    double delta_l, double delta_m);
+    double delta_l, double delta_m, bool truncate_uv_cells);
 
 // Sample a UV imaging-weight grid at each visibility's (u, v) and apply the
 // Briggs/robust denominator briggs[0]*G + briggs[1]. Serial for the same
@@ -56,22 +56,22 @@ void degrid_imaging_weights(
     const double* data_weight,
     int n_chan_g, int n_pol_g, int m_u, int m_v,
     int n_time, int n_baseline, int n_vis_chan, int n_pol, int n_pol_out,
-    double delta_l, double delta_m);
+    double delta_l, double delta_m, bool truncate_uv_cells);
 
 extern template void grid_imaging_weights<float>(
     float*, double*, const double*, const double*, const int64_t*,
-    const double*, int, int, int, int, int, int, int, int, double, double);
+    const double*, int, int, int, int, int, int, int, int, double, double, bool);
 extern template void grid_imaging_weights<double>(
     double*, double*, const double*, const double*, const int64_t*,
-    const double*, int, int, int, int, int, int, int, int, double, double);
+    const double*, int, int, int, int, int, int, int, int, double, double, bool);
 
 extern template void degrid_imaging_weights<float>(
     double*, const float*, const double*, const double*, const double*,
     const int64_t*, const int64_t*, const double*,
-    int, int, int, int, int, int, int, int, int, double, double);
+    int, int, int, int, int, int, int, int, int, double, double, bool);
 extern template void degrid_imaging_weights<double>(
     double*, const double*, const double*, const double*, const double*,
     const int64_t*, const int64_t*, const double*,
-    int, int, int, int, int, int, int, int, int, double, double);
+    int, int, int, int, int, int, int, int, int, double, double, bool);
 
 }  // namespace imaging_weighting

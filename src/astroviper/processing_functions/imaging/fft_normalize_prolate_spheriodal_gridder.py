@@ -91,7 +91,7 @@ def ifft_norm_img_xds(
 
     1. Retrieves the gridded UV array from ``img_xds``.
     2. Applies a 2-D inverse FFT (UV → lm) independently on each
-       ``(time, frequency, polarization)`` slice so that only one 2-D plane
+       ``(time, plane, polarization)`` slice so that only one 2-D plane
        is in memory during the transform.
     3. Divides in-place by the prolate-spheroidal gridding-correction function
        along each image axis.
@@ -108,8 +108,9 @@ def ifft_norm_img_xds(
     img_xds : xarray.Dataset
         Dataset containing gridded UV arrays and their normalisation scalars.
         Grid arrays must have dimensions
-        ``(time, frequency, polarization, u, v)``; normalisation scalars must
-        have dimensions ``(time, frequency, polarization)``.
+        ``(time, plane, polarization, u, v)``, where the plane dimension can
+        be ``frequency`` or a continuum Taylor axis. Normalisation scalars
+        must use the same ``(time, plane, polarization)`` dimensions.
     image_params : dict
         Imaging configuration.  Must contain:
 
@@ -159,7 +160,8 @@ def ifft_norm_img_xds(
     None
         ``img_xds`` is modified in place.  Sky / PSF / primary-beam arrays are
         added as new data variables with dimensions
-        ``(time, frequency, polarization, l, m)``.  They are real, except the
+        ``(time, plane, polarization, l, m)``, preserving the input plane
+        dimension. They are real, except the
         sky in a four-correlation basis (``XX, XY, YX, YY`` or
         ``RR, RL, LR, LL``), which is complex until it is transformed to Stokes.
 
@@ -219,14 +221,36 @@ def ifft_norm_img_xds(
             continue
 
         grid_var_name = data_group_in[data_variable_out]
-        raw_grid = img_xds[grid_var_name].values  # (time, freq, pol, u, v)
+        grid_da = img_xds[grid_var_name]
 
-        normalization = img_xds[
-            data_group_in[normalization_key[data_variable_out]]
-        ].values.copy()
-        normalization[normalization == 0] = 1  # avoid division by zero
+        if grid_da.dims[-2:] != ("u", "v"):
+            raise ValueError(
+                f"{grid_var_name} must end in dimensions ('u', 'v'); "
+                f"received {grid_da.dims}."
+            )
 
-        n_time, n_freq, n_pol = raw_grid.shape[:3]
+        plane_dims = [
+            dim for dim in grid_da.dims[:-2] if dim not in {"time", "polarization"}
+        ]
+        if len(plane_dims) != 1:
+            raise ValueError(
+                f"Could not identify one plane dimension in {grid_var_name}; "
+                f"received {grid_da.dims}."
+            )
+
+        plane_dim = plane_dims[0]
+        grid_da = grid_da.transpose("time", plane_dim, "polarization", "u", "v")
+        raw_grid = grid_da.values
+
+        normalization_name = data_group_in[normalization_key[data_variable_out]]
+        normalization = (
+            img_xds[normalization_name]
+            .transpose("time", plane_dim, "polarization")
+            .values.copy()
+        )
+        normalization[normalization == 0] = 1
+
+        n_time, n_planes, n_pol = raw_grid.shape[:3]
         image_size = np.asarray(_image_params["image_size"])
         padded_image_shape = raw_grid.shape[-2:]
         flux_scale = padded_image_shape[0] * padded_image_shape[1]
@@ -246,15 +270,43 @@ def ifft_norm_img_xds(
         keep_complex = complex_sky and data_variable == "sky"
         out_dtype = np.dtype(complex_dtype) if keep_complex else float_out_dtype
         out_name = data_group_out[ifft_pair[data_variable_out]]
+        output_dims = (
+            "time",
+            plane_dim,
+            "polarization",
+            "l",
+            "m",
+        )
+        output_shape = (
+            n_time,
+            n_planes,
+            n_pol,
+            image_size[0],
+            image_size[1],
+        )
+
+        if out_name in img_xds:
+            existing = img_xds[out_name]
+            if existing.dims != output_dims or existing.shape != output_shape:
+                if not overwrite:
+                    raise ValueError(
+                        f"Existing {out_name} has dimensions {existing.dims} "
+                        f"and shape {existing.shape}; expected {output_dims} "
+                        f"and {output_shape}."
+                    )
+                img_xds = img_xds.drop_vars(out_name)
+
         if out_name not in img_xds or img_xds[out_name].dtype != out_dtype:
+            output_coords = {
+                dim: img_xds.coords[dim] for dim in output_dims if dim in img_xds.coords
+            }
             img_xds[out_name] = xr.DataArray(
-                np.empty(
-                    (n_time, n_freq, n_pol, image_size[0], image_size[1]),
-                    dtype=out_dtype,
-                ),
-                dims=("time", "frequency", "polarization", "l", "m"),
+                np.empty(output_shape, dtype=out_dtype),
+                dims=output_dims,
+                coords=output_coords,
             )
-        out_arr = img_xds[out_name].values  # numpy view for in-place writes
+
+        out_arr = img_xds[out_name].values
         img_xds[out_name].attrs["type"] = data_variable
 
         # Each grid plane is read exactly once and the grid variable is
@@ -264,21 +316,22 @@ def ifft_norm_img_xds(
         grid_discarded = data_variable_out not in image_data_variables_keep
 
         for t in range(n_time):
-            for f in range(n_freq):
+            for plane_index in range(n_planes):
                 for p in range(n_pol):
                     plane = ifft_uv_to_lm(
-                        np.asarray(raw_grid[t, f, p], dtype=complex_dtype),
+                        np.asarray(
+                            raw_grid[t, plane_index, p],
+                            dtype=complex_dtype,
+                        ),
                         processing_function_threads=processing_function_threads,
                         fft_backend=fft_backend,
                         overwrite_input=grid_discarded,
                     )
-                    # In-place ops below preserve `plane`'s precision (the float64
-                    # kernel / normalization are broadcast without upcasting).
                     plane /= kernel_image_1D_l[:, None]
                     plane /= kernel_image_1D_m[None, :]
-                    plane *= flux_scale / normalization[t, f, p]
+                    plane *= flux_scale / normalization[t, plane_index, p]
 
-                    out_arr[t, f, p] = remove_padding(
+                    out_arr[t, plane_index, p] = remove_padding(
                         plane if keep_complex else plane.real, image_size
                     )
 
@@ -326,115 +379,20 @@ def fft_norm_img_xds(
     (the degridder widens each grid cell to ``complex128`` for the
     accumulation), so only the image-domain grid is affected here.
     """
-    if image_data_group_out_modified is None:
-        image_data_group_out_modified = {
-            "visibility": "VISIBILITY_MODEL",
-        }
-    if image_data_variables_keep is None:
-        image_data_variables_keep = []
-    if data_variables_to_process is None:
-        data_variables_to_process = ["sky"]
-
-    _image_params = image_params  # no mutation below; deep copy not needed
-
-    data_group_in, data_group_out = create_data_groups_in_and_out(
+    return _fft_norm_image_planes(
         img_xds,
-        data_group_in_name=image_data_group_in_name,
-        data_group_out_name=image_data_group_out_name,
-        data_group_out_modified=image_data_group_out_modified,
+        image_params,
+        plane_dim="frequency",
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_out_name,
+        image_data_group_out_modified=image_data_group_out_modified,
         overwrite=overwrite,
+        image_data_variables_keep=image_data_variables_keep,
+        processing_function_threads=processing_function_threads,
+        fft_backend=fft_backend,
+        data_variables_to_process=data_variables_to_process,
+        complex_dtype=complex_dtype,
     )
-
-    from astroviper.processing_functions.imaging.utils.fft_sizing import (
-        padded_grid_size,
-    )
-
-    n_uv = padded_grid_size(
-        [img_xds.sizes["l"], img_xds.sizes["m"]], _image_params["fft_padding"]
-    )
-
-    for data_variable in data_variables_to_process:
-        if data_variable not in data_group_in:
-            continue
-
-        grid_var_name = data_group_in[data_variable]
-        raw_grid = img_xds[grid_var_name].values  # (time, freq, pol, u, v)
-
-        n_time, n_freq, n_pol = raw_grid.shape[:3]
-
-        out_name = data_group_out[fft_pair[data_variable]]
-        if out_name not in img_xds:
-            img_xds[out_name] = xr.DataArray(
-                np.empty(
-                    (n_time, n_freq, n_pol, n_uv[0], n_uv[1]), dtype=complex_dtype
-                ),
-                dims=("time", "frequency", "polarization", "u", "v"),
-            )
-            # img_xds[out_name] = xr.DataArray(
-            #     np.empty((n_time, n_freq, n_pol, img_xds.sizes["l"], img_xds.sizes["m"]), dtype=np.complex128),
-            #     dims=("time", "frequency", "polarization", "l", "m"),
-            # )
-        out_arr = img_xds[out_name].values  # numpy view for in-place writes
-        img_xds[out_name].attrs["type"] = data_variable
-
-        (
-            kernel_image_1D_l,
-            kernel_image_1D_m,
-        ) = create_prolate_spheroidal_correcting_image_1D(n_lm_padded=n_uv)
-
-        # kernel_image_1D_l, kernel_image_1D_m = (
-        #     create_prolate_spheroidal_correcting_image_1D(
-        #         n_lm_padded=[250, 250]
-        #     )
-        # )
-
-        # Process one 2-D plane at a time to keep FFT temporaries small, and do
-        # ALL arithmetic in place on the plane's own buffer. The out-of-place
-        # spelling ``out_arr[t, f, p] / kernel_image_1D_l[:, None] / ...`` is a
-        # memory disaster: the float64 kernel arrays PROMOTE a complex64 plane
-        # to complex128 (array/array promotion), allocating two full-grid
-        # complex128 temporaries (≈ 2.9 GB each at 13 500²) plus the cast back
-        # -- the 2026-08-16 multi-cycle OOM. In-place division by the float64
-        # kernels keeps the plane's dtype and allocates nothing (same pattern,
-        # same reason, as ifft_norm_img_xds above). The padded borders are
-        # zero, so dividing the full padded plane is harmless.
-        for t in range(n_time):
-            for f in range(n_freq):
-                for p in range(n_pol):
-                    add_padding(raw_grid[t, f, p], out_arr[t, f, p])
-                    out_arr[t, f, p] /= kernel_image_1D_l[:, None]
-                    out_arr[t, f, p] /= kernel_image_1D_m[None, :]
-
-                    # The plane is the output buffer being overwritten anyway,
-                    # so the FFT may destroy it (skips the defensive copy).
-                    out_arr[t, f, p] = fft_lm_to_uv(
-                        out_arr[t, f, p],
-                        processing_function_threads=processing_function_threads,
-                        fft_backend=fft_backend,
-                        complex_dtype=complex_dtype,
-                        overwrite_input=True,
-                    )
-
-        if data_variable not in image_data_variables_keep:
-            # Release the large grid from the dataset so it can be freed as soon
-            # as `del raw_grid` is called after the loop.
-            img_xds.xr_img.delete_data_variables(
-                variables=[grid_var_name]
-            )  # Deletes the raw grid from the xds.
-            del raw_grid  # free ≈ 9 GB as early as possible
-
-        # img_xds[data_group_out[fft_pair[data_variable]]] = xr.DataArray(
-        #     result, dims=("time", "frequency", "polarization", "l", "m")
-        # )
-
-        modify_data_groups_xds(
-            img_xds,
-            image_data_group_out_name,
-            data_group_out,
-            description="Transformed from lm plane to aperture uv plane.",
-        )
-
-    return img_xds
 
 
 def _fold_shift_checkerboard(arr, axes):
@@ -702,3 +660,267 @@ def add_padding(src, dst):
     dst[..., start_xy[0] : end_xy[0], : start_xy[1]] = 0
     dst[..., start_xy[0] : end_xy[0], end_xy[1] :] = 0
     return dst
+
+
+def fft_norm_continuum_img_xds(
+    img_xds,
+    image_params,
+    image_data_group_in_name="model",
+    image_data_group_out_name="model",
+    image_data_group_out_modified=None,
+    overwrite=True,
+    image_data_variables_keep=None,
+    processing_function_threads=1,
+    fft_backend="pyfftw",
+    data_variables_to_process=None,
+    complex_dtype=np.complex128,
+):
+    """Forward-transform continuum Taylor-model images into Taylor UV grids.
+
+    This is the MT-MFS equivalent of :func:`fft_norm_img_xds`. The input sky
+    model must have dimensions
+
+        (time, taylor_term, polarization, l, m)
+
+    and the output visibility grid is created with dimensions
+
+        (time, taylor_term, polarization, u, v).
+
+    One FFT is performed for each Taylor term, rather than for every frequency
+    channel.
+
+    Parameters
+    ----------
+    img_xds : xarray.Dataset
+        Continuum image dataset containing the Taylor-term sky model.
+    image_params : dict
+        Imaging parameters. Must contain ``image_size`` and ``fft_padding``.
+    image_data_group_in_name : str, optional
+        Input image data group containing the sky model.
+    image_data_group_out_name : str, optional
+        Output image data group receiving the Taylor UV grid.
+    image_data_group_out_modified : dict, optional
+        Output data-group variable mapping. Defaults to
+        ``{"visibility": "VISIBILITY_MODEL"}``.
+    overwrite : bool, optional
+        Allow overwriting an existing output variable. Buffers with incompatible
+        dimensions, shape or dtype are replaced.
+    image_data_variables_keep : list of str, optional
+        Logical input variables to retain after the FFT.
+    processing_function_threads : int, optional
+        Number of FFT threads.
+    fft_backend : {"scipy", "pyfftw"}, optional
+        FFT backend.
+    data_variables_to_process : list of str, optional
+        Logical variables to transform. Defaults to ``["sky"]``.
+    complex_dtype : numpy dtype, optional
+        Complex precision of the UV grid.
+
+    Returns
+    -------
+    xarray.Dataset
+        Dataset containing the Taylor-term visibility grid.
+    """
+    return _fft_norm_image_planes(
+        img_xds,
+        image_params,
+        plane_dim="taylor_term",
+        image_data_group_in_name=image_data_group_in_name,
+        image_data_group_out_name=image_data_group_out_name,
+        image_data_group_out_modified=image_data_group_out_modified,
+        overwrite=overwrite,
+        image_data_variables_keep=image_data_variables_keep,
+        processing_function_threads=processing_function_threads,
+        fft_backend=fft_backend,
+        data_variables_to_process=data_variables_to_process,
+        complex_dtype=complex_dtype,
+    )
+
+
+def _fft_norm_image_planes(
+    img_xds,
+    image_params,
+    *,
+    plane_dim,
+    image_data_group_in_name,
+    image_data_group_out_name,
+    image_data_group_out_modified,
+    overwrite,
+    image_data_variables_keep,
+    processing_function_threads,
+    fft_backend,
+    data_variables_to_process,
+    complex_dtype,
+):
+    """Transform frequency or Taylor planes with shared allocation and FFT rules.
+
+    Output buffers are reused only when dimensions, shape and dtype match.
+    Each output plane doubles as its padded FFT workspace; input sky planes
+    remain unchanged until optionally removed from the returned dataset.
+    """
+    if image_data_group_out_modified is None:
+        image_data_group_out_modified = {
+            "visibility": "VISIBILITY_MODEL",
+        }
+
+    if image_data_variables_keep is None:
+        image_data_variables_keep = []
+
+    if data_variables_to_process is None:
+        data_variables_to_process = ["sky"]
+
+    data_group_in, data_group_out = create_data_groups_in_and_out(
+        img_xds,
+        data_group_in_name=image_data_group_in_name,
+        data_group_out_name=image_data_group_out_name,
+        data_group_out_modified=image_data_group_out_modified,
+        overwrite=overwrite,
+    )
+
+    from astroviper.processing_functions.imaging.utils.fft_sizing import (
+        padded_grid_size,
+    )
+
+    n_uv = padded_grid_size(
+        [img_xds.sizes["l"], img_xds.sizes["m"]],
+        image_params["fft_padding"],
+    )
+
+    for data_variable in data_variables_to_process:
+        if data_variable not in data_group_in:
+            continue
+
+        image_var_name = data_group_in[data_variable]
+
+        if image_var_name not in img_xds:
+            raise KeyError(
+                f"Input image variable {image_var_name!r} is not present in img_xds."
+            )
+
+        image_da = img_xds[image_var_name]
+
+        required_dims = {
+            "time",
+            plane_dim,
+            "polarization",
+            "l",
+            "m",
+        }
+
+        missing_dims = required_dims.difference(image_da.dims)
+
+        if missing_dims:
+            raise ValueError(
+                f"{image_var_name!r} is missing dimensions "
+                f"{sorted(missing_dims)}. Received {image_da.dims}."
+            )
+
+        image_da = image_da.transpose(
+            "time",
+            plane_dim,
+            "polarization",
+            "l",
+            "m",
+        )
+
+        raw_image = image_da.values
+
+        n_time = image_da.sizes["time"]
+        n_planes = image_da.sizes[plane_dim]
+        n_pol = image_da.sizes["polarization"]
+
+        output_dims = (
+            "time",
+            plane_dim,
+            "polarization",
+            "u",
+            "v",
+        )
+
+        output_shape = (
+            n_time,
+            n_planes,
+            n_pol,
+            n_uv[0],
+            n_uv[1],
+        )
+
+        out_name = data_group_out[fft_pair[data_variable]]
+
+        if out_name in img_xds:
+            existing = img_xds[out_name]
+
+            if (
+                existing.dims != output_dims
+                or existing.shape != output_shape
+                or existing.dtype != np.dtype(complex_dtype)
+            ):
+                if not overwrite:
+                    raise ValueError(
+                        f"Existing {out_name!r} has dimensions "
+                        f"{existing.dims}, shape {existing.shape}, and dtype {existing.dtype}; "
+                        f"expected {output_dims}, {output_shape}, and {np.dtype(complex_dtype)}."
+                    )
+
+                del img_xds[out_name]
+
+        if out_name not in img_xds:
+            output_coords = {}
+
+            for dim in ("time", plane_dim, "polarization"):
+                if dim in image_da.coords:
+                    output_coords[dim] = image_da.coords[dim]
+                elif dim in img_xds.coords:
+                    output_coords[dim] = img_xds.coords[dim]
+
+            # Preserve only this transform's plane axis (frequency or Taylor).
+            img_xds[out_name] = xr.DataArray(
+                np.empty(
+                    output_shape,
+                    dtype=complex_dtype,
+                ),
+                dims=output_dims,
+                coords=output_coords,
+            )
+
+        out_arr = img_xds[out_name].values
+        img_xds[out_name].attrs["type"] = data_variable
+
+        (
+            kernel_image_1D_l,
+            kernel_image_1D_m,
+        ) = create_prolate_spheroidal_correcting_image_1D(n_lm_padded=n_uv)
+
+        # Work in each output plane: no separate padded workspace or defensive
+        # FFT copy. In-place division preserves complex64 even with float64 kernels.
+        for t in range(n_time):
+            for plane_index in range(n_planes):
+                for pol in range(n_pol):
+                    plane = out_arr[t, plane_index, pol]
+                    add_padding(raw_image[t, plane_index, pol], plane)
+                    plane /= kernel_image_1D_l[:, None]
+                    plane /= kernel_image_1D_m[None, :]
+                    plane[...] = fft_lm_to_uv(
+                        plane,
+                        processing_function_threads=processing_function_threads,
+                        fft_backend=fft_backend,
+                        complex_dtype=complex_dtype,
+                        overwrite_input=True,
+                    )
+
+        if data_variable not in image_data_variables_keep:
+            img_xds.xr_img.delete_data_variables(variables=[image_var_name])
+            del raw_image
+
+        modify_data_groups_xds(
+            img_xds,
+            image_data_group_out_name,
+            data_group_out,
+            description=(
+                "Transformed continuum Taylor model from lm plane to aperture uv plane."
+                if plane_dim == "taylor_term"
+                else "Transformed from lm plane to aperture uv plane."
+            ),
+        )
+
+    return img_xds

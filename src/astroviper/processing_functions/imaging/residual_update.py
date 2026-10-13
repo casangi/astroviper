@@ -138,6 +138,7 @@ def imaging_setup_single_field(
         ms_data_group_out_name=ps_data_group_name,
         ms_data_group_out_modified={"weight_imaging": "WEIGHT_IMAGING"},
         processing_function_threads=processing_function_threads,
+        frequency_matching="nearest",
     )
     T_weights = time.time() - T_start_weight
 

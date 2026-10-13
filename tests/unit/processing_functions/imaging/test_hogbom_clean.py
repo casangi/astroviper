@@ -1036,3 +1036,32 @@ class TestCubeReturnShapes:
 
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("casa_cap", [0, 1, 5])
+@pytest.mark.parametrize("cycles", [1, 2])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_explicit_budget_matches_casa_capped_point_updates(casa_cap, cycles, dtype):
+    """Match CASA's inclusive cap by inputs, keeping the kernel exclusive.
+
+    An isolated unit point with gain 0.1 has residual 0.9**updates. This
+    checks physical model updates independently of either engine's counter.
+    Zero remains inactive; each positive capped CASA call needs cap+1 here.
+    """
+    dirty = _point_source_residual(16, 16, [(8, 8, 1.0)], dtype=dtype)
+    model = _zeros(16, 16, dtype=dtype)
+    psf = _delta_psf(16, 16, dtype=dtype)
+    budget = casa_cap + 1 if casa_cap else 0
+    for _ in range(cycles):
+        result = hogbom.clean(
+            dirty_image=dirty,
+            psf=psf,
+            model=model,
+            gain=0.1,
+            threshold=0.0,
+            max_iter_remaining=budget,
+        )
+        assert result["iterations_performed"] == budget
+    expected_residual = 0.9 ** (cycles * budget)
+    assert dirty[8, 8] == pytest.approx(expected_residual, abs=2e-7)
+    assert model.sum() == pytest.approx(1 - expected_residual, abs=2e-7)

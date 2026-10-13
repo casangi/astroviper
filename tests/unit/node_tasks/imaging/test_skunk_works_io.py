@@ -520,7 +520,12 @@ def test_sharded_slot_overflow_raises(tmp_path):
 # Full processing-set reconstruction
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("processing_function_threads", [1, 4])
-def test_load_processing_set_reconstruction(tmp_path, processing_function_threads):
+@pytest.mark.parametrize("load_correlated_data", [True, False])
+def test_load_processing_set_reconstruction(
+    tmp_path,
+    processing_function_threads,
+    load_correlated_data,
+):
     ntime, nbl, nfreq, npol = 2, 6, 4, 2
     rng = np.random.default_rng(6)
     store = str(tmp_path / "ps.zarr")
@@ -568,9 +573,13 @@ def test_load_processing_set_reconstruction(tmp_path, processing_function_thread
         freq_values,
         "linear",
         processing_function_threads=processing_function_threads,
+        load_correlated_data=load_correlated_data,
     )
     ms = ps[ms_name]
-    assert _equal(ms["VISIBILITY"].values, vis[:, :, 1:3, :])
+    if load_correlated_data:
+        assert _equal(ms["VISIBILITY"].values, vis[:, :, 1:3, :])
+    else:
+        assert "VISIBILITY" not in ms
     assert _equal(ms["UVW"].values, uvw)
     assert _equal(ms["WEIGHT"].values, weight[:, :, 1:3, :])
     assert _equal(ms["FLAG"].values, flag[:, :, 1:3, :])
@@ -588,7 +597,10 @@ def test_load_processing_set_reconstruction(tmp_path, processing_function_thread
     assert int(mask.sum()) == 3
 
 
-def test_load_processing_set_selects_the_needed_correlations(tmp_path):
+@pytest.mark.parametrize("load_correlated_data", [True, False])
+def test_load_processing_set_selects_the_needed_correlations(
+    tmp_path, load_correlated_data
+):
     """A ``polarization`` entry in the selection keeps only those correlations
     (the parallel hands of four-correlation data for Stokes I, Q)."""
     ntime, nbl, nfreq, npol = 2, 3, 4, 4
@@ -602,6 +614,9 @@ def test_load_processing_set_selects_the_needed_correlations(tmp_path):
     }
     uvw = rng.standard_normal((ntime, nbl, 3)).astype("<f8")
     for name, data in arrays.items():
+        # Cached-grid loading must succeed without an observed visibility store.
+        if name == "VISIBILITY" and not load_correlated_data:
+            continue
         array = zarr.create_array(
             f"{store}/{ms_name}/{name}",
             shape=data.shape,
@@ -627,16 +642,30 @@ def test_load_processing_set_selects_the_needed_correlations(tmp_path):
     freq_values = np.linspace(1.0e9, 1.3e9, nfreq)[1:3]
 
     everything = load_processing_set_skunk_works(
-        store, {ms_name: {"frequency": slice(1, 3)}}, data_group, "base", freq_values
+        store,
+        {ms_name: {"frequency": slice(1, 3)}},
+        data_group,
+        "base",
+        freq_values,
+        load_correlated_data=load_correlated_data,
     )[ms_name]
     assert list(everything.polarization.values) == ["XX", "XY", "YX", "YY"]
 
     selection = {ms_name: {"frequency": slice(1, 3), "polarization": [0, 3]}}
     ms = load_processing_set_skunk_works(
-        store, selection, data_group, "base", freq_values
+        store,
+        selection,
+        data_group,
+        "base",
+        freq_values,
+        load_correlated_data=load_correlated_data,
     )[ms_name]
     assert list(ms.polarization.values) == ["XX", "YY"]
+    assert ("VISIBILITY" in everything) == load_correlated_data
+    assert ("VISIBILITY" in ms) == load_correlated_data
     for name, data in arrays.items():
+        if name == "VISIBILITY" and not load_correlated_data:
+            continue
         assert _equal(ms[name].values, data[:, :, 1:3, :][..., [0, 3]]), name
         assert ms[name].values.flags["C_CONTIGUOUS"]
     assert _equal(ms["UVW"].values, uvw)

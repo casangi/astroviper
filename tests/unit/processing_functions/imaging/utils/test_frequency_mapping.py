@@ -203,3 +203,38 @@ class TestCubePathsShareFrequencyMap(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExplicitContinuumMatching(unittest.TestCase):
+    def test_exact_reordered_subset(self):
+        np.testing.assert_array_equal(
+            map_visibility_frequencies_to_image(
+                [1.2e9, 1e9], [1e9, 1.1e9, 1.2e9], matching="exact"
+            ),
+            [2, 0],
+        )
+
+    def test_exact_rejects_shift_ambiguity_and_many_to_one(self):
+        for visibility, image in [
+            ([1.01e9], [1e9, 1.1e9]),
+            ([1e9], [1e9, 1e9]),
+            ([1e9, 1e9], [1e9, 1.1e9]),
+            ([1.7e9], [1e9]),
+        ]:
+            with self.subTest(visibility=visibility, image=image):
+                with self.assertRaises(ValueError):
+                    map_visibility_frequencies_to_image(
+                        visibility, image, matching="exact"
+                    )
+
+    def test_exact_tolerance(self):
+        np.testing.assert_array_equal(
+            map_visibility_frequencies_to_image(
+                [1e9 + 0.0001], [1e9], matching="exact"
+            ),
+            [0],
+        )
+
+    def test_unknown_policy_rejected(self):
+        with self.assertRaisesRegex(ValueError, "matching"):
+            map_visibility_frequencies_to_image([1e9], [1e9], matching="unknown")

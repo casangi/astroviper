@@ -246,6 +246,73 @@ class TestGridImagingWeightsCpp(unittest.TestCase):
         self.assertEqual(np.count_nonzero(grid), 0)
         self.assertEqual(np.count_nonzero(sum_weight), 0)
 
+    def test_truncate_uv_cells_uses_casa_continuum_assignment(self):
+        """Truncation selects the lower shifted cell without changing default."""
+        n_uv = np.array([8, 8], dtype=np.int64)
+        frequency = np.array([299792458.0])
+        delta_lm = np.array([-1.0 / 8.0, -1.0 / 8.0])
+        uvw = np.array([[[0.6, 0.6, 0.0]]])
+        chan_map = np.array([0], dtype=np.int64)
+        weights = np.array([[[[2.0]]]])
+
+        nearest = np.zeros((1, 1, 8, 8))
+        nearest_sum = np.zeros((1, 1))
+        grid_imaging_weights(
+            nearest,
+            nearest_sum,
+            uvw,
+            frequency,
+            chan_map,
+            weights,
+            n_uv,
+            delta_lm,
+        )
+
+        truncated = np.zeros_like(nearest)
+        truncated_sum = np.zeros_like(nearest_sum)
+        grid_imaging_weights(
+            truncated,
+            truncated_sum,
+            uvw,
+            frequency,
+            chan_map,
+            weights,
+            n_uv,
+            delta_lm,
+            truncate_uv_cells=True,
+        )
+
+        self.assertEqual(nearest[0, 0, 5, 5], 2.0)
+        self.assertEqual(truncated[0, 0, 4, 4], 2.0)
+        self.assertEqual(nearest[0, 0, 4, 4], 0.0)
+        np.testing.assert_array_equal(nearest_sum, [[4.0]])
+        np.testing.assert_array_equal(truncated_sum, [[4.0]])
+
+    def test_truncate_uv_cells_accumulates_valid_conjugates_independently(self):
+        """CASA truncation retains a valid direct cell at the opposite edge."""
+        n_uv = np.array([8, 8], dtype=np.int64)
+        frequency = np.array([299792458.0])
+        delta_lm = np.array([-1.0 / 8.0, -1.0 / 8.0])
+        uvw = np.array([[[3.6, 0.0, 0.0]]])
+        grid = np.zeros((1, 1, 8, 8))
+        sum_weight = np.zeros((1, 1))
+
+        grid_imaging_weights(
+            grid,
+            sum_weight,
+            uvw,
+            frequency,
+            np.array([0], dtype=np.int64),
+            np.array([[[[2.0]]]]),
+            n_uv,
+            delta_lm,
+            truncate_uv_cells=True,
+        )
+
+        self.assertEqual(grid[0, 0, 7, 4], 2.0)
+        self.assertEqual(np.count_nonzero(grid), 1)
+        np.testing.assert_array_equal(sum_weight, [[2.0]])
+
     def test_wrong_ndim_raises(self):
         inp = _make_inputs(seed=7)
         bad_grid = np.zeros((inp["n_chan"], inp["m_u"], inp["m_v"]))  # 3-D
@@ -356,6 +423,34 @@ class TestDegridImagingWeightsCpp(unittest.TestCase):
             inp["delta_lm"],
         )
         self.assertEqual(np.count_nonzero(out), 0)
+
+    def test_truncate_uv_cells_samples_casa_continuum_cell(self):
+        """Degridding uses the same selected cell convention as gridding."""
+        grid = np.zeros((1, 1, 8, 8))
+        grid[0, 0, 5, 5] = 10.0
+        grid[0, 0, 4, 4] = 20.0
+        frequency = np.array([299792458.0])
+        uvw = np.array([[[0.6, 0.6, 0.0]]])
+        data_weight = np.array([[[[2.0]]]])
+        common = (
+            grid,
+            np.array([[[1.0]], [[0.0]]]),
+            uvw,
+            frequency,
+            np.array([0], dtype=np.int64),
+            np.array([0], dtype=np.int64),
+            data_weight,
+            np.array([8, 8], dtype=np.int64),
+            np.array([-1.0 / 8.0, -1.0 / 8.0]),
+        )
+
+        nearest = np.zeros_like(data_weight)
+        degrid_imaging_weights(nearest, *common)
+        truncated = np.zeros_like(data_weight)
+        degrid_imaging_weights(truncated, *common, truncate_uv_cells=True)
+
+        np.testing.assert_array_equal(nearest, [[[[0.2]]]])
+        np.testing.assert_array_equal(truncated, [[[[0.1]]]])
 
 
 if __name__ == "__main__":

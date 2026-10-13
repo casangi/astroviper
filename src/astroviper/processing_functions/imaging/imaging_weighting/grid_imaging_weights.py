@@ -39,6 +39,8 @@ def grid_imaging_weights(
     # are bit-reproducible; accepted for API consistency across the stack.
     processing_function_threads: int = 1,
     frequency_map: np.ndarray | None = None,
+    *,
+    truncate_uv_cells: bool = False,
 ):
     """
     Grid per-visibility *data weights* onto a UV grid.
@@ -72,13 +74,17 @@ def grid_imaging_weights(
         per visibility channel. Pass the map returned by
         :func:`~astroviper.processing_functions.imaging.utils.frequency_mapping.map_visibility_frequencies_to_image`
         when the visibility channels are a subset of, or offset from, the
-        image frequency axis.
+        image frequency axis. An all-zero map accumulates all visibility
+        channels into one continuum plane.
 
     n_uv : tuple(int, int)
             Target padded image size in pixels along (u, v). This is also
             the UV grid size.
     cell_size : tuple(float, float)
             Pixel scale (Δl, Δm) in radians along the two image axes.
+    truncate_uv_cells : bool, default ``False``
+        If True, use CASA continuum integer truncation after shifting UV
+        coordinates into the grid domain. If False, use nearest-cell assignment.
 
     Returns
     -------
@@ -91,8 +97,9 @@ def grid_imaging_weights(
       ``assert weight.shape[3] < 3`` and the kernel currently grids only
       polarization 0. If you intend to combine polarizations (e.g., average PP
       and QQ), adjust the polarization logic in the C++ kernel accordingly.
-    * Rounding: to match historical Fortran/CASA behavior, UV pixel indices are
-      computed by rounding to the nearest pixel (``floor(x + 0.5)``).
+    * Cell assignment defaults to nearest-cell ``floor(x + 0.5)``. CASA's
+      continuum path instead truncates the shifted coordinate toward zero;
+      select that behavior with ``truncate_uv_cells=True``.
     """
     from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights_cpp import (
         grid_imaging_weights as grid_imaging_weights_cpp,
@@ -114,6 +121,7 @@ def grid_imaging_weights(
         np.asarray(n_uv, dtype=np.int64),
         np.asarray(delta_lm, dtype=np.float64),
         processing_function_threads=processing_function_threads,
+        truncate_uv_cells=truncate_uv_cells,
     )
 
 
@@ -129,6 +137,8 @@ def degrid_imaging_weights(
     # sums are bit-reproducible; accepted for API consistency across the stack.
     processing_function_threads: int = 1,
     frequency_map: np.ndarray | None = None,
+    *,
+    truncate_uv_cells: bool = False,
 ):
     """
     Sample a UV *imaging weight grid* at each visibility's (u, v) to form
@@ -158,6 +168,9 @@ def degrid_imaging_weights(
         Dictionary with required keys:
         - ``"image_size"`` : tuple(int, int), UV grid size.
         - ``"cell_size"`` : tuple(float, float), image pixel scale (Δl, Δm) in radians.
+    truncate_uv_cells : bool, default ``False``
+        If True, sample the CASA continuum truncated UV cell. If False, sample
+        the nearest UV cell used by cube weighting.
 
     Returns
     -------
@@ -174,6 +187,22 @@ def degrid_imaging_weights(
     """
     from astroviper.processing_functions.imaging.imaging_weighting.grid_imaging_weights_cpp import (
         degrid_imaging_weights as degrid_imaging_weights_cpp,
+    )
+
+    # Distributed xarray reductions can preserve a non-native byte order (for
+    # example ``>f8`` from an on-disk MS).  Normalize the read-only density
+    # grid at the Python boundary so the C++ kernel receives native float32 or
+    # float64 storage without weakening its strict binding validation.
+    grid_imaging_weight = np.asarray(grid_imaging_weight)
+    if grid_imaging_weight.dtype.kind != "f":
+        raise TypeError(
+            "grid_imaging_weight must have a floating-point dtype; received "
+            f"{grid_imaging_weight.dtype}."
+        )
+    grid_dtype = np.float32 if grid_imaging_weight.dtype.itemsize <= 4 else np.float64
+    grid_imaging_weight = np.ascontiguousarray(
+        grid_imaging_weight,
+        dtype=grid_dtype,
     )
 
     chan_map = _resolve_frequency_map(
@@ -199,6 +228,7 @@ def degrid_imaging_weights(
         np.asarray(n_uv, dtype=np.int64),
         np.asarray(delta_lm, dtype=np.float64),
         processing_function_threads=processing_function_threads,
+        truncate_uv_cells=truncate_uv_cells,
     )
 
     return imaging_weight

@@ -20,7 +20,7 @@ void grid_imaging_weights(
     const double* data_weights,
     int n_chan_g, int n_pol_g, int m_u, int m_v,
     int n_time, int n_baseline, int n_vis_chan, int n_pol,
-    double delta_l, double delta_m
+    double delta_l, double delta_m, bool truncate_uv_cells
 ) {
     (void)n_chan_g;
 
@@ -65,49 +65,75 @@ void grid_imaging_weights(
                 const double u_pos_conj = -u + uv_center_u;
                 const double v_pos_conj = -v + uv_center_v;
 
-                // Round to the nearest pixel and bounds-check in double
-                // precision *before* narrowing to int: casting an out-of-range
-                // double to int is undefined behaviour (see the identical
-                // rationale in the prolate spheroidal gridder). For in-bounds,
-                // non-negative coordinates std::floor(x + 0.5) matches the
-                // historical Fortran/CASA int(x + 0.5) rounding exactly.
-                const double u_center      = std::floor(u_pos + 0.5);
-                const double v_center      = std::floor(v_pos + 0.5);
-                const double u_center_conj = std::floor(u_pos_conj + 0.5);
-                const double v_center_conj = std::floor(v_pos_conj + 0.5);
+                // Cube weighting uses nearest-cell assignment. CASA continuum
+                // weighting instead applies integer conversion after shifting
+                // into the positive grid domain, i.e. truncation toward zero.
+                // Keep the coordinates in double precision until after bounds
+                // checks so narrowing an out-of-range value is never undefined.
+                const double u_center = truncate_uv_cells
+                    ? std::trunc(u_pos) : std::floor(u_pos + 0.5);
+                const double v_center = truncate_uv_cells
+                    ? std::trunc(v_pos) : std::floor(v_pos + 0.5);
+                const double u_center_conj = truncate_uv_cells
+                    ? std::trunc(u_pos_conj) : std::floor(u_pos_conj + 0.5);
+                const double v_center_conj = truncate_uv_cells
+                    ? std::trunc(v_pos_conj) : std::floor(v_pos_conj + 0.5);
 
-                if (u_center < 0 || u_center >= m_u) continue;
-                if (v_center < 0 || v_center >= m_v) continue;
-                // The conjugate pixel is guarded too (the historical kernel
-                // only checked the direct pixel; an out-of-bounds conjugate
-                // write would corrupt memory here).
-                if (u_center_conj < 0 || u_center_conj >= m_u) continue;
-                if (v_center_conj < 0 || v_center_conj >= m_v) continue;
+                const bool direct_in_bounds = truncate_uv_cells
+                    ? (u_center > 0 && u_center < m_u &&
+                       v_center > 0 && v_center < m_v)
+                    : (u_center >= 0 && u_center < m_u &&
+                       v_center >= 0 && v_center < m_v);
+                const bool conjugate_in_bounds = truncate_uv_cells
+                    ? (u_center_conj > 0 && u_center_conj < m_u &&
+                       v_center_conj > 0 && v_center_conj < m_v)
+                    : (u_center_conj >= 0 && u_center_conj < m_u &&
+                       v_center_conj >= 0 && v_center_conj < m_v);
 
-                const int u_indx      = static_cast<int>(u_center);
-                const int v_indx      = static_cast<int>(v_center);
-                const int u_indx_conj = static_cast<int>(u_center_conj);
-                const int v_indx_conj = static_cast<int>(v_center_conj);
+                // Preserve main's nearest-cell behavior: both Hermitian cells
+                // must be valid before either is accumulated. CASA continuum's
+                // historical truncation path handles the two cells separately.
+                if (!truncate_uv_cells &&
+                    (!direct_in_bounds || !conjugate_in_bounds)) continue;
+                if (truncate_uv_cells &&
+                    !direct_in_bounds && !conjugate_in_bounds) continue;
 
                 // Only polarization 0 is gridded (weights are parallel-hand
                 // equalized upstream).
                 const double weight = data_weights[wt_off + i_chan * wt_chan_stride + 0];
                 if (std::isnan(weight)) continue;
 
-                const int cell      = a_chan * grid_chan_stride + u_indx * m_v + v_indx;
-                const int cell_conj =
-                    a_chan * grid_chan_stride + u_indx_conj * m_v + v_indx_conj;
-
-                // Accumulate in double and narrow on store (a float32 grid
-                // cell promotes to double when added to the float64 weight),
-                // matching NumPy's mixed-precision semantics exactly.
-                grid[cell] =
-                    static_cast<GridT>(static_cast<double>(grid[cell]) + weight);
-                grid[cell_conj] =
-                    static_cast<GridT>(static_cast<double>(grid[cell_conj]) + weight);
-
-                // Factor 2 accounts for the conjugate update.
-                sum_weight[a_chan * n_pol_g + 0] += 2.0 * weight;
+                if (!truncate_uv_cells) {
+                    const int cell = a_chan * grid_chan_stride +
+                        static_cast<int>(u_center) * m_v +
+                        static_cast<int>(v_center);
+                    const int cell_conj = a_chan * grid_chan_stride +
+                        static_cast<int>(u_center_conj) * m_v +
+                        static_cast<int>(v_center_conj);
+                    grid[cell] = static_cast<GridT>(
+                        static_cast<double>(grid[cell]) + weight);
+                    grid[cell_conj] = static_cast<GridT>(
+                        static_cast<double>(grid[cell_conj]) + weight);
+                    // Retain main's single addition and accumulation order.
+                    sum_weight[a_chan * n_pol_g + 0] += 2.0 * weight;
+                } else {
+                    if (direct_in_bounds) {
+                        const int cell = a_chan * grid_chan_stride +
+                            static_cast<int>(u_center) * m_v +
+                            static_cast<int>(v_center);
+                        grid[cell] = static_cast<GridT>(
+                            static_cast<double>(grid[cell]) + weight);
+                        sum_weight[a_chan * n_pol_g + 0] += weight;
+                    }
+                    if (conjugate_in_bounds) {
+                        const int cell_conj = a_chan * grid_chan_stride +
+                            static_cast<int>(u_center_conj) * m_v +
+                            static_cast<int>(v_center_conj);
+                        grid[cell_conj] = static_cast<GridT>(
+                            static_cast<double>(grid[cell_conj]) + weight);
+                        sum_weight[a_chan * n_pol_g + 0] += weight;
+                    }
+                }
             }
         }
     }
@@ -125,7 +151,7 @@ void degrid_imaging_weights(
     const double* data_weight,
     int n_chan_g, int n_pol_g, int m_u, int m_v,
     int n_time, int n_baseline, int n_vis_chan, int n_pol, int n_pol_out,
-    double delta_l, double delta_m
+    double delta_l, double delta_m, bool truncate_uv_cells
 ) {
     const int uv_center_u = m_u / 2;
     const int uv_center_v = m_v / 2;
@@ -165,13 +191,20 @@ void degrid_imaging_weights(
 
                 if (std::isnan(u) || std::isnan(v)) continue;
 
-                // Same rounding / double-precision bounds-check convention as
-                // grid_imaging_weights above.
-                const double u_center = std::floor(u + uv_center_u + 0.5);
-                const double v_center = std::floor(v + uv_center_v + 0.5);
+                const double u_pos = u + uv_center_u;
+                const double v_pos = v + uv_center_v;
+                const double u_center = truncate_uv_cells
+                    ? std::trunc(u_pos) : std::floor(u_pos + 0.5);
+                const double v_center = truncate_uv_cells
+                    ? std::trunc(v_pos) : std::floor(v_pos + 0.5);
 
-                if (u_center < 0 || u_center >= m_u) continue;
-                if (v_center < 0 || v_center >= m_v) continue;
+                if (truncate_uv_cells) {
+                    if (u_center <= 0 || u_center >= m_u) continue;
+                    if (v_center <= 0 || v_center >= m_v) continue;
+                } else {
+                    if (u_center < 0 || u_center >= m_u) continue;
+                    if (v_center < 0 || v_center >= m_v) continue;
+                }
 
                 const int u_center_indx = static_cast<int>(u_center);
                 const int v_center_indx = static_cast<int>(v_center);
@@ -211,18 +244,18 @@ void degrid_imaging_weights(
 
 template void grid_imaging_weights<float>(
     float*, double*, const double*, const double*, const int64_t*,
-    const double*, int, int, int, int, int, int, int, int, double, double);
+    const double*, int, int, int, int, int, int, int, int, double, double, bool);
 template void grid_imaging_weights<double>(
     double*, double*, const double*, const double*, const int64_t*,
-    const double*, int, int, int, int, int, int, int, int, double, double);
+    const double*, int, int, int, int, int, int, int, int, double, double, bool);
 
 template void degrid_imaging_weights<float>(
     double*, const float*, const double*, const double*, const double*,
     const int64_t*, const int64_t*, const double*,
-    int, int, int, int, int, int, int, int, int, double, double);
+    int, int, int, int, int, int, int, int, int, double, double, bool);
 template void degrid_imaging_weights<double>(
     double*, const double*, const double*, const double*, const double*,
     const int64_t*, const int64_t*, const double*,
-    int, int, int, int, int, int, int, int, int, double, double);
+    int, int, int, int, int, int, int, int, int, double, double, bool);
 
 }  // namespace imaging_weighting
