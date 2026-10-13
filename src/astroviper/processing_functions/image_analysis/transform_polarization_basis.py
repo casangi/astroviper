@@ -289,6 +289,7 @@ def transform_polarization_basis(
             if img_xds["PRIMARY_BEAM"].attrs["method"] in (
                 "airy_disk",
                 "beam_polynomial",
+                "uniform",
             ):
                 continue
 

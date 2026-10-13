@@ -64,10 +64,18 @@ IMAGING_PARAM_DOCS = {
         "1 GHz), ``effective_dish_diameter`` and ``blockage_diameter`` (metres;\n"
         'refused for ``"vla"``) and ``max_rad_1GHz`` (CASA\'s maximum radius of\n'
         "the beam table at 1 GHz in radians, scaled as 1 / frequency, which sets\n"
-        "the radius sampling of the beam; the beam polynomial is zero beyond\n"
+        "the radius sampling of the beam; the beam is zero beyond\n"
         "it). Numbers given with a telescope override that telescope's values;\n"
         'no telescope means ``"alma"``. ``None`` is the ALMA 12 m beam (10.7 m,\n'
-        "0.75 m, 1.784 deg at 1 GHz)."
+        "0.75 m, 1.784 deg at 1 GHz). Or ``beam_model`` alone: an analytic dict\n"
+        "or a beam-polynomial dataset as ``simulate_processing_set`` takes it in\n"
+        '``beam_models`` (``"vla"`` is\n'
+        '``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square\n'
+        "of the voltage pattern the simulator applies for the model, computed by\n"
+        "the same function\n"
+        "(:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`).\n"
+        "Zernike aperture models and Jones images are not supported: they are\n"
+        "not azimuthally symmetric and depend on the parallactic angle."
     ),
     "cycle_control_params": (
         "CLEAN cycle controls. An **imaging cycle** (below simply a cycle)\n"

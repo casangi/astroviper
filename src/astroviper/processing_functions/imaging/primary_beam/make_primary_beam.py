@@ -1,7 +1,8 @@
 """Primary-beam creation for the single-field cube imager."""
 
 import functools
-import math
+
+from astroviper.utils.beam_models import EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ
 
 
 def make_primary_beam_single_field(
@@ -14,26 +15,29 @@ def make_primary_beam_single_field(
     max_rad_1GHz=0.03113667385557884,
     ipower=2,
     float_dtype=None,
-    beam_polynomial_coefficients=None,
+    beam_model=None,
 ):
     """Add an azimuthally-symmetric primary beam to a single-field image dataset.
 
     Follows the CASA definition: the primary beam is the **power** sensitivity
     pattern of the antenna, the square of the absolute value of the voltage
-    pattern (``P = |V| ** 2``).  The CASA ``PBMath1DAiry`` compatible obscured
-    Airy pattern is evaluated per frequency channel with
-    :func:`~astroviper.processing_functions.imaging.primary_beam.airy_disk.casa_airy_disk_response`
-    -- the same function the simulation subdomain uses for its antenna voltage
-    patterns -- and written as the ``PRIMARY_BEAM`` data variable (matching the
-    ``.pb`` image of ``tclean`` to float32 precision), registered under
-    ``image_data_group_out_name``.  The same beam is broadcast across
-    polarization (a single dish diameter is assumed).  With
-    ``beam_polynomial_coefficients`` the beam is CASA's ``PBMath1DEVLA`` power
-    polynomial instead (:func:`polynomial_primary_beam`).
+    pattern (``P = |V| ** 2``).  The beam is an antenna beam model of the
+    simulator, evaluated per frequency channel with
+    :func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`
+    -- the function whose voltage pattern
+    :func:`~astroviper.processing_functions.simulation.antenna_beams.sample_jones`
+    applies to simulated visibilities -- so it is zero beyond
+    ``max_rad_1GHz / (frequency / 1 GHz)``, as CASA's ``.pb`` image.  By
+    default it is the CASA ``PBMath1DAiry`` compatible obscured Airy pattern
+    (matching the ``.pb`` image of ``tclean`` to float32 precision);
+    ``beam_model`` gives another (CASA's ``PBMath1DEVLA`` power polynomial for
+    the EVLA beam-polynomial model).  It is written as the ``PRIMARY_BEAM``
+    data variable, registered under ``image_data_group_out_name``, and
+    broadcast across polarization (a single antenna beam is assumed).
 
     The beam is created in whatever polarization basis ``img_xds`` currently
     carries; because ``PRIMARY_BEAM`` is stamped with ``method="airy_disk"``
-    (or ``"beam_polynomial"``) it is skipped by
+    (or ``"beam_polynomial"`` or ``"uniform"``) it is skipped by
     :func:`~astroviper.processing_functions.image_analysis.transform_polarization_basis.transform_polarization_basis`,
     so it is invariant to a later basis change.  If the data group already has a
     ``primary_beam`` entry the function is a no-op.
@@ -61,22 +65,21 @@ def make_primary_beam_single_field(
         Sub-reflector blockage diameters in metres.  Default
         ``numpy.array([0.75])``.
     max_rad_1GHz : float, optional
-        CASA ``PBMath1DAiry`` (or beam-polynomial) maximum tabulated radius at
-        1 GHz in radians (scaled to the observing frequency).  Default is
-        CASA's ALMA value.
+        CASA ``PBMath1DAiry`` maximum tabulated radius at 1 GHz in radians
+        (scaled to the observing frequency), beyond which the beam is zero.
+        Default is CASA's ALMA value.
     ipower : int, optional
         ``2`` returns the (power) primary beam -- the CASA definition;
         ``1`` returns the voltage pattern.  Default ``2``.
     float_dtype : numpy.dtype, optional
         Floating-point precision for the primary beam.  Defaults to
         ``numpy.float64``.
-    beam_polynomial_coefficients : xarray.Dataset, optional
-        Beam-polynomial model
-        (:func:`~astroviper.utils.beam_models.read_beam_polynomial_coefficients`)
-        evaluated instead of the Airy disk out to ``max_rad_1GHz``, not the
-        model's own (:data:`EVLA_MAX_RAD_1GHZ` for CASA's EVLA beam);
-        ``list_dish_diameters`` and ``list_blockage_diameters`` are then not
-        used.
+    beam_model : dict or xarray.Dataset, optional
+        Analytic (dict) or beam-polynomial (dataset) antenna beam model, as
+        ``beam_models`` of the simulator takes it
+        (:mod:`astroviper.utils.beam_models`), evaluated instead of the Airy
+        disk (:func:`pack_primary_beam_model`); ``list_dish_diameters``,
+        ``list_blockage_diameters`` and ``max_rad_1GHz`` are then not used.
 
     Returns
     -------
@@ -88,7 +91,7 @@ def make_primary_beam_single_field(
 
     See Also
     --------
-    astroviper.processing_functions.imaging.primary_beam.airy_disk.casa_airy_disk_response
+    astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response
     astroviper.processing_functions.imaging.make_point_spread_function.make_point_spread_function_single_field
     astroviper.processing_functions.imaging.correct_sky_by_primary_beam.correct_sky_by_primary_beam
     """
@@ -98,8 +101,8 @@ def make_primary_beam_single_field(
     import pandas as pd
     import xarray as xr
 
-    from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
-        casa_airy_disk_response,
+    from astroviper.processing_functions.simulation.antenna_beams import (
+        symmetric_beam_response,
     )
     from astroviper.utils.data_group_tools import (
         create_data_groups_in_and_out,
@@ -127,31 +130,38 @@ def make_primary_beam_single_field(
         overwrite=False,
     )
 
-    # Evaluate the CASA-compatible Airy beam of the first (only) dish diameter,
-    # or the beam polynomial, on the image's (l, m) grid for every channel, then
-    # broadcast over polarization and add a leading time axis.
-    if beam_polynomial_coefficients is None:
-        pb = casa_airy_disk_response(
-            img_xds.l.values[None, :, None],
-            img_xds.m.values[None, None, :],
-            img_xds.frequency.values[:, None, None],
-            float(np.asarray(list_dish_diameters)[0]),
-            float(np.asarray(list_blockage_diameters)[0]),
-            max_rad_1GHz,
-            ipower=ipower,
-        )
-        method = "airy_disk"
+    if beam_model is None:
+        beam_model = {
+            "func": "casa_airy",
+            "dish_diameter": float(np.asarray(list_dish_diameters)[0]),
+            "blockage_diameter": float(np.asarray(list_blockage_diameters)[0]),
+            "max_rad_1GHz": max_rad_1GHz,
+        }
+    frequency = img_xds.frequency.values
+    packed_model = pack_primary_beam_model(beam_model, frequency)
+    if packed_model["kind"] == "polynomial":
+        method = "beam_polynomial"
+    elif packed_model["func"] == "none":
+        method = "uniform"
     else:
-        pb = polynomial_primary_beam(
+        method = "airy_disk"
+
+    # Evaluate the beam on the image's (l, m) grid one channel at a time, then
+    # broadcast over polarization and add a leading time axis.  The buffer is
+    # allocated after the first channel, whose temporaries set the peak memory.
+    pb = None
+    for i_chan, f in enumerate(frequency):
+        response = symmetric_beam_response(
+            packed_model,
             img_xds.l.values[:, None],
             img_xds.m.values[None, :],
-            img_xds.frequency.values,
-            beam_polynomial_coefficients,
-            max_rad_1GHz,
-            ipower=ipower,
+            f,
+            ipower,
         )
-        method = "beam_polynomial"
-    pb = pb.astype(float_dtype, copy=False)
+        if pb is None:
+            pb = np.empty((frequency.size, *response.shape), dtype=float_dtype)
+        pb[i_chan] = response
+        del response
     img_xds["PRIMARY_BEAM"] = xr.DataArray(
         np.tile(pb[None, :, None, :, :], (1, 1, img_xds.sizes["polarization"], 1, 1)),
         dims=("time", "frequency", "polarization", "l", "m"),
@@ -169,73 +179,90 @@ def make_primary_beam_single_field(
     return img_xds, pd.DataFrame({"T_primary_beam": [time.time() - start]})
 
 
-def polynomial_primary_beam(
-    l,  # noqa: E741
-    m,
-    frequency,
-    beam_polynomial_coefficients,
-    max_rad_1GHz,
-    ipower=2,
-):
-    """CASA ``PBMath1DEVLA`` primary beam of a beam-polynomial model for each frequency.
+def pack_primary_beam_model(beam_model, frequency):
+    """The packed antenna beam model the primary beam is evaluated with.
 
-    Each frequency takes the coefficients of
-    :func:`~astroviper.utils.beam_models.beam_polynomial_coefficient_index`,
-    evaluated at the frequency itself on CASA's 10000-sample table out to
-    ``max_rad_1GHz``
-    (:func:`~astroviper.processing_functions.simulation.antenna_beams.polynomial_beam_response`);
-    the beam is zero beyond ``max_rad_1GHz / (frequency / 1 GHz)``.
+    The model as
+    :func:`~astroviper.processing_functions.simulation.antenna_beams.evaluate_beam_models`
+    gives it to the simulator (a beam polynomial reduced to the row
+    :func:`~astroviper.utils.beam_models.beam_polynomial_coefficient_index`
+    picks at each frequency), packed.
 
     Parameters
     ----------
-    l, m : array_like (broadcastable)
-        Direction cosines (radians).
-    frequency : array_like, [n_frequency]
+    beam_model : dict or xarray.Dataset
+        Analytic or beam-polynomial antenna beam model.
+    frequency : array_like
         Frequencies (Hz).
-    beam_polynomial_coefficients : xarray.Dataset
-        Beam-polynomial model
-        (:func:`~astroviper.utils.beam_models.read_beam_polynomial_coefficients`).
-    max_rad_1GHz : float
-        Radius of the beam table at 1 GHz (radians).
-    ipower : int, optional
-        ``2`` returns the power beam, ``1`` the voltage pattern.  Default ``2``.
 
     Returns
     -------
-    numpy.ndarray
-        ``[n_frequency, *broadcast(l, m).shape]``.
+    dict
+        One element of
+        :func:`~astroviper.processing_functions.simulation.antenna_beams.pack_beam_models`.
+
+    Raises
+    ------
+    ValueError
+        For another kind of model or a beam that is not physical.
     """
     import numpy as np
 
     from astroviper.processing_functions.simulation.antenna_beams import (
-        polynomial_beam_response,
+        evaluate_beam_models,
+        pack_beam_models,
     )
-    from astroviper.utils.beam_models import beam_polynomial_coefficient_index
 
-    frequency = np.atleast_1d(np.asarray(frequency, dtype=np.float64))
-    rho = np.hypot(l, m)
-    coefficients = beam_polynomial_coefficients.BPC.values[
-        beam_polynomial_coefficient_index(beam_polynomial_coefficients, frequency), 0
-    ]
-    beam = np.empty(frequency.shape + rho.shape)
-    for i, f in enumerate(frequency):
-        beam[i] = np.where(
-            rho > max_rad_1GHz / (f / 1e9),
-            0.0,
-            polynomial_beam_response(l, m, f, coefficients[i], max_rad_1GHz, ipower),
+    # time, phase centre and site are only used for Zernike models
+    evaluated, _ = evaluate_beam_models(
+        [_checked_primary_beam_model(beam_model)],
+        np.zeros(1),
+        np.atleast_1d(np.asarray(frequency, dtype=np.float64)),
+        np.zeros((1, 2)),
+        np.zeros(3),
+    )
+    return pack_beam_models(evaluated)[0]
+
+
+def _checked_primary_beam_model(beam_model):
+    from astroviper.processing_functions.simulation.antenna_beams import (
+        beam_model_kind,
+        normalize_beam_model,
+    )
+
+    kind = beam_model_kind(beam_model)
+    if kind not in ("analytic", "beam_polynomial_coefficients"):
+        raise ValueError(
+            f"beam_model of kind {kind!r} is not supported: the primary beam is "
+            "an analytic or beam-polynomial model, azimuthally symmetric and "
+            "independent of the parallactic angle"
         )
-    return beam
+    beam_model = normalize_beam_model(beam_model)
+    if kind == "analytic":
+        dish, blockage = beam_model["dish_diameter"], beam_model["blockage_diameter"]
+        if beam_model["func"] not in ("casa_airy", "airy", "none") or not (
+            dish > 0.0 and 0.0 <= blockage < dish
+        ):
+            raise ValueError(
+                "an analytic beam_model needs func 'casa_airy', 'airy' or 'none', "
+                "dish_diameter > 0 and 0 <= blockage_diameter < dish_diameter; "
+                f"got {beam_model}"
+            )
+    max_rad = (beam_model if kind == "analytic" else beam_model.attrs)["max_rad_1GHz"]
+    if not max_rad > 0.0:
+        raise ValueError(f"beam_model needs max_rad_1GHz > 0; got {max_rad}")
+    return beam_model
 
 
 # CASA PBMath.cc builds its EVLA beam polynomial with a 58 arcmin table at 1 GHz.
-EVLA_MAX_RAD_1GHZ = math.radians(58.0 / 60.0)
+EVLA_MAX_RAD_1GHZ = EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ
 
 
 @functools.cache
 def _evla_beam_polynomial_coefficients():
     from astroviper.utils.beam_models import read_beam_polynomial_coefficients
 
-    return read_beam_polynomial_coefficients("EVLA_", max_rad_1GHz=EVLA_MAX_RAD_1GHZ)
+    return read_beam_polynomial_coefficients("EVLA_")
 
 
 PRIMARY_BEAM_PARAMS_KEYS = (
@@ -243,6 +270,7 @@ PRIMARY_BEAM_PARAMS_KEYS = (
     "effective_dish_diameter",
     "blockage_diameter",
     "max_rad_1GHz",
+    "beam_model",
 )
 
 
@@ -252,28 +280,30 @@ def resolve_primary_beam_params(primary_beam_params=None):
     Parameters
     ----------
     primary_beam_params : dict, optional
-        ``telescope`` (a key of :data:`astroviper.utils.beam_models.AIRY_DISK_MODELS`,
-        default ``"alma"``; ``"vla"`` is CASA's EVLA beam polynomial) and the
-        numbers ``effective_dish_diameter``, ``blockage_diameter`` (metres; refused
-        for ``"vla"``) and ``max_rad_1GHz`` (radians), which override the
-        telescope's values.
+        ``beam_model`` (an analytic dict or a beam-polynomial dataset, as
+        ``beam_models`` of the simulator takes it; alone), or ``telescope``
+        (a key of :data:`astroviper.utils.beam_models.AIRY_DISK_MODELS`,
+        default ``"alma"``, which names ``airy_disk_model(telescope)``;
+        ``"vla"`` names ``read_beam_polynomial_coefficients("EVLA_")``, CASA's
+        EVLA beam polynomial) and the numbers ``effective_dish_diameter``,
+        ``blockage_diameter`` (metres; refused for ``"vla"``) and
+        ``max_rad_1GHz`` (radians), which override the telescope model's values.
 
     Returns
     -------
     dict
-        ``{}`` for ``None`` (the function's ALMA defaults); for ``"vla"``
-        ``beam_polynomial_coefficients`` (``EVLA_`` with
-        :data:`EVLA_MAX_RAD_1GHZ`) and ``max_rad_1GHz``; else
-        ``list_dish_diameters``, ``list_blockage_diameters`` and ``max_rad_1GHz``.
+        ``{}`` for ``None`` (the function's ALMA defaults), else
+        ``beam_model``.
 
     Raises
     ------
     ValueError
-        For an unknown key or telescope, a dish or blockage diameter given
-        with ``"vla"``, or a beam that is not physical.
+        For an unknown key or telescope, ``beam_model`` with another key, a
+        Zernike aperture or Jones image ``beam_model``, a dish or blockage
+        diameter given with ``"vla"``, or a beam that is not physical.
+    TypeError
+        For a ``beam_model`` that is not a beam model.
     """
-    import numpy as np
-
     from astroviper.utils.beam_models import AIRY_DISK_MODELS, airy_disk_model
 
     if primary_beam_params is None:
@@ -284,6 +314,16 @@ def resolve_primary_beam_params(primary_beam_params=None):
             f"unknown primary_beam_params key(s) {sorted(unknown)}; expected "
             f"{list(PRIMARY_BEAM_PARAMS_KEYS)}"
         )
+    if "beam_model" in primary_beam_params:
+        refused = sorted(set(primary_beam_params) - {"beam_model"})
+        if refused:
+            raise ValueError(
+                f"primary_beam_params {refused} do not apply with beam_model, "
+                "which holds its own values"
+            )
+        return {
+            "beam_model": _checked_primary_beam_model(primary_beam_params["beam_model"])
+        }
     telescope = str(primary_beam_params.get("telescope", "alma"))
     if telescope.lower() == "vla":
         refused = sorted(
@@ -294,15 +334,15 @@ def resolve_primary_beam_params(primary_beam_params=None):
                 f"primary_beam_params {refused} do not apply to telescope "
                 f"{telescope!r}, CASA's EVLA beam polynomial"
             )
-        max_rad = float(primary_beam_params.get("max_rad_1GHz", EVLA_MAX_RAD_1GHZ))
+        model = _evla_beam_polynomial_coefficients()
+        max_rad = float(
+            primary_beam_params.get("max_rad_1GHz", model.attrs["max_rad_1GHz"])
+        )
         if not max_rad > 0.0:
             raise ValueError(
                 f"primary_beam_params need max_rad_1GHz > 0; got {max_rad}"
             )
-        return {
-            "beam_polynomial_coefficients": _evla_beam_polynomial_coefficients(),
-            "max_rad_1GHz": max_rad,
-        }
+        return {"beam_model": model.assign_attrs(max_rad_1GHz=max_rad)}
     if telescope.lower() not in AIRY_DISK_MODELS:
         raise ValueError(
             f"primary_beam_params['telescope'] {telescope!r} is not one of "
@@ -323,7 +363,10 @@ def resolve_primary_beam_params(primary_beam_params=None):
             f"got {dish}, {blockage}, {max_rad}"
         )
     return {
-        "list_dish_diameters": np.array([dish]),
-        "list_blockage_diameters": np.array([blockage]),
-        "max_rad_1GHz": max_rad,
+        "beam_model": {
+            **model,
+            "dish_diameter": dish,
+            "blockage_diameter": blockage,
+            "max_rad_1GHz": max_rad,
+        }
     }

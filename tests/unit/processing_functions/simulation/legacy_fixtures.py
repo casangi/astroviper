@@ -7,6 +7,7 @@ import os
 import numpy as np
 
 from astroviper.utils.beam_models import (
+    DEG_TO_RAD,
     airy_disk_model,
     read_aperture_polynomial_coefficients,
     read_beam_polynomial_coefficients,
@@ -19,7 +20,10 @@ LEGACY_BEAM_MODELS = {
     "vla_airy": lambda: [airy_disk_model("vla")],
     "vla_airy_pointing": lambda: [airy_disk_model("vla")],
     "alma_het_mosaic_noise": lambda: [airy_disk_model("aca"), airy_disk_model("alma")],
-    "evla_polynomial_beam": lambda: [read_beam_polynomial_coefficients("EVLA_")],
+    # SIRIUS made this fixture with 0.8564 deg, not CASA's 58 arcmin EVLA table.
+    "evla_polynomial_beam": lambda: [
+        read_beam_polynomial_coefficients("EVLA_", max_rad_1GHz=0.8564 * DEG_TO_RAD)
+    ],
     "evla_zernike_beam": lambda: [
         read_aperture_polynomial_coefficients("EVLA_avg_zcoeffs_SBand_lookup")
     ],

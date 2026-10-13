@@ -21,6 +21,7 @@ from astroviper.processing_functions.simulation.antenna_beams import (
     polynomial_beam_response,
     resolve_beam_params,
     sample_jones,
+    symmetric_beam_response,
 )
 from astroviper.processing_functions.simulation.zernike_polynomials import (
     N_ZERNIKE_TERMS,
@@ -151,6 +152,17 @@ def test_beam_polynomial_coefficient_index_is_casa_pick(frequency, table_frequen
     bpc = read_beam_polynomial_coefficients("EVLA_")
     index = beam_polynomial_coefficient_index(bpc, frequency)
     assert bpc.frequency.values[index] == table_frequency_mhz * 1e6
+
+
+def test_beam_polynomial_default_radius_is_that_of_casa_evla():
+    """The EVLA beam polynomial has CASA's 58 arcmin table at 1 GHz
+    (PBMath1DEVLA); the EVLA Zernike models keep 0.8564 deg."""
+    assert read_beam_polynomial_coefficients("EVLA_").attrs[
+        "max_rad_1GHz"
+    ] == pytest.approx(np.radians(58.0 / 60.0), rel=1e-15)
+    assert read_aperture_polynomial_coefficients("EVLA_avg_zcoeffs_SBand_lookup").attrs[
+        "max_rad_1GHz"
+    ] == pytest.approx(np.radians(0.8564), rel=1e-15)
 
 
 def test_beam_polynomial_coefficient_index_of_the_table():
@@ -432,6 +444,45 @@ def test_sample_jones_analytic_and_polynomial():
     assert 0 < np.abs(jp[1, 0, 0]) < 1.0
     with pytest.raises(ValueError):
         sample_jones({"kind": "bogus", "max_rad_1GHz": 1.0}, lm, np.array([3e9]), 0.0)
+
+
+def test_symmetric_beam_response_is_the_sampled_voltage_pattern():
+    packed = pack_beam_models(
+        [airy_disk_model("vla"), read_beam_polynomial_coefficients("EVLA_")]
+    )
+    lm = np.array([[0.0, 0.0], [1e-3, 0.0], [0.02, 0.0]])
+    frequency = np.array([3e9, 3.4e9])
+    for model in packed:
+        voltage = symmetric_beam_response(model, lm[:, :1], lm[:, 1:], frequency)
+        np.testing.assert_array_equal(
+            sample_jones(model, lm, frequency, 0.0)[:, :, 0], voltage
+        )
+        power = symmetric_beam_response(model, lm[:, :1], lm[:, 1:], frequency, 2)
+        np.testing.assert_allclose(power, voltage**2, rtol=0, atol=1e-15)
+        np.testing.assert_array_equal(power[2], 0.0)  # beyond max_rad at 3 GHz
+    with pytest.raises(ValueError, match="not azimuthally symmetric"):
+        symmetric_beam_response({"kind": "jones_image"}, 0.0, 0.0, 3e9)
+
+
+def test_symmetric_beam_cut_is_that_of_the_cpp_kernel():
+    """On the cut circle the beam is zero where sqrt(l * l + m * m), the radius
+    of the C++ kernel, reaches it, also where np.hypot rounds to the other side."""
+    packed = pack_beam_models([airy_disk_model("alma")])[0]
+    frequency = 100e9
+    cut = packed["max_rad_1GHz"] / (frequency / 1e9)
+    angle = np.linspace(0.0, 2.0 * np.pi, 1000)
+    l, m = cut * np.cos(angle), cut * np.sin(angle)  # noqa: E741
+    outside = np.sqrt(l * l + m * m) >= cut
+    assert (outside & (np.hypot(l, m) < cut)).any()
+    assert (~outside & (np.hypot(l, m) >= cut)).any()
+    voltage = symmetric_beam_response(packed, l, m, frequency)
+    np.testing.assert_array_equal(voltage == 0.0, outside)
+    np.testing.assert_array_equal(
+        sample_jones(packed, np.stack([l, m], axis=-1), np.array([frequency]), 0.0)[
+            :, 0, 0
+        ],
+        voltage,
+    )
 
 
 def test_apply_mueller():

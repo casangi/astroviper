@@ -70,6 +70,10 @@ _MAX_RAD_1GHZ_BY_TELESCOPE = {
     "meerkat": 1.5 * DEG_TO_RAD,
 }
 
+# CASA PBMath.cc builds its EVLA beam polynomial (PBMath1DEVLA) with a 58 arcmin
+# table at 1 GHz.
+EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ = 58.0 / 60.0 * DEG_TO_RAD
+
 _LEGACY_ATTR_NAMES = {
     "dish_diam": "dish_diameter",
     "blockage_diam": "blockage_diameter",
@@ -282,6 +286,9 @@ def read_beam_polynomial_coefficients(
         e.g. ``"EVLA_"``) or a path.
     dish_diameter : float
     max_rad_1GHz : float, optional
+        Radians; default :data:`EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ` (CASA's
+        ``PBMath1DEVLA``) for EVLA, else from the telescope name (CASA PBMath
+        values).
     telescope_name : str, optional
     max_coefficients : int
     polarization : str
@@ -306,7 +313,11 @@ def read_beam_polynomial_coefficients(
     if telescope_name is None:
         telescope_name = base.partition("_")[0]
     if max_rad_1GHz is None:
-        max_rad_1GHz = _max_rad_for_telescope(telescope_name)
+        max_rad_1GHz = (
+            EVLA_BEAM_POLYNOMIAL_MAX_RAD_1GHZ
+            if telescope_name.lower() == "evla"
+            else _max_rad_for_telescope(telescope_name)
+        )
 
     band_names: list[str] = []
     band_definitions: list[list] = []

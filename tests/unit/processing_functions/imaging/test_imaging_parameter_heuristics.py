@@ -116,6 +116,47 @@ def test_primary_beam_radius_is_the_level_of_the_imager_beam(telescope, level):
     ) == pytest.approx(radius / 2, rel=2e-3)
 
 
+def _uncut_airy_disk_radius(frequency, level, model, n_scan=4096):
+    """The radius of CASA's Airy power pattern without the cut at max_rad_1GHz,
+    on the scan of primary_beam_radius."""
+    from scipy.optimize import brentq
+
+    def excess(radius):
+        return (
+            float(
+                casa_airy_disk_response(
+                    radius,
+                    0.0,
+                    frequency,
+                    model["dish_diameter"],
+                    model["blockage_diameter"],
+                    model["max_rad_1GHz"],
+                    ipower=2,
+                )
+            )
+            - level
+        )
+
+    radii = np.linspace(
+        0.0, 1.5 * SPEED_OF_LIGHT / frequency / model["dish_diameter"], n_scan
+    )
+    below = np.flatnonzero([excess(radius) < 0.0 for radius in radii])
+    return float(brentq(excess, radii[below[0] - 1], radii[below[0]]))
+
+
+@pytest.mark.parametrize("telescope", ["alma", "aca", "ngvla"])
+@pytest.mark.parametrize("level", [0.5, 0.2, 0.05])
+@pytest.mark.parametrize("frequency", [100e9, 230e9])
+def test_primary_beam_radius_of_an_airy_disk_is_that_without_the_cut(
+    telescope, level, frequency
+):
+    """The main lobe crosses the level inside max_rad_1GHz, so the zero beyond
+    it leaves the radius unchanged to the bit."""
+    assert primary_beam_radius(
+        frequency, level, {"telescope": telescope}
+    ) == _uncut_airy_disk_radius(frequency, level, airy_disk_model(telescope))
+
+
 @pytest.mark.parametrize("level", [0.5, 0.2, 0.05])
 def test_primary_beam_radius_is_the_level_of_the_imager_vla_beam(level):
     """For "vla" the imager's beam is CASA's EVLA polynomial; 100 and 200 GHz lie

@@ -186,7 +186,37 @@ def test_primary_beam_is_casa_power_pattern():
         0.03113667385557884,
         ipower=1,
     )
-    np.testing.assert_array_equal(img_xds["PRIMARY_BEAM"].values[0, 0, 0], voltage**2)
+    outside = np.hypot(
+        img_xds.l.values[:, None], img_xds.m.values[None, :]
+    ) >= 0.03113667385557884 / (img_xds.frequency.values[0] / 1e9)
+    np.testing.assert_array_equal(
+        img_xds["PRIMARY_BEAM"].values[0, 0, 0], np.where(outside, 0.0, voltage**2)
+    )
+
+
+def test_primary_beam_is_the_airy_disk_inside_max_rad_and_zero_beyond():
+    """The ALMA beam is CASA's Airy power pattern, as before the cut, bit for bit
+    inside max_rad_1GHz / (frequency / 1 GHz) and zero beyond it, as CASA's .pb."""
+    from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
+        casa_airy_disk_response,
+    )
+
+    max_rad = airy_disk_model("alma")["max_rad_1GHz"]
+    img_xds, image_params = _make_empty_residual_image(
+        frequency_coords=(1.0e11, 2.3e11, 9.5e11)
+    )
+    img_xds, _ = make_primary_beam_single_field(img_xds, image_params)
+    l_axis = img_xds.l.values[None, :, None]
+    m_axis = img_xds.m.values[None, None, :]
+    frequency = img_xds.frequency.values[:, None, None]
+    uncut = casa_airy_disk_response(
+        l_axis, m_axis, frequency, 10.7, 0.75, max_rad, ipower=2
+    )
+    outside = np.hypot(l_axis, m_axis) >= max_rad / (frequency / 1e9)
+    assert outside.any(axis=(1, 2)).all() and not outside.all(axis=(1, 2)).any()
+    np.testing.assert_array_equal(
+        img_xds["PRIMARY_BEAM"].values[0, :, 0], np.where(outside, 0.0, uncut)
+    )
 
 
 def test_airy_disk_rorder_versions_agree():
@@ -258,6 +288,7 @@ def test_primary_beam_params_vla_beam():
 
     assert EVLA_MAX_RAD_1GHZ == pytest.approx(58.0 / 60.0 * np.pi / 180.0, rel=1e-15)
     bpc = read_beam_polynomial_coefficients("EVLA_")
+    assert bpc.attrs["max_rad_1GHz"] == EVLA_MAX_RAD_1GHZ
     img_xds = _primary_beam(
         {"telescope": "vla"}, frequency_coords=(33e9, 45e9), cell_arcsec=4.0
     )
@@ -274,13 +305,13 @@ def test_primary_beam_params_vla_beam():
             EVLA_MAX_RAD_1GHZ,
             ipower=2,
         )
-        outside = np.hypot(l_axis, m_axis) > EVLA_MAX_RAD_1GHZ / (frequency / 1e9)
+        outside = np.hypot(l_axis, m_axis) >= EVLA_MAX_RAD_1GHZ / (frequency / 1e9)
         assert outside.any() and not outside.all()
         np.testing.assert_array_equal(
             pb.values[0, f, 0], np.where(outside, 0.0, expected)
         )
     resolved = resolve_primary_beam_params({"telescope": "vla", "max_rad_1GHz": 0.02})
-    assert resolved["max_rad_1GHz"] == 0.02
+    assert resolved["beam_model"].attrs["max_rad_1GHz"] == 0.02
 
 
 def test_primary_beam_params_numbers_equal_to_a_telescope_give_its_beam():
@@ -321,3 +352,161 @@ def test_primary_beam_params_numbers_equal_to_a_telescope_give_its_beam():
 def test_primary_beam_params_refused(primary_beam_params, match):
     with pytest.raises(ValueError, match=match):
         resolve_primary_beam_params(primary_beam_params)
+
+
+def _beam_model(name):
+    from astroviper.utils.beam_models import read_beam_polynomial_coefficients
+
+    if name == "EVLA_":
+        return read_beam_polynomial_coefficients(name)
+    return airy_disk_model(name)
+
+
+@pytest.mark.parametrize(
+    "name, frequency_coords",
+    [
+        ("alma", (90e9, 230e9, 345e9)),
+        ("aca", (90e9, 230e9)),
+        ("ngvla", (30e9, 93e9)),
+        ("vla", (1.5e9, 3e9)),
+        ("EVLA_", (2.01e9, 3e9, 4.5e9)),
+    ],
+)
+def test_primary_beam_is_the_simulator_beam(name, frequency_coords):
+    """The primary beam of a beam model is |J_pp|**2 of the simulator's
+    sample_jones for that model, inside and beyond max_rad_1GHz."""
+    from astroviper.processing_functions.simulation.antenna_beams import (
+        evaluate_beam_models,
+        pack_beam_models,
+        sample_jones,
+    )
+
+    model = _beam_model(name)
+    max_rad = (model if isinstance(model, dict) else model.attrs)["max_rad_1GHz"]
+    # the image reaches 1.5 times the cut at the lowest frequency
+    cell_arcsec = 1.5 * max_rad / (min(frequency_coords) / 1e9) / 32 / ARCSEC
+    img_xds = _primary_beam(
+        {"beam_model": model},
+        frequency_coords=frequency_coords,
+        cell_arcsec=cell_arcsec,
+    )
+    frequency = img_xds.frequency.values
+    l_grid, m_grid = np.meshgrid(img_xds.l.values, img_xds.m.values, indexing="ij")
+    outside = np.hypot(l_grid, m_grid) >= max_rad / (frequency[:, None, None] / 1e9)
+    assert outside.any(axis=(1, 2)).all() and not outside.all(axis=(1, 2)).any()
+    evaluated, parallactic_angle = evaluate_beam_models(
+        [model], np.array([0.0]), frequency, np.zeros((1, 2)), np.zeros(3)
+    )
+    jones = sample_jones(
+        pack_beam_models(evaluated)[0],
+        np.stack([l_grid.ravel(), m_grid.ravel()], axis=-1),
+        frequency,
+        parallactic_angle[0],
+    )
+    simulated = (np.abs(jones[:, :, 0]) ** 2).T.reshape(outside.shape)
+    np.testing.assert_allclose(
+        img_xds["PRIMARY_BEAM"].values[0, :, 0], simulated, rtol=0, atol=1e-15
+    )
+
+
+@pytest.mark.parametrize("telescope", ["alma", "aca", "ngvla", "vla"])
+def test_primary_beam_params_beam_model_is_the_telescope_beam(telescope):
+    """A telescope names a beam model: giving that model is the same beam."""
+    model = _beam_model("EVLA_" if telescope == "vla" else telescope)
+    np.testing.assert_array_equal(
+        _primary_beam({"beam_model": model})["PRIMARY_BEAM"].values,
+        _primary_beam({"telescope": telescope})["PRIMARY_BEAM"].values,
+    )
+
+
+def test_primary_beam_params_beam_model_is_normalized():
+    legacy = {"dish_diam": 10.7, "blockage_diam": 0.75, "max_rad_1GHz": 0.0311}
+    assert resolve_primary_beam_params({"beam_model": legacy})["beam_model"] == {
+        "func": "casa_airy",
+        "dish_diameter": 10.7,
+        "blockage_diameter": 0.75,
+        "max_rad_1GHz": 0.0311,
+    }
+
+
+def _zernike_model():
+    from astroviper.utils.beam_models import read_aperture_polynomial_coefficients
+
+    return read_aperture_polynomial_coefficients("EVLA_avg_zcoeffs_SBand_lookup")
+
+
+def _jones_image_model():
+    from astroviper.processing_functions.simulation.antenna_beams import (
+        make_airy_jones_beam,
+    )
+
+    return make_airy_jones_beam(airy_disk_model("alma"), [1e11], {"image_size": [8, 8]})
+
+
+@pytest.mark.parametrize(
+    "primary_beam_params, error, match",
+    [
+        (
+            lambda: {"beam_model": airy_disk_model("alma"), "telescope": "alma"},
+            ValueError,
+            "do not apply with beam_model",
+        ),
+        (
+            lambda: {"beam_model": _beam_model("EVLA_"), "max_rad_1GHz": 0.02},
+            ValueError,
+            "do not apply with beam_model",
+        ),
+        (lambda: {"beam_model": _zernike_model()}, ValueError, "not supported"),
+        (lambda: {"beam_model": _jones_image_model()}, ValueError, "not supported"),
+        (lambda: {"beam_model": "alma"}, TypeError, "Unsupported beam model"),
+        (
+            lambda: {"beam_model": {**airy_disk_model("alma"), "dish_diameter": 0.0}},
+            ValueError,
+            "dish_diameter > 0",
+        ),
+        (
+            lambda: {
+                "beam_model": {**airy_disk_model("alma"), "blockage_diameter": 12.0}
+            },
+            ValueError,
+            "blockage_diameter < dish_diameter",
+        ),
+        (
+            lambda: {"beam_model": {**airy_disk_model("alma"), "func": "gaussian"}},
+            ValueError,
+            "func 'casa_airy', 'airy' or 'none'",
+        ),
+        (
+            lambda: {"beam_model": {**airy_disk_model("alma"), "max_rad_1GHz": 0.0}},
+            ValueError,
+            "max_rad_1GHz > 0",
+        ),
+        (
+            lambda: {"beam_model": _beam_model("EVLA_").assign_attrs(max_rad_1GHz=0.0)},
+            ValueError,
+            "max_rad_1GHz > 0",
+        ),
+    ],
+)
+def test_primary_beam_params_beam_model_refused(primary_beam_params, error, match):
+    with pytest.raises(error, match=match):
+        resolve_primary_beam_params(primary_beam_params())
+
+
+def test_primary_beam_of_a_zernike_model_refused():
+    img_xds, image_params = _make_empty_residual_image()
+    with pytest.raises(ValueError, match="not supported"):
+        make_primary_beam_single_field(
+            img_xds, image_params, beam_model=_zernike_model()
+        )
+
+
+def test_primary_beam_of_func_none_is_uniform():
+    """func "none" is 1 out to max_rad_1GHz, not an Airy disk."""
+    pb = _primary_beam(
+        {"beam_model": {**airy_disk_model("alma"), "func": "none"}},
+        frequency_coords=(1.0e11,),
+        cell_arcsec=2.0,
+    )["PRIMARY_BEAM"]
+    assert pb.attrs["method"] == "uniform"
+    assert set(np.unique(pb.values)) == {0.0, 1.0}

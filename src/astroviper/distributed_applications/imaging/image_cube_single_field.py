@@ -506,10 +506,18 @@ def image_cube_single_field(
         1 GHz), ``effective_dish_diameter`` and ``blockage_diameter`` (metres;
         refused for ``"vla"``) and ``max_rad_1GHz`` (CASA's maximum radius of
         the beam table at 1 GHz in radians, scaled as 1 / frequency, which sets
-        the radius sampling of the beam; the beam polynomial is zero beyond
+        the radius sampling of the beam; the beam is zero beyond
         it). Numbers given with a telescope override that telescope's values;
         no telescope means ``"alma"``. ``None`` is the ALMA 12 m beam (10.7 m,
-        0.75 m, 1.784 deg at 1 GHz).
+        0.75 m, 1.784 deg at 1 GHz). Or ``beam_model`` alone: an analytic dict
+        or a beam-polynomial dataset as ``simulate_processing_set`` takes it in
+        ``beam_models`` (``"vla"`` is
+        ``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square
+        of the voltage pattern the simulator applies for the model, computed by
+        the same function
+        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`).
+        Zernike aperture models and Jones images are not supported: they are
+        not azimuthally symmetric and depend on the parallactic angle.
     skunk_works : bool
         If ``True`` use the experimental performance I/O path in each node task:
         load only the data group's data variables straight from the Zarr chunk
