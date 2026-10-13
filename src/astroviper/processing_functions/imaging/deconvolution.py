@@ -108,6 +108,15 @@ def _validate_deconvolve_params(deconvolve_params):
         - ``max_iter`` : int, maximum number of iterations. Default 1000.
         - ``threshold`` : float, stopping threshold, non-negative.
           Default 0.0.
+        - ``max_iter_per_cycle`` : int, cap on the iterations of one model
+          update; negative for no cap. Used only without
+          ``max_iter_per_cycle_updated``.
+        - ``max_iter_per_cycle_updated`` : int or ``(nt, nf, np)`` int array,
+          iteration limit of each plane for this model update, as the cycle
+          controller sets it. Default ``min(max_iter_per_cycle, max_iter)``.
+        - ``threshold_per_cycle`` : float or ``(nt, nf, np)`` array, stopping
+          threshold of each plane for this model update, as the cycle
+          controller sets it. Default ``threshold``.
         - ``primary_beam_limit`` : float in ``[0, 1]``, primary-beam mask
           cutoff as a fraction of the peak primary beam (used to build the
           deconvolution mask, *not* the deconvolver stopping threshold).
@@ -295,18 +304,20 @@ def _divergence_kwargs(deconvolve_params, asp=False):
 
 
 def _per_plane_per_cycle_limits(deconvolve_params, nt, nf, npol, threshold_dtype):
-    """Build the per-plane ``max_iter_per_cycle`` and ``threshold_per_cycle`` cubes.
+    """Build the per-plane ``max_iter_per_cycle_updated`` and ``threshold_per_cycle`` cubes.
 
-    Cycle control is performed independently for every
+    Iteration control is performed independently for every
     ``(time, frequency, polarization)`` plane, so the deconvolvers are driven
     with a per-plane iteration limit and a per-plane stopping threshold rather
-    than single scalars. ``deconvolve_params["max_iter_per_cycle"]`` and
-    ``deconvolve_params["threshold_per_cycle"]`` may each be either a scalar
-    (standalone calls) or an ``(nt, nf, npol)`` array (supplied by the
+    than single scalars. ``deconvolve_params["max_iter_per_cycle_updated"]``
+    and ``deconvolve_params["threshold_per_cycle"]`` may each be either a
+    scalar or an ``(nt, nf, npol)`` array (supplied by the
     :class:`CycleController`, indexed ``(time, frequency, polarization)``).
-    A scalar is broadcast to every plane; an absent ``max_iter_per_cycle`` or
-    a negative one falls back to ``max_iter``, and an absent
-    ``threshold_per_cycle`` falls back to the absolute ``threshold``.
+    A scalar is broadcast to every plane. A call without them (outside the
+    imaging cycle loop) is one model update with all of ``max_iter`` left:
+    ``max_iter_per_cycle_updated`` is ``min(max_iter_per_cycle, max_iter)``
+    (``max_iter`` when ``max_iter_per_cycle`` is absent or negative), and
+    ``threshold_per_cycle`` is the absolute ``threshold``.
 
     Parameters
     ----------
@@ -320,7 +331,7 @@ def _per_plane_per_cycle_limits(deconvolve_params, nt, nf, npol, threshold_dtype
 
     Returns
     -------
-    max_iter_per_cycle : numpy.ndarray
+    max_iter_per_cycle_updated : numpy.ndarray
         ``(nt, nf, npol)`` int32 per-plane iteration limits for this model
         update.
     threshold_per_cycle : numpy.ndarray
@@ -329,18 +340,26 @@ def _per_plane_per_cycle_limits(deconvolve_params, nt, nf, npol, threshold_dtype
     shape = (nt, nf, npol)
 
     max_iter = int(deconvolve_params["max_iter"])
-    max_iter_per_cycle = deconvolve_params.get("max_iter_per_cycle", None)
-    if max_iter_per_cycle is None or np.ndim(max_iter_per_cycle) == 0:
-        cap = max_iter if max_iter_per_cycle is None else int(max_iter_per_cycle)
-        if cap < 0:
-            cap = max_iter
-        max_iter_per_cycle = np.full(shape, min(cap, max_iter), dtype=np.int32)
+    max_iter_per_cycle_updated = deconvolve_params.get(
+        "max_iter_per_cycle_updated", None
+    )
+    if max_iter_per_cycle_updated is None:
+        cap = deconvolve_params.get("max_iter_per_cycle", None)
+        cap = max_iter if cap is None or int(cap) < 0 else int(cap)
+        max_iter_per_cycle_updated = min(cap, max_iter)
+    if np.ndim(max_iter_per_cycle_updated) == 0:
+        max_iter_per_cycle_updated = np.full(
+            shape, int(max_iter_per_cycle_updated), dtype=np.int32
+        )
     else:
-        max_iter_per_cycle = np.ascontiguousarray(max_iter_per_cycle, dtype=np.int32)
-        if max_iter_per_cycle.shape != shape:
+        max_iter_per_cycle_updated = np.ascontiguousarray(
+            max_iter_per_cycle_updated, dtype=np.int32
+        )
+        if max_iter_per_cycle_updated.shape != shape:
             raise ValueError(
-                f"max_iter_per_cycle shape {max_iter_per_cycle.shape} does not "
-                f"match the image plane grid {shape}"
+                "max_iter_per_cycle_updated shape "
+                f"{max_iter_per_cycle_updated.shape} does not match the image "
+                f"plane grid {shape}"
             )
 
     threshold_per_cycle = deconvolve_params.get("threshold_per_cycle", None)
@@ -362,7 +381,7 @@ def _per_plane_per_cycle_limits(deconvolve_params, nt, nf, npol, threshold_dtype
                 f"not match the image plane grid {shape}"
             )
 
-    return max_iter_per_cycle, threshold_per_cycle
+    return max_iter_per_cycle_updated, threshold_per_cycle
 
 
 def _plane_peak_abs_signed(arr, mask=None):
@@ -942,7 +961,7 @@ def _run_hogbom(
     peak_mask_cube,
     mask_arg,
     clean_box,
-    max_iter_per_cycle,
+    max_iter_per_cycle_updated,
     threshold_per_cycle,
     deconvolve_params,
     processing_function_threads,
@@ -955,18 +974,18 @@ def _run_hogbom(
     whole plane, skips NaN and is 1e20 when no pixel counts).
     """
     start_peak = _hogbom_peak_cube(residual_cube, peak_mask_cube, clean_box)
-    max_iter_remaining = np.where(np.isnan(start_peak), 0, max_iter_per_cycle).astype(
-        max_iter_per_cycle.dtype
-    )
+    max_iter_per_cycle_updated = np.where(
+        np.isnan(start_peak), 0, max_iter_per_cycle_updated
+    ).astype(max_iter_per_cycle_updated.dtype)
     result = clean_cube(
         residual_cube=residual_cube,
         psf_cube=psf_cube,
         model_cube=model_cube,
         mask_cube=mask_arg,
         clean_box=clean_box,
-        max_iter_remaining=max_iter_remaining,
+        max_iter_per_cycle_updated=max_iter_per_cycle_updated,
         gain=deconvolve_params["gain"],
-        threshold=threshold_per_cycle,
+        threshold_per_cycle=threshold_per_cycle,
         processing_function_threads=int(processing_function_threads),
         **_divergence_kwargs(deconvolve_params),
         record_iteration_history=bool(deconvolve_params["record_iteration_history"]),
@@ -1055,10 +1074,11 @@ def hogbom_clean(
     astroviper, so a plain ``img_xds[name].values`` call produces an
     array that can be passed to this function without any copy.
 
-    **Stop tests.** Every plane is tested at every iteration, inside the C++
-    kernel, and stops when
+    **Stop tests (iteration control).** Every plane is tested at every
+    iteration, inside the C++ kernel, and stops when
 
-    - it has spent its iteration budget (``max_iter_per_cycle``);
+    - it has spent its iteration limit for this model update
+      (``max_iter_per_cycle_updated``);
     - its peak residual is at or below its ``threshold_per_cycle`` (so an
       all-zero plane does no iterations);
     - it diverges. The test follows the RMS of the residual over the pixels
@@ -1147,9 +1167,9 @@ def hogbom_clean(
         mask_cube if mask_cube is not None else np.array([], dtype=residual_cube.dtype)
     )
 
-    # Per-plane cycle control: each (time, frequency, polarization) plane
+    # Per-plane iteration control: each (time, frequency, polarization) plane
     # is cleaned with its own iteration limit and threshold_per_cycle.
-    max_iter_per_cycle, threshold_per_cycle = _per_plane_per_cycle_limits(
+    max_iter_per_cycle_updated, threshold_per_cycle = _per_plane_per_cycle_limits(
         deconvolve_params, nt, nf, npol_img, residual_cube.dtype
     )
 
@@ -1161,7 +1181,7 @@ def hogbom_clean(
         peak_mask_cube=mask_cube,
         mask_arg=mask_arg,
         clean_box=clean_box,
-        max_iter_per_cycle=max_iter_per_cycle,
+        max_iter_per_cycle_updated=max_iter_per_cycle_updated,
         threshold_per_cycle=threshold_per_cycle,
         deconvolve_params=deconvolve_params,
         processing_function_threads=processing_function_threads,
@@ -1240,9 +1260,9 @@ def hogbom_clean_many_threads(
         mask_cube if mask_cube is not None else np.array([], dtype=residual_cube.dtype)
     )
 
-    # Per-plane cycle control: each plane has its own iteration limit and
+    # Per-plane iteration control: each plane has its own iteration limit and
     # threshold_per_cycle (shared with the C++ path via _per_plane_per_cycle_limits).
-    max_iter_per_cycle, threshold_per_cycle = _per_plane_per_cycle_limits(
+    max_iter_per_cycle_updated, threshold_per_cycle = _per_plane_per_cycle_limits(
         deconvolve_params, nt, nf, npol_img, residual_cube.dtype
     )
 
@@ -1254,7 +1274,7 @@ def hogbom_clean_many_threads(
         peak_mask_cube=mask_cube,
         mask_arg=mask_arg,
         clean_box=clean_box,
-        max_iter_per_cycle=max_iter_per_cycle,
+        max_iter_per_cycle_updated=max_iter_per_cycle_updated,
         threshold_per_cycle=threshold_per_cycle,
         deconvolve_params=deconvolve_params,
         processing_function_threads=processing_function_threads,
@@ -1415,19 +1435,19 @@ def asp_clean(
     else:
         mask_arg = np.array([], dtype=residual_cube.dtype)
 
-    # Per-plane cycle control: each (time, frequency, polarization) plane
+    # Per-plane iteration control: each (time, frequency, polarization) plane
     # is cleaned with its own iteration limit and threshold_per_cycle. Asp uses a
     # float64 threshold_per_cycle regardless of the image dtype.
-    max_iter_per_cycle, threshold_per_cycle = _per_plane_per_cycle_limits(
+    max_iter_per_cycle_updated, threshold_per_cycle = _per_plane_per_cycle_limits(
         deconvolve_params, nt, nf, npol_img, np.float64
     )
     # A plane whose search region (mask above the kernel's 0.99) holds a pixel
     # that is not a number gets no iterations, as with the Hogbom kernels.
     search = None if mask_cube is None else mask_cube > 0.99
     start_peak = _hogbom_peak_cube(residual_cube, search, (-1, -1, -1, -1))
-    max_iter_per_cycle = np.where(np.isnan(start_peak), 0, max_iter_per_cycle).astype(
-        max_iter_per_cycle.dtype
-    )
+    max_iter_per_cycle_updated = np.where(
+        np.isnan(start_peak), 0, max_iter_per_cycle_updated
+    ).astype(max_iter_per_cycle_updated.dtype)
 
     return aspclean.clean_cube(
         residual=residual_cube,
@@ -1435,8 +1455,8 @@ def asp_clean(
         model=model_cube,
         mask=mask_arg,
         gain=deconvolve_params["gain"],
-        threshold=threshold_per_cycle,
-        max_iter_remaining=max_iter_per_cycle,
+        threshold_per_cycle=threshold_per_cycle,
+        max_iter_per_cycle_updated=max_iter_per_cycle_updated,
         fusedthreshold=deconvolve_params.get("fusedthreshold", 0.0),
         psf_width=deconvolve_params.get("psf_width", 0.0),
         largestscale=deconvolve_params.get("largestscale", -1),

@@ -584,8 +584,13 @@ def image_cube_single_field(
         every frequency channel (the node task images one channel at a time),
         so a channel's cycles continue until all of its (time, polarization)
         planes have stopped, and a channel that has stopped does no further
-        residual updates while the others carry on. The CASA ``tclean``
-        equivalent is given in brackets. Keys:
+        residual updates while the others carry on. **Cycle control** is the
+        stop test between the residual update and the model update, which
+        decides whether a plane gets another cycle and sets the limits of its
+        next model update; **iteration control** is the stop test inside the
+        model update, made by the deconvolver at every iteration against
+        those limits. The CASA ``tclean`` equivalent is given in brackets.
+        Keys:
 
         - ``max_iter`` [CASA ``niter``] : Maximum number of deconvolution
           iterations (flux components) per plane, summed over all cycles. A
@@ -724,8 +729,11 @@ def image_cube_single_field(
         ``threshold_per_cycle = max(psf_fraction * peak_residual, threshold)``
         is the stopping threshold of that model update, where
         ``peak_residual`` is the plane's peak residual inside the mask at the
-        start of the cycle. The deconvolver also receives the per-plane
-        ``max_iter_per_cycle``, ``min(max_iter_per_cycle, remaining max_iter)``.
+        start of the cycle, and
+        ``max_iter_per_cycle_updated = min(max_iter_per_cycle,
+        max_iter_remaining)`` is the iteration limit of that model update (0
+        for a plane the entropy stop has ended), where ``max_iter_remaining``
+        is what is left of ``max_iter``.
     task_coords : dict
         Per-chunk coordinate mapping; ``task_coords[<parallel dim>]`` supplies
         this chunk's parallel coordinate values (``"data"``) and its

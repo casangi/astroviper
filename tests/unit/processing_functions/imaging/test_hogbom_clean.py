@@ -77,8 +77,8 @@ class TestBasicCorrectness:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=10,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=10,
         )
 
         assert result["iterations_performed"] >= 1
@@ -101,8 +101,8 @@ class TestBasicCorrectness:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=50,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=50,
         )
 
         for iy, ix, amp in sources:
@@ -123,8 +123,8 @@ class TestBasicCorrectness:
             psf=psf,
             model=model,
             gain=0.1,
-            threshold=0.0,
-            max_iter_remaining=1,
+            threshold_per_cycle=0.0,
+            max_iter_per_cycle_updated=1,
         )
 
         assert result["iterations_performed"] == 1
@@ -155,8 +155,8 @@ class TestInPlaceContract:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=5,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=5,
         )
 
         assert dirty.__array_interface__["data"][0] == ptr_before
@@ -178,8 +178,8 @@ class TestInPlaceContract:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=5,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=5,
         )
 
         assert model.__array_interface__["data"][0] == ptr_before
@@ -200,8 +200,8 @@ class TestInPlaceContract:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=5,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=5,
         )
 
         # Prior value is preserved, new component added.
@@ -220,8 +220,8 @@ class TestInPlaceContract:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=5,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=5,
         )
 
         assert np.array_equal(psf, psf_before)
@@ -244,8 +244,8 @@ class TestDtypeHandling:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=5,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=5,
         )
 
         assert dirty.dtype == np.float64
@@ -344,8 +344,8 @@ class TestIterationControls:
             psf=psf,
             model=model,
             gain=0.05,
-            threshold=0.0,
-            max_iter_remaining=7,
+            threshold_per_cycle=0.0,
+            max_iter_per_cycle_updated=7,
         )
 
         assert result["iterations_performed"] == 7
@@ -363,8 +363,8 @@ class TestIterationControls:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.01,
-            max_iter_remaining=100,
+            threshold_per_cycle=0.01,
+            max_iter_per_cycle_updated=100,
         )
 
         assert result["iterations_performed"] <= 5
@@ -386,8 +386,8 @@ class TestIterationControls:
             psf=psf,
             model=model,
             gain=0.1,
-            threshold=0.0,
-            max_iter_remaining=20,
+            threshold_per_cycle=0.0,
+            max_iter_per_cycle_updated=20,
             progress_callback=cb,
         )
 
@@ -413,8 +413,8 @@ class TestIterationControls:
             psf=psf,
             model=model,
             gain=0.01,
-            threshold=0.0,
-            max_iter_remaining=1000,
+            threshold_per_cycle=0.0,
+            max_iter_per_cycle_updated=1000,
             stop_callback=stop,
         )
 
@@ -440,8 +440,8 @@ class TestMaskAndCleanBox:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=10,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=10,
             clean_box=(15, 25, 15, 25),
         )
 
@@ -469,8 +469,8 @@ class TestMaskAndCleanBox:
             model=model,
             mask=mask,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=10,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=10,
         )
 
         # Masked source is untouched; the unmasked one is cleaned.
@@ -512,8 +512,8 @@ class TestImagingDict:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=5,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=5,
         )
 
         for key in (
@@ -538,8 +538,8 @@ class TestImagingDict:
             psf=psf,
             model=model,
             gain=1.0,
-            threshold=0.1,
-            max_iter_remaining=20,
+            threshold_per_cycle=0.1,
+            max_iter_per_cycle_updated=20,
         )
 
         assert result["total_flux_cleaned"] == pytest.approx(
@@ -607,8 +607,8 @@ class TestCubeBasicCorrectness:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 10),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 10),
             processing_function_threads=1,
         )
 
@@ -640,8 +640,8 @@ class TestCubeBasicCorrectness:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 10),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 10),
             processing_function_threads=4,
         )
 
@@ -672,8 +672,8 @@ class TestCubeBasicCorrectness:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 10),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 10),
             processing_function_threads=2,
         )
 
@@ -697,8 +697,8 @@ class TestCubeBasicCorrectness:
             psf_cube=psf,
             model_cube=model_a,
             gain=0.1,
-            threshold=_plane_threshold(resid_a, 0.05),
-            max_iter_remaining=_plane_iters(resid_a, 30),
+            threshold_per_cycle=_plane_threshold(resid_a, 0.05),
+            max_iter_per_cycle_updated=_plane_iters(resid_a, 30),
             processing_function_threads=1,
         )
 
@@ -709,8 +709,8 @@ class TestCubeBasicCorrectness:
             psf_cube=psf,
             model_cube=model_b,
             gain=0.1,
-            threshold=_plane_threshold(resid_b, 0.05),
-            max_iter_remaining=_plane_iters(resid_b, 30),
+            threshold_per_cycle=_plane_threshold(resid_b, 0.05),
+            max_iter_per_cycle_updated=_plane_iters(resid_b, 30),
             processing_function_threads=4,
         )
 
@@ -737,8 +737,8 @@ class TestCubeBasicCorrectness:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 10),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 10),
             processing_function_threads=2,
         )
 
@@ -773,8 +773,8 @@ class TestCubeInPlaceContract:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 5),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 5),
             processing_function_threads=2,
         )
 
@@ -797,8 +797,8 @@ class TestCubeInPlaceContract:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 5),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 5),
             processing_function_threads=1,
         )
 
@@ -818,8 +818,8 @@ class TestCubeInPlaceContract:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 5),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 5),
             processing_function_threads=1,
         )
 
@@ -931,8 +931,8 @@ class TestCubeMaskAndBox:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 10),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 10),
             clean_box=(15, 25, 15, 25),
             processing_function_threads=1,
         )
@@ -965,8 +965,8 @@ class TestCubeMaskAndBox:
             model_cube=model,
             mask_cube=mask,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 10),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 10),
             processing_function_threads=1,
         )
 
@@ -1000,8 +1000,8 @@ class TestCubeReturnShapes:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.01),
-            max_iter_remaining=_plane_iters(resid, 5),
+            threshold_per_cycle=_plane_threshold(resid, 0.01),
+            max_iter_per_cycle_updated=_plane_iters(resid, 5),
             processing_function_threads=2,
         )
 
@@ -1027,8 +1027,8 @@ class TestCubeReturnShapes:
             psf_cube=psf,
             model_cube=model,
             gain=1.0,
-            threshold=_plane_threshold(resid, 0.1),
-            max_iter_remaining=_plane_iters(resid, 5),
+            threshold_per_cycle=_plane_threshold(resid, 0.1),
+            max_iter_per_cycle_updated=_plane_iters(resid, 5),
             processing_function_threads=64,
         )
         assert model[0, 0, 0, 4, 4] == pytest.approx(1.0, abs=1e-6)

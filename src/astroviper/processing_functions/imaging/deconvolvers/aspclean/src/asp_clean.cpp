@@ -275,13 +275,13 @@ template <typename T>
 class Cleaner {
 public:
     Cleaner(T* residual, T* model, const T* psf, const T* mask, int nx, int ny,
-            double gain, double threshold, int max_iter_remaining, double fusedthreshold,
+            double gain, double threshold, int max_iter_per_cycle_updated, double fusedthreshold,
             double psf_width, int largestscale, int stoppointmode,
             int norm_method, bool verbose,
             const deconvolvers::DivergenceControl<double>& divergence)
         : residual_(residual), model_(model), psf_(psf), mask_(mask),
           nx_(nx), ny_(ny), gain_(gain), threshold_(threshold),
-          maxNiter_(max_iter_remaining), fusedThreshold_(fusedthreshold),
+          maxNiter_(max_iter_per_cycle_updated), fusedThreshold_(fusedthreshold),
           userLargestScale_(static_cast<double>(largestscale)),
           stopPointMode_(stoppointmode),
           normMethod_(norm_method <= 0 ? 1 : norm_method), verbose_(verbose),
@@ -973,8 +973,8 @@ double psf_gaussian_width(const double* psf, int nx, int ny) {
 
 template <typename T>
 AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
-                         int nx, int ny, double gain, double threshold,
-                         int max_iter_remaining, double fusedthreshold, double psf_width,
+                         int nx, int ny, double gain, double threshold_per_cycle,
+                         int max_iter_per_cycle_updated, double fusedthreshold, double psf_width,
                          int largestscale, int stoppointmode, int norm_method,
                          bool verbose,
                          const deconvolvers::DivergenceControl<double>& divergence) {
@@ -991,8 +991,8 @@ AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
                 residual[k] = T(0);
             }
     }
-    Cleaner<T> cleaner(residual, model, psf, mask, nx, ny, gain, threshold,
-                       max_iter_remaining, fusedthreshold, psf_width, largestscale,
+    Cleaner<T> cleaner(residual, model, psf, mask, nx, ny, gain, threshold_per_cycle,
+                       max_iter_per_cycle_updated, fusedthreshold, psf_width, largestscale,
                        stoppointmode, norm_method, verbose, divergence);
     const AspResult result = cleaner.run();
     for (const auto& [k, value] : nonFinite) residual[k] = value;
@@ -1002,7 +1002,8 @@ AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
 template <typename T>
 void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
                    int nf, int np_img, int np_psf, int nx, int ny, double gain,
-                   const double* threshold, const int* max_iter_remaining, double fusedthreshold,
+                   const double* threshold_per_cycle,
+                   const int* max_iter_per_cycle_updated, double fusedthreshold,
                    double psf_width, int largestscale, int stoppointmode,
                    int norm_method, int processing_function_threads,
                    const deconvolvers::DivergenceControl<double>& divergence,
@@ -1024,11 +1025,11 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask, int nt,
             const std::size_t psf_off =
                 ((static_cast<std::size_t>(tt) * nf + nn) * np_psf + pidx) * plane;
             const T* maskp = mask ? mask + img_off : nullptr;
-            // Cycle control is independent per plane: each (t, f, p)
+            // Iteration control is independent per plane: each (t, f, p)
             // plane uses its own threshold and iteration limit.
             results[p] = aspclean_plane<T>(residual + img_off, model + img_off,
                                            psf + psf_off, maskp, nx, ny, gain,
-                                           threshold[p], max_iter_remaining[p], fusedthreshold,
+                                           threshold_per_cycle[p], max_iter_per_cycle_updated[p], fusedthreshold,
                                            psf_width, largestscale, stoppointmode,
                                            norm_method, false, divergence);
         }

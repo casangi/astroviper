@@ -363,10 +363,10 @@ int taylor_hessian(const T* psf, int nterms, int nx, int ny, std::vector<float>&
 
 template <typename T>
 CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nterms, int nx, int ny,
-                     const std::vector<float>& scales, float small_scale_bias, int max_iter_remaining, T gain,
+                     const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle_updated, T gain,
                      T threshold, T psf_fraction, T mask_threshold,
                      const deconvolvers::DivergenceControl<T>& divergence) {
-    if (max_iter_remaining < 0) throw std::invalid_argument("max_iter_remaining must be >= 0");
+    if (max_iter_per_cycle_updated < 0) throw std::invalid_argument("max_iter_per_cycle_updated must be >= 0");
     if (!std::isfinite(static_cast<double>(gain)) || !std::isfinite(static_cast<double>(threshold)) ||
         !std::isfinite(static_cast<double>(psf_fraction)) || !std::isfinite(static_cast<double>(mask_threshold)))
         throw std::invalid_argument("gain, threshold, psf_fraction and mask_threshold must be finite");
@@ -502,7 +502,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
         out.iterations = 0;
         out.stop_code = stop;
     } else {
-        for (int itercount = 0; itercount < max_iter_remaining; ++itercount) {
+        for (int itercount = 0; itercount < max_iter_per_cycle_updated; ++itercount) {
             global_max_val = static_cast<T>(-1e10);
             if (itercount == 0) {
                 blc = {0, 0};

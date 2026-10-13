@@ -78,7 +78,7 @@ int taylor_hessian(const T* psf, int nterms, int nx, int ny, std::vector<float>&
 //   (plane_stop_test.hpp); stops with kStopDiverged
 template <typename T>
 CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nterms, int nx, int ny,
-                     const std::vector<float>& scales, float small_scale_bias, int max_iter_remaining, T gain,
+                     const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle_updated, T gain,
                      T threshold, T psf_fraction, T mask_threshold,
                      const deconvolvers::DivergenceControl<T>& divergence);
 

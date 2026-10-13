@@ -947,12 +947,12 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
             chan=0,
         )
 
-        max_iter_per_cycle, threshold_per_cycle = controller.calculate_per_cycle_limits(
-            rd
+        max_iter_per_cycle_updated, threshold_per_cycle = (
+            controller.calculate_per_cycle_limits(rd)
         )
 
         # Should use min(100, 1000) = 100
-        self.assertEqual(max_iter_per_cycle, 100)
+        self.assertEqual(max_iter_per_cycle_updated, 100)
 
     def test_max_iter_per_cycle_respects_remaining_iterations(self):
         """Test max_iter_per_cycle respects remaining max_iter."""
@@ -969,12 +969,12 @@ class TestCalculatePerCycleLimits(unittest.TestCase):
             chan=0,
         )
 
-        max_iter_per_cycle, threshold_per_cycle = controller.calculate_per_cycle_limits(
-            rd
+        max_iter_per_cycle_updated, threshold_per_cycle = (
+            controller.calculate_per_cycle_limits(rd)
         )
 
         # Should use min(100, 50) = 50
-        self.assertEqual(max_iter_per_cycle, 50)
+        self.assertEqual(max_iter_per_cycle_updated, 50)
 
     def test_default_psf_sidelobe_used(self):
         """Test default PSF sidelobe when not in ImagingDict."""
@@ -2566,10 +2566,10 @@ class TestEntropyStop(unittest.TestCase):
         _, _, update = self._cycle(controller, (7.4, 7.5))
         for fields in update.data.values():
             fields["max_psf_sidelobe"] = 0.2
-        max_iter_per_cycle, _ = get_per_cycle_limits(
+        max_iter_per_cycle_updated, _ = get_per_cycle_limits(
             controller, update, None, True, {"gain": 0.1}
         )
-        self.assertEqual(max_iter_per_cycle[0, 0].tolist(), [0, 200])
+        self.assertEqual(max_iter_per_cycle_updated[0, 0].tolist(), [0, 200])
         # the budget of the controller is not touched
         self.assertEqual(controller.max_iter_remaining[0, 0].tolist(), [950, 900])
 
