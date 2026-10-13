@@ -30,6 +30,7 @@ from astroviper.processing_functions.simulation.zernike_polynomials import (
 from astroviper.utils.beam_models import (
     AIRY_DISK_MODELS,
     airy_disk_model,
+    beam_polynomial_coefficient_index,
     list_aperture_polynomial_coefficient_models,
     list_beam_polynomial_coefficient_models,
     normalize_beam_model_dict,
@@ -116,6 +117,8 @@ def test_read_shipped_coefficient_models():
     assert bpc.BPC.dims == ("frequency", "polarization", "coefficient")
     assert bpc.sizes["frequency"] == 235 and bpc.sizes["coefficient"] == 5
     assert bpc.band.values[0] == "P" and bpc.band.values[-1] == "Q"
+    assert [b[0] for b in bpc.attrs["band_definitions"]] == list("PLSCXUKAQ")
+    assert bpc.attrs["band_definitions"][0] == ["P", 224e6, 480e6]
     np.testing.assert_allclose(
         bpc.BPC.values[0, 0], [1.0, -1.137e-3, 5.19e-7, -1.04e-10, 0.71e-14]
     )
@@ -128,6 +131,38 @@ def test_read_shipped_coefficient_models():
         dish_diameters_of_beam_models([zpc, bpc, airy_disk_model("aca")]),
         [25.0, 25.0, 6.25],
     )
+
+
+@pytest.mark.parametrize(
+    "frequency, table_frequency_mhz",
+    [
+        (33e9, 34052),  # a tie goes to the higher entry
+        (3e9, 3052),
+        (6e9, 6052),
+        (2.01e9, 2052),  # S band, clamped to its first entry
+        (4000.5e6, 3948),  # S band (listed before C), clamped to its last entry
+        (45e9, 43948),  # Q band, clamped
+        (60e9, 43948),  # no band
+        (1.5e9, 1488),
+        (100e6, 232),
+    ],
+)
+def test_beam_polynomial_coefficient_index_is_casa_pick(frequency, table_frequency_mhz):
+    bpc = read_beam_polynomial_coefficients("EVLA_")
+    index = beam_polynomial_coefficient_index(bpc, frequency)
+    assert bpc.frequency.values[index] == table_frequency_mhz * 1e6
+
+
+def test_beam_polynomial_coefficient_index_of_the_table():
+    bpc = read_beam_polynomial_coefficients("EVLA_")
+    np.testing.assert_array_equal(
+        beam_polynomial_coefficient_index(bpc, bpc.frequency.values),
+        np.arange(bpc.sizes["frequency"]),
+    )
+    # without band definitions nothing is clamped
+    bpc.attrs.pop("band_definitions")
+    index = beam_polynomial_coefficient_index(bpc, [2.01e9, 3e9])
+    np.testing.assert_array_equal(bpc.frequency.values[index], [2000e6, 3052e6])
 
 
 # ----------------------------------------------------------------------------
@@ -256,6 +291,23 @@ def test_airy_and_polynomial_jones_images():
     assert np.all(np.abs(j_poly.JONES.values) <= 1.0 + 1e-12)
 
 
+def test_polynomial_jones_image_uses_the_casa_coefficients():
+    """At 33 GHz, a tie of 31948 and 34052 MHz, the image uses 34052 MHz."""
+    bpc = read_beam_polynomial_coefficients("EVLA_")
+    j_poly = make_polynomial_jones_beam(bpc, [33e9], {"image_size": [32, 32]})
+    l, m = j_poly.l.values[20], j_poly.m.values[16]  # noqa: E741
+
+    def voltage(table_frequency):
+        coefficients = bpc.BPC.sel(frequency=table_frequency).values[0]
+        return polynomial_beam_response(
+            l, m, 33e9, coefficients, bpc.attrs["max_rad_1GHz"], 1, n_sample=None
+        )
+
+    sampled = j_poly.JONES.values[0, 0, 0, 20, 16]
+    np.testing.assert_allclose(sampled, voltage(34052e6), rtol=1e-12)
+    assert not np.isclose(sampled, voltage(31948e6), rtol=1e-6)
+
+
 def test_make_mueller_matrix():
     zpc = read_aperture_polynomial_coefficients("EVLA_avg_zcoeffs_SBand_lookup")
     jones = make_zernike_jones_beam(
@@ -294,6 +346,23 @@ def test_evaluate_beam_models_without_zernike_has_zero_parallactic_angle():
     assert models[0]["func"] == "casa_airy"
     packed = pack_beam_models(models)
     assert packed[0]["kind"] == "analytic"
+
+
+def test_evaluate_beam_models_resolves_beam_polynomials_to_the_channels():
+    f = load_legacy("vla_airy")
+    bpc = read_beam_polynomial_coefficients("EVLA_")
+    frequency = np.array([33e9, 2.01e9, 3e9])
+    models, _ = evaluate_beam_models(
+        [bpc], f["time"], frequency, f["phase_center_ra_dec"], f["site_position"]
+    )
+    np.testing.assert_array_equal(models[0].frequency.values, frequency)
+    np.testing.assert_array_equal(
+        models[0].BPC.values,
+        bpc.BPC.sel(frequency=[34052e6, 2052e6, 3052e6]).values,
+    )
+    assert models[0].attrs == bpc.attrs
+    packed = pack_beam_models(models)[0]
+    np.testing.assert_array_equal(packed["frequency"], frequency)
 
 
 def test_evaluate_beam_models_with_zernike():

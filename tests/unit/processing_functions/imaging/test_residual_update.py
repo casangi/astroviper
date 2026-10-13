@@ -203,11 +203,15 @@ def test_residual_update_with_model_uses_the_imaged_data_group(data_group_name):
 
 
 def test_imaging_setup_uses_the_primary_beam_params():
-    """primary_beam_params reach the primary beam of the setup (the VLA beam here)."""
-    from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
-        casa_airy_disk_response,
+    """primary_beam_params reach the primary beam of the setup (the VLA beam here),
+    which the transform to Stokes leaves alone."""
+    from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (
+        EVLA_MAX_RAD_1GHZ,
     )
-    from astroviper.utils.beam_models import airy_disk_model
+    from astroviper.processing_functions.simulation.antenna_beams import (
+        polynomial_beam_response,
+    )
+    from astroviper.utils.beam_models import read_beam_polynomial_coefficients
 
     image_params = {
         "image_size": IMAGE_SIZE,
@@ -232,18 +236,17 @@ def test_imaging_setup_uses_the_primary_beam_params():
             primary_beam_params=params,
             **common,
         )
-        beams[name] = img_xds["PRIMARY_BEAM"].values[0, 0, 0]
-    vla = airy_disk_model("vla")
-    expected = casa_airy_disk_response(
+        beams[name] = img_xds["PRIMARY_BEAM"].values[0, 0]
+    expected = polynomial_beam_response(
         _empty_image().l.values[:, None],
         _empty_image().m.values[None, :],
         FREQUENCY,
-        vla["dish_diameter"],
-        vla["blockage_diameter"],
-        vla["max_rad_1GHz"],
+        read_beam_polynomial_coefficients("EVLA_").BPC.sel(frequency=1424e6).values[0],
+        EVLA_MAX_RAD_1GHZ,
         ipower=2,
     )
-    np.testing.assert_array_equal(beams["vla"], expected)
+    for plane in beams["vla"]:  # I and Q
+        np.testing.assert_array_equal(plane, expected)
     assert not np.allclose(beams["vla"], beams["default"])
 
 

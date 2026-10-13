@@ -23,7 +23,10 @@ from astroviper.processing_functions.simulation.calculate_visibilities_cpp impor
 from astroviper.processing_functions.simulation.simulate_processing_set import (
     simulate_processing_set,
 )
-from astroviper.utils.beam_models import airy_disk_model
+from astroviper.utils.beam_models import (
+    airy_disk_model,
+    read_beam_polynomial_coefficients,
+)
 from astroviper.utils.coordinate_transforms import sin_project
 from astroviper.utils.measurement_set_tools import polarization_index
 from astroviper.utils.telescope_layout import read_telescope_layout
@@ -324,6 +327,35 @@ def test_cpp_kernel_matches_numpy_reference(name):
     vis_numpy, _ = run_legacy_scenario(name, "numpy")
     vis_cpp, _ = run_legacy_scenario(name, "cpp")
     np.testing.assert_allclose(vis_cpp, vis_numpy, atol=1e-13, rtol=0)
+
+
+@pytest.mark.skipif("cpp" not in IMPLEMENTATIONS, reason="C++ kernel not built")
+def test_cpp_kernel_matches_numpy_with_the_casa_beam_polynomial_rows():
+    """The EVLA table resolved to the channels gives both kernels CASA's rows,
+    not the nearest ones at the 33 GHz tie and the 2.01 GHz S-band clamp."""
+    f = load_legacy("evla_polynomial_beam")
+    frequency = np.array([1.5e9, 2.01e9, 33e9])
+    source_ra_dec = f["phase_center_ra_dec"][None] + [0.0, np.radians(0.8 / 60)]
+    bpc = read_beam_polynomial_coefficients("EVLA_")
+    models, pa = evaluate_beam_models(
+        [bpc], f["time"], frequency, f["phase_center_ra_dec"], f["site_position"]
+    )
+
+    def visibilities(beam_models, implementation):
+        return calculate_visibilities(
+            f["uvw"], f["antenna1"], f["antenna2"], frequency,
+            polarization_index(f["polarization"]), f["point_source_flux"], source_ra_dec,
+            f["phase_center_ra_dec"], None, f["beam_model_map"], pack_beam_models(beam_models),
+            pa, f["mueller_selection"], implementation=implementation,
+        )  # fmt: skip
+
+    vis_numpy = visibilities(models, "numpy")
+    np.testing.assert_allclose(
+        visibilities(models, "cpp"), vis_numpy, atol=1e-13, rtol=0
+    )
+    nearest = visibilities([bpc], "numpy")
+    np.testing.assert_array_equal(vis_numpy[:, :, 0], nearest[:, :, 0])
+    assert not np.isclose(vis_numpy[:, :, 1:], nearest[:, :, 1:], rtol=1e-6).any()
 
 
 @pytest.mark.skipif("cpp" not in IMPLEMENTATIONS, reason="C++ kernel not built")

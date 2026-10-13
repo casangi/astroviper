@@ -6,6 +6,9 @@ import pytest
 from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
     casa_airy_disk_response,
 )
+from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (
+    EVLA_MAX_RAD_1GHZ,
+)
 from astroviper.processing_functions.imaging.utils.fft_sizing import (
     next_fft_friendly_size,
 )
@@ -23,7 +26,13 @@ from astroviper.processing_functions.imaging.utils.imaging_parameter_heuristics 
     primary_beam_telescope,
     stokes_for_correlations,
 )
-from astroviper.utils.beam_models import airy_disk_model
+from astroviper.processing_functions.simulation.antenna_beams import (
+    polynomial_beam_response,
+)
+from astroviper.utils.beam_models import (
+    airy_disk_model,
+    read_beam_polynomial_coefficients,
+)
 
 
 @pytest.mark.parametrize(
@@ -77,7 +86,7 @@ def test_stokes_for_correlations_invalid(correlations):
         stokes_for_correlations(correlations)
 
 
-@pytest.mark.parametrize("telescope", ["alma", "aca", "vla", "ngvla"])
+@pytest.mark.parametrize("telescope", ["alma", "aca", "ngvla"])
 @pytest.mark.parametrize("level", [0.5, 0.2, 0.05])
 def test_primary_beam_radius_is_the_level_of_the_imager_beam(telescope, level):
     """The imager's power pattern equals ``level`` at the radius (to the CASA
@@ -105,6 +114,51 @@ def test_primary_beam_radius_is_the_level_of_the_imager_beam(telescope, level):
     assert primary_beam_radius(
         2 * frequency, level, {"telescope": telescope}
     ) == pytest.approx(radius / 2, rel=2e-3)
+
+
+@pytest.mark.parametrize("level", [0.5, 0.2, 0.05])
+def test_primary_beam_radius_is_the_level_of_the_imager_vla_beam(level):
+    """For "vla" the imager's beam is CASA's EVLA polynomial; 100 and 200 GHz lie
+    in no band, so both take the last entry (43948 MHz)."""
+    frequency = 100e9
+    radius = primary_beam_radius(frequency, level, {"telescope": "vla"})
+    coefficients = (
+        read_beam_polynomial_coefficients("EVLA_").BPC.sel(frequency=43948e6).values[0]
+    )
+
+    def beam(r):
+        return float(
+            polynomial_beam_response(
+                r, 0.0, frequency, coefficients, EVLA_MAX_RAD_1GHZ, ipower=2
+            )
+        )
+
+    assert beam(radius * 0.999) >= level > beam(radius * 1.001)
+    assert np.all([beam(r) > level for r in np.linspace(0.0, radius * 0.999, 50)])
+    assert primary_beam_radius(
+        2 * frequency, level, {"telescope": "vla"}
+    ) == pytest.approx(radius / 2, rel=2e-3)
+
+
+@pytest.mark.parametrize(
+    "frequency, radius_tclean",
+    [(1.5e9, 0.7405), (6e9, 0.7395), (22e9, 0.7484), (33e9, 0.7410), (45e9, 0.7355)],
+)
+def test_primary_beam_radius_vla_is_that_of_tclean(frequency, radius_tclean):
+    """The 0.2 radius in lambda / 25 m of tclean's .pb for an EVLA measurement
+    set (CASA 6.7.5)."""
+    radius = primary_beam_radius(frequency, 0.2, {"telescope": "vla"})
+    assert radius / (SPEED_OF_LIGHT / frequency / 25.0) == pytest.approx(
+        radius_tclean, rel=1e-3
+    )
+
+
+def test_primary_beam_radius_vla_below_the_beam_at_its_cut():
+    """At 350 MHz the P-band polynomial is still 0.137 at the table radius, where
+    the imager's beam is cut to zero, so the 0.1 radius is that cut."""
+    frequency = 350e6
+    radius = primary_beam_radius(frequency, 0.1, {"telescope": "vla"})
+    assert radius == pytest.approx(EVLA_MAX_RAD_1GHZ / (frequency / 1e9), rel=1e-9)
 
 
 def test_primary_beam_radius_alma_half_power_width_and_default():

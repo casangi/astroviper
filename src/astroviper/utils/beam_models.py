@@ -14,7 +14,9 @@ Three kinds of **antenna (voltage) beam models** are understood by the simulator
    simulator (Sekhar et al. 2022 models for the EVLA and MeerKAT ship as CSV).
 3. **Beam polynomial coefficients** — an ``xr.Dataset`` with
    ``BPC[frequency, polarization, coefficient]``: CASA ``PBMath1DPoly``-style
-   1-D power-beam polynomials in ``r`` (arcmin at 1 GHz), e.g. the EVLA models.
+   1-D power-beam polynomials in ``r`` (arcmin at 1 GHz), e.g. the EVLA models;
+   :func:`beam_polynomial_coefficient_index` picks the row CASA uses at a
+   frequency.
 
 The legacy SIRIUS coordinate names (``chan``, ``pol``, ``coef_indx``,
 ``dish_diam``) are translated by :func:`normalize_beam_model_xds`.
@@ -289,8 +291,9 @@ def read_beam_polynomial_coefficients(
     -------
     xr.Dataset
         ``BPC[frequency, polarization, coefficient]`` (float64) with a ``band``
-        coordinate along ``frequency`` and the same attrs as
-        :func:`read_aperture_polynomial_coefficients`.
+        coordinate along ``frequency``, the same attrs as
+        :func:`read_aperture_polynomial_coefficients` and ``band_definitions``
+        (``[name, start_Hz, end_Hz]`` per band, in file order).
     """
     path = model
     if not os.path.isfile(path):
@@ -306,6 +309,7 @@ def read_beam_polynomial_coefficients(
         max_rad_1GHz = _max_rad_for_telescope(telescope_name)
 
     band_names: list[str] = []
+    band_definitions: list[list] = []
     frequency, coefficients, bands = [], [], []
     mode = None
     band = None
@@ -325,6 +329,7 @@ def read_beam_polynomial_coefficients(
             if mode == "band":
                 parts = line.split()
                 band_names.append(parts[0])
+                band_definitions.append([parts[0], float(parts[1]), float(parts[2])])
             elif mode == "coef":
                 if line[0] in band_names and "{" not in line:
                     band = line[0]
@@ -361,7 +366,59 @@ def read_beam_polynomial_coefficients(
             "conversion_date": str(date.today()),
             "dish_diameter": float(dish_diameter),
             "max_rad_1GHz": float(max_rad_1GHz),
+            "band_definitions": band_definitions,
         },
     )
     xds.frequency.attrs.update({"units": "Hz", "type": "spectral_coord"})
     return xds
+
+
+def beam_polynomial_coefficient_index(
+    bpc_xds: xr.Dataset, frequency: np.ndarray
+) -> np.ndarray:
+    """Row of ``BPC`` that CASA ``PBMath1DEVLA`` uses at each frequency.
+
+    The band of a frequency is the first of ``attrs["band_definitions"]`` (file
+    order) with ``start < frequency < end``; the frequency is clamped to the
+    first and last tabulated frequency of that band, and the nearest tabulated
+    frequency is taken, an exact tie going to the higher one.  Without
+    ``band_definitions``, or outside every band, the frequency is not clamped.
+    Frequencies are compared in MHz, as in CASA.
+
+    Parameters
+    ----------
+    bpc_xds : xr.Dataset
+        Beam-polynomial model with ascending ``frequency``
+        (:func:`read_beam_polynomial_coefficients`).
+    frequency : np.ndarray, Hz
+
+    Returns
+    -------
+    np.ndarray of int
+        Index along ``frequency`` of ``bpc_xds``, shaped as ``frequency``.
+    """
+    table = np.asarray(bpc_xds.frequency.values, dtype=np.float64)
+    frequency = np.asarray(frequency, dtype=np.float64)
+    selection = frequency.copy()
+    in_a_band = np.zeros(frequency.shape, dtype=bool)
+    band_definitions = bpc_xds.attrs.get("band_definitions", [])
+    band = bpc_xds.band.values if band_definitions else None
+    for name, start, end in band_definitions:
+        in_band = ~in_a_band & (start < frequency) & (frequency < end)
+        tabulated = table[band == name]
+        if tabulated.size:
+            selection[in_band] = np.clip(
+                frequency[in_band], tabulated.min(), tabulated.max()
+            )
+        in_a_band |= in_band
+    table_mhz = table * 1e-6
+    selection_mhz = selection * 1e-6
+    upper = np.searchsorted(table_mhz, selection_mhz, side="left")
+    lower = np.maximum(upper - 1, 0)
+    upper = np.minimum(upper, table_mhz.size - 1)
+    return np.where(
+        np.abs(selection_mhz - table_mhz[lower])
+        < np.abs(table_mhz[upper] - selection_mhz),
+        lower,
+        upper,
+    )

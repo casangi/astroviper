@@ -55,14 +55,17 @@ IMAGING_PARAM_DOCS = {
         "for the ``fft_padding``, e.g. 17 at 1.05) is refused."
     ),
     "primary_beam_params": (
-        "The primary beam of the imager, the power pattern of CASA's obscured Airy\n"
-        "disk that gives the clean mask and the primary beam correction:\n"
-        '``telescope`` (``"alma"``, ``"aca"``, ``"vla"`` or ``"ngvla"``, CASA\'s\n'
-        "PBMath values of :func:`~astroviper.utils.beam_models.airy_disk_model`),\n"
-        "``effective_dish_diameter`` and ``blockage_diameter`` (metres) and\n"
-        "``max_rad_1GHz`` (CASA's maximum radius of the beam table at 1 GHz in\n"
-        "radians, scaled as 1 / frequency, which sets the radius sampling of the\n"
-        "beam). Numbers given with a telescope override that telescope's values;\n"
+        "The primary beam of the imager, the power pattern that gives the clean\n"
+        'mask and the primary beam correction: ``telescope`` (``"alma"``,\n'
+        '``"aca"`` or ``"ngvla"``, CASA\'s obscured Airy disk with the PBMath\n'
+        "values of :func:`~astroviper.utils.beam_models.airy_disk_model`;\n"
+        '``"vla"``, CASA\'s EVLA beam polynomial ``PBMath1DEVLA``, with the\n'
+        "coefficients CASA picks for each channel and a 58 arcmin table at\n"
+        "1 GHz), ``effective_dish_diameter`` and ``blockage_diameter`` (metres;\n"
+        'refused for ``"vla"``) and ``max_rad_1GHz`` (CASA\'s maximum radius of\n'
+        "the beam table at 1 GHz in radians, scaled as 1 / frequency, which sets\n"
+        "the radius sampling of the beam; the beam polynomial is zero beyond\n"
+        "it). Numbers given with a telescope override that telescope's values;\n"
         'no telescope means ``"alma"``. ``None`` is the ALMA 12 m beam (10.7 m,\n'
         "0.75 m, 1.784 deg at 1 GHz)."
     ),

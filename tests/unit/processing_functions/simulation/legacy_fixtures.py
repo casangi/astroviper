@@ -46,4 +46,13 @@ def load_legacy(name: str) -> dict:
         "pa_radius": 0.2,
     }
     d["beam_models"] = LEGACY_BEAM_MODELS[name]()
+    if name == "evla_polynomial_beam":
+        # SIRIUS's pick: the lower row at the 3.0 GHz tie, where CASA takes the higher.
+        bpc = d["beam_models"][0]
+        nearest = np.argmin(
+            np.abs(d["frequency"][:, None] - bpc.frequency.values), axis=1
+        )
+        d["beam_models"] = [
+            bpc.isel(frequency=nearest).assign_coords(frequency=d["frequency"])
+        ]
     return d

@@ -149,9 +149,13 @@ def primary_beam_radius(frequency, level, primary_beam_params=None, n_scan=4096)
     The beam is the one the imager makes for ``primary_beam_params``
     (:func:`~astroviper.processing_functions.imaging.primary_beam.make_primary_beam.resolve_primary_beam_params`
     and the power pattern of
-    :func:`~astroviper.processing_functions.imaging.primary_beam.airy_disk.casa_airy_disk_response`),
+    :func:`~astroviper.processing_functions.imaging.primary_beam.airy_disk.casa_airy_disk_response`,
+    or for ``"vla"`` of
+    :func:`~astroviper.processing_functions.imaging.primary_beam.make_primary_beam.polynomial_primary_beam`),
     and the radius is the first crossing of the main lobe, found on a scan out
-    to ``1.5 lambda / D`` and refined with Brent's method.
+    to ``1.5 lambda / D`` (for ``"vla"`` to just past
+    ``max_rad_1GHz / (frequency / 1 GHz)``, beyond which the beam is zero) and
+    refined with Brent's method.
 
     Parameters
     ----------
@@ -181,6 +185,7 @@ def primary_beam_radius(frequency, level, primary_beam_params=None, n_scan=4096)
         casa_airy_disk_response,
     )
     from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (
+        polynomial_primary_beam,
         resolve_primary_beam_params,
     )
 
@@ -189,26 +194,48 @@ def primary_beam_radius(frequency, level, primary_beam_params=None, n_scan=4096)
     resolved = resolve_primary_beam_params(
         {"telescope": "alma"} if primary_beam_params is None else primary_beam_params
     )
-    dish = float(resolved["list_dish_diameters"][0])
-    blockage = float(resolved["list_blockage_diameters"][0])
-
-    def excess(radius):
-        return (
-            float(
-                casa_airy_disk_response(
-                    radius,
-                    0.0,
-                    float(frequency),
-                    dish,
-                    blockage,
-                    resolved["max_rad_1GHz"],
-                    ipower=2,
-                )
-            )
-            - level
+    if "beam_polynomial_coefficients" in resolved:
+        # end just past the cut, where the beam is zero
+        scan_radius = np.nextafter(
+            resolved["max_rad_1GHz"] / (float(frequency) / 1e9), np.inf
         )
 
-    radii = np.linspace(0.0, 1.5 * SPEED_OF_LIGHT / float(frequency) / dish, n_scan)
+        def excess(radius):
+            return (
+                float(
+                    polynomial_primary_beam(
+                        radius,
+                        0.0,
+                        float(frequency),
+                        resolved["beam_polynomial_coefficients"],
+                        resolved["max_rad_1GHz"],
+                    )[0]
+                )
+                - level
+            )
+
+    else:
+        dish = float(resolved["list_dish_diameters"][0])
+        blockage = float(resolved["list_blockage_diameters"][0])
+        scan_radius = 1.5 * SPEED_OF_LIGHT / float(frequency) / dish
+
+        def excess(radius):
+            return (
+                float(
+                    casa_airy_disk_response(
+                        radius,
+                        0.0,
+                        float(frequency),
+                        dish,
+                        blockage,
+                        resolved["max_rad_1GHz"],
+                        ipower=2,
+                    )
+                )
+                - level
+            )
+
+    radii = np.linspace(0.0, scan_radius, n_scan)
     below = np.flatnonzero([excess(radius) < 0.0 for radius in radii])
     if below.size == 0:
         raise ValueError(

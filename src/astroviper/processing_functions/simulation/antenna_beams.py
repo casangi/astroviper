@@ -47,6 +47,7 @@ from astroviper.processing_functions.simulation.zernike_polynomials import (
     zernike_surface,
 )
 from astroviper.utils.beam_models import (
+    beam_polynomial_coefficient_index,
     normalize_beam_model_dict,
     normalize_beam_model_xds,
 )
@@ -232,7 +233,7 @@ def make_polynomial_jones_beam(
     beam_params: dict | None = None,
     polarization: Sequence[str] = ("RR", "LL"),
 ) -> xr.Dataset:
-    """Jones beam image of a beam-polynomial model (nearest tabulated frequency)."""
+    """Jones beam image of a beam-polynomial model (the rows CASA picks)."""
     bpc_xds = normalize_beam_model_xds(bpc_xds)
     params = resolve_beam_params(beam_params)
     frequency = np.atleast_1d(np.asarray(frequency, dtype=np.float64))
@@ -240,9 +241,9 @@ def make_polynomial_jones_beam(
     cell_size = beam_image_cell_size(max_rad, frequency, params)
     l, m = beam_image_coordinates(params["image_size"], cell_size)  # noqa: E741
     resp = np.empty((len(frequency), len(l), len(m)))
+    i_chan = beam_polynomial_coefficient_index(bpc_xds, frequency)
     for i, f in enumerate(frequency):
-        i_chan = int(np.argmin(np.abs(bpc_xds.frequency.values - f)))
-        coef = bpc_xds.BPC.values[i_chan, 0, :]
+        coef = bpc_xds.BPC.values[i_chan[i], 0, :]
         resp[i] = polynomial_beam_response(
             l[:, None], m[None, :], f, coef, max_rad, 1, n_sample=None
         )
@@ -482,7 +483,12 @@ def evaluate_beam_models(
     model is present; otherwise they are zero.  Zernike models are evaluated on
     the representative subset of parallactic angles returned by
     :func:`~astroviper.processing_functions.simulation.calculate_parallactic_angles.find_representative_angles`
-    with ``beam_params["pa_radius"]``.
+    with ``beam_params["pa_radius"]``.  Beam-polynomial models are reduced to
+    one row per channel, the row of
+    :func:`~astroviper.utils.beam_models.beam_polynomial_coefficient_index`,
+    with the channel frequencies as coordinate, so the samplers pick it exactly
+    (their nearest-row search then costs O(n_channel**2) per chunk, as for the
+    Zernike Jones images).
 
     Parameters
     ----------
@@ -499,7 +505,8 @@ def evaluate_beam_models(
     Returns
     -------
     evaluated_beam_models : list
-        Same order as ``beam_models``; Zernike models replaced by Jones images.
+        Same order as ``beam_models``; Zernike models replaced by Jones images
+        and beam polynomials resolved to ``frequency``.
     parallactic_angle : np.ndarray, [n_time], radians
     """
     params = resolve_beam_params(beam_params)
@@ -521,6 +528,12 @@ def evaluate_beam_models(
         if kind == "aperture_polynomial_coefficients":
             evaluated.append(
                 make_zernike_jones_beam(model, pa_subset, frequency, params)
+            )
+        elif kind == "beam_polynomial_coefficients":
+            evaluated.append(
+                model.isel(
+                    frequency=beam_polynomial_coefficient_index(model, frequency)
+                ).assign_coords(frequency=frequency)
             )
         else:
             evaluated.append(model)

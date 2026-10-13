@@ -105,14 +105,17 @@ def imaging_setup_single_field(
         of its centre value at the edge of the image kept (a support too large
         for the ``fft_padding``, e.g. 17 at 1.05) is refused.
     primary_beam_params : dict, optional
-        The primary beam of the imager, the power pattern of CASA's obscured Airy
-        disk that gives the clean mask and the primary beam correction:
-        ``telescope`` (``"alma"``, ``"aca"``, ``"vla"`` or ``"ngvla"``, CASA's
-        PBMath values of :func:`~astroviper.utils.beam_models.airy_disk_model`),
-        ``effective_dish_diameter`` and ``blockage_diameter`` (metres) and
-        ``max_rad_1GHz`` (CASA's maximum radius of the beam table at 1 GHz in
-        radians, scaled as 1 / frequency, which sets the radius sampling of the
-        beam). Numbers given with a telescope override that telescope's values;
+        The primary beam of the imager, the power pattern that gives the clean
+        mask and the primary beam correction: ``telescope`` (``"alma"``,
+        ``"aca"`` or ``"ngvla"``, CASA's obscured Airy disk with the PBMath
+        values of :func:`~astroviper.utils.beam_models.airy_disk_model`;
+        ``"vla"``, CASA's EVLA beam polynomial ``PBMath1DEVLA``, with the
+        coefficients CASA picks for each channel and a 58 arcmin table at
+        1 GHz), ``effective_dish_diameter`` and ``blockage_diameter`` (metres;
+        refused for ``"vla"``) and ``max_rad_1GHz`` (CASA's maximum radius of
+        the beam table at 1 GHz in radians, scaled as 1 / frequency, which sets
+        the radius sampling of the beam; the beam polynomial is zero beyond
+        it). Numbers given with a telescope override that telescope's values;
         no telescope means ``"alma"``. ``None`` is the ALMA 12 m beam (10.7 m,
         0.75 m, 1.784 deg at 1 GHz).
 
@@ -199,8 +202,9 @@ def imaging_setup_single_field(
     )
     T_make_point_spread_function = time.time() - T_start_psf
 
-    # Primary beam (azimuthally-symmetric obscured Airy disk).  It is independent
-    # of the PSF and is created before the transform to the Stokes basis.
+    # Primary beam (azimuthally-symmetric Airy disk or beam polynomial).  It is
+    # independent of the PSF and is created before the transform to the Stokes
+    # basis.
     img_xds, primary_beam_return_df = make_primary_beam_single_field(
         img_xds,
         image_params,

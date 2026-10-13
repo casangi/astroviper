@@ -245,48 +245,57 @@ def test_primary_beam_params_none_and_alma_are_the_default_beam():
 
 
 def test_primary_beam_params_vla_beam():
-    """{"telescope": "vla"} is the 24.5 m beam without blockage, sampled as CASA's VLA table."""
-    from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
-        casa_airy_disk_response,
+    """{"telescope": "vla"} is CASA's EVLA beam polynomial: the coefficients CASA
+    picks (34052 MHz at the 33 GHz tie, 43948 MHz in Q band at 45 GHz), a
+    58 arcmin table at 1 GHz and zero beyond it."""
+    from astroviper.processing_functions.imaging.primary_beam.make_primary_beam import (
+        EVLA_MAX_RAD_1GHZ,
     )
+    from astroviper.processing_functions.simulation.antenna_beams import (
+        polynomial_beam_response,
+    )
+    from astroviper.utils.beam_models import read_beam_polynomial_coefficients
 
-    vla = airy_disk_model("vla")
-    img_xds = _primary_beam({"telescope": "vla"})
-    pb = img_xds["PRIMARY_BEAM"].values[0, :, 0]
+    assert EVLA_MAX_RAD_1GHZ == pytest.approx(58.0 / 60.0 * np.pi / 180.0, rel=1e-15)
+    bpc = read_beam_polynomial_coefficients("EVLA_")
+    img_xds = _primary_beam(
+        {"telescope": "vla"}, frequency_coords=(33e9, 45e9), cell_arcsec=4.0
+    )
+    pb = img_xds["PRIMARY_BEAM"]
+    assert pb.attrs["method"] == "beam_polynomial"
     l_axis, m_axis = img_xds.l.values[:, None], img_xds.m.values[None, :]
-    for f, frequency in enumerate(img_xds.frequency.values):
-        expected = casa_airy_disk_response(
-            l_axis, m_axis, frequency, 24.5, 0.0, vla["max_rad_1GHz"], ipower=2
-        )
-        np.testing.assert_array_equal(pb[f], expected)
-        # the VLA table radius, not ALMA's, sets the sampling of the beam
-        alma_sampling = casa_airy_disk_response(
+    for f, table_frequency in enumerate((34052e6, 43948e6)):
+        frequency = img_xds.frequency.values[f]
+        expected = polynomial_beam_response(
             l_axis,
             m_axis,
             frequency,
-            24.5,
-            0.0,
-            airy_disk_model("alma")["max_rad_1GHz"],
+            bpc.BPC.sel(frequency=table_frequency).values[0],
+            EVLA_MAX_RAD_1GHZ,
             ipower=2,
         )
-        assert not np.array_equal(pb[f], alma_sampling)
-    alma = _primary_beam(None)["PRIMARY_BEAM"].values[0, :, 0]
-    assert not np.allclose(pb, alma)
+        outside = np.hypot(l_axis, m_axis) > EVLA_MAX_RAD_1GHZ / (frequency / 1e9)
+        assert outside.any() and not outside.all()
+        np.testing.assert_array_equal(
+            pb.values[0, f, 0], np.where(outside, 0.0, expected)
+        )
+    resolved = resolve_primary_beam_params({"telescope": "vla", "max_rad_1GHz": 0.02})
+    assert resolved["max_rad_1GHz"] == 0.02
 
 
 def test_primary_beam_params_numbers_equal_to_a_telescope_give_its_beam():
     """Explicit numbers equal to a telescope's give its beam; numbers override a telescope."""
-    vla = airy_disk_model("vla")
+    ngvla = airy_disk_model("ngvla")
     explicit = {
-        "effective_dish_diameter": vla["dish_diameter"],
-        "blockage_diameter": vla["blockage_diameter"],
-        "max_rad_1GHz": vla["max_rad_1GHz"],
+        "effective_dish_diameter": ngvla["dish_diameter"],
+        "blockage_diameter": ngvla["blockage_diameter"],
+        "max_rad_1GHz": ngvla["max_rad_1GHz"],
     }
-    by_name = _primary_beam({"telescope": "vla"})["PRIMARY_BEAM"].values
+    by_name = _primary_beam({"telescope": "ngvla"})["PRIMARY_BEAM"].values
     np.testing.assert_array_equal(
         _primary_beam(explicit)["PRIMARY_BEAM"].values, by_name
     )
-    overridden = _primary_beam({"telescope": "vla", "effective_dish_diameter": 25.0})
+    overridden = _primary_beam({"telescope": "ngvla", "effective_dish_diameter": 25.0})
     np.testing.assert_array_equal(
         overridden["PRIMARY_BEAM"].values,
         _primary_beam({**explicit, "effective_dish_diameter": 25.0})[
@@ -304,6 +313,9 @@ def test_primary_beam_params_numbers_equal_to_a_telescope_give_its_beam():
         ({"effective_dish_diameter": 0.0}, "effective_dish_diameter > 0"),
         ({"blockage_diameter": 11.0}, "blockage_diameter"),
         ({"max_rad_1GHz": 0.0}, "max_rad_1GHz > 0"),
+        ({"telescope": "vla", "effective_dish_diameter": 25.0}, "do not apply"),
+        ({"telescope": "VLA", "blockage_diameter": 1.0}, "do not apply"),
+        ({"telescope": "vla", "max_rad_1GHz": 0.0}, "max_rad_1GHz > 0"),
     ],
 )
 def test_primary_beam_params_refused(primary_beam_params, match):
