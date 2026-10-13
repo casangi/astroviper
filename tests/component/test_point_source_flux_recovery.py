@@ -184,15 +184,15 @@ CASA_KERNEL = {
 }
 # typical ALMA noise (Cycle 13 sensitivity calculator at the zenith): T_sys reached
 # through t_receiver with the default atmosphere term, the aperture efficiency of
-# the Technical Handbook rescaled to the 10.7 m diameter of the beam model
+# the Technical Handbook (Ruze, 25 um surface) on the 12 m collecting area
 BAND3_NOISE = {
     "t_receiver": 34.075,
-    "ant_efficiency": 0.8957,
+    "ant_efficiency": 0.7121,
     "random_seed": 7,
 }  # 74.3 K
 BAND10_NOISE = {
     "t_receiver": 3169.775,
-    "ant_efficiency": 0.3358,
+    "ant_efficiency": 0.267,
     "random_seed": 7,
 }  # 3210 K
 # ALMA C8 at 950 GHz (see the module docstring)

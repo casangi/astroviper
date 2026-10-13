@@ -11,6 +11,9 @@ import astroviper.distributed_applications as distributed_applications
 from astroviper.processing_functions.simulation import (
     simulate_processing_set as simulate_processing_set_pf,
 )
+from astroviper.processing_functions.simulation.calculate_noise import (
+    DEFAULT_NOISE_PARAMS,
+)
 from astroviper.utils.beam_models import (
     airy_disk_model,
     read_aperture_polynomial_coefficients,
@@ -149,6 +152,56 @@ def test_mosaic_fields_noise_and_zernike(tmp_path):
     )
     ms2 = load_processing_set(result2["ps_store"])["mosaic"].ds
     np.testing.assert_array_equal(ms.VISIBILITY.values, ms2.VISIBILITY.values)
+
+
+def test_noise_collecting_area_is_the_antenna_dish_diameter(tmp_path):
+    """ALMA 7 m and 12 m antennas with the 10.7 m effective diameter beam model: the
+    weights follow the radiometer equation with each baseline's physical apertures."""
+    alma_all = read_telescope_layout("alma.all")
+    dish = alma_all.ANTENNA_DISH_DIAMETER.values
+    i7, i12 = np.flatnonzero(dish == 7.0), np.flatnonzero(dish == 12.0)
+    ant = alma_all.isel(antenna_name=[i7[0], i12[0], i7[1], i12[1]])
+    assert airy_disk_model("alma")["dish_diameter"] == 10.7
+    result, kwargs = run(
+        tmp_path,
+        antenna_xds=ant,
+        polarization=["XX", "YY"],
+        beam_models=[airy_disk_model("alma")],
+        beam_model_map=np.zeros(4, int),
+        noise_params={"random_seed": 5},
+        n_time_chunks=2,
+        n_frequency_chunks=1,
+    )
+    ms = load_processing_set(result["ps_store"])[result["ms_name"]].ds
+    diameter = ant.ANTENNA_DISH_DIAMETER
+    d1 = diameter.sel(antenna_name=ms.baseline_antenna1_name.values).values
+    d2 = diameter.sel(antenna_name=ms.baseline_antenna2_name.values).values
+    assert {*(d1 * d2)} == {49.0, 84.0, 144.0}
+    p = DEFAULT_NOISE_PARAMS
+    t_sys = p["t_receiver"] + p["t_atmos"] * (1 - p["spill_efficiency"]) + p["t_cmb"]
+    effective_area = p["ant_efficiency"] * np.pi * d1 * d2 / 4
+    sigma = (
+        np.sqrt(2)
+        * 1.380649e-23
+        * t_sys
+        * 1e26
+        / (
+            p["corr_efficiency"]
+            * p["quantization_efficiency"]
+            * effective_area
+            * np.sqrt(FREQ_PARAMS["channel_width"] * TIME_PARAMS["time_delta"])
+        )
+    )
+    np.testing.assert_allclose(
+        ms.WEIGHT.values,
+        np.broadcast_to(1 / sigma[None, :, None, None] ** 2, ms.WEIGHT.shape),
+        rtol=1e-12,
+    )
+    with pytest.raises(ValueError, match="ANTENNA_DISH_DIAMETER"):
+        run(
+            tmp_path,
+            **{**kwargs, "antenna_xds": ant.drop_vars("ANTENNA_DISH_DIAMETER")},
+        )
 
 
 def test_automatic_chunking_and_validation_errors(tmp_path):

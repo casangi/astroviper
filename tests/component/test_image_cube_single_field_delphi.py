@@ -27,7 +27,7 @@ delphi_module = importlib.import_module(
 PHASE_CENTER = SkyCoord(ra="19h59m28.5s", dec="+40d44m01.5s", frame="fk5")
 PC = np.array([PHASE_CENTER.ra.rad, PHASE_CENTER.dec.rad])
 N_ANTENNA = 10
-BAND3_NOISE = {"t_receiver": 34.075, "ant_efficiency": 0.8957, "random_seed": 7}
+BAND3_NOISE = {"t_receiver": 34.075, "ant_efficiency": 0.7121, "random_seed": 7}
 
 
 def _simulate_noisy_alma(ps_store):

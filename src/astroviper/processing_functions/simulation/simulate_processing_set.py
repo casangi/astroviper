@@ -8,7 +8,6 @@ import numpy as np
 import xarray as xr
 
 from astroviper.processing_functions.simulation.antenna_beams import (
-    dish_diameters_of_beam_models,
     evaluate_beam_models,
     pack_beam_models,
     resolve_beam_params,
@@ -46,6 +45,7 @@ def simulate_processing_set(
     noise_params: dict | None = None,
     channel_width: float | None = None,
     integration_time: float | None = None,
+    antenna_dish_diameter: np.ndarray | None = None,
     direction_frame: str = "icrs",
     processing_function_threads: int = 1,
     implementation: str = "cpp",
@@ -170,6 +170,12 @@ def simulate_processing_set(
         Channel width used for the noise level; defaults to the channel spacing.
     integration_time : float, s, optional
         Integration time used for the noise level; defaults to the time spacing.
+    antenna_dish_diameter : np.ndarray, [n_antenna], metres, optional
+        Diameter of the main reflector of each antenna
+        (``antenna_xds.ANTENNA_DISH_DIAMETER``); it sets the effective area of the
+        noise model, ``ant_efficiency * pi * D1 * D2 / 4``.  Required when
+        ``noise_params`` is given; the beam models keep their own (effective)
+        ``dish_diameter``.
     direction_frame : str
         Astropy frame of all right ascension / declination inputs (``"icrs"`` or ``"fk5"``).
     processing_function_threads : int
@@ -289,11 +295,12 @@ def simulate_processing_set(
             raise ValueError(
                 "channel_width and integration_time are required for the noise model."
             )
-        dish_diameter = dish_diameters_of_beam_models(beam_models)[beam_model_map]
+        if antenna_dish_diameter is None:
+            raise ValueError("antenna_dish_diameter is required for the noise model.")
         seed = random_seed if random_seed is not None else noise.get("random_seed")
         noise_values, weight, _ = calculate_noise(
             visibility.shape,
-            dish_diameter,
+            antenna_dish_diameter,
             antenna1,
             antenna2,
             channel_width,

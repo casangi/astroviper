@@ -58,7 +58,7 @@ def noise_processing_set(tmp_path_factory):
         phase_center_ra_dec=PHASE_CENTER[None, :],
         beam_models=[airy_disk_model("alma")],
         beam_model_map=np.zeros(antenna_xds.sizes["antenna_name"], int),
-        noise_params={"t_receiver": 34.075, "ant_efficiency": 0.8957, "random_seed": 7},
+        noise_params={"t_receiver": 34.075, "ant_efficiency": 0.7121, "random_seed": 7},
         n_time_chunks=1,
         n_frequency_chunks=2,
         overwrite=True,

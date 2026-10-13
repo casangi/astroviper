@@ -120,6 +120,13 @@ SIMULATION_PARAM_DOCS = {
         "``spill_efficiency``, ``corr_efficiency``, ``quantization_efficiency``,\n"
         "``t_cmb`` and ``random_seed``; ``None`` disables noise (unit weights)."
     ),
+    "antenna_dish_diameter": (
+        "Diameter of the main reflector of each antenna\n"
+        "(``antenna_xds.ANTENNA_DISH_DIAMETER``); it sets the effective area of the\n"
+        "noise model, ``ant_efficiency * pi * D1 * D2 / 4``.  Required when\n"
+        "``noise_params`` is given; the beam models keep their own (effective)\n"
+        "``dish_diameter``."
+    ),
     "direction_frame": (
         'Astropy frame of all right ascension / declination inputs (``"icrs"`` or ``"fk5"``).'
     ),

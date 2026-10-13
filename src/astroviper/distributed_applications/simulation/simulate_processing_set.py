@@ -112,7 +112,9 @@ def simulate_processing_set(
         :func:`astroviper.utils.telescope_layout.read_telescope_layout`.  Its
         ``overall_telescope_name`` selects the array reference position (uvw,
         parallactic angles) via
-        :func:`astroviper.utils.telescope_layout.observatory_position`.
+        :func:`astroviper.utils.telescope_layout.observatory_position`.  With
+        ``noise_params`` its ``ANTENNA_DISH_DIAMETER`` is required and sets the
+        collecting area.
     time_params : dict
         ``time_start`` (``"YYYY-MM-DDTHH:MM:SS.SSS"`` UTC), ``time_delta`` (s,
         integration time) and ``n_samples``.
@@ -402,6 +404,15 @@ def simulate_processing_set(
     )  # fmt: skip
 
     antenna_position = np.asarray(antenna_xds.ANTENNA_POSITION.values, dtype=np.float64)
+    antenna_dish_diameter = None
+    if noise_params is not None:
+        if "ANTENNA_DISH_DIAMETER" not in antenna_xds:
+            raise ValueError(
+                "noise_params needs antenna_xds.ANTENNA_DISH_DIAMETER (dish diameters, m)."
+            )
+        antenna_dish_diameter = np.asarray(
+            antenna_xds.ANTENNA_DISH_DIAMETER.values, dtype=np.float64
+        )
     telescope_name = str(antenna_xds.attrs.get("overall_telescope_name", "unknown"))
     site_position = observatory_position(telescope_name, antenna_position)
 
@@ -563,6 +574,7 @@ def simulate_processing_set(
         "noise_params": noise_params,
         "channel_width": channel_width,
         "integration_time": integration_time,
+        "antenna_dish_diameter": antenna_dish_diameter,
         "direction_frame": direction_frame,
         "processing_function_threads": processing_function_threads,
         "implementation": implementation,

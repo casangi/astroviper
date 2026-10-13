@@ -278,6 +278,10 @@ def test_simulate_processing_set_processing_function_end_to_end():
         noise_params={"t_receiver": 50.0, "random_seed": 1},
         channel_width=0.5e9,
         integration_time=2000.0,
+        # SIRIUS took the collecting area from the beam model diameters
+        antenna_dish_diameter=antenna_beams.dish_diameters_of_beam_models(
+            f["beam_models"]
+        )[f["beam_model_map"]],
     )
     assert set(timing) == {"T_uvw", "T_beams", "T_visibilities", "T_noise"}
     assert xds.VISIBILITY.dims == ("time", "baseline_id", "frequency", "polarization")
@@ -309,6 +313,13 @@ def test_simulate_processing_set_processing_function_end_to_end():
         f["beam_models"], f["beam_model_map"],
     )  # fmt: skip
     np.testing.assert_allclose(xds1.VISIBILITY.values, f["visibility"], atol=1e-8)
+    with pytest.raises(ValueError, match="antenna_dish_diameter"):
+        simulate_processing_set(
+            f["time"], f["frequency"], ["XX", "YY"], f["antenna_position"], f["site_position"],
+            f["point_source_flux"], f["point_source_ra_dec"], f["phase_center_ra_dec"],
+            f["beam_models"], f["beam_model_map"], noise_params={},
+            channel_width=0.5e9, integration_time=2000.0,
+        )  # fmt: skip
 
 
 @pytest.mark.skipif("cpp" not in IMPLEMENTATIONS, reason="C++ kernel not built")

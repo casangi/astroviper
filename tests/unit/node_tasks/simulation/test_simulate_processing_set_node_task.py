@@ -76,6 +76,7 @@ def setup(tmp_path):
         noise_params={"t_receiver": 50.0, "random_seed": 11},
         channel_width=1e8,
         integration_time=600.0,
+        antenna_dish_diameter=ant.ANTENNA_DISH_DIAMETER.values,
     )
     return ps_store, ms_path, tc, fc, mapping, params
 
@@ -106,6 +107,7 @@ def test_graph_mode_false_matches_processing_function(setup):
         noise_params={"t_receiver": 50.0, "random_seed": 11 + 3},
         channel_width=1e8,
         integration_time=600.0,
+        antenna_dish_diameter=params["antenna_dish_diameter"],
     )
     np.testing.assert_allclose(xds.VISIBILITY.values, ref.VISIBILITY.values)
     np.testing.assert_allclose(xds.UVW.values, ref.UVW.values)
