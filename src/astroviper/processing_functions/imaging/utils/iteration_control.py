@@ -1096,7 +1096,10 @@ class IterationController:
         Model update Stopping Criteria:
         -------------------------------
         - Checked by deconvolver (max_iter_per_cycle, threshold_per_cycle)
-        - Can be propagated via imaging_dict if needed
+        - Propagated from the deconvolver's ``StopCode.model_update`` when
+          ``model_update_ran`` is true
+        - Cleared on a fresh-residual check, because that check has no model
+          update of its own
 
         Parameters:
         -----------
@@ -1154,9 +1157,12 @@ class IterationController:
         self._ensure_state(imaging_dict)
 
         # Evaluate every selected plane independently and record its own stop
-        # code. The aggregate returned to the caller is CONTINUE while any
-        # plane is still active.
+        # code. The aggregate imaging code returned to the caller is CONTINUE
+        # while any plane is still active. A model-update code describes why
+        # the just-completed minor cycle ended; it does not by itself turn
+        # into a global imaging stop.
         plane_imaging_codes = []
+        plane_model_update_codes = []
         for key, fields in imaging_dict.data.items():
             if not self._matches(key, time, pol, chan):
                 continue
@@ -1186,17 +1192,34 @@ class IterationController:
             else:
                 maj = IMAGING_CONTINUE
 
-            self.stop_code_imaging[idx] = maj
-            self.stop_code_model_update[idx] = MODEL_UPDATE_CONTINUE
-            plane_imaging_codes.append(maj)
+            model_update = MODEL_UPDATE_CONTINUE
+            if model_update_ran:
+                reported_stop = self._latest(fields, "stop_code", None)
+                if isinstance(reported_stop, StopCode):
+                    model_update = int(reported_stop.model_update)
+                elif reported_stop is not None:
+                    # Accept the legacy scalar form while every deconvolver is
+                    # migrated to the canonical two-part StopCode contract.
+                    model_update = int(reported_stop)
+                if model_update not in MODEL_UPDATE_STOP_DESCRIPTIONS:
+                    raise ValueError(
+                        "Unknown model-update stop code "
+                        f"{model_update} for plane {key}."
+                    )
 
-            # Stamp this plane's stop code/description into the ImagingDict,
-            # replacing the placeholder set by the deconvolver. Written
-            # directly (not via add()) so it stays a single value.
-            fields["stop_code"] = StopCode(
-                imaging=maj, model_update=MODEL_UPDATE_CONTINUE
+            self.stop_code_imaging[idx] = maj
+            self.stop_code_model_update[idx] = model_update
+            plane_imaging_codes.append(maj)
+            plane_model_update_codes.append(model_update)
+
+            # Stamp this plane's combined stop code into the ImagingDict.
+            # Written directly (not via add()) so it stays a single value.
+            fields["stop_code"] = StopCode(imaging=maj, model_update=model_update)
+            fields["stop_description"] = (
+                IMAGING_STOP_DESCRIPTIONS[maj]
+                if maj != IMAGING_CONTINUE or model_update == MODEL_UPDATE_CONTINUE
+                else MODEL_UPDATE_STOP_DESCRIPTIONS[model_update]
             )
-            fields["stop_description"] = IMAGING_STOP_DESCRIPTIONS[maj]
 
         # Aggregate across the selected planes.
         if not plane_imaging_codes:
@@ -1215,9 +1238,26 @@ class IterationController:
             agg_imaging = max(plane_imaging_codes)
             self.stopdescription = "All planes stopped (mixed reasons)"
 
-        self.stopcode = StopCode(
-            imaging=agg_imaging, model_update=MODEL_UPDATE_CONTINUE
-        )
+        if not plane_model_update_codes:
+            agg_model_update = MODEL_UPDATE_CONTINUE
+        elif len(set(plane_model_update_codes)) == 1:
+            agg_model_update = plane_model_update_codes[0]
+        else:
+            # A model update has completed for every selected plane. Preserve
+            # a representative nonzero reason for callers while the per-plane
+            # arrays retain every exact code.
+            agg_model_update = max(plane_model_update_codes)
+
+        if (
+            agg_imaging == IMAGING_CONTINUE
+            and agg_model_update != MODEL_UPDATE_CONTINUE
+        ):
+            if len(set(plane_model_update_codes)) > 1:
+                self.stopdescription = "Model updates stopped (mixed reasons)"
+            else:
+                self.stopdescription = MODEL_UPDATE_STOP_DESCRIPTIONS[agg_model_update]
+
+        self.stopcode = StopCode(imaging=agg_imaging, model_update=agg_model_update)
         return self.stopcode, self.stopdescription
 
     def _follow_entropy(self, idx, fields):
