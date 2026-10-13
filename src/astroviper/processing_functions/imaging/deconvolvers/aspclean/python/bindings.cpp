@@ -77,6 +77,7 @@ static py::dict plane_impl(py::array residual, py::array psf, py::array model,
     py::dict out;
     out["iterations_performed"] = res.iterations;
     out["retval"] = res.retval;
+    out["stop_code"] = res.stop_code;
     out["converged"] = (res.retval == 1);
     out["diverged"] = (res.retval == -3);
     out["peak_residual"] = res.peak_residual;
@@ -177,12 +178,14 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
 
     py::array_t<int> iters({nt, nf, np_img});
     py::array_t<int> retval({nt, nf, np_img});
+    py::array_t<int> stop_code({nt, nf, np_img});
     py::array_t<bool> converged({nt, nf, np_img});
     py::array_t<bool> diverged({nt, nf, np_img});
     py::array_t<double> peak({nt, nf, np_img});
     py::array_t<double> flux({nt, nf, np_img});
     int* ip = iters.mutable_data();
     int* rp = retval.mutable_data();
+    int* sp = stop_code.mutable_data();
     bool* cp = converged.mutable_data();
     bool* dp = diverged.mutable_data();
     double* pp = peak.mutable_data();
@@ -190,6 +193,7 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
     for (int i = 0; i < nplanes; ++i) {
         ip[i] = results[i].iterations;
         rp[i] = results[i].retval;
+        sp[i] = results[i].stop_code;
         cp[i] = (results[i].retval == 1);
         dp[i] = (results[i].retval == -3);
         pp[i] = results[i].peak_residual;
@@ -199,6 +203,7 @@ static py::dict cube_impl(py::array residual, py::array psf, py::array model,
     py::dict out;
     out["iterations_performed"] = iters;
     out["retval"] = retval;
+    out["stop_code"] = stop_code;
     out["converged"] = converged;
     out["diverged"] = diverged;
     out["peak_residual"] = peak;
@@ -303,7 +308,11 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           "masked residual above divergence_rms_factor x its lowest value for "
           "max_iter_divergence consecutive iterations, its peak above "
           "divergence_peak_factor x its starting peak, or a peak that is not "
-          "finite (max_iter_divergence < 0 disables the first two tests).",
+          "finite (max_iter_divergence < 0 disables the first two tests). "
+          "stop_code reports why the model update ended, as the other "
+          "deconvolvers do: 0 did not run, 1 spent max_iter_per_cycle_updated, "
+          "2 reached threshold_per_cycle, 4 diverged, 5 a test of Asp itself "
+          "(optimum strength, end of a Hogbom run, stop point mode).",
           py::arg("residual"), py::arg("psf"), py::arg("model"),
           py::arg("mask") = py::array(), py::arg("gain") = 0.1,
           py::arg("threshold_per_cycle") = 0.0, py::arg("max_iter_per_cycle_updated") = 100,
@@ -321,7 +330,8 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           "(float64) and max_iter_per_cycle_updated (int32) are (nt, nf, np) "
           "arrays giving each plane its own threshold and iteration limit; the "
           "divergence test is that of clean. "
-          "Returns per-plane arrays of shape (nt, nf, np).",
+          "Returns per-plane arrays of shape (nt, nf, np), stop_code among "
+          "them.",
           py::arg("residual"), py::arg("psf"), py::arg("model"),
           py::arg("mask") = py::array(), py::arg("gain") = 0.1,
           py::arg("threshold_per_cycle") = py::array(), py::arg("max_iter_per_cycle_updated") = py::array(),

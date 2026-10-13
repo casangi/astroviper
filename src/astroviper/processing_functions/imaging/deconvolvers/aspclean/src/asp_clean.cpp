@@ -297,6 +297,7 @@ public:
             return res;
         }
         res.retval = aspclean();
+        res.stop_code = stopCode_;
         res.iterations = iteration_;
         res.peak_residual = peakResidual_;
         res.model_flux = modelSum();
@@ -353,6 +354,7 @@ private:
     bool stopAtLargeScaleNegative_ = false;
     bool didStopPointMode_ = false;
     int iteration_ = 0, startingIter_ = 0;
+    int stopCode_ = deconvolvers::STOP_NONE;  // AspResult::stop_code
     double maximumResidual_ = 0.0, totalFlux_ = 0.0;
     std::vector<double> goodAspActiveSet_, goodAspAmplitude_;
     deconvolvers::PlaneStopTest<double> stopTest_;
@@ -778,6 +780,7 @@ private:
             // 0. below cycle threshold
             if (std::abs(peakResidual_) < computeThreshold()) {
                 converged = 1;
+                stopCode_ = deconvolvers::STOP_THRESHOLD;
                 switchedToHogbom_ = false;
                 break;
             }
@@ -792,12 +795,14 @@ private:
             if (stopTest_.check_divergence(std::abs(peakResidual_), sumSquares_,
                                            divergence_) != deconvolvers::STOP_NONE) {
                 converged = -3;
+                stopCode_ = deconvolvers::STOP_DIVERGED;
                 switchedToHogbom_ = false;
                 break;
             }
             // 1. optimum strength below threshold
             if (std::abs(strengthOptimum_) < (1e-6 * fusedThreshold_)) {
                 converged = 1;
+                stopCode_ = deconvolvers::STOP_ALGORITHM;
                 switchedToHogbom_ = false;
                 break;
             }
@@ -805,6 +810,7 @@ private:
             if ((nInitScales_ > 1) && stopAtLargeScaleNegative_ &&
                 optimumScale_ == (nInitScales_ - 1) && strengthOptimum_ < 0.0) {
                 converged = -2;
+                stopCode_ = deconvolvers::STOP_ALGORITHM;
                 break;
             }
             // 3. stop-point mode
@@ -813,6 +819,7 @@ private:
                 if (stopPointModeCounter >= stopPointMode_) {
                     didStopPointMode_ = true;
                     converged = -1;
+                    stopCode_ = deconvolvers::STOP_ALGORITHM;
                     break;
                 }
             }
@@ -851,6 +858,7 @@ private:
                     switchedToHogbom_ = false;
                     if (!(initRMSResidual > rms && initRMSResidual / rms < 1.5)) {
                         converged = 1;
+                        stopCode_ = deconvolvers::STOP_ALGORITHM;
                         break;
                     }
                 } else {
@@ -864,6 +872,8 @@ private:
             defineAspScales(tempScaleSizes);
         }
 
+        // No stop test fired: the iteration limit is spent (or was 0).
+        if (!converged && maxNiter_ > startingIter_) stopCode_ = deconvolvers::STOP_MAX_ITER;
         if (!converged && verbose_)
             std::fprintf(stderr, "[aspclean] failed to reach stopping threshold\n");
         return converged;

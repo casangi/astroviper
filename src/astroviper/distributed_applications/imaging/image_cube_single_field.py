@@ -311,8 +311,14 @@ def image_cube_single_field(
           can raise the peak of a healthy residual, has no peak limit and
           allows ``(1 + gain)`` times the lowest RMS instead. An infinite peak
           always stops the model update. The next residual update then
-          recomputes the true residual and the cycles go on. Default 1, the
-          first such iteration; ``-1`` disables the two limits.
+          recomputes the true residual and the cycles go on (see
+          ``max_cycles_divergence``). Default 1, the first such iteration;
+          ``-1`` disables the two limits.
+        - ``max_cycles_divergence`` : Divergence stop of the cycle control. A
+          plane whose last ``max_cycles_divergence`` model updates all ended
+          diverged (see ``max_iter_divergence``) gets no more iterations and
+          stops with imaging stop code 5, while the other planes of its
+          channel carry on. Default ``-1``, off.
         - ``entropy_stop`` : If ``True``, a plane stops once the entropy of
           its residual has passed its maximum. The entropy (Homan, Roth and
           Pushkarev 2024, AJ 167, 11) measures how much the residual looks
@@ -361,8 +367,8 @@ def image_cube_single_field(
         start of the cycle, and
         ``max_iter_per_cycle_updated = min(max_iter_per_cycle,
         max_iter_remaining)`` is the iteration limit of that model update (0
-        for a plane the entropy stop has ended), where ``max_iter_remaining``
-        is what is left of ``max_iter``.
+        for a plane the entropy or divergence stop has ended), where
+        ``max_iter_remaining`` is what is left of ``max_iter``.
     gridder : str
         The gridder to use. Default ``"anti_alias"``: convolutional gridding
         with the anti-aliasing kernel of ``gridding_kernel_params`` (by default

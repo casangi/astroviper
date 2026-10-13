@@ -27,11 +27,13 @@
 
 namespace mtmfs {
 
+// The stop codes shared by the deconvolvers (plane_stop_test.hpp). Nothing
+// left to clean in the search region counts as kStopThreshold.
 enum StopCode : int {
-    kStopMaxIter = 0,
-    kStopThreshold = 1,
-    kStopNothingToClean = 2,
-    kStopDiverged = -1,
+    kStopNone = deconvolvers::STOP_NONE,
+    kStopMaxIter = deconvolvers::STOP_MAX_ITER,
+    kStopThreshold = deconvolvers::STOP_THRESHOLD,
+    kStopDiverged = deconvolvers::STOP_DIVERGED,
 };
 
 constexpr int kSingularHessian = -2;
@@ -40,7 +42,7 @@ constexpr int kMaxTaylorTerms = 4;
 template <typename T>
 struct CleanResult {
     int iterations = 0;
-    int stop_code = kStopMaxIter;
+    int stop_code = kStopNone;
     T peak_residual = 0;
     T model_flux = 0;
     int psf_support = 0;

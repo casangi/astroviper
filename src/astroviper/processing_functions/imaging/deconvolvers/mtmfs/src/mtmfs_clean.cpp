@@ -537,7 +537,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                 static_cast<std::size_t>(global_max_pos[1]) * nx + static_cast<std::size_t>(global_max_pos[0]);
             const T mask_at_peak = vec_scale_masks[static_cast<std::size_t>(max_scale_index)][gpk];
             if (mask_at_peak == static_cast<T>(0) || global_max_val <= static_cast<T>(0)) {
-                stop = kStopNothingToClean;
+                stop = kStopThreshold;  // nothing left to clean
                 break;
             }
 
@@ -593,7 +593,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
             stop = check_convergence(itercount, true);
             if (stop) break;
         }
-        if (stop == 0) stop = kStopMaxIter;
+        if (stop == kStopNone && max_iter_per_cycle_updated > 0) stop = kStopMaxIter;
         out.iterations = iterdone;
         out.stop_code = stop;
 

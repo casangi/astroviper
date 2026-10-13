@@ -118,7 +118,7 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
     out["iterations_performed"] = result.iterations;
     out["peak_residual"] = result.peak_residual;
     out["model_flux"] = result.model_flux;
-    out["converged"] = (result.stop_code == mtmfs::kStopThreshold || result.stop_code == mtmfs::kStopNothingToClean);
+    out["converged"] = (result.stop_code == mtmfs::kStopThreshold);
     out["diverged"] = (result.stop_code == mtmfs::kStopDiverged);
     out["stop_code"] = result.stop_code;
     out["scales"] = result.scales;
@@ -223,7 +223,7 @@ PYBIND11_MODULE(_mtmfs_ext, m) {
           "is 0), falls below max(threshold, psf_fraction times its initial value); that estimate is "
           "updated only inside the psf_support patch, so the returned residual can still exceed threshold. "
           "mask_threshold > 0 binarises each scale-convolved mask at 0.1 (its value is otherwise unused). The "
-          "call also stops as diverged (stop_code -1) on the divergence test shared with the other "
+          "call also stops as diverged (stop_code 4) on the divergence test shared with the other "
           "deconvolvers, applied to that estimate and to the sum of the squares of the same masked image: "
           "its RMS above divergence_rms_factor times its lowest value for max_iter_divergence consecutive "
           "components, its peak above divergence_peak_factor times its starting value, or a peak that is "
@@ -232,7 +232,8 @@ PYBIND11_MODULE(_mtmfs_ext, m) {
           "with the PSF. Returns a dict with "
           "iterations_performed, peak_residual (max |residual[0]*mask|, not divided by the PSF peak), model_flux "
           "(sum of model[0]), converged (engine stop on threshold or empty search), diverged, "
-          "stop_code, scales, small_scale_bias, psf_support, hessian, inverse_hessian and the per-scale "
+          "stop_code (0 did not run, 1 spent max_iter_per_cycle_updated, 2 reached the threshold or "
+          "nothing left to clean, 4 diverged), scales, small_scale_bias, psf_support, hessian, inverse_hessian and the per-scale "
           "infinity-norm hessian_condition_number.",
           py::arg("residual"), py::arg("psf"), py::arg("model"), py::arg("mask") = py::none(),
           py::arg("scales") = std::vector<float>{}, py::arg("small_scale_bias") = 0.0f,

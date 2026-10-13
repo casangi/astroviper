@@ -175,8 +175,14 @@ IMAGING_PARAM_DOCS = {
         "  can raise the peak of a healthy residual, has no peak limit and\n"
         "  allows ``(1 + gain)`` times the lowest RMS instead. An infinite peak\n"
         "  always stops the model update. The next residual update then\n"
-        "  recomputes the true residual and the cycles go on. Default 1, the\n"
-        "  first such iteration; ``-1`` disables the two limits.\n"
+        "  recomputes the true residual and the cycles go on (see\n"
+        "  ``max_cycles_divergence``). Default 1, the first such iteration;\n"
+        "  ``-1`` disables the two limits.\n"
+        "- ``max_cycles_divergence`` : Divergence stop of the cycle control. A\n"
+        "  plane whose last ``max_cycles_divergence`` model updates all ended\n"
+        "  diverged (see ``max_iter_divergence``) gets no more iterations and\n"
+        "  stops with imaging stop code 5, while the other planes of its\n"
+        "  channel carry on. Default ``-1``, off.\n"
         "- ``entropy_stop`` : If ``True``, a plane stops once the entropy of\n"
         "  its residual has passed its maximum. The entropy (Homan, Roth and\n"
         "  Pushkarev 2024, AJ 167, 11) measures how much the residual looks\n"
@@ -225,8 +231,8 @@ IMAGING_PARAM_DOCS = {
         "start of the cycle, and\n"
         "``max_iter_per_cycle_updated = min(max_iter_per_cycle,\n"
         "max_iter_remaining)`` is the iteration limit of that model update (0\n"
-        "for a plane the entropy stop has ended), where ``max_iter_remaining``\n"
-        "is what is left of ``max_iter``.\n"
+        "for a plane the entropy or divergence stop has ended), where\n"
+        "``max_iter_remaining`` is what is left of ``max_iter``.\n"
     ),
     "processing_set_data_group_name": (
         'Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).'

@@ -161,6 +161,7 @@ class TestClean:
         for key in (
             "iterations_performed",
             "retval",
+            "stop_code",
             "converged",
             "diverged",
             "peak_residual",
@@ -517,6 +518,7 @@ class TestDivergence:
         # nothing else stops the runaway: both spend their budget
         assert result["iterations_performed"] == off["iterations_performed"] == 40
         assert result["retval"] == off["retval"] == 0
+        assert result["stop_code"] == off["stop_code"] == 1
         np.testing.assert_array_equal(residual, residual_off)
         np.testing.assert_array_equal(model, model_off)
 
@@ -530,6 +532,7 @@ class TestDivergence:
         )
         assert result["iterations_performed"] == 2
         assert result["retval"] == -3
+        assert result["stop_code"] == 4
         assert result["diverged"]
         assert not result["converged"]
         # the peak fell; the RMS rose
@@ -688,6 +691,7 @@ class TestDivergence:
         np.testing.assert_array_equal(result["retval"][0, 0, 0], -3)
         # the shared test stops plane 0
         np.testing.assert_array_equal(result["iterations_performed"], [[[2, 40]]])
+        np.testing.assert_array_equal(result["stop_code"], [[[4, 1]]])
 
     def test_rms_is_taken_inside_the_mask(self):
         # the sidelobes that raise the RMS fall outside a 3 x 3 mask
@@ -727,6 +731,45 @@ class TestDivergence:
 # ---------------------------------------------------------------------------
 # The per-Aspen L-BFGS optimizer (ALGLIB minlbfgs conventions)
 # ---------------------------------------------------------------------------
+
+
+class TestStopCode:
+    """stop_code is the code the other deconvolvers report (plane_stop_test.hpp)."""
+
+    @staticmethod
+    def _clean(max_iter_per_cycle_updated=40, threshold_per_cycle=0.0):
+        residual, psf = TestDivergence._spreading()
+        model = np.zeros_like(residual)
+        result = aspclean.clean(
+            residual,
+            psf,
+            model,
+            gain=0.9,
+            threshold_per_cycle=threshold_per_cycle,
+            max_iter_per_cycle_updated=max_iter_per_cycle_updated,
+            psf_width=1.0,
+            largestscale=0,
+        )
+        return result, model
+
+    def test_no_iteration_limit_does_not_run(self):
+        result, model = self._clean(max_iter_per_cycle_updated=0)
+        assert result["iterations_performed"] == 0
+        assert result["stop_code"] == 0
+        assert not model.any()
+
+    def test_threshold_per_cycle(self):
+        result, _ = self._clean(threshold_per_cycle=2.0)
+        assert result["retval"] == 1
+        assert result["stop_code"] == 2
+
+    def test_stop_point_mode_is_a_test_of_asp(self):
+        # only scale 0 (largestscale=0): the first component stops it
+        result, _, _ = TestDivergence._clean(
+            TestDivergence._spreading(), stoppointmode=1
+        )
+        assert result["retval"] == -1
+        assert result["stop_code"] == 5
 
 
 class TestLbfgs:

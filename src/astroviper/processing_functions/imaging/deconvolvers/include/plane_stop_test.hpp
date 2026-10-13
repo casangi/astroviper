@@ -15,7 +15,8 @@ enum StopReason : int {
     STOP_NONE = 0,       ///< did not run (no iteration budget) or stopped on request
     STOP_MAX_ITER = 1,   ///< spent its iteration budget (max_iter_per_cycle_updated)
     STOP_THRESHOLD = 2,  ///< peak residual at or below its threshold_per_cycle
-    STOP_DIVERGED = 4    ///< residual diverging (RMS or peak) or peak not finite
+    STOP_DIVERGED = 4,   ///< residual diverging (RMS or peak) or peak not finite
+    STOP_ALGORITHM = 5   ///< a stop test of the deconvolver itself (Asp)
 };
 
 /**

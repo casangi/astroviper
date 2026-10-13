@@ -615,8 +615,18 @@ class TestTcleanAnalogues:
             residual, psf, model, mask=mask, max_iter_per_cycle_updated=3, gain=0.5
         )
         assert out["iterations_performed"] == 0
-        assert out["stop_code"] == mtmfs.STOP_NOTHING_TO_CLEAN
+        assert out["stop_code"] == mtmfs.STOP_THRESHOLD
         assert out["converged"]
+        assert np.all(model == 0)
+
+    def test_no_iteration_limit_does_not_run(self):
+        ny = nx = 32
+        psf = make_psf_stack(1, nx, ny)
+        residual = np.ones((1, ny, nx), dtype=np.float32)
+        model = np.zeros_like(residual)
+        out = mtmfs.clean(residual, psf, model, max_iter_per_cycle_updated=0)
+        assert out["iterations_performed"] == 0
+        assert out["stop_code"] == mtmfs.STOP_NONE
         assert np.all(model == 0)
 
     def test_mask_none_is_accepted(self):

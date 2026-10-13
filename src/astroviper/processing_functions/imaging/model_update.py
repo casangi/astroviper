@@ -64,9 +64,11 @@ def model_update_cube_single_field(
     Returns
     -------
     imaging_dict : ImagingDict
-        Per-plane deconvolution statistics for this cycle. A plane that the
-        divergence test stopped carries the model update stop code
-        ``MODEL_UPDATE_DIVERGENCE``. With ``record_iteration_history`` every
+        Per-plane deconvolution statistics for this cycle. Every plane
+        carries the reason the deconvolver ended its model update as the
+        model update stop code (iteration control: ``MODEL_UPDATE_*`` of
+        :mod:`~astroviper.processing_functions.imaging.utils.cycle_control`).
+        With ``record_iteration_history`` every
         plane also carries its ``iteration_peak_residual`` and
         ``iteration_residual_rms``.
     return_df : pandas.DataFrame

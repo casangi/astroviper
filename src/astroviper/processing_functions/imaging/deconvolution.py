@@ -518,11 +518,14 @@ def create_imaging_dict(
         - ``masksum`` : ``(nt, nf, np)`` per-plane count of valid (unmasked)
           pixels.
 
-        Optional key: ``diverged``, an ``(nt, nf, np)`` bool array of the
-        planes whose model update the deconvolver stopped as diverged. Their
-        ``stop_code`` placeholder carries the model update divergence code,
-        which the :class:`CycleController` keeps when it stamps the
-        imaging stop code.
+        Optional key: ``stop_code``, an ``(nt, nf, np)`` int array of the
+        reason the deconvolver ended each plane's model update (its iteration
+        control stop code: 0 did not run, 1 spent
+        ``max_iter_per_cycle_updated``, 2 reached ``threshold_per_cycle``, 4
+        diverged, 5 a test of the deconvolver itself). Every plane's
+        ``stop_code`` placeholder carries it as the model update stop code,
+        which the :class:`CycleController` keeps when it stamps the imaging
+        stop code.
 
         Optional keys ``iteration_peak_residual`` and
         ``iteration_residual_rms``: the iteration history of the
@@ -560,16 +563,15 @@ def create_imaging_dict(
     max_psf_fraction = selected_calculations["max_psf_fraction"]
     max_psf_sidelobe = selected_calculations["max_psf_sidelobe"]
     masksum = selected_calculations["masksum"]
-    diverged = selected_calculations.get("diverged", None)
+    stop_code = selected_calculations.get("stop_code", None)
     iteration_history = {
         field: selected_calculations[field]
         for field in ITERATION_HISTORY_FIELDS
         if field in selected_calculations
     }
-    if diverged is not None:
+    if stop_code is not None:
         from astroviper.processing_functions.imaging.utils.cycle_control import (
             IMAGING_CONTINUE,
-            MODEL_UPDATE_DIVERGENCE,
             StopCode,
         )
 
@@ -608,9 +610,9 @@ def create_imaging_dict(
                     "stop_code": (
                         StopCode(
                             imaging=IMAGING_CONTINUE,
-                            model_update=MODEL_UPDATE_DIVERGENCE,
+                            model_update=int(stop_code[tt, nn, pp]),
                         )
-                        if diverged is not None and bool(diverged[tt, nn, pp])
+                        if stop_code is not None
                         else None
                     ),
                     "stokes": pol_vals[pp],
@@ -895,6 +897,7 @@ def deconvolve(
         )
 
     iters = np.asarray(results["iterations_performed"])
+    stop_code = np.asarray(results["stop_code"], dtype=int)
     diverged = results.get("diverged", None)
     if diverged is not None:
         diverged = np.asarray(diverged, dtype=bool)
@@ -917,7 +920,7 @@ def deconvolve(
             "max_psf_fraction": max_psf_fraction,
             "max_psf_sidelobe": max_psf_sidelobe,
             "masksum": masksum,
-            "diverged": diverged,
+            "stop_code": stop_code,
             **{
                 field: results[field]
                 for field in ITERATION_HISTORY_FIELDS
@@ -1095,7 +1098,9 @@ def hogbom_clean(
       (``stop_code`` 0, not ``diverged``).
 
     A diverged model update does not end the plane's imaging cycles: the next
-    residual update recomputes the true residual and cleaning resumes from it.
+    residual update recomputes the true residual and cleaning resumes from it,
+    unless the plane's last ``max_cycles_divergence`` model updates all
+    diverged (cycle control, see :class:`CycleController`).
 
     **Iteration history.** With ``record_iteration_history`` every plane
     records, for iteration ``k`` of the model update,
@@ -1354,9 +1359,11 @@ def asp_clean(
     -------
     dict
         Per-plane summary arrays with shape ``(nt, nf, np)`` and keys
-        ``iterations_performed`` (int), ``retval`` (int), ``converged``
-        (bool), ``diverged`` (bool), ``peak_residual`` (float), and
-        ``model_flux`` (float). A plane stops as diverged (``retval`` -3)
+        ``iterations_performed`` (int), ``retval`` (int), ``stop_code``
+        (int, as for :func:`hogbom_clean`, and 5 for a test of Asp itself:
+        optimum strength, end of a Hogbom run, stop point mode),
+        ``converged`` (bool), ``diverged`` (bool), ``peak_residual`` (float),
+        and ``model_flux`` (float). A plane stops as diverged (``retval`` -3)
         when the RMS of its residual inside the mask has been above
         ``(1 + gain)`` times the lowest RMS of the model update for
         ``max_iter_divergence`` consecutive iterations, or when its peak is

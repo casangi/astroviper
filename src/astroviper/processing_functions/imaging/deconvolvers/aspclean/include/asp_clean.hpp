@@ -44,6 +44,10 @@ struct AspResult {
                                   // -2 large-scale negative / diverging
                                   // -3 diverging (the divergence test shared
                                   //    with the other deconvolvers)
+    int stop_code = deconvolvers::STOP_NONE;  // why the model update ended, as
+                                  // the other deconvolvers report it; Asp's own
+                                  // tests (optimum strength, end of a Hogbom
+                                  // run, stop point mode) are STOP_ALGORITHM
     double peak_residual = 0.0;   // |peak| of the (masked) residual at exit
     double model_flux = 0.0;      // sum of the model image at exit
     bool switched_to_hogbom = false;
