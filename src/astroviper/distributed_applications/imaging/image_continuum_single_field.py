@@ -2616,8 +2616,14 @@ def image_continuum_single_field(
 
     MFS reduces Taylor UV grids before the global inverse FFT. MVC performs
     channel FFTs and PB correction in map tasks, then reduces Taylor
-    contributions. Both accept only ``deconvolver="hogbom"``, update Taylor term zero, and verify
-    refreshed residuals before finalization. Restoration is optional.
+    contributions. Native MT-MFS updates the complete Taylor model; Högbom
+    updates Taylor term zero. Both verify refreshed residuals before
+    finalization. With one Taylor term, an MT-MFS request emits a warning and
+    falls back to Högbom. Restoration is optional.
+
+    When ``deconvolver="mtmfs"``, ``iteration_control_params`` also accepts
+    ``scales``, ``small_scale_bias``, and ``mask_threshold``. These names are
+    passed unchanged through the Python and native layers.
 
     Parameters
     ----------

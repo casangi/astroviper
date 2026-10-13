@@ -74,8 +74,8 @@ int taylor_hessian(const T* psf, int nterms, int nx, int ny, std::vector<float>&
 //   mask_threshold > 0 binarises the scale-convolved mask at 0.1 (CASA)
 template <typename T>
 CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nterms, int nx, int ny,
-                     const std::vector<float>& scales, float small_scale_bias, int max_iter_remaining, T gain,
-                     T threshold, T psf_fraction, T mask_threshold);
+                     const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle, T gain,
+                     T threshold_per_cycle, T mask_threshold);
 
 // residual[t1] = sum_t2 inverse_hessian[t1, t2] * residual[t2] in place
 // (MultiTermMatrixCleaner::computeprincipalsolution). inverse_hessian is
@@ -90,10 +90,9 @@ extern template int taylor_hessian<double>(const double*, int, int, int, std::ve
                                            std::vector<double>&, std::vector<double>&,
                                            std::vector<double>&, int&);
 extern template CleanResult<float> clean<float>(float*, float*, const float*, const float*, int, int, int,
-                                                const std::vector<float>&, float, int, float, float, float, float);
+                                                const std::vector<float>&, float, int, float, float, float);
 extern template CleanResult<double> clean<double>(double*, double*, const double*, const double*, int, int, int,
-                                                  const std::vector<float>&, float, int, double, double, double,
-                                                  double);
+                                                  const std::vector<float>&, float, int, double, double, double);
 extern template void principal_solution<float>(float*, const double*, int, int, int);
 extern template void principal_solution<double>(double*, const double*, int, int, int);
 

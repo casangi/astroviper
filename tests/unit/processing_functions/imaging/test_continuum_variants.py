@@ -8,9 +8,12 @@ import pytest
 import xarray as xr
 
 from astroviper.processing_functions.imaging.image_continuum_single_field import (
+    accumulate_continuum_model,
     convert_mvc_cubes_to_taylor_normal_equations,
+    model_update_mtmfs_single_field,
     restore_image,
 )
+from astroviper.processing_functions.imaging.utils import ImagingDict
 from tests.utils.continuum_images import make_continuum_image
 
 
@@ -59,6 +62,122 @@ def test_restoration_supports_odd_even_and_rectangular_images(image_shape, dtype
     xr.testing.assert_identical(result.SKY_RESIDUAL, snapshot.SKY_RESIDUAL)
     assert "T_restore" in timing
     assert "T_correct_sky_by_primary_beam" in timing
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtype):
+    image = make_continuum_image()
+    psf_zero = image.POINT_SPREAD_FUNCTION.isel(psf_taylor_order=0, drop=True)
+    image = image.drop_dims("psf_taylor_order")
+    image["POINT_SPREAD_FUNCTION"] = xr.concat(
+        [psf_zero, psf_zero, psf_zero],
+        dim=xr.IndexVariable("psf_taylor_order", [0, 1, 2]),
+    ).transpose("time", "psf_taylor_order", "polarization", "l", "m")
+    for name in ("SKY_MODEL", "SKY_RESIDUAL", "POINT_SPREAD_FUNCTION"):
+        image[name] = image[name].astype(dtype)
+    image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (
+        ("time", "polarization"),
+        np.asarray([[0.2]], dtype=dtype),
+    )
+    residual_snapshot = image.SKY_RESIDUAL.copy(deep=True)
+    calls = []
+
+    def native_clean(residual, psf, model, **kwargs):
+        calls.append((residual.shape, psf.shape, model.shape, kwargs))
+        assert residual.ndim == psf.ndim == model.ndim == 3
+        assert residual.shape == model.shape == (2, 8, 8)
+        assert psf.shape == (3, 8, 8)
+        assert residual.flags.c_contiguous
+        assert psf.flags.c_contiguous
+        assert model.flags.c_contiguous
+        assert residual.dtype == psf.dtype == model.dtype == dtype
+        np.testing.assert_array_equal(model, 0.0)
+        residual *= dtype(0.5)
+        model[0] = dtype(1.0)
+        model[1] = dtype(2.0)
+        return {
+            "iterations_performed": 3,
+            "peak_residual": 0.125,
+            "model_flux": float(model[0].sum()),
+            "converged": False,
+            "stop_code": 0,
+            "scales": np.asarray([0.0]),
+            "hessian_condition_number": np.asarray([2.0]),
+        }
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.deconvolvers.mtmfs.clean",
+        native_clean,
+    )
+    statistics, timing = model_update_mtmfs_single_field(
+        image,
+        "mtmfs",
+        {
+            "max_iter": 20,
+            "max_iter_per_cycle": np.asarray([[[3]]]),
+            "threshold_per_cycle": np.asarray([[[0.01]]], dtype=dtype),
+            "gain": 0.2,
+            "scales": [0.0],
+        },
+    )
+
+    assert len(calls) == 1
+    assert calls[0][3]["max_iter_per_cycle"] == 3
+    assert calls[0][3]["threshold_per_cycle"] == pytest.approx(0.01)
+    assert "psf_fraction" not in calls[0][3]
+    xr.testing.assert_identical(image.SKY_RESIDUAL, residual_snapshot)
+    np.testing.assert_array_equal(image.SKY_MODEL.isel(taylor_term=0), 1.0)
+    np.testing.assert_array_equal(image.SKY_MODEL.isel(taylor_term=1), 2.0)
+    previous = xr.Dataset({"SKY_MODEL": xr.zeros_like(image.SKY_MODEL)})
+    previous.SKY_MODEL.loc[{"taylor_term": 0}] = dtype(10.0)
+    previous.SKY_MODEL.loc[{"taylor_term": 1}] = dtype(20.0)
+    accumulated = accumulate_continuum_model(image, previous)
+    np.testing.assert_array_equal(
+        accumulated.SKY_MODEL.isel(taylor_term=0), dtype(11.0)
+    )
+    np.testing.assert_array_equal(
+        accumulated.SKY_MODEL.isel(taylor_term=1), dtype(22.0)
+    )
+    fields = next(iter(statistics.data.values()))
+    assert fields["iter_done"] == [3]
+    assert fields["mtmfs_stop_code"] == 0
+    assert "T_mtmfs" in timing
+
+
+def test_single_term_mtmfs_warns_and_falls_back_to_hogbom(monkeypatch):
+    image = make_continuum_image().isel(
+        taylor_term=slice(0, 1), psf_taylor_order=slice(0, 1)
+    )
+    image["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"] = (
+        ("time", "polarization"),
+        [[0.2]],
+    )
+    called = []
+
+    def hogbom_backend(image_arg, deconvolver, params, **kwargs):
+        called.append(deconvolver)
+        assert image_arg.SKY_RESIDUAL.dims == (
+            "time",
+            "frequency",
+            "polarization",
+            "l",
+            "m",
+        )
+        return ImagingDict(), pd.DataFrame({"T_deconvolve": [0.0]})
+
+    monkeypatch.setattr(
+        "astroviper.processing_functions.imaging.model_update."
+        "model_update_cube_single_field",
+        hogbom_backend,
+    )
+    with pytest.warns(UserWarning, match="nterms=1.*falling back"):
+        model_update_mtmfs_single_field(
+            image,
+            "mtmfs",
+            {"max_iter": 1, "max_iter_per_cycle": 1, "gain": 0.1},
+        )
+
+    assert called == ["hogbom"]
 
 
 def test_restoration_reports_incomplete_backend_result(monkeypatch):

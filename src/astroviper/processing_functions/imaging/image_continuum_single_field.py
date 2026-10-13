@@ -1866,6 +1866,188 @@ def build_continuum_residual_imaging_dict(
     return statistics
 
 
+def _model_update_native_mtmfs(
+    img_xds,
+    deconvolve_params,
+    residual_name,
+    psf_name,
+    max_sidelobe_name,
+    image_data_group_in_name,
+    image_data_group_out_name,
+):
+    """Run the native MT-MFS kernel on each time/polarization Taylor stack."""
+    import time
+
+    import numpy as np
+    import pandas as pd
+
+    from astroviper.processing_functions.imaging.deconvolvers import mtmfs
+    from astroviper.processing_functions.imaging.utils import ImagingDict
+
+    residual_da = img_xds[residual_name].transpose(
+        "time", "taylor_term", "polarization", "l", "m"
+    )
+    psf_da = img_xds[psf_name].transpose(
+        "time", "psf_taylor_order", "polarization", "l", "m"
+    )
+    residual = residual_da.values
+    psf = psf_da.values
+    ntime, nterms, npol, nl, nm = residual.shape
+
+    if not 2 <= nterms <= 4:
+        raise ValueError(
+            "Native MT-MFS continuum deconvolution requires 2 to 4 Taylor "
+            f"terms; received {nterms}."
+        )
+    expected_psf_terms = 2 * nterms - 1
+    if psf.shape != (ntime, expected_psf_terms, npol, nl, nm):
+        raise ValueError(
+            "POINT_SPREAD_FUNCTION must have shape "
+            f"(time, {expected_psf_terms}, polarization, l, m) for "
+            f"nterms={nterms}; received {psf.shape}."
+        )
+    if residual.dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
+        raise TypeError(
+            "Native MT-MFS residuals must use float32 or float64; "
+            f"received {residual.dtype}."
+        )
+    if psf.dtype != residual.dtype:
+        raise TypeError(
+            "Native MT-MFS residual and PSF dtypes must match; "
+            f"received {residual.dtype} and {psf.dtype}."
+        )
+
+    residual_group = img_xds.attrs["data_groups"][image_data_group_in_name]
+    reference_plane = residual_da.isel(taylor_term=0, drop=True)
+    mask_name = residual_group.get("mask")
+    if mask_name is not None:
+        mask_da = img_xds[mask_name]
+        selection = {
+            dim: 0
+            for dim in ("taylor_term", "frequency", "psf_taylor_order")
+            if dim in mask_da.dims
+        }
+        support_da = mask_da.isel(selection, drop=True).broadcast_like(reference_plane)
+        support_da = support_da > 0.5
+    elif residual_group.get("primary_beam") is not None:
+        primary_beam = img_xds[residual_group["primary_beam"]]
+        selection = {
+            dim: 0
+            for dim in ("taylor_term", "frequency", "psf_taylor_order")
+            if dim in primary_beam.dims
+        }
+        primary_beam = primary_beam.isel(selection, drop=True)
+        primary_beam_limit = float(deconvolve_params.get("primary_beam_limit", 0.2))
+        support_da = (
+            primary_beam >= primary_beam_limit * primary_beam.max(skipna=True)
+        ).broadcast_like(reference_plane)
+    else:
+        support_da = reference_plane.notnull()
+    support = support_da.transpose("time", "polarization", "l", "m").values
+
+    max_sidelobe = img_xds[max_sidelobe_name]
+    selection = {
+        dim: 0
+        for dim in ("taylor_term", "frequency", "psf_taylor_order")
+        if dim in max_sidelobe.dims
+    }
+    max_sidelobe = (
+        max_sidelobe.isel(selection, drop=True)
+        .broadcast_like(reference_plane.isel(l=0, m=0, drop=True))
+        .transpose("time", "polarization")
+        .values
+    )
+
+    def plane_control(name, tt, pp, default):
+        value = deconvolve_params.get(name, default)
+        if value is None:
+            value = default
+        if np.ndim(value) == 0:
+            return value
+        values = np.asarray(value)
+        if values.shape != (ntime, 1, npol):
+            raise ValueError(
+                f"{name} must be scalar or have shape {(ntime, 1, npol)}; "
+                f"received {values.shape}."
+            )
+        return values[tt, 0, pp]
+
+    model = np.zeros_like(residual)
+    imaging_dict = ImagingDict()
+    start = time.time()
+    for tt in range(ntime):
+        for pp in range(npol):
+            # Indexing produces the native (nterms, l, m) layout directly. No
+            # flattening or reshaping is needed. A contiguous copy protects the
+            # verified major-cycle residual from the kernel's in-place update.
+            residual_work = np.array(residual[tt, :, pp, :, :], copy=True, order="C")
+            psf_work = np.ascontiguousarray(psf[tt, :, pp, :, :])
+            model_work = np.zeros_like(residual_work)
+            mask_work = np.ascontiguousarray(support[tt, pp], dtype=residual_work.dtype)
+            selected = support[tt, pp] & np.isfinite(residual_work[0])
+            start_peak = float(np.max(np.abs(residual_work[0][selected]), initial=0.0))
+            start_peak_nomask = float(np.max(np.abs(residual_work[0]), initial=0.0))
+            threshold_per_cycle = float(
+                plane_control("threshold_per_cycle", tt, pp, 0.0)
+            )
+            max_iter = int(
+                plane_control(
+                    "max_iter_per_cycle",
+                    tt,
+                    pp,
+                    deconvolve_params.get("max_iter", 0),
+                )
+            )
+            result = mtmfs.clean(
+                residual_work,
+                psf_work,
+                model_work,
+                mask=mask_work,
+                scales=deconvolve_params.get("scales", []),
+                small_scale_bias=deconvolve_params.get("small_scale_bias", 0.0),
+                max_iter_per_cycle=max_iter,
+                gain=deconvolve_params.get("gain", 0.1),
+                threshold_per_cycle=threshold_per_cycle,
+                mask_threshold=deconvolve_params.get("mask_threshold", 0.9),
+            )
+            model[tt, :, pp, :, :] = model_work
+            final_selected = support[tt, pp] & np.isfinite(residual_work[0])
+            fields = {
+                "max_iter": deconvolve_params.get("max_iter"),
+                "threshold_per_cycle": threshold_per_cycle,
+                "iter_done": int(result["iterations_performed"]),
+                "gain": deconvolve_params.get("gain", 0.1),
+                "max_psf_sidelobe": float(max_sidelobe[tt, pp]),
+                "stop_code": result["stop_code"],
+                "stokes": img_xds.coords["polarization"].values[pp],
+                "frequency": img_xds.attrs.get("reference_frequency", 0.0),
+                "time": img_xds.coords["time"].values[tt],
+                "start_model_flux": 0.0,
+                "model_flux": float(model_work[0].sum()),
+                "start_peakres": start_peak,
+                "start_peakres_nomask": start_peak_nomask,
+                "peakres": float(
+                    np.max(np.abs(residual_work[0][final_selected]), initial=0.0)
+                ),
+                "peakres_nomask": float(np.max(np.abs(residual_work[0]), initial=0.0)),
+                "masksum": int(np.count_nonzero(final_selected)),
+                "mtmfs_converged": bool(result["converged"]),
+                "mtmfs_stop_code": int(result["stop_code"]),
+                "scales": result["scales"],
+                "hessian_condition_number": result["hessian_condition_number"],
+            }
+            imaging_dict.add(fields, time=tt, pol=pp, chan=0)
+
+    img_xds["SKY_MODEL"] = residual_da.copy(data=model)
+    img_xds.attrs.setdefault("data_groups", {})[image_data_group_out_name] = {
+        "sky": "SKY_MODEL"
+    }
+    elapsed = time.time() - start
+    return imaging_dict, pd.DataFrame(
+        {"T_mtmfs": [elapsed], "T_model_update_cycle": [elapsed]}
+    )
+
+
 @shares_param_docs
 def model_update_mtmfs_single_field(
     img_xds,
@@ -1878,11 +2060,10 @@ def model_update_mtmfs_single_field(
 ):
     """Perform one continuum model update.
 
-    This function implements the current continuum deconvolution backend used by
-    the distributed MT-MFS imaging workflow. Until a native MT-MFS deconvolver is
-    available, the model update is performed by temporarily projecting the
-    continuum dataset onto a single-frequency cube representation and reusing the
-    existing cube Högbom implementation.
+    Dispatch the continuum model update to native MT-MFS or to the compatibility
+    Högbom path. Native MT-MFS receives each complete Taylor stack directly as
+    ``(nterms, l, m)``. Högbom temporarily projects Taylor term zero onto a
+    single-frequency cube representation.
 
     The procedure is
 
@@ -1920,12 +2101,14 @@ def model_update_mtmfs_single_field(
         function uses ``psf_taylor_order``.
 
     deconvolver : str
-        Name of the continuum deconvolver. Currently only ``"hogbom"`` is
-        supported.
+        ``"mtmfs"`` uses the native Taylor-stack deconvolver for two to four
+        Taylor terms. ``"hogbom"`` cleans Taylor term zero. Requesting MT-MFS
+        with one Taylor term emits a warning and falls back to Högbom.
 
     deconvolve_params : dict
         Minor-cycle control parameters. These typically include entries such as
-        ``max_iter``, ``max_iter_per_cycle``, and ``threshold_per_cycle``.
+        ``max_iter``, ``max_iter_per_cycle``, ``threshold_per_cycle``, ``gain``,
+        ``scales``, ``small_scale_bias``, and ``mask_threshold``.
         The per-cycle limits and thresholds accept scalars or per-plane arrays,
         using the same keys as the cube deconvolver.
 
@@ -1944,18 +2127,17 @@ def model_update_mtmfs_single_field(
     Returns
     -------
     deconvolve_dict : ImagingDict
-        Deconvolution statistics returned by the Högbom implementation.
+        Per-plane deconvolution statistics returned by the selected backend.
 
     return_df : pandas.DataFrame
         Timing information for the continuum model update.
 
     Notes
     -----
-    This function is a compatibility layer that allows the continuum imaging
-    pipeline to reuse the existing cube deconvolution backend. Although the
-    surrounding imaging algorithm is MT-MFS, the current model update operates
-    only on the zeroth Taylor coefficient. A future native MT-MFS deconvolver
-    will replace this implementation."""
+    Native MT-MFS operates on contiguous working copies because its C++ kernel
+    updates residual and model buffers in place. No array is flattened or
+    reshaped; the verified major-cycle residual in ``img_xds`` remains unchanged.
+    """
     import copy
     import time
 
@@ -1963,10 +2145,11 @@ def model_update_mtmfs_single_field(
     import pandas as pd
     import xarray as xr
 
-    if deconvolver.lower() != "hogbom":
+    deconvolver = deconvolver.lower()
+    if deconvolver not in {"hogbom", "mtmfs"}:
         raise NotImplementedError(
-            "Continuum deconvolution currently supports only "
-            "'hogbom' cleaning of Taylor term zero."
+            "Continuum deconvolution supports 'hogbom' and 'mtmfs'; "
+            f"received {deconvolver!r}."
         )
 
     if "SKY_RESIDUAL" not in img_xds:
@@ -2006,6 +2189,17 @@ def model_update_mtmfs_single_field(
 
     if psf.sizes["psf_taylor_order"] < 1:
         raise ValueError("POINT_SPREAD_FUNCTION contains no PSF Taylor terms.")
+
+    if deconvolver == "mtmfs" and residual.sizes["taylor_term"] == 1:
+        import warnings
+
+        warnings.warn(
+            "deconvolver='mtmfs' was requested with nterms=1; falling back "
+            "to deconvolver='hogbom'.",
+            UserWarning,
+            stacklevel=2,
+        )
+        deconvolver = "hogbom"
 
     # make a cube-compatible copy of the per-plane controls
     cube_deconvolve_params = copy.deepcopy(deconvolve_params)
@@ -2064,6 +2258,17 @@ def model_update_mtmfs_single_field(
     )
 
     residual_data_group["max_sidelobe_point_spread_function"] = max_sidelobe_name
+
+    if deconvolver == "mtmfs":
+        return _model_update_native_mtmfs(
+            img_xds,
+            cube_deconvolve_params,
+            residual_name,
+            psf_name,
+            max_sidelobe_name,
+            image_data_group_in_name,
+            image_data_group_out_name,
+        )
 
     # ------------------------------------------------------------------
     # Build a temporary cube-like image dataset.

@@ -68,8 +68,8 @@ py::array_t<double> vector_array(const std::vector<double>& values) {
 
 template <typename T>
 py::dict clean_impl(py::array residual, py::array psf, py::array model, py::object mask_obj,
-                    const std::vector<float>& scales, float small_scale_bias, int max_iter_remaining, double gain,
-                    double threshold, double psf_fraction, double mask_threshold) {
+                    const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle, double gain,
+                    double threshold_per_cycle, double mask_threshold) {
     int nterms, ny, nx;
     stack_dims(residual, "residual", nterms, ny, nx);
     const std::vector<py::ssize_t> stack = {nterms, ny, nx};
@@ -104,8 +104,8 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
     {
         py::gil_scoped_release release;
         result = mtmfs::clean<T>(res, mod, psf_ptr, mask_ptr, nterms, nx, ny, scales, small_scale_bias,
-                                 max_iter_remaining, static_cast<T>(gain), static_cast<T>(threshold),
-                                 static_cast<T>(psf_fraction), static_cast<T>(mask_threshold));
+                                 max_iter_per_cycle, static_cast<T>(gain), static_cast<T>(threshold_per_cycle),
+                                 static_cast<T>(mask_threshold));
     }
 
     const int nscales = static_cast<int>(result.scales.size());
@@ -125,14 +125,14 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
 }
 
 static py::dict clean_dispatch(py::array residual, py::array psf, py::array model, py::object mask,
-                               const std::vector<float>& scales, float small_scale_bias, int max_iter_remaining,
-                               double gain, double threshold, double psf_fraction, double mask_threshold) {
+                               const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle,
+                               double gain, double threshold_per_cycle, double mask_threshold) {
     if (py::isinstance<py::array_t<float>>(residual))
-        return clean_impl<float>(residual, psf, model, mask, scales, small_scale_bias, max_iter_remaining, gain,
-                                 threshold, psf_fraction, mask_threshold);
+        return clean_impl<float>(residual, psf, model, mask, scales, small_scale_bias, max_iter_per_cycle, gain,
+                                 threshold_per_cycle, mask_threshold);
     if (py::isinstance<py::array_t<double>>(residual))
-        return clean_impl<double>(residual, psf, model, mask, scales, small_scale_bias, max_iter_remaining, gain,
-                                  threshold, psf_fraction, mask_threshold);
+        return clean_impl<double>(residual, psf, model, mask, scales, small_scale_bias, max_iter_per_cycle, gain,
+                                  threshold_per_cycle, mask_threshold);
     throw std::runtime_error("residual must be float32 or float64");
 }
 
@@ -207,22 +207,22 @@ PYBIND11_MODULE(_mtmfs_ext, m) {
           "(2*nterms-1, ny, nx), read-only. mask is an optional (ny, nx) array of the same "
           "dtype, or None. scales are pixel sizes (empty -> [0]; sorted and de-duplicated; "
           "sizes larger than half the image are dropped). small_scale_bias is clamped to "
-          "[-1, 1]. gain <= 0 selects casacore adaptive gain. max_iter_remaining [CASA niter] caps the "
+          "[-1, 1]. gain <= 0 selects casacore adaptive gain. max_iter_per_cycle [CASA cycleniter] caps the "
           "components added in this call. The call stops when max |residual[0] convolved with the smallest "
           "scale| over that scale's mask, divided by hessian[0, 0, 0] (the PSF peak when the smallest scale "
-          "is 0), falls below max(threshold, psf_fraction times its initial value); that estimate is "
-          "updated only inside the psf_support patch, so the returned residual can still exceed threshold. "
+          "is 0), falls below threshold_per_cycle; that estimate is updated only inside the psf_support "
+          "patch, so the returned residual can still exceed threshold_per_cycle. "
           "mask_threshold > 0 binarises each scale-convolved mask at 0.1 (its value is otherwise unused). The "
           "residual is updated at the end of the call by a circular FFT convolution of the new components "
           "with the PSF. Returns a dict with "
           "iterations_performed, peak_residual (max |residual[0]*mask|, not divided by the PSF peak), model_flux "
-          "(sum of model[0]), converged (engine stop on threshold or empty search), "
+          "(sum of model[0]), converged (engine stop on threshold_per_cycle or empty search), "
           "stop_code, scales, small_scale_bias, psf_support, hessian, inverse_hessian and the per-scale "
           "infinity-norm hessian_condition_number.",
           py::arg("residual"), py::arg("psf"), py::arg("model"), py::arg("mask") = py::none(),
           py::arg("scales") = std::vector<float>{}, py::arg("small_scale_bias") = 0.0f,
-          py::arg("max_iter_remaining") = 100, py::arg("gain") = 0.1, py::arg("threshold") = 0.0,
-          py::arg("psf_fraction") = 0.0, py::arg("mask_threshold") = 0.9);
+          py::arg("max_iter_per_cycle") = 100, py::arg("gain") = 0.1,
+          py::arg("threshold_per_cycle") = 0.0, py::arg("mask_threshold") = 0.9);
 
     m.def("hessian", &hessian_dispatch,
           "Taylor Hessians and inverses for a (2*nterms-1, ny, nx) PSF stack, with 1 <= nterms <= 4. Returns a dict "

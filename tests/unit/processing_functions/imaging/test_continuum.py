@@ -168,8 +168,12 @@ def test_cached_mvc_frequency_grid_subtracts_model_plane_by_plane():
 
 def test_accumulate_continuum_model_adds_later_increment_positionally():
     """A later increment reproduces the former driver-side model addition."""
-    previous = _model_dataset(2.0)
-    increment = _model_dataset(0.5)
+    previous = _model_dataset(0.0)
+    previous.SKY_MODEL.loc[{"taylor_term": 0}] = 2.0
+    previous.SKY_MODEL.loc[{"taylor_term": 1}] = 20.0
+    increment = _model_dataset(0.0)
+    increment.SKY_MODEL.loc[{"taylor_term": 0}] = 0.5
+    increment.SKY_MODEL.loc[{"taylor_term": 1}] = 5.0
 
     actual = accumulate_continuum_model(
         increment,
@@ -177,8 +181,10 @@ def test_accumulate_continuum_model_adds_later_increment_positionally():
         specmode="mfs",
     )
 
-    np.testing.assert_array_equal(actual["SKY_MODEL"], 2.5)
-    np.testing.assert_array_equal(previous["SKY_MODEL"], 2.0)
+    np.testing.assert_array_equal(actual.SKY_MODEL.isel(taylor_term=0), 2.5)
+    np.testing.assert_array_equal(actual.SKY_MODEL.isel(taylor_term=1), 25.0)
+    np.testing.assert_array_equal(previous.SKY_MODEL.isel(taylor_term=0), 2.0)
+    np.testing.assert_array_equal(previous.SKY_MODEL.isel(taylor_term=1), 20.0)
     assert actual["SKY_MODEL"].attrs == previous["SKY_MODEL"].attrs
 
 
@@ -652,6 +658,9 @@ def _taylor_model(value=1.0):
 
 def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(monkeypatch):
     """MFS prediction preparation validates and registers its Taylor UV model."""
+    model = _taylor_model(0.0)
+    model.SKY_MODEL.loc[{"taylor_term": 0}] = 2.0
+    model.SKY_MODEL.loc[{"taylor_term": 1}] = 3.0
     monkeypatch.setattr(
         "astroviper.processing_functions.image_analysis.transform_polarization_basis."
         "transform_polarization_basis",
@@ -669,15 +678,23 @@ def test_prepare_mfs_model_transforms_and_fourier_converts_all_terms(monkeypatch
         fake_fft,
     )
     result = prepare_model_uv_continuum_single_field(
-        _taylor_model(), {"nterms": 2}, instrument_polarization_basis="linear"
+        model, {"nterms": 2}, instrument_polarization_basis="linear"
     )
     assert result.VISIBILITY_MODEL.sizes["taylor_term"] == 2
     assert result.VISIBILITY_MODEL.attrs["nterms"] == 2
+    np.testing.assert_array_equal(
+        result.VISIBILITY_MODEL.isel(taylor_term=0), 2.0 + 0.0j
+    )
+    np.testing.assert_array_equal(
+        result.VISIBILITY_MODEL.isel(taylor_term=1), 3.0 + 0.0j
+    )
 
 
 def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(monkeypatch):
     """MVC builds a channel cube, applies PB convention, and performs one FFT."""
-    model = _taylor_model()
+    model = _taylor_model(0.0)
+    model.SKY_MODEL.loc[{"taylor_term": 0}] = 2.0
+    model.SKY_MODEL.loc[{"taylor_term": 1}] = 3.0
     model["PRIMARY_BEAM"] = xr.DataArray(
         np.ones((1, 1, 1, 2, 2)),
         dims=("time", "frequency", "polarization", "l", "m"),
@@ -720,6 +737,10 @@ def test_prepare_mvc_model_evaluates_taylor_terms_and_channel_beams(monkeypatch)
         "polarization",
         "l",
         "m",
+    )
+    np.testing.assert_allclose(
+        result.SKY_MODEL_MVC.isel(time=0, polarization=0, l=0, m=0),
+        [1.7, 2.3],
     )
 
 
