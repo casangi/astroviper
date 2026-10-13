@@ -4,24 +4,30 @@ import numpy as np
 import xarray as xr
 
 
-def make_continuum_image(psf_axis="psf_taylor_order", beam_axis=None, legacy=False):
+def make_continuum_image(
+    psf_axis="psf_taylor_order",
+    beam_axis=None,
+    legacy=False,
+    image_shape=(8, 8),
+):
+    nl, nm = image_shape
     coords = dict(
         time=[0.0],
         taylor_term=[0, 1],
         polarization=["I"],
-        l=np.arange(8) * -1e-5,
-        m=np.arange(8) * 1e-5,
+        l=np.arange(nl) * -1e-5,
+        m=np.arange(nm) * 1e-5,
     )
     dims = ("time", "taylor_term", "polarization", "l", "m")
-    model = np.zeros((1, 2, 1, 8, 8))
-    model[0, 0, 0, 4, 4] = 2.0
-    model[0, 1, 0, 4, 4] = 17.0  # Higher Taylor terms must not be restored.
+    model = np.zeros((1, 2, 1, nl, nm))
+    model[0, 0, 0, nl // 2, nm // 2] = 2.0
+    model[0, 1, 0, nl // 2, nm // 2] = 17.0  # Higher Taylor terms must not be restored.
     image = xr.Dataset(
         {"SKY_MODEL": (dims, model), "SKY_RESIDUAL": (dims, np.full_like(model, 0.25))},
         coords=coords,
     )
     plane = xr.DataArray(
-        np.ones((1, 1, 8, 8)),
+        np.ones((1, 1, nl, nm)),
         dims=("time", "polarization", "l", "m"),
         coords={k: image.coords[k] for k in ("time", "polarization", "l", "m")},
     )

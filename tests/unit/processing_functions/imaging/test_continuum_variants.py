@@ -33,6 +33,34 @@ def test_restoration_layouts_match_actual_cube_backend(psf_axis, beam_axis, lega
     assert float(result.SKY_RESTORED.isel(taylor_term=0).max()) == pytest.approx(2.25)
 
 
+@pytest.mark.parametrize("image_shape", [(8, 8), (7, 7), (7, 10), (10, 7), (8, 11)])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_restoration_supports_odd_even_and_rectangular_images(image_shape, dtype):
+    image = make_continuum_image(image_shape=image_shape)
+    for name in ("SKY_MODEL", "SKY_RESIDUAL", "POINT_SPREAD_FUNCTION"):
+        image[name] = image[name].astype(dtype)
+    snapshot = image.copy(deep=True)
+
+    result, timing = restore_image(image, primary_beam_correction=True)
+
+    assert result.SKY_RESTORED.sizes["l"] == image_shape[0]
+    assert result.SKY_RESTORED.sizes["m"] == image_shape[1]
+    assert result.SKY_RESTORED_PBCOR.sizes["l"] == image_shape[0]
+    assert result.SKY_RESTORED_PBCOR.sizes["m"] == image_shape[1]
+    assert result.SKY_RESTORED.dtype == dtype
+    assert result.SKY_RESTORED_PBCOR.dtype == dtype
+    restored_taylor_zero = result.SKY_RESTORED.isel(taylor_term=0)
+    assert np.isfinite(restored_taylor_zero).all()
+    assert result.SKY_RESTORED.isel(taylor_term=slice(1, None)).isnull().all()
+    assert np.isfinite(result.SKY_RESTORED_PBCOR).all()
+    assert float(restored_taylor_zero.max()) == pytest.approx(2.25, rel=1e-6)
+    assert float(result.SKY_RESTORED_PBCOR.max()) == pytest.approx(4.5, rel=1e-6)
+    xr.testing.assert_identical(result.SKY_MODEL, snapshot.SKY_MODEL)
+    xr.testing.assert_identical(result.SKY_RESIDUAL, snapshot.SKY_RESIDUAL)
+    assert "T_restore" in timing
+    assert "T_correct_sky_by_primary_beam" in timing
+
+
 def test_restoration_reports_incomplete_backend_result(monkeypatch):
     module = importlib.import_module("astroviper.processing_functions.imaging.restore")
 
