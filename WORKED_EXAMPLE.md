@@ -100,8 +100,11 @@ via `CycleController`:
 - **Model update** — `model_update_cube_single_field(...)` →
   `deconvolve(...)` (Hogbom or ASP CLEAN in C++) updates the model image, with
   a mask from `make_mask`.
-- Accumulate per-plane stats into an `ImagingDict`; check convergence; iterate.
-- A closing residual update produces the last residual image.
+- After every residual update, the first included, the stop test (cycle
+  control) checks the residual that update has just made; a plane that
+  continues gets another model update. Per-plane stats accumulate into an
+  `ImagingDict`. The loop ends only at the stop test, so the last residual
+  update produces the written residual image.
 - When `restore=True` (off by default), a final `restore_image(...)` step
   (`processing_functions/imaging/restore.py`) convolves the model with the clean
   beam (the per-frequency Gaussian fit to the PSF, in the `residual` data group)

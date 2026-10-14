@@ -587,9 +587,13 @@ def image_cube_single_field(
         residual updates while the others carry on. **Cycle control** is the
         stop test between the residual update and the model update, which
         decides whether a plane gets another cycle and sets the limits of its
-        next model update; **iteration control** is the stop test inside the
-        model update, made by the deconvolver at every iteration against
-        those limits. The CASA ``tclean`` equivalent is given in brackets.
+        next model update. It is made after every residual update, the first
+        included, on the residual that update has just made, never on the
+        residual a model update ends with, and the residual and restored
+        images written are those of the last residual update. **Iteration
+        control** is the stop test inside the model update, made by the
+        deconvolver at every iteration against those limits. The CASA
+        ``tclean`` equivalent is given in brackets.
         Keys:
 
         - ``max_iter`` [CASA ``niter``] : Maximum number of deconvolution
@@ -599,11 +603,12 @@ def image_cube_single_field(
           ``niter`` is one budget for the whole image; here every plane gets
           the full value, and no budget is shared or split between planes.
         - ``max_cycles`` [CASA ``nmajor``] : Maximum number of cycles.
-          ``max_cycles = N`` performs ``N`` model updates; the dirty image is
-          made by the residual update of the first cycle, and a closing
-          residual update follows the last model update so that the written
-          residual reflects the final model. ``max_cycles = 0`` makes only the
-          dirty image; ``max_cycles = -1`` removes the limit. Counted per
+          ``max_cycles = N`` performs at most ``N`` model updates and
+          ``N + 1`` residual updates: the first makes the dirty image, and
+          every model update is followed by a residual update, whose residual
+          the stop test checks; the last one's residual is written.
+          ``max_cycles = 0`` makes only the dirty image; ``max_cycles = -1``
+          removes the limit. Counted per
           frequency channel: a channel that converges early stops cycling while
           the others continue. ``max_cycles = "auto"`` predicts the limit of a
           channel from its dirty image: every plane takes ``P0``, its peak
@@ -635,9 +640,9 @@ def image_cube_single_field(
           data scale with their fluxes). The distributed application and the
           node task also take a nested list of shape (n_frequency,
           n_polarization), one row per image channel in the order of the image
-          frequency coordinate; each channel gets its row. A plane stops when its
-          peak residual
-          inside the clean mask falls to or below its threshold; the value is
+          frequency coordinate; each channel gets its row. A plane stops when the
+          peak of its residual inside the clean mask, as the latest residual
+          update made it, falls to or below its threshold; the value is
           also a hard floor on ``threshold_per_cycle``. ``0`` disables the
           absolute stop. *Differs from CASA*: floats in Jy only, no ``'1mJy'``
           strings.
@@ -682,14 +687,16 @@ def image_cube_single_field(
           can raise the peak of a healthy residual, has no peak limit and
           allows ``(1 + gain)`` times the lowest RMS instead. An infinite peak
           always stops the model update. The next residual update then
-          recomputes the true residual and the cycles go on (see
-          ``max_cycles_divergence``). Default 1, the first such iteration;
-          ``-1`` disables the two limits.
+          recomputes the true residual, the stop test is made on it, and the
+          cycles go on (see ``max_cycles_divergence``). Default 1, the first
+          such iteration; ``-1`` disables the two limits.
         - ``max_cycles_divergence`` : Divergence stop of the cycle control. A
           plane whose last ``max_cycles_divergence`` model updates all ended
           diverged (see ``max_iter_divergence``) gets no more iterations and
-          stops with imaging stop code 5, while the other planes of its
-          channel carry on. Default ``-1``, off.
+          is stopped with imaging stop code 5 by the stop test after the next
+          residual update (code 2 if that residual is at or below its
+          threshold), while the other planes of its channel carry on.
+          Default ``-1``, off.
         - ``entropy_stop`` : If ``True``, a plane stops once the entropy of
           its residual has passed its maximum. The entropy (Homan, Roth and
           Pushkarev 2024, AJ 167, 11) measures how much the residual looks
@@ -725,8 +732,8 @@ def image_cube_single_field(
           No CASA equivalent.
 
         A plane whose model updates do no iteration any more (two in a row)
-        is stopped with the no progress stop code, so an all-zero plane cannot
-        keep its channel cycling.
+        is stopped with the no progress stop code at the next stop test, so
+        an all-zero plane cannot keep its channel cycling.
 
         Derived per plane before each model update (not set by the caller):
         ``psf_fraction = clamp(max_psf_sidelobe * psf_sidelobe_factor,
@@ -734,8 +741,9 @@ def image_cube_single_field(
         peak residual down to which one model update cleans, and
         ``threshold_per_cycle = max(psf_fraction * peak_residual, threshold)``
         is the stopping threshold of that model update, where
-        ``peak_residual`` is the plane's peak residual inside the mask at the
-        start of the cycle, and
+        ``peak_residual`` is the plane's peak residual inside the mask: that
+        of the dirty image for the first model update and, for a later one,
+        the peak the previous model update ended with, and
         ``max_iter_per_cycle_updated = min(max_iter_per_cycle,
         max_iter_remaining)`` is the iteration limit of that model update (0
         for a plane the entropy or divergence stop has ended), where

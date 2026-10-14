@@ -664,8 +664,8 @@ def check_recovery(recovery, convergence, summary, strict):
             np.asarray(plane.peakres, dtype=float)
         )  # recorded with its sign
         label = f"channel {plane.chan} Stokes {plane.stokes}"
-        assert plane.n_cycles >= 2, (
-            f"{label}: only {plane.n_cycles} residual update cycle(s)"
+        assert plane.n_cycles - 1 >= 2, (
+            f"{label}: only {plane.n_cycles - 1} imaging cycle(s)"
         )
         assert peakres[-1] < 0.1 * peakres[0], (
             f"{label}: peak residual did not fall: {peakres}"
@@ -1176,8 +1176,8 @@ def check_c8(result, noise):
         )
     else:
         assert (convergence.stop_code_imaging == IMAGING_THRESHOLD).all()
-        assert stokes_i.n_cycles <= result["predicted_cycles"] + 2, (
-            stokes_i.n_cycles,
+        assert stokes_i.n_cycles - 1 <= result["predicted_cycles"] + 2, (
+            stokes_i.n_cycles - 1,
             result["predicted_cycles"],
         )
         oracle, run = result["oracle"], result["run"]

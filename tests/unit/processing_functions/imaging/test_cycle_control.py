@@ -2504,6 +2504,107 @@ class TestModelUpdateStopCode(unittest.TestCase):
         self.assertEqual(controller.get_state()["max_cycles_divergence"], 1)
 
 
+class TestRecordModelUpdate(unittest.TestCase):
+    """``record_model_update`` books a model update for the stop test after
+    the next residual update and decides nothing; ``check_convergence`` with
+    ``model_update_ran=True`` is that booking followed by the stop test."""
+
+    _model_update = staticmethod(TestNoProgressStop._model_update)
+
+    @staticmethod
+    def _controller():
+        return CycleController(
+            max_iter=100, max_cycles=-1, threshold=0.0, max_cycles_divergence=2
+        )
+
+    def test_books_without_deciding(self):
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            IMAGING_DIVERGENCE,
+            IMAGING_NO_PROGRESS,
+            MODEL_UPDATE_DIVERGENCE,
+        )
+
+        diverged = StopCode(IMAGING_CONTINUE, MODEL_UPDATE_DIVERGENCE)
+        controller = self._controller()
+        for _ in range(2):
+            rd = self._model_update(iter_done=(10, 0), stop_codes=(diverged, None))
+            controller.update_counts(rd)
+            controller.record_model_update(rd)
+        self.assertEqual(controller.zero_iter_model_updates[0, 0].tolist(), [0, 2])
+        self.assertEqual(
+            controller.stop_code_model_update[0, 0].tolist(),
+            [MODEL_UPDATE_DIVERGENCE, MODEL_UPDATE_CONTINUE],
+        )
+        self.assertEqual(controller.divergence_stopped[0, 0].tolist(), [True, False])
+        self.assertEqual(controller.stop_code_imaging[0, 0].tolist(), [0, 0])
+        self.assertEqual(controller.stopcode, StopCode(0, MODEL_UPDATE_CONTINUE))
+        self.assertEqual(list(rd.data.values())[0]["stop_code"], diverged)
+        # the stop test on the residual of the next residual update decides
+        stopcode, _ = controller.check_convergence(self._model_update((0, 0)))
+        self.assertEqual(
+            controller.stop_code_imaging[0, 0].tolist(),
+            [IMAGING_DIVERGENCE, IMAGING_NO_PROGRESS],
+        )
+        self.assertEqual(stopcode.imaging, IMAGING_DIVERGENCE)
+
+    def test_a_check_after_a_model_update_books_then_tests(self):
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            IMAGING_DIVERGENCE,
+            IMAGING_NO_PROGRESS,
+            MODEL_UPDATE_DIVERGENCE,
+            MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+            MODEL_UPDATE_THRESHOLD_PER_CYCLE,
+        )
+
+        div, mic, tpc = (
+            MODEL_UPDATE_DIVERGENCE,
+            MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+            MODEL_UPDATE_THRESHOLD_PER_CYCLE,
+        )
+        cont = MODEL_UPDATE_CONTINUE
+        nop, dvg = IMAGING_NO_PROGRESS, IMAGING_DIVERGENCE
+        # (iter_done, reported codes) -> after booking and testing, per plane:
+        # max_iter_remaining, zero_iter_model_updates, stop_code_model_update,
+        # diverged_model_updates, divergence_stopped, stop_code_imaging
+        sequence = (
+            ((10, 0), (div, cont), ([90, 100], [0, 1], [div, cont], [1, 0], 0, [0, 0])),
+            (
+                (0, 0),
+                (mic, cont),
+                ([90, 100], [1, 2], [mic, cont], [0, 0], 0, [0, nop]),
+            ),
+            ((10, 0), (div, tpc), ([80, 100], [0, 3], [div, tpc], [1, 0], 0, [0, nop])),
+            (
+                (5, 0),
+                (div, cont),
+                ([75, 100], [0, 4], [div, tpc], [2, 0], 1, [dvg, nop]),
+            ),
+        )
+        controller = self._controller()
+        for iter_done, codes, expected in sequence:
+            stop_codes = tuple(StopCode(IMAGING_CONTINUE, code) for code in codes)
+            rd = self._model_update(iter_done, stop_codes=stop_codes)
+            controller.update_counts(rd)
+            stopcode, _ = controller.check_convergence(rd, model_update_ran=True)
+            remaining, zero_iter, mu_code, diverged, stopped, imaging = expected
+            self.assertEqual(controller.max_iter_remaining[0, 0].tolist(), remaining)
+            self.assertEqual(
+                controller.zero_iter_model_updates[0, 0].tolist(), zero_iter
+            )
+            self.assertEqual(controller.stop_code_model_update[0, 0].tolist(), mu_code)
+            self.assertEqual(controller.diverged_model_updates[0, 0].tolist(), diverged)
+            self.assertEqual(
+                controller.divergence_stopped[0, 0].tolist(), [bool(stopped), False]
+            )
+            self.assertEqual(controller.stop_code_imaging[0, 0].tolist(), imaging)
+            self.assertEqual(
+                [fields["stop_code"] for fields in rd.data.values()],
+                [StopCode(i, m) for i, m in zip(imaging, mu_code, strict=True)],
+            )
+        # every plane has stopped, for different reasons: the largest code
+        self.assertEqual(stopcode.imaging, dvg)
+
+
 class TestPerPlaneStateGrowth(unittest.TestCase):
     def test_arrays_grow_when_a_larger_plane_index_appears(self):
         from astroviper.processing_functions.imaging.utils.cycle_control import (

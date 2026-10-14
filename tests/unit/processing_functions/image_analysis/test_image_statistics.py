@@ -158,6 +158,12 @@ def test_peak_is_searched_inside_the_mask():
     entropy, snr = image_residual_entropy(_img_xds(plane), "residual")
     assert snr.item() == pytest.approx(30.0 / rms)
     assert np.isnan(entropy.item())
+    # a mask given as an argument takes the place of the data group's
+    given = np.broadcast_to(mask, (1, 1, 1, 128, 128))
+    masked = image_residual_entropy(_img_xds(plane, mask), "residual")
+    for img_xds in (_img_xds(plane), _img_xds(plane, ~mask)):
+        got = image_residual_entropy(img_xds, "residual", mask=given)
+        np.testing.assert_array_equal(got, masked)
 
 
 def test_histogram_stays_small_for_any_limit():

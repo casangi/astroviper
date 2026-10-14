@@ -154,10 +154,18 @@ def imaging_dict_to_dataframe(imaging_dict):
         columns (a ``StopCode`` namedtuple becomes ``stop_code_imaging`` /
         ``stop_code_model_update``); per-cycle history lists (``iter_done``,
         ``peakres``, ...) are kept as list-valued columns AND summarized into
-        the derived columns ``n_cycles``, ``iter_total`` (total CLEAN
-        iterations over all cycles -- 0 means the plane was never
-        deconvolved), ``peakres_start`` / ``peakres_final`` and
-        ``model_flux_final``. The iteration history
+        the derived columns ``n_cycles`` (the entries of ``iter_done``; for
+        the record of the imaging cycle loop the model updates plus the
+        closing stop test, i.e. the residual updates), ``iter_total`` (total
+        CLEAN iterations over all cycles -- 0 means the plane was never
+        deconvolved), ``peakres_start`` / ``peakres_final`` (for that record
+        the absolute peak of the written residual inside the clean mask, 0
+        for an empty mask; the entries of the model updates hold the signed
+        value at the absolute peak, not a number for an empty mask) and
+        ``model_flux_final``. The fields only a model update reports
+        (``start_peakres``, ``start_model_flux``, ``model_flux``, ...) have
+        one entry per model update, one fewer than ``iter_done`` and
+        ``peakres`` in that record. The iteration history
         (``iteration_peak_residual``, ``iteration_residual_rms``; only with
         ``record_iteration_history``) is a list of one 1-D array per cycle,
         which feather stores as a list of lists. Empty for an empty dict

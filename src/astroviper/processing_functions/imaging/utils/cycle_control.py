@@ -7,10 +7,11 @@ imager_return_dict.py. It has been streamlined to work with AstroViper's
 ImagingDict structure while retaining all original functionality.
 
 Cycle control is the stop test between the residual update and the model
-update: it decides whether a plane gets another imaging cycle and sets the
-limits of its next model update. Iteration control is the stop test inside
-the model update, made by the deconvolver at every iteration against those
-limits (``max_iter_per_cycle_updated``, ``threshold_per_cycle``).
+update, made on the residual the residual update has just made: it decides
+whether a plane gets another imaging cycle and sets the limits of its next
+model update. Iteration control is the stop test inside the model update,
+made by the deconvolver at every iteration against those limits
+(``max_iter_per_cycle_updated``, ``threshold_per_cycle``).
 
 Per-plane cycle control
 ----------------------------
@@ -1217,8 +1218,9 @@ class CycleController:
         the statistics of the residual of the first residual update, the
         dirty image (:func:`build_residual_imaging_dict`). For every plane:
 
-        - ``P0`` is its peak residual (``peakres``), the peak its first model
-          update starts from and sets its ``threshold_per_cycle`` from;
+        - ``P0`` is its peak residual inside the clean mask (``peakres``), the
+          peak its first model update starts from and sets its
+          ``threshold_per_cycle`` from;
         - ``f`` is its PSF fraction, ``clamp(max_psf_sidelobe *
           psf_sidelobe_factor, min_psf_fraction, max_psf_fraction)``;
         - ``L`` is its threshold if that is above 0, else its theoretical
@@ -1333,7 +1335,13 @@ class CycleController:
         model_update_ran: bool = False,
     ) -> tuple[StopCode, str]:
         """
-        Cycle control: check whether every plane gets another imaging cycle.
+        Cycle control: the stop test on the residual of a residual update.
+
+        The imaging cycle loop makes it after every residual update, the
+        first included, on :func:`build_residual_imaging_dict` of the
+        residual that update has just made, and a plane that continues gets
+        another model update; the residual a model update ends with decides
+        nothing (:meth:`record_model_update` books the model update).
 
         This implements CASA's convergence checking from imager_return_dict.py:463-565.
 
@@ -1345,7 +1353,9 @@ class CycleController:
         --------------------------------------------------------
         1. Zero mask (stopcode 7): No valid pixels to clean
         2. Iteration limit (stopcode 1): max_iter_remaining <= 0
-        3. Threshold reached (stopcode 2): peak_residual <= threshold
+        3. Threshold reached (stopcode 2): peak_residual <= threshold, the
+           ``peakres`` of the entry (the peak of the residual inside the
+           clean mask)
         4. Residual entropy (stopcode 10), only with ``entropy_stop``: the
            entropy of the plane's residual (``entropy`` in the ImagingDict,
            see :func:`build_residual_imaging_dict`) is lower than the highest
@@ -1381,12 +1391,13 @@ class CycleController:
           the ``stop_code`` placeholder of the ImagingDict entry (1
           ``MODEL_UPDATE_MAX_ITER_PER_CYCLE``, 2
           ``MODEL_UPDATE_THRESHOLD_PER_CYCLE``, 4 ``MODEL_UPDATE_DIVERGENCE``,
-          5 ``MODEL_UPDATE_ALGORITHM``, 0 did not run). It becomes the plane's
-          model update stop code and is kept until a later model update runs
-          for the plane: a check on the residual alone, or a model update
-          that gave the plane no iterations, leaves it as it is. A diverged
-          model update does not end the plane's imaging cycles by itself: the
-          next residual update recomputes the true residual.
+          5 ``MODEL_UPDATE_ALGORITHM``, 0 did not run).
+          :meth:`record_model_update` makes it the plane's model update stop
+          code, kept until a later model update runs for the plane: a check
+          on the residual alone, or a model update that gave the plane no
+          iterations, leaves it as it is. No model update stop code ends the
+          plane's imaging cycles by itself: the next residual update
+          recomputes the true residual and the stop test is made on it.
 
         Parameters:
         -----------
@@ -1404,11 +1415,11 @@ class CycleController:
         chan : int, optional
             Filter by specific channel index
         model_update_ran : bool, optional
-            ``True`` when ``imaging_dict`` is the result of a model update that
-            ran in this imaging cycle; its ``iter_done`` then feeds the no
-            progress stop. ``False`` (default) for a check on the residual
-            alone, where no model update has run; the entropy stop is decided
-            on such a check.
+            ``True`` when ``imaging_dict`` is the result of a model update:
+            it is booked first (:meth:`record_model_update`) and then tested.
+            The imaging cycle loop does not use this. ``False`` (default) for
+            the stop test on the residual of a residual update; the entropy
+            stop is decided on such a test.
 
         Returns:
         --------
@@ -1441,8 +1452,8 @@ class CycleController:
         Example:
         --------
         >>> controller = CycleController(max_iter=100, threshold=0.01)
-        >>> # After running deconvolution...
-        >>> stopcode, desc = controller.check_convergence(imaging_dict)
+        >>> # After a residual update...
+        >>> stopcode, desc = controller.check_convergence(residual_imaging_dict)
         >>> if stopcode.imaging != 0:
         >>>     print(f"Converged: {desc}")
         >>> # Check both the imaging and the model update stop code
@@ -1451,6 +1462,8 @@ class CycleController:
         """
         self._ensure_state(imaging_dict)
         self._require_resolved_max_cycles()
+        if model_update_ran:
+            self.record_model_update(imaging_dict, time=time, pol=pol, chan=chan)
 
         # Evaluate every selected plane independently and record its own stop
         # code. The aggregate returned to the caller is CONTINUE while any
@@ -1465,44 +1478,12 @@ class CycleController:
             remaining = int(self.max_iter_remaining[idx])
             threshold = self._plane_threshold(idx[2])
 
-            # Consecutive model updates of this plane that did no iteration.
-            if model_update_ran:
-                if int(self._latest(fields, "iter_done", 0)) == 0:
-                    self.zero_iter_model_updates[idx] += 1
-                else:
-                    self.zero_iter_model_updates[idx] = 0
-
             # Entropy of the fresh residual of this plane against the highest
             # entropy of its earlier imaging cycles.
             if self.entropy_stop and not model_update_ran:
                 self._follow_entropy(idx, fields)
 
-            # The deconvolver reports why the model update ended through the
-            # stop_code placeholder of the entry; it stays the plane's model
-            # update stop code until a later model update runs for the plane
-            # (a plane given no iterations reports MODEL_UPDATE_CONTINUE).
-            placeholder = fields.get("stop_code", None)
-            reported = (
-                int(placeholder.model_update)
-                if isinstance(placeholder, StopCode)
-                else MODEL_UPDATE_CONTINUE
-            )
-            if reported != MODEL_UPDATE_CONTINUE:
-                self.stop_code_model_update[idx] = reported
             model_update_code = int(self.stop_code_model_update[idx])
-
-            # Consecutive model updates of this plane that ended diverged; a
-            # model update that did not run for the plane changes nothing.
-            if model_update_ran and reported != MODEL_UPDATE_CONTINUE:
-                if reported == MODEL_UPDATE_DIVERGENCE:
-                    self.diverged_model_updates[idx] += 1
-                else:
-                    self.diverged_model_updates[idx] = 0
-                if (
-                    self.max_cycles_divergence > 0
-                    and self.diverged_model_updates[idx] >= self.max_cycles_divergence
-                ):
-                    self.divergence_stopped[idx] = True
 
             # Imaging cycle stopping criteria, in priority order (per plane):
             #   1 zero mask, 2 iteration limit, 3 threshold, 4 residual entropy,
@@ -1556,6 +1537,59 @@ class CycleController:
             imaging=agg_imaging, model_update=MODEL_UPDATE_CONTINUE
         )
         return self.stopcode, self.stopdescription
+
+    def record_model_update(
+        self,
+        imaging_dict: ImagingDict,
+        time: int | None = None,
+        pol: int | None = None,
+        chan: int | None = None,
+    ) -> None:
+        """Book one model update for the stop test after the next residual update.
+
+        For every selected plane: the run of model updates without an
+        iteration (no progress stop), the model update stop code the
+        deconvolver reported in the ``stop_code`` placeholder of the entry,
+        and the run of diverged model updates (divergence stop). A plane given
+        no iterations reports ``MODEL_UPDATE_CONTINUE`` and keeps its code and
+        its run of diverged model updates. Nothing is decided here and
+        ``stopcode`` is left as it is: :meth:`check_convergence` decides on
+        the residual the next residual update recomputes.
+
+        Parameters
+        ----------
+        imaging_dict : ImagingDict
+            Result of the model update (``iter_done`` and ``stop_code``).
+        time, pol, chan : int, optional
+            Restrict the booking to a selection (otherwise all planes).
+        """
+        self._ensure_state(imaging_dict)
+        for key, fields in imaging_dict.data.items():
+            if not self._matches(key, time, pol, chan):
+                continue
+            idx = self._key_index(key)
+            if int(self._latest(fields, "iter_done", 0)) == 0:
+                self.zero_iter_model_updates[idx] += 1
+            else:
+                self.zero_iter_model_updates[idx] = 0
+            placeholder = fields.get("stop_code", None)
+            reported = (
+                int(placeholder.model_update)
+                if isinstance(placeholder, StopCode)
+                else MODEL_UPDATE_CONTINUE
+            )
+            if reported == MODEL_UPDATE_CONTINUE:
+                continue
+            self.stop_code_model_update[idx] = reported
+            if reported == MODEL_UPDATE_DIVERGENCE:
+                self.diverged_model_updates[idx] += 1
+            else:
+                self.diverged_model_updates[idx] = 0
+            if (
+                self.max_cycles_divergence > 0
+                and self.diverged_model_updates[idx] >= self.max_cycles_divergence
+            ):
+                self.divergence_stopped[idx] = True
 
     def _follow_entropy(self, idx, fields):
         """Entropy stop of one plane, from the residual of a residual update.
@@ -2198,8 +2232,10 @@ def format_imaging_dict(combined_imaging_dict, float_format="{:.6g}"):
     ...). The default ``repr`` dumps each plane on one very long line, which is
     hard to read. This formatter groups each plane, separates scalar parameters
     from the per-cycle history, and lays the history out as an aligned table
-    with one column per imaging cycle. Numpy scalars (``np.float64``, ``np.str_``)
-    are unwrapped so they print as plain values; an array in the history (the
+    with one column per imaging cycle (the record of the imaging cycle loop
+    ends with a column ``stop``, its closing stop test). Numpy scalars
+    (``np.float64``, ``np.str_``) are unwrapped so they print as plain
+    values; an array in the history (the
     iteration history of a model update, ``record_iteration_history``) prints
     as the number of its values.
 
@@ -2262,13 +2298,17 @@ def format_imaging_dict(combined_imaging_dict, float_format="{:.6g}"):
             for f, v in scalar_items:
                 lines.append(f"  {f:<{label_w}} : {fmt(v)}")
 
-        # Per-cycle history table (one column per imaging cycle).
+        # Per-cycle history table (one column per imaging cycle). The record of
+        # the imaging cycle loop ends with the closing stop test, which has no
+        # model update fields (start_peakres).
         if history:
             n_cycles = max(len(v) for v in history.values())
             label_w = max([len(f) for f in history] + [len("cycle")])
             # Format every cell, then right-justify to a uniform width.
             formatted = {f: [fmt(x) for x in v] for f, v in history.items()}
-            cycle_labels = [str(i) for i in range(n_cycles)]
+            closing = int(0 < len(history.get("start_peakres", [])) == n_cycles - 1)
+            n_model_updates = n_cycles - closing
+            cycle_labels = [str(i) for i in range(n_model_updates)] + ["stop"] * closing
             cell_w = max(
                 [len(c) for cells in formatted.values() for c in cells]
                 + [len(c) for c in cycle_labels]
@@ -2278,8 +2318,9 @@ def format_imaging_dict(combined_imaging_dict, float_format="{:.6g}"):
                 padded = " ".join(f"{c:>{cell_w}}" for c in cells)
                 return f"  {label:<{label_w}} : {padded}"
 
-            plural = "s" if n_cycles != 1 else ""
-            lines.append(f"Per-cycle history ({n_cycles} cycle{plural}):")
+            plural = "s" if n_model_updates != 1 else ""
+            stop = " and the closing stop test" if closing else ""
+            lines.append(f"Per-cycle history ({n_model_updates} cycle{plural}{stop}):")
             lines.append(row("cycle", cycle_labels))
             for f, cells in formatted.items():
                 lines.append(row(f, cells))
@@ -2293,14 +2334,52 @@ def print_imaging_dict(combined_imaging_dict, float_format="{:.6g}"):
     print(format_imaging_dict(combined_imaging_dict, float_format=float_format))
 
 
+def _clean_mask(img_xds, image_data_group_in_name, primary_beam_limit):
+    """The clean mask of a residual data group as a bool cube, or ``None``.
+
+    The mask of the data group or, before the first model update has made
+    it, the mask that model update makes
+    (:func:`~astroviper.processing_functions.image_analysis.make_mask.make_mask`
+    with ``primary_beam_limit``), made on a dataset of its own so that
+    ``img_xds`` and its data groups are left as they are. ``None`` when the
+    data group has neither a mask nor a primary beam.
+    """
+    data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
+    mask_name = data_group.get("mask", None)
+    if mask_name is not None and mask_name in img_xds:
+        return img_xds[mask_name].values.astype(bool, copy=False)
+    primary_beam_name = data_group.get("primary_beam", None)
+    if primary_beam_name is None or primary_beam_name not in img_xds:
+        return None
+    import xarray as xr
+
+    from astroviper.processing_functions.image_analysis.make_mask import make_mask
+
+    probe = xr.Dataset(
+        {primary_beam_name: img_xds[primary_beam_name]},
+        attrs={"data_groups": {"residual": {"primary_beam": primary_beam_name}}},
+    )
+    make_mask(
+        probe,
+        primary_beam_limit=primary_beam_limit,
+        image_data_group_in_name="residual",
+        image_data_group_out_name="residual",
+    )
+    return probe["MASK"].values.astype(bool, copy=False)
+
+
 def build_residual_imaging_dict(
     img_xds, image_data_group_in_name, cycle_control_params
 ):
     """Seed a per-plane :class:`ImagingDict` of peak-residual/masksum stats
     straight from the current residual image, no deconvolution involved.
 
-    Used both for a pre-deconvolve convergence check and, on the first model
-    update, as the seed for :func:`calculate_per_cycle_limits`.
+    The record of the stop test after every residual update
+    (:meth:`CycleController.check_convergence`) and, on the first model
+    update, the seed for :func:`calculate_per_cycle_limits`. The clean mask is
+    the mask of the data group or, before the first model update has made it,
+    the mask that model update makes (``primary_beam_limit``); ``img_xds`` is
+    not modified. Without a mask and a primary beam every pixel counts.
 
     Parameters
     ----------
@@ -2311,17 +2390,21 @@ def build_residual_imaging_dict(
         ``"sky"`` key resolves to the residual variable.
     cycle_control_params : dict
         Cycle control parameters; ``gain`` seeds the placeholder
-        per-plane field. With ``entropy_stop`` the entropy of the residual is
-        worked out as well (``entropy_max_snr``, ``entropy_spatial_bins``,
-        ``entropy_flux_bins``).
+        per-plane field and ``primary_beam_limit`` (default 0) gives the
+        clean mask before the first model update. With ``entropy_stop`` the
+        entropy of the residual is worked out as well (``entropy_max_snr``,
+        ``entropy_spatial_bins``, ``entropy_flux_bins``).
 
     Returns
     -------
     ImagingDict
-        Per-plane ``peakres``/``peakres_nomask``/``masksum``/``iter_done``
-        stats, indexed ``(time, chan, pol)``. With ``entropy_stop`` also
-        ``entropy`` and ``residual_snr``, the entropy of the residual and the
-        ratio of its peak to its RMS
+        Per-plane ``peakres`` (the absolute peak of the residual inside the
+        clean mask, 0 for an empty mask), ``peakres_nomask`` (that of the
+        whole plane), ``masksum`` (the pixels of the clean mask) and
+        ``iter_done`` (0), indexed ``(time, chan, pol)``. With ``entropy_stop``
+        also ``entropy`` and ``residual_snr``, the entropy of the whole plane
+        and the ratio of the peak inside the same clean mask to the RMS of
+        the plane
         (:func:`~astroviper.processing_functions.image_analysis.image_statistics.image_residual_entropy`).
         With ``record_iteration_history`` also an empty
         ``iteration_peak_residual`` and ``iteration_residual_rms`` (no
@@ -2335,14 +2418,25 @@ def build_residual_imaging_dict(
         "record_iteration_history", False
     )
     residual_data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
+    residual = img_xds[residual_data_group["sky"]].values
     # plane by plane and block by block: no copy of the residual cube
-    plane_peak = imgstats.cube_plane_abs_max(
-        img_xds[residual_data_group["sky"]].values
-    )  # (ntime, nfreq, npol)
-    ntime, nfreq, npol = plane_peak.shape
-    masksum = imgstats.get_image_masksum(
-        img_xds, data_group_name=image_data_group_in_name
+    plane_peak_nomask = imgstats.cube_plane_abs_max(residual)  # (ntime, nfreq, npol)
+    ntime, nfreq, npol = plane_peak_nomask.shape
+    mask = _clean_mask(
+        img_xds,
+        image_data_group_in_name,
+        cycle_control_params.get("primary_beam_limit", 0.0),
     )
+    if mask is None:
+        plane_peak = plane_peak_nomask
+        masksum = imgstats.get_image_masksum(
+            img_xds, data_group_name=image_data_group_in_name
+        )
+    else:
+        plane_peak = np.empty_like(plane_peak_nomask)
+        for index in np.ndindex(plane_peak.shape):
+            plane_peak[index] = imgstats.plane_abs_max(residual[index], mask[index])
+        masksum = mask.sum(axis=(-2, -1))
     max_psf_sidelobe_arr = img_xds[
         residual_data_group["max_sidelobe_point_spread_function"]
     ].values  # (ntime, nfreq, npol)
@@ -2353,15 +2447,15 @@ def build_residual_imaging_dict(
             spatial_bins=entropy_spatial_bins,
             flux_bins=entropy_flux_bins,
             max_snr=entropy_max_snr,
+            mask=mask,
         )
     rd = ImagingDict()
     for tt in range(ntime):
         for nn in range(nfreq):
             for pp in range(npol):
-                peak = float(plane_peak[tt, nn, pp])
                 fields = {
-                    "peakres": peak,
-                    "peakres_nomask": peak,
+                    "peakres": float(plane_peak[tt, nn, pp]),
+                    "peakres_nomask": float(plane_peak_nomask[tt, nn, pp]),
                     "masksum": int(masksum[tt, nn, pp]),
                     "iter_done": 0,
                     "max_psf_sidelobe": float(max_psf_sidelobe_arr[tt, nn, pp]),
@@ -2417,10 +2511,12 @@ def get_per_cycle_limits(
 
     Before the first model update (``model_exists`` is ``False``) the controls
     are derived from the freshly made dirty image (each plane's own peak
-    residual); afterwards they are derived from the accumulated convergence
-    statistics in ``combined_imaging_dict``.  Both arrays are built per
-    ``(time, frequency, polarization)`` plane from that plane's own state, so
-    the result is independent of how the cube was chunked across tasks.
+    residual inside the clean mask); afterwards they are derived from the
+    accumulated convergence statistics in ``combined_imaging_dict`` (each
+    plane's peak at the end of the previous model update).  Both arrays are
+    built per ``(time, frequency, polarization)`` plane from that plane's own
+    state, so the result is independent of how the cube was chunked across
+    tasks.
 
     Parameters
     ----------
@@ -2538,34 +2634,20 @@ def resolve_auto_max_cycles(
     """
     if not _is_auto_max_cycles(controller.max_cycles):
         return controller.max_cycles
-    import xarray as xr
-
-    from astroviper.processing_functions.image_analysis.make_mask import make_mask
     from astroviper.processing_functions.imaging.weight_statistics import (
         calculate_weight_statistics_single_field,
     )
 
-    data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
-    mask_name = data_group.get("mask", None)
-    if mask_name is not None and mask_name in img_xds:
-        mask = img_xds[mask_name].values
-    else:
-        # The mask the first model update will make, made on a dataset of its
-        # own so that img_xds and its data groups are left as they are.
-        primary_beam_name = data_group["primary_beam"]
-        probe = xr.Dataset(
-            {primary_beam_name: img_xds[primary_beam_name]},
-            attrs={"data_groups": {"residual": {"primary_beam": primary_beam_name}}},
-        )
-        make_mask(
-            probe,
-            primary_beam_limit=cycle_control_params.get("primary_beam_limit", 0.0),
-            image_data_group_in_name="residual",
-            image_data_group_out_name="residual",
-        )
-        mask = probe["MASK"].values
-    mask = mask.astype(bool, copy=False)
-    mask_pixels = mask.sum(axis=(-2, -1))
+    mask = _clean_mask(
+        img_xds,
+        image_data_group_in_name,
+        cycle_control_params.get("primary_beam_limit", 0.0),
+    )
+    mask_pixels = (
+        imgstats.get_image_masksum(img_xds, data_group_name=image_data_group_in_name)
+        if mask is None
+        else mask.sum(axis=(-2, -1))
+    )
     # The weights are read only for a plane whose level is its sensitivity
     # (threshold not above 0, as in resolve_max_cycles) and that has a clean
     # mask. Planes are (time, chan, pol), the order of the controller's
