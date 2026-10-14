@@ -85,8 +85,9 @@ TRUTH_IMAGE_MULTI_CYCLE_SINGLE = (
 _TRUTH_IMAGE_DRIVE_IDS = {
     # v6, regenerated 2026-10-14 for the stop test on the fresh residual
     # (issue 290): every threshold_per_cycle is based on the peak residual
-    # inside the clean mask at the start of its imaging cycle, which changes
-    # the CLEAN of multi_cycle (niter0 and niter100 hold the same data as v5).
+    # inside the clean mask after the residual update of its imaging cycle,
+    # which changes the CLEAN of multi_cycle (niter0 and niter100 hold the
+    # same data as v5).
     # v5, regenerated 2026-10-13 for the shared beam model (issue 290): the
     # primary beam is now the textbook obscured Airy disk instead of CASA's
     # PBMath1DAiry formula, whose blockage term widens the beam, so the

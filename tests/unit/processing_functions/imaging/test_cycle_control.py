@@ -2439,7 +2439,7 @@ class TestModelUpdateStopCode(unittest.TestCase):
         # the plane gets no more iterations ...
         for fields in rd.data.values():
             fields["max_psf_sidelobe"] = 0.2
-        limits, _ = get_per_cycle_limits(controller, rd, None, True, {"gain": 0.1})
+        limits, _ = get_per_cycle_limits(controller, rd)
         self.assertEqual(limits[0, 0].tolist(), [0, 980])
         # ... and the stop is final
         self._run(
@@ -2852,9 +2852,7 @@ class TestEntropyStop(unittest.TestCase):
         _, _, update = self._cycle(controller, (7.4, 7.5))
         for fields in update.data.values():
             fields["max_psf_sidelobe"] = 0.2
-        max_iter_per_cycle_updated, _ = get_per_cycle_limits(
-            controller, update, None, True, {"gain": 0.1}
-        )
+        max_iter_per_cycle_updated, _ = get_per_cycle_limits(controller, update)
         self.assertEqual(max_iter_per_cycle_updated[0, 0].tolist(), [0, 200])
         # the budget of the controller is not touched
         self.assertEqual(controller.max_iter_remaining[0, 0].tolist(), [950, 900])

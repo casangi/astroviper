@@ -48,6 +48,7 @@ from astroviper.processing_functions.imaging.utils.imaging_dict import (
     ITERATION_HISTORY_FIELDS,
     ImagingDict,
     Key,
+    imaging_dict_to_dataframe,
 )
 
 
@@ -867,11 +868,14 @@ class TestTheStopTestIsOnTheFreshResidual:
         stokes_i = record.data[STOKES_I]
         assert len(stokes_i["iter_done"]) == n_mu + 1
         assert stokes_i["iter_done"][-1] == 0
+        assert (imaging_dict_to_dataframe(record).n_cycles == n_mu).all()
         assert stokes_i["stop_code"].imaging == code
         # the stop test is timed on its own, outside the model update
         assert timing["T_stop_test"].iloc[0] > 0
-        assert ("and the closing stop test" in format_imaging_dict(record)) == (
-            n_mu > 0
+        plural = "s" if n_mu != 1 else ""
+        assert (
+            f"Per-cycle history ({n_mu} cycle{plural} and the closing stop test)"
+            in format_imaging_dict(record)
         )
         if n_model_updates is not None:
             assert n_mu == n_model_updates
@@ -963,6 +967,28 @@ class TestTheRecordOfTheStopTest:
         assert record.data[STOKES_Q]["masksum"] == [0]
         assert "MASK" not in xds
         assert xds.attrs["data_groups"] == data_groups
+
+    @pytest.mark.parametrize("primary_beam_limit", [0.0, 0.2])
+    def test_the_mask_is_the_one_make_mask_makes(self, primary_beam_limit):
+        from astroviper.processing_functions.image_analysis.make_mask import (
+            make_mask,
+        )
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            _clean_mask,
+        )
+
+        xds, _ = _dirty_dataset()
+        xds["PRIMARY_BEAM"].values[0, 0, 0, 0, :4] = (np.nan, 0.0, -0.5, 0.2)
+        mask = _clean_mask(xds, "residual", primary_beam_limit)
+        make_mask(
+            xds,
+            primary_beam_limit=primary_beam_limit,
+            image_data_group_in_name="residual",
+            image_data_group_out_name="residual",
+            overwrite=True,
+        )
+        assert mask.dtype == bool
+        np.testing.assert_array_equal(mask, xds["MASK"].values)
 
     def test_the_mask_of_the_residual_group(self):
         from astroviper.processing_functions.imaging.utils.cycle_control import (

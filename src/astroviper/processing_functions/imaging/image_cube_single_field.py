@@ -167,8 +167,10 @@ def imaging_preparation_single_field(
           plane whose last ``max_cycles_divergence`` model updates all ended
           diverged (see ``max_iter_divergence``) gets no more iterations and
           is stopped with imaging stop code 5 by the stop test after the next
-          residual update (code 2 if that residual is at or below its
-          threshold), while the other planes of its channel carry on.
+          residual update (unless a stop that takes precedence applies there:
+          an empty mask, ``max_iter`` spent, the threshold or the entropy
+          stop, codes 7, 1, 2 and 10), while the other planes of its channel
+          carry on.
           Default ``-1``, off.
         - ``entropy_stop`` : If ``True``, a plane stops once the entropy of
           its residual has passed its maximum. The entropy (Homan, Roth and
@@ -214,8 +216,9 @@ def imaging_preparation_single_field(
         peak residual down to which one model update cleans, and
         ``threshold_per_cycle = max(psf_fraction * peak_residual, threshold)``
         is the stopping threshold of that model update, where
-        ``peak_residual`` is the plane's peak residual inside the mask at the
-        start of the cycle, and
+        ``peak_residual`` is the plane's peak residual inside the clean mask
+        after the residual update of the same cycle (the peak of the stop
+        test), and
         ``max_iter_per_cycle_updated = min(max_iter_per_cycle,
         max_iter_remaining)`` is the iteration limit of that model update (0
         for a plane the entropy or divergence stop has ended), where
@@ -538,8 +541,10 @@ def image_cube_single_field(
           plane whose last ``max_cycles_divergence`` model updates all ended
           diverged (see ``max_iter_divergence``) gets no more iterations and
           is stopped with imaging stop code 5 by the stop test after the next
-          residual update (code 2 if that residual is at or below its
-          threshold), while the other planes of its channel carry on.
+          residual update (unless a stop that takes precedence applies there:
+          an empty mask, ``max_iter`` spent, the threshold or the entropy
+          stop, codes 7, 1, 2 and 10), while the other planes of its channel
+          carry on.
           Default ``-1``, off.
         - ``entropy_stop`` : If ``True``, a plane stops once the entropy of
           its residual has passed its maximum. The entropy (Homan, Roth and
@@ -585,8 +590,9 @@ def image_cube_single_field(
         peak residual down to which one model update cleans, and
         ``threshold_per_cycle = max(psf_fraction * peak_residual, threshold)``
         is the stopping threshold of that model update, where
-        ``peak_residual`` is the plane's peak residual inside the mask at the
-        start of the cycle, and
+        ``peak_residual`` is the plane's peak residual inside the clean mask
+        after the residual update of the same cycle (the peak of the stop
+        test), and
         ``max_iter_per_cycle_updated = min(max_iter_per_cycle,
         max_iter_remaining)`` is the iteration limit of that model update (0
         for a plane the entropy or divergence stop has ended), where
@@ -850,12 +856,7 @@ def image_cube_single_field(
                 img_xds.sizes["polarization"],
             )
             max_iter_per_cycle_updated, threshold_per_cycle = get_per_cycle_limits(
-                controller,
-                combined_imaging_dict,
-                img_xds,
-                model_exists,
-                cycle_control_params=cycle_control_params,
-                residual_imaging_dict=residual_imaging_dict,
+                controller, residual_imaging_dict
             )
             timing["T_cycle_control"] += time.time() - start
 

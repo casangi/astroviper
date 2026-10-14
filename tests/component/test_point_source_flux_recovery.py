@@ -71,13 +71,14 @@ support 7 with linear lookup in a table of 300 samples per cell) lies below
 a third of it. The floor is measured, not assumed: the residual one residual
 update leaves for the true model (the oracle). The controls come from
 ``alma_cycle_control_params`` (threshold 1.2 times the masked peak of the
-oracle); every plane must stop on the threshold within the predicted number
-of cycles plus two, with the residual and the error image at the oracle's
-floor and nothing of it absorbed into the model. With typical Band 10 noise
-the entropy stop must end the clean at the thermal noise. CI runs a 1000
-pixel probe of the same field (where the kernel, not the w term, sets the
-floor), with and without the w term and the noise; the full field runs with
-``ASTROVIPER_FULL_C8_TEST=1``.
+oracle); every plane must stop on the threshold, cleaning down to it within
+the predicted number of cycles plus two (a later model update starts within
+``PEAK_RESIDUAL_RISE`` of it), with the residual and the error image at the
+oracle's floor and nothing of it absorbed into the model. With typical Band
+10 noise the entropy stop must end the clean at the thermal noise. CI runs a
+1000 pixel probe of the same field (where the kernel, not the w term, sets
+the floor), with and without the w term and the noise; the full field runs
+with ``ASTROVIPER_FULL_C8_TEST=1``.
 
 The scenario builder and the analysis are plain functions so that
 ``dev/imaging/alma_point_source_recovery`` can rerun them and plot the result.
@@ -664,9 +665,7 @@ def check_recovery(recovery, convergence, summary, strict):
             np.asarray(plane.peakres, dtype=float)
         )  # recorded with its sign
         label = f"channel {plane.chan} Stokes {plane.stokes}"
-        assert plane.n_cycles - 1 >= 2, (
-            f"{label}: only {plane.n_cycles - 1} imaging cycle(s)"
-        )
+        assert plane.n_cycles >= 2, f"{label}: only {plane.n_cycles} imaging cycle(s)"
         assert peakres[-1] < 0.1 * peakres[0], (
             f"{label}: peak residual did not fall: {peakres}"
         )
@@ -852,9 +851,9 @@ def test_entropy_stop_with_thermal_noise(tmp_path):
     for _, plane in convergence.iterrows():
         entropy = np.asarray(plane.entropy, dtype=float)
         followed = entropy[np.isfinite(entropy)]
-        # one entropy per imaging cycle; the last one recorded for a cycle in
+        # one entropy per residual update; the last one recorded for a cycle in
         # which the plane cleaned lies below the highest one
-        assert len(entropy) == plane.n_cycles
+        assert len(entropy) == plane.n_cycles + 1
         assert followed.max() > followed[-1]
 
     img = load_image(image_store)
@@ -1176,9 +1175,21 @@ def check_c8(result, noise):
         )
     else:
         assert (convergence.stop_code_imaging == IMAGING_THRESHOLD).all()
-        assert stokes_i.n_cycles - 1 <= result["predicted_cycles"] + 2, (
-            stokes_i.n_cycles - 1,
+        # The model updates down to the first one that cleans to the threshold
+        # follow the cycle law; every later one starts from what the residual
+        # update, which the model update cannot see, leaves above the threshold.
+        threshold = result["controls"]["threshold"]
+        start = np.abs(np.asarray(stokes_i.start_peakres, dtype=float))
+        floored = np.flatnonzero(
+            psf_fraction(stokes_i.max_psf_sidelobe) * start <= threshold
+        )
+        descent = floored[0] + 1 if floored.size else start.size
+        assert descent <= result["predicted_cycles"] + 2, (
+            descent,
             result["predicted_cycles"],
+        )
+        assert (start[descent:] <= PEAK_RESIDUAL_RISE * threshold).all(), (
+            start / threshold
         )
         oracle, run = result["oracle"], result["run"]
         assert 0.8 <= run["rms"] / oracle["rms"] <= 1.3, (run["rms"], oracle["rms"])

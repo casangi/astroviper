@@ -47,6 +47,7 @@ from astroviper.processing_functions.imaging.utils.imaging_dict import (
     ITERATION_HISTORY_FIELDS,
     ImagingDict,
     Key,
+    ends_with_stop_test,
 )
 
 # Stop codes matching CASA's implementation
@@ -2304,7 +2305,11 @@ def format_imaging_dict(combined_imaging_dict, float_format="{:.6g}"):
             label_w = max([len(f) for f in history] + [len("cycle")])
             # Format every cell, then right-justify to a uniform width.
             formatted = {f: [fmt(x) for x in v] for f, v in history.items()}
-            closing = int(0 < len(history.get("start_peakres", [])) == n_cycles - 1)
+            closing = int(
+                ends_with_stop_test(
+                    history.get("iter_done", []), history.get("start_peakres", [])
+                )
+            )
             n_model_updates = n_cycles - closing
             cycle_labels = [str(i) for i in range(n_model_updates)] + ["stop"] * closing
             cell_w = max(
@@ -2338,9 +2343,10 @@ def _clean_mask(img_xds, image_data_group_in_name, primary_beam_limit):
     The mask of the data group or, before the first model update has made
     it, the mask that model update makes
     (:func:`~astroviper.processing_functions.image_analysis.make_mask.make_mask`
-    with ``primary_beam_limit``), made on a dataset of its own so that
-    ``img_xds`` and its data groups are left as they are. ``None`` when the
-    data group has neither a mask nor a primary beam.
+    with ``primary_beam_limit``: the nonzero primary beam at or above
+    ``primary_beam_limit`` times its peak over the cube), made without a
+    float copy of the primary beam and without touching ``img_xds``.
+    ``None`` when the data group has neither a mask nor a primary beam.
     """
     data_group = img_xds.attrs["data_groups"][image_data_group_in_name]
     mask_name = data_group.get("mask", None)
@@ -2349,21 +2355,10 @@ def _clean_mask(img_xds, image_data_group_in_name, primary_beam_limit):
     primary_beam_name = data_group.get("primary_beam", None)
     if primary_beam_name is None or primary_beam_name not in img_xds:
         return None
-    import xarray as xr
-
-    from astroviper.processing_functions.image_analysis.make_mask import make_mask
-
-    probe = xr.Dataset(
-        {primary_beam_name: img_xds[primary_beam_name]},
-        attrs={"data_groups": {"residual": {"primary_beam": primary_beam_name}}},
-    )
-    make_mask(
-        probe,
-        primary_beam_limit=primary_beam_limit,
-        image_data_group_in_name="residual",
-        image_data_group_out_name="residual",
-    )
-    return probe["MASK"].values.astype(bool, copy=False)
+    primary_beam = img_xds[primary_beam_name].values
+    mask = primary_beam >= primary_beam_limit * np.nanmax(primary_beam)
+    mask &= primary_beam != 0
+    return mask
 
 
 def build_residual_imaging_dict(
@@ -2373,11 +2368,12 @@ def build_residual_imaging_dict(
     straight from the current residual image, no deconvolution involved.
 
     The record of the stop test after every residual update
-    (:meth:`CycleController.check_convergence`) and, on the first model
-    update, the seed for :func:`calculate_per_cycle_limits`. The clean mask is
-    the mask of the data group or, before the first model update has made it,
-    the mask that model update makes (``primary_beam_limit``); ``img_xds`` is
-    not modified. Without a mask and a primary beam every pixel counts.
+    (:meth:`CycleController.check_convergence`) and the seed of the per cycle
+    limits of the model update that follows it (:func:`get_per_cycle_limits`).
+    The clean mask is the mask of the data group or, before the first model
+    update has made it, the mask that model update makes
+    (``primary_beam_limit``); ``img_xds`` is not modified. Without a mask and
+    a primary beam every pixel counts.
 
     Parameters
     ----------
@@ -2496,25 +2492,14 @@ def copy_residual_entropy(imaging_dict, residual_imaging_dict):
                 )
 
 
-def get_per_cycle_limits(
-    controller,
-    combined_imaging_dict,
-    img_xds,
-    model_exists,
-    cycle_control_params,
-    image_data_group_in_name="residual",
-    residual_imaging_dict=None,
-):
+def get_per_cycle_limits(controller, residual_imaging_dict):
     """Compute the per-plane ``max_iter_per_cycle_updated`` and ``threshold_per_cycle`` for the next model update.
 
     The controls of every model update are derived from
     ``residual_imaging_dict``, the record of the stop test on the residual the
     residual update before it has just made (each plane's own peak residual
     inside the clean mask): the dirty image for the first model update, the
-    fresh residual for a later one.  Without that record they are derived
-    from the residual image of ``img_xds`` before the first model update
-    (``model_exists`` is ``False``) and from the latest entries of
-    ``combined_imaging_dict`` afterwards.  Both arrays are built per
+    fresh residual for a later one.  Both arrays are built per
     ``(time, frequency, polarization)`` plane from that plane's own state, so
     the result is independent of how the cube was chunked across tasks.
 
@@ -2523,19 +2508,7 @@ def get_per_cycle_limits(
     controller : CycleController
         Controller whose ``calculate_per_cycle_limits`` and
         ``per_plane_threshold_per_cycle`` drive the result.
-    combined_imaging_dict : ImagingDict
-        Accumulated per-plane convergence statistics (used once a model
-        exists, without ``residual_imaging_dict``).
-    img_xds : xarray.Dataset
-        Image dataset providing the residual image for the first model update
-        (without ``residual_imaging_dict``).
-    model_exists : bool
-        ``False`` before the first model update, ``True`` afterwards.
-    cycle_control_params : dict
-        Cycle control parameters (``gain`` seeds the first model update).
-    image_data_group_in_name : str, optional
-        Image data group holding the residual image.  Default ``"residual"``.
-    residual_imaging_dict : ImagingDict, optional
+    residual_imaging_dict : ImagingDict
         :func:`build_residual_imaging_dict` of the residual the latest
         residual update has made, the record of the stop test before this
         model update.
@@ -2551,22 +2524,18 @@ def get_per_cycle_limits(
         ``(time, frequency, polarization)`` float array of per-plane stopping
         thresholds for the next model update.
     """
-    rd = residual_imaging_dict
-    if rd is None and not model_exists:
-        rd = build_residual_imaging_dict(
-            img_xds, image_data_group_in_name, cycle_control_params
-        )
-    elif rd is None:
-        rd = combined_imaging_dict
-
     # Per-plane threshold_per_cycle so each plane is cleaned to its own depth
     # (allocates the controller's per-plane state if needed).
-    threshold_per_cycle = controller.per_plane_threshold_per_cycle(rd)
+    threshold_per_cycle = controller.per_plane_threshold_per_cycle(
+        residual_imaging_dict
+    )
     # Scalar cap = min(max_iter_per_cycle, largest remaining budget); clipping
     # the per-plane remaining budget with it gives each plane
     # min(max_iter_per_cycle, its own max_iter_remaining). .clip returns a
     # copy; the controller's own budget is decremented later by update_counts.
-    max_iter_per_cycle_cap, _ = controller.calculate_per_cycle_limits(rd)
+    max_iter_per_cycle_cap, _ = controller.calculate_per_cycle_limits(
+        residual_imaging_dict
+    )
     max_iter_per_cycle_updated = controller.max_iter_remaining.clip(
         max=max_iter_per_cycle_cap
     )

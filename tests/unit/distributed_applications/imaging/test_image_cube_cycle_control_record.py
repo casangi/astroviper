@@ -118,7 +118,8 @@ def test_iteration_history_and_auto_max_cycles_reach_the_result(
         if key.pol == 0:  # Stokes I: cleaned to the threshold within its limit
             assert entry["stop_code"].imaging == IMAGING_THRESHOLD
             # the model updates and the closing stop test
-            assert 1 <= len(entry["iter_done"]) <= entry["max_cycles_auto"] + 1
+            assert 2 <= len(entry["iter_done"]) <= entry["max_cycles_auto"] + 1
+            assert entry["iter_done"][-1] == 0
             assert sum(entry["iter_done"]) > 0
         else:  # the empty Stokes V plane has nothing to predict
             assert entry["max_cycles_auto"] is None
