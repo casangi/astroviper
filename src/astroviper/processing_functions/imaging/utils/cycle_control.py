@@ -81,10 +81,8 @@ MODEL_UPDATE_DIVERGENCE = 4  # Divergence detected by the deconvolver
 MODEL_UPDATE_ALGORITHM = 5  # A stop test of the deconvolver itself (Asp)
 
 # A plane whose model update did no iteration cannot change its residual, so a
-# second identical imaging cycle would follow, and a third. One such model
-# update is tolerated (its threshold_per_cycle was set from the peak of the
-# previous cycle, which the residual update may have lowered); after this many
-# in a row the plane is stopped with IMAGING_NO_PROGRESS.
+# second identical imaging cycle would follow, and a third. After this many
+# such model updates in a row the plane is stopped with IMAGING_NO_PROGRESS.
 NO_PROGRESS_MODEL_UPDATES = 2
 
 # max_cycles="auto": the limit is predicted from the dirty image (see
@@ -2509,14 +2507,16 @@ def get_per_cycle_limits(
 ):
     """Compute the per-plane ``max_iter_per_cycle_updated`` and ``threshold_per_cycle`` for the next model update.
 
-    Before the first model update (``model_exists`` is ``False``) the controls
-    are derived from the freshly made dirty image (each plane's own peak
-    residual inside the clean mask); afterwards they are derived from the
-    accumulated convergence statistics in ``combined_imaging_dict`` (each
-    plane's peak at the end of the previous model update).  Both arrays are
-    built per ``(time, frequency, polarization)`` plane from that plane's own
-    state, so the result is independent of how the cube was chunked across
-    tasks.
+    The controls of every model update are derived from
+    ``residual_imaging_dict``, the record of the stop test on the residual the
+    residual update before it has just made (each plane's own peak residual
+    inside the clean mask): the dirty image for the first model update, the
+    fresh residual for a later one.  Without that record they are derived
+    from the residual image of ``img_xds`` before the first model update
+    (``model_exists`` is ``False``) and from the latest entries of
+    ``combined_imaging_dict`` afterwards.  Both arrays are built per
+    ``(time, frequency, polarization)`` plane from that plane's own state, so
+    the result is independent of how the cube was chunked across tasks.
 
     Parameters
     ----------
@@ -2525,9 +2525,10 @@ def get_per_cycle_limits(
         ``per_plane_threshold_per_cycle`` drive the result.
     combined_imaging_dict : ImagingDict
         Accumulated per-plane convergence statistics (used once a model
-        exists).
+        exists, without ``residual_imaging_dict``).
     img_xds : xarray.Dataset
-        Image dataset providing the residual image for the first model update.
+        Image dataset providing the residual image for the first model update
+        (without ``residual_imaging_dict``).
     model_exists : bool
         ``False`` before the first model update, ``True`` afterwards.
     cycle_control_params : dict
@@ -2535,8 +2536,9 @@ def get_per_cycle_limits(
     image_data_group_in_name : str, optional
         Image data group holding the residual image.  Default ``"residual"``.
     residual_imaging_dict : ImagingDict, optional
-        Pre-built result of :func:`build_residual_imaging_dict`, reused before
-        the first model update instead of rebuilding it. Built here if omitted.
+        :func:`build_residual_imaging_dict` of the residual the latest
+        residual update has made, the record of the stop test before this
+        model update.
 
     Returns
     -------
@@ -2549,13 +2551,12 @@ def get_per_cycle_limits(
         ``(time, frequency, polarization)`` float array of per-plane stopping
         thresholds for the next model update.
     """
-    if not model_exists:
-        rd = residual_imaging_dict
-        if rd is None:
-            rd = build_residual_imaging_dict(
-                img_xds, image_data_group_in_name, cycle_control_params
-            )
-    else:
+    rd = residual_imaging_dict
+    if rd is None and not model_exists:
+        rd = build_residual_imaging_dict(
+            img_xds, image_data_group_in_name, cycle_control_params
+        )
+    elif rd is None:
         rd = combined_imaging_dict
 
     # Per-plane threshold_per_cycle so each plane is cleaned to its own depth

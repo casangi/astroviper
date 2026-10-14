@@ -894,6 +894,52 @@ class TestTheStopTestIsOnTheFreshResidual:
         assert stokes_i["peakres"][-1] == tested[-1] == _masked_peak(img)
 
 
+class TestThePerCycleThresholdOfTheFreshResidual:
+    """Every model update cleans down to its PSF fraction of the peak the stop
+    test before it measured, not of the peak the previous model update ended
+    with."""
+
+    def _run(self, monkeypatch, on_model_update=None):
+        used = []
+
+        def spy(imaging_dict):
+            entry = imaging_dict.data[STOKES_I]
+            used.append((entry["threshold_per_cycle"], entry["peakres"][0]))
+            if on_model_update is not None:
+                on_model_update(imaging_dict)
+
+        seen = _spy_on_the_loop(monkeypatch, on_model_update=spy)
+        _, _, record = _image(
+            {"max_cycles": 3, "max_iter_per_cycle": 5, "threshold": 1e-6}
+        )
+        stokes_i = record.data[STOKES_I]
+        fraction = stokes_i["max_psf_sidelobe"]  # inside the clamp here
+        tested = [rd.data[STOKES_I]["peakres"][0] for rd in seen["records"]]
+        expected = [fraction * peak for peak in tested[:-1]]
+        return used, tested, expected, stokes_i
+
+    def test_the_base_is_the_peak_of_the_stop_test(self, monkeypatch):
+        used, tested, expected, _ = self._run(monkeypatch)
+        thresholds, own_peaks = (list(values) for values in zip(*used, strict=True))
+        assert thresholds == pytest.approx(expected, rel=1e-12)
+        # the residual update moves the peak a model update ended with (here
+        # by 2e-8 to 5e-7 of it)
+        for own, fresh in zip(own_peaks, tested[1:], strict=True):
+            assert abs(own) != fresh
+
+    def test_a_diverged_model_update_leaves_a_finite_threshold(self, monkeypatch):
+        def diverged_to_infinity(imaging_dict):
+            for entry in imaging_dict.data.values():
+                entry["peakres"] = [np.inf]
+                entry["stop_code"] = StopCode(IMAGING_CONTINUE, MODEL_UPDATE_DIVERGENCE)
+
+        used, _, expected, stokes_i = self._run(monkeypatch, diverged_to_infinity)
+        assert [threshold for threshold, _ in used] == pytest.approx(
+            expected, rel=1e-12
+        )
+        assert stokes_i["iter_done"] == [5, 5, 5, 0]
+
+
 class TestTheRecordOfTheStopTest:
     """The peak of the record is taken inside the clean mask, the mask the
     first model update makes or the mask of the residual group."""

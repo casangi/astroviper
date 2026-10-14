@@ -214,9 +214,8 @@ def imaging_preparation_single_field(
         peak residual down to which one model update cleans, and
         ``threshold_per_cycle = max(psf_fraction * peak_residual, threshold)``
         is the stopping threshold of that model update, where
-        ``peak_residual`` is the plane's peak residual inside the mask: that
-        of the dirty image for the first model update and, for a later one,
-        the peak the previous model update ended with, and
+        ``peak_residual`` is the plane's peak residual inside the mask at the
+        start of the cycle, and
         ``max_iter_per_cycle_updated = min(max_iter_per_cycle,
         max_iter_remaining)`` is the iteration limit of that model update (0
         for a plane the entropy or divergence stop has ended), where
@@ -586,9 +585,8 @@ def image_cube_single_field(
         peak residual down to which one model update cleans, and
         ``threshold_per_cycle = max(psf_fraction * peak_residual, threshold)``
         is the stopping threshold of that model update, where
-        ``peak_residual`` is the plane's peak residual inside the mask: that
-        of the dirty image for the first model update and, for a later one,
-        the peak the previous model update ended with, and
+        ``peak_residual`` is the plane's peak residual inside the mask at the
+        start of the cycle, and
         ``max_iter_per_cycle_updated = min(max_iter_per_cycle,
         max_iter_remaining)`` is the iteration limit of that model update (0
         for a plane the entropy or divergence stop has ended), where
