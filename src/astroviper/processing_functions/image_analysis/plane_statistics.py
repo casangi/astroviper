@@ -4,6 +4,8 @@ Every statistic is reduced over the two sky axes of each
 ``(time, frequency, polarization)`` plane and ignores NaN pixels, so the result
 for a cube of shape ``(time, frequency, polarization, l, m)`` has shape
 ``(time, frequency, polarization)``.
+Numerical calculations use the same NumPy backend as image statistics; masks
+and one-plane-at-a-time execution remain specific to this wrapper.
 """
 
 # Statistics computed for every plane over its valid (non-NaN) pixels, in the
@@ -56,29 +58,15 @@ def _plane_statistics_1d(values):
         One value per entry of :data:`PLANE_STATISTIC_NAMES`; all NaN (and
         ``n_pixels = 0``) when ``values`` is empty.
     """
-    import numpy as np
+    from astroviper.processing_functions.image_analysis.statistics import (
+        _array_statistics,
+    )
 
-    n = values.size
-    if n == 0:
-        out = [np.nan] * len(PLANE_STATISTIC_NAMES)
-        out[PLANE_STATISTIC_NAMES.index("n_pixels")] = 0.0
-        return out
-
-    mean = float(values.mean())
-    median = float(np.median(values))
-    peak_index = int(np.abs(values).argmax())
-    return [
-        mean,
-        median,
-        float(values.max()),
-        float(values.min()),
-        float(values[peak_index]),
-        float(values.sum()),
-        float(np.sqrt(np.mean(values * values))),
-        float(values.std()),
-        float(1.4826 * np.median(np.abs(values - median))),
-        float(n),
-    ]
+    summary = _array_statistics.summarize_samples(values, assume_valid=True)
+    result = _array_statistics.finalize_summary(
+        summary, PLANE_STATISTIC_NAMES, samples=values
+    )
+    return [float(result[name]) for name in PLANE_STATISTIC_NAMES]
 
 
 def calculate_plane_statistics(

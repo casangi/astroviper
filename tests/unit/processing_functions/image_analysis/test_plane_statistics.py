@@ -224,3 +224,63 @@ def test_to_dataframe_long_format():
         stats["sky_residual"]["mean"].values[0, 1, 1]
     )
     assert plane_statistics_to_dataframe({}).empty
+
+
+def test_shared_backend_receives_one_plane_at_a_time(monkeypatch):
+    """Keep temporary numerical buffers bounded by one spatial plane."""
+    from astroviper.processing_functions.image_analysis.statistics import (
+        _array_statistics,
+    )
+
+    original = _array_statistics.summarize_samples
+    shapes = []
+
+    def record(samples, **kwargs):
+        shapes.append(samples.shape)
+        return original(samples, **kwargs)
+
+    monkeypatch.setattr(_array_statistics, "summarize_samples", record)
+    image = _make_image(n_freq=4, n_pol=2, n_lm=16)
+    calculate_plane_statistics(image)
+    assert shapes
+    assert all(len(shape) == 1 and shape[0] <= 16 * 16 for shape in shapes)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_shared_interfaces_match_for_full_cube_and_masks(dtype):
+    """All value outputs agree for multiple times, channels, polarizations and masks."""
+    from astroviper.processing_functions.image_analysis.statistics import (
+        create_statistics_state,
+        finalize_statistics_state,
+    )
+
+    shape = (2, 3, 2, 4, 5)
+    values = (1e4 + np.random.default_rng(7).normal(size=shape)).astype(dtype)
+    values[0, 0, 0] = np.nan
+    values[1, 2, 1, 0, :2] = [-2e4, 2e4]
+    data = xr.DataArray(
+        values,
+        dims=DIMS,
+        coords={dim: np.arange(size) for dim, size in zip(DIMS, shape, strict=True)},
+        name="SKY_RESIDUAL",
+    )
+    mask = xr.DataArray(
+        np.indices(shape).sum(axis=0) % 2 == 0, dims=DIMS, coords=data.coords
+    )
+    dataset = xr.Dataset({"SKY_RESIDUAL": data, "MASK": mask})
+    plane = calculate_plane_statistics(dataset, mask_name="MASK")["sky_residual"]
+    for pixels, suffix in [(data, ""), (data.where(mask), "_masked")]:
+        result = finalize_statistics_state(
+            create_statistics_state(
+                pixels, ("l", "m"), statistics=PLANE_STATISTIC_NAMES
+            ),
+            PLANE_STATISTIC_NAMES,
+        )
+        for name in PLANE_STATISTIC_NAMES:
+            np.testing.assert_allclose(
+                result[name], plane[name + suffix], rtol=1e-12, atol=1e-12
+            )
+            assert (
+                result[name].dtype == plane[name + suffix].dtype == np.dtype("float64")
+            )
+        assert result.sizes == {"time": 2, "frequency": 3, "polarization": 2}
