@@ -642,10 +642,18 @@ def image_cube_single_field(
           n_polarization), one row per image channel in the order of the image
           frequency coordinate; each channel gets its row. A plane stops when the
           peak of its residual inside the clean mask, as the latest residual
-          update made it, falls to or below its threshold; the value is
+          update made it, falls to or below its threshold times
+          ``1 + threshold_tolerance``; the threshold is
           also a hard floor on ``threshold_per_cycle``. ``0`` disables the
           absolute stop. *Differs from CASA*: floats in Jy only, no ``'1mJy'``
           strings.
+        - ``threshold_tolerance`` : Relative tolerance of the threshold stop,
+          a finite number ``>= 0``: a plane whose threshold is above 0 stops
+          with imaging stop code 2, and gets no iterations while other planes of
+          its channel go on, once the peak of its residual inside the clean mask
+          is at most ``threshold * (1 + threshold_tolerance)``; the model update
+          of a plane that goes on still cleans down to ``threshold_per_cycle``,
+          floored at the threshold itself. Default 0. No CASA equivalent.
         - ``threshold_sigma`` [CASA ``nsigma``] : Noise based stopping threshold
           per plane, as a multiple of the plane's robust residual rms
           (``1.4826 * MAD``). The effective threshold of a plane is

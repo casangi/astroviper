@@ -692,6 +692,39 @@ def validate_max_cycles(max_cycles, max_psf_fraction=None):
     return int(max_cycles)
 
 
+def validate_threshold_tolerance(threshold_tolerance):
+    """``threshold_tolerance`` checked: a finite number >= 0.
+
+    Parameters
+    ----------
+    threshold_tolerance : float
+        Relative tolerance of the threshold stop
+        (:meth:`CycleController.check_convergence`).
+
+    Returns
+    -------
+    float
+        ``threshold_tolerance`` as a ``float``.
+
+    Raises
+    ------
+    ValueError
+        For a bool, anything that is not a number, NaN, infinity or a value
+        below 0.
+    """
+    if (
+        isinstance(threshold_tolerance, bool)
+        or not isinstance(threshold_tolerance, int | float | np.integer | np.floating)
+        or not np.isfinite(threshold_tolerance)
+        or threshold_tolerance < 0
+    ):
+        raise ValueError(
+            "threshold_tolerance must be a finite number >= 0; got "
+            f"{threshold_tolerance!r}."
+        )
+    return float(threshold_tolerance)
+
+
 # ============================================================================
 # CycleController Class
 # ============================================================================
@@ -736,6 +769,9 @@ class CycleController:
         otherwise.
     threshold : float
         Global stopping threshold (in Jy or image units)
+    threshold_tolerance : float
+        Relative tolerance of the threshold stop: a plane stops once its
+        peak residual is at most ``threshold * (1 + threshold_tolerance)``.
     gain : float
         CLEAN loop gain (typically 0.1)
     psf_sidelobe_factor : float
@@ -815,6 +851,7 @@ class CycleController:
         entropy_spatial_bins: int = 7,
         entropy_flux_bins: int = 10,
         max_cycles_divergence: int = -1,
+        threshold_tolerance: float = 0.0,
     ):
         """
         Initialize the cycle controller with deconvolution parameters.
@@ -873,10 +910,17 @@ class CycleController:
             Stop a plane once this many of its model updates in a row ended
             diverged (default: -1, disabled)
 
+        threshold_tolerance : float, optional
+            Relative tolerance of the threshold stop, finite and >= 0: a
+            plane stops once its peak residual is at most
+            ``threshold * (1 + threshold_tolerance)``; ``threshold_per_cycle``
+            is not changed (default: 0.0)
+
         Raises:
         -------
         ValueError
             If ``max_cycles_divergence`` is not -1 or a positive integer, if
+            ``threshold_tolerance`` is not a finite number >= 0, if
             one of the entropy parameters has a wrong type or value, if
             ``max_cycles`` is neither an integer >= -1 nor ``"auto"``, or if
             it is ``"auto"`` with a ``max_psf_fraction`` of 1 or more (the
@@ -936,6 +980,7 @@ class CycleController:
             if min(self.threshold) < 0:
                 raise ValueError(f"threshold must be >= 0; got {self.threshold}")
         self.threshold_sigma = threshold_sigma
+        self.threshold_tolerance = validate_threshold_tolerance(threshold_tolerance)
 
         # CLEAN parameters
         self.gain = gain
@@ -1352,9 +1397,9 @@ class CycleController:
         --------------------------------------------------------
         1. Zero mask (stopcode 7): No valid pixels to clean
         2. Iteration limit (stopcode 1): max_iter_remaining <= 0
-        3. Threshold reached (stopcode 2): peak_residual <= threshold, the
-           ``peakres`` of the entry (the peak of the residual inside the
-           clean mask)
+        3. Threshold reached (stopcode 2): peak_residual <= threshold *
+           (1 + threshold_tolerance), with ``peak_residual`` the ``peakres``
+           of the entry (the peak of the residual inside the clean mask)
         4. Residual entropy (stopcode 10), only with ``entropy_stop``: the
            entropy of the plane's residual (``entropy`` in the ImagingDict,
            see :func:`build_residual_imaging_dict`) is lower than the highest
@@ -1491,7 +1536,9 @@ class CycleController:
                 maj = IMAGING_ZERO_MASK
             elif remaining <= 0:
                 maj = IMAGING_MAX_ITER
-            elif threshold > 0 and peak_residual <= threshold:
+            elif threshold > 0 and peak_residual <= threshold * (
+                1 + self.threshold_tolerance
+            ):
                 maj = IMAGING_THRESHOLD
             elif self.entropy_stopped[idx]:
                 maj = IMAGING_ENTROPY
@@ -1864,6 +1911,7 @@ class CycleController:
             if np.ndim(self.threshold)
             else self.threshold,
             "threshold_sigma": self.threshold_sigma,
+            "threshold_tolerance": self.threshold_tolerance,
             "gain": self.gain,
             "psf_sidelobe_factor": self.psf_sidelobe_factor,
             "min_psf_fraction": self.min_psf_fraction,
@@ -2519,7 +2567,9 @@ def get_per_cycle_limits(controller, residual_imaging_dict):
         ``(time, frequency, polarization)`` int array: the iterations each
         plane may spend in the next model update,
         ``min(max_iter_per_cycle, max_iter_remaining)`` per plane (0 for a
-        plane the entropy or divergence stop has ended).
+        plane the entropy or divergence stop has ended, and with a
+        ``threshold_tolerance`` above 0 for a plane the threshold stop has
+        ended).
     threshold_per_cycle : numpy.ndarray
         ``(time, frequency, polarization)`` float array of per-plane stopping
         thresholds for the next model update.
@@ -2545,6 +2595,13 @@ def get_per_cycle_limits(controller, residual_imaging_dict):
         max_iter_per_cycle_updated[controller.entropy_stopped] = 0
     if controller.divergence_stopped is not None:
         max_iter_per_cycle_updated[controller.divergence_stopped] = 0
+    # Nor is a plane the threshold stop has ended within a tolerance above 0,
+    # whose peak can lie above its threshold_per_cycle; without a tolerance the
+    # peak is at or below it and the deconvolver does no iteration.
+    if controller.threshold_tolerance > 0 and controller.stop_code_imaging is not None:
+        max_iter_per_cycle_updated[
+            controller.stop_code_imaging == IMAGING_THRESHOLD
+        ] = 0
 
     return max_iter_per_cycle_updated, threshold_per_cycle
 

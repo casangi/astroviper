@@ -626,6 +626,10 @@ class TestImagingCycleLoop:
         with pytest.raises(ValueError, match="max_cycles_divergence"):
             _image({"max_cycles_divergence": 0})
 
+    def test_threshold_tolerance_reaches_the_controller(self):
+        with pytest.raises(ValueError, match="threshold_tolerance"):
+            _image({"threshold_tolerance": -0.01})
+
     def test_sensitivity_reference(self):
         """Threshold 0: every plane predicts its limit from the thermal noise
         of its image, the sensitivity of the absolute weights."""
@@ -879,6 +883,56 @@ class TestTheStopTestIsOnTheFreshResidual:
         )
         if n_model_updates is not None:
             assert n_mu == n_model_updates
+
+    @pytest.mark.parametrize("tau", [0.0, 0.5])
+    def test_threshold_tolerance_on_the_fresh_peak(self, monkeypatch, tau):
+        """The second stop test sees Stokes I at 1.2 times the threshold: a
+        tolerance of 0.5 stops the plane there; without one the next model
+        update cleans down to the threshold."""
+        targets = []
+
+        def just_above(record, n):
+            if n == 1:
+                record.data[STOKES_I]["peakres"] = [0.012]
+
+        def target(imaging_dict):
+            targets.append(imaging_dict.data[STOKES_I]["threshold_per_cycle"])
+
+        seen = _spy_on_the_loop(
+            monkeypatch, on_record=just_above, on_model_update=target
+        )
+        _, timing, record = _image({"threshold": 0.01, "threshold_tolerance": tau})
+        n_cycles = timing["n_cycles"].iloc[0]
+        assert record.data[STOKES_I]["stop_code"].imaging == IMAGING_THRESHOLD
+        assert len(seen["records"]) == n_cycles + 1
+        if tau:
+            assert n_cycles == 1
+        else:
+            assert n_cycles > 1
+            assert targets[1] == pytest.approx(0.01, rel=1e-12)
+
+    @pytest.mark.parametrize(("tau", "iterations"), [(0.0, 5), (0.5, 0)])
+    def test_a_plane_stopped_within_the_tolerance_is_not_cleaned(
+        self, monkeypatch, tau, iterations
+    ):
+        """The second stop test sees Stokes I at 1.2 times the threshold and
+        Q far above it. Within a tolerance of 0.5 the next model update gives
+        I no iteration, although its residual lies above its
+        threshold_per_cycle; without one it is cleaned."""
+        updates = []
+
+        def i_within_q_above(record, n):
+            if n == 1:
+                record.data[STOKES_I]["peakres"] = [0.012]
+                record.data[STOKES_Q]["peakres"] = [1.0]
+
+        _spy_on_the_loop(
+            monkeypatch, on_record=i_within_q_above, on_model_update=updates.append
+        )
+        _image({"threshold": 0.01, "threshold_tolerance": tau, "max_iter_per_cycle": 5})
+        stokes_i = updates[1].data[STOKES_I]
+        assert abs(stokes_i["start_peakres"][0]) > stokes_i["threshold_per_cycle"]
+        assert stokes_i["iter_done"] == [iterations]
 
     def test_the_images_come_from_the_last_residual_update(self, monkeypatch):
         seen = _spy_on_the_loop(monkeypatch)

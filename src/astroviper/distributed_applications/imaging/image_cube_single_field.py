@@ -271,10 +271,18 @@ def image_cube_single_field(
           n_polarization), one row per image channel in the order of the image
           frequency coordinate; each channel gets its row. A plane stops when the
           peak of its residual inside the clean mask, as the latest residual
-          update made it, falls to or below its threshold; the value is
+          update made it, falls to or below its threshold times
+          ``1 + threshold_tolerance``; the threshold is
           also a hard floor on ``threshold_per_cycle``. ``0`` disables the
           absolute stop. *Differs from CASA*: floats in Jy only, no ``'1mJy'``
           strings.
+        - ``threshold_tolerance`` : Relative tolerance of the threshold stop,
+          a finite number ``>= 0``: a plane whose threshold is above 0 stops
+          with imaging stop code 2, and gets no iterations while other planes of
+          its channel go on, once the peak of its residual inside the clean mask
+          is at most ``threshold * (1 + threshold_tolerance)``; the model update
+          of a plane that goes on still cleans down to ``threshold_per_cycle``,
+          floored at the threshold itself. Default 0. No CASA equivalent.
         - ``threshold_sigma`` [CASA ``nsigma``] : Noise based stopping threshold
           per plane, as a multiple of the plane's robust residual rms
           (``1.4826 * MAD``). The effective threshold of a plane is
@@ -700,6 +708,7 @@ def image_cube_single_field(
     )
     from astroviper.processing_functions.imaging.utils.cycle_control import (
         validate_max_cycles,
+        validate_threshold_tolerance,
     )
     from astroviper.processing_functions.imaging.utils.imaging_polarization import (
         correlation_selection,
@@ -814,13 +823,15 @@ def image_cube_single_field(
             f"({len(image_params['frequency_coords'])}, "
             f"{len(image_params['polarization_coords'])})"
         )
-    # max_cycles (an integer, or "auto" with max_psf_fraction < 1) and
-    # record_iteration_history (Hogbom only) are checked again in every node
-    # task; checked here too so that a bad value leaves no image behind.
+    # max_cycles (an integer, or "auto" with max_psf_fraction < 1),
+    # threshold_tolerance (a finite number >= 0) and record_iteration_history
+    # (Hogbom only) are checked again in every node task; checked here too so
+    # that a bad value leaves no image behind.
     validate_max_cycles(
         cycle_control_params.get("max_cycles", -1),
         cycle_control_params.get("max_psf_fraction"),
     )
+    validate_threshold_tolerance(cycle_control_params.get("threshold_tolerance", 0.0))
     validate_record_iteration_history(
         deconvolver, cycle_control_params.get("record_iteration_history", False)
     )

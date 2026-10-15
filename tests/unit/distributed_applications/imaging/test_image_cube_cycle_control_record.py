@@ -140,6 +140,7 @@ def test_iteration_history_and_auto_max_cycles_reach_the_result(
         ({"max_cycles": "Auto"}, "hogbom", 'integer >= -1 or "auto"'),
         ({"max_cycles": 2.5}, "hogbom", 'integer >= -1 or "auto"'),
         ({"max_psf_fraction": 1.0}, "hogbom", "max_psf_fraction below 1"),
+        ({"threshold_tolerance": -0.01}, "hogbom", "threshold_tolerance must be"),
     ],
     ids=[
         "history_asp",
@@ -147,6 +148,7 @@ def test_iteration_history_and_auto_max_cycles_reach_the_result(
         "max_cycles_Auto",
         "max_cycles_float",
         "auto_psf_fraction",
+        "tolerance_negative",
     ],
 )
 def test_refused_before_the_image_store_is_created(

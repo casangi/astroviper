@@ -3070,3 +3070,143 @@ class TestPerStokesThreshold(unittest.TestCase):
     def test_state_lists_the_thresholds(self):
         controller = CycleController(max_iter=1000, threshold=[1e-3, 1e-4])
         self.assertEqual(controller.get_state()["threshold"], [1e-3, 1e-4])
+
+
+class TestThresholdTolerance(unittest.TestCase):
+    """``threshold_tolerance``: the threshold stop at ``threshold * (1 + tau)``."""
+
+    THRESHOLDS = (1e-3, 2.5e-4, 0.0)
+
+    @classmethod
+    def _peaks(cls):
+        peaks = [0.0, 1e-9, 0.5, 2.0]
+        for value in cls.THRESHOLDS:
+            peaks += [
+                value,
+                np.nextafter(value, 0.0),
+                np.nextafter(value, np.inf),
+                value * 1.01,
+                value * 1.02,
+                value * 0.99,
+            ]
+        return peaks
+
+    @staticmethod
+    def _record(peaks, npol):
+        rd = ImagingDict()
+        for chan, peak in enumerate(peaks):
+            for pol in range(npol):
+                rd.add(
+                    {"peakres": float(peak), "masksum": 100, "max_psf_sidelobe": 0.2},
+                    time=0,
+                    pol=pol,
+                    chan=chan,
+                )
+        return rd
+
+    def _codes(self, threshold, peaks, **kwargs):
+        controller = CycleController(max_iter=1000, threshold=threshold, **kwargs)
+        controller.check_convergence(self._record(peaks, np.size(threshold)))
+        return controller.stop_code_imaging[0]
+
+    def test_zero_reproduces_the_threshold_stop(self):
+        """Default and ``0`` give the stop codes of ``peak <= threshold``."""
+        peaks = self._peaks()
+        thresholds = [*self.THRESHOLDS, list(self.THRESHOLDS)]
+        for threshold in thresholds:
+            planes = np.broadcast_to(threshold, (len(peaks), np.size(threshold)))
+            expected = np.where(
+                (planes > 0) & (np.asarray(peaks)[:, None] <= planes),
+                IMAGING_THRESHOLD,
+                IMAGING_CONTINUE,
+            )
+            for kwargs in (
+                {},
+                {"threshold_tolerance": 0.0},
+                {"threshold_tolerance": 0},
+            ):
+                np.testing.assert_array_equal(
+                    self._codes(threshold, peaks, **kwargs), expected
+                )
+
+    def test_a_peak_within_the_tolerance_stops_the_plane(self):
+        threshold, tau = 1e-3, 0.02
+        limit = threshold * (1 + tau)
+        peaks = [threshold, 1.01 * threshold, limit, np.nextafter(limit, np.inf)]
+        np.testing.assert_array_equal(
+            self._codes(threshold, peaks, threshold_tolerance=tau)[:, 0],
+            [IMAGING_THRESHOLD] * 3 + [IMAGING_CONTINUE],
+        )
+        np.testing.assert_array_equal(
+            self._codes(threshold, peaks)[:, 0],
+            [IMAGING_THRESHOLD] + [IMAGING_CONTINUE] * 3,
+        )
+
+    def test_per_plane_threshold_and_disabled_threshold(self):
+        codes = self._codes(
+            [1e-3, 1e-4, 0.0], [1.01e-3, 1.01e-4, 0.0], threshold_tolerance=0.02
+        )
+        np.testing.assert_array_equal(
+            np.diag(codes), [IMAGING_THRESHOLD, IMAGING_THRESHOLD, IMAGING_CONTINUE]
+        )
+
+    def test_threshold_per_cycle_is_unchanged(self):
+        rd = self._record([1.01e-3, 2e-3, 1.0], 1)
+        per_plane = []
+        for tau in (0.0, 0.02):
+            controller = CycleController(
+                max_iter=1000, threshold=1e-3, threshold_tolerance=tau
+            )
+            controller.ensure_planes(1, 3, 1)
+            per_plane.append(controller.per_plane_threshold_per_cycle(rd))
+        np.testing.assert_array_equal(per_plane[0], per_plane[1])
+
+    def test_a_stopped_plane_gets_no_iterations(self):
+        """Stokes I within the tolerance, Q above it and U below the
+        threshold: with a tolerance I and U get no iterations while Q goes
+        on; without one I goes on and U keeps its budget, which the
+        deconvolver does not spend (its peak is below threshold_per_cycle)."""
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
+            get_per_cycle_limits,
+        )
+
+        threshold = 1e-3
+        rd = ImagingDict()
+        for pol, peak in enumerate((1.01 * threshold, 5 * threshold, 0.5 * threshold)):
+            rd.add(
+                {"peakres": peak, "masksum": 100, "max_psf_sidelobe": 0.2},
+                time=0,
+                pol=pol,
+                chan=0,
+            )
+        for tau, codes, limits in (
+            (0.0, [IMAGING_CONTINUE, IMAGING_CONTINUE, IMAGING_THRESHOLD], [800] * 3),
+            (
+                0.02,
+                [IMAGING_THRESHOLD, IMAGING_CONTINUE, IMAGING_THRESHOLD],
+                [0, 800, 0],
+            ),
+        ):
+            controller = CycleController(
+                max_iter=800, threshold=[threshold] * 3, threshold_tolerance=tau
+            )
+            stopcode, _ = controller.check_convergence(rd)
+            self.assertEqual(stopcode.imaging, IMAGING_CONTINUE)
+            self.assertEqual(controller.stop_code_imaging[0, 0].tolist(), codes)
+            max_iter_per_cycle_updated, threshold_per_cycle = get_per_cycle_limits(
+                controller, rd
+            )
+            self.assertEqual(max_iter_per_cycle_updated[0, 0].tolist(), limits)
+            # the peak of I lies above its threshold_per_cycle
+            self.assertLess(threshold_per_cycle[0, 0, 0], 1.01 * threshold)
+
+    def test_invalid_values_are_refused(self):
+        for value in (-0.01, -1, np.nan, np.inf, True, "0.02", None):
+            with self.assertRaisesRegex(ValueError, "threshold_tolerance"):
+                CycleController(threshold=1e-3, threshold_tolerance=value)
+
+    def test_state_lists_the_tolerance(self):
+        self.assertEqual(CycleController().get_state()["threshold_tolerance"], 0.0)
+        controller = CycleController(threshold_tolerance=np.float32(0.25))
+        self.assertEqual(controller.get_state()["threshold_tolerance"], 0.25)
+        self.assertIs(type(controller.threshold_tolerance), float)

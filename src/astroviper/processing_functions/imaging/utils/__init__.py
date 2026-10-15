@@ -22,6 +22,7 @@ from astroviper.processing_functions.imaging.utils.cycle_control import (
     resolve_auto_max_cycles,
     validate_entropy_params,
     validate_max_cycles,
+    validate_threshold_tolerance,
 )
 from astroviper.processing_functions.imaging.utils.fft_sizing import (
     next_fft_friendly_size,
@@ -59,6 +60,7 @@ __all__ = [
     "copy_residual_entropy",
     "validate_entropy_params",
     "validate_max_cycles",
+    "validate_threshold_tolerance",
     "resolve_auto_max_cycles",
     "get_per_cycle_limits",
     "get_peak_residual_from_imaging_dict",
