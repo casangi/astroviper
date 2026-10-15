@@ -163,6 +163,7 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
         assert residual.flags.c_contiguous
         assert psf.flags.c_contiguous
         assert model.flags.c_contiguous
+        assert np.shares_memory(residual, image.SKY_RESIDUAL.values)
         assert residual.dtype == psf.dtype == model.dtype == dtype
         np.testing.assert_array_equal(model, 0.0)
         residual *= dtype(0.5)
@@ -198,7 +199,7 @@ def test_native_mtmfs_receives_taylor_stacks_without_reshaping(monkeypatch, dtyp
     assert calls[0][3]["max_iter_per_cycle"] == 3
     assert calls[0][3]["threshold_per_cycle"] == pytest.approx(0.01)
     assert "psf_fraction" not in calls[0][3]
-    xr.testing.assert_identical(image.SKY_RESIDUAL, residual_snapshot)
+    np.testing.assert_array_equal(image.SKY_RESIDUAL, residual_snapshot * dtype(0.5))
     np.testing.assert_array_equal(image.SKY_MODEL.isel(taylor_term=0), 1.0)
     np.testing.assert_array_equal(image.SKY_MODEL.isel(taylor_term=1), 2.0)
     previous = xr.Dataset({"SKY_MODEL": xr.zeros_like(image.SKY_MODEL)})
@@ -237,6 +238,7 @@ def test_native_mtmfs_adapter_covers_all_planes_terms_and_supports(
     image, expected_model = _native_mtmfs_continuum_image(
         nterms, image_shape, dtype, support_kind
     )
+    residual_storage = image.SKY_RESIDUAL.values
     residual_snapshot = image.SKY_RESIDUAL.copy(deep=True)
     iterations = np.ones((2, 1, 2), dtype=np.int64)
     thresholds = np.zeros((2, 1, 2), dtype=dtype)
@@ -254,7 +256,13 @@ def test_native_mtmfs_adapter_covers_all_planes_terms_and_supports(
         },
     )
 
-    xr.testing.assert_identical(image.SKY_RESIDUAL, residual_snapshot)
+    assert image.SKY_RESIDUAL.values is residual_storage
+    np.testing.assert_allclose(
+        image.SKY_RESIDUAL,
+        np.zeros_like(residual_snapshot),
+        rtol=2e-4,
+        atol=2e-5,
+    )
     np.testing.assert_allclose(image.SKY_MODEL, expected_model, rtol=2e-4, atol=2e-5)
     assert image.SKY_MODEL.dtype == dtype
     assert len(statistics.data) == 4

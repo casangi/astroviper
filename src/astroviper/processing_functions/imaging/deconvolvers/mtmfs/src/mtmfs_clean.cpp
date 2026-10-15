@@ -148,6 +148,14 @@ bool all_finite(const T* a, std::size_t n) {
     return std::all_of(a, a + n, [](T v) { return std::isfinite(v); });
 }
 
+template <typename T>
+bool all_finite_taylor_stack(const T* data, int nterms, std::size_t nimg,
+                             std::ptrdiff_t term_stride) {
+    for (int term = 0; term < nterms; ++term)
+        if (!all_finite(data + static_cast<std::ptrdiff_t>(term) * term_stride, nimg)) return false;
+    return true;
+}
+
 void check_geometry(int nterms, int nx, int ny) {
     if (nterms < 1 || nterms > kMaxTaylorTerms)
         throw std::invalid_argument("nterms must be in [1, " + std::to_string(kMaxTaylorTerms) + "]");
@@ -366,7 +374,7 @@ int taylor_hessian(const T* psf, int nterms, int nx, int ny, std::vector<float>&
 template <typename T>
 CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nterms, int nx, int ny,
                      const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle, T gain,
-                     T threshold_per_cycle, T mask_threshold) {
+                     T threshold_per_cycle, T mask_threshold, std::ptrdiff_t residual_term_stride) {
     if (max_iter_per_cycle < 0) throw std::invalid_argument("max_iter_per_cycle must be >= 0");
     if (!std::isfinite(static_cast<double>(gain)) ||
         !std::isfinite(static_cast<double>(threshold_per_cycle)) ||
@@ -379,8 +387,11 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
 
     Work<T> w;
     w.init(nterms, nx, ny, scales, small_scale_bias);
+    if (residual_term_stride == 0) residual_term_stride = static_cast<std::ptrdiff_t>(w.nimg());
+    if (residual_term_stride < static_cast<std::ptrdiff_t>(w.nimg()))
+        throw std::invalid_argument("residual Taylor-term stride must be at least ny*nx elements");
     // A non-finite pixel spreads through every FFT convolution and ends the search as converged.
-    if (!all_finite(residual, static_cast<std::size_t>(nterms) * w.nimg()) ||
+    if (!all_finite_taylor_stack(residual, nterms, w.nimg(), residual_term_stride) ||
         !all_finite(model, static_cast<std::size_t>(nterms) * w.nimg()) ||
         (mask != nullptr && !all_finite(mask, w.nimg())))
         throw std::invalid_argument("residual, model and mask must be finite");
@@ -438,7 +449,8 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
         std::vector<typename Work<T>::complex_t> dirty_ft(nspec), work(nspec);
         std::vector<T> scratch(nimg);
         for (int t = 0; t < nt; ++t) {
-            forward_r2c<T>(residual + static_cast<std::size_t>(t) * nimg, dirty_ft.data(), nx, ny);
+            forward_r2c<T>(residual + static_cast<std::ptrdiff_t>(t) * residual_term_stride, dirty_ft.data(), nx,
+                           ny);
             for (int s = 0; s < ns; ++s) {
                 for (std::size_t k = 0; k < nspec; ++k)
                     work[k] = dirty_ft[k] * w.scale_ft[static_cast<std::size_t>(s)][k];
@@ -608,7 +620,7 @@ CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nte
                 for (std::size_t k = 0; k < nspec; ++k) work[k] = pf[k] * model_ft[k];
                 backward_c2r<T>(work.data(), smooth_mod.data(), nx, ny);
                 recenter_convolution<T>(smooth_mod.data(), nx, ny, scratch.data(), 1);
-                T* d = residual + static_cast<std::size_t>(t1) * nimg;
+                T* d = residual + static_cast<std::ptrdiff_t>(t1) * residual_term_stride;
                 for (std::size_t k = 0; k < nimg; ++k) d[k] -= smooth_mod[k];
             }
         }
@@ -647,9 +659,11 @@ template int taylor_hessian<float>(const float*, int, int, int, std::vector<floa
 template int taylor_hessian<double>(const double*, int, int, int, std::vector<float>&, float, std::vector<double>&,
                                     std::vector<double>&, std::vector<double>&, int&);
 template CleanResult<float> clean<float>(float*, float*, const float*, const float*, int, int, int,
-                                         const std::vector<float>&, float, int, float, float, float);
+                                         const std::vector<float>&, float, int, float, float, float,
+                                         std::ptrdiff_t);
 template CleanResult<double> clean<double>(double*, double*, const double*, const double*, int, int, int,
-                                           const std::vector<float>&, float, int, double, double, double);
+                                           const std::vector<float>&, float, int, double, double, double,
+                                           std::ptrdiff_t);
 template void principal_solution<float>(float*, const double*, int, int, int);
 template void principal_solution<double>(double*, const double*, int, int, int);
 

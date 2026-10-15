@@ -18,7 +18,10 @@
 // after return.
 //
 // Layout: row-major (ny, nx), pixel (ix, iy) at iy*nx + ix. Taylor stacks
-// are (nterms, ny, nx); the PSF stack is (2*nterms-1, ny, nx).
+// are (nterms, ny, nx); the PSF stack is (2*nterms-1, ny, nx). Residual
+// spatial planes must be contiguous, but residual_term_stride may exceed
+// ny*nx so a polarization slice of a larger image can be updated without a
+// copy. Model and PSF stacks remain fully contiguous.
 
 #include <cstddef>
 #include <vector>
@@ -77,7 +80,7 @@ int taylor_hessian(const T* psf, int nterms, int nx, int ny, std::vector<float>&
 template <typename T>
 CleanResult<T> clean(T* residual, T* model, const T* psf, const T* mask, int nterms, int nx, int ny,
                      const std::vector<float>& scales, float small_scale_bias, int max_iter_per_cycle, T gain,
-                     T threshold_per_cycle, T mask_threshold);
+                     T threshold_per_cycle, T mask_threshold, std::ptrdiff_t residual_term_stride = 0);
 
 // residual[t1] = sum_t2 inverse_hessian[t1, t2] * residual[t2] in place
 // (MultiTermMatrixCleaner::computeprincipalsolution). inverse_hessian is
@@ -92,9 +95,11 @@ extern template int taylor_hessian<double>(const double*, int, int, int, std::ve
                                            std::vector<double>&, std::vector<double>&,
                                            std::vector<double>&, int&);
 extern template CleanResult<float> clean<float>(float*, float*, const float*, const float*, int, int, int,
-                                                const std::vector<float>&, float, int, float, float, float);
+                                                const std::vector<float>&, float, int, float, float, float,
+                                                std::ptrdiff_t);
 extern template CleanResult<double> clean<double>(double*, double*, const double*, const double*, int, int, int,
-                                                  const std::vector<float>&, float, int, double, double, double);
+                                                  const std::vector<float>&, float, int, double, double, double,
+                                                  std::ptrdiff_t);
 extern template void principal_solution<float>(float*, const double*, int, int, int);
 extern template void principal_solution<double>(double*, const double*, int, int, int);
 

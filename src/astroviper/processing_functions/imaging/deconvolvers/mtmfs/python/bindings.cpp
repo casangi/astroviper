@@ -37,6 +37,45 @@ py::buffer_info check_array(py::array& arr, const char* name, const std::vector<
     return info;
 }
 
+template <typename T>
+py::buffer_info check_strided_residual(py::array& arr, const std::vector<py::ssize_t>& shape) {
+    if (!py::isinstance<py::array_t<T>>(arr))
+        throw std::runtime_error("residual has wrong dtype; expected " +
+                                 py::cast<std::string>(py::dtype::of<T>().attr("name")) + " but got " +
+                                 py::cast<std::string>(arr.dtype().attr("name")));
+    if (!arr.writeable()) throw std::runtime_error("residual must be writeable (modified in place)");
+    py::buffer_info info = arr.request(true);
+    if (info.ndim != 3) throw std::runtime_error("residual must be a 3-D array");
+    for (int d = 0; d < 3; ++d)
+        if (info.shape[d] != shape[d])
+            throw std::runtime_error("residual has wrong shape; expected (" + std::to_string(shape[0]) + ", " +
+                                     std::to_string(shape[1]) + ", " + std::to_string(shape[2]) + ")");
+
+    const py::ssize_t itemsize = static_cast<py::ssize_t>(sizeof(T));
+    const py::ssize_t plane_bytes = shape[1] * shape[2] * itemsize;
+    if (info.strides[2] != itemsize || info.strides[1] != shape[2] * itemsize ||
+        info.strides[0] < plane_bytes || info.strides[0] % itemsize != 0)
+        throw std::runtime_error(
+            "residual spatial planes must be C-contiguous with a positive Taylor-term stride (no copy is made)");
+    return info;
+}
+
+struct MemoryInterval {
+    std::uintptr_t begin;
+    std::uintptr_t end;
+};
+
+MemoryInterval memory_interval(const py::buffer_info& info) {
+    std::uintptr_t extent = static_cast<std::uintptr_t>(info.itemsize);
+    for (py::ssize_t d = 0; d < info.ndim; ++d) {
+        if (info.strides[d] < 0) throw std::runtime_error("negative array strides are not supported");
+        if (info.shape[d] > 0)
+            extent += static_cast<std::uintptr_t>((info.shape[d] - 1) * info.strides[d]);
+    }
+    const auto begin = reinterpret_cast<std::uintptr_t>(info.ptr);
+    return {begin, begin + extent};
+}
+
 void stack_dims(const py::array& stack, const char* name, int& n, int& ny, int& nx, bool psf_stack = false) {
     if (stack.ndim() != 3) throw std::runtime_error(std::string(name) + " must be a 3-D array (nterms, ny, nx)");
     const py::ssize_t nplanes = stack.shape(0);
@@ -75,14 +114,13 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
     const std::vector<py::ssize_t> stack = {nterms, ny, nx};
     const std::vector<py::ssize_t> psf_shape = {2 * nterms - 1, ny, nx};
 
-    py::buffer_info ri = check_array<T>(residual, "residual", stack, true);
+    py::buffer_info ri = check_strided_residual<T>(residual, stack);
     py::buffer_info mi = check_array<T>(model, "model", stack, true);
     py::buffer_info pi = check_array<T>(psf, "psf", psf_shape, false);
     auto overlaps = [](const py::buffer_info& a, const py::buffer_info& b) {
-        const auto a0 = reinterpret_cast<std::uintptr_t>(a.ptr), b0 = reinterpret_cast<std::uintptr_t>(b.ptr);
-        const auto an = static_cast<std::uintptr_t>(a.size * a.itemsize);
-        const auto bn = static_cast<std::uintptr_t>(b.size * b.itemsize);
-        return a0 < b0 + bn && b0 < a0 + an;
+        const MemoryInterval ai = memory_interval(a);
+        const MemoryInterval bi = memory_interval(b);
+        return ai.begin < bi.end && bi.begin < ai.end;
     };
     if (overlaps(ri, mi))
         throw std::runtime_error("residual and model must be distinct, non-overlapping arrays");
@@ -113,7 +151,7 @@ py::dict clean_impl(py::array residual, py::array psf, py::array model, py::obje
         py::gil_scoped_release release;
         result = mtmfs::clean<T>(res, mod, psf_ptr, mask_ptr, nterms, nx, ny, scales, small_scale_bias,
                                  max_iter_per_cycle, static_cast<T>(gain), static_cast<T>(threshold_per_cycle),
-                                 static_cast<T>(mask_threshold));
+                                 static_cast<T>(mask_threshold), ri.strides[0] / static_cast<py::ssize_t>(sizeof(T)));
     }
 
     const int nscales = static_cast<int>(result.scales.size());
@@ -211,7 +249,9 @@ PYBIND11_MODULE(_mtmfs_ext, m) {
 
     m.def("clean", &clean_dispatch,
           "One MTMFS model update in place, with 1 <= nterms <= 4. residual and model are (nterms, ny, nx) "
-          "C-contiguous writeable arrays of the same dtype (float32 or float64). psf is "
+          "writeable arrays of the same dtype (float32 or float64). Each residual spatial plane must be "
+          "C-contiguous; the Taylor-term axis may be strided so views into a larger image are updated without "
+          "a copy. model must be fully C-contiguous. psf is "
           "(2*nterms-1, ny, nx), read-only. mask is an optional (ny, nx) array of the same "
           "dtype, or None. scales are pixel sizes (empty -> [0]; otherwise 0 is required; sorted and de-duplicated; "
           "sizes larger than half the image are dropped). small_scale_bias is clamped to "

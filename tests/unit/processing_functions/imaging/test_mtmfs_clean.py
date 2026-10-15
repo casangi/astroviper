@@ -827,6 +827,40 @@ class TestArrayValidation:
         with pytest.raises(RuntimeError, match="C-contiguous"):
             mtmfs.clean(residual[:, :, ::2], make_psf_stack(2, 48, 40), model)
 
+    def test_taylor_strided_residual_updates_parent_without_copy(self):
+        dirty = make_dirty_stack(2, 48, 40)
+        psf = make_psf_stack(2, 48, 40)
+        expected_residual = dirty.copy()
+        expected_model = np.zeros_like(dirty)
+        expected = mtmfs.clean(
+            expected_residual,
+            psf,
+            expected_model,
+            max_iter_per_cycle=1,
+            gain=0.1,
+        )
+
+        parent = np.zeros((1, 2, 2, 40, 48), dtype=np.float32)
+        parent[0, :, 1] = dirty
+        residual_view = parent[0, :, 1]
+        assert not residual_view.flags.c_contiguous
+        assert residual_view.strides[1:] == dirty.strides[1:]
+        model = np.zeros_like(dirty)
+
+        actual = mtmfs.clean(
+            residual_view,
+            psf,
+            model,
+            max_iter_per_cycle=1,
+            gain=0.1,
+        )
+
+        np.testing.assert_array_equal(parent[0, :, 0], 0.0)
+        np.testing.assert_allclose(residual_view, expected_residual)
+        np.testing.assert_allclose(model, expected_model)
+        assert actual["iter_done"] == expected["iter_done"]
+        assert actual["peakres"] == pytest.approx(expected["peakres"])
+
     def test_readonly_arrays_raise(self):
         residual = make_dirty_stack(2, 48, 40)
         model = np.zeros_like(residual)

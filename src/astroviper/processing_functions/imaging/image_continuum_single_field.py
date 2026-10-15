@@ -1981,10 +1981,11 @@ def _model_update_native_mtmfs(
     start = time.time()
     for tt in range(ntime):
         for pp in range(npol):
-            # Indexing produces the native (nterms, l, m) layout directly. No
-            # flattening or reshaping is needed. A contiguous copy protects the
-            # verified major-cycle residual from the kernel's in-place update.
-            residual_work = np.array(residual[tt, :, pp, :, :], copy=True, order="C")
+            # Pass the writable Taylor-stack view directly. Its spatial planes
+            # are contiguous; the native binding honors the Taylor-term stride
+            # introduced by the polarization axis and updates SKY_RESIDUAL in
+            # place without allocating a second residual stack.
+            residual_work = residual[tt, :, pp, :, :]
             psf_work = np.ascontiguousarray(psf[tt, :, pp, :, :])
             model_work = np.zeros_like(residual_work)
             mask_work = np.ascontiguousarray(support[tt, pp], dtype=residual_work.dtype)
@@ -2142,9 +2143,11 @@ def model_update_mtmfs_single_field(
 
     Notes
     -----
-    Native MT-MFS operates on contiguous working copies because its C++ kernel
-    updates residual and model buffers in place. No array is flattened or
-    reshaped; the verified major-cycle residual in ``img_xds`` remains unchanged.
+    Native MT-MFS updates the selected residual Taylor stacks in ``img_xds``
+    in place. Their spatial planes are contiguous while the binding explicitly
+    honors the Taylor-term stride introduced by the polarization axis, so no
+    residual copy or reshape is made. The model buffer remains a zero-initialized
+    increment for the current model update.
     """
     import copy
     import time
