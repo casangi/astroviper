@@ -10,7 +10,7 @@ authors = [{ name = "Jan-Willem Steeb", email = "jsteeb@nrao.edu"},
 ]
 license = { file = "LICENSE.txt" }
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11,<3.15"
 
 # ✅ Core runtime dependencies must live here
 dependencies = [
