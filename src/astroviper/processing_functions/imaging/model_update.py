@@ -42,6 +42,9 @@ def model_update_cube_single_field(
         records the peak residual and the residual RMS of every iteration
         (see
         :func:`~astroviper.processing_functions.imaging.deconvolution.hogbom_clean`).
+        ``exact_psf_subtraction`` (default ``False``; Hogbom only) subtracts
+        with ``subtraction_psf_cube``, the PSF of twice the image size (see
+        :func:`~astroviper.processing_functions.imaging.deconvolution.deconvolve`).
         The
         separate ``primary_beam_limit`` builds the primary-beam mask (a
         chunk-independent quantity, so the mask does not depend on how the cube

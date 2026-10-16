@@ -33,6 +33,10 @@ DIVERGENCE_PEAK_GAIN_FRACTION = 1.0  # hard limit: (1 + gain) x starting peak
 # update (``record_iteration_history``).
 ITERATION_HISTORY_ALGORITHMS = ("hogbom", "hogbom_many_threads")
 
+# The deconvolvers that subtract a PSF of twice the image size
+# (``exact_psf_subtraction``).
+EXACT_PSF_SUBTRACTION_ALGORITHMS = ("hogbom", "hogbom_many_threads")
+
 # XXX : TODO: As of 2025-10-07 there is no way to supply an initial model image to the deconvolver
 
 
@@ -132,6 +136,14 @@ def _validate_deconvolve_params(deconvolve_params):
         - ``record_iteration_history`` : bool, record the peak residual and
           the residual RMS of every iteration (Hogbom only, see
           :func:`hogbom_clean`). Default ``False``.
+        - ``exact_psf_subtraction`` : bool, subtract every component over the
+          whole image with ``subtraction_psf_cube`` (Hogbom only, see
+          :func:`deconvolve`). Default ``False``.
+        - ``subtraction_psf_cube`` : ``(nt, nf, np_psf, 2 ny, 2 nx)`` array,
+          the PSF of twice the image size that ``exact_psf_subtraction``
+          subtracts, as
+          :func:`~astroviper.processing_functions.imaging.make_point_spread_function.make_subtraction_point_spread_function_single_field`
+          makes it. Read by :func:`deconvolve` only.
 
     Returns
     -------
@@ -159,6 +171,7 @@ def _validate_deconvolve_params(deconvolve_params):
         "max_psf_fraction": 0.8,
         "max_iter_divergence": 1,
         "record_iteration_history": False,
+        "exact_psf_subtraction": False,
     }
 
     for key, default_value in default_params.items():
@@ -199,11 +212,9 @@ def _validate_deconvolve_params(deconvolve_params):
                     "max_iter_divergence must be a positive integer, or -1 to "
                     f"disable the divergence test; got {value!r}."
                 )
-        elif key == "record_iteration_history":
+        elif key in ("record_iteration_history", "exact_psf_subtraction"):
             if not isinstance(value, bool | np.bool_):
-                raise ValueError(
-                    f"record_iteration_history must be a bool; got {value!r}."
-                )
+                raise ValueError(f"{key} must be a bool; got {value!r}.")
 
     return deconvolve_params
 
@@ -242,6 +253,42 @@ def validate_record_iteration_history(deconvolver, record_iteration_history):
         raise ValueError(
             "record_iteration_history is supported by the Hogbom deconvolvers "
             f"{ITERATION_HISTORY_ALGORITHMS} only; got deconvolver {deconvolver!r}."
+        )
+
+
+def validate_exact_psf_subtraction(deconvolver, exact_psf_subtraction):
+    """Refuse ``exact_psf_subtraction`` for a deconvolver that cannot do it.
+
+    A Hogbom kernel subtracts every component over the PSF offsets it is
+    given, so a PSF of twice the image size reaches every pixel. Asp convolves
+    by FFT on the image grid, where the PSF outside the image wraps around
+    instead.
+
+    Parameters
+    ----------
+    deconvolver : str
+        Deconvolution algorithm (case insensitive).
+    exact_psf_subtraction : bool
+        Whether the subtraction with the PSF of twice the image size is
+        requested.
+
+    Raises
+    ------
+    ValueError
+        If ``exact_psf_subtraction`` is not a bool, or if it is requested from
+        a deconvolver other than ``"hogbom"`` or ``"hogbom_many_threads"``.
+    """
+    if not isinstance(exact_psf_subtraction, bool | np.bool_):
+        raise ValueError(
+            f"exact_psf_subtraction must be a bool; got {exact_psf_subtraction!r}."
+        )
+    if exact_psf_subtraction and (
+        deconvolver.lower() not in EXACT_PSF_SUBTRACTION_ALGORITHMS
+    ):
+        raise ValueError(
+            "exact_psf_subtraction is supported by the Hogbom deconvolvers "
+            f"{EXACT_PSF_SUBTRACTION_ALGORITHMS} only; got deconvolver "
+            f"{deconvolver!r}."
         )
 
 
@@ -704,13 +751,25 @@ def deconvolve(
     ValueError
         If ``algorithm`` is not recognized, if the PSF polarization
         dimension is incompatible with the image polarization dimension,
-        or if ``record_iteration_history`` is requested from the Asp
-        algorithm (see :func:`validate_record_iteration_history`).
+        if ``record_iteration_history`` or ``exact_psf_subtraction`` is
+        requested from the Asp algorithm (see
+        :func:`validate_record_iteration_history` and
+        :func:`validate_exact_psf_subtraction`), or if
+        ``exact_psf_subtraction`` is set without a ``subtraction_psf_cube``
+        of the PSF's ``(time, frequency, polarization)`` shape and twice the
+        image size.
 
     Notes
     -----
     - The PSF may be single-polarization (Stokes I only), in which case
       it is broadcast across all image polarizations.
+    - With ``exact_psf_subtraction`` the Hogbom deconvolvers subtract
+      ``deconvolve_params["subtraction_psf_cube"]``, the PSF of twice the
+      image size, so every component is subtracted from the whole image;
+      without it they subtract the image-sized PSF, about ``n/2`` pixels
+      either side of the component along each axis (see
+      :func:`hogbom_clean` and :func:`hogbom_clean_many_threads`). The
+      image-sized PSF gives ``max_psf_sidelobe`` either way.
     - Deconvolution is performed independently on each
       ``(time, frequency, polarization)`` plane; parallelization across
       planes happens inside the C++ binding.
@@ -740,6 +799,10 @@ def deconvolve(
     validate_record_iteration_history(
         algorithm_l, (deconvolve_params or {}).get("record_iteration_history", False)
     )
+    exact_psf_subtraction = (deconvolve_params or {}).get(
+        "exact_psf_subtraction", False
+    )
+    validate_exact_psf_subtraction(algorithm_l, exact_psf_subtraction)
 
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {"sky": "SKY_MODEL"}
@@ -758,6 +821,18 @@ def deconvolve(
     max_sidelobe_point_spread_function_name = data_group_out[
         "max_sidelobe_point_spread_function"
     ]
+
+    subtraction_psf_cube = None
+    if exact_psf_subtraction:
+        subtraction_psf_cube = deconvolve_params.get("subtraction_psf_cube")
+        nt, nf, npol_psf, n_l, n_m = img_xds[psf_name].shape
+        expected = (nt, nf, npol_psf, 2 * n_l, 2 * n_m)
+        got = getattr(subtraction_psf_cube, "shape", None)
+        if got != expected:
+            raise ValueError(
+                "exact_psf_subtraction needs deconvolve_params"
+                f"['subtraction_psf_cube'] of shape {expected}; got {got}."
+            )
 
     if model_name not in img_xds.data_vars:
         img_xds[model_name] = xr.zeros_like(img_xds[residual_name])
@@ -809,7 +884,11 @@ def deconvolve(
         )
 
     residual_arr = img_xds[residual_name].values
-    psf_arr = img_xds[psf_name].values
+    psf_arr = (
+        img_xds[psf_name].values
+        if subtraction_psf_cube is None
+        else subtraction_psf_cube
+    )
     model_arr = img_xds[model_name].values
     max_psf_sidelobe = img_xds[
         max_sidelobe_point_spread_function_name
@@ -1025,10 +1104,14 @@ def hogbom_clean(
         C-contiguous, writeable, and float32 or float64. Updated in
         place with the post-CLEAN residual.
     psf_cube : numpy.ndarray
-        5-D PSF array with shape ``(nt, nf, np_psf, ny, nx)`` where
+        5-D PSF array with shape ``(nt, nf, np_psf, ny, nx)`` or
+        ``(nt, nf, np_psf, 2 ny, 2 nx)``, peak at its centre
+        (``psf_ny // 2, psf_nx // 2``), where
         ``np_psf`` equals ``np`` or is ``1`` (Stokes-I broadcast across
         all image polarizations). Must be C-contiguous and share the
-        dtype of ``residual_cube``. Not modified.
+        dtype of ``residual_cube``. Not modified. An image-sized PSF
+        subtracts a component over the offsets ``-n/2 .. n/2 - 1`` of each
+        axis, one of twice the image size over the whole image (see Notes).
     model_cube : numpy.ndarray
         5-D model array with shape ``(nt, nf, np, ny, nx)``. CLEAN
         components are **added** into this array in place, allowing
@@ -1076,6 +1159,15 @@ def hogbom_clean(
     The 5-D layout is the same one used by ``xarray`` image datasets in
     astroviper, so a plain ``img_xds[name].values`` call produces an
     array that can be passed to this function without any copy.
+
+    **PSF size.** A component found at pixel ``p`` is subtracted at pixel
+    ``x`` with the PSF value at offset ``x - p`` from its centre, for the
+    offsets ``-psf_n // 2 .. psf_n // 2 - 1`` along each axis that fall in
+    the image. With an image-sized PSF (``psf_n = n``) pixels farther from
+    the component keep the sidelobes of the flux cleaned until the next
+    residual update. With a PSF of twice the image size every pixel is
+    subtracted at its true offset, at the cost of a subtraction over the
+    whole image at every iteration.
 
     **Stop tests (iteration control).** Every plane is tested at every
     iteration, inside the C++ kernel, and stops when
@@ -1138,9 +1230,10 @@ def hogbom_clean(
     # PSF cube may broadcast on the polarization axis.
     nt, nf, npol_img, ny, nx = residual_cube.shape
     nt_p, nf_p, npol_psf, ny_p, nx_p = psf_cube.shape
-    if (nt_p, nf_p, ny_p, nx_p) != (nt, nf, ny, nx):
+    if (nt_p, nf_p) != (nt, nf) or (ny_p, nx_p) not in ((ny, nx), (2 * ny, 2 * nx)):
         raise ValueError(
-            "psf_cube must match residual_cube on (time, frequency, y, x). "
+            "psf_cube must match residual_cube on (time, frequency, y, x), or "
+            "on (time, frequency) with twice its (y, x) size. "
             f"Got psf shape {psf_cube.shape} vs residual shape "
             f"{residual_cube.shape}"
         )
@@ -1210,7 +1303,9 @@ def hogbom_clean_many_threads(
     subtraction *within* every plane (the parallel domain is ``plane x row``), so
     all ``processing_function_threads`` stay busy regardless of the plane count. The per-plane
     algorithm and tie-breaking match :func:`hogbom_clean`, so the result is
-    bit-identical on tie-free data; the residual and model cubes are updated in
+    bit-identical on tie-free data, except with an image-sized PSF of odd
+    ``ny``: the PSF row at offset ``+ny // 2``, which :func:`hogbom_clean`
+    leaves out, is subtracted too. The residual and model cubes are updated in
     place. Parameters, return value and stop tests (threshold, divergence
     with ``max_iter_divergence``; see the Notes of :func:`hogbom_clean`) match
     :func:`hogbom_clean`.
@@ -1237,9 +1332,10 @@ def hogbom_clean_many_threads(
 
     nt, nf, npol_img, ny, nx = residual_cube.shape
     nt_p, nf_p, npol_psf, ny_p, nx_p = psf_cube.shape
-    if (nt_p, nf_p, ny_p, nx_p) != (nt, nf, ny, nx):
+    if (nt_p, nf_p) != (nt, nf) or (ny_p, nx_p) not in ((ny, nx), (2 * ny, 2 * nx)):
         raise ValueError(
-            "psf_cube must match residual_cube on (time, frequency, y, x). "
+            "psf_cube must match residual_cube on (time, frequency, y, x), or "
+            "on (time, frequency) with twice its (y, x) size. "
             f"Got psf shape {psf_cube.shape} vs residual shape {residual_cube.shape}"
         )
     if npol_psf not in (npol_img, 1):
@@ -1382,12 +1478,15 @@ def asp_clean(
         dtype, or have incompatible shapes, or if ``record_iteration_history``
         is requested: an Asp iteration subtracts a fitted Aspen, not the PSF
         at a residual peak, so only the Hogbom kernels record the iteration
-        history (see :func:`validate_record_iteration_history`).
+        history (see :func:`validate_record_iteration_history`), or if
+        ``exact_psf_subtraction`` is requested (see
+        :func:`validate_exact_psf_subtraction`).
     """
     deconvolve_params = _validate_deconvolve_params(deconvolve_params)
     validate_record_iteration_history(
         "asp", deconvolve_params["record_iteration_history"]
     )
+    validate_exact_psf_subtraction("asp", deconvolve_params["exact_psf_subtraction"])
 
     for name, arr in (
         ("residual_cube", residual_cube),

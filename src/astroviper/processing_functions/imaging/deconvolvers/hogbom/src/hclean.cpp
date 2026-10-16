@@ -83,11 +83,14 @@ void maximg(const T* limagestep, int domask, const bool* lmask,
  *
  * @param limage 2D output model image (clean components) [ny][nx]
  * @param limagestep 2D input dirty image / output residual [ny][nx]
- * @param lpsf 2D point spread function [ny][nx]
+ * @param lpsf 2D point spread function [psf_ny][psf_nx], peak at
+ *             (psf_ny/2, psf_nx/2)
  * @param domask flag indicating if mask is present (0 = no mask)
  * @param lmask 2D input mask image [ny][nx]
  * @param nx width of images
  * @param ny height of images
+ * @param psf_nx width of the PSF: nx, or 2 nx to subtract over the whole image
+ * @param psf_ny height of the PSF: ny, or 2 ny
  * @param xbeg starting x coordinate for clean box (0-based)
  * @param xend ending x coordinate for clean box (0-based, exclusive)
  * @param ybeg starting y coordinate for clean box (0-based)
@@ -107,7 +110,7 @@ void maximg(const T* limagestep, int domask, const bool* lmask,
  */
 template<typename T>
 void clean(T* limage, T* limagestep, const T* lpsf,
-           int domask, const bool* lmask, int nx, int ny,
+           int domask, const bool* lmask, int nx, int ny, int psf_nx, int psf_ny,
            int xbeg, int xend, int ybeg, int yend,
            int max_iter_per_cycle_updated, int siter, int& iter, T gain, T thres,
            T cspeedup,
@@ -194,12 +197,12 @@ void clean(T* limage, T* limagestep, const T* lpsf,
             break;
         }
 
-        // Calculate bounds for PSF subtraction
-        // Note: In Fortran code, PSF appears to be centered, so we use nx/2, ny/2
-        int x1 = std::max(0, px - nx / 2);
-        int y1 = std::max(0, py - ny / 2);
-        int x2 = std::min(nx - 1, px + nx / 2 - 1);
-        int y2 = std::min(ny - 1, py + ny / 2 - 1);
+        // Offsets -psf_n/2 .. psf_n/2 - 1 from the PSF centre, clipped to the
+        // image: the whole image for a PSF of twice its size.
+        int x1 = std::max(0, px - psf_nx / 2);
+        int y1 = std::max(0, py - psf_ny / 2);
+        int x2 = std::min(nx - 1, px + psf_nx / 2 - 1);
+        int y2 = std::min(ny - 1, py + psf_ny / 2 - 1);
 
         // Add component to model and subtract from residual
         T pv = gain * maxval;
@@ -212,18 +215,17 @@ void clean(T* limage, T* limagestep, const T* lpsf,
         for (int iy = y1; iy <= y2; ++iy) {
             for (int ix = x1; ix <= x2; ++ix) {
                 // PSF indexing: convert from Fortran centered indexing
-                // Fortran: lpsf(nx/2+ix-px+1, ny/2+iy-py+1)
-                // C++: lpsf[(ny/2 + iy - py) * nx + (nx/2 + ix - px)]
-                int psf_x = nx / 2 + ix - px;
-                int psf_y = ny / 2 + iy - py;
+                // C++: lpsf[(psf_ny/2 + iy - py) * psf_nx + (psf_nx/2 + ix - px)]
+                int psf_x = psf_nx / 2 + ix - px;
+                int psf_y = psf_ny / 2 + iy - py;
 
                 // Check if psf_x and psf_y are within bounds
-                if (psf_x < 0 || psf_x >= nx || psf_y < 0 || psf_y >= ny) {
+                if (psf_x < 0 || psf_x >= psf_nx || psf_y < 0 || psf_y >= psf_ny) {
                     continue; // Skip out-of-bounds
                 }
 
                 limagestep[iy * nx + ix] -=
-                    pv * lpsf[psf_y * nx + psf_x];
+                    pv * lpsf[static_cast<std::size_t>(psf_y) * psf_nx + psf_x];
             }
         }
     }
@@ -265,7 +267,7 @@ template<typename T>
 void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
                 int domask, const bool* mask_cube,
                 int nt, int nf, int np_img, int np_psf,
-                int ny, int nx,
+                int ny, int nx, int psf_ny, int psf_nx,
                 int xbeg, int xend, int ybeg, int yend,
                 const int* max_iter_per_cycle_updated, T gain, const T* thres, T cspeedup,
                 int processing_function_threads, int* iter_out,
@@ -283,6 +285,8 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
     auto noop_stopnow = [](int& x) { x = 0; };
 
     const std::size_t plane_size = static_cast<std::size_t>(ny) * static_cast<std::size_t>(nx);
+    const std::size_t psf_plane_size =
+        static_cast<std::size_t>(psf_ny) * static_cast<std::size_t>(psf_nx);
 
     std::atomic<int> next_plane(0);
 
@@ -297,7 +301,7 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
             const std::size_t img_offset =
                 ((static_cast<std::size_t>(tt) * nf + nn) * np_img + pp) * plane_size;
             const std::size_t psf_offset =
-                ((static_cast<std::size_t>(tt) * nf + nn) * np_psf + pidx) * plane_size;
+                ((static_cast<std::size_t>(tt) * nf + nn) * np_psf + pidx) * psf_plane_size;
 
             T* residual = residual_cube + img_offset;
             T* model = model_cube + img_offset;
@@ -313,7 +317,7 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
             // its own divergence state.
             clean<T>(model, residual, psf,
                      domask, mask,
-                     nx, ny, xbeg, xend, ybeg, yend,
+                     nx, ny, psf_nx, psf_ny, xbeg, xend, ybeg, yend,
                      max_iter_per_cycle_updated[plane], 0, iter_val, gain, thres[plane], cspeedup,
                      noop_msgput, noop_stopnow, divergence, reason,
                      (history == nullptr) ? nullptr : history + plane);
@@ -448,7 +452,7 @@ template<typename T>
 void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
                 int domask, const bool* mask_cube,
                 int nt, int nf, int np_img, int np_psf,
-                int ny, int nx,
+                int ny, int nx, int psf_ny, int psf_nx,
                 int xbeg, int xend, int ybeg, int yend,
                 const int* max_iter_per_cycle_updated, T gain, const T* thres, T cspeedup,
                 int processing_function_threads, int* iter_out,
@@ -461,6 +465,8 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
     }
     const std::size_t plane_size =
         static_cast<std::size_t>(ny) * static_cast<std::size_t>(nx);
+    const std::size_t psf_plane_size =
+        static_cast<std::size_t>(psf_ny) * static_cast<std::size_t>(psf_nx);
 
     std::vector<char> active(nplanes, 1);
     std::vector<PlaneStopTest<T>> stop_test(nplanes);
@@ -607,18 +613,18 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
                 const int pidx = (np_psf == 1) ? 0 : pp;
                 const T* psf = psf_cube
                     + (static_cast<std::size_t>(tt * nf + nn) * np_psf + pidx)
-                          * plane_size;
-                const int psf_y = ny / 2 + iy - py;
-                if (psf_y < 0 || psf_y >= ny) continue;
+                          * psf_plane_size;
+                const int psf_y = psf_ny / 2 + iy - py;
+                if (psf_y < 0 || psf_y >= psf_ny) continue;
                 T* res = residual_cube
                     + static_cast<std::size_t>(pl) * plane_size
                     + static_cast<std::size_t>(iy) * nx;
-                const T* psf_row = psf + static_cast<std::size_t>(psf_y) * nx;
-                const int x1 = std::max(0, px - nx / 2);
-                const int x2 = std::min(nx - 1, px + nx / 2 - 1);
+                const T* psf_row = psf + static_cast<std::size_t>(psf_y) * psf_nx;
+                const int x1 = std::max(0, px - psf_nx / 2);
+                const int x2 = std::min(nx - 1, px + psf_nx / 2 - 1);
                 for (int ix = x1; ix <= x2; ++ix) {
-                    const int psf_x = nx / 2 + ix - px;
-                    if (psf_x < 0 || psf_x >= nx) continue;
+                    const int psf_x = psf_nx / 2 + ix - px;
+                    if (psf_x < 0 || psf_x >= psf_nx) continue;
                     res[ix] -= pv * psf_row[psf_x];
                 }
             }
@@ -657,7 +663,7 @@ template void maximg<double>(const double* limagestep, int domask, const bool* l
                             int nx, int ny, double& fmin, double& fmax);
 
 template void clean<float>(float* limage, float* limagestep, const float* lpsf,
-                          int domask, const bool* lmask, int nx, int ny,
+                          int domask, const bool* lmask, int nx, int ny, int psf_nx, int psf_ny,
                           int xbeg, int xend, int ybeg, int yend,
                           int max_iter_per_cycle_updated, int siter, int& iter, float gain, float thres,
                           float cspeedup,
@@ -667,7 +673,7 @@ template void clean<float>(float* limage, float* limagestep, const float* lpsf,
                           int& stop_reason, IterationHistory* history);
 
 template void clean<double>(double* limage, double* limagestep, const double* lpsf,
-                           int domask, const bool* lmask, int nx, int ny,
+                           int domask, const bool* lmask, int nx, int ny, int psf_nx, int psf_ny,
                            int xbeg, int xend, int ybeg, int yend,
                            int max_iter_per_cycle_updated, int siter, int& iter, double gain, double thres,
                            double cspeedup,
@@ -680,7 +686,7 @@ template void clean_cube<float>(float* residual_cube, float* model_cube,
                                 const float* psf_cube, int domask,
                                 const bool* mask_cube,
                                 int nt, int nf, int np_img, int np_psf,
-                                int ny, int nx,
+                                int ny, int nx, int psf_ny, int psf_nx,
                                 int xbeg, int xend, int ybeg, int yend,
                                 const int* max_iter_per_cycle_updated, float gain, const float* thres, float cspeedup,
                                 int processing_function_threads, int* iter_out,
@@ -691,7 +697,7 @@ template void clean_cube<double>(double* residual_cube, double* model_cube,
                                  const double* psf_cube, int domask,
                                  const bool* mask_cube,
                                  int nt, int nf, int np_img, int np_psf,
-                                 int ny, int nx,
+                                 int ny, int nx, int psf_ny, int psf_nx,
                                  int xbeg, int xend, int ybeg, int yend,
                                  const int* max_iter_per_cycle_updated, double gain, const double* thres, double cspeedup,
                                  int processing_function_threads, int* iter_out,
@@ -702,7 +708,7 @@ template void clean_cube_many_threads<float>(float* residual_cube, float* model_
                                 const float* psf_cube, int domask,
                                 const bool* mask_cube,
                                 int nt, int nf, int np_img, int np_psf,
-                                int ny, int nx,
+                                int ny, int nx, int psf_ny, int psf_nx,
                                 int xbeg, int xend, int ybeg, int yend,
                                 const int* max_iter_per_cycle_updated, float gain, const float* thres, float cspeedup,
                                 int processing_function_threads, int* iter_out,
@@ -713,7 +719,7 @@ template void clean_cube_many_threads<double>(double* residual_cube, double* mod
                                  const double* psf_cube, int domask,
                                  const bool* mask_cube,
                                  int nt, int nf, int np_img, int np_psf,
-                                 int ny, int nx,
+                                 int ny, int nx, int psf_ny, int psf_nx,
                                  int xbeg, int xend, int ybeg, int yend,
                                  const int* max_iter_per_cycle_updated, double gain, const double* thres, double cspeedup,
                                  int processing_function_threads, int* iter_out,

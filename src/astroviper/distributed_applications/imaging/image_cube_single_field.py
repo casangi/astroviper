@@ -369,6 +369,20 @@ def image_cube_single_field(
           extra pass over the image per iteration. Hogbom deconvolvers only:
           ``deconvolver="asp"`` raises ``ValueError``. Default ``False``.
           No CASA equivalent.
+        - ``exact_psf_subtraction`` : If ``True``, a Hogbom model update
+          subtracts the PSF of every component it finds from the whole residual
+          image, with a PSF of twice the image size made once per channel from
+          the same imaging weights, cell size and gridding kernel. With
+          ``False`` it subtracts the image-sized PSF, which reaches about
+          ``n/2`` pixels either side of the component along each axis
+          (``n`` the image size in pixels), so farther pixels keep the
+          sidelobes of the flux cleaned until the next residual update. The
+          beam fit, ``max_psf_sidelobe`` and the PSF written use the
+          image-sized PSF either way. Costs a second PSF per channel (four
+          times the pixels, kept through the channel's cycles) and a
+          subtraction over the whole image at every iteration. Hogbom
+          deconvolvers only: ``deconvolver="asp"`` raises ``ValueError``.
+          Default ``False``. No CASA equivalent.
 
         A plane whose model updates do no iteration any more (two in a row)
         is stopped with the no progress stop code at the next stop test, so
@@ -704,6 +718,7 @@ def image_cube_single_field(
     from xradio.measurement_set import open_processing_set
 
     from astroviper.processing_functions.imaging.deconvolution import (
+        validate_exact_psf_subtraction,
         validate_record_iteration_history,
     )
     from astroviper.processing_functions.imaging.utils.cycle_control import (
@@ -824,9 +839,9 @@ def image_cube_single_field(
             f"{len(image_params['polarization_coords'])})"
         )
     # max_cycles (an integer, or "auto" with max_psf_fraction < 1),
-    # threshold_tolerance (a finite number >= 0) and record_iteration_history
-    # (Hogbom only) are checked again in every node task; checked here too so
-    # that a bad value leaves no image behind.
+    # threshold_tolerance (a finite number >= 0), record_iteration_history and
+    # exact_psf_subtraction (Hogbom only) are checked again in every node task;
+    # checked here too so that a bad value leaves no image behind.
     validate_max_cycles(
         cycle_control_params.get("max_cycles", -1),
         cycle_control_params.get("max_psf_fraction"),
@@ -834,6 +849,9 @@ def image_cube_single_field(
     validate_threshold_tolerance(cycle_control_params.get("threshold_tolerance", 0.0))
     validate_record_iteration_history(
         deconvolver, cycle_control_params.get("record_iteration_history", False)
+    )
+    validate_exact_psf_subtraction(
+        deconvolver, cycle_control_params.get("exact_psf_subtraction", False)
     )
 
     # A Measurement Set v2 is opened and its data group checked before
@@ -907,6 +925,10 @@ def image_cube_single_field(
             if n_mapping_parallelism is None
             else n_mapping_parallelism["frequency"],
             thread_info,
+            exact_psf_subtraction=cycle_control_params.get(
+                "exact_psf_subtraction", False
+            ),
+            fft_padding=image_params.get("fft_padding"),
         )
     )
 
@@ -1404,7 +1426,12 @@ def _validate_n_mapping_parallelism(n_mapping_parallelism):
 
 
 def calculate_mapping_parallelism_for_cube_imaging(
-    img_xds, single_precision_image, n_frequency_chunks, thread_info
+    img_xds,
+    single_precision_image,
+    n_frequency_chunks,
+    thread_info,
+    exact_psf_subtraction=False,
+    fft_padding=None,
 ):
     """Determine the mapping parallelism (number of frequency chunks) for cube
     imaging.
@@ -1429,6 +1456,14 @@ def calculate_mapping_parallelism_for_cube_imaging(
     thread_info : dict or None
         Thread information as returned by :func:`get_thread_info`.
         If ``None``, thread information is queried automatically.
+    exact_psf_subtraction : bool, optional
+        ``cycle_control_params["exact_psf_subtraction"]``: a channel also
+        holds the PSF of twice the image size and, while it is made, the uv
+        grid of every polarization and four FFT planes on its padded grid.
+        Default ``False``.
+    fft_padding : float, optional
+        The ``fft_padding`` of ``image_params``, which sizes that grid. Needed
+        with ``exact_psf_subtraction``.
 
     Returns
     -------
@@ -1462,6 +1497,25 @@ def calculate_mapping_parallelism_for_cube_imaging(
                 3 * n_pixels_single_frequency * bytes_in_dtype["complex128"] / (1024**3)
                 + 3 * n_pixels_single_frequency * bytes_in_dtype["float64"] / (1024**3)
             )
+        if exact_psf_subtraction:
+            from astroviper.processing_functions.imaging.utils.fft_sizing import (
+                padded_grid_size,
+            )
+
+            float_bytes, complex_bytes = (
+                (bytes_in_dtype["float32"], bytes_in_dtype["complex64"])
+                if single_precision_image
+                else (bytes_in_dtype["float64"], bytes_in_dtype["complex128"])
+            )
+            n_u, n_v = padded_grid_size(
+                [2 * img_xds.sizes["l"], 2 * img_xds.sizes["m"]], fft_padding
+            )
+            n_grid = int(n_u) * int(n_v) * img_xds.sizes["time"]
+            subtraction_bytes = (
+                4 * n_pixels_single_frequency * float_bytes
+                + n_grid * (img_xds.sizes["polarization"] + 4) * complex_bytes
+            )
+            memory_singleton_chunk += fudge_factor * subtraction_bytes / (1024**3)
 
         logger.info(
             "Memory required for a single frequency channel: "

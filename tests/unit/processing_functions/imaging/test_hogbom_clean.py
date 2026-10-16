@@ -1034,5 +1034,133 @@ class TestCubeReturnShapes:
         assert model[0, 0, 0, 4, 4] == pytest.approx(1.0, abs=1e-6)
 
 
+# ---------------------------------------------------------------------------
+# A PSF of twice the image size: every component subtracted from every pixel
+# ---------------------------------------------------------------------------
+
+CUBE_KERNELS = ["clean_cube", "clean_cube_many_threads"]
+
+
+def _exact_inputs(ny, nx, np_psf, dtype, seed=0):
+    """Two residual planes of noise, a PSF of twice their size with seeded
+    sidelobes out to its edge (peak 1 at (ny, nx)), a disc mask and a box."""
+    rng = np.random.default_rng(seed)
+    residual = rng.standard_normal((1, 1, 2, ny, nx)).astype(dtype)
+    psf = (0.1 * rng.standard_normal((1, 1, np_psf, 2 * ny, 2 * nx))).astype(dtype)
+    psf[..., ny, nx] = 1.0
+    yy, xx = np.mgrid[:ny, :nx]
+    disc = (yy - ny // 2) ** 2 + (xx - nx // 2) ** 2 <= (0.45 * min(ny, nx)) ** 2
+    mask = np.broadcast_to(disc, residual.shape).copy()
+    return residual, psf, mask, (2, nx - 1, 1, ny - 2)
+
+
+def _run_kernel(kernel, residual, psf, model, mask, box, n_iter, gain, divergence):
+    return getattr(hogbom, kernel)(
+        residual_cube=residual,
+        psf_cube=psf,
+        model_cube=model,
+        mask_cube=mask,
+        clean_box=box,
+        max_iter_per_cycle_updated=np.full(residual.shape[:3], n_iter, np.int32),
+        gain=gain,
+        threshold_per_cycle=np.zeros(residual.shape[:3], residual.dtype),
+        processing_function_threads=2,
+        max_iter_divergence=divergence,
+        divergence_rms_factor=1.01,
+        divergence_peak_factor=1.1,
+        record_iteration_history=True,
+    )
+
+
+class TestCubeExactSubtraction:
+    @pytest.mark.parametrize("kernel", CUBE_KERNELS)
+    @pytest.mark.parametrize("np_psf", [1, 2])
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    @pytest.mark.parametrize("shape", [(24, 24), (23, 23), (20, 26)])
+    @pytest.mark.parametrize("divergence", [-1, 1])
+    def test_equals_the_image_sized_kernel_on_an_embedded_image(
+        self, kernel, np_psf, dtype, shape, divergence
+    ):
+        """The PSF of twice the image size gives, to the bit, what the
+        image-sized kernel gives on a 2n image holding the residual at
+        (ny // 2, nx // 2), searched only there, with that PSF as its own."""
+        ny, nx = shape
+        residual, psf, mask, box = _exact_inputs(ny, nx, np_psf, dtype)
+        oy, ox = ny // 2, nx // 2
+        region = (..., slice(oy, oy + ny), slice(ox, ox + nx))
+        residual_2n = np.zeros(residual.shape[:3] + (2 * ny, 2 * nx), dtype)
+        residual_2n[region] = residual
+        mask_2n = np.zeros(residual_2n.shape, bool)
+        mask_2n[region] = mask
+        box_2n = (box[0] + ox, box[1] + ox, box[2] + oy, box[3] + oy)
+        model, model_2n = np.zeros_like(residual), np.zeros_like(residual_2n)
+
+        out = _run_kernel(kernel, residual, psf, model, mask, box, 200, 0.1, divergence)
+        ref = _run_kernel(
+            kernel, residual_2n, psf, model_2n, mask_2n, box_2n, 200, 0.1, divergence
+        )
+
+        assert np.array_equal(residual, residual_2n[region])
+        assert np.array_equal(model, model_2n[region])
+        model_2n[region] = 0
+        assert not model_2n.any()
+        for key in ("iterations_performed", "stop_code"):
+            assert np.array_equal(out[key], ref[key])
+        assert out["iterations_performed"].min() > 0
+        for key in ("iteration_peak_residual", "iteration_residual_rms"):
+            for got, want in zip(out[key][0][0], ref[key][0][0], strict=True):
+                assert np.array_equal(got, want)
+
+    @pytest.mark.parametrize("kernel", CUBE_KERNELS)
+    def test_residual_is_the_dirty_image_less_the_model_times_the_psf(self, kernel):
+        """With the PSF of twice the image size the residual is the dirty image
+        less the model convolved with that PSF, at every pixel. The
+        image-sized PSF misses a sidelobe ring at 0.75 n."""
+        n = 32
+        yy, xx = np.mgrid[: 2 * n, : 2 * n] - n
+        r = np.hypot(yy, xx)
+        psf2d = np.exp(-(r**2) / 6.0) + 0.2 * np.exp(-((r - 0.75 * n) ** 2) / 2.0)
+        psf = np.broadcast_to(psf2d / psf2d[n, n], (1, 1, 1, 2 * n, 2 * n)).copy()
+
+        def shifted(y, x):
+            return psf[0, 0, 0, n - y : 2 * n - y, n - x : 2 * n - x]
+
+        dirty = np.zeros((1, 1, 1, n, n))
+        for y, x, flux in ((5, 7, 1.0), (24, 20, -0.6), (12, 28, 0.4)):
+            dirty[0, 0, 0] += flux * shifted(y, x)
+        crop = psf[..., n - n // 2 : n - n // 2 + n, n - n // 2 : n - n // 2 + n]
+        errors = {}
+        for name, used in (("2n", psf), ("n", np.ascontiguousarray(crop))):
+            residual, model = dirty.copy(), np.zeros_like(dirty)
+            _run_kernel(
+                kernel, residual, used, model, np.array([]), (-1,) * 4, 300, 0.1, -1
+            )
+            expected = dirty[0, 0, 0].copy()
+            for y, x in zip(*np.nonzero(model[0, 0, 0]), strict=True):
+                expected -= model[0, 0, 0, y, x] * shifted(y, x)
+            errors[name] = np.abs(residual[0, 0, 0] - expected).max()
+        assert errors["2n"] <= 1e-12 * np.abs(dirty).max()
+        assert errors["n"] > 1e-2 * np.abs(dirty).max()
+
+    @pytest.mark.parametrize("kernel", CUBE_KERNELS)
+    @pytest.mark.parametrize(
+        "psf_shape", [(17, 16), (32, 16), (33, 32)], ids=["n+1", "2n_y", "2n+1_y"]
+    )
+    def test_other_psf_sizes_are_refused(self, kernel, psf_shape):
+        resid = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
+        psf = np.zeros((1, 1, 1, *psf_shape), dtype=np.float32)
+        with pytest.raises(RuntimeError, match="twice"):
+            getattr(hogbom, kernel)(
+                residual_cube=resid, psf_cube=psf, model_cube=np.zeros_like(resid)
+            )
+
+    def test_plane_clean_takes_an_image_sized_psf_only(self):
+        dirty = _point_source_residual(16, 16, [(8, 8, 1.0)])
+        with pytest.raises(RuntimeError, match="wrong shape"):
+            hogbom.clean(
+                dirty_image=dirty, psf=_delta_psf(32, 32), model=_zeros(16, 16)
+            )
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

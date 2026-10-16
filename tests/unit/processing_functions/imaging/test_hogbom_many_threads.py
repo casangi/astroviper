@@ -109,3 +109,25 @@ class TestHogbomManyThreads:
         r2, m2 = resid.copy(), np.zeros_like(resid)
         o2 = hogbom_clean_many_threads(r2, psf, m2, copy.deepcopy(p), 8, mask)
         assert o2["iterations_performed"].shape == (1, 1, 2)
+
+    @pytest.mark.parametrize("npol", [1, 2])
+    def test_matches_cpp_with_a_psf_of_twice_the_image_size(self, npol):
+        """The PSF of twice the image size subtracts every component from the
+        whole image in both kernels, to the bit (tie-free data)."""
+        n = 64
+        resid, _, mask = _data(n=n, npol=npol, seed=5)
+        yy, xx = np.mgrid[0 : 2 * n, 0 : 2 * n].astype(np.float32)
+        psf2d = np.exp(-((yy - n) ** 2 + (xx - n) ** 2) / (2 * (n / 16) ** 2))
+        psf2d += 0.05 * np.cos(np.hypot(yy - n, xx - n) / 3.0)
+        psf2d /= psf2d[n, n]
+        psf = np.broadcast_to(psf2d.astype(np.float32), (1, 1, npol, 2 * n, 2 * n))
+        psf = psf.copy()
+        p = _params(npol, max_iter=30, thr=-1.0)
+        r1, m1 = resid.copy(), np.zeros_like(resid)
+        r2, m2 = resid.copy(), np.zeros_like(resid)
+        o1 = hogbom_clean(r1, psf, m1, copy.deepcopy(p), 8, mask)
+        o2 = hogbom_clean_many_threads(r2, psf, m2, copy.deepcopy(p), 8, mask)
+        assert o1["iterations_performed"].tolist() == [[[30] * npol]]
+        assert np.array_equal(o1["iterations_performed"], o2["iterations_performed"])
+        assert np.array_equal(m1, m2)
+        assert np.array_equal(r1, r2)

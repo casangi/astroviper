@@ -573,3 +573,129 @@ def make_point_spread_function_single_field(
     )
 
     return img_xds, return_df
+
+
+@shares_param_docs
+def make_subtraction_point_spread_function_single_field(
+    ps_xdt,
+    img_xds,
+    image_params,
+    correlation_coords,
+    ms_data_group_in_name="base",
+    gridding_kernel_params=None,
+    processing_function_threads=1,
+    fft_backend="pyfftw",
+    complex_dtype=None,
+):
+    """Build the PSF of twice the image size that exact PSF subtraction uses.
+
+    Makes the PSF with :func:`make_point_spread_function_single_field` on an
+    empty image of ``2 n_l x 2 n_m`` pixels with the cell size, gridding kernel
+    and ``fft_padding`` of the image, from the imaging weights (``WEIGHT_IMAGING``)
+    already in ``ps_xdt``, so it is the response of exactly the weights the
+    residual images are made with. The weights are not recomputed: Briggs
+    weights depend on the uv cell, which the larger grid halves. The peak lies
+    at ``(n_l, n_m)``, the centre the Hogbom kernels take for a PSF of twice the
+    image size; the ``n_l x n_m`` pixels from ``(n_l - n_l // 2, n_m - n_m // 2)``
+    on are the image-sized PSF up to the gridding errors of the two: the lookup
+    of the kernel table, on uv cells that differ by a factor of two, and the
+    aliasing at the edge of the padded grid, which lies at the edge of the image
+    for the image-sized PSF and twice as far out for this one.
+
+    Parameters
+    ----------
+    ps_xdt : xarray.DataTree
+        Processing set holding the imaging weights of the image. Its
+        auto-correlations are dropped in place.
+    img_xds : xarray.Dataset
+        Image whose ``l``, ``m`` sizes and ``frequency`` coordinate the PSF
+        follows. Not modified.
+    image_params : dict
+        Image geometry and output coordinates: ``image_size``, ``cell_size``,
+        ``phase_direction``, ``time_coords``, ``polarization_coords`` and the
+        ``fft_padding`` gridding/FFT padding factor. ``polarization_coords`` is
+        ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
+        the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
+        correlations (see ``instrument_polarization_basis``).
+    correlation_coords : sequence of str
+        The correlations of the imaging weights, in their order: the PSF
+        planes, as the image-sized PSF has them before the transform to the
+        Stokes basis (which leaves PSF planes unchanged).
+    ms_data_group_in_name : str, optional
+        Measurement-set data group that supplies the weights/uvw used for the
+        UV-sampling grid.  Default ``"base"``.
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
+        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
+        ``least_misfit`` kernel whose image plane correction falls below 1e-6
+        of its centre value at the edge of the image kept (a support too large
+        for the ``fft_padding``, e.g. 17 at 1.05) is refused.
+    processing_function_threads : int, optional
+        Number of threads handed to the per-processing-function (C++ / FFT)
+        kernels.
+    fft_backend : str, optional
+        FFT backend used by the gridder normalization (``"pyfftw"`` or
+        ``"scipy"``).
+    complex_dtype : numpy.dtype, optional
+        Complex precision of the gridded data: ``complex64`` gives a float32
+        PSF, ``complex128`` (the default) a float64 one.
+
+    Returns
+    -------
+    point_spread_function : numpy.ndarray
+        C-contiguous ``(n_time, n_frequency, n_correlation, 2 n_l, 2 n_m)``
+        PSF, peak 1 at ``(n_l, n_m)``.
+    return_df : pandas.DataFrame
+        The one-row timing frame of
+        :func:`make_point_spread_function_single_field`.
+    """
+    from xradio.image import make_empty_sky_image
+
+    image_size = [2 * img_xds.sizes["l"], 2 * img_xds.sizes["m"]]
+    psf_xds = make_empty_sky_image(
+        phase_center=image_params["phase_direction"],
+        image_size=image_size,
+        cell_size=image_params["cell_size"],
+        frequency_coords=img_xds.frequency.values,
+        pol_coords=correlation_coords,
+        time_coords=image_params["time_coords"],
+        do_sky_coords=False,
+    )
+    psf_xds.attrs["type"] = "image_dataset"
+    psf_xds = psf_xds.xr_img.add_data_group(
+        new_data_group_name="residual",
+        new_data_group={"description": "PSF of twice the image size."},
+    )
+    psf_xds, return_df = make_point_spread_function_single_field(
+        ps_xdt,
+        psf_xds,
+        {**image_params, "image_size": image_size},
+        ms_data_group_in_name=ms_data_group_in_name,
+        image_data_group_in_name="residual",
+        image_data_group_out_name="residual",
+        gridding_kernel_params=gridding_kernel_params,
+        processing_function_threads=processing_function_threads,
+        fft_backend=fft_backend,
+        complex_dtype=complex_dtype,
+    )
+    return psf_xds["POINT_SPREAD_FUNCTION"].values, return_df

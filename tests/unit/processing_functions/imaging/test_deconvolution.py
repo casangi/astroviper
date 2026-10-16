@@ -31,6 +31,7 @@ from astroviper.processing_functions.imaging.deconvolution import (
     get_phase_center,
     hogbom_clean,
     hogbom_clean_many_threads,
+    validate_exact_psf_subtraction,
 )
 from astroviper.processing_functions.imaging.utils.cycle_control import (
     IMAGING_CONTINUE,
@@ -196,6 +197,7 @@ class TestValidateDeconvolveParams:
             "max_psf_fraction": 0.8,
             "max_iter_divergence": 1,
             "record_iteration_history": False,
+            "exact_psf_subtraction": False,
         }
 
     def test_empty_dict_returns_defaults(self):
@@ -209,6 +211,7 @@ class TestValidateDeconvolveParams:
             "max_psf_fraction": 0.8,
             "max_iter_divergence": 1,
             "record_iteration_history": False,
+            "exact_psf_subtraction": False,
         }
 
     def test_partial_params_filled(self):
@@ -1281,6 +1284,146 @@ class TestDeconvolveAsp:
         (entry,) = imaging_dict.data.values()
         assert entry["iter_done"] == [6]
         assert entry["stop_code"] == StopCode(IMAGING_CONTINUE, MODEL_UPDATE_DIVERGENCE)
+
+
+# ---------------------------------------------------------------------------
+# exact_psf_subtraction: the PSF of twice the image size
+# ---------------------------------------------------------------------------
+
+
+def _subtraction_psf_cube(xds, seed=0):
+    """A PSF of twice the image size of ``xds``: peak 1 at its centre and
+    seeded sidelobes out to its edge."""
+    nt, nf, npol, n_l, n_m = xds["POINT_SPREAD_FUNCTION"].shape
+    rng = np.random.default_rng(seed)
+    psf = 0.05 * rng.standard_normal((nt, nf, npol, 2 * n_l, 2 * n_m))
+    psf[..., n_l, n_m] = 1.0
+    return psf.astype(xds["POINT_SPREAD_FUNCTION"].dtype)
+
+
+def _exact_xds(npol=2):
+    sources = {
+        (0, 0, p): [(4, 5, 1.0), (27, 22, -0.7 + 0.1 * p), (14, 30, 0.4)]
+        for p in range(npol)
+    }
+    return _make_img_xds(npol=npol, sources=sources, with_mask=True)
+
+
+EXACT_PARAMS = {
+    "gain": 0.1,
+    "max_iter": 60,
+    "threshold": 0.0,
+    "max_iter_divergence": -1,
+}
+
+
+class TestExactPsfSubtraction:
+    @pytest.mark.parametrize("value", [False, True, np.bool_(True), np.bool_(False)])
+    @pytest.mark.parametrize("deconvolver", ["hogbom", "HOGBOM_MANY_THREADS"])
+    def test_accepted(self, value, deconvolver):
+        validate_exact_psf_subtraction(deconvolver, value)
+        assert (
+            _validate_deconvolve_params({"exact_psf_subtraction": value})[
+                "exact_psf_subtraction"
+            ]
+            is value
+        )
+
+    @pytest.mark.parametrize("value", [1, 0, "yes", None])
+    def test_must_be_a_bool(self, value):
+        with pytest.raises(ValueError, match="exact_psf_subtraction must be a bool"):
+            validate_exact_psf_subtraction("hogbom", value)
+        with pytest.raises(ValueError, match="exact_psf_subtraction must be a bool"):
+            _validate_deconvolve_params({"exact_psf_subtraction": value})
+
+    @pytest.mark.parametrize("deconvolver", ["asp", "aspclean", "asp_clean"])
+    def test_asp_is_refused(self, deconvolver):
+        validate_exact_psf_subtraction(deconvolver, False)
+        with pytest.raises(ValueError, match="Hogbom deconvolvers"):
+            validate_exact_psf_subtraction(deconvolver, True)
+
+    @requires_asp
+    @pytest.mark.parametrize("algorithm", ["asp", "aspclean", "asp_clean"])
+    def test_deconvolve_refuses_asp_before_the_model_is_made(self, algorithm):
+        xds = _exact_xds()
+        params = {**EXACT_PARAMS, "exact_psf_subtraction": True}
+        params["subtraction_psf_cube"] = _subtraction_psf_cube(xds)
+        with pytest.raises(ValueError, match="exact_psf_subtraction is supported"):
+            deconvolve(img_xds=xds, algorithm=algorithm, deconvolve_params=params)
+        assert "SKY_MODEL" not in xds
+        cube = xds["RESIDUAL"].values
+        with pytest.raises(ValueError, match="exact_psf_subtraction is supported"):
+            asp_clean(
+                cube.copy(),
+                xds["POINT_SPREAD_FUNCTION"].values,
+                np.zeros_like(cube),
+                deconvolve_params={"max_iter": 10, "exact_psf_subtraction": True},
+            )
+
+    @requires_hogbom
+    @pytest.mark.parametrize(
+        "cube",
+        [None, "image_sized", "one_plane", "2n_plus_one"],
+    )
+    def test_deconvolve_needs_the_subtraction_psf(self, cube):
+        xds = _exact_xds()
+        psf = xds["POINT_SPREAD_FUNCTION"].values
+        params = {**EXACT_PARAMS, "exact_psf_subtraction": True}
+        if cube == "image_sized":
+            params["subtraction_psf_cube"] = psf.copy()
+        elif cube == "one_plane":
+            params["subtraction_psf_cube"] = _subtraction_psf_cube(xds)[:, :, :1]
+        elif cube == "2n_plus_one":
+            params["subtraction_psf_cube"] = np.pad(
+                _subtraction_psf_cube(xds), ((0, 0),) * 3 + ((0, 1), (0, 0))
+            )
+        with pytest.raises(ValueError, match="subtraction_psf_cube"):
+            deconvolve(img_xds=xds, deconvolve_params=params)
+        assert "SKY_MODEL" not in xds
+
+    @requires_hogbom
+    @pytest.mark.parametrize(
+        ("algorithm", "clean"),
+        [("hogbom", hogbom_clean), ("hogbom_many_threads", hogbom_clean_many_threads)],
+    )
+    def test_deconvolve_subtracts_the_psf_of_twice_the_image_size(
+        self, algorithm, clean
+    ):
+        xds = _exact_xds()
+        subtraction_psf = _subtraction_psf_cube(xds)
+        residual = xds["RESIDUAL"].values.copy()
+        mask = xds["MASK_RESIDUAL"].values.copy()
+        psf = xds["POINT_SPREAD_FUNCTION"].values.copy()
+        imaging_dict = deconvolve(
+            img_xds=xds,
+            algorithm=algorithm,
+            deconvolve_params={
+                **EXACT_PARAMS,
+                "exact_psf_subtraction": True,
+                "subtraction_psf_cube": subtraction_psf,
+            },
+        )
+        model = np.zeros_like(residual)
+        direct = clean(residual, subtraction_psf, model, dict(EXACT_PARAMS), 1, mask)
+        assert np.array_equal(xds["RESIDUAL"].values, residual)
+        assert np.array_equal(xds["SKY_MODEL"].values, model)
+        assert [entry["iter_done"] for entry in imaging_dict.data.values()] == [
+            [n] for n in direct["iterations_performed"].reshape(-1).tolist()
+        ]
+        # the image-sized PSF is left as it was, and the default subtracts it
+        assert np.array_equal(xds["POINT_SPREAD_FUNCTION"].values, psf)
+        default = _exact_xds()
+        deconvolve(img_xds=default, algorithm=algorithm, deconvolve_params=EXACT_PARAMS)
+        assert not np.array_equal(default["RESIDUAL"].values, residual)
+
+    @requires_hogbom
+    @pytest.mark.parametrize("clean", [hogbom_clean, hogbom_clean_many_threads])
+    @pytest.mark.parametrize("psf_shape", [(17, 16), (32, 16), (33, 32)])
+    def test_hogbom_clean_takes_the_image_size_or_twice_it(self, clean, psf_shape):
+        resid = np.zeros((1, 1, 1, 16, 16), dtype=np.float32)
+        psf = np.zeros((1, 1, 1, *psf_shape), dtype=np.float32)
+        with pytest.raises(ValueError, match="twice its"):
+            clean(resid, psf, np.zeros_like(resid))
 
 
 if __name__ == "__main__":  # pragma: no cover

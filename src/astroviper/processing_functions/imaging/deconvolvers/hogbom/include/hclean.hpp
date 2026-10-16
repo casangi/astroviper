@@ -126,7 +126,7 @@ void maximg(const T* limagestep, int domask, const bool* lmask,
  */
 template<typename T>
 void clean(T* limage, T* limagestep, const T* lpsf,
-           int domask, const bool* lmask, int nx, int ny,
+           int domask, const bool* lmask, int nx, int ny, int psf_nx, int psf_ny,
            int xbeg, int xend, int ybeg, int yend,
            int max_iter_per_cycle_updated, int siter, int& iter, T gain, T thres,
            T cspeedup,
@@ -157,7 +157,8 @@ void clean(T* limage, T* limagestep, const T* lpsf,
  *
  * @param residual_cube 5D in-place residual buffer [nt, nf, np_img, ny, nx]
  * @param model_cube 5D in-place model buffer [nt, nf, np_img, ny, nx]
- * @param psf_cube 5D PSF buffer [nt, nf, np_psf, ny, nx], read-only
+ * @param psf_cube 5D PSF buffer [nt, nf, np_psf, psf_ny, psf_nx], read-only,
+ *                 peak at (psf_ny/2, psf_nx/2)
  * @param domask 0 if mask_cube is absent, 1 if present
  * @param mask_cube 5D mask buffer [nt, nf, np_img, ny, nx] or nullptr
  * @param nt number of time planes
@@ -166,6 +167,9 @@ void clean(T* limage, T* limagestep, const T* lpsf,
  * @param np_psf number of PSF polarization planes (must be np_img or 1)
  * @param ny image height
  * @param nx image width
+ * @param psf_ny,psf_nx PSF height and width: (ny, nx), which subtracts a
+ *              component over the offsets -n/2 .. n/2 - 1 of each axis, or
+ *              (2 ny, 2 nx), which subtracts it over the whole image
  * @param xbeg,xend,ybeg,yend per-plane clean box (0-based, exclusive upper)
  * @param max_iter_per_cycle_updated per-plane maximum iterations; flat array of
  *              length nt*nf*np_img in (t, f, p) C-order (iteration control is
@@ -188,7 +192,7 @@ template<typename T>
 void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
                 int domask, const bool* mask_cube,
                 int nt, int nf, int np_img, int np_psf,
-                int ny, int nx,
+                int ny, int nx, int psf_ny, int psf_nx,
                 int xbeg, int xend, int ybeg, int yend,
                 const int* max_iter_per_cycle_updated, T gain, const T* thres, T cspeedup,
                 int processing_function_threads, int* iter_out,
@@ -204,7 +208,9 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
  * per-iteration peak search and PSF subtraction across the whole (plane, row)
  * work domain and distributes it over processing_function_threads std::thread workers, keeping
  * every thread busy even with only one or two planes. The per-plane algorithm,
- * tie-breaking (lowest row then column) and outputs are identical to clean_cube.
+ * tie-breaking (lowest row then column) and outputs are identical to clean_cube,
+ * except with an image-sized PSF of odd ny: the row at offset +ny/2, which
+ * clean_cube leaves out, is subtracted too.
  *
  * Same parameters and semantics as clean_cube; processing_function_threads is the worker count
  * (clamped to [1, nplanes*ny]).
@@ -213,7 +219,7 @@ template<typename T>
 void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
                 int domask, const bool* mask_cube,
                 int nt, int nf, int np_img, int np_psf,
-                int ny, int nx,
+                int ny, int nx, int psf_ny, int psf_nx,
                 int xbeg, int xend, int ybeg, int yend,
                 const int* max_iter_per_cycle_updated, T gain, const T* thres, T cspeedup,
                 int processing_function_threads, int* iter_out,
@@ -228,7 +234,7 @@ extern template void maximg<double>(const double* limagestep, int domask, const 
                                    int nx, int ny, double& fmin, double& fmax);
 
 extern template void clean<float>(float* limage, float* limagestep, const float* lpsf,
-                                 int domask, const bool* lmask, int nx, int ny,
+                                 int domask, const bool* lmask, int nx, int ny, int psf_nx, int psf_ny,
                                  int xbeg, int xend, int ybeg, int yend,
                                  int max_iter_per_cycle_updated, int siter, int& iter, float gain, float thres,
                                  float cspeedup,
@@ -238,7 +244,7 @@ extern template void clean<float>(float* limage, float* limagestep, const float*
                                  int& stop_reason, IterationHistory* history);
 
 extern template void clean<double>(double* limage, double* limagestep, const double* lpsf,
-                                  int domask, const bool* lmask, int nx, int ny,
+                                  int domask, const bool* lmask, int nx, int ny, int psf_nx, int psf_ny,
                                   int xbeg, int xend, int ybeg, int yend,
                                   int max_iter_per_cycle_updated, int siter, int& iter, double gain, double thres,
                                   double cspeedup,
@@ -251,7 +257,7 @@ extern template void clean_cube<float>(float* residual_cube, float* model_cube,
                                        const float* psf_cube, int domask,
                                        const bool* mask_cube,
                                        int nt, int nf, int np_img, int np_psf,
-                                       int ny, int nx,
+                                       int ny, int nx, int psf_ny, int psf_nx,
                                        int xbeg, int xend, int ybeg, int yend,
                                        const int* max_iter_per_cycle_updated, float gain, const float* thres, float cspeedup,
                                        int processing_function_threads, int* iter_out,
@@ -262,7 +268,7 @@ extern template void clean_cube<double>(double* residual_cube, double* model_cub
                                         const double* psf_cube, int domask,
                                         const bool* mask_cube,
                                         int nt, int nf, int np_img, int np_psf,
-                                        int ny, int nx,
+                                        int ny, int nx, int psf_ny, int psf_nx,
                                         int xbeg, int xend, int ybeg, int yend,
                                         const int* max_iter_per_cycle_updated, double gain, const double* thres, double cspeedup,
                                         int processing_function_threads, int* iter_out,
@@ -273,7 +279,7 @@ extern template void clean_cube_many_threads<float>(float* residual_cube, float*
                                        const float* psf_cube, int domask,
                                        const bool* mask_cube,
                                        int nt, int nf, int np_img, int np_psf,
-                                       int ny, int nx,
+                                       int ny, int nx, int psf_ny, int psf_nx,
                                        int xbeg, int xend, int ybeg, int yend,
                                        const int* max_iter_per_cycle_updated, float gain, const float* thres, float cspeedup,
                                        int processing_function_threads, int* iter_out,
@@ -284,7 +290,7 @@ extern template void clean_cube_many_threads<double>(double* residual_cube, doub
                                         const double* psf_cube, int domask,
                                         const bool* mask_cube,
                                         int nt, int nf, int np_img, int np_psf,
-                                        int ny, int nx,
+                                        int ny, int nx, int psf_ny, int psf_nx,
                                         int xbeg, int xend, int ybeg, int yend,
                                         const int* max_iter_per_cycle_updated, double gain, const double* thres, double cspeedup,
                                         int processing_function_threads, int* iter_out,

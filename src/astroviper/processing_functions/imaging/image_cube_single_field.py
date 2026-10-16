@@ -213,6 +213,20 @@ def imaging_preparation_single_field(
           extra pass over the image per iteration. Hogbom deconvolvers only:
           ``deconvolver="asp"`` raises ``ValueError``. Default ``False``.
           No CASA equivalent.
+        - ``exact_psf_subtraction`` : If ``True``, a Hogbom model update
+          subtracts the PSF of every component it finds from the whole residual
+          image, with a PSF of twice the image size made once per channel from
+          the same imaging weights, cell size and gridding kernel. With
+          ``False`` it subtracts the image-sized PSF, which reaches about
+          ``n/2`` pixels either side of the component along each axis
+          (``n`` the image size in pixels), so farther pixels keep the
+          sidelobes of the flux cleaned until the next residual update. The
+          beam fit, ``max_psf_sidelobe`` and the PSF written use the
+          image-sized PSF either way. Costs a second PSF per channel (four
+          times the pixels, kept through the channel's cycles) and a
+          subtraction over the whole image at every iteration. Hogbom
+          deconvolvers only: ``deconvolver="asp"`` raises ``ValueError``.
+          Default ``False``. No CASA equivalent.
 
         A plane whose model updates do no iteration any more (two in a row)
         is stopped with the no progress stop code at the next stop test, so
@@ -596,6 +610,20 @@ def image_cube_single_field(
           extra pass over the image per iteration. Hogbom deconvolvers only:
           ``deconvolver="asp"`` raises ``ValueError``. Default ``False``.
           No CASA equivalent.
+        - ``exact_psf_subtraction`` : If ``True``, a Hogbom model update
+          subtracts the PSF of every component it finds from the whole residual
+          image, with a PSF of twice the image size made once per channel from
+          the same imaging weights, cell size and gridding kernel. With
+          ``False`` it subtracts the image-sized PSF, which reaches about
+          ``n/2`` pixels either side of the component along each axis
+          (``n`` the image size in pixels), so farther pixels keep the
+          sidelobes of the flux cleaned until the next residual update. The
+          beam fit, ``max_psf_sidelobe`` and the PSF written use the
+          image-sized PSF either way. Costs a second PSF per channel (four
+          times the pixels, kept through the channel's cycles) and a
+          subtraction over the whole image at every iteration. Hogbom
+          deconvolvers only: ``deconvolver="asp"`` raises ``ValueError``.
+          Default ``False``. No CASA equivalent.
 
         A plane whose model updates do no iteration any more (two in a row)
         is stopped with the no progress stop code at the next stop test, so
@@ -723,6 +751,9 @@ def image_cube_single_field(
     timing_df : pandas.DataFrame
         One-row frame with a ``T_*`` column per processing function plus
         ``task_id``, ``n_channels`` and ``n_cycles`` (the model updates).
+        With ``exact_psf_subtraction`` (and ``max_iter > 0``) it also holds
+        ``T_prep_subtraction_psf``, the time of the PSF of twice the image
+        size, which ``T_prep`` includes.
     combined_imaging_dict : ImagingDict
         Per-plane convergence statistics for this chunk: one entry per model
         update and a closing entry from the stop test that ended the loop
@@ -738,11 +769,16 @@ def image_cube_single_field(
     """
     import time
 
+    import numpy as np
     import pandas as pd
     import toolviper.utils.logger as logger
 
     from astroviper.processing_functions.imaging.deconvolution import (
+        validate_exact_psf_subtraction,
         validate_record_iteration_history,
+    )
+    from astroviper.processing_functions.imaging.make_point_spread_function import (
+        make_subtraction_point_spread_function_single_field,
     )
     from astroviper.processing_functions.imaging.model_update import (
         model_update_cube_single_field,
@@ -766,6 +802,11 @@ def image_cube_single_field(
     validate_record_iteration_history(
         deconvolver, cycle_control_params.get("record_iteration_history", False)
     )
+    exact_psf_subtraction = cycle_control_params.get("exact_psf_subtraction", False)
+    validate_exact_psf_subtraction(deconvolver, exact_psf_subtraction)
+    # The polarization basis of the imaging weights, which the preparation
+    # turns to Stokes on img_xds.
+    correlation_coords = img_xds.polarization.values.copy()
 
     # All once-only work -- controller setup, imaging weights, PSF and primary
     # beam creation -- happens in the preparation step before the imaging cycle
@@ -802,6 +843,25 @@ def image_cube_single_field(
     # T_model_update, T_restore.
     timing = {"T_prep": T_setup}
     accumulate_timing(timing, setup_return_df, phase="prep")
+
+    # exact_psf_subtraction: the PSF of twice the image size, made once and
+    # used by the model updates only for the subtraction.
+    subtraction_psf_cube = None
+    if exact_psf_subtraction and cycle_control_params["max_iter"] > 0:
+        start = time.time()
+        subtraction_psf_cube, _ = make_subtraction_point_spread_function_single_field(
+            ps_xdt,
+            img_xds,
+            image_params,
+            correlation_coords,
+            ms_data_group_in_name=processing_set_data_group_name,
+            gridding_kernel_params=gridding_kernel_params,
+            processing_function_threads=processing_function_threads,
+            fft_backend=fft_backend,
+            complex_dtype=np.complex64 if single_precision_image else np.complex128,
+        )
+        timing["T_prep_subtraction_psf"] = time.time() - start
+        timing["T_prep"] += timing["T_prep_subtraction_psf"]
 
     # Phase totals plus the two model-phase leaves measured here: cycle
     # control and the convergence/merge bookkeeping run in this loop (not inside
@@ -892,6 +952,8 @@ def image_cube_single_field(
                 "max_iter_per_cycle_updated": max_iter_per_cycle_updated,
                 "threshold_per_cycle": threshold_per_cycle,
             }
+            if subtraction_psf_cube is not None:
+                deconvolve_params["subtraction_psf_cube"] = subtraction_psf_cube
 
             (
                 imaging_dict,
@@ -934,6 +996,9 @@ def image_cube_single_field(
         if stopcode.imaging != 0:
             logger.debug(f"  *** CONVERGED: {stopdesc} ***")
             break
+
+    # The PSF of twice the image size is freed before the restore.
+    subtraction_psf_cube = deconvolve_params = None
 
     # Restore: convolve the model with the clean beam and add the residual. Only
     # possible once a model exists; the model/residual/beam-fit all live on

@@ -3,7 +3,8 @@ processing set: the iteration history (``record_iteration_history``) and
 ``max_cycles="auto"`` reach the merged convergence record of the distributed
 application through the node tasks and the reduce, and the record still
 saves to feather; bad values of the two are refused before the image store
-is created.
+is created. ``exact_psf_subtraction`` and ``fft_padding`` reach the mapping
+parallelism, whose channel memory depends on them.
 """
 
 import numpy as np
@@ -141,6 +142,12 @@ def test_iteration_history_and_auto_max_cycles_reach_the_result(
         ({"max_cycles": 2.5}, "hogbom", 'integer >= -1 or "auto"'),
         ({"max_psf_fraction": 1.0}, "hogbom", "max_psf_fraction below 1"),
         ({"threshold_tolerance": -0.01}, "hogbom", "threshold_tolerance must be"),
+        (
+            {"record_iteration_history": False, "exact_psf_subtraction": True},
+            "asp",
+            "exact_psf_subtraction is supported by the Hogbom",
+        ),
+        ({"exact_psf_subtraction": 1}, "hogbom", "must be a bool; got 1"),
     ],
     ids=[
         "history_asp",
@@ -149,6 +156,8 @@ def test_iteration_history_and_auto_max_cycles_reach_the_result(
         "max_cycles_float",
         "auto_psf_fraction",
         "tolerance_negative",
+        "exact_asp",
+        "exact_int",
     ],
 )
 def test_refused_before_the_image_store_is_created(
@@ -162,3 +171,32 @@ def test_refused_before_the_image_store_is_created(
             deconvolver,
         )
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("exact_psf_subtraction", [False, True])
+def test_the_mapping_parallelism_counts_exact_psf_subtraction(
+    tmp_path, point_source_ps, monkeypatch, exact_psf_subtraction
+):
+    import importlib
+
+    driver = importlib.import_module(
+        "astroviper.distributed_applications.imaging.image_cube_single_field"
+    )
+    seen = []
+
+    def mapping(*args, **kwargs):
+        seen.append(kwargs)
+        raise RuntimeError("mapping parallelism reached")
+
+    monkeypatch.setattr(
+        driver, "calculate_mapping_parallelism_for_cube_imaging", mapping
+    )
+    with pytest.raises(RuntimeError, match="mapping parallelism reached"):
+        _image_cube(
+            point_source_ps,
+            tmp_path / "cube.img.zarr",
+            {**CYCLE_CONTROL_PARAMS, "exact_psf_subtraction": exact_psf_subtraction},
+        )
+    assert seen == [
+        {"exact_psf_subtraction": exact_psf_subtraction, "fft_padding": 1.2}
+    ]

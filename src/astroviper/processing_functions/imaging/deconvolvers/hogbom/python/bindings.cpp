@@ -345,7 +345,7 @@ py::dict hclean_impl(
             static_cast<T*>(dirty_info.ptr),
             static_cast<const T*>(psf_info.ptr),
             domask, mask_ptr,
-            nx, ny,
+            nx, ny, nx, ny,
             xbeg, xend, ybeg, yend,
             max_iter_per_cycle_updated, start_iter, final_iter,
             gain, threshold_per_cycle, speedup,
@@ -455,10 +455,13 @@ py::dict hclean_cube_impl(
         throw std::runtime_error(
             "psf_cube must be a 5D array [time, frequency, polarization, y, x]");
     }
+    const int psf_ny = static_cast<int>(psf_cube.shape(3));
+    const int psf_nx = static_cast<int>(psf_cube.shape(4));
     if (psf_cube.shape(0) != nt || psf_cube.shape(1) != nf ||
-        psf_cube.shape(3) != ny || psf_cube.shape(4) != nx) {
+        !((psf_ny == ny && psf_nx == nx) || (psf_ny == 2 * ny && psf_nx == 2 * nx))) {
         throw std::runtime_error(
-            "psf_cube must match residual_cube on (time, frequency, y, x)");
+            "psf_cube must match residual_cube on (time, frequency, y, x), or on "
+            "(time, frequency) with twice its (y, x) size");
     }
     const int np_psf = static_cast<int>(psf_cube.shape(2));
     if (np_psf != np_img && np_psf != 1) {
@@ -467,7 +470,7 @@ py::dict hclean_cube_impl(
             "axis or be 1 (Stokes I broadcast)");
     }
     py::buffer_info psf_info = validate_inplace_cube<T>(
-        psf_cube, "psf_cube", nt, nf, np_psf, ny, nx,
+        psf_cube, "psf_cube", nt, nf, np_psf, psf_ny, psf_nx,
         /*require_writable=*/false);
 
     int domask = 0;
@@ -531,7 +534,7 @@ py::dict hclean_cube_impl(
                 static_cast<const T*>(psf_info.ptr),
                 domask, mask_ptr,
                 nt, nf, np_img, np_psf,
-                ny, nx,
+                ny, nx, psf_ny, psf_nx,
                 xbeg, xend, ybeg, yend,
                 max_iter_ptr, gain, thres_ptr, speedup,
                 processing_function_threads, iter_out.data(),
@@ -543,7 +546,7 @@ py::dict hclean_cube_impl(
                 static_cast<const T*>(psf_info.ptr),
                 domask, mask_ptr,
                 nt, nf, np_img, np_psf,
-                ny, nx,
+                ny, nx, psf_ny, psf_nx,
                 xbeg, xend, ybeg, yend,
                 max_iter_ptr, gain, thres_ptr, speedup,
                 processing_function_threads, iter_out.data(),
@@ -828,6 +831,10 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           "cube, parallelized across planes with std::thread. The "
           "residual and model cubes are modified in place; the PSF cube "
           "may be single-polarization to broadcast across image pols. "
+          "The PSF, peak at (psf_ny/2, psf_nx/2), has the (y, x) size of the "
+          "residual, which subtracts a component over the offsets "
+          "-n/2 .. n/2 - 1 of each axis, or twice that size, which subtracts "
+          "it over the whole image. "
           "Iteration control is independent per plane: "
           "max_iter_per_cycle_updated and threshold_per_cycle are (nt, nf, np) "
           "arrays (int32 and matching the image dtype respectively) giving "
@@ -870,16 +877,20 @@ PYBIND11_MODULE(_hogbom_ext, m) {
     // both the (time, frequency, polarization) planes AND the rows within each
     // plane, so all processing_function_threads workers stay busy even for a single-channel
     // cube (a few planes). Identical algorithm, tie-breaking and outputs to
-    // clean_cube. processing_function_threads is the worker count (set from
+    // clean_cube but for the odd ny row of the docstring.
+    // processing_function_threads is the worker count (set from
     // processing_function_threads).
     m.def("clean_cube_many_threads", &clean_cube_many_threads_dispatch,
           "Hogbom CLEAN over a 5D (time, frequency, polarization, y, x) cube, "
           "parallelized across planes AND within each plane (rows) with "
           "std::thread, so all processing_function_threads workers are used regardless of the "
           "plane count. Residual and model are modified in place; same "
+          "PSF sizes, "
           "per-plane max_iter_per_cycle_updated / threshold_per_cycle arrays, "
           "stop tests and outputs (record_iteration_history included) as "
-          "clean_cube.",
+          "clean_cube, except that with a PSF of the residual's odd y size "
+          "the row at offset +ny/2, which clean_cube leaves out, is "
+          "subtracted too.",
           py::arg("residual_cube"),
           py::arg("psf_cube"),
           py::arg("model_cube"),
