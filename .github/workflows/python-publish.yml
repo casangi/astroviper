@@ -29,8 +29,5 @@ jobs:
     uses: nrao/gh-actions-templates-public/.github/workflows/python-publish-cpp-cngi-template.yml@main
     with:
       pypi-url: "https://pypi.org/project/astroviper"
-      # TODO: remove once toolviper, xradio and graphviper releases with
-      # requires-python "<3.15" are on PyPI (needed for the cp314 wheel test).
-      ignore-requires-python: true
     secrets:
       PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }} # Explicit pass instead of inherit

@@ -30,8 +30,5 @@ jobs:
       push-python-versions: '["3.13"]'
       # astroviper's C++ extensions require C++23 (GCC >= 14).
       gcc-version: "14"
-      # TODO: remove once toolviper, xradio and graphviper releases with
-      # requires-python "<3.15" are on PyPI (needed for the 3.14 job).
-      ignore-requires-python: true
     secrets:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
