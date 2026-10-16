@@ -155,8 +155,8 @@ def _reference_clean(
                 above = 0
         lowest = min(lowest, sum_squares)
         value = gain * residual[py, px]
-        y1, y2 = max(0, py - ny // 2), min(ny - 1, py + ny // 2 - 1)
-        x1, x2 = max(0, px - nx // 2), min(nx - 1, px + nx // 2 - 1)
+        y1, y2 = max(0, py - ny // 2), min(ny - 1, py + (ny - 1) // 2)
+        x1, x2 = max(0, px - nx // 2), min(nx - 1, px + (nx - 1) // 2)
         residual[y1 : y2 + 1, x1 : x2 + 1] -= (
             value
             * psf[
