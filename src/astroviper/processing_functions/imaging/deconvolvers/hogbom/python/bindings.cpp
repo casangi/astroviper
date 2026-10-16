@@ -833,7 +833,7 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           "may be single-polarization to broadcast across image pols. "
           "The PSF, peak at (psf_ny/2, psf_nx/2), has the (y, x) size of the "
           "residual, which subtracts a component over the offsets "
-          "-n/2 .. n/2 - 1 of each axis, or twice that size, which subtracts "
+          "-n/2 .. (n - 1)/2 of each axis, or twice that size, which subtracts "
           "it over the whole image. "
           "Iteration control is independent per plane: "
           "max_iter_per_cycle_updated and threshold_per_cycle are (nt, nf, np) "
@@ -877,8 +877,7 @@ PYBIND11_MODULE(_hogbom_ext, m) {
     // both the (time, frequency, polarization) planes AND the rows within each
     // plane, so all processing_function_threads workers stay busy even for a single-channel
     // cube (a few planes). Identical algorithm, tie-breaking and outputs to
-    // clean_cube but for the odd ny row of the docstring.
-    // processing_function_threads is the worker count (set from
+    // clean_cube. processing_function_threads is the worker count (set from
     // processing_function_threads).
     m.def("clean_cube_many_threads", &clean_cube_many_threads_dispatch,
           "Hogbom CLEAN over a 5D (time, frequency, polarization, y, x) cube, "
@@ -888,9 +887,7 @@ PYBIND11_MODULE(_hogbom_ext, m) {
           "PSF sizes, "
           "per-plane max_iter_per_cycle_updated / threshold_per_cycle arrays, "
           "stop tests and outputs (record_iteration_history included) as "
-          "clean_cube, except that with a PSF of the residual's odd y size "
-          "the row at offset +ny/2, which clean_cube leaves out, is "
-          "subtracted too.",
+          "clean_cube.",
           py::arg("residual_cube"),
           py::arg("psf_cube"),
           py::arg("model_cube"),

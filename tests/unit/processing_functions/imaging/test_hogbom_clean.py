@@ -1162,5 +1162,83 @@ class TestCubeExactSubtraction:
             )
 
 
+# ---------------------------------------------------------------------------
+# An image-sized PSF: every sample subtracted, odd sizes included
+# ---------------------------------------------------------------------------
+
+
+def _hogbom_every_psf_sample(residual, psf, n_iter, gain):
+    """Hogbom on one plane: the PSF centre (psf_ny // 2, psf_nx // 2) on the
+    component, every PSF sample that falls in the image subtracted."""
+    residual, model = residual.copy(), np.zeros_like(residual)
+    gain = residual.dtype.type(gain)
+    for _ in range(n_iter):
+        py, px = np.unravel_index(np.argmax(np.abs(residual)), residual.shape)
+        pv = gain * residual[py, px]
+        model[py, px] += pv
+        y0, x0 = py - psf.shape[0] // 2, px - psf.shape[1] // 2
+        ys = slice(max(y0, 0), min(y0 + psf.shape[0], residual.shape[0]))
+        xs = slice(max(x0, 0), min(x0 + psf.shape[1], residual.shape[1]))
+        residual[ys, xs] -= (
+            pv * psf[ys.start - y0 : ys.stop - y0, xs.start - x0 : xs.stop - x0]
+        )
+    return residual, model
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("shape", [(23, 23), (21, 25), (23, 24), (24, 23)])
+def test_odd_sizes_subtract_every_psf_sample_in_every_kernel(dtype, shape):
+    """An image-sized PSF peaked at (ny // 2, nx // 2) is subtracted over the
+    offsets -(n // 2) .. (n - 1) // 2 of each axis, the row and column at
+    +n // 2 of an odd axis included, by clean, clean_cube and
+    clean_cube_many_threads to the bit."""
+    ny, nx = shape
+    rng = np.random.default_rng(7)
+    residual0 = rng.standard_normal((1, 1, 2, ny, nx)).astype(dtype)
+    psf = (0.1 * rng.standard_normal((1, 1, 2, ny, nx))).astype(dtype)
+    psf[..., ny // 2, nx // 2] = 1.0
+    n_iter = 100
+    out = {}
+    for kernel in CUBE_KERNELS:
+        residual, model = residual0.copy(), np.zeros_like(residual0)
+        res = _run_kernel(
+            kernel, residual, psf, model, np.array([]), (-1,) * 4, n_iter, 0.1, -1
+        )
+        assert res["iterations_performed"].tolist() == [[[n_iter, n_iter]]]
+        out[kernel] = residual, model, res
+    (r1, m1, o1), (r2, m2, o2) = out["clean_cube"], out["clean_cube_many_threads"]
+    assert np.array_equal(r1, r2)
+    assert np.array_equal(m1, m2)
+    assert np.array_equal(o1["stop_code"], o2["stop_code"])
+    for key in ("iteration_peak_residual", "iteration_residual_rms"):
+        for got, want in zip(o1[key][0][0], o2[key][0][0], strict=True):
+            assert np.array_equal(got, want)
+
+    without_edge = psf[..., : ny - ny % 2, : nx - nx % 2]
+    for p in range(2):
+        want_r, want_m = _hogbom_every_psf_sample(
+            residual0[0, 0, p], psf[0, 0, p], n_iter, 0.1
+        )
+        assert np.array_equal(r1[0, 0, p], want_r)
+        assert np.array_equal(m1[0, 0, p], want_m)
+        edge_dropped, _ = _hogbom_every_psf_sample(
+            residual0[0, 0, p], without_edge[0, 0, p], n_iter, 0.1
+        )
+        assert not np.array_equal(r1[0, 0, p], edge_dropped)
+
+    residual, model = residual0[0, 0, 0].copy(), np.zeros_like(residual0[0, 0, 0])
+    hogbom.clean(
+        dirty_image=residual,
+        psf=np.ascontiguousarray(psf[0, 0, 0]),
+        model=model,
+        max_iter_per_cycle_updated=n_iter,
+        gain=0.1,
+        threshold_per_cycle=0.0,
+        max_iter_divergence=-1,
+    )
+    assert np.array_equal(residual, r1[0, 0, 0])
+    assert np.array_equal(model, m1[0, 0, 0])
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

@@ -1110,8 +1110,9 @@ def hogbom_clean(
         ``np_psf`` equals ``np`` or is ``1`` (Stokes-I broadcast across
         all image polarizations). Must be C-contiguous and share the
         dtype of ``residual_cube``. Not modified. An image-sized PSF
-        subtracts a component over the offsets ``-n/2 .. n/2 - 1`` of each
-        axis, one of twice the image size over the whole image (see Notes).
+        subtracts a component over the offsets ``-(n // 2) .. (n - 1) // 2``
+        of each axis, one of twice the image size over the whole image (see
+        Notes).
     model_cube : numpy.ndarray
         5-D model array with shape ``(nt, nf, np, ny, nx)``. CLEAN
         components are **added** into this array in place, allowing
@@ -1161,13 +1162,13 @@ def hogbom_clean(
     array that can be passed to this function without any copy.
 
     **PSF size.** A component found at pixel ``p`` is subtracted at pixel
-    ``x`` with the PSF value at offset ``x - p`` from its centre, for the
-    offsets ``-psf_n // 2 .. psf_n // 2 - 1`` along each axis that fall in
-    the image. With an image-sized PSF (``psf_n = n``) pixels farther from
-    the component keep the sidelobes of the flux cleaned until the next
-    residual update. With a PSF of twice the image size every pixel is
-    subtracted at its true offset, at the cost of a subtraction over the
-    whole image at every iteration.
+    ``x`` with the PSF value at offset ``x - p`` from its centre, for every
+    sample of the PSF (offsets ``-(psf_n // 2) .. (psf_n - 1) // 2`` along
+    each axis) that falls in the image. With an image-sized PSF
+    (``psf_n = n``) pixels farther from the component keep the sidelobes of
+    the flux cleaned until the next residual update. With a PSF of twice the
+    image size every pixel is subtracted at its true offset, at the cost of a
+    subtraction over the whole image at every iteration.
 
     **Stop tests (iteration control).** Every plane is tested at every
     iteration, inside the C++ kernel, and stops when
@@ -1303,9 +1304,7 @@ def hogbom_clean_many_threads(
     subtraction *within* every plane (the parallel domain is ``plane x row``), so
     all ``processing_function_threads`` stay busy regardless of the plane count. The per-plane
     algorithm and tie-breaking match :func:`hogbom_clean`, so the result is
-    bit-identical on tie-free data, except with an image-sized PSF of odd
-    ``ny``: the PSF row at offset ``+ny // 2``, which :func:`hogbom_clean`
-    leaves out, is subtracted too. The residual and model cubes are updated in
+    bit-identical on tie-free data; the residual and model cubes are updated in
     place. Parameters, return value and stop tests (threshold, divergence
     with ``max_iter_divergence``; see the Notes of :func:`hogbom_clean`) match
     :func:`hogbom_clean`.

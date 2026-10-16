@@ -197,12 +197,13 @@ void clean(T* limage, T* limagestep, const T* lpsf,
             break;
         }
 
-        // Offsets -psf_n/2 .. psf_n/2 - 1 from the PSF centre, clipped to the
-        // image: the whole image for a PSF of twice its size.
+        // Offsets -psf_n/2 .. (psf_n - 1)/2 from the PSF centre, every sample of
+        // the PSF, clipped to the image: the whole image for a PSF of twice its
+        // size.
         int x1 = std::max(0, px - psf_nx / 2);
         int y1 = std::max(0, py - psf_ny / 2);
-        int x2 = std::min(nx - 1, px + psf_nx / 2 - 1);
-        int y2 = std::min(ny - 1, py + psf_ny / 2 - 1);
+        int x2 = std::min(nx - 1, px + (psf_nx - 1) / 2);
+        int y2 = std::min(ny - 1, py + (psf_ny - 1) / 2);
 
         // Add component to model and subtract from residual
         T pv = gain * maxval;
@@ -621,7 +622,7 @@ void clean_cube_many_threads(T* residual_cube, T* model_cube, const T* psf_cube,
                     + static_cast<std::size_t>(iy) * nx;
                 const T* psf_row = psf + static_cast<std::size_t>(psf_y) * psf_nx;
                 const int x1 = std::max(0, px - psf_nx / 2);
-                const int x2 = std::min(nx - 1, px + psf_nx / 2 - 1);
+                const int x2 = std::min(nx - 1, px + (psf_nx - 1) / 2);
                 for (int ix = x1; ix <= x2; ++ix) {
                     const int psf_x = psf_nx / 2 + ix - px;
                     if (psf_x < 0 || psf_x >= psf_nx) continue;

@@ -168,7 +168,7 @@ void clean(T* limage, T* limagestep, const T* lpsf,
  * @param ny image height
  * @param nx image width
  * @param psf_ny,psf_nx PSF height and width: (ny, nx), which subtracts a
- *              component over the offsets -n/2 .. n/2 - 1 of each axis, or
+ *              component over the offsets -n/2 .. (n - 1)/2 of each axis, or
  *              (2 ny, 2 nx), which subtracts it over the whole image
  * @param xbeg,xend,ybeg,yend per-plane clean box (0-based, exclusive upper)
  * @param max_iter_per_cycle_updated per-plane maximum iterations; flat array of
@@ -208,9 +208,7 @@ void clean_cube(T* residual_cube, T* model_cube, const T* psf_cube,
  * per-iteration peak search and PSF subtraction across the whole (plane, row)
  * work domain and distributes it over processing_function_threads std::thread workers, keeping
  * every thread busy even with only one or two planes. The per-plane algorithm,
- * tie-breaking (lowest row then column) and outputs are identical to clean_cube,
- * except with an image-sized PSF of odd ny: the row at offset +ny/2, which
- * clean_cube leaves out, is subtracted too.
+ * tie-breaking (lowest row then column) and outputs are identical to clean_cube.
  *
  * Same parameters and semantics as clean_cube; processing_function_threads is the worker count
  * (clamped to [1, nplanes*ny]).
