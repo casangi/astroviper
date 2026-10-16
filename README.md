@@ -12,8 +12,6 @@ AstroVIPER (Visibility and Image Parallel Execution Reduction) is in development
 
 ## Installation
 
-### Linux
-
 Create a virtual environment using any tool of your choice (`venv`, `uv`, `mamba`, `conda` etc.)
 and run
 
@@ -21,18 +19,12 @@ and run
 pip install astroviper
 ```
 
-### Mac
+To convert Measurement Set v2 (MSv2) data or image it directly, also install the
+casacore table backend, [arcae](https://github.com/ska-sa/arcae), which XRADIO uses
+and which has wheels for Linux and macOS:
 
-On macOS, `pip install python-casacore` does not work. Install it via
-conda-forge first (this requires an active conda/mamba environment)
-
-```bash
-conda install -c conda-forge python-casacore
 ```
-Then install astroviper:
-
-```bash
-pip install astroviper
+pip install "astroviper[casacore]"
 ```
 
 ### Developer Setup
@@ -43,12 +35,6 @@ cd astroviper
 pip install -e '.[all]'     # builds the C++ extensions; '[all]' adds test/docs/interactive deps
 pre-commit install          # installs ruff + nbstripout git hooks
 ```
-- **macOS**: install casacore via conda *first*, because `pip install
-  python-casacore` does not work on macOS:
-  ```bash
-  conda install -c conda-forge python-casacore
-  ```
-  This is only needed if you will be converting MSv2s to MSv4s or opening CASA images.
 - **After editing any `.cpp` / `.hpp` / `CMakeLists.txt`** you must rebuild for
   the change to take effect (the C++ is compiled at install time):
   ```bash
