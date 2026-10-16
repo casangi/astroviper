@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   call-testing-macos:
-    uses: nrao/gh-actions-templates-public/.github/workflows/python-testing-macos-template.yml@19-macos-template-setup-python
+    uses: nrao/gh-actions-templates-public/.github/workflows/python-testing-macos-template.yml@main
     with:
       python-versions: '["3.12", "3.13", "3.14"]'
       # astroviper's C++ extensions require C++23 (Apple Clang >= 16).
