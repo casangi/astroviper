@@ -1,4 +1,4 @@
-"""Cycle control parameters for ALMA single field cubes from the observables of a first run.
+"""Cycle control parameters for single field cubes from the observables of a first run.
 
 A model update runs until the peak residual of a plane falls to its
 ``threshold_per_cycle``, the PSF fraction
@@ -10,8 +10,11 @@ number of iterations is set by the stopping level and the gain, not by how they
 are split into cycles, and every imaging cycle costs one residual update, so the
 fastest controls run each model update to its ``threshold_per_cycle`` without a
 cap and with a small PSF fraction. The values below were measured on simulated
-ALMA data (C8 configuration at 950 GHz, point sources, dynamic range 1e3 to 1e5);
-see the RADPS memo on the imaging accuracy of the single field imager.
+ALMA data (the C8 configuration at 950 GHz of
+``tests/component/test_point_source_flux_recovery.py``, point sources, dynamic
+range 1e3 to 1e5); their use for other telescopes (the VLA in
+:func:`~astroviper.distributed_applications.imaging.image_cube_single_field_delphi.image_cube_single_field_delphi`)
+is assumed, not validated.
 
 The observables come from a first run with ``max_iter = 0``: the recorded
 ``max_psf_sidelobe`` and the peak residual of the dirty image of a channel.
@@ -32,7 +35,22 @@ NOISY_CYCLE_SAFETY = 3
 
 
 def psf_fraction(max_psf_sidelobe, psf_sidelobe_factor=PSF_SIDELOBE_FACTOR):
-    """The clamped PSF fraction of ``threshold_per_cycle`` for a recorded PSF sidelobe."""
+    """The clamped PSF fraction of ``threshold_per_cycle`` for a recorded PSF sidelobe.
+
+    Parameters
+    ----------
+    max_psf_sidelobe : float
+        The ``max_psf_sidelobe`` a ``max_iter = 0`` run records, in units of
+        the PSF peak.
+    psf_sidelobe_factor : float, optional
+        Factor on the sidelobe.
+
+    Returns
+    -------
+    float
+        ``psf_sidelobe_factor * max_psf_sidelobe`` clamped to
+        ``[MIN_PSF_FRACTION, MAX_PSF_FRACTION]``.
+    """
     return min(
         max(psf_sidelobe_factor * max_psf_sidelobe, MIN_PSF_FRACTION), MAX_PSF_FRACTION
     )
@@ -166,6 +184,39 @@ def alma_cycle_control_params(
     return params
 
 
+def noisy_cycle_prediction(point_spread_function_xds, n_sigma, max_dynamic_range):
+    """PSF fraction and predicted imaging cycles of :func:`noisy_cycle_control_params`.
+
+    Parameters
+    ----------
+    point_spread_function_xds : xarray.Dataset
+        The result of the PSF pass, with ``MAX_SIDELOBE_POINT_SPREAD_FUNCTION``.
+    n_sigma : float
+        Threshold in units of the sensitivity of the plane.
+    max_dynamic_range : float
+        Largest ratio of the peak residual of a dirty plane to its sensitivity
+        the controls allow for.
+
+    Returns
+    -------
+    tuple of (float, int)
+        The PSF fraction of the largest ``max_psf_sidelobe`` of the cube and
+        the imaging cycles that bring a peak ``max_dynamic_range`` times the
+        sensitivity down to ``n_sigma`` times it.
+
+    Raises
+    ------
+    ValueError
+        For a non positive ``n_sigma`` or ``max_dynamic_range``.
+    """
+    fraction = psf_fraction(
+        float(
+            np.nanmax(point_spread_function_xds["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"])
+        )
+    )
+    return fraction, predicted_imaging_cycles(max_dynamic_range, n_sigma, fraction)
+
+
 def noisy_cycle_control_params(
     point_spread_function_xds,
     *,
@@ -179,8 +230,9 @@ def noisy_cycle_control_params(
 
     The threshold of every plane is ``n_sigma`` times its theoretical point
     source sensitivity, the entropy stop is on and every model update is
-    capped at ``NOISY_MAX_ITER_PER_CYCLE`` iterations (the noisy controls of the
-    memo). ``max_cycles`` is the number of imaging cycles that bring a peak
+    capped at ``NOISY_MAX_ITER_PER_CYCLE`` iterations (the noisy controls of
+    :func:`alma_cycle_control_params`). ``max_cycles`` is the number of
+    imaging cycles that bring a peak
     ``max_dynamic_range`` times the sensitivity down to ``n_sigma`` times it
     (:func:`predicted_imaging_cycles`) with the PSF fraction of the largest
     ``max_psf_sidelobe`` of the cube, plus ``EXTRA_CYCLES``.
@@ -220,12 +272,9 @@ def noisy_cycle_control_params(
     sensitivity = point_spread_function_xds["SENSITIVITY"].transpose(
         "frequency", "polarization"
     )
-    fraction = psf_fraction(
-        float(
-            np.nanmax(point_spread_function_xds["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"])
-        )
+    _, cycles = noisy_cycle_prediction(
+        point_spread_function_xds, n_sigma, max_dynamic_range
     )
-    cycles = predicted_imaging_cycles(max_dynamic_range, n_sigma, fraction)
     return {
         "max_iter": int(max_iter),
         "max_cycles": cycles + EXTRA_CYCLES,

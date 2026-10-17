@@ -174,3 +174,21 @@ def test_noisy_cycle_control_params_transposed_dataset_and_invalid():
     np.testing.assert_allclose(params["threshold"], [[2.0, 4.0], [6.0, 8.0]])
     with pytest.raises(ValueError):
         noisy_cycle_control_params(xds, n_sigma=0.0)
+
+
+def test_noisy_cycle_prediction_is_that_of_the_controls():
+    from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
+        noisy_cycle_control_params,
+        noisy_cycle_prediction,
+    )
+
+    xds = _point_spread_function_xds(
+        [[1e-3, 2e-3], [3e-3, 4e-3]], [[0.3, float("nan")], [0.1, 0.2]]
+    )
+    fraction, cycles = noisy_cycle_prediction(xds, 2.0, 1e5)
+    assert fraction == psf_fraction(0.3)
+    assert cycles == predicted_imaging_cycles(1e5, 2.0, fraction)
+    params = noisy_cycle_control_params(xds, n_sigma=2.0, max_dynamic_range=1e5)
+    assert params["max_cycles"] == cycles + EXTRA_CYCLES
+    with pytest.raises(ValueError):
+        noisy_cycle_prediction(xds, 2.0, 0.0)

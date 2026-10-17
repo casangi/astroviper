@@ -515,8 +515,9 @@ def evaluate_beam_models(
     one row per channel, the row of
     :func:`~astroviper.utils.beam_models.beam_polynomial_coefficient_index`,
     with the channel frequencies as coordinate, so the samplers pick it exactly
-    (their nearest-row search then costs O(n_channel**2) per chunk, as for the
-    Zernike Jones images).
+    (the C++ kernel searches the row of every channel once per call, in
+    O(n_channel**2); the NumPy sampler, given these frequencies, takes the first
+    row of each without a search).
 
     Parameters
     ----------
@@ -674,6 +675,20 @@ def _analytic_response(model: dict, l, m, frequency, ipower=1):  # noqa: E741
     )
 
 
+def _nearest_frequency_index(frequency, model_frequency):
+    # np.argmin(np.abs(frequency[..., None] - model_frequency), axis=-1); for a
+    # model resolved to these frequencies the first row of each frequency,
+    # without the (..., n_frequency, n_model_frequency) temporary.
+    if frequency.shape[-1:] == model_frequency.shape and np.array_equal(
+        frequency, np.broadcast_to(model_frequency, frequency.shape)
+    ):
+        _, first, inverse = np.unique(
+            model_frequency, return_index=True, return_inverse=True
+        )
+        return np.broadcast_to(first[inverse], frequency.shape)
+    return np.argmin(np.abs(frequency[..., None] - model_frequency), axis=-1)
+
+
 def _outside_beam_cut(packed_model: dict, l, m, frequency):  # noqa: E741
     # the radius as the C++ kernel computes it, not np.hypot
     rho = np.sqrt(
@@ -722,9 +737,7 @@ def symmetric_beam_response(
     if kind == "analytic":
         response = _analytic_response(packed_model, l, m, frequency, ipower)
     elif kind == "polynomial":
-        i_chan = np.argmin(
-            np.abs(frequency[..., None] - packed_model["frequency"]), axis=-1
-        )
+        i_chan = _nearest_frequency_index(frequency, packed_model["frequency"])
         response = polynomial_beam_response(
             l,
             m,
@@ -818,9 +831,7 @@ def sample_jones(
                 )
             )
         )
-        i_chan = np.argmin(
-            np.abs(frequency[:, None] - packed_model["frequency"][None, :]), axis=1
-        )
+        i_chan = _nearest_frequency_index(frequency, packed_model["frequency"])
         scale = frequency / packed_model["frequency"][i_chan]  # [n_chan]
         delta_pa = parallactic_angle - packed_model["parallactic_angle"][i_pa]
         l_rot, m_rot = rotate_coordinates(

@@ -3,10 +3,11 @@
 * ``parameters_file`` of image_cube_single_field: the arguments passed win
   over the file, a call with the file alone, and the arrays of
   ``image_params`` after a JSON round trip.
-* A per channel threshold: the node task hands every channel its row.
 * image_cube_single_field_delphi on a small simulated processing set with the
   PSF pass replaced by a stand-in of its contract: the parameters file, and
   the cube imaged from it.
+* The metadata delphi reads, its input checks, the warning of a cell too
+  large for the uv coverage and the MPI options of its two computes.
 """
 
 import functools
@@ -27,9 +28,6 @@ from astroviper.distributed_applications.imaging.image_cube_single_field import 
     _apply_parameters_file,
     image_cube_single_field,
     read_parameters_file,
-)
-from astroviper.node_tasks.imaging.image_cube_single_field import (
-    _channel_cycle_control_params,
 )
 from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
     EXTRA_CYCLES,
@@ -199,28 +197,6 @@ def test_read_parameters_file_json_round_trip(tmp_path):
     assert read["n"] == 3 and isinstance(read["n"], int)
 
 
-# --------------------------------------------------------------------------- #
-# Per channel threshold in the node task
-# --------------------------------------------------------------------------- #
-def test_channel_cycle_control_params_takes_the_global_row():
-    threshold = [[1.0, 10.0], [2.0, 20.0], [3.0, 30.0], [4.0, 40.0]]
-    params = {"threshold": threshold, "gain": 0.1}
-    task_coords = {"frequency": {"data": [0.0, 0.0], "slice": slice(2, 4)}}
-    assert _channel_cycle_control_params(params, task_coords, {}, 1)["threshold"] == [
-        4.0,
-        40.0,
-    ]
-    # The offset from data_selection when the task carries no slice.
-    no_slice = {"frequency": {"data": [0.0, 0.0]}}
-    selection = {"ms": {"frequency": slice(1, 3)}}
-    channel = _channel_cycle_control_params(params, no_slice, selection, 0)
-    assert channel == {"threshold": [2.0, 20.0], "gain": 0.1}
-    assert params["threshold"] is threshold  # not mutated
-    for scalar_or_per_plane in (0.5, [0.5, 0.6]):
-        plain = {"threshold": scalar_or_per_plane}
-        assert _channel_cycle_control_params(plain, task_coords, {}, 0) is plain
-
-
 def _imaging_arguments(ps_store, image_store, frequency_coords, threshold):
     return {
         "ps_store": ps_store,
@@ -326,10 +302,8 @@ def psf_calls(monkeypatch):
         dims = ("frequency", "polarization")
         return xr.Dataset(
             {
-                # Named as the imager names it (its label coordinate is
-                # beam_params_label).
                 "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION": (
-                    dims + ("beam_params",),
+                    dims + ("beam_params_label",),
                     beam,
                 ),
                 "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (dims, np.full(shape, 0.2)),
@@ -506,3 +480,171 @@ def test_delphi_skips_a_fully_flagged_highest_channel(ps_store, tmp_path, psf_ca
         "threshold"
     ]
     assert threshold[int(np.argmax(frequency))] == [0.0, 0.0]
+
+
+# --------------------------------------------------------------------------- #
+# Metadata, input checks, uv coverage and MPI options of delphi
+# --------------------------------------------------------------------------- #
+def _metadata_processing_set(
+    correlations=(("RR", "LL"),),
+    observation_info=None,
+    antenna_attrs=None,
+    antenna_coords=None,
+    field_names=("target",),
+):
+    """The parts of a processing set that _processing_set_metadata reads."""
+    measurement_sets = {
+        f"ms_{i}": types.SimpleNamespace(
+            ds=xr.Dataset(
+                coords={"polarization": list(labels)},
+                attrs={"observation_info": observation_info or {}},
+            )
+        )
+        for i, labels in enumerate(correlations)
+    }
+    antenna_xds = xr.Dataset(
+        {"ANTENNA_POSITION": (("antenna_name", "cartesian_pos_label"), np.eye(3)[:2])},
+        coords={
+            "antenna_name": ["a0", "a1"],
+            "cartesian_pos_label": ["x", "y", "z"],
+            **(antenna_coords or {}),
+        },
+        attrs=antenna_attrs or {},
+    )
+    field_xds = xr.Dataset(
+        {
+            "FIELD_PHASE_CENTER_DIRECTION": (
+                ("field_name", "sky_dir_label"),
+                np.tile(PC, (len(field_names), 1)),
+            )
+        },
+        coords={"field_name": list(field_names), "sky_dir_label": ["ra", "dec"]},
+        attrs={"center_field_name": field_names[0]},
+    )
+    ps_xdt = types.SimpleNamespace(
+        values=measurement_sets.values,
+        xr_ps=types.SimpleNamespace(
+            get_combined_antenna_xds=lambda: antenna_xds,
+            get_combined_field_and_source_xds=lambda: field_xds,
+            get_freq_axis=lambda: xr.DataArray([3e9, 3.4e9], dims="frequency"),
+        ),
+    )
+    return ps_xdt
+
+
+@pytest.mark.parametrize(
+    "where, expected",
+    [
+        ({"observation_info": {"telescope_name": "ALMA"}}, "ALMA"),
+        ({"antenna_attrs": {"overall_telescope_name": "VLA"}}, "VLA"),
+        (
+            {"antenna_coords": {"telescope_name": ("antenna_name", ["EVLA", "EVLA"])}},
+            "EVLA",
+        ),
+    ],
+)
+def test_metadata_telescope_name_fallbacks(where, expected):
+    """The observation's telescope name, else the antennas' overall name, else
+    the first antenna's."""
+    metadata = delphi_module._processing_set_metadata(
+        _metadata_processing_set(**where), None
+    )
+    assert metadata["telescope_name"] == expected
+    assert metadata["dish_diameters"] is None
+    np.testing.assert_array_equal(metadata["phase_direction"], PC)
+    np.testing.assert_array_equal(metadata["frequency_coords"], [3e9, 3.4e9])
+
+
+def test_metadata_correlations_every_measurement_set_holds():
+    metadata = delphi_module._processing_set_metadata(
+        _metadata_processing_set(
+            correlations=(("RR", "RL", "LR", "LL"), ("LL", "RR")),
+            observation_info={"telescope_name": "VLA"},
+        ),
+        "target",
+    )
+    assert metadata["correlations"] == ["LL", "RR"]
+
+
+def test_metadata_refuses_several_fields():
+    with pytest.raises(ValueError, match="The imager makes one field"):
+        delphi_module._processing_set_metadata(
+            _metadata_processing_set(field_names=("a", "b")), None
+        )
+
+
+@pytest.mark.parametrize("name", ["pixels_per_beam", "n_sigma", "max_dynamic_range"])
+def test_delphi_refuses_a_non_positive_input(tmp_path, name):
+    with pytest.raises(ValueError, match=f"{name} must be positive"):
+        delphi_module.image_cube_single_field_delphi(
+            "unused.ps.zarr", str(tmp_path / "cube.img.zarr"), **{name: 0}
+        )
+
+
+def test_delphi_warns_when_the_cell_is_too_large_for_the_uv_grid(
+    ps_store, tmp_path, psf_calls, monkeypatch
+):
+    """The cell of the cube may leave the longest baselines off its uv grid
+    when it exceeds 1 / (2 u_max) = 1.5 times the cell of the PSF pass."""
+    import toolviper.utils.logger as logger
+
+    warnings = []
+    monkeypatch.setattr(
+        logger, "warning", lambda message, *args, **kwargs: warnings.append(message)
+    )
+    derived = delphi_module.image_cube_single_field_delphi(
+        ps_store, str(tmp_path / "narrow.img.zarr"), calculate_parameters_only=True
+    )["derived"]
+    assert derived["cell_size"] < 1.5 * derived["cell_size_guess"]
+    assert not any("off the uv grid" in message for message in warnings)
+
+    module = sys.modules[PSF_MODULE]
+    psf = module.point_spread_function_cube_single_field
+
+    def wide_beam(*args, **kwargs):
+        xds = psf(*args, **kwargs)
+        xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"] *= 3.0
+        return xds
+
+    monkeypatch.setattr(module, "point_spread_function_cube_single_field", wide_beam)
+    parameters = delphi_module.image_cube_single_field_delphi(
+        ps_store, str(tmp_path / "wide.img.zarr"), calculate_parameters_only=True
+    )
+    derived = parameters["derived"]
+    # 3 * MINOR_AXIS_IN_CELLS cells of the PSF pass across 5 pixels
+    assert derived["cell_size"] == pytest.approx(2.4 * derived["cell_size_guess"])
+    assert any("off the uv grid" in message for message in warnings)
+
+
+def test_delphi_gives_the_teardown_to_the_last_compute_only(
+    ps_store, tmp_path, psf_calls, monkeypatch
+):
+    """graphviper arms teardown_force_exit_seconds at the end of a compute, so
+    the PSF pass runs without it unless it is the only compute."""
+
+    @functools.wraps(image_cube_single_field)
+    def fake_image_cube_single_field(**kwargs):
+        return {}
+
+    monkeypatch.setattr(
+        delphi_module, "image_cube_single_field", fake_image_cube_single_field
+    )
+    mpi_cluster_setup = {"max_workers": 2, "teardown_force_exit_seconds": 30}
+    result = delphi_module.image_cube_single_field_delphi(
+        ps_store,
+        str(tmp_path / "imaged.img.zarr"),
+        compute_backend="mpi",
+        mpi_cluster_setup=mpi_cluster_setup,
+    )
+    assert psf_calls[-1]["mpi_cluster_setup"] == {"max_workers": 2}
+    arguments = result["parameters"]["image_cube_single_field"]
+    assert arguments["mpi_cluster_setup"] == mpi_cluster_setup
+    delphi_module.image_cube_single_field_delphi(
+        ps_store,
+        str(tmp_path / "parameters_only.img.zarr"),
+        calculate_parameters_only=True,
+        compute_backend="mpi",
+        mpi_cluster_setup=mpi_cluster_setup,
+    )
+    assert psf_calls[-1]["mpi_cluster_setup"] == mpi_cluster_setup
+    assert mpi_cluster_setup == {"max_workers": 2, "teardown_force_exit_seconds": 30}

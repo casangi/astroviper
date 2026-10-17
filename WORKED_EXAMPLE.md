@@ -15,7 +15,9 @@ return_dict = image_cube_single_field(
     image_store="twhya_clean.img.zarr",             # output image dataset (Zarr)
     image_params=image_params,                       # image geometry + output coords
     imaging_weights_params={"weighting": "briggs", "robust": 0.5},
-    cycle_control_params={"max_iter": 300, "max_cycles": 3, "threshold": 0.001, "gain": 0.1},
+    cycle_control_params={"max_iter": 300, "max_cycles": 3, "threshold": 0.001, "gain": 0.1,
+                          "psf_sidelobe_factor": 1.5, "max_iter_per_cycle": -1,
+                          "min_psf_fraction": 0.05, "max_psf_fraction": 0.8},
     gridder="anti_alias",
     deconvolver="hogbom_many_threads",
     image_data_variables_keep=["sky_residual", "sky_model", "mask",
@@ -80,7 +82,7 @@ task_coords, data_selection, image_store, input_data_store, ..., graph_mode=True
 ### 12.3 Science — `processing_functions/imaging/image_cube_single_field.py`
 The **cycle control and bookkeeping helpers** (not science kernels) live in
 the `processing_functions/imaging/utils/` subpackage: `cycle_control.py`
-(`CycleController`, stop codes, `merge_return_dicts`,
+(`CycleController`, stop codes, `merge_imaging_dicts`,
 `get_per_cycle_limits`, the `get_*_from_imaging_dict` extractors,
 `format_/print_imaging_dict`), `imaging_dict.py` (`ImagingDict`, `Key`),
 `timing.py` (`accumulate_timing`), and `visibility.py`
@@ -140,8 +142,10 @@ via `CycleController`:
   `beam_fit_params_point_spread_function`).
 - Deconvolvers: `deconvolution.py` dispatch → `deconvolvers/hogbom` (C++),
   `deconvolvers/aspclean` (C++).
-- The anti-aliasing gridder kernel (the standard gridder in CASA) is
-  implemented in C++ (`gridders/anti_alias_grid_cpp`); pure-Python
+- The anti-aliasing gridder is implemented in C++
+  (`gridders/anti_alias_grid_cpp`); `gridding_kernel_params` selects its
+  kernel, and the default, `prolate_spheroidal_casa`, is the kernel of
+  CASA's standard gridder. Pure-Python
   reference copies used as test oracles live in
   `tests/unit/processing_functions/imaging/gridders/reference_gridders.py`.
   **Keep the references in sync** if you change the gridding math.

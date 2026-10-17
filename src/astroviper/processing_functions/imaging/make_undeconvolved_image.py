@@ -40,8 +40,10 @@ def make_undeconvolved_image_single_field(
         ``["I", "Q"]`` (linear feeds) or ``["I", "V"]`` (circular feeds) to image
         the two parallel hands, or ``["I", "Q", "U", "V"]`` to image all four
         correlations (see ``instrument_polarization_basis``).
-    cgk_1D : numpy.ndarray
-        1-D prolate-spheroidal gridding convolution kernel.
+    cgk_1D : GriddingKernel or numpy.ndarray
+        The gridding kernel
+        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
+        or the bare table of the default prolate spheroidal kernel of support 7.
     model_exists : bool
         Accepted for call-site compatibility with the imaging cycle loop;
         currently unused (the UV-sampling/PSF grid is built once in

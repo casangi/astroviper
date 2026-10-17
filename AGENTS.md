@@ -221,6 +221,18 @@ PSF beam fit is switchable
 `processing_functions/image_analysis/psf_gaussian_fit_cpp/`) that reproduces
 `tclean`'s restoring beam exactly on the same PSF.
 
+**PSF of twice the image size.** The PSF that `exact_psf_subtraction`
+subtracts (Hogbom only; Asp refuses the option) has twice the `l` and `m`
+extents of `img_xds`, so it cannot share its coordinates and is kept outside
+`img_xds` and its data groups, as a NumPy cube `(nt, nf, np, 2 n_l, 2 n_m)`.
+`make_subtraction_point_spread_function_single_field` makes it once per
+channel, in the correlation basis, from the `WEIGHT_IMAGING` of the setup (not
+recomputed: Briggs weights depend on the uv cell, which the larger grid
+halves), and it reaches `deconvolve` as
+`deconvolve_params["subtraction_psf_cube"]`. It is used only for the
+subtraction: the beam fit, `max_psf_sidelobe` and the restore keep the
+image-sized PSF.
+
 **Polarization.** The residual update grids and degrids in the instrument
 (correlation) basis and the model update deconvolves in the Stokes basis;
 `transform_polarization_basis` converts the image dataset at the boundary

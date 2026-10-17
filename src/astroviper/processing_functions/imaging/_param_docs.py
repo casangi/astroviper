@@ -52,7 +52,14 @@ IMAGING_PARAM_DOCS = {
         "defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or\n"
         "``least_misfit`` kernel whose image plane correction falls below 1e-6\n"
         "of its centre value at the edge of the image kept (a support too large\n"
-        "for the ``fft_padding``, e.g. 17 at 1.05) is refused."
+        "for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the\n"
+        'former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,\n'
+        'not ``"prolate_spheroidal"``.'
+    ),
+    "cgk_1D": (
+        "The gridding kernel\n"
+        "(:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),\n"
+        "or the bare table of the default prolate spheroidal kernel of support 7."
     ),
     "primary_beam_params": (
         "The primary beam of the imager, the power pattern that gives the clean\n"

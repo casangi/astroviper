@@ -1,6 +1,7 @@
 """Shared anti-aliasing gridder visibility prediction primitive."""
 
 import copy
+from typing import TYPE_CHECKING
 
 import numpy as np
 import xarray as xr
@@ -11,11 +12,16 @@ from astroviper.utils.data_group_tools import (
 )
 from astroviper.utils.param_docs import shares_param_docs
 
+if TYPE_CHECKING:
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        GriddingKernel,
+    )
+
 
 @shares_param_docs
 def degrid_visibility_grid_single_field(
     ms_xds: xr.Dataset,
-    cgk_1D: np.ndarray,
+    cgk_1D: "GriddingKernel | np.ndarray",
     img_xds: xr.Dataset,
     grid: np.ndarray,
     frequency_map: np.ndarray,

@@ -16,6 +16,7 @@ import pytest
 import xarray as xr
 
 from astroviper.node_tasks.imaging.image_cube_single_field import (
+    _channel_cycle_control_params,
     _chunk_task_coords,
     _combine_channel_timing_frames,
     _ImageChunkAccumulator,
@@ -181,7 +182,16 @@ def test_node_task_images_one_channel_at_a_time(tmp_path, fake_science):
     ms_a = ps_xdt["ms_a"]
     original_groups = copy.deepcopy(ms_a.attrs["data_groups"])
 
-    result = image_cube_single_field(**_task_inputs(tmp_path), input_data=ps_xdt)
+    gridding_kernel_params = {"type": "exponential_semicircle", "oversampling": 300}
+    primary_beam_params = {"telescope": "vla"}
+    result = image_cube_single_field(
+        **_task_inputs(
+            tmp_path,
+            gridding_kernel_params=gridding_kernel_params,
+            primary_beam_params=primary_beam_params,
+        ),
+        input_data=ps_xdt,
+    )
 
     # One science call per image channel, in order, each with exactly the
     # visibility channel that maps onto it.
@@ -190,6 +200,8 @@ def test_node_task_images_one_channel_at_a_time(tmp_path, fake_science):
     for call, freq in zip(fake_science.calls, VIS_FREQUENCIES, strict=True):
         assert call["vis_frequencies"] == {"ms_a": pytest.approx([freq])}
         assert call["kwargs"]["task_id"] == 3
+        assert call["kwargs"]["gridding_kernel_params"] == gridding_kernel_params
+        assert call["kwargs"]["primary_beam_params"] == primary_beam_params
     # Data groups registered by the science function never reach the chunk.
     assert ms_a.attrs["data_groups"] == original_groups
 
@@ -680,3 +692,23 @@ def test_shift_imaging_dict_channels():
     shifted = _shift_imaging_dict_channels(imaging_dict, 4)
     assert list(shifted.data) == [Key(time=0, pol=1, chan=4)]
     assert shifted.data[Key(0, 1, 4)]["iter_done"] == [3]
+
+
+def test_channel_cycle_control_params_takes_the_global_row():
+    """A per channel threshold: every channel gets its row of the cube."""
+    threshold = [[1.0, 10.0], [2.0, 20.0], [3.0, 30.0], [4.0, 40.0]]
+    params = {"threshold": threshold, "gain": 0.1}
+    task_coords = {"frequency": {"data": [0.0, 0.0], "slice": slice(2, 4)}}
+    assert _channel_cycle_control_params(params, task_coords, {}, 1)["threshold"] == [
+        4.0,
+        40.0,
+    ]
+    # The offset from data_selection when the task carries no slice.
+    no_slice = {"frequency": {"data": [0.0, 0.0]}}
+    selection = {"ms": {"frequency": slice(1, 3)}}
+    channel = _channel_cycle_control_params(params, no_slice, selection, 0)
+    assert channel == {"threshold": [2.0, 20.0], "gain": 0.1}
+    assert params["threshold"] is threshold  # not mutated
+    for scalar_or_per_plane in (0.5, [0.5, 0.6]):
+        plain = {"threshold": scalar_or_per_plane}
+        assert _channel_cycle_control_params(plain, task_coords, {}, 0) is plain

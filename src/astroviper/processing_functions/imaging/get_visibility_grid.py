@@ -1,10 +1,17 @@
+from typing import TYPE_CHECKING
+
 import numpy as np
 import xarray as xr
+
+if TYPE_CHECKING:
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        GriddingKernel,
+    )
 
 
 def get_visibility_grid_single_field(
     ms_xds: xr.Dataset,
-    cgk_1D: np.ndarray,
+    cgk_1D: "GriddingKernel | np.ndarray",
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
     ms_data_group_out_name: str = "model",

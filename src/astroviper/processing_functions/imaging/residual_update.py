@@ -103,7 +103,9 @@ def imaging_setup_single_field(
         defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
         ``least_misfit`` kernel whose image plane correction falls below 1e-6
         of its centre value at the edge of the image kept (a support too large
-        for the ``fft_padding``, e.g. 17 at 1.05) is refused.
+        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``.
     primary_beam_params : dict, optional
         The primary beam of the imager, the power pattern that gives the clean
         mask and the primary beam correction: ``telescope`` (``"alma"``,
@@ -372,7 +374,9 @@ def residual_update_cube_single_field(
         defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
         ``least_misfit`` kernel whose image plane correction falls below 1e-6
         of its centre value at the edge of the image kept (a support too large
-        for the ``fft_padding``, e.g. 17 at 1.05) is refused.
+        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``.
 
     Returns
     -------
@@ -601,8 +605,10 @@ def make_visibility_model_single_field(
         in place.
     img_xds : xarray.Dataset
         Image dataset holding the model uv-grid to degrid from.
-    cgk_1D : numpy.ndarray
-        1-D prolate-spheroidal gridding convolution kernel.
+    cgk_1D : GriddingKernel or numpy.ndarray
+        The gridding kernel
+        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
+        or the bare table of the default prolate spheroidal kernel of support 7.
     ms_data_group_in_name : str, optional
         Measurement-set data group being imaged (the caller's
         ``processing_set_data_group_name``).  The degridder reads its ``uvw``

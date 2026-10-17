@@ -4,8 +4,9 @@ ALMA processing set with thermal noise and no source.
 Checks that the beam fit, the largest sidelobe and the point spread function
 equal what image_cube_single_field records for the same parameters with
 max_iter=0, that the natural sensitivity equals the closed form for equal
-weights and the measured noise of the dirty image, and that Briggs weighting
-never beats natural weighting.
+weights and the measured noise of the dirty image, that the Briggs
+sensitivity equals the measured noise of the Briggs dirty image, and that
+Briggs weighting never beats natural weighting.
 """
 
 import numpy as np
@@ -98,15 +99,14 @@ def natural_point_spread_function(noise_processing_set):
     return _run_point_spread_function(noise_processing_set, NATURAL, "psf_natural")
 
 
-@pytest.fixture(scope="module")
-def natural_dirty_image(noise_processing_set):
+def _dirty_image(noise_processing_set, imaging_weights_params, name):
     """The imager with max_iter=0: the dirty image and the setup's records."""
-    image_store = str(noise_processing_set["work_dir"] / "dirty.img.zarr")
+    image_store = str(noise_processing_set["work_dir"] / f"{name}.img.zarr")
     result = image_cube_single_field(
         ps_store=noise_processing_set["ps_store"],
         image_store=image_store,
         image_params=noise_processing_set["image_params"],
-        imaging_weights_params=NATURAL,
+        imaging_weights_params=imaging_weights_params,
         cycle_control_params={
             "max_iter": 0,
             "max_cycles": 0,
@@ -127,6 +127,20 @@ def natural_dirty_image(noise_processing_set):
         overwrite=True,
     )
     return result, load_image(image_store)
+
+
+@pytest.fixture(scope="module")
+def natural_dirty_image(noise_processing_set):
+    return _dirty_image(noise_processing_set, NATURAL, "dirty")
+
+
+def _robust_sigma(dirty_image):
+    """MAD noise of every plane of a source free dirty image, edges left out."""
+    sky = dirty_image.SKY_RESIDUAL.values[
+        0, :, :, EDGE_PIXELS:-EDGE_PIXELS, EDGE_PIXELS:-EDGE_PIXELS
+    ]
+    median = np.median(sky, axis=(-2, -1), keepdims=True)
+    return 1.4826 * np.median(np.abs(sky - median), axis=(-2, -1))
 
 
 def test_returned_dataset_layout(noise_processing_set, natural_point_spread_function):
@@ -222,11 +236,7 @@ def test_natural_sensitivity(
         properties.EFFECTIVE_NUMBER_OF_VISIBILITIES.values, n_samples, rtol=1e-12
     )
 
-    sky = dirty_image.SKY_RESIDUAL.values[
-        0, :, :, EDGE_PIXELS:-EDGE_PIXELS, EDGE_PIXELS:-EDGE_PIXELS
-    ]
-    median = np.median(sky, axis=(-2, -1), keepdims=True)
-    mad_sigma = 1.4826 * np.median(np.abs(sky - median), axis=(-2, -1))
+    mad_sigma = _robust_sigma(dirty_image)
     print("dirty image robust sigma / SENSITIVITY:", mad_sigma / expected)
     np.testing.assert_allclose(
         mad_sigma, properties.SENSITIVITY.values, rtol=NOISE_RTOL
@@ -257,3 +267,16 @@ def test_briggs_sensitivity_not_below_natural(
         briggs.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.sel(beam_params_label="major")
         < natural.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.sel(beam_params_label="major")
     )
+
+
+def test_briggs_sensitivity(noise_processing_set):
+    """Unequal imaging weights: the measured robust noise of the source free
+    Briggs dirty image agrees with sqrt(sum W**2 / w) / sum W."""
+    briggs, _ = _run_point_spread_function(noise_processing_set, BRIGGS, "psf_briggs")
+    _, dirty_image = _dirty_image(noise_processing_set, BRIGGS, "dirty_briggs")
+    mad_sigma = _robust_sigma(dirty_image)
+    print(
+        "Briggs dirty image robust sigma / SENSITIVITY:",
+        mad_sigma / briggs.SENSITIVITY.values,
+    )
+    np.testing.assert_allclose(mad_sigma, briggs.SENSITIVITY.values, rtol=NOISE_RTOL)
