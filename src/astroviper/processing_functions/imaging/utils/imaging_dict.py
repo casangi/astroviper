@@ -31,6 +31,7 @@ FIELD_ACCUM = {
     "start_model_flux",  # Model flux at start of each cycle (Jy)
     "entropy",  # Entropy of the residual at the start of each cycle
     "residual_snr",  # Peak / RMS of the residual at the start of each cycle
+    "model_update_stop_code",  # Stop code of the deconvolver in each model update
     "iteration_peak_residual",  # Signed peak residual of every iteration (Jy/beam)
     "iteration_residual_rms",  # Residual RMS after every iteration (Jy/beam)
 }
@@ -171,7 +172,8 @@ def imaging_dict_to_dataframe(imaging_dict):
         for an empty mask; the entries of the model updates hold the signed
         value at the absolute peak, not a number for an empty mask) and
         ``model_flux_final``. The fields only a model update reports
-        (``start_peakres``, ``start_model_flux``, ``model_flux``, ...) have
+        (``start_peakres``, ``start_model_flux``, ``model_flux``,
+        ``model_update_stop_code``, ...) have
         one entry per model update, one fewer than ``iter_done`` and
         ``peakres`` in that record. The iteration history
         (``iteration_peak_residual``, ``iteration_residual_rms``; only with

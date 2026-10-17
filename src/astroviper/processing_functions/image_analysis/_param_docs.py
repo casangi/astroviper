@@ -66,6 +66,11 @@ IMAGE_ANALYSIS_PARAM_DOCS = {
         '``"mask"``) roles name the input data variables.  Datasets without\n'
         'data groups fall back to the conventional ``"SKY"`` variable.'
     ),
+    "image_data_group_in_role": (
+        "Role of ``image_data_group_in_name`` whose data variable is collapsed,\n"
+        'e.g. ``"sky_primary_beam_corrected"`` of the imager\'s ``"restored"``\n'
+        'group.  Only the default ``"sky"`` falls back to ``"SKY"``.'
+    ),
     "include_pixel_range": (
         "Only pixel values inside ``[low, high]`` contribute.  A single value\n"
         "``b`` means ``[-abs(b), abs(b)]`` (CASA convention).  Mutually\n"

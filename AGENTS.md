@@ -171,6 +171,17 @@ distributed_applications.imaging.image_cube_single_field(...)
 distributed_applications.simulation.simulate_processing_set(...)
 ```
 
+### Reports of the distributed applications
+A distributed application takes `report=None | "html" | "pdf" | "notebook"` and,
+once its output is written, makes a report through `utils.report.make_report`
+(a failing report is logged and never costs the run its results). Every report
+starts with the common processing section (`utils.report.add_processing_section`:
+timing, task stream, cluster resources); the application's results section lives
+next to it (`<application>_report.py`), built with `utils.report.Report` and the
+pyplot-free figures of `utils/report_plots.py`. For the task stream and the
+resource monitor, a node task records `start_unixtime` and its execution identity
+(`hostname`, `process_pid`, `thread_native_id`, `worker_name`) and returns a dict.
+
 ### The `simulation` subdomain (port of SIRIUS)
 `simulate_processing_set` is a **pure generator**: there is no input processing
 set; the node task is mapped over `parallel_coords = {"time", "frequency"}` and

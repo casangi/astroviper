@@ -411,6 +411,7 @@ class TestImagingDictFieldClassification(unittest.TestCase):
             "start_model_flux",
             "entropy",
             "residual_snr",
+            "model_update_stop_code",
             "iteration_peak_residual",
             "iteration_residual_rms",
         }
@@ -444,6 +445,7 @@ class TestImagingDictFieldClassification(unittest.TestCase):
                 "start_model_flux": 0.0,
                 "entropy": 7.5,
                 "residual_snr": 3.0,
+                "model_update_stop_code": 2,
                 "iteration_peak_residual": np.array([1.0, 0.9]),
                 "iteration_residual_rms": np.array([0.2, 0.19]),
             },

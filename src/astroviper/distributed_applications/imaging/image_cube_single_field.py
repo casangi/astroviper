@@ -160,6 +160,7 @@ def image_cube_single_field(
     task_time_kill_switch_seconds: float | None = None,
     monitor_resources_seconds: float | None = None,
     msv2_open_options: dict[str, Any] | None = None,
+    report: str | None = None,
     parameters_file: str | None = None,
 ):  # -> Tuple[xr.Dataset, ImagingDict]:
     """
@@ -645,6 +646,19 @@ def image_cube_single_field(
         ``array_backend`` and ``scan_intents`` are set by the driver and
         refused here (``ValueError``; pass the ``scan_intents`` parameter).
         ``None`` (default): the defaults.
+    report : str, optional
+        Make a report of the run: ``"html"`` (one self contained file) or
+        ``"pdf"``, written next to the output store as
+        ``<name>_report.html`` or ``<name>_report.pdf`` (``cube.img.zarr``
+        gives ``cube_report.html``), or ``"notebook"``, displayed in the
+        calling Jupyter notebook. The report has a processing section common
+        to all distributed applications (timing, task stream and, with
+        ``monitor_resources_seconds``, the cluster CPU, memory and I/O) and a
+        results section of the application's own; the products it makes with
+        other distributed applications are kept in ``<name>_report_files``
+        next to the output store. It is made after the output is written: a
+        failure while making it is logged and leaves the results intact.
+        ``None`` (default): no report.
     parameters_file : str, optional
         JSON file whose ``"image_cube_single_field"`` block gives the
         arguments, as
@@ -654,10 +668,12 @@ def image_cube_single_field(
         An argument passed in the call replaces the file's value as a whole
         (an ``image_params`` given replaces the file's ``image_params``).
         ``None`` (default): every argument comes from the call.
+
     Returns
     -------
     dict
-        ``{"timing_node_tasks", "deconvolution", "timing_distributed_application"}``:
+        ``{"timing_node_tasks", "deconvolution", "image_statistics",
+        "timing_distributed_application", "report"}``:
 
         * ``"timing_node_tasks"`` is a :class:`pandas.DataFrame` with one row per
           frequency chunk and a ``T_*`` column per processing function (the
@@ -682,9 +698,25 @@ def image_cube_single_field(
           opening the input, building the graph, computing it, consolidating
           metadata; ``T_add_lazy_input_data`` is ``0.0`` for a processing set)
           plus the grand total ``T_total``.
+        * ``"report"`` is the path of the report file written (``None``
+          without one, for ``report="notebook"`` and when the report failed).
+          With a report the image statistics of the residual also hold
+          ``entropy``, the entropy of every plane's final residual.
 
     Notes
     -----
+    The report's results section (see
+    :func:`~astroviper.distributed_applications.imaging.image_cube_single_field_report.image_cube_single_field_report`):
+    cross sections of the point spread function (Stokes I, centre channel)
+    with the fitted Gaussian, the maximum over frequency (``moments``) of the
+    residual, the model and the primary beam corrected restored image per
+    Stokes plane, the spectrum of the peak inside the clean mask, and per
+    channel the cycle control stop codes, the occurrences of the model update
+    stop codes, the iterations, the imaging cycles, the final residual entropy
+    and the residual RMS. With a report and a kept
+    ``point_spread_function``, ``beam_fit_params_point_spread_function`` is
+    kept too.
+
     The Zarr image store is created with :func:`xradio.image.write_image`.
     XRADIO versions that give image Zarr stores the ``.img.zarr`` extension
     give it to an ``image_store`` without it (``cube.zarr`` gives
@@ -812,6 +844,15 @@ def image_cube_single_field(
             image_data_variables_keep = list(image_data_variables_keep) + [
                 "sky_restored_primary_beam_corrected"
             ]
+    # The report draws the point spread function with its fitted Gaussian.
+    if (
+        report is not None
+        and "point_spread_function" in image_data_variables_keep
+        and "beam_fit_params_point_spread_function" not in image_data_variables_keep
+    ):
+        image_data_variables_keep = list(image_data_variables_keep) + [
+            "beam_fit_params_point_spread_function"
+        ]
 
     # Every driver step is timed into ``timing_distributed_application``; the
     # individual per-step timing log messages are replaced by the formatted
@@ -1004,6 +1045,7 @@ def image_cube_single_field(
     input_params["image_sharding"] = image_sharding
     input_params["output_image_format"] = output_image_format
     input_params["task_time_kill_switch_seconds"] = task_time_kill_switch_seconds
+    input_params["report_statistics"] = report is not None
 
     from graphviper.graph_tools.coordinate_utils import (
         interpolate_data_coords_onto_parallel_coords,
@@ -1219,6 +1261,14 @@ def image_cube_single_field(
         raise ValueError(
             f"Unknown compute_backend {compute_backend!r}; expected 'dask' or 'mpi'."
         )
+    # A graph of one map task has no reduce node: its result is the node
+    # task's own dict, whose monitor series are folded in here as the reduce
+    # folds them in.
+    usage = imaging_dict.pop("resource_usage", None)
+    if usage is not None:
+        imaging_dict["timing_node_tasks"] = _with_resource_usage(
+            imaging_dict["timing_node_tasks"], usage
+        )
 
     # The processing set is not needed any more. Severing its parent<->child
     # links lets it, with the lazy arrays and dask graphs of every node, die by
@@ -1233,7 +1283,12 @@ def image_cube_single_field(
         zarr.consolidate_metadata(image_store)
     timing_distributed_application["T_consolidate_metadata"] = time.time() - start
 
-    timing_distributed_application["T_total"] = time.time() - application_start
+    application_end = time.time()
+    timing_distributed_application["T_total"] = application_end - application_start
+    # Absolute anchors of the whole call, which place the driver's own steps on
+    # the wall clock of the task stream.
+    timing_distributed_application["application_start_unixtime"] = application_start
+    timing_distributed_application["application_end_unixtime"] = application_end
 
     # The reduce already produced ``{"timing_node_tasks", "deconvolution"}``; add
     # the driver-level timing so the full return dict carries timing for both the
@@ -1277,7 +1332,33 @@ def image_cube_single_field(
         )
     )
 
+    imaging_dict["report"] = None
+    if report is not None:
+        from astroviper.distributed_applications.imaging.image_cube_single_field_report import (
+            image_cube_single_field_report,
+        )
+        from astroviper.utils.report import make_report
+
+        imaging_dict["report"] = make_report(
+            image_cube_single_field_report,
+            imaging_dict,
+            image_store=image_store,
+            report=report,
+            output_image_format=output_image_format,
+            image_data_variables_keep=image_data_variables_keep,
+            thread_info=thread_info,
+        )
     return imaging_dict
+
+
+def _with_resource_usage(timing, usage):
+    """A copy of a node task's one-row ``timing`` frame with the monitor's
+    ``usage`` series as columns: a list series becomes ONE cell of the single
+    row; scalars (``sample_interval_seconds``) broadcast."""
+    timing = timing.copy()
+    for key, value in usage.items():
+        timing[key] = [value] if isinstance(value, list) else value
+    return timing
 
 
 def combine_return_data_frames(input_data, input_params):
@@ -1347,11 +1428,7 @@ def combine_return_data_frames(input_data, input_params):
         # their series are already columns of a multi-row frame).
         usage = result.get("resource_usage")
         if usage is not None:
-            timing = timing.copy()
-            for key, value in usage.items():
-                # a list series becomes ONE cell of the single row; scalars
-                # (sample_interval_seconds) broadcast.
-                timing[key] = [value] if isinstance(value, list) else value
+            timing = _with_resource_usage(timing, usage)
         timing_frames.append(timing)
         imaging_dicts.append(result["deconvolution"])
         statistics_list.append(result.get("image_statistics", {}))

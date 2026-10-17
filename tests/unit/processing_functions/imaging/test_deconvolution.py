@@ -39,6 +39,7 @@ from astroviper.processing_functions.imaging.utils.cycle_control import (
     MODEL_UPDATE_MAX_ITER_PER_CYCLE,
     CycleController,
     StopCode,
+    merge_imaging_dicts,
 )
 from astroviper.processing_functions.imaging.utils.imaging_dict import ImagingDict
 
@@ -748,6 +749,31 @@ class TestDeconvolveReportsDivergence:
         assert controller.stop_code_model_update[0, 0, 0] == (
             MODEL_UPDATE_MAX_ITER_PER_CYCLE
         )
+
+    def test_every_model_update_records_its_stop_code(self):
+        """``stop_code`` keeps the code of the last model update, the
+        ``model_update_stop_code`` history that of every model update."""
+        first = deconvolve(
+            img_xds=self._xds(sidelobe=2.04),
+            deconvolve_params={
+                "gain": 0.5,
+                "max_iter": 40,
+                "threshold": 0.0,
+                "max_iter_divergence": 5,
+            },
+        )
+        second = deconvolve(
+            img_xds=self._xds(sidelobe=0.0),
+            deconvolve_params={"gain": 0.5, "max_iter": 10, "threshold": 0.0},
+        )
+        (entry,) = first.data.values()
+        assert entry["model_update_stop_code"] == [MODEL_UPDATE_DIVERGENCE]
+        (entry,) = merge_imaging_dicts([first, second]).data.values()
+        assert entry["model_update_stop_code"] == [
+            MODEL_UPDATE_DIVERGENCE,
+            MODEL_UPDATE_MAX_ITER_PER_CYCLE,
+        ]
+        assert entry["stop_code"].model_update == MODEL_UPDATE_MAX_ITER_PER_CYCLE
 
 
 @requires_hogbom

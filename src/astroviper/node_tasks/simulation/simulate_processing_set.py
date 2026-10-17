@@ -198,10 +198,14 @@ def simulate_processing_set(
 
     Returns
     -------
-    pandas.DataFrame or xr.Dataset
-        One timing row (``task_id``, ``T_uvw``, ``T_beams``, ``T_visibilities``,
-        ``T_noise``, ``T_write``, ``T_simulate_task`` plus host/pid/thread
-        provenance) in graph mode; the chunk dataset when ``graph_mode=False``.
+    dict or xr.Dataset
+        In graph mode ``{"timing_node_tasks": pandas.DataFrame}``, one timing
+        row (``task_id``, ``T_uvw``, ``T_beams``, ``T_visibilities``,
+        ``T_noise``, ``T_write``, ``T_simulate_task``, the wall clock anchor
+        ``start_unixtime`` and the execution identity ``hostname``,
+        ``process_pid``, ``thread_native_id``, ``worker_name``, as the imaging
+        node task records them); a dict, so that graphviper's resource monitor
+        can attach its series. The chunk dataset when ``graph_mode=False``.
     """
     import threading
 
@@ -301,13 +305,22 @@ def simulate_processing_set(
     timing["T_write"] = _time.time() - start
     timing["T_simulate_task"] = _time.time() - task_start
 
+    # The Dask worker this task ran on (None outside a Dask worker, e.g. MPI).
+    try:
+        from distributed import get_worker
+
+        worker_name = str(get_worker().name)
+    except Exception:
+        worker_name = None
     row = {
         "task_id": task_id,
         "n_time": len(time_chunk),
         "n_frequency": len(frequency_chunk),
         **timing,
-        "host": socket.gethostname(),
-        "pid": os.getpid(),
-        "thread": threading.get_ident(),
+        "start_unixtime": task_start,
+        "hostname": socket.gethostname(),
+        "process_pid": os.getpid(),
+        "thread_native_id": threading.get_native_id(),
+        "worker_name": worker_name,
     }
-    return pd.DataFrame([row])
+    return {"timing_node_tasks": pd.DataFrame([row])}

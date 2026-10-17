@@ -572,7 +572,8 @@ def create_imaging_dict(
         diverged, 5 a test of the deconvolver itself). Every plane's
         ``stop_code`` placeholder carries it as the model update stop code,
         which the :class:`CycleController` keeps when it stamps the imaging
-        stop code.
+        stop code, and its ``model_update_stop_code`` field records it, so
+        that the merged record holds the code of every model update.
 
         Optional keys ``iteration_peak_residual`` and
         ``iteration_residual_rms``: the iteration history of the
@@ -673,6 +674,10 @@ def create_imaging_dict(
                     "peakres_nomask": peakres_nomask,
                     "masksum": int(masksum[tt, nn, pp]),
                 }
+                if stop_code is not None:
+                    # The code of every model update; ``stop_code`` keeps
+                    # only that of the last one that ran.
+                    returnvals["model_update_stop_code"] = int(stop_code[tt, nn, pp])
                 for field, history in iteration_history.items():
                     returnvals[field] = history[tt][nn][pp]
 

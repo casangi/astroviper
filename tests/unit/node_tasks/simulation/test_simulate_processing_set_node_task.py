@@ -128,7 +128,7 @@ def test_tasks_write_disjoint_regions_and_timing(setup):
             task_coords=task["task_coords"],
             data_selection={},
             task_id=task_id,
-        )
+        )["timing_node_tasks"]
         for task_id, task in mapping.items()
     ]
     for df in frames:
@@ -140,6 +140,11 @@ def test_tasks_write_disjoint_regions_and_timing(setup):
             "T_noise",
             "T_write",
             "T_simulate_task",
+            "start_unixtime",
+            "hostname",
+            "process_pid",
+            "thread_native_id",
+            "worker_name",
         } <= set(df)
     zarr.consolidate_metadata(ps_store)
     # the assembled processing set must pass the XRADIO MSv4 schema checker

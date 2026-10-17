@@ -423,3 +423,98 @@ def test_sky_image_store_is_the_store_written(tmp_path):
     assert list(img.polarization.values) == ["I"]
     # RR = LL = 1 Jy: Stokes I = 1 Jy in every channel
     np.testing.assert_allclose(img.SKY.values.sum(axis=(2, 3, 4)), [[1.0] * 3])
+
+
+def _report_text(path):
+    with open(path, encoding="utf-8") as file:
+        return file.read()
+
+
+def test_html_report_of_a_monitored_single_task_run(tmp_path):
+    """One map task (no reduce node): the timing frame is still a frame, with
+    the monitor's series and the identity of the task; the HTML report has
+    every section."""
+    pytest.importorskip("psutil")
+    arcsec = np.pi / (180 * 3600)
+    result, _ = run(
+        tmp_path,
+        point_source_flux=None,
+        point_source_ra_dec=None,
+        sky_components=[
+            {"kind": "point", "flux": 1.0, "ra_dec": SRC[0, 0]},
+            {
+                "kind": "gaussian",
+                "flux": [1.0, 0.0, 0.0, 0.6],
+                "ra_dec": PC[0],
+                "major": 60 * arcsec,
+                "minor": 40 * arcsec,
+                "pa": 0.3,
+            },
+        ],  # fmt: skip
+        noise_params={"random_seed": 3},
+        n_time_chunks=1,
+        n_frequency_chunks=1,
+        monitor_resources_seconds=0.02,
+        report="html",
+    )
+    timing = result["timing_node_tasks"]
+    assert isinstance(timing, pd.DataFrame) and len(timing) == 1
+    for column in ("cpu_percent", "memory_rss_bytes", "start_unixtime", "hostname"):
+        assert column in timing, column
+    driver = result["timing_distributed_application"]
+    assert (
+        driver["application_start_unixtime"]
+        <= driver["compute_start_unixtime"]
+        <= driver["compute_end_unixtime"]
+        <= driver["application_end_unixtime"]
+    )
+    assert result["report"] == str(tmp_path / "vla_sim_report.html")
+    text = _report_text(result["report"])
+    for heading in (
+        "Processing",
+        "Observation",
+        "Antennas",
+        "uv coverage",
+        "Noise",
+        "Point spread function",
+        "Sky components",
+    ):
+        assert f">{heading}</h" in text, heading
+    assert "Cluster CPU" in text
+    assert "shortest baseline" in text and "longest baseline" in text
+    assert text.count("data:image/png;base64,") >= 9
+    assert (
+        tmp_path / "vla_sim_report_files" / "point_spread_function.img.zarr"
+    ).exists()
+
+
+def test_pdf_and_notebook_reports(tmp_path, monkeypatch):
+    """Without noise the report says so; with sky_image_params it draws the
+    sky image of the simulation; "notebook" displays the report."""
+    import IPython.display
+
+    arcsec = np.pi / (180 * 3600)
+    sky_image_params = {
+        "image_store": str(tmp_path / "sky.img.zarr"),
+        "image_size": [64, 64],
+        "cell_size": [-10 * arcsec, 10 * arcsec],
+    }
+    result, _ = run(tmp_path, sky_image_params=sky_image_params, report="pdf")
+    assert result["report"] == str(tmp_path / "vla_sim_report.pdf")
+    with open(result["report"], "rb") as file:
+        assert file.read(4) == b"%PDF"
+
+    shown = []
+    monkeypatch.setattr(IPython.display, "display", shown.append)
+    result, _ = run(tmp_path, sky_image_params=sky_image_params, report="notebook")
+    assert result["report"] is None
+    (html,) = (shown[0].data,)
+    assert "No noise was simulated" in html
+    assert "the sky image of the simulation" in html
+    assert "Cluster CPU, memory and I/O were not recorded" in html
+
+
+def test_unknown_report_format_is_refused(tmp_path):
+    with pytest.raises(AssertionError):  # the param.json schema
+        run(tmp_path, report="docx")
+    assert not (tmp_path / "vla_sim.ps.zarr").exists()
