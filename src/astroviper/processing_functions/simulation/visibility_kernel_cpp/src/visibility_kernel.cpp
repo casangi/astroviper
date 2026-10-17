@@ -121,10 +121,12 @@ inline double clampd(double x, double lo, double hi) { return std::min(std::max(
 
 /**
  * Sample the Jones vector [J_pp, J_pq, J_qp, J_qq] of one beam model at (l, m)
- * for one frequency.  Identical to the Python sample_jones().
+ * for one frequency, whose nearest model frequency is row i_chan.  Identical to
+ * the Python sample_jones().
  */
 inline void sample_jones(const BeamModel& bm, double l, double m, double freq,
-                         double parallactic_angle, std::complex<double> jones[4]) {
+                         double parallactic_angle, std::int64_t i_chan,
+                         std::complex<double> jones[4]) {
     jones[0] = jones[1] = jones[2] = jones[3] = 0.0;
     const double rho = std::sqrt(l * l + m * m);
     if (rho >= bm.max_rad_1GHz / (freq / 1e9)) return;  // outside the beam cut
@@ -134,7 +136,6 @@ inline void sample_jones(const BeamModel& bm, double l, double m, double freq,
         jones[0] = resp;
         jones[3] = resp;
     } else if (bm.kind == 1) {
-        const std::int64_t i_chan = nearest_index(bm.poly_frequency, bm.n_poly_frequency, freq);
         const double* coef = bm.poly_coefficients + i_chan * bm.n_poly_coefficient;
         double rho_table = rho;
         if (bm.poly_n_sample > 0) {
@@ -149,7 +150,6 @@ inline void sample_jones(const BeamModel& bm, double l, double m, double freq,
         jones[3] = beam;
     } else {
         const std::int64_t i_pa = nearest_angle_index(bm.jones_parallactic_angle, bm.n_pa, parallactic_angle);
-        const std::int64_t i_chan = nearest_index(bm.jones_frequency, bm.n_jones_frequency, freq);
         const double scale = freq / bm.jones_frequency[i_chan];
         const double delta_pa = parallactic_angle - bm.jones_parallactic_angle[i_pa];
         const double c = std::cos(delta_pa), s = std::sin(delta_pa);
@@ -221,6 +221,19 @@ void calculate_visibilities(
     const std::int64_t f_pointing_time = (n_pointing_time == 1) ? n_time : 1;
     const std::int64_t f_pointing_ant = (n_pointing_antenna == 1) ? n_antenna : 1;
 
+    // The nearest model frequency of every channel, found once.
+    std::vector<std::vector<std::int64_t>> model_row(beam_models.size());
+    for (std::size_t i = 0; i < beam_models.size(); ++i) {
+        const BeamModel& bm = beam_models[i];
+        if (bm.kind == 0) continue;
+        const double* values = bm.kind == 1 ? bm.poly_frequency : bm.jones_frequency;
+        const std::int64_t n = bm.kind == 1 ? bm.n_poly_frequency : bm.n_jones_frequency;
+        model_row[i].resize(static_cast<std::size_t>(n_frequency));
+        for (std::int64_t c = 0; c < n_frequency; ++c) {
+            model_row[i][static_cast<std::size_t>(c)] = nearest_index(values, n, frequency[c]);
+        }
+    }
+
     auto worker = [&](std::int64_t b_begin, std::int64_t b_end) {
         std::vector<std::complex<double>> jones_all(static_cast<std::size_t>(n_antenna * n_frequency * 4));
         std::vector<std::complex<double>> flux_scaled(4);
@@ -238,9 +251,12 @@ void calculate_visibilities(
                 }
                 // Jones of every antenna at every frequency
                 for (std::int64_t a = 0; a < n_antenna; ++a) {
-                    const BeamModel& bm = beam_models[static_cast<std::size_t>(beam_model_map[a])];
+                    const std::size_t i_model = static_cast<std::size_t>(beam_model_map[a]);
+                    const BeamModel& bm = beam_models[i_model];
+                    const std::vector<std::int64_t>& row = model_row[i_model];
                     for (std::int64_t c = 0; c < n_frequency; ++c) {
                         sample_jones(bm, lm_ant[2 * a], lm_ant[2 * a + 1], frequency[c], pa,
+                                     row.empty() ? 0 : row[static_cast<std::size_t>(c)],
                                      &jones_all[(a * n_frequency + c) * 4]);
                     }
                 }
