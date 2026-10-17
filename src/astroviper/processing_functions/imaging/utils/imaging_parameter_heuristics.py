@@ -19,7 +19,9 @@ Pure functions behind
   largest cell whose uv grid holds those samples
   (:func:`max_cell_size_for_uv_coverage`);
 - the image size, the next even 2, 3, 5 smooth size that covers the field of
-  view (:func:`image_size_for_field_of_view`).
+  view (:func:`image_size_for_field_of_view`);
+- the gridding kernel and FFT padding (``GRIDDING_KERNEL_PARAMS``,
+  ``FFT_PADDING``).
 """
 
 from __future__ import annotations
@@ -41,6 +43,19 @@ CELL_GUESS_SAMPLES_PER_U_MAX = 3.0
 ACA_DISH_DIAMETER_LIMIT = 9.5
 # CASA pipeline robust of a cube.
 DEFAULT_ROBUST = {"alma": 0.5, "aca": 0.5, "vla": 2.0}
+# Requirement (a) of RADPS Memo 13: the kernel floor at most a third of the w term floor.
+# Measured on the five cases of its K set (zenith tracks): at fft_padding 1.2 the
+# only tested kernel that meets it on all five; 0.30 on the 7 m array at 950 GHz,
+# 91 percent of the limit (exponential semicircle 9: 0.41), the case with the
+# smallest B_max lambda / D**2 (the most demanding by that ordering, derived); at
+# most 0.20 on ALMA C-1 and C-8, the VLA D and the ngVLA core.
+GRIDDING_KERNEL_PARAMS = {
+    "type": "prolate_spheroidal",
+    "support": 9,
+    "oversampling": 300,
+    "interpolation": "linear",
+}
+FFT_PADDING = 1.2
 
 
 def primary_beam_telescope(telescope_name, dish_diameters=None):

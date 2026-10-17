@@ -7,7 +7,6 @@
         "weighting": { "type": ["str"], "allowed": ["briggs", "natural", "uniform"] },
         "robust": { "type": ["int", "float"], "nullable": true, "min": -2, "max": 2 },
         "n_sigma": { "type": ["int", "float"], "min": 0 },
-        "max_dynamic_range": { "type": ["int", "float"], "min": 0 },
         "processing_set_data_group_name": { "type": ["str"] },
         "field_name": { "type": ["str"], "nullable": true },
         "scan_intents": { "type": ["list", "str"], "nullable": true },

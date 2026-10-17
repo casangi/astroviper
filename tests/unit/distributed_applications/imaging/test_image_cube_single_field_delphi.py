@@ -29,9 +29,12 @@ from astroviper.distributed_applications.imaging.image_cube_single_field import 
     image_cube_single_field,
     read_parameters_file,
 )
+from astroviper.processing_functions.imaging.utils.cycle_control import (
+    IMAGING_THRESHOLD,
+)
 from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
-    EXTRA_CYCLES,
-    NOISY_MAX_ITER_PER_CYCLE,
+    NOISY_N_SIGMA,
+    noisy_cycle_control_params,
 )
 from astroviper.utils.beam_models import airy_disk_model
 from astroviper.utils.telescope_layout import read_telescope_layout
@@ -44,6 +47,12 @@ PSF_MODULE = "astroviper.distributed_applications.imaging.point_spread_function_
 delphi_module = importlib.import_module(
     "astroviper.distributed_applications.imaging.image_cube_single_field_delphi"
 )
+PROLATE_SPHEROIDAL_9 = {
+    "type": "prolate_spheroidal",
+    "support": 9,
+    "oversampling": 300,
+    "interpolation": "linear",
+}
 
 
 @pytest.fixture(scope="module")
@@ -346,7 +355,8 @@ def test_delphi_calculate_parameters_only(ps_store, tmp_path, psf_calls):
     assert call["image_store"] is None
     assert call["instrument_polarization_basis"] == "circular"
     assert call["image_params"]["polarization_coords"] == ["I", "V"]
-    assert call["gridding_kernel_params"] == delphi_module.GRIDDING_KERNEL_PARAMS
+    assert call["gridding_kernel_params"] == PROLATE_SPHEROIDAL_9
+    assert call["image_params"]["fft_padding"] == 1.2
     assert call["primary_beam_params"] == {"telescope": "vla"}
     assert call["imaging_weights_params"] == {"weighting": "briggs", "robust": 2.0}
 
@@ -370,16 +380,19 @@ def test_delphi_calculate_parameters_only(ps_store, tmp_path, psf_calls):
     assert image_params["phase_direction"] == pytest.approx(PC.tolist())
     assert image_params["polarization_coords"] == ["I", "V"]
     assert len(image_params["frequency_coords"]) == 2
+    assert image_params["fft_padding"] == 1.2
 
+    # The controls of the PSF pass, every key written out.
     controls = arguments["cycle_control_params"]
+    stand_in = sys.modules[PSF_MODULE].point_spread_function_cube_single_field(**call)
+    assert controls == noisy_cycle_control_params(stand_in, n_sigma=3.0)
     np.testing.assert_allclose(
         controls["threshold"], 3.0 * np.array([[1e-3, 2e-3], [3e-3, 4e-3]])
     )
-    assert controls["max_iter_per_cycle"] == NOISY_MAX_ITER_PER_CYCLE
-    assert controls["entropy_stop"] is True
-    assert controls["primary_beam_limit"] == 0.2
-    assert controls["max_cycles"] == derived["predicted_imaging_cycles"] + EXTRA_CYCLES
-    assert arguments["gridding_kernel_params"] == delphi_module.GRIDDING_KERNEL_PARAMS
+    assert controls["threshold_tolerance"] == 0.02
+    assert controls["exact_psf_subtraction"] is False
+    assert not {"psf_fraction", "predicted_imaging_cycles"} & set(derived)
+    assert arguments["gridding_kernel_params"] == PROLATE_SPHEROIDAL_9
     assert arguments["restore"] is True and arguments["primary_beam_correction"]
     np.testing.assert_allclose(
         derived["sensitivity_natural"], 0.8 * np.array([[1e-3, 2e-3], [3e-3, 4e-3]])
@@ -425,9 +438,20 @@ def test_delphi_images_from_its_parameters_file(
     ] == {"weighting": "natural"}
 
 
+def test_delphi_n_sigma_default_is_the_heuristic():
+    parameters = inspect.signature(
+        delphi_module.image_cube_single_field_delphi
+    ).parameters
+    assert parameters["n_sigma"].default == NOISY_N_SIGMA
+    assert "max_dynamic_range" not in parameters
+
+
 def test_delphi_end_to_end_with_stand_in_psf_pass(ps_store, tmp_path, psf_calls):
     """The parameters file drives the real imager: both channels are cleaned
-    (per channel thresholds of a few mJy), restored and primary beam corrected."""
+    (per channel thresholds of a few mJy) until every plane stops on its
+    threshold within the tolerance, then restored and primary beam corrected.
+    A round trip check: delphi's former controls stop there too, so the
+    values are guarded by the tests of noisy_cycle_control_params."""
     image_store = str(tmp_path / "cube.img.zarr")
     result = delphi_module.image_cube_single_field_delphi(
         ps_store,
@@ -447,6 +471,21 @@ def test_delphi_end_to_end_with_stand_in_psf_pass(ps_store, tmp_path, psf_calls)
     np.testing.assert_allclose(np.nansum(model, axis=(1, 2)), [1.0, 1.0], rtol=0.05)
     for name in ("SKY_RESTORED", "SKY_RESTORED_PRIMARY_BEAM_CORRECTED"):
         assert name in img.data_vars
+    controls = result["parameters"]["image_cube_single_field"]["cycle_control_params"]
+    record = result["deconvolution"]
+    assert {(key.chan, key.pol) for key in record.data} == {
+        (0, 0),
+        (0, 1),
+        (1, 0),
+        (1, 1),
+    }
+    for key, entry in record.data.items():
+        threshold = controls["threshold"][key.chan][key.pol]
+        assert entry["stop_code"].imaging == IMAGING_THRESHOLD, key
+        assert len(entry["iter_done"]) - 1 <= controls["max_cycles"], key
+        assert abs(entry["peakres"][-1]) <= threshold * (
+            1 + controls["threshold_tolerance"]
+        ), key
 
 
 def test_delphi_skips_a_fully_flagged_highest_channel(ps_store, tmp_path, psf_calls):
@@ -573,7 +612,7 @@ def test_metadata_refuses_several_fields():
         )
 
 
-@pytest.mark.parametrize("name", ["pixels_per_beam", "n_sigma", "max_dynamic_range"])
+@pytest.mark.parametrize("name", ["pixels_per_beam", "n_sigma"])
 def test_delphi_refuses_a_non_positive_input(tmp_path, name):
     with pytest.raises(ValueError, match=f"{name} must be positive"):
         delphi_module.image_cube_single_field_delphi(

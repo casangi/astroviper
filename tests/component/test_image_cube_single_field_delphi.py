@@ -17,6 +17,12 @@ import astroviper.distributed_applications as distributed_applications
 from astroviper.distributed_applications.imaging.image_cube_single_field import (
     image_cube_single_field,
 )
+from astroviper.processing_functions.imaging.utils.cycle_control import (
+    IMAGING_THRESHOLD,
+)
+from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
+    NOISY_N_SIGMA,
+)
 from astroviper.utils.beam_models import airy_disk_model
 from astroviper.utils.telescope_layout import read_telescope_layout
 
@@ -87,7 +93,14 @@ def test_delphi_parameters_file_then_image_from_it(tmp_path):
         "weighting": "briggs",
         "robust": 0.5,
     }
+    assert arguments["gridding_kernel_params"] == {
+        "type": "prolate_spheroidal",
+        "support": 9,
+        "oversampling": 300,
+        "interpolation": "linear",
+    }
     image_params = arguments["image_params"]
+    assert image_params["fft_padding"] == 1.2
     assert image_params["polarization_coords"] == ["I", "Q"]
     np.testing.assert_allclose(image_params["frequency_coords"], [100e9, 101e9])
     np.testing.assert_allclose(image_params["phase_direction"], PC)
@@ -114,10 +127,13 @@ def test_delphi_parameters_file_then_image_from_it(tmp_path):
     np.testing.assert_allclose(image_params["cell_size"], [-minor / 5, minor / 5])
     size = image_params["image_size"][0]
     assert size % 2 == 0 and size * minor / 5 >= derived["field_of_view"]
-    threshold = arguments["cycle_control_params"]["threshold"]
-    np.testing.assert_allclose(threshold, 2.0 * np.array(derived["sensitivity"]))
+    controls = arguments["cycle_control_params"]
+    threshold = controls["threshold"]
+    np.testing.assert_allclose(
+        threshold, NOISY_N_SIGMA * np.array(derived["sensitivity"])
+    )
 
-    image_cube_single_field(parameters_file=parameters_file)
+    result = image_cube_single_field(parameters_file=parameters_file)
     img = load_image(image_store)
     for name in ("SKY_MODEL", "SKY_RESIDUAL", "SKY_RESTORED", "PRIMARY_BEAM"):
         assert name in img.data_vars, name
@@ -129,3 +145,11 @@ def test_delphi_parameters_file_then_image_from_it(tmp_path):
     residual_rms = np.nanstd(img.SKY_RESIDUAL.values[0, :, stokes_i], axis=(1, 2))
     sensitivity = np.array(derived["sensitivity"])[:, stokes_i]
     assert np.all((residual_rms > 0.5 * sensitivity) & (residual_rms < 2 * sensitivity))
+    # Every plane stops on its threshold, within the tolerance and max_cycles: a round
+    # trip check of the file's controls; their values are tested in the unit tests.
+    for key, entry in result["deconvolution"].data.items():
+        assert entry["stop_code"].imaging == IMAGING_THRESHOLD, key
+        assert len(entry["iter_done"]) - 1 <= controls["max_cycles"], key
+        assert abs(entry["peakres"][-1]) <= threshold[key.chan][key.pol] * (
+            1 + controls["threshold_tolerance"]
+        ), key

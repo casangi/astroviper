@@ -3,6 +3,9 @@
 import numpy as np
 import pytest
 
+from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+    make_gridding_kernel,
+)
 from astroviper.processing_functions.imaging.primary_beam.airy_disk import (
     airy_disk_response,
     casa_airy_disk_response,
@@ -11,7 +14,9 @@ from astroviper.processing_functions.imaging.utils.fft_sizing import (
     next_fft_friendly_size,
 )
 from astroviper.processing_functions.imaging.utils.imaging_parameter_heuristics import (
+    FFT_PADDING,
     FIELD_OF_VIEW_MARGIN,
+    GRIDDING_KERNEL_PARAMS,
     SPEED_OF_LIGHT,
     cell_size_from_beam,
     cell_size_from_beam_fit,
@@ -284,3 +289,17 @@ def test_max_cell_size_for_uv_coverage():
     guess = cell_size_guess(1000.0, 3e9)
     u_max = 1000.0 * 3e9 / SPEED_OF_LIGHT
     assert max_cell_size_for_uv_coverage(guess) == pytest.approx(1.0 / (2.0 * u_max))
+
+
+def test_gridding_kernel_is_made_for_its_padding():
+    """Prolate spheroidal 9/300/linear designed for padding 1.2; its
+    correction at the edge of the image kept is above the floor the imager
+    refuses."""
+    kernel = make_gridding_kernel(GRIDDING_KERNEL_PARAMS, FFT_PADDING)
+    assert kernel.params == {
+        "type": "prolate_spheroidal",
+        "support": 9,
+        "oversampling": 300,
+        "interpolation": "linear",
+    }
+    assert kernel.shape["fft_padding"] == FFT_PADDING == 1.2

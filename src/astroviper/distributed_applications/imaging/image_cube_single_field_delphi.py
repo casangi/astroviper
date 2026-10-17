@@ -23,19 +23,14 @@ import toolviper.utils.parameter
 from astroviper.distributed_applications.imaging.image_cube_single_field import (
     image_cube_single_field,
 )
+from astroviper.processing_functions.imaging.utils.imaging_parameter_heuristics import (
+    FFT_PADDING,
+    GRIDDING_KERNEL_PARAMS,
+)
 from astroviper.utils.param_docs import shares_param_docs
 
 _PARAM_CONFIG_DIR = os.path.dirname(__file__)
 
-# Measured: C8_KERNEL and C8_FFT_PADDING of the C8 test (ALMA C8 at 950 GHz),
-# tests/component/test_point_source_flux_recovery.py.
-GRIDDING_KERNEL_PARAMS = {
-    "type": "exponential_semicircle",
-    "support": 7,
-    "oversampling": 300,
-    "interpolation": "linear",
-}
-FFT_PADDING = 1.2
 PSF_FITTING_METHOD = "astroviper"
 IMAGE_DATA_VARIABLES_KEEP = [
     "sky_model",
@@ -69,8 +64,7 @@ def image_cube_single_field_delphi(
     image_edge_primary_beam_limit: float = 0.2,
     weighting: str = "briggs",
     robust: float | None = None,
-    n_sigma: float = 2.0,
-    max_dynamic_range: float = 1e5,
+    n_sigma: float = 3.0,
     processing_set_data_group_name: str = "corrected",
     field_name: str | None = None,
     scan_intents: list[str] | None = ["OBSERVE_TARGET#ON_SOURCE"],  # noqa: B006 - None means every intent, so the default stays a list; never mutated
@@ -85,7 +79,7 @@ def image_cube_single_field_delphi(
     """
     Image a single field cube with parameters derived from the data.
 
-    The derivations, for ALMA (12 m and 7 m arrays) and the VLA:
+    The derivations, for ALMA (12 m and 7 m arrays), the VLA and the ngVLA:
 
     * ``primary_beam_params``: ``{"telescope": ...}`` from the telescope
       name (of the observation, else of the antennas) and the dish diameters
@@ -106,21 +100,32 @@ def image_cube_single_field_delphi(
       Stokes I PSF of the highest frequency. Each image size is the next even
       2, 3, 5 smooth size that covers the field of view.
     * Imaging weights: ``weighting`` with ``robust`` (``None``: 0.5 for ALMA
-      and ACA, 2.0 for the VLA, the CASA pipeline values of a cube).
-    * Gridding kernel: exponential semicircle, support 7, oversampling 300,
-      linear interpolation, with ``fft_padding`` 1.2.
+      and ACA, 2.0 for the VLA, the CASA pipeline values of a cube; the ngVLA
+      has none, so Briggs weighting needs ``robust``, 0.5 in RADPS Memo 13).
+    * Gridding kernel: prolate spheroidal, support 9, oversampling 300,
+      linear interpolation, with ``fft_padding`` 1.2, the only tested
+      kernel at that padding whose floor is at most a third of the w term
+      floor on all five zenith track cases of the RADPS Memo 13 K set; on the
+      most demanding of them by ``B_max lambda / D**2`` (derived), the 7 m
+      array at 950 GHz, it reaches 91 percent of that limit
+      (``GRIDDING_KERNEL_PARAMS`` of
+      :mod:`~astroviper.processing_functions.imaging.utils.imaging_parameter_heuristics`).
     * Cycle controls for noisy data
       (:func:`~astroviper.processing_functions.imaging.utils.cycle_control_heuristics.noisy_cycle_control_params`):
       a per channel threshold of ``n_sigma`` times the theoretical
-      sensitivity of every channel and Stokes plane, the entropy stop, and
-      ``max_cycles`` from ``max_dynamic_range`` and the largest PSF sidelobe.
+      sensitivity of every channel and Stokes plane with a
+      ``threshold_tolerance`` of 0.02, gain 0.3, ``psf_sidelobe_factor`` 1.5,
+      no cap on the iterations of a model update, no entropy stop and
+      ``max_cycles`` 40 as a safety limit.
       The clean mask is the primary beam above
       ``image_edge_primary_beam_limit``. The sensitivity is a noise level only
       when ``WEIGHT`` holds absolute ``1 / sigma**2`` weights; with unit or
       relative weights (a simulation without noise, data without ``statwt``)
-      the threshold is in arbitrary units. The constants of the controls were
-      measured on simulated ALMA data; their use for the VLA is assumed, not
-      validated.
+      the threshold is in arbitrary units. The controls were measured on
+      simulated noisy ALMA 12 m (C-3, C-8), VLA (D, C) and ngVLA core cubes
+      with ``max_psf_sidelobe`` 0.034 to 0.20 (RADPS Memo 13; scope in
+      :func:`~astroviper.processing_functions.imaging.utils.cycle_control_heuristics.noisy_cycle_control_params`);
+      a plane stopped by ``max_cycles`` is not validated.
     * Products: the model, residual, PSF, primary beam and beam fit, the
       restored cube and its primary beam correction.
 
@@ -145,11 +150,7 @@ def image_cube_single_field_delphi(
     n_sigma : float, optional
         Threshold of every channel and Stokes plane in units of its
         theoretical sensitivity, which needs absolute weights (see the cycle
-        controls above). Default 2 (assumed).
-    max_dynamic_range : float, optional
-        Largest ratio of the peak residual of a dirty plane to its sensitivity
-        that ``max_cycles`` allows for. Default 1e5 (assumed: the largest
-        dynamic range the cycle controls were measured at).
+        controls above). Default 3 (assumed: the controls were measured at 3).
     processing_set_data_group_name : str
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     field_name : str, optional
@@ -209,7 +210,6 @@ def image_cube_single_field_delphi(
     )
     from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
         noisy_cycle_control_params,
-        noisy_cycle_prediction,
     )
     from astroviper.processing_functions.imaging.utils.imaging_parameter_heuristics import (
         cell_size_from_beam_fit,
@@ -228,7 +228,7 @@ def image_cube_single_field_delphi(
         name: call_locals[name]
         for name in inspect.signature(image_cube_single_field_delphi).parameters
     }
-    for name in ("pixels_per_beam", "n_sigma", "max_dynamic_range"):
+    for name in ("pixels_per_beam", "n_sigma"):
         if not delphi_inputs[name] > 0:
             raise ValueError(f"{name} must be positive, got {delphi_inputs[name]!r}")
     if parameters_file is None:
@@ -318,11 +318,7 @@ def image_cube_single_field_delphi(
     cycle_control_params = noisy_cycle_control_params(
         point_spread_function_xds,
         n_sigma=n_sigma,
-        max_dynamic_range=max_dynamic_range,
         primary_beam_limit=image_edge_primary_beam_limit,
-    )
-    fraction, cycles = noisy_cycle_prediction(
-        point_spread_function_xds, n_sigma, max_dynamic_range
     )
 
     arguments = {
@@ -365,8 +361,6 @@ def image_cube_single_field_delphi(
         "image_size_guess": image_size_guess,
         "cell_size": cell,
         "image_size": image_size,
-        "psf_fraction": fraction,
-        "predicted_imaging_cycles": cycles,
         "beam_params_label": point_spread_function_xds["beam_params_label"].values,
     }
     for name in _POINT_SPREAD_FUNCTION_VARIABLES:
