@@ -6,6 +6,7 @@ first step of forming the point spread function.
 """
 
 import copy
+from typing import TYPE_CHECKING
 
 import numpy as np
 import xarray as xr
@@ -15,6 +16,11 @@ from astroviper.utils.data_group_tools import (
     modify_data_groups_xds,
 )
 from astroviper.utils.param_docs import shares_param_docs
+
+if TYPE_CHECKING:
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        GriddingKernel,
+    )
 
 
 def add_uv_sampling_grid_mosaic(
@@ -199,7 +205,7 @@ def add_uv_sampling_grid_mosaic(
 
 def add_uv_sampling_grid_single_field(
     ms_xdt: xr.Dataset,
-    cgk_1D: np.ndarray,
+    cgk_1D: "GriddingKernel | np.ndarray",
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
     image_data_group_in_name: str = "residual",
@@ -474,7 +480,9 @@ def make_point_spread_function_single_field(
         defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
         ``least_misfit`` kernel whose image plane correction falls below 1e-6
         of its centre value at the edge of the image kept (a support too large
-        for the ``fft_padding``, e.g. 17 at 1.05) is refused.
+        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.
@@ -649,7 +657,9 @@ def make_subtraction_point_spread_function_single_field(
         defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
         ``least_misfit`` kernel whose image plane correction falls below 1e-6
         of its centre value at the edge of the image kept (a support too large
-        for the ``fft_padding``, e.g. 17 at 1.05) is refused.
+        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``.
     processing_function_threads : int, optional
         Number of threads handed to the per-processing-function (C++ / FFT)
         kernels.

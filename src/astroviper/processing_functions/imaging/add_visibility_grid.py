@@ -1,4 +1,5 @@
 import copy
+from typing import TYPE_CHECKING
 
 import numpy as np
 import xarray as xr
@@ -8,6 +9,11 @@ from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
 )
+
+if TYPE_CHECKING:
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        GriddingKernel,
+    )
 
 
 def add_visibility_grid_mosaic(
@@ -192,7 +198,7 @@ def add_visibility_grid_mosaic(
 
 def add_visibility_grid_single_field(
     ms_xds: xr.Dataset,
-    cgk_1D: np.ndarray,
+    cgk_1D: "GriddingKernel | np.ndarray",
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
     image_data_group_in_name: str = "residual",

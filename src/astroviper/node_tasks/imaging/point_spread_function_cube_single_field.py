@@ -116,7 +116,9 @@ def point_spread_function_cube_single_field(
         defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
         ``least_misfit`` kernel whose image plane correction falls below 1e-6
         of its centre value at the edge of the image kept (a support too large
-        for the ``fft_padding``, e.g. 17 at 1.05) is refused.
+        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``.
     primary_beam_params : dict, optional
         The primary beam of the imager, the power pattern that gives the clean
         mask and the primary beam correction: ``telescope`` (``"alma"``,
