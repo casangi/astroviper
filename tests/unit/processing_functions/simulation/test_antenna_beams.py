@@ -497,17 +497,19 @@ def test_symmetric_beam_response_is_the_sampled_voltage_pattern():
         symmetric_beam_response({"kind": "jones_image"}, 0.0, 0.0, 3e9)
 
 
-def test_symmetric_beam_cut_is_that_of_the_cpp_kernel():
-    """On the cut circle the beam is zero where sqrt(l * l + m * m), the radius
-    of the C++ kernel, reaches it, also where np.hypot rounds to the other side."""
+def test_symmetric_beam_cut_is_at_sqrt_of_l2_plus_m2():
+    """The beam is zero where sqrt(l * l + m * m), the radius the C++ kernel
+    computes, reaches the cut, and not one ulp inside it."""
     packed = pack_beam_models([airy_disk_model("alma", func="casa_airy")])[0]
     frequency = 100e9
     cut = packed["max_rad_1GHz"] / (frequency / 1e9)
     angle = np.linspace(0.0, 2.0 * np.pi, 1000)
-    l, m = cut * np.cos(angle), cut * np.sin(angle)  # noqa: E741
+    # sqrt(fl(x * x)) == |x| in binary64, so the last two points lie on and
+    # one ulp inside the cut on every platform.
+    l = np.append(cut * np.cos(angle), [cut, np.nextafter(cut, 0.0)])  # noqa: E741
+    m = np.append(cut * np.sin(angle), [0.0, 0.0])
     outside = np.sqrt(l * l + m * m) >= cut
-    assert (outside & (np.hypot(l, m) < cut)).any()
-    assert (~outside & (np.hypot(l, m) >= cut)).any()
+    np.testing.assert_array_equal(outside[-2:], [True, False])
     voltage = symmetric_beam_response(packed, l, m, frequency)
     np.testing.assert_array_equal(voltage == 0.0, outside)
     np.testing.assert_array_equal(

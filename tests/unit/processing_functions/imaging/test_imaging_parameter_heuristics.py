@@ -14,12 +14,14 @@ from astroviper.processing_functions.imaging.utils.imaging_parameter_heuristics 
     FIELD_OF_VIEW_MARGIN,
     SPEED_OF_LIGHT,
     cell_size_from_beam,
+    cell_size_from_beam_fit,
     cell_size_guess,
     default_robust,
     field_of_view,
     image_size_for_field_of_view,
     instrument_polarization_basis_from_correlations,
     longest_antenna_separation,
+    max_cell_size_for_uv_coverage,
     primary_beam_radius,
     primary_beam_telescope,
     stokes_for_correlations,
@@ -250,3 +252,35 @@ def test_cell_size_from_beam():
     assert cell_size_from_beam(1e-5, 5.0) == pytest.approx(2e-6)
     with pytest.raises(ValueError):
         cell_size_from_beam(1e-5, 0.0)
+
+
+def test_cell_size_from_beam_fit():
+    """The Stokes I minor axis of the highest frequency channel with a valid
+    fit, by label whatever the order of the dims."""
+    import xarray as xr
+
+    beam = np.zeros((3, 2, 3))  # frequency, polarization, beam_params_label
+    beam[:, 0, 1] = [3e-5, 2e-5, 0.0]  # Stokes I minor axes; the top channel flagged
+    beam[:, 1, 1] = 1e-5  # Stokes V
+    fit = xr.DataArray(
+        beam,
+        dims=("frequency", "polarization", "beam_params_label"),
+        coords={
+            "frequency": [3e9, 3.4e9, 3.8e9],
+            "polarization": ["I", "V"],
+            "beam_params_label": ["major", "minor", "pa"],
+        },
+    )
+    assert cell_size_from_beam_fit(fit, 5.0) == pytest.approx(4e-6)
+    assert cell_size_from_beam_fit(fit.transpose(), 4.0) == pytest.approx(5e-6)
+    fit[1, 0, 1] = np.nan
+    assert cell_size_from_beam_fit(fit, 5.0) == pytest.approx(6e-6)
+    with pytest.raises(ValueError, match="No channel has a valid beam fit"):
+        cell_size_from_beam_fit(fit.where(fit.frequency < 3e9, 0.0), 5.0)
+
+
+def test_max_cell_size_for_uv_coverage():
+    """1 / (2 u_max) with u_max the longest baseline of the cell guess."""
+    guess = cell_size_guess(1000.0, 3e9)
+    u_max = 1000.0 * 3e9 / SPEED_OF_LIGHT
+    assert max_cell_size_for_uv_coverage(guess) == pytest.approx(1.0 / (2.0 * u_max))

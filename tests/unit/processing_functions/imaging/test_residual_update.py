@@ -204,7 +204,10 @@ def test_residual_update_with_model_uses_the_imaged_data_group(data_group_name):
 
 def test_imaging_setup_uses_the_primary_beam_params():
     """primary_beam_params reach the primary beam of the setup (the VLA beam here),
-    which the transform to Stokes leaves alone."""
+    which the transform to Stokes leaves alone, also through image_cube_single_field."""
+    from astroviper.processing_functions.imaging.image_cube_single_field import (
+        image_cube_single_field,
+    )
     from astroviper.processing_functions.simulation.antenna_beams import (
         polynomial_beam_response,
     )
@@ -249,6 +252,28 @@ def test_imaging_setup_uses_the_primary_beam_params():
     for plane in beams["vla"]:  # I and Q
         np.testing.assert_array_equal(plane, expected)
     assert not np.allclose(beams["vla"], beams["default"])
+
+    img_xds, _, _ = image_cube_single_field(
+        _point_source_processing_set("base"),
+        _empty_image(),
+        image_params,
+        {"weighting": "natural"},
+        {
+            "max_iter": 0,
+            "max_cycles": 0,
+            "threshold": 0.0,
+            "gain": 0.1,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": -1,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
+        },
+        primary_beam_params={"telescope": "vla"},
+        image_data_variables_keep=["primary_beam"],
+        **common,
+    )
+    for plane in img_xds["PRIMARY_BEAM"].values[0, 0]:
+        np.testing.assert_array_equal(plane, expected)
 
 
 def _offset_point_source_processing_set(l0, m0, n_uv, n_visibility=3000):
