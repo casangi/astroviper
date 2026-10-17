@@ -40,6 +40,7 @@ from astroviper.processing_functions.image_analysis import image_statistics as i
 from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
     EXTRA_CYCLES,
     NOISY_CYCLE_SAFETY,
+    THRESHOLD_TOLERANCE,
     predicted_imaging_cycles,
 )
 from astroviper.processing_functions.imaging.utils.imaging_dict import (
@@ -851,7 +852,7 @@ class CycleController:
         entropy_spatial_bins: int = 7,
         entropy_flux_bins: int = 10,
         max_cycles_divergence: int = -1,
-        threshold_tolerance: float = 0.0,
+        threshold_tolerance: float = THRESHOLD_TOLERANCE,
     ):
         """
         Initialize the cycle controller with deconvolution parameters.
@@ -914,7 +915,7 @@ class CycleController:
             Relative tolerance of the threshold stop, finite and >= 0: a
             plane stops once its peak residual is at most
             ``threshold * (1 + threshold_tolerance)``; ``threshold_per_cycle``
-            is not changed (default: 0.0)
+            is not changed (default: ``THRESHOLD_TOLERANCE``, 0.02)
 
         Raises:
         -------

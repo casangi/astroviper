@@ -126,7 +126,9 @@ def imaging_preparation_single_field(
           its channel go on, once the peak of its residual inside the clean mask
           is at most ``threshold * (1 + threshold_tolerance)``; the model update
           of a plane that goes on still cleans down to ``threshold_per_cycle``,
-          floored at the threshold itself. Default 0. No CASA equivalent.
+          floored at the threshold itself. Default 0.02 (``THRESHOLD_TOLERANCE`` of
+          :mod:`~astroviper.processing_functions.imaging.utils.cycle_control_heuristics`).
+          No CASA equivalent.
         - ``threshold_sigma`` [CASA ``nsigma``] : Noise based stopping threshold
           per plane, as a multiple of the plane's robust residual rms
           (``1.4826 * MAD``). The effective threshold of a plane is
@@ -343,6 +345,9 @@ def imaging_preparation_single_field(
         ImagingDict,
         validate_entropy_params,
     )
+    from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
+        THRESHOLD_TOLERANCE,
+    )
 
     logger.debug("Processing chunk " + str(task_id))
 
@@ -364,7 +369,9 @@ def imaging_preparation_single_field(
         entropy_spatial_bins=entropy_spatial_bins,
         entropy_flux_bins=entropy_flux_bins,
         max_cycles_divergence=cycle_control_params.get("max_cycles_divergence", -1),
-        threshold_tolerance=cycle_control_params.get("threshold_tolerance", 0.0),
+        threshold_tolerance=cycle_control_params.get(
+            "threshold_tolerance", THRESHOLD_TOLERANCE
+        ),
     )
     combined_imaging_dict = ImagingDict()
 
@@ -525,7 +532,9 @@ def image_cube_single_field(
           its channel go on, once the peak of its residual inside the clean mask
           is at most ``threshold * (1 + threshold_tolerance)``; the model update
           of a plane that goes on still cleans down to ``threshold_per_cycle``,
-          floored at the threshold itself. Default 0. No CASA equivalent.
+          floored at the threshold itself. Default 0.02 (``THRESHOLD_TOLERANCE`` of
+          :mod:`~astroviper.processing_functions.imaging.utils.cycle_control_heuristics`).
+          No CASA equivalent.
         - ``threshold_sigma`` [CASA ``nsigma``] : Noise based stopping threshold
           per plane, as a multiple of the plane's robust residual rms
           (``1.4826 * MAD``). The effective threshold of a plane is

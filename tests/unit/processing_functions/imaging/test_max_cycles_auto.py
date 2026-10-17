@@ -884,16 +884,28 @@ class TestTheStopTestIsOnTheFreshResidual:
         if n_model_updates is not None:
             assert n_mu == n_model_updates
 
-    @pytest.mark.parametrize("tau", [0.0, 0.5])
-    def test_threshold_tolerance_on_the_fresh_peak(self, monkeypatch, tau):
-        """The second stop test sees Stokes I at 1.2 times the threshold: a
-        tolerance of 0.5 stops the plane there; without one the next model
-        update cleans down to the threshold."""
+    @pytest.mark.parametrize(
+        ("tolerance", "peak", "stops"),
+        [
+            ({"threshold_tolerance": 0.0}, 0.012, False),
+            ({"threshold_tolerance": 0.5}, 0.012, True),
+            ({"threshold_tolerance": 0.0}, 0.0101, False),
+            ({}, 0.0101, True),
+        ],
+        ids=["zero", "0.5", "zero_1.01", "default_1.01"],
+    )
+    def test_threshold_tolerance_on_the_fresh_peak(
+        self, monkeypatch, tolerance, peak, stops
+    ):
+        """The second stop test sees Stokes I at 1.2 or 1.01 times the
+        threshold: a tolerance of 0.5, or the default for 1.01, stops the
+        plane there; without one the next model update cleans down to the
+        threshold."""
         targets = []
 
         def just_above(record, n):
             if n == 1:
-                record.data[STOKES_I]["peakres"] = [0.012]
+                record.data[STOKES_I]["peakres"] = [peak]
 
         def target(imaging_dict):
             targets.append(imaging_dict.data[STOKES_I]["threshold_per_cycle"])
@@ -901,11 +913,11 @@ class TestTheStopTestIsOnTheFreshResidual:
         seen = _spy_on_the_loop(
             monkeypatch, on_record=just_above, on_model_update=target
         )
-        _, timing, record = _image({"threshold": 0.01, "threshold_tolerance": tau})
+        _, timing, record = _image({"threshold": 0.01, **tolerance})
         n_cycles = timing["n_cycles"].iloc[0]
         assert record.data[STOKES_I]["stop_code"].imaging == IMAGING_THRESHOLD
         assert len(seen["records"]) == n_cycles + 1
-        if tau:
+        if stops:
             assert n_cycles == 1
         else:
             assert n_cycles > 1

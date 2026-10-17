@@ -32,6 +32,14 @@ MAX_PSF_FRACTION = 0.8
 EXTRA_CYCLES = 3
 NOISY_MAX_ITER_PER_CYCLE = 100
 NOISY_CYCLE_SAFETY = 3
+# Measured against 0 on 30 noisy run pairs (RADPS Memo 13; Hogbom at 3 sigma, gain
+# 0.2 and 0.3, exact_psf_subtraction off): cost lower in 29, accuracy verdicts
+# unchanged in 30; the last fresh masked peak at most 1.0197 times the threshold;
+# point effects isolated on 5 of 10 stores. With exact_psf_subtraction run in one
+# configuration only (accuracy test passed on 14 of 14 judged skies). Other
+# thresholds and noise free data: cost replayed from records only; Asp and
+# max_cycles="auto": not run.
+THRESHOLD_TOLERANCE = 0.02
 
 
 def psf_fraction(max_psf_sidelobe, psf_sidelobe_factor=PSF_SIDELOBE_FACTOR):

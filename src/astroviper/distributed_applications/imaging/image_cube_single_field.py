@@ -283,7 +283,9 @@ def image_cube_single_field(
           its channel go on, once the peak of its residual inside the clean mask
           is at most ``threshold * (1 + threshold_tolerance)``; the model update
           of a plane that goes on still cleans down to ``threshold_per_cycle``,
-          floored at the threshold itself. Default 0. No CASA equivalent.
+          floored at the threshold itself. Default 0.02 (``THRESHOLD_TOLERANCE`` of
+          :mod:`~astroviper.processing_functions.imaging.utils.cycle_control_heuristics`).
+          No CASA equivalent.
         - ``threshold_sigma`` [CASA ``nsigma``] : Noise based stopping threshold
           per plane, as a multiple of the plane's robust residual rms
           (``1.4826 * MAD``). The effective threshold of a plane is
@@ -759,6 +761,9 @@ def image_cube_single_field(
         validate_max_cycles,
         validate_threshold_tolerance,
     )
+    from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
+        THRESHOLD_TOLERANCE,
+    )
     from astroviper.processing_functions.imaging.utils.imaging_polarization import (
         correlation_selection,
         correlations_for_stokes,
@@ -889,7 +894,9 @@ def image_cube_single_field(
         cycle_control_params.get("max_cycles", -1),
         cycle_control_params.get("max_psf_fraction"),
     )
-    validate_threshold_tolerance(cycle_control_params.get("threshold_tolerance", 0.0))
+    validate_threshold_tolerance(
+        cycle_control_params.get("threshold_tolerance", THRESHOLD_TOLERANCE)
+    )
     validate_record_iteration_history(
         deconvolver, cycle_control_params.get("record_iteration_history", False)
     )

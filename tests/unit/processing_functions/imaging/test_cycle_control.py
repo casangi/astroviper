@@ -34,6 +34,9 @@ from astroviper.processing_functions.imaging.utils.cycle_control import (  # Sto
     get_peak_residual_from_imaging_dict,
     merge_imaging_dicts,
 )
+from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
+    THRESHOLD_TOLERANCE,
+)
 from astroviper.processing_functions.imaging.utils.imaging_dict import (
     FIELD_ACCUM,
     FIELD_SINGLE_VALUE,
@@ -3112,7 +3115,7 @@ class TestThresholdTolerance(unittest.TestCase):
         return controller.stop_code_imaging[0]
 
     def test_zero_reproduces_the_threshold_stop(self):
-        """Default and ``0`` give the stop codes of ``peak <= threshold``."""
+        """``0`` gives the stop codes of ``peak <= threshold``."""
         peaks = self._peaks()
         thresholds = [*self.THRESHOLDS, list(self.THRESHOLDS)]
         for threshold in thresholds:
@@ -3122,11 +3125,7 @@ class TestThresholdTolerance(unittest.TestCase):
                 IMAGING_THRESHOLD,
                 IMAGING_CONTINUE,
             )
-            for kwargs in (
-                {},
-                {"threshold_tolerance": 0.0},
-                {"threshold_tolerance": 0},
-            ):
+            for kwargs in ({"threshold_tolerance": 0.0}, {"threshold_tolerance": 0}):
                 np.testing.assert_array_equal(
                     self._codes(threshold, peaks, **kwargs), expected
                 )
@@ -3140,8 +3139,17 @@ class TestThresholdTolerance(unittest.TestCase):
             [IMAGING_THRESHOLD] * 3 + [IMAGING_CONTINUE],
         )
         np.testing.assert_array_equal(
-            self._codes(threshold, peaks)[:, 0],
+            self._codes(threshold, peaks, threshold_tolerance=0)[:, 0],
             [IMAGING_THRESHOLD] + [IMAGING_CONTINUE] * 3,
+        )
+
+    def test_default_is_the_heuristic(self):
+        self.assertEqual(CycleController().threshold_tolerance, THRESHOLD_TOLERANCE)
+        threshold = 1e-3
+        limit = threshold * (1 + THRESHOLD_TOLERANCE)
+        peaks = [1.01 * threshold, np.nextafter(limit, np.inf)]
+        np.testing.assert_array_equal(
+            self._codes(threshold, peaks)[:, 0], [IMAGING_THRESHOLD, IMAGING_CONTINUE]
         )
 
     def test_per_plane_threshold_and_disabled_threshold(self):
@@ -3208,7 +3216,9 @@ class TestThresholdTolerance(unittest.TestCase):
                 CycleController(threshold=1e-3, threshold_tolerance=value)
 
     def test_state_lists_the_tolerance(self):
-        self.assertEqual(CycleController().get_state()["threshold_tolerance"], 0.0)
+        self.assertEqual(
+            CycleController().get_state()["threshold_tolerance"], THRESHOLD_TOLERANCE
+        )
         controller = CycleController(threshold_tolerance=np.float32(0.25))
         self.assertEqual(controller.get_state()["threshold_tolerance"], 0.25)
         self.assertIs(type(controller.threshold_tolerance), float)
