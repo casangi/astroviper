@@ -122,7 +122,7 @@ def node_task_inputs(tmp_path_factory):
                 image_store=str(work_dir / "driver.img.zarr"),
                 image_params=image_params,
                 imaging_weights_params={"weighting": "natural"},
-                iteration_control_params={
+                cycle_control_params={
                     "max_iter": 40,
                     "max_cycles": 2,
                     "threshold": 0.0,
@@ -134,7 +134,7 @@ def node_task_inputs(tmp_path_factory):
                     "max_psf_fraction": 0.8,
                 },
                 instrument_polarization_basis="linear",
-                gridder="prolate_spheroidal",
+                gridder="anti_alias",
                 deconvolver="hogbom",
                 scan_intents="OBSERVE_TARGET#ON_SOURCE",
                 image_data_variables_keep=KEEP,

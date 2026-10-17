@@ -69,11 +69,12 @@ IMAGING_TIMING_PHASES = [
             ("fft (grid)", "T_fft_grid"),
         ],
     ),
+    ("STOP TEST (summed over residual updates)", "T_stop_test", []),
     (
         "MODEL UPDATE (summed over imaging cycles)",
         "T_model_update",
         [
-            ("iteration control", "T_iteration_control"),
+            ("cycle control", "T_cycle_control"),
             ("make mask", "T_make_mask"),
             ("deconvolve", "T_deconvolve"),
             ("convergence / merge", "T_convergence"),
@@ -103,8 +104,8 @@ def format_timing_summary(timing, total_key=IMAGING_TIMING_TOTAL_KEY):
     Thin imaging-specific wrapper over the generic
     :func:`astroviper.utils.timing.format_timing_summary`: it supplies the
     imaging phase layout (:data:`IMAGING_TIMING_PHASES`) so the per-chunk
-    ``T_*`` timings are grouped into the four pipeline phases (preparation,
-    residual update, model update, restore) plus node I/O.
+    ``T_*`` timings are grouped into the pipeline phases (preparation,
+    residual update, stop test, model update, restore) plus node I/O.
 
     Parameters
     ----------

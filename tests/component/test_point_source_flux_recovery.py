@@ -1,7 +1,7 @@
 """Component test: CLEAN flux recovery for a field of point sources (ALMA, compact array).
 
 The scenario exercises the whole imaging cycle (residual updates in the
-instrument basis, model updates in Stokes, iteration control, primary-beam
+instrument basis, model updates in Stokes, cycle control, primary-beam
 correction) on data whose truth is known exactly:
 
 * ALMA in its most compact 12 m configuration (``alma.cycle8.1``: 43 antennas,
@@ -23,8 +23,8 @@ correction) on data whose truth is known exactly:
   modes of the imager are run: the two parallel hands ``XX, YY`` give Stokes
   ``I, Q`` and all four correlations give ``I, Q, U, V``.
 * The imaging parameters are the ones that reproduce the truth best in a scan
-  of the iteration controls and the FFT padding (see
-  :func:`iteration_control_params`): an FFT padding of 2, short model updates
+  of the cycle controls and the FFT padding (see
+  :func:`cycle_control_params`): an FFT padding of 2, short model updates
   and a stopping threshold at the numerical floor of the imaging cycle, which
   is set by the gridding and lies near ``3e-6`` of the brightest source.
 
@@ -55,10 +55,30 @@ Imaging ``I, Q`` from the four-correlation processing set must load only the
 parallel hands and reproduce the image of the two-hand data.
 
 With thermal noise added to the visibilities the entropy stop of the
-iteration control (``entropy_stop``) must end the clean of every plane where
+cycle control (``entropy_stop``) must end the clean of every plane where
 the residual looks most like noise: with a residual at the level of the
 thermal noise, and with a restored image as close to the truth as the noise
 allows.
+
+ALMA C8 (``alma.cycle8.8``, baselines to 8.5 km) at 950 GHz takes the field
+to the primary beam power 0.2 radius (3256 pixels of 2.8 mas, five across
+the minor axis of the beam), one channel, the two parallel hands of
+unpolarized sources: the 1 Jy source on the lattice site farthest out along
+an image axis, a 0.5 Jy source near the centre. There the w term, which the
+two dimensional imager does not model, sets the floor of the imaging cycle,
+and the gridding kernel (``C8_KERNEL``, the exponential of a semicircle of
+support 7 with linear lookup in a table of 300 samples per cell) lies below
+a third of it. The floor is measured, not assumed: the residual one residual
+update leaves for the true model (the oracle). The controls come from
+``alma_cycle_control_params`` (threshold 1.2 times the masked peak of the
+oracle); every plane must stop on the threshold, cleaning down to it within
+the predicted number of cycles plus two (a later model update starts within
+``PEAK_RESIDUAL_RISE`` of it), with the residual and the error image at the
+oracle's floor and nothing of it absorbed into the model. With typical Band
+10 noise the entropy stop must end the clean at the thermal noise. CI runs a
+1000 pixel probe of the same field (where the kernel, not the w term, sets
+the floor), with and without the w term and the noise; the full field runs
+with ``ASTROVIPER_FULL_C8_TEST=1``.
 
 The scenario builder and the analysis are plain functions so that
 ``dev/imaging/alma_point_source_recovery`` can rerun them and plot the result.
@@ -66,7 +86,10 @@ The scenario builder and the analysis are plain functions so that
 
 from __future__ import annotations
 
+import os
 import time
+import tracemalloc
+from unittest import mock
 
 import numpy as np
 import pandas as pd
@@ -81,15 +104,21 @@ from astroviper.distributed_applications.imaging import image_cube_single_field
 from astroviper.processing_functions.imaging.restore import (
     _elliptical_gaussian_kernel,
 )
-from astroviper.processing_functions.imaging.utils.imaging_dict import (
-    imaging_dict_to_dataframe,
-)
-from astroviper.processing_functions.imaging.utils.iteration_control import (
+from astroviper.processing_functions.imaging.utils.cycle_control import (
     IMAGING_ENTROPY,
     IMAGING_THRESHOLD,
 )
+from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
+    alma_cycle_control_params,
+    predicted_imaging_cycles,
+    psf_fraction,
+)
+from astroviper.processing_functions.imaging.utils.imaging_dict import (
+    imaging_dict_to_dataframe,
+)
 from astroviper.processing_functions.simulation.antenna_beams import (
-    casa_airy_disk_response,
+    pack_beam_models,
+    symmetric_beam_response,
 )
 from astroviper.utils.beam_models import airy_disk_model
 from astroviper.utils.coordinate_transforms import inverse_sin_project
@@ -132,7 +161,7 @@ POLARIZATION_MODES = {
 }
 # RA = local sidereal time at ALMA one hour into the track (16h18m), Dec at the zenith
 PHASE_CENTER = np.array([4.267, np.deg2rad(-23.0)])
-# imaging parameters of the best deconvolution (see iteration_control_params)
+# imaging parameters of the best deconvolution (see cycle_control_params)
 FFT_PADDING = 2.0
 THRESHOLD = 3.3e-6  # Jy, for F_MAX = 1 Jy: the numerical floor of the imaging cycle
 MAX_ITER_PER_CYCLE = 300
@@ -148,6 +177,50 @@ IMAGING_WEIGHTS_PARAMS = {
     "robust": 0.5,
     "casa_weighting_implementation": True,
 }
+CASA_KERNEL = {
+    "type": "prolate_spheroidal_casa",
+    "support": 7,
+    "oversampling": 100,
+    "interpolation": "nearest",
+}
+# typical ALMA noise (Cycle 13 sensitivity calculator at the zenith): T_sys reached
+# through t_receiver with the default atmosphere term, the aperture efficiency of
+# the Technical Handbook (Ruze, 25 um surface) on the 12 m collecting area
+BAND3_NOISE = {
+    "t_receiver": 34.075,
+    "ant_efficiency": 0.7121,
+    "random_seed": 7,
+}  # 74.3 K
+BAND10_NOISE = {
+    "t_receiver": 3169.775,
+    "ant_efficiency": 0.267,
+    "random_seed": 7,
+}  # 3210 K
+# ALMA C8 at 950 GHz (see the module docstring)
+C8_LAYOUT = "alma.cycle8.8"  # the first long baseline configuration
+C8_FREQUENCY_PARAMS = {
+    "freq_start": 950e9,
+    "freq_delta": 0.5e9,
+    "n_channels": 1,
+    "channel_width": 2e6,
+    "spectral_window_name": "Band10",
+}
+C8_CELL_ARCSEC = 2.8e-3  # a fifth of the fitted minor axis, 14.17 mas (natural weights)
+C8_BEAM_ARCSEC = 16.4e-3  # fitted major axis
+# image half widths in pixels: the CI probe, and the primary beam power 0.2 radius
+C8_HALF_WIDTH = {"probe": 500, "full": 1628}
+C8_FFT_PADDING = 1.2
+C8_KERNEL = {
+    "type": "exponential_semicircle",
+    "support": 7,
+    "oversampling": 300,
+    "interpolation": "linear",
+}
+C8_FLUX_RTOL = 1e-3
+C8_THRESHOLD_FACTOR = 1.2  # times the masked peak of the residual of the true model
+# traced Python memory of a probe imaging run, in units of one image plane (32 to 34 measured)
+C8_PROBE_MEMORY_PLANES = 34.0
+FULL_C8 = os.environ.get("ASTROVIPER_FULL_C8_TEST") == "1"
 
 
 def frequencies():
@@ -157,12 +230,9 @@ def frequencies():
 
 
 def primary_beam_power(radius, frequency):
-    """ALMA 12 m (CASA Airy) primary-beam power at ``radius`` radians from the axis."""
-    model = airy_disk_model("alma")
-    voltage = casa_airy_disk_response(
-        radius, 0.0, frequency, model["dish_diameter"], model["blockage_diameter"], model["max_rad_1GHz"]
-    )  # fmt: skip
-    return float(voltage) ** 2
+    """ALMA 12 m primary-beam power at ``radius`` radians from the axis, as the simulator and the imager compute it."""
+    (model,) = pack_beam_models([airy_disk_model("alma")])
+    return float(symmetric_beam_response(model, radius, 0.0, frequency, ipower=2))
 
 
 def build_scenario(dynamic_range, seed=0):
@@ -191,7 +261,8 @@ def build_scenario(dynamic_range, seed=0):
         offset = spacing / 2 if row % 2 else 0.0
         for col in range(-n_rows * 2, n_rows * 2 + 1):
             dj = int(round(col * spacing + offset))
-            if np.hypot(di, dj) <= r_max_pix - 1.5:
+            # the +-1 pixel jitter moves a source at most sqrt(2) pixels outward
+            if np.hypot(di, dj) <= r_max_pix - np.sqrt(2):
                 candidates.append((di, dj))
     assert len(candidates) >= N_SOURCES, (
         f"only {len(candidates)} lattice sites for {N_SOURCES} sources"
@@ -295,29 +366,42 @@ def build_scenario(dynamic_range, seed=0):
     }
 
 
-def simulate(work_dir, scenario, tag, mode="four_correlations", noise_params=None):
+def simulate(
+    work_dir,
+    scenario,
+    tag,
+    mode="four_correlations",
+    noise_params=None,
+    layout=LAYOUT,
+    frequency_params=None,
+    image_size=None,
+    cell_size=None,
+    w_term=True,
+):
     """Simulate the field and write the truth image; returns the two store paths.
 
-    ``noise_params`` adds thermal noise (``None``: no noise, unit weights).
+    ``noise_params`` adds thermal noise (``None``: no noise, unit weights);
+    ``w_term=False`` drops the w term from the visibilities.
     """
-    antenna_xds = read_telescope_layout(LAYOUT)
+    antenna_xds = read_telescope_layout(layout)
     ps_store = f"{work_dir}/{tag}.ps.zarr"
     truth_store = f"{work_dir}/{tag}_truth.img.zarr"
     distributed_applications.simulation.simulate_processing_set(
         ps_store=ps_store,
         antenna_xds=antenna_xds,
         time_params=TIME_PARAMS,
-        frequency_params=FREQUENCY_PARAMS,
+        frequency_params=frequency_params or FREQUENCY_PARAMS,
         polarization=POLARIZATION_MODES[mode]["polarization"],
         sky_components=scenario["components"],
         phase_center_ra_dec=PHASE_CENTER[None, :],
         beam_models=[airy_disk_model("alma")],
         beam_model_map=np.zeros(antenna_xds.sizes["antenna_name"], int),
         noise_params=noise_params,
+        uvw_params={"w_term": w_term},
         sky_image_params={
             "image_store": truth_store,
-            "image_size": IMAGE_SIZE,
-            "cell_size": CELL_SIZE,
+            "image_size": IMAGE_SIZE if image_size is None else image_size,
+            "cell_size": CELL_SIZE if cell_size is None else cell_size,
             "polarization_coords": STOKES,
         },
         overwrite=True,
@@ -325,8 +409,8 @@ def simulate(work_dir, scenario, tag, mode="four_correlations", noise_params=Non
     return ps_store, truth_store
 
 
-def iteration_control_params(dynamic_range):
-    """The iteration controls that reproduce the truth best.
+def cycle_control_params(dynamic_range):
+    """The cycle controls that reproduce the truth best.
 
     A scan of the controls on this field (restored image against the truth
     convolved with the clean beam, and the fluxes at the source positions)
@@ -368,10 +452,15 @@ def image(
     n_mapping_parallelism=5,
     polarization_coords=None,
     controls=None,
+    image_size=None,
+    cell_size=None,
+    fft_padding=FFT_PADDING,
+    gridding_kernel_params=CASA_KERNEL,
+    restore=True,
 ):
     """Hogbom CLEAN at double precision with restore and PB correction, in the Stokes planes of ``mode``.
 
-    ``controls`` replaces the iteration controls of :func:`iteration_control_params`.
+    ``controls`` replaces the cycle controls of :func:`cycle_control_params`.
     """
     ps_xdt = open_processing_set(ps_store)
     combined = ps_xdt.xr_ps.get_combined_field_and_source_xds()
@@ -381,26 +470,27 @@ def image(
     if polarization_coords is None:
         polarization_coords = POLARIZATION_MODES[mode]["stokes"]
     image_params = {
-        "image_size": IMAGE_SIZE,
-        "cell_size": CELL_SIZE,
+        "image_size": IMAGE_SIZE if image_size is None else image_size,
+        "cell_size": CELL_SIZE if cell_size is None else cell_size,
         "phase_direction": phase_direction,
         "frequency_coords": ps_xdt.xr_ps.get_freq_axis().values,
         "polarization_coords": polarization_coords,
         "time_coords": [0],
-        "fft_padding": FFT_PADDING,
+        "fft_padding": fft_padding,
         "cpp_gridder": True,
     }
     image_store = f"{work_dir}/{tag}.img.zarr"
     if controls is None:
-        controls = iteration_control_params(dynamic_range)
+        controls = cycle_control_params(dynamic_range)
     result = image_cube_single_field(
         ps_store=ps_store,
         image_store=image_store,
         image_params=image_params,
         imaging_weights_params=IMAGING_WEIGHTS_PARAMS,
-        iteration_control_params=controls,
+        cycle_control_params=controls,
         instrument_polarization_basis="linear",
-        gridder="prolate_spheroidal",
+        gridder="anti_alias",
+        gridding_kernel_params=gridding_kernel_params,
         deconvolver="hogbom",
         scan_intents="OBSERVE_TARGET#ON_SOURCE",
         image_data_variables_keep=[
@@ -415,8 +505,8 @@ def image(
         single_precision_image=False,
         processing_function_threads=1,
         n_mapping_parallelism={"frequency": n_mapping_parallelism},
-        restore=True,
-        primary_beam_correction=True,
+        restore=restore,
+        primary_beam_correction=restore,
         overwrite=True,
     )
     return image_store, result["deconvolution"], controls
@@ -435,7 +525,15 @@ def restore_truth(truth_plane, beam_params, cell_size):
     )
 
 
-def analyse(image_store, truth_store, scenario, deconvolution, controls):
+def analyse(
+    image_store,
+    truth_store,
+    scenario,
+    deconvolution,
+    controls,
+    cell_size=CELL_SIZE,
+    flux_rtol=FLUX_RTOL,
+):
     """Per source / channel / Stokes recovery table, per-plane convergence table and floors."""
     img = load_image(image_store)
     truth = load_image(truth_store)
@@ -485,7 +583,7 @@ def analyse(image_store, truth_store, scenario, deconvolution, controls):
         k,
     ) in planes:  # the restore step uses the Stokes I beam for every polarization
         restored_truth[c, k] = np.where(
-            mask[c, k], restore_truth(truth_sky[c, k], beam[c, 0], CELL_SIZE), 0.0
+            mask[c, k], restore_truth(truth_sky[c, k], beam[c, 0], cell_size), 0.0
         )
     rows = []
     for s, (i, j) in enumerate(zip(sources.pixel_l, sources.pixel_m, strict=True)):
@@ -498,7 +596,7 @@ def analyse(image_store, truth_store, scenario, deconvolution, controls):
             box = model[c, k, i - 1 : i + 2, j - 1 : j + 2].sum()
             recovered = box / pb
             allowance = (
-                FLUX_RTOL * scenario_stokes[s, c, 0]
+                flux_rtol * scenario_stokes[s, c, 0]
                 + (FLOOR_SIGMA * floor_rms[c, k] + controls["threshold"]) / pb
             )
             rows.append(
@@ -567,9 +665,7 @@ def check_recovery(recovery, convergence, summary, strict):
             np.asarray(plane.peakres, dtype=float)
         )  # recorded with its sign
         label = f"channel {plane.chan} Stokes {plane.stokes}"
-        assert plane.n_cycles >= 2, (
-            f"{label}: only {plane.n_cycles} residual update cycle(s)"
-        )
+        assert plane.n_cycles >= 2, f"{label}: only {plane.n_cycles} imaging cycle(s)"
         assert peakres[-1] < 0.1 * peakres[0], (
             f"{label}: peak residual did not fall: {peakres}"
         )
@@ -722,7 +818,7 @@ def test_entropy_stop_with_thermal_noise(tmp_path):
     of the level of the thermal noise, close to the truth."""
     scenario = build_scenario(1e3)
     ps_store, truth_store = simulate(
-        str(tmp_path), scenario, "noise", noise_params={"random_seed": 7}
+        str(tmp_path), scenario, "noise", noise_params=BAND3_NOISE
     )
     (ms_xdt,) = list(load_processing_set(ps_store).values())
     # natural weights: the noise of a Stokes image is that of one visibility
@@ -730,7 +826,7 @@ def test_entropy_stop_with_thermal_noise(tmp_path):
     sigma = 1.0 / np.sqrt(np.nanmax(ms_xdt.WEIGHT.values))
     n_visibilities = ms_xdt.sizes["time"] * ms_xdt.sizes["baseline_id"]
     thermal_noise = sigma / np.sqrt(2 * n_visibilities)
-    controls = iteration_control_params(1e3)
+    controls = cycle_control_params(1e3)
     controls.update(
         {
             "threshold": 0.0,
@@ -755,9 +851,9 @@ def test_entropy_stop_with_thermal_noise(tmp_path):
     for _, plane in convergence.iterrows():
         entropy = np.asarray(plane.entropy, dtype=float)
         followed = entropy[np.isfinite(entropy)]
-        # one entropy per imaging cycle; the last one recorded for a cycle in
+        # one entropy per residual update; the last one recorded for a cycle in
         # which the plane cleaned lies below the highest one
-        assert len(entropy) == plane.n_cycles
+        assert len(entropy) == plane.n_cycles + 1
         assert followed.max() > followed[-1]
 
     img = load_image(image_store)
@@ -785,3 +881,384 @@ def test_entropy_stop_with_thermal_noise(tmp_path):
             )
             error = np.sqrt(np.mean((convolved - restored[c, k])[inside] ** 2))
             assert error < 1.3 * thermal_noise, (c, k, error, thermal_noise)
+
+
+def c8_geometry(size):
+    """Image size and cell of the C8 field: ``"probe"`` (CI) or ``"full"``."""
+    half_width = C8_HALF_WIDTH[size]
+    return [2 * half_width, 2 * half_width], np.array(
+        [-C8_CELL_ARCSEC, C8_CELL_ARCSEC]
+    ) * ARCSEC
+
+
+def build_c8_scenario(size, seed=0, dynamic_range=1e3):
+    """Unpolarized point sources of one 950 GHz channel out to 0.97 of the half width.
+
+    The 1 Jy source sits on the lattice site farthest out along an image axis
+    (the worst position for the kernel and the w term), a 0.5 Jy source
+    within 0.5 arcsec of the centre, the faint extreme and the others, log
+    uniform over the dynamic range, on random lattice sites with a +-1 pixel
+    jitter.
+    """
+    rng = np.random.default_rng(seed)
+    half_width = C8_HALF_WIDTH[size]
+    image_size, cell_size = c8_geometry(size)
+    nu = np.array([C8_FREQUENCY_PARAMS["freq_start"]])
+    grid = make_empty_sky_image(
+        PHASE_CENTER, image_size, cell_size, nu, ["I"], [0.0], do_sky_coords=False
+    )
+    spacing = int(np.ceil(MIN_SEPARATION_BEAMS * C8_BEAM_ARCSEC / C8_CELL_ARCSEC)) + 3
+    row_step = spacing * np.sqrt(3) / 2
+    r_max_pix = 0.97 * half_width
+    n_rows = int(r_max_pix / row_step) + 2
+    sites = []
+    for row in range(-n_rows, n_rows + 1):
+        di = int(round(row * row_step))
+        offset = spacing / 2 if row % 2 else 0.0
+        for col in range(-n_rows * 2, n_rows * 2 + 1):
+            dj = int(round(col * spacing + offset))
+            if np.hypot(di, dj) <= r_max_pix - 1.5:
+                sites.append((di, dj))
+    sites = np.array(sites)
+    edge = int(np.argmax(np.abs(sites).max(axis=1) * 1e6 - np.abs(sites).min(axis=1)))
+    near = np.flatnonzero(np.hypot(*sites.T) * C8_CELL_ARCSEC <= 0.5)
+    near = near[near != edge]
+    centre_site = near[rng.integers(len(near))]
+    others = np.setdiff1d(np.arange(len(sites)), [edge, centre_site])
+    chosen = np.concatenate(
+        [[edge, centre_site], rng.choice(others, N_SOURCES - 2, replace=False)]
+    )
+    jitter = rng.integers(-1, 2, size=(N_SOURCES, 2))
+    jitter[:2] = 0
+    pixels = sites[chosen] + jitter + half_width
+    peak_flux = 10 ** (-rng.uniform(0.0, np.log10(dynamic_range), N_SOURCES))
+    peak_flux[:3] = 1.0, 0.5, 1.0 / dynamic_range
+    separation = np.hypot(*(pixels[:, None, :] - pixels[None, :, :]).transpose(2, 0, 1))
+    np.fill_diagonal(separation, np.inf)
+    lm = np.stack([grid.l.values[pixels[:, 0]], grid.m.values[pixels[:, 1]]], axis=-1)
+    ra_dec = inverse_sin_project(PHASE_CENTER, lm)
+    stokes = np.zeros((N_SOURCES, 1, 4))
+    stokes[:, 0, 0] = peak_flux
+    components = [
+        {
+            "kind": "point",
+            "flux": np.array([[f, 0.0, 0.0, f]]),
+            "ra_dec": ra_dec[s],
+            "name": f"source_{s:02d}",
+        }
+        for s, f in enumerate(peak_flux)
+    ]
+    radius_arcsec = np.hypot(*lm.T) / ARCSEC
+    sources = pd.DataFrame(
+        {
+            "pixel_l": pixels[:, 0],
+            "pixel_m": pixels[:, 1],
+            "radius_arcsec": radius_arcsec,
+            "primary_beam_power": [
+                primary_beam_power(r * ARCSEC, nu[0]) for r in radius_arcsec
+            ],
+            "peak_flux": peak_flux,
+            "kind": np.array(["continuum"] * N_SOURCES),
+            "nearest_neighbour_beams": separation.min(axis=1)
+            * C8_CELL_ARCSEC
+            / C8_BEAM_ARCSEC,
+        }
+    )
+    return {
+        "components": components,
+        "stokes": stokes,
+        "sources": sources,
+        "frequencies": nu,
+    }
+
+
+def oracle_residual(work_dir, ps_store, truth_store, tag, size, gridding_kernel_params):
+    """The residual the imager leaves for the true model, the floor of its imaging cycle.
+
+    One residual update with ``SKY_MODEL`` = truth x ``PRIMARY_BEAM`` after the
+    setup, run through the distributed application with its processing
+    function replaced, so the node task loads and selects the data as for a
+    CLEAN run. Returns the Stokes planes of the residual of channel 0, the
+    clean mask, the clean beam, the masked Stokes I peak of the dirty image
+    and the recorded PSF sidelobe.
+    """
+    import astroviper.processing_functions.imaging as pf_imaging
+    from astroviper.processing_functions.image_analysis.make_mask import make_mask
+    from astroviper.processing_functions.imaging.image_cube_single_field import (
+        imaging_preparation_single_field,
+    )
+    from astroviper.processing_functions.imaging.residual_update import (
+        residual_update_cube_single_field,
+    )
+    from astroviper.processing_functions.imaging.utils import (
+        build_residual_imaging_dict,
+    )
+    from astroviper.utils.data_group_tools import (
+        create_data_groups_in_and_out,
+        modify_data_groups_xds,
+    )
+
+    truth = load_image(truth_store).SKY.values
+    captured = {}
+    prep_keys = ("processing_set_data_group_name", "single_precision_image",
+                 "processing_function_threads", "fft_backend", "image_data_variables_keep",
+                 "psf_fitting_method", "gridding_kernel_params", "primary_beam_params")  # fmt: skip
+    update_keys = ("processing_set_data_group_name", "instrument_polarization_basis",
+                   "single_precision_image", "processing_function_threads", "fft_backend",
+                   "image_data_variables_keep", "gridding_kernel_params")  # fmt: skip
+
+    def processing_function(ps_xdt, img_xds, image_params, weights, controls, **kwargs):
+        prep = {key: kwargs[key] for key in prep_keys if key in kwargs}
+        update = {key: kwargs[key] for key in update_keys if key in kwargs}
+        _, img_xds, _, _, _ = imaging_preparation_single_field(
+            ps_xdt, img_xds, image_params, weights, controls, **prep
+        )
+        img_xds, _ = residual_update_cube_single_field(
+            ps_xdt, img_xds, image_params, False, **update
+        )
+        make_mask(img_xds, primary_beam_limit=controls["primary_beam_limit"],
+                  image_data_group_in_name="residual", image_data_group_out_name="residual",
+                  combine_mask=False, overwrite=False)  # fmt: skip
+        mask = img_xds.MASK.values[0, 0, 0].astype(bool)
+        captured["dirty_peak"] = float(
+            np.abs(img_xds.SKY_RESIDUAL.values[0, 0, 0][mask]).max()
+        )
+        captured["max_psf_sidelobe"] = float(
+            img_xds.MAX_SIDELOBE_POINT_SPREAD_FUNCTION.values[0, 0, 0]
+        )
+        stokes_index = [
+            STOKES.index(str(label)) for label in img_xds.polarization.values
+        ]
+        primary_beam = np.nan_to_num(img_xds.PRIMARY_BEAM.values)
+        _, model_group = create_data_groups_in_and_out(
+            img_xds, data_group_in_name="residual", data_group_out_name="model",
+            data_group_out_modified={"sky": "SKY_MODEL"}, overwrite=True,
+        )  # fmt: skip
+        img_xds["SKY_MODEL"] = img_xds["SKY_RESIDUAL"].copy(
+            data=truth[:, :, stokes_index] * primary_beam
+        )
+        modify_data_groups_xds(img_xds, "model", model_group, description="True model.")
+        img_xds, _ = residual_update_cube_single_field(
+            ps_xdt, img_xds, image_params, True, **update
+        )
+        captured.update(
+            residual=img_xds.SKY_RESIDUAL.values[0, 0].astype(np.float64),
+            mask=mask,
+            primary_beam=primary_beam[0, 0, 0],
+            beam=img_xds.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values[0, 0, 0],
+        )
+        record = build_residual_imaging_dict(img_xds, "residual", controls)
+        timing = pd.DataFrame({"T_prep": [0.0], "T_residual_update": [0.0], "T_model_update": [0.0],
+                               "T_restore": [0.0], "task_id": [kwargs.get("task_id", 0)],
+                               "n_channels": [img_xds.sizes["frequency"]], "n_cycles": [1]})  # fmt: skip
+        return img_xds, timing, record
+
+    image_size, cell_size = c8_geometry(size)
+    controls = {"max_iter": 0, "max_cycles": 1, "threshold": 0.0, "primary_beam_limit": 0.2,
+                "gain": 0.1, "psf_sidelobe_factor": 1.0, "max_iter_per_cycle": -1,
+                "min_psf_fraction": 0.05, "max_psf_fraction": 0.8}  # fmt: skip
+    with mock.patch.object(pf_imaging, "image_cube_single_field", processing_function):
+        image(work_dir, ps_store, tag, 1e3, "two_hands", 1, controls=controls,
+              image_size=image_size, cell_size=cell_size, fft_padding=C8_FFT_PADDING,
+              gridding_kernel_params=gridding_kernel_params, restore=False)  # fmt: skip
+    return captured
+
+
+def floors(residual_plane, mask, sources, beam, cell_size):
+    """RMS and peak in the mask, RMS away from the sources (3 beams), box floor of a plane."""
+    far = mask.copy()
+    radius = 3.0 * beam[0] / abs(cell_size[0])
+    ii, jj = np.indices(mask.shape)
+    for i, j in zip(sources.pixel_l, sources.pixel_m, strict=True):
+        far &= (ii - i) ** 2 + (jj - j) ** 2 > radius**2
+    box = uniform_filter(residual_plane, size=3, mode="constant") * 9.0
+    free = mask.copy()
+    guard = FLOOR_GUARD_PIXELS
+    for i, j in zip(sources.pixel_l, sources.pixel_m, strict=True):
+        free[i - guard : i + guard + 1, j - guard : j + guard + 1] = False
+    return {
+        "rms": float(np.sqrt(np.mean(residual_plane[mask] ** 2))),
+        "peak": float(np.abs(residual_plane[mask]).max()),
+        "rms_far": float(np.sqrt(np.mean(residual_plane[far] ** 2))),
+        "box": float(np.sqrt(np.mean(box[free] ** 2))),
+        "far": far,
+    }
+
+
+def run_c8(work_dir, size, w_term, noise):
+    """Simulate the C8 field, find its floor (oracle) and image it with the heuristic controls."""
+    image_size, cell_size = c8_geometry(size)
+    scenario = build_c8_scenario(size)
+    tag = f"c8_{size}_{'w' if w_term else 'no_w'}_{noise or 'no_noise'}"
+    ps_store, truth_store = simulate(
+        work_dir, scenario, tag, "two_hands", BAND10_NOISE if noise else None,
+        layout=C8_LAYOUT, frequency_params=C8_FREQUENCY_PARAMS,
+        image_size=image_size, cell_size=cell_size, w_term=w_term,
+    )  # fmt: skip
+    oracle = oracle_residual(
+        work_dir, ps_store, truth_store, tag + "_oracle", size, C8_KERNEL
+    )
+    oracle_floors = floors(oracle["residual"][0], oracle["mask"], scenario["sources"],
+                           oracle["beam"], cell_size)  # fmt: skip
+    fraction = psf_fraction(oracle["max_psf_sidelobe"])
+    if noise:
+        (ms_xdt,) = list(load_processing_set(ps_store).values())
+        sigma = 1.0 / np.sqrt(np.nanmax(ms_xdt.WEIGHT.values))
+        reference = sigma / np.sqrt(
+            2 * ms_xdt.sizes["time"] * ms_xdt.sizes["baseline_id"]
+        )
+        controls = alma_cycle_control_params(
+            oracle["max_psf_sidelobe"], oracle["dirty_peak"], 0.0, noisy=True,
+            thermal_noise=reference,
+        )  # fmt: skip
+    else:
+        reference = C8_THRESHOLD_FACTOR * oracle_floors["peak"]
+        controls = alma_cycle_control_params(
+            oracle["max_psf_sidelobe"], oracle["dirty_peak"], reference
+        )
+    tracemalloc.start()
+    start = time.time()
+    image_store, deconvolution, controls = image(
+        work_dir, ps_store, tag, 1e3, "two_hands", 1, controls=controls,
+        image_size=image_size, cell_size=cell_size, fft_padding=C8_FFT_PADDING,
+        gridding_kernel_params=C8_KERNEL,
+    )  # fmt: skip
+    t_image = time.time() - start
+    traced_peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    recovery, convergence, summary = analyse(
+        image_store, truth_store, scenario, deconvolution, controls, cell_size=cell_size,
+        flux_rtol=0.01 if noise else C8_FLUX_RTOL,
+    )  # fmt: skip
+    img = load_image(image_store)
+    model, residual = img.SKY_MODEL.values[0, 0], img.SKY_RESIDUAL.values[0, 0]
+    truth = load_image(truth_store).SKY.values[0, 0, :2] * np.nan_to_num(
+        img.PRIMARY_BEAM.values[0, 0]
+    )
+    beam = img.BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION.values[0, 0, 0]
+    error_image = residual[0] + restore_truth(model[0] - truth[0], beam, cell_size)
+    run_floors = floors(
+        residual[0], oracle["mask"], scenario["sources"], beam, cell_size
+    )
+    far = run_floors["far"]
+    return {
+        "scenario": scenario, "recovery": recovery, "convergence": convergence,
+        "summary": summary, "controls": controls, "oracle": oracle_floors,
+        "run": run_floors, "error_rms_far": float(np.sqrt(np.mean(error_image[far] ** 2))),
+        "error_peak_far": float(np.abs(error_image[far]).max()),
+        "restored_error_rms": float(np.sqrt(np.mean(
+            (img.SKY_RESTORED.values[0, 0, 0] - restore_truth(truth[0], beam, cell_size))[oracle["mask"]] ** 2))),
+        "reference": reference, "predicted_cycles": predicted_imaging_cycles(
+            oracle["dirty_peak"], reference, fraction), "t_image": t_image,
+        "traced_planes": traced_peak / (8.0 * image_size[0] * image_size[1]),
+        "oracle_residual": oracle["residual"][0], "far": far, "truth_store": truth_store,
+    }  # fmt: skip
+
+
+def check_c8(result, noise):
+    """The C8 assertions: the floor of the imaging cycle, or the thermal noise, is reached."""
+    convergence = result["convergence"]
+    recovery = result["recovery"]
+    stokes_i = convergence[convergence.stokes == "I"].iloc[0]
+    if noise:
+        assert (convergence.stop_code_imaging == IMAGING_ENTROPY).all(), convergence[
+            ["stokes", "stop_code_imaging", "n_cycles"]
+        ].to_string()
+        assert 0.6 < result["run"]["rms"] / result["reference"] < 1.4, result["run"]
+        assert result["restored_error_rms"] < 1.3 * result["reference"]
+        detected = recovery[
+            (recovery.stokes == "I")
+            & (recovery.apparent_flux > 5 * result["reference"])
+        ]
+        print(
+            f"sources above 5 sigma ({5 * result['reference']:.3g} Jy): {list(detected.source)}"
+        )
+    else:
+        assert (convergence.stop_code_imaging == IMAGING_THRESHOLD).all()
+        # The model updates down to the first one that cleans to the threshold
+        # follow the cycle law; every later one starts from what the residual
+        # update, which the model update cannot see, leaves above the threshold.
+        threshold = result["controls"]["threshold"]
+        start = np.abs(np.asarray(stokes_i.start_peakres, dtype=float))
+        floored = np.flatnonzero(
+            psf_fraction(stokes_i.max_psf_sidelobe) * start <= threshold
+        )
+        descent = floored[0] + 1 if floored.size else start.size
+        assert descent <= result["predicted_cycles"] + 2, (
+            descent,
+            result["predicted_cycles"],
+        )
+        assert (start[descent:] <= PEAK_RESIDUAL_RISE * threshold).all(), (
+            start / threshold
+        )
+        oracle, run = result["oracle"], result["run"]
+        assert 0.8 <= run["rms"] / oracle["rms"] <= 1.3, (run["rms"], oracle["rms"])
+        assert 0.7 <= run["peak"] / oracle["peak"] <= 1.5, (run["peak"], oracle["peak"])
+        assert result["error_rms_far"] <= 1.5 * oracle["rms_far"]
+        assert result["error_peak_far"] <= 1.5 * oracle["peak"]
+        # CLEAN absorbed nothing of the floor into the model
+        assert result["summary"]["floor_rms"][0, 0] <= 1.5 * oracle["box"]
+        peakres = np.abs(np.asarray(stokes_i.peakres, dtype=float))
+        assert (
+            peakres[1:] / np.minimum.accumulate(peakres)[:-1]
+        ).max() <= PEAK_RESIDUAL_RISE
+    failures = recovery[recovery.error.abs() > recovery.allowance]
+    assert failures.empty, failures.head(12).to_string()  # noise aware with noise
+
+
+@pytest.mark.parametrize("noise", [None, "band10"])
+@pytest.mark.parametrize("w_term", [True, False], ids=["w_term", "no_w_term"])
+def test_c8_950ghz_flux_recovery(tmp_path, w_term, noise):
+    """ALMA C8 at 950 GHz, CI size: the imaging cycle reaches its floor or the noise."""
+    result = run_c8(str(tmp_path), "probe", w_term, noise)
+    print(f"C8 probe, w term {w_term}, noise {noise}: oracle {result['oracle']}, run "
+          f"{ {k: v for k, v in result['run'].items() if k != 'far'} }, image {result['t_image']:.1f} s, "
+          f"traced memory {result['traced_planes']:.1f} planes")  # fmt: skip
+    check_c8(result, noise)
+    assert result["traced_planes"] <= 1.5 * C8_PROBE_MEMORY_PLANES
+
+
+def test_c8_kernel_lowers_the_floor(tmp_path):
+    """Without the w term the chosen kernel's floor is far below the CASA kernel's."""
+    scenario = build_c8_scenario("probe")
+    image_size, cell_size = c8_geometry("probe")
+    ps_store, truth_store = simulate(
+        str(tmp_path), scenario, "kernels", "two_hands", layout=C8_LAYOUT,
+        frequency_params=C8_FREQUENCY_PARAMS, image_size=image_size, cell_size=cell_size,
+        w_term=False,
+    )  # fmt: skip
+    rms = {}
+    for name, kernel in (("casa", CASA_KERNEL), ("chosen", C8_KERNEL)):
+        oracle = oracle_residual(
+            str(tmp_path), ps_store, truth_store, name, "probe", kernel
+        )
+        rms[name] = floors(oracle["residual"][0], oracle["mask"], scenario["sources"],
+                           oracle["beam"], cell_size)["rms_far"]  # fmt: skip
+    assert rms["chosen"] < rms["casa"] / 20, rms
+
+
+@pytest.mark.skipif(
+    not FULL_C8, reason="3256 pixel images: set ASTROVIPER_FULL_C8_TEST=1"
+)
+@pytest.mark.parametrize("noise", [None, "band10"])
+@pytest.mark.parametrize("w_term", [True, False], ids=["w_term", "no_w_term"])
+def test_c8_950ghz_flux_recovery_full(tmp_path, w_term, noise):
+    """The full C8 field out to primary beam power 0.2; without noise the kernel's floor
+    lies below a third of the w term's (from the w term reference image)."""
+    result = run_c8(str(tmp_path), "full", w_term, noise)
+    check_c8(result, noise)
+    if w_term and not noise:
+        scenario = build_c8_scenario("full")
+        image_size, cell_size = c8_geometry("full")
+        ps_store, _ = simulate(
+            str(tmp_path), scenario, "full_no_w", "two_hands", layout=C8_LAYOUT,
+            frequency_params=C8_FREQUENCY_PARAMS, image_size=image_size,
+            cell_size=cell_size, w_term=False,
+        )  # fmt: skip
+        no_w = oracle_residual(str(tmp_path), ps_store, result["truth_store"], "full_no_w",
+                               "full", C8_KERNEL)["residual"][0]  # fmt: skip
+        # the w term reference image: the residuals of the true model with and without w
+        far = result["far"]
+        w_rms_far = np.sqrt(np.mean((result["oracle_residual"] - no_w)[far] ** 2))
+        kernel_rms_far = np.sqrt(np.mean(no_w[far] ** 2))
+        assert kernel_rms_far <= w_rms_far / 3, (kernel_rms_far, w_rms_far)

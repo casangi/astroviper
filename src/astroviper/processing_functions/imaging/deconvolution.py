@@ -4,7 +4,10 @@ import xarray as xr
 
 from astroviper.processing_functions.image_analysis import image_statistics as imgstats
 from astroviper.processing_functions.imaging.deconvolvers import aspclean, hogbom
-from astroviper.processing_functions.imaging.utils.imaging_dict import ImagingDict
+from astroviper.processing_functions.imaging.utils.imaging_dict import (
+    ITERATION_HISTORY_FIELDS,
+    ImagingDict,
+)
 from astroviper.utils.data_group_tools import (
     create_data_groups_in_and_out,
     modify_data_groups_xds,
@@ -25,6 +28,14 @@ from astroviper.utils.data_group_tools import (
 # See ``hogbom_clean``.
 DIVERGENCE_RMS_GAIN_FRACTION = 0.1  # soft limit: (1 + gain / 10) x lowest RMS
 DIVERGENCE_PEAK_GAIN_FRACTION = 1.0  # hard limit: (1 + gain) x starting peak
+
+# The deconvolvers that record the history of every iteration of a model
+# update (``record_iteration_history``).
+ITERATION_HISTORY_ALGORITHMS = ("hogbom", "hogbom_many_threads")
+
+# The deconvolvers that subtract a PSF of twice the image size
+# (``exact_psf_subtraction``).
+EXACT_PSF_SUBTRACTION_ALGORITHMS = ("hogbom", "hogbom_many_threads")
 
 # XXX : TODO: As of 2025-10-07 there is no way to supply an initial model image to the deconvolver
 
@@ -101,6 +112,15 @@ def _validate_deconvolve_params(deconvolve_params):
         - ``max_iter`` : int, maximum number of iterations. Default 1000.
         - ``threshold`` : float, stopping threshold, non-negative.
           Default 0.0.
+        - ``max_iter_per_cycle`` : int, cap on the iterations of one model
+          update; negative for no cap. Used only without
+          ``max_iter_per_cycle_updated``.
+        - ``max_iter_per_cycle_updated`` : int or ``(nt, nf, np)`` int array,
+          iteration limit of each plane for this model update, as the cycle
+          controller sets it. Default ``min(max_iter_per_cycle, max_iter)``.
+        - ``threshold_per_cycle`` : float or ``(nt, nf, np)`` array, stopping
+          threshold of each plane for this model update, as the cycle
+          controller sets it. Default ``threshold``.
         - ``primary_beam_limit`` : float in ``[0, 1]``, primary-beam mask
           cutoff as a fraction of the peak primary beam (used to build the
           deconvolution mask, *not* the deconvolver stopping threshold).
@@ -113,6 +133,17 @@ def _validate_deconvolve_params(deconvolve_params):
           lowest RMS it has reached before its model update is stopped as
           diverged. ``-1`` disables the divergence test. Default 1:
           the model update stops at the first such iteration.
+        - ``record_iteration_history`` : bool, record the peak residual and
+          the residual RMS of every iteration (Hogbom only, see
+          :func:`hogbom_clean`). Default ``False``.
+        - ``exact_psf_subtraction`` : bool, subtract every component over the
+          whole image with ``subtraction_psf_cube`` (Hogbom only, see
+          :func:`deconvolve`). Default ``False``.
+        - ``subtraction_psf_cube`` : ``(nt, nf, np_psf, 2 ny, 2 nx)`` array,
+          the PSF of twice the image size that ``exact_psf_subtraction``
+          subtracts, as
+          :func:`~astroviper.processing_functions.imaging.make_point_spread_function.make_subtraction_point_spread_function_single_field`
+          makes it. Read by :func:`deconvolve` only.
 
     Returns
     -------
@@ -139,6 +170,8 @@ def _validate_deconvolve_params(deconvolve_params):
         "min_psf_fraction": 0.05,
         "max_psf_fraction": 0.8,
         "max_iter_divergence": 1,
+        "record_iteration_history": False,
+        "exact_psf_subtraction": False,
     }
 
     for key, default_value in default_params.items():
@@ -159,7 +192,7 @@ def _validate_deconvolve_params(deconvolve_params):
                     "Maximum number of iterations must be a positive integer."
                 )
         elif key == "threshold":
-            if value is not None and value < 0:
+            if value is not None and np.min(value) < 0:
                 raise ValueError("Threshold must be non-negative or None.")
         elif key == "clean_box":
             if value is not None and not (isinstance(value, tuple) and len(value) == 4):
@@ -179,8 +212,84 @@ def _validate_deconvolve_params(deconvolve_params):
                     "max_iter_divergence must be a positive integer, or -1 to "
                     f"disable the divergence test; got {value!r}."
                 )
+        elif key in ("record_iteration_history", "exact_psf_subtraction"):
+            if not isinstance(value, bool | np.bool_):
+                raise ValueError(f"{key} must be a bool; got {value!r}.")
 
     return deconvolve_params
+
+
+def validate_record_iteration_history(deconvolver, record_iteration_history):
+    """Refuse ``record_iteration_history`` for a deconvolver that cannot record it.
+
+    The Hogbom kernels record, for every iteration, the residual peak the
+    iteration cleaned and the RMS of the residual after its subtraction. An
+    Asp iteration subtracts a fitted Aspen (a component with a scale and an
+    amplitude that is not in Jy/beam) instead of the PSF at a residual peak,
+    so it has no such peak to record.
+
+    Parameters
+    ----------
+    deconvolver : str
+        Deconvolution algorithm (case insensitive).
+    record_iteration_history : bool
+        Whether the iteration history is requested.
+
+    Raises
+    ------
+    ValueError
+        If ``record_iteration_history`` is not a bool, or if the history is
+        requested from a deconvolver other than ``"hogbom"`` or
+        ``"hogbom_many_threads"``.
+    """
+    if not isinstance(record_iteration_history, bool | np.bool_):
+        raise ValueError(
+            "record_iteration_history must be a bool; got "
+            f"{record_iteration_history!r}."
+        )
+    if record_iteration_history and (
+        deconvolver.lower() not in ITERATION_HISTORY_ALGORITHMS
+    ):
+        raise ValueError(
+            "record_iteration_history is supported by the Hogbom deconvolvers "
+            f"{ITERATION_HISTORY_ALGORITHMS} only; got deconvolver {deconvolver!r}."
+        )
+
+
+def validate_exact_psf_subtraction(deconvolver, exact_psf_subtraction):
+    """Refuse ``exact_psf_subtraction`` for a deconvolver that cannot do it.
+
+    A Hogbom kernel subtracts every component over the PSF offsets it is
+    given, so a PSF of twice the image size reaches every pixel. Asp convolves
+    by FFT on the image grid, where the PSF outside the image wraps around
+    instead.
+
+    Parameters
+    ----------
+    deconvolver : str
+        Deconvolution algorithm (case insensitive).
+    exact_psf_subtraction : bool
+        Whether the subtraction with the PSF of twice the image size is
+        requested.
+
+    Raises
+    ------
+    ValueError
+        If ``exact_psf_subtraction`` is not a bool, or if it is requested from
+        a deconvolver other than ``"hogbom"`` or ``"hogbom_many_threads"``.
+    """
+    if not isinstance(exact_psf_subtraction, bool | np.bool_):
+        raise ValueError(
+            f"exact_psf_subtraction must be a bool; got {exact_psf_subtraction!r}."
+        )
+    if exact_psf_subtraction and (
+        deconvolver.lower() not in EXACT_PSF_SUBTRACTION_ALGORITHMS
+    ):
+        raise ValueError(
+            "exact_psf_subtraction is supported by the Hogbom deconvolvers "
+            f"{EXACT_PSF_SUBTRACTION_ALGORITHMS} only; got deconvolver "
+            f"{deconvolver!r}."
+        )
 
 
 def _divergence_factors(gain):
@@ -241,19 +350,21 @@ def _divergence_kwargs(deconvolve_params, asp=False):
     }
 
 
-def _per_plane_iteration_controls(deconvolve_params, nt, nf, npol, threshold_dtype):
-    """Build the per-plane ``max_iter_per_cycle`` and ``threshold_per_cycle`` cubes.
+def _per_plane_per_cycle_limits(deconvolve_params, nt, nf, npol, threshold_dtype):
+    """Build the per-plane ``max_iter_per_cycle_updated`` and ``threshold_per_cycle`` cubes.
 
     Iteration control is performed independently for every
     ``(time, frequency, polarization)`` plane, so the deconvolvers are driven
     with a per-plane iteration limit and a per-plane stopping threshold rather
-    than single scalars. ``deconvolve_params["max_iter_per_cycle"]`` and
-    ``deconvolve_params["threshold_per_cycle"]`` may each be either a scalar
-    (standalone calls) or an ``(nt, nf, npol)`` array (supplied by the
-    :class:`IterationController`, indexed ``(time, frequency, polarization)``).
-    A scalar is broadcast to every plane; an absent ``max_iter_per_cycle`` or
-    a negative one falls back to ``max_iter``, and an absent
-    ``threshold_per_cycle`` falls back to the absolute ``threshold``.
+    than single scalars. ``deconvolve_params["max_iter_per_cycle_updated"]``
+    and ``deconvolve_params["threshold_per_cycle"]`` may each be either a
+    scalar or an ``(nt, nf, npol)`` array (supplied by the
+    :class:`CycleController`, indexed ``(time, frequency, polarization)``).
+    A scalar is broadcast to every plane. A call without them (outside the
+    imaging cycle loop) is one model update with all of ``max_iter`` left:
+    ``max_iter_per_cycle_updated`` is ``min(max_iter_per_cycle, max_iter)``
+    (``max_iter`` when ``max_iter_per_cycle`` is absent or negative), and
+    ``threshold_per_cycle`` is the absolute ``threshold``.
 
     Parameters
     ----------
@@ -267,7 +378,7 @@ def _per_plane_iteration_controls(deconvolve_params, nt, nf, npol, threshold_dty
 
     Returns
     -------
-    max_iter_per_cycle : numpy.ndarray
+    max_iter_per_cycle_updated : numpy.ndarray
         ``(nt, nf, npol)`` int32 per-plane iteration limits for this model
         update.
     threshold_per_cycle : numpy.ndarray
@@ -276,18 +387,26 @@ def _per_plane_iteration_controls(deconvolve_params, nt, nf, npol, threshold_dty
     shape = (nt, nf, npol)
 
     max_iter = int(deconvolve_params["max_iter"])
-    max_iter_per_cycle = deconvolve_params.get("max_iter_per_cycle", None)
-    if max_iter_per_cycle is None or np.ndim(max_iter_per_cycle) == 0:
-        cap = max_iter if max_iter_per_cycle is None else int(max_iter_per_cycle)
-        if cap < 0:
-            cap = max_iter
-        max_iter_per_cycle = np.full(shape, min(cap, max_iter), dtype=np.int32)
+    max_iter_per_cycle_updated = deconvolve_params.get(
+        "max_iter_per_cycle_updated", None
+    )
+    if max_iter_per_cycle_updated is None:
+        cap = deconvolve_params.get("max_iter_per_cycle", None)
+        cap = max_iter if cap is None or int(cap) < 0 else int(cap)
+        max_iter_per_cycle_updated = min(cap, max_iter)
+    if np.ndim(max_iter_per_cycle_updated) == 0:
+        max_iter_per_cycle_updated = np.full(
+            shape, int(max_iter_per_cycle_updated), dtype=np.int32
+        )
     else:
-        max_iter_per_cycle = np.ascontiguousarray(max_iter_per_cycle, dtype=np.int32)
-        if max_iter_per_cycle.shape != shape:
+        max_iter_per_cycle_updated = np.ascontiguousarray(
+            max_iter_per_cycle_updated, dtype=np.int32
+        )
+        if max_iter_per_cycle_updated.shape != shape:
             raise ValueError(
-                f"max_iter_per_cycle shape {max_iter_per_cycle.shape} does not "
-                f"match the image plane grid {shape}"
+                "max_iter_per_cycle_updated shape "
+                f"{max_iter_per_cycle_updated.shape} does not match the image "
+                f"plane grid {shape}"
             )
 
     threshold_per_cycle = deconvolve_params.get("threshold_per_cycle", None)
@@ -309,7 +428,7 @@ def _per_plane_iteration_controls(deconvolve_params, nt, nf, npol, threshold_dty
                 f"not match the image plane grid {shape}"
             )
 
-    return max_iter_per_cycle, threshold_per_cycle
+    return max_iter_per_cycle_updated, threshold_per_cycle
 
 
 def _plane_peak_abs_signed(arr, mask=None):
@@ -446,11 +565,20 @@ def create_imaging_dict(
         - ``masksum`` : ``(nt, nf, np)`` per-plane count of valid (unmasked)
           pixels.
 
-        Optional key: ``diverged``, an ``(nt, nf, np)`` bool array of the
-        planes whose model update the deconvolver stopped as diverged. Their
-        ``stop_code`` placeholder carries the model update divergence code,
-        which the :class:`IterationController` keeps when it stamps the
-        imaging stop code.
+        Optional key: ``stop_code``, an ``(nt, nf, np)`` int array of the
+        reason the deconvolver ended each plane's model update (its iteration
+        control stop code: 0 did not run, 1 spent
+        ``max_iter_per_cycle_updated``, 2 reached ``threshold_per_cycle``, 4
+        diverged, 5 a test of the deconvolver itself). Every plane's
+        ``stop_code`` placeholder carries it as the model update stop code,
+        which the :class:`CycleController` keeps when it stamps the imaging
+        stop code, and its ``model_update_stop_code`` field records it, so
+        that the merged record holds the code of every model update.
+
+        Optional keys ``iteration_peak_residual`` and
+        ``iteration_residual_rms``: the iteration history of the
+        deconvolver, nested lists indexed ``[t][f][p]`` of 1-D float64 arrays
+        (see :func:`hogbom_clean`). Every plane's entry gets its array.
 
     Returns
     -------
@@ -483,11 +611,15 @@ def create_imaging_dict(
     max_psf_fraction = selected_calculations["max_psf_fraction"]
     max_psf_sidelobe = selected_calculations["max_psf_sidelobe"]
     masksum = selected_calculations["masksum"]
-    diverged = selected_calculations.get("diverged", None)
-    if diverged is not None:
-        from astroviper.processing_functions.imaging.utils.iteration_control import (
+    stop_code = selected_calculations.get("stop_code", None)
+    iteration_history = {
+        field: selected_calculations[field]
+        for field in ITERATION_HISTORY_FIELDS
+        if field in selected_calculations
+    }
+    if stop_code is not None:
+        from astroviper.processing_functions.imaging.utils.cycle_control import (
             IMAGING_CONTINUE,
-            MODEL_UPDATE_DIVERGENCE,
             StopCode,
         )
 
@@ -526,9 +658,9 @@ def create_imaging_dict(
                     "stop_code": (
                         StopCode(
                             imaging=IMAGING_CONTINUE,
-                            model_update=MODEL_UPDATE_DIVERGENCE,
+                            model_update=int(stop_code[tt, nn, pp]),
                         )
-                        if diverged is not None and bool(diverged[tt, nn, pp])
+                        if stop_code is not None
                         else None
                     ),
                     "stokes": pol_vals[pp],
@@ -542,6 +674,12 @@ def create_imaging_dict(
                     "peakres_nomask": peakres_nomask,
                     "masksum": int(masksum[tt, nn, pp]),
                 }
+                if stop_code is not None:
+                    # The code of every model update; ``stop_code`` keeps
+                    # only that of the last one that ran.
+                    returnvals["model_update_stop_code"] = int(stop_code[tt, nn, pp])
+                for field, history in iteration_history.items():
+                    returnvals[field] = history[tt][nn][pp]
 
                 imaging_dict.add(returnvals, time=tt, pol=pp, chan=nn)
 
@@ -608,17 +746,35 @@ def deconvolve(
         Per-plane deconvolution statistics, indexed by
         ``(time, chan, pol)``. Each entry contains iteration count, peak
         residuals before and after, model fluxes, and PSF bookkeeping.
+        With ``record_iteration_history`` every entry also holds
+        ``iteration_peak_residual`` and ``iteration_residual_rms``, 1-D
+        float64 arrays with one value per iteration of the plane (see
+        :func:`hogbom_clean`).
 
     Raises
     ------
     ValueError
-        If ``algorithm`` is not recognized, or if the PSF polarization
-        dimension is incompatible with the image polarization dimension.
+        If ``algorithm`` is not recognized, if the PSF polarization
+        dimension is incompatible with the image polarization dimension,
+        if ``record_iteration_history`` or ``exact_psf_subtraction`` is
+        requested from the Asp algorithm (see
+        :func:`validate_record_iteration_history` and
+        :func:`validate_exact_psf_subtraction`), or if
+        ``exact_psf_subtraction`` is set without a ``subtraction_psf_cube``
+        of the PSF's ``(time, frequency, polarization)`` shape and twice the
+        image size.
 
     Notes
     -----
     - The PSF may be single-polarization (Stokes I only), in which case
       it is broadcast across all image polarizations.
+    - With ``exact_psf_subtraction`` the Hogbom deconvolvers subtract
+      ``deconvolve_params["subtraction_psf_cube"]``, the PSF of twice the
+      image size, so every component is subtracted from the whole image;
+      without it they subtract the image-sized PSF, about ``n/2`` pixels
+      either side of the component along each axis (see
+      :func:`hogbom_clean` and :func:`hogbom_clean_many_threads`). The
+      image-sized PSF gives ``max_psf_sidelobe`` either way.
     - Deconvolution is performed independently on each
       ``(time, frequency, polarization)`` plane; parallelization across
       planes happens inside the C++ binding.
@@ -644,6 +800,14 @@ def deconvolve(
         "asp_clean",
     ):
         raise ValueError(f"Deconvolution algorithm '{algorithm}' not recognized.")
+    # Refused before the model is created on img_xds.
+    validate_record_iteration_history(
+        algorithm_l, (deconvolve_params or {}).get("record_iteration_history", False)
+    )
+    exact_psf_subtraction = (deconvolve_params or {}).get(
+        "exact_psf_subtraction", False
+    )
+    validate_exact_psf_subtraction(algorithm_l, exact_psf_subtraction)
 
     if image_data_group_out_modified is None:
         image_data_group_out_modified = {"sky": "SKY_MODEL"}
@@ -662,6 +826,18 @@ def deconvolve(
     max_sidelobe_point_spread_function_name = data_group_out[
         "max_sidelobe_point_spread_function"
     ]
+
+    subtraction_psf_cube = None
+    if exact_psf_subtraction:
+        subtraction_psf_cube = deconvolve_params.get("subtraction_psf_cube")
+        nt, nf, npol_psf, n_l, n_m = img_xds[psf_name].shape
+        expected = (nt, nf, npol_psf, 2 * n_l, 2 * n_m)
+        got = getattr(subtraction_psf_cube, "shape", None)
+        if got != expected:
+            raise ValueError(
+                "exact_psf_subtraction needs deconvolve_params"
+                f"['subtraction_psf_cube'] of shape {expected}; got {got}."
+            )
 
     if model_name not in img_xds.data_vars:
         img_xds[model_name] = xr.zeros_like(img_xds[residual_name])
@@ -713,7 +889,11 @@ def deconvolve(
         )
 
     residual_arr = img_xds[residual_name].values
-    psf_arr = img_xds[psf_name].values
+    psf_arr = (
+        img_xds[psf_name].values
+        if subtraction_psf_cube is None
+        else subtraction_psf_cube
+    )
     model_arr = img_xds[model_name].values
     max_psf_sidelobe = img_xds[
         max_sidelobe_point_spread_function_name
@@ -801,6 +981,7 @@ def deconvolve(
         )
 
     iters = np.asarray(results["iterations_performed"])
+    stop_code = np.asarray(results["stop_code"], dtype=int)
     diverged = results.get("diverged", None)
     if diverged is not None:
         diverged = np.asarray(diverged, dtype=bool)
@@ -823,7 +1004,12 @@ def deconvolve(
             "max_psf_fraction": max_psf_fraction,
             "max_psf_sidelobe": max_psf_sidelobe,
             "masksum": masksum,
-            "diverged": diverged,
+            "stop_code": stop_code,
+            **{
+                field: results[field]
+                for field in ITERATION_HISTORY_FIELDS
+                if field in results
+            },
         },
     )
     return imaging_dict
@@ -862,7 +1048,7 @@ def _run_hogbom(
     peak_mask_cube,
     mask_arg,
     clean_box,
-    max_iter_per_cycle,
+    max_iter_per_cycle_updated,
     threshold_per_cycle,
     deconvolve_params,
     processing_function_threads,
@@ -875,20 +1061,21 @@ def _run_hogbom(
     whole plane, skips NaN and is 1e20 when no pixel counts).
     """
     start_peak = _hogbom_peak_cube(residual_cube, peak_mask_cube, clean_box)
-    max_iter_remaining = np.where(np.isnan(start_peak), 0, max_iter_per_cycle).astype(
-        max_iter_per_cycle.dtype
-    )
+    max_iter_per_cycle_updated = np.where(
+        np.isnan(start_peak), 0, max_iter_per_cycle_updated
+    ).astype(max_iter_per_cycle_updated.dtype)
     result = clean_cube(
         residual_cube=residual_cube,
         psf_cube=psf_cube,
         model_cube=model_cube,
         mask_cube=mask_arg,
         clean_box=clean_box,
-        max_iter_remaining=max_iter_remaining,
+        max_iter_per_cycle_updated=max_iter_per_cycle_updated,
         gain=deconvolve_params["gain"],
-        threshold=threshold_per_cycle,
+        threshold_per_cycle=threshold_per_cycle,
         processing_function_threads=int(processing_function_threads),
         **_divergence_kwargs(deconvolve_params),
+        record_iteration_history=bool(deconvolve_params["record_iteration_history"]),
     )
     final_peak = _hogbom_peak_cube(residual_cube, peak_mask_cube, clean_box)
     result["final_peak"] = final_peak
@@ -922,10 +1109,15 @@ def hogbom_clean(
         C-contiguous, writeable, and float32 or float64. Updated in
         place with the post-CLEAN residual.
     psf_cube : numpy.ndarray
-        5-D PSF array with shape ``(nt, nf, np_psf, ny, nx)`` where
+        5-D PSF array with shape ``(nt, nf, np_psf, ny, nx)`` or
+        ``(nt, nf, np_psf, 2 ny, 2 nx)``, peak at its centre
+        (``psf_ny // 2, psf_nx // 2``), where
         ``np_psf`` equals ``np`` or is ``1`` (Stokes-I broadcast across
         all image polarizations). Must be C-contiguous and share the
-        dtype of ``residual_cube``. Not modified.
+        dtype of ``residual_cube``. Not modified. An image-sized PSF
+        subtracts a component over the offsets ``-(n // 2) .. (n - 1) // 2``
+        of each axis, one of twice the image size over the whole image (see
+        Notes).
     model_cube : numpy.ndarray
         5-D model array with shape ``(nt, nf, np, ny, nx)``. CLEAN
         components are **added** into this array in place, allowing
@@ -955,7 +1147,12 @@ def hogbom_clean(
         ``total_flux_cleaned`` (float), ``converged`` (bool), ``stop_code``
         (int: 1 iteration budget spent, 2 threshold reached, 4 diverged, 0
         did not run) and ``diverged`` (bool). The final residual and model
-        cubes are the caller-supplied arrays, updated in place.
+        cubes are the caller-supplied arrays, updated in place. With
+        ``record_iteration_history`` (``deconvolve_params``) also
+        ``iteration_peak_residual`` and ``iteration_residual_rms``, the
+        iteration history: nested lists indexed ``[t][f][p]`` of 1-D float64
+        arrays, one per plane with one value per iteration of the plane
+        (see Notes).
 
     Raises
     ------
@@ -969,10 +1166,20 @@ def hogbom_clean(
     astroviper, so a plain ``img_xds[name].values`` call produces an
     array that can be passed to this function without any copy.
 
-    **Stop tests.** Every plane is tested at every iteration, inside the C++
-    kernel, and stops when
+    **PSF size.** A component found at pixel ``p`` is subtracted at pixel
+    ``x`` with the PSF value at offset ``x - p`` from its centre, for every
+    sample of the PSF (offsets ``-(psf_n // 2) .. (psf_n - 1) // 2`` along
+    each axis) that falls in the image. With an image-sized PSF
+    (``psf_n = n``) pixels farther from the component keep the sidelobes of
+    the flux cleaned until the next residual update. With a PSF of twice the
+    image size every pixel is subtracted at its true offset, at the cost of a
+    subtraction over the whole image at every iteration.
 
-    - it has spent its iteration budget (``max_iter_per_cycle``);
+    **Stop tests (iteration control).** Every plane is tested at every
+    iteration, inside the C++ kernel, and stops when
+
+    - it has spent its iteration limit for this model update
+      (``max_iter_per_cycle_updated``);
     - its peak residual is at or below its ``threshold_per_cycle`` (so an
       all-zero plane does no iterations);
     - it diverges. The test follows the RMS of the residual over the pixels
@@ -989,7 +1196,24 @@ def hogbom_clean(
       (``stop_code`` 0, not ``diverged``).
 
     A diverged model update does not end the plane's imaging cycles: the next
-    residual update recomputes the true residual and cleaning resumes from it.
+    residual update recomputes the true residual and cleaning resumes from it,
+    unless the plane's last ``max_cycles_divergence`` model updates all
+    diverged (cycle control, see :class:`CycleController`).
+
+    **Iteration history.** With ``record_iteration_history`` every plane
+    records, for iteration ``k`` of the model update,
+    ``iteration_peak_residual[k]``, the signed residual value at the peak of
+    ``|residual|`` the iteration cleaned (it subtracts ``gain`` times this
+    value times the PSF; Jy/beam, as the residual image), and
+    ``iteration_residual_rms[k]``, the RMS (about zero) of the residual after
+    that subtraction over the pixels the peak search covers (the clean box
+    inside the mask). The RMS costs no extra pass over the image: the peak
+    search of every iteration already sums the squares of the residual for
+    the divergence test, so the RMS after iteration ``k`` is exactly the sum
+    found by the search of iteration ``k + 1``; only a plane that spends its
+    whole budget is scanned once more, for the RMS after its last iteration.
+    Recording does not change the residual or the model: they are the same
+    to the bit with and without it.
     """
     deconvolve_params = _validate_deconvolve_params(deconvolve_params)
 
@@ -1012,9 +1236,10 @@ def hogbom_clean(
     # PSF cube may broadcast on the polarization axis.
     nt, nf, npol_img, ny, nx = residual_cube.shape
     nt_p, nf_p, npol_psf, ny_p, nx_p = psf_cube.shape
-    if (nt_p, nf_p, ny_p, nx_p) != (nt, nf, ny, nx):
+    if (nt_p, nf_p) != (nt, nf) or (ny_p, nx_p) not in ((ny, nx), (2 * ny, 2 * nx)):
         raise ValueError(
-            "psf_cube must match residual_cube on (time, frequency, y, x). "
+            "psf_cube must match residual_cube on (time, frequency, y, x), or "
+            "on (time, frequency) with twice its (y, x) size. "
             f"Got psf shape {psf_cube.shape} vs residual shape "
             f"{residual_cube.shape}"
         )
@@ -1048,7 +1273,7 @@ def hogbom_clean(
 
     # Per-plane iteration control: each (time, frequency, polarization) plane
     # is cleaned with its own iteration limit and threshold_per_cycle.
-    max_iter_per_cycle, threshold_per_cycle = _per_plane_iteration_controls(
+    max_iter_per_cycle_updated, threshold_per_cycle = _per_plane_per_cycle_limits(
         deconvolve_params, nt, nf, npol_img, residual_cube.dtype
     )
 
@@ -1060,7 +1285,7 @@ def hogbom_clean(
         peak_mask_cube=mask_cube,
         mask_arg=mask_arg,
         clean_box=clean_box,
-        max_iter_per_cycle=max_iter_per_cycle,
+        max_iter_per_cycle_updated=max_iter_per_cycle_updated,
         threshold_per_cycle=threshold_per_cycle,
         deconvolve_params=deconvolve_params,
         processing_function_threads=processing_function_threads,
@@ -1111,9 +1336,10 @@ def hogbom_clean_many_threads(
 
     nt, nf, npol_img, ny, nx = residual_cube.shape
     nt_p, nf_p, npol_psf, ny_p, nx_p = psf_cube.shape
-    if (nt_p, nf_p, ny_p, nx_p) != (nt, nf, ny, nx):
+    if (nt_p, nf_p) != (nt, nf) or (ny_p, nx_p) not in ((ny, nx), (2 * ny, 2 * nx)):
         raise ValueError(
-            "psf_cube must match residual_cube on (time, frequency, y, x). "
+            "psf_cube must match residual_cube on (time, frequency, y, x), or "
+            "on (time, frequency) with twice its (y, x) size. "
             f"Got psf shape {psf_cube.shape} vs residual shape {residual_cube.shape}"
         )
     if npol_psf not in (npol_img, 1):
@@ -1140,8 +1366,8 @@ def hogbom_clean_many_threads(
     )
 
     # Per-plane iteration control: each plane has its own iteration limit and
-    # threshold_per_cycle (shared with the C++ path via _per_plane_iteration_controls).
-    max_iter_per_cycle, threshold_per_cycle = _per_plane_iteration_controls(
+    # threshold_per_cycle (shared with the C++ path via _per_plane_per_cycle_limits).
+    max_iter_per_cycle_updated, threshold_per_cycle = _per_plane_per_cycle_limits(
         deconvolve_params, nt, nf, npol_img, residual_cube.dtype
     )
 
@@ -1153,7 +1379,7 @@ def hogbom_clean_many_threads(
         peak_mask_cube=mask_cube,
         mask_arg=mask_arg,
         clean_box=clean_box,
-        max_iter_per_cycle=max_iter_per_cycle,
+        max_iter_per_cycle_updated=max_iter_per_cycle_updated,
         threshold_per_cycle=threshold_per_cycle,
         deconvolve_params=deconvolve_params,
         processing_function_threads=processing_function_threads,
@@ -1233,9 +1459,11 @@ def asp_clean(
     -------
     dict
         Per-plane summary arrays with shape ``(nt, nf, np)`` and keys
-        ``iterations_performed`` (int), ``retval`` (int), ``converged``
-        (bool), ``diverged`` (bool), ``peak_residual`` (float), and
-        ``model_flux`` (float). A plane stops as diverged (``retval`` -3)
+        ``iterations_performed`` (int), ``retval`` (int), ``stop_code``
+        (int, as for :func:`hogbom_clean`, and 5 for a test of Asp itself:
+        optimum strength, end of a Hogbom run, stop point mode),
+        ``converged`` (bool), ``diverged`` (bool), ``peak_residual`` (float),
+        and ``model_flux`` (float). A plane stops as diverged (``retval`` -3)
         when the RMS of its residual inside the mask has been above
         ``(1 + gain)`` times the lowest RMS of the model update for
         ``max_iter_divergence`` consecutive iterations, or when its peak is
@@ -1251,9 +1479,18 @@ def asp_clean(
     ------
     ValueError
         If the input arrays are not 5-D, do not share a floating-point
-        dtype, or have incompatible shapes.
+        dtype, or have incompatible shapes, or if ``record_iteration_history``
+        is requested: an Asp iteration subtracts a fitted Aspen, not the PSF
+        at a residual peak, so only the Hogbom kernels record the iteration
+        history (see :func:`validate_record_iteration_history`), or if
+        ``exact_psf_subtraction`` is requested (see
+        :func:`validate_exact_psf_subtraction`).
     """
     deconvolve_params = _validate_deconvolve_params(deconvolve_params)
+    validate_record_iteration_history(
+        "asp", deconvolve_params["record_iteration_history"]
+    )
+    validate_exact_psf_subtraction("asp", deconvolve_params["exact_psf_subtraction"])
 
     for name, arr in (
         ("residual_cube", residual_cube),
@@ -1311,16 +1548,16 @@ def asp_clean(
     # Per-plane iteration control: each (time, frequency, polarization) plane
     # is cleaned with its own iteration limit and threshold_per_cycle. Asp uses a
     # float64 threshold_per_cycle regardless of the image dtype.
-    max_iter_per_cycle, threshold_per_cycle = _per_plane_iteration_controls(
+    max_iter_per_cycle_updated, threshold_per_cycle = _per_plane_per_cycle_limits(
         deconvolve_params, nt, nf, npol_img, np.float64
     )
     # A plane whose search region (mask above the kernel's 0.99) holds a pixel
     # that is not a number gets no iterations, as with the Hogbom kernels.
     search = None if mask_cube is None else mask_cube > 0.99
     start_peak = _hogbom_peak_cube(residual_cube, search, (-1, -1, -1, -1))
-    max_iter_per_cycle = np.where(np.isnan(start_peak), 0, max_iter_per_cycle).astype(
-        max_iter_per_cycle.dtype
-    )
+    max_iter_per_cycle_updated = np.where(
+        np.isnan(start_peak), 0, max_iter_per_cycle_updated
+    ).astype(max_iter_per_cycle_updated.dtype)
 
     return aspclean.clean_cube(
         residual=residual_cube,
@@ -1328,8 +1565,8 @@ def asp_clean(
         model=model_cube,
         mask=mask_arg,
         gain=deconvolve_params["gain"],
-        threshold=threshold_per_cycle,
-        max_iter_remaining=max_iter_per_cycle,
+        threshold_per_cycle=threshold_per_cycle,
+        max_iter_per_cycle_updated=max_iter_per_cycle_updated,
         fusedthreshold=deconvolve_params.get("fusedthreshold", 0.0),
         psf_width=deconvolve_params.get("psf_width", 0.0),
         largestscale=deconvolve_params.get("largestscale", -1),

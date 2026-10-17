@@ -416,7 +416,7 @@ def _extract_main_lobe_2d(npix_window, threshold, psf_2d):
     main_lobe_label = labels[peak_l, peak_m]
     main_lobe_only = np.where(labels == main_lobe_label, windowed_psf, 0)
 
-    # Cycle control depends on the largest sidelobe magnitude. A negative
+    # The per cycle threshold depends on the largest sidelobe magnitude. A negative
     # sidelobe is just as capable of destabilizing a model update as a positive
     # one, so do not discard it when estimating the safe cycle threshold.
     # In place, so that no third plane is made whether or not NumPy reuses the

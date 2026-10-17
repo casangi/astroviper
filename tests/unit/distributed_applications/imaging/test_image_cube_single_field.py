@@ -65,7 +65,7 @@ def _simulate_point_source(tmp_path):
         point_source_flux=np.array([1.0, 0, 0, 1.0])[None, None, None, :],
         point_source_ra_dec=PC[None, None, :],
         phase_center_ra_dec=PC[None, :],
-        beam_models=[airy_disk_model("vla")],
+        beam_models=[airy_disk_model("vla_nvss")],
         beam_model_map=np.zeros(N_ANTENNA, int),
         n_time_chunks=1,
         n_frequency_chunks=2,
@@ -98,7 +98,7 @@ def test_image_store_name_without_img_zarr_extension(tmp_path):
             "robust": 0.5,
             "casa_weighting_implementation": True,
         },
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": 0,
             "max_cycles": 0,
             "threshold": 0.0,
@@ -163,7 +163,7 @@ def _image_cube(ps_store, image_store, frequency_coords, **overrides):
             "robust": 0.5,
             "casa_weighting_implementation": True,
         },
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": max_iter,
             "max_cycles": 2 if max_iter else 0,
             "threshold": 0.0,

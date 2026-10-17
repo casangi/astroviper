@@ -1,10 +1,17 @@
+from typing import TYPE_CHECKING
+
 import numpy as np
 import xarray as xr
+
+if TYPE_CHECKING:
+    from astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel import (
+        GriddingKernel,
+    )
 
 
 def get_visibility_grid_single_field(
     ms_xds: xr.Dataset,
-    cgk_1D: np.ndarray,
+    cgk_1D: "GriddingKernel | np.ndarray",
     img_xds: xr.Dataset,
     ms_data_group_in_name: str = "base",
     ms_data_group_out_name: str = "model",
@@ -29,8 +36,7 @@ def get_visibility_grid_single_field(
     This function is the inverse of
     :func:`~astroviper.processing_functions.imaging.add_visibility_grid.add_visibility_grid_single_field`:
     it predicts visibilities *from* a UV-plane model rather than gridding
-    observed visibilities onto a UV plane.  It uses the separable C++ prolate
-    spheroidal degridder (the standard gridder in CASA) and therefore does not
+    observed visibilities onto a UV plane.  It uses the separable C++ anti-aliasing degridder (the standard gridder in CASA) and therefore does not
     require a GCF dataset. Cube and continuum callers share that numerical
     primitive without sharing their spectral-model preparation APIs.
 
@@ -42,16 +48,16 @@ def get_visibility_grid_single_field(
         ``frequency`` coordinate.  On the first call the output visibility
         data variable is created on ``ms_xds`` as a ``complex128`` array shaped
         like the input ``correlated_data``.
-    cgk_1D : np.ndarray
-        Oversampled 1-D prolate spheroidal wave function (PSWF) kernel.
-        Shape ``(oversampling * (support // 2 + 1),)``; passed directly to
-        the prolate spheroidal degridder.
+    cgk_1D : GriddingKernel or np.ndarray
+        The gridding kernel
+        (:class:`~astroviper.processing_functions.imaging.gridding_convolution_functions.gridding_kernel.GriddingKernel`),
+        or the bare table of the default prolate spheroidal kernel of support 7.
     img_xds : xr.Dataset
         Image dataset holding the model UV grid.  Must expose an image data
         group under ``image_data_group_in_name`` whose ``"visibility"`` role
         names a data variable shaped ``(time, frequency, polarization, u, v)``,
         the same ``(u, v)`` axis order used by the C++
-        ``prolate_spheroidal_grid`` kernel.
+        ``anti_alias_grid`` kernel.
         Cell size and image dimensions are read directly from ``img_xds`` via
         ``img_xds.xr_img.get_lm_cell_size()`` and ``img_xds.sizes``.
     ms_data_group_in_name : str, default ``"base"``
@@ -114,7 +120,7 @@ def get_visibility_grid_single_field(
     astroviper.processing_functions.imaging.add_visibility_grid.add_visibility_grid_single_field :
         Forward (gridding) counterpart.
     degrid_visibility_grid_single_field :
-        Shared prolate spheroidal gridder numerical primitive.
+        Shared anti-aliasing gridder numerical primitive.
     """
     if ms_data_group_out_modified is None:
         ms_data_group_out_modified = {

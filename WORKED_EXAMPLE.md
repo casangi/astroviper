@@ -15,8 +15,10 @@ return_dict = image_cube_single_field(
     image_store="twhya_clean.img.zarr",             # output image dataset (Zarr)
     image_params=image_params,                       # image geometry + output coords
     imaging_weights_params={"weighting": "briggs", "robust": 0.5},
-    iteration_control_params={"max_iter": 300, "max_cycles": 3, "threshold": 0.001, "gain": 0.1},
-    gridder="prolate_spheroidal",
+    cycle_control_params={"max_iter": 300, "max_cycles": 3, "threshold": 0.001, "gain": 0.1,
+                          "psf_sidelobe_factor": 1.5, "max_iter_per_cycle": -1,
+                          "min_psf_fraction": 0.05, "max_psf_fraction": 0.8},
+    gridder="anti_alias",
     deconvolver="hogbom_many_threads",
     image_data_variables_keep=["sky_residual", "sky_model", "mask",
                                "point_spread_function", "primary_beam",
@@ -78,10 +80,10 @@ task_coords, data_selection, image_store, input_data_store, ..., graph_mode=True
    dict, any dimension) selects the sharded writer.
 
 ### 12.3 Science — `processing_functions/imaging/image_cube_single_field.py`
-The **iteration-control and bookkeeping helpers** (not science kernels) live in
-the `processing_functions/imaging/utils/` subpackage: `iteration_control.py`
-(`IterationController`, stop codes, `merge_return_dicts`,
-`get_calculate_cycle_controls`, the `get_*_from_imaging_dict` extractors,
+The **cycle control and bookkeeping helpers** (not science kernels) live in
+the `processing_functions/imaging/utils/` subpackage: `cycle_control.py`
+(`CycleController`, stop codes, `merge_imaging_dicts`,
+`get_per_cycle_limits`, the `get_*_from_imaging_dict` extractors,
 `format_/print_imaging_dict`), `imaging_dict.py` (`ImagingDict`, `Key`),
 `timing.py` (`accumulate_timing`), and `visibility.py`
 (`drop_auto_correlations` — the shared cross-correlation filter used by the PSF
@@ -92,7 +94,7 @@ public symbols).
 Runs the CLEAN loop of **imaging cycles**, each one **residual update**
 followed by one **model update** (the CASA names in brackets are for
 orientation only: `max_cycles` [CASA `nmajor`], `max_iter` [CASA `niter`]),
-via `IterationController`:
+via `CycleController`:
 - **Residual update** — `residual_update_cube_single_field(...)`: degrid
   model → compute residual visibilities → grid → FFT-normalize → form residual
   image (+ PSF on the first iteration), primary beam, and imaging weights
@@ -100,8 +102,11 @@ via `IterationController`:
 - **Model update** — `model_update_cube_single_field(...)` →
   `deconvolve(...)` (Hogbom or ASP CLEAN in C++) updates the model image, with
   a mask from `make_mask`.
-- Accumulate per-plane stats into an `ImagingDict`; check convergence; iterate.
-- A closing residual update produces the last residual image.
+- After every residual update, the first included, the stop test (cycle
+  control) checks the residual that update has just made; a plane that
+  continues gets another model update. Per-plane stats accumulate into an
+  `ImagingDict`. The loop ends only at the stop test, so the last residual
+  update produces the written residual image.
 - When `restore=True` (off by default), a final `restore_image(...)` step
   (`processing_functions/imaging/restore.py`) convolves the model with the clean
   beam (the per-frequency Gaussian fit to the PSF, in the `residual` data group)
@@ -125,8 +130,10 @@ via `IterationController`:
 - Undeconvolved (dirty/residual) image gridding: `make_undeconvolved_image.py`
   (`make_undeconvolved_image_single_field`).
 - Degridding (model uv grid → vis): `get_visibility_grid.py`.
-- FFT + normalization: `fft_normalize_prolate_spheriodal_gridder.py`.
-- Primary beam: `make_pb_symmetric.py` (airy disk).
+- FFT + normalization: `fft_normalize_anti_alias_gridder.py`.
+- Primary beam: `primary_beam/make_primary_beam.py`
+  (`make_primary_beam_single_field`, evaluated with
+  `simulation/antenna_beams.py::symmetric_beam_response`).
 - Polarization: `image_analysis/transform_polarization_basis.py`
   (stokes ↔ linear).
 - PSF fit: `image_analysis/point_spread_function_gaussian_fit.py`.
@@ -135,8 +142,10 @@ via `IterationController`:
   `beam_fit_params_point_spread_function`).
 - Deconvolvers: `deconvolution.py` dispatch → `deconvolvers/hogbom` (C++),
   `deconvolvers/aspclean` (C++).
-- The prolate spheroidal gridder kernel (the standard gridder in CASA) is
-  implemented in C++ (`gridders/prolate_spheroidal_grid_cpp`); pure-Python
+- The anti-aliasing gridder is implemented in C++
+  (`gridders/anti_alias_grid_cpp`); `gridding_kernel_params` selects its
+  kernel, and the default, `prolate_spheroidal_casa`, is the kernel of
+  CASA's standard gridder. Pure-Python
   reference copies used as test oracles live in
   `tests/unit/processing_functions/imaging/gridders/reference_gridders.py`.
   **Keep the references in sync** if you change the gridding math.

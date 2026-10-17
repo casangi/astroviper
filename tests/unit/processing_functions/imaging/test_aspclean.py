@@ -20,7 +20,7 @@ The tests exercise:
 
 
 The aspclean C++ binding takes the per-plane iteration cap as
-``max_iter_remaining`` (aspclean/python/bindings.cpp).
+``max_iter_per_cycle_updated`` (aspclean/python/bindings.cpp).
 """
 
 import numpy as np
@@ -151,11 +151,17 @@ class TestClean:
         model = np.zeros_like(dirty)
         resid = dirty.copy()
         res = aspclean.clean(
-            resid, psf, model, gain=0.1, threshold=0.05, max_iter_remaining=100
+            resid,
+            psf,
+            model,
+            gain=0.1,
+            threshold_per_cycle=0.05,
+            max_iter_per_cycle_updated=100,
         )
         for key in (
             "iterations_performed",
             "retval",
+            "stop_code",
             "converged",
             "diverged",
             "peak_residual",
@@ -176,8 +182,8 @@ class TestClean:
             psf,
             model,
             gain=0.1,
-            threshold=0.01,
-            max_iter_remaining=200,
+            threshold_per_cycle=0.01,
+            max_iter_per_cycle_updated=200,
             fusedthreshold=0.1,
         )
         peak1 = float(np.max(np.abs(resid)))
@@ -197,8 +203,8 @@ class TestClean:
             psf,
             model,
             gain=0.1,
-            threshold=0.05,
-            max_iter_remaining=150,
+            threshold_per_cycle=0.05,
+            max_iter_per_cycle_updated=150,
             fusedthreshold=0.1,
         )
         recon = aspclean.convolve_centered(
@@ -223,8 +229,8 @@ class TestClean:
             psf,
             model,
             gain=0.5,
-            threshold=0.01,
-            max_iter_remaining=60,
+            threshold_per_cycle=0.01,
+            max_iter_per_cycle_updated=60,
             fusedthreshold=0.5,
             psf_width=1.0,
         )
@@ -244,8 +250,8 @@ class TestClean:
                 psf,
                 model,
                 gain=0.1,
-                threshold=0.001,
-                max_iter_remaining=100,
+                threshold_per_cycle=0.001,
+                max_iter_per_cycle_updated=100,
                 fusedthreshold=0.1,
             )
             peaks.append(float(np.max(np.abs(resid))))
@@ -277,8 +283,8 @@ class TestMask:
             model,
             mask=mask,
             gain=0.1,
-            threshold=0.01,
-            max_iter_remaining=150,
+            threshold_per_cycle=0.01,
+            max_iter_per_cycle_updated=150,
             fusedthreshold=0.1,
         )
         outside = model[mask == 0]
@@ -292,7 +298,9 @@ class TestMask:
         mask = np.zeros((ny, nx))
         model = np.zeros_like(dirty)
         resid = dirty.copy()
-        res = aspclean.clean(resid, psf, model, mask=mask, max_iter_remaining=50)
+        res = aspclean.clean(
+            resid, psf, model, mask=mask, max_iter_per_cycle_updated=50
+        )
         np.testing.assert_array_equal(resid, dirty)
         np.testing.assert_array_equal(model, np.zeros_like(model))
         assert res["model_flux"] == 0.0
@@ -317,8 +325,8 @@ class TestInPlaceContract:
             psf,
             model,
             gain=0.2,
-            threshold=0.01,
-            max_iter_remaining=50,
+            threshold_per_cycle=0.01,
+            max_iter_per_cycle_updated=50,
             fusedthreshold=0.1,
         )
         # same buffers (no reallocation), and they changed
@@ -388,7 +396,7 @@ class TestCube:
 
         rc = resid.copy()
         mc = model.copy()
-        # Iteration control is per (time, frequency, polarization) plane:
+        # Cycle control is per (time, frequency, polarization) plane:
         # threshold is a float64 (nt, nf, np) array and max_iter an int32 one.
         threshold = np.full((nt, nf, npol), 0.05, dtype=np.float64)
         max_iter = np.full((nt, nf, npol), 80, dtype=np.int32)
@@ -397,8 +405,8 @@ class TestCube:
             psf,
             mc,
             gain=0.1,
-            threshold=threshold,
-            max_iter_remaining=max_iter,
+            threshold_per_cycle=threshold,
+            max_iter_per_cycle_updated=max_iter,
             fusedthreshold=0.1,
             processing_function_threads=2,
         )
@@ -416,8 +424,8 @@ class TestCube:
                         psf[t, f, p],
                         m1,
                         gain=0.1,
-                        threshold=0.05,
-                        max_iter_remaining=80,
+                        threshold_per_cycle=0.05,
+                        max_iter_per_cycle_updated=80,
                         fusedthreshold=0.1,
                     )
                     np.testing.assert_allclose(rc[t, f, p], r1, atol=1e-10)
@@ -437,8 +445,8 @@ class TestCube:
             psf1,
             model,
             gain=0.1,
-            threshold=threshold,
-            max_iter_remaining=max_iter,
+            threshold_per_cycle=threshold,
+            max_iter_per_cycle_updated=max_iter,
             fusedthreshold=0.1,
         )
         assert out["model_flux"].shape == (nt, nf, npol)
@@ -494,8 +502,8 @@ class TestDivergence:
             psf,
             model,
             gain=0.9,
-            threshold=0.0,
-            max_iter_remaining=40,
+            threshold_per_cycle=0.0,
+            max_iter_per_cycle_updated=40,
             psf_width=1.0,
             largestscale=0,
             **kwargs,
@@ -510,6 +518,7 @@ class TestDivergence:
         # nothing else stops the runaway: both spend their budget
         assert result["iterations_performed"] == off["iterations_performed"] == 40
         assert result["retval"] == off["retval"] == 0
+        assert result["stop_code"] == off["stop_code"] == 1
         np.testing.assert_array_equal(residual, residual_off)
         np.testing.assert_array_equal(model, model_off)
 
@@ -523,6 +532,7 @@ class TestDivergence:
         )
         assert result["iterations_performed"] == 2
         assert result["retval"] == -3
+        assert result["stop_code"] == 4
         assert result["diverged"]
         assert not result["converged"]
         # the peak fell; the RMS rose
@@ -556,8 +566,8 @@ class TestDivergence:
                 psf,
                 model,
                 gain=0.1,
-                threshold=0.05 * scale,
-                max_iter_remaining=100,
+                threshold_per_cycle=0.05 * scale,
+                max_iter_per_cycle_updated=100,
             )
             results.append((result, model.sum() / scale))
         (unit, unit_flux), (scaled, scaled_flux) = results
@@ -592,8 +602,8 @@ class TestDivergence:
                 model,
                 mask=mask,
                 gain=0.1,
-                threshold=0.05,
-                max_iter_remaining=100,
+                threshold_per_cycle=0.05,
+                max_iter_per_cycle_updated=100,
             )
             out.append((result, model))
         (ref, model_ref), (result, model) = out
@@ -643,8 +653,8 @@ class TestDivergence:
                 psf,
                 model,
                 gain=0.1,
-                threshold=0.05,
-                max_iter_remaining=100,
+                threshold_per_cycle=0.05,
+                max_iter_per_cycle_updated=100,
                 **kwargs,
             )
             results.append((result, residual, model))
@@ -669,8 +679,8 @@ class TestDivergence:
             psf,
             model,
             gain=0.9,
-            threshold=np.zeros((1, 1, 2)),
-            max_iter_remaining=np.full((1, 1, 2), 40, dtype=np.int32),
+            threshold_per_cycle=np.zeros((1, 1, 2)),
+            max_iter_per_cycle_updated=np.full((1, 1, 2), 40, dtype=np.int32),
             psf_width=1.0,
             largestscale=0,
             max_iter_divergence=1,
@@ -681,6 +691,7 @@ class TestDivergence:
         np.testing.assert_array_equal(result["retval"][0, 0, 0], -3)
         # the shared test stops plane 0
         np.testing.assert_array_equal(result["iterations_performed"], [[[2, 40]]])
+        np.testing.assert_array_equal(result["stop_code"], [[[4, 1]]])
 
     def test_rms_is_taken_inside_the_mask(self):
         # the sidelobes that raise the RMS fall outside a 3 x 3 mask
@@ -694,8 +705,8 @@ class TestDivergence:
             model,
             mask=mask,
             gain=0.9,
-            threshold=0.0,
-            max_iter_remaining=40,
+            threshold_per_cycle=0.0,
+            max_iter_per_cycle_updated=40,
             psf_width=1.0,
             largestscale=0,
             max_iter_divergence=1,
@@ -720,6 +731,45 @@ class TestDivergence:
 # ---------------------------------------------------------------------------
 # The per-Aspen L-BFGS optimizer (ALGLIB minlbfgs conventions)
 # ---------------------------------------------------------------------------
+
+
+class TestStopCode:
+    """stop_code is the code the other deconvolvers report (plane_stop_test.hpp)."""
+
+    @staticmethod
+    def _clean(max_iter_per_cycle_updated=40, threshold_per_cycle=0.0):
+        residual, psf = TestDivergence._spreading()
+        model = np.zeros_like(residual)
+        result = aspclean.clean(
+            residual,
+            psf,
+            model,
+            gain=0.9,
+            threshold_per_cycle=threshold_per_cycle,
+            max_iter_per_cycle_updated=max_iter_per_cycle_updated,
+            psf_width=1.0,
+            largestscale=0,
+        )
+        return result, model
+
+    def test_no_iteration_limit_does_not_run(self):
+        result, model = self._clean(max_iter_per_cycle_updated=0)
+        assert result["iterations_performed"] == 0
+        assert result["stop_code"] == 0
+        assert not model.any()
+
+    def test_threshold_per_cycle(self):
+        result, _ = self._clean(threshold_per_cycle=2.0)
+        assert result["retval"] == 1
+        assert result["stop_code"] == 2
+
+    def test_stop_point_mode_is_a_test_of_asp(self):
+        # only scale 0 (largestscale=0): the first component stops it
+        result, _, _ = TestDivergence._clean(
+            TestDivergence._spreading(), stoppointmode=1
+        )
+        assert result["retval"] == -1
+        assert result["stop_code"] == 5
 
 
 class TestLbfgs:
@@ -834,8 +884,8 @@ class TestResolvedSource:
             psf,
             model,
             gain=0.1,
-            threshold=1e-4,
-            max_iter_remaining=300,
+            threshold_per_cycle=1e-4,
+            max_iter_per_cycle_updated=300,
             max_iter_divergence=1,
             divergence_rms_factor=1.1,
             divergence_peak_factor=np.inf,

@@ -14,7 +14,7 @@ from xradio.schema.check import check_datatree
 import astroviper.distributed_applications as distributed_applications
 from astroviper.distributed_applications.imaging import image_cube_single_field
 from astroviper.processing_functions.simulation.antenna_beams import (
-    casa_airy_disk_response,
+    airy_disk_response,
 )
 from astroviper.utils.beam_models import airy_disk_model
 from astroviper.utils.coordinate_transforms import (
@@ -51,7 +51,7 @@ def simulate(tmp_path, name, flux, noise_params=None, sky_image_params=None):
         point_source_flux=np.array([flux, 0, 0, flux])[None, None, None, :],
         point_source_ra_dec=SRC[None, None, :],
         phase_center_ra_dec=PC[None, :],
-        beam_models=[airy_disk_model("vla")],
+        beam_models=[airy_disk_model("vla_nvss")],
         beam_model_map=np.zeros(27, int),
         noise_params=noise_params,
         sky_image_params=sky_image_params,
@@ -92,7 +92,7 @@ def image(tmp_path, ps_store, name):
             "robust": 0.5,
             "casa_weighting_implementation": True,
         },
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": 0,
             "max_cycles": 0,
             "threshold": 0.0,
@@ -102,7 +102,7 @@ def image(tmp_path, ps_store, name):
             "min_psf_fraction": 0.05,
             "max_psf_fraction": 0.8,
         },  # fmt: skip
-        gridder="prolate_spheroidal",
+        gridder="anti_alias",
         deconvolver="hogbom_many_threads",
         scan_intents="OBSERVE_TARGET#ON_SOURCE",
         image_data_variables_keep=["sky_residual", "point_spread_function"],
@@ -153,15 +153,8 @@ def test_point_source_lands_on_expected_pixel(tmp_path):
         plane = sky[i_chan, 0]
         i, j = np.unravel_index(np.argmax(plane), plane.shape)
         np.testing.assert_allclose([i, j], expected_pixel, atol=0.5)
-        # natural-weighted dirty peak = mean visibility amplitude = flux * power beam (casa_airy VLA)
-        voltage = casa_airy_disk_response(
-            lm[0],
-            lm[1],
-            frequency[i_chan],
-            24.5,
-            0.0,
-            airy_disk_model("vla")["max_rad_1GHz"],
-        )
+        # natural-weighted dirty peak = mean visibility amplitude = flux * power beam (airy VLA)
+        voltage = airy_disk_response(lm[0], lm[1], frequency[i_chan], 24.5, 0.0)
         # (gridding-correction / pixelisation errors of a few % at this offset)
         np.testing.assert_allclose(plane[i, j], 2.0 * voltage**2, rtol=0.05)
 

@@ -135,7 +135,7 @@ def test_gaussian_and_point_source_fluxes_recovered(tmp_path, monkeypatch):
             "robust": 0.5,
             "casa_weighting_implementation": True,
         },
-        iteration_control_params={
+        cycle_control_params={
             "max_iter": 3000,
             "max_cycles": -1,
             "threshold": 2e-4,
@@ -146,7 +146,7 @@ def test_gaussian_and_point_source_fluxes_recovered(tmp_path, monkeypatch):
             "max_psf_fraction": 0.8,
             "primary_beam_limit": 0.2,
         },
-        gridder="prolate_spheroidal",
+        gridder="anti_alias",
         deconvolver="asp",
         scan_intents="OBSERVE_TARGET#ON_SOURCE",
         image_data_variables_keep=[

@@ -366,6 +366,28 @@ def _chunk_task_coords(task_coords, data_selection, local_start, local_stop):
     return chunk_coords
 
 
+def _channel_cycle_control_params(
+    cycle_control_params, task_coords, data_selection, chan_index
+):
+    """``cycle_control_params`` of chunk-local channel ``chan_index``: a per
+    channel ``threshold`` (one row of Stokes plane values per image channel)
+    is replaced by the row of the channel's global number (see
+    :func:`_chunk_task_coords`); any other ``threshold`` leaves the dict as
+    it is."""
+    import numpy as np
+
+    threshold = cycle_control_params.get("threshold")
+    if np.ndim(threshold) != 2:
+        return cycle_control_params
+    channel = _chunk_task_coords(
+        task_coords, data_selection, chan_index, chan_index + 1
+    )["frequency"]["slice"].start
+    return {
+        **cycle_control_params,
+        "threshold": [float(value) for value in threshold[channel]],
+    }
+
+
 def _select_chunk_writer(
     graph_mode,
     skunk_works,
@@ -445,6 +467,32 @@ def _concat_image_statistics(statistics_chunks):
     }
 
 
+def _add_residual_entropy(statistics, chunk_xds, cycle_control_params):
+    """Add ``entropy``, the entropy of the residual of every plane, to the
+    image statistics of the residual (``report_statistics``)."""
+    from astroviper.processing_functions.image_analysis.image_statistics import (
+        image_residual_entropy,
+    )
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
+        validate_entropy_params,
+    )
+
+    if "sky_residual" not in statistics:
+        return
+    _, max_snr, spatial_bins, flux_bins = validate_entropy_params(cycle_control_params)
+    entropy, _ = image_residual_entropy(
+        chunk_xds,
+        data_group_name="residual",
+        spatial_bins=spatial_bins,
+        flux_bins=flux_bins,
+        max_snr=max_snr,
+    )
+    statistics["sky_residual"]["entropy"] = (
+        ("time", "frequency", "polarization"),
+        entropy,
+    )
+
+
 def _combine_channel_timing_frames(timing_frames):
     """Fold the per-channel one-row timing frames into the chunk's one row.
 
@@ -482,7 +530,7 @@ def _combine_channel_timing_frames(timing_frames):
 def image_cube_single_field(
     image_params,
     imaging_weights_params,
-    iteration_control_params,
+    cycle_control_params,
     task_coords,
     data_selection,
     image_store,
@@ -497,6 +545,8 @@ def image_cube_single_field(
     restore=False,
     primary_beam_correction=False,
     psf_fitting_method="astroviper",
+    gridding_kernel_params=None,
+    primary_beam_params=None,
     memory_mode="in_memory",
     skunk_works=False,
     data_group=None,
@@ -508,6 +558,7 @@ def image_cube_single_field(
     image_sharding=None,
     output_image_format="zarr",
     task_time_kill_switch_seconds=None,
+    report_statistics=False,
 ):
     """Image one frequency chunk of a single-field cube and write it to disk.
 
@@ -549,8 +600,8 @@ def image_cube_single_field(
     imaging_weights_params : dict
         Weighting scheme configuration: ``weighting`` (``"natural"`` or
         ``"briggs"``) and the Briggs ``robust`` parameter.
-    iteration_control_params : dict
-        CLEAN iteration controls. An **imaging cycle** (below simply a cycle)
+    cycle_control_params : dict
+        CLEAN cycle controls. An **imaging cycle** (below simply a cycle)
         is one **residual update** (degrid the model, form residual
         visibilities, grid and inverse FFT them into the residual image)
         followed by one **model update** (deconvolve the residual image into
@@ -560,8 +611,17 @@ def image_cube_single_field(
         every frequency channel (the node task images one channel at a time),
         so a channel's cycles continue until all of its (time, polarization)
         planes have stopped, and a channel that has stopped does no further
-        residual updates while the others carry on. The CASA ``tclean``
-        equivalent is given in brackets. Keys:
+        residual updates while the others carry on. **Cycle control** is the
+        stop test between the residual update and the model update, which
+        decides whether a plane gets another cycle and sets the limits of its
+        next model update. It is made after every residual update, the first
+        included, on the residual that update has just made, never on the
+        residual a model update ends with, and the residual and restored
+        images written are those of the last residual update. **Iteration
+        control** is the stop test inside the model update, made by the
+        deconvolver at every iteration against those limits. The CASA
+        ``tclean`` equivalent is given in brackets.
+        Keys:
 
         - ``max_iter`` [CASA ``niter``] : Maximum number of deconvolution
           iterations (flux components) per plane, summed over all cycles. A
@@ -570,18 +630,59 @@ def image_cube_single_field(
           ``niter`` is one budget for the whole image; here every plane gets
           the full value, and no budget is shared or split between planes.
         - ``max_cycles`` [CASA ``nmajor``] : Maximum number of cycles.
-          ``max_cycles = N`` performs ``N`` model updates; the dirty image is
-          made by the residual update of the first cycle, and a closing
-          residual update follows the last model update so that the written
-          residual reflects the final model. ``max_cycles = 0`` makes only the
-          dirty image; ``max_cycles = -1`` removes the limit. Counted per
+          ``max_cycles = N`` performs at most ``N`` model updates and
+          ``N + 1`` residual updates: the first makes the dirty image, and
+          every model update is followed by a residual update, whose residual
+          the stop test checks; the last one's residual is written.
+          ``max_cycles = 0`` makes only the dirty image; ``max_cycles = -1``
+          removes the limit. Counted per
           frequency channel: a channel that converges early stops cycling while
-          the others continue.
+          the others continue. ``max_cycles = "auto"`` predicts the limit of a
+          channel from its dirty image: every plane takes ``P0``, its peak
+          residual at the start of the first cycle (the ``peak_residual``
+          below), ``f``, its PSF fraction (below), and ``L``, its threshold or,
+          when that is 0, its theoretical point source sensitivity, worked out
+          from the imaging weights as the ``SENSITIVITY`` of
+          ``point_spread_function_cube_single_field``;
+          ``n = ceil(ln(P0 / L) / ln(1 / f))`` cycles (at least 1) bring the
+          peak down to ``L``, and the plane's limit is ``n + 3`` against a
+          threshold and ``3 * n`` against the sensitivity (``EXTRA_CYCLES``
+          and ``NOISY_CYCLE_SAFETY`` of
+          :mod:`~astroviper.processing_functions.imaging.utils.cycle_control_heuristics`).
+          The sensitivity is the thermal noise of the plane when the weights
+          are absolute (``WEIGHT = 1 / sigma**2``). With unit weights, as a
+          simulation without noise writes them, it is not a noise level but
+          about 1 over the square root of the number of visibilities (natural
+          weighting; 1e-3 for a million) in the units of the data; the limit
+          grows only with ``ln(P0 / L)``, and on the same prediction ``3 * n``
+          cycles bring the peak down to ``P0 * (L / P0)**3``. The channel's
+          ``max_cycles`` is the largest limit of its planes (at least 1; a
+          plane without a pixel in the clean mask, with a peak of 0 or without
+          data is left out) and then counts down like a number. Every plane
+          records its limit as ``max_cycles_auto`` in the returned convergence
+          record. Needs ``max_psf_fraction < 1``.
         - ``threshold`` [CASA ``threshold``] : Absolute stopping threshold, as a
-          float in Jy. A plane stops when its peak residual inside the clean
-          mask falls to or below ``threshold``; the value is also a hard floor
-          on ``threshold_per_cycle``. ``threshold = 0`` disables the absolute
-          stop. *Differs from CASA*: a float in Jy only, no ``'1mJy'`` strings.
+          float in Jy, or a list of one float per Stokes plane in the order of
+          ``polarization_coords`` (the floors of the Stokes planes of noise free
+          data scale with their fluxes). The distributed application and the
+          node task also take a nested list of shape (n_frequency,
+          n_polarization), one row per image channel in the order of the image
+          frequency coordinate; each channel gets its row. A plane stops when the
+          peak of its residual inside the clean mask, as the latest residual
+          update made it, falls to or below its threshold times
+          ``1 + threshold_tolerance``; the threshold is
+          also a hard floor on ``threshold_per_cycle``. ``0`` disables the
+          absolute stop. *Differs from CASA*: floats in Jy only, no ``'1mJy'``
+          strings.
+        - ``threshold_tolerance`` : Relative tolerance of the threshold stop,
+          a finite number ``>= 0``: a plane whose threshold is above 0 stops
+          with imaging stop code 2, and gets no iterations while other planes of
+          its channel go on, once the peak of its residual inside the clean mask
+          is at most ``threshold * (1 + threshold_tolerance)``; the model update
+          of a plane that goes on still cleans down to ``threshold_per_cycle``,
+          floored at the threshold itself. Default 0.02 (``THRESHOLD_TOLERANCE`` of
+          :mod:`~astroviper.processing_functions.imaging.utils.cycle_control_heuristics`).
+          No CASA equivalent.
         - ``threshold_sigma`` [CASA ``nsigma``] : Noise based stopping threshold
           per plane, as a multiple of the plane's robust residual rms
           (``1.4826 * MAD``). The effective threshold of a plane is
@@ -623,8 +724,18 @@ def image_cube_single_field(
           can raise the peak of a healthy residual, has no peak limit and
           allows ``(1 + gain)`` times the lowest RMS instead. An infinite peak
           always stops the model update. The next residual update then
-          recomputes the true residual and the cycles go on. Default 1, the
-          first such iteration; ``-1`` disables the two limits.
+          recomputes the true residual, the stop test is made on it, and the
+          cycles go on (see ``max_cycles_divergence``). Default 1, the first
+          such iteration; ``-1`` disables the two limits.
+        - ``max_cycles_divergence`` : Divergence stop of the cycle control. A
+          plane whose last ``max_cycles_divergence`` model updates all ended
+          diverged (see ``max_iter_divergence``) gets no more iterations and
+          is stopped with imaging stop code 5 by the stop test after the next
+          residual update (unless a stop that takes precedence applies there:
+          an empty mask, ``max_iter`` spent, the threshold or the entropy
+          stop, codes 7, 1, 2 and 10), while the other planes of its channel
+          carry on.
+          Default ``-1``, off.
         - ``entropy_stop`` : If ``True``, a plane stops once the entropy of
           its residual has passed its maximum. The entropy (Homan, Roth and
           Pushkarev 2024, AJ 167, 11) measures how much the residual looks
@@ -643,10 +754,39 @@ def image_cube_single_field(
           two image axes used for the entropy. Default 7.
         - ``entropy_flux_bins`` : Number of flux bins per unit of RMS used for
           the entropy. Default 10.
+        - ``record_iteration_history`` : If ``True``, every model update
+          records, for every plane and every deconvolution iteration, the peak
+          residual the iteration cleaned (signed, in the units of the residual
+          image) and the RMS of the residual inside the clean mask after its
+          subtraction, to follow the deconvolution in detail. The returned
+          convergence record holds them as ``iteration_peak_residual`` and
+          ``iteration_residual_rms``: per plane one array per cycle, with one
+          value per iteration of that cycle's model update (empty for a cycle
+          without one), so the record grows by two float64 values per
+          iteration done. A debugging and tuning tool: the images are the same
+          to the bit with and without it, and the RMS is the sum of squares
+          the peak search of the next iteration makes anyway, so it costs no
+          extra pass over the image per iteration. Hogbom deconvolvers only:
+          ``deconvolver="asp"`` raises ``ValueError``. Default ``False``.
+          No CASA equivalent.
+        - ``exact_psf_subtraction`` : If ``True``, a Hogbom model update
+          subtracts the PSF of every component it finds from the whole residual
+          image, with a PSF of twice the image size made once per channel from
+          the same imaging weights, cell size and gridding kernel. With
+          ``False`` it subtracts the image-sized PSF, which reaches about
+          ``n/2`` pixels either side of the component along each axis
+          (``n`` the image size in pixels), so farther pixels keep the
+          sidelobes of the flux cleaned until the next residual update. The
+          beam fit, ``max_psf_sidelobe`` and the PSF written use the
+          image-sized PSF either way. Costs a second PSF per channel (four
+          times the pixels, kept through the channel's cycles) and a
+          subtraction over the whole image at every iteration. Hogbom
+          deconvolvers only: ``deconvolver="asp"`` raises ``ValueError``.
+          Default ``False``. No CASA equivalent.
 
         A plane whose model updates do no iteration any more (two in a row)
-        is stopped with the no progress stop code, so an all-zero plane cannot
-        keep its channel cycling.
+        is stopped with the no progress stop code at the next stop test, so
+        an all-zero plane cannot keep its channel cycling.
 
         Derived per plane before each model update (not set by the caller):
         ``psf_fraction = clamp(max_psf_sidelobe * psf_sidelobe_factor,
@@ -654,9 +794,13 @@ def image_cube_single_field(
         peak residual down to which one model update cleans, and
         ``threshold_per_cycle = max(psf_fraction * peak_residual, threshold)``
         is the stopping threshold of that model update, where
-        ``peak_residual`` is the plane's peak residual inside the mask at the
-        start of the cycle. The deconvolver also receives the per-plane
-        ``max_iter_per_cycle``, ``min(max_iter_per_cycle, remaining max_iter)``.
+        ``peak_residual`` is the plane's peak residual inside the clean mask
+        after the residual update of the same cycle (the peak of the stop
+        test), and
+        ``max_iter_per_cycle_updated = min(max_iter_per_cycle,
+        max_iter_remaining)`` is the iteration limit of that model update (0
+        for a plane the entropy or divergence stop has ended), where
+        ``max_iter_remaining`` is what is left of ``max_iter``.
     task_coords : dict
         Per-chunk coordinate mapping; ``task_coords[<parallel dim>]`` supplies
         this chunk's parallel coordinate values (``"data"``) and its
@@ -717,6 +861,61 @@ def image_cube_single_field(
         Beam-fit algorithm for the PSF: ``"astroviper"`` (default) or
         ``"casa"``, the C++ port of CASA's ``StokesImageUtil::FitGaussianPSF``
         (the fit behind ``tclean``'s restoring beam).
+    gridding_kernel_params : dict, optional
+        The gridding convolution kernel the gridder and degridder use:
+        ``type`` (``"prolate_spheroidal_casa"``, Schwab's rational
+        approximation of the ``m = 6``, ``alpha = 1`` function with its
+        analytic correction, the kernel CASA uses; ``"prolate_spheroidal"``,
+        the generalised prolate spheroidal function of Schwab 1984 with its
+        bandwidth and weight exponent chosen for the image region the
+        ``fft_padding`` keeps; ``"exponential_semicircle"``, the modified
+        exponential of a semicircle of Barnett et al. 2019 and Arras et al.
+        2021 shaped for that region; or
+        ``"least_misfit"``, the table that minimises the map error over that
+        region for the lookup used, after Ye et al. 2020), ``support`` (the
+        odd number of grid points the kernel spans along one axis; 7 for the
+        ``prolate_spheroidal_casa`` kernel, any odd number from 3 for the others),
+        ``oversampling`` (samples of the kernel table per uv cell) and
+        ``interpolation`` (how the gridders read the table at a stencil
+        point: ``"nearest"`` takes the nearest sample, so the lookup error,
+        and with it the floor the imaging cycle converges to, falls as 1 over
+        the oversampling; ``"linear"`` interpolates the two neighbouring
+        samples and the error falls as 1 over its square). Missing keys take
+        the defaults ``{"type": "prolate_spheroidal_casa", "support": 7,
+        "oversampling": 100, "interpolation": "nearest"}``; ``None`` is all
+        defaults. A ``prolate_spheroidal``, ``exponential_semicircle`` or
+        ``least_misfit`` kernel whose image plane correction falls below 1e-6
+        of its centre value at the edge of the image kept (a support too large
+        for the ``fft_padding``, e.g. 17 at 1.05) is refused. The kernel of the
+        former ``gridder="prolate_spheroidal"`` is ``"prolate_spheroidal_casa"``,
+        not ``"prolate_spheroidal"``.
+    primary_beam_params : dict, optional
+        The primary beam of the imager, the power pattern that gives the clean
+        mask and the primary beam correction: ``telescope`` (``"alma"``,
+        ``"aca"`` or ``"ngvla"``, the textbook obscured Airy disk with the
+        diameters of :func:`~astroviper.utils.beam_models.airy_disk_model`, no
+        cut; ``"vla"``, the EVLA beam polynomial of CASA's ``PBMath1DEVLA``,
+        with the coefficients CASA picks for each channel (of its two 10052 MHz
+        rows, the first), at the exact radius and zero beyond 58 arcmin at
+        1 GHz, past the 5 percent power level its polynomials were fitted
+        to), ``effective_dish_diameter`` and
+        ``blockage_diameter`` (metres; refused for ``"vla"``) and
+        ``max_rad_1GHz`` (radians at 1 GHz, scaled as 1 / frequency, beyond
+        which the beam is zero; ``None`` is no cut for an Airy disk). Numbers
+        given with a telescope override that telescope's values;
+        no telescope means ``"alma"``. ``None`` is the ALMA 12 m beam (10.7 m,
+        0.75 m, no cut). Or ``beam_model`` alone: an analytic dict
+        or a beam-polynomial dataset as ``simulate_processing_set`` takes it in
+        ``beam_models`` (``"vla"`` is
+        ``read_beam_polynomial_coefficients("EVLA_")``). The beam is the square
+        of the voltage pattern the simulator applies for the model, computed by
+        the same function
+        (:func:`~astroviper.processing_functions.simulation.antenna_beams.symmetric_beam_response`).
+        The CASA variants, to compare with the ``.pb`` of ``tclean``, are such
+        models: ``airy_disk_model(telescope, func="casa_airy")`` and
+        ``read_beam_polynomial_coefficients("EVLA_", n_sample=10000)``.
+        Zernike aperture models and Jones images are not supported: they are
+        not azimuthally symmetric and depend on the parallactic angle.
     memory_mode : str, optional
         Only ``"in_memory"`` is implemented.  Default ``"in_memory"``.
     skunk_works : bool, optional
@@ -780,6 +979,15 @@ def image_cube_single_field(
         (:func:`~astroviper.node_tasks.imaging.utils.write_result_chunk_to_fits_skunk_works`;
         the driver created them with
         :func:`~astroviper.node_tasks.imaging.utils.create_empty_fits_images`).
+    report_statistics : bool, optional
+        The statistics only a report of the run needs; the distributed
+        application sets it when it makes one. With ``True`` the image
+        statistics of the residual also hold ``entropy``, the entropy of the
+        residual of every plane as the entropy stop works it out
+        (:func:`~astroviper.processing_functions.image_analysis.image_statistics.image_residual_entropy`
+        with the ``entropy_*`` settings of ``cycle_control_params``; not a
+        number for a plane whose peak is above ``entropy_max_snr`` times its
+        RMS). Default ``False``.
 
     Returns
     -------
@@ -959,7 +1167,7 @@ def image_cube_single_field(
     from astroviper.processing_functions.image_analysis.plane_statistics import (
         calculate_plane_statistics,
     )
-    from astroviper.processing_functions.imaging.utils.iteration_control import (
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
         merge_imaging_dicts,
     )
     from astroviper.utils.data_tree import clear_cached_accessors, release_data_tree
@@ -984,7 +1192,7 @@ def image_cube_single_field(
     # Masked statistics use the clean MASK when present; a max_iter=0 run has
     # none, so the fallback mask PRIMARY_BEAM > primary_beam_limit (the same
     # valid-sky cutoff the deconvolver would use) applies.
-    primary_beam_limit = iteration_control_params.get("primary_beam_limit", 0.2)
+    primary_beam_limit = cycle_control_params.get("primary_beam_limit", 0.2)
     frequency_maps = _visibility_to_image_frequency_maps(ps_xdt, img_xds)
     timing_frames = []
     imaging_dicts = []
@@ -1018,7 +1226,9 @@ def image_cube_single_field(
             img_chan,
             image_params,
             imaging_weights_params,
-            iteration_control_params,
+            _channel_cycle_control_params(
+                cycle_control_params, task_coords, data_selection, chan_index
+            ),
             processing_set_data_group_name=processing_set_data_group_name,
             deconvolver=deconvolver,
             instrument_polarization_basis=instrument_polarization_basis,
@@ -1029,6 +1239,8 @@ def image_cube_single_field(
             restore=restore,
             primary_beam_correction=primary_beam_correction,
             psf_fitting_method=psf_fitting_method,
+            gridding_kernel_params=gridding_kernel_params,
+            primary_beam_params=primary_beam_params,
             task_id=task_id,
         )
 
@@ -1074,9 +1286,12 @@ def image_cube_single_field(
         # values, so the chunks -- and the reduce -- concatenate along
         # ``frequency``.
         start = time.time()
-        statistics_chunks.append(
-            calculate_plane_statistics(chunk_xds, primary_beam_limit=primary_beam_limit)
+        statistics = calculate_plane_statistics(
+            chunk_xds, primary_beam_limit=primary_beam_limit
         )
+        if report_statistics:
+            _add_residual_entropy(statistics, chunk_xds, cycle_control_params)
+        statistics_chunks.append(statistics)
         T_image_statistics += time.time() - start
 
         start = time.time()

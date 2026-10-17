@@ -1,7 +1,8 @@
 """Unit tests for the ``image_chunking`` / ``image_sharding`` validation the
 ``image_cube_single_field`` distributed application runs before creating the
 image store (no imaging run needed -- the helper is exercised directly), plus
-the ``n_mapping_parallelism`` validation."""
+the ``n_mapping_parallelism`` validation and the channel memory its automatic
+chunking is sized with."""
 
 import pytest
 
@@ -153,3 +154,66 @@ class TestValidateNMappingParallelism:
     def test_bad_count_rejected(self, bad):
         with pytest.raises(ValueError, match="positive int"):
             self._validate({"frequency": bad})
+
+
+class TestChannelMemoryOfTheMappingParallelism:
+    """The memory of one channel the automatic frequency chunking is sized
+    with; ``exact_psf_subtraction`` adds the PSF of twice the image size and
+    the transient of making it."""
+
+    SIZES = {"time": 1, "frequency": 3, "polarization": 2, "l": 360, "m": 360}
+
+    @classmethod
+    def _bytes(cls, monkeypatch, single_precision_image, **kwargs):
+        import types
+
+        import astroviper.utils.data_partitioning as data_partitioning
+        from astroviper.distributed_applications.imaging.image_cube_single_field import (
+            calculate_mapping_parallelism_for_cube_imaging,
+        )
+
+        seen = []
+
+        def chunking(memory_singleton_chunk, chunking_dims_sizes, thread_info, **kw):
+            seen.append(memory_singleton_chunk)
+            return {"frequency": 3}
+
+        monkeypatch.setattr(data_partitioning, "calculate_data_chunking", chunking)
+        n = calculate_mapping_parallelism_for_cube_imaging(
+            types.SimpleNamespace(sizes=cls.SIZES),
+            single_precision_image,
+            None,
+            {"n_threads": 1},
+            **kwargs,
+        )
+        assert n == 3
+        (memory,) = seen
+        return memory * 1024**3
+
+    @pytest.mark.parametrize(
+        ("single_precision_image", "image", "subtraction"),
+        # 1.2 x (3 complex + 3 float) per pixel; with the option 1.2 x (the
+        # 4 n_l n_m float PSF + 6 complex planes of the 864 x 864 grid: the uv
+        # grid of both polarizations and four FFT planes)
+        [(True, 11_197_440, 47_974_809.6), (False, 22_394_880, 95_949_619.2)],
+        ids=["single", "double"],
+    )
+    def test_the_subtraction_psf_is_counted(
+        self, monkeypatch, single_precision_image, image, subtraction
+    ):
+        default = self._bytes(monkeypatch, single_precision_image)
+        assert default == pytest.approx(image)
+        assert self._bytes(
+            monkeypatch, single_precision_image, exact_psf_subtraction=False
+        ) == pytest.approx(image)
+        exact = self._bytes(
+            monkeypatch,
+            single_precision_image,
+            exact_psf_subtraction=True,
+            fft_padding=1.2,
+        )
+        assert exact - default == pytest.approx(subtraction)
+        if single_precision_image:
+            # A4 (360 px, two polarizations, single precision): the traced
+            # peak of the build was 0.0317 to 0.0402 GiB (measured)
+            assert exact - default > 0.0402 * 1024**3

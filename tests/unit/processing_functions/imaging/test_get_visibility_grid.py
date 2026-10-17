@@ -30,7 +30,7 @@ from tests.unit.processing_functions.imaging.degrid_test_datasets import (
 # kernel) lives next to the C++ gridder tests; that directory is not a package,
 # so put it on sys.path explicitly.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "gridders"))
-from reference_gridders import prolate_spheroidal_degrid_reference
+from reference_gridders import anti_alias_degrid_reference
 
 from astroviper.processing_functions.imaging.gridding_convolution_functions.gcf_prolate_spheroidal import (
     create_prolate_spheroidal_kernel_1D,
@@ -245,7 +245,7 @@ class TestGetVisibilityGridSingleField(unittest.TestCase):
         delta_lm = img_xds.xr_img.get_lm_cell_size()
 
         direct_vis = np.zeros(ms_xds["VISIBILITY"].shape, dtype=np.complex128)
-        prolate_spheroidal_degrid_reference(
+        anti_alias_degrid_reference(
             sky,
             direct_vis,
             ms_xds["UVW"].values,

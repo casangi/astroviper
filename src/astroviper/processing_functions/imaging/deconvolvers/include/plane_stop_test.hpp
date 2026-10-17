@@ -8,14 +8,15 @@
 namespace deconvolvers {
 
 /**
- * Why a plane's model update ended. The values follow the iteration
- * controller's model update stop codes (imaging/utils/iteration_control.py).
+ * Why a plane's model update ended. The values follow the cycle
+ * controller's model update stop codes (imaging/utils/cycle_control.py).
  */
 enum StopReason : int {
     STOP_NONE = 0,       ///< did not run (no iteration budget) or stopped on request
-    STOP_MAX_ITER = 1,   ///< spent its iteration budget (max_iter_remaining)
-    STOP_THRESHOLD = 2,  ///< peak residual at or below its threshold
-    STOP_DIVERGED = 4    ///< residual diverging (RMS or peak) or peak not finite
+    STOP_MAX_ITER = 1,   ///< spent its iteration budget (max_iter_per_cycle_updated)
+    STOP_THRESHOLD = 2,  ///< peak residual at or below its threshold_per_cycle
+    STOP_DIVERGED = 4,   ///< residual diverging (RMS or peak) or peak not finite
+    STOP_ALGORITHM = 5   ///< a stop test of the deconvolver itself (Asp)
 };
 
 /**

@@ -68,7 +68,7 @@ void grid_imaging_weights(
                 // Round to the nearest pixel and bounds-check in double
                 // precision *before* narrowing to int: casting an out-of-range
                 // double to int is undefined behaviour (see the identical
-                // rationale in the prolate spheroidal gridder). For in-bounds,
+                // rationale in the anti-aliasing gridder). For in-bounds,
                 // non-negative coordinates std::floor(x + 0.5) matches the
                 // historical Fortran/CASA int(x + 0.5) rounding exactly.
                 const double u_center      = std::floor(u_pos + 0.5);
