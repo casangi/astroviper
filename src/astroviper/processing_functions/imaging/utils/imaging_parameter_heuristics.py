@@ -14,8 +14,10 @@ Pure functions behind
   (:func:`primary_beam_radius`, :func:`field_of_view`);
 - a first cell, ``1 / (3 u_max)`` with ``u_max`` the longest antenna
   separation at the highest frequency, so that no sample falls off the uv grid
-  of the PSF pass (:func:`cell_size_guess`), and the final cell from the fitted
-  beam (:func:`cell_size_from_beam`);
+  of the PSF pass (:func:`cell_size_guess`), the final cell from the fitted
+  beam (:func:`cell_size_from_beam`, :func:`cell_size_from_beam_fit`) and the
+  largest cell whose uv grid holds those samples
+  (:func:`max_cell_size_for_uv_coverage`);
 - the image size, the next even 2, 3, 5 smooth size that covers the field of
   view (:func:`image_size_for_field_of_view`).
 """
@@ -30,7 +32,10 @@ from astroviper.processing_functions.imaging.utils.imaging_polarization import (
 )
 
 SPEED_OF_LIGHT = 299792458.0
+# Assumed.
 FIELD_OF_VIEW_MARGIN = 1.1
+# Derived: at least 2 puts every baseline on the uv grid of the PSF pass; 3 adds an
+# assumed margin.
 CELL_GUESS_SAMPLES_PER_U_MAX = 3.0
 # Between the 7 m (ACA) and 12 m antennas of ALMA (metres).
 ACA_DISH_DIAMETER_LIMIT = 9.5
@@ -84,6 +89,17 @@ def primary_beam_telescope(telescope_name, dish_diameters=None):
 def default_robust(telescope):
     """The CASA pipeline Briggs ``robust`` of a cube: 0.5 (ALMA, ACA), 2.0 (VLA).
 
+    Parameters
+    ----------
+    telescope : str
+        ``primary_beam_params["telescope"]``, as :func:`primary_beam_telescope`
+        returns it.
+
+    Returns
+    -------
+    float
+        The Briggs ``robust`` parameter.
+
     Raises
     ------
     ValueError
@@ -98,6 +114,16 @@ def default_robust(telescope):
 
 def instrument_polarization_basis_from_correlations(correlations):
     """``"linear"`` for ``XX, XY, YX, YY`` correlations, ``"circular"`` for ``RR, RL, LR, LL``.
+
+    Parameters
+    ----------
+    correlations : str or sequence of str
+        Correlation labels of the data.
+
+    Returns
+    -------
+    str
+        ``"linear"`` or ``"circular"``.
 
     Raises
     ------
@@ -121,6 +147,11 @@ def stokes_for_correlations(correlations):
     All four correlations give ``I, Q, U, V``; the two parallel hands give
     ``I, Q`` (linear) or ``I, V`` (circular), see
     :mod:`~astroviper.processing_functions.imaging.utils.imaging_polarization`.
+
+    Parameters
+    ----------
+    correlations : str or sequence of str
+        Correlation labels of the data.
 
     Returns
     -------
@@ -223,7 +254,27 @@ def primary_beam_radius(frequency, level, primary_beam_params=None, n_scan=4096)
 
 
 def field_of_view(frequency_min, level, primary_beam_params=None):
-    """``FIELD_OF_VIEW_MARGIN`` times the diameter where the primary beam falls to ``level`` (radians)."""
+    """``FIELD_OF_VIEW_MARGIN`` times the diameter where the primary beam falls to ``level``.
+
+    Parameters
+    ----------
+    frequency_min : float
+        Lowest frequency of the cube (Hz), where the primary beam is widest.
+    level : float
+        Primary beam power level, in ``(0, 1)``.
+    primary_beam_params : dict, optional
+        As ``primary_beam_params`` of the imager; ``None`` is ALMA 12 m.
+
+    Returns
+    -------
+    float
+        Field of view (radians).
+
+    Raises
+    ------
+    ValueError
+        As :func:`primary_beam_radius`.
+    """
     return (
         FIELD_OF_VIEW_MARGIN
         * 2.0
@@ -232,24 +283,61 @@ def field_of_view(frequency_min, level, primary_beam_params=None):
 
 
 def longest_antenna_separation(antenna_positions):
-    """Largest distance between two antennas (metres) of ``(n_antenna, 3)`` positions."""
+    """Largest distance between two antennas.
+
+    Parameters
+    ----------
+    antenna_positions : array_like of float
+        ``(n_antenna, 3)`` antenna positions (metres), as ``ANTENNA_POSITION``.
+
+    Returns
+    -------
+    float
+        Largest separation (metres).
+    """
     positions = np.asarray(antenna_positions, dtype=float).reshape(-1, 3)
     separations = positions[:, None, :] - positions[None, :, :]
     return float(np.sqrt((separations**2).sum(axis=-1)).max())
 
 
 def cell_size_guess(max_antenna_separation, frequency_max):
-    """First cell, ``1 / (3 u_max)`` (radians), with ``u_max`` in wavelengths at ``frequency_max``.
+    """First cell, ``1 / (3 u_max)``, with ``u_max`` in wavelengths at ``frequency_max``.
 
     Every projected baseline is at most the antenna separation, so the uv grid,
     which spans ``1 / cell = 3 u_max``, holds every sample of the PSF pass.
+
+    Parameters
+    ----------
+    max_antenna_separation : float
+        Longest antenna separation (metres), see
+        :func:`longest_antenna_separation`.
+    frequency_max : float
+        Highest frequency of the cube (Hz).
+
+    Returns
+    -------
+    float
+        Cell size (radians).
     """
     u_max = float(max_antenna_separation) * float(frequency_max) / SPEED_OF_LIGHT
     return 1.0 / (CELL_GUESS_SAMPLES_PER_U_MAX * u_max)
 
 
 def image_size_for_field_of_view(field_of_view, cell_size):
-    """The next even 2, 3, 5 smooth image size (pixels) that covers ``field_of_view`` at ``cell_size``."""
+    """The next even 2, 3, 5 smooth image size that covers ``field_of_view`` at ``cell_size``.
+
+    Parameters
+    ----------
+    field_of_view : float
+        Field of view (radians).
+    cell_size : float
+        Cell size (radians).
+
+    Returns
+    -------
+    int
+        Image size (pixels) along each axis.
+    """
     from astroviper.processing_functions.imaging.utils.fft_sizing import (
         next_fft_friendly_size,
     )
@@ -260,7 +348,81 @@ def image_size_for_field_of_view(field_of_view, cell_size):
 
 
 def cell_size_from_beam(minor_axis, pixels_per_beam):
-    """Cell (radians) that puts ``pixels_per_beam`` pixels across the fitted minor axis."""
+    """Cell that puts ``pixels_per_beam`` pixels across the fitted minor axis.
+
+    Parameters
+    ----------
+    minor_axis : float
+        Minor axis of the fitted beam (radians).
+    pixels_per_beam : float
+        Pixels across the minor axis.
+
+    Returns
+    -------
+    float
+        Cell size (radians).
+
+    Raises
+    ------
+    ValueError
+        For a non positive ``pixels_per_beam``.
+    """
     if not pixels_per_beam > 0.0:
         raise ValueError(f"pixels_per_beam must be positive; got {pixels_per_beam!r}")
     return float(minor_axis) / float(pixels_per_beam)
+
+
+def cell_size_from_beam_fit(beam_fit_params, pixels_per_beam):
+    """:func:`cell_size_from_beam` of the highest frequency channel with a valid fit.
+
+    The minor axis is that of the Stokes I fit. A fully flagged channel has an
+    all zero fit, so channels whose minor axis is not finite and positive are
+    skipped.
+
+    Parameters
+    ----------
+    beam_fit_params : xarray.DataArray
+        ``BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION`` of the PSF pass, with dims
+        ``frequency``, ``polarization`` and ``beam_params_label`` (radians).
+    pixels_per_beam : float
+        Pixels across the minor axis.
+
+    Returns
+    -------
+    float
+        Cell size (radians).
+
+    Raises
+    ------
+    ValueError
+        When no channel has a valid fit, or for a non positive
+        ``pixels_per_beam``.
+    """
+    minor = beam_fit_params.sel(polarization="I", beam_params_label="minor")
+    minor_axis = minor.values
+    valid = np.isfinite(minor_axis) & (minor_axis > 0)
+    if not valid.any():
+        raise ValueError("No channel has a valid beam fit (every channel flagged?).")
+    return cell_size_from_beam(
+        float(minor_axis[valid][np.argmax(minor.frequency.values[valid])]),
+        pixels_per_beam,
+    )
+
+
+def max_cell_size_for_uv_coverage(cell_guess):
+    """Largest cell whose uv grid holds every baseline of :func:`cell_size_guess`.
+
+    The uv grid spans ``|u| <= 1 / (2 cell)`` and no baseline is longer than
+    ``u_max = 1 / (CELL_GUESS_SAMPLES_PER_U_MAX * cell_guess)``.
+
+    Parameters
+    ----------
+    cell_guess : float
+        The cell of the PSF pass, :func:`cell_size_guess` (radians).
+
+    Returns
+    -------
+    float
+        ``1 / (2 u_max)`` (radians).
+    """
+    return 0.5 * CELL_GUESS_SAMPLES_PER_U_MAX * cell_guess

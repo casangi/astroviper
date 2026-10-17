@@ -272,10 +272,11 @@ def point_spread_function_cube_single_field(
 
         # The beam fit labels its parameters with the beam_params_label
         # coordinate but gives the variable the dimension beam_params; use the
-        # labelled dimension, as in the image store.
+        # labelled dimension, as in the image store. The image is kept only to
+        # be written.
         psf_chan = img_chan[
-            [
-                "POINT_SPREAD_FUNCTION",
+            (["POINT_SPREAD_FUNCTION"] if image_store is not None else [])
+            + [
                 "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION",
                 "MAX_SIDELOBE_POINT_SPREAD_FUNCTION",
             ]

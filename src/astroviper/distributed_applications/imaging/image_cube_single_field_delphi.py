@@ -27,7 +27,8 @@ from astroviper.utils.param_docs import shares_param_docs
 
 _PARAM_CONFIG_DIR = os.path.dirname(__file__)
 
-# The kernel of the RADPS imaging accuracy memo.
+# Measured: C8_KERNEL and C8_FFT_PADDING of the C8 test (ALMA C8 at 950 GHz),
+# tests/component/test_point_source_flux_recovery.py.
 GRIDDING_KERNEL_PARAMS = {
     "type": "exponential_semicircle",
     "support": 7,
@@ -35,7 +36,6 @@ GRIDDING_KERNEL_PARAMS = {
     "interpolation": "linear",
 }
 FFT_PADDING = 1.2
-BEAM_PARAMS_LABEL = ["major", "minor", "pa"]
 PSF_FITTING_METHOD = "astroviper"
 IMAGE_DATA_VARIABLES_KEEP = [
     "sky_model",
@@ -115,7 +115,12 @@ def image_cube_single_field_delphi(
       sensitivity of every channel and Stokes plane, the entropy stop, and
       ``max_cycles`` from ``max_dynamic_range`` and the largest PSF sidelobe.
       The clean mask is the primary beam above
-      ``image_edge_primary_beam_limit``.
+      ``image_edge_primary_beam_limit``. The sensitivity is a noise level only
+      when ``WEIGHT`` holds absolute ``1 / sigma**2`` weights; with unit or
+      relative weights (a simulation without noise, data without ``statwt``)
+      the threshold is in arbitrary units. The constants of the controls were
+      measured on simulated ALMA data; their use for the VLA is assumed, not
+      validated.
     * Products: the model, residual, PSF, primary beam and beam fit, the
       restored cube and its primary beam correction.
 
@@ -127,7 +132,7 @@ def image_cube_single_field_delphi(
         Path/URL of the on-disk Zarr image cube.
     pixels_per_beam : float, optional
         Pixels across the fitted minor axis of the Stokes I PSF at the highest
-        frequency. Default 5.
+        frequency. Default 5 (assumed).
     image_edge_primary_beam_limit : float, optional
         Primary beam power at the radius whose 1.1 times sets the half width
         of the image, at the lowest frequency; also the primary beam limit of
@@ -139,10 +144,12 @@ def image_cube_single_field_delphi(
         value of the telescope.
     n_sigma : float, optional
         Threshold of every channel and Stokes plane in units of its
-        theoretical sensitivity. Default 2.
+        theoretical sensitivity, which needs absolute weights (see the cycle
+        controls above). Default 2 (assumed).
     max_dynamic_range : float, optional
         Largest ratio of the peak residual of a dirty plane to its sensitivity
-        that ``max_cycles`` allows for. Default 1e5.
+        that ``max_cycles`` allows for. Default 1e5 (assumed: the largest
+        dynamic range the cycle controls were measured at).
     processing_set_data_group_name : str
         Measurement-set data group to image (e.g. ``"base"`` or ``"corrected"``).
     field_name : str, optional
@@ -202,16 +209,16 @@ def image_cube_single_field_delphi(
     )
     from astroviper.processing_functions.imaging.utils.cycle_control_heuristics import (
         noisy_cycle_control_params,
-        predicted_imaging_cycles,
-        psf_fraction,
+        noisy_cycle_prediction,
     )
     from astroviper.processing_functions.imaging.utils.imaging_parameter_heuristics import (
-        cell_size_from_beam,
+        cell_size_from_beam_fit,
         cell_size_guess,
         default_robust,
         field_of_view,
         image_size_for_field_of_view,
         longest_antenna_separation,
+        max_cell_size_for_uv_coverage,
         primary_beam_telescope,
         stokes_for_correlations,
     )
@@ -291,26 +298,15 @@ def image_cube_single_field_delphi(
         },
     )
 
-    # The last axis holds (major, minor, pa), as the imager's beam fit (whose
-    # dimension name differs from its label coordinate).
-    beam = point_spread_function_xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"]
-    beam = beam.transpose("frequency", "polarization", ...)
-    # A fully flagged channel has an all zero fit: take the highest frequency
-    # channel with a valid one.
-    minor = beam.values[
-        :, list(beam.polarization.values).index("I"), BEAM_PARAMS_LABEL.index("minor")
-    ]
-    valid = np.isfinite(minor) & (minor > 0)
-    if not valid.any():
-        raise ValueError("No channel has a valid beam fit (every channel flagged?).")
-    minor_axis = float(minor[valid][np.argmax(beam.frequency.values[valid])])
-    cell = cell_size_from_beam(minor_axis, pixels_per_beam)
-    # The uv grid spans |u| <= 1 / (2 cell), and no baseline is longer than
-    # u_max = 1 / (3 cell_guess).
-    if cell > 1.5 * cell_guess:
+    cell = cell_size_from_beam_fit(
+        point_spread_function_xds["BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION"],
+        pixels_per_beam,
+    )
+    max_cell = max_cell_size_for_uv_coverage(cell_guess)
+    if cell > max_cell:
         logger.warning(
             f"The cell {cell:.4g} rad of {pixels_per_beam} pixels per beam is "
-            f"larger than 1 / (2 u_max) = {1.5 * cell_guess:.4g} rad: the "
+            f"larger than 1 / (2 u_max) = {max_cell:.4g} rad: the "
             "longest baselines may fall off the uv grid."
         )
     image_size = image_size_for_field_of_view(fov, cell)
@@ -325,10 +321,8 @@ def image_cube_single_field_delphi(
         max_dynamic_range=max_dynamic_range,
         primary_beam_limit=image_edge_primary_beam_limit,
     )
-    fraction = psf_fraction(
-        float(
-            np.nanmax(point_spread_function_xds["MAX_SIDELOBE_POINT_SPREAD_FUNCTION"])
-        )
+    fraction, cycles = noisy_cycle_prediction(
+        point_spread_function_xds, n_sigma, max_dynamic_range
     )
 
     arguments = {
@@ -372,10 +366,8 @@ def image_cube_single_field_delphi(
         "cell_size": cell,
         "image_size": image_size,
         "psf_fraction": fraction,
-        "predicted_imaging_cycles": predicted_imaging_cycles(
-            max_dynamic_range, n_sigma, fraction
-        ),
-        "beam_params_label": BEAM_PARAMS_LABEL,
+        "predicted_imaging_cycles": cycles,
+        "beam_params_label": point_spread_function_xds["beam_params_label"].values,
     }
     for name in _POINT_SPREAD_FUNCTION_VARIABLES:
         if name in point_spread_function_xds:

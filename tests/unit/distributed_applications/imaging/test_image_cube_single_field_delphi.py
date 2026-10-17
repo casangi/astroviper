@@ -326,10 +326,8 @@ def psf_calls(monkeypatch):
         dims = ("frequency", "polarization")
         return xr.Dataset(
             {
-                # Named as the imager names it (its label coordinate is
-                # beam_params_label).
                 "BEAM_FIT_PARAMS_POINT_SPREAD_FUNCTION": (
-                    dims + ("beam_params",),
+                    dims + ("beam_params_label",),
                     beam,
                 ),
                 "MAX_SIDELOBE_POINT_SPREAD_FUNCTION": (dims, np.full(shape, 0.2)),
