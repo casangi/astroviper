@@ -195,6 +195,7 @@ def moments(
     memory_budget_gb: float | None = None,
     monitor_resources_seconds: float | None = None,
     dimension_flags: dict | None = None,
+    image_data_group_in_role: str = "sky",
 ):
     """Collapse an on-disk image along one axis into moment maps (CASA ``immoments``).
 
@@ -314,6 +315,10 @@ def moments(
         Linux, ``read_bytes``/``write_bytes``/``read_chars``/``write_chars``)
         plus the scalar ``sample_interval_seconds`` and page-fault counts.
         Requires ``psutil``. ``None`` (default) disables monitoring.
+    image_data_group_in_role : str, default "sky"
+        Role of ``image_data_group_in_name`` whose data variable is collapsed,
+        e.g. ``"sky_primary_beam_corrected"`` of the imager's ``"restored"``
+        group.  Only the default ``"sky"`` falls back to ``"SKY"``.
 
     Returns
     -------
@@ -384,7 +389,7 @@ def moments(
     # --- Read input image metadata (lazy: no pixel data is loaded) ------------
     img_xds = _open_input_image(input_image_store, selection)
     sky_name, mask_name = resolve_moments_input_variables(
-        img_xds, image_data_group_in_name, use_mask
+        img_xds, image_data_group_in_name, use_mask, image_data_group_in_role
     )
     sky = img_xds[sky_name]
     if moment_axis not in sky.dims:
@@ -445,12 +450,17 @@ def moments(
 
     # --- Determine chunking along the parallel axes ---------------------------
     # On-disk chunk geometry of the sky variable (zarr stores expose it via
-    # encoding; 1 = unknown / not chunked along that axis).
+    # encoding; an image read without one, e.g. a FITS file, is chunked as its
+    # lazy array is; 1 = unknown / not chunked along that axis).
     start = time.time()
     on_disk_chunks = sky.encoding.get("chunks")
     if on_disk_chunks is not None and len(on_disk_chunks) == sky.ndim:
         chunk_len = {
             dim: int(c) for dim, c in zip(sky.dims, on_disk_chunks, strict=True)
+        }
+    elif sky.chunks is not None:
+        chunk_len = {
+            dim: int(max(c)) for dim, c in zip(sky.dims, sky.chunks, strict=True)
         }
     else:
         chunk_len = {dim: 1 for dim in sky.dims}
@@ -680,6 +690,7 @@ def moments(
         "moments": moment_names,
         "moment_axis": moment_axis,
         "image_data_group_in_name": image_data_group_in_name,
+        "image_data_group_in_role": image_data_group_in_role,
         "include_pixel_range": include_pixel_range,
         "exclude_pixel_range": exclude_pixel_range,
         "use_mask": use_mask,

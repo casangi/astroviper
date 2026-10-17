@@ -83,21 +83,21 @@ TRUTH_IMAGE_MULTI_CYCLE_SINGLE = (
 # paste the resulting file ids here. (Until then, a locally regenerated copy is
 # used directly -- the download is a no-op when the directory already exists.)
 _TRUTH_IMAGE_DRIVE_IDS = {
-    # v6, regenerated 2026-10-14 for the stop test on the fresh residual
-    # (issue 290): every threshold_per_cycle is based on the peak residual
-    # inside the clean mask after the residual update of its imaging cycle,
-    # which changes the CLEAN of multi_cycle (niter0 and niter100 hold the
-    # same data as v5).
+    # v6, for the stop test on the fresh residual (issue 290): every
+    # threshold_per_cycle is based on the peak residual inside the clean mask
+    # after the residual update of its imaging cycle, which changes the CLEAN
+    # of multi_cycle (niter0 and niter100 hold the same data as v5). Uploaded
+    # 2026-10-17, regenerated from 290-imaging-accuracy at 86b9f12.
     # v5, regenerated 2026-10-13 for the shared beam model (issue 290): the
     # primary beam is now the textbook obscured Airy disk instead of CASA's
     # PBMath1DAiry formula, whose blockage term widens the beam, so the
     # primary_beam_limit mask shrinks and the CLEAN of niter100 and multi_cycle
     # changes. A new version keeps main's truths (the unversioned names)
     # untouched.
-    TRUTH_IMAGE_NITER0: None,  # upload pending
-    TRUTH_IMAGE_NITER100: None,  # upload pending
-    TRUTH_IMAGE_MULTI_CYCLE_DOUBLE: None,  # upload pending
-    TRUTH_IMAGE_MULTI_CYCLE_SINGLE: None,  # upload pending
+    TRUTH_IMAGE_NITER0: "1IWZxpu-9vUP-i4-LtPSFZ0zD19sfpk4Z",
+    TRUTH_IMAGE_NITER100: "1ybhHfB2KcDRsbsbnZoD6V63_0TBwYG6H",
+    TRUTH_IMAGE_MULTI_CYCLE_DOUBLE: "15q_CjP9ZPQ6PHmMQouDuTwvSvObXUY2u",
+    TRUTH_IMAGE_MULTI_CYCLE_SINGLE: "10Q4QkYW025FGWH-gtfqvYiQy2vYwu2Dk",
 }
 
 # Default (tight) per-channel relative-difference ceiling for the reproducible
@@ -445,7 +445,7 @@ def _check_imaging_dict(
     expected literals if the imaging or cycle control behaviour intentionally
     changes.
     """
-    exact_int_fields = {"max_iter", "iter_done", "masksum"}
+    exact_int_fields = {"max_iter", "iter_done", "masksum", "model_update_stop_code"}
     string_fields = {"stokes", "stop_description"}
 
     actual = {tuple(k): v for k, v in imaging_dict.data.items()}
@@ -1463,6 +1463,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23110860147112905,
         "stop_code": (1, 1),
+        "model_update_stop_code": [1],
         "stokes": "I",
         "frequency": 372762580492.5155,
         "time": 0.0,
@@ -1484,6 +1485,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23110860147112905,
         "stop_code": (1, 1),
+        "model_update_stop_code": [1],
         "stokes": "Q",
         "frequency": 372762580492.5155,
         "time": 0.0,
@@ -1505,6 +1507,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23107365193069979,
         "stop_code": (1, 1),
+        "model_update_stop_code": [1],
         "stokes": "I",
         "frequency": 372763190875.0631,
         "time": 0.0,
@@ -1526,6 +1529,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23107365193069979,
         "stop_code": (1, 1),
+        "model_update_stop_code": [1],
         "stokes": "Q",
         "frequency": 372763190875.0631,
         "time": 0.0,
@@ -1547,6 +1551,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23115665063155355,
         "stop_code": (1, 1),
+        "model_update_stop_code": [1],
         "stokes": "I",
         "frequency": 372763801257.61084,
         "time": 0.0,
@@ -1568,6 +1573,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23115665063155355,
         "stop_code": (1, 1),
+        "model_update_stop_code": [1],
         "stokes": "Q",
         "frequency": 372763801257.61084,
         "time": 0.0,
@@ -1589,6 +1595,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23118065024762538,
         "stop_code": (1, 1),
+        "model_update_stop_code": [1],
         "stokes": "I",
         "frequency": 372764411640.15845,
         "time": 0.0,
@@ -1610,6 +1617,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23118065024762538,
         "stop_code": (1, 1),
+        "model_update_stop_code": [1],
         "stokes": "Q",
         "frequency": 372764411640.15845,
         "time": 0.0,
@@ -1631,6 +1639,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23118394049874885,
         "stop_code": (1, 1),
+        "model_update_stop_code": [1],
         "stokes": "I",
         "frequency": 372765022022.7062,
         "time": 0.0,
@@ -1652,6 +1661,7 @@ EXPECTED_DECONVOLVE_DICT_NITER100 = {
         "max_psf_fraction": 0.2,
         "max_psf_sidelobe": 0.23118394049874885,
         "stop_code": (1, 1),
+        "model_update_stop_code": [1],
         "stokes": "Q",
         "frequency": 372765022022.7062,
         "time": 0.0,
@@ -1694,6 +1704,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23110860147112905,
         "stop_code": (9, 2),
+        "model_update_stop_code": [2, 2, 2, 2],
         "stokes": "I",
         "frequency": 372762580492.5155,
         "time": 0.0,
@@ -1747,6 +1758,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23110860147112905,
         "stop_code": (1, 1),
+        "model_update_stop_code": [2, 4, 1, 0],
         "stokes": "Q",
         "frequency": 372762580492.5155,
         "time": 0.0,
@@ -1800,6 +1812,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23107365193069979,
         "stop_code": (1, 1),
+        "model_update_stop_code": [2, 2, 2, 1],
         "stokes": "I",
         "frequency": 372763190875.0631,
         "time": 0.0,
@@ -1853,6 +1866,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23107365193069979,
         "stop_code": (1, 1),
+        "model_update_stop_code": [2, 2, 2, 1],
         "stokes": "Q",
         "frequency": 372763190875.0631,
         "time": 0.0,
@@ -1906,6 +1920,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23115665063155355,
         "stop_code": (9, 2),
+        "model_update_stop_code": [2, 2, 2, 2],
         "stokes": "I",
         "frequency": 372763801257.61084,
         "time": 0.0,
@@ -1959,6 +1974,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23115665063155355,
         "stop_code": (1, 1),
+        "model_update_stop_code": [2, 2, 2, 1],
         "stokes": "Q",
         "frequency": 372763801257.61084,
         "time": 0.0,
@@ -2012,6 +2028,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23118065024762538,
         "stop_code": (9, 2),
+        "model_update_stop_code": [2, 2, 2, 2],
         "stokes": "I",
         "frequency": 372764411640.15845,
         "time": 0.0,
@@ -2065,6 +2082,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23118065024762538,
         "stop_code": (1, 1),
+        "model_update_stop_code": [2, 2, 2, 1],
         "stokes": "Q",
         "frequency": 372764411640.15845,
         "time": 0.0,
@@ -2118,6 +2136,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23118394049874885,
         "stop_code": (9, 2),
+        "model_update_stop_code": [2, 2, 2, 2],
         "stokes": "I",
         "frequency": 372765022022.7062,
         "time": 0.0,
@@ -2171,6 +2190,7 @@ EXPECTED_DECONVOLVE_DICT_MULTI_CYCLE = {
         "max_psf_fraction": 0.8,
         "max_psf_sidelobe": 0.23118394049874885,
         "stop_code": (1, 1),
+        "model_update_stop_code": [2, 2, 2, 1],
         "stokes": "Q",
         "frequency": 372765022022.7062,
         "time": 0.0,

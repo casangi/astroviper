@@ -344,6 +344,21 @@ IMAGING_PARAM_DOCS = {
         "residual, written to the ``sky_restored`` (``SKY_RESTORED``) variable."
     ),
     "image_store": "Path/URL of the on-disk Zarr image cube.",
+    # Shared by every distributed application that makes a report.
+    "report": (
+        'Make a report of the run: ``"html"`` (one self contained file) or\n'
+        '``"pdf"``, written next to the output store as\n'
+        "``<name>_report.html`` or ``<name>_report.pdf`` (``cube.img.zarr``\n"
+        'gives ``cube_report.html``), or ``"notebook"``, displayed in the\n'
+        "calling Jupyter notebook. The report has a processing section common\n"
+        "to all distributed applications (timing, task stream and, with\n"
+        "``monitor_resources_seconds``, the cluster CPU, memory and I/O) and a\n"
+        "results section of the application's own; the products it makes with\n"
+        "other distributed applications are kept in ``<name>_report_files``\n"
+        "next to the output store. It is made after the output is written: a\n"
+        "failure while making it is logged and leaves the results intact.\n"
+        "``None`` (default): no report."
+    ),
     "task_id": "Identifier of the parallel chunk being processed.",
     "task_coords": (
         "Per-chunk coordinate mapping; ``task_coords[<parallel dim>]`` supplies\n"

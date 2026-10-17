@@ -467,6 +467,32 @@ def _concat_image_statistics(statistics_chunks):
     }
 
 
+def _add_residual_entropy(statistics, chunk_xds, cycle_control_params):
+    """Add ``entropy``, the entropy of the residual of every plane, to the
+    image statistics of the residual (``report_statistics``)."""
+    from astroviper.processing_functions.image_analysis.image_statistics import (
+        image_residual_entropy,
+    )
+    from astroviper.processing_functions.imaging.utils.cycle_control import (
+        validate_entropy_params,
+    )
+
+    if "sky_residual" not in statistics:
+        return
+    _, max_snr, spatial_bins, flux_bins = validate_entropy_params(cycle_control_params)
+    entropy, _ = image_residual_entropy(
+        chunk_xds,
+        data_group_name="residual",
+        spatial_bins=spatial_bins,
+        flux_bins=flux_bins,
+        max_snr=max_snr,
+    )
+    statistics["sky_residual"]["entropy"] = (
+        ("time", "frequency", "polarization"),
+        entropy,
+    )
+
+
 def _combine_channel_timing_frames(timing_frames):
     """Fold the per-channel one-row timing frames into the chunk's one row.
 
@@ -532,6 +558,7 @@ def image_cube_single_field(
     image_sharding=None,
     output_image_format="zarr",
     task_time_kill_switch_seconds=None,
+    report_statistics=False,
 ):
     """Image one frequency chunk of a single-field cube and write it to disk.
 
@@ -950,6 +977,15 @@ def image_cube_single_field(
         (:func:`~astroviper.node_tasks.imaging.utils.write_result_chunk_to_fits_skunk_works`;
         the driver created them with
         :func:`~astroviper.node_tasks.imaging.utils.create_empty_fits_images`).
+    report_statistics : bool, optional
+        The statistics only a report of the run needs; the distributed
+        application sets it when it makes one. With ``True`` the image
+        statistics of the residual also hold ``entropy``, the entropy of the
+        residual of every plane as the entropy stop works it out
+        (:func:`~astroviper.processing_functions.image_analysis.image_statistics.image_residual_entropy`
+        with the ``entropy_*`` settings of ``cycle_control_params``; not a
+        number for a plane whose peak is above ``entropy_max_snr`` times its
+        RMS). Default ``False``.
 
     Returns
     -------
@@ -1248,9 +1284,12 @@ def image_cube_single_field(
         # values, so the chunks -- and the reduce -- concatenate along
         # ``frequency``.
         start = time.time()
-        statistics_chunks.append(
-            calculate_plane_statistics(chunk_xds, primary_beam_limit=primary_beam_limit)
+        statistics = calculate_plane_statistics(
+            chunk_xds, primary_beam_limit=primary_beam_limit
         )
+        if report_statistics:
+            _add_residual_entropy(statistics, chunk_xds, cycle_control_params)
+        statistics_chunks.append(statistics)
         T_image_statistics += time.time() - start
 
         start = time.time()

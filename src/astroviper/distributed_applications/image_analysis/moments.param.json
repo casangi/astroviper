@@ -8,6 +8,7 @@
             "allowed": ["l", "m", "frequency", "polarization", "time"]
         },
         "image_data_group_in_name": { "type": ["str"] },
+        "image_data_group_in_role": { "type": ["str"] },
         "include_pixel_range": {
             "type": ["list", "int", "float"],
             "nullable": true
