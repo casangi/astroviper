@@ -175,7 +175,7 @@ def image_cube_single_field(
         A Measurement Set v2 is imaged without converting it: the driver opens
         it with XRADIO's ``xradio_msv2`` engine
         (:func:`xradio.measurement_set.open_msv2`, in the XRADIO releases that
-        carry it, with python-casacore) and every node task reads only its own
+        carry it, with its arcae backend) and every node task reads only its own
         selection through the engine. The images equal those of its
         conversion (:func:`xradio.measurement_set.convert_msv2_to_processing_set`
         with the same ``partition_scheme``, see ``msv2_open_options``): the
