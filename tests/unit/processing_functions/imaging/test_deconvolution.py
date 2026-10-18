@@ -1119,6 +1119,7 @@ class TestAspClean:
             "asp_rc_eps_max": 5.0,
             "asp_rc_switch_factor": 2.0,
             "asp_rc_floor_at_threshold": False,
+            "asp_significance_gain": 0.5,
         }
         for extra in ({}, options):
             resid = np.zeros((nt, nf, npol, ny, nx))
@@ -1130,6 +1131,7 @@ class TestAspClean:
         assert default["scale_significance"] is True
         assert default["rc_switch_factor"] == 1.0
         assert default["rc_floor_at_threshold"] is True
+        assert default["significance_gain"] == 0.3
         for key, value in options.items():
             assert given[key.removeprefix("asp_")] == value
 

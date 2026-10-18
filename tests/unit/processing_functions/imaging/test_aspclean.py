@@ -1229,10 +1229,38 @@ class TestRingCleaning:
             1e-9 * np.abs(dirty).max()
         )
 
+    def test_significance_gain(self):
+        """The components cleaned below the threshold for their significance
+        take ``significance_gain`` (``<= 0``: the gain): a larger one takes
+        the faint source in fewer of them."""
+        psf, sky, dirty, mask, threshold = self._scene(faint=True)
+        runs = {}
+        for gain in (0.0, 0.1, 0.3):
+            runs[gain] = self._clean(
+                psf,
+                dirty,
+                mask,
+                threshold,
+                scale_significance=True,
+                significance_gain=gain,
+            )
+        np.testing.assert_array_equal(runs[0.0][1], runs[0.1][1])
+        np.testing.assert_array_equal(runs[0.0][2], runs[0.1][2])
+        slow, fast = runs[0.1][0]["timing"], runs[0.3][0]["timing"]
+        assert 0 < fast["n_significance_components"] < slow["n_significance_components"]
+        assert runs[0.3][2].sum() >= runs[0.1][2].sum() > 0.1 * sky.sum()
+        resid, model = runs[0.3][1], runs[0.3][2]
+        assert np.max(np.abs(resid + _linear_convolution(model, psf) - dirty)) < (
+            1e-9 * np.abs(dirty).max()
+        )
+
     def test_cube_matches_per_plane(self):
         psf, _, dirty, mask, threshold = self._scene()
         kwargs = dict(
-            residual_components=True, scale_significance=True, rc_switch_factor=3.0
+            residual_components=True,
+            scale_significance=True,
+            rc_switch_factor=3.0,
+            significance_gain=0.3,
         )
         planes = np.stack([dirty, 0.5 * dirty])
         resid = planes[None, :, None].copy()  # planes stays the reference

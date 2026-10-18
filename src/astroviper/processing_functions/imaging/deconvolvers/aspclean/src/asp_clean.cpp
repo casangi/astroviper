@@ -1193,6 +1193,7 @@ private:
         for (int ii = startingIter_; ii < maxNiter_; ++ii) {
             ++iteration_;
             lap(clock);
+            const auto iterationStart = clock;
             const double rms = rmsResidual();
 
             // The scale of the component of this iteration (a delta while in
@@ -1292,7 +1293,9 @@ private:
             // The residual loses the exact linear convolution of the component
             // with the image-sized PSF (see setup()), so residual == dirty -
             // model (*) psf holds on the whole image, as for the Hogbom kernels.
-            const double scaleFactor = gain_ * strengthOptimum_;
+            const double iterationGain = (significantScale && options_.significance_gain > 0.0)
+                                             ? options_.significance_gain : gain_;
+            const double scaleFactor = iterationGain * strengthOptimum_;
             if (options_.record_components) {
                 components_.push_back(static_cast<double>(posOptI_));
                 components_.push_back(static_cast<double>(posOptJ_));
@@ -1384,6 +1387,11 @@ private:
             std::vector<double> tempScaleSizes = getActiveSetAspen();
             tempScaleSizes.push_back(0.0);
             defineAspScales(tempScaleSizes);
+            if (significantScale) {
+                timing_.n_significance_components += 1;
+                timing_.t_significance += std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - iterationStart).count();
+            }
         }
 
         // No stop test fired: the iteration limit is spent (or was 0).

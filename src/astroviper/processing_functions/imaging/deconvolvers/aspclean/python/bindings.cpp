@@ -101,6 +101,8 @@ static py::dict plane_impl(py::array residual, py::array psf, py::array model,
     timing["residual_components"] = res.t_residual_components;
     timing["n_residual_components"] = res.n_residual_components;
     timing["n_residual_fit_evaluations"] = res.n_residual_fit_evaluations;
+    timing["significance"] = res.t_significance;
+    timing["n_significance_components"] = res.n_significance_components;
     out["timing"] = timing;
     if (options.record_components) {
         const py::ssize_t n = static_cast<py::ssize_t>(res.components.size() / 4);
@@ -127,7 +129,8 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
                                bool scale_significance, double significance,
                                bool record_components, bool residual_components,
                                double rc_noise_floor, double rc_frac_min, double rc_eps_max,
-                               double rc_switch_factor, bool rc_floor_at_threshold) {
+                               double rc_switch_factor, bool rc_floor_at_threshold,
+                               double significance_gain) {
     aspclean::AspOptions options;
     options.scale_significance = scale_significance;
     options.significance = significance;
@@ -138,6 +141,7 @@ static py::dict clean_dispatch(py::array residual, py::array psf, py::array mode
     options.rc_eps_max = rc_eps_max;
     options.rc_switch_factor = rc_switch_factor;
     options.rc_floor_at_threshold = rc_floor_at_threshold;
+    options.significance_gain = significance_gain;
     if (residual.ndim() != 2)
         throw std::runtime_error("residual must be a 2D array [ny, nx]");
     auto dt = residual.dtype();
@@ -269,7 +273,7 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
                                     bool scale_significance, double significance,
                                     bool residual_components, double rc_noise_floor,
                                     double rc_frac_min, double rc_eps_max, double rc_switch_factor,
-                                    bool rc_floor_at_threshold) {
+                                    bool rc_floor_at_threshold, double significance_gain) {
     aspclean::AspOptions options;
     options.scale_significance = scale_significance;
     options.significance = significance;
@@ -279,6 +283,7 @@ static py::dict clean_cube_dispatch(py::array residual, py::array psf,
     options.rc_eps_max = rc_eps_max;
     options.rc_switch_factor = rc_switch_factor;
     options.rc_floor_at_threshold = rc_floor_at_threshold;
+    options.significance_gain = significance_gain;
     if (residual.ndim() != 5)
         throw std::runtime_error(
             "residual must be a 5D array [time, frequency, polarization, y, x]");
@@ -390,7 +395,8 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           "residual smoothed with each initial scale and, with the peak below "
           "threshold_per_cycle, goes on cleaning the most significant smoothed "
           "residual while its significance reaches that of the threshold at "
-          "scale 0 (or significance, when > 0); scale_noise is returned. "
+          "scale 0 (or significance, when > 0), with the gain "
+          "significance_gain (when > 0); scale_noise is returned. "
           "record_components returns the Asp components (i, j, scale, flux) "
           "and the residual-shaped fits (peak, frac, eps_frac, 0, 0, "
           "objective).",
@@ -406,7 +412,8 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           py::arg("significance") = 0.0, py::arg("record_components") = false,
           py::arg("residual_components") = false, py::arg("rc_noise_floor") = 2.0,
           py::arg("rc_frac_min") = 0.3, py::arg("rc_eps_max") = 10.0,
-          py::arg("rc_switch_factor") = 1.0, py::arg("rc_floor_at_threshold") = true);
+          py::arg("rc_switch_factor") = 1.0, py::arg("rc_floor_at_threshold") = true,
+          py::arg("significance_gain") = 0.0);
 
     m.def("clean_cube", &clean_cube_dispatch,
           "Run the Asp model update independently on every (time, frequency, "
@@ -431,7 +438,8 @@ PYBIND11_MODULE(_aspclean_ext, m) {
           py::arg("scale_significance") = false, py::arg("significance") = 0.0,
           py::arg("residual_components") = false, py::arg("rc_noise_floor") = 2.0,
           py::arg("rc_frac_min") = 0.3, py::arg("rc_eps_max") = 10.0,
-          py::arg("rc_switch_factor") = 1.0, py::arg("rc_floor_at_threshold") = true);
+          py::arg("rc_switch_factor") = 1.0, py::arg("rc_floor_at_threshold") = true,
+          py::arg("significance_gain") = 0.0);
 
     m.def("psf_gaussian_width", &psf_width_helper,
           "Estimate the PSF Gaussian width (mean FWHM in pixels) used to seed "

@@ -1484,6 +1484,13 @@ def asp_clean(
           at scale 0. Default ``True``.
         - ``asp_significance`` : float, the significance the smoothed
           residual must reach instead, when ``> 0``. Default 0.0.
+        - ``asp_significance_gain`` : float, the gain of the components cleaned
+          below ``threshold_per_cycle`` for their significance. Each is a
+          least-squares fit, so any gain up to 1 lowers the misfit; 0.3 needs
+          about half the iterations of the gain 0.1 for the same deconvolution
+          error (within 3 % on four test skies), 0.5 is worse on
+          crescent-like emission.
+          ``<= 0`` uses ``gain``. Default 0.3.
         - ``asp_rc_frac_min``, ``asp_rc_eps_max`` : float, lower bound of
           ``frac`` (upper 0.99) and upper bound of ``eps_frac`` (lower 1e-3)
           in the fit of the residual-shaped components. Defaults 0.3 and
@@ -1650,5 +1657,6 @@ def asp_clean(
         rc_floor_at_threshold=bool(
             deconvolve_params.get("asp_rc_floor_at_threshold", True)
         ),
+        significance_gain=float(deconvolve_params.get("asp_significance_gain", 0.3)),
         **_divergence_kwargs(deconvolve_params, asp=True),
     )

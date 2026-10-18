@@ -84,6 +84,10 @@ struct AspResult {
     int n_residual_components = 0;
     int n_residual_fit_evaluations = 0;
     double t_residual_components = 0.0;
+    // Iterations below the threshold on a significant smoothed residual
+    // (AspOptions::scale_significance) and their time, search and fit included.
+    int n_significance_components = 0;
+    double t_significance = 0.0;
     // Per residual-shaped component fit (peak, frac, eps_frac, 0, 0, the
     // objective at the end of the fit), when record_components.
     std::vector<double> residual_fits;
@@ -97,7 +101,8 @@ struct AspResult {
 //     initial scale (robust, outside the mask) and, once the peak is below
 //     the threshold, go on cleaning the most significant smoothed residual
 //     while it is as significant as the threshold is at scale 0 (or as
-//     `significance` times its noise when that is > 0).
+//     `significance` times its noise when that is > 0), subtracting
+//     significance_gain (when > 0, else the gain) of each such component.
 //   record_components: return the components in AspResult::components.
 //   residual_components: before the Asp iterations of a model update, clean
 //     with components shaped by the residual (Ma, Zhang & Zhang 2026, A&A
@@ -117,6 +122,7 @@ struct AspOptions {
     double rc_noise_floor = 2.0;
     double rc_switch_factor = 1.0;
     bool rc_floor_at_threshold = true;
+    double significance_gain = 0.0;
     int rc_fit_iterations = 10;
 };
 
