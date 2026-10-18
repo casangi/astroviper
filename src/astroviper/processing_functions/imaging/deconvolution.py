@@ -144,6 +144,9 @@ def _validate_deconvolve_params(deconvolve_params):
           subtracts, as
           :func:`~astroviper.processing_functions.imaging.make_point_spread_function.make_subtraction_point_spread_function_single_field`
           makes it. Read by :func:`deconvolve` only.
+        - ``asp_stop_after_hogbom_run`` : bool, end an Asp model update after
+          a Hogbom run as CASA and LibRA do (see :func:`asp_clean`). Default
+          ``False``.
 
     Returns
     -------
@@ -172,6 +175,7 @@ def _validate_deconvolve_params(deconvolve_params):
         "max_iter_divergence": 1,
         "record_iteration_history": False,
         "exact_psf_subtraction": False,
+        "asp_stop_after_hogbom_run": False,
     }
 
     for key, default_value in default_params.items():
@@ -212,7 +216,11 @@ def _validate_deconvolve_params(deconvolve_params):
                     "max_iter_divergence must be a positive integer, or -1 to "
                     f"disable the divergence test; got {value!r}."
                 )
-        elif key in ("record_iteration_history", "exact_psf_subtraction"):
+        elif key in (
+            "record_iteration_history",
+            "exact_psf_subtraction",
+            "asp_stop_after_hogbom_run",
+        ):
             if not isinstance(value, bool | np.bool_):
                 raise ValueError(f"{key} must be a bool; got {value!r}.")
 
@@ -724,7 +732,8 @@ def deconvolve(
         :func:`_validate_deconvolve_params` for the common keys and
         defaults. The ``"asp"`` algorithm additionally honours
         ``fusedthreshold``, ``psf_width``, ``largestscale``,
-        ``stoppointmode``, and ``norm_method`` (see :func:`asp_clean`).
+        ``stoppointmode``, ``norm_method`` and
+        ``asp_stop_after_hogbom_run`` (see :func:`asp_clean`).
     processing_function_threads : int, optional
         Number of ``std::thread`` workers to use for per-plane CLEAN
         execution. Values ``<= 1`` disable threading and run in the
@@ -1439,14 +1448,23 @@ def asp_clean(
           smallest-scale (point) components. ``-1`` disables. Default -1.
         - ``norm_method`` : int, scale-normalization method (1 is the
           preferred CASA default). Default 1.
+        - ``asp_stop_after_hogbom_run`` : bool, end the model update after a
+          Hogbom run of Asp (51 or 510 point components) unless the RMS of
+          the residual has fallen, by less than a factor 1.5, since the model
+          update started, as CASA and LibRA do. Their residual drifts from
+          the true one during a model update; here the residual is the exact
+          one, so by default (``False``) the model update goes on to its
+          ``threshold_per_cycle``, its iteration limit or the divergence
+          test, which takes fewer imaging cycles.
 
         Note: ``clean_box`` is ignored by the Asp algorithm (use a mask
         instead).
     processing_function_threads : int, optional
         Number of ``std::thread`` workers used to run per-plane CLEAN in
-        parallel. ``processing_function_threads <= 1`` disables threading; values larger
-        than the number of planes are clamped to the plane count.
-        Default 1.
+        parallel. ``processing_function_threads <= 1`` disables threading.
+        Threads beyond the number of planes go to the FFTs of each plane
+        (``processing_function_threads // n_planes`` per plane), so a
+        single-channel model update uses them too. Default 1.
     mask_cube : numpy.ndarray, optional
         5-D mask array with the same shape as ``residual_cube``. Unlike
         the Hogbom binding (which takes a ``bool`` mask), the Asp binding
@@ -1573,5 +1591,8 @@ def asp_clean(
         stoppointmode=deconvolve_params.get("stoppointmode", -1),
         norm_method=deconvolve_params.get("norm_method", 1),
         processing_function_threads=int(processing_function_threads),
+        stop_after_hogbom_run=bool(
+            deconvolve_params.get("asp_stop_after_hogbom_run", False)
+        ),
         **_divergence_kwargs(deconvolve_params, asp=True),
     )

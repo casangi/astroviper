@@ -555,7 +555,11 @@ class TestDivergence:
     def test_peak_above_1500_is_cleaned(self):
         # The "5. Diverging" guard of CASA 6.7.5.18 and LibRA (fc54ee25)
         # started its lowest peak at 1000, so it stopped any plane with a peak
-        # above 1500 at once (casa master has dropped that test).
+        # above 1500 at once (casa master has dropped that test). The model
+        # update ends after its first Hogbom run (stop_after_hogbom_run) in
+        # both: going on, Asp's "no change" test (a change of the peak below
+        # 1e-4 in the units of the image, CASA's constant) tells the two
+        # scalings apart.
         psf, _, dirty = TestClean()._make_scene()
         results = []
         for scale in (1.0, 1e4):
@@ -568,6 +572,7 @@ class TestDivergence:
                 gain=0.1,
                 threshold_per_cycle=0.05 * scale,
                 max_iter_per_cycle_updated=100,
+                stop_after_hogbom_run=True,
             )
             results.append((result, model.sum() / scale))
         (unit, unit_flux), (scaled, scaled_flux) = results
@@ -773,41 +778,76 @@ class TestStopCode:
 
 
 class TestLbfgs:
-    """The scaled L-BFGS behind the Aspen (amplitude, scale) fit.
-
-    The optimizer works in the scaled variables ``z = x / scale`` and takes a
-    unit-length first step there (ALGLIB's convention), so a badly scaled
-    problem is solved in a couple of steps and the first trial point never moves
-    a variable by more than its own scale. An earlier version preconditioned
-    with ``diag(scale^2)`` instead, which on the deconvolver's objective sent
-    the first trial step hundreds of scale lengths away, cost tens of
-    evaluations per Aspen and could accept garbage minima.
+    """The L-BFGS behind the Aspen (amplitude, scale) fit follows ALGLIB's
+    ``minlbfgs`` as CASA and LibRA call it (one correction pair,
+    ``minlbfgssetscale`` and no preconditioner): the search runs in the
+    variables themselves, the first trial point is a step of length
+    ``min(1, |g|)`` along the steepest descent, the More-Thuente line search
+    can lengthen a step as well as shorten it, and the scale enters only the
+    stopping tests. An earlier version stepped in the scaled variables
+    ``x / scale``; on the Asp objective it moved an Aspen's scale by tens of
+    pixels where ALGLIB moves it by one or two (checked against ALGLIB 3.17 on
+    the same objective, evaluation by evaluation), and the model updates
+    diverged.
     """
 
-    def test_badly_scaled_quadratic_converges_in_few_evaluations(self):
-        centre = np.array([2e-3, 3e3])
-        scale = [1e-3, 1e3]
-        calls = []
+    @staticmethod
+    def _quadratic(centre, weights, calls):
+        centre = np.asarray(centre, float)
+        weights = np.asarray(weights, float)
 
         def fg(x):
-            x = np.asarray(x)
-            z = (x - centre) / scale
-            calls.append(np.array(x))
-            return float(z @ z), list(2 * z / scale)
+            x = np.asarray(x, float)
+            calls.append(x.copy())
+            d = x - centre
+            return float(np.sum(weights * d * d)), list(2.0 * weights * d)
 
+        return fg
+
+    def test_first_trial_point_is_a_unit_step_along_the_steepest_descent(self):
+        calls = []
+        fg = self._quadratic([10.0, -4.0], [1.0, 3.0], calls)
+        aspclean.lbfgs_minimize(fg, [0.0, 0.0], [1.0, 1.0], max_iters=5)
+        g0 = np.array([2.0 * -10.0, 2.0 * 3.0 * 4.0])
+        step = calls[1] - calls[0]
+        np.testing.assert_allclose(step, -g0 / np.linalg.norm(g0), rtol=1e-12)
+
+    def test_line_search_lengthens_a_short_first_step(self):
+        # 1-D: the minimum is 10 units away, the first trial point one unit:
+        # the decrease is sufficient but the slope is still steep, so the
+        # More-Thuente search extrapolates instead of accepting it.
+        calls = []
+        fg = self._quadratic([10.0], [1.0], calls)
         x, f, iterations, evaluations = aspclean.lbfgs_minimize(
-            fg, [0.0, 0.0], scale, max_iters=20, epsg=1e-8, epsf=1e-12, epsx=1e-10
+            fg, [0.0], [1.0], max_iters=5, epsg=1e-10, epsf=1e-14, epsx=1e-12
         )
-        np.testing.assert_allclose(x, centre, rtol=1e-6)
-        assert f < 1e-10
-        assert evaluations <= 8
-        # the first trial point moved each variable by at most its own scale
-        first_step = np.abs(calls[1] - calls[0]) / scale
-        assert np.all(first_step <= 1.0 + 1e-12)
+        assert calls[1][0] == pytest.approx(1.0)
+        assert max(c[0] for c in calls[2:]) > 1.0
+        np.testing.assert_allclose(x, [10.0], rtol=1e-6)
 
-    def test_never_increases_and_backtracks_on_overshoot(self):
-        # A narrow valley: a unit step in the scaled variable overshoots, so
-        # the line search must backtrack; the accepted sequence is monotone.
+    def test_scale_enters_only_the_stopping_tests(self):
+        # Two runs that differ only in the scale vector visit the same points
+        # until the first of them stops.
+        calls_a, calls_b = [], []
+        fg_a = self._quadratic([3.0, -2.0], [1.0, 5.0], calls_a)
+        fg_b = self._quadratic([3.0, -2.0], [1.0, 5.0], calls_b)
+        aspclean.lbfgs_minimize(fg_a, [0.0, 0.0], [1.0, 1.0], max_iters=3)
+        aspclean.lbfgs_minimize(fg_b, [0.0, 0.0], [1e-3, 1e3], max_iters=3)
+        n = min(len(calls_a), len(calls_b))
+        np.testing.assert_allclose(
+            np.array(calls_a[:n]), np.array(calls_b[:n]), rtol=1e-12
+        )
+
+    def test_converges_on_a_quadratic(self):
+        calls = []
+        fg = self._quadratic([2.0, 3.0], [1.0, 4.0], calls)
+        x, f, iterations, evaluations = aspclean.lbfgs_minimize(
+            fg, [0.0, 0.0], [1.0, 1.0], max_iters=50, epsg=1e-10, epsf=1e-14, epsx=1e-12
+        )
+        np.testing.assert_allclose(x, [2.0, 3.0], rtol=1e-6)
+        assert f < 1e-10
+
+    def test_never_ends_above_its_start_and_stays_within_its_budget(self):
         history = []
 
         def fg(x):
@@ -820,18 +860,22 @@ class TestLbfgs:
         )
         assert iterations >= 1
         assert f <= history[0]
-        # accepted objective values (a prefix scan of the history) decrease
-        accepted = [history[0]]
-        for v in history[1:]:
-            if v < accepted[-1]:
-                accepted.append(v)
-        assert accepted[-1] == f
-        assert evaluations <= 5 * 21  # never more than max_iters line searches
+        assert evaluations <= 1 + 5 * 20  # 20 evaluations per line search
 
 
 # ---------------------------------------------------------------------------
 # Resolved sources: the case Asp exists for
 # ---------------------------------------------------------------------------
+
+
+def _linear_convolution(image, psf):
+    """model (*) psf with the PSF centred on (n // 2, n // 2) of its own image and
+    zero beyond it: the response the residual update subtracts."""
+    from scipy.signal import fftconvolve
+
+    nx, ny = image.shape
+    full = fftconvolve(image, psf, mode="full")
+    return full[nx // 2 : nx // 2 + nx, ny // 2 : ny // 2 + ny]
 
 
 class TestResolvedSource:
@@ -894,9 +938,89 @@ class TestResolvedSource:
         assert out["iterations_performed"] >= 30  # the minor cycle actually ran
         assert out["peak_residual"] < 0.2 * np.abs(dirty).max()
         np.testing.assert_allclose(model.sum(), sky.sum(), rtol=0.15)
-        # the exact reconstruction invariant holds throughout
-        recon = aspclean.convolve_centered(model, psf)
-        assert np.max(np.abs(resid + recon - dirty)) < 1e-9 * np.abs(dirty).max()
+        # the residual update subtracts the exact linear convolution
+        assert np.max(np.abs(resid + _linear_convolution(model, psf) - dirty)) < (
+            1e-9 * np.abs(dirty).max()
+        )
         # and the components are extended (hundreds of pixels above a tenth of
         # the model peak), not a handful of delta spikes
         assert np.count_nonzero(model > 0.1 * model.max()) > 100
+
+    def _clean_disk(self, **kwargs):
+        psf, sky, _ = self._scene()
+        dirty = np.ascontiguousarray(_linear_convolution(sky, psf))
+        resid = dirty.copy()
+        model = np.zeros_like(dirty)
+        out = aspclean.clean(
+            resid,
+            psf,
+            model,
+            gain=0.1,
+            threshold_per_cycle=1e-3 * np.abs(dirty).max(),
+            max_iter_per_cycle_updated=300,
+            max_iter_divergence=-1,
+            **kwargs,
+        )
+        assert np.max(np.abs(resid + _linear_convolution(model, psf) - dirty)) < (
+            1e-9 * np.abs(dirty).max()
+        )
+        return out, resid, model, dirty, sky
+
+    def test_model_update_goes_on_after_a_hogbom_run(self):
+        """By default the model update goes on past the end of a Hogbom run
+        (here to its iteration limit): the residual is the exact one, so the
+        model update does not need to stop for a residual update."""
+        default, resid, model, dirty, sky = self._clean_disk()
+        off, resid_off, model_off, _, _ = self._clean_disk(stop_after_hogbom_run=False)
+        assert default["stop_code"] == 1  # spent max_iter_per_cycle_updated
+        assert default["iterations_performed"] == 300
+        np.testing.assert_array_equal(resid, resid_off)
+        np.testing.assert_array_equal(model, model_off)
+        on, resid_on, model_on, _, _ = self._clean_disk(stop_after_hogbom_run=True)
+        assert np.abs(resid).max() < np.abs(resid_on).max()
+        assert abs(model.sum() - sky.sum()) < abs(model_on.sum() - sky.sum())
+
+    def test_stop_after_hogbom_run_ends_the_model_update_like_casa(self):
+        """With stop_after_hogbom_run the model update ends after the Hogbom
+        run once the RMS of the residual has fallen by a factor 1.5 (CASA and
+        LibRA): a test of Asp itself, well before the iteration limit."""
+        on, *_ = self._clean_disk(stop_after_hogbom_run=True)
+        assert on["stop_code"] == 5  # a test of Asp itself
+        assert on["converged"]
+        assert 51 < on["iterations_performed"] < 300
+
+    def test_disk_near_the_edge_does_not_run_away(self):
+        """A disk next to the image edge: its wide Aspens' responses reach
+        beyond the edge. Subtracting a circular convolution folded them back in
+        from the opposite edge, and the Aspen fit then chased that structure
+        with ever larger components (the model flux ran away to many times the
+        sky's on CASA's test_onefield_asp data). The residual update is now the
+        exact linear convolution and the fit stops like ALGLIB's."""
+        psf, _, _ = self._scene()
+        from astroviper.processing_functions.simulation import (
+            limb_darkened_disk_image,
+        )
+
+        n = psf.shape[0]
+        yy, xx = np.mgrid[0:n, 0:n]
+        sky = 5.0 * limb_darkened_disk_image(
+            (xx - 18).astype(float), (yy - n // 2).astype(float), 30.0, 22.0, 0.8, 1.5
+        )
+        dirty = np.ascontiguousarray(_linear_convolution(sky, psf))
+        resid = dirty.copy()
+        model = np.zeros_like(dirty)
+        out = aspclean.clean(
+            resid,
+            psf,
+            model,
+            gain=0.1,
+            threshold_per_cycle=1e-4,
+            max_iter_per_cycle_updated=300,
+            max_iter_divergence=-1,
+        )
+        assert out["iterations_performed"] >= 30
+        assert np.abs(resid).max() < 0.5 * np.abs(dirty).max()
+        np.testing.assert_allclose(model.sum(), sky.sum(), rtol=0.3)
+        assert np.max(np.abs(resid + _linear_convolution(model, psf) - dirty)) < (
+            1e-9 * np.abs(dirty).max()
+        )

@@ -199,6 +199,7 @@ class TestValidateDeconvolveParams:
             "max_iter_divergence": 1,
             "record_iteration_history": False,
             "exact_psf_subtraction": False,
+            "asp_stop_after_hogbom_run": False,
         }
 
     def test_empty_dict_returns_defaults(self):
@@ -213,6 +214,7 @@ class TestValidateDeconvolveParams:
             "max_iter_divergence": 1,
             "record_iteration_history": False,
             "exact_psf_subtraction": False,
+            "asp_stop_after_hogbom_run": False,
         }
 
     def test_partial_params_filled(self):
@@ -1037,6 +1039,40 @@ class TestAspClean:
         recon = aspclean.convolve_centered(model[0, 0, 0], psf[0, 0, 0])
         err = np.max(np.abs(resid[0, 0, 0] + recon - dirty))
         assert err / np.max(np.abs(dirty)) < 1e-5
+
+    def test_stop_after_hogbom_run_reaches_the_kernel(self):
+        """``asp_stop_after_hogbom_run`` is handed to the kernel: off by
+        default, the model update of a resolved disk goes on to its iteration
+        limit; on, it ends after its Hogbom run, as in CASA."""
+        nt, nf, npol, ny, nx = 1, 1, 1, 64, 64
+        psf, aspclean = self._gauss_psf_cube(nt, nf, npol, ny, nx, sig=2.0)
+        yy, xx = np.mgrid[0:ny, 0:nx]
+        sky = 3.0 * (np.hypot(xx - 32, yy - 32) < 10.0)
+        dirty = aspclean.convolve_centered(sky, psf[0, 0, 0])
+        results = {}
+        for stop in (None, False, True):
+            resid = dirty[None, None, None].copy()
+            model = np.zeros_like(resid)
+            params = {"gain": 0.1, "max_iter": 400, "threshold": 1e-4}
+            if stop is not None:
+                params["asp_stop_after_hogbom_run"] = stop
+            results[stop] = asp_clean(resid, psf, model, params)
+        assert results[None]["stop_code"][0, 0, 0] == 1  # the iteration limit
+        assert results[None]["iterations_performed"][0, 0, 0] == 400
+        assert results[False]["iterations_performed"][0, 0, 0] == 400
+        assert results[True]["stop_code"][0, 0, 0] == 5  # a test of Asp
+        assert results[True]["iterations_performed"][0, 0, 0] < 400
+
+    def test_stop_after_hogbom_run_must_be_a_bool(self):
+        from astroviper.processing_functions.imaging.deconvolution import (
+            _validate_deconvolve_params,
+        )
+
+        with pytest.raises(
+            ValueError, match="asp_stop_after_hogbom_run must be a bool"
+        ):
+            _validate_deconvolve_params({"asp_stop_after_hogbom_run": 1})
+        assert _validate_deconvolve_params({})["asp_stop_after_hogbom_run"] is False
 
     def test_threaded_matches_serial(self):
         nt, nf, npol, ny, nx = 1, 2, 2, 32, 32

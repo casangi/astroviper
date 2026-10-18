@@ -9,9 +9,19 @@
 // vendored pocketfft header) and asp_lbfgs.hpp.
 //
 // Deliberate departures from CASA, documented at the code:
-//  * the FFT bookkeeping (separable Aspen spectra, paired inverse transforms)
-//    computes the same quantities with roughly an eighth of the transforms;
-//  * the residual update covers the whole image, not a PSF-sized box;
+//  * the residual update and the Aspen fit use exact linear convolutions with
+//    the image-sized PSF (no wrap-around at the image edges, so residual ==
+//    dirty - model (*) psf holds on the whole image), computed with separable
+//    spectra and real transforms, and point components need no transform at
+//    all;
+//  * the per-Aspen L-BFGS (asp_lbfgs.hpp) is an independent implementation of
+//    the ALGLIB minlbfgs behaviour CASA and LibRA rely on, More-Thuente line
+//    search included;
+//  * a model update does not end after a Hogbom run (unless
+//    stop_after_hogbom_run): CASA and LibRA end it there once the RMS has
+//    fallen by a factor 1.5 or more since its start, or risen, because their
+//    residual drifts from the true one; here it is exact, so the model update
+//    goes on to its threshold, which takes fewer imaging cycles;
 //  * there is no "diverging" guard (AspMatrixCleaner "5. Diverging" in CASA
 //    6.7.5.18 and LibRA fc54ee25): the model update stops on the divergence
 //    test shared with
@@ -52,6 +62,17 @@ struct AspResult {
     double model_flux = 0.0;      // sum of the model image at exit
     bool switched_to_hogbom = false;
     double psf_width = 0.0;       // PSF Gaussian width (pixels) used for scales
+    // Wall time (seconds) of the parts of the model update, and their counts.
+    double t_setup = 0.0;         // PSF spectra, initial scales and masks, first search
+    double t_search = 0.0;        // residual (*) initial scales and peak search
+    double t_fit = 0.0;           // per-Aspen L-BFGS fits
+    double t_update_scale = 0.0;  // model and residual updates of scale components
+    double t_update_point = 0.0;  // model and residual updates of point components
+    double t_bookkeeping = 0.0;   // RMS, peak, scale image per iteration
+    int n_scale_components = 0;
+    int n_point_components = 0;
+    int n_fits = 0;
+    int n_fit_evaluations = 0;
 };
 
 // Estimate the PSF Gaussian width (mean FWHM in pixels) that seeds the Asp
@@ -60,8 +81,8 @@ double psf_gaussian_width(const double* psf, int nx, int ny);
 
 // FFT-based circular convolution of two real images (row-major [ny][nx]),
 // recentred so that convolving two centre-origin images yields a centre-origin
-// result. This is the convolution primitive the deconvolver uses internally
-// (casacore fft0 + flip). Exposed for testing.
+// result (casacore fft0 + flip). Exposed for testing; the residual update uses
+// the linear convolution instead.
 void convolve_centered(const double* a, const double* b, int nx, int ny,
                        double* out);
 
@@ -72,19 +93,23 @@ void convolve_centered(const double* a, const double* b, int nx, int ny,
 //   mask     : [ny][nx] clean mask, or nullptr for "clean everywhere"
 // `psf_width <= 0` requests an internal PSF Gaussian-width estimate.
 // `largestscale < 0`, `stoppointmode < 0`, `norm_method == 1` reproduce the
-// CASA defaults. `divergence` is the divergence test shared with the other
-// deconvolvers (plane_stop_test.hpp). No copies of the caller's buffers are made.
+// CASA defaults, and `stop_after_hogbom_run` CASA's end of the model update
+// after a Hogbom run. `divergence` is the divergence test shared with the other
+// deconvolvers (plane_stop_test.hpp). `fft_threads` is the number of threads
+// of every 2-D transform. No copies of the caller's buffers are made.
 template <typename T>
 AspResult aspclean_plane(T* residual, T* model, const T* psf, const T* mask,
                          int nx, int ny, double gain, double threshold_per_cycle,
                          int max_iter_per_cycle_updated, double fusedthreshold, double psf_width,
                          int largestscale, int stoppointmode, int norm_method,
-                         bool verbose,
-                         const deconvolvers::DivergenceControl<double>& divergence);
+                         bool stop_after_hogbom_run, bool verbose,
+                         const deconvolvers::DivergenceControl<double>& divergence,
+                         int fft_threads = 1);
 
 // Run aspclean_plane independently on every (time, frequency, polarization)
 // plane of a 5-D cube [nt, nf, np, ny, nx], in place, across `processing_function_threads`
-// worker threads. The PSF cube may have np_psf == np_img or np_psf == 1
+// worker threads (one plane per thread; when there are more threads than
+// planes, each plane's transforms share the rest). The PSF cube may have np_psf == np_img or np_psf == 1
 // (Stokes-I broadcast). `results` must have length nt*nf*np_img.
 //
 // Iteration control is independent per plane: `threshold_per_cycle` and
@@ -97,7 +122,8 @@ void aspclean_cube(T* residual, T* model, const T* psf, const T* mask,
                    double gain, const double* threshold_per_cycle,
                    const int* max_iter_per_cycle_updated,
                    double fusedthreshold, double psf_width, int largestscale,
-                   int stoppointmode, int norm_method, int processing_function_threads,
+                   int stoppointmode, int norm_method, bool stop_after_hogbom_run,
+                   int processing_function_threads,
                    const deconvolvers::DivergenceControl<double>& divergence,
                    AspResult* results);
 
