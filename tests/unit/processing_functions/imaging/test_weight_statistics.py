@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
+from astroviper.processing_functions.imaging import weight_statistics
 from astroviper.processing_functions.imaging.weight_statistics import (
     SPEED_OF_LIGHT,
     accumulate_correlation_weight_sums,
@@ -161,13 +162,15 @@ def test_uv_extent_in_wavelengths():
     np.testing.assert_allclose(extent["abs_w_max"], 7.0 * per_metre)
 
 
-def _measurement_set(weight, flag, uvw, antenna1, antenna2, frequency, pols):
+def _measurement_set(
+    weight, flag, uvw, antenna1, antenna2, frequency, pols, weight_imaging=None
+):
     ds = xr.Dataset(
         {
             "WEIGHT": (("time", "baseline_id", "frequency", "polarization"), weight),
             "WEIGHT_IMAGING": (
                 ("time", "baseline_id", "frequency", "polarization"),
-                weight.copy(),
+                weight.copy() if weight_imaging is None else weight_imaging,
             ),
             "FLAG": (("time", "baseline_id", "frequency", "polarization"), flag),
             "UVW": (("time", "baseline_id", "uvw_label"), uvw),
@@ -225,6 +228,87 @@ def test_calculate_weight_statistics_single_field_leaves_out_autocorrelations():
     np.testing.assert_allclose(stats.ABS_W_MAX.values, [10.0 * per_metre])
     np.testing.assert_array_equal(stats.FLAGGED_FRACTION.values, [0.0])
     assert list(stats.polarization.values) == ["I", "Q"]
+
+
+def _blocking_processing_set():
+    """7 integrations of three cross baselines and 5 of one (correlations
+    reversed), each with an autocorrelation, three visibility channels onto
+    two image channels; NaN, zero and negative weights, NaN imaging weights
+    and flags."""
+    rng = np.random.default_rng(11)
+    ps = {}
+    for name, n_time, antenna1, antenna2, pols in (
+        ("ms_0", 7, ["a", "a", "a", "b"], ["a", "b", "c", "c"], ["XX", "YY"]),
+        ("ms_1", 5, ["a", "a"], ["a", "b"], ["YY", "XX"]),
+    ):
+        shape = (n_time, len(antenna1), 3, 2)
+        weight = rng.uniform(0.5, 2.0, shape)
+        weight_imaging = weight * rng.uniform(0.1, 3.0, shape)
+        weight.flat[rng.choice(weight.size, 3, replace=False)] = [np.nan, 0.0, -1.0]
+        weight_imaging.flat[rng.integers(weight.size)] = np.nan
+        flag = rng.random(shape) < 0.1
+        uvw = rng.normal(0.0, 300.0, (n_time, len(antenna1), 3))
+        frequency = [1.0e11, 1.005e11, 1.02e11]
+        ps[name] = _measurement_set(
+            weight, flag, uvw, antenna1, antenna2, frequency, pols, weight_imaging
+        )
+    img_xds = xr.Dataset(
+        coords={"frequency": [1.0e11, 1.02e11], "polarization": ["I", "Q"]}
+    )
+    return ps, img_xds
+
+
+@pytest.mark.parametrize(
+    "block_samples, blocks",
+    [
+        (1, [1] * 12),
+        (20, [1] * 7 + [3, 2]),
+        (40, [2, 2, 2, 1, 5]),
+        (125, [6, 1, 5]),
+        (126, [7, 5]),
+        (weight_statistics.BLOCK_SAMPLES, [7, 5]),
+    ],
+)
+def test_weight_statistics_in_blocks_of_integrations(
+    monkeypatch, block_samples, blocks
+):
+    """Blocks of whole integrations (18 samples per integration in ms_0, 6 in
+    ms_1, where a block of one integration is one row) against one block per
+    measurement set: the same statistics bit for bit when every measurement
+    set fits in one block, otherwise the uv extent and the flagged fraction
+    bit for bit and the sums to rounding, also for blocks that do not divide
+    the integrations."""
+    ps, img_xds = _blocking_processing_set()
+    monkeypatch.setattr(weight_statistics, "BLOCK_SAMPLES", 2**40)
+    reference = calculate_weight_statistics_single_field(ps, img_xds, "base")
+
+    accumulate = weight_statistics.accumulate_correlation_weight_sums
+    block_times = []
+
+    def counting_accumulate(weight, *args):
+        block_times.append(weight.shape[0])
+        return accumulate(weight, *args)
+
+    monkeypatch.setattr(
+        weight_statistics, "accumulate_correlation_weight_sums", counting_accumulate
+    )
+    monkeypatch.setattr(weight_statistics, "BLOCK_SAMPLES", block_samples)
+    stats = calculate_weight_statistics_single_field(ps, img_xds, "base")
+    assert block_times == blocks
+    if len(blocks) == len(ps):
+        xr.testing.assert_identical(stats, reference)
+        return
+    for name in ("UV_DISTANCE_MAX", "UV_DISTANCE_MIN", "ABS_W_MAX", "FLAGGED_FRACTION"):
+        np.testing.assert_array_equal(stats[name].values, reference[name].values)
+    for name in (
+        "SENSITIVITY",
+        "SENSITIVITY_NATURAL",
+        "SUM_OF_WEIGHTS",
+        "EFFECTIVE_NUMBER_OF_VISIBILITIES",
+    ):
+        np.testing.assert_allclose(
+            stats[name].values, reference[name].values, rtol=1e-13, atol=0
+        )
 
 
 @pytest.mark.parametrize("bad", ["UU"])

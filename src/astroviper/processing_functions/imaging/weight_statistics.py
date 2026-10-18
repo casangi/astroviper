@@ -25,6 +25,11 @@ import numpy as np
 
 SPEED_OF_LIGHT = 299792458.0  # m/s
 
+# Samples (time x baseline x frequency x polarization) per block of whole
+# integrations in calculate_weight_statistics_single_field; the copies and
+# temporaries of a block take about 60 B per sample.
+BLOCK_SAMPLES = 2**22
+
 # Per (image channel, correlation) sums accumulated over the valid samples, in
 # the order accumulate_correlation_weight_sums returns them.
 CORRELATION_WEIGHT_SUM_NAMES = (
@@ -67,7 +72,7 @@ def accumulate_correlation_weight_sums(
     weight, weight_imaging, flag, image_channel_map, n_image_channels, sums=None
 ):
     """Add the per image channel and correlation weight sums of one measurement
-    set to ``sums``.
+    set, or of a block of its integrations, to ``sums``.
 
     Parameters
     ----------
@@ -83,8 +88,8 @@ def accumulate_correlation_weight_sums(
     n_image_channels : int
         Number of image channels.
     sums : dict, optional
-        Sums of earlier measurement sets to add to (updated in place);
-        ``None`` starts from zero.
+        Sums of earlier calls to add to (updated in place); ``None`` starts
+        from zero.
 
     Returns
     -------
@@ -140,8 +145,8 @@ def accumulate_correlation_weight_sums(
 def accumulate_uv_extent(
     uvw, frequency, valid, image_channel_map, n_image_channels, extent=None
 ):
-    """Add the uv extent (in wavelengths) of one measurement set's valid
-    samples to ``extent``.
+    """Add the uv extent (in wavelengths) of the valid samples of one
+    measurement set, or of a block of its integrations, to ``extent``.
 
     Parameters
     ----------
@@ -157,8 +162,7 @@ def accumulate_uv_extent(
     n_image_channels : int
         Number of image channels.
     extent : dict, optional
-        Extent of earlier measurement sets (updated in place); ``None`` starts
-        empty.
+        Extent of earlier calls (updated in place); ``None`` starts empty.
 
     Returns
     -------
@@ -293,6 +297,10 @@ def calculate_weight_statistics_single_field(
     ``weight_imaging``); see the module docstring for the definitions.
     Autocorrelations are left out (without modifying ``ps_xdt``), and every
     visibility channel counts for the image channel the gridders map it onto.
+    The samples are copied and reduced in blocks of whole integrations of at
+    most :data:`BLOCK_SAMPLES` samples (one integration if it has more), so
+    the memory this adds to ``ps_xdt`` does not grow with the number of
+    integrations.
 
     Parameters
     ----------
@@ -336,24 +344,35 @@ def calculate_weight_statistics_single_field(
         if correlation_labels is None:
             correlation_labels = labels
         order = [labels.index(label) for label in correlation_labels]
-        weight, weight_imaging, flag, uvw = (
-            _cross_correlation_values(ms_xdt[data_group[role]], cross, order)
+        variables = [
+            ms_xdt[data_group[role]]
             for role in ("weight", "weight_imaging", "flag", "uvw")
-        )
+        ]
         image_channel_map = map_visibility_frequencies_to_image(
             ms_xdt.frequency.values, image_frequencies
         )
-        sums = accumulate_correlation_weight_sums(
-            weight, weight_imaging, flag, image_channel_map, n_image_channels, sums
-        )
-        extent = accumulate_uv_extent(
-            uvw,
-            ms_xdt.frequency.values,
-            valid_sample_mask(weight, weight_imaging, flag),
-            image_channel_map,
-            n_image_channels,
-            extent,
-        )
+        samples_per_time = int(cross.sum()) * ms_xdt.sizes["frequency"] * len(order)
+        times_per_block = max(1, BLOCK_SAMPLES // max(samples_per_time, 1))
+        for start in range(0, ms_xdt.sizes["time"], times_per_block):
+            weight, weight_imaging, flag, uvw = (
+                _cross_correlation_values(
+                    variable.isel(time=slice(start, start + times_per_block)),
+                    cross,
+                    order,
+                )
+                for variable in variables
+            )
+            sums = accumulate_correlation_weight_sums(
+                weight, weight_imaging, flag, image_channel_map, n_image_channels, sums
+            )
+            extent = accumulate_uv_extent(
+                uvw,
+                ms_xdt.frequency.values,
+                valid_sample_mask(weight, weight_imaging, flag),
+                image_channel_map,
+                n_image_channels,
+                extent,
+            )
 
     stokes_labels = [str(label) for label in img_xds.polarization.values]
     statistics = stokes_weight_statistics(sums, correlation_labels, stokes_labels)
