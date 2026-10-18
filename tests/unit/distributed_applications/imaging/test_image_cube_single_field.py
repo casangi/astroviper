@@ -131,6 +131,55 @@ def test_image_store_name_without_img_zarr_extension(tmp_path):
     assert timing["T_add_lazy_input_data"] == 0.0
 
 
+def test_kept_variables_the_run_does_not_make_are_skipped(tmp_path):
+    """A dirty image run (``max_iter=0``) that keeps ``sky_model`` and ``mask``,
+    which only deconvolution makes, writes every variable it does make: the
+    two are skipped instead of failing the write of every channel."""
+    ps_store = _simulate_point_source(tmp_path)
+    ps_xdt = open_processing_set(ps_store)
+    result = distributed_applications.imaging.image_cube_single_field(
+        ps_store=ps_store,
+        image_store=str(tmp_path / "cube.img.zarr"),
+        image_params={
+            "image_size": [64, 64],
+            "cell_size": np.array([-8.0, 8.0]) * np.pi / (180 * 3600),
+            "phase_direction": PC,
+            "frequency_coords": ps_xdt.xr_ps.get_freq_axis().values,
+            "polarization_coords": ["I", "V"],
+            "time_coords": [0],
+            "fft_padding": 1.2,
+            "cpp_gridder": True,
+        },
+        instrument_polarization_basis="circular",
+        imaging_weights_params={"weighting": "natural"},
+        cycle_control_params={
+            "max_iter": 0,
+            "max_cycles": 0,
+            "threshold": 0.0,
+            "gain": 0.1,
+            "psf_sidelobe_factor": 1.5,
+            "max_iter_per_cycle": -1,
+            "min_psf_fraction": 0.05,
+            "max_psf_fraction": 0.8,
+        },
+        image_data_variables_keep=[
+            "sky_residual",
+            "sky_model",
+            "mask",
+            "point_spread_function",
+        ],
+        processing_set_data_group_name="base",
+        single_precision_image=False,
+        n_mapping_parallelism={"frequency": 2},
+    )
+    # No node task failed its write.
+    assert "task_failed_phase" not in result["timing_node_tasks"]
+    img = load_image(str(tmp_path / "cube.img.zarr"))
+    stokes_i = img.SKY_RESIDUAL.values[0, :, 0]  # [frequency, l, m]
+    np.testing.assert_allclose(np.nanmax(stokes_i, axis=(1, 2)), [1.0, 1.0], rtol=1e-3)
+    assert np.isfinite(img.POINT_SPREAD_FUNCTION.values).all()
+
+
 # --------------------------------------------------------------------------- #
 # Measurement Set v2 ps_store
 # --------------------------------------------------------------------------- #

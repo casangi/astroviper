@@ -398,7 +398,13 @@ def _select_chunk_writer(
     processing_function_threads,
 ):
     """The write path for this task's finished chunks, as a callable
-    ``write(chunk_xds, chunk_task_coords)``."""
+    ``write(chunk_xds, chunk_task_coords)``.
+
+    A variable of ``image_data_variables_keep`` that the run does not make
+    (``sky_model`` or ``mask`` of a run without deconvolution, for example)
+    is skipped: only the kept variables a chunk holds are written, and the
+    others keep the fill value of the image store.
+    """
     if graph_mode and output_image_format == "fits":
         # FITS performance path: pwrite the chunk's contiguous channel block
         # (and its BEAMS-table rows) directly into the pre-created
@@ -425,7 +431,10 @@ def _select_chunk_writer(
 
         def write(chunk_xds, chunk_task_coords):
             write_result_chunk_to_disk_using_zarr(
-                image_store, image_data_variables_keep, chunk_task_coords, chunk_xds
+                image_store,
+                _variables_made(image_data_variables_keep, chunk_xds),
+                chunk_task_coords,
+                chunk_xds,
             )
 
         return write
@@ -439,13 +448,20 @@ def _select_chunk_writer(
     def write(chunk_xds, chunk_task_coords):
         writer(
             image_store,
-            image_data_variables_keep,
+            _variables_made(image_data_variables_keep, chunk_xds),
             chunk_task_coords,
             chunk_xds,
             processing_function_threads=processing_function_threads,
         )
 
     return write
+
+
+def _variables_made(image_data_variables_keep, chunk_xds):
+    """The keys of ``image_data_variables_keep`` whose variable the chunk holds."""
+    return [
+        key for key in image_data_variables_keep if key.upper() in chunk_xds.data_vars
+    ]
 
 
 def _concat_image_statistics(statistics_chunks):
